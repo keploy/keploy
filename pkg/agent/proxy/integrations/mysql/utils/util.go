@@ -92,6 +92,49 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 	return packet, nil
 }
 
+// MaxPacketPayload is the largest payload one packet carries (16 MiB - 1). A
+// payload of exactly this length continues in the next packet.
+const MaxPacketPayload = 1<<24 - 1
+
+// ReadPacketBufferChecked reads one MySQL packet as the protocol frames it: a
+// payload of MaxPacketPayload bytes continues in the next packet, and so on to
+// one that is shorter, each with the next sequence id. It hands every header
+// to check before it reads that header's payload, and returns check's error,
+// with nothing read past that header, when check refuses one: a reader that
+// knows which sequence id comes next refuses a misframed header before
+// waiting for the megabytes a header read out of row data can claim. The
+// packet is returned under its first header, with every payload joined.
+func ReadPacketBufferChecked(ctx context.Context, logger *zap.Logger, conn net.Conn, check func(header []byte) error) ([]byte, error) {
+	var packet []byte
+	for {
+		header, err := util.ReadRequiredBytes(ctx, logger, conn, 4)
+		if err != nil {
+			return nil, err
+		}
+		if check != nil {
+			if err := check(header); err != nil {
+				return nil, err
+			}
+		}
+		payloadLength := GetPayloadLength(header[:3])
+		if packet == nil {
+			packet = header
+		}
+		if payloadLength > 0 {
+			packet, err = util.AppendRequiredBytes(ctx, logger, conn, packet, int(payloadLength))
+			if err != nil {
+				if err == io.EOF {
+					return nil, err
+				}
+				return packet[:4], err // the first header: a partial payload is not a packet
+			}
+		}
+		if payloadLength < MaxPacketPayload {
+			return packet, nil
+		}
+	}
+}
+
 // BytesToMySQLPacket converts a byte slice to a MySQL packet
 func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
 	if len(buffer) < 4 {
@@ -157,6 +200,16 @@ func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 
 	// 0-250: value of first byte
 	return uint64(b[0]), false, 1
+}
+
+// IsPublicKeyRequest reports whether packet (header included) is a client's
+// caching_sha2_password request for the server's public key: one byte, 0x02.
+// After a full authentication is asked for without TLS, a client sends it, or,
+// holding the server's key already (go-sql-driver's serverPubKey, mysql
+// --server-public-key-path, Connector/J's serverRSAPublicKeyFile), its password
+// encrypted with that key at once. Anything else there is that password.
+func IsPublicKeyRequest(packet []byte) bool {
+	return len(packet) == 5 && packet[0] == 1 && packet[1] == 0 && packet[2] == 0 && packet[4] == byte(mysql.RequestPublicKey)
 }
 
 func IsEOFPacket(data []byte) bool {
@@ -326,6 +379,21 @@ func WriteLengthEncodedString(buf *bytes.Buffer, s string) error {
 		return err
 	}
 	return nil
+}
+
+// LengthEncodedIntegerSize is the number of bytes WriteLengthEncodedInteger
+// writes for num.
+func LengthEncodedIntegerSize(num uint64) int {
+	switch {
+	case num <= 250:
+		return 1
+	case num <= 0xFFFF:
+		return 3
+	case num <= 0xFFFFFF:
+		return 4
+	default:
+		return 9
+	}
 }
 
 func WriteLengthEncodedInteger(buf *bytes.Buffer, num uint64) error {

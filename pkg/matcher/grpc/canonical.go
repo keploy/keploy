@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -18,14 +19,33 @@ const (
 // - sorting blocks lexicographically
 // - joining them back together
 func CanonicalizeTopLevelBlocks(s string) string {
+	return canonicalize(s, false)
+}
+
+// CanonicalizeKeepingRepeatedOrder is CanonicalizeTopLevelBlocks for a
+// comparison that keeps order (the proven switch): sibling blocks are ordered
+// by field number alone, so different fields compare whatever order the wire
+// put them in (protobuf gives that order no meaning), while the blocks of one
+// field number — a repeated field's elements, or a map's entries — keep the
+// order they came in. A reordered repeated field is then a difference.
+//
+// Protoscope text carries no schema, so a map field (whose entry order
+// protobuf does not keep) cannot be told from a repeated message here: its
+// entries are compared in order too. With proto files configured the body is
+// compared as JSON, where a map is an object.
+func CanonicalizeKeepingRepeatedOrder(s string) string {
+	return canonicalize(s, true)
+}
+
+func canonicalize(s string, keepRepeatedOrder bool) string {
 	if len(s) > maxCanonBytes {
 		// Too large to safely canonicalize – return normalized but otherwise unchanged.
 		return normalizeWhitespace(s)
 	}
-	return canonicalizeRecursive(s, 0)
+	return canonicalizeRecursive(s, 0, keepRepeatedOrder)
 }
 
-func canonicalizeRecursive(s string, depth int) string {
+func canonicalizeRecursive(s string, depth int, keepRepeatedOrder bool) string {
 	if depth > maxCanonDepth {
 		return normalizeWhitespace(s)
 	}
@@ -41,7 +61,7 @@ func canonicalizeRecursive(s string, depth int) string {
 	}
 	// Recursively canonicalize inner bodies of each block
 	for i := range blocks {
-		blocks[i] = canonicalizeBlock(blocks[i], depth)
+		blocks[i] = canonicalizeBlock(blocks[i], depth, keepRepeatedOrder)
 		blocks[i] = normalizeWhitespace(blocks[i])
 	}
 
@@ -51,9 +71,33 @@ func canonicalizeRecursive(s string, depth int) string {
 		blocks[i] = strings.TrimLeft(blocks[i], " \t")
 	}
 
+	if keepRepeatedOrder {
+		// Order-insensitive across fields, in order within one field.
+		sort.SliceStable(blocks, func(i, j int) bool {
+			return blockFieldNumber(blocks[i]) < blockFieldNumber(blocks[j])
+		})
+		return strings.Join(blocks, "\n")
+	}
 	// Order-insensitive among siblings
 	sort.Strings(blocks)
 	return strings.Join(blocks, "\n")
+}
+
+// blockFieldNumber is the field number a block starts with ("3: {" is 3), or
+// -1 for a block that starts with none (it keeps its place among those).
+func blockFieldNumber(block string) int {
+	i := 0
+	for i < len(block) && block[i] >= '0' && block[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(block) || block[i] != ':' {
+		return -1
+	}
+	n, err := strconv.Atoi(block[:i])
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // splitTopLevelBlocks groups lines into top-level "field blocks".
@@ -109,7 +153,7 @@ func splitTopLevelBlocks(s string) []string {
 // canonicalizeBlock finds the outermost "{...}" of this block (if any),
 // recursively canonicalizes the inside, and reassembles the block.
 // If there is no brace, returns the block as-is (after whitespace normalize by caller).
-func canonicalizeBlock(block string, depth int) string {
+func canonicalizeBlock(block string, depth int, keepRepeatedOrder bool) string {
 	// Find first '{' outside strings/backticks.
 	open := indexFirstOpenBrace(block)
 	if open < 0 {
@@ -124,7 +168,7 @@ func canonicalizeBlock(block string, depth int) string {
 	}
 
 	inner := block[open+1 : closeIdx]
-	innerCanon := canonicalizeRecursive(inner, depth+1)
+	innerCanon := canonicalizeRecursive(inner, depth+1, keepRepeatedOrder)
 
 	// Reassemble: keep exactly the same outer text, replace inner with canonical form.
 	return block[:open+1] + innerCanon + block[closeIdx:]

@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 set -Eeuxo pipefail
 
 # Ensure jq is installed
 if ! command -v jq &> /dev/null; then
-    sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 && sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y jq
+    bash "$(dirname "${BASH_SOURCE[0]}")/../../apt-install.sh" jq
 fi
 
 # --- Helper Functions ---
@@ -46,7 +53,7 @@ check_test_report() {
         local test_set_name
         test_set_name=$(basename "$report_file" -report.yaml)
         local test_status
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        test_status=$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')
         
         echo "Status for ${test_set_name}: $test_status"
         if [ "$test_status" != "PASSED" ]; then
@@ -85,7 +92,6 @@ send_request() {
 
 # Clean up
 rm -rf keploy/ record.txt test.txt
-sudo rm -f /tmp/keploy-logs.txt
 
 # Build
 section "Build App"
@@ -98,8 +104,9 @@ endsec
 section "Start Recording"
 echo "Starting Recording..."
 # Run keploy in background with tee
-sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-test" --generateGithubActions=false 2>&1 | tee record.txt &
+sudo env PATH=$PATH "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "./dns-test" --generateGithubActions=false 2>&1 | tee record.txt &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's sudo: it passes the signal on to keploy
 # Wait briefly for Keploy to initialize
 sleep 5
 endsec
@@ -108,11 +115,13 @@ send_request
 
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
-sleep 5
+# Wait for the recording to end, not for a fixed time: it drains what the
+# agent captured before it exits (wait-recording.sh).
+wait_recording_end "$KEPLOY_PID" record.txt || exit 1
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
@@ -123,18 +132,19 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 if json_pass_supported; then
     section "Start Recording (json)"
     echo "Starting json-format Recording..."
-    sudo -E env PATH=$PATH "$RECORD_BIN" record --storage-format json -c "./dns-test" --generateGithubActions=false 2>&1 | tee record_json.txt &
+    sudo env PATH=$PATH "${SUDO_ENV[@]}" "$RECORD_BIN" record --storage-format json -c "./dns-test" --generateGithubActions=false 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's sudo: it passes the signal on to keploy
     sleep 5
     endsec
 
     send_request
 
     section "Stop Recording (json)"
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     echo "$REC_PID Keploy PID"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
-    sleep 5
+    wait_recording_end "$KEPLOY_PID" record_json.txt || exit 1
     check_for_errors "record_json.txt"
     echo "Recording (json) stopped."
     endsec
@@ -143,7 +153,7 @@ fi
 # Replay
 section "Start Replay"
 echo "Starting Replay..."
-sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
+sudo env PATH=$PATH "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
 check_for_errors "test.txt"
 check_test_report
 endsec
@@ -151,7 +161,7 @@ endsec
 if json_pass_supported; then
     section "Start Replay (json)"
     echo "Starting json-format Replay..."
-    sudo -E env PATH=$PATH "$REPLAY_BIN" test --storage-format json -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
+    sudo env PATH=$PATH "${SUDO_ENV[@]}" "$REPLAY_BIN" test --storage-format json -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
     check_for_errors "test_json.txt"
     if ! json_scan_reports; then
         cat test_json.txt

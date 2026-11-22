@@ -123,13 +123,15 @@ func TestMatch_BodyDigestHeader_DoesNotForgiveNonDigestHeaders(t *testing.T) {
 }
 
 func TestIsBodyDigestHeader(t *testing.T) {
-	for _, h := range []string{"etag", "content-md5", "digest", "content-digest", "repr-digest"} {
+	for _, h := range []string{"etag", "content-md5", "digest", "content-digest", "repr-digest",
+		"x-amz-crc32", "x-amz-checksum-crc32", "x-amz-checksum-crc32c", "x-amz-checksum-crc64nvme", "x-amz-checksum-sha1", "x-amz-checksum-sha256"} {
 		if !isBodyDigestHeader(h) {
 			t.Errorf("%q should be treated as a body digest", h)
 		}
 	}
 	// Content-Length is handled by its own rule above; the rest are not digests.
-	for _, h := range []string{"content-type", "content-encoding", "content-length", "date", "server", ""} {
+	for _, h := range []string{"content-type", "content-encoding", "content-length", "date", "server", "",
+		"x-amz-checksum-type", "x-amz-checksum-md5", "x-amz-request-id"} {
 		if isBodyDigestHeader(h) {
 			t.Errorf("%q must not be treated as a body digest", h)
 		}
@@ -243,5 +245,30 @@ func TestMatch_BodyDigestHeader_IsOptIn(t *testing.T) {
 	tc2, actual2 := signinCase(signinBodyA, signinBodyB, etagForBodyA, etagForBodyB)
 	if pass, _ := Match(tc2, actual2, bodyNoise(), false, false, zap.NewNop(), false, WithAutoHeaderNoise(false)); pass {
 		t.Fatal("body-digest forgiveness applied despite WithAutoHeaderNoise(false)")
+	}
+}
+
+// THE AWS CHECKSUMS are digests of the body too (bodydigest.IsHeader), and
+// inherit its noise verdict as an ETag does: DynamoDB's x-amz-crc32 and S3's
+// x-amz-checksum-* over a body that passed only via noise are forgiven, and
+// over an identical body a differing one still fails.
+func TestMatch_AnAWSChecksumInheritsTheBodysNoiseVerdict(t *testing.T) {
+	for _, header := range []string{"X-Amz-Crc32", "X-Amz-Checksum-Crc32"} {
+		withChecksum := func(body, sum string) (*models.TestCase, *models.HTTPResp) {
+			tc, actual := signinCase(signinBodyA, body, etagForBodyA, etagForBodyA)
+			delete(tc.HTTPResp.Header, "ETag")
+			delete(actual.Header, "ETag")
+			tc.HTTPResp.Header[header] = "1111"
+			actual.Header[header] = sum
+			return tc, actual
+		}
+		tc, actual := withChecksum(signinBodyB, "2222")
+		if pass, res := Match(tc, actual, bodyNoise(), false, false, zap.NewNop(), false, WithAutoHeaderNoise(true)); !pass {
+			t.Errorf("%s over a body that passed via noise was not forgiven: %+v", header, res.HeadersResult)
+		}
+		tc, actual = withChecksum(signinBodyA, "2222")
+		if pass, _ := Match(tc, actual, bodyNoise(), false, false, zap.NewNop(), false, WithAutoHeaderNoise(true)); pass {
+			t.Errorf("%s that differs over an identical body was forgiven", header)
+		}
 	}
 }

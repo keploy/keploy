@@ -110,6 +110,10 @@ func TestAuthenticate_GuardsEveryRegisteredRoute(t *testing.T) {
 		return nil
 	}))
 	require.NotEmpty(t, paths, "walked no routes; the registration call changed shape")
+	// The run id a starter hands its agent (HandleClockRun) reaches it only
+	// over this route: without it every agent answers 404, as one older
+	// than the route, and no run's timeline is marked as its own.
+	require.Contains(t, paths, "POST /agent/hooks/clock-run", "the clock-run route is not registered")
 
 	guarded := 0
 	for _, mr := range paths {
@@ -138,6 +142,7 @@ func TestIsAuthExempt(t *testing.T) {
 	for _, path := range []string{
 		"/agent/stop", "/agent/storemocks", "/agent/pcap/keylog",
 		"/agent/pcap/traffic", "/agent/scope/begin", "/agent/mock/served",
+		"/agent/ca",
 	} {
 		require.False(t, isAuthExempt(path), "%s must not be exempt", path)
 	}
@@ -223,6 +228,7 @@ func TestNextStepFor_NamesTheVariableAScopeCallerIsMissing(t *testing.T) {
 	// the only thing that explains why per-test scoping quietly stopped.
 	require.Contains(t, nextStepFor("/agent/scope/begin"), "KEPLOY_MOCK_AGENT_TOKEN")
 	require.Contains(t, nextStepFor("/agent/scope/end"), "Authorization: Bearer")
+	require.Contains(t, nextStepFor("/agent/app/start"), "KEPLOY_MOCK_AGENT_TOKEN")
 	require.NotContains(t, nextStepFor("/agent/stop"), "KEPLOY_MOCK_AGENT_TOKEN",
 		"a rejected /agent/stop is not a test-runner problem; pointing the operator at the scope variable would misdirect them")
 }

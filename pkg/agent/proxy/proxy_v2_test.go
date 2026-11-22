@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -192,7 +193,7 @@ func newDesyncFeedHarnessCtx(t *testing.T, parent context.Context, parser integr
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = p.recordViaSupervisor(ctx, srcConn, dstConn, parser, "test",
+		_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, "test",
 			make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2,
 			models.OutgoingOptions{})
 	}()

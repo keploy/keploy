@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -99,6 +100,9 @@ func (p *Proxy) recordViaSupervisor(
 		// (nil otherwise ⇒ EmitMock uses the package-global). Routes V2
 		// parser mocks to the right app's manager, like the legacy parsers.
 		Mgr: syncMock.FromContext(ctx),
+		// Closed as the recording stops: the session's rule for a stop then
+		// (Session.RecordingStopping) reads it.
+		RecordingDone: ctx.Done(),
 		// Legacy fields kept populated so a migrated parser can still
 		// consult them for fields we haven't promoted yet. The parser
 		// must not touch Ingress/Egress net.Conn values on the V2 path.
@@ -158,34 +162,95 @@ func (p *Proxy) recordViaSupervisor(
 	// a retired parser, and they are not independent: the incident's chain was
 	// memory-pressure drop, parser starves mid-frame, hang watchdog,
 	// passthrough fallthrough. So they share one UnrecordedConn and the first
-	// one wins. It is ended when the connection ends, here or by a panic, so no
-	// span outlives it.
-	unrecorded := syncMock.NewUnrecordedConn(svSess.OpenOrphanWindow, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
+	// one wins. Every stop is stamped as it happens, at the session's stop
+	// instant (Session.StoppedAt): the parser's stop on an exchange, its death
+	// or retirement, or a capture hole, the first of them. The stamp tells the
+	// session's OnStop, which stops the connection here at that instant, so
+	// the span of what it carries from then on is open from the moment of the
+	// stop, not from when Run returns. No span opens once the recording is
+	// stopping (openSpan). It is ended when the connection ends, here or by a
+	// panic, so no span outlives it.
+	//
+	// The recording itself is stopping: its context is done. A stop then,
+	// whatever stamps it and however the parser ends, is the end of the
+	// connection, not a loss: the connection is torn down with the recording,
+	// and nothing it would carry is left to lose. One rule says so, defined on
+	// the session (Session.RecordingStopping, from the RecordingDone set
+	// above), and it decides each span of what the connection carries after a
+	// stop, which would leave out the test cases in flight as the recording
+	// stops, and each WARN that would say that every test case recorded from
+	// then on is left out: the tee's for a capture hole (OnCaptureDesync), the
+	// "parser retired" one below, and the one a parser that reports its own
+	// stop logs in its place (supervisor.ErrReported: the MySQL recorder's for
+	// lost framing). The followed spans read it in one place, openSpan, as
+	// each opens: at the stop (OnStop), from the connection's next bytes after
+	// its parser returns (StopFromNextBytes, below), or on the connection's
+	// traffic after a span closed for idleness (UnrecordedConn.Note). The
+	// closed spans of the requests a parser returned without reading go by
+	// the recording's stop instant instead (parserReads): those captured
+	// before it are a loss, whenever the return comes (and cover the test
+	// cases not streamed by then). Read where a stop is
+	// armed instead, it would let a span open after the recording had
+	// stopped, from a write the relay finishes once an app slow to read an
+	// answer reads it: the write would reopen a span closed for idleness after
+	// a stop while the recording ran, or open the first after a parser's
+	// return while it ran. The retirement WARN was decided apart, by a status
+	// of canceled, and a parser that panicked as the recording stopped had it
+	// logged with no span opened; the hole's was logged whatever the recording
+	// did, and so was the MySQL recorder's. A span at the stop opens as the
+	// stop is stamped, and each WARN reads the rule after it. A recording that
+	// has stopped does not resume, so no WARN goes out for a stop that opened
+	// no span. A span opened while the recording ran goes without its WARN if
+	// the recording stops before the WARN is due: a parser whose return wins
+	// the supervisor's select over the stop has its stop stamped as it
+	// returns, before the stop, and is seen retired once the recording has
+	// stopped. Its span is a loss before the stop, and the session's summary
+	// counts the test cases it leaves out.
+	openSpan := func(start time.Time) func() {
+		if svSess.RecordingStopping() {
+			return func() {}
+		}
+		return svSess.OpenOrphanWindow(start)
+	}
+	unrecorded := syncMock.NewUnrecordedConn(openSpan, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
 	defer unrecorded.End()
+	// What the connection carries is noted through what its parser read
+	// (parserReads): once the parser's Run has returned, a request it read is
+	// recorded, whenever the relay gets to tell of it, and one it never read
+	// is not, whenever it was told of. Every stop goes through it,
+	// so the return knows whether one came first, and when.
+	reads := newParserReads(unrecorded, svSess.RecordOrphanWindow, svSess.RecordingStopping, syncMock.UnrecordedIdleGrace, logger)
+	svSess.OnStop = reads.stop
+	stopRecordingStamp := context.AfterFunc(ctx, func() { reads.recordingStopped(time.Now()) })
+	defer stopRecordingStamp()
 
 	relayCfg := relay.Config{
-		Logger: logger,
-		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
-		// captured once per connection: the relay calls the returned fn with
-		// no options in hand. With the flag unset this is the historic
+		Logger:        logger,
+		OnCaptureLoss: p.losses.Add,
+		// A client-side upgrade's failed handshake is charged as any
+		// client-side handshake with the proxy, not as starttls_failed.
+		OnClientHandshakeFailed: p.relayClientHandshake(dstConn),
+		// verify / rootCAs come from record.upstreamTls.* and are captured
+		// once per connection: the relay calls the returned fn with no
+		// options in hand. With the flag unset this is the historic
 		// InsecureSkipVerify=true dial, unchanged.
-		TLSUpgradeFn: newProxyTLSUpgradeFn(logger, opts.UpstreamTLSVerify, opts.UpstreamTLSRootCAs, srcConn),
+		TLSUpgradeFn: newProxyTLSUpgradeFn(logger, opts.UpstreamTLSVerify, opts.UpstreamTLSRootCAs),
 		// Only when verification is on: run the client-side handshake first so
 		// the application's SNI is captured before keploy dials the upstream it
 		// has to verify. Off (the default) keeps the historic dest-first order
 		// untouched — a dest-side failure is survivable there. See
 		// relay.Config.ClientTLSFirst.
 		ClientTLSFirst: opts.UpstreamTLSVerify,
-		// Wrapped to also stamp when this connection last carried bytes.
+		BumpActivity:   sv.BumpActivity,
+		// Each chunk the forwarders hand to the tees (not those only stashed
+		// across a pause), to stamp when the connection last carried bytes.
 		// After a parser is retired the relay keeps forwarding, so this is
-		// the signal that says WHEN the dead connection was actually in
-		// use — which is what bounds the suppression window below to the
-		// periods that can really have cost a mock.
-		BumpActivity: func() {
-			sv.BumpActivity()
-			unrecorded.Note(time.Time{}) // on the wire now
-		},
-		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
+		// the signal that says WHEN the dead connection was actually in use
+		// — which is what bounds the suppression window below to the periods
+		// that can really have cost a mock. Once the parser's Run has
+		// returned, it also says which chunks it had read (parserReads).
+		OnCarried:            reads.carried,
+		OnMarkMockIncomplete: p.teeDropped(svSess.MarkMockIncomplete, func() string { return fmt.Sprintf("%s", dstConn.RemoteAddr()) }, svSess.RecordingStopping),
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
 		// A hole in this connection's capture: every test case recorded while
@@ -195,7 +260,37 @@ func (p *Proxy) recordViaSupervisor(
 		// that can re-aligns at some later message, but when is known only
 		// once it gets there, and it can be a full queue behind the traffic:
 		// the test cases in between would already have been streamed.
-		OnCaptureDesync: func(string) { unrecorded.Stop(time.Now()) },
+		// A hole stops the connection as every stop does: it stamps the
+		// session's stop instant, and OnStop opens the span there. A hole
+		// that comes after the parser stopped on an exchange
+		// (ReportStoppedOn), its queue full behind it, finds the stop stamped
+		// already, and the span open from where that exchange's span ends.
+		// It costs the recording nothing as the recording stops
+		// (Session.RecordingStopping): no span opens (openSpan), and the tee
+		// then logs no WARN for it.
+		OnCaptureDesync: func(string) bool {
+			svSess.StoppedAt()
+			return !svSess.RecordingStopping()
+		},
+		// The destination's stream ends where the client stopped taking it
+		// (it closed its socket, and refused what came after): a parser
+		// that reaches that end mid-message knows the client's close cut
+		// the message there, not the destination (the HTTP recorder leaves
+		// that exchange out, and says why, unless what the client refused,
+		// of what reached the proxy before the client's FIN, only finished
+		// the message's framing).
+		ClientStopped: svSess.MarkEndedWhereClientStopped,
+		// How each side ended its side of the connection, and which ended
+		// first: a call the destination never answered is recorded with
+		// the fault it gave (its reset or its close), or as the client's
+		// giving up when the client closed first. An end that is the
+		// application's stop, or a client's end the hooks cannot tell from
+		// its process's exit, records no fault (peerEndMarker).
+		PeerEnded: p.peerEndMarker(svSess, appEndOf(srcConn)),
+		// The error the client's socket gave after the relay's last write
+		// to it: a client that sent its FIN and then reset what reached it
+		// after, which no read of its end says (relay/client_end.go).
+		ClientEndError: svSess.MarkClientEndError,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -212,6 +307,8 @@ func (p *Proxy) recordViaSupervisor(
 		// "cannot resync" is the safe default for everything that has not
 		// explicitly claimed otherwise.
 		ParserCanResyncAfterGap: canResyncAfterGap,
+		// Zero unless KEPLOY_DEBUG_PARSER_LAG is set (debugParserLag).
+		ReaderLag: p.parserLag,
 	}
 
 	// One call sets the relay's client-direction brake AND the parser's
@@ -222,18 +319,38 @@ func (p *Proxy) recordViaSupervisor(
 	// them at two sites is what let the hold ship switched off.
 	applyClientBrakes(&relayCfg, svSess, parser, logger, parserType)
 
+	// A parser that cannot re-align after a hole, and asks for it, gets a
+	// direction that lost a chunk ended where the hole is, with the session
+	// saying so. See relay.Config.EndAtHole.
+	applyEndAtHole(&relayCfg, svSess, parser)
+
 	r := relay.New(relayCfg, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()
 	svSess.DestStream = r.DestStream()
+	svSess.Order = r.StreamedBefore
+	reads.follow(svSess.ClientStream, r.Teed)
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
+
+	// The recording's capture watermark follows this connection while its
+	// parser runs (capture_watermark.go): a test case it carried bytes for
+	// is held until the parser is done with them, and a stop drains until
+	// the parser is past it. Once the parser has returned, and what it never
+	// read is left out (parserReads), nothing it parses can hand over a mock
+	// or open a span; what the connection carries after is the
+	// UnrecordedConn's.
+	untrack := p.capture.Track(r, fmt.Sprintf("connection %s to %s (%s parser)",
+		svSess.ClientConnID, dstConn.RemoteAddr(), parserType))
+	defer untrack()
 
 	// Run the relay in its own goroutine under the supervisor's lifetime.
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the
 	// FakeConns so the parser's reads unblock on abort.
 	relayDone := make(chan error, 1)
-	relayCtx, relayCancel := context.WithCancel(ctx)
+	// A client-side TLS upgrade the relay makes is charged as every
+	// client-side handshake is (clientTLS), to this connection's destination.
+	relayCtx, relayCancel := context.WithCancel(p.withClientTLS(ctx, remoteOf(dstConn), srcProcess(opts)))
 	defer relayCancel()
 	go func() { relayDone <- r.Run(relayCtx) }()
 
@@ -261,6 +378,15 @@ func (p *Proxy) recordViaSupervisor(
 		// byte still reaches its peer. The relay's raw forwarding
 		// continues until peer close; only parser-side delivery is
 		// suppressed.
+		//
+		// The capture ends at the pause, so this is where the connection
+		// stops being recorded, unless the parser's stop, its death or a
+		// capture hole came first: stamp the session's stop instant
+		// (Session.StoppedAt) before it, and every chunk the pause drops is
+		// at or after it. The stamp opens the span of what the connection
+		// carries from there (OnStop), before the supervisor logs why it
+		// aborted and the dispatcher logs the retirement.
+		svSess.StoppedAt()
 		r.PauseTees()
 
 		// Then unblock the parser's ClientStream/DestStream reads so
@@ -298,25 +424,45 @@ func (p *Proxy) recordViaSupervisor(
 		return parser.RecordOutgoing(parserCtx, recSess)
 	}, svSess)
 
-	if result.FallthroughToPassthrough {
-		// A cancel that lands after the supervisor's grace period is the
-		// NORMAL way a `keploy record` stop ends a live V2 connection —
-		// the parser is blocked in FakeConn.Read, which observes only
-		// Close and read deadlines, so it cannot return inside the grace.
-		// There is no "rest of the connection" left to lose, so neither
-		// the warning nor the suppression window applies: emitting them
-		// would tell the user their recording is broken at the exact
-		// moment they are reading the logs, on every clean stop.
-		shuttingDown := result.Status == supervisor.StatusCanceled && ctx.Err() != nil
+	// What the caller gets back: nothing for a retired parser, whose stop is
+	// logged here and whose connection is forwarded whole; the error of a
+	// parser that returned with one, unless the network closed under it.
+	var err error
+	switch {
+	case result.FallthroughToPassthrough:
+		// A parser retired as the recording stops (RecordingStopping), however
+		// it ends: aborted once it has read its streams to their end, or once
+		// the stop's deadline passed (canceled), or dead of a panic as the
+		// recording stops (panicked).
+		// There is no "rest of the connection" left to lose, so the warning
+		// does not apply, any more than the span does (openSpan): emitting it
+		// would tell the user their recording is broken at the exact moment
+		// they are reading the logs, on every clean stop. A retired parser's
+		// stop is stamped as it dies or is aborted, before Run returns, under
+		// the same rule, and a recording that was stopping then is stopping
+		// now: no WARN goes out for a stop that opened no span. If the
+		// recording stops in between, after a stop that opened a span, no
+		// WARN goes out for that one either: the connection is torn down with
+		// the recording, and the span closes with it.
+		shuttingDown := svSess.RecordingStopping()
+		// A parser that stopped on purpose and reported why where it did, at
+		// WARN and rate-limited across connections (supervisor.ErrReported),
+		// has said what the WARN below would, under the same rule: at WARN
+		// only while the recording runs. Logged here as well, once per
+		// connection, one fault on hundreds of pooled connections would log
+		// hundreds of lines. Only that line is skipped: the Debug line after
+		// it still carries the error, and the span is open all the same
+		// (OnStop).
+		reported := result.Status == supervisor.StatusError && errors.Is(result.Err, supervisor.ErrReported)
 
-		if !shuttingDown {
+		if !shuttingDown && !reported {
 			// Warn, not Debug. This is permanent, silent capture loss for
 			// the rest of a connection's life, and several of the exits
 			// that land here (StatusError, StatusMemCap) log nothing of
 			// their own — so at Debug a whole recording could come back
 			// unreplayable without a single line above Debug to explain
 			// it. Bounded: one line per connection, only on a retired
-			// parser.
+			// parser that has not reported its stop itself.
 			//
 			// result.Err is deliberately NOT attached here. For
 			// StatusPanicked it reads "supervisor: parser panic: ..."
@@ -363,61 +509,97 @@ func (p *Proxy) recordViaSupervisor(
 		// it and fails replay with match_phase=no_mocks. Left silent, that
 		// is indistinguishable from a healthy recording until replay.
 		//
-		// So mark the span un-capturable for as long as it lasts. The TC
+		// So the span is marked un-capturable for as long as it lasts. The TC
 		// suppressor in pkg/agent/routes/record.go drops every test case
 		// whose window overlaps it, which is the same coverage-for-honesty
 		// trade the memory-pressure and resync-hole suppressors already
 		// make: a smaller recording in which every test replays, instead of
-		// a larger one that lies.
+		// a larger one that lies. It is open already, unless the recording
+		// was stopping as the stop was stamped (openSpan): the session's
+		// OnStop opened it then, as the parser reported its stop,
+		// or as the supervisor or the abort stamped it, before Run returned.
+		// When it was opened here, after the parser's return and the WARN
+		// above, a test case checked before then, as proxy mode checks each
+		// one as it streams it, overlapped no span and was saved without its
+		// mocks.
 		// `defer unrecorded.End()` at the top of this function closes the span
 		// when the connection ends, so the close survives a panic here rather
 		// than only the happy path. A span that never closes would suppress
 		// every test case for the REST OF THE SESSION.
-		if !shuttingDown {
-			// Shared with the desync path: if a tee already stopped this
-			// connection, this is a no-op rather than a second span.
-			unrecorded.Stop(time.Now())
-		}
-		<-relayDone
-		return nil
+	case result.Err != nil && isNetworkClosedErr(result.Err):
+		logger.Debug("V2 parser exited with network-closed error", zap.Error(result.Err))
+	case result.Err != nil:
+		err = result.Err
+	default:
+		logger.Debug("V2 parser recorded outgoing message successfully",
+			zap.String("parser", string(parserType)),
+			zap.String("status", result.Status.String()),
+		)
 	}
 
-	// Non-fallthrough path: parser returned normally or with an error.
+	// Whatever the connection carries from here is not recorded: its parser
+	// is gone, and the relay keeps forwarding. A parser that stopped on an
+	// exchange, died or was retired stopped the connection as its stop was
+	// stamped (OnStop, above), no later than the retirement: what it had
+	// captured and not recorded is lost, the exchange it was in, which only
+	// the parser can report (ReportStoppedOn), and those queued behind it. A
+	// parser that returned on its own recorded what it read, so the
+	// connection is left out from the next bytes it carries, if any (a parser
+	// that returns at its connection's end leaves no span). What it never
+	// read is decided by where its streams stood as it returned, not by
+	// whether the relay told of a chunk before now (parserReads): the relay
+	// tells of a chunk once it has teed it, so the parser can have read it
+	// and returned by then, and it can have returned with requests in its
+	// stream it never took, told of before now. Those requests are left out
+	// here, in closed spans, up to the first stop if one came before, or the
+	// recording's stop. The first stop counts, so the return stops nothing
+	// after a stamped one, a capture hole's included (OnCaptureDesync).
+	// Whether the bytes after the return cost the recording anything is
+	// decided as their span opens (openSpan), not here: they can come after
+	// the recording stopped, whether the parser returned before the stop or
+	// as it, from a write the relay finishes once an app slow to read an
+	// answer reads it, and they open no span then. Called before the tees are
+	// paused below: a chunk a paused tee refuses is told of as after the
+	// return.
+	reads.parserReturned()
+	// Only now does the watermark stop following the connection: a test case
+	// held for what its parser never read is let go once that is left out
+	// (above), not before, when it would be checked against no span and
+	// saved without its mocks.
+	untrack()
+
+	// The teardown, the same whether the parser returned on its own or was
+	// retired. A parser's return never ends the relay (invariant I1): the
+	// relay forwards the application's bytes until a peer closes, or the
+	// outer context is cancelled, whatever the parser does. A parser can
+	// return while the connection goes on: one that reads each direction to
+	// its own end returns once a capture hole in each has ended both
+	// (relay.Config.EndAtHole). Cancelling the relay here would have the
+	// caller close the application's socket and the destination's: the
+	// application would lose its connection at the holes.
 	//
-	// The parser has EXITED, so nothing will ever read these streams again.
-	// Say so, rather than leaving the relay to infer it: closing the
-	// FakeConns fires their Done() channels, which is what releases a tee
-	// drain still holding chunks for a full out channel. Without this the
-	// drain has no way to distinguish "parser is slow" from "parser is gone"
-	// and has to wait out ConsumerStallGrace — on a path where the answer is
-	// already known for certain. This is the same guarantee tokio gets for
-	// free when a Receiver is dropped; Go has no goroutine-death event, so
-	// the owner of the goroutine has to publish it.
+	// Pause the tees first: every later chunk then drops on the pause fast
+	// path, and PauseTees also ends a client write hold the parser can no
+	// longer release. Then close the FakeConns: the parser has EXITED, so
+	// nothing will ever read these streams again, and closing them fires
+	// their Done() channels, which is what releases a tee drain still holding
+	// chunks for a full out channel. Without this the drain has no way to
+	// distinguish "parser is slow" from "parser is gone" and has to wait out
+	// ConsumerStallGrace — on a path where the answer is already known for
+	// certain. Go has no goroutine-death event, so the owner of the goroutine
+	// has to publish it. A retired parser's SessionOnAbort has done both
+	// already, to unblock its reads; both are idempotent.
 	//
 	// Ordering matters: this must precede <-relayDone, which is where the
 	// relay waits for the drains.
+	r.PauseTees()
 	_ = r.ClientStream().Close()
 	_ = r.DestStream().Close()
 
-	// Cancel the relay and drain.
-	relayCancel()
-	relayErr := <-relayDone
-	if relayErr != nil && !errors.Is(relayErr, context.Canceled) {
+	if relayErr := <-relayDone; relayErr != nil && !errors.Is(relayErr, context.Canceled) {
 		logger.Debug("relay exited with error", zap.Error(relayErr))
 	}
-
-	if result.Err != nil {
-		if isNetworkClosedErr(result.Err) {
-			logger.Debug("V2 parser exited with network-closed error", zap.Error(result.Err))
-			return nil
-		}
-		return result.Err
-	}
-	logger.Debug("V2 parser recorded outgoing message successfully",
-		zap.String("parser", string(parserType)),
-		zap.String("status", result.Status.String()),
-	)
-	return nil
+	return err
 }
 
 // newProxyTLSUpgradeFn adapts keploy's existing TLS helpers into the
@@ -438,16 +620,18 @@ func (p *Proxy) recordViaSupervisor(
 // They are captured at closure-construction time because the relay
 // calls this fn per connection with no options in hand.
 //
-// srcConn is the application-facing socket for THIS connection. It is
-// held only to recover the client's source port, which is the key
-// CertForClient files the application's SNI under; the fn never reads
-// or writes it (the relay owns it). Nil is safe.
+// The fn returned is this connection's alone: it keeps the SNI the
+// application sent in the client-side handshake it serves, for the
+// destination-side dial it makes after (relay.Config.ClientTLSFirst).
 //
 // The conn pointer update (so the forwarders switch to the upgraded
 // conn on subsequent iterations) is the relay's responsibility; this
 // fn only performs the handshake and returns the new net.Conn —
 // hence it does not need the caller's *net.Conn handles.
-func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPool, srcConn net.Conn) relay.TLSUpgradeFn {
+func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPool) relay.TLSUpgradeFn {
+	// The name the application asked for in this connection's client-side
+	// handshake: its SNI, once that handshake is done.
+	var clientSNI atomic.Pointer[string]
 	return func(ctx context.Context, conn net.Conn, isClient bool, cfg *tls.Config) (net.Conn, error) {
 		if cfg == nil {
 			return conn, nil
@@ -500,8 +684,11 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 				}
 				// ServerName, in descending order of trustworthiness:
 				//
-				//  1. The SNI the APPLICATION sent. Parsers derive their
-				//     ServerName from the destination ADDRESS — e.g.
+				//  1. The name the APPLICATION asked for: the SNI it sent
+				//     in this connection's client-side handshake, else its
+				//     CONNECT target (pTls.ConnectTargetFrom). Parsers
+				//     derive their ServerName from the destination
+				//     ADDRESS — e.g.
 				//     mysql/recorder.buildDestTLSConfigV2 takes the host of
 				//     sess.Opts.DstCfg.Addr, which the proxy always sets to
 				//     the `ip:port` eBPF reported, never the hostname the
@@ -528,7 +715,11 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 				//
 				// The whole ladder is guarded by `verify` so the default
 				// path never gains an SNI the application did not send.
-				if sni := capturedSNIForSrc(srcConn); sni != "" {
+				sni := pTls.ConnectTargetFrom(ctx)
+				if s := clientSNI.Load(); s != nil && *s != "" {
+					sni = *s
+				}
+				if sni != "" {
 					dialCfg.ServerName = sni
 				}
 				if dialCfg.ServerName == "" {
@@ -537,7 +728,10 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 			}
 			tlsConn := tls.Client(conn, dialCfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				return nil, fmt.Errorf("dest TLS handshake failed: %w", err)
+				// The handshake's error names the server name it checked
+				// and the certificate's names whole: written by their
+				// shape and tag, as the relay logs it.
+				return nil, models.HostsInError(ctx, fmt.Errorf("dest TLS handshake failed: %w", err), dialCfg.ServerName)
 			}
 			return tlsConn, nil
 		}
@@ -551,31 +745,10 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 		if err != nil {
 			return nil, fmt.Errorf("client TLS handshake failed: %w", err)
 		}
+		sni := util.ClientServerName(wrapped)
+		clientSNI.Store(&sni)
 		return wrapped, nil
 	}
-}
-
-// capturedSNIForSrc returns the SNI the application sent on srcConn's
-// connection, as filed by CertForClient under the client's source port
-// (pTls.SrcPortToDstURL). "" when the app sent none — the normal case for an
-// IP-literal destination, which RFC 6066 forbids in SNI — or when the value
-// has not been captured yet.
-//
-// srcConn is only ever asked for its RemoteAddr; the relay owns the socket.
-func capturedSNIForSrc(srcConn net.Conn) string {
-	if srcConn == nil {
-		return ""
-	}
-	tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr)
-	if !ok || tcpAddr == nil {
-		return ""
-	}
-	v, ok := pTls.SrcPortToDstURL.Load(tcpAddr.Port)
-	if !ok {
-		return ""
-	}
-	sni, _ := v.(string)
-	return sni
 }
 
 // Compile-time sanity: ensure the dispatcher-side V2 call site can be
@@ -715,4 +888,32 @@ func parserClientBrakes(parser integrations.Integrations, logger *zap.Logger, pa
 func parserCanResyncAfterGap(parser integrations.Integrations) bool {
 	gr, ok := parser.(integrations.GapResyncCapable)
 	return ok && gr.CanResyncAfterGap()
+}
+
+// applyEndAtHole has the relay end a direction at its capture hole, and say so
+// on the session (Session.MarkEndedAtHole), for a parser that asks for it
+// (integrations.EndAtHoleCapable) and cannot re-align after a hole: cfg's
+// ParserCanResyncAfterGap is already set. A parser that re-aligns is fed the
+// bytes after the hole, so it has no hole to end at.
+//
+// It is one function with the relay's and the session's halves for the reason
+// applyClientBrakes is: an EndAtHole wired to anything but the session leaves
+// the parser an end it cannot tell from the connection's, and one never wired
+// leaves it waiting at the hole, with no test failing for either unless the
+// production path is driven.
+func applyEndAtHole(cfg *relay.Config, sess *supervisor.Session, parser integrations.Integrations) {
+	if cfg == nil || sess == nil || cfg.ParserCanResyncAfterGap || !parserCanEndAtHole(parser) {
+		return
+	}
+	cfg.EndAtHole = sess.MarkEndedAtHole
+}
+
+// parserCanEndAtHole reports whether parser asks for a direction that lost a
+// chunk to be ended at the hole (integrations.EndAtHoleCapable). Absent the
+// capability the answer is false: a parser that has not said it tells a
+// hole's end from the connection's would record what the hole cut as though
+// the connection had closed there.
+func parserCanEndAtHole(parser integrations.Integrations) bool {
+	ep, ok := parser.(integrations.EndAtHoleCapable)
+	return ok && ep.CanEndAtHole()
 }

@@ -259,14 +259,22 @@ func FindLastIndexF(path string, logger *zap.Logger, format Format) (int, error)
 // FindLastIndexAny scans `path` for both test-N.yaml and test-N.json (and
 // report-N.*) and returns the next index, ensuring newly-created files never
 // collide with pre-existing files of the other format.
+//
+// A folder that does not exist yet starts at 1. Any other failure to open or
+// list it is returned: it may hold test-N files, and reading it as empty
+// would hand out an index that is already taken.
 func FindLastIndexAny(path string, _ *zap.Logger) (int, error) {
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return 1, nil
 	}
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = dir.Close() }()
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		return 1, nil
+		return 0, err
 	}
 
 	lastIndex := 0
@@ -311,14 +319,14 @@ func ReadDir(path string, _ fs.FileMode) (*os.File, error) {
 	return dir, err
 }
 
-// CreateDir to create a directory if it doesn't exist
+// CreateDir makes path, a folder keploy writes in the project, if it is not
+// there, from the project as utils.MkdirRecordingDir makes it: a folder on its
+// way the repository carries as a link that leads out of the project is
+// refused, with why, and nothing is made where it leads.
 func CreateDir(path string, logger *zap.Logger) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		err := os.MkdirAll(path, os.ModePerm)
-		if err != nil {
-			utils.LogError(logger, err, "failed to create directory", zap.String("directory", path))
-			return err
-		}
+	if err := utils.MkdirRecordingDir(path, os.ModePerm); err != nil {
+		utils.LogError(logger, err, "failed to create directory", zap.String("directory", path))
+		return err
 	}
 	return nil
 }
@@ -363,9 +371,12 @@ func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, file
 	return nil
 }
 
-// CopyFile copies a single file from src to dst
-func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
-	srcFile, err := os.Open(src)
+// CopyFile copies a single file from src, a file under srcRoot, to dst, a file
+// under destRoot. src is opened inside srcRoot, and dst inside destRoot, so a
+// src that links out of srcRoot, or a dst that links out of destRoot, is
+// refused: what it leads to is neither copied nor written (see recording.go).
+func CopyFile(srcRoot, src, destRoot, dst string, rename bool, logger *zap.Logger) error {
+	srcFile, err := OpenInRecording(srcRoot, src)
 
 	if err != nil {
 		return err
@@ -379,7 +390,7 @@ func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
 	if rename {
 		dst = generateSchemaName(dst)
 	}
-	dstFile, err := os.Create(dst)
+	dstFile, err := OpenFileInRecording(destRoot, dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		return err
 	}
@@ -395,29 +406,36 @@ func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
 	}
 
 	// Ensure the copied file has the same permissions as the original file
-	srcInfo, err := os.Stat(src)
+	srcInfo, err := srcFile.Stat()
 	if err != nil {
 		return err
 	}
-	err = os.Chmod(dst, srcInfo.Mode())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return dstFile.Chmod(srcInfo.Mode())
 }
 
-// CopyDir recursively copies a directory tree, attempting to preserve permissions
-func CopyDir(srcDir, destDir string, rename bool, logger *zap.Logger) error {
-	// Ensure the destination directory exists
-	if _, err := os.Stat(destDir); os.IsNotExist(err) {
-		err := os.MkdirAll(destDir, os.ModePerm)
-		if err != nil {
-			return err
-		}
-	}
-	entries, err := os.ReadDir(srcDir)
+// CopyDir recursively copies srcDir, a folder under srcRoot, to destDir,
+// attempting to preserve permissions. srcRoot is the checkout the folder comes
+// with (another service's, in a contract download): srcDir, every folder in
+// it and every file it copies are read only inside srcRoot (see
+// recording.go), so a folder or a file that links out of the checkout, the
+// copied folder itself included, is refused with why, and what it leads to is
+// not copied. destDir, a folder under destRoot (the folder keploy downloads
+// into, in a contract download), every folder made in it and every file
+// written are made only inside destRoot, and destRoot from the project
+// (MkdirAllInRecording), so none is made or written through a link that leads
+// out.
+func CopyDir(srcRoot, srcDir, destRoot, destDir string, rename bool, logger *zap.Logger) error {
+	dir, err := OpenInRecording(srcRoot, srcDir)
 	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return err
+	}
+	// Ensure the destination directory exists.
+	if err := MkdirAllInRecording(destRoot, destDir, os.ModePerm); err != nil {
 		return err
 	}
 
@@ -431,16 +449,16 @@ func CopyDir(srcDir, destDir string, rename bool, logger *zap.Logger) error {
 		}
 
 		if info.IsDir() {
-			err = os.MkdirAll(destPath, info.Mode())
+			err = MkdirAllInRecording(destRoot, destPath, info.Mode().Perm())
 			if err != nil {
 				return err
 			}
-			err = CopyDir(srcPath, destPath, rename, logger)
+			err = CopyDir(srcRoot, srcPath, destRoot, destPath, rename, logger)
 			if err != nil {
 				return err
 			}
 		} else {
-			err = CopyFile(srcPath, destPath, rename, logger)
+			err = CopyFile(srcRoot, srcPath, destRoot, destPath, rename, logger)
 			if err != nil {
 				return err
 			}
@@ -456,6 +474,9 @@ func generateSchemaName(src string) string {
 	return filepath.Join(dir, newName)
 }
 
+// FileExists reports whether <fileName>.yaml exists under path. It looks for
+// the YAML file only: a store whose files may be in either format (see
+// Format) must ask FileExistsAny, or it misses a set recorded as JSON.
 func FileExists(_ context.Context, logger *zap.Logger, path string, fileName string) (bool, error) {
 	return FileExistsF(nil, logger, path, fileName, FormatYAML)
 }

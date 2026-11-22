@@ -15,22 +15,66 @@ const (
 	// only once cgroup/post_bind4 AND cgroup/post_bind6 are ATTACHED,
 	// because those hooks are what report the kernel's choice back to user
 	// space; without them the relocated port would never reach the ingress
-	// forwarder. Unset, the hooks keep their previous guess-and-check
-	// behaviour, so a cgroup setup that rejects the post_bind attach
-	// degrades to exactly what shipped before. (A LOAD failure is not
-	// covered and cannot be: LoadAndAssign fails the whole object, as it
-	// already does for every other program in it.)
+	// forwarder. Unset, the hooks pick a port no socket listens on
+	// themselves, outside the network namespace's ephemeral range, or leave
+	// the bind on the port the app names when there is none, so a cgroup
+	// setup that rejects the post_bind attach still starts. The agent says
+	// which once its flags are final (linux's sayBindFallback), and does
+	// not warn under FlagObserveOnly, where the hooks move no bind. (A LOAD
+	// failure is not covered and cannot be: LoadAndAssign fails the whole
+	// object, as it already does for every other program in it.)
 	FlagKernelPortAlloc uint32 = 1 << 1
+	// FlagProvenUDP (bit 2), set under the proven switch with the UDP
+	// watch's programs attached (udpwatch.go): the cgroup hooks register a
+	// member's non-DNS UDP sockets, report the first reply each gets in each
+	// of the watch's epochs, and refuse datagrams to UDP port 443 (QUIC), so
+	// clients fall back to TCP.
+	FlagProvenUDP uint32 = 1 << 2
+	// FlagProvenReady (bit 3), set under the proven switch with the
+	// readiness watch's programs attached (readywatch.go): the hooks report a
+	// member's TCP listen, and count its listens, connects, process forks and
+	// execs, the evidence keploy test waits on before its first test.
+	FlagProvenReady uint32 = 1 << 3
+	// FlagClassifies (bit 4), set where the agent attaches sys_enter_socket
+	// and k_sock_create, which classify processes into target_namespace_pids
+	// and excluded_pids: k_sock_create runs only then. Never where something
+	// else owns those maps (DaemonSet, per-container targeting).
+	FlagClassifies uint32 = 1 << 4
+	// FlagIngressHold (bit 5; KEPLOY_FLAG_INGRESS_HOLD in
+	// headers/k_ingress_hold.h), set once the ingress hold's objects are
+	// attached (ingressport.go): the sk_lookup program, and the
+	// cgroup/sock_release program that takes a note back. The bind hooks
+	// then note each moved socket's family and address, and the lookup
+	// holds a moved port only where the application's own socket would
+	// have taken the connection. Unset, they note nothing, and the lookup
+	// holds nothing.
+	FlagIngressHold uint32 = 1 << 5
 )
 
 type BpfSpinLock struct{ Val uint32 }
 
+// DestInfo mirrors struct dest_info_t (keploy/ebpf k_structs.h): a
+// redirected connection's original destination and the process that made it.
 type DestInfo struct {
 	IPVersion uint32
 	DestIP4   uint32
 	DestIP6   [4]uint32
 	DestPort  uint32
+	// KernelPid is the connecting process's TGID, the kernel's (the initial
+	// PID namespace's).
 	KernelPid uint32
+	// AgentNsPid is that process's TGID in the agent's PID namespace, by
+	// which the agent finds it in its own /proc: the kernel finds it by the
+	// namespace's inode the agent registered (KeployAgentInode). Equal to
+	// KernelPid for an agent in the initial namespace; 0 for a process outside
+	// the agent's namespace, which the agent then cannot name.
+	AgentNsPid uint32
+	// Instance is the keploy instance (a test worker's) the connecting
+	// process was in when it connected, 0 for none: the kernel's
+	// instance_of_tgid entry for its TGID, which the agent writes for a
+	// worker (Hooks.SetInstance) and k_instance_fork copies to each process
+	// it forks. It also keeps the struct 8-byte sized.
+	Instance uint32
 }
 
 type ProxyInfo struct {

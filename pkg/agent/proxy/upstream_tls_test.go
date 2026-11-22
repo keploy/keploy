@@ -105,7 +105,7 @@ func newVerifiableTLSTestServer(t *testing.T, closeAfterHandshake bool) (net.Lis
 func TestNewProxyTLSUpgradeFn_DestSide_VerifyFlagOnSucceedsWithRoots(t *testing.T) {
 	ln, pool := newVerifiableTLSTestServer(t, false)
 
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), true, pool, nil)
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), true, pool)
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -147,10 +147,10 @@ func TestNewProxyTLSUpgradeFn_DestSide_VerifyFlagOnSucceedsWithRoots(t *testing.
 // any pool we pass, so a verifying dial must fail — the exact failure the
 // default deliberately suppresses.
 func TestNewProxyTLSUpgradeFn_DestSide_VerifyFlagOnRejectsUntrusted(t *testing.T) {
-	ln, _ := newTLSTestServer(t, 0, []string{"h2", "http/1.1"}, nil)
+	ln, _ := newTLSTestServer(t, []string{"h2", "http/1.1"}, nil)
 	defer ln.Close()
 
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), true, nil, nil)
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), true, nil)
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -196,7 +196,7 @@ func TestNewProxyTLSUpgradeFn_DestSide_VerifyFlagOnRejectsUntrusted(t *testing.T
 func TestNewProxyTLSUpgradeFn_DestSide_VerifyFillsEmptyServerName(t *testing.T) {
 	ln, pool := newVerifiableTLSTestServer(t, false)
 
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), true, pool, nil)
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), true, pool)
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -246,7 +246,7 @@ func TestNewProxyTLSUpgradeFn_DestSide_VerifyOffLeavesServerNameEmpty(t *testing
 
 	// Pool supplied but verify off: neither the pool nor the ServerName
 	// fallback may take effect.
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, pool, nil)
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, pool)
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {

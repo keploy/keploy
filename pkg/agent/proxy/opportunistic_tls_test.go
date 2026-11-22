@@ -2,23 +2,34 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle reproduces
 // the hang from issue #4398: when the src side reports a non-TLS verdict
 // (here, by erroring out because the client closed its connection) while the
 // dst side is still idle inside sniffAndRelayLoop, opportunisticTLSIntercept
-// must still return in bounded time. Before the fix, the non-TLS branch
-// waited for the idle peer goroutine to exit *before* cancelling the context
-// that would tell it to stop, so this call hung indefinitely instead of
-// timing out after opportunisticPeekChunkTimeout.
+// must still return, and must not wait out the idle peer's read window
+// either. Before the #4398 fix, the non-TLS branch waited for the idle peer
+// goroutine to exit *before* cancelling the context that would tell it to
+// stop, so this call hung indefinitely.
+//
+// The peer's window here is longer than the test binary's deadline, so the
+// call returns only if the stop itself ended the peer's read: no wall clock
+// decides the verdict. With the 5 s window this test used to allow 2 s, and
+// on a loaded host the stop could land between the loop's context check and
+// its arming of a fresh deadline, which overwrote the poke and parked the
+// peer a whole window (about 1 run in 180 under -race on kernel 7.2).
 func TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle(t *testing.T) {
 	// Silent upstream: accepts the dial but never writes or closes, so the
 	// dst-side sniffAndRelayLoop stays blocked in its read-timeout loop
@@ -40,11 +51,12 @@ func TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle(t *testing.
 	srcConn, client := net.Pipe()
 	defer client.Close()
 
-	p := &Proxy{logger: testLogger()}
+	// A window no run reaches: an idle read ends only when the stop ends it.
+	p := &Proxy{logger: testLogger(), peekChunkWindow: 24 * time.Hour}
 
 	resCh := make(chan error, 1)
 	go func() {
-		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn, ln.Addr().String(), time.Time{}, models.OutgoingOptions{})
+		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn, ln.Addr().String(), nil, time.Time{}, models.OutgoingOptions{})
 	}()
 
 	// Client sends a plaintext (non-TLS) chunk, then closes — this makes
@@ -57,24 +69,64 @@ func TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle(t *testing.
 		t.Fatalf("client close: %v", err)
 	}
 
-	// Two properties in one bound. "Returns at all" is the #4398 fix
-	// (cancel before waiting). "Returns in well under
-	// opportunisticPeekChunkTimeout" is the error-path deadline poke: this
+	// Two properties in one wait. "Returns at all" is the #4398 fix (cancel
+	// before waiting). "Returns before the peer's window ends" is the stop's
+	// deadline poke reaching a peer parked in Read or about to arm one: this
 	// side already failed, so both connections are going to be closed
 	// regardless and there is no reason to hold two goroutines and two
-	// sockets for a further 5 s. Teardown is sub-millisecond in practice,
-	// so 2 s is ~1000x headroom while still failing if either property is
-	// lost.
-	const bound = 2 * time.Second
-	select {
-	case <-resCh:
-	case <-time.After(bound):
-		t.Fatalf("opportunisticTLSIntercept did not return within %s of the client closing "+
-			"while the peer side was idle. Either the non-TLS branch stopped cancelling the "+
-			"idle peer before waiting on it (#4398), or it stopped poking an expired read "+
-			"deadline on the error path and is now waiting out a full %s chunk timeout",
-			bound, opportunisticPeekChunkTimeout)
+	// sockets for a further window. The window outlasts the wait, so losing
+	// either property leaves the call blocked and awaitEvent fails the test.
+	_ = awaitEvent(t, resCh, "opportunisticTLSIntercept returning after the client closed while the peer "+
+		"side was idle (either the non-TLS branch stopped cancelling the idle peer before waiting on "+
+		"it (#4398), or its expired-deadline poke no longer ends the peer's read and the call waits "+
+		"out the peer's whole read window)")
+}
+
+// stopBeforeTheArm is a connection whose first arming of a read deadline is
+// preceded by a stop: the cancel, then the expired-deadline poke, as
+// opportunisticTLSIntercept's cleanup and its non-TLS branch make one.
+type stopBeforeTheArm struct {
+	net.Conn
+	once sync.Once
+	stop func()
+}
+
+func (c *stopBeforeTheArm) SetReadDeadline(t time.Time) error {
+	if !t.IsZero() {
+		c.once.Do(c.stop)
 	}
+	return c.Conn.SetReadDeadline(t)
+}
+
+// A stop that lands just before the relay loop arms its read's deadline ends
+// the loop. That is where a loop that looked at its context first and armed
+// the deadline after had already looked: its fresh deadline overwrote the
+// stop's poke, and it parked a whole window. The test above sees that only
+// when a loaded host happens to land the stop there; here it is landed there
+// every run, and the window is longer than the test binary's deadline.
+func TestSniffAndRelayLoop_AStopJustBeforeTheArmEndsTheLoop(t *testing.T) {
+	from, fromPeer := net.Pipe()
+	to, toPeer := net.Pipe()
+	t.Cleanup(func() {
+		for _, c := range []net.Conn{from, fromPeer, to, toPeer} {
+			_ = c.Close()
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &Proxy{logger: testLogger(), peekChunkWindow: 24 * time.Hour}
+	conn := &stopBeforeTheArm{Conn: from, stop: func() {
+		cancel()
+		_ = from.SetReadDeadline(time.Now())
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.sniffAndRelayLoop(ctx, "dst", conn, to, make(chan sniffResult, 2))
+	}()
+	awaitEvent(t, done, "the relay loop ending after a stop that landed just before it armed its read "+
+		"(the loop's own deadline overwrote the stop's poke, and the loop waits out its whole window)")
 }
 
 // TestOpportunisticTLSIntercept_NonTLS_BudgetExhaustedWithIdlePeer_KeepsRelaying
@@ -155,8 +207,7 @@ func TestOpportunisticTLSIntercept_NonTLS_BudgetExhaustedWithIdlePeer_KeepsRelay
 			p := &Proxy{logger: testLogger()}
 			resCh := make(chan error, 1)
 			go func() {
-				resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn,
-					ln.Addr().String(), time.Time{}, models.OutgoingOptions{})
+				resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn, ln.Addr().String(), nil, time.Time{}, models.OutgoingOptions{})
 			}()
 
 			var upstream net.Conn
@@ -314,8 +365,7 @@ func TestOpportunisticTLSIntercept_NonTLS_PeerBlockedInWriteStillReturns(t *test
 	p := &Proxy{logger: testLogger()}
 	resCh := make(chan error, 1)
 	go func() {
-		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn,
-			ln.Addr().String(), time.Time{}, models.OutgoingOptions{})
+		resCh <- p.opportunisticTLSIntercept(context.Background(), srcConn, ln.Addr().String(), nil, time.Time{}, models.OutgoingOptions{})
 	}()
 
 	upstream := <-upCh
@@ -560,5 +610,45 @@ func TestWaitForOther_DrainsResultPublishedBeforeGoroutineExit(t *testing.T) {
 		t.Errorf("%d of %d already-published verdicts were discarded — waitForOther took its "+
 			"doneCh case without draining the buffer, losing a ClientHello that exists "+
 			"nowhere else", dropped, iterations)
+	}
+}
+
+// The opportunistic upgrade's client-side handshake is charged as every
+// client-side handshake is: a client that hangs up as soon as it is done,
+// having sent nothing -- no call, no close_notify -- abandoned it, as curl,
+// libcurl and Node.js under TLS 1.2 do when they reject keploy's
+// certificate (tls_handshake_abandoned).
+func TestAnOpportunisticClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	// The dependency ends its side once keploy passes the client's end on,
+	// as a server does: the upgrade's relay then ends at once.
+	upstream, _ := newTLSTestServer(t, nil, func(c *tls.Conn) {
+		go func() { _, _ = io.Copy(io.Discard, c); _ = c.Close() }()
+	})
+	defer upstream.Close()
+	clientLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientLn.Close()
+	go func() {
+		c, err := tls.Dial("tcp", clientLn.Addr().String(), &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example", MaxVersion: tls.VersionTLS12})
+		if err == nil {
+			_ = c.NetConn().Close() // no close_notify of its own
+		}
+	}()
+	srcConn, err := clientLn.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dstConn, err := net.Dial("tcp", upstream.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Proxy{logger: zap.NewNop()}
+	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
+	_ = p.hijackAndMITM(context.Background(), srcConn, dstConn, nil, upstream.Addr().String(), time.Time{}, models.OutgoingOptions{})
+	if got := p.losses.Snapshot(); len(got) != 1 || got[0].Kind != models.CaptureLossTLSAbandoned || got[0].What != "to "+upstream.Addr().String() {
+		t.Fatalf("charged %+v, want one tls_handshake_abandoned to the destination", got)
 	}
 }

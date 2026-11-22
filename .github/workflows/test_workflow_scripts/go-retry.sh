@@ -50,8 +50,9 @@
 # on a genuine failure.
 
 # The transport subset of docker-build-retry.sh's DOCKER_BUILD_RETRY_RE (its
-# rate-limit terms are Docker-specific), plus the two proxy HTTP errors go
-# surfaces. NOT a copy of that list, and deliberately narrower in one place:
+# rate-limit terms are Docker-specific, its pip terms PyPI's), plus the two
+# proxy HTTP errors go surfaces. NOT a copy of that list, and deliberately
+# narrower in one place:
 #
 #   `unexpected EOF` is matched ONLY when qualified by a URL. cmd/compile
 #   prints "syntax error: unexpected EOF, expected }" for any unterminated

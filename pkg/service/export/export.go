@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
@@ -31,7 +32,7 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 
 	parsedURL, err := url.Parse(extractedURL)
 	if err != nil || parsedURL.Hostname() == "" {
-		utils.LogError(logger, err, "error parsing URL")
+		utils.LogError(logger, utils.WithholdInput(err), "error parsing URL")
 		return nil
 	}
 
@@ -66,14 +67,13 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	} else {
 		request.Body.Mode = "raw"
 		request.Body.Raw = http.Request.Body
-	}
-
-	if strings.Contains(http.Request.Header["Content-Type"], "application/json") {
-		request.Body.Options = map[string]interface{}{
-			"raw": map[string]interface{}{
-				"headerFamily": "json",
-				"language":     "json",
-			},
+		if strings.Contains(http.Request.Header["Content-Type"], "application/json") {
+			request.Body.Options = map[string]interface{}{
+				"raw": map[string]interface{}{
+					"headerFamily": "json",
+					"language":     "json",
+				},
+			}
 		}
 	}
 
@@ -90,15 +90,6 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	response.Body = http.Response.Body
 	response.OriginalRequest = &request
 	response.Name = http.Response.StatusMessage
-
-	if strings.Contains(http.Response.Header["Content-Type"], "application/json") {
-		request.Body.Options = map[string]interface{}{
-			"raw": map[string]interface{}{
-				"headerFamily": "json",
-				"language":     "json",
-			},
-		}
-	}
 
 	// Extract the last segment of the path as the name
 	pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
@@ -177,7 +168,11 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				utils.LogError(logger, err, "failed to read the test files", zap.String("path", testsDir))
 				continue
 			}
-			keployRequests := make(map[interface{}]int, 0)
+			// An identical request is exported once, at the place its first
+			// test case gave it: a map alone would list a folder's requests
+			// in a different order on every run.
+			keployRequests := make(map[string]struct{})
+			var requestOrder []string
 			for _, testFile := range testFiles {
 				// Pick the unmarshaler based on the file extension so testcases
 				// recorded in either StorageFormat are exported correctly.
@@ -193,7 +188,9 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				}
 
 				filePath := filepath.Join(testsDir, testFile.Name())
-				data, err := os.ReadFile(filePath)
+				// Read inside the recording: what is exported is shared, and a
+				// test case that links out of it is refused, with why.
+				data, err := pkg.ReadRecordingFile(keployDir, filepath.Join(v.Name(), "tests", testFile.Name()))
 				if err != nil {
 					utils.LogError(logger, err, "failed to read test file", zap.String("path", filePath))
 					continue
@@ -222,17 +219,27 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				}
 
 				requestJSON := ConvertKeployHTTPToPostmanCollection(logger, &httpSchema)
+				if requestJSON == nil {
+					// The URL could not be made a request (it was logged): leave
+					// the test case out, not a null item Postman cannot import.
+					logger.Warn("skipping a testcase whose URL cannot be exported", zap.String("testcase name", testFile.Name()))
+					continue
+				}
 				requestJSONString, err := json.Marshal(requestJSON)
 				if err != nil {
 					utils.LogError(logger, err, "failed to marshal requestJSON to string")
 					continue
 				}
-				keployRequests[string(requestJSONString)]++
+				if _, seen := keployRequests[string(requestJSONString)]; !seen {
+					reqStr := string(requestJSONString)
+					keployRequests[reqStr] = struct{}{}
+					requestOrder = append(requestOrder, reqStr)
+				}
 			}
-			var uniqueRequests []interface{}
-			for request := range keployRequests {
+			uniqueRequests := make([]interface{}, 0, len(requestOrder))
+			for _, request := range requestOrder {
 				var curlRequest interface{}
-				err := json.Unmarshal([]byte(request.(string)), &curlRequest)
+				err := json.Unmarshal([]byte(request), &curlRequest)
 				if err != nil {
 					utils.LogError(logger, err, "failed to unmarshal the request JSON")
 					continue

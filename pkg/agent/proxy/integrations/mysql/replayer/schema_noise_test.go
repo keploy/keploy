@@ -342,14 +342,16 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 
 	t.Run("strict-rejected exact-text candidate still names closest query", func(t *testing.T) {
 		// Identical SQL text (exact match) but a drifting query attribute
-		// (CLIENT_QUERY_ATTRIBUTES) — strict must reject, and the miss must
-		// carry the candidate's query so the report diff isn't blank.
+		// (CLIENT_QUERY_ATTRIBUTES) the statement reads — strict must
+		// reject, and the miss must carry the candidate's query so the
+		// report diff isn't blank.
+		const recorded = "SELECT mysql_query_attribute_string('tenant') AS t"
 		m := readbackMock("q1", recorded, "row-1", zeroTime())
 		m.Spec.MySQLRequests[0].PacketBundle.Message.(*mysql.QueryPacket).Parameters =
-			[]mysql.Parameter{{Type: 254 /* MYSQL_TYPE_STRING */, Value: "recorded-attr"}}
+			[]mysql.Parameter{{Type: 254 /* MYSQL_TYPE_STRING */, Name: "tenant", Value: "recorded-attr"}}
 		exactReq := comQueryReq(recorded)
 		exactReq.PacketBundle.Message.(*mysql.QueryPacket).Parameters =
-			[]mysql.Parameter{{Type: 254, Value: "replay-attr"}}
+			[]mysql.Parameter{{Type: 254, Name: "tenant", Value: "replay-attr"}}
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
 		_, ok, miss, err := matchCommand(context.Background(), logger, exactReq, db, newDecodeCtx(), eng, nil)

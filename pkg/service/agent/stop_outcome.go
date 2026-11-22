@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -104,15 +106,65 @@ func (a *Agent) writeStopOutcome(ctx context.Context, path string) error {
 // models.MockOutcome. Both reads drain, exactly as the CLI's own end-of-run
 // reads do: this is the last time they are made.
 func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
+	// The windows say which test ran when, and with what verdict; the CLI
+	// cannot ask a stopped agent for them. Read first: closing a test whose
+	// process went away charges its misses, which the miss read below must
+	// then see.
+	windows, err := a.FinalScopeWindows(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read what each test of this replay did: %w", err)
+	}
+	// Under the proven switch the agent then finishes its end of the run
+	// (its hooks' AfterTestRun), as the CLI has it do where it can still
+	// reach the agent (the mock service's settleRun), before the reads the
+	// verdict rests on: an enterprise agent writes the row of each process
+	// of the run it saw off the run's clock, the last test's among them.
+	// The account says whether it did (MockOutcome.Settled): a CLI under
+	// the switch does not judge a run without that word.
+	settled, settleErr := false, ""
+	if provenswitch.On() {
+		if err := ActiveHooks.AfterTestRun(ctx, "", nil, models.TestCoverage{}); err != nil {
+			settleErr = err.Error()
+			a.logger.Warn("keploy's agent did not finish checking the replay's tests as it stopped, so keploy will not judge them", zap.Error(err))
+		} else {
+			settled = true
+		}
+	}
 	consumed, err := a.GetConsumedMocks(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the mocks this replay served: %w", err)
 	}
 	missed, err := a.GetMockErrors(ctx)
-	if err != nil {
+	missedUnread := ""
+	if errors.Is(err, models.ErrUnmatchedCallsUnread) {
+		// What was read is kept, and the account says it may be short, and
+		// why (the reader names ErrUnmatchedCallsUnread itself).
+		missedUnread = models.UnreadCause(err)
+	} else if err != nil {
 		return nil, fmt.Errorf("failed to read the calls this replay could not match: %w", err)
 	}
-	body, err := json.Marshal(models.MockOutcome{Consumed: consumed, Missed: missed})
+	outcome := models.MockOutcome{Consumed: consumed, Missed: missed, Windows: windows, MissedUnread: missedUnread, Settled: settled, SettleError: settleErr}
+	// What record's full round learned onto recordings from calls made in
+	// other windows: the CLI writes it onto them beside what the consumed
+	// ones learned.
+	outcome.LearnedElsewhere, _ = a.LearnedElsewhere(ctx)
+	// Nor whether its hooks could track every process. Hooks that never count
+	// leave both fields out, which the CLI reads as "unknown" and lets pass.
+	// A count that could not be read leaves its error instead: completeness
+	// is then unproven, which the CLI must be able to tell from "never
+	// counted" (--strict fails it), and the agent says so here too.
+	refusals, err := a.PIDMapRefusals(ctx)
+	switch {
+	case err == nil:
+		outcome.PIDMapRefusals = &refusals
+	case errors.Is(err, models.ErrPIDMapRefusalsUnsupported):
+		a.logger.Debug("these hooks do not count refused PID map inserts; none are left in the replay outcome", zap.Error(err))
+	default:
+		outcome.PIDMapRefusalsError = err.Error()
+		a.logger.Warn("could not read the refused PID map inserts to leave in the replay outcome: keploy cannot prove that every process of the test command was tracked", zap.Error(err),
+			zap.String("next_step", "check this agent's logs for a WARN about its PID maps"))
+	}
+	body, err := json.Marshal(outcome)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the replay outcome: %w", err)
 	}

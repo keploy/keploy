@@ -4,6 +4,7 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	keployutils "go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -42,29 +44,39 @@ func StartCommand(cmd *exec.Cmd) error {
 
 // PTYHandle represents a PTY session (stub for Windows)
 type PTYHandle struct {
-	cmd    *exec.Cmd
-	logger *zap.Logger
+	cmd     *exec.Cmd
+	console *keployutils.ChildConsole
+	logger  *zap.Logger
 }
 
 // StartCommandWithPTY on Windows falls back to regular command execution since PTY is not supported.
 func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) {
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Its output reaches keploy's console cut of the values the log redactor
+	// holds, when it holds any (ChildConsole).
+	console, err := keployutils.SetChildConsole(cmd)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Stdin = os.Stdin
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	console.Started()
+	if err != nil {
 		return nil, err
 	}
 
 	return &PTYHandle{
-		cmd:    cmd,
-		logger: logger,
+		cmd:     cmd,
+		console: console,
+		logger:  logger,
 	}, nil
 }
 
-// Wait waits for the command to finish.
+// Wait waits for the command to finish, and writes out all it printed.
 func (h *PTYHandle) Wait() error {
-	return h.cmd.Wait()
+	err := h.cmd.Wait()
+	h.console.Exited()
+	return err
 }
 
 // GetProcess returns the underlying process for signal handling
@@ -75,12 +87,44 @@ func (h *PTYHandle) GetProcess() *os.Process {
 	return nil
 }
 
-// StopPTYCommand on Windows uses StopCommand since PTY is not supported.
-func StopPTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+// TerminateCommand stops cmd's process tree. Windows has no SIGTERM to send
+// and keploy attaches no uprobes there, so it is StopCommand.
+func TerminateCommand(cmd *exec.Cmd, logger *zap.Logger) error {
+	return StopCommand(cmd, logger)
+}
+
+// KillAgentCommand ends cmd's process tree at once (StopCommand), now or not.
+func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger, _ bool) error {
+	return StopCommand(cmd, logger)
+}
+
+// KillAgentReach says what KillAgentCommand does to the agent cmd started:
+// it ends it at once, now or not.
+func KillAgentReach(*exec.Cmd) (firstAtOnce, noAtOnce bool) { return true, false }
+
+// KillPTYReach is KillAgentReach: Windows has no PTY.
+func KillPTYReach(*PTYHandle) (firstAtOnce, noAtOnce bool) { return true, false }
+
+// KillPTYCommand is KillAgentCommand: Windows has no PTY.
+func KillPTYCommand(handle *PTYHandle, logger *zap.Logger, now bool) error {
 	if handle == nil || handle.cmd == nil {
 		return nil
 	}
-	return StopCommand(handle.cmd, logger)
+	return KillAgentCommand(handle.cmd, logger, now)
+}
+
+// StdinOff is always false on Windows, which has no PTY.
+func StdinOff(*PTYHandle) bool { return false }
+
+// RestoreTerminal has no terminal state to restore on Windows.
+func (h *PTYHandle) RestoreTerminal() {}
+
+// TerminatePTYCommand on Windows is TerminateCommand: PTY is not supported.
+func TerminatePTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+	if handle == nil || handle.cmd == nil {
+		return nil
+	}
+	return TerminateCommand(handle.cmd, logger)
 }
 
 // ConfigureCommandForPTY configures the command's SysProcAttr for PTY execution.
@@ -141,4 +185,26 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 		return err
 	}
 	return nil
+}
+
+// SetOwnProcessGroup starts cmd in a process group of its own
+// (CREATE_NEW_PROCESS_GROUP), which disables a console's Ctrl+C for it.
+func SetOwnProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
+}
+
+// KillOwnProcessGroup kills cmd (cmd.Process.Kill), for an exec.Cmd's
+// Cancel: a process group here (SetOwnProcessGroup) is a console's, which
+// takes no kill of its own. TerminateProcess refuses (access denied) a
+// process that has exited and has not been waited for yet: that is
+// os.ErrProcessDone here, not a process keploy may not signal.
+func KillOwnProcessGroup(cmd *exec.Cmd) error {
+	err := cmd.Process.Kill()
+	if errors.Is(err, os.ErrPermission) {
+		return os.ErrProcessDone
+	}
+	return err
 }

@@ -11,16 +11,15 @@ import (
 	"testing"
 )
 
-// RunTestSet is ~2000 lines long and no test executes it: standing up its
-// eight collaborator interfaces (TestDB, MockDB, MappingDB, ReportDB,
-// TestSetConfig, Telemetry, Instrumentation, TestHooks) plus the simulate loop
-// is a harness this slice does not justify. The consequence measured by a
-// reviewer is that the DepResult writer could be replaced with a discard and
-// the whole suite stayed green.
+// RunTestSet is ~2000 lines long, and when this file was written no test
+// executed it. The harnesses that do now (partial_run_runtestset_test.go,
+// templates_runtestset_test.go) drive some of its paths, not every wire
+// below: the consequence measured by a reviewer was that the DepResult writer
+// could be replaced with a discard and the whole suite stayed green.
 //
 // The BEHAVIOUR of every extracted seam is table-tested above
 // (resolveTestOutcome, resolveTestStatus, attachDepResults, buildDepResults,
-// shouldEmitFailureLogs, recordUnexercised). What is still unpinned is the
+// recordUnexercised). What is still unpinned is the
 // WIRING: that RunTestSet actually calls them, with the arguments that make
 // them mean what the tests say they mean.
 //
@@ -181,11 +180,12 @@ func TestRunTestSetWiring(t *testing.T) {
 			why:        "The verdict signal and the rows that explain it must come from identical inputs.",
 		},
 		{
-			name:       "the response diff is un-suppressed through the tested predicate",
+			name:       "the response diff is printed for every failed answer",
 			assignment: "emitFailureLogs",
-			want:       []string{"shouldEmitFailureLogs", "mockSetMismatch", "AssertDependencies"},
-			why: "Reverting this to `!mockSetMismatch` hands the user a test that --assert-dependencies " +
-				"just marked FAILED with its response diff suppressed as 're-record noise'.",
+			want:       []string{"true"},
+			why: "Reverting this to `!mockSetMismatch` hides the diff of a wrong answer demoted to OBSOLETE, " +
+				"which now fails the run as not judged, and of one --assert-dependencies or --strict-failure " +
+				"marked FAILED: a red run with nothing to look at before re-recording over it.",
 		},
 		{
 			name:       "the verdict goes through the single seam, carrying the raw response result and all three knobs",
@@ -196,8 +196,13 @@ func TestRunTestSetWiring(t *testing.T) {
 			// Naming the raw field here would pin the seam to one spelling and
 			// go quiet the moment a caller sets only the other one — which is
 			// the failure this guard is supposed to catch, not cause.
+			//
+			// assertTestMocks, not AssertDependencies, for the same reason: see
+			// the emitFailureLogs row. strictFailure, not StrictFailure, too:
+			// the veto is read through r.strictFailure(), which answers for the
+			// knob AND for the proven switch that turns it on for everyone.
 			want: []string{"resolveTestOutcome", "testPass", "mockSetMismatch",
-				"NoiseStrict", "AssertDependencies", "StrictFailure"},
+				"NoiseStrict", "assertTestMocks", "strictFailure"},
 			why: "resolveTestOutcome is where --assert-dependencies turns a PASSED-and-green test into a " +
 				"FAILED-and-red one. Passing anything other than the raw testPass and the three knobs " +
 				"silently removes a promotion.",
@@ -219,7 +224,7 @@ func TestRunTestSetWiring(t *testing.T) {
 		{
 			name: "the rows are attached to the persisted result",
 			call: "attachDepResults",
-			want: []string{"testCaseResult", "testStatus", "depAssert", "AssertDependencies"},
+			want: []string{"testCaseResult", "testStatus", "depAssert", "assertTestMocks"},
 			why: "Without this call the rows are computed and thrown away: nothing reaches the report, " +
 				"JUnit, --format json, or the DEPENDENCY_MISSING category.",
 		},
@@ -283,9 +288,12 @@ func TestRunTestSetWiring(t *testing.T) {
 	}
 }
 
-// The deferred streaming path must NOT write DepResult: its expected-mock list
-// is an un-tier-filtered slice built before the run, so reusable/startup mocks
-// would show up as per-test dependencies and go "missing" at random.
+// The deferred streaming path must NOT write DepResult with the proven switch
+// off: its expected-mock list is an un-tier-filtered slice built before the
+// run, so reusable/startup mocks would show up as per-test dependencies and go
+// "missing" at random. Under the switch it writes them through
+// attachStreamDepResults, which filters that list as the main loop does
+// (eligibleExpectedEntries), and only there.
 func TestStreamingPathDoesNotWriteDepResults(t *testing.T) {
 	_, fn := runTestSetSource(t)
 	if calls := callArgIdents(fn, "buildDepResults"); len(calls) != 1 {
@@ -293,6 +301,18 @@ func TestStreamingPathDoesNotWriteDepResults(t *testing.T) {
 	}
 	if calls := callArgIdents(fn, "attachDepResults"); len(calls) != 1 {
 		t.Fatalf("expected exactly one attachDepResults call in RunTestSet, found %d", len(calls))
+	}
+	pos := posOfCall(t, fn, "attachStreamDepResults")
+	under := false
+	for _, n := range ancestorsOf(fn, pos) {
+		if ifStmt, ok := n.(*ast.IfStmt); ok {
+			if call, ok := ifStmt.Cond.(*ast.CallExpr); ok && calleeName(call) == "provenswitch.On" {
+				under = true
+			}
+		}
+	}
+	if !under {
+		t.Fatal("RunTestSet writes a streamed test's dependency rows outside `if provenswitch.On()`: with the switch off the streaming pass must write none")
 	}
 }
 
@@ -681,33 +701,53 @@ func TestOutcomeDrivesTheRunVerdict(t *testing.T) {
 // degrade to `deps[0] postgres (presence)` — five calls to one service
 // distinguishable only by an unstable index, which is the finding this lookup
 // field exists to fix.
+//
+// RunTestSet's lookup is filled by addMockDisplayInfo, from the read that loads
+// the mocks (loadTestSetMocks) or from a read of its own, so the site is pinned
+// across replay.go: one literal, in addMockDisplayInfo.
 func TestMockLookupCarriesATarget(t *testing.T) {
-	fset, fn := runTestSetSource(t)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "replay.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse replay.go: %v", err)
+	}
 
 	var found []string
-	ast.Inspect(fn, func(n ast.Node) bool {
-		lit, ok := n.(*ast.CompositeLit)
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
 		if !ok {
-			return true
+			continue
 		}
-		ident, ok := lit.Type.(*ast.Ident)
-		if !ok || ident.Name != "mockDisplayInfo" {
+		ast.Inspect(fn, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			ident, ok := lit.Type.(*ast.Ident)
+			if !ok || ident.Name != "mockDisplayInfo" {
+				return true
+			}
+			found = append(found, fn.Name.Name+": "+printNode(t, fset, lit))
 			return true
-		}
-		found = append(found, printNode(t, fset, lit))
-		return true
-	})
-
-	if len(found) != 1 {
-		t.Fatalf("expected exactly one mockDisplayInfo literal in RunTestSet, found %d: %v", len(found), found)
+		})
 	}
-	const want = "mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), }"
-	if found[0] != want {
+
+	// Two literals: a mock whose payload is on disk keeps itself, and its
+	// target is worked out from it when asked (mockDisplayInfo.targetOf,
+	// which reads mockTargetFromSpec); a whole mock's is worked out here.
+	if len(found) != 2 {
+		t.Fatalf("expected exactly two mockDisplayInfo literals in replay.go, found %d: %v", len(found), found)
+	}
+	if want := "addMockDisplayInfo: mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}"; found[0] != want {
+		t.Fatalf("the mock display lookup of a mock whose payload is on disk is now %s, want %s", found[0], want)
+	}
+	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), request: mock.RequestFingerprint(), recordedAt: mock.Spec.ReqTimestampMock, lifetime: mock.TestModeInfo.Lifetime, }"
+	if found[1] != want {
 		t.Fatalf("the mock display lookup is now %s, want %s.\n\n"+
 			"WHY THIS MATTERS: `target` is the only human-meaningful destination a dependency row "+
 			"can carry — neither models.MockEntry (the mapping side) nor models.MockState (the "+
 			"consumed side) records one. Dropping it collapses five outgoing calls to the same "+
-			"service into rows that differ only by index.", found[0], want)
+			"service into rows that differ only by index.", found[1], want)
 	}
 }
 
@@ -761,7 +801,7 @@ func TestMainLoopReportsEligibilityToTheWarner(t *testing.T) {
 
 // M-1: THE STREAMING HALF OF THE INERT-KNOB WARNING.
 //
-// RunTestSet splits SSE/chunked test cases out of the main replay loop and
+// RunTestSet splits streaming test cases out of the main replay loop and
 // replays them in a Phase-2 pass that deliberately writes no DepResult and
 // never calls resolveTestOutcome, so --assert-dependencies cannot promote
 // anything there. The warning that says so lives in that pass and nowhere
@@ -788,8 +828,9 @@ func TestStreamingPassWarnsTheAssertionDidNotRun(t *testing.T) {
 	calls := callArgIdents(fn, warner)
 	if len(calls) != 2 {
 		t.Fatalf("RunTestSet calls %s %d time(s), want 2 (the main replay loop and the deferred streaming pass).\n\n"+
-			"WHY THIS MATTERS: the streaming pass runs no dependency assertion at all. Without its own "+
-			"call, --assert-dependencies over a set of SSE/chunked tests is silently inert and exits 0.",
+			"WHY THIS MATTERS: the streaming pass runs no --assert-dependencies assertion (under "+
+			"KEPLOY_PROVEN=1 it judges only its test mocks, proven_verdicts.go). Without its own call, "+
+			"--assert-dependencies over a set of streaming tests is silently inert and exits 0.",
 			warner, len(calls))
 	}
 
@@ -912,7 +953,7 @@ func TestMainLoopReportsTheConsumedFetchOutcomeToTheWarner(t *testing.T) {
 
 // THE ELIGIBILITY FILTER IS ONE FUNCTION, NOT TWO COPIES.
 //
-// `isDNSMockEntry(m, kinds) || reusable[m.Name]` decides two things that must
+// `isUnassertedMockEntry(m, kinds) || reusable[m.Name]` decides two things that must
 // agree: the persisted deps_checked bit (buildDepResults iterates the survivors)
 // and the user-facing "why nothing was asserted" warning (RunTestSet measures
 // them for noEligibleDeps, via filteredExpectedNames). It used to be written
@@ -950,10 +991,10 @@ func TestEligibilityFilterHasExactlyOneDefinition(t *testing.T) {
 					if !ok || bin.Op != token.LOR {
 						return true
 					}
-					// The composite predicate: a call to isDNSMockEntry on one
-					// side, an index into the reusable map on the other.
+					// The composite predicate: a call to isUnassertedMockEntry on
+					// one side, an index into the reusable map on the other.
 					idents := exprIdents([]ast.Expr{bin})
-					if idents["isDNSMockEntry"] && idents["reusableMockNames"] {
+					if idents["isUnassertedMockEntry"] && idents["reusableMockNames"] {
 						sites = append(sites, site{fn: fn.Name.Name, pos: fset.Position(bin.Pos()).String()})
 					}
 					return true
@@ -994,5 +1035,50 @@ func TestRunTestSetDerivesItsExpectationListFromTheSharedFilter(t *testing.T) {
 				"reusableMockNames stops session/connection-tier ones being excluded, so healthy tests are "+
 				"reported with MISSING dependencies and --assert-dependencies fails them.", w, calls[0])
 		}
+	}
+}
+
+// RunTestSet reports a test with no dependency as having used none: its row
+// carries mock_mismatches, empty, since what it consumed was read. Left out,
+// the row looked the same as one whose consumed mocks could not be read.
+func TestRunTestSetReportsATestThatUsedNoMockAsSuch(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	h.run(t)
+	var found bool
+	for _, r := range h.report.results {
+		if r.TestCaseID != "test-1" {
+			continue
+		}
+		found = true
+		if r.MockMismatches == nil {
+			t.Fatal("a test whose consumed mocks were read, and were none, has no mock_mismatches")
+		}
+		if len(r.MockMismatches.ExpectedMocks)+len(r.MockMismatches.ActualMocks) != 0 {
+			t.Fatalf("precondition: the test has no mock, yet its row lists %+v", r.MockMismatches)
+		}
+	}
+	if !found {
+		t.Fatal("no row for test-1")
+	}
+}
+
+// A test whose consumed mocks could not be read reports no mock_mismatches:
+// an empty one would say it used none.
+func TestRunTestSetLeavesOutTheMocksOfATestWhoseConsumptionWasUnread(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	h.replayer.hookImpl = consumedReadFails{}
+	h.run(t)
+	var found bool
+	for _, r := range h.report.results {
+		if r.TestCaseID != "test-1" {
+			continue
+		}
+		found = true
+		if r.MockMismatches != nil {
+			t.Fatalf("consumed mocks unread, yet the row reports %+v: read as used none", r.MockMismatches)
+		}
+	}
+	if !found {
+		t.Fatal("no row for test-1")
 	}
 }

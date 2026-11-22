@@ -2,6 +2,9 @@ package models
 
 import (
 	"errors"
+	"slices"
+	"strings"
+	"time"
 )
 
 type TestReport struct {
@@ -23,6 +26,85 @@ type TestReport struct {
 	TimeTaken     string       `json:"time_taken" yaml:"time_taken"`
 	CmdUsed       string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
 	AppLogs       string       `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
+	// CaptureVerification is what keploy's check that its agent tracked every
+	// process of this test set found, when it found something: the capture
+	// was incomplete (a process went untracked; the set is FAILED, and its
+	// JUnit suite carries a failed "keploy capture" case), or could not be
+	// verified (the count could not be read). Absent when nothing was lost,
+	// and when nothing was checked (an agent that does not count, a run that
+	// does not mock): a report does not tell those two apart.
+	CaptureVerification *CaptureVerification `json:"capture_verification,omitempty" yaml:"capture_verification,omitempty"`
+	// Real is what the set's run saw of mock.real beyond its test cases
+	// (proven switch): the destinations it reached, and the connections
+	// keploy could not capture outside them. RealListed are the
+	// destinations the recordings of its test cases that ran list. Absent
+	// without a mock.real list.
+	Real       *RealRun `json:"real,omitempty" yaml:"real,omitempty"`
+	RealListed []string `json:"realListed,omitempty" yaml:"real_listed,omitempty"`
+	// RealFailure is why mock.real failed the set (design v14 §8.2 rule 4):
+	// a destination the recordings list that the run never reached, or
+	// that never answered. JUnit fails a case of its own with it.
+	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
+	// UnclaimedCalls are the calls the set's application made outside every
+	// test that no mock answered (proven switch): after its last test, a pool
+	// miss no later test takes, and before its first, as it started
+	// (UnmatchedCall.BeforeSet); and those a parser held for a later test's
+	// recording that no test answered, wherever they were made
+	// (UnmatchedCall.Held). They fail the set; JUnit fails a case of its own
+	// with them, and another with the held ones.
+	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// OutsideTestMisses are the calls the set's application made outside
+	// every test that no mock answered and that fail nothing, each once
+	// with how many times it was made, and what to do about it: with the
+	// proven switch off, every one, made as it started, before the set's
+	// first test, or after its last (no parser holds a call for a later
+	// test then); with it on, those that count against no test (a DNS
+	// lookup, a background call), made before its first test, after its
+	// last, or held for a later test's recording. A call outside every test
+	// is served, not required: the set's verdict is what it would be
+	// without them. Each is named by its shape (OutsideTestMiss), as
+	// keploy's log lines name a call: the report may be uploaded.
+	OutsideTestMisses []OutsideTestMiss `json:"outsideTestMisses,omitempty" yaml:"outside_test_misses,omitempty"`
+	// AppNotStopped, under the proven switch, says why keploy read the set's
+	// end with its application still running (a stack kept across test-sets,
+	// --keep-app-alive, an application keploy did not start): a call the
+	// application made after that read is not judged (P101-c). The set's
+	// verdict is what the read found.
+	AppNotStopped string `json:"appNotStopped,omitempty" yaml:"app_not_stopped,omitempty"`
+	// Proven says the set was run under the proven switch (KEPLOY_PROVEN=1),
+	// so its results carry the proven model's evidence: a report renders it
+	// from this, not from the switch of the process rendering it. Set on
+	// every report a set run under the switch writes; absent for a set run
+	// without it.
+	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
+	// SetAnswers are, under the proven switch, the answered calls
+	// (UnmatchedCall.Answer) the set's end charged to the set, no test: made
+	// before its first test or after its last. They never fail
+	// the set, nor land in UnclaimedCalls. Absent when there is none.
+	SetAnswers []UnmatchedCall `json:"setAnswers,omitempty" yaml:"set_answers,omitempty"`
+}
+
+// CaptureVerificationStatus is the outcome of checking that the agent tracked
+// every process of a test set.
+type CaptureVerificationStatus string
+
+const (
+	// CaptureIncomplete: a process went untracked (the kernel refused it a
+	// place in the agent's PID map), so its dependency calls may have reached
+	// the real service unmocked. The set is FAILED for it.
+	CaptureIncompleteStatus CaptureVerificationStatus = "incomplete"
+	// CaptureUnverified: the agent counts untracked processes, but keploy
+	// could not read the count, so the capture could not be confirmed. With
+	// the proven switch off the set's pass/fail is left as decided (only
+	// mock mode's --strict fails on it); with it on the set is not judged.
+	CaptureUnverifiedStatus CaptureVerificationStatus = "unverified"
+)
+
+// CaptureVerification is the capture-completeness outcome carried in a
+// TestReport (and the JUnit and json projections).
+type CaptureVerification struct {
+	Status CaptureVerificationStatus `json:"status" yaml:"status"`
+	Reason string                    `json:"reason" yaml:"reason"`
 }
 
 type TestCoverage struct {
@@ -57,6 +139,11 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+	// SkipReason says why keploy skipped this test: set on an IGNORED result
+	// whose skip carried a reason (a quarantine, with its class and why), and
+	// rendered into the JUnit <skipped> message and the text report. Empty for
+	// every other result, and for a test skipped without one.
+	SkipReason string `json:"skip_reason,omitempty" yaml:"skip_reason,omitempty"`
 	// MockMismatches captures expected vs actually-consumed mocks for THIS test.
 	// Distinct from FailureInfo.MockMismatch (which only fires when the mock
 	// pool diverged AND the test case is OBSOLETE) — this field is set for
@@ -76,10 +163,81 @@ type TestResult struct {
 	//     (GetConsumedMocks, in either instrument or non-instrument mode)
 	//     fails. The replayer skips emitting MockMismatches rather than
 	//     attribute stale loop-scoped data to the wrong test case.
+	//   - Replay without an agent, and results written before a test reaches
+	//     the replay loop (a test that could not be sent).
 	//
+	// Present, even with both lists empty, whenever the consumed mocks were
+	// read: an empty value says the test consumed no asserted mock and its
+	// mapping names none (no mapping, or only DNS, connection-failure, startup
+	// or undelivered entries). DNS, connection-failure and startup mocks are
+	// never listed on either side, so it may have consumed those.
 	// Consumers should treat an absent value as "data not available for
 	// this test / run mode", NOT "no mocks were consumed".
 	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
+	// Captured is what this test case's {{capture ...}} placeholders took
+	// from the app's answer, in order: each key's value for the rest of the
+	// run. Absent when the expected response captures nothing.
+	Captured []TemplateCapture `json:"captured,omitempty" yaml:"captured,omitempty"`
+	// TemplateFailures are the template variable places the app's answer
+	// did not satisfy: a capture that found no value of its type, a use that
+	// did not hold its key's value; or, for a test case refused when its set
+	// loaded (never sent), each placeholder refused (Refused). Each fails
+	// the test case on its own, noise or not, unless the mock set's
+	// divergence demotes the test case to OBSOLETE (as it demotes any
+	// failure without --strict-failure); the report still names the places.
+	// Absent when there is none.
+	TemplateFailures []TemplateFailure `json:"template_failures,omitempty" yaml:"template_failures,omitempty"`
+	// Real are the mock.real destinations the test case used while it ran
+	// (proven switch): its REAL rows. Absent when it used none.
+	Real []RealUse `json:"real,omitempty" yaml:"real,omitempty"`
+	// Variables are the test variables bound while the test case ran (proven
+	// switch): the values its request sent, and each value a dependency call
+	// carried where the learn step found it first, with where it was taken.
+	// A later call that sent another value failed the test case as a miss.
+	// Absent when none was bound.
+	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
+	// Answers are, under the proven switch, the answered calls
+	// (UnmatchedCall.Answer) charged to this test's window, or to the gap
+	// before it, as misses are: a pairing record's full round
+	// made, a background write answered by its kind. They never fail the
+	// test, nor land in FailureInfo.UnmatchedCalls. Absent when there is
+	// none.
+	Answers []UnmatchedCall `json:"answers,omitempty" yaml:"answers,omitempty"`
+	// Rewritten are the places of the expected response a replay hook
+	// rewrote for this send before the answer was compared with it
+	// (TestCase.ExpectedRewrite), each with its recorded value and why: the
+	// comparison read the rewritten value there. Absent when there is none.
+	Rewritten []RewrittenPlace `json:"rewritten,omitempty" yaml:"rewritten,omitempty"`
+}
+
+// TemplateFailure is one template variable place a test case failed on, or
+// one placeholder it was refused for when its test set loaded.
+type TemplateFailure struct {
+	// Where is the place: in the answer for a failure ("body.id", "header
+	// Set-Cookie.sid"), in the test case for a refusal ("request body",
+	// "response body.items[0].id").
+	Where string `json:"where" yaml:"where"`
+	// Placeholder is the placeholder as the test case writes it.
+	Placeholder string `json:"placeholder" yaml:"placeholder"`
+	// Why says what the place needed and what the answer held; for a
+	// refusal, why the placeholder cannot run and the edit to make.
+	Why string `json:"why" yaml:"why"`
+	// Refused marks a placeholder refused when the test set loaded: the test
+	// case was never sent, and there is no answer to accept. A refusal with
+	// no Placeholder refuses the test case's whole test set (one an
+	// interrupted keploy templatize left half-written, or one a mock of which
+	// a replay hook refused; category TEST_SET_REFUSED), not a placeholder of
+	// it.
+	Refused bool `json:"refused,omitempty" yaml:"refused,omitempty"`
+}
+
+// TemplateCapture is one value a test case's expected response took from the
+// app's answer through a {{capture ...}} placeholder.
+type TemplateCapture struct {
+	Key   string `json:"key" yaml:"key"`
+	Value string `json:"value" yaml:"value"`
+	// Where is the place in the answer: "body.items[0].id", "header Set-Cookie.sid".
+	Where string `json:"where" yaml:"where"`
 }
 
 // FailureInfo captures structured diagnostic data about why a test case failed or became obsolete.
@@ -92,6 +250,228 @@ type FailureInfo struct {
 	MockMismatch   *MockMismatchInfo  `json:"mock_mismatch,omitempty" yaml:"mock_mismatch,omitempty"`
 	MatchedCalls   []MatchedCall      `json:"matched_calls,omitempty" yaml:"matched_calls,omitempty"`
 	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
+	// UnmatchedCallsUnread says UnmatchedCalls may be missing calls: the
+	// agent's record of the calls no mock answered during this test could not
+	// all be read (models.ErrUnmatchedCallsUnread, or the read failed). The
+	// test's evidence is unknown, so its test set is not judged. Set only under
+	// the proven switch.
+	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
+	// MissesUnattributed says, with the proven switch off, what
+	// UnmatchedCallsUnread says under it: the calls no mock answered during
+	// this test could not all be read, so a miss of this test may be missing
+	// from it, or have been read with another test's. With the switch off a
+	// miss fails no test, so the test's verdict stands, and nothing reads this
+	// as no verdict; but nothing may take a failed difference of its test set
+	// for noise, which may be that miss's (enterprise's auto-noise learns none
+	// for the set). Set only with the switch off.
+	MissesUnattributed bool `json:"misses_unattributed,omitempty" yaml:"misses_unattributed,omitempty"`
+	// TestMocksUnread says the mocks this test consumed could not be read
+	// from keploy's agent, so whether it made every call it recorded is
+	// unknown: it has no verdict, and its test set is not judged. Set only
+	// under the proven switch, before any hook reads the result.
+	TestMocksUnread bool `json:"test_mocks_unread,omitempty" yaml:"test_mocks_unread,omitempty"`
+	// VariablesUnchecked says why what this test captured could not be
+	// checked against what its dependency calls carried (a keploy-side
+	// fault): it has no verdict, and its test set is not judged. Set only
+	// under the proven switch.
+	VariablesUnchecked string `json:"variables_unchecked,omitempty" yaml:"variables_unchecked,omitempty"`
+	// UnconsumedMocks are, under KEPLOY_PROVEN=1, the test mocks this test
+	// did not consume: the mocks of its recorded mapping its per-test
+	// assertion owns (data-plane mocks; connection failures and
+	// protocol-phase mocks are not owned) that it made no call for, each of
+	// which fails it (a recorded call was not made). In recorded order, every
+	// one: Result.DepResult caps its rows and names a target, not the mock.
+	// Empty with the switch off, and for a test that owned none or whose
+	// consumption was not read (TestMocksUnread).
+	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
+	// not capture that is charged to this test, each of which fails it:
+	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
+	//     other kind): what the agent lost since the test set began, as this
+	//     test ended. Such a loss taints the test running when it happened
+	//     and every later test of the set (design v14 §3.2); a process of the
+	//     application's that keploy could not place (AppLife) taints every
+	//     test since that application started, in this set or an earlier one
+	//     it served (--keep-app-alive), and one that outlives the application
+	//     every test since the run began.
+	//   - a test's own kind that is judged (CaptureLossKind.PerTest:
+	//     tls_handshake_failed, capture_unread, connection_unrecorded; the
+	//     other test's own kinds are not judged, CannotCapture, or evidence):
+	//     what the agent lost while this test ran, since the previous test
+	//     ended, for this test alone.
+	//   - real_uncaptured (class e, mock.real): the connections keploy could
+	//     neither capture nor relay as real that were undecided or used while
+	//     this test ran, counted for this test alone. One undecided across
+	//     several tests is charged to each; a test that never touched it is
+	//     not (§3.2 as amended for class e). keploy relays nothing of such a
+	//     connection, so no later test's calls escape capture through it.
+	// Empty with the switch off.
+	CaptureIncomplete CaptureLosses `json:"capture_incomplete,omitempty" yaml:"capture_incomplete,omitempty"`
+	// CaptureUnread says, under KEPLOY_PROVEN=1, that keploy could not read
+	// whether its agent captured every call while this test ran (the count
+	// could not be read, at the test's end or at its set's mark): the test
+	// has no verdict, and its set is not judged.
+	CaptureUnread bool `json:"capture_unread,omitempty" yaml:"capture_unread,omitempty"`
+	// CannotCapture is, under KEPLOY_PROVEN=1, what keploy cannot capture at
+	// all that the application did while this test or one before it ran
+	// (decision 20: a call over a Unix socket, or Unix sockets keploy cannot
+	// see), and every other loss that leaves a test without a verdict
+	// (CaptureLossKind.NotJudged: an agent started again while the
+	// application ran on, agent_started_again, among them): the test has no
+	// verdict, and its set is not judged. Never a failure.
+	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
+	// StreamHeldOpen says, under KEPLOY_PROVEN=1, why the app's stream was
+	// not read to its end: the app kept it open on keepalives, past its
+	// recording (every recorded frame, or message, came, then a keepalive
+	// beyond the recorded ones), or short of it (two keepalives in a row
+	// and nothing of the rest between them) (row W1). The test has no
+	// verdict, and its set is not judged. Never a pass, and a failure only
+	// on what came.
+	StreamHeldOpen string `json:"stream_held_open,omitempty" yaml:"stream_held_open,omitempty"`
+	// AnswerStalled says, under KEPLOY_PROVEN=1 with no apiTimeout of the
+	// user's, what the stall rule waited for when it ended the test's
+	// exchange before the app's answer began, or part-way through an answer
+	// that is not streamed: the app took none of the request, or not all of
+	// it, or sent nothing back for the rule's grace of keploy's runnable time
+	// (pkg.AnswerStallGrace, rule 15). Nothing was compared: the row is
+	// built as a test with no answer is (FAILED), and the test has no
+	// verdict all the same (VerdictUnknown), nor has its set.
+	AnswerStalled string `json:"answer_stalled,omitempty" yaml:"answer_stalled,omitempty"`
+	// MappingStale says why an OBSOLETE test has no verdict: it answered
+	// differently from its recording while the dependency calls it made
+	// diverged from what its recorded mapping lists (a recorded mock of its
+	// mapping left unconsumed, or a mock outside it consumed). keploy cannot
+	// tell a regression from a stale mapping then, so the test is not
+	// judged, and neither is its set: never the silent pass an OBSOLETE once
+	// was (false-pass row 0). Set with the proven switch off, the only place
+	// a wrong answer is demoted.
+	MappingStale string `json:"mapping_stale,omitempty" yaml:"mapping_stale,omitempty"`
+	// LearningNotKept says, under KEPLOY_PROVEN=1 in record's full round, why
+	// keploy did not keep what its agent learned on the mocks this test
+	// consumed, and what it did not keep: the agent did not say it read the
+	// test case's request (an agent older than keploy), so a value the
+	// application took from the request may have been learned as noise, or
+	// as a variable that takes any value. A test that passed may have passed
+	// on it alone, so the test has no verdict, and its test set is not
+	// judged.
+	LearningNotKept string `json:"learning_not_kept,omitempty" yaml:"learning_not_kept,omitempty"`
+	// NotFound says why a FAILED test was never run: the run selected it by
+	// name (test.selectedTests in keploy.yml, or the enterprise binary's -t
+	// set:case), and its test set holds no test case of that name ("test
+	// case <name> not found in <set>"). It has no request and no answer, and
+	// is filed under TEST_CASE_NOT_FOUND.
+	NotFound string `json:"not_found,omitempty" yaml:"not_found,omitempty"`
+}
+
+// MappingStaleRemedy is what to do about a test whose recorded mapping
+// diverged from what it consumed (FailureInfo.MappingStale).
+const MappingStaleRemedy = "re-record the test-set, or run keploy test with --disable-mapping --update-test-mapping to replay it by recorded time and write its mapping afresh"
+
+// NotJudged is why the test has no verdict, whatever its status says: what
+// keploy could not read or check of it (UnmatchedCallsUnread,
+// TestMocksUnread, VariablesUnchecked, CaptureUnread, LearningNotKept), or
+// what it cannot capture at all (CannotCapture, decision 20), one reason
+// each.
+// Empty for a judged test. Each is set only under the proven switch, so a
+// result written without it is never unjudged, but for MappingStale, which is
+// set with it off, the only place a wrong answer is demoted to OBSOLETE.
+func (fi FailureInfo) NotJudged() []string {
+	var why []string
+	if fi.UnmatchedCallsUnread {
+		why = append(why, "keploy could not read every call it made that no recorded mock answered")
+	}
+	if fi.TestMocksUnread {
+		why = append(why, "keploy could not read which of its recorded calls it made")
+	}
+	if fi.VariablesUnchecked != "" {
+		why = append(why, "keploy could not check what it captured against its dependency calls: "+fi.VariablesUnchecked)
+	}
+	if fi.CaptureUnread {
+		why = append(why, "keploy could not read whether its agent captured every call while it ran")
+	}
+	if len(fi.CannotCapture) > 0 {
+		why = append(why, strings.TrimPrefix(fi.CannotCapture.NotJudgedText(), "not judged: "))
+	}
+	if fi.StreamHeldOpen != "" {
+		why = append(why, fi.StreamHeldOpen)
+	}
+	if fi.AnswerStalled != "" {
+		why = append(why, fi.AnswerStalled)
+	}
+	if fi.MappingStale != "" {
+		why = append(why, fi.MappingStale)
+	}
+	if fi.LearningNotKept != "" {
+		why = append(why, fi.LearningNotKept)
+	}
+	return why
+}
+
+// VerdictUnknown is why the test has no verdict although its row reads as
+// one (FailureInfo.NotJudged): empty for a judged test, for a FAILED one
+// (what could not be read can only add to why it failed) unless nothing was
+// compared because the stall rule ended its answer (AnswerStalled), and for
+// one keploy skipped (IGNORED, which says it has no verdict). MappingStale
+// counts on an OBSOLETE row only. JUnit and the NDJSON mark a test by this one
+// predicate.
+func (r TestResult) VerdictUnknown() []string {
+	if r.Status == TestStatusIgnored {
+		return nil
+	}
+	if r.Status == TestStatusFailed && r.FailureInfo.AnswerStalled == "" {
+		return nil
+	}
+	// A FAILED row whose answer the stall rule ended (AnswerStalled) was
+	// compared with nothing: its FAILED says no answer came, not that one
+	// differed.
+	fi := r.FailureInfo
+	if r.Status != TestStatusObsolete {
+		// MappingStale is a demoted wrong answer's: a row a hook relabelled
+		// since says its own verdict.
+		fi.MappingStale = ""
+	}
+	return fi.NotJudged()
+}
+
+// UnconsumedMock is a test mock a test did not consume
+// (FailureInfo.UnconsumedMocks).
+type UnconsumedMock struct {
+	Name string `json:"name" yaml:"name"`
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	// ConsumedBy names another test of the set that consumed this mock, when
+	// one did: the call was made, by a sibling, and the order in which the
+	// shared mock pool served the two can decide which test it counts for,
+	// until each test's consumption is exact. Empty when no test consumed it.
+	ConsumedBy string `json:"consumed_by,omitempty" yaml:"consumed_by,omitempty"`
+	// Concurrent names, under the proven switch, the other tests whose
+	// requests were open while this mock was recorded (Mapping.Groups),
+	// comma-separated in window order (a string, so the struct stays
+	// comparable). Unkept counts the tests whose requests were open beside
+	// them that the recording did not keep (models.ConcurrencyGroup.Unkept):
+	// one of those may have made it.
+	Concurrent string `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
+	// WhyNot says why this replay did not share the mock between those
+	// tests (ConcurrentNotShared*: it lists it under this test by time
+	// alone, or where keploy record's full round left it, unproven), with
+	// Stated for ConcurrentNotSharedStates. Empty, with Concurrent or Unkept
+	// set, only for the one case keploy proved: keploy record's full round
+	// shared it between them and no call of theirs matched it exactly (it
+	// learns nothing against a recording they share), so it is charged to
+	// each of them that ran; Closest then names the one whose call came
+	// closest to it, when the learn step saw one.
+	WhyNot  string `json:"why_not,omitempty" yaml:"why_not,omitempty"`
+	Stated  string `json:"stated,omitempty" yaml:"stated,omitempty"`
+	Closest string `json:"closest,omitempty" yaml:"closest,omitempty"`
+	Unkept  int    `json:"unkept,omitempty" yaml:"unkept,omitempty"`
+	// RepeatOf says that this recorded call, which this replay never made, is
+	// identical to a recording an earlier test of the set made, which
+	// answered that test's call at this replay: an application that keeps an
+	// answer for a span of elapsed time asked again at record, where the
+	// recording ran past the span, and not at a faster replay
+	// (models.RepeatNote). NextSteps is its sentence (ExplainUnmade). Both are
+	// empty when no such recording is known.
+	RepeatOf  *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
+	NextSteps string      `json:"next_steps,omitempty" yaml:"next_steps,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by
@@ -111,8 +491,10 @@ type MockMismatchMock struct {
 //     due to mock-pool divergence (mocks were added/removed between recording
 //     and replay).
 //   - TestResult.MockMismatches — populated for EVERY test that went through
-//     the replay loop, regardless of pass/fail or obsolescence. Lets report
-//     UIs render expected vs consumed mocks for passing tests too.
+//     the replay loop, regardless of pass/fail or obsolescence, whenever its
+//     consumed mocks were read, both lists empty for a test with no
+//     dependency. Lets report UIs render expected vs consumed mocks for
+//     passing tests too.
 type MockMismatchInfo struct {
 	ExpectedMocks []MockMismatchMock `json:"expected_mocks,omitempty" yaml:"expected_mocks,omitempty"`
 	ActualMocks   []MockMismatchMock `json:"actual_mocks,omitempty" yaml:"actual_mocks,omitempty"`
@@ -125,14 +507,65 @@ type MatchedCall struct {
 	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`   // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
 }
 
+// FieldReason is a field a replay refused a call in, as a reason names it
+// (no part that may be a value: FieldShape), and why it refused it, which
+// names no value either (MockMismatchReport.FieldReasons).
+type FieldReason struct {
+	Field string `json:"field" yaml:"field"`
+	Why   string `json:"why" yaml:"why"`
+}
+
+// FieldReasonShapes are rs whose field is its own shape (FieldShape), once
+// each, for a reason that names them: a reason of a field that may name a
+// value is left out, as its why may quote that field.
+func FieldReasonShapes(rs []FieldReason) []FieldReason {
+	var out []FieldReason
+	for _, r := range rs {
+		if r.Field == "" || r.Why == "" || FieldShape(r.Field) != r.Field || slices.Contains(out, r) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.
 type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
-	Destination   string `json:"destination,omitempty" yaml:"destination,omitempty"`       // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
-	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`     // internal mock reference for View Closest
-	Diff          string `json:"diff,omitempty" yaml:"diff,omitempty"`
-	NextSteps     string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
+	// PathTag mirrors MockMismatchReport.PathTag: the tag of an HTTP call's
+	// method and path that the agent's log line names it by, beside its
+	// shape (models.PathTag). The report and the console print it beside the
+	// summary, so a reader of the log finds the call here. "" for a call of
+	// another protocol, or one an agent that tags none reported.
+	PathTag     string `json:"path_tag,omitempty" yaml:"path_tag,omitempty"`
+	Destination string `json:"destination,omitempty" yaml:"destination,omitempty"` // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
+	// HostTag mirrors MockMismatchReport.HostTag: the tag of Destination's
+	// host name that the agent's log line names it by, beside its shape
+	// (models.HostTag). The report, the console and the misses file print it
+	// beside the destination. "" for an IP address, or one an agent that tags
+	// no host reported. Like PathTag, never in a receipt (Sanitized).
+	HostTag string `json:"host_tag,omitempty" yaml:"host_tag,omitempty"`
+	// Operation mirrors MockMismatchReport.Operation: the label of the
+	// operation an HTTP call carries ("query GetAppLabels"), "" when none. It
+	// names no value (HTTPOperationOf drops a label that could), so a
+	// sanitized call keeps it. A line for a person names the call with it
+	// (Named); ActualSummary never holds it, so no shape or identity does.
+	Operation string `json:"operation,omitempty" yaml:"operation,omitempty"`
+	// Command mirrors MockMismatchReport.Command: the name of a call of a
+	// protocol keploy has no shape of ("GET", "Produce"), "" when its parser
+	// names none. It names no value, so a sanitized call keeps it
+	// (CommandName) and its shape is it (MissShape).
+	Command string `json:"command,omitempty" yaml:"command,omitempty"`
+	// LiveDestination is, under the proven switch, the address the call was
+	// made to when Destination names it as the recording does instead (the
+	// mocks' destAddr: 127.0.0.1:27017 where the app reached [::1]:27017,
+	// the same loopback port), so a reader who greps mocks.yaml for
+	// Destination finds the mocks; "" when the two are the same.
+	LiveDestination string `json:"live_destination,omitempty" yaml:"live_destination,omitempty"`
+	ClosestMock     string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"` // internal mock reference for View Closest
+	Diff            string `json:"diff,omitempty" yaml:"diff,omitempty"`
+	NextSteps       string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
 	// MatchPhase, CandidateCount and FieldDiffs mirror MockMismatchReport so
 	// report consumers (CLI `keploy report`, report yaml, platform UI) can
 	// render structured field-level drift instead of an opaque string. Paths
@@ -153,7 +586,383 @@ type UnmatchedCall struct {
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
+	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
+	// places of a test variable on this call, under the proven switch only.
+	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
+	// BoundIn mirrors MockMismatchReport.BoundIn: the recordings at which
+	// this run bound the test variables a variable miss's refusal read, by
+	// name, never a value.
+	BoundIn []string `json:"bound_in,omitempty" yaml:"bound_in,omitempty"`
+	// Given mirrors MockMismatchReport.Given: the given a variable miss is
+	// about, by its name, never its value.
+	Given string `json:"given,omitempty" yaml:"given,omitempty"`
+	// VariableWhy mirrors MockMismatchReport.VariableWhy: why the variable
+	// pass refused the call as ClosestMock's, by names, never a value.
+	VariableWhy string `json:"variable_why,omitempty" yaml:"variable_why,omitempty"`
+	// At is when the call missed, so a client can tell which test made it.
+	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	// Kind is where the call was made, under the proven switch (MissInTest,
+	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
+	// extra call, how many times the test recorded that call.
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	// Instance is the test worker whose process made the call (0, left
+	// out: the run of one test process, or no worker).
+	Instance uint32 `json:"instance,omitempty" yaml:"instance,omitempty"`
+	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// SkippedReads mirrors MockMismatchReport.SkippedReads: for an extra
+	// call, the reads of tests the replay's gate skips that answered the
+	// same call in the test's window, by name, never a value.
+	SkippedReads []string `json:"skipped_reads,omitempty" yaml:"skipped_reads,omitempty"`
+	// BeforeSet says, under the proven switch, that the call was made before
+	// its test set's first test began, with no test's window open: the
+	// application's startup. Its Kind is MissOutsideTest. It is the set's,
+	// no test's: the replay fails the set with it, naming the call, and
+	// charges no test (the read of the set's first test carries it).
+	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// EarlierSetTest names, under the proven switch, the test of an earlier
+	// test set whose view the call was marked in (Marked.Test), when keploy
+	// decided the call only after the next set's mocks were staged: that
+	// test's own call, which no read of its set could take any more. Its Kind
+	// is MissOutsideTest and BeforeSet is false: it is no call of the set
+	// whose read returns it, nor of any of that set's tests, and none of them
+	// is charged with it. keploy test fails the run with it, naming the test
+	// and the set it was made in; keploy mock's agent lists it under that
+	// test (WindowOf), charged to no test. Empty for every other call.
+	EarlierSetTest string `json:"earlier_set_test,omitempty" yaml:"earlier_set_test,omitempty"`
+	// EarlierSet is, under the proven switch, for a call of an earlier test
+	// set that keploy decided only after the next set's mocks were staged,
+	// how many sets before the one whose read returns it the call was made
+	// in (1: the set run just before), by the agent's count of set starts:
+	// a call with EarlierSetTest, or one of no test, made in that set while
+	// no test's view named one (between two of its tests, or after its
+	// last), before that set's last read, which at zero latency would have
+	// failed that set with it. Its Kind is MissOutsideTest and BeforeSet is
+	// false, as for EarlierSetTest: keploy test fails the run with it,
+	// naming the set it was made in (and its test, where it names one), and
+	// charges no set or test; keploy mock's agent lists it, charged to no
+	// test. 0 for every other call.
+	EarlierSet int `json:"earlier_set,omitempty" yaml:"earlier_set,omitempty"`
+	// Held mirrors MockMismatchReport.HeldPastWindow: a parser held the call
+	// past its own window for a later test's recording, and none answered it
+	// by the set's end or its connection's end, where its miss was filed. It
+	// may have been made in a test or between two. It is the set's, no
+	// test's: whichever read takes it, the replay fails the set with it,
+	// naming it as held, and charges no test.
+	Held bool `json:"held,omitempty" yaml:"held,omitempty"`
+	// ChargedTo names, under the proven switch, the test whose end charged
+	// the call to it: the call counts against that test (CountsAgainstTest)
+	// and that test's evidence lists it. Empty for a call no test was
+	// charged with: one made before the test process claimed the run, one
+	// made outside every test (before the first, between two, or after the
+	// last), one that repeats a spent recording of the set's background
+	// (WindowOf), and every call without the switch. keploy mock's receipt
+	// lists those of them that count against a test
+	// (Receipt.UnchargedMisses).
+	ChargedTo string `json:"charged_to,omitempty" yaml:"charged_to,omitempty"`
+	// WindowOf names, under the proven switch, the test whose window a call
+	// was made in when keploy charged it to no test because it repeats a
+	// spent recording of the set's background (Repeat.Background): the
+	// application's own schedule (a janitor's sweep, a timer) made it again
+	// after that recording answered one call, and no recording of the open
+	// test's own is that call (it is no extra call of the test's, nor a
+	// recording another test made). Such a call never fails the test whose
+	// window it lands in; the receipt lists it, by this name, so a reader
+	// sees where it landed. It also names the test a call was marked in
+	// (Marked.Test) when its miss reached keploy only after that test's end was
+	// read, and the call was marked before the test that read it began being
+	// served: that test's own call, which keploy decided late, is charged to no
+	// test it did not make (the test that read it), and is listed under this
+	// name, filed in or between tests alike, and when keploy decided it only
+	// after the next test set's mocks were staged (the next set's first read
+	// then carries it as an earlier set's test's call, EarlierSetTest). A background
+	// repeat with a mark is listed under
+	// the test whose view it was marked in, none for a pool view. Empty for
+	// every other call, and for one made before that test began being served,
+	// whose window is not known.
+	WindowOf string `json:"window_of,omitempty" yaml:"window_of,omitempty"`
+	// Marked is, under the proven switch, the round the call's parser marked it
+	// in (MockMismatchReport.Mark): the zero MissMark for a parser that marks
+	// no round. Never written to a report: the agent reads it at a test's end.
+	Marked MissMark `json:"-" yaml:"-"`
+	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
+	// which the call differs from its closest recording, without values.
+	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// FieldReasons mirrors MockMismatchReport.FieldReasons: of the fields
+	// in Differs, those a replay refused for a reason of its own, and why,
+	// without values.
+	FieldReasons []FieldReason `json:"field_reasons,omitempty" yaml:"field_reasons,omitempty"`
+	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
+	// a recording the test does not own.
+	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
+	// Background mirrors MockMismatchReport.Background, under either switch:
+	// the call is the same request as one of the set's background recordings
+	// (mappings.yaml worker: or startup:), apart from noise and clock reads,
+	// made once more than any was left to answer. It is listed with the
+	// test's misses, and counts against no test (CountsAgainstTest): the
+	// application's background work made it, so it fails no test and no set,
+	// and holds back no noise learning.
+	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
+	// BackgroundBound mirrors MockMismatchReport.BackgroundBound: of a
+	// background miss, each place at which it differs from its background
+	// recording only by a value its own test bound before it, and where the
+	// test bound it. Names only, never a value.
+	BackgroundBound []BackgroundBinding `json:"background_bound,omitempty" yaml:"background_bound,omitempty"`
+	// TrailsOf mirrors MockMismatchReport.TrailsOf: the test whose kept value
+	// the call carries, whose clean-up it is. Charged to no test's window
+	// (ChargedTo is empty, WindowOf names the window it landed in), it still
+	// counts against the tests (CountsAgainstTest), so the run's receipt
+	// lists it (Receipt.UnchargedMisses) and the run fails on it; judging
+	// fails the trailed test. A test ID, never a value, so a sanitized call
+	// keeps it.
+	TrailsOf string `json:"trailsOf,omitempty" yaml:"trailsOf,omitempty"`
+	// RecordedIn names, under the proven switch, the other test of the set
+	// that owns the recording a NotOwned call is (ClosestMock): the call is
+	// likely one that test recorded, such as a later exchange of a connection
+	// it opened, whose handshake was recorded there.
+	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// OrderDependent says, under the proven switch, a test of one of a
+	// run's parallel test workers made the call RecordedIn's test recorded:
+	// a call a worker makes once (a token fetch, a pooled connection's
+	// handshake) lands in whichever of its tests it runs first, and the
+	// workers take tests in another order each run, so the call is no one
+	// test's. The test fails on it, named, as it fails on any miss: keploy
+	// never answers it with the other test's recording.
+	OrderDependent bool `json:"order_dependent,omitempty" yaml:"order_dependent,omitempty"`
+	// Earlier mirrors MockMismatchReport.Earlier: for a call of the test's
+	// own that changed, the latest recording another test made of the same
+	// method and path, to the same destination, before the test's own.
+	// EarlierIn names, under the proven switch, the other test of the set
+	// that owns it (NameEarlierIn): a test whose skip can explain the
+	// change.
+	Earlier   string `json:"earlier,omitempty" yaml:"earlier,omitempty"`
+	EarlierIn string `json:"earlier_in,omitempty" yaml:"earlier_in,omitempty"`
+	// Reason is why the call missed, in judging's words (design v14 §5.3,
+	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall, or
+	// MissViewReplaced for a call whose view a test's begin or end, or another
+	// view served between tests, replaced before keploy diagnosed its miss (its
+	// next steps say which). Only record's full round, where the learn step
+	// runs, gives one; empty everywhere else, and for a call of that round no
+	// reason of judging's names: one keploy could not judge because its own
+	// store could not read a recorded answer back, one a parser's pairing found
+	// tied between recordings whose replies differ, or one call more than the
+	// test recorded (Kind and Recorded say so).
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	// Concurrent is, under the proven switch, what keploy knows of the call
+	// when the test was recorded while other tests' requests were open
+	// (Mapping.Groups): with whom, and which of them its recording was
+	// attributed to or taken by. nil for a call of a test recorded alone.
+	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
+	// Answer, under the proven switch, says the call WAS answered, and how;
+	// "" for a miss. AnswerProvisional: record's full round answered it with
+	// ClosestMock, a recording another test owns (a pairing),
+	// which judging then moves to the set's background; RecordedIn stays
+	// empty on an answer (the parser's store names no recording's test), and
+	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
+	// drifted, Differs naming the leaves learned as noise.
+	// AnswerByKind: a background write answered by its kind, unchecked;
+	// Reused says the kind's recordings were used up. An answer never counts
+	// against a test and never lands in a miss list.
+	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
+	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
+	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
+	WriteKind string `json:"write_kind,omitempty" yaml:"write_kind,omitempty"`
+	// Source is the process that made the call (Origin's Comm and Exe; Clock
+	// unused), which the proxy's sink fills from the connection's pid, for a
+	// miss and an answer alike.
+	Source *Origin `json:"source,omitempty" yaml:"source,omitempty"`
+	// Repeat mirrors MockMismatchReport.Repeat: the call is identical to a
+	// recording an earlier test of the set made (ClosestMock, or
+	// RepeatNote.Mock for a NotOwned call, whose ClosestMock stays the
+	// recording made elsewhere), which already answered that test's call at
+	// this replay; the replay names that test (RepeatNote.Test). A call a
+	// pairing answered (Answer) carries it by a NotOwned miss's rule. nil
+	// otherwise.
+	Repeat *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
+	// Whole is, on a miss keploy's agent kept as evidence keeps one for the
+	// run's end read (Charged), the call and its next step whole, for
+	// keploy's console and the misses file, which name each call whole; nil
+	// on every other miss, which holds them whole in its own fields. A type
+	// of its own: no YAML file holds it, and Sanitized, which makes every
+	// miss a receipt or a test's evidence holds, never copies it.
+	Whole *WholeCall `json:"whole,omitempty" yaml:"-"`
 }
+
+// WholeCall is a call no mock answered as keploy's console and the misses
+// file name it (UnmatchedCall.Whole): its summary with its operation's label
+// (UnmatchedCall.Named) and the matcher's next step, as the call made them,
+// every path and value in them whole. Never written to a receipt or a log.
+type WholeCall struct {
+	Call     string `json:"call,omitempty"`
+	NextStep string `json:"next_step,omitempty"`
+}
+
+// ConcurrentNote is what keploy knows of a call made by a test that was
+// recorded while other tests' requests were open (UnmatchedCall.Concurrent):
+// names of tests and mocks only, never a value.
+type ConcurrentNote struct {
+	// With are the other tests whose requests were open beside this test's
+	// while the call's recordings were made, in window order; Unkept counts
+	// those the recording did not keep (deleted, or lost).
+	With   []string `json:"with,omitempty" yaml:"with,omitempty"`
+	Unkept int      `json:"unkept,omitempty" yaml:"unkept,omitempty"`
+	// AttributedTo is the test the recording closest to the call, one made
+	// while this test's request and others' were open, is listed under by
+	// time alone (the one whose request came first), when it is not this
+	// test. WhyNot says why this replay did not share that recording with
+	// this test.
+	AttributedTo string `json:"attributed_to,omitempty" yaml:"attributed_to,omitempty"`
+	// MayBe are, for a call with no closest recording, the other tests that
+	// list a recording of the call's own kind (KindsOfProtocol) made while
+	// their requests and this test's were open, which this replay did not
+	// share with this test: the call's recording may be one of theirs.
+	// WhyNot then says why they were not shared, when it is one reason for
+	// all of them.
+	MayBe []string `json:"may_be,omitempty" yaml:"may_be,omitempty"`
+	// Claimant is the test that answered its call with the recording this
+	// call pairs with, recorded once while both were open.
+	Claimant string `json:"claimant,omitempty" yaml:"claimant,omitempty"`
+	// Class names the recordings keploy cannot tell apart for this call
+	// (Case ConcurrentCaseClass: they got different answers;
+	// ConcurrentCaseIncomparable: each is closer to it in some place).
+	Class []string `json:"class,omitempty" yaml:"class,omitempty"`
+	// Case is what keploy record's full round could not settle of the call
+	// (ConcurrentCase*), for a call it charged with MissConcurrentAmbiguous
+	// or MissConcurrentConflict; "" on a call it merely notes.
+	Case string `json:"case,omitempty" yaml:"case,omitempty"`
+	// Places are the call's places that differ from the recording closest
+	// to it (bind.$N, literal.N), for ConcurrentCaseNotOwn.
+	Places []string `json:"places,omitempty" yaml:"places,omitempty"`
+	// WhyNot says why keploy did not share the call's recordings between
+	// the tests (ConcurrentNotShared*), when it did not; Kind is the kind
+	// keploy shares none of yet (ConcurrentNotSharedKind), and Stated what
+	// the recording states that keploy does not share
+	// (ConcurrentNotSharedStates: noise, variables, volatile positions, a
+	// redacted value).
+	WhyNot string `json:"why_not,omitempty" yaml:"why_not,omitempty"`
+	Kind   string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Stated string `json:"stated,omitempty" yaml:"stated,omitempty"`
+}
+
+// What keploy record's full round could not settle of a call of a test
+// recorded beside others (ConcurrentNote.Case).
+const (
+	// ConcurrentCaseClass: recordings of the call keploy cannot tell apart
+	// got different answers.
+	ConcurrentCaseClass = "class"
+	// ConcurrentCaseIncomparable: the recordings closest to the call are
+	// each closer to it in some place.
+	ConcurrentCaseIncomparable = "incomparable"
+	// ConcurrentCaseNotOwn: it differs (at Places) from the recording
+	// closest to it (Class), which another of the tests open while it was
+	// recorded may have made: keploy does not learn what changed against a
+	// recording another test may own.
+	ConcurrentCaseNotOwn = "not_own"
+	// ConcurrentCaseRetry: its attempts were answered by different
+	// recordings.
+	ConcurrentCaseRetry = "retry"
+	// ConcurrentCaseConflict: it and another test's call (Claimant) pair
+	// with one recording.
+	ConcurrentCaseConflict = "conflict"
+	// ConcurrentCaseUnresolved: the test lists a recording keploy record's
+	// full round could not give to one test (MockEntryUnresolvedAmbiguous).
+	ConcurrentCaseUnresolved = "unresolved"
+)
+
+// Why keploy did not share a call's recordings between the tests recorded
+// beside each other (ConcurrentNote.WhyNot).
+const (
+	// ConcurrentNotSharedKind: keploy shares no recording of the kind yet.
+	ConcurrentNotSharedKind = "kind"
+	// ConcurrentNotSharedStates: the recording states what keploy does not
+	// share (ConcurrentNote.Stated).
+	ConcurrentNotSharedStates = "states"
+	// ConcurrentNotSharedStrict: only keploy record's full round shares
+	// recordings; this replay serves each to the test that lists it.
+	ConcurrentNotSharedStrict = "strict"
+	// ConcurrentNotSharedUnkept: it was recorded while a test the recording
+	// did not keep was open, and no kept test lists it.
+	ConcurrentNotSharedUnkept = "unkept"
+	// ConcurrentNotSharedCall: keploy shares recordings of the kind, not
+	// this one (ConcurrentNote.Kind): for SQL, only queries it compares by
+	// value.
+	ConcurrentNotSharedCall = "call"
+	// ConcurrentNotSharedAgent: keploy record's full round, with an agent
+	// that does not share recordings between tests (another version).
+	ConcurrentNotSharedAgent = "agent"
+	// ConcurrentNotSharedUnproven: keploy record's full round shared it, could
+	// not tell which of the tests made its call, and left it with the test
+	// that lists it now, which it charged (MockEntry.Unresolved).
+	ConcurrentNotSharedUnproven = "unproven"
+)
+
+// Clone is a copy of n that shares nothing with it; nil for nil.
+func (n *ConcurrentNote) Clone() *ConcurrentNote {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.With = append([]string(nil), n.With...)
+	c.MayBe = append([]string(nil), n.MayBe...)
+	c.Class = append([]string(nil), n.Class...)
+	c.Places = append([]string(nil), n.Places...)
+	return &c
+}
+
+// The reasons a call of a test recorded beside other tests carries
+// (UnmatchedCall.Reason) when keploy record's full round, which shares their
+// recordings, cannot tell which of them made it.
+const (
+	// MissConcurrentAmbiguous: the call's recordings, made while several
+	// tests' requests were open, cannot be told apart for it: they got
+	// different answers, or the learn step found none of them closest, or
+	// the one closest to it is one another of the tests may have made
+	// (keploy learns nothing against such a recording), or retries were
+	// answered by different recordings.
+	MissConcurrentAmbiguous = "concurrent_ambiguous"
+	// MissConcurrentConflict: the call pairs with a recording another test
+	// that was open beside it already answered with: one of the two made a
+	// call it did not record.
+	MissConcurrentConflict = "concurrent_conflict"
+)
+
+// The answers an answered call reports (UnmatchedCall.Answer,
+// MockMismatchReport.Answer, ReportAnswer), under the proven switch.
+const (
+	// AnswerProvisional: record's full round paired the call with a recording
+	// another test owns and answered it with that recording.
+	AnswerProvisional = "provisional"
+	// AnswerByKind: a background write answered by its write kind, unchecked.
+	AnswerByKind = "by_kind"
+)
+
+// The reasons a miss of record's full round carries (UnmatchedCall.Reason),
+// as the learn step decides them (package matcher/learn).
+const (
+	// MissRequestChanged: a recorded call had the request's method,
+	// destination and shape, but the request differs from it in a way the
+	// learn step does not learn (a field added or removed, a type changed, a
+	// value several recorded calls explain equally, a value that flows from an
+	// earlier call when nothing can follow it).
+	MissRequestChanged = "request_changed"
+	// MissUnstableOrder: the closest recorded call holds an array the request
+	// sent with the recorded elements in another order (the order rule).
+	MissUnstableOrder = "unstable_order"
+	// MissUnmockedCall: no recorded call has the request's method,
+	// destination and shape.
+	MissUnmockedCall = "unmocked_call"
+)
+
+// MissViewReplaced is the reason of a miss of record's full round whose view
+// went before keploy diagnosed it (UnmatchedCall.Reason): keploy record's
+// full round decided the call in one view, a test's or the pool's between
+// tests (its learn step did, or the variable pass for a call a recording
+// that declares variables fits), and a test's begin or end, or another view
+// of the recordings served between tests, replaced that view first, so
+// keploy compared it with no recording and names none. Its next steps say
+// which test ended or began, or that another view was served. Judging
+// counts it as a miss (an unmocked call), and nothing of it moves a
+// recording.
+const MissViewReplaced = "view_replaced"
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
 // served and the outgoing calls that matched none of them -- what
@@ -164,10 +973,55 @@ type UnmatchedCall struct {
 type MockOutcome struct {
 	Consumed []MockState     `json:"consumed"`
 	Missed   []UnmatchedCall `json:"missed"`
+	// Windows are the per-test scopes the runner reported (with their
+	// verdicts), which a CLI that can no longer reach the agent — under
+	// compose it is stopped with the runner — reads from here instead. A
+	// window is a few hundred bytes, so they share the account's read bound
+	// with the served and missed calls comfortably up to suites of tens of
+	// thousands of tests.
+	Windows []ScopeWindow `json:"windows,omitempty"`
+	// MissedUnread is why Missed may be missing calls, empty when it is
+	// complete: the agent's read of the calls no mock answered was
+	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
+	// holds what was read.
+	MissedUnread string `json:"missed_unread,omitempty"`
+	// LearnedElsewhere is what record's full round's learn step taught
+	// recordings from calls made in other windows than theirs, for
+	// learning only (the agent's /mock/learned-elsewhere): none of it is
+	// consumption, so Consumed never holds it.
+	LearnedElsewhere []MockState `json:"learned_elsewhere,omitempty"`
+	// PIDMapRefusals are the inserts into the agent's PID maps the kernel
+	// refused over its life, which under compose is the replay's: processes
+	// its hooks could not track. nil when it cannot count them, which is
+	// "unknown".
+	PIDMapRefusals *PIDMapRefusals `json:"pidMapRefusals,omitempty"`
+	// PIDMapRefusalsError is why hooks that count those refusals could not be
+	// read as the agent stopped; "" when they were read, or when the hooks do
+	// not count them at all. It is what tells the CLI "the count was lost"
+	// (completeness unproven: --strict fails it) from "this agent never
+	// counts" (an older agent, or hooks without PID maps), which a nil
+	// PIDMapRefusals alone cannot.
+	PIDMapRefusalsError string `json:"pidMapRefusalsError,omitempty"`
+	// Settled says that, under the proven switch, the agent finished its end
+	// of the run (its hooks' AfterTestRun) before it read this account, as
+	// the CLI has it do where it can still reach the agent: an enterprise
+	// agent then writes the row of each process of the run it saw off the
+	// run's clock, the last test's among them. SettleError is why it could
+	// not. A CLI under the switch reads an account without Settled (an agent
+	// that failed it, or an older one) as a run the agent did not finish,
+	// and does not judge it. Without the switch neither is set.
+	Settled     bool   `json:"settled,omitempty"`
+	SettleError string `json:"settleError,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
 func MockSummaryFromSpec(mock *Mock) string {
+	if d := mock.onDisk; d != nil {
+		if d.longSummary {
+			return d.display(mock, MockSummaryFromSpec, string(mock.Kind))
+		}
+		return d.summary
+	}
 	if mock.Spec.HTTPReq != nil {
 		return string(mock.Spec.HTTPReq.Method) + " " + mock.Spec.HTTPReq.URL
 	}
@@ -224,6 +1078,18 @@ const (
 	TestSetStatusNoTestsToRun TestSetStatus = "NO_TESTS_TO_RUN"
 )
 
+// SetEnd is how keploy test ended one run of a test set (each attempt, when
+// maxFlakyChecks or --must-pass runs it again): the status the run ended it
+// with, and why, as the set's final report's FailureReason says, or the error
+// that ended the set before such a report was written. A set can end neither PASSED nor FAILED
+// with only passing results (the app halted after some tests passed, or
+// keploy could not judge the set), and FAILED with none failing (a capture
+// loss after its last test): its results alone do not say how it ended.
+type SetEnd struct {
+	Status TestSetStatus `json:"status" yaml:"status"`
+	Why    string        `json:"why,omitempty" yaml:"why,omitempty"`
+}
+
 func StringToTestSetStatus(s string) (TestSetStatus, error) {
 	switch s {
 	case "RUNNING":
@@ -277,6 +1143,32 @@ const (
 	// (keploy-consumer-design-v2.md §5, false-pass row 0). Attached only to
 	// FAILED/OBSOLETE tests so a passing test never grows a failure label.
 	DependencyMissing FailureCategory = "DEPENDENCY_MISSING"
+	// CallUnmatched: a call the test made got no recorded answer (a miss),
+	// which fails it under KEPLOY_PROVEN=1. The calls are in
+	// FailureInfo.UnmatchedCalls.
+	CallUnmatched FailureCategory = "UNMATCHED_CALL"
+	// CaptureIncompleteCategory: keploy's agent could not capture every call
+	// while this test or one before it in its test set ran, which fails it
+	// under KEPLOY_PROVEN=1. The losses are in FailureInfo.CaptureIncomplete.
+	CaptureIncompleteCategory FailureCategory = "CAPTURE_INCOMPLETE"
+	// TemplateVariable means a template variable place of the expected
+	// response was not satisfied by the answer (a {{capture ...}} that found
+	// no value of its type, or a use that did not hold its key's value), or
+	// that the test case was refused when its test set loaded, for a
+	// placeholder it cannot run with, and never sent.
+	// TestResult.TemplateFailures names each place and why.
+	TemplateVariable FailureCategory = "TEMPLATE_VARIABLE"
+	// TestSetRefused means keploy refused the test case's whole test set and
+	// ran none of it: an interrupted keploy templatize left the set
+	// half-written, or a replay hook refused one of the set's mocks (Keploy
+	// Enterprise: a sealed value its key service did not open). The set's
+	// failure reason, and the test case's refusal in
+	// TestResult.TemplateFailures, say which files or which mock, and why.
+	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
+	// TestCaseNotFound means the run selected the test case by name and its
+	// test set holds none of that name: it failed unsent, and
+	// FailureInfo.NotFound says which.
+	TestCaseNotFound FailureCategory = "TEST_CASE_NOT_FOUND"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.
@@ -288,6 +1180,13 @@ const (
 	RejectionHighRisk       RejectionReason = "HIGH_RISK_FAILURE" // response structure changed (status code, schema, headers)
 	RejectionLowRiskNoNoise RejectionReason = "LOW_RISK_NO_NOISE" // minor diffs that can't be auto-suppressed as noise
 )
+
+// ReasonLoopbackOutsideRun is the reason the agent logs when keploy passes a
+// call through to a listener owned by the run's own process tree (a self-call)
+// instead of serving it from a mock — so the log shows that a self-call reached
+// the real handler, not a recording; a broken self-handler fails the run rather
+// than passing on a stale mock.
+const ReasonLoopbackOutsideRun = "loopback_outside_run"
 
 // NoiseFailureReason explains why automatic noise extraction failed for a LOW_RISK_NO_NOISE test case.
 type NoiseFailureReason string
@@ -321,6 +1220,11 @@ const (
 	// modelled, so a difference can never be reported as handled when the next
 	// replay would fail on it again.
 	NoiseFailureUnresolved NoiseFailureReason = "UNRESOLVED"
+	// NoiseFailureUnstableOrder — an array came back in another order (the order
+	// rule, matcher.ArrayReordered), and carries matcher.NoiseSkipUnstableOrder
+	// through. A refusal: noise on the array's fields would only hide the
+	// reorder, so the case stays failed and is judged as unstable order.
+	NoiseFailureUnstableOrder NoiseFailureReason = "UNSTABLE_ORDER"
 )
 
 // FailureAssessment contains JSON structural analysis of response body differences.
@@ -479,3 +1383,13 @@ type (
 	GlobalNoise  map[string]map[string][]string
 	TestsetNoise map[string]map[string]map[string][]string
 )
+
+// TeachingWindow is a window in which a call taught a recording of another
+// window, for learning only (MockState.TaughtIn). Test is the test whose
+// window it was (the one open when the call came), "" between tests. At is
+// when the last such call of that window taught the recording: its learn
+// step, just after the call came. A window is named once per recording.
+type TeachingWindow struct {
+	Test string    `json:"test,omitempty" yaml:"test,omitempty"`
+	At   time.Time `json:"at" yaml:"at"`
+}

@@ -3,16 +3,21 @@ package replay
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -145,6 +150,34 @@ func TestGateOnAppAddress_ServingAppIsReadyImmediately(t *testing.T) {
 	}
 }
 
+// For an application whose process keploy does not run, both stages share
+// --health-poll-timeout, as on main. An address that accepts only as the
+// ceiling runs out leaves no time for the HTTP stage: the gate fires the tests
+// at once, starts no HTTP probe, and so says nothing about one.
+func TestGateOnAppAddress_AnAcceptThatSpendsTheCeilingStartsNoHTTPStage(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	core, logs := observer.New(zapcore.DebugLevel)
+
+	// A ceiling of a nanosecond is spent by the time the address accepts the
+	// gate's first dial, which it makes whatever the ceiling.
+	if !gateOnAppAddress(context.Background(), zap.New(core), gateCfg(time.Nanosecond), host, port, "test",
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("not ready, want the tests fired once the address accepted")
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the gate sent %d HTTP probes with no time left for them, want none", n)
+	}
+	if n := logs.FilterMessageSnippet("never completed an HTTP round-trip").Len(); n != 0 {
+		t.Errorf("said %d times that no HTTP round-trip completed, when none was tried", n)
+	}
+}
+
 // An operator-supplied health path must actually be the path requested.
 func TestGateOnAppAddress_UsesConfiguredHealthPath(t *testing.T) {
 	got := make(chan string, 4)
@@ -211,19 +244,19 @@ func TestGateOnAppAddress_ProbesTheResolvedTargetNotTheGatedPort(t *testing.T) {
 // it has none — an empty or non-HTTP set leaves the gate TCP-only.
 func TestResolveTestSetProbeTarget(t *testing.T) {
 	cfg := config.Test{}
-	if got := resolveTestSetProbeTarget(context.Background(), cfg, nil, "test-set-0", zap.NewNop(), nil); got.ok {
+	if got := resolveTestSetProbeTarget(context.Background(), cfg, nil, "test-set-0", zap.NewNop(), nil, nil); got.ok {
 		t.Error("an empty test set proves nothing and must not license HTTP probing")
 	}
-	if got := resolveTestSetProbeTarget(context.Background(), cfg, []*models.TestCase{nil}, "test-set-0", zap.NewNop(), nil); got.ok {
+	if got := resolveTestSetProbeTarget(context.Background(), cfg, []*models.TestCase{nil}, "test-set-0", zap.NewNop(), nil, nil); got.ok {
 		t.Error("a nil entry must not license HTTP probing")
 	}
-	if got := resolveTestSetProbeTarget(context.Background(), cfg, []*models.TestCase{{Kind: models.GRPC_EXPORT}}, "test-set-0", zap.NewNop(), nil); got.ok {
+	if got := resolveTestSetProbeTarget(context.Background(), cfg, []*models.TestCase{{Kind: models.GRPC_EXPORT}}, "test-set-0", zap.NewNop(), nil, nil); got.ok {
 		t.Error("a non-HTTP test set must not license HTTP probing")
 	}
 	// A recorded HTTP case resolves to the address the simulation would dial.
 	tc := &models.TestCase{Kind: models.HTTP}
 	tc.HTTPReq.URL = "http://localhost:6219/parse/health"
-	got := resolveTestSetProbeTarget(context.Background(), cfg, []*models.TestCase{{Kind: models.GRPC_EXPORT}, tc}, "test-set-0", zap.NewNop(), nil)
+	got := resolveTestSetProbeTarget(context.Background(), cfg, []*models.TestCase{{Kind: models.GRPC_EXPORT}, tc}, "test-set-0", zap.NewNop(), nil, nil)
 	if !got.ok {
 		t.Fatal("a recorded HTTP test case must resolve a probe target")
 	}
@@ -240,7 +273,7 @@ type portReach struct {
 	asked       map[string]int
 }
 
-func (p *portReach) UnreachableAppPort(_ context.Context, host string, port uint16) string {
+func (p *portReach) UnreachableAppPort(_ context.Context, host string, port, _ uint16) string {
 	p.asked[net.JoinHostPort(host, strconv.Itoa(int(port)))]++
 	if p.unreachable[port] {
 		return "it is not published on the host"
@@ -262,7 +295,7 @@ func TestResolveTestSetProbeTargetSkipsAnUnreachableTest(t *testing.T) {
 	}
 	reach := &portReach{unreachable: map[uint16]bool{8096: true}, asked: map[string]int{}}
 	got := resolveTestSetProbeTarget(context.Background(), config.Test{},
-		[]*models.TestCase{tcOn(8096), tcOn(8096), tcOn(8095)}, "test-set-0", zap.NewNop(), reach)
+		[]*models.TestCase{tcOn(8096), tcOn(8096), tcOn(8095)}, "test-set-0", zap.NewNop(), reach, nil)
 	if !got.ok || got.port != "8095" {
 		t.Fatalf("probe target = %+v, want the reachable test on 8095", got)
 	}
@@ -274,8 +307,114 @@ func TestResolveTestSetProbeTargetSkipsAnUnreachableTest(t *testing.T) {
 	// a probe of an address that cannot answer.
 	reach = &portReach{unreachable: map[uint16]bool{8096: true}, asked: map[string]int{}}
 	if got := resolveTestSetProbeTarget(context.Background(), config.Test{},
-		[]*models.TestCase{tcOn(8096)}, "test-set-0", zap.NewNop(), reach); got.ok {
+		[]*models.TestCase{tcOn(8096)}, "test-set-0", zap.NewNop(), reach, nil); got.ok {
 		t.Errorf("probe target = %+v for a set with no reachable test, want none", got)
+	}
+}
+
+// remapReach is the Docker instrumentation for an app whose port 8080 is
+// published on host port publishedOn: a test reaches the app at that host port
+// for app port 8080, and nowhere else. It records every question.
+type remapReach struct {
+	publishedOn uint16
+	mu          sync.Mutex
+	asked       []string
+}
+
+func (r *remapReach) UnreachableAppPort(_ context.Context, host string, port, appPort uint16) string {
+	r.mu.Lock()
+	r.asked = append(r.asked, fmt.Sprintf("%s for %d", net.JoinHostPort(host, strconv.Itoa(int(port))), appPort))
+	r.mu.Unlock()
+	if port == r.publishedOn && appPort == 8080 {
+		return ""
+	}
+	return fmt.Sprintf("host port %d does not lead to the app's port %d", port, appPort)
+}
+
+// A compose app publishing "18067:8080", recorded on 8080 and replayed with
+// --port 18067: the readiness gate's HTTP stage probes the host port the tests
+// go to, asking about it for the app's port they were recorded on. Asked about
+// the host port alone, the probe was dropped as unreachable, the gate passed on
+// docker's own listener accepting a connection, and the first test was sent to
+// an app still starting. Here the gate waits for the app's answer.
+func TestTheReadinessGateProbesAHostPortPublishedToTheAppsPort(t *testing.T) {
+	defer func(first, max time.Duration) { probeReachRecheckFirst, probeReachRecheckMax = first, max }(probeReachRecheckFirst, probeReachRecheckMax)
+	probeReachRecheckFirst, probeReachRecheckMax = 20*time.Millisecond, 40*time.Millisecond
+
+	// The app answers only after a few probes, as one still starting does.
+	var probes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if probes.Add(1) < 3 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("cannot drop the connection")
+				return
+			}
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	n, _ := strconv.Atoi(port)
+
+	tc := &models.TestCase{Kind: models.HTTP, AppPort: 8080}
+	tc.HTTPReq.URL = "http://127.0.0.1:18057/"
+	reach := &remapReach{publishedOn: uint16(n)}
+	cfg := config.Test{Host: host, Port: uint32(n)}
+	probe := resolveTestSetProbeTarget(context.Background(), cfg, []*models.TestCase{tc}, "test-set-0", zap.NewNop(), reach, nil)
+	if !probe.ok || probe.port != port {
+		t.Fatalf("probe target = %+v, want the host port %s the tests are sent to", probe, port)
+	}
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	if !gateOnAppAddress(context.Background(), zap.New(core), gateCfg(30*time.Second), host, port, "compose-published-port", probe) {
+		t.Fatal("gate must pass")
+	}
+	if probes.Load() < 3 {
+		t.Errorf("the gate passed after %d probes, before the app answered", probes.Load())
+	}
+	if confirmed := logs.FilterMessageSnippet("app readiness confirmed").Len(); confirmed != 1 {
+		t.Errorf("readiness not confirmed by a round-trip: %v", logs.All())
+	}
+	reach.mu.Lock()
+	defer reach.mu.Unlock()
+	if len(reach.asked) == 0 {
+		t.Fatal("reach was never asked")
+	}
+	want := fmt.Sprintf("%s for 8080", net.JoinHostPort(host, port))
+	for _, q := range reach.asked {
+		if q != want {
+			t.Errorf("asked %q, want every question about %q", q, want)
+		}
+	}
+}
+
+// --port sends every HTTP test to one host port, including tests recorded on
+// another app port than the one it is published to (an app calling its own
+// in-container server is recorded as ingress on that server's port). Such a
+// test first in the set is unreachable there; a later test at the same address,
+// recorded on the app's published port, is not, and is the one to probe.
+func TestResolveTestSetProbeTargetAsksAboutAnAddressForEachAppPort(t *testing.T) {
+	const hostPort = 18067
+	tcOn := func(appPort uint16) *models.TestCase {
+		tc := &models.TestCase{Kind: models.HTTP, AppPort: appPort}
+		tc.HTTPReq.URL = "http://127.0.0.1:18057/"
+		return tc
+	}
+	reach := &remapReach{publishedOn: hostPort}
+	got := resolveTestSetProbeTarget(context.Background(), config.Test{Port: hostPort},
+		[]*models.TestCase{tcOn(9000), tcOn(9000), tcOn(8080), tcOn(8080)}, "test-set-0", zap.NewNop(), reach, nil)
+	if !got.ok || got.port != strconv.Itoa(hostPort) || got.appPort != 8080 {
+		t.Fatalf("probe target = %+v, want host port %d for the test recorded on 8080", got, hostPort)
+	}
+	reach.mu.Lock()
+	defer reach.mu.Unlock()
+	want := []string{"localhost:18067 for 9000", "localhost:18067 for 8080"}
+	if !slices.Equal(reach.asked, want) {
+		t.Errorf("asked %v, want %v: each address once for each app port", reach.asked, want)
 	}
 }
 
@@ -289,7 +428,7 @@ type startingThenLoopbackReach struct {
 	after int64 // the ask from which the app is listening
 }
 
-func (s *startingThenLoopbackReach) UnreachableAppPort(_ context.Context, _ string, port uint16) string {
+func (s *startingThenLoopbackReach) UnreachableAppPort(_ context.Context, _ string, port, _ uint16) string {
 	if strconv.Itoa(int(port)) != s.port {
 		return ""
 	}
@@ -327,7 +466,7 @@ func TestGateOnAppAddress_MovesOnFromATargetThatTurnsOutUnreachable(t *testing.T
 
 	reach := &startingThenLoopbackReach{port: dropPort, after: 2}
 	probe := resolveTestSetProbeTarget(context.Background(), config.Test{},
-		[]*models.TestCase{tcOn(dropPort), tcOn(dropPort), tcOn(livePort)}, "test-set-0", zap.NewNop(), reach)
+		[]*models.TestCase{tcOn(dropPort), tcOn(dropPort), tcOn(livePort)}, "test-set-0", zap.NewNop(), reach, nil)
 	if !probe.ok || probe.port != dropPort {
 		t.Fatalf("probe target = %+v, want the first test's port %s: the app is not listening yet", probe, dropPort)
 	}
@@ -354,7 +493,7 @@ func TestGateOnAppAddress_MovesOnFromATargetThatTurnsOutUnreachable(t *testing.T
 	// No other test to move on to: the TCP-accept stage stands, at once.
 	reach = &startingThenLoopbackReach{port: dropPort, after: 2}
 	probe = resolveTestSetProbeTarget(context.Background(), config.Test{},
-		[]*models.TestCase{tcOn(dropPort)}, "test-set-0", zap.NewNop(), reach)
+		[]*models.TestCase{tcOn(dropPort)}, "test-set-0", zap.NewNop(), reach, nil)
 	start = time.Now()
 	if !gateOnAppAddress(context.Background(), zap.NewNop(), gateCfg(30*time.Second), dropHost, dropPort, "docker-published-port", probe) {
 		t.Fatal("gate must pass")
@@ -454,19 +593,25 @@ func TestWaitForAppReady_NativeAppGatesOnTheResolvedTarget(t *testing.T) {
 }
 
 // ...and it must not gate when the test set gave no resolvable HTTP target,
-// preserving the pure --delay behaviour for non-HTTP native apps.
+// preserving the pure --delay behaviour for non-HTTP native apps. The wait
+// runs under the row's own bound: a gate on some address would have no end.
 func TestWaitForAppReady_NativeAppWithoutEvidenceIsNotGated(t *testing.T) {
 	cfg := gateCfg(10 * time.Second)
 	cfg.Command = "python3 recorded_app.py"
 	cfg.Test.Delay = 0
 
-	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
-		t.Fatal("must proceed")
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("waited %v with no resolvable target; a non-HTTP native app must keep the "+
-			"pure --delay behaviour", elapsed)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- waitForAppReady(ctx, zap.NewNop(), cfg, httpProbeTarget{}) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("must proceed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("still waiting after 2s with no resolvable target; a non-HTTP native app must keep the " +
+			"pure --delay behaviour")
 	}
 }
 
@@ -621,14 +766,9 @@ func TestWaitForAppReady_DockerStartKeepsItsGate(t *testing.T) {
 // (status_code=0 because nothing was listening yet).
 func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	// A port nothing listens on: TCP never accepts.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	host, port, _ := net.SplitHostPort(ln.Addr().String())
-	_ = ln.Close() // free it so connects are refused
+	host, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 
-	core, logs := observer.New(zapcore.WarnLevel)
+	core, logs := observer.New(zapcore.InfoLevel)
 	logger := zap.New(core)
 
 	cfg := gateCfg(700 * time.Millisecond)
@@ -636,14 +776,17 @@ func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	cfg.CommandType = "native"
 	cfg.Test.Delay = 0
 
-	if !waitForAppReady(context.Background(), logger, cfg,
+	// The app's exit cancels its run's context: only that ends the wait.
+	ctx, cancel := context.WithTimeout(pkg.EndsWithApp(context.Background()), 1500*time.Millisecond)
+	defer cancel()
+	if waitForAppReady(ctx, logger, cfg,
 		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
-		t.Fatal("the gate must stay best-effort and proceed, never fail the run")
+		t.Fatal("the gate fired at an address that never accepted")
 	}
 
 	var got string
 	for _, e := range logs.All() {
-		if strings.Contains(e.Message, "app address did not accept a connection") {
+		if strings.Contains(e.Message, "waiting for the application to accept a connection on "+net.JoinHostPort(host, port)) {
 			got = e.Message
 		}
 		if strings.Contains(e.Message, "app accepted TCP but never completed") {
@@ -747,7 +890,7 @@ func TestWaitForResetResendReady_HonoursTheDisableFlag(t *testing.T) {
 					Kind:    models.HTTP,
 					HTTPReq: models.HTTPReq{URL: "http://" + host + ":" + port + "/x"},
 				},
-				"test-set-0")
+				"test-set-0", new(bool))
 
 			made := conns.Load()
 			if tc.disabled && made != 0 {
@@ -770,4 +913,61 @@ func mustAtoi(t *testing.T, s string) int {
 		t.Fatalf("atoi %q: %v", s, err)
 	}
 	return n
+}
+
+// The reserved probe must not run an app handler. Echo routes GET
+// /keploy/__readiness_probe__ to a `/:param` route (v4.9.0, as samples-go's
+// echo-sql registers it), and that handler then queries its database before
+// the first test opens a window: no recorded mock answers a call keploy made
+// up, so the probe's query missed. Routers answer an OPTIONS for a GET-only
+// route themselves (Echo 204, gin and net/http 404 or 405), without a handler.
+func TestTheReservedProbeDoesNotRunACatchAllHandler(t *testing.T) {
+	var handlerRuns, probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes.Add(1)
+		if r.Method != http.MethodGet { // a GET-only route, as an app registers it
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		handlerRuns.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	if !gateOnAppAddress(context.Background(), zap.NewNop(), gateCfg(10*time.Second), host, port, "test",
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("a serving app must pass the gate")
+	}
+	if probes.Load() == 0 {
+		t.Fatal("the app never received the probe")
+	}
+	if n := handlerRuns.Load(); n != 0 {
+		t.Fatalf("the readiness probe ran the app's catch-all GET handler %d time(s); it must be a request no handler serves", n)
+	}
+}
+
+// A configured health path is the operator's endpoint, so it is requested as
+// they would request it: with GET.
+func TestAConfiguredHealthPathIsRequestedWithGet(t *testing.T) {
+	got := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case got <- r.Method:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+
+	cfg := gateCfg(10 * time.Second)
+	cfg.Test.HealthPath = "/healthz"
+	if !gateOnAppAddress(context.Background(), zap.NewNop(), cfg, host, port, "test",
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("gate should pass against a serving app")
+	}
+	if m := <-got; m != http.MethodGet {
+		t.Fatalf("the configured health path was requested with %s, want GET", m)
+	}
 }

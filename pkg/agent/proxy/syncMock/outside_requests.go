@@ -1,0 +1,75 @@
+package manager
+
+import (
+	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// stampOutsideRequestsLocked marks mock as made while no incoming request was
+// open (models.Mock.OutsideRequests), when the windows can show it: the call
+// began after the latest window ended, no window still open began by its
+// answer, and no request given up while in flight is still running (a given-up
+// window has left the open ones, but its request may still make calls until
+// it ends: noteGivenUpInFlightLocked). A window opens before its request
+// reaches the app (OpenWindow), so a request that can have made the call has
+// opened one by the time the mock is here, however late the mock's parser
+// hands it over; where it may open after (SetWindowsOpenLate), nothing is
+// marked. A request that opens none cannot be recorded, so no test owns
+// what it calls.
+//
+// It marks nothing unless a window has ended here, so an agent whose ingress
+// opens none says nothing. Nor a call missing either of its times, which the
+// checks below cannot place. Caller holds mu.
+func (m *SyncMockManager) stampOutsideRequestsLocked(mock *models.Mock) {
+	if mock == nil || m.windowsOpenLate || m.lastWindowEnd.IsZero() || m.givenUpInFlight > 0 {
+		return
+	}
+	req, res := mock.Spec.ReqTimestampMock, mock.Spec.ResTimestampMock
+	if res.IsZero() || !m.lastWindowEnd.Before(req) {
+		return
+	}
+	if len(m.open) > 0 && !m.open[0].start.After(res) {
+		return
+	}
+	mock.OutsideRequests = true
+}
+
+// SetWindowsOpenLate says an ingress may open its windows on m only after the
+// app has read their requests: one that watches the traffic instead of carrying
+// it, such as a capture of the app's own reads that its parser takes in behind
+// them. The mock of a call such a request made can then reach m before that
+// request's window opens, so from now on m marks no mock outside the requests
+// (stampOutsideRequestsLocked): that ingress tells them itself, from how far its
+// capture has got. It also keeps startup mocks rescued within StaleHorizon
+// claimable by the late-opening window that spans them (startupClaimedLocked,
+// openClaimsStartupLocked), instead of dropping them when no window is open
+// yet. Call it before the ingress can open a window on m, so that no window of
+// its has ended here first. It cannot be undone.
+func (m *SyncMockManager) SetWindowsOpenLate() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.windowsOpenLate = true
+	m.mu.Unlock()
+}
+
+// noteGivenUpInFlightLocked notes that w has just left the open windows given
+// up (fitHoldLocked, giveUpForPool, giveUpForPressureLocked,
+// endStopFoundLocked) while its request is still in flight: until that request
+// ends (Close, givenUpEndedLocked), no mock is marked outside the requests. A
+// given-up window whose Close never comes leaves the marking off for the
+// manager's life, which marks nothing it should not. Caller holds mu.
+func (m *SyncMockManager) noteGivenUpInFlightLocked(w *Window) {
+	w.inFlight = true
+	m.givenUpInFlight++
+}
+
+// givenUpEndedLocked says the request of w, a window given up while it was in
+// flight, has ended: it is the latest window to end. Caller holds mu.
+func (m *SyncMockManager) givenUpEndedLocked(w *Window) {
+	w.inFlight = false
+	m.givenUpInFlight--
+	m.lastWindowEnd = time.Now()
+}

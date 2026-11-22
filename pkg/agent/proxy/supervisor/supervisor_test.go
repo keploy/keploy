@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -243,44 +244,47 @@ func TestHangNotDetectedWhenSuspended(t *testing.T) {
 
 func TestHangResetOnActivity(t *testing.T) {
 	t.Parallel()
+	clk := &stall.ManualClock{}
 	cfg := Config{
 		Logger:     zaptest.NewLogger(t),
 		HangBudget: 80 * time.Millisecond,
+		Clock:      clk,
 	}
 	s := New(cfg)
+	defer s.Close()
 	s.MarkPendingWork()
 
-	// Drive activity well faster than the budget so the parser's
-	// effective run time exceeds budget but the watchdog never fires.
-	runFor := 300 * time.Millisecond
-	stopBumping := make(chan struct{})
-	go func() {
-		tick := time.NewTicker(20 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-tick.C:
-				s.BumpActivity()
-			case <-stopBumping:
-				return
-			}
+	// Activity faster than the budget keeps the watchdog disarmed, even
+	// though the total run far exceeds the budget. The clock is the test's
+	// (stall.ManualClock), so the outcome depends only on the budget/interval
+	// arithmetic, never on scheduling: the old version drove BumpActivity
+	// from a 20ms ticker goroutine against a real 80ms watchdog, two
+	// wall-clock timers that drifted apart under -race on a loaded runner.
+	const (
+		interval = 20 * time.Millisecond  // activity cadence, well inside the budget
+		runFor   = 300 * time.Millisecond // total run, ~4x the 80ms budget
+	)
+	for elapsed := interval; elapsed <= runFor; elapsed += interval {
+		// The previous bump was one interval of run time ago (the advance
+		// also fires the watchdog's look), within the budget: no hang.
+		// Load-bearing: shrink HangBudget below `interval` and this fails.
+		clk.Advance(interval)
+		if s.hangExceeded() {
+			t.Fatalf("watchdog fired %s after activity with a %s budget (total %s)",
+				interval, cfg.HangBudget, elapsed)
 		}
-	}()
+		s.BumpActivity() // activity resets the no-progress reference
+	}
 
-	res := s.Run(context.Background(),
-		func(ctx context.Context, sess *Session) error {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(runFor):
-				return nil
-			}
-		},
-		&Session{})
-	close(stopBumping)
-
-	if res.Status != StatusOK {
-		t.Fatalf("expected OK with activity bumps, got %s (err=%v)", res.Status, res.Err)
+	// Complement: once activity stops, a full budget of run time without it
+	// MUST fire, proving the resets above were the only thing holding it off.
+	clk.Advance(cfg.HangBudget)
+	if s.hangExceeded() {
+		t.Fatalf("watchdog fired at exactly the budget boundary; firing must require strictly > budget")
+	}
+	clk.Advance(time.Millisecond)
+	if !s.hangExceeded() {
+		t.Fatalf("watchdog did not fire %s after activity stopped", cfg.HangBudget+time.Millisecond)
 	}
 }
 

@@ -147,7 +147,7 @@ func TestLaneForFirstDeclaredWins(t *testing.T) {
 type holdStub struct{}
 
 func (holdStub) MatchesLane(*models.Mock, models.AsyncLane) bool { return true }
-func (holdStub) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
+func (holdStub) MatchRequestShape(_ context.Context, _, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	return true, ""
 }
 func (holdStub) EmptyResponse(models.AsyncLane) ([]byte, error)         { return []byte("204"), nil }

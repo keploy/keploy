@@ -184,11 +184,63 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 			why: "without instrumentation there is no trustworthy consumed-mock set at all",
 		},
 		{
+			name: "a capture-incomplete run never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.captureIncomplete = true }),
+			reason: "capture_incomplete",
+			why: "a process the agent could not track made its calls to the real dependency, so the mocks " +
+				"recorded for them look unused although every test passed",
+		},
+		{
+			name: "a capture-unverified run never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.captureUnverified = true }),
+			reason: "capture_unverified",
+			why: "the agent counts processes it could not track, but the count could not be read, so nothing " +
+				"shows the consumed-mock set is complete",
+		},
+		{
+			name: "a stopped run whose count was lost names the stop, not the lost count", removeUnusedMocks: true, instrument: true,
+			run: with(complete(3, 0, healthy), func(r *pruneRun) {
+				r.allTestsGotAVerdict, r.captureUnverified, r.noAnswer = false, true, true
+			}),
+			reason: "not_every_test_got_a_verdict",
+			why: "an agent stopped mid-run loses its count too; an unread count is no evidence of a loss, so the " +
+				"rules that name what did go wrong (the stop, a request with no answer) keep their names",
+		},
+		{
+			name: "a request with no answer is named ahead of a lost count", removeUnusedMocks: true, instrument: true,
+			run: with(complete(3, 0, healthy), func(r *pruneRun) {
+				r.captureUnverified, r.noAnswer, r.noAnswerUnheld = true, true, true
+			}),
+			reason: "no_answer",
+			why:    "an unread count is the weakest evidence; the request that got no answer is what happened",
+		},
+		{
+			name: "a lost count still refuses a run whose unanswered tests are held", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.captureUnverified, r.noAnswer = true, true }),
+			reason: "capture_unverified",
+			why:    "the per-test hold answers only the no-answer rule; every rule after it still refuses",
+		},
+		{
+			name: "a capture-incomplete run is named ahead of the stop", removeUnusedMocks: true, instrument: true,
+			run: with(complete(3, 0, healthy), func(r *pruneRun) {
+				r.captureIncomplete, r.allTestsGotAVerdict = true, false
+			}),
+			reason: "capture_incomplete",
+			why:    "a refused process is positive evidence that calls went live; it outranks every other reason",
+		},
+		{
 			name: "a run that did not score every test never prunes", removeUnusedMocks: true, instrument: true,
 			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.allTestsGotAVerdict = false }),
 			reason: "not_every_test_got_a_verdict",
 			why: "the tests the run never scored consumed nothing, and without mappings.yaml nothing " +
 				"else keeps their mocks out of the delete",
+		},
+		{
+			name: "a run with a test not judged for a stale mapping never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.mappingStale = true; r.internalErr = true }),
+			reason: "mapping_stale",
+			why: "a wrong answer whose calls diverged from its mapping is no verdict: the mapped mock it left " +
+				"unconsumed may be what a re-record shows it still needs",
 		},
 		{
 			name: "an INTERNAL_ERR run never prunes", removeUnusedMocks: true, instrument: true,
@@ -203,10 +255,24 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 			why:    "the connection-error rule reads the results; without them it cannot see a refused request",
 		},
 		{
-			name: "a request that got no answer never prunes", removeUnusedMocks: true, instrument: true,
-			run:    with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer = true }),
+			name: "a request that got no answer prunes around its test", removeUnusedMocks: true, instrument: true,
+			run:  with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer = true }),
+			want: true,
+			why: "a timed-out request consumed nothing for want of an answer, not for want of need, and the " +
+				"caller keeps that test's own mocks (holdNoAnswerMocks); holding the whole set for it kept " +
+				"every mock of a recording, every cycle, for one test that kept timing out",
+		},
+		{
+			name: "a request a cancel ended never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer, r.noAnswerCanceled = true, true }),
 			reason: "no_answer",
-			why:    "a timed-out request consumed nothing for want of an answer, not for want of need",
+			why:    "a stop's cancel says nothing of the test it ended, so nothing names what to hold",
+		},
+		{
+			name: "a request that got no answer never prunes when its test's mocks cannot be read", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer, r.noAnswerUnheld = true, true }),
+			reason: "no_answer",
+			why:    "without the read nothing names the test's own mocks, so the whole set is held, as before",
 		},
 		{
 			name: "no test passed never prunes", removeUnusedMocks: true, instrument: true,
@@ -233,32 +299,5 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 				t.Errorf("shouldPrune = (%v, %q), want (%v, %q): %s", got, reason, tt.want, tt.reason, tt.why)
 			}
 		})
-	}
-}
-
-// TestIsAppNoAnswerMsg pins which simulate-request errors count as "the app
-// never answered". The text is always keploy's or net/http's own error, never an
-// app body: RunTestSet classifies it where SimulateRequest or the stream read
-// returns it, before any synthetic result is built.
-func TestIsAppNoAnswerMsg(t *testing.T) {
-	for _, tt := range []struct {
-		msg  string
-		want bool
-	}{
-		{`Get "http://app:8080/x": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`, true},
-		{`Get "http://app:8080/x": net/http: request canceled (Client.Timeout exceeded while awaiting headers)`, true},
-		{`Get "http://app:8080/x": context canceled`, true},
-		{`read tcp 10.0.0.1:5000->10.0.0.2:8080: i/o timeout`, true},
-		{`failed to get response headers: rpc error: code = DeadlineExceeded desc = context deadline exceeded`, true},
-		// The app, or a proxy in front of it, closed the connection mid-response.
-		{`Get "http://app:8080/x": unexpected EOF`, true},
-		{`Get "http://app:8080/x": dial tcp 10.0.0.2:8080: connect: connection refused`, false},
-		{`Get "http://app:8080/x": EOF`, false}, // isAppConnectionErrorMsg's
-		{`invalid response type for HTTP test case`, false},
-		{`net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00"`, false},
-	} {
-		if got := isAppNoAnswerMsg(tt.msg); got != tt.want {
-			t.Errorf("isAppNoAnswerMsg(%q) = %v, want %v", tt.msg, got, tt.want)
-		}
 	}
 }

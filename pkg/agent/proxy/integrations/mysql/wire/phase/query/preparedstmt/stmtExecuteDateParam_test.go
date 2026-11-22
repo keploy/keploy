@@ -80,6 +80,7 @@ func TestDecodeStmtExecute_DateParamEncodings(t *testing.T) {
 				},
 				0,
 				map[uint16]bool{},
+				nil,
 			)
 			require.NoError(t, err, "a DATE parameter real drivers send must decode, not error")
 			require.Len(t, pkt.Parameters, 1)
@@ -107,7 +108,7 @@ func TestDecodeStmtExecute_DateParamKeepsOffsetAligned(t *testing.T) {
 	pkt, err := DecodeStmtExecute(
 		context.Background(), zap.NewNop(), data,
 		map[uint32]*mysql.StmtPrepareOkPacket{stmtID: {StatementID: stmtID, NumParams: 2}},
-		0, map[uint16]bool{},
+		0, map[uint16]bool{}, nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, pkt.Parameters, 2)

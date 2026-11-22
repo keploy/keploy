@@ -137,7 +137,20 @@ func TestRenderSingleFailedTest_IncludesDependencyBlock(t *testing.T) {
 				Status:     models.TestStatusFailed,
 			},
 			wantHeader: "Testrun failed for test-set-0/test-3",
-			absent:     []string{"DEPENDENCY ASSERTIONS"},
+			absent:     []string{"DEPENDENCY ASSERTIONS", "not judged"},
+		},
+		{
+			name: "a wrong answer demoted to OBSOLETE is shown not judged, with why",
+			test: models.TestResult{
+				Kind:        models.HTTP,
+				Name:        "test-set-0",
+				TestCaseID:  "test-2",
+				Status:      models.TestStatusObsolete,
+				FailureInfo: models.FailureInfo{MappingStale: "not judged: its mapping is stale; re-record the test-set"},
+			},
+			wantHeader: "Testrun not judged for test-set-0/test-2",
+			contains:   []string{"  not judged: its mapping is stale; re-record the test-set"},
+			absent:     []string{"Testrun failed"},
 		},
 	}
 
@@ -435,6 +448,61 @@ func TestTestStatusLabel(t *testing.T) {
 	} {
 		if got := testStatusLabel(status); got != want {
 			t.Errorf("testStatusLabel(%s) = %q, want %q", status, got, want)
+		}
+	}
+}
+
+// A test keploy could not judge (TestResult.VerdictUnknown) is labelled not
+// judged, whatever its row's status, which the label still names: an OBSOLETE
+// row demoted for a wrong answer whose mapping is stale (MappingStale), and a
+// PASSED row whose evidence could not be read. A judged row keeps its label.
+// keploy report's default path, which renders the failed tests only, admits a
+// wrong answer demoted to OBSOLETE and gives it its diff: it is not judged, and
+// failed its run. An OBSOLETE row that is not a demoted wrong answer keeps the
+// compact notice.
+func TestADemotedWrongAnswerIsRenderedWithItsDiff(t *testing.T) {
+	demoted := models.TestResult{TestCaseID: "test-2", Status: models.TestStatusObsolete, FailureInfo: models.FailureInfo{MappingStale: "not judged: stale"}}
+	plain := models.TestResult{TestCaseID: "test-3", Status: models.TestStatusObsolete}
+	if !shouldRenderDiff(demoted) || rendersDepNoticeOnly(demoted) {
+		t.Fatalf("a demoted wrong answer: admitted %v, notice only %v; want admitted to the diff", shouldRenderDiff(demoted), rendersDepNoticeOnly(demoted))
+	}
+	if shouldRenderDiff(plain) {
+		t.Fatal("an OBSOLETE row with no stale mapping and no missing dependency was admitted")
+	}
+}
+
+// keploy report --test-case prints a test with no verdict on one line, with
+// why under it.
+func TestPrintTestsSaysWhyATestIsNotJudged(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(zap.NewNop(), &config.Config{DisableANSI: true}, nil, nil)
+	r.out = bufio.NewWriter(&buf)
+	unread := models.TestResult{TestCaseID: "test-1", Name: "test-set-0", Status: models.TestStatusPassed, FailureInfo: models.FailureInfo{TestMocksUnread: true}}
+	if err := r.printTests(context.Background(), []models.TestResult{unread}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NOT JUDGED ⚠️ (PASSED)", "  not judged: keploy could not read which of its recorded calls it made"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printTests output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestResultLabelSaysNotJudged(t *testing.T) {
+	stale := models.TestResult{Status: models.TestStatusObsolete, FailureInfo: models.FailureInfo{MappingStale: "not judged: stale"}}
+	unread := models.TestResult{Status: models.TestStatusPassed, FailureInfo: models.FailureInfo{TestMocksUnread: true}}
+	for _, c := range []struct {
+		r    models.TestResult
+		want string
+	}{
+		{stale, "NOT JUDGED ⚠️ (OBSOLETE)"},
+		{unread, "NOT JUDGED ⚠️ (PASSED)"},
+		{models.TestResult{Status: models.TestStatusObsolete}, "OBSOLETE ⚠️"},
+		{models.TestResult{Status: models.TestStatusPassed}, "PASSED ✅"},
+	} {
+		if got := resultLabel(c.r); got != c.want {
+			t.Errorf("resultLabel(%+v) = %q, want %q", c.r.FailureInfo, got, c.want)
 		}
 	}
 }

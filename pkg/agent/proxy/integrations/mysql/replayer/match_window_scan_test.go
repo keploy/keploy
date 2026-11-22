@@ -15,10 +15,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// The tests in this file cover matchCommand's in-window pass: while a test
-// window is active, a COM_QUERY or COM_STMT_EXECUTE is first compared with the
-// candidates recorded inside that window only, and the whole pool is scanned
-// only when none of them is an exact match.
+// The tests in this file cover matchCommand's first pass: while a test window
+// is active, a COM_QUERY or COM_STMT_EXECUTE is first compared with the
+// candidates recorded inside that window only, a COM_STMT_PREPARE or
+// COM_STMT_CLOSE with the candidates preparedIndex files under its key, and the
+// whole pool is scanned only when they do not settle it.
 
 var scanBase = time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
 
@@ -56,6 +57,28 @@ func windowExecMock(name string, stmtID uint32, param string, ts time.Time) *mod
 	return m
 }
 
+// windowCloseMock is a session-tier COM_STMT_CLOSE of statement stmtID on c1,
+// recorded at ts; offHeader gives it a header the live CLOSE does not match.
+func windowCloseMock(name string, stmtID uint32, offHeader bool, ts time.Time) *models.Mock {
+	m := &models.Mock{Name: name, Kind: models.MySQL}
+	m.TestModeInfo.Lifetime = models.LifetimeConnection
+	m.Spec.Metadata = map[string]string{"type": "connection", "connID": "c1"}
+	m.Spec.ReqTimestampMock = ts
+	m.Spec.MySQLRequests = []mysql.Request{liveCloseReq(stmtID)}
+	if offHeader {
+		m.Spec.MySQLRequests[0].PacketBundle.Header.Header.SequenceID = 1
+	}
+	m.Spec.MySQLResponses = []mysql.Response{{Payload: name}}
+	return m
+}
+
+func liveCloseReq(stmtID uint32) mysql.Request {
+	return mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 5}, Type: "COM_STMT_CLOSE"},
+		Message: &mysql.StmtClosePacket{Status: 0x19, StatementID: stmtID},
+	}}
+}
+
 func liveExecReq(stmtID uint32, param string) mysql.Request {
 	b := execBundle(param)
 	b.Message.(*mysql.StmtExecutePacket).StatementID = stmtID
@@ -72,8 +95,9 @@ type scanOutcome struct {
 	consumed []string
 }
 
-// noWindowReader hides the fake's integrations.SessionWindowReader, so the scan
-// takes the path a store without the window index takes.
+// noWindowReader hides the fake's integrations.SessionWindowReader and
+// integrations.SessionKeyReader, so the scan takes the path a store without the
+// indexes takes.
 type noWindowReader struct{ integrations.MockMemDb }
 
 // scanMode is one way matchCommandWith can be asked to find a command's mock.
@@ -85,8 +109,8 @@ type scanMode struct {
 
 var (
 	modeFullScan = scanMode{name: "full scan", fullScan: true}
-	modeIndexed  = scanMode{name: "in-window pass, window index", reader: true}
-	modeFiltered = scanMode{name: "in-window pass, no window index"}
+	modeIndexed  = scanMode{name: "first pass, store indexes", reader: true}
+	modeFiltered = scanMode{name: "first pass, no store indexes"}
 )
 
 func runScan(t *testing.T, mode scanMode, req mysql.Request, perTest, session []*models.Mock, winStart, winEnd time.Time, eng *schemanoise.Engine, prep func(*mysqlDecodeCtxShim)) scanOutcome {
@@ -136,6 +160,7 @@ type mysqlDecodeCtxShim struct{ stmtIDToQuery map[uint32]string }
 // what is served, consumed or reported.
 func TestMatchCommand_InWindowPassServesWhatTheFullScanServes(t *testing.T) {
 	const execQuery = "SELECT v FROM kv WHERE id = ?"
+	const otherExecQuery = "UPDATE kv SET v = ? WHERE id = 'k1'"
 	queryTexts := func(r *rand.Rand) string {
 		switch r.Intn(7) {
 		case 0:
@@ -194,6 +219,16 @@ func TestMatchCommand_InWindowPassServesWhatTheFullScanServes(t *testing.T) {
 				ts := start.Add(time.Duration(j) * 900 * time.Microsecond)
 				add(windowExecMock(fmt.Sprintf("s%d-w%d-x%d", seed, w, n), 1, fmt.Sprintf("k%d", r.Intn(4)), ts))
 			}
+			if r.Intn(2) == 0 { // a re-PREPARE, sometimes reusing a statement ID for another query
+				q := []string{execQuery, otherExecQuery}[r.Intn(2)]
+				pm := execPrepareMock(fmt.Sprintf("s%d-w%d-p%d", seed, w, n), q, uint32(1+r.Intn(3)))
+				pm.TestModeInfo.Lifetime = models.LifetimeConnection
+				pm.Spec.ReqTimestampMock = start.Add(300 * time.Microsecond)
+				add(pm)
+			}
+			if r.Intn(2) == 0 {
+				add(windowCloseMock(fmt.Sprintf("s%d-w%d-c%d", seed, w, n), uint32(1+r.Intn(3)), r.Intn(4) == 0, start.Add(3*time.Millisecond)))
+			}
 			if r.Intn(3) == 0 { // between this window and the next
 				name := fmt.Sprintf("s%d-gap%d-q%d", seed, w, n)
 				add(readbackMock(name, queryTexts(r), name, start.Add(7*time.Millisecond)))
@@ -232,8 +267,19 @@ func TestMatchCommand_InWindowPassServesWhatTheFullScanServes(t *testing.T) {
 					reqs = append(reqs, liveExecReq(7, p))
 					names = append(names, "EXECUTE "+p)
 				}
+				for _, q := range []string{execQuery, otherExecQuery, "SELECT never FROM prepared WHERE id = ?"} {
+					reqs = append(reqs, stmtPrepareReq(q))
+					names = append(names, "PREPARE "+q)
+				}
+				for _, id := range []uint32{7, 8, 9} {
+					reqs = append(reqs, liveCloseReq(id))
+					names = append(names, fmt.Sprintf("CLOSE %d", id))
+				}
 				for i, req := range reqs {
-					prep := func(s *mysqlDecodeCtxShim) { s.stmtIDToQuery[7] = execQuery }
+					prep := func(s *mysqlDecodeCtxShim) {
+						s.stmtIDToQuery[7] = execQuery
+						s.stmtIDToQuery[8] = otherExecQuery
+					}
 					want := runScan(t, modeFullScan, req, perTest, session, wnd.start, wnd.end, mk(), prep)
 					for _, mode := range []scanMode{modeIndexed, modeFiltered} {
 						got := runScan(t, mode, req, perTest, session, wnd.start, wnd.end, mk(), prep)
@@ -340,4 +386,79 @@ func BenchmarkMatchCommand_TestPosition(b *testing.B) {
 			}
 		})
 	}
+}
+
+// preparedLanePool is laneQueries' shape for a client that prepares every
+// statement it runs, as go-sql-driver does by default: each test PREPAREs the
+// same query on c1 under a new statement ID, EXECUTEs it with the test's own
+// parameter, and CLOSEs it. The PREPAREs and CLOSEs are connection-scoped, the
+// EXECUTEs lax-promoted; all of it is session tier.
+func preparedLanePool(tests int) []*models.Mock {
+	const query = "SELECT id, email FROM customers WHERE id = ?"
+	pool := make([]*models.Mock, 0, 3*tests)
+	for i := 0; i < tests; i++ {
+		start, _ := scanWindow(i)
+		stmt := uint32(i + 1)
+		prep := execPrepareMock(fmt.Sprintf("t%d-prepare", i), query, stmt)
+		prep.TestModeInfo.Lifetime = models.LifetimeConnection
+		prep.Spec.Metadata["type"] = "connection"
+		prep.Spec.ReqTimestampMock = start
+		pool = append(pool,
+			prep,
+			windowExecMock(fmt.Sprintf("t%d-execute", i), stmt, fmt.Sprintf("c-%06d", i), start.Add(500*time.Microsecond)),
+			windowCloseMock(fmt.Sprintf("t%d-close", i), stmt, false, start.Add(time.Millisecond)),
+		)
+	}
+	return pool
+}
+
+// examinedForPreparedTest runs test i's PREPARE, EXECUTE and CLOSE in its own
+// window, with a second EXECUTE of a parameter no recording holds (a read-back
+// of a row the test wrote) before the CLOSE, and returns how many candidates
+// the scans visited. The second EXECUTE has no definitive match anywhere; the
+// fallback it gets is the window's query-exact EXECUTE, so the window settles
+// it too.
+func examinedForPreparedTest(tb testing.TB, pool []*models.Mock, i int, opts matchOptions) int {
+	const query = "SELECT id, email FROM customers WHERE id = ?"
+	start, end := scanWindow(i)
+	db := &fakeMockDb{session: pool, winStart: start, winEnd: end}
+	dctx := newDecodeCtx()
+	dctx.StmtIDToQuery[7] = query
+	examined := 0
+	opts.examined = &examined
+	for _, req := range []mysql.Request{stmtPrepareReq(query), liveExecReq(7, fmt.Sprintf("c-%06d", i)), liveExecReq(7, "never-recorded"), liveCloseReq(7)} {
+		resp, ok, _, err := matchCommandWith(context.Background(), zap.NewNop(), req, db, dctx, nil, nil, opts)
+		if err != nil || !ok || resp == nil {
+			tb.Fatalf("test %d: %s was not served (ok=%v err=%v)", i, req.Header.Type, ok, err)
+		}
+		if req.Header.Type == "COM_STMT_EXECUTE" {
+			if want := fmt.Sprintf("t%d-execute", i); resp.Payload != want {
+				tb.Fatalf("test %d: EXECUTE served %q, want %q", i, resp.Payload, want)
+			}
+		}
+	}
+	return examined
+}
+
+// The same guard for prepared statements. A COM_STMT_PREPARE, EXECUTE or CLOSE
+// used to walk the whole session pool, and the EXECUTE and CLOSE indexed every
+// recorded PREPARE in it first, so each test of a prepared-statement replay
+// cost more than the one before.
+func TestMatchCommand_PreparedStatementCostDoesNotGrowWithTheTestIndex(t *testing.T) {
+	const tests = 4000
+	pool := preparedLanePool(tests)
+
+	first := examinedForPreparedTest(t, pool, 0, matchOptions{})
+	last := examinedForPreparedTest(t, pool, tests-1, matchOptions{})
+	if first != last {
+		t.Errorf("test 1 visited %d candidates, test %d visited %d: the scan grows with the test index", first, tests, last)
+	}
+	if last > 8 {
+		t.Errorf("test %d visited %d candidates for a PREPARE, two EXECUTEs and a CLOSE", tests, last)
+	}
+	fullLast := examinedForPreparedTest(t, pool, tests-1, matchOptions{fullScan: true})
+	if fullLast < len(pool) {
+		t.Errorf("the full scan of test %d visited only %d of %d candidates", tests, fullLast, len(pool))
+	}
+	t.Logf("candidates visited for test 1 / test %d: %d / %d (full scan of test %d: %d)", tests, first, last, tests, fullLast)
 }

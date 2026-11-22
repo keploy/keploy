@@ -25,6 +25,12 @@
 # record path end-to-end so a future regression in startup-mock
 # persistence is caught against a real application.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 # Explicit `set +e`: even when sourced from a workflow step with `-e`
 # enabled, we capture exit codes explicitly and always run cleanup.
@@ -69,7 +75,7 @@ upstream_pid=$!
 # Wait for the upstream's listening socket via ss (no extra TCP conn).
 ready=0
 for i in $(seq 1 20); do
-    if ss -tln | awk '{print $4}' | grep -q ":9091$"; then
+    if ss -tln | awk '{print $4}' | grep ":9091$" >/dev/null; then
         echo "upstream listening after ${i}s"
         ready=1
         break
@@ -118,7 +124,7 @@ for i in 0 1; do
     echo "=== record test-set-$i ==="
     drive_request &
     driver_pid=$!
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record \
         -c "python3 app.py 127.0.0.1 9091" \
         > "record_logs_$i.txt" 2>&1
     record_status=$?

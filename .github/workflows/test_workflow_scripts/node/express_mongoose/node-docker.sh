@@ -2,11 +2,11 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
 
 # Start the docker container.
 docker network create keploy-network
-docker_pull_retry mongo
-docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+start_mongo --net keploy-network || exit 1
 
 # Remove any preexisting keploy tests.
 sudo rm -rf keploy/

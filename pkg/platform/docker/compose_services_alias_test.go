@@ -401,7 +401,7 @@ services:
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if err := idc.modifyAppServiceForKeploy(&compose, "app"); err != nil {
+	if err := idc.modifyAppServiceForKeploy(&compose, "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy: %v", err)
 	}
 	data, err := idc.MarshalCompose(&compose)

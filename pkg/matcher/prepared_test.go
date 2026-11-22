@@ -69,6 +69,17 @@ var preparedCorpus = []struct {
 	{`{"a":null}`, `{"a":"x"}`, map[string][]string{"q.a": {}}},
 	{`{"n":{"createdAt":"z"}}`, `{"n":{"createdAt":"y"}}`, map[string][]string{"CreatedAt": {}, "createdAt": {"^v[0-9]$"}}},
 	{`{"n":{"createdAt":"z"}}`, `{"n":{"createdAt":"y"}}`, map[string][]string{"CreatedAt": {"^v[0-9]$"}, "createdAt": {}}},
+	// A pattern excuses a field only when both values match it.
+	{`{"id":1}`, `{"id":2}`, map[string][]string{"id": {"^1$"}}},
+	{`{"id":2}`, `{"id":1}`, map[string][]string{"id": {"^1$"}}},
+	{`{"id":1}`, `{"id":11}`, map[string][]string{"id": {"^1+$"}}},
+	{`{"id":1}`, `{}`, map[string][]string{"id": {"^1$"}}},
+	{`{}`, `{"id":1}`, map[string][]string{"id": {"^1$"}}},
+	{`{"id":1}`, `{"id":"1"}`, map[string][]string{"id": {"^1$"}}},
+	{`{"ids":[1,1]}`, `{"ids":[1,2]}`, map[string][]string{"ids": {"^1$"}}},
+	{`{"ids":[1,5]}`, `{"ids":[1,6]}`, map[string][]string{"ids": {"^1$"}}},
+	{`{"ids":[5,1]}`, `{"ids":[1,1]}`, map[string][]string{"ids": {"^1$"}}},
+	{`{"ids":[1,1]}`, `{"ids":[1]}`, map[string][]string{"ids": {"^1$"}}},
 }
 
 func TestNewValidatedJSONComparesAsTheStringEntryPoint(t *testing.T) {

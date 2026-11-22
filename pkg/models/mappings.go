@@ -3,13 +3,20 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"gopkg.in/yaml.v3"
 )
 
 const MappingKind = "TestMocksMapping"
+
+// MappingSourceKeployTest is the Mapping.Source of a mappings.yaml keploy test
+// wrote: what a replay's passing tests consumed, not what each test recorded.
+// Under the proven switch it does not say what a test owns.
+const MappingSourceKeployTest = "keploy test"
 
 // MockEntry represents a single mock entry with its name and kind.
 type MockEntry struct {
@@ -18,6 +25,245 @@ type MockEntry struct {
 	Timestamp        int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty" bson:"timestamp,omitempty"`
 	ReqTimestampMock string `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	Start            string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	// Key is, for a start-up: or worker: entry keploy mock record wrote
+	// under the proven switch, the key of the claim active when it was
+	// recorded; for a worker: entry moved out of a test's list, the key the
+	// move names, else that test's, else the entry's own
+	// (MappingDb.MoveToWorker). Replay serves it only while a test process of
+	// that key holds the run, a worker: entry in a test's window too
+	// (Mapping.Worker). Empty means PoolKeyNone.
+	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
+	// Place is, for a mock of the set's worker scope (Mapping.Worker), where
+	// in the set's run it becomes reachable: after the test case of this ID
+	// began; empty for the set's start. See Mapping.Worker.
+	Place string `json:"place,omitempty" yaml:"place,omitempty" bson:"place,omitempty"`
+	// AtStop says, for a mock of the worker scope, that keploy record
+	// recorded it once it had begun stopping the application: a call the
+	// application makes as it shuts down (a deregistration, a final flush).
+	// A replay requires it only once keploy has stopped the set's
+	// application, and never waits for it before.
+	AtStop bool `json:"atStop,omitempty" yaml:"atStop,omitempty" bson:"at_stop,omitempty"`
+	// Group is, under the proven switch, the concurrency group of a mock
+	// recorded while several tests' requests were open (Mapping.Groups):
+	// the test that lists it is the one whose request came first, which
+	// time alone cannot tell made it. keploy record's full round shares it
+	// between the group's tests and gives it to the one that made its call
+	// (dropping its group); every other replay serves it to the test that
+	// lists it. Empty for a mock recorded while one test's request was
+	// open, or none.
+	Group string `json:"group,omitempty" yaml:"group,omitempty" bson:"group,omitempty"`
+	// Unresolved says, under the proven switch, that keploy record's full
+	// round could not tell which test of its group made this mock's call,
+	// and charged the test that lists it now (it placed it there, not time):
+	// MockEntryUnresolvedAmbiguous, which every replay charges a test that
+	// lists it with, or MockEntryUnresolvedUnproven.
+	Unresolved string `json:"unresolved,omitempty" yaml:"unresolved,omitempty" bson:"unresolved,omitempty"`
+	// Reason says why keploy placed this entry where it is (a routing at
+	// record, a move by record's judging), in words with its undo; written
+	// under the proven switch, and, without it, on a worker-scope entry a
+	// user's worker-mock rule marked (WorkerRuleReason). Like every field of an
+	// entry, it is read and kept by each rewrite of mappings.yaml, whatever
+	// the switch.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty" bson:"reason,omitempty"`
+	// Owner is, on a worker-scope entry record's judging moved out of a
+	// test's list (MappingDb.MoveToWorker, under the proven switch), the test
+	// it was moved from: the test whose window recorded it (the
+	// compatibility audit's B4). Empty on every other entry. Read and kept by
+	// each rewrite of mappings.yaml, whatever the switch.
+	Owner string `json:"owner,omitempty" yaml:"owner,omitempty" bson:"owner,omitempty"`
+	// Drift says, on a moved entry, that the move rests on its Owner's
+	// quarantine: the pairing that moved it drifted, which holds the
+	// recording against its Owner, so the move is kept only while the Owner
+	// does not run. Judging quarantines such an Owner as
+	// keploy/unseparable_write (keploy cannot tell the Owner's own write
+	// from the call), or for a failure of its own; a confirming round that
+	// does not confirm the move undoes it. record's judging sets Drift on the
+	// moves it passes MoveToWorker. A replay under the switch that runs the
+	// Owner (its quarantine no longer applies: its test was edited, or
+	// verdicts.yaml lost its entry) gives the entry back to the Owner's own
+	// list: today's rule, failing closed. An exact move (no Drift) keeps its
+	// Owner running beside it, as judging kept it. Read and kept by each
+	// rewrite, whatever the switch.
+	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+	// Trails is, on a worker-scope entry record's judging moved out of a
+	// test's list (MappingDb.MoveToWorker, under the proven switch), the ID
+	// of the earlier test whose call the entry trails: the application
+	// made it for that test once it had answered it (a clean-up it runs in
+	// the background, such as deleting what the test made), so its request
+	// carries a value that test's own call sent. Judging writes it only on
+	// proof, and the entry's Reason says which proof held. Under the switch
+	// keploy mock replay tells the agent (models.ScopeTableReq.Trails), and
+	// the learn step reads the places that test's own list left the run as
+	// the call's own (learn.Trail): only that test's, every other test's
+	// stays outside the call's scope. Empty on every other entry, and an
+	// entry given back to its Owner drops it. Read and kept by each rewrite,
+	// whatever the switch.
+	Trails string `json:"trails,omitempty" yaml:"trails,omitempty" bson:"trails,omitempty"`
+	// Rule is, on a worker-scope entry a rule the user declared in
+	// keploy.yml placed there (keploy mock record, under the proven switch),
+	// that rule as "<id>@<first 8 hex of its digest>". Empty on every other
+	// entry, and an entry given back to its list drops it. Read and kept by
+	// each rewrite, whatever the switch. Not Group, which is the concurrency
+	// group.
+	Rule string `json:"rule,omitempty" yaml:"rule,omitempty" bson:"rule,omitempty"`
+	// Sources is, on an entry of any list whose recording a source rule the
+	// user declared in keploy.yml matched (kind clock or minted; keploy mock
+	// record, under the proven switch, before its full round), the source
+	// each rule gives one field of the request (DeclaredSource). keploy
+	// mock replay tells the agent (models.ScopeTableReq.Sources), whose
+	// learn step decides such a field by it. Empty on every other entry.
+	// Read and kept by each rewrite, whatever the switch, and kept by a
+	// move to worker:.
+	Sources []DeclaredSource `json:"sources,omitempty" yaml:"sources,omitempty" bson:"sources,omitempty"`
+	// Series is, on an entry Rule placed, the series it belongs to, as
+	// "<rule id>/<trailed test, or ->/<n>": every entry of one series
+	// answers one canonical request with one answer. keploy mock replay
+	// serves a series' last-placed entry again once all of its entries
+	// answered, and requires each series once per run when it is due
+	// (models.ScopeTableReq.Series, RequiredSeries). Also set, with no
+	// Rule, on an entry keploy record moved as trailing a test on its own
+	// ("trail/<trailed test>/<request>"); empty on every other entry, and
+	// kept as Rule is.
+	Series string `json:"series,omitempty" yaml:"series,omitempty" bson:"series,omitempty"`
+	// Once is, on an entry of a Series, that the rule which placed it says
+	// the application makes the series' calls once per process, for
+	// whichever test needs them first (keploy.yml mock.rules once: true on
+	// a background rule). keploy mock replay serves each entry of such a
+	// series once in the run, in a test's window or between tests, and
+	// never again: a second call of the request misses, so an application
+	// that starts making it per request is seen (models.ScopeTableReq.Once).
+	// It is required as any series is. A series is once when one entry of
+	// it says so. Kept as Series is.
+	Once bool `json:"once,omitempty" yaml:"once,omitempty" bson:"once,omitempty"`
+	// Read is, on an entry of a Series, that keploy mock record judged the
+	// series' request to read only (no insert, update, delete or other
+	// write): keploy mock replay serves it as any series and requires it
+	// never, as it serves every read and requires none. False, the default
+	// an entry without the key reads as, requires the series once per run
+	// when it is due, so a series is required unless every entry of it says
+	// read, unchanged (Unchanged) or optional (Optional). Kept as Series is.
+	Read bool `json:"read,omitempty" yaml:"read,omitempty" bson:"read,omitempty"`
+	// Unchanged is, on an entry of a Series keploy mock record judged a
+	// write, that the entry's recorded answer says the write changed nothing
+	// (a MongoDB reply of n 0: no document matched, none was inserted or
+	// upserted). keploy mock replay serves the entry as any series' and
+	// requires a series once per run only while one entry of it is neither
+	// Read nor Unchanged: a write whose every recording changed nothing
+	// cannot hide a missing data change, so such a series is served, not
+	// required. False, the default an entry without the key reads as, keeps
+	// a write's series required. Kept as Series is.
+	Unchanged bool `json:"unchanged,omitempty" yaml:"unchanged,omitempty" bson:"unchanged,omitempty"`
+	// Optional is, on an entry of a Series, that the rule which placed it
+	// serves the entry and never requires it, whatever it writes: keploy
+	// mock record saw the series' call once in the recording, which proves
+	// no period, so a run may end before the application makes the call
+	// (a timer whose first tick can fall after a shorter run's end).
+	// keploy mock replay serves the entry as any series' (an entry of a
+	// once series once in the run) and requires a series once per run only
+	// while one entry of it is neither Read, Unchanged nor Optional. False,
+	// the default an entry without the key reads as, keeps a write's series
+	// required. Kept as Series is.
+	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty" bson:"optional,omitempty"`
+	// Due is, on an entry of a once Series, the bound of the application's
+	// timer that makes the series' call (keploy.yml mock.rules due on a
+	// background rule with once: true), as a Go duration ("10s"): the
+	// application makes the call at most Due after it starts. keploy mock
+	// replay requires such a series once per run only when the application
+	// outlived the bound: in a run whose test command ended sooner, the
+	// series is not due, and the run says so (RULE NOT DUE). It reads the
+	// application's life as the test command's run, from keploy starting
+	// the command to the command's exit: an application the command starts
+	// lives no longer, so the read is never shorter than the application's
+	// life, and a series that was due is never let off. A run keploy does
+	// not time that way (a compose run) bounds nothing, and neither does a
+	// Due that does not parse as a positive duration: the series is
+	// required as one with none. Empty, the default, keeps a series required
+	// once its place is reached. A series' bound is the longest one its
+	// entries say. Kept as Series is.
+	Due string `json:"due,omitempty" yaml:"due,omitempty" bson:"due,omitempty"`
+	// NotRequired says, on an entry of a test's own list, that keploy's
+	// judging (keploy mock record's, or keploy mock judge's) proved the
+	// recording served, not required, and why, in keploy's words: the test's
+	// record made the call, round F (the judging's replay of the tests its
+	// command runs) did not make it while the test ran, and the test failed
+	// on nothing else. Under keploy mock record, round F runs the code that
+	// recorded the call, so whether the app makes it while the test runs
+	// depends on more than the code (how fast an answer comes, for one);
+	// keploy mock judge runs the code as it is when it judges. The words may
+	// also name a race note: the call of the same test (the first sent, when
+	// several were), made in the round too, that the recording shows was still
+	// unanswered when this one was sent. The note is information only: a call
+	// without one is marked all the same. Under the proven switch a replay
+	// serves the recording, when the app makes the call, by the same matching
+	// as the test's other recordings, and does not charge that test, and only
+	// that test, for not making it, unless the store refused the recording,
+	// which nothing could serve. keploy writes a mark only from that judging
+	// (a pull of a published recording gives back the mark its publish
+	// carried); a replay honours any mark an entry of the test's own list
+	// carries, one edited by hand too. Read and kept by each rewrite of
+	// mappings.yaml, whatever the switch.
+	NotRequired string `json:"notRequired,omitempty" yaml:"notRequired,omitempty" bson:"not_required,omitempty"`
+}
+
+// RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
+// record recorded under proven routing: only such a set
+// is served by the looser background rules (no worker-scope check at the set's end, the
+// pool inside tests, background writes answered by kind), and only by a build
+// whose judging enables them (replay.RegisterS12Serving), under the proven
+// switch. Every other set keeps today's rules (the compatibility audit's B3).
+const RecordedWithS12Routing = "s12-routing"
+
+// MappingDoc is mappings.yaml's document, Mapping, by the name the proven-routing
+// contract gives it (MappingDoc.RecordedWith).
+type MappingDoc = Mapping
+
+// WasRecordedWith reports whether m's set carries feature among the marks
+// keploy record wrote it with (Mapping.RecordedWith). A nil m carries none.
+func (m *Mapping) WasRecordedWith(feature string) bool {
+	if m == nil {
+		return false
+	}
+	for _, f := range m.RecordedWith {
+		if f == feature {
+			return true
+		}
+	}
+	return false
+}
+
+// The MockEntry.Unresolved of a recording keploy record's full round could not
+// give to the test of its group that made its call.
+const (
+	// MockEntryUnresolvedAmbiguous: its recordings that keploy cannot tell
+	// apart got different answers, so a replay that answers a test with it
+	// may answer with another test's.
+	MockEntryUnresolvedAmbiguous = "ambiguous"
+	// MockEntryUnresolvedUnproven: every other case keploy could not prove
+	// (no call matched it exactly, two pair with it, retries differed, a
+	// call drifted from it): it stays with a test the round charged for it.
+	MockEntryUnresolvedUnproven = "unproven"
+)
+
+// ConcurrencyGroup is one set of tests whose requests were open together
+// while a mock was recorded (Mapping.Groups): the windows that contained the
+// mock's place, from the recorded request and answer times alone.
+type ConcurrencyGroup struct {
+	ID string `json:"id" yaml:"id" bson:"id"`
+	// Tests are the group's tests the recording kept, in window order.
+	Tests []string `json:"tests" yaml:"tests" bson:"tests"`
+	// Unkept counts the group's tests the recording did not keep (deleted,
+	// or lost): one of them may have made the call.
+	Unkept int `json:"unkept,omitempty" yaml:"unkept,omitempty" bson:"unkept,omitempty"`
+}
+
+// RecordedAt is when the entry's request was recorded: its recorded time
+// (ReqTimestampMock), else its timestamp in seconds.
+func (e MockEntry) RecordedAt() time.Time {
+	if t, err := ParseMockTimestamp(e.ReqTimestampMock); err == nil && !t.IsZero() {
+		return t
+	}
+	return time.Unix(e.Timestamp, 0)
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
@@ -70,6 +316,130 @@ type Mapping struct {
 	// omitempty so an existing mappings.yaml round-trips byte-identically until a
 	// startup mock is actually recorded; every older reader ignores the key.
 	Startup []MockEntry `json:"startup,omitempty" yaml:"startup,omitempty" bson:"startup,omitempty"`
+	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
+	Boots   []BootSpec  `json:"boots,omitempty" yaml:"boots,omitempty" bson:"boots,omitempty"`
+	Runner  []MockEntry `json:"runner,omitempty" yaml:"runner,omitempty" bson:"runner,omitempty"`
+	// Worker is the set's worker scope (design v14, the founder's D1 to
+	// D4): the data-plane mocks no test case owns, which the application made
+	// on its own rather than for a test's request (a queue consumer, a timer,
+	// work a test left running), in recorded order, each with its Place.
+	//
+	// Under the proven switch a worker mock answers whether or not a test is
+	// open, from its place on (never before it: what it answers may be what a
+	// later test caused), each at most one request, as the test mocks do. No
+	// test is charged with it: the set is. At the set's end every worker mock
+	// whose place its run reached must have answered, unless its parser marks
+	// its answer idle (an empty poll). A request no mock answers is a miss, as
+	// anywhere.
+	//
+	// keploy record writes it under the switch: a test mock recorded while no
+	// test's window was open (the gap's traffic, the app's start, what came
+	// after the last test), and an answer its parser declares idle wherever
+	// it was recorded (IsIdleAnswer), is the scope's, at the place its
+	// recording holds it (DeriveWindowMappings). Omitted when empty; a reader
+	// that predates it ignores the key.
+	//
+	// keploy mock (record and replay) keeps it plainer: record lists here
+	// every call made outside every test's window after the first test began
+	// and, under the switch, every idle answer recorded after it, inside a
+	// test's window or not, with its claim's key and no place, and a reader
+	// may move a test's call here. Replay serves each from the set's start,
+	// in a test's window or between tests, at most once, and requires none of
+	// them (ScopeTableReq.Worker).
+	Worker []MockEntry `json:"worker,omitempty" yaml:"worker,omitempty" bson:"worker,omitempty"`
+	// Source is the keploy command that wrote the file's test entries, when
+	// it is not keploy record: MappingSourceKeployTest. A writer that names
+	// none keeps the file's, keploy record's writes included. Empty in a file
+	// only keploy record wrote, in one keploy test wrote before it said so,
+	// and in one a cloud store handed back (which keeps no source).
+	Source string `json:"source,omitempty" yaml:"source,omitempty" bson:"source,omitempty"`
+	// Groups are, under the proven switch, the concurrency groups the
+	// entries name (MockEntry.Group): the sets of tests whose requests were
+	// open together while a mock was recorded. Omitted for a set recorded
+	// one request at a time; a reader that predates it ignores the key, and
+	// serves every entry to the test that lists it.
+	Groups []ConcurrencyGroup `json:"groups,omitempty" yaml:"groups,omitempty" bson:"groups,omitempty"`
+	// Shared are, under the proven switch, the mocks recorded while several
+	// tests' requests were open whose first-opened test the recording did
+	// not keep (deleted, or lost): no kept test lists them, and keploy
+	// record's full round shares them between the kept tests of their group
+	// (MockEntry.Group). Every other replay leaves them unowned, as it does
+	// a mock no test lists.
+	Shared []MockEntry `json:"shared,omitempty" yaml:"shared,omitempty" bson:"shared,omitempty"`
+	// RecordedWith names, set-wide, what keploy record recorded the set with
+	// that changes how it is served: RecordedWithS12Routing for a set a
+	// proven-routing record wrote (routed at record, its background served by the background rules).
+	// keploy record writes it under the proven switch. Read and kept by each
+	// rewrite of mappings.yaml, whatever the switch, and by a writer that
+	// names none; omitted when empty, so a file without it is written as
+	// before. Only its use is under the switch.
+	RecordedWith []string `json:"recordedWith,omitempty" yaml:"recordedWith,omitempty" bson:"recorded_with,omitempty"`
+	// Rules is the digest ("sha256:<hex>") of the rules declared in
+	// keploy.yml (mock.rules) that keploy mock record placed the set's
+	// entries by (MockEntry.Rule); a lock published from the set pins it,
+	// and a replay whose keploy.yml digests otherwise refuses. Empty for a
+	// set recorded with none. Read and kept by each rewrite, whatever the
+	// switch.
+	Rules string `json:"rules,omitempty" yaml:"rules,omitempty" bson:"rules,omitempty"`
+}
+
+// Group is the concurrency group id names, nil when there is none.
+func (m *Mapping) Group(id string) *ConcurrencyGroup {
+	if m == nil || id == "" {
+		return nil
+	}
+	for i := range m.Groups {
+		if m.Groups[i].ID == id {
+			return &m.Groups[i]
+		}
+	}
+	return nil
+}
+
+type BootSpec struct {
+	Dir     string      `json:"dir" yaml:"dir" bson:"dir"`
+	Key     string      `json:"key" yaml:"key" bson:"key"`
+	Program string      `json:"program" yaml:"program" bson:"program"`
+	Place   string      `json:"place" yaml:"place" bson:"place"`
+	N       int         `json:"n" yaml:"n" bson:"n"`
+	Ready   bool        `json:"ready" yaml:"ready" bson:"ready"`
+	Mocks   []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
+}
+
+// MockPlaces says where in the mapping each mock name is named, as a reader of
+// mappings.yaml finds it: "test <id>" for a test's own list, and "startup:",
+// "runner:", "worker:", "shared:" or "boots:" for the set's sections. A name
+// named in several places has each once: its tests in the file's order,
+// then the sections in that order.
+func (m *Mapping) MockPlaces() map[string][]string {
+	out := map[string][]string{}
+	if m == nil {
+		return out
+	}
+	add := func(name, place string) {
+		if name != "" && !slices.Contains(out[name], place) {
+			out[name] = append(out[name], place)
+		}
+	}
+	for _, tc := range m.TestCases {
+		for _, e := range tc.Mocks {
+			add(e.Name, "test "+tc.ID)
+		}
+	}
+	for _, s := range []struct {
+		place   string
+		entries []MockEntry
+	}{{"startup:", m.Startup}, {"runner:", m.Runner}, {"worker:", m.Worker}, {"shared:", m.Shared}} {
+		for _, e := range s.entries {
+			add(e.Name, s.place)
+		}
+	}
+	for _, b := range m.Boots {
+		for _, e := range b.Mocks {
+			add(e.Name, "boots:")
+		}
+	}
+	return out
 }
 
 // StartupMockNames returns the names of the test-set-scoped startup mocks. Callers
@@ -91,19 +461,229 @@ func (m *Mapping) StartupMockNames() []string {
 	return names
 }
 
+// BackgroundMockNames returns the names of the set's background recordings,
+// each once: its worker: mocks, then its startup: mocks, the calls the
+// application made on its own rather than for a test's request
+// (MockFilterParams.BackgroundMocks). nil when it has neither.
+func (m *Mapping) BackgroundMockNames() []string {
+	if m == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, list := range [][]MockEntry{m.Worker, m.Startup} {
+		for _, e := range list {
+			if e.Name != "" && !seen[e.Name] {
+				seen[e.Name] = true
+				out = append(out, e.Name)
+			}
+		}
+	}
+	return out
+}
+
+// WorkerRuleReasonPrefix starts the Reason of a worker-scope entry that a
+// user's worker-mock rule put there (WorkerRuleReason): a call the user said
+// the application makes on its own, not for one test, typically once in each
+// of its worker processes (a signing-key fetch, an ORM's table schema read).
+// Which test makes such a call at replay depends on which test first reaches a
+// cold process, so a replay without the proven switch serves the mocks of
+// entries carrying it to every test (ServeAsSession). A mock a test consumed
+// stays in that test's list as well, so a keploy that does not read the
+// marker replays the set as before. It is a stable token, the marker replays
+// read: it must never change, or sets marked with the old one are no longer
+// served so.
+const WorkerRuleReasonPrefix = "worker-rule:"
+
+// WorkerRuleReason is the Reason of a worker-scope entry the user's rule ruleID
+// marked.
+func WorkerRuleReason(ruleID string) string { return WorkerRuleReasonPrefix + ruleID }
+
+// IsWorkerRuleEntry reports whether e is a worker-scope entry a user's
+// worker-mock rule marked (WorkerRuleReasonPrefix).
+func IsWorkerRuleEntry(e MockEntry) bool { return strings.HasPrefix(e.Reason, WorkerRuleReasonPrefix) }
+
+// WorkerRuleMockNames is the names of m's worker-scope entries a user's rule
+// marked (IsWorkerRuleEntry), each once, in the scope's order; nil for none.
+func (m *Mapping) WorkerRuleMockNames() []string {
+	if m == nil {
+		return nil
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, e := range m.Worker {
+		if e.Name == "" || seen[e.Name] || !IsWorkerRuleEntry(e) {
+			continue
+		}
+		seen[e.Name] = true
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+// ServeAsSession moves the mocks named in names out of filtered, the per-test
+// pool, into unfiltered, the session pool, as copies stated and derived
+// session lifetime (TestModeInfo.Lifetime, LifetimeDerived), so every test of
+// the run can be answered by them, again and again, and none is charged with
+// them; a loader that derives lifetimes again leaves them so. The stored
+// mocks are not written (models.Mock.ShallowCopy). With no names the pools
+// are handed back as they are.
+func ServeAsSession(filtered, unfiltered []*Mock, names []string) ([]*Mock, []*Mock) {
+	if len(names) == 0 {
+		return filtered, unfiltered
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	kept := make([]*Mock, 0, len(filtered))
+	for _, m := range filtered {
+		if m == nil || !want[m.Name] {
+			kept = append(kept, m)
+			continue
+		}
+		c := m.ShallowCopy()
+		c.TestModeInfo.Lifetime = LifetimeSession
+		c.TestModeInfo.LifetimeDerived = true
+		c.TestModeInfo.IsFiltered = false
+		unfiltered = append(unfiltered, c)
+	}
+	return kept, unfiltered
+}
+
+// WithoutWorkerRuleEntries is entries less those a user's worker-mock rule
+// marked (IsWorkerRuleEntry), which a replay without the proven switch alone
+// serves to every test. Every other reader of the worker scope (the proven
+// switch's serving, the background recordings a miss is told apart by) reads
+// the scope without them, as it was before rules marked any. It returns
+// entries itself when it holds none.
+func WithoutWorkerRuleEntries(entries []MockEntry) []MockEntry {
+	n := 0
+	for _, e := range entries {
+		if IsWorkerRuleEntry(e) {
+			n++
+		}
+	}
+	if n == 0 {
+		return entries
+	}
+	out := make([]MockEntry, 0, len(entries)-n)
+	for _, e := range entries {
+		if !IsWorkerRuleEntry(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 type MappedTestCase struct {
-	ID    string      `json:"id" yaml:"id" bson:"id"`
+	ID string `json:"id" yaml:"id" bson:"id"`
+	// Mocks is written and read as mock_entries (MarshalYAML, MarshalJSON);
+	// mocks is the key of the older shapes only, and under the proven switch
+	// an entry with both is refused (errBothMockLists).
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
+	// Cases names the test cases this test produced when its record captured incoming requests.
+	Cases     []string            `json:"cases,omitempty" yaml:"cases,omitempty" bson:"cases,omitempty"`
+	CaseMocks map[string][]string `json:"case_mocks,omitempty" yaml:"case_mocks,omitempty" bson:"case_mocks,omitempty"`
+	CaseSteps map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty" bson:"case_steps,omitempty"`
+	Dir       string              `json:"dir,omitempty" yaml:"dir,omitempty" bson:"dir,omitempty"`
+	Starts    int                 `json:"starts,omitempty" yaml:"starts,omitempty" bson:"starts,omitempty"`
+	// At is when the test began in its recording: the clock its replay runs
+	// on while it is open (design v14 §3.4). keploy mock record writes it
+	// under the proven switch only, and a replay acts on it only under the
+	// switch; zero in recordings made before keploy kept it, and in those
+	// made without the switch. Read and kept by each rewrite of
+	// mappings.yaml, whatever the switch, as Key.
+	At time.Time `json:"at,omitzero" yaml:"at,omitempty" bson:"at,omitempty"`
+	// End is when the test ended in its recording: the latest end of its
+	// scope (POST /agent/scope/end) of the record that wrote At, so End - At
+	// is the test's recorded duration. keploy mock record writes it beside
+	// At, under the proven switch only, and every write that sets At sets
+	// End with it, so an entry never pairs one record's begin with another's
+	// end. Nothing in a replay acts on it: it is for readers that show the
+	// recording. Zero where At is, and for a test whose scope never ended.
+	// Read and kept by each rewrite of mappings.yaml, whatever the switch, as
+	// Key.
+	End time.Time `json:"end,omitzero" yaml:"end,omitempty" bson:"end,omitempty"`
+	// Real is the mock.real destinations the test used while it was open in
+	// its recording (design v14 §4): its replay runs on the real clock, and
+	// the verdict fails when CI never reaches one. Written, and acted on by
+	// a replay, under the proven switch only; empty in recordings made
+	// without it. Read and kept by each rewrite, whatever the switch, as Key.
+	Real []string `json:"real,omitempty" yaml:"real,omitempty" bson:"real,omitempty"`
+	// Given is the values the test gave while it was open in its recording
+	// (POST /agent/scope/given), in the order it gave them: each replay
+	// binds the value the test gives then with the recorded one (design
+	// given-api §3). Written, and acted on by a replay, under the proven
+	// switch only; empty in recordings made without it. Read and kept by
+	// each rewrite, whatever the switch, as Key.
+	Given []GivenValue `json:"given,omitempty" yaml:"given,omitempty" bson:"given,omitempty"`
+	// Variables is, by name, each variable a value the test's client sent in
+	// one of its requests binds (learn.Place.Client): its recorded value, and
+	// where the request of the test case that sent it holds it, as Bind
+	// "test case <name>, request <place>" (CaseBind). A call of the test that
+	// carries the value names the variable with use places only, as it names
+	// a template key's (MockVariables). Each replay binds it from the live
+	// request that pairs with that test case; a test whose request pairs with
+	// none binds nothing, so every use of the variable misses. Written by
+	// record's full round under the proven switch only, and replaced by each
+	// record of the test (MappingDb.UpsertCases); read and kept by each
+	// rewrite, whatever the switch, as Key.
+	Variables MockVariables `json:"variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
+	// Key is the key of the claim the test ran under in its recording: the
+	// test process's (POST /agent/instance). A reader who moves one of the
+	// test's calls to the set's worker: list gives the moved entry this key,
+	// so a replay serves it while that process holds the run (MockEntry.Key).
+	// keploy mock record writes it under the proven switch only; empty in
+	// recordings made before keploy kept it, in those made without the
+	// switch, and for a test run under no claim. Read and kept by each
+	// rewrite of mappings.yaml, whatever the switch: mapdb keeps every
+	// field keploy writes on a test entry whatever the switch, and what
+	// acts on it checks the switch itself. A rewrite without the switch
+	// that dropped the key would leave a later move of the test's call no
+	// key to give.
+	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
+	// Seed is the seed the test's browser drew its random numbers from in
+	// its recording (models.ScopeWindow.Seed): each replay's begin is
+	// answered it, so the replay's pages draw what the recording's drew. It
+	// is the entry's, not derived from the test's name: an entry renamed
+	// keeps it, and a record of the test draws a new one. Written, and
+	// answered by a replay, under the proven switch only; empty in
+	// recordings made before keploy kept it, in those made with seeding
+	// off, and for a test whose harness drives no browser. Read and kept by
+	// each rewrite, whatever the switch, as Key.
+	Seed string `json:"seed,omitempty" yaml:"seed,omitempty" bson:"seed,omitempty"`
 }
 
 type persistedTestFormat struct {
-	ID          string      `json:"id" yaml:"id"`
-	MockEntries []MockEntry `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
+	ID          string              `json:"id" yaml:"id"`
+	MockEntries []MockEntry         `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
+	Cases       []string            `json:"cases,omitempty" yaml:"cases,omitempty"`
+	CaseMocks   map[string][]string `json:"case_mocks,omitempty" yaml:"case_mocks,omitempty"`
+	CaseSteps   map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty"`
+	Dir         string              `json:"dir,omitempty" yaml:"dir,omitempty"`
+	Starts      int                 `json:"starts,omitempty" yaml:"starts,omitempty"`
+}
+
+// writtenTestFormat is how a test entry is written: the persisted format and
+// the test's recorded begin, last and omitted when zero, so an entry without
+// one is written as it was before keploy kept it. The begin stays out of
+// persistedTestFormat, which also picks the shape an entry is read in.
+type writtenTestFormat struct {
+	persistedTestFormat `yaml:",inline"`
+	At                  time.Time     `json:"at,omitzero" yaml:"at,omitempty"`
+	End                 time.Time     `json:"end,omitzero" yaml:"end,omitempty"`
+	Real                []string      `json:"real,omitempty" yaml:"real,omitempty"`
+	Given               []GivenValue  `json:"given,omitempty" yaml:"given,omitempty"`
+	Variables           MockVariables `json:"variables,omitempty" yaml:"variables,omitempty"`
+	Key                 string        `json:"key,omitempty" yaml:"key,omitempty"`
+	Seed                string        `json:"seed,omitempty" yaml:"seed,omitempty"`
 }
 
 type structuredTestFormat struct {
 	ID    string      `json:"id" yaml:"id"`
 	Mocks []MockEntry `json:"mocks" yaml:"mocks"`
+	Cases []string    `json:"cases,omitempty" yaml:"cases,omitempty"`
 }
 
 type stringSliceTestFormat struct {
@@ -112,11 +692,277 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return tc.persistedFormat(), nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(tc.persistedFormat())
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed})
+}
+
+// errRecordedBegin is a test entry whose at: is not a time.
+const errRecordedBegin = "a test's recorded begin (at) is not a time: %w"
+
+// recordedBeginYAML is a test entry's at:, whatever the proven switch: a
+// writer that rewrites the file with the switch off keeps it, as it keeps the
+// entry's mocks (MappedTestCase.At). One that is not a time is an error, never
+// a reason to read the entry in another shape and lose its mocks.
+func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
+	if !nodeHasField(node, "at") {
+		return time.Time{}, nil
+	}
+	var at struct {
+		At time.Time `yaml:"at"`
+	}
+	if err := node.Decode(&at); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
+	}
+	return at.At, nil
+}
+
+// errRecordedEnd is a test entry whose end: is not a time.
+const errRecordedEnd = "a test's recorded end (end) is not a time: %w"
+
+// recordedEndYAML is a test entry's end:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a time is an error, never a reason to
+// read the entry in another shape and lose its mocks.
+func recordedEndYAML(node *yaml.Node) (time.Time, error) {
+	if !nodeHasField(node, "end") {
+		return time.Time{}, nil
+	}
+	var end struct {
+		End time.Time `yaml:"end"`
+	}
+	if err := node.Decode(&end); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedEnd, err)
+	}
+	return end.End, nil
+}
+
+// recordedEndJSON is recordedEndYAML for a JSON entry.
+func recordedEndJSON(data []byte) (time.Time, error) {
+	if !jsonContainsField(data, "end") {
+		return time.Time{}, nil
+	}
+	var end struct {
+		End time.Time `json:"end"`
+	}
+	if err := json.Unmarshal(data, &end); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedEnd, err)
+	}
+	return end.End, nil
+}
+
+// errRecordedReal is a test entry whose real: is not a list of destinations.
+const errRecordedReal = "a test's mock.real destinations (real) are not a list of strings: %w"
+
+// recordedRealYAML is a test entry's real:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a list of strings is an error, never a
+// reason to read the entry without it: its replay would run frozen and its
+// verdict would not ask for the destinations.
+func recordedRealYAML(node *yaml.Node) ([]string, error) {
+	if !nodeHasField(node, "real") {
+		return nil, nil
+	}
+	var r struct {
+		Real []string `yaml:"real"`
+	}
+	if err := node.Decode(&r); err != nil {
+		return nil, fmt.Errorf(errRecordedReal, err)
+	}
+	return r.Real, nil
+}
+
+// recordedRealJSON is recordedRealYAML for a JSON entry.
+func recordedRealJSON(data []byte) ([]string, error) {
+	if !jsonContainsField(data, "real") {
+		return nil, nil
+	}
+	var r struct {
+		Real []string `json:"real"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf(errRecordedReal, err)
+	}
+	return r.Real, nil
+}
+
+// errRecordedGiven is a test entry whose given: is not a list of givens.
+const errRecordedGiven = "a test's given values (given) are not a list of name, value and source: %w"
+
+// recordedGivenYAML is a test entry's given:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a list of givens is an error, never a
+// reason to read the entry without it: its replay would bind each given with
+// no recorded value, and check none.
+func recordedGivenYAML(node *yaml.Node) ([]GivenValue, error) {
+	if !nodeHasField(node, "given") {
+		return nil, nil
+	}
+	var g struct {
+		Given []GivenValue `yaml:"given"`
+	}
+	if err := node.Decode(&g); err != nil {
+		return nil, fmt.Errorf(errRecordedGiven, err)
+	}
+	return g.Given, nil
+}
+
+// recordedGivenJSON is recordedGivenYAML for a JSON entry.
+func recordedGivenJSON(data []byte) ([]GivenValue, error) {
+	if !jsonContainsField(data, "given") {
+		return nil, nil
+	}
+	var g struct {
+		Given []GivenValue `json:"given"`
+	}
+	if err := json.Unmarshal(data, &g); err != nil {
+		return nil, fmt.Errorf(errRecordedGiven, err)
+	}
+	return g.Given, nil
+
+}
+
+// errRecordedVariables is a test entry whose variables: is not a map of
+// variables by name.
+const errRecordedVariables = "a test's variables (variables) are not a map of name to recorded value and bind: %w"
+
+// recordedVariablesYAML is a test entry's variables:, whatever the proven
+// switch, as recordedGivenYAML: one that does not read is an error, never a
+// reason to read the entry without it, whose replay would then bind none of
+// them.
+func recordedVariablesYAML(node *yaml.Node) (MockVariables, error) {
+	if !nodeHasField(node, "variables") {
+		return nil, nil
+	}
+	var v struct {
+		Variables MockVariables `yaml:"variables"`
+	}
+	if err := node.Decode(&v); err != nil {
+		return nil, fmt.Errorf(errRecordedVariables, err)
+	}
+	return v.Variables, nil
+}
+
+// recordedVariablesJSON is recordedVariablesYAML for a JSON entry.
+func recordedVariablesJSON(data []byte) (MockVariables, error) {
+	if !jsonContainsField(data, "variables") {
+		return nil, nil
+	}
+	var v struct {
+		Variables MockVariables `json:"variables"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, fmt.Errorf(errRecordedVariables, err)
+	}
+	return v.Variables, nil
+}
+
+// CaseBind is where a test's variable is bound in its client test case's
+// request (MappedTestCase.Variables): "test case <name>, request <place>",
+// place in the grammar of a MockVariable's places.
+func CaseBind(testCase, place string) string {
+	return caseBindPrefix + testCase + caseBindRequest + place
+}
+
+const caseBindPrefix, caseBindRequest = "test case ", ", request "
+
+// ParseCaseBind reads a CaseBind: the test case and the place in its
+// request. ok is false for a bind of another form, or one naming no test
+// case or no place: a replay binds nothing from it.
+func ParseCaseBind(bind string) (testCase, place string, ok bool) {
+	rest, found := strings.CutPrefix(bind, caseBindPrefix)
+	if !found {
+		return "", "", false
+	}
+	// A bind with no ", request " names no place: Cut gives it all as the
+	// test case, and place "".
+	testCase, place, _ = strings.Cut(rest, caseBindRequest)
+	if testCase == "" || place == "" {
+		return "", "", false
+	}
+	return testCase, place, true
+}
+
+// errRecordedKey is a test entry whose key: is not a string.
+const errRecordedKey = "a test's claim key (key) is not a string: %w"
+
+// recordedKeyYAML is a test entry's key:, whatever the proven switch: a
+// writer that rewrites the file with the switch off keeps it, as it keeps
+// the entry's mocks. One that is not a string is an error, never a reason to
+// read the entry without it: an edit that moves the test's call to worker:
+// would lose the key its replay serves it under.
+func recordedKeyYAML(node *yaml.Node) (string, error) {
+	if !nodeHasField(node, "key") {
+		return "", nil
+	}
+	var k struct {
+		Key string `yaml:"key"`
+	}
+	if err := node.Decode(&k); err != nil {
+		return "", fmt.Errorf(errRecordedKey, err)
+	}
+	return k.Key, nil
+}
+
+// recordedKeyJSON is recordedKeyYAML for a JSON entry.
+func recordedKeyJSON(data []byte) (string, error) {
+	if !jsonContainsField(data, "key") {
+		return "", nil
+	}
+	var k struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(data, &k); err != nil {
+		return "", fmt.Errorf(errRecordedKey, err)
+	}
+	return k.Key, nil
+}
+
+// errRecordedSeed is a test entry whose seed: is not a string.
+const errRecordedSeed = "a test's browser seed (seed) is not a string: %w"
+
+// recordedSeedYAML is a test entry's seed:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a string is an error, never a reason to
+// read the entry without it: its replay would draw other numbers than its
+// recording.
+func recordedSeedYAML(node *yaml.Node) (string, error) {
+	if !nodeHasField(node, "seed") {
+		return "", nil
+	}
+	var k struct {
+		Seed string `yaml:"seed"`
+	}
+	if err := node.Decode(&k); err != nil {
+		return "", fmt.Errorf(errRecordedSeed, err)
+	}
+	return k.Seed, nil
+}
+
+// recordedSeedJSON is recordedSeedYAML for a JSON entry.
+func recordedSeedJSON(data []byte) (string, error) {
+	if !jsonContainsField(data, "seed") {
+		return "", nil
+	}
+	var k struct {
+		Seed string `json:"seed"`
+	}
+	if err := json.Unmarshal(data, &k); err != nil {
+		return "", fmt.Errorf(errRecordedSeed, err)
+	}
+	return k.Seed, nil
+}
+
+// recordedBeginJSON is recordedBeginYAML for a JSON entry.
+func recordedBeginJSON(data []byte) (time.Time, error) {
+	if !jsonContainsField(data, "at") {
+		return time.Time{}, nil
+	}
+	var at struct {
+		At time.Time `json:"at"`
+	}
+	if err := json.Unmarshal(data, &at); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
+	}
+	return at.At, nil
 }
 
 // UnmarshalYAML provides backward compatibility for the old comma-separated
@@ -138,33 +984,104 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 //	      - name: mock-1
 //	        kind: Redis
 func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
+	at, err := recordedBeginYAML(node)
+	if err != nil {
+		return err
+	}
+	end, err := recordedEndYAML(node)
+	if err != nil {
+		return err
+	}
+	rl, err := recordedRealYAML(node)
+	if err != nil {
+		return err
+	}
+	gv, err := recordedGivenYAML(node)
+	if err != nil {
+		return err
+	}
+	vars, err := recordedVariablesYAML(node)
+	if err != nil {
+		return err
+	}
+	key, err := recordedKeyYAML(node)
+	if err != nil {
+		return err
+	}
+	seed, err := recordedSeedYAML(node)
+	if err != nil {
+		return err
+	}
+	if err := tc.unmarshalYAMLEntry(node); err != nil {
+		return err
+	}
+	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, end, rl, gv, vars, key, seed
+	return nil
+}
+
+// errBothMockLists is a test entry with a mock_entries list and a mocks list
+// beside it, under the proven switch: keploy reads mock_entries only, so the
+// mocks list (a hand edit, or an undo followed to the letter) would be dropped
+// without a word, and the next rewrite of the file would erase it. With the
+// switch off the entry reads as it did before: mock_entries alone.
+const errBothMockLists = "test %q in mappings has both `mocks` and `mock_entries`, and keploy reads only `mock_entries`: move the entries under `mocks` into `mock_entries`, then delete `mocks`"
+
+// BothMockListsError is the refusal of a test entry that holds both mock
+// lists (errBothMockLists), with the entry's id (Test): a reader that checks
+// a set (enterprise's keploy mock check) names the entry from it, as a
+// replay refuses the set with it.
+type BothMockListsError struct{ Test string }
+
+func (e *BothMockListsError) Error() string { return fmt.Sprintf(errBothMockLists, e.Test) }
+
+// unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
+// format's other fields, in whichever shape the entry has.
+func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
+	if provenswitch.On() && mergedField(node, "mock_entries") != nil && nodeHasEntries(mergedField(node, "mocks"), "mocks") {
+		var e struct {
+			ID string `yaml:"id"`
+		}
+		_ = node.Decode(&e)
+		return &BothMockListsError{Test: e.ID}
+	}
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
-	if err := node.Decode(&persisted); err == nil && nodeHasField(node, "mock_entries") {
-		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+	perr := node.Decode(&persisted)
+	// A field a merge key (<<) brings counts as the entry's own, as the
+	// decode above reads it and as the both-lists check sees it.
+	has := func(field string) bool { return mergedField(node, field) != nil }
+	if perr == nil && (has("mock_entries") || ((has("dir") || has("starts") || has("cases")) && !has("mocks"))) {
+		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
+		tc.extras(persisted)
 		return nil
+	}
+	if perr != nil {
+		persisted = persistedTestFormat{}
 	}
 
 	type legacyTestFormat struct {
-		ID    string `yaml:"id"`
-		Mocks string `yaml:"mocks"`
+		ID    string   `yaml:"id"`
+		Mocks string   `yaml:"mocks"`
+		Cases []string `yaml:"cases"`
 	}
 	var legacy legacyTestFormat
 	if err := node.Decode(&legacy); err == nil {
-		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, legacy.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := node.Decode(&structured); err == nil {
-		tc.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		tc.applyDecodedMocks(structured.ID, structured.Mocks, "", structured.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	// Accept a string slice too so intermediate/custom fixtures remain readable.
 	var stringSlice stringSliceTestFormat
 	if err := node.Decode(&stringSlice); err == nil {
-		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
+		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "", nil)
 		return nil
 	}
 
@@ -174,31 +1091,83 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 // UnmarshalJSON provides backward compatibility for the old comma-separated
 // string format while supporting the structured formats used by newer builds.
 func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
+	at, err := recordedBeginJSON(data)
+	if err != nil {
+		return err
+	}
+	end, err := recordedEndJSON(data)
+	if err != nil {
+		return err
+	}
+	rl, err := recordedRealJSON(data)
+	if err != nil {
+		return err
+	}
+	gv, err := recordedGivenJSON(data)
+	if err != nil {
+		return err
+	}
+	vars, err := recordedVariablesJSON(data)
+	if err != nil {
+		return err
+	}
+	key, err := recordedKeyJSON(data)
+	if err != nil {
+		return err
+	}
+	seed, err := recordedSeedJSON(data)
+	if err != nil {
+		return err
+	}
+	if err := tc.unmarshalJSONEntry(data); err != nil {
+		return err
+	}
+	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, end, rl, gv, vars, key, seed
+	return nil
+}
+
+// unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.
+func (tc *MappedTestCase) unmarshalJSONEntry(data []byte) error {
+	if provenswitch.On() && jsonContainsField(data, "mock_entries") && jsonHasEntries(data, "mocks") {
+		var e struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(data, &e)
+		return &BothMockListsError{Test: e.ID}
+	}
 	var persisted persistedTestFormat
-	if err := json.Unmarshal(data, &persisted); err == nil && jsonContainsField(data, "mock_entries") {
-		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+	perr := json.Unmarshal(data, &persisted)
+	if perr == nil && (jsonContainsField(data, "mock_entries") || ((jsonContainsField(data, "dir") || jsonContainsField(data, "starts") || jsonContainsField(data, "cases")) && !jsonContainsField(data, "mocks"))) {
+		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
+		tc.extras(persisted)
 		return nil
+	}
+	if perr != nil {
+		persisted = persistedTestFormat{}
 	}
 
 	type legacyTestFormat struct {
-		ID    string `json:"id"`
-		Mocks string `json:"mocks"`
+		ID    string   `json:"id"`
+		Mocks string   `json:"mocks"`
+		Cases []string `json:"cases"`
 	}
 	var legacy legacyTestFormat
 	if err := json.Unmarshal(data, &legacy); err == nil {
-		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, legacy.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := json.Unmarshal(data, &structured); err == nil {
-		tc.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		tc.applyDecodedMocks(structured.ID, structured.Mocks, "", structured.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	var stringSlice stringSliceTestFormat
 	if err := json.Unmarshal(data, &stringSlice); err == nil {
-		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
+		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "", nil)
 		return nil
 	}
 
@@ -218,11 +1187,22 @@ func (tc MappedTestCase) persistedFormat() persistedTestFormat {
 	return persistedTestFormat{
 		ID:          tc.ID,
 		MockEntries: append([]MockEntry(nil), tc.Mocks...),
+		Cases:       append([]string(nil), tc.Cases...),
+		CaseMocks:   tc.CaseMocks,
+		CaseSteps:   tc.CaseSteps,
+		Dir:         tc.Dir,
+		Starts:      tc.Starts,
 	}
 }
 
-func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string) {
+func (tc *MappedTestCase) extras(p persistedTestFormat) {
+	tc.CaseMocks, tc.CaseSteps, tc.Dir, tc.Starts = p.CaseMocks, p.CaseSteps, p.Dir, p.Starts
+}
+
+func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string, cases []string) {
 	tc.ID = id
+	tc.Cases = append([]string(nil), cases...)
+	tc.CaseMocks, tc.CaseSteps, tc.Dir, tc.Starts = nil, nil, "", 0
 	tc.Mocks = nil
 	if len(mockEntries) > 0 {
 		tc.Mocks = append([]MockEntry(nil), mockEntries...)
@@ -272,6 +1252,77 @@ func nodeHasField(node *yaml.Node, field string) bool {
 		}
 	}
 	return false
+}
+
+// nodeHasEntries reports whether the mapping node holds field with at least
+// one entry: a list with an item, or the earlier format's comma-separated
+// string of names with one. An empty or null value loses nothing when it is
+// not read.
+func nodeHasEntries(node *yaml.Node, field string) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == field {
+			v := node.Content[i+1]
+			for v.Kind == yaml.AliasNode && v.Alias != nil {
+				v = v.Alias
+			}
+			switch v.Kind {
+			case yaml.SequenceNode, yaml.MappingNode:
+				return len(v.Content) > 0
+			case yaml.ScalarNode:
+				return v.Tag != "!!null" && strings.Trim(v.Value, " ,") != ""
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// mergedField is the mapping that gives node field: node itself, else the
+// first mapping its merge keys (<<) name that has it, as YAML resolves them;
+// nil when none does.
+func mergedField(node *yaml.Node, field string) *yaml.Node {
+	if nodeHasField(node, field) {
+		return node
+	}
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	var merged []*yaml.Node
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == "<<" {
+			merged = append(merged, node.Content[i+1])
+		}
+	}
+	for _, m := range MergedMappings(merged) {
+		if nodeHasField(m, field) {
+			return m
+		}
+	}
+	return nil
+}
+
+// jsonHasEntries is nodeHasEntries for a JSON object.
+func jsonHasEntries(data []byte, field string) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	var list []json.RawMessage
+	if json.Unmarshal(raw[field], &list) == nil {
+		return len(list) > 0
+	}
+	var names string
+	if json.Unmarshal(raw[field], &names) == nil {
+		return strings.Trim(names, " ,") != ""
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw[field], &object) == nil {
+		return len(object) > 0
+	}
+	return len(raw[field]) > 0 && string(raw[field]) != "null"
 }
 
 func jsonContainsField(data []byte, field string) bool {
@@ -347,4 +1398,10 @@ func MergeStartupMockNames(perTest []MockEntry, startup []string) []string {
 		add(n)
 	}
 	return out
+}
+
+type SuiteSpan struct {
+	Dir   string    `json:"dir" yaml:"dir" bson:"dir"`
+	Start time.Time `json:"start" yaml:"start" bson:"start"`
+	End   time.Time `json:"end" yaml:"end" bson:"end"`
 }

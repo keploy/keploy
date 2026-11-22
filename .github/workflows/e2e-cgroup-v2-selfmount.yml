@@ -53,8 +53,7 @@ jobs:
 
       - name: Install build essentials
         run: |
-          sudo timeout 600 apt-get -y update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
-          sudo timeout 600 apt-get -y install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 build-essential gcc libc-dev pkg-config
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential gcc libc-dev pkg-config
 
       - name: Install dependencies
         run: |

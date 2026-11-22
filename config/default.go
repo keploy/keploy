@@ -93,6 +93,17 @@ test:
   # legacy lax behaviour, opt out with strictMockWindow: false here or
   # export KEPLOY_STRICT_MOCK_WINDOW=0 — the env var wins.
   strictMockWindow: true
+  # allowEgress names what a replay may reach on the real network. A
+  # replay's DNS query that no mock answers gets keploy's own answer. Only a
+  # name the replay's own network owns goes to that network's resolver: in
+  # docker, a container, compose service or alias name docker's resolver
+  # holds for the replay's networks (keploy lists them); in a cluster, a
+  # name under the cluster domain. Those resolvers send every other name,
+  # single-label ones included, to the host's and public resolvers, and
+  # docker's resolver sends every query type but A, AAAA and MX of its own
+  # names there too, so keploy answers those itself. Add "dns" to forward
+  # every miss to the host's and public resolvers.
+  allowEgress: []
 record:
   recordTimer: 0s
   filters: []
@@ -149,25 +160,48 @@ bypassRules: []
 # recalls the port from the recorded mocks. You normally do not need to
 # configure anything here.
 #
-# mysqlPorts pins extra ports to the MySQL parser, skipping detection
-# for them (the built-in list is 3306 and 4000). Useful only to avoid
-# the ~250ms probe on the first connection to a port, or alongside
-# disableMysqlAutoDetect.
+# mysqlPorts pins ports to the MySQL parser, skipping detection for
+# them. The built-in 3306 and 4000 are only a hint: a connection there
+# whose client speaks first (HTTP to a service on 4000) is relayed as
+# that protocol. A listed port is pinned: an HTTP service on a port
+# listed here gets no answer, so list only ports that serve MySQL. A
+# list here replaces the built-in 3306 and 4000, so keep those you use.
+# List a port when replay reaches MySQL at an endpoint that
+# moved since the recording and is neither the container nor the host
+# the recording reached MySQL at — another port of this machine
+# (localhost, or any address of its own), or of the Docker host at
+# the container's gateway (172.17.0.1 on Docker's default bridge),
+# always needs listing; keploy's miss or warning names the port — or
+# alongside disableMysqlAutoDetect.
 mysqlPorts: []
 # Set to true to turn detection off and go back to matching mysqlPorts
-# strictly. MySQL on any other port will then hang its handshake.
+# strictly. MySQL on any other port will then hang its handshake, and
+# 3306 and 4000 (or the ports listed) are pinned to MySQL again.
 disableMysqlAutoDetect: false
-# During replay, keploy serves recorded MySQL mocks even when the app
-# connects to a port the recording never saw — an app whose environment
-# was rebuilt does not always get the endpoint it had while recording,
-# and refusing would leave it waiting for a greeting only keploy can
-# send. Set to true if a non-MySQL dependency is being misread as MySQL;
-# unlike disableMysqlAutoDetect this keeps record-time detection on.
+# During replay, keploy serves recorded MySQL mocks on a port the
+# recording never saw when the connection reaches the container the
+# recording reached MySQL in, or the host it reached it on (other than
+# this machine, or the Docker host at the container's gateway) with the
+# port moved: refusing would leave the app waiting for a greeting only
+# keploy can send. Any other moved endpoint, another localhost port
+# among them, needs its port in mysqlPorts. Set to true if a non-MySQL
+# dependency on that host is being misread as MySQL; unlike
+# disableMysqlAutoDetect this keeps record-time detection on.
 disableMysqlEndpointDrift: false
+# During replay, a PostgreSQL query that matches no recording on its
+# parameter types and values is served its recordings in record order (the
+# time-slice fallback, which checks only how many parameters it has and
+# their formats). Set to true to make such a query a miss instead, when a
+# query recorded with other values could get another call's rows.
+# KEPLOY_PG_V3_TIMESLICE_COHORT=0 turns it off too; either one does.
+disablePgTimeSliceCohort: false
 disableMapping: false
 mock:
   name: "default"
   onMiss: "fail"
+  # Record the app's incoming requests and responses as test cases alongside the mocks, once the app's
+  # port is given with --pass-through-ports <app port>; without it none are recorded. Turn off with --record-requests=false.
+  recordRequests: true
   strict: false
   local: false
   recordTimer: 0s

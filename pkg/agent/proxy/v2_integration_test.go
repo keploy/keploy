@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
@@ -53,7 +54,7 @@ func mustStartRelay(t *testing.T, pp *pipePair, bump func()) *relay.Relay {
 	r := relay.New(relay.Config{
 		Logger:       log,
 		BumpActivity: bump,
-	}, pp.proxySrc, pp.proxyDst)
+	}, pp.proxySrc, connseq.NewUpstream(pp.proxyDst))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -298,7 +299,7 @@ func (errParserDecode) Error() string { return "synthetic parser decode error" }
 
 // TestV2_ErrorDoesNotBlockTraffic mirrors TestV2_PanicDoesNotBlockTraffic
 // for the clean error-return path. A real parser returning an error
-// (e.g. http recordv2 on "invalid content-length: ...") must not tear
+// (e.g. http recordv2 on a Content-Length that is not a number) must not tear
 // down the application's TCP connection. Confirmed empirically against
 // the V2 HTTP parser via /api/stalls/v2gap/http?case=bad-cl in the
 // sample-app validators; this is the unit-level regression guard.

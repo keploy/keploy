@@ -10,6 +10,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 )
 
 // compile-time assertions.
@@ -71,7 +73,7 @@ func queryOf(r *models.HTTPReq) url.Values {
 		}
 		return vals
 	}
-	if u, err := url.Parse(r.URL); err == nil {
+	if u, err := parseRecordedURL(r.URL); err == nil {
 		return u.Query()
 	}
 	return nil
@@ -86,25 +88,43 @@ func queryOf(r *models.HTTPReq) url.Values {
 // present on the live side but absent on the stripped recorded side) and
 // spuriously fail the shape match — stripping both sides keeps the comparison
 // honest while still ignoring the volatile key's value.
-func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
+func (h *HTTP) MatchRequestShape(ctx context.Context, live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
 	if live == nil || live.Spec.HTTPReq == nil || recorded == nil || recorded.Spec.HTTPReq == nil {
 		return false, "missing request payload"
 	}
 	vol := volatileSet(lane.VolatileParams)
 	liveReq, err := mockToReq(stripVolatile(live, vol))
 	if err != nil {
-		return false, "unparseable live request: " + err.Error()
+		return false, "unparseable live request: " + utils.WithholdInput(err).Error()
 	}
 	rec := stripVolatile(recorded, vol)
 	// SchemaMatch does field-by-field request-shape comparison; a non-empty
 	// result means the single candidate matched.
-	matched, err := h.SchemaMatch(context.Background(), liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, true)
+	// Under the proven switch the destination is compared as every HTTP
+	// call's is, and no path segment or query value is relaxed for its shape
+	// (strict.go). The live call here carries no connection, so it is
+	// compared as a call that reached no container (sameDestination). The
+	// verdict only counts a flag: the engine serves
+	// the recorded epoch either way (async.Engine.decideServe), as a lane the
+	// user declared asks.
+	matched, err := h.SchemaMatch(ctx, liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, !provenswitch.On())
 	if err != nil {
-		return false, "schema match error: " + err.Error()
+		return false, "schema match error: " + utils.WithholdInput(err).Error()
 	}
 	if len(matched) == 0 {
-		return false, fmt.Sprintf("request shape drift: %s %s vs %s",
-			liveReq.method, liveReq.url.Path, recorded.Spec.HTTPReq.URL)
+		// Both by their path's shape and where they first differ: the
+		// detail is logged at INFO, and a path or a query holds tokens.
+		recURL, _ := models.ParseRequestURL(recorded.Spec.HTTPReq.URL)
+		if recURL == nil {
+			recURL = &url.URL{}
+		}
+		// The live call with its path tag (models.URLPathTag), as the
+		// agent's other lines tag its request; the recording's path by its
+		// shape alone: no console or report line prints a recording's path
+		// beside a tag.
+		return false, fmt.Sprintf("request shape drift: %s vs %s (paths differ at segment %d)",
+			models.WithPathTag(liveReq.method+" "+utils.URLPathShape(liveReq.url), models.URLPathTag(ctx, liveReq.method, liveReq.url)),
+			utils.URLPathShape(recURL), pathDiffersAt(recURL.EscapedPath(), liveReq.url.EscapedPath()))
 	}
 	return true, ""
 }
@@ -128,7 +148,7 @@ func hostAndPath(r *models.HTTPReq) (host, p string) {
 	if r.Header != nil && r.Header["Host"] != "" {
 		host = r.Header["Host"]
 	}
-	if u, err := url.Parse(r.URL); err == nil {
+	if u, err := parseRecordedURL(r.URL); err == nil {
 		if host == "" {
 			host = u.Host
 		}
@@ -157,7 +177,7 @@ func stripVolatile(m *models.Mock, vol map[string]bool) *models.Mock {
 		return m
 	}
 	req := *m.Spec.HTTPReq
-	if u, err := url.Parse(req.URL); err == nil {
+	if u, err := parseRecordedURL(req.URL); err == nil {
 		q := u.Query()
 		for k := range vol {
 			q.Del(k)
@@ -183,7 +203,7 @@ func stripVolatile(m *models.Mock, vol map[string]bool) *models.Mock {
 
 // mockToReq builds the matcher's `req` value from a recorded/live mock.
 func mockToReq(m *models.Mock) (*req, error) {
-	u, err := url.Parse(m.Spec.HTTPReq.URL)
+	u, err := parseRecordedURL(m.Spec.HTTPReq.URL)
 	if err != nil {
 		return nil, err
 	}
@@ -221,6 +241,12 @@ func liveReqToMock(input *req) *models.Mock {
 // Shared by MatchRequestShape and decode.go's auto-header-noise setup so the two
 // can't drift. The response assertion shares the underlying models list but not
 // this function — it must compare names exactly, not through a noise map.
+//
+// Under the proven switch the credentials leave it (models.CredentialHeaders):
+// a request's Authorization, idempotency keys and CSRF tokens are compared.
 func flakyHeaderNoise() map[string][]string {
+	if provenswitch.On() {
+		return models.ProvenFlakyHeaderNoise()
+	}
 	return models.FlakyHeaderNoise()
 }

@@ -53,7 +53,8 @@ func describe(list []*models.Mock) string {
 // tier between two stagings: the startup tier in front of it, a mock listed
 // twice, undated mocks, a matched mock re-stamped to the back of the tree,
 // deletions, and an update that moves a mock's request time, after which the
-// index stands down and the tree is walked.
+// index is built again. Some request times are beyond what Unix nanoseconds
+// hold, which the index checks one by one.
 func TestGetSessionMocksInWindow_IsTheWindowOfGetSessionMocks(t *testing.T) {
 	base := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
 	at := func(ms int) time.Time { return base.Add(time.Duration(ms) * time.Millisecond) }
@@ -70,8 +71,11 @@ func TestGetSessionMocksInWindow_IsTheWindowOfGetSessionMocks(t *testing.T) {
 		var session []*models.Mock
 		for i := 0; i < 300; i++ {
 			mk := newMockForTest(fmt.Sprintf("s%d-m%d", seed, i), at(r.Intn(2000)), models.LifetimeSession)
-			if r.Intn(25) == 0 {
+			switch r.Intn(25) {
+			case 0:
 				mk.Spec.ReqTimestampMock = time.Time{}
+			case 1:
+				mk.Spec.ReqTimestampMock = time.Date(1500+r.Intn(2)*900, 1, 1, 0, 0, 0, 0, time.UTC)
 			}
 			session = append(session, mk)
 		}
@@ -95,10 +99,19 @@ func TestGetSessionMocksInWindow_IsTheWindowOfGetSessionMocks(t *testing.T) {
 					t.Fatalf("seed %d, %s, window [%v, %v]:\n got  %s\n want %s", seed, stage, s.Sub(base), e.Sub(base), describe(got), describe(want))
 				}
 			}
-			// The window that holds the first test.
-			want := windowOfSessionMocks(t, mm, at(0), at(10))
-			if got, _ := mm.GetSessionMocksInWindow(at(0), at(10)); !sameMocks(got, want) {
-				t.Fatalf("seed %d, %s, first window:\n got  %s\n want %s", seed, stage, describe(got), describe(want))
+			// The window that holds the first test, and windows reaching
+			// past what Unix nanoseconds hold.
+			for _, w := range [][2]time.Time{
+				{at(0), at(10)},
+				{time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC), at(1000)},
+				{at(1000), time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{time.Date(1400, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(1600, 1, 1, 0, 0, 0, 0, time.UTC)},
+			} {
+				want := windowOfSessionMocks(t, mm, w[0], w[1])
+				if got, _ := mm.GetSessionMocksInWindow(w[0], w[1]); !sameMocks(got, want) {
+					t.Fatalf("seed %d, %s, window [%v, %v]:\n got  %s\n want %s", seed, stage, w[0], w[1], describe(got), describe(want))
+				}
 			}
 		}
 		check("staged")
@@ -122,7 +135,7 @@ func TestGetSessionMocksInWindow_IsTheWindowOfGetSessionMocks(t *testing.T) {
 		check("after deletes")
 
 		// An update that moves a mock's request time: the index cannot follow
-		// it, so lookups fall back to a walk and stay exact.
+		// it, so it is dropped and the next lookup builds it again.
 		old := current[0]
 		moved := *old
 		moved.Spec.ReqTimestampMock = at(1234)
@@ -132,10 +145,108 @@ func TestGetSessionMocksInWindow_IsTheWindowOfGetSessionMocks(t *testing.T) {
 			t.Fatalf("seed %d: the mock moved to 1234ms is not in its new window: %s", seed, describe(got))
 		}
 
-		// The next staging rebuilds the index.
+		// The next staging brings a new tree, indexed on its first lookup.
 		mm.SetMocksWithWindow(perTest, session, at(10), at(20))
 		check("restaged")
 		mm.Close()
+	}
+}
+
+// unixNs holds a time exactly when Unix nanoseconds can: from minNsTime to
+// maxNsTime inclusive. A time one nanosecond outside would wrap, and be filed
+// and looked up at the far end of the index.
+func TestUnixNsHoldsExactlyTheNanosecondRange(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		at   time.Time
+		ok   bool
+	}{
+		{"the earliest", minNsTime, true},
+		{"a nanosecond before the earliest", minNsTime.Add(-time.Nanosecond), false},
+		{"the latest", maxNsTime, true},
+		{"a nanosecond after the latest", maxNsTime.Add(time.Nanosecond), false},
+		{"the epoch", time.Unix(0, 0), true},
+	} {
+		ns, ok := unixNs(c.at)
+		if ok != c.ok {
+			t.Errorf("%s (%s): ok=%v, want %v", c.name, c.at.UTC().Format(time.RFC3339Nano), ok, c.ok)
+			continue
+		}
+		if ok && !time.Unix(0, ns).Equal(c.at) {
+			t.Errorf("%s: %d nanoseconds do not round-trip to %s", c.name, ns, c.at.UTC().Format(time.RFC3339Nano))
+		}
+	}
+
+	// Mocks at each bound and a nanosecond outside it, looked up through
+	// windows that start or end exactly there.
+	var session []*models.Mock
+	for i, at := range []time.Time{
+		minNsTime.Add(-time.Nanosecond), minNsTime, minNsTime.Add(time.Nanosecond),
+		maxNsTime.Add(-time.Nanosecond), maxNsTime, maxNsTime.Add(time.Nanosecond),
+	} {
+		session = append(session, newMockForTest(fmt.Sprintf("b%d", i), at, models.LifetimeSession))
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.SetMocksWithWindow(nil, session, minNsTime, maxNsTime)
+	for _, w := range [][2]time.Time{
+		{minNsTime.Add(-time.Nanosecond), minNsTime.Add(-time.Nanosecond)},
+		{minNsTime.Add(-time.Nanosecond), minNsTime},
+		{minNsTime, minNsTime},
+		{minNsTime, minNsTime.Add(time.Nanosecond)},
+		{maxNsTime.Add(-time.Nanosecond), maxNsTime},
+		{maxNsTime, maxNsTime},
+		{maxNsTime, maxNsTime.Add(time.Nanosecond)},
+		{maxNsTime.Add(time.Nanosecond), maxNsTime.Add(time.Nanosecond)},
+	} {
+		want := windowOfSessionMocks(t, mm, w[0], w[1])
+		if got, _ := mm.GetSessionMocksInWindow(w[0], w[1]); !sameMocks(got, want) {
+			t.Errorf("window %s - %s:\n got  %s\n want %s", w[0].UTC().Format(time.RFC3339Nano), w[1].UTC().Format(time.RFC3339Nano), describe(got), describe(want))
+		}
+	}
+}
+
+// The window index is built by the first windowed lookup on a staged tree, not
+// by the staging: a replay that never looks a window up (no MySQL traffic)
+// paid for an index on every staging (see BenchmarkSessionWindowStaging).
+// A change the index cannot follow drops it, and the next lookup builds it
+// again.
+func TestTheWindowIndexIsBuiltByTheFirstLookup(t *testing.T) {
+	base := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
+	var session []*models.Mock
+	for i := 0; i < 100; i++ {
+		session = append(session, newMockForTest(fmt.Sprintf("m%d", i), base.Add(time.Duration(i)*time.Millisecond), models.LifetimeSession))
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	indexed := func() bool { return sessionIndexed(mm) }
+
+	mm.SetMocksWithWindow(nil, session, base, base.Add(10*time.Millisecond))
+	if indexed() {
+		t.Fatal("staging built the window index; the first lookup should")
+	}
+	if got, _ := mm.GetSessionMocksInWindow(base, base.Add(9*time.Millisecond)); len(got) != 10 {
+		t.Fatalf("lookup returned %d mocks, want 10", len(got))
+	}
+	if !indexed() {
+		t.Fatal("the first lookup did not keep the index it built")
+	}
+
+	old := session[3]
+	moved := *old
+	moved.Spec.ReqTimestampMock = base.Add(50 * time.Millisecond)
+	if !mm.UpdateUnFilteredMock(old, &moved) {
+		t.Fatal("UpdateUnFilteredMock failed")
+	}
+	if indexed() {
+		t.Fatal("an update that moved a request time left the index in place")
+	}
+	got, _ := mm.GetSessionMocksInWindow(base.Add(50*time.Millisecond), base.Add(50*time.Millisecond))
+	if len(got) != 2 || !containsMock(got, &moved) {
+		t.Fatalf("window at 50ms after the move: %s, want m50 and the moved m3", describe(got))
+	}
+	if !indexed() {
+		t.Fatal("the lookup after the move did not build the index again")
 	}
 }
 
@@ -185,4 +296,49 @@ func BenchmarkSessionWindow(b *testing.B) {
 			}
 		}
 	})
+}
+
+// BenchmarkSessionWindowStaging measures what a staging and its first windowed
+// lookup cost over a pool the size of a 7,000-test MySQL recording in lax mode:
+// the reusable pool followed by the promoted per-test mocks, two runs ordered
+// by request time, staged from fresh copies as the agent stages them.
+func BenchmarkSessionWindowStaging(b *testing.B) {
+	base := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
+	const mocks = 38000
+	var pool []*models.Mock
+	for i := 0; i < mocks/10; i++ {
+		pool = append(pool, newMockForTest(fmt.Sprintf("c%d", i), base.Add(time.Duration(i*10)*time.Millisecond), models.LifetimeSession))
+	}
+	for i := 0; i < mocks-mocks/10; i++ {
+		pool = append(pool, newMockForTest(fmt.Sprintf("p%d", i), base.Add(time.Duration(i)*time.Millisecond), models.LifetimeSession))
+	}
+	start, end := base.Add(time.Second), base.Add(time.Second+4*time.Millisecond)
+	fresh := func() []*models.Mock {
+		out := make([]*models.Mock, len(pool))
+		for i, mk := range pool {
+			out[i] = mk.DeepCopy()
+		}
+		return out
+	}
+	for _, lookup := range []bool{false, true} {
+		name := "stage"
+		if lookup {
+			name = "stage+first-lookup"
+		}
+		b.Run(name, func(b *testing.B) {
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			for n := 0; n < b.N; n++ {
+				b.StopTimer()
+				staged := fresh()
+				b.StartTimer()
+				mm.SetMocksWithWindow(nil, staged, start, end)
+				if lookup {
+					if got, _ := mm.GetSessionMocksInWindow(start, end); len(got) != 6 {
+						b.Fatalf("got %d", len(got))
+					}
+				}
+			}
+		})
+	}
 }

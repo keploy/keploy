@@ -3,7 +3,7 @@
 package utils
 
 import (
-	"fmt"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -18,7 +18,7 @@ import (
 
 // findChildPIDs returns every descendant of parentPID, and how to read each
 // one's process group -- both from one snapshot of the process table (sysctl
-// kern.proc.all).
+// kern.proc.all), taken by procTable.tree.
 //
 // The groups come from that snapshot, not from getpgid(2). getpgid refuses a
 // zombie with ESRCH -- a child its parent has not waited for yet, which a
@@ -33,42 +33,40 @@ func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	parents := make(map[int]int, len(procs))
-	groups := make(map[int]int, len(procs))
+	table := newProcTable(len(procs))
 	for _, p := range procs {
-		parents[int(p.Proc.P_pid)] = int(p.Eproc.Ppid)
-		groups[int(p.Proc.P_pid)] = int(p.Eproc.Pgid)
+		table.add(int(p.Proc.P_pid), int(p.Eproc.Ppid), int(p.Eproc.Pgid))
 	}
-	groupOf := func(pid int) (int, error) {
-		pgid, ok := groups[pid]
-		if !ok {
-			return 0, fmt.Errorf("process %d is not in the process table", pid)
-		}
-		return pgid, nil
-	}
-	return descendantsOf(parentPID, parents), groupOf, nil
+	children, groupOf := table.tree(parentPID)
+	return children, groupOf, nil
 }
 
-// descendantsOf returns every descendant of root in a pid -> parent pid table,
-// nearest first. The kernel's table is a tree except at its very top
-// (kernel_task is its own parent), and each pid is still visited only once
-// however the table loops.
-func descendantsOf(root int, parents map[int]int) []int {
-	children := make(map[int][]int, len(parents))
-	for pid, ppid := range parents {
-		children[ppid] = append(children[ppid], pid)
+// groupReached reads no process on macOS, which has no /proc:
+// InterruptProcessTreeReached says none there.
+func groupReached(int, syscall.Signal) []Reached { return nil }
+
+// GroupRunsOn reports whether a process of process group pgid runs: one
+// the kernel's process table holds in that group (sysctl kern.proc.pgrp
+// reads that group alone) that has not exited. A zombie has exited, and a table keploy cannot read says none
+// runs. A native application's command leads a process group of its own
+// (ExecuteCommand), so once the command has exited, a process it started that
+// is still in its group is the application running on.
+func GroupRunsOn(pgid int) bool {
+	if pgid <= 1 {
+		return false
 	}
-	var descendants []int
-	seen := map[int]bool{root: true}
-	for queue := []int{root}; len(queue) > 0; queue = queue[1:] {
-		for _, child := range children[queue[0]] {
-			if seen[child] {
-				continue
-			}
-			seen[child] = true
-			descendants = append(descendants, child)
-			queue = append(queue, child)
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", pgid)
+	if err != nil {
+		return false
+	}
+	for _, p := range procs {
+		if p.Proc.P_stat != sZomb {
+			return true
 		}
 	}
-	return descendants
+	return false
 }
+
+// sZomb is XNU's p_stat of a process that has exited and waits for its
+// parent to reap it (bsd/sys/proc.h SZOMB).
+const sZomb = 5

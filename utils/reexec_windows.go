@@ -10,8 +10,9 @@ import (
 // Docker Desktop on Windows handles permissions differently and doesn't require sudo.
 // If this is called on Windows, it means there's a logic error - we should never
 // try to re-exec with sudo on Windows.
-func ReexecWithSudo(logger *zap.Logger) {
+func ReexecWithSudo(logger *zap.Logger) error {
 	logger.Debug("ReexecWithSudo called on Windows - this is a no-op")
+	return nil
 }
 
 // ShouldReexecWithSudo always returns false on Windows.

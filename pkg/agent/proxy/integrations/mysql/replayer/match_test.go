@@ -1,8 +1,13 @@
 package replayer
 
 import (
+	"context"
 	"fmt"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.uber.org/zap"
 )
 
 // TestQuerySigCacheIsBounded pins the retention contract on querySigCache.
@@ -107,5 +112,57 @@ func TestQuerySigCacheSkipsUnparseableSQL(t *testing.T) {
 	}
 	if got := querySigCache.Len(); got != 0 {
 		t.Errorf("querySigCache holds %d entries after a parse failure, want 0", got)
+	}
+}
+
+// An empty pool answers a command as a pool holding only mocks the command
+// cannot match does: a query by the no_mocks miss, a control statement by its
+// synthesized OK, a SEND_LONG_DATA by accepting it. Before, an empty pool was
+// an error that did not wrap models.ErrNoMockMatched: the connection was
+// dropped for every command, the proxy dropped the error too, and the test
+// that sent the command passed with no miss. Whether a ROLLBACK was answered
+// then depended on whether an unrelated mock was left in the pool. The pool is
+// empty, for one, when a connection outlives the mocks its handshake was
+// served from.
+func TestAnEmptyPoolAnswersAsAPoolWithNoMatchingMock(t *testing.T) {
+	sld := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 12}, Type: "COM_STMT_SEND_LONG_DATA"},
+		Message: &mysql.StmtSendLongDataPacket{StatementID: 3},
+	}}
+
+	t.Run("a query is the no_mocks miss", func(t *testing.T) {
+		resp, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), comQueryReq("SELECT 1"), &fakeMockDb{}, newDecodeCtx(), nil, nil)
+		if err != nil || ok || resp != nil || miss == nil || miss.matchPhase != models.MatchPhaseNoMocks || miss.candidateCount != 0 {
+			t.Fatalf("matchCommand on an empty pool: resp=%v ok=%v miss=%+v err=%v; want the no_mocks miss, and no answer or error", resp, ok, miss, err)
+		}
+	})
+	for name, req := range map[string]mysql.Request{
+		"a control statement is answered": comQueryReq("SET autocommit=0"),
+		"a SEND_LONG_DATA is accepted":    sld,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, &fakeMockDb{}, newDecodeCtx(), nil, nil)
+			if err != nil || !ok || resp == nil || miss != nil {
+				t.Fatalf("matchCommand on an empty pool: resp=%v ok=%v miss=%+v err=%v; want it answered, as a pool with no matching mock answers it", resp, ok, miss, err)
+			}
+		})
+	}
+}
+
+// A recorded SSLRequest whose message is not an SSLRequest packet is no
+// match, not a panic: the parser's recover hid one, closing the connection
+// with no miss.
+func TestAnSSLRequestThatCannotBeReadIsNoMatch(t *testing.T) {
+	header := &mysql.PacketInfo{Header: &mysql.Header{SequenceID: 1}, Type: mysql.SSLRequest}
+	recorded := mysql.PacketBundle{Header: header, Message: &mysql.OKPacket{}}
+	live := mysql.PacketBundle{Header: header, Message: &mysql.SSLRequestPacket{MaxPacketSize: 1 << 24, CharacterSet: 0x21}}
+	if err := matchSSLRequest(context.Background(), zap.NewNop(), recorded, live); err == nil {
+		t.Fatal("a recorded SSLRequest holding another packet matched")
+	}
+	if err := matchSSLRequest(context.Background(), zap.NewNop(), live, recorded); err == nil {
+		t.Fatal("a live SSLRequest holding another packet matched")
+	}
+	if err := matchSSLRequest(context.Background(), zap.NewNop(), live, live); err != nil {
+		t.Fatalf("an SSLRequest did not match itself: %v", err)
 	}
 }

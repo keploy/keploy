@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -118,7 +119,7 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 
 	for _, variable := range variables {
 		// Skip disabled variables
-		if variable["disabled"] != nil && variable["disabled"].(bool) {
+		if disabled, ok := variable["disabled"].(bool); ok && disabled {
 			continue
 		}
 
@@ -132,7 +133,9 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 		// Extract and validate variable value
 		value, ok := variable["value"].(string)
 		if !ok {
-			pi.logger.Error("Global variable value is not a string", zap.Any("value", variable["value"]))
+			// Its type, never the value: a collection's variables hold its
+			// tokens and keys.
+			pi.logger.Error("Global variable value is not a string", zap.String("type", fmt.Sprintf("%T", variable["value"])))
 			continue
 		}
 
@@ -153,14 +156,14 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 	if basePath != "" {
 		req.URL, err = utils.ReplaceBaseURL(req.URL, basePath)
 		if err != nil {
-			pi.logger.Error("failed to replace hostname", zap.Error(err))
+			pi.logger.Error("failed to replace hostname", zap.Error(utils.WithholdInput(err)))
 			return models.HTTPResp{}, err
 		}
 	}
 
 	httpReq, err := http.NewRequest(string(req.Method), req.URL, strings.NewReader(req.Body))
 	if err != nil {
-		pi.logger.Error("failed to create HTTP request", zap.Error(err))
+		pi.logger.Error("failed to create HTTP request", zap.Error(utils.WithholdInput(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -180,7 +183,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		pi.logger.Error("failed to send HTTP request", zap.Error(err))
+		pi.logger.Error("failed to send HTTP request", zap.Error(utils.WithholdInput(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -207,7 +210,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 		response.Header[key] = strings.Join(value, ",")
 	}
 	// Use the response.Body field to avoid unused write error
-	pi.logger.Info("Response Body", zap.String("body", response.Body))
+	pi.logger.Info("Response Body", zap.Int("bytes", len(response.Body)))
 
 	return response, nil
 }
@@ -220,6 +223,11 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 
 	testCounter := 0
 	var itemsToProcess []TestData
+
+	// Postman lets two folders share a name, and both write to the test set of
+	// that name, so numbering is kept per test set: the second folder's tests
+	// follow the first's instead of overwriting test-1, test-2, and so on.
+	folderCounters := make(map[string]int)
 
 	if len(collection.Items.PostmanItems) > 0 {
 		for _, item := range collection.Items.PostmanItems {
@@ -235,17 +243,17 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testSetPath := filepath.Join(cwd, "keploy", testSet)
 			testsPath := filepath.Join(testSetPath, "tests")
 
+			folderCounter := folderCounters[testSet]
 			for _, testItem := range item.Item {
 				if err := pi.processEmptyResponse(&testItem, globalVariables, basePath); err != nil {
 					return err
 				}
 
-				if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
+				if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &folderCounter); err != nil {
 					return fmt.Errorf("failed to write test data: %w", err)
 				}
 			}
-
-			testCounter = 0
+			folderCounters[testSet] = folderCounter
 		}
 	}
 
@@ -260,7 +268,7 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 				return err
 			}
 
-			if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
+			if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &testCounter); err != nil {
 				return fmt.Errorf("failed to write test data: %w", err)
 			}
 		}
@@ -358,7 +366,7 @@ func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariab
 	return fmt.Errorf("URL is empty")
 }
 
-func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, globalVariables map[string]string, testCounter *int) error {
+func (pi *PostmanImporter) writeTestData(testItem TestData, root, testsPath string, globalVariables map[string]string, testCounter *int) error {
 	for _, response := range testItem.Response {
 		testName := fmt.Sprintf("test-%d", *testCounter+1)
 
@@ -389,7 +397,7 @@ func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, gl
 			return fmt.Errorf("failed to marshal test result: %w", err)
 		}
 
-		if err := yaml.WriteFileF(pi.ctx, pi.logger, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
+		if err := yaml.WriteRecordingFileF(pi.ctx, pi.logger, root, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
 			return fmt.Errorf("failed to write test result: %w", err)
 		}
 
@@ -428,7 +436,11 @@ func constructRequest(req *PostmanRequest, variables map[string]string) models.H
 func extractHeaders(headers []map[string]interface{}) map[string]string {
 	headersMap := make(map[string]string)
 	for _, header := range headers {
-		headersMap[header["key"].(string)] = header["value"].(string)
+		key, okKey := header["key"].(string)
+		value, okVal := header["value"].(string)
+		if okKey && okVal {
+			headersMap[key] = value
+		}
 	}
 	return headersMap
 }
@@ -438,17 +450,23 @@ func extractURL(url interface{}) string {
 	case string:
 		return v
 	case map[string]interface{}:
-		url := v["raw"].(string)
-		return url
+		if raw, ok := v["raw"].(string); ok {
+			return raw
+		}
+		return ""
 	default:
 		return ""
 	}
 }
 
 func processUrlencodedBody(body []map[string]interface{}) string {
-	keyValues := []string{}
+	var keyValues []string
 	for _, item := range body {
-		keyValues = append(keyValues, item["key"].(string)+"="+item["value"].(string))
+		key, okKey := item["key"].(string)
+		value, okVal := item["value"].(string)
+		if okKey && okVal {
+			keyValues = append(keyValues, url.QueryEscape(key)+"="+url.QueryEscape(value))
+		}
 	}
 	return strings.Join(keyValues, "&")
 }
@@ -456,10 +474,42 @@ func processUrlencodedBody(body []map[string]interface{}) string {
 func processFormdataBody(body []map[string]interface{}) []models.FormData {
 	form := []models.FormData{}
 	for _, formData := range body {
-		form = append(form, models.FormData{
-			Key:    formData["key"].(string),
-			Values: []string{formData["value"].(string)},
-		})
+		if disabled, ok := formData["disabled"].(bool); ok && disabled {
+			continue
+		}
+		key, okKey := formData["key"].(string)
+		if !okKey || key == "" {
+			continue
+		}
+		if fieldType, _ := formData["type"].(string); fieldType == "file" {
+			var paths []string
+			switch src := formData["src"].(type) {
+			case string:
+				if src != "" {
+					paths = []string{src}
+				}
+			case []interface{}:
+				for _, elem := range src {
+					if p, ok := elem.(string); ok && p != "" {
+						paths = append(paths, p)
+					}
+				}
+			}
+			// Note: Postman exports typically record host absolute paths in src;
+			// replay's OpenRecordingFile enforces recording-directory containment,
+			// so absolute paths must be made relative to the recording if replayed.
+			form = append(form, models.FormData{
+				Key:   key,
+				Paths: paths,
+			})
+			continue
+		}
+		if value, okVal := formData["value"].(string); okVal {
+			form = append(form, models.FormData{
+				Key:    key,
+				Values: []string{value},
+			})
+		}
 	}
 	return form
 }
@@ -479,7 +529,7 @@ func constructResponse(res PostmanResponse) models.HTTPResp {
 }
 
 func replaceTemplateVars(input string, variables map[string]string) string {
-	re := regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
+	re := regexp.MustCompile(`\{\{\s*([\w.-]+)\s*\}\}`)
 
 	return re.ReplaceAllStringFunc(input, func(match string) string {
 		submatches := re.FindStringSubmatch(match)

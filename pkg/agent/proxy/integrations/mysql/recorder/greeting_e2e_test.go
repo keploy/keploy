@@ -480,6 +480,7 @@ type e2eLeg struct {
 
 	mu       sync.Mutex
 	closed   bool
+	captured uint64 // numbers the chunks pushed, in push order (ConnSeq)
 	clientCh chan fakeconn.Chunk
 	destCh   chan fakeconn.Chunk
 	mocks    chan *models.Mock
@@ -565,10 +566,16 @@ func (l *e2eLeg) push(fromClient bool, pkt []byte, at time.Time) {
 		ch, dir = l.clientCh, fakeconn.FromClient
 	}
 	select {
-	case ch <- fakeconn.Chunk{Dir: dir, Bytes: append([]byte(nil), pkt...), ReadAt: at, WrittenAt: at}:
+	case ch <- fakeconn.Chunk{Dir: dir, ConnSeq: l.nextSeq(), Bytes: append([]byte(nil), pkt...), ReadAt: at, WrittenAt: at}:
 	default:
 		l.err = errors.New("e2e leg buffer full: a packet was dropped")
 	}
+}
+
+// nextSeq numbers the next chunk pushed. Caller holds mu.
+func (l *e2eLeg) nextSeq() uint32 {
+	l.captured++
+	return fakeconn.ConnSeqOf(l.captured)
 }
 
 func (l *e2eLeg) closeStreams() {
@@ -604,8 +611,8 @@ func (rec *e2eRecording) rawLeg(connKey string, delay time.Duration, greeting []
 	go func() {
 		defer rec.wg.Done()
 		time.Sleep(delay)
-		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: append([]byte(nil), greeting...), ReadAt: greetingAt, WrittenAt: greetingAt}
-		clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: append([]byte(nil), sslReq...), ReadAt: sslReqAt, WrittenAt: sslReqAt}
+		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: 1, Bytes: append([]byte(nil), greeting...), ReadAt: greetingAt, WrittenAt: greetingAt}
+		clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 2, Bytes: append([]byte(nil), sslReq...), ReadAt: sslReqAt, WrittenAt: sslReqAt}
 		_ = RecordV2(ctx, zap.NewNop(), sess)
 		close(clientCh)
 		close(destCh)

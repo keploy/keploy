@@ -6,11 +6,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
@@ -63,6 +66,13 @@ func (d *stoppedAgentDocker) CopyFromContainer(_ context.Context, name, path str
 // fake has to implement it or ComposeDown nil-derefs the embedded interface.
 // Removal is a no-op here: `removed` is what this fixture uses to say the
 // containers are gone.
+// Events is the daemon's events stream, as keploy's watch of the app's
+// container asks for it: open and quiet, since these rows' app exits only with
+// its stack.
+func (d *stoppedAgentDocker) Events(context.Context, events.ListOptions) (<-chan events.Message, <-chan error) {
+	return make(chan events.Message), make(chan error)
+}
+
 func (d *stoppedAgentDocker) ContainerRemove(context.Context, string, container.RemoveOptions) error {
 	return nil
 }
@@ -77,7 +87,7 @@ func (d *stoppedAgentDocker) ContainerList(context.Context, container.ListOption
 func (d *stoppedAgentDocker) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
 	st, ok := d.states[name]
 	if !ok || (d.removed != nil && d.removed()) {
-		return container.InspectResponse{}, errors.New("no such container")
+		return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
 	}
 	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{State: st}}, nil
 }
@@ -91,7 +101,7 @@ func composeReplayApp(d docker.Client) *App {
 		logger:          zap.NewNop(),
 		docker:          d,
 		kind:            utils.DockerCompose,
-		cmd:             "docker compose -f /tmp/keploy-compose.yaml up",
+		cmd:             utils.NewAppCommand("docker compose -f /tmp/keploy-compose.yaml up"),
 		composeFile:     "/tmp/keploy-compose.yaml",
 		keployContainer: "keploy-v3-test",
 		container:       "runner",
@@ -103,8 +113,8 @@ func composeReplayApp(d docker.Client) *App {
 // TestRunReadsTheStoppedAgentBeforeTheTeardown pins the ORDER that makes a
 // compose replay provable at all.
 //
-// Compose stops the agent service the moment the app exits, so what the agent
-// served and missed exists only as the file it left in its stopped container
+// Once the stack has ended, what the agent served and missed exists only as
+// the file it left in its stopped container
 // -- and ComposeDown removes that container. Read after the teardown, the file
 // is gone on every run, and every compose replay reports its outcome as
 // unknown: consumed -1, missed -1, never isolated, and --strict failing a
@@ -143,11 +153,89 @@ func TestRunReadsTheStoppedAgentBeforeTheTeardown(t *testing.T) {
 	}
 }
 
-// Only a compose MOCK run reads the stopped agent, and only a replay has an
-// outcome to read. keploy record and keploy test must not go asking the daemon
-// about a container they never look at again, and a mock record must not go
-// asking for a file its agent never writes.
-func TestReadStoppedAgentOnlyForAComposeMockRun(t *testing.T) {
+// In a run keploy saw its agent ready in, the agent died and stopped the
+// project when it crashed (not compose's own stop of it: 0, 143, or 137
+// without running out of memory) and either compose never started the app
+// (its container never started) or the app was killed by a signal (137,
+// 143), the app's container saying so or, when docker could not say, the
+// app's exit as keploy got it. An app that ended with a code of its own, or
+// for running out of its own memory, keeps its end even when the agent then
+// crashed; and an unknown app is never read as one that never started.
+func TestAgentDiedAfterReady(t *testing.T) {
+	agent := func(code int) *container.State { return &container.State{Status: "exited", ExitCode: code} }
+	app := func(code int, oom bool) *container.State {
+		return &container.State{Status: "exited", ExitCode: code, OOMKilled: oom, StartedAt: "2026-10-14T10:00:00Z"}
+	}
+	for _, tc := range []struct {
+		name    string
+		s       StoppedAgent
+		appExit int
+		want    bool
+	}{
+		{"the agent crashed and took the app (137)", StoppedAgent{Agent: agent(139), App: app(137, false)}, 137, true},
+		{"the agent crashed and compose stopped the app (143)", StoppedAgent{Agent: agent(1), App: app(143, false)}, 143, true},
+		{"the agent ran out of memory and took the app", StoppedAgent{Agent: &container.State{Status: "exited", ExitCode: 137, OOMKilled: true}, App: app(137, false)}, 137, true},
+		{"docker could not say how the app ended: its 143 decides", StoppedAgent{Agent: agent(2)}, 143, true},
+		{"docker could not say how the app ended: its own 0 stands", StoppedAgent{Agent: agent(2)}, 0, false},
+		{"docker could not say how the app ended: its own 42 stands", StoppedAgent{Agent: agent(2)}, 42, false},
+		{"the app's own 42, then a slow agent killed", StoppedAgent{Agent: agent(137), App: app(42, false)}, 42, false},
+		// The agent crashed after the app ended with a code of its own: the
+		// app's end, as docker reports it, stands, whatever keploy got.
+		{"the app's own 42, then the agent crashed", StoppedAgent{Agent: agent(2), App: app(42, false)}, 42, false},
+		{"the app's own 0, then the agent ran out of memory", StoppedAgent{Agent: &container.State{Status: "exited", ExitCode: 137, OOMKilled: true}, App: app(0, false)}, 0, false},
+		{"docker says the app's own 42, keploy got 143", StoppedAgent{Agent: agent(2), App: app(42, false)}, 143, false},
+		{"docker says the app was killed (143), keploy got 0", StoppedAgent{Agent: agent(2), App: app(143, false)}, 0, true},
+		{"the app ran out of its own memory", StoppedAgent{Agent: agent(2), App: app(137, true)}, 137, false},
+		{"the agent exited 0", StoppedAgent{Agent: agent(0), App: app(143, false)}, 143, false},
+		{"nothing read of the agent", StoppedAgent{App: app(143, false)}, 143, false},
+		// Compose's own stop of the agent (143, or 137 after its grace) is not
+		// the agent's failure: the user stopped the project, or another
+		// service of it failed.
+		{"the user stopped the project: app 143, a slow agent killed (137)", StoppedAgent{Agent: agent(137), App: app(143, false)}, 143, false},
+		{"the user stopped the project: app 143, agent 143", StoppedAgent{Agent: agent(143), App: app(143, false)}, 143, false},
+		// The agent crashed after keploy saw it ready, before compose
+		// started the app: the app's container has no exit of its own.
+		{"compose never started the app (compose says 0)", StoppedAgent{Agent: agent(2), App: &container.State{Status: "created", StartedAt: "0001-01-01T00:00:00Z"}}, 0, true},
+		{"compose never started the app (compose says 1)", StoppedAgent{Agent: agent(2), App: &container.State{Status: "created", StartedAt: "0001-01-01T00:00:00Z"}}, 1, true},
+		{"compose never started the app, and the agent exited 0", StoppedAgent{Agent: agent(0), App: &container.State{Status: "created", StartedAt: "0001-01-01T00:00:00Z"}}, 0, false},
+		// A dependency crashed, and compose stopped the agent over it (137,
+		// or 143): the app never started, and it is not the agent's failure.
+		{"a dependency crashed; compose killed the agent (137)", StoppedAgent{Agent: agent(137), App: &container.State{Status: "created", StartedAt: "0001-01-01T00:00:00Z"}}, 1, false},
+		{"a dependency crashed; compose stopped the agent (143)", StoppedAgent{Agent: agent(143), App: &container.State{Status: "created", StartedAt: "0001-01-01T00:00:00Z"}}, 1, false},
+	} {
+		if got := tc.s.AgentDiedAfterReady(tc.appExit); got != tc.want {
+			t.Errorf("%s: AgentDiedAfterReady(%d) = %v, want %v", tc.name, tc.appExit, got, tc.want)
+		}
+	}
+}
+
+// An app whose container never started is one compose provisioned and
+// stopped the project before starting; one that ran, or that docker could
+// not report, is not.
+func TestAppNeverStarted(t *testing.T) {
+	if !(StoppedAgent{App: &container.State{Status: "created", StartedAt: "0001-01-01T00:00:00Z"}}).AppNeverStarted() {
+		t.Error("a created, never-started app container is not read as never started")
+	}
+	if (StoppedAgent{App: &container.State{Status: "exited", ExitCode: 0, StartedAt: "2026-10-14T10:00:00Z"}}).AppNeverStarted() {
+		t.Error("an app that ran is read as never started")
+	}
+	if (StoppedAgent{}).AppNeverStarted() {
+		t.Error("an app docker could not report is read as never started")
+	}
+	// The state decides, not the start time: an app that ran, with a start
+	// time keploy cannot read, did start.
+	if (StoppedAgent{App: &container.State{Status: "exited", ExitCode: 0}}).AppNeverStarted() {
+		t.Error("an exited app with no readable start time is read as never started")
+	}
+}
+
+// A compose mock run and a compose recording read how the stopped agent and
+// the app ended (a recording, to tell an agent that could not start from a
+// project that failed on its own); only a mock replay has an outcome to read.
+// keploy test must not go asking the daemon about a container it never looks
+// at again, and nothing but a mock replay may go asking for a file its agent
+// never writes.
+func TestReadStoppedAgentOnlyForAComposeMockRunOrRecording(t *testing.T) {
 	t.Run("mock record: how it ended, but no outcome", func(t *testing.T) {
 		d := &stoppedAgentDocker{states: map[string]*container.State{"keploy-v3-test": {Status: "exited", ExitCode: 137}}}
 		a := composeReplayApp(d)
@@ -161,20 +249,42 @@ func TestReadStoppedAgentOnlyForAComposeMockRun(t *testing.T) {
 			t.Fatalf("a mock record asked for a replay outcome (copied %v)", d.copied)
 		}
 	})
-	for name, opts := range map[string]models.SetupOptions{
-		"keploy test":   {Mode: models.MODE_TEST},
-		"keploy record": {Mode: models.MODE_RECORD},
-	} {
-		t.Run(name, func(t *testing.T) {
-			d := &stoppedAgentDocker{}
-			a := composeReplayApp(d)
-			a.opts = opts
-			a.readStoppedAgent(context.Background())
-			if _, ok := a.StoppedAgent(); ok || len(d.copied) > 0 {
-				t.Fatalf("read the agent's container for a %s (copied %v)", name, d.copied)
-			}
-		})
-	}
+	// keploy record reads how its agent ended, so that an agent that could
+	// not start, and so stopped the project before the app ever ran, is told
+	// from the project failing on its own (#4772); it has no outcome to read.
+	t.Run("keploy record: how it ended, but no outcome", func(t *testing.T) {
+		d := &stoppedAgentDocker{states: map[string]*container.State{
+			"keploy-v3-test": {Status: "exited", ExitCode: 6},
+			"runner":         {Status: "created", StartedAt: "0001-01-01T00:00:00Z"},
+		}}
+		a := composeReplayApp(d)
+		a.opts = models.SetupOptions{Mode: models.MODE_RECORD}
+		a.readStoppedAgent(context.Background())
+		got, ok := a.StoppedAgent()
+		if !ok || got.Agent == nil || got.Agent.ExitCode != 6 {
+			t.Fatalf("a compose recording did not read how its agent ended: %+v, %v", got, ok)
+		}
+		// How the app ended is read too: without it an agent compose killed
+		// non-zero after a project that failed on its own would be blamed.
+		if got.App == nil || got.App.Status != "created" {
+			t.Fatalf("a compose recording did not read how its app ended: %+v", got.App)
+		}
+		if !got.AgentFailed() || got.AppStarted() {
+			t.Fatalf("an agent that exited 6 before the app ever started is not read as having stopped the project: %+v", got)
+		}
+		if len(d.copied) > 0 {
+			t.Fatalf("a compose recording asked for a replay outcome (copied %v)", d.copied)
+		}
+	})
+	t.Run("keploy test", func(t *testing.T) {
+		d := &stoppedAgentDocker{}
+		a := composeReplayApp(d)
+		a.opts = models.SetupOptions{Mode: models.MODE_TEST}
+		a.readStoppedAgent(context.Background())
+		if _, ok := a.StoppedAgent(); ok || len(d.copied) > 0 {
+			t.Fatalf("read the agent's container for a keploy test (copied %v)", d.copied)
+		}
+	})
 	t.Run("docker run", func(t *testing.T) {
 		d := &stoppedAgentDocker{}
 		a := composeReplayApp(d)
@@ -215,6 +325,294 @@ func TestReadStoppedAgentRecordsAMissingOutcome(t *testing.T) {
 	}
 	if got.OutcomeErr == nil || !strings.Contains(got.OutcomeErr.Error(), "left no "+docker.AgentOutcomeFile) {
 		t.Fatalf("OutcomeErr = %v, want one naming the missing file", got.OutcomeErr)
+	}
+	// The daemon's answer: reading it again would not change it.
+	if len(d.copied) != 1 {
+		t.Fatalf("the file was asked for %d times, want once: %v", len(d.copied), d.copied)
+	}
+}
+
+// busyStoppedDocker is stoppedAgentDocker as a busy daemon serves it, by what
+// is asked: a container's name, or stoppedOutcomeAsk for the outcome's file.
+// An ask first takes the next of script, then always; one in needs answers only
+// a caller whose cap leaves it that long, and others once their cap has passed.
+// onAsk runs with each ask's count.
+type busyStoppedDocker struct {
+	*stoppedAgentDocker
+	amu    sync.Mutex
+	script map[string][]error
+	always map[string]error
+	needs  map[string]time.Duration
+	asks   map[string]int
+	onAsk  func(what string, asks int)
+}
+
+const stoppedOutcomeAsk = "the outcome"
+
+func (d *busyStoppedDocker) ask(ctx context.Context, what string) error {
+	d.amu.Lock()
+	if d.asks == nil {
+		d.asks = map[string]int{}
+	}
+	d.asks[what]++
+	asks, err := d.asks[what], d.always[what]
+	if s := d.script[what]; len(s) > 0 {
+		err, d.script[what] = s[0], s[1:]
+	}
+	needs, onAsk := d.needs[what], d.onAsk
+	d.amu.Unlock()
+	if onAsk != nil {
+		onAsk(what, asks)
+	}
+	if err != nil {
+		return err
+	}
+	if dl, ok := ctx.Deadline(); needs > 0 && (!ok || time.Until(dl) < needs) {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (d *busyStoppedDocker) asked(what string) int {
+	d.amu.Lock()
+	defer d.amu.Unlock()
+	return d.asks[what]
+}
+
+func (d *busyStoppedDocker) ContainerInspect(ctx context.Context, name string) (container.InspectResponse, error) {
+	if err := d.ask(ctx, name); err != nil {
+		return container.InspectResponse{}, err
+	}
+	return d.stoppedAgentDocker.ContainerInspect(ctx, name)
+}
+
+func (d *busyStoppedDocker) CopyFromContainer(ctx context.Context, name, path string) (io.ReadCloser, container.PathStat, error) {
+	if err := d.ask(ctx, stoppedOutcomeAsk); err != nil {
+		return nil, container.PathStat{}, err
+	}
+	return d.stoppedAgentDocker.CopyFromContainer(ctx, name, path)
+}
+
+// TestTheStoppedContainersAreReadUntilTheDaemonAnswers: what readStoppedAgent
+// reads is the run's verdict, in keploy record and in keploy mock record, so no
+// clock ends a read: on a daemon slower than any one cap, an app compose never
+// started is still read as one, and its 0 does not stand. Only what leaves
+// nothing to wait for ends a read with no answer: a refusal, the container being
+// gone, a count of failures, a daemon keploy cannot connect to.
+func TestTheStoppedContainersAreReadUntilTheDaemonAnswers(t *testing.T) {
+	const agent, app = "keploy-v3-test", "runner"
+	busy := errdefs.System(errors.New("Error response from daemon: internal error"))
+	refused := errdefs.Forbidden(errors.New("Error response from daemon: forbidden by the socket proxy"))
+	unreachable := realConnectionFailure(t)
+	// Past three caps, whose sum is more than any budget a read had before.
+	const slow = composeAbortFirstReadCap<<2 + time.Second
+	for mode, opts := range map[string]models.SetupOptions{
+		"keploy record":      {Mode: models.MODE_RECORD},
+		"keploy mock record": {MockMode: true, Mode: models.MODE_RECORD},
+	} {
+		for _, tc := range []struct {
+			name  string
+			arm   func(*busyStoppedDocker)
+			gone  bool
+			app   int // how many times the app's container was asked for
+			agent int // and the agent's; 1 when unset
+			noApp bool
+		}{
+			{name: "both answer", app: 1},
+			{name: "an app's read past three caps", app: 4, arm: func(d *busyStoppedDocker) { d.needs = map[string]time.Duration{app: slow} }},
+			{name: "an agent's read past three caps", app: 1, agent: 4, arm: func(d *busyStoppedDocker) { d.needs = map[string]time.Duration{agent: slow} }},
+			{name: "an app's read that fails is read again", app: composeEndReadFailures, arm: func(d *busyStoppedDocker) {
+				d.script = map[string][]error{app: slices.Repeat([]error{busy}, composeEndReadFailures-1)}
+			}},
+			{name: "a daemon that keeps failing the app's read", app: composeEndReadFailures, noApp: true, arm: func(d *busyStoppedDocker) {
+				d.always = map[string]error{app: busy}
+			}},
+			{name: "a refused read of the app", app: 1, noApp: true, arm: func(d *busyStoppedDocker) { d.always = map[string]error{app: refused} }},
+			{name: "an app's container that is gone", app: 1, noApp: true, gone: true},
+			{name: "a daemon keploy cannot connect to", app: composeAbortUnreachableAsks, noApp: true, arm: func(d *busyStoppedDocker) {
+				d.always = map[string]error{app: unreachable}
+			}},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				d := &busyStoppedDocker{stoppedAgentDocker: &stoppedAgentDocker{states: map[string]*container.State{
+					agent: ended("exited", 0, "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z"),
+					app:   {Status: "created", StartedAt: "0001-01-01T00:00:00Z"},
+				}}}
+				if tc.gone {
+					delete(d.states, app)
+				}
+				if tc.arm != nil {
+					tc.arm(d)
+				}
+				a := composeReplayApp(d)
+				a.opts = opts
+				a.readStoppedAgent(context.Background())
+				got, ok := a.StoppedAgent()
+				if !ok {
+					t.Fatal("nothing was read")
+				}
+				if got.Agent == nil {
+					t.Fatal("the agent's container was not read")
+				}
+				if got.AppNeverStarted() == tc.noApp {
+					t.Fatalf("AppNeverStarted() = %v (App %+v), want %v", got.AppNeverStarted(), got.App, !tc.noApp)
+				}
+				if tc.agent == 0 {
+					tc.agent = 1
+				}
+				if asks := d.asked(agent); asks != tc.agent {
+					t.Fatalf("the agent's container was read %d time(s), want %d", asks, tc.agent)
+				}
+				if asks := d.asked(app); asks != tc.app {
+					t.Fatalf("the app's container was read %d time(s), want %d", asks, tc.app)
+				}
+			})
+		}
+	}
+}
+
+// TestTheAppIsReadBesideAnAgentNobodyCouldRead: the app's read does not hang on
+// the agent's. An agent keploy got no answer about says nothing of the app, so
+// an app compose never started is still read as one, and its 0 does not stand.
+func TestTheAppIsReadBesideAnAgentNobodyCouldRead(t *testing.T) {
+	const agent, app = "keploy-v3-test", "runner"
+	busy := errdefs.System(errors.New("Error response from daemon: internal error"))
+	refused := errdefs.Forbidden(errors.New("Error response from daemon: forbidden by the socket proxy"))
+	for mode, opts := range map[string]models.SetupOptions{
+		"keploy record":      {Mode: models.MODE_RECORD},
+		"keploy mock record": {MockMode: true, Mode: models.MODE_RECORD},
+	} {
+		for _, tc := range []struct {
+			name string
+			err  error // what every read of the agent gets; "not found" when nil
+		}{
+			{name: "a daemon that keeps failing the agent's read", err: busy},
+			{name: "a refused read of the agent", err: refused},
+			{name: "an agent's container that is gone"},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				d := &busyStoppedDocker{
+					stoppedAgentDocker: &stoppedAgentDocker{states: map[string]*container.State{
+						app: {Status: "created", StartedAt: "0001-01-01T00:00:00Z"},
+					}},
+					always: map[string]error{agent: tc.err},
+				}
+				a := composeReplayApp(d)
+				a.opts = opts
+				a.readStoppedAgent(context.Background())
+				got, ok := a.StoppedAgent()
+				if !ok {
+					t.Fatal("nothing was read")
+				}
+				if got.Agent != nil {
+					t.Fatalf("the agent read as %+v, want no answer", got.Agent)
+				}
+				if !got.AppNeverStarted() {
+					t.Fatalf("AppNeverStarted() = false (App %+v, asked %d time(s)), want the app read beside the agent", got.App, d.asked(app))
+				}
+			})
+		}
+	}
+}
+
+// TestTheReplayOutcomeIsReadUntilTheDaemonAnswers: no clock decides the account
+// of a replay either. Lost to a slow daemon, a clean replay failed.
+func TestTheReplayOutcomeIsReadUntilTheDaemonAnswers(t *testing.T) {
+	busy := errdefs.System(errors.New("Error response from daemon: internal error"))
+	const slow = composeAbortFirstReadCap<<2 + time.Second
+	for _, tc := range []struct {
+		name    string
+		arm     func(*busyStoppedDocker)
+		asks    int
+		wantErr string
+	}{
+		{name: "a read past three caps", asks: 4, arm: func(d *busyStoppedDocker) {
+			d.needs = map[string]time.Duration{stoppedOutcomeAsk: slow}
+		}},
+		{name: "a read that fails is read again", asks: 2, arm: func(d *busyStoppedDocker) {
+			d.script = map[string][]error{stoppedOutcomeAsk: {busy}}
+		}},
+		{name: "a daemon that keeps failing the read", asks: composeEndReadFailures, wantErr: "internal error", arm: func(d *busyStoppedDocker) {
+			d.always = map[string]error{stoppedOutcomeAsk: busy}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			outcome := []byte(`{"consumed":[{"name":"mock-1"}],"missed":[]}`)
+			d := &busyStoppedDocker{stoppedAgentDocker: &stoppedAgentDocker{
+				files:  map[string]map[string][]byte{"keploy-v3-test": {docker.AgentOutcomeFile: outcome}},
+				states: map[string]*container.State{"keploy-v3-test": ended("exited", 0, "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z")},
+			}}
+			tc.arm(d)
+			a := composeReplayApp(d)
+			a.readStoppedAgent(context.Background())
+			got, ok := a.StoppedAgent()
+			if !ok {
+				t.Fatal("nothing was read")
+			}
+			if asks := d.asked(stoppedOutcomeAsk); asks != tc.asks {
+				t.Fatalf("the outcome was read %d time(s), want %d", asks, tc.asks)
+			}
+			if tc.wantErr != "" {
+				if got.OutcomeErr == nil || !strings.Contains(got.OutcomeErr.Error(), tc.wantErr) || got.Outcome != nil {
+					t.Fatalf("Outcome %q, OutcomeErr %v, want none and the daemon's failure", got.Outcome, got.OutcomeErr)
+				}
+				return
+			}
+			if got.OutcomeErr != nil || !bytes.Equal(got.Outcome, outcome) {
+				t.Fatalf("Outcome %q, OutcomeErr %v, want the file the agent left", got.Outcome, got.OutcomeErr)
+			}
+		})
+	}
+}
+
+// TestARunInterruptedDuringTheStoppedReadReportsNothing: the read has no end of
+// its own, so the end of the ctx it is given ends it, at once, and what it had
+// by then is not reported. Half a read is a wrong one: an agent read with no
+// app beside it reads as an agent that failed. In keploy record under compose
+// that ctx ends after the agent's drain, not at the stop itself.
+func TestARunInterruptedDuringTheStoppedReadReportsNothing(t *testing.T) {
+	for _, tc := range []struct{ name, stall string }{
+		{"on the app's container", "runner"},
+		{"on the replay outcome", stoppedOutcomeAsk},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &busyStoppedDocker{
+				stoppedAgentDocker: &stoppedAgentDocker{
+					files: map[string]map[string][]byte{"keploy-v3-test": {docker.AgentOutcomeFile: []byte(`{}`)}},
+					states: map[string]*container.State{
+						"keploy-v3-test": ended("exited", 1, "2026-09-25T12:00:00Z", "2026-09-25T12:00:10Z"),
+						"runner":         {Status: "created"},
+					},
+				},
+				needs: map[string]time.Duration{tc.stall: time.Hour},
+			}
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			d.onAsk = func(what string, asks int) {
+				if what == tc.stall && asks == 2 {
+					stop()
+				}
+			}
+			a := composeReplayApp(d)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				a.readStoppedAgent(ctx)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Minute):
+				stop()
+				t.Fatal("the read outlived the run's stop")
+			}
+			if got, ok := a.StoppedAgent(); ok {
+				t.Fatalf("an interrupted run reported %+v", got)
+			}
+		})
 	}
 }
 

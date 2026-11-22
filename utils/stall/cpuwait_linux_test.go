@@ -1,0 +1,949 @@
+//go:build linux
+
+package stall
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+func TestParse_ReadsTheKernelsAccounts(t *testing.T) {
+	if e, d, r, ok := parseSchedstat([]byte("123456 7890 12\n")); !ok || e != 123456 || d != 7890 || r != 12 {
+		t.Fatalf("parseSchedstat = %v %v %v %v; want 123456 7890 12", e, d, r, ok)
+	}
+	for _, bad := range []string{"", "123456 7890\n", "123456 x 12\n", "123456 7890 x\n"} {
+		if _, _, _, ok := parseSchedstat([]byte(bad)); ok {
+			t.Fatalf("parseSchedstat(%q) read, want no reading", bad)
+		}
+	}
+	// ppid through exit_signal (fields 4 to 38), then the CPU (39).
+	tail := strings.Repeat(" 1", 35) + " 7 0 0\n"
+	if run, cpu, ok := parseStat([]byte("42 (a (b) c) R" + tail)); !ok || !run || cpu != "cpu7" {
+		t.Fatalf("parseStat = %v %q %v; want runnable on cpu7", run, cpu, ok)
+	}
+	if run, _, ok := parseStat([]byte("42 (x) S" + tail)); !ok || run {
+		t.Fatalf("parseStat of a sleeper = %v %v; want not runnable", run, ok)
+	}
+	if _, _, ok := parseStat([]byte("42 (x) R 1 2 3\n")); ok {
+		t.Fatal("parseStat read a short stat")
+	}
+	if _, _, ok := parseStat([]byte("42 (x) R" + strings.Repeat(" 1", 35) + "\n")); ok {
+		t.Fatal("parseStat read a stat that ends before the CPU")
+	}
+	if _, cpu, ok := parseStat([]byte("42 (x) R" + strings.Repeat(" 1", 35) + " x 0 0\n")); ok {
+		t.Fatalf("parseStat read a CPU that is not a number: %q", cpu)
+	}
+	// Without comm's ')' the fields cannot be counted: the 39th from the
+	// start of the line is not the CPU.
+	if _, cpu, ok := parseStat([]byte("42 x R" + tail)); ok {
+		t.Fatalf("parseStat read a stat without comm's ')': CPU %q", cpu)
+	}
+	// A CPU line without steal (kernels before 2.6.11), one whose steal is not
+	// a number, and other lines as long as a CPU's are skipped: a CPU read as
+	// 0 would charge all of its steal so far at the next read.
+	steal := parseSteal([]byte("cpu  1 2 3 4 5 6 7 99 0 0\ncpu0 1 2 3 4 5 6 7 40 0 0\ncpu1 1 2 3 4 5 6 7 59 0 0\ncpu2 1 2 3 4 5 6 7\ncpu3 1 2 3 4 5 6 7 x 0 0\nintr 5\nsoftirq 1 2 3 4 5 6 7 8 9 10\n"))
+	if len(steal) != 2 || steal["cpu0"] != 40 || steal["cpu1"] != 59 {
+		t.Fatalf("parseSteal = %v; want cpu0 40, cpu1 59", steal)
+	}
+}
+
+// A thread is held off by the steal of the CPU it runs or waits on, not by
+// that of the CPU it slept on; a runnable thread that has not moved since the
+// last read is held off now, for as many reads in a row as it has not moved.
+func TestThreadWaits_CountStealAndSeeAWaitInProgress(t *testing.T) {
+	var w threadWaits
+	tick := time.Second / userHZ
+	w.account(map[string]threadStat{
+		"1": {exec: 100, delay: 10, runs: 1, cpu: "cpu0"},
+		"2": {exec: 100, delay: 10, runs: 1, cpu: "cpu1"},
+	}, map[string]int64{"cpu0": 5, "cpu1": 5})
+	// 1 ran on cpu0 while the host took it for 20 ticks; 2 slept on cpu1,
+	// which the host took for 30.
+	most, held := w.account(map[string]threadStat{
+		"1": {exec: 200, delay: 10, runs: 2, runnable: true, cpu: "cpu0"},
+		"2": {exec: 100, delay: 10, runs: 1, cpu: "cpu1"},
+	}, map[string]int64{"cpu0": 25, "cpu1": 35})
+	if most != 20*tick || held != 0 {
+		t.Fatalf("got %v held for %d reads; want %v, none held now", most, held, 20*tick)
+	}
+	// 1 has not moved, runnable: held off now, whatever the steal says yet;
+	// and at the next read, for two reads.
+	for want := range uint64(2) {
+		most, held = w.account(map[string]threadStat{
+			"1": {exec: 200, delay: 10, runs: 2, runnable: true, cpu: "cpu0"},
+			"2": {exec: 100, delay: 10, runs: 1, cpu: "cpu1"},
+		}, map[string]int64{"cpu0": 25, "cpu1": 35})
+		if most != 0 || held != want+1 {
+			t.Fatalf("got %v held for %d reads; want 0, held for %d", most, held, want+1)
+		}
+	}
+	// Back on its CPU: its wait (5 ms queued) and the steal (12 ticks) show.
+	most, held = w.account(map[string]threadStat{
+		"1": {exec: 300, delay: 10 + int64(5*time.Millisecond), runs: 3, runnable: true, cpu: "cpu0"},
+		"3": {runnable: true, cpu: "cpu1"}, // new, not run yet: not known to be held
+	}, map[string]int64{"cpu0": 37, "cpu1": 35})
+	if want := 5*time.Millisecond + 12*tick; most != want || held != 0 {
+		t.Fatalf("got %v held for %d reads; want %v, none held now", most, held, want)
+	}
+	// 1 is held off again: a new hold, counted from this read.
+	if _, held = w.account(map[string]threadStat{
+		"1": {exec: 300, delay: 10 + int64(5*time.Millisecond), runs: 3, runnable: true, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 37}); held != 1 {
+		t.Fatalf("held for %d reads; want a new hold, of 1", held)
+	}
+}
+
+// A thread is held off now only if nothing in its account moved since the
+// last read. Any one counter moving says it is not stuck where that read left
+// it: its CPU time alone (it ran on across both reads with no new run), its
+// run delay alone (a wait ended), or its times run alone. Found held instead,
+// a thread that runs on would hold a verdict back for as long as it runs. A
+// thread that moved is held off by its CPU's steal even if it sleeps now: it
+// ran or waited on that CPU since the last read. And a thread first seen at
+// this read started since the last: all of its account is new, so it is
+// taken as moved, and its CPU's steal is charged even before its first run
+// shows (the slow side: the clock only counts less).
+func TestThreadWaits_AThreadThatMovedIsNotHeldOff(t *testing.T) {
+	tick := time.Second / userHZ
+	was := threadStat{exec: 100, delay: 10, runs: 1, runnable: true, cpu: "cpu0"}
+	for _, c := range []struct {
+		name     string
+		now      threadStat
+		wantMost time.Duration
+	}{
+		{"its CPU time alone", threadStat{exec: 200, delay: 10, runs: 1, runnable: true, cpu: "cpu0"}, 20 * tick},
+		{"its run delay alone", threadStat{exec: 100, delay: 10 + int64(5*time.Millisecond), runs: 1, runnable: true, cpu: "cpu0"}, 5*time.Millisecond + 20*tick},
+		{"its times run alone", threadStat{exec: 100, delay: 10, runs: 2, runnable: true, cpu: "cpu0"}, 20 * tick},
+		{"it ran and sleeps now", threadStat{exec: 200, delay: 10, runs: 2, cpu: "cpu0"}, 20 * tick},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var w threadWaits
+			w.account(map[string]threadStat{"1": was}, map[string]int64{"cpu0": 5})
+			if most, held := w.account(map[string]threadStat{"1": c.now}, map[string]int64{"cpu0": 25}); most != c.wantMost || held != 0 {
+				t.Fatalf("got %v, held for %d reads; want %v, the 20 ticks of its CPU's steal included, and none held", most, held, c.wantMost)
+			}
+		})
+	}
+	t.Run("a thread first seen at this read", func(t *testing.T) {
+		var w threadWaits
+		w.account(map[string]threadStat{"1": {exec: 100, delay: 10, runs: 1, cpu: "cpu0"}}, map[string]int64{"cpu0": 5, "cpu1": 5})
+		most, held := w.account(map[string]threadStat{
+			"1": {exec: 100, delay: 10, runs: 1, cpu: "cpu0"},
+			"2": {cpu: "cpu1"}, // not run yet, and stopped
+		}, map[string]int64{"cpu0": 5, "cpu1": 35})
+		if most != 30*tick || held != 0 {
+			t.Fatalf("got %v, held for %d reads; want the 30 ticks of the new thread's CPU's steal, and none held", most, held)
+		}
+	})
+}
+
+// The host gives a virtual CPU back, so its steal shows at its first tick,
+// while the thread on it is still queued behind others: at that read the
+// thread is runnable and has not moved. The steal held it off, and is charged
+// then: at the next read the thread has run, and the steal shows no more.
+func TestThreadWaits_StealThatShowsWhileTheThreadIsStillQueuedIsCharged(t *testing.T) {
+	var w threadWaits
+	tick := time.Second / userHZ
+	w.account(map[string]threadStat{
+		"1": {exec: 100, delay: 10, runs: 1, runnable: true, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 5})
+	most, _ := w.account(map[string]threadStat{ // back, still queued
+		"1": {exec: 100, delay: 10, runs: 1, runnable: true, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 30})
+	total := most
+	most, _ = w.account(map[string]threadStat{ // it ran, after 5 ms queued
+		"1": {exec: 200, delay: 10 + int64(5*time.Millisecond), runs: 2, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 30})
+	total += most
+	if want := 25*tick + 5*time.Millisecond; total != want {
+		t.Fatalf("charged %v over the two reads, want the 25 ticks of steal and the 5 ms queued: %v", total, want)
+	}
+}
+
+// A CPU's steal that reads lower than at the last read (a /proc/stat that is
+// not the kernel's own, or CPUs renumbered under the process) is no time given
+// back: it takes nothing off a thread's run delay.
+func TestThreadWaits_StealThatReadsLowerTakesNoWaitOff(t *testing.T) {
+	var w threadWaits
+	w.account(map[string]threadStat{
+		"1": {exec: 100, delay: 10, runs: 1, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 50})
+	most, _ := w.account(map[string]threadStat{ // it ran, after 30 ms queued
+		"1": {exec: 200, delay: 10 + int64(30*time.Millisecond), runs: 2, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 20})
+	if most != 30*time.Millisecond {
+		t.Fatalf("charged %v; want the 30 ms the thread was queued, the lower steal taking none of it off", most)
+	}
+}
+
+// The sampling thread's own wait for a CPU is read from its own account, as
+// the kernel keeps it: read, it is at least what the file showed a moment
+// before. Read as none, the sampler would take every sample that came late
+// for its own wait as late, and count only what the process ran.
+func TestThreadRunDelay_ReadsTheCallingThreadsAccount(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	b, err := os.ReadFile("/proc/thread-self/schedstat")
+	if err != nil {
+		t.Skipf("the kernel keeps no run delay: %v", err)
+	}
+	_, before, _, ok := parseSchedstat(b)
+	if !ok {
+		t.Fatalf("the kernel's schedstat %q did not parse", b)
+	}
+	if got, ok := threadRunDelay(); !ok || got < time.Duration(before) {
+		t.Fatalf("threadRunDelay = %v, %v; want at least the %v the thread's schedstat showed before it", got, ok, time.Duration(before))
+	}
+}
+
+// tidSource is a process's clocks that do not move, noting the thread the
+// sampler reads its own wait for a CPU on, at each read, and closing done at
+// the want-th read.
+type tidSource struct {
+	fakeSource
+	tids  map[int]int // thread id: reads of the sampler's own wait made on it
+	looks int
+	want  int
+	done  chan struct{}
+}
+
+func (f *tidSource) ownWait() (time.Duration, bool) {
+	runtime.Gosched() // a goroutine not bound to its thread may resume on another
+	f.tids[unix.Gettid()]++
+	if f.looks++; f.looks == f.want {
+		close(f.done)
+	}
+	return 0, true
+}
+
+// The sampler reads its own wait for a CPU from the thread it runs on, and
+// sets it against how late its samples are: so it samples on one thread. A
+// goroutine not bound to its thread resumes on whichever thread has a P free
+// after it sleeps or yields, and with every P kept busy that is mostly
+// another one; another thread's run delay says nothing of this one's waits.
+func TestSampler_ReadsItsOwnWaitOnOneThread(t *testing.T) {
+	procs := max(runtime.GOMAXPROCS(0), 4)
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+	var stopped atomic.Bool
+	spun := make(chan struct{}, procs)
+	for range procs {
+		go func() {
+			defer func() { spun <- struct{}{} }()
+			for !stopped.Load() { // keeps its P busy until the row ends
+			}
+		}()
+	}
+	defer func() {
+		stopped.Store(true)
+		for range procs {
+			<-spun
+		}
+	}()
+	src := &tidSource{tids: map[int]int{}, want: 30, done: make(chan struct{})}
+	s := &sampler{src: src, tick: time.Millisecond}
+	release := s.acquire()
+	select {
+	case <-src.done:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		release()
+		t.Fatalf("the sampler read its own wait %d times in a minute; want %d", src.looks, src.want)
+	}
+	release() // the sampler's goroutine has ended: its reads are all in
+	if len(src.tids) != 1 {
+		t.Fatalf("the sampler read its own wait on %d threads (%v); want one", len(src.tids), src.tids)
+	}
+}
+
+// fakeProcFiles writes files, by path under dir, holding their contents;
+// "" removes one.
+func fakeProcFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, body := range files {
+		path := dir + "/" + name
+		if body == "" {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(path[:strings.LastIndexByte(path, '/')], 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The reader takes a thread only as the kernel shows all of its account,
+// and the CPUs' steal from the kernel's times. A thread whose run delay
+// cannot be read, or whose state cannot (it exited between the reads of
+// its two files), is not seen at that read: its account is all new at the
+// next, and its wait so far is counted then, not as though it had none. And
+// steal that shows in the kernel's times holds off a thread runnable on
+// that CPU. Where the threads cannot be listed, nothing is read.
+func TestThreadWaits_ReadOnlyTheAccountsTheKernelShows(t *testing.T) {
+	// ppid through exit_signal (fields 4 to 38), then the CPU (39): cpu0.
+	runnable := "R" + strings.Repeat(" 1", 35) + " 0 0 0\n"
+	steal := func(ticks int) string {
+		return fmt.Sprintf("cpu  1 2 3 4 5 6 7 %d 0 0\ncpu0 1 2 3 4 5 6 7 %d 0 0\nintr 5\n", ticks, ticks)
+	}
+	read := func(t *testing.T, w *threadWaits, dir string, files map[string]string) (time.Duration, uint64) {
+		t.Helper()
+		fakeProcFiles(t, dir, files)
+		return w.longestIn(dir+"/task", dir+"/stat")
+	}
+	t.Run("a run delay that cannot be read", func(t *testing.T) {
+		var w threadWaits
+		dir := t.TempDir()
+		if most, held := read(t, &w, dir, map[string]string{
+			"task/2/schedstat": "x 2000 3\n", "task/2/stat": "2 (a) " + runnable, "stat": steal(10),
+		}); most != 0 || held != 0 {
+			t.Fatalf("first read: %v, held for %d reads; want nothing, the thread not seen", most, held)
+		}
+		if most, held := read(t, &w, dir, map[string]string{"task/2/schedstat": "500 2000 3\n"}); most != 2000 || held != 0 {
+			t.Fatalf("second read: %v, held for %d reads; want the thread's 2µs of waits, all new, and none held", most, held)
+		}
+	})
+	t.Run("a state that cannot be read", func(t *testing.T) {
+		var w threadWaits
+		dir := t.TempDir()
+		if most, held := read(t, &w, dir, map[string]string{
+			"task/3/schedstat": "1000 4000 3\n", "stat": steal(10),
+		}); most != 0 || held != 0 {
+			t.Fatalf("first read: %v, held for %d reads; want nothing, the thread not seen", most, held)
+		}
+		if most, held := read(t, &w, dir, map[string]string{"task/3/stat": "3 (a) " + runnable}); most != 4000 || held != 0 {
+			t.Fatalf("second read: %v, held for %d reads; want the thread's 4µs of waits, all new, and none held", most, held)
+		}
+	})
+	t.Run("steal in the kernel's times", func(t *testing.T) {
+		var w threadWaits
+		dir := t.TempDir()
+		read(t, &w, dir, map[string]string{
+			"task/1/schedstat": "1000 2000 3\n", "task/1/stat": "1 (a) " + runnable, "stat": steal(10),
+		})
+		if most, held := read(t, &w, dir, map[string]string{"stat": steal(15)}); most != 5*time.Second/userHZ || held != 1 {
+			t.Fatalf("got %v, held for %d reads; want the 5 ticks of steal of its CPU, held for one", most, held)
+		}
+	})
+	t.Run("a kernel that keeps no account", func(t *testing.T) {
+		// Every thread shows 0 0 0, the one reading included, though it
+		// runs: none moves, and none is found held off, however long it
+		// is runnable, so no verdict waits for it for ever.
+		sleeping := "S" + strings.Repeat(" 1", 35) + " 0 0 0\n"
+		var w threadWaits
+		dir := t.TempDir()
+		files := map[string]string{
+			"task/1/schedstat": "0 0 0\n", "task/1/stat": "1 (a) " + runnable,
+			"task/2/schedstat": "0 0 0\n", "task/2/stat": "2 (a) " + runnable,
+		}
+		for i := range 3 {
+			files["stat"] = steal(10 + 5*i)
+			if most, held := read(t, &w, dir, files); most != 0 || held != 0 {
+				t.Fatalf("read %d: %v, held for %d reads; want nothing: the kernel keeps no account", i+1, most, held)
+			}
+		}
+		// The control: one thread has run, so the kernel keeps accounts,
+		// and the other, runnable and not run yet, is held off from the
+		// read after the one that first saw it.
+		files["task/1/schedstat"], files["task/1/stat"] = "500 0 1\n", "1 (a) "+sleeping
+		if _, held := read(t, &w, dir, files); held != 0 {
+			t.Fatalf("first read with accounts: held for %d reads; want none: both threads new", held)
+		}
+		if _, held := read(t, &w, dir, files); held != 1 {
+			t.Fatalf("second read with accounts: held for %d reads; want the thread not run yet held, for one", held)
+		}
+	})
+	t.Run("no threads listed", func(t *testing.T) {
+		var w threadWaits
+		dir := t.TempDir()
+		if most, held := read(t, &w, dir, map[string]string{"stat": steal(10)}); most != 0 || held != 0 || w.reads != 0 {
+			t.Fatalf("got %v, held for %d reads, %d reads; want no read", most, held, w.reads)
+		}
+	})
+}
+
+// The reader sees the wait the kernel keeps: two threads bound to one CPU
+// take turns, so each waits about as long as the other runs. The two must be
+// on the kernel's run queue together, so each has a P of its own (with one
+// P, the Go scheduler takes them in turns, and the one not running sleeps),
+// and the row reads the two threads' own accounts, not the most any thread
+// of the test binary waited.
+func TestThreadWaits_SeeAThreadKeptOffItsCPU(t *testing.T) {
+	if was := runtime.GOMAXPROCS(0); was < 2 {
+		runtime.GOMAXPROCS(2)
+		t.Cleanup(func() { runtime.GOMAXPROCS(was) })
+	}
+	var was unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &was); err != nil {
+		t.Fatal(err)
+	}
+	cpu := 0
+	for !was.IsSet(cpu) {
+		cpu++
+	}
+
+	const each = 100 * time.Millisecond
+	tids := make(chan int, 2)
+	start, done, leave := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer close(leave)
+	for range 2 {
+		go func() {
+			// Not unlocked: the thread leaves with its CPU mask, once the
+			// test has read it (a read does not see a thread that left).
+			runtime.LockOSThread()
+			defer func() {
+				done <- struct{}{}
+				<-leave
+			}()
+			var one unix.CPUSet
+			one.Set(cpu)
+			err := unix.SchedSetaffinity(0, &one)
+			tids <- unix.Gettid()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			<-start // both are bound before either runs
+			var ts0, ts unix.Timespec
+			_ = unix.ClockGettime(unix.CLOCK_THREAD_CPUTIME_ID, &ts0)
+			for time.Duration(ts.Nano()-ts0.Nano()) < each {
+				_ = unix.ClockGettime(unix.CLOCK_THREAD_CPUTIME_ID, &ts)
+			}
+		}()
+	}
+	pinned := []string{strconv.Itoa(<-tids), strconv.Itoa(<-tids)}
+	var w threadWaits
+	_, _ = w.longest()
+	before := w.last
+	close(start)
+	<-done
+	<-done
+	if t.Failed() {
+		return
+	}
+	_, _ = w.longest()
+	for _, tid := range pinned {
+		was, ok1 := before[tid]
+		now, ok2 := w.last[tid]
+		if !ok1 || !ok2 {
+			t.Fatalf("the reader did not see thread %s at both reads", tid)
+		}
+		if got := time.Duration(now.delay - was.delay); got < each/10 {
+			b, err := os.ReadFile("/proc/self/schedstat")
+			if err == nil {
+				if _, d, _, ok := parseSchedstat(b); ok && d == 0 {
+					t.Skip("this kernel keeps no run delay")
+				}
+			}
+			t.Fatalf("thread %s, bound to cpu%d beside the other, waited for it %v by the reader, want about %v", tid, cpu, got, each)
+		}
+	}
+}
+
+// overloadSource is a process's clocks on a VM whose every CPU is busy, and
+// taken by the host at times: wall and CPU time move by the test's steps, and
+// its threads' accounts are what world says at each read, through the
+// accounting the process's own reads go through (threadWaits).
+type overloadSource struct {
+	fakeSource
+	w     threadWaits
+	world func(read int) (map[string]threadStat, map[string]int64)
+	n     int
+}
+
+func (o *overloadSource) heldOff() (time.Duration, uint64) {
+	o.n++
+	return o.w.account(o.world(o.n))
+}
+
+// overload is a process of six worker threads on four CPUs, every one of them
+// busy: each worker waits on a run queue two reads in a row and runs the next
+// two, so at every read some are held off; the host takes every CPU for a tick
+// at every other read; and the consumer's thread is what consumer makes it.
+func overload(consumer func(read int, st *threadStat)) func(int) (map[string]threadStat, map[string]int64) {
+	workers := make([]threadStat, 6)
+	var cons threadStat
+	var steal int64
+	return func(read int) (map[string]threadStat, map[string]int64) {
+		seen := make(map[string]threadStat, len(workers)+1)
+		for i := range workers {
+			st := &workers[i]
+			st.runnable, st.cpu = true, fmt.Sprintf("cpu%d", i%4)
+			if (read+i)%4 >= 2 { // it ran: its wait ended
+				st.exec += int64(time.Millisecond)
+				st.delay += int64(2 * time.Millisecond)
+				st.runs++
+			}
+			seen[fmt.Sprint("w", i)] = *st
+		}
+		consumer(read, &cons)
+		seen["consumer"] = cons
+		if read%2 == 0 {
+			steal++
+		}
+		cpus := make(map[string]int64, 4)
+		for c := range 4 {
+			cpus[fmt.Sprintf("cpu%d", c)] = steal
+		}
+		if cons.cpu == "cpu9" {
+			cpus["cpu9"] = cons9Steal(read)
+		}
+		return seen, cpus
+	}
+}
+
+// overloadLooks makes the looks at a stall on a sampler over world: each a
+// sample on time, then the verdict; and says how many reads of the threads
+// there have been.
+func overloadLooks(world func(int) (map[string]threadStat, map[string]int64), grace time.Duration) (look func() (expired, due bool), reads func() int) {
+	src := &overloadSource{fakeSource: fakeSource{wall: time.Unix(1_000_000, 0)}, world: world}
+	s := &sampler{src: src, tick: Tick}
+	s.begin()
+	m := NewMeter(heldClock{s}, grace)
+	return func() (bool, bool) {
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/2
+		sampleByHand(s)
+		e := m.Expired()
+		return e, m.due.Load() != nil
+	}, func() int { return src.n }
+}
+
+// The verdict waits for the threads held off when a stall was found due, not
+// for every thread held off at every read: on a host so busy that some thread
+// of the process waits for a CPU at every read, a consumer that stopped
+// (asleep in a read, or spinning without reading) still gets its verdict, and
+// within a count of looks: those threads' turn, two reads, and one more.
+func TestMeter_AStoppedConsumerIsJudgedUnderAnOverloadThatHoldsAThreadOffAtEveryRead(t *testing.T) {
+	const grace, bound = 100 * time.Millisecond, 100
+	for _, tc := range []struct {
+		name     string
+		consumer func(read int, st *threadStat)
+	}{
+		{"asleep in a read", func(_ int, st *threadStat) {
+			st.runnable, st.cpu = false, "cpu0"
+		}},
+		{"spinning without reading", func(read int, st *threadStat) {
+			// As busy as the workers, on their CPUs.
+			st.runnable, st.cpu = true, "cpu1"
+			if read%4 >= 2 {
+				st.exec += int64(time.Millisecond)
+				st.delay += int64(2 * time.Millisecond)
+				st.runs++
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			look, _ := overloadLooks(overload(tc.consumer), grace)
+			dueAt := 0
+			for n := 1; ; n++ {
+				if n > bound {
+					t.Fatalf("no verdict in %d looks (due since look %d): a stopped consumer is held off for as long as the host is busy", bound, dueAt)
+				}
+				expired, due := look()
+				if expired {
+					if dueAt == 0 || n-dueAt > 3 {
+						t.Fatalf("judged at look %d, due at look %d: want within 3 looks of being due", n, dueAt)
+					}
+					return
+				}
+				if !due {
+					dueAt = 0
+				} else if dueAt == 0 {
+					dueAt = n
+				}
+			}
+		})
+	}
+}
+
+// heldByTheHost is a consumer the host has held off since before its stall
+// was due, among the overload: runnable on a CPU (cpu9) the host does not
+// run, from read 2 to read 41, then given it back, its 400 ms of steal
+// showing then; asleep in a read after.
+func heldByTheHost(read int, st *threadStat) {
+	st.cpu = "cpu9"
+	switch {
+	case read < 2:
+		st.runnable = true
+		st.exec, st.runs = int64(time.Millisecond), 1
+	case read < 42:
+		st.runnable = true // held off: nothing moves, the steal does not show
+	case read == 42:
+		st.runnable, st.runs = true, 2
+		st.exec += int64(time.Millisecond)
+	default:
+		st.runnable = false
+	}
+}
+
+// cons9Steal is the steal of heldByTheHost's CPU: none until the host gives it
+// back at read 42, its 40 ticks showing then.
+func cons9Steal(read int) int64 {
+	if read < 42 {
+		return 0
+	}
+	return 40
+}
+
+// Nor does narrowing the wait to those threads give the verdict to a stall
+// that was the host's: a consumer held off since before its stall was due
+// holds the verdict back while the overload holds others off at every read,
+// and when its CPU comes back the steal shows and the stall is not due; it
+// goes on, and is judged once the consumer stops.
+func TestMeter_AConsumerHeldOffSinceBeforeItsStallWasDueHoldsItsVerdict(t *testing.T) {
+	look, reads := overloadLooks(overload(heldByTheHost), 100*time.Millisecond)
+	wasDue := false
+	for n := 1; reads() < 41; n++ {
+		if n > mostSamples {
+			t.Fatalf("read the threads %d times in %d looks, want 41: a read a heldEvery (%v) at least", reads(), mostSamples, heldEvery)
+		}
+		expired, due := look()
+		if expired {
+			t.Fatalf("judged at look %d (read %d), while the consumer's CPU is the host's", n, reads())
+		}
+		wasDue = wasDue || due
+	}
+	if !wasDue {
+		t.Fatal("never due while held off: the test proves nothing")
+	}
+	if expired, due := look(); expired || due || reads() != 42 {
+		t.Fatalf("expired %v due %v at read %d, the one its CPU came back at with 400 ms of steal", expired, due, reads())
+	}
+	for n := 1; ; n++ {
+		if n > 100 {
+			t.Fatal("no verdict in 100 looks after the consumer stopped")
+		}
+		if expired, _ := look(); expired {
+			return
+		}
+	}
+}
+
+// The sampler sleeps in the kernel: a sleep ends once its length has passed,
+// and a release (stop closed, then the waker woken) ends a long one: at once
+// with an eventfd, and at its next Tick without one. A poll a wake ends takes
+// that wake, and a wake that came before the sleep, with stop still open,
+// ends no sleep early: the sleep takes it and sleeps what is left. Each is
+// waited on for far more of the test's own short sleeps than a Tick takes,
+// so a sleep that does not end fails here, not on the test's timeout.
+// Whether the release's sleep took its wake is not pinned: a signal can end
+// the sleep after stop closed and before the wake came (the sampler's next
+// run takes that wake: TestSampler_TheLastReleaseWakesItsSleep).
+func TestSleepForEndsAtItsLengthOrItsRelease(t *testing.T) {
+	const most = 10000 // the test's 1 ms sleeps: ten seconds and more
+	ends := func(t *testing.T, ended <-chan bool, want bool) {
+		t.Helper()
+		for i := 0; ; i++ {
+			select {
+			case got := <-ended:
+				if got != want {
+					t.Fatalf("sleepFor said stopped=%v, want %v", got, want)
+				}
+				return
+			default:
+			}
+			if i == most {
+				t.Fatalf("sleepFor still sleeping after %d of the test's 1 ms sleeps", most)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	ev := newWaker()
+	if ev.fd < 0 {
+		t.Fatal("the kernel made no eventfd")
+	}
+	for _, c := range []struct {
+		name string
+		w    *waker
+	}{{"an eventfd", ev}, {"no eventfd", &waker{fd: -1}}} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Run("a sleep ends at its length", func(t *testing.T) {
+				ended := make(chan bool, 1)
+				go func() { ended <- sleepFor(5*time.Millisecond, make(chan struct{}), c.w) }()
+				ends(t, ended, false)
+			})
+			if c.w.fd >= 0 {
+				// One poll, not sleepFor's loop: a loop that left the wake
+				// polls on at once until its end, and a signal or its last
+				// poll can take the wake there by chance.
+				t.Run("a poll takes the wake that ends it", func(t *testing.T) {
+					c.w.wake()
+					ended := make(chan bool, 1)
+					go func() { c.w.sleep(time.Hour); ended <- false }()
+					ends(t, ended, false)
+					wakeTaken(t, c.w)
+				})
+			}
+			t.Run("a wake from before ends no sleep early", func(t *testing.T) {
+				c.w.wake()
+				ended := make(chan bool, 1)
+				began := time.Now()
+				go func() { ended <- sleepFor(5*time.Millisecond, make(chan struct{}), c.w) }()
+				ends(t, ended, false)
+				if took := time.Since(began); took < 5*time.Millisecond {
+					t.Fatalf("a 5 ms sleep with a wake from before it ended after %v", took)
+				}
+				if c.w.fd >= 0 {
+					wakeTaken(t, c.w)
+				}
+			})
+			t.Run("a release ends a long sleep", func(t *testing.T) {
+				stop, ended := make(chan struct{}), make(chan bool, 1)
+				go func() { ended <- sleepFor(time.Hour, stop, c.w) }()
+				time.Sleep(2 * Tick) // most likely asleep by now; either way it must end
+				close(stop)
+				c.w.wake()
+				ends(t, ended, true)
+				c.w.take() // the wake, if a signal ended the sleep before it came
+			})
+		})
+	}
+}
+
+// wakeTaken fails the test unless w's eventfd reads empty: no wake is left to
+// end the next sleep at once.
+func wakeTaken(t *testing.T, w *waker) {
+	t.Helper()
+	var b [8]byte
+	if n, err := unix.Read(w.fd, b[:]); err != unix.EAGAIN {
+		t.Fatalf("the eventfd read %d bytes (%v); want none (EAGAIN): a wake is left to end the next sleep at once", n, err)
+	}
+}
+
+// The last release wakes the sampler's sleep, so it returns once the
+// sampling thread runs, not at the sampler's next look: a sampler that looks
+// once an hour still lets go at once (on a Go timer it did; the sleep in the
+// kernel must too, or every last release waits a Tick: a meter per chunk
+// that a closed tee stops, and the agent's boot reporter at its end). The
+// sampler keeps the one eventfd for all its samplings. A sampling can end
+// without taking its release's wake: a signal can end its sleep after the
+// release closed stop and before it wrote the wake. What the sampler
+// guarantees is that the next sampling takes every wake written before it
+// began, before its first sleep, so none ends that sleep at once. The row
+// writes such a wake after each release, as that signal leaves it, and reads
+// the eventfd while the next sampling waits at its first read of its own
+// thread (ownWait), which comes after the take and before the first sleep.
+func TestSampler_TheLastReleaseWakesItsSleep(t *testing.T) {
+	src := &gatedOwnSource{at: make(chan struct{}), goOn: make(chan struct{})}
+	s := &sampler{src: src, tick: time.Hour}
+	fd := -1
+	for run := range 3 {
+		release := s.acquire()
+		select {
+		case <-src.at:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("sampling %d did not read its own thread in a minute", run)
+		}
+		if s.wake.fd < 0 {
+			t.Fatal("the sampler made no eventfd")
+		}
+		if run == 0 {
+			fd = s.wake.fd
+		} else if s.wake.fd != fd {
+			t.Fatalf("sampling %d polled eventfd %d, the first %d; want one per sampler", run, s.wake.fd, fd)
+		}
+		wakeTaken(t, s.wake)
+		src.goOn <- struct{}{}
+		released := make(chan struct{})
+		go func() { release(); close(released) }()
+		select {
+		case <-released:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("sampling %d: the release of a sampler that looks once an hour has not returned in a minute", run)
+		}
+		s.wake.wake() // the wake a signal leaves: the next sampling must take it
+	}
+}
+
+// A run whose release came before it took the eventfd (stop closed, then the
+// wake written) ends without sleeping. Its take of a wake left from before
+// takes that release's wake too, and a run that slept then would sleep its
+// whole tick with its release waiting for it: an hour here, where the row's
+// minute turns that hang into a failure. The run is started by hand with its
+// stop closed and its wake written, the order a release right after acquire
+// can give before the run's goroutine first runs.
+func TestSampler_ARunReleasedBeforeItsFirstSleepEndsAtOnce(t *testing.T) {
+	s := &sampler{src: &fakeSource{}, tick: time.Hour}
+	w := newWaker()
+	if w.fd < 0 {
+		t.Fatal("the kernel made no eventfd")
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	close(stop)
+	w.wake()
+	go s.run(stop, done, w)
+	select {
+	case <-done:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("a run released (stop closed, then woken) before its first sleep still sleeps a minute later; its tick is an hour")
+	}
+	wakeTaken(t, w)
+}
+
+// gatedOwnSource is a fakeSource whose ownWait, which a sampling run reads
+// once before its first sleep, says the run is there (at) and waits for the
+// row's go-ahead (goOn).
+type gatedOwnSource struct {
+	fakeSource
+	at, goOn chan struct{}
+}
+
+func (g *gatedOwnSource) ownWait() (time.Duration, bool) {
+	g.at <- struct{}{}
+	<-g.goOn
+	return 0, true
+}
+
+// threadWaitSource is a frozen process (its CPU time never moves) whose wall
+// clock moves a second at each read, and each of whose threads has its own
+// run delay, as the kernel keeps one per thread since it began: far apart from
+// one thread to the next, and still unless the row adds to it (wait).
+type threadWaitSource struct {
+	mu   sync.Mutex
+	wall time.Time
+	own  map[int]time.Duration
+	next time.Duration
+}
+
+func (f *threadWaitSource) now() (time.Time, time.Duration, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.wall = f.wall.Add(time.Second)
+	return f.wall, 0, true
+}
+
+func (f *threadWaitSource) cpuLimit() (float64, bool) { return 0, false }
+
+func (f *threadWaitSource) heldOff() (time.Duration, uint64) { return 0, 0 }
+
+func (f *threadWaitSource) ownWait() (time.Duration, bool) {
+	tid := unix.Gettid()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.own[tid]
+	if !ok {
+		f.next += 100 * time.Second
+		d = f.next
+		f.own[tid] = d
+	}
+	return d, true
+}
+
+// wait adds d to thread tid's run delay: it waited d for a CPU.
+func (f *threadWaitSource) wait(tid int, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.own[tid] += d
+}
+
+// lockedThread is a goroutine locked to its OS thread for the row's life: on
+// runs f on it, and tid is the thread's id.
+func lockedThread(t *testing.T) (on func(f func()), tid int) {
+	fs, ran := make(chan func()), make(chan struct{})
+	ids := make(chan int)
+	go func() {
+		runtime.LockOSThread() // never unlocked: the thread ends with the goroutine
+		ids <- unix.Gettid()
+		for f := range fs {
+			f()
+			ran <- struct{}{}
+		}
+	}()
+	t.Cleanup(func() { close(fs) })
+	return func(f func()) { fs <- f; <-ran }, <-ids
+}
+
+// A run that a release stopped after its sleep ended may take the sampler's
+// lock after the next acquire began a new run on another thread: acquire
+// waits for no run, only the release that stopped it does. That run must not
+// sample. Its thread's wait runs from its own last sample, before the new
+// sampling began, and a run delay set against another thread's is any
+// difference at all: either can pass a frozen process's late sample as on
+// time, and its whole interval counts. The order is forced on two locked
+// threads: the stopped run's thread waits 100 s across the restart, its
+// sample lands after the new run's start, and the new run samples on.
+func TestSampler_ARunStoppedBeforeARestartDoesNotSampleForTheNext(t *testing.T) {
+	src := &threadWaitSource{wall: time.Unix(1_000_000, 0), own: map[int]time.Duration{}}
+	s := &sampler{src: src, tick: Tick}
+	// start is acquire's start of a sampling, without its goroutine: the
+	// row runs it, on a thread of its own (runOn).
+	start := func() *sampling {
+		s.readMu.Lock()
+		defer s.readMu.Unlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.begin()
+		s.stop = make(chan struct{})
+		return &sampling{stop: s.stop}
+	}
+	runOn := func(on func(func()), r *sampling) {
+		on(func() { // as run starts
+			s.mu.Lock()
+			r.lastOwn, r.ownOK = src.ownWait()
+			s.mu.Unlock()
+		})
+	}
+	onA, tidA := lockedThread(t)
+	onB, _ := lockedThread(t)
+	old := start()
+	runOn(onA, old)
+	onA(func() { s.sample(old) })
+	onA(func() { s.sample(old) })
+	if got := time.Duration(s.ran.Load()); got != 0 {
+		t.Fatalf("a frozen process's clock counted %v in two late samples", got)
+	}
+	// The last release, as it stops the run; then its thread waits for a
+	// CPU, through the next acquire and its run's start.
+	s.mu.Lock()
+	s.stop = nil
+	s.mu.Unlock()
+	src.wait(tidA, 100*time.Second)
+	next := start()
+	runOn(onB, next)
+	onA(func() { s.sample(old) }) // its sleep ended before the release
+	onB(func() { s.sample(next) })
+	onB(func() { s.sample(next) })
+	if got := time.Duration(s.ran.Load()); got != 0 {
+		t.Fatalf("a frozen process's clock counted %v once a stopped run's sample landed after a restart: a wait from before the restart, or another thread's, was set against its interval", got)
+	}
+}
+
+// The same left to the scheduler: three goroutines acquire and release one
+// sampler of a frozen process, one at once again and the others after holding
+// it 300 and 600 us (its samples come every 200 us), for a fixed number of
+// acquires between them, or until the clock counts; it never does. Most
+// acquires find the sampling running; it starts again only when all three let
+// go at once, and the stopped run's sample landing after that restart takes
+// on the order of a million acquires to come.
+func TestSampler_RestartCyclesNeverCountAFrozenProcess(t *testing.T) {
+	src := &threadWaitSource{wall: time.Unix(1_000_000, 0), own: map[int]time.Duration{}}
+	s := &sampler{src: src, tick: 200 * time.Microsecond}
+	const acquires = 5_000_000
+	var left atomic.Int64
+	left.Store(acquires)
+	var wg sync.WaitGroup
+	for g := range 3 {
+		wg.Go(func() {
+			for left.Add(-1) >= 0 && s.ran.Load() == 0 {
+				release := s.acquire()
+				time.Sleep(time.Duration(g) * 300 * time.Microsecond)
+				release()
+			}
+		})
+	}
+	wg.Wait()
+	if got := time.Duration(s.ran.Load()); got != 0 {
+		t.Fatalf("a frozen process's clock counted %v within %d acquires from three goroutines: a sample set one thread's run delay against another's", got, acquires)
+	}
+}

@@ -146,3 +146,156 @@ func TestWindowScheduleNilAndEmpty(t *testing.T) {
 		t.Fatal("empty schedule must behave as nil")
 	}
 }
+
+// The gap before a window runs from the latest end of the windows that start
+// before it to its start, exclusive at both ends; the first window has none
+// (what precedes it is start-up traffic), and neither has a window an earlier
+// one reaches, nor a start no window has. A call sent in a gap and answered at
+// or after the next window's start was in flight when that test began; one
+// sent and answered in the gap, one sent inside an earlier window, and one
+// sent before the gap's start are not.
+func TestWindowScheduleGapBeforeAndInFlight(t *testing.T) {
+	s := NewWindowSchedule([]TestWindow{
+		{TestCase: "test-1", Start: at(1000), End: at(1100)},
+		{TestCase: "test-2", Start: at(2000), End: at(2100)},
+		{TestCase: "long", Start: at(3000), End: at(5000)},
+		{TestCase: "inside", Start: at(4000), End: at(4100)},
+	})
+	if from, ok := s.GapBefore(at(2000)); !ok || !from.Equal(at(1100)) {
+		t.Fatalf("gap before test-2 from %v ok=%v; want from test-1's end", from, ok)
+	}
+	for _, c := range []struct {
+		name  string
+		start time.Time
+	}{{"the first window", at(1000)}, {"a window an earlier one reaches", at(4000)}, {"a start no window has", at(2500)}} {
+		if _, ok := s.GapBefore(c.start); ok {
+			t.Fatalf("%s has a gap", c.name)
+		}
+	}
+	together := NewWindowSchedule([]TestWindow{
+		{TestCase: "test-1", Start: at(1000), End: at(1100)},
+		{TestCase: "b", Start: at(2000), End: at(2100)},
+		{TestCase: "c", Start: at(2000), End: at(2200)},
+	})
+	if _, ok := together.GapBefore(at(2000)); ok || together.InFlightInto(at(1500), at(2050), at(2000)) {
+		t.Fatal("two windows that start together have a gap: which test a call in flight then is cannot be told")
+	}
+	var nilSched *WindowSchedule
+	if _, ok := nilSched.GapBefore(at(2000)); ok || nilSched.InFlightInto(at(1500), at(2050), at(2000)) {
+		t.Fatal("no schedule has a gap")
+	}
+	for _, c := range []struct {
+		name     string
+		req, res int
+		want     bool
+	}{
+		{"sent in the gap, answered in the window", 1500, 2050, true},
+		{"sent in the gap, answered at its start", 1500, 2000, true},
+		{"sent in the gap, answered after the window", 1500, 2500, true},
+		{"sent and answered in the gap", 1500, 1900, false},
+		{"sent at the gap's start (test-1's end)", 1100, 2050, false},
+		{"sent inside test-1", 1050, 2050, false},
+		{"sent at the window's start", 2000, 2050, false},
+	} {
+		if got := s.InFlightInto(at(c.req), at(c.res), at(2000)); got != c.want {
+			t.Errorf("%s: InFlightInto = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if s.InFlightInto(at(1500), time.Time{}, at(2000)) {
+		t.Error("a call with no answer time was in flight")
+	}
+}
+
+// After is past every window's End, the latest End and not the last-started
+// window's: a long early window that a later, shorter one starts inside still
+// holds what was recorded before its own End. A moment at that End is the
+// window's (Contains), not after it. An empty schedule and a zero moment tell
+// no teardown.
+func TestWindowScheduleAfterIsPastEveryWindowsEnd(t *testing.T) {
+	s := NewWindowSchedule([]TestWindow{
+		{TestCase: "test-2", Start: at(200), End: at(300)},
+		{TestCase: "test-1", Start: at(100), End: at(5000)},
+	})
+	for _, c := range []struct {
+		ms   int
+		want bool
+	}{{50, false}, {150, false}, {250, false}, {400, false}, {5000, false}, {5001, true}, {9000, true}} {
+		if got := s.After(at(c.ms)); got != c.want {
+			t.Fatalf("After(%d) = %v, want %v", c.ms, got, c.want)
+		}
+	}
+	if s.After(time.Time{}) {
+		t.Fatal("a zero moment is after the windows")
+	}
+	var none *WindowSchedule
+	if none.After(at(9000)) || NewWindowSchedule(nil).After(at(9000)) {
+		t.Fatal("with no schedule a moment is after the windows")
+	}
+}
+
+// A test merged into a window no test names (TestWindow.Tests) runs in that
+// window (IndexOfTest), and has no window of its own (Of).
+func TestWindowSchedule_AMergedTestRunsInItsMergedWindow(t *testing.T) {
+	t0 := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	s := NewWindowSchedule([]TestWindow{
+		{TestCase: "c", Start: t0.Add(20 * time.Second), End: t0.Add(30 * time.Second)},
+		{Start: t0, End: t0.Add(12 * time.Second), Tests: []string{"a", "b", ""}},
+	})
+	// An empty name names no test, though a merged window lists one.
+	for _, tc := range []struct {
+		test string
+		i    int
+		ok   bool
+	}{{"a", 0, true}, {"b", 0, true}, {"c", 1, true}, {"d", 0, false}, {"", 0, false}} {
+		if i, ok := s.IndexOfTest(tc.test); i != tc.i || ok != tc.ok {
+			t.Errorf("IndexOfTest(%q) = %d, %v; want %d, %v", tc.test, i, ok, tc.i, tc.ok)
+		}
+	}
+	if _, ok := s.Of("a"); ok {
+		t.Error("a merged test has a window of its own")
+	}
+	// A test listed in two merged windows runs in the first in Start order.
+	twice := NewWindowSchedule([]TestWindow{
+		{Start: t0.Add(40 * time.Second), End: t0.Add(50 * time.Second), Tests: []string{"a", "e"}},
+		{Start: t0, End: t0.Add(12 * time.Second), Tests: []string{"a", "b"}},
+	})
+	if i, ok := twice.IndexOfTest("a"); i != 0 || !ok {
+		t.Errorf("a test in two merged windows: IndexOfTest = %d, %v; want the first, 0", i, ok)
+	}
+	if w, ok := s.Of("c"); !ok || w.TestCase != "c" {
+		t.Errorf("Of(c) = %+v, %v", w, ok)
+	}
+}
+
+// keploy mock replay's windows do not end at their tests' ends: for the run's
+// place each runs up to the next one's start and the last has no end, in
+// Start order, a merged window keeping its tests. An End past the next start
+// (windows that were not merged) stays. None stays none.
+func TestRunWindowsRunUpToTheNextStart(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	in := []TestWindow{
+		{TestCase: "c", Start: at(30), End: at(31)},
+		{Tests: []string{"a", "b"}, Start: at(10), End: at(12)},
+		{TestCase: "d", Start: at(20), End: at(35)},
+	}
+	got := RunWindows(in)
+	if in[0].TestCase != "c" || !in[0].End.Equal(at(31)) {
+		t.Fatalf("the windows it was given changed: %v", in)
+	}
+	if len(got) != 3 || len(got[0].Tests) != 2 || got[1].TestCase != "d" || got[2].TestCase != "c" {
+		t.Fatalf("windows %v, want them in Start order", got)
+	}
+	if want := at(20).Add(-time.Nanosecond); !got[0].End.Equal(want) {
+		t.Errorf("first ends at %v, want %v", got[0].End, want)
+	}
+	if !got[1].End.Equal(at(35)) {
+		t.Errorf("an End past the next start became %v", got[1].End)
+	}
+	if !got[2].End.After(at(1 << 32)) {
+		t.Errorf("the last ends at %v, want past any recording", got[2].End)
+	}
+	if got := RunWindows(nil); len(got) != 0 {
+		t.Errorf("none: %v", got)
+	}
+}

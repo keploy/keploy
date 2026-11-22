@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    from pip._vendor.urllib3 import exceptions; exceptions.ReadTimeoutErorr
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'pip._vendor.urllib3.exceptions' has no attribute 'ReadTimeoutErorr'. Did you mean: 'ReadTimeoutError'?

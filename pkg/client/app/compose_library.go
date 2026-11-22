@@ -2,14 +2,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/docker/compose/v2/pkg/api"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -20,13 +19,7 @@ import (
 // It exists so the in-memory path is testable without a docker daemon: the
 // shell-out it replaces could be intercepted with a stub `docker` on PATH, and
 // losing that would leave the whole path covered only by live runs.
-type composeStack interface {
-	ProjectName() string
-	Up(ctx context.Context, opts docker.ComposeUpOptions, out, errW io.Writer) error
-	Down(ctx context.Context, timeout time.Duration) error
-	Ps(ctx context.Context) ([]docker.ServiceState, error)
-	ContainerIDsForService(ctx context.Context, service string) ([]string, error)
-}
+type composeStack = docker.ComposeStack
 
 // composeRunner returns the library-backed runner for the in-memory compose
 // document, building it on first use.
@@ -58,15 +51,17 @@ func (a *App) composeRunner(ctx context.Context) (composeStack, error) {
 	return runner, nil
 }
 
-// newLibraryComposeStack is the production builder: the real compose library,
-// scoped to the same project the equivalent `docker compose` invocation would
-// have resolved.
+// newLibraryComposeStack is the production builder: the registered in-process
+// runner (docker.RegisterComposeStack), scoped to the same project the
+// equivalent `docker compose` invocation would have resolved.
 func (a *App) newLibraryComposeStack(ctx context.Context) (composeStack, error) {
-	projectName, projectDir := composeProjectScope(a.cmd)
-	return docker.NewComposeRunner(ctx, a.docker, docker.ComposeRunnerOptions{
+	whole := a.cmd.WholeUnredacted()
+	projectName, projectDir := composeProjectScope(whole)
+	return docker.NewComposeStack(ctx, docker.ComposeStackSpec{
 		Content:     a.composeContent,
 		ProjectName: projectName,
 		WorkingDir:  projectDir,
+		EnvFiles:    composeEnvFiles(whole),
 	})
 }
 
@@ -86,12 +81,13 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		return utils.CmdError{Type: utils.Init, Err: err}
 	}
 
-	opts := composeUpSemantics(a.cmd)
-	a.logger.Info("Starting Application :",
-		zap.String("executing_cmd", a.cmd),
+	opts := composeUpSemantics(a.cmd.WholeUnredacted())
+	// At INFO, the command by its program alone; its project and services,
+	// which its arguments may name, with the whole command at DEBUG.
+	a.logger.Info(utils.StartingApplication, zap.Inline(a.cmd), zap.String("onExit", opts.OnExit.String()))
+	utils.LogWholeCommand(a.logger, "executing_cmd", a.cmd,
 		zap.String("composeProject", runner.ProjectName()),
-		zap.String("exitCodeFrom", opts.ExitCodeFrom),
-		zap.String("onExit", cascadeName(opts.OnExit)))
+		zap.String("exitCodeFrom", opts.ExitCodeFrom))
 
 	// Up runs on a context this function owns, NOT the caller's.
 	//
@@ -100,7 +96,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	// service's full stop grace. That is precisely the teardown the shell-out
 	// path was written to avoid: the eBPF agent is slow to stop, and waiting on
 	// it overran utils.DrainErrGroup's 30s budget and failed otherwise-green
-	// runs with "teardown drain timed out".
+	// runs with "teardown drain made no progress".
 	//
 	// So keploy's own bounded teardown has to happen FIRST — short grace for the
 	// app's coverage flush, then a fast project-wide down — and only then is the
@@ -127,7 +123,14 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		defer close(teardownDone)
 		select {
 		case <-ctx.Done():
-			a.composeGraceThenDown(composeDown)
+			// The app's stop is keploy's own, and says when it had to
+			// kill (compose_appstop.go).
+			// It says a recording's kill itself.
+			// An app that exited on its own needs no stop.
+			if _, err := a.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
+				a.logger.Warn("keploy could not stop the application's container before taking its compose stack down", zap.Error(err))
+			}
+			composeDown()
 			cancelUp()
 		case <-upDone:
 		}
@@ -147,51 +150,15 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	// teardown's reap barrier exists to prevent.
 	//
 	// It cannot hang: the goroutine closes teardownDone on both branches, and
-	// composeGraceThenDown is bounded by graceBudget plus ComposeDown's own
-	// per-call budgets.
+	// StopComposeApp is bounded by its stop's progress, ComposeDown by the
+	// project's progress (keploy cuts a down that made none) and the per-call
+	// budgets of its sweeps.
 	<-teardownDone
 
 	if err != nil {
 		return utils.CmdError{Type: utils.Runtime, Err: err}
 	}
 	return utils.CmdError{}
-}
-
-// cascadeName renders api.Cascade for logs. It is an int enum, so a plain
-// string() conversion yields a one-rune string, not the name.
-func cascadeName(c api.Cascade) string {
-	switch c {
-	case api.CascadeStop:
-		return "stop"
-	case api.CascadeFail:
-		return "fail"
-	case api.CascadeIgnore:
-		return "ignore"
-	}
-	return "unknown"
-}
-
-// composeGraceThenDown is the in-process port of cmdCancel's compose branch.
-//
-// The grace is wall-clock-bounded, not iteration-counted: a saturated daemon
-// must not let the per-tick inspect sum past the teardown budget. It ends early
-// as soon as the app container has exited, because at that point the coverage
-// flush is done (Go has written GOCOVERDIR, Java its jacoco .exec) and there is
-// no reason to keep waiting on the slower sibling services.
-func (a *App) composeGraceThenDown(composeDown func()) {
-	graceDeadline := time.Now().Add(graceBudget)
-	for time.Now().Before(graceDeadline) {
-		time.Sleep(500 * time.Millisecond)
-
-		ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
-		info, ierr := a.docker.ContainerInspect(ictx, a.container)
-		icancel()
-		if ierr == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
-			a.logger.Debug("app container stopped gracefully; tearing down the rest of the compose stack")
-			break
-		}
-	}
-	composeDown()
 }
 
 // joinComposeLabels renders a label map in the comma-separated "k=v,k=v" form

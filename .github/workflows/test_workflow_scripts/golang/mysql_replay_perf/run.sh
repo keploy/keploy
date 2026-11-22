@@ -20,6 +20,12 @@
 # run_with_keploy_privileges + compose lifecycle, same GITHUB_WORKSPACE layout.
 # It is expected to be `source`d from samples-go/go-memory-load-mysql.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
@@ -84,11 +90,12 @@ section() {
     printf '\n==== %s ====\n' "$*"
 }
 
-# sudo -E so keploy keeps the env (CPU_PROFILE etc.) when it re-execs for
-# privileged eBPF/proxy setup. Mirrors the sibling harnesses.
+# sudo hands keploy only the variables its command line names (sudo-rs
+# ignores -E): SUDO_ENV names the workflow's switches, and each caller names
+# its own (CPU_PROFILE). Mirrors the sibling harnesses.
 run_with_keploy_privileges() {
     if command -v sudo >/dev/null 2>&1; then
-        sudo -E env PATH="$PATH" "$@"
+        sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$@"
     else
         env PATH="$PATH" "$@"
     fi
@@ -269,7 +276,7 @@ check_for_fatal() {
 parse_replay_seconds() {
     local log="$1"
     local first last s e
-    first="$(grep -a 'testcase id' "$log" 2>/dev/null | head -n 1 | sed -E 's/.*Keploy: ([^ ]+).*/\1/')"
+    first="$(grep -a 'testcase id' "$log" 2>/dev/null | sed -n 1p | sed -E 's/.*Keploy: ([^ ]+).*/\1/')"
     last="$(grep -a 'testcase id' "$log" 2>/dev/null | tail -n 1 | sed -E 's/.*Keploy: ([^ ]+).*/\1/')"
     if [ -n "$first" ] && [ -n "$last" ]; then
         s="$(date -d "$first" +%s.%N 2>/dev/null || true)"
@@ -329,10 +336,9 @@ section "Building sample application image"
 docker_build_retry docker compose build
 
 section "Cleaning previous artifacts"
-# sudo for keploy/ and keploy-logs.txt: a prior privileged run leaves them
-# root-owned, and a stale root-owned keploy-logs.txt makes the (unprivileged)
-# `config --generate` below fail on its chmod. Harmless on a fresh runner.
-sudo rm -rf keploy/ keploy-logs.txt
+# sudo for keploy/: a prior privileged run leaves it root-owned. Harmless on
+# a fresh runner.
+sudo rm -rf keploy/
 rm -f "$RECORD_LOG" "$REPLAY_LOG" "$WORKLOAD_LOG" "$PWD"/docker-*.prof
 cleanup_compose
 
@@ -389,7 +395,7 @@ check_recorded_tests
 # Assert the recording produced a mappings.yaml — otherwise replay silently falls
 # back to the full-corpus scan and the ratio below reflects the slow path, not the
 # path users get. Non-fatal (report-only lane), but loud so it can't mislead.
-MAPPINGS_FILE="$(find keploy -name mappings.yaml 2>/dev/null | head -1)"
+MAPPINGS_FILE="$(find keploy -name mappings.yaml 2>/dev/null | sed -n 1p)"
 if [ -n "$MAPPINGS_FILE" ]; then
     echo "OK: recording produced $MAPPINGS_FILE ($(wc -l < "$MAPPINGS_FILE") lines) — replay will narrow the pool per test."
 else

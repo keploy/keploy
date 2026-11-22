@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/pkg/platform/storage"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
@@ -43,6 +45,12 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlMappingDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, nil, cfg)
+	// keploy's CLI has a console (stdout) for what a recording's log names
+	// by a host's shape and tag: a capture loss's destination, a mock.real
+	// connection's other name, whole beside the tag.
+	if rec, ok := recordSvc.(*record.Recorder); ok {
+		rec.SetConsole(os.Stdout)
+	}
 	logger.Debug("async: lanes parsed from config", zap.Int("count", len(cfg.Async.Lanes)))
 	if len(cfg.Async.Lanes) > 0 {
 		if rec, ok := recordSvc.(*record.Recorder); ok {
@@ -51,12 +59,27 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		}
 	}
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, commonServices.Storage, cfg)
+	// keploy's CLI has a console (stdout) for what names a call whole and
+	// never goes to a log: the mismatch table, a call of an earlier set. A
+	// program that embeds the replayer has none unless it sets one.
+	if r, ok := replaySvc.(*replay.Replayer); ok {
+		r.SetConsole(os.Stdout)
+	}
 	// mockSvc reuses the SAME AgentClient instrumentation, mock/mapping DBs and
 	// (in enterprise) RecordHooks that record/replay use, so every runtime
 	// behaviour those apply to the wrapped command — LD_PRELOAD/java-agent/Go
 	// binary TLS shims, time-freeze, secret obfuscation — applies to
 	// `keploy mock` unchanged. OSS uses the file-backed store.
 	mockSvc := mock.New(logger, commonServices.Instrumentation, commonServices.YamlMockDb, commonServices.YamlMappingDb, mock.FileStore{}, nil, cfg)
+	// So has keploy mock replay's, for each call no mock answered.
+	if s, ok := mockSvc.(mock.ConsoleSetter); ok {
+		s.SetConsole(os.Stdout)
+	}
+	if cfg.Mock.RecordRequests {
+		if s, ok := mockSvc.(mock.TestDBSetter); ok {
+			s.SetTestDB(commonServices.YamlTestDB)
+		}
+	}
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	diffSvc := diff.New(logger, commonServices.YamlReportDb, commonServices.YamlTestDB)
@@ -128,7 +151,9 @@ func resolveDockerNames(logger *zap.Logger, c *config.Config, cont, net string, 
 
 	switch {
 	case c.ContainerName == "":
-		utils.LogError(logger, err, "failed to resolve the app container from the docker command", zap.String("cmd", c.Command))
+		cmd := utils.NewAppCommand(c.Command)
+		utils.LogError(logger, err, "failed to resolve the app container from the docker command", zap.Inline(cmd))
+		utils.LogWholeCommand(logger, "cmd", cmd)
 	case cont == "":
 		logger.Warn("could not read a container name out of the docker command; using the one that was provided",
 			zap.String("containerName", c.ContainerName), zap.Error(err))
@@ -148,6 +173,11 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	var err error
 
 	if utils.IsDockerCmd(utils.CmdType(c.CommandType)) {
+		// Before the client: preparing an engine can be what gives it an
+		// Engine API endpoint to talk to.
+		if err := engine.Prepare(ctx, logger, engine.Detect(c.Command)); err != nil {
+			return nil, err
+		}
 		client, err = docker.New(logger, c)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create docker client")
@@ -165,7 +195,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 			}
 		} else if utils.CmdType(c.CommandType) != utils.DockerCompose {
 			cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
-			logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
+			logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", utils.RedactCommandLine(c.Command)))
 			resolveDockerNames(logger, c, cont, net, err)
 
 			logger.Debug("Using container and network", zap.String("container", c.ContainerName), zap.String("network", c.NetworkName))
@@ -173,6 +203,9 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	}
 
 	instrumentation := http.New(logger, client, c)
+	// keploy's CLI has a console (stdout) for what the agent client names
+	// whole and never logs: a request a recording did not record.
+	instrumentation.SetConsole(os.Stdout)
 
 	// MockFormat (yaml vs gob — chosen for record-time CPU vs grep-friendliness)
 	// is orthogonal to StorageFormat (yaml vs json — chosen for the on-disk
