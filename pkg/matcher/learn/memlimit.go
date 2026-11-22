@@ -14,34 +14,59 @@ import (
 // memoryLimit is the agent's memory limit in bytes, 0 where none is known:
 // the least of the Go runtime's (GOMEMLIMIT, or the one the agent's memory
 // guard sets), its cgroup's and each of its parents' (memory.max, or
-// memory.limit_in_bytes under cgroup v1), and the machine's memory. It
-// walks the parents where the staging's readers (stageReaders) do not:
-// those follow GOMAXPROCS, which reads the process's own cpu.max alone. The
-// two fail differently. A parent's memory.max passed OOM-kills the agent,
-// so a set's budget must sit under the lowest one; a parent's CPU quota
-// only throttles, and readers past it share its CPU time, never more.
+// memory.limit_in_bytes under cgroup v1 on Linux), and the machine's physical
+// memory (read natively on every OS: /proc/meminfo on Linux, sysctl hw.memsize
+// on macOS, GlobalMemoryStatusEx on Windows). It walks the parents where the
+// staging's readers (stageReaders) do not: those follow GOMAXPROCS, which
+// reads the process's own cpu.max alone. The two fail differently. A parent's
+// memory.max passed OOM-kills the agent, so a set's budget must sit under the
+// lowest one; a parent's CPU quota only throttles, and readers past it share
+// its CPU time, never more.
 func memoryLimit() int64 {
-	return memoryLimitAt(debug.SetMemoryLimit(-1), "/proc/self/cgroup", "/sys/fs/cgroup", "/proc/meminfo")
+	return memoryLimitFrom(debug.SetMemoryLimit(-1), processCgroupLimit(), hostMemory())
+}
+
+// memoryLimitFrom returns the least positive limit among goLimit
+// (math.MaxInt64: none), cgroup (0: none), and machine (0: unknown), or 0
+// when no limit is known.
+func memoryLimitFrom(goLimit, cgroup, machine int64) int64 {
+	limit := int64(math.MaxInt64)
+	known := false
+	if goLimit > 0 && goLimit < math.MaxInt64 {
+		limit = goLimit
+		known = true
+	}
+	if cgroup > 0 && (!known || cgroup < limit) {
+		limit = cgroup
+		known = true
+	}
+	if machine > 0 && (!known || machine < limit) {
+		limit = machine
+		known = true
+	}
+	if !known {
+		return 0
+	}
+	return limit
 }
 
 // memoryLimitAt is memoryLimit with the Go runtime's limit goLimit
 // (math.MaxInt64: none) and the cgroup and memory files read at these
 // paths, for the rows.
 func memoryLimitAt(goLimit int64, procCgroup, cgroupRoot, meminfo string) int64 {
-	limit := int64(math.MaxInt64)
-	if goLimit > 0 {
-		limit = goLimit
-	}
-	if c := cgroupLimit(procCgroup, cgroupRoot); c > 0 && c < limit {
-		limit = c
-	}
-	if m := machineMemory(meminfo); m > 0 && m < limit {
-		limit = m
-	}
-	if limit == math.MaxInt64 {
+	return memoryLimitFrom(goLimit, cgroupLimit(procCgroup, cgroupRoot), machineMemory(meminfo))
+}
+
+// clampMemoryBytes converts a positive unsigned byte count from an OS query
+// into an int64, returning 0 for 0 and math.MaxInt64 if it exceeds MaxInt64.
+func clampMemoryBytes(n uint64) int64 {
+	if n == 0 {
 		return 0
 	}
-	return limit
+	if n > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(n)
 }
 
 // cgroupLimit is the least memory limit of the process's cgroup and its
@@ -115,7 +140,7 @@ func machineMemory(meminfo string) int64 {
 		f := strings.Fields(sc.Text())
 		if len(f) >= 2 && f[0] == "MemTotal:" {
 			kb, err := strconv.ParseInt(f[1], 10, 64)
-			if err != nil || kb <= 0 {
+			if err != nil || kb <= 0 || kb > math.MaxInt64>>10 {
 				return 0
 			}
 			return kb << 10

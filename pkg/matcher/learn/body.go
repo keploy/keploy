@@ -57,6 +57,10 @@ type rawSource struct {
 	// turn (Raw.holding), is the payload it read first, kept for its
 	// later parts; nil for any other.
 	held *heldBody
+	// staged is true when this Raw was created by background staging
+	// (WarmSet), so its payload insert obeys stageStopped and never evicts
+	// call-owned tiers.
+	staged bool
 }
 
 // heldBody is the payload a holding Raw read first (Raw.holding); ok once
@@ -71,11 +75,11 @@ type heldBody struct {
 func (s *rawSource) body() rawBody {
 	if h := s.held; h != nil {
 		if !h.ok {
-			h.body, h.ok = s.store.get(s.id, s.name, s.load), true
+			h.body, h.ok = s.store.getAs(s.id, s.name, s.staged, s.load), true
 		}
 		return h.body
 	}
-	return s.store.get(s.id, s.name, s.load)
+	return s.store.getAs(s.id, s.name, s.staged, s.load)
 }
 
 // holding is x reading its payload at most once, where a part first needs
@@ -231,8 +235,14 @@ func (s *bodyStore) isOver() bool {
 }
 
 // get is the payload of the recording id (named name) names: kept, being
-// loaded (waited for), or loaded now through load.
+// loaded (waited for), or loaded now through load for a call.
 func (s *bodyStore) get(id, name string, load func() (*models.Mock, error)) rawBody {
+	return s.getAs(id, name, false, load)
+}
+
+// getAs is get for either a call (staged false) or background staging
+// (staged true).
+func (s *bodyStore) getAs(id, name string, staged bool, load func() (*models.Mock, error)) rawBody {
 	s.mu.Lock()
 	if sl := s.kept.find(id, partBody); sl != nil {
 		b := sl.p
@@ -262,7 +272,7 @@ func (s *bodyStore) get(id, name string, load func() (*models.Mock, error)) rawB
 	// an Order of the set (Order.views) holds it.
 	if l.body.read || !s.forgetUnread {
 		s.read[id] = l.body.read
-		s.kept.keep(id, partBody, l.body.size(), func(p *rawBody) { *p = l.body })
+		s.kept.keepAs(id, partBody, l.body.size(), staged, func(p *rawBody) { *p = l.body })
 	}
 	delete(s.loading, id)
 	s.mu.Unlock()
@@ -330,6 +340,6 @@ func (dc *DriftCache) LazyRawOf(m *models.Mock, served bool, load func() (*model
 		}
 		return r
 	}
-	r.src = &rawSource{id: r.id, name: m.Name, load: load, store: dc.set.bodies, mock: m}
+	r.src = &rawSource{id: r.id, name: m.Name, load: load, store: dc.set.bodies, mock: m, staged: dc.staging}
 	return r
 }

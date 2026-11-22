@@ -414,7 +414,7 @@ func (dc *DriftCache) placesKept(x Raw) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held.find(x.id, partPlaces) != nil
+	return s.held.findAs(x.id, partPlaces, dc.staging) != nil
 }
 
 // offsetBytes is the bytes the index counts, for the rows.

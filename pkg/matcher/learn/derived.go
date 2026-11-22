@@ -228,29 +228,48 @@ const (
 func byKeep(p part, keep bool) part { return p << keepIndex(keep) }
 
 // slot is what a tier keeps of one recording: each part where has holds it.
+// For a non-LRU tier, staged marks parts placed solely by background staging
+// (WarmSet) that no call has read or written yet, with stagedBytes holding
+// each staged part's size (excluding the slot overhead) so calls can reclaim
+// staged-only parts whenever the set's budget is tight.
 type slot[P any] struct {
-	id   string
-	p    P
-	has  part
-	size int64
-	at   *list.Element
+	id          string
+	p           P
+	has         part
+	staged      part
+	stagedBytes map[part]int64
+	size        int64
+	at          *list.Element
 }
 
 // tier is one of setDerived's parts, within budget bytes (about, by each
 // part's size). One that lets go (lru) lets go of the recordings read least
-// recently to keep a part; one that does not keeps none past its budget.
+// recently to keep a part; one that does not keeps none past its budget,
+// except that parts placed solely by background staging (WarmSet) remain on
+// order so calls can reclaim them on demand.
 type tier[P any] struct {
 	// cap is the bytes this tier keeps at most: the set's budget, or a
 	// row's cap on this tier (heldBudget, derivedBudget, formsBudget).
 	cap, used int64
+	// stagedUsed is the exact bytes currently reclaimable by letGoStaged
+	// in this non-LRU tier (slot overhead + staged parts for purely staged
+	// slots, staged parts alone for mixed slots).
+	stagedUsed int64
 	// set is the set's budget, which every tier's parts draw on.
 	set *budget
 	lru bool
-	// full: a tier that does not let go was past its budget for a part,
-	// and keeps no more (room).
-	full  bool
-	order *list.List // of *slot[P], the most recently read first (lru)
-	by    map[string]*slot[P]
+	// full: a tier that does not let go was past its budget for a call's
+	// part, and keeps no more (room). stageFull: background staging hit
+	// the budget and stopped, without poisoning room for calls.
+	full      bool
+	stageFull bool
+	order     *list.List // of *slot[P]: MRU-first for lru; staged slots for !lru
+	by        map[string]*slot[P]
+	// clearParts zeroes dropped staged parts of a mixed slot so their
+	// backing memory is released; onEvict notifies the set when a slot
+	// loses staged parts.
+	clearParts func(*P, part)
+	onEvict    func(id string)
 }
 
 func newTier[P any](cap int64, set *budget, lru bool) tier[P] {
@@ -262,40 +281,103 @@ func newTier[P any](cap int64, set *budget, lru bool) tier[P] {
 
 // budget is the bytes a set's tiers keep in all: one account, so a part is
 // kept while the set is within it, whichever tier the part is of. letGo
-// frees need bytes for a part: the words tier lets go of its recordings
-// read least recently, then, where that is not enough, the payloads tier
-// (bodyStore) of its own, and last the views' (setDerived.views;
-// newSetDerived).
+// frees need bytes from LRU tiers (recordings, words, payloads, views);
+// letGoStaged frees staged-only parts in forms and held when a real call
+// demands room (reclaim with reclaimStaged true), so staging can never
+// starve a call of budget. stageStopped is latched once a call reclaims
+// staged memory so concurrent WarmSet stops immediately.
 type budget struct {
-	limit, used int64
-	letGo       func(need int64)
+	limit, used  int64
+	stageStopped bool
+	letGo        func(need int64)
+	letGoStaged  func(need int64)
 }
 
-// find is id's slot where it holds p, marked read most recently.
+// reclaim frees up to need bytes: when reclaimStaged is true (a real call),
+// staged-only parts in forms and held yield FIRST so background staging never
+// evicts a call's active LRU caches; any remaining deficit is then freed from
+// LRU tiers via letGo.
+func (b *budget) reclaim(need int64, reclaimStaged bool) {
+	if need <= 0 {
+		return
+	}
+	before := b.used
+	if reclaimStaged && b.letGoStaged != nil {
+		b.letGoStaged(need)
+	}
+	if rem := need - (before - b.used); rem > 0 && b.letGo != nil {
+		b.letGo(rem)
+	}
+}
+
+// find is id's slot where it holds p, marked read most recently and promoted
+// out of staged-only state for a call.
 func (t *tier[P]) find(id string, p part) *slot[P] {
+	return t.findAs(id, p, false)
+}
+
+// findAs is find for either a call (staged false, promoting p out of
+// staged-only state) or background staging (staged true).
+func (t *tier[P]) findAs(id string, p part, staged bool) *slot[P] {
 	sl := t.by[id]
 	if sl == nil || sl.has&p == 0 {
 		return nil
 	}
 	if t.lru {
 		t.order.MoveToFront(sl.at)
+	} else if !staged {
+		t.unstage(sl, p)
 	}
 	return sl
 }
 
-// keep puts p, of size bytes, into id's slot (put), within the tier's cap
+// unstage marks part p of sl as call-demanded so letGoStaged will not evict it.
+func (t *tier[P]) unstage(sl *slot[P], p part) {
+	if t.lru || sl.staged&p == 0 {
+		return
+	}
+	if sl.staged == sl.has {
+		t.stagedUsed -= slotBytes + int64(len(sl.id))
+	}
+	t.stagedUsed -= sl.stagedBytes[p]
+	sl.staged &^= p
+	delete(sl.stagedBytes, p)
+	if sl.staged == 0 {
+		if sl.at != nil {
+			t.order.Remove(sl.at)
+			sl.at = nil
+		}
+		sl.stagedBytes = nil
+	}
+}
+
+// keep puts p, of size bytes, into id's slot (put) for a call, within the
+// tier's cap and the set's budget.
+func (t *tier[P]) keep(id string, p part, size int64, put func(*P)) {
+	t.keepAs(id, p, size, false, put)
+}
+
+// keepAs puts p, of size bytes, into id's slot (put), within the tier's cap
 // and the set's budget. Where the tier lets go (words, payloads), it then
 // has the budget let go of what the set is past it (budget.letGo: words
 // first), and lets go of its own recordings read least recently until both
 // hold; where it does not, it first has the budget let go of what the part
-// needs past the set's budget, and keeps none past it (full). A part past
+// needs past the set's budget (reclaiming staged-only parts when !staged),
+// and keeps none past it (stageFull for staging, full for calls). A part past
 // the whole of either is kept by none and lets go of nothing. A
 // recording's first part counts its slot.
-func (t *tier[P]) keep(id string, p part, size int64, put func(*P)) {
+func (t *tier[P]) keepAs(id string, p part, size int64, staged bool, put func(*P)) {
 	sl := t.by[id]
 	if sl != nil && sl.has&p != 0 {
+		if !staged {
+			t.unstage(sl, p)
+		}
 		return
 	}
+	if t.lru && staged && t.set.stageStopped {
+		return
+	}
+	partSize := size
 	if sl == nil {
 		size += slotBytes + int64(len(id))
 	}
@@ -303,19 +385,56 @@ func (t *tier[P]) keep(id string, p part, size int64, put func(*P)) {
 		return
 	}
 	if !t.lru {
-		if t.used+size > t.cap {
-			t.full = true
+		if staged && (t.stageFull || t.set.stageStopped) {
 			return
 		}
-		if need := t.set.used + size - t.set.limit; need > 0 && t.set.letGo != nil {
-			t.set.letGo(need)
+		if !staged && t.used+size > t.cap {
+			if t.letGoStaged(t.used+size-t.cap) > 0 {
+				t.set.stageStopped = true
+			}
+			if sl != nil && t.by[id] == nil {
+				sl = nil
+				size += slotBytes + int64(len(id))
+				if size > t.cap || size > t.set.limit {
+					return
+				}
+				if t.used+size > t.cap && t.letGoStaged(t.used+size-t.cap) > 0 {
+					t.set.stageStopped = true
+				}
+			}
 		}
-		if t.set.used+size > t.set.limit {
-			t.full = true
+		if t.used+size > t.cap {
+			if staged {
+				t.stageFull = true
+			} else {
+				t.full = true
+			}
+			return
+		}
+		if need := t.set.used + size - t.set.limit; need > 0 {
+			t.set.reclaim(need, !staged)
+			if sl != nil && t.by[id] == nil {
+				sl = nil
+				size += slotBytes + int64(len(id))
+				if size > t.cap || size > t.set.limit {
+					return
+				}
+				if need2 := t.set.used + size - t.set.limit; need2 > 0 {
+					t.set.reclaim(need2, !staged)
+				}
+			}
+		}
+		if t.used+size > t.cap || t.set.used+size > t.set.limit {
+			if staged {
+				t.stageFull = true
+			} else {
+				t.full = true
+			}
 			return
 		}
 	}
-	if sl == nil {
+	newSlot := sl == nil
+	if newSlot {
 		sl = &slot[P]{id: strings.Clone(id)}
 		if t.lru {
 			sl.at = t.order.PushFront(sl)
@@ -324,22 +443,91 @@ func (t *tier[P]) keep(id string, p part, size int64, put func(*P)) {
 	} else if t.lru {
 		t.order.MoveToFront(sl.at)
 	}
+	wasPureStaged := !t.lru && !newSlot && sl.has != 0 && sl.staged == sl.has
 	put(&sl.p)
 	sl.has |= p
+	if !t.lru {
+		if staged {
+			sl.staged |= p
+			if sl.stagedBytes == nil {
+				sl.stagedBytes = map[part]int64{}
+			}
+			sl.stagedBytes[p] = partSize
+			if newSlot {
+				t.stagedUsed += size
+			} else {
+				t.stagedUsed += partSize
+			}
+			if sl.at == nil {
+				sl.at = t.order.PushFront(sl)
+			}
+		} else if wasPureStaged {
+			t.stagedUsed -= slotBytes + int64(len(sl.id))
+		}
+	}
 	sl.size += size
 	t.used += size
 	t.set.used += size
 	if !t.lru {
 		return
 	}
-	if need := t.set.used - t.set.limit; need > 0 && t.set.letGo != nil {
-		t.set.letGo(need)
+	if need := t.set.used - t.set.limit; need > 0 {
+		t.set.reclaim(need, !staged)
 	}
 	for t.used > t.cap || t.set.used > t.set.limit {
 		if !t.letGoLast() {
 			break
 		}
 	}
+}
+
+// letGoStaged reclaims staged-only slots or parts from a non-LRU tier, most
+// recently staged first (keeping earlier recordings cached longest), until
+// need bytes are freed or no staged parts remain.
+func (t *tier[P]) letGoStaged(need int64) (freed int64) {
+	if t.lru {
+		return 0
+	}
+	for freed < need {
+		elem := t.order.Front()
+		if elem == nil {
+			return freed
+		}
+		old := elem.Value.(*slot[P])
+		t.order.Remove(elem)
+		old.at = nil
+		if old.staged == old.has {
+			delete(t.by, old.id)
+			t.used -= old.size
+			t.stagedUsed -= old.size
+			t.set.used -= old.size
+			freed += old.size
+			if t.onEvict != nil {
+				t.onEvict(old.id)
+			}
+			continue
+		}
+		drop := old.staged
+		var dropSize int64
+		for _, sz := range old.stagedBytes {
+			dropSize += sz
+		}
+		if t.clearParts != nil {
+			t.clearParts(&old.p, drop)
+		}
+		old.has &^= drop
+		old.staged = 0
+		old.stagedBytes = nil
+		old.size -= dropSize
+		t.used -= dropSize
+		t.stagedUsed -= dropSize
+		t.set.used -= dropSize
+		freed += dropSize
+		if t.onEvict != nil {
+			t.onEvict(old.id)
+		}
+	}
+	return freed
 }
 
 // letGo lets go of the tier's recordings read least recently until need
@@ -373,16 +561,27 @@ func (t *tier[P]) letGoLast() bool {
 // drop lets go of all the tier keeps, and keeps nothing more.
 func (t *tier[P]) drop() {
 	t.set.used -= t.used
-	t.used, t.cap, t.full = 0, 0, true
+	t.used, t.stagedUsed, t.cap, t.full, t.stageFull = 0, 0, 0, true, false
 	t.by = map[string]*slot[P]{}
 	t.order.Init()
 }
 
-// room is whether the tier may keep another part: one that lets go always
-// may; one that does not, until a part did not fit in what was left of its
-// budget (full), so a part it will not keep is not read as if it would on
-// every call.
-func (t *tier[P]) room() bool { return t.lru || !t.full }
+// room is whether the tier may keep another part for a call: one that lets go
+// always may; one that does not, until a call's part did not fit in what was
+// left of its budget (full).
+func (t *tier[P]) room() bool { return t.roomAs(false) }
+
+// roomAs is room for either a call (staged false) or background staging
+// (staged true).
+func (t *tier[P]) roomAs(staged bool) bool {
+	if t.lru {
+		return !staged || !t.set.stageStopped
+	}
+	if staged {
+		return !t.full && !t.stageFull && !t.set.stageStopped
+	}
+	return !t.full
+}
 
 // tierOf names one of setDerived's tiers in a readingKey.
 type tierOf uint8
@@ -411,16 +610,16 @@ type readingKey struct {
 // was not kept (past t's budget) is read again by each. read is told whether
 // t may keep what it reads (room): a part t will not keep is read through the
 // test's cache of texts, once per test.
-func derive[P, V any](s *setDerived, t *tier[P], in tierOf, id string, p part, get func(*P) V, read func(kept bool) V, put func(*P, V), size func(V) int64) V {
+func derive[P, V any](s *setDerived, t *tier[P], in tierOf, id string, p part, staged bool, get func(*P) V, read func(kept bool) V, put func(*P, V), size func(V) int64) V {
 	k := readingKey{id, p, in}
 	for waited := false; ; waited = true {
 		s.mu.Lock()
-		if sl := t.find(id, p); sl != nil {
+		if sl := t.findAs(id, p, staged); sl != nil {
 			v := get(&sl.p)
 			s.mu.Unlock()
 			return v
 		}
-		room := t.room()
+		room := t.roomAs(staged)
 		if !room || waited {
 			s.reads[readTally{in, p}]++
 			s.mu.Unlock()
@@ -436,13 +635,13 @@ func derive[P, V any](s *setDerived, t *tier[P], in tierOf, id string, p part, g
 		s.reading[k] = ch
 		s.reads[readTally{in, p}]++
 		s.mu.Unlock()
-		return readOnce(s, t, k, ch, get, read, put, size)
+		return readOnce(s, t, k, ch, staged, get, read, put, size)
 	}
 }
 
 // readOnce reads part k of a recording as derive's sole reader of it, keeps
 // it, and lets the handlers waiting for it go, whatever read does.
-func readOnce[P, V any](s *setDerived, t *tier[P], k readingKey, ch chan struct{}, get func(*P) V, read func(kept bool) V, put func(*P, V), size func(V) int64) V {
+func readOnce[P, V any](s *setDerived, t *tier[P], k readingKey, ch chan struct{}, staged bool, get func(*P) V, read func(kept bool) V, put func(*P, V), size func(V) int64) V {
 	defer func() {
 		s.mu.Lock()
 		delete(s.reading, k)
@@ -453,8 +652,8 @@ func readOnce[P, V any](s *setDerived, t *tier[P], k readingKey, ch chan struct{
 	n := size(v)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t.keep(k.id, k.part, n, func(e *P) { put(e, v) })
-	if sl := t.find(k.id, k.part); sl != nil {
+	t.keepAs(k.id, k.part, n, staged, func(e *P) { put(e, v) })
+	if sl := t.findAs(k.id, k.part, staged); sl != nil {
 		return get(&sl.p)
 	}
 	return v
@@ -536,20 +735,81 @@ func newSetDerived() *setDerived {
 	s.recs = newTier[*models.Mock](recordingBudget, b, true)
 	s.refused = newTier[struct{}](noCap, b, false)
 	s.inFlight = semaphore.NewWeighted(readInFlight)
+	s.held.clearParts = clearHeldParts
+	s.held.onEvict = func(id string) {
+		if s.warming[id] == warmed {
+			delete(s.warming, id)
+		}
+	}
+	s.forms.clearParts = clearFormParts
 	// The decoded recordings go first: they keep only what the budget has
 	// spare, and one let go is decoded again from the store, as it was at
 	// every read before the set kept them. The words go next: a
 	// recording's words are read again from its payload, where one let go
 	// is decoded again (a JSON encode and decode of the whole recording)
-	// before any of its parts can be read. The views go last: every call
-	// that reads a recording F served with a view reads the view.
+	// before any of its parts can be read. The views go next. Finally,
+	// when a real call demands room (reclaimStaged), staged-only entries
+	// placed by background WarmSet in forms and held yield too so staging
+	// can never starve a call of budget.
 	b.letGo = func(need int64) {
 		freed := s.recs.letGo(need)
 		freed += s.words.letGo(need - freed)
 		freed += s.bodies.kept.letGo(need - freed)
 		s.views.kept.letGo(need - freed)
 	}
+	b.letGoStaged = func(need int64) {
+		reclaimed := s.forms.letGoStaged(need)
+		reclaimed += s.held.letGoStaged(need - reclaimed)
+		if reclaimed > 0 {
+			b.stageStopped = true
+		}
+	}
 	return s
+}
+
+func clearHeldParts(e *heldParts, drop part) {
+	if drop&partMoments != 0 {
+		e.moments = nil
+	}
+	if drop&partPlaces != 0 {
+		e.places = nil
+	}
+	if drop&partFields != 0 {
+		e.fields = nil
+	}
+	if drop&partForms != 0 {
+		e.forms = nil
+	}
+	if drop&partStamps != 0 {
+		e.stamps = nil
+	}
+	if drop&partAt != 0 {
+		e.answerAt = nil
+	}
+	if drop&byKeep(partFilter, false) != 0 {
+		e.filter[0] = nil
+	}
+	if drop&byKeep(partFilter, true) != 0 {
+		e.filter[1] = nil
+	}
+	if drop&byKeep(partPlain, false) != 0 {
+		e.plain[0] = false
+	}
+	if drop&byKeep(partPlain, true) != 0 {
+		e.plain[1] = false
+	}
+	if drop&partKeys != 0 {
+		e.keys = nil
+	}
+}
+
+func clearFormParts(e *formParts, drop part) {
+	if drop&partDecoded != 0 {
+		e.d[0] = decoded{}
+	}
+	if drop&(partDecoded<<1) != 0 {
+		e.d[1] = decoded{}
+	}
 }
 
 // drop lets go of all s keeps, once its set is over (Tracker.NewSet), and
@@ -612,8 +872,8 @@ func (s *setDerived) keepRun(size int64) bool {
 	}
 	s.run += size
 	s.budget.used += size
-	if need := s.budget.used - s.budget.limit; need > 0 && s.budget.letGo != nil {
-		s.budget.letGo(need)
+	if need := s.budget.used - s.budget.limit; need > 0 {
+		s.budget.reclaim(need, true)
 	}
 	return true
 }
@@ -711,14 +971,14 @@ func (s *setDerived) heldBytes() int64 {
 
 // heldPart is part p of x's recording that s keeps for the set (held); see
 // derive.
-func heldPart[V any](s *setDerived, x Raw, p part, get func(*heldParts) V, read func(kept bool) V, put func(*heldParts, V), size func(V) int64) V {
-	return derive(s, &s.held, tierHeld, x.id, p, get, read, put, size)
+func heldPart[V any](dc *DriftCache, s *setDerived, x Raw, p part, get func(*heldParts) V, read func(kept bool) V, put func(*heldParts, V), size func(V) int64) V {
+	return derive(s, &s.held, tierHeld, x.id, p, dc.staging, get, read, put, size)
 }
 
 // wordPart is part p of x's recording that s keeps within its budget
 // (words); see derive.
-func wordPart[V any](s *setDerived, x Raw, p part, get func(*wordParts) V, read func(kept bool) V, put func(*wordParts, V), size func(V) int64) V {
-	return derive(s, &s.words, tierWords, x.id, p, get, read, put, size)
+func wordPart[V any](dc *DriftCache, s *setDerived, x Raw, p part, get func(*wordParts) V, read func(kept bool) V, put func(*wordParts, V), size func(V) int64) V {
+	return derive(s, &s.words, tierWords, x.id, p, dc.staging, get, read, put, size)
 }
 
 func momentsBytes(m []moment) int64 { return headerBytes + momentBytes*int64(len(m)) }
@@ -765,7 +1025,7 @@ func (dc *DriftCache) payloadMoments(x Raw) []moment {
 	if s == nil {
 		return read(dc.spansOf, dc.rawExtra(x.payload().text))
 	}
-	return heldPart(s, x, partMoments, func(e *heldParts) []moment { return e.moments }, func(kept bool) []moment {
+	return heldPart(dc, s, x, partMoments, func(e *heldParts) []moment { return e.moments }, func(kept bool) []moment {
 		if !kept {
 			return read(dc.spansOf, dc.payloadExtra(x))
 		}
@@ -782,7 +1042,7 @@ func (dc *DriftCache) setPlaces(x Raw) (out []keyedPlace, ok bool) {
 	if s == nil {
 		return nil, false
 	}
-	return heldPart(s, x, partPlaces, func(e *heldParts) []keyedPlace { return e.places }, func(bool) []keyedPlace {
+	return heldPart(dc, s, x, partPlaces, func(e *heldParts) []keyedPlace { return e.places }, func(bool) []keyedPlace {
 		out := dc.readPlaces(x)
 		copyPlaces(out)
 		return out
@@ -797,7 +1057,7 @@ func (dc *DriftCache) setTokens(x Raw, keep bool) (out []map[string]bool, ok boo
 		return nil, false
 	}
 	k := keepIndex(keep)
-	return wordPart(s, x, byKeep(partTokens, keep), func(e *wordParts) []map[string]bool { return e.tokens[k] }, func(bool) []map[string]bool {
+	return wordPart(dc, s, x, byKeep(partTokens, keep), func(e *wordParts) []map[string]bool { return e.tokens[k] }, func(bool) []map[string]bool {
 		return copyWords(tokensWith(x, keep, func(y Raw) (string, decoded) { return dc.decodedOf(s, y) }))
 	}, func(e *wordParts, v []map[string]bool) { e.tokens[k] = v }, tokensBytes), true
 }
@@ -830,7 +1090,7 @@ func (dc *DriftCache) stampTexts(x Raw) []string {
 	if s == nil {
 		return read()
 	}
-	return heldPart(s, x, partStamps, func(e *heldParts) []string { return e.stamps }, func(bool) []string {
+	return heldPart(dc, s, x, partStamps, func(e *heldParts) []string { return e.stamps }, func(bool) []string {
 		out := read()
 		for i := range out {
 			out[i] = strings.Clone(out[i])
@@ -853,7 +1113,7 @@ func (dc *DriftCache) answerWords(x Raw, keep bool) []map[string]bool {
 		return dc.readAnswerWords(x, keep)
 	}
 	k := keepIndex(keep)
-	return wordPart(s, x, byKeep(partAnswer, keep), func(e *wordParts) []map[string]bool { return e.answer[k] }, func(bool) []map[string]bool {
+	return wordPart(dc, s, x, byKeep(partAnswer, keep), func(e *wordParts) []map[string]bool { return e.answer[k] }, func(bool) []map[string]bool {
 		return copyWords(dc.readAnswerWords(x, keep))
 	}, func(e *wordParts, v []map[string]bool) { e.answer[k] = v }, tokensBytes)
 }
@@ -867,7 +1127,7 @@ func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
 	if s == nil {
 		return dc.readAnswerMoments(x)
 	}
-	kept := heldPart(s, x, partAt, func(e *heldParts) []givenMoment { return e.answerAt }, func(bool) []givenMoment {
+	kept := heldPart(dc, s, x, partAt, func(e *heldParts) []givenMoment { return e.answerAt }, func(bool) []givenMoment {
 		kept := dc.readAnswerMoments(x)
 		for i := range kept {
 			a := &kept[i]
@@ -898,7 +1158,7 @@ func (dc *DriftCache) fieldForms(x Raw) (out [][]moment, ok bool) {
 	if s == nil {
 		return nil, false
 	}
-	return heldPart(s, x, partForms, func(e *heldParts) [][]moment { return e.forms }, func(kept bool) [][]moment {
+	return heldPart(dc, s, x, partForms, func(e *heldParts) [][]moment { return e.forms }, func(kept bool) [][]moment {
 		return readFields(dc, x, kept, true)
 	}, func(e *heldParts, v [][]moment) { e.forms = v }, fieldsBytes), true
 }
@@ -958,7 +1218,7 @@ func (dc *DriftCache) searchWords(x Raw, keep bool) (out wordFilter, ok bool) {
 		return nil, false
 	}
 	k := keepIndex(keep)
-	out = heldPart(s, x, byKeep(partFilter, keep), func(e *heldParts) wordFilter { return e.filter[k] }, func(kept bool) wordFilter {
+	out = heldPart(dc, s, x, byKeep(partFilter, keep), func(e *heldParts) wordFilter { return e.filter[k] }, func(kept bool) wordFilter {
 		if !kept {
 			// Past the set's budget: the search reads the payload's
 			// texts, as with no set, rather than its words each call.
@@ -1111,7 +1371,7 @@ func (dc *DriftCache) fieldMoments(x Raw) (out [][]moment, ok bool) {
 	if s == nil {
 		return nil, false
 	}
-	return heldPart(s, x, partFields, func(e *heldParts) [][]moment { return e.fields }, func(kept bool) [][]moment {
+	return heldPart(dc, s, x, partFields, func(e *heldParts) [][]moment { return e.fields }, func(kept bool) [][]moment {
 		return readFields(dc, x, kept, true)
 	}, func(e *heldParts, v [][]moment) { e.fields = v }, fieldsBytes), true
 }
@@ -1124,7 +1384,7 @@ func (dc *DriftCache) payloadExtra(x Raw) string {
 	if s == nil {
 		return dc.rawExtra(x.payload().text)
 	}
-	return wordPart(s, x, partExtra, func(e *wordParts) string { return e.extra }, func(bool) string {
+	return wordPart(dc, s, x, partExtra, func(e *wordParts) string { return e.extra }, func(bool) string {
 		text, d := dc.decodedOf(s, x.withoutStamps())
 		return strings.Clone(d.extraOf(text))
 	}, func(e *wordParts, v string) { e.extra = v }, func(v string) int64 { return headerBytes + int64(len(v)) })
@@ -1140,7 +1400,7 @@ func (dc *DriftCache) setSearched(s *setDerived, x Raw, keep bool) [2]string {
 	if dc.setPlain(s, x, keep) {
 		return [2]string{x.payload().text, dc.payloadExtra(x)}
 	}
-	return wordPart(s, x, byKeep(partSearched, keep), func(e *wordParts) [2]string { return e.searched[k] }, func(bool) [2]string {
+	return wordPart(dc, s, x, byKeep(partSearched, keep), func(e *wordParts) [2]string { return e.searched[k] }, func(bool) [2]string {
 		y := x
 		if keep {
 			y = x.withoutStamps()
@@ -1155,7 +1415,7 @@ func (dc *DriftCache) setSearched(s *setDerived, x Raw, keep bool) [2]string {
 // once for the set.
 func (dc *DriftCache) setPlain(s *setDerived, x Raw, keep bool) bool {
 	k := keepIndex(keep)
-	return heldPart(s, x, byKeep(partPlain, keep), func(e *heldParts) bool { return e.plain[k] }, func(bool) bool {
+	return heldPart(dc, s, x, byKeep(partPlain, keep), func(e *heldParts) bool { return e.plain[k] }, func(bool) bool {
 		y := x
 		if keep {
 			y = x.withoutStamps()
@@ -1175,7 +1435,7 @@ func (dc *DriftCache) decodedOf(s *setDerived, y Raw) (string, decoded) {
 	if len(yb.stamps) > 0 {
 		text, i = blankStamps(text, yb.stamps), 1
 	}
-	return text, derive(s, &s.forms, tierForms, y.id, partDecoded<<i, func(e *formParts) decoded { return e.d[i] }, func(kept bool) decoded {
+	return text, derive(s, &s.forms, tierForms, y.id, partDecoded<<i, dc.staging, func(e *formParts) decoded { return e.d[i] }, func(kept bool) decoded {
 		if !kept {
 			return derivedOfText(dc, textDecoded, text, func(own string) decoded { return decodeForms(own) }, func(d decoded) int64 { return d.size() })
 		}
@@ -1193,7 +1453,7 @@ func (dc *DriftCache) searchedKeys(x Raw) (out []instantKey, ok bool) {
 	if s == nil {
 		return nil, false
 	}
-	return heldPart(s, x, partKeys, func(e *heldParts) []instantKey { return e.keys }, func(kept bool) []instantKey {
+	return heldPart(dc, s, x, partKeys, func(e *heldParts) []instantKey { return e.keys }, func(kept bool) []instantKey {
 		var keys []instantKey
 		if dc.setPlain(s, x, false) {
 			// Its searched texts are its text and its other forms, whose
@@ -1488,7 +1748,7 @@ func (dc *DriftCache) warm(raw []Raw) {
 				mu.Unlock()
 				w := readWeight(x, readCost)
 				s.reserve(w)
-				ch, mine := s.take(x)
+				ch, mine := s.take(x, false)
 				if ch == nil {
 					s.inFlight.Release(w)
 					return
@@ -1525,14 +1785,36 @@ func (dc *DriftCache) warm(raw []Raw) {
 	}
 }
 
-// take is the channel closed once x's payload is read (warmOne), and
-// whether the caller is to read it: the first to ask for x takes it. nil
-// where the set keeps no more (held has no room: past its budget, or after
-// its NewSet), where nobody reads it for the set.
-func (s *setDerived) take(x Raw) (ch chan struct{}, mine bool) {
+// stageRoomLocked reports whether background staging still has room on the
+// set's budget (s.mu held).
+func (s *setDerived) stageRoomLocked() bool {
+	return s.held.roomAs(true) && s.forms.roomAs(true)
+}
+
+// stagedBytesLocked returns the exact bytes currently reclaimable from
+// staged-only parts in forms and held (s.mu held).
+func (s *setDerived) stagedBytesLocked() int64 {
+	return s.forms.stagedUsed + s.held.stagedUsed
+}
+
+func (s *setDerived) stageRoom() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.held.room() {
+	return s.stageRoomLocked()
+}
+
+// take is the channel closed once x's payload is read (warmOne), and
+// whether the caller is to read it: the first to ask for x takes it. nil
+// where the set keeps no more (held has no room for a call, or staging hit
+// budget/stopped for staged), where nobody reads it for the set.
+func (s *setDerived) take(x Raw, staged bool) (ch chan struct{}, mine bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if staged {
+		if !s.stageRoomLocked() {
+			return nil, false
+		}
+	} else if !s.held.room() {
 		return nil, false
 	}
 	ch, taken := s.warming[x.id]
@@ -1569,22 +1851,43 @@ func (s *setDerived) take(x Raw) (ch chan struct{}, mine bool) {
 // which may have let it go to another reader's load in between.
 func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged bool) {
 	x = x.holding()
+	var started, coreDone bool
 	defer func() {
 		s.mu.Lock()
-		s.warming[x.id] = warmed
+		if staged && (!coreDone || s.held.by[x.id] == nil) {
+			delete(s.warming, x.id)
+		} else {
+			s.warming[x.id] = warmed
+		}
 		if staged {
-			s.staged++
+			if started {
+				s.staged++
+			}
 		} else {
 			s.called++
 		}
 		s.mu.Unlock()
 		close(ch)
 	}()
+	if staged && !s.stageRoom() {
+		return
+	}
+	started = true
 	dc.payloadMoments(x)
+	if staged && !s.stageRoom() {
+		return
+	}
 	dc.searchWords(x, false)
+	if staged && !s.stageRoom() {
+		return
+	}
 	dc.searchedKeys(x)
+	if staged && !s.stageRoom() {
+		return
+	}
 	dc.stampTexts(x)
-	if staged {
+	coreDone = true
+	if staged && s.stageRoom() {
 		dc.stagedParts(x)
 	}
 }
@@ -1594,7 +1897,13 @@ func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged boo
 // echo reads them.
 func (dc *DriftCache) stagedParts(x Raw) {
 	dc.setPlaces(x)
+	if dc.set != nil && !dc.set.stageRoom() {
+		return
+	}
 	dc.fieldMoments(x)
+	if dc.set != nil && !dc.set.stageRoom() {
+		return
+	}
 	dc.fieldForms(x)
 }
 
@@ -1608,6 +1917,9 @@ func (dc *DriftCache) stagedParts(x Raw) {
 // what that read keeps (derive), so each part is read once. Its parts are
 // read from one load of the payload, as warmOne's are (Raw.holding).
 func (dc *DriftCache) stageRest(s *setDerived, x Raw) {
+	if !s.stageRoom() {
+		return
+	}
 	dc.stagedParts(x.holding())
 	s.mu.Lock()
 	s.finished++

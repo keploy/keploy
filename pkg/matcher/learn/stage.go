@@ -44,6 +44,7 @@ func (t *Tracker) WarmSet(src func(visit func(*models.Mock) bool) error) <-chan 
 	// set's budget it keeps for none of the set's tests, and lets go of as
 	// it ends.
 	dc := t.newDrifts()
+	dc.staging = true
 	t.mu.Unlock()
 	readers := stageReaders()
 	go func() {
@@ -153,7 +154,7 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 		x := dc.LazyRawOf(m, false, withAnswer(m))
 		w := readWeight(x, stageCost)
 		s.reserve(w)
-		ch, mine := s.take(x)
+		ch, mine := s.take(x, true)
 		if ch == nil {
 			s.inFlight.Release(w)
 			free <- struct{}{}
@@ -207,5 +208,5 @@ func (s *setDerived) use() SetUse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return SetUse{Staged: s.staged, Called: s.called, Finished: s.finished, Decoded: s.bodies.loads, Held: s.held.used, Words: s.words.used, Forms: s.forms.used,
-		Bodies: s.bodies.kept.used, Budget: s.budget.limit, HeldFull: s.held.full, FormsFull: s.forms.full}
+		Bodies: s.bodies.kept.used, Budget: s.budget.limit, HeldFull: s.held.full || s.held.stageFull, FormsFull: s.forms.full || s.forms.stageFull}
 }

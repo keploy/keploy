@@ -3122,6 +3122,10 @@ type driftState struct {
 	// set keeps what is read of a recording's payload alone for the
 	// tracker's running set (setDerived); nil for a cache no tracker made.
 	set *setDerived
+	// staging is true only on the private DriftCache created by
+	// Tracker.WarmSet: parts written through it are reclaimable whenever a
+	// call needs room on the set's budget, so staging never starves a call.
+	staging bool
 }
 
 // InZone is dc read in z, the zone the process that made a call writes a

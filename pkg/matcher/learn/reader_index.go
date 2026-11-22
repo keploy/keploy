@@ -189,8 +189,8 @@ func setClaim(s *setDerived, n int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b := s.budget
-	if need := b.used + n - b.limit; need > 0 && b.letGo != nil {
-		b.letGo(need)
+	if need := b.used + n - b.limit; need > 0 {
+		b.reclaim(need, true)
 	}
 	if b.used+n > b.limit {
 		return false

@@ -84,7 +84,7 @@ func (s *setDerived) keepRecording(key string, size int64, decode func() (*model
 func (s *setDerived) recRoom(key string, size int64) bool {
 	t := &s.recs
 	size += slotBytes + int64(len(key))
-	return t.by[key] == nil && s.refused.by[key] == nil && size <= t.cap && s.budget.used-t.used+size <= s.budget.limit
+	return t.by[key] == nil && s.refused.by[key] == nil && size <= t.cap && s.budget.used-t.used-s.stagedBytesLocked()+size <= s.budget.limit
 }
 
 // recordingMeasures counts the recordings recordingHeap measured, for the
@@ -190,9 +190,12 @@ func (s *setDerived) keepSpare(key string, size int64, m *models.Mock) {
 		return
 	}
 	size += slotBytes + int64(len(key))
-	if size > t.cap || s.budget.used-t.used+size > s.budget.limit {
+	if size > t.cap || s.budget.used-t.used-s.stagedBytesLocked()+size > s.budget.limit {
 		s.refused.keep(key, partRecording, 0, func(*struct{}) {})
 		return
+	}
+	if need := s.budget.used + size - s.budget.limit; need > 0 && s.budget.letGoStaged != nil {
+		s.budget.letGoStaged(need)
 	}
 	for t.used+size > t.cap || s.budget.used+size > s.budget.limit {
 		if !t.letGoLast() {
