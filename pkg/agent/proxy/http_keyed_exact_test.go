@@ -404,3 +404,29 @@ func TestAnExactCallUnderURLNoiseIsAnsweredByTheWholeRead(t *testing.T) {
 		})
 	}
 }
+
+// A call whose path holds only spent recordings (a test kept them for its
+// repeats and is over with them) misses as the whole read misses it, through
+// the exact-body pass and the lax read alike: its report says no recording
+// was left to compare, though the store still lists the spent ones.
+func TestAKeyedReadOfASpentPoolMissesAsTheWholeRead(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", proven)
+			keyed := keyedRowManager(t, keyedRowMock(0, "POST", "/spent", `{"a":1}`, nil))
+			whole := keyedRowManager(t, keyedRowMock(0, "POST", "/spent", `{"a":1}`, nil))
+			keyed.Spend("mock-0")
+			whole.Spend("mock-0")
+			for _, body := range []string{`{"a":1}`, `{"a":2}`} {
+				a := serveWith(httpint.New(zap.NewNop()), keyed, models.OutgoingOptions{}, "", "POST", "/spent", body)
+				b := serveWith(httpint.New(zap.NewNop()), wholeReads{whole}, models.OutgoingOptions{}, "", "POST", "/spent", body)
+				if a != b {
+					t.Fatalf("the call of %s: the keyed read answered %q, the whole read %q", body, a, b)
+				}
+				if proven == "" && !strings.Contains(a, `"`+models.MatchPhaseNoMocks+`"`) {
+					t.Fatalf("the call of %s was answered %q; want a miss with no recording left to compare", body, a)
+				}
+			}
+		})
+	}
+}
