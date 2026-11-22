@@ -186,7 +186,11 @@ func (h *HTTP) keyedStrictRead(ctx context.Context, input *req, mockDb integrati
 	ctx = context.WithValue(context.WithValue(ctx, ownedKey{}, own), storeKey{}, mockDb)
 
 	if withVars, _ := splitVariableMocks(append(vars[0][:len(vars[0]):len(vars[0])], vars[1]...)); len(withVars) > 0 {
-		hits, problem, err := h.variablePass(ctx, input, withVars, scope, headerNoise, userBodyNoise, urlNoise)
+		// A recording that fits the call but whose variables do not hold
+		// leaves the call to the strict pass alone, as exactOnly does after a
+		// read: the keyed strict pass below is that comparison, and a miss
+		// falls back to the whole read which reports the variable problem.
+		hits, _, err := h.variablePass(ctx, input, withVars, scope, headerNoise, userBodyNoise, urlNoise)
 		if err != nil {
 			return nil, false, err
 		}
@@ -207,11 +211,6 @@ func (h *HTTP) keyedStrictRead(ctx context.Context, input *req, mockDb integrati
 				commitCursor()
 			}
 			return served, false, nil
-		}
-		if problem != nil {
-			// Only an exact recording of this very call may still answer
-			// it (exactOnly): the read decides it.
-			return nil, false, nil
 		}
 	}
 
@@ -243,10 +242,9 @@ func (h *HTTP) keyedStrictRead(ctx context.Context, input *req, mockDb integrati
 	if len(fits) == 0 {
 		return nil, false, nil
 	}
-	served, answered, retry, err := h.strictServeFits(ctx, input, live, fits, own, mockDb, n, statefulMocks)
-	if answered != nil {
-		return nil, false, nil
-	}
+	// When answered != nil, strictServeFits returns (nil, answered, false, nil),
+	// so returning (served, retry, err) falls back to the whole read.
+	served, _, retry, err = h.strictServeFits(ctx, input, live, fits, own, mockDb, n, statefulMocks)
 	return served, retry, err
 }
 
