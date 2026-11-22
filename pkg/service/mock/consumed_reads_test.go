@@ -79,8 +79,10 @@ func (o readsInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, erro
 // what was not kept.
 func TestALearnedRecordingTwoReadsCarryIsLearnedOnce(t *testing.T) {
 	provenOn(t)
-	first := models.MockState{Name: "mock-1", Timestamp: 10, ReqBodyNoise: map[string][]string{"body.ts": {}}}
-	last := models.MockState{Name: "mock-1", Timestamp: 20, ReqBodyNoise: map[string][]string{"body.ts": {}, "body.id": {}}}
+	first := models.MockState{Name: "mock-1", Timestamp: 10, ReqBodyNoise: map[string][]string{"body.ts": {}},
+		Variables: models.MockVariables{"id": {Recorded: "41", Use: []string{"body.id"}}}}
+	last := models.MockState{Name: "mock-1", Timestamp: 20, ReqBodyNoise: map[string][]string{"body.ts": {}, "body.id": {}},
+		Variables: models.MockVariables{"id": {Recorded: "42", Use: []string{"body.id"}}}}
 	for _, reads := range []bool{true, false} {
 		t.Run(map[bool]string{true: "an agent that reads client tests", false: "an agent that does not"}[reads], func(t *testing.T) {
 			store := &learnedStore{}
@@ -96,13 +98,14 @@ func TestALearnedRecordingTwoReadsCarryIsLearnedOnce(t *testing.T) {
 				require.NoError(t, counts.learnErr)
 				require.Len(t, store.got, 1)
 				require.Equal(t, last.ReqBodyNoise, store.got["mock-1"].ReqBodyNoise, "the agent's latest state, as before")
+				require.Equal(t, last.Variables, store.got["mock-1"].Variables, "the variables its latest read carries")
 				require.Equal(t, first.Timestamp, store.got["mock-1"].Timestamp, "at its first use")
 				return
 			}
 			require.Error(t, counts.learnErr)
 			kept := logs.FilterMessageSnippet("keploy kept nothing its agent learned").All()
 			require.Len(t, kept, 1)
-			require.Equal(t, []interface{}{"mock-1 body.id (noise)", "mock-1 body.ts (noise)"}, kept[0].ContextMap()["notKept"])
+			require.Equal(t, []interface{}{"mock-1 body.id (noise)", "mock-1 body.ts (noise)", "mock-1 id (variable)"}, kept[0].ContextMap()["notKept"])
 		})
 	}
 }
@@ -184,21 +187,43 @@ func TestTheComposeAccountJoinsTheReadsBeforeIt(t *testing.T) {
 // A recording several reads carry is one entry, as the agent keeps one it
 // served twice within a read: in the place its first read listed it, at its
 // first use, with its latest state otherwise (which carries what its earlier
-// pairings learned: the agent's later read of a recording does), and learned
-// after the learn step ended when any read says so; one read alone carries is
-// as it read.
+// pairings learned: the agent's later read of a recording does), the
+// variables, clocks and binds record's full round learned on it included;
+// and learned after the learn step ended when its latest read says so, any
+// of that read's consumes of it, as the agent says so of one drain. One read
+// alone carries is as it read.
 func TestConsumedReadsKeepOneEntryPerRecording(t *testing.T) {
+	vars := func(v string) models.MockVariables {
+		return models.MockVariables{"id": {Recorded: v, Use: []string{"body.id"}}}
+	}
+	clocks := func(d time.Duration) map[string]models.ClockOffset {
+		return map[string]models.ClockOffset{"body.at": {Min: -d, Max: d, Res: time.Second}}
+	}
+	binds := func(v string) map[string]models.MockVariables { return map[string]models.MockVariables{"a": vars(v)} }
 	var c consumedReads
 	require.Nil(t, c.list(), "no read handed back any")
-	c.add([]models.MockState{{Name: "a", Timestamp: 1, LearnedAfterEnd: true}, {Name: "b", Timestamp: 2, Usage: models.Updated}})
+	c.add([]models.MockState{
+		{Name: "a", Timestamp: 1, LearnedAfterEnd: true, Variables: vars("1"), Clocks: clocks(time.Second), Binds: binds("1")},
+		{Name: "b", Timestamp: 2, Usage: models.Updated},
+	})
 	c.add(nil)
-	c.add([]models.MockState{{Name: "c", Timestamp: 3}, {Name: "a", Timestamp: 4, ReqBodyNoise: map[string][]string{"body.id": {}}}})
-	c.add([]models.MockState{{Name: "b", Timestamp: 5, Usage: models.Deleted, LearnedAfterEnd: true}, {Name: "a", Timestamp: 6, ReqBodyNoise: map[string][]string{"body.id": {}}}})
+	c.add([]models.MockState{
+		{Name: "c", Timestamp: 3},
+		{Name: "a", Timestamp: 4, ReqBodyNoise: map[string][]string{"body.id": {}}, Variables: vars("2"), Clocks: clocks(2 * time.Second), Binds: binds("2")},
+	})
+	c.add([]models.MockState{
+		{Name: "b", Timestamp: 5, Usage: models.Deleted, LearnedAfterEnd: true},
+		{Name: "a", Timestamp: 6, ReqBodyNoise: map[string][]string{"body.id": {}}, Variables: vars("3"), Clocks: clocks(3 * time.Second), Binds: binds("3")},
+		{Name: "d", Timestamp: 7, LearnedAfterEnd: true},
+		{Name: "b", Timestamp: 8, Usage: models.Deleted},
+		{Name: "d", Timestamp: 9},
+	})
 	require.Equal(t, []models.MockState{
-		{Name: "a", Timestamp: 1, LearnedAfterEnd: true, ReqBodyNoise: map[string][]string{"body.id": {}}},
+		{Name: "a", Timestamp: 1, ReqBodyNoise: map[string][]string{"body.id": {}}, Variables: vars("3"), Clocks: clocks(3 * time.Second), Binds: binds("3")},
 		{Name: "b", Timestamp: 2, Usage: models.Deleted, LearnedAfterEnd: true},
 		{Name: "c", Timestamp: 3},
-	}, c.list())
+		{Name: "d", Timestamp: 7, LearnedAfterEnd: true},
+	}, c.list(), "a's first read alone says it learned after the learn step ended; b's and d's latest read says so of one of its consumes")
 }
 
 // A service that replays again starts its run's consumed afresh: its second

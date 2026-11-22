@@ -20,8 +20,11 @@ import "go.keploy.io/server/v3/pkg/models"
 // earlier pairing of the session learned on it (the agent merges each into
 // its never-drained consumed of the session), so what the learn step learned
 // on it is what the latest read says, as a read of the run's whole consumed
-// would say. It learned after the learn step ended when any of its reads says
-// so.
+// would say. It learned after the learn step ended when its latest read says
+// so: within one read, any of its consumes that did is not hidden by a later
+// one that did not, and an earlier read's is, as the agent ORs it within one
+// drain only (flagMockAsUsed: another drain's consumers were not served
+// through it), so the two keep one rule.
 type consumedReads struct {
 	states []models.MockState
 	at     map[string]int
@@ -29,6 +32,7 @@ type consumedReads struct {
 
 // add adds what one read handed back.
 func (c *consumedReads) add(read []models.MockState) {
+	inRead := make(map[string]bool, len(read))
 	for _, st := range read {
 		i, seen := c.at[st.Name]
 		if !seen {
@@ -37,11 +41,15 @@ func (c *consumedReads) add(read []models.MockState) {
 			}
 			c.at[st.Name] = len(c.states)
 			c.states = append(c.states, st)
+			inRead[st.Name] = true
 			continue
 		}
 		first := c.states[i]
 		st.Timestamp = first.Timestamp
-		st.LearnedAfterEnd = st.LearnedAfterEnd || first.LearnedAfterEnd
+		if inRead[st.Name] {
+			st.LearnedAfterEnd = st.LearnedAfterEnd || first.LearnedAfterEnd
+		}
+		inRead[st.Name] = true
 		c.states[i] = st
 	}
 }
