@@ -5,53 +5,11 @@ import (
 	"io"
 	"net"
 	"testing"
-	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 )
-
-// passthroughEventDeadline derives a hang-guard deadline solely from the test
-// binary's deadline (a quarter of the time remaining, so N failing waits in
-// one binary consume at most 1-(3/4)^N of the timeout and fail with their own
-// diagnostic before testing's binary-wide timeout panic). When the test has no
-// deadline (e.g. go test -timeout 0), ok is false and waits have no wall-clock
-// bound.
-func passthroughEventDeadline(t *testing.T) (time.Time, bool) {
-	t.Helper()
-	dl, ok := t.Deadline()
-	if !ok {
-		return time.Time{}, false
-	}
-	rem := time.Until(dl) / 4
-	if rem < 0 {
-		rem = 0
-	}
-	return time.Now().Add(rem), true
-}
-
-func beforePassthroughDeadline(t *testing.T) (<-chan time.Time, func()) {
-	t.Helper()
-	bound, ok := passthroughEventDeadline(t)
-	if !ok {
-		return nil, func() {}
-	}
-	timer := time.NewTimer(time.Until(bound))
-	return timer.C, func() { timer.Stop() }
-}
-
-func setPassthroughReadBound(t *testing.T, conn net.Conn) {
-	t.Helper()
-	if bound, ok := passthroughEventDeadline(t); ok {
-		if err := conn.SetReadDeadline(bound); err != nil {
-			t.Fatalf("set read deadline: %v", err)
-		}
-		return
-	}
-	if err := conn.SetReadDeadline(time.Time{}); err != nil {
-		t.Fatalf("clear read deadline: %v", err)
-	}
-}
 
 func passthroughHalfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 	t.Helper()
@@ -64,14 +22,7 @@ func passthroughHalfCloseExchange(t *testing.T, run func(clientConn, destConn ne
 	// unblocking both goroutines before we wait for them to exit.
 	t.Cleanup(func() {
 		for _, w := range waits {
-			expired, stop := beforePassthroughDeadline(t)
-			select {
-			case <-w.done:
-				stop()
-			case <-expired:
-				stop()
-				t.Errorf("%s did not return during cleanup", w.name)
-			}
+			testdeadline.Join(t, w.name, w.done)
 		}
 	})
 
@@ -138,7 +89,7 @@ func passthroughHalfCloseExchange(t *testing.T, run func(clientConn, destConn ne
 		t.Fatalf("half-close: %v", err)
 	}
 
-	expired, stop := beforePassthroughDeadline(t)
+	expired, stop := testdeadline.Before(t)
 	defer stop()
 	select {
 	case err := <-srvDone:
@@ -151,7 +102,7 @@ func passthroughHalfCloseExchange(t *testing.T, run func(clientConn, destConn ne
 			"the client waits for a reply that will never be sent")
 	}
 
-	setPassthroughReadBound(t, clientApp)
+	testdeadline.SetRead(t, clientApp)
 	got := make([]byte, len(reply))
 	if _, err := io.ReadFull(clientApp, got); err != nil {
 		t.Fatalf("client never received the reply: %v", err)

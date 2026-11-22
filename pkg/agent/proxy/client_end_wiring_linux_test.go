@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -103,7 +104,7 @@ func TestRecordViaSupervisor_TheSessionHoldsTheClientsResetAfterItsFIN(t *testin
 	if err := clientApp.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
-	_ = destSvc.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, destSvc)
 	if got, err := io.ReadAll(destSvc); err != nil || string(got) != request {
 		t.Fatalf("the destination read %q, %v, want the request and the FIN", got, err)
 	}
@@ -122,23 +123,27 @@ func TestRecordViaSupervisor_TheSessionHoldsTheClientsResetAfterItsFIN(t *testin
 		}
 		return got
 	}
-	for limit := time.Now().Add(10 * time.Second); info().Bytes_acked < uint64(len(answer)); {
-		if time.Now().After(limit) {
-			t.Fatal("the client's stack did not take the answer in 10s")
+	ackLimit, hasAckLimit := testdeadline.Bound(t)
+	for info().Bytes_acked < uint64(len(answer)) {
+		if hasAckLimit && time.Now().After(ackLimit) {
+			t.Fatal("the client's stack did not take the answer before the test deadline bound")
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
 	_ = clientApp.Close()
-	for limit := time.Now().Add(10 * time.Second); info().State != unix.BPF_TCP_CLOSE; {
-		if time.Now().After(limit) {
-			t.Fatal("the client did not reset the answer it closed on unread in 10s")
+	closeLimit, hasCloseLimit := testdeadline.Bound(t)
+	for info().State != unix.BPF_TCP_CLOSE {
+		if hasCloseLimit && time.Now().After(closeLimit) {
+			t.Fatal("the client did not reset the answer it closed on unread before the test deadline bound")
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
 	_ = destSvc.Close()
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-probe.ended:
-	case <-time.After(10 * time.Second):
+	case <-expired:
 		t.Fatal("the parser's destination stream did not end")
 	}
 	probe.mu.Lock()

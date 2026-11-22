@@ -18,6 +18,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
@@ -64,17 +65,21 @@ func runClientEnd(t *testing.T, client net.Conn, proxyServer net.Conn) *clientEn
 // FIN (no reset), and ClientEndError was told a reset exactly when reset.
 func (run *clientEndRun) ended(t *testing.T, want string, reset bool) {
 	t.Helper()
+	streamExpired, streamStop := testdeadline.Before(t)
+	defer streamStop()
 	select {
 	case s := <-run.streams:
 		if s != want {
 			t.Fatalf("the destination's stream carried %q, want %q", s, want)
 		}
-	case <-time.After(15 * time.Second):
+	case <-streamExpired:
 		t.Fatal("the destination's stream did not end")
 	}
+	doneExpired, doneStop := testdeadline.Before(t)
+	defer doneStop()
 	select {
 	case <-run.done:
-	case <-time.After(15 * time.Second):
+	case <-doneExpired:
 		t.Fatal("the relay did not end")
 	}
 	run.mu.Lock()
@@ -102,7 +107,7 @@ func halfClosedRequest(t *testing.T, app, server net.Conn) {
 	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, server)
 	if got, err := io.ReadAll(server); err != nil || string(got) != "req" {
 		t.Fatalf("the destination read %q, %v, want the request and the FIN", got, err)
 	}
@@ -158,7 +163,7 @@ func lateReadOfAResetWithNoFIN(t *testing.T, end func(app net.Conn)) {
 	if _, err := app.Write([]byte("req")); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, server)
 	if _, err := io.ReadFull(server, make([]byte, 3)); err != nil {
 		t.Fatalf("the destination did not read the request: %v", err)
 	}
@@ -173,9 +178,11 @@ func lateReadOfAResetWithNoFIN(t *testing.T, end func(app net.Conn)) {
 	// other one's end returns without reading its own peer's (an end the
 	// relay makes is not told: Config.PeerEnded).
 	close(release)
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-run.done:
-	case <-time.After(15 * time.Second):
+	case <-expired:
 		t.Fatal("the relay did not end")
 	}
 	run.mu.Lock()
@@ -214,7 +221,7 @@ func TestAClosedClientWhoseFINAndResetAreBothInBeforeTheReadHasTheFINRead(t *tes
 	if _, err := app.Write([]byte("req")); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, server)
 	if _, err := io.ReadFull(server, make([]byte, 3)); err != nil {
 		t.Fatalf("the destination did not read the request: %v", err)
 	}
@@ -260,9 +267,11 @@ func TestADestinationsResetAfterTheClientsFINIsAReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = server.Close()
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
+	case <-expired:
 		t.Fatal("the relay did not end")
 	}
 	mu.Lock()

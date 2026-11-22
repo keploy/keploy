@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -68,64 +69,6 @@ func prodPair(t *testing.T, withReader bool) (peer net.Conn, proxySide net.Conn)
 	return d, proxyutil.NewSafeConn(raw, zap.NewNop())
 }
 
-// eventWaitDeadline derives a hang-guard deadline solely from the test
-// binary's deadline (a quarter of the time remaining, so N failing waits in
-// one binary consume at most 1-(3/4)^N of the timeout and fail with their own
-// diagnostic before testing's binary-wide timeout panic). When the test has no
-// deadline (e.g. go test -timeout 0), ok is false and waits have no wall-clock
-// bound.
-func eventWaitDeadline(t *testing.T) (time.Time, bool) {
-	t.Helper()
-	dl, ok := t.Deadline()
-	if !ok {
-		return time.Time{}, false
-	}
-	rem := time.Until(dl) / 4
-	if rem < 0 {
-		rem = 0
-	}
-	return time.Now().Add(rem), true
-}
-
-// beforeEventDeadline returns a timer channel that fires at
-// eventWaitDeadline(t) along with a stop function, or (nil, noop) when the
-// test has no deadline.
-func beforeEventDeadline(t *testing.T) (<-chan time.Time, func()) {
-	t.Helper()
-	bound, ok := eventWaitDeadline(t)
-	if !ok {
-		return nil, func() {}
-	}
-	timer := time.NewTimer(time.Until(bound))
-	return timer.C, func() { timer.Stop() }
-}
-
-func setReadBound(t *testing.T, conn net.Conn) {
-	t.Helper()
-	if bound, ok := eventWaitDeadline(t); ok {
-		if err := conn.SetReadDeadline(bound); err != nil {
-			t.Fatalf("set read deadline: %v", err)
-		}
-		return
-	}
-	if err := conn.SetReadDeadline(time.Time{}); err != nil {
-		t.Fatalf("clear read deadline: %v", err)
-	}
-}
-
-func setWriteBound(t *testing.T, conn net.Conn) {
-	t.Helper()
-	if bound, ok := eventWaitDeadline(t); ok {
-		if err := conn.SetWriteDeadline(bound); err != nil {
-			t.Fatalf("set write deadline: %v", err)
-		}
-		return
-	}
-	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
-		t.Fatalf("clear write deadline: %v", err)
-	}
-}
-
 // halfCloseExchange drives one request/EOF/response exchange through
 // `run` and reports whether the reply came back.
 func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
@@ -137,18 +80,11 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 	var waits []cleanupWait
 	// Registered before prodPair so LIFO cleanup closes the raw TCP sockets
 	// first, unblocking both goroutines before we wait for them to exit. Each
-	// join is bounded by beforeEventDeadline so a wedged goroutine fails
-	// cleanly instead of hanging until testing's binary timeout panic.
+	// join is bounded by testdeadline.Join so a wedged goroutine fails cleanly
+	// instead of hanging until testing's binary timeout panic.
 	t.Cleanup(func() {
 		for _, w := range waits {
-			expired, stop := beforeEventDeadline(t)
-			select {
-			case <-w.done:
-				stop()
-			case <-expired:
-				stop()
-				t.Errorf("%s did not return during cleanup", w.name)
-			}
+			testdeadline.Join(t, w.name, w.done)
 		}
 	})
 
@@ -190,7 +126,7 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 		t.Fatalf("half-close: %v", err)
 	}
 
-	expired, stop := beforeEventDeadline(t)
+	expired, stop := testdeadline.Before(t)
 	defer stop()
 	select {
 	case err := <-srvDone:
@@ -203,7 +139,7 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 			"bytes that will not come while the client waits for a reply it will not send.")
 	}
 
-	setReadBound(t, clientApp)
+	testdeadline.SetRead(t, clientApp)
 	got := make([]byte, len(reply))
 	if _, err := io.ReadFull(clientApp, got); err != nil {
 		t.Fatalf("client never received the reply after half-closing: %v", err)
@@ -262,7 +198,7 @@ func TestForwardFIN_SkipsWhenTheCopyFailed(t *testing.T) {
 			"the peer will read that as a complete request and may act on a truncated message", err)
 	}
 
-	setReadBound(t, peer)
+	testdeadline.SetRead(t, peer)
 	got := make([]byte, len(sentinel))
 	if _, err := io.ReadFull(peer, got); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {

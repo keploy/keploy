@@ -9,9 +9,9 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 )
@@ -79,9 +79,11 @@ func TestTheWalkToTheClientsSocketEndsOnACycleOfWrappers(t *testing.T) {
 	s := &finSentRecorder{}
 	done := make(chan struct{})
 	go func() { defer close(done); (&Relay{client: s}).noteClientFINSent(&selfWrapping{}) }()
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-expired:
 		t.Fatal("the walk over a cycle of wrappers did not end")
 	}
 	if got := s.toldTimes(); got != 0 {
@@ -127,13 +129,15 @@ func relayTellsTheDestinationsFIN(t *testing.T, closed bool) {
 		t.Fatal(err)
 	}
 	_ = server.(*net.TCPConn).CloseWrite()
-	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, app)
 	if got, err := io.ReadAll(app); err != nil || string(got) != "answer" {
 		t.Fatalf("the client read %q, %v, want the answer and the proxy's FIN", got, err)
 	}
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
+	case <-expired:
 		t.Fatal("the relay did not end")
 	}
 	want := int32(1)

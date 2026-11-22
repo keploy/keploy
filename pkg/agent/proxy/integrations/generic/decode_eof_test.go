@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -64,7 +65,7 @@ func bigStore(ns ...int) eofStore {
 // answered).
 func readAnswer(t *testing.T, app net.Conn, want string) {
 	t.Helper()
-	setReadBound(t, app)
+	testdeadline.SetRead(t, app)
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(app, got); err != nil || string(got) != want {
 		t.Fatalf("answer %q, %v; want %q", got, err, want)
@@ -90,7 +91,7 @@ func TestTheGenericParserAnswersARequestAsLongAsItsReadBuffer(t *testing.T) {
 			// A pipe's write waits for the parser to read it: bounded by the
 			// test deadline, so a parser that stopped reading fails the test
 			// instead of hanging it.
-			setWriteBound(t, app)
+			testdeadline.SetWrite(t, app)
 			if _, err := app.Write(bytes.Repeat([]byte("A"), n)); err != nil {
 				t.Fatal(err)
 			}
@@ -133,7 +134,7 @@ func tcpPair(t *testing.T) (app *net.TCPConn, proxySide net.Conn) {
 // test's deadline bound.
 func awaitEnd(t *testing.T, done <-chan error, what string) {
 	t.Helper()
-	expired, stop := beforeEventDeadline(t)
+	expired, stop := testdeadline.Before(t)
 	defer stop()
 	select {
 	case err := <-done:

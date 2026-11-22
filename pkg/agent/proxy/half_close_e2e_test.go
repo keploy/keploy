@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -120,19 +121,21 @@ func TestRecordViaSupervisor_HalfCloseReachesTheUpstream(t *testing.T) {
 		t.Fatalf("half-close: %v", err)
 	}
 
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case err := <-srvDone:
 		if err != nil {
 			t.Fatalf("upstream: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-expired:
 		t.Fatal("the upstream never saw EOF. recordViaSupervisor wraps the client side in " +
 			"*util.Conn, which embeds net.Conn as an interface and so does not promote " +
 			"CloseWrite — the FIN is dropped and an EOF-delimited peer never learns the " +
 			"request ended. Unit tests on raw sockets cannot see this.")
 	}
 
-	_ = clientApp.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, clientApp)
 	got := make([]byte, len(reply))
 	if _, err := io.ReadFull(clientApp, got); err != nil {
 		t.Fatalf("client never received the reply after half-closing: %v", err)
@@ -217,7 +220,7 @@ func TestRecordViaSupervisor_ServerHalfCloseReachesTheClient(t *testing.T) {
 		}
 	}()
 
-	_ = clientApp.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, clientApp)
 	got, err := io.ReadAll(clientApp)
 	if err != nil {
 		t.Fatalf("the client never saw EOF after the server half-closed: %v.\n"+

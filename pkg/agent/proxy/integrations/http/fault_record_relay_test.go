@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -30,10 +31,12 @@ func (c *relayedConn) finish(t *testing.T) ([]*models.Mock, error) {
 	_ = c.app.Close()
 	_ = c.dest.Close()
 	var err error
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case err = <-c.done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("recordV2 did not return within 10s of the connection's end")
+	case <-expired:
+		t.Fatal("recordV2 did not return after the connection's end")
 	}
 	var mocks []*models.Mock
 	for {
@@ -50,7 +53,7 @@ func (c *relayedConn) finish(t *testing.T) ([]*models.Mock, error) {
 // what it read and how it ended.
 func appRead(t *testing.T, app net.Conn) (string, error) {
 	t.Helper()
-	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, app)
 	var got []byte
 	buf := make([]byte, 4096)
 	for {
@@ -109,10 +112,12 @@ func TestRecordV2_FaultUpstreamResetBeforeAnswer(t *testing.T) {
 	resetConn(t, c.dest)
 	// The proxy closes the application's connection once the relay has
 	// ended (proxy.go, after recordViaSupervisor).
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-c.relayDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the relay did not end within 10s of the upstream's reset")
+	case <-expired:
+		t.Fatal("the relay did not end after the upstream's reset")
 	}
 	_ = c.src.Close()
 	got, rerr := appRead(t, c.app)
@@ -146,7 +151,7 @@ func TestRecordV2_FaultUpstreamNeverAnswersAndTheAppGivesUp(t *testing.T) {
 	// The application's own client timeout: it closes, with no answer.
 	_ = c.app.Close()
 	buf := make([]byte, 1)
-	_ = c.dest.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, c.dest)
 	if _, err := c.dest.Read(buf); err != io.EOF {
 		t.Fatalf("the upstream read %v; want the application's close forwarded (EOF)", err)
 	}
@@ -297,7 +302,7 @@ func TestRecordV2_FaultUpstreamGoesSilentAfterTheHeadAndTheAppGivesUp(t *testing
 	relayed(t, c.app, head+"01234")
 	_ = c.app.Close()
 	buf := make([]byte, 1)
-	_ = c.dest.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, c.dest)
 	if _, err := c.dest.Read(buf); err != io.EOF {
 		t.Fatalf("the upstream read %v; want the application's close forwarded (EOF)", err)
 	}

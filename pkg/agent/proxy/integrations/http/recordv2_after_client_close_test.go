@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zapcore"
@@ -24,7 +25,7 @@ import (
 // readRequestHead reads one request head off c, as the destination does.
 func readRequestHead(t *testing.T, c net.Conn) string {
 	t.Helper()
-	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, c)
 	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
 	r := bufio.NewReader(c)
 	var head strings.Builder
@@ -46,7 +47,7 @@ func readRequestHead(t *testing.T, c net.Conn) string {
 // awaitFIN waits until c's peer has sent its FIN: c reads to its end.
 func awaitFIN(t *testing.T, c net.Conn) {
 	t.Helper()
-	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, c)
 	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
 	if rest, err := io.ReadAll(c); err != nil || len(rest) != 0 {
 		t.Fatalf("the destination read %d more bytes, %v, before the FIN", len(rest), err)
@@ -223,9 +224,11 @@ func TestRecordV2_ThroughTheRelayAResponseTheClientClosedPartwayIsLeftOutAndSays
 			}
 			if row.behind {
 				_ = c.dest.Close()
+				expired, stop := testdeadline.Before(t)
+				defer stop()
 				select {
 				case <-c.relayDone:
-				case <-time.After(10 * time.Second):
+				case <-expired:
 					t.Fatal("the relay did not end once both sides had closed")
 				}
 				c.startParser(t)
@@ -288,8 +291,9 @@ func TestRecordV2_ThroughTheRelayAStreamTheSessionClosedIsNotTheClientsClosePart
 	if _, err := c.dest.Write([]byte(body[500:])); err != nil {
 		t.Fatal(err)
 	}
-	for limit := time.Now().Add(10 * time.Second); !c.sess.EndedWhereClientStopped(); {
-		if time.Now().After(limit) {
+	stopLimit, hasStopLimit := testdeadline.Bound(t)
+	for !c.sess.EndedWhereClientStopped() {
+		if hasStopLimit && time.Now().After(stopLimit) {
 			t.Fatal("the relay did not end the stream where the client stopped")
 		}
 		time.Sleep(50 * time.Microsecond)
@@ -303,9 +307,11 @@ func TestRecordV2_ThroughTheRelayAStreamTheSessionClosedIsNotTheClientsClosePart
 	_ = c.sess.ClientStream.Close()
 	// What recordV2 returns, and reports, for a stream the session closed
 	// under it is the abort's matter, not this row's.
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-c.done:
-	case <-time.After(10 * time.Second):
+	case <-expired:
 		t.Fatal("recordV2 did not return once the session closed its streams")
 	}
 	if l := c.leftOut(supervisor.LeftOutClientClosedPartway); len(l) != 0 {
@@ -343,9 +349,11 @@ func TestRecordV2_ThroughTheRelayAWholeResponseBeforeTheClientStoppedIsRecorded(
 		t.Fatal(err)
 	}
 	_ = c.dest.Close()
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-c.relayDone:
-	case <-time.After(10 * time.Second):
+	case <-expired:
 		t.Fatal("the relay did not end once both sides had closed")
 	}
 	if !c.sess.EndedWhereClientStopped() {

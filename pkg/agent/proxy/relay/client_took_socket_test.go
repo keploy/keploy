@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -114,7 +115,7 @@ func TestAfterTheClientClosed_WhatTheClientDidNotTakeIsNotTeed(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := make([]byte, len(request))
-			_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+			testdeadline.SetRead(t, server)
 			if _, err := io.ReadFull(server, got); err != nil {
 				t.Fatalf("the destination did not get the request: %v", err)
 			}
@@ -130,15 +131,16 @@ func TestAfterTheClientClosed_WhatTheClientDidNotTakeIsNotTeed(t *testing.T) {
 			if row.unread {
 				// The FIN is at the proxy's socket, and the relay's next
 				// Read of the client has not returned.
-				for limit := time.Now().Add(5 * time.Second); tcpState(t, proxyClient) != stateCloseWait; {
-					if time.Now().After(limit) {
-						t.Fatalf("the client's FIN did not reach the proxy's socket in 5s (state %d)", tcpState(t, proxyClient))
+				finLimit, hasFinLimit := testdeadline.Bound(t)
+				for tcpState(t, proxyClient) != stateCloseWait {
+					if hasFinLimit && time.Now().After(finLimit) {
+						t.Fatalf("the client's FIN did not reach the proxy's socket (state %d)", tcpState(t, proxyClient))
 					}
 					time.Sleep(50 * time.Microsecond)
 				}
 			} else {
 				// The relay forwarded the FIN.
-				_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+				testdeadline.SetRead(t, server)
 				if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
 					t.Fatalf("the destination read %d more bytes, %v, before the FIN", len(rest), err)
 				}
@@ -148,7 +150,7 @@ func TestAfterTheClientClosed_WhatTheClientDidNotTakeIsNotTeed(t *testing.T) {
 			}
 			if row.halfClose {
 				// Forwarded, and read by the half-closed client.
-				_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+				testdeadline.SetRead(t, app)
 				got := make([]byte, len(answer))
 				if _, err := io.ReadFull(app, got); err != nil || string(got) != answer {
 					t.Fatalf("the half-closed client read %q, %v", got, err)
@@ -156,9 +158,10 @@ func TestAfterTheClientClosed_WhatTheClientDidNotTakeIsNotTeed(t *testing.T) {
 			} else {
 				// Forwarded, and refused: the closed client's stack resets
 				// the connection.
-				for limit := time.Now().Add(5 * time.Second); tcpState(t, proxyClient) != stateClosed; {
-					if time.Now().After(limit) {
-						t.Fatalf("the closed client did not reset the connection in 5s (state %d)", tcpState(t, proxyClient))
+				rstLimit, hasRstLimit := testdeadline.Bound(t)
+				for tcpState(t, proxyClient) != stateClosed {
+					if hasRstLimit && time.Now().After(rstLimit) {
+						t.Fatalf("the closed client did not reset the connection (state %d)", tcpState(t, proxyClient))
 					}
 					time.Sleep(50 * time.Microsecond)
 				}
@@ -168,9 +171,11 @@ func TestAfterTheClientClosed_WhatTheClientDidNotTakeIsNotTeed(t *testing.T) {
 			}
 			_ = server.Close()
 			var s [2]string
+			expired, stop := testdeadline.Before(t)
+			defer stop()
 			select {
 			case s = <-streams:
-			case <-time.After(10 * time.Second):
+			case <-expired:
 				t.Fatal("the relay's streams did not end once both sides had closed")
 			}
 			if s[0] != request {
@@ -208,7 +213,7 @@ func TestAfterTheClientHalfClosed_EveryAnswerItTakesIsTeed(t *testing.T) {
 	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, server)
 	if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
 		t.Fatalf("the destination read %d bytes, %v, before the FIN", len(rest), err)
 	}
@@ -217,7 +222,7 @@ func TestAfterTheClientHalfClosed_EveryAnswerItTakesIsTeed(t *testing.T) {
 		if _, err := server.Write([]byte(answer)); err != nil {
 			t.Fatal(err)
 		}
-		_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+		testdeadline.SetRead(t, app)
 		got := make([]byte, len(answer))
 		if _, err := io.ReadFull(app, got); err != nil || string(got) != answer {
 			t.Fatalf("the half-closed client read %q, %v", got, err)
@@ -225,12 +230,14 @@ func TestAfterTheClientHalfClosed_EveryAnswerItTakesIsTeed(t *testing.T) {
 		want += answer
 	}
 	_ = server.Close()
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case got := <-streams:
 		if got != want {
 			t.Fatalf("the destination's stream carried %q, want %q", got, want)
 		}
-	case <-time.After(10 * time.Second):
+	case <-expired:
 		t.Fatal("the destination's stream did not end once both sides had closed")
 	}
 	if n := notTakenLogged(t, logs); n != 0 {
@@ -322,7 +329,7 @@ func TestAClientThatResetsWithNoFINBeforeKeepsWhatItWasWritten(t *testing.T) {
 				if _, err := server.Write([]byte(answer)); err != nil {
 					t.Fatal(err)
 				}
-				_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+				testdeadline.SetRead(t, app)
 				got := make([]byte, len(head))
 				if _, err := io.ReadFull(app, got); err != nil || string(got) != head {
 					t.Fatalf("round %d: the client read %q, %v", round, got, err)
@@ -336,9 +343,12 @@ func TestAClientThatResetsWithNoFINBeforeKeepsWhatItWasWritten(t *testing.T) {
 				awaitTCPState(t, proxyClient, stateClosed, "the client closed with bytes unread")
 				_ = server.Close()
 				var s string
+				expired, stop := testdeadline.Before(t)
 				select {
 				case s = <-streams:
-				case <-time.After(10 * time.Second):
+					stop()
+				case <-expired:
+					stop()
 					t.Fatalf("round %d: the destination's stream did not end", round)
 				}
 				cancel()
@@ -389,7 +399,7 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 		if err := app.Close(); err != nil {
 			t.Fatal(err)
 		}
-		_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+		testdeadline.SetRead(t, server)
 		if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
 			t.Fatalf("the destination read %d bytes, %v, before the FIN", len(rest), err)
 		}
@@ -397,8 +407,9 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 		if _, err := server.Write([]byte(first)); err != nil {
 			t.Fatal(err)
 		}
-		for limit := time.Now().Add(5 * time.Second); stops.Load() == 0; {
-			if time.Now().After(limit) {
+		stopLimit, hasStopLimit := testdeadline.Bound(t)
+		for stops.Load() == 0 {
+			if hasStopLimit && time.Now().After(stopLimit) {
 				t.Fatal("the relay did not say the client stopped taking the first answer")
 			}
 			time.Sleep(time.Millisecond)
@@ -407,12 +418,14 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = server.Close()
+		expired, stop := testdeadline.Before(t)
+		defer stop()
 		select {
 		case s := <-streams:
 			if s != "" {
 				t.Fatalf("the destination's stream carried %q, want nothing", s)
 			}
-		case <-time.After(10 * time.Second):
+		case <-expired:
 			t.Fatal("the destination's stream did not end")
 		}
 		cancel()
@@ -452,8 +465,9 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 		if _, err := server.Write([]byte(first)); err != nil {
 			t.Fatal(err)
 		}
-		for limit := time.Now().Add(5 * time.Second); stops.Load() == 0; {
-			if time.Now().After(limit) {
+		stopLimit, hasStopLimit := testdeadline.Bound(t)
+		for stops.Load() == 0 {
+			if hasStopLimit && time.Now().After(stopLimit) {
 				t.Fatal("the relay did not say the client stopped taking the first answer")
 			}
 			time.Sleep(time.Millisecond)
@@ -461,12 +475,14 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 		if _, err := server.Write([]byte(second)); err != nil {
 			t.Fatal(err)
 		}
+		expired, stop := testdeadline.Before(t)
+		defer stop()
 		select {
 		case s := <-streams:
 			if s != "" {
 				t.Fatalf("the destination's stream carried %q, want nothing", s)
 			}
-		case <-time.After(10 * time.Second):
+		case <-expired:
 			t.Fatal("the destination's stream did not end after the short write")
 		}
 		_ = server.Close()
@@ -518,20 +534,23 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 		if _, err := server.Write([]byte(answer)); err != nil {
 			t.Fatal(err)
 		}
-		for limit := time.Now().Add(5 * time.Second); len(*marks.Load()) == 0; {
-			if time.Now().After(limit) {
+		markLimit, hasMarkLimit := testdeadline.Bound(t)
+		for len(*marks.Load()) == 0 {
+			if hasMarkLimit && time.Now().After(markLimit) {
 				t.Fatal("no mock was marked incomplete for the answer whose Write failed")
 			}
 			time.Sleep(time.Millisecond)
 		}
 		close(held.release)
 		_ = server.Close()
+		expired, stop := testdeadline.Before(t)
+		defer stop()
 		select {
 		case s := <-streams:
 			if s != answer {
 				t.Fatalf("the destination's stream carried %q, want the answer, teed as before", s)
 			}
-		case <-time.After(10 * time.Second):
+		case <-expired:
 			t.Fatal("the destination's stream did not end")
 		}
 		cancel()

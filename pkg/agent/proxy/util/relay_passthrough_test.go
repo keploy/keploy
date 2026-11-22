@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.uber.org/zap"
 )
 
@@ -409,12 +410,14 @@ func TestRelayRawPassthrough_ForwardsFINOnCleanEOF(t *testing.T) {
 		}
 	}
 
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case b := <-gotAll:
 		if string(b) != "request" {
 			t.Fatalf("destination got %q, want %q", b, "request")
 		}
-	case <-time.After(5 * time.Second):
+	case <-expired:
 		t.Fatal("the destination never saw EOF: the client's FIN was not forwarded, so an " +
 			"EOF-delimited peer would wait forever for a request that was already complete")
 	}
@@ -535,12 +538,14 @@ func TestDeadWriteConnActuallyForwardsCloseWrite(t *testing.T) {
 		}
 	}
 
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case b := <-gotAll:
 		if string(b) != "request" {
 			t.Fatalf("destination got %q, want %q", b, "request")
 		}
-	case <-time.After(5 * time.Second):
+	case <-expired:
 		t.Fatal("deadWriteConn swallowed CloseWrite, so TestRelayRawPassthrough_NoFINAfterAWriteError " +
 			"is a tautology: it would pass against a build that forwards the FIN unconditionally")
 	}
@@ -674,15 +679,19 @@ func TestRelayRawPassthrough_ReplySurvivesTheClientFIN(t *testing.T) {
 		}
 	}
 
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-relayDone:
-	case <-time.After(60 * time.Second):
+	case <-expired:
 		t.Fatal("RelayRawPassthrough never returned")
 	}
 	// handleConnection closes the real sockets the instant this returns.
 	_ = appSide.Close()
 	_ = destSide.Close()
 
+	replyExpired, replyStop := testdeadline.Before(t)
+	defer replyStop()
 	select {
 	case n := <-got:
 		if n < len(reply) {
@@ -691,7 +700,7 @@ func TestRelayRawPassthrough_ReplySurvivesTheClientFIN(t *testing.T) {
 				"returning there lets the caller's close destroy a reply that was still "+
 				"arriving.", n, len(reply))
 		}
-	case <-time.After(10 * time.Second):
+	case <-replyExpired:
 		t.Fatal("client never received the reply")
 	}
 }

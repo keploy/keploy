@@ -10,12 +10,12 @@ import (
 	"net"
 	"syscall"
 	"testing"
-	"time"
 
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	ossHttp "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -35,7 +35,7 @@ import (
 // charged, and when the application did not read want as its connection's end.
 func pairKeptWhole(t *testing.T, p *Proxy, app net.Conn, kind models.FaultKind, want error) {
 	t.Helper()
-	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, app)
 	n, rerr := app.Read(make([]byte, 64))
 	if n != 0 || !errors.Is(rerr, want) {
 		t.Errorf("after a %s fault the application read %d bytes, %v; want nothing, then %v", kind, n, rerr, want)
@@ -137,7 +137,7 @@ func TestAnUpstreamResetRelayedOnAPairedConnectionKeepsThePairingWhole(t *testin
 	if _, err := app.Write([]byte(req)); err != nil {
 		t.Fatal(err)
 	}
-	_ = upstream.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, upstream)
 	if _, err := io.ReadFull(upstream, make([]byte, len(req))); err != nil {
 		t.Fatalf("the upstream did not get the request: %v", err)
 	}
@@ -145,10 +145,12 @@ func TestAnUpstreamResetRelayedOnAPairedConnectionKeepsThePairingWhole(t *testin
 		t.Fatal(err)
 	}
 	_ = upstream.Close()
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
-		t.Fatal("the relay did not end within 15s of the upstream's reset")
+	case <-expired:
+		t.Fatal("the relay did not end after the upstream's reset")
 	}
 	_ = reader.Close() // the handler's close
 	pairKeptWhole(t, p, app, models.FaultReset, syscall.ECONNRESET)

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 )
@@ -41,14 +42,15 @@ func TestAClientThatResetsAfterItsFINHasTheResetHandedOn(t *testing.T) {
 			if _, err := server.Write([]byte(answer)); err != nil {
 				t.Fatal(err)
 			}
-			for limit := time.Now().Add(5 * time.Second); bytesAcked(t, proxyClient) < uint64(len(answer)); {
-				if time.Now().After(limit) {
-					t.Fatal("the client's stack did not take the answer in 5s")
+			ackLimit, hasAckLimit := testdeadline.Bound(t)
+			for bytesAcked(t, proxyClient) < uint64(len(answer)) {
+				if hasAckLimit && time.Now().After(ackLimit) {
+					t.Fatal("the client's stack did not take the answer before the test deadline bound")
 				}
 				time.Sleep(50 * time.Microsecond)
 			}
 			if tc.read {
-				_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+				testdeadline.SetRead(t, app)
 				if _, err := io.ReadFull(app, make([]byte, len(answer))); err != nil {
 					t.Fatal(err)
 				}
@@ -90,7 +92,7 @@ func TestAClosedClientThatResetsTheAnswerItsFINRacedHasTheResetHandedOn(t *testi
 		if _, err := app.Write([]byte("req")); err != nil {
 			t.Fatal(err)
 		}
-		_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+		testdeadline.SetRead(t, server)
 		if _, err := io.ReadFull(server, make([]byte, 3)); err != nil {
 			t.Fatalf("round %d: the destination did not read the request: %v", round, err)
 		}
@@ -132,7 +134,7 @@ func TestAClientThatTookTheAnswerAndResetsBeforeTheReadHasTheResetItsReadTookHan
 	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, server)
 	if _, err := io.ReadFull(server, make([]byte, 3)); err != nil {
 		t.Fatalf("the destination did not read the request: %v", err)
 	}
@@ -141,9 +143,10 @@ func TestAClientThatTookTheAnswerAndResetsBeforeTheReadHasTheResetItsReadTookHan
 		t.Fatal(err)
 	}
 	awaitUnread(t, app)
-	for limit := time.Now().Add(5 * time.Second); bytesAcked(t, proxyClient) < uint64(len(answer)); {
-		if time.Now().After(limit) {
-			t.Fatal("the client's stack did not acknowledge the answer in 5s")
+	ackLimit, hasAckLimit := testdeadline.Bound(t)
+	for bytesAcked(t, proxyClient) < uint64(len(answer)) {
+		if hasAckLimit && time.Now().After(ackLimit) {
+			t.Fatal("the client's stack did not acknowledge the answer before the test deadline bound")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -189,7 +192,7 @@ func TestTheSocketHoldsTheResetOfAChunkAndAFINSentToAClosedClient(t *testing.T) 
 			t.Fatal(finErr)
 		}
 		if took {
-			_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+			testdeadline.SetRead(t, app)
 			if got, err := io.ReadAll(app); err != nil || string(got) != "x" {
 				t.Fatalf("the client read %q, %v, want the chunk and the proxy's FIN", got, err)
 			}

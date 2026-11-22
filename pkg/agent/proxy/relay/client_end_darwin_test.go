@@ -8,9 +8,9 @@ import (
 	"os"
 	"syscall"
 	"testing"
-	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -151,7 +151,7 @@ func TestXNUCountsTheBytesAndTheFINTheClientSent(t *testing.T) {
 	if _, err := app.Write([]byte(sent)); err != nil {
 		t.Fatal(err)
 	}
-	_ = proxyClient.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, proxyClient)
 	if _, err := io.ReadFull(proxyClient, make([]byte, len(sent))); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestXNUATCPInfoThatCannotBeReadTeesEveryChunk(t *testing.T) {
 			if _, err := app.Write([]byte(request)); err != nil {
 				t.Fatal(err)
 			}
-			_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+			testdeadline.SetRead(t, server)
 			if _, err := io.ReadFull(server, make([]byte, len(request))); err != nil {
 				t.Fatal(err)
 			}
@@ -219,12 +219,14 @@ func TestXNUATCPInfoThatCannotBeReadTeesEveryChunk(t *testing.T) {
 			}
 			awaitTCPState(t, proxyClient, stateClosed, "the closed client resets the answer")
 			_ = server.Close()
+			expired, stop := testdeadline.Before(t)
+			defer stop()
 			select {
 			case got := <-streams:
 				if got != answer {
 					t.Fatalf("the destination's stream carried %q, want %q: teed as written", got, answer)
 				}
-			case <-time.After(10 * time.Second):
+			case <-expired:
 				t.Fatal("the destination's stream did not end")
 			}
 			if n := notTakenLogged(t, logs); n != 0 {

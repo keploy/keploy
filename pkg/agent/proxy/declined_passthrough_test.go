@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -111,6 +112,8 @@ func TestRelayDeclinedConn_RelaysTheWholeStreamIncludingConsumedBytes(t *testing
 		_ = p0().relayDeclinedConn(ctx, declined, zap.NewNop(), integrations.GRPC, session)
 	}()
 
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case got := <-received:
 		if !bytes.Equal(got, []byte(h2Preface+"POST")) {
@@ -119,7 +122,7 @@ func TestRelayDeclinedConn_RelaysTheWholeStreamIncludingConsumedBytes(t *testing
 				"anything else forwards a truncated stream and the server resets it.",
 				got, h2Preface+"POST")
 		}
-	case <-time.After(10 * time.Second):
+	case <-expired:
 		t.Fatal("upstream received nothing within the deadline. Either the declined connection " +
 			"was not relayed at all, or it was relayed from a conn positioned PAST the bytes " +
 			"the parser consumed — the preface is gone, so the reader below never fills.")
@@ -315,7 +318,7 @@ func TestRecordMySQLOutgoing_DeclineRelaysRatherThanDropping(t *testing.T) {
 	if _, err := appSide.Write([]byte("ping")); err != nil {
 		t.Fatalf("app write: %v", err)
 	}
-	_ = appSide.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, appSide)
 	buf := make([]byte, 4)
 	if _, err := io.ReadFull(appSide, buf); err != nil {
 		t.Fatalf("the declined connection did not relay: %v.\nA parser that declines must leave "+
@@ -469,18 +472,20 @@ func TestRelayDeclinedConn_ForwardsTheHalfClose(t *testing.T) {
 		}
 	}
 
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case err := <-replied:
 		if err != nil {
 			t.Fatalf("upstream: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-expired:
 		t.Fatal("the upstream never saw the client's FIN, so it never replied. A declined " +
 			"connection relayed through a passthrough that drops half-close ends the user's " +
 			"request instead of forwarding it — the same failure this change exists to fix.")
 	}
 
-	_ = appSide.SetReadDeadline(time.Now().Add(5 * time.Second))
+	testdeadline.SetRead(t, appSide)
 	got := make([]byte, len("reply"))
 	if _, err := io.ReadFull(appSide, got); err != nil {
 		t.Fatalf("client never received the reply after half-closing: %v", err)

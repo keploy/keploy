@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -100,7 +101,7 @@ func TestRecordViaSupervisor_TheDestStreamEndsWhereTheClientStopped(t *testing.T
 	if _, err := clientApp.Write([]byte(request)); err != nil {
 		t.Fatal(err)
 	}
-	_ = destSvc.SetReadDeadline(time.Now().Add(10 * time.Second))
+	testdeadline.SetRead(t, destSvc)
 	if _, err := io.ReadFull(destSvc, make([]byte, len(request))); err != nil {
 		t.Fatalf("the destination did not get the request: %v", err)
 	}
@@ -114,9 +115,11 @@ func TestRecordViaSupervisor_TheDestStreamEndsWhereTheClientStopped(t *testing.T
 		t.Fatal(err)
 	}
 	_ = destSvc.Close()
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-probe.ended:
-	case <-time.After(10 * time.Second):
+	case <-expired:
 		t.Fatal("the parser's destination stream did not end")
 	}
 	probe.mu.Lock()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testdeadline"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"io"
 	"net"
@@ -101,10 +102,7 @@ func newHalfCloseHarnessOver(t *testing.T, cfg Config, wrap func(*connseq.Upstre
 		cancel()
 		_ = clientApp.Close()
 		_ = destSvc.Close()
-		select {
-		case <-h.done:
-		case <-time.After(3 * time.Second):
-		}
+		testdeadline.Join(t, "halfCloseHarness relay goroutine", h.done)
 	})
 	return h
 }
@@ -153,17 +151,19 @@ func TestHalfClose_ClientShutdownStillReceivesReply(t *testing.T) {
 	// HANGS to the package timeout instead of reporting the defect. A
 	// test that hangs on a regression is barely better than one that
 	// misses it.
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case err := <-srvDone:
 		if err != nil {
 			t.Fatalf("the upstream never saw the complete request: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-expired:
 		t.Fatal("the upstream never saw EOF: the relay did not forward the client's FIN, so an " +
 			"EOF-delimited protocol never learns the request ended and never replies")
 	}
 
-	_ = h.clientApp.SetReadDeadline(time.Now().Add(3 * time.Second))
+	testdeadline.SetRead(t, h.clientApp)
 	got := make([]byte, len(reply))
 	if _, err := io.ReadFull(h.clientApp, got); err != nil {
 		t.Fatalf("client never received the reply after half-closing: %v.\n"+
@@ -203,7 +203,7 @@ func TestHalfClose_TheDestinationsBytesAfterTheClientsFINAreMarked(t *testing.T)
 			})
 			readFull := func(c net.Conn, n int) string {
 				t.Helper()
-				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+				testdeadline.SetRead(t, c)
 				b := make([]byte, n)
 				if _, err := io.ReadFull(c, b); err != nil {
 					t.Fatalf("read %d bytes: %v", n, err)
@@ -224,7 +224,7 @@ func TestHalfClose_TheDestinationsBytesAfterTheClientsFINAreMarked(t *testing.T)
 			if grace >= 0 {
 				// The destination answers the FIN once the relay has
 				// forwarded it, and the half-closed client reads that.
-				_ = h.destSvc.SetReadDeadline(time.Now().Add(5 * time.Second))
+				testdeadline.SetRead(t, h.destSvc)
 				if rest, err := io.ReadAll(h.destSvc); err != nil || len(rest) != 0 {
 					t.Fatalf("the destination read %d more bytes, %v, before the FIN", len(rest), err)
 				}
@@ -236,9 +236,11 @@ func TestHalfClose_TheDestinationsBytesAfterTheClientsFINAreMarked(t *testing.T)
 				}
 				_ = h.destSvc.Close()
 			}
+			expired, stop := testdeadline.Before(t)
+			defer stop()
 			select {
 			case <-h.done:
-			case <-time.After(5 * time.Second):
+			case <-expired:
 				t.Fatal("the relay did not return once both sides had closed")
 			}
 			// What a stream carried, marked and not, in order: how the
@@ -317,9 +319,11 @@ func TestHalfClose_GraceBoundsASilentPeer(t *testing.T) {
 	}
 	// The service deliberately never answers and never closes.
 
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-h.done:
-	case <-time.After(5 * time.Second):
+	case <-expired:
 		t.Fatal("relay never returned after a half-close with a silent peer; the grace bound " +
 			"is what stops this becoming the ~60s hang the old teardown prevented")
 	}
@@ -343,9 +347,11 @@ func TestHalfClose_NegativeGraceOptsOut(t *testing.T) {
 		t.Fatalf("half-close: %v", err)
 	}
 
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-h.done:
-	case <-time.After(3 * time.Second):
+	case <-expired:
 		t.Fatal("with half-close disabled the relay must tear down on the first EOF, as before")
 	}
 }
@@ -379,9 +385,11 @@ func TestHalfClose_FullCloseEndsPromptlyWhenThePeerAlsoCloses(t *testing.T) {
 	_ = h.clientApp.Close()
 
 	start := time.Now()
+	expired, stop := testdeadline.Before(t)
+	defer stop()
 	select {
 	case <-h.done:
-	case <-time.After(5 * time.Second):
+	case <-expired:
 		t.Fatal("relay never returned after both peers closed")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -435,7 +443,7 @@ func TestHalfClose_SurvivesTheTLSReadTimeWrapper(t *testing.T) {
 	}
 
 	// The peer must observe EOF, which is what "the FIN arrived" means.
-	_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+	testdeadline.SetRead(t, peer)
 	buf := make([]byte, 1)
 	if _, err := peer.Read(buf); err != io.EOF {
 		t.Fatalf("peer read = %v, want io.EOF — the FIN did not reach it", err)
@@ -485,7 +493,7 @@ func TestHalfClose_SlowResponseIsNotTruncated(t *testing.T) {
 	// (that is proxy.go's job in production), so ReadAll would hang to
 	// the deadline and report a timeout instead of the byte count that
 	// names the defect.
-	_ = h.clientApp.SetReadDeadline(time.Now().Add(8 * time.Second))
+	testdeadline.SetRead(t, h.clientApp)
 	got := make([]byte, want)
 	n, err := io.ReadFull(h.clientApp, got)
 	got = got[:n]
@@ -587,7 +595,7 @@ func TestHalfClose_SurvivesTheProductionConnWrappers(t *testing.T) {
 					"half-close is dead on this path, while raw-socket tests stay green", wrapped)
 			}
 
-			_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+			testdeadline.SetRead(t, peer)
 			buf := make([]byte, 1)
 			if _, err := peer.Read(buf); err != io.EOF {
 				t.Fatalf("peer read = %v, want io.EOF — the FIN did not reach it through %T",
