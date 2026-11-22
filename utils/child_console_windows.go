@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"time"
 	"unsafe"
 
@@ -16,11 +17,38 @@ import (
 
 var procPeekNamedPipe = windows.NewLazySystemDLL("kernel32.dll").NewProc("PeekNamedPipe")
 
+// childConsolePipeSecurityAttributes builds an owner-only protected DACL
+// granting Generic All only to SYSTEM and the current process user, so no
+// other local account can open the single-instance named pipe between
+// CreateNamedPipe and CreateFile.
+func childConsolePipeSecurityAttributes() (*windows.SecurityAttributes, *windows.SECURITY_DESCRIPTOR, error) {
+	tokenUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, nil, fmt.Errorf("get current process token user: %w", err)
+	}
+	userSID := tokenUser.User.Sid.String()
+	sddl := fmt.Sprintf("D:P(A;;GA;;;SY)(A;;GA;;;%s)", userSID)
+	if systemSID, serr := windows.CreateWellKnownSid(windows.WinLocalSystemSid); serr == nil && systemSID.Equals(tokenUser.User.Sid) {
+		sddl = "D:P(A;;GA;;;SY)"
+	}
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build child console pipe security descriptor: %w", err)
+	}
+	sa := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: sd,
+	}
+	return sa, sd, nil
+}
+
 // childConsolePipe creates a single-instance overlapped named pipe so its read
 // end joins Go's IOCP netpoller and supports SetReadDeadline (os.Pipe on
 // Windows creates non-overlapped anonymous pipes that reject read deadlines).
-// The write end is opened synchronously for the child process to inherit and
-// write to like a standard pipe.
+// The pipe is restricted to the current user and SYSTEM via an owner-only
+// protected DACL. The write end is opened synchronously with
+// GENERIC_WRITE|FILE_READ_ATTRIBUTES (matching Windows' CreatePipe write
+// handle) so a child process can both write and query pipe attributes.
 func childConsolePipe() (r, w *os.File, err error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -31,13 +59,18 @@ func childConsolePipe() (r, w *os.File, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	const openMode = windows.PIPE_ACCESS_INBOUND | windows.FILE_FLAG_OVERLAPPED | windows.FILE_FLAG_FIRST_PIPE_INSTANCE
-	const pipeMode = windows.PIPE_TYPE_BYTE | windows.PIPE_READMODE_BYTE | windows.PIPE_WAIT | windows.PIPE_REJECT_REMOTE_CLIENTS
-	rh, err := windows.CreateNamedPipe(wname, openMode, pipeMode, 1, 0, 64<<10, 0, nil)
+	sa, sd, err := childConsolePipeSecurityAttributes()
 	if err != nil {
 		return nil, nil, err
 	}
-	wh, err := windows.CreateFile(wname, windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	const openMode = windows.PIPE_ACCESS_INBOUND | windows.FILE_FLAG_OVERLAPPED | windows.FILE_FLAG_FIRST_PIPE_INSTANCE
+	const pipeMode = windows.PIPE_TYPE_BYTE | windows.PIPE_READMODE_BYTE | windows.PIPE_WAIT | windows.PIPE_REJECT_REMOTE_CLIENTS
+	rh, err := windows.CreateNamedPipe(wname, openMode, pipeMode, 1, 0, 64<<10, 0, sa)
+	runtime.KeepAlive(sd)
+	if err != nil {
+		return nil, nil, err
+	}
+	wh, err := windows.CreateFile(wname, windows.GENERIC_WRITE|windows.FILE_READ_ATTRIBUTES, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
 		_ = windows.CloseHandle(rh)
 		return nil, nil, err

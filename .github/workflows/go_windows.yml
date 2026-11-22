@@ -156,7 +156,7 @@ jobs:
       # of ./utils/ run here: the package as a whole has not been shown to
       # pass on Windows.
       - name: Test the Windows stop, working directory, and child console pipe (amd64)
-        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled|TestGetLastDirectory|TestChildConsoleWindowsDrainsWithoutWaitingForAGrandchildHoldingThePipe" ./utils/
+        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled|TestGetLastDirectory|TestChildConsoleWindowsDrainsWithoutWaitingForAGrandchildHoldingThePipe|TestChildConsoleWindowsPipeHasOwnerOnlyDACLAndReadAttributes" ./utils/
         shell: cmd
 
       # The agent's start on Windows, which has no PTY: what the command

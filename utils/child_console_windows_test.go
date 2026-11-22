@@ -15,6 +15,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 type winSyncBuffer struct {
@@ -191,4 +194,144 @@ func TestChildConsoleWindowsDrainsWithoutWaitingForAGrandchildHoldingThePipe(t *
 			}
 		}
 	})
+}
+
+// TestChildConsoleWindowsPipeHasOwnerOnlyDACLAndReadAttributes pins that
+// childConsolePipe creates its named pipe with an owner-only protected DACL
+// (current user + SYSTEM only, zero Everyone/Anonymous/Authenticated Users/
+// Users ACEs) and opens the write end with FILE_READ_ATTRIBUTES so children
+// can query pipe attributes just like Windows' CreatePipe write handle.
+func TestChildConsoleWindowsPipeHasOwnerOnlyDACLAndReadAttributes(t *testing.T) {
+	r, w, err := childConsolePipe()
+	if err != nil {
+		t.Fatalf("childConsolePipe: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
+
+	tokenUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("GetTokenUser: %v", err)
+	}
+	currentUserSID := tokenUser.User.Sid
+	systemSID, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatalf("CreateWellKnownSid(SYSTEM): %v", err)
+	}
+	forbiddenSIDs := map[string]windows.WELL_KNOWN_SID_TYPE{
+		"Everyone":            windows.WinWorldSid,
+		"Anonymous":           windows.WinAnonymousSid,
+		"Authenticated Users": windows.WinAuthenticatedUserSid,
+		"Builtin Users":       windows.WinBuiltinUsersSid,
+	}
+	forbidden := make(map[string]*windows.SID, len(forbiddenSIDs))
+	for name, kind := range forbiddenSIDs {
+		sid, serr := windows.CreateWellKnownSid(kind)
+		if serr != nil {
+			t.Fatalf("CreateWellKnownSid(%s): %v", name, serr)
+		}
+		forbidden[name] = sid
+	}
+
+	rConn, err := r.SyscallConn()
+	if err != nil {
+		t.Fatalf("read handle SyscallConn: %v", err)
+	}
+	var sd *windows.SECURITY_DESCRIPTOR
+	var secErr error
+	if err := rConn.Control(func(fd uintptr) {
+		sd, secErr = windows.GetSecurityInfo(
+			windows.Handle(fd),
+			windows.SE_KERNEL_OBJECT,
+			windows.DACL_SECURITY_INFORMATION,
+		)
+	}); err != nil {
+		t.Fatalf("read handle Control: %v", err)
+	}
+	if secErr != nil {
+		t.Fatalf("GetSecurityInfo: %v", secErr)
+	}
+
+	control, _, err := sd.Control()
+	if err != nil {
+		t.Fatalf("sd.Control: %v", err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatalf("pipe DACL is not protected (control=0x%x, sddl=%q)", control, sd.String())
+	}
+
+	dacl, defaulted, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("sd.DACL: %v", err)
+	}
+	if defaulted || dacl == nil {
+		t.Fatalf("pipe DACL defaulted=%v dacl=%v; want explicit owner-only DACL", defaulted, dacl)
+	}
+
+	var sawCurrentUser, sawSystem bool
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			t.Fatalf("GetAce(%d): %v", i, err)
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			t.Fatalf("ACE %d has unexpected type %d (sddl=%q)", i, ace.Header.AceType, sd.String())
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		for name, fsid := range forbidden {
+			if fsid.Equals(sid) {
+				t.Fatalf("pipe DACL grants access to forbidden SID %s (%s); sddl=%q", name, sid.String(), sd.String())
+			}
+		}
+		switch {
+		case currentUserSID.Equals(sid):
+			sawCurrentUser = true
+			if systemSID.Equals(sid) {
+				sawSystem = true
+			}
+		case systemSID.Equals(sid):
+			sawSystem = true
+		default:
+			t.Fatalf("pipe DACL contains unexpected SID %s (want only current user %s and SYSTEM %s); sddl=%q",
+				sid.String(), currentUserSID.String(), systemSID.String(), sd.String())
+		}
+	}
+	if !sawCurrentUser || !sawSystem {
+		t.Fatalf("pipe DACL missing required ACEs (sawCurrentUser=%v sawSystem=%v, sddl=%q)", sawCurrentUser, sawSystem, sd.String())
+	}
+
+	// Verify the write handle has FILE_READ_ATTRIBUTES (matching Windows'
+	// CreatePipe write end) so children can query handle/pipe attributes.
+	wConn, err := w.SyscallConn()
+	if err != nil {
+		t.Fatalf("write handle SyscallConn: %v", err)
+	}
+	var fileInfoErr, pipeInfoErr, pipeStateErr error
+	var maxInstances, curInstances uint32
+	if err := wConn.Control(func(fd uintptr) {
+		h := windows.Handle(fd)
+		var info windows.ByHandleFileInformation
+		fileInfoErr = windows.GetFileInformationByHandle(h, &info)
+		var flags, outSize, inSize uint32
+		pipeInfoErr = windows.GetNamedPipeInfo(h, &flags, &outSize, &inSize, &maxInstances)
+		var state uint32
+		pipeStateErr = windows.GetNamedPipeHandleState(h, &state, &curInstances, nil, nil, nil, 0)
+	}); err != nil {
+		t.Fatalf("write handle Control: %v", err)
+	}
+	if fileInfoErr != nil {
+		t.Fatalf("GetFileInformationByHandle on write end failed (missing FILE_READ_ATTRIBUTES?): %v", fileInfoErr)
+	}
+	if pipeInfoErr != nil {
+		t.Fatalf("GetNamedPipeInfo on write end failed (missing FILE_READ_ATTRIBUTES?): %v", pipeInfoErr)
+	}
+	if maxInstances != 1 {
+		t.Fatalf("GetNamedPipeInfo maxInstances=%d; want 1", maxInstances)
+	}
+	if pipeStateErr != nil {
+		t.Fatalf("GetNamedPipeHandleState on write end failed (missing FILE_READ_ATTRIBUTES?): %v", pipeStateErr)
+	}
+	if curInstances != 1 {
+		t.Fatalf("GetNamedPipeHandleState curInstances=%d; want 1", curInstances)
+	}
 }
