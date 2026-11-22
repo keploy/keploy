@@ -13,7 +13,14 @@ import (
 
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_column_definition.html
 
-func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefinition41, int, error) {
+// columnFixedTailLen is the length of a column definition's fixed-length
+// fields after its six length-encoded strings.
+const columnFixedTailLen = 13
+
+// DecodeColumn decodes the column definition packet b (with its 4-byte
+// header) as the connection frames it: with MariaDB's extended type
+// information after org_name when framing says so.
+func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte, framing mysql.MetadataFraming) (*mysql.ColumnDefinition41, int, error) {
 	packet := &mysql.ColumnDefinition41{
 		Header: mysql.Header{},
 	}
@@ -75,7 +82,30 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 	packet.OrgName = string(orgName)
 	pos += n
 
-	// skip [0x0c] (length of fixed-length fields)
+	if framing.ExtendedMetadata() {
+		ext, n, err := decodeExtendedMetadata(b[pos:])
+		if err != nil {
+			return nil, pos, err
+		}
+		packet.ExtendedMetadata = ext
+		pos += n
+	}
+
+	// The fixed-length tail: [0x0c], character_set(2), column_length(4),
+	// type(1), flags(2), decimals(1), filler(2). A column definition cut
+	// short (misframed, or a capture hole) must fail here, not panic below:
+	// a panic kills the recorder for the rest of its connection.
+	if len(b)-pos < columnFixedTailLen {
+		return nil, pos, fmt.Errorf("column definition truncated: %d of its %d fixed-length bytes present", max(len(b)-pos, 0), columnFixedTailLen)
+	}
+
+	// [0x0c], the length of the fixed-length fields. Anything else means the
+	// fields before it were not where this decoder read them (a MariaDB
+	// column definition read without its extended type information, or the
+	// reverse): decoding on would shift every field after it.
+	if b[pos] != 0x0c {
+		return nil, pos, fmt.Errorf("column definition's fixed-length fields are not where they belong: 0x%02x where their length 0x0c is", b[pos])
+	}
 	packet.FixedLength = 0x0c
 	pos++
 
@@ -103,26 +133,59 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 	packet.Filler = b[pos : pos+2]
 	pos += 2
 
-	//if more data, command was field list
-	if packet.Header.PayloadLength > uint32(pos) {
+	// If more data, the command was COM_FIELD_LIST: a default value follows.
+	// pos counts the 4-byte header, PayloadLength does not.
+	if packet.Header.PayloadLength > uint32(pos-4) {
 		//length of default value lenenc-int
 		defaultValueLength, _, n := utils.ReadLengthEncodedInteger(b[pos:])
+		if n == 0 {
+			return nil, pos, fmt.Errorf("column definition truncated before its default value's length")
+		}
 		pos += n
 
-		if pos+int(defaultValueLength) > len(b) {
-
-			return nil, pos, fmt.Errorf("malformed packet: %v", err)
+		if defaultValueLength > uint64(len(b)-pos) {
+			return nil, pos, fmt.Errorf("column definition's default value (%d bytes) overruns the packet", defaultValueLength)
 		}
 
 		//default value string[$len]
 		packet.DefaultValue = string(b[pos:(pos + int(defaultValueLength))])
-		pos--
+		pos += int(defaultValueLength)
 	}
 
 	return packet, pos, nil
 }
 
-func EncodeColumn(_ context.Context, _ *zap.Logger, packet *mysql.ColumnDefinition41) ([]byte, error) {
+// decodeExtendedMetadata decodes a MariaDB column definition's extended type
+// information at the start of b: a length-encoded length, then that many
+// bytes of entries, each a one-byte kind and a length-encoded string. It
+// returns the entries and the bytes read.
+func decodeExtendedMetadata(b []byte) ([]mysql.ColumnExtendedMetadata, int, error) {
+	size, _, n := utils.ReadLengthEncodedInteger(b)
+	if n == 0 {
+		return nil, 0, fmt.Errorf("column definition truncated before its extended type information")
+	}
+	if size > uint64(len(b)-n) {
+		return nil, 0, fmt.Errorf("column definition's extended type information (%d bytes) overruns the packet", size)
+	}
+	block := b[n : n+int(size)]
+	var ext []mysql.ColumnExtendedMetadata
+	for len(block) > 0 {
+		kind := block[0]
+		value, _, m, err := utils.ReadLengthEncodedString(block[1:])
+		if err != nil {
+			return nil, 0, fmt.Errorf("column definition's extended type information does not decode: %w", err)
+		}
+		ext = append(ext, mysql.ColumnExtendedMetadata{Kind: kind, Value: string(value)})
+		block = block[1+m:]
+	}
+	return ext, n + int(size), nil
+}
+
+// EncodeColumn encodes packet as a column definition packet (with its 4-byte
+// header) framed as the connection it is sent on negotiated: with its MariaDB
+// extended type information when framing says so (an empty one where it has
+// none), without it otherwise.
+func EncodeColumn(_ context.Context, _ *zap.Logger, packet *mysql.ColumnDefinition41, framing mysql.MetadataFraming) ([]byte, error) {
 	// Build the body first
 	body := new(bytes.Buffer)
 
@@ -144,6 +207,20 @@ func EncodeColumn(_ context.Context, _ *zap.Logger, packet *mysql.ColumnDefiniti
 	}
 	if err := utils.WriteLengthEncodedString(body, packet.OrgName); err != nil {
 		return nil, fmt.Errorf("failed to write OrgName: %w", err)
+	}
+
+	if framing.ExtendedMetadata() {
+		ext := new(bytes.Buffer)
+		for _, e := range packet.ExtendedMetadata {
+			ext.WriteByte(e.Kind)
+			if err := utils.WriteLengthEncodedString(ext, e.Value); err != nil {
+				return nil, fmt.Errorf("failed to write extended type information: %w", err)
+			}
+		}
+		if err := utils.WriteLengthEncodedInteger(body, uint64(ext.Len())); err != nil {
+			return nil, fmt.Errorf("failed to write extended type information's length: %w", err)
+		}
+		body.Write(ext.Bytes())
 	}
 
 	// Fixed-length fields length (always 0x0c)

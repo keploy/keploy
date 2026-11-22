@@ -3,6 +3,7 @@ package diff
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -30,8 +31,15 @@ type DiffResult struct {
 	Regressions       []StatusChange
 	Fixes             []StatusChange
 	StatusTransitions []StatusChange
-	Unchanged         []StatusChange
+	// Added holds test cases present in the second run only.
+	Added []StatusChange
+	// Removed holds test cases present in the first run only.
+	Removed   []StatusChange
+	Unchanged []StatusChange
 }
+
+// StatusAbsent represents the status of a test case that does not exist in a run.
+const StatusAbsent models.TestStatus = ""
 
 func New(logger *zap.Logger, reportDB ReportDB, testDB TestDB) *Diff {
 	return &Diff{
@@ -46,37 +54,53 @@ func ComputeDiff(report1, report2 *models.TestReport) *DiffResult {
 		Regressions:       make([]StatusChange, 0),
 		Fixes:             make([]StatusChange, 0),
 		StatusTransitions: make([]StatusChange, 0),
+		Added:             make([]StatusChange, 0),
+		Removed:           make([]StatusChange, 0),
 		Unchanged:         make([]StatusChange, 0),
 	}
-	if report1 == nil || report2 == nil {
-		return result
+	left := make(map[string]models.TestStatus)
+	if report1 != nil {
+		left = make(map[string]models.TestStatus, len(report1.Tests))
+		for _, test := range report1.Tests {
+			id := strings.TrimSpace(test.TestCaseID)
+			if id == "" {
+				continue
+			}
+			left[id] = test.Status
+		}
 	}
 
-	left := make(map[string]models.TestStatus, len(report1.Tests))
-	for _, test := range report1.Tests {
-		id := strings.TrimSpace(test.TestCaseID)
-		if id == "" {
-			continue
+	right := make(map[string]models.TestStatus)
+	if report2 != nil {
+		right = make(map[string]models.TestStatus, len(report2.Tests))
+		for _, test := range report2.Tests {
+			id := strings.TrimSpace(test.TestCaseID)
+			if id == "" {
+				continue
+			}
+			right[id] = test.Status
 		}
-		left[id] = test.Status
-	}
-
-	right := make(map[string]models.TestStatus, len(report2.Tests))
-	for _, test := range report2.Tests {
-		id := strings.TrimSpace(test.TestCaseID)
-		if id == "" {
-			continue
-		}
-		right[id] = test.Status
 	}
 
 	commonIDs := make([]string, 0, len(left))
+	removedIDs := make([]string, 0)
 	for id := range left {
 		if _, ok := right[id]; ok {
 			commonIDs = append(commonIDs, id)
+			continue
 		}
+		removedIDs = append(removedIDs, id)
 	}
 	sort.Strings(commonIDs)
+	sort.Strings(removedIDs)
+
+	addedIDs := make([]string, 0)
+	for id := range right {
+		if _, ok := left[id]; !ok {
+			addedIDs = append(addedIDs, id)
+		}
+	}
+	sort.Strings(addedIDs)
 
 	for _, id := range commonIDs {
 		before := left[id]
@@ -99,9 +123,28 @@ func ComputeDiff(report1, report2 *models.TestReport) *DiffResult {
 		}
 	}
 
+	for _, id := range addedIDs {
+		result.Added = append(result.Added, StatusChange{
+			TestCaseID: id,
+			Before:     StatusAbsent,
+			After:      right[id],
+		})
+	}
+
+	for _, id := range removedIDs {
+		result.Removed = append(result.Removed, StatusChange{
+			TestCaseID: id,
+			Before:     left[id],
+			After:      StatusAbsent,
+		})
+	}
+
 	return result
 }
 
+// Compare computes and prints status changes, additions, and removals across
+// the selected test sets (or test sets common to both runs when testSets is
+// empty).
 func (d *Diff) Compare(ctx context.Context, run1 string, run2 string, testSets []string) error {
 	selectedTestSets, err := d.resolveTestSets(ctx, run1, run2, testSets)
 	if err != nil {
@@ -112,6 +155,8 @@ func (d *Diff) Compare(ctx context.Context, run1 string, run2 string, testSets [
 		Regressions:       make([]StatusChange, 0),
 		Fixes:             make([]StatusChange, 0),
 		StatusTransitions: make([]StatusChange, 0),
+		Added:             make([]StatusChange, 0),
+		Removed:           make([]StatusChange, 0),
 		Unchanged:         make([]StatusChange, 0),
 	}
 
@@ -130,6 +175,8 @@ func (d *Diff) Compare(ctx context.Context, run1 string, run2 string, testSets [
 		aggregate.Regressions = append(aggregate.Regressions, withTestSet(testSetID, diff.Regressions)...)
 		aggregate.Fixes = append(aggregate.Fixes, withTestSet(testSetID, diff.Fixes)...)
 		aggregate.StatusTransitions = append(aggregate.StatusTransitions, withTestSet(testSetID, diff.StatusTransitions)...)
+		aggregate.Added = append(aggregate.Added, withTestSet(testSetID, diff.Added)...)
+		aggregate.Removed = append(aggregate.Removed, withTestSet(testSetID, diff.Removed)...)
 		aggregate.Unchanged = append(aggregate.Unchanged, withTestSet(testSetID, diff.Unchanged)...)
 	}
 
@@ -201,38 +248,69 @@ func withTestSet(testSetID string, changes []StatusChange) []StatusChange {
 }
 
 func printDiff(run1 string, run2 string, result *DiffResult) {
-	fmt.Fprintf(os.Stdout, "Test Run Comparison: %s vs %s\n\n", run1, run2)
+	writeDiff(os.Stdout, run1, run2, result)
+}
 
-	fmt.Fprintln(os.Stdout, "Regressions (newly failing):")
+func writeDiff(w io.Writer, run1 string, run2 string, result *DiffResult) {
+	printf := func(format string, args ...any) {
+		_, _ = fmt.Fprintf(w, format, args...)
+	}
+	println := func(args ...any) {
+		_, _ = fmt.Fprintln(w, args...)
+	}
+
+	printf("Test Run Comparison: %s vs %s\n\n", run1, run2)
+
+	println("Regressions (newly failing):")
 	if len(result.Regressions) == 0 {
-		fmt.Fprintln(os.Stdout, "  none")
+		println("  none")
 	} else {
 		for _, change := range result.Regressions {
-			fmt.Fprintf(os.Stdout, "  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
+			printf("  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
 		}
 	}
 
-	fmt.Fprintln(os.Stdout)
-	fmt.Fprintln(os.Stdout, "Fixes (newly passing):")
+	println()
+	println("Fixes (newly passing):")
 	if len(result.Fixes) == 0 {
-		fmt.Fprintln(os.Stdout, "  none")
+		println("  none")
 	} else {
 		for _, change := range result.Fixes {
-			fmt.Fprintf(os.Stdout, "  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
+			printf("  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
 		}
 	}
 
-	fmt.Fprintln(os.Stdout)
-	fmt.Fprintln(os.Stdout, "Status transitions (other changes):")
+	println()
+	println("Status transitions (other changes):")
 	if len(result.StatusTransitions) == 0 {
-		fmt.Fprintln(os.Stdout, "  none")
+		println("  none")
 	} else {
 		for _, change := range result.StatusTransitions {
-			fmt.Fprintf(os.Stdout, "  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
+			printf("  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "\nSummary: %d regressions, %d fixes, %d status transitions, %d unchanged\n", len(result.Regressions), len(result.Fixes), len(result.StatusTransitions), len(result.Unchanged))
+	println()
+	println("Added (only in the second run):")
+	if len(result.Added) == 0 {
+		println("  none")
+	} else {
+		for _, change := range result.Added {
+			printf("  %s: %s\n", formatTestCaseLabel(change), change.After)
+		}
+	}
+
+	println()
+	println("Removed (only in the first run):")
+	if len(result.Removed) == 0 {
+		println("  none")
+	} else {
+		for _, change := range result.Removed {
+			printf("  %s: was %s\n", formatTestCaseLabel(change), change.Before)
+		}
+	}
+
+	printf("\nSummary: %d regressions, %d fixes, %d status transitions, %d added, %d removed, %d unchanged\n", len(result.Regressions), len(result.Fixes), len(result.StatusTransitions), len(result.Added), len(result.Removed), len(result.Unchanged))
 }
 
 func formatTestCaseLabel(change StatusChange) string {

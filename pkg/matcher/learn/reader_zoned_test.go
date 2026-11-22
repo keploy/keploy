@@ -1,0 +1,242 @@
+package learn
+
+import (
+	"encoding/base64"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/variables"
+)
+
+// readerZones are the zones the reader's zoned rows write an aware
+// datetime in: one ahead of UTC by a half hour (India's), one behind it by
+// one (Newfoundland's), UTC written "Z" and "+00:00", and one ahead by whole
+// hours, each with how an ISO 8601 writer spells it.
+var readerZones = []struct {
+	name string
+	loc  *time.Location
+	iso  string
+}{
+	{"+05:30", ist, "2006-01-02T15:04:05Z07:00"},
+	{"-03:30", time.FixedZone("NST", -(3*3600 + 1800)), "2006-01-02T15:04:05Z07:00"},
+	{"Z", time.UTC, "2006-01-02T15:04:05Z07:00"},
+	{"+00:00", time.UTC, "2006-01-02T15:04:05-07:00"},
+	{"+01:00", time.FixedZone("CET", 3600), "2006-01-02T15:04:05Z07:00"},
+}
+
+// readerPGText is at as Postgres writes a timestamptz in text: a space
+// before its time, and its zone's offset as "+05:30", or "+01" at a whole
+// hour.
+func readerPGText(at time.Time) string {
+	_, off := at.Zone()
+	sign := '+'
+	if off < 0 {
+		sign, off = '-', -off
+	}
+	zone := fmt.Sprintf("%c%02d", sign, off/3600)
+	if m := off % 3600 / 60; m != 0 {
+		zone += fmt.Sprintf(":%02d", m)
+	}
+	return at.Format("2006-01-02 15:04:05") + zone
+}
+
+// An aware datetime is the instant it is, read whole in every zone and
+// form: at the second, the millisecond, four fraction digits with no colon
+// in its zone ("3050+0530"), in a sentence and in Postgres's text. Its zone's
+// sign glued to the seconds ("13+05" of "…16:20:13+05:30") makes no base64
+// token: every changed word is a word of the one instant, at its moment in
+// each run, and no whole token the reader lists holds a '+' of it. What
+// stands beside the instant is still read: a base64 run apart from it, or
+// glued to its end, that changed is a token of its own.
+func TestReaderZonedDatetimeIsOneInstant(t *testing.T) {
+	rec := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC)
+	live := rec.Add(73*time.Second + 600*time.Millisecond)
+	for _, z := range readerZones {
+		for _, form := range []struct {
+			what string
+			text func(time.Time) string
+		}{
+			{"at the second", func(at time.Time) string { return at.In(z.loc).Format(z.iso) }},
+			{"at the millisecond", func(at time.Time) string { return at.In(z.loc).Format(strings.Replace(z.iso, "05Z", "05.000Z", 1)) }},
+			{"at four fraction digits, no colon in its zone", func(at time.Time) string { return at.In(z.loc).Format("2006-01-02T15:04:05.0000-0700") }},
+			{"in a sentence", func(at time.Time) string { return "due " + at.In(z.loc).Format(z.iso) + " sharp" }},
+			{"in Postgres's text", func(at time.Time) string { return readerPGText(at.In(z.loc)) }},
+		} {
+			r, l := form.text(rec), form.text(live)
+			rd := readText(r, l)
+			if len(rd.Words) == 0 || len(rd.Instants) != 1 {
+				t.Errorf("%s %s (%q -> %q): %q, %d instants; want one instant", z.name, form.what, r, l, changedPairs(rd), len(rd.Instants))
+				continue
+			}
+			iw := rd.Instants[0]
+			if iw.Rec == nil || iw.Live == nil || iw.Rec.key.at != rec.Truncate(iw.Rec.res).UnixNano() || iw.Live.key.at != live.Truncate(iw.Live.res).UnixNano() {
+				t.Errorf("%s %s: instant %+v; want each run's moment", z.name, form.what, iw)
+			}
+			for _, w := range rd.Words {
+				if w.Instant != iw {
+					t.Errorf("%s %s: word %q>%q outside the instant", z.name, form.what, w.Rec, w.Live)
+				}
+				for _, tok := range w.Tokens {
+					if tok.Kind == tokenB64 && (strings.ContainsAny(tok.Rec, "+=") || strings.ContainsAny(tok.Live, "+=")) {
+						t.Errorf("%s %s: base64 token %q>%q across the instant", z.name, form.what, tok.Rec, tok.Live)
+					}
+				}
+			}
+		}
+		at := func(at time.Time) string { return at.In(z.loc).Format(z.iso) }
+		for _, c := range []struct{ what, rec, live, run string }{
+			{"a run apart from it", "sig=ab+cd at " + at(rec), "sig=ef+gh at " + at(live), "ab+cd"},
+			{"a run apart from it, the instant the same", "sig=ab+cd at " + at(rec), "sig=ef+gh at " + at(rec), "ab+cd"},
+			{"a run glued to its end", at(rec) + "+ab+c", at(live) + "+ef+g", "+ab+c"},
+		} {
+			rd := readText(c.rec, c.live)
+			found := false
+			for _, w := range rd.Words {
+				for _, tok := range w.Tokens {
+					found = found || tok.Kind == tokenB64 && tok.Rec == c.run
+				}
+			}
+			if !found {
+				t.Errorf("%s, %s (%q -> %q): no base64 token %q among %q", z.name, c.what, c.rec, c.live, c.run, changedPairs(rd))
+			}
+		}
+	}
+}
+
+// An instant inside a base64 or base64url cursor that stands in a longer
+// text ("cursor=<base64 of JSON>", where no step opens the text whole and no
+// address names the instant) is no plain word: every changed word of the
+// cursor carries the instant main reads in its decoded form (rawExtra),
+// Encoded, at no bytes, with each run's moment, so the caller refuses it
+// rather than learn it fresh. A cursor whose instant stayed and whose page
+// changed carries none.
+func TestReaderAnInstantInsideACursorInALongerTextIsNoPlainWord(t *testing.T) {
+	rec := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC)
+	live := rec.Add(73*time.Second + 600*time.Millisecond)
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Page"}, Word: -1}
+	for _, z := range readerZones {
+		for _, enc := range []struct {
+			name string
+			e    *base64.Encoding
+		}{{"base64", base64.StdEncoding}, {"base64url", base64.RawURLEncoding}} {
+			cur := func(at time.Time, page int) string {
+				return "cursor=" + enc.e.EncodeToString([]byte(fmt.Sprintf(`{"since":"%s","page":%d}`, at.In(z.loc).Format(z.iso), page)))
+			}
+			r, l := cur(rec, 2), cur(live, 2)
+			n := 0
+			for _, rd := range readLeaf(NewDriftCache(), at, r, l) {
+				for _, w := range rd.Words {
+					n++
+					iw := w.Instant
+					if iw == nil || !iw.Encoded || iw.RecAt[0] >= 0 || iw.LiveAt[0] >= 0 || iw.Rec == nil || iw.Live == nil ||
+						iw.Rec.key.at != rec.Truncate(iw.Rec.res).UnixNano() || iw.Live.key.at != live.Truncate(iw.Live.res).UnixNano() {
+						t.Errorf("%s in a %s cursor (%q -> %q): word %q>%q has instant %+v; want the cursor's instant, encoded, at each run's moment", z.name, enc.name, r, l, w.Rec, w.Live, iw)
+					}
+				}
+			}
+			if n == 0 {
+				t.Errorf("%s in a %s cursor (%q -> %q): no changed word", z.name, enc.name, r, l)
+			}
+			for _, rd := range readLeaf(NewDriftCache(), at, r, cur(rec, 3)) {
+				for _, w := range rd.Words {
+					if w.Instant != nil {
+						t.Errorf("%s in a %s cursor, only its page changed: word %q>%q has instant %+v", z.name, enc.name, w.Rec, w.Live, w.Instant)
+					}
+				}
+			}
+		}
+	}
+}
+
+// An instant at the microsecond in a base64 cursor glued after "cursor="
+// is no plain word either: main reads it in the text's declared forms
+// (rawExtra), and the reader hands every changed word of the cursor with
+// that instant.
+func TestReaderAnInstantInsideAnEmbeddedBase64CursorIsNotAPlainWord(t *testing.T) {
+	r, l := "2026-10-31T10:50:13.305123+05:30", "2026-10-31T10:51:27.905456+05:30"
+	cur := func(s string) string {
+		return "cursor=" + base64.StdEncoding.EncodeToString([]byte(`{"since":"`+s+`"}`))
+	}
+	rec, live := cur(r), cur(l)
+	dc := NewDriftCache()
+	if len(dc.spansOf(dc.rawExtra(rec))) == 0 {
+		t.Fatalf("fixture: main reads no instant in %q's declared forms", rec)
+	}
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Page"}, Word: -1}
+	for _, rd := range readLeaf(dc, at, rec, live) {
+		for _, w := range rd.Words {
+			if w.Instant == nil || !w.Instant.fine() {
+				t.Errorf("%q -> %q: changed word %q>%q at %s has instant %+v; want the cursor's, at a fine cut", rec, live, w.Rec, w.Live, w.At, w.Instant)
+			}
+		}
+	}
+}
+
+// A cursor whose base64 splits into a different number of words in the two
+// runs ('+' and '/' fall at other places once its instant moved) still
+// carries its instant: the words have no partner in the other run (an
+// unequal stretch), and each carries the cursor's instant, encoded, so the
+// caller refuses it rather than learn a plain word, even one bound whole.
+func TestReaderAnUnequalWordCountCursorInstantIsNotAPlainWord(t *testing.T) {
+	rec := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC)
+	words := func(s string) int { return len(tokensBy(s, isWord)) }
+	cur := func(at time.Time, last string) string {
+		return "cursor=" + base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"since":"%s","last":"%s"}`, at.Format(time.RFC3339Nano), last)))
+	}
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Page"}, Word: -1}
+	found := 0
+	for k := 0; k < 4000 && found < 3; k++ {
+		r, l := cur(rec, "a?b>c~d"), cur(rec.Add(time.Duration(k+1)*7919*time.Millisecond), "a?b>c~d"[:1+k%7])
+		if words(r) == words(l) {
+			continue
+		}
+		found++
+		for _, rd := range readLeaf(NewDriftCache(), at, r, l) {
+			if rd.ChangedShape {
+				continue // refused whole: fails closed
+			}
+			for _, w := range rd.Words {
+				if w.Instant == nil || !w.Instant.Encoded {
+					t.Errorf("%q -> %q: word %q>%q (idx %d/%d) has instant %+v; want the cursor's, encoded", r, l, w.Rec, w.Live, w.RecIdx, w.LiveIdx, w.Instant)
+				}
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatalf("fixture: no pair with unequal word counts")
+	}
+}
+
+// A cursor whose only change is a time-ordered UUID (v7) carries no
+// instant: main reads a moment only from a keyed instant (heldMoments), so
+// the UUID's words are words, as the same UUID outside a cursor is.
+func TestReaderACursorWhoseTimeOrderedUUIDChangedCarriesNoInstant(t *testing.T) {
+	v7 := func(at time.Time) string {
+		ms := at.UnixMilli()
+		return fmt.Sprintf("%08x-%04x-7abc-8def-0123456789ab", ms>>16, ms&0xffff)
+	}
+	t0 := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC)
+	cur := func(id string) string {
+		return "cursor=" + base64.StdEncoding.EncodeToString([]byte(`{"last":"`+id+`","n":20}`))
+	}
+	rec, live := cur(v7(t0)), cur(v7(t0.Add(74600*time.Millisecond)))
+	dc := NewDriftCache()
+	if len(dc.spansOf(dc.rawExtra(rec))) == 0 {
+		t.Fatalf("fixture: main reads no time group in %q's declared forms", rec)
+	}
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Page"}, Word: -1}
+	n := 0
+	for _, rd := range readLeaf(dc, at, rec, live) {
+		for _, w := range rd.Words {
+			n++
+			if w.Instant != nil {
+				t.Errorf("%q -> %q: word %q>%q carries instant %+v; want none (an unkeyed time group)", rec, live, w.Rec, w.Live, w.Instant)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatalf("fixture: no changed word in %q -> %q", rec, live)
+	}
+}

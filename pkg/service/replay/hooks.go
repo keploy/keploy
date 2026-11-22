@@ -5,10 +5,16 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -20,6 +26,14 @@ type Hooks struct {
 	// so the replay HTTP transport pins a specific cert (e.g. cluster-mode
 	// replay against a short-lived pod with a self-signed keystore).
 	tlsConfig *tls.Config
+	// appAt is where the app is when the run has no agent and its base path
+	// names a host (see runsWithoutAgent): the base path, read. It is nil for
+	// every other run, a base path that is only a path prefix included. It is
+	// set once, when the hooks are made, as the replayer makes its own
+	// decision once: a command set or cleared after that changes neither.
+	appAt *url.URL
+	// Each keeps the note of its name to one line a run.
+	hostUnused, portUnused, recordedHostUnsent sync.Once
 }
 
 // SetReplayTLSConfig installs a *tls.Config that the replay HTTP client
@@ -30,14 +44,100 @@ func (h *Hooks) SetReplayTLSConfig(c *tls.Config) {
 }
 
 func NewHooks(logger *zap.Logger, cfg *config.Config, instrumentation Instrumentation) TestHooks {
-	return &Hooks{
+	return newHooks(logger, cfg, instrumentation, runsWithoutAgent(cfg))
+}
+
+// newHooks is NewHooks for a replayer that has decided whether its run has an
+// agent, so that the hooks go by the same decision.
+func newHooks(logger *zap.Logger, cfg *config.Config, instrumentation Instrumentation, noAgent bool) *Hooks {
+	h := &Hooks{
 		cfg:             cfg,
 		logger:          logger,
 		instrumentation: instrumentation,
 	}
+	if !noAgent {
+		return h
+	}
+	// A base path that cannot be read stops the run in Start, before a test
+	// is sent, and a path prefix names no host.
+	if base, err := parseBasePath(cfg.Test.BasePath); err == nil && base.Host != "" {
+		h.appAt = base
+	}
+	return h
+}
+
+// realSimulator is an agent client that puts a mock.real test case on the
+// real clock (AgentClient.BeforeSimulateReal).
+type realSimulator interface {
+	BeforeSimulateReal(ctx context.Context, timestamp *time.Time, testSetID, tcName string, real []string) error
+}
+
+// beforeSimulate runs the before-simulate hook, which puts the run's clock at
+// the test case's recorded request (at), or, under the proven switch for a
+// test case whose recording lists mock.real destinations, then on real time
+// (design v14 §3.4, F3). A freeze that fails is logged, as before; a real
+// clock that cannot be had fails the case: it must not run at its recorded
+// time against a dependency that answers at real time.
+func (h *Hooks) beforeSimulate(ctx context.Context, tc *models.TestCase, at *time.Time, testSetID string) error {
+	if provenswitch.On() && len(tc.Real) > 0 {
+		rs, ok := h.instrumentation.(realSimulator)
+		if !ok {
+			return fmt.Errorf("test case %s uses mock.real (%s), and this keploy's agent client cannot put it on the real clock", tc.Name, strings.Join(tc.Real, ", "))
+		}
+		if err := rs.BeforeSimulateReal(ctx, at, testSetID, tc.Name, tc.Real); err != nil {
+			// Whatever the hook began (a freeze, a coverage window) ends,
+			// as after any case.
+			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
+				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
+			}
+			return err
+		}
+		return nil
+	}
+	if err := h.instrumentation.BeforeSimulate(ctx, at, testSetID, tc.Name); err != nil {
+		utils.LogError(h.logger, err, "failed to call BeforeSimulate hook")
+	}
+	return nil
+}
+
+// runLifeKey keys, in a test set's context, its run's own context
+// (withRunLife).
+type runLifeKey struct{}
+
+// withRunLife marks set, a test set's context, with run, the context of the
+// run it is part of, for the agent's hooks a test case calls
+// (agentHookContext).
+func withRunLife(set, run context.Context) context.Context {
+	return context.WithValue(set, runLifeKey{}, run)
+}
+
+// agentHookContext is what SimulateRequest calls the agent's hooks on: the
+// run's context when ctx is a test set's (withRunLife), and ctx otherwise.
+// The set's context is cancelled at any instant: when the set's app exits
+// (its watcher) or a test loop fails. A hook the agent answers with no body
+// can still be waiting for that answer after the client has put its
+// connection back in the pool (net/http, golang/go#82547); a cancel then
+// closes the connection under the next request, which took it, and keploy's
+// next read of the agent fails with the hook's cancel, on a context nothing
+// cancelled ("failed to get scope windows ...: context canceled"). A set's
+// app exiting does not cancel the run's context. What does: the user's stop,
+// the run's teardown, and a failure on the run's errgroup (Start). That is
+// the agent's unexpected exit, which ends a hook anyway (callHook), or, when
+// the app is kept alive across sets (--keep-app-alive, or docker compose with
+// mocks), the app's failure. That last one cuts hooks at any instant again,
+// but the run then fails on the app's error, so no verdict rests on them.
+// The test's own request stays on ctx: the app's exit ends it.
+func agentHookContext(ctx context.Context) context.Context {
+	if run, ok := ctx.Value(runLifeKey{}).(context.Context); ok {
+		return run
+	}
+	return ctx
 }
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
+	// The agent's hooks are keploy's own calls, on the run's context
+	// (agentHookContext); the request to the app is on ctx.
+	hookCtx := agentHookContext(ctx)
 
 	// Extract URL replacements and port mappings: merge global + per-test-set
 	// (test-set level overrides global for same key)
@@ -45,8 +145,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 	switch tc.Kind {
 	case models.HTTP:
-		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
-			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		if err := h.beforeSimulate(hookCtx, tc, &tc.HTTPReq.Timestamp, testSetID); err != nil {
+			return nil, err
 		}
 
 		hostToUse := h.cfg.Test.Host
@@ -60,14 +160,33 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		//   3. protocol-level port overrides per protocol
 		configPort := effectiveHTTPConfigPort(tc, h.cfg.Test)
 
+		// The test's URL carries the base path, and the request goes where it
+		// says. test.host (localhost unless set), the recorded app_port and
+		// the recorded Host header are where and what an app keploy starts is,
+		// so they stay out (see pkg.SimulationConfig.TargetFromURL).
+		if h.appAt != nil {
+			h.noteHostUnused(ctx, hostToUse)
+			hostToUse = ""
+		}
+
 		cfg := pkg.SimulationConfig{
-			APITimeout:      h.cfg.Test.APITimeout,
+			APITimeout: h.cfg.Test.APITimeout,
+			// Under the switch only the user's own apiTimeout bounds the
+			// app's answer (rule 15, row W1).
+			Unbounded:       provenswitch.On() && !h.cfg.Test.APITimeoutSet,
 			ConfigPort:      configPort,
 			KeployPath:      h.cfg.Path,
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
 			PortMappings:    portMappings,
+			TargetFromURL:   h.appAt != nil,
 			TLSConfig:       h.tlsConfig,
+
+			AppPortReachability: h.appPortReachability(),
+			PublishedPort:       publishedPortsOf(h.logger, h.instrumentation).of(testSetID),
+		}
+		if h.appAt != nil {
+			cfg.SentTo = func(target *url.URL, host, recordedHost string) { h.noteWhereSent(ctx, target, host, recordedHost) }
 		}
 
 		// Check if this is a streaming test case
@@ -75,31 +194,45 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			h.logger.Debug("Simulating HTTP streaming request", zap.Any("Test case", tc.Name))
 			resp, err := pkg.SimulateHTTPStreaming(ctx, tc, testSetID, h.logger, cfg)
 
-			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
-				h.logger.Error("failed to call AfterSimulate hook", zap.Error(afterErr))
+			if afterErr := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); afterErr != nil {
+				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
 			}
 
 			return resp, err
 		}
 
-		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		// The test case by its name and its request's shape, never the
+		// test case: it holds the recorded headers, bodies and metadata,
+		// the app's credentials among them.
+		h.logger.Debug("Simulating HTTP request", zap.String("testcase", tc.Name), zap.Any("metadata", utils.URLLogMeta(string(tc.HTTPReq.Method), tc.HTTPReq.URL)))
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
-		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+		if err := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); err != nil {
+			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
 	case models.GRPC_EXPORT:
 
-		if err := h.instrumentation.BeforeSimulate(ctx, &tc.GrpcReq.Timestamp, testSetID, tc.Name); err != nil {
-			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		if err := h.beforeSimulate(hookCtx, tc, &tc.GrpcReq.Timestamp, testSetID); err != nil {
+			return nil, err
 		}
 
-		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
+		// The test case by its name and its method's path by its shape, as
+		// an HTTP test's request: the report names the method whole.
+		h.logger.Debug("Simulating gRPC request", zap.String("testcase", tc.Name), zap.String("method", utils.URLPathShape(&url.URL{Path: tc.GrpcReq.Headers.PseudoHeaders[":path"]})))
 		hostToUse := h.cfg.Test.Host
 		if hostToUse == "" {
 			hostToUse = "localhost"
+		}
+
+		// A gRPC test has no URL for the base path to go in, so it goes to the
+		// host the base path names in place of test.host. The base path's port
+		// is the app's HTTP port: the test keeps the port it was recorded on,
+		// or test.grpcPort.
+		if h.appAt != nil {
+			h.noteHostUnused(ctx, hostToUse)
+			hostToUse = h.appAt.Hostname()
 		}
 
 		configPort := h.cfg.Test.GRPCPort
@@ -110,15 +243,23 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
 			// Bounds the response drain. Without it a bidi stream the server
 			// holds open hangs the whole test set instead of failing one case.
-			APITimeout:      h.cfg.Test.APITimeout,
+			APITimeout: h.cfg.Test.APITimeout,
+			// Under the switch only the user's own apiTimeout bounds the
+			// app's answer (rule 15, row W1); a stream the app holds open
+			// past its recording ends on its keepalives, not judged
+			// (pkg.ErrStreamHeldOpen).
+			Unbounded:       provenswitch.On() && !h.cfg.Test.APITimeoutSet,
 			ConfigPort:      configPort,
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
 			PortMappings:    portMappings,
+
+			AppPortReachability: h.appPortReachability(),
+			PublishedPort:       publishedPortsOf(h.logger, h.instrumentation).of(testSetID),
 		})
 
-		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+		if err := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); err != nil {
+			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
@@ -127,6 +268,71 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
 
+}
+
+// noteHostUnused says, once a run, that the test.host the user set is not where
+// the tests are sent, because the base path names the host. localhost is what
+// test.host is when nobody set it, so it is not worth a line. Each host by its
+// labels' shape beside its tag in ctx's session (models.HostLogName; an IP
+// address whole): a host name is traffic, which the console and the report
+// name whole.
+func (h *Hooks) noteHostUnused(ctx context.Context, host string) {
+	if host == "localhost" || host == h.appAt.Hostname() {
+		return
+	}
+	h.hostUnused.Do(func() {
+		h.logger.Warn("test.host is not used: a base path that names a host is where the tests are sent",
+			zap.String("host", models.HostLogName(ctx, host)), zap.String("basePath", targetLogName(ctx, h.appAt.String())),
+			zap.String("next_step", "leave test.host (--host) unset for a run against a base path, or put the host you meant in --base-path"))
+	})
+}
+
+// noteWhereSent says, once a run each, where a request of a run against a
+// base path goes other than where the base path or the recording would have
+// it go: to another port than the one written in the base path (test.port and
+// replaceWith move it), or under another Host than the one its test was
+// recorded with. An app that checks the name it is asked for under, or writes
+// it into its answers, answers differently from its recording then, and
+// nothing else in the run says why.
+func (h *Hooks) noteWhereSent(ctx context.Context, target *url.URL, host, recordedHost string) {
+	if port := portOf(h.appAt); port != "" && portOf(target) != port {
+		h.portUnused.Do(func() {
+			h.logger.Warn("the port in the base path is not used: test.port or a replaceWith rule replaces it",
+				zap.String("port", portOf(target)), zap.String("basePathPort", port), zap.String("basePath", targetLogName(ctx, h.appAt.String())),
+				zap.String("next_step", "drop test.port (--port) or the replaceWith rule for a run against a base path, or put the port the app listens on in --base-path"))
+		})
+	}
+	if recordedHost != "" && recordedHost != host {
+		h.recordedHostUnsent.Do(func() {
+			h.logger.Info("the tests ask for the app under the address they are sent to, not under the Host header they were recorded with",
+				// Both by their labels' shape beside their tags in ctx's
+				// session (models.HostLogName): a host name is traffic.
+				zap.String("host", models.HostLogName(ctx, host)), zap.String("recordedHost", models.HostLogName(ctx, recordedHost)),
+				zap.String("next_step", "if the app answers by the name it is asked for, give --base-path a name that reaches it and that it answers to"))
+		})
+	}
+}
+
+// portOf is the port a URL reaches: the one it writes, else its scheme's
+// (80 for http, 443 for https); "" for neither.
+func portOf(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	}
+	return ""
+}
+
+// appPortReachability is the instrumentation's answer to "can this address ever
+// reach the app?" when it has one (Docker mode), else nil: a refused test is
+// then re-sent as an app still starting, as before.
+func (h *Hooks) appPortReachability() pkg.AppPortReachability {
+	return appPortReachabilityOf(h.instrumentation)
 }
 
 func effectiveHTTPConfigPort(tc *models.TestCase, cfg config.Test) uint32 {
@@ -203,7 +409,7 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
 
 	if err := h.instrumentation.BeforeTestRun(ctx, testRunID); err != nil {
-		h.logger.Error("failed to call BeforeTestRun hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call BeforeTestRun hook")
 	}
 
 	return nil
@@ -218,7 +424,7 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, test
 	// (handled by HandleBeforeTestSetCompose in the agent process).
 
 	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
-		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call BeforeTestSetCompose hook")
 	}
 
 	return nil
@@ -242,11 +448,98 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	return nil
 }
 
+// setHaltKey marks the context AfterTestSetRun is called with for a set that
+// halted (WithSetHalt).
+type setHaltKey struct{}
+
+// WithSetHalt is ctx for AfterTestSetRun of a set that halted, for reason:
+// the run's stop names the set with it. The replayer calls it; a TestHooks
+// implementation's tests call it to build the context that end is told with.
+func WithSetHalt(ctx context.Context, reason string) context.Context {
+	return context.WithValue(ctx, setHaltKey{}, reason)
+}
+
+// SetHalt reports whether ctx, the context a TestHooks' AfterTestSetRun is
+// called with, says that set halted: its application exited (APP_HALTED,
+// APP_FAULT, or a docker compose stack that went down under it), or an
+// internal error of keploy's stopped the run in it (INTERNAL_ERR). reason is
+// what the run's stop names the set with, such as "the application exited
+// during test-set test-set-0 with exit code 4: ...", and the run fails for
+// it. Its tests that got no verdict got none because of this end, not for a
+// difference in the app's answers.
+//
+// Most such sets end the run: their status is false and no set runs after
+// them. Under docker compose, a stack per set, the run goes on past a set
+// whose application exited, to the next set on a stack of its own; and a set
+// whose application halted on one attempt and ran to a verdict on another (a
+// flaky check's) has the status of its last attempt, true where that one
+// passed. ctx may have ended already, with the application's exit as its
+// cause: a hook that still writes detaches from it.
+func SetHalt(ctx context.Context) (reason string, halted bool) {
+	reason, halted = ctx.Value(setHaltKey{}).(string)
+	return reason, halted
+}
+
+// setHaltAppLogsKey marks the application's last log lines in the context
+// AfterTestSetRun is called with for a set that halted (WithSetHaltAppLogs).
+type setHaltAppLogsKey struct{}
+
+// WithSetHaltAppLogs is ctx with appLogs, the application's last log lines
+// keploy took at the exit SetHalt(ctx) names. The replayer calls it; a
+// TestHooks implementation's tests call it to build the context that end is
+// told with.
+func WithSetHaltAppLogs(ctx context.Context, appLogs string) context.Context {
+	return context.WithValue(ctx, setHaltAppLogsKey{}, appLogs)
+}
+
+// SetHaltAppLogs is, for a set that halted because its application exited
+// (SetHalt), the application's last log lines keploy took when it saw that
+// exit: what the set's report keeps as its app_logs, the last lines that are
+// not blank, with no terminal escapes. It is "" when the set did not halt,
+// when its halt was an internal error of keploy's, or when keploy took no
+// lines. They are the application's own output, not redacted: a hook that
+// shows them anywhere but the set's own report redacts and bounds them first.
+func SetHaltAppLogs(ctx context.Context) string {
+	appLogs, _ := ctx.Value(setHaltAppLogsKey{}).(string)
+	return appLogs
+}
+
+// agentGoneKey marks a context whose run has no agent left to call
+// (withoutAgent).
+type agentGoneKey struct{}
+
+// withoutAgent is ctx for a run-level hook whose run's agent has gone: under
+// docker compose without a kept stack it goes down with each test set's
+// stack. The hook's own work still runs; only its call to the agent is left
+// out, which nothing would answer.
+func withoutAgent(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentGoneKey{}, true)
+}
+
+// agentGone reports whether ctx says its run's agent has gone (withoutAgent).
+func agentGone(ctx context.Context) bool {
+	gone, _ := ctx.Value(agentGoneKey{}).(bool)
+	return gone
+}
+
 func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
+	if agentGone(ctx) {
+		h.logger.Debug("not calling the agent's after-test-run hook: under docker compose it went down with the last test set's stack")
+		return nil
+	}
 
 	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
-		h.logger.Error("failed to call AfterTestRun hook", zap.Error(err))
+		// Under the proven switch the agent's end of the run is part of the
+		// run's checks: an enterprise agent refuses it when it could not
+		// write the row of a program it saw off the run's clock. The error
+		// is the caller's (models.AgentRunUnfinishedError), so that it does
+		// not judge the run on checks the agent did not finish; the caller
+		// logs it.
+		if provenswitch.On() {
+			return models.AgentRunUnfinished(ctx, err)
+		}
+		utils.LogError(h.logger, err, "failed to call AfterTestRun hook")
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -77,7 +78,7 @@ func TestRecordViaSupervisorArmsTheClientWriteHold(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		go func() {
-			_ = p.recordViaSupervisor(ctx, srcConn, dstConn, parser, "test",
+			_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, "test",
 				make(chan *models.Mock, 8), &errgroup.Group{}, zap.NewNop(), 1, 2,
 				models.OutgoingOptions{})
 		}()

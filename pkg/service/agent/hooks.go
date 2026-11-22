@@ -6,6 +6,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -24,6 +25,92 @@ type AgentHooks interface {
 	// "no anchor available" and should be treated as a no-op.
 	SetFreezeAnchor(ctx context.Context, anchor time.Time) error
 }
+
+// AppStartHook is an optional AgentHooks capability: AppStartsAnew is told,
+// under the proven switch, that keploy starts the application anew for the
+// test set testSetID (no process of an earlier application runs on), after
+// the set's mocks are stored and before the application starts, with first,
+// the earliest instant one of the set's test cases was recorded at (zero for
+// none). Hooks that keep the app's clock from moving back (the enterprise
+// time-freeze) drop what an earlier application read: a new process has read
+// no instant. It is not told again to an agent that restarts under the
+// running application.
+type AppStartHook interface {
+	AppStartsAnew(ctx context.Context, testSetID string, first time.Time) error
+}
+
+// ClockRunTaker is an optional AgentHooks capability: TakeClockRun takes the
+// run id the process that started the agent hands it (ClockRunStarter, POST
+// /agent/hooks/clock-run), before any call that can move the app's clock.
+// Hooks that keep a run's timeline on clock files another run may have left
+// (the enterprise time-freeze) mark that timeline with it. An agent whose
+// hooks lack it keeps no such timeline and answers the route 501
+// (models.NoTimelineHooks); 404 is an agent older than the route.
+type ClockRunTaker interface {
+	TakeClockRun(ctx context.Context, run string) error
+}
+
+// AppClockReader is an optional AgentHooks capability: AppClock is the
+// instant the app's clock showed at the real instant real, as the hooks moved
+// it (the enterprise time-freeze), false where they cannot tell. The agent
+// hands it to the proxy (coreAgent.AppClockSetter): the learn step reads a
+// call's clock reads in the call's own window on it.
+type AppClockReader interface {
+	AppClock(real time.Time) (time.Time, bool)
+}
+
+// AppClockRunReader is an optional AgentHooks capability, beside
+// AppClockReader: AppClockRunBegan is the real instant from which the app's
+// clock has run as one to the real instant real, as the hooks moved it: the
+// end of the last move they wrote at or before real (the first instant
+// AppClock reads the moved clock at), told from the moves they made, false
+// where AppClock(real) is. The agent hands it to the proxy
+// (coreAgent.AppClockRunSetter): a test's first call, whose span on the
+// app's clock would otherwise start at the previous test's last serve,
+// before the test's begin moved the clock, and so be none, starts its span
+// at the move. Hooks without it leave that call with no span, and a replay
+// refuses its learned clock reads; and a span from the previous serve is
+// then read at its two ends, which takes a stretch the clock left and came
+// back to the same offset by (a real test, a frozen one, a real one) for
+// one run, and passes a read made before it: hooks that move the clock
+// should tell it. Where AppClock(real) is known it must tell it too; a
+// false there gives the call no span.
+type AppClockRunReader interface {
+	AppClockRunBegan(real time.Time) (time.Time, bool)
+}
+
+// AppClockShownReader is an optional AgentHooks capability, beside
+// AppClockRunReader: AppClockShown is what the app's clock showed between
+// the real instants from and to, as the hooks moved it: a span on the app's
+// clock per offset in force at some instant between them, in the order
+// written, each over the real stretch it was in force (a move counted in
+// both, from its write's begin to its end: a reader may read either offset
+// meanwhile); false where AppClock is false at some instant between them.
+// The agent hands it to the proxy (coreAgent.AppClockShownSetter): the
+// check that a call no recording answered is one more run of the set's
+// background work reads, beside the call's span from the move that began
+// its clock's run (AppClockRunReader), the clock the application may have
+// read before that move (learn.Tracker.SetAppClockShown). Hooks without it
+// leave that check the run to the call alone, which refuses a background
+// poll that read the clock before a test's begin moved it and reached
+// keploy after.
+type AppClockShownReader interface {
+	AppClockShown(from, to time.Time) ([]learn.Span, bool)
+}
+
+// BackgroundClockReader is an optional AgentHooks capability, for the
+// check that a call no recording answered is one more run of the set's
+// background work with the proven switch off (learn.CallSpanOf):
+// BackgroundAppClock is the instant the app's clock showed at the real
+// instant real, told only where the hooks know no clock of theirs is moved
+// in the run, so the app reads the real one; false otherwise (a moved
+// clock's runs are not told with the switch off, so no span is read on
+// it). The agent hands it to the proxy (coreAgent.BackgroundClockSetter);
+// the learn step reads nothing of it.
+type BackgroundClockReader interface {
+	BackgroundAppClock(real time.Time) (time.Time, bool)
+}
+
 type AgentHook struct{}
 
 func (n *AgentHook) BeforeSimulate(ctx context.Context, t time.Time, testSetID string, tcName string) error {
@@ -62,6 +149,17 @@ type StartupHook interface {
 type StartupHooks struct{}
 
 func (h *StartupHooks) GetArgs(ctx context.Context) []string { return nil }
+
+// ClockRunStarter is an optional StartupHook capability: ClockRun is the run
+// id the client hands each agent it set up once the agent answers (the
+// agent's ClockRunTaker), "" for none. It travels over an agent route, never
+// on the agent's command line: an agent older than its starter (a
+// user-pinned agent image) answers the route 404 and runs on without it,
+// where a flag it does not know would end it. One whose hooks keep no
+// timeline answers 501, and the client takes that as nothing to hand.
+type ClockRunStarter interface {
+	ClockRun(ctx context.Context) string
+}
 
 var StartupAgentHook StartupHook = &StartupHooks{}
 

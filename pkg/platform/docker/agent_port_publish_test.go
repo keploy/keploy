@@ -8,12 +8,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly guards the
-// fix for the unauthenticated-agent-exposure report: the agent control-plane
-// HTTP server carries no authentication (it streams live TLS session keys on
-// /agent/pcap/keylog and accepts unauthenticated /agent/stop and
-// /agent/storemocks), so its published port must reach only the host's own
-// loopback, never every host-network interface.
+// TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly guards the fix
+// for the agent-exposure report: the agent control-plane HTTP server streams
+// live TLS session keys on /agent/pcap/keylog and accepts session-mutating
+// POSTs on /agent/stop and /agent/storemocks. Requests now carry a bearer
+// token (routes.Authenticate), and its published port must still reach only
+// the host's own loopback rather than every host-network interface.
 func TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly(t *testing.T) {
 	t.Parallel()
 
@@ -47,11 +47,14 @@ func TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly(t *testing.T)
 		t.Fatalf("agent port is also published unrestricted as %q, which re-exposes the unauthenticated control plane on every host interface; got %s", unrestricted, formatSequence(ports))
 	}
 
-	// The proxy port has no auth concern (it's the traffic-interception
-	// listener app containers are meant to reach) and must stay published on
-	// every interface.
-	wantProxyPublish := "16790:16790"
-	if !sequenceContains(ports, wantProxyPublish) {
-		t.Fatalf("expected proxy port published on all interfaces as %q, got %s", wantProxyPublish, formatSequence(ports))
+	// The proxy's and the DNS server's ports are reached through the shared
+	// namespace (`network_mode: service:keploy-agent`) and are not published
+	// at all. The agent binds them there and moves off one another socket
+	// holds; a publish claimed the proxy's on the host too, where two runs
+	// started together on the configured ports collided.
+	for _, p := range []string{"16790:16790", "127.0.0.1:16790:16790", "16791:16791", "127.0.0.1:16791:16791"} {
+		if sequenceContains(ports, p) {
+			t.Fatalf("the proxy's or the DNS server's port is published as %q; the app reaches them through the agent's network namespace, got %s", p, formatSequence(ports))
+		}
 	}
 }

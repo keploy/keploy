@@ -224,3 +224,64 @@ func TestFmtSeconds(t *testing.T) {
 		}
 	}
 }
+
+// A test set FAILED for an incomplete capture, every test of it passed, is
+// never a green JUnit file: the suite carries a failed "keploy capture" test
+// case with the reason, besides the properties. An unverified capture only
+// gets the properties; a set that was not checked gets neither. Either FAILED
+// set, no case of which failed, carries the case of a set that did not pass
+// (TestJUnitASetThatDidNotPassIsNeverAGreenSuite).
+func TestBuildJUnitSuites_CaptureVerification(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	for _, tc := range []struct {
+		name         string
+		cv           *models.CaptureVerification
+		wantTests    int
+		wantFailures int
+		wantErrors   int
+		wantProps    bool
+	}{
+		{"incomplete", &models.CaptureVerification{Status: models.CaptureIncompleteStatus, Reason: "capture incomplete: the agent's PID map refused 2 insert(s)"}, 2, 1, 0, true},
+		{"unverified", &models.CaptureVerification{Status: models.CaptureUnverifiedStatus, Reason: "capture unverified: read failed"}, 2, 0, 1, true},
+		{"not checked", nil, 2, 0, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			suites := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, CaptureVerification: tc.cv}})
+			s := suites.Suites[0]
+			if s.Tests != tc.wantTests || s.Failures != tc.wantFailures || suites.Failures != tc.wantFailures || s.Errors != tc.wantErrors {
+				t.Fatalf("suite tests %d failures %d (all %d) errors %d; want %d, %d and %d", s.Tests, s.Failures, suites.Failures, s.Errors, tc.wantTests, tc.wantFailures, tc.wantErrors)
+			}
+			if (s.Properties != nil) != tc.wantProps {
+				t.Fatalf("properties %+v, want present %v", s.Properties, tc.wantProps)
+			}
+			if tc.wantFailures == 1 {
+				last := s.Cases[len(s.Cases)-1]
+				if last.Name != junitCaptureCase || last.Failure == nil || last.Failure.Text != tc.cv.Reason {
+					t.Fatalf("last case %+v, want %q failed with the reason", last, junitCaptureCase)
+				}
+			}
+			if tc.wantProps && (s.Properties.Property[0].Value != string(tc.cv.Status) || s.Properties.Property[1].Value != tc.cv.Reason) {
+				t.Fatalf("properties %+v, want the status and the reason", s.Properties.Property)
+			}
+		})
+	}
+}
+
+// A test set mock.real's rule 4 failed, every test of it passed, is never a
+// green JUnit file: the suite carries a failed "keploy mock.real" case with
+// the reason.
+func TestBuildJUnitSuites_RealFailure(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	why := "mock.real destination db:5432, which its test cases' recordings list, was never reached"
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, RealFailure: why}}).Suites[0]
+	if s.Tests != 2 || s.Failures != 1 {
+		t.Fatalf("suite tests %d failures %d; want 2 and 1", s.Tests, s.Failures)
+	}
+	last := s.Cases[len(s.Cases)-1]
+	if last.Name != junitRealCase || last.Failure == nil || last.Failure.Text != why {
+		t.Fatalf("last case %+v, want %q failed with the reason", last, junitRealCase)
+	}
+	if s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "PASSED", Tests: passed}}).Suites[0]; s.Tests != 1 || s.Failures != 0 {
+		t.Fatalf("a set mock.real did not fail has %d cases, %d failed", s.Tests, s.Failures)
+	}
+}

@@ -15,13 +15,18 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	kutils "go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row
 
 func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mysql.ColumnDefinition41) (*mysql.BinaryRow, int, error) {
-
+	// A row cut short (misframed, or a capture hole) is an error, not a
+	// panic: a panic kills the recorder for the rest of its connection.
+	if len(data) < 5 {
+		return nil, 0, fmt.Errorf("binary row packet too short for its header and OK byte: %d bytes", len(data))
+	}
 	offset := 0
 	row := &mysql.BinaryRow{
 		Header: mysql.Header{
@@ -38,6 +43,9 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 	offset++
 
 	nullBitmapLen := (len(columns) + 7 + 2) / 8
+	if len(data) < offset+nullBitmapLen {
+		return nil, offset, fmt.Errorf("binary row packet too short for its %d-byte null bitmap: %d bytes after the OK byte", nullBitmapLen, len(data)-offset)
+	}
 	nullBitmap := data[offset : offset+nullBitmapLen]
 	row.RowNullBuffer = nullBitmap
 
@@ -51,6 +59,14 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 				Value: nil,
 			})
 			continue
+		}
+
+		// The bitmap says this column has a value, so a byte must remain.
+		// ParseBinaryDate/DateTime/Time read an empty slice as "nothing to
+		// parse" and return (nil, 0, nil): without this check a row cut off
+		// after its bitmap would be recorded with a NULL the server never sent.
+		if offset >= len(data) {
+			return nil, offset, fmt.Errorf("binary row has %d of its %d values", i, len(columns))
 		}
 
 		res, n, err := readBinaryValue(data[offset:], col)
@@ -87,7 +103,7 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 	}
 
 	switch mysql.FieldType(col.Type) {
-	case mysql.FieldTypeLong:
+	case mysql.FieldTypeLong, mysql.FieldTypeInt24: // MEDIUMINT is sent as 4 bytes, like INT
 		if len(data) < 4 {
 			return nil, 0, errors.New("malformed FieldTypeLong value")
 		}
@@ -104,12 +120,17 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 		mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB,
 		mysql.FieldTypeJSON,
 		mysql.FieldTypeNewDecimal, // NEWDECIMAL (0xF6 / 246) is sent as a length-encoded string in binary rows
-		mysql.FieldTypeDecimal:    // legacy DECIMAL (0) — treat same as NEWDECIMAL
+		mysql.FieldTypeDecimal,    // legacy DECIMAL (0) — treat same as NEWDECIMAL
+		mysql.FieldTypeEnum, mysql.FieldTypeSet,
+		mysql.FieldTypeBit, mysql.FieldTypeGeometry, mysql.FieldTypeVector: // bytes, kept as a string like a BLOB's
 		value, _, n, err := utils.ReadLengthEncodedString(data)
 		res.value = string(value)
 		return res, n, err
 
 	case mysql.FieldTypeTiny:
+		if len(data) < 1 {
+			return nil, 0, errors.New("malformed FieldTypeTiny value")
+		}
 		if isUnsigned {
 			res.value = uint8(data[0])
 			return res, 1, nil
@@ -244,10 +265,10 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 		}
 
 		switch ce.Type {
-		case mysql.FieldTypeLong:
+		case mysql.FieldTypeLong, mysql.FieldTypeInt24:
 			n, err := coerceToInt64(ce.Value)
 			if err != nil {
-				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+				return nil, fmt.Errorf("column %q: %w", col.Name, kutils.WithholdInput(err))
 			}
 			if ce.Unsigned {
 				if err := binary.Write(body, binary.LittleEndian, uint32(n)); err != nil {
@@ -261,7 +282,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 
 		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar,
 			mysql.FieldTypeNewDecimal, mysql.FieldTypeDecimal,
-			mysql.FieldTypeJSON:
+			mysql.FieldTypeJSON, mysql.FieldTypeEnum, mysql.FieldTypeSet:
 			s, ok := ce.Value.(string)
 			if !ok {
 				return nil, fmt.Errorf("string-like field %q not a string", col.Name)
@@ -270,7 +291,8 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 				return nil, err
 			}
 
-		case mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB:
+		case mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB,
+			mysql.FieldTypeBit, mysql.FieldTypeGeometry, mysql.FieldTypeVector:
 			switch v := ce.Value.(type) {
 			case []byte:
 				if err := writeLenEncBytes(body, v); err != nil {
@@ -294,7 +316,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 		case mysql.FieldTypeTiny:
 			n, err := coerceToInt64(ce.Value)
 			if err != nil {
-				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+				return nil, fmt.Errorf("column %q: %w", col.Name, kutils.WithholdInput(err))
 			}
 			if ce.Unsigned {
 				if err := body.WriteByte(uint8(n)); err != nil {
@@ -309,7 +331,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 		case mysql.FieldTypeShort, mysql.FieldTypeYear:
 			n, err := coerceToInt64(ce.Value)
 			if err != nil {
-				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+				return nil, fmt.Errorf("column %q: %w", col.Name, kutils.WithholdInput(err))
 			}
 			if ce.Unsigned {
 				if err := binary.Write(body, binary.LittleEndian, uint16(n)); err != nil {
@@ -324,7 +346,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 		case mysql.FieldTypeLongLong:
 			n, err := coerceToInt64(ce.Value)
 			if err != nil {
-				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+				return nil, fmt.Errorf("column %q: %w", col.Name, kutils.WithholdInput(err))
 			}
 			if ce.Unsigned {
 				if err := binary.Write(body, binary.LittleEndian, uint64(n)); err != nil {
@@ -339,7 +361,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 		case mysql.FieldTypeFloat:
 			f, err := coerceToFloat64(ce.Value)
 			if err != nil {
-				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+				return nil, fmt.Errorf("column %q: %w", col.Name, kutils.WithholdInput(err))
 			}
 			if err := binary.Write(body, binary.LittleEndian, float32(f)); err != nil {
 				return nil, err
@@ -348,7 +370,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 		case mysql.FieldTypeDouble:
 			f, err := coerceToFloat64(ce.Value)
 			if err != nil {
-				return nil, fmt.Errorf("column %q: %w", col.Name, err)
+				return nil, fmt.Errorf("column %q: %w", col.Name, kutils.WithholdInput(err))
 			}
 			if err := binary.Write(body, binary.LittleEndian, f); err != nil {
 				return nil, err
@@ -463,15 +485,15 @@ func coerceToInt64(v interface{}) (int64, error) {
 // the connection — the intermediate wrappers only add context.
 func exactInt64(f float64) (int64, error) {
 	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
-		return 0, fmt.Errorf("cannot coerce %v to integer: not a whole number; re-record this mock", f)
+		return 0, errors.New("cannot coerce a recorded value to integer: not a whole number; re-record this mock")
 	}
 	// 2^63 exactly. float64(math.MaxInt64) rounds *up* to this, so the
 	// upper bound has to be exclusive against 2^63 rather than
 	// inclusive against MaxInt64.
 	const twoPow63 = 9223372036854775808.0
 	if f < -twoPow63 || f >= twoPow63 {
-		return 0, fmt.Errorf("cannot coerce %v to integer: out of int64 range, "+
-			"the recorded value has already lost precision; re-record this mock", f)
+		return 0, errors.New("cannot coerce a recorded value to integer: out of int64 range, " +
+			"the recorded value has already lost precision; re-record this mock")
 	}
 	return int64(f), nil
 }
@@ -686,12 +708,12 @@ func encodeDateTime(value interface{}) ([]byte, error) {
 		}
 		if _, err := fmt.Sscanf(s, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
 			&y, &m, &d, &hh, &mm, &ss, &usec); err != nil {
-			return nil, fmt.Errorf("failed to parse datetime %q: %w", s, err)
+			return nil, fmt.Errorf("failed to parse a recorded datetime (%d bytes): %w", len(s), kutils.WithholdInput(err))
 		}
 	} else {
 		if _, err := fmt.Sscanf(s, "%04d-%02d-%02d %02d:%02d:%02d",
 			&y, &m, &d, &hh, &mm, &ss); err != nil {
-			return nil, fmt.Errorf("failed to parse datetime %q: %w", s, err)
+			return nil, fmt.Errorf("failed to parse a recorded datetime (%d bytes): %w", len(s), kutils.WithholdInput(err))
 		}
 	}
 
@@ -764,11 +786,11 @@ func encodeTime(value interface{}) ([]byte, error) {
 				s = head + "." + frac
 			}
 			if _, err := fmt.Sscanf(s, "%02d:%02d:%02d.%06d", &hh, &mm, &ss, &usec); err != nil {
-				return nil, fmt.Errorf("failed to parse time %q: %w", s, err)
+				return nil, fmt.Errorf("failed to parse a recorded time (%d bytes): %w", len(s), kutils.WithholdInput(err))
 			}
 		} else {
 			if _, err := fmt.Sscanf(s, "%02d:%02d:%02d", &hh, &mm, &ss); err != nil {
-				return nil, fmt.Errorf("failed to parse time %q: %w", s, err)
+				return nil, fmt.Errorf("failed to parse a recorded time (%d bytes): %w", len(s), kutils.WithholdInput(err))
 			}
 		}
 	default: // "D HH:MM:SS[.uuuuuu]"
@@ -780,11 +802,11 @@ func encodeTime(value interface{}) ([]byte, error) {
 				s = head + "." + frac
 			}
 			if _, err := fmt.Sscanf(s, "%d %02d:%02d:%02d.%06d", &days, &hh, &mm, &ss, &usec); err != nil {
-				return nil, fmt.Errorf("failed to parse time %q: %w", s, err)
+				return nil, fmt.Errorf("failed to parse a recorded time (%d bytes): %w", len(s), kutils.WithholdInput(err))
 			}
 		} else {
 			if _, err := fmt.Sscanf(s, "%d %02d:%02d:%02d", &days, &hh, &mm, &ss); err != nil {
-				return nil, fmt.Errorf("failed to parse time %q: %w", s, err)
+				return nil, fmt.Errorf("failed to parse a recorded time (%d bytes): %w", len(s), kutils.WithholdInput(err))
 			}
 		}
 	}

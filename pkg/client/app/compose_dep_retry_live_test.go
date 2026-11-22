@@ -114,11 +114,10 @@ func newLiveApp(t *testing.T, composeYAML, appContainer, project string) (*App, 
 		composeService: "app",
 		composeFile:    composePath,
 		// Project-scoped command so ComposeDown / ps target this stack only.
-		// --abort-on-container-exit --exit-code-from app mirrors what keploy's
-		// ensureComposeExitOnAppFailure injects in production, so `up` returns the
-		// app's own exit code the moment the app container exits (and aborts the
-		// stack), exactly as it does for a real recorded app.
-		cmd: "docker compose -p " + project + " -f " + composePath + " up --abort-on-container-exit --exit-code-from app",
+		// No --abort-* or --exit-code-from: keploy strips them from every
+		// compose command it runs (withoutComposeAbortFlags) and watches the
+		// app's container itself, so this run's up is the one keploy runs.
+		cmd: utils.NewAppCommand("docker compose -p " + project + " -f " + composePath + " up"),
 	}
 
 	cleanup := func() {

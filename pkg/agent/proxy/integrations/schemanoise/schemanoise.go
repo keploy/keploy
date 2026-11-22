@@ -71,6 +71,6 @@ func AddBodyPrefix(in map[string][]string) map[string][]string { return mocknois
 // DetectJSONDrift diffs two JSON bodies and returns the drifting field paths.
 //
 // Deprecated: use mocknoise.DetectJSONDrift.
-func DetectJSONDrift(recordedBody, liveBody []byte, known map[string][]string, isRecordedNoise func(string) bool) (map[string][]string, bool) {
-	return mocknoise.DetectJSONDrift(recordedBody, liveBody, known, isRecordedNoise)
+func DetectJSONDrift(recordedBody, liveBody []byte, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, isRecordedNoise func(string) bool) (map[string][]string, bool) {
+	return mocknoise.DetectJSONDrift(recordedBody, liveBody, known, typeStrict, valueChangesOnly, isRecordedNoise)
 }

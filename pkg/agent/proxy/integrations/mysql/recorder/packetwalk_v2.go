@@ -1,0 +1,190 @@
+package recorder
+
+import (
+	"encoding/binary"
+	"fmt"
+
+	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
+)
+
+// packetWalk follows the packet headers of a connection's server stream,
+// told of every byte as it leaves the stream (fakeconn.FakeConn.Tap): read,
+// dropped by the floor, or discarded by a re-align's cut. A MySQL packet's
+// header gives its length, so the headers can be walked exactly wherever no
+// byte is lost, even through a response the recorder cannot frame, whose
+// meaning it cannot parse.
+//
+// It is what proves a re-align's cut (handleCommandsV2's realignAnswer). The
+// cut is made by capture number, at the client's next command (C2) after a
+// response left out (A1). A client that pipelined C2 into A1's tail, though it
+// had not pipelined before, has A1's tail captured after C2, and the cut lands
+// in it. A tail packet at sequence id 1 (the sequence wraps every 256 packets)
+// that frames as an answer to C2 was taken for C2's answer, and a client that
+// pipelined its following command into A1 too confirmed it (takenUp): C2 was
+// recorded with A1's bytes. So the cut is taken only where the walk shows
+// A1's run of sequence ids ended (cut): every packet of an exchange is
+// numbered on from the one before it, the client's and the server's alike, so
+// a packet at the id C2's answer starts at (1) that no packet of A1's exchange
+// is numbered just before is not A1's; and the server answers in order, so the
+// first packet after A1 that is not A1's starts C2's answer.
+type packetWalk struct {
+	// on: the walk is at a packet boundary, or rest bytes into a packet's
+	// payload, of the stream as it was sent (anchor). Off until the recorder
+	// first stands at a packet boundary of its own reads.
+	on bool
+	// hdrN header bytes of the next packet are in hdr; rest bytes of the
+	// current packet's payload are still to come.
+	hdrN int
+	hdr  [4]byte
+	rest int
+	// Since the answer the stream is at began (mark), which starts at
+	// sequence id start: seen is set once a header was walked, first is the
+	// sequence id of the first one, and last of the last one.
+	seen               bool
+	start, first, last byte
+	// client: the client sent packets inside that exchange
+	// (nextCommandAfterFault passes them over: a LOCAL INFILE upload, an auth
+	// switch response), the last one numbered clientLast. The exchange takes
+	// turns: the server's next packet in it is numbered on from the client's
+	// last, and the client sends again only once that packet came, so no
+	// earlier client packet is the one a packet after the cut is numbered on
+	// from.
+	client     bool
+	clientLast byte
+	// unjudged: the answer the stream is at (mark) may start with an ERR 1835
+	// to a command without an answer that did not decode, sent before the
+	// command it answers, which cannot be told from that command's own answer
+	// (markUnjudged). head holds the first headN payload bytes of the first
+	// packet walked since the mark; headLeft more of them are still to come.
+	unjudged        bool
+	head            [3]byte
+	headN, headLeft int
+}
+
+// feed is the stream's tap: b are the stream's next bytes.
+func (w *packetWalk) feed(b []byte) {
+	for w.on && len(b) > 0 {
+		if w.rest > 0 {
+			n := min(w.rest, len(b))
+			if w.headLeft > 0 {
+				k := min(w.headLeft, n)
+				w.headN += copy(w.head[w.headN:], b[:k])
+				w.headLeft -= k
+			}
+			w.rest -= n
+			b = b[n:]
+			continue
+		}
+		n := copy(w.hdr[w.hdrN:], b)
+		w.hdrN += n
+		b = b[n:]
+		if w.hdrN < len(w.hdr) {
+			return
+		}
+		w.hdrN = 0
+		w.rest = int(mysqlUtils.GetPayloadLength(w.hdr[:3]))
+		if !w.seen {
+			w.first = w.hdr[3]
+			w.headN, w.headLeft = 0, min(len(w.head), w.rest)
+		}
+		w.seen, w.last = true, w.hdr[3]
+	}
+}
+
+// anchor says the recorder's server stream is at a packet boundary: its own
+// reads take whole packets, so it is once it has read a response whole.
+func (w *packetWalk) anchor() {
+	w.on, w.hdrN, w.rest = true, 0, 0
+}
+
+// mark says the server's next bytes start the answer to a command the client
+// sent, which starts at sequence id start: a new exchange.
+func (w *packetWalk) mark(start byte) {
+	w.start, w.seen, w.client, w.unjudged, w.headLeft = start, false, false, false, 0
+}
+
+// markUnjudged marks the answer's start as mark does where its first packet
+// may be the ERR 1835 to a command without an answer that did not decode, sent
+// before the command it answers (takeMalformedAnswers could not judge it): an
+// ERR 1835 walked first since then answers the one command or the other, so it
+// shows nothing of where that answer ended (cut).
+func (w *packetWalk) markUnjudged(start byte) {
+	w.mark(start)
+	w.unjudged = true
+}
+
+// firstIsMalformedErr reports whether the first packet walked since the mark
+// is an ERR 1835 (isMalformedPacketErr): its payload starts with 0xff and that
+// error code.
+func (w *packetWalk) firstIsMalformedErr() bool {
+	return w.seen && w.headN == len(w.head) && w.head[0] == 0xff && binary.LittleEndian.Uint16(w.head[1:]) == errMalformedPacket
+}
+
+// markAt says the answer to a command the client sent started with the packet
+// the walk last walked whole, whose sequence id is first, the one it starts
+// at: what it walked before that packet is no part of the answer.
+func (w *packetWalk) markAt(first byte) {
+	w.mark(first)
+	w.seen, w.first, w.last = true, first, first
+}
+
+// passed says the client sent a packet inside the exchange, numbered seq.
+func (w *packetWalk) passed(seq byte) {
+	w.client, w.clientLast = true, seq
+}
+
+// startedOff reports whether the answer the stream is at (mark) started with a
+// packet whose sequence id is not first, the one it starts at: its first
+// header was walked, and is at another. One whose header has not been walked
+// yet has started with nothing.
+func (w *packetWalk) startedOff(first byte) bool {
+	return w.seen && w.first != first
+}
+
+// cut says why the server's next bytes, after a re-align's cut, cannot be
+// taken for the start of the answer to the command taken up, which starts at
+// sequence id first; empty when they can. The answer's first packet is checked
+// to be at first as it is read (packetSeq). unproven says nothing showed the
+// stream was at the start of the answer left out when it was marked: that
+// exchange was itself taken up at a re-align's cut and none of its answer was
+// read, or a held PREPARE's settle read a packet at it that is neither the
+// PREPARE's EOF nor that answer's first, or may be either.
+func (w *packetWalk) cut(first byte, unproven bool) string {
+	prev := first - 1
+	switch {
+	case !w.on:
+		return "the server's packets were not followed from a packet boundary to it"
+	case w.hdrN != 0 || w.rest != 0:
+		return "it falls inside a packet of the server's"
+	case !w.seen:
+		return "no packet of the response left out came before it"
+	case w.unjudged && w.firstIsMalformedErr():
+		// The server answers in order, so an ERR 1835 to a command without an
+		// answer sent before the response left out comes before that
+		// response, and it was captured after the response's command (the
+		// mark is where nothing captured before it is left), where it cannot
+		// be told from the response's own answer, which may be one too: taken
+		// for that, it shows nothing of where the response ended, and the
+		// response may not have begun at the cut.
+		return "the first packet walked since the response left out began is an ERR 1835 (a malformed packet), which may answer a command without an answer that did not decode, sent before it, as well as its own command"
+	case unproven && w.first != w.start:
+		// The first packet walked since the mark is not where the response
+		// left out starts: it may be the tail of a response before it, which
+		// a command taken up whose answer was never read (its fault was the
+		// command's own) left unproven, captured after that command. Then
+		// nothing walked is of the response left out, and the walk shows
+		// nothing of where it ended; or the rest of a held PREPARE's response.
+		// Otherwise no byte of a response before it is left after the mark
+		// (the answer before was read whole, or its first packet proved the
+		// cut it was taken up at), so the first packet
+		// walked is the response's own, off its sequence, and what follows
+		// shows where it ended as for any response left out: refused there,
+		// the recording stopped where main re-aligns and records the rest.
+		return fmt.Sprintf("the first packet walked since the response left out began has sequence id %d, not %d where it starts", w.first, w.start)
+	case w.last == prev:
+		return fmt.Sprintf("the last packet before it has sequence id %d, so a packet at %d after it may be more of the response left out", prev, first)
+	case w.client && w.clientLast == prev:
+		return fmt.Sprintf("the client sent a packet at sequence id %d inside the exchange left out, so a packet at %d after it may be more of that exchange", prev, first)
+	}
+	return ""
+}

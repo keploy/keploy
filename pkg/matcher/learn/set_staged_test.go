@@ -1,0 +1,349 @@
+package learn
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// srcOf visits mocks in order, as the agent's staging of a set visits its
+// recordings (MockManager.RangeRecordedBefore).
+func srcOf(mocks []*models.Mock) func(visit func(*models.Mock) bool) error {
+	return func(visit func(*models.Mock) bool) error {
+		for _, m := range mocks {
+			if !visit(m) {
+				return nil
+			}
+		}
+		return nil
+	}
+}
+
+// readsOf are the payloads s's staging and its calls have read for the set
+// (warmOne), and how often a call waited for another's read.
+func readsOf(s *setDerived) (staged, called, waits int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.staged, s.called, s.waits
+}
+
+// heldUntil makes each read of text's decoding (decodeForms) wait until the
+// returned release runs; reading is closed once a read of it has begun, and
+// begun counts those reads. The row's end releases it too.
+func heldUntil(t *testing.T, raw []Raw, text string) (counts *sync.Map, reading chan struct{}, begun *atomic.Int64, release func()) {
+	reading = make(chan struct{})
+	gate := make(chan struct{})
+	begun = new(atomic.Int64)
+	var once, released sync.Once
+	release = func() { released.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	counts = countDecodes(t, raw, func(s string) {
+		if s == text {
+			begun.Add(1)
+			once.Do(func() { close(reading) })
+			<-gate
+		}
+	})
+	return counts, reading, begun, release
+}
+
+// oneStageReader has the set's staging read with one reader for the row
+// (stageReaders), so the row holds the staging's one read in progress.
+func oneStageReader(t *testing.T) {
+	t.Helper()
+	was := stageReaders
+	stageReaders = func() int { return 1 }
+	t.Cleanup(func() { stageReaders = was })
+}
+
+// A set staged before its tests (WarmSet) is read there, off the calls'
+// answer path: each of its payloads is decoded and read for its instants
+// once, by the staging, and no call of any of its tests reads one for the
+// set, its first neither (set-wide work: on api-server's round the set's
+// first drifted call read every payload recorded before it while its client
+// waited). The calls learn what they learn with no staging.
+func TestASetsCallsReadNoPayloadItsStagingRead(t *testing.T) {
+	const n, tests = 48, 6
+	row := newHeldRow(n, 4)
+	raw := row.raw()
+	plain := NewTracker()
+	plain.NewSet()
+	plain.Begin()
+	want := row.classify(plain.Drifts())
+	plain.End()
+
+	counts := countDecodes(t, raw, nil)
+	spans := countSpans(t)
+	tr := NewTracker()
+	tr.NewSet()
+	use := <-tr.WarmSet(srcOf(row.mocks))
+	s := tr.Drifts().set
+	staged, called, _ := readsOf(s)
+	if use.Staged != n || use.Called != 0 || use.Held == 0 {
+		t.Fatalf("the set's staging reported %+v: want %d read by it, none by a call, and what it keeps", use, n)
+	}
+	payloads, decodes := decodesOf(counts)
+	if staged != n || called != 0 || payloads != n || decodes != n {
+		t.Fatalf("the set's staging read %d of its %d payloads for the set (calls %d), decoding %d of them %d times: want each once, by the staging", staged, n, called, payloads, decodes)
+	}
+	read := spans.Load()
+	for i := 0; i < tests; i++ {
+		tr.Begin()
+		got := row.classify(tr.Drifts())
+		tr.End()
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("test %d of the staged set learned\n%v\nwhere the set with no staging learned\n%v", i+1, got, want)
+		}
+		if _, c, _ := readsOf(s); c != 0 {
+			t.Fatalf("test %d's call read %d of the staged set's payloads for the set: want none (the staging read them)", i+1, c)
+		}
+	}
+	if _, d := decodesOf(counts); d != decodes {
+		t.Errorf("%d tests of the staged set decoded its payloads %d more times: want none", tests, d-decodes)
+	}
+	if r := spans.Load(); r != read {
+		t.Errorf("%d tests of the staged set read its payloads' instants %d more times: want none", tests, r-read)
+	}
+}
+
+// A call made while the set's staging is still reading waits for no part of
+// the staging but a payload of its own the staging is reading: it reads the
+// rest itself, and the staging reads none of them again. Counted, not timed:
+// the staging is held in its first payload's read until the row lets it go;
+// a call that waited for the staging to end would never end.
+func TestACallWaitsOnlyForItsOwnPayloadTheStagingIsReading(t *testing.T) {
+	const n = 24
+	row := newHeldRow(n, 4)
+	raw := row.raw()
+	plain := NewTracker()
+	plain.NewSet()
+	plain.Begin()
+	want := row.classify(plain.Drifts())
+	plain.End()
+
+	oneStageReader(t)
+	counts, reading, begun, release := heldUntil(t, raw, raw[0].payload().text)
+	tr := NewTracker()
+	tr.NewSet()
+	done := tr.WarmSet(srcOf(row.mocks))
+	<-reading
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	s := dc.set
+	dc.warm(raw[1:])
+	if staged, called, waits := readsOf(s); staged != 0 || called != n-1 || waits != 0 {
+		t.Fatalf("a call of the %d payloads the staging had not taken read %d of them (the staging %d) and waited %d times: want each read by the call, no wait", n-1, called, staged, waits)
+	}
+	// The payload the staging is reading: a call of it waits for that read,
+	// and reads it not again.
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		dc.warm(raw[:1])
+	}()
+	for {
+		if _, _, waits := readsOf(s); waits == 1 {
+			break
+		}
+		select {
+		case <-ended:
+			t.Fatal("a call of the payload the staging is reading ended before that read did: want it to wait for it")
+		default:
+		}
+		if begun.Load() > 1 {
+			t.Fatal("a call of the payload the staging is reading read it again: want it to wait for the staging's read")
+		}
+		runtime.Gosched()
+	}
+	release()
+	<-ended
+	<-done
+	if staged, called, _ := readsOf(s); staged != 1 || called != n-1 {
+		t.Errorf("the staging read %d payloads and the calls %d: want the staging's held one alone (1) and the calls' %d", staged, called, n-1)
+	}
+	if payloads, decodes := decodesOf(counts); payloads != n || decodes != n {
+		t.Errorf("the staging and a call at once decoded %d of the set's %d payloads, %d times in all: want each once", payloads, n, decodes)
+	}
+	if got := row.classify(dc); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("the set read at once by its staging and a call learned\n%v\nwhere the set with no staging learned\n%v", got, want)
+	}
+}
+
+// A set's staging stops at the next set (NewSet): it reads no payload of a
+// set that is over, and the set it read keeps nothing, so the agent holds
+// one set's reads at a time.
+func TestASetsStagingStopsAtTheNextSet(t *testing.T) {
+	const n = 24
+	row := newHeldRow(n, 4)
+	raw := row.raw()
+	oneStageReader(t)
+	counts, reading, _, release := heldUntil(t, raw, raw[0].payload().text)
+	tr := NewTracker()
+	tr.NewSet()
+	s := tr.Drifts().set
+	var visits atomic.Int64
+	src := srcOf(row.mocks)
+	done := tr.WarmSet(func(visit func(*models.Mock) bool) error {
+		return src(func(m *models.Mock) bool {
+			visits.Add(1)
+			return visit(m)
+		})
+	})
+	<-reading
+	tr.NewSet()
+	release()
+	<-done
+	if v := visits.Load(); v > 2 {
+		t.Errorf("the staging of a set that was over went on to visit %d of its %d recordings: want it to stop at the first after the set ended", v, n)
+	}
+	if staged, _, _ := readsOf(s); staged != 1 {
+		t.Errorf("the staging of a set that was over read %d of its payloads: want only the one it was reading as the set ended", staged)
+	}
+	if payloads, _ := decodesOf(counts); payloads != 1 {
+		t.Errorf("the staging of a set that was over decoded %d of its %d payloads: want only the one it was reading as the set ended", payloads, n)
+	}
+	if b := s.usedBytes(); b != 0 {
+		t.Errorf("a set that is over keeps %d bytes its staging read: want none", b)
+	}
+}
+
+// A staging whose source fails mid-read (the on-disk store) ends with the
+// recordings it read before and the source's error (SetUse.Err): the agent
+// logs why the set's calls read the rest themselves. A source that reads
+// the whole set gives no error.
+func TestASetsStagingSaysWhyItStoppedShort(t *testing.T) {
+	const n, read = 12, 5
+	row := newHeldRow(n, 4)
+	broken := fmt.Errorf("read the set's recording %d: input/output error", read)
+	tr := NewTracker()
+	tr.NewSet()
+	use := <-tr.WarmSet(func(visit func(*models.Mock) bool) error {
+		for _, m := range row.mocks[:read] {
+			if !visit(m) {
+				return nil
+			}
+		}
+		return broken
+	})
+	if use.Err != broken || use.Staged != read {
+		t.Fatalf("a staging whose source failed after %d of %d recordings reported %+v: want %d read and the source's error", read, n, use, read)
+	}
+	tr.NewSet()
+	if use := <-tr.WarmSet(srcOf(row.mocks)); use.Err != nil || use.Staged != n {
+		t.Fatalf("a staging that read the whole set reported %+v: want %d read and no error", use, n)
+	}
+}
+
+// A call that takes recordings ahead of the set's staging (warm) reads the
+// three parts every call's rules read of each; the staging, finding them
+// taken, reads the rest a set's first drifted call reads of every
+// recording: its keyed places, its answer's stamps and its fields' instants
+// as the echo reads them. So no later call reads any of those of them on
+// its answer path, whether the call ended its reads before the staging
+// began or was still reading one as the staging came to it (the staging
+// then waits for what that read keeps, and reads it not again). Before, the
+// staging passed over a recording a call took, and the set's next drifted
+// call read those four parts of each such recording while its client
+// waited. Counted by part, not timed; the test after learns what the set
+// with no staging learns.
+func TestACallAheadOfTheStagingLeavesNoPartOfItsRecordingsToALaterCall(t *testing.T) {
+	const n, ahead, touched = 48, 20, 31
+	tokens := map[readTally]bool{{tierWords, byKeep(partTokens, false)}: true, {tierWords, byKeep(partTokens, true)}: true}
+	for _, c := range []struct {
+		name string
+		// held is the call's recording whose read the staging comes to
+		// while the call is still reading it; -1: the call ended its reads
+		// before the staging began.
+		held int
+	}{{"the call ended its reads first", -1}, {"the call is still reading one", ahead / 2}} {
+		t.Run(c.name, func(t *testing.T) {
+			row := newHeldRow(n, 4)
+			// What F saw of the drifted clock read, held by an earlier
+			// recording, so the echo reads every recording's fields; and a
+			// changed word one recording holds.
+			row.mocks[n/2].Spec.PostgresV3.Query.Response.Rows[0][1].Value = "2026-10-24T09:56:54.1Z"
+			cell := &row.mocks[touched].Spec.PostgresV3.Query.Response.Rows[0][0]
+			cell.Value = fmt.Sprint(cell.Value) + " z9y8x7w6"
+			raw := row.raw()
+			for i, m := range row.mocks {
+				raw[i] = RawOf(m, true).ServedAs(i + 1).ServedAsRecorded()
+			}
+			plain := NewTracker()
+			plain.NewSet()
+			plain.Begin()
+			want := row.classify(plain.Drifts())
+			plain.End()
+
+			var counts *sync.Map
+			var reading chan struct{}
+			var begun *atomic.Int64
+			release := func() {}
+			if c.held >= 0 {
+				counts, reading, begun, release = heldUntil(t, raw, raw[c.held].payload().text)
+			} else {
+				counts = countDecodes(t, raw, nil)
+			}
+			tr := NewTracker()
+			tr.NewSet()
+			tr.Begin()
+			dc := tr.Drifts()
+			s := dc.set
+			// A test's call warms the set's first recordings before the
+			// staging begins (or, held, as it runs).
+			warmed := make(chan struct{})
+			go func() {
+				defer close(warmed)
+				dc.warm(raw[:ahead])
+			}()
+			if c.held < 0 {
+				<-warmed
+			} else {
+				<-reading
+			}
+			done := tr.WarmSet(srcOf(row.mocks))
+			release()
+			<-warmed
+			use := <-done
+			tr.End()
+			_, called, _ := readsOf(s)
+			// The call took its recordings up to the one held; the staging
+			// may take those after it before the call comes to them.
+			took := ahead
+			if c.held >= 0 {
+				took = c.held + 1
+			}
+			if use.Staged+called != n || called < took || use.Finished != called || use.HeldFull || use.FormsFull {
+				t.Fatalf("the staging reported %+v and the call read %d payloads: want the call's %d or more, the staging the rest of the %d and the rest of the parts of each the call read, within the set's budget", use, called, took, n)
+			}
+			if c.held >= 0 && begun.Load() != 1 {
+				t.Fatalf("the payload the call was reading as the staging came to it was decoded %d times: want once, by the call", begun.Load())
+			}
+			before := tallyOf(s)
+			tr.Begin()
+			got := row.classify(tr.Drifts())
+			tr.End()
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("the test after the staging learned\n%v\nwhere the set with no staging learned\n%v", got, want)
+			}
+			read := readSince(before, tallyOf(s))
+			words := 0
+			for k, d := range read {
+				if !tokens[k] {
+					t.Fatalf("the test after the staging read part %#x (tier %d) of %d of the set's recordings on its answer path: want none, the staging read them (all reads %v)", uint32(k.part), k.tier, d, read)
+				}
+				words += d
+			}
+			if words == 0 || words > len(tokens) {
+				t.Fatalf("the test after the staging read the words of recordings %d times (all reads %v): want the one that holds a changed word (%d), once for each way it is searched", words, read, touched)
+			}
+			if payloads, decodes := decodesOf(counts); payloads != n || decodes != n {
+				t.Errorf("the call and the staging decoded %d of the set's %d payloads, %d times in all: want each once", payloads, n, decodes)
+			}
+		})
+	}
+}

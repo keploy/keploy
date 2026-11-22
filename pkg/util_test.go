@@ -9,10 +9,12 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -140,12 +143,14 @@ func TestSimulateHTTP_MultipartRebuildWithPaths_314(t *testing.T) {
 	ctx := context.Background()
 	logger := zap.NewNop()
 
-	tempFile, err := os.CreateTemp("", "keploy-multipart-test-*.txt")
+	// The file is kept in the recording, and named from its directory: a
+	// test case's file is read only there (ReadRecordingFile).
+	recording := t.TempDir()
+	tempFile, err := os.CreateTemp(recording, "keploy-multipart-test-*.txt")
 	require.NoError(t, err)
 	_, err = tempFile.WriteString("file-data")
 	require.NoError(t, err)
 	require.NoError(t, tempFile.Close())
-	defer os.Remove(tempFile.Name())
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		contentType := r.Header.Get("Content-Type")
@@ -220,13 +225,13 @@ func TestSimulateHTTP_MultipartRebuildWithPaths_314(t *testing.T) {
 				},
 				{
 					Key:   "upload",
-					Paths: []string{tempFile.Name()},
+					Paths: []string{filepath.Base(tempFile.Name())},
 				},
 			},
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10})
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10, KeployPath: recording})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -993,6 +998,83 @@ func TestToHTTPHeader_AcceptListValue_FoldedSingleHeader(t *testing.T) {
 	assert.Equal(t, "trace-id=abc,user-key=def,env=test", httpHeader["Baggage"][0])
 }
 
+// The wire lines of a recorded header, round-tripped: what ToYamlHTTPHeader and
+// ToYamlHTTPHeaderLineLengths store, ToWireHTTPHeader sends back out, and only
+// what they stored. A tenant header sent twice goes out twice, not folded; one
+// Accept line with commas in it stays one line (the dict(**headers) fix above).
+func TestToWireHTTPHeaderSendsTheRecordedLines(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wire http.Header
+	}{
+		{"a header repeated on two lines", http.Header{"X_tenant": {"acme", "acme"}}},
+		{"one line carrying commas", http.Header{"Accept": {"a, b"}}},
+		{"repeated lines carrying commas", http.Header{"Cookie": {"a=1,2", "b=3,,", ",c"}}},
+		{"an empty line among them", http.Header{"X-Empty": {"", "x", ""}}},
+		{"both together", http.Header{"X_tenant": {"acme", "acme"}, "Accept": {"a, b"}, "Host": {"h"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := ToYamlHTTPHeader(tc.wire)
+			lengths := ToYamlHTTPHeaderLineLengths(tc.wire)
+			for name, lines := range tc.wire {
+				if _, stored := lengths[name]; stored != (len(lines) > 1) {
+					t.Errorf("%s on %d line(s): lengths stored = %v", name, len(lines), stored)
+				}
+			}
+			assert.Equal(t, tc.wire, ToWireHTTPHeader(header, lengths))
+		})
+	}
+	assert.Nil(t, ToYamlHTTPHeaderLineLengths(http.Header{"Accept": {"a, b"}, "Host": {"h"}}),
+		"a header with no repeated line records no lengths, so nothing new reaches disk")
+}
+
+// A recording made before the lengths existed replays as it always did, and a
+// value that no longer is the lines it was recorded from (a template rendered,
+// a secret decrypted to something else, a hand edit) is sent as one line, not
+// cut at a guessed boundary.
+func TestToWireHTTPHeaderFoldsWhatItCannotSplit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   string
+		lengths []int
+	}{
+		{"no lengths: a recording from before them", "ab,ab", nil},
+		{"one length is not a repeated header", "ab,ab", []int{5}},
+		{"the value grew", "ab,abb", []int{2, 2}},
+		{"the value shrank", "ab,a", []int{2, 2}},
+		{"no comma where a line ended", "abXab", []int{2, 2}},
+		{"a line too long for the value", "ab", []int{2, 5}},
+		{"a negative length", "ab,ab", []int{-1, 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var lengths models.HeaderLineLengths
+			if tc.lengths != nil {
+				lengths = models.HeaderLineLengths{"X_tenant": tc.lengths}
+			}
+			got := ToWireHTTPHeader(map[string]string{"X_tenant": tc.value}, lengths)
+			assert.Equal(t, http.Header{"X_tenant": {tc.value}}, got)
+		})
+	}
+	// Lengths for a name the header no longer has add nothing.
+	got := ToWireHTTPHeader(map[string]string{"Accept": "a"}, models.HeaderLineLengths{"X_tenant": {2, 2}})
+	assert.Equal(t, http.Header{"Accept": {"a"}}, got)
+}
+
+// The recorded curl command reproduces the request that was recorded, a
+// repeated header on its own lines included.
+func TestMakeCurlCommandRepeatsARepeatedHeader(t *testing.T) {
+	curl := MakeCurlCommand(models.HTTPReq{
+		Method:            "GET",
+		URL:               "http://localhost:8080/v1/session",
+		Header:            map[string]string{"X_tenant": "acme,acme", "Accept": "a, b", "Content-Length": "0"},
+		HeaderLineLengths: models.HeaderLineLengths{"X_tenant": {4, 4}},
+	})
+	assert.Equal(t, 2, strings.Count(curl, "--header 'X_tenant: acme' \\\n"), curl)
+	assert.NotContains(t, curl, "acme,acme")
+	assert.Contains(t, curl, "--header 'Accept: a, b' \\\n")
+	assert.NotContains(t, curl, "Content-Length")
+}
+
 // TestParseHTTPRequest_And_Response_111 contains sub-tests for ParseHTTPRequest and
 // ParseHTTPResponse, validating both success and failure cases for parsing raw
 // HTTP data into their respective struct representations.
@@ -1167,7 +1249,11 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 
 // TestReadAllCapped_556 exercises the capped reader directly: boundary
 // sizes, tiny limits below the initial buffer, and that buffer capacity
-// never overshoots limit+1 (the reason it replaced io.ReadAll+LimitReader).
+// never overshoots limit+1 rounded up to whole 8 KiB heap pages: for
+// limit+1 over 32 KiB, what the allocator gives a buffer of limit+1 bytes;
+// under it, up to a page more than the size class it would give, so that
+// what a decode reserves for its buffer is what it holds
+// (io.ReadAll+LimitReader, which it replaced, could keep twice limit+1).
 func TestReadAllCapped_556(t *testing.T) {
 	t.Run("Boundaries", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -1193,7 +1279,8 @@ func TestReadAllCapped_556(t *testing.T) {
 				}
 				require.NoError(t, err)
 				assert.Equal(t, tc.size, int64(len(data)))
-				assert.LessOrEqual(t, int64(cap(data)), tc.limit+1, "capacity must never overshoot limit+1")
+				pages := (tc.limit + 1 + 8<<10 - 1) / (8 << 10) * (8 << 10)
+				assert.LessOrEqual(t, int64(cap(data)), pages, "capacity must never overshoot limit+1 in whole pages")
 			})
 		}
 	})
@@ -1887,6 +1974,96 @@ func TestHasExplicitPort_IPv6_777(t *testing.T) {
 	}
 }
 
+// A URL that already says where the app is (test.basePath) is where the
+// request goes under TargetFromURL, and under that address's name. The
+// recorded app_port otherwise replaces the URL's port, and the recorded Host
+// header the URL's host: the test goes to the port the app was recorded on,
+// asking for the app by the name it had there.
+func TestSimulateHTTP_TargetFromURLLeavesTheRecordedAddressOut(t *testing.T) {
+	// askedAs gets the Host header of each request the server answers.
+	askedAs := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		askedAs <- r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	serverHost := strings.TrimPrefix(server.URL, "http://")
+
+	// The port the test was recorded on: nothing listens there any more.
+	recordedPort := refusedPort(t)
+
+	newCase := func(appPort uint16) *models.TestCase {
+		return &models.TestCase{
+			Name:    "get-orders",
+			AppPort: appPort,
+			HTTPReq: models.HTTPReq{
+				Method: "GET",
+				URL:    server.URL + "/orders",
+				Header: map[string]string{"Host": "recorded.internal:8080"},
+			},
+		}
+	}
+
+	resp, err := SimulateHTTP(context.Background(), newCase(recordedPort), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5, TargetFromURL: true})
+	require.NoError(t, err, "the request must go to the URL's own port")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, serverHost, <-askedAs, "the app must be asked for by the URL's host")
+
+	// Without it the recorded port still wins, as it must for an app keploy
+	// starts, and so does the recorded name.
+	_, err = SimulateHTTP(context.Background(), newCase(recordedPort), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5})
+	require.Error(t, err, "the recorded app_port did not replace the URL's port")
+	assert.Contains(t, err.Error(), fmt.Sprintf(":%d", recordedPort))
+
+	_, err = SimulateHTTP(context.Background(), newCase(0), "test-set", zap.NewNop(),
+		SimulationConfig{APITimeout: 5})
+	require.NoError(t, err)
+	assert.Equal(t, "recorded.internal:8080", <-askedAs, "the recorded Host header was not sent")
+}
+
+// Under TargetFromURL the app is asked for by the URL's host as a client
+// writes it: without the port when it is the scheme's own. ResolveTestTarget
+// writes that port into every URL, and left to Go the request asked for
+// "staging.example.com:443", which a front that matches the name as written
+// does not route to the app every client reaches as "staging.example.com".
+func TestPrepareHTTPRequest_TargetFromURLAsksForTheHostAsAClientWritesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, url  string
+		configPort uint32
+		want       string
+	}{
+		{"http and no port", "http://staging.example.com/orders", 0, "staging.example.com"},
+		{"https and no port", "https://staging.example.com/orders", 0, "staging.example.com"},
+		{"the scheme's own port written out", "https://staging.example.com:443/orders", 0, "staging.example.com"},
+		{"IPv6 and no port", "http://[::1]/orders", 0, "[::1]"},
+		{"a port of its own", "http://staging.example.com:8080/orders", 0, "staging.example.com:8080"},
+		{"the other scheme's port", "http://staging.example.com:443/orders", 0, "staging.example.com:443"},
+		{"a port set for the tests", "http://staging.example.com/orders", 8080, "staging.example.com:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			test := &models.TestCase{
+				Name:    "get-orders",
+				AppPort: 9090,
+				HTTPReq: models.HTTPReq{
+					Method: "GET",
+					URL:    tc.url,
+					Header: map[string]string{"Host": "recorded.internal:9090"},
+				},
+			}
+			prepared, err := prepareHTTPRequest(context.Background(), test, "test-set", zap.NewNop(),
+				SimulationConfig{TargetFromURL: true, ConfigPort: tc.configPort})
+			require.NoError(t, err)
+
+			// The request as it goes on the wire.
+			var wire bytes.Buffer
+			require.NoError(t, prepared.Request.Write(&wire))
+			assert.Contains(t, wire.String(), "\r\nHost: "+tc.want+"\r\n")
+		})
+	}
+}
+
 func TestResolveTestTarget(t *testing.T) {
 	logger := zap.NewNop()
 
@@ -2037,6 +2214,146 @@ func TestResolveTestTarget(t *testing.T) {
 			isHTTP:         false,
 			expectedTarget: "example.com:50053",
 		},
+
+		// An IPv6 test host: a Kubernetes Pod IP comes bare ("fd00::1"), a
+		// host written next to a port bracketed. Either way it is bracketed
+		// once in the target; an HTTP one was put in the URL bare, which no
+		// URL parse accepts, and a bracketed gRPC one bracketed twice.
+		{
+			name:           "HTTP_ConfigHost_IPv6",
+			originalTarget: "http://localhost:8080/api/items?id=1",
+			configHost:     "fd00::1",
+			isHTTP:         true,
+			expectedTarget: "http://[fd00::1]:8080/api/items?id=1",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv6Bracketed",
+			originalTarget: "http://localhost:8080/api/items?id=1",
+			configHost:     "[fd00::1]",
+			isHTTP:         true,
+			expectedTarget: "http://[fd00::1]:8080/api/items?id=1",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv6Loopback_ConfigPort",
+			originalTarget: "http://localhost:8080/api",
+			configHost:     "::1",
+			configPort:     9090,
+			isHTTP:         true,
+			expectedTarget: "http://[::1]:9090/api",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv4MappedIPv6",
+			originalTarget: "http://localhost:8080/api",
+			configHost:     "::ffff:127.0.0.1",
+			isHTTP:         true,
+			expectedTarget: "http://[::ffff:127.0.0.1]:8080/api",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv4_OnAnIPv6RecordedURL",
+			originalTarget: "http://[::1]:8080/api",
+			configHost:     "10.244.0.7",
+			isHTTP:         true,
+			expectedTarget: "http://10.244.0.7:8080/api",
+		},
+		{
+			name:           "GRPC_ConfigHost_IPv6",
+			originalTarget: "localhost:50051",
+			configHost:     "fd00::1",
+			isHTTP:         false,
+			expectedTarget: "[fd00::1]:50051",
+		},
+		{
+			name:           "GRPC_ConfigHost_IPv6Bracketed",
+			originalTarget: "localhost:50051",
+			configHost:     "[fd00::1]",
+			isHTTP:         false,
+			expectedTarget: "[fd00::1]:50051",
+		},
+		{
+			name:           "GRPC_ConfigHost_IPv6Loopback",
+			originalTarget: "localhost:50051",
+			configHost:     "::1",
+			isHTTP:         false,
+			expectedTarget: "[::1]:50051",
+		},
+
+		// A test recorded against an IPv6 address, replayed with the
+		// default test host (localhost) or a bracketed one: the brackets
+		// were kept around the new host ("http://[localhost]:8080/api",
+		// "http://[[fd00::1]]:8080/api"), which no URL parse accepts.
+		{
+			name:           "HTTP_DefaultTestHost_OnAnIPv6RecordedURL",
+			originalTarget: "http://[::1]:8080/api",
+			configHost:     "localhost",
+			isHTTP:         true,
+			expectedTarget: "http://localhost:8080/api",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv6Bracketed_OnAnIPv6RecordedURL",
+			originalTarget: "http://[::1]:8080/api",
+			configHost:     "[fd00::1]",
+			isHTTP:         true,
+			expectedTarget: "http://[fd00::1]:8080/api",
+		},
+
+		// A recorded authority with no port, replayed with a test host, as
+		// every replay is (localhost by default): the test host was refused
+		// ("missing port in address") for every address family. It takes
+		// the port as any authority without one does.
+		{
+			name:           "GRPC_AuthorityWithoutPort_DefaultTestHost",
+			originalTarget: "my-svc",
+			configHost:     "localhost",
+			appPort:        50051,
+			isHTTP:         false,
+			expectedTarget: "localhost:50051",
+		},
+		{
+			name:           "GRPC_DNSAuthorityWithoutPort_IPv4TestHost",
+			originalTarget: "example.com",
+			configHost:     "10.244.0.7",
+			isHTTP:         false,
+			expectedTarget: "10.244.0.7:443",
+		},
+		{
+			name:           "GRPC_IPv4AuthorityWithoutPort",
+			originalTarget: "10.0.0.5",
+			configHost:     "localhost",
+			configPort:     9090,
+			isHTTP:         false,
+			expectedTarget: "localhost:9090",
+		},
+		{
+			name:           "GRPC_AuthorityWithoutPort_IPv6TestHost",
+			originalTarget: "example.com",
+			configHost:     "[fd00::2]",
+			appPort:        50051,
+			isHTTP:         false,
+			expectedTarget: "[fd00::2]:50051",
+		},
+		{
+			name:           "GRPC_IPv6AuthorityWithoutPort",
+			originalTarget: "[fd00::1]",
+			configHost:     "fd00::2",
+			isHTTP:         false,
+			expectedTarget: "[fd00::2]:443",
+		},
+		{
+			name:           "GRPC_IPv6AuthorityWithoutPort_DefaultTestHost",
+			originalTarget: "[fd00::1]",
+			configHost:     "localhost",
+			isHTTP:         false,
+			expectedTarget: "localhost:443",
+		},
+		// replaceWith instead of a test host: the bracketed authority it
+		// leaves was bracketed again ("[[fd00::2]]:443").
+		{
+			name:            "GRPC_IPv6AuthorityWithoutPort_ReplaceWith",
+			originalTarget:  "[fd00::1]",
+			urlReplacements: map[string]string{"fd00::1": "fd00::2"},
+			isHTTP:          false,
+			expectedTarget:  "[fd00::2]:443",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2065,116 +2382,108 @@ func TestResolveTestTarget_EdgeCases(t *testing.T) {
 	})
 }
 
-// --- updateTemplateValuesFromHTTPResp: response-header walk tests ---
+// A base path (--base-path) names the port keploy's tests go to, or its
+// scheme's default. Its host was split on its colons, so an IPv6 one with no
+// port named port "1]", and keploy stopped at its start ("failed to extract
+// port from base URL").
+func TestExtractPortTakesAnIPv6Host(t *testing.T) {
+	for _, c := range []struct {
+		url  string
+		want uint32
+	}{
+		{"http://[fd00::1]/", 80},
+		{"https://[fd00::1]/api", 443},
+		{"http://[::1]", 80},
+		{"https://[fe80::1%25eth0]/", 443},
+		{"http://[fd00::1]:8080/", 8080},
+		{"http://localhost:8080/", 8080},
+		{"http://10.0.0.1/", 80},
+		{"https://example.com/x", 443},
+		{"http://example.com:9000", 9000},
+	} {
+		got, err := ExtractPort(c.url)
+		if err != nil || got != c.want {
+			t.Errorf("ExtractPort(%q) = %d, %v; want %d", c.url, got, err, c.want)
+		}
+	}
+	// A colon with no port after it is no port, and still refused.
+	for _, u := range []string{"http://localhost:/", "http://[fd00::1]:/"} {
+		if got, err := ExtractPort(u); err == nil {
+			t.Errorf("ExtractPort(%q) = %d; want it refused", u, got)
+		}
+	}
+}
+
+// The wait for a port says which address it waited for as one is written,
+// an IPv6 host in brackets: "::1:8080" names no address.
+func TestWaitForPortNamesAnIPv6AddressInBrackets(t *testing.T) {
+	_, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
+	err := WaitForPort(context.Background(), "::1", port, 50*time.Millisecond)
+	if err == nil {
+		t.Fatalf("WaitForPort([::1]:%s) = nil, want a timeout", port)
+	}
+	if want := "[::1]:" + port; !strings.Contains(err.Error(), want) {
+		t.Errorf("WaitForPort's error %q does not name %s", err, want)
+	}
+}
+
+// listenAtAnIPv6Address listens where an app on an IPv6 address would be,
+// and returns that address as a test host is given it: bare.
 //
-// These cover the gap noted against listmonk's session-cookie round-trip: at replay
-// time the live Set-Cookie/Authorization/etc. values must be pulled out of
-// resp.Header and written into utils.TemplatizedValues so that subsequent tests
-// that render {{.session}}/{{.token}}/... see the fresh value rather than the
-// stale record-time one.
-
-func runHeaderUpdateTest(
-	t *testing.T,
-	recordedHeader, liveHeader map[string]string,
-	initialTemplatedValues map[string]interface{},
-) (changed bool, final map[string]interface{}) {
+// On [::1] where the host has an IPv6 loopback. A host with IPv6 off has
+// none, so there it listens on 127.0.0.1 and is addressed as
+// ::ffff:127.0.0.1, the same address written as IPv6, which needs the
+// brackets in a URL exactly as fd00::1 does.
+func listenAtAnIPv6Address(t *testing.T) (string, net.Listener) {
 	t.Helper()
-	logger := zap.NewNop()
-
-	templated := models.HTTPResp{
-		StatusCode: 302,
-		Header:     recordedHeader,
-		Body:       "",
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err == nil {
+		return "::1", ln
 	}
-	live := models.HTTPResp{
-		StatusCode: 302,
-		Header:     liveHeader,
-		Body:       "",
-	}
-
-	current := make(map[string]interface{}, len(initialTemplatedValues))
-	prev := make(map[string]interface{}, len(initialTemplatedValues))
-	for k, v := range initialTemplatedValues {
-		current[k] = v
-		prev[k] = v
-	}
-
-	changed = updateTemplateValuesFromHTTPResp(logger, templated, live, current, prev)
-	return changed, current
+	t.Logf("no IPv6 loopback here (%v); addressing 127.0.0.1 as ::ffff:127.0.0.1", err)
+	ln, err = net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	return "::ffff:127.0.0.1", ln
 }
 
-func TestUpdateTemplateValuesFromHTTPResp_SetCookie(t *testing.T) {
-	recorded := map[string]string{
-		"Set-Cookie": "session={{.session}}; Path=/; HttpOnly",
-	}
-	live := map[string]string{
-		"Set-Cookie": "session=LIVE123; Path=/; HttpOnly",
-	}
-	initial := map[string]interface{}{"session": "RECORDED_VAL"}
+// A TEST REPLAYED AGAINST AN APP ON AN IPv6 ADDRESS REACHES IT.
+//
+// The recorded URL's host is replaced by the test host (a cross-namespace
+// Kubernetes replay gives the replay Pod's IP, bare), and its port by the
+// app's. The target is then sent as is. Driven end to end: the target that
+// comes back is requested, and the app must see the recorded path and query.
+func TestResolveTestTargetReachesAnAppOnAnIPv6Address(t *testing.T) {
+	for _, form := range []string{"IPv6 loopback", "IPv4-mapped"} {
+		t.Run(form, func(t *testing.T) {
+			var ip string
+			var ln net.Listener
+			if form == "IPv6 loopback" {
+				ip, ln = listenAtAnIPv6Address(t)
+			} else {
+				var err error
+				ln, err = net.Listen("tcp4", "127.0.0.1:0")
+				require.NoError(t, err)
+				ip = "::ffff:127.0.0.1"
+			}
+			seen := make(chan string, 1)
+			srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.URL.RequestURI()
+				w.WriteHeader(http.StatusOK)
+			})}
+			go func() { _ = srv.Serve(ln) }()
+			t.Cleanup(func() { _ = srv.Close() })
+			port := uint32(ln.Addr().(*net.TCPAddr).Port)
 
-	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
-	assert.True(t, changed, "expected Set-Cookie placeholder update to report changed=true")
-	assert.Equal(t, "LIVE123", final["session"])
-}
-
-func TestUpdateTemplateValuesFromHTTPResp_BearerAuthorizationHeader(t *testing.T) {
-	recorded := map[string]string{
-		"Authorization": "Bearer {{.token}}",
+			target, err := ResolveTestTarget("http://localhost:8080/api/items?id=1", nil, nil, ip, 8080, port, true, zap.NewNop())
+			require.NoError(t, err, "the test target for an app at %s", ip)
+			client := &http.Client{Timeout: 10 * time.Second}
+			resp, err := client.Get(target)
+			require.NoError(t, err, "the test was not sent to %s", target)
+			_ = resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(t, "/api/items?id=1", <-seen)
+		})
 	}
-	live := map[string]string{
-		"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
-	}
-	initial := map[string]interface{}{"token": "OLD_TOKEN"}
-
-	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
-	assert.True(t, changed)
-	assert.Equal(t, "eyJhbGciOiJIUzI1NiJ9.payload.sig", final["token"])
-}
-
-func TestUpdateTemplateValuesFromHTTPResp_GenericHeader(t *testing.T) {
-	recorded := map[string]string{
-		"X-Request-Id": "{{.reqId}}",
-	}
-	live := map[string]string{
-		"X-Request-Id": "abc-123-def-456",
-	}
-	initial := map[string]interface{}{"reqId": "old-id"}
-
-	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
-	assert.True(t, changed)
-	assert.Equal(t, "abc-123-def-456", final["reqId"])
-}
-
-func TestUpdateTemplateValuesFromHTTPResp_HeaderWithLiteralPrefix(t *testing.T) {
-	recorded := map[string]string{
-		"X-Correlation": "trace-{{.id}}",
-	}
-	live := map[string]string{
-		"X-Correlation": "trace-DEF456",
-	}
-	initial := map[string]interface{}{"id": "OLDID"}
-
-	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
-	assert.True(t, changed)
-	assert.Equal(t, "DEF456", final["id"])
-}
-
-func TestUpdateTemplateValuesFromHTTPResp_NoPlaceholder_NoOp(t *testing.T) {
-	recorded := map[string]string{
-		"X-Foo": "bar",
-	}
-	live := map[string]string{
-		"X-Foo": "bar",
-	}
-	// There's a templated value, but it's unrelated to this header -- must not
-	// leak into the map under a new key, and the existing key must stay untouched.
-	initial := map[string]interface{}{"unrelated": "keepme"}
-
-	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
-	assert.False(t, changed, "no placeholder in recorded header should mean no template change")
-	assert.Equal(t, "keepme", final["unrelated"])
-	_, foundFoo := final["X-Foo"]
-	assert.False(t, foundFoo, "must not invent a new template key from a literal header")
 }
 
 // TestFilterByTimeStampThreeTier validates the Lifetime-elevated three-
@@ -2294,35 +2603,357 @@ func TestFilterByTimeStampThreeTier(t *testing.T) {
 		"connection-lifetime + startup-init PerTest + legacy connection-tagged land in startup")
 }
 
-func TestAgentReadyTimeout(t *testing.T) {
-	cases := []struct {
-		name string
-		env  string
-		set  bool
-		want time.Duration
-	}{
-		{name: "default when unset", set: false, want: DefaultAgentReadyTimeout},
-		{name: "valid override", env: "300", set: true, want: 300 * time.Second},
-		{name: "whitespace trimmed", env: "  90 ", set: true, want: 90 * time.Second},
-		{name: "zero falls back to default", env: "0", set: true, want: DefaultAgentReadyTimeout},
-		{name: "negative falls back to default", env: "-5", set: true, want: DefaultAgentReadyTimeout},
-		{name: "garbage falls back to default", env: "soon", set: true, want: DefaultAgentReadyTimeout},
+// AgentHealthTicker must find an agent whose health answer takes longer than
+// its first check waits. Reached through a Kubernetes port-forward over a slow
+// link, every new connection costs several round trips before the request is
+// even sent (two stream set-ups, then the GET): about 735ms at a 245ms round
+// trip. A fixed 500ms per check cut every one of them off, so the agent was
+// never found ready, however long the caller waited.
+func TestAgentHealthTicker_ReachesAnAgentSlowerThanTheFirstCheck(t *testing.T) {
+	resetProbeOnce(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agent/health" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		time.Sleep(750 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`"OK"`))
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	readyCh := make(chan bool, 1)
+	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh)
+
+	ready, open := <-readyCh
+	require.True(t, open && ready, "the agent answered every health check in 750ms and was never found ready")
+}
+
+// A health check's headers are the agent's only when it answered 200: an
+// answer other than 200 (a proxy's 503, an agent still starting) says nothing
+// about the agent, whatever headers it carries, and is no answer at all, as
+// none is when nothing listens. Each check here has a definite answer, so none
+// has a deadline.
+func TestAgentHealthAnswer_IsOnlyAHealthyAnswersHeaders(t *testing.T) {
+	answer := func(status int) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Keploy-Proven", "off")
+			w.WriteHeader(status)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL + "/agent"
 	}
-	for _, tc := range cases {
+
+	header := agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusOK))
+	require.NotNil(t, header, "a 200 is a healthy answer")
+	require.Equal(t, "off", header.Get("X-Keploy-Proven"), "the headers returned are not the answer's")
+
+	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusServiceUnavailable)),
+		"the headers of a 503 were taken for the agent's")
+
+	goneURL := "http://" + testnet.RefusedAddr(t, "tcp") // nothing answers there, nor can come to
+	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, goneURL+"/agent"),
+		"an address nothing answers on gave headers")
+}
+
+// Each health check waits twice as long as the last one that ran out of time,
+// up to a ceiling; a check that failed fast (nothing listening yet) or got an
+// answer leaves the wait as it was, so a local agent keeps its quick check.
+func TestNextAgentHealthWait(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wait     time.Duration
+		timedOut bool
+		want     time.Duration
+	}{
+		{"first check timed out", agentHealthFirstWait, true, 2 * agentHealthFirstWait},
+		{"a later check timed out", 4 * time.Second, true, 8 * time.Second},
+		{"capped", agentHealthMaxWait, true, agentHealthMaxWait},
+		{"doubling past the cap stops at it", agentHealthMaxWait/2 + time.Second, true, agentHealthMaxWait},
+		{"failed fast", agentHealthFirstWait, false, agentHealthFirstWait},
+		{"answered", 2 * time.Second, false, 2 * time.Second},
+	} {
+		require.Equal(t, tc.want, nextAgentHealthWait(tc.wait, tc.timedOut), tc.name)
+	}
+}
+
+// A per-test mock whose recorder stated its lifetime (MetadataLifetimeKey) is
+// the data of the test it was recorded in: the window filter serves it in its
+// own window, and in the startup band when it predates the first test, and
+// lax mode never promotes it to the reusable pool, where every other test
+// would be served it. A per-test mock recorded before lifetimes were stated is
+// promoted as it always was. KEPLOY_STRICT_MOCK_WINDOW=0, the escape hatch for
+// recordings that predate classification, leaves a stated mock as stated.
+func TestFilterByTimeStampTierAware_StatedPerTestIsNeverPromoted(t *testing.T) {
+	prevOverride, prevExplicitOff := strictWindowEnvOverride, strictWindowEnvExplicitOff
+	t.Cleanup(func() {
+		strictWindowEnvOverride, strictWindowEnvExplicitOff = prevOverride, prevExplicitOff
+	})
+
+	first := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC) // the first test window starts
+	after := first.Add(10 * time.Second)                   // this test's window
+	before := after.Add(2 * time.Second)
+	mock := func(name string, req time.Time, stated string, lifetime models.Lifetime) *models.Mock {
+		m := &models.Mock{
+			Version: "api.keploy.io/v1beta1",
+			Name:    name,
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+				ReqTimestampMock: req,
+				ResTimestampMock: req.Add(time.Millisecond),
+			},
+			TestModeInfo: models.TestModeInfo{Lifetime: lifetime, LifetimeDerived: true},
+		}
+		if stated != "" {
+			m.Spec.Metadata[models.MetadataLifetimeKey] = stated
+		}
+		return m
+	}
+	mocks := []*models.Mock{
+		mock("stated-startup", first.Add(-time.Second), models.MetadataLifetimePerTest, models.LifetimePerTest),
+		mock("stated-earlier-test", first.Add(time.Second), models.MetadataLifetimePerTest, models.LifetimePerTest),
+		mock("stated-own", after.Add(time.Second), models.MetadataLifetimePerTest, models.LifetimePerTest),
+		mock("stated-later-test", before.Add(time.Second), models.MetadataLifetimePerTest, models.LifetimePerTest),
+		mock("stated-session", first.Add(time.Second), models.MetadataLifetimeSession, models.LifetimeSession),
+		mock("unstated-earlier-test", first.Add(time.Second), "", models.LifetimePerTest),
+	}
+
+	for _, tc := range []struct {
+		name        string
+		explicitOff bool
+		unfiltered  []string
+	}{
+		{"lax", false, []string{"stated-session", "unstated-earlier-test"}},
+		{"KEPLOY_STRICT_MOCK_WINDOW=0", true, []string{"stated-session", "unstated-earlier-test"}},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.set {
-				t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", tc.env)
-			} else {
-				os.Unsetenv("KEPLOY_AGENT_READY_TIMEOUT")
+			strictWindowEnvOverride, strictWindowEnvExplicitOff = false, tc.explicitOff
+			filtered, unfiltered := filterByTimeStampTierAware(context.Background(), zap.NewNop(), mocks, after, before, false, first)
+			assert.ElementsMatch(t, []string{"stated-startup", "stated-own"}, mockNames(filtered),
+				"a stated per-test mock is served in its own window and the startup band only")
+			assert.ElementsMatch(t, tc.unfiltered, mockNames(unfiltered),
+				"lax promotion reaches unstated per-test mocks only")
+		})
+	}
+}
+
+// portServer is an HTTP server on 127.0.0.1 that answers each request with
+// its own port, and that port.
+func portServer(t *testing.T) (*httptest.Server, uint16) {
+	t.Helper()
+	var port uint16
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, port)
+	}))
+	t.Cleanup(srv.Close)
+	port = uint16(srv.Listener.Addr().(*net.TCPAddr).Port)
+	return srv, port
+}
+
+// portTest is a GET of url recorded on the app's port appPort.
+func portTest(url string, appPort uint16) *models.TestCase {
+	return &models.TestCase{Name: "test-1", Kind: models.HTTP, AppPort: appPort,
+		HTTPReq: models.HTTPReq{Method: "GET", URL: url, Header: map[string]string{}}}
+}
+
+// A test goes to the port it was recorded on (app_port), over its URL's
+// port: an app serving on two ports (HTTP on one, SSE on another) gets each
+// test on its own (#3680). Nothing here publishes anything, as on a native
+// replay: no PublishedPort.
+func TestATestGoesToTheAppPortItWasRecordedOn(t *testing.T) {
+	a, pa := portServer(t)
+	_, pb := portServer(t)
+	for _, tc := range []struct {
+		url     string
+		appPort uint16
+		want    uint16
+	}{
+		{a.URL + "/x", pb, pb},
+		{a.URL + "/x", pa, pa},
+		{fmt.Sprintf("http://127.0.0.1:%d/x", pb), pa, pa},
+		{a.URL + "/x", 0, pa}, // no app_port: the URL's
+	} {
+		resp, err := SimulateHTTP(context.Background(), portTest(tc.url, tc.appPort), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5})
+		require.NoError(t, err)
+		require.Equal(t, fmt.Sprint(tc.want), resp.Body, "url %s, app_port %d", tc.url, tc.appPort)
+	}
+}
+
+// refusedPort is a port on 127.0.0.1 nothing listens on, held for the test's
+// life so that no other socket can take it (testnet.RefusedAddr).
+func refusedPort(t *testing.T) uint16 {
+	t.Helper()
+	_, p, err := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
+	require.NoError(t, err)
+	port, err := strconv.ParseUint(p, 10, 16)
+	require.NoError(t, err)
+	return uint16(port)
+}
+
+// unreachableAt says every address is one the app can never be reached at,
+// so a refused test fails at once, saying so.
+type unreachableAt struct{}
+
+func (unreachableAt) UnreachableAppPort(context.Context, string, uint16, uint16) string {
+	return "it is published on host port 18080 instead"
+}
+
+// A test recorded on an app port that the host reaches only through one other
+// host port goes to that host port, which PublishedPort names; without it, it
+// goes to its app port and fails, saying why. A port the user set
+// (ConfigPort) is where it goes, and PublishedPort is not asked.
+func TestATestOfAnAppPortPublishedOnOneHostPortGoesThere(t *testing.T) {
+	srv, hostPort := portServer(t)
+	appPort := refusedPort(t)
+	tc := func() *models.TestCase { return portTest(srv.URL+"/x", appPort) }
+
+	_, err := SimulateHTTP(context.Background(), tc(), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{}})
+	require.True(t, IsUnreachableAppPort(err), "without PublishedPort the test goes to its app port: %v", err)
+	require.Contains(t, err.Error(), "it is published on host port 18080 instead")
+
+	var asked []string
+	published := func(_ context.Context, host string, port uint16) uint16 {
+		asked = append(asked, fmt.Sprintf("%s %d", host, port))
+		if port == appPort {
+			return hostPort
+		}
+		return 0
+	}
+	resp, err := SimulateHTTP(context.Background(), tc(), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{}, PublishedPort: published})
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprint(hostPort), resp.Body)
+	require.Equal(t, []string{fmt.Sprintf("127.0.0.1 %d", appPort)}, asked)
+
+	asked = nil
+	resp, err = SimulateHTTP(context.Background(), tc(), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5, ConfigPort: uint32(hostPort), PublishedPort: published})
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprint(hostPort), resp.Body)
+	require.Empty(t, asked, "a port the user set is not redirected")
+
+	// A replaceWith that matches the recorded URL and names the port is the
+	// user's choice too: asked of the recorded URL, which the resolved one
+	// no longer contains.
+	recorded := strings.TrimPrefix(srv.URL, "http://")
+	_, err = SimulateHTTP(context.Background(), tc(), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{},
+		URLReplacements: map[string]string{recorded: fmt.Sprintf("localhost:%d", appPort)}, PublishedPort: published})
+	require.True(t, IsUnreachableAppPort(err), "a matching replaceWith naming the port sent the test to the published port: %v", err)
+}
+
+// PublishedTarget moves a target to the host port PublishedPort names only
+// when it is the test's app port and nothing the user set moved this test: a
+// replaceWith URL or port map that does not apply to it does not stop it.
+func TestPublishedTargetMovesOnlyAnUnmovedAppPort(t *testing.T) {
+	to18080 := func(_ context.Context, _ string, appPort uint16) uint16 {
+		if appPort == 8080 {
+			return 18080
+		}
+		return 0
+	}
+	none := func(context.Context, string, uint16) uint16 { return 0 }
+	for _, tc := range []struct {
+		name     string
+		cfg      SimulationConfig
+		original string // the recorded URL or authority; "" means target
+		target   string
+		appPort  uint16
+		isHTTP   bool
+		want     string
+	}{
+		{"http, published elsewhere", SimulationConfig{PublishedPort: to18080}, "", "http://localhost:8080/x?q=1", 8080, true, "http://localhost:18080/x?q=1"},
+		{"http, IPv6 loopback", SimulationConfig{PublishedPort: to18080}, "", "http://[::1]:8080/x", 8080, true, "http://[::1]:18080/x"},
+		{"grpc authority", SimulationConfig{PublishedPort: to18080}, "", "localhost:8080", 8080, false, "localhost:18080"},
+		{"published as itself, several, or none", SimulationConfig{PublishedPort: none}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+		{"nothing to ask (native)", SimulationConfig{}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+		{"no app port", SimulationConfig{PublishedPort: to18080}, "", "http://localhost:8080/x", 0, true, "http://localhost:8080/x"},
+		{"target is not the app port", SimulationConfig{PublishedPort: to18080}, "", "http://localhost:9090/x", 8080, true, "http://localhost:9090/x"},
+		{"test.port", SimulationConfig{PublishedPort: to18080, ConfigPort: 8080}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+		{"a replaceWith URL that matches the test and names a port", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"localhost:8080": "127.0.0.1:8080"}}, "http://localhost:8080/x", "http://127.0.0.1:8080/x", 8080, true, "http://127.0.0.1:8080/x"},
+		{"one with its scheme", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"http://localhost:8080": "http://127.0.0.1:8080"}}, "http://localhost:8080/x", "http://127.0.0.1:8080/x", 8080, true, "http://127.0.0.1:8080/x"},
+		{"a replaceWith URL that matches the test and changes only its path", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"/x": "/y"}}, "http://localhost:8080/x", "http://localhost:8080/y", 8080, true, "http://localhost:18080/y"},
+		{"a replaceWith URL that does not match the test", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"staging.internal:9": "localhost:9"}}, "http://localhost:8080/x", "http://localhost:8080/x", 8080, true, "http://localhost:18080/x"},
+		{"a gRPC replaceWith that matches the authority", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"api:8080": "localhost:8080"}}, "api:8080", "localhost:8080", 8080, false, "localhost:8080"},
+		{"a port map of the app port", SimulationConfig{PublishedPort: to18080, PortMappings: map[uint32]uint32{8080: 8080}}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+		{"a port map of another port", SimulationConfig{PublishedPort: to18080, PortMappings: map[uint32]uint32{9090: 9191}}, "", "http://localhost:8080/x", 8080, true, "http://localhost:18080/x"},
+		{"the URL names the app", SimulationConfig{PublishedPort: to18080, TargetFromURL: true}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.original
+			if original == "" {
+				original = tc.target
 			}
-			if got := AgentReadyTimeout(); got != tc.want {
-				t.Fatalf("AgentReadyTimeout() = %v, want %v", got, tc.want)
+			require.Equal(t, tc.want, PublishedTarget(context.Background(), tc.cfg, original, tc.target, tc.appPort, tc.isHTTP))
+		})
+	}
+}
+
+// Whether a replaceWith value names a port, as both resolvers ask it: after
+// the scheme, for HTTP; a path after the host names none.
+func TestReplacementNamesPort(t *testing.T) {
+	for _, tc := range []struct {
+		replacement string
+		isHTTP      bool
+		want        bool
+	}{
+		{"app.internal:9090", true, true},
+		{"http://app.internal:9090", true, true},
+		{"https://app.internal:8443", true, true},
+		{"https://app.internal", true, false},
+		{"http://app.internal", true, false},
+		{"[::1]:8080", false, true},
+		{"[::1]", false, false},
+		{"app.internal:8080/path", true, false},
+		{"app.internal", false, false},
+	} {
+		if got := replacementNamesPort(tc.replacement, tc.isHTTP); got != tc.want {
+			t.Errorf("replacementNamesPort(%q, %v) = %v, want %v", tc.replacement, tc.isHTTP, got, tc.want)
+		}
+	}
+}
+
+// When several replaceWith URL entries match a test, one is applied, the
+// most specific, on every run, and PublishedTarget decides by that same one:
+// it leaves the test where that entry sends it when the entry names a port,
+// and moves it when the entry names none.
+func TestSeveralMatchingReplacementsApplyTheMostSpecific(t *testing.T) {
+	to18080 := func(_ context.Context, _ string, appPort uint16) uint16 {
+		if appPort == 8080 {
+			return 18080
+		}
+		return 0
+	}
+	const recorded = "http://localhost:8080/x"
+	for _, tc := range []struct {
+		name      string
+		urls      map[string]string
+		resolved  string
+		published string
+	}{
+		{"the most specific names a port", map[string]string{"localhost": "app.internal", "localhost:8080": "127.0.0.1:8080"},
+			"http://127.0.0.1:8080/x", "http://127.0.0.1:8080/x"},
+		{"the most specific names none", map[string]string{"localhost": "127.0.0.1:9090", "localhost:8080/x": "localhost:8080/y"},
+			"http://localhost:8080/y", "http://localhost:18080/y"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := 0; i < 64; i++ { // a map's order differs from range to range
+				got, err := ResolveTestTarget(recorded, tc.urls, nil, "", 8080, 0, true, zap.NewNop())
+				require.NoError(t, err)
+				require.Equal(t, tc.resolved, got)
+				require.Equal(t, tc.published, PublishedTarget(context.Background(), SimulationConfig{PublishedPort: to18080, URLReplacements: tc.urls}, recorded, got, 8080, true))
 			}
 		})
 	}
-	// The default must cover the agent container's own healthcheck budget
-	// (~310s), otherwise the CLI gives up while the agent is still starting.
-	if DefaultAgentReadyTimeout < 310*time.Second {
-		t.Fatalf("DefaultAgentReadyTimeout %v is shorter than the agent healthcheck budget (~310s)", DefaultAgentReadyTimeout)
-	}
+}
+
+// A replaceWith value with its scheme that names a port keeps that port: the
+// scheme is not taken for a host, and the test's app port does not override
+// it.
+func TestAReplacementWithItsSchemeKeepsItsPort(t *testing.T) {
+	got, err := ResolveTestTarget("http://localhost:8080/x", map[string]string{"http://localhost:8080": "http://127.0.0.1:9090"}, nil, "", 8080, 0, true, zap.NewNop())
+	require.NoError(t, err)
+	require.Equal(t, "http://127.0.0.1:9090/x", got)
 }

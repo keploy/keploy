@@ -135,27 +135,21 @@ function Find-FreePort {
 # Allocate FOUR distinct free ports up-front so concurrent jobs on the
 # same self-hosted VM never share a port:
 #   $appPort      - host port docker publishes the sample on
-#   $proxyPort    - keploy --proxy-port       (see below - HOST-published)
+#   $proxyPort    - keploy --proxy-port
 #   $incomingPort - keploy --incoming-proxy-port
 #   $dnsPort      - keploy --dns-port
 #
 # In docker-compose mode keploy injects a per-job `keploy-agent`
 # container into the compose project and intercepts via eBPF INSIDE the
 # compose network (pkg/client/app AddKeployAgentToCompose). That agent
-# container publishes only {AgentPort, ProxyPort, AppPorts} to the host
-# (pkg/platform/docker/docker.go GenerateKeployAgentService); dns-port
-# is forwarded to the container but bound in the container's own netns,
-# and incoming-proxy-port is not forwarded at all. So:
-#   - --proxy-port is the ESSENTIAL fix: it is host-published as
-#     `-p <proxyPort>:<proxyPort>`, so two jobs on the default 16789
-#     make the second `docker compose up` fail with "port is already
-#     allocated". AgentPort is separately OS-assigned (unique), and the
-#     app host port is $appPort. Making --proxy-port unique per job is
-#     what actually unblocks concurrency here.
-#   - --dns-port / --incoming-proxy-port are container-scoped in this
-#     mode and do NOT collide across jobs; we still pass unique values
-#     as harmless belt-and-suspenders (deterministic, and correct if a
-#     future/native path ever binds them on the host).
+# container publishes only {AgentPort, AppPorts} to the host
+# (pkg/platform/docker/docker.go GenerateKeployAgentService). AgentPort
+# is separately OS-assigned (unique), and the app host port is
+# $appPort: making $appPort unique per job is what unblocks concurrency
+# here. The proxy, DNS and incoming-proxy ports are bound in the agent
+# container's own netns and do NOT collide across jobs; we still pass
+# unique values as harmless belt-and-suspenders (deterministic, and
+# correct if a future/native path ever binds them on the host).
 # Each Find-FreePort call re-probes OS availability from a fresh random
 # high port; we de-dup so the four never coincide.
 function New-UniqueFreePort {
@@ -182,8 +176,12 @@ $containerName = "dedup-go-$id"
 # network/containers. Pin the project to the per-job guid and EXPORT it
 # so every `docker compose` call in this script AND the `docker compose
 # up` that keploy spawns share the same, job-unique project.
-$env:COMPOSE_PROJECT_NAME = "keploy-$id"
-Write-Host "Using COMPOSE_PROJECT_NAME = $env:COMPOSE_PROJECT_NAME"
+#
+# register-job-compose-project.ps1 sets COMPOSE_PROJECT_NAME and records the
+# project for the job's "Remove this job's containers" step, which removes
+# exactly this project's containers (every one carries its label). It must run
+# before the first container starts.
+& (Join-Path $PSScriptRoot '..\..\..\..\scripts\windows\register-job-compose-project.ps1') -Project "keploy-$id"
 Write-Host "Allocated ports -> app:$appPort proxy:$proxyPort incoming:$incomingPort dns:$dnsPort"
 
 $dcFile = Join-Path (Get-Location) 'docker-compose.yml'
@@ -500,10 +498,10 @@ function Show-KeployLogFiles {
 #      swallowed the first failure and sent $sent=0 requests.
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
 # 7 minutes, not 5, because this probe races keploy's own agent-readiness
-# wait and used to lose. On the compose lane keploy waits
-# pkg.DefaultAgentReadyTimeout (330s, pkg/util.go) for the in-docker
-# keploy-agent to report healthy, and only reports the real failure after
-# that. At 5 minutes this loop gave up 30s BEFORE keploy could speak, so a
+# wait and used to lose. On the compose lane keploy waited a fixed 330s
+# (pkg.DefaultAgentReadyTimeout, since removed: keploy now waits while the
+# agent's start makes progress) for the in-docker keploy-agent to report
+# healthy, and only reported the real failure after that. At 5 minutes this loop gave up 30s BEFORE keploy could speak, so a
 # genuinely failed bring-up surfaced as six "Unable to connect to the
 # remote server" retries instead of the actual cause — observed on run
 # 32388095493 / job 96488562918.
@@ -663,6 +661,25 @@ if ($REC_PID -and $REC_PID -ne 0) {
 # Stop-Job $recJob
 # Remove-Job $recJob
 
+# The agent's control plane must be guarded by the token keploy hands it. That
+# handoff fails OPEN — an agent that got no token serves everything, and the
+# recording and both replays below still pass — so a green run proves nothing
+# about it unless this is checked. Both sides say so when it breaks: the agent
+# ("running WITHOUT authentication", streamed through compose into keploy's
+# output) and keploy's own probe ("NOT enforcing control-plane authentication").
+# A targeted match rather than a blanket ERROR grep, which would trip on the
+# benign lifecycle lines docker writes to stderr; case-sensitive, like the bash
+# lanes' grep, so it matches exactly those two lines.
+function Assert-AgentGuarded {
+    param([string[]]$Paths)
+    $hits = Select-String -Path $Paths -CaseSensitive -Pattern 'running WITHOUT authentication','NOT enforcing control-plane authentication' -ErrorAction SilentlyContinue
+    if ($hits) {
+        $hits | ForEach-Object { Write-Host $_.Line }
+        Write-Error "The keploy agent ran without its control-plane token; the docker compose token handoff is broken on windows."
+        exit 1
+    }
+}
+
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
 if (-not (Test-Path $testSetPath)) {
@@ -676,6 +693,7 @@ if ($testCount -eq 0) {
 }
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
+Assert-AgentGuarded -Paths @($logPath, $errLogPath)
 
 # =========================
 # ========== REPLAY =======
@@ -756,6 +774,7 @@ if ($status -ne 'PASSED') {
   Get-Content $testLog -ErrorAction SilentlyContinue | Select-Object -Last 200
   exit 1
 }
+Assert-AgentGuarded -Paths @($testLog)
 
 # Json-format replay against the yaml-recorded fixtures (read-side
 # auto-detect path; record happens via the docker workflow once and
@@ -804,6 +823,7 @@ if ($anyJsonFailed) {
   Write-Error "Some json tests failed."
   exit 1
 }
+Assert-AgentGuarded -Paths @($testLogJson)
 
 Write-Host "All tests passed successfully (yaml + json)!"
 exit 0

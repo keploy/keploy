@@ -39,13 +39,21 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 //		return CmdError{Type: Init, Err: errors.New("not implemented")}
 //	}
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string, opts ...ExecOption) CmdError {
+	o := execOptionsOf(opts)
 	// On Windows, commands are typically executed via 'cmd /C' or 'powershell -Command'
 	// to handle complex shell-like logic in 'userCmd'. 'cmd /C' is the most robust default.
 	cmd := exec.CommandContext(ctx, "cmd", "/C", userCmd)
 
 	// Set the custom cancel function for the command
 	cmd.Cancel = cancel(cmd)
+
+	// extraEnv is added to what the command inherits from keploy, for this
+	// command alone — a secret that one child needs is not exported to every
+	// other process keploy starts.
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 
 	// cmd.WaitDelay is ignored on Windows, but we set it for consistency with the signature.
 	cmd.WaitDelay = waitDelay
@@ -64,11 +72,14 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 
-	// Set the output of the command
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Set the output of the command, cut of the values the redactor holds
+	// when it holds any (ChildConsole).
+	console, err := SetChildConsoleTee(cmd, o.outputTee)
+	if err != nil {
+		return CmdError{Type: Init, Err: err}
+	}
 
-	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))
+	logAppStart(logger, startingApplicationWindows, NewAppCommand(userCmd), "executing_cli", cmd.Args)
 
 	// Start the command. On a native run this goes through the registered
 	// starter, which creates the process suspended, loads the interception shim
@@ -76,13 +87,15 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 	// that has to happen at process creation. With no starter registered (a
 	// docker command, or interception disabled) this is exactly the cmd.Start()
 	// it always was.
-	err := startApplication(cmd, kind)
+	err = startApplication(cmd, kind)
+	console.Started()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
 
 	// Wait for the command to finish
 	err = cmd.Wait()
+	console.Exited()
 	if err != nil {
 		return CmdError{Type: Runtime, Err: err}
 	}

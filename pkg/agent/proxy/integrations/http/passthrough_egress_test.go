@@ -1,10 +1,12 @@
 package http
 
 import (
+	"net/http"
 	"net/url"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 func TestPassThroughEgressDecision(t *testing.T) {
@@ -28,7 +30,7 @@ func TestPassThroughEgressDecision(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			u := &url.URL{Path: c.path, Host: c.host}
-			rule, ok := passThroughEgressDecision(opts, c.host, c.port, "POST", u)
+			rule, ok := passThroughEgressDecision(opts, c.host, c.port, "POST", u, nil)
 			if ok != c.wantOK {
 				t.Fatalf("ok=%v want %v", ok, c.wantOK)
 			}
@@ -44,14 +46,14 @@ func TestPassThroughEgressDecision(t *testing.T) {
 func TestPassThroughEgressDecision_OffOverridesBuiltin(t *testing.T) {
 	u := &url.URL{Path: "/v1/traces", Host: "otel-collector"}
 	// Baseline: with no user rule the OTLP path is a built-in skip.
-	if _, ok := passThroughEgressDecision(models.OutgoingOptions{}, "otel-collector", 4318, "POST", u); !ok {
+	if _, ok := passThroughEgressDecision(models.OutgoingOptions{}, "otel-collector", 4318, "POST", u, nil); !ok {
 		t.Fatal("baseline: /v1/traces should be a built-in passthrough")
 	}
 	// With an off rule for the same path, the decision must report NOT-passthrough.
 	opts := models.OutgoingOptions{
 		PassThroughHosts: []models.PassThroughRule{{Path: "/v1/traces", Mode: models.PassThroughOff}},
 	}
-	if rule, ok := passThroughEgressDecision(opts, "otel-collector", 4318, "POST", u); ok {
+	if rule, ok := passThroughEgressDecision(opts, "otel-collector", 4318, "POST", u, nil); ok {
 		t.Fatalf("off rule should make it not-passthrough, got ok=true mode=%q", rule.Mode)
 	}
 }
@@ -187,5 +189,28 @@ func TestPtRecorder_2xxFirstDropsRest(t *testing.T) {
 	}
 	if r.shouldRecord(key, 503) {
 		t.Fatal("nothing records once a 2xx is captured")
+	}
+}
+
+// Under the proven switch a built-in path row needs its protocol's
+// fingerprint (design v14 §4, U19); the user's rules are read as without it
+// (keploy record and keploy test keep them until they read mock.real; keploy
+// mock's CLI clears them).
+func TestPassThroughEgressDecisionUnderTheSwitch(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	u := &url.URL{Path: "/v1/traces"}
+	opts := models.OutgoingOptions{PassThroughPorts: []models.PassThroughRule{{Port: 9999, Mode: models.PassThroughSkip}}}
+	if _, ok := passThroughEgressDecision(opts, "app", 9999, "POST", &url.URL{Path: "/x"}, nil); !ok {
+		t.Fatal("a user rule keploy record or keploy test sent was not read under the switch")
+	}
+	if _, ok := passThroughEgressDecision(models.OutgoingOptions{}, "app", 9999, "POST", &url.URL{Path: "/x"}, nil); ok {
+		t.Fatal("a call no rule names was passed through")
+	}
+	if _, ok := passThroughEgressDecision(opts, "app", 8080, "POST", u, nil); ok {
+		t.Fatal("an OTLP path without OTLP's fingerprint was passed through")
+	}
+	h := http.Header{"Content-Type": {"application/x-protobuf"}}
+	if rule, ok := passThroughEgressDecision(opts, "collector", 8080, "POST", u, h); !ok || rule.ID != "otlp-http-traces" {
+		t.Fatalf("an OTLP export was not answered as telemetry: %+v %v", rule, ok)
 	}
 }

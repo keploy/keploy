@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
@@ -29,26 +30,28 @@ func Export(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		},
 	}
 	var postmanCmd = &cobra.Command{
-		Use:     "postman",
-		Short:   "export Keploy tests as Postman collection",
-		Example: "keploy export postman",
+		Use:          "postman",
+		Short:        "export Keploy tests as Postman collection",
+		Example:      "keploy export postman",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 			svc, err := serviceFactory.GetService(ctx, "export")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				return fmt.Errorf("service doesn't satisfy tools service interface")
 			}
 			err = tools.Export(ctx) // Assuming ExportPostmanCollection is a method in tools service
 			if err != nil {
 				utils.LogError(logger, err, "failed to export Postman collection")
+				return err
 			}
 			return nil
 		},

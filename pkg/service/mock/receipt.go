@@ -6,14 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
+	"go.keploy.io/server/v3/pkg/platform/safeyaml"
+	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -38,20 +46,34 @@ const ReceiptFile = "last-replay.yaml"
 // The second covers the temporary file the write goes through: a kill between
 // creating it and renaming it leaves one behind, and `git add -A` would commit
 // it.
-var receiptIgnore = []string{"/*/" + ReceiptFile, "/*/" + receiptTempPrefix + "*"}
+var receiptIgnore = []string{"/*/" + ReceiptFile, "/*/" + receiptTempPrefix + "*", "/*/" + TestsReceiptFile, "/*/" + MissesFile}
 
-// receiptTempPrefix names the temporary file. Deliberately NOT *.yaml: an
-// editor watching keploy/*/*.yaml would pick the transient file up as though
-// it were a receipt.
-const receiptTempPrefix = ".last-replay-"
+// receiptTempPrefix begins the temporary file's name (localfile.TempPrefix).
+// Deliberately NOT *.yaml: an editor watching keploy/*/*.yaml would pick the
+// transient file up as though it were a receipt.
+const receiptTempPrefix = localfile.TempPrefix
 
 // Why a replay failed, when it did.
 const (
-	FailedBySetup       = "setup"        // keploy could not start the run; the tests never ran
-	FailedByRunner      = "runner"       // the test command itself failed
-	FailedByStrict      = "strict"       // --strict: a call was missed, or the miss list was unreadable
-	FailedByMinCoverage = "min-coverage" // --min-coverage: the run covered too little, or wrote no report
-	FailedByKeploy      = "keploy"       // keploy itself did not complete the run
+	FailedBySetup           = "setup"            // keploy could not start the run; the tests never ran
+	FailedByRunner          = "runner"           // the test command itself failed
+	FailedByStrict          = "strict"           // --strict: a counted miss, or the miss list or PID-map count was unreadable
+	FailedByMinCoverage     = "min-coverage"     // --min-coverage: the run covered too little, or wrote no report
+	FailedByKeploy          = "keploy"           // keploy itself did not complete the run
+	FailedByNothingVerified = "nothing-verified" // the run served none of the recorded calls, so it verified nothing
+	// FailedByCaptureIncomplete: the agent could not track a process the test
+	// command ran (its PID map refused it), so that process's calls went to the
+	// real dependency, neither mocked nor counted (models.PIDMapRefusals).
+	FailedByCaptureIncomplete = "capture_incomplete"
+	// FailedByBeginRefused: keploy refused a test at its begin
+	// (models.ScopeWindow.BeginRefused), and the test fails whatever its
+	// harness did next.
+	FailedByBeginRefused = "begin_refused"
+	// FailedByRuleNotMade: under the proven switch, a series a declared rule
+	// placed in the worker scope (models.MockEntry.Series) was due and the
+	// run never answered it (Receipt.RequiredNotMade), or whether it did
+	// could not be read.
+	FailedByRuleNotMade = "rule_not_made"
 )
 
 // Receipt is what one `keploy mock replay` proved.
@@ -64,24 +86,33 @@ type Receipt struct {
 	OnMiss string `yaml:"onMiss" json:"onMiss"`
 	Strict bool   `yaml:"strict" json:"strict"`
 	// ExitCode is what keploy exited with. RunnerExitCode is what the test
-	// command itself exited with (-1 when it never ran), so a run failed by
-	// a gate is not mistaken for a failing test. FailedBy names which one
-	// failed the run, when one did.
+	// command itself exited with (-1 when it has no exit of its own: it never
+	// ran, or keploy failed before it exited), so a run failed by a gate is
+	// not mistaken for a failing test. FailedBy names which one failed the
+	// run, when one did.
 	ExitCode       int    `yaml:"exitCode" json:"exitCode"`
 	RunnerExitCode int    `yaml:"runnerExitCode" json:"runnerExitCode"`
 	FailedBy       string `yaml:"failedBy,omitempty" json:"failedBy,omitempty"`
-	// Error is why keploy could not run the replay at all.
+	// Error is why keploy could not run the replay, or did not complete it.
 	Error string `yaml:"error,omitempty" json:"error,omitempty"`
 	// Loaded, Consumed and Missed are mock counts. -1 means the agent never
 	// reported that count, which is not the same as zero.
 	Loaded   int `yaml:"loaded" json:"loaded"`
 	Consumed int `yaml:"consumed" json:"consumed"`
 	Missed   int `yaml:"missed" json:"missed"`
+	// MissedData counts, under the proven switch only, the misses that count
+	// against a test (models.UnmatchedCall.CountsAgainstTest: not DNS lookups,
+	// which are protocol-phase, nor connections that sent nothing): what the
+	// proven model's verdict fails on. -1 when the misses were not read;
+	// absent with the switch off.
+	MissedData *int `yaml:"missedData,omitempty" json:"missedData,omitempty"`
 	// Bypass lists the destinations configured to skip keploy (bypassRules,
 	// --pass-through-ports): calls to them reach the real service.
 	Bypass []string `yaml:"bypass,omitempty" json:"bypass,omitempty"`
 	// Isolated says the run proved the suite passes with no dependency
-	// reachable, and IsolationNote says why not when it did not. Decided once,
+	// reachable, and IsolationNote says why not when it did not — or, when
+	// the run gated tests out (Tests.Gated), that it proved it only for the
+	// tests that ran. Decided once,
 	// when the run ends, so the log line and every reader agree.
 	Isolated      bool   `yaml:"isolated" json:"isolated"`
 	IsolationNote string `yaml:"isolationNote,omitempty" json:"isolationNote,omitempty"`
@@ -99,6 +130,309 @@ type Receipt struct {
 	// MinCoverage is the --min-coverage floor this run was held to, if any.
 	MinCoverage float64 `yaml:"minCoverage,omitempty" json:"minCoverage,omitempty"`
 	Version     string  `yaml:"keployVersion,omitempty" json:"keployVersion,omitempty"`
+	// Tests counts the run's tests by verdict, when the recording or the run
+	// named any; what each one did is in TestsReceiptFile, next to this one.
+	Tests *TestCounts `yaml:"tests,omitempty" json:"tests,omitempty"`
+	// Refusals are, under the proven switch, what keploy refused during the
+	// run (a second test process, a test it could not judge) and what a test
+	// framework's integration refused and told keploy (go test running more
+	// than one test binary at once): keploy's verdict fails the run naming
+	// each. Absent with the switch off.
+	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// CannotCapture is what the test command did that keploy cannot capture at
+	// all (decision 20: a call over a Unix socket, or Unix sockets keploy
+	// cannot see; CaptureLossKind.NotJudged), counted over the whole run
+	// from its base, one entry per kind with its latest What. Non-empty
+	// means the run has no verdict, whatever its tests' lines say: a call
+	// after the last test's read is on no line. Empty with the switch off.
+	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
+	// CaptureIncomplete is what keploy could not capture during the run, as
+	// data, one entry per kind: each PID map's refusals
+	// (models.CaptureLossPIDMap, CaptureLossPIDMapExcluded: the inserts it
+	// refused over the run, the kernel's errno for the latest in Err) and,
+	// under the proven switch, each other kind of loss counted over the run
+	// that fails it. IsolationNote, when FailedBy is capture_incomplete, says
+	// the same in words; a reader takes each loss's kind, count and cause
+	// from here, never from those words. Empty when nothing was lost; a
+	// count that could not be read adds nothing here
+	// (ProcessTrackingUnread, CallCaptureUnread say it).
+	CaptureIncomplete models.CaptureLosses `yaml:"captureIncomplete,omitempty" json:"captureIncomplete,omitempty"`
+	// UnchargedMisses are, under the proven switch, the misses MissedData
+	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
+	// empty): a call made before the test process claimed the run, or
+	// outside every test's window (before the first test, between two, or
+	// after the last): the test framework sets the windows, and a call made
+	// in none is the set's, never a test's. A call that repeats a spent
+	// recording of the set's background, which no recording of the open
+	// test's own is, is the set's too, wherever it lands, and names the
+	// window it was made in (models.UnmatchedCall.WindowOf). Each
+	// is as evidence keeps a miss (models.UnmatchedCall.Sanitized: no value
+	// the app sent), with the process that made it. nil when the misses
+	// were not read, and with the switch off.
+	UnchargedMisses []UnchargedMiss `yaml:"unchargedMisses,omitempty" json:"unchargedMisses,omitempty"`
+	// RequiredNotMade are, under the proven switch, the series declared rules
+	// placed in the worker scope (models.MockEntry.Series) that were due in
+	// the run and that it never answered: keploy requires each once per run
+	// when due, a trailing series once its test ran, a background one once
+	// the run reached its place. Each fails the run; a trailing one fails
+	// the test it trails too. nil for none, and with the switch off.
+	RequiredNotMade []RequiredNotMade `yaml:"requiredNotMade,omitempty" json:"requiredNotMade,omitempty"`
+	// RequiredNotDue are, under the proven switch, the series of once rules
+	// with a timer bound (models.MockEntry.Due) that the run reached and
+	// never answered, and did not require: the application exited before
+	// the bound (each with its RequiredNotMade.Due). None fails the run.
+	// nil for none, and with the switch off.
+	RequiredNotDue []RequiredNotMade `yaml:"requiredNotDue,omitempty" json:"requiredNotDue,omitempty"`
+	// ProcessTrackingUnread and CallCaptureUnread each say, when keploy
+	// asked for one of the agent's counts at the run's end and could not
+	// read it, what that leaves unproven and why it could not be read: the
+	// count of processes the agent could not track (its PID maps'
+	// refusals), and, under the proven switch, the count of calls it could
+	// not capture. Either one unread, nothing shows that no call reached a
+	// real dependency unmocked. Each is kept here whatever IsolationNote
+	// says: the note keeps one reason, so a run whose test command failed,
+	// whose calls matched nothing, whose agent refused a process or lost a
+	// call, or whose other count was unread too keeps that reason there.
+	//
+	// Each is empty when its count was read, or was never asked for (an
+	// agent that cannot count it, the switch off for capture losses, or a
+	// run keploy failed first). So an empty field proves nothing: a reader
+	// keys off FailedBy first, and never takes empty fields as proof that
+	// the run was isolated.
+	ProcessTrackingUnread string `yaml:"processTrackingUnread,omitempty" json:"processTrackingUnread,omitempty"`
+	CallCaptureUnread     string `yaml:"callCaptureUnread,omitempty" json:"callCaptureUnread,omitempty"`
+}
+
+// UnchargedMiss is a call no recorded mock answered that no test was charged
+// with (Receipt.UnchargedMisses), and the process that made it.
+type UnchargedMiss struct {
+	models.UnmatchedCall `yaml:",inline"`
+	// Process is the process that made the call, as the agent saw it then;
+	// nil when it named none.
+	Process *MissProcess `yaml:"process,omitempty" json:"process,omitempty"`
+}
+
+// MissProcess names the process that made a call: its pid, its comm and its
+// whole command line, its secrets redacted and its words quoted where one
+// holds white space or a quote (models.Origin.Cmdline); keploy's log writes
+// that command line by its shape alone (utils.RedactProcessArgv). Its pid
+// and command line are in the receipt's file only, which describes one run
+// on this machine and is never committed (receiptIgnore): the receipt's JSON
+// form (enterprise's keploy mock status --json embeds it) leaves them out,
+// and no recording, test case or report holds a pid or a command line
+// (models.Origin.Persisted). Unnamed says why keploy named none
+// (models.UnnamedPIDNamespace), and PID is then the kernel pid it was told.
+type MissProcess struct {
+	PID     uint32 `yaml:"pid,omitempty" json:"-"`
+	Comm    string `yaml:"comm,omitempty" json:"comm,omitempty"`
+	Exe     string `yaml:"exe,omitempty" json:"exe,omitempty"`
+	Cmdline string `yaml:"cmdline,omitempty" json:"-"`
+	Unnamed string `yaml:"unnamed,omitempty" json:"unnamed,omitempty"`
+}
+
+// unchargedMisses is, of misses, those that count against a test
+// (models.UnmatchedCall.CountsAgainstTest, what MissedData counts) and that
+// no test was charged with, each as evidence keeps a miss, with its process.
+// The calls a test's end charged come from the agent already kept so; the
+// rest, read from the proxy at the run's end, carry the call's values, which
+// the receipt never holds.
+func unchargedMisses(misses []models.UnmatchedCall) []UnchargedMiss {
+	var out []UnchargedMiss
+	for _, m := range misses {
+		if m.ChargedTo != "" || !m.CountsAgainstTest() {
+			continue
+		}
+		u := UnchargedMiss{UnmatchedCall: m.Sanitized()}
+		if src := m.Source; src != nil {
+			u.Process = &MissProcess{PID: src.PID, Comm: src.Comm, Exe: src.Exe, Cmdline: src.Cmdline, Unnamed: src.Unnamed}
+			// Process holds what only travels; the call's own source keeps
+			// what a file holds, so the receipt's JSON form carries no pid
+			// or command line through it either.
+			u.Source = src.Persisted()
+		}
+		out = append(out, u)
+	}
+	return out
+}
+
+// TestCounts counts a replay's tests by their verdict this run.
+type TestCounts struct {
+	Passed  int `yaml:"passed" json:"passed"`
+	Failed  int `yaml:"failed" json:"failed"`
+	Skipped int `yaml:"skipped" json:"skipped"`
+	// Gated tests were told not to run this replay, for GateReason, or
+	// because a test they need had not begun before them
+	// (models.ScopeOutcomeUnmet). A run with gated tests proved nothing
+	// about them.
+	Gated      int    `yaml:"gated" json:"gated"`
+	GateReason string `yaml:"gateReason,omitempty" json:"gateReason,omitempty"`
+	// NoVerdict tests did not run this replay, or ran with a harness that
+	// reported no verdict (or one keploy does not know).
+	NoVerdict int `yaml:"noVerdict" json:"noVerdict"`
+	// GateNote says the run was asked to run only some tests but ran more
+	// (no harness reported, or one that cannot skip ran a test outside the
+	// list — Ungated counts those); "" when no gate was asked for or it held.
+	GateNote string `yaml:"gateNote,omitempty" json:"gateNote,omitempty"`
+	Ungated  int    `yaml:"ungated,omitempty" json:"ungated,omitempty"`
+}
+
+// countTests summarises per-test lines.
+func countTests(tests []TestReceipt, gateReason string) *TestCounts {
+	if len(tests) == 0 {
+		return nil
+	}
+	c := &TestCounts{}
+	for _, t := range tests {
+		switch t.Outcome {
+		case models.ScopeOutcomePassed:
+			c.Passed++
+		case models.ScopeOutcomeFailed:
+			c.Failed++
+		case models.ScopeOutcomeSkipped:
+			c.Skipped++
+		case models.ScopeOutcomeGated, models.ScopeOutcomeUnmet:
+			c.Gated++
+		default:
+			c.NoVerdict++
+		}
+	}
+	if c.Gated > 0 {
+		c.GateReason = gateReason
+	}
+	return c
+}
+
+// TestsReceiptFile holds what each test did in the last replay of a set,
+// next to its ReceiptFile and local and git-ignored like it. It is kept apart
+// because it grows with the suite, and the receipt is read whole by every
+// status check.
+const TestsReceiptFile = "last-replay-tests.yaml"
+
+// TestsReceipt is the content of TestsReceiptFile.
+type TestsReceipt struct {
+	Set string    `yaml:"set" json:"set"`
+	At  time.Time `yaml:"at" json:"at"`
+	// MocksDigest is the receipt's: which recording these results are about.
+	MocksDigest string        `yaml:"mocksDigest" json:"mocksDigest"`
+	Tests       []TestReceipt `yaml:"tests" json:"tests"`
+	// Refusals are, in a record's file, what keploy refused during it
+	// (Receipt.Refusals): a record that reported no test says why.
+	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// Workers is, in a record's file, the most test workers a test process
+	// of the record declared at its claim (models.ScopeWindow.Workers): 0
+	// when none declared more than one. Whatever judges the record reads it:
+	// a judge that replays one test worker at a time cannot rerun the
+	// record's own command as it ran.
+	Workers int `yaml:"workers,omitempty" json:"workers,omitempty"`
+	// Live and Mocked are, under the proven switch, where the run's calls to
+	// local listeners went, each row naming the test open then (none:
+	// outside every test): a listener of the run's own process tree, called
+	// live (models.LiveRow), and any other local listener, recorded and
+	// mocked (models.MockedRow). keploy's summary lists them.
+	Live   []models.LiveRow   `yaml:"live,omitempty" json:"live,omitempty"`
+	Mocked []models.MockedRow `yaml:"mocked,omitempty" json:"mocked,omitempty"`
+	// Real is, under the proven switch, what the run saw of mock.real beyond
+	// its tests (design v14 §4, §8.2 rule 4): the destinations it reached,
+	// those it first reached outside a test, and the capture_incomplete
+	// evidence charged to no test. nil without the switch.
+	Real *models.RealRun `yaml:"real,omitempty" json:"real,omitempty"`
+	// CannotCapture is, under the proven switch, what the run did that keploy
+	// cannot capture at all (Receipt.CannotCapture): in a replay's file the
+	// receipt's, in a record's what the recording lacks, so it is not taken
+	// as fully captured.
+	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
+	// CaptureLosses is, in a record's file under the proven switch, what the
+	// agent could not capture that no test was charged with (design v14
+	// §3.2: a loss charges the test open when it happened and every later
+	// one, so this is a loss after the last test): no recording holds what
+	// it carried, so judging fails the run on it (§7.5, evidence charged to
+	// no test). What keploy cannot capture at all is CannotCapture's, not this.
+	CaptureLosses models.CaptureLosses `yaml:"captureLosses,omitempty" json:"captureLosses,omitempty"`
+	// CaptureLossesUnread is, in a record's file under the proven switch, why
+	// keploy could not read what its agent could not capture after the last
+	// test: judging fails the run on it, as on CaptureLosses (a read that
+	// failed is never "none").
+	CaptureLossesUnread string `yaml:"captureLossesUnread,omitempty" json:"captureLossesUnread,omitempty"`
+	// Learned is what the learn step of a record's full round wrote onto
+	// mocks no test consumed (the set's start-up and pool), each field as
+	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
+	// §7.2 step 10). What a call made in another window than its
+	// recording's taught it is LearnedElsewhere's, not this.
+	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
+	// LearnedElsewhere is what the learn step of a record's full round
+	// wrote onto recordings from calls made in other windows than theirs,
+	// for learning only (a timer's call that fired in another test's
+	// window): by recording, with the test whose recording it is and the
+	// windows that taught it. Such learning is that window's: whatever
+	// undoes what a window learned undoes it too.
+	LearnedElsewhere []LearnedElsewhere `yaml:"learnedElsewhere,omitempty" json:"learnedElsewhere,omitempty"`
+}
+
+// LearnedElsewhere is what calls made in other windows than a recording's
+// taught it, as a record's receipt says it (TestsReceipt.LearnedElsewhere).
+type LearnedElsewhere = learn.Taught
+
+// empty reports whether the run reported no test and keploy refused
+// nothing: such a run leaves no per-test file, whatever rows it saw. A
+// record's file is what says the record reported its tests (judging reads a
+// missing one as "the record reported no test"), so rows alone, which a
+// suite without keploy's integration still makes, never write one; nor does
+// what the run saw of mock.real (its agent logs each connection it could not
+// capture).
+func (r TestsReceipt) empty() bool {
+	return len(r.Tests) == 0 && len(r.Refusals) == 0
+}
+
+// TestReceipt is one test's line in a TestsReceipt. Outcome is its latest
+// run's verdict this replay (models.ScopeOutcome*); "" when it did not run or
+// reported none. Random is how the test's browser drew its random numbers
+// in that run, as its harness said at its end, else at its begin
+// (models.ScopeWindow.Random): seeded, own, or "" when it said nothing. A
+// count the agent did not report in full is -1.
+type TestReceipt struct {
+	Name     string `yaml:"name" json:"name"`
+	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
+	Random   string `yaml:"random,omitempty" json:"random,omitempty"`
+	Consumed int    `yaml:"consumed" json:"consumed"`
+	Missed   int    `yaml:"missed" json:"missed"`
+	// Began is when the test's latest run began (its window's start); zero
+	// when the replay saw it begin no run. The test with the latest Began is
+	// the last test begun: the one a run cut short was in, or left last.
+	Began time.Time `yaml:"began,omitempty" json:"began,omitzero"`
+	// Evidence is, under the proven wire, what failed the test at its end:
+	// its misses, the recorded calls of its mapping it never made, and the
+	// connections keploy could not capture; or what left it not judged
+	// (CannotCapture: a call keploy cannot capture at all, a Unix socket).
+	// A miss that is a recording another test owns names that test
+	// (recorded_in, withRecordedIn).
+	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
+	// Real is, under the proven wire, the mock.real destinations the test
+	// used while it was open: its REAL rows (design v14 §4).
+	Real []models.RealUse `yaml:"real,omitempty" json:"real,omitempty"`
+	// RealListed is, in a replay's file, the mock.real destinations the
+	// test's recording lists: the run must reach each (design v14 §8.2 rule
+	// 4), and the test ran on the real clock (§3.4, F3).
+	RealListed []string `yaml:"realListed,omitempty" json:"realListed,omitempty"`
+	// Learned is what the learn step of a record's full round wrote onto the
+	// test's recording, each field as "<mock> <path> (<kind>)" (design v14
+	// §7.2 step 10). Only that round has any.
+	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
+	// SkippedReads is, under the proven switch, each read of a test this
+	// replay's gate skips that answered one of the test's calls, whatever
+	// its outcome, in the order they did (models.ScopeWindow.SkippedReads),
+	// with the skipped test whose recording it is: keploy mock replay moved
+	// it to the worker scope for this replay (skippedReads). A replay that
+	// loads no skipped test's recordings has no answer for those calls, so
+	// a test that passed on one did not pass on its own recordings.
+	SkippedReads []SkippedReadAnswer `yaml:"skippedReads,omitempty" json:"skippedReads,omitempty"`
+}
+
+// SkippedReadAnswer is one read of a skipped test that answered a test's
+// call (TestReceipt.SkippedReads): Mock is the recording's name, Test the
+// skipped test whose window recorded it.
+type SkippedReadAnswer struct {
+	Mock string `yaml:"mock" json:"mock"`
+	Test string `yaml:"test" json:"test"`
 }
 
 // isolation decides whether a finished run proved isolation: the runner
@@ -117,9 +451,13 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 	case len(bypass) > 0:
 		return false, "bypass rules send calls to " + strings.Join(bypass, ", ") + " to the real service"
 	case counts.missed < 0:
-		return false, "the agent never reported which calls were missed"
-	case counts.missed > 0:
-		return false, fmt.Sprintf("%d call(s) matched nothing in the recording", counts.missed)
+		return false, "the agent could not report every call no recorded mock answered"
+	case counts.missedData > 0:
+		// Only a miss that counts against a test (models.UnmatchedCall.
+		// CountsAgainstTest), as --strict reads it: a DNS lookup's miss is
+		// the proxy's own answer, and a connection whose client sent
+		// nothing made no call, so neither reached a real service.
+		return false, fmt.Sprintf("%d call(s) matched nothing in the recording", counts.missedData)
 	case counts.consumed < 0:
 		return false, "the agent never reported which recorded calls it served"
 	case counts.consumed == 0:
@@ -128,13 +466,14 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 	return true, ""
 }
 
-// bypassList renders the bypass rules as destinations.
+// bypassList renders the bypass rules as destinations, an IPv6 host in
+// brackets ([::1]:27017) as the set's other files write one.
 func bypassList(rules []models.BypassRule) []string {
 	var out []string
 	for _, r := range rules {
 		d := r.Host
 		if r.Port != 0 {
-			d += fmt.Sprintf(":%d", r.Port)
+			d = net.JoinHostPort(strings.Trim(r.Host, "[]"), strconv.FormatUint(uint64(r.Port), 10))
 		}
 		d += r.Path
 		if d != "" {
@@ -144,15 +483,225 @@ func bypassList(rules []models.BypassRule) []string {
 	return out
 }
 
-// ReadReceipt reads keploy/<set>/last-replay.yaml. A missing file is
-// (nil, nil): the set has simply never been replayed here.
-func ReadReceipt(keployDir, set string) (*Receipt, error) {
-	raw, err := os.ReadFile(filepath.Join(keployDir, set, ReceiptFile))
+// MissesFile names, for the last keploy mock replay of a set, each call no
+// recorded mock answered, whole (localfile.MissesFile; keploy test writes
+// its own, localfile.TestMissesFile, and never this one). The console names the first of the calls, each with its first next step
+// (sayMisses), and points there, by path, for the rest.
+const MissesFile = localfile.MissesFile
+
+// HoldsCallsWhole says whether name, a file's base name, is one keploy writes
+// the calls a run missed into whole (localfile.HoldsCallsWhole): anything
+// that sends the keploy folder away (a bundle, an upload) leaves it out.
+func HoldsCallsWhole(name string) bool { return localfile.HoldsCallsWhole(name) }
+
+// missesWriter is keploy mock replay, as its MissesFile names it.
+var missesWriter = localfile.Writer{
+	File:      MissesFile,
+	Command:   "keploy mock replay",
+	Holds:     "each call no recorded mock answered in the last replay of this set",
+	NextStep:  missDefaultNext,
+	Unwritten: "could not write the calls no mock answered in this replay; the console names each",
+}
+
+// writeMissesFile writes MissesFile for a replay of set whose calls misses no
+// mock answered (localfile.WriteMisses), and returns its path, for the
+// console to point to; "" when none was written, the console then naming
+// every call.
+func writeMissesFile(logger *zap.Logger, keployDir, set string, misses []models.UnmatchedCall) string {
+	return localfile.WriteMisses(logger, keployDir, set, missesWriter, misses)
+}
+
+// removeMissesFile removes set's MissesFile, if there is one: it names the
+// calls of a run before the replay that is ending, which keploy did not
+// judge.
+func removeMissesFile(keployDir, set string) { localfile.RemoveMisses(keployDir, set, MissesFile) }
+
+// writeTestsReceipt writes TestsReceiptFile for a replay, or removes a stale
+// one when this replay named no tests: it would describe an earlier run.
+func writeTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt) {
+	dir := filepath.Join(keployDir, r.Set)
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return
+	}
+	writeTestsFile(logger, keployDir, dir, TestsReceiptFile, "# Written by `keploy mock replay`: what each test did in the last replay of this set.\n", "this replay", r)
+}
+
+// RecordTestsReceiptFile holds what each test did in the last record of a set:
+// its verdict against real infra, which judging the recording reads (design
+// v14 §7.4, the R0 round). Local and git-ignored like the replay's.
+const RecordTestsReceiptFile = "last-record-tests.yaml"
+
+// writeRecordTestsReceipt writes RecordTestsReceiptFile: the verdict each
+// top-level test of the record reported as it ended, with the evidence the
+// proven wire left on its window, whether or not the recording was kept. It makes the set's directory when the record kept
+// nothing, since a test that failed against real infra is judged too.
+func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt, windows []models.ScopeWindow) {
+	set := r.Set
+	for _, w := range windows {
+		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
+			continue
+		}
+		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Random: w.Random, Real: w.Real}
+		// What keploy could not capture while the test ran (a record's
+		// window carries no misses): a verdict against real infra keploy
+		// did not see whole is no basis for judging the recording.
+		if ev := w.Evidence; ev != nil && (!ev.Empty() || ev.Reason != "") {
+			tr.Evidence = ev
+		}
+		r.Tests = append(r.Tests, tr)
+	}
+	dir := filepath.Join(keployDir, set)
+	if !r.empty() {
+		if err := setfile.MkdirAllInRecording(keployDir, dir, 0o755); err != nil {
+			logger.Warn("could not write what each test did in this record", zap.String("dir", dir), zap.Error(err))
+			return
+		}
+	} else if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return
+	}
+	writeTestsFile(logger, keployDir, dir, RecordTestsReceiptFile, "# Written by `keploy mock record`: what each test did against real infra in the last record of this set.\n", "this record", r)
+	if err := utils.AddToGitIgnore(logger, keployDir, "/*/"+RecordTestsReceiptFile); err != nil {
+		logger.Debug("failed to git-ignore the record's per-test results", zap.Error(err))
+	}
+}
+
+// ReadRecordTestsReceipt reads keploy/<set>/last-record-tests.yaml; (nil, nil)
+// when there is none.
+func ReadRecordTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
+	return readTestsFile(keployDir, set, RecordTestsReceiptFile, "a record's")
+}
+
+// writeTestsFile writes a per-test results file into dir, a set's folder of
+// the recording at keployDir, or removes a stale one when the run named no
+// tests: it would describe an earlier run. Both stay inside the recording
+// (localfile.Write).
+func writeTestsFile(logger *zap.Logger, keployDir, dir, file, head, run string, r TestsReceipt) {
+	path := filepath.Join(dir, file)
+	if r.empty() {
+		_ = setfile.RemoveInRecording(keployDir, path)
+		return
+	}
+	body, err := yaml.Marshal(persistedTests(r))
+	if err == nil {
+		err = localfile.Write(logger, keployDir, dir, file, append([]byte(head), body...))
+	}
+	if err != nil {
+		_ = setfile.RemoveInRecording(keployDir, path)
+		logger.Warn("could not write what each test did in "+run, zap.String("dir", dir), zap.Error(err),
+			zap.String("next_step", "check that "+dir+" is writable by the user running keploy"))
+	}
+}
+
+// persistedTests is r as its file holds it: each miss's process as a file
+// holds one (models.PersistedCalls): why keploy named none, and the kernel
+// pid, travel from the agent and are never written, as in a test run's
+// report, so a miss whose process keploy would not name has no source, not
+// an empty one. A capture loss names its hosts with no tag
+// (models.CaptureLosses.Untagged): the file outlives the session a tag names
+// a host in. r's own tests are left as they were.
+func persistedTests(r TestsReceipt) TestsReceipt {
+	if r.Real != nil {
+		real := r.Real.Untagged()
+		r.Real = &real
+	}
+	r.CannotCapture, r.CaptureLosses = r.CannotCapture.Untagged(), r.CaptureLosses.Untagged()
+	r.Tests = append([]TestReceipt(nil), r.Tests...)
+	for i, tr := range r.Tests {
+		if tr.Evidence == nil {
+			continue
+		}
+		ev := *tr.Evidence
+		ev.Misses, _ = models.PersistedCalls(tr.Evidence.Misses)
+		ev.CaptureIncomplete, ev.CannotCapture = ev.CaptureIncomplete.Untagged(), ev.CannotCapture.Untagged()
+		ev.Incomplete = models.UntaggedIncomplete(ev.Incomplete)
+		r.Tests[i].Evidence = &ev
+	}
+	return r
+}
+
+// TestsReceiptBytes bounds a TestsReceiptFile read: tens of thousands of tests.
+const TestsReceiptBytes = 64 << 20
+
+// ReadTestsReceipt reads keploy/<set>/last-replay-tests.yaml; (nil, nil) when
+// there is none. Read through safeyaml for the reasons ReadReceipt is.
+func ReadTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
+	return readTestsFile(keployDir, set, TestsReceiptFile, "a replay's")
+}
+
+func readTestsFile(keployDir, set, file, whose string) (*TestsReceipt, error) {
+	raw, err := readInRecording(keployDir, filepath.Join(set, file), TestsReceiptBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, receiptError(filepath.Join(set, file), err)
+	}
+	var r TestsReceipt
+	if err := yaml.Unmarshal(raw, &r); err != nil {
+		return nil, fmt.Errorf("%s: %w", filepath.Join(set, file), err)
+	}
+	// An empty or foreign document unmarshals into a zero TestsReceipt with
+	// no error, as for the receipt.
+	if r.Set == "" {
+		return nil, fmt.Errorf("%s is not %s per-test results", filepath.Join(set, file), whose)
+	}
+	return &r, nil
+}
+
+// readInRecording reads name, a receipt of the recording at keployDir, as a
+// regular file of at most limit bytes (safeyaml), and only inside the
+// recording: keployDir is opened from the project (utils.OpenRecordingDir),
+// and name within it. A receipt, a set folder or a keploy folder that links
+// out is refused with why, as the recording's other files are: a cloned
+// repository could otherwise have a receipt read from anywhere.
+//
+// A link out, or a name that leads out, is said plainly (linkout.Error),
+// and receiptError keeps that whole.
+func readInRecording(keployDir, name string, limit int64) ([]byte, error) {
+	r, err := utils.OpenRecordingDir(keployDir)
+	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	b, err := safeyaml.ReadFileIn(r, name, limit)
+	refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", name, keployDir)
+	if out := linkout.Explain(r, keployDir, name, refused, err); out != nil {
+		return nil, out
+	}
+	return b, err
+}
+
+// receiptError says why name, a receipt readInRecording read, could not be
+// read: a link out of the recording as linkout.Error says it, whole,
+// since it names the receipt and where the link leads; anything else after
+// the receipt's name, without the path safeyaml's error repeats.
+func receiptError(name string, err error) error {
+	var out *linkout.Error
+	if errors.As(err, &out) {
+		return out
+	}
+	return fmt.Errorf("%s: %w", name, safeyaml.StripPath(err))
+}
+
+// ReceiptBytes bounds a receipt read. A receipt is a handful of scalar fields
+// and a coverage summary; the largest keploy writes is well under a kilobyte.
+const ReceiptBytes = 1 << 20
+
+// ReadReceipt reads keploy/<set>/last-replay.yaml. A missing file is
+// (nil, nil): the set has simply never been replayed here.
+//
+// The set directory comes from the repository keploy runs in, so the receipt
+// can be a symlink to /dev/zero or a FIFO in a cloned repo. It is read through
+// safeyaml, which refuses anything but a regular file of at most ReceiptBytes,
+// rather than reading to EOF as it once did, and only inside the recording
+// (readInRecording).
+func ReadReceipt(keployDir, set string) (*Receipt, error) {
+	raw, err := readInRecording(keployDir, filepath.Join(set, ReceiptFile), ReceiptBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, receiptError(filepath.Join(set, ReceiptFile), err)
 	}
 	var r Receipt
 	if err := yaml.Unmarshal(raw, &r); err != nil {
@@ -179,13 +728,15 @@ func MocksFile(keployDir, set string) string {
 	return ""
 }
 
-// MocksDigest is the sha256 of the set's mocks file, "" when it has none.
+// MocksDigest is the sha256 of the set's mocks file, "" when it has none or
+// it cannot be read inside the recording: a digest of a file a link out leads
+// to would name something the recording does not hold.
 func MocksDigest(keployDir, set string) string {
 	p := MocksFile(keployDir, set)
 	if p == "" {
 		return ""
 	}
-	f, err := os.Open(p)
+	f, err := setfile.OpenInRecording(keployDir, p)
 	if err != nil {
 		return ""
 	}
@@ -213,6 +764,9 @@ func writeReceipt(logger *zap.Logger, keployDir string, r Receipt) {
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
+	// A capture loss names its hosts with no tag: the receipt outlives the
+	// session a tag names a host in.
+	r.CannotCapture, r.CaptureIncomplete = r.CannotCapture.Untagged(), r.CaptureIncomplete.Untagged()
 	body, err := yaml.Marshal(r)
 	if err != nil {
 		logger.Debug("failed to encode the replay receipt", zap.Error(err))
@@ -234,63 +788,51 @@ func writeReceipt(logger *zap.Logger, keployDir string, r Receipt) {
 		// which is usually why the write failed -- so when the old receipt is
 		// still there, say so: it is green, isolated, and about a run that has
 		// just been superseded by one whose result nobody can see.
-		_ = os.Remove(path)
+		_ = setfile.RemoveInRecording(keployDir, path)
 		if _, err := os.Lstat(path); err == nil {
 			logger.Warn("the last replay receipt on disk is older than this run and no longer describes it",
 				zap.String("path", path),
 				zap.String("next_step", "delete it, or make its directory writable so keploy can keep it current"))
 		}
 	}
-	tmp, err := os.CreateTemp(dir, receiptTempPrefix+"*.tmp")
-	if err != nil {
+	if err := localfile.Write(logger, keployDir, dir, ReceiptFile, append(head, body...)); err != nil {
 		fail(err)
 		return
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.Remove(tmp.Name())
-		}
-	}()
-	_, werr := tmp.Write(append(head, body...))
-	if werr == nil {
-		werr = tmp.Chmod(0o644)
-	}
-	// Ownership on the open descriptor: under sudo the receipt belongs to the
-	// developer who ran keploy, not to root.
-	utils.RestoreFileOwnershipOf(logger, tmp, tmp.Name())
-	if cerr := tmp.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr == nil {
-		werr = os.Rename(tmp.Name(), filepath.Join(dir, ReceiptFile))
-	}
-	if werr != nil {
-		fail(werr)
-		return
-	}
-	committed = true
 	ignoreReceipts(logger, keployDir)
 }
 
-// ignoreReceipts adds the receipt entries to keploy/.gitignore, and reads the
-// file first so the common case -- they are already there -- writes nothing.
+// ignoreReceipts adds the receipt entries to keploy/.gitignore
+// (localfile.Ignore). It returns why each entry it could not add is not
+// there (nil when every one is).
 //
-// The helper is an unlocked read-modify-write, so two replays starting at once
-// in one repository can both decide to append. Reading first makes that a
-// first-run-only race instead of one on every replay.
-func ignoreReceipts(logger *zap.Logger, keployDir string) {
-	existing, _ := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
-	lines := map[string]bool{}
-	for _, l := range strings.Split(string(existing), "\n") {
-		lines[strings.TrimSpace(l)] = true
+// An entry it could not add is said at WARN, once a process for each
+// keploy/.gitignore, naming that file: the receipt holds the test command
+// whole, which a commit of a file git does not ignore would publish.
+func ignoreReceipts(logger *zap.Logger, keployDir string) (failed map[string]error) {
+	failed = localfile.Ignore(logger, keployDir, receiptIgnore)
+	if failed == nil {
+		return nil
 	}
+	var entries []string
+	var first error
 	for _, entry := range receiptIgnore {
-		if lines[entry] {
-			continue
-		}
-		if err := utils.AddToGitIgnore(logger, keployDir, entry); err != nil {
-			logger.Debug("failed to git-ignore the replay receipt", zap.String("entry", entry), zap.Error(err))
+		if err, ok := failed[entry]; ok {
+			if first == nil {
+				first = err
+			}
+			entries = append(entries, entry)
 		}
 	}
+	gitignore := filepath.Join(keployDir, ".gitignore")
+	if _, said := unignoredReceiptsSaid.LoadOrStore(gitignore, true); !said {
+		logger.Warn("keploy could not add the entries of its local receipts to this .gitignore, so git does not ignore them, and a receipt holds the test command whole",
+			zap.String("file", gitignore), zap.Strings("entries", entries), zap.Error(first),
+			zap.String("next_step", "make the file writable, or add the entries to it yourself, so that no receipt is committed"))
+	}
+	return failed
 }
+
+// unignoredReceiptsSaid are the keploy/.gitignore files ignoreReceipts said
+// it could not add an entry to, in this process.
+var unignoredReceiptsSaid sync.Map

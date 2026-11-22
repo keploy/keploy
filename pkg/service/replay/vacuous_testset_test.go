@@ -61,7 +61,7 @@ func TestVacuousRunStatusCarriesItsEvidence(t *testing.T) {
 	}
 	// A scoreless run has no test results, which is the branch that renders the
 	// startup-failure wording.
-	if reason := describeTestSetFailure(status, nil); reason == "" {
+	if reason := describeTestSetFailure(status, nil, runShape{}); reason == "" {
 		t.Fatal("the status used for a scoreless run must carry a failure reason")
 	}
 }

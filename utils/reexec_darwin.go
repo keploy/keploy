@@ -6,8 +6,9 @@ import "go.uber.org/zap"
 
 // ReexecWithSudo is a no-op on macOS.
 // Docker Desktop/Colima access does not require sudo re-exec at the keploy CLI level.
-func ReexecWithSudo(logger *zap.Logger) {
+func ReexecWithSudo(logger *zap.Logger) error {
 	logger.Debug("ReexecWithSudo called on macOS - this is a no-op")
+	return nil
 }
 
 // ShouldReexecWithSudo always returns false on macOS.

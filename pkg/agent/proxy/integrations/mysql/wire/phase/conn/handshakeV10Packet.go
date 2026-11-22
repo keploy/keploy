@@ -47,8 +47,14 @@ func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.H
 
 	data = data[9:] // Skip 8 bytes of AuthPluginData and 1 byte filler
 
-	if len(data) < 5 { // Capability flags (2 bytes), character set (1 byte), status flags (2 bytes)
-		return nil, fmt.Errorf("handshake packet too short for flags")
+	// Everything read unconditionally below: capability flags lower (2),
+	// character set (1), status flags (2), capability flags upper (2),
+	// auth-plugin-data length or 0x00 (1), reserved (10). The old check covered
+	// only the first five bytes, so a shorter greeting panicked with a slice
+	// bound out of range instead of failing to decode.
+	const fixedAfterFiller = 2 + 1 + 2 + 2 + 1 + 10
+	if len(data) < fixedAfterFiller {
+		return nil, fmt.Errorf("handshake packet too short for flags and reserved bytes: %d of %d bytes", len(data), fixedAfterFiller)
 	}
 
 	capabilityFlagsLower := binary.LittleEndian.Uint16(data[:2])
@@ -75,7 +81,12 @@ func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.H
 		data = data[1:] // constant 0x00
 	}
 
-	data = data[10:] // Skip 10 bytes reserved (all 0s)
+	// Reserved (10): all zero from MySQL. A MariaDB server sends its
+	// extended capabilities in the last four, and the client answers with
+	// them (MariaDBCapabilities): a greeting replayed without them is
+	// answered with none, unlike the HandshakeResponse41 recorded.
+	packet.MariaDBCapabilities = binary.LittleEndian.Uint32(data[6:10])
+	data = data[10:]
 
 	if authPluginDataLen > 8 {
 		lenToRead := min(authPluginDataLen-8, len(data))
@@ -147,8 +158,12 @@ func EncodeHandshakeV10(_ context.Context, _ *zap.Logger, packet *mysql.Handshak
 		buf.WriteByte(0x00)
 	}
 
-	// Reserved (10 zero bytes)
-	buf.Write(make([]byte, 10))
+	// Reserved (10): six zero bytes, then a MariaDB server's extended
+	// capabilities (zero for MySQL).
+	buf.Write(make([]byte, 6))
+	if err := binary.Write(buf, binary.LittleEndian, packet.MariaDBCapabilities); err != nil {
+		return nil, err
+	}
 
 	// Auth-plugin-data-part-2 (remaining auth data)
 	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 && len(packet.AuthPluginData) > 8 {

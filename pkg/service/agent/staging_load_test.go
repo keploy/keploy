@@ -1,0 +1,738 @@
+package agent
+
+import (
+	"cmp"
+	"context"
+	"reflect"
+	"slices"
+	"sort"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/config"
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+)
+
+// stagingStore is a recording whose per-test mocks sit in the agent's on-disk
+// store: two from the app's startup, before the set's first test at stageT0,
+// the two tests' own, and a poll recorded an hour into the recording.
+func stagingStore(t *testing.T) (*Agent, *recordingProxy, *observer.ObservedLogs) {
+	t.Helper()
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	p := &recordingProxy{}
+	a := diskAgent(t, p,
+		stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
+		stageMock("boot-auth", "/auth", stageT0.Add(-5*time.Second)),
+		stageMock("test-a", "/q", stageT0.Add(time.Second)),
+		stageMock("test-b", "/q", stageT0.Add(time.Minute)),
+		stageMock("poll-later", "/poll", stageT0.Add(time.Hour)))
+	core, logs := observer.New(zap.DebugLevel)
+	a.logger = zap.New(core)
+	return a, p, logs
+}
+
+func sortedNames(names []string) []string {
+	out := append([]string(nil), names...)
+	sort.Strings(out)
+	return out
+}
+
+func loadedFromDisk(t *testing.T, logs *observer.ObservedLogs) []int64 {
+	t.Helper()
+	var out []int64
+	for _, e := range logs.FilterMessage("agent mock residency: loaded per-test set from disk").All() {
+		n, _ := e.ContextMap()["loadedFromDisk"].(int64)
+		out = append(out, n)
+	}
+	return out
+}
+
+// The set's staging call, sent before the app starts with the window BaseTime to
+// now, reads from the on-disk store only the mocks recorded before the set's
+// first test. The proxy files whatever it is staged with as app-startup traffic,
+// so reading the whole window brought every mock of the recording into the
+// agent's memory: 81,738 of them OOM-killed a 1200Mi agent on a prod recording.
+func TestStagingReadsOnlyTheStartupMocksFromDisk(t *testing.T) {
+	a, p, logs := stagingStore(t)
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{2}) {
+		t.Fatalf("the staging call read %v mocks from disk; want the 2 recorded before the first test", got)
+	}
+	if len(p.windowed) != 1 {
+		t.Fatalf("staged %d times, want once", len(p.windowed))
+	}
+	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-auth", "boot-config"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the staging call staged %v; want the app-startup mocks %v", got, want)
+	}
+}
+
+// A test's own call is unchanged: its window plus what was recorded before the
+// set's first test.
+func TestATestStillReadsItsWindowAndTheStartupMocks(t *testing.T) {
+	a, p, logs := stagingStore(t)
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:        stageT0,
+		BeforeTime:       stageT0.Add(2 * time.Second),
+		StrictMockWindow: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{3}) {
+		t.Fatalf("the test's call read %v mocks from disk; want its own and the 2 startup mocks", got)
+	}
+	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-auth", "boot-config", "test-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the test's call staged %v; want %v", got, want)
+	}
+}
+
+// A set whose tests carry no request time has no first test to cut at, so its
+// staging call reads the window it names.
+func TestStagingWithoutARecordedTestTimeReadsItsWindow(t *testing.T) {
+	a, p, logs := stagingStore(t)
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:        models.BaseTime,
+		BeforeTime:       stageT0.Add(2 * time.Hour),
+		StrictMockWindow: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5}) {
+		t.Fatalf("the staging call read %v mocks from disk; want all 5 in its window", got)
+	}
+	if len(p.windowed[0][0]) != 5 {
+		t.Fatalf("the staging call staged %v; want all 5", p.windowed[0][0])
+	}
+}
+
+// pgQueryMock is a per-test PostgreSQL query mock of the statement sqlHash,
+// recorded at at.
+func pgQueryMock(name, sqlHash string, at time.Time) *models.Mock {
+	return &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Name:    name,
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			PostgresV3: &models.PostgresV3Spec{
+				Type:  models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{SQLAstHash: sqlHash, InvocationID: name},
+			},
+			ReqTimestampMock: at,
+			ResTimestampMock: at.Add(time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true},
+	}
+}
+
+// catalogProxy is a recordingProxy that takes the statement catalog.
+type catalogProxy struct {
+	*recordingProxy
+	catalogs [][]string
+}
+
+func (p *catalogProxy) SeedStatementCatalog(mocks []*models.Mock) {
+	p.catalogs = append(p.catalogs, namesOf(mocks))
+}
+
+// Storing a set hands the proxy its statement catalog, once: the first
+// recording of each statement on disk, those recorded inside tests included,
+// which the staging's startup band does not reach. An app that prepares at
+// start a statement it runs only inside a test is described from it. The
+// staging, a test's own call and a scope staging (its begin and end, each a
+// call from BaseTime) leave it as stored, and the next set's store replaces it,
+// with none when that store keeps nothing on disk.
+func TestStoringASetSeedsItsStatementCatalogOnce(t *testing.T) {
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	p := &catalogProxy{recordingProxy: &recordingProxy{}}
+	a := strictAgent(true)
+	a.Proxy = p
+	filtered := []*models.Mock{
+		pgQueryMock("boot-select", "sha256:boot", stageT0.Add(-5*time.Second)),
+		pgQueryMock("lists-in-a", "sha256:lists", stageT0.Add(time.Second)),
+		pgQueryMock("lists-in-b", "sha256:lists", stageT0.Add(time.Minute)),
+		pgQueryMock("insert-in-b", "sha256:insert", stageT0.Add(time.Minute+time.Second)),
+		stageMock("http-in-a", "/q", stageT0.Add(2*time.Second)),
+	}
+	header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, filtered, nil))
+	if err := a.StoreMocksStream(context.Background(), header, dec); err != nil {
+		t.Fatal(err)
+	}
+	if loadStorage(t, a).diskMocks == nil {
+		t.Fatal("the set's per-test mocks are not on disk")
+	}
+	if len(p.catalogs) != 1 {
+		t.Fatalf("storing the set seeded the catalog %d times, want once", len(p.catalogs))
+	}
+	if got, want := p.catalogs[0], []string{"boot-select", "lists-in-a", "insert-in-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the catalog is %v; want the first recording of each statement, in recorded order: %v", got, want)
+	}
+
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-select"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the staging call staged %v; want only the startup mocks %v (the catalog serves nothing)", got, want)
+	}
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime: stageT0, BeforeTime: stageT0.Add(2 * time.Second), StrictMockWindow: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.stageScope(context.Background(), []string{"lists-in-a"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.stageScope(context.Background(), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.catalogs) != 1 {
+		t.Fatalf("a call after the store seeded the catalog again (%d seeds, want 1)", len(p.catalogs))
+	}
+
+	// The next set keeps nothing on disk: its store replaces the catalog with
+	// none, so no prepare is described from the previous set's recordings.
+	if err := a.StoreMocks(context.Background(), []*models.Mock{pgQueryMock("next-set", "sha256:next", stageT0)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.catalogs) != 2 || len(p.catalogs[1]) != 0 {
+		t.Fatalf("the next set's store left the catalog %v; want it replaced with none", p.catalogs)
+	}
+}
+
+// Under the proven switch the set's exact staging stages, with the app's
+// startup traffic, the per-test mocks of its pool that the on-disk store
+// holds: calls recorded while no test was open (a poll between tests, a
+// publish after the last test), which no test owns and the pool serves by
+// name between tests from what is staged. Reading only the startup band left
+// them unstaged, and every such call missed. What tests own is still read
+// only as each test opens.
+func TestTheExactStagingStagesThePoolsMocksFromDisk(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	p := &exactProxy{}
+	a := diskAgent(t, p,
+		stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
+		stageMock("boot-auth", "/auth", stageT0.Add(-5*time.Second)),
+		stageMock("test-a", "/q", stageT0.Add(time.Second)),
+		stageMock("test-b", "/q", stageT0.Add(time.Minute)),
+		stageMock("poll-later", "/poll", stageT0.Add(time.Hour)))
+	core, logs := observer.New(zap.DebugLevel)
+	a.logger = zap.New(core)
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+		Exact:                  &models.ExactServing{Stage: true, Pool: []string{"boot-config", "boot-auth", "poll-later"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.windowed) != 1 {
+		t.Fatalf("staged %d times, want once", len(p.windowed))
+	}
+	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-auth", "boot-config", "poll-later"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the exact staging staged %v; want the startup mocks and the pool's poll %v, and no test's own", got, want)
+	}
+	// The pool's mocks the startup band read already are not read again: the
+	// staging reads three mocks from disk, and says one came for the pool.
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{3}) {
+		t.Fatalf("the exact staging read %v mocks from disk; want 3, each once", got)
+	}
+	staged := logs.FilterMessageSnippet("staged the set's app-startup mocks from the on-disk store").All()
+	if len(staged) != 1 {
+		t.Fatalf("%d staging lines, want one", len(staged))
+	}
+	if n, _ := staged[0].ContextMap()["poolMocks"].(int64); n != 1 {
+		t.Fatalf("the staging line says %v pool mocks; want 1, the poll the startup band did not read", staged[0].ContextMap()["poolMocks"])
+	}
+}
+
+// workerExactProxy is an exactProxy with a worker scope
+// (coreAgent.ExactWorkerServer): it keeps each reachable list it is told.
+type workerExactProxy struct {
+	exactProxy
+	workers [][]string
+	// source is the recording source the staging set
+	// (coreAgent.RecordingSourceSetter).
+	source func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error
+	// before is the reader of the recordings before an instant the staging
+	// set (coreAgent.RecordedBeforeSetter).
+	before func(t time.Time, visit func(*models.Mock) bool) error
+	// keeps counts the recordings the on-disk store handed the proxy to
+	// keep as it read them (coreAgent.RecordingKeeper).
+	keeps int
+}
+
+func (p *workerExactProxy) KeepRecording(_ string, _ int64, decode func() (*models.Mock, error)) (*models.Mock, error) {
+	p.keeps++
+	return decode()
+}
+
+func (p *workerExactProxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
+	p.before = src
+	return nil
+}
+
+func (p *workerExactProxy) ServeExactWorker(names []string) error {
+	p.workers = append(p.workers, append([]string{}, names...))
+	return nil
+}
+
+func (p *workerExactProxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.source = src
+	return nil
+}
+
+// Under the proven switch the set's exact staging stages the worker scope's
+// mocks (models.Mapping.Worker) by name from the on-disk store, as it does the
+// pool's: a worker call recorded after the set's first test is in no startup
+// band, and unstaged, it would miss wherever the replay made it. Before the
+// staging lands, the previous set's worker scope is withdrawn: names are
+// unique only within a set.
+func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	defer models.RegisterRequestKeys(models.HTTP, func(m *models.Mock) []string {
+		if m.Name == "test-a" {
+			return []string{"key-of-test-a"}
+		}
+		return nil
+	})()
+	p := &workerExactProxy{}
+	a := diskAgent(t, p,
+		stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
+		stageMock("test-a", "/q", stageT0.Add(time.Second)),
+		stageMock("w-delete", "/delete", stageT0.Add(30*time.Second)),
+		stageMock("w-poll", "/poll", stageT0.Add(time.Hour)))
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+		Exact: &models.ExactServing{Stage: true, Pool: []string{"boot-config"},
+			Worker: []models.MockEntry{{Name: "w-delete"}, {Name: "w-poll", Place: "test-a"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-config", "w-delete", "w-poll"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the exact staging staged %v; want the startup mock and the worker scope's %v, and no test's own", got, want)
+	}
+	if want := [][]string{{}, {"w-delete"}}; !reflect.DeepEqual(p.workers, want) {
+		t.Fatalf("the proxy was told the worker scopes %v; want %v: none before the staging, then the one placed at the set's start", p.workers, want)
+	}
+	// A miss's diagnosis reads the on-disk store through the source the
+	// staging set: the test's own recording, staged only as it opens, is
+	// there before it.
+	if p.source == nil {
+		t.Fatal("the staging set no recording source over the on-disk store")
+	}
+	var onDisk []string
+	found := false
+	if err := p.source(models.HTTP, []string{"key-of-test-a"}, func(name string, load func() (*models.Mock, error)) bool {
+		onDisk = append(onDisk, name)
+		m, err := load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		found = found || m.Name == "test-a"
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatalf("the recording source visited %v, none of them test-a's own", onDisk)
+	}
+	// The learn step's earlier places of a pool recording are read through
+	// the reader the staging set: test-a's own recording, on disk, is a
+	// recording before the instant after it, and one at its own instant (a
+	// fixture's whole second may have made it before a call made then: the
+	// caller tells the paired recording apart), and none before it.
+	if p.before == nil {
+		t.Fatal("the staging set no reader of the recordings before an instant")
+	}
+	for _, tc := range []struct {
+		at   time.Time
+		want bool
+	}{{stageT0.Add(2 * time.Second), true}, {stageT0.Add(time.Second), true}, {stageT0.Add(time.Second - time.Nanosecond), false}} {
+		has := false
+		if err := p.before(tc.at, func(m *models.Mock) bool { has = has || m.Name == "test-a"; return true }); err != nil {
+			t.Fatal(err)
+		}
+		if has != tc.want {
+			t.Fatalf("the recordings before %v hold test-a: %v; want %v", tc.at, has, tc.want)
+		}
+	}
+	// The store hands each recording it reads for them to the proxy's
+	// learn step to keep for the set (coreAgent.RecordingKeeper), so each
+	// call does not decode them again.
+	if p.keeps == 0 {
+		t.Fatal("the on-disk store handed the proxy none of the recordings it read before an instant to keep")
+	}
+	// The next set's staging withdraws this set's worker scope before its
+	// view goes on: none of its names is reachable in the next set.
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime: models.BaseTime, BeforeTime: stageT0.Add(2 * time.Hour), FirstRecordedTestStart: stageT0, StrictMockWindow: true,
+		Exact: &models.ExactServing{Stage: true, Pool: []string{"boot-config"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.workers[2:]; !reflect.DeepEqual(got, [][]string{{}, {}}) {
+		t.Fatalf("the next set's staging told the proxy %v; want the previous set's worker scope withdrawn", got)
+	}
+}
+
+// A set's staging call also stages, beside the startup band, the per-test
+// mocks a parser declares it needs staged whatever their recorded time
+// (models.StagingWithStartup): here the pushes of a broker kind, one
+// recorded before the first test, one at its start, one inside it and one in
+// the gap after it. It reads only those of its window, never the rest of the
+// recording nor a push past the window's end, and a test's own call is
+// unchanged. The mock manager files them as startup traffic, and the first
+// test refiles that tier to what was recorded before it.
+func TestStagingAlsoStagesTheMocksAParserDeclares(t *testing.T) {
+	isPush := func(m *models.Mock) bool { return m.Spec.Metadata["commandType"] == "MESSAGE" }
+	defer models.RegisterStagingNeed(agentPulsar, models.StagingNeed{Use: models.StagingWithStartup, Match: isPush})()
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	p := &mgrProxy{mm: mm}
+	a := diskAgent(t, p,
+		stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
+		agentBroker("push-boot", agentPulsar, "MESSAGE", stageT0.Add(-time.Second)),
+		agentBroker("push-at-cut", agentPulsar, "MESSAGE", stageT0),
+		stageMock("test-a", "/q", stageT0.Add(time.Second)),
+		agentBroker("push-in-a", agentPulsar, "MESSAGE", stageT0.Add(1500*time.Millisecond)),
+		agentBroker("send-in-a", agentPulsar, "SEND", stageT0.Add(1600*time.Millisecond)),
+		agentBroker("push-gap", agentPulsar, "MESSAGE", stageT0.Add(30*time.Second)),
+		stageMock("test-b", "/q", stageT0.Add(time.Minute)),
+		agentBroker("push-past-window", agentPulsar, "MESSAGE", stageT0.Add(3*time.Hour)))
+	core, logs := observer.New(zap.DebugLevel)
+	a.logger = zap.New(core)
+	startupNames := func() []string {
+		t.Helper()
+		startup, err := mm.GetStartupMocks()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, m := range startup {
+			names = append(names, m.Name)
+		}
+		return sortedNames(names)
+	}
+
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5}) {
+		t.Fatalf("the staging call read %v mocks from disk; want the 2 startup mocks and the 3 later pushes of its window", got)
+	}
+	staged := logs.FilterMessage("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs").All()
+	if len(staged) != 1 || staged[0].ContextMap()["startupMocks"] != int64(2) || staged[0].ContextMap()["declaredMocks"] != int64(3) {
+		t.Fatalf("staging logged %v; want 2 startup mocks and 3 declared ones", staged)
+	}
+	if got, want := startupNames(), []string{"boot-config", "push-at-cut", "push-boot", "push-gap", "push-in-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the staging call filed %v as startup traffic; want %v", got, want)
+	}
+
+	// The first test's call is unchanged: its window and the startup band.
+	// The first test refiles the startup tier to what was recorded before it.
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:        stageT0,
+		BeforeTime:       stageT0.Add(2 * time.Second),
+		StrictMockWindow: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5, 6}) {
+		t.Fatalf("the test's call read %v mocks from disk; want its 4 and the 2 startup mocks", got)
+	}
+	if got, want := startupNames(), []string{"boot-config", "push-boot"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("after the first test the startup tier is %v; want what was recorded before it, %v", got, want)
+	}
+}
+
+// With no kind declaring a need, the staging call reads the startup band
+// only, as before.
+func TestStagingWithNoDeclaredNeedReadsOnlyTheStartupBand(t *testing.T) {
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	p := &recordingProxy{}
+	a := diskAgent(t, p,
+		agentBroker("push-boot", agentPulsar, "MESSAGE", stageT0.Add(-time.Second)),
+		agentBroker("push-gap", agentPulsar, "MESSAGE", stageT0.Add(30*time.Second)))
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sortedNames(p.windowed[0][0]); !reflect.DeepEqual(got, []string{"push-boot"}) {
+		t.Fatalf("staged %v; want only the startup band", got)
+	}
+}
+
+// destinationsProxy records what the agent seeds as the stored set's
+// recorded destinations.
+type destinationsProxy struct {
+	recordingProxy
+	seeded [][]string
+}
+
+func (p *destinationsProxy) SeedRecordedDestinations(mocks []*models.Mock) {
+	p.seeded = append(p.seeded, sortedNames(namesOf(mocks)))
+}
+
+// When a store is published (finalizeClientMocks) the agent seeds the proxy
+// with the first mock its on-disk store holds of each recorded destination:
+// the whole recording's, not only what a staging stages. A store with no
+// on-disk store seeds none, replacing the previous store's.
+func TestAStoreSeedsTheProxyWithItsRecordedDestinations(t *testing.T) {
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	at := func(name, addr string, d time.Duration) *models.Mock {
+		m := stageMock(name, "/q", stageT0.Add(d))
+		m.Kind = models.MySQL
+		m.Spec.Metadata["destAddr"] = addr
+		return m
+	}
+	disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []*models.Mock{
+		at("db-first", "10.0.0.5:6033", time.Second),
+		at("db-later", "10.0.0.5:6033", time.Hour),
+		at("cache", "10.0.0.6:6390", time.Minute),
+	} {
+		if err := disk.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	p := &destinationsProxy{}
+	a := &Agent{logger: zap.NewNop(), Proxy: p}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{diskMocks: disk})
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	if want := [][]string{{"cache", "db-first"}, nil}; !reflect.DeepEqual(p.seeded, want) {
+		t.Fatalf("seeded %v; want the first mock of each destination, then none", p.seeded)
+	}
+}
+
+// Under the proven switch keploy mock replay stages only what was recorded
+// before the set's first test (keploy #4970), so the loopback ports a
+// recording reached, which keploy mock's loopback rules read, are seeded from
+// the on-disk store when it is published, as its destinations are: a local
+// dependency the recording reached only inside a test is a recorded port
+// before any staging, and one it never reached is not. A store with no
+// on-disk store seeds none, replacing the previous store's.
+func TestAStoreSeedsTheProxyWithThePortsItsRecordingReached(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	at := func(name, addr string, d time.Duration, startedByTests bool) *models.Mock {
+		m := stageMock(name, "/q", stageT0.Add(d))
+		m.Spec.Metadata["destAddr"] = addr
+		if startedByTests {
+			m.Spec.Metadata["startedByTests"] = "true"
+		}
+		return m
+	}
+	disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	for _, m := range []*models.Mock{
+		at("boot", "10.0.0.5:443", -5*time.Second, false),
+		at("in-test", "127.0.0.1:18094", time.Second, false),
+		at("in-test-later", "127.0.0.1:18094", time.Minute, false),
+		at("started", "127.0.0.1:18095", time.Minute, true),
+	} {
+		if err := disk.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	a := &Agent{logger: zap.NewNop(), Proxy: proxyPkg.New(zap.NewNop(), nil, &config.Config{})}
+	t.Cleanup(func() { a.finalizeClientMocks(context.Background(), &ClientMockStorage{}) })
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{diskMocks: disk})
+	if !proxyPkg.RecordedPort(18094) {
+		t.Fatal("the local dependency the recording reached only inside a test is not a recorded port; its connect would be refused")
+	}
+	for _, port := range []uint32{18095, 18096} {
+		if proxyPkg.RecordedPort(port) {
+			t.Fatalf("port %d is a recorded outside dependency; want it only a test-started one's, or never reached", port)
+		}
+	}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	if proxyPkg.RecordedPort(18094) {
+		t.Fatal("a store with no on-disk store kept the previous store's ports")
+	}
+}
+
+// diskListed registers kind, until t ends, as one whose parser holds a call
+// while the set holds an unserved recording of it (models.RegisterAnswerPlaced,
+// matching no mock, so none is placed at its answer), as the Redis parser
+// registers its kind: the agent's on-disk store lists it by kind in either
+// switch mode.
+func diskListed(t *testing.T, kind models.Kind) {
+	t.Helper()
+	t.Cleanup(models.RegisterAnswerPlaced(kind, func(*models.Mock) bool { return false }))
+}
+
+// ofKindProxy is a recordingProxy that takes the set's recordings of a kind
+// (coreAgent.RecordedOfKindSetter).
+type ofKindProxy struct {
+	*recordingProxy
+	src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	set int
+}
+
+func (p *ofKindProxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.src, p.set = src, p.set+1
+	return nil
+}
+
+// With the switch off, each staging hands the proxy the on-disk store's
+// recordings of a kind it lists by kind, one placed at its answer, as Redis
+// is (integrations.RecordedSetRanger): a test's call reads its own window,
+// and the source still ranges the whole set, those of the other tests and of
+// the startup band included.
+func TestEveryStagingHandsTheProxyTheSetAsRecorded(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "0")
+	diskListed(t, models.HTTP)
+	a, rp, _ := stagingStore(t)
+	p := &ofKindProxy{recordingProxy: rp}
+	a.Proxy = p
+	for _, params := range []models.MockFilterParams{
+		{AfterTime: models.BaseTime, BeforeTime: stageT0.Add(2 * time.Hour), FirstRecordedTestStart: stageT0, StrictMockWindow: true},
+		{AfterTime: stageT0, BeforeTime: stageT0.Add(2 * time.Second), StrictMockWindow: true},
+	} {
+		before := p.set
+		if err := a.UpdateMockParams(context.Background(), params); err != nil {
+			t.Fatal(err)
+		}
+		if p.set != before+1 || p.src == nil {
+			t.Fatalf("staging from %s set the source %d times (nil: %v); want once, the on-disk store's", params.AfterTime, p.set-before, p.src == nil)
+		}
+	}
+	if got, want := sortedNames(p.windowed[1][0]), []string{"boot-auth", "boot-config", "test-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the test's call staged %v; want %v", got, want)
+	}
+	var names []string
+	if err := p.src(models.HTTP, func(name string, _ func() (*models.Mock, error)) bool {
+		names = append(names, name)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sortedNames(names), []string{"boot-auth", "boot-config", "poll-later", "test-a", "test-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the source ranged %v; want the whole set %v", got, want)
+	}
+}
+
+// recordedSetProxy puts a real MockManager behind the agent and hands it the
+// set's recordings of a kind (coreAgent.RecordedOfKindSetter), as the proxy
+// does.
+type recordedSetProxy struct{ *mgrProxy }
+
+func (p *recordedSetProxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.mm.SetRecordedOfKind(src)
+	return nil
+}
+
+// A pipelined write's frames share one request time, and the agent keeps
+// some of a set's per-test mocks in memory (no reply time, so not on disk:
+// proxyPkg.EligibleForDisk) and the rest on disk. A test's read lists the
+// resident ones first, and the set as recorded (MockManager.RangeRecordedSet)
+// visits the trees, then the disk. Each mock still carries its place in the
+// set as the client sent it (models.TestModeInfo.LoadSeq), whichever tier
+// holds it, so a parser orders frames of one time as recorded.
+func TestEveryMockKeepsItsPlaceInTheSetWhicheverTierHoldsIt(t *testing.T) {
+	for _, sw := range []string{"0", "1"} {
+		t.Run("KEPLOY_PROVEN="+sw, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", sw)
+			t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+			diskListed(t, models.HTTP)
+			var filtered []*models.Mock
+			want := map[string]uint32{}
+			for i, resident := range []bool{false, true, false, true, false} {
+				m := stageMock("frame-"+string(rune('0'+i)), "/q", stageT0.Add(time.Second))
+				if resident {
+					m.Spec.ResTimestampMock = time.Time{}
+				}
+				filtered = append(filtered, m)
+				want[m.Name] = uint32(i + 1)
+			}
+			// A later test's, outside the window staged: one on disk, one
+			// kept in memory.
+			filtered = append(filtered, stageMock("later", "/q", stageT0.Add(time.Minute)))
+			want["later"] = 6
+			held := stageMock("later-resident", "/q", stageT0.Add(time.Minute))
+			held.Spec.ResTimestampMock = time.Time{}
+			filtered = append(filtered, held)
+			want["later-resident"] = 7
+			unfiltered := []*models.Mock{stageSessionMock("session", "/config")}
+			want["session"] = 8
+
+			mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			a := strictAgent(true)
+			a.Proxy = &recordedSetProxy{&mgrProxy{mm: mm}}
+			header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, filtered, unfiltered))
+			if err := a.StoreMocksStream(context.Background(), header, dec); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+				AfterTime: stageT0, BeforeTime: stageT0.Add(2 * time.Second), StrictMockWindow: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]uint32{}
+			var order []string
+			whole, err := mm.RangeRecordedSet(models.HTTP, func(name string, load func() (*models.Mock, error)) bool {
+				m, err := load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				got[name] = m.TestModeInfo.LoadSeq
+				order = append(order, name)
+				return true
+			})
+			if err != nil || !whole {
+				t.Fatalf("the set as recorded: whole %v, err %v; want the whole set", whole, err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("places in the set as sent: %v; want %v", got, want)
+			}
+			// The tiers split the frames: the set as recorded visits them in
+			// another order than sent, which is what LoadSeq repairs.
+			if slices.IsSortedFunc(order, func(a, b string) int { return cmp.Compare(want[a], want[b]) }) {
+				t.Fatalf("visited %v, the order sent: the frames are no longer split between memory and disk", order)
+			}
+		})
+	}
+}
