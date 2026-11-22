@@ -2582,6 +2582,70 @@ func TestAGroupsLeaderIsNeverLeftToTheDaemonStop(t *testing.T) {
 	awaitReaped(t, "the leader", reaped)
 }
 
+// A process is adopted only as the parent it runs under exits, so the group
+// wait reads again, at that exit, whether keploy's stop of the daemons ends
+// it (leftOnParentExit): a shell's background command that ignores the
+// interrupt is left to that stop once the shell is gone, though it runs on.
+// Here the stop of the daemons ends a process once its parent is not the
+// shell that started it.
+func TestAProcessIsLeftToTheDaemonStopOnceItsParentExits(t *testing.T) {
+	shell := exec.Command("sh", "-c", "sleep 600 & echo $!; wait")
+	shell.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	out, err := shell.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shell.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-shell.Process.Pid, syscall.SIGKILL)
+		_ = shell.Wait()
+	})
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading the background command's pid: %v", err)
+	}
+	child, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("the background command's pid %q: %v", line, err)
+	}
+	m, ok := ProcOf(child)
+	if !ok {
+		t.Fatal("cannot read the background command")
+	}
+	prev := daemonStopEnds.Load()
+	t.Cleanup(func() { daemonStopEnds.Store(prev) })
+	LeaveToDaemonStop(func(pid int, start uint64) bool {
+		st, ok := ReadProcStat(pid)
+		return ok && pid == m.PID && start == m.Start && st.StartTime == m.Start && st.PPID != shell.Process.Pid
+	})
+	exit, releaseExit := ExitOf(m)
+	defer releaseExit()
+	done := make(chan struct{})
+	defer close(done)
+	left := make(chan bool, 1)
+	go func() { left <- leftOnParentExit(m, exit, done) }()
+	select {
+	case <-left:
+		t.Fatal("the wait ended while the background command ran under its shell")
+	case <-time.After(300 * time.Millisecond):
+	}
+	_ = shell.Process.Signal(syscall.SIGKILL)
+	_ = shell.Wait()
+	select {
+	case got := <-left:
+		if !got {
+			t.Fatal("the wait ended as if stopped")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the background command, adopted as its shell exited, was still waited for")
+	}
+	if running, err := isProcessRunning(m.PID); err != nil || !running {
+		t.Fatalf("the background command no longer runs (%v, %v): the row proves nothing", running, err)
+	}
+}
+
 // The processes a stop watches all gone is the app's exit, though its event
 // has not come (a starved daemon slow to say its container stopped); and at
 // the user's Ctrl+C, which the stop offers once the run is interrupted, a
