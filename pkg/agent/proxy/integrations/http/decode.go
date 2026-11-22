@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -593,6 +594,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// it, and how many times the test recorded it.
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
 						zap.String("test", again.Test), zap.String("call", shapeSummary(request)), utils.PathTagField(models.URLPathTag(ctx, request.Method, request.URL)), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
+					if provenswitch.On() && opts.Learn && !integrations.LearnEnded(mockDb) {
+						if t := learn.TrackerFrom(reqCtx); t != nil {
+							in := integrations.InFlightOf(reqCtx)
+							if input.arrived.IsZero() {
+								t.ServedMockIn(again.Mock, in)
+							} else {
+								t.ServedMockAtIn(again.Mock, input.arrived, in)
+							}
+							view, key := servedLiveView(again.Mock, input)
+							t.ServedMockLive(again.Mock, key, view)
+						}
+					}
 					stub, ok, diag, lmiss, repeat = again.Mock, true, nil, nil, true
 				}
 			}

@@ -1279,10 +1279,12 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 // declares variables fits the call, and rest, the pool less those
 // recordings, is the later passes' to decide the call against.
 type varStage struct {
-	served *models.Mock
-	diag   *matchDiag
-	retry  bool
-	rest   []*models.Mock
+	served       *models.Mock
+	source       *models.Mock
+	renderedResp bool
+	diag         *matchDiag
+	retry        bool
+	rest         []*models.Mock
 }
 
 // variableStage is the variable pass of one attempt to answer a call, under
@@ -1326,7 +1328,14 @@ func (h *HTTP) variableStage(ctx context.Context, input *req, mockDb integration
 		if commitCursor != nil {
 			commitCursor()
 		}
-		return varStage{served: served}, nil
+		renderedResp := false
+		for _, d := range hit.decls {
+			if len(d.answer) > 0 {
+				renderedResp = true
+				break
+			}
+		}
+		return varStage{served: served, source: hit.mock, renderedResp: renderedResp}, nil
 	}
 	if problem != nil {
 		// A recording fit this call but its variables did not hold: only
@@ -1340,7 +1349,7 @@ func (h *HTTP) variableStage(ctx context.Context, input *req, mockDb integration
 			return varStage{retry: true}, nil
 		}
 		if ok {
-			return varStage{served: served}, nil
+			return varStage{served: served, source: served}, nil
 		}
 		if scope.moved() {
 			return varStage{retry: true}, nil // a test began meanwhile: check the call against it
@@ -1384,6 +1393,23 @@ func (h *HTTP) fullRoundVariables(ctx context.Context, input *req, mockDb integr
 		case vs.retry:
 			continue
 		case vs.served != nil:
+			// State F's view of the serve updateMock just told the learn
+			// tracker of, before the application can read the answer: without
+			// it, a later call in record's full round reads the recording as
+			// served with no view stated (fUnstated/fMay) and refuses every
+			// fresh value as unknown.
+			if t := learn.TrackerFrom(ctx); t != nil && vs.source != nil {
+				if vs.renderedResp && vs.served.Spec.HTTPResp != nil {
+					ans := vs.served
+					view, key := servedView(vs.source, input, answerView{render: func(*models.Mock) (*models.Mock, error) {
+						return ans, nil
+					}}, ans.Spec.HTTPResp)
+					t.ServedMockLive(vs.source, key, view)
+				} else {
+					view, key := servedLiveView(vs.source, input)
+					t.ServedMockLive(vs.source, key, view)
+				}
+			}
 			return vs.served, nil, true, nil
 		case vs.diag != nil:
 			return nil, vs.diag, true, nil

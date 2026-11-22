@@ -2,6 +2,7 @@ package learn
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -400,9 +401,9 @@ func TestOrderServedViewReadsTheViewItsAdaptersStatedOfEachServe(t *testing.T) {
 		{"told with no key", func(tr *Tracker) { tr.ServedMock(m); tr.ServedMockLive(m, "", benign) }, unread, false},
 		{"told with a view that cannot be read", func(tr *Tracker) { tr.ServedMock(m); tr.ServedMockLive(m, "a", broken) }, unread, false},
 		// The cap written out: a row that read maxLiveViews would move with it.
-		{"told with four different views, as many as a set keeps", tellViews(benign, benign, benign, benign), learns, false},
-		{"told with four different views, the fourth holding the word", tellViews(benign, benign, benign, holding), inAView, false},
-		{"told with five different views, one more than a set keeps", tellViews(benign, benign, benign, benign, benign), unread, false},
+		{"told with 64 different views, as many as a set keeps", tellViews(slices.Repeat([]func() (*models.Mock, error){benign}, 64)...), learns, false},
+		{"told with 64 different views, the 64th holding the word", tellViews(append(slices.Repeat([]func() (*models.Mock, error){benign}, 63), holding)...), inAView, false},
+		{"told with 65 different views, one more than a set keeps", tellViews(slices.Repeat([]func() (*models.Mock, error){benign}, 65)...), unread, false},
 		{"told before its serve", func(tr *Tracker) { tr.ServedMockLive(m, "a", benign); tr.ServedMock(m) }, unstated, false},
 		{"told in the previous set", func(tr *Tracker) {
 			tr.ServedMock(m)

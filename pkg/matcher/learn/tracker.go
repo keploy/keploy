@@ -1829,7 +1829,7 @@ func (t *Tracker) ServedMockLive(m *models.Mock, key string, view func() (*model
 // could not be read, which fails closed, so a set keeps at most
 // maxLiveViews loaders of each recording, and a later call reads at most
 // as many views of it.
-const maxLiveViews = 4
+const maxLiveViews = 64
 
 // liveViews are the views stated of one mock's serves (ServedMockLive): each
 // different one, in the order first stated, and each statement: the last

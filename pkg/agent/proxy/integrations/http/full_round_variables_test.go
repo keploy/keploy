@@ -933,3 +933,95 @@ func TestFullRoundComparesARecordingWithVariablesUnderTheReplaysNoise(t *testing
 		}
 	}
 }
+
+// observedVarDb wraps varDb and notifies observe on every consume, just as
+// proxy.MockManager's servedObserver notifies learn.Tracker.ServedMock.
+type observedVarDb struct {
+	*varDb
+	observe func(*models.Mock)
+}
+
+func (d *observedVarDb) DeleteFilteredMock(m models.Mock) bool {
+	ok := d.varDb.DeleteFilteredMock(m)
+	if ok && d.observe != nil {
+		cp := m
+		d.observe(&cp)
+	}
+	return ok
+}
+
+func (d *observedVarDb) MarkMockAsUsed(m models.Mock) bool {
+	ok := d.varDb.MarkMockAsUsed(m)
+	if ok && d.observe != nil {
+		cp := m
+		d.observe(&cp)
+	}
+	return ok
+}
+
+// In record's full round, a call answered by the variable pass
+// (fullRoundVariables) states F's view of the serve to the learn tracker
+// (ServedMockLive) right after MockManager records the serve. Without it, the
+// recording reads as served with no view stated (fUnstated/fMay) and poisons
+// every fresh value in later tests as refused (unknown). Fail-closed: if the
+// rendered answer DOES hold the later test's live value, the later test still
+// refuses it instead of learning it fresh.
+func TestFullRoundVariablesStatesServedViewForLaterLearnCalls(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name       string
+		rendered   bool   // mock-1 renders an echoed value into its response
+		liveFirst  string // value sent to mock-1 in test 1
+		liveSecond string // value sent to mock-2 in test 2
+		wantLearn  bool
+	}{
+		{"recorded answer: later fresh id learns", false, "app-live-11111111", "6b01e08301042249ce73ffff", true},
+		{"rendered echo answer: unrelated later fresh id learns", true, "k-live-11111111", "6b01e08301042249ce73ffff", true},
+		{"rendered echo answer holding later id: fail-closed refuses fresh learn", true, "6b01e08301042249ce73ffff", "6b01e08301042249ce73ffff", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := learn.NewTracker()
+			ctx := learn.WithTracker(context.Background(), tr)
+			tr.Begin()
+
+			var m1 *models.Mock
+			if tc.rendered {
+				m1 = at(onPay(varMock("mock-1", "POST", "/charge", `{"key":"k-rec-00000000","amount":5}`, 200, `{"key":"k-rec-00000000","ok":true}`,
+					models.MockVariables{"key": {Recorded: "k-rec-00000000", Bind: "body.key", Answer: []string{"body.key"}, Echo: true}})), 1)
+			} else {
+				m1 = at(onPay(varMock("mock-1", "POST", "/apps", `{"appId":"app-rec-00000000"}`, 200, `{"ok":true}`,
+					models.MockVariables{"appId": bindV("app-rec-00000000", "body.appId")})), 1)
+			}
+			db1 := &observedVarDb{varDb: &varDb{perTest: []*models.Mock{m1}}, observe: tr.ServedMock}
+			var got1 served
+			if tc.rendered {
+				got1 = serveCall(t, ctx, db1, true, "POST", "/charge", `{"key":"`+tc.liveFirst+`","amount":5}`)
+			} else {
+				got1 = serveCall(t, ctx, db1, true, "POST", "/apps", `{"appId":"`+tc.liveFirst+`"}`)
+			}
+			if got1.status != 200 {
+				t.Fatalf("test 1 call failed: %d %q (reports %v)", got1.status, got1.body, got1.reported)
+			}
+			tr.End()
+
+			// Test 2 sends a fresh 24-hex ObjectID to mock-2 (no variables yet).
+			tr.Begin()
+			h, n, opts := learnOn(t)
+			m2 := learnRecorded("mock-2", 2*time.Second, "POST", "/reserve", `{"oid":"6b01dea501042249ce73f797"}`, nil, `{"ok":true}`)
+			db2 := &learnDb{perTest: []*models.Mock{m2}, observe: tr.ServedMock}
+			got2, miss2, err := h.learnMatch(ctx, live("POST", "/reserve", `{"oid":"`+tc.liveSecond+`"}`, nil), db2, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantLearn {
+				if got2 == nil || miss2 != nil {
+					t.Fatalf("test 2 fresh id refused (got=%v, miss=%+v); mock-1's view was not stated by fullRoundVariables", got2, miss2)
+				}
+			} else {
+				if got2 != nil || miss2 == nil || !strings.Contains(miss2.res.Why, "mock-1") {
+					t.Fatalf("FALSE GREEN: test 2 id matching mock-1's rendered answer was not refused naming mock-1 (got=%v, miss=%+v)", got2, miss2)
+				}
+			}
+		})
+	}
+}
