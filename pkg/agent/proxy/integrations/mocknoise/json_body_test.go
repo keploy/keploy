@@ -27,22 +27,25 @@ func driftAsBefore(recorded, live []byte, known map[string][]string, typeStrict 
 	return out, true
 }
 
-// undecodable is JSON that json.Unmarshal does not decode into an
-// interface{}: its number is past float64's range.
-var undecodable = []byte(`{"id":1e400,"name":"a"}`)
+// beyondFloat64 is valid JSON whose number exceeds float64's range; with
+// json.Number decoding, both JSONBody and matcher.ChangedJSONFieldPaths
+// decode and compare it without overflow.
+var beyondFloat64 = []byte(`{"id":1e400,"name":"a"}`)
 
 // jsonBodyCases are recorded bodies compared with one live body: equal,
-// drifted in value, in type and by a removed field, not JSON, and JSON that
-// does not decode.
+// drifted in value (including integers above 2^53), in type and by a removed
+// field, not JSON, and JSON with a number past float64's range.
 var jsonBodyCases = [][]byte{
 	[]byte(`{"id":7,"name":"a","tags":["x"]}`),
 	[]byte(`{"id":8,"name":"a","tags":["x"]}`),
 	[]byte(`{"id":"7","name":"a","tags":["x"]}`),
 	[]byte(`{"id":7,"name":"a","tags":["x"],"gone":true}`),
 	[]byte(`{"id":7,"name":"b","tags":["y"]}`),
+	[]byte(`{"id":1234567890123456789,"name":"a","tags":["x"]}`),
+	[]byte(`{"id":1234567890123456700,"name":"a","tags":["x"]}`),
 	[]byte(`not json`),
 	nil,
-	undecodable,
+	beyondFloat64,
 }
 
 // TestDetectJSONBodyDriftFindsWhatDetectJSONDriftFoundBefore: one live
@@ -50,11 +53,11 @@ var jsonBodyCases = [][]byte{
 // compares a command's live body with its candidates, finds the drift and
 // comparability DetectJSONDrift found when it validated and decoded both
 // bodies on every comparison, under every noise setting; and so does
-// DetectJSONDrift now. Live bodies that are not JSON, or do not decode, are
-// compared too.
+// DetectJSONDrift now. Live bodies that are not JSON, or have numbers beyond
+// float64's range, are compared too.
 func TestDetectJSONBodyDriftFindsWhatDetectJSONDriftFoundBefore(t *testing.T) {
-	if _, ok := NewJSONBody(undecodable).decodedValue(); ok || !json.Valid(undecodable) {
-		t.Fatalf("%s must be JSON that does not decode", undecodable)
+	if _, ok := NewJSONBody(beyondFloat64).decodedValue(); !ok || !json.Valid(beyondFloat64) {
+		t.Fatalf("%s must be valid JSON that decodes via json.Number", beyondFloat64)
 	}
 	settings := []struct {
 		name             string
@@ -69,7 +72,7 @@ func TestDetectJSONBodyDriftFindsWhatDetectJSONDriftFoundBefore(t *testing.T) {
 		{name: "valueChangesOnly", valueChangesOnly: true},
 		{name: "recordedNoise", isNoise: func(v string) bool { return v == "a" }},
 	}
-	lives := [][]byte{jsonBodyCases[0], []byte(`not json`), undecodable}
+	lives := [][]byte{jsonBodyCases[0], jsonBodyCases[5], []byte(`not json`), beyondFloat64}
 	for _, s := range settings {
 		for _, liveRaw := range lives {
 			live := NewJSONBody(liveRaw)

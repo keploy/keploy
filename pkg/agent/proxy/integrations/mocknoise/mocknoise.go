@@ -472,8 +472,7 @@ type JSONBody struct {
 	// as bytes.
 	rawFrom func() []byte
 	// checked, valid: json.Valid's answer, once asked. read, decoded,
-	// value: json.Unmarshal's, once asked (decoded false: a body that is
-	// JSON but does not decode, a number past float64's range).
+	// value: matcher.UnmarshallJSON's, once asked.
 	checked, valid, read, decoded bool
 	value                         any
 	// reads counts the times the body was validated or decoded, so a test
@@ -519,13 +518,17 @@ func (b *JSONBody) isJSON() bool {
 	return b.valid
 }
 
-// decodedValue is the body as json.Unmarshal decodes it into an interface{}
-// (ok false: it does not decode), decoded once.
+// decodedValue is the body as matcher.UnmarshallJSON decodes it into an
+// interface{} (preserving JSON number precision via json.Number), decoded once.
 func (b *JSONBody) decodedValue() (value any, ok bool) {
 	if !b.read {
 		b.read = true
 		b.reads++
-		b.decoded = json.Unmarshal(b.raw, &b.value) == nil
+		v, err := matcher.UnmarshallJSON(string(b.raw), nil)
+		if err == nil && len(b.raw) > 0 {
+			b.value = v
+			b.decoded = true
+		}
 	}
 	return b.value, b.decoded
 }
