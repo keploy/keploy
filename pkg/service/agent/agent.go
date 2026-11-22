@@ -715,7 +715,12 @@ const (
 func (a *Agent) resetScopeState() {
 	a.scopeMu.Lock()
 	a.workerOpen, a.openProc = nil, nil
-	// A test a previous session left open is no test case of this one.
+	// A test a previous session left open is no test case of this one, and
+	// the proxy must not keep tagging serves with its window id.
+	for k := range a.openSeq {
+		a.closeSeqLocked(k)
+	}
+	a.openSeq = nil
 	for _, s := range a.openScopes {
 		s.Abandon()
 	}

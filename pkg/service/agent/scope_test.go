@@ -409,8 +409,9 @@ func (n *windowNoter) CloseTestWindow(seq uint64) {
 // proxy that can say what answered in it that it is open until it closes,
 // and puts the id on the window it records: a mock the proxy served while it
 // was open names it (models.MockState.AnsweredIn). A begin that replaces a
-// window still open closes it first; a window withdrawn closes too. A proxy
-// that cannot say gets no window's id, and its windows carry none.
+// window still open closes it first; a window withdrawn, abandoned, or left
+// open across a session reset closes too. A proxy that cannot say gets no
+// window's id, and its windows carry none.
 func TestATestWindowsIdIsTheOneTheProxyServedUnder(t *testing.T) {
 	ctx := context.Background()
 	n := &windowNoter{open: map[uint64]bool{}}
@@ -433,6 +434,22 @@ func TestATestWindowsIdIsTheOneTheProxyServedUnder(t *testing.T) {
 		seqs[w.Name] = w.Seq
 	}
 	require.Equal(t, map[string]uint64{"test1": 3, "suite": 1}, seqs)
+
+	// A window a previous session left open closes on session reset so the
+	// next session's serves are not tagged with its id.
+	require.NoError(t, a.BeginScope(ctx, "leaked", 0))
+	require.Equal(t, map[uint64]bool{6: true}, n.open)
+	a.resetScopeState()
+	require.Empty(t, n.open)
+	require.Empty(t, a.openSeq)
+	require.Equal(t, "close 6", n.events[len(n.events)-1])
+	require.NoError(t, a.BeginScope(ctx, "next", 0))
+	require.NoError(t, a.EndScope(ctx, "next", 0))
+	require.Empty(t, n.open)
+	ws, err = a.GetScopeWindows(ctx)
+	require.NoError(t, err)
+	require.Len(t, ws, 1)
+	require.Equal(t, uint64(7), ws[0].Seq)
 
 	plain := newRecordAgent()
 	require.NotPanics(t, func() {
