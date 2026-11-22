@@ -2501,6 +2501,12 @@ func JsonContains(actualJSON string, expectedJSON map[string]interface{}) (bool,
 	return containsRecursive(actual, expectedJSON), nil
 }
 
+// JSONValueEqual compares two decoded JSON values with mathematical equality
+// for numbers regardless of whether they are json.Number, float64, or Go ints.
+func JSONValueEqual(actual, expected interface{}) bool {
+	return jsonValueEqual(actual, expected)
+}
+
 // jsonValueEqual compares two decoded JSON values with mathematical equality
 // for numbers regardless of whether they are json.Number, float64, or Go ints.
 func jsonValueEqual(actual, expected interface{}) bool {
