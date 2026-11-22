@@ -4,6 +4,7 @@ package utils
 
 import (
 	"errors"
+	"sync"
 	"syscall"
 	"time"
 
@@ -123,9 +124,21 @@ func init() {
 // it goes on without it (killWithin).
 const memberSignalWait = time.Second
 
-// killMember is the stop's kill(2) of one process of a group on macOS
-// (killWithin); a test answers it.
-var killMember = killWithin
+var (
+	// killMember is the stop's kill(2) of one process of a group on macOS
+	// (killWithin); a test answers it.
+	killMember = killWithin
+
+	// killSyscall is the underlying kill(2) call killWithin runs; a test
+	// replaces it to hold calls in flight without a real held posix_spawn.
+	killSyscall = syscall.Kill
+
+	// killWaiters tracks targets (pid or -pgid) that currently have an
+	// in-flight kill(2) goroutine in the kernel, so at most one goroutine
+	// waits per target while unrelated targets are never blocked.
+	killWaitersMu sync.Mutex
+	killWaiters   = map[int]struct{}{}
+)
 
 // errKillWaits is killWithin's answer for a kill(2) that had not returned.
 var errKillWaits = errors.New("the signal waits in the kernel for a posix_spawn that is held")
@@ -167,7 +180,7 @@ func signalGroupByMembers(logger *zap.Logger, pid int, sig syscall.Signal) (sent
 	var refused error
 	for _, member := range members {
 		sent[member] = true
-		switch err := killMember(member, sig, memberSignalWait); {
+		switch err := killMember(logger, member, sig, memberSignalWait); {
 		case err == nil:
 			reached++
 		case errors.Is(err, errKillWaits):
@@ -183,7 +196,7 @@ func signalGroupByMembers(logger *zap.Logger, pid int, sig syscall.Signal) (sent
 		}
 	}
 	if sig == syscall.SIGKILL {
-		switch err := killWithin(pid, sig, memberSignalWait); {
+		switch err := killWithin(logger, pid, sig, memberSignalWait); {
 		case err == nil, errors.Is(err, errKillWaits), errors.Is(err, syscall.ESRCH):
 		case errors.Is(err, syscall.EPERM) && groupExited(pgid):
 			// Zombies only are left.
@@ -226,17 +239,55 @@ func signalJoinedMembers(logger *zap.Logger, pgid int, sig syscall.Signal, sent 
 			continue
 		}
 		sent[member] = true
-		err := killMember(member, sig, memberSignalWait)
+		err := killMember(logger, member, sig, memberSignalWait)
 		logger.Debug("signalled a process that joined the process group after its signal",
 			zap.Int("pgid", pgid), zap.Int("pid", member), zap.String("signal", sig.String()), zap.Error(err))
 	}
 }
 
-// killWithin is kill(2) of pid with sig, waited for wait at most: a kill that
-// has not returned by then answers errKillWaits, and finishes on its own.
-func killWithin(pid int, sig syscall.Signal, wait time.Duration) error {
+// killWithin is kill(2) of pid with sig, waited for wait at most.
+//
+// XNU can block kill(2) uninterruptibly while a target process (or a member of
+// a target process group) is held inside posix_spawn. Running kill(2) in its
+// own goroutine lets the stop move on after wait with errKillWaits, while that
+// goroutine -- and the OS thread pinned to the blocked syscall -- stays blocked
+// in the kernel until the held spawn ends.
+//
+// To keep repeated stops in a long-lived agent from piling up duplicate stuck
+// goroutines for the same target, killWaiters allows at most one in-flight
+// kill(2) per target pid. A repeat kill to a pid whose earlier kill is still
+// waiting in the kernel logs a warning and returns errKillWaits (counted as
+// reached) without spawning a second goroutine, while kills to any other pid
+// -- including the by-pid kill to the process that made a held spawn -- always
+// go out and are never refused. Once a blocked kill(2) returns, its goroutine
+// removes pid from killWaiters before delivering its result.
+func killWithin(logger *zap.Logger, pid int, sig syscall.Signal, wait time.Duration) error {
+	killWaitersMu.Lock()
+	if _, busy := killWaiters[pid]; busy {
+		killWaitersMu.Unlock()
+		if logger != nil {
+			logger.Warn("a kill(2) for this target is already waiting in the kernel; skipping duplicate kill goroutine",
+				zap.Int("pid", pid), zap.String("signal", sig.String()))
+		}
+		return errKillWaits
+	}
+	killWaiters[pid] = struct{}{}
+	killWaitersMu.Unlock()
+
 	done := make(chan error, 1)
-	go func() { done <- syscall.Kill(pid, sig) }()
+	go func() {
+		// Remove pid from killWaiters before sending on done so a normal
+		// return never races with a follow-up signal (such as SIGKILL after
+		// SIGINT) to the same target.
+		done <- func() error {
+			defer func() {
+				killWaitersMu.Lock()
+				delete(killWaiters, pid)
+				killWaitersMu.Unlock()
+			}()
+			return killSyscall(pid, sig)
+		}()
+	}()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {

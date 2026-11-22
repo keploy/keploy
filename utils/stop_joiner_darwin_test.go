@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -227,7 +228,7 @@ func TestAKillThatWaitsOnAHeldSpawnReachesItsProcess(t *testing.T) {
 	})
 	realKill := killMember
 	t.Cleanup(func() { killMember = realKill })
-	killMember = func(pid int, sig syscall.Signal, _ time.Duration) error {
+	killMember = func(_ *zap.Logger, pid int, sig syscall.Signal, _ time.Duration) error {
 		switch pid {
 		case refuses:
 			return syscall.EPERM
@@ -247,5 +248,151 @@ func TestAKillThatWaitsOnAHeldSpawnReachesItsProcess(t *testing.T) {
 	}
 	for _, e := range logs.FilterLevelExact(zap.ErrorLevel).All() {
 		t.Errorf("the signal logged an ERROR: %q %v", e.Message, e.ContextMap())
+	}
+}
+
+// killWithin keeps at most one in-flight kill(2) goroutine per target pid:
+// a repeat kill to a pid whose earlier kill is still blocked in the kernel
+// logs a warning and returns errKillWaits without spawning a second goroutine,
+// kills to any other pid (including the by-pid kill to the process that made a
+// held spawn, even with many unrelated pids stuck) always go out and are never
+// refused, and once a blocked kill finishes its pid entry is released cleanly.
+func TestKillWithinDeduplicatesPerPIDWithoutBlockingOtherTargets(t *testing.T) {
+	realSyscall := killSyscall
+	release := make(chan struct{})
+	var released sync.Once
+	unblock := func() { released.Do(func() { close(release) }) }
+
+	waitEmpty := func(d time.Duration) int {
+		for deadline := time.Now().Add(d); ; time.Sleep(5 * time.Millisecond) {
+			killWaitersMu.Lock()
+			n := len(killWaiters)
+			killWaitersMu.Unlock()
+			if n == 0 || time.Now().After(deadline) {
+				return n
+			}
+		}
+	}
+
+	t.Cleanup(func() {
+		unblock()
+		if n := waitEmpty(5 * time.Second); n != 0 {
+			t.Errorf("killWaiters has %d entries after cleanup; want 0", n)
+		}
+		killSyscall = realSyscall
+	})
+
+	const (
+		makerPID = 2001
+		heldPID  = 2002
+	)
+	var mu sync.Mutex
+	calls := map[int]int{}
+	entered := make(chan int, 64)
+	killSyscall = func(pid int, sig syscall.Signal) error {
+		mu.Lock()
+		calls[pid]++
+		mu.Unlock()
+		if pid == makerPID || pid == -makerPID {
+			// A by-pid kill to the spawn's maker returns at once.
+			return nil
+		}
+		entered <- pid
+		<-release
+		return nil
+	}
+	callCount := func(pid int) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls[pid]
+	}
+
+	core, logs := observer.New(zap.DebugLevel)
+	logger := zap.New(core)
+
+	// 1. First kill to heldPID blocks in the kernel and returns errKillWaits.
+	if err := killWithin(logger, heldPID, syscall.SIGINT, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("first kill of %d answered %v; want errKillWaits", heldPID, err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("first kill of %d never entered killSyscall", heldPID)
+	}
+	if got := logs.FilterLevelExact(zap.WarnLevel).Len(); got != 0 {
+		t.Fatalf("logged %d warnings on first stuck kill; want 0", got)
+	}
+
+	// 2. Repeat kill to the same stuck pid spawns no second goroutine, logs a
+	// warning, and returns errKillWaits (counted as reached).
+	if err := killWithin(logger, heldPID, syscall.SIGKILL, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("repeat kill of %d answered %v; want errKillWaits", heldPID, err)
+	}
+	if got := callCount(heldPID); got != 1 {
+		t.Fatalf("killSyscall ran %d times for stuck pid %d; want 1", got, heldPID)
+	}
+	warns := logs.FilterLevelExact(zap.WarnLevel).All()
+	if len(warns) != 1 {
+		t.Fatalf("logged %d warnings on duplicate stuck kill; want 1", len(warns))
+	}
+	if ctx := warns[0].ContextMap(); ctx["pid"] != int64(heldPID) {
+		t.Errorf("duplicate kill warning fields = %v; want pid=%d", ctx, heldPID)
+	}
+
+	// 3. Even with 40 other unrelated pids stuck in flight, a kill to another
+	// target (here, the held spawn's maker via signalGroupByMembers) always
+	// goes out and is never refused.
+	for pid := 3001; pid <= 3040; pid++ {
+		if err := killWithin(logger, pid, syscall.SIGINT, 5*time.Millisecond); !errors.Is(err, errKillWaits) {
+			t.Fatalf("stuck kill of unrelated pid %d answered %v; want errKillWaits", pid, err)
+		}
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("stuck kill of unrelated pid %d never entered killSyscall", pid)
+		}
+	}
+
+	stubProcessReads(t, func(int) ([]int, error) { return []int{makerPID, heldPID}, nil }, map[int]procsock.Proc{
+		makerPID: {PID: makerPID, PPID: 1, PGID: makerPID},
+		heldPID:  {PID: heldPID, PPID: makerPID, PGID: makerPID},
+	})
+	sent, err := signalGroupByMembers(logger, -makerPID, syscall.SIGKILL)
+	if err != nil {
+		t.Fatalf("SIGKILL of group %d with stuck waiters answered %v; want nil", makerPID, err)
+	}
+	if !sent[makerPID] || !sent[heldPID] {
+		t.Fatalf("SIGKILL of group %d marked sent=%v; want %d and %d", makerPID, sent, makerPID, heldPID)
+	}
+	if got := callCount(makerPID); got != 1 {
+		t.Fatalf("by-pid kill to spawn maker %d ran %d times; want 1", makerPID, got)
+	}
+	if got := callCount(heldPID); got != 1 {
+		t.Fatalf("killSyscall ran %d times for already-stuck child %d; want 1", got, heldPID)
+	}
+	for _, e := range logs.FilterLevelExact(zap.ErrorLevel).All() {
+		t.Errorf("the group kill logged an ERROR: %q %v", e.Message, e.ContextMap())
+	}
+
+	// 4. Once the stuck kills finish, their pid entries are released cleanly
+	// and a subsequent kill to heldPID runs normally.
+	unblock()
+	if n := waitEmpty(2 * time.Second); n != 0 {
+		t.Fatalf("killWaiters still has %d entries after unblocking; want 0", n)
+	}
+	killSyscall = func(pid int, sig syscall.Signal) error {
+		mu.Lock()
+		calls[pid]++
+		mu.Unlock()
+		return nil
+	}
+	if err := killWithin(logger, heldPID, syscall.SIGINT, 200*time.Millisecond); err != nil {
+		t.Fatalf("kill of %d after release answered %v; want nil", heldPID, err)
+	}
+	if got := callCount(heldPID); got != 2 {
+		t.Fatalf("killSyscall ran %d times for %d after release; want 2", got, heldPID)
+	}
+	if n := waitEmpty(time.Second); n != 0 {
+		t.Fatalf("killWaiters has %d entries after normal kill; want 0", n)
 	}
 }
