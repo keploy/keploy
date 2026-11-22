@@ -246,9 +246,10 @@ func queryMembersDiffering(recorded string, live []string, noise []*regexp.Regex
 // query value with every url-noise regex, so a key anchored to a whole
 // value of the shape of the members that differ (queryValueEntry) masks
 // them, on both sides, in each run, and no path (each begins with "/").
-// A member of no id shape, which the second pass never lets differ (a
-// value keploy.yml's noise already masks in part), is given none.
-func queryNoiseEntries(recordedQuery map[string]string, liveQuery url.Values, differs []string, noise []*regexp.Regexp) []string {
+// ok is false when any differing query id cannot be confined safely without
+// matching "/" or non-id values, in which case the next step names the
+// record step alone.
+func queryNoiseEntries(recordedQuery map[string]string, liveQuery url.Values, differs []string, noise []*regexp.Regexp) ([]string, bool) {
 	var out []string
 	for _, d := range differs {
 		name, ok := strings.CutPrefix(d, "url.query.")
@@ -258,22 +259,35 @@ func queryNoiseEntries(recordedQuery map[string]string, liveQuery url.Values, di
 		rv, lv := queryMembersDiffering(recordedQuery[name], liveQuery[name], noise)
 		members := slices.Concat(rv, lv)
 		for _, m := range members {
-			if c := queryValueTypeClass(m); c != "" {
-				if e := strconv.Quote(queryValueEntry(c, members)); !slices.Contains(out, e) {
-					out = append(out, e)
-				}
+			c := queryValueTypeClass(m)
+			if c == "" {
+				continue
+			}
+			pat := queryValueEntry(c, members)
+			if pat == "" {
+				return nil, false
+			}
+			if e := strconv.Quote(pat); !slices.Contains(out, e) {
+				out = append(out, e)
 			}
 		}
 	}
-	return out
+	return out, true
 }
+
+const (
+	minTokenDigitCore = 6
+	minTokenIDCore    = 8
+)
 
 // queryValueEntry is the url-noise regex that matches a whole query value
 // of class, a dynamic type-class queryValueTypeClass gives: the class's own
 // shape (a digit run of minDynamicQueryDigits or more, a uuid, long hex),
-// and for a long token, its letters and digits and each other character
-// members (the values that differ) hold, as many as the shortest of them
-// (a token's class counts at least 16 bytes; the regex counts characters).
+// and for a long token, the members' common literal prefix and suffix
+// (trimmed to separator boundaries and regexp-quoted) around the varying
+// part's own id class and length. Returns "" when no entry can be confined
+// without matching "/" (paths) or values the matcher never calls an id
+// (plain words, snake_case enums, bare digit runs).
 func queryValueEntry(class string, members []string) string {
 	switch class {
 	case "digits":
@@ -282,30 +296,215 @@ func queryValueEntry(class string, members []string) string {
 		return reSegUUID.String()
 	case "hex":
 		return reSegLongHex.String()
+	case "token":
+		return tokenQueryValueEntry(members)
+	default:
+		return ""
 	}
-	least, others := 16, map[rune]bool{}
+}
+
+func isASCIIAlnum(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
+
+func hasASCIIAlnum(s string) bool {
+	for _, r := range s {
+		if isASCIIAlnum(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// tokenQueryValueEntry confines a "token" query id to its common literal
+// prefix and suffix around a narrow id-shaped varying core (uuid, digits,
+// hex, or a labeled-affix alphanumeric id). Any member containing "/" or
+// lacking a narrow id-shaped core returns "", so the next step names the
+// record step alone.
+func tokenQueryValueEntry(members []string) string {
+	var toks []string
 	for _, m := range members {
-		if queryValueTypeClass(m) != class {
+		if queryValueTypeClass(m) != "token" {
 			continue
 		}
-		least = min(least, utf8.RuneCountInString(m))
-		for _, r := range m {
-			if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
-				continue
+		if strings.ContainsRune(m, '/') {
+			return ""
+		}
+		toks = append(toks, m)
+	}
+	if len(toks) < 2 {
+		return ""
+	}
+	prefix, suffix := commonTokenAffixes(toks)
+	cores := make([]string, len(toks))
+	for i, t := range toks {
+		cores[i] = t[len(prefix) : len(t)-len(suffix)]
+		if cores[i] == "" {
+			return ""
+		}
+	}
+	corePat := tokenCorePattern(cores, hasASCIIAlnum(prefix) || hasASCIIAlnum(suffix))
+	if corePat == "" {
+		return ""
+	}
+	return "^" + regexp.QuoteMeta(prefix) + corePat + regexp.QuoteMeta(suffix) + "$"
+}
+
+// commonTokenAffixes extracts the longest common prefix and non-overlapping
+// suffix of toks, trimmed to non-alphanumeric separator boundaries so a
+// coincidental shared character inside the random id body is not baked into
+// the literal affix.
+func commonTokenAffixes(toks []string) (prefix, suffix string) {
+	rawPre := toks[0]
+	for _, t := range toks[1:] {
+		i := 0
+		for i < len(rawPre) && i < len(t) {
+			r1, w1 := utf8.DecodeRuneInString(rawPre[i:])
+			r2, _ := utf8.DecodeRuneInString(t[i:])
+			if r1 != r2 {
+				break
 			}
-			others[r] = true
+			i += w1
+		}
+		rawPre = rawPre[:i]
+	}
+	preEnd := 0
+	for i := 0; i < len(rawPre); {
+		r, w := utf8.DecodeRuneInString(rawPre[i:])
+		if !isASCIIAlnum(r) {
+			preEnd = i + w
+		}
+		i += w
+	}
+	prefix = rawPre[:preEnd]
+
+	rawSuf := toks[0][len(prefix):]
+	for _, t := range toks[1:] {
+		rem := t[len(prefix):]
+		for len(rawSuf) > 0 {
+			if len(rawSuf) <= len(rem) && strings.HasSuffix(rem, rawSuf) {
+				break
+			}
+			_, w := utf8.DecodeRuneInString(rawSuf)
+			rawSuf = rawSuf[w:]
 		}
 	}
-	var set strings.Builder
-	for _, r := range slices.Sorted(maps.Keys(others)) {
-		if r > ' ' && r < utf8.RuneSelf-1 {
-			// ASCII punctuation: RE2 reads it escaped as itself.
-			set.WriteString(`\` + string(r))
-			continue
+	for i := 0; i < len(rawSuf); {
+		r, w := utf8.DecodeRuneInString(rawSuf[i:])
+		if !isASCIIAlnum(r) {
+			suffix = rawSuf[i:]
+			break
 		}
-		set.WriteString(`\x{` + strconv.FormatInt(int64(r), 16) + `}`)
+		i += w
 	}
-	return "^[0-9A-Za-z" + set.String() + "]{" + strconv.Itoa(least) + ",}$"
+	return prefix, suffix
+}
+
+// tokenCorePattern returns the regex fragment for the varying cores of a
+// token query id, or "" when the cores do not share a narrow id shape.
+func tokenCorePattern(cores []string, hasLabeledAffix bool) string {
+	allUUID := true
+	for _, c := range cores {
+		if !reSegUUID.MatchString(c) {
+			allUUID = false
+			break
+		}
+	}
+	if allUUID {
+		return strings.TrimSuffix(strings.TrimPrefix(reSegUUID.String(), "^"), "$")
+	}
+
+	minLen, maxLen := len(cores[0]), len(cores[0])
+	allDigits := true
+	allHex := true
+	allAlnum := true
+	everyHasDigit := true
+	everyHasAlpha := true
+	hasLower, hasUpper := false, false
+	for _, c := range cores {
+		minLen = min(minLen, len(c))
+		maxLen = max(maxLen, len(c))
+		cDigit, cAlpha := false, false
+		for i := 0; i < len(c); i++ {
+			b := c[i]
+			switch {
+			case b >= '0' && b <= '9':
+				cDigit = true
+			case b >= 'a' && b <= 'f':
+				allDigits = false
+				cAlpha = true
+				hasLower = true
+			case b >= 'A' && b <= 'F':
+				allDigits = false
+				cAlpha = true
+				hasUpper = true
+			case b >= 'g' && b <= 'z':
+				allDigits = false
+				allHex = false
+				cAlpha = true
+				hasLower = true
+			case b >= 'G' && b <= 'Z':
+				allDigits = false
+				allHex = false
+				cAlpha = true
+				hasUpper = true
+			default:
+				allDigits = false
+				allHex = false
+				allAlnum = false
+			}
+		}
+		if !cDigit {
+			everyHasDigit = false
+		}
+		if !cAlpha {
+			everyHasAlpha = false
+		}
+	}
+	quant := func() string {
+		if minLen == maxLen {
+			return "{" + strconv.Itoa(minLen) + "}"
+		}
+		return "{" + strconv.Itoa(minLen) + ",}"
+	}
+	if allDigits {
+		minReq := minDynamicQueryDigits
+		if hasLabeledAffix {
+			minReq = minTokenDigitCore
+		}
+		if minLen < minReq {
+			return ""
+		}
+		return "[0-9]" + quant()
+	}
+	if allHex && everyHasDigit {
+		minReq := 16
+		if hasLabeledAffix {
+			minReq = minTokenIDCore
+		}
+		if minLen < minReq {
+			return ""
+		}
+		switch {
+		case hasLower && !hasUpper:
+			return "[0-9a-f]" + quant()
+		case hasUpper && !hasLower:
+			return "[0-9A-F]" + quant()
+		default:
+			return "[0-9a-fA-F]" + quant()
+		}
+	}
+	if allAlnum && hasLabeledAffix && everyHasDigit && everyHasAlpha && minLen >= minTokenIDCore {
+		switch {
+		case hasLower && !hasUpper:
+			return "[0-9a-z]" + quant()
+		case hasUpper && !hasLower:
+			return "[0-9A-Z]" + quant()
+		default:
+			return "[0-9A-Za-z]" + quant()
+		}
+	}
+	return ""
 }
 
 // reportServedAnother reports, in-band (models.ReportAnswer), a call
@@ -370,14 +569,18 @@ func reportServedAnother(ctx context.Context, input *req, x *models.Mock, how se
 		if slices.ContainsFunc(r.Differs, func(d string) bool { return strings.HasPrefix(d, "url.path.") }) {
 			entries = append(entries, urlNoiseEntry(recordedPath, r.Differs))
 		}
-		query := queryNoiseEntries(recordedQuery, liveQuery, r.Differs, noise)
-		entries = append(entries, query...)
+		query, queryOK := queryNoiseEntries(recordedQuery, liveQuery, r.Differs, noise)
+		if !queryOK {
+			entries, query = nil, nil
+		} else {
+			entries = append(entries, query...)
+		}
 		r.NextSteps = "If the call is a new input, record it (keploy mock record) so it is answered with its own recording."
 		if len(entries) > 0 {
 			r.NextSteps += " If the app makes a new id there on every run, mark it as url noise in keploy.yml, under test.globalNoise.global.url: {" + strings.Join(entries, ": [], ") + ": []}; each run's call is then answered with this recording as its own."
 		}
 		if len(query) > 0 {
-			r.NextSteps += " An entry for a query value masks every query value of its shape, in every call."
+			r.NextSteps += " An entry for a query value masks every query value that matches its pattern, in every call."
 		}
 	case models.AnswerClosestBody:
 		r.Differs = how.fields

@@ -53,7 +53,7 @@ func TestACallAnsweredWithAnotherCallsRecordingIsLoggedByItsShape(t *testing.T) 
 		Answer:        models.AnswerOtherID,
 		Differs:       []string{"url.path.3", "url.query." + token},
 		Diff:          "GET /reset/" + token + "/confirm/7 was answered with the recording of GET /reset/" + token + "/confirm/1: no recording has the call's URL, which differs from that recording's only at values that look like ids (url.path.3, url.query." + token + ")",
-		NextSteps:     `If the call is a new input, record it (keploy mock record) so it is answered with its own recording. If the app makes a new id there on every run, mark it as url noise in keploy.yml, under test.globalNoise.global.url: {"^/reset/` + token + `/confirm/[0-9]+$": [], "^[0-9]{10,}$": []}; each run's call is then answered with this recording as its own. An entry for a query value masks every query value of its shape, in every call.`,
+		NextSteps:     `If the call is a new input, record it (keploy mock record) so it is answered with its own recording. If the app makes a new id there on every run, mark it as url noise in keploy.yml, under test.globalNoise.global.url: {"^/reset/` + token + `/confirm/[0-9]+$": [], "^[0-9]{10,}$": []}; each run's call is then answered with this recording as its own. An entry for a query value masks every query value that matches its pattern, in every call.`,
 	}
 	field := "body.sessions." + token + ".user"
 	body := models.UnmatchedCall{Protocol: "HTTP", Destination: "users:8080", ActualSummary: "POST /search", ClosestMock: "mock-2",
