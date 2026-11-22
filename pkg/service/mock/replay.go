@@ -290,6 +290,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// A session of its own: what an agent kept from an earlier one
 		// recorded consumed is that session's.
 		StartsTestSet:             true,
+		ReadsSetEnds:              provenswitch.On(),
 		RedisDrawn:                m.config.Redis.DrawnKeys(),
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
@@ -2995,7 +2996,11 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				if consumedErr == nil && m.learning() {
 					elsewhere = learn.ReadLearnedElsewhere(outcomeCtx, m.instrumentation, m.logger)
 				}
-				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
+				missCtx := outcomeCtx
+				if provenswitch.On() {
+					missCtx = models.WithSetEndRead(outcomeCtx)
+				}
+				misses, missesErr = m.instrumentation.GetMockErrors(missCtx)
 				if reader, ok := m.instrumentation.(idPairReader); ok {
 					if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
 						// How many, never the ids: they are the app's values.

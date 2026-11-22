@@ -510,3 +510,44 @@ func TestWriteStopOutcomeCarriesWhatCallsInOtherWindowsTaught(t *testing.T) {
 		t.Fatalf("the outcome carries %+v as served; want mock-0 alone", got.Consumed)
 	}
 }
+
+type setEndOutcomeProxy struct {
+	outcomeProxy
+	filed int
+}
+
+func (p *setEndOutcomeProxy) FileAtSetEnd(context.Context) error {
+	p.filed++
+	return nil
+}
+
+// Under docker compose with the proven switch on, the agent writes its replay
+// outcome as it stops: its final GetMockErrors read must mark the set's end
+// so parsers holding calls or deferred checks file them into the outcome.
+func TestWriteStopOutcomeFilesSetEndOnlyUnderTheSwitch(t *testing.T) {
+	prev := ActiveHooks
+	ActiveHooks = &AgentHook{}
+	t.Cleanup(func() { ActiveHooks = prev })
+
+	for _, tc := range []struct {
+		name string
+		env  string
+		want int
+	}{
+		{"switch off", "", 0},
+		{"switch on", "1", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, tc.env)
+			proxy := &setEndOutcomeProxy{}
+			a := &Agent{Proxy: proxy, logger: zap.NewNop()}
+			path := filepath.Join(t.TempDir(), "outcome.json")
+			if err := a.writeStopOutcome(context.Background(), path); err != nil {
+				t.Fatalf("writeStopOutcome: %v", err)
+			}
+			if proxy.filed != tc.want {
+				t.Fatalf("FileAtSetEnd called %d times, want %d", proxy.filed, tc.want)
+			}
+		})
+	}
+}
