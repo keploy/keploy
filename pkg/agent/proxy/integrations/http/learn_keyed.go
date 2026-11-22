@@ -46,7 +46,7 @@ func learnKeyIndexOf(n learnNoise) *integrations.MockIndex {
 
 // learnKeys are the keys learnKeyIndexOf files m under, url noise n.
 func learnKeys(m *models.Mock, n learnNoise) []string {
-	if m.Kind != models.Kind(models.HTTP) || m.Spec.HTTPReq == nil || hasVariables(m) {
+	if m == nil || m.Kind != models.Kind(models.HTTP) || m.Spec.HTTPReq == nil || hasVariables(m) {
 		return nil
 	}
 	rp := recordedParts(m)

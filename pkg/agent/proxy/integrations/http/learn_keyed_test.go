@@ -134,6 +134,7 @@ func TestTheLearnKeysOfARecording(t *testing.T) {
 		{"variables", vars, nil},
 		{"no request", &models.Mock{Kind: models.HTTP}, nil},
 		{"another kind", other, nil},
+		{"nil", nil, nil},
 	} {
 		if got := learnKeys(c.m, n); !slices.Equal(got, c.want) {
 			t.Errorf("%s: keys %q; want %q", c.name, got, c.want)

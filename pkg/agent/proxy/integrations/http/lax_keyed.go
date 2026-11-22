@@ -176,6 +176,7 @@ func (h *HTTP) keyedLaxRead(input *req, mockDb integrations.MockMemDb, urlNoise 
 			utils.LogError(h.Logger, err, "failed to get per-test mocks")
 			return nil, errKeyedRead
 		}
+		perTest = perTestMocks
 		//nolint:staticcheck // SA1019: the whole read's own session read (matchCascade), whose pool a miss reports.
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
@@ -196,7 +197,10 @@ func (h *HTTP) keyedLaxRead(input *req, mockDb integrations.MockMemDb, urlNoise 
 					return whole()
 				}
 			}
-			pass2, _, err := read(pathIndex, id)
+			pass2, p2, err := read(pathIndex, id)
+			if err == nil {
+				perTest = p2
+			}
 			return pass2, err
 		},
 		missed: func(d *matchDiag) (*matchDiag, error) {
@@ -211,5 +215,25 @@ func (h *HTTP) keyedLaxRead(input *req, mockDb integrations.MockMemDb, urlNoise 
 			return d, nil
 		},
 	}
-	return rd, openTestOwner(mockDb, perTest), true
+	var own func(*models.Mock) bool
+	if o, tells := mockDb.(integrations.TestOwner); tells {
+		own = o.OwnedByOpenTest
+	} else {
+		// Rebuild if pass2 or whole updated perTest after pass1 so a
+		// non-TestOwner store still owns per-test mocks matched in pass 2.
+		var pool map[*models.Mock]struct{}
+		var built []*models.Mock
+		own = func(m *models.Mock) bool {
+			if pool == nil || len(built) != len(perTest) || (len(built) > 0 && &built[0] != &perTest[0]) {
+				pool = make(map[*models.Mock]struct{}, len(perTest))
+				for _, p := range perTest {
+					pool[p] = struct{}{}
+				}
+				built = perTest
+			}
+			_, in := pool[m]
+			return in
+		}
+	}
+	return rd, own, true
 }

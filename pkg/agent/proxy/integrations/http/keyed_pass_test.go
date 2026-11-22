@@ -523,3 +523,31 @@ func TestAHeavyCallGivenUpWhileWaitingForATurnEndsWithoutAMiss(t *testing.T) {
 		t.Fatal("no keyed read: the row needs the keyed passes")
 	}
 }
+
+// A per-test recording of a stateful dependency (its lifetime stated) matched
+// via keyedLaxRead's pass 2 (auto-detected dynamic path segment) is the open
+// test's own even when the store does not implement integrations.TestOwner:
+// it is both marked used and kept for repeats, not served as reusable.
+func TestAKeyedLaxPass2OwnsItsPerTestMockWithoutTestOwner(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	own := recorded("pt-id", "/users/1000001", map[string]string{"Host": "upstream"}, "")
+	own.Spec.HTTPReq.Method = models.Method("GET")
+	own.TestModeInfo.Lifetime, own.TestModeInfo.Consume = models.LifetimePerTest, models.ConsumeCursorSaturate
+	own.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	if !own.StatesLifetime() {
+		t.Fatal("precondition: the recording does not state its lifetime")
+	}
+	db := &ownKeyedDb{keyedMemDb: keyedDB(), perTest: []*models.Mock{own}, used: map[string]bool{}, kept: map[string]bool{}}
+	in := sent("/users/9000009", map[string]string{"Host": "upstream"}, "")
+	in.method = "GET"
+	ok, served, _, err := newHTTP().match(context.Background(), in, db, nil, nil, nil, true, false, false, true, false)
+	if err != nil || !ok || served == nil || served.Name != "pt-id" {
+		t.Fatalf("match: ok=%v served=%v err=%v; want pt-id via pass 2", ok, served, err)
+	}
+	if !db.used["pt-id"] || !db.kept["pt-id"] {
+		t.Fatalf("pass-2 per-test recording: marked used %v, kept for repeats %v; want both", db.used["pt-id"], db.kept["pt-id"])
+	}
+	if db.keyedReads == 0 || db.wholeReads != 0 {
+		t.Fatalf("%d keyed reads and %d whole reads, want the keyed pass alone", db.keyedReads, db.wholeReads)
+	}
+}
