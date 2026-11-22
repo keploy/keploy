@@ -26,6 +26,11 @@ type restartingDocker struct {
 	// failing makes that many inspects fail, as a daemon too busy to answer.
 	failing int
 	removed []string
+	// parkNext parks the next inspect of keploy's agent until its context
+	// is done, once it has said so on parked: the watch's look, held while
+	// the `up` changes the stack and returns.
+	parkNext atomic.Bool
+	parked   chan struct{}
 }
 
 func (d *restartingDocker) set(name, id, startedAt string, running bool) {
@@ -35,7 +40,14 @@ func (d *restartingDocker) set(name, id, startedAt string, running bool) {
 	d.containers[name] = &container.State{Running: running, StartedAt: startedAt}
 }
 
-func (d *restartingDocker) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
+func (d *restartingDocker) ContainerInspect(ctx context.Context, name string) (container.InspectResponse, error) {
+	if name == "keploy-v3-test" && d.parkNext.CompareAndSwap(true, false) {
+		d.parked <- struct{}{}
+		<-ctx.Done()
+	}
+	if err := ctx.Err(); err != nil {
+		return container.InspectResponse{}, err
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.failing > 0 {
@@ -69,11 +81,24 @@ func newRestartApp(t *testing.T) (*App, *restartingDocker, *atomic.Int32) {
 	orig := agentRestartPoll
 	agentRestartPoll = 10 * time.Millisecond
 	t.Cleanup(func() { agentRestartPoll = orig })
-	d := &restartingDocker{containers: map[string]*container.State{}, ids: map[string]string{}}
+	d := &restartingDocker{containers: map[string]*container.State{}, ids: map[string]string{}, parked: make(chan struct{}, 1)}
 	a := &App{logger: zap.NewNop(), docker: d, keployContainer: "keploy-v3-test", container: "app", kind: utils.DockerCompose}
 	var setUp atomic.Int32
 	a.SetOnAgentRestart(func(context.Context) error { setUp.Add(1); return nil })
 	return a, d, &setUp
+}
+
+// parkTheWatch holds the retry's watch at its next look at keploy's agent
+// until the `up` returns, and returns once it is held: what the `up` changes
+// then, the watch has not seen when it ends.
+func (d *restartingDocker) parkTheWatch(t *testing.T) {
+	t.Helper()
+	d.parkNext.Store(true)
+	select {
+	case <-d.parked:
+	case <-time.After(30 * time.Second):
+		t.Error("the watch never looked at the agent again")
+	}
 }
 
 // up is a retried `up` that runs steps one after another, a short while apart,
@@ -95,7 +120,7 @@ func TestRetryComposeUpLeavesAKeptAgentAlone(t *testing.T) {
 	a, d, setUp := newRestartApp(t)
 	d.set("keploy-v3-test", "agent-1", "t1", true)
 	d.set("app", "app-1", "", false)
-	a.retryComposeUp(context.Background(), up(func() { d.set("app", "app-1", "t2", true) }))
+	a.retryComposeUp(context.Background(), nil, up(func() { d.set("app", "app-1", "t2", true) }))
 	if n := setUp.Load(); n != 0 {
 		t.Fatalf("set a kept agent up again %d time(s)", n)
 	}
@@ -107,7 +132,7 @@ func TestRetryComposeUpSetsUpAnAgentComposeStartedAgain(t *testing.T) {
 	a, d, setUp := newRestartApp(t)
 	d.set("keploy-v3-test", "agent-1", "t1", false)
 	d.set("app", "app-1", "", false)
-	a.retryComposeUp(context.Background(), up(func() { d.set("keploy-v3-test", "agent-1", "t3", true) }))
+	a.retryComposeUp(context.Background(), nil, up(func() { d.set("keploy-v3-test", "agent-1", "t3", true) }))
 	if n := setUp.Load(); n != 1 {
 		t.Fatalf("set the agent compose started again up %d time(s), want 1", n)
 	}
@@ -119,7 +144,7 @@ func TestRetryComposeUpSetsUpARecreatedAgent(t *testing.T) {
 	a, d, setUp := newRestartApp(t)
 	d.set("keploy-v3-test", "agent-1", "t1", true)
 	d.set("app", "app-1", "", false)
-	a.retryComposeUp(context.Background(), up(
+	a.retryComposeUp(context.Background(), nil, up(
 		func() {}, func() {}, func() {}, // the old agent still answering
 		func() { d.set("keploy-v3-test", "agent-1", "t1", false) },
 		func() { d.set("keploy-v3-test", "agent-2", "t4", true) },
@@ -135,7 +160,7 @@ func TestRetryComposeUpStopsWatchingWhenUpReturns(t *testing.T) {
 	d.set("keploy-v3-test", "agent-1", "t1", true)
 	done := make(chan struct{})
 	go func() {
-		a.retryComposeUp(context.Background(), func() utils.CmdError { return utils.CmdError{} })
+		a.retryComposeUp(context.Background(), nil, func() utils.CmdError { return utils.CmdError{} })
 		close(done)
 	}()
 	select {
@@ -154,7 +179,7 @@ func TestRetryComposeUpStopsWatchingWhenUpReturns(t *testing.T) {
 func TestRetryComposeUpWithoutAHookJustRuns(t *testing.T) {
 	a := &App{logger: zap.NewNop()}
 	ran := false
-	a.retryComposeUp(context.Background(), func() utils.CmdError { ran = true; return utils.CmdError{} })
+	a.retryComposeUp(context.Background(), nil, func() utils.CmdError { ran = true; return utils.CmdError{} })
 	if !ran {
 		t.Fatal("the retry's up did not run")
 	}
@@ -167,7 +192,7 @@ func TestRetryComposeUpKnowsWhichAgentRanBefore(t *testing.T) {
 	d.set("keploy-v3-test", "agent-1", "t1", true)
 	d.set("app", "app-1", "", false)
 	d.failing = 2
-	a.retryComposeUp(context.Background(), up(func() {}, func() { d.set("app", "app-1", "t2", true) }))
+	a.retryComposeUp(context.Background(), nil, up(func() {}, func() { d.set("app", "app-1", "t2", true) }))
 	if n := setUp.Load(); n != 0 {
 		t.Fatalf("set a kept agent up again %d time(s)", n)
 	}
@@ -183,7 +208,7 @@ func TestRetryComposeUpWithoutTheAgentBeforeGoesByItsStart(t *testing.T) {
 	d.set("keploy-v3-test", "agent-1", longAgo, true)
 	d.set("app", "app-1", "", false)
 	d.failing = agentBaselineTries
-	a.retryComposeUp(context.Background(), up(func() {}, func() { d.set("app", "app-1", "t2", true) }))
+	a.retryComposeUp(context.Background(), nil, up(func() {}, func() { d.set("app", "app-1", "t2", true) }))
 	if n := setUp.Load(); n != 0 {
 		t.Fatalf("set a kept agent up again %d time(s)", n)
 	}
@@ -192,7 +217,7 @@ func TestRetryComposeUpWithoutTheAgentBeforeGoesByItsStart(t *testing.T) {
 	d.set("keploy-v3-test", "agent-1", longAgo, true)
 	d.set("app", "app-1", "", false)
 	d.failing = agentBaselineTries
-	a.retryComposeUp(context.Background(), up(func() {
+	a.retryComposeUp(context.Background(), nil, up(func() {
 		d.set("keploy-v3-test", "agent-2", time.Now().Format(time.RFC3339Nano), true)
 	}))
 	if n := setUp.Load(); n != 1 {
@@ -205,7 +230,7 @@ func TestRetryComposeUpWithoutTheAgentBeforeGoesByItsStart(t *testing.T) {
 func TestRetryComposeUpSetsUpAnAgentComposeCreated(t *testing.T) {
 	a, d, setUp := newRestartApp(t)
 	d.set("app", "app-1", "", false)
-	a.retryComposeUp(context.Background(), up(func() { d.set("keploy-v3-test", "agent-2", "t2", true) }))
+	a.retryComposeUp(context.Background(), nil, up(func() { d.set("keploy-v3-test", "agent-2", "t2", true) }))
 	if n := setUp.Load(); n != 1 {
 		t.Fatalf("set the agent compose created up %d time(s), want 1", n)
 	}
@@ -217,7 +242,7 @@ func TestRetryComposeUpStopsWatchingOnceTheAppStarts(t *testing.T) {
 	a, d, setUp := newRestartApp(t)
 	d.set("keploy-v3-test", "agent-1", "t1", true)
 	d.set("app", "app-1", "", false)
-	a.retryComposeUp(context.Background(), up(
+	a.retryComposeUp(context.Background(), nil, up(
 		func() { d.set("app", "app-1", "t2", true) },
 		func() {}, func() {},
 		func() { d.set("keploy-v3-test", "agent-2", "t3", true) },
@@ -254,4 +279,91 @@ func TestRemoveCrashedDependencies(t *testing.T) {
 	if strings.Join(d.removed, ",") != "dep" {
 		t.Fatalf("removed %v, want only the crashed dependency", d.removed)
 	}
+}
+
+// holdingApp is newRestartApp with the agent client's release hold and setup
+// noted in order, the retry's `up` among them.
+func holdingApp(t *testing.T) (*App, *restartingDocker, func(string), func() string, chan struct{}) {
+	t.Helper()
+	a, d, _ := newRestartApp(t)
+	var mu sync.Mutex
+	var got []string
+	note := func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, s)
+	}
+	setUp := make(chan struct{})
+	var once sync.Once
+	a.SetOnAgentRestart(func(context.Context) error {
+		note("setup")
+		once.Do(func() { close(setUp) })
+		return nil
+	})
+	a.SetAgentReleaseHold(func(context.Context) func(error) {
+		note("hold")
+		return func(error) { note("resume") }
+	})
+	return a, d, note, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Join(got, ",")
+	}, setUp
+}
+
+// keploy's stop of the stack took the agent: the retry's `up` starts it
+// again, at the same address. The releases the run asked for are held from
+// before the `up` until the agent compose started again was set up (which
+// releases it last), and let go only then: one that reached it first would
+// start the app against an agent with none of the run's setup.
+func TestRetryComposeUpHoldsReleasesUntilTheRestartedAgentIsSetUp(t *testing.T) {
+	a, d, note, got, setUp := holdingApp(t)
+	d.set("keploy-v3-test", "agent-1", "t1", false)
+	d.set("app", "app-1", "", false)
+	a.retryComposeUp(context.Background(), nil, func() utils.CmdError {
+		note("up")
+		d.set("keploy-v3-test", "agent-1", "t3", true)
+		select {
+		case <-setUp:
+		case <-time.After(30 * time.Second):
+			t.Error("the agent compose started again was never set up")
+		}
+		return utils.CmdError{}
+	})
+	if g := got(); g != "hold,up,setup,resume" {
+		t.Fatalf("the retry did %s; want the releases held before its up, and let go once the agent was set up again", g)
+	}
+}
+
+// An `up` that ends with no agent started again lets the hold go with it.
+func TestRetryComposeUpLetsTheHoldGoWhenItsUpEnds(t *testing.T) {
+	a, d, note, got, _ := holdingApp(t)
+	d.set("keploy-v3-test", "agent-1", "t1", false)
+	a.retryComposeUp(context.Background(), nil, func() utils.CmdError { note("up"); return utils.CmdError{} })
+	if g := got(); g != "hold,up,resume" {
+		t.Fatalf("the retry did %s; want the hold let go once its up ended", g)
+	}
+}
+
+// An agent kept running is the one the run set up: a release still owed to
+// it goes on, unheld. So does one where docker could not say which agent ran.
+func TestRetryComposeUpHoldsNoReleaseOfAKeptOrUnknownAgent(t *testing.T) {
+	t.Run("kept", func(t *testing.T) {
+		a, d, _, got, _ := holdingApp(t)
+		d.set("keploy-v3-test", "agent-1", "t1", true)
+		d.set("app", "app-1", "", false)
+		a.retryComposeUp(context.Background(), nil, up(func() { d.set("app", "app-1", "t2", true) }))
+		if g := got(); g != "" {
+			t.Fatalf("the retry did %s for a kept agent; want nothing held", g)
+		}
+	})
+	t.Run("unknown", func(t *testing.T) {
+		a, d, _, got, _ := holdingApp(t)
+		d.failing = agentBaselineTries
+		d.set("keploy-v3-test", "agent-1", "t1", false)
+		a.retryComposeUp(context.Background(), nil, func() utils.CmdError { return utils.CmdError{} })
+		if strings.Contains(got(), "hold") {
+			t.Fatalf("the retry did %s with no agent docker could name; want nothing held", got())
+		}
+	})
 }

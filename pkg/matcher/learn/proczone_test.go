@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -951,6 +952,9 @@ func TestOneTestsCacheReadsEachCallsClockInItsOwnZoneWhicheverRanFirst(t *testin
 // order they are listed in; a mount table keploy cannot read is an error
 // read again.
 func TestAZoneFileMountedFromAnotherZonesIsUnknown(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("no mount table off Linux")
+	}
 	read := func(name string) []byte {
 		b, err := os.ReadFile("/usr/share/zoneinfo/" + name)
 		if err != nil {

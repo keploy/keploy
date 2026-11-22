@@ -285,7 +285,7 @@ func TestTheComposeAppsStopInterruptsWaitsThenKills(t *testing.T) {
 			if !a.composeApp.stopping.Load() {
 				t.Fatal("after keploy's stop the app's exit would be taken for a halt")
 			}
-			if _, err := a.StartComposeApp(context.Background()); err != nil {
+			if _, err := a.StartComposeApp(context.Background(), noNotice); err != nil {
 				t.Fatal(err)
 			}
 			if running, _, starts := d.state(); !running || starts != 1 || a.composeApp.stopping.Load() {
@@ -379,7 +379,7 @@ func TestTheComposeAppsWatchEndsTheRunOnAnExitKeployDidNotAskFor(t *testing.T) {
 	stream <- die("0")
 	<-d.inspected // the watch has read the event, the container down
 	// A stale event of a container keploy has started again: no halt.
-	if _, err := a.StartComposeApp(context.Background()); err != nil {
+	if _, err := a.StartComposeApp(context.Background(), noNotice); err != nil {
 		t.Fatal(err)
 	}
 	stream <- die("137")
@@ -441,7 +441,7 @@ func TestALateDieOfKeploysStopIsNotTheHaltOfTheRunAfterIt(t *testing.T) {
 			if _, err := a.StopComposeApp(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if anew, err := startAnew(a.StartComposeApp(ctx)); err != nil || !anew {
+			if anew, err := startAnew(a.StartComposeApp(ctx, noNotice)); err != nil || !anew {
 				t.Fatalf("the next start: anew %v, err %v; want the app started anew", anew, err)
 			}
 			// The die was sent before the start began the new run.
@@ -537,7 +537,7 @@ func TestTheComposeAppsWatchAsksAgainWhenTheDaemonFailsToDescribeADiesContainer(
 		if _, err := a.StopComposeApp(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if anew, err := startAnew(a.StartComposeApp(ctx)); err != nil || !anew {
+		if anew, err := startAnew(a.StartComposeApp(ctx, noNotice)); err != nil || !anew {
 			t.Fatalf("the next start: anew %v, err %v; want the app started anew", anew, err)
 		}
 		for len(d.inspected) > 0 {
@@ -729,25 +729,26 @@ func TestAComposeHaltIsTheAppsExit(t *testing.T) {
 	}
 }
 
-// Under the proven switch compose runs without the flags that end the stack
-// on a container's exit, the user's own too, the rest of the command as
-// written; with the switch off they are added as before.
-func TestUnderTheSwitchComposeRunsWithoutItsAbortFlags(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	for in, want := range map[string]string{
-		"docker compose up": "docker compose up",
-		"docker compose up --abort-on-container-exit --exit-code-from app":       "docker compose up",
-		"docker compose -f a.yml up --exit-code-from=app --build":                "docker compose -f a.yml up --build",
-		"docker compose up --abort-on-container-failure  --build":                "docker compose up  --build",
-		"docker compose -p abort-on-container-exit up --abort-on-container-exit": "docker compose -p abort-on-container-exit up",
-	} {
-		if got := ensureComposeExitOnAppFailure(in, "app", false); got != want {
-			t.Errorf("%q: %q, want %q", in, got, want)
+// Compose runs without the flags that end the stack on a container's exit,
+// the user's own too, the rest of the command as written, with the proven
+// switch on or off: keploy watches the app's container itself.
+func TestComposeRunsWithoutItsAbortFlagsInEveryMode(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, proven)
+		for in, want := range map[string]string{
+			"docker compose up": "docker compose -f - up",
+			"docker compose up --abort-on-container-exit --exit-code-from app":       "docker compose -f - up",
+			"docker compose -f a.yml up --exit-code-from=app --build":                "docker compose -f - up --build",
+			"docker compose up --abort-on-container-failure  --build":                "docker compose -f - up --build",
+			"docker compose -p abort-on-container-exit up --abort-on-container-exit": "docker compose -p abort-on-container-exit -f - up",
+		} {
+			if got := ensureInMemoryComposeFlags(in); got != want {
+				t.Errorf("%s=%q: %q: %q, want %q", provenswitch.Env, proven, in, got, want)
+			}
 		}
-	}
-	t.Setenv(provenswitch.Env, "")
-	if got := ensureComposeExitOnAppFailure("docker compose up", "app", false); got != "docker compose up --abort-on-container-exit --exit-code-from app" {
-		t.Errorf("switch off: %q", got)
+		if got := modifyDockerComposeCommand("docker compose up --abort-on-container-failure", "c.yaml", "docker-compose.yml"); got != "docker compose -f ./c.yaml up" {
+			t.Errorf("%s=%q: an on-disk file's command: %q", provenswitch.Env, proven, got)
+		}
 	}
 }
 
@@ -825,7 +826,9 @@ func TestComposeAwaitTeardownHoldsTheRunAfterKeploysStop(t *testing.T) {
 		{"the app exited on its own, before the watch took it", false, false, exited("exited", 3), context.Background(), nil, composeHaltCame, 1},
 		{"the app halted", true, true, nil, cancelled, nil, composeNoWait, 1},
 		{"keploy's teardown ends the run", true, false, nil, cancelled, nil, composeTeardownCame, 0},
-		{"the app keploy started again halts", true, false, nil, context.Background(), closed, composeHaltCame, 0},
+		// The halt's end (it runs once) is through before the run reads
+		// the halt: its stop of the stack, and the run's code it reads.
+		{"the app keploy started again halts", true, false, nil, context.Background(), closed, composeHaltCame, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &App{logger: zap.NewNop(), container: "app", docker: &inspectRecorder{inspects: tc.app}}
@@ -1086,7 +1089,7 @@ func TestTheComposeAppsTransitionsAreMadeUnderTheStopLock(t *testing.T) {
 		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
 		d.locked = underStopLock(t, a)
 		a.composeApp.stopping.Store(true)
-		if _, err := a.StartComposeApp(context.Background()); err != nil || d.startedCount() != 1 || a.composeApp.stopping.Load() {
+		if _, err := a.StartComposeApp(context.Background(), noNotice); err != nil || d.startedCount() != 1 || a.composeApp.stopping.Load() {
 			t.Fatalf("the start: %v, started %d, stopping %v", err, d.startedCount(), a.composeApp.stopping.Load())
 		}
 	})
@@ -1531,7 +1534,7 @@ func TestAStartWhoseInspectFailsIsNoStartAnew(t *testing.T) {
 	d, app := appStack()
 	a := stackApp(d, "app")
 	a.docker = &inspectFailsDocker{daemonModel: d, failID: app.id}
-	start, err := a.StartComposeApp(context.Background())
+	start, err := a.StartComposeApp(context.Background(), noNotice)
 	if err != nil || start != models.ComposeAppUnread {
 		t.Fatalf("the daemon never described the container, and the start said %d (err %v); want unread (%d): neither anew nor found running", start, err, models.ComposeAppUnread)
 	}
@@ -1563,7 +1566,7 @@ func TestAStartReadsTheStopsRecordHoweverSlowTheDaemonIs(t *testing.T) {
 		}
 		done := make(chan result, 1)
 		go func() {
-			anew, err := startAnew(a.StartComposeApp(context.Background()))
+			anew, err := startAnew(a.StartComposeApp(context.Background(), noNotice))
 			done <- result{anew, err}
 		}()
 		var r result
@@ -1626,7 +1629,7 @@ func TestAStartReadsTheStopsRecordHoweverSlowTheDaemonIs(t *testing.T) {
 		}
 		done := make(chan result, 1)
 		go func() {
-			anew, err := startAnew(a.StartComposeApp(ctx))
+			anew, err := startAnew(a.StartComposeApp(ctx, noNotice))
 			done <- result{anew, err}
 		}()
 		<-reading
@@ -1719,7 +1722,7 @@ func TestTheComposeAppsStopIsOfTheContainerComposeMadeForItsService(t *testing.T
 			if a.composeAppHalt() != nil {
 				t.Fatalf("keploy took another container's exit for the app's halt: %+v", a.composeAppHalt())
 			}
-			if _, err := a.StartComposeApp(context.Background()); err != nil {
+			if _, err := a.StartComposeApp(context.Background(), noNotice); err != nil {
 				t.Fatalf("the start: %v", err)
 			}
 			if running, _, _ := d.state(app.name); !running || d.startsOf(app.name) != 1 {
@@ -1771,7 +1774,7 @@ func TestTheComposeAppsStopRefusesAContainerItCannotTell(t *testing.T) {
 			if len(signals) != 0 {
 				t.Fatalf("keploy signalled %v, a container it could not tell for the app's", signals)
 			}
-			if _, err := a.StartComposeApp(context.Background()); err == nil || !strings.Contains(err.Error(), tc.says) {
+			if _, err := a.StartComposeApp(context.Background(), noNotice); err == nil || !strings.Contains(err.Error(), tc.says) {
 				t.Fatalf("the start: err %v; want an error that says %q", err, tc.says)
 			}
 		})
@@ -1807,7 +1810,7 @@ func TestTheComposeAppsWatchIsOfTheContainerComposeMadeForItsService(t *testing.
 		t.Fatal(err)
 	}
 	eventually(t, "the watch read the app's container for keploy's stop's die", func() bool { return d.inspectsOf(app.id) >= 2 })
-	if _, err := a.StartComposeApp(context.Background()); err != nil {
+	if _, err := a.StartComposeApp(context.Background(), noNotice); err != nil {
 		t.Fatal(err)
 	}
 	d.exitOnItsOwn(other.name, 1)
@@ -1867,7 +1870,7 @@ func TestTheAppsComposeProjectIsKeptOnceRead(t *testing.T) {
 	d.mu.Lock()
 	d.cs[0].name = "gone"
 	d.mu.Unlock()
-	if _, err := a.StartComposeApp(context.Background()); err != nil {
+	if _, err := a.StartComposeApp(context.Background(), noNotice); err != nil {
 		t.Fatalf("the start, the agent no longer readable: %v", err)
 	}
 	if running, _, _ := d.state(app.name); !running {
@@ -1940,7 +1943,7 @@ func TestTheComposeAppsStopIsOneTheDaemonTakesForAStop(t *testing.T) {
 			if running || restarts != 0 || strings.Join(kills, ",") != tc.sent {
 				t.Fatalf("after keploy's stop the app's container runs %v (%d restarts by the daemon) after kills %v; want stopped by %s, not started again", running, restarts, kills, tc.sent)
 			}
-			if _, err := a.StartComposeApp(context.Background()); err != nil {
+			if _, err := a.StartComposeApp(context.Background(), noNotice); err != nil {
 				t.Fatal(err)
 			}
 			if tc.restart == "" {
@@ -2007,16 +2010,16 @@ func TestAComposeStartSaysWhetherItStartedTheAppAnew(t *testing.T) {
 	stallBudget(t, 2*time.Second)
 	d, app := appStack()
 	a := stackApp(d, "app")
-	if start, err := a.StartComposeApp(context.Background()); err != nil || start != models.ComposeAppFoundRunning {
+	if start, err := a.StartComposeApp(context.Background(), noNotice); err != nil || start != models.ComposeAppFoundRunning {
 		t.Fatalf("a start of the running app: %d (%v), want found running (%d): it runs on", start, err, models.ComposeAppFoundRunning)
 	}
 	if _, err := a.StopComposeApp(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if anew, err := startAnew(a.StartComposeApp(context.Background())); err != nil || !anew {
+	if anew, err := startAnew(a.StartComposeApp(context.Background(), noNotice)); err != nil || !anew {
 		t.Fatalf("a start after a stop that ended it: anew %v (%v), want true", anew, err)
 	}
-	if start, err := a.StartComposeApp(context.Background()); err != nil || start != models.ComposeAppFoundRunning {
+	if start, err := a.StartComposeApp(context.Background(), noNotice); err != nil || start != models.ComposeAppFoundRunning {
 		t.Fatalf("a second start: %d (%v), want found running (%d): the first one's app runs on", start, err, models.ComposeAppFoundRunning)
 	}
 	d.mu.Lock()
@@ -2028,8 +2031,74 @@ func TestAComposeStartSaysWhetherItStartedTheAppAnew(t *testing.T) {
 	}
 	d.cs = kept
 	d.mu.Unlock()
-	if anew, err := startAnew(a.StartComposeApp(context.Background())); err == nil || anew {
+	if anew, err := startAnew(a.StartComposeApp(context.Background(), noNotice)); err == nil || anew {
 		t.Fatalf("a start that failed: anew %v (%v), want false with an error", anew, err)
+	}
+}
+
+// noNotice is a start's anew for a test that does not read it.
+func noNotice() {}
+
+// startFailsDocker is a daemon whose docker start fails, while every other
+// call works.
+type startFailsDocker struct{ *daemonModel }
+
+func (d *startFailsDocker) ContainerStart(context.Context, string, container.StartOptions) error {
+	return errors.New("the daemon refused to start the container")
+}
+
+// keploy's start tells a new app before the docker start (anew), and only
+// where its inspect read the container not running: keploy's agent must put
+// the set's clock in place before the new process's first instruction. Not
+// for a container found running (the app runs on), nor for one the daemon
+// never described (it may be the app that ran before). A container read not
+// running whose start then fails is told too: it holds no process of the app
+// before it, so whatever runs in it next is a new one. Told after the start,
+// the new app could read the later instant only the app before it saw.
+func TestAComposeStartTellsAnAppStartedAnewBeforeItStarts(t *testing.T) {
+	stallBudget(t, 2*time.Second)
+	d, app := appStack()
+	a := stackApp(d, "app")
+	var ranAtNotice []bool // whether the app's container ran at each notice
+	notice := func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		ranAtNotice = append(ranAtNotice, app.running)
+	}
+	if start, err := a.StartComposeApp(context.Background(), notice); err != nil || start != models.ComposeAppFoundRunning || len(ranAtNotice) != 0 {
+		t.Fatalf("a start of the running app: %d (%v), %d notices; want found running (%d), none", start, err, len(ranAtNotice), models.ComposeAppFoundRunning)
+	}
+	if _, err := a.StopComposeApp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if anew, err := startAnew(a.StartComposeApp(context.Background(), notice)); err != nil || !anew || len(ranAtNotice) != 1 || ranAtNotice[0] {
+		t.Fatalf("a start after a stop that ended it: anew %v (%v), notices %v; want anew, one notice made while the container was not running", anew, err, ranAtNotice)
+	}
+	d.mu.Lock()
+	running := app.running
+	d.mu.Unlock()
+	if !running {
+		t.Fatal("the start did not start the app's container")
+	}
+
+	// One the daemon never describes: no notice.
+	if _, err := a.StopComposeApp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ranAtNotice = nil
+	a.docker = &inspectFailsDocker{daemonModel: d, failID: app.id}
+	if start, err := a.StartComposeApp(context.Background(), notice); err != nil || start != models.ComposeAppUnread || len(ranAtNotice) != 0 {
+		t.Fatalf("a start the daemon never described the container to: %d (%v), %d notices; want unread (%d), none", start, err, len(ranAtNotice), models.ComposeAppUnread)
+	}
+
+	// One read not running whose start fails: told, with the start's error.
+	a.docker = d
+	if _, err := a.StopComposeApp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a.docker = &startFailsDocker{daemonModel: d}
+	if start, err := a.StartComposeApp(context.Background(), notice); err == nil || start != models.ComposeAppUnread || len(ranAtNotice) != 1 || ranAtNotice[0] {
+		t.Fatalf("a failed start of a container read not running: %d (%v), notices %v; want unread (%d) with the error, one notice", start, err, ranAtNotice, models.ComposeAppUnread)
 	}
 }
 
@@ -2107,7 +2176,7 @@ func TestTheAppsServiceIsReadOnTheDaemonsAnswerThoughItFailsReads(t *testing.T) 
 			d.mu.Lock()
 			app.running = false
 			d.mu.Unlock()
-			if start, err := a.StartComposeApp(context.Background()); err != nil || start != models.ComposeAppStartedAnew {
+			if start, err := a.StartComposeApp(context.Background(), noNotice); err != nil || start != models.ComposeAppStartedAnew {
 				t.Fatalf("StartComposeApp = %d, %v; want started anew (an error is replay's AppHalted: the set lost)", start, err)
 			}
 		})
@@ -2192,7 +2261,7 @@ func TestTheAppsServiceReadsEndAtTheirCallersEndWhileTheDaemonFailsThem(t *testi
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		done := make(chan error, 1)
-		go func() { _, err := a.StartComposeApp(ctx); done <- err }()
+		go func() { _, err := a.StartComposeApp(ctx, noNotice); done <- err }()
 		eventually(t, "the start listed the service's containers", failedA(sd, false))
 		cancel()
 		if err := returned(t, "StartComposeApp", done); err == nil {

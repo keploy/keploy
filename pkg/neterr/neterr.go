@@ -2,8 +2,8 @@
 // platform keploy runs on.
 //
 // The portable syscall.E* constants are not portable. On Windows, Go's syscall
-// package defines ECONNRESET, ECONNABORTED, ECONNREFUSED and EPIPE as invented
-// values in the APPLICATION_ERROR space (syscall/zerrors_windows.go), which
+// package defines ECONNRESET, ECONNABORTED, ECONNREFUSED, EPIPE and EADDRINUSE
+// as invented values in the APPLICATION_ERROR space (syscall/zerrors_windows.go), which
 // Winsock never returns: a reset socket surfaces as syscall.Errno(10054)
 // (WSAECONNRESET), a refused connect as 10061 (WSAECONNREFUSED). syscall.Errno's
 // Is method (syscall/syscall_windows.go) maps only the oserror sentinels —
@@ -112,4 +112,14 @@ var windowsPeerResetErrnos = []syscall.Errno{
 	64,    // ERROR_NETNAME_DELETED: an overlapped call completed by a reset
 	1236,  // ERROR_CONNECTION_ABORTED: an overlapped call completed by an abort
 	10053, // WSAECONNABORTED: every call once a reset that came after the peer's FIN is in
+}
+
+// IsAddrInUse reports whether err is a bind's "address already in use":
+// another socket holds the address and port. On Windows a bind fails so with
+// WSAEADDRINUSE (10048), which syscall.EADDRINUSE never matches there.
+func IsAddrInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, syscall.EADDRINUSE) || isAny(err, addrInUseErrnos)
 }

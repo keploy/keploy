@@ -227,17 +227,20 @@ func TestKeploysOwnStopChargesNoLoss(t *testing.T) {
 }
 
 // A close whose unread bytes cannot be counted is a loss of that connection's,
-// whether or not a wait holds it, as well as leaving every later wait
-// unknown. Only a wait holding it was told.
+// whether or not a wait holds it, and of no later wait's: a later wait reads
+// the connections it holds for itself, so it is not made unknown.
 func TestAnUncountableCloseIsALossWithNoWaitHoldingIt(t *testing.T) {
 	p, _, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
 	_ = proxySide.Close() // its socket gone: nothing can be read of it
 	p.pairClosing(context.Background(), proxySide, reader.(*trackedConn))
-	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
-		t.Fatalf("app_bytes_lost = %d for a close whose unread bytes could not be counted, want 1", l)
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+		t.Fatalf("app_bytes_untold = %d for a close whose unread bytes could not be counted, want 1", l)
 	}
-	if err := p.paired.failure(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
-		t.Fatalf("later waits: %v, want unknown (%v)", err, models.ErrProxyConnsUnsupported)
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("app_bytes_lost = %d for a close whose unread bytes could not be counted, want 0: keploy cannot tell a byte was lost", l)
+	}
+	if err := p.paired.failure(); err != nil {
+		t.Fatalf("later waits: %v, want no answer of this close's: it is a loss of its own connection's tests only", err)
 	}
 }
 

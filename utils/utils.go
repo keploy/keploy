@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
@@ -836,30 +837,152 @@ func extractFlagFromArgs(args []string, names ...string) string {
 	return found
 }
 
-// ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
-// Returns empty string if not found.
+// keployValueLongFlags lists known value-taking keploy CLI long flags
+// (normalized by removing hyphens and lowercasing so both kebab-case and
+// camelCase spellings match). Used by ExtractCommandFromArgs so an argument
+// value starting with "-c" (e.g. `--app-name -ci`) is consumed by its owning
+// flag rather than mistaken for the `-c` shorthand. Flags with NoOptDefVal
+// (such as boolean flags and `--enable-sampling`) must NOT be listed here
+// because pflag never consumes the following argv token for them. Unknown
+// flags are left unskipped so newly added boolean flags before `-c` still work.
+var keployValueLongFlags = map[string]bool{
+	"allowegress":            true,
+	"apitimeout":             true,
+	"appid":                  true,
+	"appname":                true,
+	"basepath":               true,
+	"builddelay":             true,
+	"cajavahome":             true,
+	"clientlogfile":          true,
+	"clientpid":              true,
+	"clientpidns":            true,
+	"cmdtype":                true,
+	"configpath":             true,
+	"consumerstallgrace":     true,
+	"containername":          true,
+	"coveragereport":         true,
+	"coveragereportpath":     true,
+	"delay":                  true,
+	"dnsport":                true,
+	"dockerhost":             true,
+	"driven":                 true,
+	"flakycheckretry":        true,
+	"format":                 true,
+	"fromcontainer":          true,
+	"grpcport":               true,
+	"halfclosegrace":         true,
+	"healthpath":             true,
+	"healthpolltimeout":      true,
+	"healthscheme":           true,
+	"healthurl":              true,
+	"host":                   true,
+	"incomingproxyport":      true,
+	"jacocoagentpath":        true,
+	"keploycontainer":        true,
+	"keploynetwork":          true,
+	"language":               true,
+	"maxfailattempts":        true,
+	"maxmemoryperconn":       true,
+	"maxmemoryperconnection": true,
+	"memorylimit":            true,
+	"metadata":               true,
+	"mincoverage":            true,
+	"mode":                   true,
+	"mongopassword":          true,
+	"name":                   true,
+	"networkname":            true,
+	"onmiss":                 true,
+	"output":                 true,
+	"passthroughports":       true,
+	"path":                   true,
+	"port":                   true,
+	"protodir":               true,
+	"protofile":              true,
+	"protoinclude":           true,
+	"proxyport":              true,
+	"queuesize":              true,
+	"recordtimer":            true,
+	"reportpath":             true,
+	"run1":                   true,
+	"run2":                   true,
+	"runonly":                true,
+	"selectedtests":          true,
+	"serverport":             true,
+	"services":               true,
+	"sseport":                true,
+	"storageformat":          true,
+	"tc":                     true,
+	"teardownprogressfile":   true,
+	"testcase":               true,
+	"testrun":                true,
+	"tests":                  true,
+	"testsets":               true,
+	"tlsprivatekeypath":      true,
+	"tokenfile":              true,
+	"upstreamtlscacert":      true,
+	"upstreamtls.cacert":     true,
+	"urlmethods":             true,
+}
+
+var keployValueShortFlags = map[string]bool{
+	"-b": true, "-d": true, "-l": true, "-n": true,
+	"-o": true, "-p": true, "-r": true, "-s": true, "-t": true,
+}
+
+func isKnownKeployValueFlag(arg string) bool {
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	if strings.HasPrefix(arg, "--") {
+		key := strings.ToLower(strings.ReplaceAll(arg[2:], "-", ""))
+		return keployValueLongFlags[key]
+	}
+	return keployValueShortFlags[arg]
+}
+
+// ExtractCommandFromArgs returns the value of -c/--command in raw argv, read
+// the way cobra reads it: the last occurrence wins, the shorthand takes its
+// value as the next argument or joined to it (-cVALUE, -c=VALUE), and nothing
+// after the "--" terminator is a flag. Returns "" when absent.
+//
+// Known value-taking keploy flags skip their following argument so values
+// beginning with "-c" (e.g. `--app-name -ci`) are not misread as the `-c`
+// shorthand.
+//
+// ShouldReexecWithSudo decides from this value whether keploy needs root,
+// before cobra parses anything. Reading another value than the one cobra runs
+// (the first of two -c, or none for -cVALUE) re-executes a native command
+// under sudo, or starts a docker command unprivileged, which then fails
+// writing /proc/sys/kernel/perf_event_paranoid.
 func ExtractCommandFromArgs(args []string) string {
+	found := ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// Check for -c or --command
-		if arg == "-c" || arg == "--command" {
-			// Next argument is the command value
+		switch {
+		case arg == "--":
+			return found
+		case arg == "-c" || arg == "--command":
+			found = ""
 			if i+1 < len(args) {
-				return args[i+1]
+				i++
+				found = args[i]
 			}
-			return ""
-		}
-
-		// Check for -c=value or --command=value format
-		if len(arg) > 3 && arg[:3] == "-c=" {
-			return arg[3:]
-		}
-		if len(arg) > 10 && arg[:10] == "--command=" {
-			return arg[10:]
+		case strings.HasPrefix(arg, "--command="):
+			found = arg[len("--command="):]
+		case strings.HasPrefix(arg, "-c"):
+			// pflag drops the "=" of -c=VALUE only when a value follows it:
+			// a bare -c= is the shorthand with the value "=".
+			found = arg[len("-c"):]
+			if len(found) > 1 && found[0] == '=' {
+				found = found[1:]
+			}
+		case isKnownKeployValueFlag(arg):
+			if i+1 < len(args) {
+				i++
+			}
 		}
 	}
-	return ""
+	return found
 }
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file.
@@ -1031,13 +1154,121 @@ func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	return path
 }
 
-// makeDirectory creates a directory if not exists with all user access
-func makeDirectory(path string) error {
-	err := os.MkdirAll(path, 0777)
+// MkdirAllForUser creates path and any missing parent directories with perm
+// using os.OpenRoot (refusing symlinks escaping the anchor directory). When
+// running under sudo, it restores ownership of only the directories newly
+// created by this call to the invoking user via open file descriptors in
+// bottom-up order, avoiding symlink-following chown races as root.
+func MkdirAllForUser(logger *zap.Logger, path string, perm os.FileMode) error {
+	if path == "" {
+		return os.MkdirAll(path, perm)
+	}
+	clean := filepath.Clean(path)
+	perm = perm.Perm()
+
+	var base string
+	var relParts []string
+	if !filepath.IsAbs(clean) {
+		parts := strings.Split(filepath.ToSlash(clean), "/")
+		i := 0
+		for i < len(parts) && (parts[i] == "." || parts[i] == "..") {
+			i++
+		}
+		if i == 0 {
+			base = "."
+		} else {
+			base = filepath.FromSlash(strings.Join(parts[:i], "/"))
+		}
+		relParts = parts[i:]
+	} else {
+		parent := filepath.Dir(clean)
+		if parent == clean {
+			// Filesystem root already exists.
+			return nil
+		}
+		relParts = append(relParts, filepath.Base(clean))
+		base = parent
+		for {
+			if _, err := os.Lstat(base); err == nil {
+				break
+			}
+			nextParent := filepath.Dir(base)
+			if nextParent == base {
+				break
+			}
+			relParts = append(relParts, filepath.Base(base))
+			base = nextParent
+		}
+		for i, j := 0, len(relParts)-1; i < j; i, j = i+1, j-1 {
+			relParts[i], relParts[j] = relParts[j], relParts[i]
+		}
+	}
+
+	r, err := os.OpenRoot(base)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = r.Close() }()
+
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	type createdDir struct {
+		f    *os.File
+		path string
+	}
+	var created []createdDir
+	defer func() {
+		for i := len(created) - 1; i >= 0; i-- {
+			RestoreFileOwnershipOf(logger, created[i].f, created[i].path)
+			_ = created[i].f.Close()
+		}
+	}()
+
+	cur := r
+	defer func() {
+		if cur != nil && cur != r {
+			_ = cur.Close()
+		}
+	}()
+	at := base
+	for _, seg := range relParts {
+		if seg == "" || seg == "." {
+			continue
+		}
+		mkErr := cur.Mkdir(seg, perm)
+		didCreate := mkErr == nil
+		next, err := cur.OpenRoot(seg)
+		if err != nil {
+			if mkErr != nil && !errors.Is(mkErr, fs.ErrExist) {
+				return mkErr
+			}
+			return err
+		}
+		nextPath := filepath.Join(at, seg)
+		if didCreate {
+			if linfo, lerr := cur.Lstat(seg); lerr == nil && linfo.IsDir() && linfo.Mode()&os.ModeSymlink == 0 {
+				if f, ferr := cur.Open(seg); ferr == nil {
+					if finfo, serr := f.Stat(); serr == nil && os.SameFile(linfo, finfo) {
+						created = append(created, createdDir{f: f, path: nextPath})
+					} else {
+						_ = f.Close()
+					}
+				}
+			}
+		}
+		if cur != r {
+			_ = cur.Close()
+		}
+		cur, at = next, nextPath
+	}
 	return nil
+}
+
+// makeDirectory creates a directory if not exists with standard permissions (0o755)
+func makeDirectory(path string) error {
+	return MkdirAllForUser(nil, path, 0o755)
 }
 
 // SetCoveragePath takes a goCovPath and sets the coverage path accordingly.
@@ -1051,7 +1282,7 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 			return "", err
 		}
 		goCovPath = currentPath + "/coverage-reports"
-		if err := makeDirectory(goCovPath); err != nil {
+		if err := MkdirAllForUser(logger, goCovPath, 0o755); err != nil {
 			LogError(logger, err, "failed to create coverage-reports directory", zap.String("CoverageReportPath", goCovPath))
 			return "", err
 		}
@@ -1645,24 +1876,287 @@ func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
 	return 0, fmt.Errorf("failed to allocate new port: %w", err)
 }
 
-func EnsureRmBeforeName(cmd string) string {
-	parts := strings.Split(cmd, " ")
-	rmIndex := -1
-	nameIndex := -1
+type shellWord struct {
+	start int
+	value string
+}
 
-	for i, part := range parts {
-		if part == "--rm" {
-			rmIndex = i
-		} else if part == "--name" {
-			nameIndex = i
-			break // Assuming --name will always have an argument, we can break here
+func isShellSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// scanShellWords tokenizes a POSIX-like shell command into words with their
+// starting byte offsets in cmd, respecting single quotes, double quotes, and
+// backslash escapes. Returns ok=false on an unterminated quote or trailing
+// backslash.
+func scanShellWords(cmd string) ([]shellWord, bool) {
+	var words []shellWord
+	n := len(cmd)
+	i := 0
+	for i < n {
+		for i < n {
+			if isShellSpace(cmd[i]) {
+				i++
+				continue
+			}
+			if cmd[i] == '\\' && i+1 < n && cmd[i+1] == '\n' {
+				i += 2
+				continue
+			}
+			break
+		}
+		if i >= n {
+			break
+		}
+
+		start := i
+		var b strings.Builder
+
+		for i < n {
+			c := cmd[i]
+			if isShellSpace(c) {
+				break
+			}
+			switch c {
+			case '\'':
+				i++
+				closeIdx := strings.IndexByte(cmd[i:], '\'')
+				if closeIdx < 0 {
+					return nil, false
+				}
+				b.WriteString(cmd[i : i+closeIdx])
+				i += closeIdx + 1
+			case '"':
+				i++
+				closed := false
+				for i < n {
+					dc := cmd[i]
+					if dc == '"' {
+						i++
+						closed = true
+						break
+					}
+					if dc == '\\' && i+1 < n {
+						next := cmd[i+1]
+						switch next {
+						case '"', '\\', '$', '`':
+							b.WriteByte(next)
+							i += 2
+							continue
+						case '\n':
+							i += 2
+							continue
+						}
+					}
+					b.WriteByte(dc)
+					i++
+				}
+				if !closed {
+					return nil, false
+				}
+			case '\\':
+				if i+1 >= n {
+					return nil, false
+				}
+				if cmd[i+1] == '\n' {
+					i += 2
+					continue
+				}
+				b.WriteByte(cmd[i+1])
+				i += 2
+			default:
+				b.WriteByte(c)
+				i++
+			}
+		}
+
+		words = append(words, shellWord{start: start, value: b.String()})
+	}
+	return words, true
+}
+
+func shellBaseName(word string) string {
+	if idx := strings.LastIndexAny(word, "/\\"); idx >= 0 {
+		return word[idx+1:]
+	}
+	return word
+}
+
+func isEnvAssignment(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	return eq > 0 && !strings.HasPrefix(word, "-")
+}
+
+var sudoValueLongFlags = map[string]bool{
+	"--user": true, "--group": true, "--host": true, "--prompt": true,
+	"--close-from": true, "--chdir": true, "--chroot": true, "--role": true,
+	"--type": true, "--other-user": true, "--command-timeout": true,
+}
+
+const sudoValueShortFlags = "CDRTUghprtu"
+
+var dockerGlobalBoolFlags = map[string]bool{
+	"-D": true, "--debug": true, "--tls": true, "--tlsverify": true,
+	"-v": true, "--version": true, "-h": true, "--help": true,
+	"-r": true, "--remote": true, "--rootless-cni": true,
+	"--syslog": true, "--transient-store": true,
+}
+
+var dockerRunBoolFlags = map[string]bool{
+	"--detach": true, "--rm": true, "--interactive": true, "--tty": true,
+	"--privileged": true, "--init": true, "--read-only": true,
+	"--publish-all": true, "--no-healthcheck": true, "--oom-kill-disable": true,
+	"--disable-content-trust": true, "--quiet": true, "--help": true,
+	"--replace": true, "--rmi": true, "--no-hosts": true, "--env-host": true,
+	"--read-only-tmpfs": true, "--http-proxy": true, "--sig-proxy": true,
+	"--use-api-socket": true, "--tls-verify": true, "--no-hostname": true,
+	"--passwd": true, "--rootfs": true, "--unsetenv-all": true,
+}
+
+const dockerRunValueShortFlags = "acehlmpuvw"
+
+func sudoFlagTakesNext(opt string) bool {
+	if strings.Contains(opt, "=") {
+		return false
+	}
+	if strings.HasPrefix(opt, "--") {
+		return sudoValueLongFlags[opt]
+	}
+	letters := opt[1:]
+	at := strings.IndexAny(letters, sudoValueShortFlags)
+	return at >= 0 && at == len(letters)-1
+}
+
+func dockerRunOptionsStart(words []shellWord) int {
+	i := 0
+	for i < len(words) && isEnvAssignment(words[i].value) {
+		i++
+	}
+	if i < len(words) && strings.EqualFold(shellBaseName(words[i].value), "sudo") {
+		i++
+		for i < len(words) && strings.HasPrefix(words[i].value, "-") && words[i].value != "-" {
+			opt := words[i].value
+			i++
+			if opt == "--" {
+				break
+			}
+			if sudoFlagTakesNext(opt) {
+				i++
+			}
+		}
+		for i < len(words) && isEnvAssignment(words[i].value) {
+			i++
 		}
 	}
-	if rmIndex == -1 && nameIndex != -1 {
-		parts = append(parts[:nameIndex], append([]string{"--rm"}, parts[nameIndex:]...)...)
+	if i >= len(words) {
+		return -1
+	}
+	prog := strings.TrimSuffix(strings.ToLower(shellBaseName(words[i].value)), ".exe")
+	if prog != "docker" && prog != "podman" {
+		return -1
+	}
+	i++
+
+	for i < len(words) && strings.HasPrefix(words[i].value, "-") && words[i].value != "-" {
+		opt := words[i].value
+		i++
+		if opt == "--" {
+			break
+		}
+		if strings.Contains(opt, "=") || dockerGlobalBoolFlags[opt] {
+			continue
+		}
+		if strings.HasPrefix(opt, "--") {
+			i++
+		} else {
+			letters := opt[1:]
+			if at := strings.IndexAny(letters, "Hcl"); at >= 0 && at == len(letters)-1 {
+				i++
+			}
+		}
+	}
+	if i >= len(words) {
+		return -1
+	}
+	sub := strings.ToLower(words[i].value)
+	if sub == "container" {
+		i++
+		if i >= len(words) || !strings.EqualFold(words[i].value, "run") {
+			return -1
+		}
+		return i + 1
+	}
+	if sub == "run" {
+		return i + 1
+	}
+	return -1
+}
+
+func dockerRunFlagTakesNext(w string) bool {
+	if strings.Contains(w, "=") {
+		return false
+	}
+	if strings.HasPrefix(w, "--") {
+		return !dockerRunBoolFlags[w]
+	}
+	letters := w[1:]
+	at := strings.IndexAny(letters, dockerRunValueShortFlags)
+	return at >= 0 && at == len(letters)-1
+}
+
+func EnsureRmBeforeName(cmd string) string {
+	words, ok := scanShellWords(cmd)
+	if !ok {
+		return cmd
+	}
+	optStart := dockerRunOptionsStart(words)
+	if optStart < 0 {
+		return cmd
 	}
 
-	return strings.Join(parts, " ")
+	hasRm := false
+	nameStart := -1
+
+	for i := optStart; i < len(words); i++ {
+		w := words[i].value
+		if w == "--" || w == "-" || !strings.HasPrefix(w, "-") {
+			// Stop at the image name (or end-of-options marker): everything
+			// after this belongs to the container command, not docker run.
+			break
+		}
+
+		if w == "--rm" || strings.HasPrefix(w, "--rm=") {
+			hasRm = true
+			continue
+		}
+
+		if w == "--name" {
+			if i+1 < len(words) {
+				if nameStart == -1 && words[i+1].value != "" {
+					nameStart = words[i].start
+				}
+				i++ // consume --name's value
+			}
+			continue
+		}
+		if val, ok := strings.CutPrefix(w, "--name="); ok {
+			// Docker accepts both "--name app" and "--name=app"
+			// (see dockerLongFlagValue).
+			if nameStart == -1 && val != "" {
+				nameStart = words[i].start
+			}
+			continue
+		}
+
+		if dockerRunFlagTakesNext(w) {
+			i++
+		}
+	}
+
+	if !hasRm && nameStart != -1 {
+		return cmd[:nameStart] + "--rm " + cmd[nameStart:]
+	}
+	return cmd
 }
 
 // dockerLongFlagValue returns the value of the first occurrence of any of
@@ -2155,54 +2649,6 @@ func isValidGRPCIdentifier(name string) bool {
 	}
 
 	return true
-}
-
-func GetContainerIPv4() (string, error) {
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	// Iterate over the interfaces
-	for _, i := range interfaces {
-		// Skip down or loopback interfaces
-		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		// Get the addresses for the current interface
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue
-		}
-
-		// Iterate over the addresses
-		for _, addr := range addrs {
-			var ip net.IP
-			// The address can be of type *net.IPNet or *net.IPAddr
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				// Check if it's an IPv4 address
-				if ipnet.IP.To4() != nil {
-					ip = ipnet.IP
-				}
-			}
-
-			if ip != nil {
-				// Found a valid IPv4 address, return it
-				return ip.String(), nil
-			}
-		}
-	}
-
-	// Tagged, so the agent that cannot start without it says so in its exit
-	// status: a container with no IPv4 address but loopback's (docker
-	// --network none, an IPv6-only network) is the environment to change, not
-	// a privilege to grant. Only an agent started with --is-docker asks (its
-	// hooks, as they load): they send the connections of the applications it
-	// serves to this address. A native one is reached over loopback and needs
-	// no address of its own.
-	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
 }
 
 // GetFullCommandUsed is the command line keploy was run with, as a test

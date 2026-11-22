@@ -31,7 +31,10 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.svc.MockOutgoing(r.Context(), OutgoingReq.OutgoingOptions); err != nil {
+	// The test set keploy test starts the session for, beside the options
+	// (models.OutgoingReq.TestSet).
+	ctx := models.WithTestSetSession(r.Context(), OutgoingReq.TestSet)
+	if err := a.svc.MockOutgoing(ctx, OutgoingReq.OutgoingOptions); err != nil {
 		utils.LogError(a.logger, err, "failed to mock outgoing")
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return

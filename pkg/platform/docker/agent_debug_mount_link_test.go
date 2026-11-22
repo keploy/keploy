@@ -21,7 +21,7 @@ func agentServiceFor(t *testing.T, keployPath string) (*yaml.Node, *observer.Obs
 	core, logs := observer.New(zapcore.WarnLevel)
 	node, err := (&Impl{
 		logger: zap.New(core),
-		conf:   &config.Config{Path: keployPath},
+		conf:   &config.Config{Path: keployPath, Debug: true},
 	}).GenerateKeployAgentService(models.SetupOptions{
 		KeployContainer: "keploy-agent",
 		AgentPort:       16789,

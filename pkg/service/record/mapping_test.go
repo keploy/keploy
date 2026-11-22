@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -153,7 +154,7 @@ func TestConsumeMappings_CountsShortPoolTests(t *testing.T) {
 	var revoked []string
 	require.NoError(t, r.consumeMappings(context.Background(), "set-0", mappings,
 		&correlationMap, &asyncMockIDs, &droppedMockIDs,
-		func(n string) { revoked = append(revoked, n) },
+		func(n string, _ []time.Time) { revoked = append(revoked, n) },
 		&shortPoolByTest))
 
 	assert.Empty(t, revoked,
@@ -357,7 +358,7 @@ func TestConsumeMappings_RevokeRollsBackShortPoolCounts(t *testing.T) {
 	var revoked []string
 	require.NoError(t, r.consumeMappings(context.Background(), "set-0", mappings,
 		&correlationMap, &asyncMockIDs, &droppedMockIDs,
-		func(n string) { revoked = append(revoked, n) },
+		func(n string, _ []time.Time) { revoked = append(revoked, n) },
 		&shortPoolByTest))
 
 	assert.Equal(t, []string{"t-1"}, revoked, "the known drop must revoke the test")
@@ -471,6 +472,6 @@ func TestConsumeMappingsTellsEachTestsResolvedMocks(t *testing.T) {
 			for _, e := range entries {
 				told = append(told, test+"/"+e.Name)
 			}
-		}, nil))
+		}, nil, nil))
 	assert.Equal(t, []string{"test-1/mock-1", "test-1/mock-2"}, told)
 }

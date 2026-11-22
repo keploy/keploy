@@ -16,6 +16,21 @@
 # well; mvn runs offline on a restored cache, and a cache that falls short
 # heals in one run (its scripts say how).
 #
+# Nor does any step cache ~/.m2 (the whole of it, or its repository) with
+# actions/cache, or its restore or save half, outside setup-java-maven's own
+# action. Maven builds online on such a cache, so it still asks Maven Central
+# about what the cache holds: the metadata of a version range, once the copy
+# restored is a day old (the default update policy), on every run, since an
+# entry is never replaced. When Central answers that request with a 404, Maven
+# deletes the cached copy and the build fails; the performance workflow's
+# PetClinic build failed so on 2026-11-19 ("No versions available for
+# org.bouncycastle:bcutil-jdk18on:jar:[1.81,1.82) within specified range").
+# A step is a YAML list item; it is such a cache when it uses actions/cache@,
+# actions/cache/restore@ or actions/cache/save@ and names .m2/repository, or
+# .m2 itself, anywhere in it (a path in block or flow style). A path given
+# only through an expression (path: ${{ env.M2 }}) is not seen, nor is a
+# Windows-style path (~\.m2\repository): no workflow runs Maven on Windows.
+#
 # Every YAML file under .github is read, at any depth: workflows, and the
 # actions they use, composite or nested in another action's directory. A
 # `cache:` of maven, quoted or not, in block or flow style (`with: { cache:
@@ -53,6 +68,42 @@ if [ -n "$uses" ]; then
   exit 1
 fi
 
+# Steps that cache ~/.m2 themselves (above), file:line of each step's start.
+# setup-java-maven's own action is the one place that may.
+rc=0
+# shellcheck disable=SC2016 # an awk program
+raw=$(git ls-files -z -- ':(glob).github/**/*.yml' ':(glob).github/**/*.yaml' \
+  ':(exclude,glob).github/actions/setup-java-maven/**' | xargs -0 -r awk '
+  function flush() {
+    if (item != "" && item ~ /uses:[[:space:]]*["\047]?actions\/cache(\/restore|\/save)?@/ &&
+        (item ~ /\.m2\/repository/ || item ~ /\.m2\/?(["\047[:space:],}]|$)/))
+      print file ":" start
+    item = ""
+  }
+  FNR == 1 { flush(); file = FILENAME }
+  {
+    text = $0
+    sub(/\r$/, "", text)
+    sub(/(^|[[:space:]])#.*/, "", text)
+    if (text ~ /^[[:space:]]*$/) next
+    match(text, /^[[:space:]]*/)
+    ind = RLENGTH
+    if (item != "" && ind <= iind) flush()
+    if (item == "" && text ~ /^[[:space:]]*-([[:space:]]|$)/) { item = text; iind = ind; start = FNR; next }
+    if (item != "") item = item "\n" text
+  }
+  END { flush() }') || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "::error::reading the workflows for steps that cache ~/.m2 failed (exit $rc)"
+  exit "$rc"
+fi
+if [ -n "$raw" ]; then
+  echo "::error::these steps cache ~/.m2 with actions/cache themselves. Maven builds online on such a cache and asks Maven Central again about what it holds (a version range's metadata, once the copy is a day old, on every run), so a bad answer from Central fails the build (see .github/workflows/test_workflow_scripts/check-maven-caches.sh):"
+  printf '%s\n' "$raw"
+  echo "Use ./.github/actions/setup-java-maven (with java-version and cache-dependency-path) and its save step: mvn then runs offline on the restored repository."
+  exit 1
+fi
+
 # Uses of setup-java-maven and of its save half, per file.
 use_re="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*['\"]?\./\.github/actions/setup-java-maven"
 rc=0
@@ -76,4 +127,4 @@ if [ -n "$unsaved" ]; then
   printf '%s\n' "$unsaved" | LC_ALL=C sort
   exit 1
 fi
-echo "No workflow or action turns on actions/setup-java's own Maven cache, and every use of setup-java-maven has its save step."
+echo "No workflow or action turns on actions/setup-java's own Maven cache or caches ~/.m2 itself, and every use of setup-java-maven has its save step."

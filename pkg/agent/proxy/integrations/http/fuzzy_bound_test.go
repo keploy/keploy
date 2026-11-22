@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"runtime/metrics"
 	"slices"
 	"strconv"
 	"strings"
@@ -893,15 +894,42 @@ func (c *heapAtEachRead) Err() error {
 // ranking's own goroutine, so nothing else of note does (the test goroutine's
 // time.After timer is a few hundred bytes against a 2 MB half-copy margin).
 //
-// HeapAlloc is off too, by far less: with several Ps it holds, now and then,
-// up to 7 KiB of sudogs that the runtime caches and the next collection
-// drops, so two readings of one heap differ by up to 7 KiB. A copy's check
-// (one < size) has 8 KiB of room: a copy is size bytes and a few of JSON,
-// which take 513 pages, 4202496 bytes. That leaves about 1 KiB of margin,
-// and a tighter check of a copy's size would fail rankings that hold nothing.
+// HeapAlloc also moves with what the rest of the process frees while the row
+// measures. In the whole package's run, small objects that the rows before
+// this one left with the runtime go in bursts, up to 70 KiB between two
+// readings a few milliseconds apart (mostly 112-byte objects), and the
+// runtime's sudog caches move by up to 7 KiB. That is nothing against the
+// bound's half-copy margin, but it is more than the 8 KiB by which a copy's
+// pages pass its size: a copy is measured by largeLeft, not by HeapAlloc.
 func heapLeft() uint64 {
 	runtime.GC()
 	return heapNow()
+}
+
+// largeLeft is the bytes of the heap's large objects, each over 32 KiB,
+// after the same two collections. A copy of a recording is one such object,
+// its size rounded up to whole 8 KiB pages (a 4 MB body and a few bytes of
+// JSON take 513 pages, 4202496 bytes), and what else moves the heap while the
+// row measures is small objects. So the large objects a copy adds are its
+// pages exactly, where HeapAlloc measured the same copy, now and then, up to
+// 70 KiB under its size: "a copy measured 4.0 MB, want its body's 4.0".
+func largeLeft() uint64 {
+	runtime.GC()
+	runtime.GC()
+	s := []metrics.Sample{{Name: "/gc/heap/allocs:bytes"}, {Name: "/gc/heap/frees:bytes"},
+		{Name: "/gc/heap/allocs-by-size:bytes"}, {Name: "/gc/heap/frees-by-size:bytes"}}
+	metrics.Read(s)
+	// One Read is one consistent snapshot of the heap's counts. Each bucket of
+	// the histograms but the last counts the objects of one small size class,
+	// whose size is the bucket's upper bound less one byte; the last counts
+	// the large objects, which allocs:bytes and frees:bytes count by their
+	// pages. What the small classes leave of allocs less frees is those pages.
+	live := s[0].Value.Uint64() - s[1].Value.Uint64()
+	allocs, frees := s[2].Value.Float64Histogram(), s[3].Value.Float64Histogram()
+	for i := range len(allocs.Counts) - 1 {
+		live -= (allocs.Counts[i] - frees.Counts[i]) * uint64(allocs.Buckets[i+1]-1)
+	}
+	return live
 }
 
 // A ranking holds one recording at a time, by its shingles and by Levenshtein
@@ -962,8 +990,9 @@ func holdsOneAtATime(t *testing.T, mocks []*models.Mock, req []byte, size uint64
 		bag = newShingleBag(reqCopy)
 	}
 	overhead := heapLeft() - base
+	large := largeLeft()
 	held := fuzzyBody(mocks[0])
-	one := heapLeft() - base - overhead
+	one := largeLeft() - large
 	runtime.KeepAlive(reqCopy)
 	runtime.KeepAlive(bag)
 	runtime.KeepAlive(held)

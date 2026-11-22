@@ -24,6 +24,7 @@ var ciProviders = []struct {
 	{"BUILDKITE", "buildkite"},
 	{"TF_BUILD", "azure-pipelines"},
 	{"BITBUCKET_PIPELINE_UUID", "bitbucket"},
+	{"BITBUCKET_BUILD_NUMBER", "bitbucket"},
 	{"CODEBUILD_BUILD_ID", "aws-codebuild"},
 	{"TEAMCITY_VERSION", "teamcity"},
 	{"DRONE", "drone"},
@@ -34,6 +35,9 @@ var ciProviders = []struct {
 	// Bamboo and GoCD set no CI variable: each is known by its own.
 	{"bamboo_planKey", "bamboo"},
 	{"GO_PIPELINE_LABEL", "gocd"},
+	// A pipeline id with no runner named: GitLab's (it sets GITLAB_CI too,
+	// read above) and other runners' that copy its variable names.
+	{"CI_PIPELINE_ID", "unknown"},
 }
 
 // ciRepoVars are the variables in which a CI provider names the repository
@@ -68,22 +72,36 @@ var ciRepoURLVars = map[string]bool{
 }
 
 // detectCI returns whether the process is running inside a CI environment
-// and the name of the CI provider (empty string if unknown or not CI).
+// and the name of the CI provider ("unknown" for a run that names none,
+// empty outside CI).
 func detectCI() (bool, string) {
 	for _, p := range ciProviders {
 		if os.Getenv(p.envVar) != "" {
 			return true, p.provider
 		}
 	}
-	if ci := os.Getenv("CI"); ci != "" {
-		// Woodpecker sets no WOODPECKER variable: every step has
-		// CI=woodpecker, its system name, beside CI_REPO.
-		if strings.EqualFold(strings.TrimSpace(ci), "woodpecker") {
-			return true, "woodpecker"
-		}
-		return true, "unknown"
+	ci := os.Getenv("CI")
+	if !ciValueSaysCI(ci) {
+		return false, ""
 	}
-	return false, ""
+	// Woodpecker sets no WOODPECKER variable: every step has
+	// CI=woodpecker, its system name, beside CI_REPO.
+	if strings.EqualFold(strings.TrimSpace(ci), "woodpecker") {
+		return true, "woodpecker"
+	}
+	return true, "unknown"
+}
+
+// ciValueSaysCI is how a value of the CI variable is read, as enterprise's
+// CLI reads it (its CIValueSaysCI): CI=false, CI=0 or CI=no says this is NOT
+// CI (a developer's shell that exports it, a runner told so), and so does an
+// empty one; any other value counts.
+func ciValueSaysCI(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "false", "0", "no":
+		return false
+	}
+	return true
 }
 
 // gitRepoOnce caches the result of the (potentially slow) git command.

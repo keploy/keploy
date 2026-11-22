@@ -10,6 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -68,7 +72,8 @@ func hideSockets(t *testing.T, ends ...net.Addr) {
 // once one of the application's has been listed (proveAppVisible, at the
 // accept, as on Linux); before, the wait and the close are unknown, unless the
 // proxy's side took the application's FIN, after which nothing it wrote is on
-// its way.
+// its way. An unknown close is a loss of the tests its connection could have
+// served, not every later wait's answer.
 func TestAHiddenApplicationSocketIsUnknownNotGoneOnDarwin(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -112,20 +117,38 @@ func TestAHiddenApplicationSocketIsUnknownNotGoneOnDarwin(t *testing.T) {
 				}
 				untilStateLeaves(t, proxySide, xnuTCPEstablished)
 			}
-			var err error
 			if tc.close {
+				// A close that cannot tell says so in a line, and is a
+				// loss of the tests the connection could have served
+				// (for a proxy that holds the paired bytes), never
+				// every later wait's answer.
+				core, logs := observer.New(zapcore.DebugLevel)
+				p.logger = zap.New(core)
 				_ = reader.Close()
-				err = p.PairedBytesErr()
-			} else {
-				if _, werr := app.Write([]byte("x")); werr != nil {
-					t.Fatal(werr)
+				n := len(logs.FilterMessageSnippet("keploy cannot tell what the application had written").All())
+				if got := n == 1; got != tc.unknown || n > 1 {
+					t.Fatalf("%d lines say the close cannot tell what was written, want unknown %v: %+v", n, tc.unknown, logs.All())
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				err = p.WaitPairedBytes(ctx, 1)
-				if !tc.unknown && !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("the wait ended with %v, want it to wait on for the application's FIN or reset", err)
+				if err := p.PairedBytesErr(); err != nil {
+					t.Fatalf("PairedBytesErr = %v after the close, want nil: every later wait would end with it", err)
 				}
+				want := uint64(0)
+				if tc.unknown && p.holdsPairedBytes() {
+					want = 1
+				}
+				if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != want {
+					t.Fatalf("%d untold closes charged, want %d", l, want)
+				}
+				return
+			}
+			if _, werr := app.Write([]byte("x")); werr != nil {
+				t.Fatal(werr)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := p.WaitPairedBytes(ctx, 1)
+			if !tc.unknown && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("the wait ended with %v, want it to wait on for the application's FIN or reset", err)
 			}
 			if got := errors.Is(err, models.ErrProxyConnsUnsupported); got != tc.unknown {
 				t.Fatalf("unknown = %v (%v), want %v", got, err, tc.unknown)
@@ -198,7 +221,7 @@ func TestTheCountsOfWhatWasWrittenHoldPastTheWrapOnDarwin(t *testing.T) {
 	}
 	pc.cutShort("test-1", tg.want)
 	wrote(100)
-	p.noteWroteAtClose(pc)
+	p.noteWroteAtClose(context.Background(), pc)
 	w := pc.wroteAtClose.Load()
 	if w == nil || w.want != 1<<32+100 {
 		t.Fatalf("the close counted %+v, want %d written: 110 past the wait's count", w, uint64(1<<32+100))

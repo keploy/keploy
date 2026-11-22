@@ -697,6 +697,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if captureEligible && pm.notRecordedStream(ctx, logger, req, resp, &win) {
 			captureEnabled = false
 		}
+		if captureEligible && captureEnabled && pm.notRecordedStaticAsset(logger, req, resp, &win) {
+			captureEnabled = false
+		}
 
 		// The app has answered. The rest of a body it answered before it came
 		// is forwarded, within bounds, before the answer (requestRelay.finish).
@@ -1107,6 +1110,23 @@ func (pm *IngressProxyManager) notRecordedStream(ctx context.Context, logger *za
 			zap.Any("metadata", notRecordedMeta(ctx, req, streamWhy)),
 			zap.String("content_type", mediaType(resp.Header.Get("Content-Type"))))
 	}
+	return true
+}
+
+// notRecordedStaticAsset reports whether resp is a web static asset that the
+// user opted out of recording via --ignore-static-assets / record.ignoreStaticAssets.
+// Checking at response headers avoids buffering up to 5 MB into respCapture,
+// holding the mock window open across asset transfers, or contending on captureHookSem.
+func (pm *IngressProxyManager) notRecordedStaticAsset(logger *zap.Logger, req *http.Request, resp *http.Response, win **syncMock.Window) bool {
+	if !hooksUtils.ShouldSkipStaticAsset(logger, req, resp, pm.loadIncomingOpts()) {
+		return false
+	}
+	if *win != nil {
+		(*win).Close()
+		*win = nil
+	}
+	logger.Debug("Skipping static asset response as a test case (--ignore-static-assets)",
+		zap.String("content_type", mediaType(resp.Header.Get("Content-Type"))))
 	return true
 }
 
@@ -1834,6 +1854,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// A stream is no test case, and that is known at its headers
 		// (notRecordedStream): its body is not captured.
 		if captureEnabled && pm.notRecordedStream(ctx, logger, req, resp, &win) {
+			captureEnabled = false
+		}
+		if captureEnabled && pm.notRecordedStaticAsset(logger, req, resp, &win) {
 			captureEnabled = false
 		}
 

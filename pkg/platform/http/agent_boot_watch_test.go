@@ -851,6 +851,135 @@ func TestTheReleaseEndsOnTheAgentsContainerHavingExited(t *testing.T) {
 	}
 }
 
+// A release the agent's exit cut is made again on the agent compose's
+// bring-up retry starts in its place (reapply): a dependency that crashed at
+// the bring-up stops the stack, the agent with it, before the agent took the
+// release, and the retry's agent, never released, would hold the app back for
+// good. One the agent refused for good (a latched CA setup failure) or the
+// run's end cut is owed to no agent, and is not made again.
+func TestAReleaseTheAgentsExitCutIsMadeAgainOnTheAgentStartedInItsPlace(t *testing.T) {
+	type agent struct {
+		a        *AgentClient
+		s        *agentSession
+		c        *scriptedContainer
+		answer   atomic.Value // what /agent/ready answers: "wait", "ca" or "ok"
+		released atomic.Int32
+		asked    chan struct{}
+	}
+	start := func(t *testing.T, answer string) *agent {
+		ag := &agent{c: &scriptedContainer{}, asked: make(chan struct{}, 1)}
+		ag.answer.Store(answer)
+		ag.c.install(t)
+		// The agent's exit is the only verdict here: a ready agent's health
+		// check is not due within the run of a row.
+		bootSilence = time.Hour
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/agent/ready"):
+				select {
+				case ag.asked <- struct{}{}:
+				default:
+				}
+				switch ag.answer.Load().(string) {
+				case "ok":
+					ag.released.Add(1)
+					w.WriteHeader(http.StatusOK)
+				case "ca":
+					http.Error(w, agentCASetupFailed+" open /tmp/keploy-tls/ca.crt: read-only file system", http.StatusServiceUnavailable)
+				default:
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}
+			case strings.HasSuffix(r.URL.Path, "/health"):
+				// Read under the switch only, and agreeing: the agent runs
+				// with --proven exactly when this keploy does.
+				healthSays("on", http.StatusOK)(w, 0)
+			default:
+				w.WriteHeader(http.StatusOK)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		ag.s = storeSession(t, srv.URL, true)
+		ag.a = clientFor(srv.URL)
+		ag.a.agentContainer = &namedContainer{name: "keploy-v3-test"}
+		ag.c.set(true, utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, true)
+		return ag
+	}
+	release := func(t *testing.T, ag *agent, ctx context.Context, cut func()) error {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- ag.a.MakeAgentReadyForDockerCompose(ctx) }()
+		select {
+		case <-ag.asked:
+		case err := <-done:
+			return err
+		case <-time.After(30 * time.Second):
+			t.Fatal("the release never asked the agent")
+		}
+		cut()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(30 * time.Second):
+			t.Fatal("the release did not end")
+		}
+		return nil
+	}
+	owed := func(s *agentSession) bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, step := range s.steps {
+			if step.kind == stepAgentReady {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("cut by the agent's exit", func(t *testing.T) {
+		ag := start(t, "wait")
+		err := release(t, ag, context.Background(), func() { ag.c.exit(137) })
+		if !errors.Is(err, errReleaseCut) || !strings.Contains(err.Error(), "exited with code 137") {
+			t.Fatalf("the release ended with %v; want it cut by the agent's exit", err)
+		}
+		if !owed(ag.s) {
+			t.Fatal("a release the agent's exit cut is not kept for the agent started in its place")
+		}
+		// compose's retry starts the agent again, which takes the release.
+		ag.c.mu.Lock()
+		ag.c.running, ag.c.ended, ag.c.code = true, false, 0
+		ag.c.mu.Unlock()
+		ag.answer.Store("ok")
+		if err := ag.s.reapply(context.Background(), zap.NewNop()); err != nil {
+			t.Fatalf("setting the restarted agent up: %v", err)
+		}
+		if n := ag.released.Load(); n != 1 {
+			t.Fatalf("the agent started in its place was released %d times, want once", n)
+		}
+	})
+	t.Run("refused for good", func(t *testing.T) {
+		ag := start(t, "ca")
+		err := release(t, ag, context.Background(), func() {})
+		if err == nil || errors.Is(err, errReleaseCut) || !strings.Contains(err.Error(), "read-only file system") {
+			t.Fatalf("the release ended with %v; want the agent's latched CA failure", err)
+		}
+		if owed(ag.s) {
+			t.Fatal("a release the agent refused for good is kept to be made again")
+		}
+	})
+	t.Run("cut by the run's end", func(t *testing.T) {
+		ag := start(t, "wait")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		err := release(t, ag, ctx, cancel)
+		if !errors.Is(err, context.Canceled) || errors.Is(err, errReleaseCut) {
+			t.Fatalf("the release ended with %v; want the run's end", err)
+		}
+		if owed(ag.s) {
+			t.Fatal("a release the run's end cut is kept to be made again")
+		}
+	})
+}
+
 // A stale report that says the agent's server listens (a container compose
 // started again, its last run's report still there) does not latch: once the
 // new run's beats begin again, the ready rule's bound counts from the new

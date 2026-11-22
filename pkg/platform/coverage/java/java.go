@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -47,20 +48,16 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 	if err == nil {
 		isFileExist, err := utils.FileExists(jacocoAgentPath)
 		if err == nil && isFileExist {
-			j.cmd = strings.Replace(
-				j.cmd,
-				j.executable,
-				fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", j.executable, jacocoAgentPath), 1,
-			)
+			j.cmd = buildJavaCoverageCmd(j.cmd, j.executable, jacocoAgentPath, runtime.GOOS)
 		}
 	}
 	if err != nil {
 		j.logger.Info("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
 		return j.cmd, err
 	}
-	// downlaod jacoco cli
-	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
-	err = os.MkdirAll(jacocoPath, 0777)
+	// download jacoco cli
+	jacocoPath := jacocoCacheDir()
+	err = os.MkdirAll(jacocoPath, 0o755)
 	if err != nil {
 		j.logger.Debug("failed to create jacoco directory", zap.Error(err))
 		return j.cmd, err
@@ -71,6 +68,28 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 		return j.cmd, err
 	}
 	return j.cmd, nil
+}
+
+func buildJavaCoverageCmd(cmd, executable, jacocoAgentPath, goos string) string {
+	var agentArg string
+	if goos == "windows" {
+		// On Windows, commands run via `cmd /C <userCmd>` without SysProcAttr.CmdLine,
+		// so Go escapes embedded double quotes as `\"`, which java.exe parses as literal
+		// quotes. Keep the argument unquoted on Windows to avoid breaking execution.
+		agentArg = fmt.Sprintf("-javaagent:%s=destfile=target/${TESTSETID}.exec", jacocoAgentPath)
+	} else {
+		agentArg = fmt.Sprintf(`"-javaagent:%s=destfile=target/${TESTSETID}.exec"`, escapePOSIXDoubleQuote(jacocoAgentPath))
+	}
+	return strings.Replace(cmd, executable, fmt.Sprintf("%s %s", executable, agentArg), 1)
+}
+
+func escapePOSIXDoubleQuote(s string) string {
+	return strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		`$`, `\$`,
+		"`", "\\`",
+	).Replace(s)
 }
 
 func (j *Java) GetCoverage() (models.TestCoverage, error) {

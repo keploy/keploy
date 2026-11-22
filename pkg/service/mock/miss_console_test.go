@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -103,7 +104,7 @@ func TestAMockReplaysConsoleNamesEachCallOnceAndAtMostSoMany(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got missesReport
+	var got localfile.MissesReport
 	if err := yaml.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +135,7 @@ func TestAMockReplaysConsoleNamesEachCallOnceAndAtMostSoMany(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got = missesReport{}
+	got = localfile.MissesReport{}
 	if err := yaml.Unmarshal(b, &got); err != nil || len(got.Misses) != 1 || got.Misses[0].Call != "GET /v1/users/7" || strings.Count(string(b), "# Written by") != 1 {
 		t.Errorf("the next replay's misses file holds %+v (%v), want its one call alone", got.Misses, err)
 	}
@@ -264,14 +265,12 @@ func TestTheMissesFileIsWrittenOnlyOnceBothEntriesAreIgnored(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(keployDir, ".gitignore"), []byte("/*/"+MissesFile+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	was := addGitIgnore
-	addGitIgnore = func(logger *zap.Logger, path, entry string) error {
+	t.Cleanup(localfile.SetAddGitIgnoreForTest(func(logger *zap.Logger, path, entry string) error {
 		if entry == "/*/"+receiptTempPrefix+"*" {
 			return fmt.Errorf("keploy/.gitignore is read-only")
 		}
-		return was(logger, path, entry)
-	}
-	t.Cleanup(func() { addGitIgnore = was })
+		return utils.AddToGitIgnore(logger, path, entry)
+	}))
 	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/reset/t0k3n", PathTag: "#000000000001"}
 	if file := writeMissesFile(zap.NewNop(), keployDir, "set", []models.UnmatchedCall{miss}); file != "" {
 		t.Fatalf("the misses file was written at %s with its temporary file's entry missing", file)
@@ -345,7 +344,7 @@ func TestAMockReplayMissNamesItsDestinationBesideItsHostTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got missesReport
+	var got localfile.MissesReport
 	if err := yaml.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +409,7 @@ func TestHoldsCallsWholeNamesTheMissesFileAndItsTemporaryFile(t *testing.T) {
 }
 
 // A kill between a local file's temporary write and its rename leaves the
-// temporary file behind. Each file the writes really made (tempWritten sees
+// temporary file behind. Each file the writes really made (SetTempWrittenForTest sees
 // them; the row puts back what a kill leaves) is git-ignored, so it is never
 // committed, and HoldsCallsWhole names exactly the ones that hold a call
 // whole, the misses file's: whatever sends the keploy folder away (a debug
@@ -425,22 +424,22 @@ func TestAKillMidWriteLeavesATemporaryFileHoldsCallsWholeNames(t *testing.T) {
 	}
 	left := map[string][]byte{}
 	var order []string
-	tempWritten = func(path string) {
+	restore := localfile.SetTempWrittenForTest(func(path string) {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			t.Errorf("read the temporary file %s: %v", path, err)
 		}
 		left[path] = b
 		order = append(order, path)
-	}
-	t.Cleanup(func() { tempWritten = func(string) {} })
+	})
+	t.Cleanup(restore)
 	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/reset/t0k3n", PathTag: "#000000000001"}
 	if file := writeMissesFile(zap.NewNop(), keployDir, "set", []models.UnmatchedCall{miss}); file == "" {
 		t.Fatal("the misses file was not written")
 	}
 	writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Tests: []TestReceipt{{Name: "TestReset"}}})
 	writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set", Command: "keploy mock replay"})
-	tempWritten = func(string) {}
+	restore()
 	if len(order) != 3 {
 		t.Fatalf("the misses file's, the tests receipt's and the receipt's writes went through %d temporary files %q, want three", len(order), order)
 	}

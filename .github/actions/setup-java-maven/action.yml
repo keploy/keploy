@@ -1,5 +1,5 @@
 name: setup-java-maven
-description: "Set up a Temurin JDK and restore ~/.m2/repository for a Maven build, keyed by the Maven, JDK, configuration and poms; mvn then runs offline on it, and heals it when it falls short"
+description: "Set up the pinned Temurin JDK (jdk/) and restore ~/.m2/repository for a Maven build, keyed by the Maven, JDK, configuration and poms; mvn then runs offline on it, and heals it when it falls short"
 
 # In place of actions/setup-java's own `cache: maven`, whose key (OS, arch,
 # pom hash) stays the same when the runner image changes its Maven. A local
@@ -19,7 +19,7 @@ description: "Set up a Temurin JDK and restore ~/.m2/repository for a Maven buil
 inputs:
   java-version:
     required: true
-    description: "The JDK, as actions/setup-java's java-version takes it"
+    description: "The JDK's major version (8, 17); jdk/jdks.txt pins each to one Temurin build"
   cache-dependency-path:
     required: true
     description: "The pom.xml files the build reads its dependencies from, one per line, relative to the workspace"
@@ -27,10 +27,13 @@ inputs:
 runs:
   using: composite
   steps:
-    # setup-java writes ~/.m2/settings.xml, which the key hashes: it comes first.
-    - uses: actions/setup-java@v4
+    # The JDK jdks.txt pins for java-version (jdk/): the image's own copy of
+    # exactly that build, or the build's checked archive.
+    # setup-java, run there, writes ~/.m2/settings.xml, which the key hashes:
+    # it comes first. This path is the workspace's, as for any local action:
+    # the job checks this repository out at the workspace's root.
+    - uses: ./.github/actions/setup-java-maven/jdk
       with:
-        distribution: temurin
         java-version: ${{ inputs.java-version }}
 
     - name: Maven repository cache key

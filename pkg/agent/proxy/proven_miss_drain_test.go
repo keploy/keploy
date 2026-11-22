@@ -11,7 +11,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 // untilTrue waits until cond holds. The conditions below are states the drain
@@ -246,36 +245,23 @@ func overflowPending(p *Proxy) {
 	flushDrain(p)
 }
 
-// Misses made while no test's window is open, past what keploy keeps, are no
-// test's when a set's first test opens its window: with the proven switch off
-// they are discarded, the drop is said, and no read is made incomplete by
-// them. Under the switch they are the set's: the first test reads those kept,
-// marked as made before the set, and its read says it is short of the rest.
-func TestBeginTestErrorCapture_SaysAPendingOverflowAndJudgesTheTest(t *testing.T) {
+// Misses made while no test's window is open, past what keploy keeps, are the
+// set's when its first test opens its window, with the proven switch on or
+// off: the first test reads those kept, marked as made before the set, and
+// its read says it is short of the rest (with the switch off the replay
+// marks that test's misses unattributed and says why; with it on it does not
+// judge the set). None is discarded unsaid.
+func TestBeginTestErrorCapture_CarriesAPendingOverflowAsTheSetsAndSaysTheReadIsShort(t *testing.T) {
 	eitherSwitch(t, func(t *testing.T) {
-		// The logger is the proxy's before its drain starts: the drain reads it.
-		core, logs := observer.New(zap.WarnLevel)
-		p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 8)}
-		ctx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
-		p.StartErrorDrain(ctx)
+		p := startedDrainProxy(t, 8)
 		overflowPending(p)
 		p.BeginTestErrorCapture()
 		got, err := p.GetMockErrors(context.Background())
-		if provenswitch.On() {
-			if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBeforeSetFull) {
-				t.Fatalf("the set's first test's read err %v; want it short of the misses made before the set", err)
-			}
-			if len(got) != maxPendingMockErrors || !got[0].BeforeSet {
-				t.Fatalf("the set's first test read %d misses (first %+v); want the %d kept, marked as the set's", len(got), got[0], maxPendingMockErrors)
-			}
-			return
+		if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBeforeSetFull) {
+			t.Fatalf("the set's first test's read err %v; want it short of the misses made before the set", err)
 		}
-		if err != nil || len(got) != 0 {
-			t.Fatalf("the set's first test read %d misses, err %v; want none, complete", len(got), err)
-		}
-		if n := len(logs.FilterMessageSnippet("than keploy keeps; the rest were dropped").All()); n != 1 {
-			t.Fatalf("the drop was said %d times; want once", n)
+		if len(got) != maxPendingMockErrors || !got[0].BeforeSet || !got[len(got)-1].BeforeSet {
+			t.Fatalf("the set's first test read %d misses; want the %d kept, each marked as the set's", len(got), maxPendingMockErrors)
 		}
 	})
 }
