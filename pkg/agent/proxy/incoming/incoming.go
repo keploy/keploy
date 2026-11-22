@@ -110,6 +110,9 @@ type IngressProxyManager struct {
 	// connections the manager forwarded (serveParked), for the run's summary.
 	parkedServed   atomic.Uint64
 	parkedServedV6 atomic.Uint64
+	// steeredServed counts the calls the park took while the hooks steer
+	// (serveSteered): every call to the app's ports then.
+	steeredServed atomic.Uint64
 	// portSems are the synchronous mode's per-port semaphores, which a
 	// port's forwarder and the park share (portSem). Guarded by semMu.
 	semMu    sync.Mutex
@@ -257,6 +260,27 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 	pm.mu.Lock()
 	if _, ok := pm.active[origAppPort]; ok {
 		pm.mu.Unlock()
+		if origAppPort == newAppPort && pm.ingressSteers() {
+			// Another socket of the app's on a port keploy steers
+			// already (on another address, or over IPv6), which the
+			// hooks noted as they sent this event: kept as the first
+			// was, so an agent restarted in the pod steers it again.
+			pm.portHolder.KeepSteerTable()
+		}
+		return
+	}
+	if pm.ingressSteers() {
+		// The app listens on its own port, and the lookup steers the calls
+		// its sockets take to the park, which forwards each to the app
+		// (serveSteered): no forwarder binds the app's port, so nothing of
+		// keploy's stands on it when keploy goes.
+		pm.active[origAppPort] = func() error { return nil }
+		pm.mu.Unlock()
+		// Kept for an agent restarted in the pod, which steers it again.
+		pm.portHolder.KeepSteerTable()
+		pm.logger.Info("Started ingress forwarding",
+			zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", origAppPort),
+			zap.String("how", "steered: the application keeps its port"))
 		return
 	}
 	hook := pm.ingressHook
@@ -320,6 +344,9 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 // false while the forwarder holds orig and that port is not known (no hold,
 // and the forwarder is still starting or the bind event did not carry it).
 func (pm *IngressProxyManager) AppListenPort(orig uint16) (port uint16, ok bool) {
+	if pm.ingressSteers() {
+		return orig, true // no bind is moved
+	}
 	pm.mu.Lock()
 	_, forwarded := pm.active[orig]
 	moved, relocated := pm.relocated[orig]
@@ -536,8 +563,17 @@ func (h *goTCPIngressHook) acceptIngress(ctx context.Context, listener net.Liste
 			return
 		default:
 		}
+		ingressAcceptTurn()
 		err := tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
 		if err != nil {
+			// StopIngress cancels ctx, then closes the listener: a stop
+			// that lands between the check above and this call is a
+			// stop, not a fault (an ERROR here was logged for a forwarder
+			// stopped as it started).
+			if ctx.Err() != nil {
+				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
+				return
+			}
 			logger.Error("Failed to set deadline on ingress listener", zap.Error(err))
 			return
 		}
@@ -560,6 +596,10 @@ func (h *goTCPIngressHook) acceptIngress(ctx context.Context, listener net.Liste
 // (not keploy's) holds, which the hold left to it on purpose with a WARN: the
 // manager does not log it as a failure.
 var errIngressPortYielded = errors.New("another listener holds the application's port; keploy's hold yielded it")
+
+// ingressAcceptTurn runs at each turn of an accept loop, after its check of
+// its context; a test stands a stop there.
+var ingressAcceptTurn = func() {}
 
 // ingressIPv6Probe is StartIngress's IPv6 check of the app's port
 // (probeIPv6Port); a variable so a test can make it fail as on a host

@@ -203,6 +203,16 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 			rb.Close()
 		}()
 
+		// The ports a restarted agent steers again, which the application
+		// bound before this agent was there: as their bind events would be.
+		for _, e := range h.steeredAgainEvents() {
+			select {
+			case <-ctx.Done():
+				return
+			case eventChan <- e:
+			}
+		}
+
 		for {
 			// Read raw data from the ring buffer
 			rec, err := rb.Read()

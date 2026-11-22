@@ -108,6 +108,13 @@ func (h *Hooks) sayBindFallback(flags uint32) {
 	warnBindFallback(h.logger, r.hook, r.err, netSysctlDir)
 }
 
+// movedOutage is what moving the app's binds costs while keploy's agent is
+// down: keploy's forwarder alone listens on each port the app asked for, so
+// every call there is refused until the agent is back. Where keploy steers
+// (BPF sk_lookup, Linux 5.9 or newer, both post_bind hooks attached), the app
+// keeps its port and its own socket takes the calls then.
+const movedOutage = "While keploy's agent is down (a crash, an OOM kill, a restart), every call to a port of the app's whose bind keploy moved is refused: keploy's forwarder alone listens there"
+
 // warnBindFallback says, once, where the app's binds go when the post_bind
 // hook named hook did not attach (attachErr): the ports the bind hooks move
 // them to, read from the sysctls in dir, and that a bind which finds each
@@ -130,7 +137,7 @@ func warnBindFallback(logger *zap.Logger, hook string, attachErr error, dir stri
 		logger.Warn(fmt.Sprintf("%s: a port in %d-%d, outside net.ipv4.ip_local_port_range %d-%d, that no socket listens on "+
 			"(rare: a port there that another socket bound without listening fails the app's bind with 'address already in use'). "+
 			"A bind that finds each port it tries there listened on is left on the port the app names, "+
-			"and that port's incoming traffic is not recorded",
+			"and that port's incoming traffic is not recorded. "+movedOutage,
 			head, p.first, p.last, p.lo, p.hi), zap.Error(attachErr))
 	}
 }

@@ -48,6 +48,11 @@ func TestAHoldThatCannotStartSaysTheWindowItLeaves(t *testing.T) {
 	if !strings.Contains(w.Message, "refused") || !strings.Contains(w.Message, "not recorded") || !strings.Contains(w.Message, "Started ingress forwarding") {
 		t.Fatalf("the warning does not say the window: %q", w.Message)
 	}
+	// Without the hold keploy moves the app's binds: its agent's outage
+	// refuses the app's calls, not only the start's window.
+	if !strings.Contains(w.Message, "While keploy's agent is down") || !strings.Contains(w.Message, "is refused") {
+		t.Fatalf("the warning does not say that the agent's outage refuses the app's calls: %q", w.Message)
+	}
 	fields := w.ContextMap()
 	if fields["next_step"] == nil || fields["kernel"] == nil || fields["error"] == nil {
 		t.Fatalf("the warning lacks its kernel, error or next_step: %v", fields)
@@ -55,18 +60,31 @@ func TestAHoldThatCannotStartSaysTheWindowItLeaves(t *testing.T) {
 }
 
 // The bind hooks note what the app binds (structs.FlagIngressHold) only for
-// a hold that is on: set when it is, cleared when it is not, even if a
-// downstream build's customizer set it, and no other bit is touched.
+// a hold that is on, and leave its bind where it asked
+// (structs.FlagIngressSteer) only for a hold that is on and steers: each set
+// when it is, cleared when it is not, even if a downstream build's customizer
+// set it, and no other bit is touched.
 func TestTheHoldFlagIsSetOnlyForAHoldThatIsOn(t *testing.T) {
 	others := structs.FlagKernelPortAlloc | structs.FlagClassifies
-	if got := ingressHoldFlag(others, true); got != others|structs.FlagIngressHold {
-		t.Fatalf("held: flags %#x, want %#x", got, others|structs.FlagIngressHold)
+	both := structs.FlagIngressHold | structs.FlagIngressSteer
+	if got := ingressHoldFlag(others, true, true); got != others|both {
+		t.Fatalf("held, steering: flags %#x, want %#x", got, others|both)
 	}
-	if got := ingressHoldFlag(others|structs.FlagIngressHold, false); got != others {
-		t.Fatalf("not held: flags %#x, want %#x", got, others)
+	if got := ingressHoldFlag(others|structs.FlagIngressSteer, true, false); got != others|structs.FlagIngressHold {
+		t.Fatalf("held, not steering: flags %#x, want %#x", got, others|structs.FlagIngressHold)
+	}
+	for _, set := range []uint32{structs.FlagIngressHold, structs.FlagIngressSteer, both} {
+		for _, steer := range []bool{false, true} {
+			if got := ingressHoldFlag(others|set, false, steer); got != others {
+				t.Fatalf("not held, %#x set, steer %v: flags %#x, want %#x", set, steer, got, others)
+			}
+		}
 	}
 	if structs.FlagIngressHold != 1<<5 {
 		t.Fatalf("FlagIngressHold is %#x; KEPLOY_FLAG_INGRESS_HOLD is bit 5", structs.FlagIngressHold)
+	}
+	if structs.FlagIngressSteer != 1<<6 {
+		t.Fatalf("FlagIngressSteer is %#x; KEPLOY_FLAG_INGRESS_STEER is bit 6", structs.FlagIngressSteer)
 	}
 }
 
