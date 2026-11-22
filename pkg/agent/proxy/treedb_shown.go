@@ -183,8 +183,10 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 		// lane's recording keeps today's rules.
 		return v.declaredInPool(mk) || v.bg.inPool(mk.Name) && !mk.IsAsync()
 	}
-	_, ok := v.pool[mk.Name]
-	return ok
+	if _, ok := v.pool[mk.Name]; ok {
+		return true
+	}
+	return v.bg.inPool(mk.Name) && !mk.IsAsync()
 }
 
 // declaredInPool reports whether mk, in a test's view, is a recording made
@@ -228,7 +230,7 @@ func (v *exactView) extraLocked(db *TreeDb, ix *integrations.MockIndex, key stri
 		return s.extra
 	}
 	shownBuilds.Add(1)
-	var pool, declared map[string]struct{}
+	var pool, bgPool, declared map[string]struct{}
 	if v.test != "" {
 		if v.bg != nil {
 			pool = v.bg.pool
@@ -238,15 +240,21 @@ func (v *exactView) extraLocked(db *TreeDb, ix *integrations.MockIndex, key stri
 		}
 	} else {
 		pool = v.pool
+		if v.bg != nil {
+			bgPool = v.bg.pool
+		}
 	}
 	var extra []keyedEntry
-	if looks := len(v.worker) + len(pool) + len(declared); looks < len(p.rest) {
+	if looks := len(v.worker) + len(pool) + len(bgPool) + len(declared); looks < len(p.rest) {
 		keyedExamined.Add(uint64(looks))
 		var pos []int
 		for name := range v.worker {
 			pos = append(pos, p.byName[name]...)
 		}
 		for name := range pool {
+			pos = append(pos, p.byName[name]...)
+		}
+		for name := range bgPool {
 			pos = append(pos, p.byName[name]...)
 		}
 		for name := range declared {

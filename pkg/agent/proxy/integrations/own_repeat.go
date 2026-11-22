@@ -137,7 +137,7 @@ func InBackground(db MockMemDb, name string) bool {
 // test's own, so they are never in the owned list and stay readable to the
 // call either way.
 func OwnRepeatRead(db MockMemDb, call CallRound, owns func() bool) MockMemDb {
-	if !provenswitch.On() || !ShowsBackgroundIn(call, db) {
+	if (!provenswitch.On() && !S12Background(db)) || !ShowsBackgroundIn(call, db) {
 		return db
 	}
 	h, ok := db.(BackgroundHider)

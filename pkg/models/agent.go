@@ -605,6 +605,11 @@ type ScopeTableReq struct {
 	// of them: they are tests' calls. Absent from an older CLI and from a
 	// set with none: every miss stays its test's.
 	Background []string `json:"background,omitempty"`
+	// StartupRules is true when the set's mappings.yaml carries at least one
+	// worker: entry placed by a declared kind: background rule with
+	// startup: true (MockEntry.Rule != "" && MockEntry.Startup). Plain
+	// recorded startup: entries do not set this flag.
+	StartupRules bool `json:"startupRules,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its

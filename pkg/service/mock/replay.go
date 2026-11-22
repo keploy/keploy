@@ -391,9 +391,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 6. Stage the whole pool as the initial serving window (BaseTime..now, no
 	//    mapping) — same call RunTestSet makes before the first test. Under
-	//    the proven switch the table push (step 5) already armed the pool
-	//    slice of calls made before any claim; arming the whole pool would
-	//    let any test's mock answer them.
+	//    the proven switch the table push already armed the pool slice of
+	//    calls made before any claim; arming the whole pool would let any
+	//    test's mock answer them.
 	if !provenswitch.On() {
 		if err := m.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
 			AfterTime:  models.BaseTime,
@@ -1393,6 +1393,31 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered,
 	// test's recorded begin (at:) is read only under the switch, so each
 	// window starts at its test's first recording.
 	windows := recordedTestWindows(nil, table, decoded)
+	if bgPusher, ok := m.instrumentation.(ScopeBackgroundPusher); ok {
+		var pool, worker, series map[string][]string
+		var bg, once []string
+		var startupRules bool
+		if reader, ok := m.mappingDB.(MappingReader); ok {
+			if mp, mpErr := mockSetMapping(ctx, reader, name); mpErr == nil && mp != nil {
+				startupRules = hasDeclaredStartupRule(mp)
+				unsetMP := withoutSourceBoundWorkerSeries(mp)
+				loaded := append(append([]*models.Mock(nil), filtered...), unfiltered...)
+				pool, _ = poolSlices(unsetMP, table, loaded, decoded)
+				worker = workerSlices(unsetMP, pool)
+				bg = backgroundNames(unsetMP, pool)
+				series = workerSeries(unsetMP, worker)
+				once = onceSeries(unsetMP, worker)
+			}
+		}
+		if len(bg) > 0 || startupRules {
+			if err := bgPusher.PushScopeTableWithBackground(ctx, table, windows, pool, worker, bg, series, once, startupRules); err != nil {
+				m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
+				return nil
+			}
+			m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
+			return nil
+		}
+	}
 	if err := pusher.PushScopeTable(ctx, table, windows); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return nil
@@ -1519,8 +1544,15 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded), onceSeries(served, worker), m.config.Mock.TimeForm); err != nil {
-		return refuse("its agent refused the per-test table: " + err.Error())
+	startupRules := hasDeclaredStartupRule(mp)
+	var pushErr error
+	if pp2, ok := m.instrumentation.(ProvenTableWithStartupRulesPusher); ok {
+		pushErr = pp2.PushProvenTableWithStartupRules(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded), onceSeries(served, worker), m.config.Mock.TimeForm, startupRules)
+	} else {
+		pushErr = pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded), onceSeries(served, worker), m.config.Mock.TimeForm)
+	}
+	if pushErr != nil {
+		return refuse("its agent refused the per-test table: " + pushErr.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
 	m.skippedReadOf = moved
@@ -1858,6 +1890,62 @@ func backgroundNames(mp *models.Mapping, pool map[string][]string) []string {
 		}
 	}
 	return out
+}
+
+// hasDeclaredStartupRule reports whether mp carries at least one worker: entry
+// placed at the set's start by a declared kind: background rule with
+// startup: true (e.Rule != "" && e.Trails == "" && e.Place == ""). Plain
+// recorded startup: entries written by keploy mock record, trailing rules
+// (Trails != ""), and non-startup background rules (Place == soleOwner) return
+// false so parallel-worker replay of sets without declared startup rules
+// behaves identically to main.
+func hasDeclaredStartupRule(mp *models.Mapping) bool {
+	if mp == nil {
+		return false
+	}
+	for _, e := range mp.Worker {
+		if e.Rule != "" && e.Trails == "" && e.Place == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutSourceBoundWorkerSeries returns a shallow copy of mp omitting from
+// Worker any entry that declares dynamic sources (e.Sources — kind: clock or
+// kind: minted rules evaluated only under KEPLOY_PROVEN=1) together with any
+// sibling worker: entries sharing its declared Series (such as a once: chain
+// whose write carries live clock fields). In KEPLOY_PROVEN unset mode,
+// SetScopeSources is not active, so serving earlier steps of a source-bound
+// chain exact-only would force the app into a later step that fails closed on
+// live timestamps.
+func withoutSourceBoundWorkerSeries(mp *models.Mapping) *models.Mapping {
+	if mp == nil || len(mp.Worker) == 0 {
+		return mp
+	}
+	dropSeries := make(map[string]bool)
+	hasDrop := false
+	for _, e := range mp.Worker {
+		if len(e.Sources) > 0 {
+			hasDrop = true
+			if e.Series != "" {
+				dropSeries[e.Series] = true
+			}
+		}
+	}
+	if !hasDrop {
+		return mp
+	}
+	cp := *mp
+	kept := make([]models.MockEntry, 0, len(mp.Worker))
+	for _, e := range mp.Worker {
+		if len(e.Sources) > 0 || (e.Series != "" && dropSeries[e.Series]) {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	cp.Worker = kept
+	return &cp
 }
 
 // skippedReads is mp and table with each read (readOnly) that a test the

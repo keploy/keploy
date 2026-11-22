@@ -296,6 +296,24 @@ func (s instanceExact) ServeExactWorker(names []string) error {
 	return nil
 }
 
+func (s instanceExact) StageExactBackground(rules string) error {
+	m, err := s.mgr()
+	if err != nil {
+		return err
+	}
+	m.StageExactBackground(rules)
+	return nil
+}
+
+func (s instanceExact) ServeExactBackground(rules string, pool, worker []string) error {
+	m, err := s.mgr()
+	if err != nil {
+		return err
+	}
+	m.ServeExactBackground(rules, pool, worker)
+	return nil
+}
+
 func (s instanceExact) RestartExactKey(key string, names []string) error {
 	m, err := s.mgr()
 	if err != nil {
@@ -339,6 +357,7 @@ var (
 	_ agent.ExactConcurrentServer = instanceExact{}
 	_ agent.ExactAheadServer      = instanceExact{}
 	_ agent.ExactWorkerServer     = instanceExact{}
+	_ agent.ExactBackgroundServer = instanceExact{}
 	_ agent.ExactKeyRestarter     = instanceExact{}
 
 	_ agent.ExactTestInstallReader = instanceExact{}
