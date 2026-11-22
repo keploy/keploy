@@ -43,7 +43,8 @@ func TCPListeners(port uint16) ([]netip.Addr, error) {
 	return out, err
 }
 
-// TCPListenSockets is TCPListeners with each socket's inode: the sockets that
+// TCPListenSockets is TCPListeners with each socket's inode, family, cookie
+// and IPV6_V6ONLY (ListenSocket): the sockets that
 // listen on port in this process's network namespace, IPv4 then IPv6. It
 // costs a dump of the listening sockets alone, never a read of every socket
 // of the namespace, as /proc/net/tcp is: the kernel's listening hash, which
@@ -64,6 +65,10 @@ func TCPListenSockets(port uint16) ([]ListenSocket, error) {
 	}
 	return out, nil
 }
+
+// listenDiagV6Only is INET_DIAG_SKV6ONLY, the attribute after an IPv6
+// socket's inet_diag_msg that holds its IPV6_V6ONLY.
+const listenDiagV6Only = 11
 
 // dumpListeners is TCPListenSockets for one address family, as request seq.
 func dumpListeners(fd int, seq uint32, family uint8, port uint16) ([]ListenSocket, error) {
@@ -136,8 +141,25 @@ func dumpListeners(fd int, seq uint32, family uint8, port uint16) ([]ListenSocke
 						a = a.WithZone(strconv.FormatUint(uint64(dev), 10))
 					}
 				}
-				out = append(out, ListenSocket{Addr: a, Inode: binary.NativeEndian.Uint32(b[listenDiagInode:])})
+				ls := ListenSocket{
+					Addr:   a,
+					Inode:  binary.NativeEndian.Uint32(b[listenDiagInode:]),
+					Family: family,
+					Cookie: uint64(binary.NativeEndian.Uint32(sid[listenDiagCookie:])) | uint64(binary.NativeEndian.Uint32(sid[listenDiagCookie+4:]))<<32,
+				}
+				ls.V6Only, ls.V6OnlyKnown = listenDiagAttrU8(b[listenDiagMsgLen:], listenDiagV6Only)
+				out = append(out, ls)
 			}
 		}
 	}
+}
+
+// listenDiagAttrU8 is the one-byte attribute of type typ among an
+// inet_diag_msg's attributes b (diagAttr), and whether it is there.
+func listenDiagAttrU8(b []byte, typ uint16) (v, ok bool) {
+	a, ok := diagAttr(b, typ)
+	if !ok || len(a) < 1 {
+		return false, false
+	}
+	return a[0] != 0, true
 }

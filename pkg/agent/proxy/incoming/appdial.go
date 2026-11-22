@@ -179,6 +179,22 @@ func dialHere(ctx context.Context, d *net.Dialer, addr string) (net.Conn, error)
 	return d.DialContext(ctx, appNetwork(addr), addr)
 }
 
+// dialAppHere is dialHere with a dialer whose Control is appDialControl: a
+// connection keploy's port holder could not note as its own (OwnConnNoted)
+// may have been steered back to keploy itself, so it is closed and the dial
+// fails, rather than a call forwarded to keploy.
+func (pm *IngressProxyManager) dialAppHere(ctx context.Context, d *net.Dialer, addr string) (net.Conn, error) {
+	conn, err := dialHere(ctx, d, addr)
+	if err != nil || pm.portHolder == nil {
+		return conn, err
+	}
+	if err := pm.portHolder.OwnConnNoted(conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
 // offHost is nil for an address a connection to stays on the host: the
 // loopback's, the unspecified address (0.0.0.0 or ::, an IPv4-mapped one
 // too: a connect there is delivered to the loopback, on Linux and macOS
@@ -209,9 +225,9 @@ func offHost(addr string) error {
 // it was (listensAt), else at addr.
 func (pm *IngressProxyManager) dialApp(ctx context.Context, addr string, client net.Conn) (net.Conn, error) {
 	target := pm.listenerFound(addr)
-	var d net.Dialer
+	d := net.Dialer{Control: pm.appDialControl(false)}
 	for {
-		conn, err := dialHere(ctx, &d, target)
+		conn, err := pm.dialAppHere(ctx, &d, target)
 		if err == nil {
 			return conn, nil
 		}
@@ -264,7 +280,7 @@ func (pm *IngressProxyManager) dialWhileStopping(ctx context.Context, d *net.Dia
 	if err != nil || at == "" || at == tried {
 		return nil, refused
 	}
-	conn, err := dialHere(ctx, d, at)
+	conn, err := pm.dialAppHere(ctx, d, at)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -408,7 +424,7 @@ func endWaiterLocked(wait *appWait, w *appWaiter, conn net.Conn, target string, 
 // waiting call's client between looks. It closes wait.polled as it returns.
 func (pm *IngressProxyManager) pollApp(wait *appWait) {
 	defer close(wait.polled)
-	d := net.Dialer{Control: pm.pollControl}
+	d := net.Dialer{Control: pm.appDialControl(true)}
 	tick := time.NewTicker(ingressTargetPollInterval)
 	defer tick.Stop()
 	for {
@@ -480,7 +496,7 @@ func (pm *IngressProxyManager) pollApp(wait *appWait) {
 // refusal means the app listens nowhere yet: the wait goes on, but once the
 // recording is stopping.
 func (pm *IngressProxyManager) probeApp(wait *appWait, d *net.Dialer) (string, net.Conn, error) {
-	conn, err := dialHere(wait.ctx, d, wait.addr)
+	conn, err := pm.dialAppHere(wait.ctx, d, wait.addr)
 	if err == nil || !isConnRefused(err) {
 		return wait.addr, conn, err
 	}
@@ -488,7 +504,7 @@ func (pm *IngressProxyManager) probeApp(wait *appWait, d *net.Dialer) (string, n
 	var unreachable *appUnreachableError
 	switch {
 	case at != "" && at != wait.addr:
-		conn, err := dialHere(wait.ctx, d, at)
+		conn, err := pm.dialAppHere(wait.ctx, d, at)
 		return at, conn, err
 	case errors.As(ferr, &unreachable):
 		return wait.addr, nil, ferr

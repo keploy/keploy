@@ -44,6 +44,10 @@ type IngressPortHolder interface {
 	// to a moved port that no forwarder takes is then the kernel's (refused),
 	// as without the hold.
 	StopIngressPark()
+	// ArmIngressPark puts the park in the lookup, as the manager's accept
+	// loop on it starts: the lookup never steers to a park nothing accepts
+	// on (its calls would hang), so until then a call is the kernel's.
+	ArmIngressPark() error
 	// AppIPv6Binds is the IPv6 addresses the app's moved sockets of orig
 	// take calls on, one per note of what a socket bound: an IPv6 socket's
 	// address (:: for any, with IPV6_V6ONLY or without); none for an IPv4
@@ -56,6 +60,61 @@ type IngressPortHolder interface {
 	// for a moved port, by name, or nil when nothing is held: lookups, not
 	// connections (a retransmitted SYN is looked up again), for Debug.
 	IngressLookupCounts() map[string]uint64
+	// IngressSteers reports whether the hooks steer the app's ports: the
+	// bind hooks move no bind, so the app listens on its own port, and the
+	// park takes every call the app's sockets would have taken. The manager
+	// then forwards each to the address it was sent to, and binds no port
+	// of the app's: when keploy goes, its sockets go with it, and the app's
+	// own socket takes its calls.
+	IngressSteers() bool
+	// OwnDialControl is the Control of a dialer that reaches the app while
+	// the hold is on: it names the socket as keploy's own, and the kernel
+	// notes the connection as it begins it, so the lookup leaves it to the
+	// app's socket instead of steering it back to the park. A no-op with the
+	// hold off.
+	OwnDialControl(network, address string, c syscall.RawConn) error
+	// OwnConnNoted is nil once the kernel noted a connection made with
+	// OwnDialControl as keploy's own; an error means it may have been
+	// steered back to keploy, and the caller closes it.
+	OwnConnNoted(conn net.Conn) error
+	// SteeredDialTarget is where a steered call sent to to is forwarded:
+	// the loopback, on to's port, where the app's socket that takes the call
+	// is one bound to any address and the loopback reaches that same socket
+	// (a connection there whose client closes first leaves a TIME_WAIT the
+	// kernel reuses), else to.
+	SteeredDialTarget(to netip.AddrPort) netip.AddrPort
+	// KeepSteerTable keeps the ports the hooks steer where an agent
+	// restarted in the pod finds them, to steer them again: the manager
+	// calls it as it starts on a steered port.
+	KeepSteerTable()
+}
+
+// ingressSteers reports whether the hooks steer the app's ports.
+func (pm *IngressProxyManager) ingressSteers() bool {
+	return pm.portHolder != nil && pm.portHolder.IngressSteers()
+}
+
+// appDialControl is the Control of every dialer the ingress reaches the app
+// with: the hooks' (OwnDialControl), then the test's (pollControl) for a
+// poll's dial.
+func (pm *IngressProxyManager) appDialControl(poll bool) func(network, address string, c syscall.RawConn) error {
+	test := pm.pollControl
+	if !poll {
+		test = nil
+	}
+	if pm.portHolder == nil {
+		return test
+	}
+	holder := pm.portHolder
+	return func(network, address string, c syscall.RawConn) error {
+		if err := holder.OwnDialControl(network, address, c); err != nil {
+			return err
+		}
+		if test != nil {
+			return test(network, address, c)
+		}
+		return nil
+	}
 }
 
 // ingressPark is the hold's park listener, or nil when the hooks hold nothing.
@@ -97,6 +156,9 @@ func (pm *IngressProxyManager) yieldIngressPort(orig uint16) {
 // refused. So they are counted apart, and the IPv6 line says where they
 // went: an app that listens on IPv6 only does not answer them there.
 func (pm *IngressProxyManager) logIngressHoldEnd() {
+	if steered := pm.steeredServed.Load(); steered > 0 {
+		pm.logger.Debug("keploy steered calls to the application's own port to its ingress", zap.Uint64("count", steered))
+	}
 	if parked := pm.parkedServed.Load(); parked > 0 {
 		pm.logger.Info("keploy served calls to the application's port that arrived before its forwarder listened, by holding the port from the application's bind",
 			zap.Uint64("count", parked))
@@ -150,6 +212,16 @@ func (pm *IngressProxyManager) serveParkedConnections(ctx context.Context, park 
 		<-ctx.Done()
 		_ = park.Close()
 	}()
+	// The lookup steers to the park only from here, as this loop accepts on
+	// it: an agent restarted while the app runs leaves the app's port to the
+	// app until its recorder connects and this loop starts.
+	if err := pm.portHolder.ArmIngressPark(); err != nil {
+		pm.portHolder.StopIngressPark()
+		_ = park.Close()
+		pm.logger.Warn("keploy's ingress hold did not start: its park could not be put in the lookup; a call to the application's port is the kernel's, and while keploy steers the port, it reaches the application unrecorded",
+			zap.Error(err))
+		return
+	}
 	var pause time.Duration
 	warned := false
 	for {
@@ -223,6 +295,10 @@ func (pm *IngressProxyManager) serveParked(ctx context.Context, conn net.Conn) {
 	}
 	orig := uint16(ta.Port)
 	moved, known := pm.portHolder.MovedPort(orig)
+	if !known && pm.ingressSteers() {
+		pm.serveSteered(ctx, conn, ta)
+		return
+	}
 	if !known {
 		// The app's bind of this port is not in app_port_info (it was
 		// unmoved, or has gone): nothing to forward it to.
@@ -238,4 +314,17 @@ func (pm *IngressProxyManager) serveParked(ctx context.Context, conn net.Conn) {
 	pm.logger.Debug("serving a call to the app's port before keploy's forwarder listened (held from the app's bind)",
 		zap.Uint16("orig_port", orig), zap.Uint16("new_port", moved))
 	pm.handleConnection(ctx, conn, "127.0.0.1:"+strconv.Itoa(int(moved)), pm.logger, pm.tcChan, pm.portSem(orig), orig)
+}
+
+// serveSteered serves a call the lookup steered to the park while the hooks
+// steer: the app listens on the port the call was sent to (its local
+// address, which the lookup kept), so it is forwarded to the app's socket
+// there (SteeredDialTarget: over the loopback where that reaches the same
+// socket), from a socket the lookup leaves to the app (appDialControl), and
+// recorded on that port.
+func (pm *IngressProxyManager) serveSteered(ctx context.Context, conn net.Conn, ta *net.TCPAddr) {
+	ap := ta.AddrPort()
+	to := pm.portHolder.SteeredDialTarget(netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()))
+	pm.steeredServed.Add(1)
+	pm.handleConnection(ctx, conn, to.String(), pm.logger, pm.tcChan, pm.portSem(ap.Port()), ap.Port())
 }

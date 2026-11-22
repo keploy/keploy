@@ -42,6 +42,17 @@ type fakePortHolder struct {
 
 	ipv6    map[uint16][]netip.Addr // AppIPv6Binds's answer, by port
 	ipv6Err error
+
+	armed  int   // ArmIngressPark's calls
+	armErr error // ArmIngressPark's answer
+
+	steers     bool                              // IngressSteers's answer
+	ownDials   []string                          // the addresses OwnDialControl was given, while steering
+	ownDialErr error                             // OwnDialControl's answer, while steering
+	notedErr   error                             // OwnConnNoted's answer, while steering
+	noted      []string                          // the local addresses OwnConnNoted was asked about, while steering
+	steerTo    map[netip.AddrPort]netip.AddrPort // SteeredDialTarget's answer; the address itself when absent
+	kept       int                               // KeepSteerTable's calls
 }
 
 func (f *fakePortHolder) IngressParkListener() net.Listener { return f.park }
@@ -77,6 +88,43 @@ func (f *fakePortHolder) AppIPv6Binds(orig uint16) ([]netip.Addr, error) {
 }
 func (f *fakePortHolder) IngressHeld() bool                      { return f.held }
 func (f *fakePortHolder) IngressLookupCounts() map[string]uint64 { return f.lookups }
+func (f *fakePortHolder) IngressSteers() bool                    { return f.steers }
+func (f *fakePortHolder) ArmIngressPark() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.armed++
+	return f.armErr
+}
+func (f *fakePortHolder) OwnDialControl(_, address string, _ syscall.RawConn) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.steers {
+		return nil
+	}
+	f.ownDials = append(f.ownDials, address)
+	return f.ownDialErr
+}
+
+func (f *fakePortHolder) OwnConnNoted(conn net.Conn) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.steers {
+		return nil
+	}
+	f.noted = append(f.noted, conn.LocalAddr().String())
+	return f.notedErr
+}
+func (f *fakePortHolder) KeepSteerTable() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.kept++
+}
+func (f *fakePortHolder) SteeredDialTarget(to netip.AddrPort) netip.AddrPort {
+	if t, ok := f.steerTo[to]; ok {
+		return t
+	}
+	return to
+}
 
 // parkListener is a loopback listener whose connections report port orig as
 // their local address, as the kernel's sk_lookup leaves a parked connection's:
