@@ -54,7 +54,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	caRunsDir = dir
+	// In a directory of the test's own: a macOS user's run takes its locks
+	// only in a runs directory whose parent is the user's alone
+	// (makeCARunsDirFor), and with TMPDIR unset the temp directory is /tmp.
+	caRunsDir = filepath.Join(dir, "runs")
+	if err := os.Mkdir(caRunsDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -67,6 +74,11 @@ func useRunsDir(t *testing.T) {
 	t.Helper()
 	old := caRunsDir
 	caRunsDir = t.TempDir()
+	// t.TempDir makes it 0777 less the umask, and a runs directory others
+	// can write takes no lock (makeCARunsDirFor).
+	if err := os.Chmod(caRunsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		releaseCARunLock()
 		caRunsDir = old
@@ -207,7 +219,7 @@ func TestCARunLockWarnsWhyItTookNone(t *testing.T) {
 			"remove the CA keploy reuses (ca.key and ca.crt in its CA key directory) so that keploy makes its own",
 			`or give that CA a common name of "Keploy MITM CA " followed by letters, digits, '-' and '_' only`,
 		}},
-		{filepath.Join(notDir, "runs"), "0a1b2c", "the directory of keploy runs' locks cannot be made", pathFix(filepath.Join(notDir, "runs"))},
+		{filepath.Join(notDir, "runs"), "0a1b2c", "the directory of keploy runs' locks cannot be made or used", pathFix(filepath.Join(notDir, "runs"))},
 		{runs, "0a1b2c", "its lock file cannot be opened", pathFix(runs)},
 	} {
 		caRunsDir = row.dir

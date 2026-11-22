@@ -4,6 +4,7 @@ package tls
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -20,6 +21,32 @@ func defaultCARunsDir() string {
 		base = `C:\ProgramData`
 	}
 	return filepath.Join(base, "Keploy", "ca-runs")
+}
+
+// makeCARunsDir makes dir, this host's runs directory, when it is missing.
+// Every user of the host adds files to it (defaultCARunsDir), so who owns it
+// decides nothing here.
+func makeCARunsDir(dir string) error { return os.MkdirAll(dir, 0o755) }
+
+// openLockFile opens path, a lock file in the runs directory, with flag,
+// creating it when missing, and returns it only when it is a regular file:
+// what holds the name of a lock file in its place, as a directory, is no lock
+// file of a run. Go's os has no O_NOFOLLOW on Windows (castore_windows.go).
+func openLockFile(path string, flag int) (*os.File, error) {
+	// #nosec G304 -- path is a lock file in caRunsDir.
+	f, err := os.OpenFile(path, flag|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("the lock file %s is not a regular file", path)
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // tryLockFile takes an exclusive lock on f's first byte if no one holds one:

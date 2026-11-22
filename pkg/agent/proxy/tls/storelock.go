@@ -130,8 +130,9 @@ func storeLockBound(ctx context.Context) (time.Duration, *storeLockBudget) {
 // (it runs under ctx, so it would only be killed) and ctx's error is returned;
 // past the bound, change does not run and the error is ErrStoreLockHeld,
 // naming the lock's file. When the lock cannot be taken at all (its directory
-// cannot be made, its file cannot be opened, or a try fails for another
-// reason than the lock being held), change runs without it, as every change
+// cannot be made, or is one another user can change; its file cannot be
+// opened, or is a link or another user's; or a try fails for another reason
+// than the lock being held), change runs without it, as every change
 // did before this lock, and the run says so once.
 func withStoreLock(ctx context.Context, logger *zap.Logger, change func() error) error {
 	unlock, err := lockStores(ctx, logger)
@@ -148,7 +149,11 @@ func withStoreLock(ctx context.Context, logger *zap.Logger, change func() error)
 // ErrStoreLockHeld, when it stayed held past its bound (storeLockBound).
 func lockStores(ctx context.Context, logger *zap.Logger) (unlock func(), err error) {
 	path := filepath.Join(caRunsDir, storeLockName)
-	if err := os.MkdirAll(caRunsDir, 0o755); err != nil {
+	// Outside Windows, a directory no other user than this run's and root
+	// can change (makeCARunsDir), and a file opened through no link that
+	// this run's user or root owns (openLockFile): no other user makes the
+	// run create a file elsewhere, or holds its lock.
+	if err := makeCARunsDir(caRunsDir); err != nil {
 		warnNoStoreLock(logger, path, err)
 		return func() {}, nil
 	}
@@ -161,8 +166,7 @@ func lockStores(ctx context.Context, logger *zap.Logger) (unlock func(), err err
 	// user's profile), so the file stays one every user can open, and so
 	// lock: one who holds it keeps the runs' changes waiting up to
 	// storeLockWait, and then they fail, naming the file.
-	// #nosec G304 -- the path is caRunsDir and a constant name.
-	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
+	f, err := openLockFile(path, os.O_RDONLY)
 	if err != nil {
 		warnNoStoreLock(logger, path, err)
 		return func() {}, nil
@@ -252,8 +256,11 @@ func warnNoStoreLock(logger *zap.Logger, path string, err error) {
 // to the directory above it), and its file, which a run creates in that
 // directory (write access to it) or opens with access ("read" for the store
 // lock, "read and write" for a run's own) when it is there, and then locks.
+// Outside Windows the directory and the file are also that user's or root's,
+// no link, and the directory is one only its owner writes (makeCARunsDir,
+// openLockFile).
 func lockFix(path, access string) string {
 	dir := filepath.Dir(path)
-	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with %s access for that user; and keep %s on a file system that supports file locks.",
+	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with %s access for that user; and keep %s on a file system that supports file locks. Outside Windows, keploy uses that directory and that file only when each is that user's or root's and no link, and only its owner can write the directory.",
 		dir, filepath.Dir(dir), path, dir, access, dir)
 }

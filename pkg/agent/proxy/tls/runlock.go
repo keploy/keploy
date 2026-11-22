@@ -126,8 +126,8 @@ func caRunLockName(id string) (name string, ok bool) {
 // or the end of the process. The CA install takes it before it writes any
 // trust-store entry, so no sweep sees an entry of this run without its lock.
 // Taking a lock for another id releases the one held. When no lock can be
-// taken (the id cannot name a lock file, the directory cannot be made, the
-// file cannot be opened, or it stays held past caRunLockWait or cannot be
+// taken (the id cannot name a lock file, the directory cannot be made or
+// used, the file cannot be opened, or it stays held past caRunLockWait or cannot be
 // locked), the run goes on unprotected, as every run did before these locks,
 // and says so once, with how to fix it (warnNoCARunLock); when ctx ends first,
 // the run is stopping, and it says so only at Debug.
@@ -144,16 +144,18 @@ func holdCARunLock(ctx context.Context, logger *zap.Logger, id string) {
 		return
 	}
 	path := filepath.Join(caRunsDir, fmt.Sprintf("%s.%d.lock", name, os.Getpid()))
-	if err := os.MkdirAll(caRunsDir, 0o755); err != nil {
-		warnNoCARunLock(logger, "the directory of keploy runs' locks cannot be made", lockFix(path, "read and write"), zap.String("dir", caRunsDir), zap.Error(err))
+	// As the store lock's (lockStores): outside Windows, a directory no other
+	// user than this run's and root can change, and a file opened through no
+	// link that this run's user or root owns.
+	if err := makeCARunsDir(caRunsDir); err != nil {
+		warnNoCARunLock(logger, "the directory of keploy runs' locks cannot be made or used", lockFix(path, "read and write"), zap.String("dir", caRunsDir), zap.Error(err))
 		return
 	}
-	// 0600: on Linux only root, whose runs sweep, opens it (a sweep that
-	// cannot open a lock file counts its run as live). On Windows the mode
-	// only decides the read-only attribute, which 0600 leaves unset; the
-	// directory's ACL lets every user read the file.
-	// #nosec G304 -- the path is caRunsDir and a name caRunLockName checked.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	// 0600 (openLockFile): on Linux only root, whose runs sweep, opens it (a
+	// sweep that cannot open a lock file counts its run as live). On Windows
+	// the mode only decides the read-only attribute, which 0600 leaves unset;
+	// the directory's ACL lets every user read the file.
+	f, err := openLockFile(path, os.O_RDWR)
 	if err != nil {
 		warnNoCARunLock(logger, "its lock file cannot be opened", lockFix(path, "read and write"), zap.String("path", path), zap.Error(err))
 		return
