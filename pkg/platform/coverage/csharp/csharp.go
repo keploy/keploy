@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -65,7 +66,7 @@ func (cs *Csharp) PreProcess(_ bool) (string, error) {
 		return cs.cmd, fmt.Errorf("dotnet coverage tool not found at: %s", dotnetCoveragePath)
 	}
 
-	cs.cmd = strings.Replace(cs.cmd, cs.executable, fmt.Sprintf("%s collect --output target/${TESTSETID}.cobertura --output-format cobertura", cs.executable), 1)
+	cs.cmd = buildCsharpCoverageCmd(cs.cmd, cs.executable, runtime.GOOS)
 
 	// download dotnet coverage
 	dotnetPath := filepath.Join(os.TempDir(), "dotnet")
@@ -83,6 +84,17 @@ func (cs *Csharp) PreProcess(_ bool) (string, error) {
 	}
 
 	return cs.cmd, nil
+}
+
+func buildCsharpCoverageCmd(cmd, executable, goos string) string {
+	outputArg := `"target/${TESTSETID}.cobertura"`
+	if goos == "windows" {
+		// On Windows, commands run via `cmd /C <userCmd>` without SysProcAttr.CmdLine,
+		// so Go escapes embedded double quotes as `\"`, which would become literal
+		// quotes in the output path.
+		outputArg = `target/${TESTSETID}.cobertura`
+	}
+	return strings.Replace(cmd, executable, fmt.Sprintf("%s collect --output %s --output-format cobertura", executable, outputArg), 1)
 }
 
 func (cs *Csharp) GetCoverage() (models.TestCoverage, error) {
