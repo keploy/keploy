@@ -185,11 +185,19 @@ func TestTheNextStepShapesAnIDLongNumberAlone(t *testing.T) {
 // "{}", or "y" and "x:y", nested 500 and 4000 deep and named whole, where
 // each place after a mark ("}", ":") begins a chain of kept fields. The
 // bytes a call allocates of its own are bounded (ownBytes: they move
-// neither with the runner's load nor with -race), and so is the
-// ratio of the fastest of 5 timings at the deeper depth to the shallower:
-// about 8 to 10 when the cost grows with depth, about 64 or more with its
-// square, so it must stay under 25. (Building every run of every path took
-// 1.3 s and 650 MB a call at 120 fields.)
+// neither with the runner's load nor with -race), and so are two ratios at
+// the deeper depth to the shallower: of those bytes, and of the CPU time a
+// call runs for by its thread's own clock (threadCPU: time the thread
+// waited for a CPU, or that a CPU quota held it back, is no part of it).
+// Each is about 8 to 10 when the cost grows with depth, about 64 or more
+// with its square, so each must stay under 25. A cost that grows with the
+// square while its bytes do not (a chain read again at each place) shows
+// only in the CPU time. No wall-clock timing is asserted: a runner's load
+// and its CPU quota move it, and a quota can throttle a longer timing and
+// spare a shorter one. Where no thread clock is read (Windows: threadCPU),
+// the CPU ratio is logged as not measured and the bytes alone are asserted.
+// (Building every run of every path took 1.3 s and 650 MB a call at 120
+// fields.)
 func TestShapingANextStepGrowsWithItsPathsDepthNotItsSquare(t *testing.T) {
 	u := "00000001-0000-4000-8000-000000000001"
 	diffs25 := func(depth int) UnmatchedCall {
@@ -213,19 +221,25 @@ func TestShapingANextStepGrowsWithItsPathsDepthNotItsSquare(t *testing.T) {
 			return UnmatchedCall{Protocol: "HTTP", NextSteps: "Only values drifted (" + p + "). Re-record.", FieldDiffs: []MockFieldDiff{{Path: p, Kind: DiffKindValueChanged}}}
 		}
 	}
-	// cost is the bytes a call allocates of its own (ownBytes) and the
-	// fastest of 5 timings of reps calls, a call's share.
-	cost := func(m UnmatchedCall, reps int) (own, state uint64, fastest time.Duration) {
-		own, state = ownBytes(t, func() { m.SanitizedNextStep() })
-		fastest = time.Duration(1<<63 - 1)
+	// cpu is the fastest of 5 readings of the CPU time its thread runs reps
+	// calls of m for, a call's share, with the goroutine locked to its
+	// thread, or false where no thread clock is read (threadCPU).
+	cpu := func(m UnmatchedCall, reps int) (time.Duration, bool) {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		fastest := time.Duration(1<<63 - 1)
 		for range 5 {
-			start := time.Now()
+			start, ok := threadCPU()
+			if !ok {
+				return 0, false
+			}
 			for range reps {
 				m.SanitizedNextStep()
 			}
-			fastest = min(fastest, time.Since(start)/time.Duration(reps))
+			end, _ := threadCPU()
+			fastest = min(fastest, (end-start)/time.Duration(reps))
 		}
-		return own, state, fastest
+		return fastest, true
 	}
 	for _, c := range []struct {
 		name            string
@@ -243,23 +257,35 @@ func TestShapingANextStepGrowsWithItsPathsDepthNotItsSquare(t *testing.T) {
 				t.Fatalf("%s: the id is in the next step: %q", c.name, out)
 			}
 		}
-		// Enough calls that the shallower timing is a few milliseconds.
-		reps := 1
-		if _, _, d := cost(low, 1); d < 2*time.Millisecond {
-			reps = int(2*time.Millisecond/max(d, time.Microsecond)) + 1
-		}
-		lowBytes, lowState, lowTime := cost(low, reps)
-		highBytes, highState, highTime := cost(high, reps)
-		ratio := float64(highTime) / float64(max(lowTime, 1))
-		t.Logf("%s: depth %d %v and %d KB a call (and %d KB of matcher state), depth %d %v and %d KB (and %d KB), time x%.1f",
-			c.name, c.low, lowTime, lowBytes>>10, lowState>>10, c.high, highTime, highBytes>>10, highState>>10, ratio)
+		lowBytes, lowState := ownBytes(t, func() { low.SanitizedNextStep() })
+		highBytes, highState := ownBytes(t, func() { high.SanitizedNextStep() })
+		ratio := float64(highBytes) / float64(max(lowBytes, 1))
+		t.Logf("%s: depth %d %d KB a call (and %d KB of matcher state), depth %d %d KB (and %d KB), bytes x%.1f",
+			c.name, c.low, lowBytes>>10, lowState>>10, c.high, highBytes>>10, highState>>10, ratio)
 		if lowBytes > c.lowMax || highBytes > c.highMax {
 			t.Errorf("%s: %d KB at depth %d and %d KB at %d a call; want at most %d KB and %d KB",
 				c.name, lowBytes>>10, c.low, highBytes>>10, c.high, c.lowMax>>10, c.highMax>>10)
 		}
 		if ratio >= 25 {
-			t.Errorf("%s: depth %d takes %.1f times what depth %d does (%v, %v); want under 25, as cost that grows with depth",
-				c.name, c.high, ratio, c.low, highTime, lowTime)
+			t.Errorf("%s: depth %d allocates %.1f times what depth %d does (%d KB, %d KB); want under 25, as cost that grows with depth",
+				c.name, c.high, ratio, c.low, highBytes>>10, lowBytes>>10)
+		}
+		// Enough calls that the shallower reading is a few milliseconds.
+		reps := 1
+		if d, ok := cpu(low, 1); ok && d < 2*time.Millisecond {
+			reps = int(2*time.Millisecond/max(d, time.Microsecond)) + 1
+		}
+		lowCPU, ok := cpu(low, reps)
+		if !ok {
+			t.Logf("%s: no thread clock is read here; the CPU time's ratio is not measured", c.name)
+			continue
+		}
+		highCPU, _ := cpu(high, reps)
+		cpuRatio := float64(highCPU) / float64(max(lowCPU, 1))
+		t.Logf("%s: a call's CPU time %v at depth %d, %v at %d, x%.1f", c.name, lowCPU, c.low, highCPU, c.high, cpuRatio)
+		if cpuRatio >= 25 {
+			t.Errorf("%s: a call at depth %d runs %.1f times the CPU time of one at depth %d (%v, %v); want under 25, as cost that grows with depth",
+				c.name, c.high, cpuRatio, c.low, highCPU, lowCPU)
 		}
 	}
 }
