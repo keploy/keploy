@@ -48,6 +48,9 @@ func TestServeLiveServesACallOverTheHoldsDial(t *testing.T) {
 			cfg.Agent.MockMode = recorded
 			cfg.Agent.RecordRequests = recorded
 			pm := New(zap.NewNop(), nil, cfg)
+			// Recorded, the call's capture runs after the handler ends, and reads
+			// the package's capture hook: it ends before the next row replaces it.
+			t.Cleanup(pm.captures.Wait)
 			client, proxied := net.Pipe()
 			defer func() { _ = client.Close() }()
 			ctx, cancel := context.WithCancel(context.Background())
@@ -78,5 +81,51 @@ func TestServeLiveServesACallOverTheHoldsDial(t *testing.T) {
 			cancel()
 			<-done
 		})
+	}
+}
+
+// The live handler's dial of the app takes the hold's dial only at the
+// address the hold dialed (util.Predialed.Take): a call to another address is
+// dialed there, and the hold's dial waits for a dial of its own address.
+// Taken at any address, the call reached whatever listener the hold had
+// dialed, not the app at the address it was given.
+func TestDialAppTakesTheHoldsDialOnlyAtItsAddress(t *testing.T) {
+	held, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	up, err := net.Dial("tcp4", held.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = up.Close() }()
+	heldEnd, err := held.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = heldEnd.Close() }()
+	other, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Close() }()
+	pre := util.NewPredialed(held.Addr().String(), connseq.NewUpstream(up))
+	ctx := util.WithPredialed(context.Background(), pre)
+	pm := New(zap.NewNop(), nil, &config.Config{})
+	client, proxied := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	conn, err := pm.dialApp(ctx, other.Addr().String(), proxied)
+	if err != nil {
+		t.Fatalf("dialApp(%s) = %v, want a connection there", other.Addr(), err)
+	}
+	defer func() { _ = conn.Close() }()
+	if pre.Is(conn) || conn.RemoteAddr().String() != other.Addr().String() {
+		t.Fatalf("dialApp(%s) gave a connection to %v; want its own dial of that address, not the hold's dial of %s", other.Addr(), conn.RemoteAddr(), held.Addr())
+	}
+	got, err := pm.dialApp(ctx, held.Addr().String(), proxied)
+	if err != nil || !pre.Is(got) {
+		t.Fatalf("dialApp(%s) = %v, %v; want the hold's dial of that address, still there for it", held.Addr(), got, err)
 	}
 }

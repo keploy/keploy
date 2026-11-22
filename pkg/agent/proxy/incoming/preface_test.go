@@ -287,3 +287,55 @@ func TestAnHTTPRequestShorterThanTheHTTP2PrefaceIsAnswered(t *testing.T) {
 	_ = client.Close()
 	<-served
 }
+
+// A recorded connection that ends before its first byte is closed, and the
+// app is not dialed for it: there is nothing to pass on or record, and the
+// connection is ended as its client ended it.
+func TestAConnectionThatEndsBeforeItsFirstByteIsClosedWithoutDialingTheApp(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	dialed := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			_ = c.Close()
+			dialed <- fmt.Errorf("the app was dialed (from %v) for a connection that sent nothing", c.RemoteAddr())
+			return
+		}
+		dialed <- nil
+	}()
+	stubIngressPaused(t, func() bool { return false })
+	cfg := &config.Config{}
+	cfg.Agent.RecordRequests = true // the path that reads a call's first bytes
+	pm := New(zap.NewNop(), nil, cfg)
+	t.Cleanup(pm.captures.Wait)
+	client, proxied := loopbackPair(t)
+	if err := client.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		pm.ServeLive(ctx, proxied, ln.Addr().String(), uint16(ln.Addr().(*net.TCPAddr).Port))
+	}()
+	select {
+	case err := <-dialed:
+		t.Fatal(err)
+	case <-served:
+	}
+	// The handler has returned, so a dial it made is in the listener's
+	// queue, where Accept takes it at once.
+	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(time.Second))
+	if err := <-dialed; err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if n, err := client.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("the client's read = %d, %v; want its connection ended (EOF)", n, err)
+	}
+}
