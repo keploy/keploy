@@ -872,6 +872,11 @@ type Replayer struct {
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
 	setCalls setCalls
+	// setRunID is the id of the run (RunTestSet's testRunID) whose set
+	// RunTestSet is running: the next step of a call outside every test
+	// names the folder it moves the set's recordings into by it
+	// (recordAgainCommand).
+	setRunID string
 	// earlierSetCalls are the calls of earlier sets' tests that keploy
 	// decided only after their set had ended, which a later set's read
 	// returned (proven switch): they fail the run, and no set
@@ -3716,6 +3721,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// What the previous set's application missed before its first test is
 	// not this set's, nor are the tests whose request its agent did not read.
 	r.setCalls.reset()
+	r.setRunID = testRunID
 	r.requestsUnread.reset()
 	// Nor are the calls an earlier run of the set missed: a run that ends
 	// before its report is written leaves no misses file naming them as
@@ -4403,7 +4409,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// What is sent: the request with this run's template values, on a
 			// copy. testCase stays as written.
 			sent := toSend(tmplRun, testCase)
-			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, &sent, testSetID)
+			resp, loopErr := r.simulate(runTestSetCtx, &sent, testSetID)
 
 			// A "connection reset by peer" / unexpected EOF while exchanging
 			// the request is, under loaded CI replaying a DOCKER app, dominated
@@ -5624,7 +5630,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// expected to stream, likewise (a streamed response never
 			// captures).
 			sent := toSend(tmplRun, tc)
-			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, &sent, testSetID)
+			resp, simErr := r.simulate(runTestSetCtx, &sent, testSetID)
 			expectedStream := streamView(tmplRun, &sent)
 			// What the stream delivered, kept only when a recorded frame
 			// holds a use (streamTemplateFailures).
@@ -6479,6 +6485,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (unclaimed_calls.go, before_set_calls.go).
 	var unclaimed []models.UnmatchedCall
 	unclaimedReason := ""
+	// ownWhy is unclaimedReason less the calls of unclaimed made outside
+	// every test (models.UnmatchedCall.OutsideEveryTest), and
+	// failedBySetCalls says the set's calls (before_set_calls.go) turned a
+	// PASSED set FAILED: what TestReport.OutsideOnly is read from.
+	ownWhy, failedBySetCalls := "", false
 	// setAnswers are the answered calls the set's end charges to the set, no
 	// test (proven switch): made before its first test or after its last.
 	// They fail nothing (TestReport.SetAnswers, SetAnswersHook). They are
@@ -6730,6 +6741,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			} else if len(workerMissing) > 0 {
 				derivedWhy := r.exact.stopsDerivedWhy(workerMissing)
 				unclaimedReason = workerWhy(workerMissing) + derivedWhy
+				ownWhy = unclaimedReason
 				next := "if the application no longer makes these calls on its own, record the test set again"
 				if derivedWhy != "" {
 					next = "record the test set again with " + provenswitch.Env + "=1, without --sync and with mapping on: keploy record's mappings.yaml marks the calls the application makes as it is stopped, and the set's end then waits for the others"
@@ -6742,14 +6754,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 			if own := r.setCalls.failing(); len(own) > 0 {
+				own = r.withSetRecordings(runTestSetCtx, testSetID, own)
 				unclaimed = append(unclaimed, own...)
 				if unclaimedReason != "" {
 					unclaimedReason += "; "
 				}
 				unclaimedReason += setCallsWhy(own) + r.exact.returnedWhy(own)
+				if rest := notOutsideEveryTest(own); len(rest) > 0 {
+					ownWhy = joinWhy(ownWhy, setCallsWhy(rest)+r.exact.returnedWhy(rest))
+				}
 				r.logSetCalls(testSetID, own)
 				if testSetStatus == models.TestSetStatusPassed {
 					testSetStatus = models.TestSetStatusFailed
+					failedBySetCalls = true
 				}
 			}
 			if len(calls) > 0 {
@@ -6758,6 +6775,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					unclaimedReason += "; "
 				}
 				unclaimedReason += unclaimedWhy(calls) + r.exact.returnedWhy(calls)
+				ownWhy = joinWhy(ownWhy, unclaimedWhy(calls)+r.exact.returnedWhy(calls))
 				r.logUnclaimed(testSetID, calls)
 				switch {
 				case conf.RecordStopKilled != "":
@@ -7490,6 +7508,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// the set made; under the switch, beside these when no call the
 	// verdict counts already named it (above).
 	r.sayMocksDroppedBesideMisses(conf.RecordMocksDropped, testSetID, missedTests, len(unclaimed))
+	shape := runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, notFoundWhy: notFoundWhy, staleWhy: staleWhy}
+	failureReason := withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, shape)))
+	shape.unclaimedWhy = ownWhy
+	outsideOnly := failedOutsideOnly(testSetStatus, unclaimed, failedBySetCalls || failure > 0,
+		withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, shape))))
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
@@ -7501,7 +7524,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, notFoundWhy: notFoundWhy, staleWhy: staleWhy}))),
+		FailureReason: failureReason,
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -7514,6 +7537,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		RealFailure:         realWhy,
 		UnclaimedCalls:      unclaimed,
 		OutsideTestMisses:   outsideTest,
+		OutsideOnly:         outsideOnly,
 		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
 		SetAnswers:          setAnswers,
@@ -10252,7 +10276,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 		// (ContinueTestErrorCapture), those made as its mock window moved,
 		// and any the failed try made (it consumed no mock) — and reopening
 		// it would drop them.
-		resp, err := r.hookImpl.SimulateRequest(ctx, testCase, testSetID)
+		resp, err := r.simulate(ctx, testCase, testSetID)
 		if err == nil {
 			return resp, true, nil, nil
 		}
@@ -10542,10 +10566,11 @@ func (r *Replayer) readMockErrors(ctx context.Context, test string) testMisses {
 	// A call an earlier set's test made is the run's, not this test's nor
 	// this set's (earlier_set_calls.go).
 	calls = r.takeEarlierSetCalls(calls)
-	// What was missed before the set's first test, and a call a parser held
-	// for a later test that none answered (its connection ended in this
-	// test), are the set's, not this test's (before_set_calls.go).
-	calls = r.setCalls.take(calls)
+	// What was missed before the set's first test, a call a parser held for
+	// a later test that none answered (its connection ended in this test),
+	// and a call made between the previous test and this one, are the set's,
+	// not this test's (before_set_calls.go).
+	calls = r.setCalls.takeOf(calls, test)
 	// An answered call is no miss: it is the test's answer (TestResult.Answers).
 	calls, answers := splitAnswers(calls)
 	read := testMisses{calls: calls, answers: answers, err: err, asked: true}
