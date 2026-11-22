@@ -10,7 +10,9 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -39,19 +41,31 @@ func (c *scaledClock) After(d time.Duration) (<-chan time.Time, func() bool) {
 }
 
 // foldsAtTheStopParser reads both its streams to their end, which they reach
-// at the recording's stop, then hands over a record of what it read every
-// 10ms (Session.Folded), records of them in all, and returns, having sent the
-// count to out. As a parser does, it goes by its streams, not its context,
-// which the supervisor cancels as the recording stops.
+// at the recording's stop, then either hands over mocks via EmitMockOutcome
+// every 20ms until clk.Runnable() has advanced by at least runFor (keeping the
+// supervisor's fold watch alive past its 1s default FoldWindow), or parks on
+// stuck without making progress when stuck != nil. As a parser does, it goes
+// by its streams, not its context, which the supervisor cancels at the stop.
 type foldsAtTheStopParser struct {
 	stubParser
-	records int
+	clk     stall.Clock
+	runFor  time.Duration
+	stuck   <-chan struct{}
+	at      time.Time
+	lost    *atomic.Int64
 	readAll chan struct{}
 	out     chan int
 }
 
-func newFoldsAtTheStopParser(records int) foldsAtTheStopParser {
-	return foldsAtTheStopParser{records: records, readAll: make(chan struct{}), out: make(chan int, 1)}
+func newFoldsAtTheStopParser(clk stall.Clock, runFor time.Duration) foldsAtTheStopParser {
+	return foldsAtTheStopParser{
+		clk:     clk,
+		runFor:  runFor,
+		at:      time.Now(),
+		lost:    &atomic.Int64{},
+		readAll: make(chan struct{}),
+		out:     make(chan int, 1),
+	}
 }
 
 func (foldsAtTheStopParser) IsV2() bool { return true }
@@ -65,13 +79,22 @@ func (p foldsAtTheStopParser) RecordOutgoing(_ context.Context, s *integrations.
 		}
 	}
 	close(p.readAll)
-	tick := time.NewTicker(10 * time.Millisecond)
+	if p.stuck != nil {
+		<-p.stuck
+		return nil
+	}
+	start := p.clk.Runnable()
+	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	handed := 0
-	for handed < p.records {
+	for p.clk.Runnable()-start < p.runFor {
 		<-tick.C
-		s.V2.Folded()
 		handed++
+		m := &models.Mock{Kind: models.HTTP, Name: "folded-" + strconv.Itoa(handed)}
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = p.at, p.at
+		if lost, err := s.V2.EmitMockOutcome(m, true); lost || err != nil {
+			p.lost.Add(1)
+		}
 	}
 	p.out <- handed
 	return nil
@@ -95,33 +118,75 @@ func stuckUntilTheEnd(t *testing.T) <-chan struct{} {
 }
 
 // A parser that has read everything its connection carried and is still
-// handing over records of it at the recording's stop is waited for while it
-// does: it hands over every record and returns on its own before the record
-// path does, and nothing says a parser was cut.
+// handing over mocks at the recording's stop is waited for past the default
+// 1s FoldWindow while it makes progress: it hands over every mock for 2s of
+// supervisor runnable time (twice the default 1s window) and returns on its
+// own before the record path does, with none lost and no WARN.
 func TestRecordViaSupervisor_AParserHandingOverAtTheStopFinishesAndLosesNothing(t *testing.T) {
-	const records = 50 // about half a second of hand-overs
+	const runFor = 2 * time.Second // twice the default 1s FoldWindow on clk
 	core, logs := observer.New(zapcore.DebugLevel)
-	parser := newFoldsAtTheStopParser(records)
-	h := newStopHarness(t, parser, zap.New(core))
+	clk := newScaledClock(2) // 1s FoldWindow = 500ms wall; 20ms tick = 40ms runnable
+	parser := newFoldsAtTheStopParser(clk, runFor)
+	h := newStopHarnessWithClock(t, parser, zap.New(core), clk)
 
 	h.send(t, "GET /one HTTP/1.1\r\n\r\n")
 	h.cancel()
 	waitFor(t, parser.readAll, "the parser never read both its streams to their end")
 	select {
 	case <-h.done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("recordViaSupervisor never returned after the recording stopped")
 	}
 
 	select {
 	case handed := <-parser.out:
-		if handed != records {
-			t.Errorf("the parser handed over %d of its %d records", handed, records)
+		if handed == 0 {
+			t.Error("the parser handed over 0 mocks")
 		}
 	default:
-		t.Error("the record path returned while the parser was still handing over records: it was cut")
+		t.Error("the record path returned while the parser was still handing over mocks past the fold window: it was cut")
+	}
+	if n := parser.lost.Load(); n != 0 {
+		t.Errorf("%d of the parser's mocks were left out or refused", n)
 	}
 	noWarns(t, logs)
+}
+
+// A parser that has read both its streams to their end at the recording's stop
+// and then makes no progress (stuck mid-exchange) is cut once its default 1s
+// FoldWindow passes on the supervisor's clock, and one WARN names the
+// connection and says a mock in progress was dropped.
+func TestRecordViaSupervisor_AParserIdleAfterReadingBothStreamsAtTheStopIsCutAndWarnedOf(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	clk := newScaledClock(5) // default 1s FoldWindow passes in ~200ms wall
+	parser := foldsAtTheStopParser{
+		stuck:   stuckUntilTheEnd(t),
+		readAll: make(chan struct{}),
+		out:     make(chan int, 1),
+	}
+	h := newStopHarnessWithClock(t, parser, zap.New(core), clk)
+
+	h.send(t, "GET /idle-fold HTTP/1.1\r\n\r\n")
+	h.cancel()
+	waitFor(t, parser.readAll, "the parser never read both its streams to their end")
+	select {
+	case <-h.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fold window never cut the parser idle after reading both its streams at the stop")
+	}
+
+	warns := logs.FilterMessage(supervisor.FoldIdleWarnMsg).All()
+	if len(warns) != 1 {
+		t.Fatalf("%d WARNs say the fold window cut the idle parser, want 1", len(warns))
+	}
+	e := warns[0]
+	f := e.ContextMap()
+	if e.Level != zapcore.WarnLevel || f["clientConnID"] != "1" || f["fold_window"] != time.Second {
+		t.Errorf("fold-idle cut logged at %v for clientConnID=%v fold_window=%v; want WARN for clientConnID=1 fold_window=1s", e.Level, f["clientConnID"], f["fold_window"])
+	}
+	if n := logs.FilterMessage(stopCutWarnMsg).Len(); n != 0 {
+		t.Errorf("%d hang stop-cut WARNs for a parser cut by its fold window, want 0", n)
+	}
 }
 
 // behindAtTheStopParser is behind its capture at the recording's stop: it
