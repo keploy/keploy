@@ -9,10 +9,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/neterr"
 )
 
 // Predialed is the upstream connection the proxy opened for an application's
@@ -273,7 +273,17 @@ func DialTLS(ctx context.Context, d *net.Dialer, network, addr string, cfg *tls.
 // closedBeforeAnswering reports whether a handshake failed because the
 // destination had closed or reset the connection, not because of anything
 // it answered.
+//
+// Classified through pkg/neterr rather than against syscall.ECONNRESET and
+// syscall.EPIPE directly: on Windows those constants are
+// APPLICATION_ERROR-space values Winsock never returns, so a peer reset
+// (WSAECONNRESET) or a reset following the peer's idle FIN (WSAECONNABORTED,
+// matched by IsPeerReset) would never match and the idle pre-dial would not
+// redial. On Windows a TCP retransmission timeout also surfaces as
+// WSAECONNABORTED (10053) and is redialled once; that is safe because the
+// redial is gated by wasPre, runs at most once, and happens before any
+// application byte is sent (only a TLS ClientHello).
 func closedBeforeAnswering(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+		neterr.IsPeerReset(err) || neterr.IsBrokenPipe(err)
 }

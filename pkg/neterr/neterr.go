@@ -97,7 +97,10 @@ func IsConnRefused(err error) bool {
 // WSAECONNABORTED. An overlapped call can also complete with
 // ERROR_NETNAME_DELETED or ERROR_CONNECTION_ABORTED for a reset or an abort,
 // so those are taken too. For a reader that asks how its peer
-// ended the connection, not whether to retry: unlike IsConnReset, it takes
+// ended the connection, or for a one-shot pre-request handshake redial that
+// sends nothing the peer could act on as an application request (such as
+// DialTLS redialling an idle pre-dialled connection after only a ClientHello),
+// not for retrying application requests: unlike IsConnReset, it takes
 // WSAECONNABORTED, which Windows also gives a connection its own stack timed
 // out, so there a peer that stopped answering reads as one that reset (Linux
 // and macOS give ETIMEDOUT for that, which is not a reset).

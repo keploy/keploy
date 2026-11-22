@@ -54,6 +54,12 @@ jobs:
       #   .../proxy/incoming  isStaleConnError, which decides whether an
       #                       idempotent request is redialed and replayed or
       #                       turned into a 502 for the user's application.
+      #   .../proxy/util      DialTLS's idle-predial redial on a peer reset
+      #                       (closedBeforeAnswering, which must match
+      #                       WSAECONNRESET and WSAECONNABORTED via pkg/neterr),
+      #                       IsAlreadyClosedErr after a TLS peer reset, and
+      #                       DialDestination's connection-refused
+      #                       classification.
       #   .../integrations/http  the recorded-upstream-error markers.
       #   .../proxy/connseq   the proxy's end of its connection to a
       #                       destination (Upstream), which numbers the chunks
@@ -115,7 +121,7 @@ jobs:
       # &&: under `shell: cmd` a multi-line block is a batch file that does not
       # stop on failure and reports only the last exit code.
       - name: Test amd64
-        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./pkg/agent/proxy/supervisor/ ./pkg/agent/proxy/relay/ ./internal/testnet/
+        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/util/ ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./pkg/agent/proxy/supervisor/ ./pkg/agent/proxy/relay/ ./internal/testnet/
         shell: cmd
 
       # The count of writes the proxy puts over every accepted client socket

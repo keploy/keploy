@@ -8,9 +8,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
+	"io"
 	"math/big"
 	"net"
+	"os"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -364,4 +368,377 @@ func TestDialTLSRedialsWhenTheIdlePredialWasJustClosed(t *testing.T) {
 		t.Fatal("the redialled connection has no connseq.Upstream under its TLS")
 	}
 	waitCount(t, &accepted, 2)
+}
+
+// readErrConn is a net.Conn whose Write succeeds and whose Read returns a
+// fixed error, used to drive DialTLS's redial predicate deterministically.
+type readErrConn struct {
+	err    error
+	closed atomic.Bool
+}
+
+func (c *readErrConn) Read([]byte) (int, error)         { return 0, c.err }
+func (c *readErrConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *readErrConn) Close() error                     { c.closed.Store(true); return nil }
+func (c *readErrConn) LocalAddr() net.Addr              { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1} }
+func (c *readErrConn) RemoteAddr() net.Addr             { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2} }
+func (c *readErrConn) SetDeadline(time.Time) error      { return nil }
+func (c *readErrConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *readErrConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestClosedBeforeAnswering pins which handshake errors trigger a fresh dial
+// of a pre-dialled connection and which must be returned to the caller.
+func TestClosedBeforeAnswering(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"eof", io.EOF, true},
+		{"unexpected eof", io.ErrUnexpectedEOF, true},
+		{"wrapped eof", &net.OpError{Op: "read", Net: "tcp", Err: io.EOF}, true},
+		// On Windows these match only Go's synthetic APPLICATION_ERROR
+		// constants; real Winsock codes are pinned by the "real peer reset"
+		// subtest below and by predial_windows_test.go.
+		{"ECONNRESET", &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}, true},
+		{"EPIPE", &net.OpError{Op: "write", Net: "tcp", Err: os.NewSyscallError("write", syscall.EPIPE)}, true},
+
+		// Exclusions: timeouts, refusals, and TLS alerts are real handshake
+		// outcomes and must not silently redial.
+		{"read timeout", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}, false},
+		{"context deadline", context.DeadlineExceeded, false},
+		{"context canceled", context.Canceled, false},
+		{"ECONNREFUSED", &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}, false},
+		{"tls alert", &net.OpError{Op: "remote error", Err: errors.New("tls: handshake failure")}, false},
+		{"plain error", errors.New("handshake failed"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := closedBeforeAnswering(tc.err); got != tc.want {
+				t.Fatalf("closedBeforeAnswering(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("real peer reset", func(t *testing.T) {
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+
+		resetSent := make(chan struct{})
+		go func() {
+			defer close(resetSent)
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, _ = c.Read(make([]byte, 64))
+			if tc, ok := c.(*net.TCPConn); ok {
+				_ = tc.SetLinger(0)
+			}
+			_ = c.Close()
+		}()
+
+		c, err := net.Dial("tcp4", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		if _, err := c.Write([]byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+		<-resetSent
+
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		var readErr error
+		buf := make([]byte, 64)
+		for {
+			if _, readErr = c.Read(buf); readErr != nil {
+				break
+			}
+		}
+		if errors.Is(readErr, io.EOF) || errors.Is(readErr, os.ErrDeadlineExceeded) {
+			t.Fatalf("harness did not produce a peer reset: %v", readErr)
+		}
+		if !closedBeforeAnswering(readErr) {
+			var errno syscall.Errno
+			errors.As(readErr, &errno)
+			t.Fatalf("closedBeforeAnswering(%v) = false for a real peer reset (errno=%d)", readErr, uintptr(errno))
+		}
+	})
+}
+
+// TestDialTLSRedialsWhenTheIdlePredialWasReset drives an explicit peer RST
+// (SetLinger(0)) on the pre-dialled connection and verifies DialTLS redials
+// and completes the TLS handshake over a fresh connseq.Upstream on every OS.
+func TestDialTLSRedialsWhenTheIdlePredialWasReset(t *testing.T) {
+	cert := selfSigned(t)
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	var accepted atomic.Int32
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			if accepted.Add(1) == 1 {
+				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+				_, _ = c.Read(make([]byte, 64))
+				if tc, ok := c.(*net.TCPConn); ok {
+					_ = tc.SetLinger(0)
+				}
+				_ = c.Close()
+				continue
+			}
+			go func() {
+				tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}})
+				_ = tc.Handshake()
+				_, _ = io.Copy(io.Discard, tc)
+				_ = tc.Close()
+			}()
+		}
+	}()
+	addr := l.Addr().String()
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := DialTLS(context.Background(), nil, "tcp", addr, &tls.Config{InsecureSkipVerify: true}, NewPredialed(addr, pre)) //nolint:gosec // test server
+	if err != nil {
+		t.Fatalf("DialTLS: %v; must redial after peer reset on idle pre-dial", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if conn.NetConn() == pre {
+		t.Fatal("the handshake ran on the reset connection")
+	}
+	if connseq.Of(conn) == nil {
+		t.Fatal("the redialled connection has no connseq.Upstream under its TLS")
+	}
+	waitCount(t, &accepted, 2)
+}
+
+// TestDialTLSRedialsWhenTheIdlePredialWasAlreadyClosed verifies DialTLS
+// redials when the destination cleanly closed the pre-dialled connection
+// before the handshake began.
+func TestDialTLSRedialsWhenTheIdlePredialWasAlreadyClosed(t *testing.T) {
+	cert := selfSigned(t)
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	firstClosed := make(chan struct{})
+	var accepted atomic.Int32
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			if accepted.Add(1) == 1 {
+				_ = c.Close()
+				close(firstClosed)
+				continue
+			}
+			go func() {
+				tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}})
+				_ = tc.Handshake()
+				_, _ = io.Copy(io.Discard, tc)
+				_ = tc.Close()
+			}()
+		}
+	}()
+	addr := l.Addr().String()
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-firstClosed
+	conn, err := DialTLS(context.Background(), nil, "tcp", addr, &tls.Config{InsecureSkipVerify: true}, NewPredialed(addr, pre)) //nolint:gosec // test server
+	if err != nil {
+		t.Fatalf("DialTLS: %v; must redial when idle pre-dial was already closed", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if conn.NetConn() == pre {
+		t.Fatal("the handshake ran on the closed connection")
+	}
+	if connseq.Of(conn) == nil {
+		t.Fatal("the redialled connection has no connseq.Upstream under its TLS")
+	}
+	waitCount(t, &accepted, 2)
+}
+
+// TestDialTLSDoesNotRedialOnHandshakeAlertOrTimeout verifies that DialTLS
+// returns real handshake failures (timeouts and TLS alerts) without opening a
+// second connection.
+func TestDialTLSDoesNotRedialOnHandshakeAlertOrTimeout(t *testing.T) {
+	t.Run("timeout", func(t *testing.T) {
+		l, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		var accepted atomic.Int32
+		go func() {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				accepted.Add(1)
+				_ = c.Close()
+			}
+		}()
+		addr := l.Addr().String()
+		fake := &readErrConn{err: &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}}
+		_, err = DialTLS(context.Background(), nil, "tcp", addr, &tls.Config{InsecureSkipVerify: true}, Adopt(addr, fake)) //nolint:gosec // test server
+		if err == nil {
+			t.Fatal("DialTLS succeeded on a timed-out pre-dialled connection")
+		}
+		if !fake.closed.Load() {
+			t.Fatal("DialTLS leaked the failed pre-dialled connection without closing it")
+		}
+		if got := accepted.Load(); got != 0 {
+			t.Fatalf("destination saw %d redial connections on a timeout, want 0", got)
+		}
+	})
+
+	t.Run("tls alert", func(t *testing.T) {
+		l, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		var accepted atomic.Int32
+		go func() {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				accepted.Add(1)
+				go func() {
+					srv := tls.Server(c, &tls.Config{
+						GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+							return nil, errors.New("rejecting client")
+						},
+					})
+					_ = srv.Handshake()
+					_ = c.Close()
+				}()
+			}
+		}()
+		addr := l.Addr().String()
+		pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = DialTLS(context.Background(), nil, "tcp", addr, &tls.Config{InsecureSkipVerify: true}, NewPredialed(addr, pre)) //nolint:gosec // test server
+		if err == nil {
+			t.Fatal("DialTLS succeeded when server rejected the TLS handshake")
+		}
+		if got := accepted.Load(); got != 1 {
+			t.Fatalf("destination saw %d connections after a TLS alert, want 1 (no redial)", got)
+		}
+	})
+}
+
+// TestDialTLSDoesNotRedialWhenNotPredialed pins the wasPre gate: a fresh
+// (non-predialled) DialTLS whose handshake is reset by the destination must
+// return the error without opening a second connection.
+func TestDialTLSDoesNotRedialWhenNotPredialed(t *testing.T) {
+	cert := selfSigned(t)
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	var accepted atomic.Int32
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			if accepted.Add(1) == 1 {
+				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+				_, _ = c.Read(make([]byte, 64))
+				if tc, ok := c.(*net.TCPConn); ok {
+					_ = tc.SetLinger(0)
+				}
+				_ = c.Close()
+				continue
+			}
+			go func() {
+				tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}})
+				_ = tc.Handshake()
+				_, _ = io.Copy(io.Discard, tc)
+				_ = tc.Close()
+			}()
+		}
+	}()
+	addr := l.Addr().String()
+	_, err = DialTLS(context.Background(), nil, "tcp", addr, &tls.Config{InsecureSkipVerify: true}, nil) //nolint:gosec // test server
+	if err == nil {
+		t.Fatal("DialTLS succeeded after a non-predialled handshake was reset")
+	}
+	if got := accepted.Load(); got != 1 {
+		t.Fatalf("destination saw %d connections for a non-predialled reset, want 1 (no redial)", got)
+	}
+}
+
+// TestDialTLSClosesResetPredialBeforeRedialling verifies on every OS that
+// DialTLS closes the dead pre-dialled connection before opening the fresh
+// upstream connection on redial.
+func TestDialTLSClosesResetPredialBeforeRedialling(t *testing.T) {
+	cert := selfSigned(t)
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	fake := &readErrConn{err: &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}}
+	var accepted atomic.Int32
+	var closedBeforeAccept atomic.Bool
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			if accepted.Add(1) == 1 {
+				closedBeforeAccept.Store(fake.closed.Load())
+			}
+			go func() {
+				tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}})
+				_ = tc.Handshake()
+				_, _ = io.Copy(io.Discard, tc)
+				_ = tc.Close()
+			}()
+		}
+	}()
+	addr := l.Addr().String()
+	conn, err := DialTLS(context.Background(), nil, "tcp", addr, &tls.Config{InsecureSkipVerify: true}, Adopt(addr, fake)) //nolint:gosec // test server
+	if err != nil {
+		t.Fatalf("DialTLS: %v; must redial after ECONNRESET on pre-dialled conn", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if !fake.closed.Load() {
+		t.Fatal("DialTLS leaked the reset pre-dialled connection without closing it")
+	}
+	if !closedBeforeAccept.Load() {
+		t.Fatal("DialTLS opened the redial connection before closing the reset pre-dialled connection")
+	}
+	if connseq.Of(conn) == nil {
+		t.Fatal("the redialled connection has no connseq.Upstream under its TLS")
+	}
+	waitCount(t, &accepted, 1)
 }
