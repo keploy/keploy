@@ -68,13 +68,13 @@ func prodPair(t *testing.T, withReader bool) (peer net.Conn, proxySide net.Conn)
 	return d, proxyutil.NewSafeConn(raw, zap.NewNop())
 }
 
-// halfCloseWaitDeadline derives a deadline solely from the test binary's
-// deadline (leaving three quarters of the remaining time for cleanup and
-// subsequent tests, and ensuring a broken half-close fails with its own
+// eventWaitDeadline derives a hang-guard deadline solely from the test
+// binary's deadline (a quarter of the time remaining, so N failing waits in
+// one binary consume at most 1-(3/4)^N of the timeout and fail with their own
 // diagnostic before testing's binary-wide timeout panic). When the test has no
 // deadline (e.g. go test -timeout 0), ok is false and waits have no wall-clock
 // bound.
-func halfCloseWaitDeadline(t *testing.T) (time.Time, bool) {
+func eventWaitDeadline(t *testing.T) (time.Time, bool) {
 	t.Helper()
 	dl, ok := t.Deadline()
 	if !ok {
@@ -87,12 +87,12 @@ func halfCloseWaitDeadline(t *testing.T) (time.Time, bool) {
 	return time.Now().Add(rem), true
 }
 
-// beforeHalfCloseDeadline returns a timer channel that fires at
-// halfCloseWaitDeadline(t) along with a stop function, or (nil, noop) when the
+// beforeEventDeadline returns a timer channel that fires at
+// eventWaitDeadline(t) along with a stop function, or (nil, noop) when the
 // test has no deadline.
-func beforeHalfCloseDeadline(t *testing.T) (<-chan time.Time, func()) {
+func beforeEventDeadline(t *testing.T) (<-chan time.Time, func()) {
 	t.Helper()
-	bound, ok := halfCloseWaitDeadline(t)
+	bound, ok := eventWaitDeadline(t)
 	if !ok {
 		return nil, func() {}
 	}
@@ -102,7 +102,7 @@ func beforeHalfCloseDeadline(t *testing.T) (<-chan time.Time, func()) {
 
 func setReadBound(t *testing.T, conn net.Conn) {
 	t.Helper()
-	if bound, ok := halfCloseWaitDeadline(t); ok {
+	if bound, ok := eventWaitDeadline(t); ok {
 		if err := conn.SetReadDeadline(bound); err != nil {
 			t.Fatalf("set read deadline: %v", err)
 		}
@@ -115,7 +115,7 @@ func setReadBound(t *testing.T, conn net.Conn) {
 
 func setWriteBound(t *testing.T, conn net.Conn) {
 	t.Helper()
-	if bound, ok := halfCloseWaitDeadline(t); ok {
+	if bound, ok := eventWaitDeadline(t); ok {
 		if err := conn.SetWriteDeadline(bound); err != nil {
 			t.Fatalf("set write deadline: %v", err)
 		}
@@ -130,12 +130,25 @@ func setWriteBound(t *testing.T, conn net.Conn) {
 // `run` and reports whether the reply came back.
 func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 	t.Helper()
-	var waits []func()
+	type cleanupWait struct {
+		name string
+		done <-chan struct{}
+	}
+	var waits []cleanupWait
 	// Registered before prodPair so LIFO cleanup closes the raw TCP sockets
-	// first, unblocking both goroutines before we wait for them to exit.
+	// first, unblocking both goroutines before we wait for them to exit. Each
+	// join is bounded by beforeEventDeadline so a wedged goroutine fails
+	// cleanly instead of hanging until testing's binary timeout panic.
 	t.Cleanup(func() {
 		for _, w := range waits {
-			w()
+			expired, stop := beforeEventDeadline(t)
+			select {
+			case <-w.done:
+				stop()
+			case <-expired:
+				stop()
+				t.Errorf("%s did not return during cleanup", w.name)
+			}
 		}
 	})
 
@@ -143,7 +156,7 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 	destSvc, dstProxy := prodPair(t, false)  // Egress: NewSafeConn
 
 	runDone := make(chan struct{})
-	waits = append(waits, func() { <-runDone })
+	waits = append(waits, cleanupWait{name: "halfCloseExchange run goroutine", done: runDone})
 	go func() {
 		defer close(runDone)
 		run(srcProxy, dstProxy)
@@ -154,7 +167,7 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 
 	srvDone := make(chan error, 1)
 	srvExited := make(chan struct{})
-	waits = append(waits, func() { <-srvExited })
+	waits = append(waits, cleanupWait{name: "halfCloseExchange service goroutine", done: srvExited})
 	go func() {
 		defer close(srvExited)
 		got, err := io.ReadAll(destSvc) // returns only once the FIN arrives
@@ -177,7 +190,7 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 		t.Fatalf("half-close: %v", err)
 	}
 
-	expired, stop := beforeHalfCloseDeadline(t)
+	expired, stop := beforeEventDeadline(t)
 	defer stop()
 	select {
 	case err := <-srvDone:
@@ -203,7 +216,8 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 // encodeGeneric is the path that actually runs during recording.
 func TestEncodeGeneric_ForwardsTheFIN(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	// Deferred so cancel runs before t.Cleanup joins encodeGeneric.
+	defer cancel()
 	mocks := make(chan *models.Mock, 8)
 	halfCloseExchange(t, func(clientConn, destConn net.Conn) {
 		_ = encodeGeneric(ctx, zap.NewNop(), nil, clientConn, destConn,
@@ -238,9 +252,9 @@ func TestForwardFIN_SkipsWhenTheCopyFailed(t *testing.T) {
 
 	forwardFIN(proxySide, io.ErrUnexpectedEOF)
 
-	// Prove synchronously without a wall-clock sleep that the write half is
-	// still open: if forwardFIN called CloseWrite on the underlying TCP socket,
-	// a follow-up write fails immediately and TCP ordering guarantees peer
+	// Prove synchronously that no FIN was sent before forwardFIN returned:
+	// if forwardFIN called CloseWrite on the underlying TCP socket, a
+	// follow-up write fails immediately and TCP ordering guarantees peer
 	// reads io.EOF before any subsequent bytes.
 	sentinel := []byte("still-open")
 	if _, err := proxySide.Write(sentinel); err != nil {
@@ -259,5 +273,17 @@ func TestForwardFIN_SkipsWhenTheCopyFailed(t *testing.T) {
 	}
 	if !bytes.Equal(got, sentinel) {
 		t.Fatalf("peer got %q, want %q", got, sentinel)
+	}
+
+	// Nor may a FIN follow after forwardFIN returns (for example from an
+	// asynchronous or deferred close). This negative check passes by timing
+	// out, so a loaded host cannot turn it into a false failure.
+	if err := peer.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatalf("set negative read deadline: %v", err)
+	}
+	_, err := peer.Read(make([]byte, 1))
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("a FIN was forwarded for a copy that ended in an error, after forwardFIN returned (peer read: %v)", err)
 	}
 }

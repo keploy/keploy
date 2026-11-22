@@ -133,7 +133,7 @@ func tcpPair(t *testing.T) (app *net.TCPConn, proxySide net.Conn) {
 // test's deadline bound.
 func awaitEnd(t *testing.T, done <-chan error, what string) {
 	t.Helper()
-	expired, stop := beforeHalfCloseDeadline(t)
+	expired, stop := beforeEventDeadline(t)
 	defer stop()
 	select {
 	case err := <-done:
