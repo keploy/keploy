@@ -3298,6 +3298,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	return fmt.Errorf("%s: %w", stopReason, err)
 }
 
+// hasMappingTestName reports whether name carries a non-blank test identity
+// that can key postStopTests or recordedTests across a stop drain. Empty and
+// whitespace-only names represent unnamed captures and must never key either
+// map.
+func hasMappingTestName(name string) bool {
+	return strings.TrimSpace(name) != ""
+}
+
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// This recording's streams end by the agent's markers when it can
 	// (stream_end.go): its token names them to the agent.
@@ -3439,17 +3447,29 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			// recording: its mocks may come after the drain has ended, and
 			// saved without them it would fail replay. An undated one
 			// (testCaseCapturedAt) cannot be told from one, and is left out
-			// too. Neither is its mapping (MAPPINGS).
+			// too. Neither is its mapping (MAPPINGS). Unnamed (empty or
+			// whitespace-only) test cases carry no identity to key
+			// postStopTests by: storing "" or whitespace would drop in-flight
+			// pre-stop unnamed mappings before framesDrained closes.
 			opts.afterStop = func(tc *models.TestCase) {
-				postStopTests.Store(tc.AgentName(), struct{}{})
+				if name := tc.AgentName(); hasMappingTestName(name) {
+					postStopTests.Store(name, struct{}{})
+				}
 				r.logger.Debug("not recording a test case served after the stop", zap.String("testCaseName", tc.Name))
 			}
 			// Keyed by the name the test case is handed over with: the
 			// agent's, which its mappings carry (its capture id when it came
 			// with one). Read before the hand-off, since the consumer's insert
-			// names an unnamed test case in place.
+			// names an unnamed test case in place. Unnamed (empty or
+			// whitespace-only) test cases carry no identity to key
+			// recordedTests by: storing blank names makes later unnamed
+			// post-stop mappings look recorded after framesDrained and reset
+			// mappingIdleGrace indefinitely.
 			opts.handing = func(tc *models.TestCase) func() {
 				name := tc.AgentName()
+				if !hasMappingTestName(name) {
+					return func() {}
+				}
 				return func() { recordedTests.Store(name, struct{}{}) }
 			}
 		}
