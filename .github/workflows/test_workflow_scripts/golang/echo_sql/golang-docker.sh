@@ -2,6 +2,8 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+# test_run_count, and keploy_exited: names a keploy command that exited non-zero.
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-exit-helpers.sh"
 
 # Build Docker Image
 docker_build_retry docker compose build
@@ -9,12 +11,18 @@ docker_build_retry docker compose build
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 
-# Generate the keploy-config file.
-$RECORD_BIN config --generate
-
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"ts":[]}}
+KEPLOY_CFG
 
 container_kill() {
     REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
@@ -56,7 +64,6 @@ send_request(){
     wait
 }
 
-
 do_record_iteration() {
     local i="$1"
     local extra_flags="${2:-}"
@@ -64,8 +71,16 @@ do_record_iteration() {
     local log="echoApp${label}.txt"
     local container_name="echoApp"
     send_request &
+    # The record's own exit, not tee's: the step sets no pipefail, so the
+    # pipeline's status is tee's, and a record that exited non-zero went on
+    # to the next iteration. Without pipefail the && takes it from
+    # PIPESTATUS; with pipefail the pipeline's status is the record's and
+    # the || takes it, so neither shell ends the step at this line.
+    local rc
     # shellcheck disable=SC2086
-    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log"
+    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log" && rc=${PIPESTATUS[0]} || rc=$?
+    # The record ends at send_request's SIGINT: logged here, after that stop.
+    echo "keploy record (iteration ${i}${label:+, json}) exited ${rc}"
 
     if grep "WARNING: DATA RACE" "$log"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -77,6 +92,27 @@ do_record_iteration() {
         cat "$log"
         cat "docker-compose-tmp.yaml"
         exit 1
+    fi
+    # The agent says this when it was handed no control-plane token: it then
+    # serves /agent/pcap/keylog, /agent/stop and /agent/storemocks to anything
+    # that can reach the port, and the run still passes.
+    #
+    # keploy probes for this itself at the readiness gate and logs an ERROR,
+    # which the check above already catches. This is the second line of
+    # defence, on the handoff most likely to break: keploy rewrites this
+    # compose file heavily, and losing the agent service's KEPLOY_AGENT_TOKEN
+    # environment entry in one of those rewrites — or compose not being given
+    # the value to fill it from — is exactly the silent regression this guards.
+    if grep -q "running WITHOUT authentication" "$log"; then
+        echo "The agent came up with no control-plane token; the compose token handoff is broken."
+        cat "$log"
+        cat "docker-compose-tmp.yaml"
+        exit 1
+    fi
+    # The lane's own stop ends a record with 0; any other exit is the
+    # record's failure, named after the log's own checks above.
+    if [ "$rc" -ne 0 ]; then
+        keploy_exited "$rc" "keploy record (iteration ${i}${label:+, json})" "$log"
     fi
     sleep 5
     echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
@@ -102,7 +138,9 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt"
+rc=0
+runs_before="$(test_run_count)"
+$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt" || rc=$?
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
@@ -114,6 +152,10 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "${test_container}.txt"
     exit 1
+fi
+
+if [ "$rc" -ne 0 ]; then
+    keploy_exited "$rc" "keploy test" "${test_container}.txt" "$runs_before"
 fi
 
 all_passed=true
@@ -146,7 +188,9 @@ else
 fi
 
 if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}_json.txt"
+    rc=0
+    runs_before="$(test_run_count)"
+    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}_json.txt" || rc=$?
     if grep "ERROR" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
@@ -154,6 +198,9 @@ if json_pass_supported; then
     if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        keploy_exited "$rc" "keploy test --storage-format json" "${test_container}_json.txt" "$runs_before"
     fi
     if ! json_scan_reports; then
         cat "${test_container}_json.txt"
@@ -183,7 +230,7 @@ echo "===== --keep-app-alive regression run ====="
 # otherwise and the new run won't be a clean lifecycle test.
 docker compose down -v --remove-orphans >/dev/null 2>&1 || true
 
-prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+prev_report_count=$(test_run_count)
 
 # Reuse the baseline's container name. --containerName in docker-compose
 # mode must match a SERVICE name in docker-compose.yml (it isn't a
@@ -192,14 +239,14 @@ prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
 # found in any of the provided docker-compose files" error before the
 # replay even starts.
 ka_log="echoApp_keep_app_alive.txt"
+replay_status=0
 $REPLAY_BIN test -c "docker compose up" \
     --containerName "$test_container" \
     --apiTimeout 60 \
     --delay 15 \
     --keep-app-alive \
     --test-sets test-set-0 \
-    --generate-github-actions=false &> "$ka_log"
-replay_status=$?
+    --generate-github-actions=false &> "$ka_log" || replay_status=$?
 
 if [ "$replay_status" -ne 0 ]; then
     echo "::error::--keep-app-alive replay failed with exit code ${replay_status}"
@@ -213,7 +260,7 @@ if grep "WARNING: DATA RACE" "$ka_log"; then
     exit 1
 fi
 
-new_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+new_report_count=$(test_run_count)
 if [ "$new_report_count" -le "$prev_report_count" ]; then
     echo "::error::--keep-app-alive replay did not produce a new test-run-* directory (prev=${prev_report_count}, new=${new_report_count}). Most likely the binary rejected the --keep-app-alive flag."
     cat "$ka_log"

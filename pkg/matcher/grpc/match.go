@@ -4,19 +4,61 @@ package grpc
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
+// MatchOption tunes Match without changing its signature.
+type MatchOption func(*matchOptions)
+
+type matchOptions struct {
+	noPassLine bool
+	// console is where the comparison's lines go (WithConsole); nil, the
+	// default, prints nothing.
+	console io.Writer
+}
+
+// out is o's console, io.Discard for none.
+func (o matchOptions) out() io.Writer {
+	if o.console == nil {
+		return io.Discard
+	}
+	return o.console
+}
+
+// WithConsole makes w the console the comparison writes its lines to: the
+// "Testrun passed" and "Testrun failed" lines and a failure's diff, which
+// names the expected and actual messages whole. With none, or a nil w, it
+// prints nothing, as the HTTP matcher's WithConsole.
+func WithConsole(w io.Writer) MatchOption {
+	return func(o *matchOptions) { o.console = w }
+}
+
+// WithoutPassLine says the caller has already failed the test case on its
+// own (a template variable's place the answer does not satisfy): a
+// comparison that matches then prints no "Testrun passed" line for it.
+func WithoutPassLine() MatchOption {
+	return func(o *matchOptions) { o.noPassLine = true }
+}
+
 // Match compares an expected gRPC response with an actual response and returns whether they match
 // along with detailed comparison results
-func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, emitFailureLogs bool, opts ...MatchOption) (bool, *models.Result) {
+	var mo matchOptions
+	for _, opt := range opts {
+		opt(&mo)
+	}
+	// Under the proven switch response arrays are compared in order.
+	ignoreOrdering = matcher.ResponseIgnoreOrdering(ignoreOrdering)
 	expectedResp := tc.GrpcResp
 	result := &models.Result{
 		HeadersResult: make([]models.HeaderResult, 0),
@@ -27,11 +69,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	var currentCategories []models.FailureCategory
 
 	// Local variables to track overall match status
-	differences := make(map[string]struct {
-		Expected string
-		Actual   string
-		Message  string
-	})
+	differences := make(map[string]grpcDiff)
 
 	// Only compare :status in pseudo headers
 	if expectedStatus, ok := expectedResp.Headers.PseudoHeaders[":status"]; ok {
@@ -48,14 +86,11 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 
 		if !exists {
-			differences["headers.pseudo_headers.:status"] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
+			differences["headers.pseudo_headers.:status"] = grpcDiff{
 				Expected: expectedStatus,
 				Actual:   "",
 				Message:  "missing status header in response",
+				missing:  true,
 			}
 			headerResult.Normal = false
 			// :status is the HTTP/2 transport-layer header (always 200 for gRPC);
@@ -66,11 +101,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			headerResult.Normal = expectedStatus == actualStatus
 
 			if !headerResult.Normal {
-				differences["headers.pseudo_headers.:status"] = struct {
-					Expected string
-					Actual   string
-					Message  string
-				}{
+				differences["headers.pseudo_headers.:status"] = grpcDiff{
 					Expected: expectedStatus,
 					Actual:   actualStatus,
 					Message:  "status header value mismatch",
@@ -96,14 +127,11 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 
 		if !exists {
-			differences["headers.ordinary_headers.content-type"] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
+			differences["headers.ordinary_headers.content-type"] = grpcDiff{
 				Expected: expectedContentType,
 				Actual:   "",
 				Message:  "missing content-type header in response",
+				missing:  true,
 			}
 			headerResult.Normal = false
 			currentRisk = models.High
@@ -130,11 +158,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			headerResult.Normal = normalize(expectedContentType) == normalize(actualContentType)
 
 			if !headerResult.Normal {
-				differences["headers.ordinary_headers.content-type"] = struct {
-					Expected string
-					Actual   string
-					Message  string
-				}{
+				differences["headers.ordinary_headers.content-type"] = grpcDiff{
 					Expected: expectedContentType,
 					Actual:   actualContentType,
 					Message:  "content-type header value mismatch",
@@ -145,47 +169,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 		result.HeadersResult = append(result.HeadersResult, headerResult)
 	}
-
-	// Compare Body - using specialized body types for gRPC
-	// Compare compression flag
-	compressionFlagNormal := expectedResp.Body.CompressionFlag == actualResp.Body.CompressionFlag
-	if !compressionFlagNormal {
-		differences["body.compression_flag"] = struct {
-			Expected string
-			Actual   string
-			Message  string
-		}{
-			Expected: fmt.Sprintf("%d", expectedResp.Body.CompressionFlag),
-			Actual:   fmt.Sprintf("%d", actualResp.Body.CompressionFlag),
-			Message:  "compression flag mismatch",
-		}
-	}
-	result.BodyResult = append(result.BodyResult, models.BodyResult{
-		Normal:   compressionFlagNormal,
-		Type:     models.GrpcCompression,
-		Expected: fmt.Sprintf("%d", expectedResp.Body.CompressionFlag),
-		Actual:   fmt.Sprintf("%d", actualResp.Body.CompressionFlag),
-	})
-
-	// Compare message length
-	messageLengthNormal := expectedResp.Body.MessageLength == actualResp.Body.MessageLength
-	if !messageLengthNormal {
-		differences["body.message_length"] = struct {
-			Expected string
-			Actual   string
-			Message  string
-		}{
-			Expected: fmt.Sprintf("%d", expectedResp.Body.MessageLength),
-			Actual:   fmt.Sprintf("%d", actualResp.Body.MessageLength),
-			Message:  "message length mismatch",
-		}
-	}
-	result.BodyResult = append(result.BodyResult, models.BodyResult{
-		Normal:   messageLengthNormal,
-		Type:     models.GrpcLength,
-		Expected: fmt.Sprintf("%d", expectedResp.Body.MessageLength),
-		Actual:   fmt.Sprintf("%d", actualResp.Body.MessageLength),
-	})
 
 	// Handle noise configuration first - needed for JSON comparison
 	noise := tc.Noise
@@ -207,114 +190,172 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		headerNoise[field] = regexArr
 	}
 
-	// Compare decoded data - use JSON comparison if both are valid JSON, otherwise use canonicalization
+	// Compare the body POSITIONALLY, one length-prefixed message at a time.
+	//
+	// Order is the entire semantic content of a stream, so comparison has to
+	// be by position. Concatenating messages into one string and diffing that
+	// would let a stream replayed in reverse order match, and so would routing
+	// a multi-message body through CanonicalizeTopLevelBlocks, which sorts
+	// sibling blocks.
+	expMsgs := expectedResp.AllMessages()
+	actMsgs := actualResp.AllMessages()
+
+	// The COUNT gets its own verdict. Comparing only min(len(exp), len(act))
+	// and calling that a match means a server returning 3 of 5 recorded
+	// messages passes — strictly worse than not supporting streams, because
+	// the user now believes streams are covered.
+	if len(expMsgs) != len(actMsgs) {
+		differences["body.message_count"] = grpcDiff{
+			Expected: fmt.Sprintf("%d", len(expMsgs)),
+			Actual:   fmt.Sprintf("%d", len(actMsgs)),
+			Message:  "gRPC message count mismatch",
+			number:   true,
+		}
+		result.BodyResult = append(result.BodyResult, models.BodyResult{
+			Normal:   false,
+			Type:     models.GrpcLength,
+			Expected: fmt.Sprintf("%d message(s)", len(expMsgs)),
+			Actual:   fmt.Sprintf("%d message(s)", len(actMsgs)),
+		})
+		currentRisk = models.High
+		currentCategories = append(currentCategories, models.SchemaBroken)
+	}
+
+	// Keys stay UNPREFIXED while both sides carry a single message, which is
+	// every recording made before streams were representable. A user's
+	// assertions.noise holds the bare string `body.decoded_data`, and the
+	// report reader keys off these too, so unary comparison must emit exactly
+	// the keys it always did.
+	indexed := useIndexedKeys(expMsgs, actMsgs)
+
+	compareCount := len(expMsgs)
+	if len(actMsgs) < compareCount {
+		compareCount = len(actMsgs)
+	}
+
+	// Carried out for the failure assessment below: the FIRST message that
+	// differs, which is the one the user needs to look at.
 	decodedDataNormal := true
-	expectedDecodedData := expectedResp.Body.DecodedData
-	actualDecodedData := actualResp.Body.DecodedData
-
+	expectedDecodedData := ""
+	actualDecodedData := ""
 	var jsonComparisonResult matcher.JSONComparisonResult
+	// reorderedOnly: every message that differs differs only in a repeated
+	// field's order, and the stream has as many messages as recorded. One
+	// message with a real change makes the body a real change, whichever
+	// message differed first.
+	reorderedOnly := len(expMsgs) == len(actMsgs)
 
-	// Check if both decoded data are valid JSON
-	if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
-		// Both are JSON - use proper JSON comparison like HTTP matcher
-		logger.Debug("Both gRPC decoded data are valid JSON, using JSON comparison",
-			zap.String("expectedDecodedData", expectedDecodedData),
-			zap.String("actualDecodedData", actualDecodedData))
-
-		expectedDecodedData = matcher.NormalizeNestedJSONForNoise(expectedDecodedData, bodyNoise, logger)
-		actualDecodedData = matcher.NormalizeNestedJSONForNoise(actualDecodedData, bodyNoise, logger)
-
-		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &expectedDecodedData, &actualDecodedData)
-		if err != nil {
-			logger.Error("Failed to validate and marshal JSON for gRPC decoded data", zap.Error(err))
+	for msgIdx := 0; msgIdx < compareCount; msgIdx++ {
+		cmp := compareGrpcMessage(msgIdx, indexed, expMsgs[msgIdx], actMsgs[msgIdx],
+			differences, result, bodyNoise, ignoreOrdering, logger)
+		if !cmp.decodedNormal && !cmp.reorderedOnly {
+			reorderedOnly = false
+		}
+		if !cmp.decodedNormal && decodedDataNormal {
+			// first mismatch wins
 			decodedDataNormal = false
-		} else if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
-			decodedDataNormal = jsonComparisonResult.IsExact()
-			if err != nil {
-				logger.Error("Failed to perform JSON diff with noise control", zap.Error(err))
-				decodedDataNormal = false
-			}
-			if !decodedDataNormal {
-				logger.Debug("JSON comparison found differences",
-					zap.Bool("isExact", jsonComparisonResult.IsExact()),
-					zap.Bool("matches", jsonComparisonResult.Matches()))
-			}
-		} else {
-			logger.Debug("JSON structures are not identical, marking as mismatch")
-			decodedDataNormal = false
-		}
-	} else {
-		// At least one is not JSON - fall back to canonicalization approach
-		logger.Debug("At least one gRPC decoded data is not valid JSON, using canonicalization",
-			zap.Bool("expectedIsJSON", json.Valid([]byte(expectedDecodedData))),
-			zap.Bool("actualIsJSON", json.Valid([]byte(actualDecodedData))))
-
-		expCanon := CanonicalizeTopLevelBlocks(expectedDecodedData)
-		actCanon := CanonicalizeTopLevelBlocks(actualDecodedData)
-		decodedDataNormal = expCanon == actCanon
-		// Update the data for result reporting
-		expectedDecodedData = expCanon
-		actualDecodedData = actCanon
-	}
-
-	if !decodedDataNormal {
-		differences["body.decoded_data"] = struct {
-			Expected string
-			Actual   string
-			Message  string
-		}{
-			Expected: expectedDecodedData,
-			Actual:   actualDecodedData,
-			Message:  "decoded data mismatch",
+			expectedDecodedData = cmp.expected
+			actualDecodedData = cmp.actual
+			jsonComparisonResult = cmp.json
 		}
 	}
-	result.BodyResult = append(result.BodyResult, models.BodyResult{
-		Normal:   decodedDataNormal,
-		Type:     models.GrpcData,
-		Expected: expectedDecodedData,
-		Actual:   actualDecodedData,
-	})
-
-	// If decoded data matches but message length differs, ignore the length difference
-	if decodedDataNormal && !messageLengthNormal {
-		logger.Debug("Ignoring message length mismatch since decoded data is identical",
-			zap.Uint32("expected", expectedResp.Body.MessageLength),
-			zap.Uint32("actual", actualResp.Body.MessageLength))
-		// Update the message length result to Normal=true
-		for i := range result.BodyResult {
-			if result.BodyResult[i].Type == models.GrpcLength {
-				result.BodyResult[i].Normal = true
-				break
-			}
-		}
-		// Remove the message_length difference from differences map
-		delete(differences, "body.message_length")
+	if decodedDataNormal && compareCount > 0 {
+		// Nothing differed; surface message 0 for the report's benefit.
+		expectedDecodedData = expMsgs[0].DecodedData
+		actualDecodedData = actMsgs[0].DecodedData
 	}
 
-	// Apply noise configuration to ignore specified differences
-	for path := range differences {
-		pathParts := strings.Split(path, ".")
-		if len(pathParts) > 1 {
-			if pathParts[0] == "body" && len(bodyNoise) > 0 {
-				if _, found := bodyNoise[strings.Join(pathParts[1:], ".")]; found {
-					delete(differences, path)
-				}
-			} else if pathParts[0] == "headers" && len(headerNoise) > 0 {
-				if _, found := headerNoise[pathParts[len(pathParts)-1]]; found {
-					delete(differences, path)
-				}
+	// Apply noise configuration to ignore specified differences. An entry
+	// with no patterns excuses its field whole. An entry with patterns lets
+	// the field vary only within them: it excuses a difference only when the
+	// recorded and the live value each match one, and never a field the
+	// answer lacks; otherwise the field is compared, and the reason names
+	// it, the patterns and the side outside them.
+	var (
+		patternWhys           []string
+		keptHeader, keptField bool // a header, a body field a pattern kept
+	)
+	for path, diff := range differences {
+		field, pats, found := grpcNoiseEntry(path, bodyNoise, headerNoise)
+		if !found {
+			continue
+		}
+		if why := grpcPatternWhy(field, pats, diff); why != "" {
+			patternWhys = append(patternWhys, why)
+			if strings.HasPrefix(path, "headers.") {
+				keptHeader = true
+			} else {
+				keptField = true
 			}
+			continue
+		}
+		delete(differences, path)
+	}
+	sort.Strings(patternWhys)
+
+	// Compare grpc-status trailer — this is the canonical gRPC status code.
+	// HTTP/2 :status (always 200 for gRPC) is transport framing and must not
+	// be used as the gRPC status; grpc-status: 0 = OK, non-zero = error.
+	//
+	// The recording's status is read as a gRPC client reads it, with the
+	// proven switch on or off: off its trailers when it has any, else off its
+	// one header block when that block carries grpc-status, a Trailers-Only
+	// answer (models.GrpcResp.TrailersAsRead). Read off the trailers alone, a
+	// Trailers-Only answer kept as its headers alone (enterprise's low-latency
+	// recorder before its fix) had no status, which reads as 0 with the switch
+	// off: its recording of NOT_FOUND passed against an app answering OK.
+	// The answer's status is as keploy's replay client, grpc-go, read it
+	// (pkg.SimulateGRPC), or the recording's own where the app sent none (a
+	// stream it held open).
+	expectedStatusText := expectedResp.TrailersAsRead().OrdinaryHeaders["grpc-status"]
+	actualStatusText := actualResp.Trailers.OrdinaryHeaders["grpc-status"]
+	expectedGrpcStatus := parseGrpcStatus(expectedStatusText)
+	actualGrpcStatus := parseGrpcStatus(actualStatusText)
+	statusDiff := grpcDiff{
+		Expected: strconv.Itoa(expectedGrpcStatus),
+		Actual:   strconv.Itoa(actualGrpcStatus),
+		Message:  "grpc-status mismatch",
+	}
+	statusNormal := expectedGrpcStatus == actualGrpcStatus
+	if provenswitch.On() {
+		// Under the proven switch an answer with no grpc-status is not an OK
+		// answer (provenGrpcStatusMatch).
+		expectedGrpcStatus, actualGrpcStatus = provenGrpcStatusCode(expectedStatusText), provenGrpcStatusCode(actualStatusText)
+		statusNormal = provenGrpcStatusMatch(expectedStatusText, actualStatusText)
+		statusDiff.Expected, statusDiff.Actual = shownGrpcStatus(expectedStatusText), shownGrpcStatus(actualStatusText)
+		if _, inHeaders := expectedResp.Headers.OrdinaryHeaders["grpc-status"]; expectedStatusText == "" && !inHeaders && !statusNormal && emitFailureLogs {
+			logger.Warn("the recorded answer has no grpc-status, in its trailers or its headers, which a gRPC client reads as an error, so it matches no answer that carries a status; "+
+				"record the test case again if its recorder lost the status (keploy before v3.6.148 did, for trailers split across CONTINUATION frames)",
+				zap.String("testcase", tc.Name))
 		}
 	}
+	result.StatusCode = models.IntResult{
+		Normal:   statusNormal,
+		Expected: expectedGrpcStatus,
+		Actual:   actualGrpcStatus,
+	}
+	if !result.StatusCode.Normal {
+		differences["trailers.grpc-status"] = statusDiff
+		currentRisk = models.High
+		currentCategories = append(currentCategories, models.StatusCodeChanged)
+	}
 
-	// Calculate final match status based on remaining differences
+	// Calculate final match status based on remaining differences.
+	//
+	// The grpc-status comparison above MUST stay above this line. It was
+	// below it, so its difference was written after `matched` had already
+	// been decided: a response with a byte-identical body whose grpc-status
+	// flipped 0 -> 13 set result.StatusCode.Normal=false and still returned
+	// matched=true, printing "Testrun passed" for a failed RPC. Moving it up
+	// also gets the mismatch into the diff the user is shown, which it was
+	// previously excluded from.
 	matched := len(differences) == 0
 
 	if !matched {
 		// Display differences to the user, similar to HTTP matcher
-		logDiffs := matcher.NewDiffsPrinter(tc.Name)
+		logDiffs := matcher.NewDiffsPrinterOut(mo.console, tc.Name)
 		newLogger := pp.New()
+		newLogger.SetOutput(mo.out())
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetFailingColorScheme())
 		var logs = ""
@@ -343,11 +384,19 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 							logDiffs.SetHasarrayIndexMismatch(true)
 							logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
 						}
+						if diff.Message == reorderedRepeatedMessage {
+							// Only the order of a repeated field differs: say so.
+							logDiffs.PushFooterDiff(reorderedRepeatedMessage)
+						}
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					default:
 						// Any other body differences
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					}
+				} else if strings.HasPrefix(path, "trailers.") && provenswitch.On() {
+					// Under the proven switch a test that fails on its
+					// grpc-status alone shows it, not an empty diff.
+					logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, path, nil)
 				}
 			}
 		} else {
@@ -357,6 +406,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 
 		// Print the differences
 		if emitFailureLogs {
+			for _, why := range patternWhys {
+				logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("testCase", tc.Name), zap.String("reason", why))
+			}
 			_, err := newLogger.Printf(logs)
 			if err != nil {
 				utils.LogError(logger, err, "failed to print the logs")
@@ -367,9 +419,10 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				utils.LogError(logger, err, "failed to render the diffs")
 			}
 		}
-	} else {
+	} else if !mo.noPassLine {
 		// Display success message
 		newLogger := pp.New()
+		newLogger.SetOutput(mo.out())
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
 		var log2 = ""
@@ -391,6 +444,19 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				currentRisk = models.High
 				currentCategories = append(currentCategories, models.InternalFailure)
 			}
+		} else if reorderedOnly {
+			// Only a repeated field's order differs (protoscope, under the
+			// proven switch): the schema and the values are the recorded
+			// ones, as a reordered JSON array is graded. The reason, with
+			// the proto-files way out for a map, is persisted with the
+			// result, so the report and JUnit say it, not only the console.
+			currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+			currentCategories = append(currentCategories, models.SchemaUnchanged)
+			bodyAssessment = &models.FailureAssessment{
+				Category: []models.FailureCategory{models.SchemaUnchanged},
+				Risk:     models.Medium,
+				Reasons:  []string{reorderedRepeatedMessage},
+			}
 		} else {
 			// non-JSON payload mismatch → Broken
 			currentRisk = models.High
@@ -398,28 +464,20 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 	}
 
-	// Compare grpc-status trailer — this is the canonical gRPC status code.
-	// HTTP/2 :status (always 200 for gRPC) is transport framing and must not
-	// be used as the gRPC status; grpc-status: 0 = OK, non-zero = error.
-	expectedGrpcStatus := parseGrpcStatus(expectedResp.Trailers.OrdinaryHeaders["grpc-status"])
-	actualGrpcStatus := parseGrpcStatus(actualResp.Trailers.OrdinaryHeaders["grpc-status"])
-	result.StatusCode = models.IntResult{
-		Normal:   expectedGrpcStatus == actualGrpcStatus,
-		Expected: expectedGrpcStatus,
-		Actual:   actualGrpcStatus,
-	}
-	if !result.StatusCode.Normal {
-		differences["trailers.grpc-status"] = struct {
-			Expected string
-			Actual   string
-			Message  string
-		}{
-			Expected: strconv.Itoa(expectedGrpcStatus),
-			Actual:   strconv.Itoa(actualGrpcStatus),
-			Message:  "grpc-status mismatch",
+	// A field a pattern kept is a changed value, graded at least Medium as
+	// the HTTP matcher grades a header or a body value a pattern keeps, so
+	// the failure and its reason reach the report (replay keeps a failed
+	// test's assessment only with a risk). A header is a changed header; a
+	// body field the comparison did not grade itself (a compression flag)
+	// is a changed value under an unchanged schema.
+	if len(patternWhys) > 0 {
+		currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+		if keptField && len(currentCategories) == 0 {
+			currentCategories = append(currentCategories, models.SchemaUnchanged)
 		}
-		currentRisk = models.High
-		currentCategories = append(currentCategories, models.StatusCodeChanged)
+		if keptHeader {
+			currentCategories = append(currentCategories, models.HeaderChanged)
+		}
 	}
 
 	// remove duplicates
@@ -432,6 +490,15 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 	}
 
+	// Why a field a pattern-guarded entry names is compared is kept with the
+	// result, so the report says it, not only the console.
+	if len(patternWhys) > 0 {
+		if bodyAssessment == nil {
+			bodyAssessment = &models.FailureAssessment{Category: uniqueCategories, Risk: currentRisk}
+		}
+		bodyAssessment.Reasons = append(bodyAssessment.Reasons, patternWhys...)
+	}
+
 	result.FailureInfo = models.FailureInfo{
 		Risk:       currentRisk,
 		Category:   uniqueCategories,
@@ -442,7 +509,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 }
 
 // parseGrpcStatus parses a grpc-status trailer value to int.
-// An empty string (trailer absent) is treated as 0 (OK) — the gRPC default.
+// An empty string (trailer absent) is treated as 0 (OK). That is the
+// comparison with the proven switch off only: no gRPC client reads an answer
+// without grpc-status as OK (provenGrpcStatusMatch).
 func parseGrpcStatus(s string) int {
 	if s == "" {
 		return 0
@@ -455,3 +524,339 @@ func parseGrpcStatus(s string) int {
 	}
 	return n
 }
+
+// provenGrpcStatusMatch reports, under the proven switch, whether two
+// grpc-status trailer values say the same status. Two codes compare as codes.
+// A value that is no code, absent or not a number, matches only the same
+// value: an answer without grpc-status is not an OK one. A gRPC client reads
+// it as an error (grpc-go: UNKNOWN), and a recording that lacks it may have
+// lost it, as keploy's recorder did before v3.6.148 for trailers split across
+// CONTINUATION frames (the call's headers were kept as its trailers), so its
+// status is not known. Read as 0, a failed call recorded so passed against an
+// app that now answers OK.
+//
+// It is not read as UNKNOWN either: keploy's replay client reads the app's
+// answer through grpc-go, which says UNKNOWN for an answer without
+// grpc-status and for one with grpc-status 2 alike, so an answer recorded
+// without its status would pass against an app that now fails UNKNOWN.
+//
+// Two absent values match: the comparison of an answer whose trailers are
+// the recording's own (a stream the app held open, the start of an answer
+// that stalled) is not failed by them.
+func provenGrpcStatusMatch(expected, actual string) bool {
+	e, eErr := strconv.Atoi(expected)
+	a, aErr := strconv.Atoi(actual)
+	if eErr == nil && aErr == nil {
+		return e == a
+	}
+	return expected == actual
+}
+
+// provenGrpcStatusCode is a grpc-status value as the result holds it under
+// the proven switch: -1 for one that is no code, absent too, never 0.
+func provenGrpcStatusCode(s string) int {
+	if s == "" {
+		return -1
+	}
+	return parseGrpcStatus(s)
+}
+
+// shownGrpcStatus is a grpc-status value as a difference shows it under the
+// proven switch: as written, "none" when absent.
+func shownGrpcStatus(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// grpcDiff is one entry in the differences map. It was an anonymous struct
+// literal repeated at every site; naming it is what lets the per-message
+// comparison live in its own function.
+type grpcDiff struct {
+	Expected string
+	Actual   string
+	Message  string
+	// missing: the answer lacks the field the recording holds. Only a noise
+	// entry with no patterns excuses it: a pattern holds a value.
+	missing bool
+	// number: the field's values are numbers, which a reason names by
+	// their digits, not as text.
+	number bool
+	// held are the recorded and the live value a noise entry's patterns
+	// hold the field to where Expected and Actual are not those values:
+	// decoded data, which a difference shows canonicalized, is held as
+	// recorded and as answered.
+	held *[2]string
+}
+
+// grpcNoiseEntry is the noise entry that names the field at a difference's
+// path, the name a reason gives that field, and whether an entry names it.
+func grpcNoiseEntry(path string, bodyNoise, headerNoise map[string][]string) (string, []string, bool) {
+	pathParts := strings.Split(path, ".")
+	if len(pathParts) < 2 {
+		return "", nil, false
+	}
+	switch pathParts[0] {
+	case "body":
+		// Strip a per-message index before the lookup. A user's
+		// assertions.noise holds bare `decoded_data` / `message_length` /
+		// `compression_flag`; joining a streaming key's parts would ask for
+		// `1.decoded_data`, match nothing, and silently render every
+		// recorded gRPC noise entry inert — so previously-suppressed
+		// flakiness would reappear as failures with no diagnostic, since
+		// this matcher never calls WarnUnmatchableBodyNoise.
+		fields := pathParts[1:]
+		if len(fields) > 1 && isAllDigits(fields[0]) {
+			fields = fields[1:]
+		}
+		pats, found := bodyNoise[strings.Join(fields, ".")]
+		return path, pats, found
+	case "headers":
+		name := pathParts[len(pathParts)-1]
+		pats, found := headerNoise[name]
+		return "header." + name, pats, found
+	}
+	return "", nil, false
+}
+
+// grpcPatternWhy is why a noise entry with patterns does not excuse the
+// difference d at field: the answer lacks the field, or its live value, or
+// else its recorded one, is outside the patterns. It is "" where the entry
+// excuses the difference: it has no patterns, or each value matches one.
+func grpcPatternWhy(field string, pats []string, d grpcDiff) string {
+	if len(pats) == 0 {
+		return ""
+	}
+	if d.missing {
+		return matcher.PatternWhy(field, pats, "live", "absent")
+	}
+	recorded, live := d.Expected, d.Actual
+	if d.held != nil {
+		recorded, live = d.held[0], d.held[1]
+	}
+	if ok, _ := matcher.MatchesAnyRegex(live, pats); !ok {
+		return matcher.PatternWhy(field, pats, "live", grpcShape(live, d.number))
+	}
+	if ok, _ := matcher.MatchesAnyRegex(recorded, pats); !ok {
+		return matcher.PatternWhy(field, pats, "recorded", grpcShape(recorded, d.number))
+	}
+	return ""
+}
+
+// grpcShape names a value by its kind and length, never its text: a value a
+// noise pattern guards may be a secret.
+func grpcShape(v string, number bool) string {
+	if number {
+		return matcher.NumberShape(len(v))
+	}
+	return matcher.StringShape(len(v))
+}
+
+// msgComparison reports how one length-prefixed message compared.
+type msgComparison struct {
+	decodedNormal bool
+	expected      string
+	actual        string
+	json          matcher.JSONComparisonResult
+	// reorderedOnly: the decoded data differs only in the order of a
+	// repeated field's elements (protoscope, under the proven switch).
+	reorderedOnly bool
+}
+
+// isAllDigits reports whether s is a non-empty run of ASCII digits, i.e. a
+// message index in a difference key like `body.1.decoded_data`.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// compareGrpcMessage compares ONE length-prefixed message and records its
+// differences and BodyResult entries.
+//
+// This is the body-comparison logic that used to be inline against
+// GrpcResp.Body, unchanged in substance — the same compression-flag, length
+// and decoded-data checks, the same JSON-versus-canonicalization split, and
+// the same rule that a length difference is forgiven when the decoded data is
+// identical. What is new is that it runs once per message and that its
+// difference keys can carry the message index.
+//
+// The key shape is deliberate. With a single message on both sides the keys
+// are exactly what they have always been (`body.decoded_data`), so existing
+// noise entries, reports and UI keep working untouched. Only a real stream
+// produces `body.<n>.decoded_data`.
+func compareGrpcMessage(
+	msgIdx int,
+	indexed bool,
+	expMsg, actMsg models.GrpcLengthPrefixedMessage,
+	differences map[string]grpcDiff,
+	result *models.Result,
+	bodyNoise map[string][]string,
+	ignoreOrdering bool,
+	logger *zap.Logger,
+) msgComparison {
+	key := func(field string) string {
+		if !indexed {
+			return "body." + field
+		}
+		return fmt.Sprintf("body.%d.%s", msgIdx, field)
+	}
+
+	// Compare compression flag
+	compressionFlagNormal := expMsg.CompressionFlag == actMsg.CompressionFlag
+	if !compressionFlagNormal {
+		differences[key("compression_flag")] = grpcDiff{
+			Expected: fmt.Sprintf("%d", expMsg.CompressionFlag),
+			Actual:   fmt.Sprintf("%d", actMsg.CompressionFlag),
+			Message:  "compression flag mismatch",
+			number:   true,
+		}
+	}
+	result.BodyResult = append(result.BodyResult, models.BodyResult{
+		Normal:   compressionFlagNormal,
+		Type:     models.GrpcCompression,
+		Expected: fmt.Sprintf("%d", expMsg.CompressionFlag),
+		Actual:   fmt.Sprintf("%d", actMsg.CompressionFlag),
+	})
+
+	// Compare message length
+	messageLengthNormal := expMsg.MessageLength == actMsg.MessageLength
+	if !messageLengthNormal {
+		differences[key("message_length")] = grpcDiff{
+			Expected: fmt.Sprintf("%d", expMsg.MessageLength),
+			Actual:   fmt.Sprintf("%d", actMsg.MessageLength),
+			Message:  "message length mismatch",
+			number:   true,
+		}
+	}
+	lengthResultIdx := len(result.BodyResult)
+	result.BodyResult = append(result.BodyResult, models.BodyResult{
+		Normal:   messageLengthNormal,
+		Type:     models.GrpcLength,
+		Expected: fmt.Sprintf("%d", expMsg.MessageLength),
+		Actual:   fmt.Sprintf("%d", actMsg.MessageLength),
+	})
+
+	// Compare decoded data — JSON comparison when both sides are valid JSON,
+	// canonicalization otherwise.
+	decodedDataNormal := true
+	decodedMessage := "decoded data mismatch"
+	expectedDecodedData := expMsg.DecodedData
+	actualDecodedData := actMsg.DecodedData
+	var jsonComparisonResult matcher.JSONComparisonResult
+
+	if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
+		// Their sizes, never the messages: they are the recorded and the
+		// app's answers.
+		logger.Debug("Both gRPC decoded data are valid JSON, using JSON comparison",
+			zap.Int("message_index", msgIdx),
+			zap.Int("expected_bytes", len(expectedDecodedData)),
+			zap.Int("actual_bytes", len(actualDecodedData)))
+
+		expectedDecodedData = matcher.NormalizeNestedJSONForNoise(expectedDecodedData, bodyNoise, logger)
+		actualDecodedData = matcher.NormalizeNestedJSONForNoise(actualDecodedData, bodyNoise, logger)
+
+		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &expectedDecodedData, &actualDecodedData)
+		if err != nil {
+			logger.Error("Failed to validate and marshal JSON for gRPC decoded data", zap.Error(err))
+			decodedDataNormal = false
+		} else if validatedJSON.IsIdentical() {
+			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
+			decodedDataNormal = jsonComparisonResult.IsExact()
+			if err != nil {
+				logger.Error("Failed to perform JSON diff with noise control", zap.Error(err))
+				decodedDataNormal = false
+			}
+		} else {
+			logger.Debug("JSON structures are not identical, marking as mismatch")
+			decodedDataNormal = false
+		}
+	} else {
+		logger.Debug("At least one gRPC decoded data is not valid JSON, using canonicalization",
+			zap.Int("message_index", msgIdx),
+			zap.Bool("expectedIsJSON", json.Valid([]byte(expectedDecodedData))),
+			zap.Bool("actualIsJSON", json.Valid([]byte(actualDecodedData))))
+
+		// Per-message only. Canonicalizing a whole stream would sort across
+		// message boundaries and let a reordered stream match.
+		//
+		// Under the proven switch a repeated field's elements are compared
+		// in order (CanonicalizeKeepingRepeatedOrder); a reorder alone is
+		// then said as one.
+		canonicalize := CanonicalizeTopLevelBlocks
+		if provenswitch.On() {
+			canonicalize = CanonicalizeKeepingRepeatedOrder
+		}
+		expCanon := canonicalize(expectedDecodedData)
+		actCanon := canonicalize(actualDecodedData)
+		decodedDataNormal = expCanon == actCanon
+		if !decodedDataNormal && provenswitch.On() && CanonicalizeTopLevelBlocks(expectedDecodedData) == CanonicalizeTopLevelBlocks(actualDecodedData) {
+			decodedMessage = reorderedRepeatedMessage
+		}
+		expectedDecodedData = expCanon
+		actualDecodedData = actCanon
+	}
+
+	if !decodedDataNormal {
+		differences[key("decoded_data")] = grpcDiff{
+			Expected: expectedDecodedData,
+			Actual:   actualDecodedData,
+			Message:  decodedMessage,
+			held:     &[2]string{expMsg.DecodedData, actMsg.DecodedData},
+		}
+	}
+	result.BodyResult = append(result.BodyResult, models.BodyResult{
+		Normal:   decodedDataNormal,
+		Type:     models.GrpcData,
+		Expected: expectedDecodedData,
+		Actual:   actualDecodedData,
+	})
+
+	// A length difference is forgiven when the decoded data is identical —
+	// mocks can be hand-edited, and CreatePayloadFromLengthPrefixedMessage
+	// deliberately re-derives the length from the re-encoded payload. Scoped
+	// to THIS message's length result, not the first one in the slice.
+	if decodedDataNormal && !messageLengthNormal {
+		logger.Debug("Ignoring message length mismatch since decoded data is identical",
+			zap.Int("message_index", msgIdx),
+			zap.Uint32("expected", expMsg.MessageLength),
+			zap.Uint32("actual", actMsg.MessageLength))
+		result.BodyResult[lengthResultIdx].Normal = true
+		delete(differences, key("message_length"))
+	}
+
+	return msgComparison{
+		decodedNormal: decodedDataNormal,
+		expected:      expectedDecodedData,
+		actual:        actualDecodedData,
+		json:          jsonComparisonResult,
+		reorderedOnly: decodedMessage == reorderedRepeatedMessage,
+	}
+}
+
+// useIndexedKeys reports whether difference keys should carry a message
+// index.
+//
+// They must NOT while both sides carry a single message. Every recording made
+// before streams were representable is unary, users' assertions.noise holds
+// the bare string `body.decoded_data`, and the report reader and UI key off
+// these names. Indexing unconditionally would rename every unary failure —
+// invisibly, because the noise lookup strips the index and would keep
+// suppressing correctly either way.
+func useIndexedKeys(expMsgs, actMsgs []models.GrpcLengthPrefixedMessage) bool {
+	return len(expMsgs) > 1 || len(actMsgs) > 1
+}
+
+// reorderedRepeatedMessage says a gRPC message's decoded data differs only in
+// the order of a repeated field's elements, which the proven switch compares
+// in order. Protoscope text carries no schema, so a map field's entries are
+// compared in order too: with proto files configured the message is compared
+// as JSON, where a map is an object.
+const reorderedRepeatedMessage = "decoded data mismatch: a repeated field's elements came back in another order (KEPLOY_PROVEN=1 compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"

@@ -2,6 +2,10 @@ package models
 
 import (
 	"encoding/gob"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -10,12 +14,24 @@ import (
 )
 
 func init() {
-	gob.Register(bson.D{})
-	gob.Register(bson.E{})
-	gob.Register(bson.A{})
-	gob.Register(bson.Binary{})
-	gob.Register(bson.M{})
-	gob.Register(bson.ObjectID{})
+	// gob.RegisterName with an EXPLICIT wire name, not gob.Register, so the name
+	// gob writes into every mocks.gob (and the interface payloads streamed
+	// between the keploy binaries) is fixed here rather than derived from the Go
+	// package path and type name. gob.Register(&T{}) keys the wire on the live
+	// identifier, so renaming or moving one of these types silently changes the
+	// on-disk format and makes previously recorded mocks fail to decode — the
+	// stability gap env-vars.md flags for the gob format. Each literal below is
+	// exactly the name gob.Register produced before, so this is byte-identical on
+	// the wire (verified by the round-trip + golden tests in gob_register_test.go)
+	// and existing mocks keep decoding; the difference is only that a future
+	// rename can no longer move it. Frozen: change a literal only with intent, and
+	// update the golden test.
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.D", bson.D{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.E", bson.E{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.A", bson.A{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.Binary", bson.Binary{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.M", bson.M{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.ObjectID", bson.ObjectID{})
 }
 
 type Kind string
@@ -49,6 +65,29 @@ const (
 	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
 	Aerospike Kind = "Aerospike"
 
+	// ConnectionFailure records that the application's attempt to open a
+	// connection to a dependency failed in a way it could see (refused,
+	// unreachable, timed out, closed before any data came back). The details
+	// are in Spec.ConnFailure; see connfailure.go.
+	//
+	// The name has NO HYPHEN, on purpose. Every keploy since 2023 skips a mock
+	// kind containing "-" at Debug level as "does not belong to open source
+	// version", BEFORE it reaches the unknown-kind branch that logs an ERROR
+	// naming the kind. A hyphenated name would make a keploy too old to replay
+	// these mocks drop them in silence; without the hyphen its YAML reader
+	// says, once per document, which kind it cannot read (its JSON reader
+	// skips an unknown kind at Debug either way). Pinned by
+	// TestConnectionFailureKindReachesTheUnknownKindError.
+	//
+	// For the keploy that records and replays the kind: never write it to a
+	// gob mock file, and send it to the agent only when the agent says it
+	// supports it. A gob reader up to v3.6.107, and an agent that predates the
+	// kind, read it as a mock of no kind and no metadata.destAddr, so its port
+	// is unknown and recorded.unknown is set: every port then counts as
+	// recorded, which turns loopback refusal off for the whole test set. This
+	// keploy never sends one to the agent (see AgentClient.StoreMocks).
+	ConnectionFailure Kind = "ConnectionFailure"
+
 	// RevokedTests is a RESERVED control Kind — it is NOT a real mock and no
 	// traffic parser ever produces it. The recorder emits a Mock with this Kind
 	// on the /outgoing stream to tell the CLI to revoke (delete) test cases
@@ -60,6 +99,56 @@ const (
 	// never sets that flag) never receives it and cannot mis-persist it.
 	RevokedTests Kind = "keploy-revoked-tests"
 )
+
+// RevokeByRequestPrefix starts the name a RevokedTests frame gives a test
+// case the agent's stream sent with no name of its own (the async capture
+// leaves naming to the client, which names it as it saves it): the rest is
+// the request time its window starts at (TestCaseWindow), in Unix
+// nanoseconds, by which the client finds the name it gave it
+// (RequestOfRevokeName). The agent names one so only to a client that says it
+// reads such a name (OutgoingOptions.SupportsRevokeByRequest).
+const RevokeByRequestPrefix = "keploy-request-at:"
+
+// RevokeNameByRequest is the name a RevokedTests frame gives a test case sent
+// with no name whose window starts at req (RevokeByRequestPrefix).
+func RevokeNameByRequest(req time.Time) string {
+	return RevokeByRequestPrefix + strconv.FormatInt(req.UnixNano(), 10)
+}
+
+// RequestOfRevokeName reports the request time, in Unix nanoseconds, a
+// revoked name gives (RevokeNameByRequest), and false for any other name.
+func RequestOfRevokeName(name string) (int64, bool) {
+	rest, ok := strings.CutPrefix(name, RevokeByRequestPrefix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(rest, 10, 64)
+	return n, err == nil
+}
+
+// CaptureIDPrefix starts every capture id (TestCase.CaptureID): the name the
+// agent gives a request it captured without --sync and without a
+// Keploy-Test-Name, for a client that reads such names
+// (OutgoingOptions.SupportsCaptureIDs). The recorder files whatever names a
+// capture id under the name it saves that request's test case with. A
+// Keploy-Test-Name that starts with it is read as a capture id: the prefix is
+// reserved.
+const CaptureIDPrefix = "keploy-capture:"
+
+// IsCaptureID reports whether name is a capture id (CaptureIDPrefix).
+func IsCaptureID(name string) bool {
+	return strings.HasPrefix(name, CaptureIDPrefix)
+}
+
+// TestCaseWindow is a test case's window, by its kind: a gRPC test case's
+// times are its GrpcReq's and GrpcResp's, any other's its HTTPReq's and
+// HTTPResp's.
+func TestCaseWindow(tc *TestCase) (time.Time, time.Time) {
+	if tc.Kind == GRPC_EXPORT {
+		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+}
 
 // MockName constants for the PostgresV3 parser. The integrations-side
 // recorder currently hardcodes these values as string literals when
@@ -103,6 +192,52 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+	// EndedInstance is, under the proven switch, the keploy instance the
+	// call's connection was stamped with when that test worker had ended by
+	// the time the call was captured (Instance is then 0): a value is given
+	// to one claim only, so the call is from a process in no live worker,
+	// and record charges it as it charges one from a process in no worker,
+	// naming the ended worker. 0 for none. Like SourcePID it only travels,
+	// and it sits in that field's padding, so a Mock is no bigger for it.
+	EndedInstance uint32 `json:"-" yaml:"-" bson:"-"`
+	Start         string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef      string `json:"-" yaml:"-" bson:"-"`
+	// Origin is, under the proven switch, where the call came from: the clock
+	// its ReqTimestampMock is on, and the process that made it. Only a record
+	// under the switch sets it; a file's is read and
+	// carried whatever the switch (models.Origin). A recording's file holds it
+	// as its document's origin block (yaml.NetworkTrafficDoc.Origin), so it is
+	// yaml "-" here. Set it whole, never edit one in place: ShallowCopy shares
+	// it, as it shares Spec's pointers.
+	Origin *Origin `json:"origin,omitempty" yaml:"-" bson:"origin,omitempty"`
+	// Instance is, under the proven switch, the keploy instance (a test
+	// worker's) the process that made the call was in when it connected,
+	// as the kernel stamped its connection: record charges the call to
+	// that worker's test only (ScopeWindow.Instance). 0 for none. Like
+	// SourcePID it only travels, to keploy record, and is never stored.
+	Instance uint32 `json:"-" yaml:"-" bson:"-"`
+	// OutsideRequests says the agent knows no incoming request was open while
+	// this call ran, so no request made it: it is the app's own background
+	// work, such as a poll on a timer. Only an agent that can tell sets it;
+	// false means "not known", never "a request's", so a mock from an agent
+	// that does not set it is taken for a request's. Like SourcePID it only
+	// travels, to the recorder, and is never stored; it sits in that field's
+	// padding, so a Mock is no bigger for it.
+	OutsideRequests bool `json:"-" yaml:"-" bson:"-"`
+
+	// pooled is set when the replay mock manager takes the mock into a staging,
+	// or stores it in a pool that matchers read, and is never cleared. The
+	// staging that takes it stamps it before any matcher can reach it; from then
+	// on matchers may hold the mock and copy it, so nothing may write it again:
+	// the manager copies a pooled mock that it is handed to stage again instead
+	// of stamping it, and the matchers in this repository store an updated copy
+	// rather than edit the mock. (keploy/integrations' HTTP/2 parser still
+	// re-stamps the pooled mock it updates in place.) Runtime only: unexported,
+	// so no encoder carries it, and DeepCopy and ShallowCopy start their copies
+	// unpooled. It sits after SourcePID, in that field's padding, so a Mock is
+	// no bigger for it.
+	pooled bool
+
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
 	// list is skipped (treated as noise). Written by the enterprise
@@ -113,12 +248,47 @@ type Mock struct {
 	// at serve time; set only for spilled per-test mocks by the agent disk store.
 	// Unexported so gob ignores it — never crosses the wire or a recording.
 	responseHydrator func() (*HTTPResp, []MongoResponse, error)
+
+	// storedSize is the bytes the agent's disk store keeps the mock in, its
+	// record and its parked response together, set by the store as it reads
+	// the mock (SetStoredSize); 0 where no store read it. Unexported so no
+	// encoder carries it.
+	storedSize int64
+
+	// onDisk is where a replay's read left the mock's payload, set only on
+	// the CLI side (LeavePayloadOnDisk); WithPayload reads it back to send
+	// the mock. Unexported so no encoder carries it.
+	onDisk *payloadOnDisk
+}
+
+// Pooled reports whether the replay mock manager has stored m in a pool that
+// matchers read (see MarkPooled).
+func (m *Mock) Pooled() bool { return m.pooled }
+
+// MarkPooled records that m is being stored in a pool that matchers read. Only
+// the mock manager calls it, as it takes or stores the mock and before any
+// matcher can reach it; a mock that is already pooled is left unwritten.
+func (m *Mock) MarkPooled() {
+	if !m.pooled {
+		m.pooled = true
+	}
 }
 
 // SetResponseHydrator installs the lazy response loader (agent disk-residency).
 func (m *Mock) SetResponseHydrator(fn func() (*HTTPResp, []MongoResponse, error)) {
 	m.responseHydrator = fn
 }
+
+// SetStoredSize records the bytes the agent's disk store keeps m in: its
+// record and its parked response together (StoredSize).
+func (m *Mock) SetStoredSize(n int64) { m.storedSize = n }
+
+// StoredSize is the bytes the agent's disk store keeps m in, its record and
+// its parked response together, as the store read it: what reading m's
+// whole payload back takes, known before its response is read back. 0
+// where no store read m (one made in memory): its size is not known before
+// its payload is read.
+func (m *Mock) StoredSize() int64 { return m.storedSize }
 
 // HasSpilledResponse reports whether the response is elided (needs hydration).
 func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
@@ -157,16 +327,30 @@ func (m *Mock) HydrateResponse() error {
 // struct is the right home for cached derived state that must not bleed
 // into recordings.
 //
-// Lifetime and HitCount were added by the unification plan: Lifetime is
-// the typed, cached form of the on-disk Spec.Metadata["type"] tag so
-// hot-path matchers never probe the metadata map; HitCount is an atomic
-// reuse counter used for telemetry of session/connection-scoped mocks
-// (how many times was this reusable mock actually matched across the
-// test run).
+// Lifetime was added by the unification plan: it is the typed, cached form
+// of the on-disk Spec.Metadata["type"] tag so hot-path matchers never probe
+// the metadata map. Match counts are not kept here: matchers copy pooled mocks
+// whole while other connections count matches against them, so the replay
+// mock manager keeps the counts itself.
 type TestModeInfo struct {
-	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
-	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
-	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	ID         int  `json:"Id,omitempty" bson:"Id,omitempty"`
+	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
+
+	// LoadSeq is the mock's place, counted from 1, in the set the agent's
+	// mock stream handed it (Agent.StoreMocksStream): the order the client
+	// sent the set in, the order its mocks were recorded in. The agent keeps
+	// each per-test mock in memory or on disk, and a read lists those kept in
+	// memory ahead of those loaded from disk, so where one time ties mocks
+	// (the frames of one pipelined write) the order a read holds them in is
+	// not the order recorded; this is, whichever tier holds the mock. Zero on
+	// a mock no stream handed. A uint32 in IsFiltered's word's padding, so a
+	// Mock stays in its size class; the stream refuses a set with more mocks
+	// than it counts. Runtime-only, like Lifetime and the fields below it:
+	// gob carries it into the agent's on-disk store and back, and no file
+	// keeps it.
+	LoadSeq uint32 `json:"-" bson:"-"`
+
+	SortOrder int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
 
 	// Lifetime classifies the mock (per-test / session / connection)
 	// once at ingest via (*Mock).DeriveLifetime. Matchers read this
@@ -185,14 +369,14 @@ type TestModeInfo struct {
 	// Runtime-only, untagged; re-derived fresh on each reload.
 	LifetimeDerived bool `json:"-" bson:"-"`
 
-	// HitCount is incremented atomically on every successful match of
-	// session- or connection-scoped mocks (per-test mocks are consumed
-	// on match so their count is always 0 or 1). Zero-cost when idle
-	// (single LOCK XADD on x86, ~1 ns). Surfaced via MockMemDb's
-	// SessionMockHitCounts for "which reusable mocks actually got
-	// used?" observability — non-zero helps confirm tagging; zero for
-	// a long-lived mock hints at dead recordings worth re-capturing.
-	HitCount uint64 `json:"-" bson:"-"`
+	// Consume classifies how the matcher consumes this mock across repeated
+	// identical requests — ConsumeReuse (serve the same response every time;
+	// the default for session/config/connection mocks) or ConsumeCursorSaturate
+	// (serve successive recorded responses in record order, then saturate on
+	// the last; for stateful data-plane mocks). Derived at ingest by
+	// DeriveLifetime alongside Lifetime; runtime-only, untagged, re-derived on
+	// each load for the same reason Lifetime is.
+	Consume ConsumeMode `json:"-" bson:"-"`
 
 	// IsStartup marks startup-window traffic: a mock captured either before
 	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret
@@ -212,15 +396,97 @@ type TestModeInfo struct {
 	// captured mocks before they are persisted. (Replay's own startup-mock
 	// preservation is timestamp-based — see replay.startupMockCutoff — not
 	// keyed off this flag.) Like the sibling runtime-only fields, the
-	// json/bson tags keep it out of the text formats; gob (which ignores
-	// struct tags) does encode it, but a value carried on a reloaded mock is
-	// inert — the reapers run only on the live record buffer, never on
-	// disk-loaded mocks.
+	// json/bson tags keep it out of the text formats, and the gob store
+	// (encoding/gob ignores struct tags) clears it on write and on read
+	// (mockdb's clearRuntimeOnly), so a disk-loaded mock never carries it.
 	IsStartup bool `json:"-" bson:"-"`
+
+	// Concurrent is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), set for a recording the test shares with the tests whose
+	// requests were open beside its own at record time
+	// (ExactServing.Concurrent): a candidate, answered at most once in the
+	// staging by whichever of them makes its call, never required of the
+	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
+	// like the fields above. It sits in IsStartup's padding, which leaves room
+	// for RepeatRead: a Mock stays in its size class.
+	Concurrent bool `json:"-" bson:"-"`
+
+	// ServedIn is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), the number of that test's view; zero on every other mock. A
+	// consume of a copy an earlier view served (a previous attempt of the
+	// same test) is refused. Runtime-only, like the fields above.
+	ServedIn uint64 `json:"-" bson:"-"`
+
+	// StagedSet is the agent's test-set generation whose staging pooled the
+	// mock (MockManager.ArmSetFence); zero on a mock no staging pooled. A
+	// consume of a mock pooled for an earlier set (a consume racing the next
+	// set's staging) is refused: it was of that set's pool, under that set's
+	// mock names. Runtime-only, like the fields above.
+	StagedSet uint64 `json:"-" bson:"-"`
+
+	// RepeatRead is, on a test's own recording under exact serving
+	// (KEPLOY_PROVEN), the repeated read the replay named it in
+	// (ScopeTableReq.RepeatReads, MarkRepeatReads): the test recorded that
+	// read at least twice, every time with one answer. Exact serving
+	// answers such a read once more than recorded, and does not charge one
+	// of its recordings left unmade (one fewer). Two reads the replay names
+	// alike are two reads (RepeatReadMark.At). nil, no read, on every other
+	// recording (ReadMark). The recordings of one read share one mark: set
+	// it whole, never edit one in place, as ShallowCopy shares it.
+	// Runtime-only, like the fields above.
+	RepeatRead *RepeatReadMark `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
 	return string(m.Kind)
+}
+
+// RecordedDestination reads the upstream authority a recorded mock was
+// captured against — "which host did this mock's call go to?" — for the
+// destination-scope diagnostic (see pkg/agent/proxy/integrations/mismatch).
+//
+// ok is false when the answer is UNKNOWN, and the caller must treat that as
+// "undecidable", never as "no destination": one mock whose host cannot be
+// read could be the very mock that targeted the live call, so it has to veto
+// the verdict rather than count as evidence. Today only HTTP mocks carry a
+// readable destination — the other protocols' recorded specs keep no
+// authority at all (Mongo/MySQL/Postgres store wire payloads, Generic stores
+// opaque buffers) — so every non-HTTP kind answers "unknown".
+//
+// Header Host first, URL authority second: the recorder stores an HTTP
+// request path-only ("/api/orders?id=90") with the authority in the
+// Host header, but a mock captured through a forward proxy carries an
+// absolute URL instead.
+func (m *Mock) RecordedDestination() (string, bool) {
+	if m == nil || m.Kind != Kind(HTTP) || m.Spec.HTTPReq == nil {
+		return "", false
+	}
+	// Case-insensitive lookup: recorded mock headers are a plain map (no
+	// textproto canonicalisation), so the key's case depends on whichever
+	// recorder wrote it.
+	//
+	// The two conventional spellings are probed directly first: the fallback
+	// scan below is O(headers) with a strings.EqualFold per key, and a real
+	// recorded request carries far more headers than a test fixture does, so
+	// the scan's cost grows with them while these two lookups do not. The
+	// scan still runs for anything else ("HOST", "hOst"), so no recording
+	// stops being readable.
+	h := m.Spec.HTTPReq.Header
+	if v := h["Host"]; v != "" {
+		return v, true
+	}
+	if v := h["host"]; v != "" {
+		return v, true
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, "Host") && v != "" {
+			return v, true
+		}
+	}
+	if u, err := ParseRequestURL(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
+		return u.Host, true
+	}
+	return "", false
 }
 
 type MockSpec struct {
@@ -251,6 +517,15 @@ type MockSpec struct {
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
 	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
 
+	// ConnFailure is the body of a ConnectionFailure mock (see connfailure.go);
+	// nil for every other kind. An older keploy's gob decoder drops it, as
+	// encoding/gob drops any field the receiving struct lacks.
+	ConnFailure *ConnFailureSpec `yaml:"connFailure,omitempty" json:"connFailure,omitempty" bson:"conn_failure,omitempty"`
+
+	// Fault is how the call ended without its whole answer (see fault.go);
+	// nil for a call that got one. Carried on an HTTP mock's spec.
+	Fault *Fault `yaml:"fault,omitempty" json:"fault,omitempty" bson:"fault,omitempty"`
+
 	// Aerospike (enterprise-only) stores its captured frames in the
 	// generic GenericRequests / GenericResponses payload slices above,
 	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
@@ -266,11 +541,73 @@ type MockSpec struct {
 	// fields drift between recording and replay.
 	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
 
+	// Correlations records request→response value echoes on this dependency mock
+	// (see FieldCorrelation): a value the application mints and sends in the
+	// request that the dependency reflects back in its response (a UUID, nonce,
+	// idempotency key). Learned on the auto-replay pass and honored at serve
+	// time — the matcher captures the live request value and renders it into the
+	// served response, instead of replaying the recorded value (a mismatch) or
+	// masking it as noise (which hides real regressions). Kind-agnostic, same
+	// home as ReqBodyNoise. Additive / omitempty: an older replayer ignores it.
+	Correlations []FieldCorrelation `json:"Correlations,omitempty" yaml:"correlations,omitempty" bson:"correlations,omitempty"`
+
+	// Variables names the places of this call that hold a test variable's
+	// value (see MockVariables). Kind-agnostic, carried on the doc envelope as
+	// a top-level `variables:` block like noise; nil for a call that holds
+	// none. Additive / omitempty: an older keploy ignores it.
+	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
+
+	// Clocks names the request places of this call the learn step learned
+	// as a read of the application's clock: a plain read (a zero offset,
+	// ClockOffset.Plain) or a read plus a constant offset (an expiry thirty
+	// minutes after now), by the field paths ReqBodyNoise uses. They are
+	// compared, never noise: a replay checks the value its call carries
+	// there is a read made in its own call's window on the application's
+	// clock plus that offset (ClockOffset.Holds), and refuses it otherwise,
+	// or where it cannot tell the application's clock. Kind-agnostic,
+	// carried on the doc envelope as a top-level `clocks:` block like
+	// variables; nil for a call that holds none. Additive / omitempty: a
+	// recording without it loads as before, and an older keploy ignores it.
+	Clocks map[string]ClockOffset `json:"Clocks,omitempty" yaml:"clocks,omitempty" bson:"clocks,omitempty"`
+
+	// learned and learnedBinds are, on a mock the learn step of record's
+	// full round just paired (agent side, in memory), the variables it
+	// learned on the mock and those it learned that are bound at an earlier
+	// mock of the same test (by that mock's name). They ride out on the
+	// consumed mock's state (MockState.Variables, MockState.Binds), and are
+	// never encoded (unexported: no gob, JSON or YAML of a mock carries
+	// them) nor served: a reused mock the learn step paired is the same
+	// recording to the next call.
+	learned      MockVariables
+	learnedBinds map[string]MockVariables
+
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
 	// block — kept OUT of the flat parser Metadata above. Serialized as a
 	// top-level `async:` block on the recorded doc. See AsyncMeta.
 	Async *AsyncMeta `json:"Async,omitempty" yaml:"async,omitempty" bson:"async,omitempty"`
+}
+
+// FieldCorrelation ties a value in a dependency mock's REQUEST to where it is
+// echoed in that mock's RESPONSE, so replay can reproduce an app-minted value
+// (UUID / nonce / idempotency key) the dependency reflects back. On replay the
+// matcher matches the request field by presence + ValueClass (not value),
+// binds the live value, and replaces RecordedValue with it in the served
+// response. RecordedValue is the value as recorded (never a live/secret value)
+// and ValueClass names its shape (e.g. "uuid", "hex", "nonce") for the
+// presence/type match.
+//
+// An HTTP mock's paths use the dotted vocabulary of ReqBodyNoise (body.<path>,
+// header.<name>, url.query.<name>). A Mongo mock's are section.<i>.<path>,
+// where i is the OP_MSG section's index. ResponsePaths says where the recording
+// answered the value, for a reader: the render goes by RecordedValue, and no
+// replay reads it. A Mongo list holds at most a few places of a value, on the
+// value's first correlation, and is empty on the value's others.
+type FieldCorrelation struct {
+	RequestPath   string   `json:"requestPath" yaml:"request_path" bson:"request_path"`
+	ResponsePaths []string `json:"responsePaths" yaml:"response_paths" bson:"response_paths"`
+	RecordedValue string   `json:"recordedValue,omitempty" yaml:"recorded_value,omitempty" bson:"recorded_value,omitempty"`
+	ValueClass    string   `json:"valueClass,omitempty" yaml:"value_class,omitempty" bson:"value_class,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
@@ -467,6 +804,19 @@ type PostgresV3QuerySpec struct {
 	BindValues  PostgresV3Cells `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
 	BindFormats []int           `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
 
+	// Literals holds the constants an extended-protocol statement carries
+	// in its SQL text (the SQL its Parse sent), in their order there, as
+	// their text values; a NULL constant is a NULL cell. SQLNormalized has
+	// them as $N placeholders and SQLAstHash ignores them, so without
+	// Literals a recording cannot say which values it was made for: a
+	// statement built by string concatenation (pgjdbc's Statement, which
+	// pgjdbc sends over the extended protocol) recorded for
+	// name = 'alice' would match a replay for name = 'carol'. Nil for a
+	// statement with no constants, and for a simple-Query invocation,
+	// whose constants are its BindValues; a recording made before the
+	// field existed has none either.
+	Literals PostgresV3Cells `json:"literals,omitempty" yaml:"literals,omitempty" bson:"literals,omitempty"`
+
 	// ResultFormats — per-column format codes the client requested at
 	// Bind time (via the Bind packet's ResultFormatCodes field).
 	// Semantics match PG wire: len=0 means "all text", len=1 means
@@ -522,6 +872,7 @@ func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
 		PrecedingTxState  string                 `yaml:"precedingTxState,omitempty"`
 		BindValues        PostgresV3Cells        `yaml:"bindValues,omitempty"`
 		BindFormats       []int                  `yaml:"bindFormats,omitempty"`
+		Literals          PostgresV3Cells        `yaml:"literals,omitempty"`
 		ResultFormats     []int                  `yaml:"resultFormats,omitempty"`
 		Response          *PostgresV3Response    `yaml:"response,omitempty"`
 		SideEffects       *PostgresV3SideEffects `yaml:"sideEffects,omitempty"`
@@ -538,6 +889,7 @@ func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
 		PrecedingTxState:  q.PrecedingTxState,
 		BindValues:        q.BindValues,
 		BindFormats:       q.BindFormats,
+		Literals:          q.Literals,
 		ResultFormats:     q.ResultFormats,
 		Response:          q.Response,
 		SideEffects:       q.SideEffects,
@@ -833,6 +1185,10 @@ type MockState struct {
 	Timestamp        int64     `json:"timestamp"`
 	ReqTimestampMock string    `json:"reqTimestampMock,omitempty"`
 	ResTimestampMock string    `json:"resTimestampMock,omitempty"`
+	// AnswerPlaced says the mock is placed at its answer (IsAnswerPlaced):
+	// the replay attributes it by its response time, never by the in-flight
+	// rule.
+	AnswerPlaced bool `json:"answerPlaced,omitempty"`
 	// Lifetime carries the recorder-derived mock tier (per-test, session,
 	// connection, …) through GetConsumedMocks so the test-mode mapping
 	// writer can carve out session/connection mocks from its
@@ -851,47 +1207,126 @@ type MockState struct {
 	// store it on the kind-agnostic MockSpec.ReqBodyNoise field. fieldpath
 	// ("body.user.id") -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
+	// CarryOver marks a mock consumed outside the running test's window through
+	// a path that exists for exactly that (see RegisterCarryOver): taken from
+	// the carry-over tier, or a registered kind's per-test mock consumed out of
+	// window through MarkMockAsUsed (a server push delivered late). The replay
+	// attributes such a mock to its own recorded window — mapped to that
+	// window's test, and kept from the prune whatever the running test's
+	// verdict — instead of to the test that happened to be running.
+	CarryOver bool `json:"carryOver,omitempty"`
+	// DataPlane says the mock is a test mock (not Mock.IsProtocolPhase)
+	// though its Type says otherwise: a Generic exchange its recorder stated
+	// per-test keeps the type "config". Under the proven switch its
+	// consumption counts toward its test's. An agent that predates it reports
+	// none, and a newer replay then finds such a test mock unconsumed: the
+	// agent and the CLI are one keploy.
+	DataPlane bool `json:"dataPlane,omitempty"`
+	// Variables carries the mock's variables (MockSpec.Variables) back from
+	// the agent under the proven switch, as ReqBodyNoise carries its learned
+	// noise: those the learn step of record's full round learned on it are
+	// written onto the recording.
+	Variables MockVariables `json:"variables,omitempty"`
+	// Clocks carries the places of the mock's call the learn step learned as
+	// reads of the application's clock (MockSpec.Clocks) back from the agent
+	// under the proven switch, as Variables does: record's full round writes
+	// them onto the recording, where a replay compares them through
+	// ClockOffset.Holds. An agent that predates it learns such a place as
+	// noise, as it did.
+	Clocks map[string]ClockOffset `json:"clocks,omitempty"`
+	// Binds are the variables the learn step learned, while answering this
+	// mock, that are bound at an earlier mock of the same test (MockSpec.LearnedBinds),
+	// by that mock's name: the replay writes them onto that mock.
+	Binds map[string]MockVariables `json:"binds,omitempty"`
+	// Concurrent says the mock answered as one of the recordings the open
+	// test shares with the tests that ran beside it at record time
+	// (ExactServing.Concurrent), not as one of its own: whose call it was is
+	// settled at the set's end. An agent that predates it reports none.
+	Concurrent bool `json:"concurrent,omitempty"`
+	// LearnedAfterEnd says the parser that consumed the mock reported, after
+	// the test set's learn step ended (MockFilterParams.LearnEnded: a retry
+	// cycle, an out-of-order streaming pass), learning the copy exact serving
+	// handed it out by did not carry: variables or binds its learn step
+	// learned, or noise paths or variables beyond the recording's and the
+	// round's kept learning. Its answer was served through that learning, so
+	// the replay gives the tests that consumed it no verdict, with that
+	// reason. An agent that predates it reports none; the agent and the CLI
+	// are one keploy.
+	LearnedAfterEnd bool `json:"learnedAfterEnd,omitempty"`
+	// TaughtIn is, on a state record's full round's learn step kept from
+	// calls made in other windows than its recording's, for learning only
+	// (the agent's LearnedElsewhere), each window such a call taught it in:
+	// whose window it was and when (TeachingWindow). Learning is scoped to
+	// a window, so whatever reads a window's learning (undoing what a round
+	// learned past a point it could not read) reads such learning as that
+	// window's, not the recording owner's. Empty on every other state.
+	TaughtIn []TeachingWindow `json:"taughtIn,omitempty"`
 }
 
+// ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
+// (requests, responses and maps are shared, not copied) and its own
+// TestModeInfo, so the copy's tree ID and sort order can be set without
+// touching m.
+func (m *Mock) ShallowCopy() *Mock {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	c.pooled = false
+	return &c
+}
+
+// DeepCopy returns a new, unpooled Mock with every field of m, sharing no
+// map, slice or pointer with it that a caller can edit: a copy's headers,
+// form values, stream chunks, gRPC headers and messages, DNS records,
+// generic packets, noise, variables and learning are its own. The one
+// exception is the decoded wire messages of the database protocols (each
+// Mongo, MySQL and Postgres request's and response's header, message and
+// meta, and a Postgres v3 spec's contents below its parts): the copy has its
+// own lists of them but shares each message. A parser writes those once, as
+// it decodes them, and nothing edits one after; they are a query's rows, and
+// replay copies every mock of a test's pool, so copying them would cost each
+// test their whole size.
 func (m *Mock) DeepCopy() *Mock {
 	if m == nil {
 		return nil
 	}
 
 	// Copy top-level fields explicitly to avoid copying embedded lock fields.
-	// HitCount is intentionally NOT carried over: the counter is bound to
-	// the live mock pool instance (it tracks matches against *this*
-	// agent's in-memory pool), so a deep copy starts with a fresh counter.
-	// Callers who want cumulative counts across copies should aggregate at
-	// the MockMemDb level, not via clones. Lifetime + LifetimeDerived ARE
-	// carried over — they're classification state, not runtime counters;
-	// skipping LifetimeDerived would cause DeriveLifetime to re-run on
-	// the copy and double-increment LegacyKindFallbackFires for untagged
-	// kinds.
-	id := m.TestModeInfo.ID
-	isFiltered := m.TestModeInfo.IsFiltered
-	sortOrder := m.TestModeInfo.SortOrder
-	lifetime := m.TestModeInfo.Lifetime
-	lifetimeDerived := m.TestModeInfo.LifetimeDerived
-	isStartup := m.TestModeInfo.IsStartup
+	// TestModeInfo is carried over whole: Lifetime + LifetimeDerived are
+	// classification state, and skipping LifetimeDerived would cause
+	// DeriveLifetime to re-run on the copy and double-increment
+	// LegacyKindFallbackFires for untagged kinds.
 	c := Mock{
-		Version: m.Version,
-		Name:    m.Name,
-		Kind:    m.Kind,
-		Spec:    m.Spec,
-		TestModeInfo: TestModeInfo{
-			ID:              id,
-			IsFiltered:      isFiltered,
-			SortOrder:       sortOrder,
-			Lifetime:        lifetime,
-			LifetimeDerived: lifetimeDerived,
-			IsStartup:       isStartup,
-		},
+		Version:      m.Version,
+		Name:         m.Name,
+		Kind:         m.Kind,
+		Spec:         m.Spec,
+		TestModeInfo: m.TestModeInfo,
 		ConnectionID: m.ConnectionID,
+		SourcePID:    m.SourcePID,
+		Start:        m.Start,
+		StartRef:     m.StartRef,
 	}
+	c.Spec.learned, c.Spec.learnedBinds = m.Spec.learned.Clone(), cloneBinds(m.Spec.learnedBinds)
 
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
+	c.onDisk = m.onDisk
+	c.storedSize = m.storedSize
+
+	// Where the call came from (proven switch): the copy's own, so a copy
+	// written later (the async gob writer's) holds what the mock held.
+	c.Origin = m.Origin.clone()
+	// And the repeated read it is one of (TestModeInfo.RepeatRead), its
+	// own copy: ShallowCopy shares the mark, a deep copy shares nothing.
+	if r := m.TestModeInfo.RepeatRead; r != nil {
+		mark := *r
+		c.TestModeInfo.RepeatRead = &mark
+	}
+	// And the test worker it came from, which record charges it by.
+	c.Instance, c.EndedInstance = m.Instance, m.EndedInstance
+	c.OutsideRequests = m.OutsideRequests
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {
@@ -922,13 +1357,25 @@ func (m *Mock) DeepCopy() *Mock {
 		}
 	}
 
+	// Deep copy the request→response correlations (and each ResponsePaths slice)
+	// for the same reason as ReqBodyNoise: the clone must not share the slices.
+	if len(m.Spec.Correlations) > 0 {
+		c.Spec.Correlations = make([]FieldCorrelation, len(m.Spec.Correlations))
+		copy(c.Spec.Correlations, m.Spec.Correlations)
+		for i := range c.Spec.Correlations {
+			if rp := m.Spec.Correlations[i].ResponsePaths; len(rp) > 0 {
+				c.Spec.Correlations[i].ResponsePaths = append([]string(nil), rp...)
+			}
+		}
+	}
+
+	c.Spec.Variables = m.Spec.Variables.Clone()
+	c.Spec.Clocks = maps.Clone(m.Spec.Clocks)
+
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.
-	c.Spec.GenericRequests = make([]Payload, len(m.Spec.GenericRequests))
-	copy(c.Spec.GenericRequests, m.Spec.GenericRequests)
-
-	c.Spec.GenericResponses = make([]Payload, len(m.Spec.GenericResponses))
-	copy(c.Spec.GenericResponses, m.Spec.GenericResponses)
+	c.Spec.GenericRequests = clonePayloads(m.Spec.GenericRequests)
+	c.Spec.GenericResponses = clonePayloads(m.Spec.GenericResponses)
 
 	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
 	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)
@@ -949,25 +1396,21 @@ func (m *Mock) DeepCopy() *Mock {
 	copy(c.Spec.PostgresResponsesV2, m.Spec.PostgresResponsesV2)
 
 	// 4. Deep copy all pointers by creating a new object and copying the value.
-	if m.Spec.HTTPReq != nil {
-		httpReqCopy := *m.Spec.HTTPReq
-		c.Spec.HTTPReq = &httpReqCopy
-	}
-	if m.Spec.HTTPResp != nil {
-		httpRespCopy := *m.Spec.HTTPResp
-		c.Spec.HTTPResp = &httpRespCopy
-	}
+	c.Spec.HTTPReq = m.Spec.HTTPReq.clone()
+	c.Spec.HTTPResp = m.Spec.HTTPResp.clone()
 	if m.Spec.Async != nil {
 		asyncCopy := *m.Spec.Async
 		c.Spec.Async = &asyncCopy
 	}
-	if m.Spec.GRPCReq != nil {
-		grpcReqCopy := *m.Spec.GRPCReq
-		c.Spec.GRPCReq = &grpcReqCopy
+	c.Spec.GRPCReq = m.Spec.GRPCReq.clone()
+	c.Spec.GRPCResp = m.Spec.GRPCResp.clone()
+	if m.Spec.ConnFailure != nil {
+		connFailureCopy := *m.Spec.ConnFailure
+		c.Spec.ConnFailure = &connFailureCopy
 	}
-	if m.Spec.GRPCResp != nil {
-		grpcRespCopy := *m.Spec.GRPCResp
-		c.Spec.GRPCResp = &grpcRespCopy
+	if m.Spec.Fault != nil {
+		faultCopy := *m.Spec.Fault
+		c.Spec.Fault = &faultCopy
 	}
 	if m.Spec.DNSReq != nil {
 		dnsReqCopy := *m.Spec.DNSReq
@@ -979,6 +1422,8 @@ func (m *Mock) DeepCopy() *Mock {
 			dnsRespCopy.Answers = make([]string, len(m.Spec.DNSResp.Answers))
 			copy(dnsRespCopy.Answers, m.Spec.DNSResp.Answers)
 		}
+		dnsRespCopy.Ns = slices.Clone(m.Spec.DNSResp.Ns)
+		dnsRespCopy.Extra = slices.Clone(m.Spec.DNSResp.Extra)
 		c.Spec.DNSResp = &dnsRespCopy
 	}
 
@@ -1044,3 +1489,17 @@ func (m *Mock) DeepCopy() *Mock {
 
 	return &c
 }
+
+// SetLearned records on s, in memory only, the variables the learn step
+// learned on its mock (vars) and those bound at earlier mocks (binds): see
+// MockSpec.learned.
+func (s *MockSpec) SetLearned(vars MockVariables, binds map[string]MockVariables) {
+	s.learned, s.learnedBinds = vars, binds
+}
+
+// Learned is the variables the learn step learned on s's mock (SetLearned).
+func (s *MockSpec) Learned() MockVariables { return s.learned }
+
+// LearnedBinds is the variables the learn step learned while answering s's
+// mock that are bound at an earlier mock, by its name (SetLearned).
+func (s *MockSpec) LearnedBinds() map[string]MockVariables { return s.learnedBinds }

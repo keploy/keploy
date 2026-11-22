@@ -10,8 +10,8 @@ import (
 // recorded via RecordOrphanWindow is reported by WasMockOrphanedInWindow, which
 // record.go queries alongside WasPressureActiveInWindow so a TC whose HTTP window
 // overlaps the hole is suppressed (rather than shipped mock-less → replay
-// match_phase=no_mocks). Kept on a separate orphanRanges slice so it can't
-// corrupt the pressureRanges open/close state machine.
+// match_phase=no_mocks). Kept in spans of their own, apart from the pressure
+// spans.
 func TestWasMockOrphanedInWindowSuppressesOverlappingTC(t *testing.T) {
 	t.Parallel()
 
@@ -54,9 +54,7 @@ func TestWasMockOrphanedInWindowIndependentOfPressure(t *testing.T) {
 
 	base := time.Now()
 	// Pressure [0s,2s] and orphan [3s,4s] are DISJOINT.
-	m := &SyncMockManager{
-		pressureRanges: []pressureRange{{start: base, end: base.Add(2 * time.Second)}},
-	}
+	m := withPressure(pressureRange{start: base, end: base.Add(2 * time.Second)})
 	m.RecordOrphanWindow(base.Add(3*time.Second), base.Add(4*time.Second))
 
 	win := func(off int) (time.Time, time.Time) {
@@ -70,13 +68,13 @@ func TestWasMockOrphanedInWindowIndependentOfPressure(t *testing.T) {
 		t.Fatalf("orphan-only window: WasMockOrphanedInWindow got ok=%v n=%d, want true 1", ok, n)
 	}
 	if ok, _ := m.WasPressureActiveInWindow(s, e); ok {
-		t.Fatalf("orphan-only window must NOT be reported by WasPressureActiveInWindow (it must not see orphanRanges)")
+		t.Fatalf("orphan-only window must NOT be reported by WasPressureActiveInWindow (it must not see the orphan spans)")
 	}
 
 	// A window over the pressure-only region [0s,2s]: pressure yes, orphaned NO.
 	s, e = win(500)
 	if ok, n := m.WasMockOrphanedInWindow(s, e); ok || n != 0 {
-		t.Fatalf("pressure-only window must NOT be reported orphaned (WasMockOrphanedInWindow must not see pressureRanges); got ok=%v n=%d", ok, n)
+		t.Fatalf("pressure-only window must NOT be reported orphaned (WasMockOrphanedInWindow must not see the pressure spans); got ok=%v n=%d", ok, n)
 	}
 	if ok, _ := m.WasPressureActiveInWindow(s, e); !ok {
 		t.Fatalf("sanity: pressure-only window must still be reported by WasPressureActiveInWindow")
@@ -128,45 +126,47 @@ func TestRecordOrphanWindowDegenerateInputs(t *testing.T) {
 	}
 }
 
-// TestRecordOrphanWindowCountCap verifies the ring caps at maxPressureRanges,
-// evicting the OLDEST intervals and retaining the newest — so continuous
-// recording can't grow orphanRanges unbounded and slow every overlap scan.
+// TestRecordOrphanWindowCountCap verifies the orphan spans stay bounded
+// (maxPressureRanges), so continuous recording can't grow them without limit,
+// and that the bound never uncovers a span: past it the oldest spans are
+// joined, never evicted. A test case over an evicted span, checked
+// by a record.go that lags the recorder, was saved without its mocks.
 func TestRecordOrphanWindowCountCap(t *testing.T) {
 	t.Parallel()
 
 	m := &SyncMockManager{}
 	base := time.Now()
-	// Record one more than the cap; interval i lives at [base+i, base+i+1] ms.
+	// Record more than the cap of disjoint intervals; interval i lives at
+	// [base+2i, base+2i+1] ms.
 	total := maxPressureRanges + 100
+	at := func(i int) time.Time { return base.Add(time.Duration(2*i) * time.Millisecond) }
 	for i := 0; i < total; i++ {
-		s := base.Add(time.Duration(i) * time.Millisecond)
-		m.RecordOrphanWindow(s, s.Add(time.Millisecond))
+		m.RecordOrphanWindow(at(i), at(i).Add(time.Millisecond))
 	}
 
-	m.mu.Lock()
-	got := len(m.orphanRanges)
-	oldest := m.orphanRanges[0].start
-	newest := m.orphanRanges[len(m.orphanRanges)-1].start
-	m.mu.Unlock()
-
-	if got != maxPressureRanges {
-		t.Fatalf("orphanRanges not capped: got %d, want %d", got, maxPressureRanges)
+	if recorded, closed, _ := m.OrphanRangeCount(); recorded != total || closed == 0 || closed > maxPressureRanges {
+		t.Fatalf("OrphanRangeCount = (%d recorded, %d closed), want (%d, 1..%d): the spans are capped, and every interval is counted", recorded, closed, total, maxPressureRanges)
 	}
-	// The first (total-maxPressureRanges) intervals must have been evicted, so
-	// the oldest surviving start is interval index (total-maxPressureRanges).
-	wantOldest := base.Add(time.Duration(total-maxPressureRanges) * time.Millisecond)
-	if !oldest.Equal(wantOldest) {
-		t.Fatalf("cap evicted the wrong end: oldest survivor=%v, want %v (newest should be kept)", oldest, wantOldest)
+	for _, i := range []int{0, 1, total / 2, total - 1} {
+		mid := at(i).Add(500 * time.Microsecond)
+		if ok, _ := m.WasMockOrphanedInWindow(mid, mid); !ok {
+			t.Fatalf("interval %d of %d is no longer covered: the cap uncovered a span", i, total)
+		}
 	}
-	wantNewest := base.Add(time.Duration(total-1) * time.Millisecond)
-	if !newest.Equal(wantNewest) {
-		t.Fatalf("cap dropped the newest interval: newest survivor=%v, want %v", newest, wantNewest)
+	after := at(total).Add(time.Second)
+	if ok, _ := m.WasMockOrphanedInWindow(after, after.Add(time.Millisecond)); ok {
+		t.Fatal("a window after the last interval is covered")
+	}
+	// The newest intervals are as they were: a window between two is clear.
+	gap := at(total - 2).Add(1500 * time.Microsecond)
+	if ok, _ := m.WasMockOrphanedInWindow(gap, gap); ok {
+		t.Fatal("a window between the two newest intervals is covered: the cap joined recent history")
 	}
 }
 
 // TestRecordOrphanWindowDoesNotTouchPressureRanges guards the isolation
-// invariant: orphan windows must NOT be appended to pressureRanges, whose
-// open/close state machine assumes the last element is the still-open interval.
+// invariant: orphan windows must NOT be added to the pressure spans, and an
+// open pressure span still closes.
 func TestRecordOrphanWindowDoesNotTouchPressureRanges(t *testing.T) {
 	t.Parallel()
 
@@ -175,19 +175,14 @@ func TestRecordOrphanWindowDoesNotTouchPressureRanges(t *testing.T) {
 	m.SetMemoryPressure(true)
 	base := time.Now()
 	m.RecordOrphanWindow(base, base.Add(time.Second))
-	// Closing pressure must still find and close the open interval — i.e. the
-	// orphan window did not become the last pressureRanges element.
+	// Closing pressure must still close the open pressure span.
 	m.SetMemoryPressure(false)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, r := range m.pressureRanges {
-		if r.end.IsZero() {
-			t.Fatalf("pressureRanges[%d] left open after close — RecordOrphanWindow corrupted the open/close state machine", i)
-		}
+	if closed, open := m.pressure.Counts(); closed != 1 || open != 0 {
+		t.Fatalf("pressure spans = (%d closed, %d open), want (1, 0): the orphan window touched them", closed, open)
 	}
-	if len(m.orphanRanges) != 1 {
-		t.Fatalf("expected the orphan window in orphanRanges (got %d), not pressureRanges", len(m.orphanRanges))
+	if closed, _ := m.orphans.Counts(); closed != 1 {
+		t.Fatalf("expected the orphan window in the orphan spans (got %d), not the pressure spans", closed)
 	}
 }
 
@@ -275,10 +270,11 @@ func TestOrphanRangeCountSplitsClosedFromOpen(t *testing.T) {
 
 	// A conventional bounded hole (the mongo resync path) lands elsewhere and
 	// must still be counted as closed.
-	m.RecordOrphanWindow(base.Add(2*time.Second), base.Add(3*time.Second))
+	// (Before A: a span that overlapped A would join it.)
+	m.RecordOrphanWindow(base.Add(-3*time.Second), base.Add(-2*time.Second))
 
-	if closed, open := m.OrphanRangeCount(); closed != 2 || open != 1 {
-		t.Fatalf("OrphanRangeCount() = (closed=%d, open=%d), want (2, 1)", closed, open)
+	if recorded, closed, open := m.OrphanRangeCount(); recorded != 3 || closed != 2 || open != 1 {
+		t.Fatalf("OrphanRangeCount() = (recorded=%d, closed=%d, open=%d), want (3, 2, 1)", recorded, closed, open)
 	}
 }
 

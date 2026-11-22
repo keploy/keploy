@@ -8,6 +8,26 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+// AppProcessRunner is an Instrumentation that says whether its Run runs the
+// application's command as a process of its own and returns when that
+// process exits, so that the exit ends the test set's run. Only for one that
+// says so does replay wait for the application with no time limit (before
+// the first test, and for a refused test request's address, pkg.EndsWithApp):
+// the exit is what ends such a wait. An Instrumentation that does not say so
+// (an embedder's whose Run only waits for its context to end, with no local
+// application to exit) keeps the bounded waits, since nothing but the
+// caller's stop would end an unbounded one.
+type AppProcessRunner interface {
+	RunsAppProcess() bool
+}
+
+// runsAppProcess reports whether instrumentation says its Run runs the
+// application's process (AppProcessRunner).
+func runsAppProcess(instrumentation Instrumentation) bool {
+	p, ok := instrumentation.(AppProcessRunner)
+	return ok && p.RunsAppProcess()
+}
+
 type Instrumentation interface {
 	//Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
@@ -29,6 +49,11 @@ type Instrumentation interface {
 	// New methods for improved mock management
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
+	// GetMockStats returns the agent's non-draining mock-session snapshot (the
+	// loaded count plus consumed/missed totals). The compose setup uses it to
+	// verify the agent still holds the stored corpus after the bring-up, before
+	// any test fires: a replacement agent reports loaded 0.
+	GetMockStats(ctx context.Context) (models.MockStats, error)
 	GetRecentAppLogs(ctx context.Context) string
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
 	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
@@ -41,6 +66,21 @@ type Instrumentation interface {
 	ComposeDownOnSetupFailure(ctx context.Context) error
 }
 
+// AppContainerExitReader is an optional Instrumentation extension for an app
+// run in docker: it says whether the app's container still runs.
+//
+// Under docker compose keploy's agent is a service in the app's project, and
+// compose stops it the moment the app exits, so an agent that stops answering
+// during the bring-up can be one that went with the app rather than one that
+// was replaced. ensureAgentHoldsStoredMocks asks this before it says the
+// agent was replaced.
+type AppContainerExitReader interface {
+	// AppContainerExit returns the app's container no longer running --
+	// exited, dead, or restarting after an exit -- as an error naming it and
+	// how it ended, and nil while it runs or when it cannot tell.
+	AppContainerExit(ctx context.Context) error
+}
+
 type Service interface {
 	Start(ctx context.Context) error
 	Instrument(ctx context.Context) (*InstrumentState, error)
@@ -50,11 +90,6 @@ type Service interface {
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
-	// UpdateTestSetTemplate persists the (possibly updated) template map for a test-set.
-	// Used during replay to dynamically refresh values like JWTs/IDs as soon as
-	// their producing API responses are observed, so subsequent test cases use the
-	// latest values rather than stale ones from the previous run.
-	UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error
 	RunApplication(ctx context.Context, opts models.RunOptions) models.AppError
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
@@ -76,6 +111,21 @@ type TestDB interface {
 	DeleteTestSet(ctx context.Context, testSetID string) error
 }
 
+// RecordedStartReader is an optional TestDB capability: the request time of the
+// earliest test case a test set ever recorded, which can predate every test case
+// the set holds now. A zero time means the TestDB does not know it.
+//
+// A set's startup traffic is what was recorded before its first test, and the
+// replayer otherwise takes that test from the test cases it is handed. That is
+// wrong when the set's earlier test cases are gone while its mock file is not:
+// k8s-proxy's auto-replay deletes a round's test cases from the recording's set
+// once they are written back, and keeps adding to the same mock file. The next
+// round's first test is then a late one, everything recorded before it counts
+// as startup traffic, and the agent stages most of the recording.
+type RecordedStartReader interface {
+	RecordedFirstTestStart(ctx context.Context, testSetID string) (time.Time, error)
+}
+
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
@@ -94,6 +144,11 @@ type ReportDB interface {
 
 type TestSetConfig interface {
 	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	// ReadForUpdate reports a config.yaml that did not parse instead of
+	// handing back a zero value. Read deliberately swallows that so
+	// secret hydration continues; a caller that is about to REPLACE the
+	// whole document must not.
+	ReadForUpdate(ctx context.Context, testSetID string) (*models.TestSet, error)
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 	ReadSecret(ctx context.Context, testSetID string) (map[string]interface{}, error)
 }
@@ -134,15 +189,65 @@ type TestCaseMutator interface {
 	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
-// MockMutator is an optional extension to TestHooks.
-// RunTestSet detects it via type assertion after GetMocks returns and before
-// StoreMocks pushes mocks to the proxy. Implementations may mutate mocks
-// in-place (e.g. decrypt ENC: fields) so the proxy always receives plaintext
-// values without ever writing plaintext to disk.
-type MockMutator interface {
-	// AfterGetMocks is invoked once per test set, after all mocks are loaded
-	// from disk and before they are sent to the proxy. Both slices may be
-	// mutated in-place; nil slices are a no-op.
+// TestCaseReporter is an optional extension to TestHooks.
+// RunTestSet detects it via type assertion once a test case has its FINAL
+// verdict; implementations that do not need per-case reporting can safely omit
+// it without breaking existing code.
+//
+// It exists because there is no per-case post-verdict hook otherwise.
+// BeforeTestResult is handed the whole test set at once, and InsertTestCaseResult
+// is batched and flushed after the retry loop closes — so what looks like a live
+// feed is really a burst per test set. A supervising process that wants to show
+// progress while a long test set runs, or to stream results across a process
+// boundary, has nothing to attach to.
+//
+// Called EXACTLY ONCE per test case the run recorded a verdict for, with that
+// verdict, after every retry cycle and the streaming phase have finished.
+//
+// "Recorded a verdict for" is the whole set, not the happy path: a case whose
+// app never answered, whose response type was wrong, or whose result came back
+// nil is persisted by its own terminal branch. An earlier version of this hook
+// was called from the single site that filled finalTestCaseResults, which those
+// branches never reach, and that site sat INSIDE the --retry-passing loop -- so
+// it both missed verdicts and fired once per cycle for the ones it saw.
+// Measured on a set of 4 with 3 no-answer failures: 4 verdicts recorded, 1
+// reported.
+//
+// Once per case, with the LAST verdict: the run keeps a per-name map and drains
+// it at the end, so a retry cycle that re-runs a passing case replaces its
+// earlier entry rather than reporting twice.
+//
+// It is drained on every exit path, including a run that bails: those runs have
+// still recorded the verdicts they got, and a consumer may be settling or
+// retiring cases from them.
+//
+// Errors are logged and the replay continues: a reporter that cannot report
+// must not be able to fail a run whose tests passed.
+type TestCaseReporter interface {
+	AfterTestCaseRun(ctx context.Context, testSetID string, tc *models.TestCase, result *models.TestResult) error
+}
+
+// MockPayloadMutator is an optional extension to TestHooks: it changes each
+// mock's payload before the mock is sent to the agent (e.g. decrypts ENC:
+// fields), so the agent receives plaintext values without plaintext ever being
+// written to disk.
+//
+// A test set's mocks are not loaded whole: a read of a yaml or json mock file
+// leaves each mock's payload in the file (models.Mock.LeavePayloadOnDisk), and
+// the payload is read back, one mock at a time, only to be sent. The mutator
+// is handed each mock whole as it is, and may change its payload only
+// (models.MutatePayload): what decides a mock's pool was read before its
+// payload was. It runs again on a mock sent again (a restarted agent's), on
+// the payload as recorded.
+type MockPayloadMutator interface {
+	MutateMockPayload(ctx context.Context, m *models.Mock) error
+}
+
+// wholeSetMockMutator is the hook a replay called with a test set's mocks
+// loaded whole, which it no longer loads (MockPayloadMutator). Hooks that
+// still implement it are refused, loudly, rather than left uncalled: a
+// decryption among them would otherwise silently stop.
+type wholeSetMockMutator interface {
 	AfterGetMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error
 }
 
@@ -169,8 +274,16 @@ type InstrumentState struct {
 type MappingDB interface {
 	Insert(ctx context.Context, mapping *models.Mapping) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
-	// Exists reports whether the mappings.yaml file is present on disk
-	// for the given test-set. Distinct from Get's second return (which
+	// GetStartup returns the test-set-scoped startup mocks — boot traffic
+	// (handshakes, pool warm-up, config fetches) that belongs to no single
+	// test and therefore never appears in Get's per-test map. Needed only by
+	// the mapping-based path, which loads mocks strictly by name; the
+	// timestamp path reloads the same mocks via LoadBefore. A missing file or
+	// absent section returns nil, nil.
+	GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error)
+	// Exists reports whether the given test-set has a mappings file on
+	// disk, in either storage format (mappings.yaml or mappings.json, as
+	// Get and Insert find it). Distinct from Get's second return (which
 	// reports "file present AND contains at least one test case with
 	// mocks") because the create-if-not-present write path needs to
 	// distinguish "no file at all" from "file exists but has empty

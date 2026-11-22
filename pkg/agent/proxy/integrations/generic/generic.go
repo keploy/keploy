@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -29,6 +30,12 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
+// MockNoise opts Generic OUT of field-level request-body mock-noise: it matches
+// opaque byte streams whole (exact + Jaccard fuzzy), so there are no named
+// fields to learn noise on. Returning nil is an explicit opt-out, not an
+// oversight. Satisfies integrations.Integrations.
+func (g *Generic) MockNoise() mocknoise.Adapter { return nil }
+
 func (g *Generic) MatchType(_ context.Context, _ []byte) bool {
 	// generic is checked explicitly in the proxy
 	return false
@@ -38,6 +45,34 @@ func (g *Generic) MatchType(_ context.Context, _ []byte) bool {
 // to run under supervisor.Run. The generic parser is protocol-agnostic
 // and needs no TLS upgrade or mid-stream directives; it simply observes
 // chunks in each direction and pairs them into mocks.
+// Generic deliberately does NOT implement integrations.GapResyncCapable, and
+// should not be "fixed" to.
+//
+// The tempting argument is that the conservative default exists for
+// length-prefix framers — a hole makes them read the next header from the middle
+// of a body, so every later frame is garbage and one Postgres framer once tried
+// to allocate gigabytes from misread row data. Generic has no framer at all; it
+// pairs chunks by direction transitions. So the framer rationale does not apply,
+// and it looks like generic is being penalised for someone else's failure mode.
+//
+// But the capability asserts something generic cannot honour. Returning true
+// means the parser DETECTS the hole — the relay stamps a monotonic
+// fakeconn.Chunk.SeqNo per direction and a dropped chunk still consumes its
+// ordinal, so a gap is visible as a discontinuity — and re-anchors on a real
+// message boundary. This recorder reads no SeqNo and has no notion of a
+// boundary to re-anchor on.
+//
+// Its failure mode after a hole is not garbage frames; it is worse in the way
+// that matters. It would pair a request with the WRONG response and emit a mock
+// that looks perfectly well-formed, which replays incorrectly and silently. The
+// conservative default instead marks the capture desynced and suppresses the
+// affected test cases — loud, and safe. Losing a test case beats shipping a
+// confidently wrong one.
+//
+// Implementing real gap detection here (compare SeqNo, drop the in-flight
+// exchange, resume cleanly on the next request) would justify flipping this. A
+// bare `return true` would not.
+
 func (g *Generic) IsV2() bool { return true }
 
 func (g *Generic) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
@@ -88,6 +123,10 @@ func (g *Generic) recordV2(_ context.Context, sess *supervisor.Session) error {
 	}
 	return encodeGenericV2(sess, logger)
 }
+
+// HoldsRequests: the generic parser marks the requests it holds while it
+// reads on (integrations.RequestHolding, decodeGeneric).
+func (g *Generic) HoldsRequests() bool { return true }
 
 func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := g.logger.With(zap.String("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.String("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.String("Client IP Address", src.RemoteAddr().String()))

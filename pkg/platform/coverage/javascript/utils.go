@@ -23,20 +23,24 @@ type ProcessInfo struct {
 
 func getCoverageFilePathsJavascript(path string) ([]string, error) {
 	filePaths := []string{}
-	walkfn := func(path string, info os.FileInfo, _ error) error {
-		if !info.IsDir() && !strings.HasSuffix(path, "index.json") {
-			fileData, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			var processInfo ProcessInfo
-			err = json.Unmarshal(fileData, &processInfo)
-			if err != nil {
-				return err
-			}
-			if len(processInfo.Files) > 0 {
-				filePaths = append(filePaths, processInfo.CoverageFilename)
-			}
+	walkfn := func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			// Walk calls the callback with a nil info when it cannot stat an entry; returning the error is what keeps info non-nil below.
+			return walkErr
+		}
+		if info.IsDir() || strings.HasSuffix(path, "index.json") {
+			return nil
+		}
+		fileData, err := os.ReadFile(path)
+		if err != nil {
+			return nil // skip the unreadable entries
+		}
+		var processInfo ProcessInfo
+		if err := json.Unmarshal(fileData, &processInfo); err != nil {
+			return nil // not a processinfo document
+		}
+		if len(processInfo.Files) > 0 && processInfo.CoverageFilename != "" {
+			filePaths = append(filePaths, processInfo.CoverageFilename)
 		}
 		return nil
 	}

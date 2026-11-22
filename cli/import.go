@@ -2,13 +2,14 @@ package cli
 
 import (
 	"context"
-	"os"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
 	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -24,18 +25,19 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: "keploy import",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(os.Stdout, disableAnsi)
+			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 			return cmd.Help()
 		},
 	}
 
 	var postmanCmd = &cobra.Command{
-		Use:     "postman",
-		Short:   "import postman collection to Keploy tests",
-		Example: "keploy import postman",
+		Use:          "postman",
+		Short:        "import postman collection to Keploy tests",
+		Example:      "keploy import postman",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(os.Stdout, disableAnsi)
+			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 			path, _ := cmd.Flags().GetString("path")
 			if path == "" {
 				path = "output.json"
@@ -44,17 +46,18 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			svc, err := serviceFactory.GetService(ctx, "import")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				return fmt.Errorf("service doesn't satisfy tools service interface")
 			}
 			err = tools.Import(ctx, path, basePath)
 			if err != nil {
 				utils.LogError(logger, err, "failed to import Postman collection")
+				return err
 			}
 			return nil
 		},

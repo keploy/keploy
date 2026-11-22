@@ -2,45 +2,27 @@ package main
 
 import (
 	"context"
+	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
-	"path/filepath"
+
+	"github.com/spf13/cobra"
 	"testing"
 
 	"go.keploy.io/server/v3/utils"
-	"go.keploy.io/server/v3/utils/log"
+	"go.uber.org/zap"
 )
 
+// A logger that cannot start stops the CLI with exit code 1 (#4441). log.New
+// does not fail where it cannot create its log file -- it logs to the console
+// only -- so the failure is injected.
 func TestStart_LoggerInitFailureSetsErrCode(t *testing.T) {
-	// t.TempDir() has to come before t.Chdir: cleanups run LIFO, so
-	// registering the temp dir first means its RemoveAll runs after the
-	// working directory has been restored. Windows cannot remove a directory
-	// that is still the process cwd.
-	tmpDir := t.TempDir()
-
-	// Creating a directory with the log file's name makes the os.OpenFile
-	// (O_WRONLY|O_CREATE) in log.New() fail on every platform - EISDIR on
-	// Unix, ERROR_ACCESS_DENIED on Windows.
-	if err := os.Mkdir(filepath.Join(tmpDir, "keploy-logs.txt"), 0755); err != nil {
-		t.Fatalf("failed to create dummy directory: %v", err)
-	}
-
-	// t.Chdir restores the working directory when the test ends. It also
-	// panics if the test is ever marked parallel, which this one can never
-	// be: it chdirs the whole process and writes the package-level
-	// utils.ErrCode.
-	t.Chdir(tmpDir)
-
-	// start() only returns early while log.New() keeps failing here. log.New()
-	// opens the hardcoded relative path "keploy-logs.txt", so making that path
-	// configurable or absolute would break this setup - and start() would then
-	// fall through into the real CLI and reach an os.Exit, killing the whole
-	// test binary with nothing pointing back at this test. Assert the
-	// precondition instead of debugging that later.
-	if _, logFile, err := log.New(); err == nil {
-		if logFile != nil {
-			_ = logFile.Close()
-		}
-		t.Fatal("log.New() unexpectedly succeeded; start() would run the whole CLI inside the test binary")
+	orig := newLogger
+	t.Cleanup(func() { newLogger = orig })
+	newLogger = func() (*zap.Logger, *os.File, error) {
+		return nil, nil, errors.New("injected logger failure")
 	}
 
 	utils.ErrCode = 0
@@ -50,5 +32,129 @@ func TestStart_LoggerInitFailureSetsErrCode(t *testing.T) {
 
 	if utils.ErrCode != 1 {
 		t.Fatalf("expected utils.ErrCode = 1 on logger failure, got %d", utils.ErrCode)
+	}
+}
+
+// A chown -R of the working directory is a destructive thing to do on the
+// strength of a guess.
+//
+// It used to be gated on conf.Path being non-empty, which is true only once
+// ValidateFlags has run -- an incidental signal, and one that turned `sudo
+// keploy --version` into a recursive chown of the whole tree the moment the
+// config default for path stopped being the empty string. Only the commands
+// that can CREATE files under that path have anything to restore.
+func TestWritesKeployFolder(t *testing.T) {
+	// A real command tree, because argv cannot be read by eye: a root flag
+	// that takes a separate value puts a non-flag word before the command.
+	root := func() *cobra.Command {
+		r := &cobra.Command{Use: "keploy"}
+		r.PersistentFlags().String("storage-format", "yaml", "")
+		r.PersistentFlags().Bool("debug", false, "")
+		for _, n := range []string{"record", "test", "normalize", "templatize", "contract", "import", "export", "sanitize", "diff", "config", "login", "update"} {
+			c := &cobra.Command{Use: n, Run: func(*cobra.Command, []string) {}}
+			r.AddCommand(c)
+		}
+		mock := &cobra.Command{Use: "mock", Run: func(*cobra.Command, []string) {}}
+		mock.AddCommand(&cobra.Command{Use: "record", Run: func(*cobra.Command, []string) {}})
+		r.AddCommand(mock)
+		return r
+	}
+	for _, c := range []struct {
+		args []string
+		want bool
+	}{
+		// A root flag with a separate value used to be read as the command.
+		{[]string{"keploy", "--storage-format", "json", "record", "-c", "npm test"}, true},
+		{[]string{"keploy", "--debug", "--storage-format", "json", "test"}, true},
+		{[]string{"keploy", "--storage-format", "json", "config", "--generate"}, false},
+		{[]string{"keploy", "mock", "record", "-c", "npm test"}, true},
+		{[]string{"keploy", "record", "-c", "npm test"}, true},
+		{[]string{"keploy", "test"}, true},
+		{[]string{"keploy", "mock", "record", "-c", "npm test"}, true},
+		{[]string{"keploy", "--debug", "record"}, true},
+		{[]string{"keploy", "--version"}, false},
+		{[]string{"keploy", "--help"}, false},
+		{[]string{"keploy"}, false},
+		{[]string{"keploy", "config", "--generate"}, false},
+		{[]string{"keploy", "config", "defaults"}, false},
+		{[]string{"keploy", "login"}, false},
+		{[]string{"keploy", "update"}, false},
+	} {
+		if got := writesKeployFolder(root(), c.args[1:]); got != c.want {
+			t.Errorf("writesKeployFolder(%v) = %v, want %v", c.args[1:], got, c.want)
+		}
+	}
+}
+
+// main says its agent records the steps of its whole teardown before the
+// command runs, and that the detach is done once the command has returned,
+// right before the process exits (utils.DeclareTeardownSteps,
+// utils.MarkDetachDone): the CLI that stops an agent kills it for want of
+// progress only when it says the first. The second is the agent's last
+// report, so nothing after it is watched: a statement main ran between it and
+// os.Exit, or a call in os.Exit's argument, that hung -- a log sync on a
+// blocked pipe, a flush -- would never be forced, only waited for until it
+// ends or Ctrl+C is pressed. So nothing may come between them, os.Exit's
+// argument calls nothing and receives from no channel, and only the Go
+// runtime's own exit goes unwatched.
+func TestMainReportsItsTeardownSteps(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body []ast.Stmt
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "main" {
+			body = fn.Body.List
+		}
+	}
+	at := func(pkg, name string) int {
+		for i, st := range body {
+			es, ok := st.(*ast.ExprStmt)
+			if !ok {
+				continue
+			}
+			call, ok := es.X.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			switch fun := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				if x, ok := fun.X.(*ast.Ident); ok && x.Name == pkg && fun.Sel.Name == name {
+					return i
+				}
+			case *ast.Ident:
+				if pkg == "" && fun.Name == name {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	declare, start, done, exit := at("utils", "DeclareTeardownSteps"), at("", "start"), at("utils", "MarkDetachDone"), at("os", "Exit")
+	if start < 0 || exit < 0 {
+		t.Fatalf("main no longer calls start and os.Exit as statements (start=%d exit=%d)", start, exit)
+	}
+	if declare < 0 || declare > start {
+		t.Errorf("main does not call utils.DeclareTeardownSteps before start (at %d, start at %d)", declare, start)
+	}
+	if done < 0 || done < start || done != exit-1 {
+		t.Errorf("main does not call utils.MarkDetachDone after start and as the statement right before os.Exit (at %d, start %d, exit %d)", done, start, exit)
+	}
+	for _, arg := range body[exit].(*ast.ExprStmt).X.(*ast.CallExpr).Args {
+		ast.Inspect(arg, func(n ast.Node) bool {
+			switch e := n.(type) {
+			case *ast.CallExpr:
+				t.Errorf("%s: os.Exit's argument in main makes a call, which runs after utils.MarkDetachDone's last report, unwatched", fset.Position(e.Pos()))
+				return false
+			case *ast.UnaryExpr:
+				if e.Op == token.ARROW {
+					t.Errorf("%s: os.Exit's argument in main receives from a channel, which can wait after utils.MarkDetachDone's last report, unwatched", fset.Position(e.Pos()))
+					return false
+				}
+			}
+			return true
+		})
 	}
 }

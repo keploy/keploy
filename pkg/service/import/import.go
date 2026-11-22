@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -68,6 +69,10 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 
 	pi.validatePostmanSchema(postmanCollection.Info.Schema)
 
+	if err := validateCollectionTestSetNames(postmanCollection); err != nil {
+		return err
+	}
+
 	globalVariables := pi.extractGlobalVariables(postmanCollection.Variables)
 
 	// Check for empty responses if basePath is not provided
@@ -118,7 +123,7 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 
 	for _, variable := range variables {
 		// Skip disabled variables
-		if variable["disabled"] != nil && variable["disabled"].(bool) {
+		if disabled, ok := variable["disabled"].(bool); ok && disabled {
 			continue
 		}
 
@@ -132,7 +137,9 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 		// Extract and validate variable value
 		value, ok := variable["value"].(string)
 		if !ok {
-			pi.logger.Error("Global variable value is not a string", zap.Any("value", variable["value"]))
+			// Its type, never the value: a collection's variables hold its
+			// tokens and keys.
+			pi.logger.Error("Global variable value is not a string", zap.String("type", fmt.Sprintf("%T", variable["value"])))
 			continue
 		}
 
@@ -153,14 +160,14 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 	if basePath != "" {
 		req.URL, err = utils.ReplaceBaseURL(req.URL, basePath)
 		if err != nil {
-			pi.logger.Error("failed to replace hostname", zap.Error(err))
+			pi.logger.Error("failed to replace hostname", zap.Error(utils.WithholdInput(err)))
 			return models.HTTPResp{}, err
 		}
 	}
 
 	httpReq, err := http.NewRequest(string(req.Method), req.URL, strings.NewReader(req.Body))
 	if err != nil {
-		pi.logger.Error("failed to create HTTP request", zap.Error(err))
+		pi.logger.Error("failed to create HTTP request", zap.Error(utils.WithholdInput(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -180,7 +187,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		pi.logger.Error("failed to send HTTP request", zap.Error(err))
+		pi.logger.Error("failed to send HTTP request", zap.Error(utils.WithholdInput(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -207,7 +214,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 		response.Header[key] = strings.Join(value, ",")
 	}
 	// Use the response.Body field to avoid unused write error
-	pi.logger.Info("Response Body", zap.String("body", response.Body))
+	pi.logger.Info("Response Body", zap.Int("bytes", len(response.Body)))
 
 	return response, nil
 }
@@ -218,8 +225,17 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 		return fmt.Errorf("failed to get current working directory: %w", err)
 	}
 
+	if err := validateCollectionTestSetNames(collection); err != nil {
+		return err
+	}
+
 	testCounter := 0
 	var itemsToProcess []TestData
+
+	// Postman lets two folders share a name, and both write to the test set of
+	// that name, so numbering is kept per test set: the second folder's tests
+	// follow the first's instead of overwriting test-1, test-2, and so on.
+	folderCounters := make(map[string]int)
 
 	if len(collection.Items.PostmanItems) > 0 {
 		for _, item := range collection.Items.PostmanItems {
@@ -231,22 +247,24 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testSet := item.Name
 			if item.Name == "" {
 				testSet = pi.generateTestSetName()
+			} else if err := validateTestSetName(testSet); err != nil {
+				return err
 			}
 
 			testSetPath := filepath.Join(cwd, "keploy", testSet)
 			testsPath := filepath.Join(testSetPath, "tests")
 
+			folderCounter := folderCounters[testSet]
 			for i := range requests {
 				if err := pi.processEmptyResponse(&requests[i], globalVariables, basePath); err != nil {
 					return err
 				}
 
-				if err := pi.writeTestData(requests[i], testsPath, globalVariables, &testCounter); err != nil {
+				if err := pi.writeTestData(requests[i], filepath.Join(cwd, "keploy"), testsPath, globalVariables, &folderCounter); err != nil {
 					return fmt.Errorf("failed to write test data: %w", err)
 				}
 			}
-
-			testCounter = 0
+			folderCounters[testSet] = folderCounter
 		}
 	}
 
@@ -261,7 +279,7 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 				return err
 			}
 
-			if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
+			if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &testCounter); err != nil {
 				return fmt.Errorf("failed to write test data: %w", err)
 			}
 		}
@@ -270,6 +288,45 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 	}
 
 	return nil
+}
+
+func validateCollectionTestSetNames(collection *PostmanCollectionStruct) error {
+	for _, item := range collection.Items.PostmanItems {
+		if len(item.CollectRequests()) == 0 || item.Name == "" {
+			continue
+		}
+		if err := validateTestSetName(item.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTestSetName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || !filepath.IsLocal(name) ||
+		hasWindowsDrivePrefix(name) || strings.ContainsAny(name, `/\`) ||
+		strings.TrimRight(name, " .") == "" || hasControlChar(name) {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
+	return nil
+}
+
+func hasWindowsDrivePrefix(name string) bool {
+	return len(name) >= 2 &&
+		((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) &&
+		name[1] == ':'
+}
+
+func hasControlChar(name string) bool {
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func (pi *PostmanImporter) generateTestSetName() string {
@@ -359,7 +416,7 @@ func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariab
 	return fmt.Errorf("URL is empty")
 }
 
-func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, globalVariables map[string]string, testCounter *int) error {
+func (pi *PostmanImporter) writeTestData(testItem TestData, root, testsPath string, globalVariables map[string]string, testCounter *int) error {
 	for _, response := range testItem.Response {
 		testName := fmt.Sprintf("test-%d", *testCounter+1)
 
@@ -390,7 +447,7 @@ func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, gl
 			return fmt.Errorf("failed to marshal test result: %w", err)
 		}
 
-		if err := yaml.WriteFileF(pi.ctx, pi.logger, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
+		if err := yaml.WriteRecordingFileF(pi.ctx, pi.logger, root, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
 			return fmt.Errorf("failed to write test result: %w", err)
 		}
 
@@ -429,7 +486,11 @@ func constructRequest(req *PostmanRequest, variables map[string]string) models.H
 func extractHeaders(headers []map[string]interface{}) map[string]string {
 	headersMap := make(map[string]string)
 	for _, header := range headers {
-		headersMap[header["key"].(string)] = header["value"].(string)
+		key, okKey := header["key"].(string)
+		value, okVal := header["value"].(string)
+		if okKey && okVal {
+			headersMap[key] = value
+		}
 	}
 	return headersMap
 }
@@ -439,17 +500,23 @@ func extractURL(url interface{}) string {
 	case string:
 		return v
 	case map[string]interface{}:
-		url := v["raw"].(string)
-		return url
+		if raw, ok := v["raw"].(string); ok {
+			return raw
+		}
+		return ""
 	default:
 		return ""
 	}
 }
 
 func processUrlencodedBody(body []map[string]interface{}) string {
-	keyValues := []string{}
+	var keyValues []string
 	for _, item := range body {
-		keyValues = append(keyValues, item["key"].(string)+"="+item["value"].(string))
+		key, okKey := item["key"].(string)
+		value, okVal := item["value"].(string)
+		if okKey && okVal {
+			keyValues = append(keyValues, url.QueryEscape(key)+"="+url.QueryEscape(value))
+		}
 	}
 	return strings.Join(keyValues, "&")
 }
@@ -457,12 +524,65 @@ func processUrlencodedBody(body []map[string]interface{}) string {
 func processFormdataBody(body []map[string]interface{}) []models.FormData {
 	form := []models.FormData{}
 	for _, formData := range body {
-		form = append(form, models.FormData{
-			Key:    formData["key"].(string),
-			Values: []string{formData["value"].(string)},
-		})
+		if disabled, ok := formData["disabled"].(bool); ok && disabled {
+			continue
+		}
+		key, okKey := formData["key"].(string)
+		if !okKey || key == "" {
+			continue
+		}
+		if fieldType, _ := formData["type"].(string); fieldType == "file" {
+			var paths []string
+			for _, p := range stringValues(formData["src"]) {
+				if p != "" {
+					paths = append(paths, p)
+				}
+			}
+			// Note: Postman exports typically record host absolute paths in src;
+			// replay's OpenRecordingFile enforces recording-directory containment,
+			// so absolute paths must be made relative to the recording if replayed.
+			form = append(form, models.FormData{
+				Key:   key,
+				Paths: paths,
+			})
+			continue
+		}
+		var values []string
+		if vals := stringValues(formData["values"]); len(vals) > 0 {
+			values = vals
+		} else if val, ok := formData["value"].(string); ok {
+			values = []string{val}
+		}
+		if len(values) > 0 {
+			form = append(form, models.FormData{
+				Key:    key,
+				Values: values,
+			})
+		}
 	}
 	return form
+}
+
+func stringValues(v interface{}) []string {
+	switch v := v.(type) {
+	case string:
+		return []string{v}
+	case []string:
+		if len(v) == 0 {
+			return nil
+		}
+		return append([]string(nil), v...)
+	case []interface{}:
+		values := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				values = append(values, s)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
 }
 
 func constructResponse(res PostmanResponse) models.HTTPResp {
@@ -480,7 +600,7 @@ func constructResponse(res PostmanResponse) models.HTTPResp {
 }
 
 func replaceTemplateVars(input string, variables map[string]string) string {
-	re := regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
+	re := regexp.MustCompile(`\{\{\s*([\w.-]+)\s*\}\}`)
 
 	return re.ReplaceAllStringFunc(input, func(match string) string {
 		submatches := re.FindStringSubmatch(match)
@@ -524,14 +644,21 @@ type PostmanItem struct {
 	Item      []PostmanItemNode   `json:"item"`
 }
 
+// CollectRequests returns all leaf requests contained in the folder and its
+// nested subfolders in depth-first traversal order.
 func (pi *PostmanItem) CollectRequests() []TestData {
+	if pi == nil {
+		return nil
+	}
 	var reqs []TestData
 	for i := range pi.Item {
-		reqs = append(reqs, pi.Item[i].CollectRequests()...)
+		pi.Item[i].collectRequests(&reqs)
 	}
 	return reqs
 }
 
+// PostmanItemNode represents a Postman collection item entry, which may be a
+// leaf request, a nested subfolder of items, or both.
 type PostmanItemNode struct {
 	Name      string                   `json:"name"`
 	Request   *PostmanRequest          `json:"request,omitempty"`
@@ -540,22 +667,32 @@ type PostmanItemNode struct {
 	Variables []map[string]interface{} `json:"variable,omitempty"`
 }
 
+// CollectRequests returns all requests at or beneath this node in depth-first
+// traversal order.
 func (n *PostmanItemNode) CollectRequests() []TestData {
-	if n.Request != nil {
-		return []TestData{
-			{
-				Name:      n.Name,
-				Request:   *n.Request,
-				Response:  n.Response,
-				Variables: n.Variables,
-			},
-		}
+	if n == nil {
+		return nil
 	}
 	var reqs []TestData
-	for i := range n.Item {
-		reqs = append(reqs, n.Item[i].CollectRequests()...)
-	}
+	n.collectRequests(&reqs)
 	return reqs
+}
+
+func (n *PostmanItemNode) collectRequests(out *[]TestData) {
+	if n == nil {
+		return
+	}
+	if n.Request != nil {
+		*out = append(*out, TestData{
+			Name:      n.Name,
+			Request:   *n.Request,
+			Response:  n.Response,
+			Variables: n.Variables,
+		})
+	}
+	for i := range n.Item {
+		n.Item[i].collectRequests(out)
+	}
 }
 
 type TestData struct {
@@ -627,7 +764,7 @@ func (ic *ItemsContainer) UnmarshalJSON(data []byte) error {
 
 func (ic ItemsContainer) MarshalJSON() ([]byte, error) {
 	if len(ic.PostmanItems) > 0 && len(ic.TestDataItems) > 0 {
-		var all []interface{}
+		all := make([]interface{}, 0, len(ic.PostmanItems)+len(ic.TestDataItems))
 		for _, pi := range ic.PostmanItems {
 			all = append(all, pi)
 		}

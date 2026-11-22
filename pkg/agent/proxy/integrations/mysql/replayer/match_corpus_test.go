@@ -1,7 +1,6 @@
 package replayer
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -55,7 +54,6 @@ func TestMatchQuery_AgainstRecordedCorpus(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	ctx := context.Background()
 
 	// Mirrors matchCommand's COM_QUERY selection: an exact match wins
 	// immediately, otherwise the highest score with strict-greater replacement,
@@ -63,7 +61,7 @@ func TestMatchQuery_AgainstRecordedCorpus(t *testing.T) {
 	pick := func(live mysql.PacketBundle) int {
 		best, bestScore := -1, 0
 		for j := range pool {
-			ok, score := matchQueryPacket(ctx, logger, pool[j], live)
+			ok, score, _ := matchQueryLive(logger, pool[j], live, &liveQuery{}, queryPacketText)
 			if ok {
 				return j
 			}

@@ -11,7 +11,9 @@ import (
 	nhttp "net/http"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/utils"
 )
 
 // UpstreamErrorMarker is a response header the recorder adds when it
@@ -128,11 +130,18 @@ func upstreamErrorClass(err error) string {
 	return "other"
 }
 
-// upstreamRequestURL extracts a best-effort URL string from a raw HTTP
-// request buffer. Falls back to the dest-socket address if the request
-// cannot be parsed (e.g. truncated / non-HTTP bytes). The returned string
-// is log-only; callers must not depend on its format.
-func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
+// upstreamRequestURL is a best-effort shape of the URL a raw HTTP request
+// buffer asks for: its host's labels' shape (models.HostShape; an address
+// whole), its path's shape and the names of its query parameters
+// (utils.GetReqMeta), never a path segment, a query value or a name, as a
+// token rides in either and a name is the app's; the request's path tag
+// (models.PathTag; "" when it cannot be parsed), which a line that names the
+// shape names beside it, as the agent's other lines about a call do; and its
+// host as such a line names it (models.HostLogName: its shape and tag). Falls
+// back to the dest-socket address if the request cannot be parsed (e.g.
+// truncated / non-HTTP bytes). The returned strings are log-only; callers
+// must not depend on their format.
+func upstreamRequestURL(ctx context.Context, rawReq []byte, destAddr net.Addr) (shape, tag, hostName string) {
 	if len(rawReq) > 0 {
 		req, err := nhttp.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
 		if err == nil && req != nil {
@@ -140,18 +149,22 @@ func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
 			if host == "" && destAddr != nil {
 				host = destAddr.String()
 			}
-			path := "/"
-			if req.URL != nil && req.URL.RequestURI() != "" {
-				path = req.URL.RequestURI()
+			meta := utils.GetReqMeta(ctx, req)
+			path := meta["path"]
+			if path == "" {
+				path = "/"
+			}
+			if keys := meta["query keys"]; keys != "" {
+				path += "?{" + keys + "}"
 			}
 			scheme := "http"
-			return fmt.Sprintf("%s://%s%s", scheme, host, path)
+			return fmt.Sprintf("%s://%s%s", scheme, models.HostShape(host), path), meta["path_tag"], models.HostLogName(ctx, host)
 		}
 	}
 	if destAddr != nil {
-		return destAddr.String()
+		return destAddr.String(), "", destAddr.String()
 	}
-	return "unknown"
+	return "unknown", "", ""
 }
 
 // parseRequestMethodAndURL extracts (method, request-uri) from a raw HTTP/1.x

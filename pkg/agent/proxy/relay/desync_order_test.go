@@ -1,0 +1,136 @@
+package relay
+
+import (
+	"testing"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+)
+
+// The owner of a tee stops the connection's recording when the tee reports its
+// hole (Config.OnCaptureDesync), and the span of what the connection carries
+// from then on opens there. So the tee reports it first, as the chunk is lost:
+// before it writes the hole's WARN, and before it marks the stream desynced,
+// which a stream ended at its hole ends on. Reported after the WARN, what the
+// connection carried while the WARN was written, on a starved agent for a
+// while, was in no span; reported after the mark, a drain could end the
+// stream, and its parser return, before the recording was stopped at the hole.
+func TestTee_ReportsItsHoleBeforeAnythingElseSeesIt(t *testing.T) {
+	t.Parallel()
+	core, logs := observer.New(zapcore.DebugLevel)
+	tt := newTee(fakeconn.FromClient, 4, 1, testStallGrace, nil, zap.New(core))
+	tt.start(make(chan struct{}))
+	t.Cleanup(func() {
+		tt.close()
+		tt.waitDone()
+	})
+	type seen struct{ warned, desynced bool }
+	var at []seen
+	tt.onDesync = func(string) bool {
+		at = append(at, seen{warned: logs.FilterLevelExact(zapcore.WarnLevel).Len() > 0, desynced: tt.desynced.Load()})
+		return true
+	}
+
+	if tt.push(mkChunk("0123456789")) {
+		t.Fatal("a chunk over the cap was admitted")
+	}
+	if tt.push(mkChunk("x")) {
+		t.Fatal("a chunk after the hole was admitted")
+	}
+	if len(at) != 1 {
+		t.Fatalf("the hole was reported %d times, want once", len(at))
+	}
+	if at[0].warned {
+		t.Error("the hole was reported after its WARN was written")
+	}
+	if at[0].desynced {
+		t.Error("the hole was reported after the stream was marked desynced: a stream ended at its hole could end, and its parser return, before the recording was stopped there")
+	}
+	if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 1 {
+		t.Errorf("%d WARNs for the hole, want one", n)
+	}
+	if !tt.desynced.Load() {
+		t.Error("the stream is not marked desynced after its hole")
+	}
+}
+
+// Each direction a capture hole cuts is warned of once, with capturesCut: how
+// many directions holes have cut so far in this process. So dozens of pooled
+// connections cut for one cause read as dozens, not as one line. A hole as the
+// owner's recording stops costs nothing (Config.OnCaptureDesync): it is
+// neither warned of nor counted. Not parallel: it reads the process-wide
+// count, which a parallel test's hole would move under it.
+func TestTee_EachCutIsWarnedOfWithHowManySoFar(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	before := capturesCut.Load()
+	for _, costs := range []bool{true, false, true} {
+		tt := newTee(fakeconn.FromDest, 4, 1, testStallGrace, nil, zap.New(core))
+		tt.start(make(chan struct{}))
+		tt.onDesync = func(string) bool { return costs }
+		if tt.push(mkChunk("0123456789")) {
+			t.Fatal("a chunk over the cap was admitted")
+		}
+		if tt.push(mkChunk("x")) {
+			t.Fatal("a chunk after the hole was admitted")
+		}
+		tt.close()
+		tt.waitDone()
+	}
+	warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
+	if len(warns) != 2 {
+		t.Fatalf("%d WARNs, want one for each of the 2 holes that cost the recording something", len(warns))
+	}
+	for i, w := range warns {
+		got, ok := w.ContextMap()["capturesCut"].(uint64)
+		if want := before + uint64(i) + 1; !ok || got != want {
+			t.Errorf("WARN %d: capturesCut=%v, want %d: each cut counted once, in order, and a hole that costs nothing not at all", i+1, w.ContextMap()["capturesCut"], want)
+		}
+	}
+	if got := capturesCut.Load() - before; got != 2 {
+		t.Errorf("capturesCut moved by %d, want 2", got)
+	}
+}
+
+// A hole as the owner's recording stops costs it nothing: the connection is
+// torn down with the recording, and the owner opens no span for it. Its WARN
+// would say that every test case recorded from then on is left out, when none
+// is, so the tee warns of a hole only when its owner says it costs something
+// (Config.OnCaptureDesync). The hole is still the end of the stream's
+// capture: reported once, and nothing after it admitted.
+func TestTee_WarnsOfAHoleOnlyWhenItCostsTheRecordingSomething(t *testing.T) {
+	t.Parallel()
+	for _, costs := range []bool{true, false} {
+		core, logs := observer.New(zapcore.DebugLevel)
+		tt := newTee(fakeconn.FromClient, 4, 1, testStallGrace, nil, zap.New(core))
+		tt.start(make(chan struct{}))
+		reported := 0
+		tt.onDesync = func(string) bool {
+			reported++
+			return costs
+		}
+
+		if tt.push(mkChunk("0123456789")) {
+			t.Fatal("a chunk over the cap was admitted")
+		}
+		if tt.push(mkChunk("x")) {
+			t.Fatal("a chunk after the hole was admitted")
+		}
+		tt.close()
+		tt.waitDone()
+		if reported != 1 {
+			t.Errorf("costs=%v: the hole was reported %d times, want once", costs, reported)
+		}
+		if !tt.desynced.Load() {
+			t.Errorf("costs=%v: the stream is not marked desynced after its hole", costs)
+		}
+		want := 0
+		if costs {
+			want = 1
+		}
+		if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != want {
+			t.Errorf("costs=%v: %d WARNs for the hole, want %d", costs, n, want)
+		}
+	}
+}

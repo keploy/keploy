@@ -36,29 +36,18 @@ runs:
 
     # --- Add Known Hosts (all OSes) ---
     #
-    # Hard-code GitHub's published SSH host keys instead of running
-    # `ssh-keyscan github.com`. The Windows runner's bundled OpenSSH
-    # can't complete the GitHub-side KEX negotiation since GitHub
-    # started offering `sntrup761x25519-sha512@openssh.com` — the
-    # client aborts with `choose_kex: unsupported KEX method ...`
-    # and the step exits 1. Pinning to GitHub's documented
-    # fingerprints (see https://docs.github.com/en/authentication/
-    # keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
-    # is also stronger from a supply-chain standpoint — we never
-    # trust whatever `ssh-keyscan` hands back from the wire.
-    #
-    # If GitHub rotates a key, update the literals here. Keys last
-    # rotated 2023-03-24 (RSA) — others are long-lived.
+    # GitHub's published SSH host keys, from .github/ssh/github_known_hosts
+    # (which cites their source), never `ssh-keyscan github.com`: a
+    # run-time scan fails the step when the runner's DNS or port 22 blips,
+    # and trusts whatever answers. github-host-keys.tests.sh (this step) and
+    # setup-git-isolation.tests.ps1 (the Windows one) check that each writes
+    # the pinned keys with no network call.
     - name: Add GitHub to known hosts (non-Windows)
       if: runner.os != 'Windows'
       shell: bash
       run: |
         mkdir -p ~/.ssh
-        cat <<'EOF' >> ~/.ssh/known_hosts
-        github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
-        github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
-        github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
-        EOF
+        grep '^github\.com ' "$GITHUB_ACTION_PATH/../../ssh/github_known_hosts" >> ~/.ssh/known_hosts
 
     # Skip when GIT_SSH_COMMAND is already set (per-run isolation handles known_hosts)
     - name: Add GitHub to known hosts (Windows)
@@ -70,13 +59,11 @@ runs:
             New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
         }
         $knownHosts = Join-Path $sshDir "known_hosts"
-        # Hard-coded GitHub host keys — see non-Windows step for rationale.
-        # Ascii encoding avoids BOM issues with OpenSSH's parser.
-        $keys = @(
-          "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
-          "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
-          "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk="
-        )
+        # The pinned keys, as in the non-Windows step. Ascii encoding avoids
+        # BOM issues with OpenSSH's parser.
+        $pinned = Join-Path (Join-Path (Split-Path -Parent (Split-Path -Parent $Env:GITHUB_ACTION_PATH)) "ssh") "github_known_hosts"
+        $keys = @(Get-Content -LiteralPath $pinned | Where-Object { $_ -match '^github\.com ' })
+        if ($keys.Count -eq 0) { throw "No github.com host keys in $pinned." }
         $keys | Out-File -FilePath $knownHosts -Encoding ascii -Append
 
     # --- SSH Agent (Common) ---
@@ -110,6 +97,19 @@ runs:
         PR_BODY: ${{ github.event_name == 'pull_request' && github.event.pull_request.body || '' }}
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+        # Bounded retry for the go commands below — both speculative fetches
+        # and the authoritative one. These are the most failure-prone network
+        # calls in CI: they reach github.com over SSH for every build and lint
+        # job, and github.com sheds SSH sessions under load with a rejection
+        # that reads as permanent (see go-retry.sh's GO_RETRY_RE). The
+        # authoritative fetch was the one `go get` in the repo with no retry at
+        # all, so a shed session failed the lane outright.
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/go-retry.sh"
+        # integration_ref_of_body, shared with integrations-tests.sh.
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/integration-ref.sh"
 
         # Cross-repo integrations-ref resolution order (first hit wins):
         #
@@ -148,7 +148,22 @@ runs:
             return 1
           fi
           echo "Trying integrations@${ref} (from ${source})"
-          if GOPRIVATE=github.com/keploy/integrations go get "github.com/keploy/integrations@${ref}" 2>/dev/null; then
+          # Retried too, and for a sharper reason than the authoritative fetch
+          # below. A shed SSH session here is indistinguishable from "that
+          # branch does not exist", so it falls through and builds
+          # integrations@main — the WRONG ref, silently, on a PR that was
+          # deliberately paired with a cross-repo branch. go_retry only retries
+          # the transient patterns, so a ref that genuinely is not there still
+          # fails on the first attempt and costs nothing.
+          #
+          # stderr stays suppressed: a missing ref is the ordinary case and its
+          # error is noise. go_retry matches on its own captured copy, not on
+          # this stream, so the retry still works.
+          # A 1s backoff, not go_retry's default 5s: stderr is suppressed here,
+          # so a retry is invisible, and a speculative fetch should not stall
+          # the step for seconds with nothing in the log to explain it.
+          if GOPRIVATE=github.com/keploy/integrations GO_RETRY_MAX_ATTEMPTS=2 GO_RETRY_BACKOFF=1 GO_RETRY_DIRECT_FROM=99 \
+            go_retry get "github.com/keploy/integrations@${ref}" 2>/dev/null; then
             echo "✓ Fetched integrations@${ref}"
             FETCHED=1
             return 0
@@ -157,17 +172,10 @@ runs:
           return 1
         }
 
-        # Step 1: PR body override.
-        # Tolerant matcher: accept the tag anywhere on a line — optional
-        # leading whitespace or a list marker ("- ", "* ", "> ") — and
-        # case-insensitive on both the "Integration" and "Ref" halves so
-        # common markdown rendering variants and hand-edited PR bodies
-        # still pair correctly. The trailing awk extracts only the
-        # FIRST whitespace-separated token after the colon — earlier
-        # iterations used `tr -d '[:space:]'` to strip trailing CR/LF,
-        # but that also concatenated "main other-tag" into
-        # "mainother-tag" if the author put two words on one line.
-        BODY_REF="$(printf '%s' "$PR_BODY" | grep -iE '^[[:space:]]*([-*>][[:space:]]+)?integration-ref:' | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | awk '{print $1; exit}' || true)"
+        # Step 1: PR body override. integration-ref.sh reads it: the
+        # first word after the first Integration-Ref line, any case, after
+        # an optional list or quote marker, with a CRLF body's CRs dropped.
+        BODY_REF="$(integration_ref_of_body "$PR_BODY")"
         if [ -n "$BODY_REF" ] && [ "$FETCHED" != "1" ]; then
           try_fetch "$BODY_REF" "PR body Integration-Ref" || true
         fi
@@ -189,7 +197,14 @@ runs:
             exit 1
           fi
           echo "Fetching private integrations dependency via SSH (INTEGRATION_REF=${INTEGRATION_REF})..."
-          GOPRIVATE=github.com/keploy/integrations go get "github.com/keploy/integrations@${INTEGRATION_REF}"
+          # GO_RETRY_DIRECT_FROM=99 pins every attempt to the default GOPROXY.
+          # The module itself is GOPRIVATE and always comes from git, so the
+          # proxy schedule cannot help it — but attempts 3-4 would otherwise
+          # flip its TRANSITIVE dependencies to `direct`, which is strictly
+          # riskier (a renamed or retagged upstream fails permanently direct
+          # where the proxy still serves it).
+          GOPRIVATE=github.com/keploy/integrations GO_RETRY_DIRECT_FROM=99 \
+            go_retry get "github.com/keploy/integrations@${INTEGRATION_REF}"
         fi
 
         echo "Creating extraparsers.go (platform-independent)..."
@@ -245,6 +260,12 @@ runs:
         # `v3.5.3+incompatible`) pass on Windows just like on Linux.
         $SafeRefRe = '^[A-Za-z0-9._/+-]+$'
 
+        # Bounded retry for every go command below. See go-retry.ps1, and
+        # go-retry.sh for why only certain failures are treated as transient.
+        . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.ps1"
+        # Get-IntegrationRefOfBody, integration-ref.sh's Windows twin.
+        . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/integration-ref.ps1"
+
         function Try-Fetch([string]$Ref, [string]$Source) {
           if ([string]::IsNullOrWhiteSpace($Ref)) { return $false }
           if ($Ref -eq $env:INTEGRATION_REF) { return $false }
@@ -253,8 +274,14 @@ runs:
             return $false
           }
           Write-Host "Trying integrations@$Ref (from $Source)"
-          go get "github.com/keploy/integrations@$Ref" 2>$null
-          if ($LASTEXITCODE -eq 0) {
+          # Retried for the same reason as the bash arm's try_fetch: a shed
+          # SSH session here is indistinguishable from "that branch does not
+          # exist", so it falls through and builds integrations@main — the
+          # WRONG ref, silently, on a PR deliberately paired with a cross-repo
+          # branch. -Quiet because a missing ref is the ordinary case and its
+          # error is noise; only the transient patterns retry, so a ref that
+          # genuinely is not there still costs one attempt.
+          if (Invoke-GoWithRetry -GoArgs @("get", "github.com/keploy/integrations@$Ref") -MaxAttempts 2 -BackoffSeconds 1 -What "integrations@$Ref" -Quiet) {
             Write-Host "Fetched integrations@$Ref"
             return $true
           }
@@ -264,25 +291,8 @@ runs:
 
         # Resolution order: PR body Integration-Ref → head_ref → input.
         # See the non-Windows step for the full rationale.
-        $BodyRef = $null
-        if ($env:PR_BODY) {
-          # Tolerant matcher: accept the tag with optional leading
-          # whitespace or a list marker ("- ", "* ", "> "), mirroring
-          # the non-Windows branch. Keeps the cross-repo pairing
-          # working when reviewers edit PR bodies by hand. Take only
-          # the FIRST whitespace-separated token after the colon —
-          # an earlier iteration stripped all whitespace, which would
-          # silently concatenate "main other-tag" into "mainother-tag"
-          # for two-word lines.
-          $line = ($env:PR_BODY -split "`n") | Where-Object { $_ -imatch '^\s*([-*>]\s+)?integration-ref\s*:' } | Select-Object -First 1
-          if ($line) {
-            $tail = $line -replace '^[^:]+:\s*', ''
-            $tokens = $tail -split '\s+', 2
-            if ($tokens.Length -gt 0 -and $tokens[0]) {
-              $BodyRef = $tokens[0]
-            }
-          }
-        }
+        # Read as the non-Windows step reads it (integration-ref.ps1).
+        $BodyRef = Get-IntegrationRefOfBody $env:PR_BODY
 
         if ($BodyRef) { $Fetched = Try-Fetch $BodyRef "PR body Integration-Ref" }
         if (-not $Fetched) { $Fetched = Try-Fetch $env:GITHUB_HEAD_REF_VAL "github.head_ref" }
@@ -293,8 +303,12 @@ runs:
             exit 1
           }
           Write-Host "Fetching private integrations dependency via SSH (INTEGRATION_REF=$env:INTEGRATION_REF)..."
-          go get "github.com/keploy/integrations@$env:INTEGRATION_REF"
-          if ($LASTEXITCODE -ne 0) { throw "go get failed for $env:INTEGRATION_REF" }
+          # Assigned and checked, because this is the authoritative fetch and a
+          # failure has to fail the step. Named $authFetched rather than
+          # $fetched: PowerShell identifiers are case-insensitive, so the latter
+          # would be the $Fetched flag above.
+          $authFetched = Invoke-GoWithRetry -GoArgs @("get", "github.com/keploy/integrations@$env:INTEGRATION_REF") -MaxAttempts 4 -What "integrations@$env:INTEGRATION_REF"
+          if (-not $authFetched) { throw "go get failed for integrations@$env:INTEGRATION_REF" }
         }
 
         Write-Host "Creating extraparsers.go..."
@@ -319,7 +333,20 @@ runs:
       shell: bash
       run: |
         echo "Tidying up Go modules..."
-        go mod tidy
+        # Wrapped for the same reason as the fetch above, and go-retry.sh's own
+        # preamble insists on it: guarding one command and leaving its siblings
+        # bare guards nothing. This resolves the whole module graph — the
+        # private module over SSH, every transitive dependency through the
+        # proxy — so it is the second most likely network call in this action.
+        #
+        # GO_RETRY_DIRECT_FROM=99 pins every attempt to the default GOPROXY, as
+        # the fetch above does and as the pwsh arm does. Letting attempts 3-4
+        # flip a WHOLE graph to `direct` is the case check-deprecated-deps.sh
+        # pins the same flag for: one renamed or retagged upstream then fails
+        # permanently where the proxy would still have served it.
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/go-retry.sh"
+        GO_RETRY_DIRECT_FROM=99 go_retry mod tidy
 
     # FIX 2: Explicitly use pwsh on Windows to avoid 'bash' invoking WSL
     - name: Add any missing Go modules (Windows)
@@ -327,4 +354,13 @@ runs:
       shell: pwsh
       run: |
         Write-Host "Tidying up Go modules..."
-        go mod tidy
+        # Each `run:` is its own shell, so the helper is dot-sourced again here.
+        # Same argument as the bash arm: this resolves the whole module graph
+        # over the network. prepare_and_run.yml's build-windows-amd64 is also
+        # the only caller anywhere that passes go-cache: false, so there it
+        # resolves the graph cold; release.yml's windows build caches like
+        # everyone else.
+        . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.ps1"
+        if (-not (Invoke-GoWithRetry -GoArgs @("mod", "tidy") -What "go mod tidy")) {
+          throw "go mod tidy failed"
+        }

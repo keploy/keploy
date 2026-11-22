@@ -7,6 +7,9 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
+
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # --- Helper Functions for Logging and Error Handling ---
@@ -52,6 +55,10 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
+    # The CLI's lines ("Keploy:") only, unlike the other fuzzer lanes, which
+    # also fail on the agent's ("Keploy(agent):"): this lane's replay leaves
+    # about a third of its queries unmatched while its tests pass
+    # (keploy/integrations#326). The agent's lines join this gate with that fix.
     # Find critical Keploy errors, but exclude specific non-critical ones.
     if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
       echo "::error::Critical error found in $logfile. Failing the build."
@@ -92,7 +99,7 @@ check_test_report() {
         local test_set_name
         test_set_name=$(basename "$report_file" -report.yaml)
         local test_status
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        test_status=$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')
         
         echo "Status for ${test_set_name}: $test_status"
         if [ "$test_status" != "PASSED" ]; then
@@ -191,7 +198,6 @@ send_requests() {
     }'
 }
 
-
 # --- Main Execution Logic ---
 
 # Initial setup and environment logging
@@ -205,6 +211,7 @@ sudo chmod +x $POSTGRES_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
 
 # Start a Postgres instance for the recording session
+docker_pull_retry postgres:latest
 docker run --name postgres-container \
   -e POSTGRES_PASSWORD=password \
   -e POSTGRES_USER=postgres \
@@ -213,8 +220,16 @@ docker run --name postgres-container \
 wait_for_postgres
 
 # Generate Keploy configuration and add noise parameter
-sudo "$RECORD_KEPLOY_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' ./keploy.yml
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > ./keploy.yml <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"duration_ms":[]}}
+KEPLOY_CFG
 echo "Keploy config generated and updated."
 endsec
 
@@ -222,6 +237,7 @@ endsec
 section "Start Recording Server"
 "$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
@@ -234,7 +250,7 @@ endsec
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
 
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 if [[ -n "$REC_PID" ]]; then
@@ -243,7 +259,9 @@ else
   echo "No Keploy record process found to kill."
 fi
 
-sleep 10
+# Wait for the recording to end, not for a fixed time: it drains what the
+# agent captured before it exits (wait-recording.sh).
+wait_recording_end "$KEPLOY_PID" record.txt || exit 1
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
@@ -271,17 +289,18 @@ if json_pass_supported; then
     section "Start Recording (json)"
     "$RECORD_KEPLOY_BIN" record --storage-format json -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
     endsec
     section "Generate Fuzzer Traffic (json)"
     send_requests
     sleep 20
     endsec
     section "Stop Recording (json)"
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     if [[ -n "$REC_PID" ]]; then
         sudo kill -INT "$REC_PID" 2>/dev/null || true
     fi
-    sleep 10
+    wait_recording_end "$KEPLOY_PID" record_json.txt || exit 1
     sudo chown -R $(whoami):$(whoami) keploy/ golden/
     check_for_errors "record_json.txt"
     endsec

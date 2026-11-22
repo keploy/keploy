@@ -1,0 +1,322 @@
+package mock
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
+)
+
+// lossRunner is a record's runner whose agent counts capture losses (the
+// first read before, every later one after) and says what of them no test
+// was charged with (uncharged, or unchargedErr).
+type lossRunner struct {
+	*runnerInstr
+	*lossCounter
+	uncharged    models.CaptureLosses
+	unchargedErr error
+}
+
+func (l *lossRunner) GetUnchargedCaptureLosses(context.Context) (models.CaptureLosses, error) {
+	return l.uncharged, l.unchargedErr
+}
+
+// stall is n parser stalls.
+func stall(n uint64) models.CaptureLosses {
+	return models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: n, What: "to db:3306"}}
+}
+
+// recordWithLosses records, under the switch in a build that judges the
+// record, two tests (orders::TestA at 0-10 ms, orders::TestB at 10-20 ms,
+// one call each) with the given per-test evidence and agent counts, over a
+// stale last-record-tests.yaml. It returns the record's error and the
+// per-test file it left.
+// afterErr fails the run's own count after the test command (the base read
+// answers); pid, when set, is the agent's PID-map count.
+func recordWithLosses(t *testing.T, evA, evB *models.ScopeEvidence, after models.CaptureLosses, afterErr error, uncharged models.CaptureLosses, unchargedErr error, pid *pidMapCounter) (error, *TestsReceipt, string) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	judgedBuild(t)
+	dir := t.TempDir()
+	a := mark("orders::TestA", 0, 10*time.Millisecond)
+	a.Outcome, a.Dir, a.Evidence = models.ScopeOutcomePassed, "orders", evA
+	b := mark("orders::TestB", 10*time.Millisecond, 20*time.Millisecond)
+	b.Outcome, b.Dir, b.Evidence = models.ScopeOutcomePassed, "orders", evB
+	runner := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
+		windows: []models.ScopeWindow{a, b}}
+	runner.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond)), mockAt("mock-1", runnerT0.Add(15*time.Millisecond))}
+	counter := &lossCounter{after: after}
+	if afterErr != nil {
+		counter.errAt = map[int]error{2: afterErr}
+	}
+	instr := &lossRunner{runnerInstr: runner, lossCounter: counter, uncharged: uncharged, unchargedErr: unchargedErr}
+	var in Instrumentation = instr
+	if pid != nil {
+		in = &pidLossRunner{instr, pid}
+	}
+	cfg := instrConfig(runner.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = dir
+	set := (&mockService{config: cfg}).setName()
+	// An earlier record's per-test results.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, set), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, set, RecordTestsReceiptFile), []byte("set: "+set+"\nat: 2020-01-01T00:00:00Z\nmocksDigest: \"\"\ntests:\n  - name: orders::TestStale\n    outcome: passed\n"), 0o644))
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), in, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	err := svc.Record(context.Background())
+	got, rerr := ReadRecordTestsReceipt(dir, set)
+	require.NoError(t, rerr)
+	return err, got, filepath.Join(dir, set)
+}
+
+func receiptTest(r *TestsReceipt, name string) *TestReceipt {
+	for i := range r.Tests {
+		if r.Tests[i].Name == name {
+			return &r.Tests[i]
+		}
+	}
+	return nil
+}
+
+// A loss during one test of a judged record taints that test (and every
+// later one), not the recording: the record keeps what it captured and
+// writes what each test did, the clean test's line without evidence and the
+// tainted one's with it, so judging commits the clean test's new recording
+// and keeps the tainted one's previous one (design v14 §7.5). Before, the
+// whole set was dropped, clean tests too, with no per-test file written and
+// an earlier record's left standing.
+func TestAJudgedRecordWithALossKeepsItsCleanTests(t *testing.T) {
+	err, got, setDir := recordWithLosses(t, nil, &models.ScopeEvidence{CaptureIncomplete: stall(1)}, stall(1), nil, nil, nil, nil)
+	require.NoError(t, err, "a loss charged to a test does not fail a judged record: judging decides")
+	require.NotNil(t, got, "no per-test file was written")
+	require.Nil(t, receiptTest(got, "orders::TestStale"), "an earlier record's per-test file was left standing")
+	a, b := receiptTest(got, "orders::TestA"), receiptTest(got, "orders::TestB")
+	require.NotNil(t, a)
+	require.NotNil(t, b)
+	require.Nil(t, a.Evidence, "the clean test carries no evidence")
+	require.NotNil(t, b.Evidence)
+	require.Equal(t, stall(1), b.Evidence.CaptureIncomplete)
+	require.Empty(t, got.CaptureLosses, "every loss was charged to a test")
+	raw, rerr := os.ReadFile(filepath.Join(setDir, "mocks.yaml"))
+	require.NoError(t, rerr, "the recording was not kept")
+	require.Contains(t, string(raw), "mock-0")
+	require.Contains(t, string(raw), "mock-1")
+}
+
+// A loss after the last test is charged to no test: no recording holds what
+// it carried, so the record's per-test file says it at the run's level, for
+// judging to fail the run. Before, a run whose tests already carried an
+// earlier loss lost it (the file was not even written), and judging
+// quarantined the tainted tests and passed.
+func TestAJudgedRecordSaysALossChargedToNoTest(t *testing.T) {
+	ev := &models.ScopeEvidence{CaptureIncomplete: stall(1)}
+	err, got, _ := recordWithLosses(t, ev, ev, stall(2), nil, stall(1), nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got, "no per-test file was written")
+	require.Equal(t, stall(1), got.CaptureLosses, "the loss after the last test is the run's")
+
+	// What no test was charged with cannot be read: every loss of the run
+	// is the run's, so judging fails it rather than pass on a guess.
+	err, got, _ = recordWithLosses(t, ev, ev, stall(2), nil, nil, errors.New("the agent went away"), nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, stall(2), got.CaptureLosses)
+
+	// Nor the run's own count: what was lost after the last test is
+	// unknown, never "none", and judging fails the run on it.
+	err, got, _ = recordWithLosses(t, ev, ev, nil, errors.New("bad file descriptor"), nil, errors.New("the agent went away"), nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Empty(t, got.CaptureLosses)
+	require.Contains(t, got.CaptureLossesUnread, "bad file descriptor")
+}
+
+// stuckClose is the loss the agent's drain owns, as the session's, for a
+// close its proxy could not count: a handler that never finished closing a
+// connection whose application end had ended (not judged).
+var stuckClose = models.CaptureLosses{{Kind: models.CaptureLossAppBytesUntold, Count: 1,
+	What: "to 10.0.0.5:5432 from 127.0.0.1:40000, in session 2, whose handler never finished closing it once the application's end had ended"}}
+
+// The session's last read has the agent drain first: its proxy counts the
+// close of every connection the run's stop ended. A record whose drain could
+// not count one never ends clean, nor judged on only what was counted:
+//   - the drain gave up on a stuck handler: the agent owns its close, named,
+//     as the run's not-judged loss, so the recording lacks it
+//     (CannotCapture), whatever the tests did;
+//   - the read itself failed (the agent made no answer): what was lost after
+//     the last test is unknown, never "none", and judging fails the run on it
+//     however few losses were counted;
+//   - an agent older than the read (it cannot say) leaves every counted loss
+//     the run's, as before.
+func TestARecordWhoseDrainCouldNotCountACloseIsNeverClean(t *testing.T) {
+	t.Run("the drain gave up on a stuck handler", func(t *testing.T) {
+		err, got, _ := recordWithLosses(t, nil, nil, stuckClose, nil, stuckClose, nil, nil)
+		require.NoError(t, err)
+		require.NotNil(t, got, "no per-test file was written")
+		require.Equal(t, stuckClose, got.CannotCapture, "the stuck close is what the recording lacks, named")
+		require.Empty(t, got.CaptureLosses)
+		require.Empty(t, got.CaptureLossesUnread)
+	})
+	t.Run("the read failed", func(t *testing.T) {
+		err, got, _ := recordWithLosses(t, nil, nil, nil, nil, nil, errors.New("the keploy agent made no answer to the read of the agent's capture losses no test was charged with"), nil)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Empty(t, got.CaptureLosses)
+		require.Contains(t, got.CaptureLossesUnread, "made no answer", "a read that failed is never none, even with nothing counted")
+	})
+	t.Run("an agent older than the read", func(t *testing.T) {
+		err, got, _ := recordWithLosses(t, nil, nil, nil, nil, nil, fmt.Errorf("%w: agent returned 404", models.ErrCaptureLossesUnsupported), nil)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Empty(t, got.CaptureLosses)
+		require.Empty(t, got.CaptureLossesUnread, "an agent that cannot say leaves every counted loss the run's, and none was counted")
+	})
+}
+
+// mock test's read of the run's losses (captureLossesDuring) has the agent
+// drain first too: a drain that gave up is in the counts (the stuck close,
+// not judged, named); a read that failed returns what the counts lost and
+// the error, so the run is never judged clean on what was counted; an agent
+// older than the read is read as before.
+func TestAMockReplaysRunLossesReadIsNeverCleanOnAFailedDrain(t *testing.T) {
+	for _, row := range []struct {
+		name         string
+		after        models.CaptureLosses
+		unchargedErr error
+		want         models.CaptureLosses
+		wantErr      string
+	}{
+		{"the drain gave up on a stuck handler", stuckClose, nil, stuckClose, ""},
+		{"the read failed", stall(1), errors.New("the keploy agent made no answer"), stall(1), "could not read whether its agent had counted every close"},
+		{"an agent older than the read", nil, fmt.Errorf("%w: agent returned 404", models.ErrCaptureLossesUnsupported), nil, ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			m := &mockService{logger: zap.NewNop(), instrumentation: &lossRunner{lossCounter: &lossCounter{after: row.after}, uncharged: row.after, unchargedErr: row.unchargedErr}}
+			m.instrumentation.(*lossRunner).reads = 1 // the base read was made
+			got, err := m.captureLossesDuring(context.Background(), lossBase{checked: true})
+			require.Equal(t, row.want, got)
+			if row.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, row.wantErr)
+			require.ErrorContains(t, err, "made no answer")
+		})
+	}
+}
+
+// pidLossRunner is lossRunner whose agent also counts PID-map refusals.
+type pidLossRunner struct {
+	*lossRunner
+	pid *pidMapCounter
+}
+
+func (p *pidLossRunner) GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error) {
+	return p.pid.GetPIDMapRefusals(ctx)
+}
+
+// A PID-map refusal charged to a test does not drop a judged record either:
+// the clean test keeps its new recording.
+func TestAJudgedRecordKeepsItsCleanTestsOverAPIDMapRefusal(t *testing.T) {
+	ev := &models.ScopeEvidence{CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1}}}
+	err, got, setDir := recordWithLosses(t, nil, ev, nil, nil, nil, nil, &pidMapCounter{after: models.PIDMapRefusals{Target: 1}})
+	require.NoError(t, err, "a refusal charged to a test does not fail a judged record")
+	require.NotNil(t, got, "no per-test file was written")
+	require.Nil(t, receiptTest(got, "orders::TestA").Evidence)
+	raw, rerr := os.ReadFile(filepath.Join(setDir, "mocks.yaml"))
+	require.NoError(t, rerr, "the recording was not kept")
+	require.Contains(t, string(raw), "mock-0")
+}
+
+// gapRunner is a record's runner whose agent counts what the kernel dropped
+// at its proxy listener after the run's last test (drops) only once a read
+// closes the drops' window no test holds -- its read of what no test was
+// charged with (the agent's closeDropsGap) -- as the agent does: until
+// then its count of the losses has none of it. tls is a TLS handshake
+// abandoned at the same moment, which the agent counts as it happens.
+type gapRunner struct {
+	*runnerInstr
+	mu         sync.Mutex
+	reads      int
+	closed     bool
+	drops, tls models.CaptureLosses
+}
+
+func (g *gapRunner) GetCaptureLosses(context.Context) (models.CaptureLosses, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reads++
+	if g.reads == 1 {
+		return nil, nil // the base, as the test command starts
+	}
+	out := append(models.CaptureLosses(nil), g.tls...)
+	if g.closed {
+		out = append(out, g.drops...)
+	}
+	return out, nil
+}
+
+func (g *gapRunner) GetUnchargedCaptureLosses(context.Context) (models.CaptureLosses, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = true
+	return append(append(models.CaptureLosses(nil), g.drops...), g.tls...), nil
+}
+
+// A connection attempt the kernel dropped at keploy's proxy listener after
+// a judged record's last test is the run's, where a TLS handshake abandoned
+// at the same moment is: the record's warning says it, and its per-test
+// file's CannotCapture carries it for judging, which leaves the recording
+// not judged on it as on the handshake; no test is charged with it. Before,
+// the record read the run's losses before the only read that counts such a
+// drop, which kept only the judged part of what it read: the drop was in
+// nothing the record wrote.
+func TestADropAfterAMockRecordsLastTestIsInWhatItCannotCapture(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	judgedBuild(t)
+	drop := models.CaptureLoss{Kind: models.CaptureLossListenerDropped, Count: 1}
+	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to 10.0.0.1:443"}
+	dir := t.TempDir()
+	w := mark("orders::TestA", 0, 10*time.Millisecond)
+	w.Outcome, w.Dir = models.ScopeOutcomePassed, "orders"
+	runner := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
+		windows: []models.ScopeWindow{w}}
+	runner.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	instr := &gapRunner{runnerInstr: runner, drops: models.CaptureLosses{drop}, tls: models.CaptureLosses{tls}}
+	cfg := instrConfig(runner.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = dir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.DebugLevel)
+	svc := New(zap.New(core), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	require.NoError(t, svc.Record(context.Background()))
+	require.Zero(t, utils.ErrCode)
+	set := (&mockService{config: cfg}).setName()
+	r, err := ReadRecordTestsReceipt(dir, set)
+	require.NoError(t, err)
+	require.NotNil(t, r, "no per-test file")
+	require.ElementsMatch(t, models.CaptureLosses{drop, tls}, r.CannotCapture, "the drop is the run's, as the handshake is")
+	require.Empty(t, r.CaptureLosses, "neither is a judged loss")
+	a := receiptTest(r, "orders::TestA")
+	require.NotNil(t, a)
+	require.Nil(t, a.Evidence, "no test is charged with either")
+	out := logged(logs)
+	require.Contains(t, out, "the recording is kept, but")
+	require.Contains(t, out, "the kernel dropped 1 connection attempt(s) at keploy's proxy listener")
+	require.Contains(t, out, "a client hung up on 1 TLS handshake(s)")
+}

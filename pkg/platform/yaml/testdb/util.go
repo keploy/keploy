@@ -10,35 +10,28 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
 // buildHTTPSchema assembles the HTTPSchema that will live in a doc's Spec,
-// plus performs the noisy-field detection that mutates tc.Noise. This is the
-// "meaningful work" shared between the YAML and JSON encode paths; it does
-// not touch any yaml.Node or produce any serialized bytes.
+// plus, with the proven switch off, performs the time-shaped noisy-field
+// detection that mutates tc.Noise (addTimeShapedNoise; a case with no noise
+// map gets the noise in a map of its own). This is the "meaningful work"
+// shared between the YAML and JSON encode paths; it does not touch any
+// yaml.Node or produce any serialized bytes.
 func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
-	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-	if err != nil {
-		utils.LogError(logger, err, "error in flattening http response")
-	}
 	noise := tc.Noise
-	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-		for _, v := range vals {
-			if pkg.IsTime(v) {
-				return true
-			}
-		}
-		return pkg.IsTime(strings.Join(vals, ", "))
-	})
-	for _, v := range noiseFieldsFound {
-		noise[v] = []string{}
+	if !provenswitch.On() {
+		noise = addTimeShapedNoise(tc, noise, logger)
 	}
 
 	httpSchema := models.HTTPSchema{
@@ -57,16 +50,102 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 			return a
 		}(),
 	}
-	if tc.Description != "" {
-		httpSchema.Metadata = map[string]string{"description": tc.Description}
-	}
+	httpSchema.Metadata = specMetadata(tc.Description)
 	return httpSchema
+}
+
+// addTimeShapedNoise adds to noise every response header and body field whose
+// value reads as a time (pkg.IsTime), as match-anything noise. It goes by the
+// value's shape alone: a date-formatted string, or any number within a day of
+// now read as epoch nanoseconds.
+//
+// With the proven switch off, every test case keploy writes (at record, and
+// each time a test case is written again) gets this noise, as it always has.
+// Under the switch it gets none: a field is noise only when it is declared, or
+// when the learn step of record's full round F saw it drift (F replays every
+// test about a minute past its recording, learn.FullRoundLead, so a value the
+// app reads from its clock drifts there and is learned from the drift). A
+// date-shaped value that stays the same from record to replay (a created_at
+// read back from a mocked database) is then asserted. Noised by its shape, a
+// change to it would pass.
+// The Date header a server mints on every answer is not asserted either way:
+// the replay forgives it by its name (models.IsVolatileResponseHeader, unless
+// --disableAutoHeaderNoise), never by its value.
+//
+// It returns the map it added to: noise itself, or a new one when noise is
+// nil. A test case can come with no noise map at all (one created from the
+// dashboard, whose form sends none, read back from the store), and an entry
+// assigned in a nil map panics.
+func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *zap.Logger) map[string][]string {
+	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
+	if err != nil {
+		utils.LogError(logger, err, "error in flattening http response")
+	}
+	isTime := func(vals []string) bool {
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+		return pkg.IsTime(strings.Join(vals, ", "))
+	}
+	// A case with no noise map gets one here, before the header loop's first
+	// write; every exit below returns it.
+	if noise == nil {
+		noise = map[string][]string{}
+	}
+	// A body field under a map keyed by ids is written once, naming every id
+	// key (matcher.NoiseIDKey), when it reads as a time under every one of
+	// them and that one entry silences, of this response's keys, exactly what
+	// the per-id ones would (matcher.CollapseIDKeyedPaths), and per id
+	// otherwise: one entry per id made a response keyed by a few dozen ids
+	// carry hundreds of entries for a handful of fields. A key a replay adds,
+	// a new id or the field under an id that lacked it, is never excused by
+	// it.
+	jsonBody := false
+	for k, vals := range m {
+		if strings.HasPrefix(k, "body.") {
+			jsonBody = true
+			continue
+		}
+		if isTime(vals) {
+			noise[k] = []string{}
+		}
+	}
+	if !jsonBody {
+		return noise
+	}
+	// The rule walks the parsed body: it judges the one entry against every
+	// node the entry would reach, objects, empty ones and nulls included,
+	// which the flattened map does not all list.
+	var doc interface{}
+	if err := json.Unmarshal([]byte(tc.HTTPResp.Body), &doc); err != nil {
+		utils.LogError(logger, err, "error in parsing http response body")
+		return noise
+	}
+	for _, rel := range matcher.CollapseIDKeyedPaths(doc, func(rel string) bool { return isTime(m["body."+rel]) }) {
+		noise["body."+rel] = []string{}
+	}
+	return noise
+}
+
+// specMetadata builds the spec-level Metadata map carrying the fields that
+// persist through the spec rather than the doc: the user-facing description.
+// Returns nil when there is nothing to carry, so specs without metadata keep
+// encoding byte-identically to before. The gRPC encoders pass description="" —
+// gRPC specs have never persisted a description and that stays unchanged.
+func specMetadata(description string) map[string]string {
+	if description == "" {
+		return nil
+	}
+	return map[string]string{"description": description}
 }
 
 // buildGrpcSpec is the JSON-path counterpart of the gRPC branch in EncodeTestcase.
 func buildGrpcSpec(tc models.TestCase) models.GrpcSpec {
 	noise := tc.Noise
 	return models.GrpcSpec{
+		Metadata: specMetadata(""),
 		GrpcReq:  tc.GrpcReq,
 		GrpcResp: tc.GrpcResp,
 		Created:  tc.Created,
@@ -99,9 +178,33 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		Kind:        tc.Kind,
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
+		Real:        tc.Real,
+		Origin:      tc.Origin.Persisted(),
 	}
 	switch tc.Kind {
 	case models.HTTP:
+		// encoding/json has no lossless form for a string that is not UTF-8:
+		// it writes U+FFFD for each bad byte and returns no error, so the file
+		// would hold another body, and the test fail at replay, unexplained. A
+		// file has no reader to ask for a body object, so refuse, as the mock
+		// writer does (mockdb). Tagged as this test case's own fault, the
+		// recorder skips and counts it and keeps recording. YAML stores such a
+		// body as !!binary, and a body saveAssets took out of the document is
+		// no longer here.
+		if field, ok := firstNonUTF8Body(tc); !ok {
+			err := fmt.Errorf("%w: testdb: %s is not valid UTF-8 and the json format cannot store it losslessly; record with storageFormat yaml to keep binary bodies", models.ErrTestCaseEncode, field)
+			// The call by its shape, and the test case by its name where it
+			// has one (one being updated): a new one refused here is never
+			// given its name, and the next one takes it.
+			named := zap.Skip()
+			if tc.Name != "" {
+				named = zap.String("testcase", tc.Name)
+			}
+			utils.LogError(logger, err, "refusing to write a binary body as JSON", named,
+				zap.Any("metadata", utils.URLLogMeta(string(tc.HTTPReq.Method), tc.HTTPReq.URL)),
+				zap.String("next_step", "set storageFormat to yaml; the yaml encoder stores binary bodies as !!binary without loss"))
+			return nil, err
+		}
 		doc.Curl = tc.Curl
 		specBytes, err := json.Marshal(buildHTTPSchema(tc, logger))
 		if err != nil {
@@ -123,6 +226,18 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 	return doc, nil
 }
 
+// firstNonUTF8Body reports whether both HTTP bodies of tc are valid UTF-8,
+// naming the first that is not.
+func firstNonUTF8Body(tc models.TestCase) (string, bool) {
+	if !utf8.ValidString(tc.HTTPReq.Body) {
+		return "the request body", false
+	}
+	if !utf8.ValidString(tc.HTTPResp.Body) {
+		return "the response body", false
+	}
+	return "", true
+}
+
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 	logger.Debug("Starting test case encoding",
 		zap.String("kind", string(tc.Kind)),
@@ -133,104 +248,37 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		Kind:        tc.Kind,
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
+		Real:        tc.Real,
+		Origin:      tc.Origin.Persisted(),
 	}
 
-	var noise map[string][]string
 	switch tc.Kind {
 	case models.HTTP:
 		logger.Debug("Encoding HTTP test case")
 		doc.Curl = tc.Curl
 
-		// find noisy fields only for HTTP responses
-		m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-		if err != nil {
-			msg := "error in flattening http response"
-			utils.LogError(logger, err, msg)
-		}
-		noise = tc.Noise
-
-		noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-			// check if k is date
-			for _, v := range vals {
-				if pkg.IsTime(v) {
-					return true
-				}
-			}
-			// maybe we need to concatenate the values
-			return pkg.IsTime(strings.Join(vals, ", "))
-		})
-
-		for _, v := range noiseFieldsFound {
-			noise[v] = []string{}
-		}
-
-		httpSchema := models.HTTPSchema{
-			Request:  tc.HTTPReq,
-			Response: tc.HTTPResp,
-			Created:  tc.Created,
-			AppPort:  tc.AppPort,
-			// need to check here for type here as well as push in other custom assertions
-			Assertions: func() map[models.AssertionType]interface{} {
-				a := map[models.AssertionType]interface{}{}
-				for k, v := range tc.Assertions {
-					a[k] = v
-				}
-
-				if len(noise) > 0 {
-					a[models.NoiseAssertion] = noise
-				}
-
-				// Optionally add other custom assertions if needed here
-				// Example:
-				// a[models.StatusCode] = tc.HTTPResp.StatusCode
-
-				return a
-			}(),
-		}
-		if tc.Description != "" {
-			httpSchema.Metadata = map[string]string{
-				"description": tc.Description,
-			}
-		}
-		err = doc.Spec.Encode(httpSchema)
+		httpSchema := buildHTTPSchema(tc, logger)
+		err := yaml.EncodeNode(&doc.Spec, httpSchema)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 			return nil, err
 		}
 	case models.GRPC_EXPORT:
 		logger.Debug("Encoding gRPC test case")
-		// For gRPC, use the noise directly from the test case
-		noise = tc.Noise
 
-		// Create a YAML node for the gRPC schema
-		grpcSpec := models.GrpcSpec{
-			GrpcReq:  tc.GrpcReq,
-			GrpcResp: tc.GrpcResp,
-			Created:  tc.Created,
-			AppPort:  tc.AppPort,
-			// need to check here for type here as well as push in other custom assertions
-			Assertions: func() map[models.AssertionType]interface{} {
-				a := map[models.AssertionType]interface{}{}
-				if len(noise) > 0 {
-					a[models.NoiseAssertion] = noise
-				}
-				// Optionally add other custom assertions if needed here
-				// Example:
-				// a[models.StatusCode] = tc.HTTPResp.StatusCode
-
-				return a
-			}(),
-		}
+		grpcSpec := buildGrpcSpec(tc)
 
 		logger.Debug("gRPC schema created",
-			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
-			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			// How many headers, never their values: gRPC metadata carries
+			// the call's credentials (authorization).
+			zap.Int("request_headers", len(grpcSpec.GrpcReq.Headers.PseudoHeaders)+len(grpcSpec.GrpcReq.Headers.OrdinaryHeaders)),
+			zap.Int("response_headers", len(grpcSpec.GrpcResp.Headers.PseudoHeaders)+len(grpcSpec.GrpcResp.Headers.OrdinaryHeaders)),
 			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
 			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
 
 		// Create a new YAML node and encode the gRPC schema
 		var node yamlLib.Node
-		err := node.Encode(grpcSpec)
+		err := yaml.EncodeNode(&node, grpcSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode gRPC schema to YAML node")
 			return nil, err
@@ -338,9 +386,11 @@ func Flatten(j interface{}) map[string][]string {
 				}
 			}
 		}
-	default:
-		fmt.Println(utils.Emoji, "found invalid value in json", j, x.Kind())
 	}
+	// A value of another kind (none that encoding/json decodes into an
+	// interface{}: AddHTTPBodyToMap's) adds no key, as matcher.Flatten's
+	// does, and is never printed: it is the application's, and an embedded
+	// Replayer's stdout may be a log.
 	return o
 }
 
@@ -406,6 +456,15 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		LastUpdated: yamlTestcase.LastUpdated,
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
+		// The clock its window start is on: read whatever the
+		// switch, so a rewrite of the case (templatize, normalize, an
+		// update) keeps it; only the proven switch uses it.
+		Origin: yamlTestcase.Origin,
+	}
+	if provenswitch.On() {
+		// The mock.real destinations the case's recording used (design v14
+		// §4): not read without the switch.
+		tc.Real = yamlTestcase.Real
 	}
 
 	switch tc.Kind {
@@ -506,6 +565,10 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		LastUpdated: doc.LastUpdated,
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
+		Origin:      doc.Origin, // as Decode reads it: whatever the switch
+	}
+	if provenswitch.On() {
+		tc.Real = doc.Real
 	}
 
 	switch tc.Kind {

@@ -1,0 +1,1871 @@
+#!/usr/bin/env bash
+# Tests for apt-install.sh. Needs Docker and access to the Ubuntu archive. Run
+# by linux-ci-scripts.yml, or locally (it changes nothing on the host):
+#
+#   bash .github/workflows/test_workflow_scripts/apt-install.tests.sh
+#
+# failover (ubuntu:22.04, one-line sources.list; ubuntu:24.04, deb822)
+#   The container resolves azure.archive.ubuntu.com to a stub. The stub
+#   answers every .deb with `502 Proxy Error`, the outage that failed job
+#   110208231113, and proxies every other path to the real mirror. Through
+#   apt-install.sh the install has to succeed: the indexes still come from
+#   azure, which is tried first, and the .deb that azure refuses comes from
+#   archive.ubuntu.com.
+# control (ubuntu:22.04)
+#   The same stub with packages from azure alone, as on that job: apt has to
+#   exit 100 with the 502. This proves the stub reproduces the outage, so the
+#   failover cases cannot pass by never reaching it. Its package lists may
+#   still fall over to archive.ubuntu.com (an apt mirror list of type:index):
+#   the stub passes them through to the real azure mirror, which at times
+#   serves a list that does not match its InRelease ("Mirror sync in
+#   progress?"), and that must not stop the control before the .deb.
+# third-party (ubuntu:24.04)
+#   thirdparty.test also resolves to the stub. Under /corrupt/ it answers
+#   InRelease with a page that is not clearsigned, as packages.microsoft.com
+#   has; under /good/ it serves a flat repository with one package. With the
+#   corrupt source configured, the default run has to install from Ubuntu
+#   without contacting it and without deleting its old list, while
+#   --all-sources has to fail on it with exit 100 (the control for that stub).
+#   With the good source, --all-sources installs its package and the default
+#   run cannot see it. apt skips its list cleanup after a failed fetch, so that
+#   makes the kept-list check inconclusive, and a control update shows that
+#   cleanup does delete such a list.
+# slow mirror (ubuntu:22.04, the helper's own mirror list; ubuntu:24.04, a list
+# the image already had, as GitHub's hosted images do)
+#   The stub answers azure's .debs at 256 B/s: up, never silent for the 30 s
+#   after which apt gives a mirror up, and far too slow, as azure was on job
+#   113004700461. archive.ubuntu.com and security.ubuntu.com resolve to the
+#   stub as well, which passes them through at full speed, so the case does
+#   not hang on how fast those two are on the day. Through apt-install.sh,
+#   with 20 s slices in an 80 s budget, the install has to succeed: azure is
+#   asked first, the helper puts archive.ubuntu.com in front, that mirror is
+#   asked for the rest of the .deb azure had begun (a Range request, so what
+#   was fetched was kept), the install itself fetches nothing, and the mirror
+#   list ends as it began.
+#   Its control (ubuntu:22.04) is the same stub and mirror list under apt
+#   alone: `timeout 45 apt-get install`, the helper's old command with a
+#   shorter limit. It has to run into the limit (exit 124) without an Ign: or
+#   Err: line and without asking another mirror. That is the failure, and it
+#   proves the stub is slow in the one way apt does not act on.
+# every mirror slow (ubuntu:22.04)
+#   All three mirrors answer .debs at 256 B/s. The helper has to put each in
+#   front in turn, each asked to go on where the one before it stopped, exit
+#   124 when the budget is spent, say in an ::error:: line how much was
+#   fetched, at what rate and from which mirrors, install nothing, and put
+#   the mirror list back. The budget is three slices, so the third mirror's
+#   slice is the last, and there are exactly three.
+# slow lists (ubuntu:22.04, the helper's own mirror list; ubuntu:24.04, a list
+# the image already had)
+#   The stub answers azure's package lists, InRelease first, at 256 B/s, so
+#   the update stalls on azure as it did on run 41251324201 (where azure did
+#   not answer, and apt fetched nothing more after the InRelease files).
+#   Through apt-install.sh, with 20 s slices in an 80 s budget, the install
+#   has to succeed: azure is asked first, the helper finds that the update
+#   received under 100 kB/s and puts archive.ubuntu.com in front, that mirror
+#   serves the lists, the download and the install follow, and the mirror
+#   list ends as it began. The bytes the helper says azure's slice received
+#   have to be what the stub wrote as azure with their TCP/IP and HTTP
+#   headers, and the rate those bytes over the slice's seconds; and every
+#   list, also one apt asks to go on with, comes from the stub's own copy.
+#   Its control (ubuntu:22.04) is the same stub under
+#   `timeout 45 apt-get update` alone: it has to run into the limit without
+#   an Ign: or Err: line and without asking another mirror.
+# every mirror's lists slow (ubuntu:22.04)
+#   All three mirrors answer the lists at 256 B/s. The helper has to put each
+#   in front in turn, exit 124 when the budget is spent, say in an ::error::
+#   line how much was received, at what rate and with which mirror in front,
+#   download and install nothing, and put the mirror list back. Each slice's
+#   bytes and rate are pinned to what the stub wrote as that mirror, as
+#   above, and the total to their sum.
+# the floor on the lists (ubuntu:22.04)
+#   azure trickles its lists again, at the ~410 B/s the machine receives
+#   them at. With APT_INSTALL_LIST_RATE=100, under that rate, azure has to
+#   stay in front slice after slice until the budget is spent, with the bytes
+#   and rates pinned as above. With 2000, over that rate but under the bytes
+#   one slice receives, archive.ubuntu.com has to be put in front and the
+#   install succeed: the floor is held against the rate, not the bytes.
+# rewrite (ubuntu:22.04, ubuntu:24.04 and ubuntu:26.04, no network, apt-get
+# shimmed out)
+#   Fixture sources: exactly the .../ubuntu URIs on archive.ubuntu.com,
+#   security.ubuntu.com and their subdomains are rewritten, the mirror
+#   list is exact, a second run changes no file, and a re-run puts back a
+#   deleted or outdated list that the sources name. No file is changed at all
+#   with RUNNER_ENVIRONMENT=self-hosted, or on sources shaped like GitHub's
+#   hosted images, which already use a mirror list of their own: in Azure,
+#   where every Ubuntu entry names it, and in AWS (ubuntu-26.04), where the
+#   -security entry names a host instead, and the same in the one-line format.
+#   The list is the machine's whatever its path, and whichever source file
+#   names it: one at another path, and one named only from a .list file in
+#   sources.list.d, leave the sources as they are too.
+#   A list counts only when an Ubuntu entry apt reads names it and its
+#   mirrors are all Ubuntu: the image's list named only in a comment (a line
+#   of its own, or a comment line inside a deb822 stanza that is read) or a
+#   disabled stanza, or a list with another host in it, leaves the sources
+#   rewritten; the list of the helper is never one of the machine, so a
+#   source added after a run is rewritten by the next. With no sources.list
+#   at all, the deb822 files are read and rewritten. A source file root
+#   cannot read (a container without CAP_DAC_OVERRIDE) stops the helper
+#   before it changes any file. The entries the update and the install are
+#   given are exactly the Ubuntu ones, on the fixture and on the hosted
+#   shapes, and the files with entries left out are named; CRLF line ends
+#   and disabled stanzas are read as apt reads them.
+#   --all-sources and a self-hosted runner give apt no source options; with no
+#   Ubuntu entry at all the default run stops before apt.
+#   Then with a shim that outlasts its slice, which needs no mirror to be
+#   slow, and that is stopped in the middle of a line every time, as apt is
+#   when it is stopped while it starts. Whatever the helper writes after that
+#   has to start a line of its own. Every download slice that runs out puts
+#   the next mirror in front, in the helper's list and in the image's, and the
+#   lists are put back at the end; a mirror that is on course stays in front
+#   and no file changes; a slice counts all it fetched, also the one after a
+#   slice in which apt began its .deb anew; a spent budget ends in exit 124
+#   and the ::error:: line, with nothing installed, also when it runs out
+#   between two slices, and then no mirror is put in front any more; an
+#   install that outlasts the budget ends in exit 124 too, with an ::error::
+#   line of its own. An update that outlasts every slice, receiving nothing,
+#   puts the next mirror in front for each, ends in exit 124 with an ::error::
+#   line that names them, downloads nothing and puts the lists back; with
+#   APT_INSTALL_LIST_RATE=0 its mirror stays in front, slice after slice, and
+#   the run goes on to install once the update is done; a floor that is not a
+#   whole number of bytes a second is refused. With no list to reorder, or on
+#   a self-hosted runner, the download gets its budget in one piece and no
+#   file changes, and with no list the update does too.
+#   Last, the helper's received_between on counts written out: an interface
+#   gone by the second read takes only its own bytes out of the count, one
+#   new at it adds none, a counter that went back counts 0, and the reads
+#   may list the interfaces in any order.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# amd64 only: an arm64 ubuntu image fetches from ports.ubuntu.com, which the
+# helper rightly leaves alone, so the failover cases would fail for no fault.
+arch="$(docker info -f '{{.Architecture}}')"
+if [ "$arch" != x86_64 ]; then
+  echo "FAIL: these tests need an x86_64 Docker host, this one is $arch"
+  exit 1
+fi
+helper="$here/apt-install.sh"
+work="$(mktemp -d)"
+net="apt-install-tests-$$"
+stub="apt-install-stub-$$"
+failures=0
+
+cleanup() {
+  docker rm -f "$stub" >/dev/null 2>&1 || true
+  docker network rm "$net" >/dev/null 2>&1 || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+fail() {
+  echo "FAIL: $*"
+  failures=$((failures + 1))
+}
+
+# expect <log> <description> <grep -E pattern>
+expect() {
+  if grep -Eq -- "$3" "$1"; then
+    echo "ok: $2"
+  else
+    fail "$2 (no line matching: $3)"
+  fi
+}
+
+# absent <log> <description> <grep -E pattern>
+absent() {
+  if grep -Eq -- "$3" "$1"; then
+    fail "$2 (a line matches: $3)"
+  else
+    echo "ok: $2"
+  fi
+}
+
+# show_log_if_failed <log> <failure count when the case started>
+show_log_if_failed() {
+  [ "$failures" = "$2" ] && return 0
+  echo "::group::$1"
+  cat "$1"
+  echo "::endgroup::"
+}
+
+# A size as the helper prints it; with /s after it, a rate.
+size='[0-9.]+ (B|kB|MB)'
+
+cat >"$work/stub.py" <<'EOF'
+import email.utils, http.server, os, re, select, socket, socketserver, sys, threading, time
+import urllib.error, urllib.request
+
+# Where what the stub passes through comes from: azure, and archive.ubuntu.com
+# for a file azure fails. The real azure at times lacks a list its InRelease
+# names, and in the slow-mirror cases apt's own fallbacks lead here as well.
+UPSTREAMS = ("http://azure.archive.ubuntu.com", "http://archive.ubuntu.com")
+AZURE = "azure.archive.ubuntu.com"
+REPO = "/repo"
+# A slow answer is 128 bytes every half second: 256 B/s, at which no .deb and
+# no InRelease here is done within a test, and never 30 s of silence, after which apt would give
+# the mirror up by itself.
+CHUNK, PAUSE = 128, 0.5
+# What the real mirror answered for everything but a .deb, by path. The package
+# lists are fetched from it once and served from here after that, so that no
+# later case depends on how fast the real mirror is at that moment. That
+# holds for apt asking to go on with a list it has part of, as well.
+LISTS = {}
+# In a case about the lists, the bytes of the lists written to apt, by case
+# and by the host apt asked, counted as each part is written. The tests
+# compare them with what the helper says it received. GET /sent/<case> from
+# inside the stub's own container lists them, a host and its bytes a line.
+SENT = {}
+SENT_LOCK = threading.Lock()
+
+
+def same_date(a, b):
+    try:
+        return email.utils.parsedate_to_datetime(a) == email.utils.parsedate_to_datetime(b)
+    except (TypeError, ValueError):
+        return False
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        sys.stdout.write("stub: " + (fmt % args) + "\n")
+        sys.stdout.flush()
+
+    def wrote(self, part):
+        self.wfile.write(part)
+        if self.count_as:
+            with SENT_LOCK:
+                SENT[self.count_as] = SENT.get(self.count_as, 0) + len(part)
+
+    # apt closed its end: it was stopped. Nothing written now would reach it,
+    # so a slow answer stops here, and counts no more bytes than apt can have.
+    def client_gone(self):
+        if not select.select([self.connection], [], [], 0)[0]:
+            return False
+        try:
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
+    def reply(self, code, reason, body, headers=(), slow=False):
+        self.send_response(code, reason)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not slow:
+            self.wrote(body)
+            return
+        try:
+            for i in range(0, len(body), CHUNK):
+                if self.client_gone():
+                    self.close_connection = True
+                    return
+                self.wrote(body[i:i + CHUNK])
+                time.sleep(PAUSE)
+        except OSError:
+            # apt was stopped in the middle of the file.
+            self.close_connection = True
+
+    # A Range request for a list the stub has, answered from it as a mirror
+    # answers: the rest of the list from where apt's part ends (206), or 416
+    # when apt has all of it. None, for the whole list, when the list apt has
+    # part of is another one (If-Range, the Last-Modified apt was given), or
+    # the range is not the one form apt asks for.
+    def part_of(self, body, headers):
+        asked = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers["Range"].strip())
+        if not asked:
+            return None
+        if self.headers.get("If-Range"):
+            modified = dict((k.lower(), v) for k, v in headers).get("last-modified")
+            if not modified or not same_date(self.headers["If-Range"], modified):
+                return None
+        start, size = int(asked.group(1)), len(body)
+        end = min(int(asked.group(2)), size - 1) if asked.group(2) else size - 1
+        if start >= size:
+            return (416, "Range Not Satisfiable", b"", [("Content-Range", "bytes */%d" % size)])
+        if end < start:
+            return None
+        return (206, "Partial Content", body[start:end + 1],
+                list(headers) + [("Content-Range", "bytes %d-%d/%d" % (start, end, size))])
+
+    # A third-party apt repository. /corrupt/ answers InRelease with a page
+    # that is not clearsigned; /good/ is the flat repository built below.
+    def third_party(self):
+        if self.path.startswith("/corrupt/") and self.path.endswith("/InRelease"):
+            return self.reply(200, "OK", b"<html>not a release file</html>\n")
+        name = os.path.basename(self.path)
+        if self.path.startswith("/good/") and os.path.isfile(os.path.join(REPO, name)):
+            with open(os.path.join(REPO, name), "rb") as f:
+                return self.reply(200, "OK", f.read())
+        return self.reply(404, "Not Found", b"")
+
+    def do_GET(self):
+        self.count_as = None
+        host = self.headers.get("Host", "").split(":")[0]
+        if host == "thirdparty.test":
+            return self.third_party()
+        if host == "127.0.0.1" and self.path.startswith("/sent/"):
+            case = self.path[len("/sent/"):]
+            with SENT_LOCK:
+                lines = "".join("%s %d\n" % (h, n) for (c, h), n in sorted(SENT.items()) if c == case)
+            return self.reply(200, "OK", lines.encode())
+        # A case asks for its fault, and names itself, in apt's User-Agent:
+        # "apt-install-tests <fault> <case>". Without one, a .deb is refused.
+        agent = self.headers.get("User-Agent", "").split()
+        fault, case = "refuse", "-"
+        if len(agent) == 3 and agent[0] == "apt-install-tests":
+            fault, case = agent[1], agent[2]
+        deb = self.path.endswith(".deb")
+        lists = fault in ("slow-lists", "slow-lists-everywhere")
+        # A case about the lists has every list request logged as well.
+        if deb or lists:
+            self.log_message("case=%s host=%s range=%s %s", case, host,
+                             self.headers.get("Range", "-"), self.path)
+        if lists and not deb:
+            self.count_as = (case, host)
+        if deb and fault == "refuse":
+            return self.reply(502, "Proxy Error", b"502 Proxy Error\n")
+        slow = deb and ((fault == "slow-debs" and host == AZURE)
+                        or fault == "slow-debs-everywhere")
+        # The package lists, InRelease included, under a slow-lists fault.
+        slow = slow or (not deb and ((fault == "slow-lists" and host == AZURE)
+                                     or fault == "slow-lists-everywhere"))
+        if self.path in LISTS:
+            body, headers = LISTS[self.path]
+            part = None if "Range" not in self.headers else self.part_of(body, headers)
+            if part is None:
+                return self.reply(200, "OK", body, headers, slow)
+            return self.reply(*part, slow=slow)
+        # In a case about the lists every list is the stub's own by now, so a
+        # row can say that none of them waited on the real mirror.
+        if lists and not deb:
+            self.log_message("case=%s host=%s forwarded %s", case, host, self.path)
+        failed = (502, "Bad Gateway", b"")
+        for upstream in UPSTREAMS:
+            # A file apt has part of is asked for from where that part ends.
+            ask = urllib.request.Request(upstream + self.path)
+            for name in ("Range", "If-Range"):
+                if self.headers.get(name):
+                    ask.add_header(name, self.headers[name])
+            try:
+                with urllib.request.urlopen(ask, timeout=60) as r:
+                    keep = [(k, v) for k, v in r.getheaders()
+                            if k.lower() in ("last-modified", "content-range")]
+                    body = r.read()
+                    # A 200 is the whole file, also when apt asked for a part.
+                    if not deb and r.status == 200:
+                        LISTS[self.path] = (body, keep)
+                    return self.reply(r.status, r.reason, body, keep, slow)
+            except urllib.error.HTTPError as e:
+                failed = (e.code, e.reason, e.read() or b"")
+            except OSError:
+                # Not reached, or no answer in time.
+                pass
+        return self.reply(*failed)
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+Server(("0.0.0.0", 80), Handler).serve_forever()
+EOF
+
+# The good third-party repository: one package, an unsigned Release (the
+# source is marked trusted=yes) and its Packages index.
+mkdir "$work/repo"
+docker run --rm --user "$(id -u):$(id -g)" -v "$work/repo:/repo" ubuntu:24.04 bash -c '
+set -euo pipefail
+pkg="$(mktemp -d)"
+mkdir -p "$pkg/DEBIAN" "$pkg/usr/share/keploy-apt-test"
+printf "%s\n" "Package: keploy-apt-test" "Version: 1.0" "Architecture: all" \
+  "Maintainer: keploy CI <ci@keploy.io>" "Description: apt-install.sh test package" \
+  >"$pkg/DEBIAN/control"
+echo ok >"$pkg/usr/share/keploy-apt-test/ok"
+cd /repo
+deb=keploy-apt-test_1.0_all.deb
+dpkg-deb --root-owner-group --build "$pkg" "$deb" >/dev/null
+{ cat "$pkg/DEBIAN/control"; echo "Filename: ./$deb"; echo "Size: $(stat -c %s "$deb")"
+  echo "SHA256: $(sha256sum "$deb" | cut -d " " -f 1)"; } >Packages
+printf "Date: %s\nSHA256:\n %s %s Packages\n" "$(date -Ru)" \
+  "$(sha256sum Packages | cut -d " " -f 1)" "$(stat -c %s Packages)" >Release
+'
+
+docker network create "$net" >/dev/null
+docker run -d --name "$stub" --network "$net" -v "$work/stub.py:/stub.py:ro" \
+  -v "$work/repo:/repo:ro" python:3.12-alpine python -u /stub.py >/dev/null
+stub_ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$stub")"
+# Listening is enough: a request through to the real mirror could hang on the
+# upstream instead of telling whether the stub is up.
+ready=no
+for _ in $(seq 1 30); do
+  if docker exec "$stub" python -c 'import socket; socket.create_connection(("127.0.0.1", 80), 1)' 2>/dev/null; then
+    ready=yes
+    break
+  fi
+  sleep 1
+done
+if [ "$ready" != yes ]; then
+  docker logs "$stub" || true
+  echo "FAIL: the stub mirror never started listening"
+  exit 1
+fi
+
+# in_ubuntu <image> <log> <script> [docker run option ...]: the script runs as
+# root, with the helper at /h/apt-install.sh and azure.archive.ubuntu.com and
+# thirdparty.test resolving to the stub. The longest wait a case has by design
+# is the 90 s budget of the every-mirror-slow one; the 300 s cap makes a hung
+# case fail with its log (exit 124) instead of running into the job's timeout
+# silently. stderr joins stdout inside the container: docker keeps the two as
+# separate streams and does not keep their order, so an apt error could
+# otherwise land after the next section's header.
+in_ubuntu() {
+  local rc=0 image="$1" log="$2" script="$3"
+  shift 3
+  docker run --rm --network "$net" --add-host "azure.archive.ubuntu.com:$stub_ip" \
+    --add-host "thirdparty.test:$stub_ip" "$@" -v "$helper:/h/apt-install.sh:ro" -v "$here/hang_guard.sh:/h/hang_guard.sh:ro" "$image" \
+    bash /h/hang_guard.sh 300 bash -c "exec 2>&1; $script" >"$log" || rc=$?
+  echo "$rc"
+}
+
+# section <log> <title>: the lines after `--- <title>`, up to the next `--- `.
+section() {
+  awk -v title="--- $2" '$0 == title { on = 1; next } /^--- / { on = 0 } on' "$1"
+}
+
+# A non-comment line still naming the Ubuntu archive over plain http(s).
+plain_uri='^[^#]*https?://([A-Za-z0-9-]+\.)*(archive|security)\.ubuntu\.com/ubuntu/?([[:space:]]|$)'
+
+for spec in jammy:ubuntu:22.04 noble:ubuntu:24.04; do
+  codename="${spec%%:*}"
+  image="${spec#*:}"
+  log="$work/failover-$codename.log"
+  started=$failures
+  echo "--- failover ($image)"
+  rc="$(in_ubuntu "$image" "$log" '
+    set -euo pipefail
+    bash /h/apt-install.sh hello
+    hello
+    echo "--- sources"
+    cat /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true')"
+  [ "$rc" = 0 ] || fail "$image: apt-install.sh exited $rc"
+  expect "$log" "$image: indexes come from azure first" \
+    "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $codename InRelease"
+  expect "$log" "$image: azure refused the .deb" \
+    "^(Ign|Err):[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $codename(-updates|-security)?/main amd64 hello "
+  expect "$log" "$image: archive.ubuntu.com served it" \
+    "^Get:[0-9]+ http://archive\.ubuntu\.com/ubuntu $codename(-updates|-security)?/main amd64 hello "
+  expect "$log" "$image: hello runs" '^Hello, world!$'
+  if grep -Eq "$plain_uri" <(sed -n '/^--- sources$/,$p' "$log"); then
+    fail "$image: an Ubuntu source still bypasses the mirror list"
+  fi
+  show_log_if_failed "$log" "$started"
+done
+
+echo "--- control: packages from azure alone, as on job 110208231113 (ubuntu:22.04)"
+log="$work/control.log"
+started=$failures
+# shellcheck disable=SC2016 # $opts expands inside the container
+rc="$(in_ubuntu ubuntu:22.04 "$log" '
+  printf "%s\n" "http://azure.archive.ubuntu.com/ubuntu/	priority:1" \
+    "http://archive.ubuntu.com/ubuntu/	priority:2	type:index" >/etc/apt/control-mirrors.txt
+  sed -i -E "s#http://(archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:/etc/apt/control-mirrors.txt#" \
+    /etc/apt/sources.list
+  opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
+  timeout 600 apt-get $opts -y update && timeout 600 apt-get $opts -y install hello')"
+if [ "$rc" = 100 ]; then echo "ok: control exits 100"; else fail "control exited $rc, want 100"; fi
+expect "$log" "control fails on the stub's 502" \
+  "^E: Failed to fetch http://azure\.archive\.ubuntu\.com/.*/hello_.*502  Proxy Error"
+show_log_if_failed "$log" "$started"
+
+echo "--- third-party sources (ubuntu:24.04)"
+log="$work/third-party.log"
+started=$failures
+# shellcheck disable=SC2016 # $? expands inside the container
+rc="$(in_ubuntu ubuntu:24.04 "$log" '
+  run() { echo "--- $1"; shift; bash /h/apt-install.sh "$@"; echo "exit $?"; }
+  printf "deb http://thirdparty.test/corrupt ./\n" >/etc/apt/sources.list.d/thirdparty.list
+  # What an earlier update of every source left behind.
+  touch /var/lib/apt/lists/thirdparty.test_corrupt_._Packages
+  run "default, corrupt third-party index" hello
+  if [ -f /var/lib/apt/lists/thirdparty.test_corrupt_._Packages ]; then echo "third-party list kept"; fi
+  run "all sources, corrupt third-party index" --all-sources hello
+  printf "deb [trusted=yes] http://thirdparty.test/good ./\n" >/etc/apt/sources.list.d/thirdparty.list
+  run "all sources, third-party package" --all-sources keploy-apt-test
+  dpkg-query -W keploy-apt-test
+  apt-get -y remove keploy-apt-test >/dev/null
+  run "default, third-party package" keploy-apt-test
+  # The control: with cleanup on, an update does delete such a list.
+  echo "--- control"
+  touch /var/lib/apt/lists/thirdparty.test_corrupt_._Packages
+  apt-get -o Dir::Etc::SourceList=/dev/null -o Dir::Etc::SourceParts=/dev/null update >/dev/null
+  if [ ! -f /var/lib/apt/lists/thirdparty.test_corrupt_._Packages ]; then echo "cleanup deletes the list"; fi
+  echo "--- end"')"
+[ "$rc" = 0 ] || fail "third-party case exited $rc"
+section "$log" "default, corrupt third-party index" >"$work/tp-default"
+expect "$work/tp-default" "an Ubuntu-only install succeeds beside a corrupt third-party index" '^exit 0$'
+expect "$work/tp-default" "it installs the package" '^Setting up hello '
+if grep -q 'thirdparty\.test' "$work/tp-default"; then
+  fail "an Ubuntu-only update contacted the third-party source"
+fi
+# apt skips its list cleanup after a failed fetch, and then the list would be
+# kept whatever the options.
+if grep -q 'Some index files failed to download' "$work/tp-default"; then
+  grep -E '^(W|E): ' "$work/tp-default" || true
+  fail "an index fetch failed on every mirror, so apt skipped its list cleanup and the kept-list check is inconclusive"
+fi
+expect "$log" "an Ubuntu-only update keeps the third-party lists" '^third-party list kept$'
+expect "$log" "control: an update with cleanup on deletes such a list" '^cleanup deletes the list$'
+section "$log" "all sources, corrupt third-party index" >"$work/tp-all"
+expect "$work/tp-all" "--all-sources exits 100 on the corrupt index (control)" '^exit 100$'
+expect "$work/tp-all" "--all-sources fails on the stub's corrupt InRelease" \
+  "thirdparty\.test/corrupt.*InRelease.*NOSPLIT"
+section "$log" "all sources, third-party package" >"$work/tp-good"
+expect "$work/tp-good" "--all-sources installs a third-party package" '^exit 0$'
+expect "$log" "the third-party package is installed" '^keploy-apt-test[[:space:]]+1\.0$'
+section "$log" "default, third-party package" >"$work/tp-hidden"
+expect "$work/tp-hidden" "an Ubuntu-only install cannot see third-party packages" '^exit 100$'
+expect "$work/tp-hidden" "apt cannot locate the third-party package" \
+  '^E: Unable to locate package keploy-apt-test$'
+show_log_if_failed "$log" "$started"
+
+# The slow-mirror cases. In them archive.ubuntu.com and security.ubuntu.com
+# resolve to the stub as well, which passes them through unless the fault says
+# otherwise.
+fallbacks_to_stub=(--add-host "archive.ubuntu.com:$stub_ip" --add-host "security.ubuntu.com:$stub_ip")
+# fault <fault> <case>, inside the container: from then on apt there asks the
+# stub for that fault, and the stub's log names the case beside every .deb it
+# is asked for. `none` is a healthy mirror.
+# shellcheck disable=SC2016 # expands inside the container
+fault_fn='fault() { echo "Acquire::http::User-Agent \"apt-install-tests $1 $2\";" >/etc/apt/apt.conf.d/99stub; }'
+# stub_saw <case>: the requests for a .deb the stub got in that case, and for a
+# list in a case about the lists.
+stub_saw() { docker logs "$stub" 2>&1 | grep -F "case=$1 " || true; }
+# after_download <log>: what follows apt's last word on a finished download.
+after_download() { sed -n '/^Download complete and in download only mode$/,$p' "$1" | sed 1d; }
+# A line that apt had begun when it was stopped, with something written after
+# it. apt ends each of these three with the line end alone when its output is
+# not a terminal, so anything more on the line was written by someone else.
+glued='(Reading package lists|Building dependency tree|Reading state information)\.\.\..'
+# The helper under a slow azure, after a run that left the package lists and
+# the mirror list in place. $case and $list are set by the script it ends.
+# shellcheck disable=SC2016 # expands inside the container
+past_slow_azure='
+  echo "--- helper"
+  fault slow-debs "$case"
+  APT_INSTALL_SLICE_SECONDS=20 APT_INSTALL_BUDGET_SECONDS=80 bash /h/apt-install.sh jq
+  echo "exit $?"
+  jq --version
+  if cmp /tmp/list.before "$list"; then echo "mirror list: as it was"; fi
+  echo "--- end"'
+
+# slow_mirror_checks <image> <codename> <case> <log>
+slow_mirror_checks() {
+  local image="$1" codename="$2" case="$3" log="$4" deb
+  deb="$codename(-updates|-security)?/main amd64 (jq|libjq1|libonig5) "
+  # With healthy mirrors: the two apt runs that replaced the one install.
+  section "$log" healthy >"$work/$case.healthy"
+  expect "$work/$case.healthy" "$image: with healthy mirrors the helper installs" '^exit 0$'
+  expect "$work/$case.healthy" "$image: it downloads first" '^Download complete and in download only mode$'
+  after_download "$work/$case.healthy" >"$work/$case.healthy-install"
+  expect "$work/$case.healthy-install" "$image: and then installs" '^Setting up hello '
+  absent "$work/$case.healthy-install" "$image: without fetching again" '^Get:'
+
+  section "$log" helper >"$work/$case.helper"
+  expect "$work/$case.helper" "$image: the helper installs past a slow azure" '^exit 0$'
+  expect "$work/$case.helper" "$image: azure is asked first" \
+    "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $deb"
+  expect "$work/$case.helper" "$image: the helper finds azure too slow and puts archive.ubuntu.com in front" \
+    "^apt-install: [0-9]+ s with http://azure\.archive\.ubuntu\.com/ubuntu/ in front fetched $size \($size/s\), too slow for the $size still to fetch in the [0-9]+ s left\. Putting http://archive\.ubuntu\.com/ubuntu/ in front; apt keeps what it has fetched\.\$"
+  expect "$work/$case.helper" "$image: archive.ubuntu.com serves the .debs" \
+    "^Get:[0-9]+ http://archive\.ubuntu\.com/ubuntu $deb"
+  absent "$work/$case.helper" "$image: azure failed no fetch, so it was not apt that left it" \
+    "^(Ign|Err):[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $deb"
+  absent "$work/$case.helper" "$image: nothing is written on a line apt was stopped in" "$glued"
+  after_download "$work/$case.helper" >"$work/$case.helper-install"
+  expect "$work/$case.helper-install" "$image: the install follows the download" '^Setting up jq '
+  absent "$work/$case.helper-install" "$image: and fetches nothing" '^Get:'
+  expect "$work/$case.helper" "$image: jq runs" '^jq-[0-9]'
+  expect "$work/$case.helper" "$image: the mirror list ends as it began" '^mirror list: as it was$'
+  stub_saw "$case" >"$work/$case.stub"
+  expect "$work/$case.stub" "$image: archive.ubuntu.com is asked for the rest of the .deb azure began" \
+    'host=archive\.ubuntu\.com range=bytes=[1-9][0-9]*- '
+}
+
+echo "--- slow mirror: azure up but slow, the helper's own mirror list (ubuntu:22.04)"
+log="$work/slow-jammy.log"
+started=$failures
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
+  case=slow-jammy list=/etc/apt/ubuntu-mirrors.txt
+  echo "--- healthy"
+  fault none "$case"
+  bash /h/apt-install.sh hello
+  echo "exit $?"
+  cp "$list" /tmp/list.before
+  echo "--- control"
+  fault slow-debs "$case-control"
+  opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
+  rc=0
+  bash /h/hang_guard.sh 45 apt-get $opts -y install jq || rc=$?
+  # apt alone leaves its last line as it was when it was stopped.
+  echo
+  echo "exit $rc"
+  # What the control fetched must not be a head start for the helper.
+  apt-get clean'"$past_slow_azure" "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "ubuntu:22.04: the slow-mirror case exited $rc"
+section "$log" control >"$work/slow-control"
+deb='jammy(-updates|-security)?/main amd64 (jq|libjq1|libonig5) '
+expect "$work/slow-control" "control: apt alone runs into the time limit" 'hang guard: still running after 45s'
+expect "$work/slow-control" "control: having asked azure" "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $deb"
+absent "$work/slow-control" "control: with no failed fetch to act on" '^(Ign|Err):'
+absent "$work/slow-control" "control: and no other mirror in its output" '^Get:[0-9]+ http://(archive|security)\.ubuntu\.com/'
+stub_saw slow-jammy-control >"$work/slow-control.stub"
+expect "$work/slow-control.stub" "control: the stub was asked for a .deb as azure" 'host=azure\.archive\.ubuntu\.com '
+absent "$work/slow-control.stub" "control: and under no other name" 'host=(archive|security)\.ubuntu\.com '
+slow_mirror_checks ubuntu:22.04 jammy slow-jammy "$log"
+show_log_if_failed "$log" "$started"
+
+echo "--- slow mirror: azure up but slow, a mirror list the image already had (ubuntu:24.04)"
+log="$work/slow-noble.log"
+started=$failures
+# The sources get the shape of GitHub's hosted images, whose list is not the
+# helper's to keep. Plain http for all three mirrors: a stock image has no
+# ca-certificates for the https that the hosted list gives the last two.
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:24.04 "$log" "$fault_fn"'
+  case=slow-noble list=/etc/apt/apt-mirrors.txt
+  printf "%s\tpriority:%s\n" http://azure.archive.ubuntu.com/ubuntu/ 1 \
+    http://archive.ubuntu.com/ubuntu/ 2 http://security.ubuntu.com/ubuntu/ 3 >"$list"
+  sed -i -E "s#http://(archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:$list#" \
+    /etc/apt/sources.list.d/ubuntu.sources
+  echo "--- healthy"
+  fault none "$case"
+  bash /h/apt-install.sh hello
+  echo "exit $?"
+  if [ ! -e /etc/apt/ubuntu-mirrors.txt ]; then echo "the helper wrote no list of its own"; fi
+  cp "$list" /tmp/list.before'"$past_slow_azure" "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "ubuntu:24.04: the slow-mirror case exited $rc"
+expect "$log" "ubuntu:24.04: the image's list is the only one" '^the helper wrote no list of its own$'
+slow_mirror_checks ubuntu:24.04 noble slow-noble "$log"
+show_log_if_failed "$log" "$started"
+
+echo "--- every mirror slow (ubuntu:22.04)"
+log="$work/slow-everywhere.log"
+started=$failures
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
+  case=slow-everywhere list=/etc/apt/ubuntu-mirrors.txt
+  fault none "$case"
+  bash /h/apt-install.sh hello
+  cp "$list" /tmp/list.before
+  echo "--- helper"
+  fault slow-debs-everywhere "$case"
+  # A budget of three slices, one for each mirror. What the helper spends
+  # between two slices comes out of the third, which it cuts to the time
+  # left: so the third is the last, whatever the machine is busy with, and
+  # still has most of its 30 s, in which apt gets as far as its .deb. A
+  # budget of four slices would end in a fourth of whatever is left over, a
+  # few seconds in which apt is stopped while it starts, or none.
+  APT_INSTALL_SLICE_SECONDS=30 APT_INSTALL_BUDGET_SECONDS=90 bash /h/apt-install.sh jq
+  echo "exit $?"
+  if ! command -v jq >/dev/null; then echo "jq: not installed"; fi
+  if cmp /tmp/list.before "$list"; then echo "mirror list: as it was"; fi
+  echo "--- end"' "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "the every-mirror-slow case exited $rc"
+section "$log" helper >"$work/slow-everywhere.helper"
+expect "$work/slow-everywhere.helper" "with every mirror slow the helper exits 124" '^exit 124$'
+slice_of() { printf '%s %s in [0-9]+ s \\(%s/s\\)' "$1" "$size" "$size"; }
+expect "$work/slow-everywhere.helper" "and says how much it fetched, how fast, and from which mirrors: one slice each" \
+  "^::error::apt-install\.sh: the packages were not downloaded within 90 s, so none was installed \(exit 124\)\. Fetched $size in that time \($size/s\)\. Mirror in front, slice by slice: $(slice_of 'http://azure\.archive\.ubuntu\.com/ubuntu/'); $(slice_of 'http://archive\.ubuntu\.com/ubuntu/'); $(slice_of 'http://security\.ubuntu\.com/ubuntu/')\.\$"
+absent "$work/slow-everywhere.helper" "nothing is written on a line apt was stopped in" "$glued"
+expect "$work/slow-everywhere.helper" "nothing is installed" '^jq: not installed$'
+expect "$work/slow-everywhere.helper" "the mirror list ends as it began" '^mirror list: as it was$'
+stub_saw slow-everywhere >"$work/slow-everywhere.stub"
+for host in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com; do
+  expect "$work/slow-everywhere.stub" "$host was asked for a .deb" "host=${host//./\\.} "
+done
+for host in archive.ubuntu.com security.ubuntu.com; do
+  expect "$work/slow-everywhere.stub" "$host was asked to go on where the mirror before it stopped" \
+    "host=${host//./\\.} range=bytes=[1-9][0-9]*- "
+done
+show_log_if_failed "$log" "$started"
+
+# The package lists. $case and $list are set by the script it ends, after a
+# healthy run that left the mirror list in place. bc is a package that no
+# earlier run installed.
+# shellcheck disable=SC2016 # expands inside the container
+past_slow_lists='
+  echo "--- helper"
+  fault slow-lists "$case"
+  APT_INSTALL_SLICE_SECONDS=20 APT_INSTALL_BUDGET_SECONDS=80 bash /h/apt-install.sh bc
+  echo "exit $?"
+  echo "1+1=$(echo 1+1 | bc)"
+  if cmp /tmp/list.before "$list"; then echo "mirror list: as it was"; fi
+  echo "--- end"'
+
+# judged_slices <helper section>: a line for each slice of the update the
+# helper judged, "<mirror> <bytes> <unit> <seconds> <rate> <unit>", the bytes
+# and the rate as it printed them ("9 kB", "425 B/s").
+judged_slices() {
+  sed -nE 's#^apt-install: ([0-9]+) s of apt-get update with ([^ ]+) in front received ([0-9.]+) ([kM]?B) \(([0-9.]+) ([kM]?B)/s\), .*#\2 \3 \4 \1 \5 \6#p' "$1"
+}
+
+# error_slices <helper section>: the same for each slice the ::error:: line of
+# a spent update names, after a line "= <bytes> <unit> <budget> <rate> <unit>"
+# for the total it names.
+error_slices() {
+  sed -nE '/^::error::apt-install\.sh: apt-get update was not done within /{
+      s#^.* within ([0-9]+) s \(exit 124\)\. Received ([0-9.]+) ([kM]?B) in that time \(([0-9.]+) ([kM]?B)/s\)\. Mirror in front, slice by slice: (.*)\.$#= \2 \3 \1 \4 \5; \6#
+      s#; #\n#g
+      p
+    }' "$1" | sed -E 's#^([^ ]+) ([0-9.]+) ([kM]?B) in ([0-9]+) s \(([0-9.]+) ([kM]?B)/s\)$#\1 \2 \3 \4 \5 \6#'
+}
+
+# pins_received <description> <slices> <case>: what the helper says each
+# mirror's slices received is what the stub wrote to apt as that mirror in
+# the case, and each rate is those bytes over those seconds. The slices are
+# judged_slices' or error_slices' lines, and name only mirrors whose lists all
+# came within them.
+#
+# The helper counts what reached the machine: each list as the stub wrote it,
+# and the TCP/IP headers around it, one for every 128 bytes at the stub's
+# slow rate (8 to 12 kB in a slice that the stub wrote 5 to 8 kB in, 405 to
+# 425 B/s against the stub's 256), and the HTTP headers. So it is at least
+# what the stub wrote and at most twice that and 2 kB. Each figure is as
+# exact as the helper's rounding: to 1 B under 1 kB, to 500 B under 1 MB. A
+# counter that reads nothing, or less than the stub wrote, or more than that
+# band, fails here. How the count treats an interface that goes away or
+# comes up in a slice, which no case here has, is pinned by the rewrite
+# case's received_between rows.
+pins_received() {
+  local what="$1" slices="$2" case="$3" problems
+  docker exec "$stub" python -c 'import sys, urllib.request
+sys.stdout.write(urllib.request.urlopen("http://127.0.0.1/sent/" + sys.argv[1], timeout=30).read().decode())' \
+    "$case" >"$work/$case.sent"
+  problems="$(awk '
+    function bytes(value, unit) { return unit == "MB" ? value * 1e6 : unit == "kB" ? value * 1e3 : value }
+    function slack(unit) { return unit == "MB" ? 5e4 : unit == "kB" ? 500 : 0 }
+    # rated <bytes> <its slack> <seconds> <rate> <its slack>: the rate the
+    # helper printed can be those bytes over those seconds, rounded down.
+    function rated(b, bs, t, r, rs) { return (r - rs) * t <= b + bs && b - bs < (r + rs + 1) * t }
+    FILENAME == ARGV[1] { sent[$1] = $2; next }
+    NF != 6 { printf "a line it did not print as a slice: %s; ", $0; next }
+    $1 == "=" { total = bytes($2, $3); total_slack = slack($3)
+      if (!rated(total, total_slack, $4, bytes($5, $6), slack($6)))
+        printf "a total of %s %s in %s s is not %s %s/s; ", $2, $3, $4, $5, $6
+      next }
+    {
+      host = $1; sub(/^https?:\/\//, "", host); sub(/\/.*/, "", host)
+      b = bytes($2, $3); bs = slack($3); slices++
+      if (!rated(b, bs, $4, bytes($5, $6), slack($6)))
+        printf "%s: %s %s in %s s is not %s %s/s; ", host, $2, $3, $4, $5, $6
+      got[host] += b; got_slack[host] += bs; all += b; all_slack += bs
+    }
+    END {
+      if (slices == 0) printf "no slice; "
+      if (total_slack != "" && (total + total_slack < all - all_slack || total - total_slack > all + all_slack))
+        printf "a total of %d B, not the %d B of its slices; ", total, all
+      for (host in got) {
+        if (sent[host] < 1000)
+          printf "the stub wrote %d B of lists as %s, not the 1 kB and more a slice gets; ", sent[host], host
+        else if (got[host] + got_slack[host] < sent[host] || got[host] - got_slack[host] > 2 * sent[host] + 2000)
+          printf "%s: received %d B, not the %d B the stub wrote and their headers; ", host, got[host], sent[host]
+      }
+    }' "$work/$case.sent" "$slices")"
+  if [ -z "$problems" ]; then
+    echo "ok: $what"
+  else
+    fail "$what (${problems%; })"
+  fi
+}
+
+# slow_lists_checks <image> <codename> <case> <log>
+slow_lists_checks() {
+  local image="$1" codename="$2" case="$3" log="$4"
+  section "$log" helper >"$work/$case.helper"
+  expect "$work/$case.helper" "$image: the helper installs past an azure that trickles its lists" '^exit 0$'
+  expect "$work/$case.helper" "$image: azure is asked first for the lists" \
+    "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $codename InRelease"
+  expect "$work/$case.helper" "$image: the helper finds the update too slow and puts archive.ubuntu.com in front" \
+    "^apt-install: [0-9]+ s of apt-get update with http://azure\.archive\.ubuntu\.com/ubuntu/ in front received $size \($size/s\), under the 100 kB/s that the package lists need\. Putting http://archive\.ubuntu\.com/ubuntu/ in front; apt goes on from what it has fetched\.\$"
+  expect "$work/$case.helper" "$image: archive.ubuntu.com serves the lists" \
+    "^(Get|Hit):[0-9]+ http://archive\.ubuntu\.com/ubuntu $codename InRelease"
+  absent "$work/$case.helper" "$image: azure failed no fetch, so it was not apt that left it" \
+    "^(Ign|Err):[0-9]+ http://azure\.archive\.ubuntu\.com/"
+  absent "$work/$case.helper" "$image: nothing is written on a line apt was stopped in" "$glued"
+  expect "$work/$case.helper" "$image: the download follows the update" '^Download complete and in download only mode$'
+  expect "$work/$case.helper" "$image: bc runs" '^1\+1=2$'
+  expect "$work/$case.helper" "$image: the mirror list ends as it began" '^mirror list: as it was$'
+  stub_saw "$case" >"$work/$case.stub"
+  expect "$work/$case.stub" "$image: the stub was asked for a list as azure" \
+    'host=azure\.archive\.ubuntu\.com range=[^ ]+ /ubuntu/dists/'
+  expect "$work/$case.stub" "$image: and as archive.ubuntu.com" \
+    'host=archive\.ubuntu\.com range=[^ ]+ /ubuntu/dists/'
+  absent "$work/$case.stub" "$image: every list came from the stub's own copy, none from the real mirror" ' forwarded '
+  judged_slices "$work/$case.helper" | grep -F 'http://azure.archive.ubuntu.com/' >"$work/$case.slices" || true
+  pins_received "$image: the bytes and the rate it gives for azure's slice are what the stub wrote as azure" \
+    "$work/$case.slices" "$case"
+}
+
+echo "--- slow lists: azure trickles its package lists, the helper's own mirror list (ubuntu:22.04)"
+log="$work/lists-jammy.log"
+started=$failures
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
+  case=lists-jammy list=/etc/apt/ubuntu-mirrors.txt
+  fault none "$case"
+  bash /h/apt-install.sh hello >/dev/null
+  cp "$list" /tmp/list.before
+  echo "--- control"
+  fault slow-lists "$case-control"
+  opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
+  rc=0
+  bash /h/hang_guard.sh 45 apt-get $opts -y update || rc=$?
+  echo
+  echo "exit $rc"'"$past_slow_lists" "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "ubuntu:22.04: the slow-lists case exited $rc"
+section "$log" control >"$work/lists-control"
+expect "$work/lists-control" "control: apt alone runs into the time limit on the update" 'hang guard: still running after 45s'
+expect "$work/lists-control" "control: having asked azure for the lists" \
+  "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu jammy InRelease"
+absent "$work/lists-control" "control: with no failed fetch to act on" '^(Ign|Err):'
+absent "$work/lists-control" "control: and no other mirror in its output" '^(Get|Hit):[0-9]+ http://(archive|security)\.ubuntu\.com/'
+stub_saw lists-jammy-control >"$work/lists-control.stub"
+absent "$work/lists-control.stub" "control: the stub was asked for no list under another name" 'host=(archive|security)\.ubuntu\.com '
+slow_lists_checks ubuntu:22.04 jammy lists-jammy "$log"
+show_log_if_failed "$log" "$started"
+
+echo "--- slow lists: azure trickles its package lists, a mirror list the image already had (ubuntu:24.04)"
+log="$work/lists-noble.log"
+started=$failures
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:24.04 "$log" "$fault_fn"'
+  case=lists-noble list=/etc/apt/apt-mirrors.txt
+  printf "%s\tpriority:%s\n" http://azure.archive.ubuntu.com/ubuntu/ 1 \
+    http://archive.ubuntu.com/ubuntu/ 2 http://security.ubuntu.com/ubuntu/ 3 >"$list"
+  sed -i -E "s#http://(archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:$list#" \
+    /etc/apt/sources.list.d/ubuntu.sources
+  fault none "$case"
+  bash /h/apt-install.sh hello >/dev/null
+  cp "$list" /tmp/list.before'"$past_slow_lists" "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "ubuntu:24.04: the slow-lists case exited $rc"
+slow_lists_checks ubuntu:24.04 noble lists-noble "$log"
+show_log_if_failed "$log" "$started"
+
+echo "--- every mirror trickles its package lists (ubuntu:22.04)"
+log="$work/lists-everywhere.log"
+started=$failures
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
+  case=lists-everywhere list=/etc/apt/ubuntu-mirrors.txt
+  fault none "$case"
+  bash /h/apt-install.sh hello >/dev/null
+  cp "$list" /tmp/list.before
+  echo "--- helper"
+  fault slow-lists-everywhere "$case"
+  # Three slices, one for each mirror, as in the every-mirror-slow case.
+  APT_INSTALL_SLICE_SECONDS=30 APT_INSTALL_BUDGET_SECONDS=90 bash /h/apt-install.sh bc
+  echo "exit $?"
+  if ! command -v bc >/dev/null; then echo "bc: not installed"; fi
+  if cmp /tmp/list.before "$list"; then echo "mirror list: as it was"; fi
+  echo "--- end"' "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "the every-mirror-lists-slow case exited $rc"
+section "$log" helper >"$work/lists-everywhere.helper"
+expect "$work/lists-everywhere.helper" "with every mirror's lists slow the helper exits 124" '^exit 124$'
+expect "$work/lists-everywhere.helper" "and says how much it received, how fast, and from which mirrors: one slice each" \
+  "^::error::apt-install\.sh: apt-get update was not done within 90 s \(exit 124\)\. Received $size in that time \($size/s\)\. Mirror in front, slice by slice: $(slice_of 'http://azure\.archive\.ubuntu\.com/ubuntu/'); $(slice_of 'http://archive\.ubuntu\.com/ubuntu/'); $(slice_of 'http://security\.ubuntu\.com/ubuntu/')\.\$"
+absent "$work/lists-everywhere.helper" "it downloads nothing" '^Download complete'
+absent "$work/lists-everywhere.helper" "nothing is written on a line apt was stopped in" "$glued"
+expect "$work/lists-everywhere.helper" "nothing is installed" '^bc: not installed$'
+expect "$work/lists-everywhere.helper" "the mirror list ends as it began" '^mirror list: as it was$'
+stub_saw lists-everywhere >"$work/lists-everywhere.stub"
+for host in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com; do
+  expect "$work/lists-everywhere.stub" "$host was asked for a list" "host=${host//./\\.} range=[^ ]+ /ubuntu/dists/"
+done
+absent "$work/lists-everywhere.stub" "every list came from the stub's own copy, none from the real mirror" ' forwarded '
+error_slices "$work/lists-everywhere.helper" >"$work/lists-everywhere.slices"
+pins_received "the bytes and the rates it gives are what the stub wrote as each mirror, and its total their sum" \
+  "$work/lists-everywhere.slices" lists-everywhere
+show_log_if_failed "$log" "$started"
+
+echo "--- the floor on the lists, under and over the rate of a mirror that trickles them (ubuntu:22.04)"
+log="$work/lists-floor.log"
+started=$failures
+# Under the rate the mirror stays in front for every slice, until the budget
+# is spent. Over it, but under the bytes one slice receives, the next mirror
+# goes in front: what is judged is the rate, not the bytes.
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
+  case=lists-floor list=/etc/apt/ubuntu-mirrors.txt
+  fault none "$case"
+  bash /h/apt-install.sh hello >/dev/null
+  cp "$list" /tmp/list.before
+  echo "--- floor under the rate"
+  fault slow-lists "$case-under"
+  APT_INSTALL_LIST_RATE=100 APT_INSTALL_SLICE_SECONDS=20 APT_INSTALL_BUDGET_SECONDS=40 bash /h/apt-install.sh bc
+  echo "exit $?"
+  if ! command -v bc >/dev/null; then echo "bc: not installed"; fi
+  if cmp /tmp/list.before "$list"; then echo "mirror list: as it was"; fi
+  echo "--- floor over the rate"
+  fault slow-lists "$case-over"
+  APT_INSTALL_LIST_RATE=2000 APT_INSTALL_SLICE_SECONDS=20 APT_INSTALL_BUDGET_SECONDS=80 bash /h/apt-install.sh bc
+  echo "exit $?"
+  echo "1+1=$(echo 1+1 | bc)"
+  if cmp /tmp/list.before "$list"; then echo "mirror list: as it was"; fi
+  echo "--- end"' "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "the lists-floor case exited $rc"
+azure='http://azure\.archive\.ubuntu\.com/ubuntu/'
+section "$log" "floor under the rate" >"$work/lists-floor-under.helper"
+expect "$work/lists-floor-under.helper" "floor 100 B/s: azure stays in front, having received bytes at a rate over the floor" \
+  "^apt-install: [0-9]+ s of apt-get update with $azure in front received [0-9.]+ (kB|MB) \\($size/s\\), at least the 100 B/s that the package lists need, so it stays in front\\.\$"
+absent "$work/lists-floor-under.helper" "floor 100 B/s: no other mirror is put in front" '^apt-install: .*Putting '
+expect "$work/lists-floor-under.helper" "floor 100 B/s: the budget is spent with azure in front, slice after slice" '^exit 124$'
+expect "$work/lists-floor-under.helper" "floor 100 B/s: and the ::error:: line names azure for both slices" \
+  "^::error::apt-install\\.sh: apt-get update was not done within 40 s \\(exit 124\\)\\. Received $size in that time \\($size/s\\)\\. Mirror in front, slice by slice: $(slice_of "$azure"); $(slice_of "$azure")\\.\$"
+expect "$work/lists-floor-under.helper" "floor 100 B/s: nothing is installed" '^bc: not installed$'
+expect "$work/lists-floor-under.helper" "floor 100 B/s: the mirror list ends as it began" '^mirror list: as it was$'
+error_slices "$work/lists-floor-under.helper" >"$work/lists-floor-under.slices"
+pins_received "floor 100 B/s: the bytes and the rates it gives are what the stub wrote as azure, and its total their sum" \
+  "$work/lists-floor-under.slices" lists-floor-under
+section "$log" "floor over the rate" >"$work/lists-floor-over.helper"
+expect "$work/lists-floor-over.helper" "floor 2 kB/s: azure goes behind, though its slice received more than 2 kB" \
+  "^apt-install: [0-9]+ s of apt-get update with $azure in front received ([3-9]|[1-9][0-9]+) kB \\($size/s\\), under the 2 kB/s that the package lists need\\. Putting http://archive\\.ubuntu\\.com/ubuntu/ in front; apt goes on from what it has fetched\\.\$"
+expect "$work/lists-floor-over.helper" "floor 2 kB/s: the helper installs" '^exit 0$'
+expect "$work/lists-floor-over.helper" "floor 2 kB/s: bc runs" '^1\+1=2$'
+expect "$work/lists-floor-over.helper" "floor 2 kB/s: the mirror list ends as it began" '^mirror list: as it was$'
+judged_slices "$work/lists-floor-over.helper" | grep -F 'http://azure.archive.ubuntu.com/' >"$work/lists-floor-over.slices" || true
+pins_received "floor 2 kB/s: the bytes and the rate it gives for azure's slice are what the stub wrote as azure" \
+  "$work/lists-floor-over.slices" lists-floor-over
+for part in under over; do
+  stub_saw "lists-floor-$part" >"$work/lists-floor-$part.stub"
+  absent "$work/lists-floor-$part.stub" "floor $part the rate: every list came from the stub's own copy" ' forwarded '
+done
+show_log_if_failed "$log" "$started"
+
+# Root without CAP_DAC_OVERRIDE cannot read a file of mode 000, so here a
+# source file the helper cannot filter is made. The helper has to stop on it
+# before it changes any file.
+# shellcheck disable=SC2016 # expands inside the container
+locked_script='
+set -euo pipefail
+rm -rf /etc/apt/sources.list.d/*
+printf "deb http://archive.ubuntu.com/ubuntu jammy main\n" >/etc/apt/sources.list
+printf "deb http://archive.ubuntu.com/ubuntu jammy universe\n" >/etc/apt/sources.list.d/locked.list
+chmod 000 /etc/apt/sources.list.d/locked.list
+if cat /etc/apt/sources.list.d/locked.list >/dev/null 2>&1; then echo "root can still read the locked file"; fi
+snap() { find /etc/apt -type f -exec stat -c "%n %i %.9Z %s" {} + | sort; }
+snap >/tmp/before
+rc=0
+bash /h/apt-install.sh hello || rc=$?
+echo "exit $rc"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "no change"; fi
+'
+
+# The offline case runs under three images: their awk (mawk) builds differ, and
+# the helper's entry filter and its mirror list reordering are awk.
+# shellcheck disable=SC2016 # expands inside the container
+rewrite_script='
+set -euo pipefail
+# The shim prints its arguments and keeps a copy of the source parts each
+# subcommand is given, which the helper deletes when it exits.
+cat >/usr/local/sbin/apt-get <<"S"
+#!/bin/sh
+echo "apt-get $*"
+parts= sub= kind=
+for a; do
+  case "$a" in
+    Dir::Etc::SourceParts=*) parts="${a#*=}" ;;
+    update|install) sub="$a" kind="$a" ;;
+    --download-only|--no-download|--print-uris) kind="${a#--}" ;;
+  esac
+done
+if [ -n "$parts" ]; then rm -rf "/tmp/parts-$sub"; cp -r "$parts" "/tmp/parts-$sub"; fi
+# The rest is for the runs under a slow apt-get, which make /tmp/slow. Each
+# call says in what order it found the two mirror lists, on stderr because the
+# helper reads the stdout of --print-uris, and keeps a copy of them.
+[ -d /tmp/slow ] || exit 0
+order() { awk "!/^[ \t]*(#|\$)/ { sub(/^https?:\/\//, \"\", \$1); sub(/\/.*/, \"\", \$1); printf \" %s\", \$1 }" "$1" 2>/dev/null; }
+echo "slow: $kind: own list:$(order /etc/apt/ubuntu-mirrors.txt), image list:$(order /etc/apt/apt-mirrors.txt)" >&2
+cp /etc/apt/ubuntu-mirrors.txt "/tmp/slow/own.$kind" 2>/dev/null
+cp /etc/apt/apt-mirrors.txt "/tmp/slow/image.$kind" 2>/dev/null
+# A call that outlasts its limit is stopped the way apt is when it is stopped
+# while it starts: in the middle of a line, which it has begun and not ended.
+outlast() { printf "Building dependency tree..."; exec sleep 20; }
+case "$kind" in
+  # One .deb of 100000 bytes is still to fetch. Saying so takes as long as
+  # /tmp/slow/print-uris says, if it is there.
+  print-uris)
+    if [ -f /tmp/slow/print-uris ]; then sleep "$(cat /tmp/slow/print-uris)"; fi
+    printf "\047mirror+file:/x/pool/a.deb\047 a.deb 100000 MD5Sum:0\n"
+    exit 0
+    ;;
+  # The install is done at once, unless /tmp/slow/no-download is there: then
+  # it outlasts any limit used here.
+  no-download)
+    [ -f /tmp/slow/no-download ] || exit 0
+    outlast
+    ;;
+esac
+# An update or a download: as many of each as /tmp/slow says outlast any limit
+# used here. A download first fetches the bytes it is told to. The one call
+# that finds the count /tmp/slow/anew names has apt begin the .deb anew
+# instead, and is stopped with nothing of it.
+calls="$(cat "/tmp/slow/$kind")"
+[ "$calls" -gt 0 ] || exit 0
+echo "$((calls - 1))" >"/tmp/slow/$kind"
+if [ "$kind" = download-only ]; then
+  if [ "$calls" = "$(cat /tmp/slow/anew 2>/dev/null)" ]; then
+    : >/var/cache/apt/archives/partial/a.deb
+  else
+    head -c "$(cat /tmp/slow/fetch)" /dev/zero >>/var/cache/apt/archives/partial/a.deb
+  fi
+fi
+outlast
+S
+chmod +x /usr/local/sbin/apt-get
+# The entries the update was given, and whether the install got the same.
+show_parts() {
+  echo "--- $1"
+  for f in /tmp/parts-update/*; do echo "-- ${f##*/}"; cat "$f"; done
+  echo "--- end"
+  if diff -r /tmp/parts-update /tmp/parts-install; then echo "$1: the install reads the same"; fi
+}
+
+# The list on the hosted images, whose fallbacks are https.
+hosted_list() {
+  printf "%s\tpriority:%s\n" http://azure.archive.ubuntu.com/ubuntu/ 1 \
+    https://archive.ubuntu.com/ubuntu/ 2 https://security.ubuntu.com/ubuntu/ 3 \
+    >/etc/apt/apt-mirrors.txt
+}
+
+fixture() {
+  rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+  hosted_list
+  # One Ubuntu mirror and one other host: not an Ubuntu list.
+  printf "%s\n" http://archive.ubuntu.com/ubuntu/ https://mirror.example.com/ubuntu/ \
+    >/etc/apt/vendor-mirrors.txt
+  cat >/etc/apt/sources.list <<"S"
+# deb http://archive.ubuntu.com/ubuntu jammy main
+deb http://archive.ubuntu.com/ubuntu/ jammy main restricted
+deb-src http://archive.ubuntu.com/ubuntu jammy main
+deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://us.archive.ubuntu.com/ubuntu jammy-updates main
+deb [arch=amd64 ]http://archive.ubuntu.com/ubuntu jammy-proposed main
+deb http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ jammy-backports main
+deb https://security.ubuntu.com/ubuntu jammy-security main
+	deb	http://azure.archive.ubuntu.com/ubuntu	jammy	universe
+# deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
+deb mirror+file:/etc/apt/vendor-mirrors.txt jammy main
+deb http://ports.ubuntu.com/ubuntu-ports jammy main
+deb http://us.ports.ubuntu.com/ubuntu-ports jammy main
+deb http://archive.ubuntu.com/ubuntu-ports jammy main
+deb http://old-releases.ubuntu.com/ubuntu hirsute main
+deb http://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main
+deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable
+S
+  cat >/etc/apt/sources.list.d/ubuntu.sources <<"S"
+## URIs: http://archive.ubuntu.com/ubuntu/
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: noble noble-updates
+Components: main
+
+Types: deb
+uris:http://security.ubuntu.com/ubuntu/ http://azure.archive.ubuntu.com/ubuntu/
+ http://archive.ubuntu.com/ubuntu
+Suites: noble-security
+Components: main
+
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/ https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+ https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+# apt skips a comment line and the field goes on
+ https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+
+Types: deb
+URIs: mirror+file:/etc/apt/vendor-mirrors.txt
+Suites: noble
+Components: main
+
+Types: deb
+URIs : http://archive.ubuntu.com/ubuntu/
+Suites: noble-backports
+Components: main
+S
+  # Disabled stanzas are no entries: not read, and not named as left out.
+  cat >/etc/apt/sources.list.d/disabled.sources <<"S"
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+Enabled: no
+
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: noble-proposed
+Components: main
+enabled: False
+
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: noble
+Components: main
+Enabled: no
+S
+  # Fields but no URIs: left out, and named.
+  printf "%s\n" "Types: deb" "Suites: noble" "Components: main" >/etc/apt/sources.list.d/nouris.sources
+  cat >/etc/apt/sources.list.d/docker.sources <<"S"
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+S
+  printf "deb https://packages.microsoft.com/ubuntu/24.04/prod noble main\n" \
+    >/etc/apt/sources.list.d/microsoft-prod.list
+  printf "deb http://archive.ubuntu.com/ubuntu noble universe\n" \
+    >/etc/apt/sources.list.d/extra.list
+}
+
+# The shape of the GitHub-hosted images: the sources already go through their
+# own mirror list.
+hosted_fixture() {
+  rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+  hosted_list
+  printf "# Ubuntu sources have moved to ubuntu.sources\n" >/etc/apt/sources.list
+  cat >/etc/apt/sources.list.d/ubuntu.sources <<"S"
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: noble noble-updates noble-backports noble-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+S
+  printf "deb https://packages.microsoft.com/ubuntu/24.04/prod noble main\n" \
+    >/etc/apt/sources.list.d/microsoft-prod.list
+}
+
+# The shape of the hosted ubuntu-26.04 image GitHub runs in AWS: its list has
+# the mirror of its region first (152 bytes, as apt said it fetched there),
+# and the -security entry names a host instead of the list.
+aws_fixture() {
+  rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+  printf "%s\tpriority:%s\n" http://us-east-2.ec2.archive.ubuntu.com/ubuntu/ 1 \
+    https://archive.ubuntu.com/ubuntu/ 2 https://security.ubuntu.com/ubuntu/ 3 \
+    >/etc/apt/apt-mirrors.txt
+  printf "# Ubuntu sources have moved to ubuntu.sources\n" >/etc/apt/sources.list
+  cat >/etc/apt/sources.list.d/ubuntu.sources <<"S"
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: resolute resolute-updates resolute-backports
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu
+Suites: resolute-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+S
+  printf "deb https://packages.microsoft.com/ubuntu/26.04/prod resolute main\n" \
+    >/etc/apt/sources.list.d/microsoft-prod.list
+}
+
+# Change time in ns: any write moves it, even one that keeps the inode, the
+# size and the content, as a cp onto the same file does.
+snap() { find /etc/apt -type f -exec stat -c "%n %i %.9Z %s" {} + | sort; find /etc/apt -type f -exec sha256sum {} + | sort; }
+
+fixture
+bash /h/apt-install.sh hello
+echo "--- sources.list"; cat /etc/apt/sources.list
+echo "--- ubuntu.sources"; cat /etc/apt/sources.list.d/ubuntu.sources
+echo "--- docker.sources"; cat /etc/apt/sources.list.d/docker.sources
+echo "--- microsoft-prod.list"; cat /etc/apt/sources.list.d/microsoft-prod.list
+echo "--- extra.list"; cat /etc/apt/sources.list.d/extra.list
+echo "--- ubuntu-mirrors.txt"; cat /etc/apt/ubuntu-mirrors.txt
+show_parts "update reads"
+snap >/tmp/run1
+bash /h/apt-install.sh hello
+snap >/tmp/run2
+if diff /tmp/run1 /tmp/run2; then echo "second run: no change"; fi
+
+# The sources already name the list, so a re-run has to put back a list that
+# went missing or out of date.
+cp /etc/apt/ubuntu-mirrors.txt /tmp/list.want
+rm /etc/apt/ubuntu-mirrors.txt
+bash /h/apt-install.sh hello
+if cmp /tmp/list.want /etc/apt/ubuntu-mirrors.txt; then echo "deleted list: restored"; fi
+echo stale >/etc/apt/ubuntu-mirrors.txt
+bash /h/apt-install.sh hello
+if cmp /tmp/list.want /etc/apt/ubuntu-mirrors.txt; then echo "stale list: restored"; fi
+
+# A source added after a run names a host again. The list the sources name by
+# then is the one of this script, which is no list of the machine of its own,
+# so the next run rewrites the new entry as well.
+printf "deb http://archive.ubuntu.com/ubuntu noble multiverse\n" >/etc/apt/sources.list.d/later.list
+bash /h/apt-install.sh hello | sed "s/^/added later: /"
+sed "s/^/added later: now /" /etc/apt/sources.list.d/later.list
+
+fixture
+snap >/tmp/before
+RUNNER_ENVIRONMENT=self-hosted bash /h/apt-install.sh hello | sed "s/^/self-hosted: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "self-hosted: no change"; fi
+
+hosted_fixture
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/hosted: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "hosted image: no change"; fi
+show_parts "hosted: update reads"
+
+aws_fixture
+echo "aws: list of $(wc -c </etc/apt/apt-mirrors.txt) bytes"
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/aws: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "aws image: no change"; fi
+show_parts "aws: update reads"
+
+# The same mix in the one-line format: one entry names the list of the image,
+# the others a host, and one of those a host this script would rewrite.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+hosted_list
+cat >/etc/apt/sources.list <<"S"
+deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
+deb http://security.ubuntu.com/ubuntu jammy-security main
+deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable
+S
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/one-line mix: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "one-line mix: no change"; fi
+
+# A list of the machine at a path other than that of the hosted images: the
+# rule is any list of the machine, not the path GitHub gives it.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+printf "%s\tpriority:%s\n" http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ 1 \
+  https://archive.ubuntu.com/ubuntu/ 2 >/etc/apt/region-mirrors.txt
+cat >/etc/apt/sources.list <<"S"
+deb mirror+file:/etc/apt/region-mirrors.txt jammy main
+deb http://security.ubuntu.com/ubuntu jammy-security main
+S
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/other path: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "other path: no change"; fi
+
+# The list of the image named only from a .list file in sources.list.d, while
+# sources.list names a host.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+hosted_list
+printf "deb http://archive.ubuntu.com/ubuntu jammy main\n" >/etc/apt/sources.list
+printf "deb mirror+file:/etc/apt/apt-mirrors.txt jammy-updates main\n" >/etc/apt/sources.list.d/hosted.list
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/list.d: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "list.d: no change"; fi
+
+# A deb822 stanza that apt reads, with a comment line in it that names the list
+# of the image: apt skips that line, so the stanza names only its host, and it
+# is rewritten.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+hosted_list
+: >/etc/apt/sources.list
+printf "%s\n" "Types: deb" "# URIs: mirror+file:/etc/apt/apt-mirrors.txt" "URIs: http://archive.ubuntu.com/ubuntu/" \
+  "Suites: noble" "Components: main" >/etc/apt/sources.list.d/ubuntu.sources
+bash /h/apt-install.sh hello | sed "s/^/stanza comment: /"
+sed "s/^/stanza comment: now /" /etc/apt/sources.list.d/ubuntu.sources
+
+# No sources.list at all, as on an image that keeps only deb822 files: the
+# helper reads the files there are, and rewrites them.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/* /etc/apt/sources.list
+printf "%s\n" "Types: deb" "URIs: http://archive.ubuntu.com/ubuntu/" "Suites: noble" "Components: main" \
+  >/etc/apt/sources.list.d/ubuntu.sources
+rc=0
+bash /h/apt-install.sh hello >/tmp/out 2>&1 || rc=$?
+sed "s/^/no sources.list: /" /tmp/out
+echo "no sources.list: exit $rc"
+
+# CRLF line ends, which apt reads: in a deb822 file of two stanzas, split by a
+# line of two CRs (empty to apt), and in a mirror list.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+: >/etc/apt/sources.list
+printf "%s\r\n" http://archive.ubuntu.com/ubuntu/ >/etc/apt/crlf-mirrors.txt
+ubuntu_stanza=("Types: deb" "URIs: mirror+file:/etc/apt/crlf-mirrors.txt" "Suites: noble" "Components: main")
+{ printf "%s\r\n" "${ubuntu_stanza[@]}"; printf "\r\r\n"
+  printf "%s\r\n" "Types: deb" "URIs: https://download.docker.com/linux/ubuntu" "Suites: noble" "Components: stable"
+} >/etc/apt/sources.list.d/crlf.sources
+bash /h/apt-install.sh hello | sed "s/^/crlf: /"
+printf "%s\n" "${ubuntu_stanza[@]}" >/tmp/crlf.want
+if cmp /tmp/crlf.want /tmp/parts-update/000-crlf.sources; then echo "crlf: kept the Ubuntu stanza only"; fi
+
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+printf "deb https://download.docker.com/linux/ubuntu noble stable\n" >/etc/apt/sources.list
+rc=0
+bash /h/apt-install.sh hello >/tmp/out 2>&1 || rc=$?
+sed "s/^/no Ubuntu source: /" /tmp/out
+echo "no Ubuntu source: exit $rc"
+bash /h/apt-install.sh --all-sources hello | sed "s/^/all sources: /"
+
+# From here on apt-get is slow.
+# slow <update calls> <download calls> [bytes each slow download call fetches]
+slow() {
+  rm -rf /tmp/slow /var/cache/apt/archives/partial/a.deb
+  mkdir -p /tmp/slow /var/cache/apt/archives/partial
+  echo "$1" >/tmp/slow/update
+  echo "$2" >/tmp/slow/download-only
+  echo "${3:-0}" >/tmp/slow/fetch
+}
+# slow_run <label> <slice> <budget> <helper argument ...>: the output of the
+# helper under that label, then its exit code.
+slow_run() {
+  local label="$1" rc=0
+  APT_INSTALL_SLICE_SECONDS="$2" APT_INSTALL_BUDGET_SECONDS="$3" bash /h/apt-install.sh "${@:4}" >/tmp/out 2>&1 || rc=$?
+  sed "s/^/$label: /" /tmp/out
+  echo "$label: exit $rc"
+}
+# What is in the files, whenever they were written.
+sums() { find /etc/apt -type f -exec sha256sum {} + | sort; }
+
+# Four downloads run out of their slice. Each fetched 3000 of 100000 bytes,
+# which the 30 s budget cannot make enough, so every one of the four moves on
+# to the next mirror: past the last of the three, and round to the first.
+# The sources name two lists, that of the helper and that of the image, so
+# each move is seen in both: the fixture is rewritten first, and then its
+# sources name the list of the image too, which leaves them as they are from
+# then on.
+fixture
+bash /h/apt-install.sh hello >/dev/null
+printf "deb mirror+file:/etc/apt/apt-mirrors.txt jammy main\n" >>/etc/apt/sources.list
+sums >/tmp/before
+slow 0 4 3000
+slow_run "moves on" 1 30 hello
+# `|| true`: a helper that never got as far as the install leaves no such
+# copy, and the cases below have to run all the same.
+echo "--- moved on: own list"; cat /tmp/slow/own.no-download || true
+echo "--- moved on: image list"; cat /tmp/slow/image.no-download || true
+echo "--- end"
+sums >/tmp/after
+if diff /tmp/before /tmp/after; then echo "moves on: lists put back"; fi
+
+# One download runs out of its slice having fetched 60000 of 100000 bytes: at
+# that rate the rest arrives in time, so the mirror stays where it is.
+snap >/tmp/before
+slow 0 1 60000
+slow_run "on course" 1 30 hello
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "on course: no change"; fi
+
+# Three downloads run out of their slice. The first fetches 40000 bytes. In
+# the second apt begins the .deb anew and has nothing of it when it is
+# stopped: the cache is smaller than it was, and that mirror is left. The
+# third fetches 40000 bytes again, and all of them have to count for the
+# mirror that served them: it is on course, and stays.
+slow 0 3 40000
+echo 2 >/tmp/slow/anew
+slow_run "anew" 1 30 hello
+
+# No download ever finishes. The 8 s budget is several slices more than the
+# three that put each mirror in front once. With --all-sources the lists are
+# looked for in the source files themselves, where one is not all Ubuntu.
+sums >/tmp/before
+vendor="$(stat -c %.9Z /etc/apt/vendor-mirrors.txt)"
+slow 0 99 2000
+slow_run "all slow" 1 8 --all-sources hello
+sums >/tmp/after
+if diff /tmp/before /tmp/after; then echo "all slow: lists put back"; fi
+if [ "$vendor" = "$(stat -c %.9Z /etc/apt/vendor-mirrors.txt)" ]; then echo "all slow: the list that is not all Ubuntu was not written"; fi
+
+# The budget runs out between two slices: after the one download that was
+# stopped, apt takes 2 of the 3 s to say what is still to fetch. No further
+# slice may start, least of all one of 0 s, which to timeout(1) is no limit,
+# and no mirror is put in front for a slice that cannot start.
+slow 0 99 2000
+echo 2 >/tmp/slow/print-uris
+slow_run "out of time" 1 3 hello
+
+# The update and the download are done at once, and the install outlasts the
+# budget, which it gets in one piece.
+slow 0 0
+touch /tmp/slow/no-download
+slow_run "slow install" 1 3 hello
+
+# The update never ends, and the machine receives nothing (no network here).
+# Every slice of it puts the next mirror in front, and the budget is several
+# slices more than the three that put each mirror in front once.
+sums >/tmp/before
+slow 99 0
+slow_run "slow update" 1 8 hello
+sums >/tmp/after
+if diff /tmp/before /tmp/after; then echo "slow update: lists put back"; fi
+
+# With a floor of 0, two slices of the update run out and the mirror stays in
+# front for each; the third update is done, and the run goes on to install.
+snap >/tmp/before
+slow 2 0
+APT_INSTALL_LIST_RATE=0 slow_run "update on course" 1 30 hello
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "update on course: no change"; fi
+
+# A floor that is no whole number of bytes a second stops the helper first.
+for rate in x 01 -1; do
+  rc=0
+  APT_INSTALL_LIST_RATE="$rate" bash /h/apt-install.sh hello >/tmp/out 2>&1 || rc=$?
+  echo "rate [$rate]: exit $rc: $(cat /tmp/out)"
+done
+
+# A self-hosted runner has the same lists, and the helper must leave them be.
+fixture
+printf "deb mirror+file:/etc/apt/apt-mirrors.txt jammy main\n" >>/etc/apt/sources.list
+snap >/tmp/before
+slow 0 99 2000
+RUNNER_ENVIRONMENT=self-hosted slow_run "self-hosted, slow" 1 3 hello
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "self-hosted, slow: no change"; fi
+
+# Sources without a mirror list, as on arm64: nothing to put in front.
+rm -rf /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+printf "deb http://ports.ubuntu.com/ubuntu-ports jammy main\n" >/etc/apt/sources.list
+slow 0 99 2000
+slow_run "no list" 1 3 hello
+# And with no mirror list the update, too, gets its budget in one piece.
+slow 99 0
+slow_run "no list, slow update" 1 3 hello
+
+# What an update slice received, from the helper itself under the awk of this
+# image, on two /proc/net/dev counts written out: a pure function of them. An
+# interface can go away or come up between the two reads (the veth of a
+# container, a Docker network), which no slice above has.
+eval "$(sed -n "/^received_between() {/,/^}/p" /h/apt-install.sh)"
+between() { echo "between [$1] [$2]: $(received_between "$1" "$2")"; }
+between "eth0:100 va:7210132" "eth0:432742"
+between "eth0:100" "eth0:600 xa:4326132"
+between "eth0:600" "eth0:100"
+between "eth0:100 wa:2000 docker0:50" "docker0:80 wa:2500 eth0:400"
+'
+
+L='mirror+file:/etc/apt/ubuntu-mirrors.txt'
+cat >"$work/rewrite.want" <<EOF
+--- sources.list
+# deb http://archive.ubuntu.com/ubuntu jammy main
+deb $L jammy main restricted
+deb-src $L jammy main
+deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $L jammy-updates main
+deb [arch=amd64 ]$L jammy-proposed main
+deb $L jammy-backports main
+deb $L jammy-security main
+	deb	$L	jammy	universe
+# deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
+deb mirror+file:/etc/apt/vendor-mirrors.txt jammy main
+deb http://ports.ubuntu.com/ubuntu-ports jammy main
+deb http://us.ports.ubuntu.com/ubuntu-ports jammy main
+deb http://archive.ubuntu.com/ubuntu-ports jammy main
+deb http://old-releases.ubuntu.com/ubuntu hirsute main
+deb http://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main
+deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable
+--- ubuntu.sources
+## URIs: http://archive.ubuntu.com/ubuntu/
+Types: deb
+URIs: $L
+Suites: noble noble-updates
+Components: main
+
+Types: deb
+uris:$L $L
+ $L
+Suites: noble-security
+Components: main
+
+Types: deb
+URIs: $L https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+
+Types: deb
+URIs: $L
+ https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+
+Types: deb
+URIs: $L
+# apt skips a comment line and the field goes on
+ https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+
+Types: deb
+URIs: mirror+file:/etc/apt/vendor-mirrors.txt
+Suites: noble
+Components: main
+
+Types: deb
+URIs : $L
+Suites: noble-backports
+Components: main
+--- docker.sources
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+--- microsoft-prod.list
+deb https://packages.microsoft.com/ubuntu/24.04/prod noble main
+--- extra.list
+deb $L noble universe
+--- ubuntu-mirrors.txt
+# Written by keploy's .github/workflows/test_workflow_scripts/apt-install.sh.
+# apt tries the mirror with the lowest priority: number first and moves to the
+# next when a fetch fails. See that script for why azure is first.
+http://azure.archive.ubuntu.com/ubuntu/	priority:1
+http://archive.ubuntu.com/ubuntu/	priority:2
+http://security.ubuntu.com/ubuntu/	priority:3
+--- update reads
+-- 000-sources.list
+deb $L jammy main restricted
+deb-src $L jammy main
+deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $L jammy-updates main
+deb [arch=amd64 ]$L jammy-proposed main
+deb $L jammy-backports main
+deb $L jammy-security main
+	deb	$L	jammy	universe
+deb http://ports.ubuntu.com/ubuntu-ports jammy main
+deb http://us.ports.ubuntu.com/ubuntu-ports jammy main
+deb http://old-releases.ubuntu.com/ubuntu hirsute main
+-- 001-extra.list
+deb $L noble universe
+-- 002-ubuntu.sources
+## URIs: http://archive.ubuntu.com/ubuntu/
+Types: deb
+URIs: $L
+Suites: noble noble-updates
+Components: main
+
+Types: deb
+uris:$L $L
+ $L
+Suites: noble-security
+Components: main
+
+Types: deb
+URIs : $L
+Suites: noble-backports
+Components: main
+--- end
+EOF
+cat >"$work/hosted.want" <<EOF
+--- hosted: update reads
+-- 000-ubuntu.sources
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: noble noble-updates noble-backports noble-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+--- end
+EOF
+cat >"$work/aws.want" <<EOF
+--- aws: update reads
+-- 000-ubuntu.sources
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: resolute resolute-updates resolute-backports
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu
+Suites: resolute-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+--- end
+EOF
+own_list='apt-install: this machine has a mirror list of its own for the Ubuntu archive \(/etc/apt/apt-mirrors\.txt\), so its apt sources are left as they are'
+bounded='apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120'
+ubuntu_only='-o Dir::Etc::SourceList=/dev/null -o Dir::Etc::SourceParts=/tmp/[^ ]+ -o APT::Get::List-Cleanup=0'
+left_out='apt-install: apt reads only the Ubuntu archive entries; pass --all-sources to also read the rest of:'
+
+# The order the slow shim has to find the mirror lists in, call by call. Both
+# lists hold the same three mirrors, so both go through the same orders.
+azure_first='azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com'
+archive_first='archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com'
+security_first='security.ubuntu.com azure.archive.ubuntu.com archive.ubuntu.com'
+# found <label> <call> <order>
+found() { echo "$1: slow: $2: own list: $3, image list: $3"; }
+{
+  found "moves on" update "$azure_first"
+  found "moves on" download-only "$azure_first"
+  found "moves on" print-uris "$azure_first"
+  found "moves on" download-only "$archive_first"
+  found "moves on" print-uris "$archive_first"
+  found "moves on" download-only "$security_first"
+  found "moves on" print-uris "$security_first"
+  found "moves on" download-only "$azure_first"
+  found "moves on" print-uris "$azure_first"
+  found "moves on" download-only "$archive_first"
+  found "moves on" no-download "$archive_first"
+} >"$work/moves-on.want"
+for call in update download-only print-uris download-only no-download; do
+  found "on course" "$call" "$azure_first"
+done >"$work/on-course.want"
+# The two lists as the install of that first run found them: archive.ubuntu.com
+# in front, the comment lines on top, the priorities counted anew, and the
+# image's mirrors with the scheme each had.
+cat >"$work/moved-on.want" <<EOF
+--- moved on: own list
+# Written by keploy's .github/workflows/test_workflow_scripts/apt-install.sh.
+# apt tries the mirror with the lowest priority: number first and moves to the
+# next when a fetch fails. See that script for why azure is first.
+http://archive.ubuntu.com/ubuntu/	priority:1
+http://security.ubuntu.com/ubuntu/	priority:2
+http://azure.archive.ubuntu.com/ubuntu/	priority:3
+--- moved on: image list
+https://archive.ubuntu.com/ubuntu/	priority:1
+https://security.ubuntu.com/ubuntu/	priority:2
+http://azure.archive.ubuntu.com/ubuntu/	priority:3
+--- end
+EOF
+# The mirrors as the helper names them: by the first list it found, which is
+# the image's, with https for the last two.
+azure='http://azure\.archive\.ubuntu\.com/ubuntu/'
+archive='https://archive\.ubuntu\.com/ubuntu/'
+security='https://security\.ubuntu\.com/ubuntu/'
+
+for image in ubuntu:22.04 ubuntu:24.04 ubuntu:26.04; do
+  log="$work/rewrite-${image#ubuntu:}.log"
+  started=$failures
+  echo "--- rewrite ($image, no network, apt-get shimmed)"
+  docker run --rm --network none -v "$helper:/h/apt-install.sh:ro" -v "$here/hang_guard.sh:/h/hang_guard.sh:ro" "$image" \
+    bash -c "exec 2>&1; $rewrite_script" >"$log" || fail "$image: rewrite case exited $?"
+  docker run --rm --network none --cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH \
+    -v "$helper:/h/apt-install.sh:ro" -v "$here/hang_guard.sh:/h/hang_guard.sh:ro" "$image" \
+    bash -c "exec 2>&1; $locked_script" | sed "s/^/locked: /" >>"$log" || fail "$image: unreadable-source case exited $?"
+  if diff -u "$work/rewrite.want" <(sed -n '/^--- sources.list$/,/^--- end$/p' "$log"); then
+    echo "ok: $image: exactly the archive and security URIs are rewritten, and apt reads exactly the Ubuntu entries"
+  else
+    fail "$image: rewritten sources or the entries apt reads differ from the expected (diff above: - want, + got)"
+  fi
+  if diff -u "$work/hosted.want" <(sed -n '/^--- hosted: update reads$/,/^--- end$/p' "$log"); then
+    echo "ok: $image: on a hosted image apt reads its Ubuntu entries and not packages.microsoft.com"
+  else
+    fail "$image: the entries apt reads on a hosted image differ from the expected (diff above: - want, + got)"
+  fi
+  expect "$log" "$image: the update gets the bounded options and only the Ubuntu entries" \
+    "^$bounded $ubuntu_only -y update\$"
+  expect "$log" "$image: the download gets the bounded options and only the Ubuntu entries" \
+    "^$bounded $ubuntu_only -y install --download-only hello\$"
+  expect "$log" "$image: and so does the install, which may not download" \
+    "^$bounded $ubuntu_only -y install --no-download hello\$"
+  expect "$log" "$image: the install reads the entries the update read" '^update reads: the install reads the same$'
+  expect "$log" "$image: on a hosted image too, the install reads the entries the update read" \
+    '^hosted: update reads: the install reads the same$'
+  expect "$log" "$image: it names every source file it left entries out of" \
+    "^$left_out /etc/apt/sources.list /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/docker.sources /etc/apt/sources.list.d/nouris.sources /etc/apt/sources.list.d/ubuntu.sources\$"
+  expect "$log" "$image: on a hosted image, packages.microsoft.com's file" \
+    "^hosted: $left_out /etc/apt/sources.list.d/microsoft-prod.list\$"
+  expect "$log" "$image: --all-sources: the update reads every source" "^all sources: $bounded -y update\$"
+  expect "$log" "$image: --all-sources: the download reads every source" \
+    "^all sources: $bounded -y install --download-only hello\$"
+  expect "$log" "$image: --all-sources: the install reads every source" \
+    "^all sources: $bounded -y install --no-download hello\$"
+  expect "$log" "$image: a self-hosted runner's update reads every source" "^self-hosted: $bounded -y update\$"
+  expect "$log" "$image: a self-hosted runner's download reads every source" \
+    "^self-hosted: $bounded -y install --download-only hello\$"
+  expect "$log" "$image: a self-hosted runner's install reads every source" \
+    "^self-hosted: $bounded -y install --no-download hello\$"
+  expect "$log" "$image: with no Ubuntu entry, the default run exits 1" '^no Ubuntu source: exit 1$'
+  expect "$log" "$image: and says to pass --all-sources" '^no Ubuntu source: apt-install: .*pass --all-sources'
+  if grep -q '^no Ubuntu source: apt-get ' "$log"; then
+    fail "$image: with no Ubuntu entry, the default run still ran apt-get"
+  fi
+  expect "$log" "$image: CRLF: the Ubuntu stanza is kept, the other left out" '^crlf: kept the Ubuntu stanza only$'
+  expect "$log" "$image: CRLF: the file is named as left out" "^crlf: $left_out /etc/apt/sources.list.d/crlf.sources\$"
+  expect "$log" "$image: a second run changes no file" '^second run: no change$'
+  expect "$log" "$image: a re-run puts back a deleted mirror list" '^deleted list: restored$'
+  expect "$log" "$image: a re-run puts back an outdated mirror list" '^stale list: restored$'
+  expect "$log" "$image: a self-hosted runner's sources are left alone" '^self-hosted: no change$'
+  expect "$log" "$image: a hosted image's own mirror list is left alone, and no list is added" '^hosted image: no change$'
+  expect "$log" "$image: on a hosted image, the helper says it has a mirror list of its own" "^hosted: $own_list\$"
+  if diff -u "$work/aws.want" <(sed -n '/^--- aws: update reads$/,/^--- end$/p' "$log"); then
+    echo "ok: $image: on the AWS image apt reads both Ubuntu entries, the -security one as the image has it"
+  else
+    fail "$image: the entries apt reads on the AWS image differ from the expected (diff above: - want, + got)"
+  fi
+  expect "$log" "$image: the AWS image's list is the size apt fetched on that image" '^aws: list of 152 bytes$'
+  expect "$log" "$image: the AWS image, whose -security entry names a host, is left alone, and no list is added" \
+    '^aws image: no change$'
+  expect "$log" "$image: on the AWS image, the helper says it has a mirror list of its own" "^aws: $own_list\$"
+  expect "$log" "$image: on the AWS image, packages.microsoft.com's file" \
+    "^aws: $left_out /etc/apt/sources.list.d/microsoft-prod.list\$"
+  expect "$log" "$image: on the AWS image too, the install reads the entries the update read" \
+    '^aws: update reads: the install reads the same$'
+  expect "$log" "$image: the same mix in the one-line format is left alone" '^one-line mix: no change$'
+  expect "$log" "$image: and the helper says why" "^one-line mix: $own_list\$"
+  expect "$log" "$image: a list of the machine at another path is left alone too" '^other path: no change$'
+  expect "$log" "$image: and the helper names that list" \
+    '^other path: apt-install: this machine has a mirror list of its own for the Ubuntu archive \(/etc/apt/region-mirrors\.txt\), so its apt sources are left as they are$'
+  expect "$log" "$image: a list named only from a .list file in sources.list.d is left alone too" '^list\.d: no change$'
+  expect "$log" "$image: and the helper names that list" "^list\\.d: $own_list\$"
+  expect "$log" "$image: a list named in a comment line inside a read deb822 stanza does not count" \
+    '^stanza comment: apt-install: /etc/apt/sources\.list\.d/ubuntu\.sources now fetches the Ubuntu archive via mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
+  expect "$log" "$image: and the stanza's host entry is rewritten, its comment line kept" \
+    '^stanza comment: now URIs: mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
+  expect "$log" "$image: (the comment line itself)" '^stanza comment: now # URIs: mirror\+file:/etc/apt/apt-mirrors\.txt$'
+  absent "$log" "$image: the helper does not take that comment for a list of the machine" \
+    '^stanza comment: apt-install: this machine has a mirror list of its own'
+  expect "$log" "$image: with no sources.list, the deb822 file is rewritten" \
+    '^no sources\.list: apt-install: /etc/apt/sources\.list\.d/ubuntu\.sources now fetches the Ubuntu archive via mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
+  expect "$log" "$image: and the run goes on to install" '^no sources\.list: exit 0$'
+  expect "$log" "$image: a source added after a run is rewritten by the next" \
+    '^added later: now deb mirror\+file:/etc/apt/ubuntu-mirrors\.txt noble multiverse$'
+  absent "$log" "$image: the list of the helper is not taken for one of the machine" \
+    '^added later: apt-install: this machine has a mirror list of its own'
+  absent "$log" "$image: root cannot read the locked source file (the control)" '^locked: root can still read the locked file$'
+  expect "$log" "$image: a source file the helper cannot filter is named" \
+    '^locked: apt-install: could not filter /etc/apt/sources\.list\.d/locked\.list \(exit [0-9]+\)$'
+  expect "$log" "$image: and stops the helper" '^locked: exit [1-9][0-9]*$'
+  expect "$log" "$image: before it changes any file" '^locked: no change$'
+
+  # The slow shim is stopped in the middle of a line every time: it has
+  # written "Building dependency tree..." and no line end. The first check is
+  # the control, that it was; the second is the rule, for every message of
+  # the helper and every later apt in every run below. The messages are also
+  # looked for one by one further down, each from the start of its line.
+  expect "$log" "$image: control: the slow shim is stopped in the middle of a line" \
+    '^moves on: Building dependency tree\.\.\.$'
+  absent "$log" "$image: nothing is written on a line apt was stopped in: what comes next starts its own" "$glued"
+
+  if diff -u "$work/moves-on.want" <(grep '^moves on: slow: ' "$log"); then
+    echo "ok: $image: every download slice that runs out puts the next mirror in front, in both lists, and the update none"
+  else
+    fail "$image: the order of the mirror lists, call by call, differs from the expected (diff above: - want, + got)"
+  fi
+  if diff -u "$work/moved-on.want" <(sed -n '/^--- moved on: own list$/,/^--- end$/p' "$log"); then
+    echo "ok: $image: a reordered list keeps its comments and schemes, with the priorities counted anew"
+  else
+    fail "$image: the reordered mirror lists differ from the expected (diff above: - want, + got)"
+  fi
+  expect "$log" "$image: the helper says why the download moved on" \
+    "^moves on: apt-install: [0-9]+ s with $azure in front fetched 3 kB \($size/s\), too slow for the 97 kB still to fetch in the [0-9]+ s left\. Putting $archive in front; apt keeps what it has fetched\.\$"
+  expect "$log" "$image: and after the last mirror the first is in front again" \
+    "^moves on: apt-install: [0-9]+ s with $security in front fetched 3 kB \($size/s\), too slow for the 91 kB still to fetch in the [0-9]+ s left\. Putting $azure in front; apt keeps what it has fetched\.\$"
+  expect "$log" "$image: the run still installs" '^moves on: exit 0$'
+  expect "$log" "$image: and puts both lists back" '^moves on: lists put back$'
+
+  if diff -u "$work/on-course.want" <(grep '^on course: slow: ' "$log"); then
+    echo "ok: $image: a mirror that is on course stays in front"
+  else
+    fail "$image: the order of the mirror lists under a mirror that is on course differs from the expected (diff above: - want, + got)"
+  fi
+  expect "$log" "$image: the helper says why it stays" \
+    "^on course: apt-install: [0-9]+ s with $azure in front fetched 60 kB \($size/s\)\. At that rate the 40 kB still to fetch arrive within the [0-9]+ s left, so it stays in front\.\$"
+  expect "$log" "$image: that run installs too" '^on course: exit 0$'
+  expect "$log" "$image: and writes no file under /etc/apt" '^on course: no change$'
+
+  expect "$log" "$image: control: apt began its .deb anew, and that slice fetched nothing" \
+    "^anew: apt-install: [0-9]+ s with $azure in front fetched 0 B \(0 B/s\), too slow for the 100 kB still to fetch in the [0-9]+ s left\. Putting $archive in front; apt keeps what it has fetched\.\$"
+  expect "$log" "$image: the slice after that counts all it fetched, and its mirror stays in front" \
+    "^anew: apt-install: [0-9]+ s with $archive in front fetched 40 kB \($size/s\)\. At that rate the 60 kB still to fetch arrive within the [0-9]+ s left, so it stays in front\.\$"
+  expect "$log" "$image: that run installs as well" '^anew: exit 0$'
+
+  expect "$log" "$image: with every mirror slow the helper exits 124" '^all slow: exit 124$'
+  for order in "$azure_first" "$archive_first" "$security_first"; do
+    expect "$log" "$image: after a download with ${order%% *} in front" \
+      "^all slow: slow: download-only: own list: $order, image list: $order\$"
+  done
+  expect "$log" "$image: it says how much was fetched, how fast, and from which mirrors" \
+    "^all slow: ::error::apt-install\.sh: the packages were not downloaded within 8 s, so none was installed \(exit 124\)\. Fetched $size in that time \($size/s\)\. Mirror in front, slice by slice: $azure 2 kB in [0-9]+ s \($size/s\); $archive 2 kB in [0-9]+ s \($size/s\); $security 2 kB in [0-9]+ s \($size/s\)[;.]"
+  absent "$log" "$image: it does not go on to install" '^all slow: slow: no-download:'
+  expect "$log" "$image: it puts both lists back" '^all slow: lists put back$'
+  expect "$log" "$image: a mirror list that is not all Ubuntu is never written" \
+    '^all slow: the list that is not all Ubuntu was not written$'
+
+  if [ "$(grep -c '^out of time: slow: download-only:' "$log")" = 1 ]; then
+    echo "ok: $image: no slice starts once the budget is spent between two of them"
+  else
+    fail "$image: the download did not run exactly once in a budget that ran out right after it"
+  fi
+  expect "$log" "$image: that run exits 124" '^out of time: exit 124$'
+  expect "$log" "$image: with the one slice it had in its ::error:: line" \
+    "^out of time: ::error::apt-install\.sh: the packages were not downloaded within 3 s, so none was installed \(exit 124\)\. Fetched 2 kB in that time \($size/s\)\. Mirror in front, slice by slice: $azure 2 kB in [0-9]+ s \($size/s\)\.\$"
+  absent "$log" "$image: and no install" '^out of time: slow: no-download:'
+  absent "$log" "$image: and no mirror put in front for a slice that could not start" '^out of time: apt-install: .* Putting '
+
+  expect "$log" "$image: an install that outlasts the budget exits 124" '^slow install: exit 124$'
+  expect "$log" "$image: and the helper says the packages were there" \
+    '^slow install: ::error::apt-install\.sh: the packages were downloaded, but installing them was not done within 3 s \(exit 124\)\.$'
+
+  for order in "$azure_first" "$archive_first" "$security_first"; do
+    expect "$log" "$image: an update slice with ${order%% *} in front" \
+      "^slow update: slow: update: own list: $order, image list: $order\$"
+  done
+  expect "$log" "$image: an update slice that receives nothing puts the next mirror in front" \
+    "^slow update: apt-install: [0-9]+ s of apt-get update with $azure in front received 0 B \(0 B/s\), under the 100 kB/s that the package lists need\. Putting $archive in front; apt goes on from what it has fetched\.\$"
+  expect "$log" "$image: an update that outlasts the budget exits 124" '^slow update: exit 124$'
+  expect "$log" "$image: and the helper says what was received, how fast, and from which mirrors" \
+    "^slow update: ::error::apt-install\.sh: apt-get update was not done within 8 s \(exit 124\)\. Received 0 B in that time \(0 B/s\)\. Mirror in front, slice by slice: $azure 0 B in [0-9]+ s \(0 B/s\); $archive 0 B in [0-9]+ s \(0 B/s\); $security 0 B in [0-9]+ s \(0 B/s\)[;.]"
+  absent "$log" "$image: no download follows" '^slow update: slow: download-only:'
+  expect "$log" "$image: and both lists are put back" '^slow update: lists put back$'
+
+  if [ "$(grep -c "^update on course: slow: update: own list: $azure_first, image list: $azure_first\$" "$log")" = 3 ]; then
+    echo "ok: $image: an update on course keeps its mirror in front, slice after slice"
+  else
+    fail "$image: the update did not run three times with azure in front"
+  fi
+  expect "$log" "$image: the helper says why it stays" \
+    "^update on course: apt-install: [0-9]+ s of apt-get update with $azure in front received 0 B \(0 B/s\), at least the 0 B/s that the package lists need, so it stays in front\.\$"
+  expect "$log" "$image: that run goes on to install" '^update on course: slow: no-download: '
+  expect "$log" "$image: and installs" '^update on course: exit 0$'
+  expect "$log" "$image: and writes no file under /etc/apt" '^update on course: no change$'
+
+  for rate in x 01 -1; do
+    expect "$log" "$image: APT_INSTALL_LIST_RATE=$rate is refused" \
+      "^rate \[$rate\]: exit 2: apt-install: APT_INSTALL_LIST_RATE is a whole number of bytes a second, 0 or more\$"
+  done
+
+  for label in 'self-hosted, slow' 'no list'; do
+    if [ "$(grep -c "^$label: slow: download-only:" "$log")" = 1 ]; then
+      echo "ok: $image: $label: the download gets its budget in one piece"
+    else
+      fail "$image: $label: the download did not run exactly once"
+    fi
+    expect "$log" "$image: $label: exit 124 when the budget is spent" "^$label: exit 124\$"
+    absent "$log" "$image: $label: and no install" "^$label: slow: no-download:"
+  done
+  expect "$log" "$image: a self-hosted runner's mirror lists are not reordered" '^self-hosted, slow: no change$'
+  expect "$log" "$image: and the helper says why it tried no other mirror" \
+    "^self-hosted, slow: ::error::apt-install\.sh: the packages were not downloaded within 3 s, so none was installed \(exit 124\)\. Fetched 2 kB in that time \($size/s\)\. This is a self-hosted runner, whose mirror lists the script does not reorder, so no other mirror was tried\.\$"
+  expect "$log" "$image: without a list the helper says there was no other mirror" \
+    "^no list: ::error::apt-install\.sh: the packages were not downloaded within 3 s, so none was installed \(exit 124\)\. Fetched 2 kB in that time \($size/s\)\. apt reads no mirror list with a second Ubuntu mirror here, so there was no other mirror to try\.\$"
+  if [ "$(grep -c '^no list, slow update: slow: update:' "$log")" = 1 ]; then
+    echo "ok: $image: no list: the update gets its budget in one piece"
+  else
+    fail "$image: no list: the update did not run exactly once"
+  fi
+  expect "$log" "$image: no list: and the helper says there was no other mirror for it" \
+    "^no list, slow update: ::error::apt-install\.sh: apt-get update was not done within 3 s \(exit 124\)\. Received 0 B in that time \(0 B/s\)\. apt reads no mirror list with a second Ubuntu mirror here, so there was no other mirror to try\.\$"
+
+  expect "$log" "$image: an interface gone by the second read takes only its own bytes out of the slice's count" \
+    '^between \[eth0:100 va:7210132\] \[eth0:432742\]: 432642$'
+  expect "$log" "$image: an interface new at the second read adds none of its bytes to it" \
+    '^between \[eth0:100\] \[eth0:600 xa:4326132\]: 500$'
+  expect "$log" "$image: a counter that went back counts 0, not less" '^between \[eth0:600\] \[eth0:100\]: 0$'
+  expect "$log" "$image: each interface is matched by name, in whatever order the reads list them" \
+    '^between \[eth0:100 wa:2000 docker0:50\] \[docker0:80 wa:2500 eth0:400\]: 830$'
+  show_log_if_failed "$log" "$started"
+done
+
+if [ "$failures" != 0 ]; then
+  echo "$failures check(s) failed"
+  exit 1
+fi
+echo "all apt-install.sh checks passed"

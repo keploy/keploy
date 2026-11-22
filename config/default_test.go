@@ -38,7 +38,7 @@ func TestDefaultConfigParses(t *testing.T) {
 		got  time.Duration
 		want time.Duration
 	}{
-		{"test.healthPollTimeout", cfg.Test.HealthPollTimeout, 60 * time.Second},
+		{"test.healthPollTimeout", cfg.Test.HealthPollTimeout, DefaultHealthPollTimeout},
 		{"record.recordTimer", cfg.Record.RecordTimer, 0},
 		// Asserted against the relay's own constant rather than a literal: the
 		// yaml default and relay.DefaultConsumerStallGrace are two sources of
@@ -79,6 +79,22 @@ func TestDefaultConfigParses(t *testing.T) {
 	if got := cfg.Record.UpstreamTLS.CACert; got != "" {
 		t.Errorf("record.upstreamTls.caCert = %q, want empty", got)
 	}
+
+	// Present in the generated config so the escape hatch is
+	// discoverable, and false so nothing changes for anyone who does not
+	// need it. A readiness probe is destructive only in specific
+	// environments (an app behind a kubectl port-forward); everywhere
+	// else it is the thing preventing status_code=0 flakes.
+	if cfg.Test.DisableAppReadyProbe {
+		t.Error("test.disableAppReadyProbe defaults to true; it must default to false or every " +
+			"app silently loses the readiness gate that stops the first test firing early")
+	}
+
+	// Opt-in static asset filtering must default to false so existing recordings
+	// and binary/media endpoints are never silently dropped.
+	if cfg.Record.IgnoreStaticAssets {
+		t.Error("record.ignoreStaticAssets defaults to true; it must default to false")
+	}
 }
 
 // TestDefaultConfigUpstreamTLSBlockPosition pins WHERE the upstreamTls block
@@ -99,6 +115,9 @@ func TestDefaultConfigUpstreamTLSBlockPosition(t *testing.T) {
 	record, ok := doc["record"].(map[string]any)
 	if !ok {
 		t.Fatalf("default config has no `record:` mapping (got %T)", doc["record"])
+	}
+	if ignoreStatic, ok := record["ignoreStaticAssets"].(bool); !ok || ignoreStatic {
+		t.Errorf("record.ignoreStaticAssets = %v (%T), want false", record["ignoreStaticAssets"], record["ignoreStaticAssets"])
 	}
 	upstream, ok := record["upstreamTls"].(map[string]any)
 	if !ok {

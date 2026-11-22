@@ -64,11 +64,13 @@ type sniffResult struct {
 // opts carries the session's resolved upstream-TLS trust material
 // (see Proxy.applyUpstreamTLSOptions); it is threaded down to
 // hijackAndMITM, which owns the only upstream tls.Config on this path.
-func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, backdate time.Time, opts models.OutgoingOptions) error {
+func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, pre *util.Predialed, backdate time.Time, opts models.OutgoingOptions) error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, opportunisticDialTimeout)
 	defer dialCancel()
-	var dialer net.Dialer
-	dstConn, err := dialer.DialContext(dialCtx, "tcp", dstAddr)
+	dstConn, err := util.DialDestinationWith(dialCtx, p.logger, util.DialTarget{Addr: dstAddr},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			return util.DialRaw(ctx, nil, "tcp", a, pre)
+		})
 	if err != nil {
 		return fmt.Errorf("dial upstream %s: %w", dstAddr, err)
 	}
@@ -158,13 +160,12 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 			// and the next read — continuePlainRelay's io.Copy — gets them
 			// intact.
 			//
-			// The poke is best-effort, not a guarantee: a peer sitting
-			// between its loop-top ctx check and its own SetReadDeadline
-			// will overwrite this deadline with a fresh one and park
-			// anyway. It also only reaches a peer blocked in Read — one
-			// blocked in to.Write() is bounded by that call's own write
-			// deadline instead. Either way the wait is capped at one
-			// opportunisticPeekChunkTimeout rather than forever.
+			// The poke reaches every peer that is reading or about to:
+			// the loop arms its own deadline before it looks at ctx, so a
+			// peer that overwrites this poke with a fresh deadline sees
+			// the cancel next and leaves (see sniffAndRelayLoop). It does
+			// not reach a peer blocked in to.Write(); that one is bounded
+			// by the write's own deadline, one window at most.
 			cancelRelay()
 			_ = srcConn.SetReadDeadline(time.Now())
 			_ = dstConn.SetReadDeadline(time.Now())
@@ -239,6 +240,15 @@ const (
 	opportunisticDialTimeout = 10 * time.Second
 )
 
+// peekChunkTimeout is the relay loop's window: opportunisticPeekChunkTimeout
+// unless a test set its own (Proxy.peekChunkWindow).
+func (p *Proxy) peekChunkTimeout() time.Duration {
+	if p.peekChunkWindow > 0 {
+		return p.peekChunkWindow
+	}
+	return opportunisticPeekChunkTimeout
+}
+
 // sniffAndRelayLoop reads chunks from `from` and forwards each one
 // to `to` while peeking the first 5 bytes for the TLS handshake
 // pattern. Only the src side meaningfully detects TLS — the dst side
@@ -249,14 +259,25 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 	buf := make([]byte, 8192)
 	relayed := 0
 
+	window := p.peekChunkTimeout()
 	for {
-		select {
-		case <-ctx.Done():
+		// Arm this read's deadline BEFORE looking at the context. A stop
+		// cancels the context first and then pokes an already-expired
+		// deadline (cleanup, and the non-TLS branch), and both deadline
+		// sets go through the connection's one lock, so they are ordered:
+		// armed before the poke, the poke replaces this deadline and the
+		// Read below returns at once; armed after it, the cancel came
+		// before this arm and the check below sees it. Either way the
+		// loop is out without a window spent. Looked at first and armed
+		// after, a stop landing between the two had its poke overwritten
+		// by this fresh deadline, and the loop parked a whole window: on a
+		// loaded host every such connection's close or hijack then waited
+		// out opportunisticPeekChunkTimeout.
+		_ = from.SetReadDeadline(time.Now().Add(window))
+		if ctx.Err() != nil {
+			_ = from.SetReadDeadline(time.Time{})
 			return
-		default:
 		}
-
-		_ = from.SetReadDeadline(time.Now().Add(opportunisticPeekChunkTimeout))
 		n, err := from.Read(buf)
 		_ = from.SetReadDeadline(time.Time{})
 
@@ -323,7 +344,7 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 		written := 0
 		var werr error
 		for written < len(chunk) {
-			_ = to.SetWriteDeadline(time.Now().Add(opportunisticPeekChunkTimeout))
+			_ = to.SetWriteDeadline(time.Now().Add(window))
 			var wn int
 			wn, werr = to.Write(chunk[written:])
 			_ = to.SetWriteDeadline(time.Time{})
@@ -391,9 +412,9 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	// Client-facing handshake. HandleTLSConnection's inner
 	// tls.Config has KeyLogWriter wired into the package-level
 	// fanout sink, so the master secret for this side is logged.
-	tlsClient, _, err := pTls.HandleTLSConnection(ctx, p.logger, wrappedSrc, backdate)
+	tlsClient, _, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr, srcProcess(opts)), p.logger, wrappedSrc, backdate)
 	if err != nil {
-		return fmt.Errorf("client-side handshake: %w", err)
+		return fmt.Errorf("client-side handshake: %w", pTls.HandshakeCause(err))
 	}
 	defer tlsClient.Close()
 
@@ -433,7 +454,7 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	//     connection after it has already completed its handshake with us.
 	serverName := hostFromAddr(dstAddr)
 	if opts.UpstreamTLSVerify {
-		serverName = resolveUpstreamServerName(capturedClientSNI(tlsClient), "", dstAddr, true)
+		serverName = resolveUpstreamServerName(util.ClientServerName(tlsClient), "", dstAddr, true)
 	}
 	upstreamCfg := &tls.Config{
 		InsecureSkipVerify: !opts.UpstreamTLSVerify, //nolint:gosec // MITM proxy by design; opt in with record.upstreamTls.verify
@@ -445,7 +466,10 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	hsCtx, hsCancel := context.WithTimeout(ctx, opportunisticDialTimeout)
 	defer hsCancel()
 	if err := tlsUpstream.HandshakeContext(hsCtx); err != nil {
-		return fmt.Errorf("upstream handshake to %s: %w", dstAddr, err)
+		// Verifying, the handshake checks the application's SNI: its error
+		// names it, and the certificate's names, whole. Written by their
+		// shape and tag, as the caller logs it.
+		return models.HostsInError(ctx, fmt.Errorf("upstream handshake to %s: %w", dstAddr, err), serverName)
 	}
 	defer tlsUpstream.Close()
 
@@ -587,11 +611,11 @@ func relayPlaintext(ctx context.Context, a, b net.Conn) error {
 // the peer's read returns EOF. Falls back to a no-op when the conn
 // type doesn't support half-close.
 func closeWriteIfPossible(c net.Conn) error {
-	type closeWriter interface{ CloseWrite() error }
-	if cw, ok := c.(closeWriter); ok {
-		return cw.CloseWrite()
-	}
-	return nil
+	// Thin alias kept for the call sites in this file; the
+	// implementation lives in util because that is the only package
+	// able to see through SafeConn, which wraps essentially every conn
+	// a parser touches.
+	return util.CloseWriteIfPossible(c)
 }
 
 // pushSignal publishes a goroutine's verdict. The send is unguarded on
@@ -683,24 +707,6 @@ func hostFromAddr(addr string) string {
 		return addr
 	}
 	return host
-}
-
-// capturedClientSNI returns the ServerName the APPLICATION put in the
-// ClientHello it sent to keploy, or "" if it sent none (which is what
-// crypto/tls does for an IP-literal destination — RFC 6066 forbids IP
-// literals in SNI).
-//
-// Read straight off the completed client-facing *tls.Conn rather than through
-// pTls.SrcPortToDstURL: it is the same value CertForClient stored there
-// moments earlier, but it needs no source-port lookup and so cannot be
-// confused by a recycled port. Returns "" for anything that is not a
-// *tls.Conn, so callers degrade to their existing fallback.
-func capturedClientSNI(clientConn net.Conn) string {
-	tc, ok := clientConn.(*tls.Conn)
-	if !ok {
-		return ""
-	}
-	return tc.ConnectionState().ServerName
 }
 
 // hostFromConn is hostFromAddr over a connection's remote address — the peer

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strings"
@@ -50,7 +51,7 @@ func TestBuildHTTPMismatchReport_FieldDiffsAgainstSchemaSurvivor(t *testing.T) {
 	liveBody := []byte(`{"order_id":"o-2","ts":"111"}`)
 	diag := &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{mock}}
 
-	report := h.buildHTTPMismatchReport(request, liveBody, db, nil, nil, nil, diag)
+	report := h.buildHTTPMismatchReport(context.Background(), request, liveBody, db, nil, nil, nil, diag)
 	if report.ClosestMock != "mock-1" {
 		t.Fatalf("expected schema survivor as closest, got %q", report.ClosestMock)
 	}
@@ -84,22 +85,22 @@ func TestBuildHTTPMismatchReport_RecordsDestination(t *testing.T) {
 
 	// Host header wins.
 	req := makeReqWithQuery("GET", "/api/orders", "")
-	req.Host = "api.payments.svc:8443"
-	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "api.payments.svc:8443" {
+	req.Host = "api.example.com:8443"
+	if got := h.buildHTTPMismatchReport(context.Background(), req, nil, db, nil, nil, nil, diag).Destination; got != "api.example.com:8443" {
 		t.Fatalf("expected destination from Host header, got %q", got)
 	}
 
 	// Falls back to the URL authority when Host is unset.
 	req = makeReqWithQuery("GET", "/api/orders", "")
-	req.URL.Host = "inventory.internal:9000"
-	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "inventory.internal:9000" {
+	req.URL.Host = "inventory.example.com:9000"
+	if got := h.buildHTTPMismatchReport(context.Background(), req, nil, db, nil, nil, nil, diag).Destination; got != "inventory.example.com:9000" {
 		t.Fatalf("expected destination from URL authority fallback, got %q", got)
 	}
 
 	// A nil URL (hand-built request reaching the error path) must not panic; the
 	// destination still comes from the Host header.
 	nilURLReq := &http.Request{Method: "GET", Host: "api.example.com", Header: http.Header{}}
-	if got := h.buildHTTPMismatchReport(nilURLReq, nil, db, nil, nil, nil, diag).Destination; got != "api.example.com" {
+	if got := h.buildHTTPMismatchReport(context.Background(), nilURLReq, nil, db, nil, nil, nil, diag).Destination; got != "api.example.com" {
 		t.Fatalf("nil-URL request: expected destination from Host, got %q", got)
 	}
 }
@@ -119,7 +120,7 @@ func TestBuildHTTPMismatchReport_RespectsLearnedAndUserNoise(t *testing.T) {
 	userBodyNoise := map[string][]string{"ts": {}}
 	diag := &matchDiag{phase: models.MatchPhaseStrict, candidates: 1, schemaMatched: []*models.Mock{mock}}
 
-	report := h.buildHTTPMismatchReport(request, liveBody, db, nil, nil, userBodyNoise, diag)
+	report := h.buildHTTPMismatchReport(context.Background(), request, liveBody, db, nil, nil, userBodyNoise, diag)
 	var gotPaths []string
 	for _, d := range report.FieldDiffs {
 		gotPaths = append(gotPaths, d.Path)

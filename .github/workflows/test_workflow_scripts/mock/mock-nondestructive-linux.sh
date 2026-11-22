@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Non-destructive record e2e for `keploy mock record`.
+#
+# `keploy mock record --name X` must NEVER destroy X's existing recording when a
+# re-record fails, is interrupted, or captures nothing. Before the fix, record
+# dropped the named set's mocks BEFORE capture even armed, so any such run left
+# the user with an empty set where a good recording had been (gaps W1/W14;
+# design §P0b "no delete-first"). The fix captures into a staging set and
+# promotes it over X only on a complete, non-empty run.
+#
+# This mirrors mock-linux.sh's embedded HTTP dependency + pytest harness, then:
+#   1. records a baseline recording and snapshots its bytes,
+#   2. re-records with a command that captures nothing  -> bytes unchanged,
+#   3. re-records with a command that FAILS             -> bytes unchanged,
+#   4. re-records a different workload successfully       -> fully replaced.
+# A leftover staging set is a failure in every case.
+#
+# Run both ways, each in a directory of its own: without the proven switch
+# (today's default) and under KEPLOY_PROVEN=1, which the flip makes the
+# default. This build does not judge each test (keploy enterprise does), so
+# under the switch a record is kept or not exactly as without it.
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
+#
+# Env: RECORD_BIN (the keploy binary under test), set by download-binary.
+set -uo pipefail
+
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
+# http_mocks_only: the mocks a record kept are the suite's own calls by kind.
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock-kinds.sh" || exit 1
+# root also needs an installation-id so the sudo'd agent doesn't prompt
+sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
+
+if ! python3 -c "import pytest" 2>/dev/null; then
+  python3 -m ensurepip --default-pip >/dev/null 2>&1 || true
+  python3 -m pip install --quiet --disable-pip-version-check pytest
+fi
+
+# This lane's directory: lane_switch.sh.
+# shellcheck source-path=SCRIPTDIR
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+RECORD_BIN="${RECORD_BIN:-keploy}"
+ROOT="$(mktemp -d)"
+cd "$ROOT" || exit 1
+PORT=18997
+FAIL=0
+
+cat > depserver.py <<'PY'
+import http.server, json, socketserver, sys
+PORT=int(sys.argv[1]); c={'n':0}
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        c['n']+=1
+        body=json.dumps({"path":self.path,"counter":c['n']}).encode()
+        self.send_response(200); self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self,*a): pass
+socketserver.TCPServer.allow_reuse_address=True
+with socketserver.TCPServer(("127.0.0.1",PORT),H) as s:
+    print("ready", flush=True)
+    s.serve_forever()
+PY
+
+cat > client.py <<PY
+import json, urllib.request
+BASE = "http://127.0.0.1:$PORT"
+def get(p):
+    with urllib.request.urlopen(BASE + p, timeout=5) as r:
+        return json.load(r)
+PY
+
+cat > test_api.py <<PY
+from client import get
+def test_users():  assert get("/users?id=1")["path"]=="/users?id=1"
+def test_items():  assert get("/items/42")["path"]=="/items/42"
+def test_health(): assert get("/health")["path"]=="/health"
+PY
+
+# start_dep: starts the dependency and waits for its ready line (DEP_PID).
+start_dep() {
+  : > dep.log
+  python3 depserver.py "$PORT" >dep.log 2>&1 &
+  DEP_PID=$!
+  until grep -qx ready dep.log 2>/dev/null; do
+    kill -0 "$DEP_PID" 2>/dev/null || { echo "FAIL: $LABEL: the dependency exited before it listened"; cat dep.log; FAIL=1; return 1; }
+    sleep 0.1
+  done
+}
+stop_dep() { kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null; }
+
+SET=nd
+MFILE="keploy/$SET/mocks.yaml"
+STAGING="keploy/$SET.keploy-staging"
+
+no_staging_left() {
+  [ ! -e "$STAGING" ] || { echo "FAIL: $LABEL: $1 left a staging set behind: $STAGING"; FAIL=1; }
+}
+
+# run_all <label> <KEPLOY_PROVEN value>: the four steps below, in a new
+# directory.
+run_all() {
+local LABEL="$1" PROVEN="$2"
+WORK="$ROOT/$LABEL"
+mkdir -p "$WORK" && cp "$ROOT/depserver.py" "$ROOT/client.py" "$ROOT/test_api.py" "$WORK/" && cd "$WORK" || exit 1
+echo "######## $LABEL (KEPLOY_PROVEN=${PROVEN}) ########"
+
+echo "== 1. record a baseline recording =="
+start_dep || return
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec.log
+verify_ran "$PROVEN" rec.log || FAIL=1
+stop_dep
+[ -f "$MFILE" ] || { echo "FAIL: $LABEL: baseline recording not written"; FAIL=1; return; }
+# One Http mock a test, its call to the dependency, and no other: client.py
+# calls it at an IP address, so the suite makes no DNS query on any runner.
+MOCKS=$(http_mocks_only "$MFILE" 3) || { echo "FAIL: $LABEL: expected 3 baseline Http mocks and no other, got $MOCKS"; FAIL=1; }
+echo "baseline mocks: $MOCKS"
+BASE_HASH=$(sha256sum "$MFILE" | awk '{print $1}')
+echo "baseline hash: $BASE_HASH"
+no_staging_left "the baseline record"
+
+echo "== 2. a re-record that captures NOTHING must leave the recording intact =="
+# The command makes no external calls, so nothing is captured. Before the fix,
+# record deleted the set first, so this left the user with an empty set.
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -c 'pass'" --name "$SET" --disable-tele 2>&1 | tee rec-empty.log
+verify_ran "$PROVEN" rec-empty.log || FAIL=1
+[ -f "$MFILE" ] || { echo "FAIL: $LABEL: a zero-capture re-record DESTROYED the existing recording"; FAIL=1; }
+NOW_HASH=$(sha256sum "$MFILE" 2>/dev/null | awk '{print $1}')
+[ "$NOW_HASH" = "$BASE_HASH" ] || { echo "FAIL: $LABEL: a zero-capture re-record changed the existing recording ($NOW_HASH != $BASE_HASH)"; FAIL=1; }
+no_staging_left "a zero-capture re-record"
+
+echo "== 3. a re-record whose command FAILS (capturing nothing) also preserves it =="
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -c 'import sys; sys.exit(7)'" --name "$SET" --disable-tele 2>&1 | tee rec-fail.log
+verify_ran "$PROVEN" rec-fail.log || FAIL=1
+[ -f "$MFILE" ] || { echo "FAIL: $LABEL: a failed re-record DESTROYED the existing recording"; FAIL=1; }
+NOW_HASH=$(sha256sum "$MFILE" 2>/dev/null | awk '{print $1}')
+[ "$NOW_HASH" = "$BASE_HASH" ] || { echo "FAIL: $LABEL: a failed re-record changed the existing recording"; FAIL=1; }
+no_staging_left "a failed re-record"
+
+echo "== 4. a successful re-record fully REPLACES the recording (clean rewrite) =="
+# A different workload, so the new recording must differ from the baseline and
+# must not keep any of the baseline's calls.
+cat > test_api.py <<PY
+from client import get
+def test_a(): assert get("/alpha")["path"]=="/alpha"
+def test_b(): assert get("/beta")["path"]=="/beta"
+PY
+start_dep || return
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec2.log
+verify_ran "$PROVEN" rec2.log || FAIL=1
+stop_dep
+MOCKS=$(http_mocks_only "$MFILE" 2) || { echo "FAIL: $LABEL: expected 2 Http mocks and no other after a clean re-record, got $MOCKS"; FAIL=1; }
+echo "re-recorded mocks: $MOCKS"
+NOW_HASH=$(sha256sum "$MFILE" 2>/dev/null | awk '{print $1}')
+[ "$NOW_HASH" != "$BASE_HASH" ] || { echo "FAIL: $LABEL: a successful re-record did not replace the baseline"; FAIL=1; }
+grep -q '/alpha' "$MFILE" || { echo "FAIL: $LABEL: the new recording is missing its calls"; FAIL=1; }
+if grep -q '/users' "$MFILE"; then echo "FAIL: $LABEL: the baseline's calls survived a clean rewrite (appended, not replaced)"; FAIL=1; fi
+no_staging_left "a successful re-record"
+}
+
+half off && run_all switch-off ""
+half on && run_all switch-on 1
+
+if [ "$FAIL" -eq 0 ]; then echo "MOCK NON-DESTRUCTIVE E2E: PASSED"; else echo "MOCK NON-DESTRUCTIVE E2E: FAILED"; fi
+exit "$FAIL"

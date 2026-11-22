@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -38,8 +39,18 @@ import (
 // branch on them in tests and assertions without importing internal
 // types. Also forwarded verbatim into OnMarkMockIncomplete.
 const (
-	// DropMemoryPressure — [Config.MemoryGuardCheck] returned true
-	// at tee time.
+	// DropMemoryPressure is no longer emitted. The tee used to refuse every
+	// chunk while the memory guard paused recording, which cut the parser's
+	// byte stream mid-frame: a framed parser (MySQL, Postgres, Mongo) that
+	// cannot re-anchor after a hole then desynced for good, and a pause of
+	// half a second ended capture on every pooled connection for the rest of
+	// the recording. A pause is temporary, so the stream is now always
+	// delivered whole; the mock manager drops, and counts, the mocks whose
+	// request fell inside a pause (syncMock.SyncMockManager.AddMock), and the
+	// recording suppresses the test cases that overlap one. Retained so
+	// existing callers and dashboards that reference the string still compile.
+	//
+	// Deprecated: no longer produced.
 	DropMemoryPressure = "memory_pressure"
 
 	// DropPerConnCap — the per-connection byte cap would be exceeded
@@ -74,7 +85,7 @@ const (
 	// its framer after a hole, so there is nothing left worth delivering.
 	//
 	// This is a CONSEQUENCE reason, not a cause: the loss that mattered was
-	// reported once as [DropPerConnCap] or [DropMemoryPressure], and
+	// reported once as [DropPerConnCap], and
 	// [tee.onDesync] already fired for it. Everything after that would be
 	// framed from the wrong offset — a length header read out of the middle
 	// of a body — which yields no mocks and, in the postgres case that
@@ -122,11 +133,10 @@ const (
 // Lifetime: created by [newTee], started by [tee.start], stopped by
 // [tee.close]. close is idempotent; callers typically defer it in Run.
 type tee struct {
-	dir      fakeconn.Direction
-	logger   *zap.Logger
-	cap      int64
-	memCheck func() bool
-	onDrop   func(reason string)
+	dir    fakeconn.Direction
+	logger *zap.Logger
+	cap    int64
+	onDrop func(reason string)
 
 	// onDesync fires exactly once per tee, on the first dropped chunk.
 	// Set by [New] from [Config.OnCaptureDesync]; nil is safe.
@@ -136,17 +146,19 @@ type tee struct {
 	// length header and then that many bytes), so a hole does not cost one
 	// message — the next header is read from the middle of a body and every
 	// subsequent frame on that connection is garbage. onDrop's per-mock
-	// [Session.MarkMockIncomplete] is therefore not enough: it is cleared by
-	// MarkMockComplete after each cycle, while the damage is permanent and
+	// [Session.MarkMockIncomplete] is therefore not enough: the next mock
+	// emitted takes it (Session.EmitMock), while the damage is permanent and
 	// connection-scoped. This hook exists so the owner can mark the span and
 	// suppress the test cases recorded in it, instead of shipping them
-	// mock-less for replay to fail on.
-	onDesync func(reason string)
-	// desynced makes onDesync and its log fire once, not once per chunk.
-	// It is also the latch push consults for [DropDesynced]: it is set for
-	// good on the first desyncing drop and never cleared, which is exactly
-	// right — the stream position is lost permanently, so there is no event
-	// that could legitimately clear it.
+	// mock-less for replay to fail on. It returns whether the hole costs the
+	// owner's recording anything, and the tee warns of the hole only then
+	// (see [Config.OnCaptureDesync]).
+	onDesync func(reason string) bool
+	// desynced is the latch push consults for [DropDesynced], and a stream
+	// ended at its hole ends on (drain): it is set for good on the first
+	// desyncing drop, once onDesync has returned, and never cleared, which
+	// is exactly right — the stream position is lost permanently, so there
+	// is no event that could legitimately clear it.
 	desynced atomic.Bool
 
 	// parserCanResync records whether the parser consuming this tee can
@@ -159,6 +171,21 @@ type tee struct {
 	// [New] sets it before the forwarder goroutines that call push exist,
 	// and the relay never changes it mid-connection.
 	parserCanResync bool
+
+	// endAtHole, set by [New] from [Config.EndAtHole] for this direction,
+	// ends the stream at its hole when the parser cannot re-align
+	// (endsAtHole): drain ends out once desynced is set and every chunk
+	// queued before the hole is delivered, calling it first with holeReason.
+	// The tee then marks no mock incomplete for the hole (drop). Nil keeps
+	// the stream open, fed nothing, until close. Read-only after
+	// construction, like parserCanResync.
+	endAtHole func(reason string)
+	// holeReason is why the chunk that desynced this tee was lost: the
+	// reason of its first desyncing drop. Storing it is what makes that drop
+	// the first, so onDesync and the WARN fire once, not once per chunk. It
+	// is stored before desynced is set, so a drain that sees desynced sees
+	// it.
+	holeReason atomic.Pointer[string]
 
 	// mu guards q, qBytes and closed. It is never held across a send on
 	// out, so a stalled consumer cannot block push.
@@ -173,6 +200,19 @@ type tee struct {
 	// closed is set by close(); push refuses afterwards and drain exits
 	// once q is empty.
 	closed bool
+	// awaiting is the destination chunks the forwarder wrote to a client
+	// after its FIN that wait for the client's answer before they are
+	// pushed or refused (client_took.go), oldest first. They are newer than
+	// every chunk on q, and count as unconsumed for the capture watermark
+	// (oldestUnconsumed). They are not counted against the tee's cap or
+	// memory check until they are pushed, which is where a chunk dropped for
+	// either is stamped: when the client's answer came. What waits is
+	// bounded by what the client's socket takes before the client answers:
+	// a client that reads acknowledges within a delayed acknowledgement
+	// (sooner for bulk data), a closed one resets on the first chunk, and
+	// for one that answers nothing the forwarder's Write blocks once the
+	// socket's send buffer is full.
+	awaiting []fakeconn.Chunk
 
 	// wake is a capacity-1 doorbell. push signals it non-blockingly after
 	// appending; drain waits on it when q is empty. A signal can be
@@ -189,6 +229,9 @@ type tee struct {
 	// [Config.ConsumerStallGrace]; see DefaultConsumerStallGrace for why it
 	// bounds stalled time rather than total teardown time.
 	stallGrace time.Duration
+	// clock measures the stall window (stall.Meter): nil, the process's own
+	// runnable clock, outside tests.
+	clock stall.Clock
 
 	// consumerGone is the FakeConn's close signal, supplied to [tee.start].
 	// It fires only when the parser itself abandons the connection, which
@@ -204,6 +247,30 @@ type tee struct {
 	// [tee.dropCount] for diagnostics and tests.
 	drops atomic.Uint64
 
+	// accepted is the running total of PAYLOAD BYTES this tee has
+	// accepted, i.e. the absolute length of the byte stream the
+	// consuming FakeConn will see. Incremented only on a successful
+	// push, so a dropped chunk does not advance it.
+	//
+	// [tee.abandon] does skew it: chunks counted here are thrown away
+	// undelivered, so accepted can end up permanently ahead of what the
+	// FakeConn received. That is safe in the only way that matters —
+	// abandon returns from drain, which ends the stream (endStream): its
+	// reader reads io.EOF there, or fakeconn.ErrClosed if it was closed
+	// first, so a discard watermark left stranded above the delivered total
+	// ends the read rather than stalling it, and no byte ABOVE the
+	// watermark can be lost to it (everything delivered is below it by
+	// construction).
+	//
+	// It exists so the relay can name a position in the parser's stream
+	// — "the parser must not see anything below offset N" — when it
+	// consumes bytes it has already teed (see
+	// fakeconn.FakeConn.DiscardBefore). A count of "chunks pending
+	// somewhere in the pipeline" could not express that: the pipeline
+	// spans a queue, a goroutine, a channel and a buffer, and the
+	// answer has to hold across all four without quiescing any of them.
+	accepted atomic.Int64
+
 	// closedFlag mirrors closed for a lock-free fast path in push.
 	closedFlag atomic.Bool
 	// closeOnce guards the single shutdown.
@@ -217,19 +284,43 @@ type tee struct {
 	// at random between delivering and discarding an already-recorded
 	// chunk.
 	shutdown chan struct{}
+
+	// progress is how far this direction's capture has got, for the
+	// capture watermark (watermark.go).
+	progress teeProgress
+
+	// consumed is how many bytes of this direction's stream have left the
+	// FakeConn its parser reads (fakeconn.FakeConn.Consumed). Set by [New]
+	// before the drain starts.
+	consumed func() int64
+
+	// readerLag, when positive, delays each chunk's delivery to the parser
+	// until this long after it was read ([Config.ReaderLag]). Read-only
+	// after construction.
+	readerLag time.Duration
+
+	// pushStart, when set, runs as push begins to admit a chunk: a test's
+	// view of the tee at that instant. Nil outside tests. Read-only after
+	// construction.
+	pushStart func()
+
+	// endingStream, when set, runs as endStream begins, before it decides
+	// the stream's end: a test's view of the tee at that instant. It runs on
+	// the drain goroutine, before done is signalled, so it must return. Nil
+	// outside tests. Read-only after construction.
+	endingStream func()
 }
 
 // newTee builds a tee. The drain goroutine does not run until [tee.start]
 // is called with the consumer's close signal — the FakeConn that consumes
 // readCh cannot be constructed until this tee exists, so binding the two
 // is necessarily a second step.
-func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, stallGrace time.Duration, memCheck func() bool, onDrop func(reason string), logger *zap.Logger) *tee {
+func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, stallGrace time.Duration, onDrop func(reason string), logger *zap.Logger) *tee {
 	return &tee{
 		dir:        dir,
 		logger:     logger,
 		cap:        capBytes,
 		stallGrace: stallGrace,
-		memCheck:   memCheck,
 		onDrop:     onDrop,
 		out:        make(chan fakeconn.Chunk, chanBuf),
 		wake:       make(chan struct{}, 1),
@@ -255,6 +346,12 @@ func (t *tee) readCh() <-chan fakeconn.Chunk { return t.out }
 // dropCount returns the number of chunks dropped since construction.
 // Safe to call concurrently.
 func (t *tee) dropCount() uint64 { return t.drops.Load() }
+
+// acceptedBytes returns how many payload bytes this tee has accepted —
+// the absolute length of the stream its FakeConn will deliver. See the
+// [tee.accepted] field comment for why the relay needs a stream
+// position rather than a pending-chunk count.
+func (t *tee) acceptedBytes() int64 { return t.accepted.Load() }
 
 // setPaused toggles delivery. When paused, push immediately drops with
 // reason [DropPaused] without consuming capacity.
@@ -297,9 +394,9 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 	// Ordered AFTER the pause check so a paused tee keeps reporting
 	// DropPaused exactly as before — a pause is requested, and the
 	// SessionOnAbort path depends on that cheap reason — and BEFORE the
-	// memory and cap checks so the remainder of a dead connection is
-	// attributed to the desync that killed it instead of re-reporting
-	// per_conn_cap / memory_pressure for every later chunk.
+	// cap check so the remainder of a dead connection is attributed to the
+	// desync that killed it instead of re-reporting per_conn_cap for every
+	// later chunk.
 	//
 	// The check is per DIRECTION, because a tee is: a hole in C2D corrupts
 	// only the request framer, and the response direction of the same
@@ -309,10 +406,14 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 		t.drop(DropDesynced)
 		return false
 	}
-	if t.memCheck != nil && t.memCheck() {
-		t.drop(DropMemoryPressure)
-		return false
+	if t.pushStart != nil {
+		t.pushStart()
 	}
+	// No memory-pressure check here, on purpose: a pause is temporary, and
+	// a chunk refused during one would be a hole in a framed stream that
+	// most parsers cannot step over, ending the connection's capture for
+	// the rest of the recording (see [DropMemoryPressure]). The cap below
+	// bounds what one connection can queue whatever the pressure.
 	n := int64(len(c.Bytes))
 
 	t.mu.Lock()
@@ -327,6 +428,11 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 	}
 	t.q = append(t.q, c)
 	t.qBytes += n
+	// Counted under mu, with the append that makes the chunk visible.
+	// Outside the lock there is a window where a chunk is queued but
+	// uncounted, and a reader of acceptedBytes that lands in it would
+	// name a stream position short of what the FakeConn will deliver.
+	t.accepted.Add(n)
 	t.mu.Unlock()
 
 	// Doorbell. Non-blocking: a pending token already tells drain there is
@@ -353,18 +459,39 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 // downstream parser stranded mid-frame.
 //
 // The test is "did the capture pipeline lose bytes the parser was going to
-// need", not "was a mock affected". [DropPerConnCap] and
-// [DropMemoryPressure] are both unilateral: the parser is mid-stream and
-// simply never receives those bytes. [DropPaused] is not — see the caller.
+// need", not "was a mock affected". [DropPerConnCap] is unilateral: the
+// parser is mid-stream and simply never receives those bytes. [DropPaused] is not — see the caller.
 // Nor is [DropDesynced]: that one is emitted BECAUSE the tee is already
 // desynced, so counting it here would make the predicate self-feeding.
 func isDesyncingDrop(reason string) bool {
-	return reason == DropPerConnCap || reason == DropMemoryPressure
+	return reason == DropPerConnCap
+}
+
+// capturesCut counts the tees whose first hole cost the recording something
+// (Config.OnCaptureDesync), process-wide: each is one direction of one
+// connection, counted once. The hole's WARN carries it, so dozens of
+// connections cut for one cause read as dozens, not as one line.
+var capturesCut atomic.Uint64
+
+// firstHole reports whether a drop for reason is this tee's hole: its first
+// desyncing drop. It stores the reason (holeReason) when it is.
+func (t *tee) firstHole(reason string) bool {
+	if !isDesyncingDrop(reason) || t.desynced.Load() {
+		return false
+	}
+	r := reason
+	return t.holeReason.CompareAndSwap(nil, &r)
 }
 
 func (t *tee) drop(reason string) {
 	n := t.drops.Add(1)
-	if t.onDrop != nil {
+	// A stream ended at its hole tells its parser where the hole is (see
+	// [Config.EndAtHole]): a mark would void whichever mock the parser emits
+	// next, which is one from before the hole, since it runs behind its
+	// capture. So neither the chunk lost at the hole nor those refused after
+	// it mark one.
+	hole := isDesyncingDrop(reason) || reason == DropDesynced
+	if t.onDrop != nil && !(hole && t.endsAtHole()) {
 		t.onDrop(reason)
 	}
 	// The first UNINTENDED drop desyncs this connection's capture
@@ -381,19 +508,56 @@ func (t *tee) drop(reason string) {
 	// connection is already ending. Treating that as a desync would fire
 	// this warning on every normal abort and cancel a relay that is already
 	// shutting down.
-	if isDesyncingDrop(reason) && !t.desynced.Swap(true) {
-		if t.logger != nil {
-			next := "a dropped chunk leaves the parser mid-frame, so no further mock can be framed on this connection; test cases recorded against it are suppressed rather than shipped mock-less. If reason=per_conn_cap, raise record.recordBuffer.maxMemoryPerConnection"
-			t.logger.Warn("relay: capture desynced; this connection can no longer be recorded",
+	if t.firstHole(reason) {
+		// Report the hole first, so the owner can suppress the test cases
+		// that overlap it instead of shipping them mock-less: the owner
+		// stops the connection's recording at the hole, and the span of
+		// what it carries from then on is open before push refuses what
+		// follows the hole (desynced), before a stream ended at its hole
+		// ends and its parser can return, and before the WARN below is
+		// written. Reported after them, the traffic in between was in no
+		// span.
+		costs := true
+		if t.onDesync != nil {
+			costs = t.onDesync(reason)
+		}
+		t.desynced.Store(true)
+		// Warned of only when it costs the recording something: a hole as
+		// the owner's recording stops is the end of the connection, and the
+		// WARN would say that every test case recorded from then on is left
+		// out when none is.
+		var cut uint64
+		if costs {
+			cut = capturesCut.Add(1)
+		}
+		if costs && t.logger != nil {
+			// Say what the owner actually does: onDesync starts suppression
+			// that follows the connection's ACTIVITY
+			// (syncMock.UnrecordedConn), not the test cases that used it.
+			// Also for a parser that re-aligns: when it re-aligns is known
+			// only once it gets there, and it can be a full queue behind.
+			msg := "relay: capture dropped a chunk; this direction is no longer fed to the parser, so the connection records no further mocks"
+			next := "the app's traffic is unaffected. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection, so on a busy pooled connection that can be every later test case"
+			if t.parserCanResync {
+				msg = "relay: capture dropped a chunk; the parser re-aligns on the next message it can frame, and the exchanges the hole cut are not recorded"
+			}
+			if reason == DropPerConnCap {
+				next += ". reason=per_conn_cap: record.recordBuffer.maxMemoryPerConnection bounds this connection's capture buffer"
+			}
+			t.logger.Warn(msg,
 				zap.String("dir", t.dir.String()),
 				zap.String("reason", reason),
-				zap.String("next_step", next),
+				zap.Uint64("capturesCut", cut),
+				zap.String("next_step", next+". capturesCut counts the connection directions a capture hole has cut so far in this process"),
 			)
 		}
-		// Report the hole so the owner can suppress the test cases that
-		// overlap it, instead of shipping them mock-less.
-		if t.onDesync != nil {
-			t.onDesync(reason)
+		// Wake a drain parked on an empty queue: a stream ended at its hole
+		// ends now if nothing before the hole is left to deliver.
+		if t.endsAtHole() {
+			select {
+			case t.wake <- struct{}{}:
+			default:
+			}
 		}
 	}
 	if t.logger != nil && n&(n-1) == 0 {
@@ -407,7 +571,7 @@ func (t *tee) drop(reason string) {
 }
 
 // drain moves chunks from the queue to the FakeConn-facing channel in FIFO
-// order, then closes out and signals done.
+// order, then ends the stream (endStream) and signals done.
 //
 // Delivery is a blocking send. That is the point: a parser that is merely
 // slow — the boot burst this path exists for, or a node under load — must
@@ -432,11 +596,32 @@ func (t *tee) drop(reason string) {
 // loss once with the total, and marks the tee closed so no later push is
 // accepted into a queue that no drain is left to serve.
 func (t *tee) drain() {
-	defer close(t.done)
-	defer close(t.out)
+	// End the stream, then signal done, in that order: the relay's teardown
+	// waits on done and then closes the FakeConns, so that close comes after
+	// endStream has read consumerGone. Signalled first, it could land before
+	// that read and leave open a stream that ended normally (ErrClosed).
+	defer func() {
+		t.endStream()
+		close(t.done)
+	}()
 	for {
 		t.mu.Lock()
 		if len(t.q) == 0 {
+			// A stream ended at its hole ends here: push queues nothing
+			// after the hole, so every chunk teed before it is delivered.
+			// Checked under mu, and before closed: a chunk queued before the
+			// hole is in q by the time desynced is set (the forwarder
+			// queues, then loses the next chunk), and a connection that
+			// closes after the hole still ends at it.
+			if t.endsAtHole() && t.desynced.Load() {
+				t.mu.Unlock()
+				reason := DropDesynced
+				if r := t.holeReason.Load(); r != nil {
+					reason = *r
+				}
+				t.endAtHole(reason)
+				return
+			}
 			if t.closed {
 				t.mu.Unlock()
 				return
@@ -457,7 +642,15 @@ func (t *tee) drain() {
 			// not pin its high-water-mark allocation for its whole life.
 			t.q = nil
 		}
+		// Off the queue and not yet consumed by the parser: the watermark
+		// follows it from here (teeProgress.delivered), under the same
+		// lock, so no look finds it in neither place.
+		t.noteDeliveringLocked(c)
 		t.mu.Unlock()
+
+		if t.readerLag > 0 && !t.lagDelivery(c) {
+			return
+		}
 
 		// Fast path: deliver without blocking whenever out has room. This
 		// is the overwhelmingly common case, and doing it first means the
@@ -499,14 +692,23 @@ func (t *tee) drain() {
 		// So the stall bound applies ONLY once close() has been called, where
 		// something must eventually terminate the drain or relay teardown
 		// (which waits on waitDone) would hang.
+		//
+		// The window is counted in time this process could RUN, not wall
+		// time. A process that gets no CPU for a while (an overloaded node, a
+		// CPU-throttled container, a frozen one) is not a consumer that
+		// stopped reading: its consumer cannot run either, and when the CPU
+		// comes back a wall-clock timer has long expired and wins the race
+		// against a consumer that is about to take the chunk. That abandoned
+		// a live consumer's chunks (TestTee_SlowConsumerLosesNothing, at
+		// host load 9). See utils/stall for how the time is measured.
 	deliver:
 		for {
-			var stallT *time.Timer
+			var meter *stall.Meter
 			var stallC <-chan time.Time
 			var closing <-chan struct{}
 			if t.closedFlag.Load() {
-				stallT = time.NewTimer(t.stallGrace)
-				stallC = stallT.C
+				meter = stall.NewMeter(t.clock, t.stallGrace)
+				stallC = meter.Wait()
 			} else {
 				// Still open, so no bound — but a drain parked here must still
 				// learn that close() happened, or it would block forever and
@@ -514,37 +716,43 @@ func (t *tee) drain() {
 				closing = t.shutdown
 			}
 
-			select {
-			case t.out <- c:
-				if stallT != nil {
-					stallT.Stop()
+			for {
+				select {
+				case t.out <- c:
+					meter.Stop()
+					break deliver
+
+				case <-t.consumerGone:
+					// The parser closed its FakeConn: nothing will read this,
+					// and the verdict covers the whole connection, not just
+					// the chunk in hand.
+					meter.Stop()
+					t.abandon(c)
+					return
+
+				case <-stallC:
+					if !meter.Expired() {
+						stallC = meter.Wait()
+						continue
+					}
+					// Out full, and the consumer freed nothing, for a whole
+					// window of time the process could run, after close().
+					// Conclude once and act on it — re-deciding per chunk
+					// would pay the window N times over and turn teardown
+					// into minutes, which is what made bounding the whole
+					// flush tempting in the first place. Deciding once gets
+					// both: a progressing consumer never trips the window, a
+					// stopped one costs one window total.
+					meter.Stop()
+					t.abandon(c)
+					return
+
+				case <-closing:
+					// close() fired while we were parked. Loop once to re-arm
+					// with the stall bound now that one is required. At most
+					// two iterations (open -> closed), so this cannot spin.
 				}
-				break deliver
-
-			case <-t.consumerGone:
-				// The parser closed its FakeConn: nothing will read this, and
-				// the verdict covers the whole connection, not just the chunk
-				// in hand.
-				if stallT != nil {
-					stallT.Stop()
-				}
-				t.abandon(c)
-				return
-
-			case <-stallC:
-				// Frozen with out full for a whole window after close().
-				// Conclude once and act on it — re-deciding per chunk would pay
-				// the window N times over and turn teardown into minutes, which
-				// is what made bounding the whole flush tempting in the first
-				// place. Deciding once gets both: a progressing consumer never
-				// trips the timer, a stopped one costs one window total.
-				t.abandon(c)
-				return
-
-			case <-closing:
-				// close() fired while we were parked. Loop once to re-arm with
-				// the stall bound now that one is required. At most two
-				// iterations (open -> closed), so this cannot spin.
+				continue deliver
 			}
 		}
 	}
@@ -567,6 +775,8 @@ func (t *tee) abandon(held fakeconn.Chunk) {
 	// first would only add an O(n) pass under the same mutex push contends on.
 	t.q = nil
 	t.qBytes = 0
+	// Nothing will consume what was delivered either: its parser is gone.
+	t.progress.delivered = nil
 	// Mark the tee dead. drain is about to return, so from here on NOTHING
 	// will deliver a queued chunk — a push that kept succeeding would append
 	// to a queue with no consumer and report success for a chunk that is
@@ -589,6 +799,33 @@ func (t *tee) abandon(held fakeconn.Chunk) {
 	}
 }
 
+// endStream ends the FakeConn's stream as drain returns: it closes out, so
+// its reader reads io.EOF once it has taken what out holds, unless the reader
+// was closed first (consumerGone). That stream is left open, so its reader
+// reads fakeconn.ErrClosed there instead: the session closed it (the
+// supervisor's abort, or the dispatcher once its parser has returned) while
+// the capture could still send, and what the connection did after is not the
+// stream's. Closing it would make the session's close read as the
+// connection's end to a reader behind its capture, one that gets to the end
+// only after the connection has ended, while a reader that waited there read
+// ErrClosed: the HTTP parser records a call that got no answer with the fault
+// its end says the upstream gave (noAnswerFault). The two events are ordered
+// here, on the one goroutine that ends the stream: a close seen before the
+// end leaves the stream open, and one that comes after the end finds it
+// ended, and its reader reads io.EOF, as a reader closed by the relay's
+// teardown does. A closed FakeConn never waits on its channel, so nothing
+// blocks on one left open.
+func (t *tee) endStream() {
+	if t.endingStream != nil {
+		t.endingStream()
+	}
+	select {
+	case <-t.consumerGone:
+	default:
+		close(t.out)
+	}
+}
+
 // close stops the tee. After close returns push is a no-op (returns
 // false) and the drain goroutine finishes once the queue is empty.
 // close is idempotent.
@@ -603,6 +840,63 @@ func (t *tee) close() {
 	})
 }
 
+// await sets c aside until the client's answer decides it (client_took.go):
+// it is neither queued nor refused yet, and the capture watermark counts it as
+// unconsumed. Called on the forwarder, which still holds c (its held stamp),
+// so a look that misses it here finds it held.
+func (t *tee) await(c fakeconn.Chunk) {
+	t.mu.Lock()
+	t.awaiting = append(t.awaiting, c)
+	t.mu.Unlock()
+}
+
+// awaitingLen is how many chunks wait for the client's answer.
+func (t *tee) awaitingLen() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.awaiting)
+}
+
+// firstAwaiting is the oldest chunk waiting for the client's answer; ok is
+// false when none is.
+func (t *tee) firstAwaiting() (c fakeconn.Chunk, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.awaiting) == 0 {
+		return fakeconn.Chunk{}, false
+	}
+	return t.awaiting[0], true
+}
+
+// doneAwaiting lets go of the oldest chunk waiting for the client's answer,
+// once it was pushed (it is on the queue now) or refused. The backing array
+// is let go of with the last one. One refused never comes on the stream, so a
+// reader waiting on it is told (Relay.StreamedBefore). The wake runs after
+// t.mu is let go of (deferred first, it runs last): waker.woken runs on this
+// goroutine inside the wake, and a test's look there
+// (TestTee_AwaitingBeforeAndToldWhenLetGo, through seenAsTold, looks with
+// awaitingBefore) takes t.mu. Were the wake under t.mu, a reader on another
+// goroutine would only wait for the unlock; the order is there for the look
+// on this goroutine.
+func (t *tee) doneAwaiting() {
+	defer t.progress.changed.wake()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.awaiting) == 0 {
+		return
+	}
+	t.awaiting[0] = fakeconn.Chunk{}
+	t.awaiting = t.awaiting[1:]
+	if len(t.awaiting) == 0 {
+		t.awaiting = nil
+	}
+}
+
 // waitDone blocks until the drain goroutine has exited. Used by the relay
 // teardown and by tests.
 func (t *tee) waitDone() { <-t.done }
+
+// endsAtHole reports whether this tee ends its stream at its hole (see
+// [Config.EndAtHole]): its parser asked for it and cannot re-align, so it is
+// fed nothing after the hole.
+func (t *tee) endsAtHole() bool { return t.endAtHole != nil && !t.parserCanResync }

@@ -2,8 +2,10 @@ package models
 
 import (
 	"bytes"
+	"encoding/gob"
 	"reflect"
 	"testing"
+	"time"
 
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -272,8 +274,56 @@ func TestPostgresV3Response_CopyIn_RoundTrip(t *testing.T) {
 	if decoded.CopyOut != nil {
 		t.Fatalf("CopyOut: omitempty should have kept this nil on the CopyIn-only fixture, got %+v", decoded.CopyOut)
 	}
-	// TODO(validation): once a Validate() method or a custom
-	// UnmarshalYAML lands on PostgresV3Response, add a separate test
-	// that feeds a malformed fixture carrying BOTH Rows and CopyIn
-	// and asserts the validator rejects it.
+
+	// Valid shape passes Validate()
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("Validate(): valid CopyIn response failed validation: %v", err)
+	}
+
+	// Malformed shape carrying both Rows and CopyIn must be rejected by Validate()
+	malformed := decoded
+	malformed.Rows = []PostgresV3Cells{{{Value: int64(42)}}}
+	if err := malformed.Validate(); err == nil {
+		t.Fatalf("Validate(): want non-nil error on malformed response with both Rows and CopyIn, got nil")
+	}
+}
+
+// What the learn step learned rides on a mock in memory only: a mock's gob,
+// which mocks.gob and the agent's mock streams carry, is the same bytes with
+// or without it (the switch-off byte identity of every encoded mock).
+func TestLearnedVariablesAreNeverEncoded(t *testing.T) {
+	enc := func(m *Mock) []byte {
+		var buf bytes.Buffer
+		if err := gob.NewEncoder(&buf).Encode(m); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	m := &Mock{Version: "api.keploy.io/v1beta1", Name: "mock-0", Kind: HTTP, Spec: MockSpec{
+		Metadata: map[string]string{"type": "HTTP_CLIENT"},
+		HTTPReq:  &HTTPReq{Method: "GET", URL: "http://x/y"},
+		HTTPResp: &HTTPResp{StatusCode: 200, Body: "{}"},
+	}}
+	plain := enc(m)
+	c := *m
+	c.Spec.SetLearned(MockVariables{"id": {Recorded: "1", Use: []string{"url.path[1]"}}}, map[string]MockVariables{"mock-a": {"id": {Recorded: "1", Bind: "body.id"}}})
+	if !bytes.Equal(plain, enc(&c)) {
+		t.Fatal("a mock's gob carries what the learn step learned on it")
+	}
+	if len(c.Spec.Learned()) != 1 || len(c.Spec.LearnedBinds()) != 1 {
+		t.Fatal("the learned variables are kept in memory")
+	}
+}
+
+// IsCaptureID reads the reserved prefix only: no saved test name, request-time
+// revoke name or name that merely contains the words is one.
+func TestIsCaptureID(t *testing.T) {
+	if !IsCaptureID(CaptureIDPrefix + "n0nce-1") {
+		t.Fatal("a capture id is not read as one")
+	}
+	for _, n := range []string{"", "test-1", "get-keploy-capture-1", RevokeNameByRequest(time.Unix(1, 0))} {
+		if IsCaptureID(n) {
+			t.Fatalf("%q is read as a capture id", n)
+		}
+	}
 }

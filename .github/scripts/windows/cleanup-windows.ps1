@@ -1,85 +1,117 @@
-# Cleanup script moved from workflow: stops long-running containers (>30m) and prunes Docker resources when safe.
-$ErrorActionPreference = 'Stop'
+# Post-run cleanup of the self-hosted Windows runners' shared Docker VM:
+# remove containers no live job can own, then prune Docker resources once no
+# job is using them.
+#
+# win-runner-1..4 run on ONE machine against ONE Docker daemon, and this runs
+# (from cleanup_windows) while sibling runners are mid-job, so neither half may
+# touch what a live job needs:
+#
+# - Containers: the same ownership rule as the pre-job reap, by running it over
+#   every container (reap-keploy-containers.ps1 -NamePrefix ''). This used to
+#   `docker rm -f` any container whose StartedAt was before the host's clock
+#   minus 30 minutes. A created-but-not-started container reports StartedAt
+#   0001-01-01, so that removed every sibling container waiting in the Created
+#   state - an application container sits there for ~6s on every `compose up`
+#   while compose waits for its keploy agent to turn healthy.
+#
+# - Prune: `docker system prune -af --volumes` removes every stopped (including
+#   Created) container and every image, network and volume no container uses,
+#   so it runs only when no lock is live, under the marker handshake that keeps
+#   a job from starting on Docker mid-prune. docker-locks.ps1 describes both.
+#   The API calls come before the marker goes down, so a slow API does not keep
+#   starting jobs waiting on a prune that live locks will call off anyway.
+#   Stale locks are deleted. Removing a container never forces a prune past
+#   live locks.
+[CmdletBinding()]
+param(
+    [string]$LockDir = '',
+    [int]$MinAgeMinutes = 45,
+    [int]$RunLockMaxAgeHours = 24,
+    # take-docker-job-lock.ps1's bound: a job stops waiting for a marker this
+    # old, because only a prune, or a start or restart of Docker Desktop,
+    # killed before its finally block leaves one that old behind
+    # (cleanup_windows has a 10-minute timeout, and ensure-docker.ps1's start
+    # or restart is bounded well below this).
+    # Such markers are deleted here.
+    [int]$PruneMaxMinutes = 15,
+    # The repository whose runs a lock names, for locks that do not say.
+    [string]$Repository = $env:GITHUB_REPOSITORY,
+    # Only the tests override these. GetRunStatus takes (repository, run ID,
+    # attempt or '') and returns the run's status, or $null when it could not
+    # find out.
+    [string]$DockerExe = 'docker',
+    [string]$WedgeDir = '',
+    [scriptblock]$GetRunStatus = $null
+)
 
-# Resolve lock directory and files
-$lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
-$lockFiles = @()
-if (Test-Path -LiteralPath $lockDir) { $lockFiles = Get-ChildItem -Path $lockDir -Filter '*.lock' -ErrorAction SilentlyContinue }
+# Under the tests, no default may reach the shared machine (test-overrides.ps1).
+. (Join-Path $PSScriptRoot 'test-overrides.ps1')
+Assert-TestOverrides 'cleanup-windows.ps1' $PSBoundParameters @('LockDir', 'WedgeDir', 'DockerExe')
+$ErrorActionPreference = 'Continue'
 
-# Ensure Docker CLI available
-$dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
-if (-not $dockerCmd) {
-  Write-Warning "Docker CLI not found on PATH. Skipping Docker cleanup."
-  return
+if (-not $LockDir) {
+    $base = $env:USERPROFILE
+    if (-not $base) { $base = $HOME }
+    $LockDir = Join-Path $base '.github-workflow-locks'
 }
 
-# Find and remove containers older than 30 minutes
-$stoppedAny = $false
+if (-not (Get-Command $DockerExe -ErrorAction SilentlyContinue)) {
+    Write-Warning "Docker CLI not found on PATH. Skipping Docker cleanup."
+    return
+}
+
+# Containers. Warn rather than fail: a teardown that fails the workflow would
+# hide the real result of the run.
 try {
-  $cutoff = (Get-Date).AddMinutes(-30)
-  $running = @(docker ps -a -q 2>$null)
-  if ($running.Count -gt 0) {
-    Write-Host "Checking running containers for uptime > 30 minutes..."
-    foreach ($cid in $running) {
-      if (-not $cid) { continue }
-      try {
-        $started = docker inspect --format "{{.State.StartedAt}}" $cid 2>$null
-        if (-not $started) { continue }
-        $startedDt = [DateTime]::Parse($started, $null, [System.Globalization.DateTimeStyles]::AssumeUniversal)
-        if ($startedDt -lt $cutoff) {
-          Write-Host "Container $cid started at $startedDt (older than 30m). Stopping and removing..."
-          try { docker rm -f $cid 2>&1 | Write-Host; $stoppedAny = $true } catch { Write-Warning "Failed to remove container ${cid}: $($_.Exception.Message)" }
-        }
-      } catch { Write-Warning "Failed to inspect/parse start time for container ${cid}: $($_.Exception.Message)" }
-    }
-  } else { Write-Host "No running containers found." }
-} catch { Write-Warning "Docker check for long-running containers failed: $($_.Exception.Message)" }
-
-# Decide whether to prune
-$shouldPrune = $false
-if (-not $lockFiles -or $lockFiles.Count -eq 0) {
-  Write-Host "No lock files found. Will perform Docker cleanup."
-  if (Test-Path -LiteralPath $lockDir) { Remove-Item -Path $lockDir -Recurse -Force -ErrorAction SilentlyContinue }
-  $shouldPrune = $true
-} elseif ($stoppedAny) {
-  Write-Host "Stopped long-running containers. Will perform Docker cleanup despite lock files."
-  $shouldPrune = $true
-} else {
-  $count = $lockFiles.Count
-  Write-Host "Lock files still present ($count). Skipping Docker cleanup."
-}
-
-# Perform prune if needed
-if ($shouldPrune) {
-  Write-Host "Pruning Docker images (this will remove dangling and unused images)..."
-  try { docker image prune -af 2>&1 | Write-Host } catch { Write-Warning "docker image prune failed: $($_.Exception.Message)" }
-  Write-Host "Pruning Docker volumes (this will remove unused volumes)..."
-  try { docker volume prune -f 2>&1 | Write-Host } catch { Write-Warning "docker volume prune failed: $($_.Exception.Message)" }
-  Write-Host "Removing unused builder cache and performing system prune (including containers/networks)..."
-  try { docker system prune -af --volumes 2>&1 | Write-Host } catch { Write-Warning "docker system prune failed: $($_.Exception.Message)" }
-}
-
-# Reap keploy agent containers (keploy-v3-*) left behind by any run on this
-# runner. This is the guaranteed half: a cancelled or crashed job never gets to
-# run its own teardown, so without a sweep here those containers accumulate
-# until someone notices the VM is full of them. Warn rather than fail — a
-# teardown that fails the workflow would hide the real result of the run.
-try {
-  $reaper = Join-Path $PSScriptRoot 'reap-keploy-containers.ps1'
-  if (Test-Path $reaper) { & $reaper } else { Write-Warning "reaper script not found at $reaper" }
+    $reaper = Join-Path $PSScriptRoot 'reap-keploy-containers.ps1'
+    $reapArgs = @{ NamePrefix = ''; MinAgeMinutes = $MinAgeMinutes; DockerExe = $DockerExe }
+    if ($WedgeDir) { $reapArgs.WedgeDir = $WedgeDir }
+    if (Test-Path $reaper) { & $reaper @reapArgs } else { Write-Warning "reaper script not found at $reaper" }
 } catch {
-  Write-Warning "keploy container reap failed: $($_.Exception.Message)"
+    Write-Warning "container reap failed: $($_.Exception.Message)"
 }
 
-# Output whether we stopped any containers (for workflow conditionals)
-# If running inside GitHub Actions, write to the GITHUB_OUTPUT file so the step can expose outputs
-if ($env:GITHUB_OUTPUT) {
-  try {
-    "stopped_any=$stoppedAny" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-  } catch {
-    Write-Warning "Failed to write to GITHUB_OUTPUT: $($_.Exception.Message)"
-    Write-Output "stopped_any=$stoppedAny"
-  }
-} else {
-  Write-Output "stopped_any=$stoppedAny"
+. (Join-Path $PSScriptRoot 'docker-locks.ps1')
+
+New-Item -ItemType Directory -Force -Path $LockDir | Out-Null
+foreach ($old in @(Get-ChildItem -LiteralPath $LockDir -Filter 'docker-prune-*.inprogress' -ErrorAction SilentlyContinue)) {
+    $oldAge = [DateTime]::UtcNow - $old.LastWriteTimeUtc
+    if ($oldAge.TotalMinutes -ge $PruneMaxMinutes) {
+        Write-Host "Deleting $($old.Name), left $([int]$oldAge.TotalMinutes) min ago by a prune, start or restart of Docker that was killed; jobs no longer wait for it."
+        Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 1. Judge the locks, asking the Actions API, with no marker down.
+$locks = Resolve-DockerLocks -LockDir $LockDir -JobLockMaxMinutes $MinAgeMinutes -RunLockMaxAgeHours $RunLockMaxAgeHours -Repository $Repository -GetRunStatus $GetRunStatus
+if ($locks.Live.Count -gt 0) {
+    Write-Host "Skipping Docker prune: $($locks.Live.Count) live lock(s) - $($locks.Live -join ', ')."
+    return
+}
+
+# 2. Marker down, then one more look at the locks, with no API call. The
+# marker is down only for that look and the prune. Another prune, or a start
+# or restart of Docker Desktop (ensure-docker.ps1), under way at the same time
+# calls this prune off: the next cleanup prunes.
+try {
+    $exclusive = Enter-DockerExclusive -LockDir $LockDir -Stale $locks.Stale -Operation 'a Docker prune' -MaxMinutes $PruneMaxMinutes
+} catch {
+    Write-Warning "could not put down the prune marker ($($_.Exception.Message)); not pruning."
+    return
+}
+if (@($exclusive.Others).Count -gt 0) {
+    Write-Host "Skipping Docker prune: another Docker prune, start or restart is under way - $($exclusive.Others -join ', ')."
+    return
+}
+if (-not $exclusive.Marker) {
+    Write-Host "Skipping Docker prune: $($exclusive.Taken.Count) lock(s) taken while the others were judged - $($exclusive.Taken -join ', ')."
+    return
+}
+try {
+    Write-Host "No live locks. Pruning Docker images, volumes, networks and build cache..."
+    try { & $DockerExe image prune -af 2>&1 | Write-Host } catch { Write-Warning "docker image prune failed: $($_.Exception.Message)" }
+    try { & $DockerExe volume prune -f 2>&1 | Write-Host } catch { Write-Warning "docker volume prune failed: $($_.Exception.Message)" }
+    try { & $DockerExe system prune -af --volumes 2>&1 | Write-Host } catch { Write-Warning "docker system prune failed: $($_.Exception.Message)" }
+} finally {
+    Remove-Item -LiteralPath $exclusive.Marker -Force -ErrorAction SilentlyContinue
 }

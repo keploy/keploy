@@ -47,10 +47,275 @@ func TestRenderUnmatchedCalls_StructuredOutput(t *testing.T) {
 	}
 }
 
+// A field the replay refused for a reason of its own (a learned read of the
+// application's clock the call does not carry) is rendered with its why, as
+// the miss report carries it (models.UnmatchedCall.FieldReasons), between
+// the field differences and the next steps; a miss with none renders no such
+// line.
+func TestRenderUnmatchedCalls_SaysWhyAFieldWasRefused(t *testing.T) {
+	why := "body.since was learned as a read of the application's clock, and the value this call carries is not a read of the application's clock made in this call's window: it changed"
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/usage", ClosestMock: "mock-3", MatchPhase: models.MatchPhaseStrict,
+		NextSteps:    "re-record",
+		FieldDiffs:   []models.MockFieldDiff{{Path: "body.since", Kind: models.DiffKindValueChanged, Expected: "a", Actual: "b"}},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: why}}}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	out := sb.String()
+	line := "    refused body.since: " + why + "\n"
+	at := strings.Index(out, line)
+	if at < 0 || at < strings.Index(out, "body.since: recorded") || at > strings.Index(out, "next steps: re-record") {
+		t.Fatalf("the refusal's why is not rendered between the field differences and the next steps:\n%s", out)
+	}
+	miss.FieldReasons = nil
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	if strings.Contains(sb.String(), "refused") {
+		t.Fatalf("a miss with no refused field renders one:\n%s", sb.String())
+	}
+}
+
 func TestRenderUnmatchedCalls_EmptyIsSilent(t *testing.T) {
 	var sb strings.Builder
 	renderUnmatchedCalls(&sb, models.TestResult{})
 	if sb.Len() != 0 {
 		t.Errorf("expected no output for tests without unmatched calls, got %q", sb.String())
+	}
+}
+
+// When nothing in the compared set targets the upstream, the "closest mock" is
+// on a DIFFERENT host and its field differences describe a comparison that
+// never meant anything. This block advertises its paths as copy-pasteable noise
+// configuration, so rendering them here would invite a user to noise away a
+// path difference between two unrelated calls. The values stay on the
+// UnmatchedCall for machine consumers; only this rendering drops them.
+func TestRenderUnmatchedCalls_SuppressesClosestMockWhenOutOfScope(t *testing.T) {
+	test := models.TestResult{
+		FailureInfo: models.FailureInfo{
+			UnmatchedCalls: []models.UnmatchedCall{
+				{
+					Protocol:         "HTTP",
+					ActualSummary:    "GET /v1/metrics",
+					Destination:      "192.0.2.20",
+					ClosestMock:      "mock-1",
+					MatchPhase:       models.MatchPhaseSchema,
+					DestinationScope: models.DestinationScopeNotInComparedSet,
+					CandidateCount:   19,
+					NextSteps:        "No recorded HTTP mock in the compared set targets 192.0.2.20. ...",
+					FieldDiffs: []models.MockFieldDiff{
+						{Path: "path", Kind: models.DiffKindValueChanged, Expected: "/api/orders", Actual: "/v1/metrics"},
+					},
+				},
+			},
+		},
+	}
+
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, test)
+	out := sb.String()
+
+	for _, absent := range []string{"closest mock: mock-1", "/api/orders", "noise-config compatible"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("out-of-scope miss must not render %q:\n%s", absent, out)
+		}
+	}
+	// The cascade stop and the guidance are still this miss's own facts, and
+	// the suppression line NAMES the destination it is about. It used to say
+	// "this destination" and resolve only because the default NextSteps
+	// happens to spell the host out on the next line — an accident a parser
+	// supplying its own hint (WithNextSteps) removes.
+	for _, want := range []string{
+		"no recorded mock in the compared set targets 192.0.2.20; closest-mock diff omitted",
+		models.MatchPhaseSchema,
+		"next steps: No recorded HTTP mock in the compared set targets 192.0.2.20",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// The suppression line must name the upstream even when the parser supplied
+// its own hint, which is exactly when nothing else on the line does.
+func TestRenderUnmatchedCalls_SuppressionLineNamesTheDestination(t *testing.T) {
+	test := models.TestResult{
+		FailureInfo: models.FailureInfo{
+			UnmatchedCalls: []models.UnmatchedCall{{
+				Protocol:         "HTTP",
+				ActualSummary:    "GET /v1/metrics",
+				Destination:      "192.0.2.20",
+				ClosestMock:      "mock-1",
+				MatchPhase:       models.MatchPhaseSchema,
+				DestinationScope: models.DestinationScopeNotInComparedSet,
+				NextSteps:        "parser-supplied hint",
+			}},
+		},
+	}
+
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, test)
+	out := sb.String()
+
+	if !strings.Contains(out, "targets 192.0.2.20;") {
+		t.Errorf("suppression line must name the destination:\n%s", out)
+	}
+	if strings.Contains(out, "this destination") {
+		t.Errorf("suppression line must not defer to a host it never prints:\n%s", out)
+	}
+}
+
+// The likely-causes paragraph is identical for every out-of-scope miss and one
+// out-of-scope container produces one miss per outgoing call it makes (23 of 28
+// unmatched calls in the recording this was built from). It is written ONCE per
+// test, not once per call.
+func TestRenderUnmatchedCalls_CausesRenderedOncePerTest(t *testing.T) {
+	var calls []models.UnmatchedCall
+	for _, host := range []string{"192.0.2.20", "192.0.2.21", "192.0.2.22"} {
+		calls = append(calls, models.UnmatchedCall{
+			Protocol:         "HTTP",
+			ActualSummary:    "GET /v1/metrics",
+			Destination:      host,
+			ClosestMock:      "mock-1",
+			MatchPhase:       models.MatchPhaseSchema,
+			DestinationScope: models.DestinationScopeNotInComparedSet,
+			NextSteps:        "No recorded HTTP mock in the compared set targets " + host + ".",
+		})
+	}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: calls}})
+	out := sb.String()
+
+	if got := strings.Count(out, "Likely causes:"); got != 1 {
+		t.Errorf("shared causes written %d times for 3 calls in one test, want 1:\n%s", got, out)
+	}
+	if got := strings.Count(out, "ONE container per session"); got != 1 {
+		t.Errorf("cause (1) written %d times, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, "per-test mock window") {
+		t.Errorf("the window-misrouting cause must reach the file report:\n%s", out)
+	}
+	// Each call still carries its own upstream.
+	for _, host := range []string{"192.0.2.20", "192.0.2.21", "192.0.2.22"} {
+		if !strings.Contains(out, "targets "+host+";") {
+			t.Errorf("per-call destination %s missing:\n%s", host, out)
+		}
+	}
+}
+
+// ...and not written at all when no call was out of scope.
+func TestRenderUnmatchedCalls_NoCausesWithoutAnOutOfScopeMiss(t *testing.T) {
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{
+		UnmatchedCalls: []models.UnmatchedCall{{
+			Protocol:         "HTTP",
+			ActualSummary:    "GET /api/orders",
+			Destination:      "192.0.2.10",
+			ClosestMock:      "mock-1",
+			MatchPhase:       models.MatchPhaseSchema,
+			DestinationScope: models.DestinationScopeInComparedSet,
+			NextSteps:        "Request structure changed since recording.",
+		}},
+	}})
+	if strings.Contains(sb.String(), "Likely causes:") {
+		t.Errorf("shared causes must not appear without an out-of-scope miss:\n%s", sb.String())
+	}
+}
+
+// A call whose test variable did not hold names the variable's value in this
+// test and what the call sent (never "recorded"), and the diff naming the
+// variable and where the test bound it.
+func TestRenderUnmatchedCalls_AVariableThatDidNotHold(t *testing.T) {
+	test := models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{
+		Protocol: "HTTP", ActualSummary: "GET /orders/o9", ClosestMock: "mock-2", MatchPhase: models.MatchPhaseVariable,
+		Diff:       `mock mock-2: variable orderId is "o1" in this test (taken at mock-1 body.id), and this call sent "o9" at url.path[1]`,
+		FieldDiffs: []models.MockFieldDiff{{Path: "url.path[1]", Kind: models.DiffKindVariable, Expected: "o1", Actual: "o9"}},
+	}}}}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, test)
+	out := sb.String()
+	for _, want := range []string{`url.path[1]: the test's variable is "o1", the call sent "o9"`, "variable orderId", "mock-1 body.id"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "recorded \"o1\"") {
+		t.Errorf("the variable's value is rendered as the recording's:\n%s", out)
+	}
+}
+
+// A miss names the operation it carries after its call.
+func TestRenderUnmatchedCalls_NamesTheOperation(t *testing.T) {
+	var sb strings.Builder
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /query", Operation: "query GetAppLabels"}
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	if !strings.Contains(sb.String(), "  [HTTP] POST /query {query GetAppLabels}") {
+		t.Fatalf("the miss does not name its operation:\n%s", sb.String())
+	}
+}
+
+// A background miss is listed apart from the test's own misses, counted,
+// under a heading that says it counts against no test, never under "likely
+// root cause"; a test with only background misses has no root-cause block.
+func TestRenderUnmatchedCalls_ListsBackgroundMissesApart(t *testing.T) {
+	poll := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "findAndModify ptw_endpoints", MatchPhase: models.MatchPhaseBody, Background: true}
+	own := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "find users", MatchPhase: models.MatchPhaseBody}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{poll, own, poll}}})
+	out := sb.String()
+	root := strings.Index(out, "(likely root cause)")
+	bg := strings.Index(out, "=== 2 BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===")
+	if root < 0 || bg < 0 || bg < root {
+		t.Fatalf("want the own miss under the root-cause heading, then 2 background misses apart:\n%s", out)
+	}
+	if strings.Contains(out[root:bg], "ptw_endpoints") || !strings.Contains(out[root:bg], "find users") {
+		t.Fatalf("the root-cause block holds a background miss, or not the test's own:\n%s", out)
+	}
+	if strings.Count(out[bg:], "findAndModify ptw_endpoints") != 2 || strings.Contains(out[bg:], "find users") {
+		t.Fatalf("the background block does not list exactly the two background misses:\n%s", out)
+	}
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{poll}}})
+	if out := sb.String(); strings.Contains(out, "likely root cause") || !strings.Contains(out, "1 BACKGROUND CALL(S)") {
+		t.Fatalf("a test with only a background miss:\n%s", out)
+	}
+}
+
+// A background miss that differs from its background recording by a value
+// its test bound is listed with the place and where the test bound it; a
+// background miss with no bound place writes no such line.
+func TestRenderUnmatchedCalls_NamesABackgroundMissesBoundPlaces(t *testing.T) {
+	del := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on api-server.uiSessionBatches", MatchPhase: models.MatchPhaseBody, Background: true,
+		BackgroundBound: []models.BackgroundBinding{{Recording: "mock-2954", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId"}}}
+	poll := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "findAndModify ptw_endpoints", MatchPhase: models.MatchPhaseBody, Background: true}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{del, poll}}})
+	out := sb.String()
+	want := "  delete on api-server.uiSessionBatches: like background recording mock-2954 but at body.docs.msgs.0.q.app_id, which holds appId as this test bound it at mock-226 body.docs.msgs.0.appId\n"
+	if !strings.Contains(out, want) {
+		t.Fatalf("report lacks the bound place line %q:\n%s", want, out)
+	}
+	if strings.Count(out, "like background recording") != 1 {
+		t.Fatalf("report names bound places for a miss with none:\n%s", out)
+	}
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{del.Sanitized()}}})
+	want = "  delete on api-server.{}: like background recording mock-2954 but at body.docs.msgs.{}.q.app_id, which holds a value as this test bound it at mock-226 body.docs.msgs.{}.appId\n"
+	if out := sb.String(); !strings.Contains(out, want) {
+		t.Fatalf("a sanitized miss, which keeps no learned variable's name, lacks %q:\n%s", want, out)
+	}
+}
+
+// A background miss whose place holds a value an ended test bound (the
+// recording trails that test) names that test as the binder, not "this
+// test", and a sanitized miss keeps the test's name.
+func TestRenderUnmatchedCalls_NamesTheTrailedTestThatBoundAPlace(t *testing.T) {
+	del := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on api-server.uiJourneyPins", MatchPhase: models.MatchPhaseBody, Background: true,
+		BackgroundBound: []models.BackgroundBinding{{Recording: "mock-233", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId", BoundTest: ".::TestAppCRUD"}}}
+	for _, uc := range []models.UnmatchedCall{del, del.Sanitized()} {
+		var sb strings.Builder
+		renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{uc}}})
+		out := sb.String()
+		if !strings.Contains(out, "as .::TestAppCRUD bound it at mock-226 ") || strings.Contains(out, "as this test bound it") {
+			t.Fatalf("report does not name the trailed test as the binder:\n%s", out)
+		}
 	}
 }

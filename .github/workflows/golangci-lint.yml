@@ -8,8 +8,6 @@ on:
 
 permissions:
   contents: read
-  # Optional: allow read access to pull request. Use with `only-new-issues` option.
-  pull-requests: read
 
 # cancel the in-progress workflow when PR is refreshed.
 concurrency:
@@ -35,7 +33,75 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
+      # The whole history: the lint step finds the lines this event changed
+      # with git (golangci-new-from.sh), not with GitHub's diff API.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # No lane pulls from ECR Public, whose anonymous quota is per source IP
+      # and GitHub's runners share theirs (the script says how). First, so a
+      # lint failure does not hide it; it needs no Go.
+      - name: Check image registries
+        run: bash ./.github/workflows/test_workflow_scripts/check-image-registries.sh
+
+      # Every artifact download goes through download-artifact-retry, which
+      # tries again when one fails (v8 fails at once on one reset connection
+      # to the artifact service), and no workflow downloads with a
+      # download-artifact older than v8: before v6 a download that stops
+      # part-way ends green with a truncated file, and before v8 a digest
+      # mismatch is only a warning (the script says how). It needs no Go
+      # either. Its cases first.
+      - name: Test the artifact download check
+        run: bash ./.github/workflows/test_workflow_scripts/check-artifact-downloads.tests.sh
+
+      - name: Check artifact downloads
+        run: bash ./.github/workflows/test_workflow_scripts/check-artifact-downloads.sh
+
+      # setup-java-maven caches ~/.m2/repository under a key that names the
+      # Maven version and configuration the build runs with, and runs Maven
+      # offline on an exact hit. Its scripts' cases (one asks the runner's
+      # own Maven), then the check that no workflow or action uses
+      # setup-java's own Maven cache, whose key does not (the check says
+      # why). They need no Go.
+      - name: Test setup-java-maven's cache key and offline mvn
+        run: bash ./.github/actions/setup-java-maven/setup-java-maven.tests.sh
+
+      - name: Test the Maven cache check
+        run: bash ./.github/workflows/test_workflow_scripts/check-maven-caches.tests.sh
+
+      - name: Check Maven caches
+        run: bash ./.github/workflows/test_workflow_scripts/check-maven-caches.sh
+
+      # Every JDK comes from setup-java-maven/jdk: the build jdks.txt pins,
+      # the runner image's own copy when it is exactly that build, else its
+      # archive, checked against the published sha256 and cached under that
+      # digest. Its script's cases (a local server stands in for the release
+      # servers), then the check that no workflow or action runs
+      # actions/setup-java itself, which resolves and downloads a JDK
+      # unchecked (the check says why). They need no Go.
+      - name: Test setup-java-maven/jdk's pinned JDK
+        run: bash ./.github/actions/setup-java-maven/jdk/jdk.tests.sh
+
+      - name: Test the setup-java check
+        run: bash ./.github/workflows/test_workflow_scripts/check-setup-java.tests.sh
+
+      - name: Check setup-java
+        run: bash ./.github/workflows/test_workflow_scripts/check-setup-java.sh
+
+      # The flag that limits the lint step to issues on the lines this event
+      # adds or changes, from the checkout's history (the script says why).
+      # It needs no Go, so a checkout it cannot read fails here in seconds.
+      # Its cases first: they fetch a repository of their own over file://.
+      - name: Test finding the lines an event changed
+        run: bash ./.github/workflows/test_workflow_scripts/golangci-new-from.tests.sh
+
+      - name: Find the lines this event changed
+        id: newfrom
+        env:
+          BEFORE: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash ./.github/workflows/test_workflow_scripts/golangci-new-from.sh
 
       - uses: actions/setup-go@v6
         with:
@@ -84,9 +150,21 @@ jobs:
           #               error: unhandled builtin recover" on Go 1.26.
           #   v2.13.1  -> honnef v0.8.0      clean on go1.27.0 (verified
           #               locally: `golangci-lint run` reports 0 issues).
-          version: v2.13.1
-          only-new-issues: true
-          args: --timeout=5m
+          #   v2.13.x  fails on go1.27.2+: "export data version 5 is greater
+          #               than maximum supported version 4" for every stdlib
+          #               import, so lint type-checks nothing.
+          #   v2.14.0  -> first release that reads go1.27.2+ export data; 0
+          #               issues on go1.27.3 (go.mod's go line, the eMudhra
+          #               crypto/x509 fix). Same version keploy-ci-golint ships.
+          version: v2.14.0
+          # Never the action's only-new-issues: it fetches the diff from
+          # GitHub's API, which refuses a PR diff over 20,000 lines (406),
+          # and on that, or on any API error for a push, the action lints the
+          # whole repository instead (over a thousand issues no PR added).
+          # The flag from the step above has golangci-lint diff the checkout
+          # with git: an issue on a line this event adds or changes fails.
+          only-new-issues: false
+          args: --timeout=5m ${{ steps.newfrom.outputs.flag }}
 
       - name: Check gofmt (diff with line numbers)
         run: |

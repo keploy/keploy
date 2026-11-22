@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# E2E: an agent that cannot start fails `keploy mock record|replay`, and
+# `keploy record` and `keploy test`, at once, with the exit code that names
+# why, and the test command (or app) never runs.
+#
+# The failure this guards is a false green. A CI step that ran keploy where its
+# agent could not start (an unprivileged job container, no tracefs, a kernel
+# BTF keploy could not read) exited 0 with the tests never run, or waited out
+# the agent's whole ready budget first; `keploy record` did so for every
+# reason the agent did not name itself with 3 or 6 (#4772). The reason
+# crosses two process boundaries on the way out: the agent's own exit status,
+# then the CLI's. Unit tests can only model those, so this runs the real
+# binary in the real environments.
+#
+# Every case runs the binary as root in a throwaway container with no network,
+# so nothing it loads or starts outlives the case, and runs `keploy mock
+# record`, `keploy mock replay`, `keploy record` and `keploy test` (with a
+# recorded test set, so it gets as far as starting its agent):
+#   unprivileged   a default container: the kernel refuses eBPF          -> 3
+#   no-tracefs     --privileged, but neither debugfs nor tracefs mounted -> 6
+#   bad-btf        --privileged, tracefs mounted, and the kernel's BTF
+#                  (/sys/kernel/btf/vmlinux) unreadable, as #4772's kernel
+#                  was to the cilium/ebpf of the time: the agent fails to
+#                  load its hooks for a reason it has no code of its own for -> 1
+# No network is not a reason: a native agent is reached over loopback, and
+# mock-offline-linux.sh runs it with nothing but loopback. An agent started
+# with --is-docker still needs a non-loopback address, because its hooks send
+# the connections of the applications it serves to its container's own one.
+#   agent-no-ipv4  `keploy agent --is-docker` in record and test mode, as
+#                  the agent container runs it: --privileged, tracefs
+#                  mounted, no network                                 -> 6
+#                  The agent runs alone, with no test command; docker-6
+#                  checks how the CLI passes an agent container's 6 on.
+# The docker-* cases run keploy's docker mode with a stand-in `docker` whose
+# agent container exits with AGENT_EXIT, as `docker run` does with its
+# container's status. Docker mode lowers kernel.perf_event_paranoid, which is
+# not namespaced: a --privileged container writing it writes the host's. So
+# every docker case that can reach it gets a file of its own mounted over it
+# (PIN_PARANOID), which also pins the level it starts from:
+#   docker-unprivileged    a default container, as a CI job's is: keploy
+#                          lacks the capabilities docker mode needs, and
+#                          says so before it changes anything            -> 3
+#   docker-sysctl-refused  those capabilities, but /proc/sys read-only (as
+#                          in any container that is not --privileged) at
+#                          level 4, which keploy has to lower            -> 3
+#   docker-sysctl-relaxed  the same, at level 2: keploy has nothing to
+#                          write and gets on with starting its agent     -> AGENT_EXIT (6)
+#   docker-N, --privileged 3 and 6 are the agent's reasons, 0 an agent
+#                          that stopped before it was ready              -> N, N, 1
+# (A working environment is mock-linux.sh's job, on the runner itself.)
+#
+# The cases above run without the proven switch, today's default. Under
+# KEPLOY_PROVEN=1, which the flip makes the default (cases named *-proven):
+#   unprivileged, no-tracefs  record fails as above (3, 6), and so do
+#                             `keploy test` and `keploy record`; this build
+#                             refuses the mock replay first, as it does any
+#                             replay under the switch: it does not judge
+#                             each test                                      -> 1
+#   docker-unprivileged,      refused before anything is checked or
+#   docker-3                  changed: no docker call, the pinned
+#                             perf_event_paranoid as it was. The record is
+#                             refused for docker mode; the replay first for
+#                             wanting a build that judges each test          -> 1
+#                             (keploy mock's runs only: its refusal of docker
+#                             mode is what these pin)
+# (agent-no-ipv4 runs the agent alone: an agent takes the switch only from
+# the --proven flag of the keploy that starts it, and under the switch no
+# keploy starts an agent container.)
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
+#
+# Env: RECORD_BIN (the keploy binary under test). E2E_IMAGE overrides the
+# image, which defaults to the runner's own distribution so the binary finds
+# the libc it was built against.
+set -uo pipefail
+
+# This lane's directory: lane_switch.sh.
+# shellcheck source-path=SCRIPTDIR
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+
+BIN="${RECORD_BIN:-keploy}"
+BIN="$(command -v "$BIN" || echo "$BIN")"
+# shellcheck disable=SC1091
+IMAGE="${E2E_IMAGE:-$(. /etc/os-release && echo "${ID}:${VERSION_ID}")}"
+WORK="$(mktemp -d)"
+FAIL=0
+
+fail() {
+  echo "FAIL: $*"
+  FAIL=1
+}
+
+if [ -z "${E2E_IMAGE:-}" ]; then
+  docker pull -q "$IMAGE" >/dev/null || { echo "FAIL: could not pull $IMAGE"; exit 1; }
+fi
+cp "$BIN" "$WORK/keploy" || { echo "FAIL: no keploy binary at $BIN"; exit 1; }
+# The bound on each run inside (bash hang_guard.sh): the run's exit code is
+# its own, not timeout(1)'s, which differs between GNU and uutils coreutils
+# (the image is the runner's distribution: Ubuntu 26.04's is uutils).
+cp "$(dirname "${BASH_SOURCE[0]}")/../hang_guard.sh" "$WORK/hang_guard.sh" || exit 1
+
+# Runs inside each container: $1 is the case. Leaves, per command, its exit
+# code and log, the list of the commands it ran (runs), and a marker if the
+# test command (or, in docker mode, the app's container) ever ran.
+cat > "$WORK/inside.sh" <<'SH'
+#!/bin/sh
+CASE=$1
+D=/work/$CASE
+# <case>-proven is the case under the proven switch (KEPLOY_PROVEN, given to
+# the container).
+BASE=${CASE%-proven}
+mkdir -p "$D/home" "$D/app" "$D/bin"
+trap 'chown -R "$HOSTUID" "$D"' EXIT
+export HOME="$D/home"
+cd "$D/app" || exit 1
+CMD="sh -c 'touch $D/ran'"
+EXTRA=""
+case "$BASE" in
+  agent-no-ipv4)
+    mount -t tracefs nodev /sys/kernel/tracing || exit 1
+    for mode in record test; do
+      bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy agent --is-docker --mode "$mode" --client-pid 1 > "$D/agent-$mode.log" 2>&1
+      echo $? > "$D/agent-$mode.exit"
+      echo "agent-$mode" >> "$D/runs"
+    done
+    exit 0
+    ;;
+  bad-btf)
+    mount -t tracefs nodev /sys/kernel/tracing || exit 1
+    printf 'keploy e2e: not a BTF blob\n' > "$D/vmlinux"
+    mount --bind "$D/vmlinux" /sys/kernel/btf/vmlinux || exit 1
+    ;;
+  docker-*)
+    if [ -n "${PIN_PARANOID:-}" ]; then
+      echo "$PIN_PARANOID" > "$D/perf_event_paranoid"
+      mount --bind "$D/perf_event_paranoid" /proc/sys/kernel/perf_event_paranoid || exit 1
+      if [ -n "${PIN_READ_ONLY:-}" ]; then
+        mount -o remount,bind,ro /proc/sys/kernel/perf_event_paranoid || exit 1
+      fi
+    fi
+    # The agent's alias is `docker container run ...`; the app's command is
+    # `docker run ...`, and only runs once the agent is up.
+    cat > "$D/bin/docker" <<EOD
+#!/bin/sh
+touch $D/docker-called
+case "\$1 \${2:-}" in
+  "container run") exit ${AGENT_EXIT:?} ;;
+  run*) touch $D/ran; exit 0 ;;
+esac
+exit 0
+EOD
+    # keploy is root here, and root runs docker directly: sudo would only
+    # reset the environment that carries the agent's token, and whatever
+    # `sudo` a machine has can break that (a pass-through stand-in execs
+    # --preserve-env as the command). A sudo that fails, loudly, keeps a
+    # regression from hiding behind a stand-in that happens to cope.
+    printf '#!/bin/sh\necho "keploy ran sudo as root: sudo $*" >&2\nexit 97\n' > "$D/bin/sudo"
+    chmod +x "$D/bin/docker" "$D/bin/sudo"
+    export PATH="$D/bin:$PATH"
+    CMD="docker run --rm --name app alpine true"
+    EXTRA="--container-name app"
+    ;;
+esac
+for sub in record replay; do
+  # shellcheck disable=SC2086
+  bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy mock "$sub" -c "$CMD" $EXTRA --disable-tele > "$D/mock-$sub.log" 2>&1
+  echo $? > "$D/mock-$sub.exit"
+  echo "mock-$sub" >> "$D/runs"
+done
+# A docker case under the proven switch is keploy mock's alone: what it pins
+# is keploy mock refusing docker mode before it calls docker.
+case "$CASE" in docker-*-proven) exit 0 ;; esac
+# `keploy test` and `keploy record`, in a directory of their own that holds a
+# recorded test set: with none, `keploy test` fails before it starts its
+# agent.
+mkdir -p "$D/kapp/keploy/test-set-0/tests"
+cat > "$D/kapp/keploy/test-set-0/tests/test-1.yaml" <<'TC'
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    req:
+        method: GET
+        url: http://localhost:8080/
+        timestamp: 2026-01-01T00:00:00Z
+    resp:
+        status_code: 200
+        timestamp: 2026-01-01T00:00:01Z
+TC
+cd "$D/kapp" || exit 1
+for sub in test record; do
+  # shellcheck disable=SC2086
+  bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy "$sub" -c "$CMD" $EXTRA --disable-tele > "$D/$sub.log" 2>&1
+  echo $? > "$D/$sub.exit"
+  echo "$sub" >> "$D/runs"
+done
+SH
+chmod +x "$WORK/inside.sh"
+
+# check <case> <exit code of every run> <what each run's log has to say> <docker flags...>
+# The runs are `keploy mock record`, `keploy mock replay`, `keploy test` and
+# `keploy record`, except for agent-no-ipv4, whose are the agent's own record
+# and test modes; a case that ran any other set of them fails. ALSO_SAYS, when
+# set, is a second line every run's log has to carry: the cause under the
+# CLI's own words.
+check() {
+  local name=$1 want=$2 says=$3 runs expect="mock-record mock-replay test record"
+  shift 3
+  [ "$name" = agent-no-ipv4 ] && expect="agent-record agent-test"
+  echo "--- $name: expecting exit $want from each of its runs ---"
+  docker run --rm --network none "$@" -e HOSTUID="$(id -u):$(id -g)" \
+    -v "$WORK:/work" "$IMAGE" /work/inside.sh "$name" || fail "$name: the container itself failed"
+  runs="$(tr '\n' ' ' < "$WORK/$name/runs" 2>/dev/null)"
+  [ "${runs% }" = "$expect" ] || fail "$name: ran \"${runs% }\", want \"$expect\""
+  for run in $expect; do
+    local got
+    got="$(cat "$WORK/$name/$run.exit" 2>/dev/null)"
+    if [ "$got" != "$want" ]; then
+      fail "$name: the $run run exited ${got:-nothing}, want $want"
+      tail -n 30 "$WORK/$name/$run.log" 2>/dev/null
+      continue
+    fi
+    for text in "$says" ${ALSO_SAYS:+"$ALSO_SAYS"}; do
+      if ! grep -aqF "$text" "$WORK/$name/$run.log" 2>/dev/null; then
+        fail "$name: the $run run's log does not say \"$text\""
+        tail -n 30 "$WORK/$name/$run.log" 2>/dev/null
+      fi
+    done
+  done
+  [ -e "$WORK/$name/ran" ] && fail "$name: the test command ran, with no agent to record or replay it"
+}
+
+if half off; then
+check unprivileged 3 "keploy does not have the kernel privileges it needs"
+check no-tracefs 6 "neither debugfs nor tracefs are mounted" --privileged
+# The agent has to have failed on the BTF, not on anything else that exits 1.
+ALSO_SAYS="load kernel spec: load vmlinux: parsing .BTF header" \
+  check bad-btf 1 "the keploy agent exited before it became ready" --privileged
+check agent-no-ipv4 6 "could not find a non-loopback IP for the container" --privileged
+# Mounting over the knob takes CAP_SYS_ADMIN, and a mount AppArmor allows.
+CAPS=(--cap-add BPF --cap-add PERFMON --cap-add NET_ADMIN --cap-add SYS_RESOURCE --cap-add SYS_PTRACE
+  --cap-add SYS_ADMIN --security-opt apparmor=unconfined)
+check docker-unprivileged 3 "keploy does not have the kernel privileges it needs: missing required capabilities" \
+  -e AGENT_EXIT=0
+check docker-sysctl-refused 3 "keploy does not have the kernel privileges it needs: open /proc/sys/kernel/perf_event_paranoid: read-only file system" \
+  "${CAPS[@]}" -e PIN_PARANOID=4 -e PIN_READ_ONLY=1 -e AGENT_EXIT=0
+check docker-sysctl-relaxed 6 "this environment lacks something keploy needs" \
+  "${CAPS[@]}" -e PIN_PARANOID=2 -e PIN_READ_ONLY=1 -e AGENT_EXIT=6
+check docker-3 3 "keploy does not have the kernel privileges it needs" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
+check docker-6 6 "this environment lacks something keploy needs" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=6
+check docker-0 1 "the keploy agent exited before it became ready" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=0
+fi
+
+# check_proven <case> <record exit> <what record says> <replay exit> <what
+# replay says> <docker flags...>: the case under the proven switch, as
+# <case>-proven. `keploy test` and `keploy record` (run in every case but a
+# docker one) fail as `keploy mock record` does, on the agent.
+check_proven() {
+  local name="$1-proven" run got want says runs expect="mock-record mock-replay test record"
+  local want_record=$2 says_record=$3 want_replay=$4 says_replay=$5
+  shift 5
+  case "$name" in docker-*) expect="mock-record mock-replay" ;; esac
+  echo "--- $name: expecting exit $want_replay from its mock replay run and $want_record from the others ---"
+  docker run --rm --network none "$@" -e KEPLOY_PROVEN=1 -e HOSTUID="$(id -u):$(id -g)" \
+    -v "$WORK:/work" "$IMAGE" /work/inside.sh "$name" || fail "$name: the container itself failed"
+  runs="$(tr '\n' ' ' < "$WORK/$name/runs" 2>/dev/null)"
+  [ "${runs% }" = "$expect" ] || fail "$name: ran \"${runs% }\", want \"$expect\""
+  for run in $expect; do
+    want=$want_record says=$says_record
+    [ "$run" = mock-replay ] && want=$want_replay says=$says_replay
+    got="$(cat "$WORK/$name/$run.exit" 2>/dev/null)"
+    if [ "$got" != "$want" ]; then
+      fail "$name: the $run run exited ${got:-nothing}, want $want"
+      tail -n 30 "$WORK/$name/$run.log" 2>/dev/null
+    fi
+    grep -aqF "$says" "$WORK/$name/$run.log" 2>/dev/null ||
+      fail "$name: the $run run's log does not say \"$says\""
+  done
+  [ -e "$WORK/$name/ran" ] && fail "$name: the test command ran, with no agent to record or replay it"
+  [ -e "$WORK/$name/docker-called" ] && fail "$name: keploy called docker before refusing docker mode under the switch"
+  if [ -f "$WORK/$name/perf_event_paranoid" ] && [ "$(cat "$WORK/$name/perf_event_paranoid")" != 4 ]; then
+    fail "$name: keploy changed perf_event_paranoid to $(cat "$WORK/$name/perf_event_paranoid") before refusing docker mode under the switch"
+  fi
+}
+
+if half on; then
+JUDGES="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
+check_proven unprivileged 3 "keploy does not have the kernel privileges it needs" 1 "$JUDGES"
+check_proven no-tracefs 6 "neither debugfs nor tracefs are mounted" 1 "$JUDGES" --privileged
+NATIVELY="keploy mock record with KEPLOY_PROVEN runs the test command natively in this release"
+check_proven docker-unprivileged 1 "$NATIVELY" 1 "$JUDGES" -e AGENT_EXIT=0
+check_proven docker-3 1 "$NATIVELY" 1 "$JUDGES" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
+fi
+
+rm -rf "$WORK"
+if [ "$FAIL" -ne 0 ]; then
+  echo "agent-cannot-start e2e FAILED"
+  exit 1
+fi
+echo "agent-cannot-start e2e passed"

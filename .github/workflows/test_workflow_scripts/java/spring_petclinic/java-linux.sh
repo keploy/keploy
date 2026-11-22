@@ -3,6 +3,8 @@
 
 set -Eeuo pipefail
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
@@ -64,6 +66,7 @@ wait_for_http_port() {
     sleep 1
   done
   echo "::error::App did not open HTTP port on 9966"
+  save_keploy_start_evidence
   endsec; return 1
 }
 
@@ -80,7 +83,7 @@ wait_for_port_free() {
   section "Ensure port ${port} is free before (re)launch"
   local reaped=0
   for i in $(seq 1 60); do
-    if ! ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN; then
+    if ! ss -ltn "sport = :${port}" 2>/dev/null | grep LISTEN >/dev/null; then
       echo "Port ${port} is free."
       endsec; return 0
     fi
@@ -679,6 +682,7 @@ git checkout petclinic-script
 endsec
 
 section "Start Postgres"
+docker_pull_retry postgres:latest
 docker run -d --name mypostgres -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic \
   -e POSTGRES_DB=petclinic -p 5432:5432 postgres:latest
 wait_for_postgres
@@ -711,6 +715,9 @@ do_record_iteration() {
     > "${app_name}.txt" 2>&1 &
   local KEPLOY_PID=$!
 
+  # The app starts once keploy's agent is ready: its wait, with its full
+  # budget, starts there (keploy-start-wait.sh).
+  await_agent_ready "${app_name}.txt" "$KEPLOY_PID" || exit 1
   send_request "$KEPLOY_PID"
 
   set +e
@@ -752,6 +759,7 @@ if json_pass_supported; then
   # the same testcases, just in a different on-disk encoding.
   section "Reset Postgres before json record pass"
   docker rm -f mypostgres
+  docker_pull_retry postgres:latest
   docker run -d --name mypostgres -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic \
     -e POSTGRES_DB=petclinic -p 5432:5432 postgres:latest
   wait_for_postgres
@@ -816,13 +824,26 @@ fi
 echo "Using reports from: $RUN_DIR"
 
 all_passed=true
+# found_any, because the glob falls through to `continue` when RUN_DIR holds no
+# yaml reports at all. This branch is the only gate that can fail it: the
+# REPLAY_RC check below downgrades a non-zero replay to a ::warning::, so with
+# an empty RUN_DIR the lane printed "All tests passed" and exited 0 having
+# scanned nothing. Eight sibling report loops in this tree already ship this
+# guard.
+found_any=false
 for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
   [[ -f "$rpt" ]] || continue
+  found_any=true
   status=$(awk '/^status:/{print $2; exit}' "$rpt")
   echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
   [[ "$status" == "PASSED" ]] || all_passed=false
 done
 endsec
+
+if [[ "$found_any" != "true" ]]; then
+  echo "::error::No test-set report files found in $RUN_DIR"
+  exit 1
+fi
 
 if [[ "$all_passed" != "true" ]]; then
   echo "::error::Some tests failed or replay exited non-zero"

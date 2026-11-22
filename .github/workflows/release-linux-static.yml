@@ -1,0 +1,94 @@
+name: Release linux binaries (static)
+
+# Builds the linux release binaries the release's way (release.yml's
+# build-linux: .github/scripts/linux/build-linux-release.sh, zig cc against
+# musl, fully static) on every change to how they are built, and runs the
+# release's checks on them: static and stripped, and they start (and the
+# Postgres parser, the C code, passes its tests) on Debian 11, Ubuntu 20.04,
+# Amazon Linux 2 and Rocky Linux 8. So a change that would ship a binary those
+# distributions cannot start (v3.6.164 needed GLIBC_2.34 and exited at once
+# there) fails here, before a release, not after it.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-linux-static.yml'
+      - '.github/scripts/linux/**'
+      - '.github/actions/setup-private-parsers/**'
+      - 'goreleaser.yaml'
+      - 'go.mod'
+      - 'go.sum'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-linux-static.yml'
+      - '.github/scripts/linux/**'
+      - '.github/actions/setup-private-parsers/**'
+      - 'goreleaser.yaml'
+      - 'go.mod'
+      - 'go.sum'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The integrations ref the release builds with (release.yml).
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+
+jobs:
+  build-linux-static:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
+      - name: Cache zig
+        uses: actions/cache@v4
+        with:
+          path: .zig
+          key: zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/linux/zig-toolchain.sh') }}
+
+      - name: Stage zig
+        run: |
+          sh .github/scripts/linux/zig-toolchain.sh "$GITHUB_WORKSPACE/.zig"
+          echo "KEPLOY_ZIG=$GITHUB_WORKSPACE/.zig/zig/zig" >> "$GITHUB_ENV"
+          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-cache" >> "$GITHUB_ENV"
+
+      - name: Build keploy the release way
+        env:
+          VERSION: 0.0.0-static-check
+          SERVER_URL: https://api.keploy.io
+          GITHUB_APP_CLIENT_ID: ""
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          sh .github/scripts/linux/build-linux-release.sh binary "${{ matrix.arch }}" out/keploy ""
+          ls -l out/keploy
+
+      - name: Run on Debian 11, Ubuntu 20.04, Amazon Linux 2 and Rocky Linux 8
+        run: |
+          set -euxo pipefail
+          sh .github/scripts/linux/build-linux-release.sh pgtest "${{ matrix.arch }}" out/pgparse.test
+          sh .github/scripts/linux/check-linux-release-distros.sh out/keploy "${{ matrix.arch }}" out/pgparse.test
