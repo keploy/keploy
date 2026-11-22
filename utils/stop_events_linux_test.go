@@ -2535,6 +2535,53 @@ func TestAGroupsLeaderIsWaitedForAsTheSignalReachedIt(t *testing.T) {
 	awaitReaped(t, "the leader", reaped)
 }
 
+// The group wait leaves to keploy's stop of the daemons each process that
+// stop ends (LeaveToDaemonStop), but never the group's leader: the app
+// keploy started, which that stop does not end. Where keploy holds no pidfd
+// on what it started (a kernel or sandbox without them), the adopter cannot
+// tell that app from a daemon it adopted, so the leader must be waited for
+// whatever the adopter answers. Here it answers yes for every process.
+func TestAGroupsLeaderIsNeverLeftToTheDaemonStop(t *testing.T) {
+	prev := daemonStopEnds.Load()
+	t.Cleanup(func() { daemonStopEnds.Store(prev) })
+	LeaveToDaemonStop(func(int, uint64) bool { return true })
+	cmd, reaped := startGroupLeader(t, "sleep", "600")
+	pid := cmd.Process.Pid
+	st, ok := ReadProcStat(pid)
+	if !ok {
+		t.Fatal("cannot read the leader")
+	}
+	reached := []Reached{{PID: pid, Start: st.StartTime}}
+	isClosed := func(c <-chan struct{}) bool {
+		select {
+		case <-c:
+			return true
+		case <-time.After(300 * time.Millisecond):
+			return false
+		}
+	}
+	// The same process, not the leader, is left to that stop: the answer
+	// is in force.
+	left, release := groupGone(0, reached)
+	if !isClosed(left) {
+		release()
+		t.Fatal("a running process the adopter says its stop ends, not the leader, was waited for")
+	}
+	release()
+	exited, release := groupGone(pid, reached)
+	defer release()
+	if isClosed(exited) {
+		t.Fatal("the group's leader, running, was left to the stop of the daemons")
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	select {
+	case <-exited:
+	case <-time.After(time.Minute):
+		t.Fatal("the leader's exit was not seen")
+	}
+	awaitReaped(t, "the leader", reaped)
+}
+
 // The processes a stop watches all gone is the app's exit, though its event
 // has not come (a starved daemon slow to say its container stopped); and at
 // the user's Ctrl+C, which the stop offers once the run is interrupted, a
