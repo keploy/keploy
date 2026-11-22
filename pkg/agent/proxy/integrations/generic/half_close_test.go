@@ -3,6 +3,7 @@ package generic
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -67,20 +68,95 @@ func prodPair(t *testing.T, withReader bool) (peer net.Conn, proxySide net.Conn)
 	return d, proxyutil.NewSafeConn(raw, zap.NewNop())
 }
 
+// halfCloseWaitDeadline derives a deadline solely from the test binary's
+// deadline (leaving three quarters of the remaining time for cleanup and
+// subsequent tests, and ensuring a broken half-close fails with its own
+// diagnostic before testing's binary-wide timeout panic). When the test has no
+// deadline (e.g. go test -timeout 0), ok is false and waits have no wall-clock
+// bound.
+func halfCloseWaitDeadline(t *testing.T) (time.Time, bool) {
+	t.Helper()
+	dl, ok := t.Deadline()
+	if !ok {
+		return time.Time{}, false
+	}
+	rem := time.Until(dl) / 4
+	if rem < 0 {
+		rem = 0
+	}
+	return time.Now().Add(rem), true
+}
+
+// beforeHalfCloseDeadline returns a timer channel that fires at
+// halfCloseWaitDeadline(t) along with a stop function, or (nil, noop) when the
+// test has no deadline.
+func beforeHalfCloseDeadline(t *testing.T) (<-chan time.Time, func()) {
+	t.Helper()
+	bound, ok := halfCloseWaitDeadline(t)
+	if !ok {
+		return nil, func() {}
+	}
+	timer := time.NewTimer(time.Until(bound))
+	return timer.C, func() { timer.Stop() }
+}
+
+func setReadBound(t *testing.T, conn net.Conn) {
+	t.Helper()
+	if bound, ok := halfCloseWaitDeadline(t); ok {
+		if err := conn.SetReadDeadline(bound); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		return
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear read deadline: %v", err)
+	}
+}
+
+func setWriteBound(t *testing.T, conn net.Conn) {
+	t.Helper()
+	if bound, ok := halfCloseWaitDeadline(t); ok {
+		if err := conn.SetWriteDeadline(bound); err != nil {
+			t.Fatalf("set write deadline: %v", err)
+		}
+		return
+	}
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear write deadline: %v", err)
+	}
+}
+
 // halfCloseExchange drives one request/EOF/response exchange through
 // `run` and reports whether the reply came back.
 func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 	t.Helper()
+	var waits []func()
+	// Registered before prodPair so LIFO cleanup closes the raw TCP sockets
+	// first, unblocking both goroutines before we wait for them to exit.
+	t.Cleanup(func() {
+		for _, w := range waits {
+			w()
+		}
+	})
+
 	clientApp, srcProxy := prodPair(t, true) // Ingress: NewSafeConnWithReader
 	destSvc, dstProxy := prodPair(t, false)  // Egress: NewSafeConn
 
-	go run(srcProxy, dstProxy)
+	runDone := make(chan struct{})
+	waits = append(waits, func() { <-runDone })
+	go func() {
+		defer close(runDone)
+		run(srcProxy, dstProxy)
+	}()
 
 	request := []byte("matrix-generic\n")
 	reply := []byte("fixture-ack:matrix-generic\n")
 
 	srvDone := make(chan error, 1)
+	srvExited := make(chan struct{})
+	waits = append(waits, func() { <-srvExited })
 	go func() {
+		defer close(srvExited)
 		got, err := io.ReadAll(destSvc) // returns only once the FIN arrives
 		if err != nil {
 			srvDone <- err
@@ -101,18 +177,20 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 		t.Fatalf("half-close: %v", err)
 	}
 
+	expired, stop := beforeHalfCloseDeadline(t)
+	defer stop()
 	select {
 	case err := <-srvDone:
 		if err != nil {
 			t.Fatalf("service: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-expired:
 		t.Fatal("the service never saw EOF: the FIN was not forwarded through the SafeConn " +
 			"wrapper, so an EOF-delimited peer never learns the request ended. It waits for " +
 			"bytes that will not come while the client waits for a reply it will not send.")
 	}
 
-	_ = clientApp.SetReadDeadline(time.Now().Add(3 * time.Second))
+	setReadBound(t, clientApp)
 	got := make([]byte, len(reply))
 	if _, err := io.ReadFull(clientApp, got); err != nil {
 		t.Fatalf("client never received the reply after half-closing: %v", err)
@@ -124,9 +202,11 @@ func halfCloseExchange(t *testing.T, run func(clientConn, destConn net.Conn)) {
 
 // encodeGeneric is the path that actually runs during recording.
 func TestEncodeGeneric_ForwardsTheFIN(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	mocks := make(chan *models.Mock, 8)
 	halfCloseExchange(t, func(clientConn, destConn net.Conn) {
-		_ = encodeGeneric(context.Background(), zap.NewNop(), nil, clientConn, destConn,
+		_ = encodeGeneric(ctx, zap.NewNop(), nil, clientConn, destConn,
 			mocks, models.OutgoingOptions{})
 	})
 }
@@ -158,11 +238,26 @@ func TestForwardFIN_SkipsWhenTheCopyFailed(t *testing.T) {
 
 	forwardFIN(proxySide, io.ErrUnexpectedEOF)
 
-	_ = peer.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-	buf := make([]byte, 1)
-	_, err := peer.Read(buf)
-	if err == io.EOF {
-		t.Fatal("a FIN was forwarded for a copy that ended in an error: the peer will read " +
-			"that as a complete request and may act on a truncated message")
+	// Prove synchronously without a wall-clock sleep that the write half is
+	// still open: if forwardFIN called CloseWrite on the underlying TCP socket,
+	// a follow-up write fails immediately and TCP ordering guarantees peer
+	// reads io.EOF before any subsequent bytes.
+	sentinel := []byte("still-open")
+	if _, err := proxySide.Write(sentinel); err != nil {
+		t.Fatalf("a FIN was forwarded for a copy that ended in an error (write after forwardFIN failed: %v): "+
+			"the peer will read that as a complete request and may act on a truncated message", err)
+	}
+
+	setReadBound(t, peer)
+	got := make([]byte, len(sentinel))
+	if _, err := io.ReadFull(peer, got); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatal("a FIN was forwarded for a copy that ended in an error: the peer will read " +
+				"that as a complete request and may act on a truncated message")
+		}
+		t.Fatalf("peer read after failed-copy forwardFIN: %v", err)
+	}
+	if !bytes.Equal(got, sentinel) {
+		t.Fatalf("peer got %q, want %q", got, sentinel)
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -61,12 +60,11 @@ func bigStore(ns ...int) eofStore {
 }
 
 // readAnswer reads want's length from app, failing the test when it does not
-// come within 10 s (a request the parser dropped is never answered).
+// come before the test's deadline bound (a request the parser dropped is never
+// answered).
 func readAnswer(t *testing.T, app net.Conn, want string) {
 	t.Helper()
-	if err := app.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
+	setReadBound(t, app)
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(app, got); err != nil || string(got) != want {
 		t.Fatalf("answer %q, %v; want %q", got, err, want)
@@ -89,11 +87,10 @@ func TestTheGenericParserAnswersARequestAsLongAsItsReadBuffer(t *testing.T) {
 				done <- decodeGeneric(ctx, zap.NewNop(), []byte("PING"), proxySide, nil, bigStore(n), models.OutgoingOptions{})
 			}()
 			readAnswer(t, app, "PONG")
-			// A pipe's write waits for the parser to read it: bounded, so a
-			// parser that stopped reading fails the test instead of hanging it.
-			if err := app.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-				t.Fatal(err)
-			}
+			// A pipe's write waits for the parser to read it: bounded by the
+			// test deadline, so a parser that stopped reading fails the test
+			// instead of hanging it.
+			setWriteBound(t, app)
 			if _, err := app.Write(bytes.Repeat([]byte("A"), n)); err != nil {
 				t.Fatal(err)
 			}
@@ -132,16 +129,18 @@ func tcpPair(t *testing.T) (app *net.TCPConn, proxySide net.Conn) {
 	return c.(*net.TCPConn), proxySide
 }
 
-// awaitEnd fails the test unless decodeGeneric (done) ends, with nil, within
-// 10 s.
+// awaitEnd fails the test unless decodeGeneric (done) ends with nil before the
+// test's deadline bound.
 func awaitEnd(t *testing.T, done <-chan error, what string) {
 	t.Helper()
+	expired, stop := beforeHalfCloseDeadline(t)
+	defer stop()
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("the parser ended with %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-expired:
 		t.Fatalf("the parser polled %s and never ended", what)
 	}
 }
