@@ -353,7 +353,6 @@ func killWithin(logger *zap.Logger, pid int, sig syscall.Signal, wait time.Durat
 			delete(killWaiters, pid)
 			killWaitersMu.Unlock()
 			if !firstDone {
-				firstDone = true
 				done <- err
 			}
 			return
