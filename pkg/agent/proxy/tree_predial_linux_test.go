@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -253,5 +255,48 @@ func TestALiveTreeCallIsHandedTheHoldsDial(t *testing.T) {
 		}
 	default:
 		t.Fatal("the call was not handed to the live handler")
+	}
+}
+
+// The proxy hands a held tree call the listener its hold found as it dialed,
+// with the hold's dial (predials.takeWith): a listener that took that one
+// connection and closed (a Gradle daemon's for its test worker) is gone when
+// the call reaches the proxy, and asked only then, no listener is found, and
+// the call is not served over the dial its listener accepted.
+func TestATreeCallReachingTheProxyIsServedWithTheListenerItsHoldFound(t *testing.T) {
+	recorded.forget()
+	t.Cleanup(recorded.forget)
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default = containerkey.NewKeyer(containerAt{})
+	addr, _, pre, srv, _ := holdDial(t, true)
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_TEST
+	cfg.Agent.MockMode = true
+	cfg.Agent.ClientNSPID = uint32(os.Getpid())
+	dest := ipv4Dest(t, addr)
+	dest.KernelPid, dest.AgentNsPid = uint32(os.Getpid()), uint32(os.Getpid())
+	p := New(zap.NewNop(), fakeDestInfo{dest: dest}, cfg)
+	p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+	if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+		t.Fatal(err)
+	}
+	app, src := acceptedConn(t)
+	end, ok := clientEnd(src.RemoteAddr())
+	if !ok {
+		t.Fatalf("no client end in %v", src.RemoteAddr())
+	}
+	p.predials.putWith(end, pre, treeListener{owner: os.Getpid(), found: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(ctx, src) }()
+	if msg := exchange(app, srv); msg != "" {
+		t.Fatal(msg)
+	}
+	_ = app.Close()
+	_ = srv.Close()
+	if err := awaitEvent(t, done, "handleConnection returning"); err != nil {
+		t.Fatalf("handleConnection = %v, want the call served over the hold's dial", err)
 	}
 }
