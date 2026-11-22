@@ -35,7 +35,7 @@ func TestURLPathIsThePathAsUrlNoiseMasksItWhole(t *testing.T) {
 		{"/v1/u/2026-09-01T09:00:00Z", []string{`v1/u`}, []string{p, "2026-09-01T09:00:00Z"}, []bool{true, false}, nil, []bool{true, true, false}},
 		{"/v1/u/2026-09-01T09:00:00Z", []string{`/u/`}, []string{"v1" + p + "2026-09-01T09:00:00Z"}, []bool{true}, nil, []bool{false, true, false}},
 		{"/v1/u", []string{`^/`}, []string{p + "v1", "u"}, []bool{true, false}, nil, []bool{false, false}},
-		{"/a/b", []string{`a`, `keploy`}, []string{"{{" + p + ".urlnoise}}", "b"}, []bool{true, false}, nil, []bool{true, false}},
+		{"/a/b", []string{`a`, `keploy`}, []string{"{{" + urlNoisePlaceholderOf(1) + ".urlnoise}}", "b"}, []bool{true, false}, nil, []bool{true, false}},
 		{"/" + p + "/b", []string{`zzz`}, []string{p, "b"}, []bool{false, false}, nil, []bool{false, false}},
 		{"v1//b", []string{`b`}, []string{"v1", "", p}, []bool{false, false, true}, nil, []bool{false, false, true}},
 		{"/ab", []string{`x*`}, nil, nil, []string{"ab"}, []bool{false}},
