@@ -1451,6 +1451,20 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		if sameMembers(rv, lv) || !guarded && (k.learnedAt(path, "") || redacted[key]) {
 			continue
 		}
+		// A JWT whose claims hold times the learn step learned is held to
+		// that check (claimsHeld), of the key's values as the learn step
+		// read them (formValue): a key of more than one value holds no one
+		// token, and is refused. One keploy.yml's patterns guard is decided
+		// by them alone.
+		if claims, ok, claimWhy := k.claimsHeld(path, formValue(rv), formValue(lv)); claims && !guarded {
+			if ok {
+				continue
+			}
+			f := shaped(path, shape, models.DiffKindValueChanged, "", "")
+			f.why = shape + " " + claimWhy
+			out = append(out, f)
+			continue
+		}
 		// A recorded value the obfuscator redacted is not held to the
 		// patterns; the key's other recorded values and the live ones are.
 		covered, refusal := k.fieldCovers(key, k.unredacted(rv), lv)
@@ -1558,6 +1572,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 	for i := range rp {
 		path, shape := "body."+rp[i].name, "body."+shapeKey(rp[i].name)
 		var refusal *patternRefusal
+		var why string
 		switch {
 		case rp[i].name != lp[i].name || rp[i].file != lp[i].file:
 			return append(out, bodyChanged())
@@ -1566,6 +1581,16 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || !k.guards(rp[i].name) && (k.learnedAt(path, "") || k.redacted(string(rp[i].data)))):
 			continue
 		case rp[i].file == "":
+			// A JWT whose claims hold times the learn step learned is held
+			// to that check (claimsHeld). One keploy.yml's patterns guard is
+			// decided by them alone.
+			if claims, ok, claimWhy := k.claimsHeld(path, string(rp[i].data), string(lp[i].data)); claims && !k.guards(rp[i].name) {
+				if ok {
+					continue
+				}
+				why = shape + " " + claimWhy
+				break
+			}
 			// A recorded value the obfuscator redacted is not held to the
 			// patterns; the live one is.
 			held := []string{string(rp[i].data)}
@@ -1579,6 +1604,9 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 		}
 		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
 		refusal.refuse(&f, shape)
+		if why != "" {
+			f.why = why
+		}
 		out = append(out, f)
 	}
 	return out

@@ -290,9 +290,7 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		}
 		s.Fixed["body"] = "form"
 		for k, vs := range form {
-			vs = append([]string(nil), vs...)
-			sort.Strings(vs)
-			add("body."+k, strings.Join(vs, ", "), strings.ContainsAny(k, ".[]"))
+			add("body."+k, formValue(vs), strings.ContainsAny(k, ".[]"))
 		}
 	case p.mediaType == "multipart/form-data":
 		if !multipartLeaves(p, s.Leaves, s.Fixed) {
@@ -418,6 +416,15 @@ func (n learnNoise) heldLearned(learned []learn.Learned) string {
 // parser's call whose parser cannot write an answer from it (req.written).
 func unwrittenWhy(m *models.Mock) string {
 	return "the call's parser cannot write an answer from " + m.Name + "'s recorded answer for this request"
+}
+
+// formValue is a form key's values as the learn step reads them, one leaf:
+// sorted, then joined by ", ", so that a repeated key's values in any order
+// are one value. A key of one value is that value.
+func formValue(vs []string) string {
+	vs = append([]string(nil), vs...)
+	sort.Strings(vs)
+	return strings.Join(vs, ", ")
 }
 
 // multipartLeaves reads a multipart/form-data body by its own boundary: each
