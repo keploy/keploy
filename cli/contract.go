@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -34,9 +35,10 @@ func Contract(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 
 func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "generate",
-		Short:   "Generate OpenAPI contract from recorded test cases",
-		Example: `keploy contract generate --path .`,
+		Use:          "generate",
+		Short:        "Generate OpenAPI contract from recorded test cases",
+		Example:      `keploy contract generate --path .`,
+		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -46,13 +48,14 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
-				return nil
+				err := errors.New("service doesn't satisfy contract service interface")
+				utils.LogError(logger, err, "service doesn't satisfy contract service interface")
+				return err
 			}
 
 			infer, _ := cmd.Flags().GetBool("infer")
@@ -64,7 +67,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")
-				return nil
+				return err
 			}
 
 			return nil
@@ -78,9 +81,10 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 
 func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "download",
-		Short:   "Download contract for specified services",
-		Example: `keploy contract download --services="email,notify" --path /local/path`,
+		Use:          "download",
+		Short:        "Download contract for specified services",
+		Example:      `keploy contract download --services="email,notify" --path /local/path`,
+		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -88,18 +92,20 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
-				return nil
+				err := errors.New("service doesn't satisfy contract service interface")
+				utils.LogError(logger, err, "service doesn't satisfy contract service interface")
+				return err
 			}
 			err = contract.Download(ctx, true)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to download contract")
+				return err
 			}
 			return nil
 		},
@@ -110,9 +116,10 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 
 func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "test",
-		Short:   "Validate contract for specified services",
-		Example: `keploy contract test --services="email,notify" --path /local/path`,
+		Use:          "test",
+		Short:        "Validate contract for specified services",
+		Example:      `keploy contract test --services="email,notify" --path /local/path`,
+		SilenceUsage: true,
 
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
@@ -121,17 +128,19 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
-				return nil
+				err := errors.New("service doesn't satisfy contract service interface")
+				utils.LogError(logger, err, "service doesn't satisfy contract service interface")
+				return err
 			}
 			err = contract.Validate(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to validate contract")
+				return err
 			}
 			return nil
 		},

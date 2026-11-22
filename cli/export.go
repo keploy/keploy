@@ -30,9 +30,10 @@ func Export(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		},
 	}
 	var postmanCmd = &cobra.Command{
-		Use:     "postman",
-		Short:   "export Keploy tests as Postman collection",
-		Example: "keploy export postman",
+		Use:          "postman",
+		Short:        "export Keploy tests as Postman collection",
+		Example:      "keploy export postman",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 			provider.PrintLogo(log.PrimarySink(), disableAnsi)

@@ -17,9 +17,10 @@ func init() {
 
 func Sanitize(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "sanitize",
-		Short:   "sanitize the keploy testcases to remove the sensitive data",
-		Example: `keploy sanitize -t "test-set-id"`,
+		Use:          "sanitize",
+		Short:        "sanitize the keploy testcases to remove the sensitive data",
+		Example:      `keploy sanitize -t "test-set-id"`,
+		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},

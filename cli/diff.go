@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -18,10 +19,11 @@ func init() {
 
 func Diff(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "diff <run1> <run2>",
-		Short:   "compare two keploy test runs and print regressions/fixes",
-		Example: `keploy diff test-run-1 test-run-2 -t "test-set-1,test-set-2"`,
-		Args:    cobra.MaximumNArgs(2),
+		Use:          "diff <run1> <run2>",
+		Short:        "compare two keploy test runs and print regressions/fixes",
+		Example:      `keploy diff test-run-1 test-run-2 -t "test-set-1,test-set-2"`,
+		SilenceUsage: true,
+		Args:         cobra.MaximumNArgs(2),
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -38,11 +40,12 @@ func Diff(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			run1 = strings.TrimSpace(run1)
 			run2 = strings.TrimSpace(run2)
 			if run1 == "" || run2 == "" {
-				return fmt.Errorf("%s expected two run IDs. usage: keploy diff <run1> <run2>", utils.Emoji)
+				return utils.UsageError(fmt.Errorf("%s expected two run IDs. usage: keploy diff <run1> <run2>", utils.Emoji))
 			}
 
 			testSets, err := cmd.Flags().GetStringSlice("test-sets")
 			if err != nil {
+				utils.LogError(logger, err, "failed to read test-sets flag")
 				return fmt.Errorf("%s failed to read test-sets flag: %w", utils.Emoji, err)
 			}
 
@@ -54,8 +57,9 @@ func Diff(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			var diffService diffSvc.Service
 			var ok bool
 			if diffService, ok = svc.(diffSvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy diff service interface")
-				return fmt.Errorf("service doesn't satisfy diff service interface")
+				err := errors.New("service doesn't satisfy diff service interface")
+				utils.LogError(logger, err, "service doesn't satisfy diff service interface")
+				return err
 			}
 
 			if err := diffService.Compare(ctx, run1, run2, testSets); err != nil {

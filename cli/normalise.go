@@ -18,9 +18,10 @@ func init() {
 // Normalize retrieves the command to normalize Keploy
 func Normalize(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var normalizeCmd = &cobra.Command{
-		Use:     "normalize",
-		Short:   "Normalize Keploy",
-		Example: `keploy normalize --test-run testrun --tests "test-set-1:test-case-1 test-case-2,test-set-2:test-case-1 test-case-2"`,
+		Use:          "normalize",
+		Short:        "Normalize Keploy",
+		Example:      `keploy normalize --test-run testrun --tests "test-set-1:test-case-1 test-case-2,test-set-2:test-case-1 test-case-2"`,
+		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},

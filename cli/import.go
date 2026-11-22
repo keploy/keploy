@@ -31,9 +31,10 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 	}
 
 	var postmanCmd = &cobra.Command{
-		Use:     "postman",
-		Short:   "import postman collection to Keploy tests",
-		Example: "keploy import postman",
+		Use:          "postman",
+		Short:        "import postman collection to Keploy tests",
+		Example:      "keploy import postman",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 			provider.PrintLogo(log.PrimarySink(), disableAnsi)
