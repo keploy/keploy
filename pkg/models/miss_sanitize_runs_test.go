@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -182,8 +183,9 @@ func TestTheNextStepShapesAnIDLongNumberAlone(t *testing.T) {
 // field diffs with an id mid-path, the text naming each whole and by runs
 // around the id (120 and 1000 fields deep); and one diff of keys "" and
 // "{}", or "y" and "x:y", nested 500 and 4000 deep and named whole, where
-// each place after a mark ("}", ":") begins a chain of kept fields. Bytes
-// are bounded (they do not move with the runner's load), and so is the
+// each place after a mark ("}", ":") begins a chain of kept fields. The
+// bytes a call allocates of its own are bounded (ownBytes: they move
+// neither with the runner's load nor with -race), and so is the
 // ratio of the fastest of 5 timings at the deeper depth to the shallower:
 // about 8 to 10 when the cost grows with depth, about 64 or more with its
 // square, so it must stay under 25. (Building every run of every path took
@@ -211,15 +213,11 @@ func TestShapingANextStepGrowsWithItsPathsDepthNotItsSquare(t *testing.T) {
 			return UnmatchedCall{Protocol: "HTTP", NextSteps: "Only values drifted (" + p + "). Re-record.", FieldDiffs: []MockFieldDiff{{Path: p, Kind: DiffKindValueChanged}}}
 		}
 	}
-	// cost is the bytes a call allocates and the fastest of 5 timings of
-	// reps calls, a call's share.
-	cost := func(m UnmatchedCall, reps int) (uint64, time.Duration) {
-		var before, after runtime.MemStats
-		runtime.GC()
-		runtime.ReadMemStats(&before)
-		m.SanitizedNextStep()
-		runtime.ReadMemStats(&after)
-		fastest := time.Duration(1<<63 - 1)
+	// cost is the bytes a call allocates of its own (ownBytes) and the
+	// fastest of 5 timings of reps calls, a call's share.
+	cost := func(m UnmatchedCall, reps int) (own, state uint64, fastest time.Duration) {
+		own, state = ownBytes(t, func() { m.SanitizedNextStep() })
+		fastest = time.Duration(1<<63 - 1)
 		for range 5 {
 			start := time.Now()
 			for range reps {
@@ -227,7 +225,7 @@ func TestShapingANextStepGrowsWithItsPathsDepthNotItsSquare(t *testing.T) {
 			}
 			fastest = min(fastest, time.Since(start)/time.Duration(reps))
 		}
-		return after.TotalAlloc - before.TotalAlloc, fastest
+		return own, state, fastest
 	}
 	for _, c := range []struct {
 		name            string
@@ -247,14 +245,14 @@ func TestShapingANextStepGrowsWithItsPathsDepthNotItsSquare(t *testing.T) {
 		}
 		// Enough calls that the shallower timing is a few milliseconds.
 		reps := 1
-		if _, d := cost(low, 1); d < 2*time.Millisecond {
+		if _, _, d := cost(low, 1); d < 2*time.Millisecond {
 			reps = int(2*time.Millisecond/max(d, time.Microsecond)) + 1
 		}
-		lowBytes, lowTime := cost(low, reps)
-		highBytes, highTime := cost(high, reps)
+		lowBytes, lowState, lowTime := cost(low, reps)
+		highBytes, highState, highTime := cost(high, reps)
 		ratio := float64(highTime) / float64(max(lowTime, 1))
-		t.Logf("%s: depth %d %v and %d KB a call, depth %d %v and %d KB, time x%.1f",
-			c.name, c.low, lowTime, lowBytes>>10, c.high, highTime, highBytes>>10, ratio)
+		t.Logf("%s: depth %d %v and %d KB a call (and %d KB of matcher state), depth %d %v and %d KB (and %d KB), time x%.1f",
+			c.name, c.low, lowTime, lowBytes>>10, lowState>>10, c.high, highTime, highBytes>>10, highState>>10, ratio)
 		if lowBytes > c.lowMax || highBytes > c.highMax {
 			t.Errorf("%s: %d KB at depth %d and %d KB at %d a call; want at most %d KB and %d KB",
 				c.name, lowBytes>>10, c.low, highBytes>>10, c.high, c.lowMax>>10, c.highMax>>10)
@@ -262,6 +260,95 @@ func TestShapingANextStepGrowsWithItsPathsDepthNotItsSquare(t *testing.T) {
 		if ratio >= 25 {
 			t.Errorf("%s: depth %d takes %.1f times what depth %d does (%v, %v); want under 25, as cost that grows with depth",
 				c.name, c.high, ratio, c.low, highTime, lowTime)
+		}
+	}
+}
+
+// matcherState are the functions in which package regexp builds the state a
+// match runs on: a backtracker's, an NFA machine's, a one-pass machine's.
+// It keeps that state in a sync.Pool between matches, so a match that finds
+// it there allocates none of it. Under -race a sync.Pool drops one put in
+// four at random, so a call rebuilds it for about a quarter of its matches:
+// by a memory profile, 4.5 to 5.5 MB more a call of keys "y" and "x:y" 500
+// deep, all of it in these functions, while the bytes the rest of the call
+// allocates stay within 2% of a build without -race.
+var matcherState = map[string]bool{
+	"regexp.newBitState":       true,
+	"regexp.(*bitState).reset": true,
+	"regexp.(*bitState).push":  true,
+	"regexp.(*Regexp).get":     true,
+	"regexp.(*machine).alloc":  true,
+	"regexp.(*machine).add":    true,
+	"regexp.(*machine).step":   true,
+	"regexp.(*machine).clear":  true,
+	"regexp.newOnePassMachine": true,
+}
+
+// ownBytes is what f allocates, as a memory profile at rate 1 (every
+// allocation) counts it while f runs, split by the function that made each
+// allocation: own is every byte but regexp's matcher state (matcherState),
+// state is that state. The profile must hold at least the bytes the runtime
+// counts allocated while f runs (TotalAlloc), or the row fails: a profile
+// that misses allocations would make own too small.
+func ownBytes(t *testing.T, f func()) (own, state uint64) {
+	t.Helper()
+	n, _ := runtime.MemProfile(nil, true)
+	before := make([]runtime.MemProfileRecord, n+4096)
+	after := make([]runtime.MemProfileRecord, n+4096)
+	rate := runtime.MemProfileRate
+	runtime.MemProfileRate = 1
+	defer func() { runtime.MemProfileRate = rate }()
+	// A profile may be up to two collections old; runtime.GC publishes
+	// what was allocated before it, and a second one covers a collection
+	// that overlapped the first.
+	runtime.GC()
+	runtime.GC()
+	nb, okBefore := runtime.MemProfile(before, true)
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	f()
+	runtime.ReadMemStats(&m1)
+	runtime.GC()
+	runtime.GC()
+	na, okAfter := runtime.MemProfile(after, true)
+	runtime.MemProfileRate = rate
+	if !okBefore || !okAfter {
+		t.Fatalf("the memory profile holds more than %d records", len(before))
+	}
+	bytesByStack := func(recs []runtime.MemProfileRecord) map[[32]uintptr]int64 {
+		m := make(map[[32]uintptr]int64, len(recs))
+		for _, r := range recs {
+			m[r.Stack0] += r.AllocBytes
+		}
+		return m
+	}
+	was := bytesByStack(before[:nb])
+	for stk, b := range bytesByStack(after[:na]) {
+		d := uint64(b - was[stk])
+		if matcherState[allocator(stk[:])] {
+			state += d
+		} else {
+			own += d
+		}
+	}
+	if counted := m1.TotalAlloc - m0.TotalAlloc; own+state < counted {
+		t.Fatalf("the memory profile holds %d bytes allocated while the call ran; the runtime counts %d", own+state, counted)
+	}
+	return own, state
+}
+
+// allocator is the function that made an allocation whose stack is stk
+// (a record's Stack0: it ends at its first 0): its first frame outside the
+// runtime.
+func allocator(stk []uintptr) string {
+	if i := slices.Index(stk, 0); i >= 0 {
+		stk = stk[:i]
+	}
+	frames := runtime.CallersFrames(stk)
+	for {
+		f, more := frames.Next()
+		if !more || !strings.HasPrefix(f.Function, "runtime.") {
+			return f.Function
 		}
 	}
 }
