@@ -566,6 +566,79 @@ func TestStrictNoiseLearnedFieldValueDriftStillMatchesAndUserNoiseWins(t *testin
 				}
 			})
 
+			t.Run("long JWT crossing 256B cut is redacted before truncation", func(t *testing.T) {
+				const jwtNeedle = "eyJhbGciOiJI"
+				type jwtCase struct {
+					name, rec, live string
+					wantPath        string
+					wantKind        models.MockFieldDiffKind
+					wantActual      string
+				}
+				var cases []jwtCase
+				// Header+payload prefix is 24 bytes ("eyJhbGciOiJIUzI1NiJ9.eyJ"), so
+				// payloadLen 232 (269B JWT), 260 (297B JWT), and 300 (337B JWT) all
+				// cross the 256-byte cut before the ".signature" segment completes.
+				for _, payloadLen := range []int{232, 260, 300} {
+					jwt := "eyJhbGciOiJIUzI1NiJ9.eyJ" + strings.Repeat("a", payloadLen) + ".c2lnbmF0dXJl"
+					total := len(jwt)
+					cases = append(cases,
+						jwtCase{
+							name:       fmt.Sprintf("value_changed %dB JWT", total),
+							rec:        `{"q":"ada","x":"ok"}`,
+							live:       `{"q":"bob","x":"` + jwt + `"}`,
+							wantPath:   "body.x",
+							wantKind:   models.DiffKindValueChanged,
+							wantActual: valueRedacted,
+						},
+						jwtCase{
+							name:       fmt.Sprintf("retyped number %dB JWT", total),
+							rec:        `{"q":"ada","x":1}`,
+							live:       `{"q":"bob","x":"` + jwt + `"}`,
+							wantPath:   "body.x",
+							wantKind:   models.DiffKindTypeChanged,
+							wantActual: "string: " + valueRedacted,
+						},
+						jwtCase{
+							name:       fmt.Sprintf("missing_in_mock %dB JWT", total),
+							rec:        `{"q":"ada"}`,
+							live:       `{"q":"bob","extra":"` + jwt + `"}`,
+							wantPath:   "body.extra",
+							wantKind:   models.DiffKindMissingInMock,
+							wantActual: valueRedacted,
+						},
+					)
+				}
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						m := recorded("m-redact-jwt", "/search", jsonHdr, tc.rec)
+						db := &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}
+						ok, _, diag, err := newHTTP().match(context.Background(), sent("/search", jsonHdr, tc.live), db, nil, nil, nil, true, false, true, true, true)
+						if err != nil || ok {
+							t.Fatalf("want miss, got ok=%v err=%v", ok, err)
+						}
+						r := newHTTP().buildHTTPMismatchReport(context.Background(), makeJSONPostRequest("/search", tc.live), []byte(tc.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
+						if strings.Contains(r.Diff, jwtNeedle) || strings.Contains(r.NextSteps, jwtNeedle) || strings.Contains(r.ReceivedReq, jwtNeedle) {
+							t.Fatalf("JWT leaked in report: diff=%q next=%q received=%q", r.Diff, r.NextSteps, r.ReceivedReq)
+						}
+						var sawTarget bool
+						for _, d := range r.FieldDiffs {
+							if strings.Contains(d.Expected, jwtNeedle) || strings.Contains(d.Actual, jwtNeedle) {
+								t.Fatalf("JWT leaked in FieldDiff %+v", d)
+							}
+							if d.Path == tc.wantPath && d.Kind == tc.wantKind {
+								sawTarget = true
+								if mode.env == "" && d.Actual != tc.wantActual {
+									t.Fatalf("want redacted Actual %q, got %+v", tc.wantActual, d)
+								}
+							}
+						}
+						if !sawTarget {
+							t.Fatalf("expected %s %s in %+v", tc.wantPath, tc.wantKind, r.FieldDiffs)
+						}
+					})
+				}
+			})
+
 			t.Run("folded array path with two refusal kinds keeps both in FieldDiffs", func(t *testing.T) {
 				rec := `{"q":"a","items":[{"ts":1},{"ts":null}]}`
 				live := `{"q":"a","items":[{},{"ts":false}]}`
