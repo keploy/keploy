@@ -70,8 +70,8 @@ func repeatNoteOf(ctx context.Context, input *req, db integrations.MockMemDb, n 
 //
 // A store that walks its per-test tier by key (integrations.PerTestKeyRanger)
 // is read under each of keys (ownKeyIndexes), up to the first such recording,
-// so a miss costs the same whatever the test or the set holds; any other is
-// read whole (ownRecordingInRead).
+// so a miss costs the same whatever the test or the set holds; any other, and
+// one whose keyed walk fails, is read whole (ownRecordingInRead).
 func ownRecordingUnder(mockDb integrations.MockMemDb, keys []string) bool {
 	pr, ok := mockDb.(integrations.PerTestKeyRanger)
 	if !ok {
@@ -95,8 +95,12 @@ func ownRecordingUnder(mockDb integrations.MockMemDb, keys []string) bool {
 			found = true
 			return false
 		})
-		if err != nil || found {
+		if found {
 			return true
+		}
+		if err != nil {
+			// A read that fails is the whole read's to answer.
+			return ownRecordingInRead(mockDb, keys)
 		}
 	}
 	return false

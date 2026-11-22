@@ -16,20 +16,21 @@ import (
 // ownKeysDb is a per-test tier (perTest) a store reads whole or by key
 // (integrations.PerTestKeyRanger): by key, the tier's recordings the index
 // files under it, in the tier's order. It reports spent the recordings spent
-// holds, and fails every keyed read with keyErr. wholeReads counts the
-// whole reads. It does not tell which recordings are the open test's own;
+// holds, fails every keyed read with keyErr and every whole read with
+// readErr. wholeReads counts the whole reads. It does not tell which recordings are the open test's own;
 // ownersDb does.
 type ownKeysDb struct {
 	*mockMemDb
 	perTest    []*models.Mock
 	spent      map[*models.Mock]bool
 	keyErr     error
+	readErr    error
 	wholeReads int
 }
 
 func (d *ownKeysDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	d.wholeReads++
-	return d.perTest, nil
+	return d.perTest, d.readErr
 }
 
 func (d *ownKeysDb) Spent(m *models.Mock) bool { return d.spent[m] }
@@ -182,14 +183,26 @@ func TestTheOwnKeyIndexFilesARecordingAsTheSwitchInForceReadsIt(t *testing.T) {
 	}
 }
 
-// A keyed per-test read that fails counts as an own recording, as a whole
-// read that fails does: no note is the side that hides nothing.
-func TestAFailedKeyedOwnRecordingCheckKeepsTheNoteOff(t *testing.T) {
-	d := &ownKeysDb{mockMemDb: &mockMemDb{}, keyErr: errors.New("read failed")}
-	if !ownRecordingUnder(d, RequestKeysOf("GET", "/a", "", false)) {
-		t.Fatal("a failed keyed read counts as no own recording; want one")
-	}
-	if d.wholeReads != 0 {
-		t.Fatalf("a failed keyed read read the tier whole %d times", d.wholeReads)
+// A keyed per-test read that fails is answered by the whole read, as a store
+// without the keyed walk is: an own recording the whole read finds keeps the
+// note off, none leaves it, and a whole read that fails too keeps it off, the
+// side that hides nothing.
+func TestAFailedKeyedOwnRecordingCheckIsTheWholeReads(t *testing.T) {
+	keys := RequestKeysOf("GET", "/a", "", false)
+	mine := httpMock("mine", "GET", "/a")
+	for _, c := range []struct {
+		name    string
+		perTest []*models.Mock
+		readErr error
+		want    bool
+	}{
+		{"an own recording under the call's keys", []*models.Mock{mine}, nil, true},
+		{"none", []*models.Mock{httpMock("elsewhere", "GET", "/b")}, nil, false},
+		{"a whole read that fails too", nil, errors.New("read failed"), true},
+	} {
+		d := &ownKeysDb{mockMemDb: &mockMemDb{}, perTest: c.perTest, keyErr: errors.New("keyed read failed"), readErr: c.readErr}
+		if got := ownRecordingUnder(d, keys); got != c.want || d.wholeReads != 1 {
+			t.Errorf("%s: own recording %v after %d whole reads, want %v after one", c.name, got, d.wholeReads, c.want)
+		}
 	}
 }
