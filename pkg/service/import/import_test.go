@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -324,11 +323,21 @@ func TestProcessFormdataBody_FileAndExportedEntries(t *testing.T) {
 		{"key": "name", "value": "om", "type": "text"},
 		{"key": "avatar", "type": "file", "src": "/tmp/avatar.png"},
 		{"key": "docs", "type": "file", "src": ["a.pdf", "b.pdf"]},
-		{"key": "tags", "values": ["x", "y"]}
+		{"key": "tags", "values": ["x", "y"]},
+		{"key": "empty_arr", "values": []},
+		{"key": "mixed_arr", "values": ["x", 123, null, "y"]},
+		{"key": "all_non_str", "values": [123, null]},
+		{"key": "empty_str_arr", "values": [""]},
+		{"key": "bad_values", "values": 42},
+		{"key": "disabled_vals", "values": ["skip"], "disabled": true},
+		{"key": "both_keys", "value": "", "values": ["a", "b"]},
+		{"key": "fallback_to_value", "value": "only", "values": []}
 	]`), &body)
-	if err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	require.NoError(t, err)
+	body = append(body, map[string]interface{}{
+		"key":    "in_memory_slice",
+		"values": []string{"m1", "m2"},
+	})
 
 	got := processFormdataBody(body)
 
@@ -337,10 +346,13 @@ func TestProcessFormdataBody_FileAndExportedEntries(t *testing.T) {
 		{Key: "avatar", Paths: []string{"/tmp/avatar.png"}},
 		{Key: "docs", Paths: []string{"a.pdf", "b.pdf"}},
 		{Key: "tags", Values: []string{"x", "y"}},
+		{Key: "mixed_arr", Values: []string{"x", "y"}},
+		{Key: "empty_str_arr", Values: []string{""}},
+		{Key: "both_keys", Values: []string{"a", "b"}},
+		{Key: "fallback_to_value", Values: []string{"only"}},
+		{Key: "in_memory_slice", Values: []string{"m1", "m2"}},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("processFormdataBody() = %+v, want %+v", got, want)
-	}
+	assert.Equal(t, want, got)
 }
 
 func TestProcessFormdataBody_HandlesFileAndText(t *testing.T) {

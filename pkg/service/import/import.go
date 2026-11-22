@@ -546,7 +546,12 @@ func processFormdataBody(body []map[string]interface{}) []models.FormData {
 			})
 			continue
 		}
-		values := append(stringValues(formData["value"]), stringValues(formData["values"])...)
+		var values []string
+		if vals := stringValues(formData["values"]); len(vals) > 0 {
+			values = vals
+		} else if val, ok := formData["value"].(string); ok {
+			values = []string{val}
+		}
 		if len(values) > 0 {
 			form = append(form, models.FormData{
 				Key:    key,
@@ -561,6 +566,11 @@ func stringValues(v interface{}) []string {
 	switch v := v.(type) {
 	case string:
 		return []string{v}
+	case []string:
+		if len(v) == 0 {
+			return nil
+		}
+		return append([]string(nil), v...)
 	case []interface{}:
 		values := make([]string, 0, len(v))
 		for _, item := range v {
