@@ -164,15 +164,24 @@ func serveScale(h integrations.Integrations, mm integrations.MockMemDb, i int) (
 // staged once, each test opened at its first call (openScale, timed apart as
 // view-ns and counted in ns/op), its calls made in recorded order; view=test
 // is one test owning all n recordings; view=none installs no exact view, so
-// every call reads the store (the path a miss takes). Without a view the set
-// is restaged (untimed) every 256 calls, so the pool stays near n, and calls
-// are taken in a stride through the set, so each one serves a different
-// recording. The exact view's verify mode, which this package's rows run
-// under (TestMain), compares every recording on every call by design and is
-// off here: what is measured is what a replay pays.
+// every call reads the store (the path a miss takes). In every mode but
+// view=tests the set is restaged (untimed) every 256 calls, so the pool stays
+// near n, and calls are taken in a stride through the set, so each one
+// serves a different recording.
+//
+// The first call after each staging files what calls read by: the parser's
+// indexes of the staged set and, with view=test, the n recordings the open
+// test owns. A replay pays that once per set or test, and the calls of the
+// set or test share it; restaged every 256 calls here, a test that owns 10k
+// recordings would have 256 calls share it, not its 10k. So that call is
+// timed apart, outside ns/op, and reported as first-ns. The exact view's
+// verify mode, which this package's rows run under (TestMain), compares
+// every recording on every call by design and is off here: what is measured
+// is what a replay pays.
 //
 // It reports the mean time of a GET (one recording per path) and of a POST
-// (every POST recording shares the path) apart, as get-ns and post-ns.
+// (every POST recording shares the path) apart, as get-ns and post-ns, each
+// less the first calls after a staging (first-ns).
 func BenchmarkHTTPReplayPerCall(b *testing.B) {
 	verify := exactViewVerify.Load()
 	exactViewVerify.Store(false)
@@ -194,8 +203,10 @@ func BenchmarkHTTPReplayPerCall(b *testing.B) {
 				defer mm.Close()
 				var took [2]time.Duration
 				var calls [2]int
-				var viewTook time.Duration
-				var views int
+				var viewTook, firstTook time.Duration
+				var views, firsts int
+				// fresh: the next call is the first after a staging.
+				fresh := false
 				var staged []*models.Mock
 				b.ReportAllocs()
 				for k := 0; k < b.N; k++ {
@@ -205,6 +216,7 @@ func BenchmarkHTTPReplayPerCall(b *testing.B) {
 						if i = k % n; i == 0 {
 							b.StopTimer()
 							staged = stageScale(mm, n, at, mode.view)
+							fresh = true
 							b.StartTimer()
 						}
 						if i%scaleCalls == 0 {
@@ -219,14 +231,25 @@ func BenchmarkHTTPReplayPerCall(b *testing.B) {
 							if staged = stageScale(mm, n, at, mode.view); mode.view == "test" {
 								openScale(mm, staged, 0, n)
 							}
+							fresh = true
 							b.StartTimer()
 						}
 						i = ((k % per) * 7919) % n
 					}
+					if fresh {
+						b.StopTimer()
+					}
 					t0 := time.Now()
 					body, err := serveScale(h, mm, i)
-					took[i%2] += time.Since(t0)
-					calls[i%2]++
+					if d := time.Since(t0); fresh {
+						firstTook += d
+						firsts++
+						fresh = false
+						b.StartTimer()
+					} else {
+						took[i%2] += d
+						calls[i%2]++
+					}
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -241,6 +264,9 @@ func BenchmarkHTTPReplayPerCall(b *testing.B) {
 				}
 				if views > 0 {
 					b.ReportMetric(float64(viewTook.Nanoseconds())/float64(views), "view-ns")
+				}
+				if firsts > 0 {
+					b.ReportMetric(float64(firstTook.Nanoseconds())/float64(firsts), "first-ns")
 				}
 			})
 		}
