@@ -123,3 +123,37 @@ func TestEngineWaitEndReleasesItsHold(t *testing.T) {
 		t.Fatalf("a wait begun after its end said %v", logs.All())
 	}
 }
+
+// A question within the run's wait on the engine ends with the wait, with its
+// cause, and with its own end; a stop no run's wait holds (a nil wait, as
+// compose's) still ends what it runs on it with its own end: the resend of its
+// SIGTERM runs on that context, and must end with the stop.
+func TestWithinEngineWaitEndsWithTheWaitAndWithItsOwnEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wait bool
+	}{{"no wait", false}, {"a wait", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var wait context.Context
+			if tc.wait {
+				wait = context.Background()
+			}
+			ctx, end := withinEngineWait(context.Background(), wait)
+			if ctx.Err() != nil {
+				t.Fatalf("ended at once: %v", context.Cause(ctx))
+			}
+			end()
+			if cause := context.Cause(ctx); !errors.Is(cause, context.Canceled) {
+				t.Fatalf("after its end, its cause is %v, want %v", cause, context.Canceled)
+			}
+		})
+	}
+	wait, stop := context.WithCancelCause(context.Background())
+	ctx, end := withinEngineWait(context.Background(), wait)
+	defer end()
+	stop(errDaemonSilent)
+	within(t, "the question's end with its wait", func() { <-ctx.Done() })
+	if cause := context.Cause(ctx); !errors.Is(cause, errDaemonSilent) {
+		t.Fatalf("ended with its wait with %v, want %v", cause, errDaemonSilent)
+	}
+}

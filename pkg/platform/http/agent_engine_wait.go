@@ -126,15 +126,18 @@ func (w *engineWait) end() {
 	w.stop(context.Canceled)
 }
 
-// withinEngineWait returns ctx ended also once wait ends, with wait's cause:
-// a question to the engine of a stop whose run waits on it (engineWait) ends
-// at that wait's bound. A nil wait returns ctx itself.
+// withinEngineWait returns a context of ctx, and the func that ends it: a
+// question to the engine of a stop whose run waits on it (engineWait) ends
+// at that wait's bound. It ends also once wait ends, with wait's cause; a nil
+// wait (a stop no run's wait holds: compose's, keploy's own) adds nothing.
+// The func ends it in every case: what a stop runs on it (the resend of its
+// SIGTERM) ends with the stop.
 func withinEngineWait(ctx, wait context.Context) (context.Context, func()) {
-	if wait == nil {
-		return ctx, func() {}
-	}
 	ctx, cancel := context.WithCancelCause(ctx)
-	unhook := context.AfterFunc(wait, func() { cancel(context.Cause(wait)) })
+	unhook := func() bool { return false }
+	if wait != nil {
+		unhook = context.AfterFunc(wait, func() { cancel(context.Cause(wait)) })
+	}
 	return ctx, func() {
 		unhook()
 		cancel(context.Canceled)
