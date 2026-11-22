@@ -239,7 +239,8 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 
 	if len(collection.Items.PostmanItems) > 0 {
 		for _, item := range collection.Items.PostmanItems {
-			if len(item.Item) == 0 {
+			requests := item.CollectRequests()
+			if len(requests) == 0 {
 				continue
 			}
 
@@ -254,12 +255,12 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testsPath := filepath.Join(testSetPath, "tests")
 
 			folderCounter := folderCounters[testSet]
-			for _, testItem := range item.Item {
-				if err := pi.processEmptyResponse(&testItem, globalVariables, basePath); err != nil {
+			for i := range requests {
+				if err := pi.processEmptyResponse(&requests[i], globalVariables, basePath); err != nil {
 					return err
 				}
 
-				if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &folderCounter); err != nil {
+				if err := pi.writeTestData(requests[i], filepath.Join(cwd, "keploy"), testsPath, globalVariables, &folderCounter); err != nil {
 					return fmt.Errorf("failed to write test data: %w", err)
 				}
 			}
@@ -291,7 +292,7 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 
 func validateCollectionTestSetNames(collection *PostmanCollectionStruct) error {
 	for _, item := range collection.Items.PostmanItems {
-		if len(item.Item) == 0 || item.Name == "" {
+		if len(item.CollectRequests()) == 0 || item.Name == "" {
 			continue
 		}
 		if err := validateTestSetName(item.Name); err != nil {
@@ -345,9 +346,9 @@ func (pi *PostmanImporter) generateTestSetName() string {
 }
 
 func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionStruct) bool {
-
 	for _, item := range collection.Items.PostmanItems {
-		for _, testItem := range item.Item {
+		requests := item.CollectRequests()
+		for _, testItem := range requests {
 			if len(testItem.Response) == 0 {
 				pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 				return true
@@ -639,8 +640,59 @@ type ItemsContainer struct {
 
 type PostmanItem struct {
 	Name      string              `json:"name"`
-	Variables []map[string]string `json:"variable"`
-	Item      []TestData          `json:"item"`
+	Variables []map[string]string `json:"variable,omitempty"`
+	Item      []PostmanItemNode   `json:"item"`
+}
+
+// CollectRequests returns all leaf requests contained in the folder and its
+// nested subfolders in depth-first traversal order.
+func (pi *PostmanItem) CollectRequests() []TestData {
+	if pi == nil {
+		return nil
+	}
+	var reqs []TestData
+	for i := range pi.Item {
+		pi.Item[i].collectRequests(&reqs)
+	}
+	return reqs
+}
+
+// PostmanItemNode represents a Postman collection item entry, which may be a
+// leaf request, a nested subfolder of items, or both.
+type PostmanItemNode struct {
+	Name      string                   `json:"name"`
+	Request   *PostmanRequest          `json:"request,omitempty"`
+	Response  []PostmanResponse        `json:"response,omitempty"`
+	Item      []PostmanItemNode        `json:"item,omitempty"`
+	Variables []map[string]interface{} `json:"variable,omitempty"`
+}
+
+// CollectRequests returns all requests at or beneath this node in depth-first
+// traversal order.
+func (n *PostmanItemNode) CollectRequests() []TestData {
+	if n == nil {
+		return nil
+	}
+	var reqs []TestData
+	n.collectRequests(&reqs)
+	return reqs
+}
+
+func (n *PostmanItemNode) collectRequests(out *[]TestData) {
+	if n == nil {
+		return
+	}
+	if n.Request != nil {
+		*out = append(*out, TestData{
+			Name:      n.Name,
+			Request:   *n.Request,
+			Response:  n.Response,
+			Variables: n.Variables,
+		})
+	}
+	for i := range n.Item {
+		n.Item[i].collectRequests(out)
+	}
 }
 
 type TestData struct {
@@ -711,6 +763,16 @@ func (ic *ItemsContainer) UnmarshalJSON(data []byte) error {
 }
 
 func (ic ItemsContainer) MarshalJSON() ([]byte, error) {
+	if len(ic.PostmanItems) > 0 && len(ic.TestDataItems) > 0 {
+		all := make([]interface{}, 0, len(ic.PostmanItems)+len(ic.TestDataItems))
+		for _, pi := range ic.PostmanItems {
+			all = append(all, pi)
+		}
+		for _, td := range ic.TestDataItems {
+			all = append(all, td)
+		}
+		return json.Marshal(all)
+	}
 	if len(ic.PostmanItems) > 0 {
 		return json.Marshal(ic.PostmanItems)
 	}
