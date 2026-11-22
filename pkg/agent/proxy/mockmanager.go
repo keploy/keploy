@@ -221,6 +221,13 @@ type MockManager struct {
 	// staging that ends such a test leaves them out, so a test's recording
 	// answers no call after its test ended. Reset with consumedPersistent.
 	scopeConsumed map[string]struct{}
+	// scopeOwned holds the open test's per-test recordings staged by
+	// SetScopeMocks (KEPLOY_PROVEN unset) so repeatsOwn / OwnedRecordings can
+	// keep background passes from borrowing a repeat of a test's own recording
+	// without enabling exactView.
+	scopeOwnedMu  sync.Mutex
+	scopeOwned    []*models.Mock
+	scopeOwnedGen uint64
 	// answered keeps, of the per-test recordings that answered a call in this
 	// test set, the request side, by request key and bounded by bytes, for a
 	// miss's diagnosis (FindAnsweredEarlier).
@@ -941,6 +948,9 @@ func (m *MockManager) ResetForReplaySession() {
 		m.scopeConsumed = make(map[string]struct{})
 	}
 	m.consumedMu.Unlock()
+	m.scopeOwnedMu.Lock()
+	m.scopeOwned = nil
+	m.scopeOwnedMu.Unlock()
 
 	m.swapMu.Lock()
 	m.boundaryPending = true
@@ -1603,6 +1613,9 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	if !open {
+		m.scopeOwnedMu.Lock()
+		m.scopeOwned = nil
+		m.scopeOwnedMu.Unlock()
 		served := m.scopeServed()
 		filtered, unfiltered = withoutScopeServed(filtered, served), withoutScopeServed(unfiltered, served)
 		ownForStaging(&filtered, &unfiltered)
@@ -1610,6 +1623,10 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 		return
 	}
 	ownForStaging(&filtered, &unfiltered)
+	m.scopeOwnedMu.Lock()
+	m.scopeOwned = slices.Clone(filtered)
+	m.scopeOwnedGen++
+	m.scopeOwnedMu.Unlock()
 	// The epoch and carry-over bookkeeping a BaseTime staging resets, which
 	// the zero-window staging below leaves alone.
 	m.bumpStagingEpoch()

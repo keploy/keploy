@@ -785,7 +785,29 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	defer r.mu.Unlock()
 	v := m.exact.view.Load()
 	if v == nil {
-		return integrations.RoundSnapshot{}, false
+		bg, exact := m.servedBackground(nil)
+		if !exact || q.Kind == "" {
+			return integrations.RoundSnapshot{}, false
+		}
+		epoch := m.stagingEpoch.Load()
+		s := integrations.RoundSnapshot{
+			At:               integrations.RoundAt{Epoch: epoch, Gen: r.gen, Bounds: r.bounds},
+			Reads:            m.windowReads.Load(),
+			Open:             exact,
+			Background:       true,
+			BackgroundUnused: m.unsetBackground(q.Kind, bg),
+			BackgroundSpent:  m.unsetSpentBackground(q.Kind, bg),
+		}
+		parts := integrations.RoundParts{
+			Windows:          m.testWindows.Load(),
+			PoolNames:        m.exact.poolNames.Load(),
+			BackgroundPool:   bg.pool,
+			BackgroundWorker: bg.worker,
+		}
+		m.windowMu.RLock()
+		parts.WindowStart, parts.WindowEnd = m.windowStart, m.windowEnd
+		m.windowMu.RUnlock()
+		return s.WithParts(parts), true
 	}
 	read := func(step string) {
 		if r.onRead != nil {

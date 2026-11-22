@@ -101,7 +101,12 @@ func (a *Agent) servePoolExactly(ctx context.Context, worker uint32) error {
 		key = models.PoolKeyNone
 	}
 	if !staged {
-		// The staging's view shows nothing staged: no worker scope either.
+		// The staging's view shows nothing staged: clear any previous
+		// background rules and worker scope first, and open staging under
+		// the set's background rules so every view during staging reads it.
+		if err := a.stageBackgroundExactly(es, a.mockBackgroundRules()); err != nil {
+			return err
+		}
 		if err := showWorker(es, nil, nil); err != nil {
 			return err
 		}
@@ -118,16 +123,174 @@ func (a *Agent) servePoolExactly(ctx context.Context, worker uint32) error {
 			a.provenMu.Unlock()
 		}
 	}
+	if err := a.serveKeyBackground(es, key); err != nil {
+		return err
+	}
 	if err := a.serveKeyWorker(es, key); err != nil {
 		return err
 	}
 	return es.ServeExactPool(key, append([]string(nil), slice[key]...))
 }
 
+// mockBackgroundRules is the background serving mode for keploy mock replay's
+// staging: models.RecordedWithS12Routing when the scope table named background
+// recordings (startup: or worker:) in either KEPLOY_PROVEN mode, else "".
+func (a *Agent) mockBackgroundRules() string {
+	a.provenMu.Lock()
+	has := len(a.proven.background) > 0
+	a.provenMu.Unlock()
+	if !has {
+		return ""
+	}
+	return models.RecordedWithS12Routing
+}
+
+// serveUnsetBackground arms ONLY the shared ServeExactBackground engine (and
+// seeds the background recordings on the proxy) when KEPLOY_PROVEN is unset.
+// It never calls ServeExactPool or ServeExactTest, so m.exactView() stays nil
+// and a test's own calls continue to run through main's exact legacy scope
+// path (stageScope / SetScopeMocks / UpdateMockParams).
+func (a *Agent) serveUnsetBackground(_ context.Context) error {
+	es, err := a.exactServer()
+	if err != nil {
+		return nil
+	}
+	a.provenMu.Lock()
+	bgNames := slices.Clone(a.proven.background)
+	a.provenMu.Unlock()
+	if len(bgNames) == 0 {
+		return a.serveBackgroundExactly(es, "", nil, nil)
+	}
+	if err := a.stageBackgroundExactly(es, models.RecordedWithS12Routing); err != nil {
+		return err
+	}
+	if err := a.serveKeyBackground(es, models.PoolKeyNone); err != nil {
+		return err
+	}
+	if storageInterface, exists := a.clientMocks.Load(uint64(0)); exists {
+		storage := storageInterface.(*ClientMockStorage)
+		storage.mu.RLock()
+		residentFiltered := make([]*models.Mock, len(storage.filtered))
+		originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
+		copy(residentFiltered, storage.filtered)
+		copy(originalUnfiltered, storage.unfiltered)
+		disk := storage.diskMocks
+		storage.mu.RUnlock()
+		a.seedBackgroundRecordings(models.MockFilterParams{BackgroundMocks: bgNames}, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
+	}
+	return nil
+}
+
+// hasDeclaredStartupRule reports whether the staged replay set carries a
+// declared kind: background rule with startup: true (SetScopeStartupRules).
+// Plain recorded startup: entries written by keploy mock record do NOT set
+// this flag, so parallel-worker replay of sets without declared startup rules
+// continues to behave identically to main.
+func (a *Agent) hasDeclaredStartupRule() bool {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return a.proven.startupRules
+}
+
+// backgroundKeysLocked returns the pool/worker keys to read for key. Under
+// KEPLOY_PROVEN=1 (or when a process key was claimed), it returns key and
+// models.PoolKeyNone while keeping other package keys isolated. In an
+// unclaimed KEPLOY_PROVEN-unset single-process run, it returns all keys in
+// sorted order so recordings captured under any key remain reachable.
+// Caller holds a.provenMu.
+func (a *Agent) backgroundKeysLocked(key string) []string {
+	if !provenswitch.On() && a.proven.key == "" {
+		kset := make(map[string]struct{}, len(a.proven.pool)+len(a.proven.worker)+1)
+		kset[models.PoolKeyNone] = struct{}{}
+		for k := range a.proven.pool {
+			kset[k] = struct{}{}
+		}
+		for k := range a.proven.worker {
+			kset[k] = struct{}{}
+		}
+		return slices.Sorted(maps.Keys(kset))
+	}
+	keys := []string{key}
+	if key != models.PoolKeyNone {
+		keys = append(keys, models.PoolKeyNone)
+	}
+	return keys
+}
+
+// serveKeyBackground installs the proxy's background rules (ServeExactBackground)
+// for keploy mock replay using the exact same engine keploy test uses in both
+// KEPLOY_PROVEN modes: worker: entries in worker order and @startup pool
+// entries in recorded order, so @startup background calls arriving inside an
+// open test window are served in strict order (test's own -> worker -> @startup)
+// without being required of any test, and never for a repeat of the open test's
+// own recording. App-boot recordings with no process key (models.PoolKeyNone)
+// are included alongside key's own slice while other package keys remain isolated.
+func (a *Agent) serveKeyBackground(es coreAgent.ExactServer, key string) error {
+	a.provenMu.Lock()
+	if len(a.proven.background) == 0 {
+		a.provenMu.Unlock()
+		return a.serveBackgroundExactly(es, "", nil, nil)
+	}
+	bgSet := make(map[string]struct{}, len(a.proven.background))
+	for _, n := range a.proven.background {
+		if n != "" {
+			bgSet[n] = struct{}{}
+		}
+	}
+	allWorkers := make(map[string]struct{})
+	for _, ws := range a.proven.worker {
+		for _, n := range ws {
+			allWorkers[n] = struct{}{}
+		}
+	}
+	keys := a.backgroundKeysLocked(key)
+	var bgWorker, bgPool []string
+	seenWorker := make(map[string]struct{})
+	seenPool := make(map[string]struct{})
+	for _, k := range keys {
+		inSlice := make(map[string]bool, len(a.proven.pool[k]))
+		for _, n := range a.proven.pool[k] {
+			inSlice[n] = true
+		}
+		for _, n := range a.proven.worker[k] {
+			if !inSlice[n] {
+				continue
+			}
+			if _, inBG := bgSet[n]; !inBG {
+				continue
+			}
+			if _, dup := seenWorker[n]; !dup {
+				seenWorker[n] = struct{}{}
+				bgWorker = append(bgWorker, n)
+			}
+		}
+		for _, n := range a.proven.pool[k] {
+			if _, inBG := bgSet[n]; !inBG {
+				continue
+			}
+			if _, isW := allWorkers[n]; isW {
+				continue
+			}
+			if _, dup := seenPool[n]; !dup {
+				seenPool[n] = struct{}{}
+				bgPool = append(bgPool, n)
+			}
+		}
+	}
+	a.provenMu.Unlock()
+	if len(bgPool) == 0 && len(bgWorker) == 0 {
+		return a.serveBackgroundExactly(es, "", nil, nil)
+	}
+	return a.serveBackgroundExactly(es, models.RecordedWithS12Routing, bgPool, bgWorker)
+}
+
 // serveKeyWorker tells the proxy, before the proven wire installs a view,
 // which recordings it shows whether a test is open or not: key's worker
 // scope (SetScopeWorker), each name of it that key's pool slice holds, and
-// so staged. In a test's window the proxy answers each at most one request
+// so staged. App-level worker entries with no process key (models.PoolKeyNone,
+// such as a startup-capable declared background rule placed out of startup:)
+// are included alongside key's own slice while other keys remain isolated.
+// In a test's window the proxy answers each at most one request
 // in the staging's windows, after the open test's own; between tests each
 // answers again, through any door (walked by placement, then saturated on
 // its last answer). No test's end requires it
@@ -137,17 +300,28 @@ func (a *Agent) servePoolExactly(ctx context.Context, worker uint32) error {
 func (a *Agent) serveKeyWorker(es coreAgent.ExactServer, key string) error {
 	a.provenMu.Lock()
 	var names, skipped []string
-	if w := a.proven.worker[key]; len(w) > 0 {
-		inSlice := make(map[string]bool, len(a.proven.pool[key]))
-		for _, n := range a.proven.pool[key] {
+	seen := make(map[string]struct{})
+	keys := a.backgroundKeysLocked(key)
+	for _, k := range keys {
+		w := a.proven.worker[k]
+		if len(w) == 0 {
+			continue
+		}
+		inSlice := make(map[string]bool, len(a.proven.pool[k]))
+		for _, n := range a.proven.pool[k] {
 			inSlice[n] = true
 		}
 		for _, n := range w {
-			if inSlice[n] {
-				names = append(names, n)
-				if _, ok := a.proven.skippedReads[n]; ok {
-					skipped = append(skipped, n)
-				}
+			if !inSlice[n] {
+				continue
+			}
+			if _, dup := seen[n]; dup {
+				continue
+			}
+			seen[n] = struct{}{}
+			names = append(names, n)
+			if _, ok := a.proven.skippedReads[n]; ok {
+				skipped = append(skipped, n)
 			}
 		}
 	}

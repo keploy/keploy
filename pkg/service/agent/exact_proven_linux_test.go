@@ -48,6 +48,10 @@ func (p *servingProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock
 	p.mm.SetMocksWithWindow(f, u, s, e)
 	return nil
 }
+func (p *servingProxy) SetScopeMocks(_ context.Context, f, u []*models.Mock, open bool) error {
+	p.mm.SetScopeMocks(f, u, open)
+	return nil
+}
 func (p *servingProxy) SetMocks(_ context.Context, f, u []*models.Mock) error {
 	p.mm.SetFilteredMocks(f)
 	p.mm.SetUnFilteredMocks(u)
@@ -72,6 +76,17 @@ func (p *servingProxy) ServeExactWorker(names []string) error {
 func (p *servingProxy) ServeExactWorkerSkipped(names, skipped []string) error {
 	p.mm.ServeExactWorkerSkipped(names, skipped)
 	return nil
+}
+func (p *servingProxy) StageExactBackground(rules string) error {
+	p.mm.StageExactBackground(rules)
+	return nil
+}
+func (p *servingProxy) ServeExactBackground(rules string, pool, worker []string) error {
+	p.mm.ServeExactBackground(rules, pool, worker)
+	return nil
+}
+func (p *servingProxy) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
+	p.mm.SeedBackgroundRecordings(recs)
 }
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)

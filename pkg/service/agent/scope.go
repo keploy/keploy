@@ -136,16 +136,12 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 			}
 		}
 		if pid >= 0 && provenswitch.On() {
-			// The proven wire serves a test exactly its own mocks
-			// (exact_proven.go): one with no mapping, or none in it, owns
-			// none, so any data-plane call of its own is a miss. Its
-			// variables begin as it opens, in the same step, so no call its
-			// mocks answer binds before them (serveTestExactly). A worker
-			// pid (an in-process caller's: the wire refuses one) names the
-			// clock's holder only: exact serving decides what every
-			// connection reads, whenever it opened, and no per-worker view
-			// narrows it (proxy scopedFor), so its test is served exactly
-			// as one without a pid is.
+			// Under the proven switch, serve the test through exact serving
+			// (exact_proven.go): one with no mapping, or none in it, owns none,
+			// so any data-plane call it makes is a miss unless served by exact
+			// background. With KEPLOY_PROVEN unset, test-own serving always
+			// stays on the legacy stageScope path below while background passes
+			// alone use ServeExactBackground.
 			if err := a.serveTestExactly(ctx, name); err != nil {
 				return a.refuseBegin(ctx, name, pid, at, took, err)
 			}
@@ -504,8 +500,8 @@ func (a *Agent) restorePool(ctx context.Context, name string, pid int, worker ui
 	a.scopeMu.Lock()
 	_, scoped := a.scopeTable[name]
 	a.scopeMu.Unlock()
-	// The proven wire narrowed even a test without a mapping entry, with a
-	// worker pid or without one (beginScopeAt).
+	// Exact serving narrowed even a test without a mapping entry, with a
+	// worker pid or without one (beginScopeAt), under KEPLOY_PROVEN=1 only.
 	exact := pid >= 0 && provenswitch.On()
 	if !scoped && !exact {
 		return nil

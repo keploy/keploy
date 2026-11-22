@@ -308,6 +308,36 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if srs, ok := a.svc.(scopeStartupRulesSetter); ok {
+			if err := srs.SetScopeStartupRules(r.Context(), req.StartupRules); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		// With the proven switch off, when the mock set carries @startup or
+		// worker: background recordings, wire ONLY the shared background
+		// serving engine (ServeExactBackground) without changing main's
+		// run-place windows or test-own scope serving.
+		if !provenswitch.On() && len(req.Background) > 0 {
+			if ws, ok := a.svc.(scopeWorkerSetter); ok {
+				if err := ws.SetScopeWorker(r.Context(), req.Worker); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if bs, ok := a.svc.(scopeBackgroundSetter); ok {
+				if err := bs.SetScopeBackground(r.Context(), req.Background); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if ps, ok := a.svc.(scopePoolSetter); ok && req.Pool != nil {
+				if err := ps.SetScopePool(r.Context(), req.Pool); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+		}
 	}
 	if provenswitch.On() && req.Sets == nil {
 		// Under the switch a table without pool slices serves no pool mock
@@ -478,6 +508,12 @@ type scopeWorkerSetter interface {
 // (models.ScopeTableReq.Background, proven wire).
 type scopeBackgroundSetter interface {
 	SetScopeBackground(ctx context.Context, names []string) error
+}
+
+// scopeStartupRulesSetter records whether a replay's set carries a declared
+// startup-capable background rule (models.ScopeTableReq.StartupRules).
+type scopeStartupRulesSetter interface {
+	SetScopeStartupRules(ctx context.Context, on bool) error
 }
 
 // scopeSkippedReadsSetter installs which of a replay's worker scope are the
