@@ -26,8 +26,38 @@ func redirectAgentReadyFile(t *testing.T) string {
 	orig := agentReadyFilePath
 	sandbox := filepath.Join(t.TempDir(), "agent.ready")
 	agentReadyFilePath = sandbox
-	t.Cleanup(func() { agentReadyFilePath = orig })
+	origReleased := appReleasedFilePath
+	appReleasedFilePath = filepath.Join(filepath.Dir(sandbox), "keploy-app-released")
+	t.Cleanup(func() { agentReadyFilePath = orig; appReleasedFilePath = origReleased })
 	return sandbox
+}
+
+// A release notes that the pod's application was released, at its path, for
+// an agent restarted in the pod (kdocker.MarkAppReleased writes it only where
+// the process names a pod); a refused release notes nothing.
+func TestMakeAgentReady_NotesTheAppReleased(t *testing.T) {
+	redirectAgentReadyFile(t)
+	var noted []string
+	orig := markAppReleased
+	markAppReleased = func(path string) error { noted = append(noted, path); return nil }
+	t.Cleanup(func() { markAppReleased = orig })
+
+	pTls.ResetCAReadyForTest()
+	rr := httptest.NewRecorder()
+	newTestAgent(t).MakeAgentReady(rr, httptest.NewRequest(http.MethodPost, "/agent/ready", nil))
+	if rr.Code == http.StatusOK || len(noted) != 0 {
+		t.Fatalf("a refused release: status %d, noted %v; want refused, nothing noted", rr.Code, noted)
+	}
+
+	pTls.CloseCAReadyForTest()
+	rr = httptest.NewRecorder()
+	newTestAgent(t).MakeAgentReady(rr, httptest.NewRequest(http.MethodPost, "/agent/ready", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rr.Code)
+	}
+	if len(noted) != 1 || noted[0] != appReleasedFilePath {
+		t.Fatalf("noted %v, want the release noted once at %s", noted, appReleasedFilePath)
+	}
 }
 
 // newTestAgent builds a routes.Agent with a test logger and nil service —

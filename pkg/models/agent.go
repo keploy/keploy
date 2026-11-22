@@ -1609,3 +1609,16 @@ func AgentStopNotice(ctx context.Context) bool {
 	v, _ := ctx.Value(agentStopNoticeKey{}).(bool)
 	return v
 }
+
+// AgentCapabilitiesHeader is /agent/health's header listing what this agent
+// does that an earlier one did not, one token each, comma-separated; a client
+// matches each token exactly, and an agent without the header has none.
+const AgentCapabilitiesHeader = "X-Keploy-Agent-Capabilities"
+
+// CapabilityIngressFailOpen (AgentCapabilitiesHeader) says the agent steers
+// the application's ports instead of moving its binds: the application keeps
+// its port, so the agent's death leaves every call to it to the
+// application's own socket, and a restarted agent steers the port again. An
+// agent that moves the binds (its kernel cannot steer them) does not say it:
+// its death leaves the application's ports refusing calls.
+const CapabilityIngressFailOpen = "ingress-fail-open"
