@@ -169,11 +169,12 @@ func serveScale(h integrations.Integrations, mm integrations.MockMemDb, i int) (
 // near n, and calls are taken in a stride through the set, so each one
 // serves a different recording.
 //
-// The first call after each staging files what calls read by: the parser's
-// indexes of the staged set and, with view=test, the n recordings the open
-// test owns. A replay pays that once per set or test, and the calls of the
-// set or test share it; restaged every 256 calls here, a test that owns 10k
-// recordings would have 256 calls share it, not its 10k. So that call is
+// The first call of each method after a staging files what calls of that
+// method read by: the parser's indexes of the staged set, with view=test the
+// n recordings the open test owns, and the POST path's recordings by their
+// bodies. A replay pays that once per set or test, and the calls of the set
+// or test share it; restaged every 256 calls here, a test that owns 10k
+// recordings would have 256 calls share it, not its 10k. So those calls are
 // timed apart, outside ns/op, and reported as first-ns. The exact view's
 // verify mode, which this package's rows run under (TestMain), compares
 // every recording on every call by design and is off here: what is measured
@@ -205,8 +206,9 @@ func BenchmarkHTTPReplayPerCall(b *testing.B) {
 				var calls [2]int
 				var viewTook, firstTook time.Duration
 				var views, firsts int
-				// fresh: the next call is the first after a staging.
-				fresh := false
+				// fresh[kind]: the next call of that kind (0 GET, 1 POST) is
+				// its first after a staging.
+				var fresh [2]bool
 				var staged []*models.Mock
 				b.ReportAllocs()
 				for k := 0; k < b.N; k++ {
@@ -216,7 +218,7 @@ func BenchmarkHTTPReplayPerCall(b *testing.B) {
 						if i = k % n; i == 0 {
 							b.StopTimer()
 							staged = stageScale(mm, n, at, mode.view)
-							fresh = true
+							fresh = [2]bool{true, true}
 							b.StartTimer()
 						}
 						if i%scaleCalls == 0 {
@@ -231,24 +233,25 @@ func BenchmarkHTTPReplayPerCall(b *testing.B) {
 							if staged = stageScale(mm, n, at, mode.view); mode.view == "test" {
 								openScale(mm, staged, 0, n)
 							}
-							fresh = true
+							fresh = [2]bool{true, true}
 							b.StartTimer()
 						}
 						i = ((k % per) * 7919) % n
 					}
-					if fresh {
+					kind := i % 2
+					if fresh[kind] {
 						b.StopTimer()
 					}
 					t0 := time.Now()
 					body, err := serveScale(h, mm, i)
-					if d := time.Since(t0); fresh {
+					if d := time.Since(t0); fresh[kind] {
 						firstTook += d
 						firsts++
-						fresh = false
+						fresh[kind] = false
 						b.StartTimer()
 					} else {
-						took[i%2] += d
-						calls[i%2]++
+						took[kind] += d
+						calls[kind]++
 					}
 					if err != nil {
 						b.Fatal(err)
