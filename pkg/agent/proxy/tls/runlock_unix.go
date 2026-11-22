@@ -117,6 +117,13 @@ func openLockFileFor(euid int, path string, flag int) (*os.File, error) {
 	return f, nil
 }
 
+// openRunLockToTest opens path, another run's lock file, to test its lock
+// (caRunLive).
+func openRunLockToTest(path string) (*os.File, error) {
+	// #nosec G304 -- a lock file in caRunsDir.
+	return os.Open(path)
+}
+
 // tryLockFile takes an exclusive flock on f if no one holds one: true when it
 // did, false when someone holds it, and an error when flock failed otherwise.
 func tryLockFile(f *os.File) (bool, error) {

@@ -255,8 +255,7 @@ func caRunLive(id string) bool {
 		if e.Name() == storeLockName || !strings.HasPrefix(e.Name(), name+".") || !strings.HasSuffix(e.Name(), ".lock") {
 			continue
 		}
-		// #nosec G304 -- a lock file in caRunsDir.
-		f, err := os.Open(filepath.Join(caRunsDir, e.Name()))
+		f, err := openRunLockToTest(filepath.Join(caRunsDir, e.Name()))
 		if err != nil {
 			return true
 		}

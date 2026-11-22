@@ -256,11 +256,13 @@ func warnNoStoreLock(logger *zap.Logger, path string, err error) {
 // to the directory above it), and its file, which a run creates in that
 // directory (write access to it) or opens with access ("read" for the store
 // lock, "read and write" for a run's own) when it is there, and then locks.
-// Outside Windows the directory and the file are also that user's or root's,
-// no link, and the directory is one only its owner writes (makeCARunsDir,
-// openLockFile).
+// keploy also uses them only as makeCARunsDir and openLockFile check them:
+// neither a link, the directory one only its owner can change, and both that
+// user's or root's; on Windows, no part of the directory's path a link or a
+// junction, and the directory the administrators' (other users may only add
+// files to it) or that user's alone.
 func lockFix(path, access string) string {
 	dir := filepath.Dir(path)
-	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with %s access for that user; and keep %s on a file system that supports file locks. Outside Windows, keploy uses that directory and that file only when each is that user's or root's and no link, and only its owner can write the directory.",
+	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with %s access for that user; and keep %s on a file system that supports file locks. keploy uses that directory and that file only when neither is a link and only its owner can change the directory, each being that user's or root's; on Windows, when no part of the directory's path is a link or a junction, and the directory is the administrators' (other users may only add files to it) or that user's alone. A directory that is not so is not used: remove it, and keploy makes it so.",
 		dir, filepath.Dir(dir), path, dir, access, dir)
 }
