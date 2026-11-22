@@ -185,9 +185,13 @@ func TestTheRoundsReadsAndWriteOfTheLiveMappingsFileAndTheNextFlushHoldLittleMor
 	if writeErr != nil {
 		t.Fatalf("flush: %v", writeErr)
 	}
+	// Bound guards live heap against whole-file YAML decode (~11.5-13x live),
+	// whole-file encode (~28-35x live), and large transient/retained buffers
+	// (a short-lived yaml.Node tree alone in Insert adds ~4x and is outside
+	// this 10x bound).
 	for what, peak := range held {
 		t.Logf("mappings file %d bytes: %s held %d bytes of heap (%.1fx)", size, what, peak, float64(peak)/float64(size))
-		if peak > size*15 {
+		if peak > size*10 {
 			t.Errorf("%s held %.1fx the %d-byte mappings file: it parsed the file whole", what, float64(peak)/float64(size), size)
 		}
 	}

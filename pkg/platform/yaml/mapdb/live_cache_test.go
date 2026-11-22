@@ -20,9 +20,9 @@ import (
 )
 
 // A recording's flush of its mappings file holds little more than the file:
-// on a long recording each flush parsed a file of tens of MB into a tree, and
-// encoded it whole, each holding tens of times the file's size (2.5 GB at
-// 35 MB), and took the process past its memory limit.
+// on a long recording each flush decoded the whole file and encoded it whole
+// (whole-file decode held >11x live heap and whole-file encode ~30x, reaching
+// GBs at 35 MB), taking the process past its memory limit.
 
 func liveBatch(from, tests, perTest int) map[string][]models.MockEntry {
 	b := map[string][]models.MockEntry{}
@@ -36,26 +36,73 @@ func liveBatch(from, tests, perTest int) map[string][]models.MockEntry {
 	return b
 }
 
-// peakHeapOf is the most heap fn's run held above what was live before it,
-// sampled every millisecond, with the collector at its default pace.
+// liveHeapBytes returns the heap bytes marked live by the most recently
+// completed garbage collection (/gc/heap/live:bytes).
+func liveHeapBytes() uint64 {
+	s := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
+	metrics.Read(s)
+	return s[0].Value.Uint64()
+}
+
+// gcCycleCount returns the total number of completed GC cycles
+// (/gc/cycles/total:gc-cycles).
+func gcCycleCount() uint64 {
+	s := []metrics.Sample{{Name: "/gc/cycles/total:gc-cycles"}}
+	metrics.Read(s)
+	return s[0].Value.Uint64()
+}
+
+// recordPeakMax atomically sets peak = max(peak, v).
+func recordPeakMax(peak *atomic.Uint64, v uint64) {
+	for {
+		cur := peak.Load()
+		if v <= cur || peak.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
+// peakHeapOf is the most live heap fn's run held above what was live before
+// it. It runs with GOGC=20 so concurrent-mark overhead stays bounded under
+// CPU throttling or GOMAXPROCS=1, samples /gc/heap/live:bytes on every GC
+// cycle via a re-arming runtime.AddCleanup hook (plus a 1 ms ticker) so no
+// intermediate cycle or lone transient spike is missed, and runs a final
+// quiescent runtime.GC() after fn returns so retained allocations are always
+// observed.
 func peakHeapOf(fn func()) uint64 {
-	defer debug.SetGCPercent(debug.SetGCPercent(100))
+	defer debug.SetGCPercent(debug.SetGCPercent(20))
 	runtime.GC()
-	sample := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
-	metrics.Read(sample)
-	base := sample[0].Value.Uint64()
+	base := liveHeapBytes()
 	var peak atomic.Uint64
+	var done atomic.Bool
+	record := func() {
+		recordPeakMax(&peak, liveHeapBytes())
+	}
+	var arm func()
+	arm = func() {
+		if done.Load() {
+			return
+		}
+		p := new(byte)
+		runtime.AddCleanup(p, func(struct{}) {
+			if done.Load() {
+				return
+			}
+			record()
+			arm()
+		}, struct{}{})
+		runtime.KeepAlive(p)
+	}
+	arm()
+	started := make(chan struct{})
 	stop, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(stopped)
+		close(started)
 		tick := time.NewTicker(time.Millisecond)
 		defer tick.Stop()
 		for {
-			s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
-			metrics.Read(s)
-			if v := s[0].Value.Uint64(); v > peak.Load() {
-				peak.Store(v)
-			}
+			record()
 			select {
 			case <-stop:
 				return
@@ -63,13 +110,75 @@ func peakHeapOf(fn func()) uint64 {
 			}
 		}
 	}()
+	<-started
 	fn()
 	close(stop)
 	<-stopped
+	done.Store(true)
+	record()
+	runtime.GC()
+	record()
 	if p := peak.Load(); p > base {
 		return p - base
 	}
 	return 0
+}
+
+func TestPeakHeapOfMeasuresLiveHeapNotGarbage(t *testing.T) {
+	// Hold a substantial live base (~44 MiB) of real mapping entries, as
+	// MappingDb's live cache does, so a garbage-counting sampler with GOGC=100
+	// allows ~44 MiB of dead objects to accumulate before sweeping.
+	baseAnchor := liveBatch(0, 4000, 20)
+
+	// Pure short-lived garbage: ~50 MiB of temporary batches, ~400 KiB live at
+	// a time, yielding between chunks so a single P can finish mark
+	// termination. Under GOGC=100 /memory/classes/heap/objects:bytes this
+	// spikes above 40 MiB; measuring live heap keeps it well below 25 MiB.
+	var sink int
+	garbagePeak := peakHeapOf(func() {
+		for i := 0; i < 140; i++ {
+			b := liveBatch(i, 25, 20)
+			sink += len(b)
+			runtime.Gosched()
+		}
+	})
+	runtime.KeepAlive(sink)
+	if garbagePeak > 25<<20 {
+		t.Fatalf("garbage-only run reported %d bytes held (want <= %d): uncollected garbage counted as live", garbagePeak, 25<<20)
+	}
+
+	// Lone transient spike: one 64 MiB allocation touched, yielded until one GC
+	// cycle completes while live, then dropped with no further allocations.
+	// Any filter requiring liveness across consecutive cycles misses this.
+	const wantLive = 64 << 20
+	loneSpikePeak := peakHeapOf(func() {
+		c0 := gcCycleCount()
+		b := make([]byte, wantLive)
+		for i := 0; i < len(b); i += 4096 {
+			b[i] = 1
+		}
+		for gcCycleCount() == c0 {
+			runtime.Gosched()
+		}
+		runtime.KeepAlive(b)
+	})
+	if loneSpikePeak < wantLive*3/4 {
+		t.Fatalf("lone transient %d-byte live spike reported only %d bytes held", wantLive, loneSpikePeak)
+	}
+
+	// Retained live allocation: 64 MiB still reachable after fn returns.
+	var retained []byte
+	retainedPeak := peakHeapOf(func() {
+		retained = make([]byte, wantLive)
+		for i := 0; i < len(retained); i += 4096 {
+			retained[i] = 1
+		}
+	})
+	if retainedPeak < wantLive*3/4 {
+		t.Fatalf("retained %d-byte live allocation reported only %d bytes held", wantLive, retainedPeak)
+	}
+	runtime.KeepAlive(retained)
+	runtime.KeepAlive(baseAnchor)
 }
 
 func TestAFlushOfALargeMappingsFileHoldsLittleMoreThanTheFile(t *testing.T) {
@@ -92,10 +201,10 @@ func TestAFlushOfALargeMappingsFileHoldsLittleMoreThanTheFile(t *testing.T) {
 	if flushErr != nil {
 		t.Fatalf("flush: %v", flushErr)
 	}
-	// The file being made, and a few entries' encoding at a time; a parse
-	// tree of the file, or its encoding at once, is tens of times its size.
+	// The file being made, and a few entries' encoding at a time; whole-file
+	// decoding holds >11x live heap and whole-file encoding ~28-35x.
 	t.Logf("one flush onto a %d-byte mappings file held %d bytes of heap (%.1fx)", info.Size(), peak, float64(peak)/float64(info.Size()))
-	if limit := uint64(info.Size()) * 15; peak > limit {
+	if limit := uint64(info.Size()) * 10; peak > limit {
 		t.Fatalf("one flush onto a %d-byte mappings file held %d bytes of heap (%.1fx the file): it parsed or encoded the whole file at once",
 			info.Size(), peak, float64(peak)/float64(info.Size()))
 	}

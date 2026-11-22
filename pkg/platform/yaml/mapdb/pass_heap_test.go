@@ -28,33 +28,67 @@ import (
 //
 // The passes: the recorder's flush, a round's read of the tests' mocks (Get),
 // the round's write (Insert), and the recorder's flush after that write. Each
-// is measured as the most heap it held above what was live before it, sampled
-// every millisecond with the collector at its default pace, the least of
-// three runs: what the pass holds, not a moment the machine was busy. This
-// file compiles on its own, so the same measurement runs against code that
-// reads and writes the file whole. There, as multiples of the file, the
-// passes held: one entry 64, 15, 65 and 74; mixed 64, 16, 65 and 65; many
-// entries 64, 18, 65 and 73. The bounds below are under every one of those.
+// is measured as the most live heap it held above what was live before it
+// (/gc/heap/live:bytes with GOGC=20, sampled on every GC cycle and at 1 ms),
+// the least of three runs. This file compiles on its own, so the same
+// measurement runs against code that reads and writes the file whole, where
+// live heap exceeds 11x for a read and 28x for a write (a short-lived
+// yaml.Node parse alone in Insert adds ~4x and is outside this 10x bound).
+// The bounds below are under every whole-file pass.
 
-// passPeakHeap is the most heap fn held above what was live before it.
+// passLiveHeap returns the heap bytes marked live by the most recently
+// completed garbage collection (/gc/heap/live:bytes).
+func passLiveHeap() uint64 {
+	s := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
+	metrics.Read(s)
+	return s[0].Value.Uint64()
+}
+
+// passRecordMax atomically sets peak = max(peak, v).
+func passRecordMax(peak *atomic.Uint64, v uint64) {
+	for {
+		cur := peak.Load()
+		if v <= cur || peak.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
+// passPeakHeap is the most live heap fn held above what was live before it.
 func passPeakHeap(fn func()) uint64 {
-	defer debug.SetGCPercent(debug.SetGCPercent(100))
+	defer debug.SetGCPercent(debug.SetGCPercent(20))
 	runtime.GC()
-	sample := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
-	metrics.Read(sample)
-	base := sample[0].Value.Uint64()
+	base := passLiveHeap()
 	var peak atomic.Uint64
+	var done atomic.Bool
+	record := func() {
+		passRecordMax(&peak, passLiveHeap())
+	}
+	var arm func()
+	arm = func() {
+		if done.Load() {
+			return
+		}
+		p := new(byte)
+		runtime.AddCleanup(p, func(struct{}) {
+			if done.Load() {
+				return
+			}
+			record()
+			arm()
+		}, struct{}{})
+		runtime.KeepAlive(p)
+	}
+	arm()
+	started := make(chan struct{})
 	stop, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(stopped)
+		close(started)
 		tick := time.NewTicker(time.Millisecond)
 		defer tick.Stop()
 		for {
-			s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
-			metrics.Read(s)
-			if v := s[0].Value.Uint64(); v > peak.Load() {
-				peak.Store(v)
-			}
+			record()
 			select {
 			case <-stop:
 				return
@@ -62,9 +96,14 @@ func passPeakHeap(fn func()) uint64 {
 			}
 		}
 	}()
+	<-started
 	fn()
 	close(stop)
 	<-stopped
+	done.Store(true)
+	record()
+	runtime.GC()
+	record()
 	if p := peak.Load(); p > base {
 		return p - base
 	}
@@ -91,9 +130,9 @@ func TestEachPassOverTheMappingsFileHoldsLessThanAWholeFilePassDid(t *testing.T)
 		tests int
 		bound bound
 	}{
-		{"one entry of 40,000 mocks", 40000, 0, bound{12, 13, 16, 12}},
-		{"one entry of 40,000 mocks and 500 tests of 20", 40000, 500, bound{12, 13, 16, 12}},
-		{"2,000 tests of 20 mocks", 0, 2000, bound{12, 13, 16, 12}},
+		{"one entry of 40,000 mocks", 40000, 0, bound{10, 10, 10, 10}},
+		{"one entry of 40,000 mocks and 500 tests of 20", 40000, 500, bound{10, 10, 10, 10}},
+		{"2,000 tests of 20 mocks", 0, 2000, bound{10, 10, 10, 10}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
