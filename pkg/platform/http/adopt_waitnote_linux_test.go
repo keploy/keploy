@@ -110,8 +110,16 @@ func TestAStopThatWaitsOnAWriterSaysWhichProcessAndHowToEndIt(t *testing.T) {
 	if first := lines[0].Time.Sub(began); first < stopStall() || first >= stopStall()+stopSayEvery {
 		t.Errorf("the stop first said what it waits for %s after it began; want once its stall window, %s, is over, at its next checks, not %s later", first, stopStall(), stopSayEvery)
 	}
-	if gap := lines[1].Time.Sub(lines[0].Time); gap < stopSayEvery {
+	// lines[0].Time is stamped by zap after check()'s /proc reads, while n.due
+	// is set from now before them, so under load lines[1].Time - lines[0].Time
+	// can be a few ms shy of stopSayEvery even when now1 - now0 >= stopSayEvery.
+	// Check both wall-clock separation (at least half a period) and lines[1]'s
+	// seen_over (computed from now1 - now0, always >= stopSayEvery).
+	if gap := lines[1].Time.Sub(lines[0].Time); gap < stopSayEvery/2 {
 		t.Errorf("the stop said what it waits for again %s after the first time; want every %s", gap, stopSayEvery)
+	}
+	if d, err := time.ParseDuration(fmt.Sprint(lines[1].ContextMap()["seen_over"])); err != nil || d < stopSayEvery {
+		t.Errorf("the second line says seen_over %q; want at least %s", lines[1].ContextMap()["seen_over"], stopSayEvery)
 	}
 	for i, l := range lines {
 		ctx := l.ContextMap()
