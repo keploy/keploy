@@ -124,6 +124,31 @@ func init() {
 // it goes on without it (killWithin).
 const memberSignalWait = time.Second
 
+// killWaiter tracks the in-flight kill(2) goroutine for one target pid (or
+// -pgid) and the strongest follow-up signal asked for while it stays blocked
+// in XNU (pending == 0 when none is queued).
+type killWaiter struct {
+	inFlight syscall.Signal
+	pending  syscall.Signal
+}
+
+// signalRank orders stop signals by strength so a stronger signal asked for
+// while an earlier kill(2) is still waiting in XNU (such as SIGKILL after
+// SIGINT) is deferred and sent once the first returns, while an exact repeat
+// of the same or weaker signal is not resent.
+func signalRank(sig syscall.Signal) int {
+	switch sig {
+	case syscall.SIGKILL:
+		return 3
+	case syscall.SIGTERM:
+		return 2
+	case syscall.SIGINT:
+		return 1
+	default:
+		return 0
+	}
+}
+
 var (
 	// killMember is the stop's kill(2) of one process of a group on macOS
 	// (killWithin); a test answers it.
@@ -137,7 +162,7 @@ var (
 	// in-flight kill(2) goroutine in the kernel, so at most one goroutine
 	// waits per target while unrelated targets are never blocked.
 	killWaitersMu sync.Mutex
-	killWaiters   = map[int]struct{}{}
+	killWaiters   = map[int]*killWaiter{}
 )
 
 // errKillWaits is killWithin's answer for a kill(2) that had not returned.
@@ -253,40 +278,86 @@ func signalJoinedMembers(logger *zap.Logger, pgid int, sig syscall.Signal, sent 
 // goroutine -- and the OS thread pinned to the blocked syscall -- stays blocked
 // in the kernel until the held spawn ends.
 //
-// To keep repeated stops in a long-lived agent from piling up duplicate stuck
+// To keep repeated stops in a long-lived agent from piling up blocked
 // goroutines for the same target, killWaiters allows at most one in-flight
-// kill(2) per target pid. A repeat kill to a pid whose earlier kill is still
-// waiting in the kernel logs a warning and returns errKillWaits (counted as
-// reached) without spawning a second goroutine, while kills to any other pid
-// -- including the by-pid kill to the process that made a held spawn -- always
-// go out and are never refused. Once a blocked kill(2) returns, its goroutine
-// removes pid from killWaiters before delivering its result.
+// kill(2) goroutine per target pid. While that kill is still waiting in XNU:
+//   - a stronger signal for the same pid (e.g. SIGKILL after SIGINT) is saved
+//     on the waiter and sent as soon as the blocked kill returns;
+//   - an exact repeat of the same or weaker signal is skipped without spawning
+//     another goroutine;
+//   - kills to any other pid -- including the by-pid kill to the process that
+//     made a held spawn and the group SIGKILL on -pgid -- always go out and
+//     are never refused.
+//
+// Each goroutine clears pid from killWaiters before delivering its result once
+// no stronger follow-up signal remains pending.
 func killWithin(logger *zap.Logger, pid int, sig syscall.Signal, wait time.Duration) error {
 	killWaitersMu.Lock()
-	if _, busy := killWaiters[pid]; busy {
+	if w, busy := killWaiters[pid]; busy {
+		inFlight := w.inFlight
+		deferred := false
+		if signalRank(sig) > signalRank(w.inFlight) {
+			if w.pending == 0 || signalRank(sig) > signalRank(w.pending) {
+				w.pending = sig
+				deferred = true
+			}
+		}
 		killWaitersMu.Unlock()
 		if logger != nil {
-			logger.Warn("a kill(2) for this target is already waiting in the kernel; skipping duplicate kill goroutine",
-				zap.Int("pid", pid), zap.String("signal", sig.String()))
+			if deferred {
+				logger.Warn("a kill(2) for this target is still waiting in the kernel; deferring stronger signal until it returns",
+					zap.Int("pid", pid), zap.String("signal", sig.String()), zap.String("in_flight", inFlight.String()))
+			} else {
+				logger.Warn("a kill(2) for this target is already waiting in the kernel; skipping repeat signal",
+					zap.Int("pid", pid), zap.String("signal", sig.String()), zap.String("in_flight", inFlight.String()))
+			}
 		}
 		return errKillWaits
 	}
-	killWaiters[pid] = struct{}{}
+	w := &killWaiter{inFlight: sig}
+	killWaiters[pid] = w
 	killWaitersMu.Unlock()
 
 	done := make(chan error, 1)
 	go func() {
-		// Remove pid from killWaiters before sending on done so a normal
-		// return never races with a follow-up signal (such as SIGKILL after
-		// SIGINT) to the same target.
-		done <- func() error {
-			defer func() {
+		// Remove pid from killWaiters before sending on done (once no stronger
+		// follow-up signal is pending) so a normal return never races with a
+		// follow-up signal (such as SIGKILL after SIGINT) to the same target.
+		defer func() {
+			if r := recover(); r != nil {
 				killWaitersMu.Lock()
-				delete(killWaiters, pid)
+				if killWaiters[pid] == w {
+					delete(killWaiters, pid)
+				}
 				killWaitersMu.Unlock()
-			}()
-			return killSyscall(pid, sig)
+				panic(r)
+			}
 		}()
+		firstDone := false
+		cur := sig
+		for {
+			err := killSyscall(pid, cur)
+			killWaitersMu.Lock()
+			next := w.pending
+			if next != 0 {
+				w.inFlight = next
+				w.pending = 0
+				killWaitersMu.Unlock()
+				if !firstDone {
+					firstDone = true
+					done <- err
+				}
+				cur = next
+				continue
+			}
+			delete(killWaiters, pid)
+			killWaitersMu.Unlock()
+			if !firstDone {
+				firstDone = true
+				done <- err
+			}
+			return
+		}
 	}()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -252,16 +253,27 @@ func TestAKillThatWaitsOnAHeldSpawnReachesItsProcess(t *testing.T) {
 }
 
 // killWithin keeps at most one in-flight kill(2) goroutine per target pid:
-// a repeat kill to a pid whose earlier kill is still blocked in the kernel
-// logs a warning and returns errKillWaits without spawning a second goroutine,
-// kills to any other pid (including the by-pid kill to the process that made a
-// held spawn, even with many unrelated pids stuck) always go out and are never
-// refused, and once a blocked kill finishes its pid entry is released cleanly.
+//   - an exact repeat of a signal already waiting in the kernel (SIGINT while
+//     SIGINT waits, or SIGKILL while SIGKILL waits) logs a warning naming the
+//     signal and is not resent;
+//   - a stronger signal asked for while an earlier kill waits (SIGKILL while
+//     SIGINT waits) is remembered on that waiter and sent as soon as the first
+//     kill returns;
+//   - kills to any other target (the by-pid kill to the process that made a
+//     held spawn, and the group SIGKILL on -pgid, even with 40 unrelated pids
+//     stuck) always go out and are never refused;
+//   - once all pending work returns, the pid entry is released cleanly.
 func TestKillWithinDeduplicatesPerPIDWithoutBlockingOtherTargets(t *testing.T) {
 	realSyscall := killSyscall
 	release := make(chan struct{})
-	var released sync.Once
-	unblock := func() { released.Do(func() { close(release) }) }
+	releaseRepeatInt := make(chan struct{})
+	releaseRepeatKill := make(chan struct{})
+	var onceMain, onceInt, onceKill sync.Once
+	unblockAll := func() {
+		onceInt.Do(func() { close(releaseRepeatInt) })
+		onceKill.Do(func() { close(releaseRepeatKill) })
+		onceMain.Do(func() { close(release) })
+	}
 
 	waitEmpty := func(d time.Duration) int {
 		for deadline := time.Now().Add(d); ; time.Sleep(5 * time.Millisecond) {
@@ -275,7 +287,7 @@ func TestKillWithinDeduplicatesPerPIDWithoutBlockingOtherTargets(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		unblock()
+		unblockAll()
 		if n := waitEmpty(5 * time.Second); n != 0 {
 			t.Errorf("killWaiters has %d entries after cleanup; want 0", n)
 		}
@@ -283,65 +295,117 @@ func TestKillWithinDeduplicatesPerPIDWithoutBlockingOtherTargets(t *testing.T) {
 	})
 
 	const (
-		makerPID = 2001
-		heldPID  = 2002
+		makerPID      = 2001
+		heldPID       = 2002
+		repeatIntPID  = 2003
+		repeatKillPID = 2004
 	)
 	var mu sync.Mutex
-	calls := map[int]int{}
+	sigCalls := map[int][]syscall.Signal{}
 	entered := make(chan int, 64)
 	killSyscall = func(pid int, sig syscall.Signal) error {
 		mu.Lock()
-		calls[pid]++
+		sigCalls[pid] = append(sigCalls[pid], sig)
 		mu.Unlock()
-		if pid == makerPID || pid == -makerPID {
-			// A by-pid kill to the spawn's maker returns at once.
+		switch {
+		case pid == makerPID || pid == -makerPID:
+			// By-pid kill to the spawn's maker and the group SIGKILL return at once.
+			return nil
+		case pid == repeatIntPID:
+			entered <- pid
+			<-releaseRepeatInt
+			return nil
+		case pid == repeatKillPID:
+			entered <- pid
+			<-releaseRepeatKill
+			return nil
+		case pid == heldPID && sig == syscall.SIGKILL:
+			// The deferred follow-up SIGKILL after the stuck SIGINT unblocks.
+			return nil
+		default:
+			entered <- pid
+			<-release
 			return nil
 		}
-		entered <- pid
-		<-release
-		return nil
 	}
-	callCount := func(pid int) int {
+	signalsOf := func(pid int) []syscall.Signal {
 		mu.Lock()
 		defer mu.Unlock()
-		return calls[pid]
+		return slices.Clone(sigCalls[pid])
+	}
+	callCount := func(pid int) int {
+		return len(signalsOf(pid))
 	}
 
 	core, logs := observer.New(zap.DebugLevel)
 	logger := zap.New(core)
 
-	// 1. First kill to heldPID blocks in the kernel and returns errKillWaits.
-	if err := killWithin(logger, heldPID, syscall.SIGINT, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
-		t.Fatalf("first kill of %d answered %v; want errKillWaits", heldPID, err)
+	// 1. Exact repeat (SIGINT while SIGINT waits): logs a Warn naming the
+	// signal, spawns no second goroutine, and does NOT resend SIGINT when the
+	// stuck kill returns.
+	if err := killWithin(logger, repeatIntPID, syscall.SIGINT, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("first SIGINT of %d answered %v; want errKillWaits", repeatIntPID, err)
 	}
 	select {
 	case <-entered:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("first kill of %d never entered killSyscall", heldPID)
+		t.Fatalf("first SIGINT of %d never entered killSyscall", repeatIntPID)
 	}
 	if got := logs.FilterLevelExact(zap.WarnLevel).Len(); got != 0 {
 		t.Fatalf("logged %d warnings on first stuck kill; want 0", got)
 	}
-
-	// 2. Repeat kill to the same stuck pid spawns no second goroutine, logs a
-	// warning, and returns errKillWaits (counted as reached).
-	if err := killWithin(logger, heldPID, syscall.SIGKILL, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
-		t.Fatalf("repeat kill of %d answered %v; want errKillWaits", heldPID, err)
-	}
-	if got := callCount(heldPID); got != 1 {
-		t.Fatalf("killSyscall ran %d times for stuck pid %d; want 1", got, heldPID)
+	if err := killWithin(logger, repeatIntPID, syscall.SIGINT, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("repeat SIGINT of %d answered %v; want errKillWaits", repeatIntPID, err)
 	}
 	warns := logs.FilterLevelExact(zap.WarnLevel).All()
 	if len(warns) != 1 {
-		t.Fatalf("logged %d warnings on duplicate stuck kill; want 1", len(warns))
+		t.Fatalf("logged %d warnings on repeat SIGINT; want 1", len(warns))
 	}
-	if ctx := warns[0].ContextMap(); ctx["pid"] != int64(heldPID) {
-		t.Errorf("duplicate kill warning fields = %v; want pid=%d", ctx, heldPID)
+	if ctx := warns[0].ContextMap(); ctx["pid"] != int64(repeatIntPID) || ctx["signal"] != syscall.SIGINT.String() {
+		t.Errorf("repeat SIGINT warning fields = %v; want pid=%d signal=%q", ctx, repeatIntPID, syscall.SIGINT.String())
+	}
+	onceInt.Do(func() { close(releaseRepeatInt) })
+	if n := waitEmpty(2 * time.Second); n != 0 {
+		t.Fatalf("killWaiters has %d entries after repeatIntPID unblocked; want 0", n)
+	}
+	if got := signalsOf(repeatIntPID); !slices.Equal(got, []syscall.Signal{syscall.SIGINT}) {
+		t.Fatalf("repeatIntPID received %v; want only one SIGINT (exact repeat must not resend)", got)
 	}
 
-	// 3. Even with 40 other unrelated pids stuck in flight, a kill to another
-	// target (here, the held spawn's maker via signalGroupByMembers) always
-	// goes out and is never refused.
+	// 2. Exact repeat (SIGKILL while SIGKILL waits): also NOT resent.
+	if err := killWithin(logger, repeatKillPID, syscall.SIGKILL, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("first SIGKILL of %d answered %v; want errKillWaits", repeatKillPID, err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("first SIGKILL of %d never entered killSyscall", repeatKillPID)
+	}
+	if err := killWithin(logger, repeatKillPID, syscall.SIGKILL, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("repeat SIGKILL of %d answered %v; want errKillWaits", repeatKillPID, err)
+	}
+	onceKill.Do(func() { close(releaseRepeatKill) })
+	if n := waitEmpty(2 * time.Second); n != 0 {
+		t.Fatalf("killWaiters has %d entries after repeatKillPID unblocked; want 0", n)
+	}
+	if got := signalsOf(repeatKillPID); !slices.Equal(got, []syscall.Signal{syscall.SIGKILL}) {
+		t.Fatalf("repeatKillPID received %v; want only one SIGKILL (exact repeat must not resend)", got)
+	}
+
+	// 3. Stuck SIGINT on heldPID + 40 unrelated stuck pids, then group SIGKILL
+	// via signalGroupByMembers:
+	//   - by-pid SIGKILL to makerPID ALWAYS goes out;
+	//   - group SIGKILL to -makerPID ALWAYS goes out;
+	//   - by-pid SIGKILL to heldPID (stronger than its stuck SIGINT) is
+	//     remembered and sent as soon as heldPID's stuck SIGINT returns.
+	if err := killWithin(logger, heldPID, syscall.SIGINT, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("first SIGINT of %d answered %v; want errKillWaits", heldPID, err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("first SIGINT of %d never entered killSyscall", heldPID)
+	}
 	for pid := 3001; pid <= 3040; pid++ {
 		if err := killWithin(logger, pid, syscall.SIGINT, 5*time.Millisecond); !errors.Is(err, errKillWaits) {
 			t.Fatalf("stuck kill of unrelated pid %d answered %v; want errKillWaits", pid, err)
@@ -353,6 +417,7 @@ func TestKillWithinDeduplicatesPerPIDWithoutBlockingOtherTargets(t *testing.T) {
 		}
 	}
 
+	warnsBefore := logs.FilterLevelExact(zap.WarnLevel).Len()
 	stubProcessReads(t, func(int) ([]int, error) { return []int{makerPID, heldPID}, nil }, map[int]procsock.Proc{
 		makerPID: {PID: makerPID, PPID: 1, PGID: makerPID},
 		heldPID:  {PID: heldPID, PPID: makerPID, PGID: makerPID},
@@ -367,30 +432,43 @@ func TestKillWithinDeduplicatesPerPIDWithoutBlockingOtherTargets(t *testing.T) {
 	if got := callCount(makerPID); got != 1 {
 		t.Fatalf("by-pid kill to spawn maker %d ran %d times; want 1", makerPID, got)
 	}
-	if got := callCount(heldPID); got != 1 {
-		t.Fatalf("killSyscall ran %d times for already-stuck child %d; want 1", got, heldPID)
+	if got := callCount(-makerPID); got != 1 {
+		t.Fatalf("group SIGKILL to -%d ran %d times while kills waited; want 1", makerPID, got)
+	}
+	if got := signalsOf(heldPID); !slices.Equal(got, []syscall.Signal{syscall.SIGINT}) {
+		t.Fatalf("heldPID received %v while its SIGINT still waited; want only [SIGINT] until it returns", got)
+	}
+	if got := logs.FilterLevelExact(zap.WarnLevel).Len(); got != warnsBefore+1 {
+		t.Fatalf("logged %d new warnings on deferred SIGKILL; want 1", got-warnsBefore)
+	}
+	if ctx := logs.FilterLevelExact(zap.WarnLevel).All()[warnsBefore].ContextMap(); ctx["pid"] != int64(heldPID) || ctx["signal"] != syscall.SIGKILL.String() {
+		t.Errorf("deferred SIGKILL warning fields = %v; want pid=%d signal=%q", ctx, heldPID, syscall.SIGKILL.String())
 	}
 	for _, e := range logs.FilterLevelExact(zap.ErrorLevel).All() {
 		t.Errorf("the group kill logged an ERROR: %q %v", e.Message, e.ContextMap())
 	}
 
-	// 4. Once the stuck kills finish, their pid entries are released cleanly
-	// and a subsequent kill to heldPID runs normally.
-	unblock()
+	// 4. Unblock the stuck SIGINT: the deferred SIGKILL for heldPID MUST go
+	// out immediately, all pid entries are released cleanly, and a later kill
+	// to heldPID runs normally.
+	onceMain.Do(func() { close(release) })
 	if n := waitEmpty(2 * time.Second); n != 0 {
 		t.Fatalf("killWaiters still has %d entries after unblocking; want 0", n)
 	}
+	if got := signalsOf(heldPID); !slices.Equal(got, []syscall.Signal{syscall.SIGINT, syscall.SIGKILL}) {
+		t.Fatalf("heldPID received %v after stuck SIGINT returned; want [SIGINT SIGKILL]", got)
+	}
 	killSyscall = func(pid int, sig syscall.Signal) error {
 		mu.Lock()
-		calls[pid]++
+		sigCalls[pid] = append(sigCalls[pid], sig)
 		mu.Unlock()
 		return nil
 	}
 	if err := killWithin(logger, heldPID, syscall.SIGINT, 200*time.Millisecond); err != nil {
 		t.Fatalf("kill of %d after release answered %v; want nil", heldPID, err)
 	}
-	if got := callCount(heldPID); got != 2 {
-		t.Fatalf("killSyscall ran %d times for %d after release; want 2", got, heldPID)
+	if got := signalsOf(heldPID); !slices.Equal(got, []syscall.Signal{syscall.SIGINT, syscall.SIGKILL, syscall.SIGINT}) {
+		t.Fatalf("heldPID received %v after post-release kill; want [SIGINT SIGKILL SIGINT]", got)
 	}
 	if n := waitEmpty(time.Second); n != 0 {
 		t.Fatalf("killWaiters has %d entries after normal kill; want 0", n)
