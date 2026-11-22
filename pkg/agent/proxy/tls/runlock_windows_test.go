@@ -135,6 +135,82 @@ func TestCARunLockFileThatIsALinkCountsAsLive(t *testing.T) {
 	}
 }
 
+// hardLinkAt makes link a second name of a new empty file kept outside the
+// runs directory, and returns that file's path.
+func hardLinkAt(t *testing.T, link string) string {
+	t.Helper()
+	target := filepath.Join(t.TempDir(), "kept-elsewhere.lock")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, link); err != nil {
+		t.Fatalf("hard link %s -> %s: %v", link, target, err)
+	}
+	return target
+}
+
+// A lock file with a second name (a hard link to a file kept elsewhere) is
+// refused, as a symbolic link is: a run takes no lock through it, and says it
+// changes the stores without the lock. A lock file with one name opens.
+func TestStoreLockThroughAHardLinkIsRefused(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runs")
+	if err := makeCARunsDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(dir, storeLockName)
+	hardLinkAt(t, lock)
+	if f, err := openLockFile(lock, os.O_RDONLY); err == nil {
+		_ = f.Close()
+		t.Fatal("openLockFile opened a lock file that is a hard link, want it refused")
+	} else if !strings.Contains(err.Error(), "has 2 names (a hard link)") {
+		t.Errorf("openLockFile = %v, want it refused as a hard link with 2 names", err)
+	}
+	old := caRunsDir
+	caRunsDir = dir
+	t.Cleanup(func() { caRunsDir = old; storeLockWarned.Store(false) })
+	storeLockWarned.Store(false)
+	core, logs := observer.New(zapcore.WarnLevel)
+	unlock, err := lockStores(context.Background(), zap.New(core))
+	if err != nil {
+		t.Fatalf("lockStores = %v, want the change to go on without the lock", err)
+	}
+	unlock()
+	if logs.FilterMessageSnippet("could not take the trust stores' lock").Len() != 1 {
+		t.Errorf("warnings %v, want one saying the stores change without their lock", logs.All())
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	f, err := openLockFile(lock, os.O_RDONLY)
+	if err != nil {
+		t.Fatalf("openLockFile of a lock file with one name = %v, want it opened", err)
+	}
+	_ = f.Close()
+}
+
+// A run's lock file that is a hard link counts as a live run's: a sweep leaves
+// its entries, and does not lock the file kept elsewhere. A run's lock file
+// with one name, unlocked, is an ended run's.
+func TestCARunLockFileThatIsAHardLinkCountsAsLive(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runs")
+	if err := makeCARunsDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	hardLinkAt(t, filepath.Join(dir, "c0ffee01.4242.lock"))
+	if err := os.WriteFile(filepath.Join(dir, "c0ffee02.4243.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := caRunsDir
+	caRunsDir = dir
+	t.Cleanup(func() { caRunsDir = old })
+	if !caRunLive("c0ffee01") {
+		t.Error("a run whose lock file is a hard link counts as ended, want live")
+	}
+	if caRunLive("c0ffee02") {
+		t.Error("a run whose unlocked lock file has one name counts as live, want ended")
+	}
+}
+
 // Who may own the runs directory, and change it: the administrators or
 // SYSTEM, where other users may add files and nothing more, or this run's
 // user alone.

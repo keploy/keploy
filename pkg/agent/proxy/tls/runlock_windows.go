@@ -43,6 +43,8 @@ func makeCARunsDir(dir string) error {
 // point (a symbolic link or a junction) in its place is opened itself, not
 // followed (FILE_OPEN_REPARSE_POINT), and refused, as is a directory. A link
 // there would make the run create or lock a file wherever the link points.
+// A file with more than one name (a hard link) is refused too: its name in
+// the runs directory may be one another user added to a file kept elsewhere.
 // It is opened for reading whatever flag asks: LockFileEx locks a file opened
 // for reading, and no run writes a lock file.
 func openLockFile(path string, _ int) (*os.File, error) {
@@ -68,9 +70,14 @@ func openLockFileIn(path string, disposition uint32) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the lock file %s cannot be opened: %w", path, err)
 	}
-	if err := notAReparsePoint(h, path, false); err != nil {
+	fi, err := notAReparsePoint(h, path, false)
+	if err != nil {
 		_ = windows.CloseHandle(h)
 		return nil, err
+	}
+	if fi.NumberOfLinks != 1 {
+		_ = windows.CloseHandle(h)
+		return nil, fmt.Errorf("the lock file %s has %d names (a hard link), which keploy does not open", path, fi.NumberOfLinks)
 	}
 	return os.NewFile(uintptr(h), path), nil
 }
@@ -146,7 +153,7 @@ func openCARunsDirAs(dir string, create bool, user *windows.SID, admin bool) (wi
 			return 0, fmt.Errorf("%s cannot be opened as a directory: %w", at, err)
 		}
 		h = next
-		if err := notAReparsePoint(h, at, true); err != nil {
+		if _, err := notAReparsePoint(h, at, true); err != nil {
 			_ = windows.CloseHandle(h)
 			return 0, err
 		}
@@ -180,21 +187,22 @@ func openAt(dir windows.Handle, name string, access, share, disposition, options
 
 // notAReparsePoint checks, on h, the handle of what was opened at path, that
 // it is no reparse point, and a directory when dir is set, a file otherwise.
-func notAReparsePoint(h windows.Handle, path string, dir bool) error {
+// It returns what it read of h, for the caller's own checks.
+func notAReparsePoint(h windows.Handle, path string, dir bool) (windows.ByHandleFileInformation, error) {
 	var fi windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &fi); err != nil {
-		return fmt.Errorf("%s cannot be asked what it is: %w", path, err)
+		return fi, fmt.Errorf("%s cannot be asked what it is: %w", path, err)
 	}
 	if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("%s is a symbolic link or a junction (a reparse point), which keploy does not follow", path)
+		return fi, fmt.Errorf("%s is a symbolic link or a junction (a reparse point), which keploy does not follow", path)
 	}
 	if isDir := fi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0; isDir != dir {
 		if dir {
-			return fmt.Errorf("%s is not a directory", path)
+			return fi, fmt.Errorf("%s is not a directory", path)
 		}
-		return fmt.Errorf("the lock file %s is not a regular file", path)
+		return fi, fmt.Errorf("the lock file %s is not a regular file", path)
 	}
-	return nil
+	return fi, nil
 }
 
 // runUser is this run's user, and whether it runs as an administrator (its
