@@ -163,8 +163,11 @@ esac
 	require.Contains(t, string(moved), "127.0.0.1:20001:20001")
 	require.NotContains(t, string(moved), "16789")
 	require.EqualValues(t, 20001, a.opts.AgentPort)
-	_, launched := token.Launched("http://localhost:20001/agent")
+	_, oldLaunched := token.Launched("http://localhost:16789/agent")
+	require.False(t, oldLaunched, "the refused port's launch record was left behind after moving the agent")
+	launch, launched := token.Launched("http://localhost:20001/agent")
 	require.True(t, launched, "the agent's launch was not recorded at its new address, so the client does not check that agent enforces the token")
+	t.Cleanup(func() { token.ForgetLaunch("http://localhost:20001/agent", launch) })
 }
 
 // exitWith is the end of a command that exited code.

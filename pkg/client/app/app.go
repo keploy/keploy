@@ -82,6 +82,11 @@ type App struct {
 	agentAddressOf     func() string
 	onAgentPortRefused func(ctx context.Context, said string) (uint32, error)
 	upSaid             atomic.Pointer[upOutput]
+	// lastLaunchURI and lastLaunchSeq track the token launch recorded by
+	// withAgentToken for the current compose up attempt so upMovingTheAgent
+	// can forget the refused port's launch before recording the moved one.
+	lastLaunchURI string
+	lastLaunchSeq uint64
 	// composeDoc is the compose document the run's compose reads
 	// (setComposeSource), which a move of the agent's port rewrites.
 	composeDoc *docker.Compose
@@ -2342,7 +2347,8 @@ func (a *App) withAgentToken(cmd string) (string, []string) {
 		}
 		return cmd, nil
 	}
-	token.RecordLaunch(a.agentAddress())
+	uri := a.agentAddress()
+	a.lastLaunchURI, a.lastLaunchSeq = uri, token.RecordLaunch(uri)
 	cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0, append([]string{token.Env}, mock...)...)
 	return cmd, docker.AgentTokenEnv()
 }

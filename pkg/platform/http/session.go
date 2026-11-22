@@ -375,6 +375,28 @@ func sessionFor(uri string) *agentSession {
 	return s.(*agentSession)
 }
 
+// stageMoveSession stores the session registered at from under to before the
+// agent's published address switches, so concurrent callers of a.session()
+// keep the same *agentSession across a compose port move rather than creating
+// a fresh non-restartable session. Call finishMoveSession after publishing to.
+func stageMoveSession(from, to string) (any, bool) {
+	if from == "" || to == "" || from == to {
+		return nil, false
+	}
+	v, ok := sessions.Load(from)
+	if !ok {
+		return nil, false
+	}
+	sessions.Store(to, v)
+	return v, true
+}
+
+func finishMoveSession(from string, moved any) {
+	if from != "" && moved != nil {
+		sessions.CompareAndDelete(from, moved)
+	}
+}
+
 func newAgentSession() *agentSession {
 	return &agentSession{changed: make(chan struct{}), streams: map[*sessionStream]struct{}{}}
 }

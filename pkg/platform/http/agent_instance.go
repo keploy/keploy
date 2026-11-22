@@ -76,6 +76,27 @@ func instancesAt(host string) *agentInstances {
 	return v.(*agentInstances)
 }
 
+// stageMoveInstances stores the agentInstances entry at fromHost under toHost
+// before the agent's address switches, so any WatchAgentInstance opened before
+// compose up continues observing answers at the moved host.
+func stageMoveInstances(fromHost, toHost string) (any, bool) {
+	if fromHost == "" || toHost == "" || fromHost == toHost {
+		return nil, false
+	}
+	v, ok := instances.Load(fromHost)
+	if !ok {
+		return nil, false
+	}
+	instances.Store(toHost, v)
+	return v, true
+}
+
+func finishMoveInstances(fromHost string, moved any) {
+	if fromHost != "" && moved != nil {
+		instances.CompareAndDelete(fromHost, moved)
+	}
+}
+
 // answered notes an answer from the process instance.
 func (s *agentInstances) answered(instance string) {
 	s.mu.Lock()

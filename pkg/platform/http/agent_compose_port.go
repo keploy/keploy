@@ -56,13 +56,45 @@ func (a *AgentClient) composeAgentPortRefused(ctx context.Context, said string) 
 	a.logger.Warn("docker compose could not publish the keploy agent's port on the host, since another socket took it after keploy picked it; moving the agent to another port, before the app starts",
 		zap.String("taken", taken), zap.String("composeSaid", line), zap.Uint32("from", from), zap.Uint32("to", to))
 	a.conf.Agent.AgentPort = to
-	a.addressAgent(uri)
+	a.moveAgentAddress(uri)
 	if os.Getenv("KEPLOY_MOCK_AGENT") == mockAgentAt(from) {
 		if err := os.Setenv("KEPLOY_MOCK_AGENT", mockAgentAt(to)); err != nil {
 			return 0, fmt.Errorf("failed to hand the tests the keploy agent's new address: %w", err)
 		}
 	}
 	return to, nil
+}
+
+// moveAgentAddress moves keploy's address for this compose agent to uri,
+// carrying every address-keyed registry populated before compose up (the
+// agent session, containerAt / agentContainerAt, and instancesAt) before
+// publishing the new address so concurrent readers never see an orphaned
+// entry, then drops the old keys and any pushers tied to the old address.
+func (a *AgentClient) moveAgentAddress(uri string) {
+	oldURI := a.conf.AgentURI()
+	if oldURI == uri {
+		return
+	}
+	oldHost, newHost := "", ""
+	if oldURI != "" {
+		oldHost = agentHost(oldURI)
+	}
+	if uri != "" {
+		newHost = agentHost(uri)
+	}
+	movedSession, _ := stageMoveSession(oldURI, uri)
+	movedContainer, oldContainerAt := a.stageMoveAgentContainer(uri)
+	movedInstances, _ := stageMoveInstances(oldHost, newHost)
+
+	a.addressAgent(uri)
+
+	finishMoveSession(oldURI, movedSession)
+	finishMoveAgentContainer(oldContainerAt, movedContainer)
+	finishMoveInstances(oldHost, movedInstances)
+	if oldURI != "" {
+		forgetContainers(oldURI)
+		forgetNetworkNames(oldURI)
+	}
 }
 
 // agentURIOn is uri, the agent's address, on port: the same scheme, host and

@@ -590,6 +590,33 @@ func (a *AgentClient) forgetAgentContainer() {
 	}
 }
 
+// stageMoveAgentContainer updates this client's agentContainerAt to newURI's
+// host and maps its *namedContainer in containerAt under that host before the
+// new address is published, so answeredAt at the moved address marks the
+// container known and forgetAgentContainer drops the moved entry later.
+func (a *AgentClient) stageMoveAgentContainer(newURI string) (*namedContainer, string) {
+	newAt := ""
+	if newURI != "" {
+		newAt = agentHost(newURI)
+	}
+	a.mu.Lock()
+	c, oldAt := a.agentContainer, a.agentContainerAt
+	if c == nil || newAt == "" || newAt == oldAt {
+		a.mu.Unlock()
+		return nil, ""
+	}
+	a.agentContainerAt = newAt
+	a.mu.Unlock()
+	containerAt.Store(newAt, c)
+	return c, oldAt
+}
+
+func finishMoveAgentContainer(oldAt string, c *namedContainer) {
+	if oldAt != "" && c != nil {
+		containerAt.CompareAndDelete(oldAt, c)
+	}
+}
+
 // containerNamed is this client's entry of container name: the one it named
 // last (nameAgentContainer), or, for a name it did not name, an entry of its
 // own, which no run, nor any other look, shares.

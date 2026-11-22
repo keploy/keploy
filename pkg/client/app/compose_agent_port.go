@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -113,6 +114,10 @@ func (a *App) upMovingTheAgent(ctx context.Context, up func() utils.CmdError, re
 		if err := a.moveComposeAgent(from, to); err != nil {
 			cmdErr.Err = fmt.Errorf("%w; keploy could not move its agent to port %d in the compose document it runs: %v", cmdErr.Err, to, err)
 			return cmdErr
+		}
+		if a.lastLaunchURI != "" {
+			token.ForgetLaunch(a.lastLaunchURI, a.lastLaunchSeq)
+			a.lastLaunchURI, a.lastLaunchSeq = "", 0
 		}
 		a.logger.Warn("running docker compose up again, with keploy's agent on another port",
 			zap.Uint32("from", from), zap.Uint32("to", to), zap.Int("move", moves+1), zap.Int("of", composeAgentMoves))
