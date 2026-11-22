@@ -70,6 +70,10 @@ type HTTP struct {
 	// strictIx is the strict pass's index of the last staging generation, or
 	// shared part of an open test's reads, a strict call read (strictIndex).
 	strictIx strictIndexes
+	// fullRoundIx is record's full-round (learnMatchIn) exact-match index of
+	// the open test's owned recordings, the shared part of an open test's
+	// reads, and pool views (full_round_index.go).
+	fullRoundIx fullRoundIndexes
 	// verify is the exact view's verify mode of this handler's own reads
 	// (verifying): nil follows the process's (integrations.ExactViewVerify),
 	// what every handler the proxy makes does; a row gives a handler its

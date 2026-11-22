@@ -84,7 +84,8 @@ type learnNoise struct {
 	ownHeaders map[string]bool
 	// body is keploy.yml's request-body noise, read by matcher.NoiseLookup:
 	// a path names whole fields, as the strict matcher reads it.
-	body matcher.NoiseLookup
+	body         matcher.NoiseLookup
+	hasBodyNoise bool
 	// url is keploy.yml's url noise: what a pattern matches in a path or a
 	// query value is not compared.
 	url []*regexp.Regexp
@@ -105,7 +106,7 @@ func (n learnNoise) withSources(db integrations.MockMemDb) learnNoise {
 }
 
 func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][]string, urlNoise []string) learnNoise {
-	n := learnNoise{body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
+	n := learnNoise{body: matcher.NewNoiseLookup(bodyNoise), hasBodyNoise: len(bodyNoise) > 0, url: compileURLNoise(h.Logger, urlNoise)}
 	n.headers, n.headerPats = splitHeaderNoise(h.Logger, opts.NoiseConfig["header"])
 	n.ownHeaders = map[string]bool{}
 	if !opts.DisableAutoHeaderNoise {
@@ -1724,6 +1725,14 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 	// pass before was refused.
 	var made learnRound
 	var madePool []*models.Mock
+	var madePoolFn func() []*models.Mock
+	resolveMadePool := func() []*models.Mock {
+		if madePool == nil && madePoolFn != nil {
+			madePool = madePoolFn()
+			madePoolFn = nil
+		}
+		return madePool
+	}
 	// alone is why the call learns nothing on any pass, "" where it may
 	// learn: its first pass read the store's test view with the tracker
 	// not open (integrations.RoundSnapshot.ViewAlone). It holds past a
@@ -1736,6 +1745,24 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
+		}
+		// Fast path: resolve unspent non-background exact matches in O(1)
+		// amortised via RoundMeta + fullRoundIndexes without copying every
+		// recording of the view. Any drift, miss, declared-noise rewrite,
+		// store read-back, or boundary diagnostic falls through to
+		// readLearnPass below.
+		if res, err := h.tryExactLearnMatch(ctx, input, mockDb, tracker, live, liveShape, n, opts, mark, call, &marked, &made, &madePool, &madePoolFn, &alone, retake, unclaimed); err != nil {
+			return nil, nil, err
+		} else {
+			switch res.step {
+			case fullRoundServed:
+				return res.out, nil, nil
+			case fullRoundMiss:
+				return nil, res.miss, nil
+			case fullRoundRetake:
+				retake = true
+				continue
+			}
 		}
 		first := call != nil && !marked
 		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool)
@@ -1772,7 +1799,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// not its own. A wait for a request that never came ends so:
 			// the window closed unread.
 			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + made.where() + ", and the replay " + moved + " before keploy could answer it"}
-			return nil, &learnMiss{res: res, pool: madePool, moved: true}, nil
+			return nil, &learnMiss{res: res, pool: resolveMadePool(), moved: true}, nil
 		}
 		if why := read.round.noOne; why != "" {
 			// The store and the tracker are apart on which test is open
@@ -1795,7 +1822,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		if !made.read || caughtUp {
 			// The first pass, or the round the side that lagged caught up
 			// with (learnRound.movedFrom): every later pass is held to it.
-			made, madePool = read.round, read.sc.http
+			made, madePool, madePoolFn = read.round, read.sc.http, nil
 		}
 		if made.waits() && read.round.ahead {
 			// The tracker began a test whose view the store has not
@@ -1827,7 +1854,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			if !moved {
 				res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request after keploy's learn tracker began a test its store had not opened, and the store cannot tell when it opens it, so the call is of no round keploy can decide it in"}
-				return nil, &learnMiss{res: res, pool: madePool, moved: true}, nil
+				return nil, &learnMiss{res: res, pool: resolveMadePool(), moved: true}, nil
 			}
 			continue
 		}
@@ -1965,7 +1992,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if stuck(picked, read.at) {
 				return refused(picked, res, sc)
 			}
-			if own && (models.HTTPStoreReads(picked.Spec.HTTPReq) || putReads(picked)) {
+			if own && (models.HTTPStoreReads(picked.Spec.HTTPReq) || (putReads(picked) && hasMatchingPut(tracker, picked))) {
 				// A read of a record the test wrote (a store's API:
 				// readBackPlan) is answered with what this run wrote, though
 				// its request is exactly the recorded one (a Scan of a
@@ -2141,7 +2168,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			if own {
+			if own && (models.HTTPStoreReads(answered.Spec.HTTPReq) || (putReads(answered) && hasMatchingPut(tracker, answered))) {
 				plan = h.readBackPlan(tracker, test, answered, n.unmaskedShape(live), served, earlier, givenVars, plan)
 			}
 			if own && !tracker.Answer(test, m) {

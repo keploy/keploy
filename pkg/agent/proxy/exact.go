@@ -3082,6 +3082,40 @@ func (v *exactView) unansweredAt(at []int) []int {
 	return out
 }
 
+// unspentFrom scans positions[from:] under v.mu for the first position whose
+// owned recording is neither consumed nor claimed by another test. nextFrom
+// advances only across leading permanently-consumed positions (v.consumed[p]
+// never transitions back to false in v), so callers can amortise repeated
+// lookups of identical-request buckets to O(1) without skipping transiently
+// unconsumed or shared-claimed entries.
+func (v *exactView) unspentFrom(positions []int, from int) (idx, nextFrom int, ok bool) {
+	if from < 0 {
+		from = 0
+	}
+	if from >= len(positions) {
+		return 0, len(positions), false
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	nextFrom = from
+	leading := true
+	for i := from; i < len(positions); i++ {
+		p := positions[i]
+		if p < 0 || p >= len(v.owned) || v.consumed[p] {
+			if leading {
+				nextFrom = i + 1
+			}
+			continue
+		}
+		leading = false
+		if v.takenByOther(p) {
+			continue
+		}
+		return i, nextFrom, true
+	}
+	return 0, nextFrom, false
+}
+
 // ownedKeys is the view's index of its owned copies' keys under ix (keyed,
 // ownedKeysOf), built on its first use.
 func (v *exactView) ownedKeys(ix *integrations.MockIndex) map[string][]int {

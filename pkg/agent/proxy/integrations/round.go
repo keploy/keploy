@@ -997,3 +997,268 @@ func RoundMoved(scope MockMemDb) string {
 	}
 	return ""
 }
+
+// RoundMeta is an O(1) read of exact serving's round state under the round
+// lock, without copying the view's or tracker's recording slices. It carries
+// everything a learn step needs to resolve an exact match through a per-view
+// index and fall back to a full RoundSnapshot whenever drift, misses or
+// boundary diagnostics require the whole scope.
+type RoundMeta struct {
+	At         RoundAt
+	Reads      uint64
+	Test       string
+	Ahead      bool
+	Fired      bool
+	Background bool
+	Staging    bool
+	Phase      RoundPhase
+	Boundary   string
+	Ended      string
+	Open       bool
+
+	// LearnBound..LearnHasHTTPPut are learn.Tracker.PlacedState read under the
+	// round lock.
+	LearnBound      bool
+	LearnNumber     uint64
+	LearnOpen       bool
+	LearnBegun      bool
+	LearnSetAhead   bool
+	LearnAwaiting   bool
+	LearnHasHTTPPut bool
+
+	// OwnedGen and Owned identify the view's immutable owned recording slice
+	// (read-only; never mutated by callers).
+	OwnedGen uint64
+	Owned    []*models.Mock
+
+	// SharedGen (when HasShared) and StagingGen identify the store's shared or
+	// pool recordings for models.HTTP.
+	SharedGen  SharedGen
+	HasShared  bool
+	StagingGen uint64
+
+	viewGen    uint64
+	ownedIndex map[string]int
+	endedIndex map[string]int
+	voided     map[string]struct{}
+	inFlight   func(m *models.Mock) bool
+	unspent    func(positions []int, from int) (idx, nextFrom int, ok bool)
+	spent      func(name string) bool
+	worker     map[string]struct{}
+	bgPool     map[string]struct{}
+	bgWorker   map[string]struct{}
+	windows    *models.WindowSchedule
+	poolNames  *map[string]struct{}
+	winStart   time.Time
+	winEnd     time.Time
+	view       any
+}
+
+// RoundMetaParts supplies the unexported O(1) references a store attaches to a
+// RoundMeta (all read-only, shared with the view).
+type RoundMetaParts struct {
+	ViewGen                uint64
+	OwnedIndex             map[string]int
+	EndedIndex             map[string]int
+	Voided                 map[string]struct{}
+	InFlight               func(m *models.Mock) bool
+	Unspent                func(positions []int, from int) (idx, nextFrom int, ok bool)
+	Spent                  func(name string) bool
+	Worker                 map[string]struct{}
+	BGPool                 map[string]struct{}
+	BGWorker               map[string]struct{}
+	Windows                *models.WindowSchedule
+	PoolNames              *map[string]struct{}
+	WindowStart, WindowEnd time.Time
+	View                   any
+}
+
+// WithMetaParts attaches p to m.
+func (m RoundMeta) WithMetaParts(p RoundMetaParts) RoundMeta {
+	m.viewGen = p.ViewGen
+	m.ownedIndex = p.OwnedIndex
+	m.endedIndex = p.EndedIndex
+	m.voided = p.Voided
+	m.inFlight = p.InFlight
+	m.unspent = p.Unspent
+	m.spent = p.Spent
+	m.worker = p.Worker
+	m.bgPool = p.BGPool
+	m.bgWorker = p.BGWorker
+	m.windows = p.Windows
+	m.poolNames = p.PoolNames
+	m.winStart = p.WindowStart
+	m.winEnd = p.WindowEnd
+	m.view = p.View
+	return m
+}
+
+// IsVoided reports whether name was voided in the current staging (TakeVoided)
+// and is held by the view, in O(1).
+func (m RoundMeta) IsVoided(name string) bool {
+	if len(m.voided) == 0 {
+		return false
+	}
+	if _, ok := m.voided[name]; !ok {
+		return false
+	}
+	_, own := m.ownedIndex[name]
+	return own
+}
+
+// IsSpent reports whether name is spent in the view captured by m (pinned to
+// that view even after a later view replaces it).
+func (m RoundMeta) IsSpent(name string) bool {
+	return m.spent != nil && m.spent(name)
+}
+
+// ViewGen returns the round generation at which the view was installed.
+func (m RoundMeta) ViewGen() uint64 { return m.viewGen }
+
+// SetUnstaged reports whether the tracker began a test set the store has not staged.
+func (m RoundMeta) SetUnstaged() bool {
+	return m.Phase == RoundBoundary && m.LearnBound && m.LearnSetAhead
+}
+
+// TrackerAhead reports whether the tracker began a test the store has not opened.
+func (m RoundMeta) TrackerAhead() bool {
+	return m.Phase == RoundBoundary && m.LearnBound && m.LearnOpen && m.Ended == "" && !m.LearnSetAhead
+}
+
+// NoOneRound mirrors RoundSnapshot.NoOneRound.
+func (m RoundMeta) NoOneRound() string {
+	if m.SetUnstaged() {
+		return "as keploy's learn tracker began a test set its store had not staged, so the call is of no round of either test set"
+	}
+	if m.Phase != RoundBoundary || !m.LearnBound || !m.LearnOpen || m.Ended == "" {
+		return ""
+	}
+	if m.Test == "" {
+		return "after keploy's store ended " + m.Ended + " and before its learn tracker did, so the call is of neither " + m.Ended + " nor the round between tests"
+	}
+	return "after keploy's store ended " + m.Ended + " for " + m.Test + "'s view and before its learn tracker ended " + m.Ended + ", so the call is of neither " + m.Ended + " nor " + m.Test
+}
+
+// ViewAlone mirrors RoundSnapshot.ViewAlone.
+func (m RoundMeta) ViewAlone() string {
+	if m.Phase != RoundBoundary || !m.LearnBound || m.LearnOpen || m.LearnSetAhead || m.Test == "" {
+		return ""
+	}
+	return "while keploy's store showed " + m.Test + "'s view and its learn tracker had no test open, so the call is of neither " + m.Test + " nor the round between tests to learn in"
+}
+
+// ExactBackground mirrors RoundSnapshot.ExactBackground.
+func (m RoundMeta) ExactBackground() bool {
+	return m.Background && m.Test != ""
+}
+
+// UnspentFrom scans positions[from:] in the view's owned list for the first
+// unspent position, returning its index in positions, the updated monotonic
+// cursor past any leading permanently-consumed prefix, and whether one was found.
+func (m RoundMeta) UnspentFrom(positions []int, from int) (idx, nextFrom int, ok bool) {
+	if m.unspent == nil {
+		return 0, from, false
+	}
+	return m.unspent(positions, from)
+}
+
+// CallRound builds the call's CallRound mark in O(1) without copying owners.
+func (m RoundMeta) CallRound() CallRound {
+	if m.SetUnstaged() {
+		return NewCallRound(m.At.Epoch, nil).HoldingEvery().ReadAt(m.At).InStaging(true).InView(false, m.Background).InStoreView(m.view).AfterReads(m.Reads)
+	}
+	worker := m.Test != "" && len(m.worker) > 0
+	if m.TrackerAhead() {
+		return NewCallRound(m.At.Epoch, nil).HoldingEvery().ReadAt(m.At).InStaging(m.Staging).InView(m.Test != "", m.Background).InWorkerView(worker).InStoreView(m.view).AfterReads(m.Reads)
+	}
+	ownedIndex, endedIndex := m.ownedIndex, m.endedIndex
+	return NewCallRound(m.At.Epoch, func(name string) bool {
+		if _, own := endedIndex[name]; own {
+			return true
+		}
+		_, own := ownedIndex[name]
+		return own
+	}).ReadAt(m.At).InStaging(m.Staging).InView(m.Test != "", m.Background).InWorkerView(worker).OfTest(m.Test).InStoreView(m.view).AfterReads(m.Reads)
+}
+
+// InBackground mirrors RoundSnapshot.InBackground in O(1).
+func (m RoundMeta) InBackground(name string) bool {
+	if _, own := m.ownedIndex[name]; own {
+		return false
+	}
+	if m.Test != "" {
+		if _, ok := m.worker[name]; ok {
+			return true
+		}
+	}
+	if !m.Background {
+		return false
+	}
+	if _, ok := m.bgPool[name]; ok {
+		return true
+	}
+	_, ok := m.bgWorker[name]
+	return ok
+}
+
+// InFlightIntoOpenTest mirrors RoundSnapshot.InFlightIntoOpenTest in O(1).
+func (m RoundMeta) InFlightIntoOpenTest(mk *models.Mock) bool {
+	return m.Open && m.inFlight != nil && m.inFlight(mk)
+}
+
+// InTestWindow mirrors RoundSnapshot.InTestWindow.
+func (m RoundMeta) InTestWindow(t time.Time) bool {
+	if m.winStart.IsZero() || m.winEnd.IsZero() || t.IsZero() {
+		return false
+	}
+	return !t.Before(m.winStart) && !t.After(m.winEnd)
+}
+
+// InRecordedTestWindow mirrors RoundSnapshot.InRecordedTestWindow.
+func (m RoundMeta) InRecordedTestWindow(t time.Time) (inside, known bool) {
+	if m.windows.Len() == 0 || t.IsZero() {
+		return false, false
+	}
+	return m.windows.Contains(t), true
+}
+
+// SameRecordedTestWindow mirrors RoundSnapshot.SameRecordedTestWindow.
+func (m RoundMeta) SameRecordedTestWindow(a, b time.Time) (same, known bool) {
+	if m.windows.Len() == 0 || a.IsZero() || b.IsZero() {
+		return false, false
+	}
+	i := m.windows.IndexOf(a)
+	return i >= 0 && i == m.windows.IndexOf(b), true
+}
+
+// InPool mirrors RoundSnapshot.InPool.
+func (m RoundMeta) InPool(mk *models.Mock) (pool, known bool) {
+	if m.poolNames == nil || mk == nil {
+		return false, false
+	}
+	_, pool = (*m.poolNames)[mk.Name]
+	return pool, true
+}
+
+var (
+	_ TestWindows      = RoundMeta{}
+	_ InFlightOwner    = RoundMeta{}
+	_ PoolMembership   = RoundMeta{}
+	_ BackgroundMember = RoundMeta{}
+)
+
+// ExactRoundReader is an optional RoundReader capability that reads round
+// metadata in O(1) without copying the view's recording slices.
+type ExactRoundReader interface {
+	RoundMeta(tracker *learn.Tracker) (RoundMeta, bool)
+}
+
+// ReadRoundMeta reads db's O(1) RoundMeta; false when db does not implement
+// ExactRoundReader, exact serving is off, or an inspection hook requires a
+// full RoundSnapshot.
+func ReadRoundMeta(db MockMemDb, tracker *learn.Tracker) (RoundMeta, bool) {
+	if r, ok := db.(ExactRoundReader); ok {
+		return r.RoundMeta(tracker)
+	}
+	return RoundMeta{}, false
+}

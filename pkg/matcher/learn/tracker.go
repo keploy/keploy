@@ -119,8 +119,10 @@ type Tracker struct {
 	outside     []*models.Mock
 	outsideKept map[string]bool
 	// kept are the identities (MockID) in mocks: a mock served again is kept
-	// once.
-	kept map[string]bool
+	// once. httpPuts are the HTTP PUT mocks of mocks, in the same order: read
+	// in O(1) by HTTP's read-back check so tests without PUTs never scan mocks.
+	kept     map[string]bool
+	httpPuts []*models.Mock
 	// answered are the test's own mocks that answered a request of the
 	// running test, by name: each answers one (design §5.2), whatever
 	// lifetime the store gives it. They are kept, as they were recorded, to
@@ -287,7 +289,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.epoch++
 	t.setEpoch = t.epoch
 	t.served = nil
-	t.mocks, t.kept, t.before = nil, nil, nil
+	t.mocks, t.kept, t.before, t.httpPuts = nil, nil, nil, nil
 	t.set, t.serves, t.seq, t.asRecorded, t.lives = nil, nil, 0, nil, nil
 	t.testFrom, t.outsideSeq, t.starts = 0, nil, nil
 	t.flights, t.lifts, t.handshakes, t.phases = nil, nil, nil, nil
@@ -613,7 +615,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 		t.keepRun(ranCalls(t.served, t.orderLocked()))
 	}
 	t.served = nil
-	t.before, t.mocks, t.kept = t.mocks, nil, nil
+	t.before, t.mocks, t.kept, t.httpPuts = t.mocks, nil, nil, nil
 	t.answered = nil
 	t.drifts = t.newDrifts()
 	t.names, t.taken, t.wordPlaces = nil, nil, nil
@@ -1001,6 +1003,48 @@ type Placed struct {
 	Order Order
 }
 
+// PlacedState is the O(1) metadata subset of Placed: the running test's
+// number, openness, set number, awaiting state, and whether any HTTP PUT mock
+// has been served in the running test. Unlike Placed it copies no slices.
+type PlacedState struct {
+	Test       uint64
+	Open       bool
+	Begun      bool
+	SetAt      uint64
+	Awaiting   bool
+	HasHTTPPut bool
+}
+
+// PlacedState reads the tracker's metadata in O(1) without copying slices.
+func (t *Tracker) PlacedState() PlacedState {
+	if t == nil {
+		return PlacedState{}
+	}
+	t.mu.Lock()
+	s := PlacedState{
+		Test:       t.epoch,
+		Open:       t.open,
+		Begun:      t.began,
+		SetAt:      t.setEpoch,
+		Awaiting:   t.awaiting != nil,
+		HasHTTPPut: len(t.httpPuts) > 0,
+	}
+	t.mu.Unlock()
+	return s
+}
+
+// HTTPPuts returns the HTTP PUT mocks served so far in the running test, as a
+// shared read-only prefix of the tracker's append-only slice (O(1), no copy).
+func (t *Tracker) HTTPPuts() []*models.Mock {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	out := t.httpPuts[:len(t.httpPuts):len(t.httpPuts)]
+	t.mu.Unlock()
+	return out
+}
+
 // Placed is Places with the set's serving (Placed.Set, Placed.Order), read
 // at one instant. It copies the running test's mocks, those served before it
 // began and those served while no test was open, never the whole set.
@@ -1188,6 +1232,9 @@ func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k ser
 		}
 		t.kept[id] = true
 		t.mocks = append(t.mocks, m)
+		if m.Kind == models.HTTP && m.Spec.HTTPReq != nil && string(m.Spec.HTTPReq.Method) == "PUT" {
+			t.httpPuts = append(t.httpPuts, m)
+		}
 	}
 	// Served while no test is open: an earlier place of every later test of
 	// the set.
