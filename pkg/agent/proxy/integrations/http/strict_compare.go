@@ -978,7 +978,7 @@ func maskURL(s string, pats []*regexp.Regexp) (masked string, mask, taken []bool
 	// mask; nil while no pattern has matched.
 	masked = s
 	var from []int
-	for _, re := range pats {
+	for i, re := range pats {
 		locs := re.FindAllStringIndex(masked, -1)
 		if len(locs) == 0 {
 			continue
@@ -989,14 +989,15 @@ func maskURL(s string, pats []*regexp.Regexp) (masked string, mask, taken []bool
 				from[j] = j
 			}
 		}
+		placeholder := urlNoisePlaceholderOf(i)
 		var b strings.Builder
-		next := make([]int, 0, len(from)+len(locs)*len(urlNoisePlaceholder))
+		next := make([]int, 0, len(from)+len(locs)*len(placeholder))
 		last := 0
 		for _, loc := range locs {
 			b.WriteString(masked[last:loc[0]])
 			next = append(next, from[last:loc[0]]...)
-			b.WriteString(urlNoisePlaceholder)
-			for range len(urlNoisePlaceholder) {
+			b.WriteString(placeholder)
+			for range len(placeholder) {
 				next = append(next, -1)
 			}
 			last = loc[1]
