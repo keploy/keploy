@@ -221,9 +221,9 @@ func holdTheUpstreamsEnd(c *relayedConn, appFirst bool) (destRead <-chan struct{
 	return dr
 }
 
-// Through the relay: the upstream closes partway through the answer first,
-// and the relay has read its close but not yet forwarded it when the app
-// closes (it gave up, or its process exited, with the upstream's end still
+// Through the relay: the upstream closes or resets partway through the
+// answer first, and the relay has read that end but not yet forwarded it when
+// the app closes (it gave up, or its process exited, with the upstream's end still
 // not at its socket). The app ended its side before the upstream's end reached
 // it, so its own end judges the call, whichever of the two ends the relay
 // marks first: the look the relay takes once the upstream's end is marked,
@@ -239,50 +239,58 @@ func TestRecordV2_ThroughTheRelayAnAppThatClosedBeforeTheUpstreamsEndReachedItJu
 		for _, proven := range []string{"", "1"} {
 			t.Run(end.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
 				t.Setenv("KEPLOY_PROVEN", proven)
-				for _, order := range ownEndOrders {
-					c := newRelayedConn(t)
-					c.clientEnd.Store(uint32(end.client))
-					destRead := holdTheUpstreamsEnd(c, order.appFirst)
-					c.start(t)
-					write(t, c.app, c.src, jdkRequest(7))
-					relayed(t, c.dest, jdkRequest(7))
-					if _, err := c.dest.Write([]byte(shape.read)); err != nil {
-						t.Fatal(err)
-					}
-					relayed(t, c.app, shape.read)
-					if err := c.dest.Close(); err != nil {
-						t.Fatal(err)
-					}
-					select {
-					case <-destRead:
-					case <-time.After(10 * time.Second):
-						t.Fatal("the relay did not read the upstream's close within 10s")
-					}
-					if err := c.app.Close(); err != nil {
-						t.Fatal(err)
-					}
-					mocks := c.end(t)
-					want := fakeconn.FromDest
-					if order.appFirst {
-						want = fakeconn.FromClient
-					}
-					if first, ok := c.sess.FirstPeerEnded(); !ok || first != want {
-						t.Fatalf("%s: the relay marked side %d's end first (%v), want side %d's", order.name, first, ok, want)
-					}
-					if end.leftOut != "" {
-						if len(mocks) != 0 {
-							t.Fatalf("%s: recorded %d mocks (fault %+v), want none: the app's own end records no fault",
-								order.name, len(mocks), mocks[0].Spec.Fault)
+				for _, o := range ownEndOrders {
+					for _, reset := range []bool{false, true} {
+						order := o
+						if reset {
+							order.name += ", the upstream resets"
 						}
-						if got := c.leftOut(end.leftOut); len(got) != 1 {
-							t.Fatalf("%s: said %d times that the exchange was left out under %q, want once", order.name, len(got), end.leftOut)
+						c := newRelayedConn(t)
+						c.clientEnd.Store(uint32(end.client))
+						destRead := holdTheUpstreamsEnd(c, order.appFirst)
+						c.start(t)
+						write(t, c.app, c.src, jdkRequest(7))
+						relayed(t, c.dest, jdkRequest(7))
+						if _, err := c.dest.Write([]byte(shape.read)); err != nil {
+							t.Fatal(err)
 						}
-						continue
+						relayed(t, c.app, shape.read)
+						if reset {
+							resetConn(t, c.dest)
+						} else if err := c.dest.Close(); err != nil {
+							t.Fatal(err)
+						}
+						select {
+						case <-destRead:
+						case <-time.After(10 * time.Second):
+							t.Fatal("the relay did not read the upstream's end within 10s")
+						}
+						if err := c.app.Close(); err != nil {
+							t.Fatal(err)
+						}
+						mocks := c.end(t)
+						want := fakeconn.FromDest
+						if order.appFirst {
+							want = fakeconn.FromClient
+						}
+						if first, ok := c.sess.FirstPeerEnded(); !ok || first != want {
+							t.Fatalf("%s: the relay marked side %d's end first (%v), want side %d's", order.name, first, ok, want)
+						}
+						if end.leftOut != "" {
+							if len(mocks) != 0 {
+								t.Fatalf("%s: recorded %d mocks (fault %+v), want none: the app's own end records no fault",
+									order.name, len(mocks), mocks[0].Spec.Fault)
+							}
+							if got := c.leftOut(end.leftOut); len(got) != 1 {
+								t.Fatalf("%s: said %d times that the exchange was left out under %q, want once", order.name, len(got), end.leftOut)
+							}
+							continue
+						}
+						if len(mocks) != 1 {
+							t.Fatalf("%s: recorded %d mocks, want the one exchange, as far as the app read it", order.name, len(mocks))
+						}
+						wantStoppedReading(t, mocks[0], shape.body, shape.sent)
 					}
-					if len(mocks) != 1 {
-						t.Fatalf("%s: recorded %d mocks, want the one exchange, as far as the app read it", order.name, len(mocks))
-					}
-					wantStoppedReading(t, mocks[0], shape.body, shape.sent)
 				}
 			})
 		}

@@ -62,9 +62,19 @@ func appRead(t *testing.T, app net.Conn) (string, error) {
 }
 
 // awaitPeerEnd waits until the relay has read dir's end of the connection
-// (Session.PeerEnded), so a close of the other side that follows is the
-// second end, as an application's reaction to an end the relay forwarded it
-// is: the relay marks an end before it forwards it.
+// (Session.PeerEnded) and handed it on, so a close of the other side that
+// follows is the second end, as an application's reaction to an end the
+// relay forwarded it is.
+//
+// The destination's end is marked before the relay looks at the client's
+// socket (Relay.destEndRead) and forwards it, so a client close that comes
+// between the mark and that look is a close before the destination's end
+// reached the client, which the client's own end judges
+// (clientEndJudges;
+// TestRecordV2_ThroughTheRelayAnAppThatClosedBeforeTheUpstreamsEndReachedItJudgesTheCall).
+// An application can react only to an end it has read, so for the
+// destination's end the wait ends once the application has read it: the
+// relay's FIN (io.EOF) or its reset.
 func awaitPeerEnd(t *testing.T, c *relayedConn, dir fakeconn.Direction) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -73,6 +83,12 @@ func awaitPeerEnd(t *testing.T, c *relayedConn, dir fakeconn.Direction) {
 			t.Fatalf("the relay did not read the end of side %d within 10s", dir)
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if dir != fakeconn.FromDest {
+		return
+	}
+	if _, err := appRead(t, c.app); err != io.EOF && !neterr.IsConnReset(err) {
+		t.Fatalf("the application's read ended with %v, want the end the relay forwarded (EOF or a reset)", err)
 	}
 }
 
