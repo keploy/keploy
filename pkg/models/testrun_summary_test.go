@@ -7,6 +7,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 )
 
+const legacyOpQuery wiremessage.OpCode = 2004 // OP_QUERY
+
 func mongoSummaryMock(message interface{}, metadata map[string]string) *Mock {
 	return mongoSummaryMockWithOpcode(wiremessage.OpMsg, message, metadata)
 }
@@ -125,7 +127,7 @@ func TestMockSummaryDerivesMongoOperationFromLegacyQuery(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mock := mongoSummaryMockWithOpcode(wiremessage.OpQuery, tc.msg, nil)
+			mock := mongoSummaryMockWithOpcode(legacyOpQuery, tc.msg, nil)
 			if got := MockSummaryFromSpec(mock); got != tc.want {
 				t.Fatalf("summary = %q, want %q", got, tc.want)
 			}
@@ -179,7 +181,7 @@ func TestMockSummaryFallsBackToBareMongoKind(t *testing.T) {
 		{name: "garbage section", mock: mongoSummaryMock(&MongoOpMessage{Sections: []string{"not a document"}}, nil)},
 		{name: "no message", mock: mongoSummaryMock(nil, nil)},
 		{name: "typed nil op_msg", mock: mongoSummaryMock(nilOpMsg, nil)},
-		{name: "typed nil op_query", mock: mongoSummaryMockWithOpcode(wiremessage.OpQuery, nilOpQuery, nil)},
+		{name: "typed nil op_query", mock: mongoSummaryMockWithOpcode(legacyOpQuery, nilOpQuery, nil)},
 		{name: "empty bson", mock: mongoSummaryMock(&MongoOpMessage{Sections: []string{emptyBSON}}, nil)},
 		{name: "empty bson key", mock: mongoSummaryMock(&MongoOpMessage{Sections: []string{emptyKeyBSON}}, nil)},
 		{name: "invalid first bson key stops before valid key", mock: mongoSummaryMock(&MongoOpMessage{Sections: []string{emptyKeyBeforeValidBSON}}, nil)},
