@@ -540,15 +540,35 @@ func (h *goTCPIngressHook) acceptIngress(ctx context.Context, listener net.Liste
 		}
 		_ = listener.Close()
 	}()
+	var pause time.Duration
+	warned := false
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		clientConn, err := listener.Accept()
 		if err != nil {
-			logger.Debug("Stopping ingress accept loop.", zap.Error(err))
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
+				return
+			}
+			if ingressAcceptCanRecover(err) {
+				pause = ingressAcceptRetryPause(pause)
+				if !warned {
+					warned = true
+					logger.Warn("keploy's ingress forwarder hit a temporary accept error; retrying with backoff",
+						zap.Uint16("port", origPort), zap.Duration("retry_delay", pause), zap.Error(err))
+				}
+				if !ingressAcceptRetryWait(ctx, pause) {
+					return
+				}
+				continue
+			}
+			logger.Error("keploy's ingress forwarder stopped accepting connections on the application's port; recording has stopped on this port",
+				zap.Uint16("port", origPort), zap.Error(err))
 			return
 		}
+		pause = 0
 		if ctx.Err() != nil {
 			_ = clientConn.Close()
 			return
@@ -557,6 +577,45 @@ func (h *goTCPIngressHook) acceptIngress(ctx context.Context, listener net.Liste
 		go func(cc net.Conn) {
 			h.pm.handleConnection(ctx, cc, newAppAddr, logger, h.pm.tcChan, sem, origPort)
 		}(clientConn)
+	}
+}
+
+// ingressAcceptCanRecover reports whether an Accept error on a live forwarder
+// is temporary (resource exhaustion such as EMFILE/ENFILE/ENOBUFS/ENOMEM, or
+// an error reporting Temporary() == true) and worth retrying with backoff.
+func ingressAcceptCanRecover(err error) bool {
+	if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.ENOBUFS) || errors.Is(err, syscall.ENOMEM) {
+		return true
+	}
+	var te interface{ Temporary() bool }
+	return errors.As(err, &te) && te.Temporary()
+}
+
+// ingressAcceptRetryPause returns the backoff pause before the next Accept
+// retry after a temporary error: 5 ms, doubling each time up to 1 s, matching
+// net/http's Server.Serve backoff.
+func ingressAcceptRetryPause(last time.Duration) time.Duration {
+	if last == 0 {
+		return 5 * time.Millisecond
+	}
+	if last *= 2; last > time.Second {
+		return time.Second
+	}
+	return last
+}
+
+// ingressAcceptRetryWait waits out d before retrying Accept, returning false
+// immediately if ctx ends first. A variable so tests can observe backoff steps
+// deterministically without sleeping.
+var ingressAcceptRetryWait = func(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
