@@ -41,20 +41,27 @@ func until(cond func() bool) bool {
 // passed does. The deadline the parser sets next has passed too, so the
 // socket's own read times out alike. With more, the first read after the
 // parser's look at what the socket holds (UnreadBytes, which asks through
-// NetConn) and the deadline it sets then is held too, until the socket holds
-// more than four reads (4 x ReadChunkSize) beyond what it held at that
-// deadline (seen), then times out without reading: those bytes arrived as
-// that read took. after counts the bytes read from there. idle counts the
-// reads after the look, before the parser's next answer, that waited and
-// timed out with nothing in the socket (the round after that answer waits
-// on an empty socket for the next request, as it should; a read whose
-// deadline had passed when it began did not wait), and early the reads
+// NetConn) and the deadline it reads on with then is held too, until the
+// socket holds more than four reads (4 x ReadChunkSize) beyond what it held
+// at that deadline (seen), then times out without reading: those bytes
+// arrived as that read took. after counts the bytes read from there. A
+// deadline set past the look is one the parser reads on with when it is
+// later than the look (lookAt, readsOn): one window from when it is set,
+// where the one it reads what the layers above the socket hold with passed
+// long ago. The clock as the deadline is set cannot tell them apart: a
+// parser held past the deadline it has just set reads on with one that has
+// passed by then. With lateReadOn, the parser is held so: each read-on
+// deadline it sets before the held read returns only once it has passed.
+// idle counts the reads after the look, before the parser's next answer, that
+// waited and timed out with nothing in the socket (the round after that
+// answer waits on an empty socket for the next request, as it should; a read
+// whose deadline had passed when it began did not wait), and early the reads
 // before the parser's first answer (its first Write). With deadlineErr, no
 // read deadline can be set once the parser looked; with pastOnly too, only
-// one that has passed when it is set (the one the parser reads what the
-// layers above the socket hold with). With eof, the read past the
-// hold that empties the socket returns its bytes with io.EOF, as a read that
-// meets the application's close does; reads after it return io.EOF, and
+// the one the parser reads what the layers above the socket hold with, not
+// one it reads on with (readsOn). With eof, the read past the hold that
+// empties the socket returns its bytes with io.EOF, as a read that meets the
+// application's close does; reads after it return io.EOF, and
 // deadlinesAfterEOF counts the read deadlines set after it. With wrote, the
 // bytes the application has written, writtenAtMore is what it had written
 // when the second hold ended. With piece, the reads past the hold go through
@@ -63,6 +70,7 @@ type heldPast struct {
 	net.Conn
 	cut, rest   int
 	more        bool
+	lateReadOn  bool
 	deadlineErr error
 	pastOnly    bool
 	eof         bool
@@ -88,6 +96,8 @@ type heldPast struct {
 	writtenAtMore     int64
 	// deadline: the read deadline last set.
 	deadline time.Time
+	// lookAt: when the parser looked (phase 3).
+	lookAt time.Time
 	// answered: the parser has written its first answer; repliedAfterLook:
 	// an answer since its look.
 	answered, repliedAfterLook bool
@@ -107,15 +117,21 @@ func (c *heldPast) Write(p []byte) (int, error) {
 func (c *heldPast) NetConn() net.Conn {
 	c.mu.Lock()
 	if c.phase == 2 {
-		c.phase = 3
+		c.phase, c.lookAt = 3, time.Now()
 	}
 	c.mu.Unlock()
 	return c.Conn
 }
 
+// readsOn says whether t, a read deadline the parser sets once it looked, is
+// one it reads on with: later than its look. c.mu is held.
+func (c *heldPast) readsOn(t time.Time) bool {
+	return c.phase >= 3 && t.After(c.lookAt)
+}
+
 func (c *heldPast) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
-	refused := c.phase >= 3 && c.deadlineErr != nil && (!c.pastOnly || !t.After(time.Now()))
+	refused := c.phase >= 3 && c.deadlineErr != nil && (!c.pastOnly || !c.readsOn(t))
 	if c.eofRead {
 		c.deadlinesAfterEOF++
 	}
@@ -125,8 +141,14 @@ func (c *heldPast) SetReadDeadline(t time.Time) error {
 	}
 	err := c.Conn.SetReadDeadline(t)
 	c.mu.Lock()
+	late := c.phase == 3 && c.more && c.lateReadOn && c.readsOn(t)
+	c.mu.Unlock()
+	if late && !until(func() bool { return !t.After(time.Now()) }) {
+		return errors.New("the read-on deadline never passed")
+	}
+	c.mu.Lock()
 	c.deadline = t
-	if c.phase == 3 && c.more && t.After(time.Now()) {
+	if c.phase == 3 && c.more && c.readsOn(t) {
 		c.seen, c.phase = pUtil.UnreadBytes(c.Conn), 4
 	}
 	c.mu.Unlock()
@@ -309,51 +331,63 @@ func TestAnEndReadAsTheParserReadsOnEndsTheParser(t *testing.T) {
 // the parser read on), within one read of them, and the request misses. A
 // parser that looked again would read on to what the socket held then, and
 // one that counted what arrived as its held read took, more than four reads
-// of bytes, as making the request longer would read on through them.
+// of bytes, as making the request longer would read on through them. A
+// parser held past the deadline it reads on with, as it sets it, reads on
+// the same.
 func TestAHeldRequestWhoseBytesNeverPauseEndsAfterWhatTheSocketHeld(t *testing.T) {
-	eachSwitch(t, func(t *testing.T) {
-		app, proxySide := tcpPair(t)
-		if tc, ok := proxySide.(*net.TCPConn); ok {
-			_ = tc.SetReadBuffer(4 << 20)
-		}
-		var written atomic.Int64
-		conn := &heldPast{Conn: proxySide, cut: 1000, rest: 1, more: true, wrote: written.Load}
-		done := make(chan error, 1)
-		go func() {
-			done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, bigStore(), models.OutgoingOptions{})
-		}()
-		readAnswer(t, app, "PONG")
-		stop, wrote := make(chan struct{}), make(chan struct{})
-		go func() {
-			defer close(wrote)
-			chunk := bytes.Repeat([]byte("Z"), 2<<10)
-			for {
-				select {
-				case <-stop:
-					return
-				default:
+	for _, c := range []struct {
+		name string
+		late bool
+	}{
+		{"read on within its deadline", false},
+		{"held past the deadline it reads on with", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			eachSwitch(t, func(t *testing.T) {
+				app, proxySide := tcpPair(t)
+				if tc, ok := proxySide.(*net.TCPConn); ok {
+					_ = tc.SetReadBuffer(4 << 20)
 				}
-				n, err := app.Write(chunk)
-				written.Add(int64(n))
-				if err != nil {
-					return
+				var written atomic.Int64
+				conn := &heldPast{Conn: proxySide, cut: 1000, rest: 1, more: true, lateReadOn: c.late, wrote: written.Load}
+				done := make(chan error, 1)
+				go func() {
+					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, bigStore(), models.OutgoingOptions{})
+				}()
+				readAnswer(t, app, "PONG")
+				stop, wrote := make(chan struct{}), make(chan struct{})
+				go func() {
+					defer close(wrote)
+					chunk := bytes.Repeat([]byte("Z"), 2<<10)
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						n, err := app.Write(chunk)
+						written.Add(int64(n))
+						if err != nil {
+							return
+						}
+						time.Sleep(2 * time.Millisecond)
+					}
+				}()
+				t.Cleanup(func() { close(stop); _ = app.Close(); <-wrote })
+				awaitMiss(t, done)
+				ended := written.Load()
+				conn.mu.Lock()
+				phase, after, seen, atMore := conn.phase, conn.after, conn.seen, conn.writtenAtMore
+				conn.mu.Unlock()
+				if phase != 5 {
+					t.Fatalf("the parser's holds ended at phase %d; want both (5)", phase)
 				}
-				time.Sleep(2 * time.Millisecond)
-			}
-		}()
-		t.Cleanup(func() { close(stop); _ = app.Close(); <-wrote })
-		awaitMiss(t, done)
-		ended := written.Load()
-		conn.mu.Lock()
-		phase, after, seen, atMore := conn.phase, conn.after, conn.seen, conn.writtenAtMore
-		conn.mu.Unlock()
-		if phase != 5 {
-			t.Fatalf("the parser's holds ended at phase %d; want both (5)", phase)
-		}
-		if during := ended - atMore; int64(after) > seen+during+pUtil.ReadChunkSize {
-			t.Fatalf("the parser read %d bytes after its look; the socket held %d then, and %d were written as it read on", after, seen, during)
-		}
-	})
+				if during := ended - atMore; int64(after) > seen+during+pUtil.ReadChunkSize {
+					t.Fatalf("the parser read %d bytes after its look; the socket held %d then, and %d were written as it read on", after, seen, during)
+				}
+			})
+		})
+	}
 }
 
 // heldAtARoundsEnd is the proxy's end of a TCP connection whose parser is held
