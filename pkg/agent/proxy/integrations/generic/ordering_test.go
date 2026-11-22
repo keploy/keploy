@@ -190,11 +190,13 @@ func TestV2_PipelinedRequestsStayInOneExchange(t *testing.T) {
 	assertExchange(t, got[0], []string{"MULTI\r\n", "EXEC\r\n"}, []string{"+OK\r\n"})
 }
 
-// A response split across chunks keeps its legacy shape: the head chunk
-// is the mock's response and the tail chunks are dropped. The next
-// request was read after every one of them, so nothing here looks like a
-// late push and the split rule must stay out of it.
-func TestV2_MultiChunkResponseStillDropsItsTail(t *testing.T) {
+// A response split across chunks is recorded whole, one response buffer a
+// chunk, as the legacy encoder records it: the next request ends the
+// answer, and its ResTimestampMock is when the relay's write of the last
+// chunk returned. The next request was read after every one of them, so
+// nothing here looks like a late push and the split rule must stay out of
+// it.
+func TestV2_MultiChunkResponseIsRecordedWhole(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
@@ -208,8 +210,11 @@ func TestV2_MultiChunkResponseStillDropsItsTail(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected 2 mocks, got %d", len(got))
 	}
-	assertExchange(t, got[0], []string{"GET big\r\n"}, []string{"head"})
+	assertExchange(t, got[0], []string{"GET big\r\n"}, []string{"head", "tail"})
 	assertExchange(t, got[1], []string{"GET small\r\n"}, []string{"+OK\r\n"})
+	if !got[0].Spec.ResTimestampMock.Equal(time.Unix(1002, 0)) {
+		t.Errorf("ResTimestampMock = %v, want the last chunk's %v", got[0].Spec.ResTimestampMock, time.Unix(1002, 0))
+	}
 }
 
 // The mirror image: the relay can be descheduled between forwarding a
@@ -257,8 +262,8 @@ func TestV2_UnorderedChunksKeepArrivalOrder(t *testing.T) {
 // What the rules do NOT claim.
 //
 // The parser pairs by direction transitions, so bytes the server sent on
-// its own — an unsolicited push, the tail of a reply whose head was
-// already emitted — are attributed to whatever request precedes them.
+// its own — an unsolicited push, a chunk sent after the request it answers
+// — are attributed to whatever request precedes them.
 // That is wrong, and it is wrong BEFORE any of this: the in-order stream
 // produces exactly the same attribution. These tests pin that equality,
 // because it is the honest scope of the fix. Arrival order stops
@@ -299,7 +304,7 @@ func TestV2_ServerPushIsPairedTheSameEitherWay(t *testing.T) {
 	// And state it outright, so a future reader sees what is being
 	// accepted rather than inferring it from an equality.
 	assertExchange(t, teedLate[0], []string{"REQ0"}, []string{"PUSH"})
-	assertExchange(t, teedLate[1], []string{"REQ1"}, []string{"D0"})
+	assertExchange(t, teedLate[1], []string{"REQ1"}, []string{"D0", "D1"})
 }
 
 // A response captured before even the FIRST request held cannot be that
@@ -308,7 +313,8 @@ func TestV2_ServerPushIsPairedTheSameEitherWay(t *testing.T) {
 // were mis-paired before the rule existed, because an opaque parser has
 // nowhere else to put a chunk the server sent unbidden — but the
 // recording is left exactly as the un-split parser wrote it instead of
-// being cut on a contradiction.
+// being cut on a contradiction: one exchange, with every chunk of the
+// answer after it.
 func TestV2_ResponseOlderThanEveryRequestDoesNotSplit(t *testing.T) {
 	t.Parallel()
 
@@ -322,7 +328,7 @@ func TestV2_ResponseOlderThanEveryRequestDoesNotSplit(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected the exchange to be left whole (1 mock), got %d", len(got))
 	}
-	assertExchange(t, got[0], []string{"REQ0", "REQ1"}, []string{"STALE"})
+	assertExchange(t, got[0], []string{"REQ0", "REQ1"}, []string{"STALE", "D1"})
 }
 
 // One late response per exchange is the common case; three in a row is
@@ -392,15 +398,13 @@ func TestV2_IncompleteCaptureIsNotSplitIntoASurvivor(t *testing.T) {
 	}
 }
 
-// A reply the server splits across chunks lands as its head alone —
-// that is the shape every generic mock has, and replay writes every
-// response buffer in a mock back to the client. So when a request is
-// teed in behind a reply that has already delivered two chunks, the
-// pairing takes the head and drops the tail, which is exactly what the
-// same bytes in wire order produce. Carrying both in would make the
-// replayed bytes depend on how the relay's goroutines were scheduled
-// while recording.
-func TestV2_AdoptTakesTheHeadChunkOnlyLikeWireOrder(t *testing.T) {
+// A reply the server splits across chunks is recorded whole, and replay
+// writes every response buffer in a mock back to the client. So when a
+// request is teed in behind a reply that has already delivered two
+// chunks, the pairing takes both, which is exactly what the same bytes in
+// wire order produce: the replayed bytes do not depend on how the relay's
+// goroutines were scheduled while recording.
+func TestV2_AdoptTakesTheWholeAnswerLikeWireOrder(t *testing.T) {
 	t.Parallel()
 
 	var (
@@ -426,11 +430,12 @@ func TestV2_AdoptTakesTheHeadChunkOnlyLikeWireOrder(t *testing.T) {
 	if len(teedLate) != 1 {
 		t.Fatalf("request teed late: expected 1 mock, got %d", len(teedLate))
 	}
-	assertExchange(t, inOrder[0], []string{"GET big"}, []string{"head"})
-	assertExchange(t, teedLate[0], []string{"GET big"}, []string{"head"})
-	if !teedLate[0].Spec.ResTimestampMock.Equal(headSeen) {
-		t.Errorf("ResTimestampMock = %v, want the head chunk's %v",
-			teedLate[0].Spec.ResTimestampMock, headSeen)
+	assertExchange(t, inOrder[0], []string{"GET big"}, []string{"head", "tail"})
+	assertExchange(t, teedLate[0], []string{"GET big"}, []string{"head", "tail"})
+	for name, m := range map[string]*models.Mock{"wire order": inOrder[0], "request teed late": teedLate[0]} {
+		if !m.Spec.ResTimestampMock.Equal(tailSeen) {
+			t.Errorf("%s: ResTimestampMock = %v, want the last chunk's %v", name, m.Spec.ResTimestampMock, tailSeen)
+		}
 	}
 }
 
@@ -459,7 +464,10 @@ func TestV2_UnorderedRequestDoesNotAdoptAHeldResponse(t *testing.T) {
 // records an answer that request never got, and nothing downstream
 // catches it — generic mocks are session-scoped, so replay's window
 // filter takes them before it would compare their timestamps. Wire
-// order drops the tail as an orphan; so does this.
+// order records the tail with its exchange; teed late, the split has
+// handed that exchange on with its head before the tail comes, so the
+// tail is left out with its span and the test case over it with it
+// (TestV2_TheTailOfTheAnswerBeforeASplitIsLeftOut): never paired with B.
 func TestV2_CarriedHalfDoesNotPairWithAnOlderTail(t *testing.T) {
 	t.Parallel()
 
@@ -524,7 +532,7 @@ func TestV2_TimesDoNotOrderTheDirections(t *testing.T) {
 	if len(adopt) != 1 {
 		t.Fatalf("adopt: expected 1 mock, got %d", len(adopt))
 	}
-	assertExchange(t, adopt[0], []string{"A"}, []string{"r"})
+	assertExchange(t, adopt[0], []string{"A"}, []string{"r", "r2"})
 }
 
 // TestV2_AReplyStampedAfterTheNextRequestStillEndsItsExchange is CI's

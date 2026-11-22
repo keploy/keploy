@@ -46,6 +46,8 @@ var keployBPFProgNames = map[string]ebpf.AttachType{
 	"k_ready_bind6":    ebpf.AttachCGroupInet6Bind,
 	"k_ready_connect4": ebpf.AttachCGroupInet4Connect,
 	"k_ready_connect6": ebpf.AttachCGroupInet6Connect,
+	// Attached in every mode (hooks.go).
+	"k_app_conn_release": ebpf.AttachCgroupInetSockRelease,
 }
 
 // kernelProgName is the name the kernel keeps for a program loaded as name:

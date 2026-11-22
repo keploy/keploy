@@ -4,6 +4,7 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -193,4 +194,17 @@ func SetOwnProcessGroup(cmd *exec.Cmd) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
+}
+
+// KillOwnProcessGroup kills cmd (cmd.Process.Kill), for an exec.Cmd's
+// Cancel: a process group here (SetOwnProcessGroup) is a console's, which
+// takes no kill of its own. TerminateProcess refuses (access denied) a
+// process that has exited and has not been waited for yet: that is
+// os.ErrProcessDone here, not a process keploy may not signal.
+func KillOwnProcessGroup(cmd *exec.Cmd) error {
+	err := cmd.Process.Kill()
+	if errors.Is(err, os.ErrPermission) {
+		return os.ErrProcessDone
+	}
+	return err
 }

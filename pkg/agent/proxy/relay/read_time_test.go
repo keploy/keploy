@@ -517,6 +517,11 @@ func TestWatermark_ARecordHeldOverAReadUnderTheTLSLayerIsStampedAfterIt(t *testi
 		end = time.Now()
 		return w.Settled("", "", end.Add(-time.Second), end)
 	})
+	// What follows a window's end happens once the clock has passed it, as
+	// the ingress has it (waitPastYield) before the client sees a response's
+	// end. Windows' clock moves on only at its tick: without the wait the
+	// read below would take the very instant the window ends at.
+	waitClockPast(t, end)
 	_ = h.clientApp.Close() // the read under the layer ends with EOF
 
 	c := nextChunk(t, chunks)

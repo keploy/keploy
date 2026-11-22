@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -619,14 +621,114 @@ func TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone(t *testing.T) {
 	tt.close()
 	tt.waitDone()
 
+	// The stream of a consumer that is gone is left open (endStream), so
+	// this takes what out holds without waiting for its end.
 	delivered := 0
-	for range tt.readCh() {
+	for len(tt.readCh()) > 0 {
+		<-tt.readCh()
 		delivered++
 	}
 	if delivered != n {
 		t.Errorf("delivered %d of %d chunks that out had room for; without the "+
 			"non-blocking pre-try the select coin-flips against a closed consumerGone "+
 			"and discards deliverable data", delivered, n)
+	}
+}
+
+// A stream whose reader was closed before the stream's end is left open, so
+// its reader reads fakeconn.ErrClosed after what it was handed, however late
+// it gets there: the session's close, not the connection's end. A reader
+// closed after the end, as the relay's teardown closes it, reads io.EOF
+// (tee.endStream).
+func TestTee_StreamClosedBeforeItsEndReadsTheClose(t *testing.T) {
+	t.Parallel()
+	for _, closedFirst := range []bool{true, false} {
+		tt := newTee(fakeconn.FromDest, 1<<20, 4, testStallGrace, nil, nil)
+		fc := fakeconn.New(tt.readCh(), nil, nil)
+		tt.start(fc.Done())
+		tt.push(mkChunk("answer"))
+		if closedFirst {
+			_ = fc.Close()
+		}
+		tt.close()
+		tt.waitDone()
+		if !closedFirst {
+			_ = fc.Close()
+		}
+		if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "answer" {
+			t.Errorf("closed first %v: read %q, %v; want the chunk delivered before the end", closedFirst, c.Bytes, err)
+		}
+		want := io.EOF
+		if closedFirst {
+			want = fakeconn.ErrClosed
+		}
+		if _, err := fc.ReadChunk(); !errors.Is(err, want) {
+			t.Errorf("closed first %v: the stream's end read %v, want %v", closedFirst, err, want)
+		}
+	}
+}
+
+// A reader closed after tee.close but before the drain's end (the relay's
+// final flush, which a session abort can land in) was closed before the
+// stream's end too, so it reads fakeconn.ErrClosed after what it was handed.
+// The stream's end is decided as the drain returns, not when close is called
+// (tee.endStream). out has one slot and the drain holds two more chunks, so
+// it cannot end before the reader's close; the hour-long stall bound cannot
+// end it either.
+func TestTee_StreamClosedDuringTheFinalFlushReadsTheClose(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 1, time.Hour, nil, nil)
+	fc := fakeconn.New(tt.readCh(), nil, nil)
+	tt.start(fc.Done())
+	for _, s := range []string{"a", "b", "c"} {
+		if !tt.push(mkChunk(s)) {
+			t.Fatalf("push %q refused", s)
+		}
+	}
+	tt.close()
+	_ = fc.Close()
+	tt.waitDone()
+	if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "a" {
+		t.Fatalf("read %q, %v; want the chunk delivered before the close", c.Bytes, err)
+	}
+	if _, err := fc.ReadChunk(); !errors.Is(err, fakeconn.ErrClosed) {
+		t.Errorf("a reader closed during the final flush read %v at the stream's end, want %v", err, fakeconn.ErrClosed)
+	}
+}
+
+// The relay's teardown waits on done and then closes the FakeConns, so the
+// drain decides the stream's end before it signals done: a close that waited
+// on done finds the stream ended, and its reader reads io.EOF after what it
+// was handed. The teardown's one close lands just before the stream's end is
+// decided if done is already signalled there, where a close that waited on
+// done could land, and after waitDone otherwise. It runs once
+// (sync.OnceFunc), and a second call returns only once the first has closed
+// the reader, so an end decided after done reads that close
+// (fakeconn.ErrClosed) on every run.
+func TestTee_CloseThatWaitedOnDoneFindsTheStreamEnded(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 4, testStallGrace, nil, nil)
+	fc := fakeconn.New(tt.readCh(), nil, nil)
+	teardownClose := sync.OnceFunc(func() { _ = fc.Close() })
+	tt.endingStream = func() {
+		select {
+		case <-tt.done:
+			teardownClose()
+		default:
+		}
+	}
+	tt.start(fc.Done())
+	if !tt.push(mkChunk("answer")) {
+		t.Fatal("push refused")
+	}
+	tt.close()
+	tt.waitDone()
+	teardownClose()
+	if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "answer" {
+		t.Fatalf("read %q, %v; want the chunk delivered before the end", c.Bytes, err)
+	}
+	if _, err := fc.ReadChunk(); !errors.Is(err, io.EOF) {
+		t.Errorf("a reader closed after done read %v at the stream's end, want %v: the end was decided after done", err, io.EOF)
 	}
 }
 
@@ -637,37 +739,58 @@ func TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone(t *testing.T) {
 // once a connection has carried its cap worth of bytes in total, every further
 // push is refused with per_conn_cap and the connection records nothing for the
 // rest of its life — however little is actually queued.
+//
+// Each push waits for the consumer to receive a chunk once a cap's worth is
+// out (an event, not a pause): drain takes a chunk's bytes off qBytes before it
+// hands the chunk over, so no more than the cap is ever queued and every push
+// must be admitted. Pacing the pushes by a sleep instead raced the drain
+// goroutine: on a loaded host it went unscheduled for the three sleeps a
+// 30-byte cap allows, the fourth push overflowed the cap as it should, and the
+// test called the instantaneous bound cumulative.
 func TestDrainingAChunkReturnsCapacity(t *testing.T) {
 	t.Parallel()
 	const chunk = "0123456789" // 10 bytes
-	// Room for ~3 chunks at once, but far less than the total we will push.
-	tt, rec, _ := newTestTeeWithConsumer(t, 3*int64(len(chunk)), 64)
+	const capChunks = 3
+	// Room for capChunks chunks at once, far less than the total we will push.
+	tt, rec, _ := newTestTeeWithConsumer(t, capChunks*int64(len(chunk)), 64)
 
-	// Drain continuously so the queue never accumulates.
+	const total = 200 // 2000 bytes through a 30-byte cap
+	received := make(chan struct{}, total)
 	drained := make(chan int, 1)
 	go func() {
 		n := 0
 		for range tt.readCh() {
 			n++
+			received <- struct{}{}
 		}
 		drained <- n
 	}()
 
-	const total = 200 // 2000 bytes through a 30-byte cap
-	sent := 0
+	hung := time.After(time.Minute) // only turns a hang into a failure
+	sent, out := 0, 0
 	for i := 0; i < total; i++ {
-		if tt.push(mkChunk(chunk)) {
-			sent++
+		if out == capChunks {
+			select {
+			case <-received:
+				out--
+			case <-hung:
+				t.Fatalf("the consumer received %d of the %d chunks admitted: drain stopped delivering", sent-out, sent)
+			}
 		}
-		time.Sleep(time.Millisecond) // let the drain keep up
+		if !tt.push(mkChunk(chunk)) {
+			break
+		}
+		sent++
+		out++
 	}
 	tt.close()
 	got := <-drained
 
-	if sent < total/2 {
-		t.Errorf("only %d of %d pushes were admitted through a %d-byte cap (drops=%v): capacity is "+
-			"not being returned when a chunk drains, so the cap has become cumulative rather than "+
-			"instantaneous and the connection stops recording", sent, total, 3*len(chunk), rec.snapshot())
+	if sent != total {
+		t.Errorf("push %d of %d was refused with at most %d bytes not yet received, within the %d-byte cap "+
+			"(drops=%v): capacity is not being returned when a chunk drains, so the cap has become "+
+			"cumulative rather than instantaneous and the connection stops recording",
+			sent+1, total, out*len(chunk), capChunks*len(chunk), rec.snapshot())
 	}
 	if got != sent {
 		t.Errorf("delivered %d but admitted %d", got, sent)

@@ -9,11 +9,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -95,12 +97,15 @@ func nxdomainResolver(t *testing.T) *net.Resolver {
 }
 
 // A failed test request is classified by its error, never by its text, by
-// three rules. Each error here is the real one, provoked.
+// three rules. Each error here is the real one, provoked; the write net/http's
+// transport makes after its own close of the connection, which a select inside
+// it picks only some of the time, is made in that order by
+// writeAfterCloseTransport.
 //
 // IsAppConnectionError is the one rule for APP_CONNECTION_ERROR: a test
 // request that got no answer at all because the connection to the app failed.
 // A drop counts in every shape net/http reports it in (the docker-proxy drop at
-// a port no app listens behind is two of them), and so does a gRPC call whose
+// a port no app listens behind is three of them), and so does a gRPC call whose
 // connection fails, dropped or answered by something that does not speak
 // HTTP/2; a timeout, a cancel and a close part-way through an answer do not.
 //
@@ -114,15 +119,7 @@ func nxdomainResolver(t *testing.T) *net.Resolver {
 // An error that only says "connection refused", or "context deadline
 // exceeded", in its text is none of them.
 func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
-	refusedAddr := func() string {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := ln.Addr().String()
-		_ = ln.Close()
-		return addr
-	}
+	refusedAddr := func() string { return testnet.RefusedAddr(t, "tcp") }
 
 	for _, tt := range []struct {
 		name string
@@ -140,7 +137,28 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 			return post(t, context.Background(), 5*time.Second, "http://"+refusedAddr()+"/x")
 		}, true, false, false, false},
 		{"dropped before the request was on the connection (errServerClosedIdle)", func(t *testing.T) error {
-			return postToAServerThatClosesFirst(t)
+			err := postToAServerThatClosesFirst(t)
+			var ue *url.Error
+			if !errors.As(err, &ue) || ue.Err.Error() != netHTTPServerClosedIdle {
+				t.Fatalf("got %v; want the errServerClosedIdle this case provokes", err)
+			}
+			return err
+		}, true, true, false, false},
+		{"dropped before the request was on the connection, and written to it after the transport closed it", func(t *testing.T) error {
+			err := postWrittenAfterTheTransportClosed(t, false)
+			var op *net.OpError
+			if !errors.As(err, &op) || op.Op != "write" || !errors.Is(op, net.ErrClosed) {
+				t.Fatalf("got %v; want the write's *net.OpError on the closed connection this case provokes", err)
+			}
+			return err
+		}, true, true, false, false},
+		{"dropped before the request was on the connection, and written to it after the transport closed it, over TLS", func(t *testing.T) error {
+			err := postWrittenAfterTheTransportClosed(t, true)
+			var op *net.OpError
+			if errors.As(err, &op) || !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("got %v; want the net.ErrClosed of a *tls.Conn written after its Close this case provokes", err)
+			}
+			return err
 		}, true, true, false, false},
 		{"dropped after the request was read (io.EOF)", func(t *testing.T) error {
 			addr := serveEachConn(t, func(c net.Conn) { readTheRequest(c); _ = c.Close() })
@@ -261,6 +279,9 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 		{"only the text of a timeout", func(*testing.T) error {
 			return errors.New(`Post "http://localhost:8080/x": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`)
 		}, false, false, false, false},
+		{"only the text of a write on a closed connection", func(*testing.T) error {
+			return errors.New(`Post "http://127.0.0.1:8080/echo": write tcp 127.0.0.1:50404->127.0.0.1:8080: use of closed network connection`)
+		}, false, false, false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.err(t)
@@ -307,24 +328,32 @@ func grpcCallToASilentServer(t *testing.T, ctx context.Context) error {
 // io.EOF: behind errors.Join and a fmt.Errorf with two %w, as well as behind
 // one Unwrap.
 func TestADropIsClassifiedAnywhereInTheErrorTree(t *testing.T) {
-	closedIdle := postToAServerThatClosesFirst(t)
 	other := errors.New("the app's port 8097 cannot be reached from the host")
-	for _, tt := range []struct {
+	for _, drop := range []struct {
 		name string
 		err  error
 	}{
-		{"errors.Join", errors.Join(other, closedIdle)},
-		{"two %w", fmt.Errorf("%w: %w", other, closedIdle)},
-		{"%w inside errors.Join", errors.Join(other, fmt.Errorf("replay: %w", closedIdle))},
+		{"errServerClosedIdle", postToAServerThatClosesFirst(t)},
+		{"written after the transport closed it", postWrittenAfterTheTransportClosed(t, false)},
+		{"written after the transport closed it, over TLS", postWrittenAfterTheTransportClosed(t, true)},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if !IsTransportConnReset(tt.err) {
-				t.Errorf("IsTransportConnReset(%v) = false", tt.err)
-			}
-			if !IsAppConnectionError(tt.err) {
-				t.Errorf("IsAppConnectionError(%v) = false", tt.err)
-			}
-		})
+		for _, tt := range []struct {
+			name string
+			err  error
+		}{
+			{"errors.Join", errors.Join(other, drop.err)},
+			{"two %w", fmt.Errorf("%w: %w", other, drop.err)},
+			{"%w inside errors.Join", errors.Join(other, fmt.Errorf("replay: %w", drop.err))},
+		} {
+			t.Run(drop.name+"/"+tt.name, func(t *testing.T) {
+				if !IsTransportConnReset(tt.err) {
+					t.Errorf("IsTransportConnReset(%v) = false", tt.err)
+				}
+				if !IsAppConnectionError(tt.err) {
+					t.Errorf("IsAppConnectionError(%v) = false", tt.err)
+				}
+			})
+		}
 	}
 	if joined := errors.Join(other, errors.New("timeout")); IsTransportConnReset(joined) || IsAppConnectionError(joined) {
 		t.Errorf("a tree with no drop in it is classified as one: %v", joined)

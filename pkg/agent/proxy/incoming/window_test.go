@@ -563,8 +563,8 @@ func TestHandleHttp1Connection_KeptExchangeRecordsAMockHeldForIt(t *testing.T) {
 // Every framing of a body: a chunked stream, which gives the synchronous lock
 // back at its headers; a response of a known length, which keeps it to the
 // end; and a body that ends when the app closes the connection (how a server
-// streams to an HTTP/1.0 client, and one way to send server-sent events),
-// whose last byte is that close, so a call made after its last data and before
+// sends a body of unknown length to an HTTP/1.0 client), whose last byte is
+// that close, so a call made after its last data and before
 // the close is the exchange's too. Synchronous: the real hooksUtils.Capture
 // resolves. Zero-copy: a hook that decides like the enterprise capture does.
 func TestHandleHttp1Connection_KeptExchangeRecordsAMockItMadeWhileSendingItsBody(t *testing.T) {
@@ -597,7 +597,7 @@ func TestHandleHttp1Connection_KeptExchangeRecordsAMockItMadeWhileSendingItsBody
 				}
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					call("before its response headers")
-					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Content-Type", "text/plain")
 					switch framing {
 					case "content-length":
 						w.Header().Set("Content-Length", strconv.Itoa(len(first)+len(last)))
@@ -900,7 +900,7 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 							}
 							next = call()
 							if shape == atOnceStream {
-								_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n8\r\ndata: 1\n\r\n"))
+								_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n8\r\ndata: 1\n\r\n"))
 								// After the ingress read the first's last byte (and
 								// its close), and this one's headers: past them.
 								if !wait(firstSent) || !wait(nextHeadersRead) {
@@ -1353,7 +1353,7 @@ func TestHandleHttp1Connection_SyncCallAfterAResponseEndsIsNotThatResponses(t *t
 								call(req.URL.Path)
 								if req.URL.Path == "/first" {
 									close(firstArrived)
-									_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n8\r\ndata: 1\n\r\n"))
+									_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n8\r\ndata: 1\n\r\n"))
 									if !wait(nextAnswered) {
 										return
 									}
@@ -1606,7 +1606,7 @@ func TestHandleHttp1Connection_SyncWindowYieldsAtItsLastByte(t *testing.T) {
 				case "/kept":
 					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
 				case "/stream":
-					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n8\r\ndata: 1\n\r\n"))
+					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n8\r\ndata: 1\n\r\n"))
 					if !wait(streamHeadersRead) {
 						return
 					}

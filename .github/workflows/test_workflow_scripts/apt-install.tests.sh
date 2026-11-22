@@ -84,16 +84,31 @@
 #   and rates pinned as above. With 2000, over that rate but under the bytes
 #   one slice receives, archive.ubuntu.com has to be put in front and the
 #   install succeed: the floor is held against the rate, not the bytes.
-# rewrite (ubuntu:22.04 and ubuntu:24.04, no network, apt-get shimmed out)
+# rewrite (ubuntu:22.04, ubuntu:24.04 and ubuntu:26.04, no network, apt-get
+# shimmed out)
 #   Fixture sources: exactly the .../ubuntu URIs on archive.ubuntu.com,
 #   security.ubuntu.com and their subdomains are rewritten, the mirror
 #   list is exact, a second run changes no file, and a re-run puts back a
 #   deleted or outdated list that the sources name. No file is changed at all
 #   with RUNNER_ENVIRONMENT=self-hosted, or on sources shaped like GitHub's
-#   hosted images, which already use a mirror list of their own. The entries
-#   the update and the install are given are exactly the Ubuntu ones, on the
-#   fixture and on the hosted shape, and the files with entries left out are
-#   named; CRLF line ends and disabled stanzas are read as apt reads them.
+#   hosted images, which already use a mirror list of their own: in Azure,
+#   where every Ubuntu entry names it, and in AWS (ubuntu-26.04), where the
+#   -security entry names a host instead, and the same in the one-line format.
+#   The list is the machine's whatever its path, and whichever source file
+#   names it: one at another path, and one named only from a .list file in
+#   sources.list.d, leave the sources as they are too.
+#   A list counts only when an Ubuntu entry apt reads names it and its
+#   mirrors are all Ubuntu: the image's list named only in a comment (a line
+#   of its own, or a comment line inside a deb822 stanza that is read) or a
+#   disabled stanza, or a list with another host in it, leaves the sources
+#   rewritten; the list of the helper is never one of the machine, so a
+#   source added after a run is rewritten by the next. With no sources.list
+#   at all, the deb822 files are read and rewritten. A source file root
+#   cannot read (a container without CAP_DAC_OVERRIDE) stops the helper
+#   before it changes any file. The entries the update and the install are
+#   given are exactly the Ubuntu ones, on the fixture and on the hosted
+#   shapes, and the files with entries left out are named; CRLF line ends
+#   and disabled stanzas are read as apt reads them.
 #   --all-sources and a self-hosted runner give apt no source options; with no
 #   Ubuntu entry at all the default run stops before apt.
 #   Then with a shim that outlasts its slice, which needs no mirror to be
@@ -407,8 +422,8 @@ in_ubuntu() {
   local rc=0 image="$1" log="$2" script="$3"
   shift 3
   docker run --rm --network "$net" --add-host "azure.archive.ubuntu.com:$stub_ip" \
-    --add-host "thirdparty.test:$stub_ip" "$@" -v "$helper:/h/apt-install.sh:ro" "$image" \
-    timeout 300 bash -c "exec 2>&1; $script" >"$log" || rc=$?
+    --add-host "thirdparty.test:$stub_ip" "$@" -v "$helper:/h/apt-install.sh:ro" -v "$here/hang_guard.sh:/h/hang_guard.sh:ro" "$image" \
+    bash /h/hang_guard.sh 300 bash -c "exec 2>&1; $script" >"$log" || rc=$?
   echo "$rc"
 }
 
@@ -591,7 +606,7 @@ rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
   fault slow-debs "$case-control"
   opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
   rc=0
-  timeout 45 apt-get $opts -y install jq || rc=$?
+  bash /h/hang_guard.sh 45 apt-get $opts -y install jq || rc=$?
   # apt alone leaves its last line as it was when it was stopped.
   echo
   echo "exit $rc"
@@ -600,7 +615,7 @@ rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
 [ "$rc" = 0 ] || fail "ubuntu:22.04: the slow-mirror case exited $rc"
 section "$log" control >"$work/slow-control"
 deb='jammy(-updates|-security)?/main amd64 (jq|libjq1|libonig5) '
-expect "$work/slow-control" "control: apt alone runs into the time limit" '^exit 124$'
+expect "$work/slow-control" "control: apt alone runs into the time limit" 'hang guard: still running after 45s'
 expect "$work/slow-control" "control: having asked azure" "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $deb"
 absent "$work/slow-control" "control: with no failed fetch to act on" '^(Ign|Err):'
 absent "$work/slow-control" "control: and no other mirror in its output" '^Get:[0-9]+ http://(archive|security)\.ubuntu\.com/'
@@ -805,12 +820,12 @@ rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
   fault slow-lists "$case-control"
   opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
   rc=0
-  timeout 45 apt-get $opts -y update || rc=$?
+  bash /h/hang_guard.sh 45 apt-get $opts -y update || rc=$?
   echo
   echo "exit $rc"'"$past_slow_lists" "${fallbacks_to_stub[@]}")"
 [ "$rc" = 0 ] || fail "ubuntu:22.04: the slow-lists case exited $rc"
 section "$log" control >"$work/lists-control"
-expect "$work/lists-control" "control: apt alone runs into the time limit on the update" '^exit 124$'
+expect "$work/lists-control" "control: apt alone runs into the time limit on the update" 'hang guard: still running after 45s'
 expect "$work/lists-control" "control: having asked azure for the lists" \
   "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu jammy InRelease"
 absent "$work/lists-control" "control: with no failed fetch to act on" '^(Ign|Err):'
@@ -927,7 +942,27 @@ for part in under over; do
 done
 show_log_if_failed "$log" "$started"
 
-# The offline case runs under both images: their awk (mawk) builds differ, and
+# Root without CAP_DAC_OVERRIDE cannot read a file of mode 000, so here a
+# source file the helper cannot filter is made. The helper has to stop on it
+# before it changes any file.
+# shellcheck disable=SC2016 # expands inside the container
+locked_script='
+set -euo pipefail
+rm -rf /etc/apt/sources.list.d/*
+printf "deb http://archive.ubuntu.com/ubuntu jammy main\n" >/etc/apt/sources.list
+printf "deb http://archive.ubuntu.com/ubuntu jammy universe\n" >/etc/apt/sources.list.d/locked.list
+chmod 000 /etc/apt/sources.list.d/locked.list
+if cat /etc/apt/sources.list.d/locked.list >/dev/null 2>&1; then echo "root can still read the locked file"; fi
+snap() { find /etc/apt -type f -exec stat -c "%n %i %.9Z %s" {} + | sort; }
+snap >/tmp/before
+rc=0
+bash /h/apt-install.sh hello || rc=$?
+echo "exit $rc"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "no change"; fi
+'
+
+# The offline case runs under three images: their awk (mawk) builds differ, and
 # the helper's entry filter and its mirror list reordering are awk.
 # shellcheck disable=SC2016 # expands inside the container
 rewrite_script='
@@ -1019,7 +1054,7 @@ deb [arch=amd64 ]http://archive.ubuntu.com/ubuntu jammy-proposed main
 deb http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ jammy-backports main
 deb https://security.ubuntu.com/ubuntu jammy-security main
 	deb	http://azure.archive.ubuntu.com/ubuntu	jammy	universe
-deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
+# deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
 deb mirror+file:/etc/apt/vendor-mirrors.txt jammy main
 deb http://ports.ubuntu.com/ubuntu-ports jammy main
 deb http://us.ports.ubuntu.com/ubuntu-ports jammy main
@@ -1082,6 +1117,12 @@ URIs: http://archive.ubuntu.com/ubuntu/
 Suites: noble-proposed
 Components: main
 enabled: False
+
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: noble
+Components: main
+Enabled: no
 S
   # Fields but no URIs: left out, and named.
   printf "%s\n" "Types: deb" "Suites: noble" "Components: main" >/etc/apt/sources.list.d/nouris.sources
@@ -1114,6 +1155,32 @@ S
     >/etc/apt/sources.list.d/microsoft-prod.list
 }
 
+# The shape of the hosted ubuntu-26.04 image GitHub runs in AWS: its list has
+# the mirror of its region first (152 bytes, as apt said it fetched there),
+# and the -security entry names a host instead of the list.
+aws_fixture() {
+  rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+  printf "%s\tpriority:%s\n" http://us-east-2.ec2.archive.ubuntu.com/ubuntu/ 1 \
+    https://archive.ubuntu.com/ubuntu/ 2 https://security.ubuntu.com/ubuntu/ 3 \
+    >/etc/apt/apt-mirrors.txt
+  printf "# Ubuntu sources have moved to ubuntu.sources\n" >/etc/apt/sources.list
+  cat >/etc/apt/sources.list.d/ubuntu.sources <<"S"
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: resolute resolute-updates resolute-backports
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu
+Suites: resolute-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+S
+  printf "deb https://packages.microsoft.com/ubuntu/26.04/prod resolute main\n" \
+    >/etc/apt/sources.list.d/microsoft-prod.list
+}
+
 # Change time in ns: any write moves it, even one that keeps the inode, the
 # size and the content, as a cp onto the same file does.
 snap() { find /etc/apt -type f -exec stat -c "%n %i %.9Z %s" {} + | sort; find /etc/apt -type f -exec sha256sum {} + | sort; }
@@ -1142,6 +1209,13 @@ echo stale >/etc/apt/ubuntu-mirrors.txt
 bash /h/apt-install.sh hello
 if cmp /tmp/list.want /etc/apt/ubuntu-mirrors.txt; then echo "stale list: restored"; fi
 
+# A source added after a run names a host again. The list the sources name by
+# then is the one of this script, which is no list of the machine of its own,
+# so the next run rewrites the new entry as well.
+printf "deb http://archive.ubuntu.com/ubuntu noble multiverse\n" >/etc/apt/sources.list.d/later.list
+bash /h/apt-install.sh hello | sed "s/^/added later: /"
+sed "s/^/added later: now /" /etc/apt/sources.list.d/later.list
+
 fixture
 snap >/tmp/before
 RUNNER_ENVIRONMENT=self-hosted bash /h/apt-install.sh hello | sed "s/^/self-hosted: /"
@@ -1154,6 +1228,74 @@ bash /h/apt-install.sh hello | sed "s/^/hosted: /"
 snap >/tmp/after
 if diff /tmp/before /tmp/after; then echo "hosted image: no change"; fi
 show_parts "hosted: update reads"
+
+aws_fixture
+echo "aws: list of $(wc -c </etc/apt/apt-mirrors.txt) bytes"
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/aws: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "aws image: no change"; fi
+show_parts "aws: update reads"
+
+# The same mix in the one-line format: one entry names the list of the image,
+# the others a host, and one of those a host this script would rewrite.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+hosted_list
+cat >/etc/apt/sources.list <<"S"
+deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
+deb http://security.ubuntu.com/ubuntu jammy-security main
+deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable
+S
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/one-line mix: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "one-line mix: no change"; fi
+
+# A list of the machine at a path other than that of the hosted images: the
+# rule is any list of the machine, not the path GitHub gives it.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+printf "%s\tpriority:%s\n" http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ 1 \
+  https://archive.ubuntu.com/ubuntu/ 2 >/etc/apt/region-mirrors.txt
+cat >/etc/apt/sources.list <<"S"
+deb mirror+file:/etc/apt/region-mirrors.txt jammy main
+deb http://security.ubuntu.com/ubuntu jammy-security main
+S
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/other path: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "other path: no change"; fi
+
+# The list of the image named only from a .list file in sources.list.d, while
+# sources.list names a host.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+hosted_list
+printf "deb http://archive.ubuntu.com/ubuntu jammy main\n" >/etc/apt/sources.list
+printf "deb mirror+file:/etc/apt/apt-mirrors.txt jammy-updates main\n" >/etc/apt/sources.list.d/hosted.list
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/list.d: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "list.d: no change"; fi
+
+# A deb822 stanza that apt reads, with a comment line in it that names the list
+# of the image: apt skips that line, so the stanza names only its host, and it
+# is rewritten.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+hosted_list
+: >/etc/apt/sources.list
+printf "%s\n" "Types: deb" "# URIs: mirror+file:/etc/apt/apt-mirrors.txt" "URIs: http://archive.ubuntu.com/ubuntu/" \
+  "Suites: noble" "Components: main" >/etc/apt/sources.list.d/ubuntu.sources
+bash /h/apt-install.sh hello | sed "s/^/stanza comment: /"
+sed "s/^/stanza comment: now /" /etc/apt/sources.list.d/ubuntu.sources
+
+# No sources.list at all, as on an image that keeps only deb822 files: the
+# helper reads the files there are, and rewrites them.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/* /etc/apt/sources.list
+printf "%s\n" "Types: deb" "URIs: http://archive.ubuntu.com/ubuntu/" "Suites: noble" "Components: main" \
+  >/etc/apt/sources.list.d/ubuntu.sources
+rc=0
+bash /h/apt-install.sh hello >/tmp/out 2>&1 || rc=$?
+sed "s/^/no sources.list: /" /tmp/out
+echo "no sources.list: exit $rc"
 
 # CRLF line ends, which apt reads: in a deb822 file of two stanzas, split by a
 # line of two CRs (empty to apt), and in a mirror list.
@@ -1199,8 +1341,13 @@ sums() { find /etc/apt -type f -exec sha256sum {} + | sort; }
 # Four downloads run out of their slice. Each fetched 3000 of 100000 bytes,
 # which the 30 s budget cannot make enough, so every one of the four moves on
 # to the next mirror: past the last of the three, and round to the first.
+# The sources name two lists, that of the helper and that of the image, so
+# each move is seen in both: the fixture is rewritten first, and then its
+# sources name the list of the image too, which leaves them as they are from
+# then on.
 fixture
 bash /h/apt-install.sh hello >/dev/null
+printf "deb mirror+file:/etc/apt/apt-mirrors.txt jammy main\n" >>/etc/apt/sources.list
 sums >/tmp/before
 slow 0 4 3000
 slow_run "moves on" 1 30 hello
@@ -1280,6 +1427,7 @@ done
 
 # A self-hosted runner has the same lists, and the helper must leave them be.
 fixture
+printf "deb mirror+file:/etc/apt/apt-mirrors.txt jammy main\n" >>/etc/apt/sources.list
 snap >/tmp/before
 slow 0 99 2000
 RUNNER_ENVIRONMENT=self-hosted slow_run "self-hosted, slow" 1 3 hello
@@ -1318,7 +1466,7 @@ deb [arch=amd64 ]$L jammy-proposed main
 deb $L jammy-backports main
 deb $L jammy-security main
 	deb	$L	jammy	universe
-deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
+# deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
 deb mirror+file:/etc/apt/vendor-mirrors.txt jammy main
 deb http://ports.ubuntu.com/ubuntu-ports jammy main
 deb http://us.ports.ubuntu.com/ubuntu-ports jammy main
@@ -1391,7 +1539,6 @@ deb [arch=amd64 ]$L jammy-proposed main
 deb $L jammy-backports main
 deb $L jammy-security main
 	deb	$L	jammy	universe
-deb mirror+file:/etc/apt/apt-mirrors.txt jammy main
 deb http://ports.ubuntu.com/ubuntu-ports jammy main
 deb http://us.ports.ubuntu.com/ubuntu-ports jammy main
 deb http://old-releases.ubuntu.com/ubuntu hirsute main
@@ -1426,6 +1573,23 @@ Components: main universe restricted multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 --- end
 EOF
+cat >"$work/aws.want" <<EOF
+--- aws: update reads
+-- 000-ubuntu.sources
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: resolute resolute-updates resolute-backports
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu
+Suites: resolute-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+--- end
+EOF
+own_list='apt-install: this machine has a mirror list of its own for the Ubuntu archive \(/etc/apt/apt-mirrors\.txt\), so its apt sources are left as they are'
 bounded='apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120'
 ubuntu_only='-o Dir::Etc::SourceList=/dev/null -o Dir::Etc::SourceParts=/tmp/[^ ]+ -o APT::Get::List-Cleanup=0'
 left_out='apt-install: apt reads only the Ubuntu archive entries; pass --all-sources to also read the rest of:'
@@ -1476,12 +1640,15 @@ azure='http://azure\.archive\.ubuntu\.com/ubuntu/'
 archive='https://archive\.ubuntu\.com/ubuntu/'
 security='https://security\.ubuntu\.com/ubuntu/'
 
-for image in ubuntu:22.04 ubuntu:24.04; do
+for image in ubuntu:22.04 ubuntu:24.04 ubuntu:26.04; do
   log="$work/rewrite-${image#ubuntu:}.log"
   started=$failures
   echo "--- rewrite ($image, no network, apt-get shimmed)"
-  docker run --rm --network none -v "$helper:/h/apt-install.sh:ro" "$image" \
+  docker run --rm --network none -v "$helper:/h/apt-install.sh:ro" -v "$here/hang_guard.sh:/h/hang_guard.sh:ro" "$image" \
     bash -c "exec 2>&1; $rewrite_script" >"$log" || fail "$image: rewrite case exited $?"
+  docker run --rm --network none --cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH \
+    -v "$helper:/h/apt-install.sh:ro" -v "$here/hang_guard.sh:/h/hang_guard.sh:ro" "$image" \
+    bash -c "exec 2>&1; $locked_script" | sed "s/^/locked: /" >>"$log" || fail "$image: unreadable-source case exited $?"
   if diff -u "$work/rewrite.want" <(sed -n '/^--- sources.list$/,/^--- end$/p' "$log"); then
     echo "ok: $image: exactly the archive and security URIs are rewritten, and apt reads exactly the Ubuntu entries"
   else
@@ -1527,6 +1694,46 @@ for image in ubuntu:22.04 ubuntu:24.04; do
   expect "$log" "$image: a re-run puts back an outdated mirror list" '^stale list: restored$'
   expect "$log" "$image: a self-hosted runner's sources are left alone" '^self-hosted: no change$'
   expect "$log" "$image: a hosted image's own mirror list is left alone, and no list is added" '^hosted image: no change$'
+  expect "$log" "$image: on a hosted image, the helper says it has a mirror list of its own" "^hosted: $own_list\$"
+  if diff -u "$work/aws.want" <(sed -n '/^--- aws: update reads$/,/^--- end$/p' "$log"); then
+    echo "ok: $image: on the AWS image apt reads both Ubuntu entries, the -security one as the image has it"
+  else
+    fail "$image: the entries apt reads on the AWS image differ from the expected (diff above: - want, + got)"
+  fi
+  expect "$log" "$image: the AWS image's list is the size apt fetched on that image" '^aws: list of 152 bytes$'
+  expect "$log" "$image: the AWS image, whose -security entry names a host, is left alone, and no list is added" \
+    '^aws image: no change$'
+  expect "$log" "$image: on the AWS image, the helper says it has a mirror list of its own" "^aws: $own_list\$"
+  expect "$log" "$image: on the AWS image, packages.microsoft.com's file" \
+    "^aws: $left_out /etc/apt/sources.list.d/microsoft-prod.list\$"
+  expect "$log" "$image: on the AWS image too, the install reads the entries the update read" \
+    '^aws: update reads: the install reads the same$'
+  expect "$log" "$image: the same mix in the one-line format is left alone" '^one-line mix: no change$'
+  expect "$log" "$image: and the helper says why" "^one-line mix: $own_list\$"
+  expect "$log" "$image: a list of the machine at another path is left alone too" '^other path: no change$'
+  expect "$log" "$image: and the helper names that list" \
+    '^other path: apt-install: this machine has a mirror list of its own for the Ubuntu archive \(/etc/apt/region-mirrors\.txt\), so its apt sources are left as they are$'
+  expect "$log" "$image: a list named only from a .list file in sources.list.d is left alone too" '^list\.d: no change$'
+  expect "$log" "$image: and the helper names that list" "^list\\.d: $own_list\$"
+  expect "$log" "$image: a list named in a comment line inside a read deb822 stanza does not count" \
+    '^stanza comment: apt-install: /etc/apt/sources\.list\.d/ubuntu\.sources now fetches the Ubuntu archive via mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
+  expect "$log" "$image: and the stanza's host entry is rewritten, its comment line kept" \
+    '^stanza comment: now URIs: mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
+  expect "$log" "$image: (the comment line itself)" '^stanza comment: now # URIs: mirror\+file:/etc/apt/apt-mirrors\.txt$'
+  absent "$log" "$image: the helper does not take that comment for a list of the machine" \
+    '^stanza comment: apt-install: this machine has a mirror list of its own'
+  expect "$log" "$image: with no sources.list, the deb822 file is rewritten" \
+    '^no sources\.list: apt-install: /etc/apt/sources\.list\.d/ubuntu\.sources now fetches the Ubuntu archive via mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
+  expect "$log" "$image: and the run goes on to install" '^no sources\.list: exit 0$'
+  expect "$log" "$image: a source added after a run is rewritten by the next" \
+    '^added later: now deb mirror\+file:/etc/apt/ubuntu-mirrors\.txt noble multiverse$'
+  absent "$log" "$image: the list of the helper is not taken for one of the machine" \
+    '^added later: apt-install: this machine has a mirror list of its own'
+  absent "$log" "$image: root cannot read the locked source file (the control)" '^locked: root can still read the locked file$'
+  expect "$log" "$image: a source file the helper cannot filter is named" \
+    '^locked: apt-install: could not filter /etc/apt/sources\.list\.d/locked\.list \(exit [0-9]+\)$'
+  expect "$log" "$image: and stops the helper" '^locked: exit [1-9][0-9]*$'
+  expect "$log" "$image: before it changes any file" '^locked: no change$'
 
   # The slow shim is stopped in the middle of a line every time: it has
   # written "Building dependency tree..." and no line end. The first check is

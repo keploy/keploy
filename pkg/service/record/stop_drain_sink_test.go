@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	agenthttp "go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/utils"
@@ -1256,12 +1257,7 @@ func TestDrain_WhatEndsTheStreamAfterALookDecidesTheVerdict(t *testing.T) {
 	// reached): that look says nothing of what it held, and nothing else did.
 	// A real refused dial: its error is the platform's own, as an agent that
 	// is gone gives it.
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	addr := testnet.RefusedAddr(t, "tcp")
 	_, refused := net.Dial("tcp4", addr)
 	if refused == nil {
 		t.Fatal("a dial to a closed port connected")

@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,8 +53,11 @@ import (
 type MockVariables map[string]MockVariable
 
 // MockVariable is where one variable is in one call. A place is written in
-// the grammar of variables.Parse: body.<json path>, url.path[<n>],
-// url.query.<name>, header.<name>.
+// the grammar of variables.Parse (body.<json path>, url.path[<n>],
+// url.query.<name>, header.<name>), or as a word address of one
+// (variables.ParseAddress: a word "#<n>" of its text, after any decode steps
+// "|<step>"). Every reader reads a place with variables.ReadPlace: as Parse
+// reads it where the recording holds it so, else as a word address.
 type MockVariable struct {
 	// Recorded is the variable's value in the recording: every place below
 	// held it when the call was recorded.
@@ -80,11 +85,52 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Minted is, for a variable keploy.yml's rule of kind minted declares
+	// made anew at its Bind (an id the application mints there), the rule
+	// and the shape the learn step read the value with: a replay binds it
+	// only to a value that is not its recorded one, that no minted
+	// variable bound earlier in the run, and that keeps the rule's form
+	// (variables.Table.BindAll). Only the learn step sets
+	// it, with a Bind; none for any other variable.
+	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty" bson:"minted,omitempty"`
+	// ByForm is, by use place (one of Use, never Bind), the time default's
+	// check of a time the application stamped there (keploy.yml's times
+	// setting at its default; ClockOffset.Form, learned by the learn step's
+	// BoundTimeLearned): a replay whose call does not hold the variable's
+	// value at that place passes it where its value is a time of that form
+	// (or of FormF beside it, where the record runs wrote two), and refuses
+	// it otherwise, as at a use with no entry. Two reads of the
+	// application's clock that fell in one second when recorded may fall in
+	// two in a replay: one is no copy of the other. The learn step sets it
+	// only for a field that is a time (a decoder-typed time, a field a clock
+	// rule declares, or a value bound where keploy learned a read of the
+	// application's clock) whose bound place no earlier answer holds: never
+	// for an echo, a value copied from an answer, an id or a minted value. A
+	// replay under mock.times: strict, and a keploy that does not read it,
+	// checks the place exactly.
+	ByForm map[string]ClockOffset `json:"by_form,omitempty" yaml:"by_form,omitempty" bson:"by_form,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
 	// undo it, for a person or a tool reading the mock (the legibility
 	// rule). Only given variables (GivenPrefix) carry one for now
 	// (learn.GivenWhy). Nothing replays it.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
+}
+
+// MintedShape is what a minted rule decided of a variable's value
+// (MockVariable.Minted): the id of the rule (Rule), and the form a value
+// bound there keeps (MintedForm: the prefix and the range of lengths).
+type MintedShape struct {
+	Rule       string `json:"rule" yaml:"rule" bson:"rule"`
+	MintedForm `yaml:",inline" bson:",inline"`
+}
+
+// clone is a copy of s that shares nothing with it; nil for nil.
+func (s *MintedShape) clone() *MintedShape {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	return &c
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -296,6 +342,35 @@ type ClockOffset struct {
 	Zone    string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
 	Layout  string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
 	AppZone string        `json:"app_zone,omitempty" yaml:"app_zone,omitempty" bson:"app_zone,omitempty"`
+	// Form, where set, is the time default's check (keploy.yml's times
+	// setting left at its default): the place is a time, and a replay passes
+	// any value of this form, whatever instant it names, with no range, cut,
+	// zone or provenance checked (learn's TimeForm names it: the decoder's
+	// type, and the text's layout with every digit and letter abstracted, so
+	// an epoch keeps its unit and a text its field order, separators and zone
+	// form; a fraction of a second is no part of a form). "" checks the read
+	// by every field above, as before the default was. Two learnings of one
+	// place meet with the forms both checked by (Meet): FormApart, which
+	// Empty refuses, where they share none; one with a Form and one without
+	// meet as the one without (its checks).
+	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
+	// FormF, set only beside a Form, is the second form of a time whose two
+	// record runs wrote it in two: a replay passes a value written in either
+	// (WrittenAs), never checking its range. The two stand in one order, the
+	// lesser in Form (FormsOf), so learnings that saw the same two forms
+	// hold one offset, whichever run wrote which. "" where both runs wrote
+	// one form.
+	FormF string `json:"form_f,omitempty" yaml:"form_f,omitempty" bson:"form_f,omitempty"`
+	// Claim, of a time the learn step read as the value whole of one claim
+	// of a JWT its place holds (a token the application signed and sent),
+	// names that claim: a replay opens the JWT its call carries there and
+	// checks that claim's value by Form alone (learn.HoldsClaimByForm), the
+	// claim's JSON type kept. It is learned under keploy.yml's times setting
+	// at its default only, so Form is set; every other part of the token is
+	// checked as its own learning says. "" otherwise, and then omitted. A
+	// keploy that does not read Claim checks the whole value by Form, which
+	// a token is not: it refuses it (fail closed).
+	Claim string `json:"claim,omitempty" yaml:"claim,omitempty" bson:"claim,omitempty"`
 	// Since is where a replay's span for the read starts: "" at its call's
 	// window (after the previous data-plane call); SinceTestBegin at the
 	// running test's begin, for a read the learn step saw made before its
@@ -318,6 +393,19 @@ type ClockOffset struct {
 	// read Word checks the whole value as one read, which a text around the
 	// word is not, so it refuses it.
 	Word ClockWord `json:"word,omitzero" yaml:"word,omitempty" bson:"word,omitempty"`
+	// WallWord, of a read whose text writes its zone after a space as
+	// UTC's ("2026-11-01 18:12:37.172 +00:00" of Sequelize, "… +0000 UTC"
+	// of Go's time.Time.String(), "… +0000" of Ruby's Time#to_s), learned
+	// in keploy mock's client tests, is the word of its date and time
+	// alone (ClockWord), the zone left in the text after it: where a keploy
+	// that did not read a zone written after a space learned the place, as
+	// a read of that word as a wall clock of no zone. Meet meets such a
+	// learning with this one as that word read in UTC (meetWord), the
+	// instant both read, not as two forms of the value. Zero otherwise, and
+	// then omitted: a learning made outside client tests, or before
+	// WallWord was, names none (no keploy read such an instant before). A
+	// replay does not read it: it checks Word.
+	WallWord ClockWord `json:"wall_word,omitzero" yaml:"wall_word,omitempty" bson:"wall_word,omitempty"`
 	// Why is the line the learn step wrote for the read: what, where, both
 	// values, the rule and the undo, for a person or a tool reading the mock.
 	// Nothing replays it. Meet keeps the lesser of two that are set, so one
@@ -326,12 +414,40 @@ type ClockOffset struct {
 	// writes Why again from the met offset.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
 	// Step is the cut the application made its clock read to before it added
-	// the offset (a read cut to the hour, plus thirty days): a replay checks
-	// the offset from that cut of the call's span (holdsStep). 0 for none,
-	// as every learning before Step was, and then omitted: an old file reads
-	// the same. Two learnings of one place at two Steps meet as StepApart
-	// (Empty), which holds nothing.
+	// the offset, as the learn step that writes it read it (learn's
+	// offsetInWindow; a replay checks it by holdsStep):
+	//   - Res: the offset was read at the cut its values show (clock - 2s,
+	//     an epoch's seconds; clock + 30d at the millisecond). A replay
+	//     checks it as Holds does any offset, but that an offset cut to a
+	//     second or a minute that no unit holds three of is checked at the
+	//     cut against the whole cuts its range holds (CoarseCut,
+	//     CutOffsets), never refused for its width;
+	//   - above Res: a look-back read at the step its two values stand a
+	//     whole number of apart (cut_m(now) - 103s, written in seconds,
+	//     Step a minute). Both runs' values share their remainder within
+	//     the step, and Min (to Min plus Res) is that remainder: a replay
+	//     passes a value only where it is a whole step of the call's span,
+	//     within one Res on either side, plus that offset (the phase lock),
+	//     so a look-back dropped or changed by part of a step fails at every
+	//     read.
+	// 0 for none, as every learning before Step was and main's chain still
+	// writes, and then omitted: an old file reads, and checks, as before.
+	// A keploy that does not read Step holds nothing of one above zero (fail
+	// closed). Two learnings of one place at two Steps meet as StepApart
+	// (Empty), which holds nothing, but two read at their values' own cuts
+	// meet at the coarser (Meet).
 	Step time.Duration `json:"step,omitempty" yaml:"step,omitempty" bson:"step,omitempty"`
+	// Phase, of an offset learned at a Step whose values are cut to the
+	// hour (Res an hour), is where that hour starts within UTC's, as both
+	// runs' values showed it: their time past UTC's whole hour (0 for an
+	// application that cuts to UTC's hour or a whole-hour zone's, 30m for
+	// one that cuts to +05:30's, 15m for +05:45's). A replay passes only a
+	// value on that phase (holdsAtStep), so one moved onto another zone's
+	// hour fails at every read. The learn step writes it of every such
+	// offset (learn's offsetInWindow), and refuses one whose two values sit
+	// on two phases. Of any other Res a Phase is no learning: it holds
+	// nothing (fail closed), as one outside the hour does.
+	Phase time.Duration `json:"phase,omitempty" yaml:"phase,omitempty" bson:"phase,omitempty"`
 }
 
 // StepApart is the Step of the Meet of two learnings of one place that saw
@@ -340,8 +456,11 @@ type ClockOffset struct {
 const StepApart time.Duration = -1
 
 // holdsStep is Holds of o, whose Step is above zero. Until a keploy reads
-// such a value, it holds nothing (fail closed).
+// such a value, it holds nothing (fail closed); this one registers
+// holdsAtStep in init.
 var holdsStep = func(o ClockOffset, at time.Time, res time.Duration, from, to time.Time) bool { return false }
+
+func init() { holdsStep = ClockOffset.holdsAtStep }
 
 // ClockWord is where a read of the clock stands in a longer text
 // (ClockOffset.Word), as recorded: the word at bytes Start to End of the
@@ -439,12 +558,62 @@ func isSHA256Hex(s string) bool {
 	return true
 }
 
-// meetWord is the Word two learnings of one place read it at, a and b, and
-// whether they share one: both whole (zero), or both the same word of the
-// same text. A read whole and one inside a text, or two at different places
-// of a text, are two forms of the value: their Meet is LayoutApart (Empty).
-func meetWord(a, b ClockWord) (ClockWord, bool) {
-	return a, a == b
+// meetWord is the Word, WallWord and Zone of the Meet of o and p, two
+// learnings of one place, and whether they read it at one place
+// (wordClass): both whole (zero Words) or the same word of the same text,
+// at the zone both hold (meetZones), as before WallWord was; or the word of
+// a wall clock's date and time and the instant that names it (WallWord),
+// whose zone after a space is UTC's: one read, the wall clock word in UTC,
+// the zone the instant names (classZone), so meetZones of the word's zone
+// and ZoneUTC (ZoneApart for a word read in the application's zone alone);
+// or two reads of that instant, as they are. A read whole and one inside a
+// text, or two at different places of a text, are two forms of the value
+// otherwise: their Meet is LayoutApart (Empty), its zone the one both
+// classZones hold, its Word and WallWord zero. Each field of the result is
+// one however the learnings are grouped: the place both read (one
+// wordClass, or none), the zone every classZone holds, and the instant's
+// form only where every learning read the instant. That holds over the
+// learnings the learn step makes (its withWallWord), where a read of an
+// instant names the WallWord of its own span: its Word (none where it
+// reads the value whole) is that WallWord with the zone after it, so two
+// reads that name one WallWord name one Word. Two that named it at two
+// Words would meet as Empty, though each meets the word read at that
+// WallWord as that read, and grouping would tell; no learning makes them.
+func meetWord(o, p ClockOffset) (word, wall ClockWord, zone string, ok bool) {
+	zone = meetZones(classZone(o), classZone(p))
+	switch {
+	case wordClass(o) != wordClass(p):
+		return ClockWord{}, ClockWord{}, zone, false
+	case o.WallWord.IsZero() != p.WallWord.IsZero():
+		return wordClass(o), ClockWord{}, zone, true
+	case o.Word != p.Word:
+		return ClockWord{}, ClockWord{}, zone, false
+	}
+	return o.Word, o.WallWord, meetZones(o.Zone, p.Zone), true
+}
+
+// wordClass is the word o reads its value at as a wall clock: WallWord,
+// the word of its date and time, for a read of an instant that names it;
+// Word otherwise.
+func wordClass(o ClockOffset) ClockWord {
+	if o.WallWord.IsZero() {
+		return o.Word
+	}
+	return o.WallWord
+}
+
+// classZone is the zone o reads its wordClass in: ZoneUTC for a read of an
+// instant that names its WallWord, whose zone after a space is UTC's, and
+// that names its moment (Zone ""), ZoneApart for one that names a WallWord
+// and a zone (no learning does); Zone otherwise.
+func classZone(o ClockOffset) string {
+	switch {
+	case o.WallWord.IsZero():
+		return o.Zone
+	case o.Zone == "":
+		return ZoneUTC
+	}
+	return ZoneApart
 }
 
 // AppZoneMatters reports whether what the learn step learned of o depends
@@ -533,17 +702,6 @@ type zoneLoad struct {
 	err error
 }
 
-// sameZoneAt reports whether a and b write at with one offset and next
-// change it at one instant (time.Time.ZoneBounds; none in either).
-func sameZoneAt(a, b *time.Location, at time.Time) bool {
-	ta, tb := at.In(a), at.In(b)
-	_, oa := ta.Zone()
-	_, ob := tb.Zone()
-	_, ea := ta.ZoneBounds()
-	_, eb := tb.ZoneBounds()
-	return oa == ob && ea.Equal(eb)
-}
-
 // isDigits reports whether s is ASCII digits alone (strconv.Atoi takes a
 // sign, which a fixed offset's hours or minutes never carry).
 func isDigits(s string) bool {
@@ -573,10 +731,10 @@ func ZoneNameOf(loc *time.Location, at time.Time) string {
 	t := at.In(loc)
 	if _, end := t.ZoneBounds(); !end.IsZero() {
 		// A name another zone's file holds ("CET" of a rule IANA's CET
-		// does not follow) names loc only where the two agree at at and on
-		// its next change of offset.
+		// does not follow) names loc only where the two agree at at and at
+		// each change of offset in the year after it (SameZoneAt).
 		if n := loc.String(); n != "" && n != "Local" {
-			if l, err := ZoneLocation(n); err == nil && sameZoneAt(l, loc, at) {
+			if l, err := ZoneLocation(n); err == nil && SameZoneAt(l, loc, at) {
 				return n
 			}
 		}
@@ -829,6 +987,14 @@ func (o ClockOffset) Checkable(res time.Duration, from, to time.Time) bool {
 		return true
 	}
 	m := max(o.CheckedAt(res), o.Res)
+	if o.Step > 0 {
+		// Read at its values' own cut (Step is Res): one cut that no unit
+		// holds three of is checked at the cut against the whole cuts its
+		// range holds (CutOffsets), in any window, so a verdict never turns
+		// on how long the call took. A phase-locked look-back (Step above
+		// Res) is checked on its step's grid (holdsAtStep), in any window.
+		return o.Step > o.Res || o.CoarseChecked(res) || o.Within(to.Sub(from), o.Max-o.Min, m, m, m)
+	}
 	if o.CoarseChecked(res) {
 		return to.Sub(from) < m && o.Max-o.Min < m-to.Sub(from)
 	}
@@ -854,6 +1020,15 @@ func (o ClockOffset) CoarseChecked(res time.Duration) bool {
 // at the cut, as standing for its whole cut, within one cut of its window
 // plus the offset on either side (Holds, Checkable).
 func (o ClockOffset) Narrow() bool {
+	if o.Step > 0 {
+		// Learned at a Step (holdsAtStep): one cut that no unit holds three
+		// of whatever its width, a replay checking it against the whole
+		// cuts its range holds (founder decision, 2026-10-27: a clock read
+		// cut coarser than a millisecond is checked at the cut, never
+		// refused), and a phase-locked look-back, whose range is one Res
+		// wide.
+		return o.Step > o.Res || o.CoarseCut() || o.Within(o.Max-o.Min, o.Res, o.Res, o.Res)
+	}
 	if o.CoarseCut() {
 		return o.Max-o.Min < o.Res
 	}
@@ -887,8 +1062,68 @@ func (o ClockOffset) CoarseCut() bool {
 		return true
 	case time.Hour:
 		return o.Unit() <= time.Hour
+	case time.Minute, time.Second:
+		// Learned at a Step: a minute's or a second's cut whose offset reads
+		// in that unit or a finer one (clock + 30m at the minute; a poll's
+		// dirtyAt <= now - 2s, an epoch's seconds) is a cut no unit holds
+		// three of too. So is a look-back whose range spans at most two
+		// cuts (a whole minute read in a window wider than it: clock - 1m,
+		// or clock - 1m1s where the read fell in the second before its
+		// call), so that where in its second a call fell never turns the
+		// verdict. An offset learned before Step is read as before.
+		return o.Step > 0 && (o.Unit() <= o.Res || o.Max <= 0 && o.Max-o.Min <= 2*o.Res)
 	}
 	return false
+}
+
+// Fine reports whether o reads in a unit the learn step never learns an
+// offset in, so a replay holds nothing of it: a unit of a second or finer
+// (clock + 300ms; or clock + 719h59m59.45s, cut to the second, where one
+// run's read fell before its call's window). A read the application made
+// outside its call's window stands from it by how long before or after it
+// was made, which shows such an offset too, bounded to a few of its
+// resolution, and a check that tight fails as soon as that wait changes;
+// an application that cuts its value to that unit makes a time to live
+// changed by one look the same. Of an o learned at a Step, a second is
+// Fine only where o is no cut no unit holds three of (CoarseCut: a poll's
+// dirtyAt <= now - 2s, written as an epoch's seconds, is checked at the
+// cut, which admits a value up to a cut stale or ahead, as any cut's check
+// does), and a phase-locked look-back (Step above Res) is never Fine: its
+// step's grid checks it (holdsAtStep). An empty o (no Unit) is Fine.
+func (o ClockOffset) Fine() bool {
+	u := o.Unit()
+	switch {
+	case o.Step <= 0:
+		return u <= time.Second
+	case o.Step > o.Res:
+		return false
+	}
+	return u < time.Second || u == time.Second && !o.CoarseCut()
+}
+
+// CutOffsets are the offsets a replay checks a value of o, learned at a
+// Step and cut to a unit that no unit holds three of (CoarseCut), against
+// (holdsAtStep): the whole cuts (multiples of o.Res) from Min up to, not
+// including, Max, lo the least and hi the greatest. Each run's range is its
+// window's width and one cut wide (a value v cut to c stands for reads from
+// v up to v plus c), and holds the one whole cut the application adds
+// (dirtyAt <= now - 2s at the second: -2s, lo == hi, the offset String
+// names) unless both runs' windows held a turn of the cut, where it may
+// hold the next one too. A range that holds no whole cut, of an offset that
+// reads in a finer unit (a cut hour plus 90 minutes), is narrower than the
+// cut: lo and hi are Min and Max. The offset the application adds lies
+// within one cut of lo to hi, so a check of the call's window plus lo to
+// hi, widened by one cut on either side, holds every value it writes, cut
+// down or rounded, wherever its read falls in the window.
+func (o ClockOffset) CutOffsets() (lo, hi time.Duration) {
+	if o.Res <= 0 {
+		return o.Min, o.Max
+	}
+	lo = ceilTo(o.Min, o.Res)
+	if lo >= o.Max {
+		return o.Min, o.Max
+	}
+	return lo, ceilTo(o.Max, o.Res) - o.Res
 }
 
 // cutSteps are the steps a Plain read's cut is read in, coarsest first:
@@ -1022,6 +1257,89 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 	}
 	c := o.CheckedAt(res)
 	return ClockOffset{Res: c}.holdsRead(at, c, from.Add(o.Min), to.Add(o.Max))
+}
+
+// phaseLocked reports whether o is a look-back read at a step above its
+// cut (holdsAtStep): its range lies below zero, up to zero at most, since
+// Max is not in it: an application that cuts its read to the minute and
+// subtracts one second has Min -1s and Max 0.
+func (o ClockOffset) phaseLocked() bool {
+	return o.Step > o.Res && o.Min < o.Max && o.Max <= 0
+}
+
+// holdsAtStep is Holds of o, learned at a Step above zero (holdsStep), with
+// Holds' own guards first: a Step below Res, a range around zero or above
+// it at a step (signed, phaseLocked), no Res, an o Fine for its unit, a
+// window with no start or that ends before it starts, a res of none, an o
+// not Checkable in the window, a value of an o cut to the hour that sits
+// off o's Phase within UTC's hour (onPhase), and a window that meets a wall
+// time at's zone shows twice (FallBack) hold nothing.
+//   - Step is Res (the offset read at its values' own cut): at is checked
+//     as Holds checks any offset, at c (CheckedAt), within one c of the
+//     span plus the offset on either side, but that of an o cut to a unit
+//     no unit holds three of (CoarseChecked) the span is the call's window
+//     plus the whole cuts its range holds (CutOffsets: clock - 2s), never
+//     its range, so a verdict never turns on how long the call took: the
+//     application's value holds at every read, one a cut stale or ahead
+//     too (a cut's cost), and one changed by two cuts or more only where
+//     the window holds a turn of the cut for each cut more;
+//   - Step above Res (a phase-locked look-back): at holds only where it
+//     is a whole Step of the call's span (cut to Step on the clock of at's
+//     zone, from one Res before from up to one Res after to) plus an
+//     offset from Min up to, not including, Max: both runs' remainder
+//     within the step. A minute's step or a finer one is one grid in every
+//     zone; an hour's or a day's is read in the zone at is in (learn's
+//     checkReadIn reads it in UTC and in the application's). A value
+//     written at an encoding coarser than Res cannot show that remainder
+//     and holds nothing.
+func (o ClockOffset) holdsAtStep(at time.Time, res time.Duration, from, to time.Time) bool {
+	if !o.phaseLocked() && (o.Step != o.Res || !o.signed()) || o.Res <= 0 || o.Fine() || from.IsZero() || to.Before(from) || res <= 0 || !o.Checkable(res, from, to) || !o.onPhase(at) {
+		return false
+	}
+	if _, _, met := o.FallBack(res, from, to, at.Location()); met {
+		return false
+	}
+	if o.Step == o.Res {
+		c := o.CheckedAt(res)
+		lo, hi := o.Min, o.Max
+		if o.CoarseChecked(res) {
+			lo, hi = o.CutOffsets()
+		}
+		return ClockOffset{Res: c}.holdsRead(at, c, from.Add(lo), to.Add(hi))
+	}
+	if res > o.Res {
+		return false
+	}
+	loc := at.Location()
+	first := ReadCut(from.Add(-o.Res), o.Step, loc)
+	last := ReadCut(to.Add(o.Res), o.Step, loc)
+	// The latest whole step that leaves at at Min or more past it, then
+	// each step before it while at stays below Max past it (Max - Min is
+	// one Res: the learn step reads no lock whose range spans its step);
+	// a day's step before a day whose clocks change is the cut before,
+	// not 24 h.
+	for k := ReadCut(at.Add(-o.Min), o.Step, loc); at.Sub(k) < o.Max && !k.Before(first); k = ReadCut(k.Add(-1), o.Step, loc) {
+		if !k.After(last) {
+			return true
+		}
+	}
+	return false
+}
+
+// onPhase reports whether at sits where o's values do within UTC's hour: of
+// an o cut to the hour, Phase past UTC's whole hour (Truncate counts from
+// UTC in every zone); of any other, only where o names no Phase. The own
+// cut's check admits a value up to a cut stale or ahead, which, read in a
+// zone the value shows a whole hour in, held one moved onto that zone's
+// hour by part of an hour (1h15m earlier in +05:45, onto UTC's) at most
+// reads; on the recorded phase the application's value holds at every
+// read and such a value at none. An application replayed in a zone whose
+// hour starts at another phase than the recording's fails (a false red).
+func (o ClockOffset) onPhase(at time.Time) bool {
+	if o.Res != time.Hour {
+		return o.Phase == 0
+	}
+	return o.Phase >= 0 && o.Phase < time.Hour && at.Sub(at.Truncate(time.Hour)) == o.Phase
 }
 
 // FallBack is the turn at which loc's clocks go back, and by how much, that
@@ -1181,8 +1499,8 @@ const maxFallBack = 3 * time.Hour
 // back by there; where across, only a turn AcrossHour holds.
 func fallBackIn(lo, hi time.Time, loc *time.Location, across bool) (time.Time, time.Duration, bool) {
 	for t := lo.Add(-maxFallBack); ; {
-		_, end := t.In(loc).ZoneBounds()
-		if end.IsZero() || !end.After(t) || end.After(hi.Add(maxFallBack)) {
+		end := ZoneEnd(t.In(loc))
+		if end.IsZero() || end.After(hi.Add(maxFallBack)) {
 			return time.Time{}, 0, false
 		}
 		_, before := end.Add(-time.Nanosecond).In(loc).Zone()
@@ -1236,8 +1554,8 @@ func yearFallBacks(y int) []zoneFallBack {
 			continue
 		}
 		for t := start.Add(-time.Nanosecond); ; {
-			_, e := t.In(loc).ZoneBounds()
-			if e.IsZero() || !e.After(t) || !e.Before(end) {
+			e := ZoneEnd(t.In(loc))
+			if e.IsZero() || !e.Before(end) {
 				break
 			}
 			_, before := e.Add(-time.Nanosecond).In(loc).Zone()
@@ -1286,7 +1604,10 @@ func (o ClockOffset) signed() bool {
 // zones no one zone holds (UTC and the application's: ZoneApart,
 // meetZones), or that saw it written in different layouts (LayoutApart,
 // meetLayouts), whole at one and a word of a text at another, or at two
-// places of a text (meetWord), meet as an Empty one, which holds nothing; ZoneEither meets
+// places of a text (meetWord), meet as an Empty one, which holds nothing,
+// except a word read as a wall clock of the date and time of an instant
+// the other reads with its zone after a space, UTC's (WallWord), which
+// meet as that word read in UTC; ZoneEither meets
 // UTC or the application's zone as that one, the zone both hold, and a
 // Layout of "" (learned before Layout was) meets another as that one. Two
 // that read the application's zone as two zones (AppZoneApart: two named
@@ -1296,22 +1617,38 @@ func (o ClockOffset) signed() bool {
 // hour in UTC, and refuses any other (learn's CheckClockRead). Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
-// pairings came in. Two at different Steps meet as StepApart (Empty). Why
+// pairings came in. Two at different Steps meet as StepApart (Empty), and
+// so do a phase lock (Step above Res) and an offset read at its values' own
+// cut that is that step (Step is Res, the same Step): the second holds no
+// phase, and a meet read at its Res would drop the first's. So do two each
+// read at its values' own cut at two cuts (now - 75s in seconds, one
+// recording's two values on a whole minute, another's not): the finer
+// learning shows the place's values are not cut to the coarser cut, and a
+// meet read at the coarser would pass a look-back changed by most of it
+// (and one read at the finer would make Meet depend on how its learnings
+// are grouped), so it holds nothing. So do two cut to the hour at two
+// Phases: no one hour holds both runs' values. Why
 // is the lesser of the two that are set (nothing replays it): one learned
 // line, whatever the order.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step, Phase: max(o.Phase, p.Phase)}
 	if m.Why == "" || p.Why != "" && p.Why < m.Why {
 		m.Why = p.Why
 	}
-	if o.Step != p.Step {
+	if own := func(x ClockOffset) bool { return x.Step > 0 && x.Step == x.Res }; o.Step != p.Step || own(o) != own(p) || o.Phase != p.Phase {
 		m.Step = StepApart
 	}
 	// One read whole and one inside a text, or at two places of a text
-	// (meetWord), were written in two forms: no one layout holds both.
-	if word, ok := meetWord(o.Word, p.Word); ok {
-		m.Word = word
-	} else {
+	// (meetWord), were written in two forms: no one layout holds both. A
+	// wall clock word of an instant's date and time and that instant read
+	// with its zone after a space, UTC's, are one read in UTC.
+	var ok bool
+	if m.Word, m.WallWord, m.Zone, ok = meetWord(o, p); !ok {
+		m.Layout = LayoutApart
+	}
+	// A read in one claim of a token and one in another, or one whole, were
+	// written in two forms too.
+	if m.Claim = o.Claim; o.Claim != p.Claim {
 		m.Layout = LayoutApart
 	}
 	// A learning whose value a replay reads in no zone of the application's
@@ -1346,8 +1683,67 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 		// either zone held, met with one in UTC) names none.
 		m.AppZone = ""
 	}
+	// The forms both learnings checked by are kept: of a learning that
+	// passes two (FormF) and one that passes one of them, that one, the
+	// stricter. Two that share none are no one check (FormApart; a meet
+	// that was apart shares none, as no time's form is FormApart). One
+	// learning that checked the read by its range keeps that check (Form
+	// ""), the stricter of the two.
+	switch {
+	case o.Form == "" || p.Form == "":
+	default:
+		var both []string
+		for _, f := range []string{o.Form, o.FormF} {
+			if p.WrittenAs(f) {
+				both = append(both, f)
+			}
+		}
+		switch len(both) {
+		case 0:
+			m.Form = FormApart
+		case 1:
+			m.Form = both[0]
+		default:
+			m.Form, m.FormF = FormsOf(both[0], both[1])
+		}
+	}
 	return m
 }
+
+// FormsOf is the Form and FormF of a time two record runs wrote in forms a
+// and b (learn's TimeForm): the one form where a and b are one, else the
+// two, the lesser first, so that two learnings of one place that saw the
+// same two forms hold one ClockOffset whichever run wrote which (Meet is
+// the same in either order).
+func FormsOf(a, b string) (form, formF string) {
+	switch {
+	case a == b:
+		return a, ""
+	case b < a:
+		return b, a
+	}
+	return a, b
+}
+
+// WrittenAs reports whether form, a time's form (learn's TimeForm), is one
+// o's time default checks by: its Form, or FormF beside it. False for "",
+// which names no time.
+func (o ClockOffset) WrittenAs(form string) bool {
+	return form != "" && (form == o.Form || form == o.FormF)
+}
+
+// Forms is how a message names the forms o checks by: its Form, or "Form
+// or FormF".
+func (o ClockOffset) Forms() string {
+	if o.FormF == "" {
+		return o.Form
+	}
+	return o.Form + " or " + o.FormF
+}
+
+// FormApart is the Form of a Meet of two learnings of one place that share
+// no form (ClockOffset.Form, FormF): Empty refuses it.
+const FormApart = "apart"
 
 // Empty reports whether o is the Meet of learnings of one place that share
 // no offset: a Max not above its Min, other than a Plain o's (a Plain and
@@ -1356,7 +1752,7 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 // written in different layouts (LayoutApart); or at different Steps
 // (StepApart). Holds holds nothing for it, and String says why.
 func (o ClockOffset) Empty() bool {
-	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0
+	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0 || o.Form == FormApart
 }
 
 // MergeClocks is a and b, two sets of the places a call's learn steps
@@ -1544,7 +1940,9 @@ func WallNanos(t time.Time, loc *time.Location) int64 {
 // offset from 29m59.96s to 32m59.956s"; an Empty o says it holds none:
 // "clock reads no one offset holds (from 30m up to 0s)". A Zone of a wall
 // clock of no zone follows it: "clock, a wall clock of no zone in the
-// application's zone"; one of ZoneApart, or one this keploy does not read,
+// application's zone"; of one learned at a Step cut to the hour, where its
+// hour starts: "clock - 2h, its hour starting 30m past UTC's whole hour";
+// one of ZoneApart, or one this keploy does not read,
 // says so instead. It never decides anything.
 func (o ClockOffset) String() string {
 	switch {
@@ -1562,8 +1960,16 @@ func (o ClockOffset) String() string {
 		return "clock reads cut to no one step (one place learned as a read cut to different steps before its offset at different calls)"
 	}
 	s := o.offsetString() + o.zoneString() + o.layoutString()
-	if o.Step > 0 {
+	if o.Step > o.Res {
 		s += ", read cut to " + o.Step.String() + " before the offset"
+	}
+	if o.Step > 0 && o.Res == time.Hour {
+		// Where its hour starts (Phase), which a replay holds it to.
+		if o.Phase == 0 {
+			s += ", its hour starting on UTC's whole hour"
+		} else {
+			s += ", its hour starting " + ShortDuration(o.Phase) + " past UTC's whole hour"
+		}
 	}
 	if !o.Word.IsZero() {
 		// Where the word stands, never what the text holds.
@@ -1571,6 +1977,13 @@ func (o ClockOffset) String() string {
 	}
 	if o.Since == SinceTestBegin {
 		s += ", read after its test began and before its call"
+		// Learned at a Step, the limit of a read since its test began,
+		// stated where it is learned: the learn step cannot tell where in
+		// that span the application read its clock, so a replay passes a
+		// read anywhere in it.
+		if o.Step > 0 {
+			s += " (a replay passes a read made anywhere in that span plus the offset, so a time to live changed by less than that span passes too)"
+		}
 	}
 	switch o.AppZone {
 	case "":
@@ -1675,16 +2088,71 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
+		mv.Minted = mv.Minted.clone()
+		mv.ByForm = maps.Clone(mv.ByForm)
 		out[name] = mv
 	}
 	return out
+}
+
+// MergeByForm is the check by form (MockVariable.ByForm) of a variable
+// whose uses are aUse, with a's checks aBy, and bUse, with bBy, as one: a
+// use only one of them names keeps its check; one both name keeps it only
+// where both learned it, the stricter of the two (byFormMeet), and is
+// checked exactly otherwise. A learning that checks a use exactly, or by
+// fewer forms, is never loosened by another's. nil where none is left.
+func MergeByForm(aUse []string, aBy map[string]ClockOffset, bUse []string, bBy map[string]ClockOffset) map[string]ClockOffset {
+	in := func(uses []string, place string) bool { return slices.Contains(uses, place) }
+	var out map[string]ClockOffset
+	keep := func(place string, o ClockOffset) {
+		if out == nil {
+			out = map[string]ClockOffset{}
+		}
+		out[place] = o
+	}
+	for place, o := range aBy {
+		if !in(bUse, place) {
+			keep(place, o)
+			continue
+		}
+		if p, ok := bBy[place]; ok {
+			if m, ok := byFormMeet(o, p); ok {
+				keep(place, m)
+			}
+		}
+	}
+	for place, o := range bBy {
+		if !in(aUse, place) {
+			keep(place, o)
+		}
+	}
+	return out
+}
+
+// byFormMeet is the one of a and b, two learnings' checks by form of one
+// use, that passes only forms the other passes too (its Form, and FormF
+// beside it: WrittenAs), a where both pass the same; ok is false where
+// neither does (two forms against two others, one shared): the use is then
+// checked exactly.
+func byFormMeet(a, b ClockOffset) (ClockOffset, bool) {
+	within := func(x, y ClockOffset) bool {
+		return y.WrittenAs(x.Form) && (x.FormF == "" || y.WrittenAs(x.FormF))
+	}
+	switch {
+	case within(a, b):
+		return a, true
+	case within(b, a):
+		return b, true
+	}
+	return ClockOffset{}, false
 }
 
 // MergeVariables is a and b as one block (neither is changed): a variable in
 // both keeps a's bind and both's uses and answers, and is an echo only when
 // both say so. Clock goes with the bind it was read at: a's bind keeps a's,
 // one taken from b keeps b's, and a variable both bind is a clock read only
-// when both say so.
+// when both say so. Minted goes with the bind as well: a's bind keeps a's
+// (a variable both bind is checked as a says), one taken from b keeps b's.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -1698,9 +2166,11 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		}
 		if cur.Bind == "" {
 			cur.Bind, cur.Clock = v.Bind, append([]ClockRead(nil), v.Clock...)
+			cur.Minted = v.Minted.clone()
 		} else if v.Bind != "" && len(v.Clock) == 0 {
 			cur.Clock = nil
 		}
+		cur.ByForm = MergeByForm(cur.Use, cur.ByForm, v.Use, v.ByForm)
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
 		cur.Echo = cur.Echo && v.Echo
@@ -1782,4 +2252,28 @@ type VariableBinding struct {
 	// variable's binding whose reads were made in the same second
 	// (ReadInOneSecond), and with no other.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty"`
+	// Minted is, for a binding of a minted variable, its shape
+	// (MockVariable.Minted): the table binds it only to a value that is
+	// new and keeps that shape (variables.MintedWhy).
+	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty"`
+	// Call marks a binding of this call alone (an echo, MockVariable.Echo:
+	// a recording no test owns that each serve mints a value at anew). The
+	// table never binds its name in a scope; a minted one's value is still
+	// checked against the run's minted values and kept among them, so a
+	// later reuse of it is refused (variables.Table.BindAll).
+	Call bool `json:"call,omitempty" yaml:"call,omitempty"`
+	// WordRun is, for a binding at a word of a value (a word address), the
+	// value span its word is in: the words its call binds at consecutive
+	// words of that text, its own among them, that hold one value (a
+	// stretch its mock holds whole elsewhere whose words learning names one
+	// value; its own word alone otherwise), live, in word order, joined by "-"
+	// (variables.WordRuns); WordRunRecorded is the same words as its
+	// recording holds them, and WordRunAt is the index of the binding's own
+	// word among them. A binding of a value whole has
+	// none. Under the proven switch, two word bindings share a live value as
+	// two variables only where, set side by side at that word, the spans
+	// show it equal by chance (variables.TwoValues).
+	WordRun         string `json:"wordRun,omitempty" yaml:"wordRun,omitempty"`
+	WordRunRecorded string `json:"wordRunRecorded,omitempty" yaml:"wordRunRecorded,omitempty"`
+	WordRunAt       int    `json:"wordRunAt,omitempty" yaml:"wordRunAt,omitempty"`
 }

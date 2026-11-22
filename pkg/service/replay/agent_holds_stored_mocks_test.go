@@ -1,11 +1,14 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -85,8 +89,10 @@ type rearmInstr struct {
 	// gone refuses the repair's first call.
 	outgoingErr error
 
-	// outgoingOpts is what the last MockOutgoing was sent.
+	// outgoingOpts is what the last MockOutgoing was sent, and outgoingSet
+	// the test set its ctx named (models.TestSetSessionOf).
 	outgoingOpts models.OutgoingOptions
+	outgoingSet  models.TestSetSession
 
 	statsCalls        int
 	mockOutgoingCalls int
@@ -132,6 +138,7 @@ func (f *rearmInstr) MockOutgoing(ctx context.Context, opts models.OutgoingOptio
 	f.mu.Lock()
 	block := f.outgoingBlock
 	f.outgoingOpts = opts
+	f.outgoingSet = models.TestSetSessionOf(ctx)
 	f.mu.Unlock()
 	if block != nil {
 		select {
@@ -269,18 +276,24 @@ func TestAgentHoldsStoredCorpus(t *testing.T) {
 func TestEnsureAgentHoldsStoredMocks_ReRegistersReplacementAgent(t *testing.T) {
 	f := &rearmInstr{storeTakesEffect: true}
 	r := newRearmReplayer(f)
+	r.setSessionRun = "run-a"
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("re-registration against the replacement agent should succeed, got: %v", err)
 	}
 	// A re-registration of the set, not a set boundary: what the app
-	// consumed as it started is the set's own, and the agent keeps it.
+	// consumed as it started is the set's own, and the agent keeps it. The
+	// replacement agent's session serves the set, of this run: a loss it
+	// finds after the set's end is the set's (earlierSetLosses).
 	f.mu.Lock()
-	starts := f.outgoingOpts.StartsTestSet
+	starts, set := f.outgoingOpts.StartsTestSet, f.outgoingSet
 	f.mu.Unlock()
 	if starts {
 		t.Fatal("the repair's MockOutgoing said it starts a test set; the agent would drop the set's own bootstrap consumes")
+	}
+	if want := (models.TestSetSession{Run: "run-a", Set: "test-set-0"}); set != want {
+		t.Fatalf("the repair's MockOutgoing named the set %+v, want %+v", set, want)
 	}
 
 	stats, outgoing, stores, updates, ready := f.counts()
@@ -1057,12 +1070,25 @@ func TestEnsureAgentHoldsStoredMocks_ReportsTheAppsExitWhenTheAgentWentWithIt(t 
 	f := &appExitInstr{
 		rearmInstr: &rearmInstr{statsErrCalls: 2, outgoingErr: errors.New("dial tcp [::1]:61885: connect: connection refused")},
 		exit:       exit,
-		logs:       "FATAL shared token: no Kubernetes client",
+		logs:       "FATAL shared token " + logleak.Canary + ": no Kubernetes client",
 	}
 	r, logs := newAppExitReplayer(f)
+	// keploy's log, as the run's log file gets it (utils/log's
+	// primarySyncer writes every line to the console and to this file), and
+	// the console the app's lines are shown on.
+	logFile := filepath.Join(t.TempDir(), "keploy-logs.txt")
+	file, err := os.Create(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	fileCore := zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(file), zapcore.DebugLevel)
+	r.logger = zap.New(zapcore.NewTee(r.logger.Core(), fileCore))
+	var console bytes.Buffer
+	r.appConsole = &console
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
-	err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases)
+	err = r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases)
 	if err == nil {
 		t.Fatal("an agent that went with the app must still fail the test set")
 	}
@@ -1080,14 +1106,18 @@ func TestEnsureAgentHoldsStoredMocks_ReportsTheAppsExitWhenTheAgentWentWithIt(t 
 			t.Fatalf("logged %q although the app's container had exited", e.Message)
 		}
 	}
-	var sawLogs bool
-	for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
-		if e.ContextMap()["appLogs"] == f.logs {
-			sawLogs = true
-		}
+	// The app's own lines are shown on the console, after the ERROR line
+	// that says the app exited, and never reach keploy's log: its file is
+	// what a recovered panic sends to Sentry.
+	if logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("no longer running").Len() != 1 {
+		t.Fatalf("the app's exit was not logged at ERROR: %v", logs.All())
 	}
-	if !sawLogs {
-		t.Fatal("the app's last log lines were not logged with its exit")
+	logleak.Check(t, logs, logleak.Canary, "the app's exit line")
+	if written, err := os.ReadFile(logFile); err != nil || logleak.Holds(string(written), logleak.Canary) || !strings.Contains(string(written), "no longer running") {
+		t.Errorf("keploy's log file (read error %v) holds the app's lines, or not the exit line", err)
+	}
+	if !strings.Contains(console.String(), f.logs+"\n") {
+		t.Errorf("the console shows %q, want the app's last log lines", console.String())
 	}
 
 	// Diagnosis only: the repair is still attempted, and armed, as before.

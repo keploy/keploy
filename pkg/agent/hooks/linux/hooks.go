@@ -56,6 +56,12 @@ type Hooks struct {
 	conf      *config.Config
 	m         sync.Mutex
 
+	// agentInfo is what SendAgentInfo last sent the kernel (agentInfoSent),
+	// for SetProxyPorts to send again with the proxy's ports.
+	agentInfoMu   sync.Mutex
+	agentInfo     structs.AgentInfo
+	agentInfoSent bool
+
 	// Linux-specific fields
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
 	// proxyMarked is set once MarkProxyListener has marked the proxy's
@@ -92,6 +98,11 @@ type Hooks struct {
 	// ebpf objects and events
 	socket      link.Link
 	processExit link.Link
+	// instanceFork is k_instance_fork's link, attached at the first
+	// SetInstance (instance.go); instanceMu guards it.
+	instanceMu   sync.Mutex
+	instanceFork link.Link
+
 	connect4    link.Link
 	udp4Sendmsg link.Link
 	udp4Recvmsg link.Link
@@ -109,12 +120,24 @@ type Hooks struct {
 	// the precondition for telling bind4/6 to let the kernel pick the
 	// application's relocated port (structs.FlagKernelPortAlloc).
 	kernelPortAlloc bool
+	// postBindRefused is the post_bind hook that did not attach, and why:
+	// bind4/6 then pick the port each of the app's binds moves to
+	// themselves. nil when both attached or ingress was not attached.
+	// load says so once the agent's flags are final (sayBindFallback).
+	postBindRefused *postBindRefusal
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
 	// sockCreate is k_sock_create's link: sys_enter_socket's backstop,
 	// attached where it is.
 	sockCreate link.Link
+	// appConnRelease is k_app_conn_release's link: it writes how the
+	// application released each connection redirected to the proxy
+	// (TakeAppConnEnd).
+	appConnRelease link.Link
+	// stopSignal is k_stop_signal's link: it notes the stop signals other
+	// processes send, which appConnRelease's records carry.
+	stopSignal link.Link
 	// skips reads the runs of the hooks' programs the kernel skipped
 	// (skipwatch.go), from their load on.
 	skips *skipWatch
@@ -193,9 +216,11 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	return nil
 }
 
-func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
+// attachIngress attaches the bind hooks to cGroupPath with attach
+// (link.AttachCgroup; a test passes one that refuses a hook).
+func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects, attach func(link.CgroupOptions) (link.Link, error)) error {
 	h.BindEvents = objs.BindEvents
-	cg4, err := link.AttachCgroup(link.CgroupOptions{
+	cg4, err := attach(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet4Bind,
 		Program: objs.K_bind4,
@@ -206,7 +231,7 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	}
 	h.cgBind4 = cg4
 
-	cg6, err := link.AttachCgroup(link.CgroupOptions{
+	cg6, err := attach(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet6Bind,
 		Program: objs.K_bind6,
@@ -224,22 +249,24 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	// assigned port back out and publish the bind event.
 	//
 	// Non-fatal on purpose, and both-or-nothing: the flag below is only
-	// set when both attach, and without the flag bind4/6 keep their old
-	// guess-a-port behaviour. So a cgroup setup that rejects them records
-	// exactly as it did before rather than failing startup, while everyone
-	// else stops hitting "That port is already in use" on the relocated
-	// port. This covers ATTACH failure only — a program the kernel refuses
-	// to LOAD already fails LoadAndAssign above and aborts the agent, the
-	// same as every other program in this object.
-	pb4, err := link.AttachCgroup(link.CgroupOptions{
+	// set when both attach, and without the flag bind4/6 pick the port
+	// themselves, a free one outside the network namespace's ephemeral
+	// range, or leave the bind alone when there is none (sayBindFallback
+	// says which, once the agent's flags are final). So a cgroup setup
+	// that rejects them still starts, while everyone else stops hitting
+	// "That port is already in use" on the relocated port. This covers
+	// ATTACH failure only — a program the kernel refuses to LOAD already
+	// fails LoadAndAssign above and aborts the agent, the same as every
+	// other program in this object.
+	pb4, err := attach(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet4PostBind,
 		Program: objs.K_postBind4,
 	})
 	if err != nil {
-		h.logger.Warn("failed to attach the post_bind4 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+		h.postBindRefused = &postBindRefusal{hook: "post_bind4", err: err}
 	} else {
-		pb6, err := link.AttachCgroup(link.CgroupOptions{
+		pb6, err := attach(link.CgroupOptions{
 			Path:    cGroupPath,
 			Attach:  ebpf.AttachCGroupInet6PostBind,
 			Program: objs.K_postBind6,
@@ -252,7 +279,7 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 			if cerr := pb4.Close(); cerr != nil {
 				h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
 			}
-			h.logger.Warn("failed to attach the post_bind6 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+			h.postBindRefused = &postBindRefusal{hook: "post_bind6", err: err}
 		} else {
 			h.cgPostBind4 = pb4
 			h.cgPostBind6 = pb6
@@ -262,6 +289,43 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 
 	h.logger.Debug("Attached ingress redirection hooks.",
 		zap.Bool("kernel_port_alloc", h.kernelPortAlloc))
+	return nil
+}
+
+// sendFinalAgentInfo makes info's flags final and sends info with send
+// (load's: SendAgentInfo). The downstream build's customizer
+// (agent.AgentInfoCustomizer) goes first, then the flags of the hooks that
+// attached, then start, which starts the watches whose flags it sets and
+// fills in the rest of info. The bind hooks read the flags as sent, so only
+// once send has taken them does it say where the app's binds go when a
+// post_bind hook did not attach (sayBindFallback): nothing under the
+// customizer's FlagObserveOnly, where the bind hooks move no bind.
+func (h *Hooks) sendFinalAgentInfo(info structs.AgentInfo, start func(*structs.AgentInfo) error, send func(structs.AgentInfo) error) error {
+	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
+	// slot consumed by the BPF cgroup hooks) before it is written.
+	if agent.AgentInfoCustomizer != nil {
+		agent.AgentInfoCustomizer(&info)
+	}
+
+	// OR'd in after the customizer so a downstream build setting its own
+	// flags cannot accidentally clear it, and only when both post_bind
+	// hooks are attached — bind4/6 must not hand the port choice to the
+	// kernel unless something is listening for the kernel's answer.
+	if h.kernelPortAlloc {
+		info.Flags |= structs.FlagKernelPortAlloc
+	}
+	info.Flags = classifyFlag(info.Flags, h.socket != nil)
+	// The bind hooks note what the app binds for the ingress hold only
+	// once both its programs are attached (ingressport.go).
+	info.Flags = ingressHoldFlag(info.Flags, h.IngressHeld())
+	if err := start(&info); err != nil {
+		return err
+	}
+	if err := send(info); err != nil {
+		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
+		return err
+	}
+	h.sayBindFallback(info.Flags)
 	return nil
 }
 
@@ -394,8 +458,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// both when its last thread exits, and the sweep (skipwatch.go) what a
 	// skipped run of it left. Without it the maps only grow, and once
 	// target_namespace_pids is full (10240 TGIDs: seconds of process churn,
-	// and it takes every process in the agent's PID namespace, the whole host
-	// for a native agent) no new process is intercepted, so its calls go to the real dependency with
+	// and it takes every process in the agent's PID namespace that calls
+	// socket(), of the keploy client's tree only for a native agent) no new
+	// process is intercepted, so its calls go to the real dependency with
 	// nothing recorded or mocked. (A refused insert is counted and reported,
 	// pidmaps.go; with this hook it takes more live processes than the map
 	// holds.) Attached in every mode,
@@ -511,12 +576,42 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.sockCreate = sc
 	}
 
+	// How the application released each connection redirected to the
+	// proxy: while its process ran, or as it exited, and by what signal
+	// (TakeAppConnEnd). The recorder tells by it the application's giving
+	// up on a call, a fault, from its exit cutting the call, the run's end.
+	// A process that handles a stop signal another process sent and exits
+	// from its handler (a JVM's or .NET's default) exits with no signal in
+	// its status: k_stop_signal notes the signal as it is sent, and the
+	// release carries it. It is required, as the release is: without it a
+	// stopped client's exit would read as the run's end, and the calls it
+	// had open would record no fault.
+	ss, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		Name:    "signal_generate",
+		Program: objs.K_stopSignal,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the signal_generate hook that notes the stop signals sent to the application")
+		return err
+	}
+	h.stopSignal = ss
+	acr, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCgroupInetSockRelease,
+		Program: objs.K_appConnRelease,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the sock_release cgroup hook that says how the application released its connections")
+		return err
+	}
+	h.appConnRelease = acr
+
 	// Ingress is captured while recording, and in mock mode whenever requests are on, so a replay can
 	// compare the app's actual responses with the recorded cases. In mock mode the wrapped process is a
 	// test runner, so a failure to attach here only means no requests are recorded; the egress capture
 	// the run depends on goes ahead.
 	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests && len(agent.GetPortToSendToKernel(ctx, opts.Rules)) > 0) {
-		if err := h.attachIngress(cGroupPath, objs); err != nil {
+		if err := h.attachIngress(cGroupPath, objs, link.AttachCgroup); err != nil {
 			if !setupOpts.MockMode {
 				return err
 			}
@@ -662,58 +757,42 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		agentInfo.RecordingStartTime = recordingStart(h.logger, hostRecordingStart())
 	}
 
-	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
-	// slot consumed by the BPF cgroup hooks) before it is written.
-	if agent.AgentInfoCustomizer != nil {
-		agent.AgentInfoCustomizer(&agentInfo)
-	}
+	err = h.sendFinalAgentInfo(agentInfo, func(info *structs.AgentInfo) error {
+		// Under the proven switch, the application's non-DNS UDP is watched
+		// for replies, and QUIC refused (udpwatch.go).
+		udpFlags, err := h.startProvenUDP(cGroupPath)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to start the proven switch's UDP watch")
+			return err
+		}
+		info.Flags &^= structs.FlagProvenUDP
+		info.Flags |= udpFlags
+		// Under the proven switch, the application's listens and the
+		// progress of its start, for keploy test's readiness (readywatch.go).
+		readyFlags, err := h.startProvenReady(cGroupPath, opts.IsDocker, opts.Mode)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to start the proven switch's readiness watch")
+			return err
+		}
+		info.Flags &^= structs.FlagProvenReady
+		info.Flags |= readyFlags
 
-	// OR'd in after the customizer so a downstream build setting its own
-	// flags cannot accidentally clear it, and only when both post_bind
-	// hooks are attached — bind4/6 must not hand the port choice to the
-	// kernel unless something is listening for the kernel's answer.
-	if h.kernelPortAlloc {
-		agentInfo.Flags |= structs.FlagKernelPortAlloc
-	}
-	agentInfo.Flags = classifyFlag(agentInfo.Flags, h.socket != nil)
-	// The bind hooks note what the app binds for the ingress hold only
-	// once both its programs are attached (ingressport.go).
-	agentInfo.Flags = ingressHoldFlag(agentInfo.Flags, h.IngressHeld())
-	// Under the proven switch, the application's non-DNS UDP is watched for
-	// replies, and QUIC refused (udpwatch.go).
-	udpFlags, err := h.startProvenUDP(cGroupPath)
+		// A client keploy cannot register would have none of its
+		// pass-through ports bypassed, so the start fails here rather than
+		// going on without them.
+		if err := h.registerClient(clientInfo, setupOpts); err != nil {
+			return fmt.Errorf("failed to register the client's pass-through ports with the kernel: %w", err)
+		}
+		logKernelPassThroughEgress(ctx, h.logger, setupOpts, opts.Rules)
+		proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
+		if err != nil {
+			return err
+		}
+		h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
+		info.Proxy = proxyInfo
+		return nil
+	}, h.SendAgentInfo)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to start the proven switch's UDP watch")
-		return err
-	}
-	agentInfo.Flags &^= structs.FlagProvenUDP
-	agentInfo.Flags |= udpFlags
-	// Under the proven switch, the application's listens and the progress
-	// of its start, for keploy test's readiness (readywatch.go).
-	readyFlags, err := h.startProvenReady(cGroupPath, opts.IsDocker, opts.Mode)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to start the proven switch's readiness watch")
-		return err
-	}
-	agentInfo.Flags &^= structs.FlagProvenReady
-	agentInfo.Flags |= readyFlags
-
-	// A client keploy cannot register would have none of its pass-through
-	// ports bypassed, so the start fails here rather than going on without them.
-	if err := h.registerClient(clientInfo, setupOpts); err != nil {
-		return fmt.Errorf("failed to register the client's pass-through ports with the kernel: %w", err)
-	}
-	logKernelPassThroughEgress(ctx, h.logger, setupOpts, opts.Rules)
-	proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
-	if err != nil {
-		return err
-	}
-	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
-
-	agentInfo.Proxy = proxyInfo
-	err = h.SendAgentInfo(agentInfo)
-	if err != nil {
-		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
 	}
 
@@ -751,7 +830,8 @@ func (h *Hooks) resolveProxyInfo(ctx context.Context, setupOpts config.Agent, op
 // ProxyIPv4 is the IPv4 address the application reaches the proxy at, once
 // Load has returned: loopback for a native agent, which shares the
 // application's network namespace, and for one started with --is-docker, its
-// container's own address, as GetProxyInfo decides.
+// container's own address, or loopback where the container has no IPv4
+// address but loopback's, as GetProxyInfo decides.
 func (h *Hooks) ProxyIPv4() string {
 	return h.proxyIP4
 }
@@ -831,6 +911,16 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 			utils.LogError(h.logger, err, "failed to close the sock_create hook")
 		}
 	}
+	if h.appConnRelease != nil {
+		if err := h.appConnRelease.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sock_release hook of the application's connections")
+		}
+	}
+	if h.stopSignal != nil {
+		if err := h.stopSignal.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the signal_generate hook of the stop signals sent to the application")
+		}
+	}
 	// What each program skipped in the session, read before they close.
 	if h.skips != nil {
 		h.objectsMutex.RLock()
@@ -861,6 +951,9 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
 	h.stopAppConns()
+	if err := h.closeInstanceFork(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the sched_process_fork hook that keeps keploy instances")
+	}
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}
@@ -978,6 +1071,10 @@ func logKernelPassThroughEgress(ctx context.Context, logger *zap.Logger, opts co
 	}
 }
 
+// containerAddress is the address the container of an agent started with
+// --is-docker is reached at (utils.GetContainerIP); a test sets another.
+var containerAddress = utils.GetContainerIP
+
 func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.HookCfg) (structs.ProxyInfo, error) {
 	port := opts.ProxyPort
 	if cfg.Port != 0 {
@@ -1018,10 +1115,14 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 
 		return proxyInfo, nil
 	}
-	AgentIP, err := utils.GetContainerIPv4() // in case of docker we will get the container's IP fron within the container
+	containerIP, err := containerAddress() // in case of docker we will get the container's IP fron within the container
 	if err != nil {
 		return structs.ProxyInfo{}, err
 	}
+	if containerIP.To4() == nil {
+		return ipv6OnlyProxyInfo(containerIP, port), nil
+	}
+	AgentIP := containerIP.String()
 	ipv4, err := IPv4ToUint32(AgentIP)
 	if err != nil {
 		return structs.ProxyInfo{}, err
@@ -1043,6 +1144,28 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 	}
 
 	return proxyInfo, nil
+}
+
+// ipv6OnlyProxyInfo is where an agent started with --is-docker whose container
+// has no IPv4 address but loopback's (a single-stack IPv6 Pod) has the kernel
+// send the applications' connections: an IPv6 one to the container's own IPv6
+// address ip, as it is, and an IPv4 one to loopback. The applications share
+// the agent's network namespace (a Pod's containers do, and docker runs the
+// application in the agent container's), where loopback reaches the proxy;
+// and on a network with no IPv4 no other IPv4 address could.
+func ipv6OnlyProxyInfo(ip net.IP, port uint32) structs.ProxyInfo {
+	b := ip.To16()
+	var ip6 [4]uint32
+	for i := range ip6 {
+		// Host order, as ToIPv4MappedIPv6 gives it: the programs turn each
+		// word to network order as they rewrite the destination.
+		ip6[i] = binary.BigEndian.Uint32(b[4*i:])
+	}
+	return structs.ProxyInfo{
+		IP4:  0x7f000001, // 127.0.0.1
+		IP6:  ip6,
+		Port: port,
+	}
 }
 
 // IPv4ToUint32 converts a string representation of an IPv4 address to a 32-bit integer.
@@ -1096,4 +1219,21 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 	}
 
 	return result, nil
+}
+
+// SetProxyPorts tells the loaded hooks that the proxy listens on proxyPort and
+// its DNS server on dnsPort (agent.ProxyPortsSetter): the agent info Load
+// sent, sent again with those ports. Load's redirect to the proxy goes to
+// GetProxyInfo's port, the proxy's own unless a port override is set; the
+// agent moves no port where one is.
+func (h *Hooks) SetProxyPorts(proxyPort, dnsPort uint32) error {
+	h.agentInfoMu.Lock()
+	defer h.agentInfoMu.Unlock()
+	if !h.agentInfoSent {
+		return errors.New("the hooks have sent the kernel no agent info: they are not loaded")
+	}
+	info := h.agentInfo
+	info.Proxy.Port = proxyPort
+	info.DNSPort = int32(dnsPort)
+	return h.sendAgentInfoLocked(info)
 }

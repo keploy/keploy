@@ -91,7 +91,7 @@ exec env -i PATH="$PATH" "$@"`,
 				logger:      zap.NewNop(),
 				docker:      &noContainers{},
 				kind:        tc.kind,
-				cmd:         tc.cmd,
+				cmd:         utils.NewAppCommand(tc.cmd),
 				composeFile: composeFile,
 				opts:        models.SetupOptions{AgentURI: agentURI},
 			}

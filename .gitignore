@@ -70,6 +70,12 @@ testdata
 # the parser is tested against what the runners actually emit.
 !pkg/platform/coverage/report/testdata/
 !pkg/platform/coverage/report/testdata/**
+# The secret detector's corpus: samples and the findings sanitize must give.
+!pkg/service/tools/testdata/
+!pkg/service/tools/testdata/**
+# The secret detector's synthetic configs: the findings gitleaks gave for them.
+!pkg/service/tools/internal/secretscan/testdata/
+!pkg/service/tools/internal/secretscan/testdata/**
 # Mocks as the recorder writes them (a production-shape recording's): the
 # in-place YAML encoder must write them byte for byte as EncodeMock did.
 !pkg/platform/yaml/mockdb/testdata/
@@ -85,6 +91,14 @@ testdata
 !pkg/platform/yaml/testdb/testdata/**
 !pkg/platform/yaml/reportdb/testdata/
 !pkg/platform/yaml/reportdb/testdata/**
+# A mysqlclient connection to MariaDB as a relay captured it: recorded and
+# replayed, it must be served byte for byte as the server sent it.
+!pkg/agent/proxy/integrations/mysql/replayer/testdata/
+!pkg/agent/proxy/integrations/mysql/replayer/testdata/**
+# Real zone files of IANA's tzdata releases, copied from Go's zoneinfo.zip of
+# each: a zone file of another release than keploy's must read as its zone.
+!pkg/matcher/learn/testdata/
+!pkg/matcher/learn/testdata/**
 
 #Ignore the c and header files
 *.c

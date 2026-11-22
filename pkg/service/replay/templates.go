@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
@@ -73,7 +73,7 @@ func (r *Replayer) resolveExpected(run *templates.Run, check *templates.CheckRes
 	r.logTemplateFailures(sent.Name, testSetID, res.Failures, check, true)
 	for _, c := range res.Captures {
 		r.logger.Debug("captured a template value from the app's answer",
-			zap.String("testcase", sent.Name), zap.String("key", c.Key), zap.String("value", c.Value), zap.String("where", c.Where))
+			zap.String("testcase", sent.Name), zap.String("key", c.Key), zap.Int("value_bytes", len(c.Value)), zap.String("where", templateWhereShape(c.Where)))
 	}
 	exp := *sent
 	exp.HTTPResp = res.Resp
@@ -129,10 +129,15 @@ func (r *Replayer) logTemplateFailures(testCase, testSetID string, fs []template
 		if check != nil {
 			next = check.NextStep(testCase, f, canCapture)
 		}
-		r.logger.Warn("a template variable's place does not hold what it must, so the test case fails",
+		// The place by its shape (a body key can be this run's value: a
+		// user's id), and not the why: it states the values the place and
+		// the variable hold (a cookie, a token, a captured id). The test
+		// report says the why, and both whole.
+		where := templateWhereShape(f.Where)
+		r.logger.Warn("a template variable's place does not hold what it must, so the test case fails (the test report says why)",
 			zap.String("testcase", testCase), zap.String("testset", testSetID),
-			zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), zap.String("why", f.Why),
-			zap.String("next_step", next))
+			zap.String("where", where), zap.String("placeholder", f.Placeholder), zap.Int("why_bytes", len(f.Why)),
+			zap.String("next_step", models.AdviceLogText(strings.ReplaceAll(next, f.Where, where))))
 	}
 }
 
@@ -359,35 +364,35 @@ func (r *Replayer) logTemplateCheck(testSetID string, check templates.CheckResul
 		for _, f := range check.Refused[name] {
 			utils.LogError(r.logger, nil, "a test case's placeholder is refused; the test case fails without being sent",
 				zap.String("testset", testSetID), zap.String("testcase", f.TestCase), zap.String("placeholder", f.Placeholder),
-				zap.String("where", f.Where), zap.String("why", f.Why),
-				zap.String("next_step", "edit the test case as the reason says, then run keploy test again"))
+				zap.String("where", templateWhereShape(f.Where)), zap.String("why", models.AdviceLogText(f.Why)),
+				zap.String("next_step", "edit the test case as the reason says (the test report says it whole), then run keploy test again"))
 		}
 	}
 	for _, u := range check.Undefined {
 		if u.Expression {
 			r.logger.Warn("template text is an expression (a pipe, a function call, a bare dot), which keploy test does not render: it is sent and compared as the literal text",
 				zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
-				zap.String("where", u.Where),
+				zap.String("where", templateWhereShape(u.Where)),
 				zap.String("next_step", "an older keploy rendered some of these ({{ .id | print }}): write the value the expression stood for in its place, or a placeholder keploy reads ({{string .k}}, {{int .k}}, {{float .k}}), or leave the text as it is"))
 			continue
 		}
 		if u.OutsideGrammar {
 			r.logger.Warn("a placeholder names a key that is not a template key (one name of letters, digits and _, starting with a letter or _): it is sent and compared as the literal text",
 				zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
-				zap.String("where", u.Where),
+				zap.String("where", templateWhereShape(u.Where)),
 				zap.String("next_step", "a template key is one name ({{string .userId}}): rename the key in config.yaml's template and in the test cases, or leave the text as it is"))
 			continue
 		}
 		r.logger.Warn("a placeholder names a key the test set's config.yaml does not define: it is sent and compared as the literal text",
 			zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
-			zap.String("where", u.Where),
+			zap.String("where", templateWhereShape(u.Where)),
 			zap.String("next_step", "add the key to config.yaml's template (its value as recorded), or fix the key's name in the test case"))
 	}
 	for _, u := range check.Uncaptured {
 		r.logger.Warn("a request sends a template key that no earlier test case captures: every run sends config.yaml's recorded value there",
 			zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
-			zap.String("where", u.Where),
-			zap.String("next_step", u.UncapturedNextStep()))
+			zap.String("where", templateWhereShape(u.Where)),
+			zap.String("next_step", models.AdviceLogText(u.UncapturedNextStep())))
 	}
 	r.warnNoiseOverVariables(testSetID, check.Places, cases, check.Refused)
 }
@@ -433,7 +438,7 @@ func (r *Replayer) warnNoiseOverVariables(testSetID string, places []templates.P
 		}
 		r.logger.Warn("a noise entry covers a template variable's place: the variable is asserted there anyway, and the noise still applies to the rest",
 			zap.String("testset", testSetID), zap.String("testcase", p.TestCase), zap.String("noise", entry),
-			zap.String("variable", p.Placeholder.Text), zap.String("where", p.Where),
+			zap.String("variable", p.Placeholder.Text), zap.String("where", templateWhereShape(p.Where)),
 			zap.String("next_step", next))
 	}
 }
@@ -658,15 +663,23 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 		}
 		results = append(results, *res)
 	}
+	return true, r.failSetUnrun(ctx, testRunID, testSetID, results, why.Error(), started)
+}
+
+// failSetUnrun writes the FAILED report of a test set keploy fails without
+// running any of its test cases, and counts it in the run's summary. results
+// are the set's rows, each FAILED, unsent and graded HIGH, and written to the
+// store already; why is the set's failure reason.
+func (r *Replayer) failSetUnrun(ctx context.Context, testRunID, testSetID string, results []models.TestResult, why string, started time.Time) error {
 	timeTaken := time.Since(started)
 	report := &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
 		Status:        string(models.TestSetStatusFailed),
-		FailureReason: why.Error(),
-		Failure:       len(testCases),
-		Total:         len(testCases),
-		HighRisk:      len(testCases),
+		FailureReason: why,
+		Failure:       len(results),
+		Total:         len(results),
+		HighRisk:      len(results),
 		Tests:         results,
 		TimeTaken:     timeTaken.String(),
 		CmdUsed:       r.config.Test.CmdUsed,
@@ -675,7 +688,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	r.noteSetEnd(report)
 	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
-		return true, err
+		return err
 	}
 	r.completeTestReportMu.Lock()
 	r.completeTestReport[testSetID] = TestReportVerdict{
@@ -689,18 +702,20 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	r.totalTestFailed += report.Failure
 	r.totalTestTimeTaken += timeTaken
 	r.completeTestReportMu.Unlock()
-	return true, nil
+	return nil
 }
 
 // mustPassDeletions splits the failed test cases of a run in two for
-// --must-pass: those it removes, and those refused when their set loaded
-// (every template failure a refusal), which were never sent and are kept.
+// --must-pass: those it removes, and those never sent, which are kept: those
+// refused when their set loaded (every template failure a refusal), and
+// those selected that are not on disk (notFoundUnsent), with nothing to
+// remove.
 func mustPassDeletions(results []models.TestResult) (deletable, refused []string) {
 	for _, res := range results {
 		if res.Status != models.TestStatusFailed {
 			continue
 		}
-		if refusedUnsent(res) {
+		if refusedUnsent(res) || notFoundUnsent(res) {
 			refused = append(refused, res.TestCaseID)
 			continue
 		}
@@ -779,6 +794,9 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 		return nil
 	}
 	out := &models.TestRequest{Test: tc.Name}
+	// Where the test began in its recording, whatever of its request keploy
+	// reads below.
+	out.RecordedAt, _ = recordReqResTimestamps(tc)
 	sent := toSend(run, tc)
 	var parts []models.TestRequestPart
 	size := 0
@@ -791,11 +809,10 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 			add(prefix+k, rec[k], live[k])
 		}
 	}
+	// A file kept beside the test case is read only inside its recording,
+	// as the replay sends it (pkg.ReadRecordingFile).
 	read := func(path string) (string, error) {
-		if keployPath != "" && !filepath.IsAbs(path) {
-			path = filepath.Join(keployPath, path)
-		}
-		b, err := os.ReadFile(path)
+		b, err := pkg.ReadRecordingFile(keployPath, path)
 		return string(b), err
 	}
 	// numbered names the n-th part (from 0) of a name: the name, then
@@ -983,7 +1000,7 @@ func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *mo
 		why := fmt.Sprintf("the app answered %q here, but sent %q as %s to its dependency (%s %s) in this test",
 			c.Value, b.Value, c.Key, b.Mock, b.Place)
 		r.logger.Warn("a value this test case captured is not the one the application sent its dependency",
-			zap.String("testcase", tc.Name), zap.String("where", c.Where), zap.String("why", why),
+			zap.String("testcase", tc.Name), zap.String("where", templateWhereShape(c.Where)), zap.String("why", models.AdviceLogText(why)),
 			zap.String("next_step", "the application answers another value than the one it stored: fix the application, or re-record the test if that is intended"))
 		fails = append(fails, models.TemplateFailure{Where: c.Where, Placeholder: templates.Format(true, "", c.Key), Why: why})
 	}
@@ -1006,4 +1023,12 @@ func headerNames(rec, live map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// templateWhereShape is a template place ("body.id", "response
+// body.items[0].id", "header Location", "body frame 3 data") as a log line
+// names it: every body path it holds in its shape (a key can be a value: a
+// user's id), the rest as it is (models.AdviceLogText).
+func templateWhereShape(where string) string {
+	return models.AdviceLogText(where)
 }

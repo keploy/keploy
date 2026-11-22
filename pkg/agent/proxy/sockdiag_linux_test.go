@@ -25,7 +25,7 @@ func exactLookupSays(t *testing.T, s diagTCP, err error) (asked func() int64) {
 	t.Helper()
 	var n atomic.Int64
 	was := lookupExact
-	lookupExact = func(*diagSock, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
+	lookupExact = func(*diagSock, uint32, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
 		n.Add(1)
 		return s, err
 	}

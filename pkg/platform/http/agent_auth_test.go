@@ -2,12 +2,14 @@ package http
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -225,6 +227,44 @@ func TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked(t *testing.T) {
 	require.True(t, launched, "an agent that got no token is not on record as launched, so nothing checks it and it serves open unreported")
 }
 
+// TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken: every native
+// agent of a run is handed the run's token, the one this process presents: in
+// a record, a test, and keploy mock's record and replay, and again for a
+// second agent of the same run (one that replaces the first). The client
+// presents that one token on every request it sends any agent of the run, so
+// an agent handed another would refuse them all, and one handed none would
+// serve its control-plane API to any caller that reaches its port
+// (routes.ConsumeSessionToken).
+func TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	require.NotEmpty(t, token.Session(), "this process has no run token to hand its agents")
+	a := New(zap.NewNop(), nil, &config.Config{})
+	for _, tc := range []struct {
+		name string
+		opts models.SetupOptions
+	}{
+		{"record", models.SetupOptions{Mode: models.MODE_RECORD}},
+		{"test", models.SetupOptions{Mode: models.MODE_TEST}},
+		{"mock record", models.SetupOptions{Mode: models.MODE_RECORD, MockMode: true}},
+		{"mock replay", models.SetupOptions{Mode: models.MODE_TEST, MockMode: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for agent := 1; agent <= 2; agent++ {
+				opts := tc.opts
+				opts.AgentPort, opts.ProxyPort, opts.DnsPort = 26789, 26790, 26791
+				opts.AgentURI = "http://localhost:26789/agent"
+				args := a.nativeAgentArgs(opts)
+				i := slices.Index(args, "--token-file")
+				require.GreaterOrEqual(t, i, 0, "agent %d of a %s run is started without --token-file: %v", agent, tc.name, args)
+				require.Less(t, i+1, len(args))
+				got, err := token.ReadFile(args[i+1])
+				require.NoError(t, err)
+				require.Equal(t, token.Session(), got, "agent %d of a %s run is handed a token that is not the run's", agent, tc.name)
+			}
+		})
+	}
+}
+
 // TestNew_BuildsClientsThatCarryTheSessionToken pins what New wires up. The
 // transport has its own tests, but New handing it an empty token left them all
 // green while every request the CLI made was a 401 — or, against an agent that
@@ -356,4 +396,71 @@ func TestNativeAgentLaunch_TellsTheAgentWhereToReportItsTeardown(t *testing.T) {
 	remove()
 	_, err = os.Stat(filepath.Dir(progress))
 	require.True(t, os.IsNotExist(err), "the directory outlives the agent: %v", err)
+}
+
+// A SCHEME AN EMBEDDER REGISTERED MUST SURVIVE THE AGENT'S OWN POOL.
+//
+// agentPool gives the AgentClient a clone of http.DefaultTransport so another
+// client's cancellation cannot close a connection under it. http.Transport.Clone
+// copies the settings and NOT the handlers installed with RegisterProtocol, so
+// on the clone alone an embedder that taught the default transport a scheme of
+// its own lost it: every request on that scheme is refused as "unsupported
+// protocol scheme" before a connection is opened.
+//
+// k8s-proxy does exactly that -- it carries the agent's token inside a
+// keploy-agent:// URL that a registered handler unseals -- so with the clone
+// alone its every agent call fails and a recording dies at its first one.
+// ownPool is what keeps it working, by sending anything that is not http or
+// https to the transport the scheme was registered on.
+//
+// Written because that fix shipped without a test: nothing else here would
+// notice if the routing went away.
+func TestAgentPoolKeepsAnEmbeddersRegisteredScheme(t *testing.T) {
+	const scheme = "keploy-agent-probe"
+
+	// The embedder's transport, standing in for http.DefaultTransport.
+	registered := http.DefaultTransport.(*http.Transport).Clone()
+	registered.RegisterProtocol(scheme, answeringRoundTripper{})
+
+	// The premise, asserted rather than assumed: a CLONE does not carry the
+	// registered scheme. If the standard library ever changes that, this test
+	// says so instead of passing for the wrong reason.
+	if _, err := (&http.Client{Transport: registered.Clone()}).Get(scheme + "://agent/ping"); err == nil {
+		t.Fatal("a clone served the registered scheme; the premise no longer holds and ownPool's routing may be unnecessary")
+	}
+
+	pool := &ownPool{pool: registered.Clone(), registered: registered}
+	resp, err := (&http.Client{Transport: pool}).Get(scheme + "://agent/ping")
+	if err != nil {
+		t.Fatalf("the agent pool dropped the embedder's registered scheme: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// And http still goes to the pool of its own, which is what that pool is
+	// for -- routing everything at `registered` would undo it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }))
+	defer srv.Close()
+	httpResp, err := (&http.Client{Transport: pool}).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("the agent pool failed an ordinary http request: %v", err)
+	}
+	defer func() { _ = httpResp.Body.Close() }()
+	if httpResp.StatusCode != http.StatusTeapot {
+		t.Errorf("http status = %d, want 418", httpResp.StatusCode)
+	}
+}
+
+// answeringRoundTripper stands in for the embedder's handler: it answers
+// without a network, which is the whole point of registering a scheme.
+type answeringRoundTripper struct{}
+
+func (answeringRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("ok")),
+		Request:    r,
+	}, nil
 }

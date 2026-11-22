@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,46 +65,51 @@ func (d *viewDb) GetSessionMocks() ([]*models.Mock, error) {
 // the store answers it with, and misses where a read misses; verify mode, on
 // for the indexed side, compares every call's fits with a read's, in the
 // read's order, where a call's own bucket and the URL learners interleave.
+// The seeds share nothing but the count and run at once.
 func TestAnOwnedIndexedStrictMatchIsTheOneAReadGives(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	was := integrations.ExactViewVerify.Load()
-	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
-	interleaved := 0
-	for seed := int64(1); seed <= randomStrictSeeds(); seed++ {
-		var noise []string
-		if seed%2 == 0 {
-			noise = []string{`/q/[0-9]+`}
-		}
-		perTest, session := strictPoolOf(seed, 400)
-		indexed, read := newHTTP(), newHTTP()
-		ixDb := newViewDb(perTest, session)
-		readDb := &exactGenDb{newOwnGenDb(slices.Clone(perTest), slices.Clone(session))}
-		rnd := rand.New(rand.NewSource(seed * 7))
-		for c := 0; c < 300; c++ {
-			r := getTo(fmt.Sprintf("/p/%d/q/%d", rnd.Intn(7), rnd.Intn(4)), strictIxHost)
-			if rnd.Intn(3) == 0 {
-				r.method = "POST"
-			}
-			integrations.ExactViewVerify.Store(true)
-			got := strictMatchOf(t, indexed, r, ixDb, ixDb, noise)
-			integrations.ExactViewVerify.Store(false)
-			want := strictMatchOf(t, read, r, readDb, nil, noise)
-			if (got == nil) != (want == nil) || got != nil && got.Name != want.Name {
-				t.Fatalf("seed %d call %d %s %s: indexed %v, read %v", seed, c, r.method, r.url.Path, got, want)
-			}
-			if own, has := indexed.strictIx.owned.last, indexed.strictIx.owned.has; has {
-				s := newStrictSieve(r, indexed.newStrictNoise(nil, nil, noise))
-				if exact, wide := own.byKey[s.method+" "+s.masked], own.byURL[s.method]; len(exact) > 0 && len(wide) > 0 && wide[0] < exact[len(exact)-1] {
-					interleaved++
+	var interleaved atomic.Int64
+	t.Run("seeds", func(t *testing.T) {
+		for seed := int64(1); seed <= randomStrictSeeds(); seed++ {
+			t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
+				t.Parallel()
+				var noise []string
+				if seed%2 == 0 {
+					noise = []string{`/q/[0-9]+`}
 				}
-			}
+				perTest, session := strictPoolOf(seed, 400)
+				indexed, read := verifyOf(newHTTP(), true), verifyOf(newHTTP(), false)
+				ixDb := newViewDb(perTest, session)
+				readDb := &exactGenDb{newOwnGenDb(slices.Clone(perTest), slices.Clone(session))}
+				rnd := rand.New(rand.NewSource(seed * 7))
+				for c := 0; c < 300; c++ {
+					r := getTo(fmt.Sprintf("/p/%d/q/%d", rnd.Intn(7), rnd.Intn(4)), strictIxHost)
+					if rnd.Intn(3) == 0 {
+						r.method = "POST"
+					}
+					got := strictMatchOf(t, indexed, r, ixDb, ixDb, noise)
+					want := strictMatchOf(t, read, r, readDb, nil, noise)
+					if (got == nil) != (want == nil) || got != nil && got.Name != want.Name {
+						t.Fatalf("seed %d call %d %s %s: indexed %v, read %v", seed, c, r.method, r.url.Path, got, want)
+					}
+					if own, has := indexed.strictIx.owned.last, indexed.strictIx.owned.has; has {
+						s := newStrictSieve(r, indexed.newStrictNoise(nil, nil, noise))
+						if exact, wide := own.byKey[s.method+" "+s.masked], own.byURL[s.method]; len(exact) > 0 && len(wide) > 0 && wide[0] < exact[len(exact)-1] {
+							interleaved.Add(1)
+						}
+					}
+				}
+				if !indexed.strictIx.owned.has || ixDb.refused != 0 {
+					t.Fatalf("seed %d: no index of the test's own was built, or it offered %d recordings the store refused", seed, ixDb.refused)
+				}
+			})
 		}
-		if !indexed.strictIx.owned.has || ixDb.refused != 0 {
-			t.Fatalf("seed %d: no index of the test's own was built, or it offered %d recordings the store refused", seed, ixDb.refused)
-		}
+	})
+	if t.Failed() {
+		return
 	}
-	if want := int(100 * randomStrictSeeds() / 6); interleaved < want {
-		t.Fatalf("only %d calls had their own bucket and a URL learner out of the list's order, want %d: the row compares too little", interleaved, want)
+	if got, want := int(interleaved.Load()), int(100*randomStrictSeeds()/6); got < want {
+		t.Fatalf("only %d calls had their own bucket and a URL learner out of the list's order, want %d: the row compares too little", got, want)
 	}
 }
 

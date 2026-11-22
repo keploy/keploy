@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent"
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -211,17 +211,6 @@ func TestAParkedCallToAPortKeployDidNotMoveIsClosed(t *testing.T) {
 	}
 }
 
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
-}
-
 // The forwarder starts, and is registered with the hold, at once, whether or
 // not the app listens on its moved port yet: a call that comes before the app
 // listens waits for it in its dial (dialApp), and is answered once it does.
@@ -246,7 +235,7 @@ func TestAForwarderStartsAtOnceAndItsCallsWaitForTheApp(t *testing.T) {
 	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
 	defer cancel()
 	app := sharedAppAddr(t) // the app has not listened yet
-	orig := portOf(t, freeAddr(t))
+	orig := uint16(testnet.ReservedPort(t))
 	g := newGoTCPIngressHook(pm)
 	if err := g.StartIngress(ctx, orig, portOf(t, app)); err != nil {
 		t.Fatal(err)
@@ -611,9 +600,9 @@ func TestTheEndCountsTheHoldsIPv6CallsApart(t *testing.T) {
 func TestAForwarderIsRegisteredWithTheHoldAndUnregisteredWhenItStops(t *testing.T) {
 	holder := &fakePortHolder{held: true}
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
-	orig := portOf(t, freeAddr(t))
+	orig := uint16(testnet.ReservedPort(t))
 	g := newGoTCPIngressHook(pm)
-	if err := g.StartIngress(context.Background(), orig, portOf(t, freeAddr(t))); err != nil {
+	if err := g.StartIngress(context.Background(), orig, uint16(testnet.ReservedPort(t))); err != nil {
 		t.Fatal(err)
 	}
 	holder.mu.Lock()
@@ -789,7 +778,7 @@ func TestAParkedCallAndTheForwardersShareThePortsSynchronousSlot(t *testing.T) {
 		captured <- req.URL.Path
 	})
 	app, got, answer := heldUpstream(t)
-	orig := portOf(t, freeAddr(t))
+	orig := uint16(testnet.ReservedPort(t))
 	park := parkListener{Listener: loopbackListener(t), orig: int(orig)}
 	holder := &fakePortHolder{park: park, moved: map[uint16]uint16{orig: portOf(t, app)}, held: true}
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder, synchronous: true}

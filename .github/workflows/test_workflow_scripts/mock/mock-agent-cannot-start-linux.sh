@@ -100,6 +100,10 @@ if [ -z "${E2E_IMAGE:-}" ]; then
   docker pull -q "$IMAGE" >/dev/null || { echo "FAIL: could not pull $IMAGE"; exit 1; }
 fi
 cp "$BIN" "$WORK/keploy" || { echo "FAIL: no keploy binary at $BIN"; exit 1; }
+# The bound on each run inside (bash hang_guard.sh): the run's exit code is
+# its own, not timeout(1)'s, which differs between GNU and uutils coreutils
+# (the image is the runner's distribution: Ubuntu 26.04's is uutils).
+cp "$(dirname "${BASH_SOURCE[0]}")/../hang_guard.sh" "$WORK/hang_guard.sh" || exit 1
 
 # Runs inside each container: $1 is the case. Leaves, per command, its exit
 # code and log, the list of the commands it ran (runs), and a marker if the
@@ -121,7 +125,7 @@ case "$BASE" in
   agent-no-ipv4)
     mount -t tracefs nodev /sys/kernel/tracing || exit 1
     for mode in record test; do
-      timeout -s INT -k 30 120 /work/keploy agent --is-docker --mode "$mode" --client-pid 1 > "$D/agent-$mode.log" 2>&1
+      bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy agent --is-docker --mode "$mode" --client-pid 1 > "$D/agent-$mode.log" 2>&1
       echo $? > "$D/agent-$mode.exit"
       echo "agent-$mode" >> "$D/runs"
     done
@@ -165,7 +169,7 @@ EOD
 esac
 for sub in record replay; do
   # shellcheck disable=SC2086
-  timeout -s INT -k 30 120 /work/keploy mock "$sub" -c "$CMD" $EXTRA --disable-tele > "$D/mock-$sub.log" 2>&1
+  bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy mock "$sub" -c "$CMD" $EXTRA --disable-tele > "$D/mock-$sub.log" 2>&1
   echo $? > "$D/mock-$sub.exit"
   echo "mock-$sub" >> "$D/runs"
 done
@@ -192,7 +196,7 @@ TC
 cd "$D/kapp" || exit 1
 for sub in test record; do
   # shellcheck disable=SC2086
-  timeout -s INT -k 30 120 /work/keploy "$sub" -c "$CMD" $EXTRA --disable-tele > "$D/$sub.log" 2>&1
+  bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy "$sub" -c "$CMD" $EXTRA --disable-tele > "$D/$sub.log" 2>&1
   echo $? > "$D/$sub.exit"
   echo "$sub" >> "$D/runs"
 done

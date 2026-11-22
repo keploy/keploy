@@ -41,3 +41,20 @@ func (c *UnmatchedCall) NameRecordedIn(test string, owners map[string][]string) 
 	c.RecordedIn = by[0]
 	return true
 }
+
+// NameEarlierIn names, on c, a call test made that no mock answered, the
+// other test that owns the recording Earlier names (EarlierIn), and reports
+// whether it named one: a test whose window, earlier than test's, holds the
+// latest recording of the call's method and path before test's own. owners
+// (MockOwners) gives Earlier's owners; the first is named. A recording test
+// owns too, or one no test owns (recorded between tests), names none: it
+// leaves c as it was. Under the proven switch only: without it no miss names
+// Earlier.
+func (c *UnmatchedCall) NameEarlierIn(test string, owners map[string][]string) bool {
+	by := owners[c.Earlier]
+	if c.Earlier == "" || len(by) == 0 || slices.Contains(by, test) {
+		return false
+	}
+	c.EarlierIn = by[0]
+	return true
+}

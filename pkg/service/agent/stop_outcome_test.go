@@ -249,6 +249,10 @@ func TestWriteStopOutcomeCarriesTheTestsWindows(t *testing.T) {
 	if err := a.EndScope(ctx, "TestOrders", 4); err != nil {
 		t.Fatal(err)
 	}
+	// A test keploy refused at its begin: the replay fails on the reason,
+	// which the account must carry.
+	const why = "TestRefunds began with the pid 5: keploy narrows a test by its pid only with the marks"
+	a.noteScopeFailed("TestRefunds", 5, time.Now(), errors.New(why))
 	path := filepath.Join(t.TempDir(), "outcome.json")
 	if err := a.writeStopOutcome(ctx, path); err != nil {
 		t.Fatalf("writeStopOutcome: %v", err)
@@ -258,8 +262,11 @@ func TestWriteStopOutcomeCarriesTheTestsWindows(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Windows) != 1 || got.Windows[0].Name != "TestOrders" || got.Windows[0].Outcome != models.ScopeOutcomePassed {
-		t.Fatalf("the outcome carries windows %+v, want TestOrders passed", got.Windows)
+	if len(got.Windows) != 2 || got.Windows[0].Name != "TestOrders" || got.Windows[0].Outcome != models.ScopeOutcomePassed || got.Windows[0].BeginRefused != "" {
+		t.Fatalf("the outcome carries windows %+v, want TestOrders passed, then TestRefunds", got.Windows)
+	}
+	if w := got.Windows[1]; w.Name != "TestRefunds" || w.PID != 5 || w.Outcome != models.ScopeOutcomeFailed || w.BeginRefused != why {
+		t.Fatalf("the outcome carries %+v, want TestRefunds (pid 5) failed, refused at its begin saying why", w)
 	}
 }
 

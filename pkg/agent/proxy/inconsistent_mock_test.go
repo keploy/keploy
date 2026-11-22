@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -9,6 +11,10 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+// answeredBeforeAskedRuns numbers the runs of
+// TestTheManagerSaysOfEachMockAnsweredBeforeItWasAskedOnce in this process.
+var answeredBeforeAskedRuns atomic.Int64
 
 // The agent leaves out of a test's pool a mock whose response is stamped
 // before its request, and says so at the default level for each such mock,
@@ -20,8 +26,12 @@ func TestTheManagerSaysOfEachMockAnsweredBeforeItWasAskedOnce(t *testing.T) {
 	defer mm.Close()
 	start := time.Date(2026, 10, 17, 11, 19, 51, 0, time.UTC)
 	end := start.Add(30 * time.Second)
+	// The process says of each mock once (pkg.WarnAnsweredBeforeAsked), and
+	// a run of the test again in the same process (go test -count) must not
+	// find its mocks already said of: each run's mocks are named for it.
+	run := answeredBeforeAskedRuns.Add(1)
 	inverted := func(name string, at time.Duration) *models.Mock {
-		m := newMockForTest(name, start.Add(at), models.LifetimePerTest)
+		m := newMockForTest(fmt.Sprintf("%s-%d", name, run), start.Add(at), models.LifetimePerTest)
 		m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(-37 * time.Microsecond)
 		return m
 	}

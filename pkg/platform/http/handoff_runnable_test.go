@@ -1,26 +1,60 @@
 package http
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/utils/stall"
 )
 
-// A decoded mock is handed to a consumer starved of CPU when it gets to run:
-// the grace is time the process could run. Before, it was 30 s of wall time,
-// and a CLI that waited longer for the CPU dropped the mock (the recording
-// went on without it). A consumer that took nothing for the grace of run time
-// is given up on.
-func TestAMockWaitsForAConsumerStarvedOfCPU(t *testing.T) {
+// A decoded mock waits for a consumer that is slow while its stream is live,
+// however long that takes: a slow consumer is back-pressure. Before, a
+// consumer that took nothing for the grace (a mock file whose lock a whole
+// file rewrite held for 49 s) had the mock dropped and the mock stream ended
+// for the rest of the recording, while its test cases went on being saved
+// without mocks.
+func TestAMockWaitsForASlowConsumerWhileItsStreamIsLive(t *testing.T) {
 	const grace = 50 * time.Millisecond
 	clk := &stall.ManualClock{}
 	ch := make(chan int)
 	taken := make(chan bool, 1)
-	go func() { taken <- handOff(ch, 1, clk, grace) }()
+	go func() { taken <- handOff(context.Background(), ch, 1, clk, grace) }()
+	// Many graces of time the process could run, and seconds of wall time:
+	// no bound of either kind gives the mock up.
+	for i := 0; i < 6; i++ {
+		clk.Advance(grace)
+		time.Sleep(500 * time.Millisecond)
+	}
+	select {
+	case ok := <-taken:
+		t.Fatalf("a live stream's mock was given up on (taken=%v) while its consumer was slow", ok)
+	default:
+	}
+	if got := <-ch; got != 1 {
+		t.Fatalf("the consumer took %d", got)
+	}
+	if !<-taken {
+		t.Fatal("a mock the consumer took was said to be dropped")
+	}
+}
+
+// Once the stream's client has ended it, the mock in hand is offered for the
+// grace of the time the process could run: the recording's drain reads on what
+// was queued after it ends the stream, also when it is starved of CPU. A
+// consumer that took nothing for the grace of run time is given up on, so a
+// stream no one reads any more does not hang.
+func TestAMockIsOfferedForTheGraceOnceItsStreamEnded(t *testing.T) {
+	const grace = 50 * time.Millisecond
+	clk := &stall.ManualClock{}
+	ch := make(chan int)
+	ended, end := context.WithCancel(context.Background())
+	end()
+	taken := make(chan bool, 1)
+	go func() { taken <- handOff(ended, ch, 1, clk, grace) }()
 	// Four graces of real wall time, no CPU: neither the clock's wall time
 	// (its timers) nor the host's may count.
-	for end := time.Now().Add(4 * grace); time.Now().Before(end); {
+	for stop := time.Now().Add(4 * grace); time.Now().Before(stop); {
 		waitLook(t, clk)
 		clk.Pass()
 	}
@@ -37,7 +71,7 @@ func TestAMockWaitsForAConsumerStarvedOfCPU(t *testing.T) {
 		t.Fatal("a mock the consumer took was said to be dropped")
 	}
 
-	go func() { taken <- handOff(ch, 2, clk, grace) }()
+	go func() { taken <- handOff(ended, ch, 2, clk, grace) }()
 	waitLook(t, clk)
 	clk.Advance(grace)
 	select {
@@ -46,7 +80,7 @@ func TestAMockWaitsForAConsumerStarvedOfCPU(t *testing.T) {
 			t.Fatal("a mock no consumer took was said to be handed off")
 		}
 	case <-time.After(time.Minute): // only turns a hang into a failure
-		t.Fatal("a consumer that took nothing for the grace of run time was not given up on")
+		t.Fatal("a consumer that took nothing for the grace of run time after its stream ended was not given up on")
 	}
 }
 

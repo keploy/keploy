@@ -4,10 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -48,6 +51,22 @@ import (
 type mysqlNoiseAdapter struct {
 	mocknoise.JSONDiffer
 }
+
+// The strict gate's live body is decoded once for all of a command's
+// candidates only through DiffJSONBodies.
+var _ mocknoise.JSONBodyDiffer = mysqlNoiseAdapter{}
+
+// DiffJSONBodies is the adapter's Diff (JSONDiffer's, DetectJSONDrift) over
+// the bodies as mocknoise.JSONBody, so the strict gate's live body, compared
+// with every candidate of a command, is decoded once (strictGate.bodyDocFor).
+func (mysqlNoiseAdapter) DiffJSONBodies(_ *models.Mock, recorded, live *mocknoise.JSONBody, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (map[string][]string, bool) {
+	return mocknoise.DetectJSONBodyDrift(recorded, live, known, typeStrict, valueChangesOnly, valIsNoise)
+}
+
+// NoiseAdapter exposes MySQL's mock-noise adapter so the top-level MySQL parser
+// can hand it to the shared engine from its MockNoise() method (the adapter
+// type itself stays unexported in this sub-package).
+func NoiseAdapter() mocknoise.Adapter { return mysqlNoiseAdapter{} }
 
 // RecordedBody returns the canonical JSON body of the mock's recorded request.
 // Command-phase data mocks carry exactly one request; multi-request bundles
@@ -118,16 +137,33 @@ func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool 
 // every parameter's type, unsigned flag and name unless both packets sent
 // them (typesSentByBoth). Any other request keeps noise as it is.
 func executeBodyNoise(noise map[string][]string, recorded *models.Mock, live *mysql.PacketBundle) map[string][]string {
+	return widenedBodyNoise(noise, executeNoiseParams(recorded, live), nil)
+}
+
+// executeNoiseParams is how many parameters executeBodyNoise ignores the
+// type, unsigned flag and name of when it compares recorded with live: the
+// larger parameter count of the two COM_STMT_EXECUTEs, or -1 (none, noise
+// kept as it is) when both sent their types or either is not one.
+func executeNoiseParams(recorded *models.Mock, live *mysql.PacketBundle) int {
 	if recorded == nil || live == nil || len(recorded.Spec.MySQLRequests) != 1 {
-		return noise
+		return -1
 	}
 	act, _ := live.Message.(*mysql.StmtExecutePacket)
 	exp, _ := recorded.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
 	if act == nil || exp == nil || typesSentByBoth(exp, act) {
+		return -1
+	}
+	return max(len(exp.Parameters), len(act.Parameters))
+}
+
+// widenedBodyNoise is noise as it is when n is negative and leftOut is
+// empty, else a copy that also ignores the type, unsigned flag and name of
+// parameters 0 to n-1 and the paths in leftOut, whatever their values.
+func widenedBodyNoise(noise map[string][]string, n int, leftOut []string) map[string][]string {
+	if n < 0 && len(leftOut) == 0 {
 		return noise
 	}
-	n := max(len(exp.Parameters), len(act.Parameters))
-	out := make(map[string][]string, len(noise)+3*n)
+	out := make(map[string][]string, len(noise)+3*max(n, 0)+len(leftOut))
 	for k, v := range noise {
 		out[k] = v
 	}
@@ -136,6 +172,9 @@ func executeBodyNoise(noise map[string][]string, recorded *models.Mock, live *my
 			// An empty list ignores the field whatever its value.
 			out["parameters."+strconv.Itoa(i)+"."+field] = []string{}
 		}
+	}
+	for _, p := range leftOut {
+		out[p] = []string{}
 	}
 	return out
 }
@@ -168,6 +207,11 @@ type strictGate struct {
 	liveBodyOK, liveBodyRead bool
 	bodiesBuilt              *int
 
+	// compared, when set, counts the candidates compare compared with the
+	// live body (its verdicts, each read once), as bodiesBuilt counts the
+	// builds.
+	compared *int
+
 	// liveQuery and liveParams are a live COM_STMT_EXECUTE's statement and
 	// its own parameter count (-1 not known): a recording of that statement
 	// is compared on as many of its parameters (recordedStatementParams).
@@ -188,7 +232,12 @@ type strictGate struct {
 	//                 exactly WHICH request fields drifted outside noise.
 	rejected    int
 	closestMock string
-	fieldDiffs  []models.MockFieldDiff
+	// closestPlaces are the places of closestMock's recording the
+	// obfuscator redacted (placesOf). fieldDiffs hold both values as they
+	// were compared: a report shows them by reportDiffs only, by the places
+	// of every recording it names.
+	closestPlaces redactedPlaces
+	fieldDiffs    []models.MockFieldDiff
 
 	// exactRejected is how many of rejected the rule of exact serving ruled
 	// out (allowsDrift without strict enforcement, allowsLiterals):
@@ -216,14 +265,55 @@ type strictGate struct {
 	// (legacyRecordedMock); read once, when first needed.
 	legacyBody                   []byte
 	legacyBodyOK, legacyBodyRead bool
+
+	// liveDoc and legacyDoc are the live body and legacyBody as compare
+	// gives them to the engine, made on first use (bodyDocFor); docsMade,
+	// when set, collects the ones made, as bodiesBuilt counts the builds.
+	liveDoc, legacyDoc *mocknoise.JSONBody
+	docsMade           *[]*mocknoise.JSONBody
+
+	// noiseMade keeps the noise sets bodyNoise made for this command's
+	// candidates; noiseSetsMade, when set, counts them, as bodiesBuilt
+	// counts the builds.
+	noiseMade     map[bodyNoiseKey]map[string][]string
+	noiseSetsMade *int
 }
 
 // bodyFor is the live request body mock's recorded one is compared with: the
 // live packet as an older keploy read it when that keploy recorded mock
 // (legacyRecordedMock), else as this one reads it.
 func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
+	if g.comparesLegacy(mock) {
+		return g.legacyBody, true
+	}
+	return g.liveRequestBody()
+}
+
+// bodyDocFor is bodyFor's body as compare gives it to the engine: one
+// mocknoise.JSONBody for the live body and one for legacyBody, so each is
+// decoded once however many candidates the command compares it with.
+// docsMade, when set, collects the ones made.
+func (g *strictGate) bodyDocFor(mock *models.Mock) *mocknoise.JSONBody {
+	doc := &g.liveDoc
+	if g.comparesLegacy(mock) {
+		doc = &g.legacyDoc
+	}
+	if *doc == nil {
+		body, _ := g.bodyFor(mock)
+		*doc = mocknoise.NewJSONBody(body)
+		if g.docsMade != nil {
+			*g.docsMade = append(*g.docsMade, *doc)
+		}
+	}
+	return *doc
+}
+
+// comparesLegacy reports whether mock's recorded body is compared with the live
+// packet as an older keploy read it (legacyBody): mock was recorded by such a
+// keploy (legacyRecordedMock) and the live packet has that reading.
+func (g *strictGate) comparesLegacy(mock *models.Mock) bool {
 	if !legacyRecordedMock(mock) {
-		return g.liveRequestBody()
+		return false
 	}
 	if !g.legacyBodyRead {
 		g.legacyBodyRead = true
@@ -248,10 +338,7 @@ func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
 			}
 		}
 	}
-	if !g.legacyBodyOK {
-		return g.liveRequestBody()
-	}
-	return g.legacyBody, true
+	return g.legacyBodyOK
 }
 
 // liveRequestBody is the live command's body (liveBody), built on its first
@@ -308,10 +395,32 @@ func (g *strictGate) recordedQuery(mock *models.Mock, q string) {
 // recordedBody is mock's recorded request body as compared with the live one
 // (recordedStatementParams).
 func (g *strictGate) recordedBody(mock *models.Mock) ([]byte, bool) {
-	if mock == nil || len(mock.Spec.MySQLRequests) != 1 {
+	bundle, statementParams, query, ok := g.recordedReading(mock)
+	if !ok {
 		return nil, false
 	}
-	bundle := &mock.Spec.MySQLRequests[0].PacketBundle
+	return mysqlRequestBody(bundle, statementParams, query)
+}
+
+// recordedJSONBody is recordedBody as compare gives it to the engine
+// (mysqlRequestJSONBody): decoded as it is built, not encoded to be decoded
+// again, when its values allow it.
+func (g *strictGate) recordedJSONBody(mock *models.Mock) (*mocknoise.JSONBody, bool) {
+	bundle, statementParams, query, ok := g.recordedReading(mock)
+	if !ok {
+		return mocknoise.NewJSONBody(nil), false
+	}
+	return mysqlRequestJSONBody(bundle, statementParams, query)
+}
+
+// recordedReading is how recordedBody reads mock's recorded request: its
+// bundle, and the statement parameter count and statement mysqlRequestBody
+// reads it with. ok is false for a mock that is not one request.
+func (g *strictGate) recordedReading(mock *models.Mock) (bundle *mysql.PacketBundle, statementParams int, query string, ok bool) {
+	if mock == nil || len(mock.Spec.MySQLRequests) != 1 {
+		return nil, 0, "", false
+	}
+	bundle = &mock.Spec.MySQLRequests[0].PacketBundle
 	q := bundle.StoredQuery()
 	if q == "" {
 		q = g.queries[mock]
@@ -324,9 +433,9 @@ func (g *strictGate) recordedBody(mock *models.Mock) ([]byte, bool) {
 	// attributes, holds the ones it reads by name, as the live body does
 	// (executeBodyParameters): split by the live statement's count.
 	if e := sqlStatementIdentity(q); live != nil && g.liveParams >= 0 && readsQueryAttributes(g.liveQuery) && e != "" && strings.EqualFold(e, sqlStatementIdentity(g.liveQuery)) {
-		return mysqlRequestBody(bundle, g.liveParams, g.liveQuery)
+		return bundle, g.liveParams, g.liveQuery, true
 	}
-	return mysqlRequestBody(bundle, recordedStatementParams(bundle, live, q, g.liveQuery, g.liveParams), "")
+	return bundle, recordedStatementParams(bundle, live, q, g.liveQuery, g.liveParams), "", true
 }
 
 // allows reports whether the candidate mock survives strict enforcement,
@@ -409,22 +518,14 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	if seen && v.allowed {
 		return true
 	}
-	noise := executeBodyNoise(g.userBodyNoise, mock, g.live)
-	if len(leftOut) > 0 {
-		out := make(map[string][]string, len(noise)+len(leftOut))
-		for k, v := range noise {
-			out[k] = v
-		}
-		for _, p := range leftOut {
-			// An empty list ignores the field whatever its value.
-			out[p] = []string{}
-		}
-		noise = out
-	}
-	body, _ := g.bodyFor(mock)
+	noise := g.bodyNoise(mock, leftOut)
+	body := g.bodyDocFor(mock)
 	if !seen {
-		recorded, recordedOK := g.recordedBody(mock)
-		v.allowed, v.drift = engine.StrictRejectRecorded(mock, recorded, recordedOK, body, noise)
+		recorded, recordedOK := g.recordedJSONBody(mock)
+		v.allowed, v.drift = engine.StrictRejectRecordedJSONBody(mock, recorded, recordedOK, body, noise)
+		if g.compared != nil {
+			*g.compared++
+		}
 		if *verdicts == nil {
 			*verdicts = make(map[*models.Mock]gateVerdict)
 		}
@@ -436,11 +537,12 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	g.rejected++
 	if g.closestMock == "" {
 		g.closestMock = mock.Name
+		g.closestPlaces = placesOf(mock)
 		if recorded, recordedOK := g.recordedBody(mock); recordedOK {
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
 			known := engine.KnownNoise(mock, noise)
-			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body), known, "body.", 96), mock, g.live)
+			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live)
 		}
 	}
 	if ce := g.logger.Check(zap.DebugLevel, "schema-noise strict: rejected candidate mock (non-noise request field drifted)"); ce != nil && !seen {
@@ -455,10 +557,48 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	return false
 }
 
+// bodyNoise is the noise compare compares mock under: executeBodyNoise's,
+// with the paths in leftOut ignored too. It depends on mock only through
+// executeNoiseParams, so it is made once a gate for each parameter count and
+// leftOut, not once a candidate: the engine and its adapters only read it.
+func (g *strictGate) bodyNoise(mock *models.Mock, leftOut []string) map[string][]string {
+	n := executeNoiseParams(mock, g.live)
+	if n < 0 && len(leftOut) == 0 {
+		return g.userBodyNoise
+	}
+	key := bodyNoiseKey{params: n, leftOut: strings.Join(leftOut, "\x00")}
+	if noise, ok := g.noiseMade[key]; ok {
+		return noise
+	}
+	noise := widenedBodyNoise(g.userBodyNoise, n, leftOut)
+	if g.noiseMade == nil {
+		g.noiseMade = make(map[bodyNoiseKey]map[string][]string)
+	}
+	g.noiseMade[key] = noise
+	if g.noiseSetsMade != nil {
+		*g.noiseSetsMade++
+	}
+	return noise
+}
+
+// bodyNoiseKey names a noise set bodyNoise made: its parameter count and its
+// leftOut paths, joined by NUL (no path holds one).
+type bodyNoiseKey struct {
+	params  int
+	leftOut string
+}
+
+// reportDiffs are fieldDiffs as a miss's report shows them: both values of
+// each at a place of places, the places of every recording the report names
+// (closestPlaces among them), redacted.
+func (g *strictGate) reportDiffs(places redactedPlaces) []models.MockFieldDiff {
+	return places.fieldDiffs(slices.Clone(g.fieldDiffs), liveStatementOf(g.live, g.liveQuery))
+}
+
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over
 // on the same command, keeping the verdicts: they still hold.
 func (g *strictGate) resetDiagnostics() {
-	g.rejected, g.closestMock, g.fieldDiffs, g.exactRejected = 0, "", nil, 0
+	g.rejected, g.closestMock, g.closestPlaces, g.fieldDiffs, g.exactRejected = 0, "", redactedPlaces{}, nil, 0
 }
 
 // queryShape is the literal-split view of a SQL text: the query with every
@@ -481,6 +621,16 @@ type queryShape struct {
 // SQL texts on the same code paths.
 const queryShapeCacheSize = querySigCacheSize
 
+// bytes is about what s holds beside the statement it was read from: its
+// template and comments, and its literals' values and headers.
+func (s *queryShape) bytes() int {
+	n := len(s.template) + len(s.comments) + int(unsafe.Sizeof(""))*cap(s.literals)
+	for _, v := range s.literals {
+		n += len(v)
+	}
+	return n
+}
+
 // queryShapeCache memoizes extractQueryShape per SQL text — the same query is
 // re-canonicalized for every candidate mock during a pool scan, and mock-side
 // texts repeat across commands. Sibling of match.go's querySigCache, 2Q for
@@ -500,13 +650,16 @@ func newQueryShapeCache() *lru.TwoQueueCache[string, *queryShape] {
 // extractQueryShape parses sql with the vitess parser (the one the matcher
 // already uses for AST-structure signatures) and splits it into template +
 // literals + comments — the MySQL equivalent of the "give it a query, get its
-// fields" helper the Postgres integration uses. Results are memoized.
+// fields" helper the Postgres integration uses. Results are memoized, those
+// memoKeeps keeps.
 func extractQueryShape(sql string) *queryShape {
 	if v, ok := queryShapeCache.Get(sql); ok {
 		return v
 	}
 	shape := computeQueryShape(sql)
-	queryShapeCache.Add(sql, shape)
+	if memoKeeps(sql, shape.bytes()) {
+		queryShapeCache.Add(sql, shape)
+	}
 	return shape
 }
 
@@ -559,7 +712,9 @@ func computeQueryShape(sql string) (shape *queryShape) {
 	}, nil)
 
 	return &queryShape{
-		template: sqlparser.String(out),
+		// The rendering's buffer may be up to twice its length: a copy
+		// holds what the cache counts (queryShape.bytes).
+		template: strings.Clone(sqlparser.String(out)),
 		literals: literals,
 		comments: strings.TrimSpace(strings.Join(comments, " ")),
 		ok:       true,
@@ -678,6 +833,136 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 // the statement's own parameters, by position, and the attributes it
 // reads, by name (body.attributes, executeBodyParameters).
 func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int, query string) ([]byte, bool) {
+	doc, ok := mysqlRequestDoc(bundle, statementParams, query)
+	if !ok {
+		return nil, false
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// mysqlRequestJSONBody is mysqlRequestBody as a mocknoise.JSONBody. When
+// every value in the body decodes as it is (decodedRequestValue), the body
+// is made decoded, as json.Unmarshal would decode mysqlRequestBody's bytes,
+// and those bytes are made only if the engine reads them: a recording a
+// replay compares with many commands is then not encoded and decoded again
+// for each. Any other body is mysqlRequestBody's bytes, decoded by the
+// engine as before.
+func mysqlRequestJSONBody(bundle *mysql.PacketBundle, statementParams int, query string) (*mocknoise.JSONBody, bool) {
+	doc, ok := mysqlRequestDoc(bundle, statementParams, query)
+	if !ok {
+		return mocknoise.NewJSONBody(nil), false
+	}
+	if value, plain := decodedRequestValue(doc); plain {
+		if check := decodedBodyCheck; check != nil {
+			check(bundle.Message, statementParams, query, doc, value)
+		}
+		return mocknoise.NewDecodedJSONBody(value, func() []byte {
+			out, _ := json.Marshal(doc)
+			return out
+		}), true
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return mocknoise.NewJSONBody(nil), false
+	}
+	return mocknoise.NewJSONBody(out), true
+}
+
+// decodedBodyCheck, when set (by the package's tests), is given each body
+// mysqlRequestJSONBody makes decoded, with the request's message and
+// reading it was made from, so a test can check it is what json.Unmarshal
+// makes of mysqlRequestBody's bytes. Nil on the replay path.
+var decodedBodyCheck func(message any, statementParams int, query string, doc map[string]any, decoded any)
+
+// decodedRequestValue is v, a value of a mysqlRequestDoc, as json.Unmarshal
+// decodes json.Marshal's encoding of it into an interface{}, made without
+// either: plain is false for a value whose encoding is not that plain (a
+// string or name that is not UTF-8, which json.Marshal rewrites; a float32,
+// encoded at its own precision; a NaN or infinity, which json.Marshal
+// refuses; []byte, time.Time and json.RawMessage, encoded as other values;
+// any other type). The caller then encodes and decodes it.
+func decodedRequestValue(v any) (decoded any, plain bool) {
+	switch x := v.(type) {
+	case nil, bool:
+		return x, true
+	case string:
+		return x, utf8.ValidString(x)
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			d, ok := decodedRequestValue(e)
+			if !ok || !utf8.ValidString(k) {
+				return nil, false
+			}
+			out[k] = d
+		}
+		return out, true
+	case map[string]string:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			if !utf8.ValidString(k) || !utf8.ValidString(e) {
+				return nil, false
+			}
+			out[k] = e
+		}
+		return out, true
+	case map[string]mysql.Parameter:
+		out := make(map[string]any, len(x))
+		for k, p := range x {
+			d, ok := decodedParameter(p)
+			if !ok || !utf8.ValidString(k) {
+				return nil, false
+			}
+			out[k] = d
+		}
+		return out, true
+	case float64:
+		return x, !math.IsNaN(x) && !math.IsInf(x, 0)
+	case int:
+		return float64(x), true
+	case int8:
+		return float64(x), true
+	case int16:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case uint:
+		return float64(x), true
+	case uint8:
+		return float64(x), true
+	case uint16:
+		return float64(x), true
+	case uint32:
+		return float64(x), true
+	case uint64:
+		return float64(x), true
+	}
+	return nil, false
+}
+
+// decodedParameter is a parameter as decodedRequestValue decodes it: the
+// object mysql.Parameter's MarshalJSON writes (its name only when it has
+// one).
+func decodedParameter(p mysql.Parameter) (any, bool) {
+	value, ok := decodedRequestValue(p.Value)
+	if !ok || !utf8.ValidString(p.Name) {
+		return nil, false
+	}
+	out := map[string]any{"type": float64(p.Type), "unsigned": p.Unsigned, "value": value}
+	if p.Name != "" {
+		out["name"] = p.Name
+	}
+	return out, true
+}
+
+// mysqlRequestDoc is the document mysqlRequestBody encodes.
+func mysqlRequestDoc(bundle *mysql.PacketBundle, statementParams int, query string) (map[string]any, bool) {
 	if bundle == nil || bundle.Header == nil {
 		return nil, false
 	}
@@ -726,11 +1011,7 @@ func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int, query str
 	default:
 		return nil, false
 	}
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return nil, false
-	}
-	return out, true
+	return doc, true
 }
 
 // readsQueryAttributes reports whether a COM_QUERY's statement reads its query

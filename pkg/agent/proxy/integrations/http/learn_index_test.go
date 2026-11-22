@@ -260,12 +260,12 @@ func TestAnIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 }
 
 // In the exact view's verify mode an index that lost a recording a read
-// finds the call exactly panics, and one that did not passes.
+// finds the call exactly panics, and one that did not passes. The mode is
+// the handler's own (verifyOf), on with the process's off.
 func TestAnIndexThatLostAMatchPanicsInVerifyMode(t *testing.T) {
 	h, n, _ := learnOn(t)
-	was := integrations.ExactViewVerify.Load()
-	integrations.ExactViewVerify.Store(true)
-	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
+	verifyOff(t)
+	verifyOf(h, true)
 	m := learnRecorded("mock-0", 0, "GET", "/item/1", "", nil, `{}`)
 	db := newGenDb([]*models.Mock{m}, nil)
 	in := live("GET", "/item/1", "", nil)

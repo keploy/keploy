@@ -30,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/textcut"
 	"go.uber.org/zap"
 )
 
@@ -124,6 +125,20 @@ func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
 	return false, ""
 }
 
+// allMatchAnyRegex reports whether there is at least one value and each
+// matches one of the patterns.
+func allMatchAnyRegex(values []string, patterns []string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	for _, v := range values {
+		if ok, _ := MatchesAnyRegex(v, patterns); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 type noiseEntry struct {
 	keyLower string
 	key      string           // as configured; orders entries whose keyLower is the same
@@ -133,9 +148,16 @@ type noiseEntry struct {
 	// flag rides on the entry so it is resolved by the SAME most-specific-first
 	// ordering as everything else — a more-specific user/regex entry still wins.
 	typeStrict bool
+	// idKeys marks an entry that names id keys (NoiseIDKey): keyLower is then
+	// held with its id keys collapsed and is matched against the traversal
+	// key's collapsed form (noise_idkey.go).
+	idKeys bool
 }
 type noiseIndex struct {
 	entries []noiseEntry
+	// idKeys is set when any entry names id keys, so a lookup collapses the
+	// traversal key only for an index that can use it.
+	idKeys bool
 }
 
 func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
@@ -144,11 +166,14 @@ func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 	}
 	out := noiseIndex{entries: make([]noiseEntry, 0, len(mp))}
 	for k, arr := range mp {
+		keyLower, idKeys := NoiseEntryKey(k)
 		out.entries = append(out.entries, noiseEntry{
-			keyLower: strings.ToLower(k),
+			keyLower: keyLower,
 			key:      k,
 			regexps:  compilePatterns(arr, logger),
+			idKeys:   idKeys,
 		})
+		out.idKeys = out.idKeys || idKeys
 	}
 
 	// match() returns the FIRST entry that matches, and entries arrive here in
@@ -179,25 +204,58 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 	return regs, isNoisy
 }
 
+// matchAdded is match for a key the recorded document lacks, one the replay
+// added: an entry naming id keys (NoiseIDKey) does not excuse it, every other
+// entry does as match reads it. Such an entry is written for the fields under
+// the ids of the recording; it excuses a value that moved there, or a key the
+// replay dropped there, as one entry per id would. A key the recording does
+// not have, a new id or a field an id did not carry, is a change no producer
+// saw, and stays one.
+func (ni noiseIndex) matchAdded(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
+	regs, isNoisy, _ = ni.lookup(keyLower, false)
+	return regs, isNoisy
+}
+
 // matchKind is match() plus the winning entry's typeStrict flag. The first
 // (most-specific-first) entry whose keyLower is a substring of keyLower wins, so a
 // learned type-strict entry never overrides a more-specific user/regex entry — it
 // only applies when it is itself the most specific match. collectJSON uses this;
 // every other caller uses match() and ignores the flag.
+//
+// An entry naming id keys (NoiseIDKey) is tested against keyLower with its id
+// keys collapsed, by the same rule; every other entry against keyLower as it
+// is, so an entry naming one id still names that id only.
 func (ni noiseIndex) matchKind(keyLower string) (regs []*regexp.Regexp, isNoisy, typeStrict bool) {
+	return ni.lookup(keyLower, true)
+}
+
+// lookup is matchKind, with the entries naming id keys consulted only when
+// idKeys is set (matchAdded).
+func (ni noiseIndex) lookup(keyLower string, idKeys bool) (regs []*regexp.Regexp, isNoisy, typeStrict bool) {
+	collapsed := keyLower
+	if idKeys && ni.idKeys {
+		collapsed = CollapseIDKeys(keyLower)
+	}
 	for _, e := range ni.entries {
+		key := keyLower
+		if e.idKeys {
+			if !idKeys {
+				continue
+			}
+			key = collapsed
+		}
 		if e.typeStrict && provenswitch.On() {
 			// Under the proven switch a learned entry names exactly the field
 			// that drifted and its subtree (the learn step writes it so,
 			// package matcher/learn). As a substring it would also excuse a
 			// field whose name it happens to contain: "items[].id" in
 			// "items[].identifier".
-			if keyLower == e.keyLower || strings.HasPrefix(keyLower, e.keyLower+".") || strings.HasPrefix(keyLower, e.keyLower+"[]") {
+			if key == e.keyLower || strings.HasPrefix(key, e.keyLower+".") || strings.HasPrefix(key, e.keyLower+"[]") {
 				return e.regexps, true, true
 			}
 			continue
 		}
-		if strings.Contains(keyLower, e.keyLower) {
+		if strings.Contains(key, e.keyLower) {
 			return e.regexps, true, e.typeStrict
 		}
 	}
@@ -215,7 +273,10 @@ func (ni *noiseIndex) markTypeStrict(typeStrict map[string]struct{}) {
 	}
 	ts := make(map[string]struct{}, len(typeStrict))
 	for k := range typeStrict {
-		ts[strings.ToLower(k)] = struct{}{}
+		// Spelled as the index spells its entries, so a learned key naming id
+		// keys finds its entry.
+		keyLower, _ := NoiseEntryKey(k)
+		ts[keyLower] = struct{}{}
 	}
 	for i := range ni.entries {
 		if _, ok := ts[ni.entries[i].keyLower]; ok {
@@ -566,9 +627,9 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		}
 		// A field recorded as null and replayed as something else. Nullable
 		// volatile fields are exactly what a pattern is for, so consult the
-		// noise entry against the replayed value rather than ignoring it.
+		// noise entry against both values: the recorded one is "null".
 		if av, ok := jsonScalarToString(actual); ok {
-			if ancestorNoisy || noisyForValue(ni, key, av) {
+			if ancestorNoisy || noisyForValues(ni, key, "null", av) {
 				out.matches, out.isExact = true, true
 			}
 			return out, nil
@@ -589,7 +650,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		// SamePresignedSigV4: a presigned URL is compared but for its
 		// signature and session token, which a replay's stand-in AWS
 		// secret changes (presigned.go).
-		if e == a || ancestorNoisy || noisyForValue(ni, key, a) || SamePresignedSigV4(e, a) {
+		if e == a || ancestorNoisy || noisyForValues(ni, key, e, a) || SamePresignedSigV4(e, a) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -599,7 +660,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ok {
 			return out, errors.New("type not matched")
 		}
-		if e == a || ancestorNoisy || noisyForValue(ni, key, strconv.FormatBool(a)) {
+		if e == a || ancestorNoisy || noisyForValues(ni, key, strconv.FormatBool(e), strconv.FormatBool(a)) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -609,7 +670,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ok {
 			return out, errors.New("type not matched")
 		}
-		if e == a || ancestorNoisy || noisyForValue(ni, key, formatJSONNumber(a)) {
+		if e == a || ancestorNoisy || noisyForValues(ni, key, formatJSONNumber(e), formatJSONNumber(a)) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -667,7 +728,9 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 				return out, nil
 			}
 
-			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, val, true) {
+			// A pattern-guarded entry excuses the field only when the recorded
+			// and the replayed value each match it (globalCoversPair).
+			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && globalCoversPair(regs, v, val) {
 				continue
 			}
 
@@ -705,11 +768,16 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			if _, ok := e[k]; ok {
 				continue
 			}
-			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, a[k], false) {
+			// A key the recording lacks has no recorded value for a pattern to
+			// match, so only an unconditional entry excuses it: the rule for a
+			// key the replay dropped (above), the other way round. Not one
+			// naming id keys (matchAdded): it speaks for the ids the recording
+			// has, and this key is none of them.
+			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && len(regs) == 0 {
 				continue
 			}
 			childKeyLower := prefixLower + strings.ToLower(k)
-			if regs, noisy := ni.match(childKeyLower); noisy && noisyForRegexps(regs, a[k], false) {
+			if regs, noisy := ni.matchAdded(childKeyLower); noisy && len(regs) == 0 {
 				continue // ignore unexpected but noisy subtree
 			}
 			return out, nil
@@ -828,16 +896,17 @@ func anyRegexpMatchStr(s string, regs []*regexp.Regexp) bool {
 	return false
 }
 
-// noisyForValue reports whether the leaf at key should be ignored given the
-// value actually replayed.
+// noisyForValues reports whether the leaf at key should be ignored given its
+// recorded and its replayed value.
 //
 // A noise entry with no patterns ignores the field unconditionally — that is
 // what auto-detected noise emits and it is unchanged. An entry WITH patterns
-// describes which values are volatile, so it ignores the field only when the
-// replayed value is one of them. Treating a pattern-guarded entry as an
-// unconditional skip makes the pattern decorative and silently stops asserting
-// the field, which is the opposite of what writing a pattern asks for.
-func noisyForValue(ni noiseIndex, key, actual string) bool {
+// says the field may vary within them, so it ignores the field only when the
+// recorded value and the replayed value are each one of them. Treating a
+// pattern-guarded entry as an unconditional skip makes the pattern decorative,
+// and checking one side only lets the other hold anything: a pattern written
+// for the recorded value would pass whatever the replay returned.
+func noisyForValues(ni noiseIndex, key, recorded, actual string) bool {
 	regs, noisy := ni.match(strings.ToLower(key))
 	switch {
 	case !noisy:
@@ -845,7 +914,7 @@ func noisyForValue(ni noiseIndex, key, actual string) bool {
 	case len(regs) == 0:
 		return true
 	default:
-		return anyRegexpMatchStr(actual, regs)
+		return anyRegexpMatchStr(recorded, regs) && anyRegexpMatchStr(actual, regs)
 	}
 }
 
@@ -895,6 +964,32 @@ func noisyForRegexps(regs []*regexp.Regexp, value interface{}, containersCovered
 		return containersCovered
 	}
 	return anyRegexpMatchStr(s, regs)
+}
+
+// globalCoversPair reports whether a global entry's patterns regs excuse a
+// field present on both sides with the recorded value rec and the live value
+// live: an entry with no patterns whatever they are; one with patterns two
+// scalars that each match one, or two containers of one kind (two objects,
+// two arrays), which hold no single value for a pattern to match (the entry
+// named the field). A scalar on one side and a container on the other, or an
+// object on one and an array on the other, is a retype, a schema change no
+// pattern excuses: the live value is outside the pattern, or the recorded
+// one is.
+func globalCoversPair(regs []*regexp.Regexp, rec, live interface{}) bool {
+	if len(regs) == 0 {
+		return true
+	}
+	rs, recScalar := jsonScalarToString(rec)
+	ls, liveScalar := jsonScalarToString(live)
+	if recScalar != liveScalar {
+		return false
+	}
+	if !recScalar {
+		_, recObject := rec.(map[string]interface{})
+		_, liveObject := live.(map[string]interface{})
+		return recObject == liveObject
+	}
+	return anyRegexpMatchStr(rs, regs) && anyRegexpMatchStr(ls, regs)
 }
 
 // allJSONScalars reports whether every element is a JSON scalar, i.e. the array
@@ -1179,7 +1274,7 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 		return nil, nil
 	}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
+		utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
 		return nil, err
 	}
 	return result, nil
@@ -1226,13 +1321,19 @@ func (d *DiffsPrinter) SetHasarrayIndexMismatch(has bool) {
 	d.hasarrayIndexMismatch = has
 }
 
+// NewDiffsPrinter is NewDiffsPrinterOut on os.Stdout: for a keploy command's
+// own output (keploy contract), never a run's console an embedder chose.
 func NewDiffsPrinter(testCase string) DiffsPrinter {
 	return NewDiffsPrinterOut(os.Stdout, testCase)
 }
 
+// NewDiffsPrinterOut is a printer of testCase's diff on out, which it names
+// whole (header values, bodies). A nil out prints nothing: the console of a
+// run whose embedder set none (a k8s proxy's replayer, whose stdout is its
+// pod's log), never os.Stdout.
 func NewDiffsPrinterOut(out io.Writer, testCase string) DiffsPrinter {
 	if out == nil {
-		out = os.Stdout
+		out = io.Discard
 	}
 	return DiffsPrinter{
 		out:       out,
@@ -1465,9 +1566,11 @@ func NewSchemaDiffPrinter(testCase string) SchemaDiffPrinter {
 	return NewSchemaDiffPrinterOut(os.Stdout, testCase)
 }
 
+// NewSchemaDiffPrinterOut is a printer of testCase's schema diff on out. A
+// nil out prints nothing, as NewDiffsPrinterOut's does.
 func NewSchemaDiffPrinterOut(out io.Writer, testCase string) SchemaDiffPrinter {
 	if out == nil {
-		out = os.Stdout
+		out = io.Discard
 	}
 	return SchemaDiffPrinter{
 		out:      out,
@@ -1651,8 +1754,8 @@ func truncateStrings(exp, act string) (string, string) {
 
 	// If both exceed max bytes, truncate both to max bytes
 	if expLen > maxBytes && actLen > maxBytes {
-		exp = exp[:maxBytes]
-		act = act[:maxBytes]
+		exp = textcut.Prefix(exp, maxBytes)
+		act = textcut.Prefix(act, maxBytes)
 		expTruncated = true
 		actTruncated = true
 	} else {
@@ -1668,25 +1771,25 @@ func truncateStrings(exp, act string) (string, string) {
 				// Expected is larger, truncate it
 				newExpLen := min(actLen+maxDiff, maxBytes)
 				if newExpLen < expLen {
-					exp = exp[:newExpLen]
+					exp = textcut.Prefix(exp, newExpLen)
 					expTruncated = true
 				}
 			} else {
 				// Actual is larger, truncate it
 				newActLen := min(expLen+maxDiff, maxBytes)
 				if newActLen < actLen {
-					act = act[:newActLen]
+					act = textcut.Prefix(act, newActLen)
 					actTruncated = true
 				}
 			}
 		} else {
 			// If either exceeds maxBytes individually, truncate it
 			if expLen > maxBytes {
-				exp = exp[:maxBytes]
+				exp = textcut.Prefix(exp, maxBytes)
 				expTruncated = true
 			}
 			if actLen > maxBytes {
-				act = act[:maxBytes]
+				act = textcut.Prefix(act, maxBytes)
 				actTruncated = true
 			}
 		}
@@ -1810,42 +1913,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	// fast path would require a skip-ToLower-if-pre-normalized invariant on
 	// the exported helper — we kept the helper idempotent instead to avoid a
 	// silent-failure API.
-	loweredNoise := make(map[string][]string, len(noise))
-	for k, v := range noise {
-		lk := strings.ToLower(k)
-		if existing, ok := loweredNoise[lk]; ok {
-			// Case-collision. slices.Concat never writes into either operand:
-			// it builds the result in a freshly grown slice (nil when the
-			// total length is zero), so the result cannot alias `existing`
-			// or `v` — unlike `append(existing, v...)`, which would write
-			// into `existing`'s spare capacity. `existing` may share that
-			// array with a caller-owned slice (we clone on first insert
-			// below, but be defensive — a future change could reintroduce
-			// sharing), and an in-place append could otherwise corrupt that
-			// caller slice across repeated CompareHeaders calls.
-			//
-			// This replaced a hand-rolled make+append+append that was
-			// equally non-aliasing; CodeQL flagged its
-			// `len(existing)+len(v)` capacity as an allocation-size
-			// overflow, which it is not — both operands are lengths of
-			// in-memory slices parsed from keploy.yml, so the sum cannot
-			// approach MaxInt, and a wrapped (negative) capacity would
-			// panic in makeslice rather than under-allocate. Concat is the
-			// clearer spelling of the same guarantee, not a fix for a real
-			// hazard.
-			loweredNoise[lk] = slices.Concat(existing, v)
-		} else {
-			// Clone `v` so later case-collision merges (or any downstream
-			// mutation of loweredNoise) can never grow/duplicate the caller's
-			// original noise-map slice. The caller's `noise` is treated as
-			// read-only config. slices.Clone maps nil to nil rather than to an
-			// empty non-nil slice; that is safe because nothing downstream
-			// distinguishes the two — the "header" sentinel lookup and the
-			// collision branch above both key off map-entry presence, and every
-			// consumer of the regex list only tests len(...) != 0.
-			loweredNoise[lk] = slices.Clone(v)
-		}
-	}
+	loweredNoise := lowerHeaderNoise(noise)
 	// Look up the "header"-scope sentinel via the normalized map so user-supplied
 	// casing (e.g. "Header" / "HEADER") is still recognized as the whole-section
 	// noise marker. The sentinel key is canonically lowercase "header".
@@ -1854,15 +1922,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		val, ok := h2[k]
 		if isNoisy && len(regexArr) != 0 {
-			// Constrain on the REPLAYED value, matching how body noise works:
-			// the replayed value is the one that varies, so testing the recorded
-			// one instead would let any replayed value through. A header the
-			// replay dropped has no value to match, so a pattern-guarded entry
-			// does not excuse it — only an unconditional entry does.
-			isNoisy = false
-			if ok && len(val) > 0 {
-				isNoisy, _ = MatchesAnyRegex(val[0], regexArr)
-			}
+			// A pattern says the header may vary within it, so it excuses the
+			// header only when every recorded value and every replayed value
+			// matches it, as body noise does: testing one side only would let
+			// the other hold anything. A header the replay dropped has no value
+			// to match, so a pattern-guarded entry does not excuse it — only an
+			// unconditional entry does.
+			isNoisy = ok && allMatchAnyRegex(v, regexArr) && allMatchAnyRegex(val, regexArr)
 		}
 		isNoisy = isNoisy || isHeaderNoisy
 		if !isNoisy {
@@ -1937,14 +2003,14 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	}
 	for k, v := range h2 {
 		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
+		val, ok := h1[k]
 		if isNoisy && len(regexArr) != 0 {
+			// A header the recording lacks has no recorded value for a pattern
+			// to match, so only an unconditional entry excuses it. One both
+			// sides hold was judged, and recorded in res, by the loop above.
 			isNoisy = false
-			if len(v) > 0 {
-				isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
-			}
 		}
 		isNoisy = isNoisy || isHeaderNoisy
-		val, ok := h1[k]
 		if isNoisy && checkKey(res, k) {
 			*res = append(*res, models.HeaderResult{
 				Normal: true,
@@ -1986,6 +2052,48 @@ func MapToArray(mp map[string][]string) []string {
 		result = append(result, k)
 	}
 	return result
+}
+
+// lowerHeaderNoise is noise keyed by lowercased header name, the regex lists
+// of keys that differ only by case merged (CompareHeaders says why).
+func lowerHeaderNoise(noise map[string][]string) map[string][]string {
+	loweredNoise := make(map[string][]string, len(noise))
+	for k, v := range noise {
+		lk := strings.ToLower(k)
+		if existing, ok := loweredNoise[lk]; ok {
+			// Case-collision. slices.Concat never writes into either operand:
+			// it builds the result in a freshly grown slice (nil when the
+			// total length is zero), so the result cannot alias `existing`
+			// or `v` — unlike `append(existing, v...)`, which would write
+			// into `existing`'s spare capacity. `existing` may share that
+			// array with a caller-owned slice (we clone on first insert
+			// below, but be defensive — a future change could reintroduce
+			// sharing), and an in-place append could otherwise corrupt that
+			// caller slice across repeated CompareHeaders calls.
+			//
+			// This replaced a hand-rolled make+append+append that was
+			// equally non-aliasing; CodeQL flagged its
+			// `len(existing)+len(v)` capacity as an allocation-size
+			// overflow, which it is not — both operands are lengths of
+			// in-memory slices parsed from keploy.yml, so the sum cannot
+			// approach MaxInt, and a wrapped (negative) capacity would
+			// panic in makeslice rather than under-allocate. Concat is the
+			// clearer spelling of the same guarantee, not a fix for a real
+			// hazard.
+			loweredNoise[lk] = slices.Concat(existing, v)
+		} else {
+			// Clone `v` so later case-collision merges (or any downstream
+			// mutation of loweredNoise) can never grow/duplicate the caller's
+			// original noise-map slice. The caller's `noise` is treated as
+			// read-only config. slices.Clone maps nil to nil rather than to an
+			// empty non-nil slice; that is safe because nothing downstream
+			// distinguishes the two — the "header" sentinel lookup and the
+			// collision branch above both key off map-entry presence, and every
+			// consumer of the regex list only tests len(...) != 0.
+			loweredNoise[lk] = slices.Clone(v)
+		}
+	}
+	return loweredNoise
 }
 
 // SubstringKeyMatch returns the regex list associated with a matching noise

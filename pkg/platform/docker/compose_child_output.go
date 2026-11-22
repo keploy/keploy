@@ -7,8 +7,6 @@ import (
 	"io"
 	"regexp"
 	"sync"
-
-	composetypes "github.com/compose-spec/compose-go/v2/types"
 )
 
 // ComposeChildOutput keeps, in the app-output tail (apptail.go), what the
@@ -32,7 +30,7 @@ import (
 // project's tails, as ComposeRunner.Up does, so the tails hold that Up's
 // output alone, and a line an earlier Up's child still prints is not kept.
 type ComposeChildOutput struct {
-	project *composetypes.Project
+	project *composeChildProject
 	run     uint64
 }
 
@@ -51,11 +49,11 @@ func StartComposeChildOutput(ctx context.Context, content []byte, projectName, w
 	if err != nil {
 		return nil, err
 	}
-	project, err := loadComposeProject(ctx, content, projectName, absWorkingDir, envFiles)
+	project, err := loadComposeChildProject(content, projectName, absWorkingDir, envFiles)
 	if err != nil {
 		return nil, err
 	}
-	return &ComposeChildOutput{project: project, run: appOutput.startRun(project.Name)}, nil
+	return &ComposeChildOutput{project: project, run: appOutput.startRun(project.name)}, nil
 }
 
 // Project is the compose project the child's output is kept under: the name
@@ -64,7 +62,7 @@ func (o *ComposeChildOutput) Project() string {
 	if o == nil || o.project == nil {
 		return ""
 	}
-	return o.project.Name
+	return o.project.name
 }
 
 // Stream is a writer for one of the child's output streams, as keploy copies
@@ -222,7 +220,7 @@ func (w *composeChildStream) end() {
 			text = text[over:]
 		}
 		o := w.out
-		appOutput.record(o.project.Name, o.run, w.name, serviceOfContainer(o.project, w.name), string(text), w.lost)
+		appOutput.record(o.project.name, o.run, w.name, o.project.serviceOf(w.name), string(text), w.lost)
 	}
 	w.name, w.skip, w.lost = "", false, 0
 	w.text = w.text[:0]

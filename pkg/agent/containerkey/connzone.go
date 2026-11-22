@@ -71,7 +71,7 @@ func (p *pushedIndex) connZone(ctx context.Context, cgroupOf func(local, remote 
 	case z.Err != "":
 		return learn.ProcZone{}, fmt.Errorf("keploy's CLI could not read the zone of container %s, which made the connection: %s", p.describe(id), z.Err)
 	}
-	return learn.ZoneOfFile(z.Name, z.Data)
+	return learn.ZoneOfFile(z.Name, learn.ZoneFile{Data: z.Data, Source: z.Source})
 }
 
 // containerIn is the container of the list held whose ID cgroup path holds

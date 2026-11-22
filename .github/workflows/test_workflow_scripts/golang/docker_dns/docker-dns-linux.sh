@@ -20,6 +20,13 @@
 # the app resolves nothing. Telemetry is off, so keploy asks it nothing
 # either. Readiness is the app's answer. The script stops only the processes
 # it started. Port: 8099 (app).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 RECORD_BIN="${RECORD_BIN:-keploy}"
 APP=8099
@@ -61,7 +68,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker pull -q busybox:1.36 >/dev/null || { echo "::error::busybox pull failed"; exit 1; }
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" --container-name docker-dns-app \
+sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$APP_CMD" --container-name docker-dns-app \
     --disable-tele --generateGithubActions=false >record.log 2>&1 </dev/null &
 REC_PID=$!
 resolv=""

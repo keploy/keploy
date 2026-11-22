@@ -50,11 +50,52 @@ type rawSource struct {
 	name  string
 	load  func() (*models.Mock, error)
 	store *bodyStore
+	// mock is the recording as the Raw was made of it, its answer maybe
+	// parked: what its read's cost is told by (readWeight).
+	mock *models.Mock
+	// held, of the source of a Raw one reader reads several parts of in
+	// turn (Raw.holding), is the payload it read first, kept for its
+	// later parts; nil for any other.
+	held *heldBody
 }
 
-// body is the payload of the recording s names: the store's, or loaded now.
+// heldBody is the payload a holding Raw read first (Raw.holding); ok once
+// it is read.
+type heldBody struct {
+	body rawBody
+	ok   bool
+}
+
+// body is the payload of the recording s names: the one it holds
+// (Raw.holding), the store's, or loaded now.
 func (s *rawSource) body() rawBody {
+	if h := s.held; h != nil {
+		if !h.ok {
+			h.body, h.ok = s.store.get(s.id, s.name, s.load), true
+		}
+		return h.body
+	}
 	return s.store.get(s.id, s.name, s.load)
+}
+
+// holding is x reading its payload at most once, where a part first needs
+// it, and holding it for each part read after, whatever the set's store
+// lets go meanwhile: what one reader reads the parts of a recording from
+// in turn (warmOne, stageRest). A store past its budget lets a payload go
+// as other readers load theirs, so a reader reading x's parts one after
+// another loaded it again for a later part, one more decode of its whole
+// recording, as often as the other readers outran it. The payload goes
+// with the Raw, which is its reader's alone, used on its goroutine; the
+// read's reservation (readWeight) counts it in flight while it is read.
+// A Raw read now (no source) is x.
+func (x Raw) holding() Raw {
+	if x.src == nil {
+		return x
+	}
+	src := *x.src
+	src.held = &heldBody{}
+	x.src = &src
+	return x
 }
 
 // payload is what x read of its recording's payload: for a lazy Raw, loaded
@@ -115,6 +156,9 @@ var everyRawLazy func(m *models.Mock, served bool) Raw
 // of reading one again.
 var bodyBudget int64 = noCap
 
+// viewBudget is bodyBudget for the set's views (setDerived.views).
+var viewBudget int64 = noCap
+
 // partBody is the one part the store's tier keeps of a recording: its
 // payload.
 const partBody part = 1
@@ -142,6 +186,11 @@ type bodyStore struct {
 	// over: the store's set is over (setDerived.drop), and it keeps no
 	// more.
 	over bool
+	// forgetUnread: a payload that could not be loaded is kept by none, and
+	// the next read loads it again (the set's views, setDerived.views: a
+	// view's loader that failed once may give it at a later call, which
+	// read it again before the set kept views).
+	forgetUnread bool
 	// loads counts the payloads loaded, for the rows.
 	loads int
 }
@@ -203,8 +252,18 @@ func (s *bodyStore) get(id, name string, load func() (*models.Mock, error)) rawB
 	l.body = loadBody(name, load)
 
 	s.mu.Lock()
-	s.read[id] = l.body.read
-	s.kept.keep(id, partBody, l.body.size(), func(p *rawBody) { *p = l.body })
+	// The store of views (forgetUnread) writes the read bit too, though
+	// Raw.isRead never asks it (Order.viewRead hands out a view with no
+	// source): one bool a view it read, kept after the view is let go
+	// past the budget and after the set is over (setDerived.drop clears
+	// no read bits, and a stale Order of the set may still add some).
+	// There are at most maxLiveViews of each recording the set served,
+	// and they go with the store once neither the set's setDerived nor
+	// an Order of the set (Order.views) holds it.
+	if l.body.read || !s.forgetUnread {
+		s.read[id] = l.body.read
+		s.kept.keep(id, partBody, l.body.size(), func(p *rawBody) { *p = l.body })
+	}
 	delete(s.loading, id)
 	s.mu.Unlock()
 	close(l.ready)
@@ -271,6 +330,6 @@ func (dc *DriftCache) LazyRawOf(m *models.Mock, served bool, load func() (*model
 		}
 		return r
 	}
-	r.src = &rawSource{id: r.id, name: m.Name, load: load, store: dc.set.bodies}
+	r.src = &rawSource{id: r.id, name: m.Name, load: load, store: dc.set.bodies, mock: m}
 	return r
 }

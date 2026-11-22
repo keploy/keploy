@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -66,12 +67,12 @@ func goneTGID(t *testing.T) uint32 {
 }
 
 // The sweep deletes what a process whose exit the kernel skipped left in the
-// PID maps once it is gone, with or without a start time, and nothing of a
-// live process's.
+// PID maps and in a keploy instance (instance_of_tgid) once it is gone, with
+// or without a start time, and nothing of a live process's.
 func TestTheSweepDeletesTheEntriesOfProcessesThatAreGone(t *testing.T) {
 	h := hooksWithObjects(t)
-	targets, excluded, starts := h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes
-	gone, goneNoStart, alive := goneTGID(t), goneTGID(t), uint32(os.Getpid())
+	targets, excluded, starts, instances := h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes, h.objects.InstanceOfTgid
+	gone, goneNoStart, goneMember, alive := goneTGID(t), goneTGID(t), goneTGID(t), uint32(os.Getpid())
 	put := func(m *ebpf.Map, k uint32, v any) {
 		t.Helper()
 		if err := m.Update(k, v, ebpf.UpdateAny); err != nil {
@@ -81,18 +82,28 @@ func TestTheSweepDeletesTheEntriesOfProcessesThatAreGone(t *testing.T) {
 	put(targets, gone, uint8(1))
 	put(starts, gone, uint64(12345))
 	put(excluded, goneNoStart, uint8(1))
+	put(instances, gone, uint32(3))
+	put(instances, goneMember, uint32(4))
 	put(targets, alive, uint8(1))
 	put(starts, alive, uint64(67890))
+	put(instances, alive, uint32(5))
 
-	n, zombies, err := sweepGonePIDs(targets, excluded, starts, nil)
+	n, zombies, err := sweepGonePIDs(targets, excluded, starts, instances, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(zombies) != 0 {
 		t.Errorf("zombies %v among the TGIDs, want none", zombies)
 	}
-	if n != 2 {
-		t.Errorf("cleared %d TGIDs, want the 2 gone ones", n)
+	if n != 3 {
+		t.Errorf("cleared %d TGIDs, want the 3 gone ones", n)
+	}
+	var v32 uint32
+	if instances.Lookup(gone, &v32) == nil || instances.Lookup(goneMember, &v32) == nil {
+		t.Errorf("TGIDs %d and %d are gone, but an instance_of_tgid entry of theirs is still there", gone, goneMember)
+	}
+	if instances.Lookup(alive, &v32) != nil {
+		t.Errorf("TGID %d is alive, and the sweep took it out of its keploy instance", alive)
 	}
 	var v8 uint8
 	var v64 uint64
@@ -107,47 +118,65 @@ func TestTheSweepDeletesTheEntriesOfProcessesThatAreGone(t *testing.T) {
 	}
 }
 
-// A process with entries that has exited but is not reaped yet (a zombie)
-// keeps its entries, and is counted, so that another sweep comes: once it
-// is reaped, that sweep deletes them. The child is held a zombie by waiting
-// on it without reaping (WNOWAIT): no clock.
-func TestTheSweepKeepsAZombiesEntriesUntilItIsReaped(t *testing.T) {
-	h := hooksWithObjects(t)
-	targets, excluded, starts := h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes
+// zombieChild starts a process that exits at once and holds it a zombie by
+// waiting on it without reaping it (WNOWAIT): no clock. Its Wait reaps it.
+func zombieChild(t *testing.T) (*exec.Cmd, uint32) {
+	t.Helper()
 	cmd := exec.Command("true")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	pid := cmd.Process.Pid
+	t.Cleanup(func() { _ = cmd.Wait() })
 	var info unix.Siginfo
-	if err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil); err != nil {
+	if err := unix.Waitid(unix.P_PID, cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil); err != nil {
 		t.Fatal(err)
 	}
-	zombie := uint32(pid)
+	return cmd, uint32(cmd.Process.Pid)
+}
+
+// A process with entries that has exited but is not reaped yet (a zombie)
+// keeps its entries, and is counted, so that another sweep comes: once it
+// is reaped, that sweep deletes them. So does one whose only entry is its
+// keploy instance's (instance_of_tgid).
+func TestTheSweepKeepsAZombiesEntriesUntilItIsReaped(t *testing.T) {
+	h := hooksWithObjects(t)
+	targets, excluded, starts, instances := h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes, h.objects.InstanceOfTgid
+	cmd, zombie := zombieChild(t)
+	memberCmd, member := zombieChild(t)
 	if err := targets.Update(zombie, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
 	if err := starts.Update(zombie, uint64(4242), ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
-	n, zombies, err := sweepGonePIDs(targets, excluded, starts, nil)
+	if err := instances.Update(member, uint32(6), ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	n, zombies, err := sweepGonePIDs(targets, excluded, starts, instances, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	sort.Slice(zombies, func(i, j int) bool { return zombies[i] < zombies[j] })
+	want := []uint32{zombie, member}
+	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
 	var v8 uint8
-	if n != 0 || fmt.Sprint(zombies) != fmt.Sprint([]uint32{zombie}) || targets.Lookup(zombie, &v8) != nil {
-		t.Fatalf("with TGID %d a zombie: cleared %d, zombies %v, its entry there: %v; want 0, [%d], true", zombie, n, zombies, targets.Lookup(zombie, &v8) == nil, zombie)
+	var v32 uint32
+	if n != 0 || fmt.Sprint(zombies) != fmt.Sprint(want) || targets.Lookup(zombie, &v8) != nil || instances.Lookup(member, &v32) != nil {
+		t.Fatalf("with TGIDs %d and %d zombies: cleared %d, zombies %v, entries there: %v, %v; want 0, %v, true, true", zombie, member, n, zombies, targets.Lookup(zombie, &v8) == nil, instances.Lookup(member, &v32) == nil, want)
 	}
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	// The next sweep looks at the zombie alone.
-	n, zombies, err = sweepGonePIDs(targets, excluded, starts, zombies)
+	if err := memberCmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	// The next sweep looks at the zombies alone.
+	n, zombies, err = sweepGonePIDs(targets, excluded, starts, instances, zombies)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || len(zombies) != 0 || targets.Lookup(zombie, &v8) == nil {
-		t.Fatalf("with TGID %d reaped: cleared %d, zombies %v, its entry gone: %v; want 1, none, true", zombie, n, zombies, targets.Lookup(zombie, &v8) != nil)
+	if n != 2 || len(zombies) != 0 || targets.Lookup(zombie, &v8) == nil || instances.Lookup(member, &v32) == nil {
+		t.Fatalf("with TGIDs %d and %d reaped: cleared %d, zombies %v, entries gone: %v, %v; want 2, none, true, true", zombie, member, n, zombies, targets.Lookup(zombie, &v8) != nil, instances.Lookup(member, &v32) != nil)
 	}
 }
 

@@ -109,7 +109,7 @@ func locallyDroppedTransfer(t *testing.T, total int) (sent, want, received, drop
 	proxySide := s.(*net.TCPConn)
 	defer proxySide.Close()
 	p := &Proxy{logger: zap.NewNop()}
-	p.paired.add(proxySide, 1)
+	p.paired.add(proxySide, 1, 0)
 	got := make(chan int64, 1)
 	go func() {
 		n, _ := io.CopyN(io.Discard, proxySide, int64(total))

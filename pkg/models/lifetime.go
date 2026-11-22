@@ -501,7 +501,7 @@ func LegacyKindFallbackFires() uint64 {
 // this kind should always be session"; the right fix for a
 // newly-observed per-test use case of a listed kind is to tag at
 // record time (via a protocol-specific classifier like
-// recordMock's type=mocks/config/connection branches).
+// the MySQL recorder's type=mocks/config/connection tags).
 //
 // Out-of-tree parsers (Enterprise Redis / Kafka / HBase) do NOT get
 // added here. Their recorders already stamp type=config / mocks /

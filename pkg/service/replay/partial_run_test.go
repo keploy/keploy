@@ -195,7 +195,7 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 			t.Fatal("the rewind did not disqualify the agent's history; cycle 2 would be filtered " +
 				"against cycle 1 and fail with match_phase=no_mocks")
 		}
-		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
+		if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}); err != nil {
 			t.Fatalf("MockOutgoing: %v", err)
 		}
 		if r.agentConsumedHistoryUnusable() {
@@ -208,7 +208,7 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{}}
 		r.agentHistoryIncompleteForRun.Store(true)
 
-		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
+		if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}); err != nil {
 			t.Fatalf("MockOutgoing: %v", err)
 		}
 		if !r.agentConsumedHistoryUnusable() {
@@ -221,7 +221,7 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{err: errors.New("agent refused")}}
 		r.agentHistoryStaleForSet.Store(true)
 
-		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err == nil {
+		if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}); err == nil {
 			t.Fatal("expected the error through")
 		}
 		if !r.agentConsumedHistoryUnusable() {
@@ -251,7 +251,7 @@ func (f *latchInstr) MockOutgoing(_ context.Context, opts models.OutgoingOptions
 func TestMockOutgoingForTestSetSaysItStartsATestSet(t *testing.T) {
 	f := &latchInstr{}
 	r := &Replayer{logger: zap.NewNop(), instrumentation: f}
-	if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{SQLDelay: time.Second}); err != nil {
+	if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{SQLDelay: time.Second}); err != nil {
 		t.Fatalf("MockOutgoing: %v", err)
 	}
 	if !f.opts.StartsTestSet || f.opts.SQLDelay != time.Second {

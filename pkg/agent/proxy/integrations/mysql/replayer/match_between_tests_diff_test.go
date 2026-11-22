@@ -185,7 +185,7 @@ func btStageStrictWindow(s *diffSide, start, end time.Time) {
 	}
 	var perTest, reusable []*models.Mock
 	for _, m := range s.pool {
-		c := m.DeepCopy()
+		c := stagedCopy(m)
 		if c.TestModeInfo.Lifetime != models.LifetimePerTest || c.Spec.Metadata["type"] == "config" {
 			reusable = append(reusable, c)
 			continue
@@ -251,6 +251,7 @@ func btStageStrictWindow(s *diffSide, start, end time.Time) {
 // the parallel subtests (box .142). Under -race the row replays the 100 sets
 // and the 1k sets but their mock replays; the plain run replays all.
 func TestBetweenTestsCallsOfARecordedSetAreAnsweredWithTheirOwnRequestsRecording(t *testing.T) {
+	sideBySide(t)
 	for _, n := range []int{100, 1000, 10000} {
 		for _, engine := range []bool{false, true} {
 			for _, rp := range btReplays {
@@ -283,7 +284,7 @@ func btReplaySet(t *testing.T, n int, engine bool, staging btStaging, timing btT
 			}
 		}
 	}
-	side := newDiffSide(pool)
+	side := newDiffSide(t, pool)
 	defer side.mm.Close()
 	if staging != btMockReplay {
 		seedWindows(side.mm, len(tests))

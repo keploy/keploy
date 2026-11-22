@@ -230,7 +230,7 @@ func clockWordInWhole(rec, live string, w *Window) (before, rw, lw, after string
 	}
 	matches := func(lay clockLayout, s string, taken []bool) [][]int {
 		var out [][]int
-		for _, m := range lay.re.FindAllStringIndex(s, -1) {
+		for _, m := range lay.matches(lay.re, s, 0, len(s)) {
 			if m[0] > 0 && isWord(s[m[0]-1]) && isWord(s[m[0]]) || m[1] < len(s) && isWord(s[m[1]-1]) && isWord(s[m[1]]) {
 				continue
 			}
@@ -484,7 +484,7 @@ func TestAClockWordWindowsEdgesReadAsTheWholeTexts(t *testing.T) {
 	var pairs []pair
 	for k := 0; k <= 80; k++ {
 		pad := strings.Repeat("x", k)
-		for _, tail := range []string{"12:34", "12:34:56", " 12:34", "1793336961", "2026-10-30", "y12:34", "a1793336961"} {
+		for _, tail := range []string{"12:34", "12:34:56", " 12:34", "1793336961", "2026-10-30", "y12:34", "a1793336961", "2026-10-30 12:34 +05:30", "2026-10-30 12:34 -1400.00", "2026-10-30 12:34 +05301"} {
 			for _, sh := range [][2]string{
 				{"at 1793336961.5:00:00:00 " + pad + tail, "at 1793336961.55:00:00:00 " + pad + tail},
 				{"at 1793336961.55:00:00:00 " + pad + tail, "at 1793336961.5:00:00:00 " + pad + tail},
@@ -531,9 +531,9 @@ func TestAClockWordWindowsEdgesReadAsTheWholeTexts(t *testing.T) {
 // read at all.
 func TestAClockWordIsLookedForInABoundedPartOfALongText(t *testing.T) {
 	if clockWordMax != 36 {
-		t.Fatalf("clockWordMax = %d; the longest instant of the layouts is a UUID's 36 bytes", clockWordMax)
+		t.Fatalf("clockWordMax = %d; the longest instants of the layouts are 36 bytes, a UUID's and an ISO instant's to the nanosecond with its zone after a space", clockWordMax)
 	}
-	for k, s := range []string{"Fri, 30 Oct 2026 08:00:00 +0000", "2026-10-30 08:00:00.123456789+05:30", "20261030T080000Z", "0192ab3c-1d2e-7f00-8abc-0123456789ab", "1793336961.123456789", "08:00:00.123456789"} {
+	for k, s := range []string{"Fri, 30 Oct 2026 08:00:00 +0000", "2026-10-30 08:00:00.123456789 +05:30", "20261030T080000Z", "0192ab3c-1d2e-7f00-8abc-0123456789ab", "1793336961.123456789", "08:00:00.123456789"} {
 		if m := clockLayouts[k].re.FindString(s); m != s {
 			t.Fatalf("layout %d matches %q of %q", k, m, s)
 		}

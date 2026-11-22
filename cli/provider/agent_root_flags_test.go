@@ -99,3 +99,29 @@ func TestTheAgentTakesTheForwardedRootSettings(t *testing.T) {
 		}
 	}
 }
+
+// The agent subcommand accepts hidden --debug-file so callers (such as a cloud
+// replay support bundle) can request agent-debug.log without lifting the
+// agent's console log level via --debug.
+func TestTheAgentAcceptsHiddenDebugFileFlag(t *testing.T) {
+	cfg := config.New()
+	c := NewCmdConfigurator(zap.NewNop(), cfg)
+	agent := &cobra.Command{Use: "agent"}
+	if err := c.AddFlags(agent); err != nil {
+		t.Fatalf("AddFlags(agent): %v", err)
+	}
+	f := agent.Flags().Lookup("debug-file")
+	if f == nil {
+		t.Fatal("agent command missing --debug-file flag")
+	}
+	if !f.Hidden {
+		t.Error("--debug-file flag must be hidden")
+	}
+	if err := agent.ParseFlags([]string{"--debug-file"}); err != nil {
+		t.Fatalf("ParseFlags(--debug-file): %v", err)
+	}
+	got, err := agent.Flags().GetBool("debug-file")
+	if err != nil || !got {
+		t.Fatalf("GetBool(debug-file) = %v, %v; want true, nil", got, err)
+	}
+}

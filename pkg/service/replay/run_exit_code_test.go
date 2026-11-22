@@ -96,8 +96,12 @@ func TestArmRunExitCode(t *testing.T) {
 // once the run has its verdict changes nothing, and a cancel that is no
 // signal's arms nothing.
 //
-// With the switch off a stopped run with nothing wrong still exits 0, the
-// CLI's contract. But a test that got no verdict before the stop (the one
+// With the switch off a run stopped with nothing wrong, once a test got its
+// verdict, still exits 0, the CLI's contract. One stopped before any test got
+// a verdict tested nothing, so nothing passed: it exits 128+N for the signal
+// too, and exited 0. A test whose verdict is OBSOLETE counts as judged, as
+// the run's own "verified nothing" rule counts it, and an ignored one does
+// not. A test that got no verdict before the stop (the one
 // such test with the switch off: a wrong answer demoted to OBSOLETE for a
 // stale mapping) does not pass, as a failed test does not: its set would not
 // be judged, and would fail the run, had the run ended on its own. The stop
@@ -106,7 +110,7 @@ func TestArmRunExitCode(t *testing.T) {
 // before the verdict exits 128+N whatever it reached, so a test with no
 // verdict, which a read the stop cut short also makes, changes nothing.
 func TestArmStartExitCode(t *testing.T) {
-	const sigint, sigterm = 2, 15
+	const sighup, sigint, sigterm = 1, 2, 15
 	for _, c := range []struct {
 		name           string
 		on             bool
@@ -115,14 +119,16 @@ func TestArmStartExitCode(t *testing.T) {
 		err            error
 		testRunResult  bool
 		verdictReached bool
-		failed         int
+		// passed, failed, obsolete and ignored are the run's totals so far.
+		passed, failed, obsolete, ignored int
 		// noVerdict marks test-2 of test-set-0 as having no verdict.
 		noVerdict bool
 		armed     int
 		want      int
 		// said: keploy says the run was stopped before it judged it;
-		// saidNoVerdict: that it was stopped after a test with no verdict.
-		said, saidNoVerdict bool
+		// saidNoVerdict: that it was stopped after a test with no verdict;
+		// saidNothing: that it was stopped before any test got a verdict.
+		said, saidNoVerdict, saidNothing bool
 	}{
 		{name: "on: stopped before the verdict", on: true, stopped: true, signal: sigint, testRunResult: true, want: 130, said: true},
 		{name: "on: SIGTERM before the verdict", on: true, stopped: true, signal: sigterm, testRunResult: true, want: 143, said: true},
@@ -138,8 +144,18 @@ func TestArmStartExitCode(t *testing.T) {
 		{name: "off: stopped after a test with no verdict", stopped: true, signal: sigint, testRunResult: true, noVerdict: true, want: 1, saidNoVerdict: true},
 		{name: "off: stopped after a test with no verdict, once the run has its verdict", stopped: true, signal: sigint, testRunResult: true, verdictReached: true, noVerdict: true, want: 1, saidNoVerdict: true},
 		{name: "off: stopped after a failed set and a test with no verdict", stopped: true, signal: sigint, noVerdict: true, want: 1},
-		{name: "off: stopped with nothing wrong", stopped: true, signal: sigint, testRunResult: true, want: 0},
-		{name: "off: stopped with nothing wrong, Start's error the stop's", stopped: true, signal: sigint, err: context.Canceled, testRunResult: true, want: 0},
+		{name: "off: stopped with nothing wrong", stopped: true, signal: sigint, testRunResult: true, passed: 2, want: 0},
+		{name: "off: stopped with nothing wrong, Start's error the stop's", stopped: true, signal: sigint, err: context.Canceled, testRunResult: true, passed: 2, want: 0},
+		{name: "off: stopped after an obsolete test only", stopped: true, signal: sigint, testRunResult: true, obsolete: 1, want: 0},
+		{name: "off: stopped before any test got a verdict", stopped: true, signal: sigint, testRunResult: true, want: 130, saidNothing: true},
+		{name: "off: SIGTERM before any test got a verdict", stopped: true, signal: sigterm, testRunResult: true, want: 143, saidNothing: true},
+		{name: "off: SIGHUP before any test got a verdict", stopped: true, signal: sighup, testRunResult: true, want: 129, saidNothing: true},
+		{name: "off: stopped before any test got a verdict, Start's error the stop's", stopped: true, signal: sigint, err: context.Canceled, testRunResult: true, want: 130, saidNothing: true},
+		{name: "off: stopped after ignored tests only", stopped: true, signal: sigint, testRunResult: true, ignored: 2, want: 130, saidNothing: true},
+		{name: "off: stopped before any test got a verdict, a code armed", stopped: true, signal: sigint, testRunResult: true, armed: 3, want: 3},
+		{name: "off: stopped before any test got a verdict by a cancel that is no signal's", stopped: true, testRunResult: true, want: 0},
+		{name: "off: stopped once the run has its verdict, with no test judged", stopped: true, signal: sigint, testRunResult: true, verdictReached: true, want: 0},
+		{name: "off: not stopped, no test judged, though a signal was noted", signal: sigint, testRunResult: true, verdictReached: true, want: 0},
 		{name: "off: stopped after a failed test", stopped: true, signal: sigint, testRunResult: true, failed: 2, want: 1},
 		{name: "off: not stopped, a test with no verdict, its set passed", testRunResult: true, verdictReached: true, noVerdict: true, want: 0},
 		{name: "off: not stopped, an error", err: errors.New("no test sets found"), testRunResult: true, want: 1},
@@ -151,7 +167,7 @@ func TestArmStartExitCode(t *testing.T) {
 			utils.ErrCode = c.armed
 			t.Cleanup(utils.SetInterruptSignalForTest(c.signal))
 			core, logs := observer.New(zap.InfoLevel)
-			r := &Replayer{logger: zap.New(core), totalTestFailed: c.failed}
+			r := &Replayer{logger: zap.New(core), totalTestPassed: c.passed, totalTestFailed: c.failed, totalTestObsolete: c.obsolete, totalTestIgnored: c.ignored}
 			if c.noVerdict {
 				r.markNoVerdict("test-set-0", []string{"test-2"})
 			}
@@ -161,6 +177,9 @@ func TestArmStartExitCode(t *testing.T) {
 			}
 			if n := logs.FilterMessageSnippet("the run was stopped before keploy judged it").Len(); (n == 1) != c.said || n > 1 {
 				t.Fatalf("keploy said %d times that the run was stopped before it judged it; want it said: %v", n, c.said)
+			}
+			if n := logs.FilterMessageSnippet("the run was stopped before any test got a verdict").Len(); (n == 1) != c.saidNothing || n > 1 {
+				t.Fatalf("keploy said %d times that the run was stopped before any test got a verdict; want it said: %v", n, c.saidNothing)
 			}
 			said := logs.FilterMessageSnippet("the run was stopped after tests of the test-set got no verdict")
 			if (said.Len() == 1) != c.saidNoVerdict || said.Len() > 1 {

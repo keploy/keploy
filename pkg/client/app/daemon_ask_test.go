@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,7 +15,6 @@ import (
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 // slowDaemon is a loaded docker daemon in front of another (Client): its
@@ -135,81 +135,6 @@ func exitedApp() *inspectRecorder {
 	return &inspectRecorder{inspects: map[string]container.InspectResponse{"app": {ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited"}}}}}
 }
 
-// The grace keploy gives a compose app it interrupted ends once the daemon
-// says the app's container exited, however slow its answer (here 2.2 s, well
-// inside the 5 s grace): the reads had 2 s budgets, every slow answer was cut,
-// and the app that had exited at once was given the whole grace. cmdCancel's
-// compose branch gives the same grace (composeAppGrace).
-func TestTheComposeGraceEndsOnTheDaemonsSlowAnswer(t *testing.T) {
-	core, logs := observer.New(zap.DebugLevel)
-	d := &slowDaemon{Client: exitedApp(), latency: 2200 * time.Millisecond}
-	a := &App{logger: zap.New(core), docker: d, container: "app"}
-	downs := 0
-	a.composeGraceThenDown(func() { downs++ })
-	if downs != 1 || logs.FilterMessage("app container stopped gracefully; tearing down the rest of the compose stack").Len() != 1 {
-		t.Fatalf("downs %d, %d answers read; want the grace ended on the daemon's answer that the app exited, then one down", downs, d.answers())
-	}
-}
-
-// The grace keploy gives a compose app it interrupted ends at compose's up
-// returning (here at 0.6 s), while the daemon fails every read of the app's
-// container: the up's return was looked at only between reads, and a read
-// asked again until the grace's end held the grace to its 5 s.
-func TestTheComposeGraceEndsAtTheUpsReturnWhileTheDaemonFailsItsReads(t *testing.T) {
-	stallBudget(t, time.Hour)
-	core, logs := observer.New(zap.DebugLevel)
-	d := &slowDaemon{Client: exitedApp(), failInspects: 1 << 30}
-	a := &App{logger: zap.New(core), docker: d, container: "app"}
-	began := time.Now()
-	returnedAt := began.Add(600 * time.Millisecond)
-	a.composeAppGrace(func() bool { return time.Now().After(returnedAt) })
-	if took := time.Since(began); took >= graceBudget {
-		t.Fatalf("the grace took %v, its whole %v, after the up returned at 0.6 s; want it ended at the up's return", took, graceBudget)
-	}
-	if logs.FilterMessage("docker compose process exited").Len() != 1 {
-		t.Fatal("the grace did not say it ended at the up's return")
-	}
-}
-
-// The grace keploy gives a compose app it interrupted ends on the app's exit
-// while compose's up still runs, as it does when the app exits at once and
-// keploy's agent is still stopping: the up returns only once every service
-// has stopped, which the down after the grace hastens. The grace's watcher of
-// the up ends with the grace; one that ended only at the up's return held the
-// grace's end, and the teardown after it, on the slowest service.
-//
-// The row counts, and does not time, that the grace is through on the app's
-// exit: the watcher looks at the up once a tick, and a grace that cancels its
-// watcher as it ends lets at most 2 looks follow its log of the exit (one in
-// flight, and one on a tick already pending when the watcher sees the end).
-// A grace that joined its watcher before cancelling it was held to its whole
-// budget after the app's exit, a look every tick until then.
-func TestTheComposeGraceEndsOnTheAppsExitWhileTheUpStillRuns(t *testing.T) {
-	const exited = "app container stopped gracefully; tearing down the rest of the compose stack"
-	core, logs := observer.New(zap.DebugLevel)
-	a := &App{logger: zap.New(core), docker: &slowDaemon{Client: exitedApp()}, container: "app"}
-	var looksAfterExit atomic.Int32
-	upReturned := func() bool {
-		if logs.FilterMessage(exited).Len() > 0 {
-			looksAfterExit.Add(1)
-		}
-		return false
-	}
-	done := make(chan struct{})
-	go func() { a.composeAppGrace(upReturned); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(time.Minute):
-		t.Fatal("the grace did not return after the app had exited: its watcher of compose's up held it")
-	}
-	if logs.FilterMessage(exited).Len() != 1 {
-		t.Fatal("the grace did not end on the app's exit")
-	}
-	if n := looksAfterExit.Load(); n > 2 {
-		t.Fatalf("the grace's watcher looked at compose's up %d times after the app had exited, want at most 2: the grace was held past the app's exit", n)
-	}
-}
-
 // The wait for a docker run app's container to exit after keploy's interrupt
 // reads the daemon's answer, however slow (2.2 s, inside the wait's 8 s), and
 // asks again a read that failed: with a 2 s budget per read, the first slow or
@@ -230,4 +155,48 @@ func TestTheWaitForADockerRunAppsExitReadsTheDaemonsAnswer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A read of the daemon that ends with no answer ends only once the ask it
+// cancelled has returned: it ended at once, its ask still in flight, so the
+// read after it (the docker run stop's last look at the container, as its
+// grace ran out mid-read) ran beside the first, and so did what the stop did
+// next (its kill). Each round's ask takes some turns of the scheduler to
+// return once cancelled, as a call to the daemon takes to unwind, and counts
+// itself left running if the read had returned by then.
+func TestAReadThatEndsWithNoAnswerEndsWithItsAsk(t *testing.T) {
+	rounds := func(ctx context.Context, t *testing.T, n int, want string) {
+		t.Helper()
+		for round := 0; round < n; round++ {
+			var readDone, leftRunning atomic.Bool
+			var asks sync.WaitGroup
+			asks.Add(1)
+			_, err := askDaemon(ctx, zap.NewNop(), "a test read", func(actx context.Context) (string, error) {
+				defer asks.Done()
+				<-actx.Done()
+				for i := 0; i < 1000 && !readDone.Load(); i++ {
+					runtime.Gosched()
+				}
+				leftRunning.Store(readDone.Load())
+				return "", actx.Err()
+			})
+			readDone.Store(true)
+			asks.Wait()
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("round %d: askDaemon's error %v; want no answer, %s", round, err, want)
+			}
+			if leftRunning.Load() {
+				t.Fatalf("round %d: the read ended with its ask still running", round)
+			}
+		}
+	}
+	t.Run("its caller stopped waiting", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rounds(ctx, t, 200, "caller stopped waiting")
+	})
+	t.Run("no answer for the stall bound", func(t *testing.T) {
+		stallBudget(t, 20*time.Millisecond)
+		rounds(context.Background(), t, 10, "no answer for")
+	})
 }

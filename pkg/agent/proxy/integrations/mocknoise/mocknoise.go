@@ -89,6 +89,9 @@ type Adapter interface {
 	// match (learned-dynamic enforcement); valueChangesOnly restricts the result
 	// to value drift (the learn pass, so a type change is never learned). Both
 	// empty/false => prior behaviour.
+	// known and typeStrict are read only: known may be the caller's own
+	// noise, given to every recording it is compared with
+	// (StrictRejectRecordedJSONBody).
 	Diff(m *models.Mock, recorded, live []byte, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (drift map[string][]string, comparable bool)
 }
 
@@ -121,6 +124,22 @@ func New(a Adapter, detection, strict bool) *Engine {
 	return &Engine{adapter: a, detection: detection, strict: strict}
 }
 
+// WithoutDetection returns a copy of e with auto-learning turned off, strict
+// enforcement unchanged. A matcher that must not learn on a particular call —
+// the proven-switch fallback and the dry own/extra-call matches, which pass
+// detection=false because record's learn step is the one noise learner — derives
+// one so a per-call "don't learn" still holds even though the connection-level
+// Engine on ctx was built with detection on. Returns e unchanged when it is nil
+// or already detection-off, so no allocation happens on the common path.
+func (e *Engine) WithoutDetection() *Engine {
+	if e == nil || !e.detection {
+		return e
+	}
+	cp := *e
+	cp.detection = false
+	return &cp
+}
+
 // DetectionEnabled reports whether auto-learning is on. nil-safe.
 func (e *Engine) DetectionEnabled() bool { return e != nil && e.detection }
 
@@ -138,7 +157,7 @@ func (e *Engine) KnownNoise(m *models.Mock, userNoise map[string][]string) map[s
 	if e == nil {
 		return userNoise
 	}
-	return MergeKnown(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m)))
+	return MergeKnown(userNoise, userDecided(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m))))
 }
 
 // Detect returns the new "body."-prefixed schema-noise to record on the mock for
@@ -231,6 +250,25 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 // it has none), for a parser that compares a recording as the live request
 // reads it.
 func (e *Engine) StrictRejectRecorded(m *models.Mock, recorded []byte, ok bool, liveBody []byte, userNoise map[string][]string) (allowed bool, drift map[string][]string) {
+	return e.StrictRejectRecordedBody(m, recorded, ok, NewJSONBody(liveBody), userNoise)
+}
+
+// StrictRejectRecordedBody is StrictRejectRecorded with the live body as a
+// JSONBody: compared with many recordings, it is validated and decoded once
+// when the adapter compares JSON bodies as they are (JSONBodyDiffer).
+func (e *Engine) StrictRejectRecordedBody(m *models.Mock, recorded []byte, ok bool, live *JSONBody, userNoise map[string][]string) (allowed bool, drift map[string][]string) {
+	return e.StrictRejectRecordedJSONBody(m, NewJSONBody(recorded), ok, live, userNoise)
+}
+
+// StrictRejectRecordedJSONBody is StrictRejectRecordedBody with the recorded
+// body as a JSONBody too: a parser that has a recording's body already
+// decoded (NewDecodedJSONBody) gives it as it is, so the engine neither
+// validates nor decodes it, and reads its bytes only where it compares
+// bytes (an adapter that is not a JSONBodyDiffer, or bodies that are not
+// both JSON). A recording with no learned noise is compared under userNoise
+// itself (knownWithLearned), so a parser that compares a call with many
+// recordings builds no noise set per recording.
+func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody, ok bool, live *JSONBody, userNoise map[string][]string) (allowed bool, drift map[string][]string) {
 	if e == nil {
 		return true, nil
 	}
@@ -253,7 +291,142 @@ func (e *Engine) StrictRejectRecorded(m *models.Mock, recorded []byte, ok bool, 
 	// typeStrict, still fully exclude learned noise; typeStrict additionally marks
 	// them so a JSON parser type-enforces rather than fully ignores (collectJSON
 	// consults typeStrict first). User-configured noise stays full-ignore/regex.
-	learned := StripBodyPrefix(e.adapter.StoredNoise(m))
+	learned := userDecided(userNoise, StripBodyPrefix(stored))
+	known := knownWithLearned(userNoise, learned)
+	typeStrict := learnedTypeStrict(userNoise, learned)
+	guarded := e.userGuardedDrift(m, recorded, live, userNoise, learned)
+	var d map[string][]string
+	var comparable bool
+	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
+		d, comparable = jd.DiffJSONBodies(m, recorded, live, known, typeStrict, false, e.adapter.RecordedValueIsNoise(m))
+	} else {
+		d, comparable = e.adapter.Diff(m, recorded.Raw(), live.Raw(), known, typeStrict, false, e.adapter.RecordedValueIsNoise(m))
+	}
+	if !comparable {
+		// No field structure to diff — fall back to byte equality so unequal
+		// opaque bodies are a real mismatch rather than a silent pass.
+		if string(recorded.Raw()) == string(live.Raw()) {
+			return true, nil
+		}
+		return false, map[string][]string{"body": nil}
+	}
+	for p, v := range guarded {
+		if d == nil {
+			d = map[string][]string{}
+		}
+		d[p] = v
+	}
+	if len(d) == 0 {
+		return true, nil
+	}
+	return false, d
+}
+
+// userGuardedDrift is the drift of every field keploy.yml's entry with
+// patterns guards that differs under userNoise alone: those patterns decide
+// such a field before any learned noise, and a learned container holding it
+// ("user" beside the user's "id", which userDecided keeps) would excuse it
+// whole. nil when nothing is learned or no entry has patterns.
+func (e *Engine) userGuardedDrift(m *models.Mock, recorded, live *JSONBody, userNoise, learned map[string][]string) map[string][]string {
+	if len(learned) == 0 || !hasPatterns(userNoise) {
+		return nil
+	}
+	return e.patternDrift(m, recorded, live, userNoise)
+}
+
+// PatternDrift is the drift of every field of m's recorded body and
+// liveBody that keploy.yml's entry with patterns guards and that differs
+// under userNoise alone: a value outside the patterns on either side (where
+// the obfuscator redacted the recorded value, the live one), or a field the
+// live body lacks. A pass that excuses the obfuscator's redacted values (the HTTP
+// parser's noise-aware exact body match) serves m only when it is empty.
+func (e *Engine) PatternDrift(m *models.Mock, liveBody []byte, userNoise map[string][]string) map[string][]string {
+	// nil engine == noise off: no adapter means no keploy.yml patterns to hold,
+	// so nothing drifts beyond them. Keeps the "every method is nil-safe"
+	// contract (see context.go) that match.go relies on when both flags are off.
+	if e == nil {
+		return nil
+	}
+	recorded, _ := e.adapter.RecordedBody(m)
+	return e.patternDrift(m, NewJSONBody(recorded), NewJSONBody(liveBody), userNoise)
+}
+
+// patternDrift is PatternDrift over bodies already read.
+func (e *Engine) patternDrift(m *models.Mock, recorded, live *JSONBody, userNoise map[string][]string) map[string][]string {
+	var ud map[string][]string
+	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
+		ud, _ = jd.DiffJSONBodies(m, recorded, live, userNoise, nil, false, e.adapter.RecordedValueIsNoise(m))
+	} else {
+		ud, _ = e.adapter.Diff(m, recorded.Raw(), live.Raw(), userNoise, nil, false, e.adapter.RecordedValueIsNoise(m))
+	}
+	user := matcher.NewNoiseLookup(userNoise)
+	var out map[string][]string
+	for p, v := range ud {
+		if pats, ok := user.Patterns(strings.TrimPrefix(p, "body.")); ok && len(pats) > 0 {
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[p] = v
+		}
+	}
+	return out
+}
+
+// knownWithLearned is KnownNoise's set (userNoise ∪ learned, userNoise winning
+// on a key both hold) for the strict compare, which only reads it: userNoise
+// itself when nothing is learned, a merged copy otherwise.
+func knownWithLearned(userNoise, learned map[string][]string) map[string][]string {
+	if len(learned) == 0 {
+		return userNoise
+	}
+	return MergeKnown(userNoise, learned)
+}
+
+// userDecided is learned without every path keploy.yml's entry with patterns
+// names (matcher.NoiseLookup: by whole fields, without case): the user's
+// patterns decide such a field, both its values. A learned entry there, a
+// case twin ("userId" beside the user's "userid") or a more specific path
+// ("user.id" under the user's "id"), would win the matcher's most specific
+// first, or case, tie-break and excuse a value the patterns refuse. learned
+// itself when it drops nothing.
+func userDecided(userNoise, learned map[string][]string) map[string][]string {
+	if len(learned) == 0 || !hasPatterns(userNoise) {
+		return learned
+	}
+	user := matcher.NewNoiseLookup(userNoise)
+	var out map[string][]string
+	for k := range learned {
+		if pats, ok := user.Patterns(k); ok && len(pats) > 0 {
+			if out == nil {
+				out = maps.Clone(learned)
+			}
+			delete(out, k)
+		}
+	}
+	if out == nil {
+		return learned
+	}
+	return out
+}
+
+// hasPatterns reports whether an entry of noise has patterns.
+func hasPatterns(noise map[string][]string) bool {
+	for _, pats := range noise {
+		if len(pats) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// learnedTypeStrict is the learned paths a JSON parser type-enforces: every
+// learned path but one the user ALSO configured as noise, which keeps the
+// user's intent (full-ignore / value-regex). known still carries it, so a
+// non-JSON parser keeps excluding it. nil when nothing is learned.
+func learnedTypeStrict(userNoise, learned map[string][]string) map[string]struct{} {
+	if len(learned) == 0 {
+		return nil
+	}
 	// User body noise is lowercased at ingest (decode.go), while learned noise
 	// keeps the recorded JSON case (e.g. "userId"), so the exclusion must compare
 	// case-insensitively — otherwise a user-ignored camelCase field would slip into
@@ -264,28 +437,12 @@ func (e *Engine) StrictRejectRecorded(m *models.Mock, recorded []byte, ok bool, 
 	}
 	typeStrict := make(map[string]struct{}, len(learned))
 	for k := range learned {
-		// A path the user ALSO configured as noise keeps the user's intent
-		// (full-ignore / value-regex); only purely auto-learned paths become
-		// type-strict. KnownNoise still carries it, so a non-JSON parser keeps
-		// excluding it.
 		if _, userConfigured := userKeys[strings.ToLower(k)]; userConfigured {
 			continue
 		}
 		typeStrict[k] = struct{}{}
 	}
-	d, comparable := e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
-	if !comparable {
-		// No field structure to diff — fall back to byte equality so unequal
-		// opaque bodies are a real mismatch rather than a silent pass.
-		if string(recorded) == string(liveBody) {
-			return true, nil
-		}
-		return false, map[string][]string{"body": nil}
-	}
-	if len(d) == 0 {
-		return true, nil
-	}
-	return false, d
+	return typeStrict
 }
 
 // DetectJSONDrift compares a recorded request body against the live one and
@@ -299,13 +456,110 @@ func (e *Engine) StrictRejectRecorded(m *models.Mock, recorded []byte, ok bool, 
 // real, non-learnable mismatch. This is the single JSON-diff kernel behind both
 // the HTTP and Pulsar schema-noise paths.
 func DetectJSONDrift(recordedBody, liveBody []byte, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, isRecordedNoise func(string) bool) (drift map[string][]string, comparable bool) {
-	if !json.Valid(recordedBody) || !json.Valid(liveBody) {
+	return DetectJSONBodyDrift(NewJSONBody(recordedBody), NewJSONBody(liveBody), known, typeStrict, valueChangesOnly, isRecordedNoise)
+}
+
+// JSONBody is a request body DetectJSONBodyDrift compares, read once: whether
+// it is JSON, and its value, are worked out by the first comparison that needs
+// them and kept. A body compared with many others (a live command's, with
+// every recording the matcher meets) is then validated and decoded once, not
+// once a comparison. The kept value is only read, never changed. Not safe for
+// concurrent use.
+type JSONBody struct {
+	raw []byte
+	// rawFrom, when set, makes raw on its first read (Raw): a body made
+	// decoded (NewDecodedJSONBody) has its bytes made only when compared
+	// as bytes.
+	rawFrom func() []byte
+	// checked, valid: json.Valid's answer, once asked. read, decoded,
+	// value: json.Unmarshal's, once asked (decoded false: a body that is
+	// JSON but does not decode, a number past float64's range).
+	checked, valid, read, decoded bool
+	value                         any
+	// reads counts the times the body was validated or decoded, so a test
+	// can check that each is done once without timing it.
+	reads int
+}
+
+// NewJSONBody is raw as a JSONBody, not yet read.
+func NewJSONBody(raw []byte) *JSONBody {
+	return &JSONBody{raw: raw}
+}
+
+// NewDecodedJSONBody is a JSON body given as the value json.Unmarshal
+// decodes its bytes into (an interface{}: map[string]any, []any, float64,
+// string, bool, nil) and a function that makes those bytes, called on the
+// first read of them (Raw), if any. The caller vouches that value is what
+// json.Unmarshal makes of raw's bytes, which are JSON: the body is neither
+// validated nor decoded (Reads stays 0).
+func NewDecodedJSONBody(value any, raw func() []byte) *JSONBody {
+	return &JSONBody{rawFrom: raw, checked: true, valid: true, read: true, decoded: true, value: value}
+}
+
+// Raw is the body's bytes.
+func (b *JSONBody) Raw() []byte {
+	if b.rawFrom != nil {
+		b.raw, b.rawFrom = b.rawFrom(), nil
+	}
+	return b.raw
+}
+
+// Reads is how many times the body was validated or decoded so far: each
+// once at most, however many comparisons read it.
+func (b *JSONBody) Reads() int {
+	return b.reads
+}
+
+// isJSON reports whether the body is JSON (json.Valid), asked once.
+func (b *JSONBody) isJSON() bool {
+	if !b.checked {
+		b.reads++
+		b.checked, b.valid = true, json.Valid(b.raw)
+	}
+	return b.valid
+}
+
+// decodedValue is the body as json.Unmarshal decodes it into an interface{}
+// (ok false: it does not decode), decoded once.
+func (b *JSONBody) decodedValue() (value any, ok bool) {
+	if !b.read {
+		b.read = true
+		b.reads++
+		b.decoded = json.Unmarshal(b.raw, &b.value) == nil
+	}
+	return b.value, b.decoded
+}
+
+// JSONBodyDiffer is an Adapter whose Diff is DetectJSONDrift over the request
+// bodies as they are (JSONDiffer's), saying so by comparing them as JSONBody
+// (DetectJSONBodyDrift): the engine then reads a live body compared with many
+// recordings once. JSONDiffer does not implement it, so an adapter that embeds
+// JSONDiffer and has a Diff of its own (HTTP's, for form bodies) keeps its Diff.
+// Like Diff, it reads known and typeStrict only.
+type JSONBodyDiffer interface {
+	DiffJSONBodies(m *models.Mock, recorded, live *JSONBody, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (drift map[string][]string, comparable bool)
+}
+
+// DetectJSONBodyDrift is DetectJSONDrift over two JSONBody, each validated and
+// decoded once however many comparisons read it.
+func DetectJSONBodyDrift(recorded, live *JSONBody, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, isRecordedNoise func(string) bool) (drift map[string][]string, comparable bool) {
+	if !recorded.isJSON() || !live.isJSON() {
 		return nil, false
+	}
+	// Both are JSON: a body that does not decode diffs to no path, as
+	// matcher.ChangedJSONFieldPaths finds none for it.
+	exp, ok := recorded.decodedValue()
+	if !ok {
+		return nil, true
+	}
+	act, ok := live.decodedValue()
+	if !ok {
+		return nil, true
 	}
 	// typeStrict paths ignore value but enforce type (learned-dynamic enforcement);
 	// valueChangesOnly restricts learning to value drift. Both default to the empty
 	// value, which keeps the prior behaviour.
-	paths := matcher.ChangedJSONFieldPaths(string(recordedBody), string(liveBody), known, typeStrict, valueChangesOnly, isRecordedNoise)
+	paths := matcher.ChangedDecodedJSONFieldPaths(exp, act, known, typeStrict, valueChangesOnly, isRecordedNoise)
 	if len(paths) == 0 {
 		return nil, true
 	}

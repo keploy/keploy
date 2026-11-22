@@ -304,7 +304,8 @@ func TestRecordV2_ResponseCutShortOtherwiseIsNotRecorded(t *testing.T) {
 }
 
 // Whole responses record the same mock whether or not the stream ended with
-// the client closing: the flag changes only what does not parse whole.
+// the client closing: the flag changes only what does not parse whole, and
+// the marks of an answer it reads as read in part (TestRecordMarksAWholeAnswerOnlyAsTheClientReadItAll).
 func TestRecordV2_WholeResponsesAreRecordedAlike(t *testing.T) {
 	t.Parallel()
 	for name, resp := range map[string]string{
@@ -322,6 +323,7 @@ func TestRecordV2_WholeResponsesAreRecordedAlike(t *testing.T) {
 		if err != nil || plain == nil {
 			t.Fatalf("%s: mock %v, err %v", name, plain, err)
 		}
+		read.Spec.HTTPResp.Marks, plain.Spec.HTTPResp.Marks = nil, nil
 		if !reflect.DeepEqual(read.Spec.HTTPResp, plain.Spec.HTTPResp) {
 			t.Errorf("%s: recorded %+v with the client's close, %+v without", name, read.Spec.HTTPResp, plain.Spec.HTTPResp)
 		}
@@ -436,16 +438,22 @@ func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 
 // An interim net/http will not read (a malformed header line in a 103) does not
 // cost the final response behind it: it is framed by its blank lines, as it
-// was before the interims were read one by one.
+// was before the interims were read one by one. A line that starts with a CR
+// is no blank line (net/textproto drops only the CR right before an LF).
 func TestRecordV2_FinalResponseBehindAMalformedInterim(t *testing.T) {
 	t.Parallel()
-	for _, end := range []streamEnd{relayedClosed, captureCut, clientClosed} {
-		m, err := recordOne(t, end, []byte("HTTP/1.1 103 Early Hints\r\nBad Header Line\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
-		if err != nil || m == nil {
-			t.Fatalf("%+v: mock %v, err %v; want the 200", end, m, err)
-		}
-		if r := m.Spec.HTTPResp; r.StatusCode != 200 || r.Body != "ok" {
-			t.Errorf("%+v: recorded %d %q, want 200 \"ok\"", end, r.StatusCode, r.Body)
+	for _, interim := range []string{
+		"HTTP/1.1 103 Early Hints\r\nBad Header Line\r\n\r\n",
+		"HTTP/1.1 103 Early Hints\r\n\rLink: </a>\r\n\r\n",
+	} {
+		for _, end := range []streamEnd{relayedClosed, captureCut, clientClosed} {
+			m, err := recordOne(t, end, []byte(interim+"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+			if err != nil || m == nil {
+				t.Fatalf("%q, %+v: mock %v, err %v; want the 200", interim, end, m, err)
+			}
+			if r := m.Spec.HTTPResp; r.StatusCode != 200 || r.Body != "ok" {
+				t.Errorf("%q, %+v: recorded %d %q, want 200 \"ok\"", interim, end, r.StatusCode, r.Body)
+			}
 		}
 	}
 }

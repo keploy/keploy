@@ -1,6 +1,7 @@
 package models
 
 import (
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -16,7 +17,41 @@ type TestWindow struct {
 	// Clock names, under the proven switch, the clock Start is on: the test
 	// case's Origin.Clock (RecordedWindow). "" is untrusted.
 	Clock string `json:"clock,omitempty"`
+	// Tests are, for a window several tests' windows were merged into (tests
+	// run at once; TestCase ""), the tests merged: the run reaches it when
+	// any of them begins, and passes its end once each of them has ended
+	// (models.RunPlace). Empty for one test's window.
+	Tests []string `json:"tests,omitempty"`
 }
+
+// RunWindows is ws, the windows keploy mock replay derives from a set's
+// mappings, as the run's place reads them (RunPlace): each runs up to the
+// next one's start, and the last has no end.
+//
+// A derived window ends at its test's last recording's place, a request, so
+// its End is not when its test ended, which the mappings do not say. Read as
+// that, the answer to the test's last call lies after its window, in a gap
+// released by the test's end, and the test's end waits for that answer. So
+// here a moment belongs to the test running when it was recorded, and no
+// release waits for a test's end: an answer recorded after a test ended and
+// before the next began is due while that test runs.
+func RunWindows(ws []TestWindow) []TestWindow {
+	out := slices.Clone(ws)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+	for i := range out {
+		end := noWindowEnd
+		if i+1 < len(out) {
+			end = out[i+1].Start.Add(-time.Nanosecond)
+		}
+		if end.After(out[i].End) {
+			out[i].End = end
+		}
+	}
+	return out
+}
+
+// noWindowEnd is the End of a window that has none: later than any recording.
+var noWindowEnd = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 // WindowSchedule is every recorded test window of one test set, sorted by
 // Start — the unselected and ignored tests included, because traffic the
@@ -50,10 +85,12 @@ type WindowSchedule struct {
 	// maxEnd[i] is the latest End among windows[0..i]. Monotone, so the first
 	// window containing t is a binary search over it.
 	maxEnd []time.Time
-	// byTest is each test case's window, by its name (Of): built at the
-	// first Of, once.
+	// byTest is each test case's window, by its name (Of), and byMember
+	// each test merged into a window no test names (IndexOfTest): built at
+	// the first lookup, once.
 	byTestOnce sync.Once
 	byTest     map[string]int
+	byMember   map[string]int
 }
 
 // NewWindowSchedule sorts a copy of ws by Start. Windows with a zero Start are
@@ -90,24 +127,54 @@ func (s *WindowSchedule) Len() int {
 
 // Of returns the window recorded for the test case named testCase: false
 // when the schedule holds none (a case with no request time opens none). A
-// name recorded twice gives its first window in Start order.
+// name recorded twice gives its first window in Start order. A test merged
+// into a window no test names (TestWindow.Tests) has none of its own.
 func (s *WindowSchedule) Of(testCase string) (TestWindow, bool) {
 	if s.Len() == 0 || testCase == "" {
 		return TestWindow{}, false
 	}
+	s.indexTests()
+	i, ok := s.byTest[testCase]
+	if !ok {
+		return TestWindow{}, false
+	}
+	return s.windows[i], true
+}
+
+// IndexOfTest is the index, in Start order (Window), of the window testCase
+// runs in: the one Of returns, else the merged window that lists it
+// (TestWindow.Tests); false where there is neither.
+func (s *WindowSchedule) IndexOfTest(testCase string) (int, bool) {
+	if s.Len() == 0 || testCase == "" {
+		return 0, false
+	}
+	s.indexTests()
+	if i, ok := s.byTest[testCase]; ok {
+		return i, true
+	}
+	i, ok := s.byMember[testCase]
+	return i, ok
+}
+
+// indexTests builds byTest and byMember, once: a name's first window in
+// Start order.
+func (s *WindowSchedule) indexTests() {
 	s.byTestOnce.Do(func() {
 		s.byTest = make(map[string]int, len(s.windows))
 		for i, w := range s.windows {
 			if _, seen := s.byTest[w.TestCase]; !seen && w.TestCase != "" {
 				s.byTest[w.TestCase] = i
 			}
+			for _, t := range w.Tests {
+				if _, seen := s.byMember[t]; !seen {
+					if s.byMember == nil {
+						s.byMember = map[string]int{}
+					}
+					s.byMember[t] = i
+				}
+			}
 		}
 	})
-	i, ok := s.byTest[testCase]
-	if !ok {
-		return TestWindow{}, false
-	}
-	return s.windows[i], true
 }
 
 // After reports whether t is later than every window's End: recorded after

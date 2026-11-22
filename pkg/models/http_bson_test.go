@@ -111,8 +111,8 @@ func TestHTTPReqBSON_LegacyDateTimeCompat(t *testing.T) {
 		t.Fatalf("UnmarshalBSON (legacy): %v", err)
 	}
 
-	if !decoded.Timestamp.Equal(legacyTS) {
-		t.Fatalf("legacy DateTime decode mismatch: want %s, got %s",
+	if !decoded.Timestamp.Equal(legacyTS) || decoded.Timestamp.Location() != time.UTC {
+		t.Fatalf("legacy DateTime decode mismatch: want %s in UTC, got %s",
 			legacyTS.Format(time.RFC3339Nano),
 			decoded.Timestamp.Format(time.RFC3339Nano))
 	}

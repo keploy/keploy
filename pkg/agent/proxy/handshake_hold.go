@@ -233,7 +233,7 @@ func (p *Proxy) dialHeld(ctx context.Context, lookup agent.HandshakeDestInfo, cl
 	conn, err := p.dialWhileHeld(ctx, lookup, client, proxy, addr)
 	if errors.Is(err, errHandshakeAbandoned) {
 		// The app's connect to its real destination failed.
-		_, _ = p.realDialFailed(addr, label)
+		_, _ = p.realDialFailed(addr, label, realOrigin(dest))
 		if p.failedDests.first("gave up "+addr, time.Now()) {
 			p.logger.Info("the application gave up connecting to a dependency before the dependency's answer "+
 				"reached it (its connect timed out or was cancelled), as it would without keploy; nothing is recorded for it",
@@ -252,7 +252,7 @@ func (p *Proxy) dialHeld(ctx context.Context, lookup agent.HandshakeDestInfo, cl
 			zap.Stringer("answer", out), zap.Error(err))
 		telling := false
 		if out != synhold.Accept {
-			label, telling = p.realDialFailed(addr, label)
+			label, telling = p.realDialFailed(addr, label, realOrigin(dest))
 		}
 		if out != synhold.Accept && p.failedDests.first("refused "+addr, time.Now()) {
 			what, recorded := "a dependency", "nothing is recorded for that attempt"

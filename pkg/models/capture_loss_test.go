@@ -31,6 +31,48 @@ func TestCaptureLossesSinceIsWhatGrew(t *testing.T) {
 	}
 }
 
+// A PID map's loss carries its map's errno (Err) as data: what grew keeps
+// it, a sum takes the later's when that says one, and the receipt's YAML and
+// the agent's JSON keep it, and leave it out when it is 0.
+func TestAPIDMapLossKeepsItsErrnoAsData(t *testing.T) {
+	base := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 4, Err: -7}}
+	got := (CaptureLosses{{Kind: CaptureLossPIDMap, Count: 7, What: "x", Err: -110}}).Since(base)
+	if want := (CaptureLosses{{Kind: CaptureLossPIDMap, Count: 3, What: "x", Err: -110}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("what grew keeps its errno: %+v, want %+v", got, want)
+	}
+	sum := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1, Err: -7}}.Plus(CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2, Err: -110}})
+	if want := (CaptureLosses{{Kind: CaptureLossPIDMap, Count: 3, Err: -110}}); !reflect.DeepEqual(sum, want) {
+		t.Fatalf("a sum takes the later's errno: %+v, want %+v", sum, want)
+	}
+	sum = CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1, Err: -7}}.Plus(CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}})
+	if want := (CaptureLosses{{Kind: CaptureLossPIDMap, Count: 3, Err: -7}}); !reflect.DeepEqual(sum, want) {
+		t.Fatalf("a later that says none leaves the earlier's: %+v, want %+v", sum, want)
+	}
+	said := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1, What: "x", Err: -7}}
+	y, err := yaml.Marshal(said)
+	if err != nil || !strings.Contains(string(y), "err: -7") {
+		t.Fatalf("YAML names the errno: %q, %v", y, err)
+	}
+	var back CaptureLosses
+	if err := yaml.Unmarshal(y, &back); err != nil || !reflect.DeepEqual(back, said) {
+		t.Fatalf("YAML reads it back: %+v, %v", back, err)
+	}
+	j, err := json.Marshal(said)
+	if err != nil || !strings.Contains(string(j), `"err":-7`) {
+		t.Fatalf("JSON names the errno: %s, %v", j, err)
+	}
+	back = nil
+	if err := json.Unmarshal(j, &back); err != nil || !reflect.DeepEqual(back, said) {
+		t.Fatalf("JSON reads it back: %+v, %v", back, err)
+	}
+	none := CaptureLosses{{Kind: CaptureLossTLSAbort, Count: 1}}
+	y, _ = yaml.Marshal(none)
+	j, _ = json.Marshal(none)
+	if strings.Contains(string(y), "err") || strings.Contains(string(j), "err") {
+		t.Fatalf("no errno, no field: %q, %s", y, j)
+	}
+}
+
 // A test is charged the agent-life kinds' growth since the run began (they
 // taint every later test) and a test's own kinds' growth since the previous
 // test ended (only the test they happened in).
@@ -53,8 +95,8 @@ func TestChargedTaintsWithTheRunsKindsAndKeepsATestsOwnToIt(t *testing.T) {
 	if got := unix.Charged(LossBases{Set: unix, App: unix}, unix); !reflect.DeepEqual(got, unix) {
 		t.Fatalf("a Unix-socket call before the base: Charged = %+v, want %+v", got, unix)
 	}
-	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() || CaptureLossAppBytesLost.PerTest() {
-		t.Fatal("only a TLS client's rejection is a test's own")
+	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() {
+		t.Fatal("a TLS client's rejection is a test's own, a process keploy could not place is not")
 	}
 }
 
@@ -148,6 +190,27 @@ func TestCaptureLossesTextShapesWhatItNames(t *testing.T) {
 	}
 }
 
+// Bytes lost with a connection that ended are that connection's, charged to
+// one test: the test the count grew in, never a later one. The same counts,
+// with the test's mark past them, charge nothing, and a kind whose later calls
+// may go with it still taints.
+func TestAppBytesLostChargeOneTest(t *testing.T) {
+	if !CaptureLossAppBytesLost.PerTest() {
+		t.Fatal("app_bytes_lost is not a test's own")
+	}
+	lost := CaptureLosses{{Kind: CaptureLossAppBytesLost, Count: 1, What: "from 127.0.0.1:40000"}}
+	if got := lost.Charged(LossBases{}, nil); !reflect.DeepEqual(got, lost) {
+		t.Fatalf("the test the loss landed in: Charged = %+v, want %+v", got, lost)
+	}
+	if got := lost.Charged(LossBases{}, lost); len(got) != 0 {
+		t.Fatalf("the test after it: Charged = %+v, want nothing", got)
+	}
+	dropped := CaptureLosses{{Kind: CaptureLossDropped, Count: 1}}
+	if got := dropped.Charged(LossBases{}, dropped); !reflect.DeepEqual(got, dropped) {
+		t.Fatalf("a kind that taints, the test after it: Charged = %+v, want %+v", got, dropped)
+	}
+}
+
 // Bytes written to a held connection that never reached the proxy are said in
 // their own words, with their count, never as an unnamed kind.
 func TestCaptureLossesTextSaysAppBytesLost(t *testing.T) {
@@ -171,7 +234,7 @@ func TestNotJudgedLossesAreSplitAndCountedFromTheRun(t *testing.T) {
 	}
 	tls := CaptureLoss{Kind: CaptureLossTLSAbort, Count: 2}
 	judged, notJudged := CaptureLosses{tls, unixAt(1)}.Split()
-	if len(judged) != 1 || judged[0] != tls || len(notJudged) != 1 || notJudged[0] != unixAt(1) {
+	if len(judged) != 1 || !reflect.DeepEqual(judged[0], tls) || len(notJudged) != 1 || !reflect.DeepEqual(notJudged[0], unixAt(1)) {
 		t.Fatalf("Split = %+v, %+v", judged, notJudged)
 	}
 	if !CaptureLossUnixSocket.NotJudged() || CaptureLossTLSAbort.NotJudged() || CaptureLossPIDMap.NotJudged() {
@@ -207,7 +270,7 @@ func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
 		t.Fatal("unix_unseen fails tests; want it to leave them not judged")
 	}
 	now := CaptureLosses{unseen}
-	if got := now.Since(now); len(got) != 1 || got[0] != unseen {
+	if got := now.Since(now); len(got) != 1 || !reflect.DeepEqual(got[0], unseen) {
 		t.Fatalf("Since(itself) = %+v, want unix_unseen kept: a state, no mark takes it away", got)
 	}
 	if got := now.SinceWithin(SameBases(now)); len(got) != 1 || got[0].Kind != CaptureLossUnixUnseen {
@@ -253,6 +316,29 @@ func TestAServerFirstConnectionLeavesItsTestNotJudged(t *testing.T) {
 	}
 	if !strings.Contains(notJudged.NotJudgedRemedy(), "mock.real") {
 		t.Fatalf("remedy %q", notJudged.NotJudgedRemedy())
+	}
+}
+
+// A close of the proxy's that keploy cannot account for leaves the tests that
+// used the connection not judged, those tests only, never failed: it says how
+// many of a test's connections it was, and its remedy is a run again.
+func TestAnUntoldCloseLeavesItsTestNotJudged(t *testing.T) {
+	k := CaptureLossAppBytesUntold
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() {
+		t.Fatalf("NotJudged %v PerTest %v runScoped %v; want a test's own loss that leaves it not judged", k.NotJudged(), k.PerTest(), k.runScoped())
+	}
+	judged, notJudged := CaptureLosses{{Kind: k, Count: 2, What: "from 127.0.0.1:50000"}}.Split()
+	if len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %+v, %+v; want it not judged, never a judged loss", judged, notJudged)
+	}
+	if text := notJudged.NotJudgedText(); !strings.Contains(text, "keploy's proxy closed 2 connection(s) this test used") {
+		t.Fatalf("NotJudgedText = %q", text)
+	}
+	if r := notJudged.NotJudgedRemedy(); !strings.Contains(r, AppBytesUntoldRemedy) {
+		t.Fatalf("remedy %q, want %q", r, AppBytesUntoldRemedy)
+	}
+	if r := (CaptureLosses{{Kind: CaptureLossServerFirst, Count: 1}}).NotJudgedRemedy(); strings.Contains(r, AppBytesUntoldRemedy) {
+		t.Fatalf("remedy %q names the untold close's remedy for a test it was not charged to", r)
 	}
 }
 
@@ -552,5 +638,82 @@ func TestAnAgentStartedAgainLeavesTheTestsWithoutAVerdict(t *testing.T) {
 	}
 	if remedy := l.NotJudgedRemedy(); remedy != AgentStartedAgainRemedy {
 		t.Fatalf("NotJudgedRemedy = %q, want %q", remedy, AgentStartedAgainRemedy)
+	}
+}
+
+// A program of the run keploy's shim is not in (macOS: a platform binary
+// such as /usr/bin/curl) leaves each test it ran in without a verdict, named,
+// with the remedy, and taints no test after it ends: its count grows in each
+// test it runs in (PerTest), never from the run's base.
+func TestAProgramWithoutTheShimLeavesItsTestsNotJudged(t *testing.T) {
+	k := CaptureLossProcessUnshimmed
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() || k.AppLife() || k.runLife() || k.Evidence() {
+		t.Fatal("a program without the shim is a test's own and not judged")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "the latest: /usr/bin/curl (pid 7)"}}
+	}
+	b := SameBases(at(1))
+	if got := at(2).Charged(b, at(1)); len(got) != 1 || got[0].Count != 1 {
+		t.Fatalf("the test it ran in: charged %+v, want 1", got)
+	}
+	if got := at(2).Charged(b, at(2)); len(got) != 0 {
+		t.Fatalf("a test after it ended: charged %+v, want nothing", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %+v, %+v: want it not judged", judged, notJudged)
+	}
+	text := notJudged.NotJudgedText()
+	if !strings.Contains(text, "keploy's shim is not in") || !strings.Contains(text, "/usr/bin/curl (pid 7)") || !strings.HasPrefix(text, "not judged: ") {
+		t.Fatalf("NotJudgedText = %q: want the program named, not judged", text)
+	}
+	if r := notJudged.NotJudgedRemedy(); r != ProcessUnshimmedRemedy {
+		t.Fatalf("NotJudgedRemedy = %q", r)
+	}
+}
+
+// A call a replay of test workers refused, as no served worker made it, is
+// the own loss of each test open when it was made: it leaves that test, and
+// no later one, not judged, and its text says the replay refused it and
+// what to do.
+func TestARefusedUnattributedCallLeavesOnlyTheTestsOpenThenNotJudged(t *testing.T) {
+	k := CaptureLossUnattributed
+	if !k.PerTest() || !k.NotJudged() || k.runScoped() || k.AppLife() || k.Evidence() {
+		t.Fatal("a call keploy cannot attribute is the open tests' own and not judged")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "the latest: a connection to 10.0.0.9:5432, from process 41, in no test worker's keploy instance"}}
+	}
+	if got := at(3).Charged(SameBases(nil), at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the one since the test began", got)
+	}
+	if got := at(3).Charged(SameBases(nil), at(3)); len(got) != 0 {
+		t.Fatalf("Charged = %+v: a later test is charged nothing", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || !reflect.DeepEqual(notJudged, at(1)) {
+		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
+	}
+	txt := notJudged.NotJudgedText()
+	for _, want := range []string{"the application made 1 call(s) from a process in no test worker's keploy instance, or in that of a worker keploy does not serve", "a replay refuses them unanswered", "(the latest: a connection to 10.0.0.9:5432, from process 41, in no test worker's keploy instance)"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("%q lacks %q", txt, want)
+		}
+	}
+	if r := notJudged.NotJudgedRemedy(); !strings.Contains(r, "and stop it before its worker ends") {
+		t.Fatalf("remedy %q does not say to stop a worker's process before the worker ends", r)
+	}
+}
+
+// A close's loss names the application's address and port alone, never a
+// host name: from an agent that lists no hosts it is still logged whole,
+// for bytes lost and for a close keploy could not account for alike.
+func TestACloseLossIsLoggedWholeWithNoHostsListed(t *testing.T) {
+	for _, k := range []CaptureLossKind{CaptureLossAppBytesLost, CaptureLossAppBytesUntold} {
+		c := CaptureLoss{Kind: k, Count: 1, What: "from 127.0.0.1:62766"}
+		if got := c.logWhat(false); got != "from 127.0.0.1:62766" {
+			t.Errorf("%s: logged %q, not its What whole", k, got)
+		}
 	}
 }

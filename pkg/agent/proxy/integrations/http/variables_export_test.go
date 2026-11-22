@@ -68,7 +68,7 @@ func TestVariableMatch_AnotherParsersCallIsServedByTheVariablePass(t *testing.T)
 	consume := func(x *models.Mock) bool { consumed = append(consumed, x.Name); return db.DeleteFilteredMock(*x) }
 	ctx := context.Background()
 
-	res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, consume)
+	res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, consume, nil)
 	if err != nil || res.Outcome != VariableServed || res.Served == nil || res.Served.Name != "mock-1" {
 		t.Fatalf("the call with a new deduplication id was not served by its recording: %+v, %v", res, err)
 	}
@@ -82,7 +82,7 @@ func TestVariableMatch_AnotherParsersCallIsServedByTheVariablePass(t *testing.T)
 	// The variable holds dedup-live in this test: a recording of it does not
 	// answer a call that sends another value.
 	again := sqsSend("mock-2", "dedup-rec", models.MockVariables{"dedup": useV("dedup-rec", []string{"body.MessageDeduplicationId"})})
-	res, err = h.VariableMatch(ctx, ReadVariableScope(db), sqsCall("dedup-other"), sdkNoise(), []*models.Mock{again}, db, consume)
+	res, err = h.VariableMatch(ctx, ReadVariableScope(db), sqsCall("dedup-other"), sdkNoise(), []*models.Mock{again}, db, consume, nil)
 	if err != nil || res.Outcome != VariableExactOnly || res.Problem == "" || len(res.Rest) != 0 {
 		t.Fatalf("a call breaking the bound variable was not left to an exact recording, with why: %+v, %v", res, err)
 	}
@@ -98,13 +98,13 @@ func TestVariableMatch_LeavesTheRestToTheCaller(t *testing.T) {
 	never := func(*models.Mock) bool { t.Fatal("consumed with the switch off"); return false }
 
 	t.Setenv(provenswitch.Env, "")
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain, withVar}, db, never)
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain, withVar}, db, never, nil)
 	if err != nil || res.Outcome != VariableNone || len(res.Rest) != 2 {
 		t.Fatalf("with the switch off the pass ran: %+v, %v", res, err)
 	}
 
 	t.Setenv(provenswitch.Env, "1")
-	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain}, db, never)
+	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain}, db, never, nil)
 	if err != nil || res.Outcome != VariableNone || len(res.Rest) != 1 || res.Rest[0] != plain {
 		t.Fatalf("a pool with no variables was not left whole to the caller: %+v, %v", res, err)
 	}
@@ -116,7 +116,7 @@ func TestVariableMatch_ARecordingTakenFirstIsCheckedAgain(t *testing.T) {
 	h := newHTTP()
 	m := sqsSend("mock-1", "dedup-rec", models.MockVariables{"dedup": bindV("dedup-rec", "body.MessageDeduplicationId")})
 	db := &varDb{perTest: []*models.Mock{m}}
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return false })
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return false }, nil)
 	if err != nil || res.Outcome != VariableRetry {
 		t.Fatalf("a recording taken first was not checked again: %+v, %v", res, err)
 	}
@@ -133,7 +133,7 @@ func TestVariableMatch_ARecordingThatCannotCarryItsVariableIsAMiss(t *testing.T)
 	}
 	m := bad()
 	db := &varDb{perTest: []*models.Mock{m}}
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true })
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true }, nil)
 	if err != nil || res.Outcome != VariableMiss || res.Problem == "" || res.Served != nil {
 		t.Fatalf("a recording that cannot carry its variable: %+v, %v; want a miss with why", res, err)
 	}
@@ -142,7 +142,7 @@ func TestVariableMatch_ARecordingThatCannotCarryItsVariableIsAMiss(t *testing.T)
 	db = &varDb{perTest: []*models.Mock{m}}
 	scope := ReadVariableScope(db)
 	db.table.Start(nil) // a test begins after the scope was read
-	res, err = h.VariableMatch(context.Background(), scope, sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true })
+	res, err = h.VariableMatch(context.Background(), scope, sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true }, nil)
 	if err != nil || res.Outcome != VariableRetry {
 		t.Fatalf("with a test begun since the scope was read: %+v, %v; want the call checked again", res, err)
 	}
@@ -157,11 +157,11 @@ func TestVariableMatch_AnSDKCallIsFittedOutsideTheRequestNoise(t *testing.T) {
 	h := newHTTP()
 	m := sqsSend("mock-1", "dedup-rec", models.MockVariables{"dedup": bindV("dedup-rec", "body.MessageDeduplicationId")})
 	db := &varDb{perTest: []*models.Mock{m}}
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), RequestNoise{}, []*models.Mock{m}, db, func(*models.Mock) bool { return true })
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), RequestNoise{}, []*models.Mock{m}, db, func(*models.Mock) bool { return true }, nil)
 	if err != nil || res.Outcome != VariableNone {
 		t.Fatalf("without the run's noise, an SDK call's headers fit the recording: %+v, %v", res, err)
 	}
-	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true })
+	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true }, nil)
 	if err != nil || res.Outcome != VariableServed {
 		t.Fatalf("with the run's noise, the SDK call was not served by its recording: %+v, %v", res, err)
 	}
@@ -226,5 +226,198 @@ func TestStrictFitsHoldsAnotherParsersRecordingsToTheStrictRule(t *testing.T) {
 		if fits(other(edit)) {
 			t.Fatalf("%s: the call fits the recording", name)
 		}
+	}
+}
+
+// The parser's written answer is asked of the answer the variables rendered,
+// before any bind or take: one it cannot write (nil) is a miss that binds and
+// takes nothing, so the recording still answers a later call; one it writes
+// is the answer served.
+func TestVariableMatch_AskTheWrittenAnswerBeforeTheTake(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := sqsSend("mock-1", "dedup-rec", models.MockVariables{"dedup": bindV("dedup-rec", "body.MessageDeduplicationId")})
+	db := &varDb{perTest: []*models.Mock{m}}
+	var consumed []string
+	consume := func(x *models.Mock) bool { consumed = append(consumed, x.Name); return db.DeleteFilteredMock(*x) }
+	var asked []string
+	refuse := func(a *models.Mock) *models.Mock { asked = append(asked, a.Name); return nil }
+
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, consume, refuse)
+	if err != nil || res.Outcome != VariableMiss || res.Served != nil || !strings.Contains(res.Problem, "cannot write an answer") {
+		t.Fatalf("an answer the parser cannot write was not a miss: %+v, %v", res, err)
+	}
+	if strings.Join(asked, ",") != "mock-1" || len(consumed) != 0 || len(db.perTest) != 1 {
+		t.Fatalf("asked %v, took %v, %d left; want mock-1 asked, nothing taken", asked, consumed, len(db.perTest))
+	}
+	if b, ok := db.table.Lookup("dedup"); ok {
+		t.Fatalf("a refused answer bound the variable: %+v", b)
+	}
+
+	written := func(a *models.Mock) *models.Mock {
+		out := *a
+		resp := *a.Spec.HTTPResp
+		resp.Body = "written"
+		out.Spec.HTTPResp = &resp
+		return &out
+	}
+	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, consume, written)
+	if err != nil || res.Outcome != VariableServed || res.Served == nil || res.Served.Spec.HTTPResp.Body != "written" || strings.Join(consumed, ",") != "mock-1" {
+		t.Fatalf("served %+v (took %v), %v; want the written answer, mock-1 taken", res, consumed, err)
+	}
+	if m.Spec.HTTPResp.Body == "written" {
+		t.Fatal("the recording itself was written")
+	}
+	if b, ok := db.table.Lookup("dedup"); !ok || b.Value != "dedup-live" {
+		t.Fatalf("the variable was not bound to the call's value: %+v %v", b, ok)
+	}
+}
+
+// answeredVarDb is varDb that tells answered, the set's recordings that
+// answered a call before and redacted something
+// (integrations.AnsweredRedactingReader), or, hiding, tells nothing (a
+// wrapper that does not forward the reader).
+type answeredVarDb struct {
+	*varDb
+	answered []*models.Mock
+	hiding   bool
+}
+
+func (d answeredVarDb) AnsweredRedacting(models.Kind) ([]*models.Mock, bool) {
+	return d.answered, !d.hiding
+}
+
+// Another parser's call that breaks a variable at a place a recording of
+// the pool redacted gets a why that shows the values there redacted, as an
+// HTTP miss report shows them: the value the call sent, and the variable's
+// value in the test, which an earlier live call sent. Redacted by the
+// recording the why names, by another of the pool, or by another that
+// answered a call before (on the set's answered list only); a pool that
+// redacted nothing there shows them, unless the store does not tell its
+// answered recordings: then the why shows no value of the call. The caller's
+// pool is left as it was, past its end too.
+func TestVariableMatch_TheWhyShowsNoValueAtARedactedPlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		name string
+		// redacted: the recordings that declare the variable redacted its
+		// place; another: a recording of the pool beside them, which
+		// declares none, did; answered: that recording answered a call
+		// before and is only on the set's answered list; hiding: the store
+		// does not tell its answered recordings.
+		redacted, another, answered, hiding bool
+	}{
+		{name: "redacted", redacted: true},
+		{name: "redacted-by-another-recording", another: true},
+		{name: "redacted-by-a-recording-answered-before", another: true, answered: true},
+		{name: "kept", hiding: false},
+		{name: "kept-at-a-store-that-does-not-tell", hiding: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHTTP()
+			rec := map[bool]string{true: "REDACTED_abc", false: "dedup-rec"}[c.redacted]
+			send := func(name string, vars models.MockVariables) *models.Mock {
+				m := sqsSend(name, rec, vars)
+				if c.redacted {
+					m.Noise = []string{`^REDACTED_abc$`}
+				}
+				return m
+			}
+			m := send("mock-1", models.MockVariables{"dedup": bindV(rec, "body.MessageDeduplicationId")})
+			db := &varDb{perTest: []*models.Mock{m}}
+			consume := func(x *models.Mock) bool { return db.DeleteFilteredMock(*x) }
+			ctx := context.Background()
+			if res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall(liveBound), sdkNoise(), []*models.Mock{m}, db, consume, nil); err != nil || res.Outcome != VariableServed {
+				t.Fatalf("the row is of a variable bound by a served call: %+v, %v", res, err)
+			}
+			// The caller's pool has room past its end, which the why must
+			// not write into.
+			pool := append(make([]*models.Mock, 0, 4), send("mock-2", models.MockVariables{"dedup": useV(rec, []string{"body.MessageDeduplicationId"})}))
+			store := answeredVarDb{varDb: db, hiding: c.hiding}
+			if c.another {
+				other := sqsSend("mock-3", "REDACTED_xyz", nil)
+				other.Spec.HTTPReq.Body = strings.Replace(other.Spec.HTTPReq.Body, "order 1", "order 3", 1)
+				other.Noise = []string{`^REDACTED_xyz$`}
+				if c.answered {
+					store.answered = []*models.Mock{other}
+				} else {
+					pool = append(pool, other)
+				}
+			}
+			n := len(pool)
+			res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall(liveSecret), sdkNoise(), pool, store, consume, nil)
+			if err != nil || res.Outcome != VariableExactOnly || !strings.Contains(res.Problem, "mock-2") {
+				t.Fatalf("the row is of a call breaking the bound variable, with why: %+v, %v", res, err)
+			}
+			for i, m := range pool[n:cap(pool)] {
+				if m != nil {
+					t.Errorf("the why wrote %q past the caller's pool's end (%d)", m.Name, n+i)
+				}
+			}
+			if c.hiding {
+				if strings.Contains(res.Problem, liveSecret) || strings.Contains(res.Problem, liveBound) {
+					t.Errorf("a store that does not tell its answered recordings, the why shows a value of the call: %s", res.Problem)
+				}
+			} else if c.redacted || c.another {
+				if strings.Contains(res.Problem, liveSecret) || strings.Contains(res.Problem, liveBound) || !strings.Contains(res.Problem, valueRedacted) {
+					t.Errorf("the why shows a value at the place a recording redacted: %s", res.Problem)
+				}
+			} else if !strings.Contains(res.Problem, liveSecret) || !strings.Contains(res.Problem, liveBound) {
+				t.Errorf("the why does not show the values at a place no recording redacted: %s", res.Problem)
+			}
+		})
+	}
+}
+
+// Another parser's call that breaks a variable at a path segment gets a why
+// that shows the values there redacted when another recording of the call's
+// shape (as many segments) redacted that segment, in the pool or only on the
+// store's answered list, though the recording the why names did not. With
+// no recording that redacted it, the why shows them.
+func TestVariableMatch_TheWhyShowsNoValueAtARedactedPathSegment(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	call := func(method, path string) VariableCall {
+		u, _ := url.Parse("http://store" + path)
+		return VariableCall{Method: method, URL: u, Header: http.Header{"Host": {"store"}, "Content-Type": {"application/json"}}}
+	}
+	for _, c := range []struct {
+		name             string
+		inPool, answered bool
+	}{
+		{name: "redacted-by-another-recording", inPool: true},
+		{name: "redacted-by-a-recording-answered-before", answered: true},
+		{name: "kept"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHTTP()
+			bind := at(varMock("mock-1", "POST", "http://store/orders/ord-rec-1", "", 201, `{}`, models.MockVariables{"orderId": bindV("ord-rec-1", "url.path[1]")}), 1)
+			db := &varDb{perTest: []*models.Mock{bind}}
+			consume := func(x *models.Mock) bool { return db.DeleteFilteredMock(*x) }
+			ctx := context.Background()
+			if res, err := h.VariableMatch(ctx, ReadVariableScope(db), call("POST", "/orders/"+liveBound), sdkNoise(), []*models.Mock{bind}, db, consume, nil); err != nil || res.Outcome != VariableServed {
+				t.Fatalf("the row is of a variable bound by a served call: %+v, %v", res, err)
+			}
+			use := at(varMock("mock-2", "GET", "http://store/orders/ord-rec-1/items", "", 200, `{}`, models.MockVariables{"orderId": useV("ord-rec-1", []string{"url.path[1]"})}), 2)
+			other := at(varMock("other", "GET", "http://store/orders/REDACTED_abc/notes", "", 200, `{}`, nil), 3)
+			other.Noise = []string{`^REDACTED_abc$`}
+			pool := []*models.Mock{use}
+			store := answeredVarDb{varDb: db}
+			if c.inPool {
+				pool = append(pool, other)
+			}
+			if c.answered {
+				store.answered = []*models.Mock{other}
+			}
+			res, err := h.VariableMatch(ctx, ReadVariableScope(db), call("GET", "/orders/"+liveSecret+"/items"), sdkNoise(), pool, store, consume, nil)
+			if err != nil || res.Outcome != VariableExactOnly || !strings.Contains(res.Problem, "mock-2") {
+				t.Fatalf("the row is of a call breaking the bound variable, with why: %+v, %v", res, err)
+			}
+			shows := strings.Contains(res.Problem, liveSecret)
+			if redacted := c.inPool || c.answered; redacted && (shows || strings.Contains(res.Problem, liveBound)) {
+				t.Errorf("the why shows a value at the segment another recording redacted: %s", res.Problem)
+			} else if !redacted && !shows {
+				t.Errorf("with no recording that redacted the segment, the why hides the value the call sent: %s", res.Problem)
+			}
+		})
 	}
 }

@@ -4,8 +4,9 @@
 #
 # The agent tracks the processes it may intercept in a BPF map,
 # target_namespace_pids (10240 entries), one entry for each live process that
-# called socket() in the agent's PID namespace (for a native agent, the whole
-# host). With the map full the kernel refuses the next process a place, and
+# called socket() in the agent's PID namespace (for a native agent, of the
+# keploy command's own tree: the app's processes, as here). With the map full
+# the kernel refuses the next process a place, and
 # that process's calls are not intercepted: they reach the real dependency.
 # While the dependency is up its tests pass all the same, and the mocks
 # recorded for those calls are consumed by nobody. So `keploy test` used to
@@ -52,6 +53,13 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+# shellcheck source=hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/hang_guard.sh" || exit 1
+# http_mocks_only: the recording is the app's calls to its dependency, by kind.
+# shellcheck source=mock-kinds.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mock-kinds.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -256,9 +264,9 @@ echo "== record $N tests, one dependency call each =="
 # No --record-timer: the recording is stopped as a user stops one, with
 # Ctrl+C, once every request has had its answer. timeout only ends a keploy
 # that hangs.
-sudo -E "${SCOPE[@]}" env PATH="$PATH" timeout -k 10 600 "$RECORD_BIN" record -c "bash app.sh" \
-  --generateGithubActions=false --disable-tele > record.log 2>&1 &
-KP=$!
+hang_start -k 10 600 sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "bash app.sh" \
+  --generateGithubActions=false --disable-tele > record.log 2>&1
+KP=$HANG_PID
 # Until the app listens (a connect, which records no test): keploy starts it
 # once its agent is up. The bound is only for an agent that never comes up.
 UP=0
@@ -271,23 +279,32 @@ done
 for i in $(seq $N); do
   curl -fsS -o /dev/null "http://127.0.0.1:$APP/order/item$i" || fail "record: GET /order/item$i failed"
 done
-# Ctrl+C to keploy itself, timeout's child, whose command line starts with
+# Ctrl+C to keploy itself, sudo's child, whose command line starts with
 # the binary (the agent it starts says "agent", not "record").
 sudo pkill -INT -f "^$RECORD_BIN record -c bash app\.sh" || fail "record: found no keploy record to stop"
-wait "$KP"
+hang_wait "$KP"
 echo "record: keploy exited $?"
 
-# mocks <file>: how many mocks it holds; 0 for a file that is not there.
+# mocks <file>: how many mocks it holds, of any kind; 0 for a file that is not
+# there. A mock's own `kind:` starts its line, as mock-kinds.sh counts them.
 mocks() {
   local n
-  n=$(sudo grep -c '^name: mock-' "$1" 2>/dev/null)
+  n=$(sudo grep -c '^kind:' "$1" 2>/dev/null)
   echo "${n:-0}"
 }
 REC=$(mocks keploy/test-set-0/mocks.yaml)
 TESTS=$(sudo sh -c 'ls keploy/test-set-0/tests 2>/dev/null | wc -l')
-echo "recorded $TESTS tests and $REC mocks"
-if [ "$TESTS" != "$N" ] || [ "$REC" -lt "$N" ]; then
-  echo "FAIL: recorded $TESTS tests and $REC mocks, want $N tests and at least $N mocks (one dependency call a test)"
+# One Http mock a test, its one call to the dependency, and no other mock:
+# the app and fetch.py call it at 127.0.0.1, and the app serves with
+# socketserver.TCPServer, which looks up no name, so the record makes no DNS
+# query on any runner; and nothing fills the PID map while it records, so it
+# loses no call. So REC, the count the checks below compare with, is N too.
+KINDS=$(http_mocks_only <(sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null) "$N")
+KINDS_OK=$?
+KINDS=${KINDS#*: }
+echo "recorded $TESTS tests and $REC mocks: $KINDS"
+if [ "$TESTS" != "$N" ] || [ "$KINDS_OK" -ne 0 ]; then
+  echo "FAIL: recorded $TESTS tests and $KINDS; want $N tests and $N Http mocks and no other (one dependency call a test)"
   tail -n 40 record.log
   exit 1
 fi
@@ -309,7 +326,7 @@ ktest() {
   # full), so that fallback must stay unreachable -- the outer timeout, the
   # same 600s, is the real hang guard, and app.py exits the app if the holder
   # dies, so a stuck /healthz never burns the window on a dead app.
-  sudo -E "${SCOPE[@]}" env PATH="$PATH" "$@" timeout -k 30 600 "$REPLAY_BIN" test -c "bash app.sh" \
+  bounded -k 30 600 sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$REPLAY_BIN" test -c "bash app.sh" \
     --health-url "http://127.0.0.1:$APP/healthz" --health-poll-timeout 600s \
     --remove-unused-mocks --generateGithubActions=false --disable-tele > "$log" 2>&1
   echo $?
@@ -345,7 +362,7 @@ ktest_kept() {
   sudo rm -rf keploy hold.out && sudo cp -a keploy.rec keploy
   make_kept_set || { echo 99; return; }
   : > dep.log
-  sudo -E "${SCOPE[@]}" env PATH="$PATH" KEPLOY_PROVEN=1 "$@" timeout -k 30 900 "$REPLAY_BIN" test -c "bash app.sh" --keep-app-alive \
+  bounded -k 30 900 sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$@" "$REPLAY_BIN" test -c "bash app.sh" --keep-app-alive \
     --health-url "http://127.0.0.1:$APP/healthz" --generateGithubActions=false --disable-tele > "$log" 2>&1
   echo $?
 }
@@ -397,6 +414,8 @@ grep -E "PID map|could not track|skipping mock pruning|not writing mappings" tes
 
 echo "== keploy test --keep-app-alive, KEPLOY_PROVEN=1, two test sets, the PID map overflowing in the first: the second must fail as capture incomplete too, saying why =="
 rc=$(ktest_kept test-kept.log OVERFLOW=1)
+# ktest_kept runs in a subshell: its run's verify line is checked here.
+verify_ran 1 test-kept.log || FAIL=$((FAIL + 1))
 rep0=$(latest_report test-set-0)
 rep1=$(latest_report test-set-1)
 echo "test (kept): keploy exited $rc; test-set-0 $(sudo grep -m1 '^status:' "$rep0" 2>/dev/null); test-set-1 $(sudo grep -m1 '^status:' "$rep1" 2>/dev/null); the dependency saw: $(tr '\n' ' ' < dep.log)"

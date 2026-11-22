@@ -668,7 +668,7 @@ func WaitExitOffered(logger *zap.Logger, exited <-chan struct{}, procs []Reached
 		case <-meter.Wait():
 		}
 		if looked := exitLooked.Load(); looked != nil {
-			(*looked)()
+			(*looked)(clock)
 		}
 		if !offering && notice.Next() {
 			offering = true
@@ -708,9 +708,10 @@ func (n *FilesUncomparedNote) Say(logger *zap.Logger, m ExitMark) {
 }
 
 // exitLooked, where a test sets it, is called at each look of
-// WaitExitByEvents at the processes it waits for (the tests count the looks);
-// atomic, as a test may reset it while a stop it left runs on.
-var exitLooked atomic.Pointer[func()]
+// WaitExitByEvents at the processes it waits for, with the stop's clock (the
+// tests count the looks, and read the clock); atomic, as a test may reset it
+// while a stop it left runs on.
+var exitLooked atomic.Pointer[func(*ExitClock)]
 
 // ProcOf is process pid as it runs now, named by its pid and start time; false
 // when it is gone (or a zombie).

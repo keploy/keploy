@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
@@ -31,7 +32,7 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 
 	parsedURL, err := url.Parse(extractedURL)
 	if err != nil || parsedURL.Hostname() == "" {
-		utils.LogError(logger, err, "error parsing URL")
+		utils.LogError(logger, utils.WithholdInput(err), "error parsing URL")
 		return nil
 	}
 
@@ -66,14 +67,13 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	} else {
 		request.Body.Mode = "raw"
 		request.Body.Raw = http.Request.Body
-	}
-
-	if strings.Contains(http.Request.Header["Content-Type"], "application/json") {
-		request.Body.Options = map[string]interface{}{
-			"raw": map[string]interface{}{
-				"headerFamily": "json",
-				"language":     "json",
-			},
+		if strings.Contains(http.Request.Header["Content-Type"], "application/json") {
+			request.Body.Options = map[string]interface{}{
+				"raw": map[string]interface{}{
+					"headerFamily": "json",
+					"language":     "json",
+				},
+			}
 		}
 	}
 
@@ -90,15 +90,6 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	response.Body = http.Response.Body
 	response.OriginalRequest = &request
 	response.Name = http.Response.StatusMessage
-
-	if strings.Contains(http.Response.Header["Content-Type"], "application/json") {
-		request.Body.Options = map[string]interface{}{
-			"raw": map[string]interface{}{
-				"headerFamily": "json",
-				"language":     "json",
-			},
-		}
-	}
 
 	// Extract the last segment of the path as the name
 	pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
@@ -193,7 +184,9 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				}
 
 				filePath := filepath.Join(testsDir, testFile.Name())
-				data, err := os.ReadFile(filePath)
+				// Read inside the recording: what is exported is shared, and a
+				// test case that links out of it is refused, with why.
+				data, err := pkg.ReadRecordingFile(keployDir, filepath.Join(v.Name(), "tests", testFile.Name()))
 				if err != nil {
 					utils.LogError(logger, err, "failed to read test file", zap.String("path", filePath))
 					continue

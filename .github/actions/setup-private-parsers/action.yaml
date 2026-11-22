@@ -36,29 +36,18 @@ runs:
 
     # --- Add Known Hosts (all OSes) ---
     #
-    # Hard-code GitHub's published SSH host keys instead of running
-    # `ssh-keyscan github.com`. The Windows runner's bundled OpenSSH
-    # can't complete the GitHub-side KEX negotiation since GitHub
-    # started offering `sntrup761x25519-sha512@openssh.com` — the
-    # client aborts with `choose_kex: unsupported KEX method ...`
-    # and the step exits 1. Pinning to GitHub's documented
-    # fingerprints (see https://docs.github.com/en/authentication/
-    # keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
-    # is also stronger from a supply-chain standpoint — we never
-    # trust whatever `ssh-keyscan` hands back from the wire.
-    #
-    # If GitHub rotates a key, update the literals here. Keys last
-    # rotated 2023-03-24 (RSA) — others are long-lived.
+    # GitHub's published SSH host keys, from .github/ssh/github_known_hosts
+    # (which cites their source), never `ssh-keyscan github.com`: a
+    # run-time scan fails the step when the runner's DNS or port 22 blips,
+    # and trusts whatever answers. github-host-keys.tests.sh (this step) and
+    # setup-git-isolation.tests.ps1 (the Windows one) check that each writes
+    # the pinned keys with no network call.
     - name: Add GitHub to known hosts (non-Windows)
       if: runner.os != 'Windows'
       shell: bash
       run: |
         mkdir -p ~/.ssh
-        cat <<'EOF' >> ~/.ssh/known_hosts
-        github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
-        github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
-        github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
-        EOF
+        grep '^github\.com ' "$GITHUB_ACTION_PATH/../../ssh/github_known_hosts" >> ~/.ssh/known_hosts
 
     # Skip when GIT_SSH_COMMAND is already set (per-run isolation handles known_hosts)
     - name: Add GitHub to known hosts (Windows)
@@ -70,13 +59,11 @@ runs:
             New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
         }
         $knownHosts = Join-Path $sshDir "known_hosts"
-        # Hard-coded GitHub host keys — see non-Windows step for rationale.
-        # Ascii encoding avoids BOM issues with OpenSSH's parser.
-        $keys = @(
-          "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
-          "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
-          "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk="
-        )
+        # The pinned keys, as in the non-Windows step. Ascii encoding avoids
+        # BOM issues with OpenSSH's parser.
+        $pinned = Join-Path (Join-Path (Split-Path -Parent (Split-Path -Parent $Env:GITHUB_ACTION_PATH)) "ssh") "github_known_hosts"
+        $keys = @(Get-Content -LiteralPath $pinned | Where-Object { $_ -match '^github\.com ' })
+        if ($keys.Count -eq 0) { throw "No github.com host keys in $pinned." }
         $keys | Out-File -FilePath $knownHosts -Encoding ascii -Append
 
     # --- SSH Agent (Common) ---
@@ -120,6 +107,9 @@ runs:
         # all, so a shed session failed the lane outright.
         # shellcheck source=/dev/null
         source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/go-retry.sh"
+        # integration_ref_of_body, shared with integrations-tests.sh.
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/integration-ref.sh"
 
         # Cross-repo integrations-ref resolution order (first hit wins):
         #
@@ -182,17 +172,10 @@ runs:
           return 1
         }
 
-        # Step 1: PR body override.
-        # Tolerant matcher: accept the tag anywhere on a line — optional
-        # leading whitespace or a list marker ("- ", "* ", "> ") — and
-        # case-insensitive on both the "Integration" and "Ref" halves so
-        # common markdown rendering variants and hand-edited PR bodies
-        # still pair correctly. The trailing awk extracts only the
-        # FIRST whitespace-separated token after the colon — earlier
-        # iterations used `tr -d '[:space:]'` to strip trailing CR/LF,
-        # but that also concatenated "main other-tag" into
-        # "mainother-tag" if the author put two words on one line.
-        BODY_REF="$(printf '%s' "$PR_BODY" | grep -iE '^[[:space:]]*([-*>][[:space:]]+)?integration-ref:' | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | awk '{print $1; exit}' || true)"
+        # Step 1: PR body override. integration-ref.sh reads it: the
+        # first word after the first Integration-Ref line, any case, after
+        # an optional list or quote marker, with a CRLF body's CRs dropped.
+        BODY_REF="$(integration_ref_of_body "$PR_BODY")"
         if [ -n "$BODY_REF" ] && [ "$FETCHED" != "1" ]; then
           try_fetch "$BODY_REF" "PR body Integration-Ref" || true
         fi
@@ -280,6 +263,8 @@ runs:
         # Bounded retry for every go command below. See go-retry.ps1, and
         # go-retry.sh for why only certain failures are treated as transient.
         . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.ps1"
+        # Get-IntegrationRefOfBody, integration-ref.sh's Windows twin.
+        . "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/integration-ref.ps1"
 
         function Try-Fetch([string]$Ref, [string]$Source) {
           if ([string]::IsNullOrWhiteSpace($Ref)) { return $false }
@@ -306,25 +291,8 @@ runs:
 
         # Resolution order: PR body Integration-Ref → head_ref → input.
         # See the non-Windows step for the full rationale.
-        $BodyRef = $null
-        if ($env:PR_BODY) {
-          # Tolerant matcher: accept the tag with optional leading
-          # whitespace or a list marker ("- ", "* ", "> "), mirroring
-          # the non-Windows branch. Keeps the cross-repo pairing
-          # working when reviewers edit PR bodies by hand. Take only
-          # the FIRST whitespace-separated token after the colon —
-          # an earlier iteration stripped all whitespace, which would
-          # silently concatenate "main other-tag" into "mainother-tag"
-          # for two-word lines.
-          $line = ($env:PR_BODY -split "`n") | Where-Object { $_ -imatch '^\s*([-*>]\s+)?integration-ref\s*:' } | Select-Object -First 1
-          if ($line) {
-            $tail = $line -replace '^[^:]+:\s*', ''
-            $tokens = $tail -split '\s+', 2
-            if ($tokens.Length -gt 0 -and $tokens[0]) {
-              $BodyRef = $tokens[0]
-            }
-          }
-        }
+        # Read as the non-Windows step reads it (integration-ref.ps1).
+        $BodyRef = Get-IntegrationRefOfBody $env:PR_BODY
 
         if ($BodyRef) { $Fetched = Try-Fetch $BodyRef "PR body Integration-Ref" }
         if (-not $Fetched) { $Fetched = Try-Fetch $env:GITHUB_HEAD_REF_VAL "github.head_ref" }
