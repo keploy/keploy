@@ -382,7 +382,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return err
 		}
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
-		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
+		_ = cmd.Flags().MarkDeprecated("app-id", "DEPRECATED: was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
@@ -428,6 +428,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "agent":
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
+		if cmd.Flags().Lookup("debug-file") == nil {
+			cmd.Flags().Bool("debug-file", false, "Write this run's DEBUG log to the file KEPLOY_DEBUG_FILE names (--debug does it too)")
+			if err := cmd.Flags().MarkHidden("debug-file"); err != nil {
+				c.logger.Debug("failed to hide the debug-file flag", zap.Error(err))
+			}
+		}
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
 		cmd.Flags().String("client-pid-ns", "", "The pid namespace the keploy client runs in, beside --client-pid (set by keploy itself)")

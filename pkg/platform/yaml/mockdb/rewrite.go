@@ -320,7 +320,7 @@ func newMockFileRewriter(logger *zap.Logger, root, dir, fileName string, format 
 // open creates the temp file on the first write, so a rewrite that keeps
 // nothing never creates one.
 func (rw *mockFileRewriter) open() error {
-	if err := yaml.MkdirAllInRecording(rw.root, rw.dir, 0o777); err != nil {
+	if err := yaml.MkdirAllInRecording(rw.root, rw.dir, 0o755); err != nil {
 		return err
 	}
 	tmp, err := yaml.CreateTempInRecording(rw.root, rw.dir, rw.fileName+".*.tmp", 0o600)

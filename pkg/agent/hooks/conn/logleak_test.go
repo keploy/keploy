@@ -1,11 +1,16 @@
 package conn
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,10 +79,88 @@ func TestCaptureGRPCOverTheLimitNamesTheMethodByItsShape(t *testing.T) {
 		},
 		GRPCResp: &models.GrpcResp{},
 	}
-	CaptureGRPC(context.Background(), logger, make(chan *models.TestCase, 1), stream, 8080, false, false)
+	keys := models.NewLogKeySession()
+	ctx := models.WithLogKeySession(context.Background(), keys)
+	CaptureGRPC(ctx, logger, make(chan *models.TestCase, 1), stream, 8080, false, false)
 	said := logs.FilterMessageSnippet("gRPC test case data exceeds 5MB limit").All()
 	if len(said) != 1 || said[0].ContextMap()["path"] != "/{}/{}" {
 		t.Fatalf("want one over-the-limit line naming the method by its shape, /{}/{}, got %+v", logs.All())
 	}
+	wantTag := models.URLPathTag(ctx, http.MethodPost, &url.URL{Path: "/" + s + ".Orders/Get"})
+	if got := said[0].ContextMap()["path_tag"]; got != wantTag {
+		t.Errorf("path_tag = %q, want %q", got, wantTag)
+	}
 	logleak.Check(t, logs, s, "the gRPC capture")
+}
+
+// Capturing a multipart upload logs only the file count, never temp or upload
+// file paths; errors removing or inlining form files also withhold the file's
+// name from both fields and os errors.
+func TestCaptureFormDataLogsNoFilePaths(t *testing.T) {
+	const s = logleak.Canary
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("document", "passport-"+s+".pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte("binary-contents")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	logger, logs := logleak.Observe()
+	req := httptest.NewRequest(http.MethodPost, "/upload", bytes.NewReader(body.Bytes()))
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}
+	ch := make(chan *models.TestCase, 1)
+	at := time.Unix(1000, 0)
+	Capture(context.Background(), logger, ch, req, resp, at, at.Add(time.Millisecond), models.IncomingOptions{}, false, false, 8080)
+	tc := <-ch
+	t.Cleanup(func() { RemoveFormFiles(logger, tc.HTTPReq.Form) })
+
+	said := logs.FilterMessage("Detected binary file in request form data").All()
+	if len(said) != 1 {
+		t.Fatalf("precondition: want 1 binary form debug line, got %d (%+v)", len(said), logs.All())
+	}
+	fields := said[0].ContextMap()
+	if _, hasPaths := fields["paths"]; hasPaths {
+		t.Errorf("binary form debug line leaked raw paths field: %+v", fields)
+	}
+	if got := fields["files"]; got != int64(1) {
+		t.Errorf("binary form debug line files = %v, want 1", got)
+	}
+
+	// InlineFormFiles on a missing upload path whose basename holds the canary
+	// must not leak the canary in either the path field or the os error.
+	badLogger, badLogs := logleak.Observe()
+	missingPath := filepath.Join(t.TempDir(), "passport-"+s+".pdf")
+	InlineFormFiles(badLogger, &models.TestCase{
+		HasBinaryFile: true,
+		HTTPReq: models.HTTPReq{Form: []models.FormData{
+			{Key: "document", FileNames: []string{"passport-" + s + ".pdf"}, Paths: []string{missingPath}},
+		}},
+	})
+	if badLogs.FilterMessageSnippet("Error reading multipart temp file").Len() == 0 {
+		t.Fatal("precondition: InlineFormFiles did not log missing file error")
+	}
+	logleak.Check(t, badLogs, s, "InlineFormFiles missing file error")
+
+	// RemoveFormFiles on a non-empty directory whose basename holds the canary
+	// must not leak the canary in either the path field or the os error.
+	rmLogger, rmLogs := logleak.Observe()
+	nonEmptyDir := filepath.Join(t.TempDir(), "passport-"+s+".dir")
+	if err := os.Mkdir(nonEmptyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyDir, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	RemoveFormFiles(rmLogger, []models.FormData{{Key: "document", Paths: []string{nonEmptyDir}}})
+	if rmLogs.FilterMessageSnippet("failed to remove the file a form's file part was written to").Len() == 0 {
+		t.Fatal("precondition: RemoveFormFiles did not log remove error")
+	}
+	logleak.Check(t, rmLogs, s, "RemoveFormFiles error")
 }

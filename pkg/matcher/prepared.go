@@ -2,9 +2,9 @@ package matcher
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"hash/fnv"
 	"math"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,7 +27,7 @@ func NewValidatedJSON(expected, actual interface{}) ValidatedJSON {
 	return ValidatedJSON{
 		expected:    expected,
 		actual:      actual,
-		isIdentical: reflect.TypeOf(expected) == reflect.TypeOf(actual),
+		isIdentical: areJSONTypesEqual(expected, actual),
 	}
 }
 
@@ -128,12 +128,26 @@ func (k *matchKeyer) walk(v interface{}, p string) {
 		} else {
 			k.tag('f', 0)
 		}
+	case json.Number:
+		if c, ok := canonicalJSONNumber(t); ok {
+			k.tag('d', len(c))
+			_, _ = k.h.Write([]byte(c))
+			return
+		}
+		s := t.String()
+		k.tag('d', len(s))
+		_, _ = k.h.Write([]byte(s))
 	case float64:
 		if t == 0 {
 			t = 0 // -0 == 0 to the matcher
 		}
 		if math.IsNaN(t) {
 			k.tag('N', 0)
+			return
+		}
+		if c, ok := canonicalJSONNumber(t); ok {
+			k.tag('d', len(c))
+			_, _ = k.h.Write([]byte(c))
 			return
 		}
 		f := strconv.FormatFloat(t, 'g', -1, 64)
@@ -242,6 +256,18 @@ func fnv64a(parts ...string) uint64 {
 	return h
 }
 
+// canonicalFieldValue normalizes numeric field values so CollectJSONFields and
+// CountJSONFieldDiffs agree with diffMaps on mathematically equal number
+// spellings (e.g., 1 vs 1.0, float64(0.1) vs json.Number("0.1")).
+func canonicalFieldValue(typ, val string) string {
+	if typ == "number" {
+		if c, ok := normalizeDecimalNumber(val); ok {
+			return c
+		}
+	}
+	return val
+}
+
 // CollectJSONFields collects doc under known as JSONFieldDiffs collects each
 // side it compares. Under noise naming id keys (NoiseIDKey) it keeps doc
 // itself, which the caller must not change: what such an entry excuses in the
@@ -260,11 +286,11 @@ func CollectJSONFields(doc interface{}, known map[string][]string) JSONFields {
 func hashFields(pm pathMaps) JSONFields {
 	out := JSONFields{fields: make([]fieldHash, 0, len(pm.types))}
 	for p, typ := range pm.types {
-		out.fields = append(out.fields, fieldHash{path: fnv64a(p), value: fnv64a(typ, pm.values[p])})
+		out.fields = append(out.fields, fieldHash{path: fnv64a(p), value: fnv64a(typ, canonicalFieldValue(typ, pm.values[p]))})
 	}
 	sortFieldHashes(out.fields)
 	for p, typ := range pm.coveredTypes {
-		out.covered = append(out.covered, fieldHash{path: fnv64a(p), value: fnv64a(typ, pm.coveredValues[p])})
+		out.covered = append(out.covered, fieldHash{path: fnv64a(p), value: fnv64a(typ, canonicalFieldValue(typ, pm.coveredValues[p]))})
 	}
 	sortFieldHashes(out.covered)
 	return out

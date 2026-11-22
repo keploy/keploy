@@ -3,8 +3,8 @@ package http
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
-
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -110,9 +110,9 @@ func toStringMap(val interface{}) (map[string]string, bool) {
 
 // toJSONObject reads json_contains' value as the JSON object it names: a
 // string of JSON, or a map of any shape a test case's file decodes to (YAML
-// keys a map, nested ones included, by the assertions' key type). Its values
-// are what JSON gives (a number is a float64), so they compare with the
-// answer's body as encoding/json reads it; false when val names no object.
+// keys a map, nested ones included, by the assertions' key type). Numbers are
+// decoded as json.Number so large integers (>2^53) keep exact precision; false
+// when val names no object.
 func toJSONObject(val interface{}) (map[string]interface{}, bool) {
 	raw, isString := val.(string)
 	if !isString {
@@ -126,8 +126,17 @@ func toJSONObject(val interface{}) (map[string]interface{}, bool) {
 		}
 		raw = string(b)
 	}
-	var out map[string]interface{}
-	if err := jsonUnmarshal234([]byte(raw), &out); err != nil {
+	d := json.NewDecoder(strings.NewReader(raw))
+	d.UseNumber()
+	var decoded interface{}
+	if err := d.Decode(&decoded); err != nil {
+		return nil, false
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return nil, false
+	}
+	out, ok := decoded.(map[string]interface{})
+	if !ok || out == nil {
 		return nil, false
 	}
 	return out, true

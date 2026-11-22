@@ -73,6 +73,22 @@ jobs:
       - name: Check Maven caches
         run: bash ./.github/workflows/test_workflow_scripts/check-maven-caches.sh
 
+      # Every JDK comes from setup-java-maven/jdk: the build jdks.txt pins,
+      # the runner image's own copy when it is exactly that build, else its
+      # archive, checked against the published sha256 and cached under that
+      # digest. Its script's cases (a local server stands in for the release
+      # servers), then the check that no workflow or action runs
+      # actions/setup-java itself, which resolves and downloads a JDK
+      # unchecked (the check says why). They need no Go.
+      - name: Test setup-java-maven/jdk's pinned JDK
+        run: bash ./.github/actions/setup-java-maven/jdk/jdk.tests.sh
+
+      - name: Test the setup-java check
+        run: bash ./.github/workflows/test_workflow_scripts/check-setup-java.tests.sh
+
+      - name: Check setup-java
+        run: bash ./.github/workflows/test_workflow_scripts/check-setup-java.sh
+
       # The flag that limits the lint step to issues on the lines this event
       # adds or changes, from the checkout's history (the script says why).
       # It needs no Go, so a checkout it cannot read fails here in seconds.

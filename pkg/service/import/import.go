@@ -69,6 +69,10 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 
 	pi.validatePostmanSchema(postmanCollection.Info.Schema)
 
+	if err := validateCollectionTestSetNames(postmanCollection); err != nil {
+		return err
+	}
+
 	globalVariables := pi.extractGlobalVariables(postmanCollection.Variables)
 
 	// Check for empty responses if basePath is not provided
@@ -119,7 +123,7 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 
 	for _, variable := range variables {
 		// Skip disabled variables
-		if variable["disabled"] != nil && variable["disabled"].(bool) {
+		if disabled, ok := variable["disabled"].(bool); ok && disabled {
 			continue
 		}
 
@@ -221,6 +225,10 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 		return fmt.Errorf("failed to get current working directory: %w", err)
 	}
 
+	if err := validateCollectionTestSetNames(collection); err != nil {
+		return err
+	}
+
 	testCounter := 0
 	var itemsToProcess []TestData
 
@@ -238,6 +246,8 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testSet := item.Name
 			if item.Name == "" {
 				testSet = pi.generateTestSetName()
+			} else if err := validateTestSetName(testSet); err != nil {
+				return err
 			}
 
 			testSetPath := filepath.Join(cwd, "keploy", testSet)
@@ -277,6 +287,45 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 	}
 
 	return nil
+}
+
+func validateCollectionTestSetNames(collection *PostmanCollectionStruct) error {
+	for _, item := range collection.Items.PostmanItems {
+		if len(item.Item) == 0 || item.Name == "" {
+			continue
+		}
+		if err := validateTestSetName(item.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTestSetName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || !filepath.IsLocal(name) ||
+		hasWindowsDrivePrefix(name) || strings.ContainsAny(name, `/\`) ||
+		strings.TrimRight(name, " .") == "" || hasControlChar(name) {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
+	return nil
+}
+
+func hasWindowsDrivePrefix(name string) bool {
+	return len(name) >= 2 &&
+		((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) &&
+		name[1] == ':'
+}
+
+func hasControlChar(name string) bool {
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func (pi *PostmanImporter) generateTestSetName() string {
@@ -436,7 +485,11 @@ func constructRequest(req *PostmanRequest, variables map[string]string) models.H
 func extractHeaders(headers []map[string]interface{}) map[string]string {
 	headersMap := make(map[string]string)
 	for _, header := range headers {
-		headersMap[header["key"].(string)] = header["value"].(string)
+		key, okKey := header["key"].(string)
+		value, okVal := header["value"].(string)
+		if okKey && okVal {
+			headersMap[key] = value
+		}
 	}
 	return headersMap
 }
@@ -446,17 +499,23 @@ func extractURL(url interface{}) string {
 	case string:
 		return v
 	case map[string]interface{}:
-		url := v["raw"].(string)
-		return url
+		if raw, ok := v["raw"].(string); ok {
+			return raw
+		}
+		return ""
 	default:
 		return ""
 	}
 }
 
 func processUrlencodedBody(body []map[string]interface{}) string {
-	keyValues := []string{}
+	var keyValues []string
 	for _, item := range body {
-		keyValues = append(keyValues, url.QueryEscape(item["key"].(string))+"="+url.QueryEscape(item["value"].(string)))
+		key, okKey := item["key"].(string)
+		value, okVal := item["value"].(string)
+		if okKey && okVal {
+			keyValues = append(keyValues, url.QueryEscape(key)+"="+url.QueryEscape(value))
+		}
 	}
 	return strings.Join(keyValues, "&")
 }
@@ -464,10 +523,42 @@ func processUrlencodedBody(body []map[string]interface{}) string {
 func processFormdataBody(body []map[string]interface{}) []models.FormData {
 	form := []models.FormData{}
 	for _, formData := range body {
-		form = append(form, models.FormData{
-			Key:    formData["key"].(string),
-			Values: []string{formData["value"].(string)},
-		})
+		if disabled, ok := formData["disabled"].(bool); ok && disabled {
+			continue
+		}
+		key, okKey := formData["key"].(string)
+		if !okKey || key == "" {
+			continue
+		}
+		if fieldType, _ := formData["type"].(string); fieldType == "file" {
+			var paths []string
+			switch src := formData["src"].(type) {
+			case string:
+				if src != "" {
+					paths = []string{src}
+				}
+			case []interface{}:
+				for _, elem := range src {
+					if p, ok := elem.(string); ok && p != "" {
+						paths = append(paths, p)
+					}
+				}
+			}
+			// Note: Postman exports typically record host absolute paths in src;
+			// replay's OpenRecordingFile enforces recording-directory containment,
+			// so absolute paths must be made relative to the recording if replayed.
+			form = append(form, models.FormData{
+				Key:   key,
+				Paths: paths,
+			})
+			continue
+		}
+		if value, okVal := formData["value"].(string); okVal {
+			form = append(form, models.FormData{
+				Key:    key,
+				Values: []string{value},
+			})
+		}
 	}
 	return form
 }
@@ -487,7 +578,7 @@ func constructResponse(res PostmanResponse) models.HTTPResp {
 }
 
 func replaceTemplateVars(input string, variables map[string]string) string {
-	re := regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
+	re := regexp.MustCompile(`\{\{\s*([\w.-]+)\s*\}\}`)
 
 	return re.ReplaceAllStringFunc(input, func(match string) string {
 		submatches := re.FindStringSubmatch(match)
