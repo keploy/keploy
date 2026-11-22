@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -67,34 +66,6 @@ func ensureInMemoryComposeFlags(appCmd string) string {
 	}
 
 	return withoutComposeAbortFlags(strings.Join(result, " "))
-}
-
-func findComposeFile(cmd string) []string {
-
-	cmdArgs := strings.Fields(cmd)
-	composePaths := []string{}
-	haveMultipleComposeFiles := false
-
-	for i := 0; i < len(cmdArgs); i++ {
-		if cmdArgs[i] == "-f" && i+1 < len(cmdArgs) {
-			composePaths = append(composePaths, cmdArgs[i+1])
-			haveMultipleComposeFiles = true
-		}
-	}
-
-	if haveMultipleComposeFiles {
-		return composePaths
-	}
-
-	filenames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
-
-	for _, filename := range filenames {
-		if _, err := os.Stat(filename); !os.IsNotExist(err) {
-			return []string{filename}
-		}
-	}
-
-	return []string{}
 }
 
 // isRewritableComposeCommand reports whether appCmd is a literal docker

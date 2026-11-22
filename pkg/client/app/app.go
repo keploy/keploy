@@ -395,7 +395,7 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	// After that, we add the keploy agent service in a copy of the found user app compose file (by creating docker-compose-tmp.yaml).
 	// Finally, we use this modified docker compose file in place of the user's original compose file to run the application with keploy integration.
 
-	paths := findComposeFile(a.cmd.WholeUnredacted())
+	paths := docker.FindComposeFiles(a.cmd.WholeUnredacted())
 	if len(paths) == 0 {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}

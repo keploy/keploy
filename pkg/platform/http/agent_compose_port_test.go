@@ -441,4 +441,53 @@ func TestComposeAgentPortExcludesDocumentPublishedHostPorts(t *testing.T) {
 			t.Fatalf("move draw excluded %v; want document published ports 61550 and 61551 included", moveKeep)
 		}
 	})
+
+	t.Run("override file and COMPOSE_FILE excluded on Setup draw", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), composeYAML, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		overrideYAML := []byte("services:\n  sidecar:\n    image: alpine:3.21\n    ports:\n      - \"61552:9000\"\n")
+		if err := os.WriteFile(filepath.Join(dir, "docker-compose.override.yml"), overrideYAML, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		envPath := filepath.Join(dir, "wrapper-compose.yml")
+		envYAML := []byte("services:\n  wrapped:\n    image: alpine:3.21\n    ports:\n      - \"61553:9001\"\n")
+		if err := os.WriteFile(envPath, envYAML, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+
+		was := containerPort
+		t.Cleanup(func() { containerPort = was })
+		var gotKeep []uint32
+		containerPort = func(k ...uint32) (uint32, error) {
+			gotKeep = append([]uint32(nil), k...)
+			return 0, stop
+		}
+
+		// Default discovery picks up docker-compose.yml + docker-compose.override.yml.
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+		conf := &config.Config{}
+		conf.ProxyPort, conf.DNSPort = 16790, 16791
+		a := &AgentClient{logger: zap.NewNop(), conf: conf}
+		opts := models.SetupOptions{CommandType: "docker-compose"}
+		if err := a.Setup(context.Background(), "docker compose up", opts); !errors.Is(err, stop) {
+			t.Fatalf("Setup = %v; want %v", err, stop)
+		}
+		if !slices.Contains(gotKeep, 61550) || !slices.Contains(gotKeep, 61552) {
+			t.Fatalf("default discovery excluded %v; want base 61550 and override 61552", gotKeep)
+		}
+
+		// COMPOSE_FILE covers wrapper commands such as "make up".
+		t.Setenv("COMPOSE_FILE", envPath)
+		gotKeep = nil
+		if err := a.Setup(context.Background(), "make up", opts); !errors.Is(err, stop) {
+			t.Fatalf("Setup(COMPOSE_FILE) = %v; want %v", err, stop)
+		}
+		if !slices.Contains(gotKeep, 61553) {
+			t.Fatalf("COMPOSE_FILE excluded %v; want 61553", gotKeep)
+		}
+	})
 }

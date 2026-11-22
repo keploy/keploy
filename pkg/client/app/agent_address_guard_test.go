@@ -82,3 +82,47 @@ func (a *App) other() string { return a.opts.AgentURI }
 		t.Fatalf("the scan found %d reads, want the one outside agentAddress", len(got))
 	}
 }
+
+// The application client uses docker.FindComposeFiles rather than carrying its
+// own duplicate compose-file finder.
+func TestTheAppUsesTheSharedComposeFileFinder(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned := 0
+	usedShared := false
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "findComposeFile" {
+				t.Fatalf("duplicate compose-file finder %s declared at %s; use docker.FindComposeFiles", fn.Name.Name, fset.Position(fn.Pos()))
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "FindComposeFiles" {
+					return true
+				}
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "docker" {
+					usedShared = true
+				}
+				return true
+			})
+		}
+	}
+	if scanned < 10 {
+		t.Fatalf("scanned %d files; the scan did not read the package", scanned)
+	}
+	if !usedShared {
+		t.Fatal("pkg/client/app does not call docker.FindComposeFiles")
+	}
+}

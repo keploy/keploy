@@ -3,10 +3,12 @@ package docker
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 
+	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
@@ -103,8 +105,16 @@ func movedScalar(slot **yaml.Node, value string) {
 	*slot = &n
 }
 
-// FindComposeFiles returns the compose file paths named on cmd (-f / --file),
-// or the first default compose filename present in the working directory.
+// FindComposeFiles returns the compose file paths for cmd in Docker Compose
+// precedence order:
+//  1. Explicit -f / --file flags on cmd.
+//  2. The COMPOSE_FILE environment variable, split by COMPOSE_PATH_SEPARATOR
+//     (or filepath.ListSeparator when unset).
+//  3. Default discovery in the working directory: the first existing base file
+//     (docker-compose.yml, docker-compose.yaml, compose.yml, compose.yaml),
+//     followed by the first existing override file
+//     (docker-compose.override.yml, docker-compose.override.yaml,
+//     compose.override.yml, compose.override.yaml) when a base file is present.
 func FindComposeFiles(cmd string) []string {
 	args := strings.Fields(cmd)
 	var paths []string
@@ -126,12 +136,38 @@ func FindComposeFiles(cmd string) []string {
 	if len(paths) > 0 {
 		return paths
 	}
-	for _, name := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"} {
-		if _, err := os.Stat(name); err == nil {
-			return []string{name}
+	if env := os.Getenv("COMPOSE_FILE"); env != "" {
+		sep := os.Getenv("COMPOSE_PATH_SEPARATOR")
+		if sep == "" {
+			sep = string(filepath.ListSeparator)
+		}
+		for _, raw := range strings.Split(env, sep) {
+			if p := strings.TrimSpace(raw); p != "" {
+				paths = append(paths, p)
+			}
+		}
+		if len(paths) > 0 {
+			return paths
 		}
 	}
-	return nil
+	var base string
+	for _, name := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"} {
+		if _, err := os.Stat(name); err == nil {
+			base = name
+			break
+		}
+	}
+	if base == "" {
+		return nil
+	}
+	paths = []string{base}
+	for _, override := range []string{"docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml"} {
+		if _, err := os.Stat(override); err == nil {
+			paths = append(paths, override)
+			break
+		}
+	}
+	return paths
 }
 
 // ComposePublishedHostPorts returns the sorted, deduplicated host ports
@@ -205,9 +241,9 @@ func ComposePublishedHostPortsFromYAML(content []byte) []uint32 {
 }
 
 // ComposePublishedHostPortsFromFiles reads each compose file in paths
-// (skipping unreadable or unparseable files) and returns the sorted,
-// deduplicated host ports statically published across them.
-func ComposePublishedHostPortsFromFiles(paths []string) []uint32 {
+// (logging at Debug and skipping any file that cannot be read or parsed) and
+// returns the sorted, deduplicated host ports statically published across them.
+func ComposePublishedHostPortsFromFiles(logger *zap.Logger, paths []string) []uint32 {
 	if len(paths) == 0 {
 		return nil
 	}
@@ -218,9 +254,19 @@ func ComposePublishedHostPortsFromFiles(paths []string) []uint32 {
 		}
 		b, err := os.ReadFile(p) //nolint:gosec // user-supplied compose file path from the compose command
 		if err != nil {
+			if logger != nil {
+				logger.Debug("skipping unreadable compose file while collecting published host ports", zap.String("path", p), zap.Error(err))
+			}
 			continue
 		}
-		for _, port := range ComposePublishedHostPortsFromYAML(b) {
+		var c Compose
+		if err := yaml.Unmarshal(b, &c); err != nil {
+			if logger != nil {
+				logger.Debug("skipping unparseable compose file while collecting published host ports", zap.String("path", p), zap.Error(err))
+			}
+			continue
+		}
+		for _, port := range ComposePublishedHostPorts(&c) {
 			seen[port] = struct{}{}
 		}
 	}

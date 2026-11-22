@@ -2,12 +2,15 @@ package docker
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"gopkg.in/yaml.v3"
 )
 
@@ -201,5 +204,175 @@ services:
 	want := []uint32{61500, 61501, 61502, 61503, 61504, 61505, 61506, 61507, 61508, 61509}
 	if !slices.Equal(got, want) {
 		t.Fatalf("ComposePublishedHostPortsFromYAML = %v; want %v", got, want)
+	}
+}
+
+// FindComposeFiles follows Docker Compose precedence: explicit -f/--file flags
+// first, then COMPOSE_FILE (split by COMPOSE_PATH_SEPARATOR or
+// filepath.ListSeparator), then default base + override files in the working
+// directory.
+func TestFindComposeFilesPrecedenceOverrideAndEnv(t *testing.T) {
+	writeFile := func(t *testing.T, dir, name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("services: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("explicit -f and --file override COMPOSE_FILE and default files", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "docker-compose.yml")
+		writeFile(t, dir, "docker-compose.override.yml")
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "from-env.yml")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		got := FindComposeFiles("docker compose -f a.yml --file b.yml -f=c.yml --file=d.yml up")
+		want := []string{"a.yml", "b.yml", "c.yml", "d.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("COMPOSE_FILE split by default filepath.ListSeparator", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "docker-compose.yml")
+		writeFile(t, dir, "docker-compose.override.yml")
+		t.Chdir(dir)
+		sep := string(filepath.ListSeparator)
+		t.Setenv("COMPOSE_FILE", "first.yml"+sep+sep+" second.yml ")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		got := FindComposeFiles("make up")
+		want := []string{"first.yml", "second.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("COMPOSE_FILE split by custom COMPOSE_PATH_SEPARATOR", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "base.yml,extra.yml")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", ",")
+
+		got := FindComposeFiles("make up")
+		want := []string{"base.yml", "extra.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("default discovery includes docker-compose.override.yml", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "docker-compose.yml")
+		writeFile(t, dir, "docker-compose.override.yml")
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		got := FindComposeFiles("docker compose up")
+		want := []string{"docker-compose.yml", "docker-compose.override.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("default discovery includes compose.override.yml", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "compose.yml")
+		writeFile(t, dir, "compose.override.yml")
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		got := FindComposeFiles("docker compose up")
+		want := []string{"compose.yml", "compose.override.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("default discovery without override returns base only", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "docker-compose.yml")
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		got := FindComposeFiles("docker compose up")
+		want := []string{"docker-compose.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("orphan override without base returns nil", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "docker-compose.override.yml")
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		if got := FindComposeFiles("docker compose up"); len(got) != 0 {
+			t.Fatalf("FindComposeFiles = %v; want empty", got)
+		}
+	})
+}
+
+// ComposePublishedHostPortsFromFiles skips unreadable or unparseable compose
+// files with a single Debug log naming the skipped file, while still returning
+// the published host ports from every readable file (including overrides).
+func TestComposePublishedHostPortsFromFilesLogsUnreadableAndReadsOverrides(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "docker-compose.yml")
+	overridePath := filepath.Join(dir, "docker-compose.override.yml")
+	missingPath := filepath.Join(dir, "missing-compose.yml")
+	brokenPath := filepath.Join(dir, "broken-compose.yml")
+
+	if err := os.WriteFile(basePath, []byte("services:\n  app:\n    image: alpine:3.21\n    ports:\n      - \"61520:8080\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overridePath, []byte("services:\n  admin:\n    image: alpine:3.21\n    ports:\n      - \"127.0.0.1:61521:9090\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(brokenPath, []byte("services:\n  app: [unterminated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	core, logs := observer.New(zap.DebugLevel)
+	logger := zap.New(core)
+
+	got := ComposePublishedHostPortsFromFiles(logger, []string{basePath, missingPath, overridePath})
+	want := []uint32{61520, 61521}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ComposePublishedHostPortsFromFiles = %v; want %v", got, want)
+	}
+
+	entries := logs.FilterLevelExact(zap.DebugLevel).All()
+	if len(entries) != 1 {
+		t.Fatalf("unreadable file emitted %d Debug logs (%v); want exactly 1", len(entries), entries)
+	}
+	if gotPath, _ := entries[0].ContextMap()["path"].(string); gotPath != missingPath {
+		t.Fatalf("Debug log path = %q; want %q", gotPath, missingPath)
+	}
+
+	// Unparseable YAML also emits one Debug log naming the file.
+	core2, logs2 := observer.New(zap.DebugLevel)
+	got2 := ComposePublishedHostPortsFromFiles(zap.New(core2), []string{brokenPath, basePath})
+	if !slices.Equal(got2, []uint32{61520}) {
+		t.Fatalf("ComposePublishedHostPortsFromFiles with broken file = %v; want [61520]", got2)
+	}
+	entries2 := logs2.FilterLevelExact(zap.DebugLevel).All()
+	if len(entries2) != 1 {
+		t.Fatalf("unparseable file emitted %d Debug logs (%v); want exactly 1", len(entries2), entries2)
+	}
+	if gotPath, _ := entries2[0].ContextMap()["path"].(string); gotPath != brokenPath {
+		t.Fatalf("Debug log path = %q; want %q", gotPath, brokenPath)
+	}
+
+	// Nil logger must not panic on unreadable files.
+	if gotNil := ComposePublishedHostPortsFromFiles(nil, []string{missingPath, basePath}); !slices.Equal(gotNil, []uint32{61520}) {
+		t.Fatalf("ComposePublishedHostPortsFromFiles(nil, ...) = %v; want [61520]", gotNil)
 	}
 }

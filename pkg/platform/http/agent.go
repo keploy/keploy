@@ -4021,14 +4021,14 @@ func (a *AgentClient) agentPorts(docker bool, extraKeep ...uint32) (agentPort, p
 // composeExcludedPorts returns the host ports statically published by other
 // services in the compose document for a docker compose run, so agentPortFor
 // does not draw one before docker compose up binds it.
-func composeExcludedPorts(cmd string, opts models.SetupOptions) []uint32 {
+func (a *AgentClient) composeExcludedPorts(cmd string, opts models.SetupOptions) []uint32 {
 	if utils.CmdType(opts.CommandType) != utils.DockerCompose {
 		return nil
 	}
 	if len(opts.InMemoryCompose) > 0 {
 		return kdocker.ComposePublishedHostPortsFromYAML(opts.InMemoryCompose)
 	}
-	return kdocker.ComposePublishedHostPortsFromFiles(kdocker.FindComposeFiles(cmd))
+	return kdocker.ComposePublishedHostPortsFromFiles(a.logger, kdocker.FindComposeFiles(cmd))
 }
 
 // agentRunsOnLinux says whether a native agent, one Setup starts as a process
@@ -4115,7 +4115,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// container.
 	a.forgetAgentContainer()
 
-	composeStatic := composeExcludedPorts(cmd, opts)
+	composeStatic := a.composeExcludedPorts(cmd, opts)
 	a.mu.Lock()
 	a.composeStaticPorts = composeStatic
 	a.mu.Unlock()
