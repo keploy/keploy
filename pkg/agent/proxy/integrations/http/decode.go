@@ -531,7 +531,21 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					if proven {
 						detect, correlate = false, true
 					}
-					ok, stub, diag, err = h.matchOf(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+					// With the switch off a call served the recording of
+					// another call (a path that differs at an id segment,
+					// or the closest of several bodies) is reported as
+					// answered so (reportServedAnother), never as its own.
+					// how holds such an answer only for a call a pass
+					// served (each pass notes it as it returns the
+					// recording), and under the switch, where the matcher
+					// serves only a call's own recording, no pass notes
+					// one: a miss, an error and a call served its own are
+					// reported nothing. The report carries the call's
+					// round where the call was marked (call), as its miss
+					// would.
+					var how servedAs
+					ok, stub, diag, err = h.matchServing(reqCtx, &how, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+					reportServedAnother(reqCtx, input, stub, how, call, urlNoise)
 					// A call that missed before the background could answer
 					// it asks now whether it is one of the open test's own
 					// (integrations.OwnRepeat): one is matched again as it
@@ -1193,6 +1207,7 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 			for k := range un {
 				urlNoise = append(urlNoise, k)
 			}
+			slices.Sort(urlNoise)
 		}
 	}
 	return RequestNoise{Header: headerNoise, Body: bodyNoise, URL: urlNoise}

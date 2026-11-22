@@ -166,3 +166,47 @@ func TestFieldPathsInTextShaped(t *testing.T) {
 		}
 	}
 }
+
+// A request-body noise entry keploy's advice gives for a field the call
+// differs at (`requestbody: {"data.id": []}`) is logged with its key as the
+// call's differs names the field (body.data.id, body.sessions.{}.user): one
+// rule (FieldShape) for both, so a log line's next step still says which
+// entry to add, and a key part that may be a value is {} in both. A quoted
+// string that is no body field the call differs at stays {}, and so is one
+// naming a field outside the body. The log line (MissLogNextStep,
+// UnmatchedCallLogText) and evidence (Sanitized: the next step and a
+// repeat's hint) read the call's fields from its differs and its field
+// diffs alike; a field diff's key is shaped before its quotes are read.
+func TestARequestBodyNoiseKeyIsLoggedAsItsDiffersNamesIt(t *testing.T) {
+	const s = missLogCanary
+	token := "sessions." + s + ".user"
+	next := `Mark them under test.globalNoise.global.requestbody: {"data.id": [], "` + token + `": [], "other.key": [], "statement": []}.`
+	differs := []string{"body.data.id", "body." + token, "statement"}
+	// What the WARN's differs and evidence name the fields by.
+	if got := MissLogDiffers(&MockMismatchReport{Differs: differs}); len(got) != 3 || got[0] != "body.data.id" || got[1] != "body.sessions.{}.user" {
+		t.Fatalf("MissLogDiffers = %q", got)
+	}
+	want := `{"data.id": [], "sessions.{}.user": [], "{}": [], "{}": []}`
+	for _, tc := range []struct {
+		name string
+		got  string
+	}{
+		{"log line, differs", UnmatchedCallLogText(UnmatchedCall{Differs: differs}, next)},
+		{"log line, field diffs", UnmatchedCallLogText(UnmatchedCall{FieldDiffs: []MockFieldDiff{{Path: "body.data.id"}, {Path: "body." + token}, {Path: "statement"}}}, next)},
+		{"miss WARN, differs", MissLogNextStep(&MockMismatchReport{NextSteps: next, Differs: differs})},
+		{"miss WARN, field diffs", MissLogNextStep(&MockMismatchReport{NextSteps: next, FieldDiffs: []MockFieldDiff{{Path: "body.data.id"}, {Path: "body." + token}, {Path: "statement"}}})},
+		{"evidence, differs", UnmatchedCall{NextSteps: next, Differs: differs}.Sanitized().NextSteps},
+		{"evidence's repeat hint, differs", UnmatchedCall{Differs: differs, Repeat: &RepeatNote{Mock: "mock-1", Hint: next}}.Sanitized().Repeat.Hint},
+	} {
+		if strings.Contains(tc.got, s[:8]) {
+			t.Errorf("%s: %q holds a value the call sent", tc.name, tc.got)
+		}
+		if !strings.Contains(tc.got, want) {
+			t.Errorf("%s: %q, want its entries %s", tc.name, tc.got, want)
+		}
+	}
+	// No field the call differs at: every key is {}, as before.
+	if got := AdviceLogText(next); !strings.Contains(got, `{"{}": [], "{}": [], "{}": [], "{}": []}`) {
+		t.Errorf("AdviceLogText = %q, want every key {}", got)
+	}
+}

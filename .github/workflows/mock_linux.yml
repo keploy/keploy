@@ -331,6 +331,20 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-header-noise-linux.sh"
 
+      # A call the recording lacks whose path differs from a recorded one's
+      # only at an id (GET /users/3 against GET /users/1 and /users/2) is
+      # served that recording, and the replay says so: a WARN naming the
+      # recording and the segment, the summary's answered_as_another, and
+      # the receipt's answeredAsAnother, with the run not counted as
+      # isolated; --strict fails it. Without the switch only: under it the
+      # matcher serves only a call's own recording, and this build refuses
+      # a replay under it.
+      - name: Run mock-mode another-id e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-another-id-linux.sh"
+
       # `keploy mock record` on a terminal that hangs up -- SIGHUP, then the
       # terminal closed, with and without a gap between the two -- must stop
       # as it does on SIGTERM: by itself, with SIGTERM's exit code, leaving
