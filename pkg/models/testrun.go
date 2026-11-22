@@ -924,7 +924,7 @@ func firstDocumentField(doc string) string {
 	}
 
 	trimmed := strings.TrimSpace(doc)
-	if !strings.HasPrefix(trimmed, "{") || !json.Valid([]byte(trimmed)) {
+	if !strings.HasPrefix(trimmed, "{") || !utf8.ValidString(trimmed) || !json.Valid([]byte(trimmed)) {
 		return ""
 	}
 	dec := json.NewDecoder(strings.NewReader(trimmed))
@@ -944,11 +944,11 @@ func firstDocumentField(doc string) string {
 		if !ok {
 			return ""
 		}
-		var discard json.RawMessage
-		if err := dec.Decode(&discard); err != nil {
-			return ""
-		}
 		if strings.HasPrefix(name, "$") {
+			var discard json.RawMessage
+			if err := dec.Decode(&discard); err != nil {
+				return ""
+			}
 			continue
 		}
 		if isValidMongoOpName(name) {
@@ -964,7 +964,7 @@ func isValidMongoOpName(name string) bool {
 		return false
 	}
 	for _, r := range name {
-		if unicode.IsSpace(r) || unicode.IsControl(r) {
+		if r == unicode.ReplacementChar || unicode.IsSpace(r) || unicode.IsControl(r) {
 			return false
 		}
 	}
