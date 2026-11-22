@@ -125,9 +125,8 @@ jobs:
       # The faults lane's JVM client (leg 16): a JVM handles SIGTERM itself
       # and exits from its handler.
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: ./.github/actions/setup-java-maven/jdk
         with:
-          distribution: temurin
           java-version: "17"
 
       # An upstream that resets, closes, never answers, cuts its body short and

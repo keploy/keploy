@@ -124,7 +124,7 @@ func TestRun_AsRootComposeDoesNotGoThroughItsSudo(t *testing.T) {
 				logger:      zap.NewNop(),
 				docker:      &noContainers{},
 				kind:        utils.DockerCompose,
-				cmd:         tc.prefix + " docker " + up,
+				cmd:         utils.NewAppCommand(tc.prefix + " docker " + up),
 				composeFile: composeFile,
 				opts:        models.SetupOptions{AgentURI: "http://localhost:16791/agent/as-root"},
 			}
@@ -163,7 +163,7 @@ func TestSetup_RefusesASudoThatWouldDropTheAgentToken(t *testing.T) {
 				logger: zap.NewNop(),
 				docker: &noContainers{},
 				kind:   utils.DockerCompose,
-				cmd:    "sudo docker compose up",
+				cmd:    utils.NewAppCommand("sudo docker compose up"),
 				opts:   models.SetupOptions{AgentURI: "http://localhost:16791/agent/old-sudo-rs"},
 			}
 			err := a.Setup(context.Background())
@@ -218,7 +218,7 @@ func TestCheckAgentTokenHandoff(t *testing.T) {
 			// classic sudo translates its version line: keploy has to ask for C.
 			t.Setenv("LC_ALL", "de_DE.UTF-8")
 			calls := installStubs(t, map[string]string{"sudo": tc.sudo})
-			err := (&App{kind: utils.DockerCompose, cmd: tc.cmd}).checkAgentTokenHandoff(context.Background())
+			err := (&App{kind: utils.DockerCompose, cmd: utils.NewAppCommand(tc.cmd)}).checkAgentTokenHandoff(context.Background())
 			if tc.refused == "" {
 				require.NoError(t, err)
 			} else {

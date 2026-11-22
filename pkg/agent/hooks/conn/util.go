@@ -94,6 +94,29 @@ func SkipUnderPressure(ctx context.Context, req *http.Request, resp *http.Respon
 	return true
 }
 
+// SkipEndedRecording reports whether no recording takes the exchange a
+// capture hook is about to record: the recording of ctx's manager has ended
+// (its client ended its streams: syncMock EndRecording) and none has started
+// since. When none does, it closes the exchange's bodies, so the proxied
+// connection's readers do not leak, and counts the request as not captured
+// (syncMock NoteNotCaptured), which the agent says once. A capture hook asks
+// it first and returns when it says true: nothing of the exchange is read,
+// deduplicated or handed on.
+func SkipEndedRecording(ctx context.Context, req *http.Request, resp *http.Response) bool {
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	if mgr.Recording() {
+		return false
+	}
+	if req != nil && req.Body != nil {
+		_ = req.Body.Close()
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	mgr.NoteNotCaptured()
+	return true
+}
+
 // SkipGRPCUnderPressure reports whether a pause of the memory guard costs a
 // gRPC call, as CaptureGRPC decides whether to record it: the guard has
 // paused recording now, or had as the forwarder read the call's request
@@ -128,6 +151,12 @@ func SkipGRPCUnderPressure(ctx context.Context, pausedAtRequest bool) bool {
 // how many it lost so. A CaptureFunc that builds its own test cases hands them
 // on with it.
 func HandOn(ctx context.Context, t chan<- *models.TestCase, testCase *models.TestCase) bool {
+	// A capture that began as its recording ended (SkipEndedRecording)
+	// hands on nothing: no stream of a recording reads t past its end.
+	if mgr := syncMock.FromContextOrGlobal(ctx); !mgr.Recording() {
+		mgr.NoteNotCaptured()
+		return false
+	}
 	select {
 	case t <- testCase:
 		return true
@@ -138,7 +167,7 @@ func HandOn(ctx context.Context, t chan<- *models.TestCase, testCase *models.Tes
 }
 
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
-	if SkipUnderPressure(ctx, req, resp) {
+	if SkipEndedRecording(ctx, req, resp) || SkipUnderPressure(ctx, req, resp) {
 		return
 	}
 
@@ -279,7 +308,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	for _, fd := range formData {
 		if len(fd.Paths) > 0 {
 			hasBinaryFile = true
-			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Strings("paths", fd.Paths))
+			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Int("files", len(fd.Paths)))
 			break
 		}
 	}
@@ -549,7 +578,7 @@ func RemoveFormFiles(logger *zap.Logger, forms []models.FormData) {
 				continue
 			}
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				utils.LogError(logger, err, "failed to remove the file a form's file part was written to", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "failed to remove the file a form's file part was written to", zap.String("path", models.FormFilePathLogText(path)))
 			}
 		}
 	}
@@ -655,7 +684,7 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 			}
 			content, err := os.ReadFile(path)
 			if err != nil {
-				utils.LogError(logger, err, "Error reading multipart temp file: the part goes without its file", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "Error reading multipart temp file: the part goes without its file", zap.String("path", models.FormFilePathLogText(path)))
 				form.Paths[j] = ""
 				continue
 			}
@@ -665,7 +694,7 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 			form.FileContents[j] = content
 			form.Paths[j] = ""
 			if err := os.Remove(path); err != nil {
-				utils.LogError(logger, err, "Error removing temp file", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "Error removing temp file", zap.String("path", models.FormFilePathLogText(path)))
 			}
 		}
 	}
@@ -703,12 +732,14 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	}
 
-	if SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
+	if SkipEndedRecording(ctx, nil, nil) || SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
 		return
 	}
 
 	reqTime, resTime := http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp
-	testName := http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]
+	// Read whatever its case: a real call sends it lowercase, as HTTP/2 does
+	// every header name (GrpcHeaders.Ordinary).
+	testName := http2Stream.GRPCReq.Headers.Ordinary("Keploy-Test-Name")
 	var isDuplicate bool
 	var schemaKey string
 	if GRPCCaptureHook != nil {
@@ -739,9 +770,13 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// easily exceed this threshold.
 	totalSize := len(http2Stream.GRPCReq.Body.DecodedData) + len(http2Stream.GRPCResp.Body.DecodedData)
 	if totalSize > MaxTestCaseSize {
+		// The method by its path's shape and per-session tag, as an HTTP call
+		// over the limit is named by its request's: the path is the app's.
+		u := &url.URL{Path: http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]}
 		logger.Error("gRPC test case data exceeds 5MB limit, skipping capture",
 			zap.Int("totalSize", totalSize),
-			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+			zap.String("path", utils.URLPathShape(u)),
+			utils.PathTagField(models.URLPathTag(ctx, http.MethodPost, u)))
 		return
 	}
 

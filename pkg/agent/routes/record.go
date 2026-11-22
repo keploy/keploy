@@ -203,6 +203,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// What of it no test was charged with (a loss after the last test).
 		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
 		r.Post("/capturelosses/owned", a.HandleOwnedCaptureLosses)
+		r.Post("/capturelosses/drain", a.HandleDrainCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		// The application's listens and its start's progress, for keploy
 		// test's readiness under the proven switch (readiness.go).
@@ -233,6 +234,8 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
+		r.Post("/hooks/app-starts-anew", a.HandleAppStartsAnew)
+		r.Post("/hooks/clock-run", a.HandleClockRun)
 	})
 }
 
@@ -288,6 +291,52 @@ func (a *Agent) HandleBeforeTestSetCompose(w http.ResponseWriter, r *http.Reques
 
 	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestSetID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleAppStartsAnew tells the hooks that keploy starts the application
+// anew for a test set (agent.AppStartHook); hooks without the capability
+// have nothing to drop.
+func (a *Agent) HandleAppStartsAnew(w http.ResponseWriter, r *http.Request) {
+	var req models.AppStartsAnewReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if h, ok := agent.ActiveHooks.(agent.AppStartHook); ok {
+		if err := h.AppStartsAnew(r.Context(), req.TestSetID, req.FirstRecorded); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleClockRun hands the hooks the run id of the process that started the
+// agent (agent.ClockRunTaker). Hooks that take none keep no clock timeline
+// (OSS's own, and a native macOS or Windows agent's): they answer 501 with
+// NoTimelineHooks, which the starter takes as nothing to hand. 404 stays
+// what an agent older than the route answers. An id the hooks refuse is
+// answered 409 with their reason.
+func (a *Agent) HandleClockRun(w http.ResponseWriter, r *http.Request) {
+	h, ok := agent.ActiveHooks.(agent.ClockRunTaker)
+	if !ok {
+		http.Error(w, models.NoTimelineHooks, http.StatusNotImplemented)
+		return
+	}
+	var req models.ClockRunReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Run == "" {
+		http.Error(w, "the run id is empty", http.StatusBadRequest)
+		return
+	}
+	if err := h.TakeClockRun(r.Context(), req.Run); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -761,8 +810,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// above cannot catch it. Suppress by EXACT owning test name so a
 		// TC whose mock was capacity-dropped is not streamed mock-less
 		// (replay: match_phase=no_mocks), without over-suppressing any
-		// concurrent TC that kept all its mocks.
-		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
+		// concurrent TC that kept all its mocks. A test case is known by
+		// its capture id when it has one (its mocks are owned by it).
+		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.AgentName())
 
 		if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
@@ -785,7 +835,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// by name, and one
 		// lost since the checks above leaves it out here
 		// (SyncMockManager.SendingTestCase).
-		if !syncmgr.Get().SendingTestCase(t.Name, tcReqTime, tcRespTime) {
+		if !syncmgr.Get().SendingTestCase(t.AgentName(), tcReqTime, tcRespTime) {
 			tcsSuppressedSoFar++
 			a.logger.Debug("agent: TC suppressed — a mock it may need was lost: one any test of the recording may need, requested before its window ended, or one no test owns requested inside its window; not sent to CLI",
 				zap.String("tc_name", t.Name),
@@ -825,7 +875,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 		// 2. Write file part if exists
 		if t.HasBinaryFile {
-			a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+			a.logger.Debug("Starting binary file streaming for test case", zap.Int("form_parts", len(t.HTTPReq.Form)))
 			for _, form := range t.HTTPReq.Form {
 				for i, path := range form.Paths {
 					if path == "" {
@@ -850,7 +900,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 					f, err := os.Open(path)
 					if err != nil {
-						a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+						a.logger.Error("failed to open file for streaming",
+							zap.String("path", models.FormFilePathLogText(path)),
+							zap.Error(models.FormFilePathsInError(err, path)))
 						return false
 					}
 					if _, err := io.Copy(filePart, f); err != nil {

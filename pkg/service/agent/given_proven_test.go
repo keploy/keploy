@@ -354,41 +354,63 @@ func (p *givingUnreadProxy) GetMockErrors(ctx context.Context) ([]models.Unmatch
 	return misses, err
 }
 
-// A replayed test keploy could not read is unread, not judged: it is not
-// told to re-record, though its read returned a miss beside the error and
-// it gave a value its recording does not hold. Read whole, the same test is.
-func TestAnUnreadTestIsNotToldToReRecord(t *testing.T) {
+// A read of a replayed test's misses that failed part way, after it
+// returned a miss, still saw that miss, which fails the test whatever the
+// rest of the read could not tell: the test is judged (never unread),
+// failed, and told to re-record once, as the same test read whole is, with
+// the read's error named first, and its end answers it failed. A test whose
+// read failed with no miss found is unread, not judged: its end is keploy's
+// error, and it is not told to re-record.
+func TestAMissReadBesideAReadErrorFailsTheTest(t *testing.T) {
 	a, wp := wireAgent(t, models.MODE_TEST)
 	p := &givingUnreadProxy{givingProxy: giving(a, wp)}
 	a.Proxy = p
 	ctx := context.Background()
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
 	require.Nil(t, serr)
-	run := func(name string, readErr error) (*models.ScopeError, models.ScopeEndResp) {
+	run := func(name string, readErr error, miss bool) (*models.ScopeError, models.ScopeEndResp) {
 		t.Helper()
 		_, serr := a.ProvenBegin(ctx, begin(name))
 		require.Nil(t, serr)
 		_, serr = a.ProvenGive(ctx, give("nonce", "1761609600123456789", ""))
 		require.Nil(t, serr)
 		p.readErr = readErr
-		wp.mu.Lock()
-		wp.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit", Destination: "127.0.0.1:18282"}}
-		wp.mu.Unlock()
+		if miss {
+			wp.mu.Lock()
+			wp.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit", Destination: "127.0.0.1:18282"}}
+			wp.mu.Unlock()
+		}
 		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
 		return serr, e
 	}
+	const lacks = "the test gave given:nonce, which its recording does not hold (recorded before the test gave it): re-record the test. "
+	const missed = "POST /audit to 127.0.0.1:18282 had no recorded answer"
 
-	serr, e := run("TestRead", nil)
+	serr, e := run("TestRead", nil, true)
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.True(t, strings.HasPrefix(e.Reason, "keploy: the test gave given:nonce, which its recording does not hold (recorded before the test gave it): re-record the test. "), e.Reason)
+	require.True(t, strings.HasPrefix(e.Reason, "keploy: "+lacks), e.Reason)
 
-	serr, _ = run("TestUnread", fmt.Errorf("%w (agent: the drain did not finish)", models.ErrUnmatchedCallsUnread))
+	readErr := fmt.Errorf("%w (agent: the drain did not finish)", models.ErrUnmatchedCallsUnread)
+	serr, e = run("TestPart", readErr, true)
+	require.Nil(t, serr, "a miss keploy saw is judged: the end answers, not keploy's error")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.True(t, strings.HasPrefix(e.Reason, "keploy: keploy could not read all of what orders::TestPart did: reading its misses: "+readErr.Error()+". "+lacks+missed), e.Reason)
+	require.Equal(t, 1, strings.Count(e.Reason, "re-record the test"), e.Reason)
+
+	serr, _ = run("TestUnread", readErr, false)
 	require.NotNil(t, serr, "a test keploy could not read fails its end")
-	w := windowOf(t, a, "orders::TestUnread")
+
+	// The windows are read once every test has ended: the read ends the run.
+	w := windowOf(t, a, "orders::TestPart")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
-	require.True(t, w.Evidence.Unread)
+	require.False(t, w.Evidence.Unread, "a miss keploy saw fails the test whatever the rest of its read could not tell")
 	require.Len(t, w.Evidence.Misses, 1, "the miss read beside the error is the test's")
+	require.Equal(t, e.Reason, w.Evidence.Reason, "the window keeps the reason")
+	w = windowOf(t, a, "orders::TestUnread")
+	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.True(t, w.Evidence.Unread, "no miss was seen: keploy could not tell what the test did")
+	require.Empty(t, w.Evidence.Misses)
 	require.True(t, strings.HasPrefix(w.Evidence.Reason, "keploy: keploy could not tell what orders::TestUnread did: reading its misses: "), w.Evidence.Reason)
 	require.NotContains(t, w.Evidence.Reason, "re-record the test", "an unread test is not judged, so it is not told to re-record")
 }
@@ -397,14 +419,16 @@ func TestAnUnreadTestIsNotToldToReRecord(t *testing.T) {
 // though keploy could not settle it, could not read its capture losses, or
 // ended it itself: its reason still names those misses. After keploy's
 // note when it could not settle the test or ended it (left open), before
-// the capture-loss note, which writes the evidence's reason again.
+// the capture-loss note, which writes the evidence's reason again. A miss
+// keploy saw fails the test whatever keploy could not tell after it: the
+// test keeps its verdict (never unread), and an end it could not settle
+// answers it failed, as any other.
 func TestTheReRecordSentenceGoesWithTheMissesRead(t *testing.T) {
 	const lacks = "the test gave given:nonce, which its recording does not hold (recorded before the test gave it): re-record the test"
 	const missed = "POST /audit to 127.0.0.1:18282 had no recorded answer"
 	for _, c := range []struct {
-		name   string
-		test   string
-		unread bool
+		name string
+		test string
 		// refused: the end call is refused, so the reason is the window's.
 		refused bool
 		// fault makes keploy unable to judge the test; nil leaves it be.
@@ -413,10 +437,8 @@ func TestTheReRecordSentenceGoesWithTheMissesRead(t *testing.T) {
 		end    func(a *Agent) (models.ScopeEndResp, *models.ScopeError)
 		prefix string
 	}{{
-		name:    "unsettled",
-		test:    "TestU",
-		unread:  true,
-		refused: true,
+		name: "unsettled",
+		test: "TestU",
 		fault: func(h *countHooks) {
 			h.mu.Lock()
 			h.err = models.ErrProxyConnsUnsupported
@@ -428,10 +450,9 @@ func TestTheReRecordSentenceGoesWithTheMissesRead(t *testing.T) {
 		prefix: "keploy: keploy could not tell that every call of orders::TestU reached it: keploy cannot count the calls still waiting for its proxy: " +
 			models.ErrProxyConnsUnsupported.Error() + ". " + lacks + ". " + missed,
 	}, {
-		name:   "capture losses unread",
-		test:   "TestL",
-		unread: true,
-		fault:  func(h *countHooks) { h.countingHooks.err = errors.New("the pid map cannot be read") },
+		name:  "capture losses unread",
+		test:  "TestL",
+		fault: func(h *countHooks) { h.countingHooks.err = errors.New("the pid map cannot be read") },
 		end: func(a *Agent) (models.ScopeEndResp, *models.ScopeError) {
 			return a.ProvenEnd(context.Background(), models.ScopeReq{Name: "TestL", Outcome: "passed"})
 		},
@@ -471,7 +492,7 @@ func TestTheReRecordSentenceGoesWithTheMissesRead(t *testing.T) {
 			}
 			w := windowOf(t, a, "orders::"+c.test)
 			require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
-			require.Equal(t, c.unread, w.Evidence.Unread)
+			require.False(t, w.Evidence.Unread, "a miss keploy saw fails the test whatever keploy could not tell after it")
 			require.Len(t, w.Evidence.Misses, 1, "the test's misses were read")
 			require.True(t, strings.HasPrefix(w.Evidence.Reason, c.prefix), w.Evidence.Reason)
 			require.Equal(t, 1, strings.Count(w.Evidence.Reason, "re-record the test"), w.Evidence.Reason)

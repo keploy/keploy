@@ -110,6 +110,10 @@ func TestAuthenticate_GuardsEveryRegisteredRoute(t *testing.T) {
 		return nil
 	}))
 	require.NotEmpty(t, paths, "walked no routes; the registration call changed shape")
+	// The run id a starter hands its agent (HandleClockRun) reaches it only
+	// over this route: without it every agent answers 404, as one older
+	// than the route, and no run's timeline is marked as its own.
+	require.Contains(t, paths, "POST /agent/hooks/clock-run", "the clock-run route is not registered")
 
 	guarded := 0
 	for _, mr := range paths {

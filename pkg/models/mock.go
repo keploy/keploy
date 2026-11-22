@@ -126,6 +126,20 @@ func RequestOfRevokeName(name string) (int64, bool) {
 	return n, err == nil
 }
 
+// CaptureIDPrefix starts every capture id (TestCase.CaptureID): the name the
+// agent gives a request it captured without --sync and without a
+// Keploy-Test-Name, for a client that reads such names
+// (OutgoingOptions.SupportsCaptureIDs). The recorder files whatever names a
+// capture id under the name it saves that request's test case with. A
+// Keploy-Test-Name that starts with it is read as a capture id: the prefix is
+// reserved.
+const CaptureIDPrefix = "keploy-capture:"
+
+// IsCaptureID reports whether name is a capture id (CaptureIDPrefix).
+func IsCaptureID(name string) bool {
+	return strings.HasPrefix(name, CaptureIDPrefix)
+}
+
 // TestCaseWindow is a test case's window, by its kind: a gRPC test case's
 // times are its GrpcReq's and GrpcResp's, any other's its HTTPReq's and
 // HTTPResp's.

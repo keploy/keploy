@@ -123,31 +123,38 @@ func TestAHiddenApplicationSocketIsUnknownNotGone(t *testing.T) {
 				}
 				untilPeerEnded(t, proxySide)
 			}
-			var err error
 			lines := closeUnknownLines(p)
 			if tc.close {
+				// A close that cannot tell is a loss of the tests the
+				// connection could have served, never every later
+				// wait's answer (wantCloseUnknown).
 				_ = reader.Close()
-				err = p.PairedBytesErr()
 				switch {
 				case !tc.unknown:
 					if all := lines.FilterMessageSnippet("keploy cannot tell what the application had written").All(); len(all) != 0 {
 						t.Fatalf("%d lines say the close cannot tell what was written, want none: %+v", len(all), all)
+					}
+					if err := p.PairedBytesErr(); err != nil {
+						t.Fatalf("PairedBytesErr = %v, want nil", err)
+					}
+					if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+						t.Fatalf("%d bytes losses, want none", l)
 					}
 				case p.holdsPairedBytes():
 					wantCloseUnknown(t, p, lines, app, proxySide, zapcore.WarnLevel, "cannot be seen from the proxy's network namespace")
 				default:
 					wantCloseUnknown(t, p, lines, app, proxySide, zapcore.DebugLevel, "cannot be seen from the proxy's network namespace")
 				}
-			} else {
-				if _, werr := app.Write([]byte("x")); werr != nil {
-					t.Fatal(werr)
-				}
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				err = p.WaitPairedBytes(ctx, 1)
-				if !tc.unknown && !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("the wait ended with %v, want it to wait on for the application's FIN or reset", err)
-				}
+				return
+			}
+			if _, werr := app.Write([]byte("x")); werr != nil {
+				t.Fatal(werr)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := p.WaitPairedBytes(ctx, 1)
+			if !tc.unknown && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("the wait ended with %v, want it to wait on for the application's FIN or reset", err)
 			}
 			if got := errors.Is(err, models.ErrProxyConnsUnsupported); got != tc.unknown {
 				t.Fatalf("unknown = %v (%v), want %v", got, err, tc.unknown)

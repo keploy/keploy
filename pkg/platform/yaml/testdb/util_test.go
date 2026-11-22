@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -307,4 +309,218 @@ func TestUnderTheProvenSwitchAStableTimeShapedFieldIsAsserted(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A field that reads as a time under every id key of a map keyed by ids is
+// written once, naming every id (matcher.NoiseIDKey); one that reads as a time
+// under some ids only is written for those ids, as before. One entry per id
+// made a response keyed by a few dozen option ids carry hundreds of entries.
+func TestTimeShapedNoiseUnderAnIDKeyedMap(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	now := time.Now().UTC()
+	at := now.Format(time.RFC3339)
+	ids := []string{"3f2504e0-4f89-11d3-9a0c-0305e82c3301", "3f2504e0-4f89-11d3-9a0c-0305e82c3302"}
+	tc := httpTestCase()
+	tc.Name = "search-1"
+	tc.HTTPResp.Header = map[string]string{"Content-Type": "application/json"}
+	tc.HTTPResp.Body = fmt.Sprintf(`{"results":{"options":{"%s":{"start":%q,"hold":%q,"price":10},"%s":{"start":%q,"hold":null,"price":11}}}}`,
+		ids[0], at, at, ids[1], at)
+	for _, format := range []string{"yaml", "json"} {
+		t.Run(format, func(t *testing.T) {
+			back := writeAndReadBack(t, tc, format)
+			want := map[string][]string{
+				"body.results.options.{id}.start":          {},
+				"body.results.options." + ids[0] + ".hold": {},
+			}
+			if !reflect.DeepEqual(back.Noise, want) {
+				t.Fatalf("noise = %v, want %v", back.Noise, want)
+			}
+			// Through the matcher a replay judges with: the start under every
+			// id and the one hold time noised may move; the price may not.
+			later := now.Add(3 * time.Second).Format(time.RFC3339)
+			replayed := func(price int) *models.HTTPResp {
+				return &models.HTTPResp{StatusCode: tc.HTTPResp.StatusCode, Header: tc.HTTPResp.Header,
+					Body: fmt.Sprintf(`{"results":{"options":{"%s":{"start":%q,"hold":%q,"price":%d},"%s":{"start":%q,"hold":null,"price":11}}}}`,
+						ids[0], later, later, price, ids[1], later)}
+			}
+			if pass, _ := httpMatcher.Match(back, replayed(10), nil, false, false, zap.NewNop(), false); !pass {
+				t.Fatal("a replay whose noised time fields moved failed")
+			}
+			if pass, _ := httpMatcher.Match(back, replayed(99), nil, false, false, zap.NewNop(), false); pass {
+				t.Fatal("a replay whose price changed passed: a field under an id key is no longer asserted")
+			}
+		})
+	}
+}
+
+// The record-time entry for a time field under every id key is written only
+// when it silences nothing the per-id entries would not. Each shape holds a
+// field that is NOT a time where the one entry would reach it (another id's
+// longer field name, an id map nested under another, a sibling id map whose
+// name ends the same, an id map at the root, an empty object under another
+// id); a replay that changes that field must fail.
+func TestTimeShapedIDEntryReachesNoOtherField(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	at := time.Now().UTC().Format(time.RFC3339)
+	u0, u1 := "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "3f2504e0-4f89-11d3-9a0c-0305e82c3302"
+	p0, o0 := "3f2504e0-4f89-11d3-9a0c-0305e82c3303", "3f2504e0-4f89-11d3-9a0c-0305e82c3304"
+	for _, tc := range []struct {
+		name, shape string
+		rec, rep    string // the non-time value, recorded and replayed
+	}{
+		{"another id's longer field", `{"options":{"%[1]s":{"hold":%[3]q},"%[2]s":{"holdReason":%[6]s}}}`, `"supplier"`, `"changed"`},
+		{"nested id map", `{"options":{"%[1]s":{"ts":%[3]q},"%[2]s":{"ts":%[3]q}},"packages":{"%[4]s":{"options":{"%[5]s":{"ts":%[6]s}}}}}`, `"label-a"`, `"label-b"`},
+		{"sibling id map", `{"options":{"%[1]s":{"ts":%[3]q},"%[2]s":{"ts":%[3]q}},"addonOptions":{"%[5]s":{"ts":%[6]s}},"x":"%[4]s"}`, `"label-a"`, `"label-b"`},
+		{"root id map", `{"%[1]s":{"ts":%[3]q},"%[2]s":{"ts":%[3]q},"meta":{"%[5]s":{"ts":%[6]s}},"x":"%[4]s"}`, `"label-a"`, `"label-b"`},
+		{"empty object under another id", `{"options":{"%[1]s":{"hold":%[3]q},"%[2]s":{"hold":%[6]s}},"x":"%[4]s%[5]s"}`, `{}`, `{"by":"label-b"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := func(v string) string { return fmt.Sprintf(tc.shape, u0, u1, at, p0, o0, v) }
+			c := httpTestCase()
+			c.HTTPResp.Header = map[string]string{"Content-Type": "application/json"}
+			c.HTTPResp.Body = body(tc.rec)
+			back := writeAndReadBack(t, c, "yaml")
+			if len(back.Noise) == 0 {
+				t.Fatalf("no noise written: the time field is not found")
+			}
+			same := &models.HTTPResp{StatusCode: c.HTTPResp.StatusCode, Header: c.HTTPResp.Header, Body: body(tc.rec)}
+			if pass, _ := httpMatcher.Match(back, same, nil, false, false, zap.NewNop(), false); !pass {
+				t.Fatalf("the recorded response itself fails with %v", back.Noise)
+			}
+			changed := &models.HTTPResp{StatusCode: c.HTTPResp.StatusCode, Header: c.HTTPResp.Header, Body: body(tc.rep)}
+			if pass, _ := httpMatcher.Match(back, changed, nil, false, false, zap.NewNop(), false); pass {
+				t.Fatalf("a replay changing a field that is not a time (%s -> %s) passed with %v", tc.rec, tc.rep, back.Noise)
+			}
+		})
+	}
+}
+
+// An entry naming id keys speaks for the ids the recording has: a value that
+// moves there, or a field a replay drops there, is excused as the per-id
+// entries main writes would excuse it. A key the recording lacks (a new id, a
+// field appearing under an id that did not carry it, under another id map, or
+// under an id map nested in another) is a change, and the replay fails, as it
+// does against the per-id entries. Each row is judged against both and must
+// get the same verdict from each.
+func TestTimeShapedIDEntryExcusesNoKeyTheRecordingLacks(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	ids := strings.NewReplacer(
+		"U1", "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "U2", "3f2504e0-4f89-11d3-9a0c-0305e82c3302",
+		"U3", "3f2504e0-4f89-11d3-9a0c-0305e82c3303", "A1", "3f2504e0-4f89-11d3-9a0c-0305e82c3304",
+		"C1", "3f2504e0-4f89-11d3-9a0c-0305e82c3305", "C2", "3f2504e0-4f89-11d3-9a0c-0305e82c3306")
+	recAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	repAt := time.Now().UTC().Format(time.RFC3339)
+	fill := func(s, at string) string { return strings.ReplaceAll(ids.Replace(s), "T", at) }
+	nested := `{"U1":{"ts":"T","children":{"C1":{"ts":"T","name":"x"}}},"U2":{"ts":"T"}}`
+	nestedEntries := "body.{id}.ts body.{id}.children.{id}.ts"
+	for _, r := range []struct {
+		name, rec, rep string
+		entries        string // the noise written, space-separated
+		pass           bool
+	}{
+		{"times move", `{"options":{"U1":{"hold":"T"},"U2":{"hold":"T"},"U3":{"price":5}}}`,
+			`{"options":{"U1":{"hold":"T"},"U2":{"hold":"T"},"U3":{"price":5}}}`, "body.options.{id}.hold", true},
+		{"a new id under a map of times", `{"lastSeen":{"U1":"T","U2":"T"}}`,
+			`{"lastSeen":{"U1":"T","U2":"T","U3":"T"}}`, "body.lastSeen.{id}", false},
+		{"the field appears under an id that lacked it", `{"options":{"U1":{"hold":"T"},"U2":{"hold":"T"},"U3":{"price":5}}}`,
+			`{"options":{"U1":{"hold":"T"},"U2":{"hold":"T"},"U3":{"price":5,"hold":"T"}}}`, "body.options.{id}.hold", false},
+		{"the field appears under another id map", `{"options":{"U1":{"ts":"T"},"U2":{"ts":"T"}},"addonOptions":{"A1":{"label":"x"}}}`,
+			`{"options":{"U1":{"ts":"T"},"U2":{"ts":"T"}},"addonOptions":{"A1":{"label":"x","ts":"T"}}}`, "body.options.{id}.ts", false},
+		{"root id map: a nested id map gains the field", `{"U1":{"ts":"T","children":{"C1":{"name":"x"}}},"U2":{"ts":"T"}}`,
+			`{"U1":{"ts":"T","children":{"C1":{"name":"x","ts":"T"}}},"U2":{"ts":"T"}}`, "body.{id}.ts", false},
+		{"an id dropped from a map of times", `{"lastSeen":{"U1":"T","U2":"T"}}`, `{"lastSeen":{"U1":"T"}}`, "body.lastSeen.{id}", true},
+		{"the field dropped under an id that had it", `{"options":{"U1":{"hold":"T"},"U2":{"hold":"T"},"U3":{"price":5}}}`,
+			`{"options":{"U1":{"hold":"T"},"U2":{},"U3":{"price":5}}}`, "body.options.{id}.hold", true},
+		{"nested id maps: times move", nested, nested, nestedEntries, true},
+		{"nested id maps: the field dropped under the nested id", nested,
+			`{"U1":{"ts":"T","children":{"C1":{"name":"x"}}},"U2":{"ts":"T"}}`, nestedEntries, true},
+		{"nested id maps: a new nested id", nested,
+			`{"U1":{"ts":"T","children":{"C1":{"ts":"T","name":"x"},"C2":{"ts":"T"}}},"U2":{"ts":"T"}}`, nestedEntries, false},
+		{"nested id maps: an outer id gains a nested map", nested,
+			`{"U1":{"ts":"T","children":{"C1":{"ts":"T","name":"x"}}},"U2":{"ts":"T","children":{"C2":{"ts":"T"}}}}`, nestedEntries, false},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			tc := httpTestCase()
+			tc.HTTPResp.Header = map[string]string{"Content-Type": "application/json"}
+			tc.HTTPResp.Body = fill(r.rec, recAt)
+			back := writeAndReadBack(t, tc, "yaml")
+			entries := strings.Fields(r.entries)
+			for _, e := range entries {
+				if _, ok := back.Noise[e]; !ok {
+					t.Fatalf("noise written = %v, want only %v", back.Noise, entries)
+				}
+			}
+			if len(back.Noise) != len(entries) {
+				t.Fatalf("noise written = %v, want only %v", back.Noise, entries)
+			}
+			replayed := &models.HTTPResp{StatusCode: tc.HTTPResp.StatusCode, Header: tc.HTTPResp.Header, Body: fill(r.rep, repAt)}
+			pass, _ := httpMatcher.Match(back, replayed, nil, false, false, zap.NewNop(), false)
+			// The per-id entries main writes: one per recorded field the
+			// entry reaches.
+			perID := *back
+			perID.Noise = map[string][]string{}
+			var doc interface{}
+			if err := json.Unmarshal([]byte(tc.HTTPResp.Body), &doc); err != nil {
+				t.Fatal(err)
+			}
+			var walk func(p string, v interface{})
+			walk = func(p string, v interface{}) {
+				for _, e := range entries {
+					if p != "" && matcher.NoiseKeyCovers("body."+p, e) {
+						perID.Noise["body."+p] = []string{}
+					}
+				}
+				if m, ok := v.(map[string]interface{}); ok {
+					for k, c := range m {
+						cp := k
+						if p != "" {
+							cp = p + "." + k
+						}
+						walk(cp, c)
+					}
+				}
+			}
+			walk("", doc)
+			var perIDNoise []string
+			for k := range perID.Noise {
+				perIDNoise = append(perIDNoise, strings.TrimPrefix(k, "body."))
+			}
+			perIDPass, _ := httpMatcher.Match(&perID, replayed, nil, false, false, zap.NewNop(), false)
+			if pass != r.pass || perIDPass != r.pass {
+				t.Fatalf("passed=%v with %v and %v with the per-id entries %v, want %v", pass, back.Noise, perIDPass, perIDNoise, r.pass)
+			}
+		})
+	}
+}
+
+// A test case can reach the encoder with no noise map at all: a test case
+// created from the dashboard (its form sends no noise), or any stored case
+// decoded from JSON whose "noise" is absent or null. With the proven switch
+// off the encoder adds the response's time-shaped fields (a Date header) as
+// noise, and it must add them to a map, not to the nil one: assigning to an
+// entry of a nil map panics, and that panic took down the k8s-proxy laying out
+// such a case for a replay. The case is written with the same noise as one
+// that came with an empty map.
+func TestATestCaseWithNoNoiseMapIsWrittenWithItsTimeShapedNoise(t *testing.T) {
+	for _, format := range []string{"yaml", "json"} {
+		t.Run(format, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "")
+			tc := timeShapedTestCase(time.Now())
+			tc.Noise = nil
+			var back *models.TestCase
+			if p := panicOf(func() { back = writeAndReadBack(t, tc, format) }); p != nil {
+				t.Fatalf("writing a test case that has no noise map panicked: %v", p)
+			}
+			if !reflect.DeepEqual(back.Noise, timeShapedNoise) {
+				t.Fatalf("the test case was written with noise %v, want every time-looking field %v, as a case with an empty map gets", back.Noise, timeShapedNoise)
+			}
+		})
+	}
+}
+
+// panicOf runs f and returns what it panicked with, or nil.
+func panicOf(f func()) (p any) {
+	defer func() { p = recover() }()
+	f()
+	return nil
 }

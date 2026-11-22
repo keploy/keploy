@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/utils"
@@ -101,7 +102,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		writeReceipt(m.logger, m.config.Path, Receipt{
 			Set:            name,
 			At:             started.UTC().Truncate(time.Second),
-			Command:        m.userCommand,
+			Command:        m.userCommand.WholeUnredacted(),
 			OnMiss:         m.config.Mock.OnMiss,
 			Strict:         m.config.Mock.Strict,
 			ExitCode:       code,
@@ -150,7 +151,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// the report files looked like beforehand is what tells that report from
 	// one an earlier run left behind.
 	workDir, _ := os.Getwd()
-	coverageBefore := report.Snapshot(workDir, m.config.Mock.CoverageReport, m.userCommand)
+	coverageBefore := report.Snapshot(workDir, m.config.Mock.CoverageReport, m.userCommand.WholeUnredacted())
 
 	if provenswitch.On() && !replaysJudged.Load() {
 		return fmt.Errorf("keploy mock replay under %s needs a keploy build that judges each test (keploy enterprise): this one exits with the test command's code, so a test keploy failed after it ended, or a call no test made that got no recorded answer, would pass", provenswitch.Env)
@@ -184,9 +185,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	m.logger.Info("Replaying mocks for your test command",
-		zap.String("mock-set", name),
-		zap.String("command", utils.RedactCommandLine(m.userCommand)),
-		zap.String("on-miss", string(policy)))
+		zap.String("mock-set", name), zap.Inline(m.userCommand), zap.String("on-miss", string(policy)))
+	utils.LogWholeCommand(m.logger, "command", m.userCommand)
 
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -351,7 +351,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if loaded == 0 {
 		m.logger.Warn("the mock set is empty; the runner will hit a miss on every dependency call",
 			zap.String("mock-set", name),
-			zap.String("next_step", fmt.Sprintf("record it first with: keploy mock record -c %q --name %s", utils.RedactCommandLine(m.userCommand), name)))
+			zap.String("next_step", "record it first with: keploy mock record -c <the same test command> --name "+name))
 	}
 	if err := m.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
 		utils.LogError(m.logger, err, "failed to store mocks on the agent")
@@ -955,7 +955,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// failure, but nothing proves the run isolated either.
 	if t := lostNotJudged.Untagged().NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
 		captureUnverified, captureUnverifiedLog = t, lostNotJudged.NotJudgedLogText()
-		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, or the Docker daemon did not answer keploy's read of a container a call reached ("+provenswitch.Env+"=1)",
+		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, the Docker daemon did not answer keploy's read of a container a call reached, or keploy's proxy closed a connection without being able to tell whether bytes the application wrote to it were still on their way ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", lostNotJudged.NotJudgedLogText()),
 			zap.String("next_step", lostNotJudged.NotJudgedRemedy()))
 		utils.SayWhole(m.console, "mock set "+name+", what keploy cannot capture", lostNotJudged.NotJudgedLogText(), lostNotJudged.NotJudgedText())
@@ -1033,7 +1033,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	writeReceipt(m.logger, m.config.Path, Receipt{
 		Set:             name,
 		At:              started.UTC().Truncate(time.Second),
-		Command:         m.userCommand,
+		Command:         m.userCommand.WholeUnredacted(),
 		OnMiss:          string(policy),
 		Strict:          m.config.Mock.Strict,
 		ExitCode:        utils.ErrCode,
@@ -1092,7 +1092,7 @@ func (m *mockService) readCoverage(dir string, before report.Before, isolated bo
 	if dir == "" {
 		return nil, "could not resolve the directory the test command ran in"
 	}
-	path, why := report.Find(dir, m.config.Mock.CoverageReport, m.userCommand, before)
+	path, why := report.Find(dir, m.config.Mock.CoverageReport, m.userCommand.WholeUnredacted(), before)
 	if path == "" {
 		m.logger.Debug("no coverage report for this replay", zap.String("reason", why))
 		return nil, why
@@ -2037,7 +2037,8 @@ const trailsUnreadReason = "keploy could not read which recordings the run used,
 // made for, naming each such recording as one of its calls the run did not
 // make (models.ScopeEvidence.Unconsumed), in name order, and leaves each
 // test of unread unread: keploy could not read whether the run made its
-// trailing series.
+// trailing series. One whose evidence holds a miss keploy saw stays failed
+// on it, with that note, and is not unread.
 func failUnmadeTrails(tests []TestReceipt, unmade map[string]string, unread map[string]bool) []TestReceipt {
 	for i := range tests {
 		t := &tests[i]
@@ -2059,7 +2060,12 @@ func failUnmadeTrails(tests []TestReceipt, unmade map[string]string, unread map[
 			t.Evidence.Unconsumed = append(t.Evidence.Unconsumed, names...)
 		}
 		if trailed {
-			t.Evidence.Unread = true
+			// A miss keploy saw fails the test whatever keploy could not
+			// read of the run: the test keeps that verdict, with the note,
+			// and is not unread.
+			if len(t.Evidence.Misses) == 0 {
+				t.Evidence.Unread = true
+			}
 			t.Evidence.Reason = strings.TrimPrefix(t.Evidence.Reason+"; "+trailsUnreadReason, "; ")
 		}
 	}
@@ -3057,11 +3063,14 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	logger.Warn(msg, append(fields, zap.String("next_step", models.UnmatchedCallLogText(miss, missNextStep(miss))))...)
 }
 
+// missDefaultNext is a miss's next step where its matcher gave none.
+const missDefaultNext = "record this call with --on-miss record, or re-record the set"
+
 // missNextStep is miss's next step, or, where its matcher gave none, to
 // record the call.
 func missNextStep(miss models.UnmatchedCall) string {
 	if miss.NextSteps == "" {
-		return "record this call with --on-miss record, or re-record the set"
+		return missDefaultNext
 	}
 	return miss.NextSteps
 }
@@ -3069,43 +3078,6 @@ func missNextStep(miss models.UnmatchedCall) string {
 // missConsoleMax is how many calls no mock answered keploy mock replay's
 // console names (sayMisses); MissesFile names every one.
 const missConsoleMax = 20
-
-// missedCall is a call no mock answered, as the console and MissesFile name
-// it: once, however many times the replay made it (count).
-type missedCall struct {
-	Protocol    string `yaml:"protocol"`
-	Call        string `yaml:"call"`
-	PathTag     string `yaml:"path_tag,omitempty"`
-	Destination string `yaml:"destination,omitempty"`
-	HostTag     string `yaml:"host_tag,omitempty"`
-	Count       int    `yaml:"count"`
-	NextStep    string `yaml:"next_step"`
-}
-
-// missedCalls is misses, each call once, in the order the replay first made
-// it, with how many times it made it: a call of one protocol, summary, path
-// tag and destination is one call. A connection that ended with nothing sent
-// (models.MatchPhaseNoRequest) made no call, and is left out: its line says
-// so.
-func missedCalls(misses []models.UnmatchedCall) []missedCall {
-	var out []missedCall
-	at := map[missedCall]int{}
-	for _, miss := range misses {
-		if miss.MatchPhase == models.MatchPhaseNoRequest {
-			continue
-		}
-		key := missedCall{Protocol: miss.Protocol, Call: miss.Named(), PathTag: miss.PathTag, Destination: miss.Destination, HostTag: miss.HostTag}
-		if i, ok := at[key]; ok {
-			out[i].Count++
-			continue
-		}
-		at[key] = len(out)
-		c := key
-		c.Count, c.NextStep = 1, strings.ReplaceAll(missNextStep(miss), "\n", " ")
-		out = append(out, c)
-	}
-	return out
-}
 
 // sayMisses writes, on keploy's console, each call of misses whole, beside
 // the path tag the lines that log it name it by (models.UnmatchedCallLogShape:
@@ -3120,7 +3092,7 @@ func sayMisses(w io.Writer, misses []models.UnmatchedCall, file string) {
 	if w == nil {
 		return
 	}
-	calls := missedCalls(misses)
+	calls := localfile.MissedCalls(misses, missDefaultNext)
 	shown := len(calls)
 	if file != "" {
 		shown = min(shown, missConsoleMax)
@@ -3183,7 +3155,9 @@ func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
 
 // withEvidence puts on each test's line the evidence the proven wire charged
 // to it at its end (models.ScopeWindow.Evidence). A test that ran more than
-// once keeps the evidence of every attempt: one failed attempt fails it.
+// once keeps the evidence of every attempt: one failed attempt fails it. A
+// miss keploy saw in any attempt fails it, though another attempt could not
+// be read: it is unread only when no attempt saw a miss.
 func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
 	var byName map[string]*models.ScopeEvidence
 	for _, w := range windows {
@@ -3200,17 +3174,24 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 			ev = &models.ScopeEvidence{Reason: w.Evidence.Reason}
 			byName[w.Name] = ev
 		}
+		switch {
+		case len(w.Evidence.Misses) > 0 && len(ev.Misses) == 0:
+			// A miss keploy saw, in any attempt, fails the test whatever
+			// another attempt could not tell: the test is failed on it,
+			// with the reason of the first attempt that saw one, and is
+			// never unread.
+			ev.Unread, ev.Reason = false, w.Evidence.Reason
+		case w.Evidence.Unread && !ev.Unread && len(ev.Misses) == 0:
+			// Else one attempt keploy could not read leaves the test
+			// unread, with that attempt's reason.
+			ev.Unread, ev.Reason = true, w.Evidence.Reason
+		}
 		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
 		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
 		ev.Incomplete = append(ev.Incomplete, w.Evidence.Incomplete...)
 		// One attempt its harness failed on its own makes what keploy saw
 		// of every attempt no evidence of where the app makes its calls.
 		ev.FailedOnItsOwn = ev.FailedOnItsOwn || w.Evidence.FailedOnItsOwn
-		// One attempt keploy could not read leaves the test unread, with
-		// that attempt's reason.
-		if w.Evidence.Unread && !ev.Unread {
-			ev.Unread, ev.Reason = true, w.Evidence.Reason
-		}
 		// Counts since the run began: each attempt carries the run's, so
 		// keep one per kind, the latest (largest); a test's own kinds,
 		// each attempt's, added.

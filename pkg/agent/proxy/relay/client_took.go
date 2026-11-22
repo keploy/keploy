@@ -145,9 +145,14 @@ import (
 //     then closed on, is refused although it took it. Each of these costs a
 //     missing mock.
 //
-// Only a client connection that is a TCP socket on Linux can be asked
-// (clientSocketOf). Elsewhere every chunk is teed as it is written, as before,
-// and one numbered after the client's FIN carries
+// On Windows, whose socket has no count of what its send buffer holds, written
+// counts the bytes sent (wintcpinfo.go): a chunk is then judged from no more
+// bytes than were written before it, which can tee one the client did not
+// take, as before, and never refuses one it took.
+//
+// Only a client connection that is a TCP socket on Linux, macOS or Windows can
+// be asked (clientSocketOf). Elsewhere every chunk is teed as it is written,
+// as before, and one numbered after the client's FIN carries
 // fakeconn.Chunk.AfterClientClose for the parser to judge by.
 
 // clientSaid is what the proxy's end of the client connection says of its
@@ -190,7 +195,10 @@ type clientSocket interface {
 	look() clientLook
 	// written is how many bytes had been written to the socket in all,
 	// counted as clientLook.acked counts them; ok is false when the socket
-	// cannot say. Where it cannot be had exactly, it is no less than that.
+	// cannot say. Where it cannot be had exactly, it is no less than that
+	// (Linux, and macOS and Windows through the count from the accept), or,
+	// on a Windows socket with no count from its accept, the bytes sent: no
+	// more than that.
 	written() (n uint64, ok bool)
 }
 

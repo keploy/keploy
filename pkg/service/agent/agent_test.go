@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -298,5 +299,25 @@ func TestPIDMapRefusalsAreTheHooksCountOrUnknown(t *testing.T) {
 	a = &Agent{logger: zap.NewNop(), Hooks: countingHooks{err: readFailed}}
 	if _, err := a.PIDMapRefusals(ctx); !errors.Is(err, readFailed) || errors.Is(err, models.ErrPIDMapRefusalsUnsupported) {
 		t.Fatalf("a read that failed: got %v; want that error, not \"unsupported\"", err)
+	}
+}
+
+// The mock stream tells the recording's manager whether its client reads
+// capture ids (SupportsCaptureIDs), each time it opens: only then does a
+// request captured without --sync get one, so an older client keeps getting
+// such requests with no name.
+func TestGetOutgoingTellsTheManagerWhetherItsClientReadsCaptureIDs(t *testing.T) {
+	useHooks(t, &clockHooks{})
+	a := newClockAgent(t)
+	a.Proxy = &workerPool{}
+	t.Cleanup(func() { syncMock.Get().SetCaptureIDs(false) })
+	for _, want := range []bool{true, false} {
+		_, err := a.GetOutgoing(context.Background(), models.OutgoingOptions{SupportsCaptureIDs: want})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := models.IsCaptureID(syncMock.Get().NewCaptureID()); got != want {
+			t.Fatalf("the stream opened with SupportsCaptureIDs %v: the manager gives a capture id: %v", want, got)
+		}
 	}
 }

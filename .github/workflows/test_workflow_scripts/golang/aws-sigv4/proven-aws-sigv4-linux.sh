@@ -39,7 +39,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
-IMAGE="${LOCALSTACK_IMAGE:-localstack/localstack:4.0.3}"
+# 4.14.0, not 4.0.3: 4.0.3 is Debian 12 with glibc 2.36, whose setenv frees
+# the environ array it outgrows while another thread's getenv may still read
+# it. LocalStack sets its AWS credentials in the environment at startup while
+# its analytics thread resolves a host (getaddrinfo reads the environment),
+# so it can die of SIGSEGV before it is ready, as 3.0.2 (the same glibc) does
+# in other lanes. 4.14.0 (glibc 2.41) keeps the old array, and starts without
+# an auth token.
+IMAGE="${LOCALSTACK_IMAGE:-localstack/localstack:4.14.0}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP=8091
 LS=4566

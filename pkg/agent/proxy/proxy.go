@@ -145,8 +145,9 @@ type Proxy struct {
 	caseBinds caseBinds
 	// serveClock tells, with the proven switch off, a call's span on the
 	// application's clock for the background check alone (learn.
-	// CallSpanOf): the managers note their serves to it, and the parsers
-	// find it on their connection's context. The learn tracker, which tells
+	// CallSpanOf, learn.CallSpansOf): the managers note their serves to it,
+	// Mock notes each test set's begin to it, and the parsers find it on
+	// their connection's context. The learn tracker, which tells
 	// it under the switch, is fed nothing with it off.
 	serveClock *learn.ServeClock
 	// procZones reads the zone each application process writes a wall
@@ -257,8 +258,8 @@ type Proxy struct {
 	// their kind that were dropped for room (noteAnswerDropped): no read is
 	// incomplete for them, and each hundredth is said.
 	answersDropped atomic.Int64
-	// missCutPending is set, under the proven switch, by a test set's Mock,
-	// and taken by its first staging (SetMocksWithWindow from
+	// missCutPending is set by a test set's Mock, with the proven switch on
+	// or off, and taken by its first staging (SetMocksWithWindow from
 	// models.BaseTime), which cuts what was missed until then
 	// (cutMissesAtSetStart).
 	missCutPending atomic.Bool
@@ -2695,25 +2696,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// counted, or a wait that saw the count reach it could find it
 			// nowhere and call the test settled while its request sat unread.
 			raw := clientConn
-			var tracked *trackedConn
-			if p.keepsConnections() {
-				tracked = p.inflight.trackTold(clientConn, p.flights())
-				clientConn = tracked
-			}
-			// Its sequence number is taken before anything else is done
-			// with it: the agent waits on the numbers the kernel gave the
-			// connections completed to this listener (accepts.go).
-			p.countAccept(raw)
-			// A paired connection is kept too, whatever the switch says
-			// (only a counted listener pairs one): its close is read
-			// before it happens (pairbytes.go).
-			if p.paired.holds(raw) {
-				if tracked == nil {
-					tracked = p.inflight.trackTold(clientConn, p.flights())
-					clientConn = tracked
-				}
-				tracked.beforeClose = func() { p.pairClosing(clientConnCtx, raw, tracked) }
-			}
+			clientConn, tracked := p.acceptedConn(clientConnCtx, raw)
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's
 			// contract forbids. If Add ran inside the goroutine
@@ -2759,6 +2742,41 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			})
 		}
 	}
+}
+
+// acceptedConn is the conn the proxy handles an accepted client connection
+// through (raw, as the listener gave it), and its tracking (nil when it is not
+// kept). ctx is the connections' context, which reads a paired connection's
+// close (pairClosing).
+func (p *Proxy) acceptedConn(ctx context.Context, raw net.Conn) (clientConn net.Conn, tracked *trackedConn) {
+	// On macOS and Windows every byte written to the client is
+	// counted from here, under the tracking and any TLS, whatever
+	// layer writes it: the relay reads what was written to the
+	// client from the count, and on macOS what the client
+	// acknowledged (relay.CountClientWrites). raw stays the socket
+	// the listener gave, for what keys or reads it (countAccept,
+	// pairKey, the paired bytes).
+	clientConn = relay.CountClientWrites(raw)
+	if p.keepsConnections() {
+		tracked = p.inflight.trackTold(clientConn, p.flights())
+		clientConn = tracked
+	}
+	// Its sequence number is taken before anything else is done
+	// with it: the agent waits on the numbers the kernel gave the
+	// connections completed to this listener (accepts.go).
+	p.countAccept(raw)
+	// A paired connection is kept too, whatever the switch says
+	// (only a counted listener pairs one): its close is read
+	// before it happens (pairbytes.go).
+	if p.paired.holds(raw) {
+		if tracked == nil {
+			tracked = p.inflight.trackTold(clientConn, p.flights())
+			clientConn = tracked
+		}
+		tracked.beforeClose = func() { p.pairClosing(ctx, raw, tracked) }
+		tracked.pairUse, tracked.pairRead = p.paired.useOf(raw), p.paired.readOf(raw)
+	}
+	return clientConn, tracked
 }
 
 func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
@@ -2946,6 +2964,12 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
+	// A drain that gives up on the connection's close names where it went
+	// (PairedBytesDrain).
+	if tracked != nil {
+		p.paired.destined(tracked, dstAddr)
+	}
+
 	//get the session rule
 	rule := p.getSession()
 	if rule == nil {
@@ -2954,7 +2978,7 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		// Nothing on the connection is captured, so its close is no loss
 		// (pairClosing).
 		if tracked != nil {
-			p.paired.servedWithoutSession(tracked.Conn)
+			p.paired.servedWithoutSession(tracked)
 		}
 		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
 	}
@@ -4694,16 +4718,22 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// explicit reset a long-lived connection could match
 	// LifetimeConnection mocks from the prior test-set or merge them
 	// with the current one's.
+	// A new test set: what is missed until its mocks are staged is not its
+	// (cutMissesAtSetStart, at the set's staging), with the switch off too:
+	// what is missed after, as its application starts, is the set's, and
+	// its first test's read hands it over as the set's (beforeSetMiss).
+	p.missCutPending.Store(true)
 	if provenswitch.On() {
-		// A new test set: what is missed until its mocks are staged is not
-		// its (cutMissesAtSetStart, at the set's staging).
-		p.missCutPending.Store(true)
 		// A new test set: what the previous set served is no earlier place
 		// of this one's, whose mocks reuse its names (package matcher/learn).
 		// A fresh agent holds no manager yet, so its first set begins on the
 		// tracker alone; the set's staging reads the tracker's set itself
 		// (MockManager.SetTrackerSetAt).
 		p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+	} else {
+		// With the switch off the background check bounds a call's read of
+		// the app's clock by the set's begin (learn.ServeClock.SpansOf).
+		p.serveClock.NewSet()
 	}
 	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
@@ -4904,9 +4934,9 @@ func (p *Proxy) stageWithWindow(ctx context.Context, filtered, unFiltered []*mod
 		}
 		p.dnsCache.Purge()
 	}
-	// A test set's staging (from models.BaseTime, the first since its Mock,
-	// under the proven switch): what was missed until its mocks were in is
-	// not the set's (cutMissesAtSetStart).
+	// A test set's staging (from models.BaseTime, the first since its Mock):
+	// what was missed until its mocks were in is not the set's
+	// (cutMissesAtSetStart).
 	if start.Equal(models.BaseTime) && p.missCutPending.CompareAndSwap(true, false) {
 		p.cutMissesAtSetStart(ctx)
 	}
@@ -5404,6 +5434,14 @@ func (p *Proxy) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
 }
 
 var _ agent.AppClockRunSetter = (*Proxy)(nil)
+
+// SetAppClockShown makes the learn tracker read what the app's clock showed
+// between two real instants (agent.AppClockShownSetter).
+func (p *Proxy) SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool)) {
+	p.learnTracker.SetAppClockShown(f)
+}
+
+var _ agent.AppClockShownSetter = (*Proxy)(nil)
 
 // ServeExactTestConcurrent implements agent.ExactConcurrentServer (exact.go).
 func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
@@ -5991,11 +6029,15 @@ func withStagingNote(e models.ParserError, next string) string {
 
 // beforeSetMiss is a miss made before a test set's first test began, with no
 // test's window open: the application's startup, as it is readied for the
-// set. Under the proven switch it is the set's, no test's: the first test's
-// window carries it, so it is read in order with every other miss, and the
-// read returns it marked (models.UnmatchedCall.BeforeSet) for the replay to
-// fail the set with, charging no test. It was dropped with a warning, and a
-// set whose application made, as it started, a call no mock answers passed.
+// set. It is the set's, no test's: the first test's window carries it, so it
+// is read in order with every other miss, and the read returns it marked
+// (models.UnmatchedCall.BeforeSet), charging no test. Under the proven switch
+// the replay fails the set with it; with the switch off it fails nothing and
+// the replay names it in the set's report (TestReport.OutsideTestMisses). It
+// was dropped with a warning, and a set whose application made, as it
+// started, a call no mock answers passed with the call named nowhere: with
+// the switch off at any level, and with it on for a DNS lookup, which counts
+// against no test.
 type beforeSetMiss struct{ error }
 
 // Unwrap is the miss itself, for errors.As.
@@ -6216,12 +6258,15 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // test case into a fresh per-test accumulator, so the replayer's GetMockErrors
 // returns only THIS test's misses instead of draining a shared global queue.
 // The replayer opens it for the first test of a test set. Misses retained
-// before it, with no window open (the app's startup, or a previous set's last
-// test's traffic), are not this test's: they are discarded so they don't
-// attach to it, and logged, so none is lost without a word. A miss made after
-// a set's last test is not left for the next set's first window: under the
-// proven switch the replayer reads it at the set's end (GetMockErrors) and it
-// fails the set. One keploy decides after that read, whose call was marked in
+// before it, with no window open, are not this test's: what was missed
+// before the set's mocks were staged (a previous set's last test's traffic)
+// was cut at the staging, and logged (cutMissesAtSetStart); the app's startup,
+// made since, is the set's, and the test's read hands it over marked as the
+// set's (beforeSetMiss), charging no test. A miss made after
+// a set's last test is not left for the next set's first window: the
+// replayer reads it at the set's end (GetMockErrors), where under the proven
+// switch it fails the set, and with the switch off it fails nothing and the
+// set's report names it. One keploy decides after that read, whose call was marked in
 // a test's view, is that test's, and one marked with no test's view named
 // before that read is the set's: the next set's first read returns either as
 // an earlier set's call (earlierSetMiss), which fails keploy test's run, not
@@ -6287,11 +6332,11 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 	between = append(between, w.pendingMockErrors.drain()...)
 	pendingLost := w.pendingLost
 	w.pendingLost = false
-	// Under the proven switch a set's first test carries what was missed
-	// before it as the set's (beforeSetMiss): nothing is dropped.
-	beforeSet := !carry && provenswitch.On()
-	switch {
-	case carry:
+	// A set's first test carries what was missed before it as the set's
+	// (beforeSetMiss), with the proven switch on or off: nothing is dropped.
+	// What was missed before the set's mocks were staged was cut there
+	// (cutMissesAtSetStart).
+	if carry {
 		for _, err := range between {
 			if !acc.addBounded(err, maxPendingMockErrors) {
 				p.missDroppedForRoom(err)
@@ -6301,7 +6346,7 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 			// They were this test's: its read is short of them.
 			w.missLoss.CompareAndSwap(nil, &missLostBetweenFull)
 		}
-	case beforeSet:
+	} else {
 		for _, err := range between {
 			if !acc.addBounded(asBeforeSet(err), maxPendingMockErrors) {
 				p.noteMissLost(err, missLostBeforeSetFull)
@@ -6313,14 +6358,6 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 		}
 	}
 	p.captureMu.Unlock()
-	if !carry && !beforeSet {
-		p.logDroppedMisses("mock mismatches made while no test's capture window was open are not attributed to a test", between)
-		if pendingLost {
-			// They were no test's either: said, and no read is short of them.
-			p.logger.Warn("more mock mismatches were made while no test's capture window was open than keploy keeps; the rest were dropped, and they are not attributed to a test either",
-				zap.Int("kept", maxPendingMockErrors))
-		}
-	}
 	p.logDroppedMisses("mock mismatches of a test whose capture window was never read are dropped", unread)
 }
 

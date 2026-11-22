@@ -39,6 +39,9 @@ var hookCalls = []struct {
 	{"AfterTestRun", func(ctx context.Context, a *AgentClient) error {
 		return a.AfterTestRun(ctx, "test-run-0", []string{"test-set-0"}, models.TestCoverage{})
 	}},
+	{"AppStartsAnew", func(ctx context.Context, a *AgentClient) error {
+		return a.AppStartsAnew(ctx, "test-set-0", time.Now())
+	}},
 }
 
 // slowAgent is an agent whose hook handler, once it is serving a call (served),
