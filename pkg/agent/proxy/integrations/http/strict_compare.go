@@ -423,6 +423,53 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 	return append(out, k.clockDiffs(ctx, input, m)...)
 }
 
+// strictDiffOffRoute compares an off-route recording m against input for
+// strictClosest's pass 2, returning walkOnly(diffs) and true only when m has
+// strictly fewer than limit differences (or any differences when limit == 0).
+// Because pass 2 runs only when no recording in the pool is of the call's
+// route, clockDiffs (which walkOnly drops for off-route recordings) cannot
+// affect the result, and comparison stops as soon as the accumulated non-clock
+// differences reach limit.
+func strictDiffOffRoute(input *req, live destination, livePath string, liveQuery url.Values, m *models.Mock, n strictNoise, limit int) ([]strictField, bool) {
+	r := m.Spec.HTTPReq
+	if r == nil {
+		if limit > 0 && 1 >= limit {
+			return nil, false
+		}
+		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}, true
+	}
+	strictDiffs.Add(1)
+	var out []strictField
+	if string(r.Method) != input.method {
+		out = append(out, field(valueDiff("method", string(r.Method), input.method)))
+	}
+	for _, d := range destinationDiff(live, m) {
+		out = append(out, field(d))
+	}
+	if limit > 0 && len(out) >= limit {
+		return nil, false
+	}
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declaredClockFields(m, n.declaredRules)}
+	recPath, recQuery := recordedStrictURL(m)
+	out = append(out, k.pathDiffs(recPath, livePath)...)
+	if limit > 0 && len(out) >= limit {
+		return nil, false
+	}
+	out = append(out, k.queryDiffs(recQuery, liveQuery)...)
+	if limit > 0 && len(out) >= limit {
+		return nil, false
+	}
+	out = append(out, k.headerDiffs(r.Header, input.header, input.sentBody())...)
+	if limit > 0 && len(out) >= limit {
+		return nil, false
+	}
+	out = append(out, k.bodyDiffs(r, input)...)
+	if limit > 0 && len(out) >= limit {
+		return nil, false
+	}
+	return walkOnly(out), true
+}
+
 // clockDiffs are the places the learn step learned as reads of the
 // application's clock (k.clocks) at which the call carries no such read made
 // in its own window on the application's clock (learn.ClockSpanOf for the

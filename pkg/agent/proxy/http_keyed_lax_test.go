@@ -310,8 +310,13 @@ func TestAKeyedLaxReadAnswersAsTheWholeRead(t *testing.T) {
 // calls, fewer than its groups, so each call is answered by a recording no
 // call before it took, and calls are taken in a stride through the groups.
 // The first call after a staging builds the indexes the shape reads and is
-// timed apart, as first-ns.
+// timed apart, as first-ns. The exact view's verify mode (TestMain) compares
+// every recording again by design and is off here, as in
+// BenchmarkHTTPReplayPerCall.
 func BenchmarkHTTPReplayLaxPerCall(b *testing.B) {
+	verify := exactViewVerify.Load()
+	exactViewVerify.Store(false)
+	b.Cleanup(func() { exactViewVerify.Store(verify) })
 	legs := []struct{ shape, proven string }{
 		{"fuzzy", "0"}, {"id", "0"}, {"urlnoise", "0"}, {"miss", "0"}, {"pass2", "0"}, {"miss", "1"},
 	}

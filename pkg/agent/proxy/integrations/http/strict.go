@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
@@ -222,8 +223,10 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		return nil, nil, false, err
 	}
 	if len(fits) == 0 {
-		// A miss: every recording is compared, for the closest.
-		_, near, err := strictCompare(ctx, input, live, pool, n)
+		// A miss: find the closest recording in pool, matching strictCompare's
+		// order and tie-breaking without comparing recordings that cannot beat
+		// the closest already found.
+		near, err := strictClosest(ctx, input, live, pool, n, h.verifying())
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -435,6 +438,93 @@ func strictCompare(ctx context.Context, input *req, live destination, pool []*mo
 		}
 	}
 	return fits, near, nil
+}
+
+// strictClosest returns the closest recording of pool to a call no recording
+// of pool fits (len(fits) == 0): strictCompare's near, without comparing
+// recordings that cannot beat it.
+//
+// Because closerThan prefers any recording of the call's route over any of
+// another, pass 1 compares only recordings strictSieve.mayBe passes (the only
+// ones whose route can match): if any of those has route true, it wins over
+// every recording of another route and pass 2 never runs; a route match with
+// one difference cannot be beaten (every recording differs in at least one
+// field) and stops pass 1 at once.
+//
+// Otherwise no recording is of the call's route, so pass 2 walks pool in its
+// order comparing each recording only up to the closest's difference count
+// (strictDiffOffRoute), stopping at once on a single-difference recording,
+// which no later one can beat.
+//
+// In verify mode (verify) every recording is also compared by strictCompare
+// and a difference panics.
+func strictClosest(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise, verify bool) (nearest, error) {
+	sieve := newStrictSieve(input, n)
+	var near nearest
+	// Pass 1: recordings that may be of the call's route. Only route-matching
+	// recordings are kept here so off-route tie-breaking stays in pool order
+	// in pass 2.
+	for _, m := range pool {
+		if ctx.Err() != nil {
+			return nearest{}, ctx.Err()
+		}
+		if !sieve.mayBe(m) {
+			continue
+		}
+		d := strictDiff(ctx, input, live, m, n)
+		if len(d) == 0 || !routeMatches(d) {
+			continue
+		}
+		c := nearest{mock: m, diffs: d, route: true}
+		if c.closerThan(near) {
+			near = c
+			if len(near.diffs) == 1 {
+				break
+			}
+		}
+	}
+	if !near.route {
+		// Pass 2: no recording is of the call's route. Walk pool in order so
+		// ties keep the earliest recording; a single difference cannot be
+		// beaten because no recording in pool fits.
+		livePath := ""
+		var liveQuery url.Values
+		if input.url != nil {
+			livePath, liveQuery = input.url.Path, input.url.Query()
+		}
+		for _, m := range pool {
+			if ctx.Err() != nil {
+				return nearest{}, ctx.Err()
+			}
+			limit := len(near.diffs)
+			if near.mock != nil && limit == 1 {
+				break
+			}
+			diffs, closer := strictDiffOffRoute(input, live, livePath, liveQuery, m, n, limit)
+			if !closer || len(diffs) == 0 {
+				continue
+			}
+			near = nearest{mock: m, diffs: diffs, route: false}
+		}
+	}
+	if verify {
+		_, want, err := strictCompare(ctx, input, live, pool, n)
+		if err != nil {
+			return nearest{}, err
+		}
+		if near.mock != want.mock || near.route != want.route || !slices.Equal(near.diffs, want.diffs) {
+			var gotName, wantName string
+			if near.mock != nil {
+				gotName = near.mock.Name
+			}
+			if want.mock != nil {
+				wantName = want.mock.Name
+			}
+			panic(fmt.Sprintf("exact view verify: strict closest of %s %s: pruned (%s, route=%v, %d diffs), compared (%s, route=%v, %d diffs)",
+				input.method, sieve.path, gotName, near.route, len(near.diffs), wantName, want.route, len(want.diffs)))
+		}
+	}
+	return near, nil
 }
 
 // walkOnly are the fields of fields the walk found differing, not the

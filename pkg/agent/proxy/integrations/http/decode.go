@@ -594,9 +594,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// begin or end replaced it, so the miss names no recording of
 				// another test's view, or the pool's, as its closest.
 				db = integrations.DiagnoseInCallView(db)
-				if lmiss == nil && provenswitch.On() {
+				if lmiss == nil && provenswitch.On() && bytes.IndexByte(input.body, '[') >= 0 {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
+					// A body without '[' holds no JSON array, so it cannot
+					// be unstable_order and needs no learn-scope read.
 					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(db))
 				}
 				if lmiss != nil {
