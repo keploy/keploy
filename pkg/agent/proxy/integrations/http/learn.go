@@ -3354,7 +3354,7 @@ func (h *HTTP) learnedMatchOf(ctx context.Context, input *req, mockDb, base inte
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		group, owner, err := h.learnedGroupOf(base, mockDb, learn.TrackerFrom(ctx), live, liveShape, n, reread)
+		group, owner, err := h.learnedGroupOf(ctx, base, mockDb, learn.TrackerFrom(ctx), live, liveShape, n, reread)
 		if err != nil {
 			return nil, nil
 		}
