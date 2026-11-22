@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1107,11 +1106,23 @@ const urlNoisePlaceholder = "{{keploy.urlnoise}}"
 // "^/users/[0-9]+$" and "^/orders/[^/]+$") never collapse their matched paths
 // onto the same masked string. Index 0 keeps urlNoisePlaceholder so a
 // single-pattern configuration keeps its placeholder bytes unchanged.
+// Indices >= 1 are spelled in lowercase ASCII letters only (no digits), so
+// queryValueTypeClass classifies every placeholder as "" (never "token") and
+// pass 2 never relaxes one pattern's masked value against another pattern's
+// or against an unmasked token.
 func urlNoisePlaceholderOf(i int) string {
-	if i == 0 {
+	if i <= 0 {
 		return urlNoisePlaceholder
 	}
-	return "{{keploy.urlnoise." + strconv.Itoa(i) + "}}"
+	var buf [16]byte
+	pos := len(buf)
+	for n := i; n > 0; {
+		n--
+		pos--
+		buf[pos] = byte('a' + n%26)
+		n /= 26
+	}
+	return "{{keploy.urlnoise." + string(buf[pos:]) + "}}"
 }
 
 // urlNoiseCache memoizes compiled url-noise patterns. MatchURLPath and
