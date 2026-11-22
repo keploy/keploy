@@ -2793,6 +2793,21 @@ func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap boo
 	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap)
 }
 
+// windowKeeps reports whether the windowed per-test read
+// (getFilteredMocksInWindowIn) keeps mk, a mock of the tier, for the window
+// [start, end]: an undated mock, or one of the window (inRecordedWindow). A
+// mock answered before it was asked is said of as that read says of it
+// (pkg.LeaveOutAnsweredBeforeAsked).
+func (m *MockManager) windowKeeps(mk *models.Mock, start, end, gapFrom time.Time, hasGap bool) bool {
+	if mk.Spec.ReqTimestampMock.IsZero() || mk.Spec.ResTimestampMock.IsZero() {
+		return true
+	}
+	if pkg.LeaveOutAnsweredBeforeAsked(m.logger, mk) {
+		return false
+	}
+	return inRecordedWindow(mk, start, end, gapFrom, hasGap)
+}
+
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].
 func clampCursor(cur, n int) int {
 	if cur > n-1 {

@@ -269,6 +269,25 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			}
 		}
 
+		// With the switch off a call that is a recording's very request is
+		// answered from the recordings of that request alone (keyedExactBody),
+		// as the exact-body pass below would answer it; any other reads the
+		// whole pool.
+		kh, err := h.keyedExactBody(ctx, input, mockDb, headerNoise, urlNoise, statefulMocks, endTurn == nil)
+		if kh.end != nil {
+			endTurn = kh.end
+		}
+		ctx = kh.ctx
+		if err != nil {
+			return false, nil, nil, err
+		}
+		if kh.found {
+			if kh.served == nil {
+				continue
+			}
+			return true, kh.served, nil, nil
+		}
+
 		// The variables' scope this attempt checks against is read before
 		// the pool: a test that begins after this read (its pool swapped in,
 		// then its scope begun) makes this attempt's binds stale, so a call
@@ -1495,6 +1514,22 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 	return schemaMatched, nil
 }
 
+// byteEqualBody is the first of mocks whose recorded body is body, byte for
+// byte: the exact-body pass's first answer (exactBodyMatch, keyedExactBody).
+func (h *HTTP) byteEqualBody(body []byte, mocks []*models.Mock) *models.Mock {
+	for _, mock := range mocks {
+		if mock.Spec.HTTPReq.Body == string(body) {
+			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
+				ce.Write(zap.String("mock", mock.Name),
+					zap.Float64("match_percentage", 100.0),
+					zap.String("match_type", "exact_body"))
+			}
+			return mock
+		}
+	}
+	return nil
+}
+
 // ExactBodyMatch performs exact body matching with noise awareness.
 // First pass: fast string equality.
 // Second pass: noise-aware comparison that skips obfuscated fields identified
@@ -1520,15 +1555,8 @@ func (h *HTTP) exactBodyMatch(body []byte, schemaMatched []*models.Mock, held fu
 	}
 
 	// First pass: exact string match (fastest path)
-	for _, mock := range schemaMatched {
-		if mock.Spec.HTTPReq.Body == string(body) {
-			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-				ce.Write(zap.String("mock", mock.Name),
-					zap.Float64("match_percentage", 100.0),
-					zap.String("match_type", "exact_body"))
-			}
-			return true, mock
-		}
+	if mock := h.byteEqualBody(body, schemaMatched); mock != nil {
+		return true, mock
 	}
 
 	// Second pass: noise-aware match for mocks with obfuscated values.

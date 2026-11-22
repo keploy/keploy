@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"slices"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -14,7 +15,9 @@ import (
 // (rangeUnansweredWithKey), so a read that stops at the key's next one
 // visits only it and copies none of the test's other mocks; the tier is read
 // only when fn has not stopped by then, as rangeExactPerTest reads it.
-// Otherwise the read is walked.
+// Otherwise the tier's key index is walked (TreeDb.rangeKeyed), each mock
+// kept as the windowed read keeps it (windowKeeps), so a read visits the
+// mocks filed under key and no other.
 func (m *MockManager) RangePerTestMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
 	return m.rangePerTestMocksWithKeyIn(m.exactView(), ix, key, fn)
 }
@@ -26,23 +29,28 @@ func (m *MockManager) rangePerTestMocksWithKeyIn(v *exactView, ix *integrations.
 	// What is not the open test's own is filed by Keys alone, as the
 	// trees' key indexes file the staged mocks.
 	under := func(mk *models.Mock) bool { return mk != nil && slices.Contains(distinctKeys(ix, mk), key) }
-	if v == nil {
-		mocks, err := m.getPerTestMocksInWindowIn(nil)
-		if err != nil {
-			return err
-		}
-		for _, mk := range mocks {
-			if under(mk) && !fn(mk) {
-				break
-			}
-		}
-		return nil
-	}
+	// The tree and the window are read together, as the windowed read
+	// (getFilteredMocksInWindowIn) reads them.
+	var start, end time.Time
 	m.swapMu.RLock()
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
+	if v == nil {
+		m.windowMu.RLock()
+		start, end = m.windowStart, m.windowEnd
+		m.windowMu.RUnlock()
+	}
 	m.swapMu.RUnlock()
+	if v == nil {
+		keeps := func(*models.Mock) bool { return true }
+		if !start.IsZero() && !end.IsZero() {
+			gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
+			keeps = func(mk *models.Mock) bool { return m.windowKeeps(mk, start, end, gapFrom, hasGap) }
+		}
+		tree.rangeKeyed(ix, key, func(mk *models.Mock) bool { return !keeps(mk) || fn(mk) })
+		return nil
+	}
 	if !v.rangeUnansweredWithKey(ix, key, fn) {
 		return nil
 	}
