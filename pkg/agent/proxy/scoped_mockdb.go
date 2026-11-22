@@ -1237,7 +1237,7 @@ func (s *scopedMockDb) WindowRewinds() (uint64, time.Time) {
 	if r, ok := s.MockMemDb.(integrations.WindowRewindCounter); ok {
 		return r.WindowRewinds()
 	}
-	start, _ := s.MockMemDb.CurrentTestWindow()
+	start, _ := s.CurrentTestWindow()
 	return 0, start
 }
 
