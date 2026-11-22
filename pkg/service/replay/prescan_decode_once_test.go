@@ -53,6 +53,10 @@ func (c *countingTestDB) HasTestCases(ctx context.Context, testSetID string) (bo
 	return c.TestYaml.HasTestCases(ctx, testSetID)
 }
 
+func (c *countingTestDB) PresenceAppliesTo(db any) bool {
+	return db == c
+}
+
 func (c *countingTestDB) gets(set string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -405,6 +409,29 @@ func (d *presenceOnlyDB) HasTestCases(_ context.Context, set string) (bool, erro
 	return d.has[set], nil
 }
 
+func (d *presenceOnlyDB) PresenceAppliesTo(db any) bool {
+	return db == d
+}
+
+// promotedWrapperDB embeds *presenceOnlyDB without opting into
+// PresenceAppliesTo itself, simulating a wrapper that inherits HasTestCases
+// via Go struct embedding.
+type promotedWrapperDB struct {
+	*presenceOnlyDB
+	getCalls []string
+}
+
+func (w *promotedWrapperDB) GetTestCases(ctx context.Context, set string) ([]*models.TestCase, error) {
+	w.getCalls = append(w.getCalls, set)
+	if err := w.errs[set]; err != nil {
+		return nil, err
+	}
+	if !w.has[set] {
+		return nil, nil
+	}
+	return w.prTestDB.GetTestCases(ctx, set)
+}
+
 // fallbackOnlyDB implements TestDB without TestCasePresenceReader, exercising
 // setHasTestCases's GetTestCases fallback.
 type fallbackOnlyDB struct {
@@ -502,6 +529,458 @@ func TestLastSetThatRuns_PrefersHasTestCasesAndFallsBackToGetTestCases(t *testin
 			}
 			if !slices.Equal(db.getCalls, tc.wantCalls) {
 				t.Fatalf("GetTestCases called on %v, want %v", db.getCalls, tc.wantCalls)
+			}
+		})
+
+		t.Run("promoted wrapper rejected/"+tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 1, 0)
+			h.replayer.config.Test.IgnoredTests = tc.ignored
+			inner := &presenceOnlyDB{prTestDB: &prTestDB{cases: h.cases}, has: tc.has, errs: tc.errs}
+			wrap := &promotedWrapperDB{presenceOnlyDB: inner}
+			h.replayer.testDB = wrap
+
+			got := h.replayer.lastSetThatRuns(context.Background(), []string{"s0", "s1", "s2"})
+			if got != tc.want {
+				t.Fatalf("lastSetThatRuns = %d, want %d", got, tc.want)
+			}
+			if len(inner.hasCalls) != 0 {
+				t.Fatalf("HasTestCases called on %v for un-opted-in embedded wrapper, want none", inner.hasCalls)
+			}
+			if !slices.Equal(wrap.getCalls, tc.wantCalls) {
+				t.Fatalf("GetTestCases called on %v, want %v", wrap.getCalls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func writeNamedRecordedHTTPTestCase(t *testing.T, db *testdb.TestYaml, set, name string, base *models.TestCase) {
+	t.Helper()
+	cp := *base
+	cp.Name = name
+	if err := db.InsertTestCase(context.Background(), &cp, set, false); err != nil {
+		t.Fatalf("InsertTestCase(%s/%s): %v", set, name, err)
+	}
+}
+
+// Plain *testdb.TestYaml (with no test wrapper) must satisfy presenceReaderOf,
+// leave r.prescanned nil, and emit a single ERROR line on an unreadable set.
+func TestStart_BareTestYamlUsesHasTestCasesAndEmitsOneError(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	root := t.TempDir()
+	dbCore, dbLogs := observer.New(zap.ErrorLevel)
+	db := testdb.New(zap.New(dbCore), root)
+	writeNamedRecordedHTTPTestCase(t, db, "test-set-0", "set0-case", h.cases[0])
+	if err := os.MkdirAll(filepath.Join(root, "test-set-1", "tests", "test-1.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if presenceReaderOf(db) == nil {
+		t.Fatal("presenceReaderOf(*testdb.TestYaml) = nil, want non-nil")
+	}
+
+	reports := &setsReportDB{prReportDB: h.report}
+	reports.statuses = map[string]string{}
+	h.replayer.reportDB = reports
+	h.replayer.testDB = db
+	h.replayer.config.Command = "./app"
+	h.replayer.config.CommandType = string(utils.Native)
+	h.replayer.config.Test.MaxFlakyChecks = 1
+	h.replayer.config.DisableANSI = true
+
+	saved := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = saved })
+	utils.ErrCode = 0
+
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	if err := h.replayer.Start(ctx); err == nil {
+		t.Fatal("Start succeeded on unreadable test-set-1; want error")
+	}
+	if n := dbLogs.FilterMessageSnippet("failed to read the testcase").Len(); n != 1 {
+		t.Fatalf("bare *TestYaml logged failed to read the testcase %d time(s), want 1 (all: %+v)", n, dbLogs.All())
+	}
+	if h.replayer.prescanned != nil {
+		t.Fatalf("bare *TestYaml populated r.prescanned = %+v, want nil", h.replayer.prescanned)
+	}
+}
+
+// autoReplayLikeDB mirrors k8s-proxy's 1-level wrapper (*autoReplayTestDB)
+// embedding *testdb.TestYaml.
+type autoReplayLikeDB struct {
+	*testdb.TestYaml
+	mu       sync.Mutex
+	getCalls map[string]int
+}
+
+func (a *autoReplayLikeDB) GetTestCases(ctx context.Context, set string) ([]*models.TestCase, error) {
+	a.mu.Lock()
+	a.getCalls[set]++
+	a.mu.Unlock()
+	return a.TestYaml.GetTestCases(ctx, set)
+}
+
+func (a *autoReplayLikeDB) gets(set string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.getCalls[set]
+}
+
+// replayerFilterLikeDB mirrors k8s-proxy's 2-level wrapper (replayerTestDB)
+// embedding *autoReplayTestDB and filtering out unreplayable cases in
+// GetTestCases. It does NOT override HasTestCases or PresenceAppliesTo.
+type replayerFilterLikeDB struct {
+	*autoReplayLikeDB
+	dropSet string
+}
+
+func (r replayerFilterLikeDB) GetTestCases(ctx context.Context, set string) ([]*models.TestCase, error) {
+	tcs, err := r.autoReplayLikeDB.GetTestCases(ctx, set)
+	if err != nil {
+		return nil, err
+	}
+	if set == r.dropSet {
+		return nil, nil
+	}
+	return tcs, nil
+}
+
+// A 2-level wrapper embedding *testdb.TestYaml (k8s-proxy's replayerTestDB
+// shape) whose GetTestCases filters out all cases of a trailing set must NOT
+// silently inherit *TestYaml's HasTestCases shortcut: lastSetThatRuns must
+// pick the set before it (as main does), KEPLOY-LAST-TESTCASE must land on
+// that set, and the fallback cache must still read every set exactly once.
+func TestStart_EmbeddedFilteringWrapperDoesNotInheritHasTestCases(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		for _, asPointer := range []bool{false, true} {
+			name := "value wrapper"
+			if asPointer {
+				name = "pointer wrapper"
+			}
+			if on {
+				name += "/switch on"
+			} else {
+				name += "/switch off"
+			}
+			t.Run(name, func(t *testing.T) {
+				provenOn(t, on)
+				h := newPartialRunHarness(t, 1, 0)
+				root := t.TempDir()
+				inner := testdb.New(zap.NewNop(), root)
+				writeNamedRecordedHTTPTestCase(t, inner, "test-set-0", "set0-case", h.cases[0])
+				writeNamedRecordedHTTPTestCase(t, inner, "test-set-1", "set1-case", h.cases[0])
+				writeNamedRecordedHTTPTestCase(t, inner, "test-set-2", "set2-case", h.cases[0])
+
+				auto := &autoReplayLikeDB{TestYaml: inner, getCalls: make(map[string]int)}
+				wrapVal := replayerFilterLikeDB{autoReplayLikeDB: auto, dropSet: "test-set-2"}
+				var db TestDB = wrapVal
+				if asPointer {
+					db = &wrapVal
+				}
+
+				if presenceReaderOf(db) != nil {
+					t.Fatalf("presenceReaderOf(%T) != nil; embedded wrapper must not inherit HasTestCases", db)
+				}
+
+				reports := &setsReportDB{prReportDB: h.report}
+				h.replayer.reportDB = reports
+				h.replayer.testDB = db
+				h.replayer.config.Command = "./app"
+				h.replayer.config.CommandType = string(utils.Native)
+				h.replayer.config.Test.MaxFlakyChecks = 1
+				h.replayer.config.DisableANSI = true
+				hooks := &lastCaseHooks{}
+				h.replayer.hookImpl = hooks
+
+				_, statuses := startEarlierSetRun(t, h, reports)
+				if statuses["test-set-0"] != string(models.TestSetStatusPassed) ||
+					statuses["test-set-1"] != string(models.TestSetStatusPassed) ||
+					statuses["test-set-2"] != string(models.TestSetStatusNoTestsToRun) {
+					t.Fatalf("statuses = %v, want test-set-0/1 PASSED and test-set-2 NO_TESTS_TO_RUN", statuses)
+				}
+				if last, _ := hooks.seen(); !slices.Equal(last, []string{"test-set-1/set1-case"}) {
+					t.Fatalf("KEPLOY-LAST-TESTCASE sent on %v, want [test-set-1/set1-case]", last)
+				}
+				for _, set := range []string{"test-set-0", "test-set-1", "test-set-2"} {
+					if got := auto.gets(set); got != 1 {
+						t.Fatalf("GetTestCases(%s) called %d time(s), want 1 (fallback must reuse pre-scanned set)", set, got)
+					}
+				}
+				if h.replayer.prescanned != nil || len(h.replayer.prescannedEmpty) != 0 {
+					t.Fatalf("Start left prescanned state behind: prescanned=%+v empty=%v", h.replayer.prescanned, h.replayer.prescannedEmpty)
+				}
+			})
+		}
+	}
+}
+
+// apiServerLikeDB implements TestDB only (no TestCasePresenceReader), matching
+// k8s-proxy's api-server-backed store. Each set can hold distinct cases, be
+// empty, return a logged error, or return different cases on a retry call.
+type apiServerLikeDB struct {
+	mu       sync.Mutex
+	ids      []string
+	bySet    map[string][][]*models.TestCase // per-call slices for flaky retry tests
+	errBySet map[string]error
+	logger   *zap.Logger
+	getCalls map[string]int
+}
+
+func (a *apiServerLikeDB) GetAllTestSetIDs(context.Context) ([]string, error) {
+	return a.ids, nil
+}
+
+func (a *apiServerLikeDB) GetTestCases(_ context.Context, set string) ([]*models.TestCase, error) {
+	a.mu.Lock()
+	callIdx := a.getCalls[set]
+	a.getCalls[set] = callIdx + 1
+	err := a.errBySet[set]
+	seq := a.bySet[set]
+	logger := a.logger
+	a.mu.Unlock()
+
+	if err != nil {
+		if logger != nil {
+			logger.Error("failed to fetch test cases from store", zap.String("testSet", set), zap.Error(err))
+		}
+		return nil, err
+	}
+	if len(seq) == 0 {
+		return nil, nil
+	}
+	if callIdx >= len(seq) {
+		callIdx = len(seq) - 1
+	}
+	// Return fresh copies so per-run mutations (e.g. IsLast) don't alias across attempts.
+	src := seq[callIdx]
+	out := make([]*models.TestCase, len(src))
+	for i, tc := range src {
+		cp := *tc
+		out[i] = &cp
+	}
+	return out, nil
+}
+
+func (a *apiServerLikeDB) UpdateTestCase(context.Context, *models.TestCase, string, bool) error {
+	return nil
+}
+func (a *apiServerLikeDB) DeleteTests(context.Context, string, []string) error { return nil }
+func (a *apiServerLikeDB) DeleteTestSet(context.Context, string) error         { return nil }
+
+func (a *apiServerLikeDB) gets(set string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.getCalls[set]
+}
+
+// recordingCaseHooks records every "set/case" simulated and which carried
+// KEPLOY-LAST-TESTCASE, and can optionally fail a named test case to drive a
+// flaky retry.
+type recordingCaseHooks struct {
+	lastCaseHooks
+	failCase string
+	rmu      sync.Mutex
+	ran      []string
+}
+
+func (h *recordingCaseHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, set string) (interface{}, error) {
+	h.rmu.Lock()
+	h.ran = append(h.ran, set+"/"+tc.Name)
+	fail := h.failCase != "" && tc.Name == h.failCase
+	h.rmu.Unlock()
+	if fail {
+		bad := *tc
+		bad.HTTPResp.StatusCode = 500
+		return &bad.HTTPResp, nil
+	}
+	return h.lastCaseHooks.SimulateRequest(ctx, tc, set)
+}
+
+func (h *recordingCaseHooks) ranCases() []string {
+	h.rmu.Lock()
+	defer h.rmu.Unlock()
+	return slices.Clone(h.ran)
+}
+
+func namedPRCase(base *models.TestCase, name string) *models.TestCase {
+	cp := *base
+	cp.Name = name
+	return &cp
+}
+
+// A fallback store that does not implement TestCasePresenceReader (such as
+// k8s-proxy's api-server store) must still fetch/decode every set once during
+// Start, never mix cases across sets, emit a single ERROR line on an unreadable
+// trailing set, and read fresh on a flaky-check retry attempt.
+func TestStart_FallbackStoreDecodesOnceAndReusesSettledSet(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		mode := "switch off"
+		if on {
+			mode = "switch on"
+		}
+
+		t.Run("every set runs/"+mode, func(t *testing.T) {
+			provenOn(t, on)
+			h := newPartialRunHarness(t, 1, 0)
+			db := &apiServerLikeDB{
+				ids: []string{"test-set-0", "test-set-1"},
+				bySet: map[string][][]*models.TestCase{
+					"test-set-0": {{namedPRCase(h.cases[0], "set0-case")}},
+					"test-set-1": {{namedPRCase(h.cases[0], "set1-case")}},
+				},
+				getCalls: make(map[string]int),
+			}
+			reports := &setsReportDB{prReportDB: h.report}
+			h.replayer.reportDB = reports
+			h.replayer.testDB = db
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			h.replayer.config.DisableANSI = true
+			hooks := &recordingCaseHooks{}
+			h.replayer.hookImpl = hooks
+
+			_, statuses := startEarlierSetRun(t, h, reports)
+			if statuses["test-set-0"] != string(models.TestSetStatusPassed) || statuses["test-set-1"] != string(models.TestSetStatusPassed) {
+				t.Fatalf("statuses = %v, want both PASSED", statuses)
+			}
+			if got := hooks.ranCases(); !slices.Equal(got, []string{"test-set-0/set0-case", "test-set-1/set1-case"}) {
+				t.Fatalf("ran cases = %v, want [test-set-0/set0-case test-set-1/set1-case]", got)
+			}
+			if last, _ := hooks.seen(); !slices.Equal(last, []string{"test-set-1/set1-case"}) {
+				t.Fatalf("KEPLOY-LAST-TESTCASE sent on %v, want [test-set-1/set1-case]", last)
+			}
+			for _, set := range []string{"test-set-0", "test-set-1"} {
+				if got := db.gets(set); got != 1 {
+					t.Fatalf("GetTestCases(%s) called %d time(s), want 1 (fallback must not double-fetch)", set, got)
+				}
+			}
+			if h.replayer.prescanned != nil {
+				t.Fatalf("r.prescanned not cleared after Start: %+v", h.replayer.prescanned)
+			}
+		})
+
+		t.Run("trailing empty set fetched once/"+mode, func(t *testing.T) {
+			provenOn(t, on)
+			h := newPartialRunHarness(t, 1, 0)
+			db := &apiServerLikeDB{
+				ids: []string{"test-set-0", "test-set-1", "test-set-2"},
+				bySet: map[string][][]*models.TestCase{
+					"test-set-0": {{namedPRCase(h.cases[0], "set0-case")}},
+					"test-set-1": {{namedPRCase(h.cases[0], "set1-case")}},
+					"test-set-2": nil,
+				},
+				getCalls: make(map[string]int),
+			}
+			reports := &setsReportDB{prReportDB: h.report}
+			h.replayer.reportDB = reports
+			h.replayer.testDB = db
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			h.replayer.config.DisableANSI = true
+			hooks := &recordingCaseHooks{}
+			h.replayer.hookImpl = hooks
+
+			_, statuses := startEarlierSetRun(t, h, reports)
+			if statuses["test-set-0"] != string(models.TestSetStatusPassed) ||
+				statuses["test-set-1"] != string(models.TestSetStatusPassed) ||
+				statuses["test-set-2"] != string(models.TestSetStatusNoTestsToRun) {
+				t.Fatalf("statuses = %v, want test-set-0/1 PASSED and test-set-2 NO_TESTS_TO_RUN", statuses)
+			}
+			if last, _ := hooks.seen(); !slices.Equal(last, []string{"test-set-1/set1-case"}) {
+				t.Fatalf("KEPLOY-LAST-TESTCASE sent on %v, want [test-set-1/set1-case]", last)
+			}
+			for _, set := range []string{"test-set-0", "test-set-1", "test-set-2"} {
+				if got := db.gets(set); got != 1 {
+					t.Fatalf("GetTestCases(%s) called %d time(s), want 1", set, got)
+				}
+			}
+		})
+
+		t.Run("trailing unreadable set logs once/"+mode, func(t *testing.T) {
+			provenOn(t, on)
+			h := newPartialRunHarness(t, 1, 0)
+			dbCore, dbLogs := observer.New(zap.ErrorLevel)
+			db := &apiServerLikeDB{
+				ids: []string{"test-set-0", "test-set-1"},
+				bySet: map[string][][]*models.TestCase{
+					"test-set-0": {{namedPRCase(h.cases[0], "set0-case")}},
+				},
+				errBySet: map[string]error{
+					"test-set-1": errors.New("backend read failed"),
+				},
+				logger:   zap.New(dbCore),
+				getCalls: make(map[string]int),
+			}
+			reports := &setsReportDB{prReportDB: h.report}
+			reports.statuses = map[string]string{}
+			h.replayer.reportDB = reports
+			h.replayer.testDB = db
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			h.replayer.config.DisableANSI = true
+			hooks := &recordingCaseHooks{}
+			h.replayer.hookImpl = hooks
+
+			saved := utils.ErrCode
+			t.Cleanup(func() { utils.ErrCode = saved })
+			utils.ErrCode = 0
+
+			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+			defer cancel()
+			if err := h.replayer.Start(ctx); err == nil {
+				t.Fatal("Start succeeded on failing test-set-1; want error")
+			}
+			if got := db.gets("test-set-1"); got != 1 {
+				t.Fatalf("GetTestCases(test-set-1) called %d time(s), want 1", got)
+			}
+			if n := dbLogs.FilterMessageSnippet("failed to fetch test cases from store").Len(); n != 1 {
+				t.Fatalf("fallback store logged error %d time(s), want 1 (all: %+v)", n, dbLogs.All())
+			}
+			if last, _ := hooks.seen(); len(last) != 0 {
+				t.Fatalf("KEPLOY-LAST-TESTCASE sent on %v, want none (test-set-1 counts as running)", last)
+			}
+			if h.replayer.prescanned != nil {
+				t.Fatalf("r.prescanned not cleared after failing Start: %+v", h.replayer.prescanned)
+			}
+		})
+
+		t.Run("flaky retry reads fresh on second attempt/"+mode, func(t *testing.T) {
+			provenOn(t, on)
+			h := newPartialRunHarness(t, 1, 0)
+			db := &apiServerLikeDB{
+				ids: []string{"test-set-0", "test-set-1"},
+				bySet: map[string][][]*models.TestCase{
+					"test-set-0": {{namedPRCase(h.cases[0], "set0-case")}},
+					"test-set-1": {
+						{namedPRCase(h.cases[0], "set1-v1")},
+						{namedPRCase(h.cases[0], "set1-v2")},
+					},
+				},
+				getCalls: make(map[string]int),
+			}
+			reports := &setsReportDB{prReportDB: h.report}
+			h.replayer.reportDB = reports
+			h.replayer.testDB = db
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.MaxFlakyChecks = 2
+			h.replayer.config.DisableANSI = true
+			hooks := &recordingCaseHooks{failCase: "set1-v1"}
+			h.replayer.hookImpl = hooks
+
+			_, statuses := startEarlierSetRun(t, h, reports)
+			if statuses["test-set-1"] != string(models.TestSetStatusPassed) {
+				t.Fatalf("test-set-1 status = %q, want PASSED on attempt 2 (fresh read)", statuses["test-set-1"])
+			}
+			// Attempt 1 reuses pre-scanned set1-v1 (1st call); attempt 2 reads fresh set1-v2 (2nd call).
+			if got := db.gets("test-set-1"); got != 2 {
+				t.Fatalf("GetTestCases(test-set-1) called %d time(s) across 2 attempts, want 2 (1 reused + 1 fresh)", got)
+			}
+			wantRan := []string{"test-set-0/set0-case", "test-set-0/set0-case", "test-set-1/set1-v1", "test-set-1/set1-v2"}
+			if got := hooks.ranCases(); !slices.Equal(got, wantRan) {
+				t.Fatalf("ran cases = %v, want %v (attempt 1 set1-v1 then attempt 2 fresh set1-v2)", got, wantRan)
 			}
 		})
 	}

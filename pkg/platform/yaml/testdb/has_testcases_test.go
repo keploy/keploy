@@ -460,3 +460,42 @@ func TestHasTestCases_SymlinksAndCanceledContext(t *testing.T) {
 		}
 	})
 }
+
+// PresenceAppliesTo must return true only for the *TestYaml receiver itself,
+// never for a distinct instance, nil, or any 1-level / 2-level wrapper that
+// embeds *TestYaml (including non-comparable value structs with map fields).
+func TestPresenceAppliesTo_RejectsEmbeddedWrappers(t *testing.T) {
+	type innerWrap struct {
+		*TestYaml
+	}
+	type outerValueWrap struct {
+		*innerWrap
+		filter map[string]bool // non-comparable; db == ts must still return false without panicking
+	}
+
+	root := t.TempDir()
+	db := New(zap.NewNop(), root)
+	other := New(zap.NewNop(), root)
+	inner := &innerWrap{TestYaml: db}
+	outerVal := outerValueWrap{innerWrap: inner, filter: map[string]bool{"test-set-1": true}}
+	outerPtr := &outerVal
+
+	if !db.PresenceAppliesTo(db) {
+		t.Fatal("db.PresenceAppliesTo(db) = false, want true")
+	}
+	if db.PresenceAppliesTo(other) {
+		t.Fatal("db.PresenceAppliesTo(other) = true, want false")
+	}
+	if db.PresenceAppliesTo(nil) {
+		t.Fatal("db.PresenceAppliesTo(nil) = true, want false")
+	}
+	if inner.PresenceAppliesTo(inner) {
+		t.Fatal("1-level pointer wrapper inherited PresenceAppliesTo = true, want false")
+	}
+	if outerVal.PresenceAppliesTo(outerVal) {
+		t.Fatal("2-level value wrapper inherited PresenceAppliesTo = true, want false")
+	}
+	if outerPtr.PresenceAppliesTo(outerPtr) {
+		t.Fatal("2-level pointer wrapper inherited PresenceAppliesTo = true, want false")
+	}
+}

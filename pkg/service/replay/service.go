@@ -119,16 +119,19 @@ type TestDB interface {
 // lastSetThatRuns pre-scans trailing sets before the first set starts so
 // KEPLOY-LAST-TESTCASE and kept-app stops land on the last set that runs.
 // Calling GetTestCases there decoded the last set twice and logged an
-// unreadable test case at ERROR twice. When a TestDB implements this
-// capability, lastSetThatRuns asks HasTestCases instead and falls back to
-// GetTestCases only for stores that do not.
-//
-// A wrapper that embeds a TestCasePresenceReader (such as *testdb.TestYaml)
-// and filters out test cases in GetTestCases inherits HasTestCases by
-// promotion and should override it if post-filter emptiness matters to
-// lastSetThatRuns.
+// unreadable test case at ERROR twice. When a TestDB opts in for itself
+// (PresenceAppliesTo(r.testDB) == true), lastSetThatRuns asks HasTestCases
+// instead. Any other store — including a wrapper that embeds *testdb.TestYaml
+// and overrides GetTestCases — falls back to GetTestCases and reuses the
+// settled set's decoded cases once in RunTestSet.
 type TestCasePresenceReader interface {
 	HasTestCases(ctx context.Context, testSetID string) (bool, error)
+	// PresenceAppliesTo reports whether HasTestCases matches the GetTestCases
+	// behavior of db itself (typically `return db == self`). Because Go
+	// promotes embedded methods onto outer wrapper structs, checking receiver
+	// identity prevents a filtering wrapper around *testdb.TestYaml from
+	// silently inheriting HasTestCases.
+	PresenceAppliesTo(db any) bool
 }
 
 // RecordedStartReader is an optional TestDB capability: the request time of the

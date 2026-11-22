@@ -82,6 +82,60 @@ func wholeSetIgnored(ignored map[string][]string, id string) bool {
 	return ok && len(tests) == 0
 }
 
+// prescannedSet holds the single GetTestCases result that lastSetThatRuns
+// already loaded on the fallback path (stores that do not opt into
+// TestCasePresenceReader). Bounded to one test set and consumed once on that
+// set's first RunTestSet attempt so neither cases nor read errors are fetched
+// or logged twice.
+type prescannedSet struct {
+	id    string
+	cases []*models.TestCase
+	err   error
+}
+
+// presenceReaderOf returns db as a TestCasePresenceReader only when db
+// explicitly opts in for its own concrete value (PresenceAppliesTo). A
+// wrapper that embeds *testdb.TestYaml and overrides GetTestCases inherits
+// both methods by promotion, fails PresenceAppliesTo(db) because the promoted
+// receiver is the inner *TestYaml rather than db, and safely falls back to
+// GetTestCases.
+func presenceReaderOf(db TestDB) TestCasePresenceReader {
+	reader, ok := db.(TestCasePresenceReader)
+	if !ok || !reader.PresenceAppliesTo(db) {
+		return nil
+	}
+	return reader
+}
+
+func (r *Replayer) clearPrescanned() {
+	r.prescanned = nil
+	r.prescannedEmpty = nil
+}
+
+// loadTestCases returns testSetID's test cases for RunTestSet, consuming a
+// pre-scanned fallback result from lastSetThatRuns once (on the set's first
+// attempt) so fallback stores neither decode/fetch nor log a read error twice.
+// Subsequent attempts (flaky retries, --must-pass after deleting failed cases)
+// always read fresh from r.testDB.
+func (r *Replayer) loadTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
+	if r.prescanned != nil && r.prescanned.id == testSetID {
+		cached := r.prescanned
+		r.prescanned = nil
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return cached.cases, cached.err
+	}
+	if _, ok := r.prescannedEmpty[testSetID]; ok {
+		delete(r.prescannedEmpty, testSetID)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	return r.testDB.GetTestCases(ctx, testSetID)
+}
+
 // lastSetThatRuns is the index in testSets of the last set that begins its
 // session on the agent (noLaterSetRuns), -1 for none: the last test case it
 // sends (lastSentOf) carries KEPLOY-LAST-TESTCASE, and its final attempt
@@ -101,30 +155,34 @@ func wholeSetIgnored(ignored map[string][]string, id string) bool {
 // request carries the header and the kept application stops only in the
 // run's teardown, on a run that has already failed.
 func (r *Replayer) lastSetThatRuns(ctx context.Context, testSets []string) int {
+	r.clearPrescanned()
+	reader := presenceReaderOf(r.testDB)
 	for i := len(testSets) - 1; i >= 0; i-- {
-		if wholeSetIgnored(r.config.Test.IgnoredTests, testSets[i]) {
+		setID := testSets[i]
+		if wholeSetIgnored(r.config.Test.IgnoredTests, setID) {
 			continue
 		}
-		if !r.setHasTestCases(ctx, testSets[i]) {
+		if reader != nil {
+			has, err := reader.HasTestCases(ctx, setID)
+			if err == nil && !has {
+				continue
+			}
+			return i
+		}
+		cases, err := r.testDB.GetTestCases(ctx, setID)
+		if err == nil && len(cases) == 0 {
+			if r.prescannedEmpty == nil {
+				r.prescannedEmpty = make(map[string]struct{})
+			}
+			r.prescannedEmpty[setID] = struct{}{}
 			continue
 		}
+		// Keep at most the one settled set so RunTestSet reuses it once
+		// without fetching/decoding or logging an error a second time.
+		r.prescanned = &prescannedSet{id: setID, cases: cases, err: err}
 		return i
 	}
 	return -1
-}
-
-// setHasTestCases reports whether testSetID has at least one test case to run,
-// or cannot be read (RunTestSet fails on an unreadable set, so it counts as
-// one that runs). When r.testDB implements TestCasePresenceReader, it asks
-// HasTestCases so the pre-scan neither decodes the set twice nor logs an
-// unreadable case's error before RunTestSet does.
-func (r *Replayer) setHasTestCases(ctx context.Context, testSetID string) bool {
-	if checker, ok := r.testDB.(TestCasePresenceReader); ok {
-		has, err := checker.HasTestCases(ctx, testSetID)
-		return err != nil || has
-	}
-	cases, err := r.testDB.GetTestCases(ctx, testSetID)
-	return err != nil || len(cases) > 0
 }
 
 // lastSentOf is the test case of tests, in the order a pass of the set runs

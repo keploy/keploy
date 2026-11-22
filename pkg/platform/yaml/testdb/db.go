@@ -449,6 +449,14 @@ func (ts *TestYaml) listTestCaseFiles(testSetID string, logger *zap.Logger) (dir
 	return TestPath, refs, true, nil
 }
 
+// PresenceAppliesTo reports whether HasTestCases matches the GetTestCases
+// behavior of db itself. Returning db == ts ensures a wrapper that embeds
+// *TestYaml and overrides GetTestCases (for example, to filter cases out)
+// does not silently inherit the on-disk presence shortcut by method promotion.
+func (ts *TestYaml) PresenceAppliesTo(db any) bool {
+	return db == ts
+}
+
 // HasTestCases reports whether testSetID has at least one non-empty test case
 // file that GetTestCases would attempt to load (that is, whether GetTestCases
 // would not return an empty slice with a nil error). It applies the same
