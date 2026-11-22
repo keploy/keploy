@@ -136,6 +136,7 @@ func decodeMappingYAML(data []byte, m *models.Mapping) bool {
 	if err := yamlLib.Unmarshal(rest, &out); err != nil {
 		return false
 	}
+	out.TestCases = make([]models.MappedTestCase, 0, len(l.entries))
 	// Each chunk is parsed under the tests key, its lines as they are in the
 	// file: YAML reads them in the context it reads them in whole (a block
 	// of text's indent is counted from its parents'), so a value reads the

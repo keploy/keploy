@@ -63,38 +63,82 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		fileName = "mappings"
 	}
 
-	finalMappings := make(map[string][]models.MockEntry)
+	newMapping, effFormat, old, oldDoc, plainHead, plainSize, err := db.prepareInsert(ctx, mapping, mappingPath, fileName)
+	if err != nil {
+		return err
+	}
+
+	var encodedData []byte
+	if effFormat != yaml.FormatJSON && oldDoc == plainDoc {
+		encodedData, err = encodePlainYAML(newMapping, plainHead, plainSize)
+	} else {
+		encodedData, err = db.encodeOver(newMapping, effFormat, old, oldDoc, headerAlways, testSetID)
+	}
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
+		return err
+	}
+	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
+	err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to write mapping file", zap.String("path", mappingPath))
+		return err
+	}
+
+	db.logger.Info("Successfully merged and saved test-mock mappings",
+		zap.String("testSetID", testSetID),
+		zap.Int("totalTests", len(newMapping.TestCases)))
+
+	return nil
+}
+
+// prepareInsert reads any existing mapping file for mapping.TestSetID and
+// merges mapping into it, returning the rebuilt mapping and only the parts of
+// the existing file encoding still needs (for a plain YAML file, just its
+// comment head and length hint so the existing bytes and decode temporaries
+// are free before the new file's buffer is allocated).
+func (db *MappingDb) prepareInsert(ctx context.Context, mapping *models.Mapping, mappingPath, fileName string) (
+	newMapping *models.Mapping, effFormat yaml.Format, old []byte, oldDoc *yamlLib.Node, plainHead []byte, plainSize int, err error,
+) {
+	testSetID := mapping.TestSetID
 	var existingStartup, existingWorker, existingShared []models.MockEntry
 	var existingGroups []models.ConcurrencyGroup
 	var existingSource string
 	var existingRecordedWith []string
 	var existingConfig models.Mapping
-	var old []byte
-	var oldDoc *yamlLib.Node
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
 	exists, detected, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to check if mapping file exists", zap.String("path", mappingPath))
-		return err
+		return nil, "", nil, nil, nil, 0, err
 	}
 
-	effFormat := db.Format
+	effFormat = db.Format
+	var finalMappings map[string][]models.MockEntry
 	if exists {
 		effFormat = detected
 		data, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", mappingPath))
-			return err
+			return nil, "", nil, nil, nil, 0, err
 		}
-		old = data
 
 		if oldDoc, err = decodeInto(effFormat, data, &existingConfig); err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", mappingPath))
-			return err
+			return nil, "", nil, nil, nil, 0, err
+		}
+		if effFormat != yaml.FormatJSON && oldDoc == plainDoc {
+			// A plain file holds no hand edits to keep, only its comment head
+			// and length hint; drop its bytes before rebuilding and encoding.
+			plainHead = commentHead(data)
+			plainSize = len(data)
+		} else {
+			old = data
 		}
 
+		finalMappings = make(map[string][]models.MockEntry, len(existingConfig.TestCases)+len(mapping.TestCases))
 		for _, t := range existingConfig.TestCases {
 			finalMappings[t.ID] = t.Mocks
 		}
@@ -103,13 +147,15 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		existingGroups, existingShared = existingConfig.Groups, existingConfig.Shared
 		existingSource = existingConfig.Source
 		existingRecordedWith = existingConfig.RecordedWith
+	} else {
+		finalMappings = make(map[string][]models.MockEntry, len(mapping.TestCases))
 	}
 
 	for _, t := range mapping.TestCases {
 		finalMappings[t.ID] = t.Mocks
 	}
 
-	newMapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
+	newMapping = CreateMappingStructure(testSetID, finalMappings, db.logger)
 
 	// Carry the startup section across the flatten-and-rebuild above.
 	//
@@ -196,24 +242,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	} else {
 		newMapping.Runner = mapping.Runner
 	}
-
-	encodedData, err := db.encodeOver(newMapping, effFormat, old, oldDoc, headerAlways, testSetID)
-	if err != nil {
-		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
-		return err
-	}
-	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
-	err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
-	if err != nil {
-		utils.LogError(db.logger, err, "failed to write mapping file", zap.String("path", mappingPath))
-		return err
-	}
-
-	db.logger.Info("Successfully merged and saved test-mock mappings",
-		zap.String("testSetID", testSetID),
-		zap.Int("totalTests", len(finalMappings)))
-
-	return nil
+	return newMapping, effFormat, old, oldDoc, plainHead, plainSize, nil
 }
 
 // keepEntries gives each test entry Insert rebuilt from the tests' mocks

@@ -210,6 +210,16 @@ func EncodeOver(mapping *models.Mapping, old []byte, renames map[string]string) 
 	return encodeYAMLOver(mapping, old, nil, renames, headerAlways)
 }
 
+// encodePlainYAML is encodeYAMLOver(headerAlways) for an existing YAML file
+// decodeInto found plain (plainDoc): the caller kept only its head and length
+// so the old file's bytes are free before the new file's buffer is allocated.
+func encodePlainYAML(mapping *models.Mapping, head []byte, oldSize int) ([]byte, error) {
+	if len(head) == 0 {
+		head = []byte(utils.GetVersionAsComment())
+	}
+	return marshalMappingYAMLAfter(head, mapping, oldSize)
+}
+
 // encodeYAMLOver is EncodeOver with keploy's line where h puts it when old
 // starts with no comment, and doc, the document old parses to when the
 // caller parsed it (nil: keepEdits parses old).
