@@ -23,6 +23,7 @@ package mismatch
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -844,12 +845,12 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 		// Pulsar's matcher reads its message payload's noise from the
 		// bucket keploy test excuses HTTP response-body fields by: say so,
 		// as a field added there is no longer asserted in a response.
-		add = append(add, fmt.Sprintf("the message payload fields under test.globalNoise.global.body with root-relative keys (e.g. body: {%s: []}), the bucket that also stops keploy test asserting those fields in HTTP response bodies", strings.Join(body.add, ": [], ")))
+		add = append(add, fmt.Sprintf("the message payload fields under test.globalNoise.global.body with root-relative keys (e.g. body: {%s}), the bucket that also stops keploy test asserting those fields in HTTP response bodies", noiseEntries(body.add)))
 	default:
-		add = append(add, fmt.Sprintf("the request-body fields under test.globalNoise.global.%[1]s with root-relative keys (e.g. %[1]s: {%[2]s: []})", bodyKey, strings.Join(body.add, ": [], ")))
+		add = append(add, fmt.Sprintf("the request-body fields under test.globalNoise.global.%[1]s with root-relative keys (e.g. %[1]s: {%[2]s})", bodyKey, noiseEntries(body.add)))
 	}
 	if len(header.add) > 0 {
-		add = append(add, fmt.Sprintf("the headers under test.globalNoise.global.header (e.g. header: {%s: []})", strings.Join(header.add, ": [], ")))
+		add = append(add, fmt.Sprintf("the headers under test.globalNoise.global.header (e.g. header: {%s})", noiseEntries(header.add)))
 	}
 	if len(add) > 0 {
 		remedy = append(remedy, "add "+strings.Join(add, " and "))
@@ -953,6 +954,26 @@ func unreadFields(protocol string, diffs []models.MockFieldDiff) []string {
 	}
 	return out
 }
+
+// noiseEntries is keys as the entries of a YAML flow mapping, each with an
+// empty list ("ts: [], meta.ts: []"), as keploy.yml's test.globalNoise reads
+// them: a key of letters, digits, '_', '.', '-' and '/' alone, which YAML
+// reads as it is when written plain, is written plain, and any other
+// ("ids[]", "@type", one with a space or a colon) double-quoted, so the
+// entry the hint names loads with the key the miss named.
+func noiseEntries(keys []string) string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		if !plainNoiseKey.MatchString(k) {
+			k = strconv.Quote(k)
+		}
+		out[i] = k + ": []"
+	}
+	return strings.Join(out, ", ")
+}
+
+// plainNoiseKey matches a key noiseEntries writes plain.
+var plainNoiseKey = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 
 // authorizationHeader reports whether a header's report name (its path less
 // "header.") is the Authorization header, or a part of a SigV4 one
