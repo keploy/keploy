@@ -1,6 +1,13 @@
 #!/bin/bash
 
 # Standard Keploy test script pattern
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Function to cleanup any remaining keploy processes
@@ -33,7 +40,7 @@ rm -rf keploy/ reports/
 
 # Record Test Cases
 echo "Starting Recording with $RECORD_BIN..."
-sudo -E env "PATH=$PATH" $RECORD_BIN record -c "python3 app.py" &
+sudo env "PATH=$PATH" "${SUDO_ENV[@]}" $RECORD_BIN record -c "python3 app.py" &
 KEPLOY_PID=$!
 
 # Wait for app to be ready
@@ -59,7 +66,7 @@ ls -R keploy/
 # Run Schema Match Test
 echo "Starting Schema Verification Test with $REPLAY_BIN..."
 set +e
-OUTPUT=$(sudo -E env "PATH=$PATH" $REPLAY_BIN test -c "python3 app-test.py" --schema-match --delay 10 2>&1)
+OUTPUT=$(sudo env "PATH=$PATH" "${SUDO_ENV[@]}" $REPLAY_BIN test -c "python3 app-test.py" --schema-match --delay 10 2>&1)
 EXIT_CODE=$?
 set -e
 
@@ -97,7 +104,7 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 if json_pass_supported; then
     echo "Running json-format schema-match pass (scratch path)..."
     rm -rf keploy_json/
-    sudo -E env "PATH=$PATH" $RECORD_BIN record --storage-format json --path ./keploy_json -c "python3 app.py" &
+    sudo env "PATH=$PATH" "${SUDO_ENV[@]}" $RECORD_BIN record --storage-format json --path ./keploy_json -c "python3 app.py" &
     KEPLOY_PID=$!
     sleep 10
     until curl -fsS http://127.0.0.1:5000/user/profile >/dev/null; do
@@ -110,7 +117,7 @@ if json_pass_supported; then
     sleep 5
 
     set +e
-    OUTPUT_JSON=$(sudo -E env "PATH=$PATH" $REPLAY_BIN test --storage-format json --path ./keploy_json -c "python3 app-test.py" --schema-match --delay 10 2>&1)
+    OUTPUT_JSON=$(sudo env "PATH=$PATH" "${SUDO_ENV[@]}" $REPLAY_BIN test --storage-format json --path ./keploy_json -c "python3 app-test.py" --schema-match --delay 10 2>&1)
     set -e
     PASS_COUNT_JSON=$(echo "$OUTPUT_JSON" | grep -c "Testrun passed" || true)
     FAIL_COUNT_JSON=$(echo "$OUTPUT_JSON" | grep -c "Testrun failed" || true)

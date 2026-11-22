@@ -9,13 +9,18 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -51,6 +56,38 @@ type HTTP struct {
 	// ptRecorder de-duplicates recordOne telemetry-passthrough captures to one
 	// representative exchange per endpoint (see passthrough_egress.go).
 	ptRecorder *ptRecorder
+	// ptLoadWarned holds the names of the recorded pass-through mocks whose
+	// response could not be loaded, each warned about once for the agent's
+	// life. Mock names repeat across test sets (mock-0, mock-1, ...), so a
+	// later set's mock of a name already warned about is not warned again.
+	ptLoadWarned sync.Map
+	// placeWarned holds the recordings (placeWarning) whose unreadable
+	// variable place the learn step warned of.
+	placeWarned sync.Map
+	// learnIx is the learn step's index of the last staging generation, or
+	// shared part of an open test's reads, a learned call read (learnIndex).
+	learnIx learnIndexes
+	// strictIx is the strict pass's index of the last staging generation, or
+	// shared part of an open test's reads, a strict call read (strictIndex).
+	strictIx strictIndexes
+	// verify is the exact view's verify mode of this handler's own reads
+	// (verifying): nil follows the process's (integrations.ExactViewVerify),
+	// what every handler the proxy makes does; a row gives a handler its
+	// own, so handlers in different modes run at once.
+	verify *atomic.Bool
+	// answerFaultHook is the fault hook replay asks before it serves a
+	// mock's answer (SetAnswerFault, answerFault); nil when none is set.
+	answerFaultHook atomic.Pointer[AnswerFault]
+}
+
+// verifying is whether h's reads run in the exact view's verify mode: each
+// kept read (an index, a sieve's pass) is computed again the way it was
+// before it was kept, and a difference panics.
+func (h *HTTP) verifying() bool {
+	if h.verify != nil {
+		return h.verify.Load()
+	}
+	return integrations.ExactViewVerify.Load()
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
@@ -60,11 +97,52 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
+// MockNoise returns HTTP's field-level request-body mock-noise adapter, wiring
+// the parser into the shared mocknoise engine (auto-replay learns
+// req_body_noise). Satisfies integrations.Integrations.
+func (h *HTTP) MockNoise() mocknoise.Adapter { return httpNoiseAdapter{} }
+
 type FinalHTTP struct {
 	Req              []byte
 	Resp             []byte
 	ReqTimestampMock time.Time
 	ResTimestampMock time.Time
+	// ReqClock is the clock ReqTimestampMock is on: the request's first
+	// chunk's (fakeconn.Chunk.ReadClock), as the producer that took the
+	// stamp named it; fakeconn.ClockUnset for a stamp it did not take, which
+	// names none. Under the proven switch buildHTTPMock writes its id on the
+	// mock (models.Origin.Clock).
+	ReqClock fakeconn.Clock
+	// RespReadInPart: Resp may be only the part of the response its client
+	// read. An observe-only capture (a DaemonSet's, OutgoingOptions.SkipTLSMITM)
+	// carries the bytes the client read and nothing else, so a client that
+	// closes the connection before the end of the response (it wanted the
+	// status line, or the headers, or the start of the body) leaves the
+	// response cut short where it stopped. buildHTTPMock then records the
+	// response as the client had it (responseAsRead). Set only when the
+	// response's stream ended with its connection
+	// (supervisor.Session.EndedWithConnection): a stream that ended at a
+	// capture hole, or because the recording stopped, lost the rest of the
+	// response rather than leaving it unread. What the capture cannot tell
+	// apart is a server that closed the connection partway through its
+	// response: the client read all there was, and it is recorded as that.
+	RespReadInPart bool
+	// RespWrites is where in Resp each write the relay made of the response
+	// to the client ended, and when, in order (readResponseWrites): what the
+	// answer's marks are worked out from (answerMarks). Nil where nothing
+	// noted them.
+	RespWrites []respWrite
+	// Fault is how the call ended, when the upstream did not give its whole
+	// answer (recordV2's noAnswerFault and partAnswerFault): with no answer,
+	// the mock is built with no response and this fault. With part of one
+	// (Fault.SendsHead), the mock carries the fault only when the response
+	// is in fact unfinished: its body cut short of its framing, or a
+	// close-delimited body the upstream reset or the client gave up on.
+	Fault *models.Fault
+	// recordOne is the recordOne mark buildHTTPMock took for the mock it
+	// built (ptRecorder.take), or nil: given back if the recording loses the
+	// mock as it is handed over (emitV2).
+	recordOne *ptMark
 }
 
 // MatchType determines if the outgoing network call is HTTP by checking for
@@ -185,6 +263,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
 	if err != nil {
+		err = utils.WithholdInput(err)
 		utils.LogError(h.Logger, err, "failed to parse the http request message")
 		return err
 	}
@@ -207,47 +286,58 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 			return err
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {
 			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody, pkg.MaxDecompressedSize)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return err
 			}
 		}
 	}
 
-	// converts the response message buffer to http response
-	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(mock.Resp)), req)
+	// converts the response message buffer to http response: the final one,
+	// never an interim 1xx (parseFinalResponse, as the V2 recorder parses it)
+	respParsed, _, err := parseFinalResponse(mock, req)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
+		// The parser's error quotes the status line it refused: on a
+		// connection read mid-stream, a body's line.
+		err = utils.WithholdInput(err)
+		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		return err
 	}
 
 	//Add the content length to the headers.
 	var respBody []byte
+	// wire is the body as the server sent it, encoded (respBody once decoded).
+	var wire []byte
 	//Checking if the body of the response is empty or does not exist.
 	if respParsed.Body != nil { // Read
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
+			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 			return err
 		}
+		wire = respBody
 
 		if respParsed.Header.Get("Content-Encoding") != "" {
 			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody, pkg.MaxDecompressedSize)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
+				utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return err
 			}
 		}
 
-		h.Logger.Debug("This is the response body: " + string(respBody))
-		//Set the content length to the headers.
-		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		h.Logger.Debug("read the response body", zap.Int("bytes", len(respBody)))
+		//Set the content length to the headers, except on a response with no
+		//body by rule (to a HEAD, a 1xx, 204 or 304), which keeps its own (as
+		//buildHTTPMock does).
+		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
+			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		}
 	}
 
 	// store the request and responses as mocks
@@ -257,10 +347,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		"operation": req.Method,
 		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
-
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
-		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
+		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		return nil
 	}
 
@@ -277,9 +366,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		if ptHost == "" && req.URL != nil {
 			ptHost = req.URL.Host
 		}
-		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
+		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
 			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return nil
 			}
 			// recordOne: defer the dedup decision to emit time (below). Marking here
@@ -291,10 +380,30 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
 	}
+	// A CORS preflight the server allowed, under the proven switch, is a
+	// phase of the call it guards (corsPreflightPhase): protocol-phase, served
+	// to any test as often as asked, owned by none.
+	preflight := corsPreflightPhase(req, respParsed.StatusCode)
+	if preflight {
+		meta["type"] = "config"
+	}
 
+	// The digest headers the body matched as the server sent it, which a
+	// replay recomputes over the body it sends (models.MetadataBodyDigestsKey),
+	// once the exchange is known to be recorded: passthrough traffic is not.
+	if note := bodydigest.Note(pkg.ToYamlHTTPHeader(respParsed.Header), respBody, wire); note != "" {
+		meta[models.MetadataBodyDigestsKey] = note
+	}
+
+	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
+	// type tag older replayers read: an exchange is the data of the test it
+	// was made in, a recordOne representative and an allowed CORS preflight
+	// (corsPreflightPhase) are served to every test.
 	ptLifetime := models.LifetimePerTest
-	if ptRecordOne {
+	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+	if ptRecordOne || preflight {
 		ptLifetime = models.LifetimeSession
+		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}
 	newMock := &models.Mock{
 		Version: models.GetVersion(),
@@ -315,6 +424,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 				StatusCode: respParsed.StatusCode,
 				Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 				Body:       string(respBody),
+
+				// Replay serves this response: keep what it takes to serve a
+				// repeated header (Set-Cookie) on its own lines.
+				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 			},
 			Created: time.Now().Unix(),
 
@@ -328,7 +441,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		// window-filtered). Stamp the lifetime authoritatively here and mark
 		// LifetimeDerived so DeriveLifetime is a no-op at ingest (its config-tag
 		// branch is short-circuited by LifetimeDerived, so the in-process value
-		// must already be correct — hence keying it off ptRecordOne, not the tag).
+		// must already be correct — hence keying it off ptRecordOne and preflight,
+		// not the tag). An allowed CORS preflight under the proven switch is
+		// session-lifetime too (corsPreflightPhase).
 		TestModeInfo: models.TestModeInfo{
 			Lifetime:        ptLifetime,
 			LifetimeDerived: true,
@@ -337,11 +452,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 	// recordOne dedup, committed only now that a mock is actually being emitted:
 	// keep the first 2xx per (scope,method,host,port,path,queryKeys), drop the rest.
-	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
-		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
-		return nil
+	var recordOne *ptMark
+	if ptRecordOne && h.ptRecorder != nil {
+		if recordOne = h.ptRecorder.take(ptKey, respParsed.StatusCode); recordOne == nil {
+			h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+			return nil
+		}
 	}
 
+	// Recorded, not passed through: under the proven switch the connection's
+	// local destination is listed mocked (integrations.CallServed).
+	integrations.CallServed(ctx)
 	if onMockRecorded != nil {
 		onMockRecorded(newMock)
 	}
@@ -356,7 +477,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		// Route HTTP mocks through the sync manager. The manager uses its
 		// internal first-request state to decide whether to buffer or forward
 		// mocks for correct time-window based association.
-		mgr.AddMock(newMock)
+		// A representative the manager drops is not one (ptMark.giveBack).
+		if mgr.AddMock(newMock).Dropped() {
+			recordOne.giveBack()
+		}
 		return nil
 	}
 

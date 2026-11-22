@@ -60,6 +60,18 @@ type NetworkTrafficDocJSON struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty"`
 	Curl         string              `json:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId,omitempty"`
+	Start        string              `json:"start,omitempty"`
+
+	Variables models.MockVariables `json:"variables,omitempty"`
+
+	// Clocks is NetworkTrafficDoc.Clocks.
+	Clocks map[string]models.ClockOffset `json:"clocks,omitempty"`
+
+	// Real is NetworkTrafficDoc.Real.
+	Real []string `json:"real,omitempty"`
+
+	// Origin is NetworkTrafficDoc.Origin.
+	Origin *models.Origin `json:"origin,omitempty"`
 }
 
 // DocToJSON converts a NetworkTrafficDoc to its JSON-friendly representation
@@ -85,6 +97,11 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		LastUpdated:  doc.LastUpdated,
 		Curl:         doc.Curl,
 		ConnectionID: doc.ConnectionID,
+		Start:        doc.Start,
+		Variables:    doc.Variables,
+		Clocks:       doc.Clocks,
+		Real:         doc.Real,
+		Origin:       doc.Origin,
 	}, nil
 }
 
@@ -150,6 +167,11 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		LastUpdated:  jsonDoc.LastUpdated,
 		Curl:         jsonDoc.Curl,
 		ConnectionID: jsonDoc.ConnectionID,
+		Start:        jsonDoc.Start,
+		Variables:    jsonDoc.Variables,
+		Clocks:       jsonDoc.Clocks,
+		Real:         jsonDoc.Real,
+		Origin:       jsonDoc.Origin,
 	}
 
 	// Convert json.RawMessage to a generic interface, then encode into yaml.Node

@@ -1,0 +1,14 @@
+#1 [internal] load local bake definitions
+#1 reading from stdin 760B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 788B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/golang:1.20-bookworm
+#3 ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://auth.docker.io/token?scope=repository%3Alibrary%2Fgolang%3Apull&service=registry.docker.io: 429 Too Many Requests
+------
+ > [internal] load metadata for docker.io/library/golang:1.20-bookworm:
+------
+failed to solve: golang:1.20-bookworm: failed to resolve source metadata for docker.io/library/golang:1.20-bookworm: failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://auth.docker.io/token?scope=repository%3Alibrary%2Fgolang%3Apull&service=registry.docker.io: 429 Too Many Requests

@@ -4,7 +4,9 @@ package reportdb
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,10 +21,23 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+// reportBytes bounds the size of a test-set report keploy reads back: a
+// regular file past it is refused ("larger than the 512 MiB keploy reads"), as
+// a report that is not a regular file is whatever its size. keploy's writer
+// does not keep this bound -- a report holds every test's bodies, with no cap
+// on how many tests a set has -- so a large enough run can write a report its
+// own reads refuse. The largest report keploy wrote on the development
+// machine is 19 MB.
+const reportBytes = 512 << 20
+
 type TestReport struct {
 	tests  map[string]map[string][]models.TestResult
 	m      sync.Mutex
 	Logger *zap.Logger
+	// Path is the reports folder, <keploy>/reports. Its files are read and
+	// written inside the recording, the folder Path is in (recording), not
+	// inside Path: a reports folder that a cloned repository carries as a link
+	// out of the recording is then a link out, and refused with why.
 	Path   string
 	Name   string
 	Format yaml.Format
@@ -49,7 +64,19 @@ func (fe *TestReport) ClearTestCaseResults(_ context.Context, testRunID string, 
 	fe.tests[testRunID] = make(map[string][]models.TestResult)
 }
 
+// recording is the recording the reports folder is in: the root its files are
+// read and written inside (see Path).
+func (fe *TestReport) recording() string {
+	return filepath.Dir(fe.Path)
+}
+
+// GetAllTestRunIDs lists the test runs in the reports folder, once the folder
+// is known to lie inside the recording: one that links out is refused, with
+// why, rather than listed.
 func (fe *TestReport) GetAllTestRunIDs(ctx context.Context) ([]string, error) {
+	if _, err := yaml.StatInRecording(fe.recording(), fe.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger, yaml.ModeDir)
 }
 
@@ -81,11 +108,19 @@ func (fe *TestReport) GetTestCaseResults(_ context.Context, testRunID string, te
 }
 
 func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error) {
+	return fe.readReport(ctx, testRunID, testSetID, reportBytes)
+}
+
+// readReport is GetReport, reading a report of at most limit bytes.
+func (fe *TestReport) readReport(ctx context.Context, testRunID string, testSetID string, limit int64) (*models.TestReport, error) {
 	path := filepath.Join(fe.Path, testRunID)
 	reportName := testSetID + "-report"
 	// Auto-detect the report format — `keploy report` keeps working for
-	// reports written by a differently-configured prior run.
-	data, detected, err := yaml.ReadFileAny(ctx, fe.Logger, path, reportName, fe.Format)
+	// reports written by a differently-configured prior run. The report is a
+	// file of the repository keploy runs in, so it is read as a regular file
+	// of at most limit bytes: a cloned repo could otherwise point it at
+	// /dev/zero or a FIFO.
+	data, detected, err := yaml.ReadRecordingFileAnyBounded(ctx, fe.recording(), path, reportName, fe.Format, limit)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to read the test-set report", zap.String("reportName", reportName), zap.String("session", filepath.Base(path)))
 		return nil, err
@@ -99,7 +134,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID
 		err = decoder.Decode(&doc)
 	}
 	if err != nil {
-		return &models.TestReport{}, fmt.Errorf("%s failed to decode the report file. error: %v", utils.Emoji, err.Error())
+		return &models.TestReport{}, fmt.Errorf("%s failed to decode the report file. error: %w", utils.Emoji, err)
 	}
 	return &doc, nil
 }
@@ -125,7 +160,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		data = append([]byte(utils.GetVersionAsComment()), data...)
 	}
 
-	err = yaml.WriteFileF(ctx, fe.Logger, reportPath, testReport.Name, data, false, fe.Format)
+	err = yaml.WriteRecordingFileF(ctx, fe.Logger, fe.recording(), reportPath, testReport.Name, data, false, fe.Format)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the report", zap.String("session", filepath.Base(reportPath)))
 		return err
@@ -137,6 +172,23 @@ func sanitizeReportForYAML(report models.TestReport) models.TestReport {
 	report.AppLogs = normalizeReportYAMLText(report.AppLogs)
 	report.FailureReason = normalizeReportYAMLText(report.FailureReason)
 	report.CmdUsed = normalizeReportYAMLText(report.CmdUsed)
+	// Each call's process as a file holds it (models.PersistedCalls): why
+	// keploy named none, and the kernel pid, travel to the replay and are
+	// never written, so the report is the same, whatever pid the process had.
+	report.UnclaimedCalls, _ = models.PersistedCalls(report.UnclaimedCalls)
+	report.SetAnswers, _ = models.PersistedCalls(report.SetAnswers)
+	copied := false
+	for i := range report.Tests {
+		answers, a := models.PersistedCalls(report.Tests[i].Answers)
+		misses, m := models.PersistedCalls(report.Tests[i].FailureInfo.UnmatchedCalls)
+		if !a && !m {
+			continue
+		}
+		if !copied {
+			report.Tests, copied = append([]models.TestResult(nil), report.Tests...), true
+		}
+		report.Tests[i].Answers, report.Tests[i].FailureInfo.UnmatchedCalls = answers, misses
+	}
 	return report
 }
 
@@ -174,7 +226,7 @@ func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, covera
 		return fmt.Errorf("%s failed to marshal coverage document. error: %s", utils.Emoji, err.Error())
 	}
 
-	err = yaml.WriteFileF(ctx, fe.Logger, reportPath, "coverage", data, false, fe.Format)
+	err = yaml.WriteRecordingFileF(ctx, fe.Logger, fe.recording(), reportPath, "coverage", data, false, fe.Format)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the coverage report", zap.String("session", filepath.Base(reportPath)))
 		return err

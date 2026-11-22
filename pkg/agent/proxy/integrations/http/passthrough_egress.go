@@ -2,6 +2,7 @@ package http
 
 import (
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -20,9 +22,18 @@ import (
 // rule matched or the winning rule is mode:"off" (record normally). host is the
 // destination authority (request Host header preferred, URL host next); port
 // from dstCfg; method gates the built-ins (they are POST-only).
-func passThroughEgressDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughRule, bool) {
+//
+// Under the proven switch a built-in path row needs its protocol's
+// fingerprint (models.ResolveProven, design v14 §4, U19). The user's rules
+// are read as they are: keploy mock's CLI clears them (mock.real replaces
+// them, U18), keploy record and keploy test keep theirs until they read
+// mock.real.
+func passThroughEgressDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL, header http.Header) (models.PassThroughRule, bool) {
 	if u == nil {
 		return models.PassThroughRule{}, false
+	}
+	if provenswitch.On() {
+		return models.ResolveProven(opts.PassThroughPorts, opts.PassThroughHosts, host, port, method, u.Path, header)
 	}
 	// ResolvePassThrough is the whole decision — built-ins (incl. the legacy
 	// /v1/traces and /ingest paths) are in the default set, and a user off rule
@@ -52,7 +63,15 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 	}
 	var fallback *models.Mock
 	for _, m := range candidates {
-		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || m.Spec.HTTPResp == nil {
+		// A response the agent's disk store kept apart is loaded below, once
+		// the request gates have passed.
+		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || (m.Spec.HTTPResp == nil && !m.HasSpilledResponse()) {
+			continue
+		}
+		// A call that ended in a fault is no representative answer: its head
+		// would be served whole to every call. The next candidate serves, or
+		// the default 200.
+		if m.Spec.Fault != nil {
 			continue
 		}
 		if m.Spec.HTTPReq.Method != models.Method(input.method) {
@@ -76,14 +95,27 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 		if !mockQueryMatches(m.Spec.HTTPReq, input.url, queryKeys) {
 			continue
 		}
+		loaded, err := withResponse(m)
+		if err != nil {
+			// The caller falls back to a synthetic 200 when no recorded mock
+			// serves, so say once per mock name why this one did not.
+			if _, warned := h.ptLoadWarned.LoadOrStore(m.Name, struct{}{}); !warned {
+				h.Logger.Warn("pass-through: the recorded response of this mock could not be loaded from the agent's on-disk mock store, so it is skipped; if no other recorded response serves the call, the application gets the default empty 200. Re-run the test set, and if this repeats, report it with this log",
+					zap.String("mock", m.Name), zap.Error(err))
+			}
+			continue
+		}
+		if loaded.Spec.HTTPResp == nil {
+			continue
+		}
 		// Prefer a 2xx response (a warmup error may also have been recorded
 		// before the first success under recordOne's first-2xx policy).
-		if isSuccessStatus(m.Spec.HTTPResp.StatusCode) {
-			if out, err := h.buildMockResponseBytes(m); err == nil {
+		if isSuccessStatus(loaded.Spec.HTTPResp.StatusCode) {
+			if out, err := h.buildMockResponseBytes(loaded); err == nil {
 				return out
 			}
 		} else if fallback == nil {
-			fallback = m
+			fallback = loaded
 		}
 	}
 	if fallback != nil {
@@ -118,7 +150,7 @@ func ptRecordKey(scope, method, host string, port uint32, reqPath string, queryK
 // resolved port, doesn't over-filter). Host compare is case-insensitive and
 // port-stripped on both sides.
 func mockHostPortMatches(mockReq *models.HTTPReq, host string, port uint32) bool {
-	u, err := url.Parse(mockReq.URL)
+	u, err := parseRecordedURL(mockReq.URL)
 	if err != nil {
 		return true // unparseable recorded URL → don't over-filter
 	}
@@ -161,7 +193,7 @@ func mockQueryGet(mockReq *models.HTTPReq, name string) string {
 	if v, ok := mockReq.URLParams[name]; ok {
 		return v
 	}
-	if u, err := url.Parse(mockReq.URL); err == nil {
+	if u, err := parseRecordedURL(mockReq.URL); err == nil {
 		return u.Query().Get(name)
 	}
 	return ""
@@ -206,8 +238,44 @@ type ptSeenState struct {
 }
 
 // shouldRecord reports whether a recordOne capture for key with the given
-// response status should be persisted (and marks state accordingly).
+// response status should be persisted (and marks state accordingly: take).
 func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
+	return p.take(key, statusCode) != nil
+}
+
+// ptMark is what one take that said yes set of its key's state, so giveBack
+// can unset it.
+type ptMark struct {
+	p      *ptRecorder
+	st     *ptSeenState
+	set2xx bool
+	setAny bool
+}
+
+// giveBack unsets what its take set, as it was before: a representative the
+// recording lost as it was handed over (its session's manager dropped it) is
+// not one, and the endpoint's next call is recorded in its place, where the
+// mark would skip it as a duplicate of a mock no recording holds. What a take
+// after it set stays: a 2xx kept after a lost warmup error stands. A key
+// evicted since left its state behind, so unsetting it changes nothing the
+// recorder reads. Nil-safe.
+func (k *ptMark) giveBack() {
+	if k == nil {
+		return
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	if k.set2xx {
+		k.st.recorded2xx = false
+	}
+	if k.setAny {
+		k.st.recordedAny = false
+	}
+}
+
+// take is shouldRecord, returning the mark it set (giveBack), or nil for a
+// capture not to persist.
+func (p *ptRecorder) take(key string, statusCode int) *ptMark {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.seen == nil {
@@ -236,24 +304,28 @@ func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
 		p.seen[key] = st
 	}
 	if st.recorded2xx {
-		return false
+		return nil
 	}
+	mark := &ptMark{p: p, st: st}
 	if isSuccessStatus(statusCode) {
+		mark.set2xx = true
+		mark.setAny = !st.recordedAny
 		st.recorded2xx = true
 		st.recordedAny = true
-		return true
+		return mark
 	}
 	if !st.recordedAny {
+		mark.setAny = true
 		st.recordedAny = true
-		return true
+		return mark
 	}
-	return false
+	return nil
 }
 
 // passThroughRecordDecision is the record-side counterpart of
 // passThroughEgressDecision: it decides whether an outgoing request being
 // recorded targets a telemetry/noisy endpoint and, if so, its mode. host is the
 // request Host (falling back to URL host); port is the resolved destination port.
-func passThroughRecordDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughRule, bool) {
-	return passThroughEgressDecision(opts, host, port, method, u)
+func passThroughRecordDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL, header http.Header) (models.PassThroughRule, bool) {
+	return passThroughEgressDecision(opts, host, port, method, u, header)
 }

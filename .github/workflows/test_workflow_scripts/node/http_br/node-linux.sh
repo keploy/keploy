@@ -19,12 +19,17 @@ echo "Replay Bin: $REPLAY_BIN"
 echo "Replay Version:"
 sudo $REPLAY_BIN --version
 
-# Generate the keploy-config file.
-sudo $RECORD_BIN config --generate
-
-# Update the global noise to ts.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"header": {"Etag":""}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"header": {"Etag":[]}}
+KEPLOY_CFG
 
 send_request(){
     node server.js &
@@ -170,7 +175,6 @@ do
         break # Exit the loop early as all tests need to pass
     fi
 done
-
 
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then

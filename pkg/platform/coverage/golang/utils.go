@@ -28,14 +28,17 @@ func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 		logger.Debug("cover flag not found in command, skipping coverage calculation")
 		return false
 	}
-	file, err := elf.Open(cmdFields[i])
+	// The lines below name the binary, never the command: its arguments carry
+	// what the user passes the app, and it is logged whole at DEBUG alone.
+	binary := cmdFields[i]
+	file, err := elf.Open(binary)
 	if err != nil {
 		utils.LogError(logger, err, "failed to open file, skipping coverage calculation")
 		return false
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			utils.LogError(logger, err, "failed to close binary file", zap.String("file", cmd))
+			utils.LogError(logger, err, "failed to close binary file", zap.String("file", binary))
 		}
 	}()
 
@@ -51,6 +54,6 @@ func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 			return true
 		}
 	}
-	logger.Debug("go binary was not build with -cover flag", zap.String("file", cmd))
+	logger.Debug("go binary was not build with -cover flag", zap.String("file", binary))
 	return false
 }

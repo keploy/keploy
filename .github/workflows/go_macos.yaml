@@ -21,9 +21,114 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build amd64
-        run: GOARCH=amd64 go build -v ./...
-
+      # macOS ships as darwin/arm64 only (Apple silicon), so this is the
+      # one macOS target to keep compiling.
       - name: Build arm64
         run: GOARCH=arm64 go build -v ./...
 
+      # The step above runs on a Mac, where cgo is ON by default — so it cannot
+      # see the constraint that actually binds downstream. Consumers of this
+      # module cross-compile their darwin binaries FROM LINUX with
+      # CGO_ENABLED=0, and under that combination any cgo-only dependency stops
+      # linking rather than silently switching implementation.
+      #
+      # That is not hypothetical: the docker-compose library keploy briefly
+      # linked reached github.com/fsnotify/fsevents through pkg/watch, fsevents
+      # is cgo-only on darwin, and it broke a downstream darwin build with
+      # `undefined: EventFlags` while this workflow stayed green. That library
+      # is gone again, so this step is now purely what catches the NEXT
+      # cgo-only dependency.
+      - name: Build darwin/arm64 without cgo (downstream cross-compile shape)
+        run: GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build ./...
+
+      # macOS has no /proc. The process-tree walk every Ctrl+C of a native run
+      # makes (utils.InterruptProcessTree) reads the kernel's process table
+      # there instead, and only a Mac can run that code: a Linux runner builds
+      # the other implementation.
+      - name: Test utils on darwin
+        run: go test -count=1 ./utils/
+
+      # connseq.Upstream is the proxy's end of its connection to a destination.
+      # Off Linux it asks the socket for no count (received_others.go), so it
+      # numbers chunks by what was read. upstream_others_test.go checks that no
+      # socket is asked; it builds only off Linux, so only this job and the
+      # Windows one can run it. The numbering by what was read is checked by
+      # upstream_test.go, which builds everywhere. Neither file had run on
+      # macOS before this job.
+      - name: Test connseq on darwin
+        run: go test -count=1 ./pkg/agent/proxy/connseq/
+
+      # A native macOS run serves its app's callers as live calls too, so the
+      # proxy watches each caller for its hang-up there (util.WatchPeerEnd,
+      # peer_end_unix.go) and tells the app when the caller leaves mid-answer
+      # (incoming/client_watch.go). How a socket shows a FIN or a reset, and
+      # how a read deadline ends a peek, are the kernel's: these rows check
+      # them on darwin's own sockets, which a Linux runner cannot.
+      - name: Test the client hang-up watch on darwin
+        run: go test -count=1 ./pkg/agent/proxy/util/ ./pkg/agent/proxy/incoming/
+
+      # The relay asks the proxy's end of a client connection what the client
+      # took of the destination's answer, and the reset it ended with, from
+      # xnu's TCP_INFO (relay/client_took_darwin.go, client_end_darwin.go),
+      # and the session keeps that reset for the parsers (supervisor). Most of
+      # these rows drive real darwin sockets; a Linux runner builds the Linux
+      # reading instead, so only this job runs them.
+      - name: Test the relay's client socket reading on darwin
+        run: go test -count=1 ./pkg/agent/proxy/relay/ ./pkg/agent/proxy/supervisor/
+
+      # The proven flow on macOS: the claimant's start time and zombie state
+      # from the kernel's process table (claimer_darwin.go), the caller read
+      # from the process socket tables (caller_darwin.go), and the proxy's
+      # byte and connection counts from the TCP table (pairbytes_darwin.go,
+      # inflight_darwin.go, accepts_darwin.go), and a worker's process chain,
+      # each process's parent from the kernel's process table
+      # (starts/proc_darwin.go), which the proxy's per-worker mock views walk
+      # (scoped_mockdb.go). A Linux runner builds the other implementation of
+      # each (it reads /proc), so only this job runs these rows. Each package
+      # runs whole.
+      - name: Test the proven flow on darwin
+        run: go test -count=1 ./pkg/service/agent/ ./pkg/agent/starts/ ./pkg/agent/routes/ ./pkg/agent/proxy/
+
+      # A native Java app gets keploy's CA through a truststore keploy builds
+      # with keytool (pkg/agent/proxy/tls). macOS ships java, javac and keytool
+      # in /usr/bin as stubs that run an installed Java's and otherwise only
+      # say there is none: these rows skip on a Mac with no Java and run where
+      # one is installed.
+      - name: Test the Java truststore on darwin
+        run: go test -count=1 ./pkg/agent/proxy/tls/
+
+      # A native app's command can exit and leave processes running in its
+      # process group. On macOS keploy adopts no daemon, so a run waits on the
+      # app before it stops it only while App.GroupRunsOn (pkg/client/app)
+      # reads such a process, and pkg/platform/http hands that read to the
+      # wait (appRunsOn, adopt_other.go). A Linux runner builds the adopted-
+      # daemon read instead, so only this job runs these rows. pkg/platform/http
+      # runs whole; pkg/client/app runs the rows of its macOS test files only,
+      # as a whole run of it takes about six minutes there.
+      - name: Test the wait on a native app's process group on darwin
+        run: |
+          bash .github/scripts/macos/go-test-darwin-rows.sh pkg/client/app pkg/client/app/*_darwin_test.go
+          go test -count=1 ./pkg/platform/http/
+
+      # Rows whose answer on macOS is not Linux's. macOS reads the wall clock
+      # in microseconds, so in pkg/agent/proxy/syncMock two reads in a row can
+      # be the same instant, as a request read in the microsecond a memory
+      # pause closes is still in the pause. Where this build runs no app
+      # natively (macOS), cli/provider refuses `keploy record` for that before
+      # it asks for -c. Linux runners run both packages too, but there the
+      # clock reads in nanoseconds and record asks for -c first, so only this
+      # job checks what these rows do on macOS.
+      - name: Test the rows that read macOS's clock and refusals on darwin
+        run: go test -count=1 ./cli/provider/ ./pkg/agent/proxy/syncMock/
+
+      # keploy.sh, served as https://keploy.io/install.sh, is what macOS users
+      # source, from zsh or the system's bash 3.2: this runs its test there
+      # (linux-ci-scripts runs it on Linux), under /bin/bash, not a newer bash
+      # on PATH. macOS's mktemp, its temp directory under a link (/var), and
+      # its BSD script(1) are not Linux's. REQUIRE_ZSH and REQUIRE_PTY make a
+      # missing zsh or script(1) fail the step rather than skip a half.
+      - name: Test the installer macOS users source (keploy.sh) on darwin
+        env:
+          REQUIRE_ZSH: '1'
+          REQUIRE_PTY: '1'
+        run: /bin/bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh

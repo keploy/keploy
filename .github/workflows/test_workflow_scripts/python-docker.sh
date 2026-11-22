@@ -2,20 +2,27 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
 
 # Start mongo before starting keploy.
 docker network create keploy-network
-docker_pull_retry mongo
-docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
+MONGO_NAME=mongo start_mongo --net keploy-network || exit 1
 
 # Set up environment
 rm -rf keploy/  # Clean up old test data
 docker_build_retry docker build -t flask-app:1.0 .  # Build the Docker image
 
-# Configure keploy
-sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "./keploy.yml" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"header": {"Allow":[]}}
+KEPLOY_CFG
 sleep 5  # Allow time for configuration to apply
-
 
 container_kill() {
     # pid=$(pgrep -f "keploy record")
@@ -58,9 +65,17 @@ do_record_iteration() {
     local extra_flags="${2:-}"
     local label="${extra_flags:+_json}"
     local container_name="flaskApp_${i}${label}"
+    # The second recording spells the launch `sudo docker run`, which the
+    # docker-run kind takes too: keploy has to put its flags after `run`. A
+    # recorder before that fix put them in front of it, and docker refused
+    # them (unknown flag: --pid), so only the build under test is asked to.
+    local launcher="docker"
+    if [ "$i" = 2 ] && [ -z "$extra_flags" ] && [ "${RECORD_SRC:-build}" = build ]; then
+        launcher="sudo docker"
+    fi
     send_request &
     # shellcheck disable=SC2086
-    $RECORD_BIN record $extra_flags -c "docker run -p 6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" --generateGithubActions=false  &> "${container_name}.txt"
+    $RECORD_BIN record $extra_flags -c "$launcher run -p 6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" --generateGithubActions=false  &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"

@@ -277,8 +277,9 @@ func TestUpsert_RejectsTraversalNameComponents(t *testing.T) {
 }
 
 func TestClaimName_Basic(t *testing.T) {
-	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
-	dir := filepath.Join(t.TempDir(), "tests")
+	base := t.TempDir()
+	ts := NewWithNaming(zap.NewNop(), base, NamingDescriptive)
+	dir := filepath.Join(base, "tests")
 	tc := httpTC("GET", "http://api.test/users")
 	name, err := ts.claimName(dir, tc)
 	if err != nil {
@@ -301,8 +302,9 @@ func TestClaimName_Basic(t *testing.T) {
 }
 
 func TestClaimName_ConcurrentCallersGetUniqueNames(t *testing.T) {
-	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
-	dir := filepath.Join(t.TempDir(), "tests")
+	base := t.TempDir()
+	ts := NewWithNaming(zap.NewNop(), base, NamingDescriptive)
+	dir := filepath.Join(base, "tests")
 	tc := httpTC("GET", "http://api.test/users")
 
 	const workers = 16
@@ -610,7 +612,7 @@ func TestDescriptiveNamesConcurrentMintsUnique(t *testing.T) {
 func TestClaimName_ForeignWriteGapBeyondRetryBound(t *testing.T) {
 	for _, gap := range []int{10, 255, 300, 1000} {
 		dir := t.TempDir()
-		ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
+		ts := NewWithNaming(zap.NewNop(), dir, NamingDescriptive)
 		tc := httpTC("POST", "http://api.test/pay")
 
 		// Take one name so the counter exists and is low (mints post-pay-1).

@@ -2,18 +2,25 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
+# test_run_count, and keploy_exited: names a keploy command that exited non-zero.
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-exit-helpers.sh"
 
 # Start mongo before starting keploy.
 docker network create keploy-network
-docker_pull_retry mongo
-docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+start_mongo --net keploy-network || exit 1
 
-# Generate the keploy-config file.
-$RECORD_BIN config --generate
-
-# Update the global noise to ts.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"ts":[]}}
+KEPLOY_CFG
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
@@ -83,8 +90,9 @@ do_record_iteration() {
     local container_name="ginApp_${i}${label}"
     local log="${container_name}.txt"
     send_request &
+    local rc=0
     # shellcheck disable=SC2086
-    $RECORD_BIN record $extra_flags -c "docker run -p 8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "$log"
+    $RECORD_BIN record $extra_flags -c "docker run -p 8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "$log" || rc=$?
 
     if grep "WARNING: DATA RACE" "$log"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -95,6 +103,9 @@ do_record_iteration() {
         echo "Error found in pipeline..."
         cat "$log"
         exit 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        keploy_exited "$rc" "keploy record (iteration ${i}${label:+, json})" "$log"
     fi
     sleep 5
     echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
@@ -120,7 +131,9 @@ fi
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-$REPLAY_BIN test -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+rc=0
+runs_before="$(test_run_count)"
+$REPLAY_BIN test -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || rc=$?
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
@@ -132,6 +145,10 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "${test_container}.txt"
     exit 1
+fi
+
+if [ "$rc" -ne 0 ]; then
+    keploy_exited "$rc" "keploy test" "${test_container}.txt" "$runs_before"
 fi
 
 all_passed=true
@@ -164,7 +181,9 @@ else
 fi
 
 if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test_json gin-mongo' --containerName "ginApp_test_json" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}_json.txt"
+    rc=0
+    runs_before="$(test_run_count)"
+    $REPLAY_BIN test --storage-format json -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test_json gin-mongo' --containerName "ginApp_test_json" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}_json.txt" || rc=$?
     if grep "ERROR" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
@@ -172,6 +191,9 @@ if json_pass_supported; then
     if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        keploy_exited "$rc" "keploy test --storage-format json" "${test_container}_json.txt" "$runs_before"
     fi
     if ! json_scan_reports; then
         cat "${test_container}_json.txt"
@@ -199,17 +221,17 @@ fi
 #                                     no flag → exit non-zero / no new
 #                                     report dir → expected red
 echo "===== --keep-app-alive regression run ====="
-prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+prev_report_count=$(test_run_count)
 
 ka_container="ginApp_test_keep_app_alive"
+replay_status=0
 $REPLAY_BIN test -c "docker run --rm -p 8080:8080 --net keploy-network --name $ka_container gin-mongo" \
     --containerName "$ka_container" \
     --apiTimeout 60 \
     --delay 20 \
     --keep-app-alive \
     --test-sets test-set-0 \
-    --generate-github-actions=false &> "${ka_container}.txt"
-replay_status=$?
+    --generate-github-actions=false &> "${ka_container}.txt" || replay_status=$?
 
 if [ "$replay_status" -ne 0 ]; then
     echo "::error::--keep-app-alive replay failed with exit code ${replay_status}"
@@ -223,7 +245,7 @@ if grep "WARNING: DATA RACE" "${ka_container}.txt"; then
     exit 1
 fi
 
-new_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+new_report_count=$(test_run_count)
 if [ "$new_report_count" -le "$prev_report_count" ]; then
     echo "::error::--keep-app-alive replay did not produce a new test-run-* directory (prev=${prev_report_count}, new=${new_report_count}). Most likely the binary rejected the --keep-app-alive flag."
     cat "${ka_container}.txt"

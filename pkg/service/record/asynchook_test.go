@@ -18,7 +18,7 @@ type laneStub struct{}
 func (laneStub) MatchesLane(m *models.Mock, _ models.AsyncLane) bool {
 	return m != nil && m.Spec.Metadata["kind"] == "lane"
 }
-func (laneStub) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
+func (laneStub) MatchRequestShape(_ context.Context, _, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	return true, ""
 }
 func (laneStub) EmptyResponse(_ models.AsyncLane) ([]byte, error) { return nil, nil }
@@ -221,7 +221,7 @@ func TestAsyncPollMockExcludedFromPerTestMapping(t *testing.T) {
 
 	r := &Recorder{logger: zap.NewNop()}
 	mapping := models.TestMockMapping{TestName: "T1", MockIDs: []string{pollMock.Name, syncMockName}}
-	got, _, _ := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs, &droppedMockSet{})
+	got, _, _ := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs, &droppedMockSet{}, nil)
 
 	for _, e := range got {
 		if e.Name == pollMock.Name {

@@ -219,3 +219,121 @@ func TestTelemetryDefaults_SingleSource(t *testing.T) {
 		t.Fatal("TelemetryDefaultsVersion must be >= 1")
 	}
 }
+
+// Under the proven model a built-in path row matches only with its protocol's
+// fingerprint (design v14 §4): any other call on such a path is an ordinary
+// dependency. Host rows and the OTLP/gRPC prefix are fingerprints already.
+func TestResolveProvenNeedsTheFingerprint(t *testing.T) {
+	proto := map[string][]string{"Content-Type": {"application/x-protobuf"}}
+	cases := []struct {
+		name   string
+		host   string
+		port   uint32
+		path   string
+		header map[string][]string
+		want   string
+	}{
+		{"OTLP on its port", "collector", 4318, "/v1/traces", nil, "otlp-http-traces"},
+		{"OTLP by its content type", "collector", 8080, "/v1/traces", proto, "otlp-http-traces"},
+		{"an app route on an OTLP path", "app", 8080, "/v1/traces", map[string][]string{"Content-Type": {"application/json"}}, ""},
+		{"Pyroscope on its port", "pyro", 4040, "/ingest", nil, "pyroscope-ingest"},
+		{"an app's /ingest", "app", 8080, "/ingest", nil, ""},
+		{"Datadog by its header", "dd", 9000, "/v0.4/traces", map[string][]string{"datadog-meta-lang": {"go"}}, "datadog-v04-traces"},
+		{"Datadog on its port", "dd", 8126, "/v0.7/traces", nil, "datadog-v07-traces"},
+		{"remote_write by its header", "prom", 9090, "/api/v1/write", map[string][]string{"X-Prometheus-Remote-Write-Version": {"0.1.0"}}, "prometheus-remote-write"},
+		{"an app's /api/v1/write", "app", 9090, "/api/v1/write", nil, ""},
+		{"a SaaS host", "intake.datadoghq.com", 443, "/anything", nil, "datadog-saas"},
+		{"the OTLP/gRPC service", "collector", 4317, "/opentelemetry.proto.collector.trace.v1.TraceService/Export", nil, "otlp-grpc"},
+	}
+	for _, c := range cases {
+		rule, ok := ResolveProven(nil, nil, c.host, c.port, "POST", c.path, c.header)
+		if c.want == "" {
+			if ok {
+				t.Errorf("%s: matched %s, want an ordinary dependency", c.name, rule.ID)
+			}
+			continue
+		}
+		if !ok || rule.ID != c.want {
+			t.Errorf("%s: got %q (%v), want %s", c.name, rule.ID, ok, c.want)
+		}
+	}
+}
+
+// Under the proven model the user's rules are read as ResolvePassThrough
+// reads them (keploy record and keploy test keep theirs until they read
+// mock.real; keploy mock's CLI clears them): a user rule beats the built-in
+// rows, and an off marker turns a built-in row off, fingerprint or not.
+func TestResolveProvenReadsTheUsersRules(t *testing.T) {
+	user := []PassThroughRule{{Host: "telemetry.example.com", Mode: PassThroughSkip}}
+	rule, ok := ResolveProven(nil, user, "telemetry.example.com", 443, "POST", "/x", nil)
+	if !ok || rule.Host != "telemetry.example.com" {
+		t.Fatalf("a user's host rule was not read: %+v %v", rule, ok)
+	}
+	off := []PassThroughRule{{ID: "otlp-http-traces", Mode: PassThroughOff}}
+	if rule, ok := ResolveProven(off, nil, "collector", 4318, "POST", "/v1/traces", nil); ok {
+		t.Fatalf("a built-in row the user turned off answered: %+v", rule)
+	}
+	if rule, ok := ResolveProven(nil, nil, "collector", 4318, "POST", "/v1/traces", nil); !ok || rule.ID != "otlp-http-traces" {
+		t.Fatalf("the fingerprinted built-in did not answer: %+v %v", rule, ok)
+	}
+}
+
+// Every fingerprinted built-in path row, one by one (design v14 §4): its
+// path alone is an app's route and an ordinary dependency; on its protocol's
+// default port, or with its protocol's header (and that header's value, when
+// the fingerprint names one), it is the protocol's, and answered.
+func TestEveryFingerprintedTelemetryRowNeedsItsFingerprint(t *testing.T) {
+	rows := map[string]PassThroughRule{}
+	for _, r := range BuiltinTelemetryDefaults() {
+		rows[r.ID] = r
+	}
+	for id, fp := range telemetryFingerprints {
+		row, ok := rows[id]
+		if !ok {
+			t.Fatalf("fingerprint %s names no built-in row", id)
+		}
+		t.Run(id, func(t *testing.T) {
+			port := uint32(18080)
+			if fp.port == port {
+				t.Fatalf("the test's own port is %s's", id)
+			}
+			if r, ok := ResolveProven(nil, nil, "app", port, row.Method, row.Path, nil); ok && r.ID == id {
+				t.Fatalf("%s answered a call on its path alone", id)
+			}
+			if fp.port == 0 && fp.header == "" {
+				t.Fatalf("%s has no fingerprint", id)
+			}
+			if fp.port != 0 {
+				if r, ok := ResolveProven(nil, nil, "collector", fp.port, row.Method, row.Path, nil); !ok || r.ID != id {
+					t.Fatalf("%s did not answer on its port %d: %+v %v", id, fp.port, r, ok)
+				}
+			}
+			if fp.header == "" {
+				return
+			}
+			value := fp.value
+			if value == "" {
+				value = "1"
+			}
+			header := map[string][]string{fp.header: {value}}
+			if r, ok := ResolveProven(nil, nil, "collector", port, row.Method, row.Path, header); !ok || r.ID != id {
+				t.Fatalf("%s did not answer with its header %s: %+v %v", id, fp.header, r, ok)
+			}
+			if fp.value != "" {
+				other := map[string][]string{fp.header: {"application/json"}}
+				if r, ok := ResolveProven(nil, nil, "app", port, row.Method, row.Path, other); ok && r.ID == id {
+					t.Fatalf("%s answered with its header but another value", id)
+				}
+			}
+		})
+	}
+	// Every built-in row a path alone would match is fingerprinted: a row
+	// with a host, or the OTLP/gRPC service prefix, is one already.
+	for _, r := range BuiltinTelemetryDefaults() {
+		if r.Host == "" && !r.PathPrefix && r.Port == 0 {
+			if _, ok := telemetryFingerprints[r.ID]; !ok {
+				t.Errorf("built-in path row %s has no fingerprint", r.ID)
+			}
+		}
+	}
+}

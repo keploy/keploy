@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
@@ -53,7 +59,7 @@ section() {
 
 run_with_keploy_privileges() {
     if command -v sudo >/dev/null 2>&1; then
-        sudo -E env PATH="$PATH" "$@"
+        sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$@"
     else
         env PATH="$PATH" "$@"
     fi
@@ -200,7 +206,7 @@ check_for_errors() {
 }
 
 check_recorded_tests() {
-    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep -q .; then
+    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep . >/dev/null; then
         echo "No recorded test cases were generated."
         return 1
     fi
@@ -548,7 +554,12 @@ rm -f record.txt test.txt docker-compose-tmp.yaml "$MEMORY_VIOLATION_FILE" "$MEM
 cleanup_compose
 
 section "Generating Keploy config"
-"$RECORD_BIN" config --generate
+# Only when the sample does not ship one. `config --generate` used to do
+# nothing at all over an existing keploy.yml -- it asked, stdin answered EOF,
+# and it skipped and exited 0 -- so the shipped config is what these runs have
+# always used, noise rules and all. It refuses out loud now rather than
+# pretending, which is right, and this says what the run actually wants.
+[ -f keploy.yml ] || "$RECORD_BIN" config --generate
 
 section "Recording load-test traffic"
 run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --generate-github-actions=false 2>&1 | tee record.txt &

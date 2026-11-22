@@ -11,8 +11,12 @@ import (
 	"sync"
 	"time"
 
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -80,15 +84,23 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 			h.Logger.Debug("on-miss passthrough: failed to close upstream conn", zap.Error(cerr))
 		}
 	}()
+	// The upstream's answer is read with no deadline: the call's end ends
+	// that read, as it ends decodeHTTP's reads of the client, so decodeHTTP,
+	// which waits for its goroutine, is not held by an upstream that does
+	// not answer.
+	defer pUtil.InterruptOnDone(ctx, dstConn)()
 
 	// Forward the exact request bytes upstream.
 	if _, err := dstConn.Write(reqBuf); err != nil {
 		return false, err
 	}
 
-	// Read the upstream response.
+	// Read the upstream's final response: an interim one (the 100 Continue
+	// to an upload, a 103 Early Hints) is not its answer, and is not relayed.
+	// The app had its 100 from the decoder already, and a matched mock
+	// serves the final response alone too.
 	respReader := bufio.NewReader(dstConn)
-	respParsed, err := http.ReadResponse(respReader, request)
+	respParsed, err := pUtil.ReadFinalResponse(respReader, request, nil)
 	if err != nil {
 		return false, err
 	}
@@ -111,14 +123,15 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 		return false, err
 	}
 
+	// By its shape (method, host, path, query keys): the URL's query values
+	// are the application's content, and this entry is at Info.
 	h.Logger.Info("on-miss: served an unrecorded call from the real dependency",
-		zap.String("method", request.Method),
-		zap.String("url", request.URL.String()),
+		zap.Any("metadata", utils.GetReqMeta(ctx, request)),
 		zap.String("policy", string(opts.OnMiss)))
 
 	// record policy: capture the exchange for the CLI to persist.
 	if opts.OnMiss.RecordsOnMiss() {
-		appendCaptured(&models.Mock{
+		captured := &models.Mock{
 			Version: models.GetVersion(),
 			Name:    "mocks",
 			Kind:    models.HTTP,
@@ -137,12 +150,21 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 					StatusCode: respParsed.StatusCode,
 					Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 					Body:       string(respBody),
+
+					// Replay serves this response: keep what it takes to serve a
+					// repeated header (Set-Cookie) on its own lines.
+					HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 				},
 				Created:          time.Now().Unix(),
 				ReqTimestampMock: reqTs,
 				ResTimestampMock: resTs,
 			},
-		})
+		}
+		// A capture never passes the sync manager, which stamps every other
+		// recorded mock with its connection's container (containerkey): its
+		// key, instance and scope, as a recorded mock carries them.
+		containerkey.StampFromContext(ctx, captured)
+		appendCaptured(captured)
 	}
 	return true, nil
 }
@@ -154,9 +176,19 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 // therefore fails the handshake here and the caller falls back to the hard miss
 // (502) rather than the proxy silently trusting an unverified upstream — this
 // on-miss path dials the real network, so it must not disable verification.
-func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCfg) (net.Conn, error) {
+//
+// Its error names the server's host name by its labels' shape beside its tag
+// in ctx's session (models.HostsInError), as its caller's line logs it: a
+// dial's and a handshake's error name it whole.
+func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCfg) (conn net.Conn, err error) {
+	defer func() { err = models.HostsInError(ctx, err, dstCfg.Addr, tlsServerName(dstCfg)) }()
 	d := &net.Dialer{Timeout: 30 * time.Second}
-	raw, err := d.DialContext(ctx, "tcp", dstCfg.Addr)
+	raw, err := pUtil.DialDestinationWith(ctx, h.Logger,
+		pUtil.DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			// Only replay misses dial here; no handshake was held for them.
+			return pUtil.DialRaw(ctx, d, "tcp", a, nil)
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -173,4 +205,13 @@ func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCf
 		return nil, err
 	}
 	return tlsConn, nil
+}
+
+// tlsServerName is the name a TLS dial of dstCfg checks the server's
+// certificate for (its client's SNI), "" for none.
+func tlsServerName(dstCfg *models.ConditionalDstCfg) string {
+	if dstCfg == nil || dstCfg.TLSCfg == nil {
+		return ""
+	}
+	return dstCfg.TLSCfg.ServerName
 }

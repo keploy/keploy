@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
+
+source "$(dirname "${BASH_SOURCE[0]}")/../go-retry.sh"
 # Drives the --enable-sampling end-to-end test:
 #
 #   1. Build the sample HTTP app (./sampling-test/main.go).
@@ -49,7 +56,7 @@ rm -rf keploy/ curl-results/ record.log sampling-test
 endsec
 
 section "Build sample app"
-go build -o sampling-test .
+go_retry build -o sampling-test .
 ls -lh sampling-test
 endsec
 
@@ -71,7 +78,7 @@ trap cleanup EXIT
 
 section "Start keploy record (--enable-sampling=$SAMPLING_LIMIT)"
 HANDLER_DELAY_MS="$HANDLER_DELAY_MS" \
-    sudo -E env PATH="$PATH" HANDLER_DELAY_MS="$HANDLER_DELAY_MS" PORT="$APP_PORT" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" HANDLER_DELAY_MS="$HANDLER_DELAY_MS" PORT="$APP_PORT" \
     "$KEPLOY_BIN" record \
         -c "./sampling-test" \
         --enable-sampling="$SAMPLING_LIMIT" \

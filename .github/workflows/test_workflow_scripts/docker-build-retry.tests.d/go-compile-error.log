@@ -1,0 +1,2 @@
+# app
+./main.go:7:1: syntax error: unexpected EOF, expected }

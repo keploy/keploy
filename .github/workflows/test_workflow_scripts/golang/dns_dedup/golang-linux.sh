@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # E2E test for DNS mock deduplication.
 #
@@ -45,7 +52,7 @@ check_test_report() {
         local test_set_name
         test_set_name=$(basename "$report_file" -report.yaml)
         local test_status
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        test_status=$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')
 
         echo "Status for ${test_set_name}: $test_status"
         if [ "$test_status" != "PASSED" ]; then
@@ -109,12 +116,11 @@ send_request() {
 # --- Main ---
 
 rm -rf keploy/ record.txt test.txt
-sudo rm -f /tmp/keploy-logs.txt
 
 section "Build App"
 echo "Building app..."
-go mod tidy
-go build -o dns-dedup
+go_retry mod tidy
+go_retry build -o dns-dedup
 endsec
 
 # Generate keploy config with noise for DNS-dependent fields.
@@ -122,14 +128,22 @@ endsec
 # counts that depend on which IPs the DNS returns — these differ between
 # live recording and mocked replay.
 section "Generate Config"
-sudo -E env PATH=$PATH "$RECORD_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"unique_ip_sets":[],"results":[]}}/' ./keploy.yml
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > ./keploy.yml <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"unique_ip_sets":[],"results":[]}}
+KEPLOY_CFG
 endsec
 
 # Record
 section "Start Recording"
 echo "Starting Recording..."
-sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-dedup" --generateGithubActions=false >record.txt 2>&1 &
+sudo env PATH=$PATH "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "./dns-dedup" --generateGithubActions=false >record.txt 2>&1 &
 KEPLOY_PID=$!
 echo "Keploy record started with PID: $KEPLOY_PID"
 sleep 5
@@ -156,7 +170,7 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 if json_pass_supported; then
     section "Start Recording (json)"
     echo "Starting json-format recording..."
-    sudo -E env PATH=$PATH "$RECORD_BIN" record --storage-format json -c "./dns-dedup" --generateGithubActions=false >record_json.txt 2>&1 &
+    sudo env PATH=$PATH "${SUDO_ENV[@]}" "$RECORD_BIN" record --storage-format json -c "./dns-dedup" --generateGithubActions=false >record_json.txt 2>&1 &
     KEPLOY_PID=$!
     echo "Keploy record (json) started with PID: $KEPLOY_PID"
     sleep 5
@@ -176,7 +190,7 @@ fi
 # Replay
 section "Start Replay"
 echo "Starting Replay..."
-sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
+sudo env PATH=$PATH "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
 check_for_errors "test.txt"
 check_test_report
 endsec
@@ -187,7 +201,7 @@ if json_pass_supported; then
     # coexist in keploy/ now).
     section "Start Replay (json)"
     echo "Starting json-format Replay..."
-    sudo -E env PATH=$PATH "$REPLAY_BIN" test --storage-format json -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
+    sudo env PATH=$PATH "${SUDO_ENV[@]}" "$REPLAY_BIN" test --storage-format json -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
     check_for_errors "test_json.txt"
     if ! json_scan_reports; then
         cat test_json.txt

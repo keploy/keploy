@@ -1,8 +1,10 @@
 package replayer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -173,7 +175,7 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 	trs, ok := resp.PacketBundle.Message.(*mysql.TextResultSet)
 	require.True(t, ok)
 
-	enc, err := query.EncodeTextResultSet(ctx, log, trs)
+	enc, err := query.EncodeTextResultSet(ctx, log, trs, 0)
 	require.NoError(t, err)
 
 	pos := 0
@@ -182,7 +184,7 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 	require.Equal(t, uint64(1), count, "single-column result set")
 	pos += n
 
-	col, cn, err := rowscols.DecodeColumn(ctx, log, enc[pos:])
+	col, cn, err := rowscols.DecodeColumn(ctx, log, enc[pos:], 0)
 	require.NoError(t, err)
 	require.NotNil(t, col)
 	assert.Equal(t, "transaction_isolation", col.Name)
@@ -200,6 +202,57 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 	assert.Equal(t, byte(0x03), term[7], "terminator status flags must be reused from the recorded probe")
 }
 
+// The session-variable resolver is the one replay path that answers with a
+// result set made from a recorded one. It must build a new set, which starts
+// with an empty encode cache, and leave the recorded probe as it was: the
+// probe, served (and so cached) before the resolver ran, serves after it the
+// bytes main's path encodes for it, and the built answer serves the bytes
+// main's path encodes for the built set.
+func TestASessionVarAnswerBuiltFromAServedProbeLeavesTheProbeAsRecorded(t *testing.T) {
+	ctx, log := context.Background(), zap.NewNop()
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
+	dctx := deprecateEOFContext()
+	dctx.LastOp, dctx.ServerGreetings = wire.NewLastOpMap(), wire.NewGreetings()
+	dctx.ServerGreetings.Store(c1, &mysql.HandshakeV10Packet{CapabilityFlags: 0x81bff7ff})
+	// mainServes is what main sends for bundle: its result set encoded from
+	// its recorded fields, in a set of its own with nothing cached.
+	mainServes := func(bundle mysql.PacketBundle) []byte {
+		t.Helper()
+		rs := bundle.Message.(*mysql.TextResultSet)
+		bundle.Message = &mysql.TextResultSet{ColumnCount: rs.ColumnCount, Columns: rs.Columns, EOFAfterColumns: rs.EOFAfterColumns, Rows: rs.Rows, FinalResponse: rs.FinalResponse}
+		b, err := wire.EncodeToBinary(ctx, log, &bundle, c1, dctx)
+		require.NoError(t, err)
+		return b
+	}
+
+	pool := probeMockPool()
+	probe := &pool[0].Spec.MySQLResponses[0].PacketBundle
+	probe.Header = &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 1, SequenceID: 1}, Type: "TextResultSet"}
+	recorded := mainServes(*probe)
+	first, err := wire.EncodeToBinary(ctx, log, probe, c1, dctx)
+	require.NoError(t, err)
+	require.Equal(t, recorded, first)
+	require.NotNil(t, probe.Message.(*mysql.TextResultSet).WireCache().Load(0), "the probe's first serve caches its payload")
+
+	// The probe labels this column "@@sql_mode"; the built answer names it
+	// "sql_mode", so a resolver that renamed the probe's own column would
+	// change the recorded probe.
+	resp := buildSessionVarResponse(log, pool, "sql_mode", dctx)
+	require.NotNil(t, resp)
+	built := resp.Message.(*mysql.TextResultSet)
+	require.Nil(t, built.WireCache().Load(0), "the built answer is a new set: nothing cached")
+	servedBuilt, err := wire.EncodeToBinary(ctx, log, &resp.PacketBundle, c1, dctx)
+	require.NoError(t, err)
+	require.Equal(t, mainServes(resp.PacketBundle), servedBuilt)
+	require.False(t, bytes.Equal(servedBuilt, first), "the built answer serves its own bytes, not the probe's")
+
+	again, err := wire.EncodeToBinary(ctx, log, probe, c1, dctx)
+	require.NoError(t, err)
+	require.Equal(t, mainServes(*probe), again, "the probe after the resolver ran: main's path and the cache must agree")
+	require.Equal(t, recorded, again, "the resolver changed the recorded probe")
+}
+
 func TestBuildSessionVarResponse_NonDeprecateEOF_ReturnsNil(t *testing.T) {
 	pool := probeMockPool()
 	// No CLIENT_DEPRECATE_EOF negotiated: must decline rather than emit
@@ -215,9 +268,9 @@ func TestBuildSessionVarResponse_UnknownVar_ReturnsNil(t *testing.T) {
 }
 
 // TestRejectsCrossVariableRead pins the blast radius of the pure-system-variable
-// rejection in matchQuery.
+// rejection in matchQueryLive.
 //
-// matchQuery is the SHARED MySQL replay path: proxy (MITM) and DaemonSet recordings
+// matchQueryLive is the SHARED MySQL replay path: proxy (MITM) and DaemonSet recordings
 // run through it too, not only the proxyless capture this work targets. The
 // rejection is subtractive, so it must fire ONLY when the candidate reads a
 // DIFFERENT variable. Rejecting on any textual difference would make a recorded
@@ -230,10 +283,10 @@ func TestRejectsCrossVariableRead(t *testing.T) {
 		// The original defect: an unrecorded @@transaction_isolation read was
 		// cross-served the recorded @@transaction_read_only mock because both are
 		// equal-length non-DML SELECTs.
-		assert.True(t, rejectsCrossVariableRead(
+		assert.True(t, crossVariableRead(
 			"SELECT @@session.transaction_read_only",
 			"SELECT @@session.transaction_isolation"))
-		assert.True(t, rejectsCrossVariableRead(
+		assert.True(t, crossVariableRead(
 			"SELECT @@autocommit", "SELECT @@sql_mode"))
 	})
 
@@ -248,26 +301,33 @@ func TestRejectsCrossVariableRead(t *testing.T) {
 			{"SELECT @@AUTOCOMMIT", "SELECT @@autocommit"},
 			{"SELECT @@sql_mode", "SELECT @@sql_mode\r\n"},
 		} {
-			assert.False(t, rejectsCrossVariableRead(c.expected, c.actual),
+			assert.False(t, crossVariableRead(c.expected, c.actual),
 				"same variable must stay eligible: expected=%q actual=%q", c.expected, c.actual)
 		}
 	})
 
 	t.Run("a var read may not be answered by an unrelated query", func(t *testing.T) {
-		assert.True(t, rejectsCrossVariableRead(
+		assert.True(t, crossVariableRead(
 			"SELECT id FROM users WHERE id = 1", "SELECT @@transaction_isolation"))
 	})
 
 	t.Run("non-var actual is never rejected here", func(t *testing.T) {
 		// Ordinary DML keeps its normal fuzzy matching; this guard must not touch it.
-		assert.False(t, rejectsCrossVariableRead(
+		assert.False(t, crossVariableRead(
 			"SELECT id FROM users WHERE id = 1", "SELECT id FROM users WHERE id = 2"))
-		assert.False(t, rejectsCrossVariableRead(
+		assert.False(t, crossVariableRead(
 			"SELECT @@version, u.name FROM users u", "SELECT @@version, u.email FROM users u"))
 	})
 
 	t.Run("identical text is never rejected", func(t *testing.T) {
-		assert.False(t, rejectsCrossVariableRead(
+		assert.False(t, crossVariableRead(
 			"SELECT @@transaction_isolation", "SELECT @@transaction_isolation"))
 	})
+}
+
+// crossVariableRead runs rejectsCrossVariableRead the way matchQueryLive does,
+// with the live query's system-variable parse derived up front.
+func crossVariableRead(expectedQuery, actualQuery string) bool {
+	actualVar, isPureVarRead := parseSingleSystemVarRead(actualQuery)
+	return rejectsCrossVariableRead(expectedQuery, actualQuery, actualVar, isPureVarRead)
 }

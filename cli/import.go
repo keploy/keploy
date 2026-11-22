@@ -2,13 +2,13 @@ package cli
 
 import (
 	"context"
-	"os"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
 	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +24,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: "keploy import",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(os.Stdout, disableAnsi)
+			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 			return cmd.Help()
 		},
 	}
@@ -35,7 +35,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: "keploy import postman",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(os.Stdout, disableAnsi)
+			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 			path, _ := cmd.Flags().GetString("path")
 			if path == "" {
 				path = "output.json"
