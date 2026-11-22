@@ -155,6 +155,7 @@ func TestRedactFieldDiffs(t *testing.T) {
 		{Path: "body.meta", Kind: models.DiffKindTypeChanged, Expected: "object", Actual: "string: drift-111"},
 		{Path: "body.num", Kind: models.DiffKindTypeChanged, Expected: "number: 999", Actual: "string: ok"},
 		{Path: "body.tok_shape", Kind: models.DiffKindTypeChanged, Expected: "null: null", Actual: "string: " + jwtSecret},
+		{Path: "body.token", Kind: models.DiffKindMissingInLive, Expected: "plain-secret", Actual: ""},
 	}
 	redactFieldDiffs(diffs, redactedPlacesOf(nil, nc), "")
 	if diffs[0].Expected != valueRedacted || diffs[0].Actual != valueRedacted {
@@ -177,6 +178,9 @@ func TestRedactFieldDiffs(t *testing.T) {
 	}
 	if diffs[6].Expected != "null: null" || diffs[6].Actual != "string: "+valueRedacted {
 		t.Errorf("type_changed credential-shaped value not redacted cleanly: %+v", diffs[6])
+	}
+	if diffs[7].Expected != valueRedacted || diffs[7].Actual != "" {
+		t.Errorf("missing_in_live sensitive key should redact Expected and keep Actual empty: %+v", diffs[7])
 	}
 }
 
