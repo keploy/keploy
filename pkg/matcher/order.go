@@ -157,13 +157,13 @@ func leafValue(v interface{}) string {
 	case bool:
 		return "b" + strconv.FormatBool(t)
 	case json.Number:
-		if r, ok := toBigRat(t); ok {
-			return "n" + r.RatString()
+		if c, ok := canonicalJSONNumber(t); ok {
+			return "n" + c
 		}
 		return "n" + t.String()
 	case float64:
-		if r, ok := toBigRat(t); ok {
-			return "n" + r.RatString()
+		if c, ok := canonicalJSONNumber(t); ok {
+			return "n" + c
 		}
 		return "n" + strconv.FormatFloat(t, 'g', -1, 64)
 	default:

@@ -2,7 +2,6 @@ package matcher
 
 import (
 	"encoding/json"
-	"fmt"
 	"slices"
 	"sort"
 	"strconv"
@@ -490,22 +489,17 @@ func eachJSONScalar(v interface{}, path string, fn func(path string, v interface
 	}
 }
 
-// scalarTypeValue is a JSON scalar's type and value as the path maps hold
-// them.
+// scalarTypeValue is a JSON scalar's type and human-readable value as the path
+// maps hold them (preserving exact JSON decimal text for reports, shape
+// diagnostics, and recorded-value exclusion).
 func scalarTypeValue(v interface{}) (typ, val string) {
 	switch t := v.(type) {
 	case string:
 		return "string", t
 	case json.Number:
-		if r, ok := toBigRat(t); ok {
-			return "number", r.RatString()
-		}
 		return "number", t.String()
 	case float64:
-		if r, ok := toBigRat(t); ok {
-			return "number", r.RatString()
-		}
-		return "number", fmt.Sprintf("%v", t)
+		return "number", formatJSONNumber(t)
 	case bool:
 		return "boolean", strconv.FormatBool(t)
 	}
@@ -538,6 +532,9 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 		av, aok := act.values[k]
 		// If both present and differ -> value change
 		if eok && aok && ev != av {
+			if expType == "number" && equalJSONNumbers(json.Number(ev), json.Number(av)) {
+				continue
+			}
 			valueChanges = append(valueChanges, k)
 		}
 	}

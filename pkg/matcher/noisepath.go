@@ -484,7 +484,7 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 			w.skip(key, NoiseSkipStructural)
 			return
 		}
-		if exp != nil && reflect.TypeOf(exp) != reflect.TypeOf(act) {
+		if exp != nil && !areJSONTypesEqual(exp, act) {
 			w.skip(key, NoiseSkipStructural)
 			return
 		}
@@ -635,10 +635,11 @@ func childNoisePath(key, field string) string {
 }
 
 // sameElementMultiset reports whether two arrays hold the same elements in some
-// order, which under ignoreOrdering means they do not differ at all. Go marshals
-// map keys in sorted order, so the canonical form is stable. An element that will
-// not marshal reports false, which routes the array to a refusal rather than to a
-// pairing that cannot be justified.
+// order, which under ignoreOrdering means they do not differ at all. Object
+// keys are sorted and JSON numbers are normalized canonically so mathematically
+// equal spellings (1 vs 1.0, 1e3 vs 1000, -0 vs 0) match. An element that
+// cannot be serialized reports false, which routes the array to a refusal
+// rather than to a pairing that cannot be justified.
 func sameElementMultiset(e, a []interface{}) bool {
 	if len(e) != len(a) {
 		return false
@@ -646,11 +647,11 @@ func sameElementMultiset(e, a []interface{}) bool {
 	canon := func(vals []interface{}) []string {
 		out := make([]string, 0, len(vals))
 		for _, v := range vals {
-			b, err := json.Marshal(v)
-			if err != nil {
+			var sb strings.Builder
+			if !writeCanonicalMultisetValue(&sb, v) {
 				return nil
 			}
-			out = append(out, string(b))
+			out = append(out, sb.String())
 		}
 		sort.Strings(out)
 		return out
@@ -665,6 +666,82 @@ func sameElementMultiset(e, a []interface{}) bool {
 		}
 	}
 	return true
+}
+
+func writeCanonicalMultisetValue(sb *strings.Builder, v interface{}) bool {
+	switch t := v.(type) {
+	case nil:
+		sb.WriteString("null")
+		return true
+	case bool:
+		if t {
+			sb.WriteString("true")
+		} else {
+			sb.WriteString("false")
+		}
+		return true
+	case string:
+		b, err := json.Marshal(t)
+		if err != nil {
+			return false
+		}
+		sb.Write(b)
+		return true
+	case json.Number, float64:
+		if c, ok := canonicalJSONNumber(t); ok {
+			sb.WriteString("n:")
+			sb.WriteString(c)
+			return true
+		}
+		b, err := json.Marshal(t)
+		if err != nil {
+			return false
+		}
+		sb.Write(b)
+		return true
+	case []interface{}:
+		sb.WriteByte('[')
+		for i, elem := range t {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			if !writeCanonicalMultisetValue(sb, elem) {
+				return false
+			}
+		}
+		sb.WriteByte(']')
+		return true
+	case map[string]interface{}:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		sb.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			kb, err := json.Marshal(k)
+			if err != nil {
+				return false
+			}
+			sb.Write(kb)
+			sb.WriteByte(':')
+			if !writeCanonicalMultisetValue(sb, t[k]) {
+				return false
+			}
+		}
+		sb.WriteByte('}')
+		return true
+	default:
+		b, err := json.Marshal(t)
+		if err != nil {
+			return false
+		}
+		sb.Write(b)
+		return true
+	}
 }
 
 // coverageEntry is one addressable node of the document: the key the walker would

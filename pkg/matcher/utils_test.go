@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
@@ -642,7 +643,142 @@ func TestJSONFieldDiffs_LargeIntegerPrecision(t *testing.T) {
 	act := `{"id": 1234567890123456700}`
 	diffs := JSONFieldDiffs(exp, act, nil, "body.", 0)
 	if len(diffs) == 0 {
-		t.Errorf("JSONFieldDiffs should report diff for differing large integers, got 0 diffs")
+		t.Fatalf("JSONFieldDiffs should report diff for differing large integers, got 0 diffs")
+	}
+	if diffs[0].Expected != "1234567890123456789" || diffs[0].Actual != "1234567890123456700" {
+		t.Errorf("JSONFieldDiffs large int formatting = (%q, %q), want exact integers", diffs[0].Expected, diffs[0].Actual)
+	}
+
+	// Decimals must render as human-readable JSON text (not rational fractions like "1/10").
+	decDiffs := JSONFieldDiffs(`{"price": 0.1}`, `{"price": 19.99}`, nil, "body.", 0)
+	if len(decDiffs) != 1 {
+		t.Fatalf("JSONFieldDiffs decimal count = %d, want 1", len(decDiffs))
+	}
+	if decDiffs[0].Expected != "0.1" || decDiffs[0].Actual != "19.99" {
+		t.Errorf("JSONFieldDiffs decimal formatting = (%q, %q), want (\"0.1\", \"19.99\")", decDiffs[0].Expected, decDiffs[0].Actual)
+	}
+
+	// Mathematically equal spellings must produce zero diffs.
+	if eqDiffs := JSONFieldDiffs(`{"count": 1, "val": 1e3, "z": -0.0}`, `{"count": 1.0, "val": 1000, "z": 0}`, nil, "body.", 0); len(eqDiffs) != 0 {
+		t.Errorf("JSONFieldDiffs reported unexpected diffs for equal numbers: %+v", eqDiffs)
+	}
+
+	// excludeRecordedValue receives human-readable decimal text.
+	var seenVal string
+	changed := ChangedJSONFieldPaths(`{"price": 0.1}`, `{"price": 0.2}`, nil, nil, false, func(v string) bool {
+		seenVal = v
+		return v == "0.1"
+	})
+	if seenVal != "0.1" || len(changed) != 0 {
+		t.Errorf("ChangedJSONFieldPaths excludeRecordedValue saw %q, changed=%v; want \"0.1\" and nil", seenVal, changed)
+	}
+}
+
+func TestCanonicalJSONNumber_HugeExponentsAndEdgeCases(t *testing.T) {
+	// Huge scientific notation exponents must normalize in linear time without OOM/hang.
+	if !equalJSONNumbers(json.Number("1e99999999"), json.Number("10e99999998")) {
+		t.Errorf("1e99999999 should equal 10e99999998")
+	}
+	if equalJSONNumbers(json.Number("1e99999999"), json.Number("2e99999999")) {
+		t.Errorf("1e99999999 should not equal 2e99999999")
+	}
+	if !equalJSONNumbers(json.Number("1e-99999999"), json.Number("0.1e-99999998")) {
+		t.Errorf("1e-99999999 should equal 0.1e-99999998")
+	}
+	if !equalJSONNumbers(json.Number("0e99999999"), json.Number("-0.0")) {
+		t.Errorf("0e99999999 should equal -0.0")
+	}
+	if !equalJSONNumbers(json.Number("1e99999999999999999999999"), json.Number("10e99999999999999999999998")) {
+		t.Errorf("arbitrary-precision exponents should normalize accurately")
+	}
+	// Mixed float64 vs json.Number on non-dyadic decimals must match.
+	for _, tc := range []struct {
+		s string
+		f float64
+	}{
+		{"0.1", 0.1},
+		{"0.2", 0.2},
+		{"19.99", 19.99},
+		{"3.141592653589793", 3.141592653589793},
+		{"-0.0", 0.0},
+	} {
+		if !equalJSONNumbers(json.Number(tc.s), tc.f) {
+			t.Errorf("equalJSONNumbers(json.Number(%q), float64(%v)) = false, want true", tc.s, tc.f)
+		}
+	}
+	// Non-JSON syntaxes must be rejected.
+	for _, bad := range []string{"1/2", "0x10", "1_000", "+1", ".5", "1.", "01", ""} {
+		if equalJSONNumbers(json.Number(bad), json.Number(bad)) {
+			t.Errorf("invalid JSON number %q must not compare equal", bad)
+		}
+	}
+}
+
+func TestJsonContains_DecimalsArraysAndLargeIntegers(t *testing.T) {
+	// Decimal float64 in expected map vs json.Number in actual JSON.
+	ok, err := JsonContains(`{"price": 0.1, "tax": 19.99, "ids": [1, 2, 3], "items": [{"id": 1, "cost": 0.2}]}`, map[string]interface{}{
+		"price": 0.1,
+		"tax":   19.99,
+		"ids":   []interface{}{float64(1), float64(2), float64(3)},
+		"items": []interface{}{map[string]interface{}{"id": float64(1), "cost": 0.2}},
+	})
+	if err != nil || !ok {
+		t.Fatalf("JsonContains decimals & numeric arrays = (%v, %v), want (true, nil)", ok, err)
+	}
+
+	// Large integer > 2^53 precision preserved in JsonContains.
+	ok, err = JsonContains(`{"id": 1234567890123456789}`, map[string]interface{}{"id": json.Number("1234567890123456700")})
+	if err != nil || ok {
+		t.Fatalf("JsonContains differing large int = (%v, %v), want (false, nil)", ok, err)
+	}
+	ok, err = JsonContains(`{"id": 1234567890123456789}`, map[string]interface{}{"id": json.Number("1234567890123456789")})
+	if err != nil || !ok {
+		t.Fatalf("JsonContains matching large int = (%v, %v), want (true, nil)", ok, err)
+	}
+
+	// Empty actualJSON must return an error.
+	if ok, err := JsonContains("", map[string]interface{}{"a": 1}); err == nil || ok {
+		t.Errorf("JsonContains empty string = (%v, %v), want (false, non-nil err)", ok, err)
+	}
+}
+
+func TestMixedFloat64AndJSONNumber_PreparedAndNoisePath(t *testing.T) {
+	// NewValidatedJSON, JSONMatchKey, CollectJSONFields/CountJSONFieldDiffs with mixed float64 vs json.Number.
+	expDoc := map[string]interface{}{"price": 0.1, "count": float64(1), "zero": -0.0}
+	actDoc, err := UnmarshallJSON(`{"price": 0.1, "count": 1.0, "zero": 0}`, nil)
+	if err != nil {
+		t.Fatalf("UnmarshallJSON: %v", err)
+	}
+	vj := NewValidatedJSON(expDoc, actDoc)
+	if !vj.IsIdentical() {
+		t.Fatalf("NewValidatedJSON(float64, json.Number) IsIdentical = false, want true")
+	}
+	res, err := JSONDiffWithNoiseControl(vj, nil, false, zap.NewNop())
+	if err != nil || !res.IsExact() {
+		t.Fatalf("JSONDiffWithNoiseControl mixed types = (%v, %v), want exact match", res.IsExact(), err)
+	}
+	if JSONMatchKey(expDoc, nil) != JSONMatchKey(actDoc, nil) {
+		t.Errorf("JSONMatchKey differs between float64 and json.Number for equivalent values")
+	}
+	if diffs := CountJSONFieldDiffs(CollectJSONFields(expDoc, nil), CollectJSONFields(actDoc, nil)); diffs != 0 {
+		t.Errorf("CountJSONFieldDiffs mixed types = %d, want 0", diffs)
+	}
+
+	// BodyNoiseFromJSONDiff with ignoreOrdering=true and differently spelled equal numbers in object arrays.
+	paths, skips := BodyNoiseFromJSONDiff(
+		`{"items": [{"id": 1}, {"id": 2}]}`,
+		`{"items": [{"id": 2.0}, {"id": 1.0}]}`,
+		nil, true,
+	)
+	if len(paths) != 0 || len(skips) != 0 {
+		t.Errorf("BodyNoiseFromJSONDiff reordered equal object array = (paths=%v, skips=%v), want empty", paths, skips)
+	}
+
+	// NormalizeNestedJSONForNoise must preserve large integers > 2^53.
+	raw := `{"id": 1234567890123456789, "payload": "{\"nested_id\": 9876543210987654321, \"ts\": 1}"}`
+	norm := NormalizeNestedJSONForNoise(raw, map[string][]string{"payload.ts": nil}, zap.NewNop())
+	if !strings.Contains(norm, "1234567890123456789") || !strings.Contains(norm, "9876543210987654321") {
+		t.Errorf("NormalizeNestedJSONForNoise lost large integer precision: %s", norm)
 	}
 }
 
@@ -650,6 +786,14 @@ func TestUnmarshallJSON_Strictness(t *testing.T) {
 	// Trailing garbage must be rejected
 	if _, err := UnmarshallJSON(`{"a": 1} trailing`, zap.NewNop()); err == nil {
 		t.Errorf("expected error on trailing garbage after JSON")
+	}
+	// Concatenated valid JSON documents must be rejected
+	if _, err := UnmarshallJSON(`{"a": 1}{"b": 2}`, zap.NewNop()); err == nil {
+		t.Errorf("expected error on concatenated JSON documents")
+	}
+	// Whitespace-only input must be rejected
+	if _, err := UnmarshallJSON("   \t\n ", zap.NewNop()); err == nil {
+		t.Errorf("expected error on whitespace-only input")
 	}
 	// Whitespace-only trailing is valid
 	if v, err := UnmarshallJSON("{\"a\": 1} \n\t ", zap.NewNop()); err != nil || v == nil {
