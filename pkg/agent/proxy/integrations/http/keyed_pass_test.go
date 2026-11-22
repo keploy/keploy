@@ -62,7 +62,7 @@ func keyedDB(mocks ...*models.Mock) *keyedMemDb {
 
 // matchKeyed runs the matcher with the proven switch off, stateful mocks on,
 // and fails the row when the call does not end within 10 s.
-func matchKeyed(t *testing.T, in *req, db *keyedMemDb) *models.Mock {
+func matchKeyed(t *testing.T, in *req, db integrations.MockMemDb) *models.Mock {
 	t.Helper()
 	type answer struct {
 		served *models.Mock
@@ -228,6 +228,94 @@ func TestAKeyedExactPassServesOnlyTheCallsVeryBody(t *testing.T) {
 	}
 	if db.keyedReads == 0 {
 		t.Fatal("no keyed read: the row needs the keyed passes")
+	}
+}
+
+// A heavy call with no recording filed under its request's key leaves the
+// keyed exact pass at once and takes no turn: the pass read nothing to weigh,
+// and the whole read that follows weighs what it reads itself (admit). With
+// every turn held, the pass ends at once, nothing found.
+func TestAKeyedExactPassWithNothingUnderItsKeyTakesNoTurn(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	db := keyedDB(recorded("other", "/other", jsonHeader, jsonQ("other")))
+	giveBack := takeAllTurns(t)
+	defer giveBack()
+	in := sent("/poll", jsonHeader, jsonQ(fuzzyLetters(heavyCallBytes, 5)))
+	in.raw = in.body
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	hit, err := newHTTP().keyedExactBody(ctx, in, db, nil, nil, true, true)
+	if hit.end != nil {
+		hit.end()
+		t.Fatal("the pass took a turn with nothing under the call's key")
+	}
+	if err != nil || hit.found {
+		t.Fatalf("the pass with nothing under the call's key: found %v, err %v; want nothing found and no error", hit.found, err)
+	}
+	if db.keyedReads == 0 {
+		t.Fatal("no keyed read: the row needs the keyed pass")
+	}
+}
+
+// ownKeyedDb is keyedMemDb with recordings of the per-test tier too
+// (perTest), which its keyed per-test read reads by key, in a store that does
+// not tell which recordings are the open test's own (no
+// integrations.TestOwner), so its per-test pool is the test's own
+// (openTestOwner). It marks used and keeps for repeats
+// (integrations.RepeatKeeper) what it is told to.
+type ownKeyedDb struct {
+	*keyedMemDb
+	perTest    []*models.Mock
+	used, kept map[string]bool
+}
+
+func (s *ownKeyedDb) GetPerTestMocksInWindow() ([]*models.Mock, error) { return s.perTest, nil }
+
+func (s *ownKeyedDb) RangePerTestMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	s.keyedReads++
+	for _, mk := range s.perTest {
+		if slices.Contains(ix.Keys(mk), key) && !fn(mk) {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (s *ownKeyedDb) MarkMockAsUsed(m models.Mock) bool {
+	s.used[m.Name] = true
+	return true
+}
+
+func (s *ownKeyedDb) KeepForRepeats(name string) { s.kept[name] = true }
+
+func (s *ownKeyedDb) KeptForRepeats() func(string) bool {
+	return func(name string) bool { return s.kept[name] }
+}
+
+// A per-test recording of a stateful dependency (its lifetime stated) that a
+// call is answered through the keyed exact pass is the open test's own where
+// the store does not tell whose it is: of the per-test pool. So it is kept
+// for the test's byte-identical repeats and marked used, as the whole read
+// keeps it, not served as a reusable recording, which would only be marked.
+func TestAKeyedExactCallKeepsTheTestsOwnRecordingForItsRepeats(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	own := recorded("own", "/count", jsonHeader, jsonQ("n"))
+	own.TestModeInfo.Lifetime, own.TestModeInfo.Consume = models.LifetimePerTest, models.ConsumeCursorSaturate
+	own.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	if !own.StatesLifetime() {
+		t.Fatal("precondition: the recording does not state its lifetime")
+	}
+	db := &ownKeyedDb{keyedMemDb: keyedDB(), perTest: []*models.Mock{own}, used: map[string]bool{}, kept: map[string]bool{}}
+	in := sent("/count", jsonHeader, jsonQ("n"))
+	in.raw = in.body
+	if served := matchKeyed(t, in, db); served == nil || served.Name != "own" {
+		t.Fatalf("served %v, want the test's own recording of the call's very request", served)
+	}
+	if !db.used["own"] || !db.kept["own"] {
+		t.Fatalf("the test's own recording: marked used %v, kept for repeats %v; want both", db.used["own"], db.kept["own"])
+	}
+	if db.keyedReads == 0 || db.wholeReads != 0 {
+		t.Fatalf("%d keyed reads and %d whole reads, want the keyed pass alone", db.keyedReads, db.wholeReads)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 // visits only it and copies none of the test's other mocks; the tier is read
 // only when fn has not stopped by then, as rangeExactPerTest reads it.
 // Otherwise the tier's key index is walked (TreeDb.rangeKeyed), each mock
-// kept as the windowed read keeps it (windowKeeps), so a read visits the
+// kept as the windowed read keeps it (inRecordedWindow), so a read visits the
 // mocks filed under key and no other.
 func (m *MockManager) RangePerTestMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
 	return m.rangePerTestMocksWithKeyIn(m.exactView(), ix, key, fn)
@@ -46,7 +46,7 @@ func (m *MockManager) rangePerTestMocksWithKeyIn(v *exactView, ix *integrations.
 		keeps := func(*models.Mock) bool { return true }
 		if !start.IsZero() && !end.IsZero() {
 			gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
-			keeps = func(mk *models.Mock) bool { return m.windowKeeps(mk, start, end, gapFrom, hasGap) }
+			keeps = func(mk *models.Mock) bool { return inRecordedWindow(mk, start, end, gapFrom, hasGap) }
 		}
 		tree.rangeKeyed(ix, key, func(mk *models.Mock) bool { return !keeps(mk) || fn(mk) })
 		return nil
