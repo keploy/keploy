@@ -312,7 +312,7 @@ grep -q 'mock replay summary.*"missed": 0.*"answered_as_another": 3' "$LOG" || f
 grep -qE '^ +answer: closest_body$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not say closest_body"
 grep -qE '^ +- body\.data\.id$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not name body.data.id"
 grep -qE '^ +- url\.query\.id$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not name url.query.id for GET /orders?id=$QUERY"
-grep -q "^  next step: .*An entry for a query value masks every query value of its shape, in every call\." "$LOG" || fail "names: the console's next step for GET /orders?id=$QUERY does not say its entry masks every query value of its shape"
+grep -q "^  next step: .*An entry for a query value masks every query value that matches its pattern, in every call\." "$LOG" || fail "names: the console's next step for GET /orders?id=$QUERY does not say its entry masks every query value that matches its pattern"
 URLKEY=$(noise_entry url "$LOG")
 BODYKEY=$(noise_entry requestbody "$LOG")
 UUIDKEY='"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$": []'
