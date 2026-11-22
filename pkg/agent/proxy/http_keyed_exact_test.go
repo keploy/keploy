@@ -3,12 +3,14 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -211,7 +213,8 @@ func corpusServe(h integrations.Integrations, mm integrations.MockMemDb, method,
 }
 
 // serveWith is corpusServe under opts, the call carrying the header lines
-// extra too.
+// extra too. A call that is not answered tells its miss too (missOf), so two
+// managers that miss a call alike must also report it alike.
 func serveWith(h integrations.Integrations, mm integrations.MockMemDb, opts models.OutgoingOptions, extra, method, path, body string) string {
 	app, agent := net.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -231,14 +234,46 @@ func serveWith(h integrations.Integrations, mm integrations.MockMemDb, opts mode
 	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
 	if err != nil {
 		_ = app.Close()
-		<-done
-		return "no answer"
+		return "no answer" + missOf(<-done)
 	}
 	got, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	_ = app.Close()
-	<-done
-	return fmt.Sprintf("%d %s", resp.StatusCode, got)
+	return fmt.Sprintf("%d %s", resp.StatusCode, got) + missOf(<-done)
+}
+
+// replayGap is the part of a repeat's next steps that tells how long after
+// the earlier call the call came, at this replay.
+var replayGap = regexp.MustCompile(`this call came \S+ after`)
+
+// missOf is what the integration returned for a call, after " | ": its
+// error and the miss report it carries, less what tells when the call was
+// made (the report's time, a repeat's answer time and gap), so the misses of
+// two managers serving one corpus compare. Nothing for no error.
+func missOf(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := " | " + err.Error()
+	var rep interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.As(err, &rep) || rep.MismatchReport() == nil {
+		return s
+	}
+	r := *rep.MismatchReport()
+	r.At = time.Time{}
+	if r.Repeat != nil {
+		note := *r.Repeat
+		note.AnsweredAt, note.ReplayGapSeconds = time.Time{}, 0
+		r.Repeat = &note
+	}
+	r.NextSteps = replayGap.ReplaceAllString(r.NextSteps, "this call came later")
+	js, err := json.Marshal(r)
+	if err != nil {
+		return s + " | the report does not encode: " + err.Error()
+	}
+	return s + " | " + string(js)
 }
 
 // The keyed exact-body pass answers every call as the whole read answers it:
