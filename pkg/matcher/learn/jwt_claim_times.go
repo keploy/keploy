@@ -117,11 +117,10 @@ func ClaimTimesLearned(ln Learned, w *Window, timeForm bool) ([]Learned, bool) {
 	out := make([]Learned, 0, len(changed))
 	offs := make([]models.ClockOffset, 0, len(changed))
 	for _, c := range changed {
-		rl, ll, why := claimTime(c, rc[c], lc[c], w)
+		rl, ll, form, formF, why := claimTime(c, rc[c], lc[c], w)
 		if why == "" {
 			return nil, false
 		}
-		form, formF := models.FormsOf(TimeForm(rl), TimeForm(ll))
 		o := models.ClockOffset{Form: form, FormF: formF, Claim: c}
 		o.Why = r.Path + " holds a JWT whose " + c + " claim is a time (" + why + "), checked by its form alone (" + o.Forms() +
 			", keploy.yml's times setting at its default); the token's header and every other claim are checked as recorded, its signature by its form"
@@ -137,31 +136,35 @@ func ClaimTimesLearned(ln Learned, w *Window, timeForm bool) ([]Learned, bool) {
 }
 
 // claimTime is the claim c's value as recorded (rv) and in round F (lv) as
-// leaves, and why it is a time in both runs: "" where it is none. A time
-// here is a JSON number in a claim the JWT specifications type a
-// NumericDate (numericDates) whose moment lies near its call in each run
-// (epochNearIn), or a value that is, in each run, a read of the
-// application's clock in that run's span of the call (readInSpan). Never by
-// its shape alone: a claim of another name whose value reads as an instant
-// learning did not read in its call's window is no time here.
-func claimTime(c string, rv, lv json.RawMessage, w *Window) (rl, ll Leaf, why string) {
+// leaves, the forms the time default checks it by (timeForms, as MongoDB's
+// learning reads a claim's: the one form where both runs wrote one, else
+// the two), and why it is a time in both runs: "" where it is none. A time
+// here has a form in each run, by which timeForms checks it: no
+// time-ordered UUID (an id, though its bits read as the clock), and no
+// epoch number far from its call. It is a JSON number in a claim the JWT
+// specifications type a NumericDate (numericDates), or a value that is, in
+// each run, a read of the application's clock in that run's span of the
+// call (readInSpan). Never by its shape alone: a claim of another name
+// whose value reads as an instant learning did not read in its call's
+// window is no time here.
+func claimTime(c string, rv, lv json.RawMessage, w *Window) (rl, ll Leaf, form, formF, why string) {
 	var ok bool
 	if rl, ok = claimLeaf(rv); !ok {
-		return Leaf{}, Leaf{}, ""
+		return Leaf{}, Leaf{}, "", "", ""
 	}
 	if ll, ok = claimLeaf(lv); !ok {
-		return Leaf{}, Leaf{}, ""
+		return Leaf{}, Leaf{}, "", "", ""
 	}
-	if TimeForm(rl) == "" || TimeForm(ll) == "" || !epochNearIn(rl, w, false, nil) || !epochNearIn(ll, w, true, nil) {
-		return Leaf{}, Leaf{}, ""
+	if form, formF = timeForms(TimeForm(rl), TimeForm(ll), rl, ll, w, nil); form == "" {
+		return Leaf{}, Leaf{}, "", "", ""
 	}
 	switch {
 	case numericDates[c] && rl.Type == Number && ll.Type == Number:
-		return rl, ll, "a NumericDate the JWT specifications define"
+		return rl, ll, form, formF, "a NumericDate the JWT specifications define"
 	case w != nil && readInSpan(rl, w.Rec) && readInSpan(ll, w.F):
-		return rl, ll, "a read of the application's clock in its call's window in both runs"
+		return rl, ll, form, formF, "a read of the application's clock in its call's window in both runs"
 	}
-	return Leaf{}, Leaf{}, ""
+	return Leaf{}, Leaf{}, "", "", ""
 }
 
 // claimLeaf is raw, a claim's JSON value, as a leaf of its JSON type: a

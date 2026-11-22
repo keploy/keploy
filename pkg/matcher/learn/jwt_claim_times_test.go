@@ -206,11 +206,18 @@ func TestOnlyNoiseOrAnUnreadInstantIsLearnedAsAToken(t *testing.T) {
 		{what: "another claim, its record run's no read", ln: other("issued", num(recAt.Add(-time.Hour)), num(liveAt)), timeForm: true},
 		{what: "another claim, round F's no read", ln: other("issued", num(recAt), num(liveAt.Add(-time.Hour))), timeForm: true},
 		{what: "another claim, a moment after its call", ln: other("issued", num(recAt), num(liveAt.Add(time.Hour))), timeForm: true},
+		{what: "another claim, a moment just after its call", ln: other("issued", num(recAt), num(liveAt.Add(2*time.Second))), timeForm: true},
 		{what: "another claim as text read as the clock", ln: other("issued", text(recAt, "Z"), text(liveAt, "Z")), timeForm: true, claim: "issued"},
 		{what: "another claim as text of no zone", ln: other("issued", text(recAt, ""), text(liveAt, "")), timeForm: true},
 		{what: "another claim as text, no window", ln: other("issued", text(recAt, "Z"), text(liveAt, "Z")), timeForm: true, noWindow: true},
 		{what: "another claim as text, a span of no start", ln: other("issued", text(recAt, "Z"), text(liveAt, "Z")), timeForm: true, noStart: true},
 		{what: "a NumericDate as text, no read of the clock", ln: other("iat", text(recAt.Add(-48*time.Hour), "Z"), text(liveAt.Add(-48*time.Hour), "Z")), timeForm: true},
+		// A number in a claim the JWT specifications type a NumericDate is a
+		// time by them, where learning read no clock for it: a sign-in
+		// before the call (auth_time), a start and an end around it.
+		{what: "an auth_time, no read of the clock", ln: other("auth_time", num(recAt.Add(-48*time.Hour)), num(liveAt.Add(-48*time.Hour))), timeForm: true, claim: "auth_time"},
+		{what: "an nbf, no read of the clock", ln: other("nbf", num(recAt.Add(-time.Minute)), num(liveAt.Add(-time.Minute))), timeForm: true, claim: "nbf"},
+		{what: "an exp, no read of the clock", ln: other("exp", num(recAt.Add(time.Hour)), num(liveAt.Add(time.Hour))), timeForm: true, claim: "exp"},
 		// A NumericDate is a number in both runs: one a text in either run
 		// is a time here only as a read of the clock in its call's window.
 		{what: "a NumericDate a text as recorded, a number in round F, no read of the clock", ln: other("iat", text(recAt.Add(-48*time.Hour), "Z"), num(liveAt)), timeForm: true},
@@ -243,6 +250,52 @@ func TestOnlyNoiseOrAnUnreadInstantIsLearnedAsAToken(t *testing.T) {
 		}
 		if o, ok := got[0].Clock(); !ok || o.Claim != claim || o.Form == "" {
 			t.Errorf("%s: learned %+v, want a time in the iat claim checked by its form", c.what, o)
+		}
+	}
+}
+
+// A claim that is a time-ordered UUID (a jti or a sid the application
+// mints at its call, of UUID version 7 or 1) is an id, not a time, though
+// its bits read as the application's clock in its call's window: no claim
+// of such a token is learned as a time checked by its form, whether the
+// token was learned as noise or refused as an instant its window shows no
+// read of the clock in, and whether its iat moved beside it or not. The
+// token stays as learning had it, as MongoDB's learning leaves it
+// (timeForms).
+func TestATimeOrderedUUIDClaimIsNoTimeOfItsToken(t *testing.T) {
+	recAt := time.Date(2026, 11, 12, 1, 0, 0, 0, time.UTC)
+	liveAt := recAt.Add(10 * time.Minute)
+	w := &Window{Rec: Span{From: recAt.Add(-time.Second), To: recAt.Add(time.Second)}, F: Span{From: liveAt.Add(-time.Second), To: liveAt.Add(time.Second)}}
+	unread := "body.token changed, and no clock read by the app matched it"
+	for _, id := range []struct {
+		name string
+		at   func(at time.Time, run int) string
+	}{
+		{name: "uuid7", at: func(at time.Time, run int) string { return uuid7(at, strings.Repeat(strconv.Itoa(run), 18)) }},
+		{name: "uuid1", at: func(at time.Time, _ int) string { return kUUID1(at, "0242ac110002") }},
+	} {
+		for _, iatMoves := range []bool{true, false} {
+			tok := func(at time.Time, run int, sig string) string {
+				iat := recAt
+				if iatMoves {
+					iat = at
+				}
+				return claimsToken(base64.RawURLEncoding, `{"sub":"a","iat":`+strconv.FormatInt(iat.Unix(), 10)+`,"jti":"`+id.at(at, run)+`"}`, sig)
+			}
+			rec := Leaf{Path: "body.token", Type: String, Value: tok(recAt, 1, claimSigA)}
+			live := Leaf{Path: "body.token", Type: String, Value: tok(liveAt, 2, claimSigB)}
+			for _, ln := range []Learned{
+				{Kind: KindNoise, Recorded: rec, Live: live},
+				{Kind: KindUnaccounted, Why: unread, unreadWhy: unread, Recorded: rec, Live: live},
+			} {
+				if got, ok := ClaimTimesLearned(ln, w, true); ok {
+					var at []string
+					for _, g := range got {
+						at = append(at, g.Recorded.Path)
+					}
+					t.Errorf("%s jti (iat moved: %v), %s: learned times at %v; want no claim of the token learned as a time", id.name, iatMoves, ln.Kind, at)
+				}
+			}
 		}
 	}
 }
