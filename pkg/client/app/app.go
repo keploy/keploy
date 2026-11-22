@@ -129,6 +129,7 @@ type App struct {
 	composeAbort    composeAbortRule
 	keployContainer string
 	composeFile     string // path to the temp compose file (set during SetupCompose)
+	composeFileEnv  string // COMPOSE_FILE handed only to a wrapper command's child env (never exported to keploy's own process env)
 	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
 	// composeServices are the service keys of the compose source keploy actually
 	// runs — the user's services plus the injected agent. It is the set
@@ -450,6 +451,7 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 
 	if newCmd != "" {
 		// Literal compose command: our file is spliced in, as before.
+		a.composeFileEnv = ""
 		a.cmd = utils.NewAppCommand(newCmd)
 		a.logger.Info(
 			"Running application using a temporary Keploy-generated Docker Compose file (will be cleaned up automatically)",
@@ -460,22 +462,19 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	}
 
 	// A wrapper (make up, ./start.sh, an npm script) that runs compose
-	// internally. Nothing to splice into, so leave the command alone and let
-	// the compose it eventually runs find our file through the environment.
-	//
-	// This is process-global and inherited by every child keploy spawns from
-	// here on, not just the application command. That is tolerable because
-	// every compose invocation keploy makes itself passes -f explicitly, so
-	// none of them consult COMPOSE_FILE.
+	// internally. Nothing to splice into, so leave the command alone and pass
+	// COMPOSE_FILE only in that child's environment (withAgentToken ->
+	// ExecuteCommand extraEnv). Never mutate keploy's own process env via
+	// os.Setenv: subsequent SetupCompose / FindComposeFiles calls in the same
+	// process (per-test-set replay, port retries) would otherwise read
+	// keploy's own generated file — which already defines keploy-agent — and
+	// fail in AddKeployAgentToCompose.
 	if previous, had := os.LookupEnv("COMPOSE_FILE"); had && previous != composeFileEnv {
 		a.logger.Warn("overriding an existing COMPOSE_FILE for this run; any files it named "+
 			"beyond the one keploy copied are not part of the application's configuration",
 			zap.String("previous", previous), zap.String("now", composeFileEnv))
 	}
-	if err := os.Setenv("COMPOSE_FILE", composeFileEnv); err != nil {
-		utils.LogError(a.logger, err, "failed to point the wrapper command at keploy's compose file")
-		return err
-	}
+	a.composeFileEnv = composeFileEnv
 
 	a.logger.Info(
 		"Running application through your command with COMPOSE_FILE pointed at a temporary "+
@@ -536,6 +535,7 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 	if err != nil {
 		return fmt.Errorf("failed to serialise modified compose to YAML: %w", err)
 	}
+	a.composeFileEnv = ""
 	a.setComposeSource("", content, &compose)
 
 	// Ensure the command uses stdin ("-f -"), its abort flags left out,
@@ -2320,11 +2320,13 @@ func extractProjectFlags(cmd string) []string {
 //
 // Under docker compose that command is what starts the agent: the generated
 // keploy-agent service names the control-plane token without a value, and
-// compose fills it in from the environment given here. A leading sudo or doas
-// would reset that environment first, so a root keploy drops it and any other
-// keploy tells sudo to keep the one variable (agentTokenCommand). Every other
-// kind starts its agent some other way, and the application under test is
-// handed nothing.
+// compose fills it in from the environment given here. For a compose wrapper
+// command (`make up`, `./start.sh`), SetupCompose also records COMPOSE_FILE on
+// the App so it travels only in that child's environment instead of mutating
+// keploy's own process env. A leading sudo or doas would reset that environment
+// first, so a root keploy drops it and any other keploy tells sudo to keep
+// those variables (agentTokenCommand). Every other kind starts its agent some
+// other way, and the application under test is handed nothing.
 //
 // One place for both, whichever way the compose command was put together —
 // rewritten around a generated file, piped in memory, or a wrapper keploy
@@ -2349,8 +2351,14 @@ func (a *App) withAgentToken(cmd string) (string, []string) {
 	}
 	uri := a.agentAddress()
 	a.lastLaunchURI, a.lastLaunchSeq = uri, token.RecordLaunch(uri)
-	cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0, append([]string{token.Env}, mock...)...)
-	return cmd, docker.AgentTokenEnv()
+	keep := append([]string{token.Env}, mock...)
+	env := docker.AgentTokenEnv()
+	if a.composeFileEnv != "" {
+		keep = append(keep, "COMPOSE_FILE")
+		env = append(env, "COMPOSE_FILE="+a.composeFileEnv)
+	}
+	cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0, keep...)
+	return cmd, env
 }
 
 func (a *App) run(ctx context.Context) models.AppError {

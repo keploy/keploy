@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
@@ -326,4 +327,51 @@ func TestAnAgentMovedOnEveryUpIsMovedABoundedNumberOfTimes(t *testing.T) {
 		require.Contains(t, string(doc), "127.0.0.1:"+last+":"+last, "file %v", file)
 		require.EqualValues(t, 20000+composeAgentMoves, a.opts.AgentPort)
 	}
+}
+
+// A compose wrapper command launched via executeCommand receives COMPOSE_FILE
+// pointing at keploy's generated docker-compose-tmp.yaml (overriding any user
+// COMPOSE_FILE in keploy's environment), while keploy's own process env keeps
+// the user's original value so a second test set's SetupCompose succeeds.
+func TestSetupComposeWrapperPassesComposeFileOnlyToChildProcess(t *testing.T) {
+	dc, err := docker.New(zap.NewNop(), &config.Config{})
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	userCompose := filepath.Join(dir, "custom-compose.yml")
+	const composeYAML = "services:\n  app:\n    image: alpine:3.21\n    container_name: app\n"
+	require.NoError(t, os.WriteFile(userCompose, []byte(composeYAML), 0o600))
+	t.Chdir(dir)
+	t.Setenv("COMPOSE_FILE", userCompose)
+	t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+	out1 := filepath.Join(dir, "child1.env")
+	out2 := filepath.Join(dir, "child2.env")
+	noopCancel := func(*exec.Cmd) func() error { return func() error { return nil } }
+
+	runSet := func(agentPort uint32, outPath string) string {
+		opts := models.SetupOptions{
+			CommandType: string(utils.DockerCompose),
+			Container:   "app",
+			AgentPort:   agentPort,
+			ProxyPort:   16790,
+			DnsPort:     16791,
+		}
+		wrapperCmd := `sh -c 'printf %s "$COMPOSE_FILE" > "` + outPath + `"'`
+		a := NewApp(zap.NewNop(), wrapperCmd, dc, opts)
+		require.NoError(t, a.SetupCompose(context.Background(), nil))
+		require.Equal(t, userCompose, os.Getenv("COMPOSE_FILE"), "SetupCompose must not mutate keploy's process env")
+		runCmd, runEnv := a.withAgentToken(a.cmd.WholeUnredacted())
+		cmdErr := a.executeCommand(context.Background(), runCmd, runEnv, noopCancel)
+		require.NoError(t, cmdErr.Err)
+		got, readErr := os.ReadFile(outPath)
+		require.NoError(t, readErr)
+		return string(got)
+	}
+
+	wantGenerated, err := filepath.Abs("docker-compose-tmp.yaml")
+	require.NoError(t, err)
+	require.Equal(t, wantGenerated, runSet(16789, out1), "test set 1 child must see keploy's generated COMPOSE_FILE")
+	require.Equal(t, wantGenerated, runSet(16792, out2), "test set 2 child must see keploy's generated COMPOSE_FILE")
+	require.Equal(t, userCompose, os.Getenv("COMPOSE_FILE"), "keploy's process env must keep user COMPOSE_FILE")
 }
