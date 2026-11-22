@@ -15,6 +15,13 @@
 #
 # Needs: RECORD_BIN, the agent image loaded as ghcr.io/keploy/keploy:v3-dev,
 # go, docker, sudo.
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,7 +67,7 @@ docker run --rm -e PROBE_SEND=1 "$IMAGE" $DESTS > "$WORK/baseline.txt"
 : > "$WORK/srv/conns.txt"
 
 mkdir -p "$WORK/rec"
-(cd "$WORK/rec" && sudo -E "$RECORD_BIN" record -c "docker run --rm --name $NAME -e PROBE_SEND=1 $IMAGE $DESTS" \
+(cd "$WORK/rec" && sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "docker run --rm --name $NAME -e PROBE_SEND=1 $IMAGE $DESTS" \
   --container-name "$NAME" --disableANSI > "$WORK/record.log" 2>&1) || true
 grep '^PROBE ' "$WORK/record.log" > "$WORK/recorded.txt" || true
 cp "$WORK/record.log" "$HERE/record_docker_logs.txt" 2>/dev/null || true

@@ -201,10 +201,22 @@ func TestTheAuxiliaryHooksStartNeverFollowsItsTeardown(t *testing.T) {
 	t.Run("a teardown during a start waits for it", func(t *testing.T) {
 		h := &orderHook{entered: make(chan struct{}), release: make(chan struct{})}
 		p := &Proxy{logger: zap.NewNop(), auxiliaryHook: h}
-		started := make(chan error, 1)
-		go func() { started <- p.runAuxStart(context.Background()) }()
+		// The held start is teardown work in progress, which every test
+		// of the process reads (utils.TeardownBusy): it is let go, and
+		// waited for, however this test ends.
+		release := sync.OnceFunc(func() { close(h.release) })
+		started, startEnded, tornDown := make(chan error, 1), make(chan struct{}), make(chan struct{})
+		go func() { defer close(startEnded); started <- p.runAuxStart(context.Background()) }()
+		tearingDown := false
+		t.Cleanup(func() {
+			release()
+			<-startEnded
+			if tearingDown {
+				<-tornDown
+			}
+		})
 		<-h.entered
-		tornDown := make(chan struct{})
+		tearingDown = true
 		go func() { p.detachThenRemoveCA(context.Background()); close(tornDown) }()
 		for !parkedIn("detachThenRemoveCA") { // the teardown waits for the start
 			select {
@@ -222,7 +234,7 @@ func TestTheAuxiliaryHooksStartNeverFollowsItsTeardown(t *testing.T) {
 			t.Fatalf("teardown work is in progress while the teardown waits for the hook's start: %v, want %v (where progress can be seen)",
 				utils.TeardownBusy(), utils.TeardownProgressSeen())
 		}
-		close(h.release)
+		release()
 		if err := <-started; err != nil {
 			t.Fatal(err)
 		}

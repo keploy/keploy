@@ -13,6 +13,8 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
+	"go.keploy.io/server/v3/pkg"
 )
 
 // newCfg builds a minimal config.Config with the replay/health knobs set.
@@ -23,6 +25,26 @@ func newCfg(healthURL string, pollTimeout time.Duration) *config.Config {
 	cfg.Test.HealthURL = healthURL
 	cfg.Test.HealthPollTimeout = pollTimeout
 	return cfg
+}
+
+// readyWithin runs waitForAppReady under a context the row cancels when it
+// ends, and fails the row when the gate has not decided within bound: a gate
+// that waits with no end fails its row by the row's own check, not by the
+// test binary's timeout.
+func readyWithin(t *testing.T, bound time.Duration, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) bool {
+	t.Helper()
+	// An application keploy runs: its exit cancels its run's context.
+	ctx, cancel := context.WithCancel(pkg.EndsWithApp(context.Background()))
+	done := make(chan bool, 1)
+	t.Cleanup(cancel)
+	go func() { done <- waitForAppReady(ctx, logger, cfg, probe) }()
+	select {
+	case ok := <-done:
+		return ok
+	case <-time.After(bound):
+		t.Fatalf("the readiness gate did not decide within %s", bound)
+		return false
+	}
 }
 
 // TestWaitForAppReady_200OnFirstTry verifies the happy path: a health endpoint
@@ -111,26 +133,27 @@ func TestWaitForAppReady_NeverOK(t *testing.T) {
 	logger := zap.New(core)
 
 	start := time.Now()
-	ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
+	ok := readyWithin(t, 30*time.Second, logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
+	// The health URL's own address accepts (it answers 500): past the poll
+	// timeout, that accept is what the first test waits for.
 	if !ok {
-		t.Fatalf("expected waitForAppReady to proceed via fallback, got false")
+		t.Fatalf("expected waitForAppReady to proceed on the app's accept, got false")
 	}
-	// Must have waited at least pollCeiling + fallback Delay.
-	if elapsed < 1200*time.Millisecond {
-		t.Fatalf("expected fallback to wait >=~1.2s (ceiling + delay), got %v", elapsed)
+	if elapsed < 300*time.Millisecond {
+		t.Fatalf("expected the health URL to be polled for its timeout (300ms), got %v", elapsed)
 	}
 
 	found := false
 	for _, entry := range logs.All() {
-		if strings.Contains(entry.Message, "health probe timed out") {
+		if strings.Contains(entry.Message, "has not answered 2xx within the poll timeout") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected INFO 'health probe timed out' log, entries=%v", logs.All())
+		t.Fatalf("expected INFO 'has not answered 2xx within the poll timeout' log, entries=%v", logs.All())
 	}
 }
 
@@ -168,15 +191,14 @@ func TestWaitForAppReady_EmptyURLUsesFixedDelay(t *testing.T) {
 // that branch we set HealthPollTimeout == cancel delay so the two wakeups
 // are tied; the assertion must hold regardless of which branch select
 // picks.
+//
+// Past the poll timeout the wait goes on for the app to accept a connection
+// on the health URL's own address, so the health URL here names an address
+// that refuses: only the cancel can end the wait.
 func TestWaitForAppReady_CtxCanceledAtCeiling(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
 	// 50ms poll ceiling + 50ms cancel => both ctx.Done() and
 	// pollCtx.Done() become ready at ~the same moment.
-	cfg := newCfg(srv.URL, 50*time.Millisecond)
+	cfg := newCfg("http://"+testnet.RefusedAddr(t, "tcp")+"/healthz", 50*time.Millisecond)
 	cfg.Test.Delay = 10 // if the bug regresses, fallback sleep returns true after 10s
 
 	logger := zap.NewNop()
@@ -338,5 +360,43 @@ func TestWaitForAppReady_CtxCanceled(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("ctx cancel should unblock quickly, elapsed=%v", elapsed)
+	}
+}
+
+// A stop (the application's exit or the user's) during the health poll ends
+// the gate at once, not ready, and is not reported as the poll's timeout:
+// the line that says the health URL did not answer within the poll timeout
+// would name the wrong cause.
+func TestAStopDuringTheHealthPollIsNotReportedAsItsTimeout(t *testing.T) {
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		polls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	core, logs := observer.New(zap.InfoLevel)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan bool, 1)
+	go func() { done <- waitForAppReady(ctx, zap.New(core), newCfg(srv.URL, time.Minute), httpProbeTarget{}) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for polls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the health URL was never polled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stop()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("the gate reported the application ready after the stop")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gate did not end at the stop")
+	}
+	if n := logs.FilterMessageSnippet("has not answered 2xx within the poll timeout").Len(); n != 0 {
+		t.Errorf("a stop during the health poll was reported as its timeout: %v", logs.All())
 	}
 }

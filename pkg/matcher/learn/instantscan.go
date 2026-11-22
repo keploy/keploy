@@ -101,12 +101,35 @@ func tried() {
 // scanInstants is each layout's matches in s, in the order they stand, as
 // FindAllStringIndex of the layout's pattern, folded, gives them: matches[k]
 // for layout k. It reads s once.
+//
+// A layout is tried only where the digits from the byte allow it (mayBegin):
+// a payload of words and numbers ("w12x345") has a digit at most of its
+// bytes, and trying every digit layout at each was most of the scan's CPU.
+// The runs of digits and of hex digits a byte begins are each read once,
+// where the scan enters them (digEnd, hexEnd). An RFC 1123 date is tried
+// only where a ',' ends the day name it would begin with (dayMayEnd).
 func scanInstants(s string) (matches [numLayouts][]span) {
 	var next [numLayouts]int
 	var steps int64
+	digEnd, hexEnd := 0, 0
 	for i := 0; i < len(s); i++ {
 		steps++
 		set := layoutStarts[s[i]]
+		if set == 0 {
+			continue
+		}
+		if i >= digEnd {
+			for digEnd = i; digEnd < len(s) && isDigit(s[digEnd]); digEnd++ {
+			}
+		}
+		if i >= hexEnd {
+			for hexEnd = i; hexEnd < len(s) && isHex(s[hexEnd]); hexEnd++ {
+			}
+		}
+		set &= mayBegin(digEnd-i, hexEnd-i)
+		if set&1 != 0 && !dayMayEnd(s, i) {
+			set &^= 1
+		}
 		for set != 0 {
 			k := bits.TrailingZeros8(set)
 			set &^= 1 << k
@@ -122,6 +145,56 @@ func scanInstants(s string) (matches [numLayouts][]span) {
 	instantScanPasses.Add(1)
 	instantScanSteps.Add(steps)
 	return matches
+}
+
+// mayBegin are the layouts (bit k for layout k of layoutAt) whose matches
+// may begin at a byte that begins d ASCII digits and h hex digits, of either
+// case: each matcher reads that run first, up to a byte no digit may be, so
+// it finds no match where the run is of another length. An RFC 1123 date
+// begins with a day's name, and may begin wherever layoutStarts says. The
+// digits' layouts are read from a table (digitLayouts) by d, not compared
+// for each length: the scan asks at every digit of a payload, and the
+// comparisons' branches, taken by a run's length, were a fifth of its CPU.
+func mayBegin(d, h int) uint8 {
+	m := digitLayouts[min(d, len(digitLayouts)-1)]
+	if h == 8 {
+		m |= 1 << 3 // uuidAt: [0-9a-fA-F]{8}-
+	}
+	return m
+}
+
+// digitLayouts are the layouts whose matches may begin at a byte that begins
+// d ASCII digits (mayBegin), by d, the last entry for 10 digits or more.
+var digitLayouts = func() (t [11]uint8) {
+	for d := range t {
+		t[d] = 1 // rfc1123At: (?:Mon|…|Sun),
+		switch {
+		case d == 2:
+			t[d] |= 1 << 5 // timeOfDayAt: \d{2}:
+		case d == 4:
+			t[d] |= 1 << 1 // isoAt: \d{4}-
+		case d == 8:
+			t[d] |= 1 << 2 // compactAt: \d{8}T
+		case d >= 10:
+			t[d] |= 1 << 4 // epochAt: \d{10} or more
+		}
+	}
+	return t
+}()
+
+// dayMayEnd says whether an RFC 1123 date's day name may begin at s[i]: the
+// byte after the name's three letters is the ',' every such date has there.
+// Of the names' letters only a leading 's' has a fold beyond ASCII (ſ, two
+// bytes, of "Sat" and "Sun"), so the name ends three bytes on, or four where
+// s[i] is ſ's lead byte. A payload of words begins one at each 'w' or 'S'
+// ("w12x345", rfcDays' "Wed"), and trying rfc1123At at each was most of
+// what scanning it cost past stepping over its bytes.
+func dayMayEnd(s string, i int) bool {
+	j := i + 3
+	if s[i] == 0xc5 {
+		j++
+	}
+	return j < len(s) && s[j] == ','
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
@@ -251,8 +324,36 @@ func rfc1123At(s string, i int) int {
 	return -1
 }
 
-// isoAt is layout 1:
-// \d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?
+// spaceZoneAt is the end of the zone written after a space that begins at
+// s[j], " [+-](?:0\d|1[0-4]):?[0-5]\d" with no letter, digit, "." or ","
+// right after it (zoneRunsOn), or -1 where none does.
+func spaceZoneAt(s string, j int) int {
+	if !byteIs(s, j, " ") || !byteIs(s, j+1, "+-") || !zoneHourAt(s, j+2) {
+		return -1
+	}
+	e := j + 4
+	if byteIs(s, e, ":") {
+		e++
+	}
+	if !byteIs(s, e, "012345") || !digitsAt(s, e+1, 1) {
+		return -1
+	}
+	if e += 2; e < len(s) && zoneRunsOn(s[e]) {
+		return -1
+	}
+	return e
+}
+
+// zoneHourAt reports whether s[i:i+2] is a zone's hour, "0\d" or "1[0-4]".
+func zoneHourAt(s string, i int) bool {
+	if byteIs(s, i, "0") {
+		return digitsAt(s, i+1, 1)
+	}
+	return byteIs(s, i, "1") && byteIs(s, i+1, "01234")
+}
+
+// isoAt is layout 1, its match ending where isoEnd says:
+// \d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: [+-](?:0\d|1[0-4]):?[0-5]\d|Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?|(?:T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?)
 func isoAt(s string, i int) int {
 	tried()
 	if !digitsAt(s, i, 4) || !byteIs(s, i+4, "-") || !digitsAt(s, i+5, 2) || !byteIs(s, i+7, "-") || !digitsAt(s, i+8, 2) {
@@ -269,6 +370,12 @@ func isoAt(s string, i int) int {
 			if byteIs(s, j, ".,") && digitsAt(s, j+1, 1) {
 				j += 1 + digitsFrom(s, j+1, 9)
 			}
+		}
+		// A zone after a space, whole (" +05:30", " +0530"), one a place
+		// keeps, that ends where its digits do (isoEnd): the instant's one
+		// zone.
+		if e := spaceZoneAt(s, j); e >= 0 {
+			return e
 		}
 	case byteIs(s, j, "Tt") && digitsAt(s, j+1, 2):
 		j += 3

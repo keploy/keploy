@@ -46,8 +46,11 @@ import (
 //
 // What the replay drains (flagMockAsUsed), the revisions and the window
 // signal move after a view's own serve, as before: a parser that keeps an
-// index reads again. A consume the view passes goes through its tier inside
-// the step, since the tier decides whether it is a serve at all.
+// index reads again. That the take answered this session
+// (HasUnservedRecording) moves with the take, in the step (takeLocked): a
+// view installed before the drain no longer shows the take spent. A
+// consume the view passes goes through its tier inside the step, since the
+// tier decides whether it is a serve at all.
 
 // roundState is the round's state that changes holding mu alone.
 type roundState struct {
@@ -77,14 +80,27 @@ type roundState struct {
 	stagedSet uint64
 	// onWait and onRead are test seams, nil outside tests: onWait runs as a
 	// change is about to take the lock (lockRound), onRead inside a
-	// snapshot after each of its reads, with that read's name. A test
-	// drives a change between any two reads with them, never with sleeps.
+	// snapshot after each of its reads, with that read's name, and in
+	// HasUnservedRecording between a recording's view read and its note
+	// read (answeredIn). A test drives a change between any two reads with
+	// them, never with sleeps. Only _test.go files assign them, so no
+	// build that ships ever runs either.
 	onWait func()
 	onRead func(step string)
-	// onSettled is a test seam too: it runs once a consume has settled and
-	// let the round lock go, before what it tells the replay
-	// (flagMockAsUsed).
-	onSettled func()
+	// onTake is a test seam too: it runs as a take of any kind is written
+	// to the take log (takeLocked), holding the round lock, with the take,
+	// before the log reads it. For a consume or a spend, the step that
+	// settles it has marked the recording spent in its view and has not
+	// noted it taken (noteTakenLocked).
+	onTake func(t integrations.Take)
+	// onAnswerAgain is a test seam too: it runs as a held call is about to
+	// be answered once more (heldScope.AnswerRepeatRead), its staging
+	// checked, holding the round lock.
+	onAnswerAgain func()
+	// onSettled is a test seam too (MockManager.OnSettled): it runs once a
+	// consume has settled as a serve and let the round lock go, before what
+	// it tells the replay (flagMockAsUsed), with the recording's name.
+	onSettled atomic.Pointer[func(name string)]
 	// onConsume is a test seam too (MockManager.OnConsume): it runs as a
 	// consume is about to be settled, no lock held.
 	onConsume atomic.Pointer[func(name string)]
@@ -240,6 +256,9 @@ func (m *MockManager) logLocked() *roundLog {
 // takeLocked writes t to the current staging's take log, holding the round
 // lock, and returns its index.
 func (m *MockManager) takeLocked(t integrations.Take) int {
+	if f := m.exact.round.onTake; f != nil {
+		f(t)
+	}
 	l := m.logLocked()
 	switch t.How {
 	case integrations.TakeCarried, integrations.TakeVoided, integrations.TakeRestored:
@@ -260,6 +279,8 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 	switch t.How {
 	case integrations.TakeRestored:
 		delete(l.taken, t.Mock.Name)
+	case integrations.TakeVoided:
+		m.forgetVoidedLocked(t.Mock.Name)
 	case integrations.TakeCarried:
 		if t.Of >= 0 {
 			byTest(t.Test, t.Of)
@@ -269,6 +290,7 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 			l.taken = map[string]bool{}
 		}
 		l.taken[t.Mock.Name] = true
+		m.noteTakenLocked(t.Mock.Name)
 		switch {
 		case t.Ahead:
 			if l.ahead == nil {
@@ -280,6 +302,41 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 		}
 	}
 	return i
+}
+
+// noteTakenLocked counts the recording named name as one that answered this
+// session (servedThisSession), holding the round lock, in the step that
+// takes it. What the replay counts of the serve (flagMockAsUsed) is written
+// only once the round lock is let go, a pool view's ahead only as the next
+// test opens: a view installed before then, the next test's or the pool's,
+// no longer reports the take spent (MockSpent), and a call held for a
+// recording no call took yet (integrations.UnservedRecordingFinder) would
+// read the taken one as unserved until a window change no test may bring.
+// The note is that count ahead of it, and reads as the count does once
+// the take is settled: a take given back later (TakeRestored) answered all
+// the same, as the replay's count of it stays, and a pool view's ahead
+// voided did not (forgetVoidedLocked).
+func (m *MockManager) noteTakenLocked(name string) {
+	m.consumedMu.Lock()
+	if m.takenThisSession == nil {
+		m.takenThisSession = map[string]bool{}
+	}
+	m.takenThisSession[name] = true
+	m.consumedMu.Unlock()
+}
+
+// forgetVoidedLocked takes back, holding the round lock, the note of a pool
+// view's ahead answer of the recording named name that a view install
+// voided (TakeVoided: the test it was answered for did not open next). The
+// replay never counts that answer (ServeExactTest flags a carried one
+// alone), so the recording answered no request of this session's, as it
+// reads with no note. No other take of it is noted in between: the pool
+// view holds it as its own, consumed, from the take to the install that
+// voids it, and refuses every other door's take of it.
+func (m *MockManager) forgetVoidedLocked(name string) {
+	m.consumedMu.Lock()
+	delete(m.takenThisSession, name)
+	m.consumedMu.Unlock()
 }
 
 // takenInStagingLocked reports whether name was consumed or spent in the
@@ -424,7 +481,10 @@ func (m *MockManager) bumpStagingEpoch() {
 // replaced within it, at a test's begin or end, is still the call's set, and
 // a consume that finds its view closed is settled in the view that replaces
 // it, as one with no guard is. restaged: a staging guard found the staging
-// moved.
+// moved. readIn: the view a staging guard's call was read in (its mark's),
+// in which the call's reads, walk and worker spend are made
+// (heldScope.readView, heldScope.SequenceView, windowed); nil when they are
+// made in the view in force (heldScope.readView says when).
 type roundGuard struct {
 	at       integrations.RoundAt
 	moved    string
@@ -432,6 +492,31 @@ type roundGuard struct {
 	free     bool
 	staging  bool
 	restaged bool
+	readIn   *exactView
+}
+
+// windowed reports whether a consume settled in v is a test window's: made
+// by a call read in a test's view. It decides which spend of the worker
+// scope the consume reads and makes (exactView.spendsInTests,
+// spentOutsideIn): the windows' or the calls' between tests. A staging
+// guard's call (HoldToRound) settles in the view in force, which a test's
+// begin or end may have installed since its read; its spend is made in the
+// view its reads are (heldScope.readView), as its walk is
+// (heldScope.SequenceView): the view it was read in (readIn) while it reads
+// there. So a call read between tests that commits after the next test
+// opened never spends a worker recording for the windows, nor one read in a
+// test that commits after its end for the calls between tests: a window's
+// answers never move with when a call's commit lands. A call that reads the
+// view in force (one marked where the learn tracker was ahead of the store,
+// decided in the test the store opens next) spends there too, so a worker
+// recording it is answered in a window is spent for the windows. Any other
+// consume settles in the view it was read in (a guard of the round refuses
+// one the round moved under), or tells no read: v's.
+func (g *roundGuard) windowed(v *exactView) bool {
+	if g != nil && g.readIn != nil {
+		return g.readIn.test != ""
+	}
+	return v.test != ""
 }
 
 // checks says g checks its take against a round: a guard, not ServingFor's.
@@ -642,6 +727,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	n := len(l.takes)
 	s := integrations.RoundSnapshot{
 		At:         integrations.RoundAt{Epoch: l.epoch, Gen: r.gen, Bounds: r.bounds, Taken: n},
+		Reads:      m.windowReads.Load(),
 		Test:       v.test,
 		Ahead:      v.test == "" && len(v.owned) > 0,
 		Fired:      m.exact.fired.Load(),
@@ -672,11 +758,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	// What the view shows of each tier (shownOf): perTest and reusable keep
 	// only those, so the snapshot never walks every test's recordings.
 	filteredVals, unfilteredVals, startupVals := v.shownOf(filtered, ""), v.shownOf(unfiltered, ""), v.shownOf(startup, "")
-	var teardown []*models.Mock
-	if v.afterTests(s.Fired) {
-		teardown = m.teardown(v.poolKey, startupVals)
-	}
-	s.PerTest = v.perTest("", filteredVals, teardown)
+	s.PerTest = v.perTest("", filteredVals, m.perTestFromStartup(v, startupVals, s.Fired))
 	read("per-test")
 	s.Startup = v.reusable("", startupVals, unfilteredVals)
 	s.SessionScoped = v.reusable("", unfilteredVals, startupVals)
@@ -734,7 +816,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	parts := integrations.RoundParts{
 		Owners: owners, Claimants: claimants, Worker: v.worker, Pool: v.pool,
 		Windows: m.testWindows.Load(), PoolNames: m.exact.poolNames.Load(),
-		ViewGen: v.round,
+		ViewGen: v.round, View: viewCursor{m: m, v: v},
 	}
 	if b := r.bound; s.Ended != "" && b != nil {
 		// A call read here may be the ended test's late one: its
@@ -932,9 +1014,32 @@ const restagedWhy = "the staging moved: the test set was staged again"
 // staging call was marked in (heldScope). restaged reports whether a read or
 // a consume door of it found the staging moved since.
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
-	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
-	h.seq, h.seqOK = call.Sequence()
+	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}, heldIn: m.exactView()}
 	h.read.at, h.read.known = call.Round()
+	snapped := false
+	if c, mine := call.StoreView().(viewCursor); mine && c.m == m {
+		// Marked from a round snapshot (integrations.RoundSnapshot.CallRound:
+		// record's full round, its learn step's read), which reads and walks
+		// in the view in force: held to the view that snapshot read, so a
+		// view installed after it, before this hold or between two holds of
+		// the call, is a move to every hold (CallViewMoved), and no verdict
+		// joins a read of one view with a read of the next.
+		h.heldIn, snapped = c.v, true
+	}
+	if call.TrackerAhead() {
+		// Decided in the test the store opens next: the call reads, walks
+		// and spends in the view in force (readView).
+		return h, h.restaged
+	}
+	if seq, ok := call.Sequence(); ok {
+		if c, mine := seq.Cursor.(viewCursor); mine && c.m == m {
+			// Read in the view its mark kept: held there too, so a read in
+			// any other is a move (CallViewMoved), even when a test's begin
+			// or end installed the view in force between the mark and here.
+			h.seq, h.g.readIn, h.heldIn = seq, c.v, c.v
+		}
+	}
+	h.snapped = snapped
 	return h, h.restaged
 }
 
@@ -944,6 +1049,9 @@ var (
 	// A parser's per-generation index serves only a store that tells whose
 	// a recording is (the HTTP strict index).
 	_ integrations.TestOwner = (*heldScope)(nil)
+	// A call held to its round reads keyed only while the manager's
+	// replay declares no sources (the manager's, promoted).
+	_ integrations.SourcesDeclarer = (*heldScope)(nil)
 )
 
 // heldScope is the manager held to one call's staging (HoldToRound): its
@@ -952,13 +1060,15 @@ var (
 // diagnoses a call finds nothing once the staging moved, checked after the
 // read is made: a staging moves its epoch before it changes the trees or
 // installs a view, so a read the staging is still the call's after was of
-// the call's set. One call's: not for sharing between goroutines.
+// the call's set. A miss of a call marked from a round snapshot finds
+// nothing, too, once its view was replaced (viewGone). One call's: not for
+// sharing between goroutines.
 type heldScope struct {
 	roundScope
 	// seq is the sequence view of the view the call was read in
-	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
-	seq   integrations.SequenceView
-	seqOK bool
+	// (integrations.CallRound.Sequence, the view g.readIn), which h walks
+	// while it reads there (SequenceView).
+	seq integrations.SequenceView
 	// owns is the call's decision whether it is one of the open test's own
 	// calls (HideBackgroundWhen), until a door or HidesBackground asks it.
 	owns func() bool
@@ -970,19 +1080,123 @@ type heldScope struct {
 	// background is in none of h's reads but KindBackground's, and its doors
 	// refuse it (hides).
 	hideBg bool
+	// ownGen is the generation h reports while it reads elsewhere
+	// (elsewhereGen), 0 until then.
+	ownGen uint64
+	// heldIn is the view h's call was read in: its mark's (readIn) when the
+	// mark kept one, the round snapshot's its mark was made from
+	// (integrations.CallRound.StoreView), else the view in force as h was
+	// held (HoldToRound). A call that reads the view in force (readIn nil:
+	// from its hold on, or since a refused consume, settled) is told it
+	// moved from it (CallViewMoved). Views are installed new and never
+	// again, so one still in force is the one the call was read in.
+	heldIn *exactView
+	// snapped says h's call was marked from a round snapshot, not one
+	// decided in the test the store opens next: it reads, walks and spends
+	// in the view in force, its miss diagnosed in the view that snapshot
+	// read (DiagnoseInCallView).
+	snapped bool
+	// diagnosing says h reads for its call's miss only in the view its
+	// round snapshot read (DiagnoseInCallView), nothing once a test's begin
+	// or end replaced it (viewGone).
+	diagnosing bool
 }
+
+// DiagnoseInCallView implements integrations.CallViewDiagnoser: h, told in
+// place (one call's), reads from now on for its call's miss. A call marked
+// from a round snapshot (record's full round's learn step) reads only in
+// the view that snapshot read: nothing once a test's begin or end replaced
+// it (viewGone), so its miss names no recording of the view in force (the
+// next test's, or the pool's) as its closest, nor diffs the call against
+// one. The snapshot kept no walk of its view to read that view in. Any
+// other call reads as before: its mark's view (readIn), or the view in
+// force for one decided in the test the store opens next, where it is
+// decided.
+func (h *heldScope) DiagnoseInCallView() integrations.MockMemDb {
+	h.diagnosing = h.snapped
+	return h
+}
+
+// CallViewGoneWhy implements integrations.CallViewGoneTeller: once h reads
+// nothing for its call's miss because a test's begin or end replaced the
+// view its round snapshot read (viewGone), which test the replay ended or
+// began, and that the miss therefore names no recording; "" otherwise.
+func (h *heldScope) CallViewGoneWhy() string {
+	if !h.viewGone() {
+		return ""
+	}
+	// heldIn is a round snapshot's view (diagnosing: snapped), never nil.
+	was, now := h.heldIn.test, h.exactView().testName()
+	where, what := "between tests", "served another view of its recordings between tests"
+	switch {
+	case was != "" && now != "":
+		where, what = "in "+was, "ended "+was+" and began "+now
+	case was != "":
+		where, what = "in "+was, "ended "+was
+	case now != "":
+		what = "began " + now
+	}
+	return "keploy record's full round decided this request " + where + ", and the replay " + what + " before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
+}
+
+// testName is v's open test, "" for none or no v.
+func (v *exactView) testName() string {
+	if v == nil {
+		return ""
+	}
+	return v.test
+}
+
+var (
+	_ integrations.CallViewDiagnoser  = (*heldScope)(nil)
+	_ integrations.CallViewGoneTeller = (*heldScope)(nil)
+)
 
 // SequenceView implements integrations.SequenceViewer: the sequence view of
 // the view h's call was read in, so a call read in one view and walked after
 // the next one is installed (a test opening or ending between the read and
 // the walk) walks the view it was read in, its cursor and its window, never
-// the next view's; with no view kept by the mark (exact serving began after
-// it), the view in force now.
+// the next view's; while h reads in the view in force (readView), that
+// view's.
 func (h *heldScope) SequenceView() (integrations.SequenceView, bool) {
-	if h.seqOK {
+	if h.g.readIn != nil {
 		return h.seq, true
 	}
 	return h.MockManager.SequenceView()
+}
+
+// readView is the view h's reads of the staged recordings are made in: the
+// view the call was read in, as its walk is (SequenceView) and its worker
+// scope's spend (roundGuard.windowed), never one a test's begin or end
+// installed after the read. So a read that lands late is answered as one
+// that landed on time: a call read between tests reads the worker scope in
+// gap order and whatever a window spent of it, a test's call what the windows
+// left, and neither reads the recordings of a test whose view came or went
+// meanwhile. Its consumes settle in the view in force (roundGuard): one the
+// view in force refuses is a miss, as a consume that lands after a test's
+// begin or end is. A call marked where the learn tracker had begun a test
+// the store had not opened is decided in the test the store opens next
+// (integrations.CallRound.TrackerAhead): it reads the view in force, and
+// walks and spends the worker scope there too, as does a call whose mark
+// kept no view, and one whose consume the view in force refused (settled).
+// One rule for the three, so one worker recording never answers two calls
+// in the windows, wherever a test's begin lands between a call's mark and
+// its read.
+func (h *heldScope) readView() *exactView {
+	if h.g.readIn != nil {
+		return h.g.readIn
+	}
+	return h.exactView()
+}
+
+// IsTestWindowActive implements integrations.TestWindows' question for h's
+// call: whether a test was open in the view its reads are made in
+// (readView), which tells a parser that routes by it which tier serves it.
+func (h *heldScope) IsTestWindowActive() bool {
+	if v := h.readView(); v != nil {
+		return v.test != ""
+	}
+	return h.MockManager.IsTestWindowActive()
 }
 
 // restaged reports whether a read or a consume door of h found the staging
@@ -1009,7 +1223,11 @@ func (h *heldScope) moved() bool {
 // set and miss each later call of it. Each is sampled before the check, as a
 // read is made before held's: a staging moves its epoch before it changes the
 // trees or a generation, so a sample the staging is still the call's after
-// is of the call's set.
+// is of the call's set. While h reads in a view other than the one in force
+// (elsewhere) each is h's own (elsewhereGen): h's reads are not the view in
+// force's, so a parser must neither answer the call from its index of the
+// view in force, nor file what h read under that view's generation for the
+// view's own calls to be answered from.
 func (h *heldScope) StagingGeneration() uint64 {
 	return h.generation(h.MockManager.StagingGeneration())
 }
@@ -1025,20 +1243,62 @@ func (h *heldScope) RevisionByKind(kind models.Kind) uint64 {
 }
 
 // generation is g, sampled before the call, while the staging is still h's
-// call's; integrations.RestagedGeneration once it moved.
+// call's and h reads in the view in force; integrations.RestagedGeneration
+// once the staging moved; h's own while it reads in another view.
 func (h *heldScope) generation(g uint64) uint64 {
 	if h.moved() {
 		return integrations.RestagedGeneration
 	}
+	if h.elsewhere() {
+		return h.elsewhereGen()
+	}
 	return g
+}
+
+// elsewhere reports whether h reads in a view other than the one in force:
+// the view its call was read in (readIn), or the round snapshot's its call
+// was marked from (viewGone), which a test's begin or end has since
+// replaced.
+func (h *heldScope) elsewhere() bool {
+	return (h.g.readIn != nil && h.g.readIn != h.exactView()) || h.viewGone()
+}
+
+// viewGone reports whether h reads for the miss of a call marked from a
+// round snapshot (diagnosing) whose view is no longer in force: a test's
+// begin or end installed another since. h reads nothing then, checked after
+// each read, as a staging's move is (held), so no text the miss prints (its
+// closest recording, its diff) is of another view than the one its learn
+// step read. Views are installed new and never again, so one still in force
+// after a read was in force for all of it.
+func (h *heldScope) viewGone() bool {
+	return h.diagnosing && h.exactView() != h.heldIn
+}
+
+// elsewhereStride parts the generations held stores report while they read
+// elsewhere: wider than any version a view over the store adds to them
+// (scopedMockDb.viewVersion), so no two stores' meet.
+const elsewhereStride = 1 << 20
+
+// elsewhereGens counts the held stores that read elsewhere.
+var elsewhereGens atomic.Uint64
+
+// elsewhereGen is h's own generation while it reads elsewhere
+// (integrations.ElsewhereGeneration): the same at each sample, and no other
+// store's.
+func (h *heldScope) elsewhereGen() uint64 {
+	if h.ownGen == 0 {
+		h.ownGen = integrations.ElsewhereGeneration + elsewhereGens.Add(1)*elsewhereStride
+	}
+	return h.ownGen
 }
 
 var _ integrations.StagingGenerations = (*heldScope)(nil)
 
 // held is mocks when the staging is still h's call's after they were read;
-// none once it moved.
+// none once it moved, nor once the view a round snapshot's call is
+// diagnosed in was replaced (viewGone).
 func (h *heldScope) held(mocks []*models.Mock, err error) ([]*models.Mock, error) {
-	if h.moved() {
+	if h.moved() || h.viewGone() {
 		return nil, nil
 	}
 	return h.unhidden(mocks), err
@@ -1059,83 +1319,84 @@ func (h *heldScope) ServingFor(f *learn.Flight) integrations.MockMemDb {
 }
 
 func (h *heldScope) GetFilteredMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetFilteredMocks())
+	return h.held(h.getFilteredMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetFilteredMocksInWindow() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetFilteredMocksInWindow())
+	return h.held(h.getFilteredMocksInWindowIn(h.readView()))
 }
 
 func (h *heldScope) GetUnFilteredMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetUnFilteredMocks())
+	return h.held(h.getUnFilteredMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetPerTestMocksInWindow() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetPerTestMocksInWindow())
+	return h.held(h.getPerTestMocksInWindowIn(h.readView()))
 }
 
 // RangePerTestMocksInWindow is the manager's per-test walk
 // (integrations.PerTestRanger), each mock checked after it is read: the walk
-// stops once the staging moved.
+// stops once the staging moved, or the call's view was replaced (viewGone).
 func (h *heldScope) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
 	if h.moved() {
 		return nil
 	}
-	return h.MockManager.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
-		return !h.moved() && (h.hides(mk) || fn(mk))
+	return h.rangePerTestMocksInWindowIn(h.readView(), func(mk *models.Mock) bool {
+		return !h.moved() && !h.viewGone() && (h.hides(mk) || fn(mk))
 	})
 }
 
 func (h *heldScope) GetSessionMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetSessionMocks())
+	return h.held(h.getSessionMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetSessionMocksInWindow(start, end))
+	return h.held(h.getSessionMocksInWindowIn(h.readView(), start, end))
 }
 
 func (h *heldScope) GetSessionScopedMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetSessionScopedMocks())
+	return h.held(h.getSessionScopedMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetStartupMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetStartupMocks())
+	return h.held(h.getStartupMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetStartupMocksByKind(kind))
+	return h.held(h.getStartupMocksByKindIn(h.readView(), kind))
 }
 
 // RangeSessionMocksWithKey is the manager's keyed walk of the session tier
 // (integrations.SessionKeyReader), each mock checked after it is read: the
-// walk stops once the staging moved.
+// walk stops once the staging moved, or the call's view was replaced
+// (viewGone).
 func (h *heldScope) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
 	if h.moved() {
 		return nil
 	}
-	return h.MockManager.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-		return !h.moved() && (h.hides(mk) || fn(mk))
+	return h.rangeSessionMocksWithKeyIn(h.readView(), ix, key, func(mk *models.Mock) bool {
+		return !h.moved() && !h.viewGone() && (h.hides(mk) || fn(mk))
 	})
 }
 
 func (h *heldScope) GetConnectionMocks(connID string) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetConnectionMocks(connID))
+	return h.held(h.getConnectionMocksIn(h.readView(), connID))
 }
 
 func (h *heldScope) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetFilteredMocksByKind(kind))
+	return h.held(h.getFilteredMocksByKindIn(h.readView(), kind))
 }
 
 func (h *heldScope) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetUnFilteredMocksByKind(kind))
+	return h.held(h.getUnFilteredMocksByKindIn(h.readView(), kind))
 }
 
 func (h *heldScope) GetCarryOverMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetCarryOverMocks())
+	return h.held(h.getCarryOverMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetCarryOverMocksByKind(kind))
+	return h.held(h.getCarryOverMocksByKindIn(h.readView(), kind))
 }
 
 func (h *heldScope) Background(kind models.Kind) []*models.Mock {
@@ -1152,7 +1413,7 @@ func (h *heldScope) SpentBackground(kind models.Kind) []*models.Mock {
 // hides all the same.
 func (h *heldScope) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
 	unused, spent = h.MockManager.KindBackground(kind)
-	if h.moved() {
+	if h.moved() || h.viewGone() {
 		return nil, nil
 	}
 	return unused, spent
@@ -1162,8 +1423,51 @@ func (h *heldScope) PairingCandidates(kind models.Kind) []*models.Mock {
 	return h.heldOf(h.MockManager.PairingCandidates(kind))
 }
 
+// ConsumedTestMocks implements integrations.ExactConsumedReader for h's
+// call: the test mocks that have answered in the view h's reads are made in
+// (readView), in the order they did, as its other reads are. So a call read
+// in a test's view is told that test's answered recordings, which none of
+// its reads shows any more, even once the test ended before it asks; never
+// those of the view in force since. None once the staging moved.
 func (h *heldScope) ConsumedTestMocks() []*models.Mock {
-	return h.heldOf(h.MockManager.ConsumedTestMocks())
+	return h.heldOf(consumedTestMocksIn(h.readView()))
+}
+
+// AnswerRepeatRead is the manager's (integrations.RepeatReadAnswerer) while
+// the staging is still h's call's: a call of a set the replay staged another
+// under is answered by no recording of it. The check and the answer are one
+// step under the round lock, which a staging holds as it moves its epoch
+// (bumpStagingEpoch), as a by-kind spend's are (spendByKindAt): a staging
+// lands before the check, and the call is refused, or after the answer.
+func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (integrations.RepeatReadAnswer, bool) {
+	m := h.MockManager
+	m.lockRound()
+	if ok, _ := m.guardLocked(&h.g, nil); !ok {
+		return integrations.RepeatReadAnswer{}, false
+	}
+	defer m.exact.round.mu.Unlock()
+	if f := m.exact.round.onAnswerAgain; f != nil {
+		f()
+	}
+	return m.AnswerRepeatRead(matched)
+}
+
+// CallViewMoved implements integrations.CallViewTeller: whether h's call
+// reads the view in force (readView: one marked from a round snapshot, one
+// decided in the test the store opens next,
+// integrations.CallRound.TrackerAhead, or one whose consume the view in force
+// refused, settled) and that view is not the one the call was read in
+// (heldIn: its mark's, its round snapshot's, or the one in force as it was
+// held), so two of its reads may have been made in two views. A call that
+// still reads the view it was read in (readIn) makes every read there: false.
+func (h *heldScope) CallViewMoved() bool {
+	return h.g.readIn == nil && h.exactView() != h.heldIn
+}
+
+var _ integrations.CallViewTeller = (*heldScope)(nil)
+
+func (h *heldScope) SkippedReadsAnswered() []*models.Mock {
+	return h.heldOf(h.MockManager.SkippedReadsAnswered())
 }
 
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
@@ -1177,6 +1481,21 @@ func (h *heldScope) FindAnsweredEarlier(kind models.Kind, keys []string, match f
 		return integrations.AnsweredCall{}, false
 	}
 	return a, ok
+}
+
+// AnsweredRedacting is the manager's (integrations.AnsweredRedactingReader)
+// while the staging is still h's call's after the read; once another set was
+// staged under the call, the log is that set's, and the call's recordings are
+// not known: none, and not complete, so the miss is redacted by every place.
+// So too for the miss of a call marked from a round snapshot once its view
+// was replaced (viewGone): h then reads none of the pool its places are
+// summed from.
+func (h *heldScope) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
+	mocks, complete := h.MockManager.AnsweredRedacting(kind)
+	if h.moved() || h.viewGone() {
+		return nil, false
+	}
+	return mocks, complete
 }
 
 func (h *heldScope) ExactTakenCandidates(kind models.Kind) []*models.Mock {

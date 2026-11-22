@@ -2,6 +2,7 @@ package generic
 
 import (
 	"encoding/base64"
+	"fmt"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -21,8 +22,10 @@ func viewRecording(answer string, reqs ...string) *models.Mock {
 // The view a generic serve states is the recording with the request as the
 // application sent it: its bytes as one piece, kept as the recorder keeps a
 // piece (text as it is, other bytes base64), and the recorded answer F
-// wrote, the recording itself unchanged. Its key names the bytes sent, the
-// same in whatever pieces they were read and another for other bytes.
+// wrote, the recording itself unchanged. Its key names the answer F gave,
+// never the request: every serve of the recording gave its recorded answer,
+// so every serve is one view, whatever bytes it sent and in whatever pieces
+// they were read.
 func TestAGenericServesViewIsTheRequestAsSentAndTheRecordedAnswer(t *testing.T) {
 	rec := viewRecording("+OK 17\r\n", "GET k ", "id=1\r\n")
 	recReq := rec.Spec.GenericRequests
@@ -66,8 +69,32 @@ func TestAGenericServesViewIsTheRequestAsSentAndTheRecordedAnswer(t *testing.T) 
 	if k1 != k2 {
 		t.Fatal("the same bytes read in other pieces are named another view")
 	}
-	if k1 == k3 {
-		t.Fatal("other bytes sent are named the same view")
+	if k1 != k3 {
+		t.Fatal("other bytes sent, answered with the same recorded answer, are named another view")
+	}
+}
+
+// A request the application makes anew on every call (a nonce, a timestamp,
+// a signature), which F answers with its recording's answer whole again and
+// again, is one view of the recording, however often it is served: F gave
+// the application one answer. Before, each request's bytes named a view of
+// its own, the fifth was past the views a set keeps, and a later call of the
+// set refused every changed value that may stand there as one where keploy
+// could not read what it gave the application.
+func TestARequestMadeAnewOnEveryCallIsOneViewOfItsRecording(t *testing.T) {
+	const serves = 64
+	rec := viewRecording("+OK 17\r\n", "AUTH nonce=0 sig=0\r\n")
+	keys := map[string]int{}
+	for i := 0; i < serves; i++ {
+		sent := [][]byte{[]byte(fmt.Sprintf("AUTH nonce=%08x ", i*2654435761)), []byte(fmt.Sprintf("sig=%064x\r\n", i+1))}
+		load, key := servedView(rec, sent)
+		if load == nil || key == "" {
+			t.Fatalf("serve %d states no view", i)
+		}
+		keys[key]++
+	}
+	if len(keys) != 1 || keys[recordedAnswerKey] != serves {
+		t.Fatalf("%d serves of one recorded answer are named %d views (%v); want one, the recorded answer's", serves, len(keys), keys)
 	}
 }
 

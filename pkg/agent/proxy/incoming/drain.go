@@ -88,9 +88,9 @@ func newDrainConn(conn net.Conn) *drainConn {
 // it is one count taken by the kernel at once (TCP_INFO), so it can only fall
 // short of what has arrived (by what arrived as the conn was wrapped), never
 // run past it. Elsewhere it is what has been read, then what the socket holds
-// unread (SIOCINQ, Linux only), read in that order: a byte read in between is
-// in neither, and a close is counted only once read. It may be read from any
-// goroutine.
+// unread (SIOCINQ, macOS's SO_NREAD, Windows' FIONREAD), read in that order:
+// a byte read in between is in neither, and a close is counted only once
+// read. It may be read from any goroutine.
 func (d *drainConn) Arrived() int64 {
 	if d.counted {
 		if n, ok := proxyutil.Received(d.rc); ok {

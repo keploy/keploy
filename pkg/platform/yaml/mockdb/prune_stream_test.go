@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"runtime/metrics"
 	"sort"
 	"strings"
 	"sync"
@@ -563,10 +562,10 @@ func TestPersistMockNoise_WritesWhatTheReadAllPathWrote(t *testing.T) {
 // heapSampleCtx measures what a prune holds while it runs. The prune checks
 // its context between lines of a yaml or json mock file (its reader does, once
 // per line) and every ctxCheckEvery mocks of a gob stream. At every
-// doneEvery-th Done call and every Err call, this context collects garbage
-// from the prune's own goroutine and reads the live heap. The prune is paused
-// for that collection, so the figure is what the prune holds at that point,
-// however the host schedules the collector.
+// doneEvery-th Done call and every Err call, this context reads the heap the
+// prune left (pruneHeapLeft) from the prune's own goroutine. The prune is
+// paused for those collections, so the figure is what the prune holds at that
+// point, however the host schedules the collector.
 //
 // Reading the live heap from another goroutine while the prune ran did not
 // measure that: a concurrent collection counts what is allocated during its
@@ -595,13 +594,29 @@ func (c *heapSampleCtx) Err() error {
 }
 
 func (c *heapSampleCtx) sample() {
-	runtime.GC()
-	s := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
-	metrics.Read(s)
+	live := pruneHeapLeft()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.peak = max(c.peak, s[0].Value.Uint64())
+	c.peak = max(c.peak, live)
 	c.samples++
+}
+
+// pruneHeapLeft is the heap allocated after two collections: the first
+// leaves what a sync.Pool keeps (encoding/json keeps its encoders' buffers
+// there, about 0.1 MiB in the json prune below), the second frees it. It is
+// HeapAlloc once the second collection's sweep is done: the objects that
+// collection left, each counted once. The bytes a collection marked
+// (/gc/heap/live:bytes) are no such count: two GC workers that reach one
+// object at once may both count it, races the runtime calls benign. The row
+// keeps the most of about 256 readings, so a reading that counted an object
+// twice was its peak, and one at its base read the prune's hold low by that
+// object.
+func pruneHeapLeft() uint64 {
+	var ms runtime.MemStats
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
 }
 
 // pruneHeapPeak runs prune with a heapSampleCtx that samples about 256 times
@@ -618,10 +633,7 @@ func pruneHeapPeak(t *testing.T, path string, prune func(ctx context.Context) er
 		return int64(bytes.Count(data, []byte("\n")))
 	}()
 	ctx := &heapSampleCtx{Context: context.Background(), doneEvery: max(1, lines/256)}
-	runtime.GC()
-	s := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
-	metrics.Read(s)
-	base := s[0].Value.Uint64()
+	base := pruneHeapLeft()
 	err = prune(ctx)
 	if ctx.peak > base {
 		peak = ctx.peak - base
@@ -733,7 +745,7 @@ func TestUpdateMocks_AFailedPruneLeavesTheMocksFileWhole(t *testing.T) {
 		name    string
 		raw     string
 		ctx     func() context.Context
-		replace func(logger *zap.Logger, src, dst string) error
+		replace func(logger *zap.Logger, root, src, dst string) error
 	}{
 		{name: "a document does not parse", raw: "---\nversion: [unterminated\n"},
 		{name: "a document does not decode", raw: "---\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-bad\nspec: 3\n"},
@@ -743,7 +755,7 @@ func TestUpdateMocks_AFailedPruneLeavesTheMocksFileWhole(t *testing.T) {
 			// file open): yaml.ReplaceFile then puts the original back and
 			// fails — see its tests for that fallback.
 			name: "the new file cannot be put in place",
-			replace: func(_ *zap.Logger, src, dst string) error {
+			replace: func(_ *zap.Logger, _, src, dst string) error {
 				return &os.LinkError{Op: "rename", Old: src, New: dst, Err: errors.New("sharing violation")}
 			},
 		},
@@ -757,7 +769,7 @@ func TestUpdateMocks_AFailedPruneLeavesTheMocksFileWhole(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.replace != nil {
-				defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
+				defer func(r func(*zap.Logger, string, string, string) error) { replaceFile = r }(replaceFile)
 				replaceFile = tc.replace
 			}
 			ctx := context.Background()
@@ -808,8 +820,8 @@ func TestUpdateMocks_AnOriginalLeftAsideIsNotAFailedPrune(t *testing.T) {
 		}
 		return os.Rename(from, to)
 	}
-	defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
-	replaceFile = func(logger *zap.Logger, src, dst string) error {
+	defer func(r func(*zap.Logger, string, string, string) error) { replaceFile = r }(replaceFile)
+	replaceFile = func(logger *zap.Logger, _, src, dst string) error {
 		return yaml.ReplaceFileWith(logger, rename, src, dst)
 	}
 

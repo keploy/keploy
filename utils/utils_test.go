@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -482,10 +483,10 @@ func TestReplaceGrpcHost(t *testing.T) {
 			wantErr:   true,
 		},
 		{
-			name:      "invalid authority format without port",
-			authority: "localhost",
+			name:      "invalid authority format",
+			authority: "[fd00::1",
 			ipAddress: "127.0.0.1",
-			want:      "localhost",
+			want:      "[fd00::1",
 			wantErr:   true,
 		},
 	}
@@ -574,6 +575,13 @@ func TestReplaceBaseURL(t *testing.T) {
 			currentURL: "://invalid-url",
 			baseURL:    "http://new-domain.com",
 			want:       "://invalid-url",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid baseURL",
+			currentURL: "http://old-domain.com/api",
+			baseURL:    "://invalid-base",
+			want:       "http://old-domain.com/api",
 			wantErr:    true,
 		},
 	}
@@ -666,54 +674,23 @@ func TestKeys(t *testing.T) {
 	}
 }
 
-func TestEnsureRmBeforeName(t *testing.T) {
-	cases := []struct {
-		name string
-		cmd  string
-		want string
-	}{
-		{
-			name: "adds --rm before --name when absent",
-			cmd:  "docker run -d --name my-app nginx",
-			want: "docker run -d --rm --name my-app nginx",
-		},
-		{
-			name: "preserves command when --rm already present",
-			cmd:  "docker run -d --rm --name my-app nginx",
-			want: "docker run -d --rm --name my-app nginx",
-		},
-		{
-			name: "does nothing when --name is not present",
-			cmd:  "docker run -d nginx",
-			want: "docker run -d nginx",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := EnsureRmBeforeName(tc.cmd); got != tc.want {
-				t.Errorf("EnsureRmBeforeName(%q) = %q, want %q", tc.cmd, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestIsDockerCmdAndHasUserCommand(t *testing.T) {
 	cases := []struct {
+		name       string
 		kind       CmdType
 		isDocker   bool
 		hasUserCmd bool
 	}{
-		{DockerRun, true, true},
-		{DockerStart, true, true},
-		{DockerCompose, true, true},
-		{FromContainer, true, false},
-		{Native, false, true},
-		{Empty, false, false},
+		{"docker-run", DockerRun, true, true},
+		{"docker-start", DockerStart, true, true},
+		{"docker-compose", DockerCompose, true, true},
+		{"from-container", FromContainer, true, false},
+		{"native", Native, false, true},
+		{"empty", Empty, false, false},
 	}
 
 	for _, tc := range cases {
-		t.Run(string(tc.kind), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			if got := IsDockerCmd(tc.kind); got != tc.isDocker {
 				t.Errorf("IsDockerCmd(%q) = %v, want %v", tc.kind, got, tc.isDocker)
 			}
@@ -732,8 +709,9 @@ func TestHash(t *testing.T) {
 	}
 
 	dataHash := Hash([]byte("keploy"))
-	if dataHash == emptyHash || len(dataHash) != 64 {
-		t.Errorf("Hash(\"keploy\") = %q, want valid 64-char sha256 string", dataHash)
+	wantKeploy := "787009cfb43f5e53579a025af080167b9b32519140d8b42c48d32cee7a9baf3a"
+	if dataHash != wantKeploy {
+		t.Errorf("Hash(\"keploy\") = %q, want %q", dataHash, wantKeploy)
 	}
 }
 
@@ -749,9 +727,14 @@ func TestTrimSpaces(t *testing.T) {
 			want:  "foo=bar,baz=qux",
 		},
 		{
-			name:  "respects escaped comma and equal",
-			input: "foo\\,bar = 1",
-			want:  "foo\\,bar=1",
+			name:  "respects escaped comma",
+			input: "foo\\, bar = 1",
+			want:  "foo\\, bar=1",
+		},
+		{
+			name:  "respects escaped equal",
+			input: "foo\\= bar = 1",
+			want:  "foo\\= bar=1",
 		},
 		{
 			name:  "handles already trimmed string",
@@ -782,8 +765,14 @@ func TestParseMetadata(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseMetadata failed: %v", err)
 		}
-		if m["name"] != "keploy" || m["env"] != "test" {
+		if len(m) != 2 || m["name"] != "keploy" || m["env"] != "test" {
 			t.Errorf("ParseMetadata returned unexpected map: %v", m)
+		}
+	})
+
+	t.Run("invalid syntax returns error", func(t *testing.T) {
+		if m, err := ParseMetadata("invalid[unclosed=1"); err == nil {
+			t.Errorf("ParseMetadata invalid syntax = %v, nil; want error", m)
 		}
 	})
 }
@@ -797,6 +786,8 @@ func TestExtractFlagsFromArgs(t *testing.T) {
 			{[]string{"keploy", "record", "--cmd-type", "Docker"}, "docker"},
 			{[]string{"keploy", "record", "--cmdType=DOCKER"}, "docker"},
 			{[]string{"keploy", "record", "--cmd-type", "Native"}, "native"},
+			{[]string{"keploy", "record", "--cmd-type", "Docker", "--cmd-type", "Native"}, "native"},
+			{[]string{"keploy", "record", "--cmd-type"}, ""},
 			{[]string{"keploy", "record"}, ""},
 			{[]string{"keploy", "record", "--", "--cmd-type", "Docker"}, ""},
 		}
@@ -820,24 +811,6 @@ func TestExtractFlagsFromArgs(t *testing.T) {
 		for _, tc := range cases {
 			if got := ExtractFromContainerFromArgs(tc.args); got != tc.want {
 				t.Errorf("ExtractFromContainerFromArgs(%v) = %q, want %q", tc.args, got, tc.want)
-			}
-		}
-	})
-
-	t.Run("ExtractCommandFromArgs", func(t *testing.T) {
-		cases := []struct {
-			args []string
-			want string
-		}{
-			{[]string{"keploy", "record", "-c", "python app.py"}, "python app.py"},
-			{[]string{"keploy", "record", "--command", "go run ."}, "go run ."},
-			{[]string{"keploy", "record", "-c=npm start"}, "npm start"},
-			{[]string{"keploy", "record", "--command=cargo run"}, "cargo run"},
-			{[]string{"keploy", "record"}, ""},
-		}
-		for _, tc := range cases {
-			if got := ExtractCommandFromArgs(tc.args); got != tc.want {
-				t.Errorf("ExtractCommandFromArgs(%v) = %q, want %q", tc.args, got, tc.want)
 			}
 		}
 	})
@@ -891,28 +864,169 @@ func TestIsXMLResponse(t *testing.T) {
 	}
 }
 
-func TestGetReqMeta(t *testing.T) {
-	req, err := http.NewRequest("GET", "http://example.com/api/v1/users?page=1&sort=desc", nil)
-	if err != nil {
-		t.Fatalf("http.NewRequest failed: %v", err)
-	}
-
-	meta := GetReqMeta(req)
-	if meta["method"] != "GET" {
-		t.Errorf("meta[method] = %q, want 'GET'", meta["method"])
-	}
-	if meta["host"] != "example.com" {
-		t.Errorf("meta[host] = %q, want 'example.com'", meta["host"])
-	}
-	if meta["path"] != "/api/v1/users" {
-		t.Errorf("meta[path] = %q, want '/api/v1/users'", meta["path"])
-	}
-	queryKeys := meta["query keys"]
-	if !strings.Contains(queryKeys, "page") || !strings.Contains(queryKeys, "sort") {
-		t.Errorf("meta[query keys] = %q, want query parameter names 'page' and 'sort'", queryKeys)
-	}
-	if strings.Contains(queryKeys, "desc") || strings.Contains(queryKeys, "1") {
-		t.Errorf("meta[query keys] = %q leaked query values", queryKeys)
+// A replay's test host may be IPv6: a Kubernetes Pod IP is reported bare
+// ("fd00::1"), and a host given next to a port comes bracketed ("[fd00::1]").
+// An IPv6 host has to be bracketed in a URL; "http://fd00::1:8080/" is none
+// (url.Parse: invalid port "::1:8080" after host), so before this every HTTP
+// test of a replay against an IPv6 host failed before it was sent.
+func TestReplaceHostBracketsAnIPv6Host(t *testing.T) {
+	const rec = "http://localhost:8080/api/items?id=1"
+	for _, c := range []struct{ url, ip, want string }{
+		{rec, "fd00::1", "http://[fd00::1]:8080/api/items?id=1"},
+		{rec, "[fd00::1]", "http://[fd00::1]:8080/api/items?id=1"},
+		{rec, "::1", "http://[::1]:8080/api/items?id=1"},
+		{rec, "::ffff:127.0.0.1", "http://[::ffff:127.0.0.1]:8080/api/items?id=1"},
+		{rec, "fe80::1%eth0", "http://[fe80::1%25eth0]:8080/api/items?id=1"},
+		{rec, "10.244.0.7", "http://10.244.0.7:8080/api/items?id=1"},
+		{rec, "host.docker.internal", "http://host.docker.internal:8080/api/items?id=1"},
+		{"http://example.com/api", "fd00::1", "http://[fd00::1]/api"},
+		{"http://example.com/api", "10.244.0.7", "http://10.244.0.7/api"},
+		// A URL recorded against an IPv6 host, replayed against IPv4: the old
+		// text replace kept the brackets, and "[10.0.0.1]" is no URL host.
+		{"http://[::1]:8080/x", "10.0.0.1", "http://10.0.0.1:8080/x"},
+		{"http://[::1]:8080/x", "fd00::1", "http://[fd00::1]:8080/x"},
+		// The same text replace kept them for a bracketed host
+		// ("http://[[fd00::1]]:8080/x"), and for the default test host,
+		// localhost ("http://[localhost]:8080/x"): every test recorded
+		// against an IPv6 address failed its replay.
+		{"http://[::1]:8080/x", "[fd00::1]", "http://[fd00::1]:8080/x"},
+		{"http://[::1]:8080/x", "localhost", "http://localhost:8080/x"},
+	} {
+		got, err := ReplaceHost(c.url, c.ip)
+		if err != nil || got != c.want {
+			t.Errorf("ReplaceHost(%q, %q) = %q, %v; want %q", c.url, c.ip, got, err, c.want)
+			continue
+		}
+		u, err := url.Parse(got)
+		if err != nil {
+			t.Errorf("ReplaceHost(%q, %q) = %q, which is no URL: %v", c.url, c.ip, got, err)
+			continue
+		}
+		if want := UnbracketHost(c.ip); u.Hostname() != want {
+			t.Errorf("ReplaceHost(%q, %q) addresses %q, want %q", c.url, c.ip, u.Hostname(), want)
+		}
 	}
 }
 
+// A gRPC authority is host:port with no URL around it, and net.JoinHostPort
+// brackets an IPv6 host: a bare one was right already, a bracketed one came
+// out bracketed twice ("[[fd00::1]]:50051").
+func TestReplaceGrpcHostTakesAnIPv6HostBareOrBracketed(t *testing.T) {
+	for _, c := range []struct{ authority, ip, want string }{
+		{"localhost:50051", "fd00::1", "[fd00::1]:50051"},
+		{"localhost:50051", "[fd00::1]", "[fd00::1]:50051"},
+		{"localhost:50051", "::1", "[::1]:50051"},
+		{"localhost:50051", "[::1]", "[::1]:50051"},
+		{"localhost:50051", "::ffff:127.0.0.1", "[::ffff:127.0.0.1]:50051"},
+		{"[::1]:50051", "10.244.0.7", "10.244.0.7:50051"},
+		{"localhost:50051", "10.244.0.7", "10.244.0.7:50051"},
+	} {
+		got, err := ReplaceGrpcHost(c.authority, c.ip)
+		if err != nil || got != c.want {
+			t.Errorf("ReplaceGrpcHost(%q, %q) = %q, %v; want %q", c.authority, c.ip, got, err, c.want)
+		}
+	}
+}
+
+// A recorded authority may have no port ("my-svc"). Its host is replaced all
+// the same, and the test host comes back alone, an IPv6 one bracketed, for
+// ResolveTestTarget to give its port. It was refused ("missing port in
+// address") whatever the host, and a replay always has a test host
+// (localhost by default), so every such gRPC test failed its replay.
+func TestReplaceGrpcHostTakesAnAuthorityWithNoPort(t *testing.T) {
+	for _, c := range []struct{ authority, ip, want string }{
+		{"my-svc", "localhost", "localhost"},
+		{"example.com", "10.244.0.7", "10.244.0.7"},
+		{"10.0.0.5", "localhost", "localhost"},
+		{"[fd00::1]", "localhost", "localhost"},
+		{"[fd00::1]", "10.244.0.7", "10.244.0.7"},
+		{"[fd00::1]", "fd00::2", "[fd00::2]"},
+		{"my-svc", "fd00::2", "[fd00::2]"},
+		{"my-svc", "[fd00::2]", "[fd00::2]"},
+		{"my-svc", "::ffff:127.0.0.1", "[::ffff:127.0.0.1]"},
+		{"fd00::1", "localhost", "localhost"},
+	} {
+		got, err := ReplaceGrpcHost(c.authority, c.ip)
+		if err != nil || got != c.want {
+			t.Errorf("ReplaceGrpcHost(%q, %q) = %q, %v; want %q", c.authority, c.ip, got, err, c.want)
+		}
+	}
+	// An authority that is neither host:port nor a host alone is refused.
+	for _, a := range []string{"[fd00::1", "a:b:c", "[fd00::1]x"} {
+		if got, err := ReplaceGrpcHost(a, "localhost"); err == nil {
+			t.Errorf("ReplaceGrpcHost(%q, localhost) = %q; want it refused", a, got)
+		}
+	}
+}
+
+// An authority with no port takes the new one as its port, an IPv6 host
+// bracketed once whichever way it came.
+func TestReplaceGrpcPortBracketsAnIPv6HostOnce(t *testing.T) {
+	for _, c := range []struct{ authority, want string }{
+		{"[fd00::1]:50051", "[fd00::1]:50052"},
+		{"[fd00::1]", "[fd00::1]:50052"},
+		{"fd00::1", "[fd00::1]:50052"},
+		{"localhost", "localhost:50052"},
+		{"localhost:50051", "localhost:50052"},
+	} {
+		got, err := ReplaceGrpcPort(c.authority, "50052")
+		if err != nil || got != c.want {
+			t.Errorf("ReplaceGrpcPort(%q, 50052) = %q, %v; want %q", c.authority, got, err, c.want)
+		}
+	}
+}
+
+// The port is replaced, never the same digits in the host: the old text
+// replace changed the first occurrence of the port's digits, which can be in
+// the host.
+func TestReplacePortChangesOnlyThePort(t *testing.T) {
+	for _, c := range []struct{ url, port, want string }{
+		{"http://10.0.0.80:80/x", "9000", "http://10.0.0.80:9000/x"},
+		{"http://[fd00::8080]:8080/x", "9090", "http://[fd00::8080]:9090/x"},
+		{"http://[::1]/x", "8080", "http://[::1]:8080/x"},
+		{"http://example.com/x", "8080", "http://example.com:8080/x"},
+		{"http://example.com:80/x?y=80", "8080", "http://example.com:8080/x?y=80"},
+	} {
+		got, err := ReplacePort(c.url, c.port)
+		if err != nil || got != c.want {
+			t.Errorf("ReplacePort(%q, %q) = %q, %v; want %q", c.url, c.port, got, err, c.want)
+		}
+	}
+}
+
+// A test report records the command keploy was run with (cmdUsed), and
+// reports are committed and uploaded: the command given with -c, and
+// keploy's own flags, are written with their secrets redacted, its hosts and
+// paths kept, a word with a space or a quote still Go-quoted.
+func TestAReportsCommandUsedHasItsSecretsRedacted(t *testing.T) {
+	saved := os.Args
+	t.Cleanup(func() { os.Args = saved })
+	os.Args = []string{"/usr/local/bin/keploy", "test",
+		"-c", "python app.py --password S3CR3T --db scott/S3CR3T@db.keploy.test:1521/XE",
+		"--delay", "10", "--api-key=S3CR3T", "--path", "./keploy"}
+	const want = `/usr/local/bin/keploy test -c "python app.py --password <redacted> --db scott/<redacted>@db.keploy.test:1521/XE" --delay 10 --api-key=<redacted> --path ./keploy`
+	if got := GetFullCommandUsed(); got != want {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, want)
+	}
+	// A shell's -c after an image named git is the shell's, not git's.
+	os.Args = []string{"keploy", "test", "-c", `docker run --rm alpine/git sh -c 'mysql -uroot -pS3CR3T -e "select 1"'`}
+	const wantGit = `keploy test -c "docker run --rm alpine/git sh -c 'mysql -uroot -p<redacted> -e '\\''select 1'\\'''"`
+	if got := GetFullCommandUsed(); got != wantGit {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, wantGit)
+	}
+	// git's setting in an image with a tag: its header's token redacted.
+	os.Args = []string{"keploy", "test", "-c", `docker run --rm alpine/git:2.43.0 -c http.extraHeader="Authorization: Bearer S3CR3T" clone https://github.com/o/r`}
+	const wantTagged = `keploy test -c "docker run --rm alpine/git:2.43.0 -c 'http.extraHeader=Authorization: <redacted>' clone https://github.com/{}/{}"`
+	if got := GetFullCommandUsed(); got != wantTagged {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, wantTagged)
+	}
+	// A command whose first word holds a dot is recorded whole: no git URL
+	// section names java, python3, node or mvnw.
+	for _, c := range []string{"java.exe -jar app.jar --spring.profiles.active=dev --server.port=8080", "python3 -m a.b --x.y=1 z",
+		"node.exe server.js --db.host=db --db.user=app", "mvnw.cmd spring-boot:run -Dspring-boot.run.profiles=dev"} {
+		os.Args = []string{"keploy", "test", "-c", c}
+		if got, want := GetFullCommandUsed(), `keploy test -c "`+c+`"`; got != want {
+			t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, want)
+		}
+	}
+}

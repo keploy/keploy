@@ -12,7 +12,8 @@ import (
 // sharedIdent is what a test's view shows of the trees beyond the
 // protocol-phase recordings, and how it hands each out: the reached worker
 // scope (its names and order), the background rules (the pool it shows in a
-// test), and the kept learning each recording is handed out with
+// test), the pool slice whose declared session calls it shows in a test
+// (exactView.declared), and the kept learning each recording is handed out with
 // (exactView.learned). Two test views with the same ident show the same of
 // the same trees (exactView.showsStatic). A staging changes the trees, and
 // the copies learned hands out are per staging epoch, but a staging moves the
@@ -23,16 +24,17 @@ import (
 // (ownShared): two views that own different recordings of the pool or the
 // worker scope show different shared parts.
 type sharedIdent struct {
-	worker *reachedWorker
-	bg     *backgroundState
-	kept   *keptLoad
-	own    string
+	worker   *reachedWorker
+	bg       *backgroundState
+	declared *poolSlice
+	kept     *keptLoad
+	own      string
 }
 
 // sharedIdentOf is v's ident now; w is the reached worker scope it was
 // installed with.
 func sharedIdentOf(v *exactView, w *reachedWorker) sharedIdent {
-	id := sharedIdent{worker: w, bg: v.bg, own: v.ownShared()}
+	id := sharedIdent{worker: w, bg: v.bg, declared: v.declared, own: v.ownShared()}
 	if v.kept != nil {
 		id.kept = v.kept.cur.Load()
 	}
@@ -127,8 +129,9 @@ func (m *MockManager) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	m.treesMu.RUnlock()
 	m.swapMu.RUnlock()
 	// A test's view reads no teardown (afterTests): its per-test read is its
-	// own then what it shows of the per-test tier (exactPerTest).
-	perTest = v.keepWith(v.shownOf(filtered, ""), v.showsStatic)
+	// own then what it shows of the per-test tier and of the worker scope in
+	// the startup tier (exactPerTest, windowWorker).
+	perTest = v.keepWith(append(v.shownOf(filtered, ""), v.windowWorker(v.shownOf(startup, ""))...), v.showsStatic)
 	// GetSessionMocks: GetStartupMocks, what the view shows of the startup
 	// tier then the session tier, then GetSessionScopedMocks, what it shows
 	// of the session tier then the startup tier, each mock once: the second
@@ -176,12 +179,14 @@ func (m *MockManager) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
 
 var _ integrations.SharedReads = (*MockManager)(nil)
 
-// SharedGeneration, SharedMocks and the owned reads are the manager's while
-// the staging is still h's call's after they were read, and report false
-// once it moved, when h reads nothing (heldScope.held).
+// SharedGeneration and SharedMocks are the manager's while the staging is
+// still h's call's after they were read and h reads in the view in force;
+// they report false once the staging moved, when h reads nothing
+// (heldScope.held), and while h reads in another view (heldScope.elsewhere):
+// they are the view in force's open test's, which h's reads are not.
 func (h *heldScope) SharedGeneration(kind models.Kind) (integrations.SharedGen, bool) {
 	g, ok := h.MockManager.SharedGeneration(kind)
-	if !ok || h.moved() {
+	if !ok || h.moved() || h.elsewhere() {
 		return integrations.SharedGen{}, false
 	}
 	return g, true
@@ -189,34 +194,75 @@ func (h *heldScope) SharedGeneration(kind models.Kind) (integrations.SharedGen, 
 
 func (h *heldScope) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	perTest, session, ok = h.MockManager.SharedMocks()
-	if !ok || h.moved() {
+	if !ok || h.moved() || h.elsewhere() {
 		return nil, nil, false
 	}
 	return perTest, session, true
 }
 
+// The owned reads are those of the view h's call was read in (ownedView), as
+// h's other reads are: keploy can decide a test's call after the replay
+// began the next test, and the call is still its own test's, one more than
+// that test recorded when it is one of that test's recordings (the own-call
+// check, integrations.OwnRepeatRead), as when keploy decides it at once. The
+// next test's recordings are never the call's own. Each reports false once
+// the staging moved (heldScope.held), while the view h reads in is no test's
+// (a pool view owns none), and once the view a round snapshot's call is
+// diagnosed in was replaced (heldScope.viewGone), checked after the read.
 func (h *heldScope) OwnedUnanswered() ([]*models.Mock, bool) {
-	owned, ok := h.MockManager.OwnedUnanswered()
-	if !ok || h.moved() {
+	v := h.ownedView()
+	if v == nil {
+		return nil, false
+	}
+	owned := v.unanswered("")
+	if !h.ownedHeld() {
 		return nil, false
 	}
 	return owned, true
 }
 
 func (h *heldScope) OwnedRecordings() (uint64, []*models.Mock, bool) {
-	view, owned, ok := h.MockManager.OwnedRecordings()
-	if !ok || h.moved() {
+	v := h.ownedView()
+	if v == nil || !h.ownedHeld() {
 		return 0, nil, false
 	}
-	return view, owned, true
+	return v.gen, v.owned, true
 }
 
 func (h *heldScope) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
-	live, ok := h.MockManager.OwnedUnansweredAt(view, at)
-	if !ok || h.moved() {
+	v := h.ownedView()
+	if v == nil || v.gen != view {
+		return nil, false
+	}
+	live := v.unansweredAt(at)
+	if !h.ownedHeld() {
 		return nil, false
 	}
 	return live, true
+}
+
+// ownedView is the view h's owned reads are made in, while it is a test's
+// (nil otherwise): the view h's reads are made in (readView: its mark's, or
+// the view in force for a call decided in the test the store opens next and
+// for one whose consume the view in force refused), or, for a call marked
+// from a round snapshot, whose other reads are made in the view in force,
+// the view that snapshot read (heldIn).
+func (h *heldScope) ownedView() *exactView {
+	v := h.readView()
+	if h.snapped {
+		v = h.heldIn
+	}
+	if v != nil && v.test != "" {
+		return v
+	}
+	return nil
+}
+
+// ownedHeld reports whether an owned read made in ownedView is h's call's:
+// the staging is still the call's, and the view a round snapshot's call is
+// diagnosed in was not replaced.
+func (h *heldScope) ownedHeld() bool {
+	return !h.moved() && !h.viewGone()
 }
 
 var _ integrations.SharedReads = (*heldScope)(nil)
@@ -280,6 +326,20 @@ func (m *MockManager) WhenRestaged(slot any, release func()) {
 	m.restaged[slot] = release
 	m.restagedMu.Unlock()
 }
+
+// Keep implements integrations.ParserKeep: the value kept for slot, made by
+// mk when slot holds none (two first calls at once may both run mk; one
+// value is kept). It is kept with the manager, and read after Close as
+// before it.
+func (m *MockManager) Keep(slot any, mk func() any) (any, bool) {
+	if v, ok := m.parserKept.Load(slot); ok {
+		return v, true
+	}
+	v, _ := m.parserKept.LoadOrStore(slot, mk())
+	return v, true
+}
+
+var _ integrations.ParserKeep = (*MockManager)(nil)
 
 // letDerivedGo runs what the parsers asked to run at a staging or Close
 // (WhenRestaged), outside the lock: called after the staging's moves, so a

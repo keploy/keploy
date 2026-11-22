@@ -118,6 +118,30 @@ func TestDecideHandshakeStopsWhenTheApplicationGivesUp(t *testing.T) {
 	}
 }
 
+// An application that gives up connecting to a mock.real destination fails
+// that connect as it would without keploy: with two test workers' tests open,
+// the failure is in the REAL row of the worker whose instance the kernel
+// stamped the connect with, and in no other.
+func TestAGivenUpConnectToARealDestinationIsItsOwnWorkersFailure(t *testing.T) {
+	prev := handshakeRecheck
+	handshakeRecheck = 50 * time.Millisecond
+	t.Cleanup(func() { handshakeRecheck = prev })
+
+	silent := unansweredAddr(t)
+	p := realProxy(t, []string{silent}, nil)
+	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+	twoWorkers(t, p)
+	dest := ipv4Dest(t, silent)
+	dest.Instance, dest.KernelPid = workerFour.Instance, workerFour.Pid
+	d := p.decideHandshake(&goneAfterFirstLookup{fakeHandshakeDest: fakeHandshakeDest{dest: dest}})(context.Background(), appEnd, proxyEnd)
+	if d.Outcome != synhold.Drop || d.Keep != nil {
+		t.Fatalf("decision %+v, want drop with nothing kept", d)
+	}
+	if got, want := endWorkers(t, p).Uses, []models.RealUse{{Dest: silent, Failed: 1}}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("worker 4's REAL row: %+v, want %+v", got, want)
+	}
+}
+
 // TestDecideHandshakeClosesWhatTheApplicationGaveUpOn: an application whose
 // connect timed out while the destination was answering leaves nothing open
 // at the destination.

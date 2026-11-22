@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,7 @@ type consumerRun struct {
 	r               *Recorder
 	db              *recMappingDB
 	waits           *mappingWaits
+	names           *captureNames
 	correlationMap  sync.Map
 	asyncMockIDs    sync.Map
 	shortPool       sync.Map
@@ -45,6 +47,7 @@ func startConsumerWith(t *testing.T, logger *zap.Logger) *consumerRun {
 	c := &consumerRun{
 		db:       &recMappingDB{},
 		waits:    newMappingWaits(),
+		names:    newCaptureNames(),
 		mappings: make(chan models.TestMockMapping),
 		mapped:   make(chan string, 64),
 		revoked:  make(chan string, 64),
@@ -54,16 +57,17 @@ func startConsumerWith(t *testing.T, logger *zap.Logger) *consumerRun {
 	go func() {
 		c.done <- c.r.consumeMappingsFor(context.Background(), "set-0", c.mappings,
 			&c.correlationMap, &c.asyncMockIDs, &c.dropped, c.waits,
-			func(tn string) { c.revoked <- tn }, &c.shortPool,
+			func(tn string, _ []time.Time) { c.revoked <- tn }, &c.shortPool,
 			func(tn string, entries []models.MockEntry) {
 				for _, e := range entries {
 					c.mapped <- tn + "/" + e.Name
 				}
-			})
+			}, nil, c.names)
 	}()
 	t.Cleanup(func() {
 		c.closeMappings()
 		c.waits.end()
+		c.names.end()
 		select {
 		case err := <-c.done:
 			assert.NoError(t, err)
@@ -224,7 +228,7 @@ func TestMappingWaits_NeverSavedMockIsLostAtTheRecordingsEnd(t *testing.T) {
 // maxHeldMappingEntries an entry is not held but settled at once, as one still
 // waiting at the end would be, so the waits never hold more than the cap. The
 // first entry the cap turns away is said once, in a Warn naming the cap, and
-// each such entry's "Failed to correlate" line says the cap, not the stream's
+// each such entry's debug line says the cap, not the stream's
 // end, is why.
 func TestMappingWaits_HeldEntriesAreBounded(t *testing.T) {
 	prev := maxHeldMappingEntries
@@ -250,7 +254,8 @@ func TestMappingWaits_HeldEntriesAreBounded(t *testing.T) {
 	capWarns := logs.FilterMessageSnippet("too many mapping entries are waiting").All()
 	require.Len(t, capWarns, 1, "the cap must be said once per recording")
 	assert.EqualValues(t, 2, capWarns[0].ContextMap()["maxHeldMappingEntries"])
-	for _, e := range logs.FilterMessageSnippet("Failed to correlate").All() {
+	assert.NotContains(t, capWarns[0].ContextMap(), "test", "the cap's line names a test (the agent's can be a request's own header)")
+	for _, e := range logs.FilterMessageSnippet(unmappedEntryLog).All() {
 		assert.Equal(t, lossNextStep(reasonCapFull), e.ContextMap()["next_step"],
 			"an entry the cap turned away was logged as if the stream had ended")
 	}
@@ -291,7 +296,7 @@ func TestMappingWaits_LossReasonsAreDistinct(t *testing.T) {
 	c.finish(t)
 
 	reasons := map[string]bool{}
-	for _, e := range logs.FilterMessageSnippet("Failed to correlate").All() {
+	for _, e := range logs.FilterMessageSnippet(unmappedEntryLog).All() {
 		reasons[e.ContextMap()["tempMockID"].(string)+": "+e.ContextMap()["next_step"].(string)] = true
 	}
 	assert.Equal(t, map[string]bool{
@@ -300,7 +305,7 @@ func TestMappingWaits_LossReasonsAreDistinct(t *testing.T) {
 	}, reasons)
 }
 
-// TestLossNextStep_EachReasonSaysItsOwnCause: a "Failed to correlate" line's
+// TestLossNextStep_EachReasonSaysItsOwnCause: an unmapped entry's debug line's
 // next_step is lossNextStep(why), and the rows compare a line against
 // lossNextStep(want), which holds however lossNextStep maps the reasons. So
 // this row pins the texts themselves: each reason a loss line can give names
@@ -437,6 +442,17 @@ func (run *recRun) test(t *testing.T, name string) {
 		t.Fatalf("recorder never consumed %s", name)
 	}
 	waitForPersistedTestCase(t, run.testDB, name)
+}
+
+// offer hands the recorder a test case the store may not keep, so it does not
+// wait for it to persist.
+func (run *recRun) offer(t *testing.T, name string) {
+	t.Helper()
+	select {
+	case run.f.incoming <- &models.TestCase{Name: name, Kind: models.HTTP}:
+	case <-time.After(hangGuard):
+		t.Fatalf("recorder never consumed %s", name)
+	}
 }
 
 func (run *recRun) mapping(t *testing.T, test string, ids ...string) {
@@ -642,9 +658,101 @@ func TestStart_NeverSentMockIsCountedAtTheStreamsEnd(t *testing.T) {
 	suite := run.stop(t)
 	assert.False(t, gaveUp(logs, "record")(), "the stop's drain had to give the recording's goroutines up")
 	assert.EqualValues(t, 1, suite["tests-short-pool"], "%v", suite)
-	lost := logs.FilterMessageSnippet("Failed to correlate").All()
+	lost := logs.FilterMessageSnippet(unmappedEntryLog).All()
 	require.Len(t, lost, 1)
 	assert.Equal(t, lossNextStep(reasonEnded), lost[0].ContextMap()["next_step"])
+}
+
+// TestStart_ATestCaseTheStoreCannotHoldIsSkippedAndCounted: a test case refused
+// for its own body says nothing about the next one, so it costs the recording
+// that one test case, and the count is said when the recording ends. One binary
+// body must not end a recording, as one unencodable mock does not.
+func TestStart_ATestCaseTheStoreCannotHoldIsSkippedAndCounted(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.New(core), func(r *Recorder) {
+		r.testDB.(*recTestDB).refuseNames = map[string]bool{"binary-1": true, "binary-2": true}
+	})
+	run.offer(t, "binary-1")
+	run.offer(t, "binary-2")
+	run.test(t, "test-3")
+	run.stop(t)
+
+	run.testDB.mu.Lock()
+	defer run.testDB.mu.Unlock()
+	assert.Equal(t, []string{"test-3"}, run.testDB.inserted)
+	said := logs.FilterMessageSnippet("recording finished without the test cases the store refused").All()
+	require.Len(t, said, 1)
+	assert.Equal(t, zap.WarnLevel, said[0].Level, "a recording that lost test cases says so above Info")
+	assert.EqualValues(t, 2, said[0].ContextMap()["testCasesRefused"])
+	run.tele.mu.Lock()
+	defer run.tele.mu.Unlock()
+	assert.Equal(t, 1, run.tele.suiteTestCount, "a refused test case was counted as recorded")
+	assert.EqualValues(t, 1, run.tele.sessionTestCount, "a refused test case was counted as recorded")
+	assert.Equal(t, 1, run.tele.testsAndMocks, "a refused test case was counted as recorded")
+}
+
+// TestStart_ARefusedTestCaseTheAgentRevokesIsNotDeleted: the store holds no such
+// test case, so the revoke finds nothing to delete and nothing to take off the
+// count of those recorded.
+func TestStart_ARefusedTestCaseTheAgentRevokesIsNotDeleted(t *testing.T) {
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.NewNop(), func(r *Recorder) {
+		r.testDB.(*recTestDB).refuseNames = map[string]bool{"binary-1": true}
+	})
+	run.offer(t, "binary-1")
+	run.test(t, "test-2")
+	run.frame(t, revokeFrame("revoke-frame", "binary-1"))
+	run.stop(t)
+
+	assert.Empty(t, run.deleted())
+	run.tele.mu.Lock()
+	defer run.tele.mu.Unlock()
+	assert.Equal(t, 1, run.tele.suiteTestCount)
+}
+
+// TestStart_ATestCaseRefusedDuringShutdownIsCounted: the insert comes back
+// refused once the recording is stopping, as it does for the last requests
+// drained. Such a test case is as missing as any other, so the count has it.
+func TestStart_ATestCaseRefusedDuringShutdownIsCounted(t *testing.T) {
+	db := &gatedFailTestDB{
+		failName: "binary-1",
+		failErr:  fmt.Errorf("%w: testdb: the response body is not valid UTF-8", models.ErrTestCaseEncode),
+		release:  make(chan struct{}),
+		entered:  make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(db.release) }) }
+	t.Cleanup(release) // a failure below must not leave the consumer in the insert
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.New(core), func(r *Recorder) {
+		r.testDB = db
+	})
+	run.offer(t, "test-1")
+	run.offer(t, "binary-1")
+	select {
+	case <-db.entered:
+	case <-time.After(hangGuard):
+		t.Fatal("the consumer never reached the refused insert")
+	}
+	// Stopping first, then the refusal: the error comes back on a done context.
+	run.cancel()
+	release()
+	run.stop(t)
+
+	said := logs.FilterMessageSnippet("recording finished without the test cases the store refused").All()
+	require.Len(t, said, 1)
+	assert.EqualValues(t, 1, said[0].ContextMap()["testCasesRefused"])
+	assert.Zero(t, logs.FilterMessageSnippet("failed to record test case during shutdown").Len(),
+		"a refused test case is said by the store and counted, not reported as a failed write")
+}
+
+// TestStart_ARecordingWithNothingRefusedSaysNothingOfIt: the line is for a
+// recording that lost test cases.
+func TestStart_ARecordingWithNothingRefusedSaysNothingOfIt(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}}, BaseRecordHooks{}, zap.New(core))
+	run.test(t, "test-1")
+	run.stop(t)
+	assert.Zero(t, logs.FilterMessageSnippet("recording finished without the test cases the store refused").Len())
 }
 
 // armedClock is a ManualClock that says when a drain arms a look.
@@ -693,11 +801,11 @@ func (run *recRun) stopGivenUp(t *testing.T, clk *armedClock) map[string]interfa
 	return run.tele.suite
 }
 
-// lossLines maps each "Failed to correlate" line's mock to its next_step.
+// lossLines maps each unmapped entry's debug line's mock to its next_step.
 func lossLines(t *testing.T, logs *observer.ObservedLogs) map[string]string {
 	t.Helper()
 	got := map[string]string{}
-	for _, e := range logs.FilterMessageSnippet("Failed to correlate").All() {
+	for _, e := range logs.FilterMessageSnippet(unmappedEntryLog).All() {
 		id, _ := e.ContextMap()["tempMockID"].(string)
 		_, dup := got[id]
 		require.False(t, dup, "two loss lines for %s", id)
@@ -850,7 +958,7 @@ func TestStart_WedgedConsumersReadyEntriesAreCounted(t *testing.T) {
 // never sends. The drop revokes test-1 (the recorder's own revoke, not the
 // agent's frame), and that revoke must release never-1's entry at once: it
 // settles while the streams are open, as a revoked test's entry (a Debug
-// line, no "Failed to correlate" Error), and test-1 is deleted, not counted
+// line, no unmapped-entry line), and test-1 is deleted, not counted
 // short.
 func TestStart_RecorderRevokeReleasesTheTestsHeldEntries(t *testing.T) {
 	release := make(chan struct{})
@@ -868,8 +976,10 @@ func TestStart_RecorderRevokeReleasesTheTestsHeldEntries(t *testing.T) {
 	assert.Contains(t, run.deleted(), "test-1", "a test that owned a dropped mock was not revoked")
 	assert.NotContains(t, suite, "tests-short-pool", "a revoked test was counted short: %v", suite)
 	assert.Empty(t, lossLines(t, logs), "a revoked test's entry was reported as lost")
-	assert.Len(t, logs.FilterMessageSnippet("not waiting for a revoked test's mock").
-		FilterField(zap.String("tempMockID", "never-1")).All(), 1)
+	revokedLines := logs.FilterMessageSnippet("not waiting for a revoked test's mock").
+		FilterField(zap.String("tempMockID", "never-1")).All()
+	require.Len(t, revokedLines, 1)
+	assert.NotContains(t, revokedLines[0].ContextMap(), "test", "a revoked entry's line names its test")
 }
 
 // TestStart_UntrackedDropSettlesAtOnceAndSaysSo: the dropped-mock set is

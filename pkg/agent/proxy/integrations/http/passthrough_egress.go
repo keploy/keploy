@@ -68,6 +68,12 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || (m.Spec.HTTPResp == nil && !m.HasSpilledResponse()) {
 			continue
 		}
+		// A call that ended in a fault is no representative answer: its head
+		// would be served whole to every call. The next candidate serves, or
+		// the default 200.
+		if m.Spec.Fault != nil {
+			continue
+		}
 		if m.Spec.HTTPReq.Method != models.Method(input.method) {
 			continue
 		}
@@ -144,7 +150,7 @@ func ptRecordKey(scope, method, host string, port uint32, reqPath string, queryK
 // resolved port, doesn't over-filter). Host compare is case-insensitive and
 // port-stripped on both sides.
 func mockHostPortMatches(mockReq *models.HTTPReq, host string, port uint32) bool {
-	u, err := url.Parse(mockReq.URL)
+	u, err := parseRecordedURL(mockReq.URL)
 	if err != nil {
 		return true // unparseable recorded URL → don't over-filter
 	}
@@ -187,7 +193,7 @@ func mockQueryGet(mockReq *models.HTTPReq, name string) string {
 	if v, ok := mockReq.URLParams[name]; ok {
 		return v
 	}
-	if u, err := url.Parse(mockReq.URL); err == nil {
+	if u, err := parseRecordedURL(mockReq.URL); err == nil {
 		return u.Query().Get(name)
 	}
 	return ""
@@ -232,8 +238,44 @@ type ptSeenState struct {
 }
 
 // shouldRecord reports whether a recordOne capture for key with the given
-// response status should be persisted (and marks state accordingly).
+// response status should be persisted (and marks state accordingly: take).
 func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
+	return p.take(key, statusCode) != nil
+}
+
+// ptMark is what one take that said yes set of its key's state, so giveBack
+// can unset it.
+type ptMark struct {
+	p      *ptRecorder
+	st     *ptSeenState
+	set2xx bool
+	setAny bool
+}
+
+// giveBack unsets what its take set, as it was before: a representative the
+// recording lost as it was handed over (its session's manager dropped it) is
+// not one, and the endpoint's next call is recorded in its place, where the
+// mark would skip it as a duplicate of a mock no recording holds. What a take
+// after it set stays: a 2xx kept after a lost warmup error stands. A key
+// evicted since left its state behind, so unsetting it changes nothing the
+// recorder reads. Nil-safe.
+func (k *ptMark) giveBack() {
+	if k == nil {
+		return
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	if k.set2xx {
+		k.st.recorded2xx = false
+	}
+	if k.setAny {
+		k.st.recordedAny = false
+	}
+}
+
+// take is shouldRecord, returning the mark it set (giveBack), or nil for a
+// capture not to persist.
+func (p *ptRecorder) take(key string, statusCode int) *ptMark {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.seen == nil {
@@ -262,18 +304,22 @@ func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
 		p.seen[key] = st
 	}
 	if st.recorded2xx {
-		return false
+		return nil
 	}
+	mark := &ptMark{p: p, st: st}
 	if isSuccessStatus(statusCode) {
+		mark.set2xx = true
+		mark.setAny = !st.recordedAny
 		st.recorded2xx = true
 		st.recordedAny = true
-		return true
+		return mark
 	}
 	if !st.recordedAny {
+		mark.setAny = true
 		st.recordedAny = true
-		return true
+		return mark
 	}
-	return false
+	return nil
 }
 
 // passThroughRecordDecision is the record-side counterpart of

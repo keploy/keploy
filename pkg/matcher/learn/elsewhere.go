@@ -210,7 +210,7 @@ func SplitTaught(added map[string][]string, kept []models.MockState, owner map[s
 func SayLearnedElsewhere(logger *zap.Logger, taught []Taught, voided []models.MockState, owner map[string]string, worker func(name string) bool, fields ...zap.Field) {
 	for _, t := range taught {
 		logger.Info("learned fields that changed between record and replay, from calls made in other windows than their recording's, for learning only",
-			append(slices.Clip(fields), zap.String("mock", t.Mock), zap.String("test", OwnerSaid(t.Mock, owner, worker)), zap.Strings("fields", t.Fields),
+			append(slices.Clip(fields), zap.String("mock", t.Mock), zap.String("test", OwnerSaid(t.Mock, owner, worker)), zap.Strings("fields", models.FieldPathsInTextShaped(t.Fields)),
 				zap.String("taughtIn", t.Windows()), zap.String("evidence", "a call of its shape in another window: no call of the round consumed the recording"))...)
 	}
 	for _, v := range voided {

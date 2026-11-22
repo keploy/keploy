@@ -118,7 +118,7 @@ func mainsBytes(t *testing.T, answers []mysql.PacketBundle) [][]byte {
 func kept(answers []mysql.PacketBundle) int64 {
 	var n int64
 	for _, a := range answers {
-		if b := cacheOf(a.Message).Load(); b != nil {
+		if b := cacheOf(a.Message).Load(0); b != nil {
 			n += int64(cap(b)) + mysql.WireEntryCost
 		}
 	}
@@ -173,7 +173,7 @@ func TestWireCacheHoldsItsBudgetAndServesMainsBytesPastIt(t *testing.T) {
 		if n := serve(t, dc, conn, &answers[i], want[i], what) + serve(t, dc, conn, &answers[i], want[i], what); n != 1 {
 			t.Fatalf("%s: two serves encoded it %d times, want once: the newest payload must stay cached", what, n)
 		}
-		cost := int64(cap(cacheOf(answers[i].Message).Load())) + mysql.WireEntryCost
+		cost := int64(cap(cacheOf(answers[i].Message).Load(0))) + mysql.WireEntryCost
 		largest, served = max(largest, cost), served+cost
 		check(what)
 		if held, _ := mysql.WireCacheUsage(); served > budget && held <= budget-largest {
@@ -183,7 +183,7 @@ func TestWireCacheHoldsItsBudgetAndServesMainsBytesPastIt(t *testing.T) {
 	evicted := 0
 	for i := range answers {
 		what := fmt.Sprintf("answer %d (%T), second pass", i, answers[i].Message)
-		cached := cacheOf(answers[i].Message).Load() != nil
+		cached := cacheOf(answers[i].Message).Load(0) != nil
 		n := serve(t, dc, conn, &answers[i], want[i], what)
 		if cached && n != 0 || !cached && n != 1 {
 			t.Fatalf("%s: cached %v before the serve, which encoded it %d times", what, cached, n)
@@ -219,10 +219,10 @@ func TestWireCacheDoesNotCacheAnAnswerLargerThanItsBudget(t *testing.T) {
 			t.Fatalf("serve %d of the large answer encoded %d result sets, want 1", k, n)
 		}
 	}
-	if held, _ := mysql.WireCacheUsage(); held != held0 || cacheOf(answers[2].Message).Load() != nil ||
-		cacheOf(answers[0].Message).Load() == nil || cacheOf(answers[1].Message).Load() == nil {
+	if held, _ := mysql.WireCacheUsage(); held != held0 || cacheOf(answers[2].Message).Load(0) != nil ||
+		cacheOf(answers[0].Message).Load(0) == nil || cacheOf(answers[1].Message).Load(0) == nil {
 		t.Fatalf("after the large answer the cache counts %d bytes (was %d); the large answer is cached %v, the small ones %v %v",
-			held, held0, cacheOf(answers[2].Message).Load() != nil, cacheOf(answers[0].Message).Load() != nil, cacheOf(answers[1].Message).Load() != nil)
+			held, held0, cacheOf(answers[2].Message).Load(0) != nil, cacheOf(answers[0].Message).Load(0) != nil, cacheOf(answers[1].Message).Load(0) != nil)
 	}
 }
 
@@ -231,7 +231,7 @@ func serveAndDrop(t *testing.T, dc *wire.DecodeContext, conn net.Conn) weak.Poin
 	a := answer(rand.New(rand.NewSource(13)), false, 4, 300)
 	want := mainsBytes(t, []mysql.PacketBundle{a})
 	serve(t, dc, conn, &a, want[0], "dropped answer")
-	if cacheOf(a.Message).Load() == nil {
+	if cacheOf(a.Message).Load(0) == nil {
 		t.Fatal("the dropped answer was not cached")
 	}
 	return weak.Make(a.Message.(*mysql.TextResultSet))

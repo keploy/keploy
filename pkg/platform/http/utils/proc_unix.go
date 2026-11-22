@@ -160,9 +160,9 @@ func isSudo(cmd *exec.Cmd) bool {
 
 // TerminatePTYCommand is TerminateCommand for a command started on a PTY: it
 // sends SIGTERM to the command (sudo, which hands it to the agent) and leaves
-// the PTY open. Closing the PTY hangs the agent up, and a hung-up agent dies
-// where it stands instead of finishing its shutdown; the PTY is closed once
-// the command has exited (PTYHandle.Wait).
+// the PTY open. Closing the PTY would hang the agent up (a stop, or nothing
+// once it is stopping: cli.Agent) and leave what its shutdown still writes
+// unread; the PTY is closed once the command has exited (PTYHandle.Wait).
 func TerminatePTYCommand(handle *PTYHandle, logger *zap.Logger) error {
 	if handle == nil || handle.cmd == nil || handle.cmd.Process == nil {
 		return nil
@@ -413,4 +413,24 @@ func SetOwnProcessGroup(cmd *exec.Cmd) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
+}
+
+// KillOwnProcessGroup kills, with SIGKILL, cmd and every process it started
+// that is still in the process group of its own it runs in
+// (SetOwnProcessGroup), for an exec.Cmd's Cancel: a command whose context
+// ends then ends whole, not only the process it started first. A process of
+// the group the caller may not signal (one sudo runs as root, or a sudo that
+// made itself root in full) is left as it is; when that is cmd, the error
+// says so (os.ErrPermission), as the default Cancel's (cmd.Process.Kill)
+// does. Once cmd has been waited for, its pid may be another process's, and
+// the group is not signalled: the error is then os.ErrProcessDone. The check
+// narrows that window, and does not close it: Wait may reap cmd between the
+// check and the kill. Its pid is taken again only once no process of its
+// group is left, and pids are handed out in turn.
+func KillOwnProcessGroup(cmd *exec.Cmd) error {
+	if err := cmd.Process.Signal(syscall.Signal(0)); errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	return cmd.Process.Kill()
 }

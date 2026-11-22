@@ -3,8 +3,9 @@
 //
 // Role: for each accepted connection the proxy constructs a Relay bound to
 // the two real net.Conns. The Relay spawns a pair of forwarder goroutines
-// that read from one socket, stamp the read instant as ReadAt, write to
-// the opposite socket, stamp the write instant as WrittenAt, and tee a
+// that read from one socket, stamp the read instant as ReadAt, stamp
+// WrittenAt and write to the opposite socket (the stamp comes first, so
+// the peer cannot have acted on the bytes before it), and tee a
 // copy of the resulting [fakeconn.Chunk] into the parser-facing FakeConn.
 // Parsers consume those read-only FakeConns; they never see the real
 // net.Conns and therefore cannot close, shutdown, or racily write to

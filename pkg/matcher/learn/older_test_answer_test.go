@@ -133,7 +133,7 @@ func TestClassifyFollowing_AnOlderTestsAnswerTheValueMovedApartFromIsNoSource(t 
 		since, inOlder bool // want: a read since the test began; mock-646 read as served in an older test
 		refuted        string
 	}{
-		{"an older test's answer, as recorded", asRecorded, none, KindClockRead, true, true, "which record's full round sent and gave the application as recorded, byte for byte"},
+		{"an older test's answer, as recorded", asRecorded, none, KindClockRead, true, true, "which record's full round sent and gave the application as recorded, while the value changed"},
 		{"an older test's answer, its view moved apart", viewAt(olderFOps), none, KindClockRead, true, true, "where record's full round gave the application another value"},
 		{"an older test's answer, its view moved with the value", viewAt(olderSLive), none, KindVariable, false, true, ""},
 		{"an older test's answer, its view moved apart there and giving the value elsewhere", viewOf(olderSLive, olderFOps), none, KindVariable, false, true, ""},

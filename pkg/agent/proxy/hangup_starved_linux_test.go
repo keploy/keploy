@@ -140,7 +140,7 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 					// in a later row's test, whose abandon it then drops.
 					pending := func() int { return p.inflight.Pending(answers) }
 					if mode.scoped {
-						sc := p.inflight.scope()
+						sc := p.inflight.scope(0)
 						pending = func() int { n, _ := sc.State(answers); return n }
 					}
 					waiting := make(chan struct{})

@@ -82,19 +82,30 @@ func TestRunTestSet_ACallTheAppMakesAsItIsStoppedIsJudged(t *testing.T) {
 	}
 }
 
-// With the switch off the set ends as it did: the app is stopped after the
-// set is reported, and nothing more is read.
-func TestRunTestSet_TheAppIsStoppedAfterTheSetWithTheSwitchOff(t *testing.T) {
+// With the switch off the set's end stops the app too, after the set's
+// post-script and before its report, and reads its misses after the stop: the
+// publish the app's shutdown flushed, which no mock answered, fails nothing
+// (the set PASSES) and is named in the report as made after the set's last
+// test, by its shape, not as an unclaimed call that fails the set.
+func TestRunTestSet_TheAppIsStoppedBeforeTheReportWithTheSwitchOff(t *testing.T) {
 	provenOn(t, false)
 	h := newPartialRunHarness(t, 2, 0)
 	app := &stoppingApp{prInstr: h.instr}
 	h.replayer.instrumentation = app
 
 	if status := h.run(t); status != models.TestSetStatusPassed {
-		t.Fatalf("status %s, want PASSED as before", status)
+		t.Fatalf("status %s (reason %q), want PASSED: the shutdown publish fails nothing with the switch off", status, h.report.report.FailureReason)
 	}
-	if app.readAfterStop {
-		t.Fatal("switch off: the agent's misses were read after the app was stopped; the set's end is as it was")
+	if !app.readAfterStop {
+		t.Fatalf("switch off: the agent's misses were read (%d reads) only while the app still ran: the publish its shutdown flushed is named nowhere", app.reads)
+	}
+	rep := h.report.report
+	if len(rep.UnclaimedCalls) != 0 {
+		t.Fatalf("unclaimed %+v; with the switch off a call after the last test is no unclaimed call", rep.UnclaimedCalls)
+	}
+	publish := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /publish"}
+	if got, want := calledShaped(rep.OutsideTestMisses), "HTTP "+models.UnmatchedCallLogShape(publish)+" @after_last_test;"; got != want {
+		t.Fatalf("the report names %q outside every test, want %q", got, want)
 	}
 }
 

@@ -74,8 +74,10 @@ func TestV2_AnExchangeLeftOutForTheIncompleteFlagIsReported(t *testing.T) {
 	if over, _ := spans.Overlaps(respWritten.Add(time.Second), respWritten.Add(2*time.Second)); over {
 		t.Fatal("a test case after the exchange is left out: the span is wider than the exchange")
 	}
-	if cleared != 1 {
-		t.Fatalf("pending work cleared %d time(s), want once: the parser consumed its input", cleared)
+	// Once as the parser holds the answer and once as it leaves the exchange
+	// out: each time, it has consumed its input.
+	if cleared != 2 {
+		t.Fatalf("pending work cleared %d time(s), want twice: as the answer is held and as the exchange is left out", cleared)
 	}
 	if n := mgr.MocksLeftOut(); n != 1 {
 		t.Fatalf("the manager counts %d mocks left out, want the one exchange", n)

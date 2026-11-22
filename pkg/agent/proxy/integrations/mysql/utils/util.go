@@ -381,6 +381,21 @@ func WriteLengthEncodedString(buf *bytes.Buffer, s string) error {
 	return nil
 }
 
+// LengthEncodedIntegerSize is the number of bytes WriteLengthEncodedInteger
+// writes for num.
+func LengthEncodedIntegerSize(num uint64) int {
+	switch {
+	case num <= 250:
+		return 1
+	case num <= 0xFFFF:
+		return 3
+	case num <= 0xFFFFFF:
+		return 4
+	default:
+		return 9
+	}
+}
+
 func WriteLengthEncodedInteger(buf *bytes.Buffer, num uint64) error {
 	switch {
 	case num <= 250:

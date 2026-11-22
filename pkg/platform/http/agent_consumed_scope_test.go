@@ -11,13 +11,16 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/models"
 	agentsvc "go.keploy.io/server/v3/pkg/service/agent"
@@ -57,7 +60,13 @@ func serve(t *testing.T, svc interface {
 	case *paramsSvc:
 		routes.DefaultRoutes{}.New(r, s, zap.NewNop())
 	}
-	srv := httptest.NewServer(r)
+	// The agent's port stays held once it closes (testnet.SharedPort): a
+	// call to an agent that went away is refused, and no other server can
+	// come to answer it.
+	srv := httptest.NewUnstartedServer(r)
+	_ = srv.Listener.Close()
+	srv.Listener = testnet.ListenShared(t, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t))))
+	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv
 }

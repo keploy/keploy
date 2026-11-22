@@ -1,4 +1,10 @@
 #!/bin/bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
+
 set -e
 
 # Start PetClinic with Keploy recording
@@ -27,7 +33,7 @@ if [ -n "${KEPLOY_STORAGE_FORMAT:-}" ]; then
 fi
 
 # Start Keploy wrapping PetClinic application
-sudo -E env PATH=$PATH ./keploy record "${storage_flag[@]}" \
+sudo env PATH=$PATH "${SUDO_ENV[@]}" ./keploy record "${storage_flag[@]}" \
   -c "java -Dspring.profiles.active=mysql -jar $PETCLINIC_JAR --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic --spring.datasource.username=root --spring.datasource.password=petclinic" \
   --path=./keploy-tests \
   --config-path=/tmp/keploy-no-config &

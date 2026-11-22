@@ -7,10 +7,19 @@ import (
 	"fmt"
 	"iter"
 	"os"
+	"runtime"
 
 	"go.uber.org/zap"
 	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
 )
+
+// systemPoolIsFileBacked says crypto/x509's system pool is the certificates of
+// the trust-store files — Linux, where keploy's loader reads the same files
+// (systemCABundleSearchPaths holds every one of Go's; see
+// TestSystemCABundleSearchPaths_CoverGosLinuxFiles), so keploy's upstream
+// verification uses the loader's bundle in its place — rather than a platform
+// verifier. A variable for tests.
+var systemPoolIsFileBacked = runtime.GOOS == "linux"
 
 // systemCertPoolFn is an indirection seam for tests, mirroring
 // loadSystemCABundleFn above it in ca.go. Production code always uses
@@ -31,8 +40,9 @@ var systemCertPoolFn = x509.SystemCertPool
 //     macOS/Windows, the platform verifier). It NEVER means "trust nothing";
 //     an empty non-nil pool would fail every handshake, so this function only
 //     ever returns a pool it has actually populated.
-//   - A non-nil pool is the system roots (or, on an image with no trust store,
-//     keploy's embedded Mozilla NSS roots) plus every certificate in caCertPath.
+//   - A non-nil pool is the roots of the trust bundle keploy gives the apps
+//     (always on Linux; elsewhere when the platform pool is unusable) or the
+//     platform roots, plus every certificate in caCertPath.
 //   - A non-nil error names caCertPath and means the operator's configuration is
 //     wrong — the file could not be read, or held no PEM certificates. Callers
 //     must surface it rather than quietly continuing, because a verifying dial
@@ -40,9 +50,10 @@ var systemCertPoolFn = x509.SystemCertPool
 //     handshake, and keploy's supervisor reacts to that by falling through to
 //     raw passthrough — the app keeps working and the mock is silently dropped.
 //
-// caCertPath == "" is the common case and costs one SystemCertPool probe: if the
-// host has a usable trust store we return (nil, nil) and let crypto/tls do
-// exactly what it would have done unconfigured.
+// caCertPath == "" is the common case: on macOS and Windows with a usable
+// platform pool we return (nil, nil) and let crypto/tls do exactly what it
+// would have done unconfigured. On Linux it costs one run of keploy's
+// trust-bundle loader (systemOrEmbeddedRootPool), once per agent process.
 func LoadUpstreamRootCAs(logger *zap.Logger, caCertPath string) (*x509.CertPool, error) {
 	pool, source := systemOrEmbeddedRootPool(logger)
 
@@ -60,6 +71,21 @@ func LoadUpstreamRootCAs(logger *zap.Logger, caCertPath string) (*x509.CertPool,
 			// produce, so fall back to Go's default; systemOrEmbeddedRootPool
 			// has already logged the remediation.
 			return nil, nil
+		case upstreamRootSourceEmbedded:
+			// The platform pool IS the Mozilla list built into keploy, read
+			// from a PEM file that cannot carry Mozilla's distrust-after
+			// constraints. Returning nil would verify against that
+			// unconstrained pool, so return the constrained one.
+			logger.Debug("upstream TLS verification uses the Mozilla root list built into keploy, with its constraints",
+				zap.String("reason", "the platform pool is that list read back from a PEM file, which drops its constraints"),
+				zap.String("source", source))
+			return pool, nil
+		case upstreamRootSourceTrustBundle:
+			// Linux: Go's pool is not what the apps trust (see
+			// systemOrEmbeddedRootPool); returning nil would verify against it.
+			logger.Debug("upstream TLS verification uses the roots of the trust bundle keploy gives the apps",
+				zap.String("source", source))
+			return pool, nil
 		default:
 			// The platform pool was unusable and we substituted keploy's own
 			// bundle. Returning nil here would leave the caller verifying
@@ -138,50 +164,83 @@ func countPEMCertificateBlocks(pemBytes []byte) (wanted, parseable int) {
 // agent actually used.
 const (
 	upstreamRootSourceSystem = "system"
-	// upstreamRootSourceKeployBundle covers both halves of loadSystemCABundle's
-	// own fallback chain (a disk bundle found by systemCABundleSearchPaths, or
-	// the compiled-in Mozilla NSS roots); loadSystemCABundle logs which one it took.
+	// upstreamRootSourceEmbedded is a platform pool holding exactly the
+	// compiled-in Mozilla NSS roots, replaced by the same roots with their
+	// constraints.
+	upstreamRootSourceEmbedded = "embedded_mozilla_roots"
+	// upstreamRootSourceTrustBundle is, on Linux, the pool of the trust
+	// bundle keploy's loader builds for the apps (trustBundlePool).
+	upstreamRootSourceTrustBundle = "trust_bundle"
+	// upstreamRootSourceKeployBundle is the same bundle standing in for a
+	// platform pool that was unavailable or empty (macOS, Windows).
 	upstreamRootSourceKeployBundle = "keploy_bundle"
 	upstreamRootSourceEmpty        = "empty"
 )
 
 // systemOrEmbeddedRootPool returns a populated root pool plus the source label.
 //
-// x509.SystemCertPool on Unix does not fail when the image has no trust store —
-// it returns a non-nil, EMPTY pool with a nil error. That is precisely the
-// distroless/scratch shape keploy already carries embeddedFallbackRoots for, and
-// handing an empty pool to tls.Config.RootCAs would reject every upstream, so
-// emptiness is treated exactly like an error here.
+// On Linux (systemPoolIsFileBacked) it is the pool of the trust bundle
+// keploy's loader builds for the apps (trustBundlePool), never Go's own pool.
+// Both are the certificates of the same trust-store files, but the loader
+// departs from crypto/x509 where Go would leave no public roots
+// (loadSystemCABundle lists how) and drops keploy's own CAs. Go's pool can
+// then hold far less than the apps trust: with SSL_CERT_FILE naming a missing
+// file and SSL_CERT_DIR a corporate CA on a Debian host, Go reads the
+// corporate CA alone, the apps get the Debian bundle plus it, and verifying
+// against Go's pool would reject every public upstream the apps trust (each
+// connection then falls through to passthrough and its mock is dropped).
+// With one pool, keploy verifies upstreams against exactly what the apps
+// trust.
+//
+// Elsewhere it is the platform pool. x509.SystemCertPool does not fail when
+// there is no trust store: it returns a non-nil, EMPTY pool with a nil error,
+// and handing an empty pool to tls.Config.RootCAs would reject every upstream,
+// so emptiness is treated exactly like an error, and keploy's trust bundle
+// stands in.
 //
 // Emptiness is probed with len(Subjects()). Subjects is deprecated because it
 // omits the system roots for the platform-verifier-backed pools on macOS and
 // Windows — there it under-reports and routes us into the keploy bundle below.
 // That is a benign degradation (keploy's own disk search finds /etc/ssl/cert.pem
 // on macOS, and the embedded Mozilla roots otherwise: a valid trust store either
-// way, just without the platform verifier), and the agent's proxy is a
-// Linux-only path in practice, where the pool is file-backed and the count is
-// accurate.
+// way, just without the platform verifier).
+//
+// A platform pool that holds exactly the compiled-in Mozilla roots is the same
+// list read back from a PEM file (SSL_CERT_FILE naming a file the roots were
+// written to, which Go reads on macOS and Windows too since Go 1.27). PEM
+// drops Mozilla's distrust-after constraints, so that pool is swapped for the
+// constrained one, as the trust bundle's embedded roots are.
 func systemOrEmbeddedRootPool(logger *zap.Logger) (*x509.CertPool, string) {
+	if systemPoolIsFileBacked {
+		return trustBundlePool(logger, upstreamRootSourceTrustBundle)
+	}
 	//nolint:staticcheck // SA1019: Subjects is deprecated only because it under-reports platform-verifier pools; we need a count, not the contents, and an under-report here degrades safely into the keploy bundle below.
 	if pool, err := systemCertPoolFn(); err == nil && pool != nil && len(pool.Subjects()) > 0 {
+		if nss, n := nssRootPool(nssRoots()); n > 0 && pool.Equal(nss) {
+			return nss, upstreamRootSourceEmbedded
+		}
 		return pool, upstreamRootSourceSystem
 	}
+	return trustBundlePool(logger, upstreamRootSourceKeployBundle)
+}
 
-	// Reuse the loader the shared-volume path already uses: it walks
-	// systemCABundleSearchPaths and falls back to the compiled-in Mozilla NSS
-	// roots, logging the severity of a missing disk bundle for us.
-	bundle, src := loadSystemCABundleFn(logger)
-	if src == systemCABundleSourceEmbedded && bytes.Equal(bundle, embeddedFallbackRoots) {
-		// Build from the NSS bundle itself rather than its PEM rendering, so a
-		// root's "distrust after" constraint (which X.509 cannot carry) is
-		// enforced for keploy's own upstream verification.
-		if pool, n := nssRootPool(nssRoots()); n > 0 {
-			return pool, upstreamRootSourceKeployBundle
-		}
+// trustBundlePool returns the pool of the trust bundle keploy's loader builds
+// for the apps (it honours SSL_CERT_FILE / SSL_CERT_DIR, walks
+// systemCABundleSearchPaths and falls back to the compiled-in Mozilla NSS
+// roots), labelled source. Wherever that bundle holds the NSS roots — first,
+// as the loader puts the embedded ones, or as the whole bundle — they keep
+// their NSS constraints.
+func trustBundlePool(logger *zap.Logger, source string) (*x509.CertPool, string) {
+	bundle, _ := loadSystemCABundleFn(logger)
+	if embedded, ok := embeddedRootsPool(bundle); ok {
+		return embedded, source
 	}
 	pool := x509.NewCertPool()
-	if len(bundle) > 0 && pool.AppendCertsFromPEM(bundle) {
-		return pool, upstreamRootSourceKeployBundle
+	if pool.AppendCertsFromPEM(bundle) {
+		if nss, _ := nssRootPool(nssRoots()); pool.Equal(nss) {
+			return nss, source
+		}
+		return pool, source
 	}
 
 	// Only reachable if the compiled-in bundle itself is empty or unparseable,
@@ -189,8 +248,27 @@ func systemOrEmbeddedRootPool(logger *zap.Logger) (*x509.CertPool, string) {
 	// Report it as empty so LoadUpstreamRootCAs does not pass an empty pool off
 	// as a trust store.
 	logger.Error("no usable trust anchors for upstream TLS verification",
-		zap.String("next_step", "install `ca-certificates` in the keploy agent image, or set record.upstreamTls.caCert to a PEM bundle readable by the agent"))
+		zap.String("next_step", "mount a PEM CA bundle into the keploy agent and set SSL_CERT_FILE to it, or set record.upstreamTls.caCert to a PEM bundle readable by the agent"))
 	return pool, upstreamRootSourceEmpty
+}
+
+// embeddedRootsPool returns the pool for a bundle of keploy's loader that is
+// the embedded roots, perhaps followed by certificates SSL_CERT_DIR added: the
+// roots built from the NSS bundle itself rather than its PEM rendering, so a
+// root's "distrust after" constraint (which X.509 cannot carry) is enforced
+// for keploy's own upstream verification, plus the rest as they are. A
+// certificate that repeats an NSS root does not displace it: the pool keeps
+// the first copy. ok is false for any other bundle.
+func embeddedRootsPool(bundle []byte) (*x509.CertPool, bool) {
+	if !bytes.HasPrefix(bundle, embeddedFallbackRoots) {
+		return nil, false
+	}
+	pool, n := nssRootPool(nssRoots())
+	if n == 0 {
+		return nil, false
+	}
+	pool.AppendCertsFromPEM(bundle[len(embeddedFallbackRoots):])
+	return pool, true
 }
 
 // nssRoots yields the compiled-in Mozilla NSS root set; a variable so tests can

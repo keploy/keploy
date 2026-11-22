@@ -512,6 +512,15 @@ func TestAClosedListenerEndsTheWaitsAtOnce(t *testing.T) {
 	ready := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Serve(ctx, ready) }()
+	// The gate holds the shutdown in its teardown work, which every test of
+	// the process reads (utils.TeardownBusy): it is let go, and the shutdown
+	// waited for, however this test ends, so a failure here is this test's
+	// alone.
+	t.Cleanup(func() {
+		cancel()
+		close(gate.release)
+		<-done
+	})
 	if err := <-ready; err != nil {
 		t.Fatal(err)
 	}
@@ -529,8 +538,39 @@ func TestAClosedListenerEndsTheWaitsAtOnce(t *testing.T) {
 	if err := <-waited; !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("a wait across the listener's close: %v, want ErrProxyConnsUnsupported saying it closed", err)
 	}
-	close(gate.release)
-	<-done
+}
+
+// A read of the counts as the listener closes says it closed, never that it
+// was not marked: the close dropped the listener, and then failed the counts,
+// each under its own lock, and a read between the two found neither the
+// listener nor a failure, and took the listener for one never marked. A wait
+// begun as the proxy stopped then said so. Each round reads the counts until
+// they fail, beside a close; every read that fails must say closed.
+func TestACountReadAsTheListenerClosesSaysItClosed(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	for round := 0; round < 2000; round++ {
+		p := &Proxy{acceptsLn: ln}
+		reading := make(chan struct{})
+		read := make(chan error, 1)
+		go func() {
+			close(reading)
+			for {
+				if _, err := p.Accepted(); err != nil {
+					read <- err
+					return
+				}
+			}
+		}()
+		<-reading
+		p.closeAccepts()
+		if err := <-read; !errors.Is(err, errListenerClosed) {
+			t.Fatalf("round %d: a read of the counts as the listener closed: %v; want %v", round, err, errListenerClosed)
+		}
+	}
 }
 
 // The proxy's own marked listener (dual-stack, as the proxy opens it) reports
@@ -814,15 +854,24 @@ func TestAnUnpairedConnectionIsRefusedAsACaptureLoss(t *testing.T) {
 	if len(losses) != 1 || losses[0].Kind != models.CaptureLossUnpairedConn || losses[0].Count != 1 {
 		t.Fatalf("CaptureLosses = %+v, want one unpaired connection", losses)
 	}
+	// Neither the refused connection's pairing nor the canary's, which no
+	// handler takes, is left behind.
+	pairs := 0
+	p.pairs.Range(func(any, any) bool { pairs++; return true })
+	if pairs != 0 {
+		t.Fatalf("%d pairings left in the proxy's map, want none", pairs)
+	}
 }
 
 // With the switch off, a connection the kernel tied to none of the
 // application's (a NAT between them) is routed by its source port, as it
 // always was, so the application's calls work: a proxy whose calls were
 // counted from its start drops to not counted, for good, says why once, and
-// its CountingLost says so (its agent then answers every later read unread);
-// one that was not counted (no sock_diag, here) pairs nothing. Neither takes
-// a capture loss: the call is routed.
+// its CountingLost says so (its agent then answers every later read unread),
+// while every paired connection still goes where its own pairing says
+// (TestOneNATdConnectionAmongPairedOnesLosesOnlyItsOwnPairing); one that was
+// not counted (no sock_diag, here) pairs nothing. Neither takes a capture
+// loss: the call is routed.
 func TestASettlingProxyRoutesANATdConnectionAsBeforeWithTheSwitchOff(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "")
 	for _, counted := range []bool{true, false} {
@@ -868,8 +917,8 @@ func TestASettlingProxyRoutesANATdConnectionAsBeforeWithTheSwitchOff(t *testing.
 			default:
 				t.Fatal("counted: CountingLost's channel is not closed")
 			}
-			if p.usesPairing() || p.keepsConnections() {
-				t.Fatal("counted: the proxy still pairs or keeps connections after the NAT'd one")
+			if !p.usesPairing() || p.keepsConnections() {
+				t.Fatalf("counted: after the NAT'd one usesPairing %v, keepsConnections %v; want the pairing still used for every paired connection, and nothing kept", p.usesPairing(), p.keepsConnections())
 			}
 			if n := logs.FilterMessageSnippet("NAT'd connection it cannot attribute").Len(); n != 1 {
 				t.Fatalf("counted: %d WARNs of the NAT, want 1 for two NAT'd connections", n)
@@ -904,7 +953,9 @@ func TestNATdConnectionsHandledAtOnceAllDropTheCount(t *testing.T) {
 	}
 	defer c.Close()
 	core, logs := observer.New(zap.WarnLevel)
-	p := New(zap.New(core), fakeDestInfo{}, config.New())
+	cfg := config.New()
+	cfg.Agent.SettleReads = true // whose reads wait for the count: a WARN
+	p := New(zap.New(core), fakeDestInfo{}, cfg)
 	for i := 0; i < 20000; i++ {
 		// A counted proxy again, its drop undone.
 		p.countingLost.Store(nil)

@@ -31,7 +31,7 @@ func (p *learningProxy) BeginTestCaseCapture() {
 }
 func (p *learningProxy) ContinueTestCaseCapture() { p.BeginTestCaseCapture() }
 func (p *learningProxy) TakeTestRequest(req *models.TestRequest) {
-	p.tracker.Give(learn.GivenRequest(req))
+	p.tracker.GiveRequest(req)
 }
 
 // learnCall sends GET path through the real HTTP matcher's learn step

@@ -36,15 +36,15 @@ func TestAgentClient_PushTestBegins(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
 
-	if err := a.PushTestBegins(ctx, map[string]time.Time{"pkg::TestA": at}, nil); err != nil {
+	if err := a.PushTestBegins(ctx, map[string]time.Time{"pkg::TestA": at}, nil, map[string]string{"pkg::TestA": "0123456789abcdef"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !got.Begins["pkg::TestA"].Equal(at) {
+	if !got.Begins["pkg::TestA"].Equal(at) || got.Seeds["pkg::TestA"] != "0123456789abcdef" {
 		t.Fatalf("the agent got %+v", got)
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		err := a.PushTestBegins(ctx, nil, nil)
+		err := a.PushTestBegins(ctx, nil, nil, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "did not take") {
 			t.Fatalf("status %d: want an error, got %v", s, err)
 		}
@@ -71,10 +71,14 @@ func TestRestartedAgentGetsTheTestBeginsAgain(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	at := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
 	begins := map[string]time.Time{"pkg::TestA": at}
-	if err := a.PushTestBegins(context.Background(), begins, nil); err != nil {
+	seeds := map[string]string{"pkg::TestA": "0123456789abcdef"}
+	cases := map[string][]models.ClientCase{"pkg::TestA": {{Name: "post-apps-1", Req: models.HTTPReq{Method: "POST", URL: "http://api/apps", Body: `{"name":"app-1"}`}}}}
+	if err := a.PushTestBegins(context.Background(), begins, nil, seeds, cases); err != nil {
 		t.Fatal(err)
 	}
 	delete(begins, "pkg::TestA")
+	delete(seeds, "pkg::TestA")
+	delete(cases, "pkg::TestA")
 	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +87,8 @@ func TestRestartedAgentGetsTheTestBeginsAgain(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("the agent got the begins %d times, want 2", len(got))
 	}
-	if !got[1].Begins["pkg::TestA"].Equal(at) {
+	if cs := got[1].Cases["pkg::TestA"]; !got[1].Begins["pkg::TestA"].Equal(at) || got[1].Seeds["pkg::TestA"] != "0123456789abcdef" ||
+		len(cs) != 1 || cs[0].Name != "post-apps-1" || cs[0].Req.Body != `{"name":"app-1"}` {
 		t.Fatalf("the restarted agent got %+v", got[1])
 	}
 }

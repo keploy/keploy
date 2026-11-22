@@ -15,8 +15,10 @@ import (
 // calls socket() to a BPF map, target_namespace_pids, or to excluded_pids when
 // it predates the recording. Both maps have a fixed size; the agent removes a
 // process when it exits, so they fill only with more LIVE socket-using
-// processes than they hold, in the agent's PID namespace (for a native agent,
-// the whole host). Then the kernel refuses the insert:
+// processes than they hold, in the agent's PID namespace; for a native agent,
+// of the keploy command's own process tree only (the application, its tests
+// and what they start), as no other process is ever intercepted there. Then
+// the kernel refuses the insert:
 //   - Target: a refused process is not intercepted. Its calls reach the real
 //     destination: in record nothing is recorded, in replay nothing is mocked,
 //     and a call that a live dependency answers passes.
@@ -196,7 +198,7 @@ func pidMapHolds(capacity uint32) string {
 }
 
 // pidMapRemedy is what a user can do when a PID map is full.
-const pidMapRemedy = "A map keeps one entry for each live process that called socket() in the agent's PID namespace (for a native agent, the whole host): run with fewer live processes (stop what else runs on the machine, or run the app in Docker so the agent sees only its container)"
+const pidMapRemedy = "A map keeps one entry for each live process that called socket() of the application keploy runs (natively, the keploy command's own process tree: the app, its tests and what they start; in Docker, the processes of the app's containers): the run kept more such live processes at once than the map holds, so run fewer at a time (lower the test runner's parallelism, or record the suite in parts)"
 
 // pidMapLockRemedy is what a user can do when an insert failed on the map's
 // bucket lock rather than for want of room: that is CPU contention on the

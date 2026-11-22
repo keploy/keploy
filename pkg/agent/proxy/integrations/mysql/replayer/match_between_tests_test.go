@@ -67,7 +67,7 @@ func TestABetweenTestsExecuteIsAnsweredWithItsOwnParametersRecording(t *testing.
 	for _, seeded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("windows=%v", seeded), func(t *testing.T) {
 			prep, between, own := betweenTestsRecording()
-			side := newDiffSide([]*models.Mock{prep, between, own})
+			side := newDiffSide(t, []*models.Mock{prep, between, own})
 			defer side.mm.Close()
 			if seeded {
 				seedWindows(side.mm, 2)
@@ -96,7 +96,7 @@ func TestAnExecuteWithNoWindowOpenIsAnsweredWithItsOwnParametersRecording(t *tes
 	for _, seeded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("windows=%v", seeded), func(t *testing.T) {
 			prep, between, own := betweenTestsRecording()
-			side := newDiffSide([]*models.Mock{prep, between, own})
+			side := newDiffSide(t, []*models.Mock{prep, between, own})
 			defer side.mm.Close()
 			if seeded {
 				seedWindows(side.mm, 2)
@@ -129,7 +129,7 @@ func TestAStartUpExecuteIsAnsweredWithItsOwnRecordingNotTheFirstTests(t *testing
 	startup := diffMock("startup-exec-5", "c1", []mysql.Request{executeReq(7, "5")}, diffBase.Add(-300*time.Microsecond), models.LifetimePerTest, "mocks")
 	t0 := diffMock("t0-exec-5", "c1", []mysql.Request{executeReq(7, "5")}, s0.Add(time.Millisecond), models.LifetimePerTest, "mocks")
 	t0b := diffMock("t0-exec-6", "c1", []mysql.Request{executeReq(7, "6")}, s0.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
-	side := newDiffSide([]*models.Mock{prep, startup, t0, t0b})
+	side := newDiffSide(t, []*models.Mock{prep, startup, t0, t0b})
 	defer side.mm.Close()
 	seedWindows(side.mm, 1)
 	ctx, dctx := betweenTestsConn()
@@ -156,7 +156,7 @@ func TestABetweenTestsExecuteWithNoRecordingOfItsOwnTakesOneOfItsParameters(t *t
 	prep, _, _ := betweenTestsRecording()
 	t1 := diffMock("t1-exec-1", "c1", []mysql.Request{executeReq(7, "1")}, s1.Add(time.Millisecond), models.LifetimePerTest, "mocks")
 	t2 := diffMock("t2-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, s2.Add(time.Millisecond), models.LifetimePerTest, "mocks")
-	side := newDiffSide([]*models.Mock{prep, t1, t2})
+	side := newDiffSide(t, []*models.Mock{prep, t1, t2})
 	defer side.mm.Close()
 	seedWindows(side.mm, 3)
 	ctx, dctx := betweenTestsConn()
@@ -177,7 +177,7 @@ func TestABetweenTestsExecuteWithNoRecordingOfItsOwnTakesOneOfItsParameters(t *t
 // holds the answer the matcher gives, so a change to it is seen.
 func TestStatedLimitInsideAWindowTheTestsOwnRecordingOutranksABetweenTestsOne(t *testing.T) {
 	prep, between, own := betweenTestsRecording()
-	side := newDiffSide([]*models.Mock{prep, between, own})
+	side := newDiffSide(t, []*models.Mock{prep, between, own})
 	defer side.mm.Close()
 	ctx, dctx := betweenTestsConn()
 
@@ -214,7 +214,7 @@ func pollRecording(n int) []*models.Mock {
 // recording of the gap it was made in: gap 0's, gap 1's, gap 2's, not gap
 // 0's every time, whose rows may differ.
 func TestEachBetweenTestsCallOfARequestIsAnsweredWithItsOwnGapsRecording(t *testing.T) {
-	side := newDiffSide(pollRecording(3))
+	side := newDiffSide(t, pollRecording(3))
 	defer side.mm.Close()
 	seedWindows(side.mm, 4)
 	ctx, dctx := betweenTestsConn()
@@ -238,7 +238,7 @@ func TestEachBetweenTestsCallOfARequestIsAnsweredWithItsOwnGapsRecording(t *test
 // an earlier gap's: the poll after test 0 takes gap 0's, and the poll after
 // test 3 (gap 2 holds none) gap 3's.
 func TestStatedLimitACallSentWhileItsTestsWindowIsStillOpenTakesTheGapBeforeIt(t *testing.T) {
-	side := newDiffSide(append(pollRecording(2), gapRecording("gap3-poll", 3, "9", 0)))
+	side := newDiffSide(t, append(pollRecording(2), gapRecording("gap3-poll", 3, "9", 0)))
 	defer side.mm.Close()
 	seedWindows(side.mm, 5)
 	ctx, dctx := betweenTestsConn()
@@ -265,7 +265,7 @@ func TestStatedLimitACallSentWhileItsTestsWindowIsStillOpenTakesTheGapBeforeIt(t
 // No event tells the matcher how late a call is. This row holds the answers
 // the matcher gives, so a change to them is seen.
 func TestStatedLimitACallReplayedTwoTestsAfterItsGapTakesALaterGapsRecording(t *testing.T) {
-	side := newDiffSide(pollRecording(2))
+	side := newDiffSide(t, pollRecording(2))
 	defer side.mm.Close()
 	seedWindows(side.mm, 5)
 	ctx, dctx := betweenTestsConn()
@@ -289,7 +289,7 @@ func TestABetweenTestsCallSentOnceTheNextTestBeganTakesTheGapBeforeIt(t *testing
 	prep, _, _ := betweenTestsRecording()
 	startup := diffMock("startup-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, diffBase.Add(-500*time.Microsecond), models.LifetimePerTest, "mocks")
 	gap0 := gapRecording("gap0-exec-2", 0, "2", 0)
-	side := newDiffSide([]*models.Mock{prep, startup, gap0})
+	side := newDiffSide(t, []*models.Mock{prep, startup, gap0})
 	defer side.mm.Close()
 	seedWindows(side.mm, 2)
 	ctx, dctx := betweenTestsConn()
@@ -307,7 +307,7 @@ func TestTwoBetweenTestsCallsOfARequestInOneGapTakeTheGapsTwoRecordings(t *testi
 	prep, _, _ := betweenTestsRecording()
 	first := gapRecording("gap0-exec-2-first", 0, "2", 0)
 	second := gapRecording("gap0-exec-2-second", 0, "2", time.Millisecond)
-	side := newDiffSide([]*models.Mock{prep, first, second})
+	side := newDiffSide(t, []*models.Mock{prep, first, second})
 	defer side.mm.Close()
 	seedWindows(side.mm, 2)
 	ctx, dctx := betweenTestsConn()
@@ -330,7 +330,7 @@ func TestABetweenTestsCallTakesTheEarlierTestsRecordingOfItsParameters(t *testin
 	prep, _, _ := betweenTestsRecording()
 	t0 := diffMock("t0-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, s0.Add(time.Millisecond), models.LifetimePerTest, "mocks")
 	t3 := diffMock("t3-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, s3.Add(time.Millisecond), models.LifetimePerTest, "mocks")
-	side := newDiffSide([]*models.Mock{prep, t0, t3})
+	side := newDiffSide(t, []*models.Mock{prep, t0, t3})
 	defer side.mm.Close()
 	seedWindows(side.mm, 4)
 	ctx, dctx := betweenTestsConn()
@@ -350,7 +350,7 @@ func TestAStartUpCallWithNoStartUpRecordingLeavesTheTestsRecordingToItsCall(t *t
 	prep, _, _ := betweenTestsRecording()
 	t0 := diffMock("t0-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, s0.Add(time.Millisecond), models.LifetimePerTest, "mocks")
 	gap2 := gapRecording("gap2-exec-2", 2, "2", 0)
-	side := newDiffSide([]*models.Mock{prep, t0, gap2})
+	side := newDiffSide(t, []*models.Mock{prep, t0, gap2})
 	defer side.mm.Close()
 	seedWindows(side.mm, 4)
 	ctx, dctx := betweenTestsConn()
@@ -485,7 +485,7 @@ func TestKeployMockReplayAnswersAnExecuteWithItsOwnParametersRecording(t *testin
 	prep, _, _ := betweenTestsRecording()
 	a := diffMock("rec-exec-1", "c1", []mysql.Request{executeReq(7, "1")}, diffBase.Add(time.Millisecond), models.LifetimePerTest, "mocks")
 	b := diffMock("rec-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, diffBase.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
-	side := newDiffSide([]*models.Mock{prep, a, b})
+	side := newDiffSide(t, []*models.Mock{prep, a, b})
 	defer side.mm.Close()
 	side.stage(models.BaseTime, time.Now())
 	ctx, dctx := betweenTestsConn()

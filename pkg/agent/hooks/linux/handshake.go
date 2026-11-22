@@ -43,14 +43,7 @@ func (h *Hooks) GetForHandshake(_ context.Context, client, proxy netip.AddrPort)
 	if err := m.Lookup(cookie, &d); err != nil {
 		return nil, fmt.Errorf("no original destination for socket %#x: %w", cookie, err)
 	}
-	return &agent.NetworkAddress{
-		Version:    d.IPVersion,
-		IPv4Addr:   d.DestIP4,
-		IPv6Addr:   d.DestIP6,
-		Port:       d.DestPort,
-		KernelPid:  d.KernelPid,
-		AgentNsPid: d.AgentNsPid,
-	}, nil
+	return networkAddress(d), nil
 }
 
 // CheckHandshakeLookup proves, once, that GetForHandshake can name a socket

@@ -50,6 +50,13 @@
 # processes it started. Ports: 8094 (app), 9094 (dependency), 9095
 # (telemetry), 9096 (the plain TCP service), 9097 (the TLS service), 9098 (the
 # HTTP/1.0 call's, never recorded). Env: RECORD_BIN, REPLAY_BIN.
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -199,7 +206,7 @@ record() {
     [ -n "$DEP_PID" ] || { start_srv dep "$DEP"; DEP_PID=$SRV_PID; }
     [ -n "$TEL_PID" ] || { start_srv tel "$TEL"; TEL_PID=$SRV_PID; }
     # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" "$@" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$APP_CMD" "$@" \
         --generateGithubActions=false --disable-tele >"record-$name.log" 2>&1 </dev/null &
     REC_PID=$!
     if ! wait_listen "$APP" "$REC_PID"; then
@@ -228,7 +235,7 @@ replay() {
     shift
     before="$(newest_run)"
     # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$REPLAY_BIN" test -c "$APP_CMD" "$@" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "$APP_CMD" "$@" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"test-$name.log" 2>&1 </dev/null
     RC=$?
     own
@@ -268,7 +275,7 @@ fi
 # recorded.
 rm -rf keploy
 # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" --pass-through-ports "$NINE,9010,$DEP" \
+sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$APP_CMD" --pass-through-ports "$NINE,9010,$DEP" \
     --generateGithubActions=false --disable-tele >record-eleven.log 2>&1 </dev/null &
 REC_PID=$!
 if wait_listen "$APP" "$REC_PID"; then
@@ -335,7 +342,7 @@ bypassRules:
 YML
 rm -rf keploy
 # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" \
+sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$APP_CMD" \
     --generateGithubActions=false --disable-tele >record-mysqlhost.log 2>&1 </dev/null &
 REC_PID=$!
 if wait_listen "$APP" "$REC_PID"; then
@@ -477,7 +484,7 @@ bypassRules:
 YML
 rm -rf keploy
 # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" \
+sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$APP_CMD" \
     --generateGithubActions=false --disable-tele >record-badregex.log 2>&1 </dev/null &
 REC_PID=$!
 if wait_listen "$APP" "$REC_PID"; then
@@ -514,7 +521,7 @@ if record control; then
     # destination is checked.
     before="$(newest_run)"
     # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$REPLAY_BIN" test -c "env HTTP10_ADDR=127.0.0.1:$HOSTLESS $APP_CMD_BASE" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "env HTTP10_ADDR=127.0.0.1:$HOSTLESS $APP_CMD_BASE" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >test-hostless.log 2>&1 </dev/null
     rc=$?
     own

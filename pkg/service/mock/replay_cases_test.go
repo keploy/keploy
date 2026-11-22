@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,30 +171,67 @@ func TestPairCasesAndAttributeMocksPickTheInnermostWindow(t *testing.T) {
 	require.Equal(t, "mock-0", out[0].Consumed[0].Name)
 }
 
+// lateIncoming is a replay's agent that hands over the app's last request
+// only after `after`, saying until then that it still holds one from before
+// the run ended, and then that it holds nothing more; it ends its request
+// stream on request, with its marker, as today's agent does.
 type lateIncoming struct {
 	*runnerInstr
 	after time.Duration
 	tc    *models.TestCase
+
+	sent    atomic.Bool
+	ended   atomic.Bool
+	endOnce sync.Once
+	endReq  chan struct{}
 }
 
-func (l lateIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (l *lateIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
 	out := make(chan *models.TestCase)
 	go func() {
 		defer close(out)
 		select {
 		case <-time.After(l.after):
-			out <- l.tc
 		case <-ctx.Done():
 			return
 		}
-		<-ctx.Done()
+		select {
+		case out <- l.tc:
+			l.sent.Store(true)
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-l.endReq:
+			l.ended.Store(true)
+		case <-ctx.Done():
+		}
 	}()
 	return out, nil
 }
 
+func (l *lateIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	if !l.sent.Load() {
+		return models.AgentBacklog{Verdict: models.BacklogPending}, nil
+	}
+	return models.AgentBacklog{Verdict: models.BacklogClear, EndMarkers: true}, nil
+}
+
+func (l *lateIncoming) EndRecordingStreams(context.Context, string) error {
+	l.endOnce.Do(func() { close(l.endReq) })
+	return nil
+}
+
+func (l *lateIncoming) StreamEnded(kind models.FrameStream) bool {
+	return kind == models.TestCaseStream && l.ended.Load()
+}
+
+// A request the agent hands over after the runner exited, and after the
+// stream's quiet, is compared: the agent says it still holds one, and the
+// drain waits on its word.
 func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
 	instr := newRunnerInstr(t, sequentialMarks()...)
-	late := lateIncoming{runnerInstr: instr, after: 200 * time.Millisecond, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
+	late := &lateIncoming{runnerInstr: instr, after: 2 * mockDrainQuiet, endReq: make(chan struct{}), tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
 	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
@@ -211,6 +250,7 @@ func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
 	require.Len(t, got.Cases, 1)
 	require.NotNil(t, got.Cases[0].Actual, "the request that arrived after the runner exited is still compared")
 	require.True(t, got.Cases[0].Passed)
+	require.True(t, late.ended.Load(), "the watch did not end on the agent's marker")
 }
 
 // heldIncoming is a replay whose agent still holds requests from before the
@@ -397,6 +437,36 @@ func TestTestReceiptsMarkAnUnreportedCount(t *testing.T) {
 	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: 2, Missed: 1}}, testReceipts(flows, true, true))
 	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: -1, Missed: 1}}, testReceipts(flows, false, true))
 	require.Nil(t, testReceipts(nil, true, true))
+}
+
+// A test's receipt says how its browser drew its random numbers in its
+// latest run (TestReceipt.Random), in a replay's receipt and in a record's.
+func TestATestsReceiptSaysHowItsBrowserDrewItsRandomNumbers(t *testing.T) {
+	at := func(ms int) time.Time { return time.Unix(0, int64(ms)*int64(time.Millisecond)) }
+	windows := []models.ScopeWindow{
+		{Name: "ui::tr", Start: at(0), End: at(100), Outcome: models.ScopeOutcomePassed, Random: models.ScopeRandomOwn},
+		{Name: "ui::tr", Start: at(200), End: at(300), Outcome: models.ScopeOutcomePassed, Random: models.ScopeRandomSeeded}, // its latest run
+		{Name: "ui::cases", Start: at(400), End: at(500), Outcome: models.ScopeOutcomeFailed, Random: models.ScopeRandomOwn},
+		{Name: "go::TestA", Start: at(600), End: at(700), Outcome: models.ScopeOutcomePassed}, // a harness that says nothing
+	}
+	expected := map[string][]models.MockEntry{"ui::tr": {{Name: "mock-0"}}}
+	got := map[string]string{}
+	for _, r := range testReceipts(attributeMocks(windows, expected, nil, nil), true, true) {
+		got[r.Name] = r.Random
+	}
+	want := map[string]string{"ui::tr": models.ScopeRandomSeeded, "ui::cases": models.ScopeRandomOwn, "go::TestA": ""}
+	require.Equal(t, want, got, "a replay's receipt: each test's latest run, with mocks of its own or none")
+
+	keployDir := t.TempDir()
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "ui"}, windows[1:])
+	rec, err := ReadRecordTestsReceipt(keployDir, "ui")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	got = map[string]string{}
+	for _, r := range rec.Tests {
+		got[r.Name] = r.Random
+	}
+	require.Equal(t, want, got, "a record's receipt")
 }
 
 // gatePusher records the gate a replay pushes.

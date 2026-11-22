@@ -60,6 +60,55 @@ type CaptureIncomplete struct {
 	Destination string    `json:"destination,omitempty" yaml:"destination,omitempty"`
 	Why         string    `json:"why" yaml:"why"`
 	At          time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	// Hosts are the host names Why names whole (a connection's other name:
+	// its Host header, its SNI, its CONNECT target), each where the agent
+	// wrote it, with the tag the agent's own lines name it by (LossHost),
+	// as CaptureLoss.Hosts are for its What; HostsListed says the agent
+	// listed them (none, for a Why that names none). An agent that
+	// predates them lists none, and a log line writes its Why by its size
+	// alone (LogWhy).
+	Hosts       LossHosts `json:"hosts,omitempty" yaml:"hosts,omitempty"`
+	HostsListed bool      `json:"hosts_listed,omitempty" yaml:"hosts_listed,omitempty"`
+}
+
+// LogWhy is c's Why as a log line carries it: each host Hosts lists by its
+// shape and tag at its place (LossHosts.LogText), nothing else read as a
+// host; a Why whose hosts the agent did not list (an agent that predates
+// them) by its size alone (UnlistedLogText), never whole. The report names it whole, each host
+// beside its tag (RealUncapturedLosses, CaptureLosses.Text).
+func (c CaptureIncomplete) LogWhy() string {
+	switch {
+	case c.Why == "":
+		return ""
+	case c.HostsListed:
+		return c.Hosts.LogText(c.Why)
+	}
+	return UnlistedLogText(c.Why)
+}
+
+// ReportWhy is c's Why as the report and the console name it: each host it
+// names whole beside its tag (LossHosts.ReportText).
+func (c CaptureIncomplete) ReportWhy() string { return c.Hosts.ReportText(c.Why) }
+
+// UntaggedIncomplete is inc with no host tag (LossHosts.Untagged): the
+// evidence a test's harness and the receipts are given, which outlive the
+// session a tag names a host in. nil for none.
+func UntaggedIncomplete(inc []CaptureIncomplete) []CaptureIncomplete {
+	if inc == nil {
+		return nil
+	}
+	out := make([]CaptureIncomplete, len(inc))
+	for i, c := range inc {
+		c.Hosts = c.Hosts.Untagged()
+		out[i] = c
+	}
+	return out
+}
+
+// Untagged is r with no host tag (UntaggedIncomplete), for a receipt.
+func (r RealRun) Untagged() RealRun {
+	r.Incomplete = UntaggedIncomplete(r.Incomplete)
+	return r
 }
 
 // RealRun is what a run's agent saw of mock.real beyond any one test.
@@ -92,7 +141,8 @@ type RealTest struct {
 // RealUncapturedLosses is capture_incomplete evidence of class e as a capture
 // loss (CaptureLossRealUncaptured): one entry, counting the connections, whose
 // What names each destination once with what to change, the first few in
-// order. nil for none.
+// order, with the hosts each Why names (Hosts) at their places in What,
+// listed where every Why it names had its hosts listed. nil for none.
 func RealUncapturedLosses(inc []CaptureIncomplete) CaptureLosses {
 	if len(inc) == 0 {
 		return nil
@@ -101,6 +151,8 @@ func RealUncapturedLosses(inc []CaptureIncomplete) CaptureLosses {
 	type key struct{ dest, why string }
 	seen := map[key]bool{}
 	var what []string
+	var hosts LossHosts
+	listed := true
 	more := 0
 	for _, c := range inc {
 		k := key{c.Destination, c.Why}
@@ -112,10 +164,19 @@ func RealUncapturedLosses(inc []CaptureIncomplete) CaptureLosses {
 			more++
 			continue
 		}
+		// Destination is the address the connection was made to (the
+		// agent decides mock.real at the address the app dialed), never a
+		// name: only the Why names one, each host at its place after what
+		// goes before the Why.
+		at := len(c.Destination) + len(": ")
+		for _, w := range what {
+			at += len(w) + len("; ")
+		}
 		what = append(what, c.Destination+": "+c.Why)
+		hosts, listed = hosts.With(c.Hosts.Shifted(at)), listed && c.HostsListed
 	}
 	if more > 0 {
 		what = append(what, fmt.Sprintf("and %d more", more))
 	}
-	return CaptureLosses{{Kind: CaptureLossRealUncaptured, Count: uint64(len(inc)), What: strings.Join(what, "; ")}}
+	return CaptureLosses{{Kind: CaptureLossRealUncaptured, Count: uint64(len(inc)), What: strings.Join(what, "; "), Hosts: hosts, HostsListed: listed}}
 }

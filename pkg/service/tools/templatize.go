@@ -389,7 +389,9 @@ func (t *Tools) sayCrowded(testSetID string, tcs []*models.TestCase, crowded []c
 	for _, c := range crowded {
 		names := make([]string, 0, len(c.candidates))
 		for _, l := range c.candidates {
-			names = append(names, fmt.Sprintf("%s %q", l.path, l.value))
+			// Each by its place and size, never its value: a value a
+			// later request sends back is a token, a session's id.
+			names = append(names, fmt.Sprintf("%s (%d bytes)", l.path, len(l.value)))
 		}
 		if c.created {
 			t.logger.Info(fmt.Sprintf("%s/%s response header %s holds more than one value its response gives first (%s), and a later request sends one of them: templatize captures none of them, since a header holds one capture and one recording cannot tell which value the app issues anew",
@@ -413,11 +415,13 @@ func (t *Tools) sayCrowded(testSetID string, tcs []*models.TestCase, crowded []c
 // instead, for a value the app issues anew (templatize writes none: it
 // would accept whatever that capture takes, a constant's regression
 // included), and then no capture is offered beside it.
+// Each value is named by its place, never quoted: a value a later request
+// sends back is a token, a session's id, and the line reaches CI logs.
 func crowdedNextStep(c crowdedHeader) string {
 	var uses []string
 	for i, l := range c.candidates {
 		if i < len(c.own) && c.own[i] != "" {
-			uses = append(uses, fmt.Sprintf("%s in place of %q", templates.Format(false, templates.TypeString, c.own[i]), l.value))
+			uses = append(uses, fmt.Sprintf("%s in place of the value at %s", templates.Format(false, templates.TypeString, c.own[i]), l.path))
 		}
 	}
 	if len(uses) > 0 {
@@ -435,12 +439,12 @@ func crowdedNextStep(c crowdedHeader) string {
 	var edits, whole, fresh []string
 	for i, l := range c.candidates {
 		if l.unholdable {
-			whole = append(whole, strconv.Quote(l.value))
+			whole = append(whole, "the value at "+l.path)
 			continue
 		}
 		key := c.keys[i]
-		edits = append(edits, fmt.Sprintf("%s in place of %q (and %s where later requests send it)",
-			templates.Format(true, templates.TypeString, key), l.value, templates.Format(false, templates.TypeString, key)))
+		edits = append(edits, fmt.Sprintf("%s in place of the value at %s (and %s where later requests send it)",
+			templates.Format(true, templates.TypeString, key), l.path, templates.Format(false, templates.TypeString, key)))
 		if !c.reused[i] {
 			fresh = append(fresh, key)
 		}
@@ -1074,7 +1078,7 @@ func planChains(logger *zap.Logger, testSetID string, tcs []*models.TestCase, lo
 		if producer.inArray && ignoreOrdering {
 			plan.left++
 			logger.Info(fmt.Sprintf("%s gives a value a later request sends, inside an array: test.ignoreOrdering is on, so which element gives it cannot be decided, and templatize captures nothing there", at(producer)),
-				zap.String("value", value))
+				zap.Int("value_bytes", len(value)))
 			continue
 		}
 		if isLocation(producer) && !urlAllowed[producer] {
@@ -1085,7 +1089,7 @@ func planChains(logger *zap.Logger, testSetID string, tcs []*models.TestCase, lo
 		if producer.unholdable {
 			plan.left++
 			logger.Info(fmt.Sprintf("%s gives a value a later request sends, holding a delimiter of its URL part, where it reads as two parts: the replay could not tell it from them, and templatize captures nothing there", at(producer)),
-				zap.String("value", value))
+				zap.Int("value_bytes", len(value)))
 			continue
 		}
 
@@ -1122,7 +1126,7 @@ func planChains(logger *zap.Logger, testSetID string, tcs []*models.TestCase, lo
 				continue // equal by value only: what this test case was not asked for
 			} else if why := untiedWhy(untied, l); l.inResponse() && why != "" {
 				logger.Info(fmt.Sprintf("%s holds a read-back's value inside an array, and it stays as recorded: test.ignoreOrdering is on and %s, so nothing would tie a use there to its element and keploy test would refuse it", at(l), why),
-					zap.String("value", value))
+					zap.Int("value_bytes", len(value)))
 				continue
 			}
 			write(l, placeholderFor(l, false, key))
@@ -1315,8 +1319,9 @@ func repeatsOf(tcs []*models.TestCase, captures []capturePlan, untied func(*loca
 func (t *Tools) sayRepeats(testSetID string, tcs []*models.TestCase, captures []capturePlan) {
 	repeats := repeatsOf(tcs, captures, t.untiedInArray(testSetID, tcs))
 	for _, rp := range repeats {
-		next := fmt.Sprintf("if the app issues the value anew each run, write %s in place of %q there: that place then asserts it holds what this same answer gives at the capture of %s, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do",
-			rp.use, rp.value, rp.key)
+		// The place names the value; the line never quotes it.
+		next := fmt.Sprintf("if the app issues the value anew each run, write %s in place of the value there (%d bytes): that place then asserts it holds what this same answer gives at the capture of %s, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do",
+			rp.use, len(rp.value), rp.key)
 		if rp.use == "" {
 			next = "no use can stand there (" + rp.noUse + "): it stays as recorded"
 		}
@@ -1497,11 +1502,9 @@ func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCa
 		if i > 0 {
 			fmt.Println("--------------------")
 		}
-		truncatedValue := chain.Value
-		if len(truncatedValue) > 50 {
-			truncatedValue = truncatedValue[:47] + "..."
-		}
-		fmt.Printf("🔗 Chain for {{.%s}} (value: \"%s\")\n", chain.TemplateKey, truncatedValue)
+		// The value's size, never the value: it is a token or an id the
+		// app issued, and this output reaches CI logs.
+		fmt.Printf("🔗 Chain for {{.%s}} (value: %d bytes)\n", chain.TemplateKey, len(chain.Value))
 		fmt.Printf("  [PRODUCER] %s\n", formatLocation(chain.Producer, testCases))
 		for j, consumer := range chain.Consumers {
 			branch := "├─>"

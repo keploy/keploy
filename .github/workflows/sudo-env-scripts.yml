@@ -1,0 +1,49 @@
+name: Sudo env scripts
+
+# sudo_env.tests.sh: SUDO_ENV, what every sudo'd keploy run in a CI script
+# names besides its own variables (the switches a workflow sets for keploy,
+# each only while it is set: sudo-rs ignores -E); a check that every KEPLOY_
+# variable a workflow's env: block sets is one of those switches or one keploy
+# does not read; a check that every script sources sudo_env.sh by its own
+# path, so it loads where a workflow checks keploy out at a path; a check
+# that no command in a script or workflow hands sudo -E or runs env through
+# sudo without naming SUDO_ENV, whatever it runs; and verify_ran, which
+# fails a run under the proven switch whose agent never said its exact view's
+# verify mode is on. hang_guard.tests.sh: the hang guard a
+# script bounds a run with, whose exit code is the run's own on GNU and uutils
+# coreutils alike (Ubuntu 26.04's timeout(1) is uutils'), and a check that no
+# script takes an exit code it checks from timeout(1).
+#
+# Those checks read every workflow and every CI script, so this one short job
+# runs on a change to any file under .github. It has a workflow of its own so
+# that the other script tests keep their own triggers.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/**'
+  pull_request:
+    paths:
+      - '.github/**'
+
+permissions:
+  contents: read
+
+jobs:
+  sudo-env:
+    # Forty-six cases on files the script writes; about a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test sudo_env.sh (a sudo'd keploy run names each workflow switch and loads sudo_env.sh by its own path; a run under the switch whose agent did not say verify mode is on fails)
+        run: bash .github/workflows/test_workflow_scripts/sudo_env.tests.sh
+
+      - name: Test hang_guard.sh (a bounded run's exit code is its own, not timeout's; no script takes one from timeout)
+        run: bash .github/workflows/test_workflow_scripts/hang_guard.tests.sh
+
+      - name: Test record-exit-codes-linux.sh (a recording that hangs fails its case, app-killed's too, whose 137 the guard's SIGKILL also gives)
+        run: bash .github/workflows/test_workflow_scripts/mock/record-exit-codes-linux.tests.sh

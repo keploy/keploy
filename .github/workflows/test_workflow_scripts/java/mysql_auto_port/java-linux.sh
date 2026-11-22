@@ -47,6 +47,7 @@
 set -Eeuo pipefail
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 
 MYSQL_PORT=3307
 # The port the application is pointed at for the SECOND replay, to simulate an
@@ -156,7 +157,9 @@ assert_no_mysql_ports_config() {
 wait_for_mysql() {
   section "Wait for MySQL readiness on :${MYSQL_PORT}"
   for _ in {1..120}; do
-    if docker compose exec -T mysql mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
+    # Over TCP (to the container's own 3306), as the app and keploy reach it:
+    # the image's first, socket-only server answers the socket alone, and exits.
+    if docker compose exec -T mysql mysql -h127.0.0.1 -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
       echo "MySQL is ready."
       endsec; return 0
     fi
@@ -179,6 +182,7 @@ wait_for_app() {
     sleep 1
   done
   echo "::error::App did not start in time — a stuck MySQL handshake on :${MYSQL_PORT} is the likely cause (auto-detection regression)"
+  save_keploy_start_evidence
   endsec; return 1
 }
 
@@ -265,6 +269,9 @@ assert_no_mysql_ports_config
 section "Record (MySQL on :${MYSQL_PORT}, nothing configured)"
 "$RECORD_BIN" record -c "java -jar $JAR_NAME" > autoPort_record.txt 2>&1 &
 KEPLOY_PID=$!
+# The app starts once keploy's agent is ready: its wait, with its full
+# budget, starts there (keploy-start-wait.sh).
+await_agent_ready autoPort_record.txt "$KEPLOY_PID" || exit 1
 send_request "$KEPLOY_PID"
 set +e
 wait "$KEPLOY_PID"

@@ -251,14 +251,14 @@ func TestV2FramingErrorsCarryNoContent(t *testing.T) {
 			h := New(zap.NewNop()).(*HTTP)
 			stream, _, _ := makeStream(t, fakeconn.FromClient, 1)
 			req := []byte(framingChunked(c.body))
-			err := h.readRequestV2(context.Background(), stream, &req)
+			err := h.readRequestV2(stream, &req)
 			framingV2Err(t, "readRequestV2", err, errMalformedChunkedBody)
 		})
 		t.Run("response/"+c.name, func(t *testing.T) {
 			h := New(zap.NewNop()).(*HTTP)
 			stream, _, _ := makeStream(t, fakeconn.FromDest, 1)
 			resp := []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + c.body + "\r\n0\r\n\r\n")
-			_, err := h.readResponseV2(context.Background(), stream, &resp, "GET")
+			_, err := h.readResponseV2(stream, &resp, "GET")
 			framingV2Err(t, "readResponseV2", err, errMalformedChunkedBody)
 		})
 	}
@@ -266,14 +266,14 @@ func TestV2FramingErrorsCarryNoContent(t *testing.T) {
 		h := New(zap.NewNop()).(*HTTP)
 		stream, _, _ := makeStream(t, fakeconn.FromClient, 1)
 		req := []byte(framingBadContentLength(framingHead))
-		err := h.readRequestV2(context.Background(), stream, &req)
+		err := h.readRequestV2(stream, &req)
 		framingV2Err(t, "readRequestV2", err, errBadContentLength)
 	})
 	t.Run("response/a Content-Length that is not a number", func(t *testing.T) {
 		h := New(zap.NewNop()).(*HTTP)
 		stream, _, _ := makeStream(t, fakeconn.FromDest, 1)
 		resp := []byte(framingBadContentLength("HTTP/1.1 200 OK\r\n"))
-		_, err := h.readResponseV2(context.Background(), stream, &resp, "GET")
+		_, err := h.readResponseV2(stream, &resp, "GET")
 		framingV2Err(t, "readResponseV2", err, errBadContentLength)
 	})
 }

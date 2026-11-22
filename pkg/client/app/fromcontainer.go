@@ -203,10 +203,11 @@ func replicaConfig(src container.InspectResponse, agentContainer string) (*conta
 	hostCfg.Binds = nil
 	hostCfg.VolumesFrom = nil
 	// The keploy CA bundle, mounted read-only exactly as the command-string
-	// path splices `-v keploy-tls-certs:/tmp/keploy-tls:ro`.
+	// path splices `-v keploy-tls-certs-<run id>:/tmp/keploy-tls:ro`: the
+	// run's own volume (TLSVolumeFor).
 	hostCfg.Mounts = append(hostCfg.Mounts, mount.Mount{
 		Type:     mount.TypeVolume,
-		Source:   docker.KeployTLSVolumeName,
+		Source:   docker.TLSVolumeFor(agentContainer),
 		Target:   docker.KeployTLSMountPath,
 		ReadOnly: true,
 	})

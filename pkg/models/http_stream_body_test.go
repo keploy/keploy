@@ -604,7 +604,7 @@ func TestAnSSEStreamsFlatBodySplitsBackIntoItsFrames(t *testing.T) {
 		": keepalive",
 		"event:tick\ndata:",
 		"data:   two spaces\ndata:  one",
-	}, "\n\n"), carried.Body, "a data line each, a comment as a comment")
+	}, "\n\n")+"\n\n", carried.Body, "a data line each, a comment as a comment, the last event ended")
 	assert.Equal(t, framesData(frames), framesData(throughYAML(t, carried).StreamBody), "body: %q", carried.Body)
 }
 

@@ -123,7 +123,7 @@ func cutWord(s string) (word, rest string) {
 // before any agent exists (see agentTokenCommand).
 func (a *App) checkAgentTokenHandoff(ctx context.Context) error {
 	root := effectiveUID() == 0
-	if _, viaSudo := agentTokenCommand(a.cmd, root, token.Env); !viaSudo {
+	if _, viaSudo := agentTokenCommand(a.cmd.WholeUnredacted(), root, token.Env); !viaSudo {
 		return nil
 	}
 	return docker.CheckSudoKeepsAgentToken(ctx, root)

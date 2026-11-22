@@ -40,6 +40,12 @@ if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
   echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
   exit 1
 fi
+# mock_kind_counts: the recording's mocks by kind, Http matched whole.
+# shellcheck source=../mock-kinds.sh
+if ! source "$MOCK_DIR/../mock-kinds.sh" || ! declare -F mock_kind_counts >/dev/null; then
+  echo "FAIL: could not load mock-kinds.sh from $MOCK_DIR/.."
+  exit 1
+fi
 RECORD_BIN="${RECORD_BIN:-keploy}"
 APP=fc-app
 DEP=fc-dep
@@ -157,7 +163,8 @@ identity() {
 if half on; then
 echo "--- under the proven switch: refused, the container untouched ---"
 BEFORE="$(identity)"
-# keploy re-execs itself under sudo for --from-container, with sudo -E: the
+# keploy re-execs itself under sudo for --from-container, naming every
+# variable of its environment for sudo to keep: the
 # switch goes with it.
 KEPLOY_PROVEN=1 "$RECORD_BIN" mock record --from-container "$APP" --name fc-proven --path . --local --disable-ansi > record-proven.log 2>&1
 RC=$?
@@ -189,11 +196,24 @@ done
 
 # The agent publishes the app's ports on its behalf, because the app shares the
 # agent's network namespace and cannot publish anything itself.
+# get_during: one GET /alpha to the app during the session, its code in CODE.
+# SENT counts the requests, OK their 200s: the app answers 200 only with its
+# one call to the dependency answered, so the recording holds an Http mock
+# for each 200, and for no more requests than were sent.
+SENT=0
+OK=0
+get_during() {
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:9420/alpha)"
+  SENT=$((SENT + 1))
+  if [ "$CODE" = "200" ]; then OK=$((OK + 1)); fi
+}
 for _ in $(seq 1 20); do
-  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:9420/alpha)" = "200" ] && break
+  get_during
+  [ "$CODE" = "200" ] && break
   sleep 2
 done
-CODE_DURING="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:9420/alpha)"
+get_during
+CODE_DURING=$CODE
 [ "$CODE_DURING" = "200" ] || fail "the app did not answer through the agent during recording (got ${CODE_DURING:-none})"
 
 echo "--- stopping the session, then asserting WITHOUT any reset ---"
@@ -238,11 +258,20 @@ LEFTOVERS="$(sudo docker ps -aq --filter 'name=keploy-restore-backup' | wc -l | 
 REPLICAS="$(sudo docker ps -aq --filter "name=^${APP}-keploy\$" | wc -l | tr -d ' ')"
 [ "$REPLICAS" = "0" ] || fail "the replica keploy ran the app as was left behind"
 
-# And the recording itself has to have captured something, or the lane would
-# pass on a session that did nothing.
-DOCS="$(sudo grep -hc '^kind:' keploy/fc/mocks.yaml 2>/dev/null)"
-DOCS="${DOCS:-0}"
-[ "$DOCS" -gt 0 ] || fail "recorded no mocks, so this proves nothing about a real session"
+# And the recording itself has to hold the session's calls, or the lane would
+# pass on a session that did nothing: an Http mock for each request the app
+# answered 200, and at least one. A request curl gave up on (--max-time) may
+# still have reached the app, whose call to fc-dep then completed and was
+# recorded, so there may be more, though no more than the requests sent
+# (get_during; a loose bound by the requests that never reached the app):
+# bounded, not fixed. The app looks fc-dep up by name on every request, so DNS
+# mocks beside them are its own lookups; a mock of any other kind is a call
+# taken for something else. By kind, so a DNS mock is never counted as a call.
+read -r HTTP DNS OTHER KINDS < <(mock_kind_counts <(sudo cat keploy/fc/mocks.yaml 2>/dev/null))
+HTTP=${HTTP:-0} DNS=${DNS:-0} OTHER=${OTHER:-0}
+if [ "$HTTP" -lt 1 ] || [ "$HTTP" -lt "$OK" ] || [ "$HTTP" -gt "$SENT" ] || [ "$OTHER" -ne 0 ]; then
+  fail "recorded $HTTP Http mocks, $DNS DNS and $OTHER of other kinds${KINDS:+ ($KINDS)}: want one Http mock for each of the $OK requests the app answered 200 (at least one, at most the $SENT sent) and no other mock but DNS"
+fi
 
 # The agent keploy started for the session must have enforced its control-plane
 # token, which reaches the agent container through the `docker run` client's
@@ -285,5 +314,5 @@ if half on; then
   echo "PASS: under the switch --from-container was refused before keploy touched the container"
 fi
 if half off; then
-  echo "PASS: the container came back on its network, publishing its ports, with its data and its compose identity ($DOCS mocks recorded)"
+  echo "PASS: the container came back on its network, publishing its ports, with its data and its compose identity ($HTTP Http mocks recorded, $DNS DNS)"
 fi

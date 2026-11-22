@@ -3,7 +3,9 @@ package http
 import (
 	"net/http"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"weak"
@@ -24,12 +26,35 @@ func (h *HTTP) encodeRecordedAnswer(stub *models.Mock) ([]byte, error) {
 	return h.encodeAnswer(stub, nil)
 }
 
+// reasonPhrase is the reason phrase resp's status line is served with: the one
+// recorded (HTTPResp.StatusMessage, set when the upstream's was not the
+// standard one, "402 Card Declined"), else the standard one for its code. A
+// message written with its code in front ("402 Card Declined", as net/http's
+// Response.Status spells it) is served without it; one that would break the
+// status line (a CR or LF in it) is not served.
+func reasonPhrase(resp *models.HTTPResp) string {
+	if resp.StatusMessage == "" {
+		return http.StatusText(resp.StatusCode) // as recorded almost always: no allocation
+	}
+	reason := strings.TrimPrefix(resp.StatusMessage, strconv.Itoa(resp.StatusCode)+" ")
+	if reason == "" || strings.ContainsAny(reason, "\r\n") {
+		return http.StatusText(resp.StatusCode)
+	}
+	return reason
+}
+
 // encodeAnswer is a recorded answer's wire bytes: the status line, the header
 // lines (a Content-Length recomputed over the body sent, unless the answer has
 // no body by rule) and the body, compressed per its Content-Encoding, after
 // rewrite, if any. stub's response is in its Spec (withResponse). The bytes are
 // written into one buffer of their size: each header line was a fmt.Sprintf
 // and a new string holding every line before it.
+//
+// The header lines are written with their names sorted, as net/http's
+// Header.Write writes them, a name's lines in their recorded order: the same
+// answer built twice is the same bytes. Built in the header map's order, an
+// answer built again (its kept bytes gone with a collected entry, or a table
+// with no room) could be other bytes than its serves before.
 func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
 	resp := stub.Spec.HTTPResp
 	protoMajor, protoMinor := 1, 1
@@ -59,11 +84,14 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	noBody := responseHasNoBody(method, resp.StatusCode)
 	var lengthDigits [20]byte
 	length := strconv.AppendInt(lengthDigits[:0], int64(len(respBody)), 10)
-	status := http.StatusText(resp.StatusCode)
+	status := reasonPhrase(resp)
 
 	// "HTTP/" major "." minor " " code " " text CRLF, each int at most 20 bytes.
 	size := len("HTTP/. \r\n ") + 3*20 + len(status) + len("\r\n") + len(respBody)
+	var nameSpace [32]string
+	names := nameSpace[:0]
 	for key, values := range header {
+		names = append(names, key)
 		if key == "Content-Length" && !noBody {
 			size += len(key) + len(": \r\n") + len(length)
 			continue
@@ -82,7 +110,9 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	out = append(out, ' ')
 	out = append(out, status...)
 	out = append(out, "\r\n"...)
-	for key, values := range header {
+	slices.Sort(names)
+	for _, key := range names {
+		values := header[key]
 		if key == "Content-Length" && !noBody {
 			out = append(out, key...)
 			out = append(out, ": "...)

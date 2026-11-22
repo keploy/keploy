@@ -85,14 +85,14 @@ func (a *AgentClient) pushContainers(ctx context.Context) {
 // destinations from a list its client gives it, and whether it predates
 // container keys (it has no such route).
 func (a *AgentClient) agentTakesContainers(ctx context.Context, uri string) (takes, older bool, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri+"/containers", nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, uri+"/containers", nil)
 	if err != nil {
 		return false, false, err
 	}
 	// Made beside the run's requests, and cancelled as the run ends
 	// (ownConnection).
 	client := a.ownConnection()
-	res, err := client.Do(req)
+	res, err := doAgent(&client, req)
 	if err != nil {
 		return false, false, err
 	}
@@ -115,7 +115,7 @@ func (a *AgentClient) postContainers(ctx context.Context, uri string, s containe
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri+"/containers", bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, uri+"/containers", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func (a *AgentClient) postContainers(ctx context.Context, uri string, s containe
 	// Made beside the run's requests, and cancelled as the run ends
 	// (ownConnection).
 	client := a.ownConnection()
-	res, err := client.Do(req)
+	res, err := doAgent(&client, req)
 	if err != nil {
 		return err
 	}
@@ -140,11 +140,11 @@ func (a *AgentClient) postContainers(ctx context.Context, uri string, s containe
 // that predates settles has no such route: containerkey.ErrNoSettles.
 func (a *AgentClient) askSettle(ctx context.Context, uri, boot string, after uint64) (containerkey.SettleAsk, error) {
 	q := url.Values{"after": {strconv.FormatUint(after, 10)}, "boot": {boot}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri+"/containers/settle?"+q.Encode(), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, uri+"/containers/settle?"+q.Encode(), nil)
 	if err != nil {
 		return containerkey.SettleAsk{}, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return containerkey.SettleAsk{}, err
 	}

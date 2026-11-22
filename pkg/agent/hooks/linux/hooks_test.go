@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -54,11 +56,13 @@ func TestProxyIPv4IsWhereTheKernelSendsTheApplication(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			want := "127.0.0.1"
 			if tc.isDocker {
-				ip, err := utils.GetContainerIPv4()
+				ip, err := utils.GetContainerIP()
 				if err != nil {
-					t.Skipf("no non-loopback IPv4 address here for a container's agent to be reached at: %v", err)
+					t.Skipf("no address here for a container's agent to be reached at: %v", err)
 				}
-				want = ip
+				if ip.To4() != nil {
+					want = ip.String()
+				}
 			}
 			h := NewHooks(zap.NewNop(), &config.Config{})
 			// Not the constructor's loopback: the native case has to show that
@@ -80,6 +84,89 @@ func TestProxyIPv4IsWhereTheKernelSendsTheApplication(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An agent started with --is-docker has the kernel send the applications'
+// connections to its container's address. A container with an IPv4 address
+// keeps what keploy always did: IPv4 there, IPv6 to its v4-mapped form. A
+// container on a single-stack IPv6 network (an IPv6-only Pod) has none, and
+// its agent used to exit at start; its IPv6 connections now go to its own
+// IPv6 address, and its IPv4 ones (only loopback's exist there) to loopback,
+// which the applications share with the agent.
+func TestGetProxyInfoDockerSendsConnectionsToTheContainersAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		addr     string
+		wantIP4  string
+		wantIP6  string
+		wantDNS4 string
+	}{
+		{"IPv4", "10.244.0.5", "10.244.0.5", "::ffff:10.244.0.5", "10.244.0.5"},
+		{"IPv6 only, unique local", "fd00:10:244::5", "127.0.0.1", "fd00:10:244::5", "127.0.0.1"},
+		{"IPv6 only, global", "2001:db8:1:2:3:4:5:6", "127.0.0.1", "2001:db8:1:2:3:4:5:6", "127.0.0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubContainerAddress(t, func() (net.IP, error) { return net.ParseIP(tc.addr), nil })
+			h := NewHooks(zap.NewNop(), &config.Config{})
+			opts := config.Agent{SetupOptions: models.SetupOptions{IsDocker: true, ProxyPort: 16789, EnableIPv6Redirect: true}}
+
+			info, err := h.resolveProxyInfo(context.Background(), opts, agent.HookCfg{IsDocker: true})
+			if err != nil {
+				t.Fatalf("the agent could not tell where its proxy is reached: %v", err)
+			}
+			var ip4 [4]byte
+			binary.BigEndian.PutUint32(ip4[:], info.IP4)
+			if got := net.IP(ip4[:]).String(); got != tc.wantIP4 {
+				t.Fatalf("IPv4 connections go to %s, want %s", got, tc.wantIP4)
+			}
+			if got := ip6Text(info.IP6); got != tc.wantIP6 {
+				t.Fatalf("IPv6 connections go to %s, want %s", got, tc.wantIP6)
+			}
+			if info.Port != 16789 {
+				t.Fatalf("connections go to port %d, want the proxy's 16789", info.Port)
+			}
+			if got := h.ProxyIPv4(); got != tc.wantDNS4 {
+				t.Fatalf("the DNS server answers with %s, want %s", got, tc.wantDNS4)
+			}
+			if h.proxyIP6 != info.IP6 {
+				t.Fatalf("the hooks log the IPv6 redirect target as %08x, but the kernel is told %08x", h.proxyIP6, info.IP6)
+			}
+		})
+	}
+}
+
+// A container with no address to be reached at stops the agent with the
+// lookup's own error, its tag kept for the exit status.
+func TestGetProxyInfoDockerWithNoAddressFails(t *testing.T) {
+	want := fmt.Errorf("%w: no address", utils.ErrEnvironmentUnsupported)
+	stubContainerAddress(t, func() (net.IP, error) { return nil, want })
+	h := newTestHooks(t)
+	_, err := h.GetProxyInfo(context.Background(), config.Agent{SetupOptions: models.SetupOptions{IsDocker: true}}, agent.HookCfg{IsDocker: true})
+	if !errors.Is(err, utils.ErrEnvironmentUnsupported) {
+		t.Fatalf("GetProxyInfo returned %v, want the lookup's tagged error", err)
+	}
+}
+
+// stubContainerAddress has GetProxyInfo read the container's address from
+// lookup for the rest of the test.
+func stubContainerAddress(t *testing.T, lookup func() (net.IP, error)) {
+	t.Helper()
+	old := containerAddress
+	containerAddress = lookup
+	t.Cleanup(func() { containerAddress = old })
+}
+
+// ip6Text is the address ProxyInfo.IP6 holds, as the programs write it into a
+// redirected connection: each word in network order.
+func ip6Text(w [4]uint32) string {
+	b := make(net.IP, net.IPv6len)
+	for i, v := range w {
+		binary.BigEndian.PutUint32(b[4*i:], v)
+	}
+	if b.To4() != nil {
+		return "::ffff:" + b.To4().String()
+	}
+	return b.String()
 }
 
 func TestGetProxyInfo_NonDocker_ReturnsNonZeroIPv6(t *testing.T) {

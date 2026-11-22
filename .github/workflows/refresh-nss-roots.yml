@@ -47,7 +47,7 @@ jobs:
       # root-store tests run here before anything is proposed.
       - name: Test the root store
         if: steps.bump.outputs.changed == 'true'
-        run: go test ./pkg/agent/proxy/tls/ -run 'TestLoadSystemCABundle|TestLoadUpstreamRootCAs' -count=1
+        run: go test ./pkg/agent/proxy/tls/ -run 'TestLoadSystemCABundle|TestLoadCABundle|TestOperatorCertEnv|TestSetupSharedVolume|TestLoadUpstreamRootCAs' -count=1
 
       - name: Open a PR (an issue if Actions may not open PRs)
         if: steps.bump.outputs.changed == 'true'

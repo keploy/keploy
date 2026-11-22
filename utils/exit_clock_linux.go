@@ -177,6 +177,19 @@ import (
 // that time and the bound (and a look) of the time they and keploy could run
 // with none of their time in the kernel taken for a wait.
 //
+// On a loaded host keploy waits for a CPU too, and may have run for less of
+// a look than the processes could: which part of their time its own fell in
+// is not known. So its time is set against their waits in the kernel first:
+// those withhold from the stall as much of the time both could run as they
+// were, and the stall counts only the rest (lookTimes.withheld): slower,
+// never faster. Set against their turns on a CPU between those waits first,
+// a keploy held off the CPU spent the whole stall bound on those turns and
+// next to none of the credit: at a 300 ms bound and a hung-task time of 3 s,
+// a stop killed an app in the kernel in turns on storage that served it with
+// 0.28 s of the credit spent. A stop of processes that make no progress
+// still goes on for no more than the credit and the bound (and a look) of
+// the time both could run.
+//
 // The rest counts, by the rule a stopping agent's teardown is judged by
 // (teardown_work.go): one held in the kernel for the whole bound is taken for
 // wedged, as waiting on would wait for ever on one the kernel never lets go.
@@ -410,7 +423,6 @@ func (c *ExitClock) Runnable() time.Duration {
 	if c.looked {
 		w := c.lookSpan(from, to, tasks)
 		ownRan := max(own-c.lastOwn, 0)
-		could := w // no account of theirs: keploy's runnable time alone
 		if ok {
 			l := lookAt(w, c.last, tasks, c.unbooked)
 			// Standing in the kernel for the kernel's hung-task time up to
@@ -428,7 +440,7 @@ func (c *ExitClock) Runnable() time.Duration {
 				var standing []string
 				served, standing = storageServed(w, c.lastDisks, disks, c.devicesUnder)
 				// What would count were the devices standing still dead.
-				stake := min(ownRan, l.could(0)) - min(ownRan, l.could(served))
+				_, stake := l.withheld(ownRan, served)
 				for _, dev := range standing {
 					still[dev] = c.still[dev] + stake
 					if still[dev] >= c.bound {
@@ -439,16 +451,17 @@ func (c *ExitClock) Runnable() time.Duration {
 			// What the waits credited withheld from the stall: the time at
 			// stake in each stretch in the kernel going on, and in the
 			// credit spent.
-			stake := min(ownRan, l.could(0)) - min(ownRan, l.could(served))
+			joint, stake := l.withheld(ownRan, served)
 			for _, h := range l.held {
 				if h.standing {
 					inKernel[h.tid] = c.inKernel[h.tid] + stake
 				}
 			}
 			c.credited += stake
-			could = l.could(served)
+			c.ran += joint - stake
+		} else {
+			c.ran += min(ownRan, w) // no account of theirs: keploy's runnable time alone
 		}
-		c.ran += min(ownRan, could)
 	}
 	c.looked, c.lastFrom, c.lastTo, c.lastOwn, c.accounted = true, from, to, own, ok
 	c.lastDisks, c.still, c.inKernel = nil, still, inKernel
@@ -583,6 +596,20 @@ func (l lookTimes) could(served time.Duration) time.Duration {
 		}
 	}
 	return min(max(l.w-waited, l.ran, 0), l.w)
+}
+
+// withheld is, of a look in which keploy could run for own, the time it and
+// the processes could both run with no wait of theirs in the kernel taken
+// for one on storage (joint), and what of that their waits there withhold
+// from the stall with storage serving for served of it (stake): as much of
+// joint as those waits were. Where keploy could run for less than they
+// could, which part of their time its own fell in is not known: set against
+// their waits first, the stall counts keploy's time only past them (slower,
+// never faster), and a keploy held off the CPU spends the credit of those
+// waits before it spends the stall (see ExitClock).
+func (l lookTimes) withheld(own, served time.Duration) (joint, stake time.Duration) {
+	joint = min(own, l.could(0))
+	return joint, min(joint, l.could(0)-l.could(served))
 }
 
 // lookAt is the account, over w of wall time, of processes whose threads were

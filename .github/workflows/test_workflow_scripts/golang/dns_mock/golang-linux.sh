@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
@@ -98,7 +104,7 @@ endsec
 section "Start Recording"
 echo "Starting Recording..."
 # Run keploy in background with tee
-sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-test" --generateGithubActions=false 2>&1 | tee record.txt &
+sudo env PATH=$PATH "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "./dns-test" --generateGithubActions=false 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 rec_keploy=$(jobs -p %%) # the pipeline's sudo: it passes the signal on to keploy
 # Wait briefly for Keploy to initialize
@@ -126,7 +132,7 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 if json_pass_supported; then
     section "Start Recording (json)"
     echo "Starting json-format Recording..."
-    sudo -E env PATH=$PATH "$RECORD_BIN" record --storage-format json -c "./dns-test" --generateGithubActions=false 2>&1 | tee record_json.txt &
+    sudo env PATH=$PATH "${SUDO_ENV[@]}" "$RECORD_BIN" record --storage-format json -c "./dns-test" --generateGithubActions=false 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
     rec_keploy=$(jobs -p %%) # the pipeline's sudo: it passes the signal on to keploy
     sleep 5
@@ -147,7 +153,7 @@ fi
 # Replay
 section "Start Replay"
 echo "Starting Replay..."
-sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
+sudo env PATH=$PATH "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
 check_for_errors "test.txt"
 check_test_report
 endsec
@@ -155,7 +161,7 @@ endsec
 if json_pass_supported; then
     section "Start Replay (json)"
     echo "Starting json-format Replay..."
-    sudo -E env PATH=$PATH "$REPLAY_BIN" test --storage-format json -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
+    sudo env PATH=$PATH "${SUDO_ENV[@]}" "$REPLAY_BIN" test --storage-format json -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
     check_for_errors "test_json.txt"
     if ! json_scan_reports; then
         cat test_json.txt

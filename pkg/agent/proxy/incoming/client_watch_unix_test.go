@@ -21,6 +21,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // An exchange whose client hung up before the answer's end is not recorded,
@@ -42,7 +43,7 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 			t.Parallel()
 			gone := make(chan struct{})
 			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
@@ -63,6 +64,10 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 			cfg.Agent.Synchronous = synchronous
 			core, logs := observer.New(zapcore.InfoLevel)
 			pm := New(zap.New(core), nil, cfg)
+			// The session the ingress serves, whose key the line tags the
+			// request under (SetLogKeySession).
+			keys := models.NewLogKeySession()
+			pm.SetLogKeySession(keys)
 
 			client, proxied := tcpPairForWatch(t)
 			served := make(chan struct{})
@@ -94,22 +99,8 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 				_ = client.Close()
 			}
 
-			// A hang fails at the test binary's deadline, not at a budget
-			// of its own.
-			never := make(<-chan time.Time)
-			if d, ok := t.Deadline(); ok {
-				never = time.After(time.Until(d) - 5*time.Second)
-			}
-			for _, w := range []struct {
-				what string
-				c    <-chan struct{}
-			}{{"the app saw its client gone", gone}, {"the handler ended", served}} {
-				select {
-				case <-w.c:
-				case <-never:
-					t.Fatalf("never: %s", w.what)
-				}
-			}
+			<-gone
+			<-served
 			pm.captures.Wait()
 			select {
 			case tc := <-pm.TCChan():
@@ -120,9 +111,12 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 				return
 			}
 			told := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed its side").
-				FilterField(zap.String("url", "/client/v1/jobs/j/events")).Len()
-			if told != 1 {
-				t.Fatalf("the half-closed client's exchange not recorded was told %d times at Info, want once", told)
+				Filter(namesThePath("/{}/{}/{}/{}/{}")).All()
+			if len(told) != 1 {
+				t.Fatalf("the half-closed client's exchange not recorded was told %d times at Info, want once", len(told))
+			}
+			if m, _ := told[0].ContextMap()["metadata"].(map[string]string); m["path_tag"] != keys.PathTag("GET", "/client/v1/jobs/j/events") {
+				t.Fatalf("the line tags the request %q, want its tag under the session the ingress serves, %s", m["path_tag"], keys.PathTag("GET", "/client/v1/jobs/j/events"))
 			}
 		})
 	}
@@ -360,21 +354,12 @@ func serveApp(t *testing.T, ln net.Listener, h http.HandlerFunc) {
 	t.Cleanup(func() { _ = srv.Close() })
 }
 
-// never fires at the test binary's deadline less 5 s: a hang fails there,
-// not at a budget of its own.
-func never(t *testing.T) <-chan time.Time {
-	if d, ok := t.Deadline(); ok {
-		return time.After(time.Until(d) - 5*time.Second)
-	}
-	return make(<-chan time.Time)
-}
-
 // streamUntilGone is an app handler that reads the request's body, streams
 // one event, and closes gone once it sees its client go.
 func streamUntilGone(gone chan struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
@@ -431,16 +416,8 @@ func TestAHundredContinueClientsHangUpReachesTheApp(t *testing.T) {
 				t.Fatal(err)
 			}
 			hangUpAfterTheFirstEvent(t, client, br)
-			for _, w := range []struct {
-				what string
-				c    <-chan struct{}
-			}{{"the app saw its client gone", gone}, {"the handler ended", served}} {
-				select {
-				case <-w.c:
-				case <-never(t):
-					t.Fatalf("never: %s", w.what)
-				}
-			}
+			<-gone
+			<-served
 		})
 	}
 }
@@ -467,16 +444,8 @@ func TestAClientsHangUpReachesTheAppAfterARedialAndReplay(t *testing.T) {
 	default:
 		t.Fatal("precondition: the app's first connection answered; no redial and replay was made")
 	}
-	for _, w := range []struct {
-		what string
-		c    <-chan struct{}
-	}{{"the app saw its client gone", gone}, {"the handler ended", served}} {
-		select {
-		case <-w.c:
-		case <-never(t):
-			t.Fatalf("never: %s", w.what)
-		}
-	}
+	<-gone
+	<-served
 }
 
 // dropsFirst is a listener whose first connection reads one request's head
@@ -550,11 +519,7 @@ func TestAClientThatClosesOnceItHasTheAnswerIsRecorded(t *testing.T) {
 				t.Fatalf("the answer read %q, %v", body, err)
 			}
 			_ = client.Close()
-			select {
-			case <-served:
-			case <-never(t):
-				t.Fatal("never: the handler ended")
-			}
+			<-served
 			if over := kept.watchOverAtEnd(); len(over) != 1 || !over[0] {
 				t.Fatalf("as the answer's last bytes were written to the client, the watch was over: %v, want once, true", over)
 			}
@@ -643,7 +608,7 @@ func TestAnAnswerCutShortByItsClientsGoingIsToldAsNotRecorded(t *testing.T) {
 				t.Fatal(err)
 			}
 			rawApp(t, appLn, func(_ int, c net.Conn, br *bufio.Reader) {
-				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
 				untilEnd(br) // told of its client's going: it ends its answer
 			})
 			_, client, served, logs := serveWatched(t, synchronous, appLn, nil)
@@ -651,13 +616,9 @@ func TestAnAnswerCutShortByItsClientsGoingIsToldAsNotRecorded(t *testing.T) {
 				t.Fatal(err)
 			}
 			hangUpAfterTheFirstEvent(t, client, bufio.NewReader(client))
-			select {
-			case <-served:
-			case <-never(t):
-				t.Fatal("never: the handler ended")
-			}
+			<-served
 			if n := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed").
-				FilterField(zap.String("url", "/client/v1/jobs/j/events")).Len(); n != 1 {
+				Filter(namesThePath("/{}/{}/{}/{}/{}")).Len(); n != 1 {
 				t.Fatalf("the exchange its client left was told %d times at Info, want once; logs: %v", n, logs.All())
 			}
 			if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
@@ -691,17 +652,9 @@ func TestAClientsHangUpBeforeTheReplayedAnswerIsNoAppFailure(t *testing.T) {
 	if _, err := client.Write([]byte("GET /client/v1/jobs/j/poll HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-asked:
-	case <-never(t):
-		t.Fatal("never: the request was sent again on a new connection")
-	}
+	<-asked
 	_ = client.Close()
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatal("never: the handler ended")
-	}
+	<-served
 	if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
 		t.Fatalf("a client's going before the replayed answer was logged as %d error(s): %v", n, logs.FilterLevelExact(zapcore.ErrorLevel).All())
 	}
@@ -722,7 +675,7 @@ func TestAnAppThatDiesMidAnswerIsNoClientsGoing(t *testing.T) {
 				t.Fatal(err)
 			}
 			rawApp(t, appLn, func(_ int, c net.Conn, _ *bufio.Reader) {
-				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
 				// it dies here: no last chunk, and its client is still there
 			})
 			_, client, served, logs := serveWatched(t, synchronous, appLn, nil)
@@ -730,11 +683,7 @@ func TestAnAppThatDiesMidAnswerIsNoClientsGoing(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, _ = io.Copy(io.Discard, client) // the client stays to the end
-			select {
-			case <-served:
-			case <-never(t):
-				t.Fatal("never: the handler ended")
-			}
+			<-served
 			if n := logs.FilterMessageSnippet("its client closed").Len(); n != 0 {
 				t.Fatalf("an app's death mid-answer was told %d time(s) as its client's going: %v", n, logs.All())
 			}
@@ -755,7 +704,7 @@ var hangUps = []struct {
 	{"closes, the answer cut short",
 		func(t *testing.T, ln net.Listener, told chan struct{}) {
 			rawApp(t, ln, func(_ int, c net.Conn, br *bufio.Reader) {
-				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
 				untilEnd(br)
 				close(told)
 			})
@@ -765,7 +714,7 @@ var hangUps = []struct {
 	{"half-closes, the answer ended whole",
 		func(t *testing.T, ln net.Listener, told chan struct{}) {
 			serveApp(t, ln, func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
@@ -826,16 +775,8 @@ func TestABypassedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.hangUp(t, client)
-			select {
-			case <-told:
-			case <-never(t):
-				t.Fatal("never: the bypassed connection's app was not told its client went")
-			}
-			select {
-			case <-served:
-			case <-never(t):
-				t.Fatal("never: the handler ended")
-			}
+			<-told
+			<-served
 			if n := logs.FilterMessageSnippet("Not recording this request as a test case").Len(); n != 0 {
 				t.Fatalf("a bypassed (never captured) exchange was told %d time(s) as not recorded for its client's going: %v", n, logs.All())
 			}
@@ -868,16 +809,8 @@ func TestAPausedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 					t.Fatal(err)
 				}
 				h.hangUp(t, client)
-				select {
-				case <-told:
-				case <-never(t):
-					t.Fatal("never: the paused exchange's app was not told its client went")
-				}
-				select {
-				case <-served:
-				case <-never(t):
-					t.Fatal("never: the handler ended")
-				}
+				<-told
+				<-served
 				if n := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed").Len(); n != 0 {
 					t.Fatalf("an exchange lost to the pause was told %d time(s) as not recorded for its client's going: %v", n, logs.All())
 				}
@@ -924,7 +857,7 @@ func TestAnExchangeAPauseCostIsCountedOnceHoweverItEnds(t *testing.T) {
 	cutThenDropped.name = "closes, one more event sent and the answer cut short"
 	cutThenDropped.serve = func(t *testing.T, ln net.Listener, told chan struct{}) {
 		rawApp(t, ln, func(_ int, c net.Conn, br *bufio.Reader) {
-			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
 			untilEnd(br)
 			close(told)
 			_, _ = io.WriteString(c, "19\r\n{\"status\":\"CLIENT GONE\"}\n\r\n")
@@ -971,16 +904,8 @@ func TestAnExchangeAPauseCostIsCountedOnceHoweverItEnds(t *testing.T) {
 					}
 				}
 				hangUp(t, client)
-				select {
-				case <-told:
-				case <-never(t):
-					t.Fatal("never: the app was not told its client went")
-				}
-				select {
-				case <-served:
-				case <-never(t):
-					t.Fatal("never: the handler ended")
-				}
+				<-told
+				<-served
 				if got := mgr.NotRecordedUnderPressure(); got.Total != e.counted {
 					t.Fatalf("counted %d time(s) as not recorded under pressure, want %d: %v", got.Total, e.counted, logs.All())
 				}
@@ -1051,11 +976,7 @@ func TestAPausedInFlightExchangeIsCountedBeforeItEnds(t *testing.T) {
 			if _, err := client.Write([]byte("GET /poll HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 				t.Fatal(err)
 			}
-			select {
-			case <-got:
-			case <-never(t):
-				t.Fatal("never: the app got the request")
-			}
+			<-got
 			inFlight := mgr.NotRecordedUnderPressure().Total
 			close(release)
 			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
@@ -1065,11 +986,7 @@ func TestAPausedInFlightExchangeIsCountedBeforeItEnds(t *testing.T) {
 			_, _ = io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			_ = client.Close()
-			select {
-			case <-served:
-			case <-never(t):
-				t.Fatal("never: the handler ended")
-			}
+			<-served
 			if after := mgr.NotRecordedUnderPressure().Total; after != 1 {
 				t.Fatalf("counted %d time(s) once the handler ended, want 1", after)
 			}
@@ -1215,11 +1132,7 @@ func TestAPauseCutIsCountedAsItsExchangeEndsOnAKeptAliveConnection(t *testing.T)
 	// before the test does, so neither reads a hook or a pause the next
 	// test swaps.
 	_ = client.Close()
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatal("never: the handler ended")
-	}
+	<-served
 	pm.captures.Wait()
 }
 
@@ -1291,11 +1204,7 @@ func TestAPauseCutOnALaterExchangeOfAKeptAliveConnectionIsCounted(t *testing.T) 
 		t.Fatalf("the later exchange the pause cut was counted %d time(s), want 1", got.Total)
 	}
 	_ = client.Close()
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatal("never: the handler ended")
-	}
+	<-served
 	pm.captures.Wait()
 }
 
@@ -1361,26 +1270,14 @@ func TestAPauseCutIsCountedBeforeItsExchangesWindowCloses(t *testing.T) {
 	}
 	upConn.closed.Store(&span)
 	_ = client.(*net.TCPConn).CloseWrite()
-	select {
-	case <-span.Changed():
-	case <-never(t):
-		t.Fatal("never: the exchange's window closed")
-	}
+	<-span.Changed()
 	counted := mgr.NotRecordedUnderPressure().Total
 	releaseClose()
 	if rest, err := io.ReadAll(br); err != nil || !strings.Contains(string(rest), "CLIENT GONE") {
 		t.Fatalf("the half-closed client got %q, %v", rest, err)
 	}
-	select {
-	case <-told:
-	case <-never(t):
-		t.Fatal("never: the app was not told its client went")
-	}
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatal("never: the handler ended")
-	}
+	<-told
+	<-served
 	pm.captures.Wait()
 	if counted != 1 {
 		t.Fatalf("the cut was counted %d time(s) as its exchange's window closed, want 1: a stop's drain could end before it", counted)
@@ -1411,4 +1308,13 @@ func (c *closeHeldOnceClosed) Close() error {
 		}
 	}
 	return c.TCPConn.Close()
+}
+
+// namesThePath is whether a line names its request by the path's shape
+// (utils.GetReqMeta's "path"): a line never names the URL as sent.
+func namesThePath(shape string) func(observer.LoggedEntry) bool {
+	return func(e observer.LoggedEntry) bool {
+		m, _ := e.ContextMap()["metadata"].(map[string]string)
+		return m["path"] == shape
+	}
 }

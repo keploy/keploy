@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -63,8 +64,11 @@ var caReadClock stall.Clock
 // wait now.
 type caRejectWatch struct {
 	logger *zap.Logger
-	reader CaptureLossReader
-	ctx    context.Context // record's: each later read leaves its cancel out (stopProof)
+	// console is keploy's console (Recorder.SetConsole), where finish names
+	// the last destination whole beside its host tag; nil prints nothing.
+	console io.Writer
+	reader  CaptureLossReader
+	ctx     context.Context // record's: each later read leaves its cancel out (stopProof)
 	// stall bounds each read in time keploy could run (stall.HangBudget), on
 	// clock (nil: keploy's own runnable time).
 	stall time.Duration
@@ -95,7 +99,7 @@ type caRejectWatch struct {
 	last   uint64 // failed handshakes counted at the last read that counted test cases
 	during uint64 // failed while test cases were recorded
 	tests  []string
-	to     string // the destination of the last failed handshake a test case's read saw
+	to     models.CaptureLoss // the last failed handshake a test case's read saw, its destination its What
 	// tail is what the last read that came with no test case to count saw,
 	// when no read that counted test cases came after it (finish). A read
 	// that counts test cases counts from last, which tail leaves as it was, so
@@ -104,7 +108,7 @@ type caRejectWatch struct {
 	tail struct {
 		read bool
 		n    uint64
-		to   string
+		to   models.CaptureLoss
 	}
 }
 
@@ -122,15 +126,15 @@ func newCARejectWatch(ctx context.Context, logger *zap.Logger, reader CaptureLos
 }
 
 // failedHandshakes is losses' count of client-side TLS handshakes that
-// failed other than by the client hanging up, and the last one's
-// destination.
-func failedHandshakes(losses models.CaptureLosses) (uint64, string) {
+// failed other than by the client hanging up, and that kind's loss, whose
+// What is the last one's destination, with the hosts it names.
+func failedHandshakes(losses models.CaptureLosses) (uint64, models.CaptureLoss) {
 	for _, c := range losses {
 		if c.Kind == models.CaptureLossTLSAbort {
-			return c.Count, c.What
+			return c.Count, c
 		}
 	}
-	return 0, ""
+	return 0, models.CaptureLoss{}
 }
 
 // stopProof is a context the stop does not end, as ctx is: only its own
@@ -151,7 +155,7 @@ func stopProof(ctx context.Context) (context.Context, context.CancelFunc) {
 // boundedRead reads the agent's count (failedHandshakes) on ctx, which ends
 // it, given up once keploy had c.stall of its own runnable time to run
 // without an answer: a starved keploy is not taken for a silent agent.
-func (c *caRejectWatch) boundedRead(ctx context.Context) (uint64, string, error) {
+func (c *caRejectWatch) boundedRead(ctx context.Context) (uint64, models.CaptureLoss, error) {
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 	type answer struct {
@@ -169,15 +173,15 @@ func (c *caRejectWatch) boundedRead(ctx context.Context) (uint64, string, error)
 		select {
 		case a := <-got:
 			if a.err != nil {
-				return 0, "", a.err
+				return 0, models.CaptureLoss{}, a.err
 			}
 			n, to := failedHandshakes(a.losses)
 			return n, to, nil
 		case <-ctx.Done():
-			return 0, "", ctx.Err()
+			return 0, models.CaptureLoss{}, ctx.Err()
 		case <-m.Wait():
 			if m.Expired() {
-				return 0, "", errCountSilent
+				return 0, models.CaptureLoss{}, errCountSilent
 			}
 		}
 	}
@@ -428,9 +432,13 @@ func (c *caRejectWatch) finish(testSetID string) {
 	if len(c.tests) > 0 || (beyond > 0 && len(notChecked) > 0) {
 		next = "make the client trust keploy's CA (" + caDocs + "), then re-record these test cases"
 	}
-	if to != "" {
-		fields = append(fields, zap.String("last", to))
+	// The last destination as the WARN logs it: its host by its shape and
+	// the agent's tag (models.CaptureLoss.LogWhat), never whole; the
+	// console names it whole beside that tag.
+	if last := to.LogWhat(); last != "" {
+		fields = append(fields, zap.String("last", last))
 	}
 	fields = append(fields, zap.String("next_step", next))
 	c.logger.Warn(fmt.Sprintf("%d TLS handshake(s) with keploy's proxy failed while this recording ran (a client that does not trust keploy's CA rejects keploy's certificate); those calls are not recorded", n), fields...)
+	sayWhole(c.console, "test set "+testSetID+", the last failed TLS handshake", to.LogWhat(), to.ReportWhat())
 }

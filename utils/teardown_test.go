@@ -107,6 +107,73 @@ func TestReportTeardownProgress(t *testing.T) {
 	awaitReport(t, path, func(p TeardownProgress) bool { return p.Done && p.Seq == 2 })
 }
 
+// The report of the detach's end is the reporter's last: it writes nothing
+// after it, beat or kick, and returns. What follows is the exit, which can
+// outlast a beat (a race-detector build waits a second there for races at
+// exit), and a beat during it is one the CLI reads as an agent that has
+// detached everything and not exited, and kills.
+func TestTheDetachsEndIsTheLastReport(t *testing.T) {
+	defer func(b time.Duration) { teardownBeat = b }(teardownBeat)
+	teardownBeat = 2 * time.Millisecond
+	teardownSeq.Store(0)
+	teardownDone.Store(false)
+	t.Cleanup(func() { teardownSeq.Store(0); teardownDone.Store(false) })
+
+	sink := make(recordingSink, 1<<16)
+	ctx, begin := context.WithCancel(context.Background())
+	stop := make(chan struct{})
+	exited := reportTeardownProgress(ctx, zap.NewNop(), sink, stop, nil)
+	t.Cleanup(func() { close(stop); <-exited })
+	// next is the reporter's next report. It fails the test if the reporter
+	// returns with none left to read, or if none comes within a bound that
+	// only turns a hang into a failure.
+	next := func() TeardownProgress {
+		t.Helper()
+		var b []byte
+		select {
+		case b = <-sink:
+		case <-exited:
+			select {
+			case b = <-sink: // written before it returned
+			default:
+				t.Fatal("the reporter returned before the detach's end")
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("no report came")
+		}
+		p, err := ParseTeardownProgress(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	begin()
+	for next().Beat < 2 { // it beats
+	}
+	TeardownStep()
+	stepped := next()
+	for stepped.Seq < 1 {
+		stepped = next()
+	}
+	for next().Beat <= stepped.Beat { // and beats on after a step
+	}
+	MarkDetachDone()
+	for !next().Done {
+	}
+	select {
+	case <-exited:
+	case b := <-sink:
+		t.Fatalf("a report after the detach's end: %s", b)
+	case <-time.After(time.Minute):
+		t.Fatal("the reporter neither returned nor reported again after the detach's end")
+	}
+	select { // one written before it returned
+	case b := <-sink:
+		t.Fatalf("a report after the detach's end: %s", b)
+	default:
+	}
+}
+
 // StopTeardownReporting ends every reporter the agent's entry points started,
 // writing or not yet, and returns once none writes any more; a reporter
 // started after it runs, and the next call ends that one too.

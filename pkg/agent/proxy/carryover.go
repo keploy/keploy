@@ -59,10 +59,16 @@ func newCarryOverPool() *carryOverPool {
 	return &carryOverPool{byKey: make(map[carryKey]carryEntry)}
 }
 
+// recordedBefore orders mocks as they were recorded: by request time, then
+// by the number mockdb gave each as it wrote it
+// (models.CompareRecordedNumbers), then by name.
 func recordedBefore(a, b *models.Mock) bool {
 	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
 	if !ta.Equal(tb) {
 		return ta.Before(tb)
+	}
+	if c := models.CompareRecordedNumbers(a.Name, b.Name); c != 0 {
+		return c < 0
 	}
 	return a.Name < b.Name
 }

@@ -418,7 +418,7 @@ func TestStrictMissReportNamesWhatDiffers(t *testing.T) {
 	if got != nil {
 		t.Fatal("served")
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: "POST", URL: &url.URL{Path: "/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
 	if r.ClosestMock != "charge" || r.MatchPhase != models.MatchPhaseStrict {
 		t.Fatalf("report closest %q phase %q", r.ClosestMock, r.MatchPhase)
 	}
@@ -555,6 +555,19 @@ func TestStrictARedactedFormValueMayChange(t *testing.T) {
 	if got, _ := strictMatch(t, sent("/oauth/token", ct, "grant_type=password&client_secret=s3cr3t"), nil, nil, nil, rec); got != nil {
 		t.Fatal("another form value beside a redacted one was excused")
 	}
+	// A form of one key whose value the obfuscator redacted by its key (a
+	// pattern for the value and one for the key's segment, which matches the
+	// whole recorded body): the redacted value may change, but a key the
+	// recording lacks is still a change. Before, the whole body was skipped
+	// as one redacted value.
+	one := recorded("one", "/introspect", ct, "token=REDACTED-3")
+	one.Noise = []string{`^REDACTED-3$`, `^token=[^&]+$`}
+	if got, diag := strictMatch(t, sent("/introspect", ct, "token=s3cr3t"), nil, nil, nil, one); got == nil {
+		t.Fatalf("the redacted value of a one-key form was compared: %v", differs(diag))
+	}
+	if got, _ := strictMatch(t, sent("/introspect", ct, "token=s3cr3t&admin=1"), nil, nil, nil, one); got != nil {
+		t.Fatal("a key added to a one-key form whose value was redacted was excused")
+	}
 }
 
 // Only stateful recordings take turns, in their record order: a recording
@@ -616,7 +629,7 @@ func TestStrictDiffersNamesOnlyWhatDiffers(t *testing.T) {
 	if got != nil {
 		t.Fatal("served")
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/v1/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: "POST", URL: &url.URL{Path: "/v1/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
 	if strings.Join(r.Differs, ",") != "header.x-tenant" {
 		t.Fatalf("Differs = %v, want only the header", r.Differs)
 	}
@@ -629,7 +642,7 @@ func TestStrictDiffersNamesOnlyWhatDiffers(t *testing.T) {
 	if got != nil {
 		t.Fatal("served")
 	}
-	r = newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/upload"}, Host: "api.example", Header: liveUp.header}, liveUp.body, &mockMemDb{mocks: []*models.Mock{up}}, nil, nil, nil, diag)
+	r = newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: "POST", URL: &url.URL{Path: "/upload"}, Host: "api.example", Header: liveUp.header}, liveUp.body, &mockMemDb{mocks: []*models.Mock{up}}, nil, nil, nil, diag)
 	if strings.Join(r.Differs, ",") != "header.x-tenant" {
 		t.Fatalf("Differs = %v, want only the header", r.Differs)
 	}
@@ -1025,7 +1038,7 @@ func TestARefusedClockReadNamesItsFieldAndWhyInTheMissReport(t *testing.T) {
 	if got != nil {
 		t.Fatal("served a call whose reads of the clock moved thirty days")
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/v1/usage"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: "POST", URL: &url.URL{Path: "/v1/usage"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
 	for _, f := range []string{"body.q", "body.since", "body.users.{}.since"} {
 		if !hasField(r.Differs, f) {
 			t.Fatalf("Differs = %v; want %s named", r.Differs, f)

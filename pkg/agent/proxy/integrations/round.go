@@ -3,6 +3,8 @@ package integrations
 import (
 	"context"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -214,6 +216,9 @@ type DiskCandidate struct {
 // round lock (RoundReader.RoundSnapshot): every field is of one instant.
 type RoundSnapshot struct {
 	At RoundAt
+	// Reads is how many reads of the misses window the store files its
+	// misses in had begun at the snapshot (CallRound.AfterReads).
+	Reads uint64
 	// Test is the store's open test, "" for a pool view; Ahead is a pool
 	// view that answers the next test's calls in flight.
 	Test  string
@@ -279,6 +284,10 @@ type RoundSnapshot struct {
 	winEnd    time.Time
 	viewGen   uint64
 	endedOwn  map[string]struct{}
+	view      any
+	// taken is what Taken says of each recording, read once for the
+	// snapshot and its copies (takenOf).
+	taken *takenIndex
 }
 
 // RoundParts is what a store fills a RoundSnapshot's unexported answers
@@ -303,6 +312,10 @@ type RoundParts struct {
 	// EndedOwn are, by name, the recordings the view of the test the store
 	// ended (RoundSnapshot.Ended) held as its own; nil when Ended is "".
 	EndedOwn map[string]struct{}
+	// View is the store's own token of the view in force at the snapshot,
+	// which a call's mark of it carries (CallRound.InStoreView); nil for a
+	// store that holds no call to a view.
+	View any
 }
 
 // WithParts is s answering from p (a store's, read with s).
@@ -313,6 +326,8 @@ func (s RoundSnapshot) WithParts(p RoundParts) RoundSnapshot {
 	s.winStart, s.winEnd = p.WindowStart, p.WindowEnd
 	s.viewGen = p.ViewGen
 	s.endedOwn = p.EndedOwn
+	s.view = p.View
+	s.taken = &takenIndex{}
 	return s
 }
 
@@ -469,22 +484,31 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // installed, so nothing tells which recordings are that test's own, the
 // pool's call (PoolsCall) among them, and a lookup that named one made elsewhere would let
 // record's judging bake a test's own recording into the worker scope. It
-// names none, and pairs none, which only fails closed.
+// names none, and pairs none, which only fails closed. Nor does its mark
+// name the test whose view is in force (CallRound.Test): the call is no call
+// of that test's, so a test's end charges its miss by the view it was read
+// in, never to no test as that test's late call.
+//
+// Each carries the store's token of the view the snapshot read
+// (RoundParts.View, CallRound.InStoreView): a store held to the call is held
+// to that view, never to one installed after the snapshot.
 func (s RoundSnapshot) CallRound() CallRound {
 	if s.SetUnstaged() {
-		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(true).InView(false, s.Background)
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(true).InView(false, s.Background).InStoreView(s.view).AfterReads(s.Reads)
 	}
 	// A test's view with a worker scope shows it the worker scope, as the
 	// store's MarkCallRound says (its sequence view's Worker).
 	worker := s.Test != "" && len(s.worker) > 0
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
+		// Its mark names no test (OfTest): the call is the pool's or the
+		// tracker's test's, never the test whose view is in force.
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).InStoreView(s.view).AfterReads(s.Reads)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
-	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
+	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker).OfTest(s.Test).InStoreView(s.view).AfterReads(s.Reads)
 }
 
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark
@@ -592,6 +616,20 @@ func (s RoundSnapshot) SameRecordedTestWindow(a, b time.Time) (same, known bool)
 	i := s.windows.IndexOf(a)
 	return i >= 0 && i == s.windows.IndexOf(b), true
 }
+
+// RecordedWindowIndex implements RecordedWindowIndex over the staging's
+// recorded test windows, as the store's own does (MockManager's): a learn
+// step that reads the round in one snapshot tells by it which gap between
+// two recorded tests (the app's start-up, before the first, is one) a
+// recording made outside every test lies in.
+func (s RoundSnapshot) RecordedWindowIndex(t time.Time) (index int, known bool) {
+	if s.windows.Len() == 0 {
+		return -1, false
+	}
+	return s.windows.CurrentIndex(t), true
+}
+
+var _ RecordedWindowIndex = RoundSnapshot{}
 
 // InPool is the store's PoolMembership (the replay's scope table) at the
 // snapshot.
@@ -707,32 +745,99 @@ func (s RoundSnapshot) Voided() []*models.Mock {
 // keeps it from the candidates). One is in two, by design: a voided ahead
 // answer (Voided) a later view of the test it named shows, which the store
 // serves again as before, and a learn step counts as spent.
+//
+// A learn step asks it of each recording a call's take log names, so a
+// scan of the log for each ask read the log once per entry, its square in
+// all: the snapshot's index (takenOf) reads it once for every ask.
 func (s RoundSnapshot) AnsweredInRound(name string) bool {
-	// The entries of name that answered, and are not given back.
+	if x := s.takenOf(); x != nil {
+		return x.answered[name] > 0
+	}
+	return answeredIn(s.Taken, s.viewGen)[name] > 0
+}
+
+// answeredIn is, by recording, how many entries of log answered a call and
+// are not given back (AnsweredInRound): a consume, or a spend that holds
+// for the view in force (gen), that no TakeRestored of the same recording
+// gave back.
+func answeredIn(log []Take, gen uint64) map[string]int {
+	n := map[string]int{}
 	live := map[int]bool{}
-	for i, t := range s.Taken {
-		if t.Mock == nil || t.Mock.Name != name {
+	for i, t := range log {
+		takeReads.Add(1)
+		if t.Mock == nil {
 			continue
 		}
 		switch t.How {
 		case TakeConsumed:
 			live[i] = true
+			n[t.Mock.Name]++
 		case TakeSpent:
-			if !t.ForView || t.Gen == s.viewGen {
+			if !t.ForView || t.Gen == gen {
 				live[i] = true
+				n[t.Mock.Name]++
 			}
 		case TakeRestored:
-			delete(live, t.Of)
+			// A give-back names the entry it gives back: one of its own
+			// recording's, or none it counts.
+			if live[t.Of] && log[t.Of].Mock.Name == t.Mock.Name {
+				delete(live, t.Of)
+				n[t.Mock.Name]--
+			}
 		}
 	}
-	return len(live) > 0
+	return n
 }
+
+// takenIndex is what a snapshot's take log says of each recording, by
+// name, read once for the snapshot and every copy of it (WithParts makes
+// it, empty): AnsweredInRound's count and ClaimedInRound's claims.
+type takenIndex struct {
+	once     sync.Once
+	log      []Take
+	answered map[string]int
+	claimed  map[string]bool
+}
+
+// takenOf is s's takenIndex, read at its first ask; nil where s has none (a
+// snapshot no store filled, WithParts) or where s's log is not the one it
+// was read from (a copy whose Taken was cut or replaced): each ask then
+// reads the log itself.
+func (s RoundSnapshot) takenOf() *takenIndex {
+	x := s.taken
+	if x == nil {
+		return nil
+	}
+	x.once.Do(func() {
+		x.log = s.Taken
+		x.answered = answeredIn(s.Taken, s.viewGen)
+		x.claimed = map[string]bool{}
+		for _, t := range s.Taken {
+			takeReads.Add(1)
+			if t.How == TakeClaimed && t.Mock != nil {
+				x.claimed[t.Mock.Name] = true
+			}
+		}
+	})
+	if len(x.log) != len(s.Taken) || len(s.Taken) > 0 && &x.log[0] != &s.Taken[0] {
+		return nil
+	}
+	return x
+}
+
+// takeReads counts the take log's entries AnsweredInRound and ClaimedInRound
+// read, for the rows that bound a call's work.
+var takeReads atomic.Int64
 
 // ClaimedInRound reports whether a pairing claimed name in the staging
 // (TakeClaimed): no pairing takes it again. The claim is no consumption: a
 // view of its owner shows it unconsumed, until the owner's call takes it.
 func (s RoundSnapshot) ClaimedInRound(name string) bool {
+	if x := s.takenOf(); x != nil {
+		return x.claimed[name]
+	}
 	for _, t := range s.Taken {
+		takeReads.Add(1)
 		if t.How == TakeClaimed && t.Mock != nil && t.Mock.Name == name {
 			return true
 		}

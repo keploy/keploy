@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"sync"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/logleak"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -100,14 +103,16 @@ func (u *unpublishedPortInstr) UnreachableAppPort(_ context.Context, host string
 }
 
 // closedLocalPort is a loopback port nothing listens on, so a dial is refused.
+// It is held for the test's life, so no other socket can take it
+// (testnet.RefusedAddr).
 func closedLocalPort(t *testing.T) uint16 {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	_, p, err := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	if err := l.Close(); err != nil {
+	port, err := strconv.ParseUint(p, 10, 16)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return uint16(port)
@@ -248,9 +253,10 @@ func TestADroppedConnectionAtAnUnreachableAppPortSaysSo(t *testing.T) {
 			if tc.Kind == models.HTTP {
 				assert.True(t, pkg.IsTransportConnReset(err), "the reset must still classify as one: %v", err)
 			}
-			// However the drop is reported (net/http's io.EOF or reset, or its
-			// errServerClosedIdle, by a race inside it), the test is labelled
-			// APP_CONNECTION_ERROR.
+			// However the drop is reported (net/http's io.EOF or reset, its
+			// errServerClosedIdle, or the request's write to the connection
+			// it closed on the drop, by races inside it), the test is
+			// labelled APP_CONNECTION_ERROR.
 			assert.Contains(t, failedWith(tc, err).FailureInfo.Category, models.AppConnectionError,
 				"a test that failed with %v", err)
 			instr.mu.Lock()
@@ -374,4 +380,65 @@ func TestAfterTestRunHandsOnTheAgentsFailureUnderTheSwitch(t *testing.T) {
 	require.NoError(t, h.AfterTestRun(context.Background(), "test-run-0", nil, models.TestCoverage{}), "without the switch the agent's failure is only logged")
 	require.EqualValues(t, 1, agent.afterTestRuns.Load())
 	require.Equal(t, 1, logs.FilterMessage("failed to call AfterTestRun hook").Len())
+}
+
+// The line for a gRPC test keploy sends names the test case and its method by
+// the path's shape, never the path, as the HTTP test's line names its
+// request: a program that embeds the replay (k8s-proxy) writes it into its
+// own log, and the report names the method whole.
+func TestSimulatingAGRPCTestNamesItsMethodByItsShape(t *testing.T) {
+	const s = logleak.Canary
+	port := closedLocalPort(t)
+	tc := &models.TestCase{
+		Name: "grpc-orders-1", Kind: models.GRPC_EXPORT, AppPort: port,
+		GrpcReq: models.GrpcReq{Headers: models.GrpcHeaders{PseudoHeaders: map[string]string{
+			":authority": net.JoinHostPort("localhost", strconv.Itoa(int(port))), ":path": "/" + s + ".Orders/Get", ":method": "POST", ":scheme": "http",
+		}}},
+	}
+	logger, logs := logleak.Observe()
+	instr := &unpublishedPortInstr{prInstr: &prInstr{}, reason: "it is not published on the host"}
+	h := NewHooks(logger, &config.Config{Test: config.Test{APITimeout: 5}}, instr)
+	if _, err := h.SimulateRequest(context.Background(), tc, "test-set-0"); err == nil {
+		t.Fatal("precondition: a request to a closed port succeeded")
+	}
+	said := logs.FilterMessage("Simulating gRPC request").All()
+	require.Len(t, said, 1, "precondition: the gRPC test's line was logged (%v)", logs.All())
+	assert.Equal(t, "grpc-orders-1", said[0].ContextMap()["testcase"])
+	assert.Equal(t, "/{}/{}", said[0].ContextMap()["method"])
+	logleak.Check(t, logs, s, "SimulateRequest")
+}
+
+// The base path's notes (noteHostUnused, noteWhereSent) name each host by its
+// labels' shape beside its tag in the run's session, never whole: test.host,
+// the base path's host, the host a request is sent to and the Host header it
+// was recorded with. A host name is traffic; the console and the report name
+// it whole.
+func TestTheBasePathNotesNameEachHostByItsShapeAndTag(t *testing.T) {
+	const s = logleak.Canary
+	logger, logs := logleak.Observe()
+	h := newHooks(logger, &config.Config{Test: config.Test{APITimeout: 5}}, &prInstr{}, false)
+	base, err := url.Parse("http://base-" + s + ".internal:8080/api")
+	require.NoError(t, err)
+	h.appAt = base
+	ctx := models.StartLogKeySession(context.Background())
+	h.noteHostUnused(ctx, "host-"+s+".internal")
+	target, err := url.Parse("http://base-" + s + ".internal:9090/api/orders")
+	require.NoError(t, err)
+	h.noteWhereSent(ctx, target, "sent-"+s+".internal", "recorded-"+s+".internal")
+	require.Len(t, logs.All(), 3, "precondition: test.host, the port and the Host header notes were logged (%v)", logs.All())
+	logleak.Check(t, logs, s, "noteHostUnused and noteWhereSent")
+	fields := map[string]bool{}
+	for _, e := range logs.All() {
+		for _, v := range e.ContextMap() {
+			if str, ok := v.(string); ok {
+				fields[str] = true
+			}
+		}
+	}
+	for _, want := range []string{
+		models.HostLogName(ctx, "host-"+s+".internal"), "http://" + models.HostLogName(ctx, base.Host) + "/{}",
+		models.HostLogName(ctx, "sent-"+s+".internal"), models.HostLogName(ctx, "recorded-"+s+".internal"),
+	} {
+		assert.True(t, fields[want], "no note names a host as %q (its shape and tag): %v", want, fields)
+	}
 }

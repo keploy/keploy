@@ -105,6 +105,11 @@ type trackedConn struct {
 	// while it was kept, so each of its holds is of a request opened since.
 	// Under mu.
 	floor *holdBound
+	// worker is the test worker's keploy instance the kernel stamped the
+	// connection with, plus one, once its handler has read its pairing
+	// (setWorker); 0 while it has not. Only its own worker's window begins
+	// and scopes move or wait for it (inflight.of).
+	worker atomic.Uint64
 	// delivered counts the bytes its reads have returned, and eof says one
 	// returned the end of the stream: changed with reading as a read
 	// returns, under mu (returned), so a view never sees a read done whose
@@ -115,13 +120,24 @@ type trackedConn struct {
 	// raw reads how many bytes the socket has received (untaken); nil for
 	// a conn with no socket under it.
 	raw syscall.RawConn
+	// base is what the platform reads, as c is kept and before its handler
+	// runs, that its later counts of what the socket received are taken
+	// from (sockBase.read; on macOS, the application's first sequence
+	// number).
+	base sockBase
 	// forgotten: its handler is done with it (forget).
 	forgotten atomic.Bool
 	// beforeClose, when set (by the accept, before the handler runs), runs
 	// once as Close begins, while the socket can still be read
 	// (pairbytes.go).
 	beforeClose func()
-	closeOnce   sync.Once
+	// pairUse, when set (by the accept, before the handler runs), counts
+	// each read of it that moved bytes, and each write of bytes as it
+	// begins, for the paired connection it is (pairedConn.used); pairRead,
+	// set with it, counts the bytes its reads returned (pairedConn.read).
+	pairUse   *atomic.Uint64
+	pairRead  *atomic.Uint64
+	closeOnce sync.Once
 	// closing: its Close has begun. A read from then on is the close's own
 	// (pairClosing reads through the TLS layer what the socket holds) or one
 	// the close is ending, never its handler waiting for the application:
@@ -206,6 +222,7 @@ func (t *inflight) trackTold(conn net.Conn, flights *learn.Tracker) *trackedConn
 	if sc, ok := conn.(syscall.Conn); ok {
 		if raw, err := sc.SyscallConn(); err == nil {
 			tc.raw = raw
+			tc.base.read(raw)
 		}
 	}
 	t.mu.Lock()
@@ -216,6 +233,37 @@ func (t *inflight) trackTold(conn net.Conn, flights *learn.Tracker) *trackedConn
 	t.mu.Unlock()
 	t.changed()
 	return tc
+}
+
+// setWorker notes the test worker's keploy instance the kernel stamped tc
+// with (0: none), read from its pairing.
+func (tc *trackedConn) setWorker(instance uint32) {
+	if tc != nil {
+		tc.worker.Store(uint64(instance) + 1)
+	}
+}
+
+// of is the connections kept now that are worker's: every one for worker 0
+// (a run of one test process, whose windows are the run's). For a test
+// worker, those its kernel stamp names, and, with unread, those whose
+// pairing its handler has not read yet: a scope waits for one of those,
+// which may be the worker's, where a window's begin leaves its cut alone,
+// since moving it could take another worker's requests out of that
+// worker's window.
+func (t *inflight) of(worker uint32, unread bool) []*trackedConn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	conns := make([]*trackedConn, 0, len(t.conns))
+	for tc := range t.conns {
+		if worker != 0 {
+			w := tc.worker.Load()
+			if w != uint64(worker)+1 && (w != 0 || !unread) {
+				continue
+			}
+		}
+		conns = append(conns, tc)
+	}
+	return conns
 }
 
 // forget drops tc: its handler is done with it, and has filed whatever miss
@@ -443,6 +491,10 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
 		c.lift()
+		c.noteUse()
+		if c.pairRead != nil {
+			c.pairRead.Add(uint64(n))
+		}
 	}
 	c.returned(n, errors.Is(err, io.EOF))
 	if n == 0 && (err == nil || isTimeout(err) || errors.Is(err, io.EOF)) {
@@ -469,12 +521,24 @@ func (c *trackedConn) Write(b []byte) (int, error) {
 	var f *learn.Flight
 	if len(b) > 0 {
 		f = c.land()
+		// Counted before the bytes go out, as the landing is: the
+		// application may read them, and its test end, before this
+		// goroutine runs again (pairedConn.usedSinceEnd).
+		c.noteUse()
 	}
 	n, err := c.Conn.Write(b)
 	if err != nil {
 		f.EndUntold()
 	}
 	return n, err
+}
+
+// noteUse counts a read of c that moved bytes, or a write of bytes as it
+// begins (pairUse).
+func (c *trackedConn) noteUse() {
+	if c.pairUse != nil {
+		c.pairUse.Add(1)
+	}
 }
 
 // lift is a read of c that returned bytes: the start of a request in
@@ -682,7 +746,7 @@ func (c *trackedConn) hungUp(v connView) bool {
 	if c.raw == nil {
 		return false
 	}
-	_, state, ok := socketReceived(c.raw)
+	_, state, ok := c.socketCounts(v)
 	return ok && clientGone(state)
 }
 
@@ -763,14 +827,8 @@ func (c *trackedConn) boundLocked(cut uint64, floor bool) *holdBound {
 // begins (trackedConn.floor): a scope cut from now on leaves out the holds
 // its parser had taken by the time its reads passed what its socket has
 // received now, until the next window begins.
-func (t *inflight) beginWindow() {
-	t.mu.Lock()
-	conns := make([]*trackedConn, 0, len(t.conns))
-	for tc := range t.conns {
-		conns = append(conns, tc)
-	}
-	t.mu.Unlock()
-	for _, c := range conns {
+func (t *inflight) beginWindow(worker uint32) {
+	for _, c := range t.of(worker, false) {
 		c.mu.Lock()
 		c.floor = c.boundLocked(c.received(c.viewLocked()), true)
 		c.mu.Unlock()
@@ -916,12 +974,13 @@ func (c *trackedConn) NetConn() net.Conn { return c.Conn }
 // loaded host is as long as the scheduler makes it). The socket alone does not
 // show those, and the counts show their read as one waiting for the
 // application. They are what the socket has received in all (the kernel's
-// count, tcpi_bytes_received, read after v, so a read that returns between
-// the two counts as untaken, never as neither) less what v says the reads
-// returned. That count takes the application's FIN as one: it is taken off
-// once the socket is in a state only a FIN it received leads to, or in
-// TCP_CLOSE (reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK ended)
-// after a read returned the stream's end (finReceived). In
+// count, read after v, so a read that returns between the two counts as
+// untaken, never as neither: tcpi_bytes_received on Linux, the distance its
+// next expected sequence number has come on macOS, socketCounts) less what v
+// says the reads returned. Either count takes the application's FIN as one:
+// it is taken off once the socket is in a state only a FIN it received leads
+// to, or closed (reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK
+// ended) after a read returned the stream's end (finCounted). In
 // TCP_CLOSE with no end returned the kernel's counts do not tell the FIN from
 // a byte (a TLS layer stops reading at the close_notify before it), so it
 // counts as one until a read returns it or the handler closes the
@@ -940,11 +999,11 @@ func (c *trackedConn) received(v connView) uint64 {
 	if c.raw == nil {
 		return v.delivered
 	}
-	received, state, ok := socketReceived(c.raw)
+	received, state, ok := c.socketCounts(v)
 	if !ok {
 		return v.delivered
 	}
-	if finReceived(state, v.eof) && received > 0 {
+	if finCounted(state, v.eof) && received > 0 {
 		received--
 	}
 	return max(received, v.delivered)
@@ -984,15 +1043,11 @@ type scope struct {
 	bounds map[*trackedConn]*holdBound
 }
 
-// scope begins a scope with every connection kept now, each cut at what its
-// socket has received.
-func (t *inflight) scope() *scope {
-	t.mu.Lock()
-	conns := make([]*trackedConn, 0, len(t.conns))
-	for tc := range t.conns {
-		conns = append(conns, tc)
-	}
-	t.mu.Unlock()
+// scope begins a scope with every connection of worker's kept now
+// (inflight.of, unread ones included), each cut at what its socket has
+// received.
+func (t *inflight) scope(worker uint32) *scope {
+	conns := t.of(worker, true)
 	left := make(map[*trackedConn]uint64, len(conns))
 	bounds := make(map[*trackedConn]*holdBound, len(conns))
 	for _, tc := range conns {
@@ -1251,10 +1306,18 @@ func (s *scope) PendingProgress(answers bool) map[uint64]uint64 {
 }
 
 // InFlightScope implements agent.InFlightScoper.
-func (p *Proxy) InFlightScope() agent.InFlightScope { return p.inflight.scope() }
+func (p *Proxy) InFlightScope() agent.InFlightScope { return p.inflight.scope(0) }
+
+// InFlightScopeOf implements agent.InFlightWorkerScoper.
+func (p *Proxy) InFlightScopeOf(instance uint32) agent.InFlightScope {
+	return p.inflight.scope(instance)
+}
+
+// InFlightBeginWindowOf implements agent.InFlightWorkerScoper.
+func (p *Proxy) InFlightBeginWindowOf(instance uint32) { p.inflight.beginWindow(instance) }
 
 // InFlightBeginWindow implements agent.InFlightWindower.
-func (p *Proxy) InFlightBeginWindow() { p.inflight.beginWindow() }
+func (p *Proxy) InFlightBeginWindow() { p.inflight.beginWindow(0) }
 
 // InFlightChanged implements agent.InFlightReader.
 func (p *Proxy) InFlightChanged() <-chan struct{} { return p.inflight.Changed() }

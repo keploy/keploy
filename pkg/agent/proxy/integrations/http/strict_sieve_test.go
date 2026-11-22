@@ -135,7 +135,7 @@ func TestStrictFitsAreWhatEveryRecordingComparedFinds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := strictFits(ctx, call, dest, pool, n)
+		got, err := strictFits(ctx, call, dest, pool, n, integrations.ExactViewVerify.Load())
 		if err != nil {
 			t.Fatal(err)
 		}

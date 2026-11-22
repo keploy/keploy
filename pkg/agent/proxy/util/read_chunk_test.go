@@ -165,8 +165,8 @@ func (c *sizeTellingConn) Read(p []byte) (int, error) {
 // pass-through's readers, ReadBuffConn; an HTTP keep-alive connection's wait
 // for its next request) take WaitReadSize, the old loop's 1 KiB: at
 // ReadChunkSize, 10k idle pass-throughs held about 600 MiB more. ReadBytes,
-// whose callers read a message on, and ReadBytesUntilEOF, generic replay's,
-// which matches pieces recorded at the relay's read size, take ReadChunkSize.
+// whose callers read a message on (generic replay among them, which matches
+// pieces recorded at the relay's read size), takes ReadChunkSize.
 func TestEachReadPathReadsWithItsSize(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -176,7 +176,6 @@ func TestEachReadPathReadsWithItsSize(t *testing.T) {
 		want int
 	}{
 		{"ReadBytes", func(r io.Reader) ([]byte, error) { return ReadBytes(ctx, zap.NewNop(), r) }, ReadChunkSize},
-		{"ReadBytesUntilEOF", func(r io.Reader) ([]byte, error) { return ReadBytesUntilEOF(ctx, zap.NewNop(), r) }, ReadChunkSize},
 		{"ReadBytesWaiting", func(r io.Reader) ([]byte, error) { return ReadBytesWaiting(ctx, zap.NewNop(), r) }, WaitReadSize},
 	} {
 		conn := &sizeTellingConn{sizes: make(chan int, 1)}

@@ -29,6 +29,7 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	m.onDisk = &payloadOnDisk{at: PayloadAt{Offset: 5, Length: 9, Name: "m"}}
 	m.MarkPooled()
 
+	m.SetStoredSize(4096)
 	c := m.ShallowCopy()
 	if c == m {
 		t.Fatal("ShallowCopy returned the same object")
@@ -45,10 +46,13 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	if c.onDisk != m.onDisk {
 		t.Error("where the payload was left on disk was not carried over")
 	}
+	if c.StoredSize() != 4096 {
+		t.Error("the store's count of the mock's bytes was not carried over")
+	}
 	cv, mv := reflect.ValueOf(*c), reflect.ValueOf(*m)
 	for i := 0; i < cv.NumField(); i++ {
 		switch name := cv.Type().Field(i).Name; name {
-		case "pooled", "responseHydrator", "onDisk": // checked above
+		case "pooled", "responseHydrator", "onDisk", "storedSize": // checked above
 		default:
 			if !reflect.DeepEqual(cv.Field(i).Interface(), mv.Field(i).Interface()) {
 				t.Errorf("field %s was not copied", name)
@@ -58,5 +62,21 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	c.TestModeInfo.ID = 99
 	if m.TestModeInfo.ID != 3 {
 		t.Error("the copy shares TestModeInfo with the original")
+	}
+}
+
+// DeepCopy is how the replay's filters copy each mock before the mock
+// manager holds it: the copy carries the store's count of the mock's bytes
+// (StoredSize), so the learn step's readers reserve what reading the copy's
+// payload costs, and not all their bytes in flight, as for a mock no store
+// counted whose answer is parked.
+func TestDeepCopyKeepsTheStoresCountOfTheMocksBytes(t *testing.T) {
+	m := &Mock{Kind: HTTP, Name: "m"}
+	m.SetStoredSize(4096)
+	if c := m.DeepCopy(); c.StoredSize() != 4096 {
+		t.Fatalf("the copy's stored size is %d: want the mock's 4096", c.StoredSize())
+	}
+	if c := (&Mock{Kind: HTTP}).DeepCopy(); c.StoredSize() != 0 {
+		t.Fatalf("a copy of a mock no store read counts %d bytes: want 0", c.StoredSize())
 	}
 }

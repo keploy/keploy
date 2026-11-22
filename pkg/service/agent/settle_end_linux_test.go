@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -55,6 +56,38 @@ func TestAnEndThatCannotCountFailsTheTest(t *testing.T) {
 	require.NotNil(t, serr)
 	w := evidenceOf(t, a, "o::TestA")
 	require.Contains(t, w.Reason, "could not tell that every call of o::TestA reached it")
+	require.True(t, w.Unread, "no miss seen: the test has no verdict of its own")
+	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestA").Outcome)
+}
+
+// A miss keploy saw is definite: an end that then cannot count the calls
+// still on their way (as after a close keploy cannot account for) says so,
+// and the test stays failed on the miss, never unread. Erasing it would turn
+// a test keploy failed into one it did not judge.
+func TestAMissSeenBeforeAnEndThatCannotCountKeepsTheTestFailed(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/stock/book", "3", t0)},
+		map[string][]string{"o::TestMiss": {"mock-1"}}, map[string][]string{})
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestMiss"))
+	require.Nil(t, serr)
+	code, _ := p.call(t, "/stock/book")
+	require.Equal(t, 200, code)
+	code, _ = p.call(t, "/reserve/book")
+	require.Equal(t, 502, code, "the changed call has no recorded answer")
+	h := a.Hooks.(*countHooks)
+	h.mu.Lock()
+	h.err = models.ErrProxyConnsUnsupported
+	h.mu.Unlock()
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestMiss", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr, "the test is judged: its end answers, not keploy's error")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "could not tell that every call of o::TestMiss reached it")
+	require.Contains(t, e.Reason, "GET /reserve/book to 127.0.0.1:18093 had no recorded answer")
+	w := windowOf(t, a, "o::TestMiss")
+	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.False(t, w.Evidence.Unread, "a miss keploy saw keeps the test's verdict")
+	require.Len(t, w.Evidence.Misses, 1)
 }
 
 // The run's last read of its misses waits, as a test's end does, until the
@@ -113,6 +146,57 @@ func TestAnEndWithAConnectionWhoseHeldRequestsAreUnknownIsNotVerified(t *testing
 	require.ErrorIs(t, err, errHoldsUnknown, "a test case's end is told it is not verified")
 }
 
+// keploy test's end of a test case makes its bytes wait under the test case's
+// name (endingTestCase): one cut short marks what it could not see reached
+// with it, so the owned losses counted later say which test case wrote the
+// bytes. An end with no test case opened says "the test case"; an opening
+// waits under no test's name.
+func TestAKeployTestEndNamesItsTestCaseToTheBytesWait(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{}, map[string][]string{})
+	ctx := context.Background()
+	var ends []string
+	p.bytesWait = func(ctx context.Context, _ uint64) error {
+		ends = append(ends, coreAgent.EndOf(ctx))
+		return nil
+	}
+	// A pool call before the set's first test case, a test case's open
+	// (which settles the gap's calls, marking nothing), its end, then two
+	// pool calls after it ended (a passed run's, a plain one), then the next
+	// test case and its end. Only an end whose view is in force names a
+	// test case: a pool call after test-1 ended is the gap's, never test-1's,
+	// which was verified.
+	for i, ex := range []models.ExactServing{{}, {Test: "test-1"}, {}, {Passed: 1}, {}, {Test: "test-2"}, {}} {
+		require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &ex}, nil), "call %d", i)
+	}
+	require.Equal(t, []string{coreAgent.BetweenTestCases, "", "test-1", coreAgent.BetweenTestCases, coreAgent.BetweenTestCases, "", "test-2"}, ends)
+}
+
+// A proxy that cannot say which view is in force names no test case: its
+// marks say "the test case", never a test case that may have ended.
+func TestAKeployTestEndWithNoServedReaderNamesNoTestCase(t *testing.T) {
+	require.Equal(t, "the test case", endingTestCase(outcomeOnly{"test-1"}))
+	a, _ := exactAgent(t, nil, map[string][]string{}, map[string][]string{})
+	es, err := a.exactServer()
+	require.NoError(t, err)
+	require.Equal(t, coreAgent.BetweenTestCases, endingTestCase(es), "no test case open")
+}
+
+// A drop counted in the gap says it was between test cases, never "while
+// between test cases ran" nor a test case's name.
+func TestADropBetweenTestCasesSaysSo(t *testing.T) {
+	require.Contains(t, dropped{what: coreAgent.BetweenTestCases, n: 2}.Error(), "listener between test cases (its SYN")
+	require.Contains(t, dropped{what: "test-1", n: 2}.Error(), "listener while test-1 ran (its SYN")
+}
+
+// outcomeOnly is an ExactServer that answers ExactTestOutcome alone.
+type outcomeOnly struct{ test string }
+
+func (outcomeOnly) ServeExactTest(string, []*models.Mock) error { return nil }
+func (outcomeOnly) ServeExactPool(string, []string) error       { return nil }
+func (o outcomeOnly) ExactTestOutcome() (string, []string, []string, bool) {
+	return o.test, nil, nil, true
+}
+
 // A test during which the kernel dropped, at the proxy's listener, what can
 // lose a connection (a SYN or final ACK it could not take: the listener's
 // drops and its namespace's ListenDrops both rose, an accept queue that
@@ -154,7 +238,7 @@ func TestADropInOneTestsWindowLeavesOnlyThatTestNotJudged(t *testing.T) {
 	require.Nil(t, serr)
 	require.Empty(t, e.Action, "TestB's drop is not TestC's: %s", e.Reason)
 
-	dropped := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}
+	dropped := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}
 	w := windowOf(t, a, "o::TestB")
 	require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
 	require.NotNil(t, w.Evidence)
@@ -174,7 +258,7 @@ func TestADropInOneTestsWindowLeavesOnlyThatTestNotJudged(t *testing.T) {
 	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil), "the test case's end serves the pool: its drop is in its losses")
 	lost, err := a.CaptureLosses(ctx)
 	require.NoError(t, err)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 2}}, lost, "TestB's drop, then test-1's")
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 2, HostsListed: true}}, lost, "TestB's drop, then test-1's")
 }
 
 // A record charges a drop the same: the test it fell in keeps its outcome
@@ -199,7 +283,7 @@ func TestARecordChargesADropToTheTestItFellIn(t *testing.T) {
 
 	w := windowOf(t, a, "o::TestB")
 	require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, w.Evidence.CannotCapture)
 	require.False(t, w.Evidence.Unread)
 	for _, id := range []string{"o::TestA", "o::TestC"} {
 		require.Nil(t, windowOf(t, a, id).Evidence, "%s is charged nothing", id)
@@ -300,7 +384,7 @@ func TestADropWhoseRisesLandOnEitherSideOfABeginIsTheNextTests(t *testing.T) {
 	}
 	for _, id := range []string{"o::TestB", "o::TestC"} {
 		w := windowOf(t, a, id)
-		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture, id)
+		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, w.Evidence.CannotCapture, id)
 		require.Contains(t, w.Evidence.Reason, "the kernel dropped 1 connection attempt(s) at keploy's proxy listener (its SYN or accept queue full)", id)
 		require.False(t, w.Evidence.Unread, "%s not judged for its own loss, not unread", id)
 	}
@@ -353,7 +437,7 @@ func TestADropBetweenTwoTestsIsTheNextTests(t *testing.T) {
 	for _, id := range []string{"o::TestB", "o::TestD"} {
 		w := windowOf(t, a, id)
 		require.NotNil(t, w.Evidence, "%s is charged the drop before it", id)
-		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture, id)
+		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, w.Evidence.CannotCapture, id)
 		require.False(t, w.Evidence.Unread, id)
 	}
 	un, err := a.UnchargedCaptureLosses(ctx)
@@ -453,14 +537,14 @@ func TestADropAfterTheLastTestIsTheRuns(t *testing.T) {
 	p.smu.Unlock()
 	un, err := a.UnchargedCaptureLosses(ctx)
 	require.NoError(t, err)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, un)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, un)
 	// The run's read of its losses after it has the drop: mock record and
 	// mock test make the uncharged read first, so theirs does.
 	require.Equal(t, uint64(1), listenerDropped(t, a), "the run's read has the drop")
 	require.Nil(t, windowOf(t, a, "o::TestA").Evidence, "TestA is charged nothing")
 	un, err = a.UnchargedCaptureLosses(ctx)
 	require.NoError(t, err)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, un, "counted once")
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, un, "counted once")
 }
 
 // A run's last read while a test is still open (out of the CLI's order, which
@@ -488,7 +572,7 @@ func TestARunsReadWhileATestIsOpenLeavesItsDropsToItsEnd(t *testing.T) {
 	require.Empty(t, e.Action, "a record never fails a test: %s", e.Reason)
 	w := windowOf(t, a, "o::TestA")
 	require.NotNil(t, w.Evidence, "TestA is charged its drop at its end")
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, w.Evidence.CannotCapture)
 	un, err = a.UnchargedCaptureLosses(ctx)
 	require.NoError(t, err)
 	require.Empty(t, un, "charged to TestA, not to the run")
@@ -527,7 +611,7 @@ func TestADropInATestWhoseEndFailedIsTheGaps(t *testing.T) {
 			require.NotNil(t, serr, "TestA's end could not settle")
 			setErr(nil)
 			drop()
-			want := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 2}}
+			want := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 2, HostsListed: true}}
 			if next {
 				require.Empty(t, endPassed(t, a, "TestB").Action)
 				w := windowOf(t, a, "o::TestB")
@@ -608,7 +692,7 @@ func TestADropBeforeTheFirstTestIsTheFirstTests(t *testing.T) {
 	require.Empty(t, endPassed(t, a, "TestB").Action)
 	w := windowOf(t, a, "o::TestA")
 	require.NotNil(t, w.Evidence)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, w.Evidence.CannotCapture)
 	require.Nil(t, windowOf(t, a, "o::TestB").Evidence)
 	un, err := a.UnchargedCaptureLosses(ctx)
 	require.NoError(t, err)
@@ -628,7 +712,7 @@ func TestADropBeforeATestProcesssClaimIsTheRuns(t *testing.T) {
 		p.drops, p.netDrops = p.drops+1, p.netDrops+1 // an accept queue full
 		p.smu.Unlock()
 	}
-	want := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}
+	want := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}
 	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
 		t.Run(string(mode)+"/the first claim", func(t *testing.T) {
 			a, p := wireAgent(t, mode)
@@ -730,14 +814,14 @@ func TestADropKeployCannotTellIsCounted(t *testing.T) {
 
 	w := windowOf(t, a, "o::TestA")
 	why := "every packet the listener dropped counted: keploy could not read its network namespace's ListenDrops, which tell a drop that can lose a connection from a client that gave up its connect: tell the listener's network namespace (SIOCGSKNS): operation not permitted"
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, What: why}}, w.Evidence.CannotCapture)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, What: why, HostsListed: true}}, w.Evidence.CannotCapture)
 	require.Contains(t, w.Evidence.Reason, "the kernel dropped 1 packet(s) at keploy's proxy listener (a full SYN or accept queue, or a client that gave up its connect: keploy could not tell which)")
 	require.NotContains(t, w.Evidence.Reason, "its SYN or accept queue full", "not said where keploy could not tell")
 	require.Contains(t, w.Evidence.Reason, "("+why+")")
 	require.False(t, w.Evidence.Unread)
 	w = windowOf(t, a, "o::TestB")
 	require.NotNil(t, w.Evidence, "an abandoned connect cannot be told from a real drop with the begin's namespace count unread")
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, What: "every packet the listener dropped counted: keploy could not read its network namespace's ListenDrops, which tell a drop that can lose a connection from a client that gave up its connect: " + atBegin}}, w.Evidence.CannotCapture)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, What: "every packet the listener dropped counted: keploy could not read its network namespace's ListenDrops, which tell a drop that can lose a connection from a client that gave up its connect: " + atBegin, HostsListed: true}}, w.Evidence.CannotCapture)
 }
 
 // A test's begin waits only for what the previous test's end left
@@ -836,6 +920,6 @@ func TestATestsWindowBeginsAtItsBeginOnly(t *testing.T) {
 	require.EqualValues(t, 1, k.windows.Load(), "the test case's end begins none")
 
 	t.Setenv(provenswitch.Env, "0")
-	b.beginWindow()
+	b.beginWindow(0)
 	require.EqualValues(t, 1, k.windows.Load(), "with the switch off no window begins")
 }
