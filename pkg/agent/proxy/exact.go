@@ -1637,7 +1637,10 @@ func (m *MockManager) GiveExactTest(test string, b models.VariableBinding) error
 		if have.Name == "" {
 			return fmt.Errorf("no scope of %s's variables has begun", test)
 		}
-		return fmt.Errorf("variable %s is bound already in %s, to %q", b.Name, test, have.Value)
+		// Its size, never the value: a variable holds what the app sent or
+		// was sent (a session's token), and the error is logged
+		// (warnCaseBind) and answered to the caller.
+		return fmt.Errorf("variable %s is bound already in %s, to another value (%d bytes)", b.Name, test, len(have.Value))
 	}
 	return nil
 }
@@ -2058,6 +2061,17 @@ func (m *MockManager) SourcesOf(mock string) []models.DeclaredSource {
 		return nil
 	}
 	return slices.Clone((*sources)[mock])
+}
+
+var _ integrations.SourcesDeclarer = (*MockManager)(nil)
+
+// DeclaresSources implements integrations.SourcesDeclarer: whether the
+// replay's scope table gives any recording a declared source
+// (SetPoolSources, which keeps only names with one); false until a replay
+// sent them.
+func (m *MockManager) DeclaresSources() bool {
+	sources := m.exact.poolSources.Load()
+	return sources != nil && len(*sources) > 0
 }
 
 // SetPoolTimeForm installs, of the replay's scope table, whether the learn
@@ -3960,8 +3974,8 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 			}
 			return verdict, wait, after
 		}()
-		if f := m.exact.round.onSettled; f != nil && verdict == exactServed {
-			f()
+		if f := m.exact.round.onSettled.Load(); f != nil && verdict == exactServed {
+			(*f)(mk.Name)
 		}
 		if after != nil {
 			after()

@@ -565,7 +565,10 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	switch {
 	case strings.HasPrefix(ref.Noise, "body."):
 		path := strings.TrimPrefix(ref.Noise, "body.")
-		if !both && k.n.body.Covers(path, "", false) ||
+		// A leaf only the live request has is excused by an entry that does
+		// not name id keys (CoversAdded).
+		if inRec && !inLive && k.n.body.Covers(path, "", false) ||
+			!inRec && k.n.body.CoversAdded(path) ||
 			both && k.n.body.Covers(path, noiseText(rec), scalarLeaf(rec)) && k.n.body.Covers(path, noiseText(live), scalarLeaf(live)) {
 			return true, false
 		}
@@ -2094,13 +2097,13 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if x, err := exactlyElsewhere(input, mockDb, sc, live, liveShape, n, elsewhereCounts(own, read.windows)); errors.As(err, &place) {
 				if _, warned := h.placeWarned.LoadOrStore(placeWarning{epoch: read.round.epoch, mock: place.mock}, true); !warned {
 					h.Logger.Warn("a recording of the test set declares a variable at a place keploy cannot read, so the learn step cannot tell whether a call of its operation is exactly that recording: it learns nothing from such a call, which misses. Correct or remove the variable in the test set's mocks.yaml, or record again, then run again",
-						zap.String("recording", place.mock), zap.String("variable", place.variable), zap.String("place", place.place))
+						zap.String("recording", place.mock), zap.String("variable", place.variable), zap.String("place", models.FieldShape(place.place)))
 				}
 				res = learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy cannot read where the recording " + place.mock + " declares its variable " + place.variable + " (" + strconv.Quote(place.place) + "), so it cannot tell whether this request is exactly " + place.mock + " rather than a changed call of " + m.Name + ", and learns nothing from it"}
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http, steps: placeSteps}, nil
 			} else if err != nil {
 				h.Logger.Warn("keploy cannot read every recording of the test set, so its learn step cannot tell whether this call is exactly one of them: it learns nothing from the call, which misses. Fix what the error names, then run again",
-					zap.String("mock", m.Name), zap.Error(err))
+					zap.String("mock", m.Name), zap.Error(utils.WithholdInput(err)))
 				res = learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy cannot read every recording of the test set (" + err.Error() + "), so it cannot tell whether this request is exactly one of them rather than a changed call of " + m.Name + ", and learns nothing from it"}
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http, steps: unreadSteps}, nil
 			} else if x != nil {
@@ -2172,8 +2175,8 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				// whether that call was the set's (an earlier test's or the
 				// start-up's): its evidence, never its value.
 				h.Logger.Info("learned a field that changed between record and replay",
-					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)),
-					zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", l.From.Path), zap.Bool("fromSet", l.From.Run))
+					zap.String("mock", m.Name), zap.String("field", models.FieldShape(l.Recorded.Path)), zap.String("as", string(l.Kind)),
+					zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", models.FieldShape(l.From.Path)), zap.Bool("fromSet", l.From.Run))
 			}
 			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own, h.learnedView(m, plan)); ok {
 				tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
@@ -2949,8 +2952,8 @@ func (h *HTTP) declaredPlan(tracker *learn.Tracker, test uint64, m *models.Mock,
 	}
 	for _, l := range kept {
 		h.Logger.Info("learned a field that changed between record and replay",
-			zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)),
-			zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", l.From.Path), zap.Bool("fromSet", l.From.Run))
+			zap.String("mock", m.Name), zap.String("field", models.FieldShape(l.Recorded.Path)), zap.String("as", string(l.Kind)),
+			zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", models.FieldShape(l.From.Path)), zap.Bool("fromSet", l.From.Run))
 	}
 	return plan, answered
 }
@@ -3046,11 +3049,15 @@ func inRecordedOrder(mocks []*models.Mock) []*models.Mock {
 }
 
 // recordedFirst is inRecordedOrder's order: a before b when a was recorded
-// first, or at the same instant with a name that sorts first.
+// first, or at the same instant with the lower number mockdb gave it as it
+// wrote it (models.CompareRecordedNumbers), or a name that sorts first.
 func recordedFirst(a, b *models.Mock) bool {
 	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
 	if !ta.Equal(tb) {
 		return ta.Before(tb)
+	}
+	if c := models.CompareRecordedNumbers(a.Name, b.Name); c != 0 {
+		return c < 0
 	}
 	return a.Name < b.Name
 }

@@ -11,6 +11,39 @@ import (
 
 type OutgoingReq struct {
 	OutgoingOptions OutgoingOptions `json:"outgoingOptions"`
+	// TestSet is, from keploy test, the test set the session serves and the
+	// run it is of (TestSetSession), the zero value from any other client
+	// and from an older one, which sends none. It travels
+	// beside OutgoingOptions, not in them: they are held by value in each
+	// connection's supervisor.Session, whose 640 B size class has no room
+	// left (TestASessionStaysInThe640ByteSizeClass).
+	TestSet TestSetSession `json:"testSet"`
+}
+
+// TestSetSession names the test set a session of keploy test's serves, and
+// the run it is of: a token keploy test draws as its run starts, so an agent
+// kept from an earlier run tells that run's sets from this one's, whose sets
+// may have the same names. The agent stamps a capture loss it finds after
+// that session ended with the set (OwnedCaptureLoss.EarlierSession), and
+// keploy test reports it as that set's.
+type TestSetSession struct {
+	Run string `json:"run"`
+	Set string `json:"set"`
+}
+
+type testSetSessionKey struct{}
+
+// WithTestSetSession is ctx carrying s, the test set a MockOutgoing under it
+// starts a session for (OutgoingReq.TestSet).
+func WithTestSetSession(ctx context.Context, s TestSetSession) context.Context {
+	return context.WithValue(ctx, testSetSessionKey{}, s)
+}
+
+// TestSetSessionOf is the test set WithTestSetSession put in ctx: the zero
+// value for none.
+func TestSetSessionOf(ctx context.Context) TestSetSession {
+	s, _ := ctx.Value(testSetSessionKey{}).(TestSetSession)
+	return s
 }
 
 type IncomingReq struct {
@@ -112,6 +145,14 @@ type TestMockMapping struct {
 	// recording's client asked it to end its streams (StreamEndPath) and it
 	// has put on the stream all it had: no test or mocks of its own.
 	StreamEnd bool `json:"stream_end,omitempty" yaml:"-"`
+	// RequestedAt dates the mapping as the agent owes it to a recording's
+	// stop (BacklogBefore): the request time of the test it maps, or, for a
+	// later delta to a past test's mapping, the earliest request time among
+	// the mocks it adds. A recording that stops while its app goes on serving
+	// judges the mapping by it, as it judges test cases and mocks by theirs:
+	// one dated after the stop is of a request made after it, and not part of
+	// the recording. Zero from an agent that does not say.
+	RequestedAt time.Time `json:"requested_at,omitzero" yaml:"-"`
 }
 
 // ScopeReq is the body of POST /agent/scope/begin and /agent/scope/end — a
@@ -251,7 +292,8 @@ func NormalizeScopeOutcome(s string) string {
 // ScopeBeginResp answers POST /agent/scope/begin. A test the replay gated out
 // (see ScopeGateReq), begun by a harness that can skip (ScopeReq.CanSkip),
 // gets Action ScopeActionSkip and the Reason; its harness skips it and sends
-// no end for it. Every other answer is exactly
+// no end for it, or an end whose Outcome is ScopeOutcomeSkipped, which is
+// answered ok. Every other answer is exactly
 // {"status":"ok"}, as before, so a harness that predates gating — or decodes
 // the answer as strings — is unaffected, and a missing action means "run".
 type ScopeBeginResp struct {
@@ -1266,6 +1308,26 @@ type AfterTestRunReq struct {
 	Coverage   TestCoverage `json:"coverage"`
 }
 
+// AppStartsAnewReq tells the agent that keploy starts the application anew
+// for the test set TestSetID: no process of an earlier application runs on.
+// FirstRecorded is the earliest instant one of the set's test cases was
+// recorded at (its request's), zero where the set has none.
+type AppStartsAnewReq struct {
+	TestSetID     string    `json:"testSetID"`
+	FirstRecorded time.Time `json:"firstRecorded"`
+}
+
+// ClockRunReq hands the agent the run id of the process that started it
+// (POST /agent/hooks/clock-run): Run, never empty.
+type ClockRunReq struct {
+	Run string `json:"run"`
+}
+
+// NoTimelineHooks is the body of the 501 an agent of a keploy that has the
+// clock-run route answers it with when its hooks keep no clock timeline
+// (OSS's own, and a native macOS or Windows agent's), so take no run id.
+const NoTimelineHooks = "no timeline hooks in this agent: it keeps no clock timeline, so it takes no run id"
+
 type AppStart struct {
 	At   time.Time `json:"at"`
 	PID  uint32    `json:"pid"`
@@ -1376,6 +1438,35 @@ const StreamEndKind Kind = "KeployStreamEnd"
 // test-case stream (StreamEndPath). Its body is the session's StreamEndSummary.
 const StreamEndPart = "stream-end"
 
+// NotRecordedPart is the form name of a multipart part of an agent's
+// test-case stream that tells its client of a request the agent's ingress
+// served and did not record as a test case (its client went before the
+// app's answer ended, the app answered before the whole body came, the
+// answer is a stream). Its body is a NotRecordedCall. A client that predates
+// it skips it, as it skips every part it does not know.
+const NotRecordedPart = "not-recorded"
+
+// NotRecordedCall is a request the agent's ingress did not record as a test
+// case (NotRecordedPart), as its client's console names it: the agent's log
+// names the request by its shape (each path segment {}) and its path tag
+// (PathTag), and the client prints the request's method and path beside the
+// same tag, so the user can tell which request the log line is about. The
+// path, never the query's values: a streamed answer's URL often carries its
+// token in the query (an EventSource can send no header).
+type NotRecordedCall struct {
+	Method string `json:"method"`
+	// Path is the request's path, escaped as its request line carried it.
+	Path string `json:"path"`
+	// QueryKeys are the names of its query's parameters, as the log names
+	// them (utils.GetReqMeta's "query keys").
+	QueryKeys string `json:"query_keys,omitempty"`
+	// PathTag is the tag the agent's line names the request by
+	// (models.PathTag), made by the agent.
+	PathTag string `json:"path_tag"`
+	// Why is why the request is not a test case, in keploy's words.
+	Why string `json:"why"`
+}
+
 // StreamEndSummary is the body of the test-case stream's end marker
 // (StreamEndPart): what the agent's summary of the session says it lost, for
 // its client to say in its own log. An agent docker compose runs logs through
@@ -1410,7 +1501,26 @@ type StreamEndSummary struct {
 	// NotRecordedUnderPressure: requests not recorded because the memory
 	// guard had paused recording when they came.
 	NotRecordedUnderPressure PressureSkipSummary `json:"not_recorded_under_pressure,omitzero"`
+	// MocksDropped: mocks the agent dropped as their parsers handed them over
+	// or after, which the recording does not hold.
+	MocksDropped MockDropSummary `json:"mocks_dropped,omitzero"`
 }
+
+// MocksDroppedSaid is what the agent's summary and its client say of the mocks
+// a session dropped (MockDropSummary).
+const MocksDroppedSaid = "the keploy agent dropped some mocks after capturing them: the recording does not hold them, and a test case that needs one may fail at replay"
+
+// MockDropSummary is how many mocks a recording's agent dropped, for memory
+// pressure and for its mock output (closed, full, or its consumer stalled),
+// and the first of them, each named with why (StreamEndSummary).
+type MockDropSummary struct {
+	ByPressure int64    `json:"by_memory_pressure" bson:"by_memory_pressure" yaml:"byMemoryPressure"`
+	Capacity   uint64   `json:"for_the_output" bson:"for_the_output" yaml:"forTheOutput"`
+	Named      []string `json:"first_dropped,omitempty" bson:"first_dropped,omitempty" yaml:"firstDropped,omitempty"`
+}
+
+// Dropped reports whether d counts a dropped mock.
+func (d MockDropSummary) Dropped() bool { return d.ByPressure > 0 || d.Capacity > 0 }
 
 // PressureSkipSummary is how many requests a recording did not record
 // because the memory guard had paused recording when they came, and on how

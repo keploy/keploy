@@ -30,7 +30,10 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 				boots[i].Mocks = append(boots[i].Mocks, entry)
 				continue
 			}
-			test := testAt(tests, s.Worker, mk.instance, mk.ts)
+			test := ""
+			if !mk.idle {
+				test = testAt(tests, s.Worker, mk.instance, mk.ts)
+			}
 			if test == "" {
 				boots[i].Mocks = append(boots[i].Mocks, entry)
 				continue
@@ -39,7 +42,9 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 			out.inTest(test, entry, mk)
 			continue
 		}
-		if test := testAt(tests, mk.pid, mk.instance, mk.ts); test != "" {
+		// An idle answer is no test's (capturedMock.idle): it goes where a
+		// call made outside every window does.
+		if test := testAt(tests, mk.pid, mk.instance, mk.ts); test != "" && !mk.idle {
 			out.inTest(test, entry, mk)
 			continue
 		}

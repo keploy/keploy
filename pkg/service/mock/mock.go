@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -22,6 +23,11 @@ import (
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
 	ids *ids.Map
+	// console is where the replay names each call no mock answered whole,
+	// for the user's eyes only and never for its log (sayMisses): keploy's
+	// console, which keploy's CLI sets (SetConsole). nil, as New leaves it,
+	// says nothing; MissesFile names every call either way.
+	console io.Writer
 	// drainClock is the clock the run's end measures its drain's stall on
 	// (teardownDrain): nil, keploy's own runnable time; a test drives its
 	// own.
@@ -46,7 +52,8 @@ type mockService struct {
 	// KEPLOY_SHIM_CTRL=… <command>` -- and that launch line is not the user's
 	// command: recorded in the replay receipt it leaked a temp path, and
 	// `keploy mock status` handed it back to agents as the command to run.
-	userCommand string
+	// Held as utils.AppCommand: a log line names it by its program.
+	userCommand utils.AppCommand
 	// claims are, under the proven switch, the run's claims (windows with
 	// Claim set), which readWindows takes out of the windows it returns: a
 	// record tags each pool mock with the key of the claim it was made
@@ -122,7 +129,7 @@ func New(
 		store:           store,
 		hooks:           hooks,
 		config:          cfg,
-		userCommand:     cfg.Command,
+		userCommand:     utils.NewAppCommand(cfg.Command),
 	}
 }
 
@@ -146,6 +153,14 @@ func (m *mockService) SetStore(store Store) {
 // SetTestDB gives Record a store for the app's incoming requests (--record-requests).
 func (m *mockService) SetTestDB(db TestDB) {
 	m.testDB = db
+}
+
+// SetConsole makes w the service's console (mockService.console): keploy's
+// CLI sets os.Stdout. A program that embeds the service sets it only to a
+// place that is for the user's eyes alone, never to a stream its log is
+// written from. nil says nothing.
+func (m *mockService) SetConsole(w io.Writer) {
+	m.console = w
 }
 
 // SetRecordHooks replaces the record hooks (e.g. enterprise secret obfuscation).

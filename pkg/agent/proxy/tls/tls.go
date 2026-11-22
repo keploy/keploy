@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -345,7 +346,8 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					cert, err := certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, connectTarget, dstIP)
+					// Under ctx's session: the connection's (certForClient).
+					cert, err := certForClient(ctx, logger, clientHello, caPrivKey, caCertParsed, backdate, connectTarget, dstIP)
 					if err == nil {
 						// crypto/tls sends it next, in the server's
 						// first flight.
@@ -402,7 +404,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	isMTLS := false
 	state := tlsConn.ConnectionState()
 	if len(state.PeerCertificates) > 0 {
-		logger.Debug("mTLS Handshake Success", zap.String("client_subject", state.PeerCertificates[0].Subject.CommonName))
+		logger.Debug("mTLS Handshake Success", zap.String("client_subject", models.HostLogName(ctx, state.PeerCertificates[0].Subject.CommonName)))
 		isMTLS = true
 	} else {
 		logger.Debug("Standard TLS Handshake Success (No Client Cert Provided)")

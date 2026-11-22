@@ -165,7 +165,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		// the recorded Host header are where and what an app keploy starts is,
 		// so they stay out (see pkg.SimulationConfig.TargetFromURL).
 		if h.appAt != nil {
-			h.noteHostUnused(hostToUse)
+			h.noteHostUnused(ctx, hostToUse)
 			hostToUse = ""
 		}
 
@@ -186,7 +186,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			PublishedPort:       publishedPortsOf(h.logger, h.instrumentation).of(testSetID),
 		}
 		if h.appAt != nil {
-			cfg.SentTo = h.noteWhereSent
+			cfg.SentTo = func(target *url.URL, host, recordedHost string) { h.noteWhereSent(ctx, target, host, recordedHost) }
 		}
 
 		// Check if this is a streaming test case
@@ -201,7 +201,10 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			return resp, err
 		}
 
-		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		// The test case by its name and its request's shape, never the
+		// test case: it holds the recorded headers, bodies and metadata,
+		// the app's credentials among them.
+		h.logger.Debug("Simulating HTTP request", zap.String("testcase", tc.Name), zap.Any("metadata", utils.URLLogMeta(string(tc.HTTPReq.Method), tc.HTTPReq.URL)))
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); err != nil {
@@ -215,7 +218,9 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			return nil, err
 		}
 
-		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
+		// The test case by its name and its method's path by its shape, as
+		// an HTTP test's request: the report names the method whole.
+		h.logger.Debug("Simulating gRPC request", zap.String("testcase", tc.Name), zap.String("method", utils.URLPathShape(&url.URL{Path: tc.GrpcReq.Headers.PseudoHeaders[":path"]})))
 		hostToUse := h.cfg.Test.Host
 		if hostToUse == "" {
 			hostToUse = "localhost"
@@ -226,7 +231,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		// is the app's HTTP port: the test keeps the port it was recorded on,
 		// or test.grpcPort.
 		if h.appAt != nil {
-			h.noteHostUnused(hostToUse)
+			h.noteHostUnused(ctx, hostToUse)
 			hostToUse = h.appAt.Hostname()
 		}
 
@@ -267,14 +272,17 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 // noteHostUnused says, once a run, that the test.host the user set is not where
 // the tests are sent, because the base path names the host. localhost is what
-// test.host is when nobody set it, so it is not worth a line.
-func (h *Hooks) noteHostUnused(host string) {
+// test.host is when nobody set it, so it is not worth a line. Each host by its
+// labels' shape beside its tag in ctx's session (models.HostLogName; an IP
+// address whole): a host name is traffic, which the console and the report
+// name whole.
+func (h *Hooks) noteHostUnused(ctx context.Context, host string) {
 	if host == "localhost" || host == h.appAt.Hostname() {
 		return
 	}
 	h.hostUnused.Do(func() {
 		h.logger.Warn("test.host is not used: a base path that names a host is where the tests are sent",
-			zap.String("host", host), zap.String("basePath", h.appAt.String()),
+			zap.String("host", models.HostLogName(ctx, host)), zap.String("basePath", targetLogName(ctx, h.appAt.String())),
 			zap.String("next_step", "leave test.host (--host) unset for a run against a base path, or put the host you meant in --base-path"))
 	})
 }
@@ -286,18 +294,20 @@ func (h *Hooks) noteHostUnused(host string) {
 // recorded with. An app that checks the name it is asked for under, or writes
 // it into its answers, answers differently from its recording then, and
 // nothing else in the run says why.
-func (h *Hooks) noteWhereSent(target *url.URL, host, recordedHost string) {
+func (h *Hooks) noteWhereSent(ctx context.Context, target *url.URL, host, recordedHost string) {
 	if port := portOf(h.appAt); port != "" && portOf(target) != port {
 		h.portUnused.Do(func() {
 			h.logger.Warn("the port in the base path is not used: test.port or a replaceWith rule replaces it",
-				zap.String("port", portOf(target)), zap.String("basePathPort", port), zap.String("basePath", h.appAt.String()),
+				zap.String("port", portOf(target)), zap.String("basePathPort", port), zap.String("basePath", targetLogName(ctx, h.appAt.String())),
 				zap.String("next_step", "drop test.port (--port) or the replaceWith rule for a run against a base path, or put the port the app listens on in --base-path"))
 		})
 	}
 	if recordedHost != "" && recordedHost != host {
 		h.recordedHostUnsent.Do(func() {
 			h.logger.Info("the tests ask for the app under the address they are sent to, not under the Host header they were recorded with",
-				zap.String("host", host), zap.String("recordedHost", recordedHost),
+				// Both by their labels' shape beside their tags in ctx's
+				// session (models.HostLogName): a host name is traffic.
+				zap.String("host", models.HostLogName(ctx, host)), zap.String("recordedHost", models.HostLogName(ctx, recordedHost)),
 				zap.String("next_step", "if the app answers by the name it is asked for, give --base-path a name that reaches it and that it answers to"))
 		})
 	}

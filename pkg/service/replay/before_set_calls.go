@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -35,6 +36,10 @@ import (
 type setCalls struct {
 	mu    sync.Mutex
 	calls []models.UnmatchedCall
+	// after are the calls the set's end read returned, made after its last
+	// test, that no mock answered, kept for its report (outside), with the
+	// proven switch on or off.
+	after []models.UnmatchedCall
 }
 
 // setsCall reports whether c is the set's, no test's: made before the set's
@@ -45,8 +50,41 @@ func setsCall(c models.UnmatchedCall) bool { return c.BeforeSet || c.Held }
 // reset forgets the previous set's calls.
 func (s *setCalls) reset() {
 	s.mu.Lock()
-	s.calls = nil
+	s.calls, s.after = nil, nil
 	s.mu.Unlock()
+}
+
+// keepAfter keeps calls, those the set's end read returned as made after its
+// last test, for the set's report, which names those that are misses and
+// fail nothing (outside).
+func (s *setCalls) keepAfter(calls []models.UnmatchedCall) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.after = append(s.after, calls...)
+}
+
+// outside is the set's calls that no mock answered and that fail nothing
+// (TestReport.OutsideTestMisses), in the order they were read, those made
+// after its last test (keepAfter) last. With the proven switch off (proven
+// false) none fails the set, so each is one: those the set's first test's
+// read handed over (made as its application started,
+// models.UnmatchedCall.BeforeSet), and those its end read returned. With it
+// on, only those that count against no test (a DNS lookup, a background
+// call): failing and the set's end read (unclaimedCalls) fail the set with
+// the others.
+func (s *setCalls) outside(proven bool) []models.UnmatchedCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []models.UnmatchedCall
+	for _, read := range [][]models.UnmatchedCall{s.calls, s.after} {
+		for _, c := range read {
+			if c.Answer != "" || (proven && c.CountsAgainstTest()) {
+				continue
+			}
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // take keeps the calls of read that are the set's (setsCall), and returns the
@@ -123,9 +161,10 @@ func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 		r.logger.Error(msg,
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
-			zap.String("call", c.Named()),
-			zap.String("destination", c.Destination),
-			zap.String("diff", c.Diff),
+			zap.String("call", models.UnmatchedCallLogShape(c)),
+			utils.PathTagField(c.PathTag),
+			zap.String("destination", models.HostShape(c.Destination)), utils.HostTagField(c.HostTag),
+			zap.Strings("differs", models.FieldShapes(c.Differs)),
 			zap.String("next_step", next))
 	}
 }

@@ -621,8 +621,9 @@ func TestAPartInlineFormFilesCannotReadGoesWithNoPath(t *testing.T) {
 	if f := tc.HTTPReq.Form[1]; len(f.Paths) != 1 || f.Paths[0] != "" || len(f.FileContents) != 1 || string(f.FileContents[0]) != "kept.bin" {
 		t.Fatalf("kept part = %+v, want its bytes and no path", f)
 	}
-	if said := logs.FilterField(zap.String("path", gone)).All(); len(said) != 1 {
-		t.Fatalf("logged %+v, want one line naming %s", logs.All(), gone)
+	wantPath := models.FormFilePathLogText(gone)
+	if said := logs.FilterField(zap.String("path", wantPath)).All(); len(said) != 1 {
+		t.Fatalf("logged %+v, want one line naming %s", logs.All(), wantPath)
 	}
 
 	// What the DaemonSet stream carries, persisted as k8s-proxy's control plane does.

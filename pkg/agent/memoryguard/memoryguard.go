@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"runtime/metrics"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,11 @@ import (
 
 const (
 	defaultCheckInterval = 500 * time.Millisecond
+	// bandCheckInterval is how often the guard samples while recording with
+	// the working set over the pause point, waiting for the runtime's next GC
+	// (sample): it sees the ceiling crossed, or a GC that found the memory live,
+	// within it.
+	bandCheckInterval    = 50 * time.Millisecond
 	reclaimCooldown      = 5 * time.Second
 	pauseThresholdRatio  = 0.80
 	resumeThresholdRatio = 0.70 // Lower than pause to avoid rapid toggle (hysteresis)
@@ -53,6 +59,25 @@ const (
 	// resume sits a full pause-headroom below pause (pause=effLimit−128,
 	// resume=effLimit−192). Applies to low-latency (overhead>0) only.
 	minViableEffLimitBytes = minPauseHeadroomBytes + minResumeHeadroomBytes // 320 MiB
+
+	// softLimitLowerStep and softLimitRaiseStep are the least moves of a
+	// GOMEMLIMIT derived from the budget (deriveSoftLimit) that the guard
+	// installs: it lowers the limit on the next sample once the derivation is
+	// softLimitLowerStep under it, and raises it once the derivation has been
+	// softLimitRaiseStep over it for reclaimCooldown, so that memory Go does not
+	// manage that comes and goes (socket buffers, page tables) never moves it
+	// up and down sample by sample.
+	softLimitLowerStep = 4 << 20  // 4 MiB
+	softLimitRaiseStep = 16 << 20 // 16 MiB
+	// softLimitSlack is what the derived GOMEMLIMIT leaves under the guard's
+	// ceiling (deriveSoftLimit): the softLimitLowerStep the installed limit
+	// may lag the derivation by, and 12 MiB more of memory Go does not manage
+	// grown between two samples.
+	softLimitSlack = 16 << 20 // 16 MiB
+
+	// unlimitedCgroupBytes: a cgroup limit at or over this is no limit (cgroup
+	// v1 writes "no limit" as 9223372036854771712; v2 as "max").
+	unlimitedCgroupBytes = int64(1) << 52 // 4 PiB
 )
 
 // MinViableLowLatencyLimitBytes returns the smallest container memory limit (in
@@ -115,6 +140,248 @@ type guard struct {
 	underPressure     bool
 	readFailCount     int
 	prevMemLimit      int64
+
+	// limitPath is the container cgroup's memory limit file: memory.max
+	// (v2) or memory.limit_in_bytes (v1), beside memoryCurrentPath.
+	limitPath string
+
+	// readCgroup, readGoMemory, reclaim and setMemoryLimit default to
+	// readCgroupSample, readGoMemoryStats, debug.FreeOSMemory and
+	// debug.SetMemoryLimit; clock and wait default to time.Now and a timer
+	// (run). Rows replace them.
+	readCgroup     func() (cgroupSample, error)
+	readGoMemory   func() goMemory
+	reclaim        func()
+	setMemoryLimit func(int64) int64
+	clock          func() time.Time
+	wait           func(time.Duration) <-chan time.Time
+	// overLogged: the crossing of the pause point that did not pause has
+	// been logged; cleared once the working set is back under it.
+	overLogged bool
+	// pausedAt is when recording last paused.
+	pausedAt time.Time
+
+	// The GOMEMLIMIT installed (applySoftLimit): its bytes, when it last
+	// changed, whether it was derived from the budget, and whether the
+	// budget has been reported too small for the agent (once each way).
+	softLimit        int64
+	softLimitAt      time.Time
+	softLimitDerived bool
+	tooSmall         bool
+	// Where no limit is derived (deriveSoftLimit: memory.stat or the
+	// runtime's figures unreadable, or a budget too small to record), the
+	// budget's 90% is installed on the first such sample (goMemAligned) and
+	// again only when the ring buffer's size (lastOverhead) changes.
+	goMemAligned bool
+	lastOverhead int64
+	// One-time log latches, so a persistent misconfiguration is reported
+	// once, not on every sample.
+	goMemFlooredLogged, nonViableLogged, containerUnderFlagLogged bool
+}
+
+// goMemory is what the Go runtime reports of its own memory (runtime/metrics,
+// which never stops the world). The runtime keeps garbage in check itself:
+// GOGC pacing and GOMEMLIMIT set when its next collection is due, and every
+// collection, its own or forced, measures the live heap anew.
+type goMemory struct {
+	objects int64  // /memory/classes/heap/objects: live objects and dead ones no GC has freed yet
+	free    int64  // /memory/classes/heap/free: free heap still backed by memory
+	live    int64  // /gc/heap/live: what the last completed GC marked live
+	goal    int64  // /gc/heap/goal: the heap size by which the runtime's next GC is due
+	cycles  uint64 // /gc/cycles/total: completed GC cycles
+	mapped  int64  // /memory/classes/total less /memory/classes/heap/released: what GOMEMLIMIT limits
+	ok      bool   // false: unreadable
+}
+
+var goMemorySampleNames = [...]string{
+	"/memory/classes/heap/objects:bytes",
+	"/memory/classes/heap/free:bytes",
+	"/gc/heap/live:bytes",
+	"/gc/heap/goal:bytes",
+	"/gc/cycles/total:gc-cycles",
+	"/memory/classes/total:bytes",
+	"/memory/classes/heap/released:bytes",
+}
+
+// cgroupSample is one reading of the container's cgroup.
+type cgroupSample struct {
+	workingSet int64 // memory.current less inactive_file, as kubectl top reports it
+	activeFile int64 // active_file: page cache, which the kernel reclaims before it OOM-kills
+	statOK     bool  // memory.stat was read: activeFile is known
+	limit      int64 // the cgroup's memory limit; 0: none (or unreadable)
+}
+
+// readGoMemoryStats reads goMemory from runtime/metrics; any figure the
+// runtime does not report leaves it not ok.
+func readGoMemoryStats() goMemory {
+	var s [len(goMemorySampleNames)]metrics.Sample
+	for i, name := range goMemorySampleNames {
+		s[i].Name = name
+	}
+	metrics.Read(s[:])
+	var v [len(goMemorySampleNames)]uint64
+	for i := range s {
+		if s[i].Value.Kind() != metrics.KindUint64 {
+			return goMemory{}
+		}
+		v[i] = s[i].Value.Uint64()
+	}
+	bytes := func(u uint64) int64 { return int64(min(u, math.MaxInt64)) }
+	return goMemory{objects: bytes(v[0]), free: bytes(v[1]), live: bytes(v[2]), goal: bytes(v[3]), cycles: v[4],
+		mapped: bytes(v[5] - min(v[6], v[5])), ok: true}
+}
+
+// unmarked is the heap no GC has found live: the last GC's garbage and
+// everything allocated since it. Before the first GC nothing has been found
+// live, so it is 0.
+func (m goMemory) unmarked() int64 {
+	if m.cycles > 0 && m.objects > m.live {
+		return m.objects - m.live
+	}
+	return 0
+}
+
+// heldAndNext judges a working-set sample by what the Go runtime reports of
+// its heap:
+//   - held is the working set less what no collection has found live: the heap
+//     objects beyond what the last GC marked live (its garbage, and everything
+//     allocated since it) and the free heap. What is left is what the last GC
+//     found live plus all the memory a collection cannot free: Go's own
+//     non-heap memory, heap fragmentation, and memory Go does not manage. Every
+//     GC, the runtime's own or forced, brings it up to date.
+//   - next is the memory the kernel cannot reclaim (the working set less its
+//     active page cache, activeFile) by the time the runtime's next GC is due:
+//     the heap grows into its free memory first, then on to its goal.
+//
+// Before the first GC nothing has been found live, so every object counts as
+// held. Unreadable figures leave the working set alone, as the guard judged
+// it before (held = next = working set).
+func heldAndNext(workingSet, activeFile int64, m goMemory) (held, next int64) {
+	if !m.ok {
+		return workingSet, workingSet
+	}
+	held = max(workingSet-m.unmarked()-m.free, 0)
+	next = max(workingSet-activeFile, 0) + max(m.goal-m.objects-m.free, 0)
+	return held, next
+}
+
+// softLimit is the GOMEMLIMIT for one sample (deriveSoftLimit) and the sizes
+// it comes from.
+type softLimit struct {
+	bytes   int64 // the limit to install
+	derived bool  // from the budget; false: goMemTarget, 90% of the budget
+	hard    int64 // the budget: --memory-limit, or the container's limit where that is lower
+	nonGo   int64 // memory in the container the Go runtime does not manage, page cache aside
+	room    int64 // hard less nonGo less the margin: what Go may use
+	need    int64 // Go memory no collection can free now
+	// floorBytes is need plus minGoMemLimitBytes: the least soft limit, so
+	// that the GC has at least 64 MiB to allocate between its collections.
+	floorBytes int64
+	// short: the room is under floorBytes and under 90% of the budget: the
+	// memory Go does not manage, not the budget's 90%, leaves Go less than
+	// its floor, and the limit installed is over the room.
+	short bool
+	// source and raise: where hard came from and what the lines advise
+	// raising (limitSource).
+	source, raise string
+}
+
+// deriveSoftLimit is the GOMEMLIMIT for one sample: the room the budget
+// leaves Go, so that the runtime's own GC collects its garbage before the
+// budget:
+//
+//	room = budget - memory Go does not manage - margin
+//
+// Its terms:
+//   - The budget is the one the guard pauses against (budget, dec.limit):
+//     --memory-limit, or the container's cgroup limit (memory.max, or
+//     memory.limit_in_bytes on cgroup v1) where that is lower. A
+//     container with no memory limit (an
+//     agent container docker starts) leaves it --memory-limit: 90% of that,
+//     blind to the memory Go does not manage, would let the runtime's next
+//     GC fall due over the ceiling on garbage alone, since a GC counts live
+//     all it allocates while it marks (more, the longer a loaded host keeps
+//     it marking) and GOGC lets the heap grow to twice what it marked; the
+//     guard would then pause recording on garbage.
+//   - Memory Go does not manage is measured, every sample: the working set less
+//     its active page cache (the kernel reclaims page cache before it
+//     OOM-kills; inactive page cache is already out of the working set) less
+//     what the Go runtime has mapped and not released (what GOMEMLIMIT
+//     limits). It is the capture ring buffer, BPF maps, cgo and other
+//     processes' memory, socket buffers. Pages Go has mapped but not yet
+//     touched make it read low, by the little the runtime has mapped ahead.
+//   - The margin is the room the guard's ceiling leaves under the budget (a
+//     quarter of what the pause point leaves: 5% of the budget where the pause
+//     point is at 80%, 48 MiB on a 1 GiB sidecar with a 64 MiB ring buffer;
+//     32 MiB where the 128 MiB headroom floor binds) plus softLimitSlack (16
+//     MiB): 64 MiB on that sidecar. With Go at its soft limit, the memory the
+//     kernel cannot reclaim is then due 16 MiB, and the 3% of the heap goal
+//     the runtime keeps under its soft limit, under the ceiling, so the
+//     guard's ceiling rule (sample) does not fire on a heap the soft limit holds
+//     unless the memory Go does not manage has grown more than that since the
+//     last sample.
+//
+// The limit is never over 90% of the budget (goMemTarget, the limit where
+// none is derived): where that already leaves room under the budget, a higher
+// soft limit would only let the runtime keep more garbage, and take the
+// working set nearer the budget. Under that, it is never under the Go memory no
+// collection can free (need: the last GC's live heap and Go's own memory
+// outside the heap) plus minGoMemLimitBytes (floorBytes): a soft limit at
+// what Go holds makes the GC run back to back. The floor is over the room
+// only when Go's live memory is within 64 MiB of it: with the budget at
+// --memory-limit, that is past the pause point on every low-latency budget
+// and every proxy-mode one of 534 MiB or more, so recording pauses there.
+// Where the room is under the floor (short), the floor is installed, up to
+// 90% of the budget, and applySoftLimit reports the budget too small if
+// pausing recording does not bring Go's live memory back under it.
+//
+// With no memory.stat, unreadable runtime figures, or a budget too small to
+// record, it is goMemTarget.
+func deriveSoftLimit(dec memoryDecision, cs cgroupSample, m goMemory) softLimit {
+	s := softLimit{bytes: dec.goMemTarget}
+	if !cs.statOK || !m.ok || !dec.viable {
+		return s
+	}
+	s.derived = true
+	s.hard, s.source, s.raise = dec.limit, dec.source, dec.raise
+	s.nonGo = max(cs.workingSet-cs.activeFile-m.mapped, 0)
+	margin := (dec.effLimit-dec.pauseThreshold)/4 + softLimitSlack
+	s.room = s.hard - s.nonGo - margin
+	s.need = max(m.mapped-m.free-m.unmarked(), 0)
+	s.floorBytes = s.need + minGoMemLimitBytes
+	s.bytes = min(max(s.room, s.floorBytes), dec.goMemTarget)
+	s.short = s.room < s.floorBytes && s.room < dec.goMemTarget
+	return s
+}
+
+func (g *guard) cgroup() (cgroupSample, error) {
+	if g.readCgroup != nil {
+		return g.readCgroup()
+	}
+	return readCgroupSample(g.memoryCurrentPath, g.limitPath)
+}
+
+func (g *guard) installMemoryLimit(b int64) {
+	if g.setMemoryLimit != nil {
+		g.setMemoryLimit(b)
+		return
+	}
+	debug.SetMemoryLimit(b)
+}
+
+func (g *guard) goMemory() goMemory {
+	if g.readGoMemory != nil {
+		return g.readGoMemory()
+	}
+	return readGoMemoryStats()
+}
+
+func (g *guard) freeOSMemory() {
+	if g.reclaim != nil {
+		g.reclaim()
+		return
+	}
+	debug.FreeOSMemory()
 }
 
 type cgroupLayout struct {
@@ -141,6 +408,26 @@ func LimitBytes(limitMB uint64) (int64, error) {
 	return int64(limitMB) * 1024 * 1024, nil
 }
 
+// goMemoryBudget is GoMemoryBudget's figure, as the guard's last sample (or
+// Start) found it; 0 while no guard runs.
+var goMemoryBudget atomic.Int64
+
+// GoMemoryBudget returns the Go memory budget the guard holds the agent to:
+// 90% of its memory budget (--memory-limit, or the container's limit where
+// that is lower) left after the capture ring buffer, floored at 64 MiB: the
+// GOMEMLIMIT the guard sets where it cannot measure the memory Go does not
+// manage. It is 0 when no guard runs. Where it can, GOMEMLIMIT is fitted
+// lower, to the room the budget leaves Go once that memory is measured
+// (deriveSoftLimit). A reader that sizes a buffer as a
+// share of the agent's memory, such as the enterprise agent's capture
+// budget, sizes it from this, so that the share is what it was before
+// GOMEMLIMIT was fitted: on a 1 GiB sidecar with a 64 MiB ring buffer,
+// 864 MiB where GOMEMLIMIT is 708. A reader sized against the Go heap's own
+// limit (pkg/matcher/learn's set budget) keeps reading GOMEMLIMIT.
+func GoMemoryBudget() int64 {
+	return goMemoryBudget.Load()
+}
+
 // IsRecordingPaused reports whether the agent is currently dropping captured
 // tests and mocks due to memory pressure.
 func IsRecordingPaused() bool {
@@ -163,6 +450,13 @@ func SetRecordingPausedForTest(paused bool) (restore func()) {
 	}
 }
 
+// SetGoMemoryBudgetForTest sets what GoMemoryBudget reports, as a running
+// guard does, and returns what puts the previous value back. Tests only.
+func SetGoMemoryBudgetForTest(b int64) (restore func()) {
+	was := goMemoryBudget.Swap(b)
+	return func() { goMemoryBudget.Store(was) }
+}
+
 // Start enables the memory guard when a Docker agent is running with a limit.
 func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB uint64) error {
 	resetAllPressure()
@@ -175,6 +469,7 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 		return err
 	}
 	if limitBytes == 0 || !isDocker {
+		goMemoryBudget.Store(0)
 		return nil
 	}
 
@@ -190,7 +485,9 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 	// this headroom the GC won't kick in until the cgroup is already at
 	// the OOM boundary, causing connection drops and I/O disruptions.
 	// Floored (see minGoMemLimitBytes) so a small limit can't drive the GC
-	// nearly continuous; run() realigns this once the overhead is known.
+	// nearly continuous; run() realigns this once the overhead is known, and
+	// sets it from the budget less the memory Go does not manage, as
+	// measured (deriveSoftLimit).
 	goMemLimit := int64(float64(limitBytes) * 0.9)
 	if goMemLimit < minGoMemLimitBytes {
 		goMemLimit = minGoMemLimitBytes
@@ -200,9 +497,11 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 	g := &guard{
 		logger:            logger,
 		memoryCurrentPath: memoryCurrentPath,
+		limitPath:         limitPathFor(memoryCurrentPath, layout.version),
 		limitBytes:        limitBytes,
 		memoryLimitMB:     memoryLimitMB,
 		prevMemLimit:      prevMemLimit,
+		softLimit:         goMemLimit,
 	}
 
 	logger.Info("Enabled keploy-agent memory guard",
@@ -210,148 +509,366 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 	logger.Debug("Memory guard cgroup details",
 		zap.Int("cgroup_version", layout.version),
 		zap.String("memory_current_path", g.memoryCurrentPath))
+	g.sampleSoftLimit()
 
 	go g.run(ctx)
 	return nil
 }
 
 func (g *guard) run(ctx context.Context) {
-	ticker := time.NewTicker(defaultCheckInterval)
-	defer ticker.Stop()
+	defer goMemoryBudget.Store(0)
 	defer g.resetPressure()
 	defer debug.SetMemoryLimit(g.prevMemLimit)
 
-	// lastOverhead tracks the fixed-overhead value we last applied so GOMEMLIMIT
-	// is only recomputed when it actually changes. It starts at -1 (an
-	// impossible byte count) so the first tick always aligns GOMEMLIMIT with the
-	// effective budget even when the overhead is still zero.
-	lastOverhead := int64(-1)
-	// One-time log latches so a persistent misconfiguration (budget too small to
-	// record) is reported once, not on every 500ms tick.
-	goMemFlooredLogged := false
-	nonViableLogged := false
-
-	for {
+	wait := g.wait
+	if wait == nil {
+		timer := time.NewTimer(defaultCheckInterval)
+		defer timer.Stop()
+		wait = func(d time.Duration) <-chan time.Time {
+			timer.Reset(d)
+			return timer.C
+		}
+	}
+	for next, more := defaultCheckInterval, true; more; {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			// readWorkingSetBytes subtracts inactive_file from memory.current so
-			// that page-cache does not count toward the pressure threshold.  This
-			// matches what kubectl top / Kubernetes eviction logic uses and avoids
-			// false-positive pauses caused by reclaimable cache pages.
-			currentBytes, err := readWorkingSetBytes(g.memoryCurrentPath)
-			if err != nil {
-				g.readFailCount++
-				if g.readFailCount == 1 {
-					g.logger.Debug("failed to read keploy-agent memory usage; "+
-						"ensure /sys/fs/cgroup is mounted in the container or set --memory-limit=0 to disable",
-						zap.String("path", g.memoryCurrentPath),
-						zap.Error(err))
-				}
-				// After ~10s of consecutive failures, disable the guard entirely
-				if g.readFailCount >= 20 {
-					g.logger.Info("Disabling memory guard after persistent read failures",
-						zap.Int("consecutive_failures", g.readFailCount))
-					g.resetPressure()
-					return
-				}
-				continue
-			}
-			g.readFailCount = 0
-
-			// Discount the fixed, non-reclaimable overhead (the low-latency eBPF
-			// ring buffer) from BOTH usage and limit, then pause when the
-			// reclaimable remainder fills the ratio of the room left above the
-			// floor — but never closer than an absolute headroom to the ceiling.
-			// See evaluateMemory. In proxy mode overhead is 0, so this reduces to
-			// the previous working-set-vs-limit behaviour.
-			dec := evaluateMemory(currentBytes, g.limitBytes, fixedOverheadBytes.Load())
-
-			// Realign GOMEMLIMIT with the Go-heap budget (the room left after the
-			// non-Go fixed overhead), recomputing only when the overhead changes so
-			// we don't thrash debug.SetMemoryLimit every tick. Floored (see
-			// evaluateMemory) so a small budget can't drive near-continuous GC.
-			if dec.overhead != lastOverhead {
-				debug.SetMemoryLimit(dec.goMemTarget)
-				// Re-log if a later overhead change re-floors GOMEMLIMIT; reset the
-				// latch when it is no longer floored so the two states stay in sync.
-				if dec.goMemFloored {
-					if !goMemFlooredLogged {
-						g.logger.Warn("keploy-agent GOMEMLIMIT floored — the heap budget left "+
-							"after the capture ring buffer is very small; raise --memory-limit "+
-							"or lower record.ringbufSizeMB",
-							zap.Int64("go_mem_limit_bytes", dec.goMemTarget),
-							zap.Int64("effective_limit_bytes", dec.effLimit),
-							zap.Int64("fixed_overhead_bytes", dec.overhead))
-						goMemFlooredLogged = true
-					}
-				} else {
-					goMemFlooredLogged = false
-				}
-				lastOverhead = dec.overhead
-			}
-
-			// Non-viable budget (low-latency only): the fixed ring buffer leaves
-			// too little room above it for a usable pause/resume band, so there is
-			// no way to record without courting an OOM-kill. Hold paused and say so
-			// loudly ONCE — silently falling back to raw guarding would reintroduce
-			// the startup-pause bug this discount exists to fix. Proxy mode
-			// (overhead 0) is never non-viable, so this and its ring-buffer message
-			// only fire when a ring buffer is actually present. The real fix is
-			// upstream (reject the record-start); this is the in-agent backstop.
-			if !dec.viable {
-				if !nonViableLogged {
-					g.logger.Error("capture ring buffer leaves too little memory below the "+
-						"limit for a usable recording budget; recording cannot proceed — "+
-						"raise --memory-limit or lower record.ringbufSizeMB",
-						zap.Int64("fixed_overhead_bytes", dec.overhead),
-						zap.Int64("effective_limit_bytes", dec.effLimit),
-						zap.Int64("memory_limit_bytes", g.limitBytes),
-						zap.Int64("min_viable_budget_bytes", int64(minViableEffLimitBytes)))
-					nonViableLogged = true
-				}
-				g.enterPressure(dec.effCurrent, 0, dec.overhead, dec.effLimit)
-				continue
-			}
-			nonViableLogged = false
-
-			if dec.effCurrent >= dec.pauseThreshold {
-				g.enterPressure(dec.effCurrent, dec.pauseThreshold, dec.overhead, dec.effLimit)
-				continue
-			}
-
-			if g.underPressure && dec.effCurrent <= dec.resumeThreshold {
-				g.resetPressure()
-				g.logger.Info("Cleared keploy-agent memory pressure after memory recovered",
-					zap.Int64("memory_usage_bytes", dec.effCurrent),
-					zap.Int64("resume_threshold_bytes", dec.resumeThreshold),
-					zap.Int64("fixed_overhead_bytes", dec.overhead),
-					zap.Int64("effective_limit_bytes", dec.effLimit))
-			}
+		case <-wait(next):
+			next, more = g.sample()
 		}
 	}
 }
 
-func (g *guard) enterPressure(currentBytes, pauseThreshold, overhead, effLimit int64) {
+// timeNow is the guard's clock: time.Now unless a row sets clock.
+func (g *guard) timeNow() time.Time {
+	if g.clock != nil {
+		return g.clock()
+	}
+	return time.Now()
+}
+
+// sample takes one sample of the container's and the runtime's memory and
+// acts on it: GOMEMLIMIT, and pausing or resuming recording. It returns how
+// long run waits for the next one, and false once the guard gives up after
+// persistent read failures.
+func (g *guard) sample() (next time.Duration, more bool) {
+	now := g.timeNow()
+	// The runtime's figures first: memory Go allocates between the two
+	// reads then makes the memory Go does not manage read high
+	// (deriveSoftLimit), never low.
+	m := g.goMemory()
+	// readCgroupSample subtracts inactive_file from memory.current so
+	// that page-cache does not count toward the pressure threshold.  This
+	// matches what kubectl top / Kubernetes eviction logic uses and avoids
+	// false-positive pauses caused by reclaimable cache pages.
+	cs, err := g.cgroup()
+	if err != nil {
+		g.readFailCount++
+		if g.readFailCount == 1 {
+			g.logger.Debug("failed to read keploy-agent memory usage; "+
+				"ensure /sys/fs/cgroup is mounted in the container or set --memory-limit=0 to disable",
+				zap.String("path", g.memoryCurrentPath),
+				zap.Error(err))
+		}
+		// After ~10s of consecutive failures, disable the guard entirely
+		if g.readFailCount >= 20 {
+			g.logger.Info("Disabling memory guard after persistent read failures",
+				zap.Int("consecutive_failures", g.readFailCount))
+			g.resetPressure()
+			return 0, false
+		}
+		return defaultCheckInterval, true
+	}
+	g.readFailCount = 0
+	currentBytes := cs.workingSet
+
+	// Discount the fixed, non-reclaimable overhead (the low-latency eBPF
+	// ring buffer) from BOTH usage and limit, then pause when the
+	// reclaimable remainder fills the ratio of the room left above the
+	// floor — but never closer than an absolute headroom to the ceiling.
+	// See evaluateMemory. In proxy mode overhead is 0, so this reduces to
+	// the previous working-set-vs-limit behaviour. The limit is the
+	// container's where that is under --memory-limit (budget).
+	dec := g.decide(cs)
+	goMemoryBudget.Store(dec.goMemTarget)
+
+	// GOMEMLIMIT: the room the budget leaves Go once the memory Go does
+	// not manage is measured (deriveSoftLimit, applySoftLimit), so that the
+	// runtime collects its garbage before the budget, whether or not the
+	// container has a memory limit. Where that cannot be measured, as
+	// before: realign it with the Go-heap budget (the room left after the
+	// non-Go fixed overhead), recomputing only when the overhead changes so
+	// we don't thrash debug.SetMemoryLimit every tick. Floored (see
+	// evaluateMemory) so a small budget can't drive near-continuous GC.
+	if sl := deriveSoftLimit(dec, cs, m); sl.derived {
+		g.applySoftLimit(sl, now)
+		g.goMemAligned = false
+	} else if !g.goMemAligned || dec.overhead != g.lastOverhead {
+		g.installMemoryLimit(dec.goMemTarget)
+		g.softLimit, g.softLimitDerived = dec.goMemTarget, false
+		g.goMemAligned, g.lastOverhead = true, dec.overhead
+	}
+	// Re-log if a later change re-floors GOMEMLIMIT; reset the latch when
+	// it is no longer floored so the two states stay in sync.
+	if dec.goMemFloored {
+		if !g.goMemFlooredLogged {
+			g.logger.Warn("keploy-agent GOMEMLIMIT floored — the heap budget left "+
+				"after the capture ring buffer is very small; raise "+dec.raise+
+				" or lower record.ringbufSizeMB",
+				zap.Int64("go_mem_limit_bytes", g.softLimit),
+				zap.Int64("effective_limit_bytes", dec.effLimit),
+				zap.Int64("fixed_overhead_bytes", dec.overhead),
+				zap.Int64("limit_bytes", dec.limit),
+				zap.String("limit_source", dec.source))
+			g.goMemFlooredLogged = true
+		}
+	} else {
+		g.goMemFlooredLogged = false
+	}
+
+	// Non-viable budget (low-latency only): the fixed ring buffer leaves
+	// too little room above it for a usable pause/resume band, so there is
+	// no way to record without courting an OOM-kill. Hold paused and say so
+	// loudly ONCE — silently falling back to raw guarding would reintroduce
+	// the startup-pause bug this discount exists to fix. Proxy mode
+	// (overhead 0) is never non-viable, so this and its ring-buffer message
+	// only fire when a ring buffer is actually present. The real fix is
+	// upstream (reject the record-start); this is the in-agent backstop.
+	if !dec.viable {
+		if !g.nonViableLogged {
+			g.logger.Error("capture ring buffer leaves too little memory below the "+
+				"limit for a usable recording budget; recording cannot proceed — "+
+				"raise "+dec.raise+" or lower record.ringbufSizeMB",
+				zap.Int64("fixed_overhead_bytes", dec.overhead),
+				zap.Int64("effective_limit_bytes", dec.effLimit),
+				zap.Int64("limit_bytes", dec.limit),
+				zap.String("limit_source", dec.source),
+				zap.Int64("min_viable_budget_bytes", int64(minViableEffLimitBytes)))
+			g.nonViableLogged = true
+		}
+		g.enterPressure(now, dec)
+		return defaultCheckInterval, true
+	}
+	g.nonViableLogged = false
+
+	// Garbage is not pressure. Between its collections the Go runtime
+	// lets garbage build up (GOGC pacing; at a recorded app's exec the
+	// agent allocates about 1.5 GB in a second, and a GC there started
+	// at 630 MB with 163 MB live), and it keeps freed heap until its
+	// scavenger returns it, so the working set crosses the pause point
+	// on memory the runtime is about to collect. The guard forces no
+	// collection to find out: it judges what the runtime's own last GC
+	// found live plus all memory a collection cannot free (held), and
+	// pauses when that reaches the pause point. A natural GC refreshes
+	// it, and one is due by the heap goal; so when the working set is
+	// over the pause point and the next GC is not due until the memory
+	// the kernel cannot reclaim reaches the ceiling (next), waiting for
+	// it would let memory that may be live come within a quarter of the
+	// pause point's headroom of the limit unchecked, and the guard
+	// pauses on the working set as before. The soft limit derived from
+	// the budget has the runtime's GC due under the ceiling
+	// (deriveSoftLimit), so that pause is left to where it cannot hold:
+	// no memory.stat, a GC that runs long while live memory grows past
+	// its goal, a budget too small for Go's live memory, or memory Go
+	// does not manage grown since the last sample. While it
+	// waits, the guard samples every bandCheckInterval.
+	held, nextGC := heldAndNext(currentBytes, cs.activeFile, m)
+	heldEff, nextEff := max(held-dec.overhead, 0), max(nextGC-dec.overhead, 0)
+	if heldEff >= dec.pauseThreshold || (dec.effCurrent >= dec.pauseThreshold && nextEff >= dec.ceiling) {
+		g.enterPressure(now, dec,
+			zap.Int64("held_memory_bytes", heldEff),
+			zap.Int64("working_set_at_next_gc_bytes", nextEff),
+			zap.Int64("ceiling_bytes", dec.ceiling))
+		return defaultCheckInterval, true
+	}
+
+	if dec.effCurrent >= dec.pauseThreshold {
+		if !g.overLogged && !g.underPressure {
+			g.logger.Debug("memory guard: the working set is over the pause point, but what the "+
+				"runtime's last GC found live is not, and its next GC is due under the ceiling; recording goes on",
+				zap.Int64("memory_usage_bytes", dec.effCurrent),
+				zap.Int64("held_memory_bytes", heldEff),
+				zap.Int64("working_set_at_next_gc_bytes", nextEff),
+				zap.Int64("pause_threshold_bytes", dec.pauseThreshold),
+				zap.Int64("ceiling_bytes", dec.ceiling))
+			g.overLogged = true
+		}
+	} else {
+		g.overLogged = false
+	}
+
+	// Resume once held memory is back at the resume point, and the
+	// working set too unless the next GC is due under the ceiling.
+	if g.underPressure && heldEff <= dec.resumeThreshold &&
+		(dec.effCurrent <= dec.resumeThreshold || nextEff < dec.ceiling) {
+		g.resetPressure()
+		g.logger.Info("Cleared keploy-agent memory pressure after memory recovered",
+			zap.Int64("memory_usage_bytes", dec.effCurrent),
+			zap.Int64("held_memory_bytes", heldEff),
+			zap.Int64("resume_threshold_bytes", dec.resumeThreshold),
+			zap.Int64("fixed_overhead_bytes", dec.overhead),
+			zap.Int64("effective_limit_bytes", dec.effLimit))
+	}
+
+	// Recording with the working set over the pause point, the sample that
+	// resumed included: the guard is waiting for the runtime's next GC.
+	if dec.effCurrent >= dec.pauseThreshold && !g.underPressure {
+		return bandCheckInterval, true
+	}
+	return defaultCheckInterval, true
+}
+
+// enterPressure pauses recording. On pausing, and every reclaimCooldown while
+// paused, it collects (FreeOSMemory), so that the buffers the pause drops are
+// returned and the next sample judges up-to-date figures. It is the guard's
+// only collection: it never collects to decide whether to pause. Its line
+// names the limit dec judged against, where that came from and what to
+// raise (limitSource).
+func (g *guard) enterPressure(now time.Time, dec memoryDecision, why ...zap.Field) {
 	alreadyPaused := g.underPressure
 	g.underPressure = true
 	applyPausedState(true)
 
-	now := time.Now()
 	if !alreadyPaused {
+		g.pausedAt = now
 		g.logger.Info("Pausing keploy-agent recording due to memory pressure. "+
-			"Consider increasing --memory-limit, enabling sampling, or reducing request concurrency",
-			zap.Int64("memory_usage_bytes", currentBytes),
-			zap.Int64("pause_threshold_bytes", pauseThreshold),
-			zap.Int64("fixed_overhead_bytes", overhead),
-			zap.Int64("effective_limit_bytes", effLimit),
-			zap.Int64("memory_limit_bytes", g.limitBytes),
-			zap.Uint64("memory_limit_mb", g.memoryLimitMB))
+			"Consider increasing "+dec.raise+", enabling sampling, or reducing request concurrency",
+			append([]zap.Field{
+				zap.Int64("memory_usage_bytes", dec.effCurrent),
+				zap.Int64("pause_threshold_bytes", dec.pauseThreshold),
+				zap.Int64("fixed_overhead_bytes", dec.overhead),
+				zap.Int64("effective_limit_bytes", dec.effLimit),
+				zap.Int64("limit_bytes", dec.limit),
+				zap.String("limit_source", dec.source)}, why...)...)
 	}
 	if !alreadyPaused || now.Sub(g.lastReclaim) >= reclaimCooldown {
 		g.lastReclaim = now
-		debug.FreeOSMemory()
+		g.freeOSMemory()
+	}
+}
+
+// sampleSoftLimit takes one sample and installs the GOMEMLIMIT derived from
+// it (applySoftLimit), where it can be derived: Start calls it so that the
+// derived limit is in force from the start, not from run's first sample.
+func (g *guard) sampleSoftLimit() {
+	m := g.goMemory()
+	cs, err := g.cgroup()
+	if err != nil {
+		return
+	}
+	dec := g.decide(cs)
+	goMemoryBudget.Store(dec.goMemTarget)
+	if sl := deriveSoftLimit(dec, cs, m); sl.derived {
+		g.applySoftLimit(sl, g.timeNow())
+	}
+}
+
+// budget is the memory limit the guard pauses, resumes and sets its ceiling
+// against: --memory-limit, or the container's limit where that is lower, so
+// that the guard can pause before the container's limit, not only before
+// one the container never lets the agent reach. The first sample that finds
+// the container's limit under --memory-limit says so once, until it is not.
+func (g *guard) budget(cs cgroupSample) int64 {
+	if cs.limit <= 0 || cs.limit >= g.limitBytes {
+		g.containerUnderFlagLogged = false
+		return g.limitBytes
+	}
+	if !g.containerUnderFlagLogged {
+		g.containerUnderFlagLogged = true
+		g.logger.Warn("the container's memory limit is under --memory-limit; the keploy-agent memory guard "+
+			"pauses recording against the container's limit",
+			zap.Int64("container_limit_bytes", cs.limit),
+			zap.Int64("memory_limit_bytes", g.limitBytes))
+	}
+	return cs.limit
+}
+
+// decide is evaluateMemory of the working set against the budget (budget),
+// with where the budget came from (limitSource).
+func (g *guard) decide(cs cgroupSample) memoryDecision {
+	dec := evaluateMemory(cs.workingSet, g.budget(cs), fixedOverheadBytes.Load())
+	dec.source, dec.raise = g.limitSource(dec.limit, cs.limit)
+	return dec
+}
+
+// limitSource is where a budget the guard judged against (budget) came
+// from, as the lines that report it name it, and the limit those lines
+// advise raising, given the container's limit as read (0: none):
+//   - the container's, where that is under --memory-limit: raising
+//     --memory-limit then changes nothing;
+//   - both, where the container's limit is --memory-limit to the MiB
+//     (--memory-limit's unit), as in every sidecar k8s-proxy injects (it
+//     sets the two equal): raising either alone leaves the other binding,
+//     and the budget where it was;
+//   - --memory-limit, where the container has no limit or one a MiB or more
+//     over it.
+func (g *guard) limitSource(limit, containerLimit int64) (source, raise string) {
+	switch {
+	case limit < g.limitBytes:
+		return "container", "the container's memory limit"
+	case containerLimit > 0 && containerLimit < g.limitBytes+1<<20:
+		return "--memory-limit and container", "--memory-limit and the container's memory limit"
+	}
+	return "--memory-limit", "--memory-limit"
+}
+
+// applySoftLimit installs a GOMEMLIMIT derived from the budget
+// (deriveSoftLimit) over the one installed (Start's 90% of --memory-limit
+// at first): lower once the derivation is softLimitLowerStep under it, higher
+// at once where Go's live memory with its floor is over it, and otherwise
+// higher only once the derivation has been softLimitRaiseStep over it
+// reclaimCooldown after the last change.
+//
+// It reports the budget too small for the agent once, and once again when
+// it has room: too small only where Go's live memory with its floor is over
+// the room the budget leaves Go (short) with recording paused, after the
+// guard's collection reclaimCooldown into the pause. Until then, live memory
+// over the room may be recording's own, which a pause drops: capture
+// buffers, at the GC that first finds a burst live, are as live as the rest.
+func (g *guard) applySoftLimit(s softLimit, now time.Time) {
+	first := !g.softLimitDerived
+	g.softLimitDerived = true
+	changed := s.bytes <= g.softLimit-softLimitLowerStep || (s.bytes > g.softLimit && s.floorBytes > g.softLimit) ||
+		(s.bytes >= g.softLimit+softLimitRaiseStep && now.Sub(g.softLimitAt) >= reclaimCooldown)
+	if changed {
+		g.installMemoryLimit(s.bytes)
+		g.softLimit, g.softLimitAt = s.bytes, now
+	}
+	if first || changed {
+		log := g.logger.Debug
+		if first {
+			log = g.logger.Info
+		}
+		log("keploy-agent GOMEMLIMIT set from the memory limit",
+			zap.Int64("go_mem_limit_bytes", g.softLimit),
+			zap.Int64("go_room_bytes", s.room),
+			zap.Int64("limit_bytes", s.hard),
+			zap.String("limit_source", s.source),
+			zap.Int64("non_go_memory_bytes", s.nonGo),
+			zap.Int64("go_live_memory_bytes", s.need))
+	}
+	collectedWhilePaused := g.underPressure && g.lastReclaim.Sub(g.pausedAt) >= reclaimCooldown
+	switch {
+	case s.short && collectedWhilePaused && !g.tooSmall:
+		g.tooSmall = true
+		g.logger.Error("the memory limit is too small for the keploy-agent: with recording paused "+
+			"and its memory collected, the agent's live Go memory plus 64 MiB is over the room the limit leaves Go, "+
+			"so GOMEMLIMIT is set over that room; raise "+s.raise,
+			zap.Int64("limit_bytes", s.hard),
+			zap.String("limit_source", s.source),
+			zap.Int64("non_go_memory_bytes", s.nonGo),
+			zap.Int64("go_room_bytes", s.room),
+			zap.Int64("go_live_memory_bytes", s.need),
+			zap.Int64("go_mem_limit_bytes", g.softLimit))
+	case g.tooSmall && s.room >= s.floorBytes+softLimitRaiseStep:
+		g.tooSmall = false
+		g.logger.Info("the memory limit has room for the keploy-agent's live Go memory plus 64 MiB again",
+			zap.Int64("limit_bytes", s.hard),
+			zap.String("limit_source", s.source),
+			zap.Int64("non_go_memory_bytes", s.nonGo),
+			zap.Int64("go_room_bytes", s.room),
+			zap.Int64("go_live_memory_bytes", s.need),
+			zap.Int64("go_mem_limit_bytes", g.softLimit))
 	}
 }
 
@@ -428,7 +945,7 @@ func applyPausedState(paused bool) {
 
 // readMemoryCurrent reads the raw cgroup memory.current value (total bytes
 // including page cache).  Callers that need the working-set should use
-// readWorkingSetBytes instead.
+// readCgroupSample instead.
 func readMemoryCurrent(path string) (int64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -445,52 +962,65 @@ func readMemoryCurrent(path string) (int64, error) {
 	return currentBytes, nil
 }
 
-// readWorkingSetBytes returns the container's working-set memory:
+// readPageCache returns the cgroup's inactive_file and active_file from the
+// memory.stat beside memCurrentPath (both cgroup versions name them so);
+// ok is false when memory.stat cannot be read.
+func readPageCache(memCurrentPath string) (inactiveFile, activeFile int64, ok bool) {
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(memCurrentPath), "memory.stat"))
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		name, value, found := strings.Cut(line, " ")
+		if !found || (name != "inactive_file" && name != "active_file") {
+			continue
+		}
+		n, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if name == "inactive_file" {
+			inactiveFile = n
+		} else {
+			activeFile = n
+		}
+	}
+	return inactiveFile, activeFile, true
+}
+
+// readCgroupSample reads the container's working set:
 //
 //	working_set = memory.current − inactive_file
 //
 // This matches what kubectl top and the Kubernetes eviction manager report,
 // and avoids false-positive pressure events caused by reclaimable page cache.
-// If memory.stat is unavailable the raw memory.current value is returned so
-// the guard still functions (conservatively).
-func readWorkingSetBytes(memCurrentPath string) (int64, error) {
-	currentBytes, inactiveFile, err := readMemoryStats(memCurrentPath)
-	if err != nil {
-		return 0, err
-	}
-	workingSet := currentBytes - inactiveFile
-	if workingSet < 0 {
-		workingSet = 0
-	}
-	return workingSet, nil
-}
-
-// readMemoryStats returns (memory.current, inactive_file). Exposed for
-// local-testing diagnostics so callers can log both components of the
-// working-set calculation.
-func readMemoryStats(memCurrentPath string) (int64, int64, error) {
+// If memory.stat is unavailable the raw memory.current value is the working
+// set, so the guard still functions (conservatively), and statOK is false.
+//
+// It also reads the active page cache, and the memory limit from limitPath: a
+// byte count, "max" (cgroup v2: none), or a count at or over
+// unlimitedCgroupBytes (cgroup v1's "none") reads as no limit (0), as does an
+// unreadable file.
+func readCgroupSample(memCurrentPath, limitPath string) (cgroupSample, error) {
 	currentBytes, err := readMemoryCurrent(memCurrentPath)
 	if err != nil {
-		return 0, 0, err
+		return cgroupSample{}, err
 	}
-
-	statPath := filepath.Join(filepath.Dir(memCurrentPath), "memory.stat")
-	data, err := os.ReadFile(statPath)
-	if err != nil {
-		return currentBytes, 0, nil
-	}
-
-	var inactiveFile int64
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "inactive_file ") {
-			fields := strings.Fields(line)
-			if len(fields) == 2 {
-				inactiveFile, _ = strconv.ParseInt(fields[1], 10, 64)
-			}
-			break
+	inactiveFile, activeFile, statOK := readPageCache(memCurrentPath)
+	s := cgroupSample{workingSet: max(currentBytes-inactiveFile, 0), activeFile: activeFile, statOK: statOK}
+	if data, err := os.ReadFile(limitPath); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil && n > 0 && n < unlimitedCgroupBytes {
+			s.limit = n
 		}
 	}
-	return currentBytes, inactiveFile, nil
+	return s, nil
+}
+
+// limitPathFor is the memory limit file beside a cgroup's usage file:
+// memory.limit_in_bytes on cgroup v1, memory.max on v2.
+func limitPathFor(memCurrentPath string, version int) string {
+	name := "memory.max"
+	if version == cgroupV1 {
+		name = "memory.limit_in_bytes"
+	}
+	return filepath.Join(filepath.Dir(memCurrentPath), name)
 }
 
 func resolveMemoryUsagePath(procMountsPath, procSelfCgroupPath, procMountInfoPath string) (string, cgroupLayout, error) {
@@ -986,14 +1516,20 @@ func thresholdBytes(limit int64, ratio float64) int64 {
 // limit and the fixed overhead. run() applies it (pause/resume, GOMEMLIMIT,
 // logging); keeping the arithmetic here makes it unit-testable without a cgroup.
 type memoryDecision struct {
+	limit           int64 // the limit judged against (guard.budget)
 	effCurrent      int64 // reclaimable usage = working set − overhead, floored at 0
 	effLimit        int64 // budget for reclaimable memory = limit − overhead
 	overhead        int64 // sanitised overhead actually applied
 	pauseThreshold  int64 // pause when effCurrent ≥ this (viable only)
 	resumeThreshold int64 // resume when effCurrent ≤ this (viable only)
+	ceiling         int64 // pause at the pause point when the next GC is due only at this (viable only)
 	goMemTarget     int64 // GOMEMLIMIT to install (floored at minGoMemLimitBytes)
 	goMemFloored    bool  // goMemTarget hit its floor
 	viable          bool  // false ⇒ budget too small to record; hold paused
+	// source and raise: where limit came from and what the lines advise
+	// raising (guard.limitSource); set by guard.decide, empty from
+	// evaluateMemory alone.
+	source, raise string
 }
 
 // evaluateMemory discounts the fixed, non-reclaimable overhead (the low-latency
@@ -1025,7 +1561,7 @@ func evaluateMemory(currentBytes, limitBytes, overhead int64) memoryDecision {
 	}
 	// effCurrent is computed even on the non-viable path so the pause log carries
 	// the real usage, not a zero.
-	d := memoryDecision{overhead: overhead, effLimit: effLimit, effCurrent: effCurrent}
+	d := memoryDecision{limit: limitBytes, overhead: overhead, effLimit: effLimit, effCurrent: effCurrent}
 
 	// GOMEMLIMIT floored so a tiny budget can't drive near-continuous GC. effLimit
 	// may be negative here when overhead > limit; 0.9×negative is still below the
@@ -1046,6 +1582,7 @@ func evaluateMemory(currentBytes, limitBytes, overhead int64) memoryDecision {
 		d.viable = true
 		d.pauseThreshold = thresholdBytes(effLimit, pauseThresholdRatio)
 		d.resumeThreshold = thresholdBytes(effLimit, resumeThresholdRatio)
+		d.ceiling = ceilingBytes(effLimit, d.pauseThreshold)
 		return d
 	}
 
@@ -1062,5 +1599,16 @@ func evaluateMemory(currentBytes, limitBytes, overhead int64) memoryDecision {
 	resumeHeadroom := max(effLimit-thresholdBytes(effLimit, resumeThresholdRatio), int64(minResumeHeadroomBytes))
 	d.pauseThreshold = effLimit - pauseHeadroom
 	d.resumeThreshold = effLimit - resumeHeadroom
+	d.ceiling = ceilingBytes(effLimit, d.pauseThreshold)
 	return d
+}
+
+// ceilingBytes is how high the working set may be due to reach by the
+// runtime's next GC while the guard waits for that GC to tell its garbage
+// from live memory: a quarter of the room the pause point leaves under the
+// budget stays free (5% of the budget where the pause point is at 80%, 32 MiB
+// where the 128 MiB headroom floor binds). Garbage measured at a recorded
+// app's exec reached 88% of a 1 GiB sidecar's budget.
+func ceilingBytes(effLimit, pauseThreshold int64) int64 {
+	return effLimit - (effLimit-pauseThreshold)/4
 }

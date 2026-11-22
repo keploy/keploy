@@ -79,6 +79,10 @@ func JudgeReplays() { replaysJudged.Store(true) }
 // diff, correlates any per-test scopes the runner reported into mappings.yaml,
 // pushes the set to the store, and propagates the runner's exit code.
 func (m *mockService) Record(ctx context.Context) error {
+	// A recording is a session of its own: what its log names by a path tag
+	// it names under a key drawn now, carried in ctx (models.LogKeySession),
+	// unless ctx carries one its embedder began for it.
+	ctx = models.EnsureLogKeySession(ctx)
 	// The recording's own teardown scope: what keploy sees its stops do
 	// moves it, and the drain below waits while it moves (teardownDrain).
 	ctx, teardown := utils.NewTeardownScope(ctx)
@@ -92,8 +96,8 @@ func (m *mockService) Record(ctx context.Context) error {
 		return err
 	}
 	m.logger.Info("Recording mocks for your test command",
-		zap.String("mock-set", name),
-		zap.String("command", m.userCommand))
+		zap.String("mock-set", name), zap.Inline(m.userCommand))
+	utils.LogWholeCommand(m.logger, "command", m.userCommand)
 
 	// The caller's context: only ITS cancellation is the user's Ctrl+C. The
 	// errgroup below cancels the context it derives whenever any goroutine in
@@ -654,20 +658,24 @@ func (m *mockService) Record(ctx context.Context) error {
 	//     said below.
 	lostLosses, lostNotJudged := lostAll.Split()
 	recordNotJudged = lostNotJudged
+	// The console names whole, beside each host's tag, the reason the lines
+	// below name by host tags (utils.SayWhole).
+	utils.SayWhole(m.console, "mock set "+name+", what keploy could not capture", lostLosses.LogText(), lostLosses.Text())
 	if t := lostLosses.Text(); t != "" && judgedRecord {
 		m.logger.Error("keploy could not capture every call the test command made: the tests charged with it keep their previous recordings in judging ("+provenswitch.Env+"=1)",
-			zap.String("mock-set", name), zap.String("reason", t))
+			zap.String("mock-set", name), zap.String("reason", lostLosses.LogText()))
 	} else if t != "" {
 		if derr := m.mockDB.DiscardStagedSet(storeCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
 		}
 		m.logger.Error("the recording was not kept: keploy could not capture every call the test command made; the existing mock set (if any) was left unchanged ("+provenswitch.Env+"=1)",
-			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.String("reason", t))
+			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.String("reason", lostLosses.LogText()))
 		if parent.Err() == nil {
 			m.propagateExit(appErr, "record")
 		}
 		utils.SetExitCodeOnce(utils.ExitKeployError)
-		return errors.New("the recording is incomplete: " + t)
+		// Its caller logs it: the losses' log form (LogText).
+		return errors.New("the recording is incomplete: " + lostLosses.LogText())
 	}
 	lossesUnread := false
 	if pidCheck.unreadable == nil && lostErr != nil {
@@ -696,10 +704,11 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 8b'. The test command called what keploy cannot capture at all: the
 	//      recording lacks those calls, and a replay of it would make them
 	//      for real. Kept, not vouched for in silence.
-	if t := lostNotJudged.NotJudgedText(); t != "" {
+	if t := lostNotJudged.NotJudgedLogText(); t != "" {
 		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, or the Docker daemon did not answer keploy's read of a container a call reached: such calls are not in it, or not as that container's ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", t),
 			zap.String("next_step", lostNotJudged.NotJudgedRemedy()+", then record again"))
+		utils.SayWhole(m.console, "mock set "+name+", calls the recording does not hold", t, lostNotJudged.NotJudgedText())
 	}
 	// 8b. The agent counts, but its count could not be read: nothing shows a
 	//     process went untracked, and nothing shows none did. The recording
@@ -798,10 +807,11 @@ func (m *mockService) Record(ctx context.Context) error {
 			if recordLosses, unread = m.runLosses(ctx, lossesBase, judgedLost, lostErr, refused); unread != nil {
 				recordLossesUnread = unread.Error()
 			}
-			if t := recordLosses.Text(); t != "" {
+			if t := recordLosses.LogText(); t != "" {
 				m.logger.Error("keploy could not capture every call the test command made after its last test: no recording holds what those calls carried, so judging fails the run ("+provenswitch.Env+"=1)",
 					zap.String("mock-set", name), zap.String("reason", t),
 					zap.String("next_step", "fix what the reason names, then record again"))
+				utils.SayWhole(m.console, "mock set "+name+", calls lost after the last test", t, recordLosses.Text())
 			}
 			if recordLossesUnread != "" {
 				m.logger.Error("keploy could not read whether its agent captured every call after the test command's last test, so judging fails the run ("+provenswitch.Env+"=1)",
@@ -844,6 +854,8 @@ func (m *mockService) Record(ctx context.Context) error {
 	// (models.CaptureLossUnattributed), which leaves it without a verdict, so
 	// judging keeps its previous recording. A build that does not judge the
 	// record would keep their recordings short of the call, so it keeps none.
+	// An idle answer (capturedMock.idle) charges no test: it is the set's
+	// wherever it was recorded (setScopeMocks), in no test's recording.
 	if calls := chargeUnattributed(windows, dataPlane(recorded)); len(calls) > 0 {
 		judging := provenswitch.On() && recordsJudged.Load()
 		for _, c := range calls {
@@ -1345,8 +1357,16 @@ type capturedMock struct {
 	// unread: an answer the client never read (models.Mock.IsUndelivered),
 	// so, under either switch, among no case's mocks either (correlateCases).
 	unread bool
-	start  string
-	ref    string
+	// idle: under the proven switch, an answer its parser declares idle
+	// (models.IsIdleAnswer: a worker's poll that found nothing, a blocking
+	// pop the server never answered). Whether a run's worker makes that
+	// call before or after a test's end is a matter of timing, not of what
+	// the test does, so no window holds it: it is the set's (setScopeMocks),
+	// worker:'s when recorded once a test had begun, as keploy record maps
+	// it (models.DeriveWindowMappings).
+	idle  bool
+	start string
+	ref   string
 	// instance is the keploy instance (a test worker's) the call's
 	// connection was stamped with (models.Mock.Instance): only a window of
 	// that worker's (ScopeWindow.Instance) holds it. 0 for none.
@@ -1366,7 +1386,8 @@ func capturedOf(mk *models.Mock) capturedMock {
 	// makes the call it recorded.
 	unread := mk.IsUndelivered()
 	protocol := provenswitch.On() && mk.IsProtocolPhase() || unread
-	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, unread: unread, start: mk.Start, ref: mk.StartRef}
+	idle := provenswitch.On() && models.IsIdleAnswer(mk)
+	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, unread: unread, idle: idle, start: mk.Start, ref: mk.StartRef}
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1381,7 +1402,8 @@ func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 // place (capturedMock.ts) falls within, producing the mappings.yaml structure. A mock
 // that matches no window (e.g. a boot-time handshake before the first scope)
 // is left out of every test's mapping — it stays reusable/session-tier at
-// replay, exactly as the timestamp-based fallback would treat it.
+// replay, exactly as the timestamp-based fallback would treat it. So is an
+// idle answer (capturedMock.idle), wherever it was recorded.
 //
 // When a mock carries a source PID it is attributed to the SAME worker's window,
 // so another worker's overlapping window does not take it; two windows open at
@@ -1434,6 +1456,10 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 		return best
 	}
 	for _, mk := range mocks {
+		if mk.idle {
+			// No test's, wherever it was recorded (capturedMock.idle).
+			continue
+		}
 		best := -1
 		if mk.pid != 0 {
 			// Attribute to the same worker's window: exact for a call the
@@ -1458,7 +1484,9 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 // unattributedCall is a call from a process in no test worker's keploy
 // instance (instance 0), or in an ended worker's (capturedMock.ended), made
 // while test workers' tests were open and no test of a run of one worker
-// was: no test's window holds it (correlateScopes).
+// was: no test's window holds it (correlateScopes). An idle answer
+// (capturedMock.idle) is none: it is the set's wherever it was recorded
+// (setScopeMocks), so no test's recording is short of it.
 type unattributedCall struct {
 	mock  string
 	pid   uint32
@@ -1468,13 +1496,15 @@ type unattributedCall struct {
 // chargeUnattributed charges each test open at an unattributed call with it
 // (models.CaptureLossUnattributed, What naming its latest such call and the
 // ended worker it came from, if any), on a copy of the test's evidence, and
-// returns the calls in the order of mocks.
+// returns the calls in the order of mocks. An idle answer (capturedMock.idle)
+// charges no test: it is the set's wherever it was recorded (setScopeMocks),
+// so no test's recording is short of it.
 func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []unattributedCall {
 	var out []unattributedCall
 	charged := map[int]models.CaptureLoss{}
 	latest := map[int]time.Time{}
 	for _, mk := range mocks {
-		if mk.instance != 0 {
+		if mk.instance != 0 || mk.idle {
 			continue
 		}
 		var open []int
@@ -1496,7 +1526,8 @@ func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []un
 		for _, i := range open {
 			c.tests = append(c.tests, windows[i].Name)
 			loss := charged[i]
-			loss.Kind, loss.Count = models.CaptureLossUnattributed, loss.Count+1
+			// It names keploy's mock and a process, no host: none to list.
+			loss.Kind, loss.Count, loss.HostsListed = models.CaptureLossUnattributed, loss.Count+1, true
 			if !mk.ts.Before(latest[i]) {
 				loss.What, latest[i] = fmt.Sprintf("the latest: mock %s, from process %d", mk.name, mk.pid), mk.ts
 				if mk.ended != 0 {
@@ -1782,12 +1813,18 @@ func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []m
 }
 
 // held reports whether a test's window holds mk, so no set scope lists it.
+// No window holds an idle answer (capturedMock.idle).
 // A test worker's call is held only by its own worker's windows, as
 // correlate keeps it: one made outside them is the set's, though another
 // worker's test was open. Any other call is held by any window open at its
 // time: inside a worker's test, a call from no worker is charged to it
 // (chargeUnattributed).
 func held(windows []models.ScopeWindow, mk capturedMock) bool {
+	if mk.idle {
+		// An idle answer is the set's wherever it was recorded
+		// (capturedMock.idle).
+		return false
+	}
 	if mk.instance == 0 {
 		return containing(windows, mk.ts) != ""
 	}

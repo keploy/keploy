@@ -6,6 +6,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -14,7 +15,9 @@ import (
 // next, series the series it is of, call the call's method and path shape,
 // for the line that says the chain answered it.
 type chainCall struct {
-	next, series, call string
+	// call is the call's shape (shapeSummary), tag its path tag
+	// (models.URLPathTag): what a line names it by.
+	next, series, call, tag string
 }
 
 // chainNext answers a call with c.next, the recording a once chain the
@@ -55,6 +58,6 @@ func (h *HTTP) chainNext(ctx context.Context, input *req, db integrations.MockMe
 		return nil, err
 	}
 	h.Logger.Info("a once series' chain answered a call: this connection made the series' earlier calls, so the series' next recording answered it ahead of any other recording of the call, the open test's own included",
-		zap.String("series", c.series), zap.String("mock", m.Name), zap.String("call", c.call), zap.Bool("the open test recorded this call too", owned()))
+		zap.String("series", c.series), zap.String("mock", m.Name), zap.String("call", c.call), utils.PathTagField(c.tag), zap.Bool("the open test recorded this call too", owned()))
 	return served, nil
 }

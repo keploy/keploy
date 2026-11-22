@@ -41,6 +41,35 @@ func TestTheMockManagerAnswersARecordingsDeclaredSources(t *testing.T) {
 	require.Equal(t, []models.DeclaredSource{minted}, mm.SourcesOf("mock-9"))
 }
 
+// The mock manager answers whether the replay's scope table declares a
+// source of any recording: not before a table, nor for a table whose names
+// have none, but once one has one, and not again once a table with none
+// replaced it. The worker's view and a call held to its round answer the
+// manager's, and a store that cannot tell, or none, declares them.
+func TestTheMockManagerAnswersWhetherTheReplayDeclaresSources(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	var db integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	held, _ := mm.HoldToRound(integrations.NewCallRound(mm.stagingEpoch.Load(), nil))
+	answers := func(want bool, why string) {
+		t.Helper()
+		require.Equal(t, want, mm.DeclaresSources(), why)
+		require.Equal(t, want, integrations.DeclaresSources(db), "the wrapper forwards it: %s", why)
+		require.Equal(t, want, integrations.DeclaresSources(held), "a held call answers the manager's: %s", why)
+	}
+	answers(false, "before any table")
+	mm.SetPoolSources(map[string][]models.DeclaredSource{"mock-8": {}, "mock-7": nil})
+	answers(false, "a table whose names have none")
+	minted := models.DeclaredSource{Rule: "id@0a1b2c3d", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id", Minted: &models.MintedForm{MinLen: 36, MaxLen: 36}}
+	mm.SetPoolSources(map[string][]models.DeclaredSource{"mock-8": {}, "mock-9": {minted}})
+	answers(true, "a table that declares one")
+	mm.SetPoolSources(nil)
+	answers(false, "a table with none replaced it")
+
+	require.True(t, integrations.DeclaresSources(nil), "no store cannot tell")
+	require.True(t, integrations.DeclaresSources(struct{ integrations.MockMemDb }{}), "a store that cannot tell declares them")
+	require.True(t, integrations.DeclaresSources(&scopedMockDb{MockMemDb: struct{ integrations.MockMemDb }{}}), "the wrapper of a store that cannot tell")
+}
+
 // The mock manager answers whether the replay's scope table turned the
 // time default on: off before any table, on once one did, off again once a
 // table turned it off. The worker's view forwards it, a store that cannot

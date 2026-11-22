@@ -50,3 +50,25 @@ func TestLearnedEntryIsExactUnderTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// An entry naming id keys names its field under every id key, as whole fields,
+// in the request dialect too.
+func TestNoiseLookupIDKeys(t *testing.T) {
+	u := testUUID(4)
+	l := NewNoiseLookup(map[string][]string{"options.{id}.traceid": {}})
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"options." + u + ".traceId", true},
+		{"req.options." + u + ".traceId", true},
+		{"options." + u + "[].traceId", false}, // an array under the id is another path
+		{"options.summary.traceId", false},
+		{"xoptions." + u + ".traceId", false}, // whole fields only
+		{"options." + u + ".traceIdx", false},
+	} {
+		if got := l.Covers(tc.path, "v", true); got != tc.want {
+			t.Errorf("Covers(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

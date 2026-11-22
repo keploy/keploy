@@ -1480,8 +1480,9 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 // one of the open test's own) binds nothing and is refused as at its consume
 // door: the call is checked again, and the recording's variables stay
 // unbound for the call it is the recording of. The debug line of each bind
-// writes its value redacted at a place logPlaces names redacted: the places
-// of every recording of the pool the call was checked against.
+// says whether its place is one logPlaces names redacted (the places of
+// every recording of the pool the call was checked against), never its
+// value.
 func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock, logPlaces func() redactedPlaces) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	if integrations.RefusesAnswer(mockDb, hit.mock) {
 		return nil, nil, true, nil
@@ -1524,16 +1525,14 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 		}
 		inRequest := variables.InRequest(recorded)
 		for _, b := range hit.binds {
-			// A value bound at a place the recording redacted is the
-			// secret it hid. The place is read as the check read it
-			// (ReadPlace, so a name holding "#" stays one place); one
-			// that does not read is redacted too.
-			value := b.Value
-			if at, err := variables.ReadPlace(b.Place, inRequest); err != nil || places.at(at.Place) {
-				value = valueRedacted
-			}
-			h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", value),
-				zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+			// Its size, never the value or the recorded one: a bound value
+			// is what the application sent (a session's token, an id), a
+			// secret where a recording redacted its place. The place is
+			// read as the check read it (ReadPlace, so a name holding "#"
+			// stays one place); one that does not read counts as redacted.
+			at, err := variables.ReadPlace(b.Place, inRequest)
+			h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.Int("value_bytes", len(b.Value)),
+				zap.Bool("at_redacted_place", err != nil || places.at(at.Place)), zap.String("mock", b.Mock), zap.String("place", models.FieldShape(b.Place)))
 		}
 	}
 	if !consume(hit.mock) {

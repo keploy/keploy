@@ -193,7 +193,7 @@ func (o *orphanLooks) arm(pending []*pairTarget, moved bool) error {
 // application's FIN.
 func awaitsOrphan(pending []*pairTarget) bool {
 	for _, t := range pending {
-		if t.orphan != 0 {
+		if t.orphan != 0 || t.base.looks() {
 			return true
 		}
 	}
@@ -202,23 +202,32 @@ func awaitsOrphan(pending []*pairTarget) bool {
 
 // orphansUnmoved is the wait's answer once the agent could run for
 // orphanFINBudget with nothing moving: unknown, naming each connection whose
-// orphan it waited on, and the state the orphan was in.
+// orphan it waited on, and the state the orphan was in, and each whose
+// application socket it read from its holder (targetBase.looks).
 func orphansUnmoved(pending []*pairTarget) error {
-	var waited []string
+	var waited, held []string
 	for _, t := range pending {
-		switch t.orphan {
-		case 0:
-		case orphanEstablished:
+		switch {
+		case t.orphan == orphanEstablished:
 			waited = append(waited, fmt.Sprintf("%s (its socket still ESTABLISHED: the proxy's close had not reached the kernel, so it was no orphan yet)", t.pc.app))
-		default:
+		case t.orphan != 0:
 			waited = append(waited, fmt.Sprintf("%s (its orphan in %s)", t.pc.app, tcpStateName(t.orphan)))
+		case t.base.looks():
+			held = append(held, t.pc.app.String())
 		}
 	}
-	what := "the connection from " + waited[0]
-	if len(waited) > 1 {
-		what = "the connections from " + strings.Join(waited, ", ")
+	var why []string
+	if len(waited) > 0 {
+		what := "the connection from "
+		if len(waited) > 1 {
+			what = "the connections from "
+		}
+		why = append(why, fmt.Sprintf("keploy waited for the application's FIN to reach the proxy's socket of %s%s, which the proxy closed one FIN short of what the application wrote, and the socket took neither that FIN nor a byte it would refuse", what, strings.Join(waited, ", ")))
 	}
-	return fmt.Errorf("%w: keploy waited for the application's FIN to reach the proxy's socket of %s, which the proxy closed one FIN short of what the application wrote, and while keploy could run for %v nothing it waited on moved: the socket took neither that FIN nor a byte it would refuse", models.ErrProxyConnsUnsupported, what, orphanFINBudget)
+	if len(held) > 0 {
+		why = append(why, fmt.Sprintf("macOS's TCP table does not list the application's end of the connections to the proxy from %s to keploy's agent, so keploy read each from the descriptor table of the process holding it, and the proxy's side received no more while the application's send buffer kept bytes it had not acknowledged", strings.Join(held, ", ")))
+	}
+	return fmt.Errorf("%w: while keploy could run for %v, nothing it waited on moved: %s", models.ErrProxyConnsUnsupported, orphanFINBudget, strings.Join(why, "; and "))
 }
 
 // disarm releases the armed look, if any.

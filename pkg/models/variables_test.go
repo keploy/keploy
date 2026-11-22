@@ -1,11 +1,14 @@
 package models
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -2189,5 +2192,213 @@ func TestAnHourCutsPhaseIsWhereAReplaysValueMustSit(t *testing.T) {
 	utc.Phase = 0
 	if s := utc.String(); !strings.Contains(s, "its hour starting on UTC's whole hour") {
 		t.Errorf("String of Phase 0 names no phase: %q", s)
+	}
+}
+
+// slimZoneData is the zone file of name in testdata/zoneinfo-slim, copied
+// from Go 1.27.3's lib/time/zoneinfo.zip (tzdata 2026c), which zic writes
+// slim (zic -b slim, its default; the zone data built into keploy,
+// time/tzdata, is that zip): no transition after the year the file's rule
+// (its TZ footer) took over, Europe/Berlin's 1996, America/New_York's 2007,
+// Australia/Sydney's 2008. The distributions' tzdata (Debian's, Ubuntu's,
+// Alpine's, Fedora's) is fat: every change to 2037.
+func slimZoneData(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "zoneinfo-slim", filepath.FromSlash(name)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// slimZone is slimZoneData(name) read as the zone named as, loaded at
+// zoneLoadedAt (loadedAt).
+func slimZone(t *testing.T, name, as string) *time.Location {
+	t.Helper()
+	return loadedAt(t, as, slimZoneData(t, name), zoneLoadedAt)
+}
+
+// zoneChanges is every instant from 1970 to 2038 at which loc's offset
+// changes, read from its offsets alone (time.Time.Zone), never from where
+// Go ends its zones (ZoneBounds): an hourly scan, each change found to the
+// second within the hour it falls in (no zone changes its offset twice in
+// an hour).
+func zoneChanges(loc *time.Location) []time.Time {
+	return zoneChangesIn(loc, time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2038, 1, 1, 0, 0, 0, 0, time.UTC))
+}
+
+// zoneChangesIn is zoneChanges from start up to end.
+func zoneChangesIn(loc *time.Location, start, end time.Time) []time.Time {
+	off := func(s int64) int {
+		_, o := time.Unix(s, 0).In(loc).Zone()
+		return o
+	}
+	from, to := start.Unix(), end.Unix()
+	var at []time.Time
+	prev := off(from)
+	for h := from + 3600; h <= to; h += 3600 {
+		o := off(h)
+		if o == prev {
+			continue
+		}
+		lo, hi := h-3600, h
+		for hi-lo > 1 {
+			if m := lo + (hi-lo)/2; off(m) == prev {
+				lo = m
+			} else {
+				hi = m
+			}
+		}
+		at, prev = append(at, time.Unix(hi, 0).UTC()), o
+	}
+	return at
+}
+
+// tzifV1 is a zone file (version 1) of the offsets offs, in seconds east
+// of UTC: offs[0] before at[0], offs[i] from at[i-1] on.
+func tzifV1(offs []int, at []time.Time) []byte {
+	var b []byte
+	put := func(v int32) { b = append(b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v)) }
+	b = append(b, "TZif"...)
+	b = append(b, make([]byte, 16)...)
+	for _, n := range []int{0, 0, 0, len(at), len(offs), 2} {
+		put(int32(n))
+	}
+	for _, t := range at {
+		put(int32(t.Unix()))
+	}
+	for i := range at {
+		b = append(b, byte(i+1))
+	}
+	for _, off := range offs {
+		put(int32(off))
+		b = append(b, 0, 0)
+	}
+	return append(b, "Z\x00"...)
+}
+
+// fatZone is loc's offsets from 1970 to 2038 (zoneChanges) as a version 1
+// zone file of every change, as zic -b fat lists them (Debian's and
+// Fedora's tzdata), named name, loaded at zoneLoadedAt (loadedAt).
+func fatZone(t *testing.T, name string, loc *time.Location) *time.Location {
+	t.Helper()
+	at := zoneChanges(loc)
+	_, first := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).In(loc).Zone()
+	offs := []int{first}
+	for _, a := range at {
+		_, o := a.In(loc).Zone()
+		offs = append(offs, o)
+	}
+	return loadedAt(t, name, tzifV1(offs, at), zoneLoadedAt)
+}
+
+// ZoneNameOf names a zone file of a rule of summer time by the IANA name it
+// carries where keploy's own zone data of that name reads the same offsets,
+// whichever of zic's two forms either file is in: slim (slimZoneData) or
+// fat (every change to 2037). Go ends a slim file's zones at each year's
+// start after its last transition, and at the start of a leap year's last
+// day (golang/go#81583), a fat file's at their next change of offset: where
+// Go ends the zone in effect is no part of the zone's rules. keploy
+// compared it, and so named no zone of an application's fat file read by a
+// keploy whose own zone data is the slim copy built into it (one whose
+// system holds no zone files), nor of a slim file beside fat ones, as
+// though the two were other zones. Keploy's own zone data of the name is
+// the row's (zoneLocations).
+func TestAZoneOfSummerTimeIsNamedWhicheverFormItsZoneFileIsIn(t *testing.T) {
+	slim := slimZone(t, "Europe/Berlin", "Europe/Berlin")
+	fat := fatZone(t, "Europe/Berlin", slim)
+	newYork := slimZone(t, "America/New_York", "Europe/Berlin")
+	t.Cleanup(func() { zoneLocations.Delete("Europe/Berlin") })
+	autumn, leapDay := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC), time.Date(2028, 12, 31, 12, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		what     string
+		own, loc *time.Location
+		at       time.Time
+		want     string
+	}{
+		{"a slim file, keploy's own fat", fat, slim, autumn, "Europe/Berlin"},
+		{"a fat file, keploy's own slim", slim, fat, autumn, "Europe/Berlin"},
+		{"a slim file on a leap year's last day, keploy's own fat", fat, slim, leapDay, "Europe/Berlin"},
+		{"a fat file on a leap year's last day, keploy's own slim", slim, fat, leapDay, "Europe/Berlin"},
+		{"a slim file, keploy's own slim", slim, slim, leapDay, "Europe/Berlin"},
+		{"New York's slim file named Europe/Berlin, keploy's own fat", fat, newYork, autumn, ""},
+		{"New York's slim file named Europe/Berlin, keploy's own slim", slim, newYork, leapDay, ""},
+	} {
+		zoneLocations.Store("Europe/Berlin", zoneLoad{loc: row.own})
+		var got string
+		returnsWithin(t, 30*time.Second, row.what, func() { got = ZoneNameOf(row.loc, row.at) })
+		if got != row.want {
+			t.Errorf("%s: ZoneNameOf %q; want %q", row.what, got, row.want)
+		}
+	}
+}
+
+// A turn at which the clocks go back is found (fallBackIn) wherever the
+// span lies, in a slim zone file too: Go's ends of a slim file's zones
+// stop advancing on a leap year's last day (golang/go#81583), where keploy
+// read no turn after it, so a span from that day on to the next turn
+// back (a check of an offset learned over months) met none, and a replay
+// did not refuse a value there (FallBack).
+func TestATurnTheClocksGoBackAtIsFoundPastALeapYearsLastDay(t *testing.T) {
+	slim := slimZone(t, "Europe/Berlin", "Europe/Berlin")
+	turn := time.Date(2029, 10, 28, 1, 0, 0, 0, time.UTC)
+	for _, loc := range []*time.Location{slim, fatZone(t, "Europe/Berlin", slim)} {
+		var at time.Time
+		var back time.Duration
+		var met bool
+		returnsWithin(t, 30*time.Second, "fallBackIn", func() {
+			at, back, met = fallBackIn(time.Date(2028, 12, 30, 12, 0, 0, 0, time.UTC), time.Date(2029, 10, 29, 0, 0, 0, 0, time.UTC), loc, false)
+		})
+		if !met || !at.Equal(turn) || back != time.Hour {
+			t.Errorf("a span from 2028-12-30 to 2029-10-29 in Berlin (%d changes listed): turn %v at %s back %s; want the turn at %s back 1h", len(zoneChanges(loc)), met, at, back, turn)
+		}
+	}
+}
+
+// Every year's turns at which the clocks go back are read (yearFallBacks)
+// from slim zone data too: the zone data built into keploy, which it reads
+// where its system holds no zone files. yearFallBacks walked each zone from
+// the last instant of the year before, and after a leap year Go's end of a
+// slim file's zone is not after that instant (golang/go#81583), so its walk
+// stopped there: 2025 and 2029 read no turn back of any zone of summer
+// time, and a replay that knows no zone of the application's (FallBackAnywhere)
+// refused no value written an hour early at one. A child process reads
+// every zone of tzNames from a directory (ZONEINFO, which Go reads once a
+// process) where each is Berlin's slim file, so each year holds Berlin's
+// turn back, on the last Sunday of October at 01:00 UTC.
+func TestEveryYearsTurnsBackAreReadFromSlimZoneData(t *testing.T) {
+	if os.Getenv("KEPLOY_TEST_SLIM_ZONEINFO") == "1" {
+		for _, y := range []int{2025, 2026, 2029} {
+			last := time.Date(y, time.November, 0, 1, 0, 0, 0, time.UTC)
+			want := last.AddDate(0, 0, -int(last.Weekday()))
+			var fs []zoneFallBack
+			returnsWithin(t, 30*time.Second, fmt.Sprint(y), func() { fs = yearFallBacks(y) })
+			met := false
+			for _, f := range fs {
+				met = met || f.at.Equal(want) && f.back == time.Hour
+			}
+			if !met {
+				t.Errorf("%d: %d turns back read, none at %s", y, len(fs), want.Format(time.RFC3339))
+			}
+		}
+		return
+	}
+	dir := t.TempDir()
+	berlin := slimZoneData(t, "Europe/Berlin")
+	for _, name := range tzNames {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, berlin, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEveryYearsTurnsBackAreReadFromSlimZoneData$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "KEPLOY_TEST_SLIM_ZONEINFO=1", "ZONEINFO="+dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("the turns back of a year, every zone read from slim data: %v\n%s", err, out)
 	}
 }

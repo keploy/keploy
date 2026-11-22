@@ -139,13 +139,11 @@ such as MySQL's ERR at `wait_timeout` or an idle-close 408). Or it is
 what is left of an answer you stopped reading and left out, which you
 report yourself (`ReportLeftOut`) as you do: the MySQL recorder leaves
 out a response it cannot frame, goes on from the client's next command,
-and skips the rest of that response by capture time first
-(`fakeconn.FakeConn.SkipThrough`, which cuts the stream before the
-floor); the floor drops only what that skip left. The bytes captured
-before the connection's first request are the server stream's start,
-in the floor's run there however they leave the stream (the floor's
-read or such a skip), and nothing captured after that request is in
-that run, whatever floor is in force when you first read the stream:
+and lets that command's floor drop the rest of that response, by
+capture number, never by capture time. The bytes captured before the
+connection's first request are the server stream's start, in the
+floor's run there, and nothing captured after that request is in that
+run, whatever floor is in force when you first read the stream:
 an answer in flight is reported over its own bytes. A parser that
 returns without reading the server's stream past its start (a client
 that sends only requests with no answer and closes, such as a pool's

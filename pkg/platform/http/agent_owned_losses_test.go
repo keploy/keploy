@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
@@ -43,7 +44,7 @@ func TestAgentClient_TakesTheLossesACutShortEndOwned(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 
 	got, err := a.TakeOwnedCaptureLosses(context.Background())
-	if err != nil || len(got) != 1 || got[0] != owned[0] {
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], owned[0]) {
 		t.Fatalf("took %+v, %v; want %+v", got, err, owned)
 	}
 	for _, code := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented} {

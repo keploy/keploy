@@ -317,6 +317,14 @@ jobs:
       - name: Running Race Detector (agent control-plane token)
         run: go test -race -count=1 ./pkg/agent/token/...
 
+      # Same argument for a set's mapping file: every write of it holds the
+      # set's write lock, which lives in a table every MappingDb of the process
+      # shares (k8s-proxy's recorder and auto-replay round each build their
+      # own over one directory). The lock rows prove no write is lost;
+      # a table read outside its mutex passes them by, and only -race sees it.
+      - name: Running Race Detector (mapping file writes)
+        run: go test -race -count=1 ./pkg/platform/yaml/mapdb/
+
       # Same argument for replay: its test-set loop runs the application, its
       # watcher and the tests on goroutines of their own, and one defect its
       # tests pin is a data race: the teardown closed a channel the app watcher

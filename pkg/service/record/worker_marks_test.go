@@ -101,7 +101,7 @@ func TestTheMappingConsumerWritesTheWorkerMarksAfterEachBatch(t *testing.T) {
 	mappings := make(chan models.TestMockMapping, 1)
 	mappings <- models.TestMockMapping{TestName: "test-1", MockIDs: []string{"m1"}}
 	close(mappings)
-	if err := r.consumeMappingsFor(context.Background(), "set-0", mappings, &correlationMap, &asyncMockIDs, &dropped, nil, nil, &shortPool, nil, marks); err != nil {
+	if err := r.consumeMappingsFor(context.Background(), "set-0", mappings, &correlationMap, &asyncMockIDs, &dropped, nil, nil, &shortPool, nil, marks, nil); err != nil {
 		t.Fatal(err)
 	}
 	if w := workerOf(t, db, "set-0"); len(w) != 1 || w[0].Name != "mock-7" {

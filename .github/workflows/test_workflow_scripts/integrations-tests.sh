@@ -13,6 +13,7 @@
 # Usage:
 #   integrations-tests.sh resolve INTEGRATIONS_DIR
 #   integrations-tests.sh test KEPLOY_DIR INTEGRATIONS_DIR
+#   integrations-tests.sh parsers KEPLOY_DIR INTEGRATIONS_DIR
 #
 # resolve
 #   INTEGRATIONS_DIR is a clone of keploy/integrations that holds every branch
@@ -55,11 +56,25 @@
 #   set. INTEGRATIONS_DESC names the integrations ref in those lines. go runs
 #   with no GOFLAGS. Exit 0 only when both runs exit 0 and each ran a test in
 #   at least one package.
+#
+# parsers
+#   Adds INTEGRATIONS_DIR's parsers to KEPLOY_DIR as setup-private-parsers adds
+#   them to a build (the integrations module required, here from
+#   INTEGRATIONS_DIR by a replace, and pkg/agent/proxy/extraparsers.go
+#   importing its parser packages), and runs keploy's row that every
+#   registered parser's recorder stamps each mock it emits with its request
+#   time (TestEveryRegisteredParsersRecorderStampsEachMocksRequestTime in
+#   pkg/agent/proxy). keploy's own go test ./... runs that row over the OSS
+#   parsers alone. The row sets each switch itself, so it runs
+#   once. go runs with no GOFLAGS. Exit 0 only when pkg/agent/proxy links the
+#   integrations parsers and the row passed; a failure names the parsers whose
+#   rows failed.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 keploy_module=go.keploy.io/server/v3
 integrations_module=github.com/keploy/integrations
+stamp_row=TestEveryRegisteredParsersRecorderStampsEachMocksRequestTime
 # The characters of a git branch, tag or commit. The PR body is untrusted, so a
 # ref read from it is refused unless it is made of these alone.
 safe_ref_re='^[A-Za-z0-9._/+-]+$'
@@ -245,6 +260,77 @@ run_tests() {
   fi
 }
 
+# The packages setup-private-parsers' extraparsers.go imports.
+extra_parsers=(pkg/parsers pkg/postgres/v2/types pkg/postgres/v3)
+
+run_parsers_row() {
+  local keploy_dir integ_dir desc replaced flags rc pkg deps lines line
+  keploy_dir="$(cd "$1" && pwd -P)" || die "no keploy tree at $1"
+  integ_dir="$(cd "$2" && pwd -P)" || die "no keploy/integrations tree at $2"
+  desc="${INTEGRATIONS_DESC:-keploy/integrations}"
+  # shellcheck source=/dev/null
+  source "$here/go-retry.sh"
+
+  cd "$keploy_dir"
+  # As in run_tests: a GOFLAGS such as -run=^$ would pass the row unrun.
+  unset GOFLAGS
+  flags="$(go env GOFLAGS)" || die "go env GOFLAGS failed"
+  [ -z "$flags" ] ||
+    die "go's env file sets GOFLAGS \"${flags}\", which would change what go test runs; this job runs go with none"
+  go mod edit -require="${integrations_module}@v0.0.0-00010101000000-000000000000" \
+    -replace="${integrations_module}=${integ_dir}" ||
+    die "cannot require ${integrations_module} from ${desc} in keploy's go.mod"
+  {
+    echo "package proxy"
+    echo
+    echo "import ("
+    for pkg in "${extra_parsers[@]}"; do
+      echo "	_ \"${integrations_module}/${pkg}\""
+    done
+    echo ")"
+  } >pkg/agent/proxy/extraparsers.go || die "cannot write pkg/agent/proxy/extraparsers.go"
+  GO_RETRY_DIRECT_FROM=99 go_retry mod tidy ||
+    die "keploy does not resolve its modules with ${desc}'s parsers added (go mod tidy failed, above)"
+  replaced="$(go list -m -f '{{with .Replace}}{{.Path}}{{end}}' "$integrations_module" 2>&1)" || true
+  [ "$replaced" = "$integ_dir" ] ||
+    die "keploy does not take ${integrations_module} from ${desc} (its replace reads \"${replaced}\")"
+  # The row runs over the parsers this build registers: with none of
+  # integrations' linked, it would check the OSS parsers again and pass.
+  deps="$(go list -deps ./pkg/agent/proxy/ 2>&1)" || die "go list -deps ./pkg/agent/proxy/ failed: ${deps}"
+  for pkg in "${extra_parsers[@]}"; do
+    grep -qxF "${integrations_module}/${pkg}" <<<"$deps" ||
+      die "pkg/agent/proxy does not link ${integrations_module}/${pkg} from ${desc}, so the row would not run over its parsers"
+  done
+
+  test_log="$(mktemp)"
+  trap 'rm -f "$test_log"' EXIT
+  echo "::group::go test -run ^${stamp_row}\$ ./pkg/agent/proxy/ with ${desc}'s parsers"
+  if env -u KEPLOY_PROVEN go test -count=1 -v -run "^${stamp_row}\$" ./pkg/agent/proxy/ 2>&1 | tee "$test_log"; then rc=0; else rc=$?; fi
+  echo "::endgroup::"
+  if [ "$rc" -eq 0 ] && grep -qE "^--- PASS: ${stamp_row} " "$test_log"; then
+    line="$(grep -oE 'registered parsers: \[[^]]*\]' "$test_log" | head -n 1)"
+    echo "PASS: ${stamp_row} with ${desc}'s parsers (${line:-registered parsers not printed})"
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      printf -- '- %s with %s: pass (%s)\n' "$stamp_row" "$desc" "${line:-registered parsers not printed}" >>"$GITHUB_STEP_SUMMARY"
+    fi
+    return 0
+  fi
+  # Each failing subtest, the deepest first as go prints them.
+  lines="$(grep -oE -- "--- FAIL: ${stamp_row}/[^ ]+" "$test_log" | sed 's/^--- FAIL: //' || true)"
+  if [ -z "$lines" ]; then
+    lines="go test exited ${rc} with no failing row of a parser; see its output in the group above"
+  fi
+  while IFS= read -r line; do
+    echo "FAIL: ${desc}'s parsers: ${line}"
+    echo "::error title=a recorder emits a mock with no request time::${desc}'s parsers: ${line}"
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      printf -- '- %s with %s: FAIL %s\n' "$stamp_row" "$desc" "$line" >>"$GITHUB_STEP_SUMMARY"
+    fi
+  done <<<"$lines"
+  echo "Each row named above records one exchange of its parser's protocol through that parser's recorder, in keploy's tree with ${desc}'s parsers, and checks that every mock it emits carries its request time (Spec.ReqTimestampMock)."
+  return 1
+}
+
 case "${1:-}" in
 resolve)
   [ "$#" -eq 2 ] || die "usage: $0 resolve INTEGRATIONS_DIR"
@@ -254,7 +340,11 @@ test)
   [ "$#" -eq 3 ] || die "usage: $0 test KEPLOY_DIR INTEGRATIONS_DIR"
   run_tests "$2" "$3"
   ;;
+parsers)
+  [ "$#" -eq 3 ] || die "usage: $0 parsers KEPLOY_DIR INTEGRATIONS_DIR"
+  run_parsers_row "$2" "$3"
+  ;;
 *)
-  die "usage: $0 resolve INTEGRATIONS_DIR | test KEPLOY_DIR INTEGRATIONS_DIR"
+  die "usage: $0 resolve INTEGRATIONS_DIR | test KEPLOY_DIR INTEGRATIONS_DIR | parsers KEPLOY_DIR INTEGRATIONS_DIR"
   ;;
 esac

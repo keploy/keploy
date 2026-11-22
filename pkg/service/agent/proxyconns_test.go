@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"syscall"
 	"testing"
@@ -569,7 +570,7 @@ func TestAnApplicationConnectionLostIsACaptureLoss(t *testing.T) {
 	lost := models.CaptureLoss{Kind: models.CaptureLossAppConnLost, Count: 1, What: "the latest on local port 41000"}
 	a := &Agent{logger: zap.NewNop(), Hooks: losingHooks{lost: models.CaptureLosses{lost}}, Proxy: gracefulProxy{}}
 	got, err := a.CaptureLosses(context.Background())
-	if err != nil || len(got) != 1 || got[0] != lost {
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], lost) {
 		t.Fatalf("CaptureLosses = %+v, %v; want the lost application connection", got, err)
 	}
 }

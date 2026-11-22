@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ func TestRecorderStatesHTTPLifetimes(t *testing.T) {
 	reqTs := time.Unix(1_700_002_000, 0)
 	build := func(opts models.OutgoingOptions) *models.Mock {
 		t.Helper()
-		m, err := h.buildHTTPMock(&FinalHTTP{
+		m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{
 			Req:              canonicalRequest,
 			Resp:             canonicalResponse,
 			ReqTimestampMock: reqTs,
@@ -129,7 +130,7 @@ func TestMissOnAStatedRecordingTellsHowToShareACall(t *testing.T) {
 			if tc.recording != nil {
 				db = statedDb{MockMemDb: db, states: *tc.recording}
 			}
-			report := h.buildHTTPMismatchReport(reqToHost("POST", "/oauth/token", "auth.example.com"), nil, db, tc.pool, nil, nil,
+			report := h.buildHTTPMismatchReport(context.Background(), reqToHost("POST", "/oauth/token", "auth.example.com"), nil, db, tc.pool, nil, nil,
 				&matchDiag{phase: models.MatchPhaseSchema, candidates: len(tc.pool)})
 			snippet := strings.Contains(report.NextSteps, `sessionCalls: [{host: "auth.example.com", method: "POST", pathPrefix: "/oauth/token"}]`)
 			for _, hint := range []string{off, on, declared, prefix} {

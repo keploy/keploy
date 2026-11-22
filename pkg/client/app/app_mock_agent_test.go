@@ -17,19 +17,19 @@ func TestDockerRunGetsTheAgentAddressInMockMode(t *testing.T) {
 	if err := a.modifyDockerRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(a.cmd, "-e KEPLOY_MOCK_AGENT=http://localhost:59226 ") {
-		t.Fatalf("mock mode must pass the agent address: %s", a.cmd)
+	if !strings.Contains(a.cmd.WholeUnredacted(), "-e KEPLOY_MOCK_AGENT=http://localhost:59226 ") {
+		t.Fatalf("mock mode must pass the agent address: %s", a.cmd.WholeUnredacted())
 	}
-	if !strings.Contains(a.cmd, "-e KEPLOY_MOCK_AGENT_TOKEN ") || strings.Contains(a.cmd, "KEPLOY_MOCK_AGENT_TOKEN=") {
-		t.Fatalf("mock mode must pass the agent token by name only: %s", a.cmd)
+	if !strings.Contains(a.cmd.WholeUnredacted(), "-e KEPLOY_MOCK_AGENT_TOKEN ") || strings.Contains(a.cmd.WholeUnredacted(), "KEPLOY_MOCK_AGENT_TOKEN=") {
+		t.Fatalf("mock mode must pass the agent token by name only: %s", a.cmd.WholeUnredacted())
 	}
 	b := NewApp(zap.NewNop(), "docker run --rm orders-e2e", nil, models.SetupOptions{AgentPort: 59226})
 	b.keployContainer = "keploy-v3-1"
 	if err := b.modifyDockerRun(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(b.cmd, "KEPLOY_MOCK_AGENT") {
-		t.Fatalf("classic record must not: %s", b.cmd)
+	if strings.Contains(b.cmd.WholeUnredacted(), "KEPLOY_MOCK_AGENT") {
+		t.Fatalf("classic record must not: %s", b.cmd.WholeUnredacted())
 	}
 }
 
@@ -47,8 +47,8 @@ func TestDockerRunMountsItsOwnRunsCAVolume(t *testing.T) {
 		if err := a.modifyDockerRun(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(a.cmd, want) || strings.Count(a.cmd, ":/tmp/keploy-tls") != 1 {
-			t.Errorf("agent %s: want the one CA mount %q in: %s", agent, want, a.cmd)
+		if !strings.Contains(a.cmd.WholeUnredacted(), want) || strings.Count(a.cmd.WholeUnredacted(), ":/tmp/keploy-tls") != 1 {
+			t.Errorf("agent %s: want the one CA mount %q in: %s", agent, want, a.cmd.WholeUnredacted())
 		}
 	}
 }
@@ -67,8 +67,8 @@ func TestDockerRunMountsItsOwnRunsEmbedderVolume(t *testing.T) {
 		if err := a.modifyDockerRun(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if strings.Count(a.cmd, "-v keploy-sockets-vol-0a1b2c3d4e5f6071:/tmp ") != 1 || strings.Count(a.cmd, ":/tmp ") != 1 {
-			t.Errorf("%q: want the one mount of the run's own volume at /tmp in: %s", cmd, a.cmd)
+		if strings.Count(a.cmd.WholeUnredacted(), "-v keploy-sockets-vol-0a1b2c3d4e5f6071:/tmp ") != 1 || strings.Count(a.cmd.WholeUnredacted(), ":/tmp ") != 1 {
+			t.Errorf("%q: want the one mount of the run's own volume at /tmp in: %s", cmd, a.cmd.WholeUnredacted())
 		}
 		if n := logs.FilterMessageSnippet("the command mounts the volume keploy-sockets-vol,").Len(); n != warns {
 			t.Errorf("%q: %d WARNs naming the shared name, want %d", cmd, n, warns)

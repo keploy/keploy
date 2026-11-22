@@ -30,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/textcut"
 	"go.uber.org/zap"
 )
 
@@ -147,9 +148,16 @@ type noiseEntry struct {
 	// flag rides on the entry so it is resolved by the SAME most-specific-first
 	// ordering as everything else — a more-specific user/regex entry still wins.
 	typeStrict bool
+	// idKeys marks an entry that names id keys (NoiseIDKey): keyLower is then
+	// held with its id keys collapsed and is matched against the traversal
+	// key's collapsed form (noise_idkey.go).
+	idKeys bool
 }
 type noiseIndex struct {
 	entries []noiseEntry
+	// idKeys is set when any entry names id keys, so a lookup collapses the
+	// traversal key only for an index that can use it.
+	idKeys bool
 }
 
 func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
@@ -158,11 +166,14 @@ func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 	}
 	out := noiseIndex{entries: make([]noiseEntry, 0, len(mp))}
 	for k, arr := range mp {
+		keyLower, idKeys := NoiseEntryKey(k)
 		out.entries = append(out.entries, noiseEntry{
-			keyLower: strings.ToLower(k),
+			keyLower: keyLower,
 			key:      k,
 			regexps:  compilePatterns(arr, logger),
+			idKeys:   idKeys,
 		})
+		out.idKeys = out.idKeys || idKeys
 	}
 
 	// match() returns the FIRST entry that matches, and entries arrive here in
@@ -193,25 +204,58 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 	return regs, isNoisy
 }
 
+// matchAdded is match for a key the recorded document lacks, one the replay
+// added: an entry naming id keys (NoiseIDKey) does not excuse it, every other
+// entry does as match reads it. Such an entry is written for the fields under
+// the ids of the recording; it excuses a value that moved there, or a key the
+// replay dropped there, as one entry per id would. A key the recording does
+// not have, a new id or a field an id did not carry, is a change no producer
+// saw, and stays one.
+func (ni noiseIndex) matchAdded(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
+	regs, isNoisy, _ = ni.lookup(keyLower, false)
+	return regs, isNoisy
+}
+
 // matchKind is match() plus the winning entry's typeStrict flag. The first
 // (most-specific-first) entry whose keyLower is a substring of keyLower wins, so a
 // learned type-strict entry never overrides a more-specific user/regex entry — it
 // only applies when it is itself the most specific match. collectJSON uses this;
 // every other caller uses match() and ignores the flag.
+//
+// An entry naming id keys (NoiseIDKey) is tested against keyLower with its id
+// keys collapsed, by the same rule; every other entry against keyLower as it
+// is, so an entry naming one id still names that id only.
 func (ni noiseIndex) matchKind(keyLower string) (regs []*regexp.Regexp, isNoisy, typeStrict bool) {
+	return ni.lookup(keyLower, true)
+}
+
+// lookup is matchKind, with the entries naming id keys consulted only when
+// idKeys is set (matchAdded).
+func (ni noiseIndex) lookup(keyLower string, idKeys bool) (regs []*regexp.Regexp, isNoisy, typeStrict bool) {
+	collapsed := keyLower
+	if idKeys && ni.idKeys {
+		collapsed = CollapseIDKeys(keyLower)
+	}
 	for _, e := range ni.entries {
+		key := keyLower
+		if e.idKeys {
+			if !idKeys {
+				continue
+			}
+			key = collapsed
+		}
 		if e.typeStrict && provenswitch.On() {
 			// Under the proven switch a learned entry names exactly the field
 			// that drifted and its subtree (the learn step writes it so,
 			// package matcher/learn). As a substring it would also excuse a
 			// field whose name it happens to contain: "items[].id" in
 			// "items[].identifier".
-			if keyLower == e.keyLower || strings.HasPrefix(keyLower, e.keyLower+".") || strings.HasPrefix(keyLower, e.keyLower+"[]") {
+			if key == e.keyLower || strings.HasPrefix(key, e.keyLower+".") || strings.HasPrefix(key, e.keyLower+"[]") {
 				return e.regexps, true, true
 			}
 			continue
 		}
-		if strings.Contains(keyLower, e.keyLower) {
+		if strings.Contains(key, e.keyLower) {
 			return e.regexps, true, e.typeStrict
 		}
 	}
@@ -229,7 +273,10 @@ func (ni *noiseIndex) markTypeStrict(typeStrict map[string]struct{}) {
 	}
 	ts := make(map[string]struct{}, len(typeStrict))
 	for k := range typeStrict {
-		ts[strings.ToLower(k)] = struct{}{}
+		// Spelled as the index spells its entries, so a learned key naming id
+		// keys finds its entry.
+		keyLower, _ := NoiseEntryKey(k)
+		ts[keyLower] = struct{}{}
 	}
 	for i := range ni.entries {
 		if _, ok := ts[ni.entries[i].keyLower]; ok {
@@ -723,12 +770,14 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			}
 			// A key the recording lacks has no recorded value for a pattern to
 			// match, so only an unconditional entry excuses it: the rule for a
-			// key the replay dropped (above), the other way round.
+			// key the replay dropped (above), the other way round. Not one
+			// naming id keys (matchAdded): it speaks for the ids the recording
+			// has, and this key is none of them.
 			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && len(regs) == 0 {
 				continue
 			}
 			childKeyLower := prefixLower + strings.ToLower(k)
-			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
+			if regs, noisy := ni.matchAdded(childKeyLower); noisy && len(regs) == 0 {
 				continue // ignore unexpected but noisy subtree
 			}
 			return out, nil
@@ -1225,7 +1274,7 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 		return nil, nil
 	}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
+		utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
 		return nil, err
 	}
 	return result, nil
@@ -1272,13 +1321,19 @@ func (d *DiffsPrinter) SetHasarrayIndexMismatch(has bool) {
 	d.hasarrayIndexMismatch = has
 }
 
+// NewDiffsPrinter is NewDiffsPrinterOut on os.Stdout: for a keploy command's
+// own output (keploy contract), never a run's console an embedder chose.
 func NewDiffsPrinter(testCase string) DiffsPrinter {
 	return NewDiffsPrinterOut(os.Stdout, testCase)
 }
 
+// NewDiffsPrinterOut is a printer of testCase's diff on out, which it names
+// whole (header values, bodies). A nil out prints nothing: the console of a
+// run whose embedder set none (a k8s proxy's replayer, whose stdout is its
+// pod's log), never os.Stdout.
 func NewDiffsPrinterOut(out io.Writer, testCase string) DiffsPrinter {
 	if out == nil {
-		out = os.Stdout
+		out = io.Discard
 	}
 	return DiffsPrinter{
 		out:       out,
@@ -1511,9 +1566,11 @@ func NewSchemaDiffPrinter(testCase string) SchemaDiffPrinter {
 	return NewSchemaDiffPrinterOut(os.Stdout, testCase)
 }
 
+// NewSchemaDiffPrinterOut is a printer of testCase's schema diff on out. A
+// nil out prints nothing, as NewDiffsPrinterOut's does.
 func NewSchemaDiffPrinterOut(out io.Writer, testCase string) SchemaDiffPrinter {
 	if out == nil {
-		out = os.Stdout
+		out = io.Discard
 	}
 	return SchemaDiffPrinter{
 		out:      out,
@@ -1697,8 +1754,8 @@ func truncateStrings(exp, act string) (string, string) {
 
 	// If both exceed max bytes, truncate both to max bytes
 	if expLen > maxBytes && actLen > maxBytes {
-		exp = exp[:maxBytes]
-		act = act[:maxBytes]
+		exp = textcut.Prefix(exp, maxBytes)
+		act = textcut.Prefix(act, maxBytes)
 		expTruncated = true
 		actTruncated = true
 	} else {
@@ -1714,25 +1771,25 @@ func truncateStrings(exp, act string) (string, string) {
 				// Expected is larger, truncate it
 				newExpLen := min(actLen+maxDiff, maxBytes)
 				if newExpLen < expLen {
-					exp = exp[:newExpLen]
+					exp = textcut.Prefix(exp, newExpLen)
 					expTruncated = true
 				}
 			} else {
 				// Actual is larger, truncate it
 				newActLen := min(expLen+maxDiff, maxBytes)
 				if newActLen < actLen {
-					act = act[:newActLen]
+					act = textcut.Prefix(act, newActLen)
 					actTruncated = true
 				}
 			}
 		} else {
 			// If either exceeds maxBytes individually, truncate it
 			if expLen > maxBytes {
-				exp = exp[:maxBytes]
+				exp = textcut.Prefix(exp, maxBytes)
 				expTruncated = true
 			}
 			if actLen > maxBytes {
-				act = act[:maxBytes]
+				act = textcut.Prefix(act, maxBytes)
 				actTruncated = true
 			}
 		}

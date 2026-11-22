@@ -108,6 +108,11 @@ func heldPairBound(t *testing.T, p *Proxy, appSeq uint64, network, addr, listenD
 	p.paired.add(proxySide, appSeq, 0)
 	tracked := p.inflight.track(proxySide)
 	tracked.beforeClose = func() { p.pairClosing(context.Background(), proxySide, tracked) }
+	// Its use counted as the proxy's accept counts it, and used once by
+	// the test open now: a close that cannot tell what was on its way is
+	// that test's (pairUntold).
+	tracked.pairUse = p.paired.useOf(proxySide)
+	tracked.pairUse.Add(1)
 	t.Cleanup(func() { p.inflight.forget(tracked) })
 	return app, proxySide, tracked
 }
@@ -915,4 +920,14 @@ func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 			}
 		})
 	}
+	// One its first lookup does not find may not be seen from here at all:
+	// no count, and errNoSocket, which the close tells from a later miss.
+	t.Run("not found by the first lookup", func(t *testing.T) {
+		was := lookupWritten
+		lookupWritten = func(*diagSock, *pairedConn, bool) (diagTCP, error) { return diagTCP{}, errNoSocket }
+		t.Cleanup(func() { lookupWritten = was })
+		if w, ok, err := wroteNow(nil, nil); ok || w != (appWrote{}) || !errors.Is(err, errNoSocket) {
+			t.Fatalf("wroteNow = %+v, %v, %v; want no count, and errNoSocket", w, ok, err)
+		}
+	})
 }

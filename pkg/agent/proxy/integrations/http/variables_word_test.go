@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -657,7 +658,7 @@ func TestVariables_ATypeChangeAtAWordIsADiffOfItsField(t *testing.T) {
 		if p.place != "body.x"+word || p.name != "a" {
 			t.Fatalf("evidence %+v; want variable a's type change at body.x%s", p, word)
 		}
-		rep := h.buildHTTPMismatchReport(makeReq("PUT", "/secrets/app"), []byte(body), db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), makeReq("PUT", "/secrets/app"), []byte(body), db, nil, nil, nil, diag)
 		want := models.MockFieldDiff{Path: "body.x", Kind: models.DiffKindTypeChanged, Expected: `"1730000000"`, Actual: "5"}
 		if rep.MatchPhase != models.MatchPhaseVariable || len(rep.FieldDiffs) != 1 || rep.FieldDiffs[0] != want {
 			t.Fatalf("at body.x%s: phase %q, diffs %+v; want %+v", word, rep.MatchPhase, rep.FieldDiffs, want)

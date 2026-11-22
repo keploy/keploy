@@ -273,12 +273,12 @@ func TestEachTestOpenAtACallFromNoWorkerIsNotJudged(t *testing.T) {
 	got := chargeUnattributed(windows, mocks)
 	require.Equal(t, []unattributedCall{{mock: "late", pid: 9, tests: []string{"b"}}, {mock: "early", pid: 4, tests: []string{"a", "b"}}}, got)
 	require.Equal(t, models.CaptureLosses{
-		{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock early, from process 4"},
+		{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock early, from process 4", HostsListed: true},
 		{Kind: models.CaptureLossUnixSocket, Count: 1},
 	}, windows[0].Evidence.CannotCapture, "a: the call made in it, beside what its end charged")
 	require.True(t, strings.HasPrefix(windows[0].Evidence.Reason, "keploy: a miss. Also not judged: the application made 1 call(s) from a process in no test worker's keploy instance"), windows[0].Evidence.Reason)
 	require.Len(t, agentEv.CannotCapture, 1, "the agent's evidence is not written to")
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 2, What: "the latest: mock late, from process 9"}}, windows[1].Evidence.CannotCapture,
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 2, What: "the latest: mock late, from process 9", HostsListed: true}}, windows[1].Evidence.CannotCapture,
 		"b: both calls, the later named, whatever order they were captured in")
 	require.True(t, strings.HasPrefix(windows[1].Evidence.Reason, "keploy: not judged: the application made 2 call(s)"), windows[1].Evidence.Reason)
 	require.Nil(t, windows[2].Evidence, "c: another worker's call is no loss of its")
@@ -309,7 +309,7 @@ func TestAnEndedWorkersCallIsChargedToEveryOpenTestAndNamed(t *testing.T) {
 	require.Equal(t, map[string][]models.MockEntry{"next": {{Name: "own"}}}, correlateScopes(windows, mocks), "the ended worker's call is in no test's mapping")
 	require.Equal(t, []unattributedCall{{mock: "survivor", pid: 7, tests: []string{"next", "other"}}}, chargeUnattributed(windows, mocks))
 	for _, i := range []int{1, 2} {
-		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock survivor, from process 7 of ended test worker 1"}}, windows[i].Evidence.CannotCapture, windows[i].Name)
+		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock survivor, from process 7 of ended test worker 1", HostsListed: true}}, windows[i].Evidence.CannotCapture, windows[i].Name)
 	}
 	require.Nil(t, windows[0].Evidence, "the ended worker's own test was closed before the call")
 
@@ -431,7 +431,7 @@ func TestALiveWorkersCallHandedOverAfterItsEndIsItsOwn(t *testing.T) {
 	mocks := []capturedMock{capturedOf(between), capturedOf(survivor)}
 	require.Equal(t, []unattributedCall{{mock: "a-survivor", pid: 4242, tests: []string{"b1"}}}, chargeUnattributed(windows, mocks),
 		"only the call read after the worker's end is from no live worker")
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock a-survivor, from process 4242 of ended test worker 1"}}, windows[1].Evidence.CannotCapture)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock a-survivor, from process 4242 of ended test worker 1", HostsListed: true}}, windows[1].Evidence.CannotCapture)
 	_, worker := setScopeMocks(windows, mocks, claims)
 	require.Equal(t, []models.MockEntry{{Name: "a-between", Key: "pA"}}, worker, "the live worker's own call is in its worker: scope; the survivor's, made in an open test, is that test's to answer for")
 }

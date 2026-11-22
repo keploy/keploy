@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -54,6 +55,11 @@ func (r *Replayer) unclaimedCalls(ctx context.Context) (calls, answered []models
 	// (the read was cut short) hands it over here: still the set's, as are
 	// the held calls the read filed (setsCall).
 	calls, answered = splitAnswers(r.setCalls.take(read))
+	// Kept for the set's report, which names those that fail nothing
+	// (TestReport.OutsideTestMisses): under the switch, those that count
+	// against no test (a DNS lookup, a background call); with it off
+	// (readAfterLastTest), every one.
+	r.setCalls.keepAfter(calls)
 	return dataPlaneCalls(calls), answered, err
 }
 
@@ -101,15 +107,31 @@ func describeUnclaimed(c models.UnmatchedCall) string {
 	return strings.TrimSpace(s)
 }
 
+// describeUnclaimedForLog is describeUnclaimed as a log line names the call:
+// its protocol, its shape beside the path tag it carries
+// (models.UnmatchedCallLogName), never its summary, which holds what it sent,
+// and where it went.
+func describeUnclaimedForLog(c models.UnmatchedCall) string {
+	s := models.UnmatchedCallLogName(c)
+	if models.MissLogShape(&models.MockMismatchReport{Protocol: c.Protocol, ActualSummary: c.ActualSummary, Command: c.Command, Operation: c.Operation}) != "" {
+		s = strings.TrimSpace(c.Protocol + " " + s)
+	}
+	if c.Destination != "" {
+		s += " to " + models.TaggedHostLogName(c.Destination, c.HostTag)
+	}
+	return s
+}
+
 // logUnclaimed says, at ERROR, each call that fails the set.
 func (r *Replayer) logUnclaimed(testSetID string, calls []models.UnmatchedCall) {
 	for _, c := range calls {
 		r.logger.Error("test-set failed: the application made a call after its last test that no mock answered (KEPLOY_PROVEN=1)",
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
-			zap.String("call", c.Named()),
-			zap.String("destination", c.Destination),
-			zap.String("diff", c.Diff),
+			zap.String("call", models.UnmatchedCallLogShape(c)),
+			utils.PathTagField(c.PathTag),
+			zap.String("destination", models.HostShape(c.Destination)), utils.HostTagField(c.HostTag),
+			zap.Strings("differs", models.FieldShapes(c.Differs)),
 			zap.String("next_step", "a call the application starts after it has answered a test (a fire-and-forget publish or write) is no test's; it changed or is new since the recording: fix the application, or re-record if the change is intended"))
 	}
 }

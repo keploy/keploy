@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -23,13 +24,14 @@ import (
 
 // buildHTTPSchema assembles the HTTPSchema that will live in a doc's Spec,
 // plus, with the proven switch off, performs the time-shaped noisy-field
-// detection that mutates tc.Noise (addTimeShapedNoise). This is the
-// "meaningful work" shared between the YAML and JSON encode paths; it does
-// not touch any yaml.Node or produce any serialized bytes.
+// detection that mutates tc.Noise (addTimeShapedNoise; a case with no noise
+// map gets the noise in a map of its own). This is the "meaningful work"
+// shared between the YAML and JSON encode paths; it does not touch any
+// yaml.Node or produce any serialized bytes.
 func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 	noise := tc.Noise
 	if !provenswitch.On() {
-		addTimeShapedNoise(tc, noise, logger)
+		noise = addTimeShapedNoise(tc, noise, logger)
 	}
 
 	httpSchema := models.HTTPSchema{
@@ -69,22 +71,62 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 // The Date header a server mints on every answer is not asserted either way:
 // the replay forgives it by its name (models.IsVolatileResponseHeader, unless
 // --disableAutoHeaderNoise), never by its value.
-func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *zap.Logger) {
+//
+// It returns the map it added to: noise itself, or a new one when noise is
+// nil. A test case can come with no noise map at all (one created from the
+// dashboard, whose form sends none, read back from the store), and an entry
+// assigned in a nil map panics.
+func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *zap.Logger) map[string][]string {
 	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
 	if err != nil {
 		utils.LogError(logger, err, "error in flattening http response")
 	}
-	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+	isTime := func(vals []string) bool {
 		for _, v := range vals {
 			if pkg.IsTime(v) {
 				return true
 			}
 		}
 		return pkg.IsTime(strings.Join(vals, ", "))
-	})
-	for _, v := range noiseFieldsFound {
-		noise[v] = []string{}
 	}
+	// A case with no noise map gets one here, before the header loop's first
+	// write; every exit below returns it.
+	if noise == nil {
+		noise = map[string][]string{}
+	}
+	// A body field under a map keyed by ids is written once, naming every id
+	// key (matcher.NoiseIDKey), when it reads as a time under every one of
+	// them and that one entry silences, of this response's keys, exactly what
+	// the per-id ones would (matcher.CollapseIDKeyedPaths), and per id
+	// otherwise: one entry per id made a response keyed by a few dozen ids
+	// carry hundreds of entries for a handful of fields. A key a replay adds,
+	// a new id or the field under an id that lacked it, is never excused by
+	// it.
+	jsonBody := false
+	for k, vals := range m {
+		if strings.HasPrefix(k, "body.") {
+			jsonBody = true
+			continue
+		}
+		if isTime(vals) {
+			noise[k] = []string{}
+		}
+	}
+	if !jsonBody {
+		return noise
+	}
+	// The rule walks the parsed body: it judges the one entry against every
+	// node the entry would reach, objects, empty ones and nulls included,
+	// which the flattened map does not all list.
+	var doc interface{}
+	if err := json.Unmarshal([]byte(tc.HTTPResp.Body), &doc); err != nil {
+		utils.LogError(logger, err, "error in parsing http response body")
+		return noise
+	}
+	for _, rel := range matcher.CollapseIDKeyedPaths(doc, func(rel string) bool { return isTime(m["body."+rel]) }) {
+		noise["body."+rel] = []string{}
+	}
+	return noise
 }
 
 // specMetadata builds the spec-level Metadata map carrying the fields that
@@ -151,9 +193,15 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		// no longer here.
 		if field, ok := firstNonUTF8Body(tc); !ok {
 			err := fmt.Errorf("%w: testdb: %s is not valid UTF-8 and the json format cannot store it losslessly; record with storageFormat yaml to keep binary bodies", models.ErrTestCaseEncode, field)
-			utils.LogError(logger, err, "refusing to write a binary body as JSON",
-				zap.String("method", string(tc.HTTPReq.Method)),
-				zap.String("url", tc.HTTPReq.URL),
+			// The call by its shape, and the test case by its name where it
+			// has one (one being updated): a new one refused here is never
+			// given its name, and the next one takes it.
+			named := zap.Skip()
+			if tc.Name != "" {
+				named = zap.String("testcase", tc.Name)
+			}
+			utils.LogError(logger, err, "refusing to write a binary body as JSON", named,
+				zap.Any("metadata", utils.URLLogMeta(string(tc.HTTPReq.Method), tc.HTTPReq.URL)),
 				zap.String("next_step", "set storageFormat to yaml; the yaml encoder stores binary bodies as !!binary without loss"))
 			return nil, err
 		}
@@ -221,8 +269,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		grpcSpec := buildGrpcSpec(tc)
 
 		logger.Debug("gRPC schema created",
-			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
-			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			// How many headers, never their values: gRPC metadata carries
+			// the call's credentials (authorization).
+			zap.Int("request_headers", len(grpcSpec.GrpcReq.Headers.PseudoHeaders)+len(grpcSpec.GrpcReq.Headers.OrdinaryHeaders)),
+			zap.Int("response_headers", len(grpcSpec.GrpcResp.Headers.PseudoHeaders)+len(grpcSpec.GrpcResp.Headers.OrdinaryHeaders)),
 			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
 			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
 
@@ -336,9 +386,11 @@ func Flatten(j interface{}) map[string][]string {
 				}
 			}
 		}
-	default:
-		fmt.Println(utils.Emoji, "found invalid value in json", j, x.Kind())
 	}
+	// A value of another kind (none that encoding/json decodes into an
+	// interface{}: AddHTTPBodyToMap's) adds no key, as matcher.Flatten's
+	// does, and is never printed: it is the application's, and an embedded
+	// Replayer's stdout may be a log.
 	return o
 }
 

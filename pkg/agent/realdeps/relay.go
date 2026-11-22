@@ -12,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 )
 
 // maxHead bounds an HTTP/1 request head, and maxLine a chunk-size line, the
@@ -56,8 +59,13 @@ type Relay struct {
 	// rows says other names may share it, not only the row of the test open
 	// at its handshake. It may be nil.
 	H2 func()
-	// Refused is told why a name check ended the connection. It may be nil.
-	Refused func(why string)
+	// Refused is told why a name check ended the connection, and the hosts
+	// why names whole, each where it stands, tagged in the session of
+	// Run's ctx (models.LossText): the name the client carried that
+	// mock.real does not list (with its port, when it named one), which a
+	// log line names by its shape and tag there alone. None for a why that
+	// names none. It may be nil.
+	Refused func(why string, hosts models.LossHosts)
 	// AwaitsAnswer is told once the client has ended its side cleanly and
 	// every byte of it has gone to the destination: what is left to relay
 	// is the destination's answer, the real server's to give, which a
@@ -102,7 +110,7 @@ func (r *Relay) Run(ctx context.Context) error {
 		back <- err
 	}()
 
-	err := r.forward()
+	err := r.forward(ctx)
 	release := func() {}
 	switch {
 	case err == nil:
@@ -138,9 +146,9 @@ func closeWrite(c net.Conn) error {
 }
 
 // forward copies the client's bytes to the destination, checking each name
-// they carry when the connection was made REAL by its name. nil is a clean
-// end of the client's bytes.
-func (r *Relay) forward() error {
+// they carry when the connection was made REAL by its name; ctx's session
+// tags a name a check refuses. nil is a clean end of the client's bytes.
+func (r *Relay) forward(ctx context.Context) error {
 	w := &sentWriter{w: r.Dest, sent: r.sent}
 	if r.Check == nil {
 		return copyClean(w, r.In)
@@ -179,9 +187,9 @@ func (r *Relay) forward() error {
 		return err
 	}
 	if !n.TLS {
-		return r.forwardHTTP(w)
+		return r.forwardHTTP(ctx, w)
 	}
-	if !r.allowed(n.Host, 0, "its ClientHello names") {
+	if !r.allowed(ctx, n.Host, 0, "its ClientHello names") {
 		return errRefused
 	}
 	r.h2 = n.H2
@@ -189,8 +197,9 @@ func (r *Relay) forward() error {
 }
 
 // allowed checks one name the client carries; what says where it was read.
-// A name that is not a DNS name (an IP literal) names nothing to check.
-func (r *Relay) allowed(host string, port uint16, what string) bool {
+// A name that is not a DNS name (an IP literal) names nothing to check. A
+// name refused is tagged in ctx's session.
+func (r *Relay) allowed(ctx context.Context, host string, port uint16, what string) bool {
 	h := CanonicalName(host)
 	if h == "" || r.Check.Allows(h, port) {
 		return true
@@ -200,8 +209,9 @@ func (r *Relay) allowed(host string, port uint16, what string) bool {
 		if port != 0 {
 			target = net.JoinHostPort(h, strconv.Itoa(int(port)))
 		}
-		r.Refused(fmt.Sprintf("a mock.real connection to %s carried another name: %s %s, which mock.real does not list; keploy ended it (one connection carries one real name: list that name too, or let the client open a connection per name)",
-			r.Check.dest(), what, target))
+		why := models.NewLossText(ctx).Say("a mock.real connection to " + r.Check.dest() + " carried another name: " + what + " ").Host(target).
+			Say(", which mock.real does not list; keploy ended it (one connection carries one real name: list that name too, or let the client open a connection per name)")
+		r.Refused(why.String(), why.Hosts())
 	}
 	return false
 }
@@ -210,7 +220,7 @@ func (r *Relay) allowed(host string, port uint16, what string) bool {
 // (or CONNECT target) before the head reaches the destination. After a
 // CONNECT or an upgrade the connection is no longer HTTP/1, and the rest is
 // relayed as it is.
-func (r *Relay) forwardHTTP(w io.Writer) error {
+func (r *Relay) forwardHTTP(ctx context.Context, w io.Writer) error {
 	for {
 		head, err := readHead(r.In)
 		if err != nil {
@@ -226,7 +236,7 @@ func (r *Relay) forwardHTTP(w io.Writer) error {
 		// (RFC 9112 §2.2); forwarded with them, byte for byte.
 		req, perr := http.ReadRequest(bufio.NewReader(bytes.NewReader(bytes.TrimLeft(head, "\r\n"))))
 		if perr != nil {
-			return r.refuse("its bytes stopped being HTTP/1 request heads keploy can check: " + perr.Error())
+			return r.refuse("its bytes stopped being HTTP/1 request heads keploy can check: " + utils.WithholdInput(perr).Error())
 		}
 		raw := false
 		if req.Method == http.MethodConnect {
@@ -234,12 +244,12 @@ func (r *Relay) forwardHTTP(w io.Writer) error {
 			if !ok {
 				return r.refuse("its CONNECT target is not host:port")
 			}
-			if !r.allowed(host, port, "a CONNECT to") {
+			if !r.allowed(ctx, host, port, "a CONNECT to") {
 				return errRefused
 			}
 			raw = true
 		} else {
-			if !r.allowed(hostOnly(req.Host), 0, "a request with Host") {
+			if !r.allowed(ctx, hostOnly(req.Host), 0, "a request with Host") {
 				return errRefused
 			}
 			raw = upgrades(req)
@@ -257,10 +267,10 @@ func (r *Relay) forwardHTTP(w io.Writer) error {
 }
 
 // refuse ends the connection for bytes whose names keploy can no longer
-// check.
+// check; why names no host.
 func (r *Relay) refuse(why string) error {
 	if r.Refused != nil {
-		r.Refused("keploy ended a mock.real connection to " + r.Check.dest() + ": " + why)
+		r.Refused("keploy ended a mock.real connection to "+r.Check.dest()+": "+why, nil)
 	}
 	return errRefused
 }
@@ -369,7 +379,10 @@ func forwardChunked(w io.Writer, br *bufio.Reader) error {
 		}
 		size, err := strconv.ParseInt(sizeText, 16, 64)
 		if err != nil || size < 0 {
-			return fmt.Errorf("%w: a chunk size %q", errNotHTTP, sizeText)
+			// Its size alone: a connection keploy joined, or a client
+			// that frames its body otherwise, puts the body's own bytes
+			// in this line.
+			return fmt.Errorf("%w: a chunk-size line of %d bytes that is no chunk size", errNotHTTP, len(sizeText))
 		}
 		if size == 0 {
 			for {

@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -725,6 +726,86 @@ func TestAReplayedListedTestIsSkippedWithItsReason(t *testing.T) {
 	require.Nil(t, serr)
 	require.Empty(t, b.Action)
 	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "orders::TestToken").Outcome)
+}
+
+// A harness that ends a test it was told to skip with the outcome skipped
+// confirms the skip: the end is answered ok, as often as it is sent, at
+// Debug, and nothing else changes. A harness that crashes on an error answer
+// (urllib raises on 409) would otherwise exit before its next test. Ending it
+// with any other outcome is still refused: the harness ran a test keploy
+// told it to skip.
+func TestASkippedEndOfAGatedTestIsAccepted(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	core, logs := observer.New(zapcore.DebugLevel)
+	a.logger = zap.New(core)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{
+		"orders::TestToken": "flaky: replay_only",
+		"orders::TestRan":   "flaky: replay_only",
+	}, nil))
+	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+
+	for i := 0; i < 2; i++ {
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skipped"})
+		require.Nil(t, serr, "end %d of a skipped test, said skipped", i+1)
+		require.Equal(t, models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, e)
+	}
+	// A runner's own spelling of skipped is skipped.
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skip"})
+	require.Nil(t, serr)
+	require.Zero(t, logs.FilterLevelExact(zapcore.WarnLevel).Len(), "the harness did as it was told")
+	require.Equal(t, 3, logs.FilterMessageSnippet("confirmed a skip").FilterLevelExact(zapcore.DebugLevel).Len())
+	require.Empty(t, refusalCodes(a))
+
+	// Every test that comes after runs as before.
+	b, serr = a.ProvenBegin(ctx, begin("TestOther"))
+	require.Nil(t, serr)
+	require.Empty(t, b.Action)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestOther", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	// Ran anyway: refused and warned, as before.
+	b, serr = a.ProvenBegin(ctx, begin("TestRan"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	for _, outcome := range []string{"passed", "failed", ""} {
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestRan", Outcome: outcome})
+		require.NotNil(t, serr, "outcome %q", outcome)
+		require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	}
+	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").FilterLevelExact(zapcore.WarnLevel).Len())
+
+	// Said skipped, for a test keploy never told to skip: refused, as before.
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestNever", Outcome: "skipped"})
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "orders::TestToken").Outcome, "still recorded not run")
+}
+
+// A skipped end of a gated test is the skip's confirmation while another
+// test of the same worker is open: that test stays open, and its end judges
+// it as usual.
+func TestASkippedEndOfAGatedTestLeavesTheOpenTestOpen(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil))
+	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	_, serr = a.ProvenBegin(ctx, begin("TestOther"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skipped"})
+	require.Nil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestOther", Outcome: "passed"})
+	require.Nil(t, serr, "TestOther was still open")
+	require.Equal(t, models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, e)
+	require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "orders::TestOther").Outcome)
 }
 
 // A test whose call holds a value an earlier test's call sends runs only
@@ -2240,7 +2321,8 @@ func TestTheAgentRefusesItsOwnClaim(t *testing.T) {
 }
 
 // A read that returns misses together with an error keeps them: they fail
-// the test, and stay in the run's misses.
+// the test, whose end answers it failed and names the read's error, and
+// they stay in the run's misses.
 func TestMissesReadWithAnErrorAreKept(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	p := &partialProxy{wireProxy: &wireProxy{served: map[string]uint64{}}}
@@ -2251,10 +2333,14 @@ func TestMissesReadWithAnErrorAreKept(t *testing.T) {
 	require.Nil(t, serr)
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
 	p.err = errors.New("some misses were not read")
-	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
-	require.NotNil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr, "a miss keploy saw is judged: the end answers, not keploy's error")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "keploy could not read all of what o::TestA did: ")
+	require.Contains(t, e.Reason, "some misses were not read")
 	w := windowOf(t, a, "o::TestA")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.False(t, w.Evidence.Unread)
 	require.Len(t, w.Evidence.Misses, 1)
 	_, err := a.GetMockErrors(ctx)
 	require.Error(t, err, "the read still fails")
@@ -2854,6 +2940,77 @@ func TestStoredMocksHandTheProxyWhereTheAppsClocksRunBegan(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
 	require.Nil(t, p.run, "the switch off: no run")
+}
+
+// shownClockHook is runClockHook that also tells what the app's clock
+// showed between two real instants (AppClockShownReader).
+type shownClockHook struct {
+	runClockHook
+}
+
+func (h *shownClockHook) AppClockShown(from, to time.Time) ([]learn.Span, bool) {
+	return []learn.Span{{From: from.Add(h.offset), To: to.Add(h.offset)}}, true
+}
+
+// shownOnlyHooks tell what the app's clock showed but report no app clock
+// (no AppClockReader).
+type shownOnlyHooks struct{ otherHooks }
+
+func (h *shownOnlyHooks) AppClockShown(from, to time.Time) ([]learn.Span, bool) {
+	return []learn.Span{{From: from, To: to}}, true
+}
+
+// shownProxy is a wireProxy that takes what the app's clock showed
+// (coreAgent.AppClockShownSetter).
+type shownProxy struct {
+	*wireProxy
+	set   bool
+	shown func(from, to time.Time) ([]learn.Span, bool)
+}
+
+func (p *shownProxy) SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool)) {
+	p.set, p.shown = true, f
+}
+
+// Once the mocks are stored, the proxy is handed what the app's clock
+// showed, from hooks that report the app's clock and tell it; hooks that do
+// not tell it, or report no app clock, hand it none, replacing any handed
+// before, and so do this build's own hooks, whose real clock never moved.
+func TestStoredMocksHandTheProxyWhatTheAppsClockShowed(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+
+	ActiveHooks = &shownClockHook{runClockHook{clockHook: clockHook{offset: time.Second}, began: at}}
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &shownProxy{wireProxy: wp}
+	a.Proxy = p
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, p.shown, "the hooks' shown clock")
+	got, ok := p.shown(at, at.Add(time.Minute))
+	require.True(t, ok)
+	require.Equal(t, []learn.Span{{From: at.Add(time.Second), To: at.Add(time.Minute + time.Second)}}, got)
+
+	ActiveHooks = &runClockHook{clockHook: clockHook{offset: time.Second}, began: at}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.True(t, p.set)
+	require.Nil(t, p.shown, "hooks that tell no shown clock: none, replacing the earlier")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &otherHooks{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "hooks that report no app clock: none")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &shownOnlyHooks{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "hooks that tell what the clock showed but report no app clock: none")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &AgentHook{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "the real clock never moved: none")
 }
 
 // recBeginProxy is a wireProxy that takes a test's recorded begin

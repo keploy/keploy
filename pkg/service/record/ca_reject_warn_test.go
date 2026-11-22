@@ -22,9 +22,20 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
+// caKeys is the agent's session the failed handshakes' hosts are tagged in.
+var caKeys = models.NewLogKeySession()
+
+// tlsFailed is the agent's count of n failed handshakes, the last to the
+// destination to names ("to api.example:443"), its host listed with its tag
+// (models.CaptureLoss.Hosts), as the agent counts it.
 func tlsFailed(n uint64, to string) models.CaptureLosses {
-	return models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: n, What: to}}
+	w := caKeys.LossText().Say("to ").Host(strings.TrimPrefix(to, "to "))
+	return models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: n, What: w.String(), Hosts: w.Hosts(), HostsListed: true}}
 }
+
+// lastLogged is how the WARN names the last failed handshake's destination
+// to: its host by its shape and the agent's tag.
+func lastLogged(to string) string { return "to " + caKeys.HostLogName(strings.TrimPrefix(to, "to ")) }
 
 // recordOff is a switch-off recording of test cases names against instr: the
 // watch as record.go drives it (begun before the app, a check as each test
@@ -77,8 +88,8 @@ func TestWithTheSwitchOffAFailedHandshakeIsSaidAndNothingFails(t *testing.T) {
 	if got, _ := f["testCases"].([]interface{}); len(got) != 2 || got[0] != "test-1" || got[1] != "test-3" {
 		t.Fatalf("testCases %v, want [test-1 test-3]", f["testCases"])
 	}
-	if f["afterTheLastTestCase"] != uint64(1) || f["last"] != "to pay.example:443" {
-		t.Fatalf("after the last %v, last %v; want 1 and to pay.example:443", f["afterTheLastTestCase"], f["last"])
+	if f["afterTheLastTestCase"] != uint64(1) || f["last"] != lastLogged("to pay.example:443") {
+		t.Fatalf("after the last %v, last %v; want 1 and %s", f["afterTheLastTestCase"], f["last"], lastLogged("to pay.example:443"))
 	}
 	if step, _ := f["next_step"].(string); !strings.Contains(step, caDocs) {
 		t.Fatalf("next_step %q does not point at %s", step, caDocs)
@@ -257,8 +268,8 @@ func TestAFailedReadIsNoCountOfZero(t *testing.T) {
 func TestTheWarnsFieldsAreWhatItSaw(t *testing.T) {
 	during := &countingInstr{answers: []models.CaptureLosses{nil, tlsFailed(1, "to api.example:443")}}
 	_, logs := recordOff(t, during, "test-1")
-	if all := logs.All(); len(all) != 1 || all[0].ContextMap()["last"] != "to api.example:443" {
-		t.Fatalf("logged %v; want the test case's destination", logs.All())
+	if all := logs.All(); len(all) != 1 || all[0].ContextMap()["last"] != lastLogged("to api.example:443") {
+		t.Fatalf("logged %v; want the test case's destination by its shape and tag", logs.All())
 	}
 	if f := logs.All()[0].ContextMap(); f["afterTheLastTestCase"] != nil {
 		t.Fatalf("afterTheLastTestCase %v with none after the last", f["afterTheLastTestCase"])
@@ -953,5 +964,56 @@ func TestAReadTakenBeforeTheFinalOneCoversNothing(t *testing.T) {
 	all := logs.All()
 	if len(all) != 1 || fmt.Sprint(all[0].ContextMap()["testCasesNotChecked"]) != "[test-2]" {
 		t.Fatalf("logged %v; want test-2 said not checked", all)
+	}
+}
+
+// The WARN names the last failed handshake's host by its shape and the tag
+// the agent's own lines name it by, whatever form the host takes (a pod's DNS
+// name, a single label), never whole; an older agent's, which lists no
+// hosts, by the size of its destination's text alone.
+func TestTheWarnNamesTheLastHostByItsShapeAndTag(t *testing.T) {
+	for _, to := range []string{"to 10-0-0-1.default.pod.cluster.local:443", "to orders-svc:8443", "to 1234567.suitetalk.api.netsuite.com:443"} {
+		_, logs := recordOff(t, &countingInstr{answers: []models.CaptureLosses{nil, tlsFailed(1, to)}}, "test-1")
+		all := logs.All()
+		if len(all) != 1 || all[0].ContextMap()["last"] != lastLogged(to) {
+			t.Fatalf("logged %v; want last %q", all, lastLogged(to))
+		}
+	}
+	// The console names it whole beside the tag the WARN names it by.
+	t.Setenv(provenswitch.Env, "")
+	core, _ := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, tlsFailed(1, "to orders-svc:8443")}})
+	var console strings.Builder
+	w.setConsole(&console)
+	w.afterTestCase(context.Background(), "test-1")
+	settle(w)
+	w.afterTestCases(context.Background())
+	w.finish("test-set-0", false)
+	if want := "to orders-svc:8443 " + models.HostTagLabel(caKeys.HostTag("orders-svc")); !strings.Contains(console.String(), want) {
+		t.Fatalf("the console %q does not name %q", console.String(), want)
+	}
+	older := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to canary7q.tenant.example:443"}}
+	_, logs := recordOff(t, &countingInstr{answers: []models.CaptureLosses{nil, older}}, "test-1")
+	all := logs.All()
+	if len(all) != 1 || all[0].ContextMap()["last"] != models.UnlistedLogText("to canary7q.tenant.example:443") {
+		t.Fatalf("an older agent's destination: logged %v; want it by its size", all)
+	}
+}
+
+// The switch-off WARN of failed TLS handshakes names no host whole in any
+// field, whatever form the host takes: its last destination was the
+// handshake's What, logged whole.
+func TestTheCAWarnNamesNoHostWhole(t *testing.T) {
+	for _, to := range []string{"to 10-0-0-1.default.pod.cluster.local:443", "to orders-svc:8443", "to 1234567.suitetalk.api.netsuite.com:443", "to api.tenant.example:443"} {
+		_, logs := recordOff(t, &countingInstr{answers: []models.CaptureLosses{nil, tlsFailed(1, to)}}, "test-1")
+		if logs.Len() != 1 {
+			t.Fatalf("%s: logged %v, want the WARN", to, logs.All())
+		}
+		name := strings.Split(strings.TrimPrefix(to, "to "), ":")[0]
+		for _, e := range logs.All() {
+			if got := fmt.Sprint(e.ContextMap()); strings.Contains(got, name) {
+				t.Errorf("%s: the WARN names %q whole: %s", to, name, got)
+			}
+		}
 	}
 }

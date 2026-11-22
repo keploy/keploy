@@ -705,7 +705,7 @@ func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testin
 		if r.Status != models.TestStatusFailed {
 			t.Fatalf("%s: %s, want FAILED: the loss taints the test running and every later one", id, r.Status)
 		}
-		if len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0] != tls[0] {
+		if len(r.FailureInfo.CaptureIncomplete) != 1 || !reflect.DeepEqual(r.FailureInfo.CaptureIncomplete[0], tls[0]) {
 			t.Fatalf("%s: capture evidence %+v, want %+v", id, r.FailureInfo.CaptureIncomplete, tls)
 		}
 		found := false
@@ -750,7 +750,7 @@ func TestUnderTheSwitchATLSRejectionFailsOnlyTheTestItHappenedIn(t *testing.T) {
 		}
 	}
 	r := byID["test-2"]
-	if r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0] != tls[0] {
+	if r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 || !reflect.DeepEqual(r.FailureInfo.CaptureIncomplete[0], tls[0]) {
 		t.Fatalf("test-2: %s %+v, want FAILED with %+v", r.Status, r.FailureInfo.CaptureIncomplete, tls)
 	}
 	if cv := h.report.report.CaptureVerification; cv != nil {
@@ -1381,6 +1381,8 @@ func errorsSaying(logs *observer.ObservedLogs, what string) int {
 	return n
 }
 
+var _ composeAppStopper = (*composeStartsInstr)(nil)
+
 // composeStartsInstr is a compose stack whose counts are now, and whose
 // app's first failStarts starts are told failed though the daemon carried
 // them out (the start call timed out on a starved daemon: StartComposeApp's
@@ -1393,7 +1395,7 @@ type composeStartsInstr struct {
 	failStarts int
 }
 
-func (c *composeStartsInstr) StartComposeApp(context.Context) (models.ComposeAppStart, error) {
+func (c *composeStartsInstr) StartComposeApp(context.Context, func()) (models.ComposeAppStart, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.starts++

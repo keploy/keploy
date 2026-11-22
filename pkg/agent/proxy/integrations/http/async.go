@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 )
 
 // compile-time assertions.
@@ -87,14 +88,14 @@ func queryOf(r *models.HTTPReq) url.Values {
 // present on the live side but absent on the stripped recorded side) and
 // spuriously fail the shape match — stripping both sides keeps the comparison
 // honest while still ignoring the volatile key's value.
-func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
+func (h *HTTP) MatchRequestShape(ctx context.Context, live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
 	if live == nil || live.Spec.HTTPReq == nil || recorded == nil || recorded.Spec.HTTPReq == nil {
 		return false, "missing request payload"
 	}
 	vol := volatileSet(lane.VolatileParams)
 	liveReq, err := mockToReq(stripVolatile(live, vol))
 	if err != nil {
-		return false, "unparseable live request: " + err.Error()
+		return false, "unparseable live request: " + utils.WithholdInput(err).Error()
 	}
 	rec := stripVolatile(recorded, vol)
 	// SchemaMatch does field-by-field request-shape comparison; a non-empty
@@ -106,13 +107,24 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	// verdict only counts a flag: the engine serves
 	// the recorded epoch either way (async.Engine.decideServe), as a lane the
 	// user declared asks.
-	matched, err := h.SchemaMatch(context.Background(), liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, !provenswitch.On())
+	matched, err := h.SchemaMatch(ctx, liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, !provenswitch.On())
 	if err != nil {
-		return false, "schema match error: " + err.Error()
+		return false, "schema match error: " + utils.WithholdInput(err).Error()
 	}
 	if len(matched) == 0 {
-		return false, fmt.Sprintf("request shape drift: %s %s vs %s",
-			liveReq.method, liveReq.url.Path, recorded.Spec.HTTPReq.URL)
+		// Both by their path's shape and where they first differ: the
+		// detail is logged at INFO, and a path or a query holds tokens.
+		recURL, _ := models.ParseRequestURL(recorded.Spec.HTTPReq.URL)
+		if recURL == nil {
+			recURL = &url.URL{}
+		}
+		// The live call with its path tag (models.URLPathTag), as the
+		// agent's other lines tag its request; the recording's path by its
+		// shape alone: no console or report line prints a recording's path
+		// beside a tag.
+		return false, fmt.Sprintf("request shape drift: %s vs %s (paths differ at segment %d)",
+			models.WithPathTag(liveReq.method+" "+utils.URLPathShape(liveReq.url), models.URLPathTag(ctx, liveReq.method, liveReq.url)),
+			utils.URLPathShape(recURL), pathDiffersAt(recURL.EscapedPath(), liveReq.url.EscapedPath()))
 	}
 	return true, ""
 }

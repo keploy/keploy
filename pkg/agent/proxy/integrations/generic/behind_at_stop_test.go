@@ -94,21 +94,12 @@ func runBehindAtTheStop(t *testing.T, n int, viaSyncMock, stopFirst, viaDispatch
 			r.leftOut = append(r.leftOut, reason)
 		}
 	}
-	deadline := time.After(10 * time.Second)
-collect:
-	for len(r.recorded)+len(r.leftOut) < n {
-		select {
-		case m := <-mocks:
-			r.recorded = append(r.recorded, m)
-		case <-deadline:
-			break collect
-		}
-	}
-	select {
-	case m := <-mocks:
-		r.recorded = append(r.recorded, m)
-	case <-time.After(50 * time.Millisecond):
-	}
+	// The parser has returned, so it hands on nothing more: every mock it
+	// handed on is taken, the manager's included once it has none on their
+	// way to the channel. Not until a count is reached and then for a time:
+	// a mock recorded as well as left out, and still on its way once the
+	// time was up, passed unseen.
+	r.recorded = takeHandedOn(t, mgr, mocks)
 	if left := mgr.MocksLeftOut(); int(left) != len(r.leftOut) {
 		t.Fatalf("the manager counts %d mock(s) left out, the log says %d (%q)", left, len(r.leftOut), r.leftOut)
 	}
@@ -163,7 +154,7 @@ func TestV2_AMockRefusedAsTheStopComesIsLeftOut(t *testing.T) {
 		t.Run(fmt.Sprint("viaSyncMock=", viaSyncMock), func(t *testing.T) {
 			r := runBehindAtTheStop(t, n, viaSyncMock, false, false)
 			if len(r.recorded)+len(r.leftOut) != n {
-				t.Fatalf("recorded %d (%q) and left out %d (%q) of the %d exchanges captured whole: some vanished with nothing said",
+				t.Fatalf("recorded %d (%q) and left out %d (%q) of the %d exchanges captured whole; want each one once, recorded or left out with its reason",
 					len(r.recorded), reqsOf(r.recorded), len(r.leftOut), r.leftOut, n)
 			}
 			if viaSyncMock && len(r.leftOut) != 1 {

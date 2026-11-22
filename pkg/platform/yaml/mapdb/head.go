@@ -67,7 +67,9 @@ func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old
 // line alone or that has none; a warning names each hand edit it could not
 // keep. A JSON file holds the fields keploy writes, each field a person
 // added named in a warning. A writer outside this package that rewrites an
-// existing file (enterprise's judged mark) writes it with this.
+// existing file (enterprise's judged mark) writes it with this. Such a writer
+// takes no set write lock, so it must not run beside a MappingDb write of the
+// same set.
 func EncodeOverF(logger *zap.Logger, mapping *models.Mapping, format yaml.Format, old []byte, testSetID string) ([]byte, error) {
 	return encodeOver(logger, mapping, format, old, nil, headerNever, testSetID)
 }
@@ -139,10 +141,19 @@ func (w *writtenFiles) is(testSetID string, data []byte) bool {
 // is the YAML document data parses to (nil for JSON). The file is parsed
 // once: the writer decodes its mapping from the
 // document, and its rewrite keeps the file's hand edits from it
-// (encodeOver). It decodes as yaml.UnmarshalGeneric does.
+// (encodeOver). It decodes as yaml.UnmarshalGeneric does. A file that holds
+// no hand edit is decoded a few test entries at a time and not parsed whole:
+// its document is plainDoc (chunked.go).
 func decodeInto(format yaml.Format, data []byte, m *models.Mapping) (*yamlLib.Node, error) {
 	if format == yaml.FormatJSON {
 		return nil, yaml.UnmarshalGeneric(format, data, m)
+	}
+	if decodeMappingYAML(data, m) {
+		if plainYAML(data, m) {
+			return plainDoc, nil
+		}
+		// A hand edit to keep: its document is needed whole.
+		*m = models.Mapping{}
 	}
 	var doc yamlLib.Node
 	if err := yamlLib.Unmarshal(data, &doc); err != nil {
@@ -203,17 +214,23 @@ func EncodeOver(mapping *models.Mapping, old []byte, renames map[string]string) 
 // starts with no comment, and doc, the document old parses to when the
 // caller parsed it (nil: keepEdits parses old).
 func encodeYAMLOver(mapping *models.Mapping, old []byte, doc *yamlLib.Node, renames map[string]string, h header) ([]byte, Unkept, error) {
-	data, err := yaml.MarshalGeneric(yaml.FormatYAML, mapping)
+	head := commentHead(old)
+	if len(head) == 0 && (h == headerAlways || h == headerOnNew && old == nil) {
+		head = []byte(utils.GetVersionAsComment())
+	}
+	if len(old) == 0 || doc == plainDoc {
+		// Nothing of old to keep but its head (keepEdits): the encoding is
+		// made after the head, in one buffer about old's size.
+		data, err := marshalMappingYAMLAfter(head, mapping, len(old))
+		return data, Unkept{}, err
+	}
+	data, err := marshalMappingYAML(mapping)
 	if err != nil {
 		return nil, Unkept{}, err
 	}
 	data, unkept := keepEdits(old, doc, data, renames)
-	head := commentHead(old)
-	switch {
-	case len(head) > 0:
+	if len(head) > 0 {
 		data = append(head, data...)
-	case h == headerAlways || h == headerOnNew && old == nil:
-		data = append([]byte(utils.GetVersionAsComment()), data...)
 	}
 	return data, unkept, nil
 }

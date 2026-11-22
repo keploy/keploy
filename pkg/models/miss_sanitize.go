@@ -32,7 +32,10 @@ import (
 // and what bound it, never a value). ChargedTo, WindowOf and TrailsOf
 // stay: each names a test, no value; so does BoundIn, each a recording. A
 // background miss's bound places (BackgroundBound) keep the recordings'
-// names and each place's shape (BackgroundBinding.Sanitized).
+// names and each place's shape (BackgroundBinding.Sanitized). A repeat's
+// note (Repeat) keeps its hint as the next step keeps its words: every path
+// and host it quotes in its shape. The path and host tags and the whole call
+// (Whole) are never kept: a tag is the run's, and evidence outlives it.
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Operation: SanitizedOperation(m.Operation), Command: CommandName(m.Command), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
@@ -41,6 +44,12 @@ func (m UnmatchedCall) Sanitized() UnmatchedCall {
 		// answered and by which process, no value.
 		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn, OrderDependent: m.OrderDependent, Earlier: m.Earlier, EarlierIn: m.EarlierIn, ChargedTo: m.ChargedTo, WindowOf: m.WindowOf, TrailsOf: m.TrailsOf,
 		Repeat: m.Repeat.Clone()}
+	if out.Repeat != nil && out.Repeat.Hint != "" {
+		// A repeat's hint is the parser's word on serving the call, and
+		// quotes the sessionCalls entry that would: its path and host, as
+		// the next step that ends with it has them (shapedNextStep).
+		out.Repeat.Hint = adviceShape(out.Repeat.Hint, m.FieldDiffs, evidencePaths)
+	}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (MissShape) still writes them {}. Any other place
 	// can name a JSON key that is a value.
@@ -79,6 +88,26 @@ func (m UnmatchedCall) Sanitized() UnmatchedCall {
 			out.NextSteps = givenNextStep(m.Given, m.ClosestMock, out.FieldDiffs)
 		}
 	}
+	return out
+}
+
+// Charged is m as keploy's agent keeps a miss it charged at a test's end for
+// the run's end read: as evidence keeps it (Sanitized), so a reader that
+// writes the run's misses to a receipt or a log finds no value of the call
+// in a field it writes, with the path and host tags its log line names the
+// call by (PathTag, HostTag: a tag is no value), and the call and its next
+// step whole in Whole, a type of its own, for the console and the misses
+// file alone. Its full requests (ClosestMockReq, ReceivedReq) are never kept:
+// the run's misses do not pile them up.
+func (m UnmatchedCall) Charged() UnmatchedCall {
+	out := m.Sanitized()
+	out.PathTag, out.HostTag = m.PathTag, m.HostTag
+	call, next := m.Named(), m.NextSteps
+	if w := m.Whole; w != nil {
+		// Kept again: whole already.
+		call, next = w.Call, w.NextStep
+	}
+	out.Whole = &WholeCall{Call: call, NextStep: next}
 	return out
 }
 
@@ -159,8 +188,14 @@ func keptVariableName(name string) bool {
 var learnedName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(#[1-9][0-9]*)?$`)
 
 // shapedNextStep is m's own next step with every field path it names in its
-// shape (SanitizedNextStep).
-func (m UnmatchedCall) shapedNextStep() string { return m.shapedText(m.NextSteps) }
+// shape, every quoted value {} and a refused word's line without its values
+// (adviceShape, as a log line has it: SanitizedNextStep).
+func (m UnmatchedCall) shapedNextStep() string {
+	if m.NextSteps == "" {
+		return ""
+	}
+	return adviceShape(m.NextSteps, m.FieldDiffs, evidencePaths)
+}
 
 // shapedText is text, a matcher's or a parser's own words about m, with
 // every field path it names in its shape: each of m's field diffs' paths

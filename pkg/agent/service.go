@@ -83,9 +83,30 @@ type CaptureLossReporter interface {
 // it (Test): bytes that test wrote to a connection, which its end could not
 // wait for, and which were lost later, under another test. It is no capture
 // loss of that other test's, and is in no count CaptureLosses reports.
+//
+// One with no Test and Open is a close of a connection of the test worker
+// whose keploy instance is Worker (the kernel's stamp of the process that
+// made the connection; 0, the one test process of a run of one, while it
+// holds its claim: PairedBytesBeginner.PairedBytesOneProcess), which no
+// other worker's test used. Epoch is that worker's test epoch as the proxy
+// counted it (PairedBytesBeginner): the agent charges it to the test of that
+// worker it began at that epoch alone, while that test is open. One counted
+// in the worker's gap between tests, or under no open test, is the run's,
+// charged to no test: never to the worker's next test, which did not exist
+// when it was counted, and never to another worker's.
+//
+// Session is the agent's session the loss was made in (PairedBytesSessioner):
+// a cut-short end's, the session that end was in; an Open one's, the session
+// the proxy last moved bytes on its connection in (or accepted it in, with
+// none moved). The agent charges a loss of an earlier session than the one
+// open as it takes it to no run or test: it logs it, once, and drops it.
 type OwnedLoss struct {
-	Test string
-	Loss models.CaptureLoss
+	Test    string
+	Worker  uint32
+	Epoch   uint64
+	Open    bool
+	Session uint64
+	Loss    models.CaptureLoss
 }
 
 // OwnedLossTaker is the optional extension implemented by a proxy that tells
@@ -537,6 +558,63 @@ type PairedBytesWaiter interface {
 	// connection received more, saw its orphan change state, or was
 	// resolved), for a watchdog: it only ever grows.
 	PairedBytesProgress() uint64
+}
+
+// PairedBytesSettler is the optional extension of a PairedBytesWaiter that
+// is told when a settle that waited for the bytes on the paired connections
+// is done (PairedBytesSettled), for the test worker whose keploy instance
+// is worker (0: a run of one test process, every connection): by then the
+// settle has had its connections' handlers take, and in a replay answer,
+// the calls it waited for, and every byte the proxy moved on them since the
+// wait began is the ending test's, never the next one's.
+type PairedBytesSettler interface {
+	PairedBytesSettled(worker uint32)
+}
+
+// PairedBytesBeginner is the optional extension of a PairedBytesSettler
+// that keeps, for each test worker (its keploy instance), a test epoch: it
+// moves at each begin of one of that worker's tests the agent tells it
+// (PairedBytesBegun, which returns the epoch the test begins at) and at
+// each end's mark, once the end's settle is done (PairedBytesSettled). A
+// close of that worker's connection is stamped with the epoch as it is
+// counted (OwnedLoss.Epoch): the begun test's while it is open and its end
+// is settling, a newer one in the gap after it, which no test began at.
+//
+// PairedBytesOneProcess is told, on, as a run of one test process claims the
+// session, before the claim reads the counts its first test counts from, and
+// off as the session is reset: while on, a close of a connection of no
+// worker's (keploy instance 0: that process's) is stamped with worker 0's
+// test epoch as a worker's is (OwnedLoss.Open), and is in no count, so one
+// counted in the gap between that process's tests is the run's, never its
+// next test's. Turned on, it moves worker 0's epoch past every test's: a
+// close counted between the claim and the first begin is the run's too.
+// While off (keploy test's test cases, which the agent begins no test of,
+// and a run of workers, whose instance 0 is no worker's) such a close is
+// in the counts (CaptureLossReporter).
+type PairedBytesBeginner interface {
+	PairedBytesBegun(worker uint32) uint64
+	PairedBytesOneProcess(on bool)
+}
+
+// PairedBytesSessioner is the optional extension of an OwnedLossTaker that is
+// told, as the agent resets a session, the new session's number, and stamps
+// each owned loss with the session it was made in (OwnedLoss.Session).
+type PairedBytesSessioner interface {
+	PairedBytesSession(session uint64)
+}
+
+// PairedBytesDrainer is the optional extension of an OwnedLossTaker that
+// waits, as a session's last read of its losses asks once the application
+// has stopped, until it has counted the close of every connection whose
+// application end has ended or whose close it has begun: a loss of such a
+// close is then in that read (counted, or owned), never in a later session's
+// or set's. A connection the application holds open is not waited for. A
+// close whose handler makes no progress for the proxy's bound is owned as the
+// session's, not judged, naming where the connection went and the session,
+// and the drain answers: the read then has it. It ends with ctx, with an
+// error: the read is then not made.
+type PairedBytesDrainer interface {
+	PairedBytesDrain(ctx context.Context) error
 }
 
 // PairedBytesChecker is the proxy's account of whether it can count the bytes
@@ -1128,6 +1206,14 @@ type AppClockRunSetter interface {
 	SetAppClockRun(f func(real time.Time) (time.Time, bool))
 }
 
+// AppClockShownSetter is an optional proxy capability, beside
+// AppClockRunSetter: SetAppClockShown makes the background check read,
+// through f, what the app's clock showed between two real instants, as the
+// agent's hooks moved it (learn.Tracker.SetAppClockShown); nil for none.
+type AppClockShownSetter interface {
+	SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool))
+}
+
 // PoolNamesSetter is an optional ExactServer capability: SetPoolNames hands the
 // proxy the names the replay's scope table puts in a pool slice, of every key,
 // so that the parsers' learn steps can tell the pool's mocks from a test's
@@ -1314,6 +1400,14 @@ type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }
 
+// IncomingOptionsReader is the optional extension of an IncomingProxy that
+// says what options the recorder last started ingress with (zero before
+// Start), so a capture path other than the proxy's own can filter the same
+// way.
+type IncomingOptionsReader interface {
+	IncomingOptions() models.IncomingOptions
+}
+
 // AppListenPorter is the optional extension of an IncomingProxy that knows
 // which port the app's own socket listens on for one of the app's ports. While
 // recording, keploy's ingress forwarder holds the app's port and the app
@@ -1449,5 +1543,10 @@ type Session struct {
 	Mode models.Mode
 	TC   chan<- *models.TestCase
 	MC   chan<- *models.Mock
+	// LogKeys is the session's key for the path tags the lines about its
+	// connections name their calls by (models.LogKeySession): the one the
+	// context Record or Mock was given carries, drawn as the session began.
+	// nil: the process's key.
+	LogKeys *models.LogKeySession
 	models.OutgoingOptions
 }

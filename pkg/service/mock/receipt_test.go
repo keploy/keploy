@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/stretchr/testify/require"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -86,6 +88,8 @@ type replayCase struct {
 	insertErr error
 	// windows: what each test did, as the agent tells it.
 	windows []models.ScopeWindow
+	// console: the service's console (SetConsole); nil leaves none.
+	console io.Writer
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -171,6 +175,9 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 		store = named("mock-0")
 	}
 	svc := New(zap.New(core), run, store, mapDB, nil, nil, cfg)
+	if c.console != nil {
+		svc.(ConsoleSetter).SetConsole(c.console)
+	}
 	// What a native macOS build does between constructing the service and
 	// running it: prefix the launch line with the interception shim.
 	if c.rewriteLaunch {
@@ -400,16 +407,28 @@ func TestNoReceiptForAMissingSet(t *testing.T) {
 // The receipt names the command the USER runs. A build that instruments
 // natively rewrites the launch line after the service is built; recording that
 // line leaked a temp path into the receipt, and status then told agents to run
-// it.
+// it. The replay's log names the user's command too: at INFO by its program
+// and how many words follow it, and whole, its secrets redacted, at DEBUG.
 func TestReceiptRecordsTheUsersCommandNotTheLaunchLine(t *testing.T) {
 	keployDir, _, logs := replayIn(t, replayCase{rewriteLaunch: true})
 	if r := mustReceipt(t, keployDir); r.Command != "go test ./..." {
 		t.Fatalf("receipt command = %q, want the user's %q", r.Command, "go test ./...")
 	}
-	for _, e := range logs.FilterMessageSnippet("Replaying mocks for your test command").All() {
-		if got := e.ContextMap()["command"]; got != "go test ./..." {
-			t.Fatalf("the replay log named %q as the user's command", got)
+	replaying := logs.FilterMessageSnippet("Replaying mocks for your test command").All()
+	if len(replaying) != 1 {
+		t.Fatalf("the replay said %d times that it replays the test command, want once", len(replaying))
+	}
+	if e := replaying[0]; e.Level != zapcore.InfoLevel || e.ContextMap()["program"] != "go" || e.ContextMap()["args"] != int64(2) || e.ContextMap()["command"] != nil {
+		t.Fatalf("the replay's INFO line names %v, want the user's program go and its 2 arguments' count alone", e.ContextMap())
+	}
+	var whole []observer.LoggedEntry
+	for _, e := range logs.FilterMessage(utils.WholeCommandMessage).All() {
+		if _, ok := e.ContextMap()["command"]; ok {
+			whole = append(whole, e)
 		}
+	}
+	if len(whole) != 1 || whole[0].Level != zapcore.DebugLevel || whole[0].ContextMap()["command"] != "go test ./..." {
+		t.Fatalf("the replay's DEBUG lines of the whole test command are %v, want one naming the user's %q", whole, "go test ./...")
 	}
 }
 
@@ -1288,7 +1307,7 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 		symlink(t, filepath.Join("..", "..", "outside", "gitignore"), filepath.Join(keployDir, ".gitignore"))
 		core, logs := observer.New(zapcore.DebugLevel)
 		ignoreReceipts(zap.New(core), keployDir)
-		said := logs.FilterMessage("failed to git-ignore the replay receipt").All()
+		said := logs.FilterMessage("failed to git-ignore a file keploy keeps local").All()
 		if len(said) != len(receiptIgnore) {
 			t.Fatalf("said %d times that an entry could not be added, want %d: %v", len(said), len(receiptIgnore), logs.All())
 		}
@@ -1299,4 +1318,38 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 			t.Fatalf("the file the link leads to holds %q (%v)", b, err)
 		}
 	})
+}
+
+// A receipt entry keploy cannot add to keploy/.gitignore is said at WARN,
+// naming the file: the receipt holds the test command whole, and a commit of
+// a file git does not ignore publishes it. Once a process for each file: a
+// second keploy folder's file is said too.
+func TestAReceiptEntryKeployCannotGitIgnoreIsSaidAtWarn(t *testing.T) {
+	keployDir, otherDir := t.TempDir(), t.TempDir()
+	t.Cleanup(localfile.SetAddGitIgnoreForTest(func(logger *zap.Logger, path, entry string) error {
+		if entry == "/*/"+ReceiptFile {
+			return fmt.Errorf("keploy/.gitignore is read-only")
+		}
+		return utils.AddToGitIgnore(logger, path, entry)
+	}))
+	core, logs := observer.New(zapcore.DebugLevel)
+	ignoreReceipts(zap.New(core), keployDir)
+	ignoreReceipts(zap.New(core), keployDir)
+	ignoreReceipts(zap.New(core), otherDir)
+	ignoreReceipts(zap.New(core), otherDir)
+	var warned []observer.LoggedEntry
+	for _, e := range logs.All() {
+		if e.Level >= zapcore.WarnLevel {
+			warned = append(warned, e)
+		}
+	}
+	if len(warned) != 2 {
+		t.Fatalf("said %d times at WARN or above that a receipt is not git-ignored, want once for each of the 2 files: %v", len(warned), logs.All())
+	}
+	for i, dir := range []string{keployDir, otherDir} {
+		f := warned[i].ContextMap()
+		if f["file"] != filepath.Join(dir, ".gitignore") || fmt.Sprint(f["entries"]) != "[/*/"+ReceiptFile+"]" || !strings.Contains(fmt.Sprint(f["error"]), "read-only") {
+			t.Fatalf("the WARN line names %v, want the file %s, the entry and why", f, filepath.Join(dir, ".gitignore"))
+		}
+	}
 }

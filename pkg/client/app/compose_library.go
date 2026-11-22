@@ -55,12 +55,13 @@ func (a *App) composeRunner(ctx context.Context) (composeStack, error) {
 // runner (docker.RegisterComposeStack), scoped to the same project the
 // equivalent `docker compose` invocation would have resolved.
 func (a *App) newLibraryComposeStack(ctx context.Context) (composeStack, error) {
-	projectName, projectDir := composeProjectScope(a.cmd)
+	whole := a.cmd.WholeUnredacted()
+	projectName, projectDir := composeProjectScope(whole)
 	return docker.NewComposeStack(ctx, docker.ComposeStackSpec{
 		Content:     a.composeContent,
 		ProjectName: projectName,
 		WorkingDir:  projectDir,
-		EnvFiles:    composeEnvFiles(a.cmd),
+		EnvFiles:    composeEnvFiles(whole),
 	})
 }
 
@@ -80,12 +81,13 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		return utils.CmdError{Type: utils.Init, Err: err}
 	}
 
-	opts := composeUpSemantics(a.cmd)
-	a.logger.Info("Starting Application :",
-		zap.String("executing_cmd", a.cmd),
+	opts := composeUpSemantics(a.cmd.WholeUnredacted())
+	// At INFO, the command by its program alone; its project and services,
+	// which its arguments may name, with the whole command at DEBUG.
+	a.logger.Info(utils.StartingApplication, zap.Inline(a.cmd), zap.String("onExit", opts.OnExit.String()))
+	utils.LogWholeCommand(a.logger, "executing_cmd", a.cmd,
 		zap.String("composeProject", runner.ProjectName()),
-		zap.String("exitCodeFrom", opts.ExitCodeFrom),
-		zap.String("onExit", opts.OnExit.String()))
+		zap.String("exitCodeFrom", opts.ExitCodeFrom))
 
 	// Up runs on a context this function owns, NOT the caller's.
 	//
@@ -94,7 +96,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	// service's full stop grace. That is precisely the teardown the shell-out
 	// path was written to avoid: the eBPF agent is slow to stop, and waiting on
 	// it overran utils.DrainErrGroup's 30s budget and failed otherwise-green
-	// runs with "teardown drain timed out".
+	// runs with "teardown drain made no progress".
 	//
 	// So keploy's own bounded teardown has to happen FIRST — short grace for the
 	// app's coverage flush, then a fast project-wide down — and only then is the
@@ -121,18 +123,14 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		defer close(teardownDone)
 		select {
 		case <-ctx.Done():
-			if composeStopsTheApp() {
-				// Under the switch the app's stop is keploy's own, and says
-				// when it had to kill (compose_appstop.go).
-				// It says a recording's kill itself.
-				// An app that exited on its own needs no stop.
-				if _, err := a.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
-					a.logger.Warn("keploy could not stop the application's container before taking its compose stack down", zap.Error(err))
-				}
-				composeDown()
-			} else {
-				a.composeGraceThenDown(composeDown)
+			// The app's stop is keploy's own, and says when it had to
+			// kill (compose_appstop.go).
+			// It says a recording's kill itself.
+			// An app that exited on its own needs no stop.
+			if _, err := a.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
+				a.logger.Warn("keploy could not stop the application's container before taking its compose stack down", zap.Error(err))
 			}
+			composeDown()
 			cancelUp()
 		case <-upDone:
 		}
@@ -152,7 +150,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	// teardown's reap barrier exists to prevent.
 	//
 	// It cannot hang: the goroutine closes teardownDone on both branches, and
-	// composeGraceThenDown is bounded by graceBudget, ComposeDown by the
+	// StopComposeApp is bounded by its stop's progress, ComposeDown by the
 	// project's progress (keploy cuts a down that made none) and the per-call
 	// budgets of its sweeps.
 	<-teardownDone
@@ -161,13 +159,6 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		return utils.CmdError{Type: utils.Runtime, Err: err}
 	}
 	return utils.CmdError{}
-}
-
-// composeGraceThenDown is the in-process port of cmdCancel's compose branch:
-// the app's grace (composeAppGrace), then the down.
-func (a *App) composeGraceThenDown(composeDown func()) {
-	a.composeAppGrace(nil)
-	composeDown()
 }
 
 // joinComposeLabels renders a label map in the comma-separated "k=v,k=v" form

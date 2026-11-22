@@ -13,7 +13,7 @@ func EncodeMapping(mapping *models.Mapping, logger *zap.Logger) ([]byte, error) 
 }
 
 func EncodeMappingF(mapping *models.Mapping, logger *zap.Logger, format yaml.Format) ([]byte, error) {
-	data, err := yaml.MarshalGeneric(format, mapping)
+	data, err := marshalMapping(format, mapping)
 	if err != nil {
 		logger.Error("failed to marshal mapping", zap.Error(err))
 		return nil, err
@@ -26,8 +26,14 @@ func DecodeMapping(yamlData []byte, logger *zap.Logger) (*models.Mapping, error)
 	return DecodeMappingF(yamlData, logger, yaml.FormatYAML)
 }
 
+// DecodeMappingF decodes data, a mappings file in format, as
+// yaml.UnmarshalGeneric does: a YAML file in the layout keploy writes a few
+// test entries at a time (chunked.go).
 func DecodeMappingF(data []byte, logger *zap.Logger, format yaml.Format) (*models.Mapping, error) {
 	var mapping models.Mapping
+	if format != yaml.FormatJSON && decodeMappingYAML(data, &mapping) {
+		return &mapping, nil
+	}
 	err := yaml.UnmarshalGeneric(format, data, &mapping)
 	if err != nil {
 		logger.Error("failed to unmarshal mapping data", zap.Error(err))
