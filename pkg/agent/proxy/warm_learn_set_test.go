@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -356,5 +357,37 @@ func mustLearnEnded(t *testing.T, p *Proxy, ended bool) {
 	t.Helper()
 	if err := p.SetLearnEnded(ended); err != nil {
 		t.Fatalf("SetLearnEnded(%v): %v", ended, err)
+	}
+}
+
+// In record's full round the learn step's staging walk is the parsers' warm
+// too: each recording the staging reads is handed to its kind's warmer, in
+// recorded order, on the one read of the disk, and the staging still reads
+// every recording.
+func TestInRecordsFullRoundTheStagingsWalkHandsEachRecordingToItsKindsWarmer(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	http := warmer(t, models.HTTP, warmStaged+warmLater+1)
+	r := newWarmRow(t, zap.NewNop())
+	r.mm.SetPairing(true)
+	done, err := r.p.warmLearnSet()
+	if err != nil || done == nil {
+		t.Fatalf("the set's staging did not start: %v", err)
+	}
+	u, ok := <-done
+	if !ok {
+		t.Fatal("the set's staging ended with nothing read")
+	}
+	if u.Staged != warmStaged+warmLater || u.Called != 0 {
+		t.Fatalf("with a warmer the staging read %d recordings and its calls %d: want all %d, none by a call", u.Staged, u.Called, warmStaged+warmLater)
+	}
+	if n := r.disk.Load(); n != 1 {
+		t.Fatalf("the staging and the warm read the on-disk store %d times: want once, for both", n)
+	}
+	want := make([]string, 0, len(r.all))
+	for _, m := range r.all {
+		want = append(want, m.Name)
+	}
+	if !slices.Equal(*http, want) {
+		t.Fatalf("the HTTP warmer was handed %v on the staging's walk: want every recording in recorded order, %v", *http, want)
 	}
 }
