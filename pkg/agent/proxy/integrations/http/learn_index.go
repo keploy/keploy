@@ -44,13 +44,18 @@ type learnIndex struct {
 	store   integrations.MockMemDb
 	gen     uint64
 	url     string
+	urlPats []*regexp.Regexp
 	entries []learnEntry
 	// split: entries[:split] are the per-test read's, the rest the session
 	// read's.
-	split  int
-	byPath map[string][]int
-	wild   map[string][]int
-	// bodies are buckets of byPath filed by their recordings' bodies
+	split      int
+	varPerTest []*models.Mock
+	varSession []*models.Mock
+	byPath     map[string][]int
+	wild       map[string][]int
+	allCur     map[string]*atomic.Int64
+	wildCur    map[string]*atomic.Int64
+	// bodies are buckets of byPath filed by their recordings' requests
 	// (learnPlainPrint), each on the first call that reads it so.
 	bodies *bodyFilings
 }
@@ -316,20 +321,43 @@ var errNoSharedReads = errors.New("the store offers no shared reads now")
 // the reads perTest and session (scopeReads.scope), in its order.
 func buildLearnIndex(key learnIndexKey, perTest, session []*models.Mock, n learnNoise) *learnIndex {
 	learnIndexBuilds.Add(1)
-	ix := &learnIndex{store: key.store, gen: key.gen, url: key.url, byPath: map[string][]int{}, wild: map[string][]int{}, bodies: newBodyFilings(&learnBodyFilings)}
+	ix := &learnIndex{store: key.store, gen: key.gen, url: key.url, urlPats: n.url, byPath: map[string][]int{}, wild: map[string][]int{}, bodies: newBodyFilings(&learnBodyFilings)}
 	add := func(mocks []*models.Mock, perTest bool) {
 		for _, m := range inRecordedOrder(FilterHTTPMocks(mocks)) {
-			if m == nil || m.Spec.HTTPReq == nil || hasVariables(m) {
+			if m == nil || m.Spec.HTTPReq == nil {
+				continue
+			}
+			if hasVariables(m) {
+				if perTest {
+					ix.varPerTest = append(ix.varPerTest, m)
+				} else {
+					ix.varSession = append(ix.varSession, m)
+				}
 				continue
 			}
 			rp := recordedParts(m)
 			masked := n.maskedPath(rp.path)
 			p := len(ix.entries)
 			ix.entries = append(ix.entries, learnEntry{m: m, perTest: perTest, masked: masked})
-			ix.byPath[rp.method+" "+masked] = append(ix.byPath[rp.method+" "+masked], p)
+			pk := rp.method + " " + masked
+			ps := append(ix.byPath[pk], p)
+			ix.byPath[pk] = ps
+			if len(ps) == 2 {
+				if ix.allCur == nil {
+					ix.allCur = map[string]*atomic.Int64{}
+				}
+				ix.allCur[pk] = &atomic.Int64{}
+			}
 			if learnsWide(m) {
 				w := rp.method + " " + strconv.Itoa(segmentCount(masked))
-				ix.wild[w] = append(ix.wild[w], p)
+				ws := append(ix.wild[w], p)
+				ix.wild[w] = ws
+				if len(ws) == 2 {
+					if ix.wildCur == nil {
+						ix.wildCur = map[string]*atomic.Int64{}
+					}
+					ix.wildCur[w] = &atomic.Int64{}
+				}
 			}
 		}
 	}
@@ -345,20 +373,27 @@ func learnsWide(m *models.Mock) bool {
 	return learnsURL(m) || len(m.Noise) > 0
 }
 
+// filePath lazily files byPath[key] by learnPlainPrint, sharing the filed
+// bodyBucket between replay's positions and record's full-round fast path.
+func (ix *learnIndex) filePath(ctx context.Context, key string, exact []int) (*bodyBucket, error) {
+	ln := learnNoise{url: ix.urlPats}
+	return ix.bodies.file(ctx, key, exact, func(p int) (uint64, bool) {
+		m := ix.entries[p].m
+		return learnPlainPrint(m, recordedParts(m), ln)
+	})
+}
+
 // positions are the entries a call of method whose masked path is masked may
 // be, in the scope's order: those filed under its path and those whose path
 // may be excused at a segment, of its segment count. Of those filed under its
-// path, where the call's body has the print body (printed: learnLivePrint),
-// only the recordings of that print and those whose body the learn step
+// path, where the call's request has the print body (printed: learnLivePrint),
+// only the recordings of that print and those whose request the learn step
 // does not compare plainly (learnPlainPrint): exactGroup never takes another.
 func (ix *learnIndex) positions(ctx context.Context, method, masked string, body uint64, printed bool) ([]int, error) {
 	key := method + " " + masked
 	exact := ix.byPath[key]
-	if printed && len(exact) > 0 {
-		b, err := ix.bodies.file(ctx, key, exact, func(p int) (uint64, bool) {
-			m := ix.entries[p].m
-			return learnPlainPrint(m, recordedParts(m))
-		})
+	if printed && len(exact) > 1 {
+		b, err := ix.filePath(ctx, key, exact)
 		if err != nil {
 			return nil, err
 		}

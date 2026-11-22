@@ -53,7 +53,7 @@ func learnKeys(m *models.Mock, n learnNoise) []string {
 	masked := n.maskedPath(rp.path)
 	k := rp.method + " " + masked
 	body := learnUnprintedKey(k)
-	if sum, ok := learnPlainPrint(m, rp); ok {
+	if sum, ok := learnPlainPrint(m, rp, n); ok {
 		body = learnPrintKey(k, sum)
 	}
 	keys := []string{learnPathKey(k), body}

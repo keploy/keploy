@@ -372,6 +372,12 @@ func (s *scopedMockDb) RoundSnapshot(q integrations.RoundQuery) (integrations.Ro
 	return integrations.SnapshotRound(s.MockMemDb, q)
 }
 
+// RoundMeta forwards the store's O(1) round metadata read
+// (integrations.ExactRoundReader).
+func (s *scopedMockDb) RoundMeta(tracker *learn.Tracker) (integrations.RoundMeta, bool) {
+	return integrations.ReadRoundMeta(s.MockMemDb, tracker)
+}
+
 // AwaitRoundMove forwards the store's wait for its round to move
 // (integrations.RoundWaiter); false, at once, from a store that has none.
 func (s *scopedMockDb) AwaitRoundMove(ctx context.Context, at integrations.RoundAt) (bool, error) {
@@ -398,8 +404,9 @@ func (s *scopedMockDb) TakenLog(epoch uint64, from, to int) []integrations.Take 
 }
 
 var (
-	_ integrations.RoundReader = (*scopedMockDb)(nil)
-	_ integrations.RoundWaiter = (*scopedMockDb)(nil)
+	_ integrations.RoundReader      = (*scopedMockDb)(nil)
+	_ integrations.RoundWaiter      = (*scopedMockDb)(nil)
+	_ integrations.ExactRoundReader = (*scopedMockDb)(nil)
 )
 
 // MarkCallRound forwards the store's (integrations.StagedFinder): the zero

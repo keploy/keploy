@@ -105,7 +105,7 @@ func (p perTestKeyedOnly) RangePerTestMocksWithKey(ix *integrations.MockIndex, k
 func TestTheLearnKeysOfARecording(t *testing.T) {
 	h, n, _ := learnOn(t)
 	plain := learnRecorded("plain", 0, "POST", "/v1/item", `{"x":1}`, nil, `{}`)
-	sum, ok := learnPlainPrint(plain, recordedParts(plain))
+	sum, ok := learnPlainPrint(plain, recordedParts(plain), n)
 	if !ok {
 		t.Fatal("a plain JSON body has no print")
 	}

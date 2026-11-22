@@ -56,14 +56,21 @@ import (
 // putTarget names the resource m's recorded request names: its Host, its
 // path and its query, each as recorded (parsedOf), the query's parameters in
 // order. ok is false for a request keploy cannot name one resource of (no
-// Host, or no path).
+// Host, or no path). Computed lazily from parsedOf(m).parts so recordings in
+// tests without PUTs allocate no target strings.
 func putTarget(m *models.Mock) (string, bool) {
 	if m == nil || m.Spec.HTTPReq == nil {
 		return "", false
 	}
-	p := parsedOf(m).parts
+	return computePutTarget(parsedOf(m).parts)
+}
+
+func computePutTarget(p httpParts) (string, bool) {
 	if p.host == "" || p.path == "" {
 		return "", false
+	}
+	if len(p.query) == 0 {
+		return p.host + " " + p.path + "?", true
 	}
 	keys := make([]string, 0, len(p.query))
 	for k := range p.query {
@@ -71,10 +78,16 @@ func putTarget(m *models.Mock) (string, bool) {
 	}
 	sort.Strings(keys)
 	var b strings.Builder
-	b.WriteString(p.host + " " + p.path + "?")
+	b.WriteString(p.host)
+	b.WriteByte(' ')
+	b.WriteString(p.path)
+	b.WriteByte('?')
 	for _, k := range keys {
 		for _, v := range p.query[k] {
-			b.WriteString(k + "=" + v + "&")
+			b.WriteString(k)
+			b.WriteByte('=')
+			b.WriteString(v)
+			b.WriteByte('&')
 		}
 	}
 	return b.String(), true

@@ -1717,32 +1717,47 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy's mock store would not hand out "+m.Name+", which it still shows, so keploy cannot answer from it"
 		return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 	}
-	marked := false
-	// made is the round the call's first pass read (learnRound), and
-	// madePool the HTTP mocks that pass offered: every later pass is held
-	// to that round. retake: the pass reads again because the take of the
-	// pass before was refused.
-	var made learnRound
-	var madePool []*models.Mock
-	// alone is why the call learns nothing on any pass, "" where it may
-	// learn: its first pass read the store's test view with the tracker
-	// not open (integrations.RoundSnapshot.ViewAlone). It holds past a
-	// catch-up of the tracker to the store's test on a retake, which only
-	// an exact take's refusal makes there: the call is answered as it would
-	// have been had the tracker's begin not landed under its take, by a
-	// recording it matches exactly, or not at all.
-	alone := ""
-	retake := false
+	st := &learnLoopState{
+		unclaimed: unclaimed,
+	}
+	resolveMadePool := func() []*models.Mock {
+		if st.madePool == nil && st.madePoolFn != nil {
+			st.madePool = st.madePoolFn()
+			st.madePoolFn = nil
+		}
+		return st.madePool
+	}
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		first := call != nil && !marked
+		// Fast path: resolve unspent non-background exact matches in O(1)
+		// amortised via RoundMeta + learnIx without copying every recording
+		// of the view. Any drift, miss, declared-noise rewrite, store
+		// read-back, or boundary diagnostic falls through to readLearnPass
+		// below.
+		if res, err := h.tryExactLearnMatch(ctx, input, mockDb, tracker, live, liveShape, n, opts, mark, call != nil, st); err != nil {
+			return nil, nil, err
+		} else {
+			if res.setCall && call != nil {
+				*call = res.callRound
+			}
+			switch res.step {
+			case fullRoundServed:
+				return res.out, nil, nil
+			case fullRoundMiss:
+				return nil, res.miss, nil
+			case fullRoundRetake:
+				st.retake = true
+				continue
+			}
+		}
+		first := call != nil && !st.marked
 		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !made.read && mark.MovedSince(read.at.round) {
+		if !st.made.read && mark.MovedSince(read.at.round) {
 			// The caller marked the call in a round its first pass no
 			// longer reads (a read that is no snapshot of the round keeps
 			// no instant of it, and is moved: nothing tells it did not).
@@ -1750,9 +1765,9 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			return nil, &learnMiss{res: res, moved: true}, nil
 		}
 		if first {
-			*call, marked = read.call, true
+			*call, st.marked = read.call, true
 		}
-		moved, caughtUp := made.movedFrom(read.round, retake)
+		moved, caughtUp := st.made.movedFrom(read.round, st.retake)
 		if caughtUp && call != nil {
 			// The call's round is the one caught up with from now on, and
 			// so is its mark: the recordings that round's view holds as its
@@ -1771,8 +1786,8 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// and recordings, and the next test's own, or the pool's, are
 			// not its own. A wait for a request that never came ends so:
 			// the window closed unread.
-			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + made.where() + ", and the replay " + moved + " before keploy could answer it"}
-			return nil, &learnMiss{res: res, pool: madePool, moved: true}, nil
+			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + st.made.where() + ", and the replay " + moved + " before keploy could answer it"}
+			return nil, &learnMiss{res: res, pool: resolveMadePool(), moved: true}, nil
 		}
 		if why := read.round.noOne; why != "" {
 			// The store and the tracker are apart on which test is open
@@ -1789,15 +1804,15 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + why}
 			return nil, &learnMiss{res: res, pool: read.sc.http, moved: true}, nil
 		}
-		if !made.read {
-			alone = read.round.alone
+		if !st.made.read {
+			st.alone = read.round.alone
 		}
-		if !made.read || caughtUp {
+		if !st.made.read || caughtUp {
 			// The first pass, or the round the side that lagged caught up
 			// with (learnRound.movedFrom): every later pass is held to it.
-			made, madePool = read.round, read.sc.http
+			st.made, st.madePool, st.madePoolFn = read.round, read.sc.http, nil
 		}
-		if made.waits() && read.round.ahead {
+		if st.made.waits() && read.round.ahead {
 			// The tracker began a test whose view the store has not
 			// installed while the store still shows the view of the test
 			// before (integrations.RoundSnapshot.TrackerAhead), which
@@ -1827,11 +1842,12 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			if !moved {
 				res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request after keploy's learn tracker began a test its store had not opened, and the store cannot tell when it opens it, so the call is of no round keploy can decide it in"}
-				return nil, &learnMiss{res: res, pool: madePool, moved: true}, nil
+				return nil, &learnMiss{res: res, pool: resolveMadePool(), moved: true}, nil
 			}
 			continue
 		}
-		retake = false
+		st.retake = false
+		alone := st.alone
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
 		test, earlier, served, before, set := read.test, read.earlier, read.served, read.before, read.set
 		// F's serves the read saw made after the call reached keploy are
@@ -1965,7 +1981,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if stuck(picked, read.at) {
 				return refused(picked, res, sc)
 			}
-			if own && (models.HTTPStoreReads(picked.Spec.HTTPReq) || putReads(picked)) {
+			if own && (models.HTTPStoreReads(picked.Spec.HTTPReq) || (putReads(picked) && hasMatchingPut(tracker, picked))) {
 				// A read of a record the test wrote (a store's API:
 				// readBackPlan) is answered with what this run wrote, though
 				// its request is exactly the recorded one (a Scan of a
@@ -1977,7 +1993,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				plan := h.readBackPlan(tracker, test, answered, n.unmaskedShape(live), served, earlierThan(earlier, picked), givenBindings(mockDb), newPairing())
 				if len(plan.vars) > 0 {
 					if !tracker.Answer(test, picked) {
-						retake = true
+						st.retake = true
 						continue
 					}
 					out, claimed, why, err := h.claimLearned(ctx, picked, claimDb, plan, sc.owner(), input.written)
@@ -1993,7 +2009,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 					}
 					if !claimed {
 						unclaimed[picked] = read.at
-						retake = true
+						st.retake = true
 						continue
 					}
 					if e, ok := n.servedExchange(tracker.Drifts(), picked, answered, rec, recordedParts(picked), liveShape, input, live, out, own, h.learnedView(picked, plan)); ok {
@@ -2035,7 +2051,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				// the test, and from an agreed round no move is a
 				// catch-up (learnRound.movedFrom), so the next pass is
 				// this round again or the moved miss.
-				retake = true
+				st.retake = true
 				continue
 			}
 			// The claim reads the scope's owners (ownedKey), as the
@@ -2062,7 +2078,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 					return nil, nil, err
 				}
 				unclaimed[picked] = read.at
-				retake = true
+				st.retake = true
 				continue
 			}
 			commit()
@@ -2141,11 +2157,11 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			if own {
+			if own && (models.HTTPStoreReads(answered.Spec.HTTPReq) || (putReads(answered) && hasMatchingPut(tracker, answered))) {
 				plan = h.readBackPlan(tracker, test, answered, n.unmaskedShape(live), served, earlier, givenVars, plan)
 			}
 			if own && !tracker.Answer(test, m) {
-				retake = true
+				st.retake = true
 				continue
 			}
 			out, claimed, why, err := h.claimLearned(ctx, m, claimDb, plan, sc.owner(), input.written)
@@ -2167,7 +2183,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				// claim's retake reads its own round again, or the moved
 				// miss.
 				unclaimed[m] = read.at
-				retake = true
+				st.retake = true
 				continue
 			}
 			for _, l := range learned {

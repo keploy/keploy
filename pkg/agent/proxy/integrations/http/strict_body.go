@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -32,6 +33,33 @@ import (
 type bodyBucket struct {
 	byPrint map[uint64][]int
 	rest    []int
+	// next holds monotonic CAS cursors for multi-entry byPrint sub-buckets
+	// (nil when every print sub-bucket has <= 1 entry). Used only by record's
+	// full-round fast path on owned and pool views (never on sharedIx).
+	next    map[uint64]*atomic.Int64
+	restCur atomic.Int64
+}
+
+func (b *bodyBucket) cursorOf(sum uint64) *atomic.Int64 {
+	if b == nil || b.next == nil {
+		return nil
+	}
+	return b.next[sum]
+}
+
+func advanceAtomicCursor(c *atomic.Int64, next int) {
+	if c == nil {
+		return
+	}
+	for {
+		cur := int(c.Load())
+		if next <= cur {
+			return
+		}
+		if c.CompareAndSwap(int64(cur), int64(next)) {
+			return
+		}
+	}
 }
 
 // bodyFilings are the buckets of one index filed by their recordings'
@@ -44,6 +72,7 @@ type bodyBucket struct {
 // what the rows count to see that a bucket is filed once, on its first call.
 type bodyFilings struct {
 	turn    chan struct{}
+	mu      sync.RWMutex
 	filed   map[string]*bodyBucket
 	filings *atomic.Int64
 }
@@ -61,28 +90,46 @@ var strictBodyFilings, learnBodyFilings atomic.Int64
 // pass compares that recording's body otherwise. A bucket is filed once, on
 // the first call that reads it so; key names it.
 func (f *bodyFilings) file(ctx context.Context, key string, ps []int, print func(p int) (uint64, bool)) (*bodyBucket, error) {
+	f.mu.RLock()
+	if b, ok := f.filed[key]; ok {
+		f.mu.RUnlock()
+		return b, nil
+	}
+	f.mu.RUnlock()
 	select {
 	case f.turn <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 	defer func() { <-f.turn }()
+	f.mu.RLock()
 	if b, ok := f.filed[key]; ok {
+		f.mu.RUnlock()
 		return b, nil
 	}
+	f.mu.RUnlock()
 	b := &bodyBucket{byPrint: map[uint64][]int{}}
 	for _, p := range ps {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if sum, ok := print(p); ok {
-			b.byPrint[sum] = append(b.byPrint[sum], p)
+			s := append(b.byPrint[sum], p)
+			b.byPrint[sum] = s
+			if len(s) == 2 {
+				if b.next == nil {
+					b.next = map[uint64]*atomic.Int64{}
+				}
+				b.next[sum] = &atomic.Int64{}
+			}
 		} else {
 			b.rest = append(b.rest, p)
 		}
 	}
 	f.filings.Add(1)
+	f.mu.Lock()
 	f.filed[key] = b
+	f.mu.Unlock()
 	return b, nil
 }
 

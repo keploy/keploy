@@ -92,7 +92,7 @@ func learnNarrows(n learnNoise, lp httpParts, mocks []*models.Mock) bool {
 		if rp.method != lp.method || n.maskedPath(rp.path) != n.maskedPath(lp.path) || hasVariables(m) || learnsWide(m) {
 			continue
 		}
-		if sum, ok := learnPlainPrint(m, rp); ok && sum != body {
+		if sum, ok := learnPlainPrint(m, rp, n); ok && sum != body {
 			return true
 		}
 	}
@@ -274,7 +274,7 @@ func TestLearnPrintFilesOnlyABodyTheLearnStepComparesPlainly(t *testing.T) {
 		t.Error(`learnPrint({"a]":1}) refused: a ']' in a key ends no path segment`)
 	}
 	plain := func(m *models.Mock) bool {
-		_, ok := learnPlainPrint(m, recordedParts(m))
+		_, ok := learnPlainPrint(m, recordedParts(m), learnNoise{})
 		return ok
 	}
 	m := learnRecorded("m", 0, "POST", "/item", `{"a":1}`, nil, `{}`)

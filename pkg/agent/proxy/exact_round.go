@@ -144,6 +144,9 @@ type roundLog struct {
 	// its own and the shared recordings it consumed, and the ahead answers
 	// carried into it (their TakeConsumed entries).
 	byTest map[string][]int
+	// voided holds the names of TakeVoided entries in takes as a copy-on-write
+	// immutable map so RoundMeta can share it in O(1) with zero copies.
+	voided map[string]struct{}
 }
 
 // lockRound takes the round lock for a change (onWait first).
@@ -280,6 +283,14 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 	case integrations.TakeRestored:
 		delete(l.taken, t.Mock.Name)
 	case integrations.TakeVoided:
+		if _, exists := l.voided[t.Mock.Name]; !exists {
+			next := make(map[string]struct{}, len(l.voided)+1)
+			for k := range l.voided {
+				next[k] = struct{}{}
+			}
+			next[t.Mock.Name] = struct{}{}
+			l.voided = next
+		}
 		m.forgetVoidedLocked(t.Mock.Name)
 	case integrations.TakeCarried:
 		if t.Of >= 0 {
@@ -949,9 +960,103 @@ func (m *MockManager) WithinRound(at integrations.RoundAt) integrations.RoundSco
 	return &roundScope{MockManager: m, g: roundGuard{at: at}}
 }
 
+// RoundMeta implements integrations.ExactRoundReader: an O(1) read of the
+// round's state and view identity under swapMu (read) and the round lock,
+// copying no mock or tracker slices. Returns false when exact serving is off
+// or when the onRead test seam is installed (so interleaving tests continue to
+// drive the full RoundSnapshot path).
+func (m *MockManager) RoundMeta(tracker *learn.Tracker) (integrations.RoundMeta, bool) {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	r := &m.exact.round
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v := m.exact.view.Load()
+	if v == nil || r.onRead != nil {
+		return integrations.RoundMeta{}, false
+	}
+	l := m.logLocked()
+	meta := integrations.RoundMeta{
+		At:         integrations.RoundAt{Epoch: l.epoch, Gen: r.gen, Bounds: r.bounds, Taken: len(l.takes)},
+		Reads:      m.windowReads.Load(),
+		Test:       v.test,
+		Ahead:      v.test == "" && len(v.owned) > 0,
+		Fired:      m.exact.fired.Load(),
+		Background: v.bg != nil,
+		Staging:    v.staging,
+		OwnedGen:   v.gen,
+		Owned:      v.owned,
+	}
+	var learnRead integrations.LearnRead
+	if tracker != nil {
+		ps := tracker.PlacedState()
+		setAhead := r.learn.routed && ps.SetAt != r.stagedSet
+		learnRead = integrations.LearnRead{
+			Bound:    true,
+			Number:   ps.Test,
+			Open:     ps.Open,
+			Begun:    ps.Begun,
+			SetAhead: setAhead,
+			Awaiting: ps.Awaiting,
+		}
+		meta.Learn = learnRead
+		meta.LearnHasHTTPPut = ps.HasHTTPPut
+	}
+	meta.Phase, meta.Boundary, meta.Ended = m.phaseLocked(v, learnRead)
+	meta.Open = meta.Phase == integrations.RoundInTest
+
+	// Read HTTP stored/staging generations in O(1).
+	m.revMu.RLock()
+	storedPtr := m.storedByKind[models.HTTP]
+	genPtr := m.stagedByKind[models.HTTP]
+	m.revMu.RUnlock()
+	var stored uint64
+	if storedPtr != nil {
+		stored = atomic.LoadUint64(storedPtr)
+	}
+	if genPtr != nil {
+		meta.StagingGen = atomic.LoadUint64(genPtr)
+	}
+	if v.test != "" {
+		meta.HasShared = true
+		meta.SharedGen = integrations.SharedGen{View: v.shared, Store: stored}
+	}
+
+	parts := integrations.RoundMetaParts{
+		ViewGen:    v.round,
+		OwnedIndex: v.index,
+		Voided:     l.voided,
+		InFlight: func(mk *models.Mock) bool {
+			if mk == nil || v.test == "" {
+				return false
+			}
+			i, ok := v.index[mk.Name]
+			return ok && !v.isCand(i) && v.inFlight[mk.Name]
+		},
+		Unspent:   v.unspentFrom,
+		Spent:     v.spentNow,
+		Pool:      v.pool,
+		Worker:    v.worker,
+		Windows:   m.testWindows.Load(),
+		PoolNames: m.exact.poolNames.Load(),
+		View:      viewCursor{m: m, v: v},
+	}
+	if b := r.bound; meta.Ended != "" && b != nil {
+		parts.EndedIndex = b.index
+	}
+	if v.bg != nil {
+		parts.BGPool, parts.BGWorker = v.bg.pool, v.bg.worker
+	}
+	m.windowMu.RLock()
+	parts.WindowStart, parts.WindowEnd = m.windowStart, m.windowEnd
+	m.windowMu.RUnlock()
+	return meta.WithMetaParts(parts), true
+}
+
 var (
-	_ integrations.RoundReader = (*MockManager)(nil)
-	_ integrations.RoundWaiter = (*MockManager)(nil)
+	_ integrations.RoundReader      = (*MockManager)(nil)
+	_ integrations.RoundWaiter      = (*MockManager)(nil)
+	_ integrations.ExactRoundReader = (*MockManager)(nil)
 )
 
 // roundScope is the manager whose consume doors settle only while it is at
