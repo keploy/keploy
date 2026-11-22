@@ -56,7 +56,7 @@ func ConsumeRefused(db MockMemDb, name string) bool {
 	if UnheldWhy(db) != "" {
 		return true
 	}
-	return name != "" && ExactServing(db)
+	return name != "" && (ExactServing(db) || (S12Background(db) && InBackground(db, name)))
 }
 
 // ExactConcurrentReader is an optional MockMemDb capability under exact

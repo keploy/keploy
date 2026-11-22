@@ -5864,6 +5864,13 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // times by the clock checks alone, which refuses more and never passes
 // more, so it is not refused.
 func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) (retErr error) {
+	return a.PushProvenTableWithStartupRules(ctx, table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background, series, sources, once, timeForm, false)
+}
+
+// PushProvenTableWithStartupRules is PushProvenTable with startupRules
+// (models.ScopeTableReq.StartupRules) set when the set carries a declared
+// startup-capable background rule.
+func (a *AgentClient) PushProvenTableWithStartupRules(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm, startupRules bool) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
@@ -5871,11 +5878,11 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 		if retErr == nil && a.session().recording() {
 			t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background), maps.Clone(series), maps.Clone(sources), slices.Clone(once)
 			a.session().record(stepScopeTable, func(c context.Context) error {
-				return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, timeForm)
+				return a.PushProvenTableWithStartupRules(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, timeForm, startupRules)
 			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, TimeForm: timeForm})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, TimeForm: timeForm, StartupRules: startupRules})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -5965,14 +5972,49 @@ func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time
 // served pool per test, with the recorded window of every test of the set
 // (models.ScopeTableReq.Windows). A missing endpoint (older agent) is a no-op.
 func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string, windows []models.TestWindow) (retErr error) {
+	return a.PushScopeTableWithBackground(ctx, table, windows, nil, nil, nil, nil, nil, false)
+}
+
+// PushScopeTableWithBackground hands the agent the replay-time per-test
+// name→mock-names table along with pool slices, worker-scope, @startup
+// background mock names, series, once series, and declared-startup-rule flag
+// (proven switch off) so both KEPLOY_PROVEN modes share the exact same
+// ServeExactBackground engine.
+func (a *AgentClient) PushScopeTableWithBackground(ctx context.Context, table map[string][]string, windows []models.TestWindow, pool, worker map[string][]string, background []string, series map[string][]string, once []string, startupRules bool) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded, recordedWindows := maps.Clone(table), slices.Clone(windows)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushScopeTable(c, recorded, recordedWindows) })
+			cloneMap := func(m map[string][]string) map[string][]string {
+				if m == nil {
+					return nil
+				}
+				cp := make(map[string][]string, len(m))
+				for k, v := range m {
+					cp[k] = slices.Clone(v)
+				}
+				return cp
+			}
+			recordedPool := cloneMap(pool)
+			recordedWorker := cloneMap(worker)
+			recordedBG := slices.Clone(background)
+			recordedSeries := cloneMap(series)
+			recordedOnce := slices.Clone(once)
+			a.session().record(stepScopeTable, func(c context.Context) error {
+				return a.PushScopeTableWithBackground(c, recorded, recordedWindows, recordedPool, recordedWorker, recordedBG, recordedSeries, recordedOnce, startupRules)
+			})
 		}
 	}()
 	url := fmt.Sprintf("%s/scope/table", a.conf.AgentURI())
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Windows: windows})
+	body, err := json.Marshal(models.ScopeTableReq{
+		Mappings:     table,
+		Windows:      windows,
+		Pool:         pool,
+		Worker:       worker,
+		Background:   background,
+		Series:       series,
+		Once:         once,
+		StartupRules: startupRules,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

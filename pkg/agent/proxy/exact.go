@@ -1090,7 +1090,7 @@ func (v *exactView) spendsBetween(mk *models.Mock, windowed bool) bool {
 func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 
 // ExactServing reports whether the manager serves each test exactly its own
-// mocks (KEPLOY_PROVEN): every read shows one view, which changes as a
+// mocks (exact view armed): every read shows one view, which changes as a
 // test begins and ends, and a consume the view refuses returns false. A
 // parser that keeps an index across reads (Postgres v3's tier engines) reads
 // it at each dispatch: exact serving can begin after a connection opened.
@@ -2492,7 +2492,8 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	v.staging = v.test == "" && m.exact.staging.Load()
 	// Under the background rules the view orders its worker scope as the
 	// agent placed it, and shows the pool in a test (exact_background.go).
-	if bg := m.exact.bg.Load(); bg != nil {
+	// servedBackground decides whether the view serves them.
+	if bg, _ := m.servedBackground(v); bg != nil {
 		v.bg = bg
 		if w != nil {
 			v.workerOrder = w.order
@@ -3953,6 +3954,9 @@ func (m *MockManager) consumeAt(mk *models.Mock, evicts bool, g *roundGuard, tie
 	if m.exactView() != nil {
 		return m.exactConsumeAt(mk, evicts, g, tier, observe) != exactRefused
 	}
+	if handled, ok := m.consumeUnsetBackground(mk, evicts, g, tier, observe); handled {
+		return ok
+	}
 	if g.checks() {
 		g.refuse("exact serving is off")
 		return false
@@ -4288,6 +4292,13 @@ func (m *MockManager) consumeValueAt(mock models.Mock, evicts bool, g *roundGuar
 			tell = func() { m.observeServedCopy(mk, g.flight()) }
 		}
 		return m.exactConsumeAt(&mk, evicts, g, func() bool { return tier(mk) }, tell) != exactRefused
+	}
+	var tell func()
+	if observe {
+		tell = func() { m.observeServedCopy(mock, g.flight()) }
+	}
+	if handled, ok := m.consumeUnsetBackground(&mock, evicts, g, func() bool { return tier(mock) }, tell); handled {
+		return ok
 	}
 	if g.checks() {
 		g.refuse("exact serving is off")

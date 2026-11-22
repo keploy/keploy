@@ -159,10 +159,22 @@ func (m *MockManager) OwnedUnanswered() ([]*models.Mock, bool) {
 // caller reads it and never changes it. False while no test is open.
 func (m *MockManager) OwnedRecordings() (uint64, []*models.Mock, bool) {
 	v := m.exactView()
-	if v == nil || v.test == "" {
+	if v != nil {
+		if v.test == "" {
+			return 0, nil, false
+		}
+		return v.gen, v.owned, true
+	}
+	if _, exact := m.servedBackground(nil); !exact {
 		return 0, nil, false
 	}
-	return v.gen, v.owned, true
+	m.scopeOwnedMu.Lock()
+	gen, owned := m.scopeOwnedGen, m.scopeOwned
+	m.scopeOwnedMu.Unlock()
+	if len(owned) == 0 {
+		return 0, nil, false
+	}
+	return gen, owned, true
 }
 
 // OwnedUnansweredAt is the positions of at, in OwnedRecordings of the view

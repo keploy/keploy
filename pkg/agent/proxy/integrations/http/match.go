@@ -297,6 +297,45 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 			return true, kh.served, nil, nil
 		}
 
+		// With KEPLOY_PROVEN unset on a set carrying background rules
+		// (S12Background), keep main's exact unfilteredMocks pool intact for
+		// test-own and reusable session calls (never stripping reusable
+		// unfiltered mocks), and run exact-only strictServe over
+		// integrations.Background only as a fallback after the primary pass
+		// misses (for per-test @startup / worker: recordings not in the open
+		// test's narrowed view).
+		tryExactBackground := func(bctx context.Context, ownDiag *matchDiag) (matched bool, served *models.Mock, diag *matchDiag, retry bool, err error) {
+			var bgMocks []*models.Mock
+			if !provenswitch.On() && integrations.S12Background(mockDb) {
+				bgMocks = integrations.Background(mockDb, models.HTTP)
+			}
+			if len(bgMocks) == 0 {
+				return false, nil, ownDiag, false, nil
+			}
+			if h.ownCall(bctx, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseStrict) {
+				return false, nil, ownDiag, false, nil
+			}
+			var compared []*models.Mock
+			if ownDiag != nil {
+				compared = ownDiag.pool
+			}
+			bgStrict := h.newStrictNoise(headerNoise, userBodyNoise, urlNoise).withSources(mockDb)
+			served, bgDiag, retry, err := h.strictServe(bctx, input, bgMocks, compared, mockDb, bgStrict, statefulMocks)
+			if err != nil {
+				return false, nil, nil, false, err
+			}
+			if retry {
+				return false, nil, nil, true, nil
+			}
+			if served != nil {
+				return true, served, nil, false, nil
+			}
+			if ownDiag != nil && ownDiag.phase != models.MatchPhaseNoMocks {
+				return false, nil, ownDiag, false, nil
+			}
+			return false, nil, bgDiag, false, nil
+		}
+
 		// With the switch off any other call is compared with the
 		// recordings of its own method and path (keyedLaxRead), as the
 		// passes below compare the whole pool.
@@ -309,7 +348,14 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 			if retry {
 				continue
 			}
-			return matched, served, diag, nil
+			if matched {
+				return true, served, nil, nil
+			}
+			okBg, servedBg, diagBg, retryBg, errBg := tryExactBackground(kctx, diag)
+			if retryBg {
+				continue
+			}
+			return okBg, servedBg, diagBg, errBg
 		}
 
 		// The variables' scope this attempt checks against is read before
@@ -387,7 +433,11 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 		}
 
 		if len(unfilteredMocks) == 0 {
-			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
+			okBg, servedBg, diagBg, retryBg, errBg := tryExactBackground(ctx, &matchDiag{phase: models.MatchPhaseNoMocks})
+			if retryBg {
+				continue
+			}
+			return okBg, servedBg, diagBg, errBg
 		}
 
 		// Under the proven switch a mock that declares variable places is
@@ -446,7 +496,14 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 		if retry {
 			continue
 		}
-		return matched, served, diag, nil
+		if matched {
+			return true, served, nil, nil
+		}
+		okBg, servedBg, diagBg, retryBg, errBg := tryExactBackground(ctx, diag)
+		if retryBg {
+			continue
+		}
+		return okBg, servedBg, diagBg, errBg
 	}
 }
 

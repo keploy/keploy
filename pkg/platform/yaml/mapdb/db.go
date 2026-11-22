@@ -704,6 +704,22 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 		}
 	}
 	if entry == nil {
+		kept := mapping.Startup[:0:0]
+		for _, e := range mapping.Startup {
+			if e.Name != mv.Name {
+				kept = append(kept, e)
+				continue
+			}
+			if entry == nil {
+				e := e
+				entry = &e
+			}
+		}
+		if len(kept) != len(mapping.Startup) {
+			mapping.Startup = kept
+		}
+	}
+	if entry == nil {
 		return false
 	}
 	entry.Place = mv.Place

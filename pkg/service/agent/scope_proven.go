@@ -166,6 +166,11 @@ type provenWire struct {
 	// the table had none.
 	background       []string
 	stagedBackground []string
+	// startupRules is true when the replay's set carries at least one worker:
+	// entry placed by a declared kind: background rule with startup: true
+	// (models.ScopeTableReq.StartupRules). Plain recorded startup: entries do
+	// not set this flag.
+	startupRules bool
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
 	// sends a pool slice naming a recording the staging did not read.
@@ -972,6 +977,20 @@ func (a *Agent) SetScopeBackground(ctx context.Context, names []string) error {
 	return nil
 }
 
+// SetScopeStartupRules records whether the staged replay set carries a
+// declared startup-capable background rule (models.ScopeTableReq.StartupRules).
+// Every scope table sets it (false clears any prior set's value).
+func (a *Agent) SetScopeStartupRules(ctx context.Context, on bool) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.startupRules = on
+	a.provenMu.Unlock()
+	return nil
+}
+
 // evidenceText is evidenceReason with what the agent holds for it: in a
 // replay, the recordings of the calls the test never made and the skipped
 // test of each read the replay's gate skips; in a record, neither.
@@ -1242,6 +1261,9 @@ func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start tim
 // unless a test is open: its end serves it. In a run of test workers, each
 // served worker none of whose tests is open is served its own key's slice.
 func (a *Agent) applyPool(ctx context.Context) error {
+	if !provenswitch.On() {
+		return a.serveUnsetBackground(ctx)
+	}
 	a.provenMu.Lock()
 	var serve []uint32
 	if ids := a.workerIDs(); len(ids) == 0 {
