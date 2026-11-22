@@ -4,9 +4,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type TestReport struct {
@@ -855,41 +860,74 @@ func MockSummaryFromSpec(mock *Mock) string {
 
 // mongoOperationFromRequest derives the operation a Mongo request names, the
 // same token Spec.Metadata["operation"] carries when a recorder stores one. An
-// OP_MSG names its command as the first field of its first section document,
-// and a legacy OP_QUERY as the first field of its query. Returns "" when there
-// is no message or nothing recognisable to read from it.
+// OP_MSG names its command as the first non-$ field of its first section
+// document, and a legacy OP_QUERY targeting .$cmd as the first non-$ field of
+// its query. Returns "" when there is no message or nothing recognisable to
+// read from it.
 func mongoOperationFromRequest(req *MongoRequest) string {
 	if req == nil || req.Message == nil {
 		return ""
 	}
 	switch msg := req.Message.(type) {
 	case *MongoOpMessage:
-		for _, section := range msg.Sections {
-			if op := firstDocumentField(section); op != "" {
-				return op
-			}
+		if msg == nil || len(msg.Sections) == 0 {
+			return ""
 		}
+		// Only inspect Sections[0] (the command document); Sections[1:] carry
+		// document sequences of user payloads whose first field is data, not a command.
+		return firstDocumentField(msg.Sections[0])
 	case *MongoOpQuery:
+		if msg == nil {
+			return ""
+		}
+		// In legacy OP_QUERY, Query is a command document only when targeting
+		// .$cmd (or when FullCollectionName is empty in legacy fixtures).
+		if msg.FullCollectionName != "" && !strings.HasSuffix(msg.FullCollectionName, ".$cmd") {
+			return ""
+		}
 		return firstDocumentField(msg.Query)
 	}
 	return ""
 }
 
-// firstDocumentField returns the first field name of a document held as a
-// string, accepting raw BSON and the JSON rendering older recorders write into
-// sections. Both carry field order from the wire, which is what makes the
-// first field the command name.
+// firstDocumentField returns the first non-$ command field name of a document
+// held as a string, accepting valid raw BSON and valid JSON objects. Both
+// carry field order from the wire, which is what makes the first command field
+// the operation name.
 func firstDocumentField(doc string) string {
-	if len(doc) < 7 {
-		return ""
-	}
-	if int32(len(doc)) == int32(binary.LittleEndian.Uint32([]byte(doc[:4]))) {
-		if end := strings.IndexByte(doc[5:], 0); end > 0 {
-			return doc[5 : 5+end]
+	if len(doc) >= 8 {
+		size := binary.LittleEndian.Uint32([]byte(doc[:4]))
+		if size <= math.MaxInt32 && uint64(len(doc)) == uint64(size) && doc[len(doc)-1] == 0 {
+			raw := bson.Raw(doc)
+			if err := raw.Validate(); err != nil {
+				return ""
+			}
+			elems, err := raw.Elements()
+			if err != nil {
+				return ""
+			}
+			for _, elem := range elems {
+				key, err := elem.KeyErr()
+				if err != nil {
+					return ""
+				}
+				if strings.HasPrefix(key, "$") {
+					continue
+				}
+				if isValidMongoOpName(key) {
+					return key
+				}
+				return ""
+			}
+			return ""
 		}
+	}
+
+	trimmed := strings.TrimSpace(doc)
+	if !strings.HasPrefix(trimmed, "{") || !json.Valid([]byte(trimmed)) {
 		return ""
 	}
-	dec := json.NewDecoder(strings.NewReader(doc))
+	dec := json.NewDecoder(strings.NewReader(trimmed))
 	tok, err := dec.Token()
 	if err != nil {
 		return ""
@@ -897,15 +935,40 @@ func firstDocumentField(doc string) string {
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
 		return ""
 	}
-	key, err := dec.Token()
-	if err != nil {
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		name, ok := keyTok.(string)
+		if !ok {
+			return ""
+		}
+		var discard json.RawMessage
+		if err := dec.Decode(&discard); err != nil {
+			return ""
+		}
+		if strings.HasPrefix(name, "$") {
+			continue
+		}
+		if isValidMongoOpName(name) {
+			return name
+		}
 		return ""
 	}
-	name, ok := key.(string)
-	if !ok {
-		return ""
+	return ""
+}
+
+func isValidMongoOpName(name string) bool {
+	if name == "" || !utf8.ValidString(name) || strings.HasPrefix(name, "$") {
+		return false
 	}
-	return name
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func (tr *TestResult) GetKind() string {
