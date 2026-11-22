@@ -302,6 +302,18 @@ func WriteRecordingFileF(ctx context.Context, logger *zap.Logger, root, path, fi
 	// same way. The destination is never created ahead of the rename (only
 	// its directory, fileDirF): a new file comes into being whole, with no
 	// empty file before it for a reader to find.
+	return WriteRecordingFileStreamF(ctx, logger, root, path, fileName, format, func(w io.Writer) error {
+		_, err := w.Write(docData)
+		return err
+	})
+}
+
+// WriteRecordingFileStreamF atomically replaces fileName in path (under root)
+// with the bytes write writes to w, using the same temp-file, sync, mode
+// preservation, and rename sequence as WriteRecordingFileF (non-append) without
+// requiring the caller to buffer the entire document in memory first.
+func WriteRecordingFileStreamF(ctx context.Context, logger *zap.Logger, root, path, fileName string, format Format, write func(w io.Writer) error) error {
+	filePath := filepath.Join(path, fileName+"."+format.FileExtension())
 	_, exists, err := fileDirF(ctx, logger, root, path, fileName, format)
 	if err != nil {
 		utils.LogError(logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))
@@ -321,7 +333,7 @@ func WriteRecordingFileF(ctx context.Context, logger *zap.Logger, root, path, fi
 	}()
 
 	cw := &ctxWriter{ctx: ctx, writer: tmpFile}
-	if _, err = cw.Write(docData); err != nil {
+	if err = write(cw); err != nil {
 		_ = tmpFile.Close()
 		if err == ctx.Err() {
 			return nil // Ignore context cancellation error

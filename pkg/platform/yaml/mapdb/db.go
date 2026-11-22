@@ -3,6 +3,7 @@ package mapdb
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -63,23 +64,25 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		fileName = "mappings"
 	}
 
-	newMapping, effFormat, old, oldDoc, plainHead, plainSize, err := db.prepareInsert(ctx, mapping, mappingPath, fileName)
+	newMapping, effFormat, old, oldDoc, plainHead, err := db.prepareInsert(ctx, mapping, mappingPath, fileName)
 	if err != nil {
 		return err
 	}
 
-	var encodedData []byte
-	if effFormat != yaml.FormatJSON && oldDoc == plainDoc {
-		encodedData, err = encodePlainYAML(newMapping, plainHead, plainSize)
-	} else {
-		encodedData, err = db.encodeOver(newMapping, effFormat, old, oldDoc, headerAlways, testSetID)
-	}
-	if err != nil {
-		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
-		return err
-	}
 	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
-	err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
+	if effFormat != yaml.FormatJSON && oldDoc == plainDoc {
+		err = yaml.WriteRecordingFileStreamF(ctx, db.logger, db.path, mappingPath, fileName, effFormat, func(w io.Writer) error {
+			return writePlainYAML(w, newMapping, plainHead)
+		})
+	} else {
+		var encodedData []byte
+		encodedData, err = db.encodeOver(newMapping, effFormat, old, oldDoc, headerAlways, testSetID)
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
+			return err
+		}
+		err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
+	}
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to write mapping file", zap.String("path", mappingPath))
 		return err
@@ -95,10 +98,10 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 // prepareInsert reads any existing mapping file for mapping.TestSetID and
 // merges mapping into it, returning the rebuilt mapping and only the parts of
 // the existing file encoding still needs (for a plain YAML file, just its
-// comment head and length hint so the existing bytes and decode temporaries
-// are free before the new file's buffer is allocated).
+// comment head so the existing bytes and decode temporaries are free before
+// encoding streams the new file).
 func (db *MappingDb) prepareInsert(ctx context.Context, mapping *models.Mapping, mappingPath, fileName string) (
-	newMapping *models.Mapping, effFormat yaml.Format, old []byte, oldDoc *yamlLib.Node, plainHead []byte, plainSize int, err error,
+	newMapping *models.Mapping, effFormat yaml.Format, old []byte, oldDoc *yamlLib.Node, plainHead []byte, err error,
 ) {
 	testSetID := mapping.TestSetID
 	var existingStartup, existingWorker, existingShared []models.MockEntry
@@ -112,7 +115,7 @@ func (db *MappingDb) prepareInsert(ctx context.Context, mapping *models.Mapping,
 	exists, detected, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to check if mapping file exists", zap.String("path", mappingPath))
-		return nil, "", nil, nil, nil, 0, err
+		return nil, "", nil, nil, nil, err
 	}
 
 	effFormat = db.Format
@@ -122,18 +125,17 @@ func (db *MappingDb) prepareInsert(ctx context.Context, mapping *models.Mapping,
 		data, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", mappingPath))
-			return nil, "", nil, nil, nil, 0, err
+			return nil, "", nil, nil, nil, err
 		}
 
 		if oldDoc, err = decodeInto(effFormat, data, &existingConfig); err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", mappingPath))
-			return nil, "", nil, nil, nil, 0, err
+			return nil, "", nil, nil, nil, err
 		}
 		if effFormat != yaml.FormatJSON && oldDoc == plainDoc {
-			// A plain file holds no hand edits to keep, only its comment head
-			// and length hint; drop its bytes before rebuilding and encoding.
+			// A plain file holds no hand edits to keep, only its comment head;
+			// drop its bytes before rebuilding and streaming the new file.
 			plainHead = commentHead(data)
-			plainSize = len(data)
 		} else {
 			old = data
 		}
@@ -242,7 +244,7 @@ func (db *MappingDb) prepareInsert(ctx context.Context, mapping *models.Mapping,
 	} else {
 		newMapping.Runner = mapping.Runner
 	}
-	return newMapping, effFormat, old, oldDoc, plainHead, plainSize, nil
+	return newMapping, effFormat, old, oldDoc, plainHead, nil
 }
 
 // keepEntries gives each test entry Insert rebuilt from the tests' mocks

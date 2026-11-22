@@ -1,9 +1,11 @@
 package mapdb
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"hash/maphash"
+	"io"
 	"strings"
 	"sync"
 
@@ -210,14 +212,31 @@ func EncodeOver(mapping *models.Mapping, old []byte, renames map[string]string) 
 	return encodeYAMLOver(mapping, old, nil, renames, headerAlways)
 }
 
-// encodePlainYAML is encodeYAMLOver(headerAlways) for an existing YAML file
-// decodeInto found plain (plainDoc): the caller kept only its head and length
-// so the old file's bytes are free before the new file's buffer is allocated.
-func encodePlainYAML(mapping *models.Mapping, head []byte, oldSize int) ([]byte, error) {
+// writePlainYAML streams encodeYAMLOver(headerAlways) for an existing YAML file
+// decodeInto found plain (plainDoc) directly to w without buffering the whole
+// encoded document in memory.
+func writePlainYAML(w io.Writer, mapping *models.Mapping, head []byte) error {
 	if len(head) == 0 {
 		head = []byte(utils.GetVersionAsComment())
 	}
-	return marshalMappingYAMLAfter(head, mapping, oldSize)
+	bw := bufio.NewWriterSize(w, 64<<10)
+	if _, err := bw.Write(head); err != nil {
+		return err
+	}
+	var writeErr error
+	if err := encodeMappingYAML(mapping, func(p []byte) bool {
+		if _, err := bw.Write(p); err != nil {
+			writeErr = err
+			return false
+		}
+		return true
+	}); err != nil {
+		return err
+	}
+	if writeErr != nil {
+		return writeErr
+	}
+	return bw.Flush()
 }
 
 // encodeYAMLOver is EncodeOver with keploy's line where h puts it when old
