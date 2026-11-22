@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,6 +132,10 @@ type v2Harness struct {
 	dirs     chan directive.Directive
 	acks     chan directive.Ack
 	sess     *supervisor.Session
+	// captured numbers the chunks pushed, across both directions, in the
+	// order they are pushed (fakeconn.Chunk.ConnSeq): the order a producer
+	// captured them in.
+	captured atomic.Uint64
 }
 
 func newV2Harness(t *testing.T) *v2Harness {
@@ -163,11 +169,13 @@ func newV2Harness(t *testing.T) *v2Harness {
 }
 
 func (h *v2Harness) pushClient(payload []byte, ts time.Time) {
-	h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
+	h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: fakeconn.ConnSeqOf(h.captured.Add(1)),
+		Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
 }
 
 func (h *v2Harness) pushDest(payload []byte, ts time.Time) {
-	h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
+	h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: fakeconn.ConnSeqOf(h.captured.Add(1)),
+		Bytes: append([]byte(nil), payload...), ReadAt: ts, WrittenAt: ts}
 }
 
 func (h *v2Harness) closeStreams() {
@@ -207,7 +215,7 @@ func TestRecordV2_HappyPath_HandshakeAndOneQuery(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	// Collect mocks; we expect two: one "config" for the handshake and
@@ -332,7 +340,7 @@ func TestRecordV2_TLSUpgrade_DirectiveAndResume(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	// Expect exactly one mock (the config mock).
@@ -369,7 +377,12 @@ func TestRecordV2_TLSUpgrade_DirectiveAndResume(t *testing.T) {
 	}
 }
 
-func TestRecordV2_TLSUpgrade_FailureMarksIncompleteAndReturnsErr(t *testing.T) {
+// A failed TLS upgrade ends the recorder with the upgrade's error: the
+// supervisor falls through to passthrough on it, which leaves out the rest of
+// the connection and says so. It marks nothing on the incomplete-mock flag:
+// no mock is emitted after the return to take a mark, so one would only sit
+// there, reporting nothing.
+func TestRecordV2_TLSUpgrade_FailureReturnsItsErrorAndLeavesNoMark(t *testing.T) {
 	t.Parallel()
 	h := newV2Harness(t)
 
@@ -392,23 +405,23 @@ func TestRecordV2_TLSUpgrade_FailureMarksIncompleteAndReturnsErr(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("expected RecordV2 to return an error on TLS upgrade failure")
+		if !errors.Is(err, errFakeTLSFail) {
+			t.Fatalf("RecordV2 returned %v on a TLS upgrade failure, want the upgrade's error", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for RecordV2 to return")
 	}
 
-	if !h.sess.IsMockIncomplete() {
-		t.Error("expected session to be marked mock incomplete after TLS upgrade failure")
+	if h.sess.IsMockIncomplete() {
+		t.Error("the session is marked mock incomplete after the recorder returned: a mark nothing takes")
 	}
 
-	// Ensure no mocks were emitted (incomplete gate drops them).
+	// Ensure no mocks were emitted.
 	select {
 	case m := <-h.mocks:
 		t.Errorf("unexpected mock emitted after TLS failure: %+v", m)
@@ -548,7 +561,7 @@ func runPostTLS(t *testing.T, h *v2Harness, ctx context.Context, want int) []*mo
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		done <- RecordV2(cctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, cctx, h.logger, h.sess)
 	}()
 	var got []*models.Mock
 	for len(got) < want {
@@ -760,7 +773,7 @@ func TestRecordV2_TLSUpgrade_ClientHelloDiscardedFromParserStream(t *testing.T) 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	select {

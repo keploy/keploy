@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 )
 
 // selfSigned is a throwaway server certificate for 127.0.0.1.
@@ -76,7 +78,7 @@ func waitCount(t *testing.T, n *atomic.Int32, want int32) {
 // dial (a redial after an abandoned attempt) opens a new one.
 func TestDialRawUsesThePredialedConnectionOnce(t *testing.T) {
 	addr, n := countingListener(t)
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +116,7 @@ func TestDialRawUsesThePredialedConnectionOnce(t *testing.T) {
 func TestDialRawLeavesOtherAddressesAlone(t *testing.T) {
 	addr, _ := countingListener(t)
 	other, n := countingListener(t)
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +144,7 @@ func TestDialRawLeavesOtherAddressesAlone(t *testing.T) {
 // dialled (or that ended first) must not leave its upstream open.
 func TestCloseIfUnusedClosesAnUntakenConnection(t *testing.T) {
 	addr, _ := countingListener(t)
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +190,7 @@ func TestDialTLSHandshakesOverThePredialedConnection(t *testing.T) {
 		}
 	}()
 	addr := l.Addr().String()
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +243,7 @@ func TestAliasLetsTheServerNameTakeTheConnection(t *testing.T) {
 	_, port, _ := net.SplitHostPort(ipAddr)
 	byName := net.JoinHostPort("localhost", port)
 
-	pre, err := net.Dial("tcp", ipAddr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", ipAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +285,7 @@ func TestDialTLSInfersServerNameAsTLSDialerDoes(t *testing.T) {
 			_ = srv.Handshake()
 			_ = server.Close()
 		}()
-		_, _ = DialTLS(context.Background(), nil, "tcp", addr, &tls.Config{}, NewPredialed(addr, client))
+		_, _ = DialTLS(context.Background(), nil, "tcp", addr, &tls.Config{}, NewPredialed(addr, connseq.NewUpstream(client)))
 		sn := <-got
 		// crypto/tls drops an IP literal from the SNI it sends.
 		if want == "[::1]" {
@@ -343,7 +345,7 @@ func TestDialTLSRedialsWhenTheIdlePredialWasJustClosed(t *testing.T) {
 		}
 	}()
 	addr := l.Addr().String()
-	pre, err := net.Dial("tcp", addr)
+	pre, err := DialUpstream(context.Background(), nil, "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,6 +356,12 @@ func TestDialTLSRedialsWhenTheIdlePredialWasJustClosed(t *testing.T) {
 	defer conn.Close()
 	if conn.NetConn() == pre {
 		t.Fatal("the handshake ran on the closed connection")
+	}
+	// The redial is a dial of the destination like any other: the relay
+	// refuses a destination with no Upstream (relay.New), so the
+	// application's connection would die instead of being relayed.
+	if connseq.Of(conn) == nil {
+		t.Fatal("the redialled connection has no connseq.Upstream under its TLS")
 	}
 	waitCount(t, &accepted, 2)
 }

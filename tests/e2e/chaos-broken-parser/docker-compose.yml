@@ -25,11 +25,12 @@
 
 services:
   postgres:
-    # Pinned tag from ECR Public's Docker Hub mirror so CI runs are
-    # reproducible and immune to Docker Hub unauthenticated rate limits
-    # (HTTP 429). Bumping requires editing the tag explicitly — never
-    # use `:latest`.
-    image: public.ecr.aws/docker/library/postgres:16
+    # Docker Hub's official image, pinned to a tag: bumping it means editing
+    # the tag, never `:latest`. Not ECR Public, whose anonymous quota is per
+    # source IP and answers 429 "Data limit exceeded" from a shared IP whose
+    # quota others have spent
+    # (.github/workflows/test_workflow_scripts/check-image-registries.sh).
+    image: postgres:16
     environment:
       POSTGRES_USER: chaos
       POSTGRES_PASSWORD: chaos
@@ -56,7 +57,7 @@ services:
   # ad-hoc psql commands without needing a psql client on the host.
   # Kept alive via `sleep infinity`; the harness exec's per-query.
   psql-client:
-    image: public.ecr.aws/docker/library/postgres:16
+    image: postgres:16
     depends_on:
       postgres:
         condition: service_healthy

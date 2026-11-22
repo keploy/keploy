@@ -2,17 +2,24 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/logleak"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -88,22 +95,24 @@ type unpublishedPortInstr struct {
 	asked  []string
 }
 
-func (u *unpublishedPortInstr) UnreachableAppPort(_ context.Context, host string, port uint16) string {
+func (u *unpublishedPortInstr) UnreachableAppPort(_ context.Context, host string, port, appPort uint16) string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.asked = append(u.asked, net.JoinHostPort(host, strconv.Itoa(int(port))))
+	u.asked = append(u.asked, fmt.Sprintf("%s for %d", net.JoinHostPort(host, strconv.Itoa(int(port))), appPort))
 	return u.reason
 }
 
 // closedLocalPort is a loopback port nothing listens on, so a dial is refused.
+// It is held for the test's life, so no other socket can take it
+// (testnet.RefusedAddr).
 func closedLocalPort(t *testing.T) uint16 {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	_, p, err := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	if err := l.Close(); err != nil {
+	port, err := strconv.ParseUint(p, 10, 16)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return uint16(port)
@@ -145,14 +154,64 @@ func TestARefusalAtAnUnreachableAppPortSaysSoAndIsNotRetried(t *testing.T) {
 			assert.Contains(t, err.Error(), wantMsg)
 			assert.True(t, neterr.IsConnRefused(err), "the refusal must still classify as one: %v", err)
 			assert.Contains(t, err.Error(), "connection refused")
+			assert.Contains(t, failedWith(tc, err).FailureInfo.Category, models.AppConnectionError,
+				"a test that failed with %v", err)
 			for _, e := range logs.All() {
 				assert.NotContains(t, e.Message, "not yet accepting", "misleading refusal message logged")
 				assert.NotContains(t, e.Message, "may still be coming up", "misleading refusal message logged")
 			}
 			instr.mu.Lock()
 			defer instr.mu.Unlock()
-			assert.Equal(t, []string{authority}, instr.asked,
-				"asked once, about the address the request was sent to, and not re-sent")
+			assert.Equal(t, []string{fmt.Sprintf("%s for %d", authority, port)}, instr.asked,
+				"asked once, about the address the request was sent to and the port it was recorded on, and not re-sent")
+		})
+	}
+}
+
+// A test that test.port (--port), or test.grpcPort for gRPC, sends to another
+// host port than the one it was recorded on is asked about as that: the host
+// port it goes to, for the app's port it was recorded on. A compose file that
+// publishes "18067:8080", replayed with --port 18067, is the app's port 8080
+// reached through host port 18067; asking about host port 18067 alone made a
+// refusal while the app was starting look like a port that can never reach it.
+// When the address is unreachable after all, the error names both ports.
+func TestARedirectedTestIsAskedAboutForTheAppPortItWasRecordedOn(t *testing.T) {
+	const reason = "host port N is published to the app's port 9000 instead of its port 8080"
+	port := closedLocalPort(t)
+	for _, tc := range []struct {
+		tc  *models.TestCase
+		cfg config.Test
+	}{
+		{
+			tc: &models.TestCase{
+				Name: "get-ping-1", Kind: models.HTTP, AppPort: 8080,
+				HTTPReq: models.HTTPReq{Method: "GET", URL: "http://127.0.0.1:18057/ping", Header: map[string]string{}},
+			},
+			cfg: config.Test{APITimeout: 5, Port: uint32(port)},
+		},
+		{
+			tc: &models.TestCase{
+				Name: "grpc-echo-1", Kind: models.GRPC_EXPORT, AppPort: 8080,
+				GrpcReq: models.GrpcReq{Headers: models.GrpcHeaders{PseudoHeaders: map[string]string{
+					":authority": "127.0.0.1:18057", ":path": "/echo.Echo/Ping", ":method": "POST", ":scheme": "http",
+				}}},
+			},
+			cfg: config.Test{APITimeout: 5, GRPCPort: uint32(port)},
+		},
+	} {
+		t.Run(string(tc.tc.Kind), func(t *testing.T) {
+			instr := &unpublishedPortInstr{prInstr: &prInstr{}, reason: reason}
+			h := NewHooks(zap.NewNop(), &config.Config{Test: tc.cfg}, instr)
+
+			_, err := h.SimulateRequest(context.Background(), tc.tc, "test-set-0")
+			if err == nil {
+				t.Fatal("a request to a closed port succeeded")
+			}
+			assert.Contains(t, err.Error(), fmt.Sprintf("the app's port 8080 cannot be reached from the host at port %d: %s", port, reason))
+			instr.mu.Lock()
+			defer instr.mu.Unlock()
+			assert.Equal(t, []string{fmt.Sprintf("localhost:%d for 8080", port)}, instr.asked,
+				"asked about the host port the request was sent to, for the app's port it was recorded on")
 		})
 	}
 }
@@ -194,9 +253,192 @@ func TestADroppedConnectionAtAnUnreachableAppPortSaysSo(t *testing.T) {
 			if tc.Kind == models.HTTP {
 				assert.True(t, pkg.IsTransportConnReset(err), "the reset must still classify as one: %v", err)
 			}
+			// However the drop is reported (net/http's io.EOF or reset, its
+			// errServerClosedIdle, or the request's write to the connection
+			// it closed on the drop, by races inside it), the test is
+			// labelled APP_CONNECTION_ERROR.
+			assert.Contains(t, failedWith(tc, err).FailureInfo.Category, models.AppConnectionError,
+				"a test that failed with %v", err)
 			instr.mu.Lock()
 			defer instr.mu.Unlock()
-			assert.Equal(t, []string{authority}, instr.asked, "asked once, about the address the request was sent to")
+			assert.Equal(t, []string{fmt.Sprintf("%s for %d", authority, n)}, instr.asked, "asked once, about the address the request was sent to")
 		})
+	}
+}
+
+// simInstr notes the clock calls a test case's simulation makes.
+type simInstr struct {
+	Instrumentation
+	frozen, real, after []string
+	realErr             error
+}
+
+func (s *simInstr) AfterSimulate(_ context.Context, tc string, _ string) error {
+	s.after = append(s.after, tc)
+	return nil
+}
+
+func (s *simInstr) BeforeSimulate(_ context.Context, _ *time.Time, _ string, tc string) error {
+	s.frozen = append(s.frozen, tc)
+	return nil
+}
+
+func (s *simInstr) BeforeSimulateReal(_ context.Context, _ *time.Time, _ string, tc string, _ []string) error {
+	s.real = append(s.real, tc)
+	return s.realErr
+}
+
+// Under the switch a test case whose recording lists mock.real destinations
+// runs on the real clock, never frozen at its recorded request (F3), and a
+// real clock that cannot be had fails the case; any other case is frozen as
+// before, its hook's failure only logged.
+func TestBeforeSimulatePutsARealTestCaseOnTheRealClock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Now()
+	s := &simInstr{}
+	h := &Hooks{logger: zap.NewNop(), instrumentation: s}
+	real := &models.TestCase{Name: "real", Real: []string{"db:5432"}}
+	plain := &models.TestCase{Name: "plain"}
+	require.NoError(t, h.beforeSimulate(context.Background(), real, &at, "set"))
+	require.NoError(t, h.beforeSimulate(context.Background(), plain, &at, "set"))
+	require.Equal(t, []string{"real"}, s.real)
+	require.Equal(t, []string{"plain"}, s.frozen)
+
+	s.realErr = errors.New("501")
+	require.ErrorContains(t, h.beforeSimulate(context.Background(), real, &at, "set"), "501")
+	require.Equal(t, []string{"real"}, s.after, "what the hook began ends when the real clock cannot be had")
+	h.instrumentation = struct{ Instrumentation }{}
+	require.ErrorContains(t, h.beforeSimulate(context.Background(), real, &at, "set"), "real clock")
+
+	t.Setenv(provenswitch.Env, "")
+	s = &simInstr{}
+	h.instrumentation = s
+	require.NoError(t, h.beforeSimulate(context.Background(), real, &at, "set"))
+	require.Equal(t, []string{"real"}, s.frozen, "without the switch the list is not read")
+}
+
+// A run-level AfterTestRun whose run has no agent left (withoutAgent) does its
+// own work and leaves out only the agent's hook; without the mark it calls it.
+func TestAfterTestRunWithoutAgentLeavesOutOnlyTheAgent(t *testing.T) {
+	agent := &bpNoAgent{}
+	h := newHooks(zap.NewNop(), &config.Config{}, agent, false)
+	require.NoError(t, h.AfterTestRun(context.Background(), "test-run-0", nil, models.TestCoverage{}))
+	require.EqualValues(t, 1, agent.afterTestRuns.Load())
+	require.NoError(t, h.AfterTestRun(withoutAgent(context.Background()), "test-run-0", nil, models.TestCoverage{}))
+	require.EqualValues(t, 1, agent.afterTestRuns.Load(), "the agent's hook was called with no agent left")
+}
+
+// afterRunRefusingAgent is an agent whose after-test-run hook fails, as an
+// enterprise agent's does when it could not write the row of a program it
+// saw off the run's clock.
+type afterRunRefusingAgent struct {
+	*bpNoAgent
+	err error
+}
+
+func (a *afterRunRefusingAgent) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
+	_ = a.bpNoAgent.AfterTestRun(ctx, testRunID, testSetIDs, coverage)
+	return a.err
+}
+
+// Under the proven switch, the agent's failed after-test-run hook is the
+// run's hook's error, so a caller does not judge the run on the checks the
+// agent did not finish (keploy test reads it as not judged); the run's own
+// cancel cause is named beside it. Without the switch it is logged and the
+// hook returns nil, as before.
+func TestAfterTestRunHandsOnTheAgentsFailureUnderTheSwitch(t *testing.T) {
+	// The agent client's error for the enterprise agent's refusal.
+	refused := errors.New("agent hook failed: 500: the run's rows miss /usr/bin/curl (started without keploy's clock shim (LD_PRELOAD): it reads the real clock): keploy's agent could not write its row: open /run/keploy-clock/unfrozen.json: permission denied")
+	newRun := func() (*Hooks, *afterRunRefusingAgent, *observer.ObservedLogs) {
+		core, logs := observer.New(zap.DebugLevel)
+		agent := &afterRunRefusingAgent{bpNoAgent: &bpNoAgent{}, err: refused}
+		return newHooks(zap.New(core), &config.Config{}, agent, false), agent, logs
+	}
+
+	t.Setenv(provenswitch.Env, "1")
+	h, agent, logs := newRun()
+	err := h.AfterTestRun(context.Background(), "test-run-0", []string{"test-set-0"}, models.TestCoverage{})
+	require.ErrorIs(t, err, refused)
+	var unfinished *models.AgentRunUnfinishedError
+	require.ErrorAs(t, err, &unfinished, "the caller tells the agent's failure from any other hook's")
+	require.EqualError(t, err, "keploy's agent did not finish checking the run's tests: "+refused.Error())
+	require.EqualValues(t, 1, agent.afterTestRuns.Load())
+	require.Zero(t, logs.FilterMessage("failed to call AfterTestRun hook").Len(), "the caller logs the error it is handed; the hook does not log it too")
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("the agent exited"))
+	err = h.AfterTestRun(ctx, "test-run-0", nil, models.TestCoverage{})
+	require.ErrorIs(t, err, refused)
+	require.ErrorContains(t, err, "(the agent exited)")
+
+	h, agent, _ = newRun()
+	require.NoError(t, h.AfterTestRun(withoutAgent(context.Background()), "test-run-0", nil, models.TestCoverage{}))
+	require.Zero(t, agent.afterTestRuns.Load(), "a run with no agent left calls none")
+
+	t.Setenv(provenswitch.Env, "")
+	h, agent, logs = newRun()
+	require.NoError(t, h.AfterTestRun(context.Background(), "test-run-0", nil, models.TestCoverage{}), "without the switch the agent's failure is only logged")
+	require.EqualValues(t, 1, agent.afterTestRuns.Load())
+	require.Equal(t, 1, logs.FilterMessage("failed to call AfterTestRun hook").Len())
+}
+
+// The line for a gRPC test keploy sends names the test case and its method by
+// the path's shape, never the path, as the HTTP test's line names its
+// request: a program that embeds the replay (k8s-proxy) writes it into its
+// own log, and the report names the method whole.
+func TestSimulatingAGRPCTestNamesItsMethodByItsShape(t *testing.T) {
+	const s = logleak.Canary
+	port := closedLocalPort(t)
+	tc := &models.TestCase{
+		Name: "grpc-orders-1", Kind: models.GRPC_EXPORT, AppPort: port,
+		GrpcReq: models.GrpcReq{Headers: models.GrpcHeaders{PseudoHeaders: map[string]string{
+			":authority": net.JoinHostPort("localhost", strconv.Itoa(int(port))), ":path": "/" + s + ".Orders/Get", ":method": "POST", ":scheme": "http",
+		}}},
+	}
+	logger, logs := logleak.Observe()
+	instr := &unpublishedPortInstr{prInstr: &prInstr{}, reason: "it is not published on the host"}
+	h := NewHooks(logger, &config.Config{Test: config.Test{APITimeout: 5}}, instr)
+	if _, err := h.SimulateRequest(context.Background(), tc, "test-set-0"); err == nil {
+		t.Fatal("precondition: a request to a closed port succeeded")
+	}
+	said := logs.FilterMessage("Simulating gRPC request").All()
+	require.Len(t, said, 1, "precondition: the gRPC test's line was logged (%v)", logs.All())
+	assert.Equal(t, "grpc-orders-1", said[0].ContextMap()["testcase"])
+	assert.Equal(t, "/{}/{}", said[0].ContextMap()["method"])
+	logleak.Check(t, logs, s, "SimulateRequest")
+}
+
+// The base path's notes (noteHostUnused, noteWhereSent) name each host by its
+// labels' shape beside its tag in the run's session, never whole: test.host,
+// the base path's host, the host a request is sent to and the Host header it
+// was recorded with. A host name is traffic; the console and the report name
+// it whole.
+func TestTheBasePathNotesNameEachHostByItsShapeAndTag(t *testing.T) {
+	const s = logleak.Canary
+	logger, logs := logleak.Observe()
+	h := newHooks(logger, &config.Config{Test: config.Test{APITimeout: 5}}, &prInstr{}, false)
+	base, err := url.Parse("http://base-" + s + ".internal:8080/api")
+	require.NoError(t, err)
+	h.appAt = base
+	ctx := models.StartLogKeySession(context.Background())
+	h.noteHostUnused(ctx, "host-"+s+".internal")
+	target, err := url.Parse("http://base-" + s + ".internal:9090/api/orders")
+	require.NoError(t, err)
+	h.noteWhereSent(ctx, target, "sent-"+s+".internal", "recorded-"+s+".internal")
+	require.Len(t, logs.All(), 3, "precondition: test.host, the port and the Host header notes were logged (%v)", logs.All())
+	logleak.Check(t, logs, s, "noteHostUnused and noteWhereSent")
+	fields := map[string]bool{}
+	for _, e := range logs.All() {
+		for _, v := range e.ContextMap() {
+			if str, ok := v.(string); ok {
+				fields[str] = true
+			}
+		}
+	}
+	for _, want := range []string{
+		models.HostLogName(ctx, "host-"+s+".internal"), "http://" + models.HostLogName(ctx, base.Host) + "/{}",
+		models.HostLogName(ctx, "sent-"+s+".internal"), models.HostLogName(ctx, "recorded-"+s+".internal"),
+	} {
+		assert.True(t, fields[want], "no note names a host as %q (its shape and tag): %v", want, fields)
 	}
 }

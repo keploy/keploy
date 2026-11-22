@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"math/big"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
@@ -296,5 +297,176 @@ func TestAsInt64RejectsUnrepresentable(t *testing.T) {
 				t.Fatalf("asInt64(%v) = %d, want %d", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// An array's, a record's and a document's []byte elements round-trip
+// through JSON as bytes (the $pgtype: binary wrapper), not as a bare base64
+// string that reads back as text. (The JSON store reads a number as int64.)
+func TestPostgresV3Cell_JSONKeepsAnArraysAndARecordsBytes(t *testing.T) {
+	in := pgNestedCells()
+	body, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Count(string(body), `"$pgtype":"binary"`) != 7 {
+		t.Fatalf("want each of the 7 byte elements written as bytes: %s", body)
+	}
+	var back PostgresV3Cells
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	want := pgNestedCells()
+	want[2].Value.([]any)[0] = int64(1)
+	want[3].Value.(map[string]any)["parts"].([]any)[1] = int64(2)
+	if !reflect.DeepEqual(back, want) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, want, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
+
+// A mock written before, a bytea[] element as a bare base64 string, still
+// loads as that string.
+func TestPostgresV3Cell_AnOlderMocksBase64ElementStillLoads(t *testing.T) {
+	var back PostgresV3Cells
+	if err := json.Unmarshal([]byte(`[["b2s=","AQI="]]`), &back); err != nil {
+		t.Fatalf("an older mock's base64 element does not load: %v", err)
+	}
+	if want := (PostgresV3Cells{NewValueCell([]any{"b2s=", "AQI="})}); !reflect.DeepEqual(back, want) {
+		t.Fatalf("it loaded as %#v, want %#v", back, want)
+	}
+}
+
+// A uuid[], macaddr[] and bit[] cell's elements, and a uuid cell as a
+// [16]uint8, round-trip through JSON as the values pgx scanned, not as
+// arrays of numbers (or base64 text) no codec encodes back for the client;
+// a document's "uuid" text stays the document's.
+func TestPostgresV3Cell_JSONKeepsAUUIDArraysElements(t *testing.T) {
+	in := append(pgUUIDArrayCells(), NewValueCell([16]uint8{0x01, 0x02}))
+	body, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back PostgresV3Cells
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, in, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
+
+// pgDocumentCells are json/jsonb documents, alone and in an array, holding
+// objects with a pgtype shape's keys: the application's objects, which a
+// store must read back as they are.
+func pgDocumentCells() PostgresV3Cells {
+	return PostgresV3Cells{
+		NewValueCell(map[string]any{"net": map[string]any{"prefix": "10.0.0.0/8"}}),
+		NewValueCell(map[string]any{
+			"at":    map[string]any{"$pgtype": "timestamp", "value": "2024-01-01T00:00:00Z"},
+			"flags": []any{map[string]any{"bytes": "oA==", "len": int64(3), "valid": true}},
+			"span":  map[string]any{"microseconds": int64(5), "valid": true},
+		}),
+		NewValueCell([]any{map[string]any{"macaddr": "08:00:2b:01:02:03"}, map[string]any{"format": "png", "bytes": int64(2048)}}),
+		NewValueCell(map[string]any{"$pgtype": "x"}),
+		NewValueCell(map[string]any{"prefix": "img_"}),
+		NewValueCell(map[string]any{"macaddr": "08:00:2b:01:02:03"}),
+		NewValueCell(map[string]any{"format": "png", "bytes": int64(2048)}),
+		NewValueCell(map[string]any{"bytes": int64(2048), "len": int64(1), "valid": true}),
+		NewValueCell(map[string]any{"microseconds": "x", "valid": "y"}),
+		NewValueCell(map[string]any{"days": "mon", "microseconds": int64(1), "months": int64(2), "valid": true}),
+		NewValueCell([]any{map[string]any{"prefix": "10.0.0.0/8"}}),
+		NewValueCell([]any{map[string]any{"microseconds": int64(5), "valid": true}}),
+		NewValueCell([]any{map[string]any{"bytes": int64(2048), "len": int64(1), "valid": true}}),
+		NewValueCell(map[string]any{"format": "png", "bytes": "aGVsbG8="}),
+		NewValueCell(map[string]any{"format": int64(1), "bytes": "hello world"}),
+		NewValueCell(map[string]any{"format": "png", "bytes": []any{int64(1), int64(2)}}),
+		NewValueCell(map[string]any{"a": map[string]any{"uuid": make([]byte, 16), "name": "x"}}),
+		NewValueCell(map[string]any{"a": map[string]any{"$pgtype": "binary", "data": "aGk=", "x": "y"}}),
+		NewValueCell(map[string]any{"a": map[string]any{"uuid": map[string]any{"$pgtype": "binary", "data": "AAAAAAAAAAAAAAAAAAAAAA==", "x": "y"}}}),
+		NewValueCell([]any{map[string]any{"bytes": []byte{1}, "x": int64(1), "y": int64(2)}}),
+		NewValueCell(map[string]any{"uuid": []byte{1, 2, 3}}),
+		NewValueCell(map[string]any{"format": int64(1), "bytes": []byte{1, 2}}),
+		NewValueCell(map[string]any{"int": "12", "exp": "x", "nan": false, "infinitymodifier": int64(0), "valid": true}),
+		NewValueCell(map[string]any{"a": "x", "b": 1.5, "c": 2.5, "valid": true}),
+		NewValueCell(map[string]any{"p": "x", "closed": false, "valid": true}),
+		NewValueCell(map[string]any{"p": "x", "r": 1.5, "valid": true}),
+		NewValueCell(map[string]any{"blocknumber": "x", "offsetnumber": int64(1), "valid": true}),
+		NewValueCell(map[string]any{"lexemes": "x", "valid": true}),
+		NewValueCell(map[string]any{"lower": int64(1), "upper": int64(2), "lowertype": "x", "uppertype": int64(101), "valid": true}),
+		NewValueCell([]any{map[string]any{"bytes": "oA==", "len": int64(3), "valid": true, "x": int64(1)}}),
+		NewValueCell([]any{map[string]any{"bytes": "not base64", "len": int64(3), "valid": true}}),
+		NewValueCell([]any{map[string]any{"bytes": "oA==", "len": int64(3), "valid": "y"}}),
+		NewValueCell([]any{map[string]any{"bytes": "oA==", "len": "3", "valid": true}}),
+		NewValueCell([]any{map[string]any{"bytes": "oA==", "len": 1.5, "valid": true}}),
+		NewValueCell(map[string]any{"int": true, "exp": int64(0), "nan": false, "infinitymodifier": int64(0), "valid": true}),
+		NewValueCell(map[string]any{"int": "12", "exp": int64(0), "nan": "x", "infinitymodifier": int64(0), "valid": true}),
+		NewValueCell(map[string]any{"int": "12", "exp": int64(0), "nan": false, "infinitymodifier": "x", "valid": true}),
+		NewValueCell(map[string]any{"int": "12", "exp": int64(0), "nan": false, "infinitymodifier": int64(0), "valid": "y"}),
+		NewValueCell(map[string]any{"microseconds": "x", "days": int64(2), "months": int64(3), "valid": true}),
+		NewValueCell(map[string]any{"microseconds": int64(1), "days": int64(2), "months": "x", "valid": true}),
+		NewValueCell(map[string]any{"microseconds": int64(1), "days": int64(2), "months": int64(3), "valid": "y"}),
+		NewValueCell(map[string]any{"microseconds": "x", "valid": true}),
+		NewValueCell(map[string]any{"microseconds": int64(5), "valid": "y"}),
+		NewValueCell(map[string]any{"bytes": []any{int64(1)}, "len": "x", "valid": true}),
+		NewValueCell(map[string]any{"bytes": []any{int64(1)}, "len": int64(1), "valid": "y"}),
+		NewValueCell(map[string]any{"a": 1.5, "b": "x", "c": 3.5, "valid": true}),
+		NewValueCell(map[string]any{"a": 1.5, "b": 2.5, "c": "x", "valid": true}),
+		NewValueCell(map[string]any{"a": 1.5, "b": 2.5, "c": 3.5, "valid": "y"}),
+		NewValueCell(map[string]any{"p": []any{int64(1)}, "closed": "x", "valid": true}),
+		NewValueCell(map[string]any{"p": []any{int64(1)}, "closed": false, "valid": "y"}),
+		NewValueCell(map[string]any{"p": map[string]any{"x": 1.5, "y": 2.5}, "r": "x", "valid": true}),
+		NewValueCell(map[string]any{"p": map[string]any{"x": 1.5, "y": 2.5}, "r": 1.5, "valid": "y"}),
+		NewValueCell(map[string]any{"blocknumber": int64(1), "offsetnumber": "x", "valid": true}),
+		NewValueCell(map[string]any{"blocknumber": int64(1), "offsetnumber": int64(2), "valid": "y"}),
+		NewValueCell(map[string]any{"lexemes": []any{"a"}, "valid": "y"}),
+		NewValueCell(map[string]any{"lower": int64(1), "upper": int64(2), "lowertype": int64(105), "uppertype": "x", "valid": true}),
+		NewValueCell(map[string]any{"lower": int64(1), "upper": int64(2), "lowertype": int64(105), "uppertype": int64(101), "valid": "y"}),
+	}
+}
+
+// A document's content is the application's: an object in it, or in a
+// json array, with a pgtype shape's keys reads back from JSON as that
+// object, not as the type (a {"prefix": ...} came back as a netip.Prefix,
+// a timestamp wrapper as a time.Time, a bit string's or a time's keys as
+// a pgtype.Bits or a pgtype.Time), and a document with a shape's keys but
+// not the kinds of value the encoder writes for it loads as the document
+// (a {"macaddr": text}, a {"format", "bytes"} or a {"bytes", "len",
+// "valid"} with a number for its bytes, a time's or an interval's keys
+// with text, a {"$pgtype"} of its own failed the load). A []byte, a uuid
+// and a macaddr in a document, which the encoder wraps, still read back
+// as their types, and only an exact wrapper does.
+func TestPostgresV3Cell_JSONDocumentsKeepTheirObjects(t *testing.T) {
+	in := append(pgDocumentCells(), NewValueCell(map[string]any{
+		"blob": []byte{1, 2},
+		"id":   [16]uint8{1},
+		"mac":  net.HardwareAddr{0x08, 0x00, 0x2b, 0x01, 0x02, 0x03},
+		"list": []any{[]byte{3}},
+	}))
+	for i, c := range in {
+		body, err := json.Marshal(c)
+		if err != nil {
+			t.Fatalf("cell %d: marshal: %v", i, err)
+		}
+		var back PostgresV3Cell
+		if err := json.Unmarshal(body, &back); err != nil {
+			t.Errorf("cell %d: unmarshal: %v\n%s", i, err, body)
+			continue
+		}
+		if !reflect.DeepEqual(back, c) {
+			t.Errorf("cell %d came back as %#v, want %#v\n%s", i, back.Value, c.Value, body)
+		}
+		if _, err := back.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
 	}
 }

@@ -20,6 +20,11 @@ type captureBuffer struct {
 	limit     int
 	total     int64
 	truncated bool
+	// lostToPause: a pause of the memory guard cut this body's capture
+	// (truncated is set too). The exchange's checks of the pause may all
+	// come after the pause has ended, so this is what says the exchange was
+	// lost to it rather than to the size budget.
+	lostToPause bool
 }
 
 func newCaptureBuffer(limit int) *captureBuffer {
@@ -46,6 +51,7 @@ func (b *captureBuffer) Write(p []byte) (int, error) {
 	// in-flight test case.
 	if isIngressRecordingPaused() {
 		b.truncated = true
+		b.lostToPause = true
 		b.buf = bytes.Buffer{}
 		return len(p), nil
 	}
@@ -81,6 +87,12 @@ func (b *captureBuffer) Total() int64 {
 
 func (b *captureBuffer) Truncated() bool {
 	return b.truncated
+}
+
+// LostToPause reports whether a pause of the memory guard cut this capture.
+// A nil buffer (no body, or capture off) was cut by nothing.
+func (b *captureBuffer) LostToPause() bool {
+	return b != nil && b.lostToPause
 }
 
 type teeReadCloser struct {
@@ -120,7 +132,25 @@ func cloneResponseForCapture(resp *http.Response) *http.Response {
 	clone.Trailer = resp.Trailer.Clone()
 	clone.TransferEncoding = append([]string(nil), resp.TransferEncoding...)
 	clone.Body = http.NoBody
+	// Close is Go's verdict on reusing the connection, not a header the app
+	// sent: serialized, it writes "Connection: close" into every HTTP/1.0
+	// response, and the recording, read back, keeps it there, while the
+	// app's answer at replay never has it. The header the app sent is in
+	// Header, as Go's client reads it at replay.
+	clone.Close = false
 	return clone
+}
+
+// closeAfter marks resp to close the client's connection after it, which sync
+// and sampled recording do to free their slot, and returns resp as the app
+// sent it, for the recording: the app's answer at replay will not say so.
+func closeAfter(resp *http.Response) *http.Response {
+	sent := new(http.Response)
+	*sent = *resp
+	sent.Header = resp.Header.Clone()
+	resp.Close = true
+	resp.Header.Set("Connection", "close")
+	return sent
 }
 
 func dumpCapturedRequest(req *http.Request, body []byte) ([]byte, error) {

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -194,24 +195,26 @@ func TestHijackAndMITM_DefaultKeepsDialAddressServerName(t *testing.T) {
 	}
 }
 
-// srcPortConn is a net.Conn stub whose only meaningful method is RemoteAddr.
-// capturedSNIForSrc uses nothing else — the relay owns the real socket.
-type srcPortConn struct {
-	net.Conn
-	port int
-}
-
-func (c srcPortConn) RemoteAddr() net.Addr {
-	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: c.port}
-}
-
-// storeCapturedSNI files sni under a source port that no real socket in this
-// test binary can own, and removes it afterwards.
-func storeCapturedSNI(t *testing.T, port int, sni string) net.Conn {
+// upgradeAfterClientHandshake is newProxyTLSUpgradeFn's fn for one connection
+// once it has served that connection's client-side handshake, in which the
+// application sent sni ("" for none) under ctx: the order the relay runs the
+// two in with verification on (relay.Config.ClientTLSFirst).
+func upgradeAfterClientHandshake(t *testing.T, ctx context.Context, verify bool, pool *x509.CertPool, sni string) relay.TLSUpgradeFn {
 	t.Helper()
-	pTls.SrcPortToDstURL.Store(port, sni)
-	t.Cleanup(func() { pTls.SrcPortToDstURL.Delete(port) })
-	return srcPortConn{port: port}
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), verify, pool)
+	app, keploySide := net.Pipe()
+	t.Cleanup(func() { _ = app.Close(); _ = keploySide.Close() })
+	appErr := make(chan error, 1)
+	go func() {
+		appErr <- tls.Client(app, &tls.Config{ServerName: sni, InsecureSkipVerify: true}).Handshake() //nolint:gosec // the application under test trusts keploy's CA
+	}()
+	if _, err := upgrade(ctx, keploySide, false, &tls.Config{}); err != nil {
+		t.Fatalf("client-side upgrade: %v", err)
+	}
+	if err := <-appErr; err != nil {
+		t.Fatalf("the application's handshake with keploy: %v", err)
+	}
+	return upgrade
 }
 
 // TestNewProxyTLSUpgradeFn_DestSide_VerifyPrefersCapturedSNI is the regression
@@ -230,9 +233,7 @@ func storeCapturedSNI(t *testing.T, port int, sni string) net.Conn {
 // avoid.
 func TestNewProxyTLSUpgradeFn_DestSide_VerifyPrefersCapturedSNI(t *testing.T) {
 	ln, pool, probe := newDNSOnlySNIRecordingTLSTestServer(t, false)
-	srcConn := storeCapturedSNI(t, 45011, "upstream.test")
-
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), true, pool, srcConn)
+	upgrade := upgradeAfterClientHandshake(t, context.Background(), true, pool, "upstream.test")
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -279,11 +280,9 @@ func TestNewProxyTLSUpgradeFn_DestSide_VerifyPrefersCapturedSNI(t *testing.T) {
 // omits SNI for the IP-literal ServerName the parser supplied).
 func TestNewProxyTLSUpgradeFn_DestSide_DefaultIgnoresCapturedSNI(t *testing.T) {
 	ln, pool, probe := newDNSOnlySNIRecordingTLSTestServer(t, false)
-	srcConn := storeCapturedSNI(t, 45012, "upstream.test")
-
 	// Pool supplied but verify off: neither the pool nor the SNI override may
 	// take effect.
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, pool, srcConn)
+	upgrade := upgradeAfterClientHandshake(t, context.Background(), false, pool, "upstream.test")
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -314,50 +313,42 @@ func TestNewProxyTLSUpgradeFn_DestSide_DefaultIgnoresCapturedSNI(t *testing.T) {
 	}
 }
 
-// TestCapturedSNIForSrc pins the lookup's degradation behaviour: every miss
-// must produce "" (the callers then fall back), never a panic, because it runs
-// on a live recording path where a connection can have gone away underneath us.
-func TestCapturedSNIForSrc(t *testing.T) {
-	if got := capturedSNIForSrc(nil); got != "" {
-		t.Fatalf("capturedSNIForSrc(nil) = %q; want empty", got)
+// TestNewProxyTLSUpgradeFn_DestSide_WithoutSNITheConnectTargetNamesTheDial:
+// the name the verified dial prefers is the one this connection's application
+// asked for, from its own handshake and context. A connection whose
+// application sent no SNI and made no CONNECT dials with the parser's name; one
+// that made a CONNECT request for "upstream.test" dials with the target.
+func TestNewProxyTLSUpgradeFn_DestSide_WithoutSNITheConnectTargetNamesTheDial(t *testing.T) {
+	ln, pool, probe := newDNSOnlySNIRecordingTLSTestServer(t, false)
+	dial := func(ctx context.Context, upgrade relay.TLSUpgradeFn) error {
+		t.Helper()
+		rawConn, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("dial upstream: %v", err)
+		}
+		defer func() { _ = rawConn.Close() }()
+		conn, err := upgrade(ctx, rawConn, true, &tls.Config{ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12})
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err
 	}
-	if got := capturedSNIForSrc(nilAddrConn{}); got != "" {
-		t.Fatalf("capturedSNIForSrc(nil RemoteAddr) = %q; want empty", got)
-	}
-	// A port with nothing filed under it.
-	if got := capturedSNIForSrc(srcPortConn{port: 45013}); got != "" {
-		t.Fatalf("capturedSNIForSrc(unmapped port) = %q; want empty", got)
-	}
-	// CertForClient files the empty string unconditionally when the client
-	// sent no SNI; that must read back as "no SNI", not as a ServerName.
-	srcConn := storeCapturedSNI(t, 45014, "")
-	if got := capturedSNIForSrc(srcConn); got != "" {
-		t.Fatalf("capturedSNIForSrc(empty stored SNI) = %q; want empty", got)
-	}
-	srcConn = storeCapturedSNI(t, 45015, "db.internal")
-	if got := capturedSNIForSrc(srcConn); got != "db.internal" {
-		t.Fatalf("capturedSNIForSrc = %q; want db.internal", got)
-	}
-}
 
-// TestCapturedClientSNI pins the opportunistic-TLS side of the same lookup —
-// read straight off the completed client-facing *tls.Conn.
-func TestCapturedClientSNI(t *testing.T) {
-	if got := capturedClientSNI(nil); got != "" {
-		t.Fatalf("capturedClientSNI(nil) = %q; want empty", got)
+	noName := upgradeAfterClientHandshake(t, context.Background(), true, pool, "")
+	err := dial(context.Background(), noName)
+	if got := probe.last(t); got != "" {
+		t.Fatalf("a connection whose application asked for no name dialled with SNI %q; want the parser's IP literal, which puts none on the wire", got)
 	}
-	// A plain (non-TLS) conn must degrade to "", not panic.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "IP SANs") {
+		t.Fatalf("a connection whose application asked for no name verified the upstream against a name it never asked for (err %v)", err)
 	}
-	defer ln.Close()
-	c, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+
+	ctx := pTls.WithConnectTarget(context.Background(), "upstream.test")
+	connected := upgradeAfterClientHandshake(t, ctx, true, pool, "")
+	if err := dial(ctx, connected); err != nil {
+		t.Fatalf("a connection that made a CONNECT request for upstream.test, with no SNI: verified dial failed: %v", err)
 	}
-	defer c.Close()
-	if got := capturedClientSNI(c); got != "" {
-		t.Fatalf("capturedClientSNI(non-TLS conn) = %q; want empty", got)
+	if got := probe.last(t); got != "upstream.test" {
+		t.Fatalf("a connection that made a CONNECT request for upstream.test dialled with SNI %q", got)
 	}
 }

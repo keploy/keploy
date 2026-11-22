@@ -1,0 +1,314 @@
+//go:build linux
+
+package agent
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// On the keploy mock path (each test judged by its own calls), a test's
+// own /x recorded once, and an identical /x in the set's worker: list (a call
+// a reader moved there, or one record listed between tests). The test's
+// second /x must miss as extra_call, and the worker recording stay unspent.
+func TestKeployMockWorkerScopeNeverAnswersATestsExtraCall(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+		pingMock("mock-1", "/x", "own", t0),
+		pingMock("mock-2", "/x", "worker", t0.Add(time.Second)),
+		pingMock("mock-3", "/y", "worker-y", t0.Add(2*time.Second)),
+	}))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {}}))
+	require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-2", "mock-3"}}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-2", "mock-3"}}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p, "TestA", "/x", "/x", "/y")
+	t.Logf("TestA got %v action=%q reason=%q", got, e.Action, e.Reason)
+	require.Equal(t, "200 own", got[0])
+	require.True(t, strings.HasPrefix(got[1], "502"), "the worker scope answered the test's extra /x: %s", got[1])
+	require.Equal(t, "200 worker-y", got[2], "a call the test never recorded is still the worker scope's")
+	require.Equal(t, models.ScopeActionFail, e.Action, "the extra call must fail the test")
+	require.Contains(t, e.Reason, "was called 2 times, recorded 1")
+	code, body := p.call(t, "/x")
+	require.Equal(t, "200 worker", fmt.Sprintf("%d %s", code, body), "the worker recording stays unspent and answers between tests")
+}
+
+// The dress-rehearsal shape on the keploy mock path: TestCRUD, the first
+// test, made the app's token read (/x) and the app kept the answer; TestA
+// recorded its own /x as well. The replay's gate skips TestCRUD, so keploy
+// mock replay moves its read to the worker scope and names it a skipped
+// read (SetScopeSkippedReads). TestA now makes /x twice: its own, then the
+// read TestCRUD made. The skipped test's read answers the second once, and
+// TestA passes; a third /x is one past what TestCRUD recorded, and fails
+// TestA as an extra call, whose line counts every /x TestA made and says
+// which recording answered the one TestCRUD's read took. Without it, TestA
+// failed on its second /x, judging set it aside, and the read moved on to
+// the test after it in every later run.
+func TestKeployMockSkippedTestsReadAnswersATestsCallOnceMore(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		calls []string
+		pass  bool
+	}{
+		{"the skipped test's read answers the second /x", []string{"/x", "/x"}, true},
+		{"a third /x is one past what the skipped test recorded", []string{"/x", "/x", "/x"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			p := newServingProxy()
+			a.Proxy = p
+			ctx := context.Background()
+			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+				pingMock("mock-1", "/x", "skipped", t0),
+				pingMock("mock-2", "/x", "own", t0.Add(time.Second)),
+			}))
+			require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-2"}}))
+			require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-1"}}))
+			require.NoError(t, a.SetScopeSkippedReads(ctx, map[string]string{"mock-1": "o::TestCRUD"}))
+			require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}}))
+			claimSelf(t, a)
+			got, e := runTest(t, a, p, "TestA", tc.calls...)
+			t.Logf("TestA got %v action=%q reason=%q", got, e.Action, e.Reason)
+			require.Equal(t, "200 own", got[0])
+			require.Equal(t, "200 skipped", got[1], "the skipped test's read answers the test's second /x")
+			if tc.pass {
+				require.NotEqual(t, models.ScopeActionFail, e.Action, "TestA made only its own read and the skipped test's: %s", e.Reason)
+				return
+			}
+			require.True(t, strings.HasPrefix(got[2], "502"), "a /x past the skipped test's one recording was answered: %s", got[2])
+			require.Equal(t, models.ScopeActionFail, e.Action, "the call past the bound must fail the test")
+			require.Contains(t, e.Reason, "GET /x to 127.0.0.1:18093 was called 3 times: 1 recorded, 1 answered by o::TestCRUD's read mock-1 (that test is skipped), 1 extra")
+		})
+	}
+}
+
+// The founder's bound in every shape: a skipped test's read answers at most
+// as many calls as that test recorded it, never more. TestCRUD is skipped,
+// and keploy mock replay moved its read of /x (mock-1) to the worker scope.
+// A call past it fails the test that makes it, whether or not that test
+// recorded /x itself, and its line names the read it is past; no miss is
+// charged to no test as a background call. Before, the call was told a
+// repeat of the worker scope's recording: TestA and TestB passed with a
+// refused call, and the run listed it as the set's background call.
+func TestKeployMockACallPastASkippedTestsReadFailsTheTestThatMakesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tests [][]string // the /x calls of TestA, then TestB
+		own   bool       // TestA recorded /x itself (mock-2)
+		fails string     // the test the call past the bound fails
+	}{
+		{"the same test makes the read twice, with no own recording", [][]string{{"/x", "/x"}}, false, "TestA"},
+		{"the next test makes the read again, with no own recording", [][]string{{"/x"}, {"/x"}}, false, "TestB"},
+		{"own, then the skipped test's read, then the next test", [][]string{{"/x", "/x"}, {"/x"}}, true, "TestB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			p := newServingProxy()
+			a.Proxy = p
+			ctx := context.Background()
+			mocks := []*models.Mock{pingMock("mock-1", "/x", "skipped", t0)}
+			table := map[string][]string{"o::TestA": {}, "o::TestB": {}}
+			if tc.own {
+				mocks = append(mocks, pingMock("mock-2", "/x", "own", t0.Add(time.Second)))
+				table["o::TestA"] = []string{"mock-2"}
+			}
+			require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+			require.NoError(t, a.SetScopeTable(ctx, table))
+			require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-1"}}))
+			require.NoError(t, a.SetScopeSkippedReads(ctx, map[string]string{"mock-1": "o::TestCRUD"}))
+			require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}}))
+			claimSelf(t, a)
+			for i, calls := range tc.tests {
+				name := []string{"TestA", "TestB"}[i]
+				got, e := runTest(t, a, p, name, calls...)
+				t.Logf("%s got %v action=%q reason=%q", name, got, e.Action, e.Reason)
+				if name != tc.fails {
+					require.NotEqual(t, models.ScopeActionFail, e.Action, "%s made no call past the bound: %s", name, e.Reason)
+					continue
+				}
+				require.True(t, strings.HasPrefix(got[len(got)-1], "502"), "a /x past the skipped test's one recording was answered: %v", got)
+				require.Equal(t, models.ScopeActionFail, e.Action, "the call past the bound must fail %s, the test that made it", name)
+				require.Contains(t, e.Reason, "GET /x to 127.0.0.1:18093 had no recorded answer: it is one call past o::TestCRUD's read mock-1 (that test is skipped)")
+			}
+			for _, m := range a.takeChargedMisses() {
+				bg := ""
+				if m.Repeat != nil {
+					bg = m.Repeat.Background
+				}
+				require.Empty(t, bg, "the call past the bound was told a background call: %+v", m)
+				require.Equal(t, "o::"+tc.fails, m.ChargedTo, "the call past the bound was charged to %q: %+v", m.ChargedTo, m)
+			}
+		})
+	}
+}
+
+// A worker: list names only what its own key's pool slice holds: a name the
+// table lists under key o that only key p's slice holds (another test
+// process's recording, moved into o's worker: by an edit) answers none of
+// o's calls, in a test's window or between tests. Every recording is staged
+// once for the whole set, so without the slice check the proxy would show it
+// as o's worker scope and serve o another process's recording.
+func TestAWorkerNameOutsideItsKeysSliceNeverAnswers(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+		pingMock("mock-1", "/token", "o's first use", t0),
+		pingMock("mock-2", "/other", "p's", t0.Add(time.Second)),
+	}))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {}, "p::TestB": {}}))
+	require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-1", "mock-2"}}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}, "p": {"mock-2"}}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p, "TestA", "/token", "/other")
+	require.Equal(t, "200 o's first use", got[0], "o's worker: recording answers in o's test")
+	require.True(t, strings.HasPrefix(got[1], "502"), "key p's recording answered key o's test: %s", got[1])
+	require.Equal(t, models.ScopeActionFail, e.Action, "the unanswered call is the test's miss")
+	code, body := p.call(t, "/other")
+	require.Equal(t, 502, code, "key p's recording answered key o between tests: %s", body)
+}
+
+// The worker scope a test's window shows is the key the test runs under, also
+// when the key changed while a test was open: a test process that died in
+// its test, and the next process, claiming another key, begins its first
+// test. The previous key's worker scope never answers the new key's test.
+func TestATestAfterAKeyChangeIsShownItsOwnKeysWorkerScope(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+		pingMock("mock-1", "/a", "a", t0),
+		pingMock("mock-2", "/token", "o's first use", t0.Add(time.Second)),
+		pingMock("mock-3", "/other", "p's first use", t0.Add(2*time.Second)),
+	}))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "p::TestB": {}}))
+	require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-2"}, "p": {"mock-3"}}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-2"}, "p": {"mock-3"}}))
+	first := child(t)
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "o"}, first.Process.Pid)
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	code, body := p.call(t, "/a")
+	require.Equal(t, "200 a", fmt.Sprintf("%d %s", code, body))
+	kill(t, first) // the process dies with TestA open
+	_, serr = a.ClaimInstance(ctx, models.InstanceReq{Key: "p"}, os.Getpid())
+	require.Nil(t, serr)
+	got, e := runTest(t, a, p, "TestB", "/token", "/other")
+	require.True(t, strings.HasPrefix(got[0], "502"), "key o's worker scope answered a test of key p: %s", got[0])
+	require.Equal(t, "200 p's first use", got[1], "key p's worker scope must answer its test")
+	require.Equal(t, models.ScopeActionFail, e.Action, "o's /token is the p test's miss")
+}
+
+// The load row: a poller the app runs between tests, whose two calls record
+// listed in worker:. On replay the app polls as often as it did at record
+// (1x) and, as when replay is slower, twice as often (2x). Between tests the
+// worker scope is served as the start-up pool is (reused, or saturated on
+// its last answer), so every poll is answered, nothing is left unanswered
+// outside every test, and each test's verdict at 2x is the one at 1x.
+func TestKeployMockABetweenTestPollerAtTwiceItsCallsMovesNoVerdict(t *testing.T) {
+	run := func(polls int) (verdicts, answers []string, misses []models.UnmatchedCall) {
+		a, _ := wireAgent(t, models.MODE_TEST)
+		p := newServingProxy()
+		a.Proxy = p
+		ctx := context.Background()
+		require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+			pingMock("mock-1", "/a", "a", t0),
+			pingMock("mock-2", "/poll", "poll", t0.Add(time.Second)),
+			pingMock("mock-3", "/poll", "poll", t0.Add(2*time.Second)),
+			pingMock("mock-4", "/b", "b", t0.Add(3*time.Second)),
+		}))
+		require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-4"}}))
+		require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-2", "mock-3"}}))
+		require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-2", "mock-3"}}))
+		claimSelf(t, a)
+		for i, name := range []string{"TestA", "TestB"} {
+			got, e := runTest(t, a, p, name, []string{"/a", "/b"}[i])
+			verdicts = append(verdicts, fmt.Sprintf("%s %v %s %q", name, got, e.Action, e.Reason))
+			if i > 0 {
+				break
+			}
+			for j := 0; j < polls; j++ {
+				code, body := p.call(t, "/poll")
+				answers = append(answers, fmt.Sprintf("%d %s", code, strings.TrimSpace(body)))
+			}
+		}
+		return verdicts, answers, a.takeChargedMisses()
+	}
+	v1, a1, m1 := run(2)
+	v2, a2, m2 := run(4)
+	require.Equal(t, []string{"200 poll", "200 poll"}, a1, "1x: a poll between tests went unanswered")
+	require.Equal(t, []string{"200 poll", "200 poll", "200 poll", "200 poll"}, a2, "2x: a poll between tests went unanswered")
+	require.Empty(t, m1, "1x: a miss was charged")
+	require.Empty(t, m2, "2x: a call between tests was left unanswered outside every test")
+	require.Equal(t, v1, v2, "a test's verdict moved when the poller called twice as often")
+	for _, v := range v1 {
+		require.NotContains(t, v, " "+models.ScopeActionFail+" ", "a test that made its own calls failed")
+	}
+}
+
+// A test window's answers never depend on how many calls landed between
+// tests: a poller's three HTTP recordings are listed in worker:, TestB polls
+// twice in its window, and only the number of polls between TestA and TestB
+// changes (0, 1, 3 and 10, as a faster or slower replay makes it). The
+// windows walk the worker scope on a cursor of their own, which no call
+// between tests advances or saturates, so TestB is answered the first two
+// recordings in placement order and passes every time. It holds for an
+// untagged recording, which HTTP keeps as it answers, and for one stated
+// per-test, as keploy mock record writes them.
+func TestAWindowsVerdictDoesNotMoveWithThePollsBetweenTests(t *testing.T) {
+	for _, shape := range []struct {
+		name string
+		meta map[string]string
+	}{
+		{"untagged", nil},
+		{"stated per-test", map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			run := func(gap int) string {
+				a, _ := wireAgent(t, models.MODE_TEST)
+				p := newServingProxy()
+				a.Proxy = p
+				ctx := context.Background()
+				mocks := []*models.Mock{pingMock("mock-a", "/a", "a", t0), pingMock("mock-b", "/b", "b", t0.Add(time.Hour))}
+				var names []string
+				for i := 0; i < 3; i++ {
+					n := fmt.Sprintf("poll-%d", i)
+					m := pingMock(n, "/poll", fmt.Sprintf("poll%d", i), t0.Add(time.Duration(i+1)*time.Second))
+					m.Spec.Metadata = shape.meta
+					mocks = append(mocks, m)
+					names = append(names, n)
+				}
+				require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+				require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-a"}, "o::TestB": {"mock-b"}}))
+				require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": names}))
+				require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": names}))
+				claimSelf(t, a)
+				runTest(t, a, p, "TestA", "/a")
+				for i := 0; i < gap; i++ {
+					code, _ := p.call(t, "/poll")
+					require.Equal(t, 200, code, "poll %d of %d between tests went unanswered", i+1, gap)
+				}
+				got, e := runTest(t, a, p, "TestB", "/b", "/poll", "/poll")
+				return fmt.Sprintf("%s verdict=%q", strings.Join(got, ","), e.Action)
+			}
+			want := run(0)
+			require.True(t, strings.HasPrefix(want, "200 b,200 poll0,200 poll1 "), "with no poll between tests TestB was answered %s; want b, then poll0 and poll1 in placement order", want)
+			for _, gap := range []int{1, 3, 10} {
+				require.Equal(t, want, run(gap), "TestB's answers and verdict moved with %d polls between tests", gap)
+			}
+		})
+	}
+}

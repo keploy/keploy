@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
@@ -61,7 +62,7 @@ func TestRecordViaSupervisorDoesNotWarnAgainAboutAStopTheParserReported(t *testi
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				_ = p.recordViaSupervisor(ctx, srcConn, dstConn, stoppingParser{err: c.err}, "test",
+				_ = p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), stoppingParser{err: c.err}, "test",
 					make(chan *models.Mock, 8), &errgroup.Group{}, zap.New(core), 1, 2, models.OutgoingOptions{})
 			}()
 

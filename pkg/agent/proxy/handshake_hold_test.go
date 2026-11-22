@@ -5,11 +5,14 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -131,12 +134,7 @@ func TestDecideHandshakeDiscardsWhatItDialledForAnAbandonedHandshake(t *testing.
 // TestDecideHandshakeAnswersAsTheDestinationDid: a destination that refuses
 // makes the application's connect fail the same way, and nothing is kept.
 func TestDecideHandshakeAnswersAsTheDestinationDid(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	refused := l.Addr().String()
-	_ = l.Close() // nothing listens there now
+	refused := testnet.RefusedAddr(t, "tcp")
 
 	p := &Proxy{logger: zap.NewNop()}
 	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
@@ -204,8 +202,8 @@ func TestDialsUpstream(t *testing.T) {
 // the same end replaces.
 func TestPredialsAreReapedAndReplaced(t *testing.T) {
 	addr, _ := listenCounting(t)
-	dial := func() net.Conn {
-		c, err := net.Dial("tcp", addr)
+	dial := func() *connseq.Upstream {
+		c, err := util.DialUpstream(context.Background(), nil, "tcp", addr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -282,8 +280,14 @@ func (plainDestInfo) Delete(context.Context, uint16) error { return nil }
 
 // TestHandshakesAreNotHeldWhereTheyCannotBe: without a way to name a
 // connection during its handshake, without sock_diag, or without NFQUEUE,
-// the proxy accepts handshakes at once as it always did, and says why once.
+// the proxy accepts handshakes at once as it always did, and says why once:
+// at Info on Linux, and at Debug elsewhere, where holding handshakes is not
+// built and its absence is no failure (startHandshakeHold).
 func TestHandshakesAreNotHeldWhereTheyCannotBe(t *testing.T) {
+	wantLevel := zapcore.InfoLevel
+	if runtime.GOOS != "linux" {
+		wantLevel = zapcore.DebugLevel
+	}
 	for _, tc := range []struct {
 		name   string
 		dest   agent.DestInfo
@@ -297,7 +301,7 @@ func TestHandshakesAreNotHeldWhereTheyCannotBe(t *testing.T) {
 		{"turned off", fakeHandshakeDest{checkErr: errors.New("must not be checked")}, 16789, "off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			core, logs := observer.New(zapcore.InfoLevel)
+			core, logs := observer.New(zapcore.DebugLevel)
 			p := &Proxy{logger: zap.New(core), DestInfo: tc.dest, Port: tc.port, DisableHandshakeHold: tc.reason == "off"}
 			if tc.reason == "off" {
 				tc.reason = ""
@@ -313,8 +317,8 @@ func TestHandshakesAreNotHeldWhereTheyCannotBe(t *testing.T) {
 				}
 				return
 			}
-			if len(infos) != 1 || infos[0].ContextMap()["reason"] != tc.reason {
-				t.Fatalf("logged %v, want one Info with reason %q", infos, tc.reason)
+			if len(infos) != 1 || infos[0].ContextMap()["reason"] != tc.reason || infos[0].Level != wantLevel {
+				t.Fatalf("logged %v, want one %s with reason %q", infos, wantLevel.CapitalString(), tc.reason)
 			}
 		})
 	}
@@ -323,8 +327,13 @@ func TestHandshakesAreNotHeldWhereTheyCannotBe(t *testing.T) {
 // TestHoldStartsWithTheFirstSessionThatDials: a replay served from mocks
 // never dials, so it adds no rules and loads no modules; the first session
 // whose connections dial their destination starts the hold, once, and a
-// closed listener never restarts it.
+// closed listener never restarts it. The reason it could not is said at Info
+// once on Linux, and never above Debug elsewhere (startHandshakeHold).
 func TestHoldStartsWithTheFirstSessionThatDials(t *testing.T) {
+	wantInfos := 1
+	if runtime.GOOS != "linux" {
+		wantInfos = 0
+	}
 	core, logs := observer.New(zapcore.InfoLevel)
 	// The lookup check fails, so each attempt to start is one check, and
 	// nothing is installed.
@@ -356,13 +365,68 @@ func TestHoldStartsWithTheFirstSessionThatDials(t *testing.T) {
 	if n := attempts(); n != 2 {
 		t.Fatalf("a later session made %d attempts in all, want 2", n)
 	}
-	if n := infos(); n != 1 {
-		t.Fatalf("the reason was logged at Info %d times, want once", n)
+	if n := infos(); n != wantInfos {
+		t.Fatalf("the reason was logged at Info %d times, want %d", n, wantInfos)
 	}
 
 	p.stopHandshakeHold()
 	p.ensureHandshakeHold(&agent.Session{Mode: models.MODE_RECORD})
 	if n := attempts(); n != 2 {
 		t.Fatal("the hold was started after the listener closed")
+	}
+}
+
+func TestDecideHandshakeRefusesALoopbackPortNothingOwnsInMockMode(t *testing.T) {
+	recorded.forget()
+	t.Cleanup(recorded.forget)
+	addr, _ := listenCounting(t)
+	free := testnet.RefusedAddr(t, "tcp")
+
+	mocked := &agent.Session{Mode: models.MODE_TEST}
+	mocked.Mocking = true
+	p := &Proxy{logger: zap.NewNop(), mockMode: true, appPID: 1}
+	p.setSession(mocked)
+	decide := func(dest string) synhold.Outcome {
+		return p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, dest)})(context.Background(), appEnd, proxyEnd).Outcome
+	}
+	if got := decide(free); got != synhold.Refuse {
+		t.Fatalf("a loopback port nothing listens on: %v, want refuse", got)
+	}
+	if got := decide(addr); got != synhold.Accept {
+		t.Fatalf("a loopback port something listens on: %v, want accept", got)
+	}
+	if got := decide("10.1.2.3:5432"); got != synhold.Accept {
+		t.Fatalf("a dependency that is not local: %v, want accept", got)
+	}
+	_, port, _ := net.SplitHostPort(free)
+	recorded.add([]*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:" + port}}}})
+	if got := decide(free); got != synhold.Accept {
+		t.Fatalf("a recorded destination: %v, want accept", got)
+	}
+	p.mockMode = false
+	recorded.reset()
+	if got := decide(free); got != synhold.Accept {
+		t.Fatalf("outside mock mode: %v, want accept", got)
+	}
+}
+
+func TestHoldStartsForANativeMockReplay(t *testing.T) {
+	var checks atomic.Int32
+	core, logs := observer.New(zapcore.InfoLevel)
+	p := &Proxy{logger: zap.New(core), DestInfo: fakeHandshakeDest{checkErr: errors.New("no tcp_diag"), checks: &checks}, Port: 16789, mockMode: true, appPID: 1}
+	mocked := &agent.Session{Mode: models.MODE_TEST}
+	mocked.Mocking = true
+	p.armHandshakeHold(context.Background())
+	p.ensureHandshakeHold(mocked)
+	if n := checks.Load(); n != 1 {
+		t.Fatalf("a native mock replay tried to hold handshakes %d times, want once", n)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a mock replay on a host that cannot hold handshakes logged %v", logs.All())
+	}
+	p.IsDocker = true
+	p.ensureHandshakeHold(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: mocked.OutgoingOptions})
+	if n := checks.Load(); n != 1 {
+		t.Fatal("a docker mock replay tried to hold handshakes")
 	}
 }

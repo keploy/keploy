@@ -49,3 +49,29 @@ func TestFakeConn_ConsumedAndWaiting(t *testing.T) {
 		t.Fatalf("Consumed = %d, want 6", f.Consumed())
 	}
 }
+
+// ReadThrough counts the bytes the discard watermark covers as done with
+// before the reader pulls them: it is never handed them, however it stops.
+func TestFakeConn_ReadThroughCountsWhatTheWatermarkCovers(t *testing.T) {
+	ch := make(chan Chunk, 2)
+	f := New(ch, nil, nil)
+	ch <- Chunk{Bytes: []byte("hello"), ReadAt: time.Now()}
+	ch <- Chunk{Bytes: []byte("world"), ReadAt: time.Now()}
+	buf := make([]byte, 5)
+	if n, err := f.Read(buf); err != nil || n != 5 {
+		t.Fatalf("Read = %d, %v", n, err)
+	}
+	if got := f.ReadThrough(); got != 5 {
+		t.Fatalf("ReadThrough = %d after 5 bytes read, want 5", got)
+	}
+	f.DiscardBefore(8)
+	if got, consumed := f.ReadThrough(), f.Consumed(); got != 8 || consumed != 5 {
+		t.Fatalf("ReadThrough = %d, Consumed = %d with the watermark at 8 and nothing pulled, want 8 and 5", got, consumed)
+	}
+	if n, err := f.Read(buf); err != nil || n != 2 {
+		t.Fatalf("Read = %d, %v, want the 2 bytes past the watermark", n, err)
+	}
+	if got := f.ReadThrough(); got != 10 {
+		t.Fatalf("ReadThrough = %d, want 10", got)
+	}
+}

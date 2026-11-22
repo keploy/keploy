@@ -106,3 +106,42 @@ func TestCompareHTTPRespForReplay_AdditivePassesWhenNotAutoReplay(t *testing.T) 
 		t.Fatal("a non-auto-replay run must still auto-pass a purely additive response-schema change")
 	}
 }
+
+// THE ADDITIVE AUTO-PASS PASSES ONLY A RESPONSE THAT CONTAINS THE RECORDING,
+// ELEMENT BY ELEMENT. It trusted a grade built from path maps that fold an
+// array's elements into one path where the last element's value wins, so a
+// price changed in an earlier element beside an added field passed, with or
+// without ignoreOrdering. Each recorded element must pair with a distinct
+// element of the answer that contains it: by index, or, under ignoreOrdering,
+// by a matching of the elements, so a reordered array that only gained
+// fields still passes.
+func TestCompareHTTPRespForReplay_AnArrayChangeBesideAnAddedFieldIsNotAutoPassed(t *testing.T) {
+	const twoItems = `{"items":[{"price":10,"n":"a"},{"price":20,"n":"b"}]}`
+	for _, c := range []struct {
+		name           string
+		recorded, act  string
+		ignoreOrdering bool
+		pass           bool
+	}{
+		{"an earlier element's price changed, a field added", twoItems, `{"items":[{"price":99,"n":"a","x":1},{"price":20,"n":"b","x":1}]}`, false, false},
+		{"the same under ignoreOrdering", twoItems, `{"items":[{"price":99,"n":"a","x":1},{"price":20,"n":"b","x":1}]}`, true, false},
+		{"the last element's price changed, a field added", twoItems, `{"items":[{"price":10,"n":"a","x":1},{"price":99,"n":"b","x":1}]}`, false, false},
+		{"an element dropped, a field added", twoItems, `{"items":[{"price":10,"n":"a"}],"x":1}`, true, false},
+		{"a field added to every element", twoItems, `{"items":[{"price":10,"n":"a","x":1},{"price":20,"n":"b","x":1}]}`, false, true},
+		{"a field added to every element, reordered, under ignoreOrdering", twoItems, `{"items":[{"price":20,"n":"b","x":1},{"price":10,"n":"a","x":1}]}`, true, true},
+		{"the same without ignoreOrdering", twoItems, `{"items":[{"price":20,"n":"b","x":1},{"price":10,"n":"a","x":1}]}`, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Test.IgnoreOrdering = c.ignoreOrdering
+			r := &Replayer{logger: zap.NewNop(), config: cfg}
+			tc := &models.TestCase{Name: "t", HTTPResp: models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: c.recorded}}
+			for _, emit := range []bool{false, true} {
+				act := &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: c.act}
+				if pass, _ := r.compareHTTPRespForReplay(tc, act, "set", emit); pass != c.pass {
+					t.Errorf("emitFailureLogs=%v: pass=%v, want %v", emit, pass, c.pass)
+				}
+			}
+		})
+	}
+}

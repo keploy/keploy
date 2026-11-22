@@ -1,18 +1,49 @@
 package utils
 
-import "errors"
+import (
+	"errors"
+	"strings"
+	"sync"
+)
 
 // Keploy's own exit codes.
 //
 // THE CONTRACT, and the reason it is narrow:
 //
 //	0        the wrapped test command succeeded (or there was none)
-//	<runner> the wrapped test command's OWN exit code, propagated verbatim.
-//	         Every CI job depends on this, so Keploy must never overwrite it —
-//	         see mock.propagateExit.
+//	<runner> the wrapped command's OWN exit code, propagated verbatim: the
+//	         test command of `keploy mock` (mock.propagateExit), and the app
+//	         `keploy record` runs, when it dies while it is recorded (128+N
+//	         for signal N; record.recordExitCode). Three exceptions, all
+//	         `keploy record`'s: an app that SIGTERM or SIGINT stopped (143,
+//	         130) ends it normally, with 0 (record.appStoppedBySignal); under
+//	         docker compose a run the keploy agent's crash ended (compose
+//	         stops the app over it, or never starts it) is not the app's own
+//	         end but keploy's failure, 1; and a compose project that stopped
+//	         before the app ever started fails with 1 though compose reported
+//	         0 (both record.composeEnd).
+//	         Otherwise Keploy never overwrites it: every CI job depends on
+//	         this. A wrapped command's own 1, 3, 4, 5, 6 or 8 reads the same
+//	         as Keploy's codes below: that is the price of passing it
+//	         through untouched.
+//	128+N    a run the user's signal N stopped before it had its verdict
+//	         (SIGINT 130, SIGHUP 129, SIGTERM 143), with no failure armed
+//	         first: `keploy mock replay` (keploy#4700), and `keploy test`
+//	         under KEPLOY_PROVEN=1 (replay.armStoppedRunExitCode). With the
+//	         switch off, a stopped `keploy test` exits 0 unless what it
+//	         reached already fails it.
 //	1        a generic Keploy-side failure
 //	3,4,6    a SPECIFIC Keploy-side failure, listed below (5 is the enterprise
 //	         build's: a command that needs a session it cannot use)
+//	8        a USAGE error — a mistyped or unknown command/verb, a flag that
+//	         could not be parsed, or the wrong number of arguments. Not a
+//	         Keploy failure and not the runner: the command never ran. Returned straight from main's exitCodeForCmdErr
+//	         (it does not flow through ErrCode / SetExitCodeOnce), so it is the
+//	         one code here not tied to an ErrCode.
+//
+// Every code of Keploy's own stays below 10: the enterprise build's `keploy ui`
+// contract (ui-capture's spec/reserved-exit-codes.json) gives 10-125 to its
+// own codes, and that build carries these.
 //
 // The specific codes exist so a caller can react correctly instead of pattern
 // matching log text or guessing from a bare 1. The VS Code extension, for
@@ -20,9 +51,9 @@ import "errors"
 // unelevated on Linux — which meant a plainly failing `pytest` (exit 1, the most
 // common non-zero code there is) told the user they had a permissions problem.
 //
-// These are only ever set for a Keploy-side failure, so nothing that succeeded
-// starts failing. Deliberately kept clear of the shell's reserved range (126,
-// 127) and of 128+N signal codes.
+// Apart from 8 (a usage error, above), these are only ever set for a Keploy-side
+// failure, so nothing that succeeded starts failing. Deliberately kept clear of
+// the shell's reserved range (126, 127) and of 128+N signal codes.
 const (
 	// ExitKeployError is the generic Keploy-side failure.
 	ExitKeployError = 1
@@ -50,6 +81,20 @@ const (
 	// enterprise build uses 5 for a command that needs a session it cannot
 	// use.
 	ExitEnvironmentUnsupported = 6
+
+	// ExitUsageError means the command line itself was wrong — a mistyped or
+	// unknown command/verb (e.g. `keploy mock bogus`), a flag that could not be
+	// parsed (`keploy test --typo`, `--delay abc`), or the wrong number of
+	// arguments (`keploy diff a b c`). It is NOT a Keploy-side
+	// failure and NOT the wrapped runner failing: the command never ran. A CI
+	// job can tell "the invocation was wrong" apart from "Keploy ran and
+	// failed" (1) by this code, instead of a mistyped verb silently exiting 0
+	// (design §P0b). It is 8 because every lower code is taken: 2 is what Go's
+	// runtime exits with on an unrecovered panic or a fatal error, so a crash
+	// would read as a mistyped command, and the enterprise build's `keploy ui`
+	// contract uses 0-7. Not sysexits' EX_USAGE (64): that lies in 10-125,
+	// which the same contract keeps for itself.
+	ExitUsageError = 8
 )
 
 // The errors the exit codes above are derived from. A failure is tagged with
@@ -69,6 +114,42 @@ var (
 	ErrEnvironmentUnsupported = errors.New("this environment lacks something keploy needs")
 )
 
+// ErrUsage is what a usage error is: the command line itself was wrong, and
+// the command never ran (see ExitUsageError). Errors are tagged with it by
+// UsageError where cobra parses the command line, not recognised afterwards
+// by their type or text: pflag returns the same error types when keploy's own
+// code misuses its flag API (reading a flag that was never defined), and that
+// is a keploy bug, not a mistyped command.
+var ErrUsage = errors.New("the command line is not one keploy accepts")
+
+type usageError struct{ err error }
+
+func (e *usageError) Error() string        { return e.err.Error() }
+func (e *usageError) Unwrap() error        { return e.err }
+func (e *usageError) Is(target error) bool { return target == ErrUsage }
+
+// UsageError tags err as a usage error, keeping its message. nil stays nil.
+// cli.Root tags every command's flag-parse and argument-validation errors with
+// it (TagUsageErrors).
+func UsageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &usageError{err: err}
+}
+
+// IsUsageError reports whether err says the command line itself was wrong: an
+// error tagged by UsageError, or an unknown command or verb (cobra's, or a
+// group's rejection from cli.HardenUnknownSubcommands, both `unknown command
+// "<verb>" for "<path>"`). This repository's main maps it to ExitUsageError,
+// and so must any binary with a main of its own.
+func IsUsageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrUsage) || strings.HasPrefix(err.Error(), `unknown command "`)
+}
+
 // ExitCodeFor is the exit code a Keploy-side failure carrying err should end
 // the process with: the specific code err was tagged with, else the generic 1.
 func ExitCodeFor(err error) int {
@@ -82,10 +163,19 @@ func ExitCodeFor(err error) int {
 	}
 }
 
+// exitCodeMu makes SetExitCodeOnce's check and set one step against other
+// SetExitCodeOnce calls: a library caller (k8s-proxy) runs recordings
+// concurrently, and each failing one arms a code. It does not cover the
+// places that write ErrCode directly (keploy mock's), nor main's read, which
+// comes once the command has returned.
+var exitCodeMu sync.Mutex
+
 // SetExitCodeOnce records a specific Keploy-side exit code, but never clobbers
 // a code already set — in particular the wrapped runner's own code, which
 // propagateExit may have installed first and which outranks ours.
 func SetExitCodeOnce(code int) {
+	exitCodeMu.Lock()
+	defer exitCodeMu.Unlock()
 	if ErrCode == 0 {
 		ErrCode = code
 	}

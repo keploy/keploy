@@ -27,8 +27,9 @@ func carryKeyOf(m *models.Mock) carryKey {
 	return carryKey{name: m.Name, req: m.Spec.ReqTimestampMock.UnixNano()}
 }
 
-// carryOverPool is the carry-over tier: per-test mocks of RegisterCarryOver
-// kinds that are reachable outside their own window — ahead of it by up to
+// carryOverPool is the carry-over tier: carry-over mocks (models.IsCarryOver:
+// RegisterCarryOver, a StagingRelease need) that are reachable outside their
+// own window — ahead of it by up to
 // models.CarryOverLookahead, and after it until consumed. Held in recorded
 // order. Disjoint from the per-test tree: a mock the current window holds is
 // served from there, not from here.
@@ -58,10 +59,16 @@ func newCarryOverPool() *carryOverPool {
 	return &carryOverPool{byKey: make(map[carryKey]carryEntry)}
 }
 
+// recordedBefore orders mocks as they were recorded: by request time, then
+// by the number mockdb gave each as it wrote it
+// (models.CompareRecordedNumbers), then by name.
 func recordedBefore(a, b *models.Mock) bool {
 	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
 	if !ta.Equal(tb) {
 		return ta.Before(tb)
+	}
+	if c := models.CompareRecordedNumbers(a.Name, b.Name); c != 0 {
+		return c < 0
 	}
 	return a.Name < b.Name
 }
@@ -227,8 +234,9 @@ func approxMockBytes(m *models.Mock) int {
 }
 
 // carryReachable reports whether a registered mock recorded at req is
-// reachable once the current window starts at start: the release window of
-// req - CarryOverLookahead has started. With no schedule, everything is.
+// reachable once the current window starts at start
+// (models.WindowSchedule.CarryOverReachable, the rule the replayer's mock
+// prune holds a carry-over mock by too).
 func carryReachable(sched *models.WindowSchedule, req, start time.Time) bool {
-	return sched.Released(req.Add(-models.CarryOverLookahead), start)
+	return sched.CarryOverReachable(req, start)
 }

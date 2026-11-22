@@ -445,7 +445,7 @@ func TestDefaultsYAML_CommentsLandOnTheSettingTheyExplain(t *testing.T) {
 	}
 	for _, want := range []struct{ phrase, key string }{
 		{"KEPLOY_STRICT_MOCK_WINDOW", "strictMockWindow"},
-		{"pins extra ports to the MySQL parser", "mysqlPorts"},
+		{"pins ports to the MySQL parser", "mysqlPorts"},
 		{"hang its handshake", "disableMysqlAutoDetect"},
 		{"authenticates the REAL upstream", "upstreamTls"},
 	} {

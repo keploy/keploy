@@ -45,7 +45,7 @@ func TestSendMapping_NeverDropsWhenRecorderIsSlow(t *testing.T) {
 	for i := 0; i < total; i++ {
 		name := fmt.Sprintf("post-orders-%d", i)
 		want = append(want, name)
-		m.sendMapping(ch, models.TestMockMapping{TestName: name, MockIDs: []string{"mock-" + name}})
+		m.sendMapping(ch, models.TestMockMapping{TestName: name, MockIDs: []string{"mock-" + name}}, nil)
 	}
 
 	// Let the overflow drainer finish handing over its backlog.
@@ -96,7 +96,7 @@ func TestSendMapping_StopsWhenStreamIsGone(t *testing.T) {
 	m.SetMappingChannel(ctx, ch)
 
 	for i := 0; i < 10; i++ {
-		m.sendMapping(ch, models.TestMockMapping{TestName: fmt.Sprintf("t-%d", i)})
+		m.sendMapping(ch, models.TestMockMapping{TestName: fmt.Sprintf("t-%d", i)}, nil)
 	}
 
 	cancel() // the recorder disconnected

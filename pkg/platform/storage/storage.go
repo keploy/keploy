@@ -159,7 +159,10 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 	// Decode into struct from the raw bytes
 	var mockUploadResponse MockUploadResponse
 	if err := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&mockUploadResponse); err != nil {
-		utils.LogError(s.logger, err, "failed to decode the response body", zap.Any("Response", resp), zap.String("body", string(bodyBytes)))
+		// The status and the body's size, never the response: it holds the
+		// request it answered, its Authorization header (the API key)
+		// with it, and the body what the server sent.
+		utils.LogError(s.logger, err, "failed to decode the response body", zap.Int("status", resp.StatusCode), zap.Int("body_bytes", len(bodyBytes)))
 		return err
 	}
 

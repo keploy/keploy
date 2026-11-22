@@ -2,6 +2,7 @@ package mockdb
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/gob"
 	"encoding/json"
@@ -28,31 +29,209 @@ import (
 // persisted anywhere else, with it.
 //
 // Both now stream: each mock is read, decoded, judged and (if it stays)
-// written to a sibling temp file before the next one is read, so a rewrite
+// written to a sibling temp file before the next one is read (a document the
+// rewrite does not re-encode is copied as read: fileDoc.verbatim), so a rewrite
 // holds one mock at a time whatever the file's size. The temp file replaces
 // the original only once every mock is written, so a rewrite that fails, is
 // cancelled or dies part way leaves the original as it was.
 
-// nextMocks reads and decodes the reader's next document: no mock for a
-// document the decoders skip (an enterprise-only kind with no mapper
-// registered), one otherwise. readErr is io.EOF after the last document, or
-// the error reading or parsing a document; decodeErr is the error decoding a
-// parsed document into a mock.
-func nextMocks(reader *yaml.MockReader, logger *zap.Logger) (mocks []*models.Mock, readErr, decodeErr error) {
+// fileDoc is one document of a yaml/json mock file, read and decoded.
+type fileDoc struct {
+	// mocks is the document's mock; none when the decoders skipped it.
+	mocks []*models.Mock
+	// raw is the document as read (see yaml.MockReader.ReadNextDocBytes).
+	raw []byte
+	// off and n are where, in the file, the bytes mocks were decoded from
+	// are: raw's, but for the document before an unfinished separator, whose
+	// mock is decoded from raw's whole lines.
+	off int64
+	n   int
+	// name and kind are the document's own, when it parsed: for a document
+	// the decoders skipped, they say what was skipped.
+	name string
+	kind models.Kind
+	// doc is a YAML document as parsed (of an incomplete one, its whole
+	// lines); nil for NDJSON, or when it does not parse.
+	doc *yaml.NetworkTrafficDoc
+	// separator says raw is no document: only the start of the separator
+	// the file ends in (see nextDoc).
+	separator bool
+	// parseErr is, when the document before that separator does not parse,
+	// the parse's error, which nextDoc's readErr does not carry.
+	parseErr error
+	// cutErr is, of an incomplete NDJSON line whose JSON parses, why its
+	// spec does not decode.
+	cutErr error
+	// verbatim says a rewrite copies raw rather than re-encoding mocks:
+	//   - the decoders skipped the document (an enterprise-only kind with no
+	//     mapper registered, a kind, a connection-failure field or value this
+	//     keploy does not know): what this keploy cannot decode it cannot
+	//     judge, and dropping it would delete, from the user's recording,
+	//     mocks that a newer keploy (or keploy enterprise) wrote and would
+	//     replay;
+	//   - it is a connection failure (copiedVerbatim): nothing in this keploy
+	//     changes one (the prune keeps it, see pruneKeeps, and no noise is
+	//     learned for it), and the copy keeps it as the keploy that recorded
+	//     it wrote it;
+	//   - it is the file's incomplete last document (see nextDoc).
+	// (Under the proven switch the noise write-back also copies, as read, a
+	// document it changes nothing of: persistLearned.)
+	verbatim bool
+	// unterminated says raw is the file's last document and ends part-way
+	// through a line.
+	unterminated bool
+	// incomplete says it is the file's last document, ending part-way
+	// through a line, and the read skipped it (see nextDoc). A rewrite does
+	// not copy it: it moves it aside (mockFileRewriter.copyDoc).
+	incomplete bool
+}
+
+// nextDoc reads and decodes the reader's next document. readErr is io.EOF
+// after the last document, or the error reading or parsing one; decodeErr is
+// the error decoding a parsed one. Either fails the whole test set, except for
+// the file's last document when the file ends part-way through a line
+// (yaml.MockReader.Unterminated): a write that was interrupted (the recorder
+// killed, the disk full; appendMock writes a large document in pieces) leaves
+// exactly that, and losing that one mock must not fail every test in the set.
+//
+// Such a YAML document is never served. That it parses, or even decodes,
+// proves nothing: yaml.v3 reads almost any prefix of a document, and what it
+// reads is the recorded mock with everything after the cut missing (a status
+// code of 2, a URL cut short, a time with no clock). It is skipped, with one
+// WARN naming the mock file, and a rewrite moves it aside. The one
+// exception is a file that stops inside the separator before the next
+// document (its last line is "-" or "--"): the document before the separator
+// is complete, and is read as any other. An NDJSON line is a whole JSON object
+// or does not parse, so a last line with no newline is read when it parses and
+// decodes, and skipped, the same way, when it does not.
+//
+// rewrite says the caller rewrites the file (the prune, the noise write-back):
+// it reports what it keeps as written at Debug, as a read of the set already
+// reported it. logger is the caller's, naming the mock file.
+func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileDoc, readErr, decodeErr error) {
 	if reader.Format() == yaml.FormatJSON {
-		doc, err := reader.ReadNextDocJSON()
-		if err != nil {
-			return nil, err, nil
+		doc, raw, err := reader.ReadNextDocJSONBytes()
+		if raw == nil {
+			return d, err, nil
 		}
-		mocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{doc}, logger)
-		return mocks, nil, err
+		d.raw, d.unterminated = raw, reader.Unterminated()
+		d.off, d.n = reader.DocOffset(), len(raw)
+		if d.unterminated && err == nil {
+			d.cutErr = jsonDocDecodeErr(doc)
+		}
+		if d.unterminated && (err != nil || d.cutErr != nil) {
+			d.verbatim, d.incomplete = true, true
+			if err == nil {
+				d.name, d.kind = doc.Name, doc.Kind
+			}
+			reportIncompleteTail(logger, rewrite, yaml.FormatJSON, d.name)
+			return d, nil, nil
+		}
+		if err != nil {
+			return d, err, nil
+		}
+		d.name, d.kind = doc.Name, doc.Kind
+		d.mocks, decodeErr = decodeMocksJSON([]*yaml.NetworkTrafficDocJSON{doc}, logger, rewrite)
+	} else {
+		doc, raw, err := reader.ReadNextDocBytes()
+		if raw == nil {
+			return d, err, nil
+		}
+		d.raw, d.unterminated = raw, reader.Unterminated()
+		d.off, d.n = reader.DocOffset(), len(raw)
+		if d.unterminated {
+			lastLine := bytes.LastIndexByte(raw, '\n') + 1
+			if !separatorPrefix(raw[lastLine:]) {
+				d.verbatim, d.incomplete = true, true
+				// Named from its whole lines only: the unfinished one may be
+				// the name, cut short.
+				if whole, err := parseYAMLDoc(raw[:lastLine]); err == nil {
+					d.name, d.kind, d.doc = whole.Name, whole.Kind, whole
+				}
+				reportIncompleteTail(logger, rewrite, yaml.FormatYAML, d.name)
+				return d, nil, nil
+			}
+			// The document before the unfinished separator is complete.
+			if len(bytes.TrimSpace(raw[:lastLine])) == 0 {
+				// Nothing but the start of a separator: no document.
+				d.verbatim, d.separator = true, true
+				return d, nil, nil
+			}
+			whole, perr := parseYAMLDoc(raw[:lastLine])
+			if perr != nil {
+				d.parseErr = perr
+				return d, errors.New("failed to decode the mock document before the unfinished separator at the end of the file"), nil
+			}
+			doc, err, d.n = whole, nil, lastLine
+		}
+		if err != nil {
+			return d, err, nil
+		}
+		d.name, d.kind, d.doc = doc.Name, doc.Kind, doc
+		d.mocks, decodeErr = decodeMocks([]*yaml.NetworkTrafficDoc{doc}, logger, rewrite)
 	}
-	doc, err := reader.ReadNextDoc()
-	if err != nil {
-		return nil, err, nil
+	if decodeErr != nil {
+		// Named, for MockFileReader; every other caller fails on decodeErr.
+		d.mocks = nil
+		return d, nil, decodeErr
 	}
-	mocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, logger)
-	return mocks, nil, err
+	d.verbatim = len(d.mocks) == 0 || copiedVerbatim(d.mocks)
+	return d, nil, nil
+}
+
+// separatorPrefix reports whether line, the unfinished last line of a mock
+// file, is the start of the "---" separator keploy writes, at the start of a
+// line, before the next document.
+func separatorPrefix(line []byte) bool {
+	return len(line) > 0 && len(line) < 3 && bytes.HasPrefix([]byte("---"), line)
+}
+
+// parseYAMLDoc parses one YAML mock document; the error is the parse's, or
+// says it is empty.
+func parseYAMLDoc(data []byte) (*yaml.NetworkTrafficDoc, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, errors.New("the document is empty")
+	}
+	var doc yaml.NetworkTrafficDoc
+	if err := yamlLib.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return &doc, nil
+}
+
+// jsonDocDecodeErr is, without logging, the error the decoders return for an
+// NDJSON document: nil when they take it (skipping it counts: that is not an
+// error).
+func jsonDocDecodeErr(doc *yaml.NetworkTrafficDocJSON) error {
+	_, err := decodeMocksJSON([]*yaml.NetworkTrafficDocJSON{doc}, zap.NewNop(), true)
+	return err
+}
+
+// reportIncompleteTail says that the mock file's last mock does not end with
+// a newline and was not read (see nextDoc): at WARN on a read of the set, at
+// Debug on a rewrite, which copies it as written.
+func reportIncompleteTail(logger *zap.Logger, rewrite bool, format yaml.Format, name string) {
+	if rewrite {
+		logger.Debug("the mock file's last mock does not end with a newline; the rewrite moves it aside", zap.String("mock", name))
+		return
+	}
+	if format == yaml.FormatJSON {
+		// A whole NDJSON line that decodes is read (nextDoc): this one does
+		// not, and a newline would not make it.
+		logger.Warn("the last line of the mock file does not end with a newline and is not a whole mock, probably because a write was interrupted (the recorder stopped, or the disk filled), and was not read",
+			zap.String("mock", name),
+			zap.String("next_step", "re-record the test set"))
+		return
+	}
+	logger.Warn("the last mock in the mock file does not end with a newline, probably because a write was interrupted (the recorder stopped, or the disk filled), and was not read",
+		zap.String("mock", name),
+		zap.String("next_step", "re-record the test set; if you saved this file by hand, add a final newline"))
+}
+
+// copiedVerbatim reports whether a decoded document is one a rewrite copies
+// as read rather than re-encodes (see fileDoc.verbatim).
+func copiedVerbatim(mocks []*models.Mock) bool {
+	return len(mocks) == 1 && mocks[0].Kind == models.ConnectionFailure
 }
 
 // pruneKeeps reports whether the prune keeps mock. A kept, consumed mock
@@ -61,14 +240,29 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 	if mock.Spec.Metadata["type"] == "config" {
 		return true
 	}
+	// The prune drops what no test consumed. Nothing consumes a connection
+	// failure at replay yet, so "not consumed" says nothing about whether one
+	// is needed, and pruning it would delete it from a recording made by a
+	// keploy that replays it. (The yaml/json prune copies these documents
+	// before asking, see nextDoc; the gob prune asks here.)
+	if mock.Kind == models.ConnectionFailure {
+		return true
+	}
+	// An answer the client never read is never served (models.Mock.
+	// IsUndelivered), so never consumed: the recording keeps it, as it says
+	// what the dependency answered.
+	if mock.IsUndelivered() {
+		return true
+	}
 	if st, ok := mockNames[mock.Name]; ok {
 		// Persist any request-body noise detected during schema-based
 		// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
 		// disk-read mock before it is re-written. Stored uniformly on the
 		// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
-		if len(st.ReqBodyNoise) > 0 {
-			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
-		}
+		// The learn step's variables ride the same way (mergeLearned); the
+		// variables bound at this mock by others were written by
+		// PersistLearned, before any prune.
+		mergeLearned(mock, st, nil)
 		return true
 	}
 	// Preserve mocks written after replay start.
@@ -86,10 +280,13 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 }
 
 // mockFileRewriter writes the replacement of a yaml/json mock file one mock
-// at a time, encoded exactly as the recorder-side rewrite always encoded it,
-// into a temp file beside it. Nothing touches the original until commit.
+// at a time, into a temp file beside it: each mock it writes (write) encoded
+// exactly as the recorder-side rewrite always encoded it, and each document
+// it copies (copyDoc) as the file held it. Nothing touches the original until
+// commit.
 type mockFileRewriter struct {
 	logger     *zap.Logger
+	root       string
 	dir        string
 	fileName   string
 	format     yaml.Format
@@ -101,11 +298,15 @@ type mockFileRewriter struct {
 	jsonEnc *json.Encoder
 	written int
 	done    bool
+	// incomplete is the source's incomplete last document, which commit
+	// moves aside (see copyDoc).
+	incomplete []byte
 }
 
-func newMockFileRewriter(logger *zap.Logger, dir, fileName string, format yaml.Format) *mockFileRewriter {
+func newMockFileRewriter(logger *zap.Logger, root, dir, fileName string, format yaml.Format) *mockFileRewriter {
 	return &mockFileRewriter{
 		logger:     logger,
+		root:       root,
 		dir:        dir,
 		fileName:   fileName,
 		format:     format,
@@ -116,10 +317,10 @@ func newMockFileRewriter(logger *zap.Logger, dir, fileName string, format yaml.F
 // open creates the temp file on the first write, so a rewrite that keeps
 // nothing never creates one.
 func (rw *mockFileRewriter) open() error {
-	if err := os.MkdirAll(rw.dir, 0o777); err != nil {
+	if err := yaml.MkdirAllInRecording(rw.root, rw.dir, 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(rw.dir, rw.fileName+".*.tmp")
+	tmp, err := yaml.CreateTempInRecording(rw.root, rw.dir, rw.fileName+".*.tmp", 0o600)
 	if err != nil {
 		return err
 	}
@@ -134,6 +335,58 @@ func (rw *mockFileRewriter) open() error {
 			return err
 		}
 	}
+	return nil
+}
+
+// copyDoc puts a document nextDoc read, and the rewrite does not re-encode
+// (fileDoc.verbatim, or, under the proven switch, one the noise write-back
+// changes nothing of: persistLearned), in the replacement as it was read,
+// ending with a newline, so the replacement always ends with one and a later
+// append starts on a line of its own. Two documents at the end of a file that does not end
+// with a newline are not copied:
+//   - the last document the read skipped (fileDoc.incomplete) is held back,
+//     and commit moves it aside;
+//   - the start of a separator ("-", "--") a write stopped in is dropped: the
+//     document before it is whole, and is copied without it.
+func (rw *mockFileRewriter) copyDoc(d fileDoc) error {
+	if d.incomplete {
+		rw.incomplete = d.raw
+		return nil
+	}
+	raw := d.raw
+	if d.unterminated && rw.format != yaml.FormatJSON {
+		// A YAML document the read took ends inside a separator (nextDoc).
+		raw = raw[:bytes.LastIndexByte(raw, '\n')+1]
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	return rw.writeRaw(raw)
+}
+
+// writeRaw copies one document into the replacement unchanged: one line of
+// NDJSON (which the reader hands back without its newline), or one YAML
+// document between separators (with the newline of its every line).
+func (rw *mockFileRewriter) writeRaw(doc []byte) error {
+	if rw.tmp == nil {
+		if err := rw.open(); err != nil {
+			return err
+		}
+	}
+	if rw.format != yaml.FormatJSON && rw.written > 0 {
+		if _, err := rw.w.WriteString("---\n"); err != nil {
+			return err
+		}
+	}
+	if _, err := rw.w.Write(doc); err != nil {
+		return err
+	}
+	if rw.format == yaml.FormatJSON {
+		if err := rw.w.WriteByte('\n'); err != nil {
+			return err
+		}
+	}
+	rw.written++
 	return nil
 }
 
@@ -185,14 +438,52 @@ func (rw *mockFileRewriter) write(mock *models.Mock) error {
 
 // commit puts the rewritten file in place of the original. A rewrite that
 // kept no mock removes the original instead, as a prune that keeps nothing
-// always has.
+// always has. The source's incomplete last document, which the rewrite did
+// not copy (copyDoc), is first written to a sibling file,
+// <file>.incomplete-<unix nanos>, which nothing reads, and one WARN names
+// both; when that copy or the replace fails, the copy is removed and the
+// original left as it was.
 func (rw *mockFileRewriter) commit() error {
 	if rw.done {
 		return errors.New("mockdb: rewrite already finished")
 	}
+	var aside string
+	if rw.incomplete != nil {
+		aside = fmt.Sprintf("%s.incomplete-%d", rw.targetPath, time.Now().UnixNano())
+		if err := writeAsideFile(rw.root, aside, rw.incomplete, 0o644); err != nil {
+			_ = yaml.RemoveInRecording(rw.root, aside)
+			return fmt.Errorf("failed to move the incomplete last mock of %s aside: %w", rw.targetPath, err)
+		}
+	}
+	if err := rw.replace(); err != nil {
+		if aside != "" {
+			_ = yaml.RemoveInRecording(rw.root, aside)
+		}
+		return err
+	}
+	if aside != "" {
+		nextStep := "the moved-aside line is not a mock this keploy reads: delete it, or re-record the test set"
+		if rw.format != yaml.FormatJSON {
+			nextStep = "if the moved-aside text is a whole mock you saved by hand, append it back to the mock file, after a --- line, with a final newline; otherwise delete it, or re-record the test set"
+		}
+		rw.logger.Warn("the mock file's last mock did not end with a newline (an interrupted write, or a mock saved by hand without its final newline), so it was not read; the rewrite moved it aside",
+			zap.String("mock_file", rw.targetPath),
+			zap.String("moved_to", aside),
+			zap.String("next_step", nextStep))
+	}
+	return nil
+}
+
+// writeAsideFile is yaml.WriteFileInRecording, replaceable by tests (a copy that cannot be
+// written whole: the disk is full).
+var writeAsideFile = yaml.WriteFileInRecording
+
+// replace puts the rewritten file in place of the original, or removes the
+// original when the rewrite kept nothing.
+func (rw *mockFileRewriter) replace() error {
 	if rw.tmp == nil {
 		rw.done = true
-		if err := os.Remove(rw.targetPath); err != nil && !os.IsNotExist(err) {
+		if err := yaml.RemoveInRecording(rw.root, rw.targetPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
@@ -208,14 +499,14 @@ func (rw *mockFileRewriter) commit() error {
 	if err != nil {
 		return err
 	}
-	fileMode, err := resolveMockFileMode(rw.targetPath)
+	fileMode, err := resolveMockFileMode(rw.root, rw.targetPath)
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(rw.tmpPath, fileMode); err != nil {
+	if err := yaml.ChmodInRecording(rw.root, rw.tmpPath, fileMode); err != nil {
 		return err
 	}
-	if err := replaceFile(rw.logger, rw.tmpPath, rw.targetPath); err != nil {
+	if err := replaceFile(rw.logger, rw.root, rw.tmpPath, rw.targetPath); err != nil {
 		return err
 	}
 	rw.done = true
@@ -233,7 +524,7 @@ func (rw *mockFileRewriter) discard() {
 		_ = rw.tmp.Close()
 	}
 	if rw.tmpPath != "" {
-		_ = os.Remove(rw.tmpPath)
+		_ = yaml.RemoveInRecording(rw.root, rw.tmpPath)
 	}
 }
 
@@ -248,10 +539,21 @@ func (rw *mockFileRewriter) discard() {
 // usefully append to an existing mocks.gob from a fresh encoder — the new
 // encoder's type table will conflict. Readers that need to merge multiple
 // sessions must read each file independently.
-func forEachGobMock(path string, fn func(*models.Mock) error) error {
-	f, err := os.Open(path)
+//
+// path is a file of the recording at root, and is opened only inside it
+// (yaml.OpenInRecording).
+func forEachGobMock(root, path string, fn func(*models.Mock) error) error {
+	_, err := forEachGobMockCut(root, path, fn)
+	return err
+}
+
+// forEachGobMockCut is forEachGobMock that also says whether the stream ended
+// part-way through a mock (cut): the file was cut, as an interrupted write
+// leaves it, and that last mock was not read.
+func forEachGobMockCut(root, path string, fn func(*models.Mock) error) (cut bool, err error) {
+	f, err := yaml.OpenInRecording(root, path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer f.Close()
 	br := bufio.NewReader(f)
@@ -261,43 +563,34 @@ func forEachGobMock(path string, fn func(*models.Mock) error) error {
 	// format changes in a breaking way.
 	magic := make([]byte, len(gobMockMagic))
 	if _, err := io.ReadFull(br, magic); err != nil {
-		return fmt.Errorf("read gob mock magic: %w (file may be truncated or not a keploy gob mock)", err)
+		return false, fmt.Errorf("read gob mock magic: %w (file may be truncated or not a keploy gob mock)", err)
 	}
 	if string(magic) != gobMockMagic {
-		return fmt.Errorf("gob mock file %s: unrecognized magic %q (want %q) — the file was written by a different keploy version", path, magic, gobMockMagic)
+		return false, fmt.Errorf("gob mock file %s: unrecognized magic %q (want %q) — the file was written by a different keploy version", path, magic, gobMockMagic)
 	}
 	dec := gob.NewDecoder(br)
 	for {
 		var m models.Mock
 		if err := dec.Decode(&m); err != nil {
 			if err == io.EOF {
-				return nil
+				return false, nil
 			}
 			if errors.Is(err, io.ErrUnexpectedEOF) {
-				return nil
+				return true, nil
 			}
-			return fmt.Errorf("decode gob mock: %w", err)
+			return false, fmt.Errorf("decode gob mock: %w", err)
 		}
-		// Lifetime and LifetimeDerived are RUNTIME-ONLY (models.Mock tags them
-		// json:"-" bson:"-" and says persisting them would create a second
-		// source of truth). encoding/gob ignores struct tags, so a gob file
-		// carries whatever the recorder stamped — and DeriveLifetime then
-		// short-circuits on the reloaded flag instead of re-deriving.
-		//
-		// The effect is that the SAME recording replays into a different tier
-		// depending on the storage format: gob keeps the recorder's per-test
-		// tag, while yaml drops it and the lax kind-fallback promotes the mock
-		// to session. A call two tests depend on is then consumed by the first
-		// and missing for the second — a CPU-optimisation knob silently
-		// changing replay semantics.
-		//
 		// Clearing on READ (not just on write) also repairs the recordings
-		// already on disk.
-		var zeroLifetime models.Lifetime
-		m.TestModeInfo.Lifetime = zeroLifetime
-		m.TestModeInfo.LifetimeDerived = false
+		// already on disk (clearRuntimeOnly).
+		clearRuntimeOnly(&m)
+		// A fault mock is held as models.HTTPFault (gobKinded); it is an
+		// HTTP mock. One with no fault stays of that kind, which no parser
+		// takes: never served as a whole answer.
+		if m.Kind == models.HTTPFault && m.Spec.Fault != nil {
+			m.Kind = models.HTTP
+		}
 		if err := fn(&m); err != nil {
-			return err
+			return false, err
 		}
 	}
 }
@@ -307,6 +600,7 @@ func forEachGobMock(path string, fn func(*models.Mock) error) error {
 // header, since gob does not support append — and renames it over the
 // original on commit. Nothing touches the original until then.
 type gobFileRewriter struct {
+	root    string
 	gobPath string
 	tmp     *os.File
 	tmpPath string
@@ -322,20 +616,20 @@ type gobFileRewriter struct {
 // any other user/process on the box. Stat before CreateTemp: if the source
 // file is gone, fall back to the same mode the gob writer uses when it opens
 // mocks.gob fresh (0644) so we do not introduce a new mode-inheritance path.
-func newGobFileRewriter(gobPath string) (*gobFileRewriter, error) {
+func newGobFileRewriter(root, gobPath string) (*gobFileRewriter, error) {
 	dir := filepath.Dir(gobPath)
 	base := filepath.Base(gobPath)
 	var originalMode os.FileMode = 0644
-	if info, statErr := os.Stat(gobPath); statErr == nil {
+	if info, statErr := yaml.StatInRecording(root, gobPath); statErr == nil {
 		originalMode = info.Mode().Perm()
 	}
-	tmp, err := os.CreateTemp(dir, base+".rewrite.*.tmp")
+	tmp, err := yaml.CreateTempInRecording(root, dir, base+".rewrite.*.tmp", 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create gob rewrite tmp: %w", err)
 	}
-	rw := &gobFileRewriter{gobPath: gobPath, tmp: tmp, tmpPath: tmp.Name()}
+	rw := &gobFileRewriter{root: root, gobPath: gobPath, tmp: tmp, tmpPath: tmp.Name()}
 	// Must happen before any concurrent reader observes the renamed file.
-	if err := os.Chmod(rw.tmpPath, originalMode); err != nil {
+	if err := yaml.ChmodInRecording(root, rw.tmpPath, originalMode); err != nil {
 		rw.discard()
 		return nil, fmt.Errorf("chmod gob rewrite tmp to %o: %w", originalMode, err)
 	}
@@ -349,7 +643,7 @@ func newGobFileRewriter(gobPath string) (*gobFileRewriter, error) {
 }
 
 func (rw *gobFileRewriter) write(mock *models.Mock) error {
-	if err := rw.enc.Encode(mock); err != nil {
+	if err := rw.enc.Encode(gobKinded(mock)); err != nil {
 		return fmt.Errorf("encode mock during gob rewrite: %w", err)
 	}
 	return nil
@@ -373,7 +667,7 @@ func (rw *gobFileRewriter) commit() error {
 	if err != nil {
 		return fmt.Errorf("close gob rewrite tmp: %w", err)
 	}
-	if err := os.Rename(rw.tmpPath, rw.gobPath); err != nil {
+	if err := yaml.RenameInRecording(rw.root, rw.tmpPath, rw.gobPath); err != nil {
 		return fmt.Errorf("rename gob rewrite tmp over %s: %w", rw.gobPath, err)
 	}
 	rw.done = true
@@ -389,7 +683,7 @@ func (rw *gobFileRewriter) discard() {
 	if rw.tmp != nil {
 		_ = rw.tmp.Close()
 	}
-	_ = os.Remove(rw.tmpPath)
+	_ = yaml.RemoveInRecording(rw.root, rw.tmpPath)
 }
 
 // errStopScan ends a decode-only pass early once it has its answer.

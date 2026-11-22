@@ -1,0 +1,1200 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"math"
+	"slices"
+	"sort"
+	"time"
+
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+)
+
+// Ownership and exact consumption under the proven switch (design v14
+// §5.2): the agent drives the proxy's exact serving (coreAgent.ExactServer),
+// the one path that decides what a replay's parsers may answer with.
+//
+//   - A test owns exactly the test mocks its mapping lists: the data-plane
+//     mocks among them. A test the mapping omits, or lists with none, owns
+//     none, and any data-plane call it makes is a miss. A mapped
+//     protocol-phase mock (an old mapping that listed a handshake) is not
+//     owned: it stays in the pool, which serves it to every test.
+//   - While a test is open, each of its test mocks answers at most one
+//     request, in recorded order; one more identical request is a miss
+//     (models.MissExtraCall). Each begin starts the test's consumption
+//     afresh, so a retry replays from its first recorded call.
+//   - While no test is open, the current key's pool slice answers, with
+//     reuse or cursor-saturate as recorded. The stateful cursors start afresh
+//     with the session and are each key's own.
+//   - The current key's worker scope (the names of its slice the set's
+//     worker: lists, SetScopeWorker) answers whether a test is open or not,
+//     after the open test's own, and is required of no test
+//     (serveKeyWorker). In a test's window each answers at most once in
+//     the staging's windows; between tests each answers again, of any
+//     lifetime, through any door (walked by placement, then saturated on
+//     its last answer), so a poller that calls more often when replay is
+//     slower moves no verdict.
+//   - At its end, each test mock the test did not consume is evidence.
+//
+// The replay's mocks are staged on the proxy once per session, whole; exact
+// serving narrows every read to what it shows, so nothing staged widens what
+// a test is served.
+
+// exactServer is the proxy's exact serving; an agent whose proxy has none
+// cannot judge a test under the switch.
+func (a *Agent) exactServer() (coreAgent.ExactServer, error) {
+	es, ok := a.Proxy.(coreAgent.ExactServer)
+	if !ok || a.Proxy == nil {
+		return nil, errors.New("this keploy agent's proxy cannot serve each test exactly its own mocks")
+	}
+	return es, nil
+}
+
+// exactServerOf is how worker's tests are served exactly: the proxy's own
+// (exactServer) for worker 0, the run of one test process, and for a test
+// worker its own manager's, served at its claim (serveWorker). A worker that
+// is not served has none: one manager's serving cannot stand in for
+// another's.
+func (a *Agent) exactServerOf(worker uint32) (coreAgent.ExactServer, error) {
+	if worker == 0 {
+		return a.exactServer()
+	}
+	a.provenMu.Lock()
+	w, ok := a.proven.workers[worker]
+	a.provenMu.Unlock()
+	if !ok || w.es == nil {
+		return nil, fmt.Errorf("keploy does not serve test worker %s from mocks of its own: it ended, or its claim served none", coreAgent.InstanceLabel(worker))
+	}
+	return w.es, nil
+}
+
+// servePoolExactly serves worker's claim's key's pool slice (before any
+// claim, models.PoolKeyNone's) while none of its tests is open; worker 0 is
+// the run of one test process, served on the proxy's own manager. It stages
+// the replay's mocks on the proxy the first time in a session, under exact
+// serving with no pool, so no staged mock is ever served outside it, and no
+// mock still staged from the previous session answers under one of this
+// session's pool names (names are unique only within a recording). A staging
+// reaches every worker's manager too. Until the CLI sent the pool slices,
+// the slice is empty: no data-plane pool mock answers.
+func (a *Agent) servePoolExactly(ctx context.Context, worker uint32) error {
+	es, err := a.exactServerOf(worker)
+	if err != nil {
+		return err
+	}
+	a.provenMu.Lock()
+	key, slice, staged := a.proven.key, a.proven.pool, a.proven.staged
+	if worker != 0 {
+		key = a.proven.workers[worker].key
+	}
+	a.provenMu.Unlock()
+	if key == "" {
+		key = models.PoolKeyNone
+	}
+	if !staged {
+		// The staging's view shows nothing staged: no worker scope either.
+		if err := showWorker(es, nil, nil); err != nil {
+			return err
+		}
+		if err := es.ServeExactPool(key, nil); err != nil {
+			return err
+		}
+		staged, err = a.stageForExactServing(ctx)
+		if err != nil {
+			return err
+		}
+		if staged {
+			a.provenMu.Lock()
+			a.proven.staged = true
+			a.provenMu.Unlock()
+		}
+	}
+	if err := a.serveKeyWorker(es, key); err != nil {
+		return err
+	}
+	return es.ServeExactPool(key, append([]string(nil), slice[key]...))
+}
+
+// serveKeyWorker tells the proxy, before the proven wire installs a view,
+// which recordings it shows whether a test is open or not: key's worker
+// scope (SetScopeWorker), each name of it that key's pool slice holds, and
+// so staged. In a test's window the proxy answers each at most one request
+// in the staging's windows, after the open test's own; between tests each
+// answers again, through any door (walked by placement, then saturated on
+// its last answer). No test's end requires it
+// (ExactTestOutcome reads a test's own mocks only). A test process claimed
+// again starts them afresh with the rest of its slice (restartKey). An
+// empty scope clears what the previous key or set showed.
+func (a *Agent) serveKeyWorker(es coreAgent.ExactServer, key string) error {
+	a.provenMu.Lock()
+	var names, skipped []string
+	if w := a.proven.worker[key]; len(w) > 0 {
+		inSlice := make(map[string]bool, len(a.proven.pool[key]))
+		for _, n := range a.proven.pool[key] {
+			inSlice[n] = true
+		}
+		for _, n := range w {
+			if inSlice[n] {
+				names = append(names, n)
+				if _, ok := a.proven.skippedReads[n]; ok {
+					skipped = append(skipped, n)
+				}
+			}
+		}
+	}
+	a.provenMu.Unlock()
+	return showWorker(es, names, skipped)
+}
+
+// showWorker has the proxy show names as the worker scope from its next view
+// on (coreAgent.ExactWorkerServer), skipped of them as the reads of tests the
+// replay's gate skips (coreAgent.ExactWorkerSkippedServer). A proxy that has
+// no worker scope shows none, and cannot serve a set that has one. A proxy
+// that cannot tell a skipped test's read shows it as the rest of the worker
+// scope: it then answers no call one more than the open test recorded, and
+// that call misses, failing closed.
+func showWorker(es coreAgent.ExactServer, names, skipped []string) error {
+	ws, ok := es.(coreAgent.ExactWorkerServer)
+	if !ok {
+		if len(names) > 0 {
+			return errors.New("this keploy agent's proxy cannot serve a set's worker: calls in a test's window")
+		}
+		return nil
+	}
+	if ss, ok := es.(coreAgent.ExactWorkerSkippedServer); ok {
+		return ss.ServeExactWorkerSkipped(names, skipped)
+	}
+	return ws.ServeExactWorker(names)
+}
+
+// stageForExactServing stages the replay's mocks on the proxy, as keploy
+// test stages a set: exact serving decides what each read shows. A new
+// session's stateful cursors start afresh (two rounds never share one). It
+// reports whether it staged: with no recording stored yet there is nothing
+// to stage.
+//
+// Of the on-disk store it reads what was recorded before the set's earliest
+// recorded test (stagingStartupCutoff) and every key's pool slice by name:
+// what no test owns. Each test reads its own as it opens (serveTestExactly),
+// and lets them go as it closes, so the agent never holds every test's
+// recordings at once (a replay of a long recording held them all for its
+// whole session). With no recorded window (a CLI that sends none) the
+// staging reads the whole window, as before. The reads of the recordings
+// the trees then do not hold go to the on-disk store (readUnstagedFromDisk).
+// The set's background recordings the CLI's table named
+// (SetScopeBackground) are handed to the proxy with the staging.
+func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
+	if _, stored := a.clientMocks.Load(uint64(0)); !stored {
+		// Nothing to stage yet: the CLI stores the recording before it
+		// sends the table, and the next serve stages it.
+		return false, nil
+	}
+	if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
+		r.ResetStatefulCursors()
+	}
+	a.provenMu.Lock()
+	first, pool, background := a.proven.firstRecorded, a.proven.pool, a.proven.background
+	a.provenMu.Unlock()
+	names := poolNames(pool)
+	// The set's background recordings (its worker: and startup: mocks, as
+	// the CLI's table names them) go with the staging, as keploy test's
+	// staging sends them: the proxy keeps them read-only, so a parser can
+	// tell a miss is one more run of one of them.
+	params := models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             time.Now(),
+		StrictMockWindow:       true,
+		ExactStaging:           true,
+		FirstRecordedTestStart: first,
+		BackgroundMocks:        background,
+	}
+	if err := a.stageMocks(ctx, params, names, nil); err != nil {
+		return false, fmt.Errorf("stage the recording's mocks: %w", err)
+	}
+	if err := a.readUnstagedFromDisk(); err != nil {
+		return false, err
+	}
+	staged := make(map[string]bool, len(names))
+	for _, n := range names {
+		staged[n] = true
+	}
+	a.provenMu.Lock()
+	a.proven.stagedPool = staged
+	a.proven.stagedBackground = background
+	a.provenMu.Unlock()
+	// The learn step reads the set's recordings now, in the background, not
+	// on its first drifted call's answer path: keploy mock's replay of
+	// record's full round stages its set here, before the test command
+	// runs, and never by keploy test's stage filter (serveKeployTestExactly).
+	// The proxy reads them only while the set's learn step is on.
+	if w, ok := a.Proxy.(coreAgent.LearnSetWarmer); ok {
+		if err := w.WarmLearnSet(); err != nil {
+			return false, fmt.Errorf("read the recording's mocks for the learn step: %w", err)
+		}
+	}
+	return true, nil
+}
+
+// poolNames is every name of pool's slices, once each, in a fixed order.
+func poolNames(pool map[string][]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, key := range slices.Sorted(maps.Keys(pool)) {
+		for _, n := range pool[key] {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// covers reports whether staged holds every name of pool's slices.
+func covers(staged map[string]bool, pool map[string][]string) bool {
+	for _, names := range pool {
+		for _, n := range names {
+			if !staged[n] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// readUnstagedFromDisk points the proxy's reads of the staged set's
+// recordings its trees do not hold (a test's own are staged only as it
+// opens) at the on-disk store: a miss on a call that is the recording of a
+// test not begun yet (a worker's call made early) is told from it; the learn
+// step's earlier places of a pool recording are every recording made before
+// it, a test's own on disk too; record's full round pairs with the
+// recordings of tests not begun yet; and under keploy mock replay a test
+// process's teardown (the calls after its own last test) is bounded by its
+// tests' recordings, which no staging reads. A set kept all resident sets
+// none: its trees hold every recording.
+func (a *Agent) readUnstagedFromDisk() error {
+	if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
+		if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
+			return fmt.Errorf("set the test set's recording source: %w", err)
+		}
+	}
+	if rb, ok := a.Proxy.(coreAgent.RecordedBeforeSetter); ok {
+		if rk, ok := a.Proxy.(coreAgent.RecordingKeeper); ok {
+			if disk := a.stagedDisk(); disk != nil {
+				disk.SetRecordingKeeper(rk.KeepRecording)
+			}
+		}
+		if err := rb.SetRecordedBefore(a.diskRecordedBefore()); err != nil {
+			return fmt.Errorf("set the test set's recordings before an instant: %w", err)
+		}
+	}
+	if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
+		if err := rk.SetRecordedOfKind(a.diskRecordedOfKind()); err != nil {
+			return fmt.Errorf("set the test set's recordings of a kind: %w", err)
+		}
+	}
+	if rt, ok := a.Proxy.(coreAgent.RecordingTimesSetter); ok {
+		if err := rt.SetRecordingTimes(a.diskRecordingTimes()); err != nil {
+			return fmt.Errorf("set the test set's recording times: %w", err)
+		}
+	}
+	return nil
+}
+
+// diskRecordingTimes visits, of the set staged, every on-disk mock's name,
+// place, protocol phase and clock (DiskMocks.RangeTimes), nil
+// when the set's mocks are all resident, and so all staged in the proxy's
+// trees.
+func (a *Agent) diskRecordingTimes() func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error {
+	disk := a.stagedDisk()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeTimes
+}
+
+// restartKey starts key's calls outside every test afresh on the proxy
+// (coreAgent.ExactKeyRestarter), when the proxy can: one that cannot keeps
+// what they consumed.
+func (a *Agent) restartKey(key string) error {
+	r, ok := a.Proxy.(coreAgent.ExactKeyRestarter)
+	if !ok {
+		return nil
+	}
+	a.provenMu.Lock()
+	names := append([]string(nil), a.proven.pool[key]...)
+	a.provenMu.Unlock()
+	return r.RestartExactKey(key, names)
+}
+
+// serveTestExactly opens test id under exact serving: its test mocks, the
+// data-plane mocks of its mapping, in recorded order, and its variables, with
+// none bound, in the same step (openExactTest). A mapping that names a mock
+// the loaded recording does not have refuses: what the test owns cannot be
+// told.
+//
+// A test worker's test is served on its worker's manager (exactServerOf).
+func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
+	worker := a.scopeInstance(id)
+	es, err := a.exactServerOf(worker)
+	if err != nil {
+		return err
+	}
+	a.provenMu.Lock()
+	staged := a.proven.staged
+	a.provenMu.Unlock()
+	if !staged {
+		// A begin before the CLI sent its table: nothing is staged, and the
+		// pool serves nothing; the test owns what its mapping (none yet)
+		// lists.
+		if err := a.servePoolExactly(ctx, worker); err != nil {
+			return err
+		}
+	}
+	a.scopeMu.Lock()
+	names := append([]string(nil), a.scopeTable[id]...)
+	reads := a.testRepeats[id]
+	a.scopeMu.Unlock()
+	var owned []*models.Mock
+	if len(names) > 0 {
+		mocks, err := a.mocksByName(names)
+		if err != nil {
+			return err
+		}
+		owned = models.MarkRepeatReads(a.notReal(id, testMocks(names, mocks)), reads)
+	}
+	// What the store refused of the test's mapping serves nothing; its end
+	// counts each as a recorded call the test did not make.
+	unservable := a.refusedOf(names)
+	a.provenMu.Lock()
+	if a.proven.unservable == nil {
+		a.proven.unservable = map[string][]string{}
+	}
+	a.proven.unservable[id] = unservable
+	a.provenMu.Unlock()
+	// The key's worker scope answers in the test's window too: the last
+	// pool serve showed it (servePoolExactly). Every change of key serves
+	// the pool again, at its claim or, when a test is open then, at that
+	// test's end, and a new worker table comes in the same request as the
+	// pool slices it serves with (SetScopeWorker, then SetScopePool), so
+	// the view the test opens on already shows it.
+	//
+	// A test is the scope of the variables keploy mock replay binds: it
+	// begins with none bound, as it opens.
+	if err := a.openExactTest(es, id, owned, nil); err != nil {
+		return err
+	}
+	// When the test began being served, and the round its view was
+	// installed at, read once the view is in force: its end files a miss
+	// marked before that install as no call of the test's, whenever keploy
+	// decided it (testEvidence).
+	began := testBegin{at: time.Now()}
+	if r, ok := es.(coreAgent.ExactTestInstallReader); ok {
+		began.epoch, began.bounds, began.round = r.ExactTestInstalled(id)
+	}
+	a.provenMu.Lock()
+	if a.proven.servedSince == nil {
+		a.proven.servedSince = map[string]testBegin{}
+	}
+	a.proven.servedSince[id] = began
+	a.provenMu.Unlock()
+	return nil
+}
+
+// endingTestCase names what a keploy test call that serves the pool settles:
+// the test case whose view is in force, which the call ends (a set's test
+// cases run one at a time), or the gap between test cases when none is
+// (coreAgent.BetweenTestCases): a pool call before the set's first test case
+// or after one ended, which is no test case's. "the test case" from a proxy
+// that cannot say which view is in force.
+func endingTestCase(es coreAgent.ExactServer) string {
+	r, ok := es.(coreAgent.ExactTestServedReader)
+	if !ok {
+		return "the test case"
+	}
+	if test := r.ExactTestServed(); test != "" {
+		return test
+	}
+	return coreAgent.BetweenTestCases
+}
+
+// openExactTest opens test under exact serving, served exactly owned, and
+// begins its variables with given bound, in one step (coreAgent.
+// ExactTestOpener): no call the test's mocks answer binds before its
+// variables begin. A proxy that cannot opens it only when it keeps no
+// variables, and none were given (opensWithoutVariables).
+func (a *Agent) openExactTest(es coreAgent.ExactServer, test string, owned []*models.Mock, given []models.VariableBinding) error {
+	if o, ok := es.(coreAgent.ExactTestOpener); ok {
+		return o.OpenExactTest(test, owned, given)
+	}
+	if err := a.opensWithoutVariables(given); err != nil {
+		return err
+	}
+	return es.ServeExactTest(test, owned)
+}
+
+// testMocks is the test mocks among a test's mapped names: the data-plane
+// mocks but the answers the client never read (models.Mock.OutsideTestScopes:
+// a mapping written before the tag, or by another writer, may list one, and
+// no replay serves it), each once, in recorded order (by request time; a mapping lists a
+// test's mocks in recorded order, which keeps ties, and an undated mock
+// before the dated ones).
+func testMocks(names []string, byName map[string]*models.Mock) []*models.Mock {
+	out := make([]*models.Mock, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, n := range names {
+		mk := byName[n]
+		if mk == nil || seen[n] || mk.OutsideTestScopes() {
+			continue
+		}
+		seen[n] = true
+		out = append(out, mk)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ti, tj := out[i].Spec.ReqTimestampMock, out[j].Spec.ReqTimestampMock
+		if ti.IsZero() || tj.IsZero() {
+			return ti.IsZero() && !tj.IsZero()
+		}
+		return ti.Before(tj)
+	})
+	return out
+}
+
+// serveKeployTestExactly is a keploy test filter under the proven switch
+// (models.ExactServing): the set's staging call stages every mock once and
+// serves the set's pool; a test case's call serves it exactly its own mocks,
+// and with open begins its variables as it opens (OpenTestCase); any other
+// call serves the pool again, between test cases. A keploy test run has one
+// key, models.PoolKeyNone.
+func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFilterParams, open *opening) error {
+	es, err := a.exactServer()
+	if err != nil {
+		return err
+	}
+	ex := params.Exact
+	// The set's learn step ends (a retry cycle of record's full round,
+	// models.MockFilterParams.LearnEnded) before anything is settled or
+	// served: a request a parser's learn step takes up after this is no
+	// longer paired, nor learned (one it took up before keeps its decision).
+	// Once ended it stays ended for the set: only the next set's staging
+	// takes it back up (as a new session does, Proxy.Mock), so a later
+	// filter that does not say it, from an older or another client, never
+	// turns learning back on mid-set. A proxy that cannot end it refuses
+	// the filter that asks to: its learn step would pair and learn in an
+	// order that is not the recorded one.
+	if le, ok := a.Proxy.(coreAgent.LearnEndSetter); ok {
+		if params.LearnEnded || ex.Stage {
+			if err := le.SetLearnEnded(params.LearnEnded); err != nil {
+				return err
+			}
+		}
+	} else if params.LearnEnded {
+		return errors.New("this keploy agent cannot stop its learn step for the test set's retry cycle")
+	}
+	// What the set's first cycle learned is on every recording the agent
+	// serves the set from here on, its retry cycles (models.MockFilterParams.
+	// Learned): only with the learn step ended, which would otherwise read
+	// a learned recording as the one recorded.
+	if len(params.Learned) > 0 {
+		if !params.LearnEnded {
+			return errors.New("the test set's learning came on a filter that does not end its learn step: keploy sends it only with its retry cycles' learn step ended; run the keploy agent of this keploy version")
+		}
+		if err := a.loadKeptLearning(params.Learned); err != nil {
+			return fmt.Errorf("serve the test set's retry cycles what its first cycle learned: %w", err)
+		}
+	}
+	// A test case opens, or ends, once the calls made before are settled
+	// (settle_proven.go): they are the pool's, or the test case's own. A
+	// connection whose held requests cannot be told does not stop either:
+	// a test case opens all the same, and one that ends is served the pool
+	// and told it is not verified (its consumption read fails).
+	var unknown error
+	switch {
+	case ex.Stage:
+	case ex.Test != "":
+		// A test case opens all the same with a connection whose held
+		// requests cannot be told: its end finds it. The listener's drops
+		// read now close the gap's window, whose drops are this test case's
+		// (markDrops), and open its own: they are what its end compares.
+		drops, err := a.settle(ctx, true)
+		if err != nil && !errors.Is(err, errHoldsUnknown) {
+			return err
+		}
+		// Its end waits only for the requests opened from here.
+		a.beginWindow(0)
+		a.markDrops(ctx, drops, true)
+	default:
+		// A test case that ends is served the pool whatever its settling
+		// found, and told it is not verified when keploy cannot tell its
+		// calls settled: the calls after it are the pool's either way.
+		// One cut short marks what it could not see reached with the test
+		// case's name, or the gap's for a pool call between test cases
+		// (endingTestCase, settledSince), which its owned losses then say.
+		unknown = a.settledSince(ctx, true, 0, endingTestCase(es))
+	}
+	switch {
+	case ex.Stage:
+		staging := params
+		staging.Exact = nil
+		// Exact serving goes on, with no pool, before the stage lands: no
+		// staged mock is ever served outside it, and none still staged from
+		// the previous set answers under one of this set's pool names
+		// (names are unique only within a set). The set's pool is served
+		// once its mocks are in. The previous set's worker scope goes for
+		// the same reason, before that view is installed.
+		a.scopeMu.Lock()
+		a.testWorker, a.testBg = nil, nil
+		a.forgetReached()
+		a.scopeMu.Unlock()
+		// The previous set's background rules go too, and the set's own
+		// rules come first: every view this staging installs reads the set
+		// as served by the rules it was recorded under (a marked set's
+		// background names no recording until its mocks are staged), so a
+		// call one of them refuses is never told the set was recorded
+		// without proven routing.
+		if err := a.stageBackgroundExactly(es, a.stagingRules(ex)); err != nil {
+			return err
+		}
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
+		if err := es.ServeExactPool(models.PoolKeyNone, nil); err != nil {
+			return err
+		}
+		if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
+			r.ResetStatefulCursors()
+		}
+		// The pool's per-test mocks are staged with the set's startup
+		// traffic: the staging call reads, of the on-disk store, only what
+		// was recorded before the set's first test (stagingStartupCutoff),
+		// and each test reads its own as it opens (ServeExactTest). A call
+		// recorded while no test was open, between tests or after the last
+		// one, is the pool's, served by name from the staged mocks; were it
+		// not staged, its replay would find no mock. The pool is what no
+		// test owns, never the whole recording.
+		//
+		// The set's worker scope (models.Mapping.Worker) is staged by name
+		// with the pool: its mocks answer from their places on.
+		if err := a.stageMocks(ctx, staging, append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...), nil); err != nil {
+			return fmt.Errorf("stage the test set's mocks: %w", err)
+		}
+		// A test's own are staged only as it opens: what reads them before
+		// reads the on-disk store.
+		if err := a.readUnstagedFromDisk(); err != nil {
+			return err
+		}
+		// The learn step reads the set's recordings now, in the background,
+		// not on its first call's answer path (record's full round alone).
+		if w, ok := a.Proxy.(coreAgent.LearnSetWarmer); ok {
+			if err := w.WarmLearnSet(); err != nil {
+				return fmt.Errorf("read the test set's recordings for the learn step: %w", err)
+			}
+		}
+		bg := a.settleBackground(ex)
+		if _, can := es.(coreAgent.ExactBackgroundServer); bg != nil && !can {
+			// A proxy that cannot serve the background rules serves the set as
+			// one recorded without proven routing, and the agent says so
+			// (ServedBackground): the replay checks it as such a set.
+			a.logger.Info("this keploy agent's proxy cannot serve a test set by the proven routing it was recorded under: its background is served as in a set recorded without proven routing, its worker scope checked at the set's end",
+				zap.String("next_step", "nothing to do for this run: it is checked as a set recorded without proven routing, and its verdicts hold. This agent's proxy (a mode or a build that predates proven routing) serves no set by proven routing; replay with one that does to have the set served by it"))
+			bg = nil
+		}
+		a.scopeMu.Lock()
+		a.testPool = append([]string(nil), ex.Pool...)
+		a.testWorker = append([]models.MockEntry(nil), ex.Worker...)
+		a.forgetReached()
+		a.testOrder = append([]string(nil), ex.Order...)
+		a.testOrderAt = make(map[string]int, len(ex.Order))
+		// From the end, so a name the order holds twice keeps its first
+		// index: its opening passes the fewer test cases.
+		for i := len(ex.Order) - 1; i >= 0; i-- {
+			a.testOrderAt[ex.Order[i]] = i
+		}
+		a.testBg = bg
+		a.scopeMu.Unlock()
+		// the background rules with the set's pool and whole worker scope; today's
+		// with neither (they name nothing). Either settles the staging the
+		// proxy opened (stageBackgroundExactly): the views from here on are
+		// no staging's.
+		if bg != nil {
+			if err := a.serveBackgroundExactly(es, models.RecordedWithS12Routing, ex.Pool, entryNames(ex.Worker)); err != nil {
+				return err
+			}
+		} else if err := a.serveBackgroundExactly(es, "", nil, nil); err != nil {
+			return err
+		}
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
+		return es.ServeExactPool(models.PoolKeyNone, append([]string(nil), ex.Pool...))
+	case ex.Test != "":
+		var owned []*models.Mock
+		if len(ex.Owned) > 0 {
+			mocks, err := a.mocksByName(ex.Owned)
+			if err != nil {
+				return fmt.Errorf("serve %s its own mocks: %w", ex.Test, err)
+			}
+			owned = testMocks(ex.Owned, mocks)
+		}
+		a.scopeMu.Lock()
+		a.reachTest(ex.Test)
+		a.scopeMu.Unlock()
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
+		if len(ex.Concurrent) > 0 {
+			return a.serveTestConcurrently(es, ex, owned, open)
+		}
+		if open != nil {
+			return a.openExactTest(es, ex.Test, owned, open.given)
+		}
+		return es.ServeExactTest(ex.Test, owned)
+	default:
+		a.scopeMu.Lock()
+		// A pass of the set's run that ended passed the test cases it
+		// skipped after the last one it opened (models.ExactServing.Passed).
+		a.passTests(ex.Passed)
+		pool := append([]string(nil), a.testPool...)
+		a.scopeMu.Unlock()
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
+		if err := a.servePoolAhead(es, pool, ex.Ahead); err != nil {
+			return err
+		}
+		return unknown
+	}
+}
+
+// loadKeptLearning puts what the replay keeps of the set's first-cycle
+// learning (states, models.MockFilterParams.Learned) on every recording the
+// agent's store hands out from now on: each resident one it holds learning
+// for is replaced by a merged copy (learn.KeptLearning.Onto), and each read
+// from the on-disk store is merged as it is decoded (DiskMocks.SetOnLoad).
+// A test's own recordings, read by name as it opens (mocksByName), are so
+// served as the next keploy test reads them once the learning is persisted.
+// The recordings the proxy staged at the set's start (the pool's, the worker
+// scope's) carry it as the proxy hands them out (KeptLearningSetter). A
+// proxy that cannot is refused before anything is loaded: the retry cycles
+// would be served the staged recordings without what was learned on them.
+// The next set's store (StoreMocks) comes without it, and so does the
+// proxy's next staging (SetLearnEnded(false)).
+func (a *Agent) loadKeptLearning(states []models.MockState) error {
+	kept := learn.NewKeptLearning(states)
+	if kept == nil {
+		return nil
+	}
+	ks, ok := a.Proxy.(coreAgent.KeptLearningSetter)
+	if !ok {
+		return errors.New("this keploy agent's proxy cannot serve the staged recordings (the pool's, the worker scope's) what the first cycle learned: it has no kept-learning capability; run the keploy agent of this keploy version")
+	}
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return errors.New("no mocks are loaded")
+	}
+	if err := ks.SetKeptLearning(kept); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for _, tier := range [][]*models.Mock{s.filtered, s.unfiltered} {
+		for i, m := range tier {
+			tier[i] = kept.Onto(m)
+		}
+	}
+	disk := s.diskMocks
+	s.mu.Unlock()
+	if disk != nil {
+		disk.SetOnLoad(kept.Into)
+	}
+	return nil
+}
+
+// serveTestConcurrently opens ex.Test with owned and the recordings it shares
+// with the tests that ran beside it at record time (ex.Concurrent, keploy
+// record's full round), when the proxy serves them
+// (coreAgent.ExactConcurrentServer), and with open begins its variables in
+// the same step (OpenExactTestConcurrent), as openExactTest does. The CLI
+// sends them only to an agent that said it does (ServesExactConcurrent); a
+// proxy that does not is refused, so a test is never served less than its
+// plan says without a word.
+func (a *Agent) serveTestConcurrently(es coreAgent.ExactServer, ex *models.ExactServing, owned []*models.Mock, open *opening) error {
+	cs, ok := es.(coreAgent.ExactConcurrentServer)
+	if !ok {
+		return fmt.Errorf("this keploy agent's proxy cannot serve %s the recordings it shares with the tests that ran beside it", ex.Test)
+	}
+	mocks, err := a.mocksByName(ex.Concurrent)
+	if err != nil {
+		return fmt.Errorf("serve %s the recordings it shares: %w", ex.Test, err)
+	}
+	cands := testMocks(ex.Concurrent, mocks)
+	if open != nil {
+		return cs.OpenExactTestConcurrent(ex.Test, owned, cands, open.given)
+	}
+	return cs.ServeExactTestConcurrent(ex.Test, owned, cands)
+}
+
+// ServesExactConcurrent reports whether this agent serves a test the
+// recordings it shares with the tests that ran beside it at record time
+// (coreAgent.ExactConcurrentServer): what /storemocks says under the proven
+// switch (models.ExactConcurrentHeader).
+func (a *Agent) ServesExactConcurrent() bool {
+	_, ok := a.Proxy.(coreAgent.ExactConcurrentServer)
+	return ok && a.Proxy != nil
+}
+
+// servePoolAhead serves the set's pool between test cases and, beside it, the
+// next test case's mocks that were in flight when it began (ahead,
+// models.ExactServing.Ahead), each answering once as that test case's, when
+// the proxy can (coreAgent.ExactAheadServer). A proxy that cannot serves the
+// pool alone, as before: those calls answer only once their test case opens.
+func (a *Agent) servePoolAhead(es coreAgent.ExactServer, pool, ahead []string) error {
+	as, ok := es.(coreAgent.ExactAheadServer)
+	if len(ahead) == 0 || !ok {
+		return es.ServeExactPool(models.PoolKeyNone, pool)
+	}
+	mocks, err := a.mocksByName(ahead)
+	if err != nil {
+		// The pool is served all the same: the test case that ended is
+		// over, and its consumption is read next. The next test case's
+		// calls in flight answer once it opens.
+		utils.LogError(a.logger, err, "could not read the next test case's calls in flight when it begins; they answer only once it opens")
+		return es.ServeExactPool(models.PoolKeyNone, pool)
+	}
+	return as.ServeExactPoolAhead(models.PoolKeyNone, pool, testMocks(ahead, mocks))
+}
+
+// diskRecordingSource visits, of the set staged, the on-disk mocks of a kind
+// under request keys (DiskMocks.RangeKeys); nil when the set's mocks are all
+// resident, and so all staged in the proxy's trees.
+func (a *Agent) diskRecordingSource() func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	disk := a.stagedDisk()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeKeys
+}
+
+// stagedDisk is the on-disk store of the staged set's per-test mocks, nil
+// when it keeps none on disk.
+func (a *Agent) stagedDisk() *proxyPkg.DiskMocks {
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.diskMocks
+}
+
+// diskRecordedBefore is the on-disk store's reader of the staged set's
+// recordings made before an instant (DiskMocks.RangeRecordedBefore), nil
+// when the set keeps none on disk.
+func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) bool) error {
+	disk := a.stagedDisk()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeRecordedBefore
+}
+
+// serveWorkerExactly tells the proxy which of the set's worker-scope mocks
+// (testWorker) the set's run has reached the place of: those placed at the
+// set's start, and those placed after a test case the run has reached since
+// the staging (testReached: begun, or passed over, reachTest). It is said
+// before each view is installed, so the view shows them. A proxy that has no
+// worker scope (coreAgent.ExactWorkerServer) cannot serve a set that has one.
+//
+// Under the background rules (testBg) a worker-scope mock
+// with no identical sibling among the set's background answers from the set's
+// start, wherever it is placed (testBackground.noSibling), and the reachable
+// ones are said in the order the view serves them in: the earlier place first
+// (the set's start, then each test case's in the order they began), within
+// one place a delivering answer before an idle one, then recorded order.
+// Identical siblings stay gated by their places.
+//
+// A recording of a once series (the replay's scope table: SetScopeOnce,
+// SetScopeSeries) answers one call in the run wherever it lands, so its
+// place does not gate it either: a call the application makes once per
+// process, as a start-up job's lease, lands in whichever test it falls in,
+// which need not be the one the recording was placed after. Before its
+// place it comes after every place the run reached (onceMembers).
+func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
+	a.provenMu.Lock()
+	once := onceMembers(a.proven.series, a.proven.once)
+	a.provenMu.Unlock()
+	a.scopeMu.Lock()
+	reachable := reachableWorker(a.testWorker, a.testReached, a.testReachAt, a.testBg, once)
+	has := len(a.testWorker) > 0
+	a.scopeMu.Unlock()
+	ws, ok := es.(coreAgent.ExactWorkerServer)
+	if !ok {
+		if has {
+			return errors.New("this keploy agent's proxy cannot serve a test set's worker scope, the calls no test case owns")
+		}
+		return nil
+	}
+	return ws.ServeExactWorker(reachable)
+}
+
+// reachTest notes, as test case name opens, that the set's run has reached
+// it, and every test case before it in the run's order (testOrder,
+// models.ExactServing.Order) that it has not reached yet: the run passed
+// those whether they ran or not, so a test case it skipped (quarantined, left
+// out by a selection, refused) reaches the worker-scope mocks placed after it
+// as one that ran does. A test case after name in the order is not reached,
+// and a name the order does not hold passes none: it reads index 0, the
+// map's zero value, as the first test case of the order does. Each test case
+// reached is given its place in the order the run reached them
+// (testReachAt): the passed ones, in the run's order, before name. Called
+// with scopeMu held.
+func (a *Agent) reachTest(name string) {
+	a.passTests(a.testOrderAt[name])
+	a.reach(name)
+}
+
+// passTests notes that the set's run has passed the first n test cases of
+// its order (testOrder), those it has not passed yet, in the order's turn:
+// as a test case opens (reachTest), and as a pass of the run ends
+// (models.ExactServing.Passed), when it has passed the test cases it skipped
+// after the last one it opened too. An n no greater than what the run has
+// passed passes none, and one greater than the order's length passes all of
+// it. Called with scopeMu held.
+func (a *Agent) passTests(n int) {
+	for ; a.testPassed < n && a.testPassed < len(a.testOrder); a.testPassed++ {
+		a.reach(a.testOrder[a.testPassed])
+	}
+}
+
+// reach notes that the set's run has reached test case test, giving it the
+// next place in the order the run reached them (testReachAt) the first time.
+// Called with scopeMu held.
+func (a *Agent) reach(test string) {
+	if a.testReached == nil {
+		a.testReached = map[string]bool{}
+	}
+	if a.testReachAt == nil {
+		a.testReachAt = map[string]int{}
+	}
+	if _, again := a.testReachAt[test]; !again {
+		a.testReachAt[test] = len(a.testReachAt) + 1
+	}
+	a.testReached[test] = true
+}
+
+// forgetReached forgets the set's run order and the test cases its run
+// reached: the next staging's run starts afresh. Called with scopeMu held.
+func (a *Agent) forgetReached() {
+	a.testReached, a.testReachAt = nil, nil
+	a.testOrder, a.testOrderAt, a.testPassed = nil, nil, 0
+}
+
+// entryNames is the names of entries, in order.
+func entryNames(entries []models.MockEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Name != "" {
+			out = append(out, e.Name)
+		}
+	}
+	return out
+}
+
+// realDestinations is implemented by a proxy that relays the run's mock.real
+// destinations: which one, if any, a recorded mock's destination is.
+type realDestinations interface {
+	RealDestination(m *models.Mock) (string, bool)
+}
+
+// notReal is owned less the mocks whose destination mock.real now reaches
+// for real: a call to one is relayed before any matcher reads it, so the
+// test is neither served the mock nor judged for not making its call (its
+// REAL row says what it did there). Each is said once per session, with the
+// fix.
+func (a *Agent) notReal(id string, owned []*models.Mock) []*models.Mock {
+	rd, ok := a.Proxy.(realDestinations)
+	if !ok {
+		return owned
+	}
+	out := owned[:0:0]
+	for _, m := range owned {
+		label, real := rd.RealDestination(m)
+		if !real {
+			out = append(out, m)
+			continue
+		}
+		a.provenMu.Lock()
+		said := a.proven.realSaid[m.Name]
+		if !said {
+			if a.proven.realSaid == nil {
+				a.proven.realSaid = map[string]bool{}
+			}
+			a.proven.realSaid[m.Name] = true
+		}
+		a.provenMu.Unlock()
+		if !said {
+			a.logger.Warn("a test's recorded call goes to a destination mock.real now reaches for real: it is neither served nor judged",
+				zap.String("test", id), zap.String("mock", m.Name), zap.String("real", label),
+				zap.String("next_step", "record the test again, so its recording holds no call to "+label))
+		}
+	}
+	return out
+}
+
+// ServedBackground is the rules the staged set's background is served by
+// (models.BackgroundRulesHeader): models.RecordedWithS12Routing when its
+// staging settled the background rules, "" for today's.
+func (a *Agent) ServedBackground() string {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	if a.testBg == nil {
+		return ""
+	}
+	return models.RecordedWithS12Routing
+}
+
+// testBackground is a set's background as its staging settled it under the
+// background rules (models.RecordedWithS12Routing): which of its worker-scope mocks
+// have no identical sibling among the set's background (its worker scope and
+// its pool) by their kind's exact key (models.ExactKeyOf), and which answer
+// idle (models.IsIdleAnswer).
+type testBackground struct {
+	noSibling map[string]bool
+	idle      map[string]bool
+	// keyErrs say, for each background recording two or more of its kind's
+	// exact keys claim (models.ExactKeyErr), why it has no key: it counts as
+	// having siblings. In recorded order of the names read.
+	keyErrs []string
+}
+
+// settleBackground settles the staged set's background under the background rules, for
+// a staging that names them (models.ExactServing.Background) under the proven
+// switch; nil for today's rules. A mock it cannot read counts as having a
+// sibling: it stays gated by its place.
+func (a *Agent) settleBackground(ex *models.ExactServing) *testBackground {
+	if a.stagingRules(ex) == "" {
+		return nil
+	}
+	if len(ex.Worker) == 0 {
+		return &testBackground{noSibling: map[string]bool{}, idle: map[string]bool{}}
+	}
+	names := append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...)
+	byName, err := a.mocksByName(names)
+	if err != nil {
+		a.logger.Warn("could not read the test set's background to tell which worker-scope recordings have no identical sibling: each answers only from its place, and a call made before it misses",
+			zap.Error(err),
+			zap.String("next_step", "fix the error above, or record the test set again if its mocks cannot be read"))
+		byName = nil
+	}
+	bg := backgroundOf(ex.Worker, ex.Pool, byName)
+	for _, why := range bg.keyErrs {
+		a.logger.Warn("a recording of the test set's background has no exact key: it answers only from its place, and a call made before it misses",
+			zap.String("why", why),
+			zap.String("next_step", "make each parser's exact key decline (ok false) the recordings it does not own"))
+	}
+	return bg
+}
+
+// backgroundOf is the background of a set whose worker scope is worker and
+// whose pool is pool, its recordings by name in byName (testBackground): a
+// worker-scope recording whose kind keys it (models.ExactSiblingKey: a key
+// as the registration that gave it, so two parsers' equal strings are two
+// keys) and that no other data-plane recording of the background shares the
+// key of has no
+// sibling; one byName lacks, or its kind cannot key, or two of its kind's
+// keys claim (models.ExactKeyErr, in keyErrs), has (it stays gated).
+func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*models.Mock) *testBackground {
+	bg := &testBackground{noSibling: map[string]bool{}, idle: map[string]bool{}}
+	names := append(append([]string(nil), pool...), entryNames(worker)...)
+	// How many of the background's data-plane recordings share each exact
+	// key, by kind.
+	keys := map[string]int{}
+	keyOf := func(mk *models.Mock) (string, bool) {
+		if mk == nil || mk.IsProtocolPhase() {
+			return "", false
+		}
+		k, ok := models.ExactSiblingKey(mk)
+		if !ok {
+			return "", false
+		}
+		return string(mk.Kind) + "\x00" + k, true
+	}
+	errSeen := map[string]bool{}
+	for _, n := range names {
+		mk := byName[n]
+		if mk == nil || mk.IsProtocolPhase() || errSeen[n] {
+			continue
+		}
+		errSeen[n] = true
+		if err := models.ExactKeyErr(mk); err != nil {
+			bg.keyErrs = append(bg.keyErrs, err.Error())
+		}
+	}
+	// Each recording counts under every key its kind's keys give it, so one
+	// two keys claim (and so keyless itself) is a sibling under either.
+	seen := map[string]bool{}
+	for _, n := range names {
+		mk := byName[n]
+		if seen[n] || mk == nil || mk.IsProtocolPhase() {
+			continue
+		}
+		seen[n] = true
+		for _, k := range models.ExactSiblingClaims(mk) {
+			keys[string(mk.Kind)+"\x00"+k]++
+		}
+	}
+	for _, e := range worker {
+		mk := byName[e.Name]
+		if mk == nil {
+			continue
+		}
+		if models.IsIdleAnswer(mk) {
+			bg.idle[e.Name] = true
+		}
+		if k, ok := keyOf(mk); ok && keys[k] == 1 {
+			bg.noSibling[e.Name] = true
+		}
+	}
+	return bg
+}
+
+// onceMembers is the recordings of the replay's once series (once, of
+// series: series -> recording names), as the proxy holds them
+// (proxy.MockManager.SetPoolSeries): a name two series hold belongs to the
+// first in series order, so it is a once member only when that series is
+// once, and an empty name is none.
+func onceMembers(series map[string][]string, once []string) map[string]bool {
+	isOnce := make(map[string]bool, len(once))
+	for _, id := range once {
+		isOnce[id] = true
+	}
+	held := map[string]bool{}
+	out := map[string]bool{}
+	for _, id := range slices.Sorted(maps.Keys(series)) {
+		for _, n := range series[id] {
+			if n == "" || held[n] {
+				continue
+			}
+			held[n] = true
+			if isOnce[id] {
+				out[n] = true
+			}
+		}
+	}
+	return out
+}
+
+// reachableWorker is the worker-scope mocks of worker (in recorded order) the
+// set's run has reached: placed at the set's start, or after a test case the
+// run has reached (reachedTest: begun, or passed over, reachTest); each of a
+// once series (once: onceMembers), wherever it is placed; and, under the
+// background rules (bg), each with no identical sibling
+// (testBackground.noSibling), wherever it is placed, in the view's order: by
+// place (the set's start for one with no sibling, else the order the run
+// reached its place's test case in, reachedAt, and after every reached place
+// for a once member whose place the run has not reached, so an identical
+// recording placed where the run is answers first), then a delivering answer
+// before an idle one, then recorded order. With bg nil, in recorded order.
+func reachableWorker(worker []models.MockEntry, reachedTest map[string]bool, reachedAt map[string]int, bg *testBackground, once map[string]bool) []string {
+	type reached struct {
+		name string
+		rank int
+		idle bool
+		at   int
+	}
+	var rs []reached
+	for i, e := range worker {
+		early := bg != nil && bg.noSibling[e.Name]
+		ahead := e.Place != "" && !reachedTest[e.Place]
+		if ahead && !early && !once[e.Name] {
+			continue
+		}
+		r := reached{name: e.Name, at: i}
+		if bg != nil {
+			if e.Place != "" && !early {
+				r.rank = reachedAt[e.Place]
+				if ahead {
+					r.rank = math.MaxInt
+				}
+			}
+			r.idle = bg.idle[e.Name]
+		}
+		rs = append(rs, r)
+	}
+	if bg != nil {
+		sort.SliceStable(rs, func(i, j int) bool {
+			if rs[i].rank != rs[j].rank {
+				return rs[i].rank < rs[j].rank
+			}
+			if rs[i].idle != rs[j].idle {
+				return !rs[i].idle
+			}
+			return rs[i].at < rs[j].at
+		})
+	}
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r.name)
+	}
+	return out
+}
+
+// stagingRules is the rules a staging of ex is served by, before its
+// background is settled: the background rules exactly when settleBackground
+// settles one (a staging that names them, under the proven switch), else
+// today's ("").
+func (a *Agent) stagingRules(ex *models.ExactServing) string {
+	if ex == nil || ex.Background != models.RecordedWithS12Routing || !provenswitch.On() {
+		return ""
+	}
+	return models.RecordedWithS12Routing
+}
+
+// stageBackgroundExactly opens a set's staging in the proxy under rules
+// (coreAgent.ExactBackgroundServer.StageExactBackground), before the staging
+// installs any view: the previous set's background goes, and every view of
+// the staging reads the set's rules. A proxy that cannot serve the background
+// rules serves every set by today's, and needs nothing.
+func (a *Agent) stageBackgroundExactly(es coreAgent.ExactServer, rules string) error {
+	bs, ok := es.(coreAgent.ExactBackgroundServer)
+	if !ok {
+		return nil
+	}
+	return bs.StageExactBackground(rules)
+}
+
+// serveBackgroundExactly tells the proxy the rules the staged set's background
+// is served by (coreAgent.ExactBackgroundServer): the background rules when rules is
+// models.RecordedWithS12Routing, with the set's pool and its whole worker
+// scope, else today's. A proxy that cannot serve the background rules serves every set
+// by today's, which need nothing of it: the staging settles no background
+// for it (testBg nil), so the agent says it serves today's and the replay
+// keeps today's checks.
+func (a *Agent) serveBackgroundExactly(es coreAgent.ExactServer, rules string, pool, worker []string) error {
+	bs, ok := es.(coreAgent.ExactBackgroundServer)
+	if !ok {
+		return nil
+	}
+	return bs.ServeExactBackground(rules, pool, worker)
+}
+
+// diskRecordedOfKind is the on-disk store's reader of the staged set's
+// recordings of a kind (DiskMocks.RangeKind), nil when the set keeps none on
+// disk.
+func (a *Agent) diskRecordedOfKind() func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	disk := a.stagedDisk()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeKind
+}

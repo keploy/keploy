@@ -67,3 +67,27 @@ func StaticDeduperFromContext(ctx context.Context) StaticDeduper {
 	d, _ := ctx.Value(staticDedupKey{}).(StaticDeduper)
 	return d
 }
+
+type windowKey struct{}
+
+// WithWindow returns a child of ctx carrying w, the open window of the request
+// whose capture runs with ctx (OpenWindow). The ingress that opened it wraps
+// the capture hook's ctx with it, so the hook can claim it for a kept resolve
+// (Keep) or end it before a duplicate's prune (Close). A nil w leaves ctx as it
+// is.
+func WithWindow(ctx context.Context, w *Window) context.Context {
+	if w == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, windowKey{}, w)
+}
+
+// WindowFromContext returns the window carried by ctx, or nil when the ingress
+// opened none; a nil window's methods are no-ops.
+func WindowFromContext(ctx context.Context) *Window {
+	if ctx == nil {
+		return nil
+	}
+	w, _ := ctx.Value(windowKey{}).(*Window)
+	return w
+}

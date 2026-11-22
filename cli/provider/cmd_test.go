@@ -2,12 +2,17 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -90,8 +95,10 @@ func TestResolveCommandType_ConfigDefaultDoesNotCountAsExplicit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		// Flag never passed; "native" comes from the generated keploy.yml.
+		// The kind as detected: docker-start is then refused, which
+		// TestResolveCommandType_RefusesDockerStart covers.
 		cmd := cmdWithCmdTypeFlag("", false)
-		got, err := resolveCommandType(zap.NewNop(), cmd, tc.command, "native")
+		got, err := resolveCommandKind(zap.NewNop(), cmd, tc.command, "native")
 		if err != nil {
 			t.Fatalf("%q: unexpected error: %v", tc.command, err)
 		}
@@ -99,6 +106,30 @@ func TestResolveCommandType_ConfigDefaultDoesNotCountAsExplicit(t *testing.T) {
 			t.Errorf("%q: got %q, want %q — the shipped keploy.yml default is being "+
 				"treated as an explicit user choice", tc.command, got, tc.want)
 		}
+	}
+}
+
+// A container `start` resumes was created without keploy's namespaces, and
+// none can be added to it: modifyDockerRun handed docker start the run-only
+// --pid, which docker rejected, after the sudo prompt and the agent's start.
+// It is refused up front, detected or given, naming what works instead.
+func TestResolveCommandType_RefusesDockerStart(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, explicit, engine string
+		changed                         bool
+	}{
+		{"detected", "docker start -a app", "", "docker", false},
+		{"given", "docker start -a app", "docker-start", "docker", true},
+		{"given empty", "sudo docker start -a app", "", "docker", true},
+		{"podman", "podman start -a app", "", "podman", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveCommandType(zap.NewNop(), cmdWithCmdTypeFlag(tc.explicit, tc.changed), tc.command, tc.explicit)
+			if err == nil || !strings.Contains(err.Error(), "`"+tc.engine+" start` resumes") ||
+				!strings.Contains(err.Error(), "`"+tc.engine+" run`") || !strings.Contains(err.Error(), "--from-container") {
+				t.Fatalf("%q: want the docker-start refusal naming `%s run` and --from-container, got %v", tc.command, tc.engine, err)
+			}
+		})
 	}
 }
 
@@ -207,7 +238,7 @@ func TestValidateFlags_HonoursCmdTypeEndToEnd(t *testing.T) {
 		want       string
 	}{
 		{"explicit compose over an unprefixed docker command", "sudo -E docker compose up", "docker-compose", "docker-compose", "docker-compose"},
-		{"config compose is not honoured", "sudo -E docker compose up", "", "docker-compose", "native"},
+		{"config compose is not honoured", "make up", "", "docker-compose", "native"},
 		{"generated default + docker command still auto-detects", "docker compose up", "", "native", "docker-compose"},
 		{"generated default + plain command stays native", "python app.py", "", "native", "native"},
 	}
@@ -246,6 +277,23 @@ func TestValidateFlags_HonoursCmdTypeEndToEnd(t *testing.T) {
 			}
 		})
 	}
+
+	// A docker command the detection does not take for one resolves to
+	// native, config or no config: it is refused, not run on the host, where
+	// keploy would capture nothing from its container.
+	cfg := config.New()
+	c := NewCmdConfigurator(zap.NewNop(), cfg)
+	cmd := &cobra.Command{Use: "record"}
+	if err := c.AddFlags(cmd); err != nil {
+		t.Fatalf("AddFlags: %v", err)
+	}
+	if err := cmd.ParseFlags([]string{"-c", "sudo -E docker compose up"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	cfg.Command, cfg.CommandType = "sudo -E docker compose up", "docker-compose"
+	if err := c.ValidateFlags(context.Background(), cmd); err == nil || !strings.Contains(err.Error(), "would run as a host process") {
+		t.Fatalf("ValidateFlags ran %q, which resolves to native, instead of refusing it: %v", cfg.Command, err)
+	}
 }
 
 // A docker cmdType only works if keploy can rewrite the command: SetupCompose
@@ -254,17 +302,23 @@ func TestValidateFlags_HonoursCmdTypeEndToEnd(t *testing.T) {
 // `make -f ./docker-compose-tmp.yaml up --abort-on-container-exit`, which
 // fails with an unrecognised option nowhere near its cause. Refusing up front
 // is the difference between a usable flag and one that looks like it worked.
+// The refusal names the command by its program, never its arguments: it is
+// logged at ERROR, and a command's arguments carry what the user passes the
+// app.
 func TestResolveCommandType_DockerRunRejectsWrapperCommand(t *testing.T) {
 	for _, cmdType := range []string{"docker-run", "docker-start"} {
-		for _, command := range []string{"make up", "./start.sh", "npm start"} {
+		for command, program := range map[string]string{"make up": "make", "./start.sh": "start.sh", "npm start": "npm"} {
 			cmd := cmdWithCmdTypeFlag(cmdType, true)
 			_, err := resolveCommandType(zap.NewNop(), cmd, command, cmdType)
 			if err == nil {
 				t.Errorf("%s with command %q: want an error, got none", cmdType, command)
 				continue
 			}
-			if !strings.Contains(err.Error(), command) {
-				t.Errorf("error for %q does not name the command: %v", command, err)
+			if !strings.Contains(err.Error(), fmt.Sprintf("the %q command", program)) {
+				t.Errorf("error for %q does not name its program %q: %v", command, program, err)
+			}
+			if strings.Contains(err.Error(), fmt.Sprintf("%q", command)) {
+				t.Errorf("error for %q names the command whole: %v", command, err)
 			}
 		}
 	}
@@ -325,6 +379,132 @@ func TestResolveCommandType_NativeAcceptsAnyCommand(t *testing.T) {
 	}
 }
 
+// Before Podman was recognised, `podman run …` resolved to native: keploy ran
+// it as a host process, the app ran in a container keploy never looked at, and
+// the recording came back empty with no word about why. A build that cannot
+// drive Podman (this one registers no Podman engine) must refuse it instead,
+// and say where to get one that can, whatever kind the command resolved to:
+// the spellings kind detection does not know resolve to native, which is
+// exactly where the recording comes back empty.
+func TestRefuseEngineCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, explicit string
+	}{
+		{"run", "podman run --rm --name app -p 8080:8080 img", ""},
+		{"start", "sudo podman start -a app", ""},
+		{"compose", "podman compose up", ""},
+		{"podman-compose", "podman-compose -f c.yml up", ""},
+		{"sudo -E, which resolves to native", "sudo -E podman run --name app img", ""},
+		{"full path, which resolves to native", "/usr/bin/podman run --name app img", ""},
+		{"engine flags before the subcommand", "podman --remote run --name app img", ""},
+		{"a wrapper with arguments", "sudo -u alice podman compose up", ""},
+		{"a connection flag with its value", "podman -c machine run --name app img", ""},
+		{"a log level with its value", "podman --log-level debug run --name app img", ""},
+		{"kube play", "podman kube play app.yaml", ""},
+		{"pod start", "podman pod start app", ""},
+		{"explicit docker-run", "podman run --name app img", "docker-run"},
+		{"a trailer after it", "podman run --rm --name app img || true", ""},
+		{"a continued line", "podman run \\\n  --rm --name app img", ""},
+		{"sudo -E with a trailer, which resolves to native", "sudo -E podman run img ; echo done", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := refuseEngineCommand(cmdWithCmdTypeFlag(tc.explicit, tc.explicit != ""), tc.command)
+			if err == nil {
+				t.Fatalf("%q: want refused, got no error", tc.command)
+			}
+			if !strings.Contains(err.Error(), "Podman") || !strings.Contains(err.Error(), "https://keploy.io/install.sh") {
+				t.Fatalf("%q: the refusal must name Podman and where to get a keploy that supports it, got %q", tc.command, err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name, command, explicit string
+	}{
+		// The command is set aside (a base path, --from-container).
+		{"no command", "", ""},
+		// The user insists: run it as a host process.
+		{"explicit native", "podman run --name app img", "native"},
+		{"explicit native, any case", "podman run --name app img", " Native "},
+		{"docker", "docker run --name app img", ""},
+		{"a wrapper", "make up", "docker-compose"},
+		{"a script named podman", "npm run podman", ""},
+		// Podman only starts a dependency; the application runs on the host.
+		{"a detached podman dependency", "cd svc && podman compose up -d db && go run .", ""},
+	} {
+		t.Run("allowed: "+tc.name, func(t *testing.T) {
+			if err := refuseEngineCommand(cmdWithCmdTypeFlag(tc.explicit, tc.explicit != ""), tc.command); err != nil {
+				t.Fatalf("%q: want allowed, got %v", tc.command, err)
+			}
+		})
+	}
+
+	// `--cmd-type=` resolves by detection, which is native for exactly the
+	// spellings refused above: only native as given is let through.
+	if err := refuseEngineCommand(cmdWithCmdTypeFlag("", true), "sudo -E podman run --name app img"); err == nil {
+		t.Fatal("an explicitly empty --cmd-type let a podman command through")
+	}
+
+	// An engine this build drives, in a form keploy would run as a host
+	// process: the container it starts is out of keploy's sight, and the run
+	// recorded nothing and said nothing.
+	for _, tc := range []struct {
+		name, command, explicit string
+	}{
+		{"sudo -E", "sudo -E docker run --name app img", ""},
+		{"full path", "/usr/bin/docker run --name app img", ""},
+		{"engine flags before the subcommand", "docker --context prod run --name app img", ""},
+		{"a wrapper", "timeout 600 docker compose up", ""},
+		{"env in front of docker-compose", "env FOO=bar docker-compose up", ""},
+		{"explicitly empty --cmd-type", "sudo -E docker run --name app img", "="},
+		{"a build before it", "docker build -t app . && docker run --name app app", ""},
+		{"a trailer after it", "sudo -E docker compose up || true", ""},
+	} {
+		t.Run("host process: "+tc.name, func(t *testing.T) {
+			explicit, changed := tc.explicit, tc.explicit != ""
+			if explicit == "=" {
+				explicit = ""
+			}
+			err := refuseEngineCommand(cmdWithCmdTypeFlag(explicit, changed), tc.command)
+			if err == nil {
+				t.Fatalf("%q: want refused, got no error", tc.command)
+			}
+			for _, want := range []string{"would run as a host process", "`docker run`", "--cmd-type native"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("%q: the refusal does not say %q: %q", tc.command, want, err)
+				}
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, command, explicit string
+	}{
+		{"docker run", "docker run --name app img", ""},
+		{"sudo docker run", "sudo docker run --name app img", ""},
+		{"docker container run", "docker container run --name app img", ""},
+		{"docker start", "docker start -a app", ""},
+		{"docker compose", "docker compose -f c.yml up", ""},
+		{"docker-compose", "docker-compose up", ""},
+		{"an explicit container kind takes it as written", "sudo -E docker run --name app img", "docker-run"},
+		{"explicit native", "/usr/bin/docker run --name app img", "native"},
+		{"a script", "./scripts/up.sh", ""},
+		// Not a kind: resolveCommandType's error is the one to show.
+		{"an invalid kind", "sudo -E docker run img", "dockerrun"},
+		{"runs of whitespace", "docker  run\t--name app img", ""},
+		// The application runs on the host; docker starts its dependencies.
+		{"dependencies in containers", "cd svc && docker compose up -d db && go run .", ""},
+		{"a detached dependency", "make deps && docker run -d -p 5432:5432 postgres && ./app", ""},
+		{"a script named docker", "npm run docker start", ""},
+		{"docker as a program's argument", "python app.py --backend docker run", ""},
+	} {
+		t.Run("allowed: "+tc.name, func(t *testing.T) {
+			if err := refuseEngineCommand(cmdWithCmdTypeFlag(tc.explicit, tc.explicit != ""), tc.command); err != nil {
+				t.Fatalf("%q: want allowed, got %v", tc.command, err)
+			}
+		})
+	}
+}
+
 // Substring matching let "./run-docker.sh" past the docker-run guard — a
 // wrapper by any reading, and the naming convention a docker wrapper script
 // actually uses. Past the guard it fails much worse: ParseDockerCmd finds no
@@ -335,6 +515,12 @@ func TestMentionsDockerBinary(t *testing.T) {
 		"sudo -E docker run --name app img",
 		"/usr/bin/docker compose up",
 		"env FOO=bar docker-compose up",
+		// Podman's CLI takes the same subcommands and flags; whether this
+		// build can drive it is resolveCommandType's to say.
+		"podman run --name app img",
+		"sudo podman start -a app",
+		"podman compose up",
+		"podman-compose up",
 	}
 	for _, cmd := range yes {
 		if !mentionsDockerBinary(cmd) {
@@ -346,8 +532,15 @@ func TestMentionsDockerBinary(t *testing.T) {
 		"./run-docker.sh",
 		"make docker-up",
 		"npm run docker",
-		"podman run --name app img",
+		"npm run podman",
 		"make up",
+		// Not rewritable: modifyDockerRun puts its flags after the run
+		// subcommand only where it follows the engine word (or `container`),
+		// and in front of `run` docker takes nothing but its own flags.
+		"docker --log-level=debug run --name app img",
+		"docker -D run --name app img",
+		"npm run docker -- start",
+		"podman --remote run --name app img",
 	}
 	for _, cmd := range no {
 		if mentionsDockerBinary(cmd) {
@@ -378,5 +571,231 @@ func TestResolveCommandType_ConfigWarningOnlyWhenItWouldDiffer(t *testing.T) {
 	}
 	if logs2.FilterMessageSnippet("not honoured").Len() == 0 {
 		t.Error("config value was silently ignored where it would have changed the outcome")
+	}
+}
+
+// Every refusal Validate returns is said in the log, as it is found: with the
+// usage text silenced under it, and cobra's error line silenced by AddFlags,
+// one returned unsaid would leave the command to exit 1 saying nothing. The
+// one it returned unsaid was appName's, the last directory of the working
+// directory, which cannot be read once that directory is gone. (This is
+// driven in-process, where the working directory can be removed under the
+// command.)
+func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	t.Cleanup(log.TestOnlyResetSink)
+	found := IsConfigFileFound
+	t.Cleanup(func() { IsConfigFileFound = found })
+
+	// No keploy.yml in --config-path: PreProcessFlags reads the working
+	// directory only to merge an override of one.
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, "keploy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(t.TempDir(), "app")
+	if err := os.Mkdir(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Skipf("this system keeps a working directory from being removed: %v", err)
+	}
+
+	core, logs := observer.New(zapcore.InfoLevel)
+	c := NewCmdConfigurator(zap.New(core), config.New())
+	cmd := &cobra.Command{Use: "record"}
+	if err := c.AddFlags(cmd); err != nil {
+		t.Fatalf("AddFlags: %v", err)
+	}
+	if err := cmd.ParseFlags([]string{"-c", "./app", "--path", project, "--config-path", project}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	cmd.SetContext(context.Background())
+
+	const refusal = "failed to get the last directory for appName"
+	err := c.Validate(context.Background(), cmd)
+	if err == nil || !strings.HasPrefix(err.Error(), refusal) || !strings.Contains(err.Error(), "the working directory is gone: ") {
+		t.Fatalf("Validate = %v, want %q, saying the working directory is gone", err, refusal)
+	}
+	var said []string
+	n := 0
+	for _, e := range logs.All() {
+		said = append(said, e.Level.String()+" "+e.Message)
+		if e.Level >= zapcore.ErrorLevel && e.Message == refusal {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%q said as %d errors, want 1:\n%s", refusal, n, strings.Join(said, "\n"))
+	}
+	if !cmd.SilenceUsage {
+		t.Errorf("cobra is left to print `keploy record`'s usage text under %q", err)
+	}
+}
+
+// keploy record run from a folder inside a git checkout, given no app name,
+// names the app after the repository (its origin remote) and the folder's
+// path inside it, not after the checkout's folder or the folder alone
+// ("b"), and writes that name into the keploy.yml it creates, so later runs
+// keep it. A name the run is given is kept.
+func TestRecordNamesTheAppAfterItsGitRepository(t *testing.T) {
+	for _, c := range []struct{ name, flag, want string }{
+		{"no name given", "", "orders-api-a-b"},
+		{"--app-name", "billing", "billing"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			original := NativeCommandSupported
+			t.Cleanup(func() { NativeCommandSupported = original })
+			RegisterNativeCommandSupport(func(string, string) bool { return true })
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			t.Cleanup(log.TestOnlyResetSink)
+			found := IsConfigFileFound
+			t.Cleanup(func() { IsConfigFileFound = found })
+
+			top := filepath.Join(t.TempDir(), "checkout")
+			if err := os.MkdirAll(filepath.Join(top, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(top, ".git", "config"), []byte("[remote \"origin\"]\n\turl = git@github.com:acme/orders-api.git\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			work := filepath.Join(top, "a", "b")
+			if err := os.MkdirAll(filepath.Join(work, "keploy"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(work)
+
+			c2 := NewCmdConfigurator(zap.NewNop(), config.New())
+			cmd := &cobra.Command{Use: "record"}
+			if err := c2.AddFlags(cmd); err != nil {
+				t.Fatalf("AddFlags: %v", err)
+			}
+			args := []string{"-c", "./app", "--config-path", work}
+			if c.flag != "" {
+				args = append(args, "--app-name", c.flag)
+			}
+			if err := cmd.ParseFlags(args); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+			cmd.SetContext(context.Background())
+			if err := c2.Validate(context.Background(), cmd); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if c2.cfg.AppName != c.want {
+				t.Errorf("appName = %q, want %q", c2.cfg.AppName, c.want)
+			}
+			written, err := os.ReadFile(filepath.Join(work, "keploy.yml"))
+			if err != nil {
+				t.Fatalf("the keploy.yml record writes: %v", err)
+			}
+			if !strings.Contains(string(written), "\nappName: "+c.want+"\n") {
+				t.Errorf("the keploy.yml record wrote does not name the app %q:\n%s", c.want, written)
+			}
+		})
+	}
+}
+
+// keploy record refuses a worker-mock rule it cannot apply, read from
+// keploy.yml as written (a camel-case key such as pathRegex included); every
+// other command, keploy mock record among them, goes on.
+func TestWorkerMockRulesAreRefusedByKeployRecordOnly(t *testing.T) {
+	t.Cleanup(viper.Reset)
+	const bad = "record:\n  workerMocks:\n    - kind: http\n      match:\n        path: /x\n"
+	const good = "record:\n  workerMocks:\n    - id: jwks\n      kind: Http\n      match:\n        method: GET\n        pathRegex: \"^/jwks$\"\n"
+	run := func(t *testing.T, cmd *cobra.Command, cfg *config.Config, yml string) error {
+		t.Helper()
+		viper.Reset()
+		if err := cmd.ParseFlags([]string{"--config-path", writeKeployYML(t, yml)}); err != nil {
+			t.Fatal(err)
+		}
+		c := NewCmdConfigurator(zap.NewNop(), cfg)
+		if err := c.PreProcessFlags(cmd); err != nil {
+			t.Fatalf("PreProcessFlags: %v", err)
+		}
+		return c.ValidateFlags(context.Background(), cmd)
+	}
+	refused := func(err error) bool { return err != nil && strings.Contains(err.Error(), "workerMocks") }
+
+	cfg := config.New()
+	if err := run(t, newRecordCmdForTest(t, cfg), cfg, bad); !refused(err) {
+		t.Fatalf("keploy record with a misspelled kind: %v; want the record.workerMocks refusal", err)
+	}
+	cfg = config.New()
+	if err := run(t, newRecordCmdForTest(t, cfg), cfg, good); refused(err) {
+		t.Fatalf("keploy record refused a valid rule read from keploy.yml: %v", err)
+	}
+	if len(cfg.Record.WorkerMocks) != 1 || cfg.Record.WorkerMocks[0].ID != "jwks" {
+		t.Fatalf("rules read %+v", cfg.Record.WorkerMocks)
+	}
+	cfg = config.New()
+	if err := run(t, newTestCmdForTest(t, cfg), cfg, bad); refused(err) {
+		t.Fatalf("keploy test refused over a rule it does not apply: %v", err)
+	}
+	cfg = config.New()
+	root, mock := &cobra.Command{Use: "keploy"}, &cobra.Command{Use: "mock"}
+	mockRecord := newRecordCmdForTest(t, cfg)
+	root.AddCommand(mock)
+	mock.AddCommand(mockRecord)
+	if isKeployRecord(mockRecord) {
+		t.Fatal("keploy mock record taken for keploy record")
+	}
+	if err := run(t, mockRecord, cfg, bad); refused(err) {
+		t.Fatalf("keploy mock record refused over a rule it does not apply: %v", err)
+	}
+}
+
+// keploy record and keploy test refuse --cmd-type docker-run for a command
+// that is no docker command (make up), and validate logs that refusal at
+// ERROR: it names the command by its program, never an argument, so the
+// password the command passes reaches no line and not the error.
+func TestTheCmdTypeRefusalNamesTheProgramAlone(t *testing.T) {
+	const command = "make up DB_PASSWORD=S3CR3T"
+	if _, err := resolveCommandType(zap.NewNop(), cmdWithCmdTypeFlag("docker-run", true), command, "docker-run"); err == nil ||
+		strings.Contains(err.Error(), "S3CR3T") || !strings.Contains(err.Error(), `the "make" command is not one`) {
+		t.Errorf("resolveCommandType: %v, want a refusal that names the make command alone", err)
+	}
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+	for _, use := range []string{"record", "test"} {
+		cfg := config.New()
+		core, logs := observer.New(zapcore.DebugLevel)
+		c := NewCmdConfigurator(zap.New(core), cfg)
+		cmd := &cobra.Command{Use: use}
+		if err := c.AddFlags(cmd); err != nil {
+			t.Fatalf("AddFlags: %v", err)
+		}
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "keploy"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		if err := cmd.ParseFlags([]string{"-c", command, "--cmd-type", "docker-run", "-p", dir}); err != nil {
+			t.Fatalf("ParseFlags: %v", err)
+		}
+		cfg.Command, cfg.Path = command, dir
+		err := c.Validate(context.Background(), cmd)
+		if err == nil || strings.Contains(err.Error(), "S3CR3T") || !strings.Contains(err.Error(), `"make"`) {
+			t.Errorf("%s: Validate: %v, want the refusal naming the make command alone", use, err)
+		}
+		refused := false
+		for _, e := range logs.All() {
+			line := e.Message + " " + fmt.Sprint(e.ContextMap())
+			if e.Level >= zapcore.InfoLevel && strings.Contains(line, "S3CR3T") {
+				t.Errorf("%s: a %v line names the command's password: %s", use, e.Level, line)
+			}
+			refused = refused || e.Level == zapcore.ErrorLevel && e.Message == "failed to validate flags"
+		}
+		if !refused {
+			t.Errorf("%s: no ERROR line said the flags failed to validate: %v", use, logs.All())
+		}
 	}
 }

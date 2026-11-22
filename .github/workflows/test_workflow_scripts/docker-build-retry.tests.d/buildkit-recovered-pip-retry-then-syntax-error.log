@@ -1,0 +1,54 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 413B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/python:3.9
+#2 DONE 0.7s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/5] FROM docker.io/library/python:3.9@sha256:da5aee29682d12a6649f51c8d6f15b87deb3e6c524b923c41d0cb3304d07c913
+#4 resolve docker.io/library/python:3.9@sha256:da5aee29682d12a6649f51c8d6f15b87deb3e6c524b923c41d0cb3304d07c913 done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 407.82kB done
+#5 DONE 0.0s
+
+#6 [2/5] WORKDIR /app
+#6 CACHED
+
+#7 [3/5] COPY . .
+#7 DONE 0.0s
+
+#8 [4/5] RUN pip3 install -r requirements.txt
+#8 18.104 Looking in indexes: http://127.0.0.1:42331/flaky/
+#8 18.104 WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=42331): Read timed out. (read timeout=3.0)")': /flaky/flask/
+#8 18.104 WARNING: Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=42331): Read timed out. (read timeout=3.0)")': /flaky/flask/
+#8 18.104 WARNING: Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=42331): Read timed out. (read timeout=3.0)")': /flaky/flask/
+#8 18.104 WARNING: Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=42331): Read timed out. (read timeout=3.0)")': /flaky/flask/
+#8 18.104 WARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=42331): Read timed out. (read timeout=3.0)")': /flaky/flask/
+#8 18.104 Collecting flask==3.1.2
+#8 18.104   Downloading http://127.0.0.1:40813/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+#8 18.104 Installing collected packages: flask
+#8 18.104 Successfully installed flask-3.1.2
+#8 DONE 18.9s
+
+#9 [5/5] RUN python -m py_compile app.py
+#9 0.311   File "app.py", line 2
+#9 0.311     print("x"
+#9 0.311          ^
+#9 0.311 SyntaxError: '(' was never closed
+#9 ERROR: process "/bin/sh -c python -m py_compile app.py" did not complete successfully: exit code: 1
+------
+ > [5/5] RUN python -m py_compile app.py:
+0.311   File "app.py", line 2
+0.311     print("x"
+0.311          ^
+0.311 SyntaxError: '(' was never closed
+------
+ERROR: failed to build: failed to solve: process "/bin/sh -c python -m py_compile app.py" did not complete successfully: exit code: 1

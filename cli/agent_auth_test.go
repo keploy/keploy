@@ -3,16 +3,17 @@ package cli
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -28,6 +29,7 @@ func (agentFlags) AddFlags(cmd *cobra.Command) error {
 	cmd.Flags().Uint32("client-pid", 0, "")
 	cmd.Flags().Bool("is-docker", false, "")
 	cmd.Flags().String("token-file", "", "")
+	cmd.Flags().String("teardown-progress-file", "", "")
 	return nil
 }
 
@@ -59,16 +61,31 @@ type runningAgent struct {
 
 func startAgent(t *testing.T, logger *zap.Logger, args ...string) *runningAgent {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
+	port := testnet.ReservedPort(t) // no other socket is given it before the agent listens
 
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 
+	// The agent reports its teardown into this test's own directory -- one
+	// only its owner may write to, as a command-line path must be whatever the
+	// umask -- the way it would: a native agent where --teardown-progress-file
+	// says, a containerised one (--is-docker) where its container's path is,
+	// here pointed at that directory rather than the path every process on
+	// the host shares. Its reporter is stopped once the agent has returned
+	// (cleanups run last first), before the directory is removed.
+	dir := filepath.Join(t.TempDir(), "teardown")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	progress := filepath.Join(dir, utils.TeardownProgressFileName)
+	t.Cleanup(utils.StopTeardownReporting)
+	if slices.Contains(args, "--is-docker") {
+		orig := containerTeardownProgressFile
+		containerTeardownProgressFile = progress
+		t.Cleanup(func() { containerTeardownProgressFile = orig })
+	} else {
+		args = append([]string{"--teardown-progress-file", progress}, args...)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	svc := servingAgent{port: port, setupCalled: make(chan struct{})}
 	cmd := Agent(ctx, logger, &config.Config{}, agentSvcFactory{svc: svc}, agentFlags{})

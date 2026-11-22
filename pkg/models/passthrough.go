@@ -222,6 +222,29 @@ func MatchPassThrough(rules []PassThroughRule, host string, port uint32, method,
 // true with rule.Mode ∈ {skip, recordOne} otherwise. Callers must branch on the
 // bool, not re-derive "does matched mean passthrough" themselves.
 func ResolvePassThrough(userPorts, userHosts []PassThroughRule, host string, port uint32, method, reqPath string) (PassThroughRule, bool) {
+	return resolvePassThrough(userPorts, userHosts, BuiltinTelemetryDefaults(), host, port, method, reqPath)
+}
+
+// ResolveProven is the egress passthrough decision under the proven switch
+// (design v14 §4, U19): as ResolvePassThrough, but a built-in path row
+// answers a call without a recording only when the call carries its
+// protocol's fingerprint, so any other call on such a path is an ordinary
+// dependency. The user's rules are read as they are: keploy mock's CLI
+// clears them under the switch (mock.real replaces them, U18), and keploy
+// record and keploy test keep theirs until they read mock.real.
+func ResolveProven(userPorts, userHosts []PassThroughRule, host string, port uint32, method, reqPath string, header map[string][]string) (PassThroughRule, bool) {
+	var builtins []PassThroughRule
+	for _, r := range BuiltinTelemetryDefaults() {
+		if fp, ok := telemetryFingerprints[r.ID]; ok && !fp.matches(port, header) {
+			continue
+		}
+		builtins = append(builtins, r)
+	}
+	return resolvePassThrough(userPorts, userHosts, builtins, host, port, method, reqPath)
+}
+
+// resolvePassThrough is ResolvePassThrough over the built-in rows given.
+func resolvePassThrough(userPorts, userHosts, builtins []PassThroughRule, host string, port uint32, method, reqPath string) (PassThroughRule, bool) {
 	// An {id, mode:"off"} override disables the built-in with that ID by identity
 	// (robust to un-mirrored fields like PathPrefix). Collect those first; the
 	// markers themselves are not matchable rules.
@@ -243,7 +266,6 @@ func ResolvePassThrough(userPorts, userHosts []PassThroughRule, host string, por
 	// rule always wins.
 	rule, ok := MatchPassThrough(user, host, port, method, reqPath)
 	if !ok {
-		builtins := BuiltinTelemetryDefaults()
 		if len(disabled) > 0 {
 			filtered := make([]PassThroughRule, 0, len(builtins))
 			for _, r := range builtins {
@@ -405,4 +427,48 @@ func MergePassThroughDefaults(userPorts, userHosts []PassThroughRule) []PassThro
 	out = append(out, userHosts...)
 	out = append(out, BuiltinTelemetryDefaults()...)
 	return out
+}
+
+// telemetryFingerprint is a built-in path row's protocol fingerprint (design
+// v14 §4): the default port of the protocol, or a header only its clients
+// send (with a value prefix, or any value when value is ""). A path alone is
+// an app's route as often as a collector's.
+type telemetryFingerprint struct {
+	port          uint32
+	header, value string
+}
+
+// telemetryFingerprints are the fingerprints of the built-in path rows. A row
+// not listed (a host row, the OTLP/gRPC service prefix, New Relic's host and
+// path) is a fingerprint already.
+var telemetryFingerprints = map[string]telemetryFingerprint{
+	"otlp-http-traces":        {port: 4318, header: "Content-Type", value: "application/x-protobuf"},
+	"otlp-http-metrics":       {port: 4318, header: "Content-Type", value: "application/x-protobuf"},
+	"otlp-http-logs":          {port: 4318, header: "Content-Type", value: "application/x-protobuf"},
+	"pyroscope-ingest":        {port: 4040},
+	"datadog-v04-traces":      {port: 8126, header: "Datadog-Meta-Lang"},
+	"datadog-v07-traces":      {port: 8126, header: "Datadog-Meta-Lang"},
+	"prometheus-remote-write": {header: "X-Prometheus-Remote-Write-Version"},
+}
+
+// matches reports whether a call to port, with header, carries the
+// fingerprint.
+func (f telemetryFingerprint) matches(port uint32, header map[string][]string) bool {
+	if f.port != 0 && port == f.port {
+		return true
+	}
+	if f.header == "" {
+		return false
+	}
+	for k, vs := range header {
+		if !strings.EqualFold(k, f.header) {
+			continue
+		}
+		for _, v := range vs {
+			if f.value == "" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(v)), f.value) {
+				return true
+			}
+		}
+	}
+	return false
 }

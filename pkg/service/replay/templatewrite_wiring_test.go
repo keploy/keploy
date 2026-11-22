@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch/switchtest"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -404,10 +405,15 @@ var probeFiles = []string{
 
 func TestMain(m *testing.M) {
 	removeProbes()
+	// The rows here check the rules with the proven switch off unless a row
+	// turns it on: a KEPLOY_PROVEN this test process inherited chooses nothing.
+	switchtest.Clear()
 	code := m.Run()
 	removeProbes()
 	os.Exit(code)
 }
+
+func TestARowStartsWithTheProvenSwitchOff(t *testing.T) { switchtest.OffAtEveryRowsStart(t) }
 
 func removeProbes() {
 	for _, f := range probeFiles {
@@ -609,8 +615,12 @@ func TestEachTemplatizingCallerUsesTheHelper(t *testing.T) {
 	// Banning the write is not enough on its own: a caller could drop
 	// the write entirely and silently stop persisting templates.
 	for path, wantCalls := range map[string]int{
-		// RunTestSet's templatized write, and UpdateTestSetTemplate.
-		"replay.go": 2,
+		// None: keploy test never writes config.yaml's template. It holds
+		// the values as recorded, and a run's own values (what its
+		// {{capture ...}} placeholders took) belong to that run only. A
+		// write here would start the next run from a value the recording
+		// never held.
+		"replay.go": 0,
 		// ProcessTestCasesV2's.
 		"../tools/templatize.go": 1,
 	} {

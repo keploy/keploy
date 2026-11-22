@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -101,9 +102,115 @@ func TestOnlyResetSink() {
 	LogCfg = defaultLogCfg()
 }
 
-// primarySyncer is the WriteSyncer form of PrimarySink, for the core builders.
+// primarySyncer is what every core builder writes to: the console
+// (PrimarySink) and this run's log file (logFileWriter). A rebuild (--debug's
+// ChangeLogLevel, the agent's AddMode, --disable-ansi's ChangeColorEncoding,
+// --json's RedirectToStderr) used to build it on the console alone, which
+// left the log with only the lines logged before the flags were read: an
+// agent's, none.
 func primarySyncer() zapcore.WriteSyncer {
-	return zapcore.AddSync(PrimarySink())
+	return zapcore.NewMultiWriteSyncer(zapcore.AddSync(PrimarySink()), logFileWriter{})
+}
+
+// logFileSink is this run's log file, the one New opened, which every logger
+// writes beside the console; nil while the run keeps none, and once
+// CloseLogFile has closed it.
+var logFileSink atomic.Pointer[os.File]
+
+// FileCapBytes is how much a log file of keploy's may hold: the debug file
+// (KEPLOY_DEBUG_FILE, AddDebugFileSink) and this run's log alike. The run's log
+// is in the temp directory, which is often memory (a tmpfs /tmp), and a --debug
+// run logs without end.
+const FileCapBytes = 100 << 20
+
+// logFileCap is FileCapBytes, which a test lowers.
+var logFileCap int64 = FileCapBytes
+
+// logFileCapNote is the log's last line, once it is full.
+var logFileCapNote = fmt.Sprintf("keploy stopped writing to this log at its %d MiB cap; the console still has every line.\n", FileCapBytes>>20)
+
+// logFileMode is the mode of this run's log while keploy writes it, and
+// logFileSealedMode its mode once it is full (logFileRoom): its owner can
+// still read it, and no keploy process writes it again.
+const (
+	logFileMode       os.FileMode = 0o600
+	logFileSealedMode os.FileMode = 0o400
+)
+
+// logFileRoom keeps this run's log within logFileCap. The native agent appends
+// to the CLI's log (ClientLogFileFlag), so the file holds the other process's
+// lines too, which count toward the cap, and only the file tells how many: the
+// writer looks at it (one fstat) before every line, so a process that has
+// been quiet while the other filled the file knows it is full. When a line
+// has no room left beside logFileCapNote, the writer seals the file (it takes
+// away the owner's write bit, logFileSealedMode), writes the note, and writes
+// nothing more. A process that finds the file sealed writes nothing more
+// either, note included: a full log ends with the note, once, whichever
+// process filled it, even where its last line was too long to fit and left
+// room for shorter ones. Only two processes that fill it at the same instant
+// (each looked before the other sealed) can both write a note. A line is
+// written whole or not at all. The console still gets every line.
+var logFileRoom struct {
+	sync.Mutex
+	f    *os.File // the log the state below is of
+	full bool     // the note is written, or the file is sealed: nothing more is
+}
+
+// logFileWriter writes to logFileSink's file as it is at each write, so a
+// logger built before the log was closed writes nothing more to it, never an
+// error about a closed file. It keeps the file within its cap (logFileRoom).
+type logFileWriter struct{}
+
+func (logFileWriter) Write(p []byte) (int, error) {
+	f := logFileSink.Load()
+	if f == nil {
+		return len(p), nil
+	}
+	r := &logFileRoom
+	r.Lock()
+	defer r.Unlock()
+	if r.f != f {
+		r.f, r.full = f, false
+	}
+	if r.full {
+		return len(p), nil
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		if errors.Is(err, os.ErrClosed) {
+			return len(p), nil
+		}
+		return 0, err
+	}
+	if fi.Mode().Perm()&0o200 == 0 {
+		r.full = true
+		return len(p), nil
+	}
+	if fi.Size()+int64(len(p))+int64(len(logFileCapNote)) > logFileCap {
+		r.full = true
+		// Sealed first, so that the other process, which looks before each
+		// line, stops at once. A file that cannot be sealed still gets the note.
+		_ = f.Chmod(logFileSealedMode)
+		if _, err := f.WriteString(logFileCapNote); err != nil && !errors.Is(err, os.ErrClosed) {
+			return 0, err
+		}
+		return len(p), nil
+	}
+	if _, err := f.Write(p); err != nil && !errors.Is(err, os.ErrClosed) {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (logFileWriter) Sync() error {
+	f := logFileSink.Load()
+	if f == nil {
+		return nil
+	}
+	if err := f.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 var LogCfg zap.Config
@@ -148,6 +255,16 @@ var globalRedactor atomic.Value
 // construction time rather than reading it from a package var.
 func SetRedactor(r Redactor) {
 	globalRedactor.Store(redactorHolder{r: r})
+}
+
+// RedactText is text as a log line carries it: through the active redactor's
+// pass over encoded text (Redactor.RedactEncoded), or as it is with none. For
+// text that leaves the process outside a log line, as a log line would.
+func RedactText(text string) string {
+	if r := loadRedactor(); r != nil {
+		return r.RedactEncoded(text)
+	}
+	return text
 }
 
 func loadRedactor() Redactor {
@@ -205,7 +322,49 @@ func (c *redactingCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 			r.RedactField(&fields[i])
 		}
 	}
+	if ent.Level >= zapcore.ErrorLevel {
+		observeError(ent)
+	}
 	return c.Core.Write(ent, fields)
+}
+
+// errorObserver is what ObserveErrors set: told of each entry logged at ERROR
+// or above.
+var errorObserver atomic.Pointer[func(msg string)]
+
+// lastObserved is the entry errorObserver was last told of: an entry a logger
+// writes to two of its cores (the console and the debug file) is one entry.
+var lastObserved struct {
+	sync.Mutex
+	at  time.Time
+	msg string
+}
+
+// ObserveErrors has fn told the message of every entry logged at ERROR or above
+// from now on, by any logger this package builds (each writes through a
+// redacting core), once per entry, as redacted: the agent counts the
+// ERRORs of its start for the CLI that waits for it (utils.NoteBootError). A
+// nil fn stops it.
+func ObserveErrors(fn func(msg string)) {
+	if fn == nil {
+		errorObserver.Store(nil)
+		return
+	}
+	errorObserver.Store(&fn)
+}
+
+func observeError(ent zapcore.Entry) {
+	fn := errorObserver.Load()
+	if fn == nil {
+		return
+	}
+	lastObserved.Lock()
+	same := ent.Time.Equal(lastObserved.at) && ent.Message == lastObserved.msg
+	lastObserved.at, lastObserved.msg = ent.Time, ent.Message
+	lastObserved.Unlock()
+	if !same {
+		(*fn)(ent.Message)
+	}
 }
 
 // redactingWriter wraps a zapcore.WriteSyncer and runs the active Redactor's
@@ -313,28 +472,60 @@ func ensureLogCfg() {
 	}
 }
 
+// New builds the run's logger: the console, and beside it the run's log file,
+// which it returns.
 func New() (*zap.Logger, *os.File, error) {
+	return newLogger(true)
+}
+
+// NewWithoutFile is New for a run that keeps no log file: one whose stdout is
+// a document (--json, `report --format json`), which has no room for the
+// `logs:` line that would name it. Nothing is created anywhere, so a run that
+// is killed leaves nothing behind.
+func NewWithoutFile() (*zap.Logger, error) {
+	logger, _, err := newLogger(false)
+	return logger, err
+}
+
+func newLogger(withFile bool) (*zap.Logger, *os.File, error) {
 	// Register the ANSI-friendly encoder
 	_ = zap.RegisterEncoder("ansiConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
+	// The log file is a fresh temp file (LogFilePattern), or, for a native
+	// agent, the CLI's (ClientLogFileFlag). A run that cannot create it (a
+	// temp directory it may not write, one that is missing) loses the file,
+	// not the command: it logs to the console only, and says so once at debug
+	// (ChangeLogLevel). An agent that does not take the CLI's says where its
+	// own is, and why at debug.
+	var logFile *os.File
+	var refused, notHanded, err error
+	if withFile {
+		logFile, refused, notHanded, err = openLogFile()
 	}
-
-	err = os.Chmod("keploy-logs.txt", 0777)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
+	var notes []logFileNote
+	if refused != nil {
+		notes = append(notes, logFileNote{"not appending to the CLI's log", refused.Error()})
 	}
+	if notHanded != nil {
+		notes = append(notes, logFileNote{"not handing this run's log to the user sudo ran keploy for", notHanded.Error()})
+	}
+	if err != nil {
+		notes = append(notes, logFileNote{"keeping no log file; logging to the console only", err.Error()})
+	}
+	setLogFileNotes(notes)
+	logFileSink.Store(logFile)
 
 	LogCfg = defaultLogCfg()
 
 	// Build the core with our custom encoder
-	core := consoleCore(LogCfg, zapcore.NewMultiWriteSyncer(primarySyncer(), zapcore.AddSync(logFile)), LogCfg.Level)
+	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
+	if refused != nil && logFile != nil {
+		logger.Info("this agent keeps a log of its own", zap.String("logs", logFile.Name()))
+	}
 	return logger, logFile, nil
 }
 
@@ -376,8 +567,39 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	// Use our custom encoder when building
 	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 
-	logger := zap.New(newRedactingCore(core))
-	return reattachDebugFileSink(logger), nil
+	logger := reattachDebugFileSink(zap.New(newRedactingCore(core)))
+	if level == zap.DebugLevel {
+		for _, n := range takeLogFileNotes() {
+			logger.Debug(n.msg, zap.String("reason", n.reason))
+		}
+	}
+	return logger, nil
+}
+
+// logFileNote is one thing New could not do with the log file -- take the
+// CLI's, create its own -- and why, kept for the first debug-level logger
+// (ChangeLogLevel) to say, once: New runs at info level, before --debug is
+// read, so a debug line of its own would never show.
+type logFileNote struct{ msg, reason string }
+
+var (
+	logFileNotesMu sync.Mutex
+	logFileNotes   []logFileNote
+)
+
+func setLogFileNotes(notes []logFileNote) {
+	logFileNotesMu.Lock()
+	defer logFileNotesMu.Unlock()
+	logFileNotes = notes
+}
+
+// takeLogFileNotes returns the notes and clears them, so each is said once.
+func takeLogFileNotes() []logFileNote {
+	logFileNotesMu.Lock()
+	defer logFileNotesMu.Unlock()
+	notes := logFileNotes
+	logFileNotes = nil
+	return notes
 }
 
 // RedirectToStderr re-creates the logger writing to stderr instead of stdout,
@@ -405,7 +627,9 @@ func AddMode(mode string) (*zap.Logger, error) {
 	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		emoji := "\U0001F430"
 		modeStr := fmt.Sprintf("Keploy(%s):", mode)
-		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339))
+		// To the nanosecond, as the CLI's own lines (customTimeEncoder): a
+		// stall of a second or two shows between two of the agent's lines.
+		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339Nano))
 	}
 
 	core := consoleCore(cfg, primarySyncer(), cfg.Level)
@@ -572,6 +796,40 @@ func (s *DebugFileSink) Written() int64 {
 	return s.capped.Written()
 }
 
+// OpenDebugFile opens path, the file KEPLOY_DEBUG_FILE names, for the debug
+// log: made if it is not there, truncated if it is, and only inside the
+// folder it is in. A link at path whose target stays in that folder is
+// followed; one with an absolute target, or one that climbs out by "..", is
+// refused with why (os.Root), and nothing is written where it leads. In
+// keploy's agent container that folder is /keploy-host, the host's keploy
+// folder, whose files come with the repository keploy runs in: a link a
+// cloned repository carries there would otherwise have the agent truncate
+// and write a file of the container's, or of a folder the host mounts into
+// it. RotateForScope keeps every later file inside the same folder. A link
+// out is said plainly (linkout.Error), not in os.Root's words.
+func OpenDebugFile(path string) (*os.File, error) {
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		if out := linkout.Explain(root, dir, name, debugLogRefusal(name, dir), err); out != nil {
+			return nil, out
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+// debugLogRefusal is what keploy says for any refusal of the debug log name,
+// a path inside the folder dir.
+func debugLogRefusal(name, dir string) string {
+	return fmt.Sprintf("the debug log %q is written only inside %q", name, dir)
+}
+
 // AddDebugFileSink returns a new logger that, in addition to whatever
 // sinks the input logger already had, writes every debug-level-or-above
 // entry to file via a 256 KiB buffered, capBytes-capped pipeline. Used
@@ -595,7 +853,7 @@ func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.L
 		return logger, nil
 	}
 	if capBytes <= 0 {
-		capBytes = 100 << 20 // 100 MiB default
+		capBytes = FileCapBytes
 	}
 	capped := newCappedWriteSyncer(zapcore.AddSync(file), capBytes)
 	// FlushInterval defaults to 30s in zap, which is too coarse: a
@@ -750,6 +1008,9 @@ func (s *DebugFileSink) RotateForScope(scope string) error {
 	}
 	newFile, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
+		if out := linkout.Explain(root, rootDir, rel, "debug file sink: "+debugLogRefusal(rel, rootDir), err); out != nil {
+			return out
+		}
 		return fmt.Errorf("debug file sink: open %q under %q: %w", rel, rootDir, err)
 	}
 

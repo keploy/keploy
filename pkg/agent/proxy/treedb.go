@@ -6,6 +6,7 @@ package proxy
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emirpasic/gods/trees/redblacktree"
@@ -41,6 +42,41 @@ type TreeDb struct {
 	// keyed holds a keyIndex per integrations.MockIndex a lookup has used.
 	// Built, read and dropped under mu.
 	keyed map[*integrations.MockIndex]*keyIndex
+	// gen is the tree's generation, moved by every change that stores a
+	// value under a key (storedLocked); parts is, at gen, the split of each
+	// key index's lists an exact view's keyed walk reads (keyParts). Both
+	// under mu.
+	gen   uint64
+	parts map[*integrations.MockIndex]*keyParts
+	// bootBuilt marks a startup tier a staging built before the set's first
+	// test fired: what it serves is consumed as the app starts
+	// (MockManager.carryTaken). Set before the tree is published, read-only
+	// after.
+	bootBuilt bool
+	// held is what a startup tier stores but does not serve without exact
+	// serving (MockManager.bootPlaced): a call placed at its answer and
+	// answered in a test. Every read of the staged set finds it, and exact
+	// serving shows it where its view places it. Nil for every other tree.
+	// Set before the tree is published; a swap (swapValue) replaces the set
+	// with one that holds the new copy too.
+	held atomic.Pointer[map[*models.Mock]struct{}]
+}
+
+// hold sets what the tree stores but does not serve without exact serving
+// (held). Called before the tree is published.
+func (db *TreeDb) hold(set map[*models.Mock]struct{}) {
+	db.held.Store(&set)
+}
+
+// serves reports whether the tree serves mk without exact serving: every mock
+// it stores but the held ones (held).
+func (db *TreeDb) serves(mk *models.Mock) bool {
+	h := db.held.Load()
+	if h == nil {
+		return true
+	}
+	_, held := (*h)[mk]
+	return !held
 }
 
 func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
@@ -54,6 +90,7 @@ func (db *TreeDb) insert(key interface{}, obj interface{}) {
 	db.mu.Lock()
 	db.win = nil   // an entry the window index does not know
 	db.keyed = nil // nor do the key indexes
+	db.storedLocked()
 	db.rbt.Put(key, obj)
 	// Update ID index
 	if info, ok := key.(models.TestModeInfo); ok {
@@ -113,26 +150,101 @@ func (db *TreeDb) delete(key interface{}) bool {
 	return true
 }
 
+// holds reports whether the entry at key is the mock want names (sameMock).
+func (db *TreeDb) holds(key models.TestModeInfo, want *models.Mock) bool {
+	if want == nil {
+		return false
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	v, found := db.rbt.Get(key)
+	return found && sameMock(v, *want)
+}
+
 // deleteMock removes the entry at key only when it is the mock the caller
 // means. See sameMock for why the key alone is not enough.
 func (db *TreeDb) deleteMock(key interface{}, want models.Mock) bool {
+	ok, _ := db.deleteMockReturning(key, want)
+	return ok
+}
+
+// deleteMockReturning is deleteMock, also returning the mock it removed.
+func (db *TreeDb) deleteMockReturning(key interface{}, want models.Mock) (bool, *models.Mock) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	v, found := db.rbt.Get(key)
 	if !found {
-		return false
+		return false, nil
 	}
 	if !sameMock(v, want) {
-		return false
+		return false, nil
 	}
 	db.rbt.Remove(key)
 	if info, ok := key.(models.TestModeInfo); ok {
 		delete(db.idIndex, info.ID)
 	}
+	removed, _ := v.(*models.Mock)
+	return true, removed
+}
+
+// swapValue stores newObj under key in place of old, when the tree holds old
+// itself there (by pointer). The key does not change, so the window index stays
+// right whenever newObj keeps old's request time, and each key index swaps the
+// entry in place (or is dropped, when newObj files under other keys). It
+// reports whether it swapped.
+func (db *TreeDb) swapValue(key models.TestModeInfo, old, newObj *models.Mock) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	cur, found := db.rbt.Get(key)
+	if !found || cur != old {
+		return false
+	}
+	db.dropWindowUnlessFiled(key.ID, key.ID, newObj)
+	for ix, ki := range db.keyed {
+		if !ki.swapInPlace(db, ix, key, old, newObj) {
+			delete(db.keyed, ix)
+		}
+	}
+	db.storedLocked()
+	db.rbt.Put(key, newObj)
+	// A held mock's copy is held too. The old one stays held: a walk that
+	// read it before the swap may still ask.
+	if h := db.held.Load(); h != nil {
+		if _, was := (*h)[old]; was {
+			next := make(map[*models.Mock]struct{}, len(*h)+1)
+			for mk := range *h {
+				next[mk] = struct{}{}
+			}
+			next[newObj] = struct{}{}
+			db.held.Store(&next)
+		}
+	}
+	return true
+}
+
+// removeValue removes the entry under key when the tree holds old itself there
+// (by pointer). It reports whether it removed.
+func (db *TreeDb) removeValue(key models.TestModeInfo, old *models.Mock) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	cur, found := db.rbt.Get(key)
+	if !found || cur != old {
+		return false
+	}
+	db.rbt.Remove(key)
+	delete(db.idIndex, key.ID)
 	return true
 }
 
 func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interface{}, want models.Mock) bool {
+	ok, _ := db.updateReplacing(oldKey, newKey, newObj, want)
+	return ok
+}
+
+// updateReplacing is update, also returning the mock the update replaced: the
+// one the tree held, which is not always the caller's (the ID-index fallback
+// finds the caller's recording under a newer copy).
+func (db *TreeDb) updateReplacing(oldKey interface{}, newKey interface{}, newObj interface{}, want models.Mock) (bool, *models.Mock) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -150,6 +262,7 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	if found {
 		db.dropWindowUnlessFiled(oldInfo.ID, newInfo.ID, newObj)
 		db.followKeyedLocked(oldKey, newKey, cur, newObj)
+		db.storedLocked()
 		db.rbt.Remove(oldKey)
 		db.rbt.Put(newKey, newObj)
 		// Update ID index
@@ -159,17 +272,18 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 		if okNew {
 			db.idIndex[newInfo.ID] = newInfo
 		}
-		return true
+		replaced, _ := cur.(*models.Mock)
+		return true, replaced
 	}
 
 	// If exact match fails, use ID index for O(1) lookup
 	if !okOld {
-		return false
+		return false, nil
 	}
 
 	currentKey, exists := db.idIndex[oldInfo.ID]
 	if !exists {
-		return false
+		return false, nil
 	}
 
 	// The ID index is keyed on ID ALONE, and ID is stamped from zero per tier,
@@ -185,19 +299,21 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	// injecting a foreign tier's mock rather than merely rewriting one.
 	cur, curFound := db.rbt.Get(currentKey)
 	if !curFound || !sameMock(cur, want) {
-		return false
+		return false, nil
 	}
 
 	// Found by ID, update it
 	db.dropWindowUnlessFiled(currentKey.ID, newInfo.ID, newObj)
 	db.followKeyedLocked(currentKey, newKey, cur, newObj)
+	db.storedLocked()
 	db.rbt.Remove(currentKey)
 	db.rbt.Put(newKey, newObj)
 	delete(db.idIndex, oldInfo.ID)
 	if okNew {
 		db.idIndex[newInfo.ID] = newInfo
 	}
-	return true
+	replaced, _ := cur.(*models.Mock)
+	return true, replaced
 }
 
 func (db *TreeDb) deleteAll() {
@@ -206,6 +322,7 @@ func (db *TreeDb) deleteAll() {
 	db.idIndex = make(map[int]models.TestModeInfo) // Reset ID index
 	db.win = nil
 	db.keyed = nil
+	db.storedLocked()
 	db.mu.Unlock()
 }
 
@@ -218,6 +335,9 @@ func (db *TreeDb) size() int {
 
 // rangeValues iterates without allocating a []interface{} snapshot.
 func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
+	if w := rangeValuesWatch.Load(); w != nil {
+		(*w)(db)
+	}
 	db.mu.RLock()
 	it := db.rbt.Iterator()
 	for it.Next() {
@@ -227,6 +347,10 @@ func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
 	}
 	db.mu.RUnlock()
 }
+
+// rangeValuesWatch, set only by this package's rows, is told of each walk of
+// a tree's values (rangeValues): what a row counts the walks of one tree by.
+var rangeValuesWatch atomic.Pointer[func(*TreeDb)]
 
 // dropWindowUnlessFiled drops the window index unless it stays right once
 // newObj is stored under newID in place of the entry under oldID: the ID does

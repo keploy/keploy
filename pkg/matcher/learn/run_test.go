@@ -1,0 +1,1823 @@
+package learn
+
+import (
+	"fmt"
+	"reflect"
+	"runtime"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+	"unsafe"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/templates"
+)
+
+// sent is an exchange served while no test is open (the start-up's): a test's
+// own exchange sets Own.
+func sent(mock string, at time.Time, path, place, rec, live string) Earlier {
+	return Earlier{Mock: mock, At: at, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: String, Value: rec}, Live: live, Place: place, Written: true}}}
+}
+
+// What the start-up sends, while no test is open, is an earlier place of
+// every later test of the set, and its variables keep one name across them.
+func TestTrackerKeepsTheRunsExchangesForEveryTest(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body.auth_time", "body.auth_time", "1792000000", "1792000777"))
+	tr.Served(0, sent("mock-2", t0, "body.status", "body.status", "ok", "ok"))
+	run, _ := tr.RunName(0, "mock-1", "body.auth_time", nil)
+
+	for i := 0; i < 2; i++ {
+		tr.Begin()
+		n, earlier, _, _ := tr.Test()
+		if len(earlier) != 1 || !earlier[0].Run || earlier[0].Mock != "mock-1" {
+			t.Fatalf("test %d: the run's exchanges are %+v, want the start-up call that carried a value the run made", i, earlier)
+		}
+		if name, ok := tr.Name(n, "mock-1", "body.auth_time", nil); !ok || name != run {
+			t.Fatalf("test %d: the run's variable is named %q here, %q at the start-up", i, name, run)
+		}
+		if name, _ := tr.Name(n, "mock-9", "body.auth_time", nil); name == run {
+			t.Fatalf("test %d: a test's own variable took the run's name %q", i, run)
+		}
+		tr.End()
+	}
+	tr.NewSet()
+	tr.Begin()
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("a new set reads the previous set's start-up: %+v", earlier)
+	}
+	tr.End()
+	tr.NewSet()
+	n, _, _, _ := tr.Test()
+	tr.Served(n, sent("mock-1", t0, "body.auth_time", "body.auth_time", "1792000000", "1792000999"))
+	tr.Begin()
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Run {
+		t.Fatalf("the next set's start-up is not the run's: %+v", earlier)
+	}
+	if again, _ := tr.RunName(n, "mock-1", "body.auth_time", nil); again != run {
+		t.Fatalf("the next set's run's variable is named %q, want %q again", again, run)
+	}
+}
+
+// A run's variable is named apart from a test case's template keys: a test
+// that reserves the key the run's value sits under uses the run's name as it
+// is.
+func TestTheRunsVariableTakesNoTemplateKey(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
+	tr.Begin()
+	n1, _, _, _ := tr.Test()
+	run, _ := tr.RunName(n1, "mock-1", "body._id", nil)
+	tr.End()
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	reserved := map[string]bool{"_id": true}
+	if again, _ := tr.RunName(n, "mock-1", "body._id", reserved); again != run || reserved[run] {
+		t.Fatalf("the run's variable is %q in a test that reserves _id, %q before", again, run)
+	}
+	if own, _ := tr.Name(n, "mock-5", "body._id", reserved); own == run || reserved[own] {
+		t.Fatalf("the test's own variable is %q, next to the run's %q and its reserved _id", own, run)
+	}
+	if name, _ := (*Tracker)(nil).RunName(0, "mock-1", "body._id", map[string]bool{"run-_id": true}); name != "run-_id-2" {
+		t.Fatalf("a nil tracker names the run's variable %q, want run-_id-2", name)
+	}
+}
+
+// A run's variable has one name for the whole set, which its start-up's
+// bind carries: a test whose test case reserves that very name (gives a value
+// under it) cannot use it there, so the place is refused in that test, never
+// renamed, and named as before in every other. keploy test's template keys
+// never take one (they hold no '-'); a name given from elsewhere may.
+func TestARunsNameATestReservesIsRefusedThere(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
+	tr.Begin()
+	n1, _, _, _ := tr.Test()
+	run, ok := tr.RunName(n1, "mock-1", "body._id", nil)
+	if !ok || run != "run-_id" {
+		t.Fatalf("the run's variable is named %q (%v), want run-_id", run, ok)
+	}
+	if templates.IsKey(run) {
+		t.Fatalf("the run's name %q is a template key keploy test can give", run)
+	}
+	tr.End()
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	reserved := map[string]bool{run: true}
+	if name, ok := tr.Name(n, "mock-1", "body._id", reserved); ok {
+		t.Fatalf("a test that reserves %q named the run's place %q", run, name)
+	}
+	if name, ok := tr.RunName(n, "mock-1", "body._id", reserved); ok {
+		t.Fatalf("a test that reserves %q named the run's variable %q", run, name)
+	}
+	tr.End()
+	tr.Begin()
+	n, _, _, _ = tr.Test()
+	if name, ok := tr.Name(n, "mock-1", "body._id", nil); !ok || name != run {
+		t.Fatalf("the next test names the run's place %q (%v), want %q", name, ok, run)
+	}
+}
+
+// A run's variable is named when a test first uses it, after earlier tests
+// named their own: it takes none of their names, and later tests take none
+// of its (two tests may share a name: variables are named per test).
+func TestTheRunsVariableTakesNoTestsName(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
+	tr.Begin()
+	n1, _, _, _ := tr.Test()
+	own, _ := tr.Name(n1, "mock-5", "body.docs.msgs.0._id", nil)
+	tr.End()
+	tr.Begin()
+	n2, _, _, _ := tr.Test()
+	run, _ := tr.RunName(n2, "mock-1", "body.docs.msgs.0._id", nil)
+	later, _ := tr.Name(n2, "mock-7", "body.docs.msgs.0._id", nil)
+	if own != "_id" || run == own || later == run {
+		t.Fatalf("test 1 named its own %q, the run's is %q, test 2's own is %q; want the run's apart from both", own, run, later)
+	}
+}
+
+// Only what the start-up served, before the first test began, is the run's.
+// A request of a test answered after it ended, or between it and the next,
+// is that test's, forgotten by the next Begin (without the proven switch:
+// with it, ranCalls keeps its drifted request places, as
+// TestAnEarlierTestsCallIsAPlaceOfTheRun shows); a start-up exchange that
+// did not drift is kept until the first test begins.
+func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body.status", "body.status", "ok", "ok"))
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Run {
+		t.Fatalf("a start-up exchange that did not drift is not kept until the first test: %+v", earlier)
+	}
+	tr.Begin()
+	n, earlier, _, _ := tr.Test()
+	if len(earlier) != 0 {
+		t.Fatalf("the first test sees a start-up exchange that carried nothing the run made: %+v", earlier)
+	}
+	tr.End()
+	late := sent("mock-4", t0.Add(time.Second), "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id")
+	late.Own = true
+	tr.Served(n, late)
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Run {
+		t.Fatalf("a late exchange of the ended test is not its own: %+v", earlier)
+	}
+	tr.Begin()
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("the next test sees the previous test's late exchange: %+v", earlier)
+	}
+	tr.End()
+	if !tr.Begun() {
+		t.Fatal("a test has begun in this set, and the tracker says none has")
+	}
+	last, _, _, _ := tr.Test()
+	drifts := tr.Drifts()
+	tr.NewSet()
+	if tr.Begun() {
+		t.Fatal("a new set begins with no test begun, and the tracker says one has")
+	}
+	tr.Served(last, sent("mock-2", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
+	tr.Served(last+9, sent("mock-8", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
+	next, _, _, _ := tr.Test()
+	straggler := sent("mock-7", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id")
+	straggler.Own = true
+	tr.Served(next, straggler)
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("a request of the previous set, of a test that never ran, or one that took its scope from the previous set, is kept as the new set's: %+v", earlier)
+	}
+	if name, ok := tr.Name(last, "mock-2", "body.docs.msgs.0._id", nil); ok {
+		t.Fatalf("a request of the previous set named a variable %q in the new set", name)
+	}
+	if tr.Answer(next, &models.Mock{Name: "mock-7"}) || tr.Answered("mock-7") || len(tr.AnsweredMocks()) != 0 || tr.Drifts() == drifts {
+		t.Fatal("with no test open, a request took a mock as a test's own, or the new set reads the previous set's answers or drifts")
+	}
+	boot := sent("mock-0", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id")
+	boot.Own = false
+	tr.Served(next, boot)
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Run {
+		t.Fatalf("the new set's start-up is not the run's: %+v", earlier)
+	}
+}
+
+// A new set names its variables afresh: what the previous set's last test
+// named, at mock names the new set reuses, names nothing of the new set's.
+// A run's variable is the set's: a request of the previous set (a test number
+// from before NewSet) is named none of the new set's run's variables, by Name
+// or by RunName, and gives none its name, as it is named no test's variable.
+// The new set's requests name them, its start-up's and its tests', a test's
+// that ended too.
+func TestANewSetsNamesAreItsOwn(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.NewSet()
+	tr.Begin()
+	old, _, _, _ := tr.Test()
+	if own, _ := tr.Name(old, "mock-1", "body.code", nil); own != "code" {
+		t.Fatalf("the previous set's test names mock-1's body.code %q", own)
+	}
+	if own, _ := tr.Name(old, "mock-2", "body.code", nil); own != "code-2" {
+		t.Fatalf("the previous set's test names mock-2's body.code %q", own)
+	}
+	tr.End()
+	tr.NewSet()
+	boot, _, _, _ := tr.Test()
+	if name, ok := tr.Name(boot, "mock-2", "body.code", nil); !ok || name != "code" {
+		t.Fatalf("the new set's start-up names mock-2's body.code %q (%v); want code, not the previous set's name of it", name, ok)
+	}
+	tr.Served(boot, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
+	if name, ok := tr.RunName(old, "mock-1", "body._id", map[string]bool{"run-_id": true}); ok {
+		t.Fatalf("a request of the previous set named the new set's run's variable %q", name)
+	}
+	run, ok := tr.RunName(boot, "mock-1", "body._id", nil)
+	if !ok || run != "run-_id" {
+		t.Fatalf("the new set's start-up names its run's variable %q (%v); want run-_id", run, ok)
+	}
+	if name, ok := tr.Name(old, "mock-1", "body._id", nil); ok {
+		t.Fatalf("a request of the previous set is named the new set's run's variable %q", name)
+	}
+	if name, ok := tr.RunName(old, "mock-1", "body._id", nil); ok {
+		t.Fatalf("a request of the previous set is named the new set's run's variable %q by RunName", name)
+	}
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	if name, ok := tr.Name(n, "mock-1", "body._id", nil); !ok || name != run {
+		t.Fatalf("the new set's test names the run's place %q (%v); want %q", name, ok, run)
+	}
+	tr.End()
+	if name, ok := tr.Name(n, "mock-1", "body._id", nil); !ok || name != run {
+		t.Fatalf("a late request of the set's ended test names the run's place %q (%v); want %q", name, ok, run)
+	}
+	if name, ok := tr.RunName(n, "mock-1", "body._id", nil); !ok || name != run {
+		t.Fatalf("a late request of the set's ended test names the run's variable %q (%v); want %q", name, ok, run)
+	}
+}
+
+// A new set's start-up has none of the previous set's exchanges as earlier
+// places, its last test's neither: an app kept alive across sets sends there
+// a value of its run, which the new set's start-up may send again. Mock names
+// restart in every set, so the previous set's mock-3 would stand for the new
+// set's mock-3: a value the start-up sends would be explained by it, and a
+// read of the record it wrote read back from it. What the start-up serves is
+// all it sees.
+func TestANewSetHasNoneOfThePreviousSetsExchanges(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	const order = "orders\x00o-live-1"
+	tr.Begin()
+	last, _, _, _ := tr.Test()
+	own := wrote("mock-3", t0, order, "body.code", String, "SAME-1", "LIVE-1")
+	own.Own = true
+	tr.Served(last, own)
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Mock != "mock-3" {
+		t.Fatalf("the set's last test does not keep its own exchange: %+v", earlier)
+	}
+	tr.End()
+	tr.NewSet()
+	boot, earlier, _, _ := tr.Test()
+	if len(earlier) != 0 {
+		t.Fatalf("the new set's start-up has the previous set's last test's exchanges: %+v", earlier)
+	}
+	if p, ok := ReadBack(Leaf{Path: "body.value.code", Type: String, Value: "SAME-1"}, order, earlier); ok {
+		t.Fatalf("the new set's start-up reads back what the previous set wrote, from %+v", p)
+	}
+	tr.Served(boot, sent("mock-1", t0.Add(time.Minute), "body.status", "body.status", "ok", "ok"))
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Mock != "mock-1" || earlier[0].Run {
+		t.Fatalf("the new set's start-up sees %+v, want only its own exchange", earlier)
+	}
+}
+
+// A value the test's own earlier call sent, which a start-up call sent too,
+// comes from the test's own call: only a test's own calls carry its
+// variables.
+func TestAValueComesFromTheTestsOwnCallBeforeTheRuns(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	boot := Earlier{Mock: "mock-0", At: t0, Run: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "header.x-build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "header.x-build"}}}
+	own := Earlier{Mock: "mock-5", At: t0.Add(time.Minute), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "header.x-build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "header.x-build"}}}
+	p, ok := appeared(clockedDrifts(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{boot, own}, nil)
+	if !ok || !p.Own || p.Mock != "mock-5" {
+		t.Fatalf("the value comes from %+v (%v), want the test's own call", p, ok)
+	}
+	p, ok = appeared(clockedDrifts(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{boot}, nil)
+	if !ok || !p.Run || p.Mock != "mock-0" {
+		t.Fatalf("with no own call the value comes from %+v (%v), want the run's", p, ok)
+	}
+	answered := Earlier{Mock: "mock-6", At: t0.Add(time.Minute), Own: true, Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "body.items.0.build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "body.items.0.build"}}}
+	p, ok = appeared(clockedDrifts(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{answered, boot}, nil)
+	if !ok || !p.Run || p.Side != Request || p.Mock != "mock-0" {
+		t.Fatalf("a value the test's own answer gave, which the start-up sent, comes from %+v (%v), want where it was sent", p, ok)
+	}
+	p, ok = appeared(clockedDrifts(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{answered}, nil)
+	if !ok || p.Side != Response || p.Mock != "mock-6" {
+		t.Fatalf("a value only an answer gave comes from %+v (%v), want that answer", p, ok)
+	}
+}
+
+// A request place that holds no variable, or whose live value is unknown,
+// does not make a start-up exchange the run's; nor does a drift in its
+// answer alone, at a place a variable can hold: only what the application
+// sent is a value it made. A request place that holds one and drifted does.
+func TestAStartUpExchangeDriftsOnlyAtAVariablePlace(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, Earlier{Mock: "mock-1", At: t0, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "request{names}", Type: Keys, Value: "a,b"}, Live: "a,b,c"},
+		{Side: Request, Leaf: Leaf{Path: "body.x", Type: String, Value: "rec"}, Live: "", Place: "body.x"},
+	}})
+	tr.Served(0, Earlier{Mock: "mock-2", At: t0.Add(time.Second), Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.session", Type: String, Value: "s-rec"}, Live: "s-live", Place: "body.session"},
+	}})
+	tr.Served(0, Earlier{Mock: "mock-3", At: t0.Add(2 * time.Second), Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.boot", Type: String, Value: "b-rec"}, Live: "b-live", Place: "body.boot"},
+	}})
+	tr.Begin()
+	_, earlier, _, _ := tr.Test()
+	if len(earlier) != 1 || earlier[0].Mock != "mock-3" || !earlier[0].Run {
+		t.Fatalf("the run's exchanges are %+v; want only mock-3, which sent a drifted value at a variable place", earlier)
+	}
+}
+
+// Named leaves the exchange it was given as it was, and names a place two
+// variables hold after the first by name.
+func TestNamedLeavesTheExchangeItWasGiven(t *testing.T) {
+	e := Earlier{Mock: "mock-1", Seen: []Seen{{Side: Request, Place: "body.id", Leaf: Leaf{Path: "body.id"}}}}
+	named := Named(e, models.MockVariables{"second": {Bind: "body.id"}, "first": {Use: []string{"body.id"}}}, nil)
+	if e.Seen[0].Name != "" {
+		t.Fatalf("Named wrote %q into the exchange it was given", e.Seen[0].Name)
+	}
+	if named.Seen[0].Name != "first" {
+		t.Fatalf("the place two variables hold is named %q, want the first by name", named.Seen[0].Name)
+	}
+	named.Seen = append(named.Seen, Seen{Side: Response, Name: "stale"})
+	again := Named(named, nil, nil)
+	if again.Seen[0].Name != "" || again.Seen[1].Name != "" || &again.Seen[0] == &named.Seen[0] {
+		t.Fatalf("Named with no variables keeps a stale name or the exchange's own Seen: %+v", again.Seen)
+	}
+}
+
+// Named marks a request leaf its call's learn step learned as a plain read of
+// the clock (Seen.Clock), by the leaf's path as MockSpec.Clocks keys it: not
+// a read plus an offset, not an answer's leaf at the same path, not a leaf
+// the clocks do not hold, and a mark the exchange held before is not kept.
+func TestNamedMarksAPlainClockReadOfARequestOnly(t *testing.T) {
+	e := Earlier{Mock: "mock-1", Seen: []Seen{
+		{Side: Request, Place: "body.lastUsedAt", Leaf: Leaf{Path: "body.lastUsedAt"}},
+		{Side: Request, Place: "body.expiresAt", Leaf: Leaf{Path: "body.expiresAt"}},
+		{Side: Response, Place: "body.lastUsedAt", Leaf: Leaf{Path: "body.lastUsedAt"}},
+		{Side: Request, Place: "body.id", Leaf: Leaf{Path: "body.id"}, Clock: true},
+	}}
+	clocks := map[string]models.ClockOffset{
+		"body.lastUsedAt": {Res: time.Second},
+		"body.expiresAt":  {Min: 30 * time.Minute, Max: 30*time.Minute + time.Second, Res: time.Second},
+	}
+	named := Named(e, nil, clocks)
+	for i, want := range []bool{true, false, false, false} {
+		if named.Seen[i].Clock != want {
+			t.Errorf("%s %s is marked a plain clock read %v; want %v", named.Seen[i].Side, named.Seen[i].Leaf.Path, named.Seen[i].Clock, want)
+		}
+	}
+	if !e.Seen[3].Clock || e.Seen[0].Clock {
+		t.Fatalf("Named wrote its marks into the exchange it was given: %+v", e.Seen)
+	}
+	if p := seenPlace(named, named.Seen[0], true); !p.Clock {
+		t.Fatalf("the place of a marked leaf is no clock read: %+v", p)
+	}
+}
+
+// Named gives each request leaf its call's learn step learned as a read of
+// the clock the read it learned (Seen.Offset), a plain read's and an
+// offset's alike, without its learned line: not an answer's leaf at the same
+// path, not a leaf the clocks do not hold, and a read the exchange held
+// before is not kept. The run counts each read it keeps (runPlaceBytes).
+func TestNamedGivesARequestsClockReadItsOffset(t *testing.T) {
+	month := 30 * 24 * time.Hour
+	ttl := models.ClockOffset{Min: month - 771*time.Microsecond, Max: month + 379*time.Microsecond, Res: time.Millisecond, Why: "body.expiresAt = clock + 30d"}
+	stale := &models.ClockOffset{Res: time.Second}
+	e := Earlier{Mock: "mock-1", Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.expiresAt"}},
+		{Side: Request, Leaf: Leaf{Path: "body.lastUsedAt"}},
+		{Side: Response, Leaf: Leaf{Path: "body.expiresAt"}},
+		{Side: Request, Leaf: Leaf{Path: "body.id"}, Offset: stale},
+	}}
+	named := Named(e, nil, map[string]models.ClockOffset{"body.expiresAt": ttl, "body.lastUsedAt": {Res: time.Second}})
+	if o := named.Seen[0].Offset; o == nil || o.Min != ttl.Min || o.Max != ttl.Max || o.Res != ttl.Res || o.Why != "" {
+		t.Errorf("a request's time to live is given %+v; want its learned offset, %s to %s at %s, with no learned line", o, ttl.Min, ttl.Max, ttl.Res)
+	}
+	if o := named.Seen[1].Offset; o == nil || !o.Plain() || o.Res != time.Second {
+		t.Errorf("a request's plain read is given %+v; want a plain read at a second", o)
+	}
+	for _, s := range named.Seen[2:] {
+		if s.Offset != nil {
+			t.Errorf("%s %s is given %+v; want no read", s.Side, s.Leaf.Path, *s.Offset)
+		}
+	}
+	if e.Seen[0].Offset != nil || e.Seen[3].Offset != stale {
+		t.Fatalf("Named wrote its reads into the exchange it was given: %+v", e.Seen)
+	}
+	if with, without := runPlaceBytes(named), runPlaceBytes(Named(e, nil, nil)); with-without != 2*int64(unsafe.Sizeof(models.ClockOffset{})) {
+		t.Errorf("the run counts %d bytes more of the exchange with two reads; want %d, the two reads it keeps", with-without, 2*unsafe.Sizeof(models.ClockOffset{}))
+	}
+}
+
+// wrote is an exchange of the run that wrote rec, made live, into record at
+// path (Seen.Written, Seen.Record), typed typ.
+func wrote(mock string, at time.Time, record, path string, typ Type, rec, live string) Earlier {
+	return Earlier{Mock: mock, At: at, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: typ, Value: rec}, Live: live, Place: path, Written: true, Record: record}}}
+}
+
+// An answer that holds a value an earlier call wrote with another value in
+// this run, into the record the read names, is answered with the value where
+// it was first written, whatever its length, script or type. A value no
+// linked write stored is not: one the write did not change, one a call only
+// named (not Written), one whose live value is unknown, one written into
+// another record, and any read the adapter links to no record.
+func TestReadBack(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	const order = "orders\x00o-live-1"
+	named := wrote("mock-7", t0, order, "body.note", String, "abc", "xyz")
+	named.Seen[0].Written = false
+	unknown := wrote("mock-8", t0, order, "body.tag", String, "t-rec", "")
+	earlier := []Earlier{
+		wrote("mock-3", t0.Add(time.Second), order, "body.code", String, "BJBM-NZBS", "FRST-XKCD"),
+		wrote("mock-1", t0.Add(-time.Second), order, "body.code", String, "BJBM-NZBS", "FRST-XKCD"),
+		wrote("mock-2", t0, order, "body.created", Number, "1792000000000", "1792000555000"),
+		wrote("mock-4", t0, order, "body.pin", String, "48213", "90717"),
+		wrote("mock-5", t0, order, "body.kind", String, "pending", "pending"),
+		wrote("mock-6", t0, order, "body.name", String, "日本", "韓国"),
+		wrote("mock-9", t0, "orders\x00o-live-2", "body.code2", String, "ZZZZ-1111", "YYYY-2222"),
+		// A write the adapter names no record of: no read is linked to it.
+		wrote("mock-10", t0, "", "body.ref", String, "REF-1", "REF-9"),
+		// A write at no place a variable can hold: nothing to bind there.
+		{Mock: "mock-11", At: t0, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "NOPLACE-1"}, Live: "NOPLACE-9", Written: true, Record: order}}},
+		named, unknown,
+	}
+	for _, c := range []struct {
+		value  string
+		typ    Type
+		record string
+		mock   string
+		live   string
+	}{
+		{"BJBM-NZBS", String, order, "mock-1", "FRST-XKCD"},
+		{"1792000000000", Number, order, "mock-2", "1792000555000"},
+		{"1792000000000", String, order, "mock-2", "1792000555000"},
+		{"48213", Number, order, "mock-4", "90717"},
+		{"日本", String, order, "mock-6", "韓国"},
+		{"pending", String, order, "", ""},
+		{"abc", String, order, "", ""},
+		{"t-rec", String, order, "", ""},
+		{"ZZZZ-1111", String, order, "", ""},
+		{"BJBM-NZBS", String, "orders\x00o-live-2", "", ""},
+		{"BJBM-NZBS", String, "", "", ""},
+		{"REF-1", String, "", "", ""},
+		{"REF-1", String, order, "", ""},
+		{"NOPLACE-1", String, order, "", ""},
+		{"", String, order, "", ""},
+	} {
+		p, ok := ReadBack(Leaf{Path: "body.value.x", Type: c.typ, Value: c.value}, c.record, earlier)
+		if c.mock == "" {
+			if ok {
+				t.Errorf("%q (%c) of record %q was read back from %+v", c.value, c.typ, c.record, p)
+			}
+			continue
+		}
+		if !ok || p.Mock != c.mock || p.Live != c.live || p.Side != Request || !p.Whole {
+			t.Errorf("%q (%c) of record %q read back as %+v (%v), want it from %s with %q", c.value, c.typ, c.record, p, ok, c.mock, c.live)
+		}
+	}
+	if _, ok := ReadBack(Leaf{Path: "body.value.x", Type: String, Value: "BJBM-NZBS", Unnamed: true}, order, earlier); ok {
+		t.Error("an unnamed leaf was read back")
+	}
+}
+
+// Writes into one record of the same recorded value that hold two live
+// values are two values a read of it may be: which write the read reads, the
+// evidence does not say, so it is read back from none (the answer's drift is
+// then unexplained, and refused). That holds whether they are two fields or
+// one field written twice, whether both drifted, one drifted and the other
+// kept the recorded value (in either order), or F could not read the other's
+// live value, and whether the other is at a place a variable can hold or not
+// (a field keploy binds no variable at holds a value the store answers all
+// the same). Where every write drifted to one live value, the read is read
+// back from the earliest at a place a variable can hold.
+func TestReadBackOfTwoFieldsWithOneRecordedValue(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	const order = "orders\x00o-live-1"
+	r := Leaf{Path: "body.value.x", Type: String, Value: "SAME-1"}
+	for _, c := range []struct {
+		name    string
+		earlier []Earlier
+		mock    string // "" when not read back
+		live    string
+	}{
+		{"two fields, two live values", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "LIVE-2"),
+		}, "", ""},
+		{"two fields of one exchange, two live values", []Earlier{{Mock: "mock-1", At: t0, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.first", Type: String, Value: "SAME-1"}, Live: "LIVE-1", Place: "body.first", Written: true, Record: order},
+			{Side: Request, Leaf: Leaf{Path: "body.second", Type: String, Value: "SAME-1"}, Live: "LIVE-2", Place: "body.second", Written: true, Record: order},
+		}}}, "", ""},
+		{"two fields, one live value", []Earlier{
+			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "LIVE-1"),
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+		}, "mock-1", "LIVE-1"},
+		{"one field written twice, two live values", []Earlier{
+			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "LIVE-2"),
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+		}, "", ""},
+		{"one field written twice, one live value", []Earlier{
+			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "LIVE-1"),
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+		}, "mock-1", "LIVE-1"},
+		{"a field of another record", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+			wrote("mock-2", t0.Add(time.Second), "orders\x00o-live-2", "body.second", String, "SAME-1", "LIVE-2"),
+		}, "mock-1", "LIVE-1"},
+		// A field that kept the recorded value is a value the read may be
+		// too: the store answers it as it was written.
+		{"two fields of one exchange, one drifted and one not", []Earlier{{Mock: "mock-1", At: t0, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.code", Type: String, Value: "SAME-1"}, Live: "LIVE-1", Place: "body.code", Written: true, Record: order},
+			{Side: Request, Leaf: Leaf{Path: "body.altCode", Type: String, Value: "SAME-1"}, Live: "SAME-1", Place: "body.altCode", Written: true, Record: order},
+		}}}, "", ""},
+		{"a field that did not drift, written after one that did", []Earlier{
+			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "SAME-1"),
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+		}, "", ""},
+		{"a field that did not drift, written before one that did", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "SAME-1"),
+			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "LIVE-1"),
+		}, "", ""},
+		// A field whose live value F could not read may hold anything.
+		{"a field whose live value is unknown", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", ""),
+		}, "", ""},
+		// One field written with two values held each in turn: the read
+		// may be either, in either order.
+		{"one field written as recorded, then drifted", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "SAME-1"),
+			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "LIVE-1"),
+		}, "", ""},
+		{"one field drifted, then written as recorded", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "LIVE-1"),
+			wrote("mock-2", t0.Add(time.Second), order, "body.first", String, "SAME-1", "SAME-1"),
+		}, "", ""},
+		// A field at no place a variable can hold, written with the
+		// recorded value, is a value the read may be too.
+		{"two fields of one exchange, one at no place, two live values", []Earlier{{Mock: "mock-1", At: t0, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.code", Type: String, Value: "SAME-1"}, Live: "LIVE-1", Place: "body.code", Written: true, Record: order},
+			{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "SAME-1"}, Live: "LIVE-2", Written: true, Record: order},
+		}}}, "", ""},
+		{"a field at no place written first, two live values", []Earlier{
+			{Mock: "mock-0", At: t0, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "SAME-1"}, Live: "LIVE-2", Written: true, Record: order}}},
+			wrote("mock-1", t0.Add(time.Second), order, "body.code", String, "SAME-1", "LIVE-1"),
+		}, "", ""},
+		{"a field at no place written first, one live value", []Earlier{
+			{Mock: "mock-0", At: t0, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "SAME-1"}, Live: "LIVE-1", Written: true, Record: order}}},
+			wrote("mock-1", t0.Add(time.Second), order, "body.code", String, "SAME-1", "LIVE-1"),
+		}, "mock-1", "LIVE-1"},
+		{"a field at no place that kept the recorded value", []Earlier{
+			wrote("mock-1", t0, order, "body.code", String, "SAME-1", "LIVE-1"),
+			{Mock: "mock-2", At: t0.Add(time.Second), Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.blob", Type: String, Value: "SAME-1"}, Live: "SAME-1", Written: true, Record: order}}},
+		}, "", ""},
+		{"no field drifted", []Earlier{
+			wrote("mock-1", t0, order, "body.first", String, "SAME-1", "SAME-1"),
+			wrote("mock-2", t0.Add(time.Second), order, "body.second", String, "SAME-1", "SAME-1"),
+		}, "", ""},
+	} {
+		p, ok := ReadBack(r, order, c.earlier)
+		if c.mock == "" {
+			if ok {
+				t.Errorf("%s: read back from %+v", c.name, p)
+			}
+			continue
+		}
+		if !ok || p.Mock != c.mock || p.Live != c.live {
+			t.Errorf("%s: read back as %+v (%v), want it from %s with %q", c.name, p, ok, c.mock, c.live)
+		}
+	}
+}
+
+// ReplaceToken replaces a value only where it stands as a token.
+func TestReplaceToken(t *testing.T) {
+	for _, c := range []struct {
+		s, v, with, want string
+		found            bool
+	}{
+		{"USER:42", "42", "7", "USER:7", true},
+		{"order-42x", "42", "7", "order-42x", false},
+		{"42/42x/42", "42", "7", "7/42x/7", true},
+		{"abcdef", "abcdef", "LIVE01", "LIVE01", true},
+		{"Xabcdef9", "abcdef", "LIVE01", "Xabcdef9", false},
+		{"", "42", "7", "", false},
+		{"42", "", "7", "42", false},
+	} {
+		got, found := ReplaceToken(c.s, c.v, c.with)
+		if got != c.want || found != c.found {
+			t.Fatalf("ReplaceToken(%q, %q, %q) = %q, %v; want %q, %v", c.s, c.v, c.with, got, found, c.want, c.found)
+		}
+	}
+}
+
+// ReplaceTokens reads s once: what one replacement puts in is not read
+// again, the longer key wins where two begin together, and a key that stands
+// nowhere is missing.
+func TestReplaceTokens(t *testing.T) {
+	out, missing := ReplaceTokens("aaaaaa:bbbbbb", map[string]string{"aaaaaa": "xx-bbbbbb-yy", "bbbbbb": "cccccc"})
+	if out != "xx-bbbbbb-yy:cccccc" || len(missing) != 0 {
+		t.Fatalf("got %q, missing %v", out, missing)
+	}
+	out, missing = ReplaceTokens("USER:42 42 42x", map[string]string{"42": "7", "USER:42": "ADMIN:7", "nowhere": "x"})
+	if out != "ADMIN:7 7 42x" || len(missing) != 1 || missing[0] != "nowhere" {
+		t.Fatalf("got %q, missing %v", out, missing)
+	}
+}
+
+// A place that uses the run's variable (Seen.Name) is no place its value
+// came from, whatever its call: the run's place that binds it is, and a
+// later call uses that variable. With only such a place earlier, the value
+// came from none, so nothing binds a second variable at a use.
+func TestAPlaceThatUsesTheRunsVariableIsNoPlaceItCameFrom(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	seen := func(path, name string) []Seen {
+		return []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: String, Value: "rec-id-aaaaaa"}, Live: "live-id-bbbbbb", Place: path, Name: name}}
+	}
+	use := Earlier{Mock: "mock-5", At: t0.Add(time.Minute), Own: true, Seen: seen("url.path[2]", "run-body.id")}
+	if p, ok := appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{use}, nil); ok {
+		t.Fatalf("the value comes from %+v, a place that uses the run's variable", p)
+	}
+	bind := Earlier{Mock: "mock-0", At: t0, Run: true, Seen: seen("body.id", "")}
+	p, ok := appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{bind, use}, nil)
+	if !ok || !p.Run || p.Mock != "mock-0" {
+		t.Fatalf("the value comes from %+v (%v), want the run's place that binds it over the test's own use", p, ok)
+	}
+}
+
+// Among the places that hold a value, one that sent it whole comes before
+// one that sent it inside a longer value, whoever's call it was; within one
+// kind, the earliest.
+func TestAValueComesFromWhereItWasSentWhole(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	seen := func(path, rec, live string) []Seen {
+		return []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: String, Value: rec}, Live: live, Place: path}}
+	}
+	boot := Earlier{Mock: "mock-0", At: t0, Run: true, Seen: seen("body.docs.msgs.0._id", "rec-id-aaaaaa", "live-id-bbbbbb")}
+	ownPart := Earlier{Mock: "mock-5", At: t0.Add(time.Minute), Own: true, Seen: seen("body.cmd.filter.ref", "USER:rec-id-aaaaaa", "USER:live-id-bbbbbb")}
+	p, ok := appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{ownPart, boot}, nil)
+	if !ok || !p.Whole || !p.Run || p.Mock != "mock-0" {
+		t.Fatalf("the value comes from %+v (%v), want the start-up's whole place over the test's own part", p, ok)
+	}
+	other := Earlier{Mock: "mock-9", At: t0.Add(-time.Minute), Seen: seen("body.x", "rec-id-aaaaaa", "live-id-bbbbbb")}
+	p, _ = appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{other, boot}, nil)
+	if !p.Run || p.Mock != "mock-0" {
+		t.Fatalf("the value comes from %+v, want the run's place over another's that is earlier", p)
+	}
+	later := Earlier{Mock: "mock-1", At: t0.Add(time.Second), Run: true, Seen: seen("body.docs.msgs.0._id", "rec-id-aaaaaa", "live-id-bbbbbb")}
+	p, _ = appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{boot, later}, nil)
+	if p.Mock != "mock-0" {
+		t.Fatalf("the value comes from %+v, want the earliest of two places of one kind", p)
+	}
+}
+
+// A run's name and a test's name never meet, whichever is named first: a
+// test's own variable at a place named like the run's takes another name, and
+// one at a place a run's name would begin with is named apart from every
+// run's name (varName), which a replay keeps for the set.
+func TestARunsNameAndATestsNameNeverMeet(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	// The run's first: run-x, then a test's own at body.run-x.
+	tr := NewTracker()
+	tr.Served(0, sent("mock-1", t0, "body.x", "body.x", "rec-x", "live-x"))
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	run, _ := tr.RunName(n, "mock-1", "body.x", nil)
+	own, _ := tr.Name(n, "mock-5", "body.run-x", nil)
+	if run != "run-x" || own == run {
+		t.Fatalf("run's first: the run's is %q, the test's own %q; want run-x and another", run, own)
+	}
+	// The test's first: its own run-x, then the run's, first named after.
+	tr = NewTracker()
+	tr.Served(0, sent("mock-1", t0, "body.x", "body.x", "rec-x", "live-x"))
+	tr.Begin()
+	n, _, _, _ = tr.Test()
+	own, _ = tr.Name(n, "mock-5", "body.run-x", nil)
+	tr.End()
+	tr.Begin()
+	n, _, _, _ = tr.Test()
+	run, _ = tr.RunName(n, "mock-1", "body.x", nil)
+	if own != "var-run-x" || run != "run-x" {
+		t.Fatalf("test's first: the test's own is %q, the run's %q; want var-run-x (no test's variable takes a run's name) and run-x", own, run)
+	}
+}
+
+// A run's place is named the run's name whatever test number asks: a late
+// call of a test that ended uses the set's name, which no test owns.
+func TestARunsPlaceIsNamedForAStaleTest(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
+	tr.Begin()
+	stale, _, _, _ := tr.Test()
+	run, _ := tr.RunName(stale, "mock-1", "body._id", nil)
+	tr.End()
+	tr.Begin()
+	if name, ok := tr.Name(stale, "mock-1", "body._id", nil); !ok || name != run {
+		t.Fatalf("an ended test's call names the run's place %q (%v), want %q", name, ok, run)
+	}
+	if name, ok := tr.Name(stale, "mock-5", "body._id", nil); ok {
+		t.Fatalf("an ended test's call named its own variable %q", name)
+	}
+}
+
+// Named names a place by the variables bound or used there, never by an
+// echo: an echo is its call's alone.
+func TestNamedSkipsAnEcho(t *testing.T) {
+	e := Earlier{Mock: "mock-1", Seen: []Seen{
+		{Side: Request, Place: "body.id", Leaf: Leaf{Path: "body.id"}},
+		{Side: Request, Place: "body.ref", Leaf: Leaf{Path: "body.ref"}},
+	}}
+	named := Named(e, models.MockVariables{
+		"echoed": {Bind: "body.id", Echo: true},
+		"ref":    {Bind: "body.ref"},
+	}, nil)
+	if named.Seen[0].Name != "" || named.Seen[1].Name != "ref" {
+		t.Fatalf("Named named the places %q and %q; want none for the echo, ref for ref", named.Seen[0].Name, named.Seen[1].Name)
+	}
+}
+
+// A variable is named by the key above an operator's key ($date, $oid): the
+// value's own name, not its encoding's.
+func TestAVariableIsNamedAboveADollarKey(t *testing.T) {
+	for place, want := range map[string]string{
+		"body.created.$date":     "created",
+		"body.order.$oid":        "order",
+		"body.items[0].ref.$oid": "ref",
+		"body.created":           "created",
+		"body.$date":             "var",
+	} {
+		if got := varName(place); got != want {
+			t.Errorf("varName(%q) = %q, want %q", place, got, want)
+		}
+	}
+}
+
+// A call made at the start-up, before the set's first test began, has no
+// test: a word of what changed that an exchange of the start-up holds is
+// named as earlier in the recording, never earlier in the test. In a test,
+// and between tests (the previous test's), it is earlier in the test.
+func TestAStartUpCallNamesItsEarlierPlacesEarlierInTheRecording(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	const path = "body.count"
+	classify := func(tr *Tracker) string {
+		t.Helper()
+		_, earlier, _, _ := tr.Test()
+		got := Classify(clockedDrifts(), []string{path},
+			Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "7"}}},
+			Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}},
+			t0.Add(time.Second), earlier, nil, nil)
+		if len(got) != 1 || got[0].Kind != KindUnaccounted {
+			t.Fatalf("FALSE GREEN? 82 recorded, 7 live, 7 sent earlier: %+v, want refused", got)
+		}
+		return got[0].Why
+	}
+	tr := NewTracker()
+	tr.Served(0, sent("mock-1", t0, "body.retries", "body.retries", "7", "7"))
+	if why := classify(tr); !strings.Contains(why, "appears earlier in the recording, in mock-1 at body.retries") {
+		t.Errorf("a start-up call: %q, want the start-up's exchange named earlier in the recording", why)
+	}
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	tr.Served(n, sent("mock-2", t0, "body.retries", "body.retries", "7", "7"))
+	if why := classify(tr); !strings.Contains(why, "appears earlier in the test, in mock-2 at body.retries") {
+		t.Errorf("a call in a test: %q, want the test's exchange named earlier in the test", why)
+	}
+	tr.End()
+	between := NewTracker()
+	between.Begin()
+	between.End()
+	n, _, _, _ = between.Test()
+	between.Served(n, sent("mock-3", t0, "body.retries", "body.retries", "7", "7"))
+	if why := classify(between); !strings.Contains(why, "appears earlier in the test, in mock-3 at body.retries") {
+		t.Errorf("a call between tests: %q, want the previous test's exchange named earlier in the test", why)
+	}
+}
+
+// ranCall is a test's own call: a request place that carried a value the run
+// made (rec drifted to live), one that did not, and an answer that drifted.
+func ranCall(mock string, at time.Time, rec, live string) Earlier {
+	return Earlier{Mock: mock, At: at, Own: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.order", Type: String, Value: rec}, Live: live, Place: "body.order", Written: true, Record: "orders"},
+		{Side: Request, Leaf: Leaf{Path: "body.item", Type: String, Value: "pen"}, Live: "pen", Place: "body.item"},
+		{Side: Response, Leaf: Leaf{Path: "body.id", Type: String, Value: rec}, Live: live, Place: "body.id"},
+	}}
+}
+
+// Under the proven switch, a test's own call that sent a value the run made
+// is a place of the run's for every later test of the set: a later test's
+// call that sends the value finds it there with the rule its own earlier
+// calls are read by, and names it by the run's name, one for the set. Each
+// own call whose request drifted is kept as its drifted request leaves
+// (ranCalls), one answered after the test ended among them; one whose
+// request did not drift and a pool call leave none, and a new set none of
+// the previous set's.
+func TestAnEarlierTestsCallIsAPlaceOfTheRun(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Begin()
+	a, _, _, _ := tr.Test()
+	tr.Served(a, ranCall("mock-a", t0, "o-1", "o-9"))
+	pool := ranCall("pool-a", t0, "s-1", "s-9")
+	pool.Own = false
+	tr.Served(a, pool)
+	tr.Served(a, ranCall("mock-same", t0, "o-3", "o-3"))
+	tr.End()
+	tr.Served(a, ranCall("mock-late", t0.Add(time.Second), "o-2", "o-8"))
+	tr.Begin()
+	b, earlier, _, _ := tr.Test()
+	var want []Earlier
+	for _, e := range []Earlier{ranCall("mock-a", t0, "o-1", "o-9"), ranCall("mock-late", t0.Add(time.Second), "o-2", "o-8")} {
+		want = append(want, Earlier{Mock: e.Mock, At: e.At, Run: true, Seen: e.Seen[:1]})
+	}
+	if !reflect.DeepEqual(earlier, want) {
+		t.Fatalf("test B's earlier places are %+v, want test A's own calls that drifted, as the run's", earlier)
+	}
+	p, ok := appeared(clockedDrifts(), "o-1", "o-9", t0.Add(time.Minute), earlier, nil)
+	if !ok || !p.Run || p.Own || p.Mock != "mock-a" || p.Var != "body.order" || !p.Whole {
+		t.Fatalf("test B's value comes from %+v (%v), want test A's call, as the run's", p, ok)
+	}
+	name, ok := tr.PlaceName(b, p, nil)
+	if !ok || name != runPrefix+"order" {
+		t.Fatalf("test B names test A's value %q (%v), want the run's name", name, ok)
+	}
+	if own, _ := tr.PlaceName(b, Place{Mock: "mock-b", Var: "body.order"}, nil); own != "order" {
+		t.Fatalf("test B's own place is named %q, want its own name", own)
+	}
+	tr.Served(b, ranCall("mock-b", t0.Add(2*time.Second), "o-1", "o-9"))
+	tr.End()
+	tr.Begin()
+	c, earlier, _, _ := tr.Test()
+	if len(earlier) != 3 {
+		t.Fatalf("test C reads %d of the run's places, want test A's two and test B's one", len(earlier))
+	}
+	if p, _ := appeared(clockedDrifts(), "o-1", "o-9", t0.Add(time.Minute), earlier, nil); p.Mock != "mock-a" {
+		t.Fatalf("test C's value comes from %s, want the earliest call that sent it", p.Mock)
+	} else if again, _ := tr.PlaceName(c, p, nil); again != name {
+		t.Fatalf("test C names the value %q, test B %q: the run's name is the set's", again, name)
+	}
+	tr.End()
+	tr.NewSet()
+	tr.Begin()
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("a new set reads the previous set's tests' calls: %+v", earlier)
+	}
+}
+
+// A place an earlier test left the run is earlier than every call of a
+// later test, whatever its recorded time says (alwaysEarlier): one keploy
+// cannot read the time of, one recorded at the later call's own instant (a
+// clock that ties) and one recorded after it each give test B's value the
+// run's variable, never a refusal for the payload such a place does not
+// keep (ranCalls).
+func TestARunPlaceIsEarlierWhateverItsRecordedTimeSays(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	call := time.Unix(1_792_000_060, 0)
+	for name, at := range map[string]time.Time{"no time": {}, "the call's instant": call, "after the call": call.Add(time.Second)} {
+		tr := NewTracker()
+		tr.Begin()
+		a, _, _, _ := tr.Test()
+		tr.Served(a, ranCall("mock-a", at, "o-1", "o-9"))
+		tr.End()
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		ln := ClassifyIn(clockedDrifts(), []string{"body.order"}, strLeaf("body.order", "o-9"), strLeaf("body.order", "o-1"), call, earlier, nil, nil, nil)[0]
+		if ln.Kind != KindVariable || ln.From.Mock != "mock-a" {
+			t.Fatalf("%s: test B's value is %s from %+v (%s), want test A's value, the run's variable", name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
+
+// The run keeps of an earlier test's call only the request leaves that
+// drifted, and where its recording stands in the orders (Raw.ordered): no
+// leaf the application sent as recorded, no answer, no word of its payload,
+// no view. A word of a leaf that did not drift is then no earlier place of a
+// later test's value, and the set holds the values its tests made, not
+// their calls.
+func TestTheRunKeepsOnlyTheDriftedRequestLeaves(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	e := ranCall("mock-a", t0, "o-1", "o-9")
+	e.noTime, e.AsRecorded, e.ViewKey = true, true, "v"
+	e.View = func() (*models.Mock, error) { return nil, nil }
+	e.Payload = Raw{mock: "mock-a", rText: "o-1 pen"}
+	e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: "body.note", Type: String, Value: "n-1"}, Live: "n-2", Place: "body.note"})
+	got := ranCalls([]Earlier{e}, Order{})
+	want := []Earlier{{Mock: "mock-a", At: t0, Run: true, noTime: true, Seen: []Seen{e.Seen[0], e.Seen[3]}, Payload: Raw{mock: "mock-a", ordered: true}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the run keeps %+v of test A's call, want its drifted request leaves alone: %+v", got, want)
+	}
+}
+
+// The run's places hold the values a set's tests made, not their calls: a
+// set of many tests, each of whose calls sends a large leaf as recorded
+// beside the value it made, keeps a heap that grows with those values alone
+// (no-OOM: the row pins the peak as its last test reads its places: the heap
+// the set holds, and the one copy of the places, not of their leaves, the
+// read makes).
+func TestTheRunsPlacesHoldTheValuesNotTheCalls(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const tests, big = 2000, 32 << 10
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < tests; i++ {
+		tr.Begin()
+		n, _, _, _ := tr.Test()
+		e := ranCall("mock-"+strconv.Itoa(i), t0, "o-"+strconv.Itoa(i), "o-"+strconv.Itoa(i)+"-9")
+		e.Seen[1].Leaf.Value = strings.Repeat(strconv.Itoa(i%10), big)
+		e.Seen[1].Live = e.Seen[1].Leaf.Value
+		tr.Served(n, e)
+		tr.End()
+	}
+	tr.Begin()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > tests*big/8 {
+		t.Fatalf("the set holds %d bytes for %d tests' places: their %d-byte calls, not the values they made", grew, tests, big)
+	}
+	// The peak, as the last test's call reads its places: the set's heap
+	// above and one read's copy, which holds each place as it is (an
+	// Earlier) and none of its leaves' values.
+	var read runtime.MemStats
+	_, earlier, _, _ := tr.Test()
+	runtime.ReadMemStats(&read)
+	if len(earlier) != tests {
+		t.Fatalf("the last test reads %d of the run's places, want one of each earlier test", len(earlier))
+	}
+	if copied, bound := read.TotalAlloc-after.TotalAlloc, uint64(tests+1)*uint64(unsafe.Sizeof(Earlier{}))+8192; copied > bound {
+		t.Fatalf("one read of %d tests' places allocates %d bytes, over %d: it copies their leaves, not the places", tests, copied, bound)
+	}
+	runtime.KeepAlive(earlier)
+}
+
+// The run keeps its places within its share of the set's budget (keepRun),
+// at the least budget a set has (64 MiB, an eighth of it the run's): 2000
+// tests that each send a 32 KiB value the run made (a generated document,
+// an upload) held 157 MB before; now the set holds about the run's share.
+// Past it, the run keeps no more, and the later tests' values are refused,
+// naming the call it stopped at and the bound, never learned as noise: the
+// value a dropped place holds, and one no test sent, alike. A value the
+// first test made, kept, is still followed as the run's variable.
+func TestTheRunsPlacesStayWithinTheirShareOfTheSetsBudget(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = minSetBudget
+	const tests, big = 2000, 32 << 10
+	// Each value is 32 KiB exactly: the run counts a value by its length,
+	// and Go rounds an allocation past 32 KiB up to its 8 KiB pages, so
+	// values a little past it hold up to a quarter more than counted.
+	bigOf := func(c string, i int) string {
+		n := strconv.Itoa(i)
+		return strings.Repeat(c, big-len(n)) + n
+	}
+	t0 := time.Unix(1_792_000_000, 0)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	tr := NewTracker()
+	for i := 0; i < tests; i++ {
+		tr.Begin()
+		n, _, _, _ := tr.Test()
+		e := ranCall("mock-"+strconv.Itoa(i), t0, bigOf("r", i), bigOf("l", i))
+		if i == 0 {
+			e = ranCall("mock-0", t0, "o-0", "o-0-9")
+		}
+		tr.Served(n, e)
+		tr.End()
+	}
+	tr.Begin()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	share := int64(minSetBudget / runShare)
+	if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > share+1<<20 {
+		t.Fatalf("the set holds %d bytes for %d tests' %d KiB values, over the run's share of %d and 1 MiB", grew, tests, big>>10, share)
+	}
+	_, earlier, _, _ := tr.Test()
+	last := earlier[len(earlier)-1]
+	if len(earlier) == tests || last.Unread == "" || len(last.Seen) != 0 {
+		t.Fatalf("the run keeps %d of %d tests' places, the last %+v: want those within its share, then one that says it keeps no more", len(earlier), tests, last)
+	}
+	stop := last.Mock
+	dc := func() *DriftCache {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		dc := tr.newDrifts()
+		dc.appClock = true
+		return dc
+	}
+	call := t0.Add(time.Hour)
+	for _, c := range []struct{ name, rec, live string }{
+		{"a value the first test made", "o-0", "o-0-9"},
+		{"the last test's value, past the bound", bigOf("r", tests-1), bigOf("l", tests-1)},
+		{"a value no test sent", "o-x", "o-x-9"},
+	} {
+		ln := ClassifyIn(dc(), []string{"body.order"}, strLeaf("body.order", c.live), strLeaf("body.order", c.rec), call, earlier, nil, nil, nil)
+		if c.rec == "o-0" {
+			if ln[0].Kind != KindVariable || ln[0].From.Mock != "mock-0" || !ln[0].From.Run {
+				t.Errorf("%s is %s from %+v (%s), want the run's variable from mock-0", c.name, ln[0].Kind, ln[0].From, ln[0].Why)
+			}
+			continue
+		}
+		if ln[0].Kind != KindUnaccounted || ln[0].Why != runFullWhy(stop, share) {
+			t.Errorf("%s is %s (%s), want refused: the run keeps no more from %s's call on, past %d bytes", c.name, ln[0].Kind, ln[0].Why, stop, share)
+		}
+	}
+	runtime.KeepAlive(tr)
+}
+
+// Each way a place reaches the run is within the bound (keepRun): a test's
+// own call as the next test begins, one told after the next began, and the
+// start-up's exchange, kept whole, the start-up's with the switch off too
+// (the bound is no proven-only change there: past it a later call's changed
+// value is refused, where it was learned as noise). Past it the run keeps no
+// more, the place that says so last, once, and a later call's changed value
+// is refused in each way it is read: a text, an instant its protocol types
+// that its call's window holds as a read of the clock, and one at that read
+// plus an offset (Mongo's BSON datetimes); a new set starts with its whole
+// share again.
+func TestEveryWayAPlaceReachesTheRunIsBounded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = 8 << 20
+	const big = 32 << 10
+	t0 := time.Unix(1_792_000_000, 0)
+	value := func(c string, i int) string { return strings.Repeat(c, big) + strconv.Itoa(i) }
+	for _, c := range []struct {
+		name    string
+		startUp bool
+		serve   func(tr *Tracker, i int)
+	}{
+		{"as the next test begins", false, func(tr *Tracker, i int) {
+			tr.Begin()
+			n, _, _, _ := tr.Test()
+			tr.Served(n, ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i)))
+			tr.End()
+		}},
+		{"told after the next began", false, func(tr *Tracker, i int) {
+			tr.Begin()
+			n, _, _, _ := tr.Test()
+			tr.End()
+			tr.Begin()
+			tr.Served(n, ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i)))
+			tr.End()
+		}},
+		{"the start-up's", true, func(tr *Tracker, i int) {
+			n, _, _, _ := tr.Test()
+			e := ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i))
+			e.Own = false
+			e.Payload = Raw{mock: e.Mock, at: e.At, rText: "p-" + strconv.Itoa(i), rRead: true}
+			tr.Served(n, e)
+		}},
+		{"the start-up's, its recording's text held whole", true, func(tr *Tracker, i int) {
+			n, _, _, _ := tr.Test()
+			e := ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), "s-"+strconv.Itoa(i), "s-"+strconv.Itoa(i)+"-9")
+			e.Own = false
+			e.Payload = Raw{mock: e.Mock, at: e.At, rText: value("p", i) + value("p", i) + value("p", i), rRead: true}
+			tr.Served(n, e)
+		}},
+	} {
+		switches := []string{"1"}
+		if c.startUp {
+			switches = append(switches, "0")
+		}
+		for _, on := range switches {
+			t.Run(c.name+", switch "+on, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, on)
+				everyWayAPlaceReachesTheRunIsBounded(t, c.serve, big)
+			})
+		}
+	}
+}
+
+// everyWayAPlaceReachesTheRunIsBounded is TestEveryWayAPlaceReachesTheRunIsBounded
+// of the places serve tells the tracker, each about big bytes.
+func everyWayAPlaceReachesTheRunIsBounded(t *testing.T, serve func(tr *Tracker, i int), big int64) {
+	tr := NewTracker()
+	for set := 0; set < 2; set++ {
+		tr.NewSet()
+		for i := 0; i < 64; i++ {
+			serve(tr, i)
+		}
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		var marks, kept int64
+		for _, e := range earlier {
+			if e.Unread != "" {
+				marks++
+				continue
+			}
+			kept += runPlaceBytes(e)
+		}
+		if last := earlier[len(earlier)-1]; marks != 1 || last.Unread == "" || kept > learnBudget/runShare || kept < learnBudget/runShare-4*big-4096 {
+			t.Fatalf("set %d: the run keeps %d bytes of its places and %d that say it keeps no more (the last %+v): want its share, %d bytes, then one", set, kept, marks, last, learnBudget/runShare)
+		}
+		// Read by a call recorded after every kept place and before
+		// the one past the bound: the place that says the run keeps
+		// no more is still earlier than the call.
+		last := earlier[len(earlier)-1]
+		ln := ClassifyIn(clockedDrifts(), []string{"body.order"}, strLeaf("body.order", "o-x-9"), strLeaf("body.order", "o-x"), last.At.Add(-time.Second/2), earlier, nil, nil, nil)
+		if ln[0].Kind != KindUnaccounted || ln[0].Why != runFullWhy(last.Mock, learnBudget/runShare) {
+			t.Fatalf("set %d: a value no test sent, in a call recorded before the place past the bound, is %s (%s): want refused, the run keeps no more", set, ln[0].Kind, ln[0].Why)
+		}
+		// The same call's instants its protocol types, each a read of
+		// the clock in its call's window in both runs (learned as a
+		// clock read, or as that read plus 30 m, where the run kept
+		// all): refused too, as the text is.
+		ms := time.Millisecond
+		call := last.At.Add(-time.Second / 2)
+		fCall := call.Add(FullRoundLead - 8*ms)
+		w := &Window{Rec: Span{From: call.Add(-50 * ms), To: call}, F: Span{From: fCall.Add(-60 * ms), To: fCall}}
+		read, fRead := call.Add(-40*ms), fCall.Add(-45*ms)
+		for _, r := range []struct {
+			name      string
+			rec, live time.Time
+			w         *Window
+		}{
+			{"an instant at the clock", read, fRead, w},
+			{"an instant at the clock plus 30 m", read.Add(30 * time.Minute), fRead.Add(30 * time.Minute), w.ComparesOffsets()},
+		} {
+			ln := ClassifyIn(clockedDrifts(), []string{"body.at"}, typedLeaf("body.at", r.live, ms), typedLeaf("body.at", r.rec, ms), call, earlier, nil, nil, r.w)
+			if ln[0].Kind != KindUnaccounted || ln[0].Offset != nil || ln[0].Why != runFullWhy(last.Mock, learnBudget/runShare) {
+				t.Fatalf("set %d: %s, in a call recorded before the place past the bound, is %s %+v (%s): want refused, the run keeps no more", set, r.name, ln[0].Kind, ln[0].Offset, ln[0].Why)
+			}
+		}
+		tr.End()
+	}
+}
+
+// The run has the first claim on its share of the set's budget
+// (setDerived.keepRun): a set whose tiers that never let go (held, forms)
+// filled the budget as it was staged still keeps its tests' values, and is
+// then past its budget by the run's share at most, never refusing every
+// later test's value for want of room; where the budget is the words tier's,
+// which lets go, the words make room, and the set stays within it.
+func TestTheRunHasTheFirstClaimOnItsShare(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = 8 << 20
+	t0 := time.Unix(1_792_000_000, 0)
+	for _, c := range []struct {
+		name  string
+		fill  func(s *setDerived, size int64)
+		bound int64
+	}{
+		{"held, which never lets go", func(s *setDerived, size int64) {
+			s.held.keep("staged", partMoments, size, func(*heldParts) {})
+		}, learnBudget + learnBudget/runShare},
+		{"words, which let go", func(s *setDerived, size int64) {
+			for i := int64(0); i < 64; i++ {
+				s.words.keep("staged-"+strconv.FormatInt(i, 10), partTokens, size/64-slotBytes-16, func(*wordParts) {})
+			}
+		}, learnBudget},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := NewTracker()
+			s := tr.derived
+			s.mu.Lock()
+			c.fill(s, s.budget.limit-slotBytes-int64(len("staged")))
+			filled := s.budget.used
+			s.mu.Unlock()
+			if filled < learnBudget-learnBudget/64 {
+				t.Fatalf("the staging filled %d of the set's %d bytes, want about all", filled, learnBudget)
+			}
+			for i := 0; i < 4; i++ {
+				tr.Begin()
+				n, _, _, _ := tr.Test()
+				tr.Served(n, ranCall("mock-"+strconv.Itoa(i), t0, strings.Repeat("r", 32<<10), strings.Repeat("l", 32<<10)))
+				tr.End()
+			}
+			tr.Begin()
+			_, earlier, _, _ := tr.Test()
+			s.mu.Lock()
+			used, run := s.budget.used, s.run
+			s.mu.Unlock()
+			if tiers := s.usedBytes(); used != tiers+run || run == 0 {
+				t.Fatalf("the set's budget counts %d bytes, its tiers %d and the run %d: want the run's on the set's budget", used, tiers, run)
+			}
+			if len(earlier) != 4 || earlier[3].Unread != "" {
+				t.Fatalf("a set staged to its budget keeps %d of 4 tests' places (the last %+v): want each, the run's first claim", len(earlier), earlier[len(earlier)-1])
+			}
+			if used > c.bound {
+				t.Fatalf("the set holds %d bytes with the run's places, over %d", used, c.bound)
+			}
+		})
+	}
+}
+
+// One call's read of the run's places as the last test of a set of n tests
+// learns its one changed value: the tracker's read (a copy of every place),
+// the learn step's sorted copy, and the source search over every place
+// (appearedIn: each place's drift, the set's, and a compare with it), with
+// a fresh drift cache of the set's, as a test's first call reads them
+// (first-read), and with the test's drift cache warm, as its later calls do
+// (later-read). "followed" is a value the set's first test made,
+// "unexplained" one no test sent. Each is linear in n, in time and in what
+// one read allocates: the copies, and a first read's entry for each place in
+// the test's own cache.
+func BenchmarkOneReadOfTheRunsPlaces(b *testing.B) {
+	b.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(1_792_000_000, 0)
+	for _, n := range []int{2000, 20000} {
+		tr := NewTracker()
+		for i := 0; i < n; i++ {
+			tr.Begin()
+			k, _, _ := tr.State()
+			tr.Served(k, ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Millisecond), "o-"+strconv.Itoa(i), "o-"+strconv.Itoa(i)+"-9"))
+			tr.End()
+		}
+		tr.Begin()
+		call := t0.Add(time.Hour)
+		for _, c := range []struct{ name, rec, live string }{{"followed", "o-0", "o-0-9"}, {"unexplained", "o-x", "o-x-9"}} {
+			for _, warm := range []bool{false, true} {
+				name := strconv.Itoa(n) + "/" + c.name + "/first-read"
+				if warm {
+					name = strconv.Itoa(n) + "/" + c.name + "/later-read"
+				}
+				b.Run(name, func(b *testing.B) {
+					// A test's own cache, of the set's (its drifts).
+					fresh := func() *DriftCache {
+						tr.mu.Lock()
+						defer tr.mu.Unlock()
+						dc := tr.newDrifts()
+						dc.appClock = true
+						return dc
+					}
+					dc := fresh()
+					read := func() {
+						if !warm {
+							dc = fresh()
+						}
+						_, earlier, _, _ := tr.Test()
+						ln := ClassifyIn(dc, []string{"body.order"}, strLeaf("body.order", c.live), strLeaf("body.order", c.rec), call, earlier, nil, nil, nil)
+						if c.name == "followed" && ln[0].Kind != KindVariable {
+							b.Fatalf("the last test's value is %s (%s), want the first test's, the run's variable", ln[0].Kind, ln[0].Why)
+						}
+					}
+					read()
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						read()
+					}
+				})
+			}
+		}
+	}
+}
+
+// A test's own call whose serve is told after the next test began is a place
+// of the run's as well: dropping it would refuse the next test's call that
+// sends the value the earlier test made, though the earlier test made it. A
+// start-up call told late (nobody's, as told in time) leaves none, nor does
+// a call of a test of the previous set told in the next set.
+func TestAnEarlierTestsCallToldAfterTheNextBeganIsAPlaceOfTheRun(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	start, _, _, _ := tr.Test()
+	tr.Begin()
+	a, _, _, _ := tr.Test()
+	tr.End()
+	tr.Begin()
+	b, _, _, _ := tr.Test()
+	tr.Served(start, ranCall("mock-start", t0, "s-1", "s-9"))
+	tr.Served(a, ranCall("mock-a", t0, "o-1", "o-9"))
+	_, earlier, _, _ := tr.Test()
+	want := ranCall("mock-a", t0, "o-1", "o-9")
+	want = Earlier{Mock: want.Mock, At: want.At, Run: true, Seen: want.Seen[:1]}
+	if !reflect.DeepEqual(earlier, []Earlier{want}) {
+		t.Fatalf("test B's earlier places are %+v, want test A's own call told after B began, as the run's", earlier)
+	}
+	p, ok := appeared(clockedDrifts(), "o-1", "o-9", t0.Add(time.Minute), earlier, nil)
+	if !ok || !p.Run || p.Mock != "mock-a" {
+		t.Fatalf("test B's value comes from %+v (%v), want test A's call told late, as the run's", p, ok)
+	}
+	if name, ok := tr.PlaceName(b, p, nil); !ok || name != runPrefix+"order" {
+		t.Fatalf("test B names test A's value %q (%v), want the run's name", name, ok)
+	}
+	tr.End()
+	tr.NewSet()
+	tr.Begin()
+	tr.Served(b, ranCall("mock-old", t0, "o-2", "o-8"))
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("a new set reads a call of the previous set's test told in it: %+v", earlier)
+	}
+}
+
+// Without the proven switch nothing learns variables, and what a test's
+// calls sent is forgotten as the next test begins, as it was before the run
+// kept them; one told after the next began is dropped.
+func TestWithoutTheSwitchATestsCallsAreNoPlaceOfTheNext(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Begin()
+	a, _, _, _ := tr.Test()
+	tr.Served(a, ranCall("mock-a", t0, "o-1", "o-9"))
+	tr.End()
+	tr.Begin()
+	tr.Served(a, ranCall("mock-late", t0, "o-2", "o-8"))
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("with the switch off test B reads test A's calls: %+v", earlier)
+	}
+}
+
+// Without the proven switch a value the set's start-up sent, which a test's
+// call sends again, is learned as it was before the run kept variables: the
+// start-up's variable (Place.Run), which every plan refuses at a test's call.
+// The run's rule (ofRun) does not make it the call's own read of the clock,
+// whatever its shape, its distance, its call's window, or what the start-up's
+// place learned.
+func TestWithoutTheSwitchAStartUpsValueStaysItsVariable(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	boot := time.Date(2026, 10, 30, 18, 40, 58, 579_000_000, time.UTC)
+	iso := func(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05Z") }
+	tod := func(at time.Time) string { return at.In(ist).Format("15:04:05") }
+	for _, shape := range []struct {
+		name string
+		text func(time.Time) string
+	}{{"instant", iso}, {"time of day", tod}} {
+		for _, clock := range []bool{false, true} {
+			for _, after := range []time.Duration{8 * time.Millisecond, 9 * time.Second} {
+				for _, win := range []bool{true, false} {
+					name := fmt.Sprintf("%s/start-up's place a clock read %v/%v later/window %v", shape.name, clock, after, win)
+					t.Run(name, func(t *testing.T) {
+						tr := NewTracker()
+						tr.Served(0, Earlier{Mock: "mock-s", At: boot, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.v", Type: String, Value: shape.text(boot)}, Live: shape.text(boot.Add(FullRoundLead)), Place: "body.v", Clock: clock}}})
+						tr.Begin()
+						_, earlier, _, _ := tr.Test()
+						call := boot.Add(after)
+						fCall := call.Add(FullRoundLead)
+						var w *Window
+						if win {
+							w = &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+						}
+						dc := clockedDrifts()
+						dc.zone = ist
+						ln := ClassifyIn(dc, []string{"body.v"}, strLeaf("body.v", shape.text(boot.Add(FullRoundLead))), strLeaf("body.v", shape.text(boot)), call, earlier, nil, nil, w)[0]
+						if ln.Kind != KindVariable || ln.From.Mock != "mock-s" || !ln.From.Run || ln.Read != nil {
+							t.Fatalf("learned %s from %+v (read %v), want the start-up's variable", ln.Kind, ln.From, ln.Read != nil)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// A test's own variable is never named a run's name: a replay keeps a run's
+// binding for the whole set (models.RunVariable), and one a test's place
+// would have been named so is named apart from it.
+func TestATestsVariableTakesNoRunsName(t *testing.T) {
+	tr := NewTracker()
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	name, ok := tr.Name(n, "mock-1", "header.run-id", nil)
+	if !ok || models.RunVariable(name) {
+		t.Fatalf("a test's variable at header.run-id is named %q (%v), a run's name", name, ok)
+	}
+	if run, _ := tr.RunName(n, "mock-0", "header.run-id", nil); !models.RunVariable(run) || run == name {
+		t.Fatalf("the run's variable there is named %q, the test's %q", run, name)
+	}
+}
+
+// The word rule's exclusions hold across tests as in one: a clock read the
+// lead moved, which test A's call sent, is no source of another clock read
+// of its minute that test B's call sends, whether A's call is read as B's
+// own or as the run's.
+func TestARunsPlaceKeepsTheWordRulesClockExclusions(t *testing.T) {
+	rec := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	text := func(at time.Time) string { return at.Format(time.RFC3339Nano) }
+	bRec := rec.Add(10 * time.Second)
+	for _, own := range []bool{false, true} {
+		a := Earlier{Mock: "mock-a", At: rec, Own: own, Run: !own, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.sent_at", Type: String, Value: text(rec)}, Live: text(rec.Add(FullRoundLead)), Place: "body.sent_at"}}}
+		if p, ok := appeared(clockedDrifts(), text(bRec), text(bRec.Add(FullRoundLead)), bRec.Add(time.Minute), []Earlier{a}, nil); ok && p.Mock == "mock-a" {
+			t.Fatalf("own %v: test B's clock read comes from test A's clock read of its minute: %+v", own, p)
+		}
+		if p, ok := appeared(clockedDrifts(), text(rec), text(rec.Add(FullRoundLead)), bRec.Add(time.Minute), []Earlier{a}, nil); !ok || p.Mock != "mock-a" {
+			t.Fatalf("own %v: test B's copy of test A's clock read whole is not followed: %+v (%v)", own, p, ok)
+		}
+	}
+}
+
+// A value an earlier test's call sent at a place its learn step learned as a
+// plain read of the clock (Seen.Clock), which a later test's call carries
+// where no window of that call holds it as a read of the clock, is refused,
+// never followed (founder, 2026-10-30): keploy cannot tell a copy of the read
+// from another read of the clock in the same second that keploy does not see
+// (a session token's auth time, minted by the test's client's login). The
+// reason names the earlier call and its place, never the value. The same
+// value a window of the later call holds is that call's read still, and one
+// its answer echoes the same second is refused as well: followed, test A's
+// place would carry the run's variable and a clock read at once, which the
+// HTTP replay refuses for test A too. One an earlier test sent at a place no
+// clock read was learned at stays the run's variable, and a copy of the
+// test's own call's clock read is no earlier test's.
+func TestAnEarlierTestsClockReadIsNoRunsVariableWhereNoWindowOfTheUseHoldsIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 30, 12, 26, 2, 0, time.UTC)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	aRead := rec.Add(50 * time.Millisecond)
+	for name, row := range map[string]struct {
+		clock, own, echoed bool
+		after              time.Duration
+		want               Kind
+	}{
+		"a clock read, nine seconds later":              {clock: true, after: 9 * time.Second, want: KindUnaccounted},
+		"a clock read, the same second":                 {clock: true, after: 250 * time.Millisecond, want: KindClockRead},
+		"a clock read, the same second, echoed":         {clock: true, echoed: true, after: 250 * time.Millisecond, want: KindUnaccounted},
+		"no clock read, nine seconds later":             {after: 9 * time.Second, want: KindVariable},
+		"the test's own clock read, nine seconds later": {clock: true, own: true, after: 9 * time.Second, want: KindVariable},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		a, _, _, _ := tr.Test()
+		tr.Served(a, Earlier{Mock: "mock-a", At: aRead, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.data.lastUsedAt", Type: String, Value: epoch(aRead)}, Live: epoch(aRead.Add(FullRoundLead)), Place: "body.data.lastUsedAt", Clock: row.clock}}})
+		if !row.own {
+			tr.End()
+			tr.Begin()
+		}
+		_, earlier, _, _ := tr.Test()
+		call := aRead.Add(row.after)
+		fCall := call.Add(FullRoundLead)
+		w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+		var resp []Leaf
+		if row.echoed {
+			resp = []Leaf{{Path: "body.code.authTime", Type: String, Value: epoch(aRead)}}
+		}
+		ln := ClassifyIn(clockedDrifts(), []string{"body.authTime"}, strLeaf("body.authTime", epoch(aRead.Add(FullRoundLead))), strLeaf("body.authTime", epoch(aRead)), call, earlier, nil, resp, w)[0]
+		if ln.Kind != row.want {
+			t.Fatalf("%s: test B's value is %s from %+v (%s); want %s", name, ln.Kind, ln.From, ln.Why, row.want)
+		}
+		switch {
+		case row.want == KindUnaccounted && (!strings.Contains(ln.Why, "mock-a at body.data.lastUsedAt") || strings.Contains(ln.Why, epoch(aRead)) || strings.Contains(ln.Why, epoch(aRead.Add(FullRoundLead))) || ln.From != (Place{})):
+			t.Fatalf("%s: the refusal names %q from %+v; want the earlier call and its place, never the value, and no place to bind at", name, ln.Why, ln.From)
+		case row.want == KindVariable && ln.From.Mock != "mock-a":
+			t.Fatalf("%s: test B's copy follows %+v; want mock-a's value", name, ln.From)
+		}
+	}
+}
+
+// A value the test set's start-up sent at a place its learn step learned as
+// a plain read of the clock (a registration's registeredAt), which a test's
+// call sends again, is refused as an earlier test's clock read is, whether
+// the test's call is in the start-up's second (a value its answer echoes)
+// or a minute later. The reason names the start-up's call as the start-up's,
+// never as an earlier test's, and never the value. A stated limit: such a
+// per-process clock value sets the tests that send it aside.
+func TestAStartUpsClockReadATestSendsAgainIsRefusedNamingTheStartUp(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 30, 12, 26, 2, 0, time.UTC)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	boot := rec.Add(50 * time.Millisecond)
+	for name, after := range map[string]time.Duration{"the start-up's second, echoed": 250 * time.Millisecond, "a minute later": time.Minute} {
+		tr := NewTracker()
+		tr.Served(0, Earlier{Mock: "mock-s", At: boot, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.registeredAt", Type: String, Value: epoch(boot)}, Live: epoch(boot.Add(FullRoundLead)), Place: "body.registeredAt", Clock: true}}})
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		call := boot.Add(after)
+		fCall := call.Add(FullRoundLead)
+		w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+		resp := []Leaf{{Path: "body.registeredAt", Type: String, Value: epoch(boot)}}
+		ln := ClassifyIn(clockedDrifts(), []string{"body.registeredAt"}, strLeaf("body.registeredAt", epoch(boot.Add(FullRoundLead))), strLeaf("body.registeredAt", epoch(boot)), call, earlier, nil, resp, w)[0]
+		if ln.Kind != KindUnaccounted || ln.From != (Place{}) {
+			t.Fatalf("%s: test 1's value is %s from %+v (%s); want refused, with no place to bind at", name, ln.Kind, ln.From, ln.Why)
+		}
+		if !strings.Contains(ln.Why, "mock-s at body.registeredAt, the test set's start-up's call,") || strings.Contains(ln.Why, "an earlier test's call") || strings.Contains(ln.Why, epoch(boot)) || strings.Contains(ln.Why, epoch(boot.Add(FullRoundLead))) {
+			t.Fatalf("%s: the refusal names %q; want the start-up's call and its place, never an earlier test's, never the value", name, ln.Why)
+		}
+	}
+}
+
+// A value an earlier test's call sent that a later test's call holds as a
+// read of its own clock too, in the same second in both runs, is that read:
+// two calls read one clock in one second, a coincidence, not dataflow
+// (founder, 2026-10-30). It is checked as a read in its own call's window at
+// every replay, so a replay whose clock crosses a second between the two
+// calls still passes, and nothing binds the run's variable at the earlier
+// call, which keeps its own clock read alone. A copy a minute later, which
+// its own call's clock does not explain, is the run's variable still, and so
+// is an id test A minted the same second with a random word in it (the
+// second is read from its digits, the word drifted with it in both calls):
+// only the whole value read as the clock is that read, and the word that
+// drifted alike in both calls is dataflow, followed, neither noise nor
+// refused (founder, 2026-10-30).
+func TestAnEarlierTestsClockReadOfTheSameSecondIsNoRunsVariable(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 30, 5, 8, 52, 0, time.UTC)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	minted := func(at time.Time) string {
+		word := "q7xk2"
+		if at.After(rec.Add(time.Minute)) {
+			word = "m3pz9" // record's full round mints another
+		}
+		return "ord-" + epoch(at) + "-" + word
+	}
+	aRead := rec.Add(50 * time.Millisecond)
+	for name, row := range map[string]struct {
+		value func(time.Time) string
+		after time.Duration
+		clock bool
+	}{
+		"the same second":                 {epoch, 250 * time.Millisecond, true},
+		"a minute later":                  {epoch, time.Minute, false},
+		"an id minted in the same second": {minted, 250 * time.Millisecond, false},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		a, _, _, _ := tr.Test()
+		tr.Served(a, Earlier{Mock: "mock-a", At: aRead, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.data.lastUsedAt", Type: String, Value: row.value(aRead)}, Live: row.value(aRead.Add(FullRoundLead)), Place: "body.data.lastUsedAt"}}})
+		tr.End()
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		call := aRead.Add(row.after)
+		fCall := call.Add(FullRoundLead)
+		w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+		ln := ClassifyIn(clockedDrifts(), []string{"body.createdAt"}, strLeaf("body.createdAt", row.value(aRead.Add(FullRoundLead))), strLeaf("body.createdAt", row.value(aRead)), call, earlier, nil, nil, w)[0]
+		_, isClock := ln.Clock()
+		switch {
+		case row.clock && (!isClock || ln.Kind == KindVariable):
+			t.Fatalf("%s: test B's clock read is %s from %+v (%s); want a read of its own call's clock, no run's variable", name, ln.Kind, ln.From, ln.Why)
+		case !row.clock && (ln.Kind != KindVariable || ln.From.Mock != "mock-a"):
+			t.Fatalf("%s: test B's copy is %s from %+v (%s); want test A's value, the run's variable", name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
+
+// A later test's call that reads its own clock in the second an earlier
+// test's call read it, and so sends the same text in both runs (an
+// application that writes the minute, "2006-01-02T15:04" of no zone in its
+// own zone, and the time of day, "15:04:05", it read for each charge, two
+// charges 8 ms apart), is that call's own read, by the rules the leaf learns
+// its own reads by: a minute or an instant its window holds, a time of day
+// its window holds modulo a day, and any read in a call keploy knows no
+// window of, which the leaf learns in its call's own span. Never refused as
+// a copy of the earlier call's read of the clock (record quarantined the
+// later test), and never the run's variable where the earlier place was not
+// learned as a read (a replay whose clock crosses a second between the two
+// calls would fail the later test). A time of day its window does not hold
+// modulo a day, nine seconds later, is refused naming the earlier call where
+// that call read it from the clock, and stays the run's variable where it
+// did not, as an instant is. So is one its recorded window holds but record's
+// full round's does not (the full round ran the two calls nine seconds
+// apart): a read is held in both runs, or it is no read of the call's own
+// clock. In a call keploy knows no window of (each own call of a keploy
+// record server test), any whole instant or time of day an earlier test sent
+// again is that call's own read, whatever the earlier place learned and
+// however much later it is sent (nine seconds, three minutes): a true copy
+// is then checked as a read in the later test's span, which record's
+// confirming round already does (Tracker.LiveSpan), so it quarantines that
+// test, never passes it. With the switch off, each is what its own call
+// learns.
+func TestALaterTestsOwnSameSecondReadIsItsOwnByTheLeafsRules(t *testing.T) {
+	rec := time.Date(2026, 10, 30, 18, 40, 58, 579_000_000, time.UTC)
+	minute := func(at time.Time) string { return at.In(ist).Format("2006-01-02T15:04") }
+	tod := func(at time.Time) string { return at.In(ist).Format("15:04:05") }
+	instant := func(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05Z") }
+	same, later, minutes := 8*time.Millisecond, 9*time.Second, 3*time.Minute
+	for _, row := range []struct {
+		name                   string
+		value                  func(time.Time) string
+		after, fAfter          time.Duration
+		window, clock, switch0 bool
+		want                   Kind
+	}{
+		{"a time of day, the same second, a window", tod, same, same, true, true, false, KindClockRead},
+		{"a time of day, the same second, no window", tod, same, same, false, true, false, KindClockRead},
+		{"a minute, the same second, a window", minute, same, same, true, true, false, KindClockRead},
+		{"a minute, the same second, no window", minute, same, same, false, true, false, KindClockRead},
+		{"an unmarked time of day, the same second, a window", tod, same, same, true, false, false, KindClockRead},
+		{"an unmarked time of day, the same second, no window", tod, same, same, false, false, false, KindClockRead},
+		{"a time of day, nine seconds later, a window", tod, later, later, true, true, false, KindUnaccounted},
+		{"an unmarked time of day, nine seconds later, a window", tod, later, later, true, false, false, KindVariable},
+		{"a time of day, nine seconds later, no window", tod, later, later, false, true, false, KindClockRead},
+		{"an unmarked time of day, nine seconds later, no window", tod, later, later, false, false, false, KindClockRead},
+		{"an unmarked instant, nine seconds later, no window", instant, later, later, false, false, false, KindClockRead},
+		{"an unmarked instant, three minutes later, no window", instant, minutes, minutes, false, false, false, KindClockRead},
+		{"a time of day, the same second, nine seconds later in the full round, a window", tod, same, later, true, true, false, KindUnaccounted},
+		{"an unmarked time of day, the same second, nine seconds later in the full round, a window", tod, same, later, true, false, false, KindVariable},
+		{"switch 0: a time of day, the same second, a window", tod, same, same, true, true, true, KindClockRead},
+		{"switch 0: a minute, the same second, no window", minute, same, same, false, true, true, KindClockRead},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "1", true: "0"}[row.switch0])
+			dc := clockedDrifts()
+			dc.zone = ist
+			tr := NewTracker()
+			tr.Begin()
+			a, _, _, _ := tr.Test()
+			tr.Served(a, Earlier{Mock: "mock-a", At: rec, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.minute", Type: String, Value: row.value(rec)}, Live: row.value(rec.Add(FullRoundLead)), Place: "body.minute", Clock: row.clock}}})
+			tr.End()
+			tr.Begin()
+			_, earlier, _, _ := tr.Test()
+			call := rec.Add(row.after)
+			fCall := rec.Add(FullRoundLead + row.fAfter)
+			var w *Window
+			if row.window {
+				w = &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+			}
+			// Test B sends test A's text in each run: its own read where the
+			// two calls share a second, a copy where they do not.
+			ln := ClassifyIn(dc, []string{"body.minute"}, strLeaf("body.minute", row.value(rec.Add(FullRoundLead))), strLeaf("body.minute", row.value(rec)), call, earlier, nil, nil, w)[0]
+			if ln.Kind != row.want {
+				t.Fatalf("test B's value is %s from %+v (%s); want %s", ln.Kind, ln.From, ln.Why, row.want)
+			}
+			switch row.want {
+			case KindClockRead:
+				if ln.From != (Place{}) || ln.Read == nil || !ln.Read.Plain() {
+					t.Fatalf("test B's read is %+v from %+v; want a plain read of its own call's clock, no earlier place", ln.Read, ln.From)
+				}
+			case KindUnaccounted:
+				if !strings.Contains(ln.Why, "mock-a at body.minute") || strings.Contains(ln.Why, row.value(rec)) || ln.From != (Place{}) {
+					t.Fatalf("the refusal names %q from %+v; want test A's call and its place, never the value, and no place to bind at", ln.Why, ln.From)
+				}
+			case KindVariable:
+				if ln.From.Mock != "mock-a" || !ln.From.Run {
+					t.Fatalf("test B's copy follows %+v; want test A's value, the run's variable", ln.From)
+				}
+			}
+		})
+	}
+}
+
+// Where a client test's clock word (TestAClientTestLearnsAWordOfATextReadInItsCallsWindow)
+// meets the run's variable: an earlier test's call sent a text whose one
+// changed word is a read of the clock (its learn step learned the place so,
+// Seen.Clock), or that word alone, and a later test's call sends a text that
+// holds it. Where a window of the later call holds the word as its own read
+// of the clock, it is that call's word read, checked at every replay, and the
+// rest of the text is still compared: the re-read that takes a whole value as
+// the call's own read takes one word of it alike, never as noise. Where none
+// does, it is refused naming the earlier call and its place, never the value,
+// and never noise. Outside client tests no word is read (dc.clientTests): a
+// copy of the whole text stays the run's variable, and the word alone is the
+// word rule's clock word, let go as it is with the switch off. A text no
+// clock read was learned at stays the run's variable. With the switch off, no
+// earlier test's call is a place of the next, and each text is what its own
+// call's window learns: a read of the word, or refused naming no earlier
+// call.
+func TestAClockWordMeetsTheRunsVariableAsTheUsesOwnReadOrARefusal(t *testing.T) {
+	rec := time.Date(2026, 10, 30, 23, 50, 7, 0, time.UTC)
+	aRead := rec.Add(50 * time.Millisecond)
+	job := func(at time.Time) string { return "job " + strconv.FormatInt(at.Unix(), 10) + " queued" }
+	alone := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	word := sides{"job ", " queued"}
+	for name, row := range map[string]struct {
+		sent         func(time.Time) string
+		clock        bool
+		after        time.Duration
+		notClient    bool
+		switchOff    bool
+		want         Kind
+		wantWordRead bool
+	}{
+		"the whole text, the same second":            {sent: job, clock: true, after: 250 * time.Millisecond, want: KindClockRead, wantWordRead: true},
+		"the whole text, nine seconds later":         {sent: job, clock: true, after: 9 * time.Second, want: KindUnaccounted},
+		"the word alone, the same second":            {sent: alone, clock: true, after: 250 * time.Millisecond, want: KindClockRead, wantWordRead: true},
+		"the word alone, nine seconds later":         {sent: alone, clock: true, after: 9 * time.Second, want: KindUnaccounted},
+		"the word alone, the same second, no client": {sent: alone, clock: true, after: 250 * time.Millisecond, notClient: true, want: KindNoise},
+		"the whole text, the same second, no client": {sent: job, after: 250 * time.Millisecond, notClient: true, want: KindVariable},
+		"no clock read, nine seconds later":          {sent: job, after: 9 * time.Second, want: KindVariable},
+		"switch 0, the same second":                  {sent: job, clock: true, after: 250 * time.Millisecond, switchOff: true, want: KindClockRead, wantWordRead: true},
+		"switch 0, nine seconds later":               {sent: job, clock: true, after: 9 * time.Second, switchOff: true, want: KindUnaccounted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sw := "1"
+			if row.switchOff {
+				sw = "0"
+			}
+			t.Setenv(provenswitch.Env, sw)
+			dc := clientTestCache()
+			if row.notClient {
+				dc = clockedDrifts()
+			}
+			tr := NewTracker()
+			tr.Begin()
+			a, _, _, _ := tr.Test()
+			tr.Served(a, Earlier{Mock: "mock-a", At: aRead, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.job", Type: String, Value: row.sent(aRead)}, Live: row.sent(aRead.Add(FullRoundLead)), Place: "body.job", Clock: row.clock}}})
+			tr.End()
+			tr.Begin()
+			_, earlier, _, _ := tr.Test()
+			call := aRead.Add(row.after)
+			fCall := call.Add(FullRoundLead)
+			w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+			bRec := job(aRead)
+			ln := ClassifyIn(dc, []string{"body.name"}, strLeaf("body.name", job(aRead.Add(FullRoundLead))), strLeaf("body.name", bRec), call, earlier, nil, nil, w)[0]
+			if ln.Kind != row.want {
+				t.Fatalf("test B's text is %s from %+v (%s); want %s", ln.Kind, ln.From, ln.Why, row.want)
+			}
+			o, _ := ln.Clock()
+			switch {
+			case row.wantWordRead && (o.Word != word.at(t, bRec) || !o.Plain() || ln.From != (Place{}) || ln.Recorded.Value != bRec):
+				t.Fatalf("test B's word read is %+v from %+v, the leaf %q; want a plain read of the word in the whole text, no place to bind at", o, ln.From, ln.Recorded.Value)
+			case row.want == KindUnaccounted && (strings.Contains(ln.Why, "mock-a at body.job, an earlier test's call,") == row.switchOff || strings.Contains(ln.Why, alone(aRead)) || strings.Contains(ln.Why, alone(aRead.Add(FullRoundLead))) || ln.From != (Place{})):
+				t.Fatalf("the refusal names %q from %+v; want the earlier call and its place, never the value, and no place to bind at", ln.Why, ln.From)
+			case row.want == KindVariable && ln.From.Mock != "mock-a":
+				t.Fatalf("test B's copy follows %+v; want mock-a's text", ln.From)
+			}
+		})
+	}
+}
+
+// A place an earlier test's call left the run keeps when the recording asked
+// and answered it, and the numbers of F's serves of it when its test ended
+// (Order.orderOf), with no word of its text: a later call's copy rule reads
+// by them whether the recording gave the application that answer before the
+// call (recordedGave) and where F served it among the other earlier answers
+// (servedOrder). Without them every value a later test holds that the place
+// held in the recording was refused as "keploy cannot read when the
+// recording answered" or "does not know where record's full round served"
+// it (api-server's create audits, a test's own clock reads in the second an
+// earlier test's audit was recorded in).
+func TestARunPlaceKeepsItsAnswerTimeAndServeOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(1_792_000_000, 0)
+	m := &models.Mock{Name: "mock-a", Spec: models.MockSpec{ReqTimestampMock: t0, ResTimestampMock: t0.Add(time.Millisecond)}}
+	other := &models.Mock{Name: "mock-o", Spec: models.MockSpec{ReqTimestampMock: t0.Add(2 * time.Millisecond), ResTimestampMock: t0.Add(3 * time.Millisecond)}}
+	tr := NewTracker()
+	tr.Begin()
+	a, _, _, _ := tr.Test()
+	tr.ServedMockAt(other, t0)
+	tr.ServedMockAt(m, t0.Add(time.Millisecond))
+	e := ranCall("mock-a", t0, "o-1", "o-9")
+	e.Payload = Raw{mock: "mock-a", at: t0, answered: t0.Add(time.Millisecond), rRead: true, rText: "o-1 pen", conn: "c1", pos: 2}
+	tr.Served(a, e)
+	tr.End()
+	tr.Begin()
+	_, earlier, _, _ := tr.Test()
+	if len(earlier) != 1 {
+		t.Fatalf("test B reads %d earlier places, want test A's call alone: %+v", len(earlier), earlier)
+	}
+	got := earlier[0].Payload
+	want := Raw{mock: "mock-a", at: t0, answered: t0.Add(time.Millisecond), conn: "c1", pos: 2, served: true, first: 2, last: 2, ordered: true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the run keeps test A's call's payload as %+v, want its orders alone: %+v", got, want)
+	}
+	if got.isRead() || got.rText != "" {
+		t.Fatalf("the run keeps a word of test A's call's payload: %+v", got)
+	}
+	if before, untimed := recordedGave(earlier[0].recordedAt(), got.answered, t0.Add(time.Second), "mock-a"); !before || untimed != "" {
+		t.Fatalf("a later call cannot tell the recording gave the application test A's answer before it: before=%v, %s", before, untimed)
+	}
+	if order, untold := servedOrder(earlier, []Raw{RawOf(other, true).ServedAs(1)}, func(string) bool { return true }); untold != "" || !reflect.DeepEqual(order, []string{"mock-o", "mock-a"}) {
+		t.Fatalf("a later call reads F's serves of test A's call as %v (%s), want after mock-o's", order, untold)
+	}
+	// A call its test's end found no serve of keeps no number, not even one
+	// its payload came with, and F's order of it stays one keploy cannot
+	// tell beside another served source.
+	tr2 := NewTracker()
+	tr2.Begin()
+	a2, _, _, _ := tr2.Test()
+	numbered := e
+	numbered.Payload = e.Payload.ServedIn(5, 5)
+	tr2.Served(a2, numbered)
+	tr2.End()
+	tr2.Begin()
+	_, earlier2, _, _ := tr2.Test()
+	if _, untold := servedOrder(earlier2, []Raw{RawOf(other, true).ServedAs(1)}, func(string) bool { return true }); untold == "" {
+		t.Fatalf("an unnumbered run place is ordered: %+v", earlier2[0].Payload)
+	}
+	// A call told after the next test began keeps no number either, though
+	// F's serve of it was numbered in its own test: the order then numbers
+	// the next test's serves too, and no count read then is the one its
+	// test's end saw.
+	tr3 := NewTracker()
+	tr3.Begin()
+	a3, _, _, _ := tr3.Test()
+	tr3.ServedMockAt(other, t0)
+	tr3.ServedMockAt(m, t0.Add(time.Millisecond))
+	tr3.End()
+	tr3.Begin()
+	tr3.ServedMockAt(m, t0.Add(time.Second))
+	tr3.Served(a3, e)
+	tr3.End()
+	tr3.Begin()
+	_, earlier3, _, _ := tr3.Test()
+	if len(earlier3) != 1 || earlier3[0].Mock != "mock-a" {
+		t.Fatalf("test C reads %+v, want test A's call told late alone", earlier3)
+	}
+	if got := earlier3[0].Payload; got.first != 0 || got.last != 0 || !got.ordered || !got.answered.Equal(t0.Add(time.Millisecond)) {
+		t.Fatalf("the run keeps test A's call told late as %+v, want its answer time and no serve number", got)
+	}
+	if _, untold := servedOrder(earlier3, []Raw{RawOf(other, true).ServedAs(1)}, func(string) bool { return true }); untold == "" {
+		t.Fatalf("a run place told after its test ended is ordered: %+v", earlier3[0].Payload)
+	}
+}

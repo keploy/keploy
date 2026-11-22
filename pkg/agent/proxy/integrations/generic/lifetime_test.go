@@ -1,0 +1,960 @@
+package generic
+
+import (
+	"context"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+)
+
+// statedOf is each mock's stated lifetime and type, in order.
+func statedOf(mocks []*models.Mock) []string {
+	var out []string
+	for _, m := range mocks {
+		out = append(out, m.Spec.Metadata[models.MetadataLifetimeKey]+"/"+m.Spec.Metadata["type"])
+	}
+	return out
+}
+
+func equal(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Both recorders state a connection's first exchange, its preamble, session
+// and every later one per-test, and keep the type tag "config", as before they
+// stated anything.
+func TestTheRecordersStateAConnectionsPreambleSessionAndTheRestPerTest(t *testing.T) {
+	want := []string{
+		models.MetadataLifetimeSession + "/config",
+		models.MetadataLifetimePerTest + "/config",
+		models.MetadataLifetimePerTest + "/config",
+	}
+	t.Run("legacy", func(t *testing.T) {
+		out := make(chan *models.Mock, 3)
+		mgr := syncMock.New(zap.NewNop())
+		mgr.SetOutputChannel(out)
+		ctx := syncMock.NewContext(context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1"), mgr)
+		chunks := make(chan capturedChunk)
+		go func() {
+			for _, x := range []string{"hello", "get a", "get b"} {
+				chunks <- capturedChunk{fromClient: true, buf: []byte(x)}
+				chunks <- capturedChunk{buf: []byte("ok " + x)}
+			}
+			close(chunks)
+		}()
+		createGenericMocksAsync(ctx, zap.NewNop(), chunks)
+		var got []*models.Mock
+		for len(got) < 3 {
+			got = append(got, <-out)
+		}
+		if s := statedOf(got); !equal(s, want) {
+			t.Fatalf("stated %v, want %v", s, want)
+		}
+	})
+	t.Run("v2", func(t *testing.T) {
+		// Unnumbered chunks on a session with no capture order: the merge
+		// hands them on in the order it takes them, so each goes on its
+		// stream once the parser has done all it can with the one before
+		// it (putAtRest).
+		r := startRecordingUnder(t, nil, false, false)
+		for i, x := range []string{"hello", "get a", "get b"} {
+			at := time.Unix(int64(1000+10*i), 0)
+			r.putAtRest(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ReadAt: at})
+			r.putAtRest(fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok " + x), WrittenAt: at.Add(time.Second)})
+		}
+		run := r.end()
+		if !run.returned {
+			t.Fatal("the parser did not return once both streams ended")
+		}
+		if s := statedOf(run.recorded); !equal(s, want) {
+			t.Fatalf("stated %v, want %v", s, want)
+		}
+	})
+}
+
+// A stated per-test exchange is a test mock (owned and judged under the
+// proven switch); the preamble and an exchange recorded before the recorder
+// stated anything are protocol-phase. Serving does not read the statement.
+func TestAStatedPerTestExchangeIsATestMockServedAsBefore(t *testing.T) {
+	mk := func(stated string) *models.Mock {
+		m := &models.Mock{Kind: models.GENERIC, Spec: models.MockSpec{Metadata: map[string]string{"type": "config"}}}
+		if stated != "" {
+			m.Spec.Metadata[models.MetadataLifetimeKey] = stated
+		}
+		return m
+	}
+	for stated, protocol := range map[string]bool{models.MetadataLifetimePerTest: false, models.MetadataLifetimeSession: true, "": true} {
+		m := mk(stated)
+		if got := m.IsProtocolPhase(); got != protocol {
+			t.Errorf("stated %q: IsProtocolPhase %v, want %v", stated, got, protocol)
+		}
+		m.DeriveLifetime()
+		if m.TestModeInfo.Lifetime != models.LifetimeSession {
+			t.Errorf("stated %q: derived %v, want session as before", stated, m.TestModeInfo.Lifetime)
+		}
+		if m.StatesLifetime() {
+			t.Errorf("stated %q: StatesLifetime, which switch-off serving reads", stated)
+		}
+	}
+}
+
+// exactStore is a store under exact serving (the proven switch) whose open
+// test owns own, with every mock staged: what keploy's mock manager tells.
+type exactStore struct {
+	integrations.MockMemDb
+	exact  bool
+	own    map[string]bool
+	staged []*models.Mock
+}
+
+func (s exactStore) MarkCallRound() integrations.CallRound {
+	if !s.exact {
+		return integrations.CallRound{}
+	}
+	return integrations.NewCallRound(1, nil)
+}
+
+// HoldToRound implements integrations.RoundHolder: s never stages again, so
+// it holds every call it marks as it is.
+func (s exactStore) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return s, func() bool { return false }
+}
+
+func (s exactStore) FindStagedNotOwned(_ models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	if !s.exact || !call.Read() {
+		return "", false
+	}
+	for _, m := range s.staged {
+		if !s.own[m.Name] && match(m) {
+			return m.Name, false
+		}
+	}
+	return "", false
+}
+func (s exactStore) GetSessionMocks() ([]*models.Mock, error)         { return nil, nil }
+func (s exactStore) GetPerTestMocksInWindow() ([]*models.Mock, error) { return nil, nil }
+
+// Under exact serving, a request no mock answers that is a later exchange of
+// a connection the open test does not own is named, with what likely happened
+// and what to do; one the test owns, a preamble, or no recorded exchange, is
+// not, nor one merely like a recorded exchange (the per-test similarity): what
+// a miss names, keploy record's judging bakes into the worker scope.
+func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
+	staged := func(name, req, stated string) *models.Mock {
+		m := exchange(name, req)
+		m.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: stated}
+		return m
+	}
+	frame := make([]byte, 64)
+	for i := range frame {
+		frame[i] = byte(0x80 + i)
+	}
+	// mock-frame holds frame as the recorder writes a binary request
+	// (encodePayload): its base64, typed binary.
+	frameMock := staged("mock-frame", "", models.MetadataLifetimePerTest)
+	frameMock.Spec.GenericRequests[0] = encodePayload(frame, models.FromClient)
+	store := exactStore{
+		exact: true,
+		own:   map[string]bool{"mock-get-y": true},
+		staged: []*models.Mock{
+			staged("mock-hello", "HELLO", models.MetadataLifetimeSession),
+			staged("mock-auth-x", "AUTH step2", models.MetadataLifetimePerTest),
+			staged("mock-get-y", "GET y", models.MetadataLifetimePerTest),
+			frameMock,
+			staged("mock-ping", "PING", models.MetadataLifetimePerTest),
+		},
+	}
+	// A binary request one byte off mock-frame's: within the per-test
+	// similarity, and another call.
+	like := append([]byte(nil), frame...)
+	like[len(like)-1] ^= 0x01
+	if findBinaryMatch(store.staged[3:], [][]byte{like}, 0.9) != 0 {
+		t.Fatal("the fixture's near request is not within the per-test similarity of mock-frame")
+	}
+	// frame's base64 sent as text is other bytes than frame, and 3c 83 46
+	// other bytes than the text PING, its base64: neither is named.
+	for req, want := range map[string]string{"AUTH step2": "mock-auth-x", string(frame): "mock-frame", string(like): "", util.EncodeBase64(frame): "", "PING": "mock-ping", "\x3c\x83\x46": "", "GET y": "", "HELLO": "", "SET z": ""} {
+		if got, _ := notOwnedExchange([][]byte{[]byte(req)}, store, store.MarkCallRound()); got != want {
+			t.Errorf("%q: %q, want %q", req, got, want)
+		}
+	}
+	// An exchange whose token buffer the obfuscator redacted is named only
+	// for its recorded bytes, as the pool matches it: not even the token the
+	// recording redacted is named (fail-closed), so neither is another.
+	tok := staged("mock-token", "", models.MetadataLifetimePerTest)
+	tok.Spec.GenericRequests[0].Message[0].Data = redactedToken
+	tok.Noise = []string{"^" + redactedToken + "$"}
+	withTok := store
+	withTok.staged = []*models.Mock{tok}
+	if got, _ := notOwnedExchange([][]byte{[]byte(recordedToken)}, withTok, withTok.MarkCallRound()); got != "" {
+		t.Errorf("the token the recording redacted, not its recorded bytes, is named %q", got)
+	}
+	if got, _ := notOwnedExchange([][]byte{[]byte(redactedToken)}, withTok, withTok.MarkCallRound()); got != "mock-token" {
+		t.Errorf("the redacted exchange's own bytes: %q, want mock-token", got)
+	}
+	store.exact = false
+	if got, _ := notOwnedExchange([][]byte{[]byte("AUTH step2")}, store, store.MarkCallRound()); got != "" {
+		t.Fatalf("without exact serving: %q", got)
+	}
+	// The miss the parser files names it, says it is not the test's, and
+	// what likely happened.
+	store.exact = true
+	r := missReport(t, store, "AUTH step2")
+	if r.ClosestMock != "mock-auth-x" || !r.NotOwned || !strings.Contains(r.NextSteps, "Likely, at replay this test made the call on a connection it opened itself") {
+		t.Fatalf("the miss names %q (not owned %v) and says %q", r.ClosestMock, r.NotOwned, r.NextSteps)
+	}
+}
+
+// Under the proven switch a connection whose whole lies inside one test (its
+// first request in the test's span, no chunk after the test's answer) is that
+// test's: the v2 recorder states its first exchange per-test too, decided by
+// recorded times alone, whether the test's window ends before the recorder
+// reads the connection or after the connection ended. A connection with a
+// chunk after the answer, in a window that ended no test case, or opened
+// outside every window, keeps its first exchange session, as its preamble.
+// Every exchange goes out in recorded order, with its recorded times. A test
+// keploy mock record knows by its harness's begin and end (a test scope: it
+// opens no window) is decided as a window's test case is.
+func TestV2AConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	at := func(i int) time.Time { return t0.Add(time.Duration(i+1) * time.Second) }
+	for _, tc := range []struct {
+		name string
+		// windowAt opens a window on the manager (none when zero); answer
+		// ends it a test case answered then (none when zero).
+		windowAt, answer time.Time
+		want             string // the first exchange's stated lifetime
+	}{
+		{"inside a test", t0, t0.Add(10 * time.Second), models.MetadataLifetimePerTest},
+		{"a chunk after the test's answer", t0, at(0).Add(500 * time.Millisecond), models.MetadataLifetimeSession},
+		{"the window ends no test case", t0, time.Time{}, models.MetadataLifetimeSession},
+		{"the window opens after the connection", at(0).Add(500 * time.Millisecond), at(5), models.MetadataLifetimeSession},
+		{"no window", time.Time{}, time.Time{}, models.MetadataLifetimeSession},
+	} {
+		for _, scope := range []bool{false, true} {
+			for _, windowEndsFirst := range []bool{true, false} {
+				name := tc.name + ", the window ends after the connection"
+				if windowEndsFirst {
+					name = tc.name + ", the window ends before the recorder reads the connection"
+				}
+				if scope {
+					name = "a test scope: " + name
+				}
+				t.Run(name, func(t *testing.T) {
+					mgr := syncMock.New(zap.NewNop())
+					var w *syncMock.Window
+					var sc *syncMock.TestScope
+					if !tc.windowAt.IsZero() {
+						if scope {
+							sc = mgr.BeginTestScope(tc.windowAt)
+						} else {
+							w = mgr.OpenWindow(tc.windowAt, nil)
+						}
+					}
+					end := func() {
+						if sc != nil {
+							if !tc.answer.IsZero() {
+								sc.End(tc.answer)
+							} else {
+								sc.Abandon()
+							}
+							return
+						}
+						if w == nil {
+							return
+						}
+						if !tc.answer.IsZero() {
+							w.Yield(tc.answer)
+							w.Tested(tc.windowAt, tc.answer)
+						}
+						w.Close()
+					}
+					clientCh := make(chan fakeconn.Chunk, 4)
+					destCh := make(chan fakeconn.Chunk, 4)
+					// Numbered as the relay numbers them: each answer after
+					// its request, the second request after the first answer.
+					// The session says the capture order, as the relay's
+					// does: merged as read, the second answer could go on
+					// ahead of the second request, as the first answer's
+					// second chunk.
+					order := newCaptureOrder(nil)
+					for i, x := range []string{"publish 1", "publish 2"} {
+						clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ConnSeq: uint32(2*i + 1), ReadAt: at(i)}
+						destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), ConnSeq: uint32(2*i + 2), WrittenAt: at(i).Add(time.Millisecond)}
+						order.put[0] += int64(len(x))
+						order.put[1] += int64(len("ok"))
+					}
+					close(clientCh)
+					close(destCh)
+					if windowEndsFirst {
+						end()
+					}
+					sess, mocks := newV2Session(t, clientCh, destCh)
+					sess.Order = order.StreamedBefore
+					sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+					done := make(chan error, 1)
+					go func() { done <- dispatch(t, sess) }()
+					if !windowEndsFirst {
+						end()
+					}
+					if err := <-done; err != nil {
+						t.Fatal(err)
+					}
+					close(mocks)
+					got := drainMocks(mocks)
+					if len(got) != 2 {
+						t.Fatalf("emitted %d mocks, want 2", len(got))
+					}
+					for i, m := range got {
+						if data := m.Spec.GenericRequests[0].Message[0].Data; data != []string{"publish 1", "publish 2"}[i] {
+							t.Fatalf("mock %d is %q: the exchanges went out out of order", i, data)
+						}
+						if !m.Spec.ReqTimestampMock.Equal(at(i)) || !m.Spec.ResTimestampMock.Equal(at(i).Add(time.Millisecond)) {
+							t.Fatalf("mock %d has times %v..%v, want its recorded %v..%v", i, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, at(i), at(i).Add(time.Millisecond))
+						}
+					}
+					if l := got[0].Spec.Metadata[models.MetadataLifetimeKey]; l != tc.want {
+						t.Fatalf("the first exchange is stated %q, want %q", l, tc.want)
+					}
+					if l := got[1].Spec.Metadata[models.MetadataLifetimeKey]; l != models.MetadataLifetimePerTest {
+						t.Fatalf("the second exchange is stated %q, want per-test", l)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A connection's chunks are timed by when the relay read them, never by when
+// its write returned. Under load the relay's write of a destination's answer
+// returned after the client had read it, ended its test and the next test had
+// begun (seen at PLG_LOAD=8: read 1.0 ms before the test's end, written 4.7 ms
+// after it): timed by that return, a connection wholly inside its test read
+// as outliving it, its only exchange went to the session pool, and the test
+// passed at replay with its call skipped. An answer the relay read after the
+// test's end still makes the connection outlive it; one with no read time
+// does not.
+func TestV2AnAnswerWrittenOnAfterItsTestEndedIsStillThatTestsWhole(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	for _, tc := range []struct {
+		name               string
+		answerRead, answer time.Time // the destination's answer read; the test's end
+		want               string
+	}{
+		{"the answer read inside the test, its write returned after the next test began", ms(19.2), ms(20.8), models.MetadataLifetimePerTest},
+		{"the answer read after the test ended", ms(21.5), ms(20.8), models.MetadataLifetimeSession},
+		// No read time shows nothing: its write's return is no time the
+		// connection was used.
+		{"the answer with no read time, its write returned after the next test began", time.Time{}, ms(20.8), models.MetadataLifetimePerTest},
+	} {
+		for _, scope := range []bool{true, false} {
+			for _, endsFirst := range []bool{true, false} {
+				name := tc.name
+				if scope {
+					name = "a test scope: " + name
+				}
+				if endsFirst {
+					name += ", the test ends before the recorder reads the connection"
+				}
+				t.Run(name, func(t *testing.T) {
+					mgr := syncMock.New(zap.NewNop())
+					var sc *syncMock.TestScope
+					var w *syncMock.Window
+					if scope {
+						sc = mgr.BeginTestScope(t0)
+					} else {
+						w = mgr.OpenWindow(t0, nil)
+					}
+					end := func() {
+						if sc != nil {
+							sc.End(tc.answer)
+						} else {
+							w.Yield(tc.answer)
+							w.Tested(t0, tc.answer)
+							w.Close()
+						}
+						// The next test begins before the relay's write returns.
+						if scope {
+							mgr.BeginTestScope(ms(21))
+						} else {
+							mgr.OpenWindow(ms(21), nil)
+						}
+					}
+					clientCh := make(chan fakeconn.Chunk, 1)
+					destCh := make(chan fakeconn.Chunk, 1)
+					clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("QUOTE item=book"), ConnSeq: 1, ReadAt: ms(19), WrittenAt: ms(19.05)}
+					destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("CENTS 1250"), ConnSeq: 2, ReadAt: tc.answerRead, WrittenAt: ms(25.5)}
+					close(clientCh)
+					close(destCh)
+					if endsFirst {
+						end()
+					}
+					sess, mocks := newV2Session(t, clientCh, destCh)
+					sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+					done := make(chan error, 1)
+					go func() { done <- dispatch(t, sess) }()
+					if !endsFirst {
+						end()
+					}
+					if err := <-done; err != nil {
+						t.Fatal(err)
+					}
+					close(mocks)
+					got := drainMocks(mocks)
+					if len(got) != 1 {
+						t.Fatalf("emitted %d mocks, want 1", len(got))
+					}
+					if !got[0].Spec.ResTimestampMock.Equal(ms(25.5)) {
+						t.Fatalf("the exchange's answer is stamped %v, want its write's return %v: the mock's own times are unchanged", got[0].Spec.ResTimestampMock, ms(25.5))
+					}
+					if l := got[0].Spec.Metadata[models.MetadataLifetimeKey]; l != tc.want {
+						t.Fatalf("the connection's only exchange is stated %q, want %q", l, tc.want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A held first exchange is decided by recorded times, never by when the
+// recorder's goroutines run, and only once the test's answer is known: a
+// connection opened after its test was answered is never held; one with a
+// chunk after its test's answer is the preamble, decided once the answer is
+// known; one with none is the test's, however late the recorder sees it, and
+// one that ends first waits for the answer; one with more exchanges than a
+// test may wholly own is the preamble whatever its times; and a recording that
+// stops first leaves it the preamble. Released, the held exchanges keep their
+// order.
+func TestAPreambleHoldIsDecidedByRecordedTimes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	sec := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Second))) }
+	first := func(at time.Time) *models.Mock {
+		return &models.Mock{Name: "first", Spec: models.MockSpec{ReqTimestampMock: at, Metadata: map[string]string{}}}
+	}
+	// test ends w a test case answered at answer.
+	test := func(w *syncMock.Window, answer time.Time) {
+		w.Yield(answer)
+		w.Tested(t0, answer)
+		w.Close()
+	}
+
+	t.Run("opened after its test was answered", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		test(mgr.OpenWindow(t0, nil), sec(0.5))
+		if holdPreamble(syncMock.NewContext(context.Background(), mgr), first(sec(1)), sec(1), sec(1.001)) != nil {
+			t.Fatal("a connection opened after its test was answered is held")
+		}
+	})
+	t.Run("a chunk after the answer", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		w := mgr.OpenWindow(t0, nil)
+		h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(sec(1)), sec(1), sec(1.001))
+		if h == nil {
+			t.Fatal("a connection opened inside a test is not held")
+		}
+		h.add(&models.Mock{Name: "second"})
+		h.saw(sec(4))
+		if h.outlived() || h.decided() {
+			t.Fatal("decided before the test's answer is known")
+		}
+		test(w, sec(3))
+		<-h.changes()
+		h.refresh()
+		if !h.outlived() || h.wholly() {
+			t.Fatal("a chunk after the test's answer did not make the first exchange the preamble")
+		}
+		got := h.release(false)
+		if len(got) != 2 || got[0].Name != "first" || got[1].Name != "second" || got[0].Spec.Metadata[models.MetadataLifetimeKey] != models.MetadataLifetimeSession {
+			t.Fatalf("released %v, want first (session) then second", got)
+		}
+	})
+	t.Run("seen after its test ended", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		test(mgr.OpenWindow(t0, nil), sec(3))
+		h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(sec(1)), sec(1), sec(2))
+		if h == nil || !h.decided() || !h.wholly() || h.changes() != nil {
+			t.Fatal("a connection whose chunks all came before its test's answer is not the test's")
+		}
+	})
+	t.Run("ends before its test is answered", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		w := mgr.OpenWindow(t0, nil)
+		h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(sec(1)), sec(1), sec(2))
+		settled := make(chan struct{})
+		go func() {
+			h.settle(context.Background())
+			close(settled)
+		}()
+		if !w.Keep() {
+			t.Fatal("the window was given up")
+		}
+		// With --sync: the resolve ends the window a test case.
+		mgr.ResolveKept(w, t0, sec(3), "test-1", false)
+		<-settled
+		if !h.wholly() {
+			t.Fatal("a connection that ended before its test was answered, inside it, is not the test's")
+		}
+	})
+	t.Run("more exchanges than a test may wholly own", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		w := mgr.OpenWindow(t0, nil)
+		defer w.Close()
+		h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(sec(1)), sec(1), sec(1))
+		for i := 1; i < maxHeldExchanges; i++ {
+			h.add(&models.Mock{})
+		}
+		if h.outlived() {
+			t.Fatalf("%d exchanges outlived their test", maxHeldExchanges)
+		}
+		h.add(&models.Mock{})
+		if !h.outlived() {
+			t.Fatalf("%d exchanges did not make the first the preamble", maxHeldExchanges+1)
+		}
+	})
+	t.Run("the recording stops first", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		w := mgr.OpenWindow(t0, nil)
+		defer w.Close()
+		h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(sec(1)), sec(1), sec(2))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		h.settle(ctx)
+		if h.wholly() {
+			t.Fatal("a connection undecided as the recording stopped is the test's")
+		}
+	})
+}
+
+// While the v2 recorder holds a connection's exchanges, the session's pending
+// work is cleared as it holds each: it has consumed them, and work left pending
+// through an idle spell (a connection left open after its test) is taken for
+// a hung parser, which the supervisor aborts.
+func TestV2HoldingAnExchangeClearsThePendingWork(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	mgr := syncMock.New(zap.NewNop())
+	w := mgr.OpenWindow(t0, nil)
+	clientCh := make(chan fakeconn.Chunk, 2)
+	destCh := make(chan fakeconn.Chunk, 2)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("publish"), ReadAt: t0.Add(time.Second)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), WrittenAt: t0.Add(2 * time.Second)}
+	sess, mocks := newV2Session(t, clientCh, destCh)
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	cleared := make(chan struct{}, 4)
+	sess.OnPendingCleared = func() { cleared <- struct{}{} }
+	done := make(chan error, 1)
+	go func() { done <- dispatch(t, sess) }()
+	// The exchange is held while the window is open (the connection open
+	// too): the pending work must be cleared without its emit. Guarded so
+	// the test fails rather than hangs when it is not.
+	select {
+	case <-cleared:
+	case <-time.After(30 * time.Second):
+		t.Fatal("holding the exchange left the session's pending work armed")
+	}
+	select {
+	case m := <-mocks:
+		t.Fatalf("the exchange was emitted (%s) while its test may own the connection", m.Spec.Metadata[models.MetadataLifetimeKey])
+	default:
+	}
+	close(clientCh)
+	close(destCh)
+	w.Yield(t0.Add(3 * time.Second))
+	w.Tested(t0, t0.Add(3*time.Second))
+	w.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if m := <-mocks; m.Spec.Metadata[models.MetadataLifetimeKey] != models.MetadataLifetimePerTest {
+		t.Fatalf("stated %q, want per-test", m.Spec.Metadata[models.MetadataLifetimeKey])
+	}
+}
+
+// neverBehind is a capture watermark whose parsers are never behind, so what
+// a recording's stop finds pending is the manager's own.
+type neverBehind struct{}
+
+func (neverBehind) Settled(_, _ string, _, _ time.Time) bool { return true }
+func (neverBehind) PendingBefore(time.Time) bool             { return false }
+
+// A connection wholly inside its test so far, left open after it, is held
+// until it is used again or closes. As the recording's stop begins it is
+// decided with what is known, the test's then, and handed on; until the
+// manager has it, the stop finds it pending, so its streams do not end
+// without it.
+func TestV2AHeldIdleConnectionIsHandedOnAsTheStopBegins(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	stop := t0.Add(10 * time.Second)
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetWatermark(neverBehind{})
+	w := mgr.OpenWindow(t0, nil)
+	w.Yield(t0.Add(3 * time.Second))
+	w.Tested(t0, t0.Add(3*time.Second))
+	w.Close()
+	clientCh := make(chan fakeconn.Chunk, 2)
+	destCh := make(chan fakeconn.Chunk, 2)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("publish"), ReadAt: t0.Add(time.Second)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), WrittenAt: t0.Add(time.Second + time.Millisecond)}
+	sess, _ := newV2Session(t, clientCh, destCh)
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	// Unbuffered and not read yet: the hand-on waits in its emit, the
+	// exchange still the parser's.
+	mocks := make(chan *models.Mock)
+	sess.Mocks = mocks
+	held := make(chan struct{}, 4)
+	sess.OnPendingCleared = func() { held <- struct{}{} }
+	done := make(chan error, 1)
+	go func() { done <- dispatch(t, sess) }()
+	select {
+	case <-held:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the exchange was not held")
+	}
+	mgr.BacklogBefore(stop) // the stop begins
+	if st := mgr.BacklogBefore(stop); !st.Pending {
+		t.Fatalf("the stop found nothing pending while the parser still had the exchange: %+v", st)
+	}
+	select {
+	case m := <-mocks:
+		if l := m.Spec.Metadata[models.MetadataLifetimeKey]; l != models.MetadataLifetimePerTest {
+			t.Fatalf("stated %q at the stop, want per-test", l)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the held exchange was not handed on as the stop began")
+	}
+	close(clientCh)
+	close(destCh)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if st := mgr.BacklogBefore(stop); st.Pending {
+		t.Fatalf("handed on, the stop still finds it pending: %+v", st)
+	}
+}
+
+// A v2 recorder that leaves while it holds exchanges (a panic, which the
+// supervisor recovers) reports them left out, as any exchange it could not
+// record, and takes its hold off the stop's count: the stop does not wait on
+// it forever, and the loss is not silent. It holds an exchange first for the
+// rest of its answer (the 1st clear of pending work, the connection still
+// open), then, once the connection's end has ended its answer, in the
+// preamble hold (the 2nd).
+func TestV2ARecorderThatLeavesHoldingReportsItsExchangesLeftOut(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		panicAt int
+		ended   bool
+		reason  string
+	}{
+		{"holding its answer", 1, false, leftOutHeldAnswer},
+		{"in the preamble hold", 2, true, "the Generic recorder stopped while it held this exchange"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			t0 := time.Unix(5000, 0)
+			mgr := syncMock.New(zap.NewNop())
+			mgr.SetWatermark(neverBehind{})
+			w := mgr.OpenWindow(t0, nil)
+			defer w.Close()
+			clientCh := make(chan fakeconn.Chunk, 2)
+			destCh := make(chan fakeconn.Chunk, 2)
+			clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("publish"), ReadAt: t0.Add(time.Second)}
+			destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), WrittenAt: t0.Add(time.Second + time.Millisecond)}
+			if c.ended {
+				close(clientCh)
+				close(destCh)
+			}
+			sess, _ := newV2Session(t, clientCh, destCh)
+			sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+			sess.Mgr = mgr
+			spans := &syncMock.Spans{}
+			sess.Orphans = spans
+			core, logs := observer.New(zapcore.DebugLevel)
+			sess.Logger = zap.New(core)
+			clears := 0
+			sess.OnPendingCleared = func() {
+				if clears++; clears == c.panicAt {
+					panic("the parser fails while it holds an exchange")
+				}
+			}
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Fatal("the parser did not fail")
+					}
+				}()
+				_ = dispatch(t, sess)
+			}()
+			if n := mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("%d exchanges reported left out, want the 1 held", n)
+			}
+			var reasons []string
+			for _, e := range logs.All() {
+				if e.Message == supervisor.LeftOutWarnMsg || e.Message == supervisor.LeftOutDebugMsg {
+					r, _ := e.ContextMap()["reason"].(string)
+					reasons = append(reasons, r)
+				}
+			}
+			if len(reasons) != 1 || reasons[0] != c.reason {
+				t.Fatalf("left out for %q, want %q", reasons, c.reason)
+			}
+			// With its span, so a test case over it is left out too.
+			if over, _ := spans.Overlaps(t0.Add(time.Second), t0.Add(time.Second+time.Millisecond)); !over {
+				t.Fatal("the exchange left out has no span: a test case over it is kept without it")
+			}
+			if st := mgr.BacklogBefore(t0.Add(10 * time.Second)); st.Pending {
+				t.Fatalf("the stop still waits on the hold of a parser that left: %+v", st)
+			}
+		})
+	}
+}
+
+// Under the proven switch, a connection wholly inside its test: its second
+// exchange goes from the hold for the rest of its answer into the preamble
+// hold (flushMock), which counts it for the stop by its own. Once the
+// connection has ended and every exchange is out, the stop finds nothing
+// pending: the answer's hold left on the stop's count would keep the stop
+// waiting to its stall bound, and end the recording as a capture lost.
+func TestV2AnAnswerHeldIntoThePreambleHoldIsOffTheStopsCount(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	at := func(i int) time.Time { return t0.Add(time.Duration(i+1) * time.Second) }
+	answer := t0.Add(10 * time.Second)
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetWatermark(neverBehind{})
+	w := mgr.OpenWindow(t0, nil)
+	w.Yield(answer)
+	w.Tested(t0, answer)
+	w.Close()
+	clientCh := make(chan fakeconn.Chunk, 4)
+	destCh := make(chan fakeconn.Chunk, 4)
+	order := newCaptureOrder(nil)
+	for i, x := range []string{"publish 1", "publish 2"} {
+		clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ConnSeq: uint32(2*i + 1), ReadAt: at(i)}                         // #nosec G115 -- test-only
+		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), ConnSeq: uint32(2*i + 2), WrittenAt: at(i).Add(time.Millisecond)} // #nosec G115 -- test-only
+		order.put[0] += int64(len(x))
+		order.put[1] += int64(len("ok"))
+	}
+	close(clientCh)
+	close(destCh)
+	sess, mocks := newV2Session(t, clientCh, destCh)
+	sess.Order = order.StreamedBefore
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	sess.Mgr = mgr
+	if err := dispatch(t, sess); err != nil {
+		t.Fatal(err)
+	}
+	close(mocks)
+	if got := drainMocks(mocks); len(got) != 2 {
+		t.Fatalf("handed on %d mocks, want both exchanges", len(got))
+	}
+	if st := mgr.BacklogBefore(t0.Add(time.Hour)); st.Pending {
+		t.Fatalf("every exchange out and the connection ended, the stop still waits: %s", st.WaitingOn)
+	}
+}
+
+// With the switch off the recorder holds no preamble: each exchange is handed
+// on once its answer has ended (the connection's next request here), the
+// first session whatever the windows, as before, though the window its
+// request lies in is still open.
+func TestV2WithTheSwitchOffTheFirstExchangeIsEmittedAtOnce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	mgr := syncMock.New(zap.NewNop())
+	w := mgr.OpenWindow(time.Unix(4000, 0), nil)
+	t.Cleanup(w.Close)
+	clientCh := make(chan fakeconn.Chunk, 2)
+	destCh := make(chan fakeconn.Chunk, 2)
+	sess, mocks := newV2Session(t, clientCh, destCh)
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	order := newCaptureOrder(nil)
+	for _, c := range []fakeconn.Chunk{
+		{Dir: fakeconn.FromClient, Bytes: []byte("hello"), ConnSeq: 1, ReadAt: time.Unix(5000, 0)},
+		{Dir: fakeconn.FromDest, Bytes: []byte("hi"), ConnSeq: 2, WrittenAt: time.Unix(5001, 0)},
+		{Dir: fakeconn.FromClient, Bytes: []byte("bye"), ConnSeq: 3, ReadAt: time.Unix(5002, 0)},
+	} {
+		if c.Dir == fakeconn.FromClient {
+			clientCh <- c
+		} else {
+			destCh <- c
+		}
+		order.put[dirIndex(c.Dir)] += int64(len(c.Bytes))
+	}
+	sess.Order = order.StreamedBefore
+	go func() {
+		// The first exchange is out before the connection ends.
+		defer close(destCh)
+		defer close(clientCh)
+		select {
+		case m := <-mocks:
+			if m.Spec.Metadata[models.MetadataLifetimeKey] != models.MetadataLifetimeSession {
+				t.Errorf("stated %q, want session", m.Spec.Metadata[models.MetadataLifetimeKey])
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("the first exchange was not handed on at the next request, with the connection open")
+		}
+	}()
+	if err := dispatch(t, sess); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The legacy recorder holds a connection's first exchange the same way under
+// the proven switch: inside a test it is stated per-test with the rest, the
+// connection's end waiting for the test's answer, and owned by its test on the
+// late path; with no window it is the session preamble.
+func TestLegacyAConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, inWindow := range []bool{true, false} {
+		out := make(chan *models.Mock, 4)
+		mgr := syncMock.New(zap.NewNop())
+		mgr.SetOutputChannel(out)
+		start := time.Now().Add(-time.Second)
+		answer := start.Add(10 * time.Millisecond)
+		var w *syncMock.Window
+		if inWindow {
+			w = mgr.OpenWindow(start, nil)
+		}
+		// Every chunk's recorded time, before the test's answer.
+		ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
+		ctx = context.WithValue(ctx, models.CapturedReqTimeKey, func() time.Time { return start.Add(time.Millisecond) })
+		ctx = context.WithValue(ctx, models.CapturedRespTimeKey, func() time.Time { return start.Add(2 * time.Millisecond) })
+		ctx = syncMock.NewContext(ctx, mgr)
+		chunks := make(chan capturedChunk)
+		go func() {
+			for _, x := range []string{"publish 1", "publish 2"} {
+				chunks <- capturedChunk{fromClient: true, buf: []byte(x)}
+				chunks <- capturedChunk{buf: []byte("ok")}
+			}
+			close(chunks)
+		}()
+		done := make(chan struct{})
+		go func() {
+			createGenericMocksAsync(ctx, zap.NewNop(), chunks)
+			close(done)
+		}()
+		if inWindow {
+			// A --sync recording's resolve ends the window a test case,
+			// whenever the recorder reads the connection.
+			if !w.Keep() {
+				t.Fatal("the window was given up")
+			}
+			mgr.ResolveKept(w, start, answer, "test-1", false)
+		}
+		<-done
+		if !inWindow {
+			mgr.ResolveRange(start, answer, "test-1", true, false)
+		}
+		mgr.FlushOwnedWindows()
+		close(out)
+		got := map[string]string{}
+		for m := range out {
+			got[m.Spec.GenericRequests[0].Message[0].Data] = m.Spec.Metadata[models.MetadataLifetimeKey]
+		}
+		want := models.MetadataLifetimeSession
+		if inWindow {
+			want = models.MetadataLifetimePerTest
+		}
+		if got["publish 1"] != want || got["publish 2"] != models.MetadataLifetimePerTest {
+			t.Fatalf("in a window %v: stated %v, want the first %s and the second per-test", inWindow, got, want)
+		}
+	}
+}
+
+// heldRuns numbers TestV2AHeldExchangeIsItsWorkersByWhenItsRequestWasRead's
+// runs in this process.
+var heldRuns atomic.Uint64
+
+// A test worker's connection opened while another worker's test is open is
+// held until that test's end (holdPreamble), by when the worker may have
+// ended. Each exchange is still its worker's or not by when the relay read
+// its request: the one read while the worker lived carries the worker's
+// instance, though handed over after its end; the one read after the end
+// (a process the worker left) carries it as ended.
+func TestV2AHeldExchangeIsItsWorkersByWhenItsRequestWasRead(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a := coreAgent.InstanceValue(1, 0)
+	// Each run its own connection: a closed one's origin is kept, with its
+	// end mark, for its late mocks (starts.Registry.ForgetOrigin).
+	conn := "held-past-its-worker-" + strconv.FormatUint(heldRuns.Add(1), 10)
+	starts.Default.InstanceBegan(a)
+	starts.Default.NoteOriginIn(conn, 4242, a)
+	t.Cleanup(func() {
+		starts.Default.ForgetOrigin(conn)
+		starts.Default.InstanceEnded(a)
+	})
+	mgr := syncMock.New(zap.NewNop())
+	opened := time.Now().Add(-time.Second)
+	w := mgr.OpenWindow(opened, nil) // the other worker's longer test
+	live := time.Now()
+	time.Sleep(time.Millisecond)
+	starts.Default.InstanceEnded(a)
+	time.Sleep(time.Millisecond)
+	left := time.Now()
+	clientCh := make(chan fakeconn.Chunk, 4)
+	destCh := make(chan fakeconn.Chunk, 4)
+	// The session says the capture order, as the relay's does.
+	order := newCaptureOrder(nil)
+	for i, readAt := range []time.Time{live, left} {
+		x := []string{"publish 1", "publish 2"}[i]
+		clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ConnSeq: uint32(2*i + 1), ReadAt: readAt}
+		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), ConnSeq: uint32(2*i + 2), WrittenAt: readAt.Add(100 * time.Microsecond)}
+		order.put[0] += int64(len(x))
+		order.put[1] += int64(len("ok"))
+	}
+	close(clientCh)
+	close(destCh)
+	sess, mocks := newV2Session(t, clientCh, destCh)
+	sess.Order = order.StreamedBefore
+	sess.ClientConnID = conn
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	done := make(chan error, 1)
+	go func() { done <- dispatch(t, sess) }()
+	answer := left.Add(time.Second)
+	w.Yield(answer)
+	w.Tested(opened, answer)
+	w.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	close(mocks)
+	got := drainMocks(mocks)
+	if len(got) != 2 {
+		t.Fatalf("emitted %d mocks, want 2", len(got))
+	}
+	for i, want := range []struct{ instance, ended uint32 }{{a, 0}, {0, a}} {
+		m := got[i]
+		// As the sync manager stamps a mock its parser hands over.
+		starts.Default.StampInstance(m)
+		if m.Instance != want.instance || m.EndedInstance != want.ended {
+			t.Fatalf("exchange %d (read at %v, its worker ended between) got instance %d, ended %d; want %d, %d", i+1, m.Spec.ReqTimestampMock, m.Instance, m.EndedInstance, want.instance, want.ended)
+		}
+	}
+}

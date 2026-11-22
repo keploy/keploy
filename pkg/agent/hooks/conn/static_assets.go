@@ -5,12 +5,20 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
-// isStaticAssetResponse recognizes successful asset downloads by their declared
-// response type. Do not guess from a URL suffix: an API ending in .png can still
-// return JSON. Mutating requests and failed downloads remain useful test cases.
-func isStaticAssetResponse(req *http.Request, resp *http.Response) bool {
+// IsStaticAssetResponse recognizes successful web static asset responses by
+// their declared Content-Type. Do not guess from a URL suffix: an API ending
+// in .png can still return JSON. API download types (application/octet-stream,
+// application/pdf, archives, application/wasm), mutating requests, and failed
+// responses are never classified as static assets.
+func IsStaticAssetResponse(req *http.Request, resp *http.Response) bool {
+	if req == nil || resp == nil {
+		return false
+	}
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		return false
 	}
@@ -29,11 +37,22 @@ func isStaticAssetResponse(req *http.Request, resp *http.Response) bool {
 	switch mediaType {
 	case "text/css", "text/javascript", "application/javascript", "application/x-javascript",
 		"application/font-woff", "application/font-woff2", "application/vnd.ms-fontobject",
-		"application/x-font-ttf", "application/x-font-opentype", "application/x-font-woff",
-		"application/octet-stream", "application/pdf", "application/wasm",
-		"application/zip", "application/gzip", "application/x-gzip", "application/x-tar",
-		"application/x-7z-compressed", "application/vnd.rar", "application/x-rar-compressed":
+		"application/x-font-ttf", "application/x-font-opentype", "application/x-font-woff":
 		return true
 	}
 	return false
+}
+
+// ShouldSkipStaticAsset reports whether req/resp should be skipped under
+// opts.IgnoreStaticAssets. Explicit Include rules in opts.Filters always take
+// precedence over IgnoreStaticAssets (unless also excluded by an Exclude rule).
+func ShouldSkipStaticAsset(logger *zap.Logger, req *http.Request, resp *http.Response, opts models.IncomingOptions) bool {
+	if !opts.IgnoreStaticAssets || !IsStaticAssetResponse(req, resp) {
+		return false
+	}
+	filtered, matchedInclude := evalFilters(logger, req, opts)
+	if !filtered && matchedInclude {
+		return false
+	}
+	return true
 }

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,27 @@ type GrpcSpec struct {
 type GrpcHeaders struct {
 	PseudoHeaders   map[string]string `json:"pseudo_headers" yaml:"pseudo_headers"`
 	OrdinaryHeaders map[string]string `json:"ordinary_headers" yaml:"ordinary_headers"`
+}
+
+// Ordinary is the value of the ordinary header named name, whatever the case
+// of the name it was read under, or "" with none. The headers hold names as
+// they came off the wire, and HTTP/2 carries them lowercase: grpc-go
+// lowercases every metadata key, and an uppercase name is malformed. So a
+// lookup by a name as it is usually spelled, such as "Keploy-Test-Name",
+// never matches a real call's header. A name of exactly that spelling wins;
+// of names that differ from it only in case (no compliant peer sends two),
+// the one that sorts first.
+func (h GrpcHeaders) Ordinary(name string) string {
+	if v, ok := h.OrdinaryHeaders[name]; ok {
+		return v
+	}
+	var key, value string
+	for k, v := range h.OrdinaryHeaders {
+		if strings.EqualFold(k, name) && (key == "" || k < key) {
+			key, value = k, v
+		}
+	}
+	return value
 }
 
 type GrpcLengthPrefixedMessage struct {
@@ -118,6 +140,25 @@ func (r GrpcResp) AllMessages() []GrpcLengthPrefixedMessage {
 		return nil
 	}
 	return allMessages(r.Body, r.AdditionalMessages)
+}
+
+// TrailersAsRead is the trailer block of a recorded answer as a gRPC client
+// reads it (gRPC over HTTP/2): its trailers or, when it has no trailers and
+// its one header block carries grpc-status, that block. Such an answer is a
+// Trailers-Only one, a single HEADERS frame that ends the stream: grpc-go
+// sends it for every call that ends before it sends headers or a message, an
+// OK one included (a server stream that returns no message). keploy's
+// recorder keeps that block as the answer's trailers as well as its headers;
+// enterprise's low-latency (proxyless) recorder kept it as its headers alone,
+// with no trailers, until it was fixed to keep both.
+func (r GrpcResp) TrailersAsRead() GrpcHeaders {
+	if len(r.Trailers.PseudoHeaders) > 0 || len(r.Trailers.OrdinaryHeaders) > 0 {
+		return r.Trailers
+	}
+	if _, ok := r.Headers.OrdinaryHeaders["grpc-status"]; ok {
+		return r.Headers
+	}
+	return r.Trailers
 }
 
 func allMessages(head GrpcLengthPrefixedMessage, tail []GrpcLengthPrefixedMessage) []GrpcLengthPrefixedMessage {

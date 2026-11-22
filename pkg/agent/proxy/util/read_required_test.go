@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -49,11 +50,13 @@ func withSentry(t *testing.T, tr sentry.Transport) {
 	t.Cleanup(func() { sentry.CurrentHub().BindClient(prev) })
 }
 
-// stepReader hands out step bytes per Read, then err (io.EOF when nil).
+// stepReader hands out step bytes per Read, then err (io.EOF when nil). eofs
+// counts the reads it answered with io.EOF.
 type stepReader struct {
 	data []byte
 	step int
 	err  error
+	eofs int
 }
 
 func (r *stepReader) Read(p []byte) (int, error) {
@@ -61,6 +64,7 @@ func (r *stepReader) Read(p []byte) (int, error) {
 		if r.err != nil {
 			return 0, r.err
 		}
+		r.eofs++
 		return 0, io.EOF
 	}
 	n := min(r.step, len(p), len(r.data))
@@ -121,18 +125,23 @@ func TestReadRequiredBytes(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	tests := []struct {
-		name     string
-		ctx      context.Context
-		r        io.Reader
-		n        int
-		want     string
-		wantErr  error
-		minDelay time.Duration
-		rest     string
+		name    string
+		ctx     context.Context
+		r       io.Reader
+		n       int
+		want    string
+		wantErr error
+		rest    string
 	}{
 		{name: "partial reads accumulate, nothing more is consumed", r: &stepReader{data: []byte("0123456789"), step: 3}, n: 7, want: "0123456", rest: "789"},
 		{name: "reader error returns what was read", r: &stepReader{data: []byte("ab"), step: 1, err: boom}, n: 4, want: "ab", wantErr: boom},
-		{name: "EOF is retried before it is believed", r: &stepReader{data: []byte("xy"), step: 2}, n: 5, want: "xy", wantErr: io.EOF, minDelay: 300 * time.Millisecond},
+		{name: "an EOF is believed at the read that returns it", r: &stepReader{data: []byte("xy"), step: 2}, n: 5, want: "xy", wantErr: io.EOF},
+		{name: "an EOF on nothing read is returned with nil", r: &stepReader{}, n: 5, wantErr: io.EOF},
+		// A reader that returns its last bytes and io.EOF in one read, as
+		// crypto/tls does for data a close_notify follows (a TLS MySQL
+		// client's COM_QUIT): the bytes wanted are all there, so nil.
+		{name: "the last bytes wanted that come with the EOF are returned with nil", r: iotest.DataErrReader(strings.NewReader("abcd")), n: 4, want: "abcd"},
+		{name: "bytes short of those wanted that come with the EOF are returned with it", r: iotest.DataErrReader(strings.NewReader("abcd")), n: 6, want: "abcd", wantErr: io.EOF},
 		{name: "cancelled context", ctx: cancelled, r: &stepReader{data: []byte("abcd"), step: 1}, n: 4, wantErr: context.Canceled},
 	}
 	for _, tc := range tests {
@@ -141,13 +150,15 @@ func TestReadRequiredBytes(t *testing.T) {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			start := time.Now()
 			b, err := ReadRequiredBytes(ctx, zap.NewNop(), tc.r, tc.n)
 			if !errors.Is(err, tc.wantErr) || string(b) != tc.want {
 				t.Fatalf("got (%q, %v), want (%q, %v)", b, err, tc.want, tc.wantErr)
 			}
-			if d := time.Since(start); d < tc.minDelay {
-				t.Fatalf("returned after %v, want at least %v", d, tc.minDelay)
+			if tc.want == "" && b != nil {
+				t.Fatalf("got %#v for nothing read, want nil", b)
+			}
+			if sr, ok := tc.r.(*stepReader); ok && err == io.EOF && sr.eofs != 1 {
+				t.Fatalf("read the EOF %d times, want once: every reader these reads take returns io.EOF only at its end", sr.eofs)
 			}
 			if tc.rest != "" {
 				if rest, _ := io.ReadAll(tc.r); string(rest) != tc.rest {

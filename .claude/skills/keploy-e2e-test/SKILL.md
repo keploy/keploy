@@ -24,7 +24,8 @@ Before doing any work, decide whether e2e record/replay is even the right
 signal. Skip with a clear, short reason if:
 
 - **Pure refactor / internal rename.** No observable behavior changed. Unit
-  tests + `go build` + `golangci-lint run` is enough.
+  tests + `go build` + `golangci-lint run --new-from-merge-base=origin/main`
+  (what CI's lint checks) is enough.
 - **Enterprise-only code path.** The logic lives in the private
   `keploy/integrations` repo, not in this tree. You cannot fully exercise
   it from a fresh fork — CI skips those jobs on forks, and so should you.

@@ -1,0 +1,8 @@
+Looking in indexes: http://192.0.2.1/simple/
+WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectTimeoutError(<pip._vendor.urllib3.connection.HTTPConnection object at 0xfffedf1fdd30>, 'Connection to 192.0.2.1 timed out. (connect timeout=3.0)')': /simple/flask/
+WARNING: Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectTimeoutError(<pip._vendor.urllib3.connection.HTTPConnection object at 0xfffedf157ed0>, 'Connection to 192.0.2.1 timed out. (connect timeout=3.0)')': /simple/flask/
+WARNING: Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectTimeoutError(<pip._vendor.urllib3.connection.HTTPConnection object at 0xfffedf06c050>, 'Connection to 192.0.2.1 timed out. (connect timeout=3.0)')': /simple/flask/
+WARNING: Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectTimeoutError(<pip._vendor.urllib3.connection.HTTPConnection object at 0xfffedf0643e0>, 'Connection to 192.0.2.1 timed out. (connect timeout=3.0)')': /simple/flask/
+WARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectTimeoutError(<pip._vendor.urllib3.connection.HTTPConnection object at 0xfffedf064640>, 'Connection to 192.0.2.1 timed out. (connect timeout=3.0)')': /simple/flask/
+ERROR: Could not find a version that satisfies the requirement flask==3.1.2 (from versions: none)
+ERROR: No matching distribution found for flask==3.1.2

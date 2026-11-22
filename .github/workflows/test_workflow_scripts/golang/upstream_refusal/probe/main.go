@@ -4,8 +4,15 @@
 // PROBE_SEND set, it also sends a line on each connection that connects and
 // reads the reply.
 //
+// An address written udp:HOST:PORT is a connected UDP client instead (statsd,
+// syslog, an OpenTelemetry exporter, QUIC): connect, send a datagram, read the
+// reply. Its class is connect's errno when connect fails -- a UDP connect to an
+// address with no route is how glibc's getaddrinfo finds the addresses it
+// cannot use, to sort them last -- else "echoed", or what the read returned.
+//
 // probe -serve PORT COUNTFILE is the other end: it counts each connection it
 // accepts, one line in COUNTFILE, and echoes the first line back.
+// probe -udpecho HOST:PORT echoes each datagram back, prefixed "ECHO:".
 package main
 
 import (
@@ -14,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -43,6 +51,44 @@ func serve(port, countFile string) {
 	}
 }
 
+func udpEcho(addr string) {
+	c, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		fmt.Println("listen:", err)
+		os.Exit(1)
+	}
+	buf := make([]byte, 1500)
+	for {
+		n, from, err := c.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		_, _ = c.WriteTo(append([]byte("ECHO:"), buf[:n]...), from)
+	}
+}
+
+// probeUDP is one connected UDP client's exchange with addr.
+func probeUDP(addr string) (string, error) {
+	c, err := net.DialTimeout("udp", addr, 5*time.Second)
+	if err != nil {
+		return classify(err), err
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Write([]byte("hello-from-probe\n")); err != nil {
+		return classify(err), err
+	}
+	buf := make([]byte, 1500)
+	n, err := c.Read(buf)
+	if err != nil {
+		return classify(err), err
+	}
+	if !strings.HasPrefix(string(buf[:n]), "ECHO:") {
+		return "OTHER", fmt.Errorf("reply %q", buf[:n])
+	}
+	return "echoed", nil
+}
+
 func classify(err error) string {
 	switch {
 	case err == nil:
@@ -66,7 +112,17 @@ func main() {
 		serve(os.Args[2], os.Args[3])
 		return
 	}
+	if len(os.Args) == 3 && os.Args[1] == "-udpecho" {
+		udpEcho(os.Args[2])
+		return
+	}
 	for _, addr := range os.Args[1:] {
+		if udp, ok := strings.CutPrefix(addr, "udp:"); ok {
+			start := time.Now()
+			class, err := probeUDP(udp)
+			fmt.Printf("PROBE %s %s %.1fs (%v)\n", addr, class, time.Since(start).Seconds(), err)
+			continue
+		}
 		start := time.Now()
 		c, err := net.DialTimeout("tcp", addr, 5*time.Second)
 		took := time.Since(start)

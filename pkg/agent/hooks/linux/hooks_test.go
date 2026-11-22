@@ -3,15 +3,26 @@
 package linux
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
+	"github.com/cilium/ebpf/rlimit"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 // newTestHooks constructs a Hooks value that is safe to call GetProxyInfo on
@@ -45,11 +56,13 @@ func TestProxyIPv4IsWhereTheKernelSendsTheApplication(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			want := "127.0.0.1"
 			if tc.isDocker {
-				ip, err := utils.GetContainerIPv4()
+				ip, err := utils.GetContainerIP()
 				if err != nil {
-					t.Skipf("no non-loopback IPv4 address here for a container's agent to be reached at: %v", err)
+					t.Skipf("no address here for a container's agent to be reached at: %v", err)
 				}
-				want = ip
+				if ip.To4() != nil {
+					want = ip.String()
+				}
 			}
 			h := NewHooks(zap.NewNop(), &config.Config{})
 			// Not the constructor's loopback: the native case has to show that
@@ -71,6 +84,89 @@ func TestProxyIPv4IsWhereTheKernelSendsTheApplication(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An agent started with --is-docker has the kernel send the applications'
+// connections to its container's address. A container with an IPv4 address
+// keeps what keploy always did: IPv4 there, IPv6 to its v4-mapped form. A
+// container on a single-stack IPv6 network (an IPv6-only Pod) has none, and
+// its agent used to exit at start; its IPv6 connections now go to its own
+// IPv6 address, and its IPv4 ones (only loopback's exist there) to loopback,
+// which the applications share with the agent.
+func TestGetProxyInfoDockerSendsConnectionsToTheContainersAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		addr     string
+		wantIP4  string
+		wantIP6  string
+		wantDNS4 string
+	}{
+		{"IPv4", "10.244.0.5", "10.244.0.5", "::ffff:10.244.0.5", "10.244.0.5"},
+		{"IPv6 only, unique local", "fd00:10:244::5", "127.0.0.1", "fd00:10:244::5", "127.0.0.1"},
+		{"IPv6 only, global", "2001:db8:1:2:3:4:5:6", "127.0.0.1", "2001:db8:1:2:3:4:5:6", "127.0.0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubContainerAddress(t, func() (net.IP, error) { return net.ParseIP(tc.addr), nil })
+			h := NewHooks(zap.NewNop(), &config.Config{})
+			opts := config.Agent{SetupOptions: models.SetupOptions{IsDocker: true, ProxyPort: 16789, EnableIPv6Redirect: true}}
+
+			info, err := h.resolveProxyInfo(context.Background(), opts, agent.HookCfg{IsDocker: true})
+			if err != nil {
+				t.Fatalf("the agent could not tell where its proxy is reached: %v", err)
+			}
+			var ip4 [4]byte
+			binary.BigEndian.PutUint32(ip4[:], info.IP4)
+			if got := net.IP(ip4[:]).String(); got != tc.wantIP4 {
+				t.Fatalf("IPv4 connections go to %s, want %s", got, tc.wantIP4)
+			}
+			if got := ip6Text(info.IP6); got != tc.wantIP6 {
+				t.Fatalf("IPv6 connections go to %s, want %s", got, tc.wantIP6)
+			}
+			if info.Port != 16789 {
+				t.Fatalf("connections go to port %d, want the proxy's 16789", info.Port)
+			}
+			if got := h.ProxyIPv4(); got != tc.wantDNS4 {
+				t.Fatalf("the DNS server answers with %s, want %s", got, tc.wantDNS4)
+			}
+			if h.proxyIP6 != info.IP6 {
+				t.Fatalf("the hooks log the IPv6 redirect target as %08x, but the kernel is told %08x", h.proxyIP6, info.IP6)
+			}
+		})
+	}
+}
+
+// A container with no address to be reached at stops the agent with the
+// lookup's own error, its tag kept for the exit status.
+func TestGetProxyInfoDockerWithNoAddressFails(t *testing.T) {
+	want := fmt.Errorf("%w: no address", utils.ErrEnvironmentUnsupported)
+	stubContainerAddress(t, func() (net.IP, error) { return nil, want })
+	h := newTestHooks(t)
+	_, err := h.GetProxyInfo(context.Background(), config.Agent{SetupOptions: models.SetupOptions{IsDocker: true}}, agent.HookCfg{IsDocker: true})
+	if !errors.Is(err, utils.ErrEnvironmentUnsupported) {
+		t.Fatalf("GetProxyInfo returned %v, want the lookup's tagged error", err)
+	}
+}
+
+// stubContainerAddress has GetProxyInfo read the container's address from
+// lookup for the rest of the test.
+func stubContainerAddress(t *testing.T, lookup func() (net.IP, error)) {
+	t.Helper()
+	old := containerAddress
+	containerAddress = lookup
+	t.Cleanup(func() { containerAddress = old })
+}
+
+// ip6Text is the address ProxyInfo.IP6 holds, as the programs write it into a
+// redirected connection: each word in network order.
+func ip6Text(w [4]uint32) string {
+	b := make(net.IP, net.IPv6len)
+	for i, v := range w {
+		binary.BigEndian.PutUint32(b[4*i:], v)
+	}
+	if b.To4() != nil {
+		return "::ffff:" + b.To4().String()
+	}
+	return b.String()
 }
 
 func TestGetProxyInfo_NonDocker_ReturnsNonZeroIPv6(t *testing.T) {
@@ -163,5 +259,140 @@ func TestGetProxyInfo_NonDocker_CfgPortOverrideStillForcesV6(t *testing.T) {
 	}
 	if info.Port != cfg.Port {
 		t.Errorf("Port = %d, want %d", info.Port, cfg.Port)
+	}
+}
+
+// Linux 7.1 added two fields to the BTF header, layout_off and layout_len, for
+// a section that gives the size of each kind of type (include/uapi/linux/btf.h),
+// and a kernel built with pahole 1.31 or later fills them in: Fedora 44's 7.2
+// kernels do. cilium/ebpf before v0.22.0 refused such a header ("parsing .BTF
+// header: header contains non-zero trailer"), and with it the kernel's whole
+// BTF, so load() could not apply the objects' CO-RE relocations and the agent
+// refused to start on those kernels. v0.22.0 accepts the two fields; it does
+// not read the section they point to, so this pins the header, and the layout
+// bytes are only there to lay the blob out as such a kernel's is: types, then
+// the layout section, then the strings. load() reads /sys/kernel/btf/vmlinux
+// with the parser this test calls.
+func TestKernelBTFWithALayoutSectionLoads(t *testing.T) {
+	le := binary.LittleEndian
+	var types []byte
+	// One type, BTF_KIND_INT (1) named "int": 32 bits, signed.
+	for _, v := range []uint32{1, 1 << 24, 4, 1<<24 | 32} {
+		types = le.AppendUint32(types, v)
+	}
+	// struct btf_layout {info_sz, elem_sz u8; flags u16} for kinds 0 to 19, as
+	// libbpf writes it (tools/lib/bpf/btf.c, layouts[]) and 7.2.7's BTF has it.
+	var layout []byte
+	for _, sz := range [][2]uint8{
+		{0, 0}, {4, 0}, {0, 0}, {12, 0}, {0, 12}, {0, 12}, {0, 8}, {0, 0}, {0, 0}, {0, 0},
+		{0, 0}, {0, 0}, {0, 0}, {0, 8}, {4, 0}, {0, 12}, {0, 0}, {4, 0}, {0, 0}, {0, 12},
+	} {
+		layout = append(layout, sz[0], sz[1], 0, 0)
+	}
+	strs := []byte("\x00int\x00")
+	blob := le.AppendUint16(nil, 0xeB9F)
+	blob = append(blob, 1, 0) // version, flags
+	for _, v := range []uint32{
+		32,                    // hdr_len
+		0, uint32(len(types)), // type_off, type_len
+		uint32(len(types) + len(layout)), uint32(len(strs)), // str_off, str_len
+		uint32(len(types)), uint32(len(layout)), // layout_off, layout_len
+	} {
+		blob = le.AppendUint32(blob, v)
+	}
+	blob = append(append(append(blob, types...), layout...), strs...)
+
+	spec, err := btf.LoadSpecFromReader(bytes.NewReader(blob))
+	if err != nil {
+		t.Fatalf("the BTF of a kernel with a layout section does not load: %v", err)
+	}
+	var i *btf.Int
+	if err := spec.TypeByName("int", &i); err != nil {
+		t.Fatalf("the loaded BTF has no int: %v", err)
+	}
+	if i.Size != 4 || i.Encoding != btf.Signed {
+		t.Fatalf("int is %d bytes, encoding %v, want 4 and signed", i.Size, i.Encoding)
+	}
+}
+
+// This kernel's BTF loads, every type of it, with the parser load() uses,
+// without root: a kernel whose BTF header or encoding cilium/ebpf refuses
+// fails here, on whatever machine runs it. (A misread field that still
+// decodes would not.) Skipped on a kernel without BTF in sysfs.
+func TestThisKernelsBTFLoads(t *testing.T) {
+	if _, err := os.Stat("/sys/kernel/btf/vmlinux"); err != nil {
+		t.Skipf("this kernel has no /sys/kernel/btf/vmlinux: %v", err)
+	}
+	spec, err := btf.LoadKernelSpec()
+	if err != nil {
+		t.Fatalf("this kernel's BTF (%s) does not load: %v", kernelRelease(), err)
+	}
+	n := 0
+	for _, err := range spec.All() {
+		if err != nil {
+			t.Fatalf("type %d of this kernel's BTF (%s) does not decode: %v", n+1, kernelRelease(), err)
+		}
+		n++
+	}
+	if n == 0 {
+		t.Fatalf("this kernel's BTF (%s) has no types", kernelRelease())
+	}
+}
+
+// The agent's objects load on this kernel as load() loads them (hookSpec,
+// hookLoadOptions): the call that failed where cilium/ebpf could not read the
+// kernel's BTF, since each object's CO-RE relocations are applied against it.
+// Nothing is attached. Needs root.
+func TestTheHooksLoadOnThisKernel(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("loading the agent's eBPF objects needs root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("root without the capabilities eBPF needs, as in a default container: %v", err)
+		}
+		t.Fatalf("remove the memlock limit: %v", err)
+	}
+	spec, err := hookSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var objs bpfObjects
+	if err := spec.LoadAndAssign(&objs, hookLoadOptions()); err != nil {
+		var ve *ebpf.VerifierError
+		if !errors.As(err, &ve) && errors.Is(err, os.ErrPermission) {
+			t.Skipf("root without the capabilities eBPF needs, as in a default container: %v", err)
+		}
+		if errors.As(err, &ve) {
+			t.Fatalf("the verifier refused the hooks on this kernel (%s): %v\n%s", kernelRelease(), err, strings.Join(ve.Log, "\n"))
+		}
+		t.Fatalf("the hooks do not load on this kernel (%s): %v", kernelRelease(), err)
+	}
+	if err := objs.Close(); err != nil {
+		t.Fatalf("close the hooks: %v", err)
+	}
+}
+
+func kernelRelease() string {
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		return "unknown kernel"
+	}
+	return unix.ByteSliceToString(u.Release[:])
+}
+
+// The hooks load without a verifier log: the kernel's formatting of it was
+// nearly all of the load's time (hookLoadOptions). cilium/ebpf asks for a log
+// only to explain a rejection.
+func TestTheHooksLoadWithoutAVerifierLog(t *testing.T) {
+	opts := hookLoadOptions()
+	if opts.Programs.LogLevel != 0 {
+		t.Errorf("the hooks load with verifier log level %v, want none", opts.Programs.LogLevel)
+	}
+	if opts.Programs.LogSizeStart != 0 {
+		t.Errorf("the hooks load with a %d-byte verifier log buffer, want none", opts.Programs.LogSizeStart)
+	}
+	if opts.Programs.LogDisabled {
+		t.Error("the hooks load with the verifier log disabled: a rejection would carry no log at all")
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.uber.org/zap"
 )
@@ -119,7 +120,7 @@ func TestClientWriteHold_AgainstARealMySQLServer(t *testing.T) {
 			Logger:           zap.NewNop(),
 			HoldClientWrites: true,
 			TLSUpgradeFn:     upgrade,
-		}, clientConn, destConn)
+		}, clientConn, connseq.NewUpstream(destConn))
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()

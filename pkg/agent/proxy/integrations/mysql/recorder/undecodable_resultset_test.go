@@ -3,20 +3,15 @@ package recorder
 import (
 	"context"
 	"encoding/binary"
-	"errors"
-	"fmt"
-	"io"
+	"strings"
 	"testing"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
-	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 // A response the recorder cannot decode must not be recorded, whole or in
@@ -41,7 +36,7 @@ const undecodableStmtID = uint32(5)
 // columnPayload is a column definition's payload, without its header.
 func columnPayload(t *testing.T, col *mysql.ColumnDefinition41) []byte {
 	t.Helper()
-	b, err := rowscols.EncodeColumn(context.Background(), zap.NewNop(), col)
+	b, err := rowscols.EncodeColumn(context.Background(), zap.NewNop(), col, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,9 +256,11 @@ func preparedFirst(t *testing.T, h *v2Harness, at func() time.Time) {
 
 // runRecordV2 records one connection: the handshake, then exchanges pushed by
 // push, then a close. It returns RecordV2's error and every mock emitted.
-func runRecordV2(t *testing.T, push func(h *v2Harness, at func() time.Time)) ([]*models.Mock, error) {
+func runRecordV2(t *testing.T, push func(h *v2Harness, at func() time.Time)) ([]*models.Mock, *orphanSpans, error) {
 	t.Helper()
 	h := newV2Harness(t)
+	leftOut := &orphanSpans{}
+	h.sess.Orphans = leftOut
 	base := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	tick := 0
 	at := func() time.Time { tick++; return base.Add(time.Duration(tick) * time.Millisecond) }
@@ -282,14 +279,14 @@ func runRecordV2(t *testing.T, push func(h *v2Harness, at func() time.Time)) ([]
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err = RecordV2(ctx, h.logger, h.sess)
+	err = recordV2NoPanic(t, ctx, h.logger, h.sess)
 	var got []*models.Mock
 	for {
 		select {
 		case m := <-h.mocks:
 			got = append(got, m)
 		default:
-			return got, err
+			return got, leftOut, err
 		}
 	}
 }
@@ -304,12 +301,18 @@ func mocksOf(mocks []*models.Mock, op string) []*models.Mock {
 	return out
 }
 
-func TestRecordV2_UndecodableResponseIsAnError(t *testing.T) {
+// A response that does not decode is left out, its exchange alone, and the
+// recording goes on: the query after it is recorded.
+func TestRecordV2_UndecodableResponseIsLeftOut(t *testing.T) {
 	t.Parallel()
+	next := cannedCOMQuery(t, 0, "SELECT 1")
+	// The query after it confirms the one taken up after the exchange left
+	// out (takenUp): the end of the connection would not.
+	confirming := cannedCOMQuery(t, 0, "SELECT 2")
 	for _, c := range undecodableCases() {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
+			got, leftOut, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
 				if c.op == "COM_STMT_EXECUTE" {
 					preparedFirst(t, h, at)
 				}
@@ -317,8 +320,24 @@ func TestRecordV2_UndecodableResponseIsAnError(t *testing.T) {
 				for _, p := range c.reply(t, false) {
 					h.pushDest(p, at())
 				}
+				h.pushClient(next, at())
+				h.pushDest(wrapPacket([]byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 1), at())
+				h.pushClient(confirming, at())
+				h.pushDest(wrapPacket([]byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 1), at())
 			})
-			recorded := mocksOf(got, c.op)
+			// The queries after the exchange are told from it by their text.
+			var recorded, after []*models.Mock
+			for _, m := range mocksOf(got, c.op) {
+				if qp, ok := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket); ok && (qp.Query == "SELECT 1" || qp.Query == "SELECT 2") {
+					continue
+				}
+				recorded = append(recorded, m)
+			}
+			for _, m := range mocksOf(got, "COM_QUERY") {
+				if qp, ok := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket); ok && qp.Query == "SELECT 1" {
+					after = append(after, m)
+				}
+			}
 			if c.op == "COM_STMT_EXECUTE" && len(mocksOf(got, "COM_STMT_PREPARE")) != 1 {
 				t.Fatalf("the COM_STMT_PREPARE before the execute was not recorded: %d mocks", len(got))
 			}
@@ -331,182 +350,117 @@ func TestRecordV2_UndecodableResponseIsAnError(t *testing.T) {
 				}
 				return
 			}
-			if err == nil {
-				t.Fatal("RecordV2 ended cleanly: the supervisor takes the parser for healthy, and nothing says the response was lost")
-			}
-			if errors.Is(err, io.EOF) {
-				t.Fatalf("RecordV2 = %v: an io.EOF passes for the connection closing", err)
-			}
 			// A definition or row that does not decode, behind a header whose
 			// sequence id checked out, is lost framing: a misread header that
-			// passed the check, or a packet short of bytes. It is reported as
-			// lost framing is: once, at WARN, rate-limited across connections,
-			// not again at ERROR for every connection it stops.
-			if !errors.Is(err, ErrFramingLost) {
-				t.Fatalf("RecordV2 = %v, want ErrFramingLost", err)
+			// passed the check, or a packet short of bytes. Its exchange is left
+			// out, and the recording goes on from the next command.
+			if err != nil {
+				t.Fatalf("RecordV2 = %v: the response that did not decode costs its own exchange, not the rest of the connection's recording", err)
 			}
 			if len(recorded) != 0 {
 				t.Fatalf("recorded %d %s mocks for a response that did not decode (the first has %d of 3 parts)", len(recorded), c.op, c.parts(recorded[0]))
 			}
+			if leftOut.count() != 1 {
+				t.Fatalf("%d exchanges left out, want the one that did not decode", leftOut.count())
+			}
+			if len(after) != 1 || describe(after[0]) != "a OK" {
+				t.Fatalf("the query after the response left out recorded %d mock(s), want its OK", len(after))
+			}
 		})
 	}
 }
 
-// The legacy async decoder has no supervisor to hand the connection to: it
-// drops the one exchange whose response did not decode, leaves out the test
-// cases recorded over it, and goes on recording the exchanges after it.
-// Before, a row that did not decode was skipped and the mock emitted short; a
-// column or parameter definition that did not decode reset the exchange
-// mid-response, and its remaining packets were held and replayed as the NEXT
-// command's response.
-func TestAsyncMySQLDecode_UndecodableResponseIsDroppedNotRecordedShort(t *testing.T) {
+// A COM_STMT_PREPARE whose exchange is left out takes the statement's executes
+// with it: an execute cannot replay without its prepare, so it is left out as
+// well, rather than saved to fail. The command after them is recorded. The
+// prepare is left out when its reply did not decode, or when its command is of
+// 16 MiB or more (framed, so the recording goes on, but not replayable). An
+// exchange left out between a whole prepare and its execute that prepared
+// nothing (a query of 16 MiB or more) forgets no statement.
+func TestRecordV2_ExecuteOfALeftOutPrepareIsLeftOut(t *testing.T) {
 	t.Parallel()
-	for _, deprecateEOF := range []bool{false, true} {
-		for _, c := range undecodableCases() {
-			t.Run(fmt.Sprintf("deprecateEOF=%v/%s", deprecateEOF, c.name), func(t *testing.T) {
-				clientConn := newPipeConn()
-				decodeCtx := buildPostHandshakeDecodeCtx(clientConn)
-				if !deprecateEOF {
-					decodeCtx.ClientCaps &^= wire.CLIENT_DEPRECATE_EOF
-					decodeCtx.ClientCapabilities = decodeCtx.ClientCaps
-					decodeCtx.ServerCaps = decodeCtx.ClientCaps
-				}
-				if decodeCtx.DeprecateEOF() != deprecateEOF {
-					t.Fatal("the decode context does not negotiate the framing under test")
-				}
-				decodeCtx.LastOp.Store(clientConn, wire.RESET)
-				decodeCtx.PreparedStatements[undecodableStmtID] = &mysql.StmtPrepareOkPacket{StatementID: undecodableStmtID, NumColumns: 2}
-				mocks := make(chan *models.Mock, 16)
-				mgr := syncMock.New(zaptest.NewLogger(t))
-				mgr.SetOutputChannel(mocks)
-				ctx := syncMock.NewContext(context.WithValue(context.Background(), models.ClientConnectionIDKey, "undecodable-"+c.name), mgr)
-
-				base := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
-				items := make(chan mysqlDecodeItem, 32)
-				tick := 0
-				send := func(fromClient bool, b []byte) {
-					tick++
-					items <- mysqlDecodeItem{fromClient: fromClient, data: b, ts: base.Add(time.Duration(tick) * time.Millisecond)}
-				}
-				send(true, c.command)
-				exchange := base.Add(time.Duration(tick) * time.Millisecond)
-				for _, p := range c.reply(t, deprecateEOF) {
-					send(false, p)
-				}
-				// The next exchange must pair with its own OK (7 affected rows).
-				send(true, queuedQuery(0, "UPDATE users SET seen = 1"))
-				next := base.Add(time.Duration(tick) * time.Millisecond)
-				send(false, queuedOK(1, 7))
-				close(items)
-
-				asyncMySQLDecode(ctx, zaptest.NewLogger(t), items, mocks, decodeCtx, clientConn, models.OutgoingOptions{})
-
-				var recorded, updates []*models.Mock
-				for _, m := range drainMocks(t, mocks) {
-					if q, _ := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket); q != nil && q.Query == "UPDATE users SET seen = 1" {
-						updates = append(updates, m)
-					} else if m.Spec.Metadata["requestOperation"] == c.op {
-						recorded = append(recorded, m)
-					} else {
-						t.Fatalf("unexpected mock for %s", m.Spec.Metadata["requestOperation"])
-					}
-				}
-				if len(updates) != 1 {
-					t.Fatalf("the command after the response recorded %d mocks, want 1", len(updates))
-				}
-				if ok, _ := updates[0].Spec.MySQLResponses[0].Message.(*mysql.OKPacket); ok == nil || ok.AffectedRows != 7 {
-					t.Fatalf("the command after the response was paired with %T %+v, not its own OK", updates[0].Spec.MySQLResponses[0].Message, updates[0].Spec.MySQLResponses[0].Message)
-				}
-				if orphaned, _ := mgr.WasMockOrphanedInWindow(next, next); orphaned {
-					t.Fatal("the test cases over the next exchange are left out")
-				}
-				orphaned, _ := mgr.WasMockOrphanedInWindow(exchange, exchange)
-				if c.valid {
-					if len(recorded) != 1 || c.parts(recorded[0]) != 3 {
-						t.Fatalf("a whole response recorded %d mocks (want 1 with 3 parts)", len(recorded))
-					}
-					if orphaned {
-						t.Fatal("the test cases over a whole response are left out")
-					}
-					return
-				}
-				if len(recorded) != 0 {
-					t.Fatalf("recorded a mock for a response that did not decode (%d of 3 parts)", c.parts(recorded[0]))
-				}
-				if !orphaned {
-					t.Fatal("the test cases recorded over the dropped exchange are kept, and will replay without its mock")
-				}
-			})
-		}
-	}
-}
-
-// A COM_STMT_PREPARE the legacy decoder drops takes the statement's executes
-// with it: an execute cannot replay without its prepare, so it is dropped as
-// well and the test cases over it are left out, rather than saved to fail.
-func TestAsyncMySQLDecode_ExecuteOfADroppedPrepareIsDropped(t *testing.T) {
-	t.Parallel()
-	for _, valid := range []bool{true, false} {
-		t.Run(fmt.Sprintf("prepare whole=%v", valid), func(t *testing.T) {
-			clientConn := newPipeConn()
-			decodeCtx := buildPostHandshakeDecodeCtx(clientConn)
-			decodeCtx.LastOp.Store(clientConn, wire.RESET)
-			mocks := make(chan *models.Mock, 16)
-			mgr := syncMock.New(zaptest.NewLogger(t))
-			mgr.SetOutputChannel(mocks)
-			ctx := syncMock.NewContext(context.WithValue(context.Background(), models.ClientConnectionIDKey, "lost-prepare"), mgr)
-
-			base := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
-			items := make(chan mysqlDecodeItem, 32)
-			tick := 0
-			send := func(fromClient bool, b []byte) time.Time {
-				tick++
-				at := base.Add(time.Duration(tick) * time.Millisecond)
-				items <- mysqlDecodeItem{fromClient: fromClient, data: b, ts: at}
-				return at
-			}
+	for _, c := range []struct {
+		name         string
+		whole, large bool
+		// largeQuery puts a query of 16 MiB or more, left out, between the
+		// prepare and its execute.
+		largeQuery bool
+	}{
+		{name: "a whole prepare", whole: true},
+		{name: "a prepare whose reply did not decode"},
+		{name: "a prepare of 16 MiB or more", whole: true, large: true},
+		{name: "a whole prepare, then a query of 16 MiB or more", whole: true, largeQuery: true},
+	} {
+		whole := c.whole && !c.large
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			col1 := columnPayload(t, undecodableColumns[1])
-			if !valid {
+			if !c.whole {
 				col1 = truncatedPrefixColumn
 			}
-			send(true, wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id, email FROM users"...), 0))
-			for _, p := range prepareOK(true, nil, [][]byte{columnPayload(t, undecodableColumns[0]), col1}) {
-				send(false, p)
+			query := "SELECT id, email FROM users WHERE id > 0"
+			command := wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, query...), 0)
+			// The reply starts at the sequence id after the command's last packet.
+			shift := byte(0)
+			if c.large {
+				command = splitPacket(append([]byte{mysql.COM_STMT_PREPARE}, query+" AND email <> '"+strings.Repeat("x", 17<<20)+"'"...), 0)
+				shift = 1
 			}
-			execute := send(true, queuedExecute(0, undecodableStmtID))
-			for _, p := range resultSet(true, [][]byte{columnPayload(t, undecodableColumns[0]), columnPayload(t, undecodableColumns[1])},
-				[][]byte{binaryRowPayload(1, str("a@example.com"))}) {
-				send(false, p)
+			got, leftOut, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
+				h.pushClient(command, at())
+				for _, p := range prepareOK(false, nil, [][]byte{columnPayload(t, undecodableColumns[0]), col1}) {
+					p[3] += shift
+					h.pushDest(p, at())
+				}
+				if c.largeQuery {
+					h.pushClient(splitPacket(append([]byte{mysql.COM_QUERY}, "SELECT '"+strings.Repeat("y", 17<<20)+"'"...), 0), at())
+					h.pushDest(okResponseWithAffectedRows(2, 0), at())
+				}
+				h.pushClient(stmtExecuteCommand(0, undecodableStmtID), at())
+				for _, p := range resultSet(false, [][]byte{columnPayload(t, undecodableColumns[0]), columnPayload(t, undecodableColumns[1])},
+					[][]byte{binaryRowPayload(1, str("a@example.com"))}) {
+					h.pushDest(p, at())
+				}
+				h.pushClient(cannedCOMQuery(t, 0, "UPDATE users SET seen = 1"), at())
+				h.pushDest(okResponseWithAffectedRows(1, 7), at())
+			})
+			if err != nil {
+				t.Fatalf("RecordV2: %v", err)
 			}
-			next := send(true, queuedQuery(0, "UPDATE users SET seen = 1"))
-			send(false, queuedOK(1, 7))
-			close(items)
-
-			asyncMySQLDecode(ctx, zaptest.NewLogger(t), items, mocks, decodeCtx, clientConn, models.OutgoingOptions{})
-
-			got := map[string]int{}
-			for _, m := range drainMocks(t, mocks) {
-				got[m.Spec.Metadata["requestOperation"]]++
+			if n := len(mocksOf(got, "COM_QUERY")); n != 1 {
+				t.Fatalf("the command after them recorded %d mocks, want 1", n)
 			}
-			if got["COM_QUERY"] != 1 {
-				t.Fatalf("the command after them recorded %d mocks, want 1", got["COM_QUERY"])
-			}
-			if orphaned, _ := mgr.WasMockOrphanedInWindow(next, next); orphaned {
-				t.Fatal("the test cases over the next command are left out")
-			}
-			orphaned, _ := mgr.WasMockOrphanedInWindow(execute, execute)
-			if valid {
-				if got["COM_STMT_PREPARE"] != 1 || got["COM_STMT_EXECUTE"] != 1 || orphaned {
-					t.Fatalf("a whole prepare and its execute recorded %v, execute left out: %v", got, orphaned)
+			prepares, executes := len(mocksOf(got, "COM_STMT_PREPARE")), len(mocksOf(got, "COM_STMT_EXECUTE"))
+			if whole {
+				wantLeftOut := 0
+				if c.largeQuery {
+					wantLeftOut = 1
+				}
+				if prepares != 1 || executes != 1 || leftOut.count() != wantLeftOut {
+					t.Fatalf("a whole prepare and its execute recorded %d and %d mocks, %d exchanges left out, want %d", prepares, executes, leftOut.count(), wantLeftOut)
 				}
 				return
 			}
-			if got["COM_STMT_PREPARE"] != 0 || got["COM_STMT_EXECUTE"] != 0 {
-				t.Fatalf("recorded %v: an execute of a prepare that was not recorded cannot replay", got)
+			if prepares != 0 || executes != 0 {
+				t.Fatalf("recorded %d prepares and %d executes: an execute of a prepare that was not recorded cannot replay", prepares, executes)
 			}
-			if !orphaned {
-				t.Fatal("the test cases over the execute are kept, and will fail at replay without its prepare")
+			if leftOut.count() != 2 {
+				t.Fatalf("%d exchanges left out, want the prepare and its execute", leftOut.count())
 			}
 		})
 	}
+}
+
+func queuedExecute(seq byte, id uint32) []byte {
+	p := make([]byte, 10)
+	p[0] = mysql.COM_STMT_EXECUTE
+	binary.LittleEndian.PutUint32(p[1:], id)
+	p[5] = 0
+	binary.LittleEndian.PutUint32(p[6:], 1)
+	return wrapPacket(p, seq)
+}
+
+func queuedQuery(seq byte, sql string) []byte {
+	p := append([]byte{mysql.COM_QUERY}, []byte(sql)...)
+	return wrapPacket(p, seq)
 }

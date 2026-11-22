@@ -12,29 +12,32 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// The real-socket tests can only provoke WSAECONNRESET and WSAECONNREFUSED.
-// The rest of the table is pinned here: without this, deleting an entry from
-// neterr_windows.go compiles and every test still passes.
+// The real-socket tests can only provoke WSAECONNRESET, WSAECONNREFUSED and
+// WSAEADDRINUSE. The rest of the table is pinned here: without this, deleting
+// an entry from neterr_windows.go compiles and every test still passes.
 func TestWindowsErrnoTable(t *testing.T) {
 	cases := []struct {
-		name                                   string
-		errno                                  syscall.Errno
-		reset, aborted, brokenPipe, connRefuse bool
+		name                                              string
+		errno                                             syscall.Errno
+		reset, aborted, brokenPipe, connRefuse, addrInUse bool
 	}{
-		{"WSAECONNRESET", windows.WSAECONNRESET, true, false, false, false},
-		{"WSAENETRESET", windows.WSAENETRESET, true, false, false, false},
-		{"WSAESHUTDOWN", windows.WSAESHUTDOWN, false, false, true, false},
-		{"WSAECONNREFUSED", windows.WSAECONNREFUSED, false, false, false, true},
+		{"WSAECONNRESET", windows.WSAECONNRESET, true, false, false, false, false},
+		{"WSAENETRESET", windows.WSAENETRESET, true, false, false, false, false},
+		{"WSAESHUTDOWN", windows.WSAESHUTDOWN, false, false, true, false, false},
+		{"WSAECONNREFUSED", windows.WSAECONNREFUSED, false, false, false, true, false},
+		{"WSAEADDRINUSE", windows.WSAEADDRINUSE, false, false, false, false, true},
 
 		// Ambiguous on Windows (genuine abort OR data-transmission timeout),
 		// so it maps to nothing. See the comment in neterr_windows.go: every
 		// caller excludes timeouts deliberately, and this is the only code
 		// that would smuggle one back in.
-		{"WSAECONNABORTED", windows.WSAECONNABORTED, false, false, false, false},
+		{"WSAECONNABORTED", windows.WSAECONNABORTED, false, false, false, false, false},
 
 		// Timeouts and unrelated Winsock failures must classify as nothing.
-		{"WSAETIMEDOUT", windows.WSAETIMEDOUT, false, false, false, false},
-		{"WSAEHOSTUNREACH", windows.WSAEHOSTUNREACH, false, false, false, false},
+		{"WSAETIMEDOUT", windows.WSAETIMEDOUT, false, false, false, false, false},
+		{"WSAEHOSTUNREACH", windows.WSAEHOSTUNREACH, false, false, false, false, false},
+		{"WSAEADDRNOTAVAIL", windows.WSAEADDRNOTAVAIL, false, false, false, false, false},
+		{"WSAEACCES", windows.WSAEACCES, false, false, false, false, false},
 	}
 
 	for _, c := range cases {
@@ -52,6 +55,9 @@ func TestWindowsErrnoTable(t *testing.T) {
 		}
 		if got := IsConnRefused(err); got != c.connRefuse {
 			t.Errorf("IsConnRefused(%s/%d) = %v, want %v", c.name, uintptr(c.errno), got, c.connRefuse)
+		}
+		if got := IsAddrInUse(err); got != c.addrInUse {
+			t.Errorf("IsAddrInUse(%s/%d) = %v, want %v", c.name, uintptr(c.errno), got, c.addrInUse)
 		}
 	}
 }

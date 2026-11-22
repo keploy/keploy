@@ -1,0 +1,4 @@
+Looking in indexes: http://127.0.0.1:36201/hang/
+Collecting flask==3.1.2
+ERROR: Could not install packages due to an OSError: HTTPConnectionPool(host='127.0.0.1', port=32899): Max retries exceeded with url: /packages/flask-3.1.2-py3-none-any.whl (Caused by ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=32899): Read timed out. (read timeout=3.0)"))
+

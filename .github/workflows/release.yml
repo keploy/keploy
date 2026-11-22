@@ -32,10 +32,13 @@ env:
 #     ships with the hosted runner is the supported path.
 #
 # Job graph:
-#   build-linux   (matrix amd64/arm64, native linux, plain `go build`)
+#   build-linux   (matrix amd64/arm64, native linux; cgo linked fully
+#                  static against musl by zig cc, checked to start on
+#                  Debian 11, Ubuntu 20.04, Amazon Linux 2, Rocky Linux 8)
 #   build-darwin  (macos-latest, Apple-silicon runner; native clang
-#                  builds the single darwin/arm64 binary, gon signs
-#                  and notarizes it before archiving)
+#                  builds the single darwin/arm64 binary,
+#                  notarize-darwin.sh signs it and has Apple
+#                  notarize it before archiving)
 #   build-windows (windows-latest, native cgo via MinGW on PATH)
 #   release       (ubuntu-latest, downloads all per-platform archives
 #                  and creates the GitHub release via `gh release create`)
@@ -55,6 +58,26 @@ env:
 # source of truth.
 
 jobs:
+  # ---------------------------------------------------------------
+  # keploy/integrations' tests against the tagged tree, with KEPLOY_PROVEN
+  # unset and set (integrations-tests.yml, against INTEGRATION_REF as the
+  # builds below are). It runs beside the builds; release (the binaries) and
+  # build-docker (the images) wait for it, so a tag whose tree fails
+  # integrations' tests publishes neither. Once integrations is fixed, re-run
+  # the failed jobs (`gh run rerun <run> --failed`) within a day, while the
+  # builds' artifacts last (retention-days: 1): it tests integrations' ref
+  # again and publishes. After a day, re-run all jobs.
+  # ---------------------------------------------------------------
+  integrations-tests:
+    uses: ./.github/workflows/integrations-tests.yml
+    # What integrations-tests.yml asks for; the workflow's contents: write is
+    # not passed on.
+    permissions:
+      contents: read
+      pull-requests: read
+    secrets:
+      INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
   # ---------------------------------------------------------------
   # Linux native builds (amd64 + arm64).
   #
@@ -98,30 +121,36 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # The pinned zig (zig cc, with musl) the linux binaries link with,
+      # cached on its pin so ziglang.org is asked once per version.
+      - name: Cache zig
+        uses: actions/cache@v4
+        with:
+          path: .zig
+          key: zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/linux/zig-toolchain.sh') }}
+
+      - name: Stage zig
+        run: |
+          sh .github/scripts/linux/zig-toolchain.sh "$GITHUB_WORKSPACE/.zig"
+          echo "KEPLOY_ZIG=$GITHUB_WORKSPACE/.zig/zig/zig" >> "$GITHUB_ENV"
+          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-cache" >> "$GITHUB_ENV"
+
       - name: Build keploy (public binary)
-        # CGO_ENABLED=1 for pg_query_go / libpg_query. gcc ships with
-        # both ubuntu-latest (amd64) and ubuntu-24.04-arm (arm64) so
-        # no toolchain install is required.
+        # cgo for pg_query_go / libpg_query, linked FULLY STATIC against
+        # musl by zig cc, so the binary runs on any Linux whatever its libc:
+        # linked by the runner's gcc against its glibc, v3.6.164 needed
+        # GLIBC_2.34 and did not start on Debian 11, Ubuntu 20.04, RHEL 8 or
+        # Amazon Linux 2. build-linux-release.sh is the recipe (and checks
+        # the binary is static and stripped).
         env:
-          CGO_ENABLED: "1"
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
           SERVER_URL: https://api.keploy.io
           GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euxo pipefail
           mkdir -p out/public
-          version="${{ steps.ver.outputs.version }}"
-          go build \
-            -tags=viper_bind_struct \
-            -ldflags="-s -w \
-              -X main.dsn=${SENTRY_DSN_BINARY} \
-              -X main.version=${version} \
-              -X main.apiServerURI=${SERVER_URL} \
-              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
-            -o out/public/keploy \
-            ./main.go
+          sh .github/scripts/linux/build-linux-release.sh binary "${{ matrix.arch }}" out/public/keploy "${SENTRY_DSN_BINARY}"
 
       - name: Package keploy_linux_${{ matrix.arch }}.tar.gz
         run: |
@@ -141,26 +170,25 @@ jobs:
 
       - name: Build keploy-docker (docker sentry dsn)
         env:
-          CGO_ENABLED: "1"
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
           SENTRY_DSN_DOCKER: ${{ secrets.SENTRY_DSN_DOCKER }}
           SERVER_URL: https://api.keploy.io
           GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euxo pipefail
           mkdir -p out/docker
-          version="${{ steps.ver.outputs.version }}"
-          go build \
-            -tags=viper_bind_struct \
-            -ldflags="-s -w \
-              -X main.dsn=${SENTRY_DSN_DOCKER} \
-              -X main.version=${version} \
-              -X main.apiServerURI=${SERVER_URL} \
-              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
-            -o out/docker/keploy \
-            ./main.go
+          sh .github/scripts/linux/build-linux-release.sh binary "${{ matrix.arch }}" out/docker/keploy "${SENTRY_DSN_DOCKER}"
           chmod +x out/docker/keploy
+
+      # Before anything is published: both binaries start, and the Postgres
+      # parser (the C code), linked the release's way, passes its tests, on
+      # the oldest distributions keploy supports (glibc 2.26 to 2.31).
+      - name: Run on Debian 11, Ubuntu 20.04, Amazon Linux 2 and Rocky Linux 8
+        run: |
+          set -euxo pipefail
+          sh .github/scripts/linux/build-linux-release.sh pgtest "${{ matrix.arch }}" out/pgparse.test
+          sh .github/scripts/linux/check-linux-release-distros.sh out/public/keploy "${{ matrix.arch }}" out/pgparse.test
+          sh .github/scripts/linux/check-linux-release-distros.sh out/docker/keploy "${{ matrix.arch }}" out/pgparse.test
 
       # Artifact name matches the previous build-go output so the
       # build-docker matrix legs below download exactly what they did
@@ -178,23 +206,45 @@ jobs:
   # silicon); there is no darwin/amd64 leg. macos-latest is itself an
   # Apple-silicon runner, so this is a plain host build: Xcode's clang
   # links the cgo binary against the SDK already on the runner, no
-  # cross-toolchain. The binary is signed/notarized with gon — same
-  # contract as the old goreleaser-on-macOS leg, just hand-rolled.
+  # cross-toolchain. .github/scripts/macos/notarize-darwin.sh signs the
+  # binary, submits it to Apple's notary service and waits for Apple's
+  # answer, each in its own step; its header says why not gon.
+  #
+  # Apple's notary, authentication and timestamp services fail now and
+  # then. The job uploads the signed zip and its submission id (artifact
+  # darwin-notary-state) before it waits, so rerunning only this job
+  # ("Re-run failed jobs") resumes that same submission: no build, no
+  # signing, no second submission.
   # ---------------------------------------------------------------
   build-darwin:
-    # Longer than the repo-wide 60 because this job blocks on Apple's
-    # notarization service, an external queue whose latency we do not control
-    # and which is documented to spike well past an hour. It previously had no
-    # bound at all; 120 still turns a wedge into two hours instead of six,
-    # without failing a legitimate release during an Apple-side slowdown.
+    # The wait for Apple's answer is bounded at 90 minutes (NOTARIZE_WAIT_S
+    # below), so the job ends with the submission id and the rerun hint
+    # before this ceiling; checkout, build, signing and upload take a few
+    # minutes, and a rerun skips the build, signing and upload.
     timeout-minutes: 120
     runs-on: macos-latest
+    env:
+      NOTARY_STATE: notary-state
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # On a first attempt nothing matches (a pattern that matches no
+      # artifact downloads none and passes), and resume says false.
+      - name: Download an earlier attempt's notarization state
+        uses: ./.github/actions/download-artifact-retry
+        with:
+          pattern: darwin-notary-state
+          path: ${{ env.NOTARY_STATE }}
+          merge-multiple: 'true'
+
+      - name: Resume an earlier attempt's notarization?
+        id: notary
+        run: bash .github/scripts/macos/notarize-darwin.sh resume "$NOTARY_STATE" >> "$GITHUB_OUTPUT"
+
       - name: Add Private Parsers
+        if: steps.notary.outputs.resume != 'true'
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
@@ -203,29 +253,24 @@ jobs:
           integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Import Code-Signing Certificates
+        if: steps.notary.outputs.resume != 'true'
         uses: Apple-Actions/import-codesign-certs@v5
         with:
           p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
           p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
 
-      - name: Install gon for code signing and app notarization
-        run: |
-          set -euxo pipefail
-          wget -q https://github.com/Bearer/gon/releases/download/v0.0.37/gon_macos.zip
-          unzip gon_macos.zip -d /usr/local/bin
-          rm -rf gon_macos.zip
-
       - name: Resolve release version
+        if: steps.notary.outputs.resume != 'true'
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build darwin/arm64 (native clang)
+        if: steps.notary.outputs.resume != 'true'
         # CGO_ENABLED=1 with Apple clang. GOOS/GOARCH are the runner's
         # own, so pg_query_go's libpg_query links against the SDK
         # that ships with Xcode on the runner. No external toolchain
-        # install. The output path is the one gon.json's "source"
-        # names — gon signs in place, so building straight into it
-        # avoids a stage/copy-back round trip.
+        # install. notarize-darwin.sh signs the binary in place and
+        # zips it for Apple; its wait writes the accepted binary back here.
         env:
           CGO_ENABLED: "1"
           GOOS: darwin
@@ -248,18 +293,38 @@ jobs:
             ./main.go
           chmod +x dist/keploy_darwin_arm64/keploy
 
-      - name: Code-sign and notarize via gon
+      - name: Code-sign
+        if: steps.notary.outputs.resume != 'true'
         env:
-          AC_PROVIDER: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
-          AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
-        # gon.json's "source" is ./dist/keploy_darwin_arm64/keploy, the
-        # path the build step writes to; the two files must move
-        # together. gon codesigns that binary in place, zips it for
-        # the notarization upload (keploy.zip) and blocks on Apple's
-        # verdict — hence this job's 120-minute ceiling.
-        run: |
-          set -euxo pipefail
-          gon -log-level=info -log-json ./gon.json
+          NOTARIZE_IDENTITY: "Developer ID Application: Shubham Jain"
+        run: bash .github/scripts/macos/notarize-darwin.sh sign dist/keploy_darwin_arm64/keploy
+
+      - name: Submit to Apple's notary service
+        if: steps.notary.outputs.resume != 'true'
+        env:
+          NOTARIZE_APPLE_ID: shubhamkjain@outlook.com
+          NOTARIZE_TEAM_ID: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
+        run: bash .github/scripts/macos/notarize-darwin.sh submit dist/keploy_darwin_arm64/keploy "$NOTARY_STATE"
+
+      # Before the wait, so that a rerun of this job finds the submission.
+      - name: Keep the submission for a rerun
+        if: steps.notary.outputs.resume != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-notary-state
+          path: ${{ env.NOTARY_STATE }}
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+      - name: Wait for Apple's notary service
+        env:
+          NOTARIZE_APPLE_ID: shubhamkjain@outlook.com
+          NOTARIZE_TEAM_ID: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
+          NOTARIZE_WAIT_S: '5400'
+        run: bash .github/scripts/macos/notarize-darwin.sh wait "$NOTARY_STATE" dist/keploy_darwin_arm64/keploy
 
       - name: Package keploy_darwin_arm64.tar.gz
         run: |
@@ -395,7 +460,7 @@ jobs:
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
     # headroom and cannot trip a job that is merely slow.
     timeout-minutes: 60
-    needs: [build-linux, build-darwin, build-windows]
+    needs: [build-linux, build-darwin, build-windows, integrations-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -405,25 +470,25 @@ jobs:
           fetch-depth: 0
 
       - name: Download linux amd64 archive
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: release-archive-linux-amd64
           path: release-assets
 
       - name: Download linux arm64 archive
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: release-archive-linux-arm64
           path: release-assets
 
       - name: Download darwin archive
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: release-archive-darwin-arm64
           path: release-assets
 
       - name: Download windows binary
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: release-archive-windows-amd64
           path: release-assets
@@ -490,7 +555,7 @@ jobs:
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
     # headroom and cannot trip a job that is merely slow.
     timeout-minutes: 60
-    needs: build-linux
+    needs: [build-linux, integrations-tests]
     strategy:
       fail-fast: true
       matrix:
@@ -530,7 +595,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
 
       - name: Download prebuilt binary
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: ${{ matrix.artifact }}
           path: dist/keploy-linux-${{ matrix.arch }}
@@ -599,8 +664,16 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
 
+      # The download is this repo's own action, which is read from the
+      # checkout; nothing else here needs one.
+      - name: Checkout the repository's actions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          persist-credentials: false
+
       - name: Download per-arch digests
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/download-artifact-retry
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*

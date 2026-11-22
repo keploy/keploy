@@ -249,14 +249,14 @@ func TestOpenDir(t *testing.T) {
 // open and the open itself. Called here without that earlier stat.
 func TestOpenCheckedDecidesOnTheOpenFile(t *testing.T) {
 	dir := t.TempDir()
-	if _, _, err := openChecked(dir, false); !errors.Is(err, ErrNotRegular) {
+	if _, _, err := openChecked(os.OpenFile, dir, false); !errors.Is(err, ErrNotRegular) {
 		t.Errorf("openChecked(directory, file) = %v, want ErrNotRegular", err)
 	}
 	p := filepath.Join(dir, "f")
 	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := openChecked(p, true); !errors.Is(err, ErrNotDir) {
+	if _, _, err := openChecked(os.OpenFile, p, true); !errors.Is(err, ErrNotDir) {
 		t.Errorf("openChecked(file, directory) = %v, want ErrNotDir", err)
 	}
 	if runtime.GOOS == "windows" {
@@ -265,7 +265,7 @@ func TestOpenCheckedDecidesOnTheOpenFile(t *testing.T) {
 	fifo := filepath.Join(dir, "fifo")
 	mkfifo(t, fifo)
 	withDeadline(t, 5*time.Second, func() {
-		if _, _, err := openChecked(fifo, false); !errors.Is(err, ErrNotRegular) {
+		if _, _, err := openChecked(os.OpenFile, fifo, false); !errors.Is(err, ErrNotRegular) {
 			t.Errorf("openChecked(FIFO) = %v, want ErrNotRegular", err)
 		}
 	})

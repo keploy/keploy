@@ -314,3 +314,48 @@ func TestFindChildPIDsReadsEachDescendantsProcessGroup(t *testing.T) {
 		}
 	}
 }
+
+// InterruptProcessTreeKilled says when the interrupt had to be followed by a
+// kill: a tree that ignores the graceful signal is killed, and says so; one
+// that exits on it is not.
+func TestInterruptProcessTreeKilledSaysWhenItKilled(t *testing.T) {
+	bin := buildSignalIgnorer(t)
+	port := ephemeralPortUtil(t)
+	for _, tc := range []struct {
+		name   string
+		cmd    *exec.Cmd
+		port   string
+		killed bool
+	}{
+		{"ignores SIGINT", exec.Command(bin, port), port, true},
+		{"exits on SIGINT", exec.Command("sleep", "600"), "", false},
+	} {
+		tc.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := tc.cmd.Start(); err != nil {
+			t.Fatalf("%s: start: %v", tc.name, err)
+		}
+		reaped := make(chan struct{})
+		go func() { _ = tc.cmd.Wait(); close(reaped) }()
+		// The ignorer binds its port once it ignores the signal: signal it
+		// only then.
+		for tc.port != "" {
+			c, err := net.DialTimeout("tcp", "127.0.0.1:"+tc.port, 100*time.Millisecond)
+			if err == nil {
+				_ = c.Close()
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		killed, err := InterruptProcessTreeKilled(zap.NewNop(), tc.cmd.Process.Pid, syscall.SIGINT)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if (killed != "") != tc.killed {
+			t.Errorf("%s: killed %q, want a kill %v", tc.name, killed, tc.killed)
+		}
+		if tc.killed && !strings.Contains(killed, "had not exited 3s later") {
+			t.Errorf("%s: the kill is said as %q, want the grace named", tc.name, killed)
+		}
+		<-reaped
+	}
+}

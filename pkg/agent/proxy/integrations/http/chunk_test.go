@@ -2,12 +2,18 @@ package http
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 const (
@@ -185,5 +191,153 @@ func TestChunkedResponseEmptyBody(t *testing.T) {
 		}
 	case <-time.After(testTimeout):
 		t.Fatalf("chunkedResponse stuck in loop after %d reads", destConn.readCount)
+	}
+}
+
+// endsAsItsDeadlineIsSet is a connection whose context ends as a read deadline
+// still to come is first set on it: it cancels the context then, and sets the
+// deadline only once the context's end has set its own, one already passed
+// (pUtil.InterruptOnDone), so that it replaces that one. It sets it as no
+// deadline: a read waits for data, the close, or a deadline already passed,
+// never for the clock.
+type endsAsItsDeadlineIsSet struct {
+	net.Conn
+	cancel      context.CancelFunc
+	interrupted chan struct{} // closed once a deadline already passed is set
+	interrupt   sync.Once
+	end         sync.Once
+}
+
+func (c *endsAsItsDeadlineIsSet) SetDeadline(t time.Time) error {
+	err := c.Conn.SetDeadline(t)
+	if !t.IsZero() && !t.After(time.Now()) {
+		c.interrupt.Do(func() { close(c.interrupted) })
+	}
+	return err
+}
+
+func (c *endsAsItsDeadlineIsSet) SetReadDeadline(t time.Time) error {
+	if t.IsZero() || !t.After(time.Now()) {
+		return c.Conn.SetReadDeadline(t)
+	}
+	c.end.Do(func() {
+		c.cancel()
+		<-c.interrupted
+	})
+	return c.Conn.SetReadDeadline(time.Time{})
+}
+
+// A request body read whose context ends just before it sets its read
+// deadline still ends: the deadline it sets replaces the one the context's end
+// set to end its read (pUtil.InterruptOnDone), so it looks at the context after
+// it sets it. It looked before, and then read on until its own deadline (20 s)
+// had passed, and held decodeHTTP, which waits for it, as long. Nothing writes
+// the body here, so only the context's end can end the read.
+func TestABodyReadEndsWithAContextThatEndsAsItsDeadlineIsSet(t *testing.T) {
+	_, proxy := tcpPair(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn := &endsAsItsDeadlineIsSet{Conn: proxy, cancel: cancel, interrupted: make(chan struct{})}
+	defer pUtil.InterruptOnDone(ctx, conn)()
+	finalReq := []byte("POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Length: 5\r\n\r\n")
+	returned := make(chan error, 1)
+	go func() {
+		returned <- newTestHTTP().contentLengthRequest(ctx, &finalReq, conn, nil, 5)
+	}()
+	select {
+	case err := <-returned:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("contentLengthRequest = %v, want the context's error", err)
+		}
+	case <-time.After(time.Minute): // the bound only turns a hang into a failure
+		t.Fatal("the body read went on reading after its context had ended")
+	}
+}
+
+// closedAtTheEndConn is a connection the context's end closes, as the proxy's
+// connection closer closes the client's at the call's end, while the deadline
+// the end sets (pUtil.InterruptOnDone) ends the read in progress: once a
+// deadline already passed is set on it, no read deadline can be set any more
+// (net.ErrClosed). Each read that starts is told on reading, when nothing
+// waits there already.
+type closedAtTheEndConn struct {
+	net.Conn
+	closed  atomic.Bool
+	reading chan struct{}
+}
+
+func (c *closedAtTheEndConn) SetDeadline(t time.Time) error {
+	if !t.IsZero() && !t.After(time.Now()) {
+		c.closed.Store(true) // before the deadline wakes the read
+	}
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *closedAtTheEndConn) SetReadDeadline(t time.Time) error {
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *closedAtTheEndConn) Read(p []byte) (int, error) {
+	select {
+	case c.reading <- struct{}{}:
+	default:
+	}
+	return c.Conn.Read(p)
+}
+
+// A request body read that the context's end stops returns the context's
+// error and logs no ERROR, the connection closed at the end too: the read
+// that sets a deadline before each read (Content-Length) failed to set the
+// next one and logged it, and the one that frames chunks logged its read's
+// end with no error, so not as the context's. Nothing writes the body here,
+// so only the context's end can end the read.
+func TestABodyReadTheContextsEndStopsLogsNoError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		head string
+		read func(h *HTTP, ctx context.Context, finalReq *[]byte, conn net.Conn) error
+	}{
+		{"Content-Length", "POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Length: 5\r\n\r\n",
+			func(h *HTTP, ctx context.Context, finalReq *[]byte, conn net.Conn) error {
+				return h.contentLengthRequest(ctx, finalReq, conn, nil, 5)
+			}},
+		{"chunked", "POST /u HTTP/1.1\r\nHost: api.example\r\nTransfer-Encoding: chunked\r\n\r\n",
+			func(h *HTTP, ctx context.Context, finalReq *[]byte, conn net.Conn) error {
+				return h.chunkedRequest(ctx, finalReq, conn, nil)
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, proxy := tcpPair(t)
+			conn := &closedAtTheEndConn{Conn: proxy, reading: make(chan struct{}, 1)}
+			core, logs := observer.New(zapcore.DebugLevel)
+			h := &HTTP{Logger: zap.New(core)}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			defer pUtil.InterruptOnDone(ctx, conn)()
+			finalReq := []byte(tc.head)
+			returned := make(chan error, 1)
+			go func() { returned <- tc.read(h, ctx, &finalReq, conn) }()
+			// The bounds below only turn a hang into a failure.
+			select {
+			case <-conn.reading:
+			case <-time.After(time.Minute):
+				t.Fatal("the body was not read")
+			}
+			cancel()
+			select {
+			case err := <-returned:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("the body read = %v, want the context's error", err)
+				}
+			case <-time.After(time.Minute):
+				t.Fatal("the body read went on reading after its context had ended")
+			}
+			for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+				t.Errorf("logged an ERROR at the context's end: %s %v", e.Message, e.Context)
+			}
+		})
 	}
 }

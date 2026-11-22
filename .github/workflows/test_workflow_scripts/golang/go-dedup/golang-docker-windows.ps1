@@ -135,29 +135,21 @@ function Find-FreePort {
 # Allocate FOUR distinct free ports up-front so concurrent jobs on the
 # same self-hosted VM never share a port:
 #   $appPort      - host port docker publishes the sample on
-#   $proxyPort    - keploy --proxy-port       (see below - HOST-published)
+#   $proxyPort    - keploy --proxy-port
 #   $incomingPort - keploy --incoming-proxy-port
 #   $dnsPort      - keploy --dns-port
 #
 # In docker-compose mode keploy injects a per-job `keploy-agent`
 # container into the compose project and intercepts via eBPF INSIDE the
 # compose network (pkg/client/app AddKeployAgentToCompose). That agent
-# container publishes only {AgentPort, ProxyPort, AppPorts} to the host
-# (pkg/platform/docker/docker.go GenerateKeployAgentService); dns-port
-# is forwarded to the container but bound in the container's own netns,
-# and incoming-proxy-port is not forwarded at all. So:
-#   - --proxy-port is the ESSENTIAL fix: it is host-published as
-#     `-p 127.0.0.1:<proxyPort>:<proxyPort>`. Scoping it to loopback
-#     narrows who can reach the interception listener but still
-#     allocates the host port, so two jobs on the default 16789 still
-#     make the second `docker compose up` fail with "port is already
-#     allocated". AgentPort is separately OS-assigned (unique), and the
-#     app host port is $appPort. Making --proxy-port unique per job is
-#     what actually unblocks concurrency here.
-#   - --dns-port / --incoming-proxy-port are container-scoped in this
-#     mode and do NOT collide across jobs; we still pass unique values
-#     as harmless belt-and-suspenders (deterministic, and correct if a
-#     future/native path ever binds them on the host).
+# container publishes only {AgentPort, AppPorts} to the host
+# (pkg/platform/docker/docker.go GenerateKeployAgentService). AgentPort
+# is separately OS-assigned (unique), and the app host port is
+# $appPort: making $appPort unique per job is what unblocks concurrency
+# here. The proxy, DNS and incoming-proxy ports are bound in the agent
+# container's own netns and do NOT collide across jobs; we still pass
+# unique values as harmless belt-and-suspenders (deterministic, and
+# correct if a future/native path ever binds them on the host).
 # Each Find-FreePort call re-probes OS availability from a fresh random
 # high port; we de-dup so the four never coincide.
 function New-UniqueFreePort {
@@ -506,10 +498,10 @@ function Show-KeployLogFiles {
 #      swallowed the first failure and sent $sent=0 requests.
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
 # 7 minutes, not 5, because this probe races keploy's own agent-readiness
-# wait and used to lose. On the compose lane keploy waits
-# pkg.DefaultAgentReadyTimeout (330s, pkg/util.go) for the in-docker
-# keploy-agent to report healthy, and only reports the real failure after
-# that. At 5 minutes this loop gave up 30s BEFORE keploy could speak, so a
+# wait and used to lose. On the compose lane keploy waited a fixed 330s
+# (pkg.DefaultAgentReadyTimeout, since removed: keploy now waits while the
+# agent's start makes progress) for the in-docker keploy-agent to report
+# healthy, and only reported the real failure after that. At 5 minutes this loop gave up 30s BEFORE keploy could speak, so a
 # genuinely failed bring-up surfaced as six "Unable to connect to the
 # remote server" retries instead of the actual cause — observed on run
 # 32388095493 / job 96488562918.

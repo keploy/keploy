@@ -297,12 +297,32 @@ var (
 // image that predates the token. This process handed that agent nothing, and
 // checking it for the token this process minted can only raise a false alarm
 // about a handoff that never happened.
-func RecordLaunch(agentURI string) {
+//
+// It returns the launch's number, Launched's, which ForgetLaunch takes.
+func RecordLaunch(agentURI string) uint64 {
 	launchMu.Lock()
 	defer launchMu.Unlock()
 
 	launchSeq++
 	launches[agentURI] = launchSeq
+	return launchSeq
+}
+
+// ForgetLaunch drops the record that this process launched an agent at
+// agentURI, when that record is still launch (Launched's number): that agent
+// is gone, and an agent at the address from then on is not this process's
+// unless it launches one there again (RecordLaunch). A later launch at the
+// address, which a compose test run makes for each test-set, is not dropped
+// by the stop of the one before it. A test that records the launch of an
+// agent at a loopback address must forget it: the address is the port the
+// system gave it, and a later test's agent may get the same port.
+func ForgetLaunch(agentURI string, launch uint64) {
+	launchMu.Lock()
+	defer launchMu.Unlock()
+
+	if launches[agentURI] == launch {
+		delete(launches, agentURI)
+	}
 }
 
 // Launched reports whether this process launched the agent at agentURI, and

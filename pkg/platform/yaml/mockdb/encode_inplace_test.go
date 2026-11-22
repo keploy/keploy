@@ -314,8 +314,8 @@ func trapMocks(t *testing.T, s string, tag string) map[string]*models.Mock {
 		m := *rows
 		setQuery(&m)
 		m.Spec.MySQLResponses = slices.Clone(rows.Spec.MySQLResponses)
-		rs := *m.Spec.MySQLResponses[0].Message.(*mysql.TextResultSet)
-		rs.Rows = slices.Clone(rs.Rows)
+		orig := m.Spec.MySQLResponses[0].Message.(*mysql.TextResultSet)
+		rs := mysql.TextResultSet{ColumnCount: orig.ColumnCount, Columns: orig.Columns, EOFAfterColumns: orig.EOFAfterColumns, Rows: slices.Clone(orig.Rows), FinalResponse: orig.FinalResponse}
 		row := *rs.Rows[0]
 		row.Values = slices.Clone(row.Values)
 		row.Values[0].Value = s
