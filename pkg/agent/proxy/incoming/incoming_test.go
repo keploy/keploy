@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -672,4 +673,324 @@ func TestAGRPCCallAPauseCostsIsCountedOnItsConnection(t *testing.T) {
 	cancel() // the ingress closes both ends
 	<-done
 	_ = client.Close()
+}
+
+// raceAtDoneReadCtx runs onFirstDone inside the first call to Done while
+// returning an unclosed channel, and delegates later Done calls to the
+// underlying context. On an accept loop that polls ctx.Done() before calling
+// SetDeadline, this places the shutdown race deterministically: the select
+// takes its default branch, and then the next operation runs with ctx already
+// canceled and the listener already closed.
+type raceAtDoneReadCtx struct {
+	context.Context
+	onFirstDone func()
+	once        sync.Once
+	firstCh     chan struct{}
+}
+
+func (c *raceAtDoneReadCtx) Done() <-chan struct{} {
+	first := false
+	c.once.Do(func() {
+		first = true
+		c.onFirstDone()
+	})
+	if first {
+		return c.firstCh
+	}
+	return c.Context.Done()
+}
+
+// Stopping an ingress forwarder cancels its context and closes its listener
+// concurrently with acceptIngress. Even when shutdown runs immediately after
+// the loop's context check — or when the listener is closed before the context
+// cancels — acceptIngress must exit cleanly without logging an ERROR or WARN.
+func TestAcceptIngressLogsNoErrorWhenListenerClosesAtShutdown(t *testing.T) {
+	t.Run("ctx cancels and listener closes after Done check", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		h := newGoTCPIngressHook(&IngressProxyManager{logger: zap.New(core)})
+
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		defer func() { _ = ln.Close() }()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rctx := &raceAtDoneReadCtx{
+			Context: ctx,
+			firstCh: make(chan struct{}),
+			onFirstDone: func() {
+				cancel()
+				_ = ln.Close()
+			},
+		}
+
+		h.acceptIngress(rctx, ln, "127.0.0.1:1", make(chan struct{}, 1), 0)
+
+		if !listenerClosed(t, ln) {
+			t.Fatal("acceptIngress returned with the listener still open")
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("acceptIngress logged %v on shutdown, want no WARN or ERROR", logs.All())
+		}
+	})
+
+	t.Run("listener closed before ctx cancels", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		h := newGoTCPIngressHook(&IngressProxyManager{logger: zap.New(core)})
+
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		h.acceptIngress(context.Background(), ln, "127.0.0.1:1", make(chan struct{}, 1), 0)
+
+		if logs.Len() != 0 {
+			t.Fatalf("acceptIngress logged %v on a closed listener, want no WARN or ERROR", logs.All())
+		}
+	})
+
+	t.Run("ctx cancel stops forwarder silently without StopIngress", func(t *testing.T) {
+		testnet.HoldFinalizers(t)
+		core, logs := observer.New(zapcore.WarnLevel)
+		h := newGoTCPIngressHook(&IngressProxyManager{logger: zap.New(core)})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		port := startIngressAtFreePort(t, ctx, h)
+		st := forwarderOf(t, h, port)
+
+		cancel()
+		<-st.done
+
+		if !listenerClosed(t, st.listener) {
+			t.Fatalf("IPv4 listener on port %d still open after ctx cancel", port)
+		}
+		if st.listener6 != nil && !listenerClosed(t, st.listener6) {
+			t.Fatalf("IPv6 listener on port %d still open after ctx cancel", port)
+		}
+		if err := bindAgain(t, port); err != nil {
+			t.Fatalf("port %d should be free after ctx cancel, bind failed: %v", port, err)
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("forwarder logged %v on ctx cancel, want no WARN or ERROR", logs.All())
+		}
+	})
+
+	t.Run("ctx already canceled before acceptIngress starts", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		h := newGoTCPIngressHook(&IngressProxyManager{logger: zap.New(core)})
+
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		defer func() { _ = ln.Close() }()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		h.acceptIngress(ctx, ln, "127.0.0.1:1", make(chan struct{}, 1), 0)
+
+		if !listenerClosed(t, ln) {
+			t.Fatal("acceptIngress returned with the listener still open on a canceled ctx")
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("acceptIngress logged %v on an already-canceled ctx, want no WARN or ERROR", logs.All())
+		}
+	})
+}
+
+type deadlineOnAcceptCtx struct {
+	context.Context
+	mu   sync.Mutex
+	err  error
+	done chan struct{}
+}
+
+func newDeadlineOnAcceptCtx() *deadlineOnAcceptCtx {
+	return &deadlineOnAcceptCtx{
+		Context: context.Background(),
+		done:    make(chan struct{}),
+	}
+}
+
+func (c *deadlineOnAcceptCtx) expire() {
+	c.mu.Lock()
+	if c.err == nil {
+		c.err = context.DeadlineExceeded
+		close(c.done)
+	}
+	c.mu.Unlock()
+}
+
+func (c *deadlineOnAcceptCtx) Done() <-chan struct{} { return c.done }
+
+func (c *deadlineOnAcceptCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+type cancelOnAcceptListener struct {
+	net.Listener
+	cancel context.CancelFunc
+	conn   net.Conn
+	mu     sync.Mutex
+	calls  int
+}
+
+func (l *cancelOnAcceptListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	l.calls++
+	n := l.calls
+	l.mu.Unlock()
+	if n == 1 {
+		l.cancel()
+		return l.conn, nil
+	}
+	return nil, net.ErrClosed
+}
+
+func (l *cancelOnAcceptListener) Close() error { return nil }
+
+// If ctx ends just as Accept returns a connection, acceptIngress must close
+// that connection and exit rather than handing it off on an ended context.
+// Using DeadlineExceeded distinguishes a direct close from handleConnection
+// closing after logging an initial-read ERROR (utils.LogError suppresses only
+// context.Canceled, not context.DeadlineExceeded).
+func TestAcceptIngressClosesConnectionAcceptedAfterCancel(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	h := newGoTCPIngressHook(&IngressProxyManager{logger: zap.New(core)})
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	ctx := newDeadlineOnAcceptCtx()
+	ln := &cancelOnAcceptListener{cancel: ctx.expire, conn: server}
+
+	h.acceptIngress(ctx, ln, "127.0.0.1:1", make(chan struct{}, 1), 0)
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := client.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("accepted connection after cancel read %v, want io.EOF (closed)", err)
+	}
+	ln.mu.Lock()
+	calls := ln.calls
+	ln.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("Accept called %d times after cancel, want 1", calls)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("acceptIngress logged %v, want no WARN or ERROR", logs.All())
+	}
+}
+
+type blockingAcceptListener struct {
+	net.Listener
+	entered   chan struct{}
+	closed    chan struct{}
+	enterOnce sync.Once
+	closeOnce sync.Once
+	mu        sync.Mutex
+	closes    int
+}
+
+func newBlockingAcceptListener() *blockingAcceptListener {
+	return &blockingAcceptListener{
+		entered: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+}
+
+func (l *blockingAcceptListener) Accept() (net.Conn, error) {
+	l.enterOnce.Do(func() { close(l.entered) })
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *blockingAcceptListener) Close() error {
+	l.mu.Lock()
+	l.closes++
+	l.mu.Unlock()
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *blockingAcceptListener) closeCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closes
+}
+
+// Once acceptIngress is blocked in Accept, canceling ctx must close the
+// listener via AfterFunc and wake the loop immediately without StopIngress.
+func TestAcceptIngressWakesBlockedAcceptOnContextCancel(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	h := newGoTCPIngressHook(&IngressProxyManager{logger: zap.New(core)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ln := newBlockingAcceptListener()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.acceptIngress(ctx, ln, "127.0.0.1:1", make(chan struct{}, 1), 0)
+	}()
+
+	<-ln.entered
+	cancel()
+	<-done
+
+	if ln.closeCount() == 0 {
+		t.Fatal("listener was not closed when ctx canceled while blocked in Accept")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("acceptIngress logged %v on ctx cancel, want no WARN or ERROR", logs.All())
+	}
+}
+
+type errAcceptListener struct {
+	net.Listener
+	err    error
+	mu     sync.Mutex
+	closes int
+}
+
+func (l *errAcceptListener) Accept() (net.Conn, error) { return nil, l.err }
+
+func (l *errAcceptListener) Close() error {
+	l.mu.Lock()
+	l.closes++
+	l.mu.Unlock()
+	return nil
+}
+
+func (l *errAcceptListener) closeCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closes
+}
+
+// When Accept fails while ctx is still live (so AfterFunc does not run),
+// acceptIngress must still close the listener before returning so the bound
+// port is never leaked.
+func TestAcceptIngressClosesListenerWhenAcceptFailsOnLiveContext(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	h := newGoTCPIngressHook(&IngressProxyManager{logger: zap.New(core)})
+
+	ln := &errAcceptListener{err: errors.New("accept failed")}
+	h.acceptIngress(context.Background(), ln, "127.0.0.1:1", make(chan struct{}, 1), 0)
+
+	if got := ln.closeCount(); got != 1 {
+		t.Fatalf("listener Close called %d times, want 1", got)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("acceptIngress logged %v, want no WARN or ERROR", logs.All())
+	}
 }

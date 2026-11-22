@@ -522,31 +522,35 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 // the listener is closed.
 func (h *goTCPIngressHook) acceptIngress(ctx context.Context, listener net.Listener, newAppAddr string, sem chan struct{}, origPort uint16) {
 	logger := h.pm.logger
-	tcpListener := listener.(*net.TCPListener)
-	// Release the listener (and its bound port) whenever the accept loop exits,
-	// even if StopIngress is never called for this forwarder (e.g. it raced with
-	// shutdown and missed StopAll's snapshot). Close is idempotent — StopIngress
-	// may also close it — and this runs before the forwarder's done is closed
-	// so a StopIngress waiter observes the port freed. Prevents the port from
-	// lingering post-exit.
-	defer func() { _ = listener.Close() }()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
+	// Close the listener as soon as ctx ends so Accept unblocks immediately
+	// without polling deadlines, and also release the listener (and its bound
+	// port) whenever the accept loop exits, even if StopIngress is never
+	// called for this forwarder (e.g. it raced with shutdown and missed
+	// StopAll's snapshot). Close is idempotent — StopIngress may also close
+	// it — and the defer runs before the forwarder's done is closed so a
+	// StopIngress waiter observes the port freed.
+	closeDone := make(chan struct{})
+	stopClose := context.AfterFunc(ctx, func() {
+		defer close(closeDone)
+		_ = listener.Close()
+	})
+	defer func() {
+		if !stopClose() {
+			<-closeDone
 		}
-		err := tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
-		if err != nil {
-			logger.Error("Failed to set deadline on ingress listener", zap.Error(err))
+		_ = listener.Close()
+	}()
+	for {
+		if ctx.Err() != nil {
 			return
 		}
 		clientConn, err := listener.Accept()
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
-			}
 			logger.Debug("Stopping ingress accept loop.", zap.Error(err))
+			return
+		}
+		if ctx.Err() != nil {
+			_ = clientConn.Close()
 			return
 		}
 
