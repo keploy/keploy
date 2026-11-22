@@ -5,8 +5,10 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,7 +23,10 @@ import (
 // words that it sent the client its TCP FIN, and how often it was asked
 // before one.
 type finSentRecorder struct {
-	closed      bool
+	closed bool
+	// inner, when it can say whether the connection closed before the
+	// proxy's FIN (finSentSocket: Windows' socket), answers for it.
+	inner       clientSocket
 	told, asked atomic.Int32
 }
 
@@ -29,7 +34,13 @@ func (*finSentRecorder) look() clientLook        { return clientLook{said: clien
 func (*finSentRecorder) written() (uint64, bool) { return 0, false }
 func (s *finSentRecorder) proxyFINSent()         { s.told.Add(1) }
 func (s *finSentRecorder) toldTimes() int32      { return s.told.Load() }
-func (s *finSentRecorder) closedBeforeFIN() bool { s.asked.Add(1); return s.closed }
+func (s *finSentRecorder) closedBeforeFIN() bool {
+	s.asked.Add(1)
+	if f, ok := s.inner.(finSentSocket); ok {
+		return f.closedBeforeFIN()
+	}
+	return s.closed
+}
 
 // The client's socket is told of the proxy's FIN when the half-close of the
 // client conn reached its TCP socket, through the wrappers over it, and not
@@ -92,7 +103,8 @@ func TestTheWalkToTheClientsSocketEndsOnACycleOfWrappers(t *testing.T) {
 // Through a relay: the client's FIN forwarded to the destination tells the
 // client's socket nothing; the destination's FIN forwarded to the client
 // tells it once, asked first whether the connection had closed: one that
-// had (a client's reset) is half-closed all the same, and told nothing.
+// had (a client's reset) is taken as over, not half-closed, and told nothing:
+// the client reads no FIN, and the relay ends all the same.
 func TestTheRelayTellsTheClientsSocketWhenItForwardsTheDestinationsFIN(t *testing.T) {
 	t.Parallel()
 	for _, closed := range []bool{false, true} {
@@ -128,7 +140,18 @@ func relayTellsTheDestinationsFIN(t *testing.T, closed bool) {
 	}
 	_ = server.(*net.TCPConn).CloseWrite()
 	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if got, err := io.ReadAll(app); err != nil || string(got) != "answer" {
+	if closed {
+		// Its socket says the connection closed: the client reads the
+		// answer, and no FIN follows it.
+		got := make([]byte, len("answer"))
+		if _, err := io.ReadFull(app, got); err != nil || string(got) != "answer" {
+			t.Fatalf("the client read %q, %v, want the answer", got, err)
+		}
+		_ = app.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if n, err := app.Read(make([]byte, 1)); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("the client read %d byte(s), %v after the answer; want nothing, no FIN sent it", n, err)
+		}
+	} else if got, err := io.ReadAll(app); err != nil || string(got) != "answer" {
 		t.Fatalf("the client read %q, %v, want the answer and the proxy's FIN", got, err)
 	}
 	select {

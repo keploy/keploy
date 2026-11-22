@@ -16,7 +16,9 @@ import (
 // The answer's head, when the upstream sent one before the fault (truncate,
 // or AfterHead), is the mock's response as recorded: its status line, its
 // reason phrase and its headers, Content-Length as the upstream sent it, and
-// the BodyBytes of its body the upstream sent.
+// the BodyBytes of its body the upstream sent. A stopped_reading fault's is a
+// whole answer's instead, the fault keeping how the upstream framed the body
+// (FaultStoppedReading).
 //
 // The format is closed: a kind this keploy does not know, or a field a kind
 // does not take, is refused by Validate with the reason named, never served
@@ -33,12 +35,32 @@ type Fault struct {
 	Kind FaultKind `json:"kind" yaml:"kind" bson:"kind"`
 	// AfterHead: the upstream sent the answer's head (status line and
 	// headers) and BodyBytes of its body before the fault. For reset and
-	// timeout only: a truncate always sends the head, an eof never does
-	// (an eof after the head is a truncate).
+	// timeout, and always for stopped_reading: a truncate always sends the
+	// head, an eof never does (an eof after the head is a truncate).
 	AfterHead bool `json:"after_head,omitempty" yaml:"after_head,omitempty" bson:"after_head,omitempty"`
 	// BodyBytes is how many bytes of the body the upstream sent before the
 	// fault, once it had sent the head.
 	BodyBytes int64 `json:"body_bytes,omitempty" yaml:"body_bytes,omitempty" bson:"body_bytes,omitempty"`
+	// ContentLength, for stopped_reading, is the Content-Length the upstream
+	// sent the answer's head with, which replay sends it with: 0 for a head
+	// with none. The mock's response carries the length of what the
+	// application read instead, for a reader that drops the fault.
+	ContentLength int64 `json:"content_length,omitempty" yaml:"content_length,omitempty" bson:"content_length,omitempty"`
+	// Chunked, for stopped_reading: the upstream sent the body chunked,
+	// which replay sends it as. A head with neither this nor a
+	// ContentLength left the body to the connection's close to end.
+	Chunked bool `json:"chunked,omitempty" yaml:"chunked,omitempty" bson:"chunked,omitempty"`
+	// AppEndedFirst, for stopped_reading and timeout: at record the
+	// application had ended its side (its FIN, or a reset) before the
+	// upstream's end reached it, and the call was judged by that end. A FIN
+	// cannot say whether the application closed or only half-closed
+	// (shutdown(SHUT_WR)) and read on, so at replay its FIN, before the
+	// answer or after it, does not end the hold: only a reset, the run's
+	// end, or a later answer served from the same mock and held does. A
+	// fault without it (written by hand, or by a keploy that did not record
+	// it) ends the hold at the application's FIN, unless its socket says
+	// that FIN was in before the answer was written.
+	AppEndedFirst bool `json:"app_ended_first,omitempty" yaml:"app_ended_first,omitempty" bson:"app_ended_first,omitempty"`
 	// Delay, for a delay, is how long the whole answer is held before it is
 	// sent, bounded by the run. Only a delay takes one.
 	Delay time.Duration `json:"delay,omitempty" yaml:"delay,omitempty" bson:"delay,omitempty"`
@@ -62,11 +84,30 @@ const (
 	// BodyBytes of the body (AfterHead), before the application closed the
 	// connection: its own client gave up. It is the application's close that
 	// ends it, never a clock: replay answers nothing more and holds the
-	// connection until the application closes it or the run ends.
+	// connection until the application closes it or the run ends; one
+	// recorded with AppEndedFirst, until a reset, the run's end, or a later
+	// answer served from the same mock and held.
 	FaultTimeout FaultKind = "timeout"
 	// FaultTruncate: the upstream sent the head, with the Content-Length it
 	// sent, and BodyBytes of the body, then closed the connection.
 	FaultTruncate FaultKind = "truncate"
+	// FaultStoppedReading: the application read the answer's head and
+	// BodyBytes of its body, then stopped reading and closed the connection,
+	// whether the upstream sent more after that or nothing: what it read is
+	// all it had, its end never. Its mock's response is a whole answer's,
+	// the body as far as the application read it, decoded, with a
+	// Content-Length of its size and no Transfer-Encoding, so a reader of
+	// the mock that drops the fault serves it whole. The fault keeps how
+	// the upstream framed the body (ContentLength, Chunked). Replay sends
+	// that head framed so, and the body without its end: under the
+	// upstream's Content-Length, which it does not reach; as one chunk with
+	// no last chunk; or, framed by the close, as it is; a compressed body
+	// flushed, not ended. Then it holds the connection until the
+	// application closes it or the run ends (with AppEndedFirst, as a
+	// recording writes it, until a reset, the run's end, or a later answer
+	// served from the same mock and held), never ended by a clock.
+	// AfterHead always.
+	FaultStoppedReading FaultKind = "stopped_reading"
 	// FaultDelay: the whole answer, sent once Delay has passed. A recording
 	// holds none (a record makes no verdict on wall-clock time); a delay is
 	// written by hand or by a tool, and replay bounds it by the run.
@@ -92,6 +133,16 @@ func (f *Fault) Validate() error {
 	}
 	switch f.Kind {
 	case FaultReset, FaultTimeout:
+	case FaultStoppedReading:
+		if !f.AfterHead {
+			return fmt.Errorf("fault stopped_reading without after_head: an application that closed before the head came had no answer; write kind timeout")
+		}
+		if f.ContentLength < 0 {
+			return fmt.Errorf("fault stopped_reading with content_length %d: a length sent is not negative; leave it out for a head that sent none", f.ContentLength)
+		}
+		if f.ContentLength > 0 && f.Chunked {
+			return fmt.Errorf("fault stopped_reading with content_length and chunked: a head frames its body one way; keep the one the upstream sent")
+		}
 	case FaultEOF:
 		if f.AfterHead {
 			return fmt.Errorf("fault eof with after_head: an upstream that closed after the head truncated the answer; write kind truncate")
@@ -104,17 +155,23 @@ func (f *Fault) Validate() error {
 		if f.Delay <= 0 {
 			return fmt.Errorf("fault delay of %s: a delay holds the answer for a positive duration", f.Delay)
 		}
-		if f.AfterHead || f.BodyBytes != 0 {
-			return fmt.Errorf("fault delay with after_head or body_bytes: a delay sends the whole answer")
+		if f.AfterHead || f.BodyBytes != 0 || f.ContentLength != 0 || f.Chunked || f.AppEndedFirst {
+			return fmt.Errorf("fault delay with after_head, body_bytes, content_length, chunked or app_ended_first: a delay sends the whole answer")
 		}
 		return nil
 	case "":
-		return fmt.Errorf("fault with no kind: write one of reset, eof, timeout, truncate, delay")
+		return fmt.Errorf("fault with no kind: write one of reset, eof, timeout, truncate, stopped_reading, delay")
 	default:
-		return fmt.Errorf("%w: fault kind %q is not one this keploy knows (reset, eof, timeout, truncate, delay); upgrade keploy", ErrFaultUnsupported, f.Kind)
+		return fmt.Errorf("%w: fault kind %q is not one this keploy knows (reset, eof, timeout, truncate, stopped_reading, delay); upgrade keploy", ErrFaultUnsupported, f.Kind)
 	}
 	if f.Delay != 0 {
 		return fmt.Errorf("fault %s with a delay: only kind delay takes one", f.Kind)
+	}
+	if f.Kind != FaultStoppedReading && (f.ContentLength != 0 || f.Chunked) {
+		return fmt.Errorf("fault %s with content_length or chunked: only kind stopped_reading takes them; its head is the mock's response as the upstream sent it", f.Kind)
+	}
+	if f.AppEndedFirst && f.Kind != FaultStoppedReading && f.Kind != FaultTimeout {
+		return fmt.Errorf("fault %s with app_ended_first: only kinds stopped_reading and timeout take it; the upstream's end judged this call", f.Kind)
 	}
 	if f.BodyBytes < 0 {
 		return fmt.Errorf("fault %s with body_bytes %d: a count of bytes sent is not negative", f.Kind, f.BodyBytes)
@@ -148,6 +205,8 @@ func (f *Fault) String() string {
 		return "no answer until the application closed"
 	case FaultTruncate:
 		return "upstream sent " + sent + ", then closed"
+	case FaultStoppedReading:
+		return "the application read " + sent + ", then stopped reading and closed"
 	case FaultDelay:
 		return "answer held " + f.Delay.String()
 	}
