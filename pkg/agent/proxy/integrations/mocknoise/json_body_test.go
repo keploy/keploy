@@ -248,10 +248,13 @@ func TestARecordedBodyGivenDecodedGetsTheVerdictsItsBytesGet(t *testing.T) {
 		viaDiff = !viaDiff
 		user := map[string][]string{"tags": {}}
 		verdicts := map[bool]int{}
-		for _, liveRaw := range [][]byte{jsonBodyCases[0], []byte(`not json`)} {
+		for _, liveRaw := range [][]byte{jsonBodyCases[0], jsonBodyCases[5], []byte(`not json`), beyondFloat64} {
 			for i, rec := range jsonBodyCases {
-				var value any
-				if !json.Valid(rec) || json.Unmarshal(rec, &value) != nil {
+				if !json.Valid(rec) {
+					continue
+				}
+				value, err := matcher.UnmarshallJSON(string(rec), nil)
+				if err != nil {
 					continue
 				}
 				made := 0

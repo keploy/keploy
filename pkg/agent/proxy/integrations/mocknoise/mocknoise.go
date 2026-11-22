@@ -485,12 +485,12 @@ func NewJSONBody(raw []byte) *JSONBody {
 	return &JSONBody{raw: raw}
 }
 
-// NewDecodedJSONBody is a JSON body given as the value json.Unmarshal
-// decodes its bytes into (an interface{}: map[string]any, []any, float64,
-// string, bool, nil) and a function that makes those bytes, called on the
-// first read of them (Raw), if any. The caller vouches that value is what
-// json.Unmarshal makes of raw's bytes, which are JSON: the body is neither
-// validated nor decoded (Reads stays 0).
+// NewDecodedJSONBody is a JSON body given as the value matcher.UnmarshallJSON
+// decodes its bytes into (map[string]any, []any, json.Number, string, bool,
+// nil — or float64 when values fit losslessly in IEEE-754) and a function that
+// makes those bytes, called on the first read of them (Raw), if any. The caller
+// vouches that value matches what matcher.UnmarshallJSON makes of raw's bytes,
+// which are JSON: the body is neither validated nor decoded (Reads stays 0).
 func NewDecodedJSONBody(value any, raw func() []byte) *JSONBody {
 	return &JSONBody{rawFrom: raw, checked: true, valid: true, read: true, decoded: true, value: value}
 }

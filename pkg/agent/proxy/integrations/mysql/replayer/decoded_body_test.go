@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -86,8 +87,8 @@ func TestARecordingsBodyIsMadeDecodedAsItsBytesDecode(t *testing.T) {
 				return
 			}
 			if plain {
-				var want any
-				if err := json.Unmarshal(raw, &want); err != nil {
+				want, err := matcher.UnmarshallJSON(string(raw), nil)
+				if err != nil {
 					t.Fatalf("the bytes %s do not decode: %v", raw, err)
 				}
 				if !reflect.DeepEqual(value, want) {
