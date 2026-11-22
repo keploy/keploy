@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -1073,6 +1074,43 @@ type RequestNoise struct {
 	URL    []string
 }
 
+// foldNoiseKeys returns a copy of src with its keys lowercased, merging keys
+// that differ only in case deterministically in sorted raw-key order: an entry
+// with no patterns (full ignore) wins over any pattern list, and two pattern
+// lists are unioned without duplicates.
+func foldNoiseKeys(src map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(src))
+	keys := make([]string, 0, len(src))
+	for k := range src {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		lk := strings.ToLower(k)
+		v := src[k]
+		existing, seen := out[lk]
+		if !seen {
+			if len(v) == 0 {
+				out[lk] = []string{}
+			} else {
+				out[lk] = slices.Clone(v)
+			}
+			continue
+		}
+		if len(existing) == 0 || len(v) == 0 {
+			out[lk] = []string{}
+			continue
+		}
+		for _, p := range v {
+			if !slices.Contains(existing, p) {
+				existing = append(existing, p)
+			}
+		}
+		out[lk] = existing
+	}
+	return out
+}
+
 // requestHeaderNoise is the header noise a call is matched with under opts,
 // by lowercased name: keploy.yml's header noise, and flaky (the static list:
 // flakyHeaderNoise) for each header keploy.yml does not name, unless
@@ -1081,7 +1119,7 @@ type RequestNoise struct {
 // outgoing requests may read at once. nil when neither names a header.
 func requestHeaderNoise(opts models.OutgoingOptions, flaky map[string][]string) map[string][]string {
 	// Extract header noise from noise configuration.
-	// We make a shallow copy so that injecting default flaky headers
+	// We make a copy so that injecting default flaky headers
 	// below does not mutate the shared opts.NoiseConfig map, which
 	// may be accessed concurrently by other outgoing requests.
 	// Keys are lowercased during copy because HeadersContainKeys
@@ -1089,17 +1127,7 @@ func requestHeaderNoise(opts models.OutgoingOptions, flaky map[string][]string) 
 	var headerNoise map[string][]string
 	if opts.NoiseConfig != nil {
 		if hn, ok := opts.NoiseConfig["header"]; ok {
-			headerNoise = make(map[string][]string, len(hn))
-			for k, v := range hn {
-				lk := strings.ToLower(k)
-				if existing, ok := headerNoise[lk]; ok {
-					// Merge value slices on case-variant collision
-					// to keep behaviour deterministic.
-					headerNoise[lk] = append(existing, v...)
-				} else {
-					headerNoise[lk] = v
-				}
-			}
+			headerNoise = foldNoiseKeys(hn)
 		}
 	}
 
@@ -1141,13 +1169,12 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 	// noise index matches lowercased paths. An entry keeps its patterns:
 	// it excuses a field only when the recorded and the live value each
 	// match one, and an entry with none excuses the field whatever it holds.
+	// Keys that differ only in case are merged deterministically so map
+	// iteration order never decides which entry wins.
 	var bodyNoise map[string][]string
 	if opts.NoiseConfig != nil {
 		if bn, ok := opts.NoiseConfig["requestbody"]; ok {
-			bodyNoise = make(map[string][]string, len(bn))
-			for k, v := range bn {
-				bodyNoise[strings.ToLower(k)] = append([]string{}, v...)
-			}
+			bodyNoise = foldNoiseKeys(bn)
 		}
 	}
 
