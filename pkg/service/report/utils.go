@@ -161,6 +161,11 @@ func applyCliColorsToDiff(diff string) string {
 	sb.Grow(len(diff) + 100)
 
 	scanner := bufio.NewScanner(strings.NewReader(diff))
+	// A diff line holds a whole value, and a body field can be far longer than
+	// the scanner's default 64 KiB: past it the scanner stops, without an
+	// error anyone reads, and the rest of the diff is dropped. No line is
+	// longer than the diff.
+	scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), len(diff)+1)
 	first := true
 
 	for scanner.Scan() {
