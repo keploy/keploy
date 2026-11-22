@@ -115,6 +115,27 @@ exit 3`)
 	}
 }
 
+// TestDockerAgentCancelOfAClientAlreadyWaitedFor: a `docker run` client that
+// ended and was waited for before the stop's kill is not killed -- its pid,
+// and its group's, may be another's by then -- and the stop reports no
+// failure: the command had ended.
+func TestDockerAgentCancelOfAClientAlreadyWaitedFor(t *testing.T) {
+	log, release := fakeEngine(t)
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := exec.Command("true")
+	if err := client.Run(); err != nil {
+		t.Fatal(err)
+	}
+	run := newAgentRun()
+	run.ready.Store(true)
+	if err := dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(&removesAtOnce{}, stopTestContainer))(); err != nil {
+		t.Fatalf("the stop of a client already waited for: %v", err)
+	}
+	requireSignalledAndWaited(t, engineLines(t, log))
+}
+
 // dockerRunStop is a docker-run run stopped once its `docker run` ran
 // (stopADockerRun).
 type dockerRunStop struct {
