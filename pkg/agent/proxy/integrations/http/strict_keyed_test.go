@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strconv"
@@ -130,6 +131,52 @@ func TestTheStrictKeysOfARecording(t *testing.T) {
 		strictKeyIndexes.mu.Unlock()
 		if size > noiseIndexesCap {
 			t.Fatalf("%d indexes kept; at most %d", size, noiseIndexesCap)
+		}
+	}
+}
+
+// A strict call under the switch reads by key only from a store with no
+// exact view and no stateful sequence view that reads both tiers by key: it
+// is served its recording by key from such a store, and from one under
+// exact serving or a sequence view, one with no keyed session read, and one
+// that reads no key, it reads no key and leaves the call to the whole read.
+func TestAKeyedStrictReadReadsByKeyOnlyWhereNoViewServes(t *testing.T) {
+	h, _, _ := learnOn(t)
+	n := h.newStrictNoise(nil, nil, nil)
+	m := learnRecorded("mock-0", 0, "POST", "/item", `{"id":1}`, nil, `{}`)
+	in := live("POST", "/item", `{"id":1}`, nil)
+	db := newKeyedLearnDb([]*models.Mock{m}, nil)
+	served, retry, err := h.keyedStrictRead(context.Background(), in, db, varScope{}, n, nil, nil, nil, true)
+	if err != nil || retry || served == nil || served.Name != "mock-0" || db.keyed == 0 || db.whole != 0 {
+		t.Fatalf("served %v (retry %v, err %v) in %d keyed walks and %d whole reads; want mock-0, by key alone", served, retry, err, db.keyed, db.whole)
+	}
+	for _, c := range []struct {
+		name string
+		db   func() (integrations.MockMemDb, *keyedLearnDb)
+	}{
+		{"exact serving", func() (integrations.MockMemDb, *keyedLearnDb) {
+			d := newKeyedLearnDb([]*models.Mock{m}, nil)
+			d.exact = true
+			return d, d
+		}},
+		{"a sequence view", func() (integrations.MockMemDb, *keyedLearnDb) {
+			d := newKeyedLearnDb([]*models.Mock{m}, nil)
+			d.sequence = true
+			return d, d
+		}},
+		{"no keyed session read", func() (integrations.MockMemDb, *keyedLearnDb) {
+			d := newKeyedLearnDb([]*models.Mock{m}, nil)
+			return perTestKeyedOnly{learnDb: d.learnDb, k: d}, d
+		}},
+		{"no keyed read", func() (integrations.MockMemDb, *keyedLearnDb) {
+			d := newKeyedLearnDb([]*models.Mock{m}, nil)
+			return d.learnDb, d
+		}},
+	} {
+		db, d := c.db()
+		served, retry, err := h.keyedStrictRead(context.Background(), in, db, varScope{}, n, nil, nil, nil, true)
+		if served != nil || retry || err != nil || d.keyed != 0 {
+			t.Fatalf("%s: served %v (retry %v, err %v) in %d keyed walks; want no answer and no key read", c.name, served, retry, err, d.keyed)
 		}
 	}
 }
