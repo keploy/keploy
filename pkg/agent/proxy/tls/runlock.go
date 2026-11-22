@@ -236,7 +236,8 @@ func releaseCARunLockLocked() {
 // though a file it left reads as live while whoever kept it from the run
 // still holds it. A lock file this process cannot open, or cannot test,
 // counts as live, so that a sweep leaves those entries rather than remove a
-// live run's. (One removed since the listing counts as live too: its run just
+// live run's; so does one it does not trust (openRunLockToTest: outside
+// Windows, a link, or a file not this run's user's alone). (One removed since the listing counts as live too: its run just
 // ended, and its teardown removed its entries before its lock.)
 func caRunLive(id string) bool {
 	name, ok := caRunLockName(id)

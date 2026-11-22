@@ -150,9 +150,10 @@ func withStoreLock(ctx context.Context, logger *zap.Logger, change func() error)
 func lockStores(ctx context.Context, logger *zap.Logger) (unlock func(), err error) {
 	path := filepath.Join(caRunsDir, storeLockName)
 	// Outside Windows, a directory no other user than this run's and root
-	// can change (makeCARunsDir), and a file opened through no link that
-	// this run's user or root owns (openLockFile): no other user makes the
-	// run create a file elsewhere, or holds its lock.
+	// can change (makeCARunsDir), and a file opened from that directory as
+	// opened, through no link, that is this run's user's and that no other
+	// user can read or write (openLockFile): no other user makes the run
+	// create a file elsewhere, or holds its lock.
 	if err := makeCARunsDir(caRunsDir); err != nil {
 		warnNoStoreLock(logger, path, err)
 		return func() {}, nil
@@ -257,12 +258,13 @@ func warnNoStoreLock(logger *zap.Logger, path string, err error) {
 // directory (write access to it) or opens with access ("read" for the store
 // lock, "read and write" for a run's own) when it is there, and then locks.
 // keploy also uses them only as makeCARunsDir and openLockFile check them:
-// neither a link, the directory one only its owner can change, and both that
-// user's or root's; on Windows, no part of the directory's path a link or a
-// junction, and the directory the administrators' (other users may only add
-// files to it) or that user's alone.
+// neither a link, the directory one only its owner can change, that user's or
+// root's, and the file that user's, with no access for anyone else; on
+// Windows, no part of the directory's path a link or a junction, and the
+// directory the administrators' (other users may only add files to it) or
+// that user's alone.
 func lockFix(path, access string) string {
 	dir := filepath.Dir(path)
-	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with %s access for that user; and keep %s on a file system that supports file locks. keploy uses that directory and that file only when neither is a link and only its owner can change the directory, each being that user's or root's; on Windows, when no part of the directory's path is a link or a junction, and the directory is the administrators' (other users may only add files to it) or that user's alone. A directory that is not so is not used: remove it, and keploy makes it so.",
+	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with %s access for that user; and keep %s on a file system that supports file locks. keploy uses that directory and that file only when neither is a link, only its owner can change the directory, which is that user's or root's, and the file is that user's, with no access for anyone else; on Windows, when no part of the directory's path is a link or a junction, and the directory is the administrators' (other users may only add files to it) or that user's alone. A directory that is not so is not used: remove it, and keploy makes it so.",
 		dir, filepath.Dir(dir), path, dir, access, dir)
 }

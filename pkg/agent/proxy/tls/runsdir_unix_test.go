@@ -256,6 +256,41 @@ func TestRunsDirectoryOnlyWhereNoOtherUserCanChangeIt(t *testing.T) {
 	}
 }
 
+// A run whose runs directory cannot be made in its temp directory (one the
+// user cannot write) says so, by the mkdir's error, and makes nothing.
+func TestRunsDirectoryThatCannotBeMadeSaysWhy(t *testing.T) {
+	tmp := t.TempDir()
+	user := os.Geteuid()
+	if user == 0 {
+		// A macOS run of root makes no runs directory in its temp
+		// directory: the row takes another user's uid.
+		user = 4242
+		if err := os.Chown(tmp, user, -1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(tmp, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tmp, 0o700) })
+	dir := filepath.Join(tmp, "keploy-ca-runs")
+	err := makeCARunsDirFor("darwin", user, dir)
+	if os.Geteuid() == 0 {
+		// Root writes a directory whatever its mode: it makes it, its
+		// own, which a run of the user trusts as root's.
+		if err != nil {
+			t.Fatalf("as root: %v, want made", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "mkdir "+dir) {
+		t.Errorf("error %v, want the mkdir's, naming %s", err, dir)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("%s was made: %v", dir, err)
+	}
+}
+
 // A runs directory root owns, and only root writes, as Linux's
 // /run/keploy-ca-runs, is one a run of another user uses too.
 func TestRunsDirectoryRootOwnsIsTrusted(t *testing.T) {
@@ -264,13 +299,23 @@ func TestRunsDirectoryRootOwnsIsTrusted(t *testing.T) {
 	}
 }
 
-// A lock file is opened through no link and only when it is a regular file
-// the run's user or root owns (openLockFileFor).
-func TestLockFileOnlyARegularFileTheRunsUserOrRootOwns(t *testing.T) {
-	dir := t.TempDir()
+// A lock file is opened from its directory as opened, which must be one no
+// other user than the run's and root can change (openCARunsDirFor), through no
+// link, and only when it is a regular file that the run's user owns and that
+// no other user can read or write (openLockFileFor, openLockFileAt).
+func TestLockFileOnlyARegularFileOfTheRunsUserAlone(t *testing.T) {
 	me := os.Geteuid()
+	// 0700: t.TempDir makes it 0777 less the umask.
+	ownDir := func(t *testing.T) string {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	dir := ownDir(t)
 	path := filepath.Join(dir, "a.lock")
-	f, err := openLockFileFor(me, path, os.O_RDONLY)
+	f, err := openLockFileFor(me, path, os.O_RDONLY|os.O_CREATE)
 	if err != nil {
 		t.Fatalf("the run's own new lock file: %v", err)
 	}
@@ -278,30 +323,58 @@ func TestLockFileOnlyARegularFileTheRunsUserOrRootOwns(t *testing.T) {
 	if fi, err := os.Lstat(path); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("the lock file made: %v %v, want mode 600", fi, err)
 	}
-	if f, err := openLockFileFor(anotherUser(t, path), path, os.O_RDONLY); err == nil || !strings.Contains(err.Error(), "the lock file "+path+" is owned by uid") {
+	// Another user's file, in a directory the run trusts.
+	d, err := openCARunsDirFor(me, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	if f, err := openLockFileAt(d, anotherUser(t, path), path, os.O_RDONLY); err == nil || !strings.Contains(err.Error(), "the lock file "+path+" is owned by uid") {
 		if f != nil {
 			_ = f.Close()
 		}
 		t.Errorf("another user's lock file: %v, want refused", err)
+	}
+	// The run's own file that others can read: anyone who can open it can
+	// hold its lock.
+	readable := filepath.Join(dir, "r.lock")
+	if err := os.WriteFile(readable, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(readable, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openLockFileFor(me, readable, os.O_RDONLY|os.O_CREATE); err == nil || !strings.Contains(err.Error(), "the lock file "+readable+" has mode 640") {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Errorf("a lock file its group can read: %v, want refused", err)
+	}
+	// Nor one root owns that every user can read, in a directory root owns
+	// (one a run of another user than root trusts): /etc/passwd is there,
+	// by its real path (macOS's /etc is a link to /private/etc, and a link
+	// is no runs directory).
+	passwd, err := filepath.EvalSymlinks("/etc/passwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openLockFileFor(4242, passwd, os.O_RDONLY); err == nil || !strings.Contains(err.Error(), "the lock file "+passwd+" has mode 644") {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Errorf("a lock file root owns that others can read: %v, want refused for its mode", err)
 	}
 	target := filepath.Join(t.TempDir(), "made-through-the-link")
 	link := filepath.Join(dir, "b.lock")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if f, err := openLockFileFor(me, link, os.O_RDONLY); err == nil {
+	if f, err := openLockFileFor(me, link, os.O_RDONLY|os.O_CREATE); err == nil {
 		_ = f.Close()
 		t.Errorf("a link at the lock file was opened")
 	}
 	if _, err := os.Lstat(target); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the link's target was made: %v", err)
-	}
-	// A file root owns that every user can read, as root's store.lock that a
-	// sweep of root's opens: no file is made, /etc/passwd is there.
-	if f, err := openLockFileFor(4242, "/etc/passwd", os.O_RDONLY); err != nil {
-		t.Errorf("a lock file root owns: %v, want opened", err)
-	} else {
-		_ = f.Close()
 	}
 	sub := filepath.Join(dir, "c.lock")
 	if err := os.Mkdir(sub, 0o700); err != nil {
@@ -310,6 +383,73 @@ func TestLockFileOnlyARegularFileTheRunsUserOrRootOwns(t *testing.T) {
 	if f, err := openLockFileFor(me, sub, os.O_RDONLY); err == nil {
 		_ = f.Close()
 		t.Errorf("a directory at the lock file was opened")
+	}
+	// The directory is checked as the file is opened, not only when a run
+	// makes it: a lock file in a directory others can write, or through a
+	// link to a directory, is not opened, and none is made.
+	open := ownDir(t)
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	inOpen := filepath.Join(open, "a.lock")
+	if f, err := openLockFileFor(me, inOpen, os.O_RDONLY|os.O_CREATE); err == nil || !strings.Contains(err.Error(), runsDirWhat+" "+open+" has mode 777") {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Errorf("a lock file in a directory others can write: %v, want refused", err)
+	}
+	if _, err := os.Lstat(inOpen); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a lock file was made in a directory others can write: %v", err)
+	}
+	dirLink := filepath.Join(ownDir(t), "runs")
+	if err := os.Symlink(ownDir(t), dirLink); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openLockFileFor(me, filepath.Join(dirLink, "a.lock"), os.O_RDONLY|os.O_CREATE); err == nil || !strings.Contains(err.Error(), runsDirWhat+" "+dirLink+" is a symlink") {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Errorf("a lock file through a link to a directory: %v, want refused", err)
+	}
+}
+
+// Another run's lock file is opened to test its lock (caRunLive) as a run's
+// own is (openRunLockToTest), never made: one it does not trust, a link or a
+// file others can open, counts as live, so a sweep leaves that run's entries.
+func TestCARunLockTestsOnlyALockFileItTrusts(t *testing.T) {
+	useRunsDir(t)
+	gone := filepath.Join(caRunsDir, "0ddba11.1.lock")
+	if f, err := openRunLockToTest(gone); err == nil {
+		_ = f.Close()
+		t.Error("openRunLockToTest opened a lock file that is not there, want an error")
+	}
+	if _, err := os.Lstat(gone); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("openRunLockToTest made a lock file: %v", err)
+	}
+	// A link at a run's lock file to a file no one holds.
+	unheld := filepath.Join(t.TempDir(), "unheld.lock")
+	if err := os.WriteFile(unheld, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(unheld, filepath.Join(caRunsDir, "11e1ed.1.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if !caRunLive("11e1ed") {
+		t.Error("a run whose lock file is a link counts as dead, want live")
+	}
+	// A lock file no one holds is not live while it is one keploy makes
+	// (0600), and is once others can read it, which keploy never makes.
+	if err := os.WriteFile(filepath.Join(caRunsDir, "0bed.1.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if caRunLive("0bed") {
+		t.Fatal("a run whose own lock file no one holds is live")
+	}
+	if err := os.Chmod(filepath.Join(caRunsDir, "0bed.1.lock"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !caRunLive("0bed") {
+		t.Error("a run whose lock file others can read counts as dead, want live")
 	}
 }
 

@@ -168,7 +168,7 @@ func TestCARunLockNames(t *testing.T) {
 	if _, err := os.Stat(escaped); !os.IsNotExist(err) {
 		t.Fatalf("an id with a separator put a lock file outside the directory (stat: %v)", err)
 	}
-	if err := os.WriteFile(filepath.Join(caRunsDir, "feed01.1.lock"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(caRunsDir, "feed01.1.lock"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if caRunLive("feed01") {

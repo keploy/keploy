@@ -134,7 +134,7 @@ func TestSweepsLeaveALiveRunsEntries(t *testing.T) {
 	useRunsDir(t)
 	startLockHolder(t, live)
 	startLockHolder(t, killed)()
-	if err := os.WriteFile(filepath.Join(caRunsDir, stale+".1.lock"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(caRunsDir, stale+".1.lock"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ids := []string{live, killed, stale, missing, current}

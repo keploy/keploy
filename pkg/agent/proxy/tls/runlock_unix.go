@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // defaultCARunsDir is this host's runs directory (caRunsDirOn).
@@ -48,6 +50,9 @@ func caRunsDirOn(goos string, euid int, tempDir string) string {
 // root (caRunsDirOn).
 func caRunsInTempDir(goos string, euid int) bool { return goos == "darwin" && euid != 0 }
 
+// runsDirWhat names the runs directory in what keploy says of it.
+const runsDirWhat = "the directory of keploy runs' locks"
+
 // makeCARunsDir makes dir, this host's runs directory, when it is missing, and
 // says whether this run can use it (makeCARunsDirFor).
 func makeCARunsDir(dir string) error {
@@ -57,8 +62,9 @@ func makeCARunsDir(dir string) error {
 // makeCARunsDirFor makes dir, the runs directory of a run on goos of the user
 // euid, when it is missing, and returns nil only when no other user than
 // euid and root can change it: a directory, no link, that euid or root owns
-// and that no one but its owner can write. In it no other user can put a
-// link where a lock file goes, or a lock file of their own to hold (openLockFile).
+// and that no one but its owner can write (openCARunsDirFor). In it no other
+// user can put a link where a lock file goes, or a lock file of their own to
+// hold (openLockFile).
 //
 // A run whose runs directory is in its temp directory (caRunsInTempDir) also
 // needs that temp directory, dir's parent, to be the user's alone in the same
@@ -67,61 +73,122 @@ func makeCARunsDir(dir string) error {
 // one ($TMPDIR); with TMPDIR unset or empty, as under env -i, sudo -u or a
 // launchd job, the temp directory is /tmp, which every user can write, and
 // the run takes no lock. That check comes first, so a run makes nothing in a
-// temp directory it does not use.
+// temp directory it does not use. The temp directory is checked as opened
+// (openOwned), and dir is made and opened from that opened directory, so the
+// directory checked is the one dir is in, whoever can change the directories
+// above it.
 func makeCARunsDirFor(goos string, euid int, dir string) error {
+	var d *os.File
 	if caRunsInTempDir(goos, euid) {
-		tmp := filepath.Dir(dir)
-		fi, err := os.Lstat(tmp)
-		if err == nil {
-			err = checkOwned("the temp directory", tmp, fi, true, 0o022, euid, false)
-		}
+		tmp, err := openOwned(unix.AT_FDCWD, filepath.Dir(dir), "the temp directory", filepath.Dir(dir), unix.O_RDONLY|unix.O_DIRECTORY, 0, 0o022, euid, false)
 		if err != nil {
 			return fmt.Errorf("%w; keploy's runs directory goes in this user's temp directory, which must be this user's alone: set TMPDIR to the one macOS gives this user (getconf DARWIN_USER_TEMP_DIR)", err)
 		}
+		defer func() { _ = tmp.Close() }()
+		name := filepath.Base(dir)
+		if err := unix.Mkdirat(int(tmp.Fd()), name, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
+			return &os.PathError{Op: "mkdir", Path: dir, Err: err}
+		}
+		d, err = openCARunsDirAt(int(tmp.Fd()), name, dir, euid)
+		if err != nil {
+			return err
+		}
+	} else {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		var err error
+		if d, err = openCARunsDirFor(euid, dir); err != nil {
+			return err
+		}
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	return checkOwned("the directory of keploy runs' locks", dir, fi, true, 0o022, euid, true)
+	return d.Close()
+}
+
+// openCARunsDirFor opens dir, a runs directory, for a run of the user euid,
+// and returns it only when, as opened (openOwned), it is a directory, no link,
+// that euid or root owns and that no one but its owner can write: whatever
+// the directories above it are, no other user than euid and root can add,
+// remove or rename a file in the directory it returns.
+func openCARunsDirFor(euid int, dir string) (*os.File, error) {
+	return openCARunsDirAt(unix.AT_FDCWD, dir, dir, euid)
+}
+
+// openCARunsDirAt opens name in the directory dirfd, the runs directory dir,
+// as openCARunsDirFor opens dir.
+func openCARunsDirAt(dirfd int, name, dir string, euid int) (*os.File, error) {
+	return openOwned(dirfd, name, runsDirWhat, dir, unix.O_RDONLY|unix.O_DIRECTORY, 0, 0o022, euid, true)
 }
 
 // openLockFile opens path, a lock file in the runs directory, with flag,
 // creating it (0600) when missing, for this run (openLockFileFor).
 func openLockFile(path string, flag int) (*os.File, error) {
-	return openLockFileFor(os.Geteuid(), path, flag)
+	return openLockFileFor(os.Geteuid(), path, flag|os.O_CREATE)
+}
+
+// openRunLockToTest opens path, another run's lock file, to test its lock
+// (caRunLive): as openLockFile does, but never creating it. A lock file it
+// does not trust is one it cannot open, and so counts as live.
+func openRunLockToTest(path string) (*os.File, error) {
+	return openLockFileFor(os.Geteuid(), path, os.O_RDONLY)
 }
 
 // openLockFileFor opens path, a lock file in the runs directory, with flag
-// for a run of the user euid, creating it (0600) when missing. It follows no
-// link at path (O_NOFOLLOW), so no one makes the run create or lock a file
-// elsewhere, and it returns the file only when it is a regular file that
-// euid or root owns: one another user made is one they may hold.
+// (os.O_CREATE: creating it, 0600, when missing) for a run of the user euid.
+// It opens the runs directory first (openCARunsDirFor), and the file from
+// that opened directory (openLockFileAt), so no other user can put a link or
+// a file of their own where the file is opened.
 func openLockFileFor(euid int, path string, flag int) (*os.File, error) {
-	// #nosec G304 -- path is a lock file in caRunsDir.
-	f, err := os.OpenFile(path, flag|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	d, err := openCARunsDirFor(euid, filepath.Dir(path))
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = d.Close() }()
+	return openLockFileAt(d, euid, path, flag)
+}
+
+// openLockFileAt opens path, a lock file in the runs directory d (as
+// opened), with flag for a run of the user euid. It follows no link at path
+// (O_NOFOLLOW), so no one makes the run create or lock a file elsewhere, and
+// it returns the file only when it is a regular file that euid owns and that
+// no other user can read or write: one another user owns, or can open, is
+// one they may hold, and keep the runs' changes waiting. keploy makes every
+// lock file 0600, as the user of the run that makes it (root's, for root's
+// runs).
+func openLockFileAt(d *os.File, euid int, path string, flag int) (*os.File, error) {
+	return openOwned(int(d.Fd()), filepath.Base(path), "the lock file", path, flag, 0o600, 0o077, euid, false)
+}
+
+// openOwned opens name in the directory dirfd (unix.AT_FDCWD: name is a path),
+// at path, with flag (perm when it creates it), following no link at name
+// (O_NOFOLLOW), and returns it only when checkOwned trusts it as opened (its
+// fstat): a directory when flag has O_DIRECTORY, a regular file otherwise,
+// with none of the bits deny, owned by euid, or by root when orRoot is true.
+// What it checks is what it returns, whatever is put at path after. what
+// names path in its errors.
+func openOwned(dirfd int, name, what, path string, flag int, perm uint32, deny os.FileMode, euid int, orRoot bool) (*os.File, error) {
+	dir := flag&unix.O_DIRECTORY != 0
+	fd, err := unix.Openat(dirfd, name, flag|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
+	if err != nil {
+		// Why, from what is at path, for the error only: a link there fails
+		// the open (ELOOP, or ENOTDIR for a directory), which says less.
+		if fi, lerr := os.Lstat(path); lerr == nil {
+			if cerr := checkOwned(what, path, fi, dir, deny, euid, orRoot); cerr != nil {
+				return nil, cerr
+			}
+		}
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
 	fi, err := f.Stat()
 	if err == nil {
-		err = checkOwned("the lock file", path, fi, false, 0, euid, true)
+		err = checkOwned(what, path, fi, dir, deny, euid, orRoot)
 	}
 	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
 	return f, nil
-}
-
-// openRunLockToTest opens path, another run's lock file, to test its lock
-// (caRunLive).
-func openRunLockToTest(path string) (*os.File, error) {
-	// #nosec G304 -- a lock file in caRunsDir.
-	return os.Open(path)
 }
 
 // tryLockFile takes an exclusive flock on f if no one holds one: true when it
