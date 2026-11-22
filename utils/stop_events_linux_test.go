@@ -2514,7 +2514,10 @@ func TestAGroupsLeaderIsWaitedForAsTheSignalReachedIt(t *testing.T) {
 		members []Reached
 		exited  bool
 	}{
-		{"not among those reached", []Reached{{PID: pid + 1, Start: st.StartTime}}, true},
+		// nil (not pid+1): groupGone watches every reached member, and on a
+		// busy host pid+1 can be an unrelated process forked in the same 10ms
+		// clock tick with StartTime == st.StartTime.
+		{"not among those reached", nil, true},
 		{"its pid naming another process", []Reached{{PID: pid, Start: st.StartTime + 1}}, true},
 		{"the one reached, running", []Reached{{PID: pid, Start: st.StartTime}}, false},
 	} {
