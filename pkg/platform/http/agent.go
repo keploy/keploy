@@ -4643,13 +4643,23 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 }
 
 // dockerAgentCancel is the `docker run` command's Cancel: it stops the agent's
-// container (stopAgentContainerFor) and then kills the client -- through
-// cmd.Process, not its raw pid, which cmd.Wait may have reaped already. The
-// client was waiting for the container's removal (--rm), so the engine is
-// asked first to say when it is removed (removal), within keploy's bound on
-// an answer from its daemon (daemonAsk): a daemon that does not take that
-// question does not hold the stop, nor one that does not answer the stop's
-// signals (engineCLI.ask).
+// container by its name (stopAgentContainerFor) and then kills the command
+// whole: the client, and every process of the command still in the process
+// group of its own it runs in (kdocker.PrepareDockerCommand starts it in a
+// session of its own, whose group it leads), through cmd.Process, not its raw
+// pid, which cmd.Wait may have reaped already (agentUtils.KillOwnProcessGroup).
+// Killing its first process alone (sh, or the sudo or docker sh ran in its
+// place) left any other running after the stop: one the client started, or
+// one sh ran beside it. A process of the group keploy may not signal (the
+// docker that sudo runs as root) is left to end by itself, once the engine
+// has removed the container it stopped. Its output goes on to keploy's
+// console; the wait for a command started with one (startWithConsole) is for
+// its first process alone (utils.ChildConsole). The client was
+// waiting for the container's removal (--rm), so the engine is asked first to
+// say when it is removed (removal), within keploy's bound on an answer from
+// its daemon (daemonAsk): a daemon that does not take that question does not
+// hold the stop, nor one that does not answer the stop's signals
+// (engineCLI.ask).
 func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string, removal *kdocker.RemovalWatch) func() error {
 	return func() error {
 		ask, release := daemonAsk()
@@ -4659,7 +4669,7 @@ func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name st
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if err := agentUtils.KillOwnProcessGroup(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			return err
 		}
 		return nil
