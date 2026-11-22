@@ -23,11 +23,11 @@ func TestDecodeColumn_TruncatedDefinitionIsAnErrorNotAPanic(t *testing.T) {
 			FixedLength: 0x0c, CharacterSet: 0x3f, ColumnLength: 20, Type: byte(mysql.FieldTypeLongLong),
 			DefaultValue: "a default value long enough to be cut inside"},
 	} {
-		full, err := EncodeColumn(ctx, logger, col)
+		full, err := EncodeColumn(ctx, logger, col, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := DecodeColumn(ctx, logger, full); err != nil {
+		if _, _, err := DecodeColumn(ctx, logger, full, 0); err != nil {
 			t.Fatalf("the whole definition of %q does not decode: %v", col.Name, err)
 		}
 		for cut := 0; cut < len(full); cut++ {
@@ -39,7 +39,7 @@ func TestDecodeColumn_TruncatedDefinitionIsAnErrorNotAPanic(t *testing.T) {
 				}()
 				// The header still declares the full length: the bytes are
 				// missing, not the claim.
-				if got, _, err := DecodeColumn(ctx, logger, full[:cut:cut]); err == nil {
+				if got, _, err := DecodeColumn(ctx, logger, full[:cut:cut], 0); err == nil {
 					t.Fatalf("decoded a definition cut to %d of %d bytes as %+v", cut, len(full), got)
 				}
 			})
@@ -56,11 +56,11 @@ func TestDecodeColumn_ShortDefaultValueIsKept(t *testing.T) {
 	for _, def := range []string{"0", "ab", "a longer default value"} {
 		col := &mysql.ColumnDefinition41{Catalog: "def", Schema: "s", Table: "t", OrgTable: "t", Name: "c", OrgName: "c",
 			FixedLength: 0x0c, CharacterSet: 0x21, ColumnLength: 4, Type: byte(mysql.FieldTypeLong), DefaultValue: def}
-		b, err := EncodeColumn(ctx, logger, col)
+		b, err := EncodeColumn(ctx, logger, col, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, pos, err := DecodeColumn(ctx, logger, b)
+		got, pos, err := DecodeColumn(ctx, logger, b, 0)
 		if err != nil || got.DefaultValue != def || pos != len(b) {
 			t.Fatalf("default %q decoded as (%q, pos %d of %d, %v)", def, got.DefaultValue, pos, len(b), err)
 		}

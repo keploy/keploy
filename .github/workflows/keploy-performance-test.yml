@@ -15,8 +15,8 @@ on:
     branches: [ main ]
   # A cache a pull_request run saves is scoped to that PR's merge ref and no
   # other PR can restore it; only a cache saved on the default branch is
-  # shared. Running on main is what seeds the PetClinic Maven cache below for
-  # every PR, and also gives a post-merge performance signal.
+  # shared. Running on main is what seeds the PetClinic jar and k6 caches
+  # below for every PR, and also gives a post-merge performance signal.
   push:
     branches: [ main ]
 
@@ -31,7 +31,15 @@ jobs:
   performance-test:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    
+    env:
+      # The app under load: a spring-petclinic commit and the JDK its jar is
+      # built and run with (Checkout Spring PetClinic says how to move them).
+      PETCLINIC_REF: 818c4136ea971c21674525f9053de0d9c7ad8cfe
+      PETCLINIC_JAVA: '17'
+      # The k6 release the load is made with (Install k6 says how to move it).
+      PERF_K6_VERSION: '2.4.0'
+      PERF_K6_SHA256: 5a5ecf23529ccf93135bc7e5b0c1cd5126ecf5f2672e22eed1556a0ab74abb87
+
     services:
       mysql:
         image: mysql:8.0
@@ -63,15 +71,23 @@ jobs:
           # Pinned: the fixture app, its dependency set and the Maven version
           # its wrapper downloads must not change under this job when upstream
           # main moves; the latency thresholds below are baselines of this
-          # exact app. Bump it deliberately.
-          ref: 818c4136ea971c21674525f9053de0d9c7ad8cfe
+          # exact app. To move it, set
+          # PETCLINIC_REF to the full SHA of another spring-petclinic commit,
+          # in a PR of its own. Its jar's cache key changes with it (Restore
+          # the PetClinic jar): the PR's run builds the new jar once, and so
+          # does the first run on main after the merge, for every later run.
+          # Before merging, check the numbers the PR's run posts against the
+          # thresholds below.
+          ref: ${{ env.PETCLINIC_REF }}
           path: petclinic
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
+      # The JDK build jdks.txt pins for PETCLINIC_JAVA: the runner image's own
+      # copy of exactly that build, else its checked and cached archive (the
+      # action says how), like k6 below.
+      - name: Setup Java ${{ env.PETCLINIC_JAVA }}
+        uses: ./keploy/.github/actions/setup-java-maven/jdk
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          java-version: ${{ env.PETCLINIC_JAVA }}
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -89,39 +105,64 @@ jobs:
             keploy/go.sum
             keploy-to-test/go.sum
 
-      # ~/.m2/wrapper holds the Maven distribution ./mvnw would otherwise
-      # fetch with a single, unretried wget from Maven Central on every run;
-      # ~/.m2/repository holds every dependency. With both restored the build
-      # needs no network at all.
-      - name: Restore Maven wrapper and repository
-        id: maven-cache
+      # k6 makes the load the thresholds below are measured under, so its
+      # version is pinned like PetClinic's commit: unpinned, this job moved
+      # from k6 2.3.0 to 2.4.0 the day 2.4.0 came out. Its release archive is
+      # checked against the sha256 the release publishes on every run, and
+      # kept in the cache under that digest, so a run downloads it only when
+      # the cache has no copy: downloaded from GitHub's release servers on
+      # every run, it failed two of main's runs on 2026-11-08 (HTTP 504).
+      # To move k6, set PERF_K6_VERSION and PERF_K6_SHA256 (the
+      # linux-amd64.tar.gz line of the release's k6-v<version>-checksums.txt).
+      - name: Restore k6
+        id: k6-cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.m2/wrapper
-            ~/.m2/repository
-          key: ${{ runner.os }}-petclinic-maven-${{ hashFiles('petclinic/.mvn/**', 'petclinic/pom.xml') }}
-          restore-keys: |
-            ${{ runner.os }}-petclinic-maven-
+          path: ~/.cache/perf-k6
+          key: perf-k6-${{ env.PERF_K6_VERSION }}-linux-amd64-${{ env.PERF_K6_SHA256 }}
 
-      - name: Setup k6
-        uses: grafana/setup-k6-action@v1
+      - name: Install k6
+        run: ./keploy/.github/workflows/test_workflow_scripts/performance/install-k6.sh
+
+      - name: Save k6
+        if: steps.k6-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/perf-k6
+          key: ${{ steps.k6-cache.outputs.cache-primary-key }}
+
+      # The jar under load is built once per PetClinic commit, JDK and build
+      # script, and every other run takes it from the cache and runs no Maven
+      # at all. Built on every run from a restored ~/.m2, ./mvnw asked Maven
+      # Central for the metadata of the version ranges PetClinic's plugins
+      # name (BouncyCastle's, through git-commit-id-maven-plugin) once the
+      # restored copy was a day old, which, as an entry is never replaced,
+      # was every run; Central's 404 for one of them failed the build on
+      # 2026-11-19. An offline build asks nothing, but Maven skips the goals
+      # that require online mode, CycloneDX's makeAggregateBom among them, so
+      # its jar has no SBOM. Repeat builds of this step on one machine make
+      # byte-identical jars.
+      - name: Restore the PetClinic jar
+        id: petclinic-jar
+        uses: actions/cache/restore@v4
+        with:
+          path: petclinic/target/spring-petclinic-*.jar
+          key: petclinic-jar-${{ runner.os }}-java${{ env.PETCLINIC_JAVA }}-${{ env.PETCLINIC_REF }}-${{ hashFiles('keploy/.github/workflows/test_workflow_scripts/performance/build-petclinic.sh') }}
 
       - name: Build Spring PetClinic
+        if: steps.petclinic-jar.outputs.cache-hit != 'true'
         working-directory: petclinic
-        run: ./mvnw clean package -DskipTests -T 1C  # Parallel build with 1 thread per core
+        run: ../keploy/.github/workflows/test_workflow_scripts/performance/build-petclinic.sh
 
       # Saved as soon as the build succeeds rather than in a post step, which
       # only saves when the whole job passes: a later performance failure must
       # not keep the cache from being seeded.
-      - name: Save Maven wrapper and repository
-        if: steps.maven-cache.outputs.cache-hit != 'true'
+      - name: Save the PetClinic jar
+        if: steps.petclinic-jar.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: |
-            ~/.m2/wrapper
-            ~/.m2/repository
-          key: ${{ steps.maven-cache.outputs.cache-primary-key }}
+          path: petclinic/target/spring-petclinic-*.jar
+          key: ${{ steps.petclinic-jar.outputs.cache-primary-key }}
 
       - name: Build Keploy
         run: |

@@ -342,9 +342,9 @@ func TestApplyEndAtHole(t *testing.T) {
 			if !tc.want {
 				return
 			}
-			cfg.EndAtHole(fakeconn.FromDest, relay.DropMemoryPressure)
-			if why, ok := sess.EndedAtHole(fakeconn.FromDest); !ok || why != relay.DropMemoryPressure {
-				t.Fatalf("EndAtHole reached the session as %q, %v; want %q, true", why, ok, relay.DropMemoryPressure)
+			cfg.EndAtHole(fakeconn.FromDest, relay.DropPerConnCap)
+			if why, ok := sess.EndedAtHole(fakeconn.FromDest); !ok || why != relay.DropPerConnCap {
+				t.Fatalf("EndAtHole reached the session as %q, %v; want %q, true", why, ok, relay.DropPerConnCap)
 			}
 		})
 	}

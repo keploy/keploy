@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/stretchr/testify/require"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,9 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -66,6 +70,26 @@ type replayCase struct {
 	// keployFails: the run fails on keploy's side, and Replay returns that
 	// failure as its own error rather than only an exit code.
 	keployFails bool
+	// windowsErr: reading what each test did from the agent fails.
+	windowsErr error
+	// mapped: the set has per-test mappings (keploy mock record wrote them),
+	// which the proven switch requires.
+	mapped bool
+	// losses: the agent counts what it could not capture (GET
+	// /agent/capturelosses).
+	losses *lossCounter
+	// pidMaps: the agent counts the processes it could not track (GET
+	// /agent/pidmaps). Its capture losses are counted too, by losses when
+	// set, else by an agent that lost none.
+	pidMaps *pidMapCounter
+	// captured: the calls the agent captured on miss (--on-miss record),
+	// which the mock store refuses with insertErr when it is set.
+	captured  []*models.Mock
+	insertErr error
+	// windows: what each test did, as the agent tells it.
+	windows []models.ScopeWindow
+	// console: the service's console (SetConsole); nil leaves none.
+	console io.Writer
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -80,6 +104,11 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	}
 	if err := os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	var mapDB MappingDB
+	if c.mapped {
+		writeMapping(t, keployDir)
+		mapDB = mapdb.New(zap.NewNop(), keployDir, "")
 	}
 	if c.covReport != "" && (c.staleCov || c.prevRun) {
 		p := filepath.Join(repo, "coverage.out")
@@ -99,6 +128,8 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	base := newInstr(t, agentUpFromSetup, false, exit)
 	base.mockErrors = c.mockErrs
 	base.mockErrorsErr = c.mockErrErr
+	base.windowsErr = c.windowsErr
+	base.windows = c.windows
 	if !c.noneServed {
 		base.consumedMocks = []models.MockState{{Name: "mock-0"}}
 	}
@@ -121,7 +152,32 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	t.Cleanup(func() { utils.ErrCode = 0 })
 
 	core, logs := observer.New(zapcore.DebugLevel)
-	svc := New(zap.New(core), instr, stubMockDB{}, nil, nil, nil, cfg)
+	var run Instrumentation = instr
+	if c.losses != nil {
+		run = lossReplayInstr{instr, c.losses}
+	}
+	if c.pidMaps != nil {
+		losses := c.losses
+		if losses == nil {
+			losses = &lossCounter{}
+		}
+		run = pidLossReplayInstr{instr, losses, c.pidMaps}
+	}
+	if c.captured != nil {
+		run = missCaptureInstr{instr, c.captured}
+	}
+	var store MockDB = stubMockDB{}
+	if c.insertErr != nil {
+		store = refusingMockDB{err: c.insertErr}
+	}
+	if c.mapped && provenswitch.On() {
+		// Under the switch the mapping must name mocks the recording has.
+		store = named("mock-0")
+	}
+	svc := New(zap.New(core), run, store, mapDB, nil, nil, cfg)
+	if c.console != nil {
+		svc.(ConsoleSetter).SetConsole(c.console)
+	}
 	// What a native macOS build does between constructing the service and
 	// running it: prefix the launch line with the interception shim.
 	if c.rewriteLaunch {
@@ -319,9 +375,10 @@ func TestReceiptRefusesASymlink(t *testing.T) {
 	if b, _ := os.ReadFile(outside); string(b) != "untouched" {
 		t.Fatalf("the receipt was written through a symlink: %q", b)
 	}
-	// The link is replaced by the receipt, not followed.
-	if info, err := os.Lstat(filepath.Join(keployDir, "set", ReceiptFile)); err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("the receipt path is not a regular file after the write: %v", err)
+	// The link leads out of the recording, so the write is refused, and the
+	// link, as a stale receipt, is taken away with it: no link out is left.
+	if info, err := os.Lstat(filepath.Join(keployDir, "set", ReceiptFile)); err == nil && !info.Mode().IsRegular() {
+		t.Fatalf("a link out is left at the receipt's path: %v", info.Mode())
 	}
 
 	// A set directory that is itself a link is not written through either.
@@ -350,16 +407,28 @@ func TestNoReceiptForAMissingSet(t *testing.T) {
 // The receipt names the command the USER runs. A build that instruments
 // natively rewrites the launch line after the service is built; recording that
 // line leaked a temp path into the receipt, and status then told agents to run
-// it.
+// it. The replay's log names the user's command too: at INFO by its program
+// and how many words follow it, and whole, its secrets redacted, at DEBUG.
 func TestReceiptRecordsTheUsersCommandNotTheLaunchLine(t *testing.T) {
 	keployDir, _, logs := replayIn(t, replayCase{rewriteLaunch: true})
 	if r := mustReceipt(t, keployDir); r.Command != "go test ./..." {
 		t.Fatalf("receipt command = %q, want the user's %q", r.Command, "go test ./...")
 	}
-	for _, e := range logs.FilterMessageSnippet("Replaying mocks for your test command").All() {
-		if got := e.ContextMap()["command"]; got != "go test ./..." {
-			t.Fatalf("the replay log named %q as the user's command", got)
+	replaying := logs.FilterMessageSnippet("Replaying mocks for your test command").All()
+	if len(replaying) != 1 {
+		t.Fatalf("the replay said %d times that it replays the test command, want once", len(replaying))
+	}
+	if e := replaying[0]; e.Level != zapcore.InfoLevel || e.ContextMap()["program"] != "go" || e.ContextMap()["args"] != int64(2) || e.ContextMap()["command"] != nil {
+		t.Fatalf("the replay's INFO line names %v, want the user's program go and its 2 arguments' count alone", e.ContextMap())
+	}
+	var whole []observer.LoggedEntry
+	for _, e := range logs.FilterMessage(utils.WholeCommandMessage).All() {
+		if _, ok := e.ContextMap()["command"]; ok {
+			whole = append(whole, e)
 		}
+	}
+	if len(whole) != 1 || whole[0].Level != zapcore.DebugLevel || whole[0].ContextMap()["command"] != "go test ./..." {
+		t.Fatalf("the replay's DEBUG lines of the whole test command are %v, want one naming the user's %q", whole, "go test ./...")
 	}
 }
 
@@ -445,9 +514,11 @@ func (a *armsThenFails) Setup(ctx context.Context, cmd string, opts models.Setup
 	return a.runWrites.Setup(ctx, cmd, opts)
 }
 
-// A user's Ctrl+C is not a failure, wherever it lands: no error, exit 0, and
+// A user's Ctrl+C is not keploy's failure, wherever it lands: no error, and
 // the last completed run's receipt stays, since it still truthfully describes
-// that run. While the test command runs, the interrupt cancels the run's own
+// that run. Nor is it a pass: it exits 128+N for the signal (130 for SIGINT),
+// whatever the stopped runner reported (run-exit: its own 130 won Run's
+// select). While the test command runs, the interrupt cancels the run's own
 // context too, which is exactly what keploy's agent dying under it looks like
 // from there; only the caller's context tells the two apart.
 func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
@@ -477,6 +548,8 @@ func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			defer utils.SetInterruptSignalForTest(2)() // SIGINT, as NewCtx's handler records it
+			t.Cleanup(func() { utils.ErrCode = 0 })
 			base := newInstr(t, agentUpFromSetup, false, tc.runExit)
 			instr := &runWrites{composeInstr: base, onRun: cancel}
 			if tc.stage == "setup" {
@@ -491,8 +564,8 @@ func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
 			if err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(ctx); err != nil {
 				t.Fatalf("an interrupted replay failed: %v", err)
 			}
-			if utils.ErrCode != 0 {
-				t.Fatalf("an interrupted replay exits %d", utils.ErrCode)
+			if utils.ErrCode != 130 {
+				t.Fatalf("an interrupted replay (SIGINT) exits %d, want 130: no pass for a run keploy never judged", utils.ErrCode)
 			}
 			if after, err := os.ReadFile(receiptPath); err != nil || !bytes.Equal(after, before) {
 				t.Fatalf("an interrupted replay replaced the last receipt (%v):\n%s", err, after)
@@ -552,7 +625,13 @@ func TestReadReceiptRefusesNonRegular(t *testing.T) {
 			}()
 			select {
 			case err := <-done:
-				if !errors.Is(err, safeyaml.ErrNotRegular) {
+				// A link to /dev/zero is a link out of the recording, refused
+				// before anything is opened; a FIFO in it is no regular file.
+				want := fmt.Sprintf("the recording's file %q is read only inside its recording %q: it is a link that leads out of it, to %q; replace the link with what it leads to", filepath.Join("set", ReceiptFile), keployDir, "/dev/zero")
+				if name == "devzero" && (err == nil || err.Error() != want) {
+					t.Fatalf("ReadReceipt on a %s receipt = %v, want it refused as outside the recording: %q", name, err, want)
+				}
+				if name != "devzero" && !errors.Is(err, safeyaml.ErrNotRegular) {
 					t.Fatalf("ReadReceipt on a %s receipt = %v, want ErrNotRegular", name, err)
 				}
 				if !strings.Contains(err.Error(), ReceiptFile) {
@@ -614,7 +693,6 @@ func TestSetupFailureRecordsTheMirroredExitCode(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 			instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: runnerExit})
 			cfg := instrConfig(instr, utils.DockerCompose, "docker compose run --rm tests")
 			cfg.Path = keployDir
@@ -738,7 +816,6 @@ func TestAnInternalFailureIsNotAUserInterrupt(t *testing.T) {
 			lifetime, cmdType := agentUpFromSetup, utils.Native
 			if stage == "compose" {
 				lifetime, cmdType = agentNeverUp, utils.DockerCompose
-				t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 			}
 			base := newInstr(t, lifetime, false, models.AppError{AppErrorType: models.ErrAppStopped})
 			cfg := instrConfig(base, cmdType, "go test ./...")
@@ -895,8 +972,10 @@ func TestCountTests(t *testing.T) {
 		{Name: "d", Outcome: models.ScopeOutcomeGated},
 		{Name: "e"},
 		{Name: "f", Outcome: "flaky"},
+		{Name: "g", Outcome: models.ScopeOutcomeUnmet},
 	}, "not yet proven")
-	require.Equal(t, &TestCounts{Passed: 1, Failed: 1, Skipped: 1, Gated: 1, GateReason: "not yet proven", NoVerdict: 2}, got)
+	// A test whose need was not met was told not to run, as a gated one.
+	require.Equal(t, &TestCounts{Passed: 1, Failed: 1, Skipped: 1, Gated: 2, GateReason: "not yet proven", NoVerdict: 2}, got)
 	require.Empty(t, countTests([]TestReceipt{{Name: "a", Outcome: models.ScopeOutcomePassed}}, "unused").GateReason,
 		"a reason is recorded only when something was gated")
 }
@@ -926,4 +1005,351 @@ func TestTestsReceiptRoundTripsAndIsLocal(t *testing.T) {
 	got, err = ReadTestsReceipt(keployDir, "set")
 	require.NoError(t, err)
 	require.Nil(t, got, "a replay that named no tests leaves no stale per-test file behind")
+}
+
+// A miss's process is written as a file holds one (models.PersistedCalls):
+// why keploy named none (it runs in a PID namespace of its own) and the
+// kernel pid travel from the agent and are never written (yaml:"-"), so that
+// miss has no source, not an empty one; a named process keeps its name.
+// What the receipt was handed is left as it was.
+func TestATestsReceiptWritesAnUnnamedProcessAsNoSource(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(keployDir, "set"), 0o755))
+	unnamed := &models.Origin{Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+	named := &models.Origin{Comm: "sqs", Exe: "./sqs", Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+	r := TestsReceipt{Set: "set", Tests: []TestReceipt{
+		{Name: "pkg.TestA", Outcome: models.ScopeOutcomeFailed, Evidence: &models.ScopeEvidence{Misses: []models.UnmatchedCall{
+			{Protocol: "HTTP", ActualSummary: "GET /x", Source: unnamed},
+			{Protocol: "Mongo", ActualSummary: "insert keploy.events", Source: named},
+		}}},
+		{Name: "pkg.TestB", Outcome: models.ScopeOutcomePassed},
+	}}
+	writeTestsReceipt(zap.NewNop(), keployDir, r)
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", TestsReceiptFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "source: {}")
+	got, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	misses := got.Tests[0].Evidence.Misses
+	require.Len(t, misses, 2)
+	require.Nil(t, misses[0].Source)
+	require.Equal(t, &models.Origin{Comm: "sqs", Exe: "./sqs"}, misses[1].Source)
+	require.Same(t, unnamed, r.Tests[0].Evidence.Misses[0].Source, "the receipt it was handed was edited")
+	require.Equal(t, uint32(2912345), r.Tests[0].Evidence.Misses[0].Source.PID)
+}
+
+// A record leaves what each top-level test did against real infra, kept or
+// not, for judging the recording; a run that named no test leaves none.
+func TestRecordTestsReceipt(t *testing.T) {
+	keployDir := t.TempDir()
+	at := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	lost := &models.ScopeEvidence{CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}}
+	windows := []models.ScopeWindow{
+		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
+		{Name: "orders::TestA/case", Outcome: models.ScopeOutcomePassed},
+		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+		{Name: "orders::TestC", Outcome: models.ScopeOutcomePassed, Evidence: lost},
+		{Name: "orders::TestD", Outcome: models.ScopeOutcomePassed, Evidence: &models.ScopeEvidence{}},
+		{Name: "suite", Suite: true},
+		{Name: "app", App: true},
+	}
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at}, windows)
+	got, err := ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "t2-go", got.Set)
+	require.Equal(t, []TestReceipt{
+		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
+		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+		{Name: "orders::TestC", Outcome: models.ScopeOutcomePassed, Evidence: lost},
+		{Name: "orders::TestD", Outcome: models.ScopeOutcomePassed},
+	}, got.Tests, "a window's capture loss is kept for judging; empty evidence is not written")
+	ignore, err := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
+	require.NoError(t, err)
+	require.Contains(t, string(ignore), "/*/"+RecordTestsReceiptFile)
+
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at}, nil)
+	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Nil(t, got, "a record that named no test removes the stale file")
+
+	// What the run saw of mock.real writes no file for a record that named
+	// no test: judging says it reported none.
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at, Real: &models.RealRun{
+		Reached: []string{"db:5432"}, Incomplete: []models.CaptureIncomplete{{Class: models.CaptureIncompleteRealName, Destination: "10.0.0.7:443"}}}}, nil)
+	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	// With its tests, the record's file carries it.
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at, Real: &models.RealRun{Reached: []string{"db:5432"}}}, windows)
+	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Equal(t, []string{"db:5432"}, got.Real.Reached)
+}
+
+// writeMapping writes keploy/set/mappings.yaml: one test, which made the
+// set's one call.
+func writeMapping(t *testing.T, keployDir string) {
+	t.Helper()
+	body := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\n"
+	if err := os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A run that reported no test leaves no per-test file, whatever rows it
+// saw: a record's file says the record reported its tests, and judging reads
+// a missing one as "the record reported no test" (a suite without keploy's
+// integration that called a local listener still makes rows).
+func TestARunWithRowsAndNoTestLeavesNoPerTestFile(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(keployDir, "set"), 0o755))
+	writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Live: []models.LiveRow{{Exe: "/app", Port: 8080}}})
+	got, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Nil(t, got, "a replay that reported no test left a per-test file")
+
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", Mocked: []models.MockedRow{{Addr: "127.0.0.1:6379", Port: 6379}}}, nil)
+	gotRec, err := ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Nil(t, gotRec, "a record that reported no test left a per-test file judging would read as complete")
+	_, err = os.Stat(filepath.Join(keployDir, "t2-go"))
+	require.True(t, os.IsNotExist(err), "a record that reported no test made its set's folder")
+
+	refused := models.RunRefusal{Code: "one_test_process_at_a_time", Message: "m"}
+	withRefusal := TestsReceipt{Set: "t2-go", Refusals: []models.RunRefusal{refused}, Live: []models.LiveRow{{Exe: "/app", Port: 8080}}}
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, withRefusal, nil)
+	gotRec, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.NotNil(t, gotRec, "a record keploy refused leaves its file")
+	require.Equal(t, withRefusal.Live, gotRec.Live, "the rows ride with the refusal")
+}
+
+// last-replay.yaml writes a bypassed destination as every other file of the
+// set writes one: an IPv6 host in brackets, so ::1 on 27017 is [::1]:27017,
+// not ::1:27017, which no reader can split into host and port.
+func TestBypassListWritesAnIPv6HostInBrackets(t *testing.T) {
+	got := bypassList([]models.BypassRule{
+		{Host: "::1", Port: 27017},
+		{Host: "[::1]", Port: 5432},
+		{Host: "localhost", Port: 8200},
+		{Port: 6379},
+		{Host: "api.internal", Path: "/v1"},
+		{Host: "10.0.0.1"},
+		{Path: "/health"},
+	})
+	require.Equal(t, []string{"[::1]:27017", "[::1]:5432", "localhost:8200", ":6379", "api.internal/v1", "10.0.0.1", "/health"}, got)
+}
+
+// A set's digest names what the recording holds: a mocks file that links out
+// of it has none, and one that links inside it has that file's.
+func TestMocksDigestStaysInsideTheRecording(t *testing.T) {
+	base := t.TempDir()
+	keployDir := filepath.Join(base, "keploy")
+	for _, set := range []string{"out", "in", "real"} {
+		if err := os.MkdirAll(filepath.Join(keployDir, set), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(base, "outside.yaml"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keployDir, "real", "mocks.yaml"), []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "..", "outside.yaml"), filepath.Join(keployDir, "out", "mocks.yaml")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "real", "mocks.yaml"), filepath.Join(keployDir, "in", "mocks.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if got := MocksDigest(keployDir, "out"); got != "" {
+		t.Fatalf("a mocks file that links out has the digest %q", got)
+	}
+	if got, want := MocksDigest(keployDir, "in"), MocksDigest(keployDir, "real"); got == "" || got != want {
+		t.Fatalf("a link inside the recording has the digest %q, want %q", got, want)
+	}
+}
+
+// A receipt is a file of the recording: it is read and written only inside
+// it. A receipt, a set folder or a keploy folder that a cloned repository
+// carries as a link out is refused, with why, by the read; and no write, a
+// replay's or a record's, puts a receipt, or a temp file, where it leads.
+func TestReceiptsStayInsideTheRecording(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links need privileges on Windows")
+	}
+	const planted = "set: set\nonMiss: fail\n"
+	// layout makes base/outside/set holding planted receipts, and
+	// base/project/keploy, and returns them.
+	layout := func(t *testing.T) (outside, keployDir string) {
+		t.Helper()
+		base := t.TempDir()
+		outside = filepath.Join(base, "outside")
+		if err := os.MkdirAll(filepath.Join(outside, "set"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{ReceiptFile, TestsReceiptFile, RecordTestsReceiptFile} {
+			if err := os.WriteFile(filepath.Join(outside, "set", f), []byte(planted), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return outside, filepath.Join(base, "project", "keploy")
+	}
+	symlink := func(t *testing.T, target, at string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// untouched requires outside to hold the planted receipts and nothing
+	// else.
+	untouched := func(t *testing.T, outside string) {
+		t.Helper()
+		if sets, err := os.ReadDir(outside); err != nil || len(sets) != 1 || sets[0].Name() != "set" {
+			t.Fatalf("outside holds %v (%v), want only the planted set", sets, err)
+		}
+		entries, err := os.ReadDir(filepath.Join(outside, "set"))
+		if err != nil || len(entries) != 3 {
+			t.Fatalf("outside holds %v (%v), want only the three planted receipts", entries, err)
+		}
+		for _, e := range entries {
+			if b, err := os.ReadFile(filepath.Join(outside, "set", e.Name())); err != nil || string(b) != planted {
+				t.Fatalf("%s outside holds %q (%v)", e.Name(), b, err)
+			}
+		}
+	}
+	refused := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "only inside") || !strings.Contains(err.Error(), "a link that leads out of it") || strings.Contains(err.Error(), "escapes from parent") {
+			t.Fatalf("%s: %v, want it refused as outside the recording", what, err)
+		}
+	}
+	read := func(t *testing.T, keployDir string) {
+		t.Helper()
+		r, err := ReadReceipt(keployDir, "set")
+		refused(t, fmt.Sprintf("ReadReceipt (read %+v)", r), err)
+		tr, err := ReadTestsReceipt(keployDir, "set")
+		refused(t, fmt.Sprintf("ReadTestsReceipt (read %+v)", tr), err)
+		tr, err = ReadRecordTestsReceipt(keployDir, "set")
+		refused(t, fmt.Sprintf("ReadRecordTestsReceipt (read %+v)", tr), err)
+	}
+	// readSays requires each reader's refusal to say exactly which receipt
+	// was refused, then what says(file) gives: the link, and where it leads
+	// from the recording, for a relative link out too.
+	readSays := func(t *testing.T, keployDir string, says func(file string) string) {
+		t.Helper()
+		for file, read := range map[string]func() error{
+			ReceiptFile:            func() error { _, err := ReadReceipt(keployDir, "set"); return err },
+			TestsReceiptFile:       func() error { _, err := ReadTestsReceipt(keployDir, "set"); return err },
+			RecordTestsReceiptFile: func() error { _, err := ReadRecordTestsReceipt(keployDir, "set"); return err },
+		} {
+			name := filepath.Join("set", file)
+			want := fmt.Sprintf("the recording's file %q is read only inside its recording %q: %s", name, keployDir, says(file))
+			if err := read(); err == nil || err.Error() != want {
+				t.Errorf("reading %s: %v, want %q", name, err, want)
+			}
+		}
+	}
+	write := func(keployDir string) {
+		writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set", OnMiss: "fail"})
+		writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Tests: []TestReceipt{{Name: "t1"}}})
+		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"}, []models.ScopeWindow{{Name: "t1"}})
+		// A run that named no tests removes the set's stale file, and a
+		// record's results for a new set make its folder.
+		writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"})
+		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"}, nil)
+		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set2"}, []models.ScopeWindow{{Name: "t1"}})
+	}
+
+	t.Run("a receipt that links out", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		for _, f := range []string{ReceiptFile, TestsReceiptFile, RecordTestsReceiptFile} {
+			symlink(t, filepath.Join("..", "..", "..", "outside", "set", f), filepath.Join(keployDir, "set", f))
+		}
+		read(t, keployDir)
+		readSays(t, keployDir, func(file string) string {
+			return fmt.Sprintf("it is a link that leads out of it, to %q; replace the link with what it leads to", filepath.Join(outside, "set", file))
+		})
+		write(keployDir)
+		untouched(t, outside)
+	})
+	t.Run("a set folder that links out", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		symlink(t, filepath.Join("..", "..", "outside", "set"), filepath.Join(keployDir, "set"))
+		read(t, keployDir)
+		readSays(t, keployDir, func(string) string {
+			return fmt.Sprintf("it leads through %q, a link that leads out of it, to %q; replace the link with what it leads to", "set", filepath.Join(outside, "set"))
+		})
+		write(keployDir)
+		untouched(t, outside)
+	})
+	t.Run("a keploy folder that links out of the project", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		symlink(t, filepath.Join("..", "outside"), keployDir)
+		read(t, keployDir)
+		write(keployDir)
+		untouched(t, outside)
+	})
+	// keploy/.gitignore that links out is not read as the recording's: the
+	// receipts' entries are then added to it, which is refused with why.
+	t.Run("a .gitignore that links out", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		gi := filepath.Join(outside, "gitignore")
+		all := strings.Join(receiptIgnore, "\n") + "\n"
+		if err := os.WriteFile(gi, []byte(all), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		symlink(t, filepath.Join("..", "..", "outside", "gitignore"), filepath.Join(keployDir, ".gitignore"))
+		core, logs := observer.New(zapcore.DebugLevel)
+		ignoreReceipts(zap.New(core), keployDir)
+		said := logs.FilterMessage("failed to git-ignore a file keploy keeps local").All()
+		if len(said) != len(receiptIgnore) {
+			t.Fatalf("said %d times that an entry could not be added, want %d: %v", len(said), len(receiptIgnore), logs.All())
+		}
+		if why := fmt.Sprint(said[0].ContextMap()["error"]); !strings.Contains(why, "only inside") || !strings.Contains(why, "a link that leads out of it") || strings.Contains(why, "escapes from parent") {
+			t.Fatalf("said %q, want it refused as outside the recording", why)
+		}
+		if b, err := os.ReadFile(gi); err != nil || string(b) != all {
+			t.Fatalf("the file the link leads to holds %q (%v)", b, err)
+		}
+	})
+}
+
+// A receipt entry keploy cannot add to keploy/.gitignore is said at WARN,
+// naming the file: the receipt holds the test command whole, and a commit of
+// a file git does not ignore publishes it. Once a process for each file: a
+// second keploy folder's file is said too.
+func TestAReceiptEntryKeployCannotGitIgnoreIsSaidAtWarn(t *testing.T) {
+	keployDir, otherDir := t.TempDir(), t.TempDir()
+	t.Cleanup(localfile.SetAddGitIgnoreForTest(func(logger *zap.Logger, path, entry string) error {
+		if entry == "/*/"+ReceiptFile {
+			return fmt.Errorf("keploy/.gitignore is read-only")
+		}
+		return utils.AddToGitIgnore(logger, path, entry)
+	}))
+	core, logs := observer.New(zapcore.DebugLevel)
+	ignoreReceipts(zap.New(core), keployDir)
+	ignoreReceipts(zap.New(core), keployDir)
+	ignoreReceipts(zap.New(core), otherDir)
+	ignoreReceipts(zap.New(core), otherDir)
+	var warned []observer.LoggedEntry
+	for _, e := range logs.All() {
+		if e.Level >= zapcore.WarnLevel {
+			warned = append(warned, e)
+		}
+	}
+	if len(warned) != 2 {
+		t.Fatalf("said %d times at WARN or above that a receipt is not git-ignored, want once for each of the 2 files: %v", len(warned), logs.All())
+	}
+	for i, dir := range []string{keployDir, otherDir} {
+		f := warned[i].ContextMap()
+		if f["file"] != filepath.Join(dir, ".gitignore") || fmt.Sprint(f["entries"]) != "[/*/"+ReceiptFile+"]" || !strings.Contains(fmt.Sprint(f["error"]), "read-only") {
+			t.Fatalf("the WARN line names %v, want the file %s, the entry and why", f, filepath.Join(dir, ".gitignore"))
+		}
+	}
 }

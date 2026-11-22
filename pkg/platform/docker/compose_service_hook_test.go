@@ -45,7 +45,7 @@ func TestModifyAppServiceForKeploy_InvokesHookForAppServiceAfterTrustStore(t *te
 	}
 
 	compose := buildComposeForDNSMigration("app", nil)
-	if err := newImpl().modifyAppServiceForKeploy(compose, "app"); err != nil {
+	if err := newImpl().modifyAppServiceForKeploy(compose, "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy returned error: %v", err)
 	}
 
@@ -100,7 +100,7 @@ func TestModifyAppServiceForKeploy_HookIdentifierIsContainerNameNotKey(t *testin
 		webSvc,
 	}}
 
-	if err := newImpl().modifyAppServiceForKeploy(compose, "my-app"); err != nil {
+	if err := newImpl().modifyAppServiceForKeploy(compose, "my-app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy returned error: %v", err)
 	}
 	if appIdentifier != "my-app" {
@@ -116,7 +116,7 @@ func TestModifyAppServiceForKeploy_NilHookIsNoOp(t *testing.T) {
 	ComposeServiceHook = nil
 
 	compose := buildComposeForDNSMigration("app", nil)
-	if err := newImpl().modifyAppServiceForKeploy(compose, "app"); err != nil {
+	if err := newImpl().modifyAppServiceForKeploy(compose, "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy with nil hook returned error: %v", err)
 	}
 	// The app still gets its truststore JAVA_TOOL_OPTIONS from OSS.
@@ -137,7 +137,7 @@ func TestModifyAppServiceForKeploy_NamesTheMockAgentTokenWithoutItsValue(t *test
 	}
 	idc := newImpl()
 	idc.mockAgentURL = "http://localhost:16789"
-	if err := idc.modifyAppServiceForKeploy(buildComposeForDNSMigration("app", nil), "app"); err != nil {
+	if err := idc.modifyAppServiceForKeploy(buildComposeForDNSMigration("app", nil), "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy returned error: %v", err)
 	}
 	if got := envSeqValue(appNode, "KEPLOY_MOCK_AGENT"); got != "http://localhost:16789" {

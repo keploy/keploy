@@ -94,6 +94,33 @@ func TestSessionKeepsNothingItWillNotUse(t *testing.T) {
 	}
 }
 
+// A restarted agent is not sent the mocks of a test set that has run, whose
+// mock file was rewritten once it ended (models.ErrPayloadFileReplaced): the
+// set being set up stores its own. The rest of the setup is made again.
+func TestSessionReapplyGoesOnPastStoredMocksOfASetThatHasRun(t *testing.T) {
+	s := newSession(t, true)
+	var mu sync.Mutex
+	var got []string
+	s.record(stepMockOutgoing, noteStep(&got, &mu, "outgoing"))
+	s.record(stepStoreMocks, func(context.Context) error {
+		return fmt.Errorf("failed to send the mocks to the agent: %w", models.ErrPayloadFileReplaced)
+	})
+	s.record(stepMockParams, noteStep(&got, &mu, "params"))
+	s.record(stepAgentReady, noteStep(&got, &mu, "ready"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatalf("reapply: %v", err)
+	}
+	if want := "outgoing params ready"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s", got, want)
+	}
+
+	// Any other failure to store the mocks still fails the setup.
+	s.record(stepStoreMocks, func(context.Context) error { return fmt.Errorf("agent down") })
+	if err := s.reapply(context.Background(), zap.NewNop()); err == nil {
+		t.Fatal("a store that failed for another reason did not fail the setup")
+	}
+}
+
 // The replayer goes on changing the consumed-mocks map it hands over; the
 // copy recorded is the call as it was made.
 func TestCopyMockParamsSharesNothing(t *testing.T) {
@@ -101,12 +128,14 @@ func TestCopyMockParamsSharesNothing(t *testing.T) {
 		TotalConsumedMocks: map[string]models.MockState{"a": {}},
 		MockMapping:        []string{"m1"},
 		RecordedWindows:    []models.TestWindow{{}},
+		BackgroundMocks:    []string{"worker-1"},
 	}
-	c := copyMockParams(params)
+	c, _ := copyMockParams(params)
 	params.TotalConsumedMocks["b"] = models.MockState{}
 	params.MockMapping[0] = "changed"
 	params.RecordedWindows[0].Start = time.Now()
-	if len(c.TotalConsumedMocks) != 1 || c.MockMapping[0] != "m1" || !c.RecordedWindows[0].Start.IsZero() {
+	params.BackgroundMocks[0] = "changed"
+	if len(c.TotalConsumedMocks) != 1 || c.MockMapping[0] != "m1" || !c.RecordedWindows[0].Start.IsZero() || c.BackgroundMocks[0] != "worker-1" {
 		t.Fatalf("the copy changed with the original: %+v", c)
 	}
 }
@@ -297,12 +326,19 @@ type restartingAgent struct {
 	// the calls other than health checks that met it.
 	down      bool
 	downCalls int
-	// refuse answers a path's nth connection 503; hang keeps it open after
-	// its item, as an agent that vanished without closing it, until release
-	// is closed; slow answers it slowBy late.
+	// refuse answers a path's nth connection 503 (the agent's readiness,
+	// with the CA setup failure an agent latches until it is started
+	// again); hang keeps it open after its item, as an agent that vanished
+	// without closing it, until release is closed; slow answers it slowBy
+	// late.
 	refuse, hang, slow map[string]int
 	release            chan struct{}
 	slowBy             time.Duration
+	// order is every call that met the agent up, as "METHOD path".
+	order []string
+	// instance, when set, names the agent process in every answer, as an
+	// agent with the proven switch on does (models.AgentInstanceHeader).
+	instance string
 }
 
 func (r *restartingAgent) handler(t *testing.T) http.Handler {
@@ -321,12 +357,23 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		}
 		r.conns[req.URL.Path]++
 		n := r.conns[req.URL.Path]
+		r.order = append(r.order, req.Method+" "+req.URL.Path)
 		if req.URL.Path == "/agent/agent/ready" { // the agent's /agent/ready, under its /agent prefix
 			r.ready++
 		}
+		if r.instance != "" {
+			w.Header().Set(models.AgentInstanceHeader, r.instance)
+		}
 		r.mu.Unlock()
 		switch req.URL.Path {
-		case "/agent/agent/ready", "/agent/health":
+		case "/agent/agent/ready":
+			if r.refuse[req.URL.Path] == n {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, "%s the agent could not set its CA up", agentCASetupFailed)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/agent/health":
 			w.WriteHeader(http.StatusOK)
 		case "/agent/outgoing":
 			if r.refuse[req.URL.Path] == n {
@@ -351,6 +398,15 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 			_ = json.NewEncoder(w).Encode(models.TestMockMapping{TestName: fmt.Sprintf("mapping-%d", n)})
 		case "/agent/pcap/traffic", "/agent/pcap/keylog":
 			_, _ = fmt.Fprintf(w, "%s#%d\n", req.URL.Path, n)
+		case "/agent/containers": // a docker-mode agent: it takes container lists
+			_, _ = io.Copy(io.Discard, req.Body)
+			w.WriteHeader(http.StatusNoContent)
+		case "/agent/containers/settle":
+			// The CLI's ask for settles, held open: this agent's first uses
+			// ask none, so it ends when the CLI's session does.
+			<-req.Context().Done()
+		case "/agent/mock":
+			_ = json.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 		default:
 			t.Errorf("unexpected request %s", req.URL.Path)
 		}
@@ -509,7 +565,7 @@ func TestStreamsEndOutsideCompose(t *testing.T) {
 // The packet capture goes on after a restart: the traffic in a capture file of
 // its own (each a valid capture), the key log in the same file.
 func TestPcapStreamsReconnectToARestartedAgent(t *testing.T) {
-	client, _ := newRestartingClient(t, true)
+	client, agent := newRestartingClient(t, true)
 	s := client.session()
 	dir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -546,6 +602,15 @@ func TestPcapStreamsReconnectToARestartedAgent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the pcap streams did not end with the run")
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	calls := map[string]int{}
+	for _, call := range agent.order {
+		calls[call]++
+	}
+	if calls["GET /agent/pcap/traffic"] != 2 || calls["GET /agent/pcap/keylog"] != 2 {
+		t.Fatalf("the pcap streams were not each opened by GET, then reopened by GET: %q", agent.order)
 	}
 }
 
@@ -673,5 +738,85 @@ func TestStreamCaughtUpOnlyToTheAgentItReached(t *testing.T) {
 	st.caughtUp(conn)
 	if !restarts(t, st) {
 		t.Fatal("a stream on a replaced agent did not reconnect to the newest")
+	}
+}
+
+// Under exact serving a set's staging is a step of its own: the filters that
+// open a test case or serve the pool after it replace each other, never the
+// staging, and a restarted agent is staged before it is told what to serve.
+func TestSessionKeepsTheExactStagingBeforeWhatIsServed(t *testing.T) {
+	stage := models.MockFilterParams{Exact: &models.ExactServing{Stage: true, Pool: []string{"mock-9"}}}
+	open := models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}
+	pool := models.MockFilterParams{Exact: &models.ExactServing{}}
+	if mockParamsStep(stage) != stepExactStage || mockParamsStep(open) != stepMockParams || mockParamsStep(pool) != stepMockParams || mockParamsStep(models.MockFilterParams{}) != stepMockParams {
+		t.Fatal("a filter is recorded under the wrong step")
+	}
+	s := newSession(t, true)
+	var mu sync.Mutex
+	var got []string
+	s.record(stepStoreMocks, noteStep(&got, &mu, "store"))
+	s.record(mockParamsStep(stage), noteStep(&got, &mu, "stage"))
+	s.record(mockParamsStep(open), noteStep(&got, &mu, "open test-1"))
+	s.record(mockParamsStep(pool), noteStep(&got, &mu, "pool"))
+	s.record(mockParamsStep(open), noteStep(&got, &mu, "open test-2"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if want := "store stage open test-2"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s", got, want)
+	}
+	// The copy recorded shares nothing with the call's exact serving.
+	c, _ := copyMockParams(stage)
+	stage.Exact.Pool[0] = "changed"
+	if c.Exact.Pool[0] != "mock-9" {
+		t.Fatalf("the copy changed with the original: %+v", c.Exact)
+	}
+	// Nor with a pool call's calls in flight (models.ExactServing.Ahead).
+	poolCall := models.MockFilterParams{Exact: &models.ExactServing{Ahead: []string{"mock-3"}}}
+	pc, _ := copyMockParams(poolCall)
+	poolCall.Exact.Ahead[0] = "changed"
+	if pc.Exact.Ahead[0] != "mock-3" {
+		t.Fatalf("the copy's calls in flight changed with the original: %+v", pc.Exact)
+	}
+}
+
+// A test set's capture files are made only inside the recording: a keploy
+// folder the repository carries as a link out of the project, or a capture
+// file that is a link out of its set, is refused, and nothing is made or
+// written where it leads.
+func TestPcapStreamsWriteOnlyInsideTheRecording(t *testing.T) {
+	client, _ := newRestartingClient(t, true)
+	project := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(project, "keploy")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := client.StreamPcapArtifacts(ctx, filepath.Join(project, "keploy", "test-set-1"))
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a keploy folder that links out: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the link leads", len(entries))
+	}
+
+	set := filepath.Join(t.TempDir(), "keploy", "test-set-1")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("KEEP ME"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(set, "traffic.pcap")); err != nil {
+		t.Fatal(err)
+	}
+	err = client.StreamPcapArtifacts(ctx, set)
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a capture file that links out: %v, want it refused", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "KEEP ME" {
+		t.Fatalf("the file the link leads to holds %q", got)
 	}
 }

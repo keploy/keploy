@@ -7,13 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -65,13 +70,81 @@ done
 for a in "$@"; do
   if [ "$a" = "ps" ]; then
     if [ "` + hang + `" = "1" ]; then while : ; do sleep 1; done; fi
+    # KEPLOY_STUB_PS_CODE: ps fails with this code, as it does on a file that
+    # needs a variable only the up's own command gave.
+    if [ -n "${KEPLOY_STUB_PS_CODE:-}" ]; then
+      echo 'required variable TAG is missing a value' >&2
+      exit "$KEPLOY_STUB_PS_CODE"
+    fi
     cat "` + errFile + `" >&2
     cat "` + psFile + `"
     exit 0
   fi
 done
 for a in "$@"; do
-  if [ "$a" = "down" ]; then exit ` + itoa(downCode) + `; fi
+  if [ "$a" = "up" ] && [ -n "${KEPLOY_STUB_UP_WAIT_FILE:-}" ]; then
+    # KEPLOY_STUB_UP_WAIT_FILE: the up runs until the file exists, as an
+    # up attached to the app alone runs until the app has stopped.
+    # KEPLOY_STUB_UP_CODE: the first up exits with this code, and every up
+    # after it exits 0 at once, as a retried up whose dependency is healthy
+    # now (the first up may also be killed: it is the first all the same).
+    # KEPLOY_STUB_UP_RETRY_WAIT_FILE: a retried up runs until that file
+    # exists instead, as an up whose stack keploy then stops.
+    if [ -n "${KEPLOY_STUB_UP_CODE:-}" ]; then
+      if [ -e "$KEPLOY_STUB_UP_WAIT_FILE.first" ]; then
+        printf 'UP-RETRIED\n' >> "` + argvLog + `"
+        if [ -n "${KEPLOY_STUB_UP_RETRY_WAIT_FILE:-}" ]; then
+          while [ ! -e "$KEPLOY_STUB_UP_RETRY_WAIT_FILE" ] && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05 </dev/null >/dev/null 2>&1; done
+          printf 'UP-RETRY-DONE\n' >> "` + argvLog + `"
+        fi
+        exit 0
+      fi
+      : > "$KEPLOY_STUB_UP_WAIT_FILE.first"
+      # The first up ignores TERM and INT, as an up whose own handling of a
+      # signal does not end it: only a kill does. It notes each it gets.
+      trap 'printf "UP-SIGNALLED\n" >> "` + argvLog + `"' TERM INT
+      # It starts a child in its process group, as the docker CLI starts
+      # its compose plugin. The child ignores TERM and INT too, ends with
+      # the up when the up ends on its own, and notes it if it outlives
+      # the group's leader: a kill of the leader alone, not of the group.
+      # The leader is this up, or the sh -c keploy runs it through, when
+      # that sh forks the up rather than exec it (Debian's and Ubuntu's
+      # dash), and then a kill of the leader alone leaves this up too.
+      ( trap '' TERM INT
+        pg=$(ps -o pgid= -p $$ | tr -d ' ')
+        if [ -z "$pg" ]; then printf 'UP-CHILD-NO-PGID\n' >> "` + argvLog + `"; exit 0; fi
+        printf 'UP-CHILD-STARTED\n' >> "` + argvLog + `"
+        while kill -0 "$pg" 2>/dev/null && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05; done
+        if [ -d "` + dir + `" ] && ! kill -0 "$pg" 2>/dev/null; then printf 'UP-CHILD-OUTLIVED\n' >> "` + argvLog + `"; fi
+      ) </dev/null >/dev/null 2>&1 &
+      child=$!
+    fi
+    # The wait also ends once this stand-in's dir is gone (its test ended)
+    # or the test process is (it died before its cleanups ran): no
+    # stand-in up outlives its test.
+    while [ ! -e "$KEPLOY_STUB_UP_WAIT_FILE" ] && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05 </dev/null >/dev/null 2>&1; done
+    printf 'UP-DONE\n' >> "` + argvLog + `"
+    if [ -n "${KEPLOY_STUB_UP_CODE:-}" ]; then
+      kill -KILL "$child" 2>/dev/null
+      exit "$KEPLOY_STUB_UP_CODE"
+    fi
+    exit 0
+  fi
+done
+for a in "$@"; do
+  if [ "$a" = "down" ]; then
+    printf 'DOWN-STARTED\n' >> "` + argvLog + `"
+    # KEPLOY_STUB_DOWN_TENTHS: the down takes that many tenths of a second,
+    # each its own short sleep off the output pipe, so a down keploy kills
+    # leaves no sleep holding the pipe or running on.
+    i=0
+    while [ "$i" -lt "${KEPLOY_STUB_DOWN_TENTHS:-0}" ]; do
+      sleep 0.1 </dev/null >/dev/null 2>&1
+      i=$((i+1))
+    done
+    printf 'DOWN-DONE\n' >> "` + argvLog + `"
+    exit ` + itoa(downCode) + `
+  fi
 done
 exit 0
 `
@@ -109,11 +182,81 @@ type inspectRecorder struct {
 	// removed records every ContainerRemove. Removal moved from `docker rm -f`
 	// to the Engine API, so the argv log no longer sees it.
 	removed []string
-	// listed records the name filters ContainerList was asked about.
-	listed []string
+	// listed records the name filters ContainerList was asked about, and
+	// listedLabels its label filters.
+	listed, listedLabels []string
 	// hangRemove makes ContainerRemove block until its context expires, which
 	// is how a saturated daemon presents.
 	hangRemove bool
+	// events is what the daemon reports of the project (Events): nil, nothing.
+	events chan events.Message
+	// eventLabels records the label filters Events was asked for;
+	// eventTypes and eventActions, its type and event filters.
+	eventLabels, eventTypes, eventActions []string
+	// inspects answers ContainerInspect for the containers it names, until
+	// they are removed; any other is "no such container".
+	inspects map[string]container.InspectResponse
+	// eventsHang makes Events wait for its context to end before it returns,
+	// as the docker client's does while the daemon has not answered.
+	eventsHang bool
+	// networks are the networks NetworkList answers; netLabels records its
+	// label filters, netRemoved every NetworkRemove.
+	networks   []network.Summary
+	netLabels  []string
+	netRemoved []string
+}
+
+// Events answers as the docker client's does: messages from r.events until
+// ctx ends, then ctx's error.
+func (r *inspectRecorder) Events(ctx context.Context, o events.ListOptions) (<-chan events.Message, <-chan error) {
+	r.mu.Lock()
+	r.eventLabels = append(r.eventLabels, o.Filters.Get("label")...)
+	r.eventTypes = append(r.eventTypes, o.Filters.Get("type")...)
+	r.eventActions = append(r.eventActions, o.Filters.Get("event")...)
+	src, hang := r.events, r.eventsHang
+	r.mu.Unlock()
+	msgs, errs := make(chan events.Message), make(chan error, 1)
+	if hang {
+		<-ctx.Done()
+		errs <- ctx.Err()
+		return msgs, errs
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				errs <- ctx.Err()
+				return
+			case m := <-src:
+				select {
+				case msgs <- m:
+				case <-ctx.Done():
+					errs <- ctx.Err()
+					return
+				}
+			}
+		}
+	}()
+	return msgs, errs
+}
+
+// ContainerLogs answers that the container is gone, as after a teardown.
+func (r *inspectRecorder) ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error) {
+	return nil, errors.New("no such container")
+}
+
+func (r *inspectRecorder) NetworkList(_ context.Context, o network.ListOptions) ([]network.Summary, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.netLabels = append(r.netLabels, o.Filters.Get("label")...)
+	return append([]network.Summary(nil), r.networks...), nil
+}
+
+func (r *inspectRecorder) NetworkRemove(_ context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.netRemoved = append(r.netRemoved, id)
+	return nil
 }
 
 func (r *inspectRecorder) ContainerRemove(ctx context.Context, name string, _ container.RemoveOptions) error {
@@ -123,6 +266,7 @@ func (r *inspectRecorder) ContainerRemove(ctx context.Context, name string, _ co
 	}
 	r.mu.Lock()
 	r.removed = append(r.removed, name)
+	delete(r.inspects, name)
 	r.mu.Unlock()
 	return nil
 }
@@ -130,8 +274,22 @@ func (r *inspectRecorder) ContainerRemove(ctx context.Context, name string, _ co
 func (r *inspectRecorder) ContainerList(_ context.Context, options container.ListOptions) ([]container.Summary, error) {
 	r.mu.Lock()
 	r.listed = append(r.listed, options.Filters.Get("name")...)
+	r.listedLabels = append(r.listedLabels, options.Filters.Get("label")...)
 	r.mu.Unlock()
 	return nil, nil
+}
+
+// listedProject reports whether the containers of compose project p were
+// listed (stopComposeProject lists them to stop them).
+func (r *inspectRecorder) listedProject(p string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.listedLabels {
+		if l == "com.docker.compose.project="+p {
+			return true
+		}
+	}
+	return false
 }
 
 // didRemove reports whether the given container was force-removed.
@@ -154,9 +312,12 @@ func (r *inspectRecorder) removedIDs() []string {
 
 func (r *inspectRecorder) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.asked = append(r.asked, name)
-	r.mu.Unlock()
-	return container.InspectResponse{}, errors.New("no such container")
+	if info, ok := r.inspects[name]; ok {
+		return info, nil
+	}
+	return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
 }
 
 func (r *inspectRecorder) askedAbout(name string) bool {
@@ -180,7 +341,7 @@ func keployStack(t *testing.T, psJSON string, downCode int) (*App, *inspectRecor
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose -p orderflow up",
+		cmd:             utils.NewAppCommand("docker compose -p orderflow up"),
 		keployContainer: "keploy-v3",
 		container:       "user-app",
 		composeServices: []string{"app", "db", "keploy-agent"},
@@ -273,6 +434,34 @@ func TestComposeDownSweepsAfterAFailedDown(t *testing.T) {
 	}
 }
 
+// TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects covers the in-memory
+// path (the enterprise cloud flow), where the compose document is piped rather
+// than written to disk. `docker compose -f -` with nothing on stdin fails with
+// "empty compose file", the sweep logs at Debug and returns nothing, and the
+// whole fix is silently a no-op on that path.
+func TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects(t *testing.T) {
+	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
+	argvLog := stubDockerCLI(t, ps, 1)
+	a := &App{
+		logger:          zap.NewNop(),
+		docker:          &inspectRecorder{},
+		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
+		composeServices: []string{"app"},
+	}
+
+	a.sweepStragglingProjectContainers()
+
+	log := recordedLog(t, argvLog)
+	if !strings.Contains(log, "ARG -\n") {
+		t.Fatalf("the in-memory sweep did not pass `-f -`.\n%s", log)
+	}
+	if !strings.Contains(log, "STDIN services:") {
+		t.Fatalf("the compose YAML never reached the child's stdin, so `docker compose -f -` sees an "+
+			"empty compose file and the sweep silently does nothing.\n%s", log)
+	}
+}
+
 // TestSweepWithNoKnownServicesDoesNothing is the safety default: without the
 // service list there is no way to tell keploy's containers from the user's, and
 // guessing is what the orphan test above forbids.
@@ -280,7 +469,7 @@ func TestSweepWithNoKnownServicesDoesNothing(t *testing.T) {
 	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
 	stubDockerCLI(t, ps, 1)
 	rec := &inspectRecorder{}
-	a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: "docker compose up"}
+	a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: utils.NewAppCommand("docker compose up")}
 
 	if ids := a.sweepStragglingProjectContainers(); len(ids) != 0 {
 		t.Fatalf("swept %v with no known service list", ids)
@@ -380,7 +569,7 @@ func TestSweepSurvivesComposeWarningsOnStderr(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 
@@ -414,7 +603,7 @@ func TestSweepLeavesComposeRunOneOffsAlone(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 
@@ -445,7 +634,7 @@ func TestSweepIsBoundedWhenComposeHangs(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 
@@ -554,48 +743,4 @@ func TestSetComposeSourceKeepsTheServiceListWithTheSource(t *testing.T) {
 		t.Fatal("the injected keploy-agent service is not in the set; the service list was captured " +
 			"before ModifyComposeForAgent")
 	}
-}
-
-// fakeComposeStack is a composeStack that answers from canned data, so the
-// in-memory compose path keeps unit coverage without a docker daemon.
-type fakeComposeStack struct {
-	ps       []docker.ServiceState
-	psCalls  int
-	downCall int
-	upErr    error
-	// upBlocksUntil, when non-nil, makes Up block until it is closed or the
-	// context ends — the shape a foreground `up` has.
-	upBlocksUntil chan struct{}
-}
-
-func (f *fakeComposeStack) ProjectName() string { return "fake" }
-
-func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _, _ io.Writer) error {
-	if f.upBlocksUntil != nil {
-		select {
-		case <-f.upBlocksUntil:
-		case <-ctx.Done():
-		}
-	}
-	return f.upErr
-}
-
-func (f *fakeComposeStack) Down(context.Context, time.Duration) error {
-	f.downCall++
-	return nil
-}
-
-func (f *fakeComposeStack) Ps(context.Context) ([]docker.ServiceState, error) {
-	f.psCalls++
-	return f.ps, nil
-}
-
-func (f *fakeComposeStack) ContainerIDsForService(_ context.Context, service string) ([]string, error) {
-	var ids []string
-	for _, s := range f.ps {
-		if s.Service == service {
-			ids = append(ids, s.ID)
-		}
-	}
-	return ids, nil
 }

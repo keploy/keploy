@@ -3,10 +3,8 @@ package http_test
 // End-to-end streaming test: a real chi router + real agent route handlers
 // (DefaultRoutes) wired to a stub Service, behind an httptest server, driven by
 // the real AgentClient. Proves the client streams the corpus and the real
-// /storemocks handler decodes the header and drives StoreMocksStream. Streaming
-// is the default wire format; StoreMocks falls back to the legacy single-shot
-// framing only when an older agent rejects the stream with 400 (covered in
-// agent_fallback_test.go).
+// /storemocks handler decodes the header and drives StoreMocksStream. The
+// stream is the only wire format the client sends (agent_storemocks_400_test.go).
 
 import (
 	"bytes"
@@ -41,6 +39,8 @@ type stubSvc struct {
 	filtered    int
 	unfiltered  int
 	names       []string
+	// mocks is every mock the stream carried, as the agent decoded it.
+	mocks []*models.Mock
 }
 
 func (s *stubSvc) StoreMocks(_ context.Context, f, u []*models.Mock) error {
@@ -62,6 +62,7 @@ func (s *stubSvc) StoreMocksStream(_ context.Context, h models.MockStreamHeader,
 		}
 		s.mu.Lock()
 		s.names = append(s.names, m.Name)
+		s.mocks = append(s.mocks, &m)
 		s.mu.Unlock()
 	}
 	s.mu.Lock()
@@ -84,8 +85,7 @@ func fixtures() (filtered, unfiltered []*models.Mock) {
 }
 
 // End-to-end: the client streams to the real agent routes, which decode the
-// header and drive StoreMocksStream. (Streaming is the default path; the legacy
-// single-shot fallback for older agents is covered in agent_fallback_test.go.)
+// header and drive StoreMocksStream.
 func TestStoreMocks_StreamsToAgent(t *testing.T) {
 	svc := &stubSvc{}
 	r := chi.NewRouter()
@@ -106,6 +106,34 @@ func TestStoreMocks_StreamsToAgent(t *testing.T) {
 	}
 	if svc.filtered != len(f) || svc.unfiltered != len(u) {
 		t.Fatalf("counts mismatch: got f=%d u=%d want f=%d u=%d", svc.filtered, svc.unfiltered, len(f), len(u))
+	}
+}
+
+// This keploy does not replay connection failures, so it never sends one to
+// the agent: an agent that predates the kind would read it as a mock with no
+// metadata.destAddr, whose unknown port turns loopback refusal off for the
+// whole test set. The caller's slices are left as they were.
+func TestStoreMocks_NeverSendsAConnectionFailureToTheAgent(t *testing.T) {
+	svc := &stubSvc{}
+	r := chi.NewRouter()
+	routes.DefaultRoutes{}.New(r, svc, zap.NewNop())
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	client := newClient(t, srv.URL+"/agent")
+	f := []*models.Mock{{Name: "f1", Kind: models.HTTP}, {Name: "cf-1", Kind: models.ConnectionFailure}, {Name: "f2", Kind: models.Mongo}}
+	u := []*models.Mock{{Name: "cf-2", Kind: models.ConnectionFailure}, {Name: "u1", Kind: models.DNS}}
+	if err := client.StoreMocks(context.Background(), f, u); err != nil {
+		t.Fatalf("StoreMocks: %v", err)
+	}
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if got := strings.Join(svc.names, ","); got != "f1,f2,u1" || svc.filtered != 2 || svc.unfiltered != 1 {
+		t.Fatalf("the agent got %q (filtered %d, unfiltered %d); want f1,f2,u1 (2, 1): no connection failure", got, svc.filtered, svc.unfiltered)
+	}
+	if len(f) != 3 || f[1].Name != "cf-1" || len(u) != 2 || u[0].Name != "cf-2" {
+		t.Fatal("StoreMocks changed the caller's slices")
 	}
 }
 

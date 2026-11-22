@@ -90,13 +90,53 @@ func TestFromClientIsAfterWhatTheSocketHadReceivedReadOrNot(t *testing.T) {
 	if got := readString(t, u, 1024); got != early {
 		t.Fatalf("the first Read returned %q, want only the bytes before the cut, %q", got, early)
 	}
-	first := u.FromDest()
+	first, _ := u.FromDest()
 	if got := readString(t, u, 1024); got != answer {
 		t.Fatalf("the second Read returned %q, want %q", got, answer)
 	}
-	second := u.FromDest()
+	second, _ := u.FromDest()
 	if !before(first, req) || !before(req, second) {
 		t.Fatalf("408 %d, request %d, answer %d: want 408 < request < answer", first, req, second)
+	}
+}
+
+// The client's FIN is numbered as a client chunk is: what the destination had
+// sent the socket when it was read is before it, read or not, and what the
+// destination sent after it is after it (FromDest says so), though one Read
+// could take both: the Read stops at the FIN's cut. Here a reply in flight when
+// the client closed, and then the destination's answer to the FIN.
+func TestClientClosedIsAfterWhatTheSocketHadReceivedReadOrNot(t *testing.T) {
+	t.Parallel()
+	u, dest := tcpUpstream(t)
+	const inFlight, interrupted = "a reply in flight", "the answer to the FIN"
+	if _, err := dest.Write([]byte(inFlight)); err != nil {
+		t.Fatal(err)
+	}
+	awaitSent(t, u, uint64(len(inFlight)))
+	fin := u.ClientClosed() // nothing has read the reply in flight
+	if again := u.ClientClosed(); again != fin {
+		t.Fatalf("a second ClientClosed numbered the FIN %d, the first %d: it is numbered once", again, fin)
+	}
+	if _, err := dest.Write([]byte(interrupted)); err != nil {
+		t.Fatal(err)
+	}
+	awaitSent(t, u, uint64(len(inFlight)+len(interrupted))) // one Read could now take both
+	if got := readString(t, u, 1024); got != inFlight {
+		t.Fatalf("the first Read returned %q, want only the bytes before the FIN, %q", got, inFlight)
+	}
+	first, firstAfter := u.FromDest()
+	if got := readString(t, u, 1024); got != interrupted {
+		t.Fatalf("the second Read returned %q, want %q", got, interrupted)
+	}
+	second, secondAfter := u.FromDest()
+	if !before(first, fin) || !before(fin, second) {
+		t.Fatalf("in flight %d, FIN %d, answer %d: want in flight < FIN < answer", first, fin, second)
+	}
+	if firstAfter {
+		t.Fatal("the reply that had reached the socket before the client closed is taken for one after")
+	}
+	if !secondAfter {
+		t.Fatal("the destination's answer to the FIN is not taken for one after the client closed")
 	}
 }
 
@@ -138,11 +178,11 @@ func TestFromClientOrdersTLSRecordsByWhenTheyReachedTheSocket(t *testing.T) {
 	if got := readString(t, client, 1024); got != early {
 		t.Fatalf("the first Read returned %q, want %q", got, early)
 	}
-	first := u.FromDest()
+	first, _ := u.FromDest()
 	if got := readString(t, client, 1024); got != answer {
 		t.Fatalf("the second Read returned %q, want %q", got, answer)
 	}
-	second := u.FromDest()
+	second, _ := u.FromDest()
 	if !before(first, req) || !before(req, second) {
 		t.Fatalf("408 %d, request %d, answer %d: want 408 < request < answer", first, req, second)
 	}

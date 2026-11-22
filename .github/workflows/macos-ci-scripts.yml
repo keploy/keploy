@@ -6,7 +6,8 @@ name: macOS CI scripts
 # exactly that as a loop in prepare_and_run.yml, removing application
 # containers compose had created and not yet started.
 #
-# Two sets of tests run here, on every change to the script or to a workflow:
+# Two sets of tests of the sweep run here, on every change to the script or
+# to a workflow:
 # - reap-stale-containers.tests.sh, the script's cases against a fake docker.
 #   prepare_and_run's precheck-macos runs them on the runners themselves too,
 #   but not for a pull request from a fork.
@@ -19,6 +20,12 @@ name: macOS CI scripts
 # Both run on GitHub's macOS image, for the bash 3.2 and BSD tools the
 # self-hosted runners have, and on Linux, where they are also run by hand and
 # where the script then sweeps a real Docker daemon.
+#
+# Also here: docker-build-retry.tests.sh, the cases of the helper every docker
+# lane builds its images through (test_workflow_scripts/docker-build-retry.sh),
+# which decides from a failed build's log whether to build again. The macOS
+# lanes source it under bash 3.2, the Linux lanes under GNU tools, so it runs
+# on both too.
 
 on:
   push:
@@ -49,6 +56,24 @@ jobs:
 
       - name: Check the workflows around it (bash 3.2, BSD tools)
         run: /bin/bash .github/scripts/macos/reap-stale-containers.workflows.tests.sh
+
+  docker-build-retry-macos:
+    timeout-minutes: 10
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test which failed builds docker_build_retry builds again (bash 3.2, BSD tools)
+        run: /bin/bash .github/workflows/test_workflow_scripts/docker-build-retry.tests.sh
+
+  docker-build-retry-linux:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test which failed builds docker_build_retry builds again (GNU tools)
+        run: bash .github/workflows/test_workflow_scripts/docker-build-retry.tests.sh
 
   reaper-linux:
     timeout-minutes: 10

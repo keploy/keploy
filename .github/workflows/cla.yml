@@ -9,6 +9,9 @@ on:
       - "opened"
       - "closed"
       - "synchronize"
+      # A PR opened with GITHUB_TOKEN (refresh-nss-roots.yml) starts no workflow;
+      # reopening it is how a maintainer kicks off its checks, CLA included.
+      - "reopened"
 
 jobs:
   cla-assistant:
@@ -54,7 +57,8 @@ jobs:
           path-to-signatures: "etc/cla-signatures/signatures.json"
           path-to-document: "https://github.com/keploy/keploy/tree/main/.github/CLA.md"
           branch: "cla-signatures"
-          allowlist: "keploy-bot,renovate"
+          # github-actions[bot] authors refresh-nss-roots.yml's weekly root-store PRs.
+          allowlist: "keploy-bot,renovate,github-actions[bot]"
 
       - name: "Post Failure Instructions"
         if: failure() && github.event_name == 'pull_request_target'

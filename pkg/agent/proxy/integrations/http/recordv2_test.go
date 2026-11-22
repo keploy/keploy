@@ -307,7 +307,7 @@ func TestRecordV2_LegacyParity(t *testing.T) {
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	reqTs := time.Unix(1_700_002_000, 0)
 	resTs := reqTs.Add(5 * time.Millisecond)
-	v2Mock, err := h.buildHTTPMock(&FinalHTTP{
+	v2Mock, err := h.buildHTTPMock(context.Background(), &FinalHTTP{
 		Req:              canonicalRequest,
 		Resp:             canonicalResponse,
 		ReqTimestampMock: reqTs,
@@ -375,6 +375,13 @@ func TestRecordV2_LegacyParity(t *testing.T) {
 	if v2Mock.TestModeInfo.Lifetime != models.LifetimePerTest || !v2Mock.TestModeInfo.LifetimeDerived {
 		t.Errorf("V2 mock must be stamped LifetimePerTest+LifetimeDerived at build time, got %+v",
 			v2Mock.TestModeInfo)
+	}
+	// Both state the exchange per-test on disk too (models.MetadataLifetimeKey),
+	// so a replay serves it to the test it was recorded in only.
+	for name, m := range map[string]*models.Mock{"v2": v2Mock, "legacy": legacyMock} {
+		if got := m.Spec.Metadata[models.MetadataLifetimeKey]; got != models.MetadataLifetimePerTest {
+			t.Errorf("%s mock states lifetime %q, want %q", name, got, models.MetadataLifetimePerTest)
+		}
 	}
 }
 

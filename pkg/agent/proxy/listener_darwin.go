@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/listeners"
 	"golang.org/x/sys/unix"
 )
@@ -33,6 +34,11 @@ func listenerOwner(ip net.IP, port uint32) (int, bool) {
 	return int(pid), true
 }
 
+func listening(ip net.IP, port uint32) bool {
+	_, ok := listenerOwner(ip, port)
+	return ok
+}
+
 func descends(pid, ancestor int) bool {
 	for i := 0; i < 64 && pid > 1; i++ {
 		if pid == ancestor {
@@ -54,4 +60,11 @@ func refused(ip net.IP, port uint32) bool {
 	}
 	_ = conn.Close()
 	return false
+}
+
+// callerOf is the process that made a redirected connection, by the number
+// the agent's process table names it by: macOS has no PID namespaces, so the
+// kernel's number (KernelPid) is that number. unnamed is never true.
+func callerOf(dest *agent.NetworkAddress) (caller int, unnamed bool) {
+	return int(dest.KernelPid), false
 }

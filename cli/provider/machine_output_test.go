@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -159,9 +160,9 @@ func TestIsMachineReadableOutput(t *testing.T) {
 // The test drives the real ValidateFlags, captures the real os.Stdout, writes
 // the document the report service would write, and decodes every line.
 func TestMachineFormatsKeepStdoutParseable(t *testing.T) {
-	// Deliberately NOT calling log.New() (it would create keploy-logs.txt in
-	// the working directory): the rebuild helpers must work from an untouched
-	// LogCfg, which is what log.ensureLogCfg guarantees.
+	// Deliberately NOT calling log.New() (it would create a log file): the
+	// rebuild helpers must work from an untouched LogCfg, which is what
+	// log.ensureLogCfg guarantees.
 
 	cases := []struct {
 		name      string
@@ -383,5 +384,170 @@ func TestFlagErrorFollowsTheLoggerSink(t *testing.T) {
 	if !strings.Contains(onStderr, flagErr) {
 		t.Errorf("the flag error never reached the logger's sink, so it went to a stdout this "+
 			"process had already declared machine-readable:\n%q", onStderr)
+	}
+}
+
+// A run whose stdout is a document keeps no log file. PrintLogo, which names
+// the log on its `logs:` line, has no room beside the document, and a log
+// nobody is told about is one a killed run leaves in the temp directory for
+// nobody to find. A text run keeps its log, and names it.
+func TestMachineOutputKeepsNoLogFile(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		args      []string
+		cfgFormat string
+		keeps     bool
+	}{
+		{name: "report --format json", args: []string{"--format", "json"}},
+		{name: "report --format junit", args: []string{"--format", "junit"}},
+		{name: "report.format json from keploy.yml", cfgFormat: "json"},
+		{name: "report --format text", args: []string{"--format", "text"}, keeps: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			t.Cleanup(log.TestOnlyResetSink)
+			_, f, err := log.New()
+			if err != nil || f == nil {
+				t.Fatalf("log.New = %v, %v; want a log file", f, err)
+			}
+			prev := utils.LogFile
+			utils.LogFile = f
+			t.Cleanup(func() {
+				_ = log.CloseLogFile(f)
+				utils.LogFile = prev
+			})
+
+			cfg := config.New()
+			cfg.Report.Format = c.cfgFormat
+			cc := NewCmdConfigurator(zap.New(nil), cfg)
+			cmd := &cobra.Command{Use: "report"}
+			if err := cc.AddFlags(cmd); err != nil {
+				t.Fatalf("AddFlags: %v", err)
+			}
+			cmd.Flags().Bool("disable-ansi", false, "")
+			if err := cmd.ParseFlags(c.args); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+			out := captureStdout(t, func() {
+				if err := cc.ValidateFlags(t.Context(), cmd); err != nil {
+					t.Errorf("ValidateFlags: %v", err)
+				}
+			})
+
+			logs, err := filepath.Glob(filepath.Join(tmp, log.LogFilePattern))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.keeps {
+				if len(logs) != 1 || utils.LogFile != f || !strings.Contains(out, "logs: "+f.Name()) {
+					t.Errorf("a text run kept %v (LogFile %v) and printed:\n%s\nwant its log %s, named on the logs: line", logs, utils.LogFile, out, f.Name())
+				}
+				return
+			}
+			if len(logs) != 0 || utils.LogFile != nil {
+				t.Errorf("a run with machine-readable output kept %v (LogFile %v); want no log file", logs, utils.LogFile)
+			}
+			// Closed, not only unlinked: a line logged from here on reaches no
+			// file. An open sink would go on filling the unlinked file, up to
+			// its 100 MiB cap of temp space nobody can see or remove.
+			cc.logger.Info("a line logged once the flags showed a document")
+			if _, err := f.Write(nil); !errors.Is(err, os.ErrClosed) {
+				size := int64(-1)
+				if fi, err := f.Stat(); err == nil {
+					size = fi.Size()
+				}
+				t.Errorf("the log of a run with machine-readable output is still open (write: %v; it holds %d bytes): its lines go on to a file nobody is told about", err, size)
+			}
+			if strings.Contains(out, "logs:") {
+				t.Errorf("a run with machine-readable output named a log on stdout:\n%s", out)
+			}
+		})
+	}
+}
+
+// WantsMachineOutput reads the command line, and the config file, as
+// ValidateFlags will decide it, before cobra parses anything: main builds a
+// logger that keeps no log file for a run it says yes to.
+func TestWantsMachineOutput(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "project")
+	other := filepath.Join(dir, "other")
+	for _, d := range []string{project, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(other, "keploy.yml"), "report:\n  format: junit\n")
+	t.Chdir(project)
+
+	for _, c := range []struct {
+		name      string
+		args      []string
+		keployYml string // in the working directory
+		override  string // project.keploy.yml, in the working directory
+		want      bool
+	}{
+		{name: "--json", args: []string{"record", "--json"}, want: true},
+		{name: "--json=true ahead of the command", args: []string{"--json=true", "report"}, want: true},
+		{name: "--json=false", args: []string{"report", "--json=false"}},
+		{name: "the last --json wins", args: []string{"report", "--json", "--json=false"}},
+		{name: "report --format json", args: []string{"report", "--format", "json"}, want: true},
+		{name: "report --format=JUNIT", args: []string{"report", "--format=JUNIT"}, want: true},
+		{name: "report --format text", args: []string{"report", "--format", "text"}},
+		{name: "the last --format wins", args: []string{"report", "--format", "json", "--format", "text"}},
+		{name: "report", args: []string{"report"}},
+		{name: "--format of another command", args: []string{"test", "--format", "json"}},
+		{name: "a root flag's value is not the command", args: []string{"--storage-format", "report", "test", "--format", "json"}},
+		{name: "past --", args: []string{"record", "-c", "app", "--", "--json"}},
+		{name: "report.format json in keploy.yml", args: []string{"report"}, keployYml: "report:\n  format: json\n", want: true},
+		{name: "the flag wins over keploy.yml", args: []string{"report", "--format", "text"}, keployYml: "report:\n  format: json\n"},
+		{name: "keploy.yml of another command", args: []string{"test"}, keployYml: "report:\n  format: json\n"},
+		{name: "the override file", args: []string{"report"}, keployYml: "report:\n  format: text\n", override: "report:\n  format: json\n", want: true},
+		{name: "keploy.yml in --config-path", args: []string{"report", "--config-path", other}, want: true},
+		{name: "keploy.yml in --configPath=", args: []string{"report", "--configPath=" + other}, want: true},
+		{name: "a keploy.yml that is no YAML", args: []string{"report"}, keployYml: "report: [\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for name, body := range map[string]string{"keploy.yml": c.keployYml, "project.keploy.yml": c.override} {
+				path := filepath.Join(project, name)
+				_ = os.Remove(path)
+				if body != "" {
+					write(path, body)
+				}
+			}
+			if got := WantsMachineOutput(append([]string{"keploy"}, c.args...)); got != c.want {
+				t.Errorf("WantsMachineOutput(keploy %s) = %v, want %v", strings.Join(c.args, " "), got, c.want)
+			}
+		})
+	}
+}
+
+// failingWriter fails every write, as a console that is gone does.
+type failingWriter struct{ writes int }
+
+func (w *failingWriter) Write([]byte) (int, error) {
+	w.writes++
+	return 0, errors.New("the console is gone")
+}
+
+// A console that cannot be written to ends nothing: PrintLogo returns, as
+// every other console line's failed write does. It used to log.Fatalf, an
+// exit from inside a command past every deferred call of the run, the
+// removal of its temp log among them; here that exit would end this test
+// binary.
+func TestPrintLogoToAConsoleThatFailsReturns(t *testing.T) {
+	for _, disableANSI := range []bool{true, false} {
+		w := &failingWriter{}
+		PrintLogo(w, disableANSI)
+		if w.writes == 0 {
+			t.Errorf("PrintLogo(disableANSI=%v) wrote nothing: the row did not reach a failing write", disableANSI)
+		}
 	}
 }

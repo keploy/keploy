@@ -1,7 +1,9 @@
 package models
 
 import (
+	"slices"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -12,7 +14,44 @@ type TestWindow struct {
 	TestCase string    `json:"testCase,omitempty"`
 	Start    time.Time `json:"start"`
 	End      time.Time `json:"end"`
+	// Clock names, under the proven switch, the clock Start is on: the test
+	// case's Origin.Clock (RecordedWindow). "" is untrusted.
+	Clock string `json:"clock,omitempty"`
+	// Tests are, for a window several tests' windows were merged into (tests
+	// run at once; TestCase ""), the tests merged: the run reaches it when
+	// any of them begins, and passes its end once each of them has ended
+	// (models.RunPlace). Empty for one test's window.
+	Tests []string `json:"tests,omitempty"`
 }
+
+// RunWindows is ws, the windows keploy mock replay derives from a set's
+// mappings, as the run's place reads them (RunPlace): each runs up to the
+// next one's start, and the last has no end.
+//
+// A derived window ends at its test's last recording's place, a request, so
+// its End is not when its test ended, which the mappings do not say. Read as
+// that, the answer to the test's last call lies after its window, in a gap
+// released by the test's end, and the test's end waits for that answer. So
+// here a moment belongs to the test running when it was recorded, and no
+// release waits for a test's end: an answer recorded after a test ended and
+// before the next began is due while that test runs.
+func RunWindows(ws []TestWindow) []TestWindow {
+	out := slices.Clone(ws)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+	for i := range out {
+		end := noWindowEnd
+		if i+1 < len(out) {
+			end = out[i+1].Start.Add(-time.Nanosecond)
+		}
+		if end.After(out[i].End) {
+			out[i].End = end
+		}
+	}
+	return out
+}
+
+// noWindowEnd is the End of a window that has none: later than any recording.
+var noWindowEnd = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 // WindowSchedule is every recorded test window of one test set, sorted by
 // Start — the unselected and ignored tests included, because traffic the
@@ -46,6 +85,12 @@ type WindowSchedule struct {
 	// maxEnd[i] is the latest End among windows[0..i]. Monotone, so the first
 	// window containing t is a binary search over it.
 	maxEnd []time.Time
+	// byTest is each test case's window, by its name (Of), and byMember
+	// each test merged into a window no test names (IndexOfTest): built at
+	// the first lookup, once.
+	byTestOnce sync.Once
+	byTest     map[string]int
+	byMember   map[string]int
 }
 
 // NewWindowSchedule sorts a copy of ws by Start. Windows with a zero Start are
@@ -80,6 +125,69 @@ func (s *WindowSchedule) Len() int {
 	return len(s.windows)
 }
 
+// Of returns the window recorded for the test case named testCase: false
+// when the schedule holds none (a case with no request time opens none). A
+// name recorded twice gives its first window in Start order. A test merged
+// into a window no test names (TestWindow.Tests) has none of its own.
+func (s *WindowSchedule) Of(testCase string) (TestWindow, bool) {
+	if s.Len() == 0 || testCase == "" {
+		return TestWindow{}, false
+	}
+	s.indexTests()
+	i, ok := s.byTest[testCase]
+	if !ok {
+		return TestWindow{}, false
+	}
+	return s.windows[i], true
+}
+
+// IndexOfTest is the index, in Start order (Window), of the window testCase
+// runs in: the one Of returns, else the merged window that lists it
+// (TestWindow.Tests); false where there is neither.
+func (s *WindowSchedule) IndexOfTest(testCase string) (int, bool) {
+	if s.Len() == 0 || testCase == "" {
+		return 0, false
+	}
+	s.indexTests()
+	if i, ok := s.byTest[testCase]; ok {
+		return i, true
+	}
+	i, ok := s.byMember[testCase]
+	return i, ok
+}
+
+// indexTests builds byTest and byMember, once: a name's first window in
+// Start order.
+func (s *WindowSchedule) indexTests() {
+	s.byTestOnce.Do(func() {
+		s.byTest = make(map[string]int, len(s.windows))
+		for i, w := range s.windows {
+			if _, seen := s.byTest[w.TestCase]; !seen && w.TestCase != "" {
+				s.byTest[w.TestCase] = i
+			}
+			for _, t := range w.Tests {
+				if _, seen := s.byMember[t]; !seen {
+					if s.byMember == nil {
+						s.byMember = map[string]int{}
+					}
+					s.byMember[t] = i
+				}
+			}
+		}
+	})
+}
+
+// After reports whether t is later than every window's End: recorded after
+// the last recorded test ended (a set's teardown). False for an empty
+// schedule: nothing tells a teardown there.
+func (s *WindowSchedule) After(t time.Time) bool {
+	n := s.Len()
+	if n == 0 {
+		return false
+	}
+	return t.After(s.maxEnd[n-1])
+}
+
 // Window returns window i in Start order.
 func (s *WindowSchedule) Window(i int) TestWindow {
 	return s.windows[i]
@@ -108,6 +216,100 @@ func (s *WindowSchedule) ReleaseIndex(t time.Time) int {
 	return p - 1
 }
 
+// GapBefore is the gap before the window that starts at start: the recorded
+// time after every window that starts earlier has ended and before start.
+// from is its exclusive lower bound, the latest end of those windows. ok is
+// false when no window starts at start, for the first window (what precedes
+// it is the app's startup), when an earlier window reaches start (no gap), and
+// when two windows start at start: a window is known by its start alone (the
+// agent's current window, MockFilterParams.AfterTime), so which of their two
+// tests a call in flight then belongs to cannot be told, and neither gets it.
+//
+// A request recorded in it and answered at or after start was in flight when
+// that window's test began, and is that test's (InFlightInto).
+func (s *WindowSchedule) GapBefore(start time.Time) (from time.Time, ok bool) {
+	n := s.Len()
+	if n == 0 || start.IsZero() {
+		return time.Time{}, false
+	}
+	i := sort.Search(n, func(i int) bool { return !s.windows[i].Start.Before(start) })
+	if i == n || !s.windows[i].Start.Equal(start) || i == 0 {
+		return time.Time{}, false
+	}
+	if i+1 < n && s.windows[i+1].Start.Equal(start) {
+		return time.Time{}, false
+	}
+	from = s.maxEnd[i-1]
+	if !from.Before(start) {
+		return time.Time{}, false
+	}
+	return from, true
+}
+
+// InFlightInto reports whether a request recorded at req and answered at res
+// was in flight when the window that starts at start began: sent in the gap
+// before it (GapBefore), answered at or after its start (SentInGapAnsweredBy).
+// Such a call is that window's test's, whenever its answer landed; one sent and
+// answered within the gap is no test's.
+func (s *WindowSchedule) InFlightInto(req, res, start time.Time) bool {
+	from, ok := s.GapBefore(start)
+	return ok && SentInGapAnsweredBy(req, res, from, start)
+}
+
+// SentInGapAnsweredBy is the in-flight rule for a gap that runs from from
+// (exclusive, GapBefore) to start: a call sent inside it and answered at or
+// after start. Every site that applies the rule calls this one predicate,
+// directly or through InFlightInto: the agent's on-disk load and its filter,
+// the mock manager's staging and its windowed read, the mapping write and the
+// window ownership (DeriveWindowMappings).
+func SentInGapAnsweredBy(req, res, from, start time.Time) bool {
+	return req.After(from) && req.Before(start) && !res.IsZero() && !res.Before(start)
+}
+
+// InFlightEligible reports whether m may be attributed by the in-flight rule:
+// a per-test mock (DeriveLifetime; a mock not derived yet is looked at through
+// a copy) that is neither carry-over nor window-bound.
+//   - A carry-over mock (IsCarryOver, a Pulsar SEND's receipt) is released at
+//     the window its recorded time belongs to, and a moment in the gap after a
+//     test belongs to that test (WindowSchedule); the carry-over tier keeps it
+//     reachable while the next test runs. Its receipt time says nothing about
+//     which test made the publish.
+//   - A window-bound mock (a connection failure) is served from its own window
+//     or the startup band only.
+//   - A session or connection mock is every test's already.
+//   - A mock placed at its answer (IsAnswerPlaced) is its answer's window's
+//     test's, wherever it was sent (PlaceOf): the in-flight rule would give
+//     one sent in a gap to the next test whenever its answer came.
+func InFlightEligible(m *Mock) bool {
+	return m != nil && !WindowBound(m.Kind) && lifetimeOf(m) == LifetimePerTest && !IsCarryOver(m) && !IsAnswerPlaced(m)
+}
+
+// Contains reports whether t is inside one of the windows, ends included.
+func (s *WindowSchedule) Contains(t time.Time) bool {
+	return s.IndexOf(t) >= 0
+}
+
+// IndexOf is the index of the earliest-starting window t is inside (ends
+// included), -1 when it is inside none.
+func (s *WindowSchedule) IndexOf(t time.Time) int {
+	p := s.CurrentIndex(t) + 1 // windows[0:p] started at or before t
+	if p <= 0 {
+		return -1
+	}
+	// maxEnd[i] >= t: some window j <= i ends at or after t, and starts no
+	// later than window i, so at or before t.
+	i := sort.Search(p, func(i int) bool { return !s.maxEnd[i].Before(t) })
+	if i >= p {
+		return -1
+	}
+	for j := 0; j <= i; j++ {
+		if !s.windows[j].End.Before(t) {
+			return j
+		}
+	}
+	return i
+}
+
 // Released reports whether traffic recorded at t is due once the current
 // window starts at currentStart: its release window starts at or before it.
 // With no schedule everything is released.
@@ -116,6 +318,20 @@ func (s *WindowSchedule) Released(t, currentStart time.Time) bool {
 		return true
 	}
 	return s.ReleaseIndex(t) <= s.CurrentIndex(currentStart)
+}
+
+// ReleasedFirstAt reports whether the window that starts at start is the
+// first at which traffic recorded at t is released: Released(t, start) holds,
+// and held at no window that starts earlier. A window is known by its start,
+// as the agent's current window is, so two windows that start together both
+// release it. False for startup traffic, which no window releases first, and
+// with no schedule.
+func (s *WindowSchedule) ReleasedFirstAt(t, start time.Time) bool {
+	if s.Len() == 0 {
+		return false
+	}
+	i := s.ReleaseIndex(t)
+	return i >= 0 && s.windows[i].Start.Equal(start)
 }
 
 // ReleaseHorizon returns the latest recorded moment that is released once the

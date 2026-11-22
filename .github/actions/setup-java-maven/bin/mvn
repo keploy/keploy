@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# mvn, as setup-java-maven puts it first on PATH: the job's own Maven
+# (SETUP_JAVA_MAVEN_REAL_MVN), run offline on a restored cache.
+#
+# After a use of the action that restored an entry, mvn runs offline: that
+# entry was saved by a passing build of the same Maven, JDK, configuration
+# and poms, so it holds most or all of what this build resolves, and needs
+# no network. When it lacks something (a goal or plugin the lane added, or
+# a file tracked in a form this Maven does not read, as Maven 3.10.0's are
+# for Maven 3.9.15), Maven says what it could not resolve. Then this says so
+# in an error annotation naming those artifacts, the key and the entry, and
+# runs mvn once more online, which fetches only what was missing, and then
+# once more offline, to check that it now resolves (if not, it says so, and
+# the save step fails instead of saving). The save
+# step stores the repository with it as a new entry of the key, which the
+# next run restores and builds offline from. So a cache that cannot serve
+# the build is never fetched again in silence, as the 3.10.0 caches were on
+# every run until Central answered 429; it costs one online run.
+#
+# After a use that missed, mvn runs online. -v, --version, -h and --help
+# run as they are. Offline, -U has no effect: a remote SNAPSHOT dependency
+# stays at its cached copy while the entry is restored (no lane has one).
+# Nothing of the command line is printed or kept: its -D values may not be
+# public.
+#
+# Each run's exit code is noted in SETUP_JAVA_MAVEN_STATES, for the save step.
+# An mvn run from inside this one (a build that starts Maven) runs the real
+# mvn as it is, and a SETUP_JAVA_MAVEN_REAL_MVN that is this script refuses
+# to run: neither can loop.
+real=${SETUP_JAVA_MAVEN_REAL_MVN:?SETUP_JAVA_MAVEN_REAL_MVN is not set}
+states=${SETUP_JAVA_MAVEN_STATES:?SETUP_JAVA_MAVEN_STATES is not set}
+self="${BASH_SOURCE[0]}"
+if [ "$real" -ef "$self" ]; then
+  echo "::error::setup-java-maven: SETUP_JAVA_MAVEN_REAL_MVN ($real) is this script; refusing to run it" >&2
+  exit 2
+fi
+if [ -n "${SETUP_JAVA_MAVEN_IN_MVN:-}" ]; then
+  exec "$real" "$@"
+fi
+export SETUP_JAVA_MAVEN_IN_MVN=1
+for a in "$@"; do
+  case "$a" in
+    -v | --version | -h | --help) exec "$real" "$@" ;;
+  esac
+done
+
+use=$(find "$states" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' 2>/dev/null | LC_ALL=C sort | tail -n 1)
+if [ -z "$use" ]; then
+  exec "$real" "$@"
+fi
+# runs: "rc mode use" per run, for save-plan.sh.
+note() { printf '%s %s %s\n' "$1" "$2" "$(basename "$use")" >>"$states/runs"; }
+if [ "$(cat "$use/hit")" != true ]; then
+  "$real" "$@"
+  rc=$?
+  note "$rc" online
+  exit "$rc"
+fi
+
+key=$(cat "$use/key")
+matched=$(cat "$use/matched")
+echo "setup-java-maven: mvn runs offline on the Maven cache $matched" >&2
+log=$(mktemp "$states/offline.XXXXXX")
+"$real" --offline "$@" | tee "$log"
+rc=${PIPESTATUS[0]}
+if [ "$rc" -eq 0 ]; then
+  rm -f "$log"
+  note 0 offline
+  exit 0
+fi
+unresolved='in offline mode|has not been downloaded from it before|No plugin found for prefix|could not be resolved|Could not resolve dependencies|Could not find artifact|Failed to read artifact descriptor|Non-resolvable'
+if ! grep -qE "$unresolved" "$log"; then
+  rm -f "$log"
+  note "$rc" offline
+  exit "$rc"
+fi
+# What Maven could not resolve offline, by its coordinates where it gives them.
+# A plugin prefix comes first: offline, resolving one reads the descriptor of
+# every plugin the pom declares, so a lane that added `dependency:tree` gets
+# dozens of plugin lines whose cause is the prefix. A plugin named both as
+# g:a:v and as g:a:jar:v is listed once.
+missing_in() { # missing_in LOG: what Maven could not resolve offline, one per line
+  perl -ne '
+  push @p, "plugin prefix $1" while /No plugin found for prefix \x27([^\x27]+)\x27/g;
+  push @a, $1 while /the artifact (\S+) has not been downloaded from it before/g;
+  push @a, $1 while /Plugin (\S+) or one of its dependencies could not be resolved/g;
+  push @a, $1 while /Could not find artifact (\S+)/g;
+  push @a, $1 while /Failed to read artifact descriptor for (\S+?):?\s/g;
+  END {
+    my %seen = map { $_ => 1 } @a;
+    my (%out, @out);
+    for (@p) { push @out, $_ unless $out{$_}++ }
+    for (sort @a) {
+      my @c = split /:/;
+      next if @c == 4 && $seen{"$c[0]:$c[1]:$c[3]"};
+      push @out, $_ unless $out{$_}++;
+    }
+    print "$_\n" for @out;
+  }
+' "$1"
+}
+shown_of() { # shown_of LIST: the first five, and how many more
+  local more
+  more=$(($(printf '%s\n' "$1" | wc -l) - 5))
+  printf '%s' "$(printf '%s\n' "$1" | head -n 5 | paste -sd';' | sed 's/;/; /g')"
+  [ "$more" -le 0 ] || printf '; and %s more' "$more"
+}
+missing=$(missing_in "$log")
+rm -f "$log"
+[ -n "$missing" ] || missing="(Maven names none; see its errors above)"
+echo "::error title=Maven cache cannot serve this build::mvn could not resolve, offline, $(shown_of "$missing") from the Maven cache $matched (key $key). Resolving online once; the save step stores what that fetches as a new entry of this key, which the next run restores." >&2
+printf '%s\n' "$missing" >>"$use/unresolved"
+"$real" "$@"
+rc=$?
+note "$rc" fallback
+[ "$rc" -eq 0 ] || exit "$rc"
+# Did the heal take? The same command line, offline again, must now resolve.
+# If it does not, a save would store an entry that heals no better, under a
+# new name every run; save-plan.sh refuses to save, and fails, instead.
+check=$(mktemp "$states/check.XXXXXX")
+if ! "$real" --offline "$@" >"$check" 2>&1; then
+  still=$(missing_in "$check")
+  [ -n "$still" ] || still="(Maven names none)"
+  printf '%s\n' "$still" >>"$use/heal-failed"
+  echo "::error title=Maven cache heal did not take::after the online run, mvn still could not resolve, offline, $(shown_of "$still") (key $key). The repository is not saved." >&2
+fi
+rm -f "$check"
+exit 0

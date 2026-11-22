@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -65,6 +66,23 @@ var stretchesEnd = time.Unix(90_000, 0)
 // before every span recorded so far.
 func newStretch() time.Time {
 	return stretchesEnd.Add(-time.Duration(stretchesTaken.Add(1)) * stretchLen)
+}
+
+// lateStretchesTaken counts the late stretches taken (newLateStretch).
+var lateStretchesTaken atomic.Int64
+
+// lateStretchesEnd is where the first late stretch ends: far after the
+// spans the past-the-cap row records from stretchesEnd on.
+var lateStretchesEnd = stretchesEnd.Add(1000 * time.Hour)
+
+// newLateStretch returns the start of a late stretch no other test or run
+// has taken, before every late one taken so far, for a test whose span
+// reaches to the real now: a recording that lost a mock any test may need
+// leaves its test cases out from that mock's request until it ends, at the
+// real now. Such a span covers only the late stretches taken before it,
+// whose tests are done, and no stretch nor the past-the-cap row's spans.
+func newLateStretch() time.Time {
+	return lateStretchesEnd.Add(-time.Duration(lateStretchesTaken.Add(1)) * stretchLen)
 }
 
 // streamWait bounds how long a test waits for the next test case of a
@@ -230,14 +248,21 @@ type backlogWatermark struct {
 func (w *backlogWatermark) PendingBefore(time.Time) bool { return w.pending.Load() }
 
 // A recording's stop asks the agent whether it may still hand over something
-// captured before it; an agent whose capture cannot tell says so (501), and
-// the stop goes by quiet alone.
+// captured before it, and how far its capture has got; an agent whose capture
+// cannot tell says so (501), and the stop goes by quiet alone.
 func TestHandlePending(t *testing.T) {
 	a := &Agent{logger: zap.NewNop()}
-	ask := func() (int, string) {
+	ask := func() (int, PendingResponse) {
+		t.Helper()
 		rr := httptest.NewRecorder()
 		a.HandlePending(rr, httptest.NewRequest(http.MethodGet, "/agent/record/pending?before=1000", nil))
-		return rr.Code, strings.TrimSpace(rr.Body.String())
+		var out PendingResponse
+		if rr.Code == http.StatusOK {
+			if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+				t.Fatalf("answer %q: %v", rr.Body.String(), err)
+			}
+		}
+		return rr.Code, out
 	}
 	syncmgr.Get().SetWatermark(nil)
 	if code, _ := ask(); code != http.StatusNotImplemented {
@@ -247,22 +272,32 @@ func TestHandlePending(t *testing.T) {
 	syncmgr.Get().SetWatermark(w)
 	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil); syncmgr.Get().NoteHeld(time.Time{}) })
 	w.pending.Store(true)
-	if code, body := ask(); code != http.StatusOK || body != `{"pending":true}` {
-		t.Fatalf("capture behind: %d %s", code, body)
+	if code, got := ask(); code != http.StatusOK || !got.Pending || got.WaitingOn == "" {
+		t.Fatalf("capture behind: %d %+v, want pending, saying what it waits on", code, got)
 	}
 	w.pending.Store(false)
-	if code, body := ask(); code != http.StatusOK || body != `{"pending":false}` {
-		t.Fatalf("capture through: %d %s", code, body)
+	if code, got := ask(); code != http.StatusOK || got.Pending || got.WaitingOn != "" {
+		t.Fatalf("capture through: %d %+v", code, got)
 	}
 	// A test case held for its verdict that ended before the time asked
 	// about is pending too.
 	syncmgr.Get().NoteHeld(time.Unix(0, 999))
-	if _, body := ask(); body != `{"pending":true}` {
-		t.Fatalf("a held test case from before: %s", body)
+	if _, got := ask(); !got.Pending {
+		t.Fatalf("a held test case from before: %+v", got)
 	}
 	syncmgr.Get().NoteHeld(time.Unix(0, 1001))
-	if _, body := ask(); body != `{"pending":false}` {
-		t.Fatalf("a held test case from after: %s", body)
+	if _, got := ask(); got.Pending {
+		t.Fatalf("a held test case from after: %+v", got)
+	}
+	// So is one the ingress is still building.
+	done := syncmgr.Get().BuildingTestCase(time.Unix(0, 900))
+	if _, got := ask(); !got.Pending {
+		t.Fatalf("a test case being built from before: %+v", got)
+	}
+	_, b0 := ask()
+	done()
+	if _, got := ask(); got.Pending || got.Progress == b0.Progress {
+		t.Fatalf("a built test case: %+v, want clear with progress counted", got)
 	}
 }
 
@@ -325,6 +360,288 @@ func TestHandleIncoming_EachLossIsInTheSummaryOfItsSessionOnce(t *testing.T) {
 	}
 	if len(warns) != 0 {
 		t.Fatalf("a session that left nothing out warned of test cases left out: %v", warns[0].ContextMap())
+	}
+}
+
+// loseMockEachWay has the default manager drop one mock for its output and one
+// for memory pressure, each of a connection named from prefix, and lose a test
+// case by name.
+func loseMockEachWay(t *testing.T, prefix string) {
+	t.Helper()
+	loseMockForOutput(prefix)
+	syncmgr.Get().RevokeTestCase(prefix + "-test")
+	loseMockToPressure(t, prefix)
+}
+
+// loseMockForOutput has the default manager drop a mock for its output: none
+// is set.
+func loseMockForOutput(prefix string) {
+	syncmgr.Get().SetOutputChannel(nil)
+	syncmgr.Get().SendConfigMock(&models.Mock{Kind: models.Kind("Kafka"), ConnectionID: prefix + "-output"})
+}
+
+// loseMockToPressure has the default manager drop a per-test mock of a pause.
+func loseMockToPressure(t *testing.T, prefix string) {
+	t.Helper()
+	mgr := syncmgr.Get()
+	mgr.SetMemoryPressure(true)
+	defer mgr.SetMemoryPressure(false)
+	m := &models.Mock{Kind: models.Kind("Kafka"), ConnectionID: prefix + "-pressure"}
+	m.Spec.ReqTimestampMock = time.Now()
+	m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(time.Millisecond)
+	if got := mgr.AddMock(m); got != syncmgr.MockDroppedUnderPressure {
+		t.Fatalf("a per-test mock of the pause: %q", got)
+	}
+}
+
+// The summary reports what a session dropped, under its own count, and names
+// each mock with why, once: the manager outlives a session, so what it dropped
+// before the session's stream opened is not the session's, and the next
+// session, which loses nothing, reports none of it again.
+func TestHandleIncoming_EachDropIsInTheSummaryOfItsSessionOnce(t *testing.T) {
+	loseMockEachWay(t, "before") // not this session's
+	logs := incomingSessionLogs(t, func() {
+		loseMockEachWay(t, "during")
+		// And one kept: of the three handed over, only it reports as added.
+		kept := make(chan *models.Mock, 1)
+		syncmgr.Get().SetOutputChannel(kept)
+		syncmgr.Get().SendConfigMock(&models.Mock{Kind: models.Kind("Kafka"), ConnectionID: "during-kept"})
+		syncmgr.Get().SetOutputChannel(nil)
+	}, false)
+	summary := logs.FilterMessage("agent: recording complete").All()[0].ContextMap()
+	if summary["mocks_dropped_capacity"] != uint64(1) || summary["mocks_dropped_by_pressure"] != int64(1) ||
+		summary["tcs_dropped_capacity"] != int64(1) || summary["mocks_added_successfully"] != int64(1) {
+		t.Fatalf("summary mocks_dropped_capacity = %v, mocks_dropped_by_pressure = %v, tcs_dropped_capacity = %v, mocks_added_successfully = %v, want 1 each",
+			summary["mocks_dropped_capacity"], summary["mocks_dropped_by_pressure"], summary["tcs_dropped_capacity"], summary["mocks_added_successfully"])
+	}
+	named := fmt.Sprint(summary["mocks_dropped_named"])
+	for _, want := range []string{"during-output", string(syncmgr.MockDroppedOutputClosed), "during-pressure", string(syncmgr.MockDroppedUnderPressure)} {
+		if !strings.Contains(named, want) {
+			t.Fatalf("the summary names %q, want it to say %q", named, want)
+		}
+	}
+	// The summary is at Info: what a session lost is said at WARN as well.
+	warned := logs.FilterMessage(models.MocksDroppedSaid).All()
+	if len(warned) != 1 || warned[0].Level != zapcore.WarnLevel ||
+		warned[0].ContextMap()["by_memory_pressure"] != int64(1) || warned[0].ContextMap()["for_the_output"] != uint64(1) ||
+		!strings.Contains(fmt.Sprint(warned[0].ContextMap()["first_dropped"]), "during-pressure") {
+		t.Fatalf("the session's drops were warned of %v, want once, counting and naming them", warned)
+	}
+	if strings.Contains(named, "before-") {
+		t.Fatalf("the summary names a mock dropped before its session: %q", named)
+	}
+
+	logs = incomingSessionLogs(t, func() {}, false)
+	summary = logs.FilterMessage("agent: recording complete").All()[0].ContextMap()
+	if summary["mocks_dropped_capacity"] != uint64(0) || summary["mocks_dropped_by_pressure"] != int64(0) ||
+		summary["tcs_dropped_capacity"] != int64(0) || summary["mocks_added_successfully"] != int64(0) {
+		t.Fatalf("the next session's summary mocks_dropped_capacity = %v, mocks_dropped_by_pressure = %v, tcs_dropped_capacity = %v, mocks_added_successfully = %v, want 0 each",
+			summary["mocks_dropped_capacity"], summary["mocks_dropped_by_pressure"], summary["tcs_dropped_capacity"], summary["mocks_added_successfully"])
+	}
+	if named := fmt.Sprint(summary["mocks_dropped_named"]); strings.Contains(named, "during-") {
+		t.Fatalf("the next session's summary names an earlier session's drops: %q", named)
+	}
+	if n := logs.FilterMessage(models.MocksDroppedSaid).Len(); n != 0 {
+		t.Fatalf("a session that dropped nothing warned of drops %d times", n)
+	}
+}
+
+// A session that dropped mocks of one kind alone is warned of as one that
+// dropped both is.
+func TestHandleIncoming_WarnsOfEitherKindOfDropAlone(t *testing.T) {
+	for name, lose := range map[string]func(){
+		"for the output":  func() { loseMockForOutput("alone") },
+		"memory pressure": func() { loseMockToPressure(t, "alone") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if n := incomingSessionLogs(t, lose, false).FilterMessage(models.MocksDroppedSaid).Len(); n != 1 {
+				t.Fatalf("a session that dropped a mock was warned of it %d times, want once", n)
+			}
+		})
+	}
+}
+
+// A recording's CLI ends the session by closing its stream once its stop's
+// drain is done; the ingress never closes its test-case channel. The session's
+// summary, and the warnings of what it lost, come at that end too, not only
+// when the channel closes: otherwise a native or docker recording says neither.
+func TestHandleIncoming_TheSummaryComesWhenTheClientEndsTheStream(t *testing.T) {
+	at := newStretch() // its spans must not reach another test's test cases
+	summary, warns := incomingSessionSummary(t, func() {
+		leaveOutIncomplete(t, at)
+		leaveOutOnGlobalManager(t)
+	}, true)
+	if summary["mocks_left_out"] != int64(1) || summary["tcs_left_out_in_flight"] != uint64(1) {
+		t.Fatalf("summary mocks_left_out = %v, tcs_left_out_in_flight = %v, want 1 each",
+			summary["mocks_left_out"], summary["tcs_left_out_in_flight"])
+	}
+	if len(warns) != 1 || warns[0].ContextMap()["test_cases"] != uint64(1) {
+		t.Fatalf("the test case left out in flight is not warned of when the client ends the stream: %v", warns)
+	}
+	if summary["ended_by"] != "client" {
+		t.Fatalf("summary ended_by = %v, want client", summary["ended_by"])
+	}
+	if summary, _ := incomingSessionSummary(t, func() {}, false); summary["ended_by"] != "capture" {
+		t.Fatalf("summary ended_by = %v, want capture", summary["ended_by"])
+	}
+}
+
+// A test case the hold's bound lets go before its verdict was final is warned
+// of when the recording's client ends the stream, as the capture closing the
+// channel would: it may lack mocks, and DEBUG is the only other line about it.
+func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStream(t *testing.T) {
+	defer func(max, tick time.Duration) { testCaseHoldMax, testCaseHoldTick = max, tick }(testCaseHoldMax, testCaseHoldTick)
+	testCaseHoldMax, testCaseHoldTick = 50*time.Millisecond, 10*time.Millisecond
+
+	w := &switchWatermark{} // never settles: a parser stuck behind the traffic
+	syncmgr.Get().SetWatermark(w)
+	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil) })
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	tcs := make(chan *models.TestCase, 1) // like the ingress's: never closed
+	a := &Agent{logger: zap.New(core), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Before srv.Close, which waits for the handler: a row that fails
+	// before it ends the stream would hang there instead.
+	defer func() { _ = resp.Body.Close() }()
+	names := streamOf(t, resp)
+
+	start := newStretch().Add(time.Second)
+	tcs <- &models.TestCase{Name: "unsettled", HTTPReq: models.HTTPReq{Timestamp: start}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Millisecond)}}
+	if name, ok := nextStreamed(t, names); !ok || name != "unsettled" {
+		t.Fatalf("streamed %q (%v), want the test case the bound let go", name, ok)
+	}
+	resp.Body.Close()
+
+	deadline := time.Now().Add(streamWait)
+	for logs.FilterMessage("agent: recording complete").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no recording-complete summary once the client ended the stream")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	warned := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("saved before the agent had parsed all the traffic they overlap").All()
+	if len(warned) != 1 || warned[0].ContextMap()["test_cases"] != int64(1) {
+		t.Fatalf("the test case the hold's bound let go is not warned of once when the client ends the stream: %v", warned)
+	}
+	if got := logs.FilterMessage("agent: recording complete").All()[0].ContextMap()["tcs_released_unsettled"]; got != int64(1) {
+		t.Fatalf("summary tcs_released_unsettled = %v, want 1", got)
+	}
+}
+
+// An app that serves on through the stop's drain (docker compose) keeps the
+// ingress handing test cases over: when the recording's client ends the
+// stream, the handler is as likely to be writing one as waiting. Either way
+// the session's summary is the ordinary one, at INFO, ended by its client,
+// not a warning that the stream broke at the end of a recording that went as
+// it should.
+func TestHandleIncoming_AClientEndingTheStreamUnderTrafficIsAnOrdinaryEnd(t *testing.T) {
+	// INFO and up, all the row reads: under steady traffic, a DEBUG entry
+	// per test case would be kept without bound.
+	core, logs := observer.New(zapcore.InfoLevel)
+	tcs := make(chan *models.TestCase) // the ingress's: never closed
+	a := &Agent{logger: zap.New(core), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Before srv.Close, which waits for the handler: a row that fails
+	// before it ends the stream would hang there instead.
+	defer func() { _ = resp.Body.Close() }()
+	names := streamOf(t, resp)
+
+	// Steady traffic after the stop.
+	stopFeed := make(chan struct{})
+	fed := make(chan struct{})
+	go func() {
+		defer close(fed)
+		big := strings.Repeat("x", 64<<10)
+		for {
+			at := time.Now()
+			select {
+			case tcs <- &models.TestCase{Name: "t", HTTPReq: models.HTTPReq{Timestamp: at, Body: big}, HTTPResp: models.HTTPResp{Timestamp: at}}:
+			case <-stopFeed:
+				return
+			}
+		}
+	}()
+	defer func() { close(stopFeed); <-fed }()
+	for i := 0; i < 3; i++ {
+		if _, ok := nextStreamed(t, names); !ok {
+			t.Fatal("the stream ended early")
+		}
+	}
+	resp.Body.Close() // the client's drain is done: it ends the stream
+
+	deadline := time.Now().Add(streamWait)
+	for logs.FilterMessage("agent: recording complete").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no summary once the client ended the stream")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got := logs.FilterMessage("agent: recording complete").All()
+	if len(got) != 1 || got[0].Level != zapcore.InfoLevel || got[0].ContextMap()["ended_by"] != "client" {
+		t.Fatalf("summaries %v, want one at INFO ended by its client", got)
+	}
+	if w := logs.FilterLevelExact(zapcore.WarnLevel).All(); len(w) > 0 {
+		t.Fatalf("a client ending the stream under traffic was warned of: %q", w[0].Message)
+	}
+	srv.Close() // waits for the handler: what it logs as it returns is in
+	if e := logs.Filter(func(e observer.LoggedEntry) bool { return e.Level >= zapcore.ErrorLevel }).All(); len(e) > 0 {
+		t.Fatalf("a client ending the stream under traffic was logged as an error: %q", e[0].Message)
+	}
+}
+
+// stopWatermark is a capture at a stop: every parser is past the stop, but
+// not past a test case that ended after it. A test case with no HTTP end
+// makes no claim of it.
+type stopWatermark struct{ stop time.Time }
+
+func (w stopWatermark) Settled(_, _ string, _, end time.Time) bool {
+	return end.IsZero() || !end.After(w.stop)
+}
+func (w stopWatermark) PendingBefore(time.Time) bool { return false }
+
+// A gRPC test case from before the stop that reaches the hold behind an HTTP
+// one whose verdict is not final (it ended after the stop) is held: the stop
+// must hear it is pending, or it ends the stream and the hold's Drain throws
+// the gRPC test case away, with the recording reported complete.
+func TestHandleIncoming_AGRPCTestCaseHeldBehindAnUnsettledOneIsPending(t *testing.T) {
+	stop := newStretch().Add(10 * time.Second)
+	syncmgr.Get().SetWatermark(stopWatermark{stop: stop})
+	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil) })
+
+	tcs := make(chan *models.TestCase) // a send returns once the handler took it
+	a := &Agent{logger: zap.NewNop(), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Served across the stop: it ended after it, its verdict not final yet.
+	tcs <- &models.TestCase{Name: "http-after", HTTPReq: models.HTTPReq{Timestamp: stop.Add(-time.Second)}, HTTPResp: models.HTTPResp{Timestamp: stop.Add(time.Second)}}
+	// A gRPC call that completed before the stop; its pipeline ran behind.
+	tcs <- &models.TestCase{Name: "grpc-before", Kind: models.GRPC_EXPORT,
+		GrpcReq: models.GrpcReq{Timestamp: stop.Add(-2 * time.Second)}, GrpcResp: models.GrpcResp{Timestamp: stop.Add(-time.Second)}}
+	// Taken only once the handler is done with the gRPC one.
+	tcs <- &models.TestCase{Name: "http-after-2", HTTPReq: models.HTTPReq{Timestamp: stop.Add(2 * time.Second)}, HTTPResp: models.HTTPResp{Timestamp: stop.Add(3 * time.Second)}}
+
+	if st := syncmgr.Get().BacklogBefore(stop); !st.Known || !st.Pending {
+		t.Fatalf("the agent said it held nothing from before the stop (%+v) while the gRPC test case that ended before it was held", st)
 	}
 }
 
@@ -447,6 +764,23 @@ func (c pauseCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.Che
 // session wherever the handler is in between.
 func incomingSummary(t *testing.T, during func()) (summary map[string]interface{}, leftOutWarns []observer.LoggedEntry) {
 	t.Helper()
+	return incomingSessionSummary(t, during, false)
+}
+
+// incomingSessionSummary is incomingSummary with the session ended by its
+// client closing the stream (clientCloses), as a recording's CLI ends it once
+// its stop's drain is done, or by the capture closing the test-case channel.
+func incomingSessionSummary(t *testing.T, during func(), clientCloses bool) (summary map[string]interface{}, leftOutWarns []observer.LoggedEntry) {
+	t.Helper()
+	logs := incomingSessionLogs(t, during, clientCloses)
+	return logs.FilterMessage("agent: recording complete").All()[0].ContextMap(),
+		logs.FilterLevelExact(zap.WarnLevel).FilterMessageSnippet("left out of the recording").All()
+}
+
+// incomingSessionLogs runs a session as incomingSessionSummary does, and
+// returns all it logged, its summary among it.
+func incomingSessionLogs(t *testing.T, during func(), clientCloses bool) *observer.ObservedLogs {
+	t.Helper()
 	core, logs := observer.New(zap.DebugLevel)
 	release := make(chan struct{})
 	released := false
@@ -469,17 +803,22 @@ func incomingSummary(t *testing.T, during func()) (summary map[string]interface{
 	during()
 	close(release)
 	released = true
-	close(tcs)
-	_ = streamedNames(t, resp)
-	deadline := time.Now().Add(5 * time.Second)
+	if clientCloses {
+		// The ingress never closes its channel: the stream ends with its
+		// client.
+		resp.Body.Close()
+	} else {
+		close(tcs)
+		_ = streamedNames(t, resp)
+	}
+	deadline := time.Now().Add(streamWait)
 	for logs.FilterMessage("agent: recording complete").Len() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("no recording-complete summary")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	return logs.FilterMessage("agent: recording complete").All()[0].ContextMap(),
-		logs.FilterLevelExact(zap.WarnLevel).FilterMessageSnippet("left out of the recording").All()
+	return logs
 }
 
 // A kept request the mock manager left out of the recording — it stayed in
@@ -551,5 +890,202 @@ func TestHandleIncoming_ItsOwnLossTakenBackIsNoLoss(t *testing.T) {
 	}
 	if n := syncmgr.Get().OpenLossTallies(); n != 0 {
 		t.Fatalf("%d loss tallies still open after the session ended", n)
+	}
+}
+
+// A test case added behind held ones that ended before all of them is held
+// from that moment: a stop's drain that asks the agent before the hold's next
+// tick must hear it is pending (NoteHeld), or the drain ends and the stream
+// drops it unsent.
+func TestHandleIncoming_ATestCaseHeldBehindOthersIsPendingAtOnce(t *testing.T) {
+	defer func(tick time.Duration) { testCaseHoldTick = tick }(testCaseHoldTick)
+	testCaseHoldTick = time.Hour // only what the stream does as a test case comes in
+
+	w := &backlogWatermark{} // never settled; its capture holds nothing
+	syncmgr.Get().SetWatermark(w)
+	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil) })
+
+	tcs := make(chan *models.TestCase) // a send returns once the stream took it
+	a := &Agent{logger: zap.NewNop(), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	start := newStretch().Add(time.Second)
+	later := &models.TestCase{Name: "later", HTTPReq: models.HTTPReq{Timestamp: start.Add(2 * time.Second)}, HTTPResp: models.HTTPResp{Timestamp: start.Add(3 * time.Second)}}
+	earlier := &models.TestCase{Name: "earlier", HTTPReq: models.HTTPReq{Timestamp: start}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Second)}}
+	tcs <- later                                        // held first
+	tcs <- earlier                                      // held behind it, though it ended first
+	before := start.Add(time.Second + time.Millisecond) // after earlier ended, before later did
+	deadline := time.Now().Add(streamWait)
+	for !syncmgr.Get().BacklogBefore(before).Pending {
+		if time.Now().After(deadline) {
+			t.Fatal("a test case held behind others was not pending to a stop's drain before the hold's next tick")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(tcs)
+}
+
+// A request of the application's in flight across a recording's stop (an
+// attached app goes on as a recording stops) is no request of the session the
+// agent serves next. Once its recording has ended, by its incoming stream's
+// end or the next session's attach, whichever comes first, the request is
+// given up (syncmgr.EndStoppedRecording): it is not kept, and its verdict is no
+// loss, whenever it comes, also when the hold's budget gave it up while the
+// last recording drained.
+func TestHandleIncoming_ARequestInFlightAcrossTheStopIsNoRequestOfTheNextSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// streamEnds: the request's recording is a session whose stream ends,
+		// and the verdict comes between the two sessions; otherwise the next
+		// session attaches while nothing ended the last one, and the verdict
+		// comes in it.
+		streamEnds, budget bool
+	}{
+		{"its recording's stream ends, then its verdict", true, false},
+		{"its recording's stream ends, then its verdict, given up by the hold's budget", true, true},
+		{"the next session attaches first, then its verdict", false, false},
+		{"the next session attaches first, then its verdict, given up by the hold's budget", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := syncmgr.Get()
+			t.Cleanup(func() {
+				// A new recording's holds session, then none: the stop's ask
+				// below is not left stopping the next test's holds.
+				mgr.SetOutputChannel(make(chan *models.Mock))
+				mgr.SetOutputChannel(nil)
+			})
+			leftOut := mgr.KeptRequestsLeftOut()
+			var stale *syncmgr.Window
+			kept := true
+			if tc.streamEnds {
+				incomingSessionSummary(t, func() { stale = inFlightAcrossTheStop(t, tc.budget) }, true)
+				kept = stale.Keep()
+			} else {
+				stale = inFlightAcrossTheStop(t, tc.budget)
+			}
+			t.Cleanup(stale.Close)
+			summary, warns := incomingSessionSummary(t, func() {
+				if !tc.streamEnds {
+					kept = stale.Keep()
+				}
+			}, true)
+			if kept {
+				t.Fatal("a request in flight across the last recording's stop was kept")
+			}
+			if n := mgr.KeptRequestsLeftOut() - leftOut; summary["tcs_left_out_in_flight"] != uint64(0) || len(warns) != 0 || n != 0 {
+				t.Fatalf("a request of the last recording was counted as a loss: tcs_left_out_in_flight = %v, %d warnings, %d left out",
+					summary["tcs_left_out_in_flight"], len(warns), n)
+			}
+		})
+	}
+}
+
+// inFlightAcrossTheStop opens a request's window on the global manager, past
+// the startup window, and has the recording's stop ask what is pending: the
+// request is in flight across the stop. budget: the hold's budget then gives it
+// up, as the drain's traffic passes it.
+func inFlightAcrossTheStop(t *testing.T, budget bool) *syncmgr.Window {
+	t.Helper()
+	mgr := syncmgr.Get()
+	mgr.SetFirstRequestSignaled()
+	old := time.Now().Add(-time.Hour)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		mgr.ResolveRange(old, old, "", true, false) // past the startup window: no mock is rescued as boot traffic
+	}
+	start := time.Now().Add(-time.Minute)
+	w := mgr.OpenWindow(start, nil)
+	mgr.BacklogBefore(time.Now())
+	if budget {
+		body := strings.Repeat("b", int(syncmgr.MaxHeldBytes/16))
+		for i := 0; i <= 16; i++ {
+			mgr.AddMock(&models.Mock{Kind: models.HTTP,
+				Spec:         models.MockSpec{ReqTimestampMock: start.Add(time.Duration(i) * time.Microsecond), HTTPResp: &models.HTTPResp{Body: body}},
+				TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}})
+		}
+		n := time.Now()
+		mgr.ResolveRange(n, n, "", true, false) // stale: held for it, past the budget
+	}
+	return w
+}
+
+// A test case of a request the stop of a recording that has ended found in
+// flight (one resolved as that recording ended, or captured as its window was
+// given up, which that recording's stream no longer took) is left out of the
+// next session: it is no request of it. A test case of any other request is
+// the next session's, and is streamed; and the session after that leaves
+// nothing out for that stop.
+func TestHandleIncoming_LeavesOutATestCaseOfARecordingThatEnded(t *testing.T) {
+	mgr := syncmgr.Get()
+	t.Cleanup(func() {
+		mgr.SetOutputChannel(make(chan *models.Mock))
+		mgr.SetOutputChannel(nil)
+	})
+	// In a stretch of its own, not a second before the real now: the pauses
+	// and holes other rows record on the real clock (loseMockToPressure's
+	// pause ran about a second before this row on a loaded runner) reach none
+	// of its test cases, which a span over them leaves out whatever else this
+	// row checks. Its windows stay in that stretch too, so none reaches another
+	// row's time. Only the stop is at the real now: a stop no later than the
+	// last ended one is not noted (NoteStop), and the stop does not read when
+	// a request's response came.
+	inFlightSince := newStretch()
+	if over, n := mgr.WasPressureActiveInWindow(inFlightSince, inFlightSince.Add(2*time.Millisecond)); over {
+		t.Fatalf("%d pauses recorded before this row already cover its test cases", n)
+	}
+	if over, n := mgr.WasMockOrphanedInWindow(inFlightSince, inFlightSince.Add(2*time.Millisecond)); over {
+		t.Fatalf("%d holes recorded before this row already cover its test cases", n)
+	}
+	w := mgr.OpenWindow(inFlightSince, nil) // in flight across the stop
+	t.Cleanup(w.Close)
+	resolvedSince := inFlightSince.Add(time.Microsecond)
+	r := mgr.OpenWindow(resolvedSince, nil) // in flight across the stop, resolved before the end
+	mgr.BacklogBefore(time.Now())
+	if !w.Claim() { // being resolved as the recording ends: left to its resolve
+		t.Fatal("fixture: the window was given up")
+	}
+	r.Keep()
+	// Its window ends in the stretch: one resolved to the real now would be a
+	// kept window of an ended recording over the past-the-cap row's spans and
+	// every late stretch, and a later row's late mock there would be let go as
+	// that recording's.
+	mgr.ResolveKept(r, resolvedSince, inFlightSince.Add(2*time.Millisecond), "", false)
+	r.Close()
+	mgr.EndStoppedRecording() // that recording's stream has ended
+
+	tc := func(name string, at time.Time) *models.TestCase {
+		return &models.TestCase{Name: name, Kind: models.HTTP,
+			HTTPReq:  models.HTTPReq{Method: "GET", URL: "http://app/" + name, Timestamp: at},
+			HTTPResp: models.HTTPResp{StatusCode: 200, Timestamp: at.Add(time.Millisecond)}}
+	}
+	session := func(cases ...*models.TestCase) []string {
+		t.Helper()
+		tcs := make(chan *models.TestCase, len(cases))
+		a := &Agent{logger: zap.NewNop(), svc: incomingSvc{tc: tcs}}
+		srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+		defer srv.Close()
+		body, _ := json.Marshal(models.IncomingReq{})
+		resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		for _, c := range cases {
+			tcs <- c
+		}
+		close(tcs)
+		return streamedNames(t, resp)
+	}
+	if got := session(tc("of-the-ended-recording", inFlightSince), tc("resolved-before-the-end", resolvedSince), tc("of-this-session", inFlightSince.Add(time.Millisecond))); len(got) != 1 || got[0] != "of-this-session" {
+		t.Fatalf("streamed %v, want only the test case of no request the last recording's stop found", got)
+	}
+	if got := session(tc("the-same-time-later", inFlightSince)); len(got) != 1 {
+		t.Fatalf("the session after it streamed %v: it still left out what the last recording's stop found", got)
 	}
 }

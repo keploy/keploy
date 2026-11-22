@@ -3,6 +3,7 @@ package mockdb
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -41,6 +42,10 @@ type inPlaceDoc struct {
 	LastUpdated  *models.LastUpdated `yaml:"last_updated,omitempty"`
 	Curl         string              `yaml:"curl,omitempty"`
 	ConnectionID string              `yaml:"connectionId,omitempty"`
+
+	Variables models.MockVariables          `yaml:"variables,omitempty"`
+	Clocks    map[string]models.ClockOffset `yaml:"clocks,omitempty"`
+	Origin    *models.Origin                `yaml:"origin,omitempty"`
 }
 
 // mysqlPacketInPlace is mysql.RequestYaml (and ResponseYaml, the same shape)
@@ -71,11 +76,14 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 	}
 	doc := inPlaceDoc{
 		Version:      mock.Version,
-		Kind:         mock.Kind,
+		Kind:         mock.DiskKind(),
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Async:        mock.Spec.Async,
 		Noise:        yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		Variables:    mock.Spec.Variables.Clone(),
+		Clocks:       maps.Clone(mock.Spec.Clocks),
+		Origin:       mock.Origin.Persisted(),
 	}
 	switch mock.Kind {
 	case models.MySQL:
@@ -120,6 +128,7 @@ func httpSpecOf(mock *models.Mock) models.HTTPSchema {
 		Created:          mock.Spec.Created,
 		ReqTimestampMock: mock.Spec.ReqTimestampMock,
 		ResTimestampMock: mock.Spec.ResTimestampMock,
+		Fault:            mock.Spec.Fault,
 	}
 }
 

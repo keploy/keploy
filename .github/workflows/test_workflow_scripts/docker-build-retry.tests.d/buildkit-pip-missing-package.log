@@ -1,0 +1,39 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 413B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/python:3.9
+#2 DONE 0.7s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/4] FROM docker.io/library/python:3.9@sha256:da5aee29682d12a6649f51c8d6f15b87deb3e6c524b923c41d0cb3304d07c913
+#4 resolve docker.io/library/python:3.9@sha256:da5aee29682d12a6649f51c8d6f15b87deb3e6c524b923c41d0cb3304d07c913 done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 407.82kB done
+#5 DONE 0.0s
+
+#6 [2/4] WORKDIR /app
+#6 CACHED
+
+#7 [3/4] COPY . .
+#7 DONE 0.0s
+
+#8 [4/4] RUN pip3 install -r requirements.txt
+#8 1.196 Looking in indexes: http://127.0.0.1:36201/simple/
+#8 1.196 ERROR: Could not find a version that satisfies the requirement nosuchpkg==0.0.0 (from versions: none)
+#8 1.196 ERROR: No matching distribution found for nosuchpkg==0.0.0
+#8 ERROR: process "/bin/sh -c pip3 install -r requirements.txt" did not complete successfully: exit code: 1
+------
+ > [4/4] RUN pip3 install -r requirements.txt:
+1.196 Looking in indexes: http://127.0.0.1:36201/simple/
+1.196 ERROR: Could not find a version that satisfies the requirement nosuchpkg==0.0.0 (from versions: none)
+1.196 ERROR: No matching distribution found for nosuchpkg==0.0.0
+------
+ERROR: failed to build: failed to solve: process "/bin/sh -c pip3 install -r requirements.txt" did not complete successfully: exit code: 1

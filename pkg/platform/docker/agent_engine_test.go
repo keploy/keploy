@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.uber.org/zap"
@@ -21,7 +22,7 @@ func TestGetAlias_LinuxStartsTheAgentOnTheActiveEngine(t *testing.T) {
 	}
 	opts := models.SetupOptions{KeployContainer: "keploy-test", AgentPort: 16790, Mode: models.MODE_RECORD}
 
-	alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+	alias, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 	require.NoError(t, err)
 	require.Regexp(t, `^(sudo .*)?docker container run `, alias, "the agent is not started with docker's CLI")
 	require.Contains(t, alias, " --security-opt label=disable ",
@@ -38,7 +39,7 @@ func TestGetAlias_LinuxStartsTheAgentOnTheActiveEngine(t *testing.T) {
 	require.NoError(t, engine.Prepare(context.Background(), zap.NewNop(), "podman-test"))
 	t.Cleanup(func() { _ = engine.Prepare(context.Background(), zap.NewNop(), engine.Docker) })
 
-	alias, err = getAlias(context.Background(), zap.NewNop(), opts, false)
+	alias, err = getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 	require.NoError(t, err)
 	require.Contains(t, alias, "/usr/bin/podman container run ", "the agent is not started with the engine's CLI: %s", alias)
 	require.NotContains(t, alias, "docker container run", "the agent is still started with docker: %s", alias)

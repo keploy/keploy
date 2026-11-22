@@ -28,6 +28,9 @@ func TestExitCodeForCmdErr(t *testing.T) {
 		// wantSaid: the error itself is printed here, as nothing printed it
 		// where it was raised (a flag error's flag-error func prints its own).
 		wantSaid bool
+		// path: the command cobra was running when it failed; the hint
+		// points at its --help. Empty means the root, "keploy".
+		path string
 	}{
 		{
 			name:     "success",
@@ -42,17 +45,21 @@ func TestExitCodeForCmdErr(t *testing.T) {
 			wantSaid: true,
 		},
 		{
-			name:     "unknown mock verb is a usage error (8) and hints",
+			name:     "unknown mock verb is a usage error (8) and hints at mock's help",
 			err:      errors.New(`unknown command "bogus" for "keploy mock"`),
 			wantCode: utils.ExitUsageError,
 			wantHint: true,
 			wantSaid: true,
+			path:     "keploy mock",
 		},
 		{
-			name:     "a flag error tagged where it was parsed is a usage error and hints",
+			// `keploy record --delay 10`: record's help lists record's flags;
+			// the root's lists only commands.
+			name:     "a flag error tagged where it was parsed is a usage error and hints at its command's help",
 			err:      utils.UsageError(&pflag.NotExistError{}),
 			wantCode: utils.ExitUsageError,
 			wantHint: true,
+			path:     "keploy record",
 		},
 		{
 			name:     "an argument-count error tagged where it was raised is a usage error, said and hinted",
@@ -60,6 +67,7 @@ func TestExitCodeForCmdErr(t *testing.T) {
 			wantCode: utils.ExitUsageError,
 			wantHint: true,
 			wantSaid: true,
+			path:     "keploy diff",
 		},
 		{
 			// keploy reading a flag it never defined: pflag's type, not tagged.
@@ -76,18 +84,28 @@ func TestExitCodeForCmdErr(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			path := tt.path
+			if path == "" {
+				path = "keploy"
+			}
 			var out bytes.Buffer
-			got := exitCodeForCmdErr(tt.err, &out)
+			got := exitCodeForCmdErr(tt.err, path, &out)
 			if got != tt.wantCode {
 				t.Errorf("exit code = %d, want %d", got, tt.wantCode)
 			}
-			hinted := strings.Contains(out.String(), "Run 'keploy --help' for usage.")
+			hinted := strings.Contains(out.String(), "Run '"+path+" --help' for usage.")
 			if hinted != tt.wantHint {
 				t.Errorf("usage hint printed = %v, want %v (output: %q)", hinted, tt.wantHint, out.String())
 			}
-			said := strings.Contains(out.String(), "Error: ")
+			said := strings.Contains(out.String(), "Error:")
 			if said != tt.wantSaid {
 				t.Errorf("error printed = %v, want %v (output: %q)", said, tt.wantSaid, out.String())
+			}
+			// As cobra says it: `Error: <the error>`, one space. Every
+			// command silences cobra's own print, so this line is the only
+			// one the user sees.
+			if tt.wantSaid && !strings.HasPrefix(out.String(), "Error: "+tt.err.Error()+"\n") {
+				t.Errorf("the error is not said as `Error: %s` on a line of its own: %q", tt.err, out.String())
 			}
 		})
 	}
@@ -112,7 +130,7 @@ func TestFinalExitCodeKeepsAMirroredRunnerCode(t *testing.T) {
 		{"error, runner mirrored 1", errors.New("boom"), 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := finalExitCode(tc.err, tc.current, &out); got != tc.want {
+			if got := finalExitCode(tc.err, tc.current, "keploy", &out); got != tc.want {
 				t.Fatalf("finalExitCode(%v, %d) = %d, want %d", tc.err, tc.current, got, tc.want)
 			}
 		})

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,3 +214,52 @@ func TestSimulateGRPC_HeldOpenStreamIsBounded(t *testing.T) {
 var _ = binary.BigEndian
 var _ = io.EOF
 var _ = metadata.MD{}
+
+// startDropBeforePreface is a port docker accepts a connection on and drops,
+// as it does for an app listening only on 127.0.0.1 in its container.
+func startDropBeforePreface(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A gRPC test that test.grpcPort sends to another host port than the one it
+// was recorded on (a compose file publishing "18080:8080"), at a port docker
+// accepts it on and drops it, fails creating its stream, never having had the
+// server's preface. It is asked about as what it is: the host port it went
+// to, for the app's port it was recorded on, and the error names both.
+func TestSimulateGRPC_ALostConnectionIsAskedAboutForTheRecordedAppPort(t *testing.T) {
+	const reason = "host port N is published to the container's port 9000, where nothing listens"
+	_, port, _ := net.SplitHostPort(startDropBeforePreface(t))
+	n, _ := strconv.Atoi(port)
+	test := grpcTestCase("127.0.0.1:50052", []models.GrpcLengthPrefixedMessage{{}})
+	test.AppPort = 8097
+	reach := &answerReach{reason: reason}
+
+	_, err := SimulateGRPC(context.Background(), test, "set", zap.NewNop(), SimulationConfig{
+		APITimeout: 5, ConfigHost: "127.0.0.1", ConfigPort: uint32(n), AppPortReachability: reach,
+	})
+	want := fmt.Sprintf("failed to create stream: the app's port 8097 cannot be reached from the host at port %d: %s: ", n, reason)
+	if err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("error %v\nwant it to start %q", err, want)
+	}
+	if !IsUnreachableAppPort(err) {
+		t.Errorf("not marked as never reachable: %v", err)
+	}
+	if !slices.Equal(reach.asked, []string{"127.0.0.1:" + port}) || !slices.Equal(reach.appPorts, []uint16{8097}) {
+		t.Errorf("asked about %v for app ports %v, want 127.0.0.1:%s for 8097", reach.asked, reach.appPorts, port)
+	}
+}

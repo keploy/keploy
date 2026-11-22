@@ -9,10 +9,11 @@ import (
 	"net"
 	"os"
 	"testing"
-	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -27,17 +28,13 @@ func recordedPlainDep(port uint32) *models.Mock {
 	}
 }
 
-func selfCallProxy() *Proxy {
-	return &Proxy{mockMode: true, appPID: uint32(os.Getpid()), logger: zap.NewNop()}
-}
-
 // A port the recording called as an outside dependency stays on the mock path
 // even when a process in the run's own tree now listens on it — otherwise the
 // test set's recorded mock for that dependency would be skipped for whatever is
 // live there. (The hardening guard in serveTreeListener.)
 func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
-	recorded.reset()
-	defer recorded.reset()
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -52,10 +49,10 @@ func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
 	}
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 	if served || err != nil {
 		t.Fatalf("a recorded outside dependency must stay on the mock path (served=false), got served=%v err=%v", served, err)
 	}
@@ -66,8 +63,8 @@ func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
 // handler, so a broken self-handler fails the run instead of being served a
 // stale mock.
 func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
-	recorded.reset()
-	defer recorded.reset()
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -87,32 +84,44 @@ func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
 	}()
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	cli, srv := net.Pipe()
 	defer cli.Close()
 
-	servedCh := make(chan bool, 1)
+	// Two events, in the order a pass-through has them: the real handler's
+	// response reaches the caller, then serveTreeListener returns once the
+	// caller hangs up. No deadline of its own: serveTreeListener returning
+	// first (the mock path, or a failed dial) is the failure, at once.
+	type event struct {
+		read   bool // the caller's read ended (else serveTreeListener returned)
+		served bool
+		err    error
+	}
+	events := make(chan event, 2)
 	go func() {
-		served, _ := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
-		servedCh <- served
+		served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		events <- event{served: served, err: err}
 	}()
 
 	// The real handler's response must reach the caller, relayed over srcConn —
 	// proving the live handler answered, not a mock.
 	buf := make([]byte, len(live))
-	_ = cli.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, err := io.ReadFull(cli, buf); err != nil || string(buf) != live {
-		t.Fatalf("the real handler's response must reach the caller: got %q (%v), want %q", string(buf), err, live)
+	go func() {
+		_, err := io.ReadFull(cli, buf)
+		events <- event{read: true, err: err}
+	}()
+	first := awaitEvent(t, events, "the real handler's response reaching the caller, or serveTreeListener returning")
+	if !first.read {
+		_ = cli.Close()
+		t.Fatalf("serveTreeListener returned (served=%v, err=%v) before the real handler's response reached the caller", first.served, first.err)
+	}
+	if first.err != nil || string(buf) != live {
+		t.Fatalf("the real handler's response must reach the caller: got %q (%v), want %q", string(buf), first.err, live)
 	}
 	_ = cli.Close() // let the relay's other direction finish so serveTreeListener returns
 
-	select {
-	case served := <-servedCh:
-		if !served {
-			t.Fatal("a self-call must be served by passing it through to the real handler")
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("serveTreeListener did not return after the relay finished")
+	if r := awaitEvent(t, events, "serveTreeListener returning after the relay finished"); !r.served || r.err != nil {
+		t.Fatalf("a self-call must be served by passing it through to the real handler: served=%v err=%v", r.served, r.err)
 	}
 }
 
@@ -120,23 +129,69 @@ func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
 // dependency is closed (the real connect would have been refused), not served a
 // stale mock.
 func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
-	recorded.reset()
-	defer recorded.reset()
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint32(l.Addr().(*net.TCPAddr).Port)
-	_ = l.Close() // nothing listens there now
+	port := uint32(mustPort(t, testnet.RefusedAddr(t, "tcp")))
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 	if !served || err != nil {
 		t.Fatalf("a down, unrecorded local port is closed (served=true, nil err), got served=%v err=%v", served, err)
+	}
+}
+
+// Under the proven switch, keploy mock replay stages only what no test owns
+// (keploy #4970), so a stopped local dependency the recording reached only
+// inside tests is a recorded port by the on-disk store's seed alone: its call
+// is left to the mock path and listed as a mocked local call, not closed as
+// a refused connect. A port no recording reached, or only a process the test
+// command started reached, is still closed. Without the switch the store
+// seeds no port: what a set's stagings stage decides, as before.
+func TestServeTreeListenerListsAStoppedLocalPortTheStoreSeeds(t *testing.T) {
+	for _, on := range []string{"1", "0"} {
+		t.Run(provenswitch.Env+"="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			plain, kid, never := testnet.RefusedAddr(t, "tcp"), testnet.RefusedAddr(t, "tcp"), testnet.RefusedAddr(t, "tcp")
+			store := localPortsStore(t, plain, kid)
+			recorded.forget()
+			t.Cleanup(recorded.forget)
+			p := selfCallProxy()
+			recorded.reset() // the session's Mock
+			seed, err := store.LoadDestinations()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.SeedRecordedDestinations(seed)
+			serve := func(addr string) (bool, *models.MockedRow) {
+				t.Helper()
+				port := uint32(mustPort(t, addr))
+				dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
+				_, srv := net.Pipe()
+				t.Cleanup(func() { _ = srv.Close() })
+				served, outside, err := p.serveTreeListener(context.Background(), srv, dest, addr, "1")
+				if err != nil {
+					t.Fatalf("%s: %v", addr, err)
+				}
+				return served, outside
+			}
+			served, outside := serve(plain)
+			if on == "1" {
+				if served || outside == nil || int(outside.Port) != mustPort(t, plain) {
+					t.Fatalf("a stopped local dependency the recording reached only inside a test: served=%v outside=%+v, want it left to the mock path and listed", served, outside)
+				}
+			} else if !served || outside != nil {
+				t.Fatalf("without the switch the store seeds no port: served=%v outside=%+v, want closed", served, outside)
+			}
+			for _, addr := range []string{never, kid} {
+				if served, outside := serve(addr); !served || outside != nil {
+					t.Fatalf("%s, a port no recording reached as an outside dependency: served=%v outside=%+v, want closed", addr, served, outside)
+				}
+			}
+		})
 	}
 }
 
@@ -148,8 +203,8 @@ func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
 // logged again only if it moved). A run with one self-call has no count: its
 // INFO line said it all.
 func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
-	recorded.reset()
-	defer recorded.reset()
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 
 	core, logs := observer.New(zap.DebugLevel)
 	p := selfCallProxy()
@@ -167,25 +222,20 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 			}
 		}()
 		port := uint32(l.Addr().(*net.TCPAddr).Port)
-		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 		cli, srv := net.Pipe()
 		defer srv.Close()
 		_ = cli.Close()
 		done := make(chan error, 1)
 		go func() {
-			served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+			served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 			if err == nil && !served {
 				err = fmt.Errorf("not passed through")
 			}
 			done <- err
 		}()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("a self-call must be passed through: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("serveTreeListener did not return")
+		if err := awaitEvent(t, done, "serveTreeListener returning"); err != nil {
+			t.Fatalf("a self-call must be passed through: %v", err)
 		}
 	}
 	selfCall()
@@ -228,4 +278,46 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 	if got := counts(); len(got) != 2 || got[1].ContextMap()["calls"] != int64(calls+1) {
 		t.Fatalf("a count that moved is said again: want a second line with %d, got %+v", calls+1, got)
 	}
+}
+
+// Under the proven switch, serveTreeListener tells OnProcess the owner of a
+// listener of the run's own tree a connection is addressed to, by its number
+// in the agent's /proc (where it found it), with no kernel PID.
+func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
+	recorded.forget()
+	t.Cleanup(recorded.forget)
+	prev := OnProcess
+	t.Cleanup(func() { OnProcess = prev })
+	t.Setenv("KEPLOY_PROVEN", "1")
+	seen := make(chan Process, 4)
+	OnProcess = func(p Process) { seen <- p }
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := uint32(l.Addr().(*net.TCPAddr).Port)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+	}()
+
+	p := selfCallProxy()
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		close(done)
+	}()
+	if got, want := awaitEvent(t, seen, "OnProcess being told the listener's owner"), (Process{Pid: uint32(os.Getpid())}); got != want {
+		t.Fatalf("OnProcess was told %+v, want the listener's owner %+v", got, want)
+	}
+	_ = cli.Close()
+	<-done
 }

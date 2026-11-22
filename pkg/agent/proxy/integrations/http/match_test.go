@@ -34,6 +34,12 @@ type mockMemDb struct {
 	cursors                 map[string]int // backs MockCursorIndex/AdvanceMockCursor for cursor tests
 }
 
+// AnsweredRedacting makes the double a store that tells the set's answered
+// recordings that redacted something (integrations.AnsweredRedactingReader),
+// as the agent's does: it takes none out of its reads, so it tells none, all
+// it has. A store that does not tell them redacts a miss whole.
+func (m *mockMemDb) AnsweredRedacting(models.Kind) ([]*models.Mock, bool) { return nil, true }
+
 // MockCursorIndex / AdvanceMockCursor give the double the optional
 // stateful-cursor capability (peek + commit) so cursorPick can advance through
 // identical-request recordings in tests.
@@ -124,7 +130,7 @@ func httpMock(name, method, rawURL string) *models.Mock {
 func TestBuildHTTPMismatchReport_NoMocks(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{mocks: nil}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -143,7 +149,7 @@ func TestBuildHTTPMismatchReport_NoMocks(t *testing.T) {
 func TestBuildHTTPMismatchReport_DbError(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{err: fmt.Errorf("db error")}
-	report := h.buildHTTPMismatchReport(makeReq("POST", "/api/items"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("POST", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -162,7 +168,7 @@ func TestBuildHTTPMismatchReport_NoHTTPMocks(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		{Name: "dns-mock", Kind: "DNS", Spec: models.MockSpec{}},
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/data"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/data"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -179,7 +185,7 @@ func TestBuildHTTPMismatchReport_SameMethodMatch(t *testing.T) {
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 		httpMock("mock-post-users", "POST", "http://localhost:8080/api/users"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -199,7 +205,7 @@ func TestBuildHTTPMismatchReport_DiffMethodFallback(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		httpMock("mock-post-items", "POST", "http://localhost:8080/api/items"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -219,7 +225,7 @@ func TestBuildHTTPMismatchReport_PathDiff(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/orders"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/orders"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -239,7 +245,7 @@ func TestBuildHTTPMismatchReport_ExactPathMethodMatch(t *testing.T) {
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 	}}
 	// Same method and path — diff should indicate headers/body differ
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")

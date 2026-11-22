@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -55,6 +56,273 @@ type agentSession struct {
 	changed chan struct{}
 	// reapplying lets one re-application run at a time.
 	reapplying sync.Mutex
+	// releases are the releases of the app in flight (makeAgentReady), and
+	// readyBy the one that recorded the release step, while it is the one.
+	// held counts the holds on the releases the run asked for
+	// (holdReleases). refused is why no release of this run reaches the
+	// agent any more: the setup of the agent compose started again failed
+	// (refuseReleases, held or not); nil until then, and again once the run
+	// ends.
+	releases map[*releaseCall]struct{}
+	readyBy  *releaseCall
+	held     int
+	refused  error
+	// notSetUp: the agent at this address may be one compose's retry
+	// started again that no setup has completed on, from a hold (no agent
+	// ran before the retry's `up`, so any that runs now is a new one) or
+	// from the beginning of a restarted agent's setup, until a setup of the
+	// agent completes (setUpDone), or the run ends. No release the run asked
+	// for reaches the agent meanwhile: one the retry's watch cut short of
+	// that setup is set up again by the next retry, before any release goes
+	// to it, and the hold's end alone lets none go.
+	notSetUp bool
+	// releasedGen is the agent (gen) a setup's release reached: the ready
+	// step its setup made again last (reapply), or the release a hold held
+	// that the retry's watch had made on it (releaseHeld). 0, the run's
+	// first agent, is released by the run itself.
+	releasedGen int
+}
+
+// releaseCall is one release of the app in flight (makeAgentReady). setup: it
+// is the release a restarted agent's setup makes (reapply), which no hold
+// holds. posting: its request to the agent is out. refused: why it sends
+// nothing to the agent any more (agentSession.refused). cut ends its wait,
+// and the request it has out, with why (its context's cancel).
+type releaseCall struct {
+	setup   bool
+	posting bool
+	refused error
+	cut     context.CancelCauseFunc
+}
+
+// releaseRefused is how a release the failed setup of a restarted agent
+// refused (refuseReleases) ends.
+func releaseRefused(failed error) error {
+	return fmt.Errorf("the keploy agent was not released (/agent/ready), since keploy's agent, started again by docker compose, could not be set up again: %w", failed)
+}
+
+// beginRelease notes a release of the app in flight. A release is owed from
+// the moment it is asked for, so it is recorded now, unless one already is: a
+// restarted agent whose setup begins from here on is released last, however
+// late this release learns that the agent it asked is gone. Its watch's
+// verdict, and the look that verdict waits for, can come after that setup
+// has read what to make again (reapply), and an agent set up without its
+// release holds the app back for good. cut ends the release (refuseReleases).
+// A release asked for once the run's releases were refused is neither noted
+// nor recorded: it ends with refused, asking the agent nothing.
+func (s *agentSession) beginRelease(setup bool, cut context.CancelCauseFunc, apply func(ctx context.Context) error) (rc *releaseCall, refused error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rc = &releaseCall{setup: setup, cut: cut}
+	if s.refused != nil {
+		rc.refused = s.refused
+		return rc, s.refused
+	}
+	if s.releases == nil {
+		s.releases = map[*releaseCall]struct{}{}
+	}
+	s.releases[rc] = struct{}{}
+	if s.restartable && !slices.ContainsFunc(s.steps, func(st sessionStep) bool { return st.kind == stepAgentReady }) {
+		s.steps = append(s.steps, sessionStep{kind: stepAgentReady, apply: apply})
+		s.readyBy = rc
+	}
+	return rc, nil
+}
+
+// endRelease notes the end of release rc. One that was not owed (the agent
+// refused it for good, or the run's end cut it) takes back the release step
+// it recorded, unless a release that was owed has ended since; one recorded
+// before it stays.
+func (s *agentSession) endRelease(rc *releaseCall, owed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.releases, rc)
+	switch {
+	case owed:
+		s.readyBy = nil
+	case s.readyBy == rc:
+		s.steps = slices.DeleteFunc(s.steps, func(st sessionStep) bool { return st.kind == stepAgentReady })
+		s.readyBy = nil
+	}
+	s.notify()
+}
+
+// awaitPost waits until release rc may send its request to the agent: at
+// once for a restarted agent's setup, otherwise while no hold is on and no
+// agent that is not set up may run (notSetUp). It
+// reports false once done, rc's context, is closed first, and, with no wait,
+// once the setup of an agent compose started again has failed: rc then sends
+// nothing to the agent, and its context carries that failure, since its
+// refusal cut it (refuseReleases).
+func (s *agentSession) awaitPost(done <-chan struct{}, rc *releaseCall) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for !rc.setup && (s.held > 0 || s.notSetUp) {
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-changed:
+		case <-done:
+			s.mu.Lock()
+			return false
+		}
+		s.mu.Lock()
+	}
+	if rc.refused != nil {
+		return false
+	}
+	rc.posting = true
+	return true
+}
+
+// releaseOut reports whether a release has its request out; with s.mu held.
+func (s *agentSession) releaseOut() bool {
+	for rc := range s.releases {
+		if rc.posting {
+			return true
+		}
+	}
+	return false
+}
+
+// posted notes that release rc's request is back, and its answer read. It
+// returns why rc was refused (refuseReleases) while that request was out: the
+// release then ends with that, whatever the agent answered.
+func (s *agentSession) posted(rc *releaseCall) (refused error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rc.posting = false
+	s.notify()
+	return rc.refused
+}
+
+// holdReleases holds every release of the app the run asked for, in flight or
+// asked for from now on, until the func it returns is called: none sends a
+// request to the agent while a hold is on. It returns once no release has one
+// out, or once ctx is done. compose's bring-up retry holds them while its `up` can
+// start the agent again: the restarted agent answers at the same address, and
+// a release it took before its setup was made again (reapply) would start the
+// app against an agent with none of the run's mocks or settings. Its setup
+// releases it, last.
+//
+// The agent that may answer from the hold on is one no setup has completed
+// on (notSetUp): letting the hold go alone lets no release go to it; a
+// completed setup of it (setUpDone) does.
+//
+// resume(failed), failed the error of that setup, lets the hold go without
+// letting a release go: every release of this run, in flight or asked for
+// until the run ends (end), then ends with failed and sends nothing to the
+// agent, which would start the app against an agent that is not set up. The
+// run ends on that failure (App.retryComposeUp).
+func (s *agentSession) holdReleases(ctx context.Context) (resume func(failed error)) {
+	s.mu.Lock()
+	s.held++
+	s.notSetUp = true
+	for ctx.Err() == nil && s.releaseOut() {
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+		}
+		s.mu.Lock()
+	}
+	s.mu.Unlock()
+	var once sync.Once
+	return func(failed error) {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if failed != nil {
+				s.refuseReleases(failed)
+			}
+			s.held--
+			s.notify()
+		})
+	}
+}
+
+// releaseHeld makes, on the agent the latest setup completed on, the release
+// of the app the run asked for once that setup had read what to make again,
+// which a hold still holds: the retry's watch, which holds the releases until
+// the app's container starts, has the agent client make it (App.
+// SetAgentHeldRelease), as that setup would have made it last. A run whose
+// first agent was stopped before it answered (a dependency's crash keploy
+// stopped the stack on) has set nothing up on any agent and asked for no
+// release when the watch sets up the agent the retry started: that setup
+// makes nothing again, the run then sets the agent up itself and asks for its
+// release, and the hold held it while the app it would start, behind the
+// agent's healthcheck, held the hold. Each run of the app waited for good.
+//
+// It makes the release only while a hold is on, a setup has completed since
+// it began (notSetUp clear: no agent that is not set up may answer), no
+// setup's release has reached that agent, no refusal stands, and a release
+// the run asked for waits on the hold, and then only if current, asked once
+// before the release's first request goes, says the agent that runs is still
+// the one set up.
+// The release held goes on once the hold ends, to the agent this one
+// released. nil once nothing is owed, or the release taken; otherwise the
+// release's error.
+func (s *agentSession) releaseHeld(ctx context.Context, current func(ctx context.Context) bool) error {
+	s.mu.Lock()
+	gen := s.gen
+	var apply func(ctx context.Context) error
+	if s.held > 0 && !s.notSetUp && s.refused == nil && s.releasedGen != gen && s.releaseWaits() {
+		for _, step := range s.steps {
+			if step.kind == stepAgentReady {
+				apply = step.apply
+			}
+		}
+	}
+	s.mu.Unlock()
+	if apply == nil || !current(ctx) {
+		return nil
+	}
+	if err := apply(ctx); err != nil {
+		return err
+	}
+	// The watch makes this release and every setup (reapply), one at a
+	// time, so gen is still the agent released.
+	s.mu.Lock()
+	s.releasedGen = gen
+	s.mu.Unlock()
+	return nil
+}
+
+// releaseWaits reports whether a release the run asked for waits to send its
+// request: one no setup makes, with none out and no refusal; with s.mu held.
+func (s *agentSession) releaseWaits() bool {
+	for rc := range s.releases {
+		if !rc.setup && !rc.posting && rc.refused == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseReleases ends every release of this run with failed, in flight or
+// asked for until the run ends, before it sends anything more to the agent;
+// with s.mu held. A release in flight is cut at once, its wait and the
+// request it has out with it: that request, still on its way, never reaches
+// the agent, and one the agent answered ends with failed all the same.
+func (s *agentSession) refuseReleases(failed error) {
+	s.refused = failed
+	for rc := range s.releases {
+		rc.refused = failed
+		rc.cut(releaseRefused(failed))
+	}
+}
+
+// refuseRun ends every release of this run with failed (refuseReleases), held
+// or not: the setup of the agent compose's retry started again failed where
+// no hold was on (docker could not say which agent ran before the retry, or
+// compose recreated a running agent), and the run ends on that failure
+// (App.retryComposeUp). A release must never reach that agent, which has none
+// of the run's mocks or settings.
+func (s *agentSession) refuseRun(failed error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refuseReleases(failed)
 }
 
 // sessionStep is one configuring call, made again by apply.
@@ -68,14 +336,24 @@ type sessionStep struct {
 // They are made again in the order the kinds were first made in, except
 // readiness, which releases the app and so goes last.
 const (
+	stepRealDeps     = "real-deps"
 	stepTestSetHook  = "before-test-set-compose"
 	stepMockOutgoing = "mock-outgoing"
 	stepStoreMocks   = "store-mocks"
 	stepMockParams   = "update-mock-params"
 	stepScopeTable   = "scope-table"
+	stepSetTable     = "set-table"
 	stepScopeGate    = "scope-gate"
+	stepTestBegins   = "test-begins"
 	stepAgentReady   = "agent-ready"
 )
+
+// stepExactStage is a set's staging under exact serving (KEPLOY_PROVEN,
+// models.ExactServing.Stage): it stages the set's mocks once, and each test
+// case's filter after it only says what is served. It is a kind of its own,
+// so the latest of those filters does not replace it, and a restarted agent
+// is staged before it is told what to serve.
+const stepExactStage = "exact-stage"
 
 // staleStreamGrace is how long setting a restarted agent up waits for the
 // streams to see their old agent gone (its connection closing) before it cuts
@@ -122,6 +400,26 @@ func (s *agentSession) end() {
 	defer s.mu.Unlock()
 	s.ends++
 	s.steps = nil
+	s.refused = nil
+	s.notSetUp = false
+	s.notify()
+}
+
+// settingUp notes that the setup of an agent compose started again begins:
+// no release the run asked for reaches it until that setup completes
+// (setUpDone), however the setup ends.
+func (s *agentSession) settingUp() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notSetUp = true
+}
+
+// setUpDone notes that the setup of the agent compose started again
+// completed: the releases the run asked for may go to it, once no hold is on.
+func (s *agentSession) setUpDone() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notSetUp = false
 	s.notify()
 }
 
@@ -335,6 +633,7 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 
 	s.mu.Lock()
 	s.gen++
+	gen := s.gen
 	var steps, ready []sessionStep
 	for _, step := range s.steps {
 		if step.kind == stepAgentReady {
@@ -365,8 +664,29 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 	}
 	for _, step := range append(steps, ready...) {
 		if err := step.apply(ctx); err != nil {
+			if step.kind == stepTestSetHook {
+				// As on the agent before it: a set hook that fails is
+				// logged and the run goes on (the replay's hooks), and
+				// the mocks and readiness after it still matter.
+				logger.Warn("keploy's restarted agent: its test set's hook failed; setting the rest of it up", zap.Error(err))
+				continue
+			}
+			if step.kind == stepStoreMocks && errors.Is(err, models.ErrPayloadFileReplaced) {
+				// The stored mocks are of a set that has run: its mock
+				// file was rewritten once it ended, and the set being set
+				// up stores its own.
+				logger.Debug("keploy's restarted agent: not storing the mocks of a test set that has run; the next set stores its own", zap.Error(err))
+				continue
+			}
 			return fmt.Errorf("failed to set keploy's restarted agent up again (%s): %w", step.kind, err)
 		}
+	}
+	if len(ready) > 0 {
+		// gen is still this setup's: setups run one at a time (reapplying),
+		// and only a setup moves gen.
+		s.mu.Lock()
+		s.releasedGen = gen
+		s.mu.Unlock()
 	}
 	logger.Info("keploy's agent was started again by docker compose; set it up again as before",
 		zap.Int("calls", len(steps)+len(ready)))
@@ -382,24 +702,59 @@ func (a *AgentClient) session() *agentSession {
 // answers: its container runs before its server listens, and a stream that
 // reconnected, or a call made, before then would only be refused.
 func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
+	s := a.session()
+	s.settingUp()
 	if err := a.awaitAgentAnswers(ctx); err != nil {
 		return err
 	}
-	return a.session().reapply(ctx, a.logger)
+	// The process that answers was started in place of the agent while the
+	// app's container had never started: compose's retry runs only then
+	// (shouldRetryComposeUp), and its watch takes an agent found started
+	// again for one only before it finds the app's container running
+	// (App.retryComposeUp). So the app ran against none of the process it
+	// replaced, whether or not the setup below takes: the replay counts
+	// what this one counts from its start (AgentStartedBeforeApp).
+	instancesAt(agentHost(a.conf.Agent.AgentURI)).startedBeforeApp()
+	// A docker-mode agent that restarted holds no container list, nor the
+	// names its networks answer.
+	a.pushContainers(ctx)
+	forgetNetworkNames(a.conf.Agent.AgentURI)
+	a.pushNetworkNames(ctx)
+	if err := s.reapply(ctx, a.logger); err != nil {
+		return err
+	}
+	// The agent compose started again holds the whole setup again, and the
+	// app has not run against the one it replaced: compose's retry runs only
+	// while the app's container was never started (shouldRetryComposeUp),
+	// and the app starts behind this agent's readiness, put back last. So
+	// what a watch of the agent's process keeps to (a test set's evidence)
+	// is all on this one.
+	instancesAt(agentHost(a.conf.Agent.AgentURI)).accept()
+	s.setUpDone()
+	return nil
 }
 
-// awaitAgentAnswers waits, up to the agent's readiness budget, for its health
-// endpoint to answer.
+// awaitAgentAnswers waits for the agent's health endpoint to answer while its
+// start makes progress (WatchAgentStart), as long as that takes, and ends once
+// the start fails or stops making progress.
 func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	start, over := a.watchAgent(ctx, false)
+	if over != nil {
+		// The wait ends only once its watch has, its look with it.
+		defer func() {
+			cancel()
+			<-over
+		}()
+	}
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		probe, cancelProbe := context.WithTimeout(ctx, 500*time.Millisecond)
-		req, err := http.NewRequestWithContext(probe, http.MethodGet, a.conf.Agent.AgentURI+"/health", nil)
+		req, err := newAgentRequest(probe, http.MethodGet, a.conf.Agent.AgentURI+"/health", nil)
 		if err == nil {
-			if res, err := a.client.Do(req); err == nil {
+			if res, err := doAgent(&a.client, req); err == nil {
 				_ = res.Body.Close()
 				if res.StatusCode == http.StatusOK {
 					cancelProbe()
@@ -411,7 +766,10 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not answer at %s: %w",
-				a.conf.Agent.AgentURI, ctx.Err())
+				pkg.ShownAgentURI(a.conf.Agent.AgentURI), ctx.Err())
+		case err := <-start:
+			return fmt.Errorf("keploy's agent, started again by docker compose, did not come up at %s: %w",
+				pkg.ShownAgentURI(a.conf.Agent.AgentURI), err)
 		case <-tick.C:
 		}
 	}
@@ -419,22 +777,54 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 
 // copyMockParams is params sharing no memory with it: the replayer goes on
 // changing the consumed-mocks map it hands over.
-func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
+//
+// A consumed history (models.ConsumedHistory) is not copied: it is marked, at
+// no cost, and rebuild puts the history as it was at the call back into the
+// copy, when the call is made again. A copy of the whole history at every
+// test made a replay's cost grow with the square of its tests.
+func copyMockParams(params models.MockFilterParams) (_ models.MockFilterParams, rebuild func(models.MockFilterParams) models.MockFilterParams) {
+	rebuild = func(p models.MockFilterParams) models.MockFilterParams { return p }
+	if h := params.ConsumedHistory; h != nil && params.TotalConsumedMocks != nil {
+		mark := h.Mark()
+		params.ConsumedHistory, params.TotalConsumedMocks = nil, nil
+		rebuild = func(p models.MockFilterParams) models.MockFilterParams {
+			p.TotalConsumedMocks = mark.State()
+			return p
+		}
+	}
 	params.TotalConsumedMocks = maps.Clone(params.TotalConsumedMocks)
 	params.RecordedWindows = slices.Clone(params.RecordedWindows)
+	params.BackgroundMocks = slices.Clone(params.BackgroundMocks)
 	params.MockMapping = slices.Clone(params.MockMapping)
-	return params
+	params.Variables = slices.Clone(params.Variables)
+	if params.Exact != nil {
+		ex := *params.Exact
+		ex.Pool = slices.Clone(ex.Pool)
+		ex.Owned = slices.Clone(ex.Owned)
+		ex.Ahead = slices.Clone(ex.Ahead)
+		params.Exact = &ex
+	}
+	return params, rebuild
+}
+
+// mockParamsStep is the step kind a mock filter is recorded under: a set's
+// staging under exact serving is its own (stepExactStage).
+func mockParamsStep(params models.MockFilterParams) string {
+	if params.Exact != nil && params.Exact.Stage {
+		return stepExactStage
+	}
+	return stepMockParams
 }
 
 // resumeStream is called when a stream's connection ended. Once the session
 // is set up on a restarted agent, it makes the stream's request again, the
-// same method, path and body, on a new connection, and returns its response.
+// same request (newRequest), on a new connection, and returns its response.
 // A stream that cannot reconnect waits for the next agent compose starts. It
 // reports false when the stream is over (see awaitRestart).
-func (a *AgentClient) resumeStream(ctx context.Context, stream *sessionStream, name, method, path string, body []byte) (*http.Response, bool) {
+func (a *AgentClient) resumeStream(ctx context.Context, stream *sessionStream, name string, newRequest streamRequest) (*http.Response, bool) {
 	for stream.awaitRestart(ctx) {
 		conn := stream.connect(ctx)
-		res, err := a.reopenStream(conn.ctx, name, method, path, body)
+		res, err := a.reopenStream(conn.ctx, name, newRequest)
 		if err == nil {
 			res.Body = conn.body(res.Body)
 			stream.caughtUp(conn)
@@ -462,22 +852,40 @@ var (
 	reopenBackoff = 500 * time.Millisecond
 )
 
-// reopenStream makes a stream's request again: see resumeStream.
-func (a *AgentClient) reopenStream(ctx context.Context, name, method, path string, body []byte) (*http.Response, error) {
-	var lastErr error
-	for attempt := 1; attempt <= reopenRetries; attempt++ {
+// streamRequest makes a stream's request on ctx, a new one each time. A
+// reopened stream calls the same one, so all a stream asks of its agent is
+// asked again of the agent that replaces it.
+type streamRequest func(ctx context.Context) (*http.Request, error)
+
+// streamRequestOf is the streamRequest of a stream that sends only its method,
+// path and body.
+func (a *AgentClient) streamRequestOf(method, path string, body []byte) streamRequest {
+	return func(ctx context.Context) (*http.Request, error) {
 		var rd io.Reader
 		if body != nil {
 			rd = bytes.NewReader(body)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, a.conf.Agent.AgentURI+path, rd)
+		req, err := newAgentRequest(ctx, method, a.conf.Agent.AgentURI+path, rd)
 		if err != nil {
 			return nil, err
 		}
 		if method == http.MethodPost {
 			req.Header.Set("Content-Type", "application/json")
 		}
-		res, err := a.client.Do(req)
+		a.markDrainsAfterStop(ctx, req)
+		return req, nil
+	}
+}
+
+// reopenStream makes a stream's request again: see resumeStream.
+func (a *AgentClient) reopenStream(ctx context.Context, name string, newRequest streamRequest) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= reopenRetries; attempt++ {
+		req, err := newRequest(ctx)
+		if err != nil {
+			return nil, err
+		}
+		res, err := doAgent(&a.client, req)
 		if err == nil {
 			if err := agentStreamStatus(name, res); err != nil {
 				return nil, err

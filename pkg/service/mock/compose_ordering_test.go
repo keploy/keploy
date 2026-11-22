@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -69,10 +70,66 @@ type composeInstr struct {
 	// What the agent reports back when asked for the replay outcome. Under
 	// compose it is routinely asked after it has already been stopped, so both
 	// reads failing is the normal case there, not an exotic one.
+	// table, pool and worker are the per-test table, the pool slices and
+	// the worker scope the last proven table push sent, and given the
+	// values each test gave when it was recorded that it sent with them.
+	table, pool, worker map[string][]string
+	// skippedReads are the names of worker that push said are the reads of
+	// tests the gate skips.
+	skippedReads map[string]string
+	// trails is the test each worker recording trails that push sent.
+	trails map[string]string
+	// recordedWindows are the recorded test windows that push sent.
+	recordedWindows []models.TestWindow
+	// scopeWindows are those the switch-off table push sent.
+	scopeWindows []models.TestWindow
+	given        map[string][]models.GivenValue
+	// repeats are the repeated reads that push named.
+	repeats map[string][]models.RepeatRead
+	// notRequired are the names of each test's own list that push said
+	// marked served, not required.
+	notRequired map[string][]string
+	// background are the names of the set's background recordings that
+	// push sent (models.ScopeTableReq.Background).
+	background []string
+	// series is, by series, the worker-scope recordings a declared rule
+	// placed that push sent (models.ScopeTableReq.Series).
+	series map[string][]string
+	// sources is the declared sources the last PushProvenTable carried.
+	sources map[string][]models.DeclaredSource
+	// once is the once series the last PushProvenTable carried.
+	once []string
+	// timeForm is whether the last PushProvenTable turned the time
+	// default on.
+	timeForm bool
+	// begins and seeds are what the last push of the tests' recorded begins
+	// sent, and beginsErr what it fails with.
+	begins    map[string]time.Time
+	seeds     map[string]string
+	beginsErr error
+	// windows is what the agent answers the windows read with.
+	windows []models.ScopeWindow
+
 	consumedMocks []models.MockState
 	consumedErr   error
-	mockErrors    []models.UnmatchedCall
-	mockErrorsErr error
+	// consumedReads are what the agent hands the reads of what it consumed
+	// before consumedMocks, one each, in order: a read hands back only what
+	// was consumed since the one before.
+	consumedReads [][]models.MockState
+	// runsOn, when set, is what the test command left of the application
+	// running once it exited (models.RunOptions.BeforeStop's running): Run
+	// calls BeforeStop while it says true, as the agent client does.
+	runsOn func() bool
+	// consumedReadCount is how many reads of what the agent consumed were
+	// made.
+	consumedReadCount int
+	mockErrors        []models.UnmatchedCall
+	mockErrorsErr     error
+	// mockStats and mockStatsErr are what GetMockStats answers: the
+	// agent's count of each series' repeats (models.MockStats).
+	mockStats      models.MockStats
+	mockStatsErr   error
+	mockStatsReads int
 
 	// What the agent left as compose stopped it (ComposeOutcomeReader): under
 	// compose, the only account of the run there is.
@@ -81,11 +138,19 @@ type composeInstr struct {
 	// agentFailure is what the agent's container says about how it stopped
 	// (ComposeAgentFailureReader); nil: it outlived the app.
 	agentFailure func() error
+	// composeEnd is what ended the project when the test command's own end
+	// does not stand (ComposeEndReader); nil: its end stands.
+	composeEnd func(appExit int) error
+	// windowsErr is what reading the per-test windows (ScopeReader) fails
+	// with; nil: the run had no per-test windows.
+	windowsErr error
 
 	mu         sync.Mutex
 	events     []string
 	runs       int
 	healthHits int
+	// stored is every mock StoreMocks was sent.
+	stored []*models.Mock
 }
 
 func newInstr(t *testing.T, lifetime agentLifetime, runBlocks bool, runResult models.AppError) *composeInstr {
@@ -105,7 +170,7 @@ func newInstr(t *testing.T, lifetime agentLifetime, runBlocks bool, runResult mo
 		f.mu.Unlock()
 		if !f.agentUp() {
 			// In reality nothing is listening at all and the probe gets a
-			// connection refusal; both are "not healthy" to isAgentHealthy,
+			// connection refusal; both are "not healthy" to agentHealthAnswer,
 			// and a served 503 avoids racing a listener open and closed.
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -151,7 +216,7 @@ func (f *composeInstr) counts() (runs, healthHits int) {
 
 func (f *composeInstr) Setup(context.Context, string, models.SetupOptions) error { return nil }
 
-func (f *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+func (f *composeInstr) Run(ctx context.Context, opts models.RunOptions) models.AppError {
 	f.mu.Lock()
 	f.runs++
 	f.events = append(f.events, "run")
@@ -181,6 +246,9 @@ func (f *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppE
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	if opts.BeforeStop != nil && f.runsOn != nil && ctx.Err() == nil && f.runsOn() {
+		opts.BeforeStop(ctx, f.runsOn)
+	}
 	return f.runResult
 }
 
@@ -193,6 +261,36 @@ func (f *composeInstr) released() bool {
 	return false
 }
 
+func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
+	return f.windows, f.windowsErr
+}
+
+// PushScopeTable takes the per-test table and the recorded test windows
+// (ScopePusher), and keeps the windows.
+func (f *composeInstr) PushScopeTable(_ context.Context, _ map[string][]string, windows []models.TestWindow) error {
+	f.scopeWindows = windows
+	return nil
+}
+
+// PushProvenTable takes the per-test table, the pool slices, the worker
+// scope, the names of it that are skipped tests' reads, the trails, the
+// recorded test windows, the recorded givens, the named repeated reads, the
+// not-required marks, the background recordings' names, the series, the
+// declared sources, the once series and the time default
+// (ProvenTablePusher), and keeps them.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) error {
+	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired, f.background = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background
+	f.series, f.sources, f.once, f.timeForm = series, sources, once, timeForm
+	return nil
+}
+
+// PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
+// fails with beginsErr.
+func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds map[string]string, _ map[string][]models.ClientCase) error {
+	f.begins, f.seeds = begins, seeds
+	return f.beginsErr
+}
+
 func (f *composeInstr) ComposeAgentOutcome() (models.MockOutcome, error) {
 	return f.leftOutcome, f.leftOutcomeErr
 }
@@ -202,6 +300,13 @@ func (f *composeInstr) ComposeAgentFailure() error {
 		return nil
 	}
 	return f.agentFailure()
+}
+
+func (f *composeInstr) ComposeEndAfterReady(appExit int) error {
+	if f.composeEnd == nil {
+		return nil
+	}
+	return f.composeEnd(appExit)
 }
 
 func (f *composeInstr) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {
@@ -230,8 +335,11 @@ func (f *composeInstr) MakeAgentReadyForDockerCompose(context.Context) error {
 	return nil
 }
 
-func (f *composeInstr) StoreMocks(context.Context, []*models.Mock, []*models.Mock) error {
+func (f *composeInstr) StoreMocks(_ context.Context, filtered, unfiltered []*models.Mock) error {
 	f.record("store")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stored = append(append(f.stored, filtered...), unfiltered...)
 	return nil
 }
 
@@ -240,7 +348,22 @@ func (f *composeInstr) UpdateMockParams(context.Context, models.MockFilterParams
 	return nil
 }
 func (f *composeInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.consumedReadCount++
+	if len(f.consumedReads) > 0 {
+		read := f.consumedReads[0]
+		f.consumedReads = f.consumedReads[1:]
+		return read, nil
+	}
 	return f.consumedMocks, f.consumedErr
+}
+
+func (f *composeInstr) GetMockStats(context.Context) (models.MockStats, error) {
+	f.mu.Lock()
+	f.mockStatsReads++
+	f.mu.Unlock()
+	return f.mockStats, f.mockStatsErr
 }
 
 func (f *composeInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
@@ -255,6 +378,11 @@ type stubMockDB struct {
 }
 
 func (stubMockDB) InsertMock(context.Context, *models.Mock, string) error { return nil }
+
+// SkippedMocks: the stub has no mock file, so its read skips nothing.
+func (stubMockDB) SkippedMocks(context.Context, string) (string, map[string]models.SkippedMock) {
+	return "", map[string]models.SkippedMock{}
+}
 func (stubMockDB) DeleteMocksForSet(context.Context, string) error        { return nil }
 func (stubMockDB) PromoteStagedSet(context.Context, string, string) error { return nil }
 func (stubMockDB) DiscardStagedSet(context.Context, string) error         { return nil }
@@ -274,19 +402,6 @@ func instrConfig(instr *composeInstr, cmdType utils.CmdType, command string) *co
 	cfg.Mock.Name = "set"
 	cfg.Agent.AgentURI = instr.health.URL
 	return cfg
-}
-
-// shortAgentBudget is how long a regression takes to surface here: an ordering
-// that waits for the agent before starting the project never sees it go
-// healthy, so the run fails when this budget expires. The 330s default would
-// make that a five-and-a-half-minute test.
-//
-// 20s, not less: a HEALTHY run spends composeAgentBootProbes ticks (~3s) in the
-// same wait, and the margin is what keeps a loaded CI runner from turning a
-// pass into a failure.
-func shortAgentBudget(t *testing.T) {
-	t.Helper()
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "20")
 }
 
 // waitForEvent blocks until the recorded sequence contains event, failing at
@@ -343,7 +458,6 @@ func TestComposeOrdering(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortAgentBudget(t)
 			instr := newInstr(t, agentUpAfterRun, true, models.AppError{})
 			svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
 
@@ -431,7 +545,6 @@ func TestNonComposeOrderingIsUntouched(t *testing.T) {
 // a port already taken — must be reported with what it did, not by sitting out
 // the whole agent budget waiting for an agent that is never going to start.
 func TestComposeProjectThatDiesFailsFast(t *testing.T) {
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 	instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 1})
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
 
@@ -453,7 +566,6 @@ func TestComposeProjectThatDiesFailsFast(t *testing.T) {
 // instead, so the same crash exited 7 or 1 depending on which of two racing
 // paths noticed it first.
 func TestComposeProjectThatDiesMirrorsItsExitCode(t *testing.T) {
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 	instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 7})
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
 
@@ -491,7 +603,6 @@ func TestComposeAgentThatCannotStartIsKeploysFailure(t *testing.T) {
 		{"replay", func(s Service, ctx context.Context) error { return s.Replay(ctx) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 			// compose's own exit status for a dependency that failed to start
 			instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 1})
 			instr.agentFailure = func() error {
@@ -545,10 +656,9 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 		{"replay", func(s Service, ctx context.Context) error { return s.Replay(ctx) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortAgentBudget(t)
 			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 137})
 			instr.runUntilReady = true
-			died := errors.New("the keploy agent stopped while the test command was running: the keploy-agent container keploy-v3-x exited with code 137")
+			died := errors.New("the keploy agent stopped while the app was running: the keploy-agent container keploy-v3-x exited with code 137")
 			instr.agentFailure = func() error { return died }
 			cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
 			cfg.Mock.OnMiss = string(models.MissFail)
@@ -593,6 +703,162 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 	}
 }
 
+// Compose can report 0 for a test command it never started: another of the
+// project's services ended the project first. That 0 is no verdict. Read as
+// one, keploy mock record said the test command passed, and exited 0, for a
+// run that ran nothing: a CI job that records on merge went green with no test
+// run and its mock set left as it was. The test command's own end stands
+// whenever keploy has no such reading, and only a compose run is asked.
+func TestComposeTestCommandThatNeverRanFailsTheRecord(t *testing.T) {
+	neverRan := errors.New("compose never started the app (another of the project's services ended it), though it reported 0")
+	agentStopped := errors.New("the keploy agent stopped before compose started the app")
+	end := func(appExit int) error {
+		if appExit == 0 {
+			return neverRan
+		}
+		return nil
+	}
+	for _, tc := range []struct {
+		name     string
+		cmdType  utils.CmdType
+		command  string
+		lifetime agentLifetime
+		result   models.AppError
+		end      func(int) error
+		agent    error
+		want     error
+		wantCode int
+	}{
+		{name: "compose reported 0 for a test command it never started", cmdType: utils.DockerCompose, command: "docker compose up", lifetime: agentUpAfterRun,
+			result: models.AppError{AppErrorType: models.ErrAppStopped}, end: end, want: neverRan},
+		{name: "an agent that stopped the project is named first", cmdType: utils.DockerCompose, command: "docker compose up", lifetime: agentUpAfterRun,
+			result: models.AppError{AppErrorType: models.ErrAppStopped}, end: end, agent: agentStopped, want: agentStopped},
+		{name: "a test command that failed keeps its own code", cmdType: utils.DockerCompose, command: "docker compose up", lifetime: agentUpAfterRun,
+			result: models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}, end: end, wantCode: 3},
+		{name: "a test command that ran and passed", cmdType: utils.DockerCompose, command: "docker compose up", lifetime: agentUpAfterRun,
+			result: models.AppError{AppErrorType: models.ErrAppStopped}},
+		{name: "only a compose run is asked", cmdType: utils.Native, command: "pytest -q", lifetime: agentUpFromSetup,
+			result: models.AppError{AppErrorType: models.ErrAppStopped}, end: end},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instr := newInstr(t, tc.lifetime, false, tc.result)
+			instr.runUntilReady = tc.cmdType == utils.DockerCompose
+			instr.composeEnd = tc.end
+			if tc.agent != nil {
+				instr.agentFailure = func() error { return tc.agent }
+			}
+			cfg := instrConfig(instr, tc.cmdType, tc.command)
+			cfg.Path = t.TempDir()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+
+			core, logs := observer.New(zap.InfoLevel)
+			err := New(zap.New(core), instr, stubMockDB{}, nil, nil, nil, cfg).Record(context.Background())
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("returned %v, want %v", err, tc.want)
+			}
+			if utils.ErrCode != tc.wantCode {
+				t.Fatalf("exit code %d, want %d", utils.ErrCode, tc.wantCode)
+			}
+			said := logs.FilterMessageSnippet("test command finished successfully").Len()
+			if tc.want != nil && said != 0 {
+				t.Fatal("keploy said a test command it never ran finished successfully")
+			}
+		})
+	}
+}
+
+// heldComposeInstr is composeInstr with an agent that still holds a mock when
+// the test command has ended: its stream stays open until the capture ends,
+// and it says so.
+type heldComposeInstr struct {
+	*composeInstr
+}
+
+func (h *heldComposeInstr) GetOutgoing(ctx context.Context, _ models.OutgoingOptions) (<-chan *models.Mock, error) {
+	h.record("arm")
+	out := make(chan *models.Mock)
+	go func() {
+		<-ctx.Done()
+		close(out)
+	}()
+	return out, nil
+}
+
+func (h *heldComposeInstr) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogPending}, nil
+}
+
+// A recording that ended short of what the agent held fails either way, and
+// says why from the test command's own exit: compose's 0 for a command it never
+// started names that end, and a command that exited with a code of its own was
+// not one compose never started.
+func TestAComposeDrainGivenUpReadsTheTestCommandsExit(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	neverRan := errors.New("compose never started the app (another of the project's services ended it), though it reported 0")
+	for _, tc := range []struct {
+		name   string
+		result models.AppError
+		want   bool
+	}{
+		{name: "compose reported 0", result: models.AppError{AppErrorType: models.ErrAppStopped}, want: true},
+		{name: "the test command exited 3", result: models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			utils.ClearInterrupted()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+			utils.MarkInterrupted() // the stop
+			instr := newInstr(t, agentUpAfterRun, false, tc.result)
+			instr.runUntilReady = true
+			instr.composeEnd = func(appExit int) error {
+				if appExit == 0 {
+					return neverRan
+				}
+				return nil
+			}
+			held := &heldComposeInstr{composeInstr: instr}
+			cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
+			cfg.Path = t.TempDir()
+			core, logs := observer.New(zap.InfoLevel)
+			returned := make(chan error, 1)
+			go func() {
+				returned <- New(zap.New(core), held, stubMockDB{}, nil, nil, nil, cfg).Record(context.Background())
+			}()
+			if err, early := untilSaid(t, logs, recordDrainWords.saving+"; "+recordDrainWords.stopNow, returned); early {
+				t.Fatalf("Record returned (%v) before its drain offered to stop now", err)
+			}
+			if !utils.MarkInterruptedAgain() { // the user, as told
+				t.Fatal("setup: no offer standing")
+			}
+			err := returnedWithin(t, returned)
+			if err == nil || errors.Is(err, neverRan) != tc.want {
+				t.Fatalf("returned %v, want a failure that names compose never starting it: %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// What the containers say comes before the run's own end: a run that also ended
+// did not run the test command any more for it.
+func TestAComposeEndIsNamedBeforeTheRunsOwnEnd(t *testing.T) {
+	neverRan := errors.New("compose never started the app (another of the project's services ended it), though it reported 0")
+	instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.composeEnd = func(int) error { return neverRan }
+	cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
+	m, ok := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).(*mockService)
+	if !ok {
+		t.Fatal("New did not make a mockService")
+	}
+	ctx, end := context.WithCancelCause(context.Background())
+	end(errors.New("the run's own end"))
+	if got := m.runFailure(ctx, models.AppError{}); !errors.Is(got, neverRan) {
+		t.Fatalf("got %v, want compose's end", got)
+	}
+}
+
 // Under compose the app's exit reaches Record over a channel rather than as
 // Run's return value, so a panic inside Run has to still deliver one. It does
 // not on its own: utils.Recover swallows the panic instead of re-panicking, so
@@ -601,7 +867,6 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 // break out. The native branch has no such hazard: Run is called inline there,
 // and a panic simply propagates.
 func TestComposePanicInRunStillDeliversAnExit(t *testing.T) {
-	shortAgentBudget(t)
 	instr := newInstr(t, agentUpAfterRun, false, models.AppError{})
 	instr.runPanics = true
 	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.DockerCompose, "docker compose up"))
@@ -620,5 +885,37 @@ func TestComposePanicInRunStillDeliversAnExit(t *testing.T) {
 
 	if utils.ErrCode == 0 {
 		t.Error("a panicking app runner exited keploy cleanly; it must not report success")
+	}
+}
+
+// stalledStartInstr is a compose project whose agent never answers, and whose
+// start the watch gives up on (pkg.AgentStartWatcher).
+type stalledStartInstr struct {
+	*composeInstr
+}
+
+func (*stalledStartInstr) WatchAgentStart(context.Context) <-chan error {
+	out := make(chan error, 1)
+	out <- fmt.Errorf("%w: its start took no step across 30 of its beats", pkg.ErrAgentNotReady)
+	return out
+}
+
+// keploy mock's wait for the agent compose starts follows the agent's start:
+// a start that stopped ends it, with that, while the project still runs and
+// the agent never answers; no budget of wall time does.
+func TestComposeStartEndsOnTheAgentsStalledStart(t *testing.T) {
+	instr := &stalledStartInstr{newInstr(t, agentNeverUp, true, models.AppError{})}
+	svc := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr.composeInstr, utils.DockerCompose, "docker compose up"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- svc.Record(ctx) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "did not come up") {
+			t.Fatalf("Record = %v; want the agent's stalled start", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Record waited on an agent whose start had stopped")
 	}
 }

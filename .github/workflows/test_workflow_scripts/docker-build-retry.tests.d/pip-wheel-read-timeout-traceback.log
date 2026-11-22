@@ -1,0 +1,135 @@
+Looking in indexes: http://127.0.0.1:36201/stall/
+Collecting flask==3.1.2
+  Downloading http://127.0.0.1:39529/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+ERROR: Exception:
+Traceback (most recent call last):
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/urllib3/response.py", line 438, in _error_catcher
+    yield
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/urllib3/response.py", line 561, in read
+    data = self._fp_read(amt) if not fp_closed else b""
+           ~~~~~~~~~~~~~^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/urllib3/response.py", line 527, in _fp_read
+    return self._fp.read(amt) if amt is not None else self._fp.read()
+           ~~~~~~~~~~~~~^^^^^
+  File "/usr/lib64/python3.14/http/client.py", line 494, in read
+    s = self.fp.read(amt)
+  File "/usr/lib64/python3.14/socket.py", line 729, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+TimeoutError: timed out
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/cli/base_command.py", line 106, in _run_wrapper
+    status = _inner_run()
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/cli/base_command.py", line 97, in _inner_run
+    return self.run(options, args)
+           ~~~~~~~~^^^^^^^^^^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/cli/req_command.py", line 67, in wrapper
+    return func(self, options, args)
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/commands/install.py", line 386, in run
+    requirement_set = resolver.resolve(
+        reqs, check_supported_wheels=not options.target_dir
+    )
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/resolver.py", line 95, in resolve
+    result = self._result = resolver.resolve(
+                            ~~~~~~~~~~~~~~~~^
+        collected.requirements, max_rounds=limit_how_complex_resolution_can_be
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/resolvelib/resolvers.py", line 546, in resolve
+    state = resolution.resolve(requirements, max_rounds=max_rounds)
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/resolvelib/resolvers.py", line 397, in resolve
+    self._add_to_criteria(self.state.criteria, r, parent=None)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/resolvelib/resolvers.py", line 173, in _add_to_criteria
+    if not criterion.candidates:
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/resolvelib/structs.py", line 156, in __bool__
+    return bool(self._sequence)
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 174, in __bool__
+    return any(self)
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 162, in <genexpr>
+    return (c for c in iterator if id(c) not in self._incompatible_ids)
+                       ^^^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 53, in _iter_built
+    candidate = func()
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/factory.py", line 187, in _make_candidate_from_link
+    base: Optional[BaseCandidate] = self._make_base_candidate_from_link(
+                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        link, template, name, version
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/factory.py", line 233, in _make_base_candidate_from_link
+    self._link_candidate_cache[link] = LinkCandidate(
+                                       ~~~~~~~~~~~~~^
+        link,
+        ^^^^^
+    ...<3 lines>...
+        version=version,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 304, in __init__
+    super().__init__(
+    ~~~~~~~~~~~~~~~~^
+        link=link,
+        ^^^^^^^^^^
+    ...<4 lines>...
+        version=version,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 159, in __init__
+    self.dist = self._prepare()
+                ~~~~~~~~~~~~~^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 236, in _prepare
+    dist = self._prepare_distribution()
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 315, in _prepare_distribution
+    return preparer.prepare_linked_requirement(self._ireq, parallel_builds=True)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/operations/prepare.py", line 527, in prepare_linked_requirement
+    return self._prepare_linked_requirement(req, parallel_builds)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/operations/prepare.py", line 598, in _prepare_linked_requirement
+    local_file = unpack_url(
+        link,
+    ...<4 lines>...
+        hashes,
+    )
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/operations/prepare.py", line 170, in unpack_url
+    file = get_http_url(
+        link,
+    ...<2 lines>...
+        hashes=hashes,
+    )
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/operations/prepare.py", line 111, in get_http_url
+    from_path, content_type = download(link, temp_dir.path)
+                              ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/network/download.py", line 148, in __call__
+    for chunk in chunks:
+                 ^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_internal/network/utils.py", line 65, in response_chunks
+    for chunk in response.raw.stream(
+                 ~~~~~~~~~~~~~~~~~~~^
+        chunk_size,
+        ^^^^^^^^^^^
+    ...<22 lines>...
+        decode_content=False,
+        ^^^^^^^^^^^^^^^^^^^^^
+    ):
+    ^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/urllib3/response.py", line 622, in stream
+    data = self.read(amt=amt, decode_content=decode_content)
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/urllib3/response.py", line 560, in read
+    with self._error_catcher():
+         ~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/var/tmp/docker-build-retry-capture.aoBzGa/pip-25.0.1/lib64/python3.14/site-packages/pip/_vendor/urllib3/response.py", line 443, in _error_catcher
+    raise ReadTimeoutError(self._pool, None, "Read timed out.")
+pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPConnectionPool(host='127.0.0.1', port=39529): Read timed out.

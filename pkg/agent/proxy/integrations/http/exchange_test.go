@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/sync/errgroup"
@@ -82,14 +83,58 @@ const noMockAnswer = "HTTP/1.1 502 Bad Gateway"
 // decodeHTTP returns ErrMockNotMatched.
 func startDecode(t *testing.T, first string, proxy net.Conn) <-chan error {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	return runDecode(t, proxy, func(ctx context.Context) error {
+		return h.decodeHTTP(ctx, []byte(first), proxy, nil, &mockMemDb{}, models.OutgoingOptions{})
+	})
+}
+
+// runDecode runs decode, a decodeHTTP serving the proxy's end of a connection,
+// and returns what it returns. The test's cleanup stops it
+// (startDecodeUntilStopped) before the test ends, whether the test read its
+// result or failed first, and then closes that end.
+func runDecode(t *testing.T, proxy net.Conn, decode func(ctx context.Context) error) <-chan error {
+	t.Helper()
 	done := make(chan error, 1)
-	go func() {
-		done <- h.decodeHTTP(ctx, []byte(first), proxy, nil, &mockMemDb{}, models.OutgoingOptions{})
-	}()
+	stop := startDecodeUntilStopped(t, func(ctx context.Context) error {
+		err := decode(ctx)
+		done <- err
+		return err
+	})
+	t.Cleanup(func() {
+		stop()
+		_ = proxy.Close()
+	})
 	return done
+}
+
+// startDecodeUntilStopped runs decode, a decodeHTTP, and returns what stops it:
+// it cancels decode's context and returns once decodeHTTP has returned. That is
+// once the goroutine decodeHTTP started has ended too, its read of the
+// connection ended by the context's end, so nothing it started logs through
+// the test's logger after the test. A test that only cancelled the context,
+// and did not wait, left decodeHTTP to log after the test had ended, racing
+// testing's cleanup (a DATA RACE under go test -race); decodeHTTP itself
+// returned at once then, and left that goroutine blocked on the connection.
+// The test's cleanup stops it too, for a test that fails before it does.
+func startDecodeUntilStopped(t *testing.T, decode func(ctx context.Context) error) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		_ = decode(ctx)
+	}()
+	stop = func() {
+		cancel()
+		select {
+		case <-returned:
+		case <-time.After(time.Minute): // the bound only turns a hang into a failure
+			t.Error("decodeHTTP did not return once its context was cancelled")
+		}
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 func wantMockMiss(t *testing.T, done <-chan error) {
@@ -217,10 +262,10 @@ func TestARequestAfterEmptyLinesIsParsed(t *testing.T) {
 		send([]byte("\r\n"), now, now)
 		send([]byte("\r\n"+req), now, now)
 		var finalReq []byte
-		if err := h.readRequestV2(context.Background(), stream, &finalReq); err != nil || string(finalReq) != req {
+		if err := h.readRequestV2(stream, &finalReq); err != nil || string(finalReq) != req {
 			t.Fatalf("readRequestV2 = (%q, %v), want the request from its request line: %q", finalReq, err, req)
 		}
-		m, err := h.buildHTTPMock(&FinalHTTP{Req: finalReq, Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"),
+		m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: finalReq, Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"),
 			ReqTimestampMock: now, ResTimestampMock: now}, 443, "test-conn", models.OutgoingOptions{})
 		if err != nil || m == nil || m.Spec.HTTPReq == nil || m.Spec.HTTPReq.Body != "hello" {
 			t.Fatalf("buildHTTPMock = (%+v, %v), want a mock of the request", m, err)
@@ -243,6 +288,9 @@ func TestARequestAfterEmptyLinesIsParsed(t *testing.T) {
 func TestHandleChunkedResponsesHandsOverAfterAProtocolSwitch(t *testing.T) {
 	for _, c := range []struct{ method, head string }{
 		{"GET", "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"},
+		// net/http frames a 101 as its head whatever its fields say.
+		{"GET", "HTTP/1.1 101 Switching Protocols\r\nContent-Length: 5\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n"},
+		{"GET", "HTTP/1.1 101 Switching Protocols\r\nTransfer-Encoding: chunked\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n"},
 		{"CONNECT", "HTTP/1.1 200 Connection Established\r\n\r\n"},
 	} {
 		dest := newScriptedConn() // the upgraded stream: nothing more yet
@@ -293,7 +341,7 @@ func TestReadResponseV2ReadsPastAHundredContinueInItsOwnRead(t *testing.T) {
 	send([]byte("hello"), now, now)
 	finalResp := []byte("HTTP/1.1 100 Continue\r\n\r\n") // the first read, already taken by recordV2
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(context.Background(), stream, &finalResp, "POST"); done <- err }()
+	go func() { _, err := h.readResponseV2(stream, &finalResp, "POST"); done <- err }()
 	select {
 	case err := <-done:
 		if err != nil || string(finalResp) != "HTTP/1.1 100 Continue\r\n\r\n"+final {
@@ -324,10 +372,71 @@ func encodeHarness(t *testing.T, first string, upstream func(net.Conn)) (app net
 	gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "test-conn")
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	d := make(chan error, 1)
+	returned := make(chan struct{})
 	go func() {
+		defer close(returned)
 		d <- h.encodeHTTP(gctx, []byte(first), proxyClient, proxyDest, out, models.OutgoingOptions{}, nil)
 	}()
+	// As in runDecode, and registered after cancel so it runs before it: the
+	// proxy's ends are closed and encodeHTTP waited for with its context
+	// live, whether the test read its result or failed first. encodeHTTP
+	// returns on the result its forwarding goroutine sends before that
+	// goroutine drains its recorder, which logs through the test's logger, so
+	// the errgroup that goroutine runs in is waited for as well.
+	t.Cleanup(func() {
+		_ = proxyClient.Close()
+		_ = proxyDest.Close()
+		<-returned
+		_ = g.Wait()
+	})
 	return app, d, out
+}
+
+// A recording waits for a keep-alive connection's next request on a small
+// read (pUtil.WaitReadSize, as the old loop read): the read holds its buffer
+// for as long as the connection is idle, which for a client's pool is hours.
+func TestEncodeHTTPWaitsForTheNextRequestOnASmallRead(t *testing.T) {
+	out := make(chan *models.Mock, 4)
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.SetOutputChannel(out)
+		t.Cleanup(func() { mgr.SetOutputChannel(make(chan<- *models.Mock, 1)) })
+	}
+	app, proxyClient := tcpPair(t)
+	up, proxyDest := tcpPair(t)
+	go func() {
+		_ = readUntil(up, "\r\n\r\n", time.Minute)
+		_, _ = up.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	}()
+	conn := &readWatchedConn{Conn: proxyClient, reading: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	g, gctx := errgroup.WithContext(ctx)
+	gctx = context.WithValue(gctx, models.ErrGroupKey, g)
+	gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "test-conn")
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		_ = h.encodeHTTP(gctx, []byte("GET /x HTTP/1.1\r\nHost: up\r\n\r\n"), conn, proxyDest, out, models.OutgoingOptions{}, nil)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = proxyClient.Close()
+		_ = proxyDest.Close()
+		<-returned
+		_ = g.Wait()
+	})
+	// The bounds below only turn a hang into a failure.
+	if got := readUntil(app, "\r\n\r\nok", time.Minute); !strings.HasSuffix(got, "\r\n\r\nok") {
+		t.Fatalf("the app got %q", got)
+	}
+	select {
+	case <-conn.reading: // waiting for the next request
+	case <-time.After(time.Minute):
+		t.Fatal("encodeHTTP did not read on for the next request")
+	}
+	if got := conn.waitSize.Load(); got != pUtil.WaitReadSize {
+		t.Fatalf("encodeHTTP waits for the next request on a %d-byte read, want pUtil.WaitReadSize (%d)", got, pUtil.WaitReadSize)
+	}
 }
 
 // A mock recorded after an interim response is the final response, and it is

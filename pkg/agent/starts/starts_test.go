@@ -1,6 +1,10 @@
 package starts
 
 import (
+	"os"
+	"os/exec"
+	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -156,13 +160,13 @@ func TestReplayBindsEachStartToItsOwnBootAndHidesTheOthers(t *testing.T) {
 	f.spawn(100, 1, at(0), "orders.test")
 	r.Begin(100, "e2e/orders", "/r/e2e/orders", true, at(10))
 	f.spawn(101, 100, at(20), "shop")
-	rank, universe, ok := r.View(101, at(30))
+	rank, universe, ok, _ := r.View(101, at(30))
 	if !ok || rank["boot-inr"] != 2 || hasAny(rank, "boot-usd", "boot-eur") {
 		t.Fatalf("TestMain start view = %v", rank)
 	}
 	r.Begin(100, "orders.TestReload", "/r/e2e/orders", false, at(100))
 	f.spawn(102, 100, at(150), "shop")
-	rank, _, _ = r.View(102, at(160))
+	rank, _, _, _ = r.View(102, at(160))
 	if rank["boot-usd"] != 2 || hasAny(rank, "boot-inr", "boot-eur") {
 		t.Fatalf("restart view = %v", rank)
 	}
@@ -175,9 +179,51 @@ func TestReplayBindsEachStartToItsOwnBootAndHidesTheOthers(t *testing.T) {
 	if _, ok := universe["boot-eur"]; !ok {
 		t.Fatal("the universe must list every recorded name so unlisted ones are hidden")
 	}
-	rank, _, _ = r.View(101, at(170))
+	rank, _, _, _ = r.View(101, at(170))
 	if rank["pen-old"] != 1 || rank["boot-inr"] != 2 || hasAny(rank, "book") {
 		t.Fatalf("old shop during the test sees only this test's mocks and its own boot: %v", rank)
+	}
+}
+
+// A call owns the recordings its open test's mapping names, from whichever
+// start: not a boot's, not another test's, and none with no test open.
+func TestOwnsIsTheOpenTestsMapping(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	if _, known := r.Owns(101, "pen-old"); known {
+		t.Fatal("a registry with no table knows no view")
+	}
+	r.SetTable("/r", map[string]models.SetTable{
+		"e2e/orders": {
+			Boots: map[string][]string{"shop#1": {"boot-inr"}},
+			Tests: map[string][]models.Owned{
+				"orders.TestReload": {{Name: "pen-old", Start: "shop#1"}, {Name: "pen-new", Start: "shop#1@orders.TestReload"}},
+				"orders.TestCreate": {{Name: "book", Start: "shop#1"}},
+			},
+		},
+	})
+	f.spawn(100, 1, at(0), "orders.test")
+	r.Begin(100, "e2e/orders", "/r/e2e/orders", true, at(10))
+	f.spawn(101, 100, at(20), "shop")
+	if owned, known := r.Owns(101, "pen-old"); owned || !known {
+		t.Fatalf("no test open: owned %v known %v; want not owned, known", owned, known)
+	}
+	if _, known := r.Owns(999, "pen-old"); known {
+		t.Fatal("with no test open a pid of no worker has no view")
+	}
+	r.Begin(100, "orders.TestReload", "/r/e2e/orders", false, at(100))
+	for name, want := range map[string]bool{"pen-old": true, "pen-new": true, "boot-inr": false, "book": false, "unmapped": false} {
+		if owned, known := r.Owns(101, name); owned != want || !known {
+			t.Errorf("Owns(%q) = %v, %v; want %v, true", name, owned, known, want)
+		}
+		// A pid of no worker is the one open test's (attribute).
+		if owned, known := r.Owns(999, name); owned != want || !known {
+			t.Errorf("Owns(999, %q) = %v, %v; want %v, true", name, owned, known, want)
+		}
+	}
+	r.End(100, "orders.TestReload", false, at(150))
+	if owned, _ := r.Owns(101, "pen-old"); owned {
+		t.Fatal("an ended test owns nothing")
 	}
 }
 
@@ -189,7 +235,7 @@ func TestAnUnrecordedStartFallsBackToTheSuiteStartOfTheSameProgram(t *testing.T)
 	r.Begin(100, "e2e/orders", "/r/e2e/orders", true, at(10))
 	r.Begin(100, "orders.TestNew", "/r/e2e/orders", false, at(20))
 	f.spawn(101, 100, at(30), "shop")
-	rank, _, _ := r.View(101, at(40))
+	rank, _, _, _ := r.View(101, at(40))
 	if rank["boot"] != 2 {
 		t.Fatalf("view = %v", rank)
 	}
@@ -202,7 +248,7 @@ func TestSetsMatchByPathEndingWhenTheCheckoutMoved(t *testing.T) {
 	f.spawn(100, 1, at(0), "orders.test")
 	r.Begin(100, "e2e/orders", "/ci/build/repo/e2e/orders", true, at(10))
 	f.spawn(101, 100, at(20), "shop")
-	if rank, _, ok := r.View(101, at(30)); !ok || rank["b"] != 2 {
+	if rank, _, ok, _ := r.View(101, at(30)); !ok || rank["b"] != 2 {
 		t.Fatalf("view = %v %v", rank, ok)
 	}
 }
@@ -212,16 +258,36 @@ func TestOnlyOpenTestInTheRunServesAnAppUnderTheRunner(t *testing.T) {
 	r := New(f, 0)
 	r.SetTable("/r", map[string]models.SetTable{"web": {
 		Boots: map[string][]string{"server#1": {"boot"}},
-		Tests: map[string][]models.Owned{"login": {{Name: "auth", Start: "server#1"}}},
+		Tests: map[string][]models.Owned{"login": {{Name: "auth", Start: "server#1"}}, "cart": {{Name: "add", Start: "server#1"}}},
 	}})
 	f.spawn(10, 1, at(0), "node")
 	r.Begin(10, "web", "/r/web", true, at(1))
 	f.spawn(11, 10, at(5), "server")
 	f.spawn(20, 10, at(6), "node")
+	f.spawn(30, 10, at(7), "node")
 	r.Begin(20, "login", "/r/web", false, at(50))
-	rank, _, _ := r.View(11, at(60))
-	if rank["auth"] != 1 {
+	rank, _, _, _ := r.View(11, at(60))
+	if rank["auth"] != 1 || hasAny(rank, "add") {
 		t.Fatalf("the app under the runner must see the test open in the worker: %v", rank)
+	}
+
+	// With two tests open in two workers, the runner's app cannot be told
+	// which one its call is for: it is served neither test's mocks, has the
+	// runner's scope, and owns no recording.
+	r.Begin(30, "cart", "/r/web", false, at(70))
+	if rank, _, ok, err := r.View(11, at(80)); err != nil || !ok || hasAny(rank, "auth", "add") {
+		t.Fatalf("with login and cart open the runner's app was shown %v (ok %v, err %v); want neither test's mocks", rank, ok, err)
+	}
+	if got := r.Scope(11); got != "w10" {
+		t.Fatalf("with login and cart open the runner's app has scope %q, want the runner's w10", got)
+	}
+	if owned, known := r.Owns(11, "auth"); owned || !known {
+		t.Fatalf("with login and cart open Owns(11, auth) = %v, %v; want false, true", owned, known)
+	}
+
+	r.End(20, "login", false, at(90))
+	if rank, _, _, _ := r.View(11, at(100)); rank["add"] != 1 || hasAny(rank, "auth") {
+		t.Fatalf("with cart alone open the runner's app must see cart's mocks: %v", rank)
 	}
 }
 
@@ -296,5 +362,96 @@ func TestOnMarkRunsOnceWhenTheFirstAppIsMarked(t *testing.T) {
 	case <-calls:
 		t.Fatal("the hook runs only for the first mark")
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestStartIsTheRecordedStartOfTheMarksSet(t *testing.T) {
+	r := New(newFake(), time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {Start: t0}, "b": {}})
+	r.Begin(7, "s", "/r/a", true, at(0))
+	if set, got := r.Start(7, ""); set != "a" || !got.Equal(t0) {
+		t.Fatalf("worker's set start = %q %v", set, got)
+	}
+	if set, got := r.Start(0, "/r/a"); set != "a" || !got.Equal(t0) {
+		t.Fatalf("dir's set start = %q %v", set, got)
+	}
+	if set, got := r.Start(0, "/r/b"); set != "b" || !got.IsZero() {
+		t.Fatalf("set without a start = %q %v", set, got)
+	}
+	if set, got := r.Start(9, "/elsewhere"); set != "" || !got.IsZero() {
+		t.Fatalf("no set = %q %v", set, got)
+	}
+}
+
+func TestLiveNamesTheSetsWithASuiteOrATestOpen(t *testing.T) {
+	r := New(newFake(), time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {}, "b": {}, "c": {}})
+	if got := r.Live(); len(got) != 0 {
+		t.Fatalf("live before any mark: %v", got)
+	}
+	r.Begin(7, "/r/a", "/r/a", true, at(0))
+	r.Begin(8, "t1", "/r/b", false, at(1))
+	r.Begin(9, "t2", "/elsewhere", false, at(1))
+	if got := r.Live(); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("live = %v", got)
+	}
+	r.End(8, "t1", false, at(2))
+	if got := r.Live(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("a set whose only test ended is still live: %v", got)
+	}
+	r.Begin(7, "t3", "", false, at(3))
+	r.End(7, "t3", false, at(4))
+	if got := r.Live(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("a set whose suite is open is not live: %v", got)
+	}
+	r.End(7, "/r/a", true, at(5))
+	if got := r.Live(); len(got) != 0 {
+		t.Fatalf("live after every suite ended: %v", got)
+	}
+}
+
+func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
+	f := newFake()
+	r := New(f, time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {}, "b": {}})
+	f.spawn(7, 1, at(0), "/tmp/a.test")
+	r.Begin(7, "/r/a", "/r/a", true, at(1))
+	r.Begin(8, "/r/b", "/r/b", true, at(1))
+	if got := r.Live(); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("live = %v", got)
+	}
+	delete(f.born, 7)
+	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("a runner that died without ending its suite still holds its set: %v", got)
+	}
+	f.spawn(7, 1, at(5), "/tmp/other")
+	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
+	}
+}
+
+// ParentOf reads this host's process table: on Linux and on macOS (which has
+// no /proc) a process this test starts has this test for its parent, this
+// test has its own parent, and a pid no process holds has none.
+func TestParentOfReadsTheHostsProcessTable(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("a process's parent is read on linux and darwin only")
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if ppid, ok := ParentOf(uint32(cmd.Process.Pid)); !ok || ppid != uint32(os.Getpid()) {
+		t.Fatalf("the parent of a process this test started is %d (%v), want this test's %d", ppid, ok, os.Getpid())
+	}
+	if ppid, ok := ParentOf(uint32(os.Getpid())); !ok || ppid != uint32(os.Getppid()) {
+		t.Fatalf("this test's parent is %d (%v), want %d", ppid, ok, os.Getppid())
+	}
+	if ppid, ok := ParentOf(4000000000); ok {
+		t.Fatalf("a pid no process holds has the parent %d", ppid)
 	}
 }

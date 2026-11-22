@@ -97,11 +97,17 @@ Linter is `golangci-lint` with config schema v2, at `.golangci.yml`:
 
 - Enabled linters: `govet`, `staticcheck`, `errcheck`, `ineffassign`, `unused`
 - Formatters: `gofmt`, `goimports`
-- Paths excluded from linters: the generated eBPF Go files (currently `pkg/agent/hooks/bpf_arm64_bpfel.go` and `pkg/agent/hooks/bpf_x86_bpfel.go`) and `pkg/service/utgen`
+- Generated files (Go's `// Code generated ... DO NOT EDIT.` header, such as the eBPF Go files) are not linted; no path is excluded.
+- CI lints the Linux build of the root module: files built only for Windows or macOS, files behind a build tag such as `composelib`, and the lanes' own Go modules under `.github/` are not linted.
+- In what it lints, CI fails on any issue on a line your change adds or edits. Issues already on lines you leave alone are not reported: the code base still holds older ones.
+
+Check what CI checks (on Linux, from your branch, with `origin/main` fetched):
 
 ```bash
-golangci-lint run
+golangci-lint run --new-from-merge-base=origin/main
 ```
+
+A bare `golangci-lint run` also lists the older issues.
 
 ### Commit hygiene
 
@@ -198,7 +204,7 @@ for the canonical report-parsing loop.
 - **Config access** — services read from the `*config.Config` wired in `cli/provider/`. Don't call `os.Getenv` from `pkg/service/` or `pkg/core/`; add a field to `config.Config`, parse it in `cmdConfigurator` / `main.go`, thread it in.
 - **Interfaces live where they're consumed** — each `pkg/service/<name>/service.go` defines the small interfaces that package depends on (`TestDB`, `MockDB`, `Telemetry`, `Instrumentation`, ...). Keep them 1–10 methods and role-shaped; concrete implementations live in separate packages (e.g. `pkg/platform/yaml/testdb/`) and are wired in `cli/provider/core_service.go`.
 - **Context-aware I/O** — long-lived flows should use `ctxReader` / `ctxWriter` from `pkg/platform/yaml/yaml.go` so file I/O honors cancellation.
-- **Generated code** — the eBPF Go files `pkg/agent/hooks/bpf_*_bpfel.go` (today: `bpf_arm64_bpfel.go`, `bpf_x86_bpfel.go`) are generated from `.c` sources. Never edit by hand; they're linter-excluded in `.golangci.yml`. Regenerate via the eBPF toolchain if probe behavior must change.
+- **Generated code** — the eBPF Go files `pkg/agent/hooks/linux/bpf_*_bpfel.go` (today: `bpf_arm64_bpfel.go`, `bpf_x86_bpfel.go`) are generated from `.c` sources. Never edit by hand; golangci-lint skips them by their generated-code header. Regenerate via the eBPF toolchain if probe behavior must change.
 
 ### General Go hygiene (universal rules this codebase follows)
 

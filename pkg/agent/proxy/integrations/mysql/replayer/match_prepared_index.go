@@ -1,21 +1,57 @@
 package replayer
 
 import (
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
-// preparedIndex files the mocks prepared statements are matched against, so
-// matchCommand finds them in the session tier through the store's index
-// (integrations.SessionKeyReader) instead of walking the whole pool for every
-// COM_STMT_PREPARE, COM_STMT_EXECUTE and COM_STMT_CLOSE. In lax mode that tier
-// holds every test's traffic, and a walk per command cost more with every test
-// the set held.
-var preparedIndex = &integrations.MockIndex{Keys: preparedKeys}
+// preparedIndex, queryIndex and executeIndex file the mocks commands are
+// matched against, so matchCommand finds them in the session tier through the
+// store's index (integrations.SessionKeyReader) instead of walking the whole
+// pool for every COM_STMT_PREPARE, COM_STMT_CLOSE and, while no test window is
+// open, COM_QUERY and COM_STMT_EXECUTE. No window is open under exact serving
+// (keploy mock replay), and in keploy test only before a set's first test: a
+// test's window stays open until the next test is staged. In lax mode that
+// tier holds every test's traffic, and a walk per command cost more with
+// every test the set held.
+//
+// Each command reads one index, and a store builds an index on its first
+// walk: preparedIndex files the PREPAREs, the CLOSEs and the PREPAREs
+// recordedQuery looks up (as on main), queryIndex the COM_QUERYs and
+// executeIndex the EXECUTEs that recorded their query. So the first command
+// of a staging that reaches the session tier computes the keys of its own
+// kind of command alone: a COM_QUERY computes no EXECUTE's or PREPARE's
+// statement identity. When one index filed every key, that command built all
+// of them, which cost twice main's whole call at 10,000 staged mocks.
+//
+// Under exact serving the per-test tier leads with every mock the open test
+// owns, and matchCommand walks it whole before each keyed walk of the session
+// tier (the keyed pass, and recordedQuery's look-up of a PREPARE after its
+// look-up in that tier). So the test's own mocks are filed under no key
+// (fileNone): a keyed walk reads the staged mocks alone, and a test view
+// computes no statement identity of the mocks it owns. Keploy mock replay can
+// have one test own a whole set, and the view's index of every key of every
+// mock it owned cost the test's first EXECUTE two to four times main's whole
+// call.
+//
+// The one key matchCommand reads before the per-test tier,
+// keyExecuteUnnamed, is read through unnamedExecIndex, which computes no
+// statement identity of any mock and files the open test's own mocks under no
+// key either: an EXECUTE the test owns is read in the per-test tier, ahead of
+// every staged one.
+var (
+	preparedIndex    = &integrations.MockIndex{Keys: preparedKeys, OwnedKeys: fileNone}
+	queryIndex       = &integrations.MockIndex{Keys: queryKeys, OwnedKeys: fileNone}
+	executeIndex     = &integrations.MockIndex{Keys: executeKeys, OwnedKeys: fileNone}
+	unnamedExecIndex = &integrations.MockIndex{Keys: unnamedExecKeys, OwnedKeys: fileNone}
+)
 
 const (
 	// keyPrepare + a statement's identity (sqlStatementIdentity): a mock with a
@@ -28,33 +64,106 @@ const (
 	// keyClose: a mock with a COM_STMT_CLOSE request, the only requests a
 	// live CLOSE scores against.
 	keyClose = "C"
+	// keyQuery + a statement's identity (sqlStatementIdentity): a mock with a
+	// COM_QUERY request of that statement. A recorded COM_QUERY is an exact
+	// match for a live one only when the two identities are equal
+	// (matchQueryLive).
+	keyQuery = "Q\x00"
+	// keyExecute + the case folding (foldKey) of the identity of the query a
+	// COM_STMT_EXECUTE request recorded (mysql.PacketBundle.StoredQuery): a
+	// mock with such a request. A recorded EXECUTE matches a live one on its
+	// query, definitively or for the FIFO fallback, only when the two
+	// identities are equal ignoring case (matchStmtExecutePacketQueryAware).
+	keyExecute = "E\x00"
+	// keyExecuteUnnamed: a mock with a COM_STMT_EXECUTE request that recorded
+	// no query. Its statement is the one its PREPARE in the pool names, which
+	// no key of its own can say, so a live EXECUTE is matched by the full scan
+	// while the staged mocks of the session tier hold one. One the open test
+	// owns is read in the per-test tier, ahead of every staged mock.
+	keyExecuteUnnamed = "E?"
 )
 
 var (
 	comStmtPrepare = mysql.CommandStatusToString(mysql.COM_STMT_PREPARE)
 	comStmtClose   = mysql.CommandStatusToString(mysql.COM_STMT_CLOSE)
+	comQuery       = mysql.CommandStatusToString(mysql.COM_QUERY)
+	comStmtExecute = mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE)
 )
+
+// appendKey appends key to keys unless keys holds it.
+func appendKey(keys []string, key string) []string {
+	if slices.Contains(keys, key) {
+		return keys
+	}
+	return append(keys, key)
+}
+
+// foldKey is s case-folded so that foldKey(a) == foldKey(b) exactly when
+// strings.EqualFold(a, b): each rune, an invalid byte read as
+// utf8.RuneError as EqualFold reads it, becomes the smallest rune of its
+// simple case folding orbit (unicode.SimpleFold). An ASCII letter's is its
+// upper case.
+func foldKey(s string) string {
+	ascii, upper := true, true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= utf8.RuneSelf {
+			ascii = false
+			break
+		}
+		if 'a' <= c && c <= 'z' {
+			upper = false
+		}
+	}
+	if ascii {
+		if upper {
+			return s
+		}
+		b := []byte(s)
+		for i, c := range b {
+			if 'a' <= c && c <= 'z' {
+				b[i] = c - ('a' - 'A')
+			}
+		}
+		return string(b)
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < least {
+				least = f
+			}
+		}
+		b.WriteRune(least)
+	}
+	return b.String()
+}
 
 func prepEntryKey(connID string, stmtID uint32) string {
 	return keyPrepEntry + connID + "\x00" + strconv.FormatUint(uint64(stmtID), 10)
 }
 
-// preparedKeys is preparedIndex's Keys. Each key depends only on the mock's
-// recording and its Lifetime, which do not change while it is pooled.
+// preparedKeys is preparedIndex's Keys: a PREPARE's statement, a CLOSE, and
+// the entry recordedQuery looks up. Each key, here and in queryKeys,
+// executeKeys and unnamedExecKeys, depends only on the mock's recording and
+// its Lifetime, which do not change while it is pooled.
 func preparedKeys(m *models.Mock) []string {
 	if m == nil || m.Kind != models.MySQL {
 		return nil
 	}
 	var keys []string
 	closeFiled := false
-	for _, r := range m.Spec.MySQLRequests {
-		h := r.PacketBundle.Header
+	for i := range m.Spec.MySQLRequests {
+		r := &m.Spec.MySQLRequests[i]
+		h := r.Header
 		if h == nil {
 			continue
 		}
 		switch h.Type {
 		case comStmtPrepare:
-			if sp, ok := r.PacketBundle.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
+			if sp, ok := r.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
 				keys = append(keys, keyPrepare+sqlStatementIdentity(sp.Query))
 			}
 		case comStmtClose:
@@ -70,6 +179,74 @@ func preparedKeys(m *models.Mock) []string {
 	return keys
 }
 
+// queryKeys is queryIndex's Keys: each COM_QUERY's statement.
+func queryKeys(m *models.Mock) []string {
+	if m == nil || m.Kind != models.MySQL {
+		return nil
+	}
+	var keys []string
+	for i := range m.Spec.MySQLRequests {
+		r := &m.Spec.MySQLRequests[i]
+		if r.Header == nil || r.Header.Type != comQuery {
+			continue
+		}
+		if qp, ok := r.Message.(*mysql.QueryPacket); ok && qp != nil {
+			keys = appendKey(keys, keyQuery+sqlStatementIdentity(qp.Query))
+		}
+	}
+	return keys
+}
+
+// executeKeys is executeIndex's Keys: the query each COM_STMT_EXECUTE
+// recorded, case-folded. An EXECUTE that recorded none is unnamedExecKeys'.
+func executeKeys(m *models.Mock) []string {
+	if m == nil || m.Kind != models.MySQL {
+		return nil
+	}
+	var keys []string
+	for i := range m.Spec.MySQLRequests {
+		r := &m.Spec.MySQLRequests[i]
+		if r.Header == nil || r.Header.Type != comStmtExecute {
+			continue
+		}
+		if ep, ok := r.Message.(*mysql.StmtExecutePacket); ok && ep != nil {
+			if q := r.StoredQuery(); q != "" {
+				keys = appendKey(keys, keyExecute+foldKey(sqlStatementIdentity(q)))
+			}
+		}
+	}
+	return keys
+}
+
+// executeUnnamed reports whether r is a COM_STMT_EXECUTE request that recorded
+// no query: unnamedExecKeys files its mock under keyExecuteUnnamed.
+func executeUnnamed(r *mysql.Request) bool {
+	if r.Header == nil || r.Header.Type != comStmtExecute {
+		return false
+	}
+	ep, ok := r.Message.(*mysql.StmtExecutePacket)
+	return ok && ep != nil && r.StoredQuery() == ""
+}
+
+// unnamedExecKeys is unnamedExecIndex's Keys: keyExecuteUnnamed for a mock
+// that holds an EXECUTE recorded without its query, no key otherwise. It
+// reads each request's type, and the stored query of an EXECUTE alone.
+func unnamedExecKeys(m *models.Mock) []string {
+	if m == nil || m.Kind != models.MySQL {
+		return nil
+	}
+	for i := range m.Spec.MySQLRequests {
+		if executeUnnamed(&m.Spec.MySQLRequests[i]) {
+			return []string{keyExecuteUnnamed}
+		}
+	}
+	return nil
+}
+
+// fileNone is the OwnedKeys of every index here: it files no mock under any
+// key.
+func fileNone(*models.Mock) []string { return nil }
+
 // recordedPrepEntry reports the entry buildRecordedPrepIndex makes of m, and
 // the recorded connection it files it under, if it makes one: a MySQL mock
 // that is not a session or config one, whose first request is a
@@ -77,16 +254,6 @@ func preparedKeys(m *models.Mock) []string {
 // COM_STMT_PREPARE_OK.
 func recordedPrepEntry(m *models.Mock) (string, prepEntry, bool) {
 	if m == nil || m.Kind != models.MySQL {
-		return "", prepEntry{}, false
-	}
-	// MySQL matcher now reads the typed Lifetime with a defensive
-	// fallback to the raw metadata tag. This handles both the
-	// fully-migrated path (DeriveLifetime has run, Lifetime is
-	// set) and the edge case where a mock reached the pool
-	// without DeriveLifetime having set Lifetime — the raw tag
-	// still says config so we skip it correctly.
-	if m.TestModeInfo.Lifetime == models.LifetimeSession ||
-		(m.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(m)) {
 		return "", prepEntry{}, false
 	}
 	if len(m.Spec.MySQLResponses) == 0 || len(m.Spec.MySQLRequests) == 0 {
@@ -104,6 +271,19 @@ func recordedPrepEntry(m *models.Mock) (string, prepEntry, bool) {
 	}
 	prepQuery := strings.TrimSpace(sp.Query)
 	if prepQuery == "" {
+		return "", prepEntry{}, false
+	}
+	// MySQL matcher now reads the typed Lifetime with a defensive
+	// fallback to the raw metadata tag. This handles both the
+	// fully-migrated path (DeriveLifetime has run, Lifetime is
+	// set) and the edge case where a mock reached the pool
+	// without DeriveLifetime having set Lifetime — the raw tag
+	// still says config so we skip it correctly. It is checked last:
+	// the tag is a map lookup, and only a PREPARE mock needs it. Every
+	// check here is a condition the entry needs, so their order does
+	// not change which mocks make one.
+	if m.TestModeInfo.Lifetime == models.LifetimeSession ||
+		(m.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(m)) {
 		return "", prepEntry{}, false
 	}
 	connID := ""

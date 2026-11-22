@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #
 # Schema-based request-body noise detection — end-to-end CI test using the real
@@ -20,6 +26,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #             agent stopped, the replay's context left live) leaves mocks.yaml
 #             byte-identical and creates no mappings.yaml; a full replay
 #             afterwards passes every test and maps them all.
+#   Phase F — the prune (F1) and the noise write-back (F2) keep, byte for
+#             byte, mock documents this keploy cannot decode (an enterprise
+#             kind, a ConnectionFailure with a field from a newer format) and a
+#             ConnectionFailure it reads; results are unchanged, and the skip
+#             ERROR and the connection-failure WARN name the mock file.
 #
 # Runs inside samples-go/mux-elasticsearch. Expects: $KEPLOY_BIN (named
 # "keploy"), an Elasticsearch reachable at 127.0.0.1:9200, passwordless sudo, Go.
@@ -45,6 +56,9 @@ export ELASTICSEARCH_URL="http://127.0.0.1:9200"
 # keep-alive on the ES client). Off by default so the app's committed
 # recordings stay valid; this pipeline opts in.
 export STAMP_CREATED_AT=1
+# keploy runs under sudo, which hands it and the app only the variables each
+# command names: sudo-rs (Ubuntu 26.04's sudo) ignores -E. STAMP_CREATED_AT is
+# named only while it is set, so that the phases that unset it run without it.
 
 FAILURES=0
 step()  { echo "== $* =="; }
@@ -92,7 +106,7 @@ record_fresh() {
   local n="${1:-1}"
   cleanup
   sudo rm -rf "$SND_PATH"
-  sudo -E env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" \
+  sudo env "PATH=$PATH" "${SUDO_ENV[@]}" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" record -c "./$APP_BIN" --path "$SND_PATH" >"$APP_DIR/record.log" 2>&1 &
   local rec_pid=$!
   local i
@@ -123,7 +137,7 @@ record_fresh() {
 replay() {
   local log="$1"; shift
   cleanup
-  sudo -E env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" \
+  sudo env "PATH=$PATH" "${SUDO_ENV[@]}" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" test -c "./$APP_BIN" --path "$SND_PATH" --delay 10 "$@" >"$log" 2>&1
   local rc=$?
   cleanup
@@ -132,7 +146,7 @@ replay() {
 
 checkout_passed() {  # post-documents testcase passed?
   grep -oE '"testcase id": "[^"]*document[^"]*".*"passed": "[^"]+"' "$1" \
-    | strip_ansi | grep -q '"passed": "true"'
+    | strip_ansi | grep '"passed": "true"' >/dev/null
 }
 # Request-body schema noise is written under the unified `noise:` block as a
 # `req:` list of field paths (this replaced the legacy top-level `req_body_noise:`
@@ -248,7 +262,7 @@ test:
     schemaNoiseStrict: true
 EOF
 replay "$APP_DIR/test_strict.log" --schema-noise-detection --config-path "$STRICT_CFG" --debug
-if grep 'strict req-body match rejected mock' "$APP_DIR/test_strict.log" | grep -q 'body.content'; then
+if grep 'strict req-body match rejected mock' "$APP_DIR/test_strict.log" | grep 'body.content' >/dev/null; then
   pass "strict matching rejected the mock on non-noise drift (body.content)"
 else
   fail "expected strict rejection on body.content"
@@ -388,7 +402,7 @@ else
   cleanup
   # --api-timeout outlasts the agent's shutdown, so doc-4 is still parked when
   # the agent is gone and the listener answers it.
-  sudo -E env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" \
+  sudo env "PATH=$PATH" "${SUDO_ENV[@]}" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" test -c "./$APP_BIN" --path "$SND_PATH" --delay 10 --remove-unused-mocks --api-timeout 30 \
     >"$APP_DIR/test_stopped.log" 2>&1 &
   test_pid=$!
@@ -476,6 +490,157 @@ else
   else
     pass "the full replay after the stop passed all $total_tests tests and mapped every document's test"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# Phase F — the prune and the noise write-back keep, byte for byte, the
+# documents this keploy cannot decode.
+# A recording can hold documents this keploy skips on read: a kind only keploy
+# enterprise reads (hyphenated, skipped at Debug on OSS), or a kind or field
+# from a newer keploy (here a ConnectionFailure carrying a field this keploy's
+# format does not have, which it skips with an ERROR). What a rewrite cannot
+# decode it cannot judge, so both rewrites copy such documents through, in
+# place, and a prune that keeps nothing decodable still keeps them (and so
+# mocks.yaml). A third document, a valid ConnectionFailure, is one this keploy
+# reads but neither replays nor rewrites. Each is spelled as no keploy encoder writes it (spacing, quoting,
+# key order, a comment), so only a verbatim copy keeps it.
+#   F1: a clean --remove-unused-mocks replay of seven documents with the three
+#       appended and an unused mock planted. The planted mock must go (so the
+#       prune ran and rewrote the file), the three must stay byte for byte,
+#       every test must get the result a replay of the same set without them
+#       got, and the skip ERROR and the connection-failure WARN must name the
+#       mock file.
+#   F2: a --schema-noise-detection replay without the prune (the noise
+#       write-back). The learned noise must be written, so the file was
+#       rewritten, and the three must stay byte for byte.
+# ---------------------------------------------------------------------------
+
+# append_undecodable <mocks.yaml> <dir> [plant]: appends the three documents,
+# timed as the file's last mock, and saves each as <dir>/<name>.yaml to compare
+# against later. With "plant", first adds a copy of the doc-7 mock that asks ES
+# for a document no test indexes (as Phase D2 does), which a prune must delete.
+append_undecodable() {
+  sudo rm -rf "$2" && mkdir -p "$2"
+  sudo python3 - "$1" "$2" "${3:-}" <<'PY'
+import os, re, sys
+path, out, plant = sys.argv[1], sys.argv[2], sys.argv[3] == "plant"
+docs = open(path).read().rstrip("\n").split("\n---\n")
+if plant:
+    src = next(d for d in docs if '"title":"doc-7"' in d)
+    docs.append(re.sub(r"(?m)^name: .*$", "name: mock-planted", src, count=1).replace('"title":"doc-7"', '"title":"doc-9"'))
+req, res = re.findall(r"(?m)^    reqTimestampMock: (\S+)\n    resTimestampMock: (\S+)$", "\n".join(docs))[-1]
+added = {
+    "enterprise": "version: api.keploy.io/v1beta1\nkind: Acme-Queue\nname: mock-e2e-enterprise\nspec:\n"
+                  "    metadata:\n        type:   mocks   # only a verbatim copy keeps this spacing and comment\n"
+                  f"    reqTimestampMock: {req}\n",
+    "cf-newer": "version: api.keploy.io/v1beta1\nkind: ConnectionFailure\nname: mock-e2e-cf-newer\nspec:\n"
+                "    address: \"127.0.0.1:9\"\n    phase: connect\n    outcome: refused\n    count: 3\n"
+                f"    reqTimestampMock: {req}\n    resTimestampMock: {res}\n",
+    "cf": "version: api.keploy.io/v1beta1\nkind: ConnectionFailure\nname: mock-e2e-cf\nspec:\n"
+          "    phase: connect   # key order, quoting and this comment survive only a verbatim copy\n"
+          "    outcome: \"refused\"\n    address: \"127.0.0.1:9\"\n"
+          f"    reqTimestampMock: {req}\n    resTimestampMock: {res}\n",
+}
+for name, doc in added.items():
+    open(os.path.join(out, name + ".yaml"), "w").write(doc)
+    docs.append(doc.rstrip("\n"))
+open(path, "w").write("\n---\n".join(docs) + "\n")
+PY
+}
+
+# kept_verbatim <mocks.yaml> <dir>: succeeds when every <dir>/*.yaml is a
+# document of the file, byte for byte, exactly once. Documents are split as
+# keploy's reader splits them; it prints what is missing otherwise.
+kept_verbatim() {
+  sudo python3 - "$1" "$2" <<'PY'
+import glob, os, sys
+path, out = sys.argv[1], sys.argv[2]
+if not os.path.exists(path):
+    print(f"{path} is gone"); sys.exit(1)
+docs, cur, first = [], [], True
+for line in open(path).read().splitlines(keepends=True):
+    if line.strip() == "---":
+        if cur: docs.append("".join(cur)); cur = []
+        first = False
+        continue
+    if first and not cur and line.startswith("#"):
+        continue
+    cur.append(line)
+if cur: docs.append("".join(cur))
+missing = [os.path.basename(f) for f in sorted(glob.glob(os.path.join(out, "*.yaml"))) if docs.count(open(f).read()) != 1]
+if missing:
+    print("not kept byte for byte: " + " ".join(missing)); sys.exit(1)
+PY
+}
+
+# names_file <log> <pattern> <mocks.yaml>: the first log line matching pattern
+# names the mock file (its mock_file field) and it is mocks.yaml.
+names_file() {
+  local named
+  named=$(grep -E "$2" "$1" | head -1 | grep -oE '"mock_file": "[^"]*"')
+  named=${named#\"mock_file\": \"}
+  named=${named%\"}
+  [ -n "$named" ] && [ "$(readlink -f "$named")" = "$(readlink -f "$3")" ]
+}
+
+# test_results <plain log>: each test's id and verdict, one per line, sorted.
+test_results() { sed -nE 's/.*"testcase id": "([^"]*)".*"passed": "([^"]+)".*/\1 \2/p' "$1" | sort; }
+
+step "Phase F1 — --remove-unused-mocks keeps the documents this keploy cannot decode"
+record_fresh 7
+mf="$(mock_file)"
+total_tests=$(find "$(dirname "$mf")/tests" -name '*.yaml' | wc -l)
+replay "$APP_DIR/test_undecodable_base.log"
+strip_ansi <"$APP_DIR/test_undecodable_base.log" >"$APP_DIR/test_undecodable_base.plain.log"
+base_results=$(test_results "$APP_DIR/test_undecodable_base.plain.log")
+append_undecodable "$mf" "$APP_DIR/undecodable-f1" plant
+if ! grep -qE '^name:[[:space:]]+mock-planted$' "$mf" || ! kept_verbatim "$mf" "$APP_DIR/undecodable-f1"; then
+  fail "precondition: could not plant the unused mock and append the three documents"
+elif [ "$(echo "$base_results" | grep -c ' true$')" -ne "$total_tests" ]; then
+  fail "precondition: want all $total_tests tests to pass before the documents were appended"
+  while IFS= read -r line; do echo "    $line"; done <<<"$base_results"
+else
+  replay "$APP_DIR/test_undecodable_prune.log" --remove-unused-mocks
+  f1_log="$APP_DIR/test_undecodable_prune.plain.log"
+  strip_ansi <"$APP_DIR/test_undecodable_prune.log" >"$f1_log"
+  if [ "$(test_results "$f1_log")" != "$base_results" ]; then
+    fail "the documents changed the replay's results"
+    diff <(echo "$base_results") <(test_results "$f1_log") | sed 's/^/    /'
+  elif grep -q 'skipping mock pruning' "$f1_log" || sudo grep -qE '^name:[[:space:]]+mock-planted$' "$mf"; then
+    fail "precondition: the prune did not run (the planted unused mock is still there)"
+    grep 'skipping mock pruning' "$f1_log" | sed 's/^/    /'
+  elif ! why=$(kept_verbatim "$mf" "$APP_DIR/undecodable-f1"); then
+    fail "--remove-unused-mocks dropped documents this keploy cannot decode: $why"
+  else
+    pass "the prune deleted the planted unused mock and kept all three documents byte for byte, and every test's result is unchanged"
+  fi
+  if names_file "$f1_log" 'skipping a connection failure mock this keploy cannot replay.*uses field.*count' "$mf"; then
+    pass "the ERROR for the connection failure with an unknown field names the mock file"
+  else
+    fail "want an ERROR that skips the connection failure with the unknown field \"count\" and names $mf"
+  fi
+  if names_file "$f1_log" '1 connection-failure mock in test-set-[0-9]+: keploy .* reads it but cannot replay it' "$mf"; then
+    pass "the WARN about the connection failure this keploy cannot replay names the mock file"
+  else
+    fail "want a WARN that counts the one connection failure read and names $mf"
+  fi
+  grep -E 'connection.failure|Acme-Queue|unknown type' "$f1_log" | sed 's/^/    /'
+fi
+
+step "Phase F2 — the noise write-back keeps the documents this keploy cannot decode"
+export STAMP_CREATED_AT=1
+record_fresh
+mf="$(mock_file)"
+append_undecodable "$mf" "$APP_DIR/undecodable-f2"
+replay "$APP_DIR/test_undecodable_noise.log" --schema-noise-detection
+if ! checkout_passed "$APP_DIR/test_undecodable_noise.log"; then
+  fail "precondition: want the replay to pass with the documents appended"
+elif ! sudo grep -qE '^[[:space:]]*-[[:space:]]+body\.created_at([[:space:]]|$)' "$mf"; then
+  fail "precondition: the noise write-back did not write body.created_at, so it did not rewrite the file"
+elif ! why=$(kept_verbatim "$mf" "$APP_DIR/undecodable-f2"); then
+  fail "the noise write-back dropped documents this keploy cannot decode: $why"
+else
+  pass "the noise write-back wrote body.created_at and kept all three documents byte for byte"
 fi
 
 # ---------------------------------------------------------------------------

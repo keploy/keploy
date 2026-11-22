@@ -20,6 +20,7 @@
 package mockdb
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -655,5 +656,78 @@ postgresV3:
 	}
 	if q.Query.InvocationID != "sha256:abcd:0" {
 		t.Fatalf("Query.InvocationID: want %q, got %q", "sha256:abcd:0", q.Query.InvocationID)
+	}
+}
+
+// nestedBytesQueryMock is a v3 query mock whose row holds a bytea[] cell
+// (a NULL element among its bytes), a record with an int and a bytea
+// field, and a uuid[] cell (each element a [16]uint8, as pgx scans it):
+// elements keploy's stores used to write as a sequence of ints (YAML) or
+// a bare base64 string or array of numbers (JSON), which no replay could
+// encode back for the client.
+func nestedBytesQueryMock() *models.Mock {
+	return &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"type": "mocks", "class": "APP"},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					Class: "APP", Lifetime: "perTest", SQLAstHash: "sha256:blobs",
+					SQLNormalized: "select blobs, rec from t where id=$1",
+					ParamOIDs:     []uint32{20}, InvocationID: "0:0",
+					BindValues: models.PostgresV3Cells{models.NewValueCell(int64(1))},
+					Response: &models.PostgresV3Response{
+						RowDescription: []models.PostgresV3ColumnDescriptor{
+							{Name: "blobs", TypeOID: 1001, TypeSize: -1, TypeMod: -1},
+							{Name: "rec", TypeOID: 2249, TypeSize: -1, TypeMod: -1},
+							{Name: "ids", TypeOID: 2951, TypeSize: -1, TypeMod: -1},
+						},
+						Rows: []models.PostgresV3Cells{{
+							models.NewValueCell([]any{[]byte("ok"), []byte{0xf6, 0x0a}, nil}),
+							models.NewValueCell([]any{int64(1), []byte{0xf6, 0x0a, 0xfb}}),
+							models.NewValueCell([]any{[16]uint8{0xa0, 0xee, 0xbc, 0x99}, [16]uint8{0xb0, 0xee}}),
+						}},
+						CommandComplete: "SELECT 1",
+					},
+				},
+			},
+		},
+	}
+}
+
+// A bytea[] cell, a record's bytea field and a uuid[] cell round-trip
+// through both mock stores, YAML and JSON, as the bytes they are. (A
+// record's int reads back as yaml.v3's generic decode reads a nested int,
+// a Go int, from YAML, and as int64 from JSON.)
+func TestRoundTrip_PostgresV3Query_ArrayAndRecordBytesInBothStores(t *testing.T) {
+	want := nestedBytesQueryMock().Spec.PostgresV3.Query.Response.Rows
+	wantYAML := nestedBytesQueryMock().Spec.PostgresV3.Query.Response.Rows
+	wantYAML[0][1].Value.([]any)[0] = 1
+
+	got := yamlRoundTrip(t, "ArrayAndRecordBytes", nestedBytesQueryMock())
+	if rows := got.Spec.PostgresV3.Query.Response.Rows; !reflect.DeepEqual(rows, wantYAML) {
+		t.Errorf("YAML store: the rows came back as %#v, want %#v", rows, wantYAML)
+	}
+
+	doc, ok, err := EncodeMockJSON(nestedBytesQueryMock(), zap.NewNop())
+	if err != nil || !ok {
+		t.Fatalf("EncodeMockJSON: ok=%v err=%v", ok, err)
+	}
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("json.Marshal(doc): %v", err)
+	}
+	var back pyaml.NetworkTrafficDocJSON
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("json.Unmarshal: %v\n%s", err, body)
+	}
+	mocks, err := DecodeMocksJSON([]*pyaml.NetworkTrafficDocJSON{&back}, zap.NewNop())
+	if err != nil || len(mocks) != 1 {
+		t.Fatalf("DecodeMocksJSON: %d mocks, %v", len(mocks), err)
+	}
+	if rows := mocks[0].Spec.PostgresV3.Query.Response.Rows; !reflect.DeepEqual(rows, want) {
+		t.Errorf("JSON store: the rows came back as %#v, want %#v", rows, want)
 	}
 }

@@ -256,10 +256,11 @@ func TestAgentClient_MisroutedAgentURIReportsTheMisroute(t *testing.T) {
 
 // TestGetMappingsToleratesAnAgentWithoutTheRoute pins the version-skew carve
 // out. /mappings arrived with test-mock mapping (keploy #3715); an older agent
-// image 404s it. GetMappings runs inside the record errgroup, so returning an
-// error for a MISSING ROUTE aborts the entire recording — turning a CLI that is
-// merely ahead of the agent image into a total capture failure. The degraded
-// behaviour (record without mappings) is the correct one.
+// image 404s it. GetMappings runs inside the record errgroup, so any error for
+// a MISSING ROUTE other than models.ErrNoMappingStream aborts the entire
+// recording — turning a CLI that is merely ahead of the agent image into a
+// total capture failure. The degraded behaviour (record without mappings) is
+// the correct one, and ErrNoMappingStream is how the recorder knows to take it.
 func TestGetMappingsToleratesAnAgentWithoutTheRoute(t *testing.T) {
 	// An agent that has no /mappings route at all.
 	srv := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
@@ -271,15 +272,12 @@ func TestGetMappingsToleratesAnAgentWithoutTheRoute(t *testing.T) {
 	grp, gctx := errgroup.WithContext(context.Background())
 	ctx := context.WithValue(gctx, models.ErrGroupKey, grp)
 
-	ch, err := c.GetMappings(ctx, models.IncomingOptions{})
-	if err != nil {
-		t.Fatalf("a missing /mappings route was reported as a failure: %v\n"+
-			"This runs inside the record errgroup, so this error aborts the whole recording.", err)
-	}
-	if ch == nil {
-		t.Fatal("GetMappings returned a nil channel; ranging over it would block forever")
-	}
-	for range ch {
-		t.Fatal("an agent without /mappings yielded a mapping")
+	// models.ErrNoMappingStream, which the recorder takes for a recording
+	// without mappings: any other error aborts the whole recording, and a
+	// channel closed at once reads as the agent ending its stream with
+	// mappings unsaved (pkg/service/record).
+	if _, err := c.GetMappings(ctx, models.IncomingOptions{}); !errors.Is(err, models.ErrNoMappingStream) {
+		t.Fatalf("a missing /mappings route was not told as no mapping stream: %v\n"+
+			"This runs inside the record errgroup, so any other error aborts the whole recording.", err)
 	}
 }

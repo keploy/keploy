@@ -24,9 +24,9 @@ import (
 // however late the scheduler runs any goroutine here: the case under test
 // does not depend on a margin of wall-clock time.
 func TestRunTestSetDrainThatGivesUpLeavesTheWatcherAlone(t *testing.T) {
-	prev := testSetDrainTimeout
-	testSetDrainTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { testSetDrainTimeout = prev })
+	prev := testSetDrainStall
+	testSetDrainStall = 50 * time.Millisecond
+	t.Cleanup(func() { testSetDrainStall = prev })
 
 	h := newPartialRunHarness(t, 2, 0)
 	release := make(chan struct{})

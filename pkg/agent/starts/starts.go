@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 type Proc interface {
@@ -46,6 +48,8 @@ type worker struct {
 	pid    uint32
 	dir    string
 	frames []*frame
+	suite  bool
+	born   time.Time
 }
 
 type procKey struct {
@@ -63,7 +67,6 @@ type Registry struct {
 	byProc   map[procKey]*Start
 	byPID    map[uint32]*Start
 	conns    map[string]uint32
-	dests    map[string]string
 	child    map[string]bool
 	root     string
 	sets     map[string]models.SetTable
@@ -71,7 +74,22 @@ type Registry struct {
 	marked   bool
 	onMark   []func()
 	begins   uint64 // Begin calls so far; numbers test frames
+	// origin is, under the proven switch, the process each recorded
+	// connection came from (origin.go).
+	origin origins
+	// dest is each connection's address, which every recorded mock names
+	// (dest.go).
+	dest destinations
+	// instances are the live test workers' keploy instances
+	// (instances.go).
+	instances liveInstances
 }
+
+// ParentOf is the parent of process pid in this host's process table, read
+// as Default reads it: /proc/<pid>/stat on Linux, the kernel's process table
+// (sysctl kern.proc.pid) on macOS, which has no /proc, and nothing elsewhere.
+// It is false when pid names no process it can read.
+func ParentOf(pid uint32) (uint32, bool) { return sysProc{}.Parent(pid) }
 
 func New(p Proc, slack time.Duration) *Registry {
 	return &Registry{proc: p, slack: slack}
@@ -86,12 +104,13 @@ func (r *Registry) Reset() {
 	r.byProc = nil
 	r.byPID = nil
 	r.conns = nil
-	r.dests = nil
 	r.child = nil
 	r.root = ""
 	r.sets = nil
 	r.universe = nil
 	r.marked = false
+	r.resetOrigins()
+	r.resetDests()
 }
 
 func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time) {
@@ -106,6 +125,7 @@ func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time)
 	}
 	if suite {
 		w.frames = []*frame{{place: "", opened: at, counts: map[string]int{}}}
+		w.suite = true
 		return
 	}
 	if len(w.frames) == 0 {
@@ -127,6 +147,7 @@ func (r *Registry) End(pid uint32, name string, suite bool, at time.Time) {
 	}
 	if suite {
 		w.frames = nil
+		w.suite = false
 		return
 	}
 	for i := len(w.frames) - 1; i >= 1; i-- {
@@ -147,6 +168,9 @@ func (r *Registry) worker(pid uint32) *worker {
 	w, ok := r.workers[pid]
 	if !ok {
 		w = &worker{pid: pid}
+		if r.proc != nil {
+			w.born, _ = r.proc.Birth(pid)
+		}
 		r.workers[pid] = w
 	}
 	return w
@@ -165,18 +189,6 @@ func (r *Registry) Note(conn string, pid uint32, at time.Time) {
 		r.conns[conn] = pid
 	}
 	r.startOf(pid, at)
-}
-
-func (r *Registry) Dest(conn, addr string) {
-	if conn == "" || addr == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.dests == nil {
-		r.dests = map[string]string{}
-	}
-	r.dests[conn] = addr
 }
 
 func (r *Registry) Child(conn string) {
@@ -262,17 +274,20 @@ func (r *Registry) Stamp(m *models.Mock) {
 	if m == nil {
 		return
 	}
+	// The process its call came from (proven switch): the
+	// sync manager stamped it as its parser handed it over, else here.
+	if provenswitch.On() {
+		r.StampOrigin(m)
+		r.StampInstance(m)
+	}
+	// The address its connection reached, for a mock no parser handed the
+	// sync manager, which stamps it as it is handed over (StampDest).
+	r.StampDest(m)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	id := m.ConnectionID
 	if id == "" && m.Spec.Metadata != nil {
 		id = m.Spec.Metadata["connID"]
-	}
-	if addr := r.dests[id]; addr != "" && m.Spec.Metadata["destAddr"] == "" {
-		if m.Spec.Metadata == nil {
-			m.Spec.Metadata = map[string]string{}
-		}
-		m.Spec.Metadata["destAddr"] = addr
 	}
 	if r.child[id] {
 		if m.Spec.Metadata == nil {
@@ -325,28 +340,74 @@ func (r *Registry) chain(pid uint32) ([]uint32, *worker) {
 }
 
 // Scope names the scope a call from pid runs in, resolved as View resolves
-// the test whose mocks it sees: the test frame currentFrame picks (a re-run of
-// the same test is a new frame, so a new scope), or, with no test open to it,
-// the registered worker it descends from. "" when pid belongs to no worker.
+// the test whose mocks it sees (attribute): the test frame open to it (a
+// re-run of the same test is a new frame, so a new scope), or, with no test
+// open to it, the registered worker it descends from. "" when it has neither.
 //
 // It follows View's attribution exactly, so a call's stateful cursors are
 // those of the test whose recordings it is served — including currentFrame's
 // fallback, under which a worker between its own tests is attributed to the
-// one test open elsewhere. It does not tell app starts within one test apart.
+// one test open elsewhere, and a call of no worker to the one test open. It
+// does not tell app starts within one test apart.
 func (r *Registry) Scope(pid uint32) string {
-	if pid == 0 {
-		return ""
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, w := r.chain(pid)
-	if w == nil {
+	a, err := r.attribute(pid)
+	switch {
+	case err != nil || a.w == nil:
 		return ""
+	case a.f != nil:
+		return fmt.Sprintf("t%d", a.f.seq)
 	}
-	if f := r.currentFrame(w); f != nil {
-		return fmt.Sprintf("t%d", f.seq)
+	return fmt.Sprintf("w%d", a.w.pid)
+}
+
+// Unattributed is why a call is served no recording: its process descends
+// from no process that began a test or the suite (an app server the tests did
+// not start, a call from a test process whose pid was sent from another pid
+// namespace, or one whose pid the proxy could not read), while more than one
+// test is open, so keploy cannot tell which test it belongs to.
+type Unattributed struct {
+	PID  uint32 // 0 when the proxy could not read it
+	Open int    // the tests open
+}
+
+func (e *Unattributed) Error() string {
+	who := fmt.Sprintf("the call from pid %d", e.PID)
+	if e.PID == 0 {
+		who = "a call whose pid the proxy could not read"
 	}
-	return fmt.Sprintf("w%d", w.pid)
+	return fmt.Sprintf("keploy cannot tell which test %s belongs to: %d tests are open, and it comes from no process that began a test or the suite, nor from one they started, so it is served no recording. "+
+		"Start the app from the test process that begins its tests, or run the tests one at a time", who, e.Open)
+}
+
+// attribution is a call's place in the run: the worker whose set it reads,
+// the test open to it, and, for a call of the worker's own process tree, the
+// processes below the worker it came through.
+type attribution struct {
+	path []uint32 // pid and its ancestors below w, nearest first; nil when w is not its own
+	w    *worker  // nil when no test is open to a call of no worker
+	f    *frame   // the test open to the call; nil for none
+}
+
+// attribute places a call from pid. A call of a worker's process tree is that
+// worker's, with the test currentFrame gives it. A call of no worker (an app
+// server the tests did not start, a call from a test process whose pid was
+// sent from another pid namespace, or pid 0, one the proxy could not read) is
+// the one test open in the run, when exactly one is, as a begin without a pid
+// narrows every connection to its test; with none open it is no test's (w
+// nil: View shows it every recording, as before the first test); with more
+// than one it is refused (*Unattributed), never served the whole pool.
+func (r *Registry) attribute(pid uint32) (attribution, error) {
+	path, w := r.chain(pid)
+	if w != nil {
+		return attribution{path: path, w: w, f: r.currentFrame(w)}, nil
+	}
+	ow, f, n := r.openTest()
+	if n > 1 {
+		return attribution{}, &Unattributed{PID: pid, Open: n}
+	}
+	return attribution{w: ow, f: f}, nil
 }
 
 func (r *Registry) rootStart(pid uint32) *Start {
@@ -475,6 +536,38 @@ func (r *Registry) Active() bool {
 	return r.sets != nil
 }
 
+func (r *Registry) Start(pid uint32, dir string) (string, time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if w, ok := r.workers[pid]; ok && dir == "" {
+		dir = w.dir
+	}
+	set := r.setOf(dir)
+	return set, r.sets[set].Start
+}
+
+func (r *Registry) Live() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, w := range r.workers {
+		if !w.suite && len(w.frames) < 2 {
+			continue
+		}
+		if !w.born.IsZero() {
+			if b, ok := r.proc.Birth(w.pid); !ok || !b.Equal(w.born) {
+				continue
+			}
+		}
+		set := r.setOf(w.dir)
+		if _, ok := r.sets[set]; ok && !slices.Contains(out, set) {
+			out = append(out, set)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 func (r *Registry) setOf(dir string) string {
 	if dir == "" {
 		return ""
@@ -516,13 +609,6 @@ func (r *Registry) bind(s *Start) {
 	}
 }
 
-func (r *Registry) currentTest(w *worker) string {
-	if f := r.currentFrame(w); f != nil {
-		return f.place
-	}
-	return ""
-}
-
 // currentFrame is the test frame a call from w's process tree runs in: w's own
 // open test, or — for a worker with none (an app started once for the suite)
 // — the one test open on any worker, when exactly one is. nil otherwise.
@@ -530,40 +616,94 @@ func (r *Registry) currentFrame(w *worker) *frame {
 	if w != nil && len(w.frames) > 1 {
 		return w.frames[len(w.frames)-1]
 	}
-	var open *frame
+	_, f, _ := r.openTest()
+	return f
+}
+
+// openTest is the one test open in the run and the worker it is open on, when
+// exactly one is (nil, nil otherwise), and how many are open.
+func (r *Registry) openTest() (*worker, *frame, int) {
+	var (
+		ow   *worker
+		open *frame
+	)
 	count := 0
 	for _, o := range r.workers {
 		if len(o.frames) > 1 {
-			open = o.frames[len(o.frames)-1]
+			ow, open = o, o.frames[len(o.frames)-1]
 			count++
 		}
 	}
-	if count == 1 {
-		return open
+	if count != 1 {
+		return nil, nil, count
 	}
-	return nil
+	return ow, open, count
 }
 
-func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]struct{}, bool) {
+// Owns reports whether the named mock is a recording of the test open to a
+// call from pid, resolved as View resolves it (attribute): whether that
+// test's mapping names it. A boot, runner or unmapped mock, which View also
+// shows the call, is no test's own, and with no test open to pid nothing is.
+// known is false when pid has no view (View's ok, or its refusal), and owned
+// is then false.
+func (r *Registry) Owns(pid uint32, name string) (owned, known bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.sets == nil || pid == 0 {
-		return nil, nil, false
+	if r.sets == nil {
+		return false, false
 	}
-	path, w := r.chain(pid)
-	if w == nil {
-		return nil, nil, false
+	a, err := r.attribute(pid)
+	if err != nil || a.w == nil {
+		return false, false
+	}
+	st, ok := r.sets[r.setOf(a.w.dir)]
+	if !ok {
+		return false, false
+	}
+	if a.f == nil {
+		return false, true
+	}
+	for _, o := range st.Tests[a.f.place] {
+		if o.Name == name {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// View is what a call from pid may be served now, in the run's replay table:
+// each recording it may be served, ranked (lower first), and the universe of
+// every name the table maps, so a recording mapped to none (absent from it)
+// is shown too. ok is false when the call has no view and is shown every
+// recording: no replay table, a worker's set the table lacks, or a call of no
+// worker with no test open. err refuses the call every recording: it is of no
+// worker while more than one test is open (*Unattributed, attribute).
+func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]struct{}, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sets == nil {
+		return nil, nil, false, nil
+	}
+	a, err := r.attribute(pid)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if a.w == nil {
+		return nil, nil, false, nil
 	}
 	var s *Start
-	if len(path) > 0 {
+	if len(a.path) > 0 {
 		s = r.startOf(pid, at)
 	}
-	set := r.setOf(w.dir)
+	set := r.setOf(a.w.dir)
 	st, ok := r.sets[set]
 	if !ok {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
-	test := r.currentTest(w)
+	test := ""
+	if a.f != nil {
+		test = a.f.place
+	}
 	rank := map[string]int{}
 	put := func(name string, g int) {
 		if old, ok := rank[name]; !ok || g < old {
@@ -588,7 +728,7 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 		for _, n := range st.Runner {
 			put(n, 4)
 		}
-		return rank, r.universe, true
+		return rank, r.universe, true, nil
 	}
 	for _, o := range st.Tests[test] {
 		put(o.Name, 1)
@@ -596,5 +736,5 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 	for _, n := range st.Runner {
 		put(n, 2)
 	}
-	return rank, r.universe, true
+	return rank, r.universe, true, nil
 }

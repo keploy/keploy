@@ -2,7 +2,6 @@ package utils
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -24,10 +25,10 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
-	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -38,14 +39,14 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/linkout"
+	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
 )
 
 var WarningSign = "\U000026A0"
-
-var TemplatizedValues = map[string]interface{}{}
-var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
@@ -68,6 +69,25 @@ func IsShutdownError(err error) bool {
 		strings.Contains(errStr, "use of closed network connection")
 }
 
+// UnbracketHost is host without the one pair of brackets an IPv6 literal
+// comes in when it is written next to a port ("[fd00::1]"). "fd00::1" and
+// "[fd00::1]" are one host, and the helpers here bracket an IPv6 host
+// themselves wherever the form they build needs it (net.JoinHostPort, a URL's
+// host), so one passed in bracketed would come out bracketed twice.
+func UnbracketHost(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
+// ReplaceHost replaces currentURL's host with ipAddress, keeping its port.
+//
+// ipAddress may be IPv6, bare ("fd00::1", as a Kubernetes Pod IP is) or
+// bracketed. An IPv6 host has to be bracketed in a URL: "http://fd00::1:8080/"
+// is no URL, and url.Parse refuses it (invalid port "::1:8080" after host).
+// A zone ("fe80::1%eth0") is kept and written as a URL writes it (%25).
+// Any other host (a name, an IPv4 address) is put in as given.
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
@@ -81,26 +101,69 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
 	}
 
-	// Replace hostname with the IP address
-	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-	// Return the modified URL
+	host := ipAddress
+	if bare := UnbracketHost(ipAddress); isIPv6Literal(bare) {
+		host = "[" + bare + "]"
+	}
+	if port := parsedURL.Port(); port != "" {
+		host += ":" + port
+	}
+	parsedURL.Host = host
 	return parsedURL.String(), nil
 }
 
+// isIPv6Literal says host is an IPv6 address, with or without a zone, an
+// IPv4-mapped one ("::ffff:127.0.0.1") included: every one has colons, so
+// each needs the brackets.
+func isIPv6Literal(host string) bool {
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Is6()
+}
+
+// ReplaceGrpcHost replaces authority's host with ipAddress, keeping its port.
+//
+// An authority may have no port ("my-svc", "10.0.0.5", "[fd00::1]"): then
+// ipAddress alone comes back, an IPv6 one bracketed as an authority writes
+// it, and ResolveTestTarget gives it its port (app_port, grpcPort or 443).
+// ipAddress may be IPv6, bare or bracketed. One with a zone ("fe80::1%eth0")
+// is put in too, but grpc-go refuses a target with a zone.
 func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
 	// Check if ipAddress is empty
 	if ipAddress == "" {
 		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
 	}
 
-	// Use net.SplitHostPort to properly handle IPv6 addresses
-	_, port, err := net.SplitHostPort(authority)
+	port, hasPort, err := authorityPort(authority)
 	if err != nil {
 		return authority, fmt.Errorf("invalid authority format: %v", err)
 	}
+	host := UnbracketHost(ipAddress)
+	if !hasPort {
+		if isIPv6Literal(host) {
+			return "[" + host + "]", nil
+		}
+		return host, nil
+	}
+	// Replace the host part with ipAddress, keeping the port. JoinHostPort
+	// brackets an IPv6 host, so a bracketed one is given to it bare.
+	return net.JoinHostPort(host, port), nil
+}
 
-	// Replace the host part with ipAddress, keeping the port
-	return net.JoinHostPort(ipAddress, port), nil
+// authorityPort is the port of a host:port authority, and hasPort false for
+// one with no port: one with no colon (a name, an IPv4 address), one in
+// brackets ("[fd00::1]"), or a bare IPv6 address, whose colons are the
+// address's. The host itself is not checked, as ReplaceGrpcHost replaces it
+// whole. Anything else net.SplitHostPort cannot split ("a:b:c", "[fd00::1")
+// is an error.
+func authorityPort(authority string) (port string, hasPort bool, err error) {
+	_, port, err = net.SplitHostPort(authority)
+	if err == nil {
+		return port, true, nil
+	}
+	if !strings.Contains(authority, ":") || UnbracketHost(authority) != authority || isIPv6Literal(authority) {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
 func ReplaceGrpcPort(authority string, port string) (string, error) {
@@ -112,8 +175,9 @@ func ReplaceGrpcPort(authority string, port string) (string, error) {
 	// Use net.SplitHostPort to properly handle IPv6 addresses
 	host, _, err := net.SplitHostPort(authority)
 	if err != nil {
-		// If splitting fails, assume it's just a host without port
-		return net.JoinHostPort(authority, port), nil
+		// If splitting fails, assume it's just a host without port: "[fd00::1]"
+		// or "fd00::1" as much as "localhost", which JoinHostPort brackets.
+		return net.JoinHostPort(UnbracketHost(authority), port), nil
 	}
 
 	// Replace the port part, keeping the host
@@ -159,29 +223,118 @@ func ReplacePort(currentURL string, port string) (string, error) {
 		return currentURL, err
 	}
 
-	if parsedURL.Port() == "" {
-		parsedURL.Host = parsedURL.Host + ":" + port
-	} else {
-		parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Port(), port, 1)
-	}
-
+	// Rebuilt from the hostname, never edited as text: replacing the port's
+	// digits in Host replaced their first occurrence, which can be in the host
+	// ("10.0.0.80:80" became "10.0.0.9000:80", "[fd00::8080]:8080" a
+	// different host). JoinHostPort brackets an IPv6 hostname.
+	parsedURL.Host = net.JoinHostPort(parsedURL.Hostname(), port)
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta returns the metadata of the request
-func GetReqMeta(req *http.Request) map[string]string {
-	reqMeta := map[string]string{}
-	if req != nil {
-		// get request metadata
-		reqMeta = map[string]string{
-			"method": req.Method,
-			"url":    req.URL.String(),
-			"host":   req.Host,
+// GetReqMeta is what a log line logged under ctx says about req: its
+// method, its host (a name by its shape and tag, models.HostLogName), its
+// path's shape (URLPathShape), its path tag (path_tag,
+// models.URLPathTag under the session ctx carries: what the console and the
+// report print beside the request where they name it whole; none for a
+// request that names no method) and the names of its query parameters
+// (GetReqShape). For the agent's lines about a call, which the console and
+// the report name by that tag. ctx is the context of the work the line is
+// logged in (a connection's, a request's): a line under a context with no
+// session tags under the process's key (models.LogKeySession).
+func GetReqMeta(ctx context.Context, req *http.Request) map[string]string {
+	reqMeta := GetReqShape(req)
+	if req != nil && req.Host != "" {
+		// The host's name by its shape beside its tag under the session
+		// (models.HostLogName), so the session's lines about one host match
+		// up; an IP address whole.
+		reqMeta["host"] = models.HostLogName(ctx, req.Host)
+	}
+	if req != nil && req.URL != nil {
+		if tag := models.URLPathTag(ctx, req.Method, req.URL); tag != "" {
+			reqMeta["path_tag"] = tag
 		}
 	}
 	return reqMeta
 }
 
+// GetReqShape is what a log says about req with no path tag: its method, its
+// host (a name by its labels' shape, models.HostShape, with no tag), its
+// path's shape (URLPathShape) and the names of its query
+// parameters. For a line of keploy's CLI about a test case's request (one it
+// sends, stores or compares): no console or report line prints such a tag,
+// so the line names the request by its shape, and the test case where it has
+// one. Never a path segment, a query value, a header or the body: those are
+// the application's content (a segment may be a token the recording
+// redacted), and logs get pasted into issues. A query part with no "=" is not
+// named either, since it may be a bare token; a bare token that holds "="
+// (padded base64, ?dG9rZW4=) is named by what comes before its first "="
+// (dG9rZW4).
+func GetReqShape(req *http.Request) map[string]string {
+	reqMeta := map[string]string{}
+	if req == nil {
+		return reqMeta
+	}
+	reqMeta["method"] = req.Method
+	// The host by its labels' shape (models.HostShape): a name is the
+	// app's, as a path is; an IP address whole.
+	reqMeta["host"] = models.HostShape(req.Host)
+	if req.URL != nil {
+		reqMeta["path"] = URLPathShape(req.URL)
+		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
+			reqMeta["query keys"] = strings.Join(keys, ",")
+		}
+	}
+	return reqMeta
+}
+
+// URLPathShape is u's path in its shape: each segment of the escaped path
+// written {}, an empty one (a trailing "/", "//") kept empty, so it names
+// how many segments the path has and never a value of one. A log made where
+// no recording is at hand names a path this way: keploy does not know there
+// which segment holds a secret the recording redacted. "" for a nil u.
+func URLPathShape(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	escaped := u.EscapedPath()
+	segs := strings.Split(strings.TrimPrefix(escaped, "/"), "/")
+	for i, seg := range segs {
+		if seg != "" {
+			segs[i] = "{}"
+		}
+	}
+	out := strings.Join(segs, "/")
+	if strings.HasPrefix(escaped, "/") {
+		out = "/" + out
+	}
+	return out
+}
+
+// queryKeys are the names of rawQuery's name=value parameters, unescaped,
+// sorted and each once. A name ends at its part's first "=": a value may
+// hold "=" too (base64 padding).
+func queryKeys(rawQuery string) []string {
+	var keys []string
+	for _, part := range strings.Split(rawQuery, "&") {
+		k, _, ok := strings.Cut(part, "=")
+		if !ok || k == "" {
+			continue
+		}
+		if u, err := url.QueryUnescape(k); err == nil {
+			k = u
+		}
+		// A name that does not read as one may be a value the app sent (a
+		// token passed as a parameter's name): {} (models.KeyShape).
+		keys = append(keys, models.KeyShape(k))
+	}
+	slices.Sort(keys)
+	return slices.Compact(keys)
+}
+
+// IsPassThrough reports whether one of opts' bypass rules names req, to
+// destPort. A rule whose regex does not compile is said, with req by its
+// shape alone (GetReqShape): the line is about keploy.yml's rule, and no
+// console or report line names the call a rule was tried on beside a tag.
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
 	passThrough := false
 
@@ -189,7 +342,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Host != "" {
 			regex, err := regexp.Compile(bypass.Host)
 			if err != nil {
-				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqShape(req)))
 				continue
 			}
 			passThrough = regex.MatchString(req.Host)
@@ -200,7 +353,10 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Path != "" {
 			regex, err := regexp.Compile(bypass.Path)
 			if err != nil {
-				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqShape(req)))
+				// The rule's host may have matched; a path that does not
+				// compile matches no call.
+				passThrough = false
 				continue
 			}
 			passThrough = regex.MatchString(req.URL.String())
@@ -228,9 +384,24 @@ func kebabToCamel(s string) string {
 	return strings.Join(parts, "")
 }
 
+// ConfigKeyAnnotation marks a flag whose value keploy moves into the config
+// itself, under the config key the annotation names, so BindFlagsToViper does
+// not bind it to a key of its own name. Without the mark, record's
+// --pass-through-ports (a port list, which ValidateFlags turns into
+// bypassRules) was bound to record.passThroughPorts, which holds telemetry
+// rules, and the config failed to load whenever the flag was passed.
+const ConfigKeyAnnotation = "keploy.io/config-key"
+
+// BindFlagsToViper binds each flag of cmd to the config key of its own name,
+// at the top level and under viperKeyPrefix (the command's name by default),
+// and that key to its environment variable. A flag marked with
+// ConfigKeyAnnotation is left out.
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if _, ok := flag.Annotations[ConfigKeyAnnotation]; ok {
+			return
+		}
 		camelCaseName := kebabToCamel(flag.Name)
 		err := viper.BindPFlag(camelCaseName, flag)
 		if err != nil {
@@ -317,20 +488,6 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
-// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
-// For example:
-// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
-// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
-func RemoveDoubleQuotes(tempMap map[string]interface{}) {
-	// Remove double quotes
-	for key, val := range tempMap {
-		if str, ok := val.(string); ok {
-			tempMap[key] = strings.ReplaceAll(str, `"`, "")
-		}
-	}
-}
-
 func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
@@ -352,8 +509,16 @@ func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 }
 
 type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
+	TagName string               `json:"tag_name"`
+	Body    string               `json:"body"`
+	Assets  []GitHubReleaseAsset `json:"assets"`
+}
+
+// GitHubReleaseAsset is one file of a release. Digest is GitHub's own
+// "sha256:<hex>" of it, which `keploy update` checks the download against.
+type GitHubReleaseAsset struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -438,6 +603,10 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
+
+// DevVersion is the version of a build that was not given one.
+const DevVersion = "3-dev"
+
 var VersionIdentifier string
 var LogFile *os.File
 
@@ -457,18 +626,18 @@ func ConfigHeader() string {
 		"#   keploy config defaults -o FILE    # save them\n"
 }
 
-func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
-	file, err := os.Open(logFilePath)
-	if err != nil {
-		return fmt.Errorf("error opening log file: %s", err.Error())
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			LogError(logger, err, "Error closing log file")
-		}
-	}()
+// crashReportLogTail is how much of the end of this run's log a crash report
+// carries: the log holds up to log.FileCapBytes, the native agent's lines and
+// --debug's among them, and a crash report must stay well under Sentry's
+// 1 MB event limit, and be read into no more memory than it sends.
+const crashReportLogTail = 512 << 10
 
-	content, err := io.ReadAll(file)
+// attachLogFileToSentry attaches the end of logFile, this run's log, to the
+// crash report (crashReportLogTail): read through its name only while that is
+// still this run's log, never whatever a symlink there points at (a root
+// run's crash would otherwise send the link's target).
+func attachLogFileToSentry(logFile *os.File) error {
+	content, err := keployLog.ReadLogFileTail(logFile, crashReportLogTail)
 	if err != nil {
 		return fmt.Errorf("error reading log file: %s", err.Error())
 	}
@@ -482,11 +651,16 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 
 // HandleRecovery handles the common logic for recovering from a panic.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
-	if err != nil {
-		LogError(logger, err, "failed to attach log file to sentry")
+	// With no crash-report client (telemetry off, or not yet resolved: see
+	// ResolveCrashReports) nothing is reported, so the log is not read into
+	// memory for a report that goes nowhere.
+	if sentry.CurrentHub().Client() != nil {
+		err := attachLogFileToSentry(LogFile)
+		if err != nil {
+			LogError(logger, err, "failed to attach log file to sentry")
+		}
+		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 	}
-	sentry.CaptureException(errors.New(fmt.Sprint(r)))
 	// Get the stack trace
 	stackTrace := debug.Stack()
 	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
@@ -562,8 +736,13 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	repoOwner := "keploy"
 	repoName := "keploy"
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
+	return getGitHubRelease(ctx, logger, fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName))
+}
 
+// getGitHubRelease reads the release at apiURL. Anything but a 200 carrying a
+// tag is an error: a rate-limited answer decodes to an empty release, which
+// read as a version other than the running one -- an update to "".
+func getGitHubRelease(ctx context.Context, logger *zap.Logger, apiURL string) (GitHubRelease, error) {
 	client := http.Client{
 		Timeout: 4 * time.Second,
 	}
@@ -587,9 +766,15 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 		}
 	}()
 
+	if resp.StatusCode != http.StatusOK {
+		return GitHubRelease{}, fmt.Errorf("GitHub answered %s for %s", resp.Status, apiURL)
+	}
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return GitHubRelease{}, err
+	}
+	if release.TagName == "" {
+		return GitHubRelease{}, fmt.Errorf("GitHub's answer for %s names no release", apiURL)
 	}
 	return release, nil
 }
@@ -652,30 +837,152 @@ func extractFlagFromArgs(args []string, names ...string) string {
 	return found
 }
 
-// ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
-// Returns empty string if not found.
+// keployValueLongFlags lists known value-taking keploy CLI long flags
+// (normalized by removing hyphens and lowercasing so both kebab-case and
+// camelCase spellings match). Used by ExtractCommandFromArgs so an argument
+// value starting with "-c" (e.g. `--app-name -ci`) is consumed by its owning
+// flag rather than mistaken for the `-c` shorthand. Flags with NoOptDefVal
+// (such as boolean flags and `--enable-sampling`) must NOT be listed here
+// because pflag never consumes the following argv token for them. Unknown
+// flags are left unskipped so newly added boolean flags before `-c` still work.
+var keployValueLongFlags = map[string]bool{
+	"allowegress":            true,
+	"apitimeout":             true,
+	"appid":                  true,
+	"appname":                true,
+	"basepath":               true,
+	"builddelay":             true,
+	"cajavahome":             true,
+	"clientlogfile":          true,
+	"clientpid":              true,
+	"clientpidns":            true,
+	"cmdtype":                true,
+	"configpath":             true,
+	"consumerstallgrace":     true,
+	"containername":          true,
+	"coveragereport":         true,
+	"coveragereportpath":     true,
+	"delay":                  true,
+	"dnsport":                true,
+	"dockerhost":             true,
+	"driven":                 true,
+	"flakycheckretry":        true,
+	"format":                 true,
+	"fromcontainer":          true,
+	"grpcport":               true,
+	"halfclosegrace":         true,
+	"healthpath":             true,
+	"healthpolltimeout":      true,
+	"healthscheme":           true,
+	"healthurl":              true,
+	"host":                   true,
+	"incomingproxyport":      true,
+	"jacocoagentpath":        true,
+	"keploycontainer":        true,
+	"keploynetwork":          true,
+	"language":               true,
+	"maxfailattempts":        true,
+	"maxmemoryperconn":       true,
+	"maxmemoryperconnection": true,
+	"memorylimit":            true,
+	"metadata":               true,
+	"mincoverage":            true,
+	"mode":                   true,
+	"mongopassword":          true,
+	"name":                   true,
+	"networkname":            true,
+	"onmiss":                 true,
+	"output":                 true,
+	"passthroughports":       true,
+	"path":                   true,
+	"port":                   true,
+	"protodir":               true,
+	"protofile":              true,
+	"protoinclude":           true,
+	"proxyport":              true,
+	"queuesize":              true,
+	"recordtimer":            true,
+	"reportpath":             true,
+	"run1":                   true,
+	"run2":                   true,
+	"runonly":                true,
+	"selectedtests":          true,
+	"serverport":             true,
+	"services":               true,
+	"sseport":                true,
+	"storageformat":          true,
+	"tc":                     true,
+	"teardownprogressfile":   true,
+	"testcase":               true,
+	"testrun":                true,
+	"tests":                  true,
+	"testsets":               true,
+	"tlsprivatekeypath":      true,
+	"tokenfile":              true,
+	"upstreamtlscacert":      true,
+	"upstreamtls.cacert":     true,
+	"urlmethods":             true,
+}
+
+var keployValueShortFlags = map[string]bool{
+	"-b": true, "-d": true, "-l": true, "-n": true,
+	"-o": true, "-p": true, "-r": true, "-s": true, "-t": true,
+}
+
+func isKnownKeployValueFlag(arg string) bool {
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	if strings.HasPrefix(arg, "--") {
+		key := strings.ToLower(strings.ReplaceAll(arg[2:], "-", ""))
+		return keployValueLongFlags[key]
+	}
+	return keployValueShortFlags[arg]
+}
+
+// ExtractCommandFromArgs returns the value of -c/--command in raw argv, read
+// the way cobra reads it: the last occurrence wins, the shorthand takes its
+// value as the next argument or joined to it (-cVALUE, -c=VALUE), and nothing
+// after the "--" terminator is a flag. Returns "" when absent.
+//
+// Known value-taking keploy flags skip their following argument so values
+// beginning with "-c" (e.g. `--app-name -ci`) are not misread as the `-c`
+// shorthand.
+//
+// ShouldReexecWithSudo decides from this value whether keploy needs root,
+// before cobra parses anything. Reading another value than the one cobra runs
+// (the first of two -c, or none for -cVALUE) re-executes a native command
+// under sudo, or starts a docker command unprivileged, which then fails
+// writing /proc/sys/kernel/perf_event_paranoid.
 func ExtractCommandFromArgs(args []string) string {
+	found := ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// Check for -c or --command
-		if arg == "-c" || arg == "--command" {
-			// Next argument is the command value
+		switch {
+		case arg == "--":
+			return found
+		case arg == "-c" || arg == "--command":
+			found = ""
 			if i+1 < len(args) {
-				return args[i+1]
+				i++
+				found = args[i]
 			}
-			return ""
-		}
-
-		// Check for -c=value or --command=value format
-		if len(arg) > 3 && arg[:3] == "-c=" {
-			return arg[3:]
-		}
-		if len(arg) > 10 && arg[:10] == "--command=" {
-			return arg[10:]
+		case strings.HasPrefix(arg, "--command="):
+			found = arg[len("--command="):]
+		case strings.HasPrefix(arg, "-c"):
+			// pflag drops the "=" of -c=VALUE only when a value follows it:
+			// a bare -c= is the shorthand with the value "=".
+			found = arg[len("-c"):]
+			if len(found) > 1 && found[0] == '=' {
+				found = found[1:]
+			}
+		case isKnownKeployValueFlag(arg):
+			if i+1 < len(args) {
+				i++
+			}
 		}
 	}
-	return ""
+	return found
 }
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file.
@@ -778,74 +1085,6 @@ const (
 	Empty         CmdType = ""
 )
 
-func ToInt(value interface{}) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case int32:
-		return int(v)
-	case float32:
-		return int(v)
-	case string:
-		i, err := strconv.Atoi(v)
-		if err != nil {
-			fmt.Printf("failed to convert string to int: %v", err)
-			return 0
-		}
-		return i
-	case float64:
-		return int(v)
-	case json.Number:
-		// Try int64 first
-		if i, err := v.Int64(); err == nil {
-			return int(i)
-		}
-		if f, err := v.Float64(); err == nil {
-			return int(f)
-		}
-
-	}
-	return 0
-}
-
-// ToString remove all types of value to strings for comparison.
-func ToString(val interface{}) string {
-	switch v := val.(type) {
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case int32:
-		return strconv.FormatInt(int64(v), 10)
-	case string:
-		return v
-	}
-	return ""
-}
-
-func ToFloat(value interface{}) float64 {
-	switch v := value.(type) {
-	case float64:
-		return v
-	case string:
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			fmt.Printf("failed to convert string to float: %v", err)
-			return 0
-		}
-		return f
-	case int:
-		return float64(v)
-	}
-	return 0
-}
-
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
 	keys := make([]string, 0, len(m))
@@ -853,16 +1092,6 @@ func Keys(m map[string][]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
-
-func SentryInit(logger *zap.Logger, dsn string) {
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              dsn,
-		TracesSampleRate: 1.0,
-	})
-	if err != nil {
-		logger.Debug("Could not initialise sentry.", zap.Error(err))
-	}
 }
 
 //func FetchHomeDirectory(isNewConfigPath bool) string {
@@ -925,13 +1154,121 @@ func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	return path
 }
 
-// makeDirectory creates a directory if not exists with all user access
-func makeDirectory(path string) error {
-	err := os.MkdirAll(path, 0777)
+// MkdirAllForUser creates path and any missing parent directories with perm
+// using os.OpenRoot (refusing symlinks escaping the anchor directory). When
+// running under sudo, it restores ownership of only the directories newly
+// created by this call to the invoking user via open file descriptors in
+// bottom-up order, avoiding symlink-following chown races as root.
+func MkdirAllForUser(logger *zap.Logger, path string, perm os.FileMode) error {
+	if path == "" {
+		return os.MkdirAll(path, perm)
+	}
+	clean := filepath.Clean(path)
+	perm = perm.Perm()
+
+	var base string
+	var relParts []string
+	if !filepath.IsAbs(clean) {
+		parts := strings.Split(filepath.ToSlash(clean), "/")
+		i := 0
+		for i < len(parts) && (parts[i] == "." || parts[i] == "..") {
+			i++
+		}
+		if i == 0 {
+			base = "."
+		} else {
+			base = filepath.FromSlash(strings.Join(parts[:i], "/"))
+		}
+		relParts = parts[i:]
+	} else {
+		parent := filepath.Dir(clean)
+		if parent == clean {
+			// Filesystem root already exists.
+			return nil
+		}
+		relParts = append(relParts, filepath.Base(clean))
+		base = parent
+		for {
+			if _, err := os.Lstat(base); err == nil {
+				break
+			}
+			nextParent := filepath.Dir(base)
+			if nextParent == base {
+				break
+			}
+			relParts = append(relParts, filepath.Base(base))
+			base = nextParent
+		}
+		for i, j := 0, len(relParts)-1; i < j; i, j = i+1, j-1 {
+			relParts[i], relParts[j] = relParts[j], relParts[i]
+		}
+	}
+
+	r, err := os.OpenRoot(base)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = r.Close() }()
+
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	type createdDir struct {
+		f    *os.File
+		path string
+	}
+	var created []createdDir
+	defer func() {
+		for i := len(created) - 1; i >= 0; i-- {
+			RestoreFileOwnershipOf(logger, created[i].f, created[i].path)
+			_ = created[i].f.Close()
+		}
+	}()
+
+	cur := r
+	defer func() {
+		if cur != nil && cur != r {
+			_ = cur.Close()
+		}
+	}()
+	at := base
+	for _, seg := range relParts {
+		if seg == "" || seg == "." {
+			continue
+		}
+		mkErr := cur.Mkdir(seg, perm)
+		didCreate := mkErr == nil
+		next, err := cur.OpenRoot(seg)
+		if err != nil {
+			if mkErr != nil && !errors.Is(mkErr, fs.ErrExist) {
+				return mkErr
+			}
+			return err
+		}
+		nextPath := filepath.Join(at, seg)
+		if didCreate {
+			if linfo, lerr := cur.Lstat(seg); lerr == nil && linfo.IsDir() && linfo.Mode()&os.ModeSymlink == 0 {
+				if f, ferr := cur.Open(seg); ferr == nil {
+					if finfo, serr := f.Stat(); serr == nil && os.SameFile(linfo, finfo) {
+						created = append(created, createdDir{f: f, path: nextPath})
+					} else {
+						_ = f.Close()
+					}
+				}
+			}
+		}
+		if cur != r {
+			_ = cur.Close()
+		}
+		cur, at = next, nextPath
+	}
 	return nil
+}
+
+// makeDirectory creates a directory if not exists with standard permissions (0o755)
+func makeDirectory(path string) error {
+	return MkdirAllForUser(nil, path, 0o755)
 }
 
 // SetCoveragePath takes a goCovPath and sets the coverage path accordingly.
@@ -945,7 +1282,7 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 			return "", err
 		}
 		goCovPath = currentPath + "/coverage-reports"
-		if err := makeDirectory(goCovPath); err != nil {
+		if err := MkdirAllForUser(logger, goCovPath, 0o755); err != nil {
 			LogError(logger, err, "failed to create coverage-reports directory", zap.String("CoverageReportPath", goCovPath))
 			return "", err
 		}
@@ -992,6 +1329,78 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
+	_, _, err := interruptProcessTree(logger, ppid, sig, nil, false, nil)
+	return err
+}
+
+// InterruptProcessTreeKilled is InterruptProcessTree, and says why it had to
+// kill, "" when it did not: a process group's leader had not exited
+// TreeInterruptGrace after sig, and the group was sent SIGKILL; or, on
+// Windows, the tree had not exited windowsInterruptGrace after its
+// CTRL_BREAK, and was force-killed (taskkill /F). A stop that could not tell
+// that the tree had exited without a kill says so too: one whose signal could
+// not be sent, whose force-kill failed, or whose state it could not read. As
+// InterruptProcessTree, it waits for each group's leader, not for the rest of
+// the group.
+func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
+	killed, _, err = interruptProcessTree(logger, ppid, sig, nil, false, nil)
+	return killed, err
+}
+
+// Reached is a process that a signal sent to its process group reached: its
+// pid and its start time (in clock ticks after boot, as /proc/<pid>/stat
+// gives it), which together name it while it runs, and whether it ignored
+// the signal when the signal was sent.
+type Reached struct {
+	PID     int
+	Start   uint64
+	Ignores bool
+}
+
+// InterruptProcessTreeReached is InterruptProcessTreeKilled, and also says
+// which processes its signals reached: each process of a group it signalled,
+// as /proc showed that group just before its signal, and whether the process
+// ignored the signal then. A process the group gained as /proc was read is
+// not among them. Off Linux it says none.
+func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, reached []Reached, err error) {
+	return interruptProcessTree(logger, ppid, sig, groupReached, false, nil)
+}
+
+// InterruptProcessTreeStop is InterruptProcessTreeReached for a stop that
+// waits on the app's exit, not for a number of seconds (a test set's end, a
+// recording's end, under the proven switch): it waits for each group's
+// leader to exit, on its exit event (Linux, stop_events_linux.go), and kills
+// a group only when it made no progress on its way out for StopStallBudget
+// of the time both it and keploy could run (ExitClock). A starved group,
+// whether the host is or only the group is, takes as long as it takes.
+// Elsewhere it is InterruptProcessTreeReached, with its grace.
+//
+// Each step a group takes on its way out is a movement of moved, the
+// teardown scope of the run whose app it stops (nil: none).
+func InterruptProcessTreeStop(logger *zap.Logger, ppid int, sig syscall.Signal, moved *TeardownScope) (killed string, reached []Reached, err error) {
+	return interruptProcessTree(logger, ppid, sig, groupReached, true, moved)
+}
+
+// groupStopByEvents, where it is set (Linux), is how InterruptProcessTreeStop
+// waits for a group it signalled: until its leader exits, while its members
+// (as the signal reached them) make progress. It kills the group on a stall,
+// or at the user's Ctrl+C, and says why ("" when it did not kill).
+// Each step the group takes on its way out is a movement of moved.
+var groupStopByEvents func(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string)
+
+// TreeInterruptGrace is how long InterruptProcessTree waits for each process
+// group of the tree to exit after its signal before it sends SIGKILL.
+const TreeInterruptGrace = 3 * time.Second
+
+// windowsInterruptGrace is how long InterruptProcessTree waits on Windows for
+// the tree to exit after its CTRL_BREAK before it ends it with taskkill.
+const windowsInterruptGrace = 10 * time.Second
+
+// interruptProcessTree is the work of the four above. snapshot, when set,
+// reads which processes a group's signal is about to reach; byEvents (with
+// snapshot) has it wait for each group on its exit event, under the stall
+// rule, rather than for TreeInterruptGrace.
+func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal, snapshot func(pgid int, sig syscall.Signal) []Reached, byEvents bool, moved *TeardownScope) (killed string, reached []Reached, err error) {
 	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
 	if runtime.GOOS == "windows" {
 		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
@@ -1007,7 +1416,9 @@ function Get-ChildProcesses($parentId) {
         Get-ChildProcesses $child.ProcessId
     }
 }
-Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List`, ppid))
+Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Format-List`, ppid))
+		// Ids and names only, as the listing after the kill: a process's
+		// command line can carry a credential (an inline -e TOKEN=...).
 		if output, err := listAllCmd.CombinedOutput(); err == nil {
 			logger.Debug("ALL descendant processes before kill", zap.Int("parent_pid", ppid), zap.String("output", string(output)))
 		} else {
@@ -1015,17 +1426,22 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 		}
 
 		// Prefer a console Ctrl+Break event so the app can exit cleanly.
+		// why is what a kill from here on is said with.
+		why := fmt.Sprintf("it had not exited %s after keploy's CTRL_BREAK (the grace keploy's stop gives it on Windows), so keploy killed it", windowsInterruptGrace)
 		if sig == syscall.SIGINT {
 			if err := SendSignal(logger, -ppid, sig); err == nil {
-				if err := waitForProcessExit(ppid, 10*time.Second, logger); err != nil {
+				if err := waitForProcessExit(ppid, windowsInterruptGrace, logger); err != nil {
 					logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 				}
 				if running, err := isProcessRunning(ppid); err == nil && !running {
-					return nil
+					return "", nil, nil
 				}
 			} else {
 				logger.Debug("failed to send console ctrl event", zap.Int("pid", ppid), zap.Error(err))
+				why = fmt.Sprintf("keploy could not send it a CTRL_BREAK (%v), so keploy killed it", err)
 			}
+		} else {
+			why = fmt.Sprintf("keploy cannot send %s on Windows, so keploy killed it", sig)
 		}
 
 		// Try graceful taskkill as a fallback (without /F).
@@ -1036,13 +1452,21 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 			logger.Debug("taskkill graceful succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
 		}
 
-		// Force kill as the last resort if the process tree is still alive.
-		if running, err := isProcessRunning(ppid); err != nil {
+		// Force kill as the last resort if the process tree is still alive,
+		// or its state cannot be read: either way the stop says it killed,
+		// as it cannot tell that the tree exited on its own. So does a force
+		// kill that failed.
+		running, err := isProcessRunning(ppid)
+		if err != nil {
 			logger.Debug("failed to check process state after graceful taskkill", zap.Int("pid", ppid), zap.Error(err))
-		} else if running {
+			why = fmt.Sprintf("%s; and keploy could not read whether it had exited (%v)", strings.TrimSuffix(why, ", so keploy killed it"), err) + ", so keploy killed it"
+		}
+		if running || err != nil {
+			killed = why
 			forcedCmd := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T", "/F")
-			if output, err := forcedCmd.CombinedOutput(); err != nil {
-				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+			if output, ferr := forcedCmd.CombinedOutput(); ferr != nil {
+				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(ferr), zap.String("output", string(output)))
+				killed = fmt.Sprintf("%s, and its taskkill /F failed (%v)", why, ferr)
 			} else {
 				logger.Debug("taskkill forced succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
 			}
@@ -1068,38 +1492,65 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if err := waitForProcessExit(ppid, 3*time.Second, logger); err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 		}
-		return nil
+		return killed, nil, nil
 	}
 
 	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
-	children, groupOf, err := findChildPIDs(ppid)
+	var uniqueProcess []int
+	children, groupOf, err := processTree(ppid)
 	if err != nil {
-		return err
-	}
+		// The tree cannot be read: its leader's own group (keploy starts
+		// the app in a group of its own) is still interrupted, waited for
+		// and, if need be, killed, as below. Returning here sent no signal
+		// at all, and the app was killed when the command's WaitDelay ran
+		// out, unsaid. A process of the tree in a group of its own is then
+		// not interrupted.
+		logger.Warn("keploy could not read the application's process tree; it interrupts the application's own process group only",
+			zap.Int("pid", ppid), zap.Error(err))
+		uniqueProcess = []int{ppid}
+	} else {
+		children = append(children, ppid)
 
-	children = append(children, ppid)
+		logger.Debug("Found child PIDs", zap.Ints("children", children))
 
-	logger.Debug("Found child PIDs", zap.Ints("children", children))
-
-	uniqueProcess, err := uniqueProcessGroups(children, groupOf)
-	if err != nil {
-		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
-		uniqueProcess = children
+		uniqueProcess, err = uniqueProcessGroups(children, groupOf)
+		if err != nil {
+			logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
+			uniqueProcess = children
+		}
 	}
 
 	logger.Debug("Unique process groups", zap.Ints("uniqueProcess", uniqueProcess))
 
 	// Send signal to interrupt each process and wait for them to exit one by one
 	for _, pid := range uniqueProcess {
-		err := SendSignal(logger, -pid, sig)
+		var members []Reached
+		if snapshot != nil {
+			members = snapshot(pid, sig)
+		}
+		err := signalGroup(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
+			// The group was not asked to stop: what ends it now (the
+			// command's WaitDelay kills it) is no exit of its own.
+			if killed == "" {
+				killed = fmt.Sprintf("its process group %d could not be signalled (%v), so keploy could not let it stop on its own", pid, err)
+			}
+			continue
+		}
+		reached = append(reached, members...)
+		// A stop that waits on the app's exit kills only a group that
+		// stopped making progress on its way out.
+		if byEvents && snapshot != nil && groupStopByEvents != nil {
+			if why := groupStopByEvents(logger, pid, members, moved); why != "" && killed == "" {
+				killed = why
+			}
 			continue
 		}
 		// Wait for this particular process to exit with a timeout of 3 seconds
-		err = waitForProcessExit(pid, 3*time.Second, logger)
+		err = waitForProcessExit(pid, TreeInterruptGrace, logger)
 		if err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
 		}
@@ -1111,6 +1562,9 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			logger.Debug("could not verify process state after graceful signal", zap.Int("pid", pid), zap.Error(rerr))
 		} else if running {
 			logger.Debug("process still alive after graceful signal; escalating to SIGKILL", zap.Int("pgid", pid))
+			if killed == "" {
+				killed = fmt.Sprintf("a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", TreeInterruptGrace)
+			}
 			if killErr := SendSignal(logger, -pid, syscall.SIGKILL); killErr != nil {
 				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
 			} else {
@@ -1118,8 +1572,15 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			}
 		}
 	}
-	return nil
+	return killed, reached, nil
 }
+
+// processTree and signalGroup are the tree interrupt's reads of the process
+// tree and its signals to a process group; a test fails them.
+var (
+	processTree = findChildPIDs
+	signalGroup = SendSignal
+)
 
 // waitForProcessExit waits for the process to exit or times out after the specified duration
 func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) error {
@@ -1284,9 +1745,47 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // window rather than closing it — nothing short of passing the listener itself
 // closes it — but the port no longer competes with every other bind(0) on the
 // host.
+//
+// Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
+// one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
-	if _, ephemeralHi, known := ephemeralPortRange(); known && ephemeralHi < 65535 {
-		lo := ephemeralHi + 1
+	return availablePortAbove(hostEphemeralRange, 0)
+}
+
+// hostEphemeralRange reads the host's ephemeral port range for
+// GetAvailablePort and GetAvailableContainerPort (ephemeralPortRange).
+var hostEphemeralRange = ephemeralPortRange
+
+// containerEphemeralHi is the top of a container's ephemeral port range: the
+// kernel gives each new network namespace Linux's default range, 32768-60999,
+// whatever the host's is.
+const containerEphemeralHi = defaultEphemeralHi
+
+// GetAvailableContainerPort is GetAvailablePort for a port a container
+// listens on that the host publishes as itself (127.0.0.1:P:P), as a Docker
+// agent's: free on the host, and above the container's own ephemeral range
+// too. On a user-defined network, as every compose stack's is, Docker's
+// embedded DNS resolver listens in the container's namespace, on 127.0.0.11,
+// on a TCP and a UDP port the kernel drew from that range before the
+// container's process ran. A port the CLI found free on the host could be one
+// of them, and the process in the container then cannot bind it, nor move off
+// it: the CLI reaches it through the publish. A host whose range ends below
+// 60999, or reaches 65535, or is unknown (macOS, Windows), would otherwise
+// hand out ports inside it.
+func GetAvailableContainerPort() (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi)
+}
+
+// availablePortAbove is GetAvailablePort with the host's ephemeral range read
+// by ephemeral (ephemeralPortRange's signature), whose candidates are above
+// floor too.
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32) (uint32, error) {
+	top := floor
+	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
+		top = ephemeralHi
+	}
+	if top > 0 {
+		lo := top + 1
 		span := 65536 - lo // inclusive of 65535
 		// A random start, not a scan from the bottom. Scanning upward returns
 		// the LOWEST free port every time, so two keploy processes started
@@ -1298,7 +1797,7 @@ func GetAvailablePort() (uint32, error) {
 		}
 		for i := uint32(0); i < span; i++ {
 			port := lo + ((start - lo + i) % span)
-			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 			if err != nil {
 				continue
 			}
@@ -1313,10 +1812,12 @@ func GetAvailablePort() (uint32, error) {
 	}
 
 	// Either the platform's ephemeral range is unknown, or every port above it
-	// is taken, or the range reaches 65535 leaving no space. Fall back to the
-	// OS assignment rather than failing: a port that may race is strictly
-	// better than no port at all, and this is the historical behaviour.
-	listener, err := net.Listen("tcp", ":0")
+	// is taken, or the range reaches 65535 leaving no space (with no floor).
+	// Fall back to the OS assignment rather than failing: a port that may race
+	// is strictly better than no port at all, and this is the historical
+	// behaviour. A container's port that then meets one of the resolver's
+	// fails the agent's start at its bind, as no port at all would.
+	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)
 	}
@@ -1326,9 +1827,10 @@ func GetAvailablePort() (uint32, error) {
 	return uint32(addr.Port), nil
 }
 
-// isPortAvailable checks if a specific port is available on the system
+// isPortAvailable checks if a specific port is available on the system, with
+// a plain TCP probe listener (as GetAvailablePort's).
 func isPortAvailable(port uint32) bool {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	listener, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return false
 	}
@@ -1374,24 +1876,287 @@ func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
 	return 0, fmt.Errorf("failed to allocate new port: %w", err)
 }
 
-func EnsureRmBeforeName(cmd string) string {
-	parts := strings.Split(cmd, " ")
-	rmIndex := -1
-	nameIndex := -1
+type shellWord struct {
+	start int
+	value string
+}
 
-	for i, part := range parts {
-		if part == "--rm" {
-			rmIndex = i
-		} else if part == "--name" {
-			nameIndex = i
-			break // Assuming --name will always have an argument, we can break here
+func isShellSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// scanShellWords tokenizes a POSIX-like shell command into words with their
+// starting byte offsets in cmd, respecting single quotes, double quotes, and
+// backslash escapes. Returns ok=false on an unterminated quote or trailing
+// backslash.
+func scanShellWords(cmd string) ([]shellWord, bool) {
+	var words []shellWord
+	n := len(cmd)
+	i := 0
+	for i < n {
+		for i < n {
+			if isShellSpace(cmd[i]) {
+				i++
+				continue
+			}
+			if cmd[i] == '\\' && i+1 < n && cmd[i+1] == '\n' {
+				i += 2
+				continue
+			}
+			break
+		}
+		if i >= n {
+			break
+		}
+
+		start := i
+		var b strings.Builder
+
+		for i < n {
+			c := cmd[i]
+			if isShellSpace(c) {
+				break
+			}
+			switch c {
+			case '\'':
+				i++
+				closeIdx := strings.IndexByte(cmd[i:], '\'')
+				if closeIdx < 0 {
+					return nil, false
+				}
+				b.WriteString(cmd[i : i+closeIdx])
+				i += closeIdx + 1
+			case '"':
+				i++
+				closed := false
+				for i < n {
+					dc := cmd[i]
+					if dc == '"' {
+						i++
+						closed = true
+						break
+					}
+					if dc == '\\' && i+1 < n {
+						next := cmd[i+1]
+						switch next {
+						case '"', '\\', '$', '`':
+							b.WriteByte(next)
+							i += 2
+							continue
+						case '\n':
+							i += 2
+							continue
+						}
+					}
+					b.WriteByte(dc)
+					i++
+				}
+				if !closed {
+					return nil, false
+				}
+			case '\\':
+				if i+1 >= n {
+					return nil, false
+				}
+				if cmd[i+1] == '\n' {
+					i += 2
+					continue
+				}
+				b.WriteByte(cmd[i+1])
+				i += 2
+			default:
+				b.WriteByte(c)
+				i++
+			}
+		}
+
+		words = append(words, shellWord{start: start, value: b.String()})
+	}
+	return words, true
+}
+
+func shellBaseName(word string) string {
+	if idx := strings.LastIndexAny(word, "/\\"); idx >= 0 {
+		return word[idx+1:]
+	}
+	return word
+}
+
+func isEnvAssignment(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	return eq > 0 && !strings.HasPrefix(word, "-")
+}
+
+var sudoValueLongFlags = map[string]bool{
+	"--user": true, "--group": true, "--host": true, "--prompt": true,
+	"--close-from": true, "--chdir": true, "--chroot": true, "--role": true,
+	"--type": true, "--other-user": true, "--command-timeout": true,
+}
+
+const sudoValueShortFlags = "CDRTUghprtu"
+
+var dockerGlobalBoolFlags = map[string]bool{
+	"-D": true, "--debug": true, "--tls": true, "--tlsverify": true,
+	"-v": true, "--version": true, "-h": true, "--help": true,
+	"-r": true, "--remote": true, "--rootless-cni": true,
+	"--syslog": true, "--transient-store": true,
+}
+
+var dockerRunBoolFlags = map[string]bool{
+	"--detach": true, "--rm": true, "--interactive": true, "--tty": true,
+	"--privileged": true, "--init": true, "--read-only": true,
+	"--publish-all": true, "--no-healthcheck": true, "--oom-kill-disable": true,
+	"--disable-content-trust": true, "--quiet": true, "--help": true,
+	"--replace": true, "--rmi": true, "--no-hosts": true, "--env-host": true,
+	"--read-only-tmpfs": true, "--http-proxy": true, "--sig-proxy": true,
+	"--use-api-socket": true, "--tls-verify": true, "--no-hostname": true,
+	"--passwd": true, "--rootfs": true, "--unsetenv-all": true,
+}
+
+const dockerRunValueShortFlags = "acehlmpuvw"
+
+func sudoFlagTakesNext(opt string) bool {
+	if strings.Contains(opt, "=") {
+		return false
+	}
+	if strings.HasPrefix(opt, "--") {
+		return sudoValueLongFlags[opt]
+	}
+	letters := opt[1:]
+	at := strings.IndexAny(letters, sudoValueShortFlags)
+	return at >= 0 && at == len(letters)-1
+}
+
+func dockerRunOptionsStart(words []shellWord) int {
+	i := 0
+	for i < len(words) && isEnvAssignment(words[i].value) {
+		i++
+	}
+	if i < len(words) && strings.EqualFold(shellBaseName(words[i].value), "sudo") {
+		i++
+		for i < len(words) && strings.HasPrefix(words[i].value, "-") && words[i].value != "-" {
+			opt := words[i].value
+			i++
+			if opt == "--" {
+				break
+			}
+			if sudoFlagTakesNext(opt) {
+				i++
+			}
+		}
+		for i < len(words) && isEnvAssignment(words[i].value) {
+			i++
 		}
 	}
-	if rmIndex == -1 && nameIndex != -1 {
-		parts = append(parts[:nameIndex], append([]string{"--rm"}, parts[nameIndex:]...)...)
+	if i >= len(words) {
+		return -1
+	}
+	prog := strings.TrimSuffix(strings.ToLower(shellBaseName(words[i].value)), ".exe")
+	if prog != "docker" && prog != "podman" {
+		return -1
+	}
+	i++
+
+	for i < len(words) && strings.HasPrefix(words[i].value, "-") && words[i].value != "-" {
+		opt := words[i].value
+		i++
+		if opt == "--" {
+			break
+		}
+		if strings.Contains(opt, "=") || dockerGlobalBoolFlags[opt] {
+			continue
+		}
+		if strings.HasPrefix(opt, "--") {
+			i++
+		} else {
+			letters := opt[1:]
+			if at := strings.IndexAny(letters, "Hcl"); at >= 0 && at == len(letters)-1 {
+				i++
+			}
+		}
+	}
+	if i >= len(words) {
+		return -1
+	}
+	sub := strings.ToLower(words[i].value)
+	if sub == "container" {
+		i++
+		if i >= len(words) || !strings.EqualFold(words[i].value, "run") {
+			return -1
+		}
+		return i + 1
+	}
+	if sub == "run" {
+		return i + 1
+	}
+	return -1
+}
+
+func dockerRunFlagTakesNext(w string) bool {
+	if strings.Contains(w, "=") {
+		return false
+	}
+	if strings.HasPrefix(w, "--") {
+		return !dockerRunBoolFlags[w]
+	}
+	letters := w[1:]
+	at := strings.IndexAny(letters, dockerRunValueShortFlags)
+	return at >= 0 && at == len(letters)-1
+}
+
+func EnsureRmBeforeName(cmd string) string {
+	words, ok := scanShellWords(cmd)
+	if !ok {
+		return cmd
+	}
+	optStart := dockerRunOptionsStart(words)
+	if optStart < 0 {
+		return cmd
 	}
 
-	return strings.Join(parts, " ")
+	hasRm := false
+	nameStart := -1
+
+	for i := optStart; i < len(words); i++ {
+		w := words[i].value
+		if w == "--" || w == "-" || !strings.HasPrefix(w, "-") {
+			// Stop at the image name (or end-of-options marker): everything
+			// after this belongs to the container command, not docker run.
+			break
+		}
+
+		if w == "--rm" || strings.HasPrefix(w, "--rm=") {
+			hasRm = true
+			continue
+		}
+
+		if w == "--name" {
+			if i+1 < len(words) {
+				if nameStart == -1 && words[i+1].value != "" {
+					nameStart = words[i].start
+				}
+				i++ // consume --name's value
+			}
+			continue
+		}
+		if val, ok := strings.CutPrefix(w, "--name="); ok {
+			// Docker accepts both "--name app" and "--name=app"
+			// (see dockerLongFlagValue).
+			if nameStart == -1 && val != "" {
+				nameStart = words[i].start
+			}
+			continue
+		}
+
+		if dockerRunFlagTakesNext(w) {
+			i++
+		}
+	}
+
+	if !hasRm && nameStart != -1 {
+		return cmd[:nameStart] + "--rm " + cmd[nameStart:]
+	}
+	return cmd
 }
 
 // dockerLongFlagValue returns the value of the first occurrence of any of
@@ -1560,13 +2325,26 @@ type PermissionError struct {
 	IsRead   bool // true if it's a read permission issue, false if write
 }
 
-// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
+// AddToGitIgnore adds ignoreString to path's .gitignore, if it is not there
+// yet. The file is opened inside path, and path from the project
+// (OpenRecordingDir): keploy/.gitignore comes with a cloned repository, so
+// one that links out of path, or a path that links out of the project, is
+// refused, with why, and what it leads to is not written. A link that stays
+// inside is followed.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
-	gitignorePath := path + "/.gitignore"
-
-	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
+	root, err := OpenRecordingDir(path)
 	if err != nil {
-		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
+		return fmt.Errorf("error opening the folder of the .gitignore file: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	file, err := root.OpenFile(".gitignore", os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		refused := fmt.Sprintf("the .gitignore file is written only inside %q", path)
+		if out := linkout.Explain(root, path, ".gitignore", refused, err); out != nil {
+			return out
+		}
+		return fmt.Errorf("%s: %w", refused, err)
 	}
 
 	defer func() {
@@ -1593,22 +2371,97 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 	return nil
 }
 
+// GitIgnores reports whether git ignores path, a path inside dir (relative
+// to dir, or absolute), as `git add` would read it: by every .gitignore that
+// applies, a later entry that un-ignores it (a "!*.yaml") included, the
+// repository's info/exclude, and the global excludes of the HOME keploy runs
+// with. known is false when git cannot say (it is not installed, dir is in no
+// git work tree, or git refused or took too long), and then ignored says
+// nothing. A path git tracks already is not ignored. Under sudo git runs as
+// the user sudo ran keploy for (asInvokingUser): git refuses, as root, a work
+// tree another user owns. sudo usually keeps root's HOME, so that user's own
+// global excludes are then not read: they can only ignore more, never
+// un-ignore a path, so the answer errs only toward not ignored.
+func GitIgnores(dir, path string) (ignored, known bool) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, git, "-C", dir, "check-ignore", "-q", "--", path)
+	cmd.SysProcAttr = asInvokingUser()
+	err = cmd.Run()
+	if err == nil {
+		return true, true
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, true
+	}
+	return false, false
+}
+
 func Hash(data []byte) string {
 	hasher := sha256.New()
 	hasher.Write(data)
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+// cdIntoOneThatExists is what a user does about a working directory that is
+// gone.
+const cdIntoOneThatExists = "cd into a directory that exists and run keploy again"
+
+// GetLastDirectory is the name of the directory keploy runs in. It fails once
+// that directory is gone, on every platform, in the same words.
 func GetLastDirectory() (string, error) {
-	// Get the current working directory
-	dir, err := os.Getwd()
+	return lastDirectory(os.Getwd)
+}
+
+func lastDirectory(getwd func() (string, error)) (string, error) {
+	dir, err := workingDirectory(getwd)
 	if err != nil {
 		return "", err
 	}
+	return filepath.Base(dir), nil
+}
 
-	// Extract the base (last directory)
-	lastDir := filepath.Base(dir)
-	return lastDir, nil
+// workingDirectory is getwd's answer, once confirmWorkingDirectory says it
+// still leads to the directory the process is in.
+func workingDirectory(getwd func() (string, error)) (string, error) {
+	dir, err := getwd()
+	if err == nil {
+		err = confirmWorkingDirectory(dir)
+	}
+	// Linux's Getwd fails here, and on macOS the stat of its answer does.
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("the working directory is gone: %w; %s", err, cdIntoOneThatExists)
+	}
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// confirmWorkingDirectory fails unless dir, os.Getwd's answer, still leads to
+// the directory the process is in. Getwd does not say so itself: on Linux it
+// fails once the directory is removed, but macOS's getcwd goes on answering the
+// path the directory last had, which by then leads nowhere or to a newer
+// directory of that name. A path this user may not walk, as under `sudo -u`
+// below a private directory, says nothing of the kind, and is let through.
+func confirmWorkingDirectory(dir string) error {
+	here, err := os.Stat(".")
+	if err == nil {
+		var there os.FileInfo
+		there, err = os.Stat(dir)
+		if err == nil && !os.SameFile(here, there) {
+			return fmt.Errorf("the working directory is gone: %s is another directory now; %s", dir, cdIntoOneThatExists)
+		}
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return nil
+	}
+	return err
 }
 
 func IsFileEmpty(filePath string) (bool, error) {
@@ -1686,90 +2539,6 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("cannot parse metadata: %w", err)
 	}
 	return m, nil
-}
-
-// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
-// executes them with the provided data, and replaces them with the result.
-// It is robust against strings that contain non-template curly braces by using a strict regex.
-func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
-	// This regex is specifically designed to match valid Keploy templates:
-	// - It must start with {{ and optional whitespace.
-	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
-	// - It MUST contain a dot (.) to indicate a field access.
-	// - It non-greedily matches characters until the closing braces.
-	// This prevents it from matching invalid syntax like {{u^2}}.
-	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
-
-	funcMap := template.FuncMap{
-		"int":    ToInt,
-		"string": ToString,
-		"float":  ToFloat,
-	}
-
-	var firstErr error
-
-	// Check if the entire input string is a single template placeholder.
-	// This is more efficient than using MatchString and FindString separately.
-	matchIndexes := re.FindStringIndex(input)
-	isExactPlaceholderMatch := matchIndexes != nil && matchIndexes[0] == 0 && matchIndexes[1] == len(input)
-
-	result := re.ReplaceAllStringFunc(input, func(match string) string {
-		// Only parse and execute the matched placeholder, not the entire string.
-		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
-		if err != nil {
-
-			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
-			return match
-		}
-
-		var output bytes.Buffer
-		err = tmpl.Execute(&output, templateData)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
-			}
-			return match
-		}
-
-		if isExactPlaceholderMatch {
-			return output.String()
-		}
-
-		// Ensure the placeholder result is safe to embed inside JSON strings by
-		// escaping control characters like newlines, quotes, and backslashes.
-		// This prevents errors such as `invalid character '\n' in string literal`
-		// when we later json.Unmarshal the rendered testcase.
-		return jsonEscapeString(logger, output.String())
-	})
-
-	return result, firstErr
-}
-
-// jsonEscapeString returns a JSON-safe representation of s suitable for
-// embedding directly inside a JSON string literal. It escapes characters
-// that must not appear unescaped in JSON strings (newlines, quotes, etc.)
-// but does not add surrounding quotes.
-func jsonEscapeString(logger *zap.Logger, s string) string {
-	if s == "" {
-		return ""
-	}
-	b, err := json.Marshal(s)
-	// json.Marshal on a string should rarely fail, but if it does, log it
-	// and return the original string to avoid breaking the flow.
-	if err != nil {
-		LogError(logger, err, "failed to marshal string for JSON escaping, returning original unescaped string", zap.String("string", s))
-		return s
-	}
-
-	// The result of marshaling a string is a JSON string literal, which includes
-	// surrounding quotes. We need to strip them.
-	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
-		// This case is highly unlikely if json.Marshal succeeded without error.
-		LogError(logger, fmt.Errorf("json.Marshal returned unexpected format: %s", string(b)), "unexpected output from json.Marshal for a string", zap.String("string", s))
-		return s
-	}
-	// Strip the surrounding quotes added by json.Marshal.
-	return string(b[1 : len(b)-1])
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
@@ -1882,58 +2651,16 @@ func isValidGRPCIdentifier(name string) bool {
 	return true
 }
 
-func GetContainerIPv4() (string, error) {
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	// Iterate over the interfaces
-	for _, i := range interfaces {
-		// Skip down or loopback interfaces
-		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		// Get the addresses for the current interface
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue
-		}
-
-		// Iterate over the addresses
-		for _, addr := range addrs {
-			var ip net.IP
-			// The address can be of type *net.IPNet or *net.IPAddr
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				// Check if it's an IPv4 address
-				if ipnet.IP.To4() != nil {
-					ip = ipnet.IP
-				}
-			}
-
-			if ip != nil {
-				// Found a valid IPv4 address, return it
-				return ip.String(), nil
-			}
-		}
-	}
-
-	// Tagged, so the agent that cannot start without it says so in its exit
-	// status: a container with no IPv4 address but loopback's (docker
-	// --network none, an IPv6-only network) is the environment to change, not
-	// a privilege to grant. Only an agent started with --is-docker asks (its
-	// hooks, as they load): they send the connections of the applications it
-	// serves to this address. A native one is reached over loopback and needs
-	// no address of its own.
-	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
-}
-
-// GetFullCommandUsed returns the full command-line used to run the current process.
-// It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
+// GetFullCommandUsed is the command line keploy was run with, as a test
+// report records it (cmdUsed): os.Args, its secrets redacted by RedactArgv,
+// the redactor of every line that names a command whole (the command given
+// with -c is read as the command line it is, so its password, token or
+// logon is <redacted> and its hosts and paths are kept), and an argument
+// that holds a space or a quote Go-quoted. Reports are committed, kept as CI
+// artifacts and uploaded: a secret RedactArgv reads in the command reaches
+// none.
 func GetFullCommandUsed() string {
-	args := os.Args
+	args := RedactArgv(os.Args)
 
 	// Build the command string with proper quoting for arguments containing spaces
 	var parts []string

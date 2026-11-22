@@ -34,6 +34,10 @@ env:
   # SHA via the repo var if a feat branch needs to carry a cross-repo
   # change.
   INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+  # Every run under the proven switch (KEPLOY_PROVEN=1) runs the agent's exact
+  # view in verify mode (see mock_linux.yml); runs without the switch are
+  # unchanged. Called workflows set it themselves: they do not inherit this.
+  KEPLOY_EXACT_VIEW_VERIFY: '1'
 
 jobs:
   # -------------------------------------------------------------------
@@ -181,6 +185,10 @@ jobs:
     # Native windows/amd64 cgo build on self-hosted runner.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
+    outputs:
+      # keploy.exe's SHA-256, as kept on this machine: what the Windows lanes
+      # take it from the machine cache by. Empty when the put failed.
+      keploy_exe_sha256: ${{ steps.keep_windows_binary.outputs.sha256 }}
     # Bound wall-clock so a hung build cannot sit on a self-hosted Windows
     # runner for 6h. Healthy runs are ~5 min; 30 gives 6x headroom.
     timeout-minutes: 30
@@ -396,26 +404,18 @@ jobs:
           git config --file $gitConfig core.eol lf
           if ($LASTEXITCODE -ne 0) { throw "git config core.eol failed (exit $LASTEXITCODE)" }
 
-          # Per-job SSH known_hosts. Prefer ssh-keyscan so we pick up
-          # any host-key rotation automatically; fall back to GitHub's
-          # published keys (https://api.github.com/meta .ssh_keys) when
-          # ssh-keyscan returns nothing. Some self-hosted runners in
-          # this fleet ship without the OpenSSH client, or have egress
-          # policies that block port 22, so ssh-keyscan can be silent
-          # even though HTTPS git clones work fine.
+          # Per-job SSH known_hosts: GitHub's published host keys, never
+          # fetched at run time (a run-time ssh-keyscan fails the job when
+          # the runner's DNS blips, and trusts whatever answers on port 22).
+          # This step runs before the checkout, so it carries a copy of the
+          # key lines of .github/ssh/github_known_hosts, which cites their
+          # source; github-host-keys.tests.sh fails if the two differ.
           $knownHosts = Join-Path $isoDir 'known_hosts'
-          $hostKeys = $null
-          if (Get-Command ssh-keyscan -ErrorAction SilentlyContinue) {
-              $hostKeys = & ssh-keyscan github.com 2>$null
-          }
-          if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
-              Write-Host "ssh-keyscan unavailable or empty; using GitHub published host keys."
-              $hostKeys = @(
-                  'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl',
-                  'github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=',
-                  'github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk='
-              )
-          }
+          $hostKeys = @(
+              'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl',
+              'github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=',
+              'github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk='
+          )
           $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
 
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -574,6 +574,20 @@ jobs:
           $env:CGO_ENABLED = "1"
           go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy.exe ./main.go
 
+      # The Windows lanes run on this same machine: they copy keploy.exe from
+      # here, by its SHA-256 (this job's keploy_exe_sha256), instead of
+      # downloading the artifact below back
+      # (.github/scripts/windows/machine-cache.ps1). A put that fails costs
+      # them the download, not this build.
+      - name: Keep the Windows binary on this machine
+        id: keep_windows_binary
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $out = & "$env:GITHUB_WORKSPACE\.github\scripts\windows\machine-cache.ps1" -Put -Name build-windows -File keploy.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @($out)[-1] | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Upload build artifact (Windows CLI)
         uses: actions/upload-artifact@v4
         with:
@@ -644,7 +658,7 @@ jobs:
       # proxy-stress-test both rely on docker binaries not carrying
       # race-runtime overhead (memory baseline / data-race noise).
       - name: Download linux/amd64 binary
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: build-no-race
           path: dist/keploy-linux-amd64
@@ -683,7 +697,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download linux/arm64 binary
-        uses: actions/download-artifact@v4
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: build-no-race-linux-arm64
           path: dist/keploy-linux-arm64
@@ -714,6 +728,16 @@ jobs:
   # Linux test jobs
   # -------------------------------------------------------------------
 
+  # The hooks' eBPF objects are one tested keploy/ebpf main commit's
+  # (ebpf-objects.yml). Needs no build: seconds, beside the builds. It reads
+  # the private keploy/ebpf with PRO_ACCESS_TOKEN; a pull request from a fork
+  # gets no secrets, and from-fork tells the check so.
+  run_ebpf_objects:
+    uses: ./.github/workflows/ebpf-objects.yml
+    with:
+      from-fork: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+    secrets:
+      PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
@@ -751,7 +775,7 @@ jobs:
   run_mysql_tls_greeting_stitch_linux:
     # Regression guard for the proxyless MySQL-over-TLS capture shortfall: the
     # last-greeting fallback (resolvePreTLSGreeting -> cachedGreeting) was dead
-    # code on the V2 path because only the legacy handleInitialHandshake ever
+    # code on the V2 path because only the legacy capture, since removed, ever
     # seeded it, so a pooled connection whose own greeting had been consumed
     # lost its whole command phase. Includes a mutation guard that fails the
     # build if the regression tests stop actually exercising the fix, and a
@@ -783,12 +807,27 @@ jobs:
     uses: ./.github/workflows/upstream-refusal-linux.yml
     with:
       legs: core
+  run_listener_drops_linux:
+    # Guard: a client that closed its connect mid-handshake (raising only the
+    # proxy listener's sk_drops) leaves its test judged; a full accept queue
+    # (raising the namespace's ListenDrops too) does not; and a test that
+    # abandons a connect leaves its window in an SDK-driven keploy mock record
+    # charged nothing, and every test case of keploy test judged. Builds
+    # keploy from source, so it needs no artifact.
+    uses: ./.github/workflows/listener-drops-linux.yml
   run_upstream_refusal_linux_extended:
     # Its arm64 and docker legs, on the artifacts built for same-repo PRs.
     needs: [build-and-upload, build-docker-image-amd64, build-linux-arm64]
     uses: ./.github/workflows/upstream-refusal-linux.yml
     with:
       legs: extended
+  run_held_request_under_load_linux:
+    # Guard: under keploy record --sync, a request held past the 7 s stale
+    # cutoff beside a steady load is recorded with every mock it made, and so
+    # is every fast request beside it (resolves pass over the mocks buffered
+    # for it through the window index): every test passes keploy test.
+    needs: [build-and-upload]
+    uses: ./.github/workflows/held-request-under-load-linux.yml
   run_startup_mock_capture_linux:
     # Regression guard for a once-per-boot startup mock (e.g. an AWS
     # Secret Manager fetch at boot) being dropped from some recorded test
@@ -799,14 +838,26 @@ jobs:
     uses: ./.github/workflows/startup-mock-capture-linux.yml
   run_repeated_headers_linux:
     # Guard: replay sends a recorded header on the lines it arrived on
-    # (a tenant header sent twice; a mock's two Set-Cookie lines).
+    # (a tenant header sent twice; a mock's two Set-Cookie lines), and an
+    # HTTP dependency on 4000, a MySQL default port, records and replays.
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/repeated-headers-linux.yml
+  run_interim_responses_linux:
+    # Guard: an app's interim (1xx) responses are forwarded to the client and
+    # the final response is recorded, in default and --sync record.
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/interim-responses-linux.yml
   run_unpublished_port_docker:
     # Guard: a test recorded on an app port the docker command does not
     # publish is named at record time and fails at replay saying so.
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/unpublished-port-docker.yml
+  run_proven_setend_docker:
+    # Guard: under KEPLOY_PROVEN=1 the stop at a set's end and a recording's
+    # end waits for a starved Docker's container to stop, and kills only on
+    # the stall rule.
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
+    uses: ./.github/workflows/proven-setend-docker.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml
@@ -1234,6 +1285,8 @@ jobs:
   run_golang_docker_windows:
     needs: [build-windows-amd64, build-docker-image-amd64, precheck-windows]
     uses: ./.github/workflows/golang_docker_windows.yml
+    with:
+      windows_binary_sha256: ${{ needs.build-windows-amd64.outputs.keploy_exe_sha256 }}
 
   cleanup_windows:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
@@ -1379,6 +1432,32 @@ jobs:
             exit 1
           }
 
+      # The Windows binaries kept on this machine (machine-cache.ps1), 140 MB
+      # each: a day at most, the 16 newest and any younger than 3 hours. The
+      # policy is for speed only: an entry a lane still needs and loses costs
+      # it a download, not the job (machine-cache.ps1 says why). Before the
+      # cases below, and whatever came before: a red case must not stop the
+      # pruning.
+      - name: Prune the machine cache
+        if: always()
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\machine-cache.ps1" -Prune -MaxEntries 16 -KeepHours 3 -MaxAgeDays 1
+
+      # machine-cache.ps1's cases on this machine: its Windows PowerShell, and
+      # its runner's temp directory, on the drive the cache is on (Windows CI
+      # scripts runs them under pwsh 7 on Linux and under 5.1 on
+      # windows-latest). Here, after the lanes: a case that fails fails this
+      # job, and gate_windows with it, and leaves the lanes' run alone. Each
+      # case uses a root of its own.
+      - name: Test the Windows machine cache (Windows PowerShell)
+        timeout-minutes: 4
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\machine-cache.tests.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
@@ -1416,14 +1495,18 @@ jobs:
       - run_outbound_fin_stall_linux
       - run_upstream_refusal_linux
       - run_upstream_refusal_linux_extended
+      - run_listener_drops_linux
+      - run_held_request_under_load_linux
       - run_startup_mock_capture_linux
       - run_repeated_headers_linux
+      - run_interim_responses_linux
       - run_unpublished_port_docker
       - run_golang_docker
       - run_fuzzer_linux
       - run_grpc_linux
       - run_schema_match_linux
       - run_sample_tls_pcap
+      - run_ebpf_objects
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
@@ -1446,14 +1529,18 @@ jobs:
             "${{ needs.run_outbound_fin_stall_linux.result }}" \
             "${{ needs.run_upstream_refusal_linux.result }}" \
             "${{ needs.run_upstream_refusal_linux_extended.result }}" \
+            "${{ needs.run_listener_drops_linux.result }}" \
+            "${{ needs.run_held_request_under_load_linux.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \
             "${{ needs.run_repeated_headers_linux.result }}" \
+            "${{ needs.run_interim_responses_linux.result }}" \
             "${{ needs.run_unpublished_port_docker.result }}" \
             "${{ needs.run_golang_docker.result }}" \
             "${{ needs.run_fuzzer_linux.result }}" \
             "${{ needs.run_grpc_linux.result }}" \
             "${{ needs.run_schema_match_linux.result }}" \
             "${{ needs.run_sample_tls_pcap.result }}" \
+            "${{ needs.run_ebpf_objects.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then

@@ -33,11 +33,11 @@ func (h *holeEnds) calls() ([]fakeconn.Direction, []string) {
 // newHoleEndTee is a tee of the client direction for a parser that cannot
 // re-align and asks to have its stream ended at its hole, with capBytes and an
 // out channel of one chunk, so what drain cannot hand over stays queued.
-func newHoleEndTee(t *testing.T, capBytes int64, memCheck func() bool) (*tee, *dropRecorder, *holeEnds) {
+func newHoleEndTee(t *testing.T, capBytes int64) (*tee, *dropRecorder, *holeEnds) {
 	t.Helper()
 	rec := &dropRecorder{}
 	ends := &holeEnds{}
-	tt := newTee(fakeconn.FromClient, capBytes, 1, testStallGrace, memCheck, rec.record, nil)
+	tt := newTee(fakeconn.FromClient, capBytes, 1, testStallGrace, rec.record, nil)
 	tt.endAtHole = func(reason string) { ends.end(fakeconn.FromClient, reason) }
 	tt.start(make(chan struct{}))
 	t.Cleanup(func() {
@@ -74,21 +74,14 @@ func TestTee_EndsAStreamAtItsHoleWhenItsParserAsks(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name     string
-		cause    string
-		pressure bool
+		name  string
+		cause string
 	}{
 		{name: "lost to the cap", cause: DropPerConnCap},
-		{name: "lost to memory pressure", cause: DropMemoryPressure, pressure: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var pressure struct {
-				sync.Mutex
-				on bool
-			}
-			memCheck := func() bool { pressure.Lock(); defer pressure.Unlock(); return pressure.on }
-			tt, rec, ends := newHoleEndTee(t, 8, memCheck)
+			tt, rec, ends := newHoleEndTee(t, 8)
 			desyncs := 0
 			tt.onDesync = func(string) bool { desyncs++; return true }
 
@@ -98,11 +91,6 @@ func TestTee_EndsAStreamAtItsHoleWhenItsParserAsks(t *testing.T) {
 				if !tt.push(mkChunk(p)) {
 					t.Fatalf("push %q before the hole was refused", p)
 				}
-			}
-			if tc.pressure {
-				pressure.Lock()
-				pressure.on = true
-				pressure.Unlock()
 			}
 			if tt.push(mkChunk("0123456789")) {
 				t.Fatal("the chunk at the hole was admitted")
@@ -147,7 +135,7 @@ func TestTee_EndsAStreamAtItsHoleWhenItsParserAsks(t *testing.T) {
 
 	t.Run("with nothing queued before the hole it ends at once", func(t *testing.T) {
 		t.Parallel()
-		tt, rec, ends := newHoleEndTee(t, 4, nil)
+		tt, rec, ends := newHoleEndTee(t, 4)
 		if !tt.push(mkChunk("ab")) {
 			t.Fatal("push before the hole was refused")
 		}
@@ -172,7 +160,7 @@ func TestTee_EndsAStreamAtItsHoleWhenItsParserAsks(t *testing.T) {
 
 	t.Run("a connection that closes after the hole still ends at it", func(t *testing.T) {
 		t.Parallel()
-		tt, _, ends := newHoleEndTee(t, 8, nil)
+		tt, _, ends := newHoleEndTee(t, 8)
 		for _, p := range []string{"a1", "a2", "a3"} {
 			tt.push(mkChunk(p))
 		}
@@ -193,7 +181,7 @@ func TestTee_EndsAStreamAtItsHoleWhenItsParserAsks(t *testing.T) {
 
 	t.Run("a connection that closes with no hole does not end at one", func(t *testing.T) {
 		t.Parallel()
-		tt, rec, ends := newHoleEndTee(t, 8, nil)
+		tt, rec, ends := newHoleEndTee(t, 8)
 		tt.push(mkChunk("a1"))
 		tt.close()
 		if c, ok := recvOrEnd(t, tt); !ok || string(c.Bytes) != "a1" {
@@ -212,7 +200,7 @@ func TestTee_EndsAStreamAtItsHoleWhenItsParserAsks(t *testing.T) {
 
 	t.Run("a pause is not a hole: it marks, and the stream goes on", func(t *testing.T) {
 		t.Parallel()
-		tt, rec, ends := newHoleEndTee(t, 8, nil)
+		tt, rec, ends := newHoleEndTee(t, 8)
 		tt.setPaused(true)
 		if tt.push(mkChunk("p")) {
 			t.Fatal("push while paused was admitted")
@@ -236,7 +224,7 @@ func TestTee_EndsAStreamAtItsHoleWhenItsParserAsks(t *testing.T) {
 		t.Parallel()
 		rec := &dropRecorder{}
 		ends := &holeEnds{}
-		tt := newTee(fakeconn.FromClient, 4, 4, testStallGrace, nil, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 4, 4, testStallGrace, rec.record, nil)
 		tt.parserCanResync = true
 		tt.endAtHole = func(reason string) { ends.end(fakeconn.FromClient, reason) }
 		tt.start(make(chan struct{}))
@@ -259,7 +247,7 @@ func TestTee_EndsAStreamAtItsHoleWhenItsParserAsks(t *testing.T) {
 
 	t.Run("a parser that does not ask is marked as before, and its stream does not end", func(t *testing.T) {
 		t.Parallel()
-		tt, _, rec := newTestTee(t, 4, 4, nil)
+		tt, _, rec := newTestTee(t, 4, 4)
 		tt.push(mkChunk("0123456789"))
 		tt.push(mkChunk("ok"))
 		if rec.count(DropPerConnCap) != 1 || rec.count(DropDesynced) != 1 {

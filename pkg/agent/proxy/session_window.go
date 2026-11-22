@@ -172,7 +172,13 @@ func recordedIn(mk *models.Mock, start, end time.Time) bool {
 // GetSessionMocks snapshot narrowed to the mocks recorded in [start, end] or
 // undated, in the same order, found through the session tree's window index.
 func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
-	startup, err := m.GetStartupMocks()
+	return m.getSessionMocksInWindowIn(m.exactView(), start, end)
+}
+
+// getSessionMocksInWindowIn is GetSessionMocksInWindow read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getSessionMocksInWindowIn(v *exactView, start, end time.Time) ([]*models.Mock, error) {
+	startup, err := m.getStartupMocksIn(v)
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +187,13 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 	m.treesMu.RUnlock()
 
 	session := tree.valuesInWindow(start, end)
+	if v != nil {
+		// What GetSessionMocks shows under exact serving, narrowed alike.
+		session = v.keep(session)
+		if owned := v.unanswered(""); len(owned) > 0 {
+			startup = append(owned, startup...)
+		}
+	}
 
 	// The same union GetSessionMocks builds, over the narrowed halves: the
 	// predicate is per mock, so filtering before or after the union keeps the
@@ -209,13 +222,37 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 // GetSessionMocks snapshot narrowed to the mocks ix files under key, in the
 // same order, found through the startup and session trees' key indexes.
 func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	return m.rangeSessionMocksWithKeyIn(m.exactView(), ix, key, fn)
+}
+
+// rangeSessionMocksWithKeyIn is RangeSessionMocksWithKey read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) rangeSessionMocksWithKeyIn(v *exactView, ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	// Without exact serving a tree's walk passes over what it holds and does
+	// not serve (TreeDb.serves), as GetStartupMocks does.
+	walk := func(db *TreeDb, fn func(*models.Mock) bool) {
+		db.rangeKeyed(ix, key, func(mk *models.Mock) bool { return !db.serves(mk) || fn(mk) })
+	}
+	if v != nil {
+		// What GetSessionMocks shows under exact serving: the open test's
+		// unanswered mocks first, then the staged ones the view shows,
+		// which the view's walk reaches without examining the open
+		// test's own recordings the trees file under the key too. The
+		// open test's are read past the ones that answered by their
+		// links, so a read that stops at the key's next one visits only
+		// it.
+		if !v.rangeUnansweredWithKey(ix, key, fn) {
+			return nil
+		}
+		walk = func(db *TreeDb, fn func(*models.Mock) bool) { v.rangeShownKeyed(db, ix, key, fn) }
+	}
 	m.treesMu.RLock()
 	startup, session := m.startup, m.unfiltered
 	m.treesMu.RUnlock()
 	// GetSessionMocks dedups by pointer only when the startup tier holds
 	// anything, and then across both tiers.
 	if startup == nil || startup.size() == 0 {
-		session.rangeKeyed(ix, key, fn)
+		walk(session, fn)
 		return nil
 	}
 	var seen map[*models.Mock]struct{}
@@ -234,9 +271,9 @@ func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key s
 		}
 		return true
 	}
-	startup.rangeKeyed(ix, key, visit)
+	walk(startup, visit)
 	if !stopped {
-		session.rangeKeyed(ix, key, visit)
+		walk(session, visit)
 	}
 	return nil
 }

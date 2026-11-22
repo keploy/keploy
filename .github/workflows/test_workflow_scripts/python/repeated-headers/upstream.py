@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Upstream for the repeated-headers guard: GET /session answers with two
 Set-Cookie lines. The second carries an Expires date, whose comma makes a
-folded "a,b" Set-Cookie impossible to split back apart."""
+folded "a,b" Set-Cookie impossible to split back apart. It listens on 4000,
+one of the ports keploy takes as a hint of MySQL, which never speaks first:
+an HTTP server there must still get the app's request through the proxy."""
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9092
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 4000
 
 
 class Handler(BaseHTTPRequestHandler):

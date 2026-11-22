@@ -2,6 +2,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 
 # E2E test for the async-egress engine (keploy#4368) via the async-config-poll
 # sample (keploy/samples-java).
@@ -133,7 +134,7 @@ wait_for_app() {
     fi
     sleep 1
   done
-  echo "::error::App did not return 200 from /health in time"; endsec; return 1
+  echo "::error::App did not return 200 from /health in time"; save_keploy_start_evidence; endsec; return 1
 }
 
 run_maven_build() {
@@ -177,6 +178,9 @@ wait_for_mysql  # ready by now — its init overlapped the build
 section "Record"
 "$RECORD_BIN" record -c "$APP_ENV $APP_JAVA -jar $JAR" > record.txt 2>&1 &
 KEPLOY_PID=$!
+# The app starts once keploy's agent is ready: its wait, with its full
+# budget, starts there (keploy-start-wait.sh).
+await_agent_ready record.txt "$KEPLOY_PID" || exit 1
 wait_for_app
 echo "=== drive the recorded tests ==="
 curl -s -o /dev/null -w "GET /health          -> %{http_code}\n" http://127.0.0.1:8080/health

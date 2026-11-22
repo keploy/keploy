@@ -152,8 +152,17 @@ func MockReplay(ctx context.Context, logger *zap.Logger, serviceFactory ServiceF
 				}
 			}()
 			if err := m.Replay(ctx); err != nil {
-				// A user interrupt is not a failure.
+				// A user interrupt is not keploy's failure, and no pass
+				// either: it exits 128+N for the signal
+				// (utils.InterruptExitCode) unless a code is already armed,
+				// never the test command's 0. keploy's own Replay arms it and
+				// returns nil; this arms it for a service that wraps Replay
+				// (enterprise composes it) and fails on the cancel instead. A
+				// wrapper that returns nil must arm it itself.
 				if ctx.Err() == context.Canceled {
+					if code := utils.InterruptExitCode(); code != 0 {
+						utils.SetExitCodeOnce(code)
+					}
 					return nil
 				}
 				utils.LogError(logger, err, "failed to replay mocks")

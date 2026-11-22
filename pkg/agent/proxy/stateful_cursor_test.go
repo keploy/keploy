@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -372,5 +373,413 @@ func TestStartupTierKeyIndexSurvivesAMirroredUpdate(t *testing.T) {
 	}
 	if got := walk(); len(got) != 3 || got[0] != &upd {
 		t.Fatalf("keyed walk lists %d mocks, first %p; want 3 with the updated copy (%p) first", len(got), got[0], &upd)
+	}
+}
+
+// Allow mode, one keep-alive connection: its cursors follow the worker's scope
+// to the next test, which walks its own recordings from the first.
+func TestStatefulCursor_AllowKeepAliveAcrossTests(t *testing.T) {
+	mgr := newCursorManager(t)
+	base := time.Now().Add(-time.Hour)
+	mgr.SetMocksWithWindow(nil, append(counterPool(base, "a1", "a2"), counterPool(base.Add(time.Minute), "b1", "b2")...), models.BaseTime, time.Now())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "a2", "b1", "b2"})
+	w := uint32(os.Getpid())
+	p.SetWorkerScope(w, []string{"a1", "a2"})
+	conn := p.scopedFor(w, mgr)
+	if got, want := readCounter(t, conn, 2), "a1,a2"; got != want {
+		t.Fatalf("t1 served %s, want %s", got, want)
+	}
+	p.ClearWorkerScope(w)
+	p.SetWorkerScope(w, []string{"b1", "b2"})
+	if got, want := readCounter(t, conn, 3), "b1,b2,b2"; got != want {
+		t.Fatalf("t2 on the connection opened in t1 served %s, want %s", got, want)
+	}
+}
+
+// The commit after a peek advances the scope the peek resolved, even when the
+// worker's next test begins between the two.
+func TestStatefulCursor_AllowCommitReusesThePeekedScope(t *testing.T) {
+	mgr := newCursorManager(t)
+	self := uint32(os.Getpid())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1"})
+	conn := workerScopedOn(t, p, mgr, []string{"a1"})
+	idx := conn.MockCursorIndex("k", 3)    // a t1 read peeks
+	p.SetWorkerScope(self, []string{"a1"}) // t2 begins before it commits
+	conn.AdvanceMockCursor("k", idx, 3)
+	if got := conn.MockCursorIndex("k", 3); got != 0 {
+		t.Fatalf("t2's cursor starts at %d: the commit of a t1 read advanced it", got)
+	}
+}
+
+// perTestCounterPool is a stateful dependency's recordings as a recorder that
+// states lifetimes writes them: per-test (models.MetadataLifetimeKey), which
+// DeriveLifetime gives the record-order cursor too.
+func perTestCounterPool(base time.Time, names ...string) []*models.Mock {
+	out := counterPool(base, names...)
+	for _, m := range out {
+		m.Spec.Metadata = map[string]string{"type": "HTTP_CLIENT", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+		m.TestModeInfo = models.TestModeInfo{}
+		m.DeriveLifetime()
+	}
+	return out
+}
+
+// readOrMiss is readCounter that writes MISS for a call no recording answers.
+func readOrMiss(t *testing.T, db integrations.MockMemDb, n int) string {
+	t.Helper()
+	h := httpint.New(zap.NewNop())
+	got := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		resp, body, _ := serveOne(t, h, db, "GET /counter HTTP/1.1\r\nHost: api\r\n\r\n")
+		if resp == nil || resp.StatusCode != 200 {
+			got = append(got, "MISS")
+			continue
+		}
+		got = append(got, string(body))
+	}
+	return strings.Join(got, ",")
+}
+
+// A stateful dependency's per-test recordings take turns, and saturate on the
+// last, within the pool they are served from, and never across tests: a test
+// is served its own recordings in record order and then its last one again;
+// the next test starts its own over; a test that recorded none of them misses
+// rather than being answered with another test's. Staged once at BaseTime
+// (`keploy mock replay` with no test open), every test's recordings are the
+// pool, in record order.
+func TestStatefulCursor_PerTestRecordingsTakeTurnsWithinTheirTestOnly(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	pool := func() []*models.Mock {
+		return append(perTestCounterPool(base, "a1", "a2", "a3"), perTestCounterPool(base.Add(time.Minute), "b1", "b2")...)
+	}
+	window := func(from time.Time) (time.Time, time.Time) { return from.Add(-time.Second), from.Add(10 * time.Second) }
+
+	t.Run("no test open", func(t *testing.T) {
+		mgr := newCursorManager(t)
+		mgr.SetMocksWithWindow(pool(), nil, models.BaseTime, time.Now())
+		if got, want := readOrMiss(t, mgr, 6), "a1,a2,a3,b1,b2,b2"; got != want {
+			t.Fatalf("served %s, want %s", got, want)
+		}
+	})
+	t.Run("keploy test", func(t *testing.T) {
+		mgr := newCursorManager(t)
+		mgr.SetMocksWithWindow(pool(), nil, models.BaseTime, time.Now())
+		var got []string
+		for _, tc := range []struct {
+			from time.Time
+			n    int
+		}{{base, 4}, {base.Add(time.Minute), 3}, {base.Add(5 * time.Minute), 1}, {base, 2}} {
+			start, end := window(tc.from)
+			mgr.SetMocksWithWindow(pool(), nil, start, end)
+			got = append(got, readOrMiss(t, mgr, tc.n))
+		}
+		// Test A, test B, test C (which recorded no call), and A again.
+		if g, want := strings.Join(got, " | "), "a1,a2,a3,a3 | b1,b2,b2 | MISS | a1,a2"; g != want {
+			t.Fatalf("served %s, want %s", g, want)
+		}
+	})
+	t.Run("scoped workers", func(t *testing.T) {
+		mgr := newCursorManager(t)
+		mgr.SetMocksWithWindow(pool(), nil, models.BaseTime, time.Now())
+		p := &Proxy{}
+		p.SetMappedUniverse([]string{"a1", "a2", "a3", "b1", "b2"})
+		const workerA, workerB = 4101, 4202
+		p.SetWorkerScope(workerA, []string{"a1", "a2", "a3"})
+		p.SetWorkerScope(workerB, []string{"b1", "b2"})
+		viewA, viewB := p.scopedFor(workerA, mgr), p.scopedFor(workerB, mgr)
+		got := readOrMiss(t, viewA, 1) + " " + readOrMiss(t, viewB, 1) + " " + readOrMiss(t, viewA, 3) + " " + readOrMiss(t, viewB, 2)
+		if want := "a1 b1 a2,a3,a3 b2,b2"; got != want {
+			t.Fatalf("served %s, want %s", got, want)
+		}
+		// Both tests end: what each kept for its repeats is spent, so a call
+		// between tests (no worker scope: the whole pool) is served none of it.
+		p.ClearWorkerScope(workerA)
+		p.ClearWorkerScope(workerB)
+		if got := readOrMiss(t, mgr, 1); got != "MISS" {
+			t.Fatalf("a call between tests was served %s, want a miss: both tests consumed their recordings", got)
+		}
+		// A later run of test A is served its recordings again, from the start.
+		p.SetWorkerScope(workerA, []string{"a1", "a2", "a3"})
+		if got, want := readOrMiss(t, p.scopedFor(workerA, mgr), 4), "a1,a2,a3,a3"; got != want {
+			t.Fatalf("a new scope served %s, want %s", got, want)
+		}
+	})
+}
+
+// A per-test recording is kept for its test's byte-identical repeats only: a
+// call whose body differs (a fresh id each time) consumes the recording it is
+// matched with, so a test's two different calls are answered by its two
+// recordings, not the first one twice.
+func TestStatefulCursor_ADifferentCallConsumesTheRecordingItTakes(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	event := func(name, id string, at time.Time) *models.Mock {
+		m := counterMock(name, at)
+		m.Spec.HTTPReq = &models.HTTPReq{Method: "POST", URL: "http://api/events", ProtoMajor: 1, ProtoMinor: 1,
+			Header: map[string]string{"Content-Type": "application/json"}, Body: `{"id":"` + id + `"}`}
+		m.Spec.Metadata = map[string]string{"type": "HTTP_CLIENT", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+		m.TestModeInfo = models.TestModeInfo{}
+		m.DeriveLifetime()
+		return m
+	}
+	mgr := newCursorManager(t)
+	pool := []*models.Mock{event("e1", "aaaa1111", base), event("e2", "bbbb2222", base.Add(time.Second))}
+	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	mgr.SetMocksWithWindow(pool, nil, base.Add(-time.Second), base.Add(10*time.Second))
+	h := httpint.New(zap.NewNop())
+	var got []string
+	for _, id := range []string{"cccc3333", "dddd4444"} {
+		body := `{"id":"` + id + `"}`
+		raw := "POST /events HTTP/1.1\r\nHost: api\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+		resp, served, _ := serveOne(t, h, mgr, raw)
+		if resp == nil || resp.StatusCode != 200 {
+			got = append(got, "MISS")
+			continue
+		}
+		got = append(got, string(served))
+	}
+	if g, want := strings.Join(got, ","), "e1,e2"; g != want {
+		t.Fatalf("served %s, want %s: the second call is answered by the recording the first did not take", g, want)
+	}
+}
+
+// A per-test recording of a call the app also made at startup is answered
+// from the open test's own recordings first: the startup band's recording,
+// which the reusable union holds, is a sequence of its own.
+func TestStatefulCursor_ATestsOwnRecordingComesBeforeTheStartupBand(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	boot := perTestCounterPool(base, "boot")
+	own := perTestCounterPool(base.Add(time.Minute), "a1")
+	pool := append(boot, own...)
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	if got := readOrMiss(t, mgr, 1); got != "boot" {
+		t.Fatalf("at startup the call was served %s, want boot", got)
+	}
+	start := base.Add(time.Minute - time.Second)
+	mgr.SetMocksWithWindow(pool, nil, start, start.Add(10*time.Second))
+	if got, want := readOrMiss(t, mgr, 2), "a1,a1"; got != want {
+		t.Fatalf("in test A the call was served %s, want %s: its own recording, then again", got, want)
+	}
+}
+
+// searchMock is a recording of POST /search with body, as a recorder that
+// states lifetimes writes it (per-test) or as one made before (stated false:
+// DeriveLifetime gives an untagged HTTP mock the reusable cursor).
+func searchMock(name, body string, at time.Time, stated bool) *models.Mock {
+	m := counterMock(name, at)
+	m.Spec.HTTPReq = &models.HTTPReq{Method: "POST", URL: "http://api/search", ProtoMajor: 1, ProtoMinor: 1,
+		Header: map[string]string{"Content-Type": "application/json"}, Body: body}
+	m.Spec.Metadata = map[string]string{"type": "HTTP_CLIENT"}
+	if stated {
+		m.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+	}
+	m.TestModeInfo = models.TestModeInfo{}
+	m.DeriveLifetime()
+	return m
+}
+
+// postOrMiss sends POST /search with each body through the real HTTP
+// integration and returns the recording served for each, MISS for none.
+func postOrMiss(t *testing.T, db integrations.MockMemDb, bodies ...string) string {
+	t.Helper()
+	h := httpint.New(zap.NewNop())
+	got := make([]string, 0, len(bodies))
+	for _, b := range bodies {
+		raw := "POST /search HTTP/1.1\r\nHost: api\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(b)) + "\r\n\r\n" + b
+		resp, served, _ := serveOne(t, h, db, raw)
+		if resp == nil || resp.StatusCode != 200 {
+			got = append(got, "MISS")
+			continue
+		}
+		got = append(got, string(served))
+	}
+	return strings.Join(got, ",")
+}
+
+// With no test open (keploy mock replay that opens none, or the app's startup
+// before the first test), no recording is a test's own: a recording that
+// states its lifetime is served as one made before is, whatever the order or
+// number of the calls, and neither consumed by a call that differs nor kept
+// from one.
+func TestStatefulCursor_NoTestOpenServesEveryRecordingAsReusable(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	exact, other := `{"q":"a","p":1}`, `{"q":"a","p":2}`
+	for _, tc := range []struct {
+		name  string
+		pool  func(stated bool) []*models.Mock
+		calls []string
+		want  string
+	}{
+		{"a different call, the recorded one, and the different one again",
+			func(stated bool) []*models.Mock { return []*models.Mock{searchMock("r1", exact, base, stated)} },
+			[]string{other, exact, other}, "r1,r1,r1"},
+		{"the recorded call, then a different one",
+			func(stated bool) []*models.Mock { return []*models.Mock{searchMock("r1", exact, base, stated)} },
+			[]string{exact, other}, "r1,r1"},
+		{"more calls with fresh ids than recordings",
+			func(stated bool) []*models.Mock {
+				return []*models.Mock{searchMock("e1", `{"id":"aaaa1111"}`, base, stated), searchMock("e2", `{"id":"bbbb2222"}`, base.Add(time.Second), stated)}
+			},
+			[]string{`{"id":"cccc3333"}`, `{"id":"dddd4444"}`, `{"id":"eeee5555"}`, `{"id":"ffff6666"}`}, "e1,e1,e1,e1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, stated := range []bool{false, true} {
+				mgr := newCursorManager(t)
+				if stated {
+					mgr.SetMocksWithWindow(tc.pool(true), nil, models.BaseTime, time.Now())
+				} else {
+					mgr.SetMocksWithWindow(nil, tc.pool(false), models.BaseTime, time.Now())
+				}
+				if got := postOrMiss(t, mgr, tc.calls...); got != tc.want {
+					t.Errorf("stated %v: served %s, want %s", stated, got, tc.want)
+				}
+			}
+		})
+	}
+	// A test's window cleared (SetCurrentTestWindow with zero values): the
+	// per-test pool is every recording again, and none is a test's own.
+	t.Run("a window cleared", func(t *testing.T) {
+		mgr := newCursorManager(t)
+		pool := []*models.Mock{searchMock("e1", `{"id":"aaaa1111"}`, base, true), searchMock("e2", `{"id":"bbbb2222"}`, base.Add(time.Second), true)}
+		mgr.SetMocksWithWindow(pool, nil, base.Add(-time.Second), base.Add(10*time.Second))
+		mgr.SetCurrentTestWindow(time.Time{}, time.Time{})
+		if got, want := postOrMiss(t, mgr, `{"id":"cccc3333"}`, `{"id":"dddd4444"}`, `{"id":"eeee5555"}`), "e1,e1,e1"; got != want {
+			t.Errorf("served %s, want %s", got, want)
+		}
+	})
+}
+
+// A scoped worker's test owns the recordings its mapping names: a call that
+// differs consumes the one it takes, so the test's second call is answered by
+// its second recording. A recording mapped to no test (the app's startup
+// call) is no test's own: served to the test, it is neither consumed nor
+// spent when the test ends, and the next test is served it too.
+func TestStatefulCursor_AScopedTestOwnsItsMappedRecordingsOnly(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	pool := []*models.Mock{
+		searchMock("boot", `{"id":"0000boot"}`, base.Add(-time.Minute), true),
+		searchMock("a1", `{"id":"aaaa1111"}`, base, true),
+		searchMock("a2", `{"id":"aaaa2222"}`, base.Add(time.Second), true),
+	}
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "a2"})
+	const worker = 4101
+	p.SetWorkerScope(worker, []string{"a1", "a2"})
+	if got, want := postOrMiss(t, p.scopedFor(worker, mgr), `{"id":"aaaa1111"}`, `{"id":"aaaa2222"}`), "a1,a2"; got != want {
+		t.Fatalf("the test's own calls were served %s, want %s", got, want)
+	}
+	if got, want := postOrMiss(t, p.scopedFor(worker, mgr), `{"id":"0000boot"}`, `{"id":"0000boot"}`), "boot,boot"; got != want {
+		t.Fatalf("the startup call in the test was served %s, want %s", got, want)
+	}
+	p.ClearWorkerScope(worker)
+	p.SetWorkerScope(worker, []string{})
+	if got, want := postOrMiss(t, p.scopedFor(worker, mgr), `{"id":"0000boot"}`), "boot"; got != want {
+		t.Fatalf("the next test's startup call was served %s, want %s: no test owns the recording", got, want)
+	}
+}
+
+// A scoped worker's test run again in the same agent (a retry, -count=2, a
+// watch-mode rerun) is served its whole recording again, the recordings its
+// first run's calls consumed included; no call between the runs is.
+func TestStatefulCursor_AScopedTestRunAgainIsServedItsRecordingsAgain(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	pool := []*models.Mock{
+		searchMock("a1", `{"id":"aaaa1111"}`, base, true),
+		searchMock("a2", `{"id":"aaaa2222"}`, base.Add(time.Second), true),
+	}
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "a2"})
+	const worker = 4101
+	calls := []string{`{"id":"cccc3333"}`, `{"id":"dddd4444"}`, `{"id":"eeee5555"}`}
+	keyed := func(db integrations.MockMemDb) string {
+		var names []string
+		ix := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"search"} }}
+		_ = db.(integrations.SessionKeyReader).RangeSessionMocksWithKey(ix, "search", func(mk *models.Mock) bool {
+			names = append(names, mk.Name)
+			return true
+		})
+		return strings.Join(names, ",")
+	}
+	for run := 1; run <= 2; run++ {
+		p.SetWorkerScope(worker, []string{"a1", "a2"})
+		conn := p.scopedFor(worker, mgr)
+		if got, want := postOrMiss(t, conn, calls...), "a1,a2,MISS"; got != want {
+			t.Fatalf("run %d was served %s, want %s", run, got, want)
+		}
+		// A keyed read of the test hides what it consumed too.
+		if got := keyed(conn); got != "" {
+			t.Fatalf("after run %d's calls a keyed read showed %q, want nothing", run, got)
+		}
+		p.ClearWorkerScope(worker)
+		// Between the runs: on a connection the test opened, and on a new one.
+		if got := postOrMiss(t, conn, calls[0]) + "," + postOrMiss(t, mgr, calls[0]); got != "MISS,MISS" {
+			t.Fatalf("a call after run %d was served %s, want misses", run, got)
+		}
+	}
+}
+
+// In live mode (the starts registry) a test run again is a new frame, served
+// its recordings afresh; within a run each is served once, and the next test
+// is served none of them.
+func TestStatefulCursor_ALiveTestRunAgainIsServedItsRecordingsAgain(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow([]*models.Mock{
+		searchMock("a1", `{"id":"aaaa1111"}`, base, true),
+		searchMock("a2", `{"id":"aaaa2222"}`, base.Add(time.Second), true),
+	}, nil, models.BaseTime, time.Now())
+	starts.Default.SetTable("", liveSets())
+	t.Cleanup(starts.Default.Reset)
+	pid := uint32(os.Getpid())
+	conn := (&Proxy{}).scopedFor(pid, mgr)
+	calls := []string{`{"id":"cccc3333"}`, `{"id":"dddd4444"}`, `{"id":"eeee5555"}`}
+	for run := 1; run <= 2; run++ {
+		starts.Default.Begin(pid, "t1", "", false, time.Now())
+		if got, want := postOrMiss(t, conn, calls...), "a1,a2,MISS"; got != want {
+			t.Fatalf("run %d of t1 was served %s, want %s", run, got, want)
+		}
+		starts.Default.End(pid, "t1", false, time.Now())
+	}
+	starts.Default.Begin(pid, "t2", "", false, time.Now())
+	if got := postOrMiss(t, conn, calls[0]); got != "MISS" {
+		t.Fatalf("t2 was served %s, want a miss: t1's recordings are t1's", got)
+	}
+}
+
+// Inside a test, a call the app also made at startup is answered by the
+// startup recording, from the reusable union, every time: it is no test's
+// own, so it is not consumed.
+func TestStatefulCursor_TheStartupRecordingInsideATestIsNotConsumed(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	pool := []*models.Mock{
+		searchMock("boot", `{"id":"0000boot"}`, base.Add(-time.Minute), true),
+		searchMock("a1", `{"id":"aaaa1111"}`, base, true),
+	}
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow(pool, nil, models.BaseTime, time.Now())
+	mgr.SetMocksWithWindow(pool, nil, base.Add(-time.Second), base.Add(10*time.Second))
+	if got, want := postOrMiss(t, mgr, `{"id":"0000boot"}`, `{"id":"0000boot"}`, `{"id":"1111boot"}`), "boot,boot,boot"; got != want {
+		t.Fatalf("the startup call inside the test was served %s, want %s", got, want)
+	}
+}
+
+// A test begun without a worker pid (MockManager.SetScopeMocks) owns the
+// per-test pool staged for it, not a per-test recording staged with the
+// reusable tier (one mapped to no test): served by an exact match, the
+// latter is not kept from a later call that differs.
+func TestStatefulCursor_APidlessTestOwnsItsStagedPoolOnly(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mgr.SetScopeMocks([]*models.Mock{searchMock("a1", `{"id":"aaaa1111"}`, base, true)},
+		[]*models.Mock{searchMock("boot", `{"id":"0000boot"}`, base.Add(-time.Minute), true)}, true)
+	if got, want := postOrMiss(t, mgr, `{"id":"0000boot"}`, `{"id":"1111boot"}`), "boot,boot"; got != want {
+		t.Fatalf("the unmapped call in the test was served %s, want %s", got, want)
 	}
 }

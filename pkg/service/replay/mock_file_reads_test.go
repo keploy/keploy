@@ -22,7 +22,9 @@ import (
 // per-test pool, then the session pool, then the session pool again for the
 // report's mock lookup, and the YAML mock store read and decoded the whole
 // file for each: three decodes of the whole file before the first test could
-// run.
+// run. The read leaves each mock's payload in the file, and each mock's
+// document is decoded once more, alone, when the mock is sent to the agent:
+// a probe document the agent is sent is decoded twice.
 
 // decodeProbeKind is a mock kind only this file records. mockdb decodes every
 // document of a kind that has a MockYAMLMapper through that mapper, so the
@@ -124,31 +126,29 @@ func TestRunTestSetDecodesTheMockFileOnce(t *testing.T) {
 	if status := h.run(t); status != models.TestSetStatusPassed {
 		t.Fatalf("the run reported %q; want PASSED", status)
 	}
-	if got := decodeProbeCount.Load() - before; got != 1 {
-		t.Fatalf("one replay of the test set decoded its mock file %d times; want 1", got)
+	if got := decodeProbeCount.Load() - before; got != 2 {
+		t.Fatalf("one replay of the test set decoded the probe %d times; want 2: once as its mock file is read, once as it is sent", got)
 	}
 	if stored := storedNames(h.instr.storedUnfiltered); !stored["decode-probe"] || !stored["mock-0"] {
 		t.Fatalf("the agent was not handed the recorded session mocks; it got %v", stored)
 	}
 }
 
-// mutatingHooks is a MockMutator: it changes the loaded mocks in place, after
-// they are read and before the agent gets them, as a hook that decrypts
-// recorded secrets does.
+// mutatingHooks is a MockPayloadMutator: it changes each mock's payload on
+// its way to the agent, as a hook that decrypts recorded secrets does.
 type mutatingHooks struct {
 	prHooks
-	mutate func(filtered, unfiltered []*models.Mock)
+	mutate func(m *models.Mock)
 }
 
-func (h mutatingHooks) AfterGetMocks(_ context.Context, filtered, unfiltered []*models.Mock) error {
-	h.mutate(filtered, unfiltered)
+func (h mutatingHooks) MutateMockPayload(_ context.Context, m *models.Mock) error {
+	h.mutate(m)
 	return nil
 }
 
-// The report describes a mock as it is recorded, not as a MockMutator left
-// it: the separate read the report's lookup came from saw the file, and the
-// lookup now comes from the read that loads the mocks, which the mutator
-// changes in place afterwards. A mutator decrypts secrets for the agent; the
+// The report describes a mock as it is recorded, not as a MockPayloadMutator
+// left it: the lookup comes from the read that loads the mocks, and the
+// mutator changes each payload as it is sent. A mutator decrypts secrets for the agent; the
 // report must not carry them. A store that reads one pool per call still gets
 // the lookup from a read of its own.
 func TestRunTestSetReportsMocksAsRecordedNotAsMutated(t *testing.T) {
@@ -166,11 +166,9 @@ func TestRunTestSetReportsMocksAsRecordedNotAsMutated(t *testing.T) {
 					consumed:  []models.MockState{{Name: "mock-0", Kind: models.HTTP}},
 					wrongBody: map[string]bool{"test-1": true},
 				},
-				mutate: func(_, unfiltered []*models.Mock) {
-					for _, m := range unfiltered {
-						if m.Spec.HTTPReq != nil {
-							m.Spec.HTTPReq.URL = mutated
-						}
+				mutate: func(m *models.Mock) {
+					if m.Spec.HTTPReq != nil {
+						m.Spec.HTTPReq.URL = mutated
 					}
 				},
 			}
@@ -261,8 +259,7 @@ func useGobMocks(t *testing.T, h *prRun, mocks ...*models.Mock) {
 // the session pool alone, so a per-test mock (the pool a test's own calls are
 // recorded in, and the only tier a dependency row is written for) was
 // reported with an empty summary and a row with no target. The lookup
-// describes the mocks as recorded: before a MockMutator changes them in
-// place, and whether or not the window filter kept them for the agent.
+// describes the mocks as recorded: before a MockPayloadMutator changes them, and whether or not the window filter kept them for the agent.
 func TestRunTestSetReportsTheFailedTestsPerTestMocks(t *testing.T) {
 	const (
 		ordersOp = "/orders.Orders/Get"
@@ -275,9 +272,10 @@ func TestRunTestSetReportsTheFailedTestsPerTestMocks(t *testing.T) {
 		// gob file, which the probe cannot count.
 		decodes int64
 	}{
-		{"one read", 1},
+		// The file, and the probe's document again as it is sent.
+		{"one read", 2},
 		// The per-test pool, the session pool, and the session pool before
-		// the prune, as before.
+		// the prune, as before; their mocks are whole.
 		{"a read per pool", 3},
 		// mock-1's response is stamped before its request, so the window
 		// filter keeps it from the agent; the recording still maps it to
@@ -308,11 +306,9 @@ func TestRunTestSetReportsTheFailedTestsPerTestMocks(t *testing.T) {
 					consumed:  []models.MockState{{Name: "mock-0", Kind: models.GRPC_EXPORT}},
 					wrongBody: map[string]bool{"test-1": true},
 				},
-				mutate: func(filtered, _ []*models.Mock) {
-					for _, m := range filtered {
-						if m.Kind == models.GRPC_EXPORT {
-							m.Spec.Metadata["operation"] += mutated
-						}
+				mutate: func(m *models.Mock) {
+					if m.Kind == models.GRPC_EXPORT {
+						m.Spec.Metadata["operation"] += mutated
 					}
 				},
 			}

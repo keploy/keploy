@@ -1,51 +1,150 @@
 package proxy
 
 import (
-	"bytes"
-	"encoding/gob"
+	"cmp"
 	"fmt"
+	"math"
 	"os"
+	"slices"
 	"sort"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
-// DiskMocks parks per-test mocks on the agent's local disk and loads only the
-// mocks a given test needs (its request-time window) on demand, so resident RAM
-// is O(config/startup + one window) instead of the whole delivered pool.
+// DiskMocks keeps per-test mocks encoded, the first residentBudgetBytes of
+// them in memory and the rest on the agent's local disk, and decodes only the
+// mocks a given test needs (its request-time window) on demand, so resident
+// RAM is O(config/startup + the budget + one window) instead of the whole
+// delivered pool decoded.
 type DiskMocks struct {
 	mu       sync.Mutex
 	f        *os.File
 	path     string
 	offset   int64
-	entries  []diskEntry          // sorted by reqTsNano after Finalize
+	entries  []diskEntry          // by place, then offset, after Finalize (sortRecorded)
 	byName   map[string]diskEntry // name -> entry, by value so it survives sorting entries
 	finalize bool
 	logger   *zap.Logger
 	closed   bool
 
-	// carry indexes the entries of RegisterCarryOver kinds (models.IsCarryOver
-	// at Add), sorted with entries, so the lookahead load reads only them.
-	// Empty while no kind is registered.
+	// carry indexes the carry-over entries (models.IsCarryOver at Add: a
+	// RegisterCarryOver kind's, a StagingRelease need's), sorted by request
+	// time when Finalize sorts entries, so the lookahead load reads only
+	// them. Empty while nothing is registered.
 	carry []diskEntry
+
+	// staged indexes the entries a models.StagingWithStartup need declares
+	// (models.IsStagedAtStaging at Add), sorted by request time when
+	// Finalize sorts entries, so the set's staging call reads only them
+	// beside the startup band (LoadStaged). Empty while no kind declares
+	// one.
+	staged []diskEntry
+
+	// placed indexes the entries placed at their answer (models.IsAnswerPlaced
+	// at Add), sorted by place with entries, so a mapping-mode test's load
+	// reads only them beside the mocks its mapping names
+	// (LoadAnswerPlaced). Empty while no kind registers one.
+	placed []diskEntry
+
+	// destinations is, for each recorded destination a mock on disk reached
+	// (destinationKey) and, under the proven switch, each port one reached
+	// (reachedPortKey), the entry of the first one recorded
+	// (LoadDestinations). One entry per destination and port, resident.
+	destinations map[string]diskEntry
+
+	// statements is the statement catalog: for each statement a mock on disk
+	// records (its kind and models.StatementKey), the entry of the first one
+	// recorded (LoadStatements). One entry per statement, resident.
+	statements map[string]diskEntry
+
+	// onLoad, when set, is applied to every mock read from the store, as it
+	// is decoded (readAt): what a test set's first cycle learned, put on the
+	// recordings its retry cycles are served (SetOnLoad). nil until then.
+	onLoad atomic.Pointer[func(*models.Mock)]
+	// id names the store among the agent's, and loadGen how many times
+	// its onLoad was set (SetOnLoad), in the keys of the recordings a
+	// keeper keeps (SetRecordingKeeper): a key names one record as the
+	// store reads it now.
+	id      uint64
+	loadGen atomic.Uint64
+	// keeper keeps the recordings RangeRecordedBefore decodes
+	// (SetRecordingKeeper); nil: each is decoded at each read.
+	keeper atomic.Pointer[RecordingKeeper]
+	// recordedReads counts the records RangeRecordedBefore decoded, for
+	// the rows.
+	recordedReads atomic.Int64
+
+	// byKey names, by kind and request key (models.RequestKeys), every mock
+	// on disk under each key its parser declares, in the order Add took them
+	// (LoadKeys).
+	byKey map[string][]string
+
+	// byKind names, by kind, every mock on disk, in the order Add took them
+	// (RangeKind), each name once under the kind it was last added as
+	// (kindOf); kept under the proven switch, and in either switch mode for
+	// a kind placed at its answer (models.AnswerPlacedKind).
+	byKind map[models.Kind][]string
+	kindOf map[string]models.Kind
+
+	// phase names the mocks on disk that are protocol-phase
+	// (models.Mock.IsProtocolPhase at Add): few, so only those are listed
+	// (RangeTimes); kept under the proven switch only. nil while none is.
+	phase map[string]bool
+
+	// clockOf is, of each mock on disk on a clock (models.Origin.Clock), its
+	// clock's place in clocks (RangeTimes); a mock on none is not listed.
+	// One record run stamps its mocks on one clock, so clocks holds few.
+	// Kept under the proven switch only, nil while no mock is on a clock.
+	clockOf map[string]uint16
+	clocks  []string
+
+	// budget is how many bytes of records the store keeps in memory
+	// (residentBudgetBytes); the first records up to it stay there, in mem by
+	// offset, and once one does not fit, it and every record after it go to
+	// the file, at their offset less memEnd.
+	budget int64
+	mem    map[int64][]byte
+	memEnd int64
+
+	// records decodes what the store reads, with decoders that live as long
+	// as it does (gobRecords).
+	records gobRecords
 }
 
-// diskEntry locates one on-disk mock (~56 B resident). For spilled HTTP/Mongo
-// mocks the response is a separate blob at respOff/respLen; respOff -1 = inline.
+// diskEntry locates one stored mock: 48 B, held in entries and byName and in
+// each index that lists the mock (carry, staged, placed, destinations,
+// statements).
+// For spilled HTTP/Mongo mocks the response is a separate blob at
+// respOff/respLen; respOff -1 = inline.
 type diskEntry struct {
 	reqTsNano int64
-	off       int64
-	length    int
-	respOff   int64
-	respLen   int
+	// resTsNano is the response time, for the in-flight load (LoadInFlight).
+	resTsNano int64
+	// placeTsNano is where the mock sits in the recording (models.PlaceOf):
+	// its request time, or its answer's for a mock placed at its answer. The
+	// window and start-up loads read it.
+	placeTsNano int64
+	off         int64
+	length      int
+	respOff     int64
+	respLen     int
 }
 
-// responseSpillMinBytes: only elide HTTP bodies at least this big; smaller ones
-// stay inline (a serve-time disk read isn't worth it). Mongo always spills.
+// responseSpillMinBytes: only answers at least this big are kept apart from
+// their mock (an HTTP body, or the Mongo responses as encoded); smaller ones
+// stay inline, decoded with the mock, as reading one apart on each serve costs
+// more than it saves.
 const responseSpillMinBytes = 8 * 1024
+
+// residentBudgetBytes is how many bytes of encoded records a store keeps in
+// memory before it writes the rest to its file.
+const residentBudgetBytes = 64 << 20
 
 // spilledResponse is the elided response payload, stored apart from the mock so
 // the resident window holds only matchers. Exactly one field is populated.
@@ -54,8 +153,15 @@ type spilledResponse struct {
 	Mongo []models.MongoResponse
 }
 
-// NewDiskMocks creates the store over a fresh temp file; caller must Close it.
+// NewDiskMocks creates the store over a fresh temp file, keeping up to
+// residentBudgetBytes of records in memory; caller must Close it.
 func NewDiskMocks(logger *zap.Logger) (*DiskMocks, error) {
+	return newDiskMocks(logger, residentBudgetBytes)
+}
+
+// newDiskMocks is NewDiskMocks keeping up to budget bytes of records in
+// memory.
+func newDiskMocks(logger *zap.Logger, budget int64) (*DiskMocks, error) {
 	f, err := os.CreateTemp("", "keploy-diskmocks-*.gob")
 	if err != nil {
 		return nil, fmt.Errorf("disk mocks: create temp file: %w", err)
@@ -65,10 +171,13 @@ func NewDiskMocks(logger *zap.Logger) (*DiskMocks, error) {
 		path = ""
 	}
 	return &DiskMocks{
-		f:      f,
-		path:   path,
-		byName: make(map[string]diskEntry),
-		logger: logger,
+		id:      diskStores.Add(1),
+		f:       f,
+		path:    path,
+		byName:  make(map[string]diskEntry),
+		logger:  logger,
+		budget:  budget,
+		records: newGobRecords(),
 	}, nil
 }
 
@@ -87,8 +196,10 @@ func EligibleForDisk(m *models.Mock) bool {
 	return true
 }
 
-// EligibleForResponseSpill reports whether a disk-eligible mock has a big
-// HTTP/Mongo response worth eliding from the window (matching never reads it).
+// EligibleForResponseSpill reports whether a disk-eligible mock's HTTP/Mongo
+// response may be worth eliding from the window (matching never reads it): an
+// HTTP body of responseSpillMinBytes or more, or any Mongo responses, which
+// Add keeps apart only when they encode to responseSpillMinBytes or more.
 func EligibleForResponseSpill(m *models.Mock) bool {
 	if !EligibleForDisk(m) {
 		return false
@@ -102,42 +213,43 @@ func EligibleForResponseSpill(m *models.Mock) bool {
 	return false
 }
 
-// Add writes a mock to disk and indexes it; caller drops its resident ref after.
-// Spill-eligible mocks write their response as a separate blob and encode the
-// record with the response elided. Called from the single-threaded ingest loop.
+// Add stores a mock and indexes it; caller drops its resident ref after.
+// A mock with a big answer (EligibleForResponseSpill, and for Mongo
+// responses that encode to responseSpillMinBytes or more) has its answer
+// written as a separate blob and the record encoded with it elided. Called
+// from the single-threaded ingest loop.
 func (d *DiskMocks) Add(m *models.Mock) error {
 	spill := EligibleForResponseSpill(m)
-
-	var respBlob []byte
-	if spill {
-		var rb bytes.Buffer
-		sr := spilledResponse{HTTP: m.Spec.HTTPResp, Mongo: m.Spec.MongoResponses}
-		if err := gob.NewEncoder(&rb).Encode(&sr); err != nil {
-			return fmt.Errorf("disk mocks: encode response %q: %w", m.Name, err)
-		}
-		respBlob = rb.Bytes()
-	}
-
-	// Fresh encoder per record → each is self-contained and decodable via ReadAt.
-	var buf bytes.Buffer
-	if spill {
-		// Elide the response for encoding, then restore (caller drops m anyway).
-		httpResp, mongoResp := m.Spec.HTTPResp, m.Spec.MongoResponses
-		m.Spec.HTTPResp, m.Spec.MongoResponses = nil, nil
-		err := gob.NewEncoder(&buf).Encode(m)
-		m.Spec.HTTPResp, m.Spec.MongoResponses = httpResp, mongoResp
-		if err != nil {
-			return fmt.Errorf("disk mocks: encode %q: %w", m.Name, err)
-		}
-	} else if err := gob.NewEncoder(&buf).Encode(m); err != nil {
-		return fmt.Errorf("disk mocks: encode %q: %w", m.Name, err)
-	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
 		return fmt.Errorf("disk mocks: store closed")
 	}
+	var respBlob []byte
+	if spill {
+		sr := spilledResponse{HTTP: m.Spec.HTTPResp, Mongo: m.Spec.MongoResponses}
+		b, err := d.records.encodeLocked(&sr, true, d.offset, d.writeLocked)
+		if err != nil {
+			return fmt.Errorf("disk mocks: encode response %q: %w", m.Name, err)
+		}
+		respBlob = b
+		if m.Kind == models.Mongo && len(respBlob) < responseSpillMinBytes {
+			spill, respBlob = false, nil
+		}
+	}
+
+	// Elide a spilled response for encoding, then restore (caller drops m anyway).
+	httpResp, mongoResp := m.Spec.HTTPResp, m.Spec.MongoResponses
+	if spill {
+		m.Spec.HTTPResp, m.Spec.MongoResponses = nil, nil
+	}
+	rec, err := d.records.encodeLocked(m, false, d.offset, d.writeLocked)
+	m.Spec.HTTPResp, m.Spec.MongoResponses = httpResp, mongoResp
+	if err != nil {
+		return fmt.Errorf("disk mocks: encode %q: %w", m.Name, err)
+	}
+
 	respOff := int64(-1)
 	respLen := 0
 	if spill {
@@ -147,24 +259,102 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		}
 		respOff, respLen = off, n
 	}
-	off, n, err := d.writeLocked(buf.Bytes())
+	off, n, err := d.writeLocked(rec)
 	if err != nil {
 		return fmt.Errorf("disk mocks: write %q: %w", m.Name, err)
 	}
-	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), off: off, length: n, respOff: respOff, respLen: respLen}
+	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), resTsNano: m.Spec.ResTimestampMock.UnixNano(),
+		placeTsNano: placeNano(models.PlaceOf(m)), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
+	// Listed by kind (RangeKind) for the kinds diskListsKind names.
+	if diskListsKind(m.Kind) {
+		if d.byKind == nil {
+			d.byKind, d.kindOf = make(map[models.Kind][]string), make(map[string]models.Kind)
+		}
+		// A mock added again under its name is listed once; added as another
+		// kind, it is that kind's (RangeKind skips the stale listing).
+		if prev, again := d.kindOf[m.Name]; !again || prev != m.Kind {
+			d.byKind[m.Kind] = append(d.byKind[m.Kind], m.Name)
+			d.kindOf[m.Name] = m.Kind
+		}
+	}
+	// The teardown bound reads which are protocol-phase (RangeTimes), under
+	// the proven switch only.
+	if provenswitch.On() {
+		if m.IsProtocolPhase() {
+			if d.phase == nil {
+				d.phase = make(map[string]bool)
+			}
+			d.phase[m.Name] = true
+		} else {
+			delete(d.phase, m.Name)
+		}
+		d.noteClockLocked(m.Name, mockClock(m))
+	}
+	for _, k := range models.RequestKeys(m) {
+		if d.byKey == nil {
+			d.byKey = make(map[string][]string)
+		}
+		d.byKey[diskKey(m.Kind, k)] = append(d.byKey[diskKey(m.Kind, k)], m.Name)
+	}
 	if models.IsCarryOver(m) {
 		d.carry = append(d.carry, e)
+	}
+	if models.IsStagedAtStaging(m) {
+		d.staged = append(d.staged, e)
+	}
+	if models.IsAnswerPlaced(m) {
+		d.placed = append(d.placed, e)
+	}
+	// Under the proven switch the store also keeps the first mock of each
+	// port the recording reached (reachedPortKey), for the loopback rules
+	// keploy mock replay reads (recordedPorts.seed): its staging reads only
+	// what was recorded before the set's first test.
+	keys := []string{destinationKey(m)}
+	if provenswitch.On() {
+		keys = append(keys, reachedPortKey(m))
+	}
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		if first, ok := d.destinations[k]; !ok || e.reqTsNano < first.reqTsNano {
+			if d.destinations == nil {
+				d.destinations = make(map[string]diskEntry)
+			}
+			d.destinations[k] = e
+		}
+	}
+	if k := models.StatementKey(m); k != "" {
+		key := string(m.Kind) + "\x00" + k
+		if first, ok := d.statements[key]; !ok || e.reqTsNano < first.reqTsNano {
+			if d.statements == nil {
+				d.statements = make(map[string]diskEntry)
+			}
+			d.statements[key] = e
+		}
 	}
 	d.finalize = false
 	return nil
 }
 
-// writeLocked appends b at the running offset and advances it. Caller holds mu.
+// writeLocked appends b at the running offset and advances it: in memory
+// while the records so far and b fit the budget, else to the file, and so is
+// every record after it, as the offset only grows. The store keeps b, which
+// nothing may change after. Caller holds mu.
 func (d *DiskMocks) writeLocked(b []byte) (int64, int, error) {
 	off := d.offset
-	n, err := d.f.WriteAt(b, off)
+	if off+int64(len(b)) <= d.budget {
+		if d.mem == nil {
+			d.mem = make(map[int64][]byte)
+		}
+		d.mem[off] = b
+		d.offset += int64(len(b))
+		d.memEnd = d.offset
+		return off, len(b), nil
+	}
+	n, err := d.f.WriteAt(b, off-d.memEnd)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -172,60 +362,143 @@ func (d *DiskMocks) writeLocked(b []byte) (int64, int, error) {
 	return off, n, nil
 }
 
-// Finalize sorts the index by request timestamp for binary search. Idempotent.
+// bytesAt returns the n bytes stored at off: the record itself while it is
+// kept in memory (never changed, so it is read without a copy), else read
+// from the file, which nothing writes again once written.
+func (d *DiskMocks) bytesAt(off int64, n int) ([]byte, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if off < d.memEnd {
+		b, ok := d.mem[off]
+		d.mu.Unlock()
+		if !ok || len(b) != n {
+			return nil, fmt.Errorf("disk mocks: no record of %d bytes at %d", n, off)
+		}
+		return b, nil
+	}
+	f, fileOff := d.f, off-d.memEnd
+	d.mu.Unlock()
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, fileOff); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// Finalize sorts the index and the answer-placed one by place
+// (models.PlaceOf: the request timestamp, or the answer's for a mock placed
+// at its answer) for binary search, and the carry-over and staged indexes by
+// request timestamp, which their loads search by, the mocks of one time in
+// the order they were added (sortRecorded). A carry-over or staged mock is
+// never placed at its answer (models.IsAnswerPlaced, held so by
+// models.TestPlaceOfIsTheAnswerForAMockPlacedAtItsAnswer), so its place is
+// its request time, and a sort of those two by place would order them
+// alike. Idempotent.
 func (d *DiskMocks) Finalize() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.finalize {
 		return
 	}
-	sort.Slice(d.entries, func(i, j int) bool { return d.entries[i].reqTsNano < d.entries[j].reqTsNano })
-	sort.Slice(d.carry, func(i, j int) bool { return d.carry[i].reqTsNano < d.carry[j].reqTsNano })
+	sortRecorded(d.entries, entryPlace)
+	sortRecorded(d.carry, entryRequest)
+	sortRecorded(d.staged, entryRequest)
+	sortRecorded(d.placed, entryPlace)
 	d.finalize = true
 }
 
-// readAt decodes the mock at an entry. The file is immutable after Finalize, so
-// ReadAt is concurrency-safe. Elided responses get a lazy serve-time loader.
+// sortRecorded sorts entries by at, and the entries of one time by their
+// offset in the store: the order Add took them in, as it writes each at a
+// running offset, which is the mock file's order, the order they were
+// recorded in. Every frame of one client write is read at that write's time,
+// so a pipeline of commands records many mocks of one request time, and a
+// parser answers a repeated command from its recordings in turn (a counter
+// read again and again): a sort by time alone, which may reorder entries of
+// one time, would have them answered out of turn. No two entries share an
+// offset, so the order is total.
+func sortRecorded(entries []diskEntry, at func(diskEntry) int64) {
+	slices.SortFunc(entries, func(a, b diskEntry) int { return recordedFirst(a, b, at) })
+}
+
+// recordedFirst compares two entries by at, and two of one time by their
+// offset (sortRecorded).
+func recordedFirst(a, b diskEntry, at func(diskEntry) int64) int {
+	if c := cmp.Compare(at(a), at(b)); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.off, b.off)
+}
+
+func entryPlace(e diskEntry) int64   { return e.placeTsNano }
+func entryRequest(e diskEntry) int64 { return e.reqTsNano }
+
+// readAt decodes the mock at an entry, into a mock of its own (gobRecords).
+// Stored records never change, so reads are concurrency-safe. Elided
+// responses get a lazy serve-time loader.
 func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
-	buf := make([]byte, e.length)
-	if _, err := d.f.ReadAt(buf, e.off); err != nil {
+	buf, err := d.bytesAt(e.off, e.length)
+	if err != nil {
 		return nil, fmt.Errorf("disk mocks: read at %d: %w", e.off, err)
 	}
-	var m models.Mock
-	if err := gob.NewDecoder(bytes.NewReader(buf)).Decode(&m); err != nil {
+	m, err := decodeRecord[models.Mock](d, e.off, buf)
+	if err != nil {
 		return nil, fmt.Errorf("disk mocks: decode at %d: %w", e.off, err)
 	}
+	if f := d.onLoad.Load(); f != nil {
+		(*f)(m)
+	}
+	m.SetStoredSize(int64(e.length + e.respLen))
 	if e.respOff >= 0 {
 		respOff, respLen := e.respOff, e.respLen
 		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
 			return d.loadResponse(respOff, respLen)
 		})
 	}
-	return &m, nil
+	return m, nil
+}
+
+// DecodersBuilt returns how many gob decoders the store has made to read
+// what it holds (gobRecords; diagnostics/tests).
+func (d *DiskMocks) DecodersBuilt() int64 { return d.records.built.Load() }
+
+// SetOnLoad has f applied to every mock the store reads from now on, as it is
+// decoded, before any caller holds it: the agent puts on them what a test
+// set's first cycle learned, for its retry cycles (learn.KeptLearning.Into).
+// A mock read before keeps what it was read with.
+func (d *DiskMocks) SetOnLoad(f func(*models.Mock)) {
+	// The generation the keeper's keys name (recordedAt) moves only after
+	// the Store, deferred. Moved before it, a read in between would take
+	// the new generation's key, decode with the old onLoad, and the keeper
+	// would hand that stale recording to every later read of the set. In
+	// this order a read in between keys its recording by the old generation,
+	// which no read after the bump asks again.
+	defer d.loadGen.Add(1)
+	if f == nil {
+		d.onLoad.Store(nil)
+		return
+	}
+	d.onLoad.Store(&f)
 }
 
 // loadResponse reads and decodes an elided response blob on demand at serve.
 func (d *DiskMocks) loadResponse(off int64, length int) (*models.HTTPResp, []models.MongoResponse, error) {
-	d.mu.Lock()
-	closed := d.closed
-	f := d.f
-	d.mu.Unlock()
-	if closed {
-		return nil, nil, fmt.Errorf("disk mocks: store closed")
-	}
-	buf := make([]byte, length)
-	if _, err := f.ReadAt(buf, off); err != nil {
+	buf, err := d.bytesAt(off, length)
+	if err != nil {
 		return nil, nil, fmt.Errorf("disk mocks: read response at %d: %w", off, err)
 	}
-	var sr spilledResponse
-	if err := gob.NewDecoder(bytes.NewReader(buf)).Decode(&sr); err != nil {
+	sr, err := decodeRecord[spilledResponse](d, off, buf)
+	if err != nil {
 		return nil, nil, fmt.Errorf("disk mocks: decode response at %d: %w", off, err)
 	}
 	return sr.HTTP, sr.Mongo, nil
 }
 
-// LoadWindow returns mocks with request timestamp in [start,end] (inclusive,
-// matching SetMocksWithWindow).
+// LoadWindow returns mocks placed in [start,end] (inclusive, matching
+// SetMocksWithWindow): their request timestamp, or their answer's for a mock
+// placed at its answer (models.PlaceOf).
 func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -256,16 +529,59 @@ func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 			zap.Time("start", start), zap.Time("end", end))
 		hi = lo
 	}
-	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].reqTsNano >= lo })
+	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].placeTsNano >= lo })
 	sel := make([]diskEntry, 0)
-	for ; i < len(d.entries) && d.entries[i].reqTsNano <= hi; i++ {
+	for ; i < len(d.entries) && d.entries[i].placeTsNano <= hi; i++ {
 		sel = append(sel, d.entries[i])
 	}
 	d.mu.Unlock()
 	return d.decodeAll(sel)
 }
 
-// LoadCarryOver returns the mocks of RegisterCarryOver kinds with request
+// LoadInFlight returns the mocks in flight at at that were sent after from:
+// request time in (from, at), response time at or after at
+// (models.SentInGapAnsweredBy), that the in-flight rule applies to
+// (models.InFlightEligible). For a test window starting at at, with from the
+// end of the gap before it (models.WindowSchedule.GapBefore), they are the
+// calls in flight when the test began. A mock with no response time is not
+// one. It scans the entries by place, from from to at (a mock the in-flight
+// rule applies to is placed at its request; one placed at its answer, which
+// it does not, would be placed past at), and decodes only those answered at
+// or after at.
+func (d *DiskMocks) LoadInFlight(from, at time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo, hi := from.UnixNano(), at.UnixNano()
+	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].placeTsNano > lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.entries) && d.entries[i].placeTsNano < hi; i++ {
+		if e := d.entries[i]; e.resTsNano >= hi && e.resTsNano > 0 {
+			sel = append(sel, e)
+		}
+	}
+	d.mu.Unlock()
+	decoded, err := d.decodeAll(sel)
+	if err != nil {
+		return nil, err
+	}
+	out := decoded[:0]
+	for _, m := range decoded {
+		if models.InFlightEligible(m) && models.SentInGapAnsweredBy(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, from, at) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// LoadCarryOver returns the carry-over mocks (models.IsCarryOver) with request
 // timestamp in [from, to] (inclusive), for the agent's lookahead load of the
 // carry-over tier. It reads only those entries, whatever else the range holds.
 func (d *DiskMocks) LoadCarryOver(from, to time.Time) ([]*models.Mock, error) {
@@ -289,8 +605,63 @@ func (d *DiskMocks) LoadCarryOver(from, to time.Time) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
-// LoadBefore returns mocks with request timestamp strictly before t — the
-// startup band routed to the startup tree; loaded once, kept resident by caller.
+// LoadStaged returns, in recorded order, the mocks a
+// models.StagingWithStartup need declares with request timestamp in
+// [from, to] (inclusive): what the set's staging call stages beside the
+// startup band (LoadBefore), from the band's cutoff to the end of the
+// staging's window. It reads only those entries.
+func (d *DiskMocks) LoadStaged(from, to time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo, hi := from.UnixNano(), to.UnixNano()
+	i := sort.Search(len(d.staged), func(k int) bool { return d.staged[k].reqTsNano >= lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.staged) && d.staged[i].reqTsNano <= hi; i++ {
+		sel = append(sel, d.staged[i])
+	}
+	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
+// LoadAnswerPlaced returns, in placed order, the mocks placed at their answer
+// (models.IsAnswerPlaced) whose answer is in [from, to] (inclusive, as
+// LoadWindow's): what a mapping-mode test window serves beside the mocks its
+// mapping names (pkg.FilterTcsMocksMappingInWindow). It reads only those
+// entries, whatever else the window holds. An inverted window holds none, as
+// the filter's does.
+func (d *DiskMocks) LoadAnswerPlaced(from, to time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo, hi := from.UnixNano(), to.UnixNano()
+	i := sort.Search(len(d.placed), func(k int) bool { return d.placed[k].placeTsNano >= lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.placed) && d.placed[i].placeTsNano <= hi; i++ {
+		sel = append(sel, d.placed[i])
+	}
+	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
+// LoadBefore returns mocks placed strictly before t (models.PlaceOf) — the
+// startup band routed to the startup tree; loaded once, kept resident by
+// caller. A consumer's poll sent as the app boots and answered in a test is
+// placed at its answer, and is that test's, not start-up traffic.
 func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -303,9 +674,134 @@ func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
 		d.mu.Lock()
 	}
 	cut := t.UnixNano()
-	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].reqTsNano >= cut })
+	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].placeTsNano >= cut })
 	sel := append([]diskEntry(nil), d.entries[:i]...)
 	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
+// RangeRecordedBefore visits the mocks recorded before t, or at t's own
+// instant (integrations.RecordedBeforeReader), by request time (wherever they are placed: one placed at its answer may sit
+// past t), in recorded order, until visit returns false, for the learn
+// step's earlier places (MockManager.RangeRecordedBefore). Each is decoded
+// for visit alone, one at a time, and kept by no one: what the store keeps
+// on disk is never in memory at once.
+func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) bool) error {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	cut := t.UnixNano()
+	var sel []diskEntry
+	for _, e := range d.entries {
+		if e.reqTsNano <= cut {
+			sel = append(sel, e)
+		}
+	}
+	d.mu.Unlock()
+	sortRecorded(sel, entryRequest)
+	keep := d.keeper.Load()
+	for _, e := range sel {
+		m, err := d.recordedAt(e, keep)
+		if err != nil {
+			return err
+		}
+		if !visit(m) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// RecordingKeeper keeps a recording key names as decode reads it, for the
+// learn step's reads of the set's recordings (learn.Tracker.KeepRecording):
+// size is about the bytes the decoded recording holds. It hands each read a
+// recording of its own, as decode does.
+type RecordingKeeper func(key string, size int64, decode func() (*models.Mock, error)) (*models.Mock, error)
+
+// SetRecordingKeeper has k keep the recordings RangeRecordedBefore decodes,
+// so the learn step's calls, each of which reads every recording of the set
+// made before it, decode one once for the set where k has room, and at
+// each read where it has none, as with no keeper (nil).
+func (d *DiskMocks) SetRecordingKeeper(k RecordingKeeper) {
+	if k == nil {
+		d.keeper.Store(nil)
+		return
+	}
+	d.keeper.Store(&k)
+}
+
+// RecordedReads is how many records RangeRecordedBefore has decoded, for
+// the rows.
+func (d *DiskMocks) RecordedReads() int64 { return d.recordedReads.Load() }
+
+// diskStores numbers the agent's stores (DiskMocks.id).
+var diskStores atomic.Uint64
+
+// decodedOverhead is about the bytes a decoded recording holds past its
+// record's: its struct, its spec's and the maps and slices they hold.
+const decodedOverhead = 1 << 10
+
+// recordedAt is e's recording as RangeRecordedBefore hands it: kept by
+// keep where one is set (nil: decoded now). Its key names the store, how
+// its onLoad was set when it was read, and e's record.
+func (d *DiskMocks) recordedAt(e diskEntry, keep *RecordingKeeper) (*models.Mock, error) {
+	decode := func() (*models.Mock, error) {
+		d.recordedReads.Add(1)
+		return d.readAt(e)
+	}
+	if keep == nil {
+		return decode()
+	}
+	key := strconv.FormatUint(d.id, 10) + ":" + strconv.FormatUint(d.loadGen.Load(), 10) + ":" + strconv.FormatInt(e.off, 10)
+	return (*keep)(key, 2*int64(e.length)+decodedOverhead, decode)
+}
+
+// LoadStatements returns the statement catalog: for each statement the mocks
+// on disk record (models.StatementKey), the first one recorded, in recorded
+// order. A client may prepare a statement at app start that its recordings hold
+// only inside tests, which the startup band (LoadBefore) does not reach: the
+// agent reads these once, when the set is stored, and seeds them on the proxy
+// describe-only, so a parser can answer the prepare and never serves them.
+func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	sel := make([]diskEntry, 0, len(d.statements))
+	for _, e := range d.statements {
+		sel = append(sel, e)
+	}
+	d.mu.Unlock()
+	sortRecorded(sel, entryRequest)
+	return d.decodeAll(sel)
+}
+
+// LoadDestinations returns, in recorded order, the first mock on disk of
+// each recorded destination (destinationKey) and, under the proven switch, of
+// each port the recording reached (reachedPortKey), each mock once: what the
+// recording says of its destinations, bounded by how many it reached, for the
+// proxy's destination rules to read before any of them is staged
+// (Proxy.SeedRecordedDestinations).
+func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	sel := make([]diskEntry, 0, len(d.destinations))
+	seen := make(map[int64]bool, len(d.destinations))
+	for _, e := range d.destinations {
+		// One mock may be the first of a destination and of a port.
+		if !seen[e.off] {
+			seen[e.off] = true
+			sel = append(sel, e)
+		}
+	}
+	d.mu.Unlock()
+	sortRecorded(sel, entryRequest)
 	return d.decodeAll(sel)
 }
 
@@ -325,6 +821,181 @@ func (d *DiskMocks) LoadByNames(names []string) ([]*models.Mock, error) {
 	d.mu.Unlock()
 	return d.decodeAll(sel)
 }
+
+// RangeKeys calls visit, in recorded order (request time), with each on-disk
+// mock of kind indexed under any of keys (models.RequestKeys), once each, until
+// visit returns false: its name, and load, which decodes it. Only what visit
+// loads is decoded, so a caller that filters by name first decodes none it
+// passes over: what a miss's diagnosis under exact serving reads for a
+// recording of a test not begun yet (MockManager.FindStagedNotOwnedByKeys's
+// recording source).
+func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	type candidate struct {
+		name string
+		e    diskEntry
+	}
+	var cs []candidate
+	seen := map[string]bool{}
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	for _, k := range keys {
+		for _, name := range d.byKey[diskKey(kind, k)] {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			if e, ok := d.byName[name]; ok {
+				cs = append(cs, candidate{name: name, e: e})
+			}
+		}
+	}
+	d.mu.Unlock()
+	slices.SortFunc(cs, func(a, b candidate) int { return recordedFirst(a.e, b.e, entryRequest) })
+	for _, c := range cs {
+		e := c.e
+		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// diskListsKind reports whether the on-disk store lists kind's mocks by kind
+// (Add, RangeKind). Record's full round pairs by kind under the proven switch:
+// every replay under the switch keeps the index (a name per on-disk mock), so
+// that one can. Without the switch it lists only the kinds whose parser holds
+// a call while the set still holds an unserved recording of it
+// (models.AnswerPlacedKind), which reads them by kind. The set as recorded
+// (MockManager.RangeRecordedSet) tells a whole set only for a kind this
+// names, so a kind the disk does not list is never told whole with its
+// on-disk recordings missing.
+func diskListsKind(kind models.Kind) bool {
+	return provenswitch.On() || models.AnswerPlacedKind(kind)
+}
+
+// RangeKind calls visit, in recorded order (request time), with each on-disk
+// mock of kind, once each, until visit returns false: its name, and load,
+// which decodes it. Only what visit loads is decoded. What record's full
+// round's pairing reads of the recordings of a test not begun yet
+// (MockManager.PairingCandidates's source), and a parser of the staged set
+// as recorded (MockManager.RangeRecordedSet).
+func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	type candidate struct {
+		name string
+		e    diskEntry
+	}
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	names := d.byKind[kind]
+	cs := make([]candidate, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] || d.kindOf[name] != kind {
+			continue
+		}
+		seen[name] = true
+		if e, ok := d.byName[name]; ok {
+			cs = append(cs, candidate{name: name, e: e})
+		}
+	}
+	d.mu.Unlock()
+	slices.SortFunc(cs, func(a, b candidate) int { return recordedFirst(a.e, b.e, entryRequest) })
+	for _, c := range cs {
+		e := c.e
+		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// RangeTimes calls visit with every mock on disk, each once, in no order:
+// its name, its place (models.PlaceOf, as Add computed it; the zero time for
+// a mock with none, which bounds nothing), whether it is
+// protocol-phase (models.Mock.IsProtocolPhase) and its clock
+// (models.Origin.Clock, "" for none; both told under the proven switch
+// only, the only one the teardown bound reads them under), until visit
+// returns false. Nothing is decoded: the places are the store's own, kept
+// as each mock was added. It
+// is what bounds a set's teardown under keploy mock replay
+// (MockManager.SetRecordingTimes): the latest recording of the set's tests,
+// which the staging does not read. visit runs under the store's lock, so it
+// must not call the store.
+func (d *DiskMocks) RangeTimes(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	for name, e := range d.byName {
+		clock := ""
+		if i, ok := d.clockOf[name]; ok {
+			clock = d.clocks[i]
+		}
+		// A mock with no place (placeNano) is told the zero time, as the
+		// trees tell it, not the Unix epoch.
+		var place time.Time
+		if e.placeTsNano != 0 {
+			place = time.Unix(0, e.placeTsNano)
+		}
+		if !visit(name, place, d.phase[name], clock) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// placeNano is place (models.PlaceOf) in Unix nanoseconds as the store keeps
+// it: 0 for the zero place of a mock with no request time, which RangeTimes
+// tells as the zero time, not the zero time's UnixNano, which overflows to a
+// time in 1754 that it told as a place. Like that time, 0 sorts before every
+// recorded place.
+func placeNano(place time.Time) int64 {
+	if place.IsZero() {
+		return 0
+	}
+	return place.UnixNano()
+}
+
+// noteClockLocked notes name's clock for RangeTimes, "" for none: a mock
+// added again under its name takes its latest clock. The store's lock is
+// held.
+func (d *DiskMocks) noteClockLocked(name, clock string) {
+	if clock == "" {
+		delete(d.clockOf, name)
+		return
+	}
+	i := -1
+	for j, c := range d.clocks {
+		if c == clock {
+			i = j
+			break
+		}
+	}
+	if i < 0 {
+		if len(d.clocks) > math.MaxUint16 {
+			// Never in practice (a record run names one clock); past it a
+			// mock reads as on no clock, which bounds every one: fail closed.
+			delete(d.clockOf, name)
+			return
+		}
+		i = len(d.clocks)
+		d.clocks = append(d.clocks, clock)
+	}
+	if d.clockOf == nil {
+		d.clockOf = make(map[string]uint16)
+	}
+	d.clockOf[name] = uint16(i)
+}
+
+// diskKey is the byKey index of kind and request key.
+func diskKey(kind models.Kind, key string) string { return string(kind) + "\x00" + key }
 
 // LoadAll returns every on-disk mock (lax mode needs the full per-test set).
 func (d *DiskMocks) LoadAll() ([]*models.Mock, error) {
@@ -358,16 +1029,15 @@ func (d *DiskMocks) EarliestReqTs() time.Time {
 	if len(d.entries) == 0 {
 		return time.Time{}
 	}
-	if !d.finalize {
-		min := d.entries[0].reqTsNano
-		for _, e := range d.entries[1:] {
-			if e.reqTsNano < min {
-				min = e.reqTsNano
-			}
+	// entries are sorted by place once finalized, and a mock placed at its
+	// answer may be the earliest asked: the minimum is read either way.
+	min := d.entries[0].reqTsNano
+	for _, e := range d.entries[1:] {
+		if e.reqTsNano < min {
+			min = e.reqTsNano
 		}
-		return time.Unix(0, min)
 	}
-	return time.Unix(0, d.entries[0].reqTsNano)
+	return time.Unix(0, min)
 }
 
 // Len returns the on-disk mock count (diagnostics/tests).
@@ -395,7 +1065,15 @@ func (d *DiskMocks) SpilledResponses() int {
 func (d *DiskMocks) DiskBytes() int64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.offset
+	return d.offset - d.memEnd
+}
+
+// ResidentBytes returns the bytes of records kept in memory, at most the
+// store's budget (diagnostics/tests).
+func (d *DiskMocks) ResidentBytes() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.memEnd
 }
 
 // Close closes and removes the temp file. Idempotent; later ops then fail.
@@ -406,6 +1084,7 @@ func (d *DiskMocks) Close() error {
 		return nil
 	}
 	d.closed = true
+	d.mem = nil
 	var firstErr error
 	if d.f != nil {
 		if err := d.f.Close(); err != nil {

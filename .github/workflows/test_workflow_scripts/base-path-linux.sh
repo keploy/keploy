@@ -14,9 +14,13 @@
 # way (%20 to a space, %2F to a path separator, %23 to the start of a
 # fragment); and a streaming test was never given the base path at all.
 #
-# Records six tests of an app that prices orders from a dependency -- one with
-# escapes in its path and query that the app answers with what it was asked,
-# one streamed -- then replays them with --base-path, not as root:
+# Records five tests of an app that prices orders from a dependency -- one
+# with escapes in its path and query that the app answers with what it was
+# asked -- and sends it a sixth request it answers with a stream, which keploy
+# passes to the client whole and records no test case of
+# (models.IsHTTPStreamResponse). The set gets that sixth test as a keploy
+# before that rule recorded it, a streamed one, which keploy still replays.
+# Then it replays the six with --base-path, not as root:
 #   1. the app where it was recorded: all pass, exit 0;
 #   2. the app at another address (127.0.0.2, on the dependency's old port),
 #      with the dependency now answering at the recorded address: all pass,
@@ -42,12 +46,25 @@
 #      --must-pass: the first test's pass is kept, no test fails, none is
 #      deleted, nothing is logged as an ERROR, exit 0. Every test after the
 #      stop was started, failed at once and reported FAILED, and --must-pass
-#      deleted the whole test set.
+#      deleted the whole test set;
+#   9. the run stopped by SIGINT, SIGTERM or SIGHUP as its FIRST test waits
+#      for an answer, so that no test has a verdict: the report is
+#      USER_ABORT with none passed or failed, the run says it tested nothing,
+#      and it exits 130, 143 or 129. It exited 0, as a run that passed does.
 #
 # It uses ports 18911 and 18912 on 127.0.0.1 and 127.0.0.2, and refuses to
 # start while something else listens on one.
 #
 # Env: RECORD_BIN and REPLAY_BIN, the PR `build` binary for both (mock_linux.yml).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+# shellcheck source=hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/hang_guard.sh" || exit 1
+
 set -uo pipefail
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -84,13 +101,14 @@ socketserver.ThreadingTCPServer.allow_reuse_address = True
 with socketserver.ThreadingTCPServer(("127.0.0.1", PORT), H) as s: s.serve_forever()
 PY
 
-# The app. argv: BIND PORT DEP_PORT [bug|hold]. With "bug" an order costs one
-# more than its items, the regression leg 3 replays against. With "hold" it
-# takes the request for order 1, says so in the file app.holding, and never
-# answers it, for leg 8. It answers only a request that asks for it by its own
-# address, as an app behind a front that routes by name is only reached under
-# its name; /echo/ answers with the request target as it came over the wire;
-# /events streams three lines.
+# The app. argv: BIND PORT DEP_PORT [bug|hold|hold-first]. With "bug" an order
+# costs one more than its items, the regression leg 3 replays against. With
+# "hold" it takes the request for order 1, says so in the file app.holding,
+# and never answers it, for leg 8. With "hold-first" it does the same with the
+# health check, the first test, for leg 9. It answers only a request that
+# asks for it by its own address, as an app behind a front that routes by name
+# is only reached under its name; /echo/ answers with the request target as it
+# came over the wire; /events streams three lines.
 cat > app.py <<'PY'
 import http.server, json, socketserver, sys, time, urllib.request
 BIND, PORT, DEP = sys.argv[1], int(sys.argv[2]), "http://127.0.0.1:%s" % sys.argv[3]
@@ -100,6 +118,9 @@ def price(item):
     with urllib.request.urlopen(DEP + "/price/" + item, timeout=5) as r: return json.loads(r.read())["price"]
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # One Server header whatever python runs it: the streamed test below was
+    # not recorded by this run, and its answer's headers are compared.
+    def version_string(self): return "app/1"
     def send(self, code, obj):
         body = json.dumps(obj).encode()
         self.send_response(code); self.send_header("Content-Type", "application/json")
@@ -120,6 +141,7 @@ class H(http.server.BaseHTTPRequestHandler):
         while True: time.sleep(60)
     def do_GET(self):
         if self.misdirected(): return
+        if self.path == "/health" and MODE == "hold-first": return self.hold()
         if self.path == "/health": return self.send(200, {"ok": True})
         if self.path == "/orders/1" and MODE == "hold": return self.hold()
         if self.path == "/orders/1": return self.send(200, {"id": 1, "item": "widget", "price": price("widget")})
@@ -147,7 +169,7 @@ trap down EXIT
 
 # listening HOST PORT: something accepts a connection there. A connection and
 # no request: under `keploy record` a request is a test, and the recording is
-# to hold the six below and no probe.
+# to hold the five below that are no stream, and no probe.
 listening() { (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; }
 
 # unused HOST PORT: nothing listens there yet. A listener that is not this
@@ -190,8 +212,8 @@ start_dep() { # start_dep PORT
   serve dep.log 127.0.0.1 "$1" python3 dep.py "$1"
 }
 
-# up BIND PORT DEP_PORT [bug|hold]: the dependency, and the app in front of it,
-# as a user runs them before pointing keploy at the app.
+# up BIND PORT DEP_PORT [bug|hold|hold-first]: the dependency, and the app in
+# front of it, as a user runs them before pointing keploy at the app.
 up() {
   start_dep "$3" || return 1
   serve app.log "$1" "$2" python3 app.py "$@"
@@ -212,7 +234,7 @@ drive() {
   return "$rc"
 }
 
-echo "== record $TESTS tests of the app =="
+echo "== record the app ($((TESTS - 1)) tests and a stream) =="
 # Every address a leg listens on, before anything is started.
 for at in "127.0.0.1 $APP_PORT" "127.0.0.1 $DEP_PORT" "127.0.0.2 $DEP_PORT"; do
   # shellcheck disable=SC2086 # a host and a port, split on purpose
@@ -224,7 +246,7 @@ DRIVER=$!
 # The timer stops the recording: the app is a server and would not end. It
 # runs from when keploy starts the app, so a slow agent does not use it up.
 # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-sudo -E env PATH="$PATH" timeout -k 10 480 "$RECORD_BIN" record -c "python3 app.py 127.0.0.1 $APP_PORT $DEP_PORT" \
+bounded -k 10 480 sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "python3 app.py 127.0.0.1 $APP_PORT $DEP_PORT" \
   --record-timer 20s --generateGithubActions=false --disable-tele > record.log 2>&1
 echo "record exit status: $?"
 # Once keploy is gone nothing will answer a driver still waiting for the app.
@@ -235,12 +257,75 @@ grep -q '"total": 14' drive.log || fail "the app did not price the order while r
 grep -q '"asked": "/echo/a%2Fb/?q=a%20b%23c%26d%3De"' drive.log || fail "the app was not asked the escaped request while recording: $(cat drive.log)"
 grep -q 'WARNING: DATA RACE' record.log && fail "data race while recording: $(grep -m1 -A12 'WARNING: DATA RACE' record.log)"
 grep -q 'ERROR' record.log && fail "the recording logged an ERROR: $(grep -m3 'ERROR' record.log)"
+[ "$(grep -o '{"n": [123], "price": 5}' drive.log | wc -l)" -eq 3 ] || fail "the client did not get the app's stream whole while recording: $(cat drive.log)"
+# The stream is told as not recorded, once, and is no test case.
+said_record=$(grep -c 'Not recording a streaming response as a test case' record.log)
+[ "$said_record" -eq 1 ] || fail "the recording told $said_record stream(s) as not recorded, want 1"
 RECORDED=$(find keploy/test-set-0/tests -type f 2>/dev/null | wc -l)
-if [ "$RECORDED" -ne "$TESTS" ]; then
-  echo "FAIL: recorded $RECORDED tests, want $TESTS"
+if [ "$RECORDED" -ne "$((TESTS - 1))" ] || [ -e keploy/test-set-0/tests/get-events-1.yaml ]; then
+  echo "FAIL: recorded $RECORDED tests, want $((TESTS - 1)), none of them the stream"
+  ls keploy/test-set-0/tests
   tail -40 record.log
   exit 1
 fi
+
+# The streamed test of /events in the form keploy recorded one before it
+# recorded no stream (main at d11f3f3df wrote this shape), stamped after the
+# five so it is last, as it was recorded on main. keploy still replays such a
+# test, after the set's others, in a pass of its own: it must go to the base
+# path as every other test does.
+if ! { REQ_AT=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ) &&
+  RESP_AT=$(date -u -d "$REQ_AT + 1 second" +%Y-%m-%dT%H:%M:%S.%NZ) &&
+  RESP_DATE=$(date -u -d "$RESP_AT" '+%a, %d %b %Y %H:%M:%S GMT') &&
+  CREATED=$(date -u -d "$RESP_AT" +%s); }; then
+  echo "FAIL: could not stamp the streamed test"
+  exit 1
+fi
+cat > keploy/test-set-0/tests/get-events-1.yaml <<YAML
+# Generated by Keploy (3-dev)
+version: api.keploy.io/v1beta1
+kind: Http
+name: get-events-1
+spec:
+  metadata: {}
+  req:
+    method: GET
+    proto_major: 1
+    proto_minor: 1
+    url: http://127.0.0.1:$APP_PORT/events
+    header:
+      Accept: '*/*'
+      Host: 127.0.0.1:$APP_PORT
+      User-Agent: curl/8.18.0
+    body: ""
+    timestamp: $REQ_AT
+  resp:
+    status_code: 200
+    header:
+      Content-Type: application/x-ndjson
+      Date: $RESP_DATE
+      Server: app/1
+    body:
+      - ts: "$RESP_AT"
+        data:
+          raw: '{"n": 1, "price": 5}'
+      - ts: "$RESP_AT"
+        data:
+          raw: '{"n": 2, "price": 5}'
+      - ts: "$RESP_AT"
+        data:
+          raw: '{"n": 3, "price": 5}'
+    status_message: OK
+    proto_major: 0
+    proto_minor: 0
+    timestamp: $RESP_AT
+  objects: []
+  assertions:
+    noise:
+      header.Date: []
+  created: $CREATED
+  app_port: $APP_PORT
+YAML
 
 # report_of RUN: the status, passed and failed counts of that run's report.
 report_of() {
@@ -257,7 +342,7 @@ replay() {
   local report="keploy/reports/test-run-$RUN/test-set-0-report.yaml"
   shift 6
   [ "${want%% *}" = NONE ] || RUN=$((RUN + 1))
-  timeout -k 10 120 "$REPLAY_BIN" test --base-path "$base" --generateGithubActions=false --disable-tele "$@" > "$name.log" 2>&1 </dev/null
+  bounded -k 10 120 "$REPLAY_BIN" test --base-path "$base" --generateGithubActions=false --disable-tele "$@" > "$name.log" 2>&1 </dev/null
   rc=$?
   sed -i 's/\x1b\[[0-9;]*m//g' "$name.log"
   local before=$FAIL
@@ -353,19 +438,19 @@ echo "== 8. the run is stopped as a test waits for its answer =="
 up 127.0.0.1 "$APP_PORT" "$DEP_PORT" hold || exit 1
 # --must-pass, which deletes the tests a run reports as failed, and longer for
 # the app to answer than this leg takes, so that the stop is what ends the wait.
-timeout -k 30 120 "$REPLAY_BIN" test --base-path "http://127.0.0.1:$APP_PORT" --must-pass --test-sets test-set-0 \
-  --api-timeout 100 --generateGithubActions=false --disable-tele > stopped.log 2>&1 </dev/null &
-KEPLOY=$!
+hang_start -k 30 120 "$REPLAY_BIN" test --base-path "http://127.0.0.1:$APP_PORT" --must-pass --test-sets test-set-0 \
+  --api-timeout 100 --generateGithubActions=false --disable-tele > stopped.log 2>&1 </dev/null
+KEPLOY=$HANG_PID
 for ((i = 0; i < 600; i++)); do
   [ -e app.holding ] && break
   sleep 0.2
 done
 BEFORE=$FAIL
 [ -e app.holding ] || fail "stopped: the app was never asked for the order it holds"
-# To keploy itself, which is timeout's child: a script's background job is
-# started with SIGINT ignored, and timeout does not hand on what it ignores.
-pkill -INT -P "$KEPLOY"
-wait "$KEPLOY"
+# To keploy itself (hang_start runs it with SIGINT not ignored, which a
+# script's background job otherwise is).
+kill -INT "$KEPLOY"
+hang_wait "$KEPLOY"
 rc=$?
 down
 sed -i 's/\x1b\[[0-9;]*m//g' stopped.log
@@ -382,6 +467,52 @@ if [ "$FAIL" -ne "$BEFORE" ]; then
 else
   echo "ok: stopped"
 fi
+
+echo "== 9. the run is stopped as its first test waits for its answer =="
+# The tests run in the order they were recorded, so the health check is the
+# first, and the app holds it: no test has a verdict when the signal comes.
+# The exit code alone would not tell a stop keploy handled from a death by the
+# signal, which timeout hands on as 128+N too; the report and the warning do.
+up 127.0.0.1 "$APP_PORT" "$DEP_PORT" hold-first || exit 1
+for stop in INT:130 TERM:143 HUP:129; do
+  sig=${stop%%:*}
+  want=${stop##*:}
+  name=first-$sig
+  # The run before this one (leg 8's, at first) wrote test-run-$RUN.
+  RUN=$((RUN + 1))
+  rm -f app.holding
+  hang_start -k 30 120 "$REPLAY_BIN" test --base-path "http://127.0.0.1:$APP_PORT" --test-sets test-set-0 \
+    --api-timeout 100 --generateGithubActions=false --disable-tele > "$name.log" 2>&1 </dev/null
+  KEPLOY=$HANG_PID
+  # Until the app holds the first test, or keploy has ended without asking
+  # for it; the hang guard ends keploy if neither comes.
+  until [ -e app.holding ] || ! kill -0 "$KEPLOY" 2>/dev/null; do
+    sleep 0.2
+  done
+  BEFORE=$FAIL
+  if [ -e app.holding ]; then
+    # To keploy itself, as in leg 8.
+    kill -"$sig" "$KEPLOY" || fail "$name: keploy had ended before its SIG$sig"
+  else
+    fail "$name: the app was never asked for the first test"
+  fi
+  hang_wait "$KEPLOY"
+  rc=$?
+  sed -i 's/\x1b\[[0-9;]*m//g' "$name.log"
+  [ "$rc" -eq "$want" ] || fail "$name: exit code $rc, want $want: the run was stopped before any test got a verdict"
+  got=$(report_of "$RUN" 2>/dev/null)
+  [ "$got" = "USER_ABORT 0 0" ] || fail "$name: the report says '$got' (status, passed, failed), want 'USER_ABORT 0 0'"
+  said "$name" 1 'the run was stopped before any test got a verdict, so it tested nothing'
+  grep -q 'Now executing streaming tests' "$name.log" && fail "$name: the run went on to its streamed test"
+  grep -q 'WARNING: DATA RACE' "$name.log" && fail "$name: data race"
+  grep -q 'ERROR' "$name.log" && fail "$name: a stop logged an ERROR: $(grep -m1 'ERROR' "$name.log")"
+  if [ "$FAIL" -ne "$BEFORE" ]; then
+    tail -40 "$name.log"
+  else
+    echo "ok: $name, exit $rc"
+  fi
+done
+down
 
 if [ "$FAIL" -ne 0 ]; then
   echo "BASE PATH E2E: FAILED; its output is kept in $WORK"

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -189,6 +191,19 @@ func TestDockerIsAlwaysSupportedAndPodmanOnlyWhenRegistered(t *testing.T) {
 	}
 }
 
+// The refusal for a Podman app names the install command keploy prints
+// everywhere, which writes nothing in the directory it runs in. The one it
+// named before saved the installer as ./install.sh first.
+func TestThePodmanRefusalNamesTheInstallCommand(t *testing.T) {
+	err := Unsupported(Podman)
+	if !strings.Contains(err.Error(), models.InstallCommand) {
+		t.Fatalf("the refusal must name the install command %q, got %q", models.InstallCommand, err)
+	}
+	if strings.Contains(err.Error(), "-O") {
+		t.Fatalf("the refusal names a command that saves the installer in the working directory: %q", err)
+	}
+}
+
 func TestPrepareRefusesAnUnregisteredEngine(t *testing.T) {
 	withRegistry(t)
 	err := Prepare(context.Background(), zap.NewNop(), Podman)
@@ -206,6 +221,9 @@ func TestPrepareRefusesAnUnregisteredEngine(t *testing.T) {
 func TestPrepareMakesARegisteredEngineActiveAndExportsItsEndpoint(t *testing.T) {
 	withRegistry(t)
 	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	// DOCKER_HOST was keploy's, from a docker context (UseDockerContext).
+	t.Setenv(ContextEnv, "rancher-desktop")
+	t.Setenv(ContextHostEnv, "unix:///var/run/docker.sock")
 	want := Runtime{
 		Name:              Podman,
 		CLI:               "/usr/bin/podman",
@@ -225,6 +243,16 @@ func TestPrepareMakesARegisteredEngineActiveAndExportsItsEndpoint(t *testing.T) 
 	}
 	if h := os.Getenv("DOCKER_HOST"); h != want.Host {
 		t.Fatalf("DOCKER_HOST = %q, want the engine's endpoint %q", h, want.Host)
+	}
+	// The engine's endpoint is no docker context's: the markers that said
+	// so are gone, for this process and the ones it starts.
+	if got := DockerHostContext(); got != "" {
+		t.Fatalf("DockerHostContext() = %q after Prepare, want \"\"", got)
+	}
+	for _, k := range []string{ContextEnv, ContextHostEnv} {
+		if v, set := os.LookupEnv(k); set {
+			t.Fatalf("%s = %q after Prepare, want it unset", k, v)
+		}
 	}
 
 	// Back to Docker: its runtime, and the environment's endpoint is left as
@@ -272,5 +300,94 @@ func TestPrepareFillsWhatAPreparerLeftEmpty(t *testing.T) {
 	got := Active()
 	if got.Name != Podman || got.CLI != Podman || strings.Join(got.Compose, " ") != "podman compose" {
 		t.Fatalf("Active() = %+v, want name, CLI and compose filled from the engine's name", got)
+	}
+}
+
+// A port mapping is read from a docker or podman run's (or create's, or
+// compose run's) own options, before its image or service: a native app's
+// -p, a container's own argument after its image, another program's -p and
+// compose's project are none. A mapping is the word as the command writes
+// it, its quotes and its variables kept.
+func TestPublishesAreTheRunsOwnOptions(t *testing.T) {
+	for _, c := range []struct {
+		cmd  string
+		want []string
+	}{
+		{"docker run -p 8080:80 img", []string{"8080:80"}},
+		{"docker run --rm -p 8080:80 --name app img -p S3CR3T", []string{"8080:80"}},
+		{"docker run -p8080:80 -p=9090:90 --publish 7070:70 --publish=6060:60 img", []string{"8080:80", "9090:90", "7070:70", "6060:60"}},
+		{"sudo -E docker run -itp 8080:80 img", []string{"8080:80"}},
+		{"PORT=1 docker run -dp 8080:80 img", []string{"8080:80"}},
+		{"docker --context prod container run -p 8080:80 img", []string{"8080:80"}},
+		{"podman container create -p 8080:80 img", []string{"8080:80"}},
+		{"docker create -p 8080:80 img", []string{"8080:80"}},
+		{"docker network create n && docker run --network n -p 8080:80 img", []string{"8080:80"}},
+		{`docker run -p "${PORT:-8080}:80" -p ${PORT}:81 -p '$PORT:82' img`, []string{`"${PORT:-8080}:80"`, "${PORT}:81", "'$PORT:82'"}},
+		{"docker compose run --rm -p 8080:80 app -p S3CR3T", []string{"8080:80"}},
+		{"docker-compose -p shop run --publish=9090:90 app", []string{"9090:90"}},
+		// No mapping.
+		{"./app --user admin -p S3CR3T", nil},
+		{`./app -p "$APP_PASSWORD"`, nil},
+		{"java -jar app.jar -p S3CR3T", nil},
+		{"sshpass -p S3CR3T ./app", nil},
+		{"docker run --rm img -p S3CR3T", nil},
+		{`docker run img sh -c "./app -p S3CR3T"`, nil},
+		{"docker run -e -p=1 --name -p img", nil},
+		{"docker exec app ./cli -p S3CR3T", nil},
+		{"docker compose -p shop up", nil},
+		{"docker-compose -p shop up -d", nil},
+		{"docker start -a app", nil},
+		{"mysql -uroot -p S3CR3T shop && docker ps", nil},
+	} {
+		if got := Publishes(c.cmd); !slices.Equal(got, c.want) {
+			t.Errorf("Publishes(%q) = %q, want %q", c.cmd, got, c.want)
+		}
+	}
+}
+
+// Compose's own options are the words between compose and its subcommand,
+// of the compose command that runs the application: a later program's
+// words, a container's own arguments after compose run's service, and a
+// subcommand's options are none of them. So a -p there is no project.
+func TestComposeOptionsAreComposesOwn(t *testing.T) {
+	for _, c := range []struct {
+		cmd  string
+		want []string
+	}{
+		{"docker compose -p shop -f a.yml up", []string{"-p", "shop", "-f", "a.yml"}},
+		{`docker compose -p "quoted" --project-directory '/srv/q' -f - up`, []string{"-p", "quoted", "--project-directory", "/srv/q", "-f", "-"}},
+		{"docker compose -p up up --build", []string{"-p", "up"}},
+		{"docker compose -pshop up", []string{"-pshop"}},
+		{"docker compose --workdir /srv -p shop up", []string{"--workdir", "/srv", "-p", "shop"}},
+		{"docker compose --insecure-registry r.example -p shop up", []string{"--insecure-registry", "r.example", "-p", "shop"}},
+		{"docker-compose -p v1 up", []string{"-p", "v1"}},
+		{"podman compose --project-name=pod up", []string{"--project-name=pod"}},
+		{"podman-compose -p pc up", []string{"-p", "pc"}},
+		{"docker --context prod compose -p ctx up", []string{"-p", "ctx"}},
+		{"sudo -E COMPOSE_X=1 docker compose -p s up", []string{"-p", "s"}},
+		// A shell's command is read as the command line it is.
+		{"sh -c 'docker compose -p shop up'", []string{"-p", "shop"}},
+		{`bash -lc "cd /srv && docker compose --project-directory /srv -p shop up"`, []string{"--project-directory", "/srv", "-p", "shop"}},
+		// Another program's -p, a container's and a subcommand's: none.
+		{"docker compose run --rm app ./tool -p S3CR3T", []string{}},
+		{"./seed.sh -p S3CR3T && docker compose up", []string{}},
+		{"docker compose up -d db && mysql -uroot -p S3CR3T shop && docker compose up app", []string{}},
+		{"docker compose up app -p S3CR3T", []string{}},
+		{"docker compose exec app sh -c 'tool -p S3CR3T'", []string{}},
+		{"sshpass -p S3CR3T docker compose up", nil},
+		// Of several, the one that runs the application attached.
+		{"docker compose -p infra up -d && docker compose -p app up", []string{"-p", "app"}},
+		{"docker compose -p old down && docker compose up", []string{}},
+		{"docker compose -p deps up -d", []string{"-p", "deps"}},
+		{"docker compose -p x ps", []string{"-p", "x"}},
+		// No compose.
+		{"./app -p S3CR3T", nil},
+		{"docker run -p 8080:80 img", nil},
+		{"sh ./start.sh -p S3CR3T", nil},
+	} {
+		got := ComposeOptions(c.cmd)
+		if !slices.Equal(got, c.want) || (got == nil) != (c.want == nil) {
+			t.Errorf("ComposeOptions(%q) = %q, want %q", c.cmd, got, c.want)
+		}
 	}
 }

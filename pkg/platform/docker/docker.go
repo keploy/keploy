@@ -18,7 +18,9 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -39,6 +41,22 @@ const (
 	// on agent startup to prevent stale state from passing the healthcheck.
 	AgentReadyFile = "/tmp/agent.ready"
 
+	// InternalNetworkName, InternalSubnet and AgentInternalIP address the agent
+	// on a compose network that denies the replayed app any egress.
+	//
+	// A STATIC address, because the agent's URI is settled before the container
+	// exists (AgentClient.Setup), so there is nothing to inspect yet. Both ends
+	// read these constants: the generator pins the agent here, and the caller
+	// that shares the daemon's network namespace dials it here.
+	//
+	// The subnet is deliberately obscure. It only has to avoid colliding with
+	// the Pod's own networks, and a replay Pod is short-lived and otherwise
+	// empty, so a fixed range costs nothing and removes an inspect-then-wire
+	// ordering problem entirely.
+	InternalNetworkName = "default"
+	InternalSubnet      = "172.31.253.0/24"
+	AgentInternalIP     = "172.31.253.10"
+
 	// AgentOutcomeFile is where a containerised agent serving a mock replay
 	// leaves what it served and what it could not match (models.MockOutcome)
 	// as it is stopped. Under docker compose that is the only account of the
@@ -46,6 +64,19 @@ const (
 	// before keploy can ask the agent anything, so keploy reads this file out
 	// of the stopped container instead, before its teardown removes it.
 	AgentOutcomeFile = "/tmp/keploy-mock-outcome.json"
+
+	// AgentTeardownProgressFile is where a containerised agent reports its
+	// teardown progress once it is stopped (utils.ReportTeardownProgress):
+	// keploy reads it out of the container to tell an agent still detaching
+	// from one that has stopped making progress, which alone it kills.
+	AgentTeardownProgressFile = "/tmp/keploy-agent-teardown.json"
+
+	// AgentBootProgressFile is where a containerised agent reports its
+	// start's progress until its control-plane server listens
+	// (utils.ReportBootProgress): keploy reads it out of the container to
+	// tell an agent still starting from one that has stopped making
+	// progress, which alone it gives up on.
+	AgentBootProgressFile = "/tmp/keploy-agent-boot.json"
 
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
@@ -55,18 +86,14 @@ const (
 // counts toward `retries` nor marks the container unhealthy, so a dependent app
 // (depends_on: service_healthy) simply keeps waiting.
 //
-// WHAT IT IS NOT. For a LITERAL `docker compose` command it is NOT the
-// mechanism that detects a dead agent: keploy rewrites such commands to inject
-// `--abort-on-container-exit` (ensureComposeExitOnAppFailure, called from
-// modifyDockerComposeCommand / ensureInMemoryComposeFlags in pkg/client/app),
-// so a crashed or OOM-killed agent container EXITS and aborts the whole run
-// immediately, independent of this budget. That covers the go-memory-load lanes
-// this fix targets (they run `-c "docker compose up"`). For a WRAPPER command
-// (make / npm / a shell script) keploy passes its compose file via COMPOSE_FILE
-// and cannot splice the flag in — it warns about exactly this at app.go:~288 —
-// so there this window genuinely IS the backstop, which is a further reason to
-// keep it generous. In both cases the window's job is the same: avoid
-// false-failing an agent that is ALIVE and still doing its one-time setup.
+// WHAT IT IS NOT. It is NOT the mechanism that detects a dead agent: a crashed
+// or OOM-killed agent container EXITS, and the app, which depends on its health
+// (depends_on: service_healthy), is then never started: compose's up fails on
+// that dependency at once, independent of this budget. keploy adds no
+// --abort-* flag to a compose command, and strips the user's
+// (withoutComposeAbortFlags in pkg/client/app): it watches the app's container
+// itself. The window's job is to avoid false-failing an agent that is ALIVE
+// and still doing its one-time setup.
 //
 // WHAT IT BOUNDS. The agent writes AgentReadyFile only after the CLI has read
 // and decoded the test-set's mock corpus (GetFilteredMocks) and streamed it to
@@ -84,8 +111,8 @@ const (
 // WHY GENEROUS IS THE RIGHT SHAPE, NOT A GUESS. The container flips healthy the
 // instant the ready file appears, so in the common case the app starts in
 // seconds no matter how large this window is — a generous value costs the fast
-// path nothing. For literal compose, agent death is caught by container-exit
-// (--abort-on-container-exit), not by this window. So this
+// path nothing. Agent death before the app starts is caught by the agent
+// container's exit, not by this window. So this
 // is a floor sized to "comfortably longer than any legitimate setup," not a
 // delicate estimate of load time; its exact value is not correctness-critical.
 // The only case it still bounds is an agent that is alive but wedged (never
@@ -105,6 +132,17 @@ func agentHealthcheckStartPeriod() time.Duration {
 	}
 	return def
 }
+
+// agentStopGracePeriod is how long compose waits for keploy's agent to stop
+// before it kills it (the agent service's stop_grace_period): far longer than
+// any drain. The agent goes by events, not by it.
+const agentStopGracePeriod = "24h"
+
+// agentForcePauseEnv is memoryguard.ForcePauseEnv, the debug knob that forces
+// a memory-guard pause by request count, which GenerateKeployAgentService
+// hands on to the agent's container. Spelled here so this package does not
+// take on the agent's memory guard; a test holds the two equal.
+const agentForcePauseEnv = "KEPLOY_DEBUG_FORCE_PAUSE"
 
 // ComposeServiceHook is called for each keploy-managed Docker Compose service
 // node during generation so a downstream caller (the enterprise low-latency hook)
@@ -760,6 +798,46 @@ func (idc *Impl) generateKeployVolumes() []string {
 	return volumes
 }
 
+// composeLiteral is s written so that compose reads it back as s. A command
+// list is read by no shell, but compose interpolates every string of a file
+// it loads ($VAR, ${VAR}, from the operator's environment), and reads $$ as
+// one $: the agent's arguments (a caller's ExtraArgs, its config path) reach
+// it as they were given.
+func composeLiteral(s string) string { return strings.ReplaceAll(s, "$", "$$") }
+
+// debugFileRequested reports whether this compose run asked for the agent's
+// debug file: either the CLI's own --debug is on, or ExtraArgs turns --debug
+// or --debug-file on (for example, a cloud replay's support bundle).
+func debugFileRequested(conf *config.Config, extraArgs []string) bool {
+	if conf != nil && conf.Debug {
+		return true
+	}
+	return extraFlagOn(extraArgs, "debug") || extraFlagOn(extraArgs, "debug-file")
+}
+
+// extraFlagOn reports whether args (before any "--" terminator) leave the
+// boolean flag name turned on. The last occurrence decides.
+func extraFlagOn(args []string, name string) bool {
+	on := false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "--"+name || a == "-"+name {
+			on = true
+			continue
+		}
+		for _, p := range []string{"--" + name + "=", "-" + name + "="} {
+			if v, ok := strings.CutPrefix(a, p); ok {
+				if b, err := strconv.ParseBool(v); err == nil {
+					on = b
+				}
+			}
+		}
+	}
+	return on
+}
+
 // GenerateKeployAgentService creates a Docker Compose service configuration for keploy-agent
 // based on the SetupOptions and returns it as a yaml.Node that can be appended to a compose file
 func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error) {
@@ -775,6 +853,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Add installation ID if available
 	if installationID := os.Getenv("INSTALLATION_ID"); installationID != "" {
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
+	}
+
+	// The debug knob that forces a memory-guard pause by request count is
+	// read by the agent, so it travels to the agent's container. Absent
+	// unless the operator set it.
+	if v := os.Getenv(agentForcePauseEnv); v != "" {
+		envVars = append(envVars, agentForcePauseEnv+"="+v)
 	}
 
 	// The control-plane token, by name only: a bare `KEPLOY_AGENT_TOKEN` entry
@@ -822,24 +907,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		// port in the first place.
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.AgentPort, opts.AgentPort))
 	}
-	if opts.ProxyPort != 0 {
-		// Host loopback only, for the same reason as the agent port above.
-		//
-		// The proxy is the interception point for the application's outgoing
-		// dependency calls: reaching it means being able to drive mock
-		// matching and to see what a recorded dependency answers. The app does
-		// not need this publish to get there — it runs in the agent's own
-		// network namespace (`network_mode: service:keploy-agent`, set in
-		// modifyAppService) and reaches the proxy over that namespace's
-		// loopback. The DNS port, used exactly the same way, is not published
-		// at all, which is the clearest evidence the publish was never what
-		// made interception work.
-		//
-		// It dates from the agent/client split, where it was introduced as a
-		// copy of the agent port's `%d:%d` line; the agent port has since been
-		// narrowed and this one had not been.
-		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort))
-	}
+	// The proxy's port is not published, as the DNS server's is not. The
+	// proxy is the interception point for the application's outgoing
+	// dependency calls, and the app reaches it over the loopback of the
+	// agent's network namespace, which it runs in (`network_mode:
+	// service:keploy-agent`, set in modifyAppService), where the agent binds
+	// it and moves off it when another socket holds it
+	// (agent.letProxyPortsMove). A publish claimed the port on the host too:
+	// two runs started together on the configured ports collided there, and
+	// after a move it named a port the proxy did not listen on.
 
 	ports = append(ports, opts.AppPorts...)
 
@@ -847,14 +923,32 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	volumes := idc.generateKeployVolumes()
 	volumes = append(volumes, fmt.Sprintf("%s:%s", KeployTLSVolumeName, KeployTLSMountPath))
 
-	// Bind-mount the host keploy folder + wire KEPLOY_DEBUG_FILE so the
-	// agent's debug-level log lands on the host. Skip when the host
-	// path is empty (e.g. very early bootstrap before Validate runs)
-	// or relative (Docker rejects relative bind-source paths).
+	// Bind-mount the host keploy folder + wire KEPLOY_DEBUG_FILE only when
+	// this run asked for the agent's debug log (--debug, or --debug-file
+	// passed via ExtraArgs). Leaving it off by default avoids mounting the
+	// repository's keploy folder into the agent container and avoids writing
+	// agent-debug.log into keploy/ or keploy/test-set-N/ on normal runs.
+	// Skip when the host path is empty (e.g. very early bootstrap before
+	// Validate runs) or relative (Docker rejects relative bind-source paths).
+	//
+	// Docker follows a link at the bind source on the host, and the agent
+	// writes there as root. git keeps links, so the keploy folder may be a
+	// link a cloned repository carries: the folder is mounted only when it
+	// is made and opened from the project, as every recording folder is
+	// (utils.MkdirOpenRecordingDir), so a keploy folder that leads out of
+	// the project is refused with why, and nothing of the agent's is
+	// written where it leads. Made here, it is the user's, not a folder the
+	// daemon makes as root for a missing bind source.
 	const agentDebugMount = "/keploy-host"
-	if keployHostPath != "" && filepath.IsAbs(keployHostPath) {
-		volumes = append(volumes, fmt.Sprintf("%s:%s", keployHostPath, agentDebugMount))
-		envVars = append(envVars, fmt.Sprintf("KEPLOY_DEBUG_FILE=%s/agent-debug.log", agentDebugMount))
+	if debugFileRequested(idc.conf, opts.ExtraArgs) && keployHostPath != "" && filepath.IsAbs(keployHostPath) {
+		if r, err := utils.MkdirOpenRecordingDir(keployHostPath, 0o755); err != nil {
+			idc.logger.Warn("the keploy folder is not mounted into the agent container, so the agent's debug log is not kept",
+				zap.String("keployFolder", keployHostPath), zap.Error(err))
+		} else {
+			_ = r.Close()
+			volumes = append(volumes, fmt.Sprintf("%s:%s", keployHostPath, agentDebugMount))
+			envVars = append(envVars, fmt.Sprintf("KEPLOY_DEBUG_FILE=%s/agent-debug.log", agentDebugMount))
+		}
 	}
 
 	clientPid := int(os.Getpid())
@@ -867,10 +961,18 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		"--mode", string(opts.Mode),
 		"--is-docker",
 	}
-
-	if idc.conf.Debug {
-		command = append(command, "--debug")
+	// The pid namespace clientPid is this CLI's in: keploy-agent's own pid
+	// namespace, which the app's services join, is another, so the agent
+	// takes the pid for none of their processes (utils.ClientPIDHere).
+	if ns := utils.OwnPIDNamespace(); ns != "" {
+		command = append(command, "--client-pid-ns", ns)
 	}
+
+	// The CLI's root-level settings (--debug, --disable-tele, --disable-ansi,
+	// --disable-mapping), each with its value: the keploy.yml directory is not
+	// bind-mounted into the agent's filesystem, so the agent's own config
+	// would otherwise hold the defaults, whatever the CLI resolved.
+	command = append(command, agentargs.Root(idc.conf)...)
 	if opts.MockMode && opts.AgentPort != 0 {
 		idc.mockAgentURL = fmt.Sprintf("http://localhost:%d", opts.AgentPort)
 	}
@@ -882,15 +984,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.RecordRequests {
 		command = append(command, "--record-requests")
 	}
+	if opts.SettleReads {
+		command = append(command, "--settle-reads")
+	}
+	// The proven model's staging switch: the agent container is not given
+	// KEPLOY_PROVEN, so it travels as a flag.
+	command = append(command, provenswitch.AgentArgs()...)
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}
-	// Forward the operator's --disable-mapping (root-level config) into
-	// the agent container. The keploy.yml directory isn't bind-mounted
-	// into the agent's filesystem, so viper inside the container would
-	// otherwise default to true and disable record-side mapping
-	// production regardless of the host config.
-	command = append(command, fmt.Sprintf("--disable-mapping=%t", idc.conf.DisableMapping))
 	if idc.conf.Record.EnableSampling > 0 {
 		command = append(command, fmt.Sprintf("--enable-sampling=%d", idc.conf.Record.EnableSampling))
 	}
@@ -907,6 +1009,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
 	}
+	allowEgress, err := models.NormalizeAllowEgress(opts.AllowEgress)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range allowEgress {
+		command = append(command, "--allow-egress="+e)
+	}
 	if opts.DisableHandshakeHold {
 		command = append(command, "--disable-handshake-hold")
 	}
@@ -920,7 +1029,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		command = append(command, "--channel-binding-shim")
 	}
 	// Upstream TLS verification. Forwarded unconditionally as =%t, matching
-	// --disable-mapping above and the native launcher, so that the precedence
+	// the root settings above and the native launcher, so that the precedence
 	// flag > yaml > default resolves IDENTICALLY here and on a native run —
 	// see proxy.resolveUpstreamTLSConfig. The CA path is resolved inside the
 	// agent container, so the operator must bind-mount the PEM (or point at a
@@ -934,9 +1043,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 	if opts.MemoryLimit > 0 {
 		command = append(command, "--memory-limit", strconv.FormatUint(opts.MemoryLimit, 10))
-	}
-	if models.IsAnsiDisabled {
-		command = append(command, "--disable-ansi")
 	}
 	if len(opts.PassThroughPorts) > 0 {
 		portStrings := make([]string, len(opts.PassThroughPorts))
@@ -1049,8 +1155,28 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		)
 	}
 
-	// Add networks if specified
-	if len(opts.NetworkAliases) > 0 {
+	// Add networks if specified.
+	//
+	// The pinned-address branch comes FIRST and is exclusive: a caller that
+	// presets Agent.AgentURI shares the docker daemon's network namespace and
+	// dials the agent directly, on a compose network that denies the replayed
+	// app egress. That stack has one generated network and no aliases, and a
+	// second `networks` key here would be a duplicate mapping key -- invalid
+	// YAML that compose rejects.
+	if ip := PresetAgentIP(idc.conf); ip != "" {
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "networks"},
+			&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: InternalNetworkName},
+				{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "ipv4_address"},
+					{Kind: yaml.ScalarNode, Value: ip, Tag: "!!str"},
+				}},
+			}},
+		)
+		idc.logger.Info("pinned the keploy-agent to a static compose address",
+			zap.String("ip", ip), zap.String("network", InternalNetworkName))
+	} else if len(opts.NetworkAliases) > 0 {
 		networksMapNode := &yaml.Node{Kind: yaml.MappingNode}
 
 		for netName, aliases := range opts.NetworkAliases {
@@ -1108,7 +1234,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		for _, cmd := range command {
 			commandNode.Content = append(commandNode.Content, &yaml.Node{
 				Kind:  yaml.ScalarNode,
-				Value: cmd,
+				Value: composeLiteral(cmd),
 				Tag:   "!!str", // Explicitly mark as string
 			})
 		}
@@ -1141,9 +1267,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "retries"},
 			{Kind: yaml.ScalarNode, Value: "60"},
 
-			// start_period — a generous, env-tunable readiness floor. For a
-			// literal `docker compose` command it is not the death detector (a
-			// dead agent exits and --abort-on-container-exit aborts the run); it
+			// start_period — a generous, env-tunable readiness floor. It is
+			// not the death detector (a dead agent exits, and compose's up
+			// fails on the app's dependency on its health); it
 			// only keeps a live, still-setting-up agent from being false-failed
 			// while the CLI decodes and streams the mock corpus. See
 			// agentHealthcheckStartPeriod for the full rationale.
@@ -1156,6 +1282,24 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		&yaml.Node{Kind: yaml.ScalarNode, Value: "healthcheck"},
 		healthcheckNode,
 	)
+
+	// stop_grace_period, for `keploy record`: compose stops the agent with
+	// the project, also when the app exits on its own (keploy's watch of the
+	// app's container ends the run, and the stack goes down), and the agent
+	// then waits for the
+	// recording that holds its streams to save what it captured
+	// (models.DrainsOnAgentStopHeader): it goes once that drain is through,
+	// has stalled, or its client is gone, all of them events. Compose's
+	// default grace (10s) would kill it mid-drain, at a backlog that takes
+	// longer than that to hand over. This grace only bounds an agent that
+	// never goes; it does not decide when one does. Nothing else holds the
+	// agent at a stop under compose, so other commands keep compose's grace.
+	if opts.Mode == models.MODE_RECORD && !opts.MockMode {
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "stop_grace_period"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: agentStopGracePeriod},
+		)
+	}
 
 	// Inject Pprof Environment Variables and Mounts if enabled on host
 	// This logic has been automated to support offline profiling via file dumps.
@@ -1406,15 +1550,17 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 	}
 
 	// Now modify the app container to integrate with keploy-agent
-	err = idc.modifyAppServiceForKeploy(compose, appContainerName)
+	err = idc.modifyAppServiceForKeploy(compose, appContainerName, opts.HostGateway)
 	if err != nil {
 		return fmt.Errorf("failed to modify app service: %w", err)
 	}
 	return nil
 }
 
-// modifyAppServiceForKeploy modifies the app service to depend on keploy-agent and share namespaces
-func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName string) error {
+// modifyAppServiceForKeploy modifies the app service to depend on keploy-agent
+// and share namespaces. hostGateway says the daemon resolves host-gateway:
+// keploy-agent then maps host.docker.internal to it (moveExtraHostsToAgent).
+func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName string, hostGateway bool) error {
 	if compose.Services.Content == nil {
 		return fmt.Errorf("no services found in compose file")
 	}
@@ -1465,6 +1611,13 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 					idc.setServicePropertyNode(keployServiceNode, key, cloneYAMLNode(valueNode))
 					idc.removeServiceProperty(serviceContentNode, key)
 				}
+			}
+			// Host entries likewise: compose refuses extra_hosts with
+			// network_mode ("conflicting options: custom host-to-IP mapping
+			// and the network mode"), and the app reads keploy-agent's
+			// /etc/hosts (extra_hosts.go).
+			if err := idc.moveExtraHostsToAgent(serviceContentNode, keployServiceNode, hostGateway); err != nil {
+				return err
 			}
 
 			// Remove networks and ports from the app service

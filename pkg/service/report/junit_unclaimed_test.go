@@ -1,0 +1,108 @@
+package report
+
+import (
+	"strings"
+	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// P101: a set the calls its application made after its last test failed,
+// every test of it passed, is never a green JUnit file: the suite carries a
+// failed case naming the calls.
+func TestBuildJUnitSuites_UnclaimedCalls(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	calls := []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "POST /publish", Destination: "broker:9099"},
+		{Protocol: "TCP", Destination: "127.0.0.1:9098"},
+	}
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: calls}}).Suites[0]
+	if s.Tests != 2 || s.Failures != 1 {
+		t.Fatalf("suite tests %d failures %d; want 2 and 1", s.Tests, s.Failures)
+	}
+	last := s.Cases[len(s.Cases)-1]
+	if last.Name != junitUnclaimedCase || last.Failure == nil {
+		t.Fatalf("last case %+v, want %q failed", last, junitUnclaimedCase)
+	}
+	for _, want := range []string{"HTTP POST /publish to broker:9099", "TCP to 127.0.0.1:9098"} {
+		if !strings.Contains(last.Failure.Text, want) {
+			t.Fatalf("failure text %q does not name %q", last.Failure.Text, want)
+		}
+	}
+	if s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "PASSED", Tests: passed}}).Suites[0]; s.Tests != 1 || s.Failures != 0 {
+		t.Fatalf("a set with no unclaimed call has %d cases, %d failed", s.Tests, s.Failures)
+	}
+}
+
+// F2: a call the application made as it started, before the set's first test,
+// is named as such in the same failed case.
+func TestBuildJUnitSuites_ACallBeforeTheFirstTestIsNamedAsSuch(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	calls := []models.UnmatchedCall{
+		{Protocol: "Mongo", ActualSummary: "insert on events", BeforeSet: true, Kind: models.MissOutsideTest},
+		{Protocol: "HTTP", ActualSummary: "POST /publish"},
+	}
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: calls}}).Suites[0]
+	last := s.Cases[len(s.Cases)-1]
+	if last.Failure == nil || strings.Contains(last.Failure.Message, "after the last test") {
+		t.Fatalf("failure %+v; want a message for calls outside every test", last.Failure)
+	}
+	for _, want := range []string{"before the first test: Mongo insert on events", "after the last test: HTTP POST /publish"} {
+		if !strings.Contains(last.Failure.Text, want) {
+			t.Fatalf("failure text %q does not say %q", last.Failure.Text, want)
+		}
+	}
+}
+
+// A GraphQL call after the last test names the operation it carries after
+// its call, so two operations posted to one URL read apart.
+// Mutation: the junit line drops the operation.
+func TestBuildJUnitSuites_AnUnclaimedCallNamesItsOperation(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	calls := []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "POST /query", Operation: "query GetAppLabels", Destination: "api:8080"},
+		{Protocol: "HTTP", ActualSummary: "POST /query", Destination: "api:8080"},
+	}
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: calls}}).Suites[0]
+	last := s.Cases[len(s.Cases)-1]
+	if last.Failure == nil {
+		t.Fatalf("last case %+v, want a failure", last)
+	}
+	for _, want := range []string{"HTTP POST /query {query GetAppLabels} to api:8080", "HTTP POST /query to api:8080"} {
+		if !strings.Contains(last.Failure.Text, want) {
+			t.Fatalf("failure text %q does not name %q", last.Failure.Text, want)
+		}
+	}
+}
+
+// A call a parser held for a later test's recording that no test of the set
+// answered (UnmatchedCall.Held) may have been made in a test: it fails a case
+// of its own, never named as a call after the last test, and the calls made
+// outside every test keep theirs as before.
+// Mutations: held calls stay in the after-the-last-test case; the held case
+// is dropped.
+func TestBuildJUnitSuites_AHeldCallFailsACaseOfItsOwn(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	poll := models.UnmatchedCall{Protocol: "Kafka", ActualSummary: "Fetch orders", Destination: "kafka:9092", Kind: models.MissInTest, Held: true}
+	after := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /publish", Destination: "broker:9099"}
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: []models.UnmatchedCall{poll, after}}}).Suites[0]
+	if s.Tests != 3 || s.Failures != 2 {
+		t.Fatalf("suite tests %d failures %d; want 3 and 2", s.Tests, s.Failures)
+	}
+	byName := map[string]junitTestCase{}
+	for _, c := range s.Cases {
+		byName[c.Name] = c
+	}
+	out, held := byName[junitUnclaimedCase], byName[junitHeldCase]
+	if out.Failure == nil || out.Failure.Text != "HTTP POST /publish to broker:9099" || out.Failure.Message != "a call after the last test got no recorded answer" {
+		t.Fatalf("the after-the-last-test case is %+v", out.Failure)
+	}
+	if held.Failure == nil || held.Failure.Text != "Kafka Fetch orders to kafka:9092" || strings.Contains(held.Failure.Message, "after the last test") {
+		t.Fatalf("the held case is %+v", held.Failure)
+	}
+
+	s = buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: []models.UnmatchedCall{poll}}}).Suites[0]
+	if s.Tests != 2 || s.Failures != 1 || s.Cases[len(s.Cases)-1].Name != junitHeldCase {
+		t.Fatalf("a set with held calls alone: tests %d failures %d cases %+v; want its held case alone", s.Tests, s.Failures, s.Cases)
+	}
+}

@@ -17,8 +17,13 @@ container's own address, and nothing listens there on 8097.
 At startup the app calls its own /echo on each, before it serves anything, the
 way a self-check does: that makes tests on 8096 and 8097 the first ones in the
 set, the tests the replay's readiness gate picks to probe.
+
+PUBLIC_START_DELAY (seconds, default 0) holds the public listener back after
+the self-check, as a slow-starting app does: a replay that sends its first test
+before then finds docker's published port accepting and nothing behind it.
 """
 import json
+import os
 import sys
 import threading
 import time
@@ -89,17 +94,13 @@ class Public(BaseHTTPRequestHandler):
 
 
 def self_check(port):
-    # Retried: under keploy record the port's ingress forwarder comes up a
-    # moment after the app's own listen() returns, and a call in that moment
-    # is refused. That is not what this fixture is about.
-    for attempt in range(40):
-        try:
-            call_echo({"warmup": True}, port)
-            return
-        except OSError as e:
-            print("[app] self-check of :%d attempt %d: %s" % (port, attempt + 1, e), flush=True)
-            time.sleep(0.25)
-    sys.exit("[app] self-check of :%d never succeeded" % port)
+    # One call, right after the app's own listen() returned: under keploy
+    # record, keploy holds the port from the app's bind until its ingress
+    # forwarder listens there, so a call this early is answered, not refused.
+    try:
+        call_echo({"warmup": True}, port)
+    except OSError as e:
+        sys.exit("[app] self-check of :%d, made as the app listens, failed: %s" % (port, e))
 
 
 if __name__ == "__main__":
@@ -108,5 +109,14 @@ if __name__ == "__main__":
         threading.Thread(target=server.serve_forever, daemon=True).start()
     self_check(PRIVATE_PORT)
     self_check(LOOPBACK_PORT)
+    delay = float(os.environ.get("PUBLIC_START_DELAY") or 0)
+    if delay > 0:
+        # Not "self-check passed": that line says the app serves, and a
+        # driver waits for it.
+        print("[app] self-check done; holding :%d back %.0fs" % (PUBLIC_PORT, delay), flush=True)
+        time.sleep(delay)
+    # The constructor binds and listens, so the line below is true when a
+    # driver waiting for it sends its first request.
+    public = ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), Public)
     print("[app] self-check passed; serving on :%d" % PUBLIC_PORT, flush=True)
-    ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), Public).serve_forever()
+    public.serve_forever()

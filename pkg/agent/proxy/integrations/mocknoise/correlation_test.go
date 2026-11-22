@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 func mockWithBodies(reqBody, respBody string) *models.Mock {
@@ -37,7 +39,7 @@ func TestCorrelationsFromMock(t *testing.T) {
 		{"non-JSON bodies", `not json`, `also not json`, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := CorrelationsFromMock(mockWithBodies(tc.req, tc.resp))
+			got := CorrelationsFromMock(zap.NewNop(), mockWithBodies(tc.req, tc.resp))
 			if tc.wantPath == "" {
 				if len(got) != 0 {
 					t.Fatalf("want no correlation, got %+v", got)
@@ -67,25 +69,49 @@ func TestCorrelationsFromMock(t *testing.T) {
 // TestMaterializeCorrelations pins the replay-ingest helper: it populates an
 // echo mock's Correlations, leaves a no-echo mock empty, and never clobbers a
 // mock that already carries correlations.
+//
+// With the proven switch off, which this test sets: under it nothing is
+// detected (TestMaterializeCorrelations_NothingUnderTheProvenSwitch), and left
+// to the environment the switch-on run failed this test.
 func TestMaterializeCorrelations(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
 	const id = "550e8400-e29b-41d4-a716-446655440000"
 
 	echo := mockWithBodies(`{"idempotencyKey":"`+id+`"}`, `{"ok":true,"idempotencyKey":"`+id+`"}`)
-	MaterializeCorrelations(echo)
+	MaterializeCorrelations(zap.NewNop(), echo)
 	if len(echo.Spec.Correlations) != 1 || echo.Spec.Correlations[0].RequestPath != "body.idempotencyKey" {
 		t.Fatalf("materialize should populate the echo correlation, got %+v", echo.Spec.Correlations)
 	}
 
 	none := mockWithBodies(`{"amount":10}`, `{"ok":true}`)
-	MaterializeCorrelations(none)
+	MaterializeCorrelations(zap.NewNop(), none)
 	if len(none.Spec.Correlations) != 0 {
 		t.Fatalf("no echo must stay empty, got %+v", none.Spec.Correlations)
 	}
 
 	pre := mockWithBodies(`{"idempotencyKey":"`+id+`"}`, `{"idempotencyKey":"`+id+`"}`)
 	pre.Spec.Correlations = []models.FieldCorrelation{{RequestPath: "pre", RecordedValue: "x"}}
-	MaterializeCorrelations(pre)
+	MaterializeCorrelations(zap.NewNop(), pre)
 	if len(pre.Spec.Correlations) != 1 || pre.Spec.Correlations[0].RequestPath != "pre" {
 		t.Fatalf("already-populated must be left unchanged, got %+v", pre.Spec.Correlations)
+	}
+}
+
+// Under the proven switch nothing is detected from what a value looks like: an
+// echo is a variable of its call, written by the learn step.
+func TestMaterializeCorrelations_NothingUnderTheProvenSwitch(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Body: `{"key":"550e8400-e29b-41d4-a716-446655440000"}`},
+		HTTPResp: &models.HTTPResp{Body: `{"key":"550e8400-e29b-41d4-a716-446655440000"}`},
+	}}
+	MaterializeCorrelations(zap.NewNop(), m)
+	if len(m.Spec.Correlations) != 0 {
+		t.Fatalf("a correlation was detected under the switch: %+v", m.Spec.Correlations)
+	}
+	t.Setenv(provenswitch.Env, "0")
+	MaterializeCorrelations(zap.NewNop(), m)
+	if len(m.Spec.Correlations) != 1 {
+		t.Fatalf("switch off: %d correlations, want 1 as before", len(m.Spec.Correlations))
 	}
 }

@@ -64,20 +64,91 @@ jobs:
       #                       and the macOS one can run it; upstream_test.go
       #                       checks the numbering by what was read. Neither
       #                       had run on Windows before this job.
+      #   .../proxy/supervisor  the session's record of how each end of a
+      #                       connection ended: a client socket's Winsock
+      #                       reset or broken pipe kept as syscall.ECONNRESET
+      #                       or syscall.EPIPE for the parsers
+      #                       (client_end_windows.go). Its Windows rows keep
+      #                       the errors real loopback sockets gave and run
+      #                       only here.
+      #   .../proxy/relay     which chunks of an answer the client took before
+      #                       it closed or reset, judged from the client
+      #                       socket's TCP_INFO_v0 (SIO_TCP_INFO,
+      #                       client_socket_windows.go). Its real-socket rows
+      #                       drive loopback clients that half-close, reset,
+      #                       or stop reading until their receive window
+      #                       closes, so they prove the Windows reading only
+      #                       when they run here.
+      #   ./internal/testnet  the ports ./pkg, ./pkg/neterr and
+      #                       ./pkg/agent/proxy/incoming take for their
+      #                       refused dials and their listeners. Their
+      #                       RefusedAddr ports are held by a connection's
+      #                       local end here, whose socket binds the port
+      #                       exclusively (SO_EXCLUSIVEADDRUSE). Their
+      #                       SharedPort and ReservedPort ports are not held:
+      #                       they are ports below the dynamic port range,
+      #                       claimed by a lock file per port, which no bind
+      #                       to port 0 and no connect is given.
+      #                       Its rows check that a held port refuses a dial
+      #                       and that no other socket can bind it, that a
+      #                       claimed port refuses a dial until the test's
+      #                       own listener opens there, and that a claim
+      #                       takes a port no other test claimed below the
+      #                       range netsh reports.
       #
       # Every one of these but connseq was cross-compiled and executed on a
       # real Windows host before being listed. No Windows host was at hand for
       # connseq: it was listed after its windows/amd64 test binary ran under
       # Wine 10.0, where every test passes and a socketCounterOf that returns a
-      # counter fails four of them. pkg/agent/proxy is deliberately NOT here:
-      # two of its tests read a source file by relative path, so I could not
-      # separate "fails on Windows" from "fails in my harness" and will not
-      # add a package on a guess. Widen this list as packages are shown to
-      # pass here, not speculatively.
+      # counter fails four of them. Nor for testnet: no Windows host and no
+      # Wine was at hand, and ./pkg, ./pkg/neterr and incoming already hold
+      # their ports through it here, so its rows are listed to run where its
+      # callers do; this job is where they run on Windows.
+      #
+      # pkg/agent/proxy is deliberately NOT here: two of its tests read a
+      # source file by relative path, so I could not separate "fails on
+      # Windows" from "fails in my harness" and will not add a package on a
+      # guess. Widen this list as packages are shown to pass here, not
+      # speculatively.
       #
       # One `go test` invocation with several patterns, not several joined by
       # &&: under `shell: cmd` a multi-line block is a batch file that does not
       # stop on failure and reports only the last exit code.
       - name: Test amd64
-        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/...
+        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./pkg/agent/proxy/supervisor/ ./pkg/agent/proxy/relay/ ./internal/testnet/
+        shell: cmd
+
+      # The count of writes the proxy puts over every accepted client socket
+      # (relay.CountClientWrites, under the tracking), which the relay's
+      # closed-window rows above read on Windows: every site that keys or
+      # reads the accepted socket finds it under the count, whether the proxy
+      # keeps the connection, pairs it, both or neither. Only these two rows
+      # of ./pkg/agent/proxy/ run here: the package as a whole is not listed
+      # above (see its line).
+      - name: Test the proxy's count of accepted sockets (amd64)
+        run: go test -count=1 -run "^(TestTheAcceptedSocketIsFoundUnderTheCountOfWrites|TestEveryAcceptedSocketIsCountedWhetherKeptOrPaired)$" ./pkg/agent/proxy/
+        shell: cmd
+
+      # The Windows stop of a native app (utils.interruptProcessTree): one that
+      # had to force-kill the app says so, so a test set's end it cut is not
+      # judged (P101-b-o). It takes ~30 s, most of it the stop's own 10 s
+      # grace and its PowerShell process checks. And the check every command
+      # makes that its working directory is still there (GetLastDirectory),
+      # which must answer the directory a Windows run is in. Only these tests
+      # of ./utils/ run here: the package as a whole has not been shown to
+      # pass on Windows.
+      - name: Test the Windows stop and working directory (amd64)
+        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled|TestGetLastDirectory" ./utils/
+        shell: cmd
+
+      # The run's log on Windows: a full log is sealed with the read-only
+      # attribute through its handle, by whichever of the CLI and its native
+      # agent fills it, and closing a log twice is a no-op (a closed file's
+      # Stat is an error of its own here, not os.ErrClosed). These rows are
+      # the only ones of ./utils/log/ that run here: the package's other
+      # tests are Unix-only or have not been shown to pass on Windows. They
+      # were added with the code they test, which no Windows host or Wine was
+      # at hand to run, so this job is their first Windows run.
+      - name: Test the run's log (amd64)
+        run: go test -count=1 -run "TestTheRunsLog|TestCloseLogFileOfAClosedLogIsANoOp|TestCloseLogFileLeavesAFileThatIsNotALog" ./utils/log/
         shell: cmd

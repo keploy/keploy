@@ -687,6 +687,11 @@ func TestBuildDepResults_MissingRowsAgreeWithMockSubset(t *testing.T) {
 			expected: []models.MockEntry{{Name: "m1", Kind: "Http"}, {Name: "dns", Kind: "DNS"}},
 			consumed: []models.MockState{consumed("m1", models.HTTP)},
 		},
+		{
+			name:     "an unconsumed connection failure never counts as missing",
+			expected: []models.MockEntry{{Name: "m1", Kind: "Http"}, {Name: "cf", Kind: "ConnectionFailure"}},
+			consumed: []models.MockState{consumed("m1", models.HTTP)},
+		},
 	}
 
 	for _, tt := range tests {
@@ -694,14 +699,14 @@ func TestBuildDepResults_MissingRowsAgreeWithMockSubset(t *testing.T) {
 			// Reproduce the call site's filtered name slices verbatim.
 			var filteredExpected []string
 			for _, m := range tt.expected {
-				if isDNSMockEntry(m, nil) || tt.reusable[m.Name] {
+				if isUnassertedMockEntry(m, nil) || tt.reusable[m.Name] {
 					continue
 				}
 				filteredExpected = append(filteredExpected, m.Name)
 			}
 			var filteredConsumed []string
 			for _, m := range tt.consumed {
-				if m.Kind == models.DNS || isReusableTierState(m) {
+				if consumedOutsideAssertion(m) {
 					continue
 				}
 				filteredConsumed = append(filteredConsumed, m.Name)
@@ -1117,32 +1122,6 @@ func TestResolveTestOutcome_DefaultsAreBackwardCompatible(t *testing.T) {
 				"responseMatched=%v mismatch=%v", responseMatched, mismatch)
 			assert.False(t, got.DepAssertFail)
 		}
-	}
-}
-
-// A diverged mock set normally suppresses the response diff as "re-record
-// noise". Under --assert-dependencies the same test is about to be marked
-// FAILED, so suppressing its diff hands the user a red test with nothing to
-// look at.
-func TestShouldEmitFailureLogs(t *testing.T) {
-	tests := []struct {
-		name               string
-		mockSetMismatch    bool
-		assertDependencies bool
-		want               bool
-	}{
-		{name: "no divergence: diffs as always", want: true},
-		{name: "no divergence, knob on", assertDependencies: true, want: true},
-		{name: "divergence, knob off: historical suppression", mockSetMismatch: true, want: false},
-		{
-			name:            "divergence, knob on: the test is going red, so show the diff",
-			mockSetMismatch: true, assertDependencies: true, want: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, shouldEmitFailureLogs(tt.mockSetMismatch, tt.assertDependencies))
-		})
 	}
 }
 
@@ -1647,7 +1626,7 @@ func TestWarnDependencyAssertionInert(t *testing.T) {
 			// the assertion ran normally for every non-streaming test, and
 			// the set-wide sentence would be a false alarm about those.
 			wantMsg:    "does not run for this test set's streaming test cases",
-			wantReason: "streaming (SSE/chunked) test cases",
+			wantReason: "streaming test cases (server-sent events, NDJSON or multipart by their Content-Type",
 		},
 		{
 			name:       "knob OFF and streaming tests deferred: silence",
@@ -2021,5 +2000,34 @@ func TestNoEligibleDepsAndCheckedAreTheSameQuestion(t *testing.T) {
 				t.Fatalf("a NOT-CHECKED verdict carries data: consumed=%d rows=%v", dep.Consumed, dep.Rows)
 			}
 		})
+	}
+}
+
+// A test with no dependency reports an empty used list, not none: the
+// report's mock_mismatches is present whenever what the test consumed was
+// read, so a reader can tell "used none" from "unknown" (absent, only when
+// the read failed). Left out when empty, the two looked the same, and cloud
+// triage could never confirm a dependency-free test's change.
+func TestMockMismatchesForSaysUsedNone(t *testing.T) {
+	empty := mockMismatchesFor(true, nil, nil)
+	if empty == nil {
+		t.Fatal("a test whose consumed mocks were read, and were none, has no mock_mismatches")
+	}
+	out, err := yaml.Marshal(models.TestResult{Name: "get-greet-1", MockMismatches: empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "mock_mismatches: {}") {
+		t.Errorf("the report leaves the empty used list out:\n%s", out)
+	}
+
+	if got := mockMismatchesFor(false, []models.MockMismatchMock{{Name: "mock-1"}}, nil); got != nil {
+		t.Errorf("consumed mocks unread: %+v, want absent", got)
+	}
+
+	exp := []models.MockMismatchMock{{Name: "mock-1", Kind: "Http"}}
+	act := []models.MockMismatchMock{{Name: "mock-2", Kind: "Http"}}
+	if got := mockMismatchesFor(true, exp, act); got == nil || !reflect.DeepEqual(got.ExpectedMocks, exp) || !reflect.DeepEqual(got.ActualMocks, act) {
+		t.Errorf("both lists: %+v", got)
 	}
 }

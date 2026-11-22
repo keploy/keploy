@@ -40,4 +40,25 @@ func (sysProc) Program(pid uint32) string {
 	return ""
 }
 
+// KernelPidsLocal is true: macOS knows no PID namespaces, and its sysctl
+// names a process by the number keploy's proxy reports.
+func (sysProc) KernelPidsLocal() bool { return true }
+
+// Command reads process pid's comm (kinfo_proc's p_comm) and command line
+// (kern.procargs2: argc, the executable's path and its padding, then argv,
+// NUL-separated: procArgs).
+func (sysProc) Command(pid uint32) (comm string, argv []string, ok bool) {
+	if kp, err := unix.SysctlKinfoProc("kern.proc.pid", int(pid)); err == nil && kp != nil && kp.Proc.P_pid != 0 {
+		c := kp.Proc.P_comm[:]
+		if i := bytes.IndexByte(c, 0); i >= 0 {
+			c = c[:i]
+		}
+		comm = string(c)
+	}
+	if b, err := unix.SysctlRaw("kern.procargs2", int(pid)); err == nil {
+		argv = procArgs(b)
+	}
+	return comm, argv, comm != "" || len(argv) > 0
+}
+
 var Default = New(sysProc{}, 2*time.Millisecond)
