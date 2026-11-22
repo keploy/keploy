@@ -7,7 +7,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -116,16 +115,17 @@ func strictPrintKey(k string, sum uint64) string {
 //     where two lists of a tier hold fits, they are put in the order of the
 //     tier's list of the call's method, which holds both (strictFitsInOrder).
 //
-// served nil and retry false is no answer here, and the call reads the whole
-// pool: the switch is off, an exact view or a stateful sequence view is in
-// force, the store reads no key, or any outcome but an answer (a miss, a
-// recording with variables that fits the call but whose variables do not
-// hold, an answered stateful walk), which the read decides and reports. So
-// each call is answered, missed and reported as the whole read does it.
+// Its one caller, matchCascade, calls it under the switch alone. served nil
+// and retry false is no answer here, and the call reads the whole pool: an
+// exact view or a stateful sequence view is in force, the store reads no
+// key, or any outcome but an answer (a miss, a recording with variables that
+// fits the call but whose variables do not hold, an answered stateful walk),
+// which the read decides and reports. So each call is answered, missed and
+// reported as the whole read does it.
 // retry is true when another connection took the recording first, or a
 // variable's bind met another's, as the read retries then.
 func (h *HTTP) keyedStrictRead(ctx context.Context, input *req, mockDb integrations.MockMemDb, scope varScope, n strictNoise, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (served *models.Mock, retry bool, err error) {
-	if !provenswitch.On() || integrations.ExactServing(mockDb) {
+	if integrations.ExactServing(mockDb) {
 		return nil, false, nil
 	}
 	if _, exact := integrations.SequenceViewOf(mockDb); exact {

@@ -437,13 +437,14 @@ func mergeRecorded(out, owned, shared []learnEntry, perTest bool) []learnEntry {
 	return out
 }
 
-// scope is r's scope for the live request, as scopeReads.scope builds it
-// from a read with sieve set (learnedGroup), from entries, the index's
-// entries the call may be (learnLook.entries). The candidates it leaves out
-// are those the sieve shapes none of, which exactGroup never takes; the own
-// recordings that answered and that the store let go are spent, never
-// shaped, and left out too.
-func (ix *learnIndex) scope(r scopeReads, entries []learnEntry, live httpParts, liveShape learn.Shape, n learnNoise) scope {
+// scopeOfEntries is r's scope for the live request, as scopeReads.scope
+// builds it from a read with sieve set (learnedGroup), from entries, the
+// entries the call may be of an index (learnLook.entries) or of the store's
+// key indexes (keyedLearnEntries). The candidates it leaves out are those
+// the sieve shapes none of, which exactGroup never takes; the own recordings
+// that answered and that the store let go are spent, never shaped, and left
+// out too.
+func scopeOfEntries(r scopeReads, entries []learnEntry, live httpParts, liveShape learn.Shape, n learnNoise) scope {
 	var sc scope
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
@@ -505,9 +506,10 @@ func unspentOnce(gone func(*models.Mock) bool) func([]*models.Mock) []*models.Mo
 }
 
 // learnedGroupOf is learnedGroup for the live request: through h's indexed
-// read of db (learnIndexes.of) where there is one, else (and always with
-// reread) from db's reads. In the exact view's verify mode a group found
-// through the index is compared with the one every candidate of a read
+// read of db (learnIndexes.of) where there is one (never with reread), else
+// through db's key indexes (keyedLearnEntries) where it reads by key, else
+// from db's reads. In the exact view's verify mode a group found
+// through an index is compared with the one every candidate of a read
 // gives, as is its owner of each recording of it, and a difference panics.
 func (h *HTTP) learnedGroupOf(ctx context.Context, base, db integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, reread bool) ([]*models.Mock, func(*models.Mock) bool, error) {
 	read := func() (scopeReads, error) { return h.learnReads(db, tracker) }
@@ -525,6 +527,20 @@ func (h *HTTP) learnedGroupOf(ctx context.Context, base, db integrations.MockMem
 			return nil, nil, err
 		}
 	}
+	var entries []learnEntry
+	gen := look.gen
+	if indexed {
+		var err error
+		if entries, err = look.entries(ctx, live.method, sieve.masked, body, printed, mockSpentOf(db)); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		// With no index of its own (no exact view, or a reread) the call
+		// reads the recordings it may be through the store's key indexes,
+		// which read the store as it is now, as its read does.
+		gen, _ = integrations.StagingGenerationOf(db, models.HTTP)
+		entries, indexed = keyedLearnEntries(db, n, live.method, sieve.masked, body, printed)
+	}
 	if !indexed {
 		r, err := read()
 		if err != nil {
@@ -539,11 +555,7 @@ func (h *HTTP) learnedGroupOf(ctx context.Context, base, db integrations.MockMem
 		r = r.answersOnce()
 	}
 	r.sieve = sieve
-	entries, err := look.entries(ctx, live.method, r.sieve.masked, body, printed, mockSpentOf(db))
-	if err != nil {
-		return nil, nil, err
-	}
-	sc := look.ix.scope(r, entries, live, liveShape, n)
+	sc := scopeOfEntries(r, entries, live, liveShape, n)
 	group, owner := exactGroup(liveShape, sc, false), sc.owner()
 	if verify {
 		full, err := read()
@@ -562,7 +574,7 @@ func (h *HTTP) learnedGroupOf(ctx context.Context, base, db integrations.MockMem
 		spentNow := mockSpentOf(db)
 		unspent := unspentOnce(func(m *models.Mock) bool { return spentNow(m.Name) })
 		got, want := unspent(group), unspent(all)
-		if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again == look.gen {
+		if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again == gen {
 			if !slices.Equal(want, got) {
 				panic(fmt.Sprintf("exact view verify: indexed learned group of %s %s: indexed %v, read %v", live.method, live.path, strictNames(got), strictNames(want)))
 			}

@@ -16,10 +16,11 @@ import (
 
 // Under the proven switch with no exact view installed (an agent whose
 // filters carry no exact mapping, as the integration-test runner's do) the
-// matcher compares a call with the recordings that may be it alone: a GET of
-// its own path and a POST of a path every POST shares, by its body. Each is
-// served its recording through the stores' key indexes, examining a few keyed
-// entries, in a set of 4000.
+// learn step and the matcher compare a call with the recordings that may be
+// it alone: a GET of its own path and a POST of a path every POST shares, by
+// its body. Each is served its recording through the stores' key indexes,
+// examining a few keyed entries and never walking the per-test tier whole,
+// in a set of 4000.
 func TestAProvenCallWithNoExactViewReadsOnlyItsRecordings(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	const n = 4000
@@ -28,9 +29,12 @@ func TestAProvenCallWithNoExactViewReadsOnlyItsRecordings(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 	stageScale(mm, n, at, "none")
+	defer exactViewVerify.Store(exactViewVerify.Load())
+	exactViewVerify.Store(false) // the verify mode reads the whole set on every call: counted alone
+	walks := watchTreeWalks(t, mm.filtered)
 	for k := 0; k < 64; k++ {
 		i := (k * 7919) % n
-		before := keyedExamined.Load()
+		before, walked := keyedExamined.Load(), walks[0].Load()
 		body, err := serveScale(h, mm, i)
 		if err != nil {
 			t.Fatal(err)
@@ -44,6 +48,9 @@ func TestAProvenCallWithNoExactViewReadsOnlyItsRecordings(t *testing.T) {
 		}
 		if e := keyedExamined.Load() - before; e == 0 || e > 8 {
 			t.Fatalf("call %d examined %d keyed entries; want its own few, read by key", i, e)
+		}
+		if w := walks[0].Load() - walked; w != 0 {
+			t.Fatalf("call %d walked the per-test tier whole %d times; want it read by key alone", i, w)
 		}
 	}
 }
@@ -124,6 +131,8 @@ func strictCorpusMock(r *rand.Rand, i int, at time.Time, reqs *[][3]string) (*mo
 // (tok1 and tok22), and under a bare pattern that masks every digit run.
 func TestAKeyedStrictReadAnswersAsTheWholeRead(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
+	defer exactViewVerify.Store(exactViewVerify.Load())
+	exactViewVerify.Store(false) // the verify mode reads the whole set on every call: counted alone
 	noises := map[string][]string{"none": nil, "token": {"/s/tok[0-9]+"}, "digits": {"[0-9]+"}}
 	for _, noise := range []string{"none", "token", "digits"} {
 		t.Run("noise="+noise, func(t *testing.T) {
@@ -137,10 +146,10 @@ func TestAKeyedStrictReadAnswersAsTheWholeRead(t *testing.T) {
 			at := time.Unix(1_700_000_000, 0)
 			// served counts the calls answered by a recording; matched,
 			// those the matcher answered (the whole manager walked its
-			// per-test tier more than the learn step's once); fewer, those
-			// of them the keyed manager answered walking its tier fewer
-			// times.
-			served, matched, fewer, missed := 0, 0, 0, 0
+			// per-test tier more than the learn step's once); byKey, those
+			// served the keyed manager answered never walking its per-test
+			// tier whole, in the learn step or the matcher.
+			served, matched, byKey, missed := 0, 0, 0, 0
 			for seed := int64(1); seed <= 16; seed++ {
 				r := rand.New(rand.NewSource(seed))
 				var perTest, session []*models.Mock
@@ -188,18 +197,18 @@ func TestAKeyedStrictReadAnswersAsTheWholeRead(t *testing.T) {
 					served++
 					if w2 > 1 {
 						matched++
-						if w1 < w2 {
-							fewer++
-						}
+					}
+					if w1 == 0 {
+						byKey++
 					}
 				}
 				keyed.Close()
 				whole.Close()
 				refused.Close()
 			}
-			t.Logf("served %d calls, the matcher %d of them, %d without its whole read; %d missed", served, matched, fewer, missed)
-			if served < 200 || matched < 150 || missed < 60 || fewer < matched*9/10 {
-				t.Fatalf("the corpora served %d calls, the matcher %d of them, %d without its whole read, and missed %d; the row needs many of each, nearly all the matcher's by key", served, matched, fewer, missed)
+			t.Logf("served %d calls, the matcher %d of them; %d by key alone; %d missed", served, matched, byKey, missed)
+			if served < 200 || matched < 150 || missed < 60 || byKey < served*49/50 {
+				t.Fatalf("the corpora served %d calls, the matcher %d of them, %d by key alone, and missed %d; the row needs many of each, nearly all served by key", served, matched, byKey, missed)
 			}
 		})
 	}
