@@ -530,7 +530,18 @@ func TestStoreLockThatCannotBeTaken(t *testing.T) {
 			caRunsDir = filepath.Join(file, "runs")
 		}},
 		{"no file", func(t *testing.T) {
-			if err := os.MkdirAll(filepath.Join(caRunsDir, storeLockName), 0o755); err != nil {
+			path := filepath.Join(caRunsDir, storeLockName)
+			if runtime.GOOS == "windows" {
+				// Making a link needs a privilege there.
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			// A link to itself, which no open follows (too many
+			// levels of links), also as root. Not a directory: macOS
+			// opens one and takes its lock.
+			if err := os.Symlink(storeLockName, path); err != nil {
 				t.Fatal(err)
 			}
 		}},

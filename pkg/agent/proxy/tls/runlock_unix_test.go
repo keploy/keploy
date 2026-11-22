@@ -297,3 +297,27 @@ func TestNativeInstallLocksBeforeItsFirstAnchor(t *testing.T) {
 		t.Fatal("after the teardown of a failed install, this run is still live")
 	}
 }
+
+// The runs directory of each OS and user: /run on Linux for every run; on
+// macOS, which has no /run, /var/run for root's runs and the run's own temp
+// directory for another user's. The host's default is its own OS's.
+func TestCARunsDirOfEachOSAndUser(t *testing.T) {
+	const tmp = "/var/folders/9c/user/T/"
+	for _, tc := range []struct {
+		goos string
+		euid int
+		want string
+	}{
+		{"linux", 0, "/run/keploy-ca-runs"},
+		{"linux", 1000, "/run/keploy-ca-runs"},
+		{"darwin", 0, "/var/run/keploy-ca-runs"},
+		{"darwin", 502, "/var/folders/9c/user/T/keploy-ca-runs"},
+	} {
+		if got := caRunsDirOn(tc.goos, tc.euid, tmp); got != tc.want {
+			t.Errorf("caRunsDirOn(%s, euid %d) = %q, want %q", tc.goos, tc.euid, got, tc.want)
+		}
+	}
+	if got, want := defaultCARunsDir(), caRunsDirOn(runtime.GOOS, os.Geteuid(), os.TempDir()); got != want {
+		t.Errorf("defaultCARunsDir() = %q, want %q", got, want)
+	}
+}

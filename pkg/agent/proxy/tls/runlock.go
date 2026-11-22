@@ -43,7 +43,8 @@ import (
 // writesSweptEntries reports whether the native install on goos writes
 // trust-store entries, and so takes this run's lock before it writes them
 // (setupNativeForApp). Only the macOS install writes none
-// (setupNativeDarwin): it takes no lock, and its run makes no lock directory.
+// (setupNativeDarwin): it takes no run lock (its legacy sweep takes the store
+// lock: caRunsDirOn).
 func writesSweptEntries(goos string) bool { return goos != "darwin" }
 
 // caRunsDir is the directory of the runs' lock files: one for every keploy run
