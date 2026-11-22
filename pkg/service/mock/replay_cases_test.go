@@ -535,7 +535,11 @@ func TestATestsLineNamesEveryRecordingThatAnsweredIt(t *testing.T) {
 	require.True(t, firsts["mock-21"][0].Before(firsts["mock-21"][1]))
 	require.True(t, firsts["mock-10"][0].Before(firsts["mock-21"][1]), "mock-10 answered TestA before mock-21 did")
 	require.Equal(t, []string{"mock-30", "mock-21", "mock-10", "mock-40"}, []string{counts.answered[0].Mock, counts.answered[1].Mock, counts.answered[2].Mock, counts.answered[3].Mock}, "the order the agent first served them")
-	for range 20 {
+	// mock-21's places are a map's keys, whose order Go varies from one
+	// read to the next: TestA and TestC, first answered at one instant,
+	// come out of it in either order. 200 reads make one that orders them
+	// by the map's order, not by name, fail all but certainly.
+	for range 200 {
 		require.Equal(t, counts.answered, answeredWhere(consumed, windows), "the same receipt every time: places first answered at once are in the order of their tests' names")
 	}
 }
