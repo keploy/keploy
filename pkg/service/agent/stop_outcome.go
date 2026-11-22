@@ -134,7 +134,11 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the mocks this replay served: %w", err)
 	}
-	missed, err := a.GetMockErrors(ctx)
+	missCtx := ctx
+	if provenswitch.On() {
+		missCtx = models.WithSetEndRead(ctx)
+	}
+	missed, err := a.GetMockErrors(missCtx)
 	missedUnread := ""
 	if errors.Is(err, models.ErrUnmatchedCallsUnread) {
 		// What was read is kept, and the account says it may be short, and

@@ -331,14 +331,13 @@ type OutgoingOptions struct {
 	// ReadsSetEnds is a capability flag set by the CLI on the replay
 	// session's /mock request: when true, the CLI reads each of its test
 	// sets' end with a set's end read (WithSetEndRead) and fails the set
-	// with a call it files there, as keploy test does under the proven
-	// switch. The run's mock manager takes a parser's
+	// with a call it files there, as keploy test and keploy mock do under the
+	// proven switch. The run's mock manager takes a parser's
 	// set's end registration (integrations.SetEndFiler), which the parser
 	// makes at each call it would hold for a later test, ONLY in a session
-	// that sets it, so under a client that does not (keploy mock; keploy
-	// test without the switch, whose read of a set's end fails nothing; one
-	// from before the read) a parser holds no call for a later test: it
-	// misses it at once instead.
+	// that sets it, so under a client that does not (without the switch,
+	// whose read of a set's end fails nothing; one from before the read) a
+	// parser holds no call for a later test: it misses it at once instead.
 	// The agent passes it on only to a Proxy that files those calls at the
 	// read (agent.SetEndFilingProxy), and false to any other. Replay path
 	// only.
