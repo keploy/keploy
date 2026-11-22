@@ -58,6 +58,11 @@ type clockLayout struct {
 	timeWord func(match string, i int) bool
 	// wraps: the instant is a time of day, compared modulo a day.
 	wraps bool
+	// end, when not nil, is where a match of re that ends at s[b] ends,
+	// read with the bytes of s after it (matchEnd): re says what a match
+	// holds, end what may stand right after it, which a pattern of Go's
+	// regexp syntax cannot say.
+	end func(s string, b int) int
 }
 
 // Every layout reads its text in UTC where the text names no offset, and an
@@ -68,7 +73,17 @@ var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} (?:GMT|UTC|[+-]\d{4})`), read: readRFC1123},
 	// ISO 8601 at the day, the hour ("2026-10-22T10Z", its reduced
 	// precision, after a T only), the minute, the second and a fraction.
-	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
+	// A time to the minute or finer may write its zone after a space, whole
+	// ("2026-11-01 23:42:37.172 +05:30" of Sequelize's timezone option,
+	// "… +0530 IST" of Go's time.Time.String(), "… +0530" of Ruby's
+	// Time#to_s), as its one zone: the zone places the instant, as it does
+	// with no space. Such a zone is one a place keeps (hours 00 to 14,
+	// minutes 00 to 59) that ends where its digits do (isoEnd: no letter,
+	// digit, "." or "," right after it). Any other signed number after a
+	// space, and any after a date alone or an hour, is no zone: the instant
+	// before it is read as it is with nothing after it ("2026-11-01
+	// 10:00:00 -1400.00" is a time, then a sum).
+	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: [+-](?:0\d|1[0-4]):?[0-5]\d|Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?|(?:T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?)`), read: readISO, end: isoEnd},
 	{re: regexp.MustCompile(`\d{8}T\d{6}Z?`), read: readCompact},
 	{re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
 	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch},
@@ -287,6 +302,20 @@ func (w *Window) ComparesOffsets() *Window {
 // later call), which the learn step learns only where both runs' spans from
 // their test's begin hold it (Window.sinceBegin), and a replay checks from
 // its own test's begin (models.SinceTestBegin), never from an earlier start.
+//
+// TestFrom is where the running test began on the app's clock, or where the
+// app's clock's run to the call began after it (SetAppClockRun), in a
+// replay's span (LiveSpan) whose From a serve made after the test began
+// set, and in a server test's window (CallWindowFrom) in each run whose
+// From a call made after the test began set there (in the recording, after
+// its recorded begin): zero otherwise, and in a client test's window, which
+// reads from each run's test begin by Began. Another goroutine of the
+// application (a queue's consumer beside the test's handler) can make a
+// call keploy serves between a read of the clock and the call that carries
+// the read, so a serve made after the test began bounds no read of the
+// call: a replay passes a value that holds in the span from TestFrom too
+// (CheckClockRead), and so never refuses a read made in the test because
+// of when keploy served another call.
 type Span struct {
 	From, To time.Time
 	Zone     *time.Location
@@ -294,8 +323,9 @@ type Span struct {
 	// ClockSpanFrom): the zone the application writes its clock in in this
 	// run, in which a replay checks a learned read whatever zone the learn
 	// step named (CheckClockRead). false where Zone is the agent's own.
-	Own   bool
-	Began time.Time
+	Own      bool
+	Began    time.Time
+	TestFrom time.Time
 }
 
 // sinceBegin is s from the running test's begin (Began) to its call: false
@@ -325,6 +355,31 @@ func (w *Window) sinceBegin() *Window {
 		return nil
 	}
 	return &Window{Rec: rec, F: f, offsets: w.offsets, begun: true}
+}
+
+// fromTestBegin is w, the window of a server test's call, with each run's
+// span from where the test began there where a call made after that begin
+// starts it (Span.TestFrom), the other run's span as w has it: the window
+// in which the learn step reads a read of the clock its call's window
+// refuses, as the replay's check passes a value its span refuses where it
+// holds from the test's begin (CheckClockRead). Another goroutine of the
+// application can make a call between the read and the call that carries
+// it, in either run, so that call bounds no read of this one. It is also
+// the window in which a server test's value's words are read as the
+// clock's rather than as data (newDrift). nil where neither run's span
+// knows such a begin.
+func (w *Window) fromTestBegin() *Window {
+	if w == nil || w.Rec.TestFrom.IsZero() && w.F.TestFrom.IsZero() {
+		return nil
+	}
+	from := func(s Span) Span {
+		if !s.TestFrom.IsZero() && s.TestFrom.Before(s.From) {
+			s.From = s.TestFrom
+		}
+		s.TestFrom = time.Time{}
+		return s
+	}
+	return &Window{Rec: from(w.Rec), F: from(w.F), offsets: w.offsets}
 }
 
 // clockWordIn finds the one instant that changed in a text, recorded as rec
@@ -503,9 +558,9 @@ func clockSeamAfter(s string, lo int) int {
 func clockReach(s string, a int) int {
 	end := a
 	t := s[a:min(len(s), a+clockWordMax)]
-	for _, re := range clockAnchored {
-		if m := re.FindStringIndex(t); m != nil && a+m[1] > end {
-			end = a + m[1]
+	for k, re := range clockAnchored {
+		if m := re.FindStringIndex(t); m != nil {
+			end = max(end, clockLayouts[k].matchEnd(s, a+m[1]))
 		}
 	}
 	return end
@@ -526,7 +581,7 @@ func clockPairsAfter(lay clockLayout, rec string, er int, s string, extra [][]in
 		if m == nil {
 			return true
 		}
-		a, b := at+m[0], at+m[1]
+		a, b := at+m[0], lay.matchEnd(rec, at+m[1])
 		at = b
 		if !atWordBounds(rec, a, b) {
 			continue
@@ -600,19 +655,27 @@ func (w *Window) Holds(rec, live time.Time, res time.Duration) bool {
 	return w != nil && w.Rec.holds(rec, res) && w.F.holds(live, res)
 }
 
-// key is w as a map key, the zero key for none: its spans' bounds, and 1
-// last for a reading from each run's test begin (begun), which reads a
-// value's words otherwise than its call's own window does even where the
-// two windows' bounds are the same.
-func (w *Window) key() [5]int64 {
+// key is w as a map key, the zero key for none: its spans' bounds, 1 for a
+// reading from each run's test begin (begun), which reads a value's words
+// otherwise than its call's own window does even where the two windows'
+// bounds are the same, and each run's test begin a server test's span
+// carries (Span.TestFrom, 0 for none), from which the value's clock words
+// are read too (newDrift).
+func (w *Window) key() [7]int64 {
 	if w == nil {
-		return [5]int64{}
+		return [7]int64{}
 	}
 	var begun int64
 	if w.begun {
 		begun = 1
 	}
-	return [5]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun}
+	at := func(t time.Time) int64 {
+		if t.IsZero() {
+			return 0
+		}
+		return t.UnixNano()
+	}
+	return [7]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun, at(w.Rec.TestFrom), at(w.F.TestFrom)}
 }
 
 // clockOf is clockIn with no call's window: the clock reads that moved by
@@ -732,8 +795,7 @@ func (b byPlace) Swap(i, j int) {
 // across from or to (clockWordWindow).
 func clockMatches(lay clockLayout, s string, from, to int, taken []bool) [][]int {
 	var out [][]int
-	for _, m := range lay.re.FindAllStringIndex(s[from:to], -1) {
-		m[0], m[1] = m[0]+from, m[1]+from
+	for _, m := range lay.matches(lay.re, s, from, to) {
 		if !atWordBounds(s, m[0], m[1]) {
 			continue
 		}
@@ -749,6 +811,62 @@ func clockMatches(lay clockLayout, s string, from, to int, taken []bool) [][]int
 		}
 	}
 	return out
+}
+
+// matchEnd is where lay's match that its pattern ends at s[b] ends with
+// what stands after it in s (lay.end): b, or before b where that ends it
+// earlier.
+func (lay clockLayout) matchEnd(s string, b int) int {
+	if lay.end == nil {
+		return b
+	}
+	return lay.end(s, b)
+}
+
+// matches are lay's matches in s from from to to, in the order they stand:
+// re's (lay.re, or it compiled in either case), each ending where matchEnd
+// says and the next looked for from there, as a pattern that could say what
+// stands after a match would find them.
+func (lay clockLayout) matches(re *regexp.Regexp, s string, from, to int) [][]int {
+	var out [][]int
+	for at := from; at < to; {
+		m := re.FindStringIndex(s[at:to])
+		if m == nil {
+			break
+		}
+		a, b := at+m[0], lay.matchEnd(s, at+m[1])
+		out = append(out, []int{a, b})
+		at = b
+	}
+	return out
+}
+
+// isoEnd is where a match of the ISO 8601 layout that its pattern ends at
+// s[b] ends: before the zone it writes after a space where a letter, a
+// digit, "." or "," stands right after that zone (zoneRunsOn: "…
+// 10:00:00 -1400.00" is a time, then a sum), and at b otherwise. The
+// pattern reads such a zone whole, its hours and its minutes, so it is the
+// match's last seven bytes (" +05:30") or six (" +0530"), and no other
+// match of the layout, a date's ten bytes or more, ends in a space and a
+// sign there.
+func isoEnd(s string, b int) int {
+	if b >= len(s) || !zoneRunsOn(s[b]) {
+		return b
+	}
+	for _, n := range [...]int{7, 6} {
+		if z := b - n; s[z] == ' ' && (s[z+1] == '+' || s[z+1] == '-') {
+			return z
+		}
+	}
+	return b
+}
+
+// zoneRunsOn reports whether c, right after the digits of a zone written
+// after a space, says the signed number there runs on past them: a letter,
+// a digit, a "." or a ",", whatever follows it. So "… +05:30." and
+// "… +05:30,next" hold no zone, as "… -1400.00" holds none.
+func zoneRunsOn(c byte) bool {
+	return isWord(c) || c == '.' || c == ','
 }
 
 // atWordBounds reports whether s[a:b] stands at ASCII word boundaries of s:
@@ -863,7 +981,14 @@ func readRFC1123(s string) (time.Time, time.Duration, bool) {
 
 func readISO(s string) (time.Time, time.Duration, bool) {
 	s = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(s, "UTC"), "GMT"), " ")
-	n := strings.Replace(strings.Replace(s, " ", "T", 1), ",", ".", 1)
+	// The date's separator from its time, a space or a T, as a T, and no
+	// space before the zone ("… 23:42:37.172 +05:30"): the forms the
+	// layouts below write.
+	n := strings.Replace(s, ",", ".", 1)
+	if len(n) > 10 && n[10] == ' ' {
+		n = n[:10] + "T" + n[11:]
+	}
+	n = strings.Replace(n, " ", "", 1)
 	res := 24 * time.Hour
 	if i := strings.Index(n, "T"); i >= 0 {
 		// The time's own colons, not its zone's ("+05:30").

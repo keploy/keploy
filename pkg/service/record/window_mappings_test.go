@@ -274,29 +274,52 @@ func TestStart_OnlyAProvenRecordWithoutSyncMapsFromWindows(t *testing.T) {
 	}
 }
 
-// A test case the finalize deletes (the agent revoked it: a mock it owned was
-// dropped) gets no entry, and the mocks recorded inside its window stay its
-// own: they are not handed to the test whose window overlapped it.
+// A test case the agent revoked (a mock it owned was dropped) before it
+// arrived is not saved, and gets no entry, and the mocks recorded inside its
+// window stay its own: they are not handed to the test whose window overlapped
+// it.
 func TestStart_ProvenWindowMappingsLeaveARevokedTestOut(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	keepExitCode(t)
 	w := startWinRecording(t, &config.Config{}, nil, nil)
+	w.mock(t, &models.Mock{Kind: models.RevokedTests, Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-2"}}})
 	w.mock(t, winMock("rates-1", models.HTTP, "", 1030))
 	w.mock(t, winMock("rates-2", models.HTTP, "", 2060))
 	w.mock(t, winMock("rates-3", models.HTTP, "", 2200))
-	w.mock(t, &models.Mock{Kind: models.RevokedTests, Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-2"}}})
+	// The mock loop takes the frames in order: once it saved rates-3 it has
+	// applied the revoke, which comes on another stream than test-2.
+	require.Eventually(t, func() bool {
+		w.mockDB.mu.Lock()
+		defer w.mockDB.mu.Unlock()
+		return len(w.mockDB.inserted) == 3
+	}, 10*time.Second, time.Millisecond, "the recorder did not save the mocks sent after the revoke")
 	w.test(t, winTest("test-1", 1000, 1100))
 	w.test(t, winTest("test-2", 2000, 2100))
 	w.test(t, winTest("test-3", 2050, 2300))
-	w.stop(t, 3, 3)
+	// test-2, revoked before it arrived, is never saved (liveRevokes).
+	w.stop(t, 2, 3)
 
 	w.testDB.mu.Lock()
+	inserted := append([]string(nil), w.testDB.inserted...)
 	deleted := append([]string(nil), w.testDB.deleted...)
 	w.testDB.mu.Unlock()
-	require.Equal(t, []string{"test-2"}, deleted, "precondition: the finalize deletes the revoked test")
+	require.Equal(t, []string{"test-1", "test-3"}, inserted, "precondition: the revoked test is not saved")
+	require.Empty(t, deleted, "precondition: a test never saved is not deleted")
 	want := []map[string][]string{{"test-1": {"rates-1"}, "test-3": {"rates-3"}}}
 	if got := w.batches(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("mappings written: %v; want %v", got, want)
+	}
+}
+
+// loseTests loses the windows of the test cases named so, as the recording
+// does for each capture it deleted (liveRevokes.placed).
+func loseTests(w *windowMappings, names ...string) {
+	for i, tw := range w.tests {
+		for _, n := range names {
+			if tw.TestCase == n {
+				w.lose(i)
+			}
+		}
 	}
 }
 
@@ -336,7 +359,7 @@ func TestWindowMappingsWriteNothingAfterADrainThatTimedOut(t *testing.T) {
 	w := &windowMappings{}
 	w.addTest(winTest("test-1", 1000, 1100))
 	w.addMock(winMock("rates-1", models.HTTP, "", 1030))
-	w.write(context.Background(), zap.New(core), db, "test-set-0", nil, false, 0)
+	w.write(context.Background(), zap.New(core), db, "test-set-0", false, 0)
 
 	if len(db.batches) != 0 {
 		t.Fatalf("wrote %v after a drain that timed out", db.batches)
@@ -350,7 +373,7 @@ func TestWindowMappingsWriteNothingAfterADrainThatTimedOut(t *testing.T) {
 
 	// The control: drained, the same collector writes.
 	utils.ErrCode = 0
-	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 	if len(db.batches) != 1 || utils.ErrCode != 0 {
 		t.Fatalf("a drained recording wrote %v (exit code %d); want one batch", db.batches, utils.ErrCode)
 	}
@@ -367,7 +390,7 @@ func TestWindowMappingsNameConcurrentTests(t *testing.T) {
 	w.addTest(winTest("alone", 3000, 3100))
 	w.addMock(winMock("call", models.HTTP, "", 1250))
 	w.addMock(winMock("other", models.HTTP, "", 3050))
-	w.write(context.Background(), zap.New(core), db, "test-set-0", nil, true, 0)
+	w.write(context.Background(), zap.New(core), db, "test-set-0", true, 0)
 
 	warned := logs.FilterMessageSnippet("recorded while another test's request was still open").All()
 	if len(warned) != 1 {
@@ -420,7 +443,8 @@ func TestWindowMappingsALostTestKeepsItsWindow(t *testing.T) {
 	w.addTest(winTest("other", 3000, 3100))
 	w.addMock(winMock("lost-call", models.HTTP, "", 1210))
 	w.addMock(winMock("other-call", models.HTTP, "", 3050))
-	w.write(context.Background(), zap.New(core), db, "test-set-0", map[string]struct{}{"deleted": {}}, true, 0)
+	loseTests(w, "deleted")
+	w.write(context.Background(), zap.New(core), db, "test-set-0", true, 0)
 
 	if len(db.batches) != 1 {
 		t.Fatalf("want one batch, got %v", db.batches)
@@ -522,6 +546,41 @@ func TestStart_ProvenWindowMappingsKeepTheWindowOfATestThatFailedToPersist(t *te
 	}
 }
 
+// Through Start: a test case the store refused for its own body is lost as one
+// that failed to persist is, though the recording goes on. The call recorded
+// while it and a later-started test were open goes to no test, not to the one
+// that persisted.
+func TestStart_ProvenWindowMappingsKeepTheWindowOfARefusedTestCase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	keepExitCode(t)
+	mockDB := &recMockDB{unencodable: map[string]bool{}}
+	run := startRecording(t, mockDB, BaseRecordHooks{}, zap.NewNop(), func(r *Recorder) {
+		r.testDB.(*recTestDB).refuseNames = map[string]bool{"refused": true}
+	})
+	run.frame(t, winMock("call", models.HTTP, "", 1210))
+	require.Eventually(t, func() bool {
+		mockDB.mu.Lock()
+		defer mockDB.mu.Unlock()
+		return len(mockDB.inserted) == 1
+	}, 10*time.Second, 10*time.Millisecond)
+	for _, tc := range []*models.TestCase{winTest("refused", 1000, 1500), winTest("kept", 1200, 1300)} {
+		select {
+		case run.f.incoming <- tc:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the recorder never took %s", tc.Name)
+		}
+	}
+	run.stop(t)
+	run.mapDB.mu.Lock()
+	defer run.mapDB.mu.Unlock()
+	if len(run.mapDB.batches) != 1 {
+		t.Fatalf("want one batch, got %v", run.mapDB.batches)
+	}
+	if got, ok := run.mapDB.batches[0]["kept"]; len(run.mapDB.batches[0]) != 1 || !ok || len(got) != 0 {
+		t.Fatalf("mapped %v; want kept with no mock: the call was recorded inside the window of the refused test case", got)
+	}
+}
+
 // A test case that came back from its insert without a name keeps its window,
 // as one that failed to persist does: the call recorded inside it goes to no
 // test rather than to a later-started one, and no entry is written under "".
@@ -531,7 +590,7 @@ func TestWindowMappingsATestWithoutANameKeepsItsWindow(t *testing.T) {
 	w.addTest(winTest("", 1000, 1500))
 	w.addTest(winTest("later", 1200, 1300))
 	w.addMock(winMock("call", models.HTTP, "", 1210))
-	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 	if len(db.batches) != 1 {
 		t.Fatalf("want one batch, got %v", db.batches)
 	}
@@ -617,7 +676,8 @@ func TestWindowMappingsPlaceTheWorkerScopeOnKeptTests(t *testing.T) {
 	w.addMock(winMock("after-kept", models.HTTP, "", 2500))
 	w.addMock(winMock("after-deleted", models.HTTP, "", 3500))
 	w.addMock(winMock("in-kept", models.HTTP, "", 2050))
-	w.write(context.Background(), zap.NewNop(), db, "test-set-0", map[string]struct{}{"deleted-first": {}, "deleted": {}}, true, 0)
+	loseTests(w, "deleted-first", "deleted")
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 
 	got := []string{}
 	for _, e := range db.worker {
@@ -639,7 +699,7 @@ func TestWindowMappingsWriteAnIdleAnswerInTheWorkerScope(t *testing.T) {
 	w.addTest(winTest("test-1", 1000, 1100))
 	w.addMock(winMock("own-call", models.HTTP, "", 1040))
 	w.addMock(winMock("empty-poll", models.HTTP, "", 1050))
-	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 
 	if len(db.batches) != 1 || len(db.batches[0]["test-1"]) != 1 || db.batches[0]["test-1"][0].Name != "own-call" {
 		t.Fatalf("test-1's mapping is %v; want only own-call", db.batches)
@@ -665,7 +725,7 @@ func TestWindowMappingsMarkTheShutdownsCalls(t *testing.T) {
 		for _, at := range stops {
 			w.noteStop(winAt(at))
 		}
-		w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+		w.write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 		return db.worker
 	}
 	atStop := func(worker []models.MockEntry) []string {
@@ -728,7 +788,7 @@ func TestMarkAtStopReadsAMocksPlace(t *testing.T) {
 		{Name: "early", ReqTimestampMock: models.FormatMockTimestamp(winAt(2900)), ResTimestampMock: models.FormatMockTimestamp(winAt(3100))},
 		{Name: "unplaced", ReqTimestampMock: models.FormatMockTimestamp(winAt(3050))},
 	}
-	markAtStop(worker, map[string]time.Time{"held-poll": winAt(3100), "early": winAt(2900)}, stop)
+	models.MarkAtStop(worker, map[string]time.Time{"held-poll": winAt(3100), "early": winAt(2900)}, stop)
 	got := map[string]bool{}
 	for _, e := range worker {
 		got[e.Name] = e.AtStop
@@ -779,8 +839,8 @@ func TestWindowMappingsWriteTheConcurrencyGroupsAndTheSharedCalls(t *testing.T) 
 	w.addMock(winMock("alone", models.HTTP, "", 1650))          // kept-b only
 	w.addMock(winMock("unkept-only", models.HTTP, "", 5150))    // deleted-2 only, after only-unkept ended
 	w.addMock(winMock("both-unkept", models.HTTP, "", 5060))    // only-unkept (deleted) and deleted-2
-	deleted := map[string]struct{}{"deleted": {}, "deleted-2": {}, "only-unkept": {}}
-	w.write(context.Background(), zap.New(core), db, "test-set-0", deleted, true, 0)
+	loseTests(w, "deleted", "deleted-2", "only-unkept")
+	w.write(context.Background(), zap.New(core), db, "test-set-0", true, 0)
 
 	if len(db.batches) != 1 {
 		t.Fatalf("want one batch, got %v", db.batches)
@@ -834,7 +894,7 @@ func TestWindowMappingsWriteNoGroupsWithoutConcurrency(t *testing.T) {
 	w.addTest(winTest("b", 2000, 2100))
 	w.addMock(winMock("a-call", models.HTTP, "", 1050))
 	w.addMock(winMock("b-call", models.HTTP, "", 2050))
-	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 	if db.writes != 1 || len(db.groups) != 0 || len(db.shared) != 0 {
 		t.Fatalf("groups written %d times (%+v, %+v) for a recording without concurrency; want once, empty", db.writes, db.groups, db.shared)
 	}
@@ -858,7 +918,7 @@ func TestWindowMappingsWriteEveryGroupWithNoBound(t *testing.T) {
 		w.addTest(winTest(fmt.Sprintf("t-%03d", i), 1000+i*10, 1000+i*10+15))
 		w.addMock(winMock(fmt.Sprintf("m-%03d", i), models.HTTP, "", 1000+i*10+12))
 	}
-	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 	if len(db.groups) != n-1 {
 		t.Fatalf("%d groups written; want %d", len(db.groups), n-1)
 	}

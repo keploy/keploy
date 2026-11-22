@@ -192,10 +192,13 @@ type ZoneMount struct {
 // file's name in it), or through one whose file (Mount.Source) is zn's, or
 // p's own zone's (zn an alias the image links to it: Asia/Calcutta to
 // Asia/Kolkata), or of another of IANA's names of UTC where zn is one
-// (utcNames). Where it is another zone's file, or one whose path names no
-// zone (a host's /etc/localtime that is a copy), the mount (ZoneMount): the
-// C library, Go and Python read that file's rules, which are not zn's. An
-// error where keploy cannot read the table.
+// (utcNames), or of a name the newest release of IANA's zone data keploy
+// knows reads with zn's offsets from 1970 to 2038 (sameZoneNames: a host's
+// Asia/Calcutta mounted over an image's link to Asia/Kolkata, the one zone
+// by another name). Where it is another zone's file, or one whose path
+// names no zone (a host's /etc/localtime that is a copy), the mount
+// (ZoneMount): the C library, Go and Python read that file's rules, which
+// are not zn's. An error where keploy cannot read the table.
 func ZoneFileMount(table, p, zn string) (*ZoneMount, error) {
 	m, ok, err := MountOf(table, p)
 	if err != nil || !ok {
@@ -210,10 +213,28 @@ func ZoneFileMount(table, p, zn string) (*ZoneMount, error) {
 	}
 	src := m.Source(p)
 	sn := ZoneinfoName(src)
-	if sn != "" && (sn == zn || sn == own || utcNames[sn] && utcNames[zn]) {
+	if sn != "" && (sn == zn || sn == own || utcNames[sn] && utcNames[zn] || sameZoneNames(sn, zn)) {
 		return nil, nil
 	}
 	return &ZoneMount{Source: src, Zone: sn, Replaced: m.Replaced}, nil
+}
+
+// sameZoneNames reports whether the newest release of IANA's zone data
+// keploy knows (ZoneReleasesLast) reads the names a and b with one offset
+// at every instant from 1970 to 2038 (zoneReleases): two names of one
+// zone, a link's and its target's (Asia/Calcutta, Asia/Kolkata; EET and
+// Europe/Athens, which 2024b linked), or two zones tzdata merged for
+// agreeing from 1970 on. Two names an older release alone read alike are
+// two zones (Asia/Urumqi and Antarctica/Vostok, which 2023d parted). It
+// reads no zone file: keploy's own file of either name may be the very
+// file mounted.
+func sameZoneNames(a, b string) bool {
+	na, _, ok := zoneReleasesOf(a)
+	if !ok || na == 0 {
+		return false
+	}
+	nb, _, ok := zoneReleasesOf(b)
+	return ok && na == nb
 }
 
 // ownZoneMounts is the mount table keploy's own zone files are read
@@ -257,8 +278,9 @@ func SetOwnZoneFilesForTest(table string, dirs []string) (restore func()) {
 
 // ownZoneFileMounted is nil where the file time.LoadLocation reads name
 // from (goZoneFile), if any, is name's own as far as keploy's own mounts
-// tell (ZoneFileMount); an error naming both where it is mounted from
-// another zone's file (a host's /etc/localtime bind-mounted over the link
+// tell (ZoneFileMount); an error naming the file and the zone the mount's
+// source names (never the source's own path, a host's) where it is mounted
+// from another zone's file (a host's /etc/localtime bind-mounted over the link
 // to the zone where keploy runs natively, in the application's
 // container), or where keploy cannot tell. Off Linux no mount table is
 // read: macOS's zone files are no container's.
@@ -288,8 +310,8 @@ func ownZoneFileMounted(name string) error {
 	if m.Replaced {
 		what += ", since replaced on the host"
 	}
-	return fmt.Errorf("%w: keploy reads %q from its own zone file %s, which is a file mounted from %s, %s, so keploy cannot tell whether it holds %q's rules, which a JVM and Node read %q by in their own zone data. A host's /etc/localtime bind-mounted over the link to that zone where keploy runs (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: drop the mount, or set TZ to the zone the application runs in",
-		errOwnZoneMount, name, p, m.Source, what, name, name)
+	return fmt.Errorf("%w: keploy reads %q from its own zone file %s, which is a file mounted from %s, so keploy cannot tell whether it holds %q's rules, which a JVM and Node read %q by in their own zone data. A host's /etc/localtime bind-mounted over the link to that zone where keploy runs (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: drop the mount, or set TZ to the zone the application runs in",
+		errOwnZoneMount, name, p, what, name, name)
 }
 
 // goZoneFile is the file time.LoadLocation reads name from: under

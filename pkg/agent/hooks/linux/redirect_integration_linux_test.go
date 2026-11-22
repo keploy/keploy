@@ -9,6 +9,7 @@ package linux
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
@@ -32,7 +34,8 @@ import (
 // redirectedTo is a TCP socket of the application's that keploy's connect
 // hook redirected, away from dst (an orig_dst_by_cookie entry, as connect4
 // leaves one), bound to port (0: any) in family v6 or IPv4, and a func that
-// closes it once: the test's end closes it if nothing did.
+// closes it once: the test's end closes it if nothing did. SO_REUSEPORT lets
+// it bind beside testnet.SharedPort's hold of the port it binds.
 func redirectedTo(t *testing.T, h *Hooks, v6 bool, port int, dst structs.DestInfo) (int, func()) {
 	t.Helper()
 	family := unix.AF_INET
@@ -47,6 +50,9 @@ func redirectedTo(t *testing.T, h *Hooks, v6 bool, port int, dst structs.DestInf
 	closeFD := func() { once.Do(func() { _ = unix.Close(fd) }) }
 	t.Cleanup(closeFD)
 	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
 		t.Fatal(err)
 	}
 	if v6 {
@@ -71,6 +77,47 @@ func redirectedTo(t *testing.T, h *Hooks, v6 bool, port int, dst structs.DestInf
 		t.Fatal(err)
 	}
 	return fd, closeFD
+}
+
+// noOtherSocketTakes fails the test unless port p is held at the loopback of
+// family v6 or IPv4 as testnet.SharedPort holds it: another socket's bind()
+// of p there with SO_REUSEADDR, as a listener's, must find it taken. A test
+// binds its sockets to a port SharedPort holds, never to one a connect()
+// chose: connect() shares its port with the host's other connections to
+// other destinations, TIME_WAIT ones included, at either loopback family,
+// and a later bind of that port then fails with "address already in use".
+// A bind() to port 0 at [::] takes a port no socket at any address has,
+// TIME_WAIT ones included, and connect() never takes a port a bind() holds.
+// A test that binds a port a connect() chose fails here, or at its own bind
+// after: this bind joins a connected socket that set SO_REUSEADDR, as
+// redirectedTo's do, and one of the other family is no conflict.
+func noOtherSocketTakes(t *testing.T, v6 bool, p int) {
+	t.Helper()
+	family, at := unix.AF_INET, "127.0.0.1"
+	var sa unix.Sockaddr = &unix.SockaddrInet4{Port: p, Addr: [4]byte{127, 0, 0, 1}}
+	if v6 {
+		family, at, sa = unix.AF_INET6, "[::1]", &unix.SockaddrInet6{Port: p, Addr: [16]byte{15: 1}}
+	}
+	fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		t.Fatal(err)
+	}
+	if v6 {
+		if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err = unix.Bind(fd, sa)
+	if err == nil {
+		t.Fatalf("another socket's bind() took the held port %d at %s", p, at)
+	}
+	if !errors.Is(err, unix.EADDRINUSE) {
+		t.Fatalf("another socket's bind() of the held port %d at %s: %v, want %v", p, at, err, unix.EADDRINUSE)
+	}
 }
 
 // connectTo connects fd to the loopback of its family at port and returns
@@ -225,8 +272,13 @@ func TestTwoConnectionsOnOnePortReachTheirOwnDependencies(t *testing.T) {
 	}
 	four := namedDependency(t, "four")
 	six := namedDependency(t, "six")
-	v4, _ := redirectedTo(t, h, false, 0, four)
-	lport := connectTo(t, v4, proxyPort)
+	lport := testnet.SharedPort(t)
+	v4, _ := redirectedTo(t, h, false, lport, four)
+	if got := connectTo(t, v4, proxyPort); got != lport {
+		t.Fatalf("the IPv4 connection's port %d, want the held %d", got, lport)
+	}
+	noOtherSocketTakes(t, false, lport)
+	noOtherSocketTakes(t, true, lport)
 	v6, _ := redirectedTo(t, h, true, lport, six)
 	if got := connectTo(t, v6, proxyPort); got != lport {
 		t.Fatalf("the IPv6 connection's port %d, want %d", got, lport)

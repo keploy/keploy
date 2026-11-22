@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,10 +32,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -45,13 +46,12 @@ import (
 )
 
 // closedAgentURL is the URL of an agent API nothing listens on: a stop
-// request to it is refused, as one to an agent that cannot be asked is.
+// request to it is refused, as one to an agent that cannot be asked is. Its
+// port is held for the test's life (testnet.RefusedAddr), so no other
+// server can come to answer there.
 func closedAgentURL(t *testing.T) string {
 	t.Helper()
-	srv := httptest.NewServer(http.NotFoundHandler())
-	u := srv.URL
-	srv.Close()
-	return u
+	return "http://" + testnet.RefusedAddr(t, "tcp")
 }
 
 // startPTYSleeper starts a long sleep on a PTY, as startNativeAgentWithPTY
@@ -269,9 +269,11 @@ func TestStopPTYAgentRestoresTheTerminalAndSignals(t *testing.T) {
 	}
 }
 
-// dockerAgentCancel, the `docker run` command's Cancel: the container is sent
-// SIGTERM and waited for, answered or not, never `stop`, and then the client
-// is killed.
+// dockerAgentCancel, the `docker run` command's Cancel: the engine is first
+// asked to say when the container is removed -- the client it kills was
+// waiting for that, and the run's CA volume is freed only then -- and the
+// container is then sent SIGTERM and waited for, answered or not, never
+// `stop`, and then the client is killed.
 func TestDockerAgentCancel(t *testing.T) {
 	for _, ready := range []bool{true, false} {
 		log, release := fakeEngine(t)
@@ -284,13 +286,379 @@ func TestDockerAgentCancel(t *testing.T) {
 		}
 		run := newAgentRun()
 		run.ready.Store(ready)
-		if err := dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer)(); err != nil {
+		watch := &removalAsked{t: t, log: log, before: -1, asks: recordStopAsks(t)}
+		if err := dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(watch, stopTestContainer))(); err != nil {
 			t.Fatalf("ready=%v: cancel: %v", ready, err)
+		}
+		if watch.before != 0 || watch.cond != container.WaitConditionRemoved || watch.name != stopTestContainer {
+			t.Errorf("ready=%v: the engine was asked to wait for %q's %q after %d engine calls, want its removal asked before the stop's first", ready, watch.name, watch.cond, watch.before)
+		}
+		// The question is asked on an ask of keploy's bound that is still
+		// open, and the ask's end, once the engine has taken it, withdraws
+		// nothing: the wait the engine took outlives the stop, for the
+		// removal's Wait after it.
+		switch ask := watch.ask; {
+		case ask == nil || !watch.askOpen:
+			t.Errorf("ready=%v: the engine was asked for the removal on no open ask of keploy's bound", ready)
+		case ask.registered() == 0:
+			t.Errorf("ready=%v: the removal's question was not bounded by its ask", ready)
+		case !ask.ended():
+			t.Errorf("ready=%v: the removal's ask was never released", ready)
+		case ask.ran() != 0:
+			t.Errorf("ready=%v: the end of the removal's ask withdrew the question the engine had taken", ready)
 		}
 		if err := client.Wait(); err == nil {
 			t.Fatalf("ready=%v: the docker client was not killed", ready)
 		}
 		requireSignalledAndWaited(t, engineLines(t, log))
+	}
+}
+
+// A daemon that does not take the removal's question does not hold the
+// stop: once keploy has had daemonAnswerStall of its own runnable time, the
+// question is withdrawn and the container is sent SIGTERM and waited for,
+// and the client is killed.
+func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
+	clk := &stall.ManualClock{}
+	boundClock = clk
+	t.Cleanup(func() { boundClock = nil })
+	log, release := fakeEngine(t)
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := exec.Command("sleep", "300")
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	run := newAgentRun()
+	run.ready.Store(true)
+	silent := &removalSilent{asked: make(chan struct{})}
+	cancelled := make(chan error, 1)
+	go func() {
+		cancelled <- dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(silent, stopTestContainer))()
+	}()
+	within(t, "the removal's question", func() { <-silent.asked })
+	// The bound's look at the clock is armed before the clock moves: a move
+	// made before would fire no timer.
+	awaitBoundArmed(t, clk, "the bound on the removal's question")
+	clk.Advance(daemonAnswerStall)
+	within(t, "dockerAgentCancel", func() {
+		if err := <-cancelled; err != nil {
+			t.Errorf("cancel: %v", err)
+		}
+	})
+	if err := client.Wait(); err == nil {
+		t.Fatal("the docker client was not killed")
+	}
+	requireSignalledAndWaited(t, engineLines(t, log))
+}
+
+// removalSilent is an engine whose daemon does not take the removal's
+// question: ContainerWait returns only once its context ends.
+type removalSilent struct{ asked chan struct{} }
+
+func (r *removalSilent) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	close(r.asked)
+	<-ctx.Done()
+	failed := make(chan error, 1)
+	failed <- ctx.Err()
+	return make(chan container.WaitResponse), failed
+}
+
+func (r *removalSilent) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+	return container.InspectResponse{}, nil
+}
+
+// removalAsked is the engine's API a removal watch asks: it records the
+// wait asked, its context, and how many engine CLI calls came before it.
+// The ask is the latest of the stop's questions to the daemon (asks), and
+// askOpen says whether it was still open as the engine was asked.
+type removalAsked struct {
+	t       *testing.T
+	log     string
+	before  int
+	name    string
+	cond    container.WaitCondition
+	asks    *stopAsks
+	ask     *endingAsk
+	askOpen bool
+}
+
+func (r *removalAsked) ContainerWait(_ context.Context, name string, cond container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	r.before, r.name, r.cond = len(engineLines(r.t, r.log)), name, cond
+	r.ask = r.asks.latest()
+	r.askOpen = r.ask != nil && !r.ask.ended()
+	return make(chan container.WaitResponse), make(chan error)
+}
+
+func (r *removalAsked) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+	return container.InspectResponse{}, nil
+}
+
+// A daemon that does not answer a signal of the stop's to the agent's
+// container does not hold the stop: the signal's question ends with keploy's
+// bound on the daemon's answer (daemonAsk; here the test ends it, as the
+// bound would), keploy says at WARN that the container may still run, and
+// the stop goes on -- the first SIGTERM, the escalation signal at a Ctrl+C
+// while the container is waited for, and the one sent to a compose agent a
+// stalled drain holds. A signal the daemon refuses at once (a container
+// already gone) is answered: no WARN. So is one it answers in the instant
+// before the bound ends, ended as keploy looks at the answer: the signal was
+// sent, and its answer is kept.
+func TestAStopsSignalToASilentDaemonDoesNotHoldIt(t *testing.T) {
+	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
+	dockerStopPoll = 5 * time.Millisecond
+	sig := func(s string) string { return "kill --signal " + s + " " + stopTestContainer }
+	wait := "wait " + stopTestContainer
+	stopFor := func(logger *zap.Logger) {
+		run := newAgentRun()
+		run.ready.Store(true)
+		stopAgentContainerFor(logger, run, stopTestContainer)
+	}
+	endCompose := func(logger *zap.Logger) {
+		(&AgentClient{logger: logger, conf: &config.Config{KeployContainer: stopTestContainer}}).EndComposeAgent(true)
+	}
+	for _, tc := range []struct {
+		name   string
+		silent string
+		stop   func(*zap.Logger)
+		press  bool // the silent signal is the stop's answer to a Ctrl+C
+		refuse bool // the daemon refuses it at once instead
+		answer bool // the daemon answers it, and the bound ends as keploy looks
+		want   []string
+	}{
+		{"the stop's SIGTERM", sig("SIGTERM"), stopFor, false, false, false, []string{sig("SIGTERM")}},
+		{"the escalation at a Ctrl+C", sig("SIGUSR2"), stopFor, true, false, false, []string{sig("SIGTERM"), wait, sig("SIGUSR2")}},
+		{"a compose agent's release", sig("SIGUSR2"), endCompose, false, false, false, []string{sig("SIGUSR2"), wait}},
+		{"a SIGTERM refused", sig("SIGTERM"), stopFor, false, true, false, []string{sig("SIGTERM")}},
+		{"a SIGTERM answered as the bound ends", sig("SIGTERM"), stopFor, false, false, true, []string{sig("SIGTERM"), wait}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			t.Cleanup(utils.ResetInterruptedAgain)
+			if tc.press {
+				theStopWasASignal(t)
+			}
+			asks := recordStopAsks(t)
+			log, release := fakeEngine(t)
+			switch {
+			case tc.answer:
+				asks.endAtLook()
+			case tc.refuse:
+				refuse(t, log, tc.silent)
+			default:
+				silence(t, log, tc.silent)
+			}
+			core, logs := observer.New(zap.DebugLevel)
+			returned := make(chan struct{})
+			go func() { tc.stop(zap.New(core)); close(returned) }()
+			if tc.press {
+				awaitEngineWait(t, log, returned)
+				ctrlCWhileWaited(t)
+			}
+			if !tc.refuse && !tc.answer {
+				awaitCall(t, log, tc.silent, returned)
+				asks.runOut()
+			}
+			// The container exits: only a stop the signal still holds waits on.
+			if err := os.WriteFile(release, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			within(t, "the stop, past a signal its daemon did not answer", func() { <-returned })
+			if got := engineLines(t, log); !slices.Equal(got, tc.want) {
+				t.Errorf("engine calls %q, want %q", got, tc.want)
+			}
+			want := 1
+			if tc.refuse || tc.answer {
+				want = 0
+			}
+			if n := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("did not answer keploy's `" + tc.silent + "`").Len(); n != want {
+				t.Errorf("%d WARNs that the daemon did not answer %q, want %d; logs: %v", n, tc.silent, want, logs.All())
+			}
+		})
+	}
+}
+
+// awaitBoundArmed returns once a bound on clk has armed its look at the
+// clock, and fails the test, naming what, if none has within hangBound.
+func awaitBoundArmed(t *testing.T, clk *stall.ManualClock, what string) {
+	t.Helper()
+	hung := time.After(hangBound)
+	for clk.Pending() == 0 {
+		select {
+		case <-hung:
+			t.Fatalf("%s was never armed within %v", what, hangBound)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// stopAsks stands in for daemonAsk: each of a stop's questions to the
+// daemon is an endingAsk, ended at its release, or by the test (runOut), as
+// keploy's bound ends one its daemon did not answer.
+type stopAsks struct {
+	mu     sync.Mutex
+	asks   []*endingAsk
+	atLook bool
+}
+
+func recordStopAsks(t *testing.T) *stopAsks {
+	t.Helper()
+	s := &stopAsks{}
+	prev := daemonAsk
+	daemonAsk = func() (context.Context, func()) {
+		a := newEndingAsk()
+		s.mu.Lock()
+		a.atLook = s.atLook
+		s.asks = append(s.asks, a)
+		s.mu.Unlock()
+		return a, a.end
+	}
+	t.Cleanup(func() { daemonAsk = prev })
+	return s
+}
+
+// latest is the question asked last, nil before any.
+func (s *stopAsks) latest() *endingAsk {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.asks) == 0 {
+		return nil
+	}
+	return s.asks[len(s.asks)-1]
+}
+
+// runOut ends the question asked last, as keploy's bound would.
+func (s *stopAsks) runOut() { s.latest().end() }
+
+// endAtLook makes each question asked from now on end at keploy's first look
+// at whether it has ended (its Err), as keploy's bound would end it in the
+// instant between the daemon's answer and that look. os/exec reads a
+// command's context's Err only once its Done is closed, so the first look is
+// keploy's own, after the CLI's answer.
+func (s *stopAsks) endAtLook() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.atLook = true
+}
+
+// endingAsk is a question's context the test sees end. context.AfterFunc
+// registers on it through its AfterFunc method, and its end runs what is
+// still registered on the ender's goroutine and counts it (ran): whether the
+// end withdrew anything is known as it ends, not by waiting for the
+// withdrawal's goroutine.
+type endingAsk struct {
+	done     chan struct{}
+	mu       sync.Mutex
+	fns      map[int]func()
+	next     int
+	isEnded  bool
+	ranAtEnd int
+	atLook   bool // ends at the first look at Err (stopAsks.endAtLook)
+}
+
+func newEndingAsk() *endingAsk {
+	return &endingAsk{done: make(chan struct{}), fns: map[int]func(){}}
+}
+
+func (a *endingAsk) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (a *endingAsk) Done() <-chan struct{}       { return a.done }
+func (a *endingAsk) Value(any) any               { return nil }
+
+func (a *endingAsk) Err() error {
+	if a.atLook {
+		a.end()
+	}
+	if a.ended() {
+		return context.Canceled
+	}
+	return nil
+}
+
+// AfterFunc registers f, to run at the end unless stopped first.
+func (a *endingAsk) AfterFunc(f func()) func() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	id := a.next
+	a.next++
+	a.fns[id] = f
+	return func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		_, ok := a.fns[id]
+		delete(a.fns, id)
+		return ok
+	}
+}
+
+// end ends the ask, once, and runs what is still registered on it.
+func (a *endingAsk) end() {
+	a.mu.Lock()
+	if a.isEnded {
+		a.mu.Unlock()
+		return
+	}
+	fns := a.fns
+	a.fns, a.isEnded, a.ranAtEnd = map[int]func(){}, true, len(fns)
+	close(a.done)
+	a.mu.Unlock()
+	for _, f := range fns {
+		f()
+	}
+}
+
+func (a *endingAsk) ended() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.isEnded
+}
+
+// registered is how many funcs were ever registered on the ask.
+func (a *endingAsk) registered() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.next
+}
+
+// ran is how many registered funcs its end ran.
+func (a *endingAsk) ran() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ranAtEnd
+}
+
+// silence makes the fake engine's daemon answer call (an invocation's
+// arguments, as engineLines logs them) never: the call is logged, and then
+// holds until the test is done with the engine, or is killed.
+func silence(t *testing.T, log, call string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(filepath.Dir(log), "silent"), []byte(call+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// refuse makes the fake engine's daemon refuse call at once, as it does a
+// signal to a container that is gone.
+func refuse(t *testing.T, log, call string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(filepath.Dir(log), "refused"), []byte(call+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// awaitCall returns once the fake engine has logged call, and fails the test
+// if the stop returned first, or never makes it.
+func awaitCall(t *testing.T, log, call string, returned <-chan struct{}) {
+	t.Helper()
+	hung := time.After(hangBound)
+	for count(engineLines(t, log), call) == 0 {
+		select {
+		case <-returned:
+			t.Fatalf("the stop returned without %q; calls: %q", call, engineLines(t, log))
+		case <-hung:
+			t.Fatalf("the stop never made %q; calls: %q", call, engineLines(t, log))
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 
@@ -374,7 +742,9 @@ var stopTestContainer = fmt.Sprintf("keploy-stop-test-no-such-container-%d", os.
 // signal, on which it kills itself), ends the container. Its `cp` serves the
 // agent's teardown progress as the engine does, a tar stream, from
 // engineProgressFile(log), and logs each read's content to engineReads(log);
-// `cp` is not logged as a call.
+// `cp` is not logged as a call. A call silence names is logged and then
+// never answered: it holds as a `wait` does, and ends with exit status 1. A
+// call refuse names is logged and refused at once.
 //
 // No invocation outlives its test (reapEngine): a `wait`, or a `cp` made to
 // hang (slowcp), also ends once the test is done with the engine, once its
@@ -410,6 +780,14 @@ if [ "$1" = cp ]; then
   exec tar -C "` + progress + `" -cf - "$(basename "$f")"
 fi
 echo "$*" >> "` + log + `"
+if [ -e "$dir/silent" ] && [ "$*" = "$(cat "$dir/silent")" ]; then
+  while held; do sleep 0.05; done
+  exit 1
+fi
+if [ -e "$dir/refused" ] && [ "$*" = "$(cat "$dir/refused")" ]; then
+  echo "Error response from daemon: No such container" >&2
+  exit 1
+fi
 if [ "$1" = wait ]; then
   while [ ! -e "` + release + `" ] && held; do sleep 0.05; done
 fi

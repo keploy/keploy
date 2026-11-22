@@ -34,6 +34,11 @@ import (
 // report rendering uses "$.a[0].b". Reconciling those is a separate change; the
 // hazard is only that someone copies one of them into a noise path.
 //
+// One segment is the vocabulary's own rather than a key's: NoiseIDKey ("{id}")
+// stands for any id key at its level, so a field under a map keyed by ids has
+// one path however many ids there are (noise_idkey.go). An entry naming one id
+// keeps naming that id only.
+//
 // This file makes the vocabulary an API. BodyNoiseFromJSONDiff is the supported
 // way to turn a response-body difference into noise paths, and
 // UnmatchableBodyNoise is the supported way to ask whether an existing path can
@@ -118,6 +123,13 @@ type NoiseSkip struct {
 // nothing else in the document. Everything else is refused with a
 // NoiseSkipReason explaining which assertion emitting it would have deleted.
 //
+// A field that drifted under an id key (IsIDKey) is emitted once, with every id
+// key on its path spelled NoiseIDKey, when that one path covers nothing that did
+// not drift: the field drifted under every id key that carries it. Otherwise it
+// is emitted per id, for exactly the ids whose field drifted, as before. Such an
+// entry never excuses a key the recording lacks (noiseIndex.matchAdded), so a
+// later replay that adds an id, or the field under an id that lacked it, fails.
+//
 // known is the noise the test case already carries, root-relative and lowercased
 // as SplitNoise returns it, including any regex patterns. Differences it already
 // excuses are not re-emitted, so successive auto-noise rounds converge instead of
@@ -196,12 +208,31 @@ func BodyNoiseFromJSONDiff(expJSON, actJSON string, known map[string][]string, i
 	// Both documents are indexed: a field that exists only in the replay is still
 	// something an entry can silence, so it counts as collateral.
 	cov := newCoverageIndex(exp, act)
-	for _, p := range w.paths {
-		if _, ok := cov.coversOnly(p, w.drifted, w.alreadySilenced); !ok {
-			w.skip(p, NoiseSkipOverBroad)
-			continue
+	for _, g := range groupByIDKeys(w.paths) {
+		// The id-free spelling first: it is one entry for what would otherwise
+		// be one per id, and it is safe exactly when it silences nothing more
+		// than its members do, i.e. the field drifted under every id key that
+		// carries it. Checked against every sibling in both documents, by the
+		// same test as any other candidate.
+		//
+		// Not when an entry the case already carries addresses a member. Such
+		// an entry has a pattern (one without would have excused the drift),
+		// and a per-id one outranks the id-key spelling in the matcher, so the
+		// collapsed entry would resolve nothing there; the per-id candidate is
+		// what lets the caller name the pattern that is too narrow.
+		if g.collapsed != "" && !w.anyAddressed(g.members) {
+			if _, ok := cov.coversOnly(g.collapsed, w.drifted, w.alreadySilenced); ok {
+				paths = append(paths, g.collapsed)
+				continue
+			}
 		}
-		paths = append(paths, p)
+		for _, p := range g.members {
+			if _, ok := cov.coversOnly(p, w.drifted, w.alreadySilenced); !ok {
+				w.skip(p, NoiseSkipOverBroad)
+				continue
+			}
+			paths = append(paths, p)
+		}
 	}
 
 	sort.Strings(paths)
@@ -262,9 +293,15 @@ type noiseCandidateWalk struct {
 
 // alreadySilenced reports whether the test case's existing noise unconditionally
 // ignores this key already. Such a field is not collateral: a new entry that also
-// covers it takes away nothing that is still being asserted.
-func (w *noiseCandidateWalk) alreadySilenced(lowerKey string, ancestryLower []string) bool {
-	if regs, noisy := w.knownPath.match(lowerKey); noisy && len(regs) == 0 {
+// covers it takes away nothing that is still being asserted. added is set for a
+// key only the replay has, which an entry naming id keys does not excuse
+// (noiseIndex.matchAdded).
+func (w *noiseCandidateWalk) alreadySilenced(lowerKey string, ancestryLower []string, added bool) bool {
+	match := w.knownPath.match
+	if added {
+		match = w.knownPath.matchAdded
+	}
+	if regs, noisy := match(lowerKey); noisy && len(regs) == 0 {
 		return true
 	}
 	for _, f := range ancestryLower {
@@ -276,18 +313,22 @@ func (w *noiseCandidateWalk) alreadySilenced(lowerKey string, ancestryLower []st
 }
 
 // knownCoversLeaf reports whether the test case's existing noise already excuses
-// this leaf, applying patterns the way noisyForValue does — an entry with
-// patterns only excuses the values those patterns match, so treating it as an
-// unconditional skip would make the producer return nothing for a live drift.
+// this value of a leaf, applying patterns the way noisyForValues does — an
+// entry with patterns only excuses the values those patterns match, so treating
+// it as an unconditional skip would make the producer return nothing for a live
+// drift. knownCoversPair of one value.
 func (w *noiseCandidateWalk) knownCoversLeaf(key string, actual interface{}) bool {
-	value, isScalar := jsonScalarToString(actual)
-	if regs, noisy := w.knownPath.match(strings.ToLower(key)); noisy {
-		if len(regs) == 0 {
-			return true
-		}
-		if isScalar && anyRegexpMatchStr(value, regs) {
-			return true
-		}
+	return w.knownCoversPair(key, actual, actual)
+}
+
+// knownCoversPair reports whether one entry of the test case's existing noise
+// excuses both values of a leaf, as the matcher reads them: the path entry
+// that names it, or the global entry on its field (noisyForValues), each
+// value matching one of that entry's patterns. Each side excused by another
+// entry is not excused: the matcher holds one entry to both values.
+func (w *noiseCandidateWalk) knownCoversPair(key string, exp, act interface{}) bool {
+	if regs, noisy := w.knownPath.match(strings.ToLower(key)); noisy && leafCovered(regs, exp) && leafCovered(regs, act) {
+		return true
 	}
 	if !w.hasKnownGlobal {
 		return false
@@ -298,13 +339,17 @@ func (w *noiseCandidateWalk) knownCoversLeaf(key string, actual interface{}) boo
 		field = key[i+1:]
 	}
 	regs, isGlobal := w.knownGlobalRegs[strings.ToLower(field)]
-	if !isGlobal {
-		return false
-	}
+	return isGlobal && leafCovered(regs, exp) && leafCovered(regs, act)
+}
+
+// leafCovered reports whether an entry's patterns regs excuse a leaf's value
+// v: an entry with none any value, one with patterns a scalar one matches.
+func leafCovered(regs []*regexp.Regexp, v interface{}) bool {
 	if len(regs) == 0 {
 		return true
 	}
-	return isScalar && anyRegexpMatchStr(value, regs)
+	s, ok := jsonScalarToString(v)
+	return ok && anyRegexpMatchStr(s, regs)
 }
 
 // knownCoversSubtree mirrors the walker's container early-return: only an entry
@@ -316,6 +361,13 @@ func (w *noiseCandidateWalk) knownCoversSubtree(key string) bool {
 		return false
 	}
 	regs, noisy := w.knownPath.match(strings.ToLower(key))
+	return noisy && len(regs) == 0
+}
+
+// knownCoversAdded is knownCoversSubtree for a key the replay added: an entry
+// naming id keys does not excuse it (noiseIndex.matchAdded).
+func (w *noiseCandidateWalk) knownCoversAdded(key string) bool {
+	regs, noisy := w.knownPath.matchAdded(strings.ToLower(key))
 	return noisy && len(regs) == 0
 }
 
@@ -374,25 +426,28 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 				continue
 			}
 			// A global entry on a key that IS present skips the child subtree
-			// wholesale, structure included — and with containersCovered=true, so
-			// even a pattern-guarded one does. Walking into it anyway invented
-			// refusals for differences the matcher already excuses, and derived
-			// redundant entries for values it had already stopped comparing.
-			if w.globalCoversSubtree(k, av) {
+			// wholesale, structure included, as the matcher does
+			// (globalCoversPair): even a pattern-guarded one does when both
+			// values are containers or both match it. Walking into it anyway
+			// invented refusals for differences the matcher already excuses,
+			// and derived redundant entries for values it had already stopped
+			// comparing.
+			if w.globalCoversPair(k, ev, av) {
 				continue
 			}
 			w.walk(child, childNodeID(id, k), ev, av, ambiguous || strings.Contains(k, "."), ancestorNoisy)
 		}
-		for k, av := range a {
+		for k := range a {
 			if _, present := e[k]; present {
 				continue
 			}
-			// A key the replay added. Here a pattern CAN excuse it, because there
-			// is a replayed value for it to describe — via a global entry or a
-			// path entry, both passed to noisyForRegexps in utils.go's added-key
-			// branch. That branch does not consult ancestorNoisy either.
+			// A key the replay added. A pattern cannot excuse it: there is no
+			// recorded value for it to match, so only an unconditional global or
+			// path entry does, and not one naming id keys, as in utils.go's
+			// added-key branch. That branch does not consult ancestorNoisy
+			// either.
 			child := childNoisePath(key, k)
-			if w.globalCoversValue(k, av) || w.pathCoversValue(child, av) {
+			if w.globalUnconditional(k) || w.knownCoversAdded(child) {
 				continue
 			}
 			w.skip(child, NoiseSkipStructural)
@@ -482,7 +537,7 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 		if key != "" {
 			w.drifted[id] = true
 		}
-		if ancestorNoisy || w.knownCoversLeaf(key, act) {
+		if ancestorNoisy || w.knownCoversPair(key, exp, act) {
 			return
 		}
 		switch {
@@ -535,6 +590,25 @@ func (w *noiseCandidateWalk) excusedInArray(ancestorNoisy bool) func(key, field 
 	}
 }
 
+// anyAddressed reports whether an entry of the test case's existing noise, a
+// dotted one or a global one on the field's name, addresses any of the paths,
+// with or without patterns.
+func (w *noiseCandidateWalk) anyAddressed(paths []string) bool {
+	for _, p := range paths {
+		if w.knownMatches(p) {
+			return true
+		}
+		field := p
+		if i := strings.LastIndex(p, "."); i >= 0 {
+			field = p[i+1:]
+		}
+		if _, ok := w.knownGlobalRegs[strings.ToLower(field)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // globalUnconditional reports whether a global entry ignores this field name
 // outright — the only form that also excuses the field being absent.
 func (w *noiseCandidateWalk) globalUnconditional(field string) bool {
@@ -573,15 +647,15 @@ func (w *noiseCandidateWalk) acceptedByMatcher(exp, act interface{}, known map[s
 	return err == nil && res.IsExact()
 }
 
-// pathCoversValue reports whether a path entry excuses a field the replay added.
-// Mirrors utils.go's added-key branch, which passes the replayed value to
-// noisyForRegexps so a pattern can describe it.
-func (w *noiseCandidateWalk) pathCoversValue(key string, value interface{}) bool {
-	regs, noisy := w.knownPath.match(strings.ToLower(key))
-	if !noisy {
+// globalCoversPair reports whether a global entry on field excuses the pair
+// of values a key present in both documents holds, as the matcher's
+// present-key branch reads it (globalCoversPair).
+func (w *noiseCandidateWalk) globalCoversPair(field string, exp, act interface{}) bool {
+	if !w.hasKnownGlobal {
 		return false
 	}
-	return noisyForRegexps(regs, value, false)
+	regs, ok := w.knownGlobalRegs[strings.ToLower(field)]
+	return ok && globalCoversPair(regs, exp, act)
 }
 
 // globalCoversSubtree reports whether a global entry covers a key that is present
@@ -599,19 +673,6 @@ func (w *noiseCandidateWalk) globalCoversSubtree(field string, value interface{}
 	return noisyForRegexps(regs, value, true)
 }
 
-// globalCoversValue reports whether a global entry excuses a field the replay
-// added, which a pattern can do because there is a value for it to describe.
-func (w *noiseCandidateWalk) globalCoversValue(field string, value interface{}) bool {
-	if !w.hasKnownGlobal {
-		return false
-	}
-	regs, ok := w.knownGlobalRegs[strings.ToLower(field)]
-	if !ok {
-		return false
-	}
-	return noisyForRegexps(regs, value, false)
-}
-
 func (w *noiseCandidateWalk) emit(path string) {
 	if w.seen[path] {
 		return
@@ -627,6 +688,41 @@ func (w *noiseCandidateWalk) skip(path string, reason NoiseSkipReason) {
 	}
 	w.skipSeen[s] = true
 	w.skipped = append(w.skipped, s)
+}
+
+// idKeyGroup is the candidates that are one field under different id keys:
+// members are their per-id paths, collapsed their shared spelling with every id
+// key as NoiseIDKey. collapsed is empty for a candidate naming no id key.
+type idKeyGroup struct {
+	collapsed string
+	members   []string
+}
+
+// groupByIDKeys groups candidate paths by their id-collapsed spelling. A
+// dot-free candidate is never collapsed: it is a GLOBAL entry, matched by field
+// name at any depth, and a field name of NoiseIDKey would name nothing.
+func groupByIDKeys(paths []string) []idKeyGroup {
+	var out []idKeyGroup
+	at := map[string]int{}
+	for _, p := range paths {
+		c := ""
+		if strings.Contains(p, ".") {
+			if cc := CollapseIDKeys(p); cc != p {
+				c = cc
+			}
+		}
+		if c == "" {
+			out = append(out, idKeyGroup{members: []string{p}})
+			continue
+		}
+		if i, ok := at[c]; ok {
+			out[i].members = append(out[i].members, p)
+			continue
+		}
+		at[c] = len(out)
+		out = append(out, idKeyGroup{collapsed: c, members: []string{p}})
+	}
+	return out
 }
 
 func childNoisePath(key, field string) string {
@@ -675,6 +771,11 @@ func sameElementMultiset(e, a []interface{}) bool {
 type coverageEntry struct {
 	lowerKey      string
 	ancestryLower []string
+	// collapsedLower is lowerKey with its id keys collapsed, which is what an
+	// entry naming id keys is matched against.
+	collapsedLower string
+	// added marks a node only a document after the first (the replay) has.
+	added bool
 }
 
 // childNodeID extends a node identity. NUL cannot occur in a Go string literal
@@ -700,31 +801,34 @@ type coverageIndex struct {
 	nodes map[string]coverageEntry
 }
 
+// newCoverageIndex indexes the recorded document first, then the replayed
+// ones: a node only a later one has is marked added.
 func newCoverageIndex(docs ...interface{}) *coverageIndex {
 	c := &coverageIndex{nodes: map[string]coverageEntry{}}
-	for _, d := range docs {
-		c.collect(d, "", "", nil)
+	for i, d := range docs {
+		c.collect(d, "", "", nil, i > 0)
 	}
 	return c
 }
 
-func (c *coverageIndex) collect(node interface{}, key, id string, ancestry []string) {
+func (c *coverageIndex) collect(node interface{}, key, id string, ancestry []string, added bool) {
 	if key != "" {
 		if _, ok := c.nodes[id]; !ok {
-			c.nodes[id] = coverageEntry{lowerKey: strings.ToLower(key), ancestryLower: ancestry}
+			lk := strings.ToLower(key)
+			c.nodes[id] = coverageEntry{lowerKey: lk, ancestryLower: ancestry, collapsedLower: CollapseIDKeys(lk), added: added}
 		}
 	}
 	switch v := node.(type) {
 	case map[string]interface{}:
 		for k, child := range v {
 			c.collect(child, childNoisePath(key, k), childNodeID(id, k),
-				append(append([]string(nil), ancestry...), strings.ToLower(k)))
+				append(append([]string(nil), ancestry...), strings.ToLower(k)), added)
 		}
 	case []interface{}:
 		// Key AND identity unchanged, matching both slice branches of the walker:
 		// elements are genuinely indistinguishable to it.
 		for _, child := range v {
-			c.collect(child, key, id, ancestry)
+			c.collect(child, key, id, ancestry, added)
 		}
 	}
 }
@@ -732,8 +836,12 @@ func (c *coverageIndex) collect(node interface{}, key, id string, ancestry []str
 // coversOnly reports whether an entry for path silences nothing beyond fields
 // that actually drifted or that the existing noise already ignores, and names the
 // first offender when it does not.
-func (c *coverageIndex) coversOnly(path string, drifted map[string]bool, silenced func(lowerKey string, ancestryLower []string) bool) (collateral string, ok bool) {
-	lp := strings.ToLower(path)
+//
+// A path naming id keys (NoiseIDKey) is tested against every node's collapsed
+// key, so it is judged against the field under EVERY id key, as the matcher
+// will apply it.
+func (c *coverageIndex) coversOnly(path string, drifted map[string]bool, silenced func(lowerKey string, ancestryLower []string, added bool) bool) (collateral string, ok bool) {
+	lp, idKeys := NoiseEntryKey(path)
 	global := !strings.Contains(lp, ".")
 	for nodeID, e := range c.nodes {
 		covered := false
@@ -746,13 +854,15 @@ func (c *coverageIndex) coversOnly(path string, drifted map[string]bool, silence
 					break
 				}
 			}
+		} else if idKeys {
+			covered = strings.Contains(e.collapsedLower, lp)
 		} else {
 			covered = strings.Contains(e.lowerKey, lp)
 		}
 		if !covered || drifted[nodeID] {
 			continue
 		}
-		if silenced != nil && silenced(e.lowerKey, e.ancestryLower) {
+		if silenced != nil && silenced(e.lowerKey, e.ancestryLower, e.added) {
 			continue
 		}
 		return e.lowerKey, false
@@ -808,9 +918,12 @@ func UnmatchableBodyNoise(bodyNoise map[string][]string, bodies ...string) []str
 		return nil
 	}
 
+	// An entry naming id keys is alive where the collapsed form of a key
+	// carries it, as the matcher reads it. Collapsed once, and only if needed.
+	var collapsed map[string]bool
 	var dead []string
 	for k := range bodyNoise {
-		lk := strings.ToLower(k)
+		lk, idKeys := NoiseEntryKey(k)
 		if lk == "" || lk == "*" {
 			// "*" is the documented ignore-everything wildcard, not a field.
 			continue
@@ -823,8 +936,18 @@ func UnmatchableBodyNoise(bodyNoise map[string][]string, bodies ...string) []str
 			}
 			continue
 		}
+		keys := paths
+		if idKeys {
+			if collapsed == nil {
+				collapsed = make(map[string]bool, len(paths))
+				for p := range paths {
+					collapsed[CollapseIDKeys(p)] = true
+				}
+			}
+			keys = collapsed
+		}
 		alive := false
-		for p := range paths {
+		for p := range keys {
 			// noiseIndex.match's test, verbatim: the noise key is the needle and
 			// the traversal key is the haystack.
 			if strings.Contains(p, lk) {

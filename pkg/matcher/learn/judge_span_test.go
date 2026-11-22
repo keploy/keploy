@@ -62,6 +62,32 @@ func TestJudgeSpan_AWorkerServeDoesNotStartTheSpanOfACheckAgainstTheTestsOwnReco
 	spanFrom(t, "after a start-up serve", s, ok, startServe)
 }
 
+// SetServeOwner's false says the store holds the recording another's
+// (OwnerOther), never that it cannot say (OwnerUnknown): the span of a call
+// checked against a worker:'s recording carries no test's begin
+// (Span.TestFrom), the bound CheckClockRead passes a read made earlier in
+// the test by, while that of a call checked against the test's own
+// recording carries it, in a server test and in a client test alike.
+func TestJudgeSpan_ABoolOwnersFalseIsAnothersRecording(t *testing.T) {
+	began := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	arrival := began.Add(30 * time.Millisecond)
+	for _, client := range []bool{false, true} {
+		tr := spanRun(t, "own-1", "own-2")
+		tr.SetClientTests(client)
+		tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, true })
+		tr.NewSetAt(began.Add(-time.Second))
+		tr.BeginAt(began)
+		tr.ServedMockAt(rec("own-1"), began.Add(10*time.Millisecond))
+		tr.ServedMockAt(rec("worker-1"), began.Add(20*time.Millisecond))
+		if s, ok := tr.LiveSpanOf(arrival, rec("own-2")); !ok || !s.TestFrom.Equal(began) {
+			t.Errorf("client %v, checked against the test's own recording: span %+v, %v; want it carrying the test's begin %v", client, s, ok, began)
+		}
+		if s, ok := tr.LiveSpanOf(arrival, rec("worker-2")); !ok || !s.TestFrom.IsZero() {
+			t.Errorf("client %v, checked against a worker: recording the store says is not the test's: span %+v, %v; want no test's begin", client, s, ok)
+		}
+	}
+}
+
 // The span of a test's own call never starts before the latest serve of any
 // flow made before the test began: a read the application kept from TestA
 // (its last serve a worker: one) and sent in TestB's first call is before
@@ -138,5 +164,98 @@ func TestJudgeSpan_WithNoOwnerOrNoTestOpenItIsLiveSpan(t *testing.T) {
 			s, ok := tr.LiveSpanOf(arrival, rec("own-2"))
 			spanFrom(t, "LiveSpanOf", s, ok, began.Add(20*time.Millisecond))
 		})
+	}
+}
+
+// recordedTests places each instant of the recording in the recorded test
+// numbered at[instant] (0: outside every window), and says nothing of an
+// instant it was not given (known false).
+type recordedTests map[time.Time]int
+
+func (r recordedTests) InRecordedTestWindow(at time.Time) (bool, bool) {
+	n, ok := r[at]
+	return ok && n > 0, ok
+}
+
+func (r recordedTests) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
+	na, oka := r[a]
+	nb, okb := r[b]
+	return oka && okb && na > 0 && na == nb, oka && okb
+}
+
+// A test's own call in keploy record's server tests is read in its own
+// window (OwnCall), as a replay checks its reads (LiveSpanOf): in this run
+// from the test's own serve, past a worker: serve made after it; in the
+// recording from the test's own previous recording, past a background
+// recording made after it in the same recorded test. Before the test, any
+// flow's call bounds it in both runs: the previous test's last recording,
+// a worker's, starts the recorded half of the test's first call, as the
+// last serve before the test began starts this run's. A sibling of the
+// call, the test's own, starts neither half. With no owner told,
+// or a paired recording outside every recorded test (or one the store
+// cannot place), the call has no window, as before.
+func TestJudgeSpan_ATestsOwnCallsLearnWindowStartsAtItsOwnCalls(t *testing.T) {
+	began := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	ownServe, workerServe, arrival := began.Add(10*time.Millisecond), began.Add(20*time.Millisecond), began.Add(30*time.Millisecond)
+	recAt := began.Add(-time.Hour)
+	at := func(name string, d time.Duration) *models.Mock {
+		m := rec(name)
+		m.Spec.ReqTimestampMock = recAt.Add(d)
+		return m
+	}
+	prevTest, own1, bg, own2 := at("worker-0", -2*time.Second), at("own-1", -30*time.Millisecond), at("bg-1", -10*time.Millisecond), at("own-2", 0)
+	tests := recordedTests{prevTest.Spec.ReqTimestampMock: 1, own1.Spec.ReqTimestampMock: 2, bg.Spec.ReqTimestampMock: 2, own2.Spec.ReqTimestampMock: 2}
+	run := func(owner bool) *Tracker {
+		tr := spanRun(t, "own-1", "own-2", "sib-1")
+		if !owner {
+			tr.SetServeOwner(nil)
+		}
+		tr.NewSetAt(began.Add(-time.Second))
+		tr.BeginAt(began)
+		tr.ServedMockAt(rec("own-1"), ownServe)
+		tr.ServedMockAt(rec("worker-1"), workerServe)
+		return tr
+	}
+	window := func(tr *Tracker, paired *models.Mock, tests RecordedTests, seen ...*models.Mock) *Window {
+		oc := tr.NewOwnCall(paired, nil, tests)
+		for _, m := range seen {
+			oc.See(m)
+		}
+		return oc.Window(arrival)
+	}
+	w := window(run(true), own2, tests, prevTest, own1, bg)
+	if w == nil || !w.F.From.Equal(ownServe) || !w.Rec.From.Equal(own1.Spec.ReqTimestampMock) || !w.Rec.To.Equal(own2.Spec.ReqTimestampMock) {
+		t.Fatalf("the own call's window %+v; want F from the test's own serve %v and the recording's half from own-1 %v", w, ownServe, own1.Spec.ReqTimestampMock)
+	}
+	// A sibling of the call (Siblings), the test's own, starts neither half.
+	sib := at("sib-1", -5*time.Millisecond)
+	tests[sib.Spec.ReqTimestampMock] = 2
+	tr := run(true)
+	tr.ServedMockAt(rec("sib-1"), began.Add(25*time.Millisecond))
+	oc := tr.NewOwnCall(own2, func(m *models.Mock) bool { return m.Name == "sib-1" }, tests)
+	for _, m := range []*models.Mock{prevTest, own1, bg, sib} {
+		oc.See(m)
+	}
+	if w := oc.Window(arrival); w == nil || !w.F.From.Equal(ownServe) || !w.Rec.From.Equal(own1.Spec.ReqTimestampMock) {
+		t.Fatalf("the own call's window beside its sibling %+v; want F from %v and the recording's half from own-1 %v", w, ownServe, own1.Spec.ReqTimestampMock)
+	}
+	if w := window(run(true), own2, tests, prevTest, bg); w == nil || !w.Rec.From.Equal(prevTest.Spec.ReqTimestampMock) {
+		t.Fatalf("the test's first call's window %+v; want the recording's half from the previous test's last recording %v", w, prevTest.Spec.ReqTimestampMock)
+	}
+	if w := run(true).CallWindowFrom(bg.Spec.ReqTimestampMock, own2, arrival); w == nil || !w.F.From.Equal(workerServe) {
+		t.Fatalf("the pool's window %+v; want F from the worker: serve %v, any flow's", w, workerServe)
+	}
+	if w := window(run(false), own2, tests, prevTest, own1, bg); w != nil {
+		t.Fatalf("with no owner told: window %+v; want none", w)
+	}
+	outside := recordedTests{prevTest.Spec.ReqTimestampMock: 0, own2.Spec.ReqTimestampMock: 0}
+	if w := window(run(true), own2, outside, prevTest); w != nil {
+		t.Fatalf("a paired recording outside every recorded test: window %+v; want none", w)
+	}
+	if w := window(run(true), own2, recordedTests{}, prevTest); w != nil {
+		t.Fatalf("a paired recording the store cannot place: window %+v; want none", w)
+	}
+	if w := window(run(true), own2, nil, prevTest); w != nil {
+		t.Fatalf("no recorded tests: window %+v; want none", w)
 	}
 }

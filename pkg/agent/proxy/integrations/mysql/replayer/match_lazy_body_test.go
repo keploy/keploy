@@ -2,9 +2,11 @@ package replayer_test
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"math/rand"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,101 +68,168 @@ func (s *diffSide) matchBody(ctx context.Context, req mysql.Request, eng *mockno
 // TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes replays each
 // recording twice, the live request body built before the scan on one side
 // and on its first read on the other, under every noise setting, and requires
-// the two to serve, consume, report and learn the same at every command. The
-// recordings are the windowed and between-test replays of
-// TestFirstPassesServeWhatTheFullScanServes, and sets of 100, 1,000 and 10,000
-// mocks with no window whose commands read recorded rows, rows never recorded
-// and EXECUTEs whose parameters drifted.
+// the two to serve, consume, report and learn the same at every command
+// (replayCorpora).
 func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
+	sideBySide(t)
 	seeds := int64(30)
 	sizes := []int{100, 1000, 10000}
 	if testing.Short() || raceEnabled {
 		seeds, sizes = 6, sizes[:2]
 	}
-	for _, ne := range noiseEngines {
-		// learned and rejected count the commands that learned noise and the
-		// misses strict enforcement made, so the rows cannot pass by never
-		// reading the body.
-		learned, rejected := 0, 0
-		compare := func(want, got string) bool {
-			if !strings.HasSuffix(want, "; learned") {
-				learned++
-			}
-			if strings.Contains(want, "strictRejected:") && !strings.Contains(want, "strictRejected:0") {
-				rejected++
-			}
-			return want == got
+	replayCorporaPerEngine(t, seeds, sizes, [2]string{"eager body", "lazy body"},
+		func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string {
+			got, _ := s.matchBody(ctx, req, eng, ref)
+			return got
+		})
+}
+
+// replayCorporaPerEngine runs replayCorpora under every noise setting
+// (noiseEngines): each setting's windowed replays (seeds of them) and each of
+// its sets of sizes mocks is a subtest of its own, and the subtests run side
+// by side (t.Parallel). They share nothing they write: each builds its own
+// recordings, stores and noise engines, and adds its counts to its setting's
+// tally atomically. Once they have all ended (t.Cleanup), it requires, per
+// setting and summed over its subtests, that some command learned noise
+// exactly when detection is on alone, and that strict rejected candidates on
+// some command exactly when strict is on, so a row cannot pass by never
+// reading the body. A setting is judged only when every one of its subtests
+// ran to its end: one that -run did not select, or -failfast did not start,
+// added nothing to its tally. A run that selected every subtest judges
+// every setting.
+func replayCorporaPerEngine(t *testing.T, seeds int64, sizes []int, sides [2]string, match func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string) {
+	t.Helper()
+	type part struct {
+		name  string
+		seeds int64
+		sizes []int
+	}
+	parts := []part{{"windows", seeds, nil}}
+	for _, n := range sizes {
+		parts = append(parts, part{fmt.Sprintf("n=%d", n), 0, []int{n}})
+	}
+	tallies := make([]struct{ learned, rejected, ran atomic.Int64 }, len(noiseEngines))
+	t.Cleanup(func() {
+		if t.Failed() {
+			return
 		}
-		for seed := int64(1); seed <= seeds; seed++ {
-			r := rand.New(rand.NewSource(seed))
-			windows := 4 + r.Intn(5)
-			pool := diffPool(r, windows)
-			ref, lazy := newDiffSide(pool), newDiffSide(pool)
-			for _, s := range []*diffSide{ref, lazy} {
-				s.stage(models.BaseTime, time.Now())
+		judged := 0
+		for i, ne := range noiseEngines {
+			if tallies[i].ran.Load() != int64(len(parts)) {
+				continue
 			}
-			for w := 0; w < windows; w++ {
-				start, end := diffWindow(w)
-				for _, s := range []*diffSide{ref, lazy} {
-					s.stage(start, end)
-				}
-				for c := 0; c < 5+r.Intn(25); c++ {
-					between := r.Intn(6) == 0
-					if between {
-						ref.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
-						lazy.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
-					}
-					req, desc := diffCommand(r)
-					ctx := context.Background()
-					if conn := []string{"", "c1", "c2"}[r.Intn(3)]; conn != "" {
-						ctx = context.WithValue(ctx, models.ClientConnectionIDKey, conn)
-					}
-					want, _ := ref.matchBody(ctx, req, ne.eng(), true)
-					got, _ := lazy.matchBody(ctx, req, ne.eng(), false)
-					if !compare(want, got) {
-						t.Fatalf("noise %s seed %d window %d command %d (%s), between tests=%v:\n eager body: %s\n lazy body:  %s", ne.name, seed, w, c, desc, between, want, got)
-					}
-					if between {
-						ref.mm.SetCurrentTestWindow(start, end)
-						lazy.mm.SetCurrentTestWindow(start, end)
-					}
-				}
+			judged++
+			learned, rejected := tallies[i].learned.Load(), tallies[i].rejected.Load()
+			// Under strict, the drift detection learns from is a miss instead.
+			detects, stricts := ne.name == "detect", strings.Contains(ne.name, "strict")
+			if detects != (learned > 0) || stricts != (rejected > 0) {
+				t.Errorf("noise %s: %d commands learned noise and strict rejected candidates on %d", ne.name, learned, rejected)
 			}
-			ref.mm.Close()
-			lazy.mm.Close()
 		}
-		for _, n := range sizes {
-			pool := keyedSet(n, models.LifetimePerTest)
-			ref, lazy := newDiffSide(pool), newDiffSide(pool)
-			ref.stageNoWindow()
-			lazy.stageNoWindow()
-			for i := 0; i < n; i += n / 100 {
-				var reqs []mysql.Request
-				switch i % 4 {
-				case 0, 1:
-					reqs = []mysql.Request{queryReq(keyedSetText(i)), queryReq(keyedSetText(i) + " LIMIT 1")}
-				case 2:
-					reqs = []mysql.Request{executeReq(7, fmt.Sprintf("k%d", i%500)), executeReq(7, "never-recorded")}
-				default:
-					reqs = []mysql.Request{executeReq(8, fmt.Sprintf("k%d", i%500)), executeReq(8, "never-recorded")}
-				}
-				for _, req := range reqs {
-					want, _ := ref.matchBody(context.Background(), req, ne.eng(), true)
-					got, _ := lazy.matchBody(context.Background(), req, ne.eng(), false)
-					if !compare(want, got) {
-						t.Fatalf("noise %s set of %d command for mock %d:\n eager body: %s\n lazy body:  %s", ne.name, n, i, want, got)
-					}
-				}
-			}
-			ref.mm.Close()
-			lazy.mm.Close()
+		// With no -run or -skip, every subtest ran: every setting is judged.
+		if judged != len(noiseEngines) && flag.Lookup("test.run").Value.String() == "" && flag.Lookup("test.skip").Value.String() == "" {
+			t.Errorf("%d of %d noise settings judged in a run that selected every subtest", judged, len(noiseEngines))
 		}
-		// Under strict, the drift detection learns from is a miss instead.
-		detects, stricts := ne.name == "detect", strings.Contains(ne.name, "strict")
-		if detects != (learned > 0) || stricts != (rejected > 0) {
-			t.Errorf("noise %s: %d commands learned noise and strict rejected candidates on %d", ne.name, learned, rejected)
+	})
+	for i, ne := range noiseEngines {
+		for _, p := range parts {
+			t.Run(ne.name+"/"+p.name, func(t *testing.T) {
+				t.Parallel()
+				learned, rejected := replayCorpora(t, ne.name, ne.eng, p.seeds, p.sizes, sides, match)
+				tallies[i].learned.Add(int64(learned))
+				tallies[i].rejected.Add(int64(rejected))
+				tallies[i].ran.Add(1)
+			})
 		}
 	}
+}
+
+// replayCorpora replays, under the noise setting name (eng), each recording
+// twice, on a reference side and on another, matching every command on each
+// with match (ref true on the reference side), and fails at the first command
+// the two serve, consume, report or learn differently; sides name the two in
+// that message. The recordings are the windowed and between-test replays of
+// TestFirstPassesServeWhatTheFullScanServes (seeds of them), and sets of
+// sizes mocks with no window whose commands read recorded rows, rows never
+// recorded and EXECUTEs whose parameters drifted. It returns how many
+// commands learned noise and how many were misses strict enforcement made,
+// so a row cannot pass by never reading the body.
+func replayCorpora(t *testing.T, name string, eng func() *mocknoise.Engine, seeds int64, sizes []int, sides [2]string, match func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string) (learned, rejected int) {
+	t.Helper()
+	compare := func(want, got string) bool {
+		if !strings.HasSuffix(want, "; learned") {
+			learned++
+		}
+		if strings.Contains(want, "strictRejected:") && !strings.Contains(want, "strictRejected:0") {
+			rejected++
+		}
+		return want == got
+	}
+	for seed := int64(1); seed <= seeds; seed++ {
+		r := rand.New(rand.NewSource(seed))
+		windows := 4 + r.Intn(5)
+		pool := diffPool(r, windows)
+		ref, other := newDiffSide(t, pool), newDiffSide(t, pool)
+		for _, s := range []*diffSide{ref, other} {
+			s.stage(models.BaseTime, time.Now())
+		}
+		for w := 0; w < windows; w++ {
+			start, end := diffWindow(w)
+			for _, s := range []*diffSide{ref, other} {
+				s.stage(start, end)
+			}
+			for c := 0; c < 5+r.Intn(25); c++ {
+				between := r.Intn(6) == 0
+				if between {
+					ref.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
+					other.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
+				}
+				req, desc := diffCommand(r)
+				ctx := context.Background()
+				if conn := []string{"", "c1", "c2"}[r.Intn(3)]; conn != "" {
+					ctx = context.WithValue(ctx, models.ClientConnectionIDKey, conn)
+				}
+				want := match(ref, ctx, req, eng(), true)
+				got := match(other, ctx, req, eng(), false)
+				if !compare(want, got) {
+					t.Fatalf("noise %s seed %d window %d command %d (%s), between tests=%v:\n %s: %s\n %s: %s", name, seed, w, c, desc, between, sides[0], want, sides[1], got)
+				}
+				if between {
+					ref.mm.SetCurrentTestWindow(start, end)
+					other.mm.SetCurrentTestWindow(start, end)
+				}
+			}
+		}
+		ref.mm.Close()
+		other.mm.Close()
+	}
+	for _, n := range sizes {
+		pool := keyedSet(n, models.LifetimePerTest)
+		ref, other := newDiffSide(t, pool), newDiffSide(t, pool)
+		ref.stageNoWindow()
+		other.stageNoWindow()
+		for i := 0; i < n; i += n / 100 {
+			var reqs []mysql.Request
+			switch i % 4 {
+			case 0, 1:
+				reqs = []mysql.Request{queryReq(keyedSetText(i)), queryReq(keyedSetText(i) + " LIMIT 1")}
+			case 2:
+				reqs = []mysql.Request{executeReq(7, fmt.Sprintf("k%d", i%500)), executeReq(7, "never-recorded")}
+			default:
+				reqs = []mysql.Request{executeReq(8, fmt.Sprintf("k%d", i%500)), executeReq(8, "never-recorded")}
+			}
+			for _, req := range reqs {
+				want := match(ref, context.Background(), req, eng(), true)
+				got := match(other, context.Background(), req, eng(), false)
+				if !compare(want, got) {
+					t.Fatalf("noise %s set of %d command for mock %d:\n %s: %s\n %s: %s", name, n, i, sides[0], want, sides[1], got)
+				}
+			}
+		}
+		ref.mm.Close()
+		other.mm.Close()
+	}
+	return learned, rejected
 }
 
 // TestCommandBuildsItsBodyOnlyForStrictOrDetection: a command builds the
@@ -168,7 +237,7 @@ func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
 // detection reads it, and then once, however many candidates strict compares
 // it with.
 func TestCommandBuildsItsBodyOnlyForStrictOrDetection(t *testing.T) {
-	s := newDiffSide(keyedSet(80, models.LifetimeSession))
+	s := newDiffSide(t, keyedSet(80, models.LifetimeSession))
 	s.stageNoWindow()
 	defer s.mm.Close()
 	for _, ne := range noiseEngines {
@@ -207,7 +276,7 @@ func TestCommandAllocationsDoNotGrowWithItsParametersWithoutNoise(t *testing.T) 
 		}
 		rec := req
 		rec.SetStoredQuery(diffQueryB)
-		s := newDiffSide([]*models.Mock{diffMock("m-0", "c1", []mysql.Request{rec}, diffBase, models.LifetimeSession, "config")})
+		s := newDiffSide(t, []*models.Mock{diffMock("m-0", "c1", []mysql.Request{rec}, diffBase, models.LifetimeSession, "config")})
 		s.mm.SetMocksWithWindow(nil, []*models.Mock{s.pool[0].DeepCopy()}, time.Time{}, time.Time{})
 		s.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
 		defer s.mm.Close()

@@ -113,7 +113,7 @@ func (s *shareSet) run(test string, consumed ...models.MockState) {
 
 func (s *shareSet) settle(t *testing.T) []string {
 	t.Helper()
-	return s.p.settleShares(s.results, s.cons, true, map[string]mockDisplayInfo{})
+	return s.p.settleShares(nil, s.results, s.cons, true, map[string]mockDisplayInfo{})
 }
 
 func used(name string) models.MockState { return models.MockState{Name: name, Kind: shareKind} }
@@ -195,6 +195,32 @@ func TestShareConcurrentSplitsDefiniteFromCandidates(t *testing.T) {
 	for _, n := range s.p.pool {
 		if n == "s1" {
 			t.Fatal("a shared recording is in the pool")
+		}
+	}
+}
+
+// A test's candidates of one request time are served in the order mockdb
+// wrote them: by the number it gave each (mock-9 before mock-10, which text
+// order reverses), then a name with no number by name. An HTTP/1.1 pipeline's
+// or one write's reads share one request time.
+func TestShareConcurrentServesCandidatesOfOneTimeInTheOrderWritten(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	early := shMock("mock-11", 100, "INSERT", "bind.$1=e", "ok")
+	m10 := shMock("mock-10", 200, "INSERT", "bind.$1=x10", "ok")
+	m9 := shMock("mock-9", 200, "INSERT", "bind.$1=x9", "ok")
+	m2 := shMock("mock-2", 200, "INSERT", "bind.$1=x2", "ok")
+	named := shMock("aaa-named", 200, "INSERT", "bind.$1=n", "ok")
+	groups := []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}
+	mappings := map[string][]models.MockEntry{
+		"a": {shEntry(named, "g1"), shEntry(m10, "g1"), shEntry(early, "g1"), shEntry(m9, "g1"), shEntry(m2, "g1")},
+		"b": {},
+	}
+	s := newShareSet(t, groups, mappings, nil, nil, named, m10, early, m9, m2)
+	want := []string{"mock-11", "mock-2", "mock-9", "mock-10", "aaa-named"}
+	for _, test := range []string{"a", "b"} {
+		if got := s.p.concurrentServing(test); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s's candidates %v; want %v: by request time, then by mockdb's number, then by name", test, got, want)
 		}
 	}
 }
@@ -609,7 +635,7 @@ func TestSettleSharesIncomplete(t *testing.T) {
 	}
 	s := mk()
 	s.run("a", used("c"))
-	if charged := s.p.settleShares(s.results, s.cons, false, nil); charged != nil {
+	if charged := s.p.settleShares(nil, s.results, s.cons, false, nil); charged != nil {
 		t.Fatalf("charged %v", charged)
 	}
 	if got, _ := s.p.setShares(models.TestSetStatusPassed); got.State != models.SharesIncomplete || got.Any() {
@@ -696,13 +722,13 @@ func TestSettleSharesIsANoOpWithoutSharing(t *testing.T) {
 	p := newExactPlan(mappings, nil, []*models.Mock{c})
 	p.share = sharePlanOf(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}, mappings, nil), nil, []*models.Mock{c})
 	results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusPassed}}
-	if charged := p.settleShares(results, nil, true, nil); charged != nil || results[0].Status != models.TestStatusPassed {
+	if charged := p.settleShares(nil, results, nil, true, nil); charged != nil || results[0].Status != models.TestStatusPassed {
 		t.Fatalf("switch off: charged %v", charged)
 	}
 	if _, ok := p.setShares(models.TestSetStatusPassed); ok {
 		t.Fatal("a plan that does not share has shares")
 	}
-	if charged := p.annotateConcurrent(results, nil); charged != nil {
+	if charged := p.annotateConcurrent(nil, results, nil); charged != nil {
 		t.Fatalf("switch off: annotated %v", charged)
 	}
 }
@@ -781,7 +807,7 @@ func TestAnnotateConcurrentSaysWhatKeployKnows(t *testing.T) {
 		{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnconsumedMocks: []models.UnconsumedMock{{Name: "c"}}}},
 		{TestCaseID: "solo", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "PostgreSQL"}}}},
 	}
-	charged := p.annotateConcurrent(results, nil)
+	charged := p.annotateConcurrent(nil, results, nil)
 	if !reflect.DeepEqual(charged, []string{"b"}) {
 		t.Fatalf("charged %v; want b, which lists an unresolved recording", charged)
 	}
@@ -801,7 +827,7 @@ func TestAnnotateConcurrentSaysWhatKeployKnows(t *testing.T) {
 	// A test this replay skips (quarantined, ignored) is not charged for the
 	// unresolved recording it lists: it stays IGNORED, never FAILED.
 	skipped := []models.TestResult{{TestCaseID: "b", Status: models.TestStatusIgnored}}
-	if charged := p.annotateConcurrent(skipped, nil); len(charged) != 0 || skipped[0].Status != models.TestStatusIgnored || len(skipped[0].FailureInfo.UnmatchedCalls) != 0 {
+	if charged := p.annotateConcurrent(nil, skipped, nil); len(charged) != 0 || skipped[0].Status != models.TestStatusIgnored || len(skipped[0].FailureInfo.UnmatchedCalls) != 0 {
 		t.Fatalf("a skipped test was charged %v: status %s, calls %+v", charged, skipped[0].Status, skipped[0].FailureInfo.UnmatchedCalls)
 	}
 	if got := results[1].FailureInfo.UnconsumedMocks[0]; got.Concurrent != "b" || got.WhyNot != models.ConcurrentNotSharedStrict {
@@ -816,7 +842,7 @@ func TestAnnotateConcurrentSaysWhatKeployKnows(t *testing.T) {
 	parsed := &models.ConcurrentNote{Class: []string{"c"}, Case: models.ConcurrentCaseNotOwn, Places: []string{"bind.$1"}}
 	refused := []models.TestResult{{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
 		{Protocol: "PostgreSQL", Kind: models.MissInTest, ClosestMock: "c", Reason: models.MissConcurrentAmbiguous, Concurrent: parsed}}}}}
-	p.annotateConcurrent(refused, nil)
+	p.annotateConcurrent(nil, refused, nil)
 	if n := refused[0].FailureInfo.UnmatchedCalls[0].Concurrent; !reflect.DeepEqual(n.With, []string{"a"}) || n.Case != models.ConcurrentCaseNotOwn || !reflect.DeepEqual(n.Class, []string{"c"}) || len(parsed.With) != 0 {
 		t.Fatalf("the parser's note became %+v (its own %+v); want with a, its case and class kept, the parser's left as it was", n, parsed)
 	}
@@ -894,7 +920,7 @@ func TestAnnotateConcurrentSaysTrulyWhyARecordingWasNotShared(t *testing.T) {
 			{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnconsumedMocks: []models.UnconsumedMock{{Name: mock}}}},
 			{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "PostgreSQL", Kind: models.MissInTest, ClosestMock: mock}}}},
 		}
-		if charged := p.annotateConcurrent(results, nil); len(charged) != 0 {
+		if charged := p.annotateConcurrent(nil, results, nil); len(charged) != 0 {
 			t.Fatalf("charged %v", charged)
 		}
 		return results[0].FailureInfo.UnconsumedMocks[0], results[1].FailureInfo.UnmatchedCalls[0].Concurrent
@@ -993,7 +1019,7 @@ func TestAnnotateConcurrentSaysTrulyWhyARecordingWasNotShared(t *testing.T) {
 		p := newExactPlan(mappings, nil, []*models.Mock{s})
 		p.share = sharePlanOf(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}, Unkept: 1}}, mappings, []models.MockEntry{shEntry(s, "g1")}), nil, []*models.Mock{s})
 		results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "s"}}}}}
-		if charged := p.annotateConcurrent(results, nil); len(charged) != 0 {
+		if charged := p.annotateConcurrent(nil, results, nil); len(charged) != 0 {
 			t.Fatalf("charged %v", charged)
 		}
 		n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent
@@ -1125,7 +1151,7 @@ func TestAnnotateConcurrentSaysOnlyWhatIsTrueOfTheCall(t *testing.T) {
 	miss := func(p *exactPlan, protocol, closest string) *models.ConcurrentNote {
 		t.Helper()
 		results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: protocol, Kind: models.MissInTest, ClosestMock: closest}}}}}
-		p.annotateConcurrent(results, nil)
+		p.annotateConcurrent(nil, results, nil)
 		n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent
 		if n == nil || !reflect.DeepEqual(n.With, []string{"b"}) {
 			t.Fatalf("a's miss says %+v; want with b", n)
@@ -1200,7 +1226,7 @@ func TestAnnotateConcurrentSaysOnlyWhatIsTrueOfTheCall(t *testing.T) {
 		p := newExactPlan(m, nil, append(mocks, h2))
 		p.share = sharePlanOf(concurrencyOf(gs, m, nil), nil, append(mocks, h2))
 		results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "HTTP", Kind: models.MissInTest}}}}}
-		p.annotateConcurrent(results, nil)
+		p.annotateConcurrent(nil, results, nil)
 		n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent
 		if n == nil || !reflect.DeepEqual(n.MayBe, []string{"b", "e"}) || n.WhyNot != "" || n.Kind != "" {
 			t.Fatalf("a's HTTP miss says %+v; want it may be b's or e's, and no one reason", n)
@@ -1226,7 +1252,7 @@ func TestAnnotateConcurrentCountsTheTestsTheRecordingDidNotKeep(t *testing.T) {
 		},
 		UnconsumedMocks: []models.UnconsumedMock{{Name: "c"}},
 	}}}
-	p.annotateConcurrent(results, nil)
+	p.annotateConcurrent(nil, results, nil)
 	calls := results[0].FailureInfo.UnmatchedCalls
 	if n := calls[0].Concurrent; n == nil || n.With != nil || n.Unkept != 1 || n.WhyNot != models.ConcurrentNotSharedStrict {
 		t.Fatalf("a's miss says %+v; want 1 test the recording did not keep, not shared by a strict replay", n)
@@ -1245,7 +1271,7 @@ func TestAnnotateConcurrentCountsTheTestsTheRecordingDidNotKeep(t *testing.T) {
 		UnmatchedCalls:  []models.UnmatchedCall{{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "c"}},
 		UnconsumedMocks: []models.UnconsumedMock{{Name: "c"}},
 	}}}
-	alone.annotateConcurrent(solo, nil)
+	alone.annotateConcurrent(nil, solo, nil)
 	if n, u := solo[0].FailureInfo.UnmatchedCalls[0].Concurrent, solo[0].FailureInfo.UnconsumedMocks[0]; n != nil || u != (models.UnconsumedMock{Name: "c"}) {
 		t.Fatalf("a, recorded alone, says %+v and %+v", n, u)
 	}
@@ -1274,7 +1300,7 @@ func TestAnnotateConcurrentNamesTheHeldKindOfAnEntryThatNamesNone(t *testing.T) 
 	e.Kind = ""
 	s := newShareSet(t, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}, map[string][]models.MockEntry{"a": {e}, "b": {}}, nil, nil, unkeyed)
 	results := []models.TestResult{{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "u"}}}}}
-	s.p.annotateConcurrent(results, nil)
+	s.p.annotateConcurrent(nil, results, nil)
 	if n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent; n == nil || n.WhyNot != models.ConcurrentNotSharedCall || n.Kind != string(shareKind) || n.AttributedTo != "a" {
 		t.Fatalf("b's miss says %+v; want attributed to a, a %s recording keploy does not key", n, shareKind)
 	}
@@ -1311,5 +1337,40 @@ func TestAClockReadIsLearningASharedRecordingIsPairedBy(t *testing.T) {
 	}
 	if len(st.Clocks) != 1 {
 		t.Fatal("stripUnresolved changed the consumed state")
+	}
+}
+
+// A shared recording charged to a test names the operation its request
+// carries, beside its summary: from the recording the plan holds, or the one
+// a replay left on disk.
+func TestASharedCallNamesItsOperation(t *testing.T) {
+	unregister := models.RegisterHTTPOperation(func(r *models.HTTPReq) (models.HTTPOperation, bool) {
+		if r.Body == "" {
+			return models.HTTPOperation{}, false
+		}
+		return models.HTTPOperation{Label: "query " + r.Body}, true
+	})
+	t.Cleanup(unregister)
+	gql := func(op string) *models.Mock {
+		return &models.Mock{Name: "mock-" + op, Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
+			Method: "POST", URL: "http://localhost:8083/query", Body: op}}}
+	}
+	held, onDisk := gql("GetAppLabels"), gql("GetSubscription")
+	s := &settlement{
+		lookup: map[string]mockDisplayInfo{
+			held.Name:   {protocol: "HTTP", summary: "POST http://localhost:8083/query"},
+			onDisk.Name: {protocol: "HTTP", onDisk: onDisk},
+		},
+		sp: &sharePlan{info: map[string]*shareInfo{held.Name: {mock: held}}},
+	}
+	for _, tc := range []struct{ mock, op string }{
+		{held.Name, "query GetAppLabels"},
+		{onDisk.Name, "query GetSubscription"},
+		{"mock-unknown", ""},
+	} {
+		c := s.call(tc.mock, "shared", nil, "why")
+		if c.Operation != tc.op || (tc.op != "" && c.ActualSummary != "POST http://localhost:8083/query") {
+			t.Fatalf("%s: summary %q operation %q; want operation %q", tc.mock, c.ActualSummary, c.Operation, tc.op)
+		}
 	}
 }

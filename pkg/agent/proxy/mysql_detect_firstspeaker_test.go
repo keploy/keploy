@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -31,6 +31,12 @@ func acceptingServer(t *testing.T, serve func(c net.Conn)) (addr string, conns *
 	if err != nil {
 		t.Fatal(err)
 	}
+	return acceptingOn(t, ln, serve)
+}
+
+// acceptingOn is acceptingServer on ln, closed when the test ends.
+func acceptingOn(t *testing.T, ln net.Listener, serve func(c net.Conn)) (addr string, conns *atomic.Int32, accepted <-chan struct{}) {
+	t.Helper()
 	t.Cleanup(func() { _ = ln.Close() })
 	var n atomic.Int32
 	ch := make(chan struct{}, 16)

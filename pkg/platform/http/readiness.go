@@ -20,11 +20,11 @@ func (a *AgentClient) AppReadiness(ctx context.Context, since uint64) (models.Ap
 	if a.conf.Agent.AgentURI == "" {
 		return models.AppReadiness{}, errors.New("no keploy agent to ask")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/app/readiness?since="+strconv.FormatUint(since, 10), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/app/readiness?since="+strconv.FormatUint(since, 10), nil)
 	if err != nil {
 		return models.AppReadiness{}, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.AppReadiness{}, fmt.Errorf("ask the agent whether the application listens: %w", err)
 	}
@@ -56,11 +56,11 @@ func (a *AgentClient) MarkReadiness(ctx context.Context) (models.AppReadiness, e
 	if a.conf.Agent.AgentURI == "" {
 		return models.AppReadiness{}, errors.New("no keploy agent to ask")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/app/readiness/mark", nil)
+	req, err := newAgentRequest(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/app/readiness/mark", nil)
 	if err != nil {
 		return models.AppReadiness{}, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.AppReadiness{}, fmt.Errorf("mark the set's start on the agent: %w", err)
 	}

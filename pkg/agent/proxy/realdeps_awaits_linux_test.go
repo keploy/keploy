@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/realdeps"
 )
 
 // realSink is a real destination that reads what it is sent and never
@@ -66,7 +67,7 @@ func TestARealConnectionItsAppEndedWaitsOnNoAnswer(t *testing.T) {
 	ctx := integrations.WithRequestHolder(context.Background(), accepted)
 	done := make(chan served, 1)
 	go func() {
-		h, c, err := p.serveReal(ctx, accepted, sink, "", 1, nil)
+		h, c, err := p.serveReal(ctx, accepted, sink, "", 1, realdeps.Origin{}, nil)
 		done <- served{h, c, err}
 	}()
 

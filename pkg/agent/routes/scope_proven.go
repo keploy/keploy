@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/render"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -150,8 +151,14 @@ func (a *Agent) HandleInstance(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, resp)
 }
 
+// withCaller gives the service the begin's or end's caller, read from the
+// connection only if the service asks (coreAgent.WithCaller).
+func withCaller(r *http.Request) context.Context {
+	return coreAgent.WithCaller(r.Context(), func() (int, error) { return callerPID(r) })
+}
+
 func (a *Agent) provenBegin(w http.ResponseWriter, r *http.Request, p provenScope, req models.ScopeReq) {
-	resp, serr := p.ProvenBegin(r.Context(), req)
+	resp, serr := p.ProvenBegin(withCaller(r), req)
 	if serr != nil {
 		a.refuse(w, r, serr)
 		return
@@ -161,7 +168,7 @@ func (a *Agent) provenBegin(w http.ResponseWriter, r *http.Request, p provenScop
 }
 
 func (a *Agent) provenEnd(w http.ResponseWriter, r *http.Request, p provenScope, req models.ScopeReq) {
-	resp, serr := p.ProvenEnd(r.Context(), req)
+	resp, serr := p.ProvenEnd(withCaller(r), req)
 	if serr != nil {
 		// An end the wire refuses because of its harness (an old one, or a
 		// body that is not the protocol's) is the run's to name, as at a

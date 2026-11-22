@@ -96,3 +96,43 @@ func TestARecordKeepsTheGivensAndItsReplayPushesThem(t *testing.T) {
 	require.Equal(t, []string{"mock-0"}, rinstr.table["orders::TestPlace"])
 	require.Equal(t, map[string][]models.GivenValue{"orders::TestPlace": g}, rinstr.given, "the replay pushes each test's recorded givens")
 }
+
+// A record writes into each test's mapping the seed its browser drew from
+// (Record -> stampSeeds), and a replay of the set hands the agent those
+// seeds, by test, with the tests' begins (pushTestBegins): without either,
+// every replayed test's browser would draw other numbers than its
+// recording's.
+func TestARecordKeepsEachTestsSeedAndItsReplayPushesIt(t *testing.T) {
+	provenOn(t)
+	const seed = "0123456789abcdef0123456789abcdef"
+	dir := t.TempDir()
+	w := mark("ui::tr", 0, 10*time.Millisecond)
+	w.Outcome, w.Dir, w.Random, w.Seed = models.ScopeOutcomePassed, "tests", models.ScopeRandomSeeded, seed
+	other := mark("ui::history", 20*time.Millisecond, 30*time.Millisecond)
+	other.Outcome, other.Dir, other.Random = models.ScopeOutcomePassed, "tests", models.ScopeRandomOwn
+	instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
+		windows: []models.ScopeWindow{w, other}}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = dir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg).Record(context.Background()))
+	set := (&mockService{config: cfg}).setName()
+	mp, err := mapdb.New(zap.NewNop(), dir, "").GetMapping(context.Background(), set)
+	require.NoError(t, err)
+	require.NotNil(t, mp)
+	byID := map[string]models.MappedTestCase{}
+	for _, tc := range mp.TestCases {
+		byID[tc.ID] = tc
+	}
+	require.Equal(t, seed, byID["ui::tr"].Seed, "the mapping keeps the seed the test's browser drew from")
+	require.Empty(t, byID["ui::history"].Seed)
+
+	// The replay of that recording pushes it with the begins.
+	rinstr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	rcfg := instrConfig(rinstr, utils.Native, "go test -p 1 -json ./...")
+	rcfg.Path, rcfg.Mock.OnMiss = dir, "fail"
+	require.NoError(t, New(zap.NewNop(), rinstr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, rcfg).Replay(context.Background()))
+	require.Equal(t, map[string]string{"ui::tr": seed}, rinstr.seeds, "the replay pushes each test's recorded seed")
+}

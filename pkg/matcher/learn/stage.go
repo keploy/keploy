@@ -95,7 +95,8 @@ func readersFor(procs int) int {
 // recorded (a lazy Raw of it unserved: LazyRawOf, its answer the agent
 // parked on disk read back first, withAnswer). src visits them one at a
 // time, in recorded order, and each is taken (take) only once a reader is
-// free to read it, so none is taken ahead of the readers: a call reads
+// free to read it and its read's cost (readWeight) is reserved of the
+// set's readInFlight, so none is taken ahead of the readers: a call reads
 // itself every recording no reader has begun, and a set over (take: past
 // its budget, or after its NewSet) is visited no further. A recording a
 // call took first is read too, for the parts the call's read leaves
@@ -118,6 +119,9 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 		// rest: a call took x first, and the reader reads only what the
 		// call's read of it leaves (stageRest).
 		rest bool
+		// w is what the read reserved of the set's readInFlight
+		// (readWeight), given back once it is read.
+		w int64
 	}
 	// free holds a token for each reader not reading; next never holds
 	// more than the readers' count, so a hand-off never waits.
@@ -129,11 +133,14 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 		go func() {
 			defer wg.Done()
 			for r := range next {
-				if r.rest {
-					dc.stageRest(s, r.x)
-				} else {
-					dc.warmOne(s, r.x, r.ch, true)
-				}
+				func() {
+					defer s.inFlight.Release(r.w)
+					if r.rest {
+						dc.stageRest(s, r.x)
+					} else {
+						dc.warmOne(s, r.x, r.ch, true)
+					}
+				}()
 				free <- struct{}{}
 			}
 		}()
@@ -144,12 +151,15 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 		}
 		<-free
 		x := dc.LazyRawOf(m, false, withAnswer(m))
+		w := readWeight(x, stageCost)
+		s.reserve(w)
 		ch, mine := s.take(x)
 		if ch == nil {
+			s.inFlight.Release(w)
 			free <- struct{}{}
 			return false
 		}
-		next <- read{x: x, ch: ch, rest: !mine}
+		next <- read{x: x, ch: ch, rest: !mine, w: w}
 		return true
 	})
 	close(next)

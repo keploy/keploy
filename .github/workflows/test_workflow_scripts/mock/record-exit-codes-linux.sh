@@ -14,12 +14,18 @@
 # #4772 an app that died exited 0 too. A recording whose agent cannot start is
 # mock-agent-cannot-start-linux.sh's.
 #
-# Env: RECORD_BIN (the keploy binary under test).
+# Env: RECORD_BIN (the keploy binary under test); RECORD_HANG_SECONDS (the
+# bound on each recording, 120 by default: record-exit-codes-linux.tests.sh
+# shortens it, with a keploy that hangs).
 set -uo pipefail
 # Job control: without it a background job of a script starts with SIGINT
 # ignored, and sudo, finding it ignored, never relays the interrupt this lane
 # sends it to keploy.
 set -m
+# shellcheck source=../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
+# shellcheck source=../hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../hang_guard.sh" || exit 1
 
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"
@@ -31,40 +37,30 @@ fail() {
   FAIL=1
 }
 
-# pid_running PID: whether PID still runs, by its state in /proc, which shows
-# root's processes to this user too: gone, or a zombie, is not running. Not
-# kill -0: keploy runs under sudo here, and while sudo checks its policy it
-# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
-# that is alive, and keploy would be taken for ended before it started.
-pid_running() {
-  local st
-  case $1 in "" | *[!0-9]*) return 1 ;; esac
-  { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
-  st=${st##*) }
-  [ "${st%% *}" != Z ]
-}
-
 # start <case> <keploy record args...>: starts `keploy record` as root, in a
 # directory of its own, logging to $WORK/<case>.log, and sets PID to sudo's
-# (sudo relays a signal sent to it to keploy, and exits with keploy's code).
-# The timeout is a hang guard only: when it fires it says so (--verbose, in
-# the C locale, so the line is the same on every host), and expect fails the
-# case on that line, whatever the exit code (a hung run's
-# agent and app, each in a process group of its own, are left to the
-# runner's teardown).
+# (sudo relays a signal sent to it to keploy, and exits with keploy's code,
+# which expect reads by wait: not timeout(1)'s, whose code for a relayed
+# interrupt is not keploy's on Ubuntu 26.04; see hang_guard.sh). The hang
+# guard only bounds the run: when it fires it says so in the log, and expect
+# fails the case on that line, whatever the exit code (a hung run's agent and
+# app, each in a process group of its own, are left to the runner's
+# teardown).
 start() {
   local name=$1
   shift
   mkdir -p "$WORK/$name"
-  (cd "$WORK/$name" && exec sudo -E env LC_ALL=C PATH="$PATH" timeout --verbose -s KILL 120 "$BIN" record "$@" --disable-tele > "$WORK/$name.log" 2>&1) &
-  PID=$!
+  cd "$WORK/$name" || exit 1
+  hang_start -s KILL "${RECORD_HANG_SECONDS:-120}" sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$BIN" record "$@" --disable-tele > "$WORK/$name.log" 2>&1
+  PID=$HANG_PID
+  cd - >/dev/null || exit 1
 }
 
 # expect <case> <exit code> <what its log has to say>: waits for the case's
 # recording to end and checks how it did.
 expect() {
   local name=$1 want=$2 says=$3 got
-  wait "$PID"
+  hang_wait "$PID"
   got=$?
   echo "--- $name: exited $got, want $want ---"
   local bad=0
@@ -76,8 +72,7 @@ expect() {
     fail "$name: its log does not say \"$says\""
     bad=1
   fi
-  # Only the guard sends KILL; an interrupt it relays is logged as INT.
-  if grep -aqF "timeout: sending signal KILL" "$WORK/$name.log"; then
+  if grep -aqF "$HANG_LINE" "$WORK/$name.log"; then
     fail "$name: keploy record hung, and the hang guard killed it"
     bad=1
   fi
@@ -114,7 +109,7 @@ expect record-timer 0 "Time up! Stopping keploy"
 MARK="$WORK/sigint/app-running"
 start sigint -c "sh -c 'touch $MARK; exec sleep 600'"
 until [ -e "$MARK" ]; do
-  pid_running "$PID" || break
+  hang_running "$PID" || break
   sleep 0.2
 done
 if [ -e "$MARK" ]; then

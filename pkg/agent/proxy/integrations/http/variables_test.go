@@ -214,7 +214,7 @@ func TestVariables_AUseOfAnotherValueIsAMissWithEvidence(t *testing.T) {
 			if p.mock != "mock-2" || p.name != "orderId" || p.place != "url.path[1]" || p.expected != "ord-live-9" || p.actual != tc.asked {
 				t.Fatalf("evidence %+v", p)
 			}
-			rep := h.buildHTTPMismatchReport(makeReq("GET", "/orders/"+tc.asked), nil, db, nil, nil, nil, diag)
+			rep := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/orders/"+tc.asked), nil, db, nil, nil, nil, diag)
 			if rep.MatchPhase != models.MatchPhaseVariable || rep.ClosestMock != "mock-2" || len(rep.FieldDiffs) != 1 ||
 				rep.FieldDiffs[0].Kind != models.DiffKindVariable || rep.FieldDiffs[0].Expected != "ord-live-9" || rep.FieldDiffs[0].Actual != tc.asked {
 				t.Fatalf("report %+v", rep)
@@ -244,7 +244,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		db := &varDb{perTest: createAndReadBack("kqzxwv")}
 		ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/kqzxwv", ""))
 		wantProblem(t, ok, diag, "before the call that binds it")
-		rep := h.buildHTTPMismatchReport(makeReq("GET", "/orders/kqzxwv"), nil, db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/orders/kqzxwv"), nil, db, nil, nil, nil, diag)
 		if len(rep.FieldDiffs) != 0 || !slices.Contains(rep.VariablePlaces, "url.path[1]") {
 			t.Fatalf("report diffs %+v places %v; want no diff and the mock's url.path[1]", rep.FieldDiffs, rep.VariablePlaces)
 		}
@@ -262,7 +262,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		if p.place != "" {
 			t.Fatalf("a refusal names no place, got %q", p.place)
 		}
-		rep := h.buildHTTPMismatchReport(makeReq("GET", "/orders/kqzxwvbn"), nil, db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/orders/kqzxwvbn"), nil, db, nil, nil, nil, diag)
 		if !slices.Equal(rep.VariablePlaces, []string{"url.path[1]"}) {
 			t.Fatalf("report places %v; want the mock's declared url.path[1]", rep.VariablePlaces)
 		}
@@ -287,7 +287,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		}
 		r := makeReq("PUT", "/orders/kqzxwvbn")
 		r.Header = http.Header{"Content-Type": []string{"application/json"}}
-		rep := h.buildHTTPMismatchReport(r, live.body, db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), r, live.body, db, nil, nil, nil, diag)
 		if rep.ClosestMock != "mock-2" || !slices.Equal(rep.VariablePlaces, []string{"url.path[1]"}) {
 			t.Fatalf("report closest %q places %v; want mock-2's declared url.path[1]", rep.ClosestMock, rep.VariablePlaces)
 		}
@@ -295,7 +295,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 			t.Fatalf("the miss's shape is %q, want PUT /orders/{}", got)
 		}
 		t.Setenv(provenswitch.Env, "")
-		if off := h.buildHTTPMismatchReport(r, live.body, db, nil, nil, nil, diag); off.VariablePlaces != nil {
+		if off := h.buildHTTPMismatchReport(context.Background(), r, live.body, db, nil, nil, nil, diag); off.VariablePlaces != nil {
 			t.Fatalf("with the switch off a miss carries no places, got %v", off.VariablePlaces)
 		}
 		encoded, err := url.Parse("/orders/a%2Fb")
@@ -303,7 +303,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 			t.Fatal(err)
 		}
 		er := &http.Request{Method: "PUT", URL: encoded, Header: http.Header{"Content-Type": []string{"application/json"}}}
-		if off := h.buildHTTPMismatchReport(er, live.body, db, nil, nil, nil, diag); off.VariablePlaces != nil || off.ActualSummary != "PUT /orders/a/b" {
+		if off := h.buildHTTPMismatchReport(context.Background(), er, live.body, db, nil, nil, nil, diag); off.VariablePlaces != nil || off.ActualSummary != "PUT /orders/a/b" {
 			t.Fatalf("with the switch off a miss names its path decoded, as before, with no places: got %q %v", off.ActualSummary, off.VariablePlaces)
 		}
 	})
@@ -315,7 +315,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		read := at(varMock("mock-2", "GET", "http://store/orders/recval", "", 200, `{}`,
 			models.MockVariables{"orderId": useV("recval", []string{"url.path[1]"})}), 2)
 		diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1, pool: []*models.Mock{read}}
-		rep := h.buildHTTPMismatchReport(makeReq("GET", "/orders/kqzxwvbn"), nil, &varDb{}, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/orders/kqzxwvbn"), nil, &varDb{}, nil, nil, nil, diag)
 		if rep.ClosestMock != "" || !slices.Equal(rep.VariablePlaces, []string{"url.path[1]"}) {
 			t.Fatalf("report closest %q places %v; want no closest mock and the route's url.path[1]", rep.ClosestMock, rep.VariablePlaces)
 		}
@@ -338,7 +338,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		}
 		r := makeReq("PUT", "/orders/widget")
 		r.Header = http.Header{"Content-Type": []string{"application/json"}}
-		rep := h.buildHTTPMismatchReport(r, live.body, db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), r, live.body, db, nil, nil, nil, diag)
 		if !slices.Contains(rep.VariablePlaces, "url.path[1]") {
 			t.Fatalf("report closest %q places %v; want mock-2's url.path[1], a mock on the call's route", rep.ClosestMock, rep.VariablePlaces)
 		}
@@ -365,7 +365,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		if ok || diag == nil || diag.phase == models.MatchPhaseVariable {
 			t.Fatalf("want a miss in another phase, got ok=%v diag=%+v", ok, diag)
 		}
-		rep := h.buildHTTPMismatchReport(&http.Request{Method: "PUT", URL: u, Header: http.Header{"Content-Type": []string{"application/json"}}}, live.body, db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), &http.Request{Method: "PUT", URL: u, Header: http.Header{"Content-Type": []string{"application/json"}}}, live.body, db, nil, nil, nil, diag)
 		if rep.ActualSummary != "PUT /files/a%2Fb/kqzxwvbn" {
 			t.Fatalf("the miss names its path %q; want it escaped, as a place counts it", rep.ActualSummary)
 		}
@@ -387,7 +387,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 			if ok {
 				t.Fatal("the call made again should miss: its mock was consumed")
 			}
-			rep := h.buildHTTPMismatchReport(makeReq("GET", "/orders/widget"), nil, db, nil, nil, nil, diag)
+			rep := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/orders/widget"), nil, db, nil, nil, nil, diag)
 			if !slices.Contains(rep.VariablePlaces, "url.path[1]") {
 				t.Fatalf("with %d session mock(s): report phase %q closest %q places %v; want url.path[1], which holds orderId's value", len(session), rep.MatchPhase, rep.ClosestMock, rep.VariablePlaces)
 			}
@@ -406,7 +406,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		if ok {
 			t.Fatal("the call should miss")
 		}
-		rep := h.buildHTTPMismatchReport(makeReq("GET", "/items/abcd"), nil, db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/items/abcd"), nil, db, nil, nil, nil, diag)
 		if rep.ClosestMock != "mock-3" || len(rep.VariablePlaces) != 0 {
 			t.Fatalf("report closest %q places %v; want mock-3 and no place: mock-2 is on another route", rep.ClosestMock, rep.VariablePlaces)
 		}
@@ -417,12 +417,12 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 	t.Run("a report with no closest mock", func(t *testing.T) {
 		read := at(varMock("mock-2", "GET", "http://store/orders/recval", "", 200, `{}`,
 			models.MockVariables{"orderId": useV("recval", []string{"url.path[1]"})}), 2)
-		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil)
+		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil, placesOf(nil))
 		if !slices.Equal(r.VariablePlaces, []string{"url.path[1]"}) {
 			t.Fatalf("places %v; want the route's url.path[1]", r.VariablePlaces)
 		}
 		for _, off := range []*http.Request{makeReq("GET", "/items/kqzxwvbn"), makeReq("DELETE", "/orders/kqzxwvbn"), makeReq("GET", "/orders/kqzxwvbn/lines")} {
-			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil)
+			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil, placesOf(nil))
 			if r.VariablePlaces != nil {
 				t.Fatalf("%s %s is off mock-2's route, yet carries places %v", off.Method, off.URL.Path, r.VariablePlaces)
 			}
@@ -444,7 +444,7 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 		}
 		ok, _, diag := matchVar(t, h, db, &req{method: "GET", url: u, header: http.Header{"Content-Type": []string{"application/json"}, "Host": []string{"store"}}})
 		wantProblem(t, ok, diag, "")
-		rep := h.buildHTTPMismatchReport(&http.Request{Method: "GET", URL: u}, nil, db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), &http.Request{Method: "GET", URL: u}, nil, db, nil, nil, nil, diag)
 		if rep.ActualSummary != "GET /files/a%2Fb/othervalue" {
 			t.Fatalf("the miss names its path %q; want it escaped, as a place counts it", rep.ActualSummary)
 		}
@@ -483,6 +483,22 @@ func TestVariables_AUseBeforeItsBindingCallIsAMiss(t *testing.T) {
 	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
 	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/ord-live-9", ""))
 	wantProblem(t, ok, diag, "before the call that binds it")
+}
+
+// A variable the test binds at a client test case's request, which bound
+// nothing this run, misses saying why (variables.Table.Note), never naming a
+// call that binds it.
+func TestVariables_AUseOfAVariableItsTestCaseBoundNothingSaysWhy(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
+	db.table.Start(nil)
+	db.table.Note("orderId", "the test binds it at test case post-orders-1's request, at body.id, which bound nothing this run")
+	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/ord-live-9", ""))
+	p := wantProblem(t, ok, diag, "variable orderId is used at url.path[1], and the test binds it at test case post-orders-1's request")
+	if strings.Contains(p.why, "before the call that binds it") || !strings.Contains(p.next, "did not bind it") {
+		t.Fatalf("the miss says %q, next %q", p.why, p.next)
+	}
 }
 
 func TestVariables_ABindingPlaceHoldsTheBoundValue(t *testing.T) {
@@ -625,7 +641,7 @@ func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
 		hit := &varHit{mock: m, binds: []variables.Binding{{Name: "polled", Value: "V", Recorded: "r-2", Mock: "mock-2", Place: "body.at"}},
 			local: map[string]variables.Binding{}, table: &tb, gen: tb.Gen(), saw: c.saw}
 		consumed := false
-		served, problem, retry, err := newHTTP().serveVariablesBy(hit, nil, func(*models.Mock) bool { consumed = true; return true })
+		served, problem, retry, err := newHTTP().serveVariablesBy(hit, nil, func(*models.Mock) bool { consumed = true; return true }, nil, unreadPlaces)
 		if err != nil || served != nil || consumed {
 			t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
 		}
@@ -1198,7 +1214,7 @@ func TestVariables_TheClosestMockDiffLeavesTheVariablesOut(t *testing.T) {
 	}
 	req := makeReq("POST", "/orders")
 	req.Header = http.Header{"Content-Type": []string{"application/json"}}
-	rep := h.buildHTTPMismatchReport(req, live.body, db, nil, nil, nil, diag)
+	rep := h.buildHTTPMismatchReport(context.Background(), req, live.body, db, nil, nil, nil, diag)
 	for _, d := range rep.FieldDiffs {
 		if d.Path == "body.id" {
 			t.Fatalf("the diff names the variable's place: %+v", rep.FieldDiffs)
@@ -1234,10 +1250,10 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hx, db); err != nil || p != nil || retry {
+	if _, p, retry, err := h.serveVariables(ctx, hx, db, unreadPlaces); err != nil || p != nil || retry {
 		t.Fatalf("x: problem %+v retry %v err %v", p, retry, err)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hy, db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hy, db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("y's collision should be checked again, not failed: problem %+v retry %v err %v", p, retry, err)
 	}
 	ok, stub, diag := matchVar(t, h, db, y)
@@ -1262,7 +1278,7 @@ func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
 		t.Fatal("the straggler should fit")
 	}
 	db.table.Reset() // the next test begins
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("a straggler should be checked again: problem %+v retry %v err %v", p, retry, err)
 	}
 	if got := db.table.Snapshot(); len(got) != 0 {
@@ -1289,7 +1305,7 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 	if ok, _, _ := matchVar(t, h, db, read); !ok {
 		t.Fatal("the read-back should match")
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("a mock another call took: problem %+v retry %v err %v", p, retry, err)
 	}
 	if ok, _, _ := matchVar(t, h, db, read); ok {
@@ -1307,13 +1323,13 @@ func TestVariables_TheEvidenceSaysWhatDiffers(t *testing.T) {
 		models.MockVariables{"orderId": bindV("123", "body.id")}), 1)
 	db := &varDb{perTest: []*models.Mock{m}}
 	_, _, diag := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":456,"item":"pen"}`))
-	rep := h.buildHTTPMismatchReport(makeReq("POST", "/orders"), []byte(`{"id":456,"item":"pen"}`), db, nil, nil, nil, diag)
+	rep := h.buildHTTPMismatchReport(context.Background(), makeReq("POST", "/orders"), []byte(`{"id":456,"item":"pen"}`), db, nil, nil, nil, diag)
 	if len(rep.FieldDiffs) != 1 || rep.FieldDiffs[0].Kind != models.DiffKindTypeChanged || rep.FieldDiffs[0].Expected != `"123"` {
 		t.Fatalf("a type change: %+v", rep.FieldDiffs)
 	}
 	db = &varDb{perTest: createAndReadBack("r")}
 	_, _, diag = matchVar(t, h, db, liveReq("GET", "/orders/l1", ""))
-	rep = h.buildHTTPMismatchReport(makeReq("GET", "/orders/l1"), nil, db, nil, nil, nil, diag)
+	rep = h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/orders/l1"), nil, db, nil, nil, nil, diag)
 	if len(rep.FieldDiffs) != 0 || !strings.Contains(rep.Diff, "before the call that binds it") {
 		t.Fatalf("a use before the binding call: %+v %q", rep.FieldDiffs, rep.Diff)
 	}
@@ -1331,7 +1347,7 @@ func TestVariables_TheReportRendersTheCallAsReceived(t *testing.T) {
 	_, _, diag := matchVar(t, h, db, liveReq("POST", "/orders", body))
 	req := makeReq("POST", "/orders")
 	req.Header = http.Header{"Content-Type": []string{"application/json"}}
-	rep := h.buildHTTPMismatchReport(req, []byte(body), db, nil, nil, nil, diag)
+	rep := h.buildHTTPMismatchReport(context.Background(), req, []byte(body), db, nil, nil, nil, diag)
 	if !strings.Contains(rep.ReceivedReq, "l1") || strings.Contains(rep.ReceivedReq, "r1") {
 		t.Fatalf("the received call is rendered as %q", rep.ReceivedReq)
 	}
@@ -1359,7 +1375,7 @@ func TestVariables_SwitchOffTheReportIsAsOnMain(t *testing.T) {
 	db := &varDb{perTest: []*models.Mock{m}}
 	req := makeReq("POST", "/orders")
 	req.Header = http.Header{"Content-Type": []string{"application/json"}}
-	rep := h.buildHTTPMismatchReport(req, []byte(`{"id":"l1","item":"book"}`), db, nil, nil, nil, &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{m}})
+	rep := h.buildHTTPMismatchReport(context.Background(), req, []byte(`{"id":"l1","item":"book"}`), db, nil, nil, nil, &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{m}})
 	paths := map[string]bool{}
 	for _, d := range rep.FieldDiffs {
 		paths[d.Path] = true
@@ -1441,7 +1457,7 @@ func TestVariables_TheClosestMockDiffLeavesEveryVariablePlaceOut(t *testing.T) {
 	req.URL.RawQuery = "trace=t-live"
 	req.Header = http.Header{"Content-Type": []string{"application/json"}, "X-Ref": []string{"k-live"}}
 	body := `{"id":"i-live","n":6,"item":"book"}`
-	rep := h.buildHTTPMismatchReport(req, []byte(body), db, nil, nil, nil, &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{m}, pool: []*models.Mock{m}})
+	rep := h.buildHTTPMismatchReport(context.Background(), req, []byte(body), db, nil, nil, nil, &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{m}, pool: []*models.Mock{m}})
 	paths := map[string]bool{}
 	for _, d := range rep.FieldDiffs {
 		paths[d.Path] = true

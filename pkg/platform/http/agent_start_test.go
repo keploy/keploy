@@ -658,6 +658,7 @@ var (
 	_ record.ComposeAgentFailureReader = (*AgentClient)(nil)
 	_ record.ComposeEndReader          = (*AgentClient)(nil)
 	_ mock.ComposeAgentFailureReader   = (*AgentClient)(nil)
+	_ mock.ComposeEndReader            = (*AgentClient)(nil)
 )
 
 // After keploy saw the agent ready, a compose recording ends as keploy's

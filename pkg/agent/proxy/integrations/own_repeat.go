@@ -23,6 +23,17 @@ import (
 // duplicate of a recorded call (a write made twice, a retried request) would
 // pass.
 //
+// One exception, in the judging, not in the answer: a parser that finds such
+// a call the same request as one of the set's background recordings (its
+// worker: or startup: mocks), apart from noise and reads of the clock, marks
+// its miss Background (models.MockMismatchReport.Background). That miss is
+// listed, and counts against no test and no set: it is one more run of the
+// application's own background work, a poll on a timer, and not the test's.
+// So the background still never answers one call more than the open test
+// recorded, but such a call fails the test only when it is not identical to
+// a background recording. A parser that marks nothing leaves every such miss
+// the test's, as before.
+//
 // The parser decides whether a call is one of the open test's own calls: one
 // its matcher, as it reads "the same call", matches with a recording the
 // test owns, answered or not (OwnRepeatRead). The decision is asked where a

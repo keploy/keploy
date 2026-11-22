@@ -809,3 +809,77 @@ func TestStart_AComposeAgentThatSaysItIsStoppingIsDrainedWhileTheStackIsUp(t *te
 		t.Fatalf("watched %v, %d of 3 streams asked for the agent's word of a stop", agent.watched.Load(), n)
 	}
 }
+
+// Under docker compose a mapping after the stop is kept only for a test case
+// served before it, told by the name the agent's mappings carry: its capture
+// id, for a test case that came with one and no name (a request captured
+// without --sync). Keyed by its name, "", every such test case's mapping was
+// one the drain had never read, and was left out.
+func TestGetTestAndMockChans_AMappingAfterTheStopIsToldByItsCaptureID(t *testing.T) {
+	t.Parallel()
+	h := newStopDrainHarnessFor(t, utils.DockerCompose)
+	var maps []string
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for range h.frames.Incoming {
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range h.frames.Outgoing {
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for m := range h.frames.Mappings {
+			maps = append(maps, m.TestName)
+		}
+	}()
+	before := time.Now()
+	h.stop()
+	after := time.Now().Add(time.Second)
+	captured := func(id string, at time.Time) *models.TestCase {
+		tc := tcAt("", at)
+		tc.CaptureID = models.CaptureIDPrefix + id
+		return tc
+	}
+	take := func(ok bool, what string) {
+		t.Helper()
+		if !ok {
+			t.Fatalf("%s was not taken", what)
+		}
+	}
+	sendTC := func(tc *models.TestCase) {
+		t.Helper()
+		select {
+		case h.f.incoming <- tc:
+			take(true, tc.CaptureID)
+		case <-time.After(5 * time.Second):
+			take(false, tc.CaptureID)
+		}
+	}
+	sendMap := func(id string) {
+		t.Helper()
+		select {
+		case h.f.mappings <- models.TestMockMapping{TestName: models.CaptureIDPrefix + id, MockIDs: []string{"m-" + id}}:
+		case <-time.After(5 * time.Second):
+			take(false, "the mapping of "+id)
+		}
+	}
+	sendTC(captured("before", before))
+	sendTC(captured("after", after))
+	// The frame drains have taken what was queued; the mappings trail them.
+	time.Sleep(100 * time.Millisecond)
+	sendMap("after")
+	// The test-case drain ends; the agent then emits the mapping of a test
+	// case it handed on before the stop, and of one the drain never read.
+	time.Sleep(mappingIdleGrace + 500*time.Millisecond)
+	sendMap("before")
+	sendMap("never-read")
+	wg.Wait()
+	if fmt.Sprint(maps) != "["+models.CaptureIDPrefix+"before]" {
+		t.Fatalf("mappings %v; want only the one of the test case served before the stop", maps)
+	}
+}

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 
 # E2E test for MySQL dual-connection handshake matching.
 #
@@ -30,7 +31,9 @@ trap die ERR
 wait_for_mysql() {
   section "Wait for MySQL readiness"
   for i in {1..120}; do
-    if docker compose exec -T mysql mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
+    # Over TCP (to the container's own 3306), as the app and keploy reach it:
+    # the image's first, socket-only server answers the socket alone, and exits.
+    if docker compose exec -T mysql mysql -h127.0.0.1 -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
       echo "MySQL is ready."
       endsec; return 0
     fi
@@ -50,6 +53,7 @@ wait_for_app() {
     sleep 1
   done
   echo "::error::App did not start in time"
+  save_keploy_start_evidence
   endsec; return 1
 }
 
@@ -161,6 +165,9 @@ do_record_iteration() {
     > "${app_name}.txt" 2>&1 &
   local KEPLOY_PID=$!
 
+  # The app starts once keploy's agent is ready: its wait, with its full
+  # budget, starts there (keploy-start-wait.sh).
+  await_agent_ready "${app_name}.txt" "$KEPLOY_PID" || exit 1
   send_request "$KEPLOY_PID"
 
   set +e

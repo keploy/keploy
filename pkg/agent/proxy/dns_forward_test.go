@@ -881,7 +881,7 @@ func TestDNSForwardLinesSayMockMissOnlyOnAMiss(t *testing.T) {
 	orders := dns.Question{Name: "orders.shop.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	grpcProbe := dns.Question{Name: "_grpc_config.orders.shop.svc.cluster.local.", Qtype: dns.TypeTXT, Qclass: dns.ClassINET}
 	// With the search list below, this is orders.svc.cluster.local expanded
-	// once more: unrecordable, never reported.
+	// once more: it cannot resolve, so it is never reported.
 	searchExpansion := dns.Question{Name: "orders.svc.cluster.local.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	cases := []struct {
 		name    string

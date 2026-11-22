@@ -6,9 +6,11 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
+
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 // The shape of a call keploy could not answer, as the proven model's evidence
@@ -28,10 +30,16 @@ import (
 //
 // A MongoDB miss's shape also names, from the request the matcher rendered
 // (ReceivedReq), the database the command ran in and its filter's keys
-// (mongoMissShape).
+// (mongoMissShape). A miss of a protocol keploy has no shape of (CallShape
+// "": a cache, a broker, a queue, DNS) is named by the command its parser
+// read (Command, as CommandName keeps it), and its summary is left out: it
+// can hold the values the call sent.
 func MissShape(m UnmatchedCall) string {
 	if isMongoCall(m.Protocol) {
 		return mongoMissShape(m)
+	}
+	if !IsPathProtocol(m.Protocol) && !isSQLCall(m.Protocol) {
+		return CommandName(m.Command)
 	}
 	shape := CallShape(m.Protocol, m.ActualSummary)
 	if !IsPathProtocol(m.Protocol) || (len(m.FieldDiffs) == 0 && len(m.VariablePlaces) == 0) {
@@ -62,6 +70,32 @@ func CallShape(protocol, summary string) string {
 		return mongoShape(summary)
 	}
 	return ""
+}
+
+// maxCommandName is the longest command a miss is named by (CommandName).
+const maxCommandName = 64
+
+// CommandName is c, a call's command as its parser read it
+// (UnmatchedCall.Command), when it has a command's shape: at most
+// maxCommandName bytes, an ASCII letter first, then only ASCII letters,
+// digits, '_' and '.' (a Redis module's "JSON.GET", DNS's "NSEC3"). "" for
+// anything else: a value with a space, ':', '-', '@' or '/' in it (a key
+// such as "user:42", a dashed UUID, an address, a sentence) names no
+// command. The shape is a defence, not a proof: a value of the same shape (a
+// bare key such as "orders", "session.abc123", an undashed hex id that
+// starts with a letter) is kept. That the word is a command is the parser's
+// contract: it puts there only the command it names a call by (the Redis
+// command, the Kafka API, the DNS query type).
+func CommandName(c string) string {
+	if c == "" || len(c) > maxCommandName || !isLetterByte(c[0]) {
+		return ""
+	}
+	for i := 1; i < len(c); i++ {
+		if b := c[i]; !isLetterByte(b) && (b < '0' || b > '9') && b != '_' && b != '.' {
+			return ""
+		}
+	}
+	return c
 }
 
 // isHTTPProtocol reports whether a miss's protocol is HTTP, whose summary is
@@ -99,7 +133,7 @@ func MockURLShape(m *Mock) string {
 	if m == nil || m.Spec.HTTPReq == nil {
 		return ""
 	}
-	u, err := url.Parse(strings.TrimSpace(m.Spec.HTTPReq.URL))
+	u, err := ParseRequestURL(strings.TrimSpace(m.Spec.HTTPReq.URL))
 	if err != nil {
 		return pathHole
 	}
@@ -171,13 +205,19 @@ func FieldShapes(fields []string) []string {
 // key that is an ID, an email address, a token) is {}. By that rule any key
 // that does not read as a name is {} too (line1, $set, iOS, café), and an
 // API version (v1) is kept. A header's name is kept whole: it names the
-// field (header.Authorization). A raw dotted key is shaped part by part
+// field (header.Authorization), when it is a header's name at all (a
+// token: headerName), else {}. A raw dotted key is shaped part by part
 // (alice.smith@example.com keeps "alice"), so a producer shapes its keys
 // first (KeyShape), as the strict comparison does. An SQL call's place name
 // is kept whole too (sqlPlace: bind.$1, literal.3): a position keploy counts
 // in the statement, not a value the app sent.
 func FieldShape(f string) string {
 	if name, ok := strings.CutPrefix(f, "header."); ok && name != "" && !strings.Contains(name, ".") {
+		if !headerName.MatchString(name) {
+			// No header's name (a space, a quote): a value written
+			// where a name goes.
+			return "header." + pathHole
+		}
 		return f
 	}
 	if sqlPlace.MatchString(f) {
@@ -244,13 +284,50 @@ func mongoShape(summary string) string {
 	out := KeyShape(f[0])
 	i := 1
 	if i+1 < len(f) && f[i] == "on" {
-		out += " on " + mongoNameShape(f[i+1])
+		if ns := mongoCommandNamespace(f[0], f[i+1]); ns != "" {
+			out += " on " + mongoNameShape(ns)
+		}
 		i += 2
 	}
 	if i+1 < len(f) && f[i] == "filter" {
 		out += " filter " + strings.Join(mongoKeysShape(strings.Split(f[i+1], ",")), ",")
 	}
 	return out
+}
+
+// mongoCollectionCommands are the MongoDB commands whose value names the
+// collection they run on (find: "users"), in lower case. Any other
+// command's value names something else (createUser's user, a role), which a
+// shape never names as a collection.
+var mongoCollectionCommands = map[string]bool{
+	"find": true, "insert": true, "update": true, "delete": true, "aggregate": true, "count": true,
+	"distinct": true, "findandmodify": true, "mapreduce": true, "getmore": true, "killcursors": true,
+	"createindexes": true, "dropindexes": true, "listindexes": true, "create": true, "drop": true,
+	"collstats": true, "explain": true, "collmod": true, "validate": true, "compact": true,
+}
+
+// mongoNamesCollection reports whether command's value names a collection.
+func mongoNamesCollection(command string) bool {
+	return mongoCollectionCommands[strings.ToLower(command)]
+}
+
+// mongoCommandNamespace is the namespace a summary names for command
+// ("<db>.<collection>"): whole for a command that runs on a collection; for
+// any other, its database alone, or its legacy command pseudo-collection
+// ($cmd), or "" where it names no database: what follows is the command's
+// value (createUser's user).
+func mongoCommandNamespace(command, ns string) string {
+	if mongoNamesCollection(command) || ns == "$cmd" {
+		return ns
+	}
+	db, rest, ok := strings.Cut(ns, ".")
+	switch {
+	case !ok:
+		return ""
+	case rest == "$cmd":
+		return ns
+	}
+	return db
 }
 
 // mongoMissShape is a MongoDB miss's shape (mongoShape) naming, when the
@@ -276,7 +353,9 @@ func mongoMissShape(m UnmatchedCall) string {
 	}
 	var command, coll, db string
 	command = f[0]
-	if json.Unmarshal(body.Cmd[command], &coll) != nil || coll == "" {
+	if !mongoNamesCollection(command) || json.Unmarshal(body.Cmd[command], &coll) != nil || coll == "" {
+		// A command that runs on no collection names its user, its role,
+		// its database there: never a collection.
 		return shape
 	}
 	_ = json.Unmarshal(body.Cmd["$db"], &db)
@@ -678,10 +757,17 @@ func holePathPlaces(shape string, places []string) string {
 }
 
 // pathPlaceIndex is the segment a place "url.path[<n>]" names, read as a
-// variable's place is read (a number from 0, without leading zeros); a place
-// past url.path[9999] is ignored.
+// variable's place is read (a number from 0, without leading zeros), or a
+// word of it ("url.path[<n>]#<w>", after any "|<step>": a word address, as
+// variables.ParseAddress reads one); a place past url.path[9999] is ignored.
 func pathPlaceIndex(place string) (int, bool) {
 	const prefix = "url.path["
+	if i := strings.IndexByte(place, ']'); i >= 0 && i+1 < len(place) {
+		if !isWordSuffix(place[i+1:]) {
+			return 0, false
+		}
+		place = place[:i+1]
+	}
 	if !strings.HasPrefix(place, prefix) || !strings.HasSuffix(place, "]") {
 		return 0, false
 	}
@@ -697,6 +783,41 @@ func pathPlaceIndex(place string) (int, bool) {
 		n = n*10 + int(digits[i]-'0')
 	}
 	return n, true
+}
+
+// isWordSuffix reports whether s, what follows a place, is a word
+// address's: steps ("|pct", "|json", "|b64", "|b64url", "|jwt.<claim>",
+// "|cookie.<name>", a '|', '#' or '\' in a name escaped by '\'), then at
+// most one word ("#<n>", a number from 0 without leading zeros), as
+// variables.ParseAddress reads them.
+func isWordSuffix(s string) bool {
+	for strings.HasPrefix(s, "|") {
+		i := 1
+		for ; i < len(s) && s[i] != '|' && s[i] != '#'; i++ {
+			if s[i] == '\\' {
+				i++
+			}
+		}
+		i = min(i, len(s))
+		// A name's escapes leave its step's kind and its being empty as
+		// they are: the raw name is read.
+		switch st := s[1:i]; {
+		case st == "pct" || st == "json" || st == "b64" || st == "b64url":
+		case len(st) > len("jwt.") && strings.HasPrefix(st, "jwt."):
+		case len(st) > len("cookie.") && strings.HasPrefix(st, "cookie."):
+		default:
+			return false
+		}
+		s = s[i:]
+	}
+	if s == "" {
+		return true
+	}
+	// A number prints as it is written; Atoi's 0 or bound on an error
+	// prints as no such text.
+	w, ok := strings.CutPrefix(s, "#")
+	n, _ := strconv.Atoi(w)
+	return ok && n >= 0 && strconv.Itoa(n) == w
 }
 
 func isASCIILetter(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
@@ -800,11 +921,7 @@ scan:
 		out = strings.TrimSpace(out + " …")
 	}
 	if len(out) > maxSQLText {
-		i := maxSQLText
-		for i > 0 && !utf8.RuneStart(out[i]) {
-			i--
-		}
-		out = out[:i] + "…"
+		out = textcut.Prefix(out, maxSQLText) + "…"
 	}
 	return out
 }

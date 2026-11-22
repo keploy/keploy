@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -28,6 +29,12 @@ func New(logger *zap.Logger) integrations.Integrations {
 		logger: logger,
 	}
 }
+
+// MockNoise opts Generic OUT of field-level request-body mock-noise: it matches
+// opaque byte streams whole (exact + Jaccard fuzzy), so there are no named
+// fields to learn noise on. Returning nil is an explicit opt-out, not an
+// oversight. Satisfies integrations.Integrations.
+func (g *Generic) MockNoise() mocknoise.Adapter { return nil }
 
 func (g *Generic) MatchType(_ context.Context, _ []byte) bool {
 	// generic is checked explicitly in the proxy

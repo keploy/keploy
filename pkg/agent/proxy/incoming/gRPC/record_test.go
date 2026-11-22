@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,7 +48,7 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 		timestamp: requestAt,
 	}
 	close(clientCh)
-	parseFramesFromChan(logger, clientCh, sm, false, func([]func()) {})
+	parseFramesFromChan(logger, clientCh, sm, false, func([]func()) {}, newCallWindows(nil, false))
 
 	destCh := make(chan frameChunk, 1)
 	destCh <- frameChunk{
@@ -67,7 +68,7 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 		timestamp: responseAt,
 	}
 	close(destCh)
-	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {})
+	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {}, newCallWindows(nil, false))
 
 	streams := sm.GetCompleteStreams()
 	require.Len(t, streams, 1)
@@ -106,7 +107,7 @@ func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
 	parserDone := make(chan struct{})
 	go func() {
 		defer close(parserDone)
-		parseFramesFromChan(logger, clientCh, sm, false, func([]func()) { chunkParsed <- struct{}{} })
+		parseFramesFromChan(logger, clientCh, sm, false, func([]func()) { chunkParsed <- struct{}{} }, newCallWindows(nil, false))
 	}()
 	// Call 1: read while paused; parsed with the pause over.
 	clientCh <- frameChunk{data: append([]byte(http2.ClientPreface), request(1)...), timestamp: time.Unix(200, 0), paused: true}
@@ -122,7 +123,7 @@ func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
 	destCh := make(chan frameChunk, 1)
 	destCh <- frameChunk{data: append(response(1), response(3)...), timestamp: time.Unix(202, 0)}
 	close(destCh)
-	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {})
+	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {}, newCallWindows(nil, false))
 
 	got := map[uint32]bool{}
 	for _, s := range sm.GetCompleteStreams() {
@@ -139,11 +140,9 @@ func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
 // the clock reads past the stamp. Stamped after its write, as it was, the
 // stamp came after the client had the trailers and could send its next call.
 func TestForwardAndTeeStampsAStreamsEndBeforeItsClientCanSeeIt(t *testing.T) {
-	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
-		t.Run(clockName(tick), func(t *testing.T) {
-			if tick != 0 {
-				stubQuantizedClock(t, tick)
-			}
+	for _, c := range []testClock{systemClock, {tick: windowsTick}, {tick: time.Millisecond}, windowsClock} {
+		t.Run(c.String(), func(t *testing.T) {
+			tick := c.stub(t)
 			srcRead, srcWrite := net.Pipe()
 			dstRead, dstWrite := net.Pipe()
 			for _, c := range []net.Conn{srcRead, srcWrite, dstRead, dstWrite} {
@@ -151,7 +150,7 @@ func TestForwardAndTeeStampsAStreamsEndBeforeItsClientCanSeeIt(t *testing.T) {
 				defer c.Close()
 			}
 			ch := make(chan frameChunk, 1)
-			go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil, nil)
+			go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil, nil, nil)
 
 			_, resp := pingCall(t)
 			awaitTickStart(tick)
@@ -196,7 +195,7 @@ func TestForwardAndTeeStampsAReadOfSeveralEndsOnce(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil, nil)
+		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, nil, nil, nil)
 	}()
 	_, resp1 := echoCall(t, 1, "one")
 	_, resp3 := echoCall(t, 3, "two")
@@ -370,7 +369,8 @@ type grpcIngress struct {
 	tcCh           chan *models.TestCase
 	recorded       chan struct{}
 	// stop is the recording's stop, as a CLI asks about it: one time, the
-	// same at every look, after every call the test makes.
+	// same at every look, after every call the test makes, as the agent gets
+	// it (asTheAgentGetsIt).
 	stop time.Time
 	// stopIngress ends the ingress's context, as its forwarder for the app's
 	// port, or the agent, stopping does.
@@ -387,7 +387,7 @@ func startGRPCIngress(t *testing.T) *grpcIngress {
 func startGRPCIngressOn(t *testing.T, wrap func(net.Conn) net.Conn) *grpcIngress {
 	t.Helper()
 	g := &grpcIngress{m: syncMock.New(nil), tcCh: make(chan *models.TestCase), recorded: make(chan struct{}),
-		stop: time.Now().Add(time.Hour)}
+		stop: asTheAgentGetsIt(time.Now().Add(time.Hour))}
 	remove := g.m.AddWatermark(caughtUp{})
 	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), g.m))
 	g.stopIngress = cancel
@@ -421,6 +421,17 @@ func startGRPCIngressOn(t *testing.T, wrap func(net.Conn) net.Conn) *grpcIngress
 // backlog is what the stop learns asking now: whether something from before
 // it is pending, and how many of the chunks noted before it are let go.
 func (g *grpcIngress) backlog() syncMock.BacklogState { return g.m.BacklogBefore(g.stop) }
+
+// asTheAgentGetsIt is a recording's stop's instant as the agent gets it: the
+// CLI sends it in Unix nanoseconds (AgentClient.BacklogBefore), and the agent
+// asks of time.Unix of that (Agent.HandlePending), a wall reading with no
+// monotonic one. The CLI keeps a test case as one from before its stop by the
+// wall time it decodes from the agent's frame (forwardUntilDrained): a stop
+// orders a call by the wall clock. A time from clockNow has a monotonic
+// reading too, and time.Time compares two that both have one by it alone: a
+// clock no stop sees, which on Windows moves only at the timer tick, so a
+// call that ended after the stop read the stop's very instant by it.
+func asTheAgentGetsIt(stop time.Time) time.Time { return time.Unix(0, stop.UnixNano()) }
 
 // waitFor waits for cond to hold of the backlog; the bound only catches a
 // pipeline that never gets there.
@@ -514,7 +525,7 @@ func TestParseFramesFromChan_ReleasesEachChunkOnce(t *testing.T) {
 				d()
 			}
 			viaEmitter = false
-		})
+		}, newCallWindows(nil, false))
 		return got
 	}
 
@@ -568,7 +579,7 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 					for _, d := range done {
 						d()
 					}
-				})
+				}, newCallWindows(nil, false))
 			}()
 			for i := range tc.chunks {
 				c := tc.chunks[i]
@@ -688,7 +699,7 @@ func TestForwardAndTeeTeesThroughAPause(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "client→app", false, building, nil)
+				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "client→app", false, building, nil, newCallWindows(nil, false))
 			}()
 			forward := func(b string) {
 				t.Helper()
@@ -749,7 +760,7 @@ func TestForwardAndTeeNotesEachChunkFromBeforeItsStamp(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, nil)
+				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, nil, newCallWindows(nil, false))
 			}()
 
 			go func() { _, _ = srcWrite.Write(tc.payload) }()
@@ -825,11 +836,9 @@ func TestRecordIncoming_ACallCompletedUnderPressureIsDecidedBeforeItsChunksGo(t 
 // next call's request is stamped in the tick the pause's span ended in, and
 // judged by that time, the first call after every pause was left out.
 func TestRecordIncoming_AConnectionIsCapturedAgainAfterAPause(t *testing.T) {
-	for _, tick := range []time.Duration{0, 500 * time.Microsecond, time.Millisecond, windowsTick} {
-		t.Run(clockName(tick), func(t *testing.T) {
-			if tick > 0 {
-				stubQuantizedClock(t, tick)
-			}
+	for _, c := range []testClock{systemClock, {tick: 500 * time.Microsecond}, {tick: time.Millisecond}, {tick: windowsTick}, windowsClock} {
+		t.Run(c.String(), func(t *testing.T) {
+			tick := c.stub(t)
 			awaitTickStart(tick)
 			type call struct{ pausedAtRequest, pausedAtResponse, captured bool }
 			for name, tc := range map[string]struct {
@@ -1117,13 +1126,13 @@ func TestRecordIncoming_AHeaderBlockSplitAcrossFramesIsReadWhole(t *testing.T) {
 // that stop's instant, so nothing from before the stop is lost. Ended at the
 // HEADERS frame's time instead, the call came after the stop heard "clear"
 // with an end from before it. On a clock as coarse as Windows' too, where the
-// later chunk's stamp could read the very instant the stop asked about.
+// later chunk's stamp could read the very instant the stop asked about, and on
+// one like Windows' own, whose monotonic reading alone is that coarse: the
+// stop goes by the wall clock (asTheAgentGetsIt).
 func TestRecordIncoming_AStopBetweenTheChunksOfASplitBlockLosesNothing(t *testing.T) {
-	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
-		t.Run(clockName(tick), func(t *testing.T) {
-			if tick != 0 {
-				stubQuantizedClock(t, tick)
-			}
+	for _, c := range []testClock{systemClock, {tick: windowsTick}, {tick: time.Millisecond}, windowsClock} {
+		t.Run(c.String(), func(t *testing.T) {
+			tick := c.stub(t)
 			aStopBetweenTheChunksOfASplitBlockLosesNothing(t, tick)
 		})
 	}
@@ -1159,7 +1168,7 @@ func aStopBetweenTheChunksOfASplitBlockLosesNothing(t *testing.T, tick time.Dura
 	require.NoError(t, err)
 	g.waitFor(t, "the first response chunk's release", func(st syncMock.BacklogState) bool { return st.Progress >= 2 && !st.Pending })
 
-	stop := clockNow()
+	stop := asTheAgentGetsIt(clockNow())
 	st := g.m.BacklogBefore(stop)
 	require.False(t, st.Pending, "setup: the stop asked with nothing pending")
 
@@ -1186,11 +1195,9 @@ func aStopBetweenTheChunksOfASplitBlockLosesNothing(t *testing.T, tick time.Dura
 // in the split call's window. On the system clock and on clocks as coarse as
 // Windows'.
 func TestRecordIncoming_ASplitBlocksEndIsStampedBeforeItsClientCanSeeIt(t *testing.T) {
-	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
-		t.Run(clockName(tick), func(t *testing.T) {
-			if tick != 0 {
-				stubQuantizedClock(t, tick)
-			}
+	for _, c := range []testClock{systemClock, {tick: windowsTick}, {tick: time.Millisecond}, windowsClock} {
+		t.Run(c.String(), func(t *testing.T) {
+			tick := c.stub(t)
 			aSplitBlocksEndIsStampedBeforeItsClientCanSeeIt(t, tick)
 		})
 	}
@@ -1294,9 +1301,9 @@ func aSplitBlocksEndIsStampedBeforeItsClientCanSeeIt(t *testing.T, tick time.Dur
 // own, and its stream may have ended. A read that ends none gives no call its
 // end and is not held for it.
 func TestForwardAndTeeStampsAStreamsEndAfterTheInstantAStopAskedAbout(t *testing.T) {
-	for _, tick := range []time.Duration{windowsTick, time.Millisecond} {
-		t.Run(clockName(tick), func(t *testing.T) {
-			stubQuantizedClock(t, tick)
+	for _, c := range []testClock{{tick: windowsTick}, {tick: time.Millisecond}, windowsClock} {
+		t.Run(c.String(), func(t *testing.T) {
+			tick := c.stub(t)
 			srcRead, srcWrite := net.Pipe()
 			dstRead, dstWrite := net.Pipe()
 			for _, c := range []net.Conn{srcRead, srcWrite, dstRead, dstWrite} {
@@ -1311,11 +1318,11 @@ func TestForwardAndTeeStampsAStreamsEndAfterTheInstantAStopAskedAbout(t *testing
 				}
 				return time.Time{}
 			}
-			go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, func(time.Time) func() { return func() {} }, stopAsked)
+			go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, func(time.Time) func() { return func() {} }, stopAsked, nil)
 
 			_, resp := pingCall(t)
 			awaitTickStart(tick)
-			stop := clockNow()
+			stop := asTheAgentGetsIt(clockNow())
 			asked.Store(stop.UnixNano())
 			go func() { _, _ = srcWrite.Write(resp) }()
 			_, err := io.ReadFull(dstRead, make([]byte, len(resp)))
@@ -1349,7 +1356,7 @@ func TestForwardAndTeeDoesNotWaitForAStopInstantFarAhead(t *testing.T) {
 		defer c.Close()
 	}
 	ch := make(chan frameChunk, 1)
-	go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, func(time.Time) func() { return func() {} }, func() time.Time { return ahead })
+	go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, func(time.Time) func() { return func() {} }, func() time.Time { return ahead }, nil)
 	_, resp := pingCall(t) // ends its stream
 	go func() { _, _ = srcWrite.Write(resp) }()
 	_, err := io.ReadFull(dstRead, make([]byte, len(resp)))
@@ -1385,7 +1392,7 @@ func TestForwardAndTeeHoldsOnlyAStreamsEndForAStopsInstant(t *testing.T) {
 		ch := make(chan frameChunk, 1)
 		awaitTickStart(windowsTick)
 		asked := clockNow() // this tick
-		go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, func() time.Time { return asked })
+		go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, func() time.Time { return asked }, newCallWindows(nil, false))
 		go func() { _, _ = srcWrite.Write(tc.b) }()
 		_, err := io.ReadFull(dstRead, make([]byte, len(tc.b)))
 		require.NoError(t, err)
@@ -1540,11 +1547,9 @@ func echoCall(t *testing.T, id uint32, msg string) (req, resp []byte) {
 // stamp: the window holds every call the app made for the call, and nothing
 // its client does on the answer.
 func TestRecordIncoming_AResponseEndsBeforeItsClientCanSeeIt(t *testing.T) {
-	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
-		t.Run(clockName(tick), func(t *testing.T) {
-			if tick != 0 {
-				stubQuantizedClock(t, tick)
-			}
+	for _, c := range []testClock{systemClock, {tick: windowsTick}, {tick: time.Millisecond}, windowsClock} {
+		t.Run(c.String(), func(t *testing.T) {
+			tick := c.stub(t)
 			aResponseEndsBeforeItsClientCanSeeIt(t, tick)
 		})
 	}
@@ -1637,7 +1642,9 @@ const windowsTick = 15625 * time.Microsecond
 
 // stubQuantizedClock has the forwarder, and the stamps a test takes with
 // clockNow, read a clock of tick's resolution until the test ends: real time
-// cut down to the tick, as Windows' time.Now is. The forwarder's waits are
+// cut down to the tick. Truncate leaves a time no monotonic reading, so its
+// readings compare by the wall clock alone, and both readings of a time are
+// the tick's, as Windows' readings usually are. The forwarder's waits are
 // real sleeps on it.
 func stubQuantizedClock(t *testing.T, tick time.Duration) {
 	t.Helper()
@@ -1658,12 +1665,95 @@ func awaitTickStart(tick time.Duration) {
 	}
 }
 
-// clockName names a run by the clock it runs on.
-func clockName(tick time.Duration) string {
-	if tick == 0 {
-		return "on the system clock"
+// stubWindowsClock has the forwarder, and the stamps a test takes with
+// clockNow, read a clock as CI observed on Windows until the test ends: its
+// monotonic reading (Windows' interrupt time) moves only at the tick, its wall
+// reading moves within the tick. Only clockNow is stubbed: syncMock and the
+// parser still read the real clock, so a stubbed stamp and a real reading may
+// be out of the order real Windows keeps; no test here compares the two. Two readings in one tick are then Equal, and neither
+// is After the other, though their wall readings are in order: time.Time
+// compares two times that both have a monotonic reading by it alone. A
+// Windows run read a recording's stop and a call's end 268.7µs apart on the
+// wall clock, with one monotonic reading (m=+0.425537201). The forwarder's
+// waits are real sleeps on it.
+func stubWindowsClock(t *testing.T, tick time.Duration) {
+	t.Helper()
+	origin := time.Now()
+	later := origin.Add(time.Millisecond)
+	tied := withMonotonicOf(later, origin)
+	require.True(t, tied.Equal(origin) && tied.UnixNano() == later.UnixNano(),
+		"withMonotonicOf gave %v, not the wall reading of %v with the monotonic reading of %v: time.Time's fields changed", tied, later, origin)
+	originWall := origin.Round(0)
+	prev := stubbedClock.Swap(&forwardClock{
+		now: func() time.Time {
+			n := time.Now()
+			// The monotonic reading at the start of n's tick.
+			return withMonotonicOf(n, origin.Add(n.Truncate(tick).Sub(originWall)))
+		},
+		sleep: time.Sleep,
+	})
+	t.Cleanup(func() { stubbedClock.Store(prev) })
+}
+
+// timeFields is time.Time's fields: its wall clock, and ext, which for a time
+// with a monotonic reading is that reading.
+type timeFields struct {
+	wall uint64
+	ext  int64
+	loc  *time.Location
+}
+
+// withMonotonicOf is wall with the monotonic reading of mono; both are
+// readings of time.Now, so both have one. The time package sets no monotonic
+// reading of a caller's choosing; stubWindowsClock checks this one before it
+// uses it.
+func withMonotonicOf(wall, mono time.Time) time.Time {
+	if unsafe.Sizeof(timeFields{}) != unsafe.Sizeof(time.Time{}) {
+		return time.Time{}
 	}
-	return "on a clock of " + tick.String() + " ticks"
+	t := wall
+	(*timeFields)(unsafe.Pointer(&t)).ext = (*timeFields)(unsafe.Pointer(&mono)).ext
+	return t
+}
+
+// testClock is a clock a run has the forwarder, and the stamps the test takes
+// with clockNow, read: the system's (tick 0), or a coarser one.
+type testClock struct {
+	tick time.Duration
+	// monotonicOnly: only the monotonic reading moves at the tick, as
+	// Windows' time.Now does (stubWindowsClock); else both do
+	// (stubQuantizedClock).
+	monotonicOnly bool
+}
+
+var (
+	systemClock = testClock{}
+	// windowsClock is Windows' time.Now at its default tick.
+	windowsClock = testClock{tick: windowsTick, monotonicOnly: true}
+)
+
+// stub has the forwarder read c until the test ends, and returns c's tick.
+func (c testClock) stub(t *testing.T) time.Duration {
+	t.Helper()
+	switch {
+	case c.tick == 0:
+	case c.monotonicOnly:
+		stubWindowsClock(t, c.tick)
+	default:
+		stubQuantizedClock(t, c.tick)
+	}
+	return c.tick
+}
+
+// String names a run by the clock it runs on.
+func (c testClock) String() string {
+	switch {
+	case c.tick == 0:
+		return "on the system clock"
+	case c.monotonicOnly:
+		return "on a clock whose monotonic reading alone has " + c.tick.String() + " ticks"
+	}
+	return "on a clock of " + c.tick.String() + " ticks"
 }
 
 // The forwarder is descheduled after it reads the clock, before its next
@@ -1706,7 +1796,7 @@ func TestRecordIncoming_AStopBetweenAReadAndItsNoteLosesNothing(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the forwarder never read its clock for the response")
 	}
-	g.stop = time.Now().Add(time.Millisecond)
+	g.stop = asTheAgentGetsIt(time.Now().Add(time.Millisecond))
 	for !time.Now().After(g.stop) {
 		time.Sleep(100 * time.Microsecond)
 	}

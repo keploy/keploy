@@ -59,7 +59,7 @@ func downloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 				}
 			}()
 
-			outFile, err := os.Create(cliPath)
+			outFile, err := os.OpenFile(cliPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 			if err != nil {
 				return err
 			}
@@ -91,12 +91,19 @@ func downloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 	return nil
 }
 
+func jacocoCacheDir() string {
+	if uid := os.Geteuid(); uid >= 0 {
+		return filepath.Join(os.TempDir(), fmt.Sprintf("jacoco-%d", uid))
+	}
+	return filepath.Join(os.TempDir(), "jacoco")
+}
+
 func MergeAndGenerateJacocoReport(ctx context.Context, logger *zap.Logger) error {
-	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
+	jacocoPath := jacocoCacheDir()
 	jacocoCliPath := filepath.Join(jacocoPath, "jacococli.jar")
 	err := MergeJacocoCoverageFiles(ctx, jacocoCliPath)
 	if err == nil {
-		err = generateJacocoReport(ctx, jacocoCliPath)
+		err = generateJacocoReport(ctx, logger, jacocoCliPath)
 		if err != nil {
 			logger.Debug("failed to generate jacoco report", zap.Error(err))
 		}
@@ -143,11 +150,11 @@ func MergeJacocoCoverageFiles(ctx context.Context, jacocoCliPath string) error {
 	return nil
 }
 
-func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
+func generateJacocoReport(ctx context.Context, logger *zap.Logger, jacocoCliPath string) error {
 	reportDir := "target/site/keployE2E"
 
 	// Ensure the report directory exists
-	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+	if err := utils.MkdirAllForUser(logger, reportDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create report directory: %w", err)
 	}
 

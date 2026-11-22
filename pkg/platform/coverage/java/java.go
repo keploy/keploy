@@ -58,8 +58,8 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 		j.logger.Info("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
 		return j.cmd, err
 	}
-	// downlaod jacoco cli
-	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
+	// download jacoco cli
+	jacocoPath := jacocoCacheDir()
 	err = os.MkdirAll(jacocoPath, 0o755)
 	if err != nil {
 		j.logger.Debug("failed to create jacoco directory", zap.Error(err))

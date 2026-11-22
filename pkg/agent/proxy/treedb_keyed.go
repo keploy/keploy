@@ -24,6 +24,11 @@ import (
 // again.
 type keyIndex struct {
 	lists map[string][]keyedEntry
+	// ver moves on every change to lists after the build (follow,
+	// swapInPlace), so a reader that keeps what it read of lists (the
+	// verify mode's walk, exactView.walkedLocked) knows when to read again
+	// without trusting the tree's generation. A rebuild is a new keyIndex.
+	ver uint64
 }
 
 // keyedEntry is one mock filed under one key. key is the tree key it was filed
@@ -138,6 +143,7 @@ func (ki *keyIndex) follow(db *TreeDb, ix *integrations.MockIndex, curKey, newKe
 			return false
 		}
 	}
+	ki.ver++
 	for _, k := range ks {
 		l := ki.lists[k]
 		i := sort.Search(len(l), func(j int) bool { return cmp(l[j].key, curKey) >= 0 })
@@ -184,6 +190,7 @@ func (ki *keyIndex) swapInPlace(db *TreeDb, ix *integrations.MockIndex, key mode
 		}
 	}
 	cmp := db.rbt.Comparator
+	ki.ver++
 	for _, k := range ks {
 		l := ki.lists[k]
 		i := sort.Search(len(l), func(j int) bool { return cmp(l[j].key, key) >= 0 })

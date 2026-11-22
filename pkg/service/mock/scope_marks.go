@@ -89,6 +89,18 @@ func testWindows(windows []models.ScopeWindow) []models.ScopeWindow {
 	return tests
 }
 
+// beginRefusals are the windows of the tests keploy refused at their begin
+// (models.ScopeWindow.BeginRefused), in the order the agent noted them.
+func beginRefusals(windows []models.ScopeWindow) []models.ScopeWindow {
+	var out []models.ScopeWindow
+	for _, w := range windows {
+		if w.BeginRefused != "" {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 func appStarts(windows []models.ScopeWindow) []models.ScopeWindow {
 	var out []models.ScopeWindow
 	for _, w := range windows {

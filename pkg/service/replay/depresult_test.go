@@ -2002,3 +2002,32 @@ func TestNoEligibleDepsAndCheckedAreTheSameQuestion(t *testing.T) {
 		})
 	}
 }
+
+// A test with no dependency reports an empty used list, not none: the
+// report's mock_mismatches is present whenever what the test consumed was
+// read, so a reader can tell "used none" from "unknown" (absent, only when
+// the read failed). Left out when empty, the two looked the same, and cloud
+// triage could never confirm a dependency-free test's change.
+func TestMockMismatchesForSaysUsedNone(t *testing.T) {
+	empty := mockMismatchesFor(true, nil, nil)
+	if empty == nil {
+		t.Fatal("a test whose consumed mocks were read, and were none, has no mock_mismatches")
+	}
+	out, err := yaml.Marshal(models.TestResult{Name: "get-greet-1", MockMismatches: empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "mock_mismatches: {}") {
+		t.Errorf("the report leaves the empty used list out:\n%s", out)
+	}
+
+	if got := mockMismatchesFor(false, []models.MockMismatchMock{{Name: "mock-1"}}, nil); got != nil {
+		t.Errorf("consumed mocks unread: %+v, want absent", got)
+	}
+
+	exp := []models.MockMismatchMock{{Name: "mock-1", Kind: "Http"}}
+	act := []models.MockMismatchMock{{Name: "mock-2", Kind: "Http"}}
+	if got := mockMismatchesFor(true, exp, act); got == nil || !reflect.DeepEqual(got.ExpectedMocks, exp) || !reflect.DeepEqual(got.ActualMocks, act) {
+		t.Errorf("both lists: %+v", got)
+	}
+}

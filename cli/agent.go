@@ -136,16 +136,43 @@ func reportTeardown(ctx context.Context, logger *zap.Logger, flagPath string, is
 	}
 }
 
+// startedByClient reports whether a keploy client started this agent: the
+// launcher passes its own pid as --client-pid (pkg/platform/http and
+// pkg/platform/docker). An agent no client started has none: the flag's 0,
+// which GetUint32 also returns for a command built without the flag.
+func startedByClient(cmd *cobra.Command) bool {
+	pid, _ := cmd.Flags().GetUint32("client-pid")
+	return pid > 0
+}
+
 func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
 		Short: "starts keploy agent for hooking and starting proxy",
 		// Hidden: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			// A hang-up kills the agent, as it did before NewCtx made one
-			// stop keploy gracefully: see utils.DieOnHangup. Not once it is
+			// An agent a keploy client started takes a hang-up as that
+			// client does since NewCtx heard one: as a stop, which waits
+			// while the client drains its streams (utils.SetSignalHold).
+			// The client owns its lifetime: it stops the agent. If the
+			// client dies, a native agent's watchdog ends that wait
+			// (watchParentProcess); a docker agent has no watchdog, and
+			// its wait ends when the dead client's streams drop.
+			// The hang-up is the client's too: it reaches an agent sudo runs
+			// on its own PTY (sudo's use_pty, the default since sudo
+			// 1.9.14, and in Debian's and Ubuntu's sudoers before it) at
+			// the agent's first write after the client's terminal hung up,
+			// when the client is already ending its recording, and killed
+			// it part way through the end.
+			//
+			// One no client started (a Kubernetes agent under the
+			// enterprise self-update supervisor, one run by hand) dies of
+			// a hang-up, as it did before NewCtx made one stop keploy
+			// gracefully: see utils.DieOnHangup. Neither, once it is
 			// shutting down: see utils.IgnoreHangupOnceStopping.
-			utils.DieOnHangup()
+			if !startedByClient(cmd) {
+				utils.DieOnHangup()
+			}
 			utils.IgnoreHangupOnceStopping(ctx)
 			// The CLI's forced stop of an agent it may not signal itself
 			// (sudo's): see utils.DieOnEscalation.

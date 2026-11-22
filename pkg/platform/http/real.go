@@ -42,12 +42,12 @@ func (a *AgentClient) pushRealDeps(ctx context.Context, req0 models.RealDepsReq)
 	if err != nil {
 		return fmt.Errorf("failed to marshal mock.real: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/real", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/real", a.conf.Agent.AgentURI), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return fmt.Errorf("failed to send the agent mock.real: %w", err)
 	}
@@ -71,11 +71,11 @@ func (a *AgentClient) pushRealDeps(ctx context.Context, req0 models.RealDepsReq)
 // takes the capture_incomplete evidence charged to no test. It has no deadline:
 // the agent's answer, or the connection's close, ends it.
 func (a *AgentClient) RealRun(ctx context.Context) (models.RealRun, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/real/run", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/real/run", a.conf.Agent.AgentURI), nil)
 	if err != nil {
 		return models.RealRun{}, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.RealRun{}, fmt.Errorf("failed to read the run's mock.real destinations from the agent: %w", err)
 	}
@@ -99,11 +99,11 @@ func (a *AgentClient) RealRun(ctx context.Context) (models.RealRun, error) {
 // it. It has no deadline: the agent's answer, or the connection's close,
 // ends it.
 func (a *AgentClient) RealTest(ctx context.Context) (models.RealTest, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/real/test", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/real/test", a.conf.Agent.AgentURI), nil)
 	if err != nil {
 		return models.RealTest{}, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.RealTest{}, fmt.Errorf("failed to read the test case's mock.real use from the agent: %w", err)
 	}

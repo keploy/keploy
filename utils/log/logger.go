@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -795,6 +796,40 @@ func (s *DebugFileSink) Written() int64 {
 	return s.capped.Written()
 }
 
+// OpenDebugFile opens path, the file KEPLOY_DEBUG_FILE names, for the debug
+// log: made if it is not there, truncated if it is, and only inside the
+// folder it is in. A link at path whose target stays in that folder is
+// followed; one with an absolute target, or one that climbs out by "..", is
+// refused with why (os.Root), and nothing is written where it leads. In
+// keploy's agent container that folder is /keploy-host, the host's keploy
+// folder, whose files come with the repository keploy runs in: a link a
+// cloned repository carries there would otherwise have the agent truncate
+// and write a file of the container's, or of a folder the host mounts into
+// it. RotateForScope keeps every later file inside the same folder. A link
+// out is said plainly (linkout.Error), not in os.Root's words.
+func OpenDebugFile(path string) (*os.File, error) {
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		if out := linkout.Explain(root, dir, name, debugLogRefusal(name, dir), err); out != nil {
+			return nil, out
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+// debugLogRefusal is what keploy says for any refusal of the debug log name,
+// a path inside the folder dir.
+func debugLogRefusal(name, dir string) string {
+	return fmt.Sprintf("the debug log %q is written only inside %q", name, dir)
+}
+
 // AddDebugFileSink returns a new logger that, in addition to whatever
 // sinks the input logger already had, writes every debug-level-or-above
 // entry to file via a 256 KiB buffered, capBytes-capped pipeline. Used
@@ -973,6 +1008,9 @@ func (s *DebugFileSink) RotateForScope(scope string) error {
 	}
 	newFile, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
+		if out := linkout.Explain(root, rootDir, rel, "debug file sink: "+debugLogRefusal(rel, rootDir), err); out != nil {
+			return out
+		}
 		return fmt.Errorf("debug file sink: open %q under %q: %w", rel, rootDir, err)
 	}
 

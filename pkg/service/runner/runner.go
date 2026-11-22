@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -256,8 +257,10 @@ func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, ser
 	tcCopy.HTTPReq = httpReq
 
 	// Sent as written: one test case run alone has no test set's template
-	// values, which belong to a replay of the whole set (pkg/templates).
-	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
+	// values, which belong to a replay of the whole set (pkg/templates). The
+	// files kept beside the test case are read from its testdb's directory,
+	// not the process's working directory.
+	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{KeployPath: r.testCaseDB.Root()})
 	if err != nil {
 		return false, models.RespCompare{}, err
 	}
@@ -385,7 +388,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		// waited out the whole of it for one that had stopped.
 		agentCtx, cancel := context.WithCancel(gCtx)
 		agentReadyCh := make(chan bool, 1)
-		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
 		agentStart := r.instrumentation.WatchAgentStart(agentCtx)
 		select {
 		case <-gCtx.Done():
@@ -396,7 +399,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			if gCtx.Err() != nil {
 				return nil, gCtx.Err()
 			}
-			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", r.config.Agent.AgentURI, err)
+			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", keployPkg.ShownAgentURI(r.config.Agent.AgentURI), err)
 		case ready, ok := <-agentReadyCh:
 			if !ok || !ready {
 				cancel()
@@ -438,22 +441,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			}
 		}
 	}
-	noiseCfg := map[string]map[string][]string{}
-	if headerNoise, ok := r.globalNoise["header"]; ok {
-		noiseCfg["header"] = headerNoise
-	}
-	if bodyNoise, ok := r.globalNoise["body"]; ok {
-		// "body" feeds outgoing-payload matchers (e.g. the Pulsar SEND matcher)
-		// and stays the response-assertion bucket — it intentionally does NOT
-		// drive HTTP request-body matching anymore.
-		noiseCfg["body"] = bodyNoise
-	}
-	if reqBodyNoise, ok := r.globalNoise["requestbody"]; ok {
-		// Dedicated HTTP request-body matching noise (drift-detection
-		// exclusion + strict-noise allowance). Separate from "body" so
-		// response-assertion noise can't silently soften request matching.
-		noiseCfg["requestbody"] = reqBodyNoise
-	}
+	// keploy.yml's matching noise, cut to the buckets the agent's mock
+	// matchers read, as keploy test cuts it (models.MockMatchingNoise).
+	noiseCfg := models.MockMatchingNoise(r.globalNoise)
 	if len(noiseCfg) > 0 {
 		outOpts.NoiseConfig = noiseCfg
 	}
@@ -468,6 +458,15 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	if err != nil {
 		return nil, err
 	}
+	// The mocks the set's worker-mock rules marked, served to every step as
+	// keploy test serves them (models.ServeAsSession): named for each step,
+	// as the startup traffic is, and session mocks whatever the loading path.
+	workerMocks := r.workerRuleNames(gCtx, testSetID)
+	for _, n := range workerMocks {
+		if !slices.Contains(startupMockNames, n) {
+			startupMockNames = append(startupMockNames, n)
+		}
+	}
 
 	// Disk fetch uses the widest window; per-test containment is
 	// enforced by the agent via UpdateMockParams at step time.
@@ -475,6 +474,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	if err != nil {
 		return nil, err
 	}
+	filtered, unfiltered = models.ServeAsSession(filtered, unfiltered, workerMocks)
 
 	// mockKindByName lets the mismatch-reporting path filter DNS
 	// entries even when the mapping-entry Kind is empty
@@ -605,6 +605,32 @@ func (r *Runner) loadMocksPerPool(ctx context.Context, testSetID string, mocksTh
 		return nil, nil, nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
 	}
 	return filtered, unfiltered, nil, nil
+}
+
+// workerRuleNames is the names of the mocks the set's worker-mock rules
+// marked (models.Mapping.WorkerRuleMockNames), as keploy test reads them: none under
+// the proven switch, which serves the worker scope on its own rules (the
+// runner always serves through an agent, so the switch alone is keploy
+// test's exact serving, Replayer.exactServing), none
+// with mapping disabled, and none from a store that cannot read the whole
+// mapping or a read that fails (which costs those mocks, not the run).
+func (r *Runner) workerRuleNames(ctx context.Context, testSetID string) []string {
+	if r.mappingDB == nil || provenswitch.On() || (r.config != nil && r.config.DisableMapping) {
+		return nil
+	}
+	mr, ok := r.mappingDB.(interface {
+		GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
+	})
+	if !ok {
+		return nil
+	}
+	m, err := mr.GetMapping(ctx, testSetID)
+	if err != nil {
+		r.logger.Debug("failed to read the worker mocks from mappings; continuing without them",
+			zap.String("testSetID", testSetID), zap.Error(err))
+		return nil
+	}
+	return m.WorkerRuleMockNames()
 }
 
 // loadMappingsForSet returns the full per-test-case mapping and the

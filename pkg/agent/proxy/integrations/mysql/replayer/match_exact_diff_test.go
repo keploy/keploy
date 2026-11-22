@@ -234,7 +234,7 @@ func newSetReplay(t *testing.T, preps []*models.Mock, tests [][]setCommand, outs
 		s.mm = proxy.NewMockManager(nil, nil, zap.NewNop())
 		s.mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
 	} else {
-		s.side = newDiffSide(pool)
+		s.side = newDiffSide(t, pool)
 		s.mm = s.side.mm
 	}
 	t.Cleanup(s.mm.Close)
@@ -341,6 +341,7 @@ func replayedTests(tests int) []int {
 // The keploy test answers' digest is logged, so runs of this test on two
 // builds show the switch-off answers byte-identical between them.
 func TestExactServingAnswersARecordedSetAsKeployTestDoes(t *testing.T) {
+	sideBySide(t)
 	sizes := []int{100, 1000, 10000}
 	if testing.Short() || raceEnabled {
 		sizes = sizes[:2]
@@ -445,6 +446,7 @@ func setMocksCommands(tests [][]setCommand) []setCommand {
 // twice. Which of two recordings of one request answers which command is the
 // order of the consumes, not compared.
 func TestExactServingAnswersARecordedSetRunEightAtOnce(t *testing.T) {
+	sideBySide(t)
 	const conns = 8
 	sizes := []int{100, 1000, 10000}
 	if testing.Short() || raceEnabled {

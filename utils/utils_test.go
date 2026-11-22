@@ -6,8 +6,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -401,16 +403,272 @@ func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
 }
 
 func TestMakeDirectory(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "testdir", "nested")
+	if runtime.GOOS != "windows" {
+		oldMask := SetUmask()
+		defer RestoreUmask(oldMask)
+	}
+	base := t.TempDir()
+	parent := filepath.Join(base, "testdir")
+	dir := filepath.Join(parent, "nested")
 	if err := makeDirectory(dir); err != nil {
 		t.Fatalf("makeDirectory failed: %v", err)
 	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("stat on created directory failed: %v", err)
-	}
-	if !info.IsDir() {
-		t.Fatalf("expected directory, got file")
+	for _, p := range []string{parent, dir} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat on created directory %q failed: %v", p, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("expected directory at %q, got file", p)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+			t.Errorf("makeDirectory(%q) mode = %o, want 0o755", p, info.Mode().Perm())
+		}
 	}
 }
 
+func TestMkdirAllForUser_EdgeCases(t *testing.T) {
+	t.Run("empty path returns error", func(t *testing.T) {
+		if err := MkdirAllForUser(zap.NewNop(), "", 0o755); err == nil {
+			t.Fatal("MkdirAllForUser(\"\") succeeded; want error")
+		}
+	})
+
+	t.Run("pre-existing directory preserves mode", func(t *testing.T) {
+		existing := filepath.Join(t.TempDir(), "existing")
+		if err := os.Mkdir(existing, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := MkdirAllForUser(zap.NewNop(), existing, 0o755); err != nil {
+			t.Fatalf("MkdirAllForUser on existing dir failed: %v", err)
+		}
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(existing)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if got := info.Mode().Perm(); got != 0o700 {
+				t.Errorf("existing dir mode = %o, want 0o700 preserved", got)
+			}
+		}
+	})
+
+	t.Run("existing regular file at target or ancestor returns error", func(t *testing.T) {
+		base := t.TempDir()
+		filePath := filepath.Join(base, "regular-file")
+		if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		if err := MkdirAllForUser(zap.NewNop(), filePath, 0o755); err == nil {
+			t.Error("MkdirAllForUser on existing file succeeded; want error")
+		}
+		if err := MkdirAllForUser(zap.NewNop(), filepath.Join(filePath, "child"), 0o755); err == nil {
+			t.Error("MkdirAllForUser beneath existing file succeeded; want error")
+		}
+	})
+
+	t.Run("symlink escaping base directory is refused", func(t *testing.T) {
+		base := t.TempDir()
+		outside := t.TempDir()
+		work := filepath.Join(base, "work")
+		if err := os.MkdirAll(work, 0o755); err != nil {
+			t.Fatalf("mkdir work: %v", err)
+		}
+		link := filepath.Join(work, "target")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		t.Chdir(work)
+		if err := MkdirAllForUser(zap.NewNop(), filepath.Join("target", "site", "keployE2E"), 0o755); err == nil {
+			t.Fatal("MkdirAllForUser followed escaping symlink; want error")
+		}
+		if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+			t.Fatalf("escaping symlink created entries outside base: %v (err=%v)", entries, err)
+		}
+	})
+
+	t.Run("existing child beneath read-only parent succeeds", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("read-only parent permission test requires non-root POSIX")
+		}
+		parent := filepath.Join(t.TempDir(), "ro-parent")
+		child := filepath.Join(parent, "existing-child")
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatalf("mkdir child: %v", err)
+		}
+		if err := os.Chmod(parent, 0o555); err != nil {
+			t.Fatalf("chmod parent: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+		if err := MkdirAllForUser(zap.NewNop(), child, 0o755); err != nil {
+			t.Fatalf("MkdirAllForUser on existing child under read-only parent failed: %v", err)
+		}
+	})
+}
+
+// A replay's test host may be IPv6: a Kubernetes Pod IP is reported bare
+// ("fd00::1"), and a host given next to a port comes bracketed ("[fd00::1]").
+// An IPv6 host has to be bracketed in a URL; "http://fd00::1:8080/" is none
+// (url.Parse: invalid port "::1:8080" after host), so before this every HTTP
+// test of a replay against an IPv6 host failed before it was sent.
+func TestReplaceHostBracketsAnIPv6Host(t *testing.T) {
+	const rec = "http://localhost:8080/api/items?id=1"
+	for _, c := range []struct{ url, ip, want string }{
+		{rec, "fd00::1", "http://[fd00::1]:8080/api/items?id=1"},
+		{rec, "[fd00::1]", "http://[fd00::1]:8080/api/items?id=1"},
+		{rec, "::1", "http://[::1]:8080/api/items?id=1"},
+		{rec, "::ffff:127.0.0.1", "http://[::ffff:127.0.0.1]:8080/api/items?id=1"},
+		{rec, "fe80::1%eth0", "http://[fe80::1%25eth0]:8080/api/items?id=1"},
+		{rec, "10.244.0.7", "http://10.244.0.7:8080/api/items?id=1"},
+		{rec, "host.docker.internal", "http://host.docker.internal:8080/api/items?id=1"},
+		{"http://example.com/api", "fd00::1", "http://[fd00::1]/api"},
+		{"http://example.com/api", "10.244.0.7", "http://10.244.0.7/api"},
+		// A URL recorded against an IPv6 host, replayed against IPv4: the old
+		// text replace kept the brackets, and "[10.0.0.1]" is no URL host.
+		{"http://[::1]:8080/x", "10.0.0.1", "http://10.0.0.1:8080/x"},
+		{"http://[::1]:8080/x", "fd00::1", "http://[fd00::1]:8080/x"},
+		// The same text replace kept them for a bracketed host
+		// ("http://[[fd00::1]]:8080/x"), and for the default test host,
+		// localhost ("http://[localhost]:8080/x"): every test recorded
+		// against an IPv6 address failed its replay.
+		{"http://[::1]:8080/x", "[fd00::1]", "http://[fd00::1]:8080/x"},
+		{"http://[::1]:8080/x", "localhost", "http://localhost:8080/x"},
+	} {
+		got, err := ReplaceHost(c.url, c.ip)
+		if err != nil || got != c.want {
+			t.Errorf("ReplaceHost(%q, %q) = %q, %v; want %q", c.url, c.ip, got, err, c.want)
+			continue
+		}
+		u, err := url.Parse(got)
+		if err != nil {
+			t.Errorf("ReplaceHost(%q, %q) = %q, which is no URL: %v", c.url, c.ip, got, err)
+			continue
+		}
+		if want := UnbracketHost(c.ip); u.Hostname() != want {
+			t.Errorf("ReplaceHost(%q, %q) addresses %q, want %q", c.url, c.ip, u.Hostname(), want)
+		}
+	}
+}
+
+// A gRPC authority is host:port with no URL around it, and net.JoinHostPort
+// brackets an IPv6 host: a bare one was right already, a bracketed one came
+// out bracketed twice ("[[fd00::1]]:50051").
+func TestReplaceGrpcHostTakesAnIPv6HostBareOrBracketed(t *testing.T) {
+	for _, c := range []struct{ authority, ip, want string }{
+		{"localhost:50051", "fd00::1", "[fd00::1]:50051"},
+		{"localhost:50051", "[fd00::1]", "[fd00::1]:50051"},
+		{"localhost:50051", "::1", "[::1]:50051"},
+		{"localhost:50051", "[::1]", "[::1]:50051"},
+		{"localhost:50051", "::ffff:127.0.0.1", "[::ffff:127.0.0.1]:50051"},
+		{"[::1]:50051", "10.244.0.7", "10.244.0.7:50051"},
+		{"localhost:50051", "10.244.0.7", "10.244.0.7:50051"},
+	} {
+		got, err := ReplaceGrpcHost(c.authority, c.ip)
+		if err != nil || got != c.want {
+			t.Errorf("ReplaceGrpcHost(%q, %q) = %q, %v; want %q", c.authority, c.ip, got, err, c.want)
+		}
+	}
+}
+
+// A recorded authority may have no port ("my-svc"). Its host is replaced all
+// the same, and the test host comes back alone, an IPv6 one bracketed, for
+// ResolveTestTarget to give its port. It was refused ("missing port in
+// address") whatever the host, and a replay always has a test host
+// (localhost by default), so every such gRPC test failed its replay.
+func TestReplaceGrpcHostTakesAnAuthorityWithNoPort(t *testing.T) {
+	for _, c := range []struct{ authority, ip, want string }{
+		{"my-svc", "localhost", "localhost"},
+		{"example.com", "10.244.0.7", "10.244.0.7"},
+		{"10.0.0.5", "localhost", "localhost"},
+		{"[fd00::1]", "localhost", "localhost"},
+		{"[fd00::1]", "10.244.0.7", "10.244.0.7"},
+		{"[fd00::1]", "fd00::2", "[fd00::2]"},
+		{"my-svc", "fd00::2", "[fd00::2]"},
+		{"my-svc", "[fd00::2]", "[fd00::2]"},
+		{"my-svc", "::ffff:127.0.0.1", "[::ffff:127.0.0.1]"},
+		{"fd00::1", "localhost", "localhost"},
+	} {
+		got, err := ReplaceGrpcHost(c.authority, c.ip)
+		if err != nil || got != c.want {
+			t.Errorf("ReplaceGrpcHost(%q, %q) = %q, %v; want %q", c.authority, c.ip, got, err, c.want)
+		}
+	}
+	// An authority that is neither host:port nor a host alone is refused.
+	for _, a := range []string{"[fd00::1", "a:b:c", "[fd00::1]x"} {
+		if got, err := ReplaceGrpcHost(a, "localhost"); err == nil {
+			t.Errorf("ReplaceGrpcHost(%q, localhost) = %q; want it refused", a, got)
+		}
+	}
+}
+
+// An authority with no port takes the new one as its port, an IPv6 host
+// bracketed once whichever way it came.
+func TestReplaceGrpcPortBracketsAnIPv6HostOnce(t *testing.T) {
+	for _, c := range []struct{ authority, want string }{
+		{"[fd00::1]:50051", "[fd00::1]:50052"},
+		{"[fd00::1]", "[fd00::1]:50052"},
+		{"fd00::1", "[fd00::1]:50052"},
+		{"localhost", "localhost:50052"},
+		{"localhost:50051", "localhost:50052"},
+	} {
+		got, err := ReplaceGrpcPort(c.authority, "50052")
+		if err != nil || got != c.want {
+			t.Errorf("ReplaceGrpcPort(%q, 50052) = %q, %v; want %q", c.authority, got, err, c.want)
+		}
+	}
+}
+
+// The port is replaced, never the same digits in the host: the old text
+// replace changed the first occurrence of the port's digits, which can be in
+// the host.
+func TestReplacePortChangesOnlyThePort(t *testing.T) {
+	for _, c := range []struct{ url, port, want string }{
+		{"http://10.0.0.80:80/x", "9000", "http://10.0.0.80:9000/x"},
+		{"http://[fd00::8080]:8080/x", "9090", "http://[fd00::8080]:9090/x"},
+		{"http://[::1]/x", "8080", "http://[::1]:8080/x"},
+		{"http://example.com/x", "8080", "http://example.com:8080/x"},
+		{"http://example.com:80/x?y=80", "8080", "http://example.com:8080/x?y=80"},
+	} {
+		got, err := ReplacePort(c.url, c.port)
+		if err != nil || got != c.want {
+			t.Errorf("ReplacePort(%q, %q) = %q, %v; want %q", c.url, c.port, got, err, c.want)
+		}
+	}
+}
+
+// A test report records the command keploy was run with (cmdUsed), and
+// reports are committed and uploaded: the command given with -c, and
+// keploy's own flags, are written with their secrets redacted, its hosts and
+// paths kept, a word with a space or a quote still Go-quoted.
+func TestAReportsCommandUsedHasItsSecretsRedacted(t *testing.T) {
+	saved := os.Args
+	t.Cleanup(func() { os.Args = saved })
+	os.Args = []string{"/usr/local/bin/keploy", "test",
+		"-c", "python app.py --password S3CR3T --db scott/S3CR3T@db.keploy.test:1521/XE",
+		"--delay", "10", "--api-key=S3CR3T", "--path", "./keploy"}
+	const want = `/usr/local/bin/keploy test -c "python app.py --password <redacted> --db scott/<redacted>@db.keploy.test:1521/XE" --delay 10 --api-key=<redacted> --path ./keploy`
+	if got := GetFullCommandUsed(); got != want {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, want)
+	}
+	// A shell's -c after an image named git is the shell's, not git's.
+	os.Args = []string{"keploy", "test", "-c", `docker run --rm alpine/git sh -c 'mysql -uroot -pS3CR3T -e "select 1"'`}
+	const wantGit = `keploy test -c "docker run --rm alpine/git sh -c 'mysql -uroot -p<redacted> -e '\\''select 1'\\'''"`
+	if got := GetFullCommandUsed(); got != wantGit {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, wantGit)
+	}
+	// git's setting in an image with a tag: its header's token redacted.
+	os.Args = []string{"keploy", "test", "-c", `docker run --rm alpine/git:2.43.0 -c http.extraHeader="Authorization: Bearer S3CR3T" clone https://github.com/o/r`}
+	const wantTagged = `keploy test -c "docker run --rm alpine/git:2.43.0 -c 'http.extraHeader=Authorization: <redacted>' clone https://github.com/{}/{}"`
+	if got := GetFullCommandUsed(); got != wantTagged {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, wantTagged)
+	}
+	// A command whose first word holds a dot is recorded whole: no git URL
+	// section names java, python3, node or mvnw.
+	for _, c := range []string{"java.exe -jar app.jar --spring.profiles.active=dev --server.port=8080", "python3 -m a.b --x.y=1 z",
+		"node.exe server.js --db.host=db --db.user=app", "mvnw.cmd spring-boot:run -Dspring-boot.run.profiles=dev"} {
+		os.Args = []string{"keploy", "test", "-c", c}
+		if got, want := GetFullCommandUsed(), `keploy test -c "`+c+`"`; got != want {
+			t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, want)
+		}
+	}
+}

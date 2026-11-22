@@ -26,7 +26,7 @@ func TestMain(m *testing.M) {
 			r := rawOfNow(mock, served)
 			key := "every\x00" + strconv.FormatInt(n.Add(1), 10)
 			r.rText, r.rClock, r.rFields, r.rStamps, r.rRead = "", nil, nil, nil, false
-			r.src = &rawSource{id: key, name: mock.Name, load: func() (*models.Mock, error) { return mock, nil }, store: store}
+			r.src = &rawSource{id: key, name: mock.Name, load: func() (*models.Mock, error) { return mock, nil }, store: store, mock: mock}
 			return r
 		}
 	}

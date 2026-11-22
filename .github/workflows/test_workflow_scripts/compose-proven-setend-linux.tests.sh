@@ -40,6 +40,14 @@
 #   listened.
 # await, on a log keploy's job never makes
 #   keploy exits first: await has to say so (1), not wait on.
+#
+# under the verify switch (KEPLOY_EXACT_VIEW_VERIFY=1), keploy record's agent
+# says its verify mode is on
+#   sudo resets the environment, as both sudos do: the switch reaches keploy
+#   record only as the lane's sudo line names it (SUDO_ENV). record() has to
+#   find the agent's line and pass.
+# under the verify switch, the agent never says its verify mode is on
+#   record() has to fail, saying the variable did not reach keploy.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,23 +65,37 @@ fail_case() {
 # The lane's functions, as the lane defines them: every one, so record() finds
 # whatever it calls, as in the lane.
 funcs="$root/funcs.sh"
+# They call what the lane loads at its top by its own directory (sudo_env.sh's
+# SUDO_ENV and verify_ran). The copy is not beside the lane, so it loads each
+# of those files first, by the lane's directory, resolved here.
+own_source='^[[:space:]]*(source|\.)[[:space:]]+"\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)/([^"]+)"'
+while IFS= read -r line; do
+    [[ $line =~ $own_source ]] && printf '. %q || exit 1\n' "$here/${BASH_REMATCH[2]}"
+done <"$lane" >"$funcs"
 # A function is its "name() {" line to its first "}" line; a one-line
 # function, "name() { ...; }", is its line alone.
 awk -v names='^[A-Za-z_][A-Za-z0-9_]*\\(\\) \\{' '
     !in_fn && $0 ~ names { print; if ($0 !~ /\}[[:space:]]*$/) in_fn = 1; next }
     in_fn { print; if ($0 ~ /^\}/) in_fn = 0 }
-' "$lane" >"$funcs"
+' "$lane" >>"$funcs"
 for f in fail await test_files signal_keploy no_orphans cleanup record; do
     grep -q "^$f() {" "$funcs" || { echo "FAIL: the lane defines no $f()"; exit 1; }
 done
+# The copy has what the lane's functions call from sudo_env.sh, as the lane
+# does: a copy without it fails every case below, each for a reason that is
+# not the lane's.
+FUNCS="$funcs" bash -c '. "$FUNCS" && declare -F verify_ran >/dev/null && declare -p SUDO_ENV >/dev/null' ||
+    { echo "FAIL: the copy of the lane's functions does not load sudo_env.sh, whose SUDO_ENV and verify_ran record() uses"; exit 1; }
 
 mkdir -p "$root/bin" "$root/ws"
 # sudo: runs its command as a child, as sudo runs keploy (signal_keploy
-# signals sudo's child), without -E.
+# signals sudo's child), in a reset environment, as both sudos run it: only
+# PATH and what the fakes read (ROOT, WRITE, DROP, NOVERIFY) reach it, and
+# what the command line names. -E is ignored, as sudo-rs ignores it.
 cat >"$root/bin/sudo" <<'SH'
 #!/bin/bash
 [ "${1:-}" = -E ] && shift
-"$@" &
+env -i PATH="$PATH" ROOT="${ROOT:-}" WRITE="${WRITE:-}" DROP="${DROP:-0}" NOVERIFY="${NOVERIFY:-}" "$@" &
 child=$!
 wait "$child"
 SH
@@ -95,7 +117,9 @@ fi
 echo "curl: (56) Recv failure: Connection reset by peer" >&2
 exit 56
 SH
-# keploy record: the app listens; on keploy's interrupt the app publishes its
+# keploy record: its agent says its verify mode is on when
+# KEPLOY_EXACT_VIEW_VERIFY=1 reached it (but not where NOVERIFY=1), as the
+# agent does; the app listens; on keploy's interrupt the app publishes its
 # shutdown, keploy record takes a moment to write what it still holds
 # (WRITE=stop: a test case for each request answered, but the last where
 # DROP=1), says how many test cases it had written, and exits. The moment is
@@ -121,24 +145,32 @@ def bye(*_):
     print("RECORDED %d" % written(), flush=True)
     sys.exit(0)
 signal.signal(signal.SIGINT, bye)
+if os.environ.get("KEPLOY_EXACT_VIEW_VERIFY") == "1" and not os.environ.get("NOVERIFY"):
+    print("Keploy(agent): INFO the exact view's verify mode is on in this agent: each read it keeps is recomputed", flush=True)
 print("APP LISTENING", flush=True)
 while True:
     signal.pause()
 PY
 chmod +x "$root/bin/"*
 
-# run_record CASE CURL WRITE DROP: record 0 in a fresh workspace, curl
-# failing or answering, keploy record writing its test cases as the requests
-# are answered or as it stops, all or all but the last; its output is in
-# $root/CASE.out, keploy record's log in $root/CASE.log.
+# run_record CASE CURL WRITE DROP [VERIFY]: record 0 in a fresh workspace,
+# curl failing or answering, keploy record writing its test cases as the
+# requests are answered or as it stops, all or all but the last; with VERIFY
+# (on or never), under KEPLOY_EXACT_VIEW_VERIFY=1, its agent saying its verify
+# mode is on or never saying it; its output is in $root/CASE.out, keploy
+# record's log in $root/CASE.log.
 run_record() {
-    local rc
+    local rc verify=()
+    case ${5:-} in
+        on) verify=(KEPLOY_EXACT_VIEW_VERIFY=1) ;;
+        never) verify=(KEPLOY_EXACT_VIEW_VERIFY=1 NOVERIFY=1) ;;
+    esac
     rm -rf "$root/ws" "$root/answered"
     mkdir -p "$root/ws"
     (
         cd "$root/ws" &&
-            PATH="$root/bin:$PATH" ROOT="$root" CURL="$2" WRITE="$3" DROP="$4" FUNCS="$funcs" RECORD_BIN="$root/bin/record" PORT=1 KNAME=app PROJECT=setend-tests \
-                timeout 60 bash -c 'FAIL=0; . "$FUNCS"; record 0; echo "RECORD RETURNED FAIL=$FAIL"'
+            env -u KEPLOY_EXACT_VIEW_VERIFY -u NOVERIFY "${verify[@]}" PATH="$root/bin:$PATH" ROOT="$root" CURL="$2" WRITE="$3" DROP="$4" FUNCS="$funcs" RECORD_BIN="$root/bin/record" PORT=1 KNAME=app PROJECT=setend-tests \
+                bash "$here/hang_guard.sh" 60 bash -c 'FAIL=0; . "$FUNCS"; record 0; echo "RECORD RETURNED FAIL=$FAIL"'
     ) >"$root/$1.out" 2>&1
     rc=$?
     cp "$root/ws/record0.log" "$root/$1.log" 2>/dev/null
@@ -163,6 +195,14 @@ grep -q "FAIL: record 0: keploy record wrote 1 test cases, want 2" "$out" || fai
 grep -q "^RECORD RETURNED FAIL=[1-9]" "$out" || fail_case "keploy record drops a test case: record() did not return with the failure counted"
 grep -q "^RECORDED 1" "$out" || fail_case "keploy record drops a test case: record() did not print keploy record's log"
 
+run_record verify-on ok run 0 on
+grep -q "^RECORD RETURNED FAIL=0" "$root/verify-on.out" || fail_case "under the verify switch, the agent says its verify mode is on: record() failed"
+grep -q "verify mode is on in this agent" "$root/verify-on.log" || fail_case "under the verify switch, the agent says its verify mode is on: the switch did not reach keploy record"
+run_record verify-never ok run 0 never
+out="$root/verify-never.out"
+grep -q "and its agent never said its exact view's verify mode is on" "$out" || fail_case "under the verify switch, the agent never says its verify mode is on: record() did not say so"
+grep -q "^RECORD RETURNED FAIL=[1-9]" "$out" || fail_case "under the verify switch, the agent never says its verify mode is on: record() did not return with the failure counted"
+
 # await_case CASE MAKES: the lane's await of "APP LISTENING" in $root/CASE.log,
 # made by a job that makes it a second after it starts (MAKES=yes), as keploy's
 # background job's redirection does on a loaded host, or that exits with no
@@ -181,7 +221,7 @@ await_case() {
         (sleep 1) &
     fi
     job=$!
-    FUNCS="$funcs" LOG="$log" JOB="$job" timeout 60 bash -c '. "$FUNCS"; await "$LOG" "$JOB" "APP LISTENING" 1'
+    FUNCS="$funcs" LOG="$log" JOB="$job" bash "$here/hang_guard.sh" 60 bash -c '. "$FUNCS"; await "$LOG" "$JOB" "APP LISTENING" 1'
     rc=$?
     kill "$job" 2>/dev/null
     wait "$job" 2>/dev/null
@@ -201,4 +241,4 @@ if [ "$failures" -ne 0 ]; then
     done
     exit 1
 fi
-echo "PASS: compose-proven-setend-linux.sh's record() and await cases"
+echo "PASS: compose-proven-setend-linux.sh's record(), verify and await cases"

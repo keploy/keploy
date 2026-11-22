@@ -342,7 +342,7 @@ func TestUnderTheSwitchAWindowOwnedSetGivesNoMoveBack(t *testing.T) {
 
 // returnStaleMoves gives back only a drift move whose owner runs and that the
 // set has, in recorded order among the owner's entries, as recorded (no
-// place, line or tie); it leaves its inputs as they are, and hands them back
+// place, line, tie or trail); it leaves its inputs as they are, and hands them back
 // untouched when nothing goes back.
 func TestReturnStaleMovesGivesBackOnlyARunningOwnersDriftMoves(t *testing.T) {
 	at := func(ms int) string { return models.FormatMockTimestamp(attrAt(ms)) }
@@ -352,7 +352,7 @@ func TestReturnStaleMovesGivesBackOnlyARunningOwnersDriftMoves(t *testing.T) {
 	}
 	worker := []models.MockEntry{
 		{Name: "boot"},
-		{Name: "b", Owner: "runs", Drift: true, Place: "runs", Reason: "moved", ReqTimestampMock: at(20)},
+		{Name: "b", Owner: "runs", Drift: true, Place: "runs", Reason: "moved", Trails: "skipped", ReqTimestampMock: at(20)},
 		{Name: "x", Owner: "runs", ReqTimestampMock: at(25)},                 // exact: stays
 		{Name: "q", Owner: "skipped", Drift: true, ReqTimestampMock: at(45)}, // its owner skipped: stays
 		{Name: "g", Owner: "gone", Drift: true, ReqTimestampMock: at(50)},    // its owner gone: stays
@@ -366,7 +366,7 @@ func TestReturnStaleMovesGivesBackOnlyARunningOwnersDriftMoves(t *testing.T) {
 	var names []string
 	for _, e := range gotM["runs"] {
 		names = append(names, e.Name)
-		if e.Name == "b" && (e.Owner != "" || e.Drift || e.Place != "" || e.Reason != "") {
+		if e.Name == "b" && (e.Owner != "" || e.Drift || e.Place != "" || e.Reason != "" || e.Trails != "") {
 			t.Fatalf("b went back with its move's marks: %+v", e)
 		}
 	}
@@ -394,7 +394,7 @@ func TestReturnStaleMovesGivesBackOnlyARunningOwnersDriftMoves(t *testing.T) {
 // (returnedMissed); nothing for any other miss, or a plan that gave none back.
 func TestAMissOfAReturnedRecordingNamesItsOwner(t *testing.T) {
 	p := &exactPlan{returned: map[string]string{"mock-6": "post-url-1"}}
-	calls := []models.UnmatchedCall{{ClosestMock: "mock-6", ActualSummary: "insert keploy.events"}, {ClosestMock: "mock-9"}, {ClosestMock: "mock-6"}}
+	calls := []models.UnmatchedCall{{ClosestMock: "mock-6", Protocol: "MongoDB", ActualSummary: "insert on events"}, {ClosestMock: "mock-9"}, {ClosestMock: "mock-6"}}
 	why := p.returnedWhy(calls)
 	for _, want := range []string{"mock-6 is post-url-1's own again", "post-url-1's quarantine (keploy/unseparable_write)", "record the test set again"} {
 		if !strings.Contains(why, want) {
@@ -408,12 +408,12 @@ func TestAMissOfAReturnedRecordingNamesItsOwner(t *testing.T) {
 		{TestCaseID: "P", FailureInfo: models.FailureInfo{UnmatchedCalls: calls[:2]}},
 		{TestCaseID: "post-url-1", FailureInfo: models.FailureInfo{UnmatchedCalls: calls[:1]}},
 	}
-	if got := p.returnedMissed(results); !reflect.DeepEqual(got, []string{"P: insert keploy.events (mock-6, given back to post-url-1)"}) {
+	if got := p.returnedMissed(results); !reflect.DeepEqual(got, []string{"P: insert on events (mock-6, given back to post-url-1)"}) {
 		t.Fatalf("returnedMissed = %v", got)
 	}
 	// A test with a row per cycle is named once, from its last row.
 	cycles := append([]models.TestResult{{TestCaseID: "P", FailureInfo: models.FailureInfo{UnmatchedCalls: calls[:1]}}}, results...)
-	if got := p.returnedMissed(cycles); !reflect.DeepEqual(got, []string{"P: insert keploy.events (mock-6, given back to post-url-1)"}) {
+	if got := p.returnedMissed(cycles); !reflect.DeepEqual(got, []string{"P: insert on events (mock-6, given back to post-url-1)"}) {
 		t.Fatalf("returnedMissed over two cycles = %v; want P named once", got)
 	}
 	var none *exactPlan

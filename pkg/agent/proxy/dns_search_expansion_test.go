@@ -14,8 +14,9 @@ import (
 // A Kubernetes resolver with ndots:5 walks its search list before trying a name
 // absolutely, so `appdb.ns.svc.cluster.local` is first probed as
 // `appdb.ns.svc.cluster.local.ns.svc.cluster.local.` — the search domain glued
-// onto a name that already carried it. Such a name cannot resolve and cannot
-// have been recorded: capture skips non-Success rcodes by design.
+// onto a name that already carried it. Such a name cannot resolve: a recording
+// that asked it holds its NXDOMAIN, and one with no mock for it is no gap in
+// what the app depends on.
 //
 // #4565 already suppresses the mock-miss report for these, but only when
 // upstream actually answers NXDOMAIN. Every other way the forward can end —

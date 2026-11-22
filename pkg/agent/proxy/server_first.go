@@ -252,11 +252,16 @@ func (p *Proxy) relayServerFirst(ctx context.Context, src net.Conn, dstAddr stri
 	}
 	relay := &realdeps.Relay{Client: src, In: bufio.NewReader(src), Dest: dst}
 	if provenswitch.On() {
-		what, kind := "to "+dstAddr, models.CaptureLossServerFirst
+		kind := models.CaptureLossServerFirst
 		if refused {
 			kind = models.CaptureLossRefusedAtAccept
 		}
-		relay.Sent = func(int) { p.losses.Add(kind, what) }
+		// dstAddr is the address the app dialed (no name to list, as the
+		// lines above name it whole); listed all the same, as every loss's
+		// host is.
+		what := models.NewLossText(ctx).Say("to ").Host(dstAddr)
+		text, hosts := what.String(), what.Hosts()
+		relay.Sent = func(int) { p.losses.Add(kind, text, hosts...) }
 	}
 	return relay.Run(ctx)
 }

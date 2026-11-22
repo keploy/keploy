@@ -49,6 +49,13 @@ var answerPlacedHooks mockPredicates
 // when none is, every mock is placed at its request.
 func AnswerPlacedRegistered() bool { return answerPlacedHooks.any() }
 
+// AnswerPlacedKind reports whether a RegisterAnswerPlaced registration names
+// kind: its parser holds a call no recording answers yet, and asks the store
+// whether the set still holds an unserved recording of it
+// (integrations.UnservedRecordingFinder), so the agent's on-disk store lists
+// kind's recordings by kind (DiskMocks.RangeKind) under either switch.
+func AnswerPlacedKind(kind Kind) bool { return answerPlacedHooks.hasKind(kind) }
+
 // IsAnswerPlaced reports whether m is placed at its answer (PlaceOf): a
 // per-test mock a RegisterAnswerPlaced registration accepts, with a recorded
 // answer no earlier than its request (one stamped before it, which only the

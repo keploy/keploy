@@ -115,7 +115,7 @@ func TestADefinitionInsideAnInterfaceValueIsALesson(t *testing.T) {
 	ms := nestedMocks()
 	for _, budget := range []int64{0, residentBudgetBytes} {
 		d := newStoreWith(t, budget, ms...)
-		if got, want := servedRead(t, d, "c-json"), freshRead(t, ms[2]); !reflect.DeepEqual(got, want) {
+		if got, want := servedRead(t, d, "c-json"), freshAsStored(t, d, ms[2]); !reflect.DeepEqual(got, want) {
 			t.Fatalf("budget %d: c-json served\n%+v\nwant\n%+v", budget, got.Spec, want.Spec)
 		}
 		_ = d.Close()
@@ -148,7 +148,7 @@ func TestASecondDecoderReadsANestedInterfaceMock(t *testing.T) {
 		if d.DecodersBuilt() != 1 {
 			t.Fatalf("precondition: %d decoders built before the second reader, want 1", d.DecodersBuilt())
 		}
-		if got, want := servedRead(t, d, "c-json"), freshRead(t, ms[2]); !reflect.DeepEqual(got, want) {
+		if got, want := servedRead(t, d, "c-json"), freshAsStored(t, d, ms[2]); !reflect.DeepEqual(got, want) {
 			t.Fatalf("budget %d: c-json served by a second decoder\n%+v\nwant\n%+v", budget, got.Spec, want.Spec)
 		}
 		if d.DecodersBuilt() != 2 {

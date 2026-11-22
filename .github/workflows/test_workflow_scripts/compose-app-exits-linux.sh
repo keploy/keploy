@@ -18,6 +18,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -154,7 +156,7 @@ record() {
   local name=$1 proven=$2 flags=${3:-} log="$1.log" pid rc i before=$FAIL
   sudo rm -rf keploy
   : > "$log"
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "docker compose ${flags:+$flags }up" --container-name "cae-app-$ID" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "docker compose ${flags:+$flags }up" --container-name "cae-app-$ID" \
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
@@ -177,6 +179,7 @@ record() {
   wait "$pid"
   rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: $name: keploy record exited $rc"; FAIL=1; }
+  verify_ran "$proven" "$log" || FAIL=$((FAIL + 1))
   grep -q "APP ANSWERED ALL $N" "$log" || { echo "FAIL: $name: the app did not answer all $N calls"; FAIL=1; }
   [ "$FAIL" -eq "$before" ] || tail -80 "$log"
 }

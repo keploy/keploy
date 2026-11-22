@@ -1,10 +1,14 @@
 package models
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -1635,5 +1639,766 @@ func TestMergeVariablesKeepsAWhy(t *testing.T) {
 		if got := MergeVariables(a, b)["given:nonce"]; got.Why != c.want || len(got.Use) != 2 {
 			t.Errorf("%s: merged why %q uses %v, want %q at both uses", c.name, got.Why, got.Use, c.want)
 		}
+	}
+}
+
+// An offset learned at a Step holds by holdsAtStep, which this keploy
+// registers, and nothing by the declared default (a keploy that reads no
+// Step: fail closed). holdsAtStep applies Holds' own guards first (a window
+// with no start or that ends before it starts, a res of none, a range
+// around zero, a Step below Res, a value coarser than the remainder it is
+// locked to). Read at its values' own second (Step is Res), clock - 2s is
+// checked against that whole second, whatever its range's width; the same
+// offset with no Step (an old recording) checks as before: too fine for its
+// unit, it is not Narrow and holds nothing.
+func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
+	sec := time.Second
+	from := time.Date(2026, 10, 28, 9, 30, 15, 400e6, time.UTC)
+	to := from.Add(61 * time.Millisecond)
+	read := to.Truncate(time.Minute).Add(-103 * sec)
+	lock := ClockOffset{Min: -103 * sec, Max: -102 * sec, Res: sec, Layout: LayoutTyped, Step: time.Minute}
+	if !lock.Holds(read, sec, from, to) {
+		t.Fatal("FALSE RED: the cutter's value does not hold at its phase")
+	}
+	defer func(f func(ClockOffset, time.Time, time.Duration, time.Time, time.Time) bool) { holdsStep = f }(holdsStep)
+	holdsStep = declaredHoldsStep
+	if lock.Holds(read, sec, from, to) {
+		t.Error("FALSE GREEN: a Step holds with no keploy to read it")
+	}
+	holdsStep = ClockOffset.holdsAtStep
+	unsigned := lock
+	unsigned.Min, unsigned.Max = -sec, sec
+	below := lock
+	below.Step = sec / 2
+	for _, c := range []struct {
+		name     string
+		o        ClockOffset
+		res      time.Duration
+		from, to time.Time
+	}{
+		{"a window with no start", lock, sec, time.Time{}, to},
+		{"a window that ends before it starts", lock, sec, to, from},
+		{"a res of none", lock, 0, from, to},
+		{"a range around zero", unsigned, sec, from, to},
+		{"a Step below its Res", below, sec, from, to},
+		{"a value written coarser than its remainder", lock, time.Minute, from, to},
+	} {
+		if c.o.Holds(read, c.res, c.from, c.to) {
+			t.Errorf("FALSE GREEN: %s holds", c.name)
+		}
+	}
+	// A range around zero read at its own cut (Step is Res) is no offset a
+	// learn step writes, neither a time to live nor a look-back: it holds
+	// nothing, not even a plain read of its window, which it would pass.
+	around := ClockOffset{Min: -sec, Max: sec, Res: sec, Layout: LayoutTyped, Step: sec}
+	if around.Fine() || !around.Checkable(sec, from, to) || around.Holds(from.Truncate(sec), sec, from, to) {
+		t.Errorf("FALSE GREEN: a range around zero at its own cut (Fine %v, Checkable %v) holds a plain read", around.Fine(), around.Checkable(sec, from, to))
+	}
+	// An offset Fine for its unit (clock - 2s at the millisecond, which the
+	// learn step refuses as reading in seconds) holds nothing, though a file
+	// may carry one and a window narrow enough checks it.
+	fine := ClockOffset{Min: -2061 * time.Millisecond, Max: -1990 * time.Millisecond, Res: time.Millisecond, Layout: LayoutTyped, Step: time.Millisecond}
+	if !fine.Fine() || !fine.Checkable(time.Millisecond, from, to) || fine.Holds(to.Add(-2030*time.Millisecond), time.Millisecond, from, to) {
+		t.Errorf("FALSE GREEN: an offset Fine for its unit (Fine %v, Checkable %v) holds", fine.Fine(), fine.Checkable(time.Millisecond, from, to))
+	}
+	// clock + 30m at the second, read at its own cut: a replay window of 90 s
+	// is wider than the minute its offset reads in, so it is not Checkable
+	// there and holds nothing, though the application's value lies in the
+	// window plus the offset; a window of 61 ms checks it.
+	ttl := ClockOffset{Min: 30*time.Minute - 461*time.Millisecond, Max: 30*time.Minute + 600*time.Millisecond, Res: sec, Layout: LayoutTyped, Step: sec}
+	wide := from.Add(90 * sec)
+	if !ttl.Holds(to.Add(30*time.Minute).Truncate(sec), sec, from, to) {
+		t.Error("FALSE RED: clock + 30m at the second does not hold in a 61 ms window")
+	}
+	if ttl.Fine() || ttl.Checkable(sec, from, wide) || ttl.Holds(from.Add(45*sec+30*time.Minute).Truncate(sec), sec, from, wide) {
+		t.Errorf("FALSE GREEN: clock + 30m at the second holds in a 90 s window (Fine %v, Checkable %v)", ttl.Fine(), ttl.Checkable(sec, from, wide))
+	}
+	for _, d := range []time.Duration{73 * sec, 133 * sec} {
+		if lock.Holds(to.Truncate(time.Minute).Add(-d), sec, from, to) {
+			t.Errorf("FALSE GREEN: a look-back of %s holds", d)
+		}
+	}
+	if lock.Holds(to.Truncate(sec), sec, from, to) {
+		t.Error("FALSE GREEN: a dropped look-back holds")
+	}
+
+	own := ClockOffset{Min: -2*sec - 61*time.Millisecond, Max: -sec - 400*time.Millisecond, Res: sec, Layout: LayoutTyped, Step: sec}
+	if lo, hi := own.CutOffsets(); lo != -2*sec || hi != -2*sec || !own.Narrow() || own.Fine() {
+		t.Fatalf("clock - 2s at the second: cuts %s to %s, Narrow %v, Fine %v", lo, hi, own.Narrow(), own.Fine())
+	}
+	// No learn step writes a plain read at a Step (a hand-edited file): it
+	// holds nothing, not even the read itself.
+	for _, step := range []time.Duration{sec, time.Minute} {
+		plain := ClockOffset{Res: sec, Layout: LayoutTyped, Step: step}
+		if plain.Holds(to.Truncate(sec), sec, from, to) {
+			t.Errorf("FALSE GREEN: a plain read at a Step of %s holds", step)
+		}
+	}
+	// A range at its own cut wider than its unit (clock + 29d to 31d at the
+	// second: no cut no unit holds three of, nor a phase lock) is no narrow
+	// offset, so the order's guard refuses it as for an offset learned
+	// before Step.
+	if spread := (ClockOffset{Min: 29 * 24 * time.Hour, Max: 31 * 24 * time.Hour, Res: sec, Layout: LayoutTyped, Step: sec}); spread.Narrow() || spread.CoarseCut() {
+		t.Errorf("FALSE GREEN: clock + 29d to 31d at the second is Narrow (%v) or a cut (%v)", spread.Narrow(), spread.CoarseCut())
+	}
+	for phase := time.Duration(0); phase < sec; phase += 50 * time.Millisecond {
+		f := from.Truncate(sec).Add(phase)
+		tt := f.Add(61 * time.Millisecond)
+		if !own.Holds(tt.Truncate(sec).Add(-2*sec), sec, f, tt) {
+			t.Errorf("FALSE RED: clock - 2s at %s into its second", phase)
+		}
+		if own.Holds(tt.Truncate(sec).Add(-5*sec), sec, f, tt) || own.Holds(tt.Truncate(sec), sec, f, tt) {
+			t.Errorf("FALSE GREEN: clock - 5s or a plain read at %s into its second", phase)
+		}
+	}
+	// Across Europe/Berlin's turn back (2026-10-25 01:00 UTC, 03:00 CEST to
+	// 02:00 CET), read in that zone, it holds nothing (FallBack), though the
+	// application's value lies in the window less 2 s.
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := time.Date(2026, 10, 25, 1, 0, 0, 30e6, time.UTC)
+	if bf := bt.Add(-61 * time.Millisecond); own.Holds(bt.Truncate(sec).Add(-2*sec).In(berlin), sec, bf, bt) {
+		t.Error("FALSE GREEN: clock - 2s at the second holds across Berlin's turn back")
+	}
+	// A day's phase lock whose range holds two steps (both runs' calls
+	// straddled midnight: clock - 2h to clock - 26h, cut to the day, at the
+	// second), read in Europe/Berlin just after the midnight that starts its
+	// 23-hour day (2026-03-29, 02:00 CET to 03:00 CEST): the step before the
+	// next midnight is that midnight, 23 hours back, so the application's
+	// value (the midnight less 2 h) holds.
+	day := 24 * time.Hour
+	twoDays := ClockOffset{Min: -2*time.Hour - day, Max: -2*time.Hour + sec, Res: sec, Layout: LayoutTyped, Step: day}
+	spring := time.Date(2026, 3, 29, 0, 0, 0, 0, berlin)
+	if sf := spring.Add(10 * time.Minute); !twoDays.Holds(spring.Add(-2*time.Hour), sec, sf, sf.Add(61*time.Millisecond)) {
+		t.Error("FALSE RED: a day's phase lock of two steps does not hold its value after Berlin's 23-hour day starts")
+	}
+	old := own
+	old.Step = 0
+	if old.Narrow() || !old.Fine() || old.Holds(to.Truncate(sec).Add(-2*sec), sec, from, to) || old.CoarseCut() {
+		t.Errorf("an old recording's clock - 2s at the second reads unlike main: Narrow %v, Fine %v, CoarseCut %v", old.Narrow(), old.Fine(), old.CoarseCut())
+	}
+	if m := own.Meet(ClockOffset{Min: -2 * sec, Max: -sec, Res: time.Millisecond, Layout: LayoutTyped, Step: time.Millisecond}); m.Step != StepApart || !m.Empty() {
+		t.Errorf("FALSE GREEN: two offsets read at their own cuts at two cuts meet as %+v, want StepApart, which holds nothing", m)
+	}
+	if m := own.Meet(lock); m.Step != StepApart {
+		t.Errorf("an own cut and a phase lock meet as %+v, want StepApart", m)
+	}
+}
+
+// An offset learned before Step (Step 0: every recording made before, and
+// what main's chain still writes) reads and checks exactly as main does,
+// method by method: its line (String), Narrow, CoarseCut and Unit,
+// CoarseChecked and Checkable, Holds, and Meet. stepZeroOnMain is what main
+// (f04e97d6f) answers, read there by this same stepZeroReadings: a look-back
+// of a second or less at the second, refused as too fine (it holds
+// nothing), stays refused; the cuts, times to live and plain read hold
+// where they held.
+func TestAnOffsetLearnedBeforeAStepChecksAsOnMain(t *testing.T) {
+	want := strings.Split(strings.TrimSpace(stepZeroOnMain), "\n")
+	got := stepZeroReadings()
+	if len(got) != len(want) {
+		t.Fatalf("%d readings, main has %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("an old recording reads unlike main:\n got  %s\n main %s", got[i], want[i])
+		}
+	}
+}
+
+// stepZeroReadings is what each method a learning at a Step changed
+// answers of offsets learned before Step (Step 0), one line per offset and
+// method: Holds of a value at seven offsets from the window's end (Min
+// less two Res, less one, Min, the middle, Max, plus one Res, plus two), 1
+// where it holds, in windows 61 ms, 2 s and 90 s wide.
+func stepZeroReadings() []string {
+	ms, sec, min, hour, day := time.Millisecond, time.Second, time.Minute, time.Hour, 24*time.Hour
+	typed := func(lo, hi, res time.Duration) ClockOffset {
+		return ClockOffset{Min: lo, Max: hi, Res: res, Layout: LayoutTyped}
+	}
+	since := typed(30*day-5*sec, 30*day+sec, sec)
+	since.Since = SinceTestBegin
+	offsets := []struct {
+		name string
+		o    ClockOffset
+	}{
+		{"clock - 2s at the second", typed(-2*sec-61*ms, -sec-400*ms, sec)},
+		{"clock - 1m43s at the second", typed(-103*sec, -102*sec, sec)},
+		{"clock - 1500ms at the millisecond", typed(-1561*ms, -1500*ms, ms)},
+		{"clock + 30m at the minute", typed(29*min, 31*min, min)},
+		{"clock + 30m at the second", typed(30*min-61*ms, 30*min+sec, sec)},
+		{"clock + 2h at the hour", typed(100*min, 140*min, hour)},
+		{"clock + 30d at the day", typed(29*day+20*hour, 30*day+10*hour, day)},
+		{"clock + 30d at the millisecond", typed(30*day-ms, 30*day+62*ms, ms)},
+		{"clock + 30d at the second, a whole second apart", typed(30*day-ms, 30*day+sec+ms, sec)},
+		{"clock + 30d since its test began", since},
+		{"a plain read at the second", ClockOffset{Res: sec, Layout: LayoutTyped}},
+	}
+	from := time.Date(2026, 10, 28, 9, 30, 15, 400e6, time.UTC)
+	var out []string
+	for i, c := range offsets {
+		o := c.o
+		add := func(method, v string) { out = append(out, c.name+" | "+method+" = "+v) }
+		add("String", o.String())
+		add("Narrow, CoarseCut, Unit", fmt.Sprint(o.Narrow(), o.CoarseCut(), o.Unit()))
+		for _, res := range []time.Duration{ms, sec} {
+			checkable, holds := fmt.Sprint(o.CoarseChecked(res)), ""
+			for _, width := range []time.Duration{61 * ms, 2 * sec, 90 * sec} {
+				to := from.Add(width)
+				checkable += " " + fmt.Sprint(o.Checkable(res, from, to))
+				holds += " "
+				for _, d := range []time.Duration{o.Min - 2*o.Res, o.Min - o.Res, o.Min, (o.Min + o.Max) / 2, o.Max, o.Max + o.Res, o.Max + 2*o.Res} {
+					holds += map[bool]string{true: "1", false: "0"}[o.Holds(to.Add(d).Truncate(res), res, from, to)]
+				}
+			}
+			add("CoarseChecked, Checkable("+res.String()+")", checkable)
+			add("Holds("+res.String()+")", holds[1:])
+		}
+		m := o.Meet(offsets[(i+1)%len(offsets)].o)
+		add("Meet(next), Meet(self)", fmt.Sprintf("%s, empty %v, step %v; %s", m, m.Empty(), m.Step, o.Meet(o)))
+	}
+	return out
+}
+
+const stepZeroOnMain = `
+clock - 2s at the second | String = clock - 2s (from -2.061s to -1.4s)
+clock - 2s at the second | Narrow, CoarseCut, Unit = false false 1s
+clock - 2s at the second | CoarseChecked, Checkable(1ms) = false false false false
+clock - 2s at the second | Holds(1ms) = 0000000 0000000 0000000
+clock - 2s at the second | CoarseChecked, Checkable(1s) = false false false false
+clock - 2s at the second | Holds(1s) = 0000000 0000000 0000000
+clock - 2s at the second | Meet(next), Meet(self) = clock reads no one offset holds (from -2.061s up to -1m42s), empty true, step 0s; clock - 2s (from -2.061s to -1.4s)
+clock - 1m43s at the second | String = clock - 1m43s (from -1m43s to -1m42s)
+clock - 1m43s at the second | Narrow, CoarseCut, Unit = false false 1s
+clock - 1m43s at the second | CoarseChecked, Checkable(1ms) = false false false false
+clock - 1m43s at the second | Holds(1ms) = 0000000 0000000 0000000
+clock - 1m43s at the second | CoarseChecked, Checkable(1s) = false false false false
+clock - 1m43s at the second | Holds(1s) = 0000000 0000000 0000000
+clock - 1m43s at the second | Meet(next), Meet(self) = clock reads no one offset holds (from -1.561s up to -1m42s), empty true, step 0s; clock - 1m43s (from -1m43s to -1m42s)
+clock - 1500ms at the millisecond | String = clock plus an offset from -1.561s to -1.5s
+clock - 1500ms at the millisecond | Narrow, CoarseCut, Unit = false false 1ms
+clock - 1500ms at the millisecond | CoarseChecked, Checkable(1ms) = false false false false
+clock - 1500ms at the millisecond | Holds(1ms) = 0000000 0000000 0000000
+clock - 1500ms at the millisecond | CoarseChecked, Checkable(1s) = false false false false
+clock - 1500ms at the millisecond | Holds(1s) = 0000000 0000000 0000000
+clock - 1500ms at the millisecond | Meet(next), Meet(self) = clock reads no one offset holds (from 29m up to -1.5s), empty true, step 0s; clock plus an offset from -1.561s to -1.5s
+clock + 30m at the minute | String = clock plus an offset from 29m to 31m
+clock + 30m at the minute | Narrow, CoarseCut, Unit = false false 1m0s
+clock + 30m at the minute | CoarseChecked, Checkable(1ms) = false false false false
+clock + 30m at the minute | Holds(1ms) = 0000000 0000000 0000000
+clock + 30m at the minute | CoarseChecked, Checkable(1s) = false false false false
+clock + 30m at the minute | Holds(1s) = 0000000 0000000 0000000
+clock + 30m at the minute | Meet(next), Meet(self) = clock + 30m (from 29m59.939s to 30m1s), empty false, step 0s; clock plus an offset from 29m to 31m
+clock + 30m at the second | String = clock + 30m (from 29m59.939s to 30m1s)
+clock + 30m at the second | Narrow, CoarseCut, Unit = true false 1m0s
+clock + 30m at the second | CoarseChecked, Checkable(1ms) = false true true false
+clock + 30m at the second | Holds(1ms) = 0111110 1111110 0000000
+clock + 30m at the second | CoarseChecked, Checkable(1s) = false true true false
+clock + 30m at the second | Holds(1s) = 0111110 1111110 0000000
+clock + 30m at the second | Meet(next), Meet(self) = clock reads no one offset holds (from 1h40m up to 30m1s), empty true, step 0s; clock + 30m (from 29m59.939s to 30m1s)
+clock + 2h at the hour | String = clock + 2h (from 1h40m to 2h20m)
+clock + 2h at the hour | Narrow, CoarseCut, Unit = true true 1h0m0s
+clock + 2h at the hour | CoarseChecked, Checkable(1ms) = true true true true
+clock + 2h at the hour | Holds(1ms) = 0111110 0111110 0111110
+clock + 2h at the hour | CoarseChecked, Checkable(1s) = true true true true
+clock + 2h at the hour | Holds(1s) = 0111110 0111110 0111110
+clock + 2h at the hour | Meet(next), Meet(self) = clock reads no one offset holds (from 716h up to 2h20m), empty true, step 0s; clock + 2h (from 1h40m to 2h20m)
+clock + 30d at the day | String = clock + 30d (from 716h to 730h)
+clock + 30d at the day | Narrow, CoarseCut, Unit = true true 24h0m0s
+clock + 30d at the day | CoarseChecked, Checkable(1ms) = true true true true
+clock + 30d at the day | Holds(1ms) = 0111110 0111110 0111110
+clock + 30d at the day | CoarseChecked, Checkable(1s) = true true true true
+clock + 30d at the day | Holds(1s) = 0111110 0111110 0111110
+clock + 30d at the day | Meet(next), Meet(self) = clock + 30d (from 719h59m59.999s to 720h0m0.062s), empty false, step 0s; clock + 30d (from 716h to 730h)
+clock + 30d at the millisecond | String = clock + 30d (from 719h59m59.999s to 720h0m0.062s)
+clock + 30d at the millisecond | Narrow, CoarseCut, Unit = true false 24h0m0s
+clock + 30d at the millisecond | CoarseChecked, Checkable(1ms) = false true true true
+clock + 30d at the millisecond | Holds(1ms) = 1111110 1111110 1111110
+clock + 30d at the millisecond | CoarseChecked, Checkable(1s) = false true true true
+clock + 30d at the millisecond | Holds(1s) = 1111111 1111111 1111111
+clock + 30d at the millisecond | Meet(next), Meet(self) = clock + 30d (from 719h59m59.999s to 720h0m0.062s), empty false, step 0s; clock + 30d (from 719h59m59.999s to 720h0m0.062s)
+clock + 30d at the second, a whole second apart | String = clock + 30d (from 719h59m59.999s to 720h0m1.001s)
+clock + 30d at the second, a whole second apart | Narrow, CoarseCut, Unit = true false 24h0m0s
+clock + 30d at the second, a whole second apart | CoarseChecked, Checkable(1ms) = false true true true
+clock + 30d at the second, a whole second apart | Holds(1ms) = 0111110 1111110 1111110
+clock + 30d at the second, a whole second apart | CoarseChecked, Checkable(1s) = false true true true
+clock + 30d at the second, a whole second apart | Holds(1s) = 0111110 1111110 1111110
+clock + 30d at the second, a whole second apart | Meet(next), Meet(self) = clock + 30d (from 719h59m59.999s to 720h0m1s), read after its test began and before its call, empty false, step 0s; clock + 30d (from 719h59m59.999s to 720h0m1.001s)
+clock + 30d since its test began | String = clock + 30d (from 719h59m55s to 720h0m1s), read after its test began and before its call
+clock + 30d since its test began | Narrow, CoarseCut, Unit = true false 24h0m0s
+clock + 30d since its test began | CoarseChecked, Checkable(1ms) = false true true true
+clock + 30d since its test began | Holds(1ms) = 0111110 1111110 1111110
+clock + 30d since its test began | CoarseChecked, Checkable(1s) = false true true true
+clock + 30d since its test began | Holds(1s) = 0111110 1111110 1111110
+clock + 30d since its test began | Meet(next), Meet(self) = clock reads no one offset holds (from 719h59m55s up to 0s), read after its test began and before its call, empty true, step 0s; clock + 30d (from 719h59m55s to 720h0m1s), read after its test began and before its call
+a plain read at the second | String = clock
+a plain read at the second | Narrow, CoarseCut, Unit = false false 0s
+a plain read at the second | CoarseChecked, Checkable(1ms) = false true true true
+a plain read at the second | Holds(1ms) = 0000000 0000000 0000000
+a plain read at the second | CoarseChecked, Checkable(1s) = false true true true
+a plain read at the second | Holds(1s) = 0111110 1111110 1111110
+a plain read at the second | Meet(next), Meet(self) = clock reads no one offset holds (from 0s up to -1.4s), empty true, step 0s; clock
+`
+
+// A look-back one cut below its step has Max 0: its range ends at the whole
+// step and holds no value past it, so it is a look-back, and a replay holds
+// the application's value by the phase rule. Its guards hold nothing of any
+// other range at a step: one around zero, one above zero, one empty.
+func TestAPhaseLockUpToZeroHoldsAndItsGuardsHoldNothingElse(t *testing.T) {
+	sec := time.Second
+	lock := func(min, max time.Duration) ClockOffset {
+		return ClockOffset{Min: min, Max: max, Res: sec, Step: time.Minute, Layout: LayoutTyped}
+	}
+	to := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
+	from := to.Add(-61 * time.Millisecond)
+	value := to.Truncate(time.Minute).Add(-sec)
+	if !lock(-sec, 0).Holds(value, sec, from, to) {
+		t.Errorf("the end of the last minute, Max 0: holds nothing; want the application's value")
+	}
+	if lock(-sec, 0).Holds(to.Truncate(sec), sec, from, to) {
+		t.Errorf("the end of the last minute, Max 0: holds a dropped look-back")
+	}
+	for name, o := range map[string]ClockOffset{
+		"a range around zero": lock(-sec, sec),
+		"a range above zero":  lock(sec, 2*sec),
+		"an empty range":      lock(-sec, -sec),
+		"a backward range":    lock(-sec, -2*sec),
+		"no range":            lock(0, 0),
+	} {
+		for ph := time.Duration(0); ph < time.Minute; ph += sec {
+			if v := to.Truncate(time.Minute).Add(ph); o.Holds(v, sec, from, to) {
+				t.Errorf("%s (%+v) holds %s; want nothing", name, o, v)
+			}
+		}
+	}
+	for name, o := range map[string]ClockOffset{
+		"a Step below its Res": {Min: -3 * time.Minute, Max: -2 * time.Minute, Res: time.Minute, Step: sec, Layout: LayoutTyped},
+		"a Step and no Res":    {Min: -3 * time.Minute, Max: -2 * time.Minute, Step: sec, Layout: LayoutTyped},
+	} {
+		for ph := -5 * time.Minute; ph < time.Minute; ph += sec {
+			if v := to.Add(ph); o.Holds(v, sec, from, to) {
+				t.Errorf("%s (%+v) holds %s; want nothing", name, o, v)
+			}
+		}
+	}
+	// One Res of slack after the window's end: a read at :59.9 written a
+	// second on stands in the next minute.
+	end := time.Date(2026, 11, 1, 15, 21, 59, 900e6, time.UTC)
+	if !lock(-103*sec, -102*sec).Holds(time.Date(2026, 11, 1, 15, 22, 0, 0, time.UTC).Add(-103*sec), sec, end.Add(-time.Millisecond), end) {
+		t.Errorf("a whole step one Res after the window's end: holds nothing; want its slack")
+	}
+	if !lock(-30*sec, -29*sec).Narrow() {
+		t.Errorf("a phase lock that reads in seconds is not Narrow: its range is one Res wide and its step's grid checks it")
+	}
+}
+
+// A look-back read at its own cut of a second (Step == Res) whose range
+// holds a whole minute (Unit above Res) is a cut (CoarseCut) where that
+// range spans at most two cuts, from one cut wide up to exactly two: a
+// replay checks it against the whole seconds it holds (CutOffsets), within
+// one second on either side, so a look-back changed by two seconds or more
+// past them fails at every read. A range even a millisecond wider is no
+// cut: a replay checks it from Min to Max, within one second on either
+// side, as its learned line states (a read plus Max plus one second passes
+// at every read).
+func TestAnOwnCutLookBackIsACutUpToTwoCutsWide(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	own := func(min, max time.Duration) ClockOffset {
+		return ClockOffset{Min: min, Max: max, Res: sec, Step: sec, Layout: LayoutTyped}
+	}
+	at := time.Date(2026, 11, 2, 3, 53, 31, 0, time.UTC)
+	for _, c := range []struct {
+		name       string
+		o          ClockOffset
+		cut        bool
+		pass, fail []time.Duration // look-backs, in whole seconds, from the read's own second
+	}{
+		{"one cut wide", own(-60500*ms, -59500*ms), true, []time.Duration{-61, -60, -59}, []time.Duration{-62, -58}},
+		{"exactly two cuts wide", own(-61*sec, -59*sec), true, []time.Duration{-62, -61, -60, -59}, []time.Duration{-63, -58}},
+		{"a millisecond past two cuts", own(-61*sec-ms, -59*sec), false, []time.Duration{-61, -60, -59, -58}, []time.Duration{-57}},
+	} {
+		if got := c.o.CoarseCut(); got != c.cut {
+			t.Errorf("%s (%v): CoarseCut %v; want %v", c.name, c.o, got, c.cut)
+		}
+		// Calls 5 ms wide at four places in their second: every read
+		// stands in the second at holds.
+		for _, ph := range []time.Duration{0, 250 * ms, 500 * ms, 990 * ms} {
+			from := at.Add(ph)
+			to := from.Add(5 * ms)
+			for _, d := range c.pass {
+				if !c.o.Holds(at.Add(d*sec), sec, from, to) {
+					t.Errorf("%s (%v), a call %v into its second: a look-back of %v holds nothing; want it to pass", c.name, c.o, ph, -d*sec)
+				}
+			}
+			for _, d := range c.fail {
+				if c.o.Holds(at.Add(d*sec), sec, from, to) {
+					t.Errorf("%s (%v), a call %v into its second: a look-back of %v passes; want it to fail", c.name, c.o, ph, -d*sec)
+				}
+			}
+		}
+	}
+}
+
+// Two learnings of one place meet by the same rule in any order and any
+// grouping, and a phase lock (Step above Res) never turns into an offset
+// read at its values' own cut, which would drop the remainder it is locked
+// to. Two read at their own cuts at two cuts meet as StepApart too: the
+// finer shows the place's values are not cut to the coarser, so neither cut
+// checks both (now - 75s in seconds, one recording's values on a whole
+// minute: clock - 1m at the minute; another's not: clock - 1m15s at the
+// second; read at the minute, the met offset would pass a look-back
+// changed by 28 s or 50 s at every phase).
+func TestMeetKeepsAPhaseLockAndIsTheSameInAnyOrder(t *testing.T) {
+	sec := time.Second
+	lock := ClockOffset{Min: -103 * sec, Max: -102 * sec, Res: sec, Step: time.Minute, Layout: LayoutTyped}
+	ownMin := ClockOffset{Min: -2 * time.Minute, Max: -time.Minute - 30*sec, Res: time.Minute, Step: time.Minute, Layout: LayoutTyped}
+	ownSec := ClockOffset{Min: -2 * time.Minute, Max: -time.Minute, Res: sec, Step: sec, Layout: LayoutTyped}
+	if m := lock.Meet(ownMin); m.Step != StepApart || !m.Empty() {
+		t.Errorf("a phase lock met with an offset at its step's own cut: %+v; want StepApart, which holds nothing", m)
+	}
+	if m := ownMin.Meet(lock); m.Step != StepApart || !m.Empty() {
+		t.Errorf("an offset at a step's own cut met with a phase lock: %+v; want StepApart, which holds nothing", m)
+	}
+	for _, m := range []ClockOffset{ownSec.Meet(ownMin), ownMin.Meet(ownSec)} {
+		if m.Step != StepApart || !m.Empty() {
+			t.Errorf("FALSE GREEN: two read at their own cuts at two cuts: %+v; want StepApart, which holds nothing", m)
+		}
+	}
+	// now - 75s in seconds: one pairing's two values on a whole minute, the
+	// other's at the second.
+	atMin := ClockOffset{Min: -75*sec - 149*time.Millisecond, Max: -15*sec - 143*time.Millisecond, Res: time.Minute, Step: time.Minute, Layout: LayoutTyped}
+	atSec := ClockOffset{Min: -75*sec - 204*time.Millisecond, Max: -74*sec - 688*time.Millisecond, Res: sec, Step: sec, Layout: LayoutTyped}
+	for _, m := range []ClockOffset{atMin.Meet(atSec), atSec.Meet(atMin)} {
+		if !m.Empty() {
+			t.Errorf("FALSE GREEN: clock - 1m at the minute met with clock - 1m15s at the second: %s (%+v); want StepApart, which holds nothing", m, m)
+		}
+		for ph := time.Duration(0); ph < time.Minute; ph += 1500 * time.Millisecond {
+			to := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC).Add(ph + 37*time.Millisecond)
+			for _, back := range []time.Duration{75 * sec, 47 * sec, 103 * sec, 125 * sec} {
+				if m.Holds(to.Add(-4*time.Millisecond-back).Truncate(sec), sec, to.Add(-61*time.Millisecond), to) {
+					t.Errorf("FALSE GREEN: the meet holds now - %s at %s into its minute", back, ph)
+				}
+			}
+		}
+	}
+	if m := lock.Meet(lock); m.Step != time.Minute || m.Res != sec || m.Empty() {
+		t.Errorf("a phase lock met with itself: %+v; want it kept", m)
+	}
+	// Two learnings cut to the hour, one on +05:30's hour (30m past UTC's)
+	// and one on +05:45's: no one hour holds both, so they meet as StepApart;
+	// one met with itself keeps its phase.
+	hour30 := ClockOffset{Min: -3 * time.Hour, Max: -2 * time.Hour, Res: time.Hour, Step: time.Hour, Layout: LayoutTyped, Phase: 30 * time.Minute}
+	hour15 := hour30
+	hour15.Phase = 15 * time.Minute
+	for _, m := range []ClockOffset{hour30.Meet(hour15), hour15.Meet(hour30)} {
+		if m.Step != StepApart || !m.Empty() {
+			t.Errorf("FALSE GREEN: two cut to the hour at two phases: %+v; want StepApart, which holds nothing", m)
+		}
+	}
+	if m := hour30.Meet(hour30); m.Step != time.Hour || m.Phase != 30*time.Minute || m.Empty() {
+		t.Errorf("an hour's cut met with itself: %+v; want it kept on its phase", m)
+	}
+	pick := []ClockOffset{lock, ownMin, ownSec,
+		{Min: -3 * sec, Max: -2 * sec, Res: sec, Step: sec, Layout: LayoutTyped},
+		{Min: -3 * sec, Max: -sec, Res: sec, Layout: LayoutTyped},
+		{Min: -103 * sec, Max: -102 * sec, Res: time.Millisecond, Step: sec, Layout: LayoutTyped},
+		{Min: -time.Hour, Max: -sec, Res: time.Minute, Step: time.Hour, Layout: LayoutTyped},
+		hour30, hour15, {Min: -3 * time.Hour, Max: -2 * time.Hour, Res: time.Hour, Step: time.Hour, Layout: LayoutTyped}}
+	for _, a := range pick {
+		for _, b := range pick {
+			for _, c := range pick {
+				x, y, z := a.Meet(b).Meet(c), a.Meet(c).Meet(b), b.Meet(c).Meet(a)
+				if x.Step != y.Step || y.Step != z.Step || x.Res != y.Res || x.Min != y.Min || x.Max != z.Max || x.Phase != y.Phase || y.Phase != z.Phase {
+					t.Errorf("meet depends on its order: %+v, %+v, %+v: %+v, %+v, %+v", a, b, c, x, y, z)
+				}
+			}
+		}
+	}
+}
+
+// What a Clock's line names of its Step: a look-back's cut only where it is
+// above the values' own (read at its own cut, the offset says all of it),
+// and the limit of a read since its test began only of one learned at a
+// Step (one learned before Step reads as it did).
+func TestAClockOffsetsStringNamesItsStepAndItsSpan(t *testing.T) {
+	sec := time.Second
+	lock := ClockOffset{Min: -103 * sec, Max: -102 * sec, Res: sec, Step: time.Minute, Layout: LayoutTyped}
+	own := ClockOffset{Min: -2*sec - 61*time.Millisecond, Max: -sec - 400*time.Millisecond, Res: sec, Step: sec, Layout: LayoutTyped}
+	if got := lock.String(); !strings.Contains(got, ", read cut to 1m0s before the offset") {
+		t.Errorf("a phase lock: %q; want its step named", got)
+	}
+	if got := own.String(); strings.Contains(got, "read cut to") {
+		t.Errorf("an offset read at its own cut: %q; want no step named", got)
+	}
+	limit := "a replay passes a read made anywhere in that span plus the offset"
+	since := ClockOffset{Min: 29 * 24 * time.Hour, Max: 31 * 24 * time.Hour, Res: sec, Layout: LayoutTyped, Since: SinceTestBegin}
+	if got := since.String(); strings.Contains(got, limit) {
+		t.Errorf("a read since its test began learned before Step: %q; want it read as it did", got)
+	}
+	since.Step = sec
+	if got := since.String(); !strings.Contains(got, limit) {
+		t.Errorf("a read since its test began learned at a Step: %q; want its limit stated", got)
+	}
+}
+
+// An offset learned at its values' own cut of an hour holds a value only on
+// its Phase within UTC's hour: the application's value (an hour of +05:30,
+// 30m past UTC's, less two hours) at every read of the hour; one moved onto
+// UTC's hour (1h30m earlier), which the cut's slack of a cut on either side
+// held at some reads, at none. A Phase outside the hour, or on an offset cut
+// to anything but the hour, holds nothing (fail closed), and String names
+// where the hour starts.
+func TestAnHourCutsPhaseIsWhereAReplaysValueMustSit(t *testing.T) {
+	ist := time.FixedZone("+05:30", 5*3600+1800)
+	o := ClockOffset{Min: -2*time.Hour - 40*time.Minute, Max: -time.Hour - 40*time.Minute, Res: time.Hour, Step: time.Hour, Layout: LayoutTyped, Phase: 30 * time.Minute}
+	base := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	moved := 0
+	for ph := time.Duration(0); ph < time.Hour; ph += 5*time.Minute + 7*time.Second {
+		to := base.Add(ph)
+		from, read := to.Add(-61*time.Millisecond), to.Add(-20*time.Millisecond)
+		app := ReadCut(read, time.Hour, ist).Add(-2 * time.Hour)
+		if !o.Holds(app, time.Second, from, to) {
+			t.Errorf("FALSE RED: the application's value %s at %s into UTC's hour", app, ph)
+		}
+		// Read in UTC, which shows it a whole hour, as a replay reads it
+		// (learn's cutZones).
+		onUTC := app.Add(-90 * time.Minute).In(time.UTC)
+		if o.Holds(onUTC, time.Second, from, to) {
+			t.Errorf("FALSE GREEN: a value moved onto UTC's hour, 1h30m earlier, at %s into UTC's hour", ph)
+		}
+		if p := (ClockOffset{Min: o.Min, Max: o.Max, Res: o.Res, Step: o.Step, Layout: o.Layout}); p.Holds(onUTC, time.Second, from, to) {
+			moved++
+		}
+		for _, bad := range []time.Duration{time.Hour, -time.Minute} {
+			p := o
+			p.Phase = bad
+			if p.Holds(app, time.Second, from, to) {
+				t.Errorf("FALSE GREEN: a Phase of %s holds the application's value", bad)
+			}
+		}
+		if p := (ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second, Step: time.Second, Layout: LayoutTyped, Phase: 30 * time.Minute}); p.Holds(read.Truncate(time.Second).Add(-2*time.Second), time.Second, from, to) {
+			t.Errorf("FALSE GREEN: a Phase on an offset cut to the second holds a value")
+		}
+	}
+	if moved == 0 {
+		t.Errorf("the same offset on UTC's hour (Phase 0) holds the value moved onto UTC's hour at no read: the row no longer shows what Phase guards")
+	}
+	if s := o.String(); !strings.Contains(s, "its hour starting 30m past UTC's whole hour") {
+		t.Errorf("String names no phase: %q", s)
+	}
+	utc := o
+	utc.Phase = 0
+	if s := utc.String(); !strings.Contains(s, "its hour starting on UTC's whole hour") {
+		t.Errorf("String of Phase 0 names no phase: %q", s)
+	}
+}
+
+// slimZoneData is the zone file of name in testdata/zoneinfo-slim, copied
+// from Go 1.27.3's lib/time/zoneinfo.zip (tzdata 2026c), which zic writes
+// slim (zic -b slim, its default; the zone data built into keploy,
+// time/tzdata, is that zip): no transition after the year the file's rule
+// (its TZ footer) took over, Europe/Berlin's 1996, America/New_York's 2007,
+// Australia/Sydney's 2008. The distributions' tzdata (Debian's, Ubuntu's,
+// Alpine's, Fedora's) is fat: every change to 2037.
+func slimZoneData(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "zoneinfo-slim", filepath.FromSlash(name)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// slimZone is slimZoneData(name) read as the zone named as, loaded at
+// zoneLoadedAt (loadedAt).
+func slimZone(t *testing.T, name, as string) *time.Location {
+	t.Helper()
+	return loadedAt(t, as, slimZoneData(t, name), zoneLoadedAt)
+}
+
+// zoneChanges is every instant from 1970 to 2038 at which loc's offset
+// changes, read from its offsets alone (time.Time.Zone), never from where
+// Go ends its zones (ZoneBounds): an hourly scan, each change found to the
+// second within the hour it falls in (no zone changes its offset twice in
+// an hour).
+func zoneChanges(loc *time.Location) []time.Time {
+	return zoneChangesIn(loc, time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2038, 1, 1, 0, 0, 0, 0, time.UTC))
+}
+
+// zoneChangesIn is zoneChanges from start up to end.
+func zoneChangesIn(loc *time.Location, start, end time.Time) []time.Time {
+	off := func(s int64) int {
+		_, o := time.Unix(s, 0).In(loc).Zone()
+		return o
+	}
+	from, to := start.Unix(), end.Unix()
+	var at []time.Time
+	prev := off(from)
+	for h := from + 3600; h <= to; h += 3600 {
+		o := off(h)
+		if o == prev {
+			continue
+		}
+		lo, hi := h-3600, h
+		for hi-lo > 1 {
+			if m := lo + (hi-lo)/2; off(m) == prev {
+				lo = m
+			} else {
+				hi = m
+			}
+		}
+		at, prev = append(at, time.Unix(hi, 0).UTC()), o
+	}
+	return at
+}
+
+// tzifV1 is a zone file (version 1) of the offsets offs, in seconds east
+// of UTC: offs[0] before at[0], offs[i] from at[i-1] on.
+func tzifV1(offs []int, at []time.Time) []byte {
+	var b []byte
+	put := func(v int32) { b = append(b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v)) }
+	b = append(b, "TZif"...)
+	b = append(b, make([]byte, 16)...)
+	for _, n := range []int{0, 0, 0, len(at), len(offs), 2} {
+		put(int32(n))
+	}
+	for _, t := range at {
+		put(int32(t.Unix()))
+	}
+	for i := range at {
+		b = append(b, byte(i+1))
+	}
+	for _, off := range offs {
+		put(int32(off))
+		b = append(b, 0, 0)
+	}
+	return append(b, "Z\x00"...)
+}
+
+// fatZone is loc's offsets from 1970 to 2038 (zoneChanges) as a version 1
+// zone file of every change, as zic -b fat lists them (Debian's and
+// Fedora's tzdata), named name, loaded at zoneLoadedAt (loadedAt).
+func fatZone(t *testing.T, name string, loc *time.Location) *time.Location {
+	t.Helper()
+	at := zoneChanges(loc)
+	_, first := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).In(loc).Zone()
+	offs := []int{first}
+	for _, a := range at {
+		_, o := a.In(loc).Zone()
+		offs = append(offs, o)
+	}
+	return loadedAt(t, name, tzifV1(offs, at), zoneLoadedAt)
+}
+
+// ZoneNameOf names a zone file of a rule of summer time by the IANA name it
+// carries where keploy's own zone data of that name reads the same offsets,
+// whichever of zic's two forms either file is in: slim (slimZoneData) or
+// fat (every change to 2037). Go ends a slim file's zones at each year's
+// start after its last transition, and at the start of a leap year's last
+// day (golang/go#81583), a fat file's at their next change of offset: where
+// Go ends the zone in effect is no part of the zone's rules. keploy
+// compared it, and so named no zone of an application's fat file read by a
+// keploy whose own zone data is the slim copy built into it (one whose
+// system holds no zone files), nor of a slim file beside fat ones, as
+// though the two were other zones. Keploy's own zone data of the name is
+// the row's (zoneLocations).
+func TestAZoneOfSummerTimeIsNamedWhicheverFormItsZoneFileIsIn(t *testing.T) {
+	slim := slimZone(t, "Europe/Berlin", "Europe/Berlin")
+	fat := fatZone(t, "Europe/Berlin", slim)
+	newYork := slimZone(t, "America/New_York", "Europe/Berlin")
+	t.Cleanup(func() { zoneLocations.Delete("Europe/Berlin") })
+	autumn, leapDay := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC), time.Date(2028, 12, 31, 12, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		what     string
+		own, loc *time.Location
+		at       time.Time
+		want     string
+	}{
+		{"a slim file, keploy's own fat", fat, slim, autumn, "Europe/Berlin"},
+		{"a fat file, keploy's own slim", slim, fat, autumn, "Europe/Berlin"},
+		{"a slim file on a leap year's last day, keploy's own fat", fat, slim, leapDay, "Europe/Berlin"},
+		{"a fat file on a leap year's last day, keploy's own slim", slim, fat, leapDay, "Europe/Berlin"},
+		{"a slim file, keploy's own slim", slim, slim, leapDay, "Europe/Berlin"},
+		{"New York's slim file named Europe/Berlin, keploy's own fat", fat, newYork, autumn, ""},
+		{"New York's slim file named Europe/Berlin, keploy's own slim", slim, newYork, leapDay, ""},
+	} {
+		zoneLocations.Store("Europe/Berlin", zoneLoad{loc: row.own})
+		var got string
+		returnsWithin(t, 30*time.Second, row.what, func() { got = ZoneNameOf(row.loc, row.at) })
+		if got != row.want {
+			t.Errorf("%s: ZoneNameOf %q; want %q", row.what, got, row.want)
+		}
+	}
+}
+
+// A turn at which the clocks go back is found (fallBackIn) wherever the
+// span lies, in a slim zone file too: Go's ends of a slim file's zones
+// stop advancing on a leap year's last day (golang/go#81583), where keploy
+// read no turn after it, so a span from that day on to the next turn
+// back (a check of an offset learned over months) met none, and a replay
+// did not refuse a value there (FallBack).
+func TestATurnTheClocksGoBackAtIsFoundPastALeapYearsLastDay(t *testing.T) {
+	slim := slimZone(t, "Europe/Berlin", "Europe/Berlin")
+	turn := time.Date(2029, 10, 28, 1, 0, 0, 0, time.UTC)
+	for _, loc := range []*time.Location{slim, fatZone(t, "Europe/Berlin", slim)} {
+		var at time.Time
+		var back time.Duration
+		var met bool
+		returnsWithin(t, 30*time.Second, "fallBackIn", func() {
+			at, back, met = fallBackIn(time.Date(2028, 12, 30, 12, 0, 0, 0, time.UTC), time.Date(2029, 10, 29, 0, 0, 0, 0, time.UTC), loc, false)
+		})
+		if !met || !at.Equal(turn) || back != time.Hour {
+			t.Errorf("a span from 2028-12-30 to 2029-10-29 in Berlin (%d changes listed): turn %v at %s back %s; want the turn at %s back 1h", len(zoneChanges(loc)), met, at, back, turn)
+		}
+	}
+}
+
+// Every year's turns at which the clocks go back are read (yearFallBacks)
+// from slim zone data too: the zone data built into keploy, which it reads
+// where its system holds no zone files. yearFallBacks walked each zone from
+// the last instant of the year before, and after a leap year Go's end of a
+// slim file's zone is not after that instant (golang/go#81583), so its walk
+// stopped there: 2025 and 2029 read no turn back of any zone of summer
+// time, and a replay that knows no zone of the application's (FallBackAnywhere)
+// refused no value written an hour early at one. A child process reads
+// every zone of tzNames from a directory (ZONEINFO, which Go reads once a
+// process) where each is Berlin's slim file, so each year holds Berlin's
+// turn back, on the last Sunday of October at 01:00 UTC.
+func TestEveryYearsTurnsBackAreReadFromSlimZoneData(t *testing.T) {
+	if os.Getenv("KEPLOY_TEST_SLIM_ZONEINFO") == "1" {
+		for _, y := range []int{2025, 2026, 2029} {
+			last := time.Date(y, time.November, 0, 1, 0, 0, 0, time.UTC)
+			want := last.AddDate(0, 0, -int(last.Weekday()))
+			var fs []zoneFallBack
+			returnsWithin(t, 30*time.Second, fmt.Sprint(y), func() { fs = yearFallBacks(y) })
+			met := false
+			for _, f := range fs {
+				met = met || f.at.Equal(want) && f.back == time.Hour
+			}
+			if !met {
+				t.Errorf("%d: %d turns back read, none at %s", y, len(fs), want.Format(time.RFC3339))
+			}
+		}
+		return
+	}
+	dir := t.TempDir()
+	berlin := slimZoneData(t, "Europe/Berlin")
+	for _, name := range tzNames {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, berlin, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEveryYearsTurnsBackAreReadFromSlimZoneData$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "KEPLOY_TEST_SLIM_ZONEINFO=1", "ZONEINFO="+dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("the turns back of a year, every zone read from slim data: %v\n%s", err, out)
 	}
 }

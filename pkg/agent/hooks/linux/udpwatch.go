@@ -47,7 +47,7 @@ type udpDest struct {
 	Port       uint32
 	KernelPid  uint32
 	AgentNsPid uint32
-	_          uint32
+	_          uint32 // dest_info_t's instance: only the TCP connect hooks stamp it
 }
 
 // udpReplyEventSize is struct udp_reply_event's size: a report of any other

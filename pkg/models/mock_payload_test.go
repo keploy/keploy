@@ -305,3 +305,22 @@ func TestMutatePayloadRefusesAHookThatMovesTheMock(t *testing.T) {
 		t.Fatalf("no mutator: %v", err)
 	}
 }
+
+// A payload hook that fails on a mock refuses it: MutatePayload returns a
+// MockPayloadRefusal naming the mock, worded as the error was before it was
+// typed, which unwraps to the hook's error, so a caller can still ask
+// errors.Is or errors.As of the hook's own error.
+func TestMutatePayloadRefusesTheMockAHookFailedOn(t *testing.T) {
+	reason := errors.New("response body.token: sealed under key k-7: permission denied")
+	err := MutatePayload(context.Background(), payloadMocks()["http"](), func(context.Context, *Mock) error { return reason })
+	var refusal *MockPayloadRefusal
+	if !errors.As(err, &refusal) || refusal.Mock != "http" || refusal.Err != reason {
+		t.Fatalf("MutatePayload returned %#v; want a MockPayloadRefusal of mock http with the hook's error", err)
+	}
+	if !errors.Is(err, reason) {
+		t.Fatalf("the refusal %v does not unwrap to the hook's error", err)
+	}
+	if want := `the mock payload hook failed on mock "http": response body.token: sealed under key k-7: permission denied`; err.Error() != want {
+		t.Fatalf("the refusal says %q; want %q", err.Error(), want)
+	}
+}

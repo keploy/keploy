@@ -172,7 +172,7 @@ func httpMissCall(t *testing.T, mm *MockManager, path string) (string, *models.M
 }
 
 // httpMissSend is httpMissCall for the whole request raw.
-func httpMissSend(t *testing.T, mm *MockManager, raw string) (string, *models.MockMismatchReport) {
+func httpMissSend(t *testing.T, mm integrations.MockMemDb, raw string) (string, *models.MockMismatchReport) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
 	defer cancel()
@@ -702,6 +702,17 @@ func TestACallDecidedTheTestsOwnIsRefusedTheBackgroundAtEveryDoorAndWalk(t *test
 			func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) bool {
 				var names []string
 				if err := db.(integrations.PerTestRanger).RangePerTestMocksInWindow(func(m *models.Mock) bool {
+					names = append(names, m.Name)
+					return true
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return walked(names, mk.Name)
+			}, false, true},
+		{"RangePerTestMocksWithKey", func(s staged) *models.Mock { return s.worker },
+			func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) bool {
+				var names []string
+				if err := db.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(oneKey, "PING", func(m *models.Mock) bool {
 					names = append(names, m.Name)
 					return true
 				}); err != nil {

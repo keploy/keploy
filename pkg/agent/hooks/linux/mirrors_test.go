@@ -61,7 +61,7 @@ func TestTheDestinationMirrorsMatchTheObjects(t *testing.T) {
 	for _, m := range dst.Members {
 		names = append(names, m.Name)
 	}
-	if want := []string{"ip_version", "dest_ip4", "dest_ip6", "dest_port", "kernelPid", "agentNsPid", "_pad"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"ip_version", "dest_ip4", "dest_ip6", "dest_port", "kernelPid", "agentNsPid", "instance"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("dest_info_t's members are %q, want %q (structs.DestInfo mirrors them in order)", names, want)
 	}
 	sameLayout(t, btfStruct(t, spec, "proxy_conn_mark_t"), proxyConnMark{})

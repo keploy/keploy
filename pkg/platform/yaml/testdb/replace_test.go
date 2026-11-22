@@ -38,7 +38,7 @@ func useRename(t *testing.T, rename func(from, to string) error) {
 	t.Helper()
 	prev := replaceFile
 	t.Cleanup(func() { replaceFile = prev })
-	replaceFile = func(logger *zap.Logger, src, dst string) error {
+	replaceFile = func(logger *zap.Logger, _, src, dst string) error {
 		return yamlLib.ReplaceFileWith(logger, rename, src, dst)
 	}
 }

@@ -179,6 +179,8 @@ func runFlights(tr *Tracker, steps []flightStep) {
 			tr.ServedHandshakeIn(s.m, fs[s.c+"1"], fs[s.c])
 		case "land":
 			fs[s.c].Land()
+		case "untold":
+			fs[s.c].EndUntold()
 		}
 	}
 }
@@ -592,7 +594,9 @@ func TestAHandshakeIsToldInTheRequestItAnswers(t *testing.T) {
 		{"told before its request landed", open("A", hsA), true},
 		{"told after its request landed", []flightStep{{"A", "lift", nil}, {"A", "land", nil}, {"A", "handshake", hsA}}, false},
 		{"told in no request a connection lifted", []flightStep{{"A", "lift", nil}, {"Z", "handshake", hsA}, {"A", "land", nil}}, false},
-		{"told as a protocol phase", []flightStep{{"A", "lift", nil}, {"A", "said", hsA}, {"A", "land", nil}}, false},
+		// Said in its request as any other protocol phase is, it has that
+		// request's place (TestAProtocolPhaseHasThePlaceOfTheRequestItWasSaidIn).
+		{"told as a protocol phase said in its request", []flightStep{{"A", "lift", nil}, {"A", "said", hsA}, {"A", "land", nil}}, true},
 		{"told with no connection ever lifted", []flightStep{{"Z", "handshake", hsA}}, true},
 		{"told in NoRequest", []flightStep{{"A", "lift", nil}, {"N", "none", hsA}, {"A", "land", nil}}, false},
 		{"chosen in an earlier request", []flightStep{{"A1", "lift", nil}, {"A1", "land", nil}, {"A", "lift", nil}, {"A", "ssl", hsA}, {"A", "land", nil}}, false},
@@ -602,6 +606,146 @@ func TestAHandshakeIsToldInTheRequestItAnswers(t *testing.T) {
 			runFlights(tr, tc.steps)
 			if f, l := tr.Placed().Order.Of(hsA); (f != 0 && f == l) != tc.want {
 				t.Fatalf("%v: the start-up at %d,%d; told %v, want %v", tc.steps, f, l, f != 0, tc.want)
+			}
+		})
+	}
+}
+
+// A protocol phase its parser says it served in a request (a Postgres
+// connection's setup statement or catalog read: Sequelize's sync on one
+// connection before the application's first test) is that request's answer:
+// it has the request's place in F's order, told once the request landed, as
+// a data-plane serve is. Untold, every word of a start-up catalog read stood
+// as a place keploy cannot order, and an echo beside one was refused. It has
+// none where its request was aloft beside one that was a serve, got a
+// handshake or got another such phase (the application may hold either
+// answer first), and makes no data-plane serve or handshake untold, as a
+// handshake makes none. Told in no request, or with none said, after a
+// connection lifted, it has none: a greeting a server sends first answers
+// no request.
+func TestAProtocolPhaseHasThePlaceOfTheRequestItWasSaidIn(t *testing.T) {
+	phase := func(name string) *models.Mock {
+		return &models.Mock{Name: name, Spec: models.MockSpec{Metadata: map[string]string{"type": "config", "lifetime": "session"}}}
+	}
+	table, create, index := phase("mock-13"), phase("mock-14"), phase("mock-15")
+	q := &models.Mock{Name: "mock-25"}
+	req := func(c, what string, m *models.Mock) []flightStep {
+		return []flightStep{{c, "lift", nil}, {c, what, m}, {c, "land", nil}}
+	}
+	t.Run("a start-up's setup statements on one connection", func(t *testing.T) {
+		var steps []flightStep
+		for _, m := range []*models.Mock{table, create, index} {
+			steps = append(steps, req("C2", "said", m)...)
+		}
+		steps = append(steps, req("C4", "said", q)...)
+		tr := NewTracker()
+		runFlights(tr, steps)
+		o := tr.Placed().Order
+		prev := 0
+		for _, m := range []*models.Mock{table, create, index, q} {
+			f, l := o.Of(m)
+			if f == 0 || f != l || f <= prev {
+				t.Fatalf("%s at %d,%d after %d; want its own serve's number, in the order F served them", m.Name, f, l, prev)
+			}
+			prev = f
+		}
+	})
+	t.Run("beside a statement", func(t *testing.T) {
+		for i, steps := range interleavings(req("S", "said", q), req("P", "said", index)) {
+			tr := NewTracker()
+			runFlights(tr, steps)
+			o := tr.Placed().Order
+			if f, l := o.Of(q); f == 0 || f != l {
+				t.Fatalf("interleaving %d %v: the statement at %d,%d; want its serve's number (a phase beside it is no serve)", i, steps, f, l)
+			}
+			f, _ := o.Of(index)
+			if want := !overlapped(steps, "S", "P"); (f != 0) != want {
+				t.Fatalf("interleaving %d %v: the phase at %d; told %v, want %v", i, steps, f, f != 0, want)
+			}
+		}
+	})
+	t.Run("beside another connection's phase", func(t *testing.T) {
+		for i, steps := range interleavings(req("A", "said", table), req("B", "said", index)) {
+			tr := NewTracker()
+			runFlights(tr, steps)
+			o := tr.Placed().Order
+			fa, _ := o.Of(table)
+			fb, _ := o.Of(index)
+			want := !overlapped(steps, "A", "B")
+			if (fa != 0) != want || (fb != 0) != want {
+				t.Fatalf("interleaving %d %v: A's phase at %d, B's at %d; told %v, want %v", i, steps, fa, fb, fa != 0 && fb != 0, want)
+			}
+		}
+	})
+	t.Run("beside a handshake", func(t *testing.T) {
+		hs := handshakeMock("mock-hs")
+		for i, steps := range interleavings(req("H", "handshake", hs), req("P", "said", index)) {
+			tr := NewTracker()
+			runFlights(tr, steps)
+			o := tr.Placed().Order
+			if f, l := o.Of(hs); f == 0 || f != l {
+				t.Fatalf("interleaving %d %v: the handshake at %d,%d; want its serve's number (a phase beside it leaves it its place)", i, steps, f, l)
+			}
+			f, _ := o.Of(index)
+			if want := !overlapped(steps, "H", "P"); (f != 0) != want {
+				t.Fatalf("interleaving %d %v: the phase at %d; told %v, want %v", i, steps, f, f != 0, want)
+			}
+		}
+	})
+	t.Run("a read keeps the first phase of a request beside it", func(t *testing.T) {
+		// A's first phase was aloft with B's: a read made before A's second
+		// phase keeps B's untold after A's second is numbered.
+		tr := NewTracker()
+		a, b := tr.Lift(), tr.Lift()
+		tr.ServedMockIn(table, a)
+		tr.ServedMockIn(index, b)
+		b.Land()
+		read := tr.Placed().Order
+		tr.ServedMockIn(create, a)
+		a.Land()
+		if f, l := read.Of(index); f != 0 || l != 0 {
+			t.Fatalf("B's phase at %d,%d; want untold (A's first phase was aloft beside it)", f, l)
+		}
+	})
+	t.Run("said in another tracker's request", func(t *testing.T) {
+		tr, other := NewTracker(), NewTracker()
+		a := tr.Lift()
+		a.Land()
+		f := other.Lift()
+		tr.ServedMockIn(index, f)
+		f.Land()
+		if g, l := tr.Placed().Order.Of(index); g != 0 || l != 0 {
+			t.Fatalf("the phase at %d,%d; want no place (its request is no request of this tracker's)", g, l)
+		}
+	})
+	t.Run("a statement of the next set numbered as a phase was", func(t *testing.T) {
+		// The next set numbers its serves from 1 again: a phase of the set
+		// before marks none of them.
+		tr := NewTracker()
+		runFlights(tr, req("P", "said", index))
+		tr.NewSet()
+		runFlights(tr, []flightStep{{"H", "lift", nil}, {"S", "lift", nil}, {"S", "said", q}, {"H", "handshake", handshakeMock("mock-hs")}, {"S", "land", nil}, {"H", "land", nil}})
+		if f, l := tr.Placed().Order.Of(q); f != 1 || l != 1 {
+			t.Fatalf("the next set's statement at %d,%d beside a handshake; want 1,1 (no phase of the set before is its)", f, l)
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		steps []flightStep
+		want  bool
+	}{
+		{"said in its request", req("A", "said", index), true},
+		{"told with no request said", req("A", "unsaid", index), false},
+		{"said after its request landed", []flightStep{{"A", "lift", nil}, {"A", "land", nil}, {"A", "said", index}}, false},
+		{"said in NoRequest", []flightStep{{"A", "lift", nil}, {"N", "none", index}, {"A", "land", nil}}, false},
+		{"said in a request that ended untold", []flightStep{{"A", "lift", nil}, {"A", "said", index}, {"A", "untold", nil}}, false},
+		{"told with no connection ever lifted", []flightStep{{"Z", "unsaid", index}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTracker()
+			runFlights(tr, tc.steps)
+			if f, l := tr.Placed().Order.Of(index); (f != 0 && f == l) != tc.want {
+				t.Fatalf("%v: the phase at %d,%d; told %v, want %v", tc.steps, f, l, f != 0, tc.want)
 			}
 		})
 	}

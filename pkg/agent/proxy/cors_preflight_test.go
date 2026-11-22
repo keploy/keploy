@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -98,7 +99,13 @@ type corsTest struct {
 // unconsumed.
 func corsRun(t *testing.T, set []*models.Mock, tests []corsTest) (missed map[string][]int, unconsumed map[string][]string) {
 	t.Helper()
-	mm := NewMockManager(nil, nil, zap.NewNop())
+	return corsRunLogged(t, zap.NewNop(), set, tests)
+}
+
+// corsRunLogged is corsRun with the agent logging to logger.
+func corsRunLogged(t *testing.T, logger *zap.Logger, set []*models.Mock, tests []corsTest) (missed map[string][]int, unconsumed map[string][]string) {
+	t.Helper()
+	mm := NewMockManager(nil, nil, logger)
 	t.Cleanup(mm.Close)
 	mm.SetMocksWithWindow(nil, set, models.BaseTime, time.Now().Add(time.Hour))
 	mm.ServeExactPool("k", nil)
@@ -106,7 +113,7 @@ func corsRun(t *testing.T, set []*models.Mock, tests []corsTest) (missed map[str
 	for _, tc := range tests {
 		mm.ServeExactTest(tc.name, corsOwned(tc.mapping...))
 		for i, req := range tc.sends {
-			if r := sendForMiss(t, mm, models.OutgoingOptions{}, nil, req); r != nil {
+			if r := sendForMissLogged(t, context.Background(), logger, mm, models.OutgoingOptions{}, nil, req); r != nil {
 				missed[tc.name] = append(missed[tc.name], i)
 			}
 		}

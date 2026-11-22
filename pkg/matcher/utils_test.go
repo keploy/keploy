@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -785,5 +786,95 @@ func TestSplitNoiseKeysDifferingOnlyInCaseKeepTheSameEntryEveryCall(t *testing.T
 		if got := header["x-id"]; len(got) != 1 || got[0] != "^h$" {
 			t.Fatalf("call %d: header x-id = %q, want the entry of \"header.X-Id\", the smallest key", i, got)
 		}
+	}
+}
+
+// jsonDiffExact runs the body comparison with noise and reports whether the two
+// documents compare equal under it.
+func jsonDiffExact(t *testing.T, exp, act string, noise map[string][]string) bool {
+	t.Helper()
+	v, err := ValidateAndMarshalJSON(zap.NewNop(), &exp, &act)
+	if err != nil {
+		t.Fatalf("ValidateAndMarshalJSON: %v", err)
+	}
+	res, err := JSONDiffWithNoiseControl(v, noise, false, nil)
+	if err != nil {
+		return false
+	}
+	return res.IsExact()
+}
+
+// An entry naming id keys excuses its field under every id key of the map, and
+// nothing under an ordinary key there or anywhere else in the response.
+func TestJSONDiffWithNoiseControl_IDKeyEntry(t *testing.T) {
+	u, v := testUUID(1), testUUID(2)
+	doc := func(t1, t2, rate, summary string) string {
+		return `{"options":{"` + u + `":{"traceId":"` + t1 + `","rate":` + rate + `},"` + v +
+			`":{"traceId":"` + t2 + `","rate":2},"summary":{"traceId":"` + summary + `"}}}`
+	}
+	noise := map[string][]string{"options.{id}.traceId": {}}
+	exp := doc("a", "b", "1", "s")
+	if !jsonDiffExact(t, exp, doc("x", "y", "1", "s"), noise) {
+		t.Errorf("the traceId under both id keys is excused")
+	}
+	if jsonDiffExact(t, exp, doc("x", "y", "9", "s"), noise) {
+		t.Errorf("a sibling field under an id key is still compared")
+	}
+	if jsonDiffExact(t, exp, doc("a", "b", "1", "changed"), noise) {
+		t.Errorf("traceId under an ordinary key (summary) is still compared")
+	}
+}
+
+// An entry naming ONE id keeps naming that id only. Auto-noise writes one per
+// id whose field drifted, which on a real response is not every id, so reading
+// it as every id would stop asserting the field where it never drifted.
+func TestJSONDiffWithNoiseControl_PerIDEntryNamesOneID(t *testing.T) {
+	u, v := testUUID(1), testUUID(2)
+	doc := func(t1, t2 string) string {
+		return `{"options":{"` + u + `":{"hold":"` + t1 + `"},"` + v + `":{"hold":"` + t2 + `"}}}`
+	}
+	noise := map[string][]string{"options." + u + ".hold": {}}
+	if !jsonDiffExact(t, doc("a", "b"), doc("x", "b"), noise) {
+		t.Errorf("the id the entry names is excused")
+	}
+	if jsonDiffExact(t, doc("a", "b"), doc("a", "y"), noise) {
+		t.Errorf("the same field under another id is still compared")
+	}
+}
+
+// Most specific first holds across the two spellings: an entry naming one id
+// is more specific than the id-key entry for the same field, so its pattern
+// decides for that id, and the id-key entry is not a way around it.
+func TestJSONDiffWithNoiseControl_PerIDPatternOutranksIDKeyEntry(t *testing.T) {
+	u, v := testUUID(1), testUUID(2)
+	doc := func(t1, t2 string) string {
+		return `{"options":{"` + u + `":{"t":"` + t1 + `"},"` + v + `":{"t":"` + t2 + `"}}}`
+	}
+	noise := map[string][]string{
+		"options." + u + ".t": {"^ok-"},
+		"options.{id}.t":      {},
+	}
+	if !jsonDiffExact(t, doc("ok-1", "b"), doc("ok-2", "y"), noise) {
+		t.Errorf("values inside the narrower pattern, and the other id, are excused")
+	}
+	if jsonDiffExact(t, doc("ok-1", "b"), doc("bad", "b"), noise) {
+		t.Errorf("a value outside the per-id pattern is a difference although an id-key entry also names the field")
+	}
+}
+
+// Under the proven switch a learned entry names exactly its field and subtree;
+// one naming id keys does so under every id key. The learned key is spelled as
+// the index spells the entry, a literal id beside the segment included.
+func TestLearnedIDKeyEntryIsExactUnderTheSwitch(t *testing.T) {
+	u, v := testUUID(3), testUUID(4)
+	learned := "Options[]." + u + ".{ID}.T"
+	idx := buildNoiseIndex(map[string][]string{learned: {}}, nil)
+	idx.markTypeStrict(map[string]struct{}{learned: {}})
+	t.Setenv(provenswitch.Env, "1")
+	if _, noisy, strict := idx.matchKind("options[]." + v + "." + u + ".t"); !noisy || !strict {
+		t.Fatalf("the learned field under id keys: noisy=%v typeStrict=%v", noisy, strict)
+	}
+	if _, noisy, _ := idx.matchKind("options[]." + v + "." + u + ".tx"); noisy {
+		t.Fatalf("a sibling whose name it prefixes is excused under the switch")
 	}
 }

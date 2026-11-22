@@ -50,6 +50,15 @@ func (p *stageProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
 }
 
+func (p *stageProxy) RefuseWorker(uint32, string)                {}
+func (p *stageProxy) SeedRunPlaceWindows(ws []models.TestWindow) { p.mm.SeedRunPlaceWindows(ws) }
+func (p *stageProxy) ReachRunTest(test string, open bool)        { p.mm.ReachRunTest(test, open) }
+func (p *stageProxy) EndRunSet()                                 { p.mm.EndRunSet() }
+
+func (p *stageProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	return nil, nil
+}
+
 func (p *stageProxy) FirstTestWindowStart() time.Time { return p.mm.FirstTestWindowStart() }
 func (p *stageProxy) SetMappedUniverse([]string)      {}
 
@@ -73,6 +82,13 @@ func stageMock(name, path string, at time.Time) *models.Mock {
 		},
 		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true},
 	}
+}
+
+// answeredAt gives m the answer's time at, written in one write: its one mark.
+func answeredAt(m *models.Mock, at time.Time) *models.Mock {
+	m.Spec.ResTimestampMock = at
+	m.Spec.HTTPResp.Marks = &models.HTTPAnswerMarks{Head: at, Writes: []models.HTTPAnswerWrite{{Offset: len(m.Spec.HTTPResp.Body), TS: at}}}
+	return m
 }
 
 func stageSessionMock(name, path string) *models.Mock {
@@ -547,6 +563,15 @@ type workerProxy struct {
 	recordingProxy
 	workerScopes map[uint32][]string
 	cleared      []uint32
+	// refused is why each worker's reads are refused (RefuseWorker).
+	refused map[uint32]string
+}
+
+func (p *workerProxy) RefuseWorker(pid uint32, why string) {
+	if p.refused == nil {
+		p.refused = map[uint32]string{}
+	}
+	p.refused[pid] = why
 }
 
 func (p *workerProxy) SetWorkerScope(pid uint32, names []string) {
@@ -558,11 +583,14 @@ func (p *workerProxy) SetWorkerScope(pid uint32, names []string) {
 
 func (p *workerProxy) ClearWorkerScope(pid uint32) { p.cleared = append(p.cleared, pid) }
 
-// A worker that reports its pid is scoped on its own view, with the switch off
-// as before: its begin and end stage nothing on the global pool, whether its
-// test recorded calls or none.
+// A worker that reports its pid, in a run with the suite mark or an app-start mark,
+// is scoped on its own view, with the switch off as before: its begin and end
+// stage nothing on the global pool, whether its test recorded calls or none.
+// (Without the marks its begin is refused:
+// TestAPidBeginWithoutMarksIsRefusedAndFailsTheTest.)
 func TestScopeWorkerScopeStagesNothingGlobal(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "")
+	marked(t, "TestA", "TestC")
 	p := &workerProxy{}
 	cfg := &config.Config{}
 	cfg.Agent.Mode = models.MODE_TEST

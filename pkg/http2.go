@@ -508,6 +508,24 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 	return completed
 }
 
+// ResetStream forgets a stream that either side reset (RST_STREAM) before it
+// was complete: no call is built of it, and what it held goes. It reports
+// whether the stream ended so, which a stream it holds nothing of did too. A
+// complete stream is its capture's (GetCompleteStreams, CleanupStream): it
+// stays, and ResetStream reports false. A frame of the stream handled after
+// the reset is the other side's (one side sends nothing after its own reset,
+// and what it sent before is handled before it): it starts the stream again
+// with that side's frames only, so it never completes.
+func (sm *DefaultStreamManager) ResetStream(streamID uint32) bool {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	if s := sm.streams[streamID]; s != nil && s.isComplete {
+		return false
+	}
+	delete(sm.streams, streamID)
+	return true
+}
+
 // CleanupStream removes a stream from the manager
 func (sm *DefaultStreamManager) CleanupStream(streamID uint32) {
 	sm.mutex.Lock()
@@ -654,13 +672,17 @@ func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, au
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
 // dialTCPWithConnRefusedRetry dials authority over TCP, retrying a pure
-// connection-refused (the app is still coming up) up to maxConnRefusedRetries
-// with the shared growing backoff. A refused dial sent zero bytes and consumed
-// zero mocks, so the re-dial is idempotent; any other dial error, exhaustion of
-// the attempts, or a cancelled context returns immediately, and so does a
-// refusal at an address reach says the app's server on appPort (the port the
-// test was recorded on, 0 when not known) can never be reached at.
+// connection-refused (the app is still coming up): on a context EndsWithApp
+// marked, once authority accepts a connection, with only the context ending
+// the wait; on any other, up to maxConnRefusedRetries with the shared growing
+// backoff. A refused dial sent zero bytes and consumed zero mocks, so the
+// re-dial is idempotent; any other dial error, exhaustion of the attempts, or
+// a cancelled context returns immediately, and so does a refusal at an
+// address reach says the app's server on appPort (the port the test was
+// recorded on, 0 when not known) can never be reached at.
 func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string, reach AppPortReachability, appPort uint16) (net.Conn, error) {
+	var wait reSendWait
+	defer wait.end()
 	for attempt := 0; ; attempt++ {
 		conn, err := net.Dial("tcp", authority)
 		if err == nil {
@@ -675,6 +697,12 @@ func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, author
 					return nil, unreachable
 				}
 			}
+		}
+		if AppExitEnds(ctx) {
+			if waitErr := waitToReSend(ctx, logger, "gRPC test's dial", authority, err, &wait); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
 		}
 		if attempt >= maxConnRefusedRetries {
 			return nil, err
@@ -706,7 +734,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Determine which port to use for test execution.
 	var err error
 	recorded := authority
-	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
+	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger.With(zap.String("testcase", tc.Name)))
 	if err != nil {
 		return nil, err
 	}
@@ -744,7 +772,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// the exchange (pingWatch tells it which: never a keepalive) cuts it.
 	var dialed net.Conn = conn
 	var pings *pingWatch
-	answer := newAnswerWatch(cfg)
+	answer := newAnswerWatch(ctx, cfg)
 	defer answer.stop()
 	defer answer.waiting()()
 	answer.closeOnCut(conn)
@@ -909,8 +937,10 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			// mock. Stop draining and record it below, rather than discarding
 			// a partial stream and the reason it ended.
 			drainErr = err
+			// Its code, never its message: the app's server writes that
+			// (an echo of what it refused); the mock records it.
 			logger.Debug("gRPC response stream ended with an error; recording what arrived",
-				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.Error(err))
+				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.String("code", status.Code(err).String()))
 			break
 		}
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))

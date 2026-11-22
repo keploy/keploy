@@ -1,5 +1,7 @@
 package mysql
 
+import "encoding/binary"
+
 // This file contains struct for connection phase packets
 // refer: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets.html
 
@@ -15,7 +17,13 @@ type HandshakeV10Packet struct {
 	CapabilityFlags uint32 `yaml:"capability_flags" json:"capability_flags"`
 	CharacterSet    uint8  `yaml:"character_set" json:"character_set"`
 	StatusFlags     uint16 `yaml:"status_flags" json:"status_flags"`
-	AuthPluginName  string `yaml:"auth_plugin_name" json:"auth_plugin_name"`
+	// MariaDBCapabilities is a MariaDB server's extended capabilities (its
+	// MARIADB_CLIENT_* flags, bits 32-63 of its capabilities), which it sends
+	// in the last four of the greeting's ten reserved bytes, with
+	// CLIENT_MYSQL (bit 0) clear. Zero for MySQL, whose reserved bytes are
+	// all zero.
+	MariaDBCapabilities uint32 `yaml:"mariadb_capabilities,omitempty" json:"mariadb_capabilities,omitempty"`
+	AuthPluginName      string `yaml:"auth_plugin_name" json:"auth_plugin_name"`
 }
 
 // HandshakeResponse41Packet represents the response packet sent by the client to the server after receiving the HandshakeV10Packet
@@ -65,4 +73,17 @@ type AuthNextFactorPacket struct {
 	PacketType byte   `yaml:"packet_type" json:"packet_type"`
 	PluginName string `yaml:"plugin_name" json:"plugin_name"`
 	PluginData string `yaml:"plugin_data" json:"plugin_data"`
+}
+
+// MariaDBCapabilities returns the MariaDB extended capabilities the client
+// sent in the last four bytes of its filler. They count only when its
+// CLIENT_MYSQL bit is clear (see CLIENT_MYSQL).
+func (p *HandshakeResponse41Packet) MariaDBCapabilities() uint32 {
+	return binary.LittleEndian.Uint32(p.Filler[19:])
+}
+
+// MariaDBCapabilities returns the MariaDB extended capabilities the client
+// sent in the last four bytes of its filler, as in its HandshakeResponse41.
+func (p *SSLRequestPacket) MariaDBCapabilities() uint32 {
+	return binary.LittleEndian.Uint32(p.Filler[19:])
 }

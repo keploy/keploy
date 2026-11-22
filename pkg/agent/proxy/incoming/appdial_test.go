@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -234,5 +234,33 @@ func TestCallsThatFindAnAddressRefusingShareOneWait(t *testing.T) {
 	}
 	if _, waits := waitersAt(pm, addr); waits != 0 {
 		t.Fatalf("the wait outlived its calls (%d)", waits)
+	}
+}
+
+// A call whose context ends while other calls share its wait leaves at once,
+// and the others wait on, in the same wait: its poll is theirs, and the
+// connection that finds the listener goes to one of them.
+func TestACallThatLeavesASharedWaitEndsAtOnceAndTheOthersWaitOn(t *testing.T) {
+	addr := sharedAppAddr(t)
+	pm := New(zap.NewNop(), nil, &config.Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	leaving := dialAsync(ctx, pm, addr, nil)
+	staying := dialAsync(context.Background(), pm, addr, nil)
+	awaitWaiters(t, pm, addr, 2)
+	cancel()
+	if r := result(t, leaving); !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("a call that left a shared wait returned %v, want its context's end", r.err)
+	}
+	if callers, waits := waitersAt(pm, addr); callers != 1 || waits != 1 {
+		t.Fatalf("after one of two calls left: %d calls in %d waits, want the other in one", callers, waits)
+	}
+	l := testnet.ListenShared(t, "tcp4", addr)
+	r := result(t, staying)
+	if r.err != nil {
+		t.Fatalf("the call that stayed in the wait: %v", r.err)
+	}
+	defer func() { _ = r.conn.Close() }()
+	if got := accepted(t, l); got != 1 {
+		t.Fatalf("the app saw %d connections for the one call that stayed", got)
 	}
 }

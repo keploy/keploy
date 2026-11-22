@@ -39,7 +39,7 @@ func NewNoiseLookup(noise map[string][]string) NoiseLookup {
 // is a scalar (scalar true); a container is excused only by an entry with no
 // patterns.
 func (l NoiseLookup) Covers(path, value string, scalar bool) bool {
-	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path))
+	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path), true)
 	if !noisy {
 		return false
 	}
@@ -49,11 +49,46 @@ func (l NoiseLookup) Covers(path, value string, scalar bool) bool {
 	return scalar && anyRegexpMatchStr(value, regs)
 }
 
+// CoversAdded reports whether the leaf at path, which the live request carries
+// and the recorded one lacks, is noise: an entry with no patterns names it, and
+// that entry does not name id keys. An entry naming id keys speaks for the ids
+// the recording has; a new id, or a field an id did not carry, is a change (as
+// the response matcher reads it, noiseIndex.matchAdded).
+func (l NoiseLookup) CoversAdded(path string) bool {
+	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path), false)
+	return noisy && len(regs) == 0
+}
+
+// Patterns are the patterns of the entry that names the leaf at path, as
+// Covers reads it, and whether an entry does: none for an entry that excuses
+// every value. A reason names them; Covers decides.
+func (l NoiseLookup) Patterns(path string) ([]string, bool) {
+	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path), true)
+	out := make([]string, len(regs))
+	for i, re := range regs {
+		out[i] = re.String()
+	}
+	return out, noisy
+}
+
 // matchWholeFields is match with entries naming whole fields (namesWholeFields):
-// the first, most specific, entry that does wins.
-func (ni noiseIndex) matchWholeFields(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
+// the first, most specific, entry that does wins. An entry naming id keys
+// (NoiseIDKey) is tested against the path with its id keys collapsed, as
+// matchKind tests it, and only when idKeys is set (CoversAdded).
+func (ni noiseIndex) matchWholeFields(keyLower string, idKeys bool) (regs []*regexp.Regexp, isNoisy bool) {
+	collapsed := keyLower
+	if idKeys && ni.idKeys {
+		collapsed = CollapseIDKeys(keyLower)
+	}
 	for _, e := range ni.entries {
-		if namesWholeFields(keyLower, e.keyLower) {
+		path := keyLower
+		if e.idKeys {
+			if !idKeys {
+				continue
+			}
+			path = collapsed
+		}
+		if namesWholeFields(path, e.keyLower) {
 			return e.regexps, true
 		}
 	}

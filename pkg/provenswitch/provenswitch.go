@@ -186,7 +186,7 @@ func CheckAgent(reported string) error {
 	case reported == local:
 		return nil
 	}
-	return fmt.Errorf("%w: the switch is %s in this keploy (%s) and %s in its agent. An agent takes it only from the --%s flag of the keploy that starts it; an agent started by anything else (k8s-proxy does not pass the flag yet) or by another keploy version has its own",
+	return fmt.Errorf("%w: the switch is %s in this keploy (%s) and %s in its agent. An agent takes it only from the --%s flag of what starts it: this keploy, or k8s-proxy for the agents it starts; an agent started by anything else (such as a k8s-proxy release that does not pass the flag) or by another keploy version has its own",
 		ErrAgentSwitch, local, Env, reported, AgentFlag)
 }
 

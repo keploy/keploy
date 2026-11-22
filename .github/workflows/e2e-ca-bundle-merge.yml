@@ -1,5 +1,5 @@
 # e2e-ca-bundle-merge.yml — runs tests/e2e/ca-bundle-merge/run.sh on push and
-# PR. The test brings up two containers via docker compose:
+# PR. The test brings up, via docker compose, among others:
 #   * ca-writer (locally built kpl-ca-merge:local — see Dockerfile.setup: a
 #     debian:trixie-slim base with ca-certificates + curl installed) invokes
 #     the Go harness which calls SetupCA(..., isDocker=true) so
@@ -11,8 +11,14 @@
 #     with curl exit 60 — proves the guard by demonstrating the bug would
 #     exist without the merge).
 #
+# Further services cover trust-store sources other than the image's CA
+# bundle: a writer with no bundle (an empty /etc/ssl/certs), writers given a
+# private corporate CA through SSL_CERT_DIR and SSL_CERT_FILE, and a local
+# HTTPS server that CA signed (corp-pki, corp-server). run.sh lists the
+# assertions, [A] to [F].
+#
 # Network egress to AWS STS is required; if the runner lacks it, this job
-# will fail the [A] assertion — that is the intended behaviour and mirrors
+# will fail the [A] to [D] assertions — that is the intended behaviour and mirrors
 # what a real customer would observe.
 
 name: e2e-ca-bundle-merge

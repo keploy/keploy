@@ -95,21 +95,24 @@ type roundStream struct {
 // An agent this client started that can no longer be reached to ask
 // (utils.AgentGone) has died, and its streams close: each is still judged by
 // its marker, whichever comes first, so a marker the agent sent before it
-// went is read and counts. One something else stops, and an agent that
-// answers but does not take the request, leave the streams for the caller to
-// close, as before markers, said at WARN: a frame still on its way is lost.
+// went is read and counts. One something else stops leaves the streams for
+// the caller to close, as before markers, said at WARN: a frame still on its
+// way is lost. An agent that answers but does not take the request (an error
+// that is not the agent gone) leaves them so too, and that answer is refused:
+// the caller says what it costs (keploy mock record saves the recording and
+// says so at WARN; keploy mock replay, the judge, does not judge the run).
 //
 // Every mockDrainNotice it says what it is still doing, and, once the run has
 // been interrupted, that another interrupt stops it now and what that costs
 // (as drainTrailingMocks does); the next one then does, and the round is
 // lost. A stop-now the user already took (an earlier read's offer) is not
 // waited out: the streams are ended here, as before markers.
-func (m *mockService) endRound(r *roundEnd, strict func() bool, streams []roundStream, words drainWords) (lost bool) {
+func (m *mockService) endRound(r *roundEnd, strict func() bool, streams []roundStream, words drainWords) (lost bool, refused error) {
 	select {
 	case <-utils.StopNow():
 		m.logger.Warn("not waiting for the keploy agent to end its streams with their markers: the user's interrupt already gave up waiting on the agent; ending them here, and what was still on its way is lost",
 			zap.String("next_step", words.endedHere))
-		return false
+		return false, nil
 	default:
 	}
 	reqCtx, cancelReq := context.WithCancel(context.Background())
@@ -147,11 +150,9 @@ func (m *mockService) endRound(r *roundEnd, strict func() bool, streams []roundS
 					continue
 				}
 				if utils.AgentGone(err) {
-					return m.endedEarly(false, s.kind, words, err)
+					return m.endedEarly(false, s.kind, words, err), nil
 				}
-				m.logger.Warn("the keploy agent did not take the request to end its streams; ending them here, and what was still on its way is lost",
-					zap.Error(err), zap.String("next_step", words.endedHere))
-				return false
+				return false, err
 			case <-utils.StopNow():
 				// A stream that is through goes by its marker, whatever
 				// else is ready.
@@ -159,7 +160,7 @@ func (m *mockService) endRound(r *roundEnd, strict func() bool, streams []roundS
 				case <-s.done:
 					waiting = false
 				default:
-					return m.stoppedNow(words)
+					return m.stoppedNow(words), nil
 				}
 			case <-notices.C:
 				msg := words.saving
@@ -177,14 +178,14 @@ func (m *mockService) endRound(r *roundEnd, strict func() bool, streams []roundS
 		// it gives the round up: the user's stop.
 		select {
 		case <-utils.StopNow():
-			return m.stoppedNow(words)
+			return m.stoppedNow(words), nil
 		default:
 		}
 		if lost := m.endedEarly(strict(), s.kind, words, gone); lost {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // endedEarly says the agent left a round before it was through (endRound): it
@@ -205,3 +206,40 @@ func (m *mockService) endedEarly(strict bool, kind models.FrameStream, words dra
 	utils.SetExitCodeOnce(utils.ExitKeployError)
 	return true
 }
+
+// replayEndRefused is keploy mock replay's answer to an end request its agent
+// answered and did not take (endRound's refused; nil when there was none):
+// the request stream is ended here, and a request still on its way is not in
+// what the run compares, where it would read as one the app never made.
+// Replay is the judge, so a run that cannot confirm it holds every request is
+// not judged: it is said at ERROR, the run gets keploy's exit code, and the
+// reason the run is short (Replay's requestsShort), naming the agent's
+// answer, is returned. Not once the user stopped the run: an agent the user's
+// stop reached may refuse as it goes, and the run ends unjudged, as one the
+// user stopped (128+N). That is said at WARN, as keploy mock record says it,
+// and "" is returned.
+func (m *mockService) replayEndRefused(name string, refused error) string {
+	if refused == nil {
+		return ""
+	}
+	if utils.Interrupted() {
+		m.logger.Warn(endRefused, zap.Error(refused), zap.String("next_step", replayDrainWords.endedHere))
+		return ""
+	}
+	m.logger.Error(endRefusedRequestsUnconfirmed, zap.String("mock-set", name), zap.Error(refused),
+		zap.String("next_step", endRefusedRequestsUnconfirmedNext))
+	utils.SetExitCodeOnce(utils.ExitKeployError)
+	return requestsEndRefused + " (" + refused.Error() + ")"
+}
+
+// endRefusedRequestsUnconfirmed, with its next step, is said at ERROR when
+// keploy mock replay's agent did not take the request to end its request
+// stream (replayEndRefused).
+const (
+	endRefusedRequestsUnconfirmed     = "replay failed: the keploy agent did not take the request to end its request stream after what it sent, so keploy ended the stream itself: this run is not judged, since a request still on its way would read as one the app never made"
+	endRefusedRequestsUnconfirmedNext = "check the agent logs for why it refused the request, then replay again with a keploy agent of this keploy's version"
+)
+
+// requestsEndRefused is why such a run is short of the requests the agent
+// captured (Replay's requestsShort), before the agent's answer.
+const requestsEndRefused = "keploy could not confirm it read every request the app served: its agent did not take the request to end its request stream after what it sent"

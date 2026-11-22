@@ -32,7 +32,7 @@ func heldRun(t *testing.T, env ...string) (cmd *exec.Cmd, out *bytes.Buffer, dir
 		t.Skipf("cannot make a named pipe here: %v", err)
 	}
 	cmd = exec.Command(os.Args[0])
-	cmd.Args = []string{"keploy", "--help"}
+	cmd.Args = []string{"keploy", "--debug", "--help"}
 	cmd.Env = append(append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+tmp, "KEPLOY_DEBUG_FILE="+fifo), env...)
 	cmd.Dir = dir
 	out = &bytes.Buffer{}
@@ -137,12 +137,18 @@ func TestNativeAgentAppendsToItsCLIsLog(t *testing.T) {
 	}
 	defer func() { _ = held.Close() }()
 
-	// The agent logs a warning: its KEPLOY_DEBUG_FILE cannot be opened.
+	// The agent logs a warning: its KEPLOY_DEBUG_FILE cannot be opened (a
+	// directory stands at the file's path so .gitignore in its parent succeeds
+	// and OpenDebugFile fails).
 	agentTmp := t.TempDir()
+	unopenable := filepath.Join(t.TempDir(), "debug.log")
+	if err := os.Mkdir(unopenable, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	agent := exec.Command(os.Args[0])
-	agent.Args = []string{"keploy", "agent", "--" + log.ClientLogFileFlag + "=" + logPath, "--help"}
+	agent.Args = []string{"keploy", "agent", "--debug", "--" + log.ClientLogFileFlag + "=" + logPath, "--help"}
 	agent.Env = append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+agentTmp, "SUDO_UID=",
-		"KEPLOY_DEBUG_FILE="+filepath.Join(t.TempDir(), "missing", "debug.log"))
+		"KEPLOY_DEBUG_FILE="+unopenable)
 	agent.Dir = dir
 	agentOut, err := agent.CombinedOutput()
 	if err != nil {

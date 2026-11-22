@@ -255,7 +255,7 @@ func randomOffsetPlaces(rng *rand.Rand) *offsetPlaces {
 			k := keys[rng.Intn(len(keys))]
 			places[j] = keyedPlace{k: k, m: moment(k), where: fmt.Sprintf("%s at %s", x.mock, k.path)}
 		}
-		srcs[i] = offsetSource{key: offsetKeyOf(x.mock, x.at) + fmt.Sprint(i), x: x, places: places, kept: true, read: true}
+		srcs[i] = offsetSource{key: []byte(offsetKeyOf(x.mock, x.at) + fmt.Sprint(i)), x: x, places: places, kept: true, read: true}
 	}
 	ix := newOffsetIndex(0)
 	var snap offsetSnap

@@ -400,3 +400,25 @@ func TestTheLearnStepReadsTheProvenOnlyStaticHeaders(t *testing.T) {
 		}
 	}
 }
+
+// A SigV4 Authorization keploy.yml guards with patterns is excused when its
+// recorded and its live value each match one; when the live one is outside
+// them, each part that differs is named with the patterns and the side.
+func TestStrictSigV4KeployYmlPatternNamesEachPart(t *testing.T) {
+	body := "hello"
+	rec := recorded("put", "/bucket/key", awsCall(sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(1)), "20261015T101010Z", hashOf(body)), body)
+	live := sent("/bucket/key", awsCall(sigV4("AKID", "20261015", "eu-west-1", "s3", signed, sig(2)), "20261015T101533Z", hashOf(body)), body)
+	if got, diag := strictMatch(t, live, map[string][]string{"authorization": {`^AWS4-HMAC-SHA256 `}}, nil, nil, rec); got == nil {
+		t.Fatalf("an Authorization both of whose values match was compared: %v", differs(diag))
+	}
+	got, diag := strictMatch(t, live, map[string][]string{"authorization": {`/us-east-1/s3/`}}, nil, nil, rec)
+	if got != nil || !hasField(differs(diag), "header.authorization.region") {
+		t.Fatalf("a live Authorization outside the pattern: served %v, differs %v", got != nil, differs(diag))
+	}
+	why := whyOf(diag, "header.authorization.region")
+	for _, want := range []string{"header.authorization", `"/us-east-1/s3/"`, "live value"} {
+		if !strings.Contains(why, want) {
+			t.Fatalf("reason %q does not say %q", why, want)
+		}
+	}
+}

@@ -705,7 +705,7 @@ func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testin
 		if r.Status != models.TestStatusFailed {
 			t.Fatalf("%s: %s, want FAILED: the loss taints the test running and every later one", id, r.Status)
 		}
-		if len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0] != tls[0] {
+		if len(r.FailureInfo.CaptureIncomplete) != 1 || !reflect.DeepEqual(r.FailureInfo.CaptureIncomplete[0], tls[0]) {
 			t.Fatalf("%s: capture evidence %+v, want %+v", id, r.FailureInfo.CaptureIncomplete, tls)
 		}
 		found := false
@@ -750,7 +750,7 @@ func TestUnderTheSwitchATLSRejectionFailsOnlyTheTestItHappenedIn(t *testing.T) {
 		}
 	}
 	r := byID["test-2"]
-	if r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0] != tls[0] {
+	if r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 || !reflect.DeepEqual(r.FailureInfo.CaptureIncomplete[0], tls[0]) {
 		t.Fatalf("test-2: %s %+v, want FAILED with %+v", r.Status, r.FailureInfo.CaptureIncomplete, tls)
 	}
 	if cv := h.report.report.CaptureVerification; cv != nil {
@@ -1337,6 +1337,27 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 	}
 }
 
+// What a set's tests are charged
+// from before it began (appLossesCarriedIn) is each loss as the agent's
+// record gives it, a PID map refusal's errno (models.CaptureLoss.Err) kept,
+// with only its count moved to what was lost before the set's mark. Here the
+// application lost 4 of target_namespace_pids's inserts before this set
+// (2 of them before its start, which are not its) and 1 more in the set.
+func TestACarriedInPIDMapRefusalKeepsItsErrno(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	stall := models.CaptureLoss{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"}
+	r := &Replayer{
+		lossAppBase:  models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, Err: -7}},
+		lossMark:     captureLossMark{at: models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 6, Err: -7}}, known: true},
+		lossLastRead: true,
+		lossLast:     models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 7, What: "target_namespace_pids, E2BIG", Err: -7}, stall},
+	}
+	want := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 4, What: "target_namespace_pids, E2BIG", Err: -7}}
+	if got := r.appLossesCarriedIn(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the losses carried into the set: %+v; want %+v (its errno kept)", got, want)
+	}
+}
+
 // errorWhy is the "why" field of the first of logs' entries at ERROR that
 // says what; "" where none does, or it has no such field.
 func errorWhy(logs *observer.ObservedLogs, what string) string {
@@ -1360,6 +1381,8 @@ func errorsSaying(logs *observer.ObservedLogs, what string) int {
 	return n
 }
 
+var _ composeAppStopper = (*composeStartsInstr)(nil)
+
 // composeStartsInstr is a compose stack whose counts are now, and whose
 // app's first failStarts starts are told failed though the daemon carried
 // them out (the start call timed out on a starved daemon: StartComposeApp's
@@ -1372,7 +1395,7 @@ type composeStartsInstr struct {
 	failStarts int
 }
 
-func (c *composeStartsInstr) StartComposeApp(context.Context) (models.ComposeAppStart, error) {
+func (c *composeStartsInstr) StartComposeApp(context.Context, func()) (models.ComposeAppStart, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.starts++

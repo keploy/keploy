@@ -31,7 +31,10 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.svc.MockOutgoing(r.Context(), OutgoingReq.OutgoingOptions); err != nil {
+	// The test set keploy test starts the session for, beside the options
+	// (models.OutgoingReq.TestSet).
+	ctx := models.WithTestSetSession(r.Context(), OutgoingReq.TestSet)
+	if err := a.svc.MockOutgoing(ctx, OutgoingReq.OutgoingOptions); err != nil {
 		utils.LogError(a.logger, err, "failed to mock outgoing")
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
@@ -78,7 +81,13 @@ func respondAgent(w http.ResponseWriter, r *http.Request, status int, err error)
 func (a *Agent) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	consumedMocks, err := a.svc.GetConsumedMocks(r.Context())
+	ctx := r.Context()
+	if r.URL.Query().Get(models.SetEndReadQuery) == "1" {
+		// The read of what was consumed after a set's last test, with the
+		// proven switch off (models.WithSetEndRead).
+		ctx = models.WithSetEndRead(ctx)
+	}
+	consumedMocks, err := a.svc.GetConsumedMocks(ctx)
 	if err != nil {
 		// The CLI decodes a 200 here straight into []models.MockState, so
 		// a failure MUST carry a non-2xx status — otherwise the error
@@ -96,7 +105,13 @@ func (a *Agent) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	mockErrors, err := a.svc.GetMockErrors(r.Context())
+	ctx := r.Context()
+	if r.URL.Query().Get(models.SetEndReadQuery) == "1" {
+		ctx = models.WithSetEndRead(ctx)
+	}
+	// A test's end read names the test (models.WithTestEndRead).
+	ctx = models.WithTestEndRead(ctx, r.URL.Query().Get(models.TestEndReadQuery))
+	mockErrors, err := a.svc.GetMockErrors(ctx)
 	if err != nil && !errors.Is(err, models.ErrUnmatchedCallsUnread) {
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
