@@ -416,8 +416,12 @@ func commonTokenAffixes(toks []string) (prefix, suffix string) {
 //
 // Each branch has the form C{a,}[0-9]C{b,} with a+1+b == minMatch, so every
 // match has length >= minMatch and includes a digit; stepping a by
-// (minLen - minMatch + 1) covers every digit position 0..minLen-1.
+// (minLen - minMatch + 1) covers every digit position 0..minLen-1. Returns ""
+// when minMatch < 1 or minMatch > minLen.
 func digitCorePattern(charClass string, minLen, minMatch int) string {
+	if minMatch < 1 || minMatch > minLen {
+		return ""
+	}
 	c := "[" + charClass + "]"
 	quant := func(n int) string {
 		switch n {

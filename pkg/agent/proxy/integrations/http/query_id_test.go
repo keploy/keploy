@@ -213,6 +213,8 @@ func TestQueryValueEntryMasksAWholeValueOfItsShape(t *testing.T) {
 		{"token", []string{"report2024abc.pdf", "invoice99xyz1.pdf"}, "", nil, nil},
 		{"token", []string{"ab12cd34ef.svc.local", "zz98yy76xx.svc.local"}, "", nil, nil},
 		{"token", []string{"2026-a1b2c3d4e5f6", "2026-z9y8x7w6v5u4"}, "", nil, nil},
+		{"token", []string{"2026-8ab071aa4d5a130a", "2026-dcce109751713323"}, "", nil, nil},
+		{"token", []string{"+8ab071aa4d5a130a", "+dcce109751713323"}, "", nil, nil},
 		{"token", []string{"ord_8ab071aa4d5a130a"}, "", nil, nil},
 	} {
 		got := queryValueEntry(tc.class, tc.members)
@@ -333,7 +335,8 @@ func TestConfinedTokenQueryIDEntryNeverMasksWordsEnumsOrPaths(t *testing.T) {
 
 // digitCorePattern must match every string of length >= minLen containing a
 // digit at any position 0..minLen-1, while never matching a letter-only
-// string or a string shorter than minMatch.
+// string or a string shorter than minMatch, and must return "" without
+// looping when minMatch < 1 or minMatch > minLen.
 func TestDigitCorePatternCoversEveryDigitPositionAndRejectsLetterOnly(t *testing.T) {
 	for _, tc := range []struct {
 		prefix, charClass string
@@ -363,6 +366,17 @@ func TestDigitCorePatternCoversEveryDigitPositionAndRejectsLetterOnly(t *testing
 		tooShort := tc.prefix + "5" + strings.Repeat("a", tc.minMatch-2)
 		if re.MatchString(tooShort) {
 			t.Errorf("%s matched too-short %q", re, tooShort)
+		}
+	}
+	for _, invalid := range []struct{ minLen, minMatch int }{
+		{4, 8},
+		{4, 5},
+		{8, 0},
+		{8, -1},
+		{0, 0},
+	} {
+		if got := digitCorePattern("0-9a-f", invalid.minLen, invalid.minMatch); got != "" {
+			t.Errorf("digitCorePattern(minLen=%d, minMatch=%d) = %q, want empty", invalid.minLen, invalid.minMatch, got)
 		}
 	}
 }
