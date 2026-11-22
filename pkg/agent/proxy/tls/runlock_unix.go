@@ -168,7 +168,7 @@ func openLockFileAt(d *os.File, euid int, path string, flag int) (*os.File, erro
 // names path in its errors.
 func openOwned(dirfd int, name, what, path string, flag int, perm uint32, deny os.FileMode, euid int, orRoot bool) (*os.File, error) {
 	dir := flag&unix.O_DIRECTORY != 0
-	fd, err := unix.Openat(dirfd, name, flag|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
+	fd, err := openOrCreateAt(dirfd, name, flag|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
 	if err != nil {
 		// Why, from what is at path, for the error only: a link there fails
 		// the open (ELOOP, or ENOTDIR for a directory), which says less.
@@ -189,6 +189,50 @@ func openOwned(dirfd int, name, what, path string, flag int, perm uint32, deny o
 		return nil, err
 	}
 	return f, nil
+}
+
+// openatFn is unix.Openat. A row stands in for it to give the answers of a
+// kernel or a race it cannot make happen at will.
+var openatFn = unix.Openat
+
+// createTries is how many times openOrCreateAt starts again when the file it
+// found is gone before it opens it.
+const createTries = 3
+
+// openOrCreateAt opens name in the directory dirfd with flag, as openat does,
+// and, with O_CREAT, opens or creates it however many runs do the same at
+// once. macOS's openat with O_CREAT and no O_EXCL fails ENOENT, and opens
+// nothing, when another thread or process creates name at the same moment:
+// of two runs that open a new store.lock together, one would get no lock and
+// change the store under the other. So it creates name only with O_EXCL,
+// opens it without O_CREAT when it is there already (EEXIST, a link at name
+// included, which the open then refuses as O_NOFOLLOW says), and starts again
+// when it is gone between the two (ENOENT), createTries times at most. An
+// open a signal interrupts (EINTR) is made again, as os.OpenFile does.
+func openOrCreateAt(dirfd int, name string, flag int, perm uint32) (int, error) {
+	if flag&unix.O_CREAT == 0 {
+		return openatRestarted(dirfd, name, flag, perm)
+	}
+	for try := 1; ; try++ {
+		fd, err := openatRestarted(dirfd, name, flag|unix.O_EXCL, perm)
+		if !errors.Is(err, unix.EEXIST) {
+			return fd, err
+		}
+		fd, err = openatRestarted(dirfd, name, flag&^unix.O_CREAT, 0)
+		if !errors.Is(err, unix.ENOENT) || try == createTries {
+			return fd, err
+		}
+	}
+}
+
+// openatRestarted is openatFn, made again while a signal interrupts it.
+func openatRestarted(dirfd int, name string, flag int, perm uint32) (int, error) {
+	for {
+		fd, err := openatFn(dirfd, name, flag, perm)
+		if !errors.Is(err, unix.EINTR) {
+			return fd, err
+		}
+	}
 }
 
 // tryLockFile takes an exclusive flock on f if no one holds one: true when it

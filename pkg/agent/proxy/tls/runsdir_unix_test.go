@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sys/unix"
 )
 
 // anotherUser is a uid that does not own path, and is not root, for a row that
@@ -555,4 +557,165 @@ func TestCAKeyFileOnlyTheUsersOwnAndPrivate(t *testing.T) {
 			}
 		}
 	}
+}
+
+// ownRunsDir is a runs directory the test's user alone can change (0700:
+// t.TempDir makes it 0777 less the umask).
+func ownRunsDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Runs that open one new lock file at the same moment all open it. On macOS
+// an openat with O_CREAT and no O_EXCL fails ENOENT for each thread that
+// loses the race to create the name, so of two runs importing into one
+// keystore at once, one took no store lock (TestTwoRunsImportsIntoOneKeystoreBothStay).
+func TestLockFileOpensWhileOtherRunsCreateIt(t *testing.T) {
+	dir := ownRunsDir(t)
+	const names, runs = 300, 4
+	for i := 0; i < names; i++ {
+		path := filepath.Join(dir, "l"+strconv.Itoa(i)+".lock")
+		start := make(chan struct{})
+		errs := make(chan error, runs)
+		for r := 0; r < runs; r++ {
+			go func() {
+				<-start
+				f, err := openLockFileFor(os.Geteuid(), path, os.O_RDONLY|os.O_CREATE)
+				if err == nil {
+					_ = f.Close()
+				}
+				errs <- err
+			}()
+		}
+		close(start)
+		for r := 0; r < runs; r++ {
+			if err := <-errs; err != nil {
+				t.Fatalf("lock file %d, opened by %d runs at once: %v", i, runs, err)
+			}
+		}
+	}
+}
+
+// The same on any kernel: openatFn answers as macOS answers a thread that
+// loses the race to create a name (O_CREAT without O_EXCL, on a name that is
+// there, fails ENOENT). A lock file that is there, or that is not, opens; a
+// link at one is still refused, and nothing is made through it.
+func TestLockFileOpensWhereCreatingANameThereFails(t *testing.T) {
+	prev := openatFn
+	t.Cleanup(func() { openatFn = prev })
+	openatFn = func(dirfd int, name string, flag int, perm uint32) (int, error) {
+		var st unix.Stat_t
+		if flag&unix.O_CREAT != 0 && flag&unix.O_EXCL == 0 && unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil {
+			return -1, unix.ENOENT
+		}
+		return unix.Openat(dirfd, name, flag, perm)
+	}
+	me := os.Geteuid()
+	dir := ownRunsDir(t)
+	there := filepath.Join(dir, "there.lock")
+	if err := os.WriteFile(there, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{there, filepath.Join(dir, "new.lock")} {
+		f, err := openLockFileFor(me, path, os.O_RDONLY|os.O_CREATE)
+		if err != nil {
+			t.Fatalf("%s: %v, want it opened", filepath.Base(path), err)
+		}
+		_ = f.Close()
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	link := filepath.Join(dir, "link.lock")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openLockFileFor(me, link, os.O_RDONLY|os.O_CREATE); err == nil || !strings.Contains(err.Error(), "the lock file "+link+" is a symlink") {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Errorf("a link at a lock file: %v, want refused", err)
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a file was made through the link: %v", err)
+	}
+}
+
+// scriptOpenat makes openatFn give script's answers, one per call (nil: the
+// real openat's), and fail the row on a call past them, and returns the flags
+// of each call made.
+func scriptOpenat(t *testing.T, script ...error) *[]int {
+	t.Helper()
+	prev := openatFn
+	t.Cleanup(func() { openatFn = prev })
+	var flags []int
+	openatFn = func(dirfd int, name string, flag int, perm uint32) (int, error) {
+		flags = append(flags, flag)
+		if len(flags) > len(script) {
+			t.Fatalf("openat call %d, past the row's %d: flags %#x", len(flags), len(script), flags)
+		}
+		if err := script[len(flags)-1]; err != nil {
+			return -1, err
+		}
+		return unix.Openat(dirfd, name, flag, perm)
+	}
+	return &flags
+}
+
+// A lock file found (EEXIST) but gone before it is opened (ENOENT) is looked
+// for again, createTries times, and made on a later try; one gone every time
+// is an error, after createTries tries.
+func TestLockFileGoneWhileOpenedIsTriedAgain(t *testing.T) {
+	me := os.Geteuid()
+	dir := ownRunsDir(t)
+	excl, open := os.O_RDONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC
+	runsDir, err := openCARunsDirFor(me, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runsDir.Close() }()
+
+	path := filepath.Join(dir, "later.lock")
+	calls := scriptOpenat(t, unix.EEXIST, unix.ENOENT, unix.EEXIST, unix.ENOENT, nil)
+	f, err := openLockFileAt(runsDir, me, path, os.O_RDONLY|os.O_CREATE)
+	if err != nil {
+		t.Fatalf("a lock file gone twice, then made: %v", err)
+	}
+	_ = f.Close()
+	if want := []int{excl, open, excl, open, excl}; !slices.Equal(*calls, want) {
+		t.Errorf("openat flags %#x, want %#x", *calls, want)
+	}
+
+	path = filepath.Join(dir, "never.lock")
+	calls = scriptOpenat(t, unix.EEXIST, unix.ENOENT, unix.EEXIST, unix.ENOENT, unix.EEXIST, unix.ENOENT)
+	if f, err := openLockFileAt(runsDir, me, path, os.O_RDONLY|os.O_CREATE); !errors.Is(err, unix.ENOENT) {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Errorf("a lock file gone every time: %v, want ENOENT", err)
+	}
+	if len(*calls) != 2*createTries {
+		t.Errorf("openat called %d times, want %d", len(*calls), 2*createTries)
+	}
+}
+
+// An open a signal interrupts (EINTR) is made again, as os.OpenFile does,
+// whether it creates the lock file or only opens it.
+func TestLockFileOpenInterruptedIsMadeAgain(t *testing.T) {
+	me := os.Geteuid()
+	dir := ownRunsDir(t)
+	path := filepath.Join(dir, "a.lock")
+	scriptOpenat(t, nil, unix.EINTR, nil)
+	f, err := openLockFileFor(me, path, os.O_RDONLY|os.O_CREATE)
+	if err != nil {
+		t.Fatalf("creating, interrupted once: %v", err)
+	}
+	_ = f.Close()
+	scriptOpenat(t, nil, unix.EINTR, nil)
+	if f, err = openLockFileFor(me, path, os.O_RDONLY); err != nil {
+		t.Fatalf("opening, interrupted once: %v", err)
+	}
+	_ = f.Close()
 }
