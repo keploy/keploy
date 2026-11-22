@@ -57,6 +57,30 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	for _, opt := range opts {
 		opt(&mo)
 	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	// When the test case carries assertions (anything beyond the noise entry),
+	// evaluate them in place of the ordinary comparison before running or
+	// printing any comparison output. This mirrors pkg/matcher/http/match.go:
+	// no contradictory pass/fail banners, no spurious comparison warnings, and
+	// honours emitFailureLogs, WithConsole, and WithoutPassLine.
+	if AssertionsReplaceComparison(tc) {
+		pass, res := AssertionMatch(tc, actualResp, zap.NewNop())
+		if emitFailureLogs {
+			if pass {
+				if !mo.noPassLine {
+					printPassLine(tc, logger, mo.out())
+				}
+			} else {
+				printFailLine(tc, logger, mo.out())
+				AssertionMatch(tc, actualResp, logger)
+			}
+		}
+		return pass, res
+	}
+
 	// Under the proven switch response arrays are compared in order.
 	ignoreOrdering = matcher.ResponseIgnoreOrdering(ignoreOrdering)
 	expectedResp := tc.GrpcResp
@@ -505,16 +529,27 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		Assessment: bodyAssessment,
 	}
 
-	// When the test case carries assertions (anything beyond the noise entry),
-	// hand off to AssertionMatch — the assertions, not the recorded response,
-	// decide the outcome. This mirrors the HTTP matcher (see http/match.go);
-	// without it a gRPC test with assertions passed whenever the response
-	// matched the recording, silently ignoring the assertions (#4609).
-	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
-		return AssertionMatch(tc, actualResp, logger)
-	}
-
 	return matched, result
+}
+
+func printPassLine(tc *models.TestCase, logger *zap.Logger, out io.Writer) {
+	newLogger := pp.New()
+	newLogger.SetOutput(out)
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetPassingColorScheme())
+	if _, err := newLogger.Printf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name); err != nil {
+		utils.LogError(logger, err, "failed to print the logs")
+	}
+}
+
+func printFailLine(tc *models.TestCase, logger *zap.Logger, out io.Writer) {
+	newLogger := pp.New()
+	newLogger.SetOutput(out)
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetFailingColorScheme())
+	if _, err := newLogger.Printf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name); err != nil {
+		utils.LogError(logger, err, "failed to print the logs")
+	}
 }
 
 // parseGrpcStatus parses a grpc-status trailer value to int.
