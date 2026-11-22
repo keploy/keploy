@@ -129,6 +129,15 @@ jobs:
         run: go test -count=1 -run "^(TestTheAcceptedSocketIsFoundUnderTheCountOfWrites|TestEveryAcceptedSocketIsCountedWhetherKeptOrPaired)$" ./pkg/agent/proxy/
         shell: cmd
 
+      # The look at a socket's TCP state (util.PeerGone, util.AwaitPeerReset:
+      # SIO_TCP_INFO here) that the http package's held answers above ask on
+      # Windows: a peer's FIN and its reset are seen, and a wait past the FIN
+      # ends at the reset. Only these rows of ./pkg/agent/proxy/util/ run
+      # here: the package as a whole has not been shown to pass on Windows.
+      - name: Test the look at a socket's peer (amd64)
+        run: go test -count=1 -run "^(TestPeerGone|TestPeerGoneByTheSocketsState|TestAwaitPeerReset|TestTCPStateOnWindows)$" ./pkg/agent/proxy/util/
+        shell: cmd
+
       # The Windows stop of a native app (utils.interruptProcessTree): one that
       # had to force-kill the app says so, so a test set's end it cut is not
       # judged (P101-b-o). It takes ~30 s, most of it the stop's own 10 s

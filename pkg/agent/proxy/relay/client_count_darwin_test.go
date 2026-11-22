@@ -338,8 +338,8 @@ func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
 		t.Fatalf("the count after a write of 10 bytes: %+v", w)
 	}
 	var c net.Conn = a
-	if !halfCloseWrite(&c) {
-		t.Fatal("the count did not half-close the socket")
+	if err := closeWrite(&c); err != nil {
+		t.Fatalf("the count did not half-close the socket: %v", err)
 	}
 	_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 	if got, err := io.ReadAll(app); err != nil || string(got) != "0123456789" {
