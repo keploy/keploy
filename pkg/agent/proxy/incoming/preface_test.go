@@ -339,3 +339,58 @@ func TestAConnectionThatEndsBeforeItsFirstByteIsClosedWithoutDialingTheApp(t *te
 		t.Fatalf("the client's read = %d, %v; want its connection ended (EOF)", n, err)
 	}
 }
+
+// An HTTP request whose first bytes come in pieces is told and captured as
+// HTTP: the ingress reads on until the bytes say what the connection
+// carries. Its client is a net.Pipe, so the ingress reads each piece by
+// itself: decided on its first read, "G" read as not HTTP, and the call was
+// relayed unrecorded.
+func TestAnHTTPRequestWhoseFirstBytesComeInPiecesIsCaptured(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	var captured atomic.Int32
+	stubCaptureHook(t, func(_ context.Context, _ *zap.Logger, _ chan *models.TestCase, req *http.Request, _ *http.Response, _, _ time.Time, _ models.IncomingOptions, _, _ bool, _ uint16) {
+		if req.URL.Path == "/ping" {
+			captured.Add(1)
+		}
+	})
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("pong"))
+	}))
+	t.Cleanup(app.Close)
+	cfg := &config.Config{}
+	cfg.Agent.RecordRequests = true
+	pm := New(zap.NewNop(), nil, cfg)
+	t.Cleanup(pm.captures.Wait)
+	port := app.Listener.Addr().(*net.TCPAddr).Port
+	client, proxied := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		pm.ServeLive(ctx, proxied, app.Listener.Addr().String(), uint16(port))
+	}()
+	_ = client.SetDeadline(time.Now().Add(20 * time.Second))
+	// A net.Pipe write returns once the reader has taken all of it.
+	for _, piece := range []string{"G", "ET", " /ping HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"} {
+		if _, err := client.Write([]byte(piece)); err != nil {
+			t.Fatalf("writing %q: %v", piece, err)
+		}
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("the call was not answered: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(b) != "pong" {
+		t.Fatalf("the call's answer = %d %q, want the app's 200 pong", resp.StatusCode, b)
+	}
+	_ = client.Close()
+	<-served
+	pm.captures.Wait()
+	if n := captured.Load(); n != 1 {
+		t.Fatalf("%d captures of the call, want 1", n)
+	}
+}
