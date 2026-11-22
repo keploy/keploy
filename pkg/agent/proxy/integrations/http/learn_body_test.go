@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -132,10 +133,17 @@ func TestALearnedPOSTReadsOnlyTheRecordingsOfItsBody(t *testing.T) {
 						}
 						return g
 					}
+					before := learnBodyFilings.Load()
 					for i := 0; i < 2; i++ {
 						group(i)
 					}
 					filings := learnBodyFilings.Load()
+					// The bucket is filed once, by the call that first reads it
+					// so; where keploy.yml declares noise of request bodies no
+					// call reads it so.
+					if first := map[bool]int64{false: 1, true: 0}[declared]; filings-before != first {
+						t.Fatalf("the first calls filed %d buckets by their bodies; want %d", filings-before, first)
+					}
 					var g []*models.Mock
 					visits := learnVisitsOf(func() { g = group(size / 2) })
 					// An open test's own recording is in both its tiers' reads.
@@ -164,37 +172,78 @@ func TestALearnedPOSTReadsOnlyTheRecordingsOfItsBody(t *testing.T) {
 	}
 }
 
-// A learned call of a path no recording has files no bucket by its bodies.
+// A learned call of a path no recording has files no bucket by its bodies,
+// of a staging generation and of an open test's own alike.
 func TestALearnedCallOfAnUnrecordedPathFilesNoBodies(t *testing.T) {
-	h, n, _ := learnOn(t)
-	verifyOff(t)
-	db := newGenDb([]*models.Mock{learnRecorded("post-0", 0, "POST", "/item", postBody(0), nil, `{}`)}, nil)
-	for _, path := range []string{"/item", "/item", "/other"} {
-		filings := learnBodyFilings.Load()
-		lp := liveParts(context.Background(), live("POST", path, postBody(1), nil))
-		if _, _, err := h.learnedGroupOf(context.Background(), db, db, nil, lp, n.shape(lp, sameDest), n, false); err != nil {
-			t.Fatal(err)
-		}
-		if path == "/other" && learnBodyFilings.Load() != filings {
-			t.Fatalf("a call of an unrecorded path filed %d buckets by their bodies; want none", learnBodyFilings.Load()-filings)
-		}
+	for _, view := range []bool{false, true} {
+		t.Run(fmt.Sprintf("view=%v", view), func(t *testing.T) {
+			h, n, _ := learnOn(t)
+			verifyOff(t)
+			mocks := []*models.Mock{learnRecorded("post-0", 0, "POST", "/item", postBody(0), nil, `{}`)}
+			var db integrations.MockMemDb = newGenDb(mocks, nil)
+			if view {
+				db = newViewDb(mocks, nil)
+			}
+			for _, path := range []string{"/item", "/item", "/other"} {
+				filings := learnBodyFilings.Load()
+				lp := liveParts(context.Background(), live("POST", path, postBody(1), nil))
+				if _, _, err := h.learnedGroupOf(context.Background(), db, db, nil, lp, n.shape(lp, sameDest), n, false); err != nil {
+					t.Fatal(err)
+				}
+				if got := learnBodyFilings.Load(); path == "/other" && got != filings {
+					t.Fatalf("a call of an unrecorded path filed %d buckets by their bodies; want none", got-filings)
+				}
+			}
+		})
 	}
 }
 
-// A learned call whose context ends while another call files its bucket
-// leaves with the context's error, and the call after it is answered.
-func TestALearnedCallLeavesWhenItsContextEndsWhileABucketIsFiled(t *testing.T) {
-	ix := newBodyFilings(&learnBodyFilings)
-	ix.turn <- struct{}{}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := ix.file(ctx, "POST item", []int{0}, func(int) (uint64, bool) { return 1, true }); err == nil {
-		t.Fatal("a call whose context ended waited on another's filing")
-	}
-	<-ix.turn
-	b, err := ix.file(context.Background(), "POST item", []int{0, 1}, func(p int) (uint64, bool) { return uint64(p), p == 0 })
-	if err != nil || len(b.of(0)) != 2 || len(b.of(7)) != 1 {
-		t.Fatalf("filed %+v err %v; want position 0 by its print and 1 whatever the call's", b, err)
+// A learned call whose context ends before its bucket is filed by its bodies
+// leaves with the context's error, of a staging generation and of an open
+// test's own alike, and files nothing: the next call files the bucket and is
+// answered.
+func TestALearnedCallLeavesWhenItsContextEndsBeforeItsBucketIsFiled(t *testing.T) {
+	for _, view := range []bool{false, true} {
+		t.Run(fmt.Sprintf("view=%v", view), func(t *testing.T) {
+			h, n, _ := learnOn(t)
+			verifyOff(t)
+			mocks := []*models.Mock{
+				learnRecorded("post-0", 0, "POST", "/item", postBody(0), nil, `{}`),
+				learnRecorded("post-1", time.Millisecond, "POST", "/item", postBody(1), nil, `{}`),
+			}
+			var db integrations.MockMemDb = newGenDb(mocks, nil)
+			if view {
+				db = newViewDb(mocks, nil)
+			}
+			group := func(ctx context.Context, path string, i int) ([]*models.Mock, error) {
+				lp := liveParts(context.Background(), live("POST", path, postBody(i), nil))
+				g, _, err := h.learnedGroupOf(ctx, db, db, nil, lp, n.shape(lp, sameDest), n, false)
+				return g, err
+			}
+			// Calls of a path no recording has build the indexes and file
+			// no bucket.
+			for i := 0; i < 2; i++ {
+				if _, err := group(context.Background(), "/other", 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			filings := learnBodyFilings.Load()
+			if g, err := group(ctx, "/item", 1); !errors.Is(err, context.Canceled) || g != nil {
+				t.Fatalf("a call whose context ended got %v, err %v; want its context's error", strictNames(g), err)
+			}
+			if got := learnBodyFilings.Load(); got != filings {
+				t.Fatalf("a call whose context ended filed %d buckets; want none", got-filings)
+			}
+			g, err := group(context.Background(), "/item", 1)
+			if err != nil || len(g) == 0 || g[0].Name != "post-1" {
+				t.Fatalf("the call after it got %v, err %v; want post-1", strictNames(g), err)
+			}
+			if got := learnBodyFilings.Load(); got != filings+1 {
+				t.Fatalf("the call after it filed %d buckets; want 1", got-filings)
+			}
+		})
 	}
 }
 

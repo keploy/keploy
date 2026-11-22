@@ -2,10 +2,13 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,10 +79,17 @@ func TestAStrictPOSTLooksOnlyAtTheRecordingsOfItsBody(t *testing.T) {
 			t.Run(fmt.Sprintf("%d/view=%v/declares=%v", size, view, declares), func(t *testing.T) {
 				h := newHTTP()
 				db := postStore(view, declares, postItems(size))
+				before := strictBodyFilings.Load()
 				for i := 0; i < 2; i++ {
 					strictMatchOf(t, h, postCall("application/json", postBody(i)), db, db, nil)
 				}
 				filings := strictBodyFilings.Load()
+				// The bucket is filed once, by the call that first reads it
+				// so; where the replay may declare a source no call reads it
+				// so.
+				if first := map[bool]int64{false: 1, true: 0}[declares]; filings-before != first {
+					t.Fatalf("the first calls filed %d buckets by their bodies; want %d", filings-before, first)
+				}
 				var served *models.Mock
 				visits := strictVisitsOf(func() {
 					served = strictMatchOf(t, h, postCall("application/json", postBody(size/2)), db, db, nil)
@@ -105,21 +115,151 @@ func TestAStrictPOSTLooksOnlyAtTheRecordingsOfItsBody(t *testing.T) {
 	}
 }
 
-// A call of a path no recording has files no bucket by its bodies.
+// A call of a path no recording has files no bucket by its bodies, of a
+// staging generation and of an open test's own alike.
 func TestAStrictCallOfAnUnrecordedPathFilesNoBodies(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
-	h := newHTTP()
-	db := newOwnGenDb(postItems(4), nil)
-	strictMatchOf(t, h, postCall("application/json", postBody(0)), db, db, nil)
-	filings := strictBodyFilings.Load()
-	miss := postCall("application/json", postBody(1))
-	miss.url.Path = "/other"
-	if served := strictMatchOf(t, h, miss, db, db, nil); served != nil {
-		t.Fatalf("a call of /other served %s", served.Name)
+	for _, view := range []bool{false, true} {
+		t.Run(fmt.Sprintf("view=%v", view), func(t *testing.T) {
+			h := newHTTP()
+			db := postStore(view, false, postItems(4))
+			for i := 0; i < 2; i++ {
+				strictMatchOf(t, h, postCall("application/json", postBody(i)), db, db, nil)
+			}
+			filings := strictBodyFilings.Load()
+			if served := strictMatchOf(t, h, otherCall(2), db, db, nil); served != nil {
+				t.Fatalf("a call of /other served %s", served.Name)
+			}
+			if got := strictBodyFilings.Load(); got != filings {
+				t.Fatalf("a call of an unrecorded path filed %d buckets by their bodies; want none", got-filings)
+			}
+		})
 	}
-	if got := strictBodyFilings.Load(); got != filings {
-		t.Fatalf("a call of an unrecorded path filed %d buckets by their bodies; want none", got-filings)
+}
+
+// otherCall is postCall of postBody(i) to /other, a path postItems has none of.
+func otherCall(i int) *req {
+	r := postCall("application/json", postBody(i))
+	r.url.Path = "/other"
+	return r
+}
+
+// A strict call whose context ends before its bucket is filed by its bodies
+// leaves with the context's error, of a staging generation and of an open
+// test's own alike, and files nothing: the next call files the bucket and is
+// served.
+func TestAStrictCallLeavesWhenItsContextEndsBeforeItsBucketIsFiled(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	for _, view := range []bool{false, true} {
+		t.Run(fmt.Sprintf("view=%v", view), func(t *testing.T) {
+			h := newHTTP()
+			db := postStore(view, false, postItems(4))
+			// Calls of a path no recording has build the indexes and file no
+			// bucket.
+			for i := 0; i < 2; i++ {
+				if served := strictMatchOf(t, h, otherCall(i), db, db, nil); served != nil {
+					t.Fatalf("a call of /other served %s", served.Name)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			filings := strictBodyFilings.Load()
+			// matchOf leaves at once with a context that ended; the indexed
+			// pass is where a filing waits.
+			served, _, err := h.strictIndexed(ctx, postCall("application/json", postBody(1)), db, db, h.newStrictNoise(nil, nil, nil), nil, nil, nil, true)
+			if !errors.Is(err, context.Canceled) || served != nil {
+				t.Fatalf("a call whose context ended served %v, err %v; want its context's error", served, err)
+			}
+			if got := strictBodyFilings.Load(); got != filings {
+				t.Fatalf("a call whose context ended filed %d buckets; want none", got-filings)
+			}
+			if served := strictMatchOf(t, h, postCall("application/json", postBody(1)), db, db, nil); served == nil || served.Name != "post-1" {
+				t.Fatalf("the call after it served %v; want post-1", served)
+			}
+			if got := strictBodyFilings.Load(); got != filings+1 {
+				t.Fatalf("the call after it filed %d buckets; want 1", got-filings)
+			}
+		})
+	}
+}
+
+// within is what file returns, failing the row where it does not return in
+// 5 s: a filing that waits on after its context ended fails the row instead
+// of hanging it.
+func within(t *testing.T, file func() (*bodyBucket, error)) (*bodyBucket, error) {
+	t.Helper()
+	type filed struct {
+		b   *bodyBucket
+		err error
+	}
+	done := make(chan filed, 1)
+	go func() {
+		b, err := file()
+		done <- filed{b, err}
+	}()
+	select {
+	case f := <-done:
+		return f.b, f.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("a filing did not return in 5 s")
+		return nil, nil
+	}
+}
+
+// A filing whose context ends while another call files, or while it files
+// itself, leaves with the context's error and the bucket unfiled; the next
+// call files it once, each recording by its print or with the rest, and
+// every call after reads that filing. A bucket of another key is its own.
+func TestABodyFilingLeavesWhenItsContextEndsAndFilesOnce(t *testing.T) {
+	var filings atomic.Int64
+	ix := newBodyFilings(&filings)
+	ps := []int{0, 1, 2}
+	byPos := func(p int) (uint64, bool) { return uint64(p), p != 1 }
+	ix.turn <- struct{}{}
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := within(t, func() (*bodyBucket, error) { return ix.file(ended, "POST item", ps, byPos) }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a call whose context ended while another filed got %v; want its context's error", err)
+	}
+	<-ix.turn
+	ending, end := context.WithCancel(context.Background())
+	defer end()
+	printed := 0
+	if _, err := within(t, func() (*bodyBucket, error) {
+		return ix.file(ending, "POST item", ps, func(p int) (uint64, bool) {
+			printed++
+			end()
+			return byPos(p)
+		})
+	}); !errors.Is(err, context.Canceled) || printed != 1 {
+		t.Fatalf("a call whose context ended while it filed got %v after %d prints; want its context's error after 1", err, printed)
+	}
+	if got := filings.Load(); got != 0 {
+		t.Fatalf("calls whose context ended filed %d buckets; want none", got)
+	}
+	b, err := within(t, func() (*bodyBucket, error) { return ix.file(context.Background(), "POST item", ps, byPos) })
+	if err != nil || filings.Load() != 1 {
+		t.Fatalf("the next call got err %v, %d filings; want the bucket filed once", err, filings.Load())
+	}
+	for sum, want := range map[uint64][]int{0: {0, 1}, 2: {1, 2}, 7: {1}} {
+		if got := b.of(sum); !slices.Equal(got, want) {
+			t.Fatalf("a call of print %d may be %v; want %v", sum, got, want)
+		}
+	}
+	again, err := within(t, func() (*bodyBucket, error) {
+		return ix.file(context.Background(), "POST item", ps, func(int) (uint64, bool) {
+			t.Error("a filed bucket was filed again")
+			return 0, false
+		})
+	})
+	if err != nil || again != b || filings.Load() != 1 {
+		t.Fatalf("a call after it got err %v, %d filings, its own bucket %v; want the one filing", err, filings.Load(), again != b)
+	}
+	other, err := within(t, func() (*bodyBucket, error) { return ix.file(context.Background(), "GET item", []int{3}, byPos) })
+	if err != nil || other == b || filings.Load() != 2 || !slices.Equal(other.of(3), []int{3}) {
+		t.Fatalf("a bucket of another key got err %v, %d filings; want its own filing", err, filings.Load())
 	}
 }
 
