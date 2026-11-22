@@ -303,16 +303,26 @@ func TestAKeyedLaxReadAnswersAsTheWholeRead(t *testing.T) {
 }
 
 // BenchmarkHTTPReplayLaxPerCall is one replayed call of a lax shape (see
-// laxRecorded) against a set of n recordings, with the proven switch off. The
-// set is restaged (untimed) every 200 calls, fewer than its groups, so each
-// call is answered by a recording no call before it took, and calls are taken
-// in a stride through the groups. The first call after a staging builds the
-// indexes the shape reads and is timed apart, as first-ns.
+// laxRecorded) against a set of n recordings, with the proven switch off,
+// and the miss shape also with the switch on and no exact view installed (an
+// agent whose mock filters carry no exact mapping), where a call no keyed
+// read answers reads the whole pool. The set is restaged (untimed) every 200
+// calls, fewer than its groups, so each call is answered by a recording no
+// call before it took, and calls are taken in a stride through the groups.
+// The first call after a staging builds the indexes the shape reads and is
+// timed apart, as first-ns.
 func BenchmarkHTTPReplayLaxPerCall(b *testing.B) {
-	for _, shape := range []string{"fuzzy", "id", "urlnoise", "miss", "pass2"} {
+	legs := []struct{ shape, proven string }{
+		{"fuzzy", "0"}, {"id", "0"}, {"urlnoise", "0"}, {"miss", "0"}, {"pass2", "0"}, {"miss", "1"},
+	}
+	for _, leg := range legs {
+		shape, name := leg.shape, leg.shape
+		if leg.proven == "1" {
+			name += "/proven=1"
+		}
 		for _, n := range []int{1000, 10000} {
-			b.Run(shape+"/n="+strconv.Itoa(n), func(b *testing.B) {
-				b.Setenv("KEPLOY_PROVEN", "0")
+			b.Run(name+"/n="+strconv.Itoa(n), func(b *testing.B) {
+				b.Setenv("KEPLOY_PROVEN", leg.proven)
 				const per = 200
 				at := time.Unix(1_700_000_000, 0)
 				h := httpint.New(zap.NewNop())
