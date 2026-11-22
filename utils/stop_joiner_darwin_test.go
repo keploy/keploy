@@ -474,3 +474,141 @@ func TestKillWithinDeduplicatesPerPIDWithoutBlockingOtherTargets(t *testing.T) {
 		t.Fatalf("killWaiters has %d entries after normal kill; want 0", n)
 	}
 }
+
+func TestKillWithinDropsPendingStrongerSignalOnESRCH(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	logger := zap.New(core)
+
+	origKill := killSyscall
+	releaseESRCH := make(chan struct{})
+	releaseDeferred := make(chan struct{})
+	var onceESRCH, onceDeferred sync.Once
+
+	waitEmpty := func(timeout time.Duration) int {
+		deadline := time.Now().Add(timeout)
+		for {
+			killWaitersMu.Lock()
+			n := len(killWaiters)
+			killWaitersMu.Unlock()
+			if n == 0 || time.Now().After(deadline) {
+				return n
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	t.Cleanup(func() {
+		onceESRCH.Do(func() { close(releaseESRCH) })
+		onceDeferred.Do(func() { close(releaseDeferred) })
+		killSyscall = origKill
+		if n := waitEmpty(2 * time.Second); n != 0 {
+			t.Errorf("killWaiters has %d entries after cleanup; want 0", n)
+		}
+	})
+
+	const (
+		esrchPID       = 4001
+		deferredErrPID = 4002
+	)
+	entered := make(chan int, 8)
+	var mu sync.Mutex
+	sigCalls := map[int][]syscall.Signal{}
+	killSyscall = func(pid int, sig syscall.Signal) error {
+		mu.Lock()
+		sigCalls[pid] = append(sigCalls[pid], sig)
+		mu.Unlock()
+		switch {
+		case pid == esrchPID && sig == syscall.SIGINT:
+			entered <- pid
+			<-releaseESRCH
+			return syscall.ESRCH
+		case pid == deferredErrPID && sig == syscall.SIGINT:
+			entered <- pid
+			<-releaseDeferred
+			return nil
+		case pid == deferredErrPID && sig == syscall.SIGKILL:
+			return syscall.EPERM
+		default:
+			return nil
+		}
+	}
+	signalsOf := func(pid int) []syscall.Signal {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(sigCalls[pid])
+	}
+
+	// 1. Stuck SIGINT returns ESRCH while SIGKILL is pending: the pending
+	// SIGKILL must be dropped (the pid is gone and may be reused) and the
+	// kill's ESRCH error must be logged at Debug or above.
+	if err := killWithin(logger, esrchPID, syscall.SIGINT, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("stuck SIGINT of %d answered %v; want errKillWaits", esrchPID, err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("stuck SIGINT of %d never entered killSyscall", esrchPID)
+	}
+	if err := killWithin(logger, esrchPID, syscall.SIGKILL, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("deferred SIGKILL of %d answered %v; want errKillWaits", esrchPID, err)
+	}
+	onceESRCH.Do(func() { close(releaseESRCH) })
+	if n := waitEmpty(2 * time.Second); n != 0 {
+		t.Fatalf("killWaiters has %d entries after ESRCH kill returned; want 0", n)
+	}
+	if got := signalsOf(esrchPID); !slices.Equal(got, []syscall.Signal{syscall.SIGINT}) {
+		t.Fatalf("esrchPID received %v after ESRCH; want only [SIGINT] (pending SIGKILL must be dropped)", got)
+	}
+	foundDropLog := false
+	for _, entry := range logs.All() {
+		if entry.Level < zap.DebugLevel {
+			continue
+		}
+		ctx := entry.ContextMap()
+		errStr, _ := ctx["error"].(string)
+		if ctx["pid"] == int64(esrchPID) && ctx["dropped"] == syscall.SIGKILL.String() && strings.Contains(errStr, syscall.ESRCH.Error()) {
+			foundDropLog = true
+			break
+		}
+	}
+	if !foundDropLog {
+		t.Fatalf("expected Debug-or-above log for dropped SIGKILL with ESRCH error on pid %d; got %v", esrchPID, logs.All())
+	}
+
+	// 2. Stuck SIGINT returns nil while SIGKILL is pending, and the deferred
+	// SIGKILL returns EPERM: the deferred kill runs and its own error is logged
+	// at Debug or above.
+	if err := killWithin(logger, deferredErrPID, syscall.SIGINT, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("stuck SIGINT of %d answered %v; want errKillWaits", deferredErrPID, err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("stuck SIGINT of %d never entered killSyscall", deferredErrPID)
+	}
+	if err := killWithin(logger, deferredErrPID, syscall.SIGKILL, 20*time.Millisecond); !errors.Is(err, errKillWaits) {
+		t.Fatalf("deferred SIGKILL of %d answered %v; want errKillWaits", deferredErrPID, err)
+	}
+	onceDeferred.Do(func() { close(releaseDeferred) })
+	if n := waitEmpty(2 * time.Second); n != 0 {
+		t.Fatalf("killWaiters has %d entries after deferred SIGKILL returned; want 0", n)
+	}
+	if got := signalsOf(deferredErrPID); !slices.Equal(got, []syscall.Signal{syscall.SIGINT, syscall.SIGKILL}) {
+		t.Fatalf("deferredErrPID received %v; want [SIGINT SIGKILL]", got)
+	}
+	foundDeferredErrLog := false
+	for _, entry := range logs.All() {
+		if entry.Level < zap.DebugLevel {
+			continue
+		}
+		ctx := entry.ContextMap()
+		errStr, _ := ctx["error"].(string)
+		if ctx["pid"] == int64(deferredErrPID) && ctx["signal"] == syscall.SIGKILL.String() && strings.Contains(errStr, syscall.EPERM.Error()) {
+			foundDeferredErrLog = true
+			break
+		}
+	}
+	if !foundDeferredErrLog {
+		t.Fatalf("expected Debug-or-above log for deferred SIGKILL EPERM error on pid %d; got %v", deferredErrPID, logs.All())
+	}
+}

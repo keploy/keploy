@@ -282,15 +282,19 @@ func signalJoinedMembers(logger *zap.Logger, pgid int, sig syscall.Signal, sent 
 // goroutines for the same target, killWaiters allows at most one in-flight
 // kill(2) goroutine per target pid. While that kill is still waiting in XNU:
 //   - a stronger signal for the same pid (e.g. SIGKILL after SIGINT) is saved
-//     on the waiter and sent as soon as the blocked kill returns;
+//     on the waiter and sent as soon as the blocked kill returns, unless that
+//     kill returned ESRCH (the process is already gone and its pid may be
+//     reused, so the pending signal is dropped and the error is logged);
 //   - an exact repeat of the same or weaker signal is skipped without spawning
 //     another goroutine;
 //   - kills to any other pid -- including the by-pid kill to the process that
 //     made a held spawn and the group SIGKILL on -pgid -- always go out and
 //     are never refused.
 //
-// Each goroutine clears pid from killWaiters before delivering its result once
-// no stronger follow-up signal remains pending.
+// When no follow-up signal is pending, the goroutine clears pid from
+// killWaiters before delivering its result; when a stronger signal is pending,
+// it delivers the first kill's result before sending the follow-up and clears
+// pid once the follow-up finishes (or is dropped on ESRCH).
 func killWithin(logger *zap.Logger, pid int, sig syscall.Signal, wait time.Duration) error {
 	killWaitersMu.Lock()
 	if w, busy := killWaiters[pid]; busy {
@@ -337,9 +341,13 @@ func killWithin(logger *zap.Logger, pid int, sig syscall.Signal, wait time.Durat
 		cur := sig
 		for {
 			err := killSyscall(pid, cur)
+			if firstDone && err != nil && logger != nil {
+				logger.Debug("deferred kill(2) returned an error",
+					zap.Int("pid", pid), zap.String("signal", cur.String()), zap.Error(err))
+			}
 			killWaitersMu.Lock()
 			next := w.pending
-			if next != 0 {
+			if next != 0 && !errors.Is(err, syscall.ESRCH) {
 				w.inFlight = next
 				w.pending = 0
 				killWaitersMu.Unlock()
@@ -349,6 +357,15 @@ func killWithin(logger *zap.Logger, pid int, sig syscall.Signal, wait time.Durat
 				}
 				cur = next
 				continue
+			}
+			if next != 0 {
+				w.pending = 0
+				killWaitersMu.Unlock()
+				if logger != nil {
+					logger.Debug("dropping deferred signal after kill(2) reported process exited",
+						zap.Int("pid", pid), zap.String("signal", cur.String()), zap.String("dropped", next.String()), zap.Error(err))
+				}
+				killWaitersMu.Lock()
 			}
 			delete(killWaiters, pid)
 			killWaitersMu.Unlock()
