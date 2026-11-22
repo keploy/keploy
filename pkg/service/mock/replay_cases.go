@@ -83,7 +83,10 @@ func (m *mockService) watchIncoming(ctx context.Context, on bool) *actualCapture
 	if !on {
 		return nil
 	}
-	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(ctx, models.IncomingOptions{Filters: m.config.Record.Filters})
+	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(ctx, models.IncomingOptions{
+		Filters:            m.config.Record.Filters,
+		IgnoreStaticAssets: m.config.Record.IgnoreStaticAssets,
+	})
 	if err != nil {
 		m.logger.Warn("the app's responses will not be compared with the recording: could not read its incoming requests", zap.Error(err))
 		return nil

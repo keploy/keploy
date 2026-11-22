@@ -165,6 +165,9 @@ type Record struct {
 	BasePath    string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata    string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// IgnoreStaticAssets skips recording successful GET/HEAD responses for web
+	// static assets (CSS, JavaScript, fonts, images, audio, video) as test cases.
+	IgnoreStaticAssets bool `json:"ignoreStaticAssets" yaml:"ignoreStaticAssets" mapstructure:"ignoreStaticAssets"`
 	// TestCaseNaming controls how default test case filenames are generated.
 	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
 	// "sequential" preserves the legacy `test-N.yaml` numbering.

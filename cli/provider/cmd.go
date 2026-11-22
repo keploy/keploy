@@ -557,6 +557,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	case "record":
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
+		cmd.Flags().Bool("ignore-static-assets", c.cfg.Record.IgnoreStaticAssets, "Skip recording successful GET/HEAD web static asset responses (CSS, JS, fonts, images, audio, video) as test cases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
@@ -677,6 +678,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"goCoverage":                "go-coverage",
 		"fallBackOnMiss":            "fallBack-on-miss",
 		"basePath":                  "base-path",
+		"ignoreStaticAssets":        "ignore-static-assets",
 		"updateTemplate":            "update-template",
 		"mocking":                   "mocking",
 		"configPath":                "config-path",
@@ -2926,6 +2928,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	case "record":
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
 		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
+		cmd.Flags().Bool("ignore-static-assets", c.cfg.Record.IgnoreStaticAssets, "Skip recording successful GET/HEAD web static asset responses (CSS, JS, fonts, images, audio, video) as test cases when --record-requests is enabled")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if a call missed its recorded mock (dependency contract drift); a DNS lookup or a connection that sent nothing does not count")
@@ -3208,6 +3211,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			c.cfg.Mock.RecordTimer = d
 		}
 		if err := c.readMockBool(cmd, "record-requests", "mock.recordRequests", &c.cfg.Mock.RecordRequests); err != nil {
+			return err
+		}
+		if err := c.readMockBool(cmd, "ignore-static-assets", "record.ignoreStaticAssets", &c.cfg.Record.IgnoreStaticAssets); err != nil {
 			return err
 		}
 	case "replay":

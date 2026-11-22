@@ -424,6 +424,10 @@ type ConditionalDstCfg struct {
 type IncomingOptions struct {
 	Filters  []Filter
 	BasePath string
+	// IgnoreStaticAssets skips recording successful HTTP GET/HEAD responses
+	// for web static assets (CSS, JavaScript, fonts, images, audio, video)
+	// unless an explicit Include filter matches the request.
+	IgnoreStaticAssets bool
 }
 
 // AppDNS is an app container's resolver settings, as docker run takes them:
