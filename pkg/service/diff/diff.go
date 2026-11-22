@@ -252,58 +252,65 @@ func printDiff(run1 string, run2 string, result *DiffResult) {
 }
 
 func writeDiff(w io.Writer, run1 string, run2 string, result *DiffResult) {
-	fmt.Fprintf(w, "Test Run Comparison: %s vs %s\n\n", run1, run2)
+	printf := func(format string, args ...any) {
+		_, _ = fmt.Fprintf(w, format, args...)
+	}
+	println := func(args ...any) {
+		_, _ = fmt.Fprintln(w, args...)
+	}
 
-	fmt.Fprintln(w, "Regressions (newly failing):")
+	printf("Test Run Comparison: %s vs %s\n\n", run1, run2)
+
+	println("Regressions (newly failing):")
 	if len(result.Regressions) == 0 {
-		fmt.Fprintln(w, "  none")
+		println("  none")
 	} else {
 		for _, change := range result.Regressions {
-			fmt.Fprintf(w, "  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
+			printf("  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
 		}
 	}
 
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Fixes (newly passing):")
+	println()
+	println("Fixes (newly passing):")
 	if len(result.Fixes) == 0 {
-		fmt.Fprintln(w, "  none")
+		println("  none")
 	} else {
 		for _, change := range result.Fixes {
-			fmt.Fprintf(w, "  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
+			printf("  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
 		}
 	}
 
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Status transitions (other changes):")
+	println()
+	println("Status transitions (other changes):")
 	if len(result.StatusTransitions) == 0 {
-		fmt.Fprintln(w, "  none")
+		println("  none")
 	} else {
 		for _, change := range result.StatusTransitions {
-			fmt.Fprintf(w, "  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
+			printf("  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
 		}
 	}
 
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Added (only in the second run):")
+	println()
+	println("Added (only in the second run):")
 	if len(result.Added) == 0 {
-		fmt.Fprintln(w, "  none")
+		println("  none")
 	} else {
 		for _, change := range result.Added {
-			fmt.Fprintf(w, "  %s: %s\n", formatTestCaseLabel(change), change.After)
+			printf("  %s: %s\n", formatTestCaseLabel(change), change.After)
 		}
 	}
 
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Removed (only in the first run):")
+	println()
+	println("Removed (only in the first run):")
 	if len(result.Removed) == 0 {
-		fmt.Fprintln(w, "  none")
+		println("  none")
 	} else {
 		for _, change := range result.Removed {
-			fmt.Fprintf(w, "  %s: was %s\n", formatTestCaseLabel(change), change.Before)
+			printf("  %s: was %s\n", formatTestCaseLabel(change), change.Before)
 		}
 	}
 
-	fmt.Fprintf(w, "\nSummary: %d regressions, %d fixes, %d status transitions, %d added, %d removed, %d unchanged\n", len(result.Regressions), len(result.Fixes), len(result.StatusTransitions), len(result.Added), len(result.Removed), len(result.Unchanged))
+	printf("\nSummary: %d regressions, %d fixes, %d status transitions, %d added, %d removed, %d unchanged\n", len(result.Regressions), len(result.Fixes), len(result.StatusTransitions), len(result.Added), len(result.Removed), len(result.Unchanged))
 }
 
 func formatTestCaseLabel(change StatusChange) string {
