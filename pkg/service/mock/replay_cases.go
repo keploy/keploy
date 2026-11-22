@@ -221,29 +221,23 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 	for _, w := range windows {
 		bySeq[w.Seq] = w.Name // no answer names 0: the agent's ids start at 1
 	}
-	// A mock is put under a test once, however many of consumed's entries
-	// place it there: two of its windows, or two reads that both carry it
-	// (the wait for the series the run owes reads before the run's end
-	// does, and each read hands back what was served since the one before:
-	// withSeriesRead). The first entry is kept.
-	under := make(map[string]map[string]bool)
-	put := func(flow string, c models.MockState) {
-		if under[flow][c.Name] {
-			return
-		}
-		if under[flow] == nil {
-			under[flow] = make(map[string]bool)
-		}
-		under[flow][c.Name] = true
-		get(flow).Consumed = append(get(flow).Consumed, c)
-	}
+	// consumed holds each recording once, with where it answered over every
+	// read of the run (consumedReads).
 	for _, c := range consumed {
 		if answeredInKnown(c) {
-			// Under every test whose window was open at one of its serves.
+			// Under every test whose window was open at one of its serves,
+			// once each: two of its windows can be one test's runs.
+			var under map[string]bool
 			for _, a := range c.AnsweredIn {
-				if flow, ok := bySeq[a.Seq]; ok {
-					put(flow, c)
+				flow, ok := bySeq[a.Seq]
+				if !ok || under[flow] {
+					continue
 				}
+				if under == nil {
+					under = make(map[string]bool)
+				}
+				under[flow] = true
+				get(flow).Consumed = append(get(flow).Consumed, c)
 			}
 			continue
 		}
@@ -251,7 +245,7 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 			continue // an older agent does not say when it served a mock
 		}
 		if flow, ok := flowAt(windows, time.Unix(0, c.Timestamp), expected); ok {
-			put(flow, c)
+			get(flow).Consumed = append(get(flow).Consumed, c)
 		}
 	}
 	for _, miss := range misses {

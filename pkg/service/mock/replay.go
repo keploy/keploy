@@ -3410,30 +3410,23 @@ func withEnded(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt 
 	return tests
 }
 
-// answeredWhere is every recording consumed holds, once, in the order it
-// first lists them, with each place it answered and when it first answered
-// there (TestsReceipt.Answered): the test of each window it answered in
-// (windows' Seq), each test once at its earliest answer over its runs; and
-// no test ("") at its first answer outside every window, or in a window
-// that is none of windows' (said as no test's, so a reader compares it by
-// time with every test). A recording two reads carry (the wait for the
-// series the run owes reads before the run's end does: withSeriesRead) is
-// listed once, at its earliest answer in each place over both. Its places
-// are in the order it first answered there.
+// answeredWhere is every recording consumed holds, in its order, with each
+// place it answered and when it first answered there
+// (TestsReceipt.Answered): the test of each window it answered in (windows'
+// Seq), each test once at its earliest answer over its runs; and no test
+// ("") at its first answer outside every window, or in a window that is
+// none of windows' (said as no test's, so a reader compares it by time
+// with every test). consumed holds each recording once, with where it
+// answered over every read of the run (consumedReads). Its places are in
+// the order it first answered there.
 func answeredWhere(consumed []models.MockState, windows []models.ScopeWindow) []RecordingAnswers {
 	bySeq := make(map[uint64]string)
 	for _, w := range windows {
 		bySeq[w.Seq] = w.Name // no answer names 0: the agent's ids start at 1
 	}
-	var order []string
-	firstOf := make(map[string]map[string]int64)
+	out := make([]RecordingAnswers, 0, len(consumed))
 	for _, c := range consumed {
-		first, listed := firstOf[c.Name]
-		if !listed {
-			first = make(map[string]int64)
-			firstOf[c.Name] = first
-			order = append(order, c.Name)
-		}
+		first := make(map[string]int64)
 		note := func(test string, at int64) {
 			if prev, ok := first[test]; !ok || at < prev {
 				first[test] = at
@@ -3445,11 +3438,8 @@ func answeredWhere(consumed []models.MockState, windows []models.ScopeWindow) []
 		if c.AnsweredOutsideAt != 0 {
 			note("", c.AnsweredOutsideAt)
 		}
-	}
-	out := make([]RecordingAnswers, 0, len(order))
-	for _, name := range order {
-		r := RecordingAnswers{Mock: name}
-		for test, at := range firstOf[name] {
+		r := RecordingAnswers{Mock: c.Name}
+		for test, at := range first {
 			r.In = append(r.In, AnswerPlace{Test: test, First: time.Unix(0, at).UTC()})
 		}
 		slices.SortFunc(r.In, func(x, y AnswerPlace) int {

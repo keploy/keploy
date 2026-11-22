@@ -96,25 +96,6 @@ func TestAttributeMocksUsesTheTestRunningAtTheTime(t *testing.T) {
 	require.Nil(t, attributeMocks(replayWindows, nil, nil, nil))
 }
 
-// An older agent says only when it first served a mock in each read, so two
-// reads that both carry a recording give it two times: in one test's window,
-// it is put under that test once; in two tests' windows, under each.
-func TestAttributeMocksPutsARecordingTwoReadsCarryUnderATestOnce(t *testing.T) {
-	expected := map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-0"}}, "pkg.TestB": {{Name: "mock-1"}}}
-	consumed := []models.MockState{
-		{Name: "mock-0", Kind: models.HTTP, Timestamp: runnerT0.Add(10 * time.Millisecond).UnixNano()},
-		{Name: "mock-1", Kind: models.HTTP, Timestamp: runnerT0.Add(20 * time.Millisecond).UnixNano()},
-		{Name: "mock-0", Kind: models.HTTP, Timestamp: runnerT0.Add(60 * time.Millisecond).UnixNano()},  // the next read's
-		{Name: "mock-1", Kind: models.HTTP, Timestamp: runnerT0.Add(250 * time.Millisecond).UnixNano()}, // the next read's
-	}
-	out := attributeMocks(replayWindows, expected, consumed, nil)
-	require.Len(t, out, 2)
-	require.Equal(t, "pkg.TestA", out[0].Flow)
-	require.Equal(t, []string{"mock-0", "mock-1"}, answeredBy(out[0].Consumed), "each once under pkg.TestA")
-	require.Equal(t, "pkg.TestB", out[1].Flow)
-	require.Equal(t, []string{"mock-1"}, answeredBy(out[1].Consumed))
-}
-
 // A replay with requests on compares what the app answered with the recorded cases and says which mocks each test used.
 func TestReplayOutcomeCarriesTheCasesAndTheMocksPerTest(t *testing.T) {
 	instr := newRunnerInstr(t, sequentialMarks()...)
@@ -560,7 +541,7 @@ func (d drainInstr) GetConsumedMocks(context.Context) ([]models.MockState, error
 // lists it once, when two consumed reads both carry it under that test: the
 // wait for the series the run owes reads what was consumed once the test
 // command has exited (readOwedSeries), and the run's end reads again what
-// was consumed after that (withSeriesRead). A test left open when its
+// was consumed after that (consumedReads). A test left open when its
 // command exited (its process died mid-test) holds its window open through
 // the wait, so a recording that answered it before the wait's read and
 // again after is in both reads, each under that window.
@@ -575,9 +556,10 @@ func TestATestsLineNamesARecordingOnceWhenTwoReadsCarryIt(t *testing.T) {
 	serve("mock-21", models.LifetimeSession)
 	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: drainInstr{mm: mm}}
 	m.readOwedSeries(context.Background(), nil) // the wait's read
-	require.Len(t, m.seriesRead, 1)
-	require.Len(t, m.seriesRead[0].AnsweredIn, 1)
-	firstAt := m.seriesRead[0].AnsweredIn[0].First
+	read := m.consumed.list()
+	require.Len(t, read, 1)
+	require.Len(t, read[0].AnsweredIn, 1)
+	firstAt := read[0].AnsweredIn[0].First
 	// The application runs on: a later serve, at a time that is not the
 	// first's.
 	time.Sleep(2 * time.Millisecond)
