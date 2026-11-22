@@ -474,9 +474,37 @@ func processUrlencodedBody(body []map[string]interface{}) string {
 func processFormdataBody(body []map[string]interface{}) []models.FormData {
 	form := []models.FormData{}
 	for _, formData := range body {
+		if disabled, ok := formData["disabled"].(bool); ok && disabled {
+			continue
+		}
 		key, okKey := formData["key"].(string)
-		value, okVal := formData["value"].(string)
-		if okKey && okVal {
+		if !okKey || key == "" {
+			continue
+		}
+		if fieldType, _ := formData["type"].(string); fieldType == "file" {
+			var paths []string
+			switch src := formData["src"].(type) {
+			case string:
+				if src != "" {
+					paths = []string{src}
+				}
+			case []interface{}:
+				for _, elem := range src {
+					if p, ok := elem.(string); ok && p != "" {
+						paths = append(paths, p)
+					}
+				}
+			}
+			// Note: Postman exports typically record host absolute paths in src;
+			// replay's OpenRecordingFile enforces recording-directory containment,
+			// so absolute paths must be made relative to the recording if replayed.
+			form = append(form, models.FormData{
+				Key:   key,
+				Paths: paths,
+			})
+			continue
+		}
+		if value, okVal := formData["value"].(string); okVal {
 			form = append(form, models.FormData{
 				Key:    key,
 				Values: []string{value},

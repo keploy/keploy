@@ -317,6 +317,89 @@ func TestAnImportedTestIsWrittenOnlyInsideTheRecording(t *testing.T) {
 	}
 }
 
+func TestProcessFormdataBody_HandlesFileAndText(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []map[string]interface{}
+		want  []models.FormData
+	}{
+		{
+			name: "text and file fields including omitted src",
+			input: []map[string]interface{}{
+				{"key": "username", "value": "aditya", "type": "text"},
+				{"key": "role", "value": "admin"},
+				{"key": "empty_val", "value": "", "type": "text"},
+				{"key": "avatar", "type": "file", "src": "/path/to/avatar.png"},
+				{"key": "document", "type": "file"},
+			},
+			want: []models.FormData{
+				{Key: "username", Values: []string{"aditya"}},
+				{Key: "role", Values: []string{"admin"}},
+				{Key: "empty_val", Values: []string{""}},
+				{Key: "avatar", Paths: []string{"/path/to/avatar.png"}},
+				{Key: "document", Paths: nil},
+			},
+		},
+		{
+			name: "postman v2.1 multi-file src array filters empty and non-string entries",
+			input: []map[string]interface{}{
+				{
+					"key":  "attachments",
+					"type": "file",
+					"src":  []interface{}{"files/a.pdf", "", 123, nil, "files/b.png"},
+				},
+				{
+					"key":  "empty_array",
+					"type": "file",
+					"src":  []interface{}{"", 42},
+				},
+			},
+			want: []models.FormData{
+				{Key: "attachments", Paths: []string{"files/a.pdf", "files/b.png"}},
+				{Key: "empty_array", Paths: nil},
+			},
+		},
+		{
+			name: "file fields with nil, empty, or non-string src omit empty paths",
+			input: []map[string]interface{}{
+				{"key": "nil_src", "type": "file", "src": nil},
+				{"key": "empty_src", "type": "file", "src": ""},
+				{"key": "int_src", "type": "file", "src": 99},
+			},
+			want: []models.FormData{
+				{Key: "nil_src", Paths: nil},
+				{Key: "empty_src", Paths: nil},
+				{Key: "int_src", Paths: nil},
+			},
+		},
+		{
+			name: "skips disabled, malformed keys, and non-string values",
+			input: []map[string]interface{}{
+				{"key": "disabled_text", "value": "skip", "disabled": true},
+				{"key": "disabled_file", "type": "file", "src": "a.bin", "disabled": true},
+				{"key": "non_bool_disabled", "value": "keep", "disabled": "true"},
+				{"key": "", "value": "empty-key"},
+				{"key": nil, "value": "nil-key"},
+				{"key": 123, "value": "int-key"},
+				{"key": "nil_val", "value": nil},
+				{"key": "int_val", "value": 456},
+				{"key": "non_string_type", "type": 7, "value": "fallback-text"},
+			},
+			want: []models.FormData{
+				{Key: "non_bool_disabled", Values: []string{"keep"}},
+				{Key: "non_string_type", Values: []string{"fallback-text"}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := processFormdataBody(tc.input)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestProcessUrlencodedBody_PreservesFieldBoundaries(t *testing.T) {
 	tests := []struct {
 		name     string
