@@ -109,7 +109,11 @@ func TestStrictClosestIsWhatEveryRecordingComparedFinds(t *testing.T) {
 	routeMisses, offRouteMisses := 0, 0
 	for round := 0; round < 400; round++ {
 		urlNoise := noises[rng.Intn(len(noises))]
-		n := h.newStrictNoise(nil, nil, urlNoise)
+		var bodyNoise map[string][]string
+		if round%2 == 0 {
+			bodyNoise = map[string][]string{"k": {"^only-digits-[0-9]+$"}}
+		}
+		n := h.newStrictNoise(nil, bodyNoise, urlNoise)
 		pool := make([]*models.Mock, 1+rng.Intn(14))
 		for i := range pool {
 			m := onHost(fmt.Sprintf("mock-%d", i), recorded[rng.Intn(len(recorded))], hosts[rng.Intn(len(hosts))])
@@ -146,7 +150,7 @@ func TestStrictClosestIsWhatEveryRecordingComparedFinds(t *testing.T) {
 		if len(fits) > 0 {
 			continue
 		}
-		got, err := strictClosest(ctx, call, dest, pool, n, true)
+		got, err := strictClosest(ctx, call, dest, pool, n, integrations.ExactViewVerify.Load())
 		if err != nil {
 			t.Fatal(err)
 		}

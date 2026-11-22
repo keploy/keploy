@@ -213,3 +213,41 @@ func TestAKeyedStrictReadAnswersAsTheWholeRead(t *testing.T) {
 		})
 	}
 }
+
+// Under KEPLOY_PROVEN=1 outside record's full round (Learn=false), a miss whose
+// body contains a reordered JSON array still runs orderMiss and reports
+// models.MissUnstableOrder (pinning decode.go's '[' guard).
+func TestAProvenReplayMissStillDetectsUnstableArrayOrder(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	at := time.Unix(1_700_000_000, 0)
+	m := &models.Mock{
+		Version: models.GetVersion(),
+		Name:    "mock-order",
+		Kind:    models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"type": models.HTTPClient},
+			HTTPReq: &models.HTTPReq{
+				Method: models.Method("POST"), ProtoMajor: 1, ProtoMinor: 1,
+				URL:    "http://upstream/batch",
+				Header: map[string]string{"Host": "upstream", "Content-Type": "application/json"},
+				Body:   `{"ids":[1,2,3]}`,
+			},
+			HTTPResp: &models.HTTPResp{
+				StatusCode: 200,
+				Header:     map[string]string{"Content-Type": "application/json"},
+				Body:       `{"ok":true}`,
+			},
+			ReqTimestampMock: at,
+			ResTimestampMock: at.Add(time.Millisecond),
+		},
+	}
+	m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.SetMocksWithWindow([]*models.Mock{m}, nil, at.Add(-time.Second), at.Add(time.Minute))
+	h := httpint.New(zap.NewNop())
+	got := serveWith(h, mm, models.OutgoingOptions{}, "", "POST", "/batch", `{"ids":[3,1,2]}`)
+	if !strings.Contains(got, string(models.MissUnstableOrder)) {
+		t.Fatalf("reordered array miss = %q; want %q", got, models.MissUnstableOrder)
+	}
+}
