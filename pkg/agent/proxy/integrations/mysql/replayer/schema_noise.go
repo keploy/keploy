@@ -960,7 +960,7 @@ func jsonNumberFromFloat64(f float64) json.Number {
 	b := strconv.AppendFloat(make([]byte, 0, 24), f, fmtByte, -1, 64)
 	if fmtByte == 'e' {
 		n := len(b)
-		if n >= 4 && b[n-4] == 'e' && (b[n-3] == '-' || b[n-3] == '+') && b[n-2] == '0' {
+		if n >= 4 && b[n-4] == 'e' && b[n-3] == '-' && b[n-2] == '0' {
 			b[n-2] = b[n-1]
 			b = b[:n-1]
 		}
