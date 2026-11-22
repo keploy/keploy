@@ -278,6 +278,7 @@ func queryNoiseEntries(recordedQuery map[string]string, liveQuery url.Values, di
 const (
 	minTokenDigitCore = 6
 	minTokenIDCore    = 8
+	minTokenTotalLen  = 16
 )
 
 // queryValueEntry is the url-noise regex that matches a whole query value
@@ -285,9 +286,10 @@ const (
 // shape (a digit run of minDynamicQueryDigits or more, a uuid, long hex),
 // and for a long token, the members' common literal prefix and suffix
 // (trimmed to separator boundaries and regexp-quoted) around the varying
-// part's own id class and length. Returns "" when no entry can be confined
-// without matching "/" (paths) or values the matcher never calls an id
-// (plain words, snake_case enums, bare digit runs).
+// part's own id class and length, with the core regex itself requiring a
+// digit and the class's minimum length. Returns "" when no entry can be
+// confined without matching "/" (paths) or values the matcher never calls an
+// id (plain words, letter-only cores, snake_case enums, short digit runs).
 func queryValueEntry(class string, members []string) string {
 	switch class {
 	case "digits":
@@ -307,9 +309,13 @@ func isASCIIAlnum(r rune) bool {
 	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
-func hasASCIIAlnum(s string) bool {
+func isASCIIAlpha(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
+
+func hasASCIIAlpha(s string) bool {
 	for _, r := range s {
-		if isASCIIAlnum(r) {
+		if isASCIIAlpha(r) {
 			return true
 		}
 	}
@@ -318,9 +324,11 @@ func hasASCIIAlnum(s string) bool {
 
 // tokenQueryValueEntry confines a "token" query id to its common literal
 // prefix and suffix around a narrow id-shaped varying core (uuid, digits,
-// hex, or a labeled-affix alphanumeric id). Any member containing "/" or
-// lacking a narrow id-shaped core returns "", so the next step names the
-// record step alone.
+// hex, or a prefix-labeled alphanumeric id). Every emitted hex or alnum core
+// pattern syntactically requires at least one ASCII digit and the "token"
+// class's total length floor, so letter-only values (class "") never match.
+// Any member containing "/" or lacking a narrow id-shaped core returns "",
+// so the next step names the record step alone.
 func tokenQueryValueEntry(members []string) string {
 	var toks []string
 	for _, m := range members {
@@ -343,7 +351,7 @@ func tokenQueryValueEntry(members []string) string {
 			return ""
 		}
 	}
-	corePat := tokenCorePattern(cores, hasASCIIAlnum(prefix) || hasASCIIAlnum(suffix))
+	corePat := tokenCorePattern(cores, prefix, suffix)
 	if corePat == "" {
 		return ""
 	}
@@ -400,9 +408,48 @@ func commonTokenAffixes(toks []string) (prefix, suffix string) {
 	return prefix, suffix
 }
 
+// digitCorePattern builds an RE2 pattern over [charClass] that:
+//  1. matches every string of length >= minLen over [charClass] containing at
+//     least one ASCII digit [0-9], and
+//  2. matches only strings of length >= minMatch containing at least one ASCII
+//     digit [0-9] (with 1 <= minMatch <= minLen).
+//
+// Each branch has the form C{a,}[0-9]C{b,} with a+1+b == minMatch, so every
+// match has length >= minMatch and includes a digit; stepping a by
+// (minLen - minMatch + 1) covers every digit position 0..minLen-1.
+func digitCorePattern(charClass string, minLen, minMatch int) string {
+	c := "[" + charClass + "]"
+	quant := func(n int) string {
+		switch n {
+		case 0:
+			return "*"
+		case 1:
+			return "+"
+		default:
+			return "{" + strconv.Itoa(n) + ",}"
+		}
+	}
+	step := minLen - minMatch + 1
+	var branches []string
+	for a := 0; ; a += step {
+		if a > minMatch-1 {
+			a = minMatch - 1
+		}
+		b := minMatch - 1 - a
+		branches = append(branches, c+quant(a)+"[0-9]"+c+quant(b))
+		if a == minMatch-1 {
+			break
+		}
+	}
+	if len(branches) == 1 {
+		return branches[0]
+	}
+	return "(?:" + strings.Join(branches, "|") + ")"
+}
+
 // tokenCorePattern returns the regex fragment for the varying cores of a
 // token query id, or "" when the cores do not share a narrow id shape.
-func tokenCorePattern(cores []string, hasLabeledAffix bool) string {
+func tokenCorePattern(cores []string, prefix, suffix string) string {
 	allUUID := true
 	for _, c := range cores {
 		if !reSegUUID.MatchString(c) {
@@ -461,25 +508,28 @@ func tokenCorePattern(cores []string, hasLabeledAffix bool) string {
 			everyHasAlpha = false
 		}
 	}
-	quant := func() string {
-		if minLen == maxLen {
-			return "{" + strconv.Itoa(minLen) + "}"
-		}
-		return "{" + strconv.Itoa(minLen) + ",}"
-	}
+
+	hasPrefixLabel := hasASCIIAlpha(prefix)
+	affixHasAlpha := hasPrefixLabel || hasASCIIAlpha(suffix)
+	affixLen := len(prefix) + len(suffix)
+	minMatch := max(minTokenIDCore, minTokenTotalLen-affixLen)
+
 	if allDigits {
 		minReq := minDynamicQueryDigits
-		if hasLabeledAffix {
+		if hasPrefixLabel {
 			minReq = minTokenDigitCore
 		}
 		if minLen < minReq {
 			return ""
 		}
-		return "[0-9]" + quant()
+		if minLen == maxLen {
+			return "[0-9]{" + strconv.Itoa(minLen) + "}"
+		}
+		return "[0-9]{" + strconv.Itoa(minLen) + ",}"
 	}
-	if allHex && everyHasDigit {
+	if allHex && everyHasDigit && affixHasAlpha {
 		minReq := 16
-		if hasLabeledAffix {
+		if hasPrefixLabel {
 			minReq = minTokenIDCore
 		}
 		if minLen < minReq {
@@ -487,21 +537,21 @@ func tokenCorePattern(cores []string, hasLabeledAffix bool) string {
 		}
 		switch {
 		case hasLower && !hasUpper:
-			return "[0-9a-f]" + quant()
+			return digitCorePattern("0-9a-f", minLen, minMatch)
 		case hasUpper && !hasLower:
-			return "[0-9A-F]" + quant()
+			return digitCorePattern("0-9A-F", minLen, minMatch)
 		default:
-			return "[0-9a-fA-F]" + quant()
+			return digitCorePattern("0-9a-fA-F", minLen, minMatch)
 		}
 	}
-	if allAlnum && hasLabeledAffix && everyHasDigit && everyHasAlpha && minLen >= minTokenIDCore {
+	if allAlnum && hasPrefixLabel && everyHasDigit && everyHasAlpha && minLen >= minTokenIDCore {
 		switch {
 		case hasLower && !hasUpper:
-			return "[0-9a-z]" + quant()
+			return digitCorePattern("0-9a-z", minLen, minMatch)
 		case hasUpper && !hasLower:
-			return "[0-9A-Z]" + quant()
+			return digitCorePattern("0-9A-Z", minLen, minMatch)
 		default:
-			return "[0-9A-Za-z]" + quant()
+			return digitCorePattern("0-9A-Za-z", minLen, minMatch)
 		}
 	}
 	return ""
