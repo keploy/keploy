@@ -111,6 +111,26 @@ type TestDB interface {
 	DeleteTestSet(ctx context.Context, testSetID string) error
 }
 
+// TestCasePresenceReader is an optional TestDB capability: it reports whether
+// a test set has at least one test case to run without decoding every test
+// case or logging an error on a set that RunTestSet is about to read and
+// report itself.
+//
+// lastSetThatRuns pre-scans trailing sets before the first set starts so
+// KEPLOY-LAST-TESTCASE and kept-app stops land on the last set that runs.
+// Calling GetTestCases there decoded the last set twice and logged an
+// unreadable test case at ERROR twice. When a TestDB implements this
+// capability, lastSetThatRuns asks HasTestCases instead and falls back to
+// GetTestCases only for stores that do not.
+//
+// A wrapper that embeds a TestCasePresenceReader (such as *testdb.TestYaml)
+// and filters out test cases in GetTestCases inherits HasTestCases by
+// promotion and should override it if post-filter emptiness matters to
+// lastSetThatRuns.
+type TestCasePresenceReader interface {
+	HasTestCases(ctx context.Context, testSetID string) (bool, error)
+}
+
 // RecordedStartReader is an optional TestDB capability: the request time of the
 // earliest test case a test set ever recorded, which can predate every test case
 // the set holds now. A zero time means the TestDB does not know it.

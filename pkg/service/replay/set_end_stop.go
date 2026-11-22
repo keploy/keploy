@@ -105,12 +105,26 @@ func (r *Replayer) lastSetThatRuns(ctx context.Context, testSets []string) int {
 		if wholeSetIgnored(r.config.Test.IgnoredTests, testSets[i]) {
 			continue
 		}
-		if cases, err := r.testDB.GetTestCases(ctx, testSets[i]); err == nil && len(cases) == 0 {
+		if !r.setHasTestCases(ctx, testSets[i]) {
 			continue
 		}
 		return i
 	}
 	return -1
+}
+
+// setHasTestCases reports whether testSetID has at least one test case to run,
+// or cannot be read (RunTestSet fails on an unreadable set, so it counts as
+// one that runs). When r.testDB implements TestCasePresenceReader, it asks
+// HasTestCases so the pre-scan neither decodes the set twice nor logs an
+// unreadable case's error before RunTestSet does.
+func (r *Replayer) setHasTestCases(ctx context.Context, testSetID string) bool {
+	if checker, ok := r.testDB.(TestCasePresenceReader); ok {
+		has, err := checker.HasTestCases(ctx, testSetID)
+		return err != nil || has
+	}
+	cases, err := r.testDB.GetTestCases(ctx, testSetID)
+	return err != nil || len(cases) > 0
 }
 
 // lastSentOf is the test case of tests, in the order a pass of the set runs

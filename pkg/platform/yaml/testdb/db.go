@@ -362,6 +362,10 @@ type testCaseFileRef struct {
 // error, not "no tests": reading it as empty would report a recorded set as
 // having nothing to run.
 func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCaseFileRef, ok bool, err error) {
+	return ts.listTestCaseFiles(testSetID, ts.logger)
+}
+
+func (ts *TestYaml) listTestCaseFiles(testSetID string, logger *zap.Logger) (dir string, refs []testCaseFileRef, ok bool, err error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 
 	TestPath, err := yaml.ValidatePath(path)
@@ -370,24 +374,24 @@ func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCase
 	}
 	_, err = os.Stat(TestPath)
 	if errors.Is(err, fs.ErrNotExist) {
-		ts.logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
+		logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
 		return TestPath, nil, false, nil
 	}
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to look at the directory containing yaml testcases", zap.String("path", TestPath))
+		utils.LogError(logger, err, "failed to look at the directory containing yaml testcases", zap.String("path", TestPath))
 		return TestPath, nil, false, err
 	}
 	d, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.String("path", TestPath))
+		utils.LogError(logger, err, "failed to open the directory containing yaml testcases", zap.String("path", TestPath))
 		return TestPath, nil, false, err
 	}
 	files, err := d.ReadDir(0)
 	if closeErr := d.Close(); closeErr != nil {
-		ts.logger.Debug("failed to close the directory containing yaml testcases", zap.String("path", TestPath), zap.Error(closeErr))
+		logger.Debug("failed to close the directory containing yaml testcases", zap.String("path", TestPath), zap.Error(closeErr))
 	}
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
+		utils.LogError(logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
 		return TestPath, nil, false, err
 	}
 	// Accept both .yaml and .json so a directory containing a mix of
@@ -443,6 +447,68 @@ func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCase
 		refs = append(refs, testCaseFileRef{name: name, format: fileFormat})
 	}
 	return TestPath, refs, true, nil
+}
+
+// HasTestCases reports whether testSetID has at least one non-empty test case
+// file that GetTestCases would attempt to load (that is, whether GetTestCases
+// would not return an empty slice with a nil error). It applies the same
+// directory listing, extension filter, mocks-file exclusion, and
+// format-preference dedup as GetTestCases and skips 0-byte files, but opens
+// each candidate inside the recording root and reads at most one byte without
+// unmarshaling YAML/JSON or logging at ERROR. Replay's last-set-that-runs
+// pre-scan uses it so sets are decoded once (in RunTestSet) and an unreadable
+// directory or test case emits only RunTestSet's single ERROR line.
+func (ts *TestYaml) HasTestCases(ctx context.Context, testSetID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	TestPath, refs, ok, err := ts.listTestCaseFiles(testSetID, zap.NewNop())
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	for _, ref := range refs {
+		nonEmpty, err := hasBytesInRecording(ctx, ts.TcsPath, TestPath, ref)
+		if err != nil {
+			return false, err
+		}
+		if nonEmpty {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// hasBytesInRecording opens ref inside root and reports whether it contains at
+// least one byte, without reading the rest of the file or logging on error.
+func hasBytesInRecording(ctx context.Context, root, dir string, ref testCaseFileRef) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	filePath := filepath.Join(dir, ref.name+"."+ref.format.FileExtension())
+	f, err := yaml.OpenInRecording(root, filePath)
+	if err != nil {
+		return false, fmt.Errorf("failed to read the file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	var one [1]byte
+	n, err := f.Read(one[:])
+	if n > 0 {
+		return true, nil
+	}
+	if errors.Is(err, io.EOF) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // TestCaseFiles returns the test case files of a test set as they are
