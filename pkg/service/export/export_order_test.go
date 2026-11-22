@@ -62,14 +62,18 @@ func itemNames(t *testing.T, items []interface{}) []string {
 			names = append(names, fmt.Sprintf("<%T>", it))
 			continue
 		}
-		names = append(names, m["name"].(string))
+		name, ok := m["name"].(string)
+		if !ok {
+			names = append(names, fmt.Sprintf("<non-string name: %T>", m["name"]))
+			continue
+		}
+		names = append(names, name)
 	}
 	return names
 }
 
-// A collection is a file people keep in git and diff: exporting the same
-// recording twice must give the same file, with a folder's requests in the
-// order the test cases were recorded.
+// Exporting the same recording repeatedly must list a folder's requests in
+// the deterministic order the test cases were recorded.
 func TestExportKeepsARecordingsRequestsInTheirOrder(t *testing.T) {
 	var urls []string
 	var want []string
@@ -81,6 +85,25 @@ func TestExportKeepsARecordingsRequestsInTheirOrder(t *testing.T) {
 		got := itemNames(t, exportedItems(t, urls))
 		if fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Fatalf("run %d: requests are not in recording order:\n got  %v\n want %v", run, got, want)
+		}
+	}
+}
+
+// Identical requests must be deduplicated while preserving the first-seen
+// position in the folder.
+func TestExportDeduplicatesIdenticalRequestsAtFirstSeenOrder(t *testing.T) {
+	urls := []string{
+		"http://127.0.0.1:9/alpha",
+		"http://127.0.0.1:9/beta",
+		"http://127.0.0.1:9/alpha",
+		"http://127.0.0.1:9/gamma",
+		"http://127.0.0.1:9/beta",
+	}
+	want := []string{"alpha", "beta", "gamma"}
+	for run := 0; run < 5; run++ {
+		got := itemNames(t, exportedItems(t, urls))
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("run %d: deduplicated order = %v, want %v", run, got, want)
 		}
 	}
 }
@@ -97,5 +120,17 @@ func TestExportLeavesNoNullItemForAnUnconvertibleTestCase(t *testing.T) {
 	}
 	if len(items) != 1 {
 		t.Fatalf("want only the convertible request, got %v", itemNames(t, items))
+	}
+}
+
+// When every test case in a folder is unconvertible, the folder's "item" field
+// must serialize as an empty JSON array ([]), never null.
+func TestExportAllUnconvertibleFolderSerializesEmptyArray(t *testing.T) {
+	items := exportedItems(t, []string{"/no-host/one", "/no-host/two"})
+	if items == nil {
+		t.Fatalf("folder item field decoded as nil (JSON null); want non-nil empty JSON array []")
+	}
+	if len(items) != 0 {
+		t.Fatalf("want 0 items, got %v", itemNames(t, items))
 	}
 }

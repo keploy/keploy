@@ -241,11 +241,12 @@ func Export(_ context.Context, logger *zap.Logger) error {
 					continue
 				}
 				if _, seen := keployRequests[string(requestJSONString)]; !seen {
-					keployRequests[string(requestJSONString)] = struct{}{}
-					requestOrder = append(requestOrder, string(requestJSONString))
+					reqStr := string(requestJSONString)
+					keployRequests[reqStr] = struct{}{}
+					requestOrder = append(requestOrder, reqStr)
 				}
 			}
-			var uniqueRequests []interface{}
+			uniqueRequests := make([]interface{}, 0, len(requestOrder))
 			for _, request := range requestOrder {
 				var curlRequest interface{}
 				err := json.Unmarshal([]byte(request), &curlRequest)
