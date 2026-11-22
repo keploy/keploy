@@ -3,12 +3,15 @@ package http
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // keyedMemDb is the test double with the agent's keyed reads
@@ -186,6 +189,27 @@ func TestAKeyedLightExactPassLeavesTheTurnToTheHeavyPassAfterIt(t *testing.T) {
 	}
 }
 
+// A call that is a recording's very request is answered from its request's
+// recordings alone (keyedExactBody), however heavy its path's other
+// recordings are: with every turn held it is answered at once, the light
+// recordings of its request taking no turn.
+func TestAKeyedExactCallIsAnsweredFromItsRequestAlone(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	body := jsonQ("light")
+	db := keyedDB(append(heavyDB(t, 8, 200000).mocks, recorded("own", "/poll", jsonHeader, body))...)
+	db.claims = 1 // no claim refused
+	giveBack := takeAllTurns(t)
+	defer giveBack()
+	in := sent("/poll", jsonHeader, body)
+	in.raw = in.body
+	if served := matchKeyed(t, in, db); served == nil || served.Name != "own" {
+		t.Fatalf("served %v, want the recording of the call's very request", served)
+	}
+	if db.wholeReads != 0 {
+		t.Fatalf("%d whole reads, want the keyed pass alone", db.wholeReads)
+	}
+}
+
 // A recording a key of requestIndex holds answers a call through the
 // exact-body pass only when its body is the call's, byte for byte: under a
 // key whose body hash collides with the call's, another body is passed over
@@ -201,6 +225,211 @@ func TestAKeyedExactPassServesOnlyTheCallsVeryBody(t *testing.T) {
 	in.raw = in.body
 	if served := matchKeyed(t, in, db); served == nil || served.Name != "near" {
 		t.Fatalf("served %v, want the recording of the call's very body", served)
+	}
+	if db.keyedReads == 0 {
+		t.Fatal("no keyed read: the row needs the keyed passes")
+	}
+}
+
+// sessionKeyFails is keyedMemDb with recordings of the per-test tier too
+// (perTest), which its keyed per-test read reads by key, and its keyed
+// session read failing: a store whose keyed read fails, so the call reads
+// the whole pool.
+type sessionKeyFails struct {
+	*keyedMemDb
+	perTest []*models.Mock
+}
+
+func (s *sessionKeyFails) GetPerTestMocksInWindow() ([]*models.Mock, error) { return s.perTest, nil }
+
+func (s *sessionKeyFails) RangePerTestMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	s.keyedReads++
+	for _, mk := range s.perTest {
+		if slices.Contains(ix.Keys(mk), key) && !fn(mk) {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (s *sessionKeyFails) RangeSessionMocksWithKey(*integrations.MockIndex, string, func(*models.Mock) bool) error {
+	return errors.New("the keyed session read fails")
+}
+
+// A call whose store fails its keyed session read is matched as the whole
+// read matches it, not from the per-test recordings the keyed read gave
+// before it failed: of a light per-test recording of the call's very request
+// and heavy session recordings of its path, the whole read weighs them all,
+// so with every turn held the call waits for one, and is answered the
+// per-test recording once a turn is free.
+func TestAKeyedReadThatFailsLeavesTheCallToTheWholeRead(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	body := jsonQ(fuzzyLetters(300000, 5))
+	own := recorded("own", "/poll", jsonHeader, body)
+	db := &sessionKeyFails{keyedMemDb: keyedDB(heavyDB(t, 4, 300000).mocks...), perTest: []*models.Mock{own}}
+	db.claims = 1 // no claim refused
+	db.deleteFilteredReturn = true
+	giveBack := takeAllTurns(t)
+	defer giveBack()
+	in := sent("/poll", jsonHeader, body)
+	in.raw = in.body
+	type answer struct {
+		served *models.Mock
+		err    error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		_, served, _, err := newHTTP().match(context.Background(), in, db, nil, nil, nil, false, false, false, true, false)
+		done <- answer{served, err}
+	}()
+	select {
+	case <-done:
+		t.Fatal("the call was matched with no turn free: it was answered from the keyed read that failed")
+	case <-time.After(300 * time.Millisecond):
+	}
+	giveBack()
+	select {
+	case a := <-done:
+		if a.err != nil {
+			t.Fatal(a.err)
+		}
+		if a.served == nil || a.served.Name != "own" {
+			t.Fatalf("served %v, want the per-test recording of the call's very request", a.served)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call did not end once a turn was free")
+	}
+	if db.keyedReads == 0 {
+		t.Fatal("no keyed read: the row needs the keyed passes")
+	}
+}
+
+// A call answered by its very request's recording, whose response the store
+// keeps apart (a spilled response) and does not load, ends with that error,
+// as the whole read's claim ends it: it does not pick the recording again.
+func TestAKeyedExactCallWhoseResponseDoesNotLoadEndsWithTheError(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	body := jsonQ("spilled")
+	m := recorded("spilled", "/poll", jsonHeader, body)
+	m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		return nil, nil, errors.New("the parked response is gone")
+	})
+	db := keyedDB(m)
+	db.claims = 1 // no claim refused
+	in := sent("/poll", jsonHeader, body)
+	in.raw = in.body
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := newHTTP().match(context.Background(), in, db, nil, nil, nil, false, false, false, true, false)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "load the recorded response") {
+			t.Fatalf("the call ended with %v, want the response's load error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call never ended: it picked the recording again and again")
+	}
+	if db.keyedReads == 0 {
+		t.Fatal("no keyed read: the row needs the keyed passes")
+	}
+}
+
+// A url noise's index is made once (noiseIndexOf): a call under a noise an
+// earlier call was matched under reads the index the stores already hold,
+// another noise has one of its own, and at most noiseIndexesCap are kept, so
+// a replay of many noises holds a bounded set.
+func TestANoiseIndexIsMadeOncePerNoise(t *testing.T) {
+	noiseIndexes.mu.Lock()
+	noiseIndexes.m = nil
+	noiseIndexes.mu.Unlock()
+	log := zap.NewNop()
+	a := noiseIndexOf(log, []string{"/a/[0-9]+"})
+	b := noiseIndexOf(log, []string{"/b/[0-9]+"})
+	if a == b {
+		t.Fatal("two noises share one index")
+	}
+	if again := noiseIndexOf(log, []string{"/a/[0-9]+"}); again != a {
+		t.Fatal("a noise met again was given a new index")
+	}
+	for i := 0; i <= noiseIndexesCap; i++ {
+		noiseIndexOf(log, []string{fmt.Sprintf("/c%d/[0-9]+", i)})
+		noiseIndexes.mu.Lock()
+		kept := len(noiseIndexes.m)
+		noiseIndexes.mu.Unlock()
+		if kept > noiseIndexesCap {
+			t.Fatalf("%d noises' indexes kept, want at most %d", kept, noiseIndexesCap)
+		}
+	}
+}
+
+// The keyed reads' keys tell requests apart by method and by each segment
+// of the path (idKey keeps where a segment ends), and a path key from an id
+// key; a mock that is not an HTTP recording, or whose URL does not parse, is
+// filed under no key, by requestIndex, pathIndex and a noise's index alike.
+func TestTheKeyedReadsKeys(t *testing.T) {
+	if idKey("GET", "/a/b") == idKey("GET", "/ab") {
+		t.Fatal("/a/b and /ab share an id key")
+	}
+	if idKey("GET", "/a/b") == idKey("POST", "/a/b") {
+		t.Fatal("two methods share an id key")
+	}
+	if pathKey("GET", "/a") == idKey("GET", "/a") {
+		t.Fatal("a path key is an id key")
+	}
+	grpc := recorded("grpc", "/a", jsonHeader, "")
+	grpc.Kind = models.GRPC_EXPORT
+	noReq := recorded("noReq", "/a", jsonHeader, "")
+	noReq.Spec.HTTPReq = nil
+	badURL := recorded("badURL", "/a", jsonHeader, "")
+	badURL.Spec.HTTPReq.URL = "http://[::1"
+	for name, keys := range map[string]func(*models.Mock) []string{
+		"requestIndex": requestIndex.Keys,
+		"pathIndex":    pathIndex.Keys,
+		"noise":        noiseIndexOf(zap.NewNop(), []string{"/a/[0-9]+"}).Keys,
+	} {
+		for i, m := range []*models.Mock{nil, grpc, noReq, badURL} {
+			if got := keys(m); got != nil {
+				t.Fatalf("%s filed mock %d (nil, gRPC, no request, a bad URL) under %q", name, i, got)
+			}
+		}
+		if got := keys(recorded("ok", "/a", jsonHeader, "")); len(got) == 0 {
+			t.Fatalf("%s filed an HTTP recording under no key", name)
+		}
+	}
+}
+
+// A heavy call that no recording of its path answers, given up by its
+// caller while it waits for a turn, ends with its caller's end, not with a
+// miss: no report is made of a call no one waits for.
+func TestAHeavyCallGivenUpWhileWaitingForATurnEndsWithoutAMiss(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	db := keyedDB(recorded("elsewhere", "/elsewhere", jsonHeader, jsonQ("x")))
+	db.claims = 1 // no claim refused
+	giveBack := takeAllTurns(t)
+	defer giveBack()
+	in := sent("/nowhere", jsonHeader, jsonQ(fuzzyLetters(int(heavyCallBytes)+1, 9)))
+	in.raw = in.body
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, diag, err := newHTTP().match(ctx, in, db, nil, nil, nil, false, false, false, true, false)
+		if err == nil && diag != nil {
+			err = fmt.Errorf("a miss of phase %q", diag.phase)
+		}
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the call given up ended with %v, want its caller's end", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call given up never ended")
 	}
 	if db.keyedReads == 0 {
 		t.Fatal("no keyed read: the row needs the keyed passes")
