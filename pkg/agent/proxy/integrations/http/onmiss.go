@@ -1,0 +1,217 @@
+package http
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/tls"
+	"io"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+)
+
+// On-miss policy for `keploy mock replay` (models.OutgoingOptions.OnMiss):
+//   - fail (default): the miss is a hard 502; nothing reaches the real upstream.
+//   - passthrough: dial the real dependency, relay the exchange, don't persist.
+//   - record: passthrough AND capture the exchange so the CLI appends it to the
+//     mock set at end-of-run (VCR "new_episodes" — incremental refresh).
+//
+// The capture buffer is a process-global drained once per run by the CLI via
+// GET /agent/mock/captured, so record-on-miss needs no live streaming and no
+// change to the proxy's mock-serving session mode.
+
+var (
+	capturedMu    sync.Mutex
+	capturedMocks []*models.Mock
+)
+
+// ResetCaptured clears the on-miss capture buffer at the start of a mock-serving
+// session so a reused agent process does not leak captures across runs.
+func ResetCaptured() {
+	capturedMu.Lock()
+	capturedMocks = nil
+	capturedMu.Unlock()
+}
+
+// DrainCaptured returns and clears the mocks captured on miss this run. The CLI
+// appends them to the active set.
+func DrainCaptured() []*models.Mock {
+	capturedMu.Lock()
+	out := capturedMocks
+	capturedMocks = nil
+	capturedMu.Unlock()
+	return out
+}
+
+func appendCaptured(m *models.Mock) {
+	capturedMu.Lock()
+	capturedMocks = append(capturedMocks, m)
+	capturedMu.Unlock()
+}
+
+// serveOnMiss handles an HTTP mock miss under a passthrough/record policy: it
+// dials the real upstream, relays the request and response, writes the response
+// back to the client, and (for record) captures a mock. It returns true when it
+// handled the exchange (the caller then continues the keep-alive loop), or false
+// when the policy is fail (the caller sends the 502). An error means the
+// upstream dial/relay failed and the caller should fall back to the 502.
+func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []byte, request *http.Request, reqBody []byte, dstCfg *models.ConditionalDstCfg, opts models.OutgoingOptions) (bool, error) {
+	if !opts.OnMiss.PassesThroughOnMiss() {
+		return false, nil
+	}
+	if dstCfg == nil || dstCfg.Addr == "" {
+		h.Logger.Debug("on-miss passthrough: no upstream address known; falling back to hard miss")
+		return false, nil
+	}
+
+	reqTs := time.Now()
+	dstConn, err := h.dialUpstream(ctx, dstCfg)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if cerr := dstConn.Close(); cerr != nil {
+			h.Logger.Debug("on-miss passthrough: failed to close upstream conn", zap.Error(cerr))
+		}
+	}()
+	// The upstream's answer is read with no deadline: the call's end ends
+	// that read, as it ends decodeHTTP's reads of the client, so decodeHTTP,
+	// which waits for its goroutine, is not held by an upstream that does
+	// not answer.
+	defer pUtil.InterruptOnDone(ctx, dstConn)()
+
+	// Forward the exact request bytes upstream.
+	if _, err := dstConn.Write(reqBuf); err != nil {
+		return false, err
+	}
+
+	// Read the upstream's final response: an interim one (the 100 Continue
+	// to an upload, a 103 Early Hints) is not its answer, and is not relayed.
+	// The app had its 100 from the decoder already, and a matched mock
+	// serves the final response alone too.
+	respReader := bufio.NewReader(dstConn)
+	respParsed, err := pUtil.ReadFinalResponse(respReader, request, nil)
+	if err != nil {
+		return false, err
+	}
+	respBody, err := io.ReadAll(respParsed.Body)
+	_ = respParsed.Body.Close()
+	if err != nil {
+		return false, err
+	}
+	resTs := time.Now()
+
+	// Relay the response to the client verbatim (re-serialize with a correct
+	// Content-Length; the app reads a normal HTTP response).
+	respParsed.Body = io.NopCloser(bytes.NewReader(respBody))
+	respParsed.ContentLength = int64(len(respBody))
+	var outBuf bytes.Buffer
+	if err := respParsed.Write(&outBuf); err != nil {
+		return false, err
+	}
+	if _, err := clientConn.Write(outBuf.Bytes()); err != nil {
+		return false, err
+	}
+
+	// By its shape (method, host, path, query keys): the URL's query values
+	// are the application's content, and this entry is at Info.
+	h.Logger.Info("on-miss: served an unrecorded call from the real dependency",
+		zap.Any("metadata", utils.GetReqMeta(ctx, request)),
+		zap.String("policy", string(opts.OnMiss)))
+
+	// record policy: capture the exchange for the CLI to persist.
+	if opts.OnMiss.RecordsOnMiss() {
+		captured := &models.Mock{
+			Version: models.GetVersion(),
+			Name:    "mocks",
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata: map[string]string{"type": "HTTP_CLIENT", "operation": request.Method},
+				HTTPReq: &models.HTTPReq{
+					Method:     models.Method(request.Method),
+					ProtoMajor: request.ProtoMajor,
+					ProtoMinor: request.ProtoMinor,
+					URL:        request.URL.String(),
+					Header:     pkg.ToYamlHTTPHeader(request.Header),
+					Body:       string(reqBody),
+					URLParams:  pkg.URLParams(request),
+				},
+				HTTPResp: &models.HTTPResp{
+					StatusCode: respParsed.StatusCode,
+					Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
+					Body:       string(respBody),
+
+					// Replay serves this response: keep what it takes to serve a
+					// repeated header (Set-Cookie) on its own lines.
+					HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
+				},
+				Created:          time.Now().Unix(),
+				ReqTimestampMock: reqTs,
+				ResTimestampMock: resTs,
+			},
+		}
+		// A capture never passes the sync manager, which stamps every other
+		// recorded mock with its connection's container (containerkey): its
+		// key, instance and scope, as a recorded mock carries them.
+		containerkey.StampFromContext(ctx, captured)
+		appendCaptured(captured)
+	}
+	return true, nil
+}
+
+// dialUpstream opens a connection to the real dependency, wrapping it in TLS
+// when the original client connection was TLS (dstCfg.TLSCfg set). The upstream
+// certificate is verified against the system trust store (ServerName carried
+// over from the client's SNI). A dependency with a self-signed / untrusted cert
+// therefore fails the handshake here and the caller falls back to the hard miss
+// (502) rather than the proxy silently trusting an unverified upstream — this
+// on-miss path dials the real network, so it must not disable verification.
+//
+// Its error names the server's host name by its labels' shape beside its tag
+// in ctx's session (models.HostsInError), as its caller's line logs it: a
+// dial's and a handshake's error name it whole.
+func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCfg) (conn net.Conn, err error) {
+	defer func() { err = models.HostsInError(ctx, err, dstCfg.Addr, tlsServerName(dstCfg)) }()
+	d := &net.Dialer{Timeout: 30 * time.Second}
+	raw, err := pUtil.DialDestinationWith(ctx, h.Logger,
+		pUtil.DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			// Only replay misses dial here; no handshake was held for them.
+			return pUtil.DialRaw(ctx, d, "tcp", a, nil)
+		})
+	if err != nil {
+		return nil, err
+	}
+	if dstCfg.TLSCfg == nil {
+		return raw, nil
+	}
+	// Minimal upstream client config: verify against the system trust store
+	// (RootCAs nil) with the app's SNI as ServerName. We deliberately do NOT
+	// reuse dstCfg.TLSCfg — that is keploy's MITM SERVER config (leaf cert, CA)
+	// and must not leak into an upstream client dial. No skip-verify.
+	tlsConn := tls.Client(raw, &tls.Config{ServerName: dstCfg.TLSCfg.ServerName, MinVersion: tls.VersionTLS12})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
+// tlsServerName is the name a TLS dial of dstCfg checks the server's
+// certificate for (its client's SNI), "" for none.
+func tlsServerName(dstCfg *models.ConditionalDstCfg) string {
+	if dstCfg == nil || dstCfg.TLSCfg == nil {
+		return ""
+	}
+	return dstCfg.TLSCfg.ServerName
+}

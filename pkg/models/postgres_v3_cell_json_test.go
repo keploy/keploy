@@ -1,0 +1,472 @@
+package models
+
+import (
+	"encoding/json"
+	"math"
+	"math/big"
+	"net"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+// TestPgtypeJSONNarrowingRejectsOutOfRange pins the range checks on
+// every JSON field that lands in a pgtype struct member narrower than
+// the int64 asInt64 returns.
+//
+// Go's integer conversions truncate silently — int32(1<<31) is
+// -2147483648, uint16(65536) is 0, uint8(-1) is 255 — so before the
+// range checks a hand-edited (or corrupted) mock carrying an
+// out-of-range literal decoded into a *different, wrong* value and
+// replayed as if it were what the user wrote. The YAML path never had
+// this hole: yaml.v3 decodes straight into the target width and errors
+// on overflow (see decodePgNumericMapping, which decodes `exp` into an
+// int32 and `infinitymodifier` into an int8). These cases give the JSON
+// path the same guarantee.
+//
+// Each case asserts a decode ERROR, not a clamped value: silently
+// rewriting a user's mock is exactly the failure being fixed.
+func TestPgtypeJSONNarrowingRejectsOutOfRange(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		// wantErrSubstr keeps the existing per-field error prefix
+		// recognizable ("pg/numeric exp: ...") so callers grepping
+		// mock-decode failures don't lose the field name.
+		wantErrSubstr string
+	}{
+		{
+			name:          "numeric_exp_over_int32",
+			json:          `{"int":"1","exp":2147483648,"nan":false,"infinitymodifier":0,"valid":true}`,
+			wantErrSubstr: "pg/numeric exp:",
+		},
+		{
+			name:          "numeric_exp_under_int32",
+			json:          `{"int":"1","exp":-2147483649,"nan":false,"infinitymodifier":0,"valid":true}`,
+			wantErrSubstr: "pg/numeric exp:",
+		},
+		{
+			name:          "numeric_infinitymodifier_over_int8",
+			json:          `{"int":"1","exp":0,"nan":false,"infinitymodifier":200,"valid":true}`,
+			wantErrSubstr: "pg/numeric infinitymodifier:",
+		},
+		{
+			name:          "interval_days_over_int32",
+			json:          `{"microseconds":0,"days":4294967296,"months":0,"valid":true}`,
+			wantErrSubstr: "pg/interval days:",
+		},
+		{
+			name:          "interval_months_under_int32",
+			json:          `{"microseconds":0,"days":0,"months":-2147483649,"valid":true}`,
+			wantErrSubstr: "pg/interval months:",
+		},
+		{
+			name:          "bits_len_over_int32",
+			json:          `{"bytes":"","len":2147483648,"valid":true}`,
+			wantErrSubstr: "pg/bits len:",
+		},
+		{
+			name:          "bits_bytes_element_over_uint8",
+			json:          `{"bytes":[1,256],"len":16,"valid":true}`,
+			wantErrSubstr: "pg/bits bytes[1]:",
+		},
+		{
+			name:          "bits_bytes_element_negative",
+			json:          `{"bytes":[-1],"len":8,"valid":true}`,
+			wantErrSubstr: "pg/bits bytes[0]:",
+		},
+		{
+			name:          "tid_blocknumber_over_uint32",
+			json:          `{"blocknumber":4294967296,"offsetnumber":0,"valid":true}`,
+			wantErrSubstr: "pg/tid blocknumber:",
+		},
+		{
+			name:          "tid_blocknumber_negative",
+			json:          `{"blocknumber":-1,"offsetnumber":0,"valid":true}`,
+			wantErrSubstr: "pg/tid blocknumber:",
+		},
+		{
+			name:          "tid_offsetnumber_over_uint16",
+			json:          `{"blocknumber":0,"offsetnumber":65536,"valid":true}`,
+			wantErrSubstr: "pg/tid offsetnumber:",
+		},
+		{
+			name:          "tsvector_position_over_uint16",
+			json:          `{"lexemes":[{"word":"cat","positions":[{"position":65536,"weight":0}]}],"valid":true}`,
+			wantErrSubstr: "positions[0] position:",
+		},
+		{
+			name:          "tsvector_weight_over_uint8",
+			json:          `{"lexemes":[{"word":"cat","positions":[{"position":1,"weight":256}]}],"valid":true}`,
+			wantErrSubstr: "positions[0] weight:",
+		},
+		{
+			name:          "range_lowertype_over_uint8",
+			json:          `{"lower":1,"upper":2,"lowertype":256,"uppertype":0,"valid":true}`,
+			wantErrSubstr: "pg/range lowertype:",
+		},
+		{
+			name:          "range_uppertype_negative",
+			json:          `{"lower":1,"upper":2,"lowertype":0,"uppertype":-1,"valid":true}`,
+			wantErrSubstr: "pg/range uppertype:",
+		},
+		{
+			name:          "raw_format_over_int16",
+			json:          `{"format":32768,"bytes":""}`,
+			wantErrSubstr: "pg/raw format:",
+		},
+		{
+			name:          "raw_format_under_int16",
+			json:          `{"format":-32769,"bytes":""}`,
+			wantErrSubstr: "pg/raw format:",
+		},
+		{
+			// The multirange arm reaches rangeFromJSON through the
+			// discriminator envelope — the bound-type checks have to
+			// hold on that path too, not just the bare-range probe.
+			name:          "multirange_nested_range_bound_over_uint8",
+			json:          `{"$pgtype":"multirange","values":[{"lower":1,"upper":2,"lowertype":300,"uppertype":0,"valid":true}]}`,
+			wantErrSubstr: "pg/multirange[0]: pg/range lowertype:",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c PostgresV3Cell
+			err := json.Unmarshal([]byte(tc.json), &c)
+			if err == nil {
+				// Print the decoded value so a regression shows the
+				// silently-rewritten field, not just "expected error".
+				t.Fatalf("out-of-range field decoded silently instead of erroring; got %#v", c.Value)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSubstr) {
+				t.Fatalf("error lost its field prefix: want substring %q, got %q", tc.wantErrSubstr, err.Error())
+			}
+			// The offending value has to appear so a user can find the
+			// bad literal in a multi-megabyte mock file.
+			if !strings.Contains(err.Error(), "out of range") {
+				t.Fatalf("error does not name the range violation: %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestPgtypeJSONNarrowingAcceptsBoundaryValues is the other half of the
+// range checks: every extreme value that DOES fit the target width must
+// still decode, unchanged. An over-eager bound (off-by-one, or a signed
+// check applied to an unsigned field) would truncate the legitimate
+// extremes Postgres actually emits — TID block numbers run the full
+// uint32 space, tsvector positions the full uint16 space.
+func TestPgtypeJSONNarrowingAcceptsBoundaryValues(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want any
+	}{
+		{
+			name: "numeric_exp_int32_extremes",
+			json: `{"int":"1","exp":2147483647,"nan":false,"infinitymodifier":-1,"valid":true}`,
+			want: pgtype.Numeric{Int: big.NewInt(1), Exp: math.MaxInt32, InfinityModifier: pgtype.NegativeInfinity, Valid: true},
+		},
+		{
+			name: "interval_int32_extremes",
+			json: `{"microseconds":9223372036854775807,"days":-2147483648,"months":2147483647,"valid":true}`,
+			want: pgtype.Interval{Microseconds: math.MaxInt64, Days: math.MinInt32, Months: math.MaxInt32, Valid: true},
+		},
+		{
+			name: "bits_len_and_byte_extremes",
+			json: `{"bytes":[0,255],"len":2147483647,"valid":true}`,
+			want: pgtype.Bits{Bytes: []byte{0, 255}, Len: math.MaxInt32, Valid: true},
+		},
+		{
+			name: "tid_unsigned_extremes",
+			json: `{"blocknumber":4294967295,"offsetnumber":65535,"valid":true}`,
+			want: pgtype.TID{BlockNumber: math.MaxUint32, OffsetNumber: math.MaxUint16, Valid: true},
+		},
+		{
+			name: "tsvector_unsigned_extremes",
+			json: `{"lexemes":[{"word":"cat","positions":[{"position":65535,"weight":255}]}],"valid":true}`,
+			want: pgtype.TSVector{
+				Lexemes: []pgtype.TSVectorLexeme{{
+					Word:      "cat",
+					Positions: []pgtype.TSVectorPosition{{Position: math.MaxUint16, Weight: pgtype.TSVectorWeight(255)}},
+				}},
+				Valid: true,
+			},
+		},
+		{
+			name: "range_bound_type_extremes",
+			json: `{"lower":1,"upper":2,"lowertype":255,"uppertype":0,"valid":true}`,
+			want: pgtype.Range[any]{Lower: int64(1), Upper: int64(2), LowerType: pgtype.BoundType(255), UpperType: pgtype.BoundType(0), Valid: true},
+		},
+		{
+			name: "raw_format_int16_extremes",
+			json: `{"format":-32768,"bytes":""}`,
+			want: PostgresV3CellRaw{Format: math.MinInt16, Bytes: []byte{}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c PostgresV3Cell
+			if err := json.Unmarshal([]byte(tc.json), &c); err != nil {
+				t.Fatalf("in-range value rejected: %v", err)
+			}
+			if !reflect.DeepEqual(c.Value, tc.want) {
+				t.Fatalf("decoded value mismatch:\n got %#v\nwant %#v", c.Value, tc.want)
+			}
+			// Round-trip: re-encoding and re-decoding the extreme must
+			// be a fixed point, so the range checks can't quietly
+			// degrade a mock across record → replay rewrites.
+			b, err := json.Marshal(PostgresV3Cell{Value: c.Value})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var back PostgresV3Cell
+			if err := json.Unmarshal(b, &back); err != nil {
+				t.Fatalf("re-decode of %s: %v", b, err)
+			}
+			if !reflect.DeepEqual(back.Value, tc.want) {
+				t.Fatalf("round-trip mismatch:\n got %#v\nwant %#v", back.Value, tc.want)
+			}
+		})
+	}
+}
+
+// TestAsInt64RejectsUnrepresentable covers the narrowing conversions
+// inside asInt64 itself, which no JSON literal can reach
+// (json.Number.Int64 rejects them first) but Go-built map fixtures can:
+// a float64 outside int64's range — where the Go spec leaves the
+// conversion result implementation-defined — and the unsigned shapes as
+// wide as int64 (uint64 AND uint), which wrap to a negative int64.
+func TestAsInt64RejectsUnrepresentable(t *testing.T) {
+	type unrepresentable struct {
+		name string
+		in   any
+	}
+	cases := []unrepresentable{
+		{"float64_over_int64", 1e30},
+		{"float64_under_int64", -1e30},
+		{"float64_nan", math.NaN()},
+		{"float64_positive_inf", math.Inf(1)},
+		{"float64_negative_inf", math.Inf(-1)},
+		{"float32_over_int64", float32(1e30)},
+		{"uint64_over_int64", uint64(math.MaxInt64) + 1},
+	}
+	// uint is 64 bits wide on every 64-bit build, i.e. exactly as wide as
+	// uint64, and wraps identically. The constant guard keeps a 32-bit
+	// build compiling and passing, where no uint value exceeds int64.
+	if math.MaxUint > math.MaxInt64 {
+		cases = append(cases,
+			unrepresentable{"uint_max", ^uint(0)},
+			unrepresentable{"uint_max_int64_plus_one", ^uint(0)/2 + 1},
+		)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := asInt64(tc.in)
+			if err == nil {
+				t.Fatalf("unrepresentable %T(%v) converted silently to %d", tc.in, tc.in, got)
+			}
+		})
+	}
+
+	// Values that do fit must keep their existing behaviour, including
+	// the truncation of a fractional float that hand-built fixtures
+	// have always relied on.
+	fits := []struct {
+		name string
+		in   any
+		want int64
+	}{
+		{"float64_fraction_truncates", 1.9, 1},
+		{"float64_negative_fraction_truncates", -1.9, -1},
+		{"uint64_max_int64", uint64(math.MaxInt64), math.MaxInt64},
+		{"json_number", json.Number("-42"), -42},
+		{"string", "1234", 1234},
+	}
+	for _, tc := range fits {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := asInt64(tc.in)
+			if err != nil {
+				t.Fatalf("representable %T(%v) rejected: %v", tc.in, tc.in, err)
+			}
+			if got != tc.want {
+				t.Fatalf("asInt64(%v) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// An array's, a record's and a document's []byte elements round-trip
+// through JSON as bytes (the $pgtype: binary wrapper), not as a bare base64
+// string that reads back as text. (The JSON store reads a number as int64.)
+func TestPostgresV3Cell_JSONKeepsAnArraysAndARecordsBytes(t *testing.T) {
+	in := pgNestedCells()
+	body, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Count(string(body), `"$pgtype":"binary"`) != 7 {
+		t.Fatalf("want each of the 7 byte elements written as bytes: %s", body)
+	}
+	var back PostgresV3Cells
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	want := pgNestedCells()
+	want[2].Value.([]any)[0] = int64(1)
+	want[3].Value.(map[string]any)["parts"].([]any)[1] = int64(2)
+	if !reflect.DeepEqual(back, want) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, want, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
+
+// A mock written before, a bytea[] element as a bare base64 string, still
+// loads as that string.
+func TestPostgresV3Cell_AnOlderMocksBase64ElementStillLoads(t *testing.T) {
+	var back PostgresV3Cells
+	if err := json.Unmarshal([]byte(`[["b2s=","AQI="]]`), &back); err != nil {
+		t.Fatalf("an older mock's base64 element does not load: %v", err)
+	}
+	if want := (PostgresV3Cells{NewValueCell([]any{"b2s=", "AQI="})}); !reflect.DeepEqual(back, want) {
+		t.Fatalf("it loaded as %#v, want %#v", back, want)
+	}
+}
+
+// A uuid[], macaddr[] and bit[] cell's elements, and a uuid cell as a
+// [16]uint8, round-trip through JSON as the values pgx scanned, not as
+// arrays of numbers (or base64 text) no codec encodes back for the client;
+// a document's "uuid" text stays the document's.
+func TestPostgresV3Cell_JSONKeepsAUUIDArraysElements(t *testing.T) {
+	in := append(pgUUIDArrayCells(), NewValueCell([16]uint8{0x01, 0x02}))
+	body, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back PostgresV3Cells
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, in, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
+
+// pgDocumentCells are json/jsonb documents, alone and in an array, holding
+// objects with a pgtype shape's keys: the application's objects, which a
+// store must read back as they are.
+func pgDocumentCells() PostgresV3Cells {
+	return PostgresV3Cells{
+		NewValueCell(map[string]any{"net": map[string]any{"prefix": "10.0.0.0/8"}}),
+		NewValueCell(map[string]any{
+			"at":    map[string]any{"$pgtype": "timestamp", "value": "2024-01-01T00:00:00Z"},
+			"flags": []any{map[string]any{"bytes": "oA==", "len": int64(3), "valid": true}},
+			"span":  map[string]any{"microseconds": int64(5), "valid": true},
+		}),
+		NewValueCell([]any{map[string]any{"macaddr": "08:00:2b:01:02:03"}, map[string]any{"format": "png", "bytes": int64(2048)}}),
+		NewValueCell(map[string]any{"$pgtype": "x"}),
+		NewValueCell(map[string]any{"prefix": "img_"}),
+		NewValueCell(map[string]any{"macaddr": "08:00:2b:01:02:03"}),
+		NewValueCell(map[string]any{"format": "png", "bytes": int64(2048)}),
+		NewValueCell(map[string]any{"bytes": int64(2048), "len": int64(1), "valid": true}),
+		NewValueCell(map[string]any{"microseconds": "x", "valid": "y"}),
+		NewValueCell(map[string]any{"days": "mon", "microseconds": int64(1), "months": int64(2), "valid": true}),
+		NewValueCell([]any{map[string]any{"prefix": "10.0.0.0/8"}}),
+		NewValueCell([]any{map[string]any{"microseconds": int64(5), "valid": true}}),
+		NewValueCell([]any{map[string]any{"bytes": int64(2048), "len": int64(1), "valid": true}}),
+		NewValueCell(map[string]any{"format": "png", "bytes": "aGVsbG8="}),
+		NewValueCell(map[string]any{"format": int64(1), "bytes": "hello world"}),
+		NewValueCell(map[string]any{"format": "png", "bytes": []any{int64(1), int64(2)}}),
+		NewValueCell(map[string]any{"a": map[string]any{"uuid": make([]byte, 16), "name": "x"}}),
+		NewValueCell(map[string]any{"a": map[string]any{"$pgtype": "binary", "data": "aGk=", "x": "y"}}),
+		NewValueCell(map[string]any{"a": map[string]any{"uuid": map[string]any{"$pgtype": "binary", "data": "AAAAAAAAAAAAAAAAAAAAAA==", "x": "y"}}}),
+		NewValueCell([]any{map[string]any{"bytes": []byte{1}, "x": int64(1), "y": int64(2)}}),
+		NewValueCell(map[string]any{"uuid": []byte{1, 2, 3}}),
+		NewValueCell(map[string]any{"format": int64(1), "bytes": []byte{1, 2}}),
+		NewValueCell(map[string]any{"int": "12", "exp": "x", "nan": false, "infinitymodifier": int64(0), "valid": true}),
+		NewValueCell(map[string]any{"a": "x", "b": 1.5, "c": 2.5, "valid": true}),
+		NewValueCell(map[string]any{"p": "x", "closed": false, "valid": true}),
+		NewValueCell(map[string]any{"p": "x", "r": 1.5, "valid": true}),
+		NewValueCell(map[string]any{"blocknumber": "x", "offsetnumber": int64(1), "valid": true}),
+		NewValueCell(map[string]any{"lexemes": "x", "valid": true}),
+		NewValueCell(map[string]any{"lower": int64(1), "upper": int64(2), "lowertype": "x", "uppertype": int64(101), "valid": true}),
+		NewValueCell([]any{map[string]any{"bytes": "oA==", "len": int64(3), "valid": true, "x": int64(1)}}),
+		NewValueCell([]any{map[string]any{"bytes": "not base64", "len": int64(3), "valid": true}}),
+		NewValueCell([]any{map[string]any{"bytes": "oA==", "len": int64(3), "valid": "y"}}),
+		NewValueCell([]any{map[string]any{"bytes": "oA==", "len": "3", "valid": true}}),
+		NewValueCell([]any{map[string]any{"bytes": "oA==", "len": 1.5, "valid": true}}),
+		NewValueCell(map[string]any{"int": true, "exp": int64(0), "nan": false, "infinitymodifier": int64(0), "valid": true}),
+		NewValueCell(map[string]any{"int": "12", "exp": int64(0), "nan": "x", "infinitymodifier": int64(0), "valid": true}),
+		NewValueCell(map[string]any{"int": "12", "exp": int64(0), "nan": false, "infinitymodifier": "x", "valid": true}),
+		NewValueCell(map[string]any{"int": "12", "exp": int64(0), "nan": false, "infinitymodifier": int64(0), "valid": "y"}),
+		NewValueCell(map[string]any{"microseconds": "x", "days": int64(2), "months": int64(3), "valid": true}),
+		NewValueCell(map[string]any{"microseconds": int64(1), "days": int64(2), "months": "x", "valid": true}),
+		NewValueCell(map[string]any{"microseconds": int64(1), "days": int64(2), "months": int64(3), "valid": "y"}),
+		NewValueCell(map[string]any{"microseconds": "x", "valid": true}),
+		NewValueCell(map[string]any{"microseconds": int64(5), "valid": "y"}),
+		NewValueCell(map[string]any{"bytes": []any{int64(1)}, "len": "x", "valid": true}),
+		NewValueCell(map[string]any{"bytes": []any{int64(1)}, "len": int64(1), "valid": "y"}),
+		NewValueCell(map[string]any{"a": 1.5, "b": "x", "c": 3.5, "valid": true}),
+		NewValueCell(map[string]any{"a": 1.5, "b": 2.5, "c": "x", "valid": true}),
+		NewValueCell(map[string]any{"a": 1.5, "b": 2.5, "c": 3.5, "valid": "y"}),
+		NewValueCell(map[string]any{"p": []any{int64(1)}, "closed": "x", "valid": true}),
+		NewValueCell(map[string]any{"p": []any{int64(1)}, "closed": false, "valid": "y"}),
+		NewValueCell(map[string]any{"p": map[string]any{"x": 1.5, "y": 2.5}, "r": "x", "valid": true}),
+		NewValueCell(map[string]any{"p": map[string]any{"x": 1.5, "y": 2.5}, "r": 1.5, "valid": "y"}),
+		NewValueCell(map[string]any{"blocknumber": int64(1), "offsetnumber": "x", "valid": true}),
+		NewValueCell(map[string]any{"blocknumber": int64(1), "offsetnumber": int64(2), "valid": "y"}),
+		NewValueCell(map[string]any{"lexemes": []any{"a"}, "valid": "y"}),
+		NewValueCell(map[string]any{"lower": int64(1), "upper": int64(2), "lowertype": int64(105), "uppertype": "x", "valid": true}),
+		NewValueCell(map[string]any{"lower": int64(1), "upper": int64(2), "lowertype": int64(105), "uppertype": int64(101), "valid": "y"}),
+	}
+}
+
+// A document's content is the application's: an object in it, or in a
+// json array, with a pgtype shape's keys reads back from JSON as that
+// object, not as the type (a {"prefix": ...} came back as a netip.Prefix,
+// a timestamp wrapper as a time.Time, a bit string's or a time's keys as
+// a pgtype.Bits or a pgtype.Time), and a document with a shape's keys but
+// not the kinds of value the encoder writes for it loads as the document
+// (a {"macaddr": text}, a {"format", "bytes"} or a {"bytes", "len",
+// "valid"} with a number for its bytes, a time's or an interval's keys
+// with text, a {"$pgtype"} of its own failed the load). A []byte, a uuid
+// and a macaddr in a document, which the encoder wraps, still read back
+// as their types, and only an exact wrapper does.
+func TestPostgresV3Cell_JSONDocumentsKeepTheirObjects(t *testing.T) {
+	in := append(pgDocumentCells(), NewValueCell(map[string]any{
+		"blob": []byte{1, 2},
+		"id":   [16]uint8{1},
+		"mac":  net.HardwareAddr{0x08, 0x00, 0x2b, 0x01, 0x02, 0x03},
+		"list": []any{[]byte{3}},
+	}))
+	for i, c := range in {
+		body, err := json.Marshal(c)
+		if err != nil {
+			t.Fatalf("cell %d: marshal: %v", i, err)
+		}
+		var back PostgresV3Cell
+		if err := json.Unmarshal(body, &back); err != nil {
+			t.Errorf("cell %d: unmarshal: %v\n%s", i, err, body)
+			continue
+		}
+		if !reflect.DeepEqual(back, c) {
+			t.Errorf("cell %d came back as %#v, want %#v\n%s", i, back.Value, c.Value, body)
+		}
+		if _, err := back.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}

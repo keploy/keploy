@@ -1,76 +1,271 @@
+// Package mock implements the `keploy mock record|replay` flow: using Keploy as
+// a framework-agnostic mocking layer for a user's own test runner (pytest, go
+// test, jest/playwright, mobile UI tests). Unlike record/test it captures ONLY
+// outgoing dependency calls (no incoming test cases become test cases) into a
+// single named mock set, and on replay serves that set back to the wrapped
+// runner while propagating the runner's own exit code.
+//
+// The same *http.AgentClient instrumentation, RecordHooks and app hooks that
+// `record`/`test` use flow through here unchanged, so enterprise runtime
+// features (LD_PRELOAD / java-agent / go-binpatch TLS shims, time-freeze,
+// secret obfuscation, registry upload) apply to `keploy mock` with no
+// mock-specific wiring.
 package mock
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// Service is the interface for the mock service which only handles mock loading,
-// without any test case or test set concerns.
+// Service is the mock record/replay flow. Record captures outgoing calls into
+// the configured named set; Replay serves that set to the wrapped runner.
+// Both return the wrapped runner's exit code (or an error only for setup
+// failures) and set utils.ErrCode so the keploy process mirrors the runner.
 type Service interface {
-	// LoadMocks fetches the mocks that belong to the given testSetID (and
-	// optionally a specific testCaseName) from the database, then pushes them
-	// into the proxy so outgoing calls from the application under test are
-	// intercepted and served from that mock list.
-	//
-	// If testCaseName is empty, all mocks for the test set are loaded.
-	LoadMocks(ctx context.Context, testSetID string, testCaseName string) error
+	Record(ctx context.Context) error
+	Replay(ctx context.Context) error
 }
 
-// Instrumentation is the subset of the agent/proxy capabilities that the mock
-// service needs.
+// Instrumentation is the subset of the agent/proxy control surface the mock
+// flow needs. It is satisfied verbatim by *pkg/platform/http.AgentClient — the
+// same client record/replay use — so the mock flow inherits every runtime
+// behaviour that client applies to the wrapped command.
 type Instrumentation interface {
-	// Setup prepares the environment (loads eBPF hooks, starts the proxy, etc.).
+	// Setup prepares the environment: starts the agent, loads hooks and the
+	// proxy, and prepares the wrapped command. opts.MockMode must be set so
+	// the agent does NOT relocate the runner's listening ports.
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
 
-	// MockOutgoing tells the proxy to start intercepting outgoing calls and
-	// serve them from the stored mock list.
+	// GetOutgoing switches the proxy to record mode and streams every captured
+	// outgoing call as a mock. Used by Record.
+	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
+
+	// MockOutgoing switches the proxy to mock-serving mode. Used by Replay.
 	MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error
 
-	// StoreMocks pushes filtered and unfiltered mocks into the proxy so they
-	// can be matched against live outgoing traffic.
+	// StoreMocks pushes the loaded set into the proxy. Used by Replay.
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 
-	// UpdateMockParams sends filtering parameters to the agent so it knows
-	// how to select mocks for incoming requests (mapping-based vs timestamp-based).
+	// UpdateMockParams selects which mocks the proxy serves (whole pool, or —
+	// via MockMapping — a single scoped test's mocks). Used by Replay.
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 
-	// NotifyGracefulShutdown signals the proxy that the session is ending so
-	// connection errors are logged at debug level instead of error level.
-	NotifyGracefulShutdown(ctx context.Context) error
+	// GetConsumedMocks / GetMockErrors report which mocks were served and which
+	// outgoing calls matched nothing, for the end-of-run summary and --strict.
+	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
+
+	// Run runs the wrapped command and blocks until it exits, returning its
+	// exit status in AppError.ExitCode.
+	Run(ctx context.Context, opts models.RunOptions) models.AppError
+
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
+	NotifyGracefulShutdown(ctx context.Context) error
 }
 
-// MockDB is the subset of storage operations the mock service needs to read
-// mocks from the filesystem / database.
+// RunSettler is an optional Instrumentation extension, which
+// pkg/platform/http.AgentClient has: the agent's end-of-run hook. Under the
+// proven switch Replay calls it once the test command has exited, before it
+// reads what the agent served (settleRun).
+type RunSettler interface {
+	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
+}
+
+// ScopeReader is an optional Instrumentation extension: the per-test scope
+// windows the wrapped runner reported through the agent's /agent/scope/* API
+// during a record session. Record uses it to write mappings.yaml so replay can
+// serve mocks per test. When the instrumentation does not implement it (or the
+// runner made no scope calls) the set is recorded suite-level and replay serves
+// the whole pool — still correct, just without per-test isolation.
+type ScopeReader interface {
+	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
+}
+
+// MissCapturer is an optional Instrumentation extension: under `--on-miss
+// record`, Replay drains the calls the proxy served live-from-upstream on a miss
+// and appends them to the set (VCR new_episodes).
+type MissCapturer interface {
+	DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error)
+}
+
+// ComposeOutcomeReader is an optional Instrumentation extension for a docker
+// compose replay. There the keploy agent is a service in the project, and
+// compose stops it along with the app -- so by the time Replay has the
+// runner's exit, the agent is gone and GetConsumedMocks / GetMockErrors have
+// nothing to ask. This returns what the agent served and missed as it wrote
+// them on being stopped.
+type ComposeOutcomeReader interface {
+	ComposeAgentOutcome() (models.MockOutcome, error)
+}
+
+// ComposeAgentFailureReader is an optional Instrumentation extension for a
+// docker compose run: the keploy agent, a service in the project, having
+// stopped while the app still needed it. Compose then aborts the project over
+// the agent, and the exit that reaches Record/Replay -- compose's own, or the
+// test command's after compose stopped it -- is not the test command's
+// verdict. nil when the agent outlived the app, as it does on every run it
+// does not fail.
+type ComposeAgentFailureReader interface {
+	ComposeAgentFailure() error
+}
+
+// ComposeEndReader is an optional Instrumentation extension for a docker
+// compose recording: what ended the project when the test command's own end
+// does not stand. Compose can report 0 for a test command it never started
+// (another of the project's services ended the project first), and that 0 is
+// no verdict: nothing ran to be recorded. appExit is the test command's exit
+// as keploy got it. nil when its own end stands. AgentClient implements it.
+type ComposeEndReader interface {
+	ComposeEndAfterReady(appExit int) error
+}
+
+// ScopePusher is an optional Instrumentation extension: Replay uses it to hand
+// the agent the per-test name→mock-names table (from mappings.yaml) so the
+// runner's /agent/scope/begin calls can restrict the served pool per test,
+// with every test's recorded window (recordedTestWindows), the run's place
+// an answer recorded in a later window than its call is written at.
+type ScopePusher interface {
+	PushScopeTable(ctx context.Context, table map[string][]string, windows []models.TestWindow) error
+}
+
+// ScopeGatePusher is an optional Instrumentation extension: Replay uses it to
+// tell the agent which tests should run this replay (see ScopeGateSource).
+// run == nil lets every test run.
+type ScopeGatePusher interface {
+	PushScopeGate(ctx context.Context, run []string, reason string) error
+}
+
+// TestBeginsPusher is an optional Instrumentation extension: under the proven
+// switch Replay hands the agent when each test of the recording began, so the
+// agent moves the run's clock per test (design v14 §3.4), the seed each
+// test's recording kept for its browser's random numbers, and the requests
+// each client test sent the application in its recording.
+type TestBeginsPusher interface {
+	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) error
+}
+
+type SetPusher interface {
+	PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error
+}
+
+// ProvenTablePusher is the Instrumentation extension a replay under the
+// proven switch needs: it hands the agent the per-test table and each key's
+// pool slice (models.ScopeTableReq.Pool) in one request, with the recorded
+// window of every test of the set (models.ScopeTableReq.Windows), each
+// key's worker scope (models.ScopeTableReq.Worker), the names of it that
+// are the reads of tests the replay's gate skips, each with the skipped test
+// that lists it (models.ScopeTableReq.SkippedReads), the test each worker
+// recording trails (models.ScopeTableReq.Trails), the values each test
+// gave when it was recorded (models.ScopeTableReq.Given), each test's
+// repeated reads (models.ScopeTableReq.RepeatReads), the names of each
+// test's list keploy's judging marked served, not required
+// (models.ScopeTableReq.NotRequired), and the names of the set's background
+// recordings, its worker: and startup: mocks (models.ScopeTableReq.Background),
+// and whether the learn step checks a changed time by its form alone
+// (models.ScopeTableReq.TimeForm, config.MockCmd.TimeForm).
+type ProvenTablePusher interface {
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) error
+}
+
+type MappingReader interface {
+	GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
+}
+
+// MockDB reads and writes a named mock set on disk. It is exactly the surface
+// the yaml mockdb already implements, so OSS wires the file store directly and
+// enterprise wraps it with registry upload/download.
 type MockDB interface {
+	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
+	DeleteMocksForSet(ctx context.Context, testSetID string) error
+	// PromoteStagedSet replaces targetID's mock files with the ones recorded into
+	// stagingID (an atomic rename for the common same-format case), then removes
+	// the staging set. Record captures into a staging set and promotes it only on
+	// a complete, non-empty run, so a failed, interrupted or zero-capture record
+	// never destroys an existing recording (gaps W1/W14; design §P0b "no
+	// delete-first").
+	PromoteStagedSet(ctx context.Context, stagingID, targetID string) error
+	// DiscardStagedSet removes a staging set left by a record that did not
+	// complete, leaving the target it was never promoted over intact. Also used
+	// before capture to clear a staging directory a crashed run left behind.
+	DiscardStagedSet(ctx context.Context, stagingID string) error
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
+	ResetCounterID()
+	// SetCounterID seeds the mock-name counter so the next InsertMock names its
+	// mock "mock-<id+1>" — used to append without reusing existing names.
+	SetCounterID(id int64)
+	// SkippedMocks is the mock file a replay of the set testSetID reads ("" for
+	// none) and, by name, each named document of it the read skips, with why
+	// (the read's own reason): a refusal over a name mappings.yaml lists then
+	// names the edit to correct. Nil when the file cannot be read. A store
+	// that wraps another must forward it: the refusal cannot tell a skipped
+	// mock from one the file does not have without it.
+	SkippedMocks(ctx context.Context, testSetID string) (file string, skipped map[string]models.SkippedMock)
 }
 
-// MappingDB gives the mock service access to the test-case → mock-name
-// mapping table so it can apply the same mapping-based filtering strategy
-// that the replayer uses.
+// MappingDB persists and reads the per-test mock mapping for a set. Optional:
+// nil disables per-test scoping (suite-level record/replay).
 type MappingDB interface {
+	UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 }
 
-// OutgoingConfig holds the knobs that control how the proxy intercepts and
-// matches outgoing calls. These mirror the fields from models.OutgoingOptions
-// that are relevant to the mock service (no test-case-specific timestamps, etc.).
-type OutgoingConfig struct {
-	// BypassRules lists host/port patterns that should be passed through
-	// without being mocked.
-	BypassRules []models.BypassRule
+// CaseMapper is an optional MappingDB extension: Record writes which test cases each flow produced through it.
+type CaseMapper interface {
+	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error
+}
 
-	// MongoPassword is used to decode encrypted Mongo wire traffic.
-	MongoPassword string
+// WorkerMapper writes a set's worker scope (models.Mapping.Worker) whole,
+// keeping every other section of its mappings.
+type WorkerMapper interface {
+	UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error
+}
 
-	// SQLDelay mimics the application startup delay used during test runs.
-	SQLDelay time.Duration
+type BootMapper interface {
+	UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error
+}
 
-	// Mocking enables or disables mock interception entirely.
-	Mocking bool
+// IncomingReader is an optional Instrumentation extension: the agent's stream of the app's captured incoming requests.
+type IncomingReader interface {
+	GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+}
+
+// TestDB stores the app's incoming requests as test cases under --record-requests.
+type TestDB interface {
+	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error
+	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+}
+
+// TestDBSetter is how the CLI hands the mock service a test-case store when --record-requests is set.
+type TestDBSetter interface {
+	SetTestDB(db TestDB)
+}
+
+// ConsoleSetter is the service's console (where a replay names each call no
+// mock answered whole, never in its log): keploy's CLI sets os.Stdout; a
+// service whose console is not set says nothing there.
+type ConsoleSetter interface {
+	SetConsole(w io.Writer)
+}
+
+// MappingDeleter is an optional MappingDB extension: Record drops the set's old mappings through it before a re-record.
+type MappingDeleter interface {
+	Delete(ctx context.Context, testSetID string) error
+}
+
+// Store is the mock-set persistence backend. OSS uses FileStore (mocks live on
+// disk, no remote sync). Enterprise plugs in a registry-backed store that
+// uploads after record and downloads before replay. Registry-first by default;
+// `--local` selects FileStore.
+type Store interface {
+	// Pull materialises the named set locally before replay. FileStore is a
+	// no-op (the set is already on disk).
+	Pull(ctx context.Context, name string) error
+	// Push publishes the named set after a successful record. FileStore is a
+	// no-op.
+	Push(ctx context.Context, name string) error
 }

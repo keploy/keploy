@@ -4,6 +4,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
+	"sort"
 )
 
 // EncodeMapping encodes a mapping structure into a YAML document
@@ -12,7 +13,7 @@ func EncodeMapping(mapping *models.Mapping, logger *zap.Logger) ([]byte, error) 
 }
 
 func EncodeMappingF(mapping *models.Mapping, logger *zap.Logger, format yaml.Format) ([]byte, error) {
-	data, err := yaml.MarshalGeneric(format, mapping)
+	data, err := marshalMapping(format, mapping)
 	if err != nil {
 		logger.Error("failed to marshal mapping", zap.Error(err))
 		return nil, err
@@ -25,8 +26,14 @@ func DecodeMapping(yamlData []byte, logger *zap.Logger) (*models.Mapping, error)
 	return DecodeMappingF(yamlData, logger, yaml.FormatYAML)
 }
 
+// DecodeMappingF decodes data, a mappings file in format, as
+// yaml.UnmarshalGeneric does: a YAML file in the layout keploy writes a few
+// test entries at a time (chunked.go).
 func DecodeMappingF(data []byte, logger *zap.Logger, format yaml.Format) (*models.Mapping, error) {
 	var mapping models.Mapping
+	if format != yaml.FormatJSON && decodeMappingYAML(data, &mapping) {
+		return &mapping, nil
+	}
 	err := yaml.UnmarshalGeneric(format, data, &mapping)
 	if err != nil {
 		logger.Error("failed to unmarshal mapping data", zap.Error(err))
@@ -57,13 +64,21 @@ func CreateMappingStructure(testSetID string, testMockMappings map[string][]mode
 		TestSetID: testSetID,
 	}
 
-	// Convert the map to the structured format
-	for testName, mockEntries := range testMockMappings {
-		test := models.MappedTestCase{
+	// Sorted, because Go randomises map iteration and mappings.yaml is a recorded
+	// artifact that gets diffed, reviewed and committed. Without this every
+	// rewrite reshuffles `tests:` and produces a large diff with no content
+	// change. UpsertBatch already sorts its appends for the same reason.
+	testNames := make([]string, 0, len(testMockMappings))
+	for testName := range testMockMappings {
+		testNames = append(testNames, testName)
+	}
+	sort.Strings(testNames)
+
+	for _, testName := range testNames {
+		mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{
 			ID:    testName,
-			Mocks: mockEntries,
-		}
-		mapping.TestCases = append(mapping.TestCases, test)
+			Mocks: testMockMappings[testName],
+		})
 	}
 
 	return mapping

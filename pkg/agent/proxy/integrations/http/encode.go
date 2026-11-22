@@ -3,14 +3,14 @@ package http
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"golang.org/x/sync/errgroup"
 
@@ -64,6 +64,15 @@ func probeHTTP(ctx context.Context, logger *zap.Logger, phase string, fields ...
 func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, onMockRecorded integrations.PostRecordHook) error {
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
+	// Prefer the resolved destination port from DstCfg when present. In proxyless
+	// (observe-only) mode destConn is a SimulatedConn with no real upstream
+	// socket, so remoteAddr.Port is 0 — which would break port-keyed matching
+	// (telemetry passthrough rules, MySQL/bypass port checks). DstCfg.Port is set
+	// authoritatively by the classic proxy AND by the proxyless routeEgressToParser,
+	// and equals remoteAddr.Port on the classic path, so this is a no-op there.
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		destPort = opts.DstCfg.Port
+	}
 
 	probeHTTP(ctx, h.Logger, "encode-start",
 		zap.String("dstAddr", destConn.RemoteAddr().String()),
@@ -84,7 +93,10 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		return ctx.Err()
 	}
 
-	h.Logger.Debug("This is the initial request: " + string(reqBuf))
+	// Sizes only, here and below: a request holds the application's
+	// credentials (its Authorization header, cookies) and its data, and an
+	// answer the server's.
+	h.Logger.Debug("read the initial request", zap.Int("bytes", len(reqBuf)))
 	var finalReq []byte
 	errCh := make(chan error, 1)
 
@@ -133,8 +145,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	// synchronous implementation. Only parseFinalHTTP calls are replaced
 	// with enqueueMock sends.
 	g.Go(func() error {
-		defer pUtil.Recover(h.Logger, clientConn, destConn)
 		defer close(errCh)
+		defer pUtil.RecoverInto(h.Logger, clientConn, destConn, errCh)
 		defer func() {
 			close(mockDataCh)
 			<-recorderDone
@@ -143,28 +155,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		for {
 			if memoryguard.IsRecordingPaused() {
 				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
-				done := make(chan struct{}, 2)
-				cp := func(dst, src net.Conn) {
-					_, _ = io.Copy(dst, src)
-					done <- struct{}{}
-				}
-				go cp(destConn, clientConn)
-				go cp(clientConn, destConn)
-				<-done
-				<-done
+				relayRawPassthrough(clientConn, destConn)
 				return nil
 			}
 
-			// Check if expect: 100-continue header is present.
-			lines := strings.Split(string(finalReq), "\n")
-			var expectHeader string
-			for _, line := range lines {
-				if strings.HasPrefix(line, "Expect:") {
-					expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
-					break
-				}
+			// The whole header section first (relayed as it is read): only
+			// then is it known whether the client is waiting for a 100
+			// (Continue) before its body.
+			if _, _, err := h.readRequestHead(ctx, &finalReq, clientConn, destConn); err != nil {
+				errCh <- err
+				return nil
 			}
-			if expectHeader == "100-continue" {
+			if awaitsContinue(finalReq) {
 				resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to read the response message from the server after 100-continue request")
@@ -182,29 +184,15 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					return nil
 				}
 
-				h.Logger.Debug("This is the response from the server after the expect header" + string(resp))
+				h.Logger.Debug("read the server's answer to the expect header", zap.Int("bytes", len(resp)))
 
 				if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
 					utils.LogError(h.Logger, nil, "failed to get the 100 continue response from the user client")
 					errCh <- err
 					return nil
 				}
-				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to read the request buffer from the user client")
-					errCh <- err
-					return nil
-				}
-				_, err = destConn.Write(reqBuf)
-				if err != nil {
-					if ctx.Err() != nil {
-						return ctx.Err()
-					}
-					utils.LogError(h.Logger, err, "failed to write request message to the destination server")
-					errCh <- err
-					return nil
-				}
-				finalReq = append(finalReq, reqBuf...)
+				// HandleChunkedRequests relays and records the body the
+				// client now sends, by its framing.
 			}
 
 			// Capture the request timestamp.
@@ -222,7 +210,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
+			h.Logger.Debug("read the complete request", zap.Int("bytes", len(finalReq)))
 
 			// Read the response from the actual server.
 			probeHTTP(ctx, h.Logger, "encode-read-resp-start")
@@ -294,10 +282,13 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				var resTimestampMock time.Time
 				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
 				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
+				// The call by its shape and its path tag, as the agent's
+				// other lines about a call name it.
+				upstreamURL, upstreamTag, upstreamHost := upstreamRequestURL(ctx, finalReq, destConn.RemoteAddr())
 				if len(resp) == 0 {
 					resTimestampMock = reqTimestampMock
 					h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
-						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+						zap.String("upstream_url", upstreamURL), utils.PathTagField(upstreamTag), zap.String("host", upstreamHost),
 						zap.String("error_class", upstreamErrorClass(err)),
 						zap.Error(err))
 					// Write the synthesized response back to the client so
@@ -326,7 +317,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					// the synthesized error mock instead.
 					h.Logger.Error("upstream errored AFTER partial response bytes were received; discarding truncated bytes and persisting synthesized error mock",
 						zap.Int("partial_resp_len", len(resp)),
-						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+						zap.String("upstream_url", upstreamURL), utils.PathTagField(upstreamTag), zap.String("host", upstreamHost),
 						zap.String("error_class", upstreamErrorClass(err)),
 						zap.Error(err),
 						zap.String("next_step", "investigate upstream stability (check connection resets, timeouts, keep-alive settings); recorded synthesized 5xx mock in place of the truncated response"))
@@ -350,14 +341,21 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			}
 			var finalResp []byte
 			finalResp = append(finalResp, resp...)
-			h.Logger.Debug("This is the initial response: " + string(resp))
+			h.Logger.Debug("read the initial response", zap.Int("bytes", len(resp)))
 
 			chunkedRespStart := time.Now()
-			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp)
+			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp, requestMethod(finalReq))
 			probeHTTP(ctx, h.Logger, "encode-chunked-resp-done",
 				zap.Int64("dur_ns", time.Since(chunkedRespStart).Nanoseconds()),
 				zap.Int("finalRespLen", len(finalResp)),
 				zap.Error(err))
+			if startsWithInterimResponse(resp) {
+				// The mock is the FINAL response (parseFinalHTTP skips the
+				// interim 1xx this first read began with): time it by the
+				// final response's bytes, as the V2 record path does, not by
+				// a 100 Continue that came long before it.
+				resTimestampMock = models.CapturedRespTime(ctx)
+			}
 			if err != nil {
 				if err == io.EOF {
 					h.Logger.Debug("conn closed by the server", zap.Error(err))
@@ -383,7 +381,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			h.Logger.Debug("This is the final response: " + string(finalResp))
+			h.Logger.Debug("read the final response", zap.Int("bytes", len(finalResp)))
 
 			// Offload mock creation to async recorder.
 			enqueueMock(finalReq, finalResp, reqTimestampMock, resTimestampMock)
@@ -396,7 +394,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			probeHTTP(ctx, h.Logger, "encode-next-req-read-start")
 			nextReqStart := time.Now()
 
-			finalReq, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+			finalReq, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
 			probeHTTP(ctx, h.Logger, "encode-next-req-read-done",
 				zap.Int64("dur_ns", time.Since(nextReqStart).Nanoseconds()),
 				zap.Int("reqLen", len(finalReq)),
@@ -404,7 +402,6 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			if err != nil {
 				if err != io.EOF {
 					h.Logger.Debug("failed to read the request message from the user client", zap.Error(err))
-					h.Logger.Debug("This was the last response from the server: " + string(resp))
 					errCh <- nil
 					return nil
 				}
@@ -434,4 +431,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		}
 		return err
 	}
+}
+
+// relayRawPassthrough is the memory-pressure fallback: nothing is
+// captured, bytes are just relayed.
+//
+// It delegates to proxyutil.RelayRawPassthrough. http and mysql shared
+// this verbatim; generic had the same logic with the FIN factored into a
+// forwardFIN helper. See that function for the two rules
+// it enforces — forward the FIN only on a clean EOF, and give a surviving
+// direction a bounded drain when the other breaks rather than waiting for
+// it forever or abandoning it at once.
+
+func relayRawPassthrough(clientConn, destConn net.Conn) {
+	proxyutil.RelayRawPassthrough(clientConn, destConn)
 }

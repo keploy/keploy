@@ -1,12 +1,15 @@
 package models
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -191,4 +194,459 @@ func TestHTTPResp_MarshalYAML_SSEMultilineDataUsesSingleDataField(t *testing.T) 
 	assert.Contains(t, body, "data: |-")
 	assert.Contains(t, body, "line-1")
 	assert.Contains(t, body, "line-2")
+}
+
+// TestHTTPResp_YAML_NonUTF8BodyRoundTrips is the regression guard for the
+// defect that ended a 46-hour production recording of prod/api-server.
+//
+// A gzip-encoded response body is perfectly valid HTTP and invalid UTF-8. The
+// streaming chunk encoder used to stamp an explicit `!!str` tag on it, and
+// yaml.v3 refuses that outright — "cannot marshal invalid UTF-8 data as !!str".
+// That error surfaced as a failed mock insert, and the recorder treats a failed
+// insert as fatal, so ONE response body destroyed the whole session.
+//
+// The Content-Type matters: only the streaming kinds took the chunk path.
+// application/json always used the flat scalar body and always worked, which is
+// why this went unnoticed. text/event-stream additionally corrupted the bytes
+// silently, because parseSSEBodyToChunks lower-cases the field name and
+// strings.ToLower rewrites every invalid byte to U+FFFD.
+func TestHTTPResp_YAML_NonUTF8BodyRoundTrips(t *testing.T) {
+	// gzip magic + a deflate payload: real bytes an HTTP response carries.
+	body := string([]byte{
+		0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff,
+		0xca, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x04, 0x00, 0x00, 0xff, 0xff,
+	})
+	if utf8.ValidString(body) {
+		t.Fatal("fixture must be invalid UTF-8, otherwise this test proves nothing")
+	}
+
+	for _, ct := range []string{
+		"application/octet-stream",
+		"text/plain",
+		"application/x-ndjson",
+		"text/event-stream",
+		"application/json", // control: always worked, must keep working
+	} {
+		t.Run(ct, func(t *testing.T) {
+			in := HTTPResp{
+				StatusCode: 200,
+				Header:     map[string]string{"Content-Type": ct},
+				Body:       body,
+				Timestamp:  time.Unix(1700000000, 0).UTC(),
+			}
+
+			out, err := yamlLib.Marshal(&in)
+			if err != nil {
+				t.Fatalf("marshalling a non-UTF-8 %s body failed: %v\n"+
+					"  this is the exact production failure: the encoder tags the body !!str, "+
+					"yaml.v3 rejects it, the mock insert fails, and the recorder tears down the session", ct, err)
+			}
+
+			var got HTTPResp
+			if err := yamlLib.Unmarshal(out, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.Body != in.Body {
+				t.Fatalf("body did not round-trip for %s\n  want % x\n  got  % x\n"+
+					"  (silent corruption: a mock recorded this way replays the wrong bytes)",
+					ct, in.Body, got.Body)
+			}
+		})
+	}
+}
+
+// TestHTTPResp_YAML_TextStreamsStillChunk guards the other direction: the UTF-8
+// guard must not disable streaming for ordinary text bodies, which is the whole
+// point of the chunk encoder. An octet stream is kept as a frame with the
+// proven switch off (recordedFramesOf), and whole under it.
+func TestHTTPResp_YAML_TextStreamsStillChunk(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	in := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "application/octet-stream"},
+		Body:       "hello world",
+		Timestamp:  time.Unix(1700000000, 0).UTC(),
+	}
+	out, err := yamlLib.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), "raw") {
+		t.Fatalf("a valid-UTF-8 octet-stream body stopped being chunked; the guard must only "+
+			"divert NON-UTF-8 bodies.\n---\n%s", out)
+	}
+	var got HTTPResp
+	if err := yamlLib.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Body != in.Body {
+		t.Fatalf("text body round-trip broke: want %q got %q", in.Body, got.Body)
+	}
+}
+
+// TestStringNode_NonUTF8UsesBinaryTagAndDecodesBack pins the two halves of
+// the encode/decode pair directly, rather than only through HTTPResp. An
+// explicit `!!str` on invalid UTF-8 makes yaml.v3 hard-fail ("cannot marshal
+// invalid UTF-8 data as !!str"), which aborted the mock insert and, before
+// the recorder learned to skip a bad mock, ended the whole recording. The
+// decode half matters just as much: yaml.v3 leaves the BASE64 TEXT in
+// node.Value for a !!binary scalar, so a yamlNodeToString that returned it
+// raw would hand replay the base64 string and mismatch every time.
+func TestStringNode_NonUTF8UsesBinaryTagAndDecodesBack(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"gzip_magic", string([]byte{0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe})},
+		{"lone_continuation", string([]byte{0x80})},
+		{"utf16_bom", string([]byte{0xff, 0xfe, 0x48, 0x00})},
+		{"long", strings.Repeat(string([]byte{0xff, 0xfe, 0x00, 0x8b}), 64)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, utf8.ValidString(tc.in), "fixture must be invalid UTF-8")
+
+			n := stringNode(tc.in)
+			assert.Equal(t, "!!binary", n.Tag,
+				"invalid UTF-8 must not be stamped !!str — yaml.v3 hard-fails on it")
+
+			// Go through a real marshal/unmarshal so the emitter's line
+			// folding is exercised, not just the in-memory node.
+			out, err := yamlLib.Marshal(n)
+			require.NoError(t, err, "marshalling a !!binary scalar must not fail")
+
+			var got yamlLib.Node
+			require.NoError(t, yamlLib.Unmarshal(out, &got))
+			require.Equal(t, yamlLib.DocumentNode, got.Kind)
+			assert.Equal(t, tc.in, yamlNodeToString(got.Content[0]),
+				"binary body did not survive the YAML round-trip")
+		})
+	}
+}
+
+// TestStringNode_UTF8StaysReadable guards the other direction: valid UTF-8
+// must keep its plain !!str form so mock files stay human-readable and
+// diffable. Base64-ing everything would "fix" the crash and ruin the files.
+func TestStringNode_UTF8StaysReadable(t *testing.T) {
+	for _, in := range []string{"", "hello", "café ☕", "{\"k\":\"v\"}"} {
+		n := stringNode(in)
+		assert.Equal(t, "!!str", n.Tag, "valid UTF-8 %q must stay !!str", in)
+		assert.Equal(t, in, n.Value)
+		assert.Equal(t, in, yamlNodeToString(n))
+	}
+}
+
+// TestYAMLNodeToString_FoldedBinaryScalar covers reading a mock file whose
+// !!binary scalar is wrapped across lines. yaml.v3 emits binary on one long
+// line, but the YAML spec says a !!binary payload may carry line breaks and
+// libyaml-based writers (PyYAML, ruby-psych) wrap at 80 columns by default.
+//
+// The `>` (folded) indicator is the case that bites: YAML joins folded lines
+// with a SPACE, and base64.StdEncoding rejects a space. (It happens to skip
+// \r and \n, so a `|` literal block would decode even without the strip and
+// would prove nothing here.) Without stripBase64Whitespace the decode errors
+// and yamlNodeToString falls through to handing replay the raw base64 text.
+func TestYAMLNodeToString_FoldedBinaryScalar(t *testing.T) {
+	want := strings.Repeat(string([]byte{0xff, 0xfe, 0x00, 0x8b}), 24)
+
+	const doc = `body: !!binary >-
+  //4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv/
+  /gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL
+`
+	var m struct {
+		Body yamlLib.Node `yaml:"body"`
+	}
+	require.NoError(t, yamlLib.Unmarshal([]byte(doc), &m))
+	require.Equal(t, "!!binary", m.Body.Tag)
+	assert.Contains(t, m.Body.Value, " ",
+		"fixture must actually fold to a space, otherwise this asserts nothing")
+
+	assert.Equal(t, want, yamlNodeToString(&m.Body),
+		"folded !!binary must decode to the original bytes, not the base64 text")
+}
+
+// TestHTTPResp_YAML_NonUTF8ChunksOnlyStillCarryTheBody covers the arm the
+// UTF-8 guard opens up. When the chunks fail the UTF-8 check, MarshalYAML falls
+// back to the flat scalar body — but StreamBody and Body travel independently
+// over the transport, so a producer that populated ONLY the chunk form has an
+// empty Body and the fallback would write `body: ""`, silently losing the whole
+// response. Guarding against a marshal failure by dropping the payload instead
+// is not a fix; the bytes have to reach the flat !!binary scalar.
+func TestHTTPResp_YAML_NonUTF8ChunksOnlyStillCarryTheBody(t *testing.T) {
+	raw := string([]byte{0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe})
+	require.False(t, utf8.ValidString(raw), "fixture must be invalid UTF-8")
+
+	in := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "application/octet-stream"},
+		// Body deliberately empty: only the chunk form is populated.
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+		StreamBody: []HTTPStreamChunk{
+			{TS: time.Unix(1700000000, 0).UTC(), Data: []HTTPStreamDataField{{Key: "raw", Value: raw}}},
+		},
+	}
+
+	out, err := yamlLib.Marshal(&in)
+	require.NoError(t, err, "marshalling non-UTF-8 chunks must not fail")
+
+	var got HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &got))
+	assert.Equal(t, raw, got.Body,
+		"the response body was silently dropped: the chunk form was rejected for being non-UTF-8 "+
+			"and the flat fallback encoded an empty Body")
+}
+
+// TestDecodeStreamDataFields_BinaryKeyDecodes pins the key half of the chunk
+// decoder. stringNode can emit a data-field KEY as !!binary, and yaml.v3 leaves
+// the BASE64 TEXT in node.Value for those — reading Value raw substitutes the
+// base64 for the real field name. Uses a folded (`>-`) scalar so the whitespace
+// strip is exercised too: YAML joins folded lines with a space, which
+// base64.StdEncoding rejects.
+func TestDecodeStreamDataFields_BinaryKeyDecodes(t *testing.T) {
+	// base64 of the 48 bytes below, wrapped so the fold inserts a space.
+	const doc = `data:
+  ? !!binary >-
+    //4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv/
+    /gCL
+  : plain-value
+  ordinary-key: v2
+`
+	var m struct {
+		Data yamlLib.Node `yaml:"data"`
+	}
+	require.NoError(t, yamlLib.Unmarshal([]byte(doc), &m))
+
+	fields, err := decodeStreamDataFields(&m.Data)
+	require.NoError(t, err)
+	require.Len(t, fields, 2)
+
+	wantKey := strings.Repeat(string([]byte{0xff, 0xfe, 0x00, 0x8b}), 15)
+	assert.Equal(t, wantKey, fields[0].Key,
+		"a !!binary data-field key was not decoded — replay would see the base64 text as the field name")
+	assert.Equal(t, "plain-value", fields[0].Value)
+	// An ordinary key must still be trimmed as before.
+	assert.Equal(t, "ordinary-key", fields[1].Key)
+}
+
+// TestHTTPResp_YAML_NonUTF8SSEFieldNameSurvivesFallback covers the corner where
+// it is the SSE field NAME, not the value, that is not valid UTF-8.
+//
+// The chunk form is rejected for exactly that reason and MarshalYAML falls back
+// to the flat body — which for text/event-stream is rebuilt by
+// streamChunksToLegacyBody, and that used to lower-case every field name.
+// strings.ToLower rewrites each invalid byte to U+FFFD, so the fallback added to
+// stop the body being dropped would instead have shipped it corrupted: the same
+// silent mangling the UTF-8 guard exists to prevent, one layer down.
+func TestHTTPResp_YAML_NonUTF8SSEFieldNameSurvivesFallback(t *testing.T) {
+	badKey := string([]byte{0xff, 0xfe, 0x41})
+	require.False(t, utf8.ValidString(badKey), "fixture must be invalid UTF-8")
+
+	in := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "text/event-stream"},
+		Timestamp:  time.Unix(1700000000, 0).UTC(),
+		StreamBody: []HTTPStreamChunk{
+			{TS: time.Unix(1700000000, 0).UTC(), Data: []HTTPStreamDataField{{Key: badKey, Value: "v"}}},
+		},
+	}
+
+	out, err := yamlLib.Marshal(&in)
+	require.NoError(t, err)
+
+	var got HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &got))
+	assert.Contains(t, got.Body, badKey,
+		"the non-UTF-8 SSE field name was mangled to U+FFFD by strings.ToLower in the flat-body fallback")
+	assert.NotContains(t, got.Body, "�", "replacement characters appeared in the body")
+}
+
+// A response body, or a stream chunk's value, that a block scalar cannot
+// carry (YAMLBlockScalarUnsafe) is written double-quoted and reads back
+// exactly. Body went through Node.Encode, which wrote it as a block and
+// failed to parse that back: the mock or test case was lost.
+func TestHTTPResp_MarshalYAML_BodyABlockScalarCannotCarry(t *testing.T) {
+	for _, body := range []string{"\t{\n\t\"a\": 1\n}", "\n\thello", " a\nb"} {
+		out, err := yamlLib.Marshal(map[string]any{"list": []HTTPResp{{StatusCode: 200, Body: body}}})
+		require.NoError(t, err, "body %q", body)
+		var back map[string][]HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &back), "body %q:\n%s", body, out)
+		assert.Equal(t, body, back["list"][0].Body)
+	}
+	chunk := "\tindented\nevent"
+	resp := HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/event-stream"},
+		StreamBody: []HTTPStreamChunk{{TS: time.Unix(1, 0).UTC(), Data: []HTTPStreamDataField{{Key: "data", Value: chunk}}}}}
+	out, err := yamlLib.Marshal(map[string]any{"list": []HTTPResp{resp}})
+	require.NoError(t, err)
+	var back map[string][]HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &back), "%s", out)
+	require.Len(t, back["list"][0].StreamBody, 1)
+	v, _ := back["list"][0].StreamBody[0].ValueByKey("data")
+	assert.Equal(t, chunk, v)
+}
+
+// A recording keeps a body as frames only when the response is a stream by
+// keploy's one rule (HTTPStreamOf): a stream's Content-Type. Go's JSON written
+// with no Content-Type goes out as text/plain, chunked and with no
+// Content-Length, and used to be written as a list of frames for that alone;
+// the replay then took the frames for evidence of a stream. It is one
+// document, and is kept as one.
+func TestHTTPResp_MarshalYAML_ChunkedTextPlainJSONStaysFlat(t *testing.T) {
+	json := `[{"id":"cluster-1","name":"one"},{"id":"cluster-2","name":"two"}]`
+	for _, header := range []map[string]string{
+		{"Content-Type": "text/plain; charset=utf-8"},
+		{"Content-Type": "text/plain; charset=utf-8", "Transfer-Encoding": "chunked"},
+		{"Content-Type": "text/plain"},
+	} {
+		in := HTTPResp{StatusCode: 200, Header: header, Body: json + "\n", Timestamp: time.Unix(1700000000, 0).UTC()}
+		out, err := yamlLib.Marshal(in)
+		require.NoError(t, err)
+		assert.NotContains(t, string(out), "- ts:", "a chunked text/plain JSON body (header %v) was written as frames:\n%s", header, out)
+		assert.NotContains(t, string(out), "raw:", "a chunked text/plain JSON body (header %v) was written as frames:\n%s", header, out)
+
+		var got HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &got))
+		assert.Empty(t, got.StreamBody, "a chunked text/plain JSON body (header %v) was read back as frames", header)
+		assert.Equal(t, in.Body, got.Body, "a chunked text/plain JSON body (header %v) did not round-trip whole", header)
+	}
+
+	// A dependency's chunked text/plain answer, kept as a mock, is served
+	// back byte for byte: as frames its line endings and its last newline
+	// were lost.
+	text := "line one\r\nline two\r\n"
+	out, err := yamlLib.Marshal(HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/plain"}, Body: text})
+	require.NoError(t, err)
+	var got HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &got))
+	assert.Equal(t, text, got.Body, "a chunked text/plain body did not round-trip byte for byte:\n%s", out)
+}
+
+// A stream's Content-Type still has its body kept as frames, whatever its
+// length framing: SSE by events, NDJSON by lines.
+func TestHTTPResp_MarshalYAML_StreamContentTypesStillFrame(t *testing.T) {
+	for _, c := range []struct {
+		header map[string]string
+		body   string
+		frames int
+	}{
+		{map[string]string{"Content-Type": "text/event-stream", "Content-Length": "30"}, "data: one\n\ndata: two\n\n", 2},
+		{map[string]string{"Content-Type": "application/x-ndjson; charset=utf-8"}, "{\"n\":1}\n\n{\"n\":2}\n", 2},
+		{map[string]string{"Content-Type": "application/ndjson", "Content-Length": "16"}, "{\"n\":1}\n{\"n\":2}\n", 2},
+	} {
+		out, err := yamlLib.Marshal(HTTPResp{StatusCode: 200, Header: c.header, Body: c.body, Timestamp: time.Unix(1700000000, 0).UTC()})
+		require.NoError(t, err)
+		var got HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &got))
+		assert.Len(t, got.StreamBody, c.frames, "a %v body was not kept as its frames:\n%s", c.header, out)
+	}
+}
+
+// framesData is the fields of each frame, what a stream is compared by (a
+// frame's TS is when it came).
+func framesData(chunks []HTTPStreamChunk) [][]HTTPStreamDataField {
+	out := make([][]HTTPStreamDataField, 0, len(chunks))
+	for _, c := range chunks {
+		out = append(out, c.Data)
+	}
+	return out
+}
+
+// throughYAML is resp written as YAML and read back, as a recording keeps it.
+func throughYAML(t *testing.T, resp HTTPResp) HTTPResp {
+	t.Helper()
+	out, err := yamlLib.Marshal(resp)
+	require.NoError(t, err)
+	var back HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &back))
+	return back
+}
+
+// carriedAsJSON is resp, recorded as frames and read back from YAML, after a
+// trip through JSON: its body, the one form of the stream JSON carries.
+func carriedAsJSON(t *testing.T, resp HTTPResp) HTTPResp {
+	t.Helper()
+	recorded := throughYAML(t, resp)
+	require.Equal(t, framesData(resp.StreamBody), framesData(recorded.StreamBody), "YAML keeps the frames")
+
+	j, err := json.Marshal(recorded)
+	require.NoError(t, err)
+	var carried HTTPResp
+	require.NoError(t, json.Unmarshal(j, &carried))
+	require.Empty(t, carried.StreamBody, "JSON carries the body alone: one form of the stream, which an edit of the body (api-server's golden body) cannot leave stale")
+	require.Equal(t, recorded.Body, carried.Body)
+	return carried
+}
+
+// The flat body a recording's SSE frames read back as is the SSE wire of
+// those frames: a test case carried as JSON, which carries that body alone,
+// is recorded again (a cloud test case written to YAML) with the frames its
+// recording kept. An event's data lines, a blank one among them, a value that
+// starts with a space, and a comment are no other event, or field, read back
+// from it.
+func TestAnSSEStreamsFlatBodySplitsBackIntoItsFrames(t *testing.T) {
+	frames := []HTTPStreamChunk{
+		{Data: []HTTPStreamDataField{{Key: "id", Value: "1"}, {Key: "event", Value: "log"}, {Key: "data", Value: "line one\nline two"}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: " indented"}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: "before\n\nafter"}}},
+		{Data: []HTTPStreamDataField{{Key: "comment", Value: " keepalive"}}},
+		{Data: []HTTPStreamDataField{{Key: "event", Value: "tick"}, {Key: "data", Value: ""}}},
+		{Data: []HTTPStreamDataField{{Key: "data", Value: "  two spaces\n one"}}},
+	}
+	resp := HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "text/event-stream"},
+		StreamBody: frames,
+	}
+	carried := carriedAsJSON(t, resp)
+	assert.Equal(t, strings.Join([]string{
+		"id:1\nevent:log\ndata:line one\ndata:line two",
+		"data:  indented",
+		"data:before\ndata:\ndata:after",
+		": keepalive",
+		"event:tick\ndata:",
+		"data:   two spaces\ndata:  one",
+	}, "\n\n")+"\n\n", carried.Body, "a data line each, a comment as a comment, the last event ended")
+	assert.Equal(t, framesData(frames), framesData(throughYAML(t, carried).StreamBody), "body: %q", carried.Body)
+}
+
+// The same for a stream of lines: NDJSON, whose blank lines are keepalives,
+// and a text stream, whose blank lines are lines, a last one too. A recording
+// keeps a text/plain body whole (recordedFramesOf): its frames are an older
+// keploy's, and carried as JSON it is no stream (HTTPStreamOf, not framed),
+// compared whole by this body. So the body read as lines is those frames, and
+// is the wire they were read from, a blank last line ending in its newline.
+func TestALineStreamsFlatBodySplitsBackIntoItsFrames(t *testing.T) {
+	raw := func(vs ...string) []HTTPStreamChunk {
+		out := make([]HTTPStreamChunk, 0, len(vs))
+		for _, v := range vs {
+			out = append(out, HTTPStreamChunk{Data: []HTTPStreamDataField{{Key: "raw", Value: v}}})
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name, contentType, wire string
+		frames                  []HTTPStreamChunk
+	}{
+		{"ndjson", "application/x-ndjson", "{\"a\":1}\n{\"b\":\"x y\"}", raw(`{"a":1}`, `{"b":"x y"}`)},
+		{"text", "text/plain", "first\n\nthird", raw("first", "", "third")},
+		{"text ending in a blank line", "text/plain", "first\n\nlast\n\n", raw("first", "", "last", "")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			resp := HTTPResp{
+				StatusCode: 200,
+				Header:     map[string]string{"Content-Type": c.contentType},
+				StreamBody: c.frames,
+			}
+			carried := carriedAsJSON(t, resp)
+			assert.Equal(t, c.wire, carried.Body)
+			format := httpStreamFormatOf(c.contentType)
+			assert.Equal(t, framesData(c.frames), framesData(SplitStreamBody(format, carried.Body)), "body: %q", carried.Body)
+			again := throughYAML(t, carried)
+			if recordedFramesOf(c.contentType) == HTTPStreamNone {
+				assert.Empty(t, again.StreamBody, "a recording keeps a %s body whole", c.contentType)
+				assert.Equal(t, carried.Body, again.Body)
+				return
+			}
+			assert.Equal(t, framesData(c.frames), framesData(again.StreamBody), "body: %q", carried.Body)
+		})
+	}
 }

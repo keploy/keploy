@@ -2,6 +2,7 @@ package models
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
 	"math/big"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	yaml "gopkg.in/yaml.v3"
@@ -640,9 +642,14 @@ func TestPostgresV3Cell_BinaryWithFoldedWhitespace_Decodes(t *testing.T) {
 	// yaml-authored payload with a real line wrap inside the scalar —
 	// identical in effect to what yaml.v3 emits for long binary cells.
 	// The original bytes are the 12-byte sequence below; base64 is
-	// "AAECAwQFBgcICQoL", wrapped at position 6 across two lines. With
-	// the `|` indicator the newline becomes whitespace in the scalar.
-	body := "!!binary |\n  AAECAwQF\n  BgcICQoL\n"
+	// "AAECAwQFBgcICQoL", wrapped at position 8 across two lines.
+	//
+	// The `>` (folded) indicator is deliberate: it joins the two lines
+	// with a SPACE, which base64.StdEncoding rejects. A `|` literal
+	// block would join with \n, which the decoder happens to skip on
+	// its own — so that spelling would pass even with the strip removed
+	// and would pin nothing.
+	body := "!!binary >\n  AAECAwQF\n  BgcICQoL\n"
 
 	var c PostgresV3Cell
 	if err := yaml.Unmarshal([]byte(body), &c); err != nil {
@@ -656,4 +663,360 @@ func TestPostgresV3Cell_BinaryWithFoldedWhitespace_Decodes(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Errorf("folded !!binary decode: got %x, want %x", got, want)
 	}
+}
+
+// TestPostgresV3Cell_NonUTF8HstoreRoundTrips covers the sibling of the HTTP
+// body defect. scalarStrNode used to stamp an explicit `!!str` on hstore values
+// and TSVector lexemes, which makes yaml.v3 hard-fail on invalid UTF-8 — the
+// same "cannot marshal invalid UTF-8 data as !!str" that surfaces as a failed
+// mock insert. Keys had the mirror-image bug: they encoded fine (yaml.v3
+// auto-binarizes an untagged scalar) but decoded back as the BASE64 TEXT,
+// silently replacing the key.
+//
+// The mapping marshalPgHstoreYAML emits is untagged, so a bare
+// yaml.Unmarshal into a PostgresV3Cell yields a generic map — hstore is
+// reconstructed by decodePgHstoreMapping, which is what this drives.
+func TestPostgresV3Cell_NonUTF8HstoreRoundTrips(t *testing.T) {
+	binKey := string([]byte{0xff, 0xfe, 0x48, 0x8b})
+	binVal := string([]byte{0x1f, 0x8b, 0x08, 0x00})
+	if utf8.ValidString(binKey) || utf8.ValidString(binVal) {
+		t.Fatal("fixtures must be invalid UTF-8")
+	}
+	v := binVal
+	in := PostgresV3Cell{Value: pgtype.Hstore{binKey: &v}}
+
+	out, err := yaml.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshalling a non-UTF-8 hstore failed: %v\n"+
+			"  this aborts the mock insert exactly like the HTTP body case did", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
+		t.Fatalf("unexpected document shape: kind=%d content=%d", doc.Kind, len(doc.Content))
+	}
+	h, err := decodePgHstoreMapping(doc.Content[0])
+	if err != nil {
+		t.Fatalf("decodePgHstoreMapping: %v", err)
+	}
+	gv, present := h[binKey]
+	if !present {
+		keys := make([]string, 0, len(h))
+		for k := range h {
+			keys = append(keys, k)
+		}
+		t.Fatalf("the binary hstore KEY did not round-trip: want % x, got keys %q", binKey, keys)
+	}
+	if gv == nil || *gv != binVal {
+		t.Fatalf("hstore VALUE did not round-trip: want % x", binVal)
+	}
+}
+
+// TestDecodePgHstoreMapping_FoldedBinaryKey pins the whitespace strip inside
+// decodeYAMLScalarKey. yaml.v3 emits binary on one long line, so the sibling
+// round-trip test can never produce a folded key on its own — but a mocks.yaml
+// may be written by a libyaml-based tool (PyYAML, ruby-psych, which wrap at 80
+// columns) or hand-edited. The `>` indicator joins lines with a SPACE, which
+// base64.StdEncoding rejects outright; without the strip the decode fails and
+// the key silently becomes the raw base64 text, replacing the real hstore key.
+func TestDecodePgHstoreMapping_FoldedBinaryKey(t *testing.T) {
+	const doc = `? !!binary >-
+    //4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv//gCL//4Ai//+AIv/
+    /gCL
+: some-value
+`
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(doc), &node); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	mapping := node.Content[0]
+	if got := mapping.Content[0].Value; !bytes.Contains([]byte(got), []byte(" ")) {
+		t.Fatalf("fixture must actually fold to a space, otherwise this asserts nothing: %q", got)
+	}
+
+	h, err := decodePgHstoreMapping(mapping)
+	if err != nil {
+		t.Fatalf("decodePgHstoreMapping: %v", err)
+	}
+	wantKey := string(bytes.Repeat([]byte{0xff, 0xfe, 0x00, 0x8b}, 15))
+	v, ok := h[wantKey]
+	if !ok {
+		keys := make([]string, 0, len(h))
+		for k := range h {
+			keys = append(keys, k)
+		}
+		t.Fatalf("a folded !!binary hstore key was not decoded: want % x, got keys %q", wantKey, keys)
+	}
+	if v == nil || *v != "some-value" {
+		t.Fatalf("value for the folded key is wrong: %v", v)
+	}
+}
+
+// TestScalarKeyNode_TagsBinaryExplicitly pins what scalarKeyNode actually does.
+// Round-trip tests cannot: yaml.v3 auto-binarizes an untagged non-UTF-8 scalar
+// on emit, so the decoder sees !!binary whether or not this function tags it,
+// and deleting the arm leaves every round-trip green. The value of the arm is
+// that the tag is stated here rather than inherited from an emitter heuristic,
+// so that is what this asserts — at the node, before the emitter runs.
+func TestScalarKeyNode_TagsBinaryExplicitly(t *testing.T) {
+	binKey := string([]byte{0xff, 0xfe, 0x48, 0x8b})
+	if utf8.ValidString(binKey) {
+		t.Fatal("fixture must be invalid UTF-8")
+	}
+	n := scalarKeyNode(binKey)
+	if n.Tag != "!!binary" {
+		t.Errorf("non-UTF-8 key node tag = %q, want !!binary; the encoding is left to yaml.v3's "+
+			"auto-promotion instead of being stated by this package", n.Tag)
+	}
+	if n.Value != base64.StdEncoding.EncodeToString([]byte(binKey)) {
+		t.Errorf("non-UTF-8 key node value is not the base64 payload: %q", n.Value)
+	}
+
+	// Valid UTF-8 must stay a plain, readable key — base64-ing everything would
+	// "fix" the encoding and ruin the mock files.
+	if p := scalarKeyNode("plain"); p.Tag != "" || p.Value != "plain" {
+		t.Errorf("a valid UTF-8 key was not left plain: tag=%q value=%q", p.Tag, p.Value)
+	}
+}
+
+// pgNestedCells are cells whose []byte elements keploy's stores used to
+// lose: a bytea[] (with a NULL and an empty element), a nested one, a record
+// with an int and a bytea field, and a document holding bytes in an array.
+// Their ints are Go ints, as yaml.v3's generic decode reads a nested int.
+func pgNestedCells() PostgresV3Cells {
+	return PostgresV3Cells{
+		NewValueCell([]any{[]byte("ok"), []byte{0xf6, 0x0a}, nil, []byte{}}),
+		NewValueCell([]any{[]any{[]byte{0x01}}, []any{[]byte{0x02, 0xff}}}),
+		NewValueCell([]any{1, []byte{0xf6, 0x0a, 0xfb}}),
+		NewValueCell(map[string]any{"name": "alice", "parts": []any{"a", 2, []byte{0xf6}}}),
+	}
+}
+
+// An array's, a record's and a document's []byte elements round-trip
+// through YAML as bytes (!!binary), not as a sequence of ints that no
+// replay can send as the bytes recorded, and gob-encode after the reload.
+func TestPostgresV3Cell_YAMLKeepsAnArraysAndARecordsBytes(t *testing.T) {
+	in := pgNestedCells()
+	body, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Count(body, []byte("!!binary")) != 7 {
+		t.Fatalf("want each of the 7 byte elements written as bytes:\n%s", body)
+	}
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, in, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
+
+// What holds no []byte is written and read exactly as before: an array of
+// documents whose keys a pgtype shape has ({"prefix"}, {"bytes", "format"})
+// stays those documents, and a document is written as yaml.v3 writes it.
+func TestPostgresV3Cell_YAMLWritesWhatHoldsNoBytesAsBefore(t *testing.T) {
+	doc := []any{map[string]any{"prefix": "img_"}, map[string]any{"format": "png", "bytes": 2048}}
+	want, err := yaml.Marshal([]any{doc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := yaml.Marshal(PostgresV3Cells{NewValueCell(doc)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(body) != string(want) {
+		t.Errorf("written as\n%s\nwant, as before,\n%s", body, want)
+	}
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal(body, &back); err != nil {
+		t.Fatalf("an array of such documents does not load: %v", err)
+	}
+	if !reflect.DeepEqual(back[0].Value, doc) {
+		t.Errorf("it came back as %#v, want %#v", back[0].Value, doc)
+	}
+}
+
+// A mock written before, a bytea[] element as a sequence of ints, still
+// loads as those ints, and still gob-encodes for the agent.
+func TestPostgresV3Cell_AnOlderMocksIntSequenceElementStillLoads(t *testing.T) {
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal([]byte("- - - 111\n    - 107\n  - - 1\n    - 2\n"), &back); err != nil {
+		t.Fatalf("an older mock's int-sequence element does not load: %v", err)
+	}
+	want := PostgresV3Cells{NewValueCell([]any{[]any{111, 107}, []any{1, 2}})}
+	if !reflect.DeepEqual(back, want) {
+		t.Fatalf("it loaded as %#v, want %#v", back, want)
+	}
+	if _, err := back[0].GobEncode(); err != nil {
+		t.Errorf("it does not gob-encode for the agent: %v", err)
+	}
+}
+
+// An aliased !!binary element, as a hand-edited mock may carry, reads back
+// as bytes like any other.
+func TestPostgresV3Cell_YAMLAliasedBinaryElementIsBytes(t *testing.T) {
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal([]byte("- - &b !!binary b2s=\n  - *b\n"), &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if want := (PostgresV3Cells{NewValueCell([]any{[]byte("ok"), []byte("ok")})}); !reflect.DeepEqual(back, want) {
+		t.Fatalf("it loaded as %#v, want %#v", back, want)
+	}
+}
+
+// A text element that is not valid UTF-8 (a binary-format text[] element or
+// a record's text field from a non-UTF-8 database) is a string yaml.v3
+// writes as !!binary, as a released keploy wrote it. It reads back as its
+// bytes, as such a top-level text cell already does; the codec encodes a
+// text element held as bytes to the same wire bytes.
+func TestPostgresV3Cell_AnInvalidUTF8TextElementReadsBackAsItsBytes(t *testing.T) {
+	body, err := yaml.Marshal(PostgresV3Cells{NewValueCell([]any{"caf\xe9", "ok"})})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if want := "- - !!binary Y2Fm6Q==\n  - ok\n"; string(body) != want {
+		t.Fatalf("written as %q, want, as before, %q", body, want)
+	}
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if want := (PostgresV3Cells{NewValueCell([]any{[]byte("caf\xe9"), "ok"})}); !reflect.DeepEqual(back, want) {
+		t.Fatalf("it loaded as %#v, want %#v", back, want)
+	}
+	var top PostgresV3Cells
+	if err := yaml.Unmarshal([]byte("- !!binary Y2Fm6Q==\n"), &top); err != nil || !reflect.DeepEqual(top[0].Value, []byte("caf\xe9")) {
+		t.Fatalf("a top-level one loaded as %#v (%v), want its bytes", top, err)
+	}
+}
+
+// pgUUIDArrayCells are a uuid[], a macaddr[] and a bit[] cell as pgx scans
+// them (each element a [16]uint8, a net.HardwareAddr, a pgtype.Bits), and
+// documents with a "uuid" key holding text, at the top and inside an
+// array.
+func pgUUIDArrayCells() PostgresV3Cells {
+	u1 := [16]uint8{0xa0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8, 0xbb, 0x6d, 0x6b, 0xb9, 0xbd, 0x38, 0x0a, 0x11}
+	u2 := [16]uint8{0xb0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8, 0xbb, 0x6d, 0x6b, 0xb9, 0xbd, 0x38, 0x0a, 0x12}
+	return PostgresV3Cells{
+		NewValueCell([]any{u1, nil, u2}),
+		NewValueCell([]any{net.HardwareAddr{0x08, 0x00, 0x2b, 0x01, 0x02, 0x03}, nil}),
+		NewValueCell([]any{pgtype.Bits{Bytes: []byte{0xa0}, Len: 3, Valid: true}, nil}),
+		NewValueCell(map[string]any{"uuid": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"}),
+		NewValueCell([]any{map[string]any{"uuid": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"}}),
+	}
+}
+
+// A document in an array with the keys of a macaddr or a bit element's
+// mapping, its values text (an application's jsonb can hold such keys),
+// reads back as that document: only a !!binary value makes it the element.
+// And a document with a uuid's 16 bytes under "uuid" and other keys is the
+// document, not the uuid: an element's mapping holds no other key.
+func TestPostgresV3Cell_YAMLDocumentsWithAnElementsKeysStayDocuments(t *testing.T) {
+	doc := []any{
+		map[string]any{"macaddr": "CAArAQID"},
+		map[string]any{"bytes": "oA==", "len": 3, "valid": true},
+		map[string]any{"uuid": make([]byte, 16), "name": "x"},
+	}
+	body, err := yaml.Marshal(PostgresV3Cells{NewValueCell(doc)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if !reflect.DeepEqual(back[0].Value, doc) {
+		t.Errorf("it came back as %#v, want %#v\n%s", back[0].Value, doc, body)
+	}
+}
+
+// A raw cell whose format is an alias of an anchored integer, as a
+// hand-edited mock can hold, reads back as the raw cell.
+func TestPostgresV3Cell_YAMLAliasedRawCellFormatIsTheRawCell(t *testing.T) {
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal([]byte("- &fmt 1\n- {format: *fmt, bytes: [1, 2]}\n"), &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if want := (PostgresV3CellRaw{Format: 1, Bytes: []byte{1, 2}}); len(back) != 2 || !reflect.DeepEqual(back[1].Value, want) {
+		t.Fatalf("it read back as %#v, want %#v", back, want)
+	}
+}
+
+// A uuid[], macaddr[] and bit[] cell's elements round-trip through YAML as
+// the values pgx scanned, not as sequences of ints (or mappings) no codec
+// encodes back for the client, and a document's "uuid" text stays the
+// document's.
+func TestPostgresV3Cell_YAMLKeepsAUUIDArraysElements(t *testing.T) {
+	in := pgUUIDArrayCells()
+	body, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, in, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
+
+// The documents pgDocumentCells holds read back from YAML as they are: a
+// top-level document with a prefix's, a macaddr's, a raw cell's, a bit
+// string's, a time's or an interval's keys and other kinds of value (a
+// {"prefix": "img_"}, a {"format": "png", "bytes": 2048}, a document
+// holding bytes under a raw cell's keys) failed the mock's load, taken
+// for that type.
+func TestPostgresV3Cell_YAMLDocumentsKeepTheirObjects(t *testing.T) {
+	for i, c := range pgDocumentCells() {
+		c = NewValueCell(yamlInts(c.Value))
+		body, err := yaml.Marshal(PostgresV3Cells{c})
+		if err != nil {
+			t.Fatalf("cell %d: marshal: %v", i, err)
+		}
+		var back PostgresV3Cells
+		if err := yaml.Unmarshal(body, &back); err != nil {
+			t.Errorf("cell %d: unmarshal: %v\n%s", i, err, body)
+			continue
+		}
+		if !reflect.DeepEqual(back, PostgresV3Cells{c}) {
+			t.Errorf("cell %d came back as %#v, want %#v\n%s", i, back[0].Value, c.Value, body)
+		}
+	}
+}
+
+// yamlInts is v with each int64 in it an int, as yaml.v3's generic decode
+// reads an integer.
+func yamlInts(v any) any {
+	switch x := v.(type) {
+	case int64:
+		return int(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = yamlInts(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = yamlInts(e)
+		}
+		return out
+	}
+	return v
 }

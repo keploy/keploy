@@ -2,10 +2,21 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"sort"
 	"testing"
+	"time"
 
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func mockMiss(summary string) models.ParserError {
@@ -63,17 +74,393 @@ func TestCaptureWindow_RendezvousNoLoss(t *testing.T) {
 	}
 }
 
-// TestCaptureWindow_BeginClearsStale proves BeginTestErrorCapture discards
-// misses retained before the window (startup / background traffic) so they
-// don't attach to the first test.
-func TestCaptureWindow_BeginClearsStale(t *testing.T) {
-	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+// A set's first test reads what was missed before it with no window open (its
+// application's startup) as the set's (models.UnmatchedCall.BeforeSet,
+// models.MissOutsideTest), a DNS lookup's too, with the proven switch on or
+// off: with it off they were dropped, and nothing the run wrote named them.
+func TestCaptureWindow_BeginHandsTheStartupsMissesOverAsTheSets(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			core, logs := observer.New(zap.DebugLevel)
+			p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16)}
 
-	p.pendingMockErrors.addBounded(mockMiss("GET /background"), maxPendingMockErrors)
+			dns := mockMiss("A db.internal.example.")
+			dns.MismatchReport.Protocol = "DNS"
+			p.pendingMockErrors.addBounded(dns, maxPendingMockErrors)
+			p.pendingMockErrors.addBounded(mockMiss("GET /config"), maxPendingMockErrors)
+			p.BeginTestErrorCapture()
+			p.errChannel <- mockMiss("POST /t1")
+
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatalf("GetMockErrors: %v", err)
+			}
+			read := map[string]models.UnmatchedCall{}
+			for _, c := range got {
+				read[c.ActualSummary] = c
+			}
+			if len(got) != 3 || len(read) != 3 {
+				t.Fatalf("the set's first test read %+v; want the startup's two misses and its own", got)
+			}
+			for _, name := range []string{"A db.internal.example.", "GET /config"} {
+				if c := read[name]; !c.BeforeSet || c.Kind != models.MissOutsideTest {
+					t.Errorf("the startup's miss %q reads %+v; want it marked BeforeSet, %s", name, c, models.MissOutsideTest)
+				}
+			}
+			if c := read["POST /t1"]; c.BeforeSet {
+				t.Errorf("the test's own miss reads %+v; want it unmarked", c)
+			}
+			if n := logs.FilterMessageSnippet("not attributed to a test").Len(); n != 0 {
+				t.Errorf("the startup's misses were said to be dropped (%d)", n)
+			}
+		})
+	}
+}
+
+// pendingLen is how many misses wait with no capture window open.
+func (p *Proxy) pendingLen() int {
+	p.pendingMockErrors.mu.Lock()
+	defer p.pendingMockErrors.mu.Unlock()
+	return len(p.pendingMockErrors.errs)
+}
+
+// A miss made between two tests (after one test's window closed, before the
+// next opened) is the next test's when the replayer continues the capture: a
+// SEND the app publishes then would otherwise be reported against no test.
+// Through the real drain goroutine, which files it with no window open.
+func TestCaptureWindow_ContinueCarriesTheGapsMisses(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartErrorDrain(ctx)
+
+	p.BeginTestErrorCapture()
+	p.errChannel <- mockMiss("POST /t1")
+	if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || got[0].ActualSummary != "POST /t1" {
+		t.Fatalf("test1 expected [POST /t1], got %+v", got)
+	}
+
+	p.errChannel <- mockMiss("SEND between tests") // no window is open
+	deadline := time.Now().Add(5 * time.Second)
+	for p.pendingLen() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the drain goroutine never filed the miss made between tests")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	p.ContinueTestErrorCapture()
+	p.errChannel <- mockMiss("POST /t2")
+	got, _ := p.GetMockErrors(context.Background())
+	if len(got) != 2 || got[0].ActualSummary != "SEND between tests" || got[1].ActualSummary != "POST /t2" {
+		t.Fatalf("test2 expected [SEND between tests, POST /t2], got %+v", got)
+	}
+
+	// And a test that begins instead (a set's first) reads it as the set's,
+	// not its own.
+	p.errChannel <- mockMiss("SEND between tests")
+	deadline = time.Now().Add(5 * time.Second)
+	for p.pendingLen() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the drain goroutine never filed the second miss made between tests")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	p.BeginTestErrorCapture()
+	if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || !got[0].BeforeSet {
+		t.Fatalf("a set's first test must read what was missed before it as the set's, got %+v", got)
+	}
+}
+
+// When GetMockErrors cannot close a test's window, it reads the window and
+// leaves it installed. What lands in it after that was made after the test's
+// misses were taken, between two tests: the next test that continues the
+// capture carries it, rather than dropping it as a window never read.
+//
+// The drain is running (errDrainDone set before errDrainActive, as
+// StartErrorDrain sets them) but never meets the flush marker. Nothing is
+// bounded by a clock, with the proven switch on or off: the read ends when its
+// caller gives it up, saying it could not vouch for every miss
+// (ErrUnmatchedCallsUnread). With the switch off a two-second wait gave up on
+// the drain and the read said nothing, so a miss the drain had not routed yet
+// was read with the next test's as if it were that test's.
+func TestCaptureWindow_ContinueCarriesWhatAReadWindowGotLater(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+			p.errDrainDone = make(chan struct{}) // a drain that runs and never reaches the marker
+			p.errDrainActive.Store(true)
+
+			// The caller gives the read up: the event that ends it.
+			ctx, giveUp := context.WithCancel(context.Background())
+			giveUp()
+			p.BeginTestErrorCapture()
+			p.activeTestErrors.Load().addBounded(mockMiss("POST /t1"), maxPendingMockErrors)
+			got, err := p.GetMockErrors(ctx)
+			if len(got) != 1 || got[0].ActualSummary != "POST /t1" {
+				t.Fatalf("test1 expected [POST /t1], got %+v", got)
+			}
+			if !errors.Is(err, models.ErrUnmatchedCallsUnread) {
+				t.Fatalf("test1's read error %v; a read that could not close its window says so", err)
+			}
+			acc := p.activeTestErrors.Load()
+			if acc == nil {
+				t.Fatal("premise: the degenerate path closed the window")
+			}
+			acc.addBounded(mockMiss("SEND after test1 was read"), maxPendingMockErrors)
+
+			p.ContinueTestErrorCapture()
+			p.errDrainActive.Store(false) // the next read closes the window normally
+			if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || got[0].ActualSummary != "SEND after test1 was read" {
+				t.Fatalf("test2 expected [SEND after test1 was read], got %+v", got)
+			}
+		})
+	}
+}
+
+// Under the proven switch a miss made before a set's first test began (the
+// application's startup, with no window open) is the set's, no test's: the
+// first test's read returns it marked as made before the set (BeforeSet), an
+// outside_test miss, with the test's own, for the replay to fail the set
+// with. It was dropped with a warning, and a set whose startup made a call
+// no mock answers passed. The next test does not read it again.
+func TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.WarnLevel)
+	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16)}
+
+	p.pendingMockErrors.addBounded(mockMiss("insert on events"), maxPendingMockErrors)
+	p.BeginTestErrorCapture()
+	p.errChannel <- mockMiss("POST /t1")
+
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatalf("GetMockErrors: %v", err)
+	}
+	read := map[string]models.UnmatchedCall{}
+	for _, c := range got {
+		read[c.ActualSummary] = c
+	}
+	if len(got) != 2 || len(read) != 2 {
+		t.Fatalf("the first test read %+v; want the startup's miss and its own", got)
+	}
+	if c := read["insert on events"]; !c.BeforeSet || c.Kind != models.MissOutsideTest {
+		t.Errorf("the startup's miss reads %+v; want it marked BeforeSet, %s", c, models.MissOutsideTest)
+	}
+	if c := read["POST /t1"]; c.BeforeSet {
+		t.Errorf("the test's own miss reads %+v; want it unmarked", c)
+	}
+	if n := logs.FilterMessageSnippet("not attributed to a test").Len(); n != 0 {
+		t.Errorf("the startup's miss was said to be dropped (%d)", n)
+	}
+
+	p.ContinueTestErrorCapture()
+	if got, _ := p.GetMockErrors(context.Background()); len(got) != 0 {
+		t.Fatalf("the next test read %+v; want nothing", got)
+	}
+}
+
+// What the application missed after a set's last read (a call it made as it
+// stopped, or later still), and while the next set's mocks were not staged yet
+// (a warm application's call that missed for keploy's staging), is not the
+// next set's: its staging cuts it, saying so, so its first test does not read
+// it as made before that set. A staging that is not a set's first since its
+// Mock (a test's window, a re-stage within the set) cuts nothing: what was
+// missed between two tests is the next test's.
+func TestAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) { missBeforeASetsMocksAreStagedIsNotTheSets(t, proven) })
+	}
+}
+
+// missBeforeASetsMocksAreStagedIsNotTheSets is
+// TestAMissBeforeASetsMocksAreStagedIsNotTheSets with the proven switch set
+// to proven.
+func missBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T, proven string) {
+	t.Setenv(provenswitch.Env, proven)
+	core, logs := observer.New(zap.WarnLevel)
+	p := New(zap.New(core), fakeDestInfo{}, config.New())
+	p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	p.StartErrorDrain(ctx)
+
+	// The previous set's last test and its end read, and a call its
+	// application makes after that read.
+	p.BeginTestErrorCapture()
+	if _, err := p.GetMockErrors(context.Background()); err != nil {
+		t.Fatalf("the set's end read: %v", err)
+	}
+	p.SendError(mockMiss("POST /stopped"))
+	// The next set: its Mock, a call missed before its mocks are staged,
+	// its staging, then its application's startup.
+	if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+		t.Fatal(err)
+	}
+	p.SendError(mockMiss("GET /health"))
+	if err := p.SetMocksWithWindow(context.Background(), nil, nil, models.BaseTime, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	p.SendError(mockMiss("insert on events"))
+	flushDrain(p)
+	// A second staging of the set from BaseTime cuts nothing.
+	if err := p.SetMocksWithWindow(context.Background(), nil, nil, models.BaseTime, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	p.BeginTestErrorCapture()
 
-	got, _ := p.GetMockErrors(context.Background())
-	if len(got) != 0 {
-		t.Fatalf("stale pre-window miss should be cleared on Begin, got %+v", got)
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatalf("GetMockErrors: %v", err)
+	}
+	if len(got) != 1 || got[0].ActualSummary != "insert on events" || !got[0].BeforeSet {
+		t.Fatalf("the set's first test read %+v; want only its own startup's miss, as the set's", got)
+	}
+	e := logs.FilterMessageSnippet("before this set's mocks were staged").All()
+	if len(e) != 1 {
+		t.Fatalf("the cut was said %d times; want once: %+v", len(e), logs.All())
+	}
+	calls, _ := e[0].ContextMap()["calls"].([]interface{})
+	if len(calls) != 2 || calls[0] != "HTTP POST /{}" || calls[1] != "HTTP GET /{}" {
+		t.Fatalf("the warning names %v; want the call after the last read and the one before the staging", calls)
+	}
+
+	// Within the set, a miss between two tests is the next test's.
+	p.SendError(mockMiss("POST /between"))
+	flushDrain(p)
+	if err := p.SetMocksWithWindow(context.Background(), nil, nil, time.Now(), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	p.ContinueTestErrorCapture()
+	if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || got[0].ActualSummary != "POST /between" || got[0].BeforeSet {
+		t.Fatalf("the next test read %+v; want the miss made between the tests, its own", got)
+	}
+}
+
+// A window the agent's scope begin takes back (WithdrawTestErrorCapture: it
+// opens the test's window before the test's view, and the view was refused)
+// ends the learn tracker's test, and what the window held is carried into
+// the next test's window whole: the misses made between tests that it took
+// in, those made as the begin failed, and those made after it, until the
+// next window opens. None is dropped, and none is left with the test that
+// did not begin.
+func TestAWithdrawnCaptureWindowIsCarriedIntoTheNextTestsWhole(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.WarnLevel)
+	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16), learnTracker: learn.NewTracker()}
+	p.BeginTestErrorCapture()
+	if got, err := p.GetMockErrors(context.Background()); err != nil || len(got) != 0 {
+		t.Fatalf("the first test read %+v, %v; want nothing", got, err)
+	}
+	p.pendingMockErrors.addBounded(mockMiss("between tests"), maxPendingMockErrors)
+	p.ContinueTestErrorCapture() // the begin that fails opens its window first
+	if p.learnTracker.OpenEpoch() == 0 {
+		t.Fatal("the window opened no learn tracker test")
+	}
+	// Filed as the drain files a miss: into the window open when it lands.
+	p.activeTestErrors.Load().add(mockMiss("as the begin failed"))
+	p.WithdrawTestErrorCapture()
+	if n := p.learnTracker.OpenEpoch(); n != 0 {
+		t.Fatalf("the window taken back left the tracker's test %d open", n)
+	}
+	p.activeTestErrors.Load().add(mockMiss("after the begin failed"))
+
+	p.ContinueTestErrorCapture()
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatalf("GetMockErrors: %v", err)
+	}
+	var read []string
+	for _, c := range got {
+		read = append(read, c.ActualSummary)
+	}
+	sort.Strings(read)
+	if want := []string{"after the begin failed", "as the begin failed", "between tests"}; !reflect.DeepEqual(read, want) {
+		t.Fatalf("the next test read %q; want %q", read, want)
+	}
+	if n := logs.FilterMessageSnippet("dropped").Len(); n != 0 {
+		t.Fatalf("misses were said to be dropped (%d)", n)
+	}
+}
+
+// A window taken back (WithdrawTestErrorCapture) ends the learn tracker's
+// test through the mock manager, as every boundary of the proxy's tracker
+// does (learnBoundary): holding the round lock, so the manager's round reads
+// the tracker as it is. Ended on the tracker alone, the round still read the
+// withdrawn test as open: a test's view the store then installed, before the
+// tracker began the next test (the store opening it first), was bound to the
+// withdrawn test, and once the tracker began that next test every read of
+// the round found the two apart ("the learn tracker began another test"),
+// though the store showed the very test the tracker had begun. Bound to
+// none, the view is the test the tracker begins next, and the round is in it.
+// No caller installs a view between a failed begin and the next window (the
+// agent opens the window before the view); the row drives that order
+// directly, as the store-led order LearnBoundary binds.
+func TestAWithdrawnWindowEndsTheTrackersTestInTheManagersRound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own := exactMock("own", 0, models.LifetimePerTest)
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4), learnTracker: learn.NewTracker()}
+	mm := stagedManager(t, []*models.Mock{own}, nil)
+	p.setMockManager(mm)
+	p.BeginTestErrorCapture()
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	p.EndTestErrorCapture()
+	mm.ServeExactPool("-", nil)
+	p.ContinueTestErrorCapture() // the begin that fails opens its window first
+	p.WithdrawTestErrorCapture()
+	if mm.exact.round.learn.open {
+		t.Fatal("the manager's round still reads the withdrawn test as open")
+	}
+	mm.ServeExactTest("T2", []*models.Mock{own})
+	p.ContinueTestErrorCapture()
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.HTTP, Tracker: p.learnTracker})
+	if !ok {
+		t.Fatal("no round snapshot")
+	}
+	if snap.Phase != integrations.RoundInTest || snap.Test != "T2" {
+		t.Fatalf("the round reads phase %v, test %q (%s); want T2's test, the one the tracker began over the view", snap.Phase, snap.Test, snap.Boundary)
+	}
+}
+
+// What a set's staging cuts (cutMissesAtSetStart) is said, with the calls by
+// their shape (models.MissLogShape), so no miss is dropped without a word: at
+// Warn, but DNS misses alone and connections that sent nothing alone at
+// Debug, which the end-of-run summary leaves out of a green run too.
+func TestDroppedMissesAreSaidAtWarnButDNSOrSilentAloneAtDebug(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	p := &Proxy{logger: zap.New(core)}
+
+	p.logDroppedMisses(missesCutAtSetStart, []error{mockMiss("GET /background")})
+	e := logs.FilterMessageSnippet("not attributed to a test").All()
+	if len(e) != 1 || e[0].ContextMap()["count"] != int64(1) {
+		t.Fatalf("want one Warn naming the dropped miss, got %+v", logs.All())
+	}
+	if calls, _ := e[0].ContextMap()["calls"].([]interface{}); len(calls) != 1 || calls[0] != "HTTP GET /{}" {
+		t.Fatalf("the Warn does not name the call: %+v", e[0].ContextMap())
+	}
+
+	logs.TakeAll()
+	p.logDroppedMisses(missesCutAtSetStart, nil)
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("nothing dropped logged %d line(s)", n)
+	}
+	dns := mockMiss("A example.com")
+	dns.MismatchReport.Protocol = "DNS"
+	silent := mockMiss("connection phase: server greeting")
+	silent.MismatchReport.MatchPhase = models.MatchPhaseNoRequest
+	p.logDroppedMisses(missesCutAtSetStart, []error{dns, silent})
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("DNS misses and connections that sent nothing alone logged %d Warn line(s): %+v", n, logs.All())
+	}
+	p.logDroppedMisses(missesCutAtSetStart, []error{dns, mockMiss("GET /background")})
+	if n := logs.Len(); n != 1 {
+		t.Fatalf("a DNS miss beside a call that counts logged %d Warn line(s); want one", n)
 	}
 }

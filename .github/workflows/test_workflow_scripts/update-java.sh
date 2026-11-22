@@ -1,7 +1,7 @@
 #! /bin/bash
 
 java_major_version() {
-  "$1" -version 2>&1 | awk -F '[\".]' '/version/ {print ($2 == "1" ? $3 : $2); exit}'
+  "$1" -version 2>&1 | awk -F '[\".]' '/version/ {print ($2 == "1" ? $3 : $2)}' | sed -n 1p
 }
 
 has_java_17_jdk() {
@@ -33,8 +33,7 @@ if [[ "$java_setup_done" != "true" ]] && command -v java >/dev/null 2>&1; then
 fi
 
 if [[ "$java_setup_done" != "true" ]]; then
-  sudo apt-get update
-  sudo apt-get install openjdk-17-jdk-headless -y
+  bash "$(dirname "${BASH_SOURCE[0]}")/apt-install.sh" openjdk-17-jdk-headless
   export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
   export PATH="${JAVA_HOME}/bin:${PATH}"
 fi

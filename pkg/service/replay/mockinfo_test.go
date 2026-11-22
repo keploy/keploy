@@ -14,7 +14,7 @@ func TestBuildExpectedMockInfos_FiltersDNSByEntryKind(t *testing.T) {
 		{Name: "mock-3", Kind: "PostgresV3"},
 	}
 
-	out := buildExpectedMockInfos(entries, nil)
+	out := buildExpectedMockInfos(entries, nil, nil)
 
 	assert.Equal(t, []models.MockMismatchMock{
 		{Name: "mock-1", Kind: "Http"},
@@ -35,7 +35,7 @@ func TestBuildExpectedMockInfos_FiltersDNSByLookup(t *testing.T) {
 		"mock-dns": models.DNS,
 	}
 
-	out := buildExpectedMockInfos(entries, kindByName)
+	out := buildExpectedMockInfos(entries, kindByName, nil)
 
 	assert.Equal(t, []models.MockMismatchMock{
 		{Name: "mock-1", Kind: "Http"},
@@ -48,13 +48,13 @@ func TestBuildExpectedMockInfos_ResolvesEmptyKindFromLookup(t *testing.T) {
 		"mock-1": models.Kind("Http"),
 	}
 
-	out := buildExpectedMockInfos(entries, kindByName)
+	out := buildExpectedMockInfos(entries, kindByName, nil)
 
 	assert.Equal(t, []models.MockMismatchMock{{Name: "mock-1", Kind: "Http"}}, out)
 }
 
 func TestBuildExpectedMockInfos_EmptyInput(t *testing.T) {
-	out := buildExpectedMockInfos(nil, nil)
+	out := buildExpectedMockInfos(nil, nil, nil)
 	assert.Empty(t, out)
 	assert.NotNil(t, out, "should return non-nil empty slice")
 }

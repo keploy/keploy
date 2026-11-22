@@ -1,0 +1,149 @@
+package mock
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
+	rec "go.keploy.io/server/v3/pkg/service/record"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+)
+
+// caseCapture stores the app's incoming requests as test cases while the runner runs.
+type caseCapture struct {
+	done  chan struct{}
+	mu    sync.Mutex
+	cases []capturedMock
+	// handled counts the cases taken off the stream and dealt with (stored,
+	// or failed to be): the capture's progress, said while Record waits for
+	// it (waitConsumers).
+	handled atomic.Uint64
+	// refused counts the cases the test-case store did not write (a full
+	// disk, a permission), and firstErr is the first of its errors. leftOut
+	// counts those it refused for their own body (models.ErrTestCaseEncode):
+	// not written either, but they do not end the run. Read only once done is
+	// closed (notWritten).
+	refused  int
+	leftOut  int
+	firstErr error
+}
+
+func (m *mockService) requests() bool {
+	if !m.config.Mock.RecordRequests {
+		return false
+	}
+	_, ok := m.instrumentation.(IncomingReader)
+	switch {
+	case !ok || m.testDB == nil:
+		m.logger.Warn("the app's incoming requests are not recorded: this build has no test-case store or incoming stream for them")
+	default:
+		return true
+	}
+	return false
+}
+
+// captureCases starts storing incoming requests when on; nil when requests are off or their stream cannot be read.
+func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name string, seen *atomic.Int64, on bool) *caseCapture {
+	if !on {
+		return nil
+	}
+	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(captureCtx, models.IncomingOptions{
+		Filters:            m.config.Record.Filters,
+		IgnoreStaticAssets: m.config.Record.IgnoreStaticAssets,
+	})
+	if err != nil {
+		m.logger.Warn("the app's incoming requests are not recorded: could not read them from the agent", zap.Error(err))
+		return nil
+	}
+	c := &caseCapture{done: make(chan struct{})}
+	go func() {
+		defer utils.Recover(m.logger)
+		defer close(c.done)
+		for tc := range incoming {
+			seen.Add(1)
+			if err := m.hooks.BeforeTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
+				m.logger.Debug("BeforeTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
+			}
+			if err := m.testDB.InsertTestCase(persistCtx, tc, name, true); err != nil {
+				if errors.Is(err, models.ErrTestCaseEncode) {
+					// THIS case's body, not the storage: the store said so at
+					// ERROR, and the next case may be fine. Left out and
+					// counted, as Record drops an unencodable mock.
+					c.leftOut++
+					c.handled.Add(1)
+					continue
+				}
+				// Not in the recording: counted, and the run then ends as one
+				// that is not saved (Record, after closeStore).
+				utils.LogError(m.logger, err, "failed to persist test case", zap.String("case", tc.Name))
+				if c.refused++; c.firstErr == nil {
+					c.firstErr = err
+				}
+				c.handled.Add(1)
+				continue
+			}
+			if err := m.hooks.AfterTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
+				m.logger.Debug("AfterTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
+			}
+			c.add(tc)
+			c.handled.Add(1)
+		}
+		if c.leftOut > 0 {
+			m.logger.Warn("test cases left out of the recording: their bodies cannot be stored in this format, and each is said above",
+				zap.Int("testCasesLeftOut", c.leftOut),
+				zap.String("next_step", "set storageFormat to yaml and record them again; the yaml encoder stores binary bodies as !!binary without loss"))
+		}
+	}()
+	return c
+}
+
+// notWritten says how many of the cases handed to the test-case store it did
+// not write, those left out among them, with the first error of a write that
+// failed; nil when no write failed, or requests are off. Left-out cases alone
+// are nil: they do not end the run. Read only once done is closed.
+func (c *caseCapture) notWritten() error {
+	if c == nil || c.refused == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d of the %d test cases handed to the test-case store were not written; the first write failed: %w",
+		c.refused+c.leftOut, c.handled.Load(), c.firstErr)
+}
+
+func (c *caseCapture) add(tc *models.TestCase) {
+	if tc.Name == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cases = append(c.cases, capturedMock{name: tc.Name, ts: caseTime(tc), end: caseEnd(tc)})
+}
+
+// caseTime is when the app received the request, which decides the flow it belongs to.
+func caseTime(tc *models.TestCase) time.Time {
+	if !tc.HTTPReq.Timestamp.IsZero() {
+		return tc.HTTPReq.Timestamp
+	}
+	return tc.GrpcReq.Timestamp
+}
+
+func caseEnd(tc *models.TestCase) time.Time {
+	if !tc.HTTPResp.Timestamp.IsZero() {
+		return tc.HTTPResp.Timestamp
+	}
+	return tc.GrpcResp.Timestamp
+}
+
+// list is every stored case with the time its request arrived.
+func (c *caseCapture) list() []capturedMock {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]capturedMock(nil), c.cases...)
+}

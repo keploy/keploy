@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -29,7 +30,7 @@ func (Hooks) BeforeDockerComposeSetup(ctx context.Context, _ *docker.Compose, _ 
 }
 
 func (h Hooks) BeforeDockerSetup(ctx context.Context, cmd string) (string, error) {
-	h.logger.Debug("running before docker setup hook - oss", zap.String("cmd", cmd))
+	h.logger.Debug("running before docker setup hook - oss", zap.String("cmd", utils.RedactCommandLine(cmd)))
 	// no-op
 	return cmd, nil
 }

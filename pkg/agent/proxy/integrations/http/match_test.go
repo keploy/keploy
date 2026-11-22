@@ -31,6 +31,44 @@ type mockMemDb struct {
 	updateUnFilteredReturn  bool
 	deletedFiltered         *models.Mock
 	deleteFilteredReturn    bool
+	cursors                 map[string]int // backs MockCursorIndex/AdvanceMockCursor for cursor tests
+}
+
+// AnsweredRedacting makes the double a store that tells the set's answered
+// recordings that redacted something (integrations.AnsweredRedactingReader),
+// as the agent's does: it takes none out of its reads, so it tells none, all
+// it has. A store that does not tell them redacts a miss whole.
+func (m *mockMemDb) AnsweredRedacting(models.Kind) ([]*models.Mock, bool) { return nil, true }
+
+// MockCursorIndex / AdvanceMockCursor give the double the optional
+// stateful-cursor capability (peek + commit) so cursorPick can advance through
+// identical-request recordings in tests.
+func (m *mockMemDb) MockCursorIndex(key string, n int) int {
+	if n <= 1 {
+		return 0
+	}
+	cur := m.cursors[key]
+	if cur > n-1 {
+		cur = n - 1
+	}
+	return cur
+}
+
+func (m *mockMemDb) AdvanceMockCursor(key string, servedIdx, n int) {
+	if n <= 1 {
+		return
+	}
+	if m.cursors == nil {
+		m.cursors = make(map[string]int)
+	}
+	next := servedIdx + 1
+	if cur := m.cursors[key]; cur > next {
+		next = cur
+	}
+	if next > n {
+		next = n
+	}
+	m.cursors[key] = next
 }
 
 func (m *mockMemDb) GetUnFilteredMocks() ([]*models.Mock, error) { return m.mocks, m.err }
@@ -92,7 +130,7 @@ func httpMock(name, method, rawURL string) *models.Mock {
 func TestBuildHTTPMismatchReport_NoMocks(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{mocks: nil}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -111,7 +149,7 @@ func TestBuildHTTPMismatchReport_NoMocks(t *testing.T) {
 func TestBuildHTTPMismatchReport_DbError(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{err: fmt.Errorf("db error")}
-	report := h.buildHTTPMismatchReport(makeReq("POST", "/api/items"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("POST", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -130,7 +168,7 @@ func TestBuildHTTPMismatchReport_NoHTTPMocks(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		{Name: "dns-mock", Kind: "DNS", Spec: models.MockSpec{}},
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/data"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/data"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -147,7 +185,7 @@ func TestBuildHTTPMismatchReport_SameMethodMatch(t *testing.T) {
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 		httpMock("mock-post-users", "POST", "http://localhost:8080/api/users"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -167,7 +205,7 @@ func TestBuildHTTPMismatchReport_DiffMethodFallback(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		httpMock("mock-post-items", "POST", "http://localhost:8080/api/items"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -187,7 +225,7 @@ func TestBuildHTTPMismatchReport_PathDiff(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/orders"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/orders"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -207,7 +245,7 @@ func TestBuildHTTPMismatchReport_ExactPathMethodMatch(t *testing.T) {
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 	}}
 	// Same method and path — diff should indicate headers/body differ
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
+	report := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -1006,5 +1044,103 @@ func TestUpdateMock_PerTestPrefersDelete(t *testing.T) {
 	if !original.TestModeInfo.IsFiltered || original.TestModeInfo.SortOrder != 7 {
 		t.Errorf("updateMock mutated the pool pointer on the per-test path: %+v",
 			original.TestModeInfo)
+	}
+}
+
+// TestQueryParamsMatch_ValueSensitive is the regression guard for the
+// query-param VALUE bug: SchemaMatch's strict pass previously gated query
+// params with MapsHaveSameKeys, which compared only the key set / counts and
+// never the values, so a mock recorded for /search?id=A would satisfy a live
+// /search?id=B and the wrong recorded response could be served.
+// QueryParamsMatch keeps the same bidirectional key-set contract but also
+// compares each shared key's value (url-noise aware).
+func TestQueryParamsMatch_ValueSensitive(t *testing.T) {
+	h := newHTTP()
+
+	cases := []struct {
+		name       string
+		mockParams map[string]string
+		reqQuery   url.Values
+		urlNoise   []string
+		want       bool
+	}{
+		{
+			name:       "different value does not match (the bug)",
+			mockParams: map[string]string{"id": "A"},
+			reqQuery:   url.Values{"id": {"B"}},
+			want:       false,
+		},
+		{
+			name:       "same value matches",
+			mockParams: map[string]string{"id": "B"},
+			reqQuery:   url.Values{"id": {"B"}},
+			want:       true,
+		},
+		{
+			name:       "differing value covered by url noise still matches",
+			mockParams: map[string]string{"id": "A"},
+			reqQuery:   url.Values{"id": {"B"}},
+			urlNoise:   []string{"^[A-Z]$"},
+			want:       true,
+		},
+		{
+			name:       "differing value NOT covered by url noise still fails",
+			mockParams: map[string]string{"id": "A"},
+			reqQuery:   url.Values{"id": {"B"}},
+			urlNoise:   []string{"^[0-9]+$"},
+			want:       false,
+		},
+		{
+			name:       "different keys are distinguished",
+			mockParams: map[string]string{"id": "A"},
+			reqQuery:   url.Values{"name": {"A"}},
+			want:       false,
+		},
+		{
+			name:       "extra key on request side fails",
+			mockParams: map[string]string{"id": "A"},
+			reqQuery:   url.Values{"id": {"A"}, "page": {"2"}},
+			want:       false,
+		},
+		{
+			name:       "multiple shared keys all match on value",
+			mockParams: map[string]string{"id": "A", "page": "2"},
+			reqQuery:   url.Values{"id": {"A"}, "page": {"2"}},
+			want:       true,
+		},
+		{
+			name:       "one of several shared keys differs -> no match",
+			mockParams: map[string]string{"id": "A", "page": "2"},
+			reqQuery:   url.Values{"id": {"A"}, "page": {"3"}},
+			want:       false,
+		},
+		{
+			name:       "keploy-prefixed keys are ignored on both sides",
+			mockParams: map[string]string{"id": "A", "keployId": "x"},
+			reqQuery:   url.Values{"id": {"A"}, "keployTrace": {"y"}},
+			want:       true,
+		},
+		{
+			name:       "multi-value param compared in recorded joined form",
+			mockParams: map[string]string{"tag": "a, b"},
+			reqQuery:   url.Values{"tag": {"a", "b"}},
+			want:       true,
+		},
+		{
+			name:       "multi-value param with differing member fails",
+			mockParams: map[string]string{"tag": "a, b"},
+			reqQuery:   url.Values{"tag": {"a", "c"}},
+			want:       false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := h.QueryParamsMatch(tc.mockParams, tc.reqQuery, tc.urlNoise, false)
+			if got != tc.want {
+				t.Fatalf("QueryParamsMatch(%v, %v, %v) = %v, want %v",
+					tc.mockParams, tc.reqQuery, tc.urlNoise, got, tc.want)
+			}
+		})
 	}
 }

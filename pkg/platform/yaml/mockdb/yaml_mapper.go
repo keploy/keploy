@@ -33,6 +33,10 @@ var builtinYAMLKinds = map[models.Kind]struct{}{
 	models.Mongo:       {},
 	models.GRPC_EXPORT: {},
 	models.DNS:         {},
+	// The connection-failure format is keploy's own contract between the
+	// keploy that records a failure and the one that replays it (and Validate's
+	// "upgrade keploy" rule depends on it), so no mapper may reshape it.
+	models.ConnectionFailure: {},
 }
 
 // RegisterMockYAMLMapper registers mapper as the encode/decode
@@ -53,6 +57,9 @@ var builtinYAMLKinds = map[models.Kind]struct{}{
 // and logs a warning. Two packages claiming the same kind is almost
 // always a bug; surfacing it at startup rather than at first load
 // makes the failure mode obvious.
+//
+// A registration starts a new models.MockRulesGeneration, so no mock-file
+// index kept before it answers a later read.
 func RegisterMockYAMLMapper(kind models.Kind, mapper MockYAMLMapper) {
 	if kind == "" || mapper.Encode == nil || mapper.Decode == nil {
 		return
@@ -65,6 +72,9 @@ func RegisterMockYAMLMapper(kind models.Kind, mapper MockYAMLMapper) {
 		log.Printf("mockdb: replacing previously-registered YAML mapper for kind %q; check for duplicate init() registrations", kind)
 		mockYAMLMappers.Store(kind, mapper)
 	}
+	// A document of this kind now decodes otherwise: an index of a mock file
+	// kept before (indexCache) no longer answers a read.
+	models.MockRulesChanged()
 }
 
 func encodeWithMapper(mock *models.Mock, doc *yaml.NetworkTrafficDoc) (bool, error) {
@@ -76,6 +86,17 @@ func encodeWithMapper(mock *models.Mock, doc *yaml.NetworkTrafficDoc) (bool, err
 		return false, nil
 	}
 	return true, v.(MockYAMLMapper).Encode(mock, doc)
+}
+
+// hasMapperForKind reports whether an out-of-tree MockYAMLMapper is registered
+// for kind. The JSON encoder does not consult the mapper registry at all — it
+// projects the OSS kinds it knows and returns handled=false for anything else —
+// so callers need this to tell "kind keploy genuinely cannot encode" from "kind
+// an enterprise mapper owns", which must not be treated as a skippable payload
+// fault. See the errMapperEncode note in util.go.
+func hasMapperForKind(kind models.Kind) bool {
+	_, ok := mockYAMLMappers.Load(kind)
+	return ok
 }
 
 func decodeWithMapper(doc *yaml.NetworkTrafficDoc, mock *models.Mock) (bool, error) {

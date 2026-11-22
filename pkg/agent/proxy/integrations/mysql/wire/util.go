@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -25,14 +26,87 @@ type DecodeContext struct {
 	ClientCaps         uint32 // live client's caps (from HandshakeResponse41)
 	RecordedClientCaps uint32 // caps from the recorded config mock
 	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps
+	// ServerMariaDBCaps and ClientMariaDBCaps are the MariaDB extended
+	// capabilities each side sent: the greeting's
+	// (HandshakeV10Packet.MariaDBCapabilities) and the client's
+	// HandshakeResponse41 or SSLRequest's. MetadataFraming reads them.
+	ServerMariaDBCaps uint32
+	ClientMariaDBCaps uint32
+	// FramingAssumed is set while ClientCaps is assumed rather than read off
+	// the client's HandshakeResponse41 or SSLRequest (a connection joined
+	// mid-stream, with no SSLRequest of its own captured): the recorder
+	// settles whether CLIENT_DEPRECATE_EOF holds from the first packet that
+	// tells, and clears it.
+	FramingAssumed bool
 
-	//runtime stmt-id → query mapping set when COM_STMT_PREP matches
+	// LongDataParams records which parameters of a prepared statement had
+	// their value streamed ahead of time with COM_STMT_SEND_LONG_DATA
+	// (stmtID -> set of parameter ids).
+	//
+	// It has to be tracked out of band because the wire gives no other clue:
+	// a long-sent parameter is simply ABSENT from the COM_STMT_EXECUTE
+	// payload while still being non-NULL in the null bitmap, so a decoder
+	// that reads a value for every non-NULL parameter walks off the end of
+	// the packet and rejects the command. That is what dropped every
+	// streamed-BLOB EXECUTE from the recording (#4262).
+	//
+	// The server discards long data when the statement executes, resets, or
+	// closes, so the entry is cleared at all three points.
+	LongDataParams map[uint32]map[uint16]bool
+
+	// StmtParamTypes holds, per prepared statement (by ID), the types of
+	// its placeholders from its last COM_STMT_EXECUTE that sent them
+	// (new_params_bind_flag 1): an EXECUTE with the flag 0 sends none, and
+	// the server, and the decoder, read its values with these
+	// (preparedstmt.DecodeStmtExecute). A COM_STMT_CLOSE forgets them.
+	StmtParamTypes map[uint32][]mysql.Parameter
+
+	// StmtIDToQuery maps the connection's prepared statements, by ID, to
+	// their queries. Replay sets it when a COM_STMT_PREPARE matches; record
+	// sets it when a COM_STMT_PREPARE_OK answers one, and records the query
+	// on each command that names the statement (mysql.MetaQuery).
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
+
+	// InTx, Bound, BoundWindow, AutocommitOff and AutocommitOffAtConnect
+	// are replay's binding of the live connection's open transaction to the
+	// connection it was recorded on, which the replayer keeps from the
+	// status of the answers it replayed (its connection rule). InTx is
+	// whether the live connection is in a transaction: the latest answer
+	// said one is open, or that its autocommit is off. Bound is the
+	// recording that answered the transaction's latest command after its
+	// start, and BoundWindow the start of the test window it answered in
+	// (zero under exact serving). AutocommitOff is whether the live
+	// session's autocommit is off, and AutocommitOffAtConnect whether it was
+	// at connect (the greeting's status), which a reset brings back.
+	InTx                   bool
+	Bound                  *models.Mock
+	BoundWindow            time.Time
+	AutocommitOff          bool
+	AutocommitOffAtConnect bool
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
+
+// rememberParamTypes notes the types params were sent with, for the
+// statement's EXECUTEs that send none (StmtParamTypes). It keeps no value,
+// and no name: a flag-0 EXECUTE sends none. The server keeps the types of the
+// statement's placeholders only, not of the query attributes sent after them
+// (a flag-0 EXECUTE may still carry NULL ones), so neither does this.
+func (d *DecodeContext) rememberParamTypes(stmtID uint32, params []mysql.Parameter) {
+	if ps := d.PreparedStatements[stmtID]; ps != nil && int(ps.NumParams) < len(params) {
+		params = params[:ps.NumParams]
+	}
+	types := make([]mysql.Parameter, len(params))
+	for i, p := range params {
+		types[i] = mysql.Parameter{Type: p.Type, Unsigned: p.Unsigned}
+	}
+	if d.StmtParamTypes == nil {
+		d.StmtParamTypes = make(map[uint32][]mysql.Parameter)
+	}
+	d.StmtParamTypes[stmtID] = types
+}
 
 func (d *DecodeContext) effectiveClientCaps() uint32 {
 	if d.PreferRecordedCaps && d.RecordedClientCaps != 0 {
@@ -44,6 +118,25 @@ func (d *DecodeContext) effectiveClientCaps() uint32 {
 func (d *DecodeContext) DeprecateEOF() bool {
 	return (d.ServerCaps&CLIENT_DEPRECATE_EOF) != 0 &&
 		(d.effectiveClientCaps()&CLIENT_DEPRECATE_EOF) != 0
+}
+
+// MetadataFraming returns which of MariaDB's optional result-set metadata
+// fields the connection's responses carry: those of the extended
+// capabilities both sides sent, when both speak MariaDB's extensions
+// (CLIENT_MYSQL clear on both). A MySQL server or client gets none.
+func (d *DecodeContext) MetadataFraming() mysql.MetadataFraming {
+	if d.ServerCaps&mysql.CLIENT_MYSQL != 0 || d.effectiveClientCaps()&mysql.CLIENT_MYSQL != 0 {
+		return 0
+	}
+	caps := d.ServerMariaDBCaps & d.ClientMariaDBCaps
+	var f mysql.MetadataFraming
+	if caps&mysql.MARIADB_CLIENT_EXTENDED_METADATA != 0 {
+		f |= mysql.FramingExtendedMetadata
+	}
+	if caps&mysql.MARIADB_CLIENT_CACHE_METADATA != 0 {
+		f |= mysql.FramingMetadataFollows
+	}
+	return f
 }
 
 // This map is used to store the last operation that was performed on a connection.
@@ -156,7 +249,12 @@ func IsGenericResponsePkt(packet *mysql.PacketBundle) bool {
 
 func IsNoResponseCommand(command string) bool {
 	switch command {
-	case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
+	// COM_QUIT is answered only by the server closing the socket. Leaving it
+	// out made the async recorder queue it as a response-bearing command,
+	// where it is never paired and, worse, keeps the queue non-empty — which
+	// suppresses the heldResp guard for any genuinely orphaned response that
+	// follows it.
+	case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA), mysql.CommandStatusToString(mysql.COM_QUIT):
 		return true
 	default:
 		return false

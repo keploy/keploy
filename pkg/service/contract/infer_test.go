@@ -2,7 +2,6 @@ package contract
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -69,7 +68,9 @@ func TestInferSchemaPOSTEndpointWithJSONBody(t *testing.T) {
 	schema := requestBody.Value.Content["application/json"].Schema
 	assertSchemaType(t, schema, "object")
 	assertSchemaType(t, schema.Value.Properties["name"], "string")
-	assertSchemaType(t, schema.Value.Properties["age"], "number")
+	// 30 is an integer literal. This asserted "number" while InferSchema
+	// decoded with encoding/json, which makes every JSON number a float64.
+	assertSchemaType(t, schema.Value.Properties["age"], "integer")
 }
 
 func TestInferSchemaMultipleEndpoints(t *testing.T) {
@@ -116,7 +117,8 @@ func TestInferSchemaTypeInferenceNestedObjects(t *testing.T) {
 	schema := response.Value.Content["application/json"].Schema
 
 	assertSchemaType(t, schema.Value.Properties["name"], "string")
-	assertSchemaType(t, schema.Value.Properties["age"], "number")
+	// See TestInferSchemaPOSTEndpointWithJSONBody: 30 is an integer.
+	assertSchemaType(t, schema.Value.Properties["age"], "integer")
 	assertSchemaType(t, schema.Value.Properties["active"], "boolean")
 
 	profile := schema.Value.Properties["profile"]
@@ -176,40 +178,5 @@ func assertSchemaType(t *testing.T, schemaRef *openapi3.SchemaRef, expected stri
 
 	if schemaRef == nil || schemaRef.Value == nil || schemaRef.Value.Type == nil || !schemaRef.Value.Type.Is(expected) {
 		t.Fatalf("expected type %q", expected)
-	}
-}
-
-func TestSafeJoinWithinRoot(t *testing.T) {
-	root := t.TempDir()
-
-	tests := []struct {
-		name    string
-		rel     string
-		wantErr bool
-	}{
-		{"relative within root", "assets/body.json", false},
-		{"dot path", ".", false},
-		{"absolute path rejected", "/etc/passwd", true},
-		{"traversal rejected", "../../etc/passwd", true},
-		{"nested traversal rejected", "assets/../../etc/passwd", true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := safeJoinWithinRoot(root, tc.rel)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for %q, got path %q", tc.rel, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error for %q: %v", tc.rel, err)
-			}
-			absRoot, _ := filepath.Abs(root)
-			if got != absRoot && !filepath.IsAbs(got) {
-				t.Fatalf("expected absolute path, got %q", got)
-			}
-		})
 	}
 }

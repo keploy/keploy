@@ -55,10 +55,23 @@ type NetworkTrafficDocJSON struct {
 	Kind         models.Kind         `json:"kind"`
 	Name         string              `json:"name"`
 	Spec         json.RawMessage     `json:"spec"`
+	Async        *models.AsyncMeta   `json:"async,omitempty"`
 	Noise        *DocNoise           `json:"noise,omitempty"`
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty"`
 	Curl         string              `json:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId,omitempty"`
+	Start        string              `json:"start,omitempty"`
+
+	Variables models.MockVariables `json:"variables,omitempty"`
+
+	// Clocks is NetworkTrafficDoc.Clocks.
+	Clocks map[string]models.ClockOffset `json:"clocks,omitempty"`
+
+	// Real is NetworkTrafficDoc.Real.
+	Real []string `json:"real,omitempty"`
+
+	// Origin is NetworkTrafficDoc.Origin.
+	Origin *models.Origin `json:"origin,omitempty"`
 }
 
 // DocToJSON converts a NetworkTrafficDoc to its JSON-friendly representation
@@ -79,10 +92,16 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		Kind:         doc.Kind,
 		Name:         doc.Name,
 		Spec:         specBytes,
+		Async:        doc.Async,
 		Noise:        doc.Noise,
 		LastUpdated:  doc.LastUpdated,
 		Curl:         doc.Curl,
 		ConnectionID: doc.ConnectionID,
+		Start:        doc.Start,
+		Variables:    doc.Variables,
+		Clocks:       doc.Clocks,
+		Real:         doc.Real,
+		Origin:       doc.Origin,
 	}, nil
 }
 
@@ -143,10 +162,16 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		Version:      jsonDoc.Version,
 		Kind:         jsonDoc.Kind,
 		Name:         jsonDoc.Name,
+		Async:        jsonDoc.Async,
 		Noise:        jsonDoc.Noise,
 		LastUpdated:  jsonDoc.LastUpdated,
 		Curl:         jsonDoc.Curl,
 		ConnectionID: jsonDoc.ConnectionID,
+		Start:        jsonDoc.Start,
+		Variables:    jsonDoc.Variables,
+		Clocks:       jsonDoc.Clocks,
+		Real:         jsonDoc.Real,
+		Origin:       jsonDoc.Origin,
 	}
 
 	// Convert json.RawMessage to a generic interface, then encode into yaml.Node

@@ -58,6 +58,16 @@ type RunTestOpts struct {
 	TestSetID  string
 	TestStepID string // TestStepID is the test case name used to load the case from TestCaseDB.
 	ServiceURL string
+	// AppEnded is for a caller that started the app at ServiceURL: it closes
+	// once that run of the app has ended (the process exited, or the compose
+	// that runs it came down). Given it, the wait for the app before the
+	// request has no budget. It ends when the app answers, when AppEnded
+	// closes (the test fails: the app stopped before it answered), or when ctx
+	// ends. So an app whose start is held (compose waiting on a slow
+	// dependency's health before it starts the app) is waited for for as long
+	// as its start takes. Nil, for a caller that did not start the app and has
+	// no such event: the wait keeps its two-minute budget.
+	AppEnded <-chan struct{}
 }
 
 // Service runs a single integration test end-to-end.
@@ -71,6 +81,10 @@ type Service interface {
 // Implemented by go.keploy.io/server/v3/pkg/platform/yaml/testdb.TestYaml.
 type TestCaseDB interface {
 	GetTestCase(ctx context.Context, testSetID string, testCaseName string) (*models.TestCase, error)
+	// Root is the recording's directory: a test case names the files kept
+	// beside it (a large body, a form part) from there, and they are read
+	// only inside it (keployPkg.ReadRecordingFile).
+	Root() string
 }
 
 // Instrumentation is the agent/proxy control surface needed for mock loading.
@@ -82,6 +96,10 @@ type Instrumentation interface {
 	NotifyGracefulShutdown(ctx context.Context) error
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	// WatchAgentStart watches the start of the agent the gate waits for
+	// (pkg.AgentStartWatcher): part of the surface, so that a wrapper (the
+	// sandbox's) passes it on, or does not compile.
+	WatchAgentStart(ctx context.Context) <-chan error
 }
 
 // MockDB reads mocks from storage.
@@ -93,4 +111,13 @@ type MockDB interface {
 // MappingDB provides test-case → mock-name mapping.
 type MappingDB interface {
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
+	// GetStartup returns the test-set-scoped startup mocks — boot traffic
+	// (handshakes, pool warm-up, config fetches) that belongs to no single test
+	// and so never appears in Get's per-test map. Required here for the same
+	// reason as in pkg/service/replay: this path also loads mocks strictly BY
+	// NAME (sendPerTestParams -> MockFilterParams.MockMapping ->
+	// disk.LoadByNames), so a startup mock missing from the per-test list is
+	// absent from the pool for every test. Returns nil, nil when the file or
+	// the section is absent.
+	GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error)
 }

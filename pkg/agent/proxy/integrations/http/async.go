@@ -1,0 +1,252 @@
+package http
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"path"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
+)
+
+// compile-time assertions.
+var _ async.AsyncParser = (*HTTP)(nil)
+var _ async.AsyncAware = (*HTTP)(nil)
+
+// SetAsyncEngine stores the shared engine (setter injection).
+func (h *HTTP) SetAsyncEngine(e *async.Engine) { h.asyncEngine = e }
+
+// MatchesLane matches host + path globs (path.Match) from lane.Match against
+// the mock's recorded request URL.
+func (h *HTTP) MatchesLane(m *models.Mock, lane models.AsyncLane) bool {
+	if m == nil || m.Spec.HTTPReq == nil {
+		return false
+	}
+	host, p := hostAndPath(m.Spec.HTTPReq)
+	matched := false
+	if hg := lane.Match["host"]; hg != "" {
+		matched = true
+		if ok, _ := path.Match(hg, host); !ok {
+			return false
+		}
+	}
+	// pathRegex, when set, is the path check (a regex alternative to the glob
+	// match.path — for URLs a glob can't express, e.g. numeric-id segments).
+	// Reuses pkg/matcher's cached, fail-closed regex helper.
+	if pr := lane.Match["pathRegex"]; pr != "" {
+		matched = true
+		if ok, _ := matcher.MatchesAnyRegex(p, []string{pr}); !ok {
+			return false
+		}
+	} else if pg := lane.Match["path"]; pg != "" {
+		matched = true
+		if ok, _ := path.Match(pg, p); !ok {
+			return false
+		}
+	}
+	if len(lane.MatchQuery) > 0 {
+		matched = true
+		q := queryOf(m.Spec.HTTPReq)
+		for k, v := range lane.MatchQuery {
+			if q.Get(k) != v {
+				return false
+			}
+		}
+	}
+	return matched
+}
+
+// queryOf returns the request's query params, URLParams-first (the recorded
+// source of truth) with the parsed URL as fallback — the same precedence as
+// match.go / mismatch_render.go. Returns nil when there are none (Get is
+// nil-safe), avoiding a throwaway allocation.
+func queryOf(r *models.HTTPReq) url.Values {
+	if len(r.URLParams) > 0 {
+		vals := make(url.Values, len(r.URLParams))
+		for k, v := range r.URLParams {
+			vals.Set(k, v)
+		}
+		return vals
+	}
+	if u, err := parseRecordedURL(r.URL); err == nil {
+		return u.Query()
+	}
+	return nil
+}
+
+// MatchRequestShape reuses SchemaMatch against the single recorded mock.
+// Volatile query params (lane.VolatileParams) are stripped from BOTH the
+// live and the recorded request before comparison: SchemaMatch's query-param
+// check (QueryParamsMatch) compares the KEY SET and VALUES of the live
+// request's parsed URL query against the recorded mock's URLParams, so
+// stripping only one side would leave the key counts unequal (e.g. "cursor"
+// present on the live side but absent on the stripped recorded side) and
+// spuriously fail the shape match — stripping both sides keeps the comparison
+// honest while still ignoring the volatile key's value.
+func (h *HTTP) MatchRequestShape(ctx context.Context, live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
+	if live == nil || live.Spec.HTTPReq == nil || recorded == nil || recorded.Spec.HTTPReq == nil {
+		return false, "missing request payload"
+	}
+	vol := volatileSet(lane.VolatileParams)
+	liveReq, err := mockToReq(stripVolatile(live, vol))
+	if err != nil {
+		return false, "unparseable live request: " + utils.WithholdInput(err).Error()
+	}
+	rec := stripVolatile(recorded, vol)
+	// SchemaMatch does field-by-field request-shape comparison; a non-empty
+	// result means the single candidate matched.
+	// Under the proven switch the destination is compared as every HTTP
+	// call's is, and no path segment or query value is relaxed for its shape
+	// (strict.go). The live call here carries no connection, so it is
+	// compared as a call that reached no container (sameDestination). The
+	// verdict only counts a flag: the engine serves
+	// the recorded epoch either way (async.Engine.decideServe), as a lane the
+	// user declared asks.
+	matched, err := h.SchemaMatch(ctx, liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, !provenswitch.On())
+	if err != nil {
+		return false, "schema match error: " + utils.WithholdInput(err).Error()
+	}
+	if len(matched) == 0 {
+		// Both by their path's shape and where they first differ: the
+		// detail is logged at INFO, and a path or a query holds tokens.
+		recURL, _ := models.ParseRequestURL(recorded.Spec.HTTPReq.URL)
+		if recURL == nil {
+			recURL = &url.URL{}
+		}
+		// The live call with its path tag (models.URLPathTag), as the
+		// agent's other lines tag its request; the recording's path by its
+		// shape alone: no console or report line prints a recording's path
+		// beside a tag.
+		return false, fmt.Sprintf("request shape drift: %s vs %s (paths differ at segment %d)",
+			models.WithPathTag(liveReq.method+" "+utils.URLPathShape(liveReq.url), models.URLPathTag(ctx, liveReq.method, liveReq.url)),
+			utils.URLPathShape(recURL), pathDiffersAt(recURL.EscapedPath(), liveReq.url.EscapedPath()))
+	}
+	return true, ""
+}
+
+// EmptyResponse is a minimal 204 keep-alive.
+func (h *HTTP) EmptyResponse(_ models.AsyncLane) ([]byte, error) {
+	return []byte("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"), nil
+}
+
+// ResponseValueKey fingerprints the value the client consumes: response status
+// + body. Volatile response headers (Date, etc.) are not part of the value; the
+// body carries the config version/data, so a real change materially alters it.
+func (h *HTTP) ResponseValueKey(m *models.Mock, _ models.AsyncLane) string {
+	if m == nil || m.Spec.HTTPResp == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d\n%s", m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body)
+}
+
+func hostAndPath(r *models.HTTPReq) (host, p string) {
+	if r.Header != nil && r.Header["Host"] != "" {
+		host = r.Header["Host"]
+	}
+	if u, err := parseRecordedURL(r.URL); err == nil {
+		if host == "" {
+			host = u.Host
+		}
+		p = u.Path
+	}
+	return host, p
+}
+
+// volatileSet builds the volatile-param lookup set once, so a caller stripping
+// both the live and recorded request doesn't rebuild it twice.
+func volatileSet(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	vol := make(map[string]bool, len(names))
+	for _, n := range names {
+		vol[n] = true
+	}
+	return vol
+}
+
+// stripVolatile returns a shallow copy of the mock with the volatile query
+// params (vol) removed from URL + URLParams, so key-set comparison ignores them.
+func stripVolatile(m *models.Mock, vol map[string]bool) *models.Mock {
+	if len(vol) == 0 {
+		return m
+	}
+	req := *m.Spec.HTTPReq
+	if u, err := parseRecordedURL(req.URL); err == nil {
+		q := u.Query()
+		for k := range vol {
+			q.Del(k)
+		}
+		u.RawQuery = q.Encode()
+		req.URL = u.String()
+	}
+	if req.URLParams != nil {
+		np := make(map[string]string, len(req.URLParams))
+		for k, v := range req.URLParams {
+			if !vol[k] {
+				np[k] = v
+			}
+		}
+		req.URLParams = np
+	}
+	cp := *m
+	sp := m.Spec
+	sp.HTTPReq = &req
+	cp.Spec = sp
+	return &cp
+}
+
+// mockToReq builds the matcher's `req` value from a recorded/live mock.
+func mockToReq(m *models.Mock) (*req, error) {
+	u, err := parseRecordedURL(m.Spec.HTTPReq.URL)
+	if err != nil {
+		return nil, err
+	}
+	hdr := http.Header{}
+	for k, v := range m.Spec.HTTPReq.Header {
+		hdr.Set(k, v)
+	}
+	return &req{
+		method: string(m.Spec.HTTPReq.Method),
+		url:    u,
+		header: hdr,
+		body:   []byte(m.Spec.HTTPReq.Body),
+	}, nil
+}
+
+// liveReqToMock wraps the matcher's parsed request as a *models.Mock so the
+// transport-agnostic engine (which speaks only *models.Mock) can route/verify it.
+func liveReqToMock(input *req) *models.Mock {
+	hdr := map[string]string{}
+	for k := range input.header {
+		hdr[k] = input.header.Get(k)
+	}
+	return &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata: map[string]string{},
+		HTTPReq: &models.HTTPReq{
+			Method: models.Method(input.method),
+			URL:    input.url.String(),
+			Header: hdr,
+			Body:   string(input.body),
+		},
+	}}
+}
+
+// flakyHeaderNoise returns the flaky-header list as a header-noise map.
+// Shared by MatchRequestShape and decode.go's auto-header-noise setup so the two
+// can't drift. The response assertion shares the underlying models list but not
+// this function — it must compare names exactly, not through a noise map.
+//
+// Under the proven switch the credentials leave it (models.CredentialHeaders):
+// a request's Authorization, idempotency keys and CSRF tokens are compared.
+func flakyHeaderNoise() map[string][]string {
+	if provenswitch.On() {
+		return models.ProvenFlakyHeaderNoise()
+	}
+	return models.FlakyHeaderNoise()
+}

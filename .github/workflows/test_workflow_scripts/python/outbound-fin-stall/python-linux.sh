@@ -29,6 +29,12 @@
 #      its mock is incomplete and is dropped — only mock-0 (call-1)
 #      lands on disk.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 # Explicit set +e: even when this script is sourced from a workflow
 # step that has -e enabled by default (GitHub Actions does this for
@@ -66,7 +72,12 @@ python3 -m pip install --upgrade pip >/dev/null
 python3 -m pip install -r requirements.txt
 
 echo "=== generate keploy config ==="
-$RECORD_BIN config --generate
+# Only when the sample does not ship one. `config --generate` used to do
+# nothing at all over an existing keploy.yml -- it asked, stdin answered EOF,
+# and it skipped and exited 0 -- so the shipped config is what these runs have
+# always used, noise rules and all. It refuses out loud now rather than
+# pretending, which is right, and this says what the run actually wants.
+[ -f keploy.yml ] || $RECORD_BIN config --generate
 rm -rf keploy/
 
 echo "=== start fake upstream (FIN after 5s idle) ==="
@@ -78,7 +89,7 @@ upstream_pid=$!
 # idle bookkeeping.
 ready=0
 for i in $(seq 1 20); do
-    if ss -tln | awk '{print $4}' | grep -q ":9090$"; then
+    if ss -tln | awk '{print $4}' | grep ":9090$" >/dev/null; then
         echo "upstream listening after $((i))s"
         ready=1
         break
@@ -92,7 +103,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 echo "=== run keploy record + app.py (call-1, sleep 8s, call-2) ==="
-sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record \
     -c "python3 app.py 127.0.0.1 9090 8" \
     > record_logs.txt 2>&1
 record_status=$?

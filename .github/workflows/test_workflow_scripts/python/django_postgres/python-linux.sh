@@ -1,10 +1,14 @@
 #!/bin/bash
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
+
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # Start the postgres database
+docker_compose_pull_retry
 docker compose up -d
 
 # Install dependencies
@@ -18,10 +22,18 @@ python3 manage.py makemigrations
 python3 manage.py migrate
 
 # Configuration and cleanup
-sudo $RECORD_BIN config --generate
 sudo rm -rf keploy/  # Clean old test data
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > "$config_file" <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"header": {"Allow":[],}}
+KEPLOY_CFG
 sleep 5  # Allow time for configuration changes
 
 APP_HOST="127.0.0.1"
@@ -80,12 +92,23 @@ wait_for_app() {
     done
 
     echo "::error::App proxy did not become ready on ${APP_HOST}:${APP_PORT} within 120 seconds"
+    save_keploy_start_evidence
     stop_recording
     dump_and_force_kill_if_stuck "$REC_PID"
     return 1
 }
 
 send_request(){
+    # The app starts once keploy's agent is ready: its wait, with its full
+    # budget, starts there (keploy-start-wait.sh). keploy, in the
+    # foreground, writes its PID to ${app_name}.pid (exec_noting_pid), so a
+    # keploy that exits first fails the wait at once.
+    # Stopped as on the app's wait's failure: nothing else stops it.
+    if ! await_agent_ready "${app_name}.txt" "@${app_name}.pid"; then
+        stop_recording
+        dump_and_force_kill_if_stuck "$REC_PID"
+        return 1
+    fi
     sleep 10
     wait_for_app || return 1
     # Start making curl calls to record the testcases and mocks.
@@ -113,10 +136,14 @@ do_record_iteration() {
     local extra_flags="${2:-}"
     local label="${extra_flags:+_json}"
     local app_name="flaskApp_${i}${label}"
+    # Emptied and removed first: the driver waits for this run's ready line
+    # in the log, and for this run's keploy by the PID file.
+    : >"${app_name}.txt"
+    rm -f "${app_name}.pid"
     send_request &
     local request_pid=$!
     # shellcheck disable=SC2086
-    $RECORD_BIN record $extra_flags -c "python3 manage.py runserver"   2>&1 | tee "${app_name}.txt"
+    exec_noting_pid "${app_name}.pid" $RECORD_BIN record $extra_flags -c "python3 manage.py runserver"   2>&1 | tee "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"

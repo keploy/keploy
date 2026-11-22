@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -58,7 +59,7 @@ func (p *Python) PreProcess(_ bool) (string, error) {
 		// Fallback to original behavior if executable not found as separate part
 		covCmd := fmt.Sprintf("%s -m coverage run", p.executable)
 		str := strings.Replace(p.cmd, p.executable, covCmd, 1)
-		p.logger.Debug("PreProcess command for Python coverage (fallback)", zap.String("command", str))
+		p.logger.Debug("PreProcess command for Python coverage (fallback)", zap.String("command", utils.RedactCommandLine(str)))
 		return str, nil
 	}
 
@@ -69,7 +70,7 @@ func (p *Python) PreProcess(_ bool) (string, error) {
 	newParts = append(newParts, parts[executableIndex+1:]...) // Add remaining parts
 
 	str := strings.Join(newParts, " ")
-	p.logger.Debug("PreProcess command for Python coverage", zap.String("command", str), zap.String("executable", p.executable))
+	p.logger.Debug("PreProcess command for Python coverage", zap.String("command", utils.RedactCommandLine(str)), zap.String("executable", p.executable))
 	return str, nil
 }
 

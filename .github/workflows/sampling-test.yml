@@ -43,7 +43,11 @@ jobs:
       - name: Build keploy
         working-directory: keploy
         run: |
-          go build -o keploy main.go
+          # Relative, not $GITHUB_WORKSPACE-rooted: this is the one workflow that
+          # checks keploy out into a subdirectory (path: keploy above), and
+          # working-directory: keploy is already in effect for this step.
+          source .github/workflows/test_workflow_scripts/go-retry.sh
+          go_retry build -o keploy main.go
           chmod +x keploy
           ls -lh keploy
 

@@ -1,0 +1,651 @@
+package learn
+
+import (
+	"encoding/base64"
+	"errors"
+	"net/url"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+)
+
+// instantOfWord is the instant the reader reads at the first changed word
+// of (rec, live), nil where it reads none.
+func instantOfWord(t *testing.T, rec, live string) *instantWord {
+	t.Helper()
+	rd := readText(rec, live)
+	if len(rd.Words) == 0 {
+		t.Fatalf("%q -> %q: no changed word", rec, live)
+	}
+	return rd.Words[0].Instant
+}
+
+// Every number of 10, 13, 16 or 19 digits in either run is an instant:
+// one that parses (2000-2100) by its moment, one that does not by its
+// exact text. Other lengths are no instant.
+func TestReaderEpochNumbersAreInstants(t *testing.T) {
+	for _, c := range []struct {
+		what, rec, live string
+		res             time.Duration
+	}{
+		{"seconds", "1792667656", "1792667731", time.Second},
+		{"milliseconds", "1792667656473", "1792667731901", time.Millisecond},
+		{"microseconds", "1792667656473120", "1792667731901555", time.Microsecond},
+		{"nanoseconds", "1792667656473120999", "1792667731901555123", time.Nanosecond},
+		{"seconds in a text", "at=1792667656;n=2", "at=1792667731;n=2", time.Second},
+	} {
+		iw := instantOfWord(t, c.rec, c.live)
+		if iw == nil || !iw.Number || iw.ByText || iw.Rec == nil || iw.Live == nil {
+			t.Errorf("%s (%q -> %q): %+v; want a number read by its moment in both runs", c.what, c.rec, c.live, iw)
+			continue
+		}
+		if iw.Rec.res != c.res || iw.Live.res != c.res {
+			t.Errorf("%s: resolution %v/%v; want %v", c.what, iw.Rec.res, iw.Live.res, c.res)
+		}
+	}
+	// A 13-digit number outside 2000-2100: matched by its exact text.
+	for _, c := range []struct{ what, rec, live string }{
+		{"13 digits before 2000", "0000000000473", "0000000000901"},
+		{"13 digits after 2100", "9999999999473", "9999999999901"},
+		{"10 digits in one run only parses", "1792667656", "0000000001"},
+		// An epoch's length in one run is enough: the other run's number
+		// is matched by its text, parse or not.
+		{"10 digits in R, 8 in F", "1792667656", "17926676"},
+		{"10 digits in R that do not parse, 8 in F", "0000000001", "17926676"},
+	} {
+		iw := instantOfWord(t, c.rec, c.live)
+		if iw == nil || !iw.Number || !iw.ByText {
+			t.Errorf("%s (%q -> %q): %+v; want a number matched by its exact text", c.what, c.rec, c.live, iw)
+		}
+	}
+	for _, c := range []struct{ rec, live string }{{"12345", "12399"}, {"123456789012", "123456789099"}, {"17926676561", "17926677311"}} {
+		if iw := instantOfWord(t, c.rec, c.live); iw != nil {
+			t.Errorf("%q -> %q: an instant %+v; want none (no epoch length)", c.rec, c.live, iw)
+		}
+	}
+}
+
+// Every token that parses in main's layouts is an instant, read whole: the
+// changed words of one instant share one reading of it.
+func TestReaderLayoutTokensAreInstants(t *testing.T) {
+	rec, live := "due 2026-10-31T10:50:13.305Z sharp", "due 2026-10-31T10:51:27.905Z sharp"
+	rd := readText(rec, live)
+	if len(rd.Words) < 2 {
+		t.Fatalf("%q -> %q: %q; want the instant's changed words", rec, live, changedPairs(rd))
+	}
+	first := rd.Words[0].Instant
+	for _, w := range rd.Words {
+		if w.Instant == nil || w.Instant != first {
+			t.Errorf("word %q>%q: instant %p; want the one instant %p", w.Rec, w.Live, w.Instant, first)
+		}
+	}
+	if first == nil || first.Rec == nil || rec[first.RecAt[0]:first.RecAt[1]] != "2026-10-31T10:50:13.305Z" || live[first.LiveAt[0]:first.LiveAt[1]] != "2026-10-31T10:51:27.905Z" {
+		t.Errorf("the instant %+v; want it whole in each run", first)
+	}
+	if len(rd.Instants) != 1 {
+		t.Errorf("instants %d; want one", len(rd.Instants))
+	}
+}
+
+// A cut finer than a millisecond is fine; a millisecond or coarser is
+// coarse: microseconds and nanoseconds are fine, milliseconds, BSON dates,
+// 13-digit epochs and seconds are coarse.
+func TestReaderFineAndCoarseCuts(t *testing.T) {
+	for _, c := range []struct {
+		what, rec, live string
+		fine            bool
+	}{
+		{"nanoseconds", "1792667656473120999", "1792667731901555123", true},
+		{"microseconds", "1792667656473120", "1792667731901555", true},
+		{"an ISO microsecond", "2026-10-31T10:50:13.305120Z", "2026-10-31T10:51:27.905555Z", true},
+		{"a 13-digit epoch", "1792667656473", "1792667731901", false},
+		{"an ISO millisecond", "2026-10-31T10:50:13.305Z", "2026-10-31T10:51:27.905Z", false},
+		{"seconds", "1792667656", "1792667731", false},
+	} {
+		iw := instantOfWord(t, c.rec, c.live)
+		if iw == nil || iw.fine() != c.fine {
+			t.Errorf("%s: %+v fine %v; want %v", c.what, iw, iw != nil && iw.fine(), c.fine)
+		}
+	}
+	for _, c := range []struct {
+		res  time.Duration
+		fine bool
+	}{{time.Nanosecond, true}, {100 * time.Nanosecond, true}, {time.Microsecond, true}, {100 * time.Microsecond, true}, {time.Millisecond, false}, {time.Second, false}} {
+		if fineCut(c.res) != c.fine {
+			t.Errorf("fineCut(%v) = %v; want %v", c.res, !c.fine, c.fine)
+		}
+	}
+	// A BSON date: typed, a millisecond: coarse, whole.
+	at := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC)
+	iw, ok := readTypedPair(readerBSONDate(at), readerBSONDate(at.Add(74*time.Second)))
+	if !ok || !iw.Typed || iw.fine() || iw.Rec == nil || iw.Rec.res != time.Millisecond {
+		t.Errorf("a BSON date: %+v %v; want a typed instant, coarse", iw, ok)
+	}
+	if _, ok := readTypedPair(Leaf{Path: "body.n", Type: String, Value: "x"}, Leaf{Path: "body.n", Type: String, Value: "y"}); ok {
+		t.Errorf("a string leaf read as a typed instant")
+	}
+}
+
+// readerBSONDate is a BSON datetime leaf at at, as the Mongo decoder gives one.
+func readerBSONDate(at time.Time) Leaf {
+	return InstantLeaf("body.at", "body.at", at, time.Millisecond)
+}
+
+// By moment is main's cuts: one rule names the held instant's moment.
+// Equal keys at a fine resolution are a fine copy; a millisecond copy, or a
+// value that is the second of a finer read the place holds, is coarse; a
+// finer value is no copy of a second the place holds, and a moment no rule
+// names is not held.
+func TestReaderByMoment(t *testing.T) {
+	read := func(s string) moment {
+		sp := instantSpans(s)
+		if len(sp) != 1 {
+			t.Fatalf("%q: %d instants", s, len(sp))
+		}
+		return sp[0].moment()
+	}
+	for _, c := range []struct {
+		what, held, m string
+		ok, fine      bool
+	}{
+		{"a nanosecond copy", "1792667656473120999", "1792667656473120999", true, true},
+		{"a millisecond copy", "1792667656473", "1792667656473", true, false},
+		{"a value that is the second of a microsecond read held", "2026-10-21T08:34:16.473120Z", "2026-10-21T08:34:16Z", true, false},
+		{"a microsecond value beside a second held: no copy", "2026-10-21T08:34:16Z", "2026-10-21T08:34:16.473120Z", false, false},
+		{"another moment", "2026-10-21T08:34:16Z", "2026-10-21T09:34:17Z", false, false},
+		// One moment at two resolutions is cut at the coarser of them.
+		{"a nanosecond read held, its millisecond copy", "1792667656473000000", "1792667656473", true, false},
+		{"a millisecond read held, its nanosecond copy", "1792667656473", "1792667656473000000", true, false},
+		// Of several rules that name the value, the finest is the cut: a
+		// microsecond's truncation names it as well as a millisecond's.
+		{"the finest of several cuts", "2026-10-21T08:34:16.473000999Z", "2026-10-21T08:34:16.473Z", true, true},
+	} {
+		ok, fine := byMoment(read(c.held), read(c.m))
+		if ok != c.ok || fine != c.fine {
+			t.Errorf("%s: held %v fine %v; want %v %v", c.what, ok, fine, c.ok, c.fine)
+		}
+	}
+	x := newReaderIndex(nil)
+	held, fine, readOK := x.text(`{"at":"` + strings.Repeat("x", 3) + ` 1792667656473120999"}`).holdsMoment(read("1792667656473120999"))
+	if !held || !fine || !readOK {
+		t.Errorf("a place holding the nanosecond read: held %v fine %v read %v", held, fine, readOK)
+	}
+}
+
+// Round F's view of a recording it gave the application earlier in the set
+// (Tracker.ServedMockLive: a view told for a serve the read saw) is kept as
+// instants, read as the recording's answer is (GivenPlaces.answer), so that
+// a changed instant that copies what F gave there is judged as at any other
+// place. Only under the proven switch; nothing where F gave the recording
+// as recorded, where keploy cannot tell what F gave (its words say so), or
+// with the switch off. The set reads each view once, however many calls
+// read the recording.
+func TestReaderKeepsRoundFsViewOfASetRecordingsInstants(t *testing.T) {
+	const (
+		recAt   = "2026-10-20T10:00:00.123456Z"
+		viewAt  = "2026-10-20T10:00:05.654321Z"
+		otherAt = "2026-10-20T10:00:09.111111Z"
+	)
+	momentOf := func(s string) moment {
+		t.Helper()
+		sp := NewDriftCache().spansOf(s)
+		if len(sp) != 1 || !sp[0].keyed {
+			t.Fatalf("%q reads as %d instants; want one", s, len(sp))
+		}
+		return sp[0].moment()
+	}
+	keysOf := func(ms []givenMoment) []instantKey {
+		var out []instantKey
+		for _, g := range ms {
+			if !slices.Contains(out, g.m.key) {
+				out = append(out, g.m.key)
+			}
+		}
+		return out
+	}
+	m := jobsMock(recAt, "5")
+	loads := map[string]int{}
+	view := func(id string) func() (*models.Mock, error) {
+		return func() (*models.Mock, error) { loads[id]++; return jobsMock(id, "9"), nil }
+	}
+	// A view whose own stamps say nothing of when it was recorded: its
+	// instants stand where the recording does all the same.
+	unstamped := func(id string) func() (*models.Mock, error) {
+		return func() (*models.Mock, error) {
+			loads[id]++
+			v := jobsMock(id, "9")
+			v.Spec.ReqTimestampMock, v.Spec.ResTimestampMock = time.Time{}, time.Time{}
+			return v, nil
+		}
+	}
+	for _, c := range []struct {
+		name   string
+		proven string
+		tell   func(tr *Tracker)
+		want   []string // the instants of fView, in order
+	}{
+		{"told with a view", "1", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(viewAt)) }, []string{viewAt}},
+		{"told with a view, the switch off", "0", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(viewAt)) }, nil},
+		{"told as recorded", "1", func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, nil},
+		{"told nothing", "1", func(*Tracker) {}, nil},
+		{"told with a view that cannot be read", "1", func(tr *Tracker) {
+			tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return nil, errors.New("gone") })
+		}, nil},
+		{"told as recorded, then with a view", "1", func(tr *Tracker) {
+			tr.ServedMockAsRecorded(m)
+			tr.ServedMock(m)
+			tr.ServedMockLive(m, "a", view(viewAt))
+		}, []string{viewAt}},
+		{"told with a view stamped with no time", "1", func(tr *Tracker) { tr.ServedMockLive(m, "a", unstamped(viewAt)) }, []string{viewAt}},
+		{"told with two views", "1", func(tr *Tracker) {
+			tr.ServedMockLive(m, "a", view(viewAt))
+			tr.ServedMock(m)
+			tr.ServedMockLive(m, "b", view(otherAt))
+		}, []string{viewAt, otherAt}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.proven)
+			clear(loads)
+			tr := NewTracker()
+			tr.Begin()
+			tr.ServedMock(m)
+			c.tell(tr)
+			tr.End()
+			tr.Begin()
+			tr.End()
+			tr.Begin()
+			o := tr.Placed().Order
+			for _, read := range []string{"first read", "cached read"} {
+				g, err := o.GivenPlaces(m)
+				if err != nil {
+					t.Fatalf("%s: %v", read, err)
+				}
+				// Each instant may be read in more than one form of its
+				// field (readAnswerMoments): compare the instants named.
+				if got := keysOf(g.answer); len(got) != 1 || got[0] != momentOf(recAt).key {
+					t.Errorf("%s: the recording's answer names %d instants; want its own one, as recorded", read, len(got))
+				}
+				got := keysOf(g.fView)
+				if len(got) != len(c.want) {
+					t.Fatalf("%s: round F's view names %d instants (%+v); want %d", read, len(got), g.fView, len(c.want))
+				}
+				for k, want := range c.want {
+					if got[k] != momentOf(want).key {
+						t.Errorf("%s: view instant %d is not %s", read, k, want)
+					}
+				}
+				for _, v := range g.fView {
+					if v.mock != m.Name || !strings.HasPrefix(v.where, m.Name+" at ") || !v.at.Equal(m.Spec.ReqTimestampMock) {
+						t.Errorf("%s: a view instant stands at %q of %q recorded %v; want mock-6's field, recorded when mock-6 was", read, v.where, v.mock, v.at)
+					}
+					if a := g.answer[0]; v.late != a.late || v.noTime != a.noTime {
+						t.Errorf("%s: a view instant reads late %v, no time %v; want the recording's %v, %v", read, v.late, v.noTime, a.late, a.noTime)
+					}
+				}
+			}
+			// With the switch off the set keeps no view's instants: it reads
+			// the views for their words, and nothing reads their instants.
+			if o.places != nil && c.proven == "0" {
+				if len(o.places.views) == 0 {
+					t.Errorf("the set kept no view: the switch-off row reads nothing")
+				}
+				for key, v := range o.places.views {
+					if len(v.moments) != 0 {
+						t.Errorf("switch off: the set keeps %d instants of the view %q", len(v.moments), key)
+					}
+				}
+			}
+			for id, n := range loads {
+				if n != 1 {
+					t.Errorf("the view %s was read %d times over two reads of one set; want once", id, n)
+				}
+			}
+		})
+	}
+	// A view its words were read from that cannot be read again for its
+	// instants (an order keeping no set's places reads each view anew) is
+	// one keploy cannot tell: its words say unread, the fail-closed side.
+	// With the switch off nothing reads a view's instants, so nothing
+	// reads it again: its words stay read, as without the reader.
+	for _, proven := range []string{"1", "0"} {
+		t.Run("a view read for its words and not again, switch "+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			viewReadForItsWordsAndNotAgain(t, m, viewAt, proven == "1")
+		})
+	}
+}
+
+// viewReadForItsWordsAndNotAgain tells m's set a view that reads once and
+// fails after, and checks its words read unread (want) and no view instant.
+func viewReadForItsWordsAndNotAgain(t *testing.T, m *models.Mock, viewAt string, want bool) {
+	t.Helper()
+	tr := NewTracker()
+	tr.Begin()
+	tr.ServedMock(m)
+	reads := 0
+	tr.ServedMockLive(m, "a", func() (*models.Mock, error) {
+		if reads++; reads > 1 {
+			return nil, errors.New("gone")
+		}
+		return jobsMock(viewAt, "9"), nil
+	})
+	tr.End()
+	tr.Begin()
+	o := tr.Placed().Order
+	o.places = nil
+	g, err := o.GivenPlaces(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.words.unread != want || len(g.fView) != 0 {
+		t.Errorf("words unread %v, %d view instants; want unread %v and none", g.words.unread, len(g.fView), want)
+	}
+}
+
+// An earlier place holds an instant in any form main reads it in: its text
+// and its declared forms (holdsExact(text) || holdsExact(rawExtra(text))),
+// so a percent-encoded query, a base64url cursor or a base64 copy holds a
+// recorded µs instant at its fine cut, as the plain text does.
+func TestReaderIndexHoldsAnInstantInEveryFormMainReads(t *testing.T) {
+	r := "2026-10-31T10:50:13.305123+05:30"
+	m := readText(r, "2026-10-31T10:51:27.905456+05:30").Instants[0].Rec
+	dc := NewDriftCache()
+	for _, place := range []string{
+		"ok " + r,
+		"/jobs?since=" + url.QueryEscape(r) + "&page=2",
+		`{"next":"` + base64.RawURLEncoding.EncodeToString([]byte(`{"since":"`+r+`","page":2}`)) + `"}`,
+		`{"c":"` + base64.StdEncoding.EncodeToString([]byte(r)) + `"}`,
+	} {
+		if !dc.holdsExact(place, *m) && !dc.holdsExact(dc.rawExtra(place), *m) {
+			t.Fatalf("%q: main does not hold the moment: the row reads nothing", place)
+		}
+		for _, x := range []*readerIndex{newReaderIndex(nil), newReaderIndex(dc)} {
+			if held, fine, read := x.text(place).holdsMoment(*m); !held || !fine || !read {
+				t.Errorf("%q: main holds the moment exactly; the reader's index held %v fine %v read %v", place, held, fine, read)
+			}
+		}
+	}
+}
+
+// A place that holds a moment at a fine cut holds it fine, whatever
+// coarser cut it holds it at besides, before or after: "at <instant> on
+// <its day>" holds the instant fine, never only at the day's cut, which
+// would hide a fine-cut copy.
+func TestReaderIndexHoldsAMomentAtItsFinestCut(t *testing.T) {
+	r := "2026-10-31T10:50:13.305123Z"
+	m := readText(r, "2026-10-31T10:51:27.905456Z").Instants[0].Rec
+	for _, place := range []string{"at " + r + " on 2026-10-31", "on 2026-10-31 at " + r} {
+		for _, x := range []*readerIndex{newReaderIndex(nil), newReaderIndex(NewDriftCache())} {
+			if held, fine, read := x.text(place).holdsMoment(*m); !held || !fine || !read {
+				t.Errorf("%q: held %v fine %v read %v; want held fine", place, held, fine, read)
+			}
+		}
+	}
+}
+
+// An instant whose word count changes between the runs is one instant read
+// whole in each run: a zero fraction dropped (RFC3339Nano, Java's
+// Instant.toString), or a ' ' to 'T' with a zone added. The two instants
+// align as units, and its moved words are an unequal stretch inside them.
+// Where one run holds more instants there, the first of each align in order
+// and the one left over stands in its run alone: the text changes shape,
+// and that instant reads no moment in the other run.
+func TestReaderAnInstantWhoseWordCountChangesIsOneInstant(t *testing.T) {
+	for _, c := range []struct{ rec, live, rInst, lInst string }{
+		{"x 2026-10-31T10:50:13.305Z y", "x 2026-10-31T10:51:27Z y", "2026-10-31T10:50:13.305Z", "2026-10-31T10:51:27Z"},
+		{"2026-10-31 10:50:13.305+05:30", "2026-10-31 10:51:27+05:30", "2026-10-31 10:50:13.305+05:30", "2026-10-31 10:51:27+05:30"},
+		{"2024-01-02 03:04:05", "2024-01-02T03:04:05Z", "2024-01-02 03:04:05", "2024-01-02T03:04:05Z"},
+		{"x 2026-10-31T10:50:13.305Z y 17", "x 2026-10-31T10:51:27Z y 18", "2026-10-31T10:50:13.305Z", "2026-10-31T10:51:27Z"},
+	} {
+		rd := readText(c.rec, c.live)
+		var one *instantWord
+		for _, w := range rd.Words {
+			if w.Rec == "17" {
+				if w.Instant != nil {
+					t.Errorf("%q -> %q: the word 17>18 reads as an instant %+v", c.rec, c.live, w.Instant)
+				}
+				continue
+			}
+			if w.Instant == nil || one != nil && w.Instant != one {
+				t.Errorf("%q -> %q: word %q>%q instant %+v; want the one instant", c.rec, c.live, w.Rec, w.Live, w.Instant)
+				continue
+			}
+			one = w.Instant
+		}
+		if one == nil || one.Rec == nil || one.Live == nil || len(rd.Instants) != 1 {
+			t.Errorf("%q -> %q: %d instants, %+v; want one, with a moment in each run", c.rec, c.live, len(rd.Instants), one)
+			continue
+		}
+		if got := c.rec[one.RecAt[0]:one.RecAt[1]]; got != c.rInst {
+			t.Errorf("%q: R's instant %q; want %q", c.rec, got, c.rInst)
+		}
+		if got := c.live[one.LiveAt[0]:one.LiveAt[1]]; got != c.lInst {
+			t.Errorf("%q: F's instant %q; want %q", c.live, got, c.lInst)
+		}
+	}
+	// R holds two instants there, F one: R's second stands alone.
+	rd := readText("at 10:50:13.305 10:50:14 b", "at 10:51:27 b")
+	if !rd.ChangedShape {
+		t.Errorf("an instant only R holds at its place: no changed shape")
+	}
+	if iw := instantOf(t, rd, "14", ""); iw == nil || iw.Live != nil || iw.LiveAt[0] >= 0 {
+		t.Errorf("R's second instant reads %+v; want R's alone", iw)
+	}
+}
+
+// Two instants side by side each align with the other run's at its place,
+// whole, before any word is diffed, so the diff never pairs a word of one
+// with a word of the other: a time whose words the other run's neighbour
+// holds ("08:06 08:08" to "08:08 08:09"), the minute of one moving onto the
+// seconds or the hour of the next, two HTTP dates of one text, and a
+// constructed pair whose second instant moves back (01:02:03 04:05:06 to
+// 01:07:08 03:05:09): two instants, each read whole with a moment in each
+// run, and no change of shape. A text of the same words with no instant is
+// still diffed word by word, and its word only one run has changes it.
+func TestReaderInstantsSideBySideAlignWhole(t *testing.T) {
+	const d1, d2 = "Mon, 09 Nov 2026 07:06:07 GMT", "Mon, 09 Nov 2026 07:07:09 GMT"
+	for _, c := range []struct{ rec, live string }{
+		{"08:06 08:08", "08:08 08:09"},
+		{"09:57:55 09:59:11", "09:59:01 10:00:30"},
+		{"from 11:58:29 to 12:00:12", "from 12:00:02 to 12:01:45"},
+		{"from 07:22:16 to 07:22:23", "from 07:23:31 to 07:23:39"},
+		{"from 07:06:07 to 07:07:09", "from 07:07:09 to 07:08:10"},
+		{d1 + "; " + d2, d2 + "; Mon, 09 Nov 2026 07:08:11 GMT"},
+		{"01:02:03 04:05:06", "01:07:08 03:05:09"},
+	} {
+		rd := readText(c.rec, c.live)
+		if rd.ChangedShape {
+			t.Errorf("%q -> %q: changed shape; want each instant aligned whole with its own", c.rec, c.live)
+		}
+		if len(rd.Instants) != 2 {
+			t.Errorf("%q -> %q: %d instants; want two", c.rec, c.live, len(rd.Instants))
+		}
+		for _, iw := range rd.Instants {
+			if iw.Rec == nil || iw.Live == nil {
+				t.Errorf("%q -> %q: an instant %q -> %q without a moment in each run", c.rec, c.live, c.rec[max(iw.RecAt[0], 0):max(iw.RecAt[1], 0)], c.live[max(iw.LiveAt[0], 0):max(iw.LiveAt[1], 0)])
+			}
+		}
+	}
+	for _, c := range []struct{ rec, live string }{
+		{"08 06 08 08", "08 08 08 09"},
+		{"seq 07 06 07", "seq 07 07 09"},
+	} {
+		if rd := readText(c.rec, c.live); !rd.ChangedShape || len(rd.Instants) != 0 {
+			t.Errorf("%q -> %q: changed shape %v, %d instants; want a text of no instant diffed word by word, its lone words a change of shape", c.rec, c.live, rd.ChangedShape, len(rd.Instants))
+		}
+	}
+}
+
+// instantOf is the instant the reader reads at the changed word rec>live
+// of rd (a word only one run has: "" on the other side), failing where
+// rd lists no such word.
+func instantOf(t *testing.T, rd textReading, rec, live string) *instantWord {
+	t.Helper()
+	for _, w := range rd.Words {
+		if w.Rec == rec && w.Live == live {
+			return w.Instant
+		}
+	}
+	t.Fatalf("%q -> %q: no changed word %q>%q in %v", rd.Rec, rd.Live, rec, live, changedPairs(rd))
+	return nil
+}
+
+// An instant aligns with one instant of the other run at most, in order:
+// R's 10:50:13.305 aligns with F's 10:51 (its words 50>51 and 305 read that
+// one instant, with a moment in each run), and F's 13:52 and 9, which R has
+// nothing at, stand in F alone: the text changes shape, and 52 reads no
+// moment in R. The same the other way.
+func TestReaderAnInstantAlignsWithOneInstantAtMost(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"10:50:13.305", "10:51 13:52 9"},
+		{"10:51 13:52 9", "10:50:13.305"},
+	} {
+		rd := readText(c.rec, c.live)
+		if !rd.ChangedShape {
+			t.Errorf("%q -> %q: no changed shape; want an instant one run alone holds to change it", c.rec, c.live)
+		}
+		var first, alone *instantWord
+		if c.rec == "10:50:13.305" {
+			first, alone = instantOf(t, rd, "305", ""), instantOf(t, rd, "", "52")
+		} else {
+			first, alone = instantOf(t, rd, "", "305"), instantOf(t, rd, "52", "")
+		}
+		if first == nil || first.Rec == nil || first.Live == nil {
+			t.Errorf("%q -> %q: the first instants read %+v; want one instant, a moment in each run", c.rec, c.live, first)
+		}
+		if alone == nil || alone == first || alone.RecAt[0] >= 0 && alone.LiveAt[0] >= 0 {
+			t.Errorf("%q -> %q: 13:52 reads %+v; want its own run's alone", c.rec, c.live, alone)
+		}
+	}
+}
+
+// A word beside an aligned instant pairs with the other run's word at its
+// place, never with a word of the instant: the instant's bounds end the
+// stretch before it and start the one after it. R's "1" stands just before
+// an instant none of whose words stay (09:59:59.305 to 10:00:01, a
+// fraction dropped), or just after one whose last words change (10:50:13.305
+// to 10:51:27): 1>2 is one changed word, paired, of no instant, and the
+// text keeps its shape.
+func TestReaderAWordBesideAnAlignedInstantPairsWithItsOwn(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"attempt 1 09:59:59.305", "attempt 2 10:00:01"},
+		{"10:50:13.305 1 attempt", "10:51:27 2 attempt"},
+	} {
+		rd := readText(c.rec, c.live)
+		if rd.ChangedShape || len(rd.Instants) != 1 {
+			t.Errorf("%q -> %q: changed shape %v, %d instants; want one instant aligned whole and no change of shape", c.rec, c.live, rd.ChangedShape, len(rd.Instants))
+		}
+		if iw := instantOf(t, rd, "1", "2"); iw != nil {
+			t.Errorf("%q -> %q: 1>2 reads an instant %+v; want a word of none", c.rec, c.live, iw)
+		}
+	}
+}
+
+// An instant the alignment aligns with none of the other run's changes the
+// text's shape, whatever words stand at its place in the other run, either
+// way round: R's 10:50 is an instant, F's "10 50" or "10:77" at its place
+// none (its 11:00, the text's one instant, aligns with R's 11:00). The
+// words are as many in both runs, and the separators the same where F
+// holds 10:77, yet R's instant stands alone. Its words, and the other
+// run's at its place, pair with none: none is read as changed in place
+// (50 to 77), and no separator between them as changed (":" to " ").
+func TestReaderAnInstantAlignedWithNoneChangesShapeWhateverItsWords(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"from 10:50 to 11:00", "from 10 50 to 11:00"},
+		{"from 10 50 to 11:00", "from 10:50 to 11:00"},
+		{"from 10:50 to 11:00", "from 10:77 to 11:00"},
+		{"from 10:77 to 11:00", "from 10:50 to 11:00"},
+	} {
+		rd := readText(c.rec, c.live)
+		if !rd.ChangedShape {
+			t.Errorf("%q -> %q: no changed shape; want an instant one run alone holds at its place to change it", c.rec, c.live)
+		}
+		if slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx >= 0 && w.LiveIdx >= 0 }) || len(rd.Separators) > 0 {
+			t.Errorf("%q -> %q: words %+v, separators %+v; want the words at the lone instant's place to pair with none", c.rec, c.live, rd.Words, rd.Separators)
+		}
+	}
+}
+
+// A stretch that ends at an aligned instant and holds an instant of one run
+// alone changes the shape, whatever its words: 10:50 in R and no instant in
+// F before the aligned 10:51>10:52.
+func TestReaderALoneInstantBeforeAnAlignedOneChangesShape(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"x 10:50 a 10:51 y", "x b 10:52 y"},
+		{"x 07:06:07 a 07:06:08 y", "x b 07:07:09 y"},
+		{"x 07:06:07 a b 07:06:08 y", "x c 07:07:09 y"},
+	} {
+		rd := readText(c.rec, c.live)
+		if !rd.ChangedShape || !slices.ContainsFunc(rd.Stretches, func(st wordStretch) bool { return st.Loose }) {
+			t.Errorf("%q -> %q: changed shape %v, stretches %+v; want a loose stretch, a changed shape", c.rec, c.live, rd.ChangedShape, rd.Stretches)
+		}
+	}
+}
+
+// A word of an instant only one run has takes the partner the instant's
+// paired words give it: `10:50:13.305 x` to `10:51:13 x` pairs R's
+// instant with F's by 50>51 alone, and 305 reads that one instant, with a
+// moment in each run.
+func TestReaderAOneSidedWordOfAnInstantTakesItsPairedWordsPartner(t *testing.T) {
+	rd := readText("10:50:13.305 x", "10:51:13 x")
+	one, paired := instantOf(t, rd, "305", ""), instantOf(t, rd, "50", "51")
+	if one == nil || one != paired || one.Rec == nil || one.Live == nil {
+		t.Fatalf("305 reads %+v, 50>51 reads %+v; want the one instant, with a moment in each run", one, paired)
+	}
+}
+
+// An instant that crosses a minute between the runs (08:59:00 to
+// 09:00:01) is one instant read whole, judged by its moment: the "00" of
+// R's seconds and of F's minutes stays in the word alignment, which leaves
+// a word only F has there, and that word is the instant's, not a change of
+// the text's shape. So is one where no paired word changed, whose minute
+// moved to the value its seconds were recorded at (an HTTP date, 07:06:07
+// to 07:07:09) or whose hour to its minute's (06:07 to 07:09, and back):
+// the word that stayed ties the two runs' instants, of as many words, R's
+// first word or F's first. A word only one run has outside any instant
+// still changes the shape, and so does one an instant gained or lost, or
+// one of an instant whose word that stayed lies in no instant in the other
+// run (07 x 10:50 to 07:09 x): it ties nothing. An instant's words are its
+// own, never the words that stand before it (12:00 to 12:00:13.5, after
+// three words of no instant in R, 10:61 x, and one in F).
+func TestReaderAnInstantThatCrossesAMinuteIsOneInstant(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"2026-10-31T08:59:00.000Z", "2026-10-31T09:00:01.000Z"},
+		{"at 2026-10-31T08:59:00.000Z ok", "at 2026-10-31T09:00:01.000Z ok"},
+		{"10:50:13.305 x", "10:51:13 x"},
+		{"Mon, 09 Nov 2026 07:06:07 GMT", "Mon, 09 Nov 2026 07:07:09 GMT"},
+		{"at Mon, 09 Nov 2026 15:29:30 GMT ok", "at Mon, 09 Nov 2026 15:30:32 GMT ok"},
+		{"06:07", "07:09"},
+		{"07:09", "06:07"},
+	} {
+		rd := readText(c.rec, c.live)
+		if rd.ChangedShape {
+			t.Errorf("%q -> %q: changed shape (%v); want one instant read whole", c.rec, c.live, changedPairs(rd))
+		}
+		if len(rd.Instants) != 1 || rd.Instants[0].Rec == nil || rd.Instants[0].Live == nil {
+			t.Errorf("%q -> %q: %d instants; want one, with a moment in each run", c.rec, c.live, len(rd.Instants))
+			continue
+		}
+		for _, w := range rd.Words {
+			if w.Instant != rd.Instants[0] {
+				t.Errorf("%q -> %q: word %q>%q reads %+v; want the one instant", c.rec, c.live, w.Rec, w.Live, w.Instant)
+			}
+		}
+	}
+	for _, c := range []struct{ rec, live string }{
+		{"at 2026-10-31T08:59:00.000Z ok", "at 2026-10-31T09:00:01.000Z ok 7"},
+		{"id 10:50", "id 10:50:13"},
+		{"id 10:50:13", "id 10:50"},
+		{"07 x 10:50", "07:09 x"},
+		{"07:09 x", "07 x 10:50"},
+		{"10:61 x 12:00", "10:50 x 12:00:13.5"},
+	} {
+		if rd := readText(c.rec, c.live); !rd.ChangedShape {
+			t.Errorf("%q -> %q: no changed shape; want a word only one run has, that no paired instant holds, to change it", c.rec, c.live)
+		}
+	}
+}

@@ -2,9 +2,11 @@ package models
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -35,10 +37,13 @@ type HTTPStreamDataField struct {
 // For NDJSON and plain-text streams this is one newline-delimited line.
 // For binary streams this is the full captured body.
 //
-// TS is the wall-clock time the chunk was received during recording,
-// used by the replay engine to preserve the inter-chunk timing when replaying.
+// TS is when the chunk reached the application during recording: for a mock
+// recorded with marks (HTTPResp.Marks), the time of the write that completed
+// it. Replay keeps no timing between chunks: it writes each part of an
+// answer once the replay has reached or passed its recorded place, which it
+// reads from the marks.
 type HTTPStreamChunk struct {
-	TS   time.Time             // Wall-clock time this chunk arrived during recording
+	TS   time.Time             // When this chunk reached the application during recording
 	Data []HTTPStreamDataField // Key-value fields that make up this chunk
 }
 
@@ -82,12 +87,35 @@ func (c HTTPStreamChunk) ValueByKey(key string) (string, bool) {
 // as a YAML sequence of chunks. Otherwise, it is written as a plain scalar string.
 func (h HTTPResp) MarshalYAML() (interface{}, error) {
 	bodyNode := &yamlLib.Node{}
+	marks := h.Marks
 	if chunks, ok := streamChunksForYAML(h); ok {
-		// Streaming response — encode as a YAML sequence of chunks
+		// Streaming response — encode as a YAML sequence of chunks. A fresh
+		// recording's frames are split from its body here: each takes the
+		// time of the write that completed it, and the marks move to the
+		// body the frames read back as. A response read back from frames
+		// (StreamBody) has both already.
+		if marks != nil && len(h.StreamBody) == 0 {
+			chunks, marks = marksOnFrames(h, chunks)
+		}
 		bodyNode = encodeStreamChunksNode(chunks)
 	} else {
-		// Non-streaming response — encode body as a plain string scalar
-		if err := bodyNode.Encode(h.Body); err != nil {
+		// Non-streaming response, OR a stream whose bytes cannot survive the
+		// chunked representation — encode the body as a plain string scalar
+		// (yaml.v3 auto-promotes an untagged non-UTF-8 scalar to !!binary).
+		//
+		// Reconstruct the flat body from the chunks when the chunk form was
+		// rejected and Body is empty: StreamBody travels independently of Body
+		// over the transport, so a producer that populated only the chunk form
+		// would otherwise have its entire body silently written as "".
+		body := h.Body
+		if body == "" && len(h.StreamBody) > 0 {
+			body = streamChunksToLegacyBody(h.StreamBody, detectStreamBodyKind(h.Header))
+		}
+		if YAMLBlockScalarUnsafe(body) {
+			// Node.Encode writes it as a block scalar and parses that
+			// back, which fails (YAMLBlockScalarUnsafe): the mock was lost.
+			bodyNode = &yamlLib.Node{Kind: yamlLib.ScalarNode, Tag: "!!str", Value: body, Style: yamlLib.DoubleQuotedStyle}
+		} else if err := bodyNode.Encode(body); err != nil {
 			return nil, err
 		}
 	}
@@ -103,6 +131,9 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		ProtoMinor    int               `yaml:"proto_minor"`
 		Binary        string            `yaml:"binary,omitempty"`
 		Timestamp     time.Time         `yaml:"timestamp"`
+
+		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
+		Marks             *HTTPAnswerMarks  `yaml:"marks,omitempty"`
 	}
 
 	return httpRespYAML{
@@ -116,6 +147,9 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		ProtoMinor:    h.ProtoMinor,
 		Binary:        h.Binary,
 		Timestamp:     h.Timestamp,
+
+		HeaderLineLengths: h.HeaderLineLengths,
+		Marks:             marks,
 	}, nil
 }
 
@@ -134,6 +168,9 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 		ProtoMinor    int               `yaml:"proto_minor"`
 		Binary        string            `yaml:"binary,omitempty"`
 		Timestamp     time.Time         `yaml:"timestamp"`
+
+		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
+		Marks             *HTTPAnswerMarks  `yaml:"marks,omitempty"`
 	}
 
 	var raw httpRespYAML
@@ -150,6 +187,8 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	h.ProtoMinor = raw.ProtoMinor
 	h.Binary = raw.Binary
 	h.Timestamp = raw.Timestamp
+	h.HeaderLineLengths = raw.HeaderLineLengths
+	h.Marks = raw.Marks
 
 	// Decode body — may produce a plain string body, streaming chunks, or both.
 	// StreamBody is populated only when the YAML body field was a sequence node.
@@ -176,68 +215,116 @@ const (
 	streamBodyKindRaw     streamBodyKind = "raw" // All other streaming formats (NDJSON, plain text, binary)
 )
 
-// streamChunksForYAML returns the chunks to encode if this response has a streaming body.
-// Returns (nil, false) for non-streaming responses.
+// streamChunksAreUTF8 reports whether every key and value in an already-parsed
+// chunk list is valid UTF-8. The chunked representation puts arbitrary body
+// bytes into YAML scalars, and an SSE field NAME additionally goes through
+// strings.ToLower during parsing, which rewrites every invalid byte to U+FFFD
+// — so a body that fails this check must fall back to the flat scalar form
+// rather than be chunked.
+func streamChunksAreUTF8(chunks []HTTPStreamChunk) bool {
+	for _, c := range chunks {
+		for _, f := range c.Data {
+			if !utf8.ValidString(f.Key) || !utf8.ValidString(f.Value) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// streamChunksForYAML returns the chunks to encode if this response has a
+// streaming body, and (nil, false) for a non-streaming response or one whose
+// bytes cannot survive the chunked representation.
 func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 	if len(resp.StreamBody) > 0 {
+		if !streamChunksAreUTF8(resp.StreamBody) {
+			return nil, false
+		}
 		return cloneStreamChunks(resp.StreamBody), true
 	}
 
-	if resp.Body != "" {
-		kind := detectStreamBodyKind(resp.Header)
-		if kind == streamBodyKindSSE {
-			chunks := parseSSEBodyToChunks(resp.Body, resp.Timestamp)
-			if len(chunks) > 0 {
-				return chunks, true
-			}
-		} else if kind == streamBodyKindRaw {
-			contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
-			isNDJSON := strings.Contains(contentType, "application/x-ndjson") || strings.Contains(contentType, "application/ndjson")
-			isTextPlain := strings.Contains(contentType, "text/plain")
-			isOctetStream := strings.Contains(contentType, "application/octet-stream")
-
-			if isOctetStream {
-				if strings.TrimSpace(resp.Body) == "" {
-					return nil, false
-				}
-				return []HTTPStreamChunk{{
-					TS: resp.Timestamp,
-					Data: []HTTPStreamDataField{{
-						Key:   "raw",
-						Value: resp.Body,
-					}},
-				}}, true
-			}
-
-			hasContentLength := getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Length") != ""
-			isChunked := strings.Contains(strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Transfer-Encoding")), "chunked")
-
-			// Only safely auto-chunk known streaming structured formats to avoid false-positives on plain text files.
-			shouldChunk := isNDJSON
-			if isTextPlain {
-				// For text/plain, it is streaming if Transfer-Encoding is chunked or Content-Length is absent.
-				if isChunked || !hasContentLength {
-					shouldChunk = true
-				} else {
-					shouldChunk = false
-				}
-			}
-
-			if shouldChunk {
-				chunks := parseRawBodyToChunks(resp.Body, resp.Timestamp, isNDJSON)
-				if len(chunks) > 0 {
-					return chunks, true
-				}
-			}
+	if resp.Body != "" && !resp.bodyOnWire {
+		// A fault's body is the bytes the upstream sent before it
+		// (bodyOnWire): kept as they came, never split.
+		//
+		// A non-UTF-8 body is not a text stream, and must never reach the
+		// chunkers below.
+		//
+		// Two things go wrong if it does. The chunk encoder emits every key and
+		// value through stringNode, which stamps an explicit `!!str` tag, and
+		// yaml.v3 refuses that outright: "cannot marshal invalid UTF-8 data as
+		// !!str". That error is returned all the way out of InsertMock, and the
+		// recorder treats a failed insert as fatal — one gzip response body
+		// ended a 46-hour production recording of prod/api-server. Second, even
+		// when it does not abort, parseSSEBodyToChunks lower-cases the SSE field
+		// name, and strings.ToLower rewrites every invalid byte to U+FFFD, so
+		// the mock is silently corrupted and replays the wrong bytes.
+		//
+		// Falling through to the flat scalar body costs nothing and fixes both:
+		// yaml.v3 auto-promotes an untagged non-UTF-8 scalar to `!!binary` with
+		// base64, which is exactly how non-streaming bodies (application/json
+		// and friends) have always been stored. No schema change, and the
+		// decoder already handles it — decodeStreamBody dispatches on node kind
+		// and yaml.v3 base64-decodes `!!binary` scalars back into the string.
+		if !utf8.ValidString(resp.Body) {
+			return nil, false
+		}
+		// A body is kept as frames only when the response is a stream by
+		// keploy's one rule (HTTPStreamOf) on its Content-Type, never on how
+		// its length was framed: a text/plain body, chunked or with no
+		// Content-Length (Go's JSON written with no Content-Type), is one
+		// document, kept whole, and replayed as one (recordedFramesOf).
+		format := recordedFramesOf(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
+		if format == HTTPStreamSSE && !sseEndsItsLastEvent(resp.Body) {
+			// An SSE stream that ended inside its last event, before the
+			// blank line that ends it, is kept as its bytes. Its frames would
+			// read back with that event ended (streamChunksToLegacyBody), and
+			// replay would send an event its client never dispatched at
+			// record: a close-delimited body the upstream closed mid-event,
+			// or a server that never ended its last event. Kept so, replay
+			// sends the bytes as recorded, and the client drops the
+			// unfinished event as it did.
+			return nil, false
+		}
+		if chunks := splitStreamBody(format, resp.Body, resp.Timestamp); len(chunks) > 0 {
+			return chunks, true
 		}
 	}
 
 	return nil, false
 }
 
-// detectStreamBodyKind inspects the Content-Type header to decide
-// which streaming format the body uses. This determines how flat body strings
-// are reconstructed from structured chunks.
+// StreamChunksOf splits the body of a response that is a stream (HTTPStreamOf)
+// into frames by the format of its Content-Type, as a recording of the stream
+// keeps them (StreamBody): SSE frames by blank lines, NDJSON and text by
+// lines, an octet stream whole. It is nil for a body that does not split
+// (multipart, a Content-Type of no stream format), and for one that is empty
+// or not UTF-8, which a recording keeps whole. A replay splits what a stream
+// delivered with it, so frame i of a recording and frame i of an answer are
+// read alike. It does not say whether a response is a stream.
+func StreamChunksOf(header map[string]string, body string) []HTTPStreamChunk {
+	if !utf8.ValidString(body) {
+		return nil
+	}
+	return SplitStreamBody(httpStreamFormatOf(getHeaderValueCaseInsensitiveModel(header, "Content-Type")), body)
+}
+
+// SplitStreamBody splits a stream's body into the frames of a format, as
+// StreamChunksOf does by a Content-Type's, whatever its bytes: it is for
+// comparing a stream, which reads the answer's bytes as they come, not for
+// keeping one (a recording keeps a body that is not UTF-8 whole).
+func SplitStreamBody(format HTTPStreamFormat, body string) []HTTPStreamChunk {
+	if body == "" {
+		return nil
+	}
+	return splitStreamBody(format, body, time.Time{})
+}
+
+// detectStreamBodyKind is the format a recording's frames were kept in, by
+// its Content-Type: how a flat body is reconstructed from them. It says
+// nothing of whether the response is a stream (HTTPStreamOf). It reads frames
+// as every keploy kept them: as SSE events under a Content-Type that names
+// text/event-stream, and as lines under the rest (recordedFramesOf).
 func detectStreamBodyKind(headers map[string]string) streamBodyKind {
 	contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(headers, "Content-Type"))
 	if strings.Contains(contentType, "text/event-stream") {
@@ -347,8 +434,17 @@ func decodeStreamDataFields(dataNode *yamlLib.Node) ([]HTTPStreamDataField, erro
 		if keyNode == nil || valueNode == nil {
 			continue
 		}
+		// Keys decode the same way values do. stringNode can emit a key as
+		// !!binary, and yaml.v3 leaves the BASE64 TEXT in node.Value for those
+		// — reading Value raw would substitute the base64 for the real field
+		// name. TrimSpace stays off the binary branch: for decoded bytes it is
+		// not cosmetic, it would silently eat payload.
+		key := decodeYAMLScalarKey(keyNode)
+		if keyNode.Tag != "!!binary" {
+			key = strings.TrimSpace(key)
+		}
 		fields = append(fields, HTTPStreamDataField{
-			Key:   strings.TrimSpace(keyNode.Value),
+			Key:   key,
 			Value: yamlNodeToString(valueNode),
 		})
 	}
@@ -389,10 +485,21 @@ func encodeStreamChunksNode(chunks []HTTPStreamChunk) *yamlLib.Node {
 // even though the YAML file now stores structured streaming data.
 //
 // For SSE bodies, each chunk becomes an SSE frame (fields joined by \n,
-// frames joined by \n\n, matching the SSE wire format).
+// each frame ended by a blank line, the last one too, matching the SSE wire
+// format).
 //
 // For all other streaming formats (NDJSON, plain text, binary), each chunk's
 // "raw" field value becomes one line.
+//
+// The body is the one form of the stream that JSON carries (StreamBody is not
+// JSON): a test case read from YAML and sent on as JSON (an upload to Keploy
+// Cloud, which keeps and serves it so) reaches the replay with this body
+// alone, which reads it as it reads the app's stream to compare the two, and
+// a recording of it splits it again (MarshalYAML). So the body is written as
+// a wire that splits back into the frames: an SSE value of more than one line
+// (an event's data lines, which a read joins) is one line of its field each,
+// a value that starts with a space gets the one space a read takes off, and a
+// last line that is blank ends in its newline.
 func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) string {
 	if len(chunks) == 0 {
 		return ""
@@ -401,28 +508,30 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 	switch kind {
 	case streamBodyKindSSE:
 		// Reconstruct SSE wire format: each frame is a block of "key:value" lines
-		// separated by \n, and frames are separated by \n\n.
+		// separated by \n, and each frame ends in a blank line.
 		frames := make([]string, 0, len(chunks))
 		for _, chunk := range chunks {
-			lines := make([]string, 0, len(chunk.Data))
-			for _, field := range chunk.Data {
-				key := strings.TrimSpace(field.Key)
-				if strings.EqualFold(key, "comment") {
-					// SSE comments start with ':' and have no key prefix.
-					lines = append(lines, ":"+field.Value)
-					continue
-				}
-				if key == "" {
-					continue
-				}
-				lines = append(lines, strings.ToLower(key)+":"+field.Value)
+			if frame := sseFrame(chunk); frame != "" {
+				frames = append(frames, frame)
 			}
-			if len(lines) == 0 {
-				continue
-			}
-			frames = append(frames, strings.Join(lines, "\n"))
 		}
-		return strings.Join(frames, "\n\n")
+		body := strings.Join(frames, "\n\n")
+		if len(frames) > 0 {
+			// The last event ends in its blank line as every other does: a
+			// client dispatches an event only at the blank line after it, and
+			// drops the one a stream ends inside (the WHATWG event-stream
+			// parse), so a body that stopped at its last field would lose its
+			// last event on replay (an LLM stream's "data: [DONE]"). A frame
+			// never ends in a blank line of its own (every line carries its
+			// field's name or the comment's ':'), so this is the one blank
+			// line. A recording keeps a stream that ended inside its last
+			// event as its bytes, never as frames (streamChunksForYAML), so
+			// frames are of a stream that ended its last event. Frames an
+			// earlier keploy kept of one that did not carry no word of it,
+			// and read back with that event ended.
+			body += "\n\n"
+		}
+		return body
 
 	default:
 		// NDJSON, plain text, binary — each chunk contributes one line via its "raw" field.
@@ -437,8 +546,74 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 				lines = append(lines, chunk.Data[0].Value)
 			}
 		}
-		return strings.Join(lines, "\n")
+		body := strings.Join(lines, "\n")
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			// A last line that is blank (a text stream's) ends in the
+			// newline a read of lines reads it by: without it the read
+			// ends one line short.
+			body += "\n"
+		}
+		return body
 	}
+}
+
+// sseEndsItsLastEvent reports whether an SSE body ends in a blank line: two
+// line ends in a row, each "\r\n", "\n" or "\r" as the WHATWG event-stream
+// parse reads them ("\r\n\r\n", "\n\r", "\r\r" too). A client dispatches an
+// event at the blank line that ends it, and drops the one a stream ends
+// inside. Only the line ends the body ends in are read: no "\r\n" spans the
+// last other byte and them.
+func sseEndsItsLastEvent(body string) bool {
+	ends := body[len(strings.TrimRight(body, "\r\n")):]
+	return len(normalizeModelLineEndings(ends)) >= 2
+}
+
+// sseFrame is chunk as an SSE event's lines, joined by "\n", without the blank
+// line that ends the event; "" for a chunk of no line, which the body leaves
+// out.
+func sseFrame(chunk HTTPStreamChunk) string {
+	lines := make([]string, 0, len(chunk.Data))
+	for _, field := range chunk.Data {
+		key := strings.TrimSpace(field.Key)
+		if strings.EqualFold(key, "comment") {
+			// SSE comments start with ':' and have no key prefix.
+			lines = appendSSEFieldLines(lines, ":", field.Value, false)
+			continue
+		}
+		if key == "" {
+			continue
+		}
+		// strings.ToLower rewrites every invalid byte to U+FFFD, so it
+		// must not touch a field name that is not valid UTF-8. This is
+		// reachable precisely because MarshalYAML now routes non-UTF-8
+		// chunks through here as its flat-body fallback — lower-casing
+		// them would reintroduce the silent corruption the fallback
+		// exists to avoid. SSE field names are ASCII in practice, so
+		// skipping the fold for the pathological case costs nothing.
+		name := key
+		if utf8.ValidString(name) {
+			name = strings.ToLower(name)
+		}
+		lines = appendSSEFieldLines(lines, name+":", field.Value, true)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// appendSSEFieldLines appends an SSE field's lines to lines: prefix (its
+// name and ':', or ':' alone for a comment) and each line of value, so a
+// value of more than one line never reads back as a field of its own, or as
+// the end of its frame (an empty line). A field the parse takes a space off
+// (spaced) keeps a value that starts with one: it is written after one more.
+// Only data lines join when read: a value of more than one line in a field of
+// another name, which no SSE wire carries, reads back as a field per line.
+func appendSSEFieldLines(lines []string, prefix, value string, spaced bool) []string {
+	for _, line := range strings.Split(value, "\n") {
+		if spaced && strings.HasPrefix(line, " ") {
+			line = " " + line
+		}
+		lines = append(lines, prefix+line)
+	}
+	return lines
 }
 
 // ── Body → Chunk parsers ───────────────────────────────────────────────────────
@@ -622,6 +797,15 @@ func yamlNodeToString(node *yamlLib.Node) string {
 		return ""
 	}
 	if node.Kind == yamlLib.ScalarNode {
+		// yaml.v3 leaves the BASE64 TEXT in node.Value for a !!binary scalar
+		// rather than the decoded bytes, so returning it raw would hand replay
+		// the base64 string and silently mismatch. Decode it here, mirroring
+		// stringNode. Whitespace strip: yaml.v3 folds long base64 scalars.
+		if node.Tag == "!!binary" {
+			if raw, err := base64.StdEncoding.DecodeString(stripBase64Whitespace(node.Value)); err == nil {
+				return string(raw)
+			}
+		}
 		return node.Value
 	}
 	// Complex node (mapping or sequence) — decode then re-encode as JSON.
@@ -639,11 +823,28 @@ func yamlNodeToString(node *yamlLib.Node) string {
 // stringNode creates a YAML scalar string node with the given value.
 // Used as a helper when constructing YAML trees programmatically.
 func stringNode(value string) *yamlLib.Node {
-	return &yamlLib.Node{
+	// Defence in depth behind streamChunksForYAML's guard. yaml.v3 hard-fails
+	// on invalid UTF-8 under an EXPLICIT tag ("cannot marshal invalid UTF-8
+	// data as !!str") but silently base64s it under `!!binary`, so stamping
+	// !!str on arbitrary bytes is what turns one bad chunk into a failed mock
+	// insert — and a failed insert used to end the whole recording.
+	// yamlNodeToString decodes this back, so the round-trip is lossless.
+	if !utf8.ValidString(value) {
+		return &yamlLib.Node{
+			Kind:  yamlLib.ScalarNode,
+			Tag:   "!!binary",
+			Value: base64.StdEncoding.EncodeToString([]byte(value)),
+		}
+	}
+	n := &yamlLib.Node{
 		Kind:  yamlLib.ScalarNode,
 		Tag:   "!!str",
 		Value: value,
 	}
+	if YAMLBlockScalarUnsafe(value) {
+		n.Style = yamlLib.DoubleQuotedStyle // not a block scalar that reads back as another string
+	}
+	return n
 }
 
 // cloneStreamChunks returns a deep copy of a slice of HTTPStreamChunk.

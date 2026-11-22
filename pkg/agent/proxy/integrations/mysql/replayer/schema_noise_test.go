@@ -3,6 +3,7 @@ package replayer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -341,14 +342,16 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 
 	t.Run("strict-rejected exact-text candidate still names closest query", func(t *testing.T) {
 		// Identical SQL text (exact match) but a drifting query attribute
-		// (CLIENT_QUERY_ATTRIBUTES) — strict must reject, and the miss must
-		// carry the candidate's query so the report diff isn't blank.
+		// (CLIENT_QUERY_ATTRIBUTES) the statement reads — strict must
+		// reject, and the miss must carry the candidate's query so the
+		// report diff isn't blank.
+		const recorded = "SELECT mysql_query_attribute_string('tenant') AS t"
 		m := readbackMock("q1", recorded, "row-1", zeroTime())
 		m.Spec.MySQLRequests[0].PacketBundle.Message.(*mysql.QueryPacket).Parameters =
-			[]mysql.Parameter{{Type: 254 /* MYSQL_TYPE_STRING */, Value: "recorded-attr"}}
+			[]mysql.Parameter{{Type: 254 /* MYSQL_TYPE_STRING */, Name: "tenant", Value: "recorded-attr"}}
 		exactReq := comQueryReq(recorded)
 		exactReq.PacketBundle.Message.(*mysql.QueryPacket).Parameters =
-			[]mysql.Parameter{{Type: 254, Value: "replay-attr"}}
+			[]mysql.Parameter{{Type: 254, Name: "tenant", Value: "replay-attr"}}
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
 		_, ok, miss, err := matchCommand(context.Background(), logger, exactReq, db, newDecodeCtx(), eng, nil)
@@ -579,4 +582,56 @@ func TestMatchCommand_TraceCommentDrift(t *testing.T) {
 			t.Fatalf("strict must serve when only the noised comment drifts (ok=%v err=%v)", ok, err)
 		}
 	})
+}
+
+// TestQueryShapeCacheIsBounded pins the retention contract on queryShapeCache.
+// Same reasoning as match_test.go's TestQuerySigCacheIsBounded: the key is the
+// raw SQL text, so a client that inlines literals mints an unbounded number of
+// keys and the cache must cap out rather than track its input.
+func TestQueryShapeCacheIsBounded(t *testing.T) {
+	queryShapeCache.Purge()
+	t.Cleanup(queryShapeCache.Purge)
+
+	const distinct = queryShapeCacheSize + 500
+	for i := 0; i < distinct; i++ {
+		extractQueryShape(fmt.Sprintf("SELECT name FROM users WHERE id = %d", i))
+	}
+
+	if got := queryShapeCache.Len(); got > queryShapeCacheSize {
+		t.Errorf("queryShapeCache holds %d entries after %d distinct queries, must never exceed the %d cap: the cache is tracking its input, not bounding it",
+			got, distinct, queryShapeCacheSize)
+	}
+}
+
+// TestQueryShapeCacheMemoIsStable proves eviction is safe: computeQueryShape is
+// a pure function of the SQL text, so a purged entry recomputes identically.
+// Without that property, bounding the cache could change drift verdicts.
+func TestQueryShapeCacheMemoIsStable(t *testing.T) {
+	queryShapeCache.Purge()
+	t.Cleanup(queryShapeCache.Purge)
+
+	const sql = "SELECT customer FROM orders WHERE amount > 50 AND region = 'apac'"
+
+	first := extractQueryShape(sql)
+	if !first.ok {
+		t.Fatal("expected parseable SQL")
+	}
+
+	queryShapeCache.Purge()
+	recomputed := extractQueryShape(sql)
+	if !recomputed.ok {
+		t.Fatal("expected parseable SQL after eviction")
+	}
+	if recomputed.template != first.template || recomputed.comments != first.comments {
+		t.Errorf("shape after eviction differs: template %q vs %q, comments %q vs %q",
+			recomputed.template, first.template, recomputed.comments, first.comments)
+	}
+	if len(recomputed.literals) != len(first.literals) {
+		t.Fatalf("literals after eviction = %v, want %v", recomputed.literals, first.literals)
+	}
+	for i := range first.literals {
+		if recomputed.literals[i] != first.literals[i] {
+			t.Errorf("literals[%d] after eviction = %q, want %q", i, recomputed.literals[i], first.literals[i])
+		}
+	}
 }

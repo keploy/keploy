@@ -13,17 +13,21 @@ import (
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_auth_next_factor_request.html
 
 func DecodeAuthNextFactor(_ context.Context, data []byte) (*mysql.AuthNextFactorPacket, error) {
-
+	if len(data) == 0 {
+		return nil, fmt.Errorf("malformed AuthNextFactor packet: empty")
+	}
 	packet := &mysql.AuthNextFactorPacket{
 		PacketType: data[0],
 	}
 
-	data, idx, err := utils.ReadNullTerminatedString(data[1:])
+	name, n, err := utils.ReadNullTerminatedString(data[1:])
 	if err != nil {
-		return nil, fmt.Errorf("malformed handshake response packet: missing null terminator for PluginName")
+		return nil, fmt.Errorf("malformed AuthNextFactor packet: missing null terminator for PluginName: %w", err)
 	}
-	packet.PluginName = string(data)
-	packet.PluginData = string(data[idx:])
+	packet.PluginName = string(name)
+	// The plugin data follows the name's terminator in the packet, not in
+	// the name's own bytes.
+	packet.PluginData = string(data[1+n:])
 
 	return packet, nil
 }

@@ -4,8 +4,12 @@ package http
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -14,9 +18,10 @@ import (
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/bodydigest"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -24,27 +29,130 @@ import (
 var jsonValid234 = json.Valid
 var fmtSprint234 = fmt.Sprint
 var ppNew234 = pp.New
-var jsonMarshal234 = json.Marshal
-var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+// MatchOption tunes Match without changing its signature — enterprise and
+// k8s-proxy both call Match, so a new parameter would break them on their next
+// OSS bump.
+type MatchOption func(*matchOptions)
+
+type matchOptions struct {
+	autoHeaderNoise bool
+	// noPassLine: the caller failed the test case on its own (a template
+	// variable's place), so a comparison that matches prints no pass line.
+	noPassLine bool
+	// recordedBody is the body the expected response's digest headers were
+	// computed over, when that is not tc.HTTPResp.Body (see WithRecordedBody).
+	recordedBody *string
+	// console is where the comparison's lines go (WithConsole); nil, the
+	// default, prints nothing.
+	console io.Writer
+}
+
+// out is o's console, io.Discard for none.
+func (o matchOptions) out() io.Writer {
+	if o.console == nil {
+		return io.Discard
+	}
+	return o.console
+}
+
+// WithConsole makes w the console the comparison writes its lines to: the
+// "Testrun passed" and "Testrun failed" lines, and a failure's diff, which
+// names the test case's expected and actual header values and bodies whole.
+// With none, or a nil w, it prints nothing: a program that embeds keploy (a
+// k8s proxy, whose stdout is its pod's log) must never have an answer's body
+// written to a log. keploy's CLI gives its run's console (os.Stdout).
+func WithConsole(w io.Writer) MatchOption {
+	return func(o *matchOptions) { o.console = w }
+}
+
+// WithAutoHeaderNoise forgives a VALUE difference on response headers the server
+// mints fresh on every call — the HTTP date, request/correlation ids and
+// distributed-trace ids (models.IsVolatileResponseHeader).
+//
+// Presence is still asserted: a header that only one side carries stays a
+// failure. Off unless the caller asks.
+func WithAutoHeaderNoise(enabled bool) MatchOption {
+	return func(o *matchOptions) { o.autoHeaderNoise = enabled }
+}
+
+// WithoutPassLine says the caller has already failed the test case on its
+// own (a template variable's place the answer does not satisfy): a
+// comparison that matches then prints no "Testrun passed" line for it. A
+// difference is printed as before.
+func WithoutPassLine() MatchOption {
+	return func(o *matchOptions) { o.noPassLine = true }
+}
+
+// PrintPassLine prints the "Testrun passed" line for tc, as Match prints it
+// for a comparison that passes when it emits its logs, unless opts say the
+// caller failed the test case on its own (WithoutPassLine). For a caller
+// that compared quietly first (emitFailureLogs false) and found it passing.
+func PrintPassLine(tc *models.TestCase, logger *zap.Logger, opts ...MatchOption) {
+	var mo matchOptions
+	for _, o := range opts {
+		o(&mo)
+	}
+	if mo.noPassLine {
+		return
+	}
+	newLogger := ppNew234()
+	newLogger.SetOutput(mo.out())
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetPassingColorScheme())
+	var log2 = ""
+	log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+	if _, err := newLogger.Printf(log2); err != nil {
+		utils.LogError(logger, err, "failed to print the logs")
+	}
+}
+
+// WithRecordedBody says the expected body was resolved from a test case's
+// placeholders for this run (pkg/templates), and what the body was when it was
+// recorded: each placeholder at its config.yaml value. When this run's values
+// made the expected body differ from that, a header that is a digest of the
+// recorded body (an Express, Rails, Spring or hex ETag, Content-MD5, Digest;
+// bodydigest.Form lists them) is asserted as the same digest of the answer's
+// body, recomputed; any other value of such a header (a resource version) is
+// compared as written. Content-Length already follows the body.
+func WithRecordedBody(body string) MatchOption {
+	return func(o *matchOptions) { o.recordedBody = &body }
+}
+
+// Match compares the app's answer with the test case's expected response, as
+// written: nothing in tc is matched by its value against anything else.
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool, opts ...MatchOption) (bool, *models.Result) {
+	var mo matchOptions
+	for _, opt := range opts {
+		opt(&mo)
+	}
+	// Under the proven switch response arrays are compared in order.
+	ignoreOrdering = matcherUtils.ResponseIgnoreOrdering(ignoreOrdering)
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
+	// receivedBody is the body as it came, which the test case's assertions,
+	// when they judge it, read (below).
 	var bodySizeResult models.IntResult
+	receivedBody := actualResponse.Body
 	if tc.HTTPResp.BodySkipped {
 		actualBodySize := int64(len(actualResponse.Body))
 		bodySizeMatch := tc.HTTPResp.BodySize == actualBodySize
 
-		logger.Info("response body was greater than 1MB during recording, comparing body size",
-			zap.String("testcase", tc.Name),
-			zap.Int64("expected_size", tc.HTTPResp.BodySize),
-			zap.Int64("actual_size", actualBodySize),
-			zap.Bool("size_match", bodySizeMatch))
+		// Said only by a comparison that emits its logs and judges by the
+		// size: assertions that judge in its place do not read it.
+		if emitFailureLogs && !AssertionsReplaceComparison(tc) {
+			logger.Info("response body was greater than 1MB during recording, comparing body size",
+				zap.String("testcase", tc.Name),
+				zap.Int64("expected_size", tc.HTTPResp.BodySize),
+				zap.Int64("actual_size", actualBodySize),
+				zap.Bool("size_match", bodySizeMatch))
+		}
 
-		// Log actual response body as debug before clearing
+		// Its size, never the body: it is the app's answer, a token or a
+		// user's data among it.
 		logger.Debug("actual response body (skipped during recording)",
 			zap.String("testcase", tc.Name),
-			zap.String("body", actualResponse.Body))
+			zap.Int("body_bytes", len(actualResponse.Body)))
 
 		bodySizeResult = models.IntResult{
 			Normal:   bodySizeMatch,
@@ -84,45 +192,67 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	}
 
 	noise := tc.Noise
+	// Copy the shared config maps before merging this test case's noise into
+	// them, otherwise each test case permanently widens the noise applied to
+	// every later one.
 	var (
-		bodyNoise   = noiseConfig["body"]
-		headerNoise = noiseConfig["header"]
+		bodyNoise    = matcherUtils.CloneNoiseMap(noiseConfig["body"])
+		headerNoise  = matcherUtils.CloneNoiseMap(noiseConfig["header"])
+		wildcardBody bool
 	)
-	if bodyNoise != nil {
-		if ignoreFields, ok := bodyNoise["*"]; ok && len(ignoreFields) > 0 && ignoreFields[0] == "*" {
-			if noise["body"] == nil {
-				noise["body"] = make([]string, 0)
-			}
-		}
-	} else {
-		bodyNoise = map[string][]string{}
-	}
-	if headerNoise == nil {
-		headerNoise = map[string][]string{}
-	}
+	// wildcardBody carries this on its own. Writing the sentinel back into
+	// tc.Noise used to be how it reached the body-skip check; that mutated the
+	// caller's test case, panicked when tc.Noise was nil, and could be persisted
+	// back to disk by a later re-encode.
+	ignoreFields, hasWildcard := bodyNoise["*"]
+	wildcardBody = hasWildcard && len(ignoreFields) > 0 && ignoreFields[0] == "*"
 
-	for field, regexArr := range noise {
-		a := strings.Split(field, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[strings.ToLower(x)] = regexArr
-		} else if a[0] == "header" {
-			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
-		}
+	tcBodyNoise, tcHeaderNoise, skipBody := matcherUtils.SplitNoise(noise, logger)
+	// The global wildcard means "ignore every response body" on its own; it
+	// must not depend on the test case also carrying a bare "body" key, which
+	// stops being the skip sentinel once that key lists field paths.
+	skipBody = skipBody || wildcardBody
+	for field, regexArr := range tcBodyNoise {
+		bodyNoise[field] = regexArr
+	}
+	for field, regexArr := range tcHeaderNoise {
+		headerNoise[field] = regexArr
 	}
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 
+	// bodyActuallyCompared distinguishes "the body was compared and passed" from
+	// "the body comparison never ran". `pass` starts true and SEVERAL paths below
+	// leave it that way without looking at a single byte: a non-JSON body with
+	// compareAll off, the skipBody sentinel, a wildcard noise entry, and the >1MB
+	// BodySkipped path whose actual body is deliberately cleared. Only a body that
+	// was really compared says anything about the bytes, and only that can justify
+	// forgiving a digest computed FROM those bytes.
+	bodyActuallyCompared := false
+
+	// A body that is no JSON is compared byte for byte with --compare-all,
+	// under the proven switch (every part of a response is compared there),
+	// and whenever the recorded and the live body differ in kind: JSON
+	// against no JSON, or an empty body against a non-empty one. Left
+	// uncompared, a test that recorded {"n":7} passed on the app's 200 with
+	// keploy's plain-text "no matching mock" in its place, or with no body at
+	// all. Only a non-JSON body of the recorded kind, with the switch off and
+	// no --compare-all, is still not compared, as before.
+	expectedJSON := jsonValid234([]byte(tc.HTTPResp.Body))
+	kindDiffers := expectedJSON != (bodyType == models.JSON) || (tc.HTTPResp.Body == "") != (actualResponse.Body == "")
+	compareNonJSON := compareAll || provenswitch.On() || kindDiffers
+
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
-	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
+	if !skipBody && bodyType == models.JSON && expectedJSON {
+		bodyActuallyCompared = true
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
 			return false, res
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
 			pass = jsonComparisonResult.IsExact()
 			if err != nil {
 				return false, res
@@ -132,24 +262,102 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
-		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
+		// Their sizes, never the bodies: they are the recorded and the
+		// app's answers.
+		logger.Debug("compared bodies", zap.Int("expected_bytes", len(cleanExp)), zap.Int("actual_bytes", len(cleanAct)))
 	} else {
-		// Skip body comparison for non-JSON responses unless compareAll is enabled
-		if !compareAll && bodyType != models.JSON {
+		// Skip the comparison of a non-JSON body of the recorded kind, with
+		// the switch off and no --compare-all (compareNonJSON above).
+		if !compareNonJSON && bodyType != models.JSON {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
-		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
-			pass = false
+		} else if !skipBody {
+			bodyActuallyCompared = true
+			// A body that is a presigned URL is compared but for its
+			// signature and session token (matcher presigned.go).
+			if tc.HTTPResp.Body != actualResponse.Body && !matcherUtils.SamePresignedSigV4(tc.HTTPResp.Body, actualResponse.Body) {
+				pass = false
+			}
 		}
 	}
 
 	res.BodyResult[0].Normal = pass
 
-	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
-		res.HeadersResult = *hRes
+	// A body that failed while carrying noise is the one moment the user needs to
+	// know that some of that noise is inert: the report names a field they
+	// believe they already excluded. Only on a JSON failure — noise paths address
+	// JSON fields, so on any other body every entry would read as dead and the
+	// advice would be nonsense. Only on failure, so the happy path pays nothing
+	// for the extra walk.
+	//
+	// tcBodyNoise, not the merged map: a globalNoise entry applies to every
+	// endpoint by design, so naming it dead on each case that happens not to have
+	// that field would emit a line per failing case and bury the real failures.
+	// Only the test case's own recorded noise is a claim about THIS response.
+	if !pass && !skipBody && bodyType == models.JSON {
+		matcherUtils.WarnUnmatchableBodyNoise(logger, tc.Name, tcBodyNoise, tc.HTTPResp.Body, actualResponse.Body)
+	}
 
-		// If body matches but content-length differs, ignore the content-length difference
+	headersMatched := matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise)
+	res.HeadersResult = *hRes
+	if !headersMatched {
+		// A header keploy.yml's noise lets vary only within patterns, a
+		// side's value outside them: why it is compared, legibly.
+		for _, why := range matcherUtils.HeaderPatternWhys(*hRes, headerNoise) {
+			logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("testCase", tc.Name), zap.String("reason", why))
+		}
+
+		// Forgive a VALUE difference on a header the server mints fresh per call.
+		//
+		// Applied to the comparison RESULT, deliberately not by seeding
+		// headerNoise: that map is resolved by matcher.SubstringKeyMatch, which
+		// uses strings.Contains, so a "date" entry would also swallow
+		// "X-Candidate-Id" and "X-Validate-Token" — headers that merely contain
+		// the word. Matching the result's key exactly confines the forgiveness to
+		// the header it was meant for.
+		//
+		// Only when BOTH sides carried the header. CompareHeaders reports a
+		// missing or unexpected header with a nil Value on the absent side, and
+		// those stay failures: a server that stops emitting X-Request-Id, or
+		// starts emitting one it never did, is a real change and must not be
+		// hidden by a rule about values.
+		if mo.autoHeaderNoise {
+			for i := range res.HeadersResult {
+				hr := &res.HeadersResult[i]
+				if hr.Normal || hr.Expected.Value == nil || hr.Actual.Value == nil {
+					continue
+				}
+				name := hr.Expected.Key
+				if name == "" {
+					name = hr.Actual.Key
+				}
+				// An explicit user pattern outranks this. If the user wrote a
+				// regex for this header they narrowed it on purpose, and
+				// CompareHeaders already judged the replayed value against it —
+				// widening that into a blanket ignore would silently discard the
+				// constraint. Resolved through SubstringKeyMatch so the lookup
+				// sees the entry exactly as CompareHeaders did, whatever the
+				// user's casing. (An UNCONDITIONAL user entry never reaches here:
+				// CompareHeaders would already have marked the header normal.)
+				if patterns, constrained := matcherUtils.SubstringKeyMatch(name, headerNoise); constrained && len(patterns) > 0 {
+					continue
+				}
+				if models.IsVolatileResponseHeader(name) {
+					logger.Debug("ignoring value drift on a per-request-volatile response header",
+						zap.String("header", name))
+					hr.Normal = true
+				}
+			}
+		}
+
+		// If body matches but content-length differs, ignore the content-length
+		// difference. The body "matches" only when it was compared and was
+		// the same, when the test case's noise excludes it whole, or, with the
+		// switch off and no --compare-all, when it is a non-JSON body of the
+		// recorded kind, left uncompared and its length excused as before.
+		// A body of another kind is always compared, and under the switch
+		// every body is, so neither excuses a length that changed unless
+		// the test case's noise excludes the body whole.
 		if res.BodyResult[0].Normal {
 			for i := range res.HeadersResult {
 				if strings.ToLower(res.HeadersResult[i].Expected.Key) == "content-length" && !res.HeadersResult[i].Normal {
@@ -161,19 +369,89 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 		}
 
-		// Check if there are still any header mismatches after ignoring content-length
-		hasHeaderMismatch := false
-		for _, hr := range res.HeadersResult {
-			if !hr.Normal {
-				hasHeaderMismatch = true
-				break
+		// Same idea as Content-Length above, for headers that are a DIGEST of the
+		// body rather than its length.
+		//
+		// When the body comparison passed only BECAUSE a field was noised, the
+		// bytes still differ — so ETag / Content-MD5 / Digest, which the server
+		// computes from those bytes, differ too. Asserting them byte-for-byte
+		// silently re-imposes the exact equality the noise deliberately waived:
+		// noise on a body field is defeated by a header nobody configured. That is
+		// the residual node-jwt failure — a JWT whose `iat` lands either side of a
+		// second boundary changes the body, and the ETag with it.
+		//
+		// Deliberately NARROWER than the Content-Length rule: it also requires the
+		// raw bodies to actually DIFFER. If the bytes are identical and the digest
+		// is not, the server is minting a non-deterministic ETag, which is a real
+		// defect and must still fail. And this is not the same as adding "etag" to
+		// models.IsVolatileResponseHeader — that would ignore it unconditionally,
+		// including when the body failed. Here, if the body fails, everything
+		// still fails.
+		// Gated on the same opt-in as the volatile-header block above. Leaving it
+		// ungated would forgive ETag/Digest for a user who explicitly passed
+		// --disableAutoHeaderNoise, and for the enterprise and k8s-proxy callers
+		// that invoke Match with no MatchOption at all -- a silent behaviour change
+		// in another repo, which is the exact thing MatchOption exists to prevent.
+		//
+		// Each remaining clause is load-bearing; I verified by differential sweep
+		// that dropping any one changes real verdicts:
+		//
+		//   bodyActuallyCompared  -- `pass` starts true, so BodyResult[0].Normal is
+		//     ALSO true on every path that never compared a body (non-JSON with
+		//     compareAll off, skipBody, wildcard noise, the >1MB BodySkipped path
+		//     whose actual body is cleared). Without this, a totally different HTML
+		//     body with NO noise configured would have its ETag forgiven -- and for
+		//     a non-JSON response that digest is the ONLY remaining signal that the
+		//     representation changed.
+		//   BodyResult[0].Normal  -- if the body failed, everything still fails.
+		//   raw bytes differ      -- identical bytes with a differing digest means a
+		//     non-deterministic ETag, which is a real defect and must still fail.
+		if mo.autoHeaderNoise && bodyActuallyCompared &&
+			res.BodyResult[0].Normal && tc.HTTPResp.Body != actualResponse.Body {
+			for i := range res.HeadersResult {
+				hr := &res.HeadersResult[i]
+				// Presence is still asserted, exactly as the block above does it: a
+				// server that STOPS emitting an ETag, or starts emitting a Digest it
+				// never did, is a real change. CompareHeaders reports those with a
+				// nil Value on the absent side.
+				if hr.Normal || hr.Expected.Value == nil || hr.Actual.Value == nil {
+					continue
+				}
+				name := hr.Expected.Key
+				if name == "" {
+					name = hr.Actual.Key
+				}
+				// An explicit user pattern outranks this, same as above. If the user
+				// wrote a regex for this header they narrowed it deliberately and
+				// CompareHeaders already judged the replayed value against it;
+				// overriding that would silently discard their constraint.
+				if patterns, constrained := matcherUtils.SubstringKeyMatch(name, headerNoise); constrained && len(patterns) > 0 {
+					continue
+				}
+				if isBodyDigestHeader(strings.ToLower(name)) {
+					logger.Debug("ignoring a body-digest header whose body passed only via noise",
+						zap.String("header", name))
+					hr.Normal = true
+				}
 			}
 		}
-		if hasHeaderMismatch {
+	}
+
+	// A templated body this run's values rewrote (WithRecordedBody): its
+	// recorded digest headers were computed over the body as recorded, which
+	// the answer no longer has on purpose. One that is a digest of the
+	// recorded body is asserted as that digest of the answer's body; any
+	// other is left as compared above, as written.
+	if mo.recordedBody != nil && *mo.recordedBody != tc.HTTPResp.Body {
+		assertRenderedDigests(res, *mo.recordedBody, actualResponse.Body, headerNoise, logger)
+	}
+
+	// Check if there are still any header mismatches after ignoring content-length
+	for _, hr := range res.HeadersResult {
+		if !hr.Normal {
 			pass = false
+			break
 		}
-	} else {
-		res.HeadersResult = *hRes
 	}
 	if tc.HTTPResp.StatusCode == actualResponse.StatusCode {
 		res.StatusCode.Normal = true
@@ -182,13 +460,18 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	}
 
 	skipSuccessMsg := false
+	// When the test case's assertions judge its answer in place of this
+	// comparison, the console says what they say (below), not what the
+	// comparison found: no diff, no failure for an answer they pass.
+	assertionsJudge := AssertionsReplaceComparison(tc)
 	if !pass {
 		isStatusMismatch := false
 		isHeaderMismatch := false
 		isBodyMismatch := false
 
-		logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
+		logDiffs := matcherUtils.NewDiffsPrinterOut(mo.console, tc.Name)
 		newLogger := ppNew234()
+		newLogger.SetOutput(mo.out())
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetFailingColorScheme())
 		var logs = ""
@@ -212,32 +495,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			var actualValue []string
 			var expectedValue []string
 			if !j.Normal {
-				for _, v := range j.Actual.Value {
-					_, temp, err := tools.RenderIfTemplatized(v)
-					if err != nil {
-						utils.LogError(logger, err, "failed to render the actual header")
-						return false, nil
-					}
-					val, ok := temp.(string)
-					if !ok {
-						utils.LogError(logger, fmt.Errorf("failed to convert the actual header value to string while templatizing"), "")
-						return false, nil
-					}
-					actualValue = append(actualValue, val)
-				}
-				for _, v := range j.Expected.Value {
-					_, temp, err := tools.RenderIfTemplatized(v)
-					if err != nil {
-						utils.LogError(logger, err, "failed to render the expected header")
-						return false, nil
-					}
-					val, ok := temp.(string)
-					if !ok {
-						utils.LogError(logger, fmt.Errorf("failed to convert the expected header value to string while templatizing"), "")
-						return false, nil
-					}
-					expectedValue = append(expectedValue, val)
-				}
+				actualValue = append(actualValue, j.Actual.Value...)
+				expectedValue = append(expectedValue, j.Expected.Value...)
 			}
 			if len(actualValue) != len(expectedValue) {
 				isHeaderMismatch = true
@@ -271,54 +530,16 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 			switch actRespBodyType {
 			case models.JSON:
-				patch, err := jsondiff.Compare(cleanExp, cleanAct)
-				if err != nil {
-					logger.Debug("failed to compute json diff", zap.Error(err))
-				}
-
-				// Checking for templatized values.
-				for _, val := range patch {
-					// Parse the value in map.
-					expStringVal, ok := val.OldValue.(string)
-					if !ok {
-						continue
-					}
-					// Parse the body into json.
-					expResponse, err := matcherUtils.ParseIntoJSON(expStringVal)
-					if err != nil {
-						utils.LogError(logger, err, "failed to parse the exp response into json")
-						break
-					}
-
-					actStringVal, ok := val.Value.(string)
-					if !ok {
-						continue
-					}
-
-					actResponse, err := matcherUtils.ParseIntoJSON(actStringVal)
-					if err != nil {
-						utils.LogError(logger, err, "failed to parse the act response into json")
-						break
-					}
-					matcherUtils.CompareResponses(&expResponse, &actResponse, "")
-					jsonBytes, err := jsonMarshal234(expResponse)
-					if err != nil {
-						return false, nil
-					}
-					actJSONBytes, err := jsonMarshal234(actResponse)
-					if err != nil {
-						return false, nil
-					}
-					cleanExp = string(jsonBytes)
-					cleanAct = string(actJSONBytes)
-				}
+				// Only explains the verdict already reached above: what differs,
+				// as written. Nothing here is matched by value, and nothing here
+				// changes pass.
 				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 				if err != nil {
 					return false, res
 				}
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
-					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
 					if err != nil {
 						return false, res
 					}
@@ -328,8 +549,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				} else {
 					isBodyMismatch = true
 				}
-				// Comparing the body again after updating the expected
-				patch, err = jsondiff.Compare(cleanExp, cleanAct)
+				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
 					logger.Debug("failed to compute json diff", zap.Error(err))
 				}
@@ -418,8 +638,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		isBodySizeMismatch := tc.HTTPResp.BodySkipped && !bodySizeResult.Normal
 
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch || isBodySizeMismatch {
-			skipSuccessMsg = true
-
 			if isBodySizeMismatch {
 				logDiffs.PushBodyDiff(
 					fmtSprint234(fmt.Sprintf("body_size: %d bytes", bodySizeResult.Expected)),
@@ -428,7 +646,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				)
 			}
 
-			if emitFailureLogs {
+			if emitFailureLogs && !assertionsJudge {
 				_, err := newLogger.Printf(logs)
 				if err != nil {
 					utils.LogError(logger, err, "failed to print the logs")
@@ -439,30 +657,105 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					utils.LogError(logger, err, "failed to render the diffs")
 				}
 			}
-		} else {
-			pass = true
 		}
+		// The diff printing above never turns a failure into a pass: the
+		// verdict is the comparison's, made before it, and a failure never
+		// prints the success line.
+		skipSuccessMsg = true
+	}
+
+	if assertionsJudge {
+		// The assertions' verdict, the line that says it and, under that
+		// line, what each assertion that fails says, as a comparison's diff
+		// is printed under its line: printed above it, they would sit under
+		// the previous test case's line. AssertionMatch only reads tc and the
+		// answer, so the second call says what the first found. Compared
+		// quietly (emitFailureLogs false), nothing is said, an assertion's
+		// failure included: a caller that compares again with its logs on
+		// (compareHTTPRespForReplay) says it then, once.
+		//
+		// They judge the answer in place of the whole comparison, the body
+		// size of a recording that kept no body (BodySkipped) included, and
+		// read its body as it came, not the one cleared above for that
+		// comparison; the result keeps no more of it than the comparison's
+		// does.
+		judged := actualResponse
+		if tc.HTTPResp.BodySkipped {
+			received := *actualResponse
+			received.Body = receivedBody
+			judged = &received
+		}
+		pass, res := AssertionMatch(tc, judged, zap.NewNop())
+		if emitFailureLogs {
+			if pass {
+				PrintPassLine(tc, logger, opts...)
+			} else {
+				printFailLine(tc, logger, mo.out())
+				AssertionMatch(tc, judged, logger)
+			}
+		}
+		res.BodyResult[0].Actual = actualResponse.Body
+		return pass, res
 	}
 
 	// When emitFailureLogs is false, caller is handling logging themselves (e.g., streaming comparison)
 	// so we skip the success message as well
 	if !skipSuccessMsg && emitFailureLogs {
-		newLogger := ppNew234()
-		newLogger.WithLineInfo = false
-		newLogger.SetColorScheme(models.GetPassingColorScheme())
-		var log2 = ""
-		log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-		_, err := newLogger.Printf(log2)
-		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
-		}
-	}
-
-	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
-		return AssertionMatch(tc, actualResponse, logger)
+		PrintPassLine(tc, logger, opts...)
 	}
 
 	return pass, res
+}
+
+// printFailLine prints the "Testrun failed" line for tc on out, as Match
+// prints it above a comparison's diff, for a test case its assertions fail.
+func printFailLine(tc *models.TestCase, logger *zap.Logger, out io.Writer) {
+	newLogger := ppNew234()
+	newLogger.SetOutput(out)
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetFailingColorScheme())
+	if _, err := newLogger.Printf(newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)); err != nil {
+		utils.LogError(logger, err, "failed to print the logs")
+	}
+}
+
+// AssertionsReplaceComparison reports whether tc's assertions judge its
+// answer in place of the comparison above: Match then returns what
+// AssertionMatch says, which reads only what each assertion names. It holds
+// whenever tc has an assertion other than its noise. Noise, an empty one
+// included, judges nothing: a test case with nothing else is compared.
+func AssertionsReplaceComparison(tc *models.TestCase) bool {
+	for name := range tc.Assertions {
+		if name != models.NoiseAssertion {
+			return true
+		}
+	}
+	return false
+}
+
+// AssertionsUntieBody names the assertions that judge tc's answer in place of
+// its comparison (AssertionsReplaceComparison) when none of them reads the
+// whole body, or "" otherwise. json_equal compares the body as written; every
+// other assertion reads a status, a header or the subset json_contains names,
+// so no comparison of the elements of a body array is made, and nothing ties
+// a value inside one to its element. keploy test refuses a template use there
+// under test.ignoreOrdering, and keploy templatize writes none, through this
+// one predicate.
+func AssertionsUntieBody(tc *models.TestCase) string {
+	if !AssertionsReplaceComparison(tc) {
+		return ""
+	}
+	if _, whole := tc.Assertions[models.JsonEqual]; whole {
+		return ""
+	}
+	names := make([]string, 0, len(tc.Assertions))
+	for name := range tc.Assertions {
+		if name != models.NoiseAssertion {
+			names = append(names, string(name))
+		}
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // AssertionMatch checks the assertions in the test case against the actual response, if all of the assertions pass, it returns true, it doesn't care about other parameters of the response,
@@ -512,7 +805,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			} else {
 				classStr = class
 			}
-			actualClass := fmtSprintf234("%dxx", 200/100)
+			actualClass := fmtSprintf234("%dxx", actualResponse.StatusCode/100)
 			if classStr != actualClass {
 				pass = false
 				logger.Error("status_code_class assertion failed", zap.String("expected", class), zap.String("actual", actualClass))
@@ -525,6 +818,11 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				if i, err := strconvAtoi234(s); err == nil {
 					ints = append(ints, i)
 				}
+			}
+			if len(ints) == 0 {
+				pass = false
+				logUnreadableAssertion(logger, assertionName, value, "a list of status codes")
+				continue
 			}
 			found := false
 			for _, c := range ints {
@@ -540,34 +838,44 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 		case models.HeaderEqual:
 			// value should be a map[string]interface{} → we convert to map[string]string
-			hm := toStringMap(value)
+			hm, ok := toStringMap(value)
+			if !ok {
+				pass = false
+				logUnreadableAssertion(logger, assertionName, value, "a map of header names to values")
+				continue
+			}
 			for header, exp := range hm {
-				act, ok := actualResponse.Header[header]
+				act, ok := answerHeader(actualResponse.Header, header)
 				if !ok || act != exp {
 					pass = false
+					// The header's name and the values' sizes, never the
+					// values: a header holds a session's cookie, a token.
+					// The test report says how the answer differs.
 					logger.Error("header_equal assertion failed",
 						zap.String("header", header),
-						zap.String("expected", exp),
-						zap.String("actual", act),
+						zap.Int("expected_bytes", len(exp)),
+						zap.Bool("present", ok),
+						zap.Int("actual_bytes", len(act)),
 					)
 				}
-				logger.Info("header_equal assertion failed",
-					zap.String("header", header),
-					zap.String("expected", exp),
-					zap.String("actual", act),
-				)
 			}
 
 		case models.HeaderContains:
-			hm := toStringMap(value)
+			hm, ok := toStringMap(value)
+			if !ok {
+				pass = false
+				logUnreadableAssertion(logger, assertionName, value, "a map of header names to substrings")
+				continue
+			}
 			for header, exp := range hm {
-				act, ok := actualResponse.Header[header]
+				act, ok := answerHeader(actualResponse.Header, header)
 				if !ok || !strings.Contains(act, exp) {
 					pass = false
 					logger.Error("header_contains assertion failed",
 						zap.String("header", header),
-						zap.String("expected_substr", exp),
-						zap.String("actual", act),
+						zap.Int("expected_substr_bytes", len(exp)),
+						zap.Bool("present", ok),
+						zap.Int("actual_bytes", len(act)),
 					)
 				}
 			}
@@ -579,7 +887,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			case []interface{}:
 				for _, item := range v {
 					hdr := fmtSprint234(item)
-					if _, ok := actualResponse.Header[hdr]; !ok {
+					if _, ok := answerHeader(actualResponse.Header, hdr); !ok {
 						pass = false
 						logger.Error("header_exists assertion failed", zap.String("header", hdr))
 					}
@@ -588,7 +896,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			// a map[string]… where the keys are header names
 			case map[string]interface{}:
 				for hdr := range v {
-					if _, ok := actualResponse.Header[hdr]; !ok {
+					if _, ok := answerHeader(actualResponse.Header, hdr); !ok {
 						pass = false
 						logger.Error("header_exists assertion failed", zap.String("header", hdr))
 					}
@@ -597,7 +905,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			case map[models.AssertionType]interface{}:
 				for kt := range v {
 					hdr := string(kt)
-					if _, ok := actualResponse.Header[hdr]; !ok {
+					if _, ok := answerHeader(actualResponse.Header, hdr); !ok {
 						pass = false
 						logger.Error("header_exists assertion failed", zap.String("header", hdr))
 					}
@@ -605,14 +913,19 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 			default:
 				pass = false
-				logger.Error("header_exists: unsupported format, expected slice or map", zap.Any("value", value))
+				logger.Error("header_exists: unsupported format, expected slice or map", zap.String("value_type", fmt.Sprintf("%T", value)))
 			}
 
 		case models.HeaderMatches:
 			// value should be a map[string]interface{} → convert to map[string]string
-			hm := toStringMap(value)
+			hm, ok := toStringMap(value)
+			if !ok {
+				pass = false
+				logUnreadableAssertion(logger, assertionName, value, "a map of header names to patterns")
+				continue
+			}
 			for header, pattern := range hm {
-				act, ok := actualResponse.Header[header]
+				act, ok := answerHeader(actualResponse.Header, header)
 				if !ok {
 					pass = false
 					logger.Error("header_matches: header not found", zap.String("header", header))
@@ -620,44 +933,59 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				}
 				if matched, err := regexp.MatchString(pattern, act); err != nil || !matched {
 					pass = false
+					// The pattern's size too: an assertion's pattern can
+					// be a literal value (^session=...$), as an expected
+					// header can.
 					logger.Error("header_matches assertion failed",
 						zap.String("header", header),
-						zap.String("pattern", pattern),
-						zap.String("actual", act),
-						zap.Error(err),
+						zap.Int("pattern_bytes", len(pattern)),
+						zap.Int("actual_bytes", len(act)),
+						// Not the compile error: it quotes the pattern.
+						zap.Bool("pattern_compiles", err == nil),
 					)
 				}
 			}
 
 		case models.JsonEqual:
+			if tc.HTTPResp.BodySkipped {
+				// The recording kept no body to compare the answer's with: an
+				// unread body never passes.
+				pass = false
+				logger.Error("json_equal assertion cannot be judged: the recording kept no body to compare with (it was over 1 MB, so only its size was recorded)",
+					zap.Int64("recordedBodySize", tc.HTTPResp.BodySize))
+				continue
+			}
 			expJSON := tc.HTTPResp.Body
 			actJSON := actualResponse.Body
 			if expJSON != actJSON {
 				pass = false
-				logger.Error("json_equal assertion failed", zap.String("expected", expJSON), zap.String("actual", actJSON))
+				logger.Error("json_equal assertion failed", zap.Int("expected_bytes", len(expJSON)), zap.Int("actual_bytes", len(actJSON)))
 			}
 
 		case models.JsonContains:
-			var expectedMap map[string]interface{}
-			switch v := value.(type) {
-			case map[string]interface{}:
-				expectedMap = v
-			case string:
-				_ = jsonUnmarshal234([]byte(v), &expectedMap)
-			default:
+			expectedMap, ok := toJSONObject(value)
+			if !ok {
 				pass = false
-				logger.Error("json_contains: unexpected format", zap.Any("value", value))
+				logUnreadableAssertion(logger, assertionName, value, "a JSON object, as a map or a string")
 				continue
 			}
 			if ok, _ := matcherUtils.JsonContains(actualResponse.Body, expectedMap); !ok {
 				pass = false
-				logger.Error("json_contains assertion failed", zap.Any("expected", expectedMap))
+				logger.Error("json_contains assertion failed", zap.Strings("expected_keys", models.FieldShapes(slices.Sorted(maps.Keys(expectedMap)))))
 			}
 
+		case models.NoiseAssertion:
+			// Noise is not a judgement of the answer: the comparison reads it.
+
 		default:
-			if assertionName != models.NoiseAssertion {
-				logger.Debug("unhandled assertion type", zap.String("name", string(assertionName)))
+			// An assertion this keploy does not implement judges nothing, so
+			// it fails the test case rather than pass any answer.
+			pass = false
+			fields := []zap.Field{zap.String("assertion", string(assertionName)), zap.String("supported", supportedAssertions)}
+			if testSuiteAssertions[strings.ToLower(string(assertionName))] {
+				fields = append(fields, zap.String("note", "it is an assertion type of keploy's test suites (keploy/tests, steps[].assert), which a recorded test case's assertions do not take"))
 			}
+			logger.Error("this keploy does not support the test case's assertion "+strconv.Quote(string(assertionName))+", so it fails the test case", fields...)
 		}
 	}
 
@@ -667,6 +995,41 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 	}
 
 	return pass, res
+}
+
+// answerHeader looks up a header of the answer by name, ignoring case, as
+// HTTP header names are case-insensitive. The answer's map is keyed by Go's
+// canonical form (X-Request-Id), so an assertion that names X-Request-ID or
+// content-type would otherwise miss a header the answer carries.
+func answerHeader(header map[string]string, name string) (string, bool) {
+	if v, ok := header[name]; ok {
+		return v, true
+	}
+	for k, v := range header {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// supportedAssertions names the assertions AssertionMatch judges.
+const supportedAssertions = "status_code, status_code_class, status_code_in, header_equal, header_contains, header_exists, header_matches, json_equal, json_contains (and noise)"
+
+// testSuiteAssertions are the assertion types of keploy's test suites
+// (keploy/tests YAML, a step's assert list of {type, key, expected}), which
+// api-server and the test-suite runner judge. A recorded test case's
+// assertions ({name: value}) have no shape for them.
+var testSuiteAssertions = map[string]bool{
+	"json_strict_equal": true, "json_path": true, "schema": true, "selected_fields": true, "custom_functions": true,
+	"graphql_no_errors": true, "graphql_has_error_code": true, "graphql_error_path_eq": true,
+	"graphql_error_message_contains": true, "graphql_data_not_null": true,
+}
+
+// logUnreadableAssertion says that an assertion's value is not of the shape it
+// takes, so it fails the test case rather than judge against nothing.
+func logUnreadableAssertion(logger *zap.Logger, name models.AssertionType, value interface{}, want string) {
+	logger.Error(string(name)+" assertion cannot be read, so it fails the test case: its value is not "+want, zap.String("value_type", fmt.Sprintf("%T", value)))
 }
 
 func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error) {
@@ -679,4 +1042,45 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 		return m, err
 	}
 	return m, nil
+}
+
+// isBodyDigestHeader reports whether a response header's value is computed by
+// the server FROM the response body, so that a body which passed only via noise
+// necessarily changes it too.
+//
+// Restricted to headers that are a digest of the body and nothing else.
+// Content-Length is handled separately above, and headers that merely relate to
+// the body (Content-Type, Content-Encoding) are NOT here: those are independent
+// of the bytes and a change in one is a real change.
+func isBodyDigestHeader(lowerName string) bool { return bodydigest.IsHeader(lowerName) }
+
+// assertRenderedDigests judges each body-digest header of a templated
+// response whose recorded value is a digest of the recorded body: the answer
+// must carry the same digest of its own body. A header the user's noise
+// covers keeps the verdict the noise gave it, and a header absent on either
+// side keeps CompareHeaders' verdict.
+func assertRenderedDigests(res *models.Result, recordedBody, answerBody string, headerNoise map[string][]string, logger *zap.Logger) {
+	_, allNoisy := headerNoise["header"]
+	for i := range res.HeadersResult {
+		hr := &res.HeadersResult[i]
+		if hr.Expected.Value == nil || hr.Actual.Value == nil || allNoisy {
+			continue
+		}
+		name := hr.Expected.Key
+		lower := strings.ToLower(name)
+		if !isBodyDigestHeader(lower) {
+			continue
+		}
+		if _, noisy := matcherUtils.SubstringKeyMatch(name, headerNoise); noisy {
+			continue
+		}
+		form, ok := bodydigest.Form(lower, strings.Join(hr.Expected.Value, ","), recordedBody)
+		if !ok {
+			continue
+		}
+		want := form(answerBody)
+		hr.Normal = strings.Join(hr.Actual.Value, ",") == want
+		logger.Debug("a digest header of a templated body is asserted over the answer's body",
+			zap.String("header", name), zap.Bool("normal", hr.Normal))
+	}
 }

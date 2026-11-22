@@ -3,6 +3,8 @@ package wire
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 
@@ -18,6 +20,15 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
+
+// ErrServerGreetingNotFound is returned when a packet is decoded on a
+// connection for which no server greeting (HandshakeV10) was ever captured.
+// The greeting carries the server capability flags every later packet is
+// decoded against, so without it the connection is un-decodable. In practice
+// this means recording joined the connection mid-stream — it was opened before
+// recording started, e.g. a pre-warmed JDBC connection pool. Callers should
+// treat it as a signal to skip that connection, not as a hard error.
+var ErrServerGreetingNotFound = errors.New("server Greetings not found")
 
 // DecodePayload is used to decode mysql packets that don't consist of multiple packets within them, because we are reading per packet.
 func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientConn net.Conn, decodeCtx *DecodeContext) (*mysql.PacketBundle, error) {
@@ -36,9 +47,6 @@ func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientC
 		logger.Debug("Last operation not found in DecodePayload")
 		lastOp = 0x00
 	}
-
-	logger.Debug("Last operation in DecodePayload", zap.String("operation", fmt.Sprintf("%#x", lastOp)), zap.Any("header", packet.Header))
-	logger.Debug("Mode", zap.Any("Mode", decodeCtx.Mode))
 
 	if (lastOp == mysql.COM_QUERY || lastOp == mysql.COM_STMT_EXECUTE) && decodeCtx.Mode == models.MODE_RECORD {
 		return handleQueryStmtResponse(ctx, logger, packet, clientConn, lastOp, decodeCtx)
@@ -67,10 +75,8 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
 	if !ok {
-		return parsedPacket, fmt.Errorf("server Greetings not found")
+		return parsedPacket, ErrServerGreetingNotFound
 	}
-
-	logger.Debug("Last operation when handling client query", zap.Any("last operation", mysql.CommandStatusToString(lastOp)))
 
 	switch payloadType {
 	case mysql.OK:
@@ -114,7 +120,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 			pktType = string(mysql.Text)
 		}
 
-		pkt, err := query.DecodeResultSetMetadata(ctx, logger, payload, rowType)
+		pkt, err := query.DecodeResultSetMetadata(ctx, logger, payload, rowType, decodeCtx.MetadataFraming())
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode result set: %w", err)
 		}
@@ -145,15 +151,12 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	if payloadType != mysql.HandshakeV10 {
 		sg, ok = decodeCtx.ServerGreetings.Load(clientConn)
 		if !ok {
-			return parsedPacket, fmt.Errorf("server Greetings not found")
+			return parsedPacket, ErrServerGreetingNotFound
 		}
 	}
 
-	logger.Debug("payload info", zap.Any("last operation", lastOp), zap.Any("payload type", payloadType))
-
 	// Handle handshakeResponse41 separately, because its status is not defined and can be changed with the client capabilities.
 	if lastOp == mysql.HandshakeV10 {
-		logger.Debug("HandshakeResponse41/SSL Request packet", zap.Any("Type", payloadType))
 		pkt, err := connection.DecodeHandshakeResponse(ctx, logger, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode HandshakeResponse41 packet: %w", err)
@@ -164,6 +167,21 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		case *mysql.HandshakeResponse41Packet:
 			// Store the client capabilities to use it later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+			decodeCtx.ClientMariaDBCaps = pkt.MariaDBCapabilities()
+
+			// Its auth response is the client's credential, or derived
+			// from it: the password in clear under mysql_clear_password
+			// (PAM, LDAP, cloud IAM tokens), otherwise a scramble the
+			// greeting's salt, which a recording keeps, opens to a
+			// dictionary attack. Nothing reads it (replay matches a
+			// HandshakeResponse41 without it, as it is salt-dependent),
+			// so a decoded one keeps only its length, as zero bytes, and
+			// a recording never holds the credential. It is a new slice:
+			// the decoded one points into the caller's buffer, the bytes
+			// the client sent, which decoding never changes.
+			if len(pkt.AuthResponse) > 0 {
+				pkt.AuthResponse = make([]byte, len(pkt.AuthResponse))
+			}
 
 			pktType = mysql.HandshakeResponse41
 			lastOp = payloadType
@@ -179,36 +197,29 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 		setPacketInfo(ctx, parsedPacket, pkt, pktType, clientConn, lastOp, decodeCtx)
 
-		logger.Debug("HandshakeResponse41/SSL Request decoded", zap.Any("parsed packet", parsedPacket))
-
 		return parsedPacket, nil
 	}
 
 	switch {
 	// generic response packets
 	case payloadType == mysql.EOF && len(payload) == 5: //assuming that the payload is always 5 bytes
-		logger.Debug("EOF packet", zap.Any("Type", payloadType))
 		pkt, err := phase.DecodeEOF(ctx, payload, sg.CapabilityFlags)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode EOF packet: %w", err)
 		}
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.StatusToString(mysql.EOF), clientConn, mysql.EOF, decodeCtx)
-		logger.Debug("EOF decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == mysql.ERR:
-		logger.Debug("ERR packet", zap.Any("Type", payloadType))
 		pkt, err := phase.DecodeERR(ctx, payload, sg.CapabilityFlags)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode ERR packet: %w", err)
 		}
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.StatusToString(mysql.ERR), clientConn, mysql.ERR, decodeCtx)
-		logger.Debug("ERR decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == mysql.OK:
 		if lastOp == mysql.COM_STMT_PREPARE {
-			logger.Debug("COM_STMT_PREPARE_OK packet", zap.Any("Type", payloadType))
 			pkt, err := preparedstmt.DecodePrepareOk(ctx, logger, payload, sg.CapabilityFlags)
 			if err != nil {
 				return parsedPacket, fmt.Errorf("failed to decode COM_STMT_PREPARE_OK packet: %w", err)
@@ -218,47 +229,37 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			setPacketInfo(ctx, parsedPacket, pkt, "COM_STMT_PREPARE_OK", clientConn, lastOp, decodeCtx)
 			// Store the prepared statement to use it later
 			decodeCtx.PreparedStatements[pkt.StatementID] = pkt
-			logger.Debug("Prepared statement stored", zap.Any("statementId", pkt.StatementID), zap.Any("prepared statement", pkt))
-			logger.Debug("COM_STMT_PREPARE_OK decoded", zap.Any("parsed packet", parsedPacket))
 
 		} else {
-			logger.Debug("OK packet", zap.Any("Type", payloadType))
 			pkt, err := phase.DecodeOk(ctx, payload, sg.CapabilityFlags)
 			if err != nil {
 				return parsedPacket, fmt.Errorf("failed to decode OK packet: %w", err)
 			}
 
 			setPacketInfo(ctx, parsedPacket, pkt, mysql.StatusToString(mysql.OK), clientConn, mysql.OK, decodeCtx)
-			logger.Debug("OK decoded", zap.Any("parsed packet", parsedPacket))
 		}
 
 		// auth packets
 	case payloadType == 0x01:
 		if len(payload) == 1 {
-			logger.Debug("COM_QUIT packet", zap.Any("Type", payloadType))
 			pkt := &mysql.QuitPacket{
 				Command: payloadType,
 			}
 			setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_QUIT), clientConn, mysql.COM_QUIT, decodeCtx)
-			logger.Debug("COM_QUIT decoded", zap.Any("parsed packet", parsedPacket))
 		} else {
 			//otherwise it is a AuthMoreData packet
-			logger.Debug("AuthMoreData packet", zap.Any("Type", payloadType))
 			pkt, err := connection.DecodeAuthMoreData(ctx, payload)
 			if err != nil {
 				return parsedPacket, fmt.Errorf("failed to decode AuthMoreData packet: %w", err)
 			}
 			setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthMoreData), clientConn, mysql.AuthMoreData, decodeCtx)
-			logger.Debug("AuthMoreData decoded", zap.Any("parsed packet", parsedPacket))
 		}
 	case payloadType == mysql.AuthSwitchRequest && len(payload) > 5: //conflicting with EOF packet, assuming that the payload is always greater than 5 bytes
-		logger.Debug("AuthSwitchRequest packet", zap.Any("Type", payloadType))
 		pkt, err := connection.DecodeAuthSwitchRequest(ctx, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode AuthSwitchRequest packet: %w", err)
 		}
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthSwitchRequest), clientConn, mysql.AuthSwitchRequest, decodeCtx)
-		logger.Debug("AuthSwitchRequest decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == 0x02:
 		// 0x02 is ambiguous: it can be COM_INIT_DB or auth-related (AuthNextFactor / request public key).
@@ -267,29 +268,23 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			if len(payload) == 1 {
 				logger.Debug(("Request public key detected"))
 				setPacketInfo(ctx, parsedPacket, "request_public_key", mysql.CachingSha2PasswordToString(mysql.RequestPublicKey), clientConn, byte(mysql.RequestPublicKey), decodeCtx)
-				logger.Debug("Request public key decoded", zap.Any("parsed packet", parsedPacket))
 			} else {
-				logger.Debug("AuthNextFactor packet", zap.Any("Type", payloadType))
 				pkt, err := connection.DecodeAuthNextFactor(ctx, payload)
 				if err != nil {
 					return parsedPacket, fmt.Errorf("failed to decode AuthNextFactor packet: %w", err)
 				}
 				logger.Debug("AuthNextFactor packet not supported, further flow can be affected")
 				setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthNextFactor), clientConn, mysql.AuthNextFactor, decodeCtx)
-				logger.Debug("AuthNextFactor decoded", zap.Any("parsed packet", parsedPacket))
 			}
 		} else {
-			logger.Debug("COM_INIT_DB packet", zap.Any("Type", payloadType))
 			pkt, err := utility.DecodeInitDb(ctx, payload)
 			if err != nil {
 				return parsedPacket, fmt.Errorf("failed to decode COM_INIT_DB packet: %w", err)
 			}
 
 			setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_INIT_DB), clientConn, mysql.COM_INIT_DB, decodeCtx)
-			logger.Debug("COM_INIT_DB decoded", zap.Any("parsed packet", parsedPacket))
 		}
 	case payloadType == mysql.HandshakeV10:
-		logger.Debug("HandshakeV10 packet", zap.Any("Type", payloadType))
 		pkt, err := connection.DecodeHandshakeV10(ctx, logger, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode HandshakeV10 packet: %w", err)
@@ -298,57 +293,43 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		decodeCtx.ServerGreetings.Store(clientConn, pkt)
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.HandshakeV10), clientConn, mysql.HandshakeV10, decodeCtx)
 
-		logger.Debug("HandshakeV10 decoded", zap.Any("parsed packet", parsedPacket))
-
 		// utility packets
 	case payloadType == mysql.COM_QUIT:
-		logger.Debug("COM_QUIT packet", zap.Any("Type", payloadType))
 		pkt := &mysql.QuitPacket{
 			Command: payloadType,
 		}
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_QUIT), clientConn, mysql.COM_QUIT, decodeCtx)
-		logger.Debug("COM_QUIT decoded", zap.Any("parsed packet", parsedPacket))
 	case payloadType == mysql.COM_STATISTICS:
-		logger.Debug("COM_STATISTICS packet", zap.Any("Type", payloadType))
 		pkt := &mysql.StatisticsPacket{
 			Command: payloadType,
 		}
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STATISTICS), clientConn, mysql.COM_STATISTICS, decodeCtx)
-		logger.Debug("COM_STATISTICS decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == mysql.COM_DEBUG:
-		logger.Debug("COM_DEBUG packet", zap.Any("Type", payloadType))
 		pkt := &mysql.DebugPacket{
 			Command: payloadType,
 		}
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_DEBUG), clientConn, mysql.COM_DEBUG, decodeCtx)
-		logger.Debug("COM_DEBUG decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == mysql.COM_PING:
-		logger.Debug("COM_PING packet", zap.Any("Type", payloadType))
 		pkt := &mysql.PingPacket{
 			Command: payloadType,
 		}
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_PING), clientConn, mysql.COM_PING, decodeCtx)
-		logger.Debug("COM_PING decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == mysql.COM_CHANGE_USER:
-		logger.Debug("COM_CHANGE_USER packet", zap.Any("Type", payloadType))
 		pkt := &mysql.ChangeUserPacket{
 			Command: payloadType,
 		}
 		logger.Debug("COM_CHANGE_USER packet not supported, further flow can be affected")
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_CHANGE_USER), clientConn, mysql.COM_CHANGE_USER, decodeCtx)
-		logger.Debug("COM_CHANGE_USER decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == mysql.COM_RESET_CONNECTION:
-		logger.Debug("COM_RESET_CONNECTION packet", zap.Any("Type", payloadType))
 		pkt := &mysql.ResetConnectionPacket{
 			Command: payloadType,
 		}
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION), clientConn, mysql.COM_RESET_CONNECTION, decodeCtx)
-		logger.Debug("COM_RESET_CONNECTION decoded", zap.Any("parsed packet", parsedPacket))
 
 	// case payloadType == mysql.COM_SET_OPTION:
 	// 	logger.Debug("COM_SET_OPTION packet", zap.Any("Type", payloadType))
@@ -361,20 +342,17 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	// command packets
 	case payloadType == mysql.COM_QUERY:
-		logger.Debug("COM_QUERY packet", zap.Any("Type", payloadType))
 
-		pkt, err := query.DecodeQuery(ctx, logger, payload, decodeCtx.ClientCapabilities)
+		// The older keploy's reading is read only at replay, to match what
+		// it recorded.
+		pkt, err := query.DecodeQuery(ctx, logger, payload, decodeCtx.ClientCapabilities, decodeCtx.Mode == models.MODE_TEST)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_QUERY packet: %w", err)
 		}
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_QUERY), clientConn, mysql.COM_QUERY, decodeCtx)
 
-		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
-		logger.Debug("COM_QUERY decoded", zap.Any("parsed packet", parsedPacket), zap.Any("last operation", lstOp))
-
 	case payloadType == mysql.COM_STMT_PREPARE:
-		logger.Debug("COM_STMT_PREPARE packet", zap.Any("Type", payloadType))
 
 		pkt, err := preparedstmt.DecodeStmtPrepare(ctx, payload)
 		if err != nil {
@@ -382,53 +360,90 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		}
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_PREPARE), clientConn, mysql.COM_STMT_PREPARE, decodeCtx)
-		logger.Debug("COM_STMT_PREPARE decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == mysql.COM_STMT_EXECUTE:
-		logger.Debug("COM_STMT_EXECUTE packet", zap.Any("Type", payloadType))
-		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities)
+		stmtID := stmtIDFromExecute(payload)
+		longData := decodeCtx.LongDataParams[stmtID]
+		if len(payload) >= 10 {
+			// Execution consumes any long-data parameters buffered for this
+			// statement even if decoding the rest of the packet fails (e.g. an
+			// unsupported parameter type), because the connection keeps
+			// recording subsequent commands on the same statement.
+			delete(decodeCtx.LongDataParams, stmtID)
+		}
+		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities, longData, decodeCtx.StmtParamTypes[stmtID])
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_EXECUTE packet: %w", err)
 		}
+		if pkt.NewParamsBindFlag == 1 {
+			decodeCtx.rememberParamTypes(stmtID, pkt.Parameters)
+		}
+		if decodeCtx.Mode != models.MODE_TEST {
+			// Read only to match an older keploy's recording at replay.
+			pkt.LegacyParameters = nil
+		}
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE), clientConn, mysql.COM_STMT_EXECUTE, decodeCtx)
-		logger.Debug("COM_STMT_EXECUTE decoded", zap.Any("parsed packet", parsedPacket))
 
 	// case payloadType == mysql.COM_STMT_FETCH:
 	case payloadType == mysql.COM_STMT_CLOSE:
-		logger.Debug("COM_STMT_CLOSE packet", zap.Any("Type", payloadType))
 		pkt, err := preparedstmt.DecoderStmtClose(ctx, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_CLOSE packet: %w", err)
 		}
+		// The statement is gone, and its ID may name another one later.
+		delete(decodeCtx.StmtParamTypes, pkt.StatementID)
+		delete(decodeCtx.LongDataParams, pkt.StatementID)
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), clientConn, mysql.COM_STMT_CLOSE, decodeCtx)
-		logger.Debug("COM_STMT_CLOSE decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == mysql.COM_STMT_RESET:
-		logger.Debug("COM_STMT_RESET packet", zap.Any("Type", payloadType))
 		pkt, err := preparedstmt.DecodeStmtReset(ctx, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_RESET packet: %w", err)
 		}
 
+		// COM_STMT_RESET discards any long data buffered on the server, so
+		// drop our record of it too — otherwise the next EXECUTE would skip a
+		// parameter whose value is genuinely in the payload.
+		delete(decodeCtx.LongDataParams, pkt.StatementID)
+
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_RESET), clientConn, mysql.COM_STMT_RESET, decodeCtx)
 
-		logger.Debug("COM_STMT_RESET decoded", zap.Any("parsed packet", parsedPacket))
-
 	case payloadType == mysql.COM_STMT_SEND_LONG_DATA:
-		logger.Debug("COM_STMT_SEND_LONG_DATA packet", zap.Any("Type", payloadType))
 		pkt, err := preparedstmt.DecodeStmtSendLongData(ctx, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_SEND_LONG_DATA packet: %w", err)
 		}
 
+		// Remember that this parameter's value travelled out of band, so the
+		// following COM_STMT_EXECUTE knows not to look for it in its payload.
+		if decodeCtx.LongDataParams == nil {
+			decodeCtx.LongDataParams = make(map[uint32]map[uint16]bool)
+		}
+		if decodeCtx.LongDataParams[pkt.StatementID] == nil {
+			decodeCtx.LongDataParams[pkt.StatementID] = make(map[uint16]bool)
+		}
+		decodeCtx.LongDataParams[pkt.StatementID][pkt.ParameterID] = true
+
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA), clientConn, mysql.COM_STMT_SEND_LONG_DATA, decodeCtx)
-		logger.Debug("COM_STMT_SEND_LONG_DATA decoded", zap.Any("parsed packet", parsedPacket))
 	default:
-		logger.Debug("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
+		// Its size, never its bytes: an unknown command can carry a
+		// credential (COM_REGISTER_SLAVE's password) or data.
+		logger.Debug("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Int("payload_bytes", len(payload)), zap.Any("last operation", lastOp))
 		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), fmt.Sprintf("%#x", payloadType), clientConn, RESET, decodeCtx)
 	}
 
 	return parsedPacket, nil
+}
+
+// stmtIDFromExecute peeks the statement id out of a COM_STMT_EXECUTE payload
+// so the caller can look up which of its parameters arrived earlier via
+// COM_STMT_SEND_LONG_DATA. Returns 0 for a payload too short to carry one,
+// which simply means "no long data recorded".
+func stmtIDFromExecute(payload []byte) uint32 {
+	if len(payload) < 5 {
+		return 0
+	}
+	return binary.LittleEndian.Uint32(payload[1:5])
 }

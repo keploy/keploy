@@ -12,9 +12,10 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
@@ -26,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -54,8 +56,39 @@ type Hooks struct {
 	conf      *config.Config
 	m         sync.Mutex
 
+	// agentInfo is what SendAgentInfo last sent the kernel (agentInfoSent),
+	// for SetProxyPorts to send again with the proxy's ports.
+	agentInfoMu   sync.Mutex
+	agentInfo     structs.AgentInfo
+	agentInfoSent bool
+
 	// Linux-specific fields
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
+	// proxyMarked is set once MarkProxyListener has marked the proxy's
+	// listener: proxy_conns_established counts nothing before (proxyconns.go).
+	proxyMarked atomic.Bool
+	// app is the application's side of that count (appconns.go), started
+	// once, by the first mark (appOnce); appMu guards its lost count.
+	app     appConnState
+	appOnce sync.Once
+	appMu   sync.Mutex
+	// unix is the AF_UNIX connect report (unixconn.go), under unixMu.
+	unixMu sync.Mutex
+	unix   *unixConn
+	// udp is the proven switch's UDP watch (udpwatch.go), under udpMu; nil
+	// with the switch off.
+	udpMu sync.Mutex
+	udp   *udpWatch
+	// ready is the proven switch's readiness watch (readywatch.go), under
+	// readyMu; nil with the switch off.
+	readyMu sync.Mutex
+	ready   *readyWatch
+	// clientPIDNS is the pid namespace the registered client said it runs
+	// in (config.Agent.ClientPIDNS), beside its pid in the kernel's
+	// registration, under clientMu: the readiness watch reads that pid
+	// through it (utils.ClientPIDIn).
+	clientMu    sync.Mutex
+	clientPIDNS string
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -64,6 +97,12 @@ type Hooks struct {
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
 	socket      link.Link
+	processExit link.Link
+	// instanceFork is k_instance_fork's link, attached at the first
+	// SetInstance (instance.go); instanceMu guards it.
+	instanceMu   sync.Mutex
+	instanceFork link.Link
+
 	connect4    link.Link
 	udp4Sendmsg link.Link
 	udp4Recvmsg link.Link
@@ -75,9 +114,42 @@ type Hooks struct {
 	objects     bpfObjects
 	cgBind4     link.Link
 	cgBind6     link.Link
+	cgPostBind4 link.Link
+	cgPostBind6 link.Link
+	// kernelPortAlloc records that BOTH post_bind hooks attached, which is
+	// the precondition for telling bind4/6 to let the kernel pick the
+	// application's relocated port (structs.FlagKernelPortAlloc).
+	kernelPortAlloc bool
+	// postBindRefused is the post_bind hook that did not attach, and why:
+	// bind4/6 then pick the port each of the app's binds moves to
+	// themselves. nil when both attached or ingress was not attached.
+	// load says so once the agent's flags are final (sayBindFallback).
+	postBindRefused *postBindRefusal
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
+	// sockCreate is k_sock_create's link: sys_enter_socket's backstop,
+	// attached where it is.
+	sockCreate link.Link
+	// appConnRelease is k_app_conn_release's link: it writes how the
+	// application released each connection redirected to the proxy
+	// (TakeAppConnEnd).
+	appConnRelease link.Link
+	// stopSignal is k_stop_signal's link: it notes the stop signals other
+	// processes send, which appConnRelease's records carry.
+	stopSignal link.Link
+	// skips reads the runs of the hooks' programs the kernel skipped
+	// (skipwatch.go), from their load on.
+	skips *skipWatch
+
+	// ingress holds the application's moved ports from inside their bind
+	// (ingressport.go); nil when the kernel has no sk_lookup or a step
+	// failed, and keploy forwards as it did before. A call that uses its
+	// maps or park holds ingressMu's read lock throughout; the hold is set,
+	// cleared and closed under the write lock, so none of its maps is closed
+	// while a call uses it.
+	ingressMu sync.RWMutex
+	ingress   *ingressHold
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -87,7 +159,7 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	})
 	err := h.load(ctx, opts, setupOpts)
 	if err != nil {
-		return err
+		return privilegeFailure(err)
 	}
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -95,9 +167,45 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return errors.New("failed to get the error group from the context")
 	}
 
+	// A process the kernel refuses a place in the PID maps is not tracked,
+	// and nothing else would say so (pidmaps.go). Its last read, as ctx
+	// ends, comes before unLoad closes the counters.
+	watched := make(chan struct{})
+	g.Go(func() error {
+		defer close(watched)
+		defer utils.Recover(h.logger)
+		watchPIDMapRefusals(ctx, h.logger, h.pidMapCounts, pidMapPollInterval)
+		return nil
+	})
+
+	// The entries a process leaves in the PID maps when the kernel skips
+	// k_process_exit's run for its exit: deleted once the process is gone,
+	// whenever the program's skip count grew (skipwatch.go).
+	swept := make(chan struct{})
+	g.Go(func() error {
+		defer close(swept)
+		defer utils.Recover(h.logger)
+		t := time.NewTicker(pidMapPollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-t.C:
+				h.sweepIfExitsSkipped()
+			}
+		}
+	})
+
+	// The application's AF_UNIX connects to sockets no member of it owns
+	// (unixconn.go): calls keploy's proxy never sees.
+	h.startUnixConn(ctx)
+
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
+		<-watched
+		<-swept
 		h.unLoad(ctx, opts)
 
 		// deleting in order to free the memory on shutdown.
@@ -108,26 +216,141 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	return nil
 }
 
-func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
-	// Allow the current process to lock memory for eBPF resources.
-	if err := rlimit.RemoveMemlock(); err != nil {
-		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
+// attachIngress attaches the bind hooks to cGroupPath with attach
+// (link.AttachCgroup; a test passes one that refuses a hook).
+func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects, attach func(link.CgroupOptions) (link.Link, error)) error {
+	h.BindEvents = objs.BindEvents
+	cg4, err := attach(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet4Bind,
+		Program: objs.K_bind4,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
 		return err
 	}
+	h.cgBind4 = cg4
 
-	// Load pre-compiled programs and maps into the kernel.
-	objs := bpfObjects{}
-	bpfopts := &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{
-			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
-			LogSizeStart: 1 * 1024 * 1024,
-		},
+	cg6, err := attach(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet6Bind,
+		Program: objs.K_bind6,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
+		return err
+	}
+	h.cgBind6 = cg6
+
+	// post_bind4/6 are what make the kernel-allocated relocation port
+	// usable: bind4/6 set user_port = 0 so the kernel's allocator picks a
+	// port that is genuinely free (BPF cannot determine that — see
+	// find_free_port's comment in keploy/ebpf), and these hooks read the
+	// assigned port back out and publish the bind event.
+	//
+	// Non-fatal on purpose, and both-or-nothing: the flag below is only
+	// set when both attach, and without the flag bind4/6 pick the port
+	// themselves, a free one outside the network namespace's ephemeral
+	// range, or leave the bind alone when there is none (sayBindFallback
+	// says which, once the agent's flags are final). So a cgroup setup
+	// that rejects them still starts, while everyone else stops hitting
+	// "That port is already in use" on the relocated port. This covers
+	// ATTACH failure only — a program the kernel refuses to LOAD already
+	// fails LoadAndAssign above and aborts the agent, the same as every
+	// other program in this object.
+	pb4, err := attach(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupInet4PostBind,
+		Program: objs.K_postBind4,
+	})
+	if err != nil {
+		h.postBindRefused = &postBindRefusal{hook: "post_bind4", err: err}
+	} else {
+		pb6, err := attach(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet6PostBind,
+			Program: objs.K_postBind6,
+		})
+		if err != nil {
+			// Detach the v4 half too. With the flag off it would never do
+			// any work, and leaving it attached runs a guaranteed no-op
+			// program on every AF_INET bind on the machine for the whole
+			// session.
+			if cerr := pb4.Close(); cerr != nil {
+				h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
+			}
+			h.postBindRefused = &postBindRefusal{hook: "post_bind6", err: err}
+		} else {
+			h.cgPostBind4 = pb4
+			h.cgPostBind6 = pb6
+			h.kernelPortAlloc = true
+		}
 	}
 
+	h.logger.Debug("Attached ingress redirection hooks.",
+		zap.Bool("kernel_port_alloc", h.kernelPortAlloc))
+	return nil
+}
+
+// sendFinalAgentInfo makes info's flags final and sends info with send
+// (load's: SendAgentInfo). The downstream build's customizer
+// (agent.AgentInfoCustomizer) goes first, then the flags of the hooks that
+// attached, then start, which starts the watches whose flags it sets and
+// fills in the rest of info. The bind hooks read the flags as sent, so only
+// once send has taken them does it say where the app's binds go when a
+// post_bind hook did not attach (sayBindFallback): nothing under the
+// customizer's FlagObserveOnly, where the bind hooks move no bind.
+func (h *Hooks) sendFinalAgentInfo(info structs.AgentInfo, start func(*structs.AgentInfo) error, send func(structs.AgentInfo) error) error {
+	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
+	// slot consumed by the BPF cgroup hooks) before it is written.
+	if agent.AgentInfoCustomizer != nil {
+		agent.AgentInfoCustomizer(&info)
+	}
+
+	// OR'd in after the customizer so a downstream build setting its own
+	// flags cannot accidentally clear it, and only when both post_bind
+	// hooks are attached — bind4/6 must not hand the port choice to the
+	// kernel unless something is listening for the kernel's answer.
+	if h.kernelPortAlloc {
+		info.Flags |= structs.FlagKernelPortAlloc
+	}
+	info.Flags = classifyFlag(info.Flags, h.socket != nil)
+	// The bind hooks note what the app binds for the ingress hold only
+	// once both its programs are attached (ingressport.go).
+	info.Flags = ingressHoldFlag(info.Flags, h.IngressHeld())
+	if err := start(&info); err != nil {
+		return err
+	}
+	if err := send(info); err != nil {
+		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
+		return err
+	}
+	h.sayBindFallback(info.Flags)
+	return nil
+}
+
+// hookLoadOptions are the options load() loads hookSpec() with: no verifier
+// log. The kernel formats the log while it verifies, and at the instruction
+// and branch level the agent asked for, that log (and verifying again each
+// program whose log outgrew its buffer: cilium/ebpf grows the buffer on
+// ENOSPC and loads the program again) was nearly all of the load:
+// keploy's hook object (bpf_x86_bpfel.o) loaded in 3.5-6.5 s with it and in
+// 0.09-0.24 s without on 5.10.240, and in 0.84-1.5 s against 0.09-0.11 s on
+// 6.12.40, on 4-vCPU KVM guests, every agent start, and for longer on a host
+// short of CPU. A program the verifier rejects is loaded again by
+// cilium/ebpf with a log (LogLevelBranch, in a buffer it grows until the log
+// fits), so a rejection's *ebpf.VerifierError still carries the verifier's
+// account of the failing path, which load() prints.
+func hookLoadOptions() *ebpf.CollectionOptions {
+	return &ebpf.CollectionOptions{}
+}
+
+// hookSpec is the collection load() loads into the kernel: the compiled
+// objects, with k_sockops's program and attach types set.
+func hookSpec() (*ebpf.CollectionSpec, error) {
 	spec, err := loadBpf()
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to load BPF spec")
-		return err
+		return nil, err
 	}
 
 	programs := []struct {
@@ -144,9 +367,71 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 			prog.AttachType = p.aType
 		}
 	}
+	shrinkUnswitchedMaps(spec)
+	return spec, nil
+}
 
-	// Now load and assign into the kernel with the corrected spec
-	if err := spec.LoadAndAssign(&objs, bpfopts); err != nil {
+// unswitchedMaps are the maps only the proven switch's UDP and readiness
+// watches use, which
+// the kernel allocates whole at load (an LRU hash, a ring buffer): with the
+// switch off nothing uses them, so they are loaded at their smallest, and
+// the watch costs nothing (udpwatch.go).
+var unswitchedMaps = []string{"udp_peer_first", "udp_member_addrs", "udp_reply_events", "ready_socks", "ready_mains", "ready_live", "ready_listen_events", "ready_seen", "ready_holders"}
+
+// shrinkUnswitchedMaps loads unswitchedMaps at their smallest when the
+// proven switch is off: one entry, or one page for a ring buffer.
+func shrinkUnswitchedMaps(spec *ebpf.CollectionSpec) {
+	if provenswitch.On() {
+		return
+	}
+	for _, name := range unswitchedMaps {
+		m, ok := spec.Maps[name]
+		if !ok {
+			continue
+		}
+		if m.Type == ebpf.RingBuf {
+			m.MaxEntries = uint32(os.Getpagesize())
+		} else {
+			m.MaxEntries = 1
+		}
+	}
+}
+
+func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
+	// The pass-through list is checked before anything is loaded: a run whose
+	// ports the kernel cannot hold is refused at once, with nothing to undo.
+	clientInfo, err := clientInfoFor(ctx, setupOpts, opts.Rules)
+	if err != nil {
+		return err
+	}
+
+	// Allow the current process to lock memory for eBPF resources.
+	if err := rlimit.RemoveMemlock(); err != nil {
+		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
+		return err
+	}
+
+	// Load pre-compiled programs and maps into the kernel.
+	objs := bpfObjects{}
+
+	spec, err := hookSpec()
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to load BPF spec")
+		return err
+	}
+
+	// Now load and assign into the kernel with the corrected spec.
+	//
+	// BPF_PROG_LOAD is uninterruptible while it waits in the kernel, so a load
+	// stuck there leaves the agent with no log output at all and the container
+	// merely "not ready". watchedCall makes that state describe itself, from
+	// the thread making the call. Scoped to this one call: the rest of load()
+	// attaches tracepoints and resolves cgroups, and a watchdog left running
+	// across that would blame BPF_PROG_LOAD for whatever else was slow.
+	err = watchedCall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", func() error {
+		return spec.LoadAndAssign(&objs, hookLoadOptions())
+	})
+	if err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			fmt.Printf("VERIFIER FAILURE:\n%s\n", strings.Join(ve.Log, "\n"))
@@ -160,8 +445,38 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistrationMap = objs.KeployAgentRegistrationMap
 	h.objects = objs
+	// The runs of these programs the kernel skips, from here on, before
+	// any attaches (skipwatch.go).
+	h.skips = newSkipWatch(h.logger, objs.SocketClassifyFailures)
+	h.skips.watch(programsByName(&objs.bpfPrograms))
 	h.objectsMutex.Unlock()
 	// ---------------
+
+	// sys_enter_socket and k_sock_create add to target_namespace_pids and
+	// excluded_pids (a classification replaces a dead process's entries
+	// under the TGID, track_process); k_process_exit takes a process out of
+	// both when its last thread exits, and the sweep (skipwatch.go) what a
+	// skipped run of it left. Without it the maps only grow, and once
+	// target_namespace_pids is full (10240 TGIDs: seconds of process churn,
+	// and it takes every process in the agent's PID namespace that calls
+	// socket(), of the keploy client's tree only for a native agent) no new
+	// process is intercepted, so its calls go to the real dependency with
+	// nothing recorded or mocked. (A refused insert is counted and reported,
+	// pidmaps.go; with this hook it takes more live processes than the map
+	// holds.) Attached in every mode,
+	// DaemonSet and per-container targeting included: it only removes TGIDs
+	// of processes that no longer exist, whoever added them. A raw
+	// tracepoint, so it needs no tracefs. Attached before sys_enter_socket so
+	// that no process it adds can exit unseen.
+	processExit, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		Name:    "sched_process_exit",
+		Program: objs.K_processExit,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the sched_process_exit hook that removes exited processes from the PID maps")
+		return err
+	}
+	h.processExit = processExit
 
 	// In DaemonSet mode the CRD-scoped SessionReconciler is the SOLE owner of
 	// target_namespace_pids — it arms exactly the recorded pods' TGIDs, and the
@@ -174,13 +489,27 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// "test-set-0 / node-daemon traffic" leak. The reconciler-armed TGIDs
 	// already capture the app's ingress (no auto-detection needed), so skip the
 	// tracepoint entirely in DS mode.
-	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" {
-		h.logger.Info("daemonset mode: skipping sys_enter_socket PID auto-registration (SessionReconciler owns target_namespace_pids)")
+	// Low-latency per-container targeting (KEPLOY_TARGET_CONTAINERS set by the
+	// webhook) is the same situation as DaemonSet: the enterprise exec-barrier
+	// owns target_namespace_pids and scopes it to the TARGET container's cgroup.
+	// sys_enter_socket would auto-register EVERY process in the pod's PID ns
+	// (both target and sibling containers, keyed by host TGID), leaking sibling
+	// traffic past the cgroup targeting — the same pollution the DS skip prevents.
+	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" || os.Getenv("KEPLOY_TARGET_CONTAINERS") != "" {
+		h.logger.Info("daemonset/targeting mode: skipping sys_enter_socket PID auto-registration (target_namespace_pids is owned/scoped externally)")
 	} else {
-		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
+		// A perf-event attach locks the kernel's tracing event_mutex
+		// (perf_trace_init), which every other tracer's attach and detach on
+		// the host holds too: watched like the load.
+		var socket link.Link
+		err := watchedCall(h.logger, "perf_event_open (tracepoint syscalls/sys_enter_socket) via link.Tracepoint", func() error {
+			var err error
+			socket, err = link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
+			return err
+		})
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
-			return err
+			return tracepointFailure(err, tracefsMounted())
 		}
 		h.socket = socket
 	}
@@ -226,31 +555,73 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.sockops = sockops
 
-	if opts.Mode == models.MODE_RECORD {
-
-		h.BindEvents = objs.BindEvents
-		cg4, err := link.AttachCgroup(link.CgroupOptions{
+	// sys_enter_socket's backstop, where sys_enter_socket is attached: the
+	// kernel skips runs of a tracepoint's program, and from 7.2 a syscall
+	// tracepoint's programs run preemptible, so under load it misses
+	// processes' socket() calls, and such a process is no target.
+	// k_sock_create, a cgroup program the kernel runs for every inet
+	// socket's creation, classifies by the same rule before the process's
+	// first connect, send or bind reaches pid_filter (keploy/ebpf
+	// keploy_ebpf.c).
+	if h.socket != nil {
+		sc, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupInet4Bind,
-			Program: objs.K_bind4,
+			Attach:  ebpf.AttachCGroupInetSockCreate,
+			Program: objs.K_sockCreate,
 		})
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
+			utils.LogError(h.logger, err, "failed to attach the sock_create cgroup hook that classifies a process sys_enter_socket missed")
 			return err
 		}
-		h.cgBind4 = cg4
+		h.sockCreate = sc
+	}
 
-		cg6, err := link.AttachCgroup(link.CgroupOptions{
-			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupInet6Bind,
-			Program: objs.K_bind6,
-		})
-		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
-			return err
+	// How the application released each connection redirected to the
+	// proxy: while its process ran, or as it exited, and by what signal
+	// (TakeAppConnEnd). The recorder tells by it the application's giving
+	// up on a call, a fault, from its exit cutting the call, the run's end.
+	// A process that handles a stop signal another process sent and exits
+	// from its handler (a JVM's or .NET's default) exits with no signal in
+	// its status: k_stop_signal notes the signal as it is sent, and the
+	// release carries it. It is required, as the release is: without it a
+	// stopped client's exit would read as the run's end, and the calls it
+	// had open would record no fault.
+	ss, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		Name:    "signal_generate",
+		Program: objs.K_stopSignal,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the signal_generate hook that notes the stop signals sent to the application")
+		return err
+	}
+	h.stopSignal = ss
+	acr, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCgroupInetSockRelease,
+		Program: objs.K_appConnRelease,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the sock_release cgroup hook that says how the application released its connections")
+		return err
+	}
+	h.appConnRelease = acr
+
+	// Ingress is captured while recording, and in mock mode whenever requests are on, so a replay can
+	// compare the app's actual responses with the recorded cases. In mock mode the wrapped process is a
+	// test runner, so a failure to attach here only means no requests are recorded; the egress capture
+	// the run depends on goes ahead.
+	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests && len(agent.GetPortToSendToKernel(ctx, opts.Rules)) > 0) {
+		if err := h.attachIngress(cGroupPath, objs, link.AttachCgroup); err != nil {
+			if !setupOpts.MockMode {
+				return err
+			}
+			h.logger.Warn("the ingress hooks did not attach; the app's incoming requests will not be recorded as test cases", zap.Error(err))
+		} else {
+			// The bind hooks now move the app's bind inside bind(2) and write
+			// app_port_info. Hold the moved ports from that moment, so a call
+			// to one before keploy's forwarder listens is served, not refused.
+			h.startIngressHold(ctx, cGroupPath)
 		}
-		h.cgBind6 = cg6
-		h.logger.Debug("Attached ingress redirection hooks.")
 	}
 
 	c4, err := link.AttachCgroup(link.CgroupOptions{
@@ -378,57 +749,97 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	agentInfo.DNSPort = int32(setupOpts.DnsPort)
 
-	// Set recording start time using CLOCK_BOOTTIME so the eBPF tracepoint
-	// can compare process start_boottime and auto-exclude pre-existing PIDs.
+	// When the recording started in this PID namespace, for the eBPF
+	// tracepoint to exclude the processes that were there before it: this
+	// agent's load time, unless an agent before it in the same PID namespace
+	// loaded first (recording_start.go).
 	if setupOpts.IsDocker {
-		var ts unix.Timespec
-		if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-			h.logger.Debug("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
-		} else {
-			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
-			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
-		}
+		agentInfo.RecordingStartTime = recordingStart(h.logger, hostRecordingStart())
 	}
 
-	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
-	// slot consumed by the BPF cgroup hooks) before it is written.
-	if agent.AgentInfoCustomizer != nil {
-		agent.AgentInfoCustomizer(&agentInfo)
-	}
-
-	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
-	if err != nil {
-		h.logger.Debug("Failed to register Client")
-	}
-	proxyInfo, err := h.GetProxyInfo(ctx, setupOpts, opts)
-	if err != nil {
-		return err
-	}
-
-	if opts.IsDocker {
-		h.proxyIP4, err = utils.GetContainerIPv4()
+	err = h.sendFinalAgentInfo(agentInfo, func(info *structs.AgentInfo) error {
+		// Under the proven switch, the application's non-DNS UDP is watched
+		// for replies, and QUIC refused (udpwatch.go).
+		udpFlags, err := h.startProvenUDP(cGroupPath)
 		if err != nil {
-			h.logger.Error("Failed to get the container IP", zap.Error(err))
+			utils.LogError(h.logger, err, "failed to start the proven switch's UDP watch")
 			return err
 		}
-		ipv6, err := ToIPv4MappedIPv6(h.proxyIP4)
+		info.Flags &^= structs.FlagProvenUDP
+		info.Flags |= udpFlags
+		// Under the proven switch, the application's listens and the
+		// progress of its start, for keploy test's readiness (readywatch.go).
+		readyFlags, err := h.startProvenReady(cGroupPath, opts.IsDocker, opts.Mode)
 		if err != nil {
-			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", h.proxyIP4, err)
+			utils.LogError(h.logger, err, "failed to start the proven switch's readiness watch")
+			return err
 		}
-		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.proxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-		h.proxyIP6 = ipv6
-	}
-	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
+		info.Flags &^= structs.FlagProvenReady
+		info.Flags |= readyFlags
 
-	agentInfo.Proxy = proxyInfo
-	err = h.SendAgentInfo(agentInfo)
+		// A client keploy cannot register would have none of its
+		// pass-through ports bypassed, so the start fails here rather than
+		// going on without them.
+		if err := h.registerClient(clientInfo, setupOpts); err != nil {
+			return fmt.Errorf("failed to register the client's pass-through ports with the kernel: %w", err)
+		}
+		logKernelPassThroughEgress(ctx, h.logger, setupOpts, opts.Rules)
+		proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
+		if err != nil {
+			return err
+		}
+		h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
+		info.Proxy = proxyInfo
+		return nil
+	}, h.SendAgentInfo)
 	if err != nil {
-		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
+	}
+
+	// With the flag set: the kernel records the agent's own mount namespace
+	// (its container), so what runs in its container is not the application's progress
+	// (readywatch.go). Failing, the watch says so at each read.
+	h.readyMu.Lock()
+	ready := h.ready
+	h.readyMu.Unlock()
+	if ready != nil {
+		if err := ready.selfRegistered(); err != nil {
+			h.logger.Warn("the readiness watch could not record the agent's own mount namespace; keploy test cannot tell whether the application is ready", zap.Error(err))
+		}
 	}
 
 	return nil
 }
+
+// resolveProxyInfo is GetProxyInfo, keeping the addresses it picked: where the
+// kernel is told to send the application's connections is where the
+// application reaches the proxy, and so what ProxyIPv4 reports. Looking the
+// address up a second time could come back with another interface's.
+func (h *Hooks) resolveProxyInfo(ctx context.Context, setupOpts config.Agent, opts agent.HookCfg) (structs.ProxyInfo, error) {
+	info, err := h.GetProxyInfo(ctx, setupOpts, opts)
+	if err != nil {
+		return structs.ProxyInfo{}, err
+	}
+	var ip4 [4]byte
+	binary.BigEndian.PutUint32(ip4[:], info.IP4)
+	h.proxyIP4 = net.IP(ip4[:]).String()
+	h.proxyIP6 = info.IP6
+	return info, nil
+}
+
+// ProxyIPv4 is the IPv4 address the application reaches the proxy at, once
+// Load has returned: loopback for a native agent, which shares the
+// application's network namespace, and for one started with --is-docker, its
+// container's own address, or loopback where the container has no IPv4
+// address but loopback's, as GetProxyInfo decides.
+func (h *Hooks) ProxyIPv4() string {
+	return h.proxyIP4
+}
+
+// Compile-time proof that the Linux hooks report where the proxy is reached:
+// were the method renamed, the agent's type assertion would stop matching
+// and an --is-docker agent's DNS server would silently answer loopback.
+var _ agent.ProxyAddressReporter = (*Hooks)(nil)
 
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
@@ -437,6 +848,12 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.socket != nil {
 		if err := h.socket.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the tracepoint hook on sys_socket")
+		}
+	}
+
+	if h.processExit != nil {
+		if err := h.processExit.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sched_process_exit hook")
 		}
 	}
 
@@ -489,15 +906,60 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.sockops != nil {
 		h.sockops.Close()
 	}
+	if h.sockCreate != nil {
+		if err := h.sockCreate.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sock_create hook")
+		}
+	}
+	if h.appConnRelease != nil {
+		if err := h.appConnRelease.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sock_release hook of the application's connections")
+		}
+	}
+	if h.stopSignal != nil {
+		if err := h.stopSignal.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the signal_generate hook of the stop signals sent to the application")
+		}
+	}
+	// What each program skipped in the session, read before they close.
+	if h.skips != nil {
+		h.objectsMutex.RLock()
+		h.skips.close()
+		h.objectsMutex.RUnlock()
+	}
+
+	// The UDP watch reads the objects' ring buffer: closed before them.
+	// The watch stays, failed: a read after the hooks unloaded is unknown,
+	// never 0.
+	h.udpMu.Lock()
+	if h.udp != nil {
+		h.udp.fail(errors.New("the UDP watch was closed with the hooks"))
+		h.udp.close()
+	}
+	h.udpMu.Unlock()
+	h.readyMu.Lock()
+	if h.ready != nil {
+		h.ready.fail(errors.New("the readiness watch was closed with the hooks"))
+		h.ready.close()
+	}
+	h.readyMu.Unlock()
+
+	// The ingress hold's program and park go before the objects it shares
+	// app_port_info with (ctx.Done already closes it; this is the backstop).
+	h.closeIngressHold()
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
+	h.stopAppConns()
+	if err := h.closeInstanceFork(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the sched_process_fork hook that keeps keploy instances")
+	}
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}
 	h.objectsMutex.Unlock()
 
-	if opts.Mode == models.MODE_RECORD {
+	if h.cgBind4 != nil || h.cgBind6 != nil {
 		if h.cgBind4 != nil {
 			if err := h.cgBind4.Close(); err != nil {
 				utils.LogError(h.logger, err, "failed to close the cgBind4")
@@ -508,16 +970,36 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 				utils.LogError(h.logger, err, "failed to close the cgBind6")
 			}
 		}
+		if h.cgPostBind4 != nil {
+			if err := h.cgPostBind4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgPostBind4")
+			}
+		}
+		if h.cgPostBind6 != nil {
+			if err := h.cgPostBind6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgPostBind6")
+			}
+		}
 
 	}
 	h.logger.Debug("eBPF resources released successfully...")
 
 }
 
-func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {
+// registerClient hands the kernel the client info clientInfoFor built.
+func (h *Hooks) registerClient(clientInfo structs.ClientInfo, opts config.Agent) error {
 	h.logger.Debug("Registering the client Info with keploy")
-	// Register the client and start processing
+	h.clientMu.Lock()
+	h.clientPIDNS = opts.ClientPIDNS
+	h.clientMu.Unlock()
 
+	return h.SendClientInfo(clientInfo)
+}
+
+// clientInfoFor is the client info registerClient hands the kernel: the mode,
+// the client's pid, and the pass-through list (kernelPassThroughList), with
+// keploy's own ports in it before the ports of the user's bypassRules.
+func clientInfoFor(ctx context.Context, opts config.Agent, rules []models.BypassRule) (structs.ClientInfo, error) {
 	clientInfo := structs.ClientInfo{}
 
 	switch opts.Mode {
@@ -529,23 +1011,69 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 		clientInfo.Mode = uint32(0)
 	}
 
-	ports := agent.GetPortToSendToKernel(ctx, rules)
-
-	if agent.ExtraPassThroughPortsHook != nil {
-		ports = append(ports, agent.ExtraPassThroughPortsHook()...)
+	own, user := passThroughSources(ctx, opts, rules)
+	var ownPorts []uint
+	for _, s := range own {
+		ownPorts = append(ownPorts, s.Ports...)
 	}
-
-	for i := 0; i < 10; i++ {
-		if len(ports) <= i {
-			clientInfo.PassThroughPorts[i] = -1
-			continue
-		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
+	list, err := kernelPassThroughList(ownPorts, user.Ports)
+	if err != nil {
+		return structs.ClientInfo{}, err
 	}
+	clientInfo.PassThroughPorts = list
 	clientInfo.ClientNSPID = opts.ClientNSPID
-
-	return h.SendClientInfo(clientInfo)
+	return clientInfo, nil
 }
+
+// passThroughSources is each knob that puts ports in the kernel's pass-through
+// list, with its ports: keploy's own (own), then the user's port-only
+// bypassRules (user).
+func passThroughSources(ctx context.Context, opts config.Agent, rules []models.BypassRule) (own []agent.PassThroughSource, user agent.PassThroughSource) {
+	if agent.ExtraPassThroughPortsHook != nil {
+		own = append(own, agent.PassThroughSource{
+			Knob:  "a pass-through port this build registers (RegisterExtraPassThroughPortsHook)",
+			Ports: agent.ExtraPassThroughPortsHook(),
+		})
+	}
+
+	// Mock mode: the wrapped test runner calls the agent's own HTTP server
+	// (the /agent/scope/* API) at localhost:<AgentPort>. That process is inside
+	// the intercepted PID tree, so without bypassing this port the runner's
+	// scope calls would be redirected into the proxy instead of reaching the
+	// agent. Kernel-level bypass the agent's own control port.
+	if opts.MockMode && opts.AgentPort != 0 {
+		own = append(own, agent.PassThroughSource{
+			Knob:  "keploy mock's agent API port",
+			Ports: []uint{uint(opts.AgentPort)},
+		})
+	}
+
+	return own, agent.PassThroughSource{
+		Knob:  "bypassRules naming only a port",
+		Ports: agent.GetPortToSendToKernel(ctx, rules),
+	}
+}
+
+// logKernelPassThroughEgress names, in a replay, each knob whose ports the
+// kernel hands to their real destination: keploy neither serves nor reports a
+// connection to one, so each is real egress. The list holds every port or the
+// run was refused (kernelPassThroughList), so no knob is named for a port the
+// kernel does not leave alone.
+func logKernelPassThroughEgress(ctx context.Context, logger *zap.Logger, opts config.Agent, rules []models.BypassRule) {
+	if opts.Mode != models.MODE_TEST {
+		return
+	}
+	own, user := passThroughSources(ctx, opts, rules)
+	for _, s := range append(own, user) {
+		if len(s.Ports) > 0 {
+			agent.LogRealEgress(logger, s.Knob, agent.KernelPassThroughDest, zap.Uints("ports", s.Ports))
+		}
+	}
+}
+
+// containerAddress is the address the container of an agent started with
+// --is-docker is reached at (utils.GetContainerIP); a test sets another.
+var containerAddress = utils.GetContainerIP
 
 func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.HookCfg) (structs.ProxyInfo, error) {
 	port := opts.ProxyPort
@@ -587,10 +1115,14 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 
 		return proxyInfo, nil
 	}
-	AgentIP, err := utils.GetContainerIPv4() // in case of docker we will get the container's IP fron within the container
+	containerIP, err := containerAddress() // in case of docker we will get the container's IP fron within the container
 	if err != nil {
 		return structs.ProxyInfo{}, err
 	}
+	if containerIP.To4() == nil {
+		return ipv6OnlyProxyInfo(containerIP, port), nil
+	}
+	AgentIP := containerIP.String()
 	ipv4, err := IPv4ToUint32(AgentIP)
 	if err != nil {
 		return structs.ProxyInfo{}, err
@@ -612,6 +1144,28 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 	}
 
 	return proxyInfo, nil
+}
+
+// ipv6OnlyProxyInfo is where an agent started with --is-docker whose container
+// has no IPv4 address but loopback's (a single-stack IPv6 Pod) has the kernel
+// send the applications' connections: an IPv6 one to the container's own IPv6
+// address ip, as it is, and an IPv4 one to loopback. The applications share
+// the agent's network namespace (a Pod's containers do, and docker runs the
+// application in the agent container's), where loopback reaches the proxy;
+// and on a network with no IPv4 no other IPv4 address could.
+func ipv6OnlyProxyInfo(ip net.IP, port uint32) structs.ProxyInfo {
+	b := ip.To16()
+	var ip6 [4]uint32
+	for i := range ip6 {
+		// Host order, as ToIPv4MappedIPv6 gives it: the programs turn each
+		// word to network order as they rewrite the destination.
+		ip6[i] = binary.BigEndian.Uint32(b[4*i:])
+	}
+	return structs.ProxyInfo{
+		IP4:  0x7f000001, // 127.0.0.1
+		IP6:  ip6,
+		Port: port,
+	}
 }
 
 // IPv4ToUint32 converts a string representation of an IPv4 address to a 32-bit integer.
@@ -665,4 +1219,21 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 	}
 
 	return result, nil
+}
+
+// SetProxyPorts tells the loaded hooks that the proxy listens on proxyPort and
+// its DNS server on dnsPort (agent.ProxyPortsSetter): the agent info Load
+// sent, sent again with those ports. Load's redirect to the proxy goes to
+// GetProxyInfo's port, the proxy's own unless a port override is set; the
+// agent moves no port where one is.
+func (h *Hooks) SetProxyPorts(proxyPort, dnsPort uint32) error {
+	h.agentInfoMu.Lock()
+	defer h.agentInfoMu.Unlock()
+	if !h.agentInfoSent {
+		return errors.New("the hooks have sent the kernel no agent info: they are not loaded")
+	}
+	info := h.agentInfo
+	info.Proxy.Port = proxyPort
+	info.DNSPort = int32(dnsPort)
+	return h.sendAgentInfoLocked(info)
 }

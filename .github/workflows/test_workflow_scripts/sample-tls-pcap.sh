@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+
+source "$(dirname "${BASH_SOURCE[0]}")/go-retry.sh"
+# http_mock_count: the Http mocks of mocks.yaml, by their kind whole.
+source "$(dirname "${BASH_SOURCE[0]}")/mock-kinds.sh" || exit 1
 # E2E validation for keploy's TLS capture features.
 #
 # Runs the sample-tls-app under keploy with $KEPLOY_FLAGS — either
-# "--capture-packets" alone (default record path) or together with
-# "--opportunistic-tls-intercept" (peek-and-hijack passthrough). In
-# both modes it asserts:
+# "--capture-packets" alone (default record path), or together with
+# "--opportunistic-tls-intercept" (peek-and-hijack passthrough), or
+# together with "--upstream-tls-verify" (opt-in upstream certificate
+# verification), or with BOTH of the latter two (the opportunistic
+# hijack's own upstream dial site, which is not reachable from any of
+# the other three). In every mode it asserts:
 #
 #   1. <test-set>/traffic.pcap and <test-set>/sslkeys.log appeared
 #      and grew during the recording (proves the streaming model).
@@ -22,6 +34,14 @@
 #   6. Postgres TLS round-trip works through the proxy: same shape.
 #   7. mocks.yaml exists and (for capture-only mode) contains
 #      kind: Http records — proves the HTTP parser dispatch fired.
+#   8. For the verify-upstream* modes: the agent reported that upstream
+#      certificate verification was actually ON. In verify-upstream the
+#      mock inventory must still cover all three upstreams (Http, MySQL,
+#      Postgres) — see that case below for why the mocks, not the exit
+#      code, are the load-bearing assertion. In
+#      verify-upstream-opportunistic it is the reverse: the hijack owns
+#      the connection, so a verification failure kills the application's
+#      socket and the round-trips above are what fail.
 #
 # Run from the sample-tls-app working directory. RECORD_BIN must
 # point at a keploy build with the postgres parsers linked. KEPLOY_FLAGS
@@ -34,7 +54,7 @@ section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
 dump_state() {
-  rc=$?
+  local rc=$1
   echo "::error::e2e failed (mode=${MODE_NAME:-?}, exit=$rc). Dumping context for triage…"
   echo "== keploy log (last 200 lines) =="
   [[ -f keploy-record.log ]] && tail -200 keploy-record.log || true
@@ -46,12 +66,27 @@ dump_state() {
   [[ -f keploy/test-set-0/sslkeys.log ]] && sudo head -10 keploy/test-set-0/sslkeys.log || true
   echo "== capinfos =="
   [[ -f keploy/test-set-0/traffic.pcap ]] && sudo capinfos -c -i keploy/test-set-0/traffic.pcap 2>/dev/null || true
+  echo "== tshark stderr, by call =="
+  [[ -n "${TSHARK_ERR:-}" && -f "$TSHARK_ERR" ]] && cat "$TSHARK_ERR" || true
   echo "== mysql/postgres docker logs =="
   docker logs sample-mysql-tls 2>&1 | tail -40 || true
   docker logs sample-pg-tls 2>&1 | tail -40 || true
-  exit "$rc"
 }
-trap dump_state ERR
+# On EXIT, not ERR: most assertions below fail with `exit 1`, which never
+# fires an ERR trap, so every assertion failure used to end the job with none
+# of this context - run 36092000545's decrypt failure left no keploy log, no
+# keylog and no capture summary to look at. It also removes the temp files
+# the decrypt below makes, which are named here first: this file is sourced,
+# so a name left over in the caller's shell must not be removed.
+TSHARK_IN='' TSHARK_ERR='' REMAPPED_PCAP=''
+remove_temp_files() {
+  [[ -z "$TSHARK_IN" ]] || sudo rm -rf "$TSHARK_IN"
+  local f
+  for f in "$TSHARK_ERR" "$REMAPPED_PCAP"; do
+    [[ -z "$f" ]] || rm -f "$f"
+  done
+}
+trap 'rc=$?; trap - EXIT; if [[ $rc -ne 0 ]]; then dump_state "$rc"; fi; remove_temp_files || true; exit "$rc"' EXIT
 
 wait_for_http() {
   local url="$1" tries="${2:-90}"
@@ -99,6 +134,21 @@ openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 # same CI CA that gets installed into the OS trust store below, with
 # SANs for both hostnames, so the app's system-pool verification passes
 # directly and through keploy's MITM exactly as the public certs did.
+#
+# The SANs are DNS-ONLY, deliberately. This cert used to also carry
+# DNS:localhost and IP:127.0.0.1, and that IP SAN was actively harmful:
+# the app reaches these hostnames over loopback, so keploy's destination
+# address is 127.0.0.1:7443, and an IP SAN made "verify against the dial
+# address" succeed BY ACCIDENT. Every ServerName-plumbing defect on the
+# verifying path — keploy checking the destination IP instead of the SNI
+# the application sent — therefore passed CI while breaking every
+# hostname-addressed upstream in the real world. Without the IP SAN the
+# HTTPS leg can only verify if keploy carries the application's SNI
+# through to its own dial, which is the property under test. Nothing
+# dials this listener by IP or as "localhost" (grep UPSTREAM_PORT: every
+# reference is $QUOTE_HOST / $ECHO_HOST), so no other mode is affected.
+# The DB cert (server.cnf above) keeps its IP SAN on purpose — MySQL is
+# dialled at an IP literal and sends no SNI, which is the OTHER path.
 openssl genrsa -out upstream.key 2048 >/dev/null 2>&1
 cat > upstream.cnf <<EOF
 [req]
@@ -108,7 +158,7 @@ prompt=no
 [dn]
 CN=keploy-ci-upstream
 [ext]
-subjectAltName=DNS:quote.keploy.local,DNS:echo.keploy.local,DNS:localhost,IP:127.0.0.1
+subjectAltName=DNS:quote.keploy.local,DNS:echo.keploy.local
 EOF
 openssl req -new -key upstream.key -out upstream.csr -config upstream.cnf >/dev/null 2>&1
 openssl x509 -req -in upstream.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
@@ -249,13 +299,16 @@ endsec
 QUOTE_HOST=quote.keploy.local
 ECHO_HOST=echo.keploy.local
 UPSTREAM_PORT=7443
+# keploy's outgoing proxy port, passed explicitly because the decrypt below
+# pins it to TLS (see tshark_tls) and must name the port keploy really used.
+KEPLOY_PROXY_PORT=16789
 
 section "Start local TLS upstream (replaces api.github.com / httpbin.org)"
 echo "127.0.0.1 ${QUOTE_HOST} ${ECHO_HOST}" | sudo tee -a /etc/hosts >/dev/null
 # The upstream fixture ships with the sample app (ci/tls-upstream); build
 # and run it from the checked-out app repo. Pre-build so $! is the server
 # PID itself (not a `go run` wrapper), which the teardown kill relies on.
-go build -o tls-upstream ./ci/tls-upstream
+go_retry build -o tls-upstream ./ci/tls-upstream
 ./tls-upstream .ci/certs/upstream.crt .ci/certs/upstream.key 127.0.0.1 "$UPSTREAM_PORT" \
   > tls-upstream.log 2>&1 &
 UPSTREAM_PID=$!
@@ -291,24 +344,23 @@ export POSTGRES_DSN="postgres://app:ci_pg_pw@localhost:5433/app?sslmode=verify-c
 export QUOTE_URL="https://${QUOTE_HOST}:${UPSTREAM_PORT}/zen"
 export ECHO_URL="https://${ECHO_HOST}:${UPSTREAM_PORT}/anything"
 
-go build -o sample-tls-app .
+go_retry build -o sample-tls-app .
 
 # shellcheck disable=SC2086
-sudo -E env PATH="$PATH" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
   QUOTE_URL="$QUOTE_URL" ECHO_URL="$ECHO_URL" \
   "$RECORD_BIN" record \
   -c "./sample-tls-app" \
   $KEPLOY_FLAGS \
+  --proxy-port "$KEPLOY_PROXY_PORT" \
   > keploy-record.log 2>&1 &
 endsec
 
 section "Drive HTTP / MySQL / Postgres traffic"
 if ! wait_for_http "http://localhost:8080/" 120; then
   echo "::error::sample-tls-app did not become healthy on :8080"
-  # Explicit dump_state — `exit 1` on a control-flow branch like
-  # this does not trigger the ERR trap under `set -e`, so we'd
-  # otherwise lose keploy's stderr. False, by contrast, fires ERR.
-  false
+  # Any non-zero exit dumps keploy's log via the EXIT trap.
+  exit 1
 fi
 
 # HTTP routes — outbound TLS to the LOCAL upstream.
@@ -335,7 +387,7 @@ echo "good! HTTP routes returned"
 curl -fsS -X POST "http://localhost:8080/mysql/items?name=ci-${MODE_NAME}-mysql" >/dev/null
 MYSQL_BODY=$(curl -fsS http://localhost:8080/mysql/items)
 echo "mysql GET body: $MYSQL_BODY"
-echo "$MYSQL_BODY" | grep -q "ci-${MODE_NAME}-mysql" || {
+echo "$MYSQL_BODY" | grep "ci-${MODE_NAME}-mysql" >/dev/null || {
   echo "::error::MySQL round-trip failed — inserted name not present in GET response"
   exit 1
 }
@@ -345,7 +397,7 @@ echo "good! MySQL round-trip succeeded through keploy proxy"
 curl -fsS -X POST "http://localhost:8080/postgres/items?name=ci-${MODE_NAME}-pg" >/dev/null
 PG_BODY=$(curl -fsS http://localhost:8080/postgres/items)
 echo "postgres GET body: $PG_BODY"
-echo "$PG_BODY" | grep -q "ci-${MODE_NAME}-pg" || {
+echo "$PG_BODY" | grep "ci-${MODE_NAME}-pg" >/dev/null || {
   echo "::error::Postgres round-trip failed — inserted name not present in GET response"
   exit 1
 }
@@ -363,7 +415,57 @@ for _ in $(seq 1 30); do
 done
 endsec
 
+section "Assert keploy's per-run MITM CA did not persist in the OS trust store"
+# keploy now generates a fresh MITM CA per run, installs it into the system
+# store under a unique keploy-mitm-<id>.crt name for the duration of the run,
+# and removes it on shutdown. After the run, no such anchor may remain in any
+# store dir — otherwise trust (to a CA whose key is already gone) would leak
+# across runs. The fixture CA this script installed itself (keploy-ci-db-ca.crt)
+# is unrelated and must survive.
+leftover="$(sudo find \
+  /usr/local/share/ca-certificates/ \
+  /etc/pki/ca-trust/source/anchors/ \
+  /etc/ca-certificates/trust-source/anchors/ \
+  /etc/pki/trust/anchors/ \
+  /usr/local/share/certs/ \
+  /etc/ssl/certs/ \
+  -maxdepth 1 -name 'keploy-mitm-*.crt' 2>/dev/null || true)"
+if [[ -n "$leftover" ]]; then
+  echo "::error::keploy left a per-run MITM CA anchor behind after the run:"
+  echo "$leftover"
+  false
+fi
+if ! sudo test -f /usr/local/share/ca-certificates/keploy-ci-db-ca.crt; then
+  echo "::error::the test's own CA fixture was wrongly removed by keploy's cleanup"
+  false
+fi
+echo "no keploy-mitm-* anchor remained; the fixture CA survived"
+endsec
+
 # ----- assertions on the captured artifacts -----
+
+if [[ "$MODE_NAME" == verify-upstream* ]]; then
+  section "Assert the agent actually turned upstream TLS verification ON"
+  # --upstream-tls-verify FAILS OPEN by design: if the trust anchors
+  # cannot be loaded, proxy.New logs the error, flips upstreamTLSVerify
+  # back to false and records exactly as the default path does. That is
+  # the correct production behaviour — a misconfigured CA must never turn
+  # into silently dropped mocks — but it means a green run proves nothing
+  # on its own: this job would just be re-testing capture-only under a
+  # different name. So assert the positive log line the agent emits once
+  # per process after it has resolved the pool (pkg/agent/proxy/proxy.go,
+  # "upstream TLS certificate verification is enabled"). The native agent
+  # is a child process whose stdout/stderr are the record command's, so
+  # its logs land in keploy-record.log with everything else.
+  grep -q "upstream TLS certificate verification is enabled" keploy-record.log || {
+    echo "::error::the agent never reported upstream TLS verification enabled — either --upstream-tls-verify did not reach it, or loading the trust anchors failed and verification silently fell back to skip"
+    echo "== upstream-TLS lines in keploy-record.log =="
+    grep -n -i "upstream tls" keploy-record.log || echo "(none — the flag never reached the agent)"
+    exit 1
+  }
+  echo "good! agent reported upstream TLS certificate verification enabled"
+  endsec
+fi
 
 PCAP=keploy/test-set-0/traffic.pcap
 KEYLOG=keploy/test-set-0/sslkeys.log
@@ -392,27 +494,88 @@ sudo grep -q "^CLIENT_TRAFFIC_SECRET_0 " "$KEYLOG" || {
 }
 endsec
 
+# tshark over a keploy capture, with keploy's proxy port pinned to TLS.
+#
+# Every TLS stream in the capture is application <-> keploy's outgoing proxy
+# port, which no Wireshark dissector knows as TLS, so without -d the ONLY thing
+# that makes tshark decode one as TLS is its tls heuristic - and TCP heuristics
+# run only when no PORT dissector claims the stream first. The application's
+# side of each connection is an ephemeral port, and Wireshark 4.2 (the tshark
+# ubuntu-24.04 installs) registers port dissectors on eight ports of Linux's
+# 32768-60999 range: 34980 ecatf, 40000 sapni, 44321 pcp, 44322 pmproxy,
+# 44818 enip, 48049 cbsp, 48898 ams, 57000 irc. A connection that drew one of
+# them was dissected as that protocol and never as TLS, so its requests
+# vanished from the decrypt even with its keys and packets in the files - one
+# HTTPS host at random: echo.keploy.local on run 36092000545, quote.keploy.local
+# on run 35130298832 (neither capture was kept; moving one connection of a
+# complete capture onto 44818 reproduces 36092000545's output exactly).
+# Measured over every port of the range, a real capture's ClientHello decodes
+# as TLS on all 28232 with -d, and on 28224 without it under 4.2.2.
+#
+# tshark reads copies of its inputs in a directory root owns under /tmp, not
+# the files themselves. Ubuntu 26.04 confines /usr/bin/tshark with an AppArmor
+# profile (/etc/apparmor.d/tshark): besides its own data files, the journal and
+# the system files every program reads, it may read only files it owns under
+# /tmp, /var/tmp and ~/tmp (<abstractions/user-tmp>). Given the capture where
+# keploy writes it (the workspace), or a copy the runner user owns in /tmp, it
+# says "You don't have permission to read the file" and decodes nothing, and it
+# silently skips a keylog it may not read. That is why the decrypt below, given
+# the workspace files, found no request on any ubuntu-26.04 runner, though the
+# same files decrypt in full unconfined. tshark runs as root here (sudo), so a
+# copy root owns is one it may read, under that profile and without it. What
+# tshark says on stderr goes to TSHARK_ERR, under a line naming the call, and a
+# failure prints it (it went to /dev/null, which hid that refusal).
+TSHARK_IN=$(sudo mktemp -d -p /tmp)
+TSHARK_ERR=$(mktemp)
+sudo cp "$KEYLOG" "$TSHARK_IN/sslkeys.log"
+# tshark_input FILE: prints the path of a copy of FILE that tshark may read.
+tshark_input() {
+  local copy
+  copy="$TSHARK_IN/$(basename "$1")"
+  sudo cp "$1" "$copy" && echo "$copy"
+}
+# tshark_run ARGS...: sudo tshark ARGS, its stdout as it is, its stderr
+# appended to TSHARK_ERR under a line naming the call, with tshark's exit code.
+# The warning every tshark run as root prints is left out (sed, not grep: sed
+# ends 0 when nothing is left).
+tshark_run() {
+  printf '== tshark %s\n' "$*" >>"$TSHARK_ERR"
+  { sudo tshark "$@" 2>&1 >&3 3>&- | sed '/^Running as user "root" and group "root"\. This could be dangerous\.$/d' >>"$TSHARK_ERR" 3>&-; } 3>&1
+}
+tshark_tls() {
+  local pcap
+  pcap=$(tshark_input "$1") || return 1
+  shift
+  tshark_run -r "$pcap" -o "tls.keylog_file:$TSHARK_IN/sslkeys.log" -d "tcp.port==${KEPLOY_PROXY_PORT},tls" "$@"
+}
+# The same without -d: TLS found only by the heuristic, as before the fix.
+# Used only to tell whether the port check below can fail on this tshark.
+tshark_tls_heuristic() {
+  local pcap
+  pcap=$(tshark_input "$1") || return 1
+  shift
+  tshark_run -r "$pcap" -o "tls.keylog_file:$TSHARK_IN/sslkeys.log" "$@"
+}
+
 section "Assert tshark + keylog decrypts HTTP-over-TLS sessions"
-DECRYPTED_REQS=$(sudo tshark -r "$PCAP" -o "tls.keylog_file:$KEYLOG" \
-  -Y "http.request" -T fields -e http.host -e http.request.uri 2>/dev/null || true)
+DECRYPTED_REQS=$(tshark_tls "$PCAP" -Y "http.request" -T fields -e http.host -e http.request.uri || true)
 echo "decrypted HTTP requests:"
 echo "$DECRYPTED_REQS"
 
-echo "$DECRYPTED_REQS" | grep -q "$QUOTE_HOST" || {
+echo "$DECRYPTED_REQS" | grep "$QUOTE_HOST" >/dev/null || {
   echo "::error::tshark did not see decrypted GET to $QUOTE_HOST"
   exit 1
 }
-echo "$DECRYPTED_REQS" | grep -q "$ECHO_HOST" || {
+echo "$DECRYPTED_REQS" | grep "$ECHO_HOST" >/dev/null || {
   echo "::error::tshark did not see decrypted GET to $ECHO_HOST"
   exit 1
 }
-echo "$DECRYPTED_REQS" | grep -q "ci-${MODE_NAME}" || {
+echo "$DECRYPTED_REQS" | grep "ci-${MODE_NAME}" >/dev/null || {
   echo "::error::ci-${MODE_NAME} query string did not survive into the decrypted pcap"
   exit 1
 }
 
-DECRYPTED_RESP_OK=$(sudo tshark -r "$PCAP" -o "tls.keylog_file:$KEYLOG" \
-  -Y "http.response" -T fields -e http.response.code 2>/dev/null | grep -c "^200$" || true)
+DECRYPTED_RESP_OK=$(tshark_tls "$PCAP" -Y "http.response" -T fields -e http.response.code | grep -c "^200$" || true)
 echo "decrypted 200 responses: $DECRYPTED_RESP_OK"
 if [[ "$DECRYPTED_RESP_OK" -lt 2 ]]; then
   echo "::error::expected >=2 decrypted 200 responses; saw $DECRYPTED_RESP_OK"
@@ -420,33 +583,129 @@ if [[ "$DECRYPTED_RESP_OK" -lt 2 ]]; then
 fi
 endsec
 
+section "Assert the decrypt does not depend on the application's ephemeral ports"
+# The decrypt above passing says nothing about the draw that used to lose a
+# host: only 8 of 28232 ephemeral ports trigger it. So replay that draw
+# deterministically - in copies of the capture, move the application's side
+# of every HTTPS connection onto ports Wireshark 4.2 claims for another
+# protocol, rotating through the copies until every claimed port has been
+# tried, and require the decrypt of each copy to match the original exactly.
+# This only has teeth under Wireshark 4.2.x (what ubuntu-24.04 ships): 4.4
+# decodes a moved copy as TLS even without -d, which is checked and reported.
+CLAIMED_PORTS=(44818 48898 34980 57000 40000 44321 44322 48049)
+mapfile -t HTTPS_CLIENT_PORTS < <(tshark_tls "$PCAP" -Y "tls.handshake.type==1" \
+  -T fields -e tls.handshake.extensions_server_name -e tcp.srcport \
+  | awk -v q="$QUOTE_HOST" -v e="$ECHO_HOST" '($1==q || $1==e) && !seen[$2]++ {print $2}')
+if [[ ${#HTTPS_CLIENT_PORTS[@]} -lt 2 || ${#HTTPS_CLIENT_PORTS[@]} -gt ${#CLAIMED_PORTS[@]} ]]; then
+  echo "::error::expected 2..${#CLAIMED_PORTS[@]} application-side ports for the $QUOTE_HOST/$ECHO_HOST connections; got '${HTTPS_CLIENT_PORTS[*]}'"
+  exit 1
+fi
+# A claimed port some other connection of this capture already uses cannot
+# take a moved one (the two TCP streams would merge), so it is left out and
+# named, rather than failing the run over a draw of the MySQL/Postgres ports.
+mapfile -t USED_PORTS < <(tshark_tls "$PCAP" -Y tcp -T fields -e tcp.srcport -e tcp.dstport | tr '\t' '\n' | sort -u)
+TARGET_PORTS=()
+for p in "${CLAIMED_PORTS[@]}"; do
+  if [[ " ${USED_PORTS[*]} " == *" $p "* ]]; then
+    echo "::notice::port $p is already used in this capture; not moving a connection onto it"
+  else
+    TARGET_PORTS+=("$p")
+  fi
+done
+N_CONN=${#HTTPS_CLIENT_PORTS[@]}
+if [[ ${#TARGET_PORTS[@]} -lt $N_CONN ]]; then
+  echo "::error::only ${#TARGET_PORTS[@]} claimed ports are free in this capture for $N_CONN HTTPS connections"
+  exit 1
+fi
+REMAPPED_PCAP=$(mktemp --suffix=.pcap)
+HEURISTIC_HELD=()
+COVERED=()
+COPIES=$(( (${#TARGET_PORTS[@]} + N_CONN - 1) / N_CONN ))
+for (( copy = 0; copy < COPIES; copy++ )); do
+  PORT_MAP=()
+  for i in "${!HTTPS_CLIENT_PORTS[@]}"; do
+    PORT_MAP+=("${HTTPS_CLIENT_PORTS[$i]}:${TARGET_PORTS[$(( (copy * N_CONN + i) % ${#TARGET_PORTS[@]} ))]}")
+  done
+  COVERED+=("${PORT_MAP[@]#*:}")
+  if ! REMAPPED_FIELDS=$(sudo cat "$PCAP" | python3 -c '
+import struct, sys
+remap = dict((int(a), int(b)) for a, b in (m.split(":") for m in sys.argv[1:]))
+data = sys.stdin.buffer.read()
+# keploy writes a classic little-endian Ethernet pcap (pcapgo, LinkTypeEthernet).
+if data[:4] not in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1") or struct.unpack("<I", data[20:24])[0] != 1:
+    sys.exit("not a little-endian Ethernet pcap")
+out, off, moved = bytearray(data[:24]), 24, 0
+while off + 16 <= len(data):
+    hdr = data[off:off + 16]
+    incl = struct.unpack("<I", hdr[8:12])[0]
+    frame = bytearray(data[off + 16:off + 16 + incl])
+    off += 16 + incl
+    if len(frame) >= 38 and frame[12:14] == b"\x08\x00" and frame[23] == 6:  # IPv4 + TCP
+        tcp = 14 + (frame[14] & 0x0F) * 4
+        for at in (tcp, tcp + 2):
+            port = struct.unpack(">H", frame[at:at + 2])[0]
+            if port in remap:
+                frame[at:at + 2] = struct.pack(">H", remap[port])
+                moved += 1
+    out += hdr + frame
+sys.stdout.buffer.write(bytes(out))
+sys.stderr.write(str(moved))
+' "${PORT_MAP[@]}" 2>&1 >"$REMAPPED_PCAP") || ! [[ "$REMAPPED_FIELDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "::error::could not rewrite the capture's HTTPS client ports (${PORT_MAP[*]}): $REMAPPED_FIELDS"
+    exit 1
+  fi
+  echo "copy $((copy + 1))/$COPIES: rewrote $REMAPPED_FIELDS TCP port field(s): ${PORT_MAP[*]}"
+  REMAPPED_REQS=$(tshark_tls "$REMAPPED_PCAP" -Y "http.request" -T fields -e http.host -e http.request.uri || true)
+  if [[ "$REMAPPED_REQS" != "$DECRYPTED_REQS" ]]; then
+    echo "decrypted HTTP requests with the client ports moved:"
+    echo "$REMAPPED_REQS"
+    echo "::error::moving the HTTPS connections onto ephemeral ports Wireshark assigns to other protocols (${PORT_MAP[*]}) changed what decrypts - the decrypt depends on the port the application happened to draw"
+    exit 1
+  fi
+  if [[ "$(tshark_tls_heuristic "$REMAPPED_PCAP" -Y "http.request" -T fields -e http.host -e http.request.uri || true)" == "$DECRYPTED_REQS" ]]; then
+    HEURISTIC_HELD+=("${PORT_MAP[@]}")
+  fi
+done
+rm -f "$REMAPPED_PCAP"
+REMAPPED_PCAP=
+if [[ ${#HEURISTIC_HELD[@]} -eq $(( COPIES * N_CONN )) ]]; then
+  echo "::notice::this tshark ($(tshark --version | head -n1)) decrypts the moved copies even without -d, so this check cannot fail here; it guards the fix only under Wireshark 4.2.x"
+elif [[ ${#HEURISTIC_HELD[@]} -gt 0 ]]; then
+  echo "::notice::without -d this tshark still decrypted the copies moved as ${HEURISTIC_HELD[*]}; those ports test nothing here"
+fi
+echo "good! decrypt holds with the HTTPS client ports moved onto each of $(printf '%s\n' "${COVERED[@]}" | sort -un | paste -sd' ')"
+endsec
+
 section "Assert the captured pcap contains the HTTP-over-TLS ClientHellos"
-# tshark only dissects a ClientHello when the TCP stream BEGINS with a
-# TLS record. That holds for the HTTP-over-TLS sessions, so we assert a
-# ClientHello carrying each upstream host's SNI actually crossed the
-# proxy (proving the traffic went out as TLS, not a fall-back to plain
-# TCP). We key on the SNI rather than a raw frame count: the app shares
-# one keep-alive client, so the two /echo calls collapse onto a single
+# tshark_tls dissects every stream to keploy's proxy port as TLS, so each
+# HTTP-over-TLS session's ClientHello is in the output, and we assert one
+# carrying each upstream host's SNI actually crossed the proxy (proving
+# the traffic went out as TLS, not a fall-back to plain TCP). We key
+# on the SNI rather than a raw frame count: the app shares one
+# keep-alive client, so the two /echo calls collapse onto a single
 # connection — a count-based check is at the mercy of connection reuse
 # and was the real reason this step flaked (it silently leaned on the
 # old public endpoints NOT reusing connections to reach its threshold).
 #
-# MySQL/Postgres are deliberately NOT checked here: their streams open
+# MySQL/Postgres are deliberately NOT asserted here. Their streams open
 # with the protocol's STARTTLS preamble (MySQL server greeting /
-# Postgres SSLRequest) before the embedded ClientHello, so tshark's TLS
-# dissector can't latch onto them on keploy's proxy port. Their TLS is
-# proven instead by the openssl s_client sanity above and the
-# round-trip asserts (POST→GET through the proxy) earlier in this run.
-HELLO_SNIS=$(sudo tshark -r "$PCAP" -Y "tls.handshake.type==1" \
-  -T fields -e tls.handshake.extensions_server_name 2>/dev/null | sort -u)
-HELLO_COUNT=$(sudo tshark -r "$PCAP" -Y "tls.handshake.type==1" 2>/dev/null | wc -l)
+# Postgres SSLRequest) before the embedded ClientHello. tshark_tls forces
+# keploy's proxy port to TLS, so tshark does dissect those ClientHellos
+# too, and they are counted in HELLO_COUNT and listed in HELLO_SNIS
+# (SNI "localhost", or none). But neither SNI names the upstream, so
+# they prove nothing about where the traffic went. Their TLS is proven
+# instead by the openssl s_client sanity above and the round-trip
+# asserts (POST→GET through the proxy) earlier in this run.
+HELLO_SNIS=$(tshark_tls "$PCAP" -Y "tls.handshake.type==1" \
+  -T fields -e tls.handshake.extensions_server_name | sort -u)
+HELLO_COUNT=$(tshark_tls "$PCAP" -Y "tls.handshake.type==1" | wc -l)
 echo "TLS ClientHello frames in pcap: $HELLO_COUNT"
 echo "ClientHello SNIs:"; echo "$HELLO_SNIS"
-echo "$HELLO_SNIS" | grep -q "$QUOTE_HOST" || {
+echo "$HELLO_SNIS" | grep "$QUOTE_HOST" >/dev/null || {
   echo "::error::no captured ClientHello carried SNI $QUOTE_HOST — /quote did not cross the proxy as TLS"
   exit 1
 }
-echo "$HELLO_SNIS" | grep -q "$ECHO_HOST" || {
+echo "$HELLO_SNIS" | grep "$ECHO_HOST" >/dev/null || {
   echo "::error::no captured ClientHello carried SNI $ECHO_HOST — /echo did not cross the proxy as TLS"
   exit 1
 }
@@ -460,7 +719,7 @@ case "$MODE_NAME" in
     # (MySQL/Postgres mocks may also appear depending on which
     # integrations are linked into the build.)
     sudo test -s "$MOCKS" || { echo "::error::missing or empty $MOCKS"; exit 1; }
-    HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    HTTP_MOCKS=$(http_mock_count <(sudo cat "$MOCKS"))
     echo "Http mock records: $HTTP_MOCKS"
     if [[ "$HTTP_MOCKS" -lt 2 ]]; then
       echo "::error::expected >=2 'kind: Http' mocks (one per upstream host); saw $HTTP_MOCKS"
@@ -477,6 +736,8 @@ case "$MODE_NAME" in
     # issues no outbound DNS — there are no DNS mocks to write, and with
     # parser dispatch bypassed there are no Http mocks either. Treat a
     # missing/empty file as zero Http mocks rather than a failure.
+    # The `Http` prefix counts the Http2 and HttpFault mocks too: the HTTP
+    # parsers write those as well, so none may appear here either.
     if sudo test -s "$MOCKS"; then
       HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
     else
@@ -487,6 +748,106 @@ case "$MODE_NAME" in
       echo "::error::found $HTTP_MOCKS 'kind: Http' mocks in with-opportunistic mode — parser dispatch should be bypassed"
       exit 1
     fi
+    ;;
+  verify-upstream)
+    # Same record path as capture-only (parsers still dispatch), except
+    # every outbound dial keploy makes now authenticates the REAL
+    # upstream instead of skipping. The trust material is already in
+    # place: the CI CA was installed into the OS trust store above, and
+    # it signed both the DB cert (SANs DNS:localhost, IP:127.0.0.1) and
+    # the HTTPS upstream cert (SANs DNS:quote.keploy.local,
+    # DNS:echo.keploy.local), so nothing extra needs configuring.
+    #
+    # The three upstreams cover the two distinct ServerName paths:
+    #   - the HTTPS upstreams send SNI, so keploy verifies the exact name
+    #     the app asked for — and their cert has NO IP SAN, so this leg
+    #     can ONLY pass if keploy carried that SNI through to its own
+    #     dial rather than substituting the destination IP;
+    #   - MySQL is dialled at an IP literal (tcp(127.0.0.1:3306)) and
+    #     RFC 6066 forbids IP literals in SNI, so keploy captures NO
+    #     ServerName and must fall back to the dial address and match the
+    #     cert's IP:127.0.0.1 SAN. Postgres lands on whichever of the two
+    #     paths its driver picks for sslmode=verify-ca; the cert carries
+    #     DNS:localhost *and* IP:127.0.0.1, so either is covered.
+    #
+    # Why the MOCKS are the assertion and not the exit code: a
+    # verification error does NOT fail the application. The dest-side
+    # handshake fails, the supervisor falls through to raw passthrough,
+    # the app's connection continues to work — and the mock is DROPPED.
+    # Every round-trip driven above would still return 200 and this job
+    # would go green having captured nothing. The mock inventory is the
+    # only signal that separates "verified, then recorded" from "failed
+    # verification, then silently degraded".
+    sudo test -s "$MOCKS" || {
+      echo "::error::missing or empty $MOCKS with verification on — every upstream failed to verify and fell through to raw passthrough"
+      exit 1
+    }
+    echo "== recorded mock kinds =="
+    sudo grep "^kind: " "$MOCKS" | sort | uniq -c || true
+
+    HTTP_MOCKS=$(http_mock_count <(sudo cat "$MOCKS"))
+    MYSQL_MOCKS=$(sudo grep -c "^kind: MySQL" "$MOCKS" || true)
+    # The `Postgres` prefix deliberately covers all three parser
+    # generations (Postgres / PostgresV2 / PostgresV3) — which one is
+    # linked is a property of the build, not of this feature.
+    PG_MOCKS=$(sudo grep -c "^kind: Postgres" "$MOCKS" || true)
+    echo "Http mocks: $HTTP_MOCKS, MySQL mocks: $MYSQL_MOCKS, Postgres mocks: $PG_MOCKS"
+
+    if [[ "$HTTP_MOCKS" -lt 2 ]]; then
+      echo "::error::expected >=2 'kind: Http' mocks (one per upstream host) with verification on; saw $HTTP_MOCKS — the HTTPS upstream's certificate failed to verify against the CI CA and the sessions degraded to raw passthrough"
+      exit 1
+    fi
+    if [[ "$MYSQL_MOCKS" -lt 1 ]]; then
+      echo "::error::no 'kind: MySQL' mocks with verification on — MySQL is dialled at an IP literal so no SNI is sent; this is the ServerName-from-dial-address fallback failing to match the cert's IP:127.0.0.1 SAN"
+      exit 1
+    fi
+    if [[ "$PG_MOCKS" -lt 1 ]]; then
+      echo "::error::no 'kind: Postgres*' mocks with verification on — the Postgres dest-side handshake failed to verify and the session fell through to raw passthrough"
+      exit 1
+    fi
+    echo "good! all three upstreams verified and recorded with --upstream-tls-verify"
+    ;;
+  verify-upstream-opportunistic)
+    # --opportunistic-tls-intercept + --upstream-tls-verify. This is the
+    # combination that the verify-upstream mode alone cannot reach: the
+    # opportunistic path hijacks the connection BEFORE parser dispatch and
+    # owns its own upstream tls.Config (proxy/opportunistic_tls.go,
+    # hijackAndMITM), which is a completely separate dial site from the
+    # one verify-upstream exercises.
+    #
+    # The load-bearing assertion for this mode is NOT down here — it is the
+    # `retry_curl http://localhost:8080/quote` above. On this path a failed
+    # upstream verification is not a dropped mock, it is a dropped
+    # CONNECTION: hijackAndMITM defers srcConn.Close()/dstConn.Close() and
+    # its error propagates out of handleConnection, so the application's
+    # socket dies after it had already completed its handshake with keploy
+    # and the route returns 502. The upstream cert carries DNS SANs only
+    # (see upstream.cnf), so that is exactly what happens if keploy dials
+    # with the destination IP as its ServerName instead of the SNI the app
+    # sent — the defect this combination exists to catch.
+    #
+    # Mock shape here is the with-opportunistic shape, not the
+    # verify-upstream one: parser dispatch is bypassed, so there must be
+    # NO Http mocks. Verification changes which upstreams keploy is
+    # willing to talk to, never whether parsers run. As there, the `Http`
+    # prefix counts the Http2 and HttpFault mocks too.
+    if sudo test -s "$MOCKS"; then
+      HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    else
+      HTTP_MOCKS=0
+    fi
+    echo "Http mock records (must be 0): $HTTP_MOCKS"
+    if [[ "$HTTP_MOCKS" -gt 0 ]]; then
+      echo "::error::found $HTTP_MOCKS 'kind: Http' mocks in verify-upstream-opportunistic mode — parser dispatch should be bypassed"
+      exit 1
+    fi
+    # Belt to the braces of the round-trips above: if the opportunistic
+    # upstream handshake had failed, the hijack would have torn the
+    # connection down and no application bytes would have reached the
+    # upstream at all — so the decrypted-pcap assertion earlier (which
+    # greps the ci-${MODE_NAME} query string out of the TLS keylog-decrypted
+    # capture) would have found nothing to decrypt.
+    echo "good! opportunistic hijack completed against a DNS-SAN-only upstream with verification on"
     ;;
 esac
 endsec

@@ -1,14 +1,20 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 func TestGenerateDNSDedupeKey_SameQuerySameKey(t *testing.T) {
@@ -239,21 +245,287 @@ func TestDNSCacheLifecycle_DedupeStillCatchesDuplicates(t *testing.T) {
 	dedupe := newRecordedDNSMocksCache()
 
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	key := generateDNSDedupeKey(q)
 
-	if _, ok := dedupe.Get(key); ok {
+	if _, first := dedupe.firstAnswer(q, dnsRankResolved); !first {
 		t.Fatalf("fresh dedupe cache must not report the query as already recorded")
 	}
-	dedupe.Add(key, true)
-	if _, ok := dedupe.Get(key); !ok {
-		t.Fatalf("dedupe cache must remember the recorded query")
-	}
-	// Simulate a duplicate emission attempt — the caller checks Get()
-	// and skips recording if found. No double-Add is possible in
-	// production; the test just pins the read path.
+	// Simulate duplicate emission attempts — the caller skips recording
+	// when the answer is not the first of its kind.
 	for i := 0; i < 3; i++ {
-		if _, ok := dedupe.Get(key); !ok {
+		if _, first := dedupe.firstAnswer(q, dnsRankResolved); first {
 			t.Fatalf("dedupe cache must consistently signal a duplicate (iter=%d)", i)
 		}
 	}
+}
+
+// TestShouldLogNodataRelay_DedupesPerNameAndQtype locks in the behaviour the
+// tracker exists for: the "relayed NODATA" Info line is emitted once per
+// (name, qtype) and suppressed thereafter.
+func TestShouldLogNodataRelay_DedupesPerNameAndQtype(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), nodataRelayLogged: newNodataRelayLogCache()}
+
+	keyA := generateCacheKey("payments.svc.cluster.local", dns.TypeAAAA)
+	keyB := generateCacheKey("payments.svc.cluster.local", dns.TypeA)
+
+	if !p.shouldLogNodataRelay(keyA) {
+		t.Fatal("first sighting of a (name,qtype) must log")
+	}
+	if p.shouldLogNodataRelay(keyA) {
+		t.Error("second sighting of the same (name,qtype) must be suppressed")
+	}
+	if !p.shouldLogNodataRelay(keyB) {
+		t.Error("a different qtype for the same name is a different key and must log")
+	}
+}
+
+// TestShouldLogNodataRelay_IsBounded is the retention contract. The key is
+// (name, qtype) and the name is chosen by the application under test — a
+// client resolving per-request hostnames, or a k8s search-domain/ndots setup
+// fanning one lookup into many qualified names, mints keys without limit. The
+// tracker only suppresses duplicate log output, so capping it is free; letting
+// it grow costs the agent memory for its entire lifetime.
+func TestShouldLogNodataRelay_IsBounded(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), nodataRelayLogged: newNodataRelayLogCache()}
+
+	const distinct = nodataRelayLogMaxSize + 500
+	for i := 0; i < distinct; i++ {
+		p.shouldLogNodataRelay(generateCacheKey(fmt.Sprintf("req-%d.tenant.example", i), dns.TypeA))
+	}
+
+	if got := p.nodataRelayLogged.Len(); got > nodataRelayLogMaxSize {
+		t.Errorf("nodataRelayLogged holds %d entries after %d distinct names, must never exceed the %d cap: the tracker is following its input, not bounding it",
+			got, distinct, nodataRelayLogMaxSize)
+	}
+}
+
+// TestShouldLogNodataRelay_NilTrackerNeverPanics covers the many unit tests
+// (and any future caller) that build a bare &Proxy{} literal: an uninitialised
+// tracker must degrade to "never dedupe", not crash the DNS server.
+func TestShouldLogNodataRelay_NilTrackerNeverPanics(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	key := generateCacheKey("bare.proxy.literal", dns.TypeA)
+	if !p.shouldLogNodataRelay(key) || !p.shouldLogNodataRelay(key) {
+		t.Error("a nil tracker must report every sighting as loggable")
+	}
+}
+
+// TestResetRecordedDNSMocks_ClearsBothTrackers pins the session boundary. Both
+// DNS dedupe trackers are per-session state: carrying them across a
+// record/replay session boundary silently suppresses the current session's
+// first-sighting signals.
+func TestResetRecordedDNSMocks_ClearsBothTrackers(t *testing.T) {
+	p := &Proxy{
+		logger:            zap.NewNop(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		nodataRelayLogged: newNodataRelayLogCache(),
+	}
+
+	key := generateCacheKey("carryover.example", dns.TypeA)
+	carried := dns.Question{Name: "carryover.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	p.recordedDNSMocks.firstAnswer(carried, dnsRankResolved)
+	p.recordedDNSMocks.firstAnswer(carried, dnsRankNXDOMAIN)
+	if !p.shouldLogNodataRelay(key) {
+		t.Fatal("first sighting must log")
+	}
+
+	p.ResetRecordedDNSMocks()
+
+	for _, rank := range []int{dnsRankResolved, dnsRankNXDOMAIN} {
+		if _, first := p.recordedDNSMocks.firstAnswer(carried, rank); !first {
+			t.Errorf("recordedDNSMocks still holds the answer of kind %d after reset", rank)
+		}
+	}
+	if p.nodataRelayLogged.Len() != 0 {
+		t.Errorf("nodataRelayLogged still holds %d entries after reset", p.nodataRelayLogged.Len())
+	}
+	if !p.shouldLogNodataRelay(key) {
+		t.Error("after a session reset the same (name,qtype) must log again")
+	}
+}
+
+// TestResetRecordedDNSMocks_PurgesInPlace guards against reintroducing a
+// goroutine + heap leak that is worse than the retention this file fixes.
+//
+// expirable.NewLRU with a non-zero TTL starts a janitor goroutine whose done
+// channel is never closed, and that goroutine captures the cache. Allocating a
+// replacement tracker on every reset would therefore strand one goroutine per
+// reset and pin every discarded entry beyond the reach of the GC. The reset
+// must clear the existing trackers, not swap in new ones — which also keeps
+// the pointer stable for the DNS handler goroutines reading it concurrently.
+func TestResetRecordedDNSMocks_PurgesInPlace(t *testing.T) {
+	p := &Proxy{
+		logger:            zap.NewNop(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		nodataRelayLogged: newNodataRelayLogCache(),
+	}
+	beforeMocks, beforeNodata := p.recordedDNSMocks, p.nodataRelayLogged
+
+	p.ResetRecordedDNSMocks()
+
+	if p.recordedDNSMocks != beforeMocks {
+		t.Error("recordedDNSMocks was reallocated: the discarded cache and its janitor goroutine leak for the process lifetime")
+	}
+	if p.nodataRelayLogged != beforeNodata {
+		t.Error("nodataRelayLogged was reallocated: the discarded cache and its janitor goroutine leak for the process lifetime")
+	}
+}
+
+// TestResetRecordedDNSMocks_NilTrackersNeverPanic covers the bare &Proxy{}
+// literals: a reset on an uninitialised proxy must be a no-op, not a crash.
+func TestResetRecordedDNSMocks_NilTrackersNeverPanic(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	p.ResetRecordedDNSMocks()
+}
+
+// bigMXRecords is how many MX records bigMXAnswer holds, each with an AAAA
+// and an A record for its host.
+const bigMXRecords = 12
+
+// bigMXAnswer is an MX answer like gmail.com's, with its extra records, over
+// the 512 bytes a UDP client takes by default even compressed.
+func bigMXAnswer(t *testing.T) *dns.Msg {
+	t.Helper()
+	m := new(dns.Msg)
+	m.SetQuestion("gmail.com.", dns.TypeMX)
+	m.Response = true
+	for i := 0; i < bigMXRecords; i++ {
+		mx, err := dns.NewRR(fmt.Sprintf("gmail.com. 300 IN MX %d alt%d.gmail-smtp-in.l.google.com.", i*10, i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Answer = append(m.Answer, mx)
+		for _, s := range []string{
+			fmt.Sprintf("alt%d.gmail-smtp-in.l.google.com. 300 IN AAAA 2607:f8b0:4004:c1b::%x", i, 0x100+i),
+			fmt.Sprintf("alt%d.gmail-smtp-in.l.google.com. 300 IN A 142.250.27.%d", i, 26+i),
+		} {
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Extra = append(m.Extra, rr)
+		}
+	}
+	m.Compress = true
+	if b, _ := m.Pack(); len(b) <= dns.MinMsgSize {
+		t.Fatalf("the fixture is %d bytes compressed, want it over %d", len(b), dns.MinMsgSize)
+	}
+	m.Compress = false
+	return m
+}
+
+// serveDNSOn runs p's DNS handler on a loopback listener of network ("udp" or
+// "tcp") and returns its address.
+func serveDNSOn(t *testing.T, p *Proxy, network string) string {
+	t.Helper()
+	srv := &dns.Server{Handler: p}
+	switch network {
+	case "udp":
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.PacketConn = pc
+	default:
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.Listener = l
+	}
+	started := make(chan struct{})
+	failed := make(chan error, 1)
+	srv.NotifyStartedFunc = func() { close(started) }
+	go func() { failed <- srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	select {
+	case <-started:
+	case err := <-failed:
+		t.Fatalf("the DNS server did not start: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the DNS server did not start")
+	}
+	if srv.PacketConn != nil {
+		return srv.PacketConn.LocalAddr().String()
+	}
+	return srv.Listener.Addr().String()
+}
+
+// A DNS answer over UDP fits what the client takes -- 512 bytes, or the EDNS0
+// size it advertised -- and over TCP is whole. Written whole over UDP, gmail's
+// MX answer was cut off by the client's read and failed to parse ("dns:
+// overflowing header size"), while recording and when its mock was replayed.
+func TestServeDNS_AnswersFitTheClient(t *testing.T) {
+	p := newTestProxyForDNS(false)
+	p.dnsCache = newDNSCache()
+	p.dnsCache.Add(generateCacheKey("gmail.com.", dns.TypeMX), dnsCacheEntry{Msg: bigMXAnswer(t), FromUpstream: true})
+	query := func(network string, edns uint16) (*dns.Msg, error) {
+		q := new(dns.Msg)
+		q.SetQuestion("gmail.com.", dns.TypeMX)
+		if edns > 0 {
+			q.SetEdns0(edns, false)
+		}
+		c := &dns.Client{Net: network, Timeout: 5 * time.Second}
+		if edns > 0 {
+			c.UDPSize = edns
+		}
+		r, _, err := c.Exchange(q, serveDNSOn(t, p, network))
+		return r, err
+	}
+
+	whole := func(r *dns.Msg) bool {
+		return r != nil && !r.Truncated && len(r.Answer) == bigMXRecords && len(r.Extra) == 2*bigMXRecords
+	}
+	// 512 bytes: every MX record fits once compressed, so only extra records
+	// go, and TC tells the client it may ask again over TCP for the rest.
+	r, err := query("udp", 0)
+	if err != nil {
+		t.Fatalf("a UDP client without EDNS0 could not read the answer: %v", err)
+	}
+	if len(r.Answer) != bigMXRecords || len(r.Extra) >= 2*bigMXRecords || !r.Truncated {
+		t.Errorf("a UDP client without EDNS0 got %d answers, %d extras, TC=%v; want every answer, fewer extras, TC", len(r.Answer), len(r.Extra), r.Truncated)
+	}
+	for _, size := range []uint16{1232, 4096} {
+		if r, err := query("udp", size); err != nil || !whole(r) {
+			t.Errorf("a UDP client advertising %d bytes got %v, %v; want the whole answer", size, r, err)
+		}
+	}
+	if r, err := query("tcp", 0); err != nil || !whole(r) {
+		t.Errorf("a TCP client got %v, %v; want the whole answer", r, err)
+	}
+}
+
+// The DNS servers' bind is a stage of the agent's start of its own, begun on
+// the goroutine that binds both sockets (StartProxy's, in startDNSServers),
+// and ended there once they are bound, or once the bind failed.
+func TestTheDNSServersBindIsAStageOfTheAgentsStart(t *testing.T) {
+	start := func(p *Proxy) error {
+		ctx, cancel := context.WithCancel(context.Background())
+		var g errgroup.Group
+		t.Cleanup(func() { cancel(); _ = g.Wait() })
+		done := make(chan error, 1)
+		go func() { done <- p.startDNSServers(ctx, &g) }()
+		return <-done
+	}
+	t.Run("they bind", func(t *testing.T) {
+		begun := recordBootWork(t)
+		p := &Proxy{logger: zap.NewNop(), DNSPort: uint32(freeDNSPort(t))}
+		p.SetPortMover(func(uint32, uint32) error { return nil }) // a port taken first moves
+		if err := start(p); err != nil {
+			t.Fatalf("startDNSServers: %v", err)
+		}
+		assertOneOwnStage(t, begun(), "the DNS servers' bind")
+	})
+	t.Run("tcp cannot bind", func(t *testing.T) {
+		held, err := plaintcp.Listen(context.Background(), "tcp", ":0") // no SO_REUSEPORT: the server cannot share it
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = held.Close() })
+		begun := recordBootWork(t)
+		p := &Proxy{logger: zap.NewNop(), DNSPort: uint32(held.Addr().(*net.TCPAddr).Port)}
+		if err := start(p); !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatalf("startDNSServers on a port another socket holds: %v; want EADDRINUSE", err)
+		}
+		assertOneOwnStage(t, begun(), "the DNS servers' bind")
+	})
 }

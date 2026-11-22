@@ -1,0 +1,556 @@
+package proxy
+
+import (
+	"os"
+	"os/exec"
+	"runtime"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// fakeMockDb is a minimal MockMemDb: the per-test read methods return a fixed
+// set; every other method is the promoted (nil) interface and must not be called
+// by these tests.
+type fakeMockDb struct {
+	integrations.MockMemDb
+	mocks []*models.Mock
+}
+
+func (f *fakeMockDb) GetFilteredMocks() ([]*models.Mock, error)         { return f.mocks, nil }
+func (f *fakeMockDb) GetFilteredMocksInWindow() ([]*models.Mock, error) { return f.mocks, nil }
+func (f *fakeMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return f.mocks, nil }
+func (f *fakeMockDb) GetSessionMocks() ([]*models.Mock, error)          { return f.mocks, nil }
+func (f *fakeMockDb) GetUnFilteredMocks() ([]*models.Mock, error)       { return f.mocks, nil }
+func (f *fakeMockDb) GetSessionScopedMocks() ([]*models.Mock, error)    { return f.mocks, nil }
+
+func scopedNames(ms []*models.Mock) []string {
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m.Name)
+	}
+	return out
+}
+
+// workerScoped is the view a call from this process gets once it registered as
+// a worker whose test may see allow, under the given mapped universe.
+func workerScoped(t *testing.T, db integrations.MockMemDb, allow, universe []string) *scopedMockDb {
+	t.Helper()
+	p := &Proxy{}
+	p.SetMappedUniverse(universe)
+	return workerScopedOn(t, p, db, allow)
+}
+
+// workerScopedOn registers this process as a worker of p allowed allow, and
+// returns the view its calls get.
+func workerScopedOn(t *testing.T, p *Proxy, db integrations.MockMemDb, allow []string) *scopedMockDb {
+	t.Helper()
+	p.SetWorkerScope(uint32(os.Getpid()), allow)
+	v, ok := p.scopedFor(uint32(os.Getpid()), db).(*scopedMockDb)
+	require.True(t, ok, "a registered worker's call is scoped")
+	return v
+}
+
+// skipUnlessParentsRead skips a test that needs starts.ParentOf to find this
+// process's parent, which it does on linux and darwin only.
+func skipUnlessParentsRead(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("a process's parent is read on linux and darwin only (starts.ParentOf)")
+	}
+}
+
+func TestScopedMockDbFiltersReads(t *testing.T) {
+	// m1,m2,m3 belong to tests (in the universe); "shared" belongs to no test.
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "m1"}, {Name: "m2"}, {Name: "m3"}, {Name: "shared"}}}
+	universe := []string{"m1", "m2", "m3"}
+
+	// Worker allowed m1,m3: it sees m1,m3 (its test) + "shared" (unmapped), but
+	// NOT m2 (another test's mock). Applies to per-test AND session tiers.
+	s := workerScoped(t, db, []string{"m1", "m3"}, universe)
+	for _, get := range []func() ([]*models.Mock, error){
+		s.GetPerTestMocksInWindow, s.GetFilteredMocks, s.GetFilteredMocksInWindow,
+		s.GetSessionMocks, s.GetUnFilteredMocks, s.GetSessionScopedMocks,
+	} {
+		got, err := get()
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"m1", "m3", "shared"}, scopedNames(got),
+			"worker sees its own test's mocks plus unmapped shared mocks, never another test's")
+	}
+
+	// A nil universe (no mappings pushed) is a passthrough — never hide anything.
+	pass := workerScoped(t, db, []string{"m1"}, nil)
+	got, err := pass.GetSessionMocks()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"m1", "m2", "m3", "shared"}, scopedNames(got))
+}
+
+func TestScopedForResolvesWorkerAndFallsBack(t *testing.T) {
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "only-this"}, {Name: "other"}, {Name: "shared"}}}
+	self := uint32(os.Getpid())
+	sees := func(v integrations.MockMemDb) []string {
+		got, err := v.GetSessionMocks()
+		require.NoError(t, err)
+		return scopedNames(got)
+	}
+
+	// No worker scoped: fast path, no process-tree walk, the bare manager.
+	p := &Proxy{}
+	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(self, db), "no scopes ⇒ whole pool")
+
+	// The replay installed its scope table, but no worker registered: still
+	// the bare manager. A wrap is a new store identity, which parsers that
+	// key state on the store would split per connection.
+	p.SetMappedUniverse([]string{"only-this", "other"})
+	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(self, db), "a table alone does not wrap")
+
+	// A registered worker PID: the call is scoped to its allowlist.
+	p.SetWorkerScope(self, []string{"only-this"})
+	view := p.scopedFor(self, db)
+	require.ElementsMatch(t, []string{"only-this", "shared"}, sees(view), "own PID resolves to its test's mocks")
+
+	// PID 0 (unknown origin) and an unregistered/dead PID ⇒ the bare manager.
+	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(0, db))
+	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(4000000000, db))
+
+	// Cleared ⇒ the same, still-open view is back to the whole pool.
+	p.ClearWorkerScope(self)
+	require.ElementsMatch(t, []string{"only-this", "other", "shared"}, sees(view))
+}
+
+// A connection outlives a test: a keep-alive client a worker opened during one
+// test and reuses in the next sees the next test's mocks, and revision-gated
+// parsers on it are told the view changed — while another worker's test does
+// not touch it.
+func TestScopedViewFollowsItsWorkerAcrossTests(t *testing.T) {
+	mgr := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mgr.Close()
+	at := time.Now().Add(-time.Hour)
+	mgr.SetMocksWithWindow(nil, []*models.Mock{
+		newMockForTest("a1", at, models.LifetimeSession),
+		newMockForTest("b1", at, models.LifetimeSession),
+		newMockForTest("shared", at, models.LifetimeSession),
+	}, models.BaseTime, time.Now())
+	self := uint32(os.Getpid())
+	sees := func(v integrations.MockMemDb) []string {
+		got, err := v.GetSessionMocks()
+		require.NoError(t, err)
+		return scopedNames(got)
+	}
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "b1"})
+	p.SetWorkerScope(self, []string{"a1"})
+
+	conn := p.scopedFor(self, mgr).(*scopedMockDb) // opened during t1
+	require.ElementsMatch(t, []string{"a1", "shared"}, sees(conn))
+	rev, byKind := conn.Revision(), conn.RevisionByKind(models.HTTP)
+	require.Equal(t, rev, conn.Revision(), "an unchanged view keeps its revision")
+
+	p.SetWorkerScope(4000000001, []string{"b1"}) // another worker's test
+	require.Equal(t, rev, conn.Revision(), "another worker's test does not touch this view")
+
+	p.ClearWorkerScope(self)
+	p.SetWorkerScope(self, []string{"b1"})
+	require.ElementsMatch(t, []string{"b1", "shared"}, sees(conn), "a keep-alive connection follows the worker to its next test")
+	next := conn.Revision()
+	require.Greater(t, next, rev, "a parser that caches what it read must read again")
+	require.Greater(t, conn.RevisionByKind(models.HTTP), byKind)
+	require.Equal(t, next, conn.Revision())
+}
+
+// A parser that caches by revision samples the revision, then reads, and
+// keeps what it read under the revision it sampled. A view between two tests
+// shows the whole pool both times, but it must not report the same revision:
+// a test that began after the sample and ended before the next one would
+// leave that test's filtered read cached as the whole pool.
+func TestScopedViewNeverReturnsToAnEarlierRevision(t *testing.T) {
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "a1"}, {Name: "b1"}, {Name: "shared"}}}
+	self := uint32(os.Getpid())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "b1"})
+	conn := workerScopedOn(t, p, db, []string{"a1"})
+	p.ClearWorkerScope(self) // t1 ended: the connection is between tests
+
+	sampled := conn.Revision()
+	p.SetWorkerScope(self, []string{"b1"}) // t2 begins after the sample
+	cached, err := conn.GetSessionMocks()  // read under the sampled revision
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"b1", "shared"}, scopedNames(cached))
+	p.ClearWorkerScope(self) // t2 ends before the next sample
+
+	require.Greater(t, conn.Revision(), sampled, "the view is the whole pool again, but what was read under the old revision is not")
+
+	// And a test's end is a change of its own: a parser that sampled during
+	// t3 must read again once t3 has ended and the view is the whole pool.
+	p.SetWorkerScope(self, []string{"a1"})
+	during := conn.Revision()
+	p.ClearWorkerScope(self)
+	require.Greater(t, conn.Revision(), during, "the test ended: the view changed")
+}
+
+// Replacing the mapped universe changes what every view filters with.
+func TestScopedViewRevisionFollowsTheMappedUniverse(t *testing.T) {
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "a1"}, {Name: "b1"}, {Name: "shared"}}}
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "b1"})
+	conn := workerScopedOn(t, p, db, []string{"a1"})
+	rev := conn.Revision()
+	p.SetMappedUniverse([]string{"a1", "b1", "shared"})
+	got, err := conn.GetSessionMocks()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"a1"}, scopedNames(got), "shared is now another test's")
+	require.Greater(t, conn.Revision(), rev)
+}
+
+// A view made later reports a revision above anything an earlier view
+// reported, so a parser that keys its cache on the store's address cannot
+// take a new view at a recycled address for the one it knew.
+func TestScopedViewStartsAboveEveryEarlierView(t *testing.T) {
+	db := &fakeMockDb{}
+	self, other := uint32(os.Getpid()), uint32(4000000001) // no such process: its chain is itself
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1"})
+	p.SetWorkerScope(other, []string{"a1"}) // before everything the old view goes through
+	old := workerScopedOn(t, p, db, []string{"a1"})
+	p.ClearWorkerScope(self)
+	p.SetWorkerScope(self, []string{"a1"})
+	last := old.Revision() // the old connection's last word, then it closes
+
+	fresh, ok := p.scopedFor(other, db).(*scopedMockDb)
+	require.True(t, ok)
+	require.Greater(t, fresh.Revision(), last, "nothing of the new view changed since the old one's last revision, but it is a different view")
+}
+
+// Every registered worker on a connection's process chain counts, not only the
+// nearest: when a worker nested under another ends its test, the view falls to
+// the outer worker's test, and when that one ends too, to the whole pool. Each
+// is a change a caching parser must hear of.
+func TestScopedViewFollowsEveryWorkerOnItsChain(t *testing.T) {
+	skipUnlessParentsRead(t)
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "a"}, {Name: "b"}, {Name: "shared"}}}
+	self, parent := uint32(os.Getpid()), uint32(os.Getppid())
+	sees := func(v integrations.MockMemDb) []string {
+		got, err := v.GetSessionMocks()
+		require.NoError(t, err)
+		return scopedNames(got)
+	}
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a", "b"})
+	p.SetWorkerScope(parent, []string{"b"})
+	conn := workerScopedOn(t, p, db, []string{"a"})
+	require.ElementsMatch(t, []string{"a", "shared"}, sees(conn))
+	rev := conn.Revision()
+
+	p.ClearWorkerScope(self)
+	require.ElementsMatch(t, []string{"b", "shared"}, sees(conn), "the inner worker ended: the outer one's test")
+	inner := conn.Revision()
+	require.Greater(t, inner, rev)
+
+	p.ClearWorkerScope(parent)
+	require.ElementsMatch(t, []string{"a", "b", "shared"}, sees(conn), "the outer worker ended: the whole pool")
+	outer := conn.Revision()
+	require.Greater(t, outer, inner)
+
+	p.SetWorkerScope(parent, []string{"a"})
+	require.ElementsMatch(t, []string{"a", "shared"}, sees(conn))
+	require.Greater(t, conn.Revision(), outer, "the outer worker began again")
+}
+
+// Wiping every scope at once (a new replay session) changes every open view.
+func TestScopedViewRevisionFollowsAWipe(t *testing.T) {
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "a"}, {Name: "b"}, {Name: "shared"}}}
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a", "b"})
+	conn := workerScopedOn(t, p, db, []string{"a"})
+	rev := conn.Revision()
+	p.ClearAllWorkerScopes()
+	got, err := conn.GetSessionMocks()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"a", "b", "shared"}, scopedNames(got))
+	require.Greater(t, conn.Revision(), rev)
+}
+
+func TestScopedForWalksUpProcessTree(t *testing.T) {
+	skipUnlessParentsRead(t)
+	db := &fakeMockDb{mocks: []*models.Mock{{Name: "parents"}, {Name: "others"}, {Name: "shared"}}}
+	// Register the PARENT of this process; this process's call must resolve up to
+	// it (models a worker whose child/grandchild opened the socket).
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"parents", "others"})
+	p.SetWorkerScope(uint32(os.Getppid()), []string{"parents"})
+	view := p.scopedFor(uint32(os.Getpid()), db)
+	got, err := view.GetSessionMocks()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"parents", "shared"}, scopedNames(got),
+		"a call from a descendant sees the registered ancestor's test")
+
+	p.ClearAllWorkerScopes()
+	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(uint32(os.Getpid()), db))
+}
+
+// A connection's chain runs from its process through the process that
+// started it: a process this test starts has this test's process next on its
+// chain, and then this test's parent.
+func TestAncestorChainRunsThroughTheProcessThatStartedIt(t *testing.T) {
+	skipUnlessParentsRead(t)
+	cmd := exec.Command("sleep", "30")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	child, self := uint32(cmd.Process.Pid), uint32(os.Getpid())
+	want := []uint32{child, self}
+	if pp := os.Getppid(); pp > 1 {
+		want = append(want, uint32(pp))
+	}
+	chain := ancestorChain(child)
+	require.GreaterOrEqual(t, len(chain), len(want), "the chain of a process this test started is %v", chain)
+	require.Equal(t, want, chain[:len(want)],
+		"the chain of a process this test started does not run through this test and its parent")
+}
+
+// SetWorkerScope with an empty name list clears the entry (no-mapping ⇒ suite).
+func TestSetWorkerScopeEmptyClears(t *testing.T) {
+	p := &Proxy{}
+	p.SetWorkerScope(42, []string{"a"})
+	p.SetWorkerScope(42, nil)
+	p.workerScopeMu.RLock()
+	_, present := p.workerScope[42]
+	p.workerScopeMu.RUnlock()
+	require.False(t, present, "empty allowlist clears the worker's scope")
+}
+
+// The wrapper embeds the MockMemDb INTERFACE, so anything a parser reaches for
+// by type assertion but that is not in that interface is silently erased by the
+// wrap. Every kind-aware parser then falls to a legacy branch — and in
+// `keploy mock replay`, the only mode where worker scoping exists, the startup
+// tier is the whole pool, so that branch reads nothing.
+func TestScopedMockDb_DoesNotEraseTheManagersCapabilities(t *testing.T) {
+	mgr := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mgr.Close()
+
+	type revSrc interface{ Revision() uint64 }
+	type revKind interface{ RevisionByKind(models.Kind) uint64 }
+	type kindAware interface {
+		GetFilteredMocksByKind(models.Kind) ([]*models.Mock, error)
+		GetUnFilteredMocksByKind(models.Kind) ([]*models.Mock, error)
+	}
+
+	var scoped interface{} = &scopedMockDb{MockMemDb: mgr}
+	if _, ok := scoped.(revSrc); !ok {
+		t.Error("Revision erased by the wrap: consumers fall back to rebuilding on every call")
+	}
+	if _, ok := scoped.(revKind); !ok {
+		t.Error("RevisionByKind erased by the wrap")
+	}
+	if _, ok := scoped.(kindAware); !ok {
+		t.Error("the by-kind readers are erased by the wrap: kind-aware parsers take their " +
+			"legacy branch, which cannot read the startup tier")
+	}
+	c, ok := scoped.(integrations.MockCursor)
+	if !ok {
+		t.Fatal("the stateful cursor is erased by the wrap: a scoped worker replays every " +
+			"repeated request as its first recording")
+	}
+	// The wrap must reach the manager's cursor, not a private copy.
+	c.AdvanceMockCursor("k", 0, 3)
+	if got := mgr.MockCursorIndex("k", 3); got != 1 {
+		t.Fatalf("cursor advanced through the wrap must be visible on the manager: got %d, want 1", got)
+	}
+}
+
+// The startup tier is filtered like every other read tier. It sounds shared,
+// but staging puts the whole per-test slice into it, and in `keploy mock replay`
+// it is the entire pool — so leaving it unfiltered let one worker read, and
+// consume, another worker's mocks.
+func TestScopedMockDb_StartupTierIsScopedToTheWorker(t *testing.T) {
+	mgr := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mgr.Close()
+
+	a := newMockForTest("mock-A", time.Now().Add(-time.Hour), models.LifetimePerTest)
+	b := newMockForTest("mock-B", time.Now().Add(-time.Hour), models.LifetimePerTest)
+	mgr.SetMocksWithWindow([]*models.Mock{a, b}, nil, models.BaseTime, time.Now())
+
+	workerA := workerScoped(t, mgr, []string{"mock-A"}, []string{"mock-A", "mock-B"})
+
+	startup, err := workerA.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if containsMockNamed(startup, "mock-B") {
+		t.Fatal("worker A can see worker B's mock through the startup tier; it can also " +
+			"consume it, deleting another worker's recording")
+	}
+	if !containsMockNamed(startup, "mock-A") {
+		t.Fatal("worker A cannot see its own mock")
+	}
+}
+
+// A scoped worker's keyed walk of the session tier sees what its
+// GetSessionMocks sees, through the manager's index or, when the wrapped store
+// has none, through a walk of that snapshot.
+func TestScopedMockDb_KeyedSessionWalkIsScopedToTheWorker(t *testing.T) {
+	base := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
+	var session []*models.Mock
+	for i, n := range []string{"mine", "theirs", "shared", "mine-unkeyed"} {
+		mk := newMockForTest(n, base.Add(time.Duration(i)*time.Millisecond), models.LifetimeSession)
+		if n != "mine-unkeyed" {
+			mk.Noise = []string{"k"}
+		}
+		session = append(session, mk)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.SetMocksWithWindow(nil, session, base, base.Add(time.Second))
+	allow := []string{"mine", "mine-unkeyed"}
+	universe := []string{"mine", "theirs", "mine-unkeyed"}
+
+	walk := func(db integrations.SessionKeyReader) []string {
+		var got []string
+		require.NoError(t, db.RangeSessionMocksWithKey(keyedTestIndex, "k", func(mk *models.Mock) bool {
+			got = append(got, mk.Name)
+			return true
+		}))
+		return got
+	}
+	want := []string{"mine", "shared"}
+	require.Equal(t, want, walk(workerScoped(t, mm, allow, universe)))
+	// A wrapped store without the index: the filtered snapshot is walked.
+	require.Equal(t, want, walk(workerScoped(t, &fakeMockDb{mocks: session}, allow, universe)))
+}
+
+// A view made before exact serving began serves its connection for the
+// connection's life: scopedFor hands a connection opened under exact serving
+// the bare manager, but one opened before, from a registered worker or under
+// the starts registry, keeps its scopedMockDb. Under exact serving
+// MarkMockAsUsed's false for a named mock is a refusal the parsers must honour
+// (one more request than a test mock answers, a copy read before a begin),
+// and they ask the store they were handed whether it serves exactly: the view
+// must say what the manager says, and show what the manager's test has
+// answered.
+func TestAViewMadeBeforeExactServingBeganCarriesItsRefusals(t *testing.T) {
+	self := uint32(os.Getpid())
+	for _, tc := range []struct {
+		name string
+		view func(p *Proxy, mm *MockManager) integrations.MockMemDb
+	}{
+		{"a registered worker's view", func(p *Proxy, mm *MockManager) integrations.MockMemDb {
+			p.SetMappedUniverse([]string{"mock-1"})
+			return workerScopedOn(t, p, mm, []string{"mock-1"})
+		}},
+		{"a view under the starts registry", func(_ *Proxy, mm *MockManager) integrations.MockMemDb {
+			return &scopedMockDb{MockMemDb: mm, pid: self, live: true}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mm := stagedManager(t, nil, nil)
+			p := &Proxy{logger: zap.NewNop()}
+			view := tc.view(p, mm)
+			if integrations.ExactServing(view) || integrations.ConsumeRefused(view, "mock-1") {
+				t.Fatal("the view says it serves exactly before exact serving began")
+			}
+			er, ok := view.(integrations.ExactConsumedReader)
+			require.True(t, ok, "the view hides the test's answered mocks: an extra call is not told from an unrecorded one")
+			require.Empty(t, er.ConsumedTestMocks(), "no test has answered before exact serving began")
+
+			mm.ServeExactTest("T", []*models.Mock{exactMock("mock-1", 0, models.LifetimePerTest)})
+			require.Equal(t, integrations.MockMemDb(mm), p.scopedFor(self, mm),
+				"a connection opened under exact serving is handed the bare manager")
+
+			read, err := view.GetFilteredMocks()
+			require.NoError(t, err)
+			equalNames(t, "the open test's mocks, read through the view", read, "mock-1")
+			require.True(t, view.MarkMockAsUsed(*read[0]), "the test mock answers its first request")
+			require.False(t, view.MarkMockAsUsed(*read[0]), "one more request: the manager refuses the consume")
+
+			require.True(t, integrations.ConsumeRefused(view, read[0].Name),
+				"the view hides exact serving: a parser on it takes the refusal for bookkeeping and answers with the mock")
+			equalNames(t, "answered through the view", er.ConsumedTestMocks(), "mock-1")
+		})
+	}
+}
+
+// A view over a store that cannot serve exactly forwards nothing it does not
+// have: it does not serve exactly, and no test of it has answered.
+func TestAViewOverAStoreThatCannotServeExactlyForwardsNothing(t *testing.T) {
+	view := &scopedMockDb{MockMemDb: &fakeMockDb{}}
+	require.False(t, integrations.ExactServing(view))
+	require.Nil(t, view.ConsumedTestMocks())
+	require.Nil(t, view.SkippedReadsAnswered())
+	require.Nil(t, view.ExactTakenCandidates(""))
+	_, ok := view.ClaimantOf("mock-1")
+	require.False(t, ok)
+}
+
+// A view made before exact serving began tells a parser's learn step what the
+// open test shares with the tests recorded beside it, as the bare manager
+// does: which shared recording another test answered with, and by whom.
+func TestAViewMadeBeforeExactServingBeganSaysWhatTheOpenTestShares(t *testing.T) {
+	mm := stagedManager(t, nil, nil)
+	view := &scopedMockDb{MockMemDb: mm, pid: uint32(os.Getpid()), live: true}
+	shared := exactMock("shared-1", 0, models.LifetimePerTest)
+	mm.ServeExactTestConcurrent("A", nil, []*models.Mock{shared})
+	read, err := view.GetFilteredMocks()
+	require.NoError(t, err)
+	equalNames(t, "A's shared recording, read through the view", read, "shared-1")
+	require.True(t, view.MarkMockAsUsed(*read[0]), "A answers its call with it")
+	mm.ServeExactTestConcurrent("B", nil, []*models.Mock{shared})
+	who, ok := view.ClaimantOf("shared-1")
+	require.True(t, ok)
+	require.Equal(t, "A", who)
+	equalNames(t, "the shared recording A took, as B's view tells it", view.ExactTakenCandidates(""), "shared-1")
+}
+
+// A worker's view made before exact serving began serves its connection for
+// the connection's life. While the manager serves each test exactly its own
+// mocks, the view passes everything straight through: it narrows no read by
+// the worker's old scope, so the open test's own mocks are read on it; and it
+// holds no consumed recording of its own, so the manager's refusal of a stale
+// copy (one read before the test began again) reaches the parser.
+func TestAWorkersViewPassesStraightThroughUnderExactServing(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	b := exactMock("b", time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a, b}, nil)
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a", "b"})
+	const worker = 4101
+	p.SetWorkerScope(worker, []string{"a"})
+	view := p.scopedFor(worker, mm)
+	if view == integrations.MockMemDb(mm) {
+		t.Fatal("precondition: the worker's connection got the bare manager")
+	}
+
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T", []*models.Mock{b})
+	pt, _ := view.GetPerTestMocksInWindow()
+	equalNames(t, "the open test's mocks on the old view", pt, "b")
+	if got := func() string {
+		f := view.(integrations.StagedFinder)
+		n, _ := f.FindStagedNotOwned(models.HTTP, f.MarkCallRound(), func(m *models.Mock) bool { return true })
+		return n
+	}(); got != "a" {
+		t.Fatalf("a miss's diagnosis on the old view found %q, want a, staged and not the open test's", got)
+	}
+
+	// The test begins again: the copy read before it is stale, and the
+	// manager refuses it.
+	p.SetWorkerScope(worker, []string{"b"})
+	stale := *pt[0]
+	mm.ServeExactTest("T", []*models.Mock{b})
+	if view.DeleteFilteredMock(stale) {
+		t.Fatal("a consume the manager refuses answered through the old view")
+	}
+	fresh, _ := view.GetPerTestMocksInWindow()
+	if len(fresh) != 1 || !view.DeleteFilteredMock(*fresh[0]) {
+		t.Fatalf("the test's own mock, read now, was not consumed: %v", exactNames(fresh))
+	}
+	if view.DeleteFilteredMock(*fresh[0]) {
+		t.Fatal("a test mock answered twice through the old view")
+	}
+}

@@ -1,0 +1,83 @@
+# E2E regression guard for the UI-join annotation.
+#
+# NOTE: this repo carries only .github/workflows/* (no Woodpecker
+# pipeline), matching e2e-agent-ready-ca-gate.yml. If Woodpecker is
+# adopted, mirror this job into .woodpecker/.
+#
+# WHY THIS EXISTS. The annotation is assembled from an observed ingress
+# port, a wall clock and three environment variables, and written by the
+# stop defer at the very end of a real recording session. Every one of
+# those is a seam a unit test has to fake -- and the feature shipped with
+# unit tests that all passed. This job drives the binary a user runs.
+name: e2e-ui-join-annotation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pkg/models/uijoin*.go'
+      - 'pkg/service/record/uijoin_record*.go'
+      - 'pkg/service/record/record.go'
+      # Declares FrameChan.Abandon and the TestSetConfig interface the
+      # annotation is written through. ReadForUpdate is deliberately NOT
+      # on that interface -- it is reached by runtime assertion from
+      # uijoin_record.go, so enterprise's implementation keeps compiling
+      # -- which is why this filter also lists uijoin_record*.go above.
+      - 'pkg/service/record/service.go'
+      # The store that actually writes config.yaml. A read-modify-write
+      # bug there is precisely the class this e2e exists to catch, and it
+      # would not have triggered the job.
+      - 'pkg/platform/yaml/configdb/testset/**'
+      # models.TestSet and its Metadata map -- the struct the annotation
+      # rides in. NOT matched by the uijoin*.go pattern above, so a yaml
+      # tag change here would break the round trip silently.
+      - 'pkg/models/config.go'
+      # The generic reader/writer that store goes through.
+      - 'pkg/platform/yaml/*.go'
+      - 'tests/e2e/ui-join-annotation/**'
+      - '.github/workflows/e2e-ui-join-annotation.yml'
+  pull_request:
+    paths:
+      - 'pkg/models/uijoin*.go'
+      - 'pkg/service/record/uijoin_record*.go'
+      - 'pkg/service/record/record.go'
+      # Declares FrameChan.Abandon and the TestSetConfig interface the
+      # annotation is written through. ReadForUpdate is deliberately NOT
+      # on that interface -- it is reached by runtime assertion from
+      # uijoin_record.go, so enterprise's implementation keeps compiling
+      # -- which is why this filter also lists uijoin_record*.go above.
+      - 'pkg/service/record/service.go'
+      # The store that actually writes config.yaml. A read-modify-write
+      # bug there is precisely the class this e2e exists to catch, and it
+      # would not have triggered the job.
+      - 'pkg/platform/yaml/configdb/testset/**'
+      # models.TestSet and its Metadata map -- the struct the annotation
+      # rides in. NOT matched by the uijoin*.go pattern above, so a yaml
+      # tag change here would break the round trip silently.
+      - 'pkg/models/config.go'
+      # The generic reader/writer that store goes through.
+      - 'pkg/platform/yaml/*.go'
+      - 'tests/e2e/ui-join-annotation/**'
+      - '.github/workflows/e2e-ui-join-annotation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    # Two recording sessions measured ~25s locally (4 runs, 24-26s),
+    # plus the Go build. 30 minutes is ample headroom without letting a
+    # hang burn the 6-hour job ceiling.
+    timeout-minutes: 30
+    name: ui-join annotation lands on disk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run e2e regression
+        run: ./tests/e2e/ui-join-annotation/run.sh

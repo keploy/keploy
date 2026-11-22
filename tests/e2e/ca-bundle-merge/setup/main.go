@@ -22,6 +22,24 @@ import (
 )
 
 func main() {
+	// Helpers for the corporate-CA scenarios (see docker-compose.yml): write a
+	// private PKI, or serve HTTPS with its leaf.
+	if len(os.Args) == 3 {
+		var err error
+		switch os.Args[1] {
+		case "gen-corp":
+			err = genCorp(os.Args[2])
+		case "serve-corp":
+			err = serveCorp(os.Args[2])
+		default:
+			log.Fatalf("unknown command %q (want gen-corp or serve-corp)", os.Args[1])
+		}
+		if err != nil {
+			log.Fatalf("%s: %v", os.Args[1], err)
+		}
+		return
+	}
+
 	exportPath := "/tmp/keploy-tls"
 	if v := os.Getenv("EXPORT_PATH"); v != "" {
 		exportPath = v

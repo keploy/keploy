@@ -1,25 +1,77 @@
 package relay
 
 import (
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/utils/stall"
+	"go.uber.org/zap"
 )
 
 // newTestTee constructs a tee with reasonable defaults for tests.
 // cap is expressed in bytes; buf is the channel capacity.
-func newTestTee(t *testing.T, capBytes int64, buf int, memCheck func() bool) (*tee, func(reason string), *dropRecorder) {
+const testStallGrace = 150 * time.Millisecond
+
+func newTestTee(t *testing.T, capBytes int64, buf int) (*tee, func(reason string), *dropRecorder) {
 	t.Helper()
 	rec := &dropRecorder{}
-	t2 := newTee(fakeconn.FromClient, capBytes, buf, memCheck, rec.record, nil)
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, rec.record, nil)
+	// A consumer that never goes away: these tests exercise queueing and
+	// delivery, so drain must never take the abandon branch. Tests that
+	// simulate a departed parser build their own signal (see
+	// newTestTeeWithConsumer).
+	t2.start(make(chan struct{}))
 	t.Cleanup(func() {
 		t2.close()
 		t2.waitDone()
 	})
 	return t2, rec.record, rec
+}
+
+// newTestTeeWithConsumer is newTestTee plus control over the consumer's
+// liveness: closing the returned channel is what a parser abandoning its
+// FakeConn looks like to the tee.
+// newTestTeeQueued builds a tee whose drain loop is NOT started, so pushed
+// chunks stay in the queue.
+//
+// The per-connection cap is an OCCUPANCY cap: drain decrements qBytes as it
+// dequeues, so a delivered chunk stops counting against it — that is the
+// behaviour TestDrainingAChunkReturnsCapacity exists to pin, and it is correct.
+// The consequence is that any test asserting "this push is refused because the
+// earlier ones are still queued" is racing its own drainer. If drain wins, the
+// bytes are already released and the push legitimately succeeds; the test then
+// fails for a reason that has nothing to do with the cap. Measured at roughly
+// 1-in-40 runs, and 5-in-5 with a 50ms pause between the pushes.
+//
+// Not starting drain removes the race and lets those tests assert exactly what
+// the cap means. waitDone is deliberately absent from the cleanup: t.done is
+// closed by drain, which never runs here.
+func newTestTeeQueued(t *testing.T, capBytes int64, buf int) (*tee, *dropRecorder) {
+	t.Helper()
+	rec := &dropRecorder{}
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, rec.record, nil)
+	t.Cleanup(t2.close)
+	return t2, rec
+}
+
+func newTestTeeWithConsumer(t *testing.T, capBytes int64, buf int) (*tee, *dropRecorder, chan struct{}) {
+	t.Helper()
+	rec := &dropRecorder{}
+	gone := make(chan struct{})
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, rec.record, nil)
+	t2.start(gone)
+	t.Cleanup(func() {
+		t2.close()
+		t2.waitDone()
+	})
+	return t2, rec, gone
 }
 
 // dropRecorder collects drop reasons for assertion.
@@ -65,7 +117,7 @@ func mkChunk(payload string) fakeconn.Chunk {
 
 func TestTee_PushAndDrain(t *testing.T) {
 	t.Parallel()
-	tt, _, rec := newTestTee(t, 1<<20, 4, nil)
+	tt, _, rec := newTestTee(t, 1<<20, 4)
 
 	if !tt.push(mkChunk("hello")) {
 		t.Fatalf("push returned false unexpectedly")
@@ -74,29 +126,18 @@ func TestTee_PushAndDrain(t *testing.T) {
 	if string(got.Bytes) != "hello" {
 		t.Fatalf("got bytes %q, want %q", got.Bytes, "hello")
 	}
-	if rec.count(DropMemoryPressure)+rec.count(DropPerConnCap)+rec.count(DropChannelFull) != 0 {
+	if rec.count(DropPerConnCap)+rec.count(DropChannelFull) != 0 {
 		t.Fatalf("unexpected drops: %v", rec.snapshot())
-	}
-}
-
-func TestTee_DropOnMemoryPressure(t *testing.T) {
-	t.Parallel()
-	var paused atomic.Bool
-	paused.Store(true)
-	tt, _, rec := newTestTee(t, 1<<20, 4, paused.Load)
-
-	if tt.push(mkChunk("x")) {
-		t.Fatalf("push should have dropped under memory pressure")
-	}
-	if rec.count(DropMemoryPressure) != 1 {
-		t.Fatalf("want 1 memory_pressure drop, got reasons %v", rec.snapshot())
 	}
 }
 
 func TestTee_DropOnPerConnCap(t *testing.T) {
 	t.Parallel()
-	// Cap at 4 bytes; first 3-byte push fits, second also fits (6 > 4) → drop.
-	tt, _, rec := newTestTee(t, 4, 16, nil)
+	// Cap at 4 bytes; the first 3-byte push fits, the second would take the
+	// QUEUE to 6 > 4 → drop. Drain must not run: it releases bytes as it
+	// dequeues, which would let the second push through for reasons unrelated
+	// to the cap (see newTestTeeQueued).
+	tt, rec := newTestTeeQueued(t, 4, 16)
 
 	if !tt.push(mkChunk("abc")) {
 		t.Fatalf("first push should succeed")
@@ -109,28 +150,154 @@ func TestTee_DropOnPerConnCap(t *testing.T) {
 	}
 }
 
-func TestTee_DropOnChannelFull(t *testing.T) {
+// TestTee_SpillsInsteadOfDroppingOnChannelFull pins the core of the
+// boot-capture fix: a full staging channel no longer forces a drop. buf=1
+// with no receiver means every push after the first would previously drop
+// on channel_full — losing response chunks and stranding their mock. With
+// the overflow spill each push instead succeeds (buffered up to the
+// per-conn cap), so no chunk is dropped.
+func TestTee_SpillsInsteadOfDroppingOnChannelFull(t *testing.T) {
 	t.Parallel()
-	// Large cap but channel buf=1; drain goroutine starts but we
-	// never receive on readCh, so staging fills.
-	tt, _, rec := newTestTee(t, 1<<30, 1, nil)
+	// Large cap so the spill has headroom; buf=1 so staging fills at once.
+	tt, _, rec := newTestTee(t, 1<<30, 1)
 
-	// Push enough that at least one drop occurs. The drain goroutine
-	// buffers one chunk in `out` too, so we need >2 pushes to be sure
-	// we see a drop.
-	for i := 0; i < 10; i++ {
-		tt.push(mkChunk("x"))
+	for i := 0; i < 64; i++ {
+		if !tt.push(mkChunk(fmt.Sprintf("c%03d", i))) {
+			t.Fatalf("push %d dropped despite spill headroom (drops=%v)", i, rec.snapshot())
+		}
 	}
-	// Give the drain goroutine time to settle its buffer.
-	time.Sleep(20 * time.Millisecond)
-	if rec.count(DropChannelFull) == 0 {
-		t.Fatalf("expected at least one channel_full drop, got %v", rec.snapshot())
+	if rec.count(DropChannelFull) != 0 {
+		t.Fatalf("channel_full drop must not happen with the spill: %v", rec.snapshot())
+	}
+}
+
+// TestTee_SpillPreservesOrderNoLoss proves the spill is lossless AND
+// order-preserving end to end: push a burst that overruns the drain, then
+// drain everything (including the teardown-flushed overflow tail) and
+// assert the exact sequence is delivered.
+func TestTee_SpillPreservesOrderNoLoss(t *testing.T) {
+	t.Parallel()
+	tt, _, rec := newTestTee(t, 1<<30, 1)
+
+	recvd := make(chan []string, 1)
+	go func() {
+		var got []string
+		for c := range tt.readCh() {
+			got = append(got, string(c.Bytes))
+		}
+		recvd <- got
+	}()
+
+	const N = 300
+	for i := 0; i < N; i++ {
+		if !tt.push(mkChunk(fmt.Sprintf("c%03d", i))) {
+			t.Fatalf("push %d dropped unexpectedly (drops=%v)", i, rec.snapshot())
+		}
+	}
+	tt.close()
+	tt.waitDone()
+	got := <-recvd
+
+	if len(got) != N {
+		t.Fatalf("LOST chunks: got %d, want %d (drops=%v)", len(got), N, rec.snapshot())
+	}
+	for i, s := range got {
+		if want := fmt.Sprintf("c%03d", i); s != want {
+			t.Fatalf("out of wire order at index %d: got %q want %q", i, s, want)
+		}
+	}
+	if d := rec.count(DropChannelFull) + rec.count(DropPerConnCap); d != 0 {
+		t.Fatalf("unexpected drops despite spill + cap headroom: %v", rec.snapshot())
+	}
+}
+
+// TestTee_CloseRacingSpillBacklog_Conserves pins the subtle teardown
+// guarantee flagged by review: when close() races an overflow backlog, every
+// accepted chunk is either delivered exactly once or counted as a drop —
+// never silently lost, duplicated, or reordered. Correctness depends on
+// push's len(overflow)==0 fast-path re-checking `closed`; a refactor that
+// broke that ordering would reintroduce stranding, and this test would catch
+// it. Run under -race, it also stresses the push/close/drain interleaving.
+func TestTee_CloseRacingSpillBacklog_Conserves(t *testing.T) {
+	t.Parallel()
+	for iter := 0; iter < 100; iter++ {
+		rec := &dropRecorder{}
+		tt := newTee(fakeconn.FromClient, 1<<30, 1, testStallGrace, rec.record, nil) // buf=1 forces spill
+		tt.start(make(chan struct{}))                                                // consumer stays alive for this test
+
+		recvd := make(chan []int, 1)
+		go func() {
+			var got []int
+			for c := range tt.readCh() {
+				var n int
+				_, _ = fmt.Sscanf(string(c.Bytes), "%d", &n)
+				got = append(got, n)
+			}
+			recvd <- got
+		}()
+
+		const N = 50
+		accepted := 0
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < N; i++ {
+				if tt.push(mkChunk(fmt.Sprintf("%d", i))) {
+					accepted++ // single writer; read after wg.Wait()
+				}
+			}
+		}()
+		wg.Wait()
+		tt.close()
+		tt.waitDone()
+		got := <-recvd
+
+		seen := make(map[int]bool, len(got))
+		for i, n := range got {
+			if seen[n] {
+				t.Fatalf("iter %d: duplicate delivery of %d: %v", iter, n, got)
+			}
+			seen[n] = true
+			if i > 0 && n <= got[i-1] {
+				t.Fatalf("iter %d: out of wire order: %v", iter, got)
+			}
+		}
+		if delivered, drops := len(got), int(tt.dropCount()); delivered+drops != accepted {
+			t.Fatalf("iter %d: conservation violated: delivered=%d + drops=%d != accepted=%d",
+				iter, delivered, drops, accepted)
+		}
+	}
+}
+
+// TestTee_DropsWhenOverflowExceedsCap confirms the spill is bounded: the
+// per-conn cap still governs total buffered bytes (staging + overflow), so
+// a runaway that exceeds it drops (per_conn_cap) rather than growing
+// without limit — preserving the OOM-safety contract.
+func TestTee_DropsWhenOverflowExceedsCap(t *testing.T) {
+	t.Parallel()
+	// cap=10 bytes, buf=1, no receiver. Each chunk is 4 bytes. Drain is not
+	// started so the queue actually accumulates (see newTestTeeQueued).
+	tt, rec := newTestTeeQueued(t, 10, 1)
+	// "aaaa" (staging) + "bbbb" (overflow, total 8) fit; "cccc" (total 12
+	// > 10) must drop on per_conn_cap.
+	if !tt.push(mkChunk("aaaa")) {
+		t.Fatal("first push should fit")
+	}
+	if !tt.push(mkChunk("bbbb")) {
+		t.Fatal("second push should spill within cap")
+	}
+	if tt.push(mkChunk("cccc")) {
+		t.Fatal("third push should drop (staging+overflow would exceed cap)")
+	}
+	if rec.count(DropPerConnCap) == 0 {
+		t.Fatalf("want a per_conn_cap drop, got %v", rec.snapshot())
 	}
 }
 
 func TestTee_PausedDropsWithoutCapUsage(t *testing.T) {
 	t.Parallel()
-	tt, _, rec := newTestTee(t, 1<<20, 4, nil)
+	tt, _, rec := newTestTee(t, 1<<20, 4)
 
 	tt.setPaused(true)
 	if tt.push(mkChunk("hello")) {
@@ -148,7 +315,8 @@ func TestTee_PausedDropsWithoutCapUsage(t *testing.T) {
 
 func TestTee_ClosePreventsSendPanic(t *testing.T) {
 	t.Parallel()
-	tt := newTee(fakeconn.FromClient, 1<<20, 4, nil, nil, nil)
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil)
+	tt.start(make(chan struct{})) // consumer stays alive for this test
 
 	// Spawn pushers racing with close; no panic expected.
 	var wg sync.WaitGroup
@@ -169,7 +337,8 @@ func TestTee_ClosePreventsSendPanic(t *testing.T) {
 
 func TestTee_CloseIsIdempotent(t *testing.T) {
 	t.Parallel()
-	tt := newTee(fakeconn.FromClient, 1<<20, 4, nil, nil, nil)
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil)
+	tt.start(make(chan struct{})) // consumer stays alive for this test
 	tt.close()
 	tt.close() // must not panic
 	tt.waitDone()
@@ -195,7 +364,8 @@ func TestTee_StagedChunkSurvivesClose(t *testing.T) {
 	const iters = 200
 	for i := 0; i < iters; i++ {
 		rec := &dropRecorder{}
-		tt := newTee(fakeconn.FromClient, 1<<30, 4, nil, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 1<<30, 4, testStallGrace, rec.record, nil)
+		tt.start(make(chan struct{})) // consumer stays alive for this test
 
 		// Admit a chunk into staging, then immediately tear the tee
 		// down — mirroring the forwarder pushing the final response
@@ -219,8 +389,756 @@ func TestTee_StagedChunkSurvivesClose(t *testing.T) {
 		if got != 1 {
 			t.Fatalf("iter %d: delivered %d chunks, want 1 (chunk dropped on teardown)", i, got)
 		}
-		if d := rec.count(DropChannelFull) + rec.count(DropMemoryPressure) + rec.count(DropPerConnCap); d != 0 {
+		if d := rec.count(DropChannelFull) + rec.count(DropPerConnCap); d != 0 {
 			t.Fatalf("iter %d: unexpected push-side drops: %v", i, rec.snapshot())
 		}
+	}
+}
+
+// TestTee_SlowConsumerLosesNothing is the stress property.
+//
+// A parser that is merely behind — a boot burst, a big decode, a loaded
+// node — must receive every chunk no matter how long the whole drain takes.
+// The delivery wait is therefore bounded by STALLED time, not elapsed time:
+// each time the consumer takes anything the wait restarts. A consumer that
+// crawls for many multiples of the grace still loses nothing.
+func TestTee_SlowConsumerLosesNothing(t *testing.T) {
+	t.Parallel()
+	tt, rec, _ := newTestTeeWithConsumer(t, 1<<30, 1) // buf=1 → every send waits
+
+	const n = 40
+	for i := 0; i < n; i++ {
+		if !tt.push(mkChunk(fmt.Sprintf("c%03d", i))) {
+			t.Fatalf("push %d refused", i)
+		}
+	}
+	tt.close()
+
+	// Drain slower than the grace on purpose: total time far exceeds one
+	// window, but no single gap does.
+	var got []string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for c := range tt.readCh() {
+			got = append(got, string(c.Bytes))
+			time.Sleep(testStallGrace / 3)
+		}
+	}()
+	<-done
+
+	if len(got) != n {
+		t.Fatalf("slow consumer lost data: got %d chunks, want %d (drops=%v)", len(got), n, rec.snapshot())
+	}
+	for i, s := range got {
+		if want := fmt.Sprintf("c%03d", i); s != want {
+			t.Fatalf("out of order at %d: got %q want %q", i, s, want)
+		}
+	}
+	if d := tt.dropCount(); d != 0 {
+		t.Errorf("dropCount = %d, want 0 for a consumer that kept progressing", d)
+	}
+}
+
+// TestTee_GoneConsumerIsAbandonedAtOnce pins the two halves of the "gone"
+// verdict: it is reached without waiting out the grace, and it applies to
+// the whole connection rather than being re-decided per chunk.
+func TestTee_GoneConsumerIsAbandonedAtOnce(t *testing.T) {
+	t.Parallel()
+	tt, rec, gone := newTestTeeWithConsumer(t, 1<<30, 1)
+
+	for i := 0; i < 200; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
+	}
+
+	start := time.Now()
+	close(gone) // the parser closed its FakeConn
+	tt.close()
+	tt.waitDone()
+	elapsed := time.Since(start)
+
+	if elapsed > testStallGrace {
+		t.Errorf("took %v to release a departed consumer; the close signal should not wait out the grace (%v)",
+			elapsed, testStallGrace)
+	}
+	// One report for the connection, not one per abandoned chunk.
+	if n := rec.count(DropConsumerGone); n != 1 {
+		t.Errorf("consumer_gone reported %d times, want exactly 1 for the whole remainder", n)
+	}
+	if d := tt.dropCount(); d == 0 {
+		t.Error("abandoned chunks were not counted; loss must be visible, not silent")
+	}
+}
+
+// TestTee_StalledConsumerCostsOneGraceNotOnePerChunk is the regression guard
+// for the teardown-latency trap.
+//
+// Arming the wait per chunk is what keeps a slow-but-progressing consumer
+// whole, but if the verdict is re-decided per chunk then a consumer that has
+// actually stopped costs grace × queue-depth — hundreds of queued chunks turn
+// teardown into minutes, which is exactly why bounding the whole flush was
+// tempting. Deciding once and abandoning the remainder gets both: this must
+// finish in ONE window regardless of how much is queued.
+//
+// The window is time the process could run (utils/stall), so it is measured
+// on an injected clock, not in wall time: on a starved host one window of run
+// time is many of wall time, and a wall-clock bound here would fail there
+// for the behaviour the window exists to have.
+func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
+	t.Parallel()
+	const queued = 200
+	clk := &stall.ManualClock{Step: stall.OnTime}
+	tt, rec := newTestTeeClock(t, 1<<30, 1, clk) // consumer never reads
+
+	for i := 0; i < queued; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
+	}
+
+	tt.close()
+	tt.waitDone()
+
+	// Per-chunk re-decision would take queued windows of samples.
+	if got, want := clk.Waits, int(testStallGrace/stall.CheckEvery(testStallGrace)); got != want {
+		t.Errorf("teardown looked %d times with %d chunks queued, want one window of %d: the stall verdict is being "+
+			"re-taken per chunk instead of once for the connection", got, queued, want)
+	}
+	if n := rec.count(DropConsumerGone); n != 1 {
+		t.Errorf("consumer_gone reported %d times, want exactly 1", n)
+	}
+	// Conservation: every chunk is either delivered or counted as lost, and
+	// the tally is the ONLY way that loss becomes visible. os/exec makes the
+	// same point the hard way — when WaitDelay fires it returns ErrWaitDelay
+	// even for a process that exited 0, because a capture that may be
+	// incomplete must never be reported as clean. A tally of 1 when 199 were
+	// abandoned is a silent truncation, and a silently truncated recording
+	// yields an unreplayable mock.
+	delivered := 0
+	for range tt.readCh() { // out is closed by now; this drains its buffer
+		delivered++
+	}
+	if got := delivered + int(tt.dropCount()); got != queued {
+		t.Errorf("chunk accounting does not balance: %d delivered + %d dropped = %d, want %d — "+
+			"undelivered chunks are going unreported", delivered, tt.dropCount(), got, queued)
+	}
+}
+
+// TestTee_PushRefusedAfterAbandon is the C1 regression guard.
+//
+// abandon() ends the drain, so from that moment nothing will ever deliver a
+// queued chunk. If push kept succeeding it would append to a queue with no
+// consumer and report TRUE for a chunk that is already lost — worse than the
+// leak this path exists to fix, because the caller uses that return to decide
+// the chunk was teed and to arm the supervisor's pending-work watchdog, whose
+// eventual hang verdict abandons the connection's recording wholesale.
+func TestTee_PushRefusedAfterAbandon(t *testing.T) {
+	t.Parallel()
+	tt, _, gone := newTestTeeWithConsumer(t, 1<<30, 1)
+
+	for i := 0; i < 20; i++ {
+		tt.push(mkChunk("x"))
+	}
+	close(gone) // parser departed → drain abandons and returns
+	tt.waitDone()
+
+	before := tt.dropCount()
+	accepted := 0
+	for i := 0; i < 10; i++ {
+		if tt.push(mkChunk("after")) {
+			accepted++
+		}
+	}
+	if accepted != 0 {
+		t.Errorf("push accepted %d chunks after the connection was abandoned; "+
+			"they are queued behind a drain that has already returned, so each one is "+
+			"silently lost while the caller is told it was recorded", accepted)
+	}
+	if got := tt.dropCount(); got != before {
+		t.Errorf("dropCount moved %d -> %d: refused pushes should not be counted twice, "+
+			"the abandonment was already reported once with its total", before, got)
+	}
+}
+
+// TestTee_LiveConnectionIsNotAbandonedOnStall is the H1 regression guard.
+//
+// The stall bound exists only so relay teardown (which waits on waitDone)
+// cannot hang. Applying it MID-connection would throw away a live recording
+// and close out under a parser that is still reading, handing it a premature
+// io.EOF — a net-new loss path that the fixed-slot design never had. A parser
+// that is simply behind for longer than the grace must lose nothing.
+func TestTee_LiveConnectionIsNotAbandonedOnStall(t *testing.T) {
+	t.Parallel()
+	tt, rec, _ := newTestTeeWithConsumer(t, 1<<30, 1) // buf=1: the send blocks
+
+	const n = 6
+	for i := 0; i < n; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
+	}
+
+	// Stall well past the grace WITHOUT closing the tee: the parser is alive,
+	// just busy.
+	time.Sleep(3 * testStallGrace)
+
+	if d := tt.dropCount(); d != 0 {
+		t.Fatalf("dropCount = %d after a mid-connection stall: a live connection was "+
+			"abandoned (reasons=%v)", d, rec.snapshot())
+	}
+
+	// The parser comes back and must still receive everything.
+	got := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range tt.readCh() {
+			got++
+		}
+	}()
+	tt.close()
+	<-done
+
+	if got != n {
+		t.Errorf("slow-but-alive parser received %d of %d chunks; the stall bound must not "+
+			"apply mid-connection", got, n)
+	}
+}
+
+// TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone pins drain's non-blocking
+// pre-try.
+//
+// Once consumerGone is closed, a plain select between "send to out" and "give
+// up" picks at RANDOM whenever both are ready — so roughly half of the chunks
+// out still had room for would be abandoned. The pre-try is what makes
+// delivery win whenever it is possible at all; without it this test loses
+// about half its data.
+func TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone(t *testing.T) {
+	t.Parallel()
+	const n = 200
+	tt, _, gone := newTestTeeWithConsumer(t, 1<<30, n*4) // out has ample room
+
+	close(gone) // consumer "gone", but out can still accept everything
+	for i := 0; i < n; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
+	}
+	tt.close()
+	tt.waitDone()
+
+	// The stream of a consumer that is gone is left open (endStream), so
+	// this takes what out holds without waiting for its end.
+	delivered := 0
+	for len(tt.readCh()) > 0 {
+		<-tt.readCh()
+		delivered++
+	}
+	if delivered != n {
+		t.Errorf("delivered %d of %d chunks that out had room for; without the "+
+			"non-blocking pre-try the select coin-flips against a closed consumerGone "+
+			"and discards deliverable data", delivered, n)
+	}
+}
+
+// A stream whose reader was closed before the stream's end is left open, so
+// its reader reads fakeconn.ErrClosed after what it was handed, however late
+// it gets there: the session's close, not the connection's end. A reader
+// closed after the end, as the relay's teardown closes it, reads io.EOF
+// (tee.endStream).
+func TestTee_StreamClosedBeforeItsEndReadsTheClose(t *testing.T) {
+	t.Parallel()
+	for _, closedFirst := range []bool{true, false} {
+		tt := newTee(fakeconn.FromDest, 1<<20, 4, testStallGrace, nil, nil)
+		fc := fakeconn.New(tt.readCh(), nil, nil)
+		tt.start(fc.Done())
+		tt.push(mkChunk("answer"))
+		if closedFirst {
+			_ = fc.Close()
+		}
+		tt.close()
+		tt.waitDone()
+		if !closedFirst {
+			_ = fc.Close()
+		}
+		if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "answer" {
+			t.Errorf("closed first %v: read %q, %v; want the chunk delivered before the end", closedFirst, c.Bytes, err)
+		}
+		want := io.EOF
+		if closedFirst {
+			want = fakeconn.ErrClosed
+		}
+		if _, err := fc.ReadChunk(); !errors.Is(err, want) {
+			t.Errorf("closed first %v: the stream's end read %v, want %v", closedFirst, err, want)
+		}
+	}
+}
+
+// A reader closed after tee.close but before the drain's end (the relay's
+// final flush, which a session abort can land in) was closed before the
+// stream's end too, so it reads fakeconn.ErrClosed after what it was handed.
+// The stream's end is decided as the drain returns, not when close is called
+// (tee.endStream). out has one slot and the drain holds two more chunks, so
+// it cannot end before the reader's close; the hour-long stall bound cannot
+// end it either.
+func TestTee_StreamClosedDuringTheFinalFlushReadsTheClose(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 1, time.Hour, nil, nil)
+	fc := fakeconn.New(tt.readCh(), nil, nil)
+	tt.start(fc.Done())
+	for _, s := range []string{"a", "b", "c"} {
+		if !tt.push(mkChunk(s)) {
+			t.Fatalf("push %q refused", s)
+		}
+	}
+	tt.close()
+	_ = fc.Close()
+	tt.waitDone()
+	if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "a" {
+		t.Fatalf("read %q, %v; want the chunk delivered before the close", c.Bytes, err)
+	}
+	if _, err := fc.ReadChunk(); !errors.Is(err, fakeconn.ErrClosed) {
+		t.Errorf("a reader closed during the final flush read %v at the stream's end, want %v", err, fakeconn.ErrClosed)
+	}
+}
+
+// The relay's teardown waits on done and then closes the FakeConns, so the
+// drain decides the stream's end before it signals done: a close that waited
+// on done finds the stream ended, and its reader reads io.EOF after what it
+// was handed. The teardown's one close lands just before the stream's end is
+// decided if done is already signalled there, where a close that waited on
+// done could land, and after waitDone otherwise. It runs once
+// (sync.OnceFunc), and a second call returns only once the first has closed
+// the reader, so an end decided after done reads that close
+// (fakeconn.ErrClosed) on every run.
+func TestTee_CloseThatWaitedOnDoneFindsTheStreamEnded(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 4, testStallGrace, nil, nil)
+	fc := fakeconn.New(tt.readCh(), nil, nil)
+	teardownClose := sync.OnceFunc(func() { _ = fc.Close() })
+	tt.endingStream = func() {
+		select {
+		case <-tt.done:
+			teardownClose()
+		default:
+		}
+	}
+	tt.start(fc.Done())
+	if !tt.push(mkChunk("answer")) {
+		t.Fatal("push refused")
+	}
+	tt.close()
+	tt.waitDone()
+	teardownClose()
+	if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "answer" {
+		t.Fatalf("read %q, %v; want the chunk delivered before the end", c.Bytes, err)
+	}
+	if _, err := fc.ReadChunk(); !errors.Is(err, io.EOF) {
+		t.Errorf("a reader closed after done read %v at the stream's end, want %v: the end was decided after done", err, io.EOF)
+	}
+}
+
+// TestDrainingAChunkReturnsCapacity pins the queue's core accounting invariant.
+//
+// qBytes must fall when a chunk leaves the queue. Without that, PerConnCap
+// stops being an INSTANTANEOUS bound and silently becomes a CUMULATIVE one:
+// once a connection has carried its cap worth of bytes in total, every further
+// push is refused with per_conn_cap and the connection records nothing for the
+// rest of its life — however little is actually queued.
+//
+// Each push waits for the consumer to receive a chunk once a cap's worth is
+// out (an event, not a pause): drain takes a chunk's bytes off qBytes before it
+// hands the chunk over, so no more than the cap is ever queued and every push
+// must be admitted. Pacing the pushes by a sleep instead raced the drain
+// goroutine: on a loaded host it went unscheduled for the three sleeps a
+// 30-byte cap allows, the fourth push overflowed the cap as it should, and the
+// test called the instantaneous bound cumulative.
+func TestDrainingAChunkReturnsCapacity(t *testing.T) {
+	t.Parallel()
+	const chunk = "0123456789" // 10 bytes
+	const capChunks = 3
+	// Room for capChunks chunks at once, far less than the total we will push.
+	tt, rec, _ := newTestTeeWithConsumer(t, capChunks*int64(len(chunk)), 64)
+
+	const total = 200 // 2000 bytes through a 30-byte cap
+	received := make(chan struct{}, total)
+	drained := make(chan int, 1)
+	go func() {
+		n := 0
+		for range tt.readCh() {
+			n++
+			received <- struct{}{}
+		}
+		drained <- n
+	}()
+
+	hung := time.After(time.Minute) // only turns a hang into a failure
+	sent, out := 0, 0
+	for i := 0; i < total; i++ {
+		if out == capChunks {
+			select {
+			case <-received:
+				out--
+			case <-hung:
+				t.Fatalf("the consumer received %d of the %d chunks admitted: drain stopped delivering", sent-out, sent)
+			}
+		}
+		if !tt.push(mkChunk(chunk)) {
+			break
+		}
+		sent++
+		out++
+	}
+	tt.close()
+	got := <-drained
+
+	if sent != total {
+		t.Errorf("push %d of %d was refused with at most %d bytes not yet received, within the %d-byte cap "+
+			"(drops=%v): capacity is not being returned when a chunk drains, so the cap has become "+
+			"cumulative rather than instantaneous and the connection stops recording",
+			sent+1, total, out*len(chunk), capChunks*len(chunk), rec.snapshot())
+	}
+	if got != sent {
+		t.Errorf("delivered %d but admitted %d", got, sent)
+	}
+}
+
+// TestConfigSuppliesTheStallGrace pins the plumbing from Config to the tee.
+//
+// The production caller (proxy.New) passes the CLAMPED
+// config.Record.RecordBuffer.ConsumerStallGrace, and keploy.yml ships an
+// explicit 2s, so the common path no longer relies on this clause — but the
+// zero path is still reachable and still
+// load-bearing: an operator who writes 0s, a programmatically built Config, and
+// any enterprise SetDefaultConfig string that omits the key all arrive here as
+// zero. A zero grace makes the teardown wait expire instantly: a parser that
+// resumes reading a moment later has already had its remaining chunks
+// abandoned — the boot "no mocks" loss this change exists to remove,
+// reintroduced by deleting one line.
+func TestConfigSuppliesTheStallGrace(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero resolves to the default", func(t *testing.T) {
+		got := Config{}.withDefaults()
+		if got.ConsumerStallGrace != DefaultConsumerStallGrace {
+			t.Errorf("ConsumerStallGrace = %v, want %v: without this the tee runs with a zero "+
+				"grace and abandons a briefly-stalled parser's chunks immediately",
+				got.ConsumerStallGrace, DefaultConsumerStallGrace)
+		}
+	})
+
+	t.Run("an explicit value is preserved", func(t *testing.T) {
+		want := 1234 * time.Millisecond
+		if got := (Config{ConsumerStallGrace: want}).withDefaults(); got.ConsumerStallGrace != want {
+			t.Errorf("ConsumerStallGrace = %v, want %v (caller's value must win)", got.ConsumerStallGrace, want)
+		}
+	})
+
+	t.Run("a zero grace loses a briefly-stalled parser's chunks", func(t *testing.T) {
+		// Demonstrates WHY the clause above matters, so the guard reads as a
+		// consequence rather than a style rule.
+		rec := &dropRecorder{}
+		tt := newTee(fakeconn.FromClient, 1<<30, 1, 0 /* zero grace */, rec.record, nil)
+		tt.start(make(chan struct{}))
+		for i := 0; i < 50; i++ {
+			tt.push(mkChunk("x"))
+		}
+		tt.close()
+		tt.waitDone()
+		if tt.dropCount() == 0 {
+			t.Skip("zero grace did not abandon here; timing-dependent, nothing to assert")
+		}
+		// With a real grace the same shape loses nothing — see
+		// TestTee_SlowConsumerLosesNothing.
+		t.Logf("zero grace abandoned %d chunks; the withDefaults clause is what prevents this", tt.dropCount())
+	})
+}
+
+// TestNewWiresTheStallGraceIntoBothTees closes the last link in the chain.
+//
+// TestConfigSuppliesTheStallGrace proves Config resolves the value; this proves
+// New actually hands it to the tees. Both halves are needed: passing 0 here
+// while withDefaults is correct still yields a zero grace at the only place it
+// is read, and no behavioural test notices because every tee test constructs
+// newTee directly with an explicit grace.
+func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
+	t.Parallel()
+	const want = 4321 * time.Millisecond
+
+	c1, c2 := net.Pipe()
+	d1, d2 := net.Pipe()
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close(); _ = d1.Close(); _ = d2.Close() })
+
+	r := New(Config{ConsumerStallGrace: want, Logger: zap.NewNop()}, c1, connseq.NewUpstream(d1))
+	t.Cleanup(func() { r.teeC2D.close(); r.teeD2C.close() })
+
+	if got := r.teeC2D.stallGrace; got != want {
+		t.Errorf("client→dest tee stallGrace = %v, want %v: Config's value is not reaching the tee, "+
+			"so the teardown wait runs at whatever New passed instead", got, want)
+	}
+	if got := r.teeD2C.stallGrace; got != want {
+		t.Errorf("dest→client tee stallGrace = %v, want %v", got, want)
+	}
+
+	// And the zero-config path must land on the default, not on zero.
+	r2 := New(Config{Logger: zap.NewNop()}, c2, connseq.NewUpstream(d2))
+	t.Cleanup(func() { r2.teeC2D.close(); r2.teeD2C.close() })
+	if got := r2.teeC2D.stallGrace; got != DefaultConsumerStallGrace {
+		t.Errorf("zero-config stallGrace = %v, want %v", got, DefaultConsumerStallGrace)
+	}
+}
+
+// TestAnUnintendedDropReportsCaptureDesync pins the signal that a connection's
+// capture is finished.
+//
+// This is the guard for a proven production data-loss bug: the agent dropped
+// egress chunks (then under memory pressure, now only past the per-connection
+// cap) while continuing to record test cases, so a recording ended with test cases that had no mocks at all and
+// replayed as match_phase=no_mocks. The drop was reported only through the
+// per-mock MarkMockIncomplete (cleared after every cycle) and a sampled Debug
+// line, so a whole failing run contained zero errors. What makes it permanent
+// is framing: the parsers read a length prefix and then that many bytes, so a
+// hole means every later frame on the connection is read from the wrong offset.
+// Hence exactly once, on the first unintended drop, and never for a pause.
+func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
+	t.Parallel()
+
+	t.Run("exceeding the per-connection cap desyncs the connection", func(t *testing.T) {
+		t.Parallel()
+		var desyncs []string
+		// Cap admits the first chunk and refuses the second.
+		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, nil)
+		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
+		t.Cleanup(tt.close)
+
+		if !tt.push(fakeconn.Chunk{Bytes: []byte("abcd")}) {
+			t.Fatal("first push should have fit under the cap")
+		}
+		if tt.push(fakeconn.Chunk{Bytes: []byte("too long for the cap")}) {
+			t.Fatal("push should have refused a chunk over the cap")
+		}
+		if len(desyncs) != 1 || desyncs[0] != DropPerConnCap {
+			t.Fatalf("onDesync calls = %v, want exactly [%s]: a capped-out chunk is lost to the "+
+				"parser just as surely as any other lost chunk", desyncs, DropPerConnCap)
+		}
+	})
+
+	t.Run("a deliberate pause does NOT desync the connection", func(t *testing.T) {
+		t.Parallel()
+		var desyncs []string
+		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil)
+		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
+		t.Cleanup(tt.close)
+
+		tt.setPaused(true)
+		if tt.push(fakeconn.Chunk{Bytes: []byte("abc")}) {
+			t.Fatal("push should have dropped while paused")
+		}
+		if len(desyncs) != 0 {
+			t.Fatalf("onDesync fired %v on a pause; a pause is requested by the parser or by "+
+				"SessionOnAbort at teardown, so treating it as a desync would warn on every "+
+				"normal abort and cancel a relay that is already shutting down", desyncs)
+		}
+	})
+}
+
+// TestTee_DesyncedTeeStopsFeedingAParserThatCannotResync pins the gate that
+// this whole capability exists for.
+//
+// Before it, push never consulted t.desynced. So a tee that had already
+// logged "capture desynced; this connection can no longer be recorded" kept
+// admitting chunks and handing them to a parser framing from the wrong
+// offset. That is not a quiet waste: the parser reads whatever four bytes now
+// sit at the head as a length prefix, and a postgres framer that read them
+// out of misread row data tried to allocate multiple gigabytes.
+//
+// The gate is conditional, not blanket. mongo/v2 is BUILT to recover from a
+// hole — it sees the SeqNo discontinuity, discards the un-completable partial
+// and content-scans for the next chain-validated header — and it can only do
+// that from the bytes that arrive AFTER the hole. Cutting its feed would
+// strand it desynced for the life of a pooled connection, which is the exact
+// bug the resync machinery was written to fix.
+func TestTee_DesyncedTeeStopsFeedingAParserThatCannotResync(t *testing.T) {
+	t.Parallel()
+
+	// desyncByCap drives a tee into the permanent desynced state through the
+	// per-connection cap and returns it with 4 of its 8 bytes still occupied,
+	// so a following small chunk WOULD fit if the gate were not there.
+	// Drain is deliberately not started: a delivered chunk releases its bytes,
+	// which would make the residual occupancy racy.
+	desyncByCap := func(t *testing.T, canResync bool) (*tee, *dropRecorder, *int) {
+		t.Helper()
+		rec := &dropRecorder{}
+		desyncs := 0
+		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, rec.record, nil)
+		tt.parserCanResync = canResync
+		tt.onDesync = func(string) bool { desyncs++; return true }
+		t.Cleanup(tt.close)
+
+		if !tt.push(mkChunk("abcd")) {
+			t.Fatal("first push should have fit under the cap")
+		}
+		if tt.push(mkChunk("far too long for this cap")) {
+			t.Fatal("oversized push should have been refused by the cap")
+		}
+		if !tt.desynced.Load() {
+			t.Fatal("a per_conn_cap drop must have latched the desync")
+		}
+		return tt, rec, &desyncs
+	}
+
+	t.Run("a parser that cannot resync is cut off after the desync", func(t *testing.T) {
+		t.Parallel()
+		tt, rec, desyncs := desyncByCap(t, false)
+
+		// "x" fits: 4 queued + 1 <= cap of 8. The ONLY reason to refuse it is
+		// that the stream position is already lost.
+		if tt.push(mkChunk("x")) {
+			t.Fatal("push after a permanent desync must be refused: the parser would " +
+				"frame this chunk from the wrong offset, which yields no mock and can " +
+				"turn misread payload into a bogus multi-gigabyte length")
+		}
+		if got := rec.count(DropDesynced); got != 1 {
+			t.Fatalf("%s drops = %d, want 1; reasons=%v", DropDesynced, got, rec.snapshot())
+		}
+		// The cause was already reported once. Re-reporting it per chunk would
+		// blame the cap for the whole rest of the connection.
+		if got := rec.count(DropPerConnCap); got != 1 {
+			t.Fatalf("%s drops = %d, want exactly 1 (the original loss); reasons=%v",
+				DropPerConnCap, got, rec.snapshot())
+		}
+		if *desyncs != 1 {
+			t.Fatalf("onDesync fired %d times, want 1: %s reports a connection that is "+
+				"ALREADY desynced, so it must not re-enter the branch that produced it",
+				*desyncs, DropDesynced)
+		}
+	})
+
+	t.Run("a resync-capable parser keeps its feed after the desync", func(t *testing.T) {
+		t.Parallel()
+		tt, rec, _ := desyncByCap(t, true)
+
+		if !tt.push(mkChunk("x")) {
+			t.Fatal("a parser that re-anchors after a hole must keep receiving bytes — " +
+				"the post-hole bytes are the only thing it can resync ON. Cutting mongo/v2's " +
+				"feed here would strand it desynced for the life of a pooled connection")
+		}
+		if got := rec.count(DropDesynced); got != 0 {
+			t.Fatalf("%s drops = %d, want 0 for a resync-capable parser; reasons=%v",
+				DropDesynced, got, rec.snapshot())
+		}
+	})
+
+	t.Run("the gate keys off the desync latch, not off any drop", func(t *testing.T) {
+		t.Parallel()
+		rec := &dropRecorder{}
+		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, rec.record, nil)
+		// Default: cannot resync. A pause must still not engage the gate.
+		t.Cleanup(tt.close)
+
+		tt.setPaused(true)
+		if tt.push(mkChunk("held")) {
+			t.Fatal("push while paused should have dropped")
+		}
+		tt.setPaused(false)
+		if !tt.push(mkChunk("resumed")) {
+			t.Fatal("a pause is requested, not a loss: it never desyncs the stream, so " +
+				"capture must resume the moment the pause lifts")
+		}
+		if got := rec.count(DropDesynced); got != 0 {
+			t.Fatalf("%s drops = %d, want 0 — a paused drop is not a hole", DropDesynced, got)
+		}
+	})
+
+	t.Run("a pause on an already-desynced tee still reports paused", func(t *testing.T) {
+		t.Parallel()
+		tt, rec, _ := desyncByCap(t, false)
+
+		tt.setPaused(true)
+		if tt.push(mkChunk("y")) {
+			t.Fatal("push while paused should have dropped")
+		}
+		// SessionOnAbort pauses precisely so teardown chunks take the cheap
+		// reason; the ordering in push must preserve that.
+		if got := rec.count(DropPaused); got != 1 {
+			t.Fatalf("%s drops = %d, want 1; reasons=%v", DropPaused, got, rec.snapshot())
+		}
+	})
+
+	t.Run("the desync reason outranks the cap", func(t *testing.T) {
+		t.Parallel()
+		// A dead connection's remaining chunks must be attributed to the
+		// desync that killed it, not re-reported as per_conn_cap once per
+		// chunk for the rest of its life. That reason names a CAUSE the
+		// operator can act on ("raise maxMemoryPerConnection"); repeating it
+		// after the stream position is already lost sends the operator after
+		// a knob that would not have saved this connection.
+		//
+		// Pinning it needs a chunk the cap check would also refuse, which is
+		// why the chunk is oversized.
+		rec := &dropRecorder{}
+		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, rec.record, nil)
+		t.Cleanup(tt.close)
+
+		if !tt.push(mkChunk("abcd")) {
+			t.Fatal("first push should have fit under the cap")
+		}
+		if tt.push(mkChunk("far too long for this cap")) {
+			t.Fatal("oversized push should have been refused by the cap")
+		}
+		if !tt.desynced.Load() {
+			t.Fatal("a per_conn_cap drop must have latched the desync")
+		}
+
+		if tt.push(mkChunk("also far too long for this cap")) {
+			t.Fatal("push after a permanent desync must be refused")
+		}
+		if got := rec.count(DropDesynced); got != 1 {
+			t.Fatalf("%s drops = %d, want 1 — the gate must run BEFORE the cap "+
+				"check; reasons=%v", DropDesynced, got, rec.snapshot())
+		}
+		if got := rec.count(DropPerConnCap); got != 1 {
+			t.Fatalf("%s drops = %d, want exactly 1 (the original loss); re-reporting the "+
+				"cap for every later chunk points the operator at a knob that would not "+
+				"have saved this connection; reasons=%v",
+				DropPerConnCap, got, rec.snapshot())
+		}
+	})
+
+	t.Run("the desynced reason is not itself a desyncing drop", func(t *testing.T) {
+		t.Parallel()
+		if isDesyncingDrop(DropDesynced) {
+			t.Fatalf("isDesyncingDrop(%q) = true; it must be false or the predicate feeds "+
+				"itself: the reason is emitted BECAUSE the tee already desynced", DropDesynced)
+		}
+	})
+}
+
+// TestNewWiresParserCanResyncIntoBothTees pins the plumbing from Config to
+// both directions.
+//
+// Both, because a parser's ability to re-anchor is a property of the PARSER,
+// not of a direction — while the desync latch that the flag gates is
+// per-direction, since a hole in the request stream says nothing about the
+// response framer. Wiring only one tee would leave the other silently on the
+// default.
+func TestNewWiresParserCanResyncIntoBothTees(t *testing.T) {
+	t.Parallel()
+
+	clientApp, srcProxy := net.Pipe()
+	dstProxy, destSvc := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientApp.Close()
+		_ = srcProxy.Close()
+		_ = dstProxy.Close()
+		_ = destSvc.Close()
+	})
+
+	def := New(Config{Logger: zap.NewNop()}, srcProxy, connseq.NewUpstream(dstProxy))
+	if def.teeC2D.parserCanResync || def.teeD2C.parserCanResync {
+		t.Fatalf("default parserCanResync = (c2d=%v, d2c=%v), want both false: a parser that "+
+			"never heard of the capability is the one least likely to have a resync path, "+
+			"so it must not be opted in by omission",
+			def.teeC2D.parserCanResync, def.teeD2C.parserCanResync)
+	}
+
+	on := New(Config{Logger: zap.NewNop(), ParserCanResyncAfterGap: true}, srcProxy, connseq.NewUpstream(dstProxy))
+	if !on.teeC2D.parserCanResync || !on.teeD2C.parserCanResync {
+		t.Fatalf("with ParserCanResyncAfterGap=true, got (c2d=%v, d2c=%v), want both true",
+			on.teeC2D.parserCanResync, on.teeD2C.parserCanResync)
 	}
 }

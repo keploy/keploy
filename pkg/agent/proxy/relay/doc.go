@@ -3,8 +3,9 @@
 //
 // Role: for each accepted connection the proxy constructs a Relay bound to
 // the two real net.Conns. The Relay spawns a pair of forwarder goroutines
-// that read from one socket, stamp the read instant as ReadAt, write to
-// the opposite socket, stamp the write instant as WrittenAt, and tee a
+// that read from one socket, stamp the read instant as ReadAt, stamp
+// WrittenAt and write to the opposite socket (the stamp comes first, so
+// the peer cannot have acted on the bytes before it), and tee a
 // copy of the resulting [fakeconn.Chunk] into the parser-facing FakeConn.
 // Parsers consume those read-only FakeConns; they never see the real
 // net.Conns and therefore cannot close, shutdown, or racily write to
@@ -21,13 +22,50 @@
 //
 // Lifecycle ownership: callers (proxy.go) create the Relay, pass in the
 // real net.Conns, and call [Relay.Run]. The Relay does NOT close the
-// real sockets on parser misbehavior or on its own Run returning — it
-// only reads and writes them. Callers close them at connection end.
+// real sockets on parser misbehavior or on its own Run returning —
+// callers close them at connection end.
+//
+// One qualification: the relay does half-close them. When one direction
+// reaches a clean EOF it calls CloseWrite on the conn that direction was
+// writing to, forwarding the peer's FIN so a client that did
+// shutdown(SHUT_WR) still receives its reply (see
+// [Config.HalfCloseGrace]). That shuts only the write half and leaves
+// the conn readable and closable, so full ownership still sits with the
+// caller — but "only reads and writes them" is no longer the whole
+// story.
+//
+// What the destination sends after the client's FIN is still forwarded,
+// as soon as it comes, but on Linux the parser is given it only if the
+// client took it (client_took.go). A client that half-closed and waits
+// for its reply takes it: its TCP stack acknowledges the bytes. A client
+// that closed its socket (a driver closing a pooled connection, an HTTP
+// client giving up at its timeout) reads nothing more, and its stack
+// answers the bytes with a reset and acknowledges none. A chunk written
+// once a look found the client's FIN at the proxy's socket waits for
+// that answer, off the forwarding path; answered with a reset and no
+// acknowledgement, it is not teed, whatever its protocol, and nor is any
+// later one. The one such chunk an application did read is one a
+// half-closed client read and then reset before its stack acknowledged
+// it (an abortive close). The relay also numbers the FIN in the capture
+// sequence as it reads it, before it forwards it, and every destination
+// chunk numbered after it carries [fakeconn.Chunk.AfterClientClose]:
+// where the client's socket cannot be asked (off Linux), that mark is
+// what a parser whose clients never read after their FIN (a MongoDB
+// driver) judges by.
 //
 // This package is wired into the record path via the V2 dispatcher
 // (see ../proxy_v2.go::recordViaSupervisor). V2-capable parsers
 // (those implementing integrations.IntegrationsV2 with IsV2()==true)
-// run inside a supervisor attached to a Relay; legacy parsers
-// continue on the pre-V2 path unchanged. The KEPLOY_NEW_RELAY=off
-// env var forces legacy routing for all parsers as a rollback knob.
+// run inside a supervisor attached to a Relay. Every parser that the
+// dispatcher can route to record is V2, so this is the only record path
+// in practice; the pre-V2 branch survives solely for a parser that does
+// not implement IntegrationsV2 (today: none on the record path).
+//
+// There is no longer an env knob that forces legacy routing — the
+// KEPLOY_NEW_RELAY rollback switch has been removed. That matters because
+// rolling back was never a clean escape: the legacy path waits for both
+// directions instead of tearing the second down, so it does not LOSE the
+// reply, but it never forwards the FIN either, so an EOF-delimited peer
+// never learns the request ended and the connection hangs until external
+// teardown. It traded one half-close defect for another.
 package relay

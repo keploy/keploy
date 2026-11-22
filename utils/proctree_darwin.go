@@ -1,0 +1,72 @@
+//go:build darwin
+
+package utils
+
+import (
+	"syscall"
+
+	"golang.org/x/sys/unix"
+)
+
+// The process tree InterruptProcessTree signals, read from the kernel's
+// process table. macOS has no /proc. Walking it anyway found no descendants
+// at all, so a descendant that had put itself in a process group of its own
+// was never signalled and outlived the run, and looking up the runner's group
+// failed on every Ctrl+C with "failed to find unique process groups: open
+// /proc/<pid>/status" -- an ERROR in an interrupt that had otherwise gone as
+// it should, which an editor driving keploy shows in red.
+
+// findChildPIDs returns every descendant of parentPID, and how to read each
+// one's process group -- both from one snapshot of the process table (sysctl
+// kern.proc.all), taken by procTable.tree.
+//
+// The groups come from that snapshot, not from getpgid(2). getpgid refuses a
+// zombie with ESRCH -- a child its parent has not waited for yet, which a
+// test that starts a subprocess and never waits for it leaves behind -- and
+// cannot find a process that exited after the snapshot was taken. Either
+// failed the lookup of every group in the tree, so such an interrupt logged
+// "failed to find unique process groups: no such process" at ERROR, and fell
+// back to signalling each pid as if it led a group. The table holds every
+// process's group, a zombie's included.
+func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, nil, err
+	}
+	table := newProcTable(len(procs))
+	for _, p := range procs {
+		table.add(int(p.Proc.P_pid), int(p.Eproc.Ppid), int(p.Eproc.Pgid))
+	}
+	children, groupOf := table.tree(parentPID)
+	return children, groupOf, nil
+}
+
+// groupReached reads no process on macOS, which has no /proc:
+// InterruptProcessTreeReached says none there.
+func groupReached(int, syscall.Signal) []Reached { return nil }
+
+// GroupRunsOn reports whether a process of process group pgid runs: one
+// the kernel's process table holds in that group (sysctl kern.proc.pgrp
+// reads that group alone) that has not exited. A zombie has exited, and a table keploy cannot read says none
+// runs. A native application's command leads a process group of its own
+// (ExecuteCommand), so once the command has exited, a process it started that
+// is still in its group is the application running on.
+func GroupRunsOn(pgid int) bool {
+	if pgid <= 1 {
+		return false
+	}
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", pgid)
+	if err != nil {
+		return false
+	}
+	for _, p := range procs {
+		if p.Proc.P_stat != sZomb {
+			return true
+		}
+	}
+	return false
+}
+
+// sZomb is XNU's p_stat of a process that has exited and waits for its
+// parent to reap it (bsd/sys/proc.h SZOMB).
+const sZomb = 5

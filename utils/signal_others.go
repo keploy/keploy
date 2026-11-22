@@ -34,7 +34,8 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string, opts ...ExecOption) CmdError {
+	o := execOptionsOf(opts)
 	// Run the app as the user who invoked sudo
 
 	// Run through `sh -c` when a shell is available; fall back to a direct exec
@@ -47,11 +48,27 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// Set the cancel function for the command
 	cmd.Cancel = cancel(cmd)
 
+	// extraEnv is added to what the command inherits from keploy, for this
+	// command alone — a secret that one child needs is not exported to every
+	// other process keploy starts.
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = waitDelay
 
-	// Check if the command is docker-compose related and output is a TTY
-	cmdType := FindDockerCmd(userCmd)
+	// Check if the command is docker-compose related and output is a TTY.
+	//
+	// kind is the resolved command type, not a second guess from the command
+	// string. Re-deriving here mislabelled every command --cmd-type exists
+	// for — a wrapper like "make up", and `sudo -E docker compose up`, both
+	// come back "native" — which drops compose onto the Setpgid path and the
+	// background process group that SIGTTOU/SIGTTIN stalls.
+	cmdType := kind
+	if cmdType == Empty {
+		cmdType = FindDockerCmd(userCmd)
+	}
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
 	// When in-memory compose content is provided, pipe it via stdin and skip PTY.
@@ -74,7 +91,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 			Setsid: true,
 		}
 		logger.Debug("Output is a TTY (Docker Compose -> PTY)")
-		return executeWithPTY(ctx, logger, cmd)
+		return executeWithPTY(ctx, logger, cmd, NewAppCommand(userCmd), o.outputTee)
 	}
 
 	// For non-PTY execution, use Setpgid for process group management
@@ -85,17 +102,27 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	if cmdType == DockerCompose {
 		logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
 	}
-	// Set the output of the command to stdout/stderr
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
-	err = cmd.Start()
+	// Set the output of the command to stdout/stderr, cut of the values the
+	// redactor holds when it holds any (ChildConsole).
+	console, err := SetChildConsoleTee(cmd, o.outputTee)
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
 
+	logAppStart(logger, StartingApplication, NewAppCommand(userCmd), "executing_cmd", cmd.Args)
+	err = cmd.Start()
+	console.Started()
+	if err != nil {
+		return CmdError{Type: Init, Err: err}
+	}
+	if kind == Native {
+		// The application's own process: a wait for it to listen can name
+		// the ports it listens on instead (AppListenPorts).
+		NoteAppPID(ctx, cmd.Process.Pid)
+	}
+
 	err = cmd.Wait()
+	console.Exited()
 	if err != nil {
 		return CmdError{Type: Runtime, Err: err}
 	}
@@ -106,8 +133,9 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 // executeWithPTY runs the command inside a dedicated PTY (Pseudo-Terminal).
 // This is necessary for Docker Compose when Setpgid is true, as Docker Compose
 // tries to read terminal size for rendering progress bars. Without a PTY,
-// the OS would pause the background process with SIGTTOU/SIGTTIN.
-func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdError {
+// the OS would pause the background process with SIGTTOU/SIGTTIN. userCmd is
+// the user's command cmd runs, which its log line names (logAppStart).
+func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, userCmd AppCommand, tee func() io.Writer) CmdError {
 	// Start the command with a PTY
 	// pty.Start creates a PTY pair, assigns the slave PTY to cmd's stdin/stdout/stderr,
 	// and starts the command
@@ -117,7 +145,7 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 		return CmdError{Type: Init, Err: err}
 	}
 
-	logger.Info("Starting Application:", zap.String("executing_cmd", cmd.String()))
+	logAppStart(logger, startingApplicationPTY, userCmd, "executing_cmd", cmd.Args)
 
 	// Handle terminal resize - propagate size changes from real terminal to PTY
 	resizeCh := make(chan os.Signal, 1)
@@ -139,14 +167,9 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	// Trigger initial resize
 	resizeCh <- syscall.SIGWINCH
 
-	// Copy PTY output to real stdout
-	// This goroutine will exit when ptmx is closed after cmd.Wait() returns
-	outputDone := make(chan struct{})
-	var copyErr error
-	go func() {
-		_, copyErr = io.Copy(os.Stdout, ptmx)
-		close(outputDone)
-	}()
+	// Copy PTY output to real stdout, cut as ChildConsole's would be, and to
+	// the tee when one is set (WithOutputTee).
+	output := StartChildOutputCopy(teeTo(os.Stdout, tee), ptmx, false)
 
 	// Wait for the command to finish
 	cmdErr := cmd.Wait()
@@ -164,17 +187,13 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	// Wait for the resize goroutine to finish to ensure it's done using the PTY
 	wg.Wait()
 
-	// Close PTY - this will unblock the io.Copy goroutine reading from ptmx
+	// The copy ends at EIO, once the command and all it left holding the
+	// terminal have closed it and the kernel has moved to ptmx all they
+	// wrote. Only then is ptmx closed: closing it first dropped what the
+	// copy had not yet read.
+	<-output.Done()
 	if closeErr := ptmx.Close(); closeErr != nil {
 		logger.Debug("failed to close PTY", zap.Error(closeErr))
-	}
-
-	// Wait for output copy to finish to ensure all output is flushed
-	<-outputDone
-
-	// Log copy error if it's not due to PTY being closed (which is expected)
-	if copyErr != nil && !isClosedPTYError(copyErr) {
-		logger.Debug("error copying PTY output to stdout", zap.Error(copyErr))
 	}
 
 	if cmdErr != nil {

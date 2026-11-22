@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 )
 
@@ -20,24 +21,187 @@ type GrpcHeaders struct {
 	OrdinaryHeaders map[string]string `json:"ordinary_headers" yaml:"ordinary_headers"`
 }
 
+// Ordinary is the value of the ordinary header named name, whatever the case
+// of the name it was read under, or "" with none. The headers hold names as
+// they came off the wire, and HTTP/2 carries them lowercase: grpc-go
+// lowercases every metadata key, and an uppercase name is malformed. So a
+// lookup by a name as it is usually spelled, such as "Keploy-Test-Name",
+// never matches a real call's header. A name of exactly that spelling wins;
+// of names that differ from it only in case (no compliant peer sends two),
+// the one that sorts first.
+func (h GrpcHeaders) Ordinary(name string) string {
+	if v, ok := h.OrdinaryHeaders[name]; ok {
+		return v
+	}
+	var key, value string
+	for k, v := range h.OrdinaryHeaders {
+		if strings.EqualFold(k, name) && (key == "" || k < key) {
+			key, value = k, v
+		}
+	}
+	return value
+}
+
 type GrpcLengthPrefixedMessage struct {
 	CompressionFlag uint   `json:"compression_flag" yaml:"compression_flag"`
 	MessageLength   uint32 `json:"message_length" yaml:"message_length"`
 	DecodedData     string `json:"decoded_data" yaml:"decoded_data"`
 }
 
+// A gRPC direction carries a SEQUENCE of length-prefixed messages, not one.
+// Unary sends exactly one each way; client-, server- and bidi-streaming send
+// many, and server reflection is bidi-streaming, so this is not an exotic
+// case.
+//
+// Body is message 0. AdditionalMessages is the TAIL — messages 1..N — and is
+// empty for every unary call, which is why a unary mock is byte-identical on
+// disk to one written before streams were representable.
+//
+// WHY A TAIL AND NOT A LIST. The obvious shape, retyping Body to a slice, is
+// undeliverable: mocks travel from agent to CLI over gob with no version
+// handshake (agent/routes/record.go -> platform/http/agent.go), and gob sends
+// a type's whole transitive graph before the first value. Changing Body's type
+// breaks decoding of EVERY mock in the stream, including HTTP mocks whose
+// GrpcReq is nil, on any agent/CLI version skew. Adding a field does not.
+//
+// The tail also makes an illegal state unrepresentable. A full list alongside
+// Body would be two sources of truth for message 0, and every existing
+// in-place `Body.DecodedData = ...` write in the replay path would silently
+// stop taking effect. With a tail there is exactly one place message 0 lives.
+//
+// Read through AllMessages(); write through SetMessages(). Do not append to
+// AdditionalMessages directly.
 type GrpcReq struct {
-	Headers   GrpcHeaders               `json:"headers" yaml:"headers"`
-	Body      GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
-	Timestamp time.Time                 `json:"timestamp" yaml:"timestamp"`
+	Headers GrpcHeaders               `json:"headers" yaml:"headers"`
+	Body    GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	// AdditionalMessages carries messages 1..N of a streaming request.
+	// omitempty keeps it off disk entirely for unary.
+	AdditionalMessages []GrpcLengthPrefixedMessage `json:"additional_messages,omitempty" yaml:"additional_messages,omitempty"`
+	// NoMessages records that the direction carried ZERO messages, which is
+	// distinct from carrying one EMPTY message and cannot otherwise be
+	// expressed: a zero-value Body is indistinguishable from an absent one.
+	//
+	// Both shapes are legal gRPC. A server stream may end with no messages at
+	// all (grpc-go's own interop matrix calls this DoEmptyStream), while the
+	// health check records exactly one message of length 0. Without this flag
+	// AllMessages() returns one element for both, so a stream the server ended
+	// with NOTHING replayed as one empty message and the application saw a
+	// count of 1 where it had seen 0.
+	//
+	// omitempty, and false is the pre-existing meaning: every mock recorded
+	// before this field existed decodes with NoMessages=false and keeps exactly
+	// the old behaviour.
+	NoMessages bool      `json:"no_messages,omitempty" yaml:"no_messages,omitempty"`
+	Timestamp  time.Time `json:"timestamp" yaml:"timestamp"`
 }
 
 type GrpcResp struct {
-	Headers   GrpcHeaders               `json:"headers" yaml:"headers"`
-	Body      GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
-	Trailers  GrpcHeaders               `json:"trailers" yaml:"trailers"`
-	Timestamp time.Time                 `json:"timestamp" yaml:"timestamp"`
+	Headers GrpcHeaders               `json:"headers" yaml:"headers"`
+	Body    GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	// AdditionalMessages carries messages 1..N of a streaming response.
+	AdditionalMessages []GrpcLengthPrefixedMessage `json:"additional_messages,omitempty" yaml:"additional_messages,omitempty"`
+	// NoMessages records that the direction carried ZERO messages, which is
+	// distinct from carrying one EMPTY message and cannot otherwise be
+	// expressed: a zero-value Body is indistinguishable from an absent one.
+	//
+	// Both shapes are legal gRPC. A server stream may end with no messages at
+	// all (grpc-go's own interop matrix calls this DoEmptyStream), while the
+	// health check records exactly one message of length 0. Without this flag
+	// AllMessages() returns one element for both, so a stream the server ended
+	// with NOTHING replayed as one empty message and the application saw a
+	// count of 1 where it had seen 0.
+	//
+	// omitempty, and false is the pre-existing meaning: every mock recorded
+	// before this field existed decodes with NoMessages=false and keeps exactly
+	// the old behaviour.
+	NoMessages bool        `json:"no_messages,omitempty" yaml:"no_messages,omitempty"`
+	Trailers   GrpcHeaders `json:"trailers" yaml:"trailers"`
+	Timestamp  time.Time   `json:"timestamp" yaml:"timestamp"`
 }
+
+// AllMessages returns the direction's messages in wire order.
+//
+// It ALWAYS returns at least one element, and that is load-bearing rather
+// than defensive. A zero-value Body is a real recorded shape — the Health
+// check test case stores message_length: 0 with an empty decoded_data, and
+// replay sends exactly one message with a nil payload for it. Returning an
+// empty slice for that would make `for range AllMessages()` send nothing and
+// hang the RPC, turning a passing unary test into a timeout.
+func (r GrpcReq) AllMessages() []GrpcLengthPrefixedMessage {
+	if r.NoMessages {
+		return nil
+	}
+	return allMessages(r.Body, r.AdditionalMessages)
+}
+
+// AllMessages returns the response's messages in wire order. See GrpcReq.AllMessages.
+func (r GrpcResp) AllMessages() []GrpcLengthPrefixedMessage {
+	if r.NoMessages {
+		return nil
+	}
+	return allMessages(r.Body, r.AdditionalMessages)
+}
+
+// TrailersAsRead is the trailer block of a recorded answer as a gRPC client
+// reads it (gRPC over HTTP/2): its trailers or, when it has no trailers and
+// its one header block carries grpc-status, that block. Such an answer is a
+// Trailers-Only one, a single HEADERS frame that ends the stream: grpc-go
+// sends it for every call that ends before it sends headers or a message, an
+// OK one included (a server stream that returns no message). keploy's
+// recorder keeps that block as the answer's trailers as well as its headers;
+// enterprise's low-latency (proxyless) recorder kept it as its headers alone,
+// with no trailers, until it was fixed to keep both.
+func (r GrpcResp) TrailersAsRead() GrpcHeaders {
+	if len(r.Trailers.PseudoHeaders) > 0 || len(r.Trailers.OrdinaryHeaders) > 0 {
+		return r.Trailers
+	}
+	if _, ok := r.Headers.OrdinaryHeaders["grpc-status"]; ok {
+		return r.Headers
+	}
+	return r.Trailers
+}
+
+func allMessages(head GrpcLengthPrefixedMessage, tail []GrpcLengthPrefixedMessage) []GrpcLengthPrefixedMessage {
+	out := make([]GrpcLengthPrefixedMessage, 0, 1+len(tail))
+	out = append(out, head)
+	return append(out, tail...)
+}
+
+// SetMessages stores msgs in wire order, splitting head from tail.
+//
+// An empty msgs zeroes the direction rather than leaving a stale body, so
+// callers cannot half-write a direction by passing nothing.
+func (r *GrpcReq) SetMessages(msgs []GrpcLengthPrefixedMessage) {
+	r.NoMessages = len(msgs) == 0
+	r.Body, r.AdditionalMessages = splitMessages(msgs)
+}
+
+// SetMessages stores msgs in wire order. See GrpcReq.SetMessages.
+func (r *GrpcResp) SetMessages(msgs []GrpcLengthPrefixedMessage) {
+	r.NoMessages = len(msgs) == 0
+	r.Body, r.AdditionalMessages = splitMessages(msgs)
+}
+
+func splitMessages(msgs []GrpcLengthPrefixedMessage) (GrpcLengthPrefixedMessage, []GrpcLengthPrefixedMessage) {
+	if len(msgs) == 0 {
+		return GrpcLengthPrefixedMessage{}, nil
+	}
+	if len(msgs) == 1 {
+		// nil, not an empty slice: omitempty must keep it off disk so a
+		// unary mock stays byte-identical to one written before streaming
+		// was representable.
+		return msgs[0], nil
+	}
+	tail := make([]GrpcLengthPrefixedMessage, len(msgs)-1)
+	copy(tail, msgs[1:])
+	return msgs[0], tail
+}
+
+// IsStream reports whether this direction carries more than one message.
+func (r GrpcReq) IsStream() bool { return len(r.AdditionalMessages) > 0 }
+
+// IsStream reports whether this direction carries more than one message.
+func (r GrpcResp) IsStream() bool { return len(r.AdditionalMessages) > 0 }
 
 // GrpcStream is a helper function to combine the request-response model in a single struct
 type GrpcStream struct {

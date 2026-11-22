@@ -2,11 +2,14 @@ package integration
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	keployPkg "go.keploy.io/server/v3/pkg"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -58,14 +62,21 @@ type Runner struct {
 // already consumed — replay.go maintains the equivalent local map
 // inside RunTestSet.
 type testSetSetup struct {
-	id              string
-	mappings        map[string][]models.MockEntry
-	mockKindByName  map[string]models.Kind
-	useMappingBased bool
-	cleanup         func()
+	id       string
+	mappings map[string][]models.MockEntry
+	// startupMockNames is the test-set's boot traffic, merged into every test's
+	// expected-name list by expectedMocksForTest. Constant for the whole set.
+	startupMockNames []string
+	mockKindByName   map[string]models.Kind
+	useMappingBased  bool
+	cleanup          func()
 
 	consumedMu    sync.Mutex
 	totalConsumed map[string]models.MockState
+	// perTestRegion names the per-test mocks the set handed the agent, the
+	// only ones whose consumed entries an agent that says so reads
+	// (keployPkg.ConsumedForAgent).
+	perTestRegion map[string]struct{}
 }
 
 func (s *testSetSetup) mergeConsumed(mocks []models.MockState) {
@@ -79,9 +90,15 @@ func (s *testSetSetup) mergeConsumed(mocks []models.MockState) {
 	}
 }
 
-func (s *testSetSetup) snapshotConsumed() map[string]models.MockState {
+// snapshotConsumed returns the consumed history to send to the agent: only the
+// entries of the set's per-test mocks when perTestOnly (the agent has said it
+// reads no others), all of them otherwise.
+func (s *testSetSetup) snapshotConsumed(perTestOnly bool) map[string]models.MockState {
 	s.consumedMu.Lock()
 	defer s.consumedMu.Unlock()
+	if perTestOnly && s.perTestRegion != nil {
+		return keployPkg.ConsumedForAgent(s.totalConsumed, s.perTestRegion)
+	}
 	out := make(map[string]models.MockState, len(s.totalConsumed))
 	for k, v := range s.totalConsumed {
 		out[k] = v
@@ -162,8 +179,10 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	//    remains active for any startup-init traffic the app emits
 	//    before this step's narrower window kicks in. Matches replay's
 	//    ordering where the initial broad UpdateMockParams precedes
-	//    the first per-test one (replay.go:1047 / 1156 → 1433).
-	if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
+	//    the first per-test one (replay.go:1047 / 1156 → 1433). A caller
+	//    that started the app gives its end (opts.AppEnded): the wait then
+	//    has no budget and ends on the app's answer or its end.
+	if err := waitForApp(ctx, opts.ServiceURL, appWaitBudget, opts.AppEnded, r.logger); err != nil {
 		return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
 	}
 
@@ -237,7 +256,11 @@ func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, ser
 	httpReq.URL = orig.String()
 	tcCopy.HTTPReq = httpReq
 
-	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
+	// Sent as written: one test case run alone has no test set's template
+	// values, which belong to a replay of the whole set (pkg/templates). The
+	// files kept beside the test case are read from its testdb's directory,
+	// not the process's working directory.
+	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{KeployPath: r.testCaseDB.Root()})
 	if err != nil {
 		return false, models.RespCompare{}, err
 	}
@@ -336,6 +359,14 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			DockerDelay: r.config.BuildDelay,
 			BuildDelay:  r.config.BuildDelay,
 			Mode:        models.MODE_TEST,
+
+			// The same real-egress opt-ins keploy test hands its agent
+			// (replay.go): this agent replays too, so it opens only what the
+			// user named, and DNS stays inside the replay without them.
+			GlobalPassthrough: r.config.Record.GlobalPassthrough,
+			AllowEgress:       r.config.Test.AllowEgress,
+
+			DisableHandshakeHold: r.config.Record.DisableHandshakeHold,
 		}); err != nil {
 			return nil, fmt.Errorf("setup failed: %w", err)
 		}
@@ -348,25 +379,32 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	// "connect: connection refused" on the agent URL. Mirrors replay's
 	// pre-MockOutgoing AgentHealthTicker gate (replay.go:939-952).
 	if r.config != nil && r.config.Agent.AgentURI != "" {
-		// Use the same contention-tuned budget as the record/replay/agent
-		// readiness gates (pkg.AgentReadyTimeout, default 330s, overridable via
-		// KEPLOY_AGENT_READY_TIMEOUT) rather than a hardcoded 120s. On a
-		// saturated CI daemon the agent container can take well over a minute
-		// just to start, so the 120s ceiling here fired prematurely and failed
-		// an otherwise-healthy sandbox/runner bring-up that the other gates
-		// would have waited out.
-		agentReadyTimeout := keployPkg.AgentReadyTimeout()
-		agentCtx, cancel := context.WithTimeout(gCtx, agentReadyTimeout)
+		// The gate follows the agent's start, as the record and replay gates
+		// do, not a clock: it lasts while the start makes progress (and while
+		// the engine has not run the agent's container yet), and ends once the
+		// start fails or stops making progress (keployPkg.WatchAgentStart). On
+		// a saturated CI daemon the agent container can take well over a
+		// minute just to start; a fixed budget gave up on such a start, and
+		// waited out the whole of it for one that had stopped.
+		agentCtx, cancel := context.WithCancel(gCtx)
 		agentReadyCh := make(chan bool, 1)
-		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
+		agentStart := r.instrumentation.WatchAgentStart(agentCtx)
 		select {
 		case <-gCtx.Done():
 			cancel()
 			return nil, gCtx.Err()
-		case <-agentCtx.Done():
+		case err := <-agentStart:
 			cancel()
-			return nil, fmt.Errorf("keploy-agent at %s did not become ready within %s; check the agent container logs and ensure its host port is reachable", r.config.Agent.AgentURI, agentReadyTimeout)
-		case <-agentReadyCh:
+			if gCtx.Err() != nil {
+				return nil, gCtx.Err()
+			}
+			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", keployPkg.ShownAgentURI(r.config.Agent.AgentURI), err)
+		case ready, ok := <-agentReadyCh:
+			if !ok || !ready {
+				cancel()
+				return nil, gCtx.Err()
+			}
 		}
 		cancel()
 	}
@@ -380,48 +418,63 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.MongoPassword = r.config.Test.MongoPassword
 		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
-		outOpts.SchemaNoiseDetection = r.config.Test.SchemaNoiseDetection
-		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
+		outOpts.MockNoiseDetection = r.config.Test.NoiseDetection()
+		outOpts.MockNoiseStrict = r.config.Test.NoiseStrict()
+		outOpts.DisableStatefulMocks = r.config.Test.DisableStatefulMocks
+		outOpts.DisableMockCorrelation = r.config.Test.DisableMockCorrelation
 		outOpts.MysqlPorts = r.config.MysqlPorts
+		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
+		outOpts.DisableMysqlEndpointDrift = r.config.DisableMysqlEndpointDrift
+		outOpts.DisablePgTimeSliceCohort = r.config.DisablePgTimeSliceCohort
+		outOpts.PassThroughPorts = r.config.Record.PassThroughPorts
+		outOpts.PassThroughHosts = r.config.Record.PassThroughHosts
+		// Validate modes at load: NormalizeMode fails an unknown/typo'd mode CLOSED
+		// (to "off" = no passthrough), which means a mistyped rule silently
+		// suppresses the telemetry protection it meant to configure. Warn loudly so
+		// the typo is visible instead of only surfacing as unexpected replay.
+		for _, rule := range append(append([]models.PassThroughRule{}, outOpts.PassThroughPorts...), outOpts.PassThroughHosts...) {
+			switch rule.Mode {
+			case "", models.PassThroughSkip, models.PassThroughRecordOne, models.PassThroughOff:
+			default:
+				r.logger.Warn("passthrough: unrecognized mode, treated as no-passthrough (endpoint recorded normally); use skip|recordOne|off",
+					zap.String("mode", string(rule.Mode)), zap.String("host", rule.Host), zap.Uint32("port", rule.Port))
+			}
+		}
 	}
-	noiseCfg := map[string]map[string][]string{}
-	if headerNoise, ok := r.globalNoise["header"]; ok {
-		noiseCfg["header"] = headerNoise
-	}
-	if bodyNoise, ok := r.globalNoise["body"]; ok {
-		// "body" feeds outgoing-payload matchers (e.g. the Pulsar SEND matcher)
-		// and stays the response-assertion bucket — it intentionally does NOT
-		// drive HTTP request-body matching anymore.
-		noiseCfg["body"] = bodyNoise
-	}
-	if reqBodyNoise, ok := r.globalNoise["requestbody"]; ok {
-		// Dedicated HTTP request-body matching noise (drift-detection
-		// exclusion + strict-noise allowance). Separate from "body" so
-		// response-assertion noise can't silently soften request matching.
-		noiseCfg["requestbody"] = reqBodyNoise
-	}
+	// keploy.yml's matching noise, cut to the buckets the agent's mock
+	// matchers read, as keploy test cuts it (models.MockMatchingNoise).
+	noiseCfg := models.MockMatchingNoise(r.globalNoise)
 	if len(noiseCfg) > 0 {
 		outOpts.NoiseConfig = noiseCfg
 	}
+	// A set's session: what the agent recorded consumed of the previous
+	// set's pool is not this set's (models.OutgoingOptions.StartsTestSet).
+	outOpts.StartsTestSet = true
 	if err := r.instrumentation.MockOutgoing(gCtx, outOpts); err != nil {
 		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
 	}
 
-	mappings, mocksThatHaveMappings, mocksWeNeed, err := r.loadMappingsForSet(gCtx, testSetID)
+	mappings, mocksThatHaveMappings, mocksWeNeed, startupMockNames, err := r.loadMappingsForSet(gCtx, testSetID)
 	if err != nil {
 		return nil, err
+	}
+	// The mocks the set's worker-mock rules marked, served to every step as
+	// keploy test serves them (models.ServeAsSession): named for each step,
+	// as the startup traffic is, and session mocks whatever the loading path.
+	workerMocks := r.workerRuleNames(gCtx, testSetID)
+	for _, n := range workerMocks {
+		if !slices.Contains(startupMockNames, n) {
+			startupMockNames = append(startupMockNames, n)
+		}
 	}
 
 	// Disk fetch uses the widest window; per-test containment is
 	// enforced by the agent via UpdateMockParams at step time.
-	filtered, err := r.mockDB.GetFilteredMocks(gCtx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	filtered, unfiltered, skipped, err := r.loadMocks(gCtx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+		return nil, err
 	}
-	unfiltered, err := r.mockDB.GetUnFilteredMocks(gCtx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
-	}
+	filtered, unfiltered = models.ServeAsSession(filtered, unfiltered, workerMocks)
 
 	// mockKindByName lets the mismatch-reporting path filter DNS
 	// entries even when the mapping-entry Kind is empty
@@ -433,6 +486,19 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	for _, m := range unfiltered {
 		mockKindByName[m.Name] = m.Kind
 	}
+	// A document the decoders skipped is in no pool, but a mapping entry with
+	// no kind can still name it; one the assertion leaves out (a connection
+	// failure this keploy cannot replay) stays out by name (as in the
+	// replayer's RunTestSet).
+	for name, kind := range skipped {
+		if _, ok := mockKindByName[name]; !ok && models.ExcludedFromDependencyAssertion(kind) {
+			mockKindByName[name] = kind
+		}
+	}
+
+	// What the agent holds: the pools less what this keploy never sends it
+	// (models.AgentBound), so what is counted below is what was sent.
+	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
 
 	// Seed the process-wide sort counter past the highest recorded
 	// mock sortOrder so any live-generated mocks during replay don't
@@ -445,6 +511,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	}
 
 	if err := r.instrumentation.MakeAgentReadyForDockerCompose(gCtx); err != nil {
+		if errors.Is(err, provenswitch.ErrAgentSwitch) {
+			return nil, err
+		}
 		r.logger.Debug("failed to mark agent ready", zap.Error(err))
 	}
 
@@ -479,12 +548,14 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 
 	success = true
 	return &testSetSetup{
-		id:              testSetID,
-		mappings:        mappings,
-		mockKindByName:  mockKindByName,
-		useMappingBased: useMappingBased,
-		totalConsumed:   map[string]models.MockState{},
-		cleanup:         cleanup,
+		id:               testSetID,
+		mappings:         mappings,
+		startupMockNames: startupMockNames,
+		mockKindByName:   mockKindByName,
+		useMappingBased:  useMappingBased,
+		totalConsumed:    map[string]models.MockState{},
+		perTestRegion:    keployPkg.PerTestRegion(filtered),
+		cleanup:          cleanup,
 	}, nil
 }
 
@@ -498,18 +569,98 @@ func (r *Runner) strictMockWindow() bool {
 	return r.config.Test.StrictMockWindow
 }
 
+// loadMocks returns the test set's per-test and session pools over the widest
+// window, from one read of its mock file when the mock store can (see
+// keployPkg.TestSetMocksReader), otherwise with one read per pool. A store
+// that indexes the file (keployPkg.TestSetMockIndexReader) leaves each mock's
+// payload in it: the runner holds a small entry per mock, and StoreMocks reads
+// each payload back as it sends the mock to the agent. skipped is the
+// documents the store's decoders skipped (models.TestSetMocks.Skipped), nil
+// from a store that reads one pool per call.
+func (r *Runner) loadMocks(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, skipped map[string]models.Kind, err error) {
+	var set models.TestSetMocks
+	switch reader := r.mockDB.(type) {
+	case keployPkg.TestSetMockIndexReader:
+		set, err = reader.IndexTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	case keployPkg.TestSetMocksReader:
+		set, err = reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	default:
+		return r.loadMocksPerPool(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
+	}
+	if err != nil {
+		// The pass that failed is the one the per-test pool was read in.
+		return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+	}
+	return set.Filtered, set.Unfiltered, set.Skipped, nil
+}
+
+// loadMocksPerPool is loadMocks for a store that reads one pool per call.
+func (r *Runner) loadMocksPerPool(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, skipped map[string]models.Kind, err error) {
+	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+	}
+	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+	}
+	return filtered, unfiltered, nil, nil
+}
+
+// workerRuleNames is the names of the mocks the set's worker-mock rules
+// marked (models.Mapping.WorkerRuleMockNames), as keploy test reads them: none under
+// the proven switch, which serves the worker scope on its own rules (the
+// runner always serves through an agent, so the switch alone is keploy
+// test's exact serving, Replayer.exactServing), none
+// with mapping disabled, and none from a store that cannot read the whole
+// mapping or a read that fails (which costs those mocks, not the run).
+func (r *Runner) workerRuleNames(ctx context.Context, testSetID string) []string {
+	if r.mappingDB == nil || provenswitch.On() || (r.config != nil && r.config.DisableMapping) {
+		return nil
+	}
+	mr, ok := r.mappingDB.(interface {
+		GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
+	})
+	if !ok {
+		return nil
+	}
+	m, err := mr.GetMapping(ctx, testSetID)
+	if err != nil {
+		r.logger.Debug("failed to read the worker mocks from mappings; continuing without them",
+			zap.String("testSetID", testSetID), zap.Error(err))
+		return nil
+	}
+	return m.WorkerRuleMockNames()
+}
+
 // loadMappingsForSet returns the full per-test-case mapping and the
 // set-level UNION of expected mocks across every test in the set.
 // The UNION is what we pass to GetFilteredMocks / GetUnFilteredMocks
 // so the StoreMocks call covers every step — per-step filtering then
 // happens via UpdateMockParams.
-func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[string][]models.MockEntry, map[string]bool, map[string]bool, error) {
+func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[string][]models.MockEntry, map[string]bool, map[string]bool, []string, error) {
 	if r.mappingDB == nil {
-		return nil, nil, nil, fmt.Errorf("mappingDB not configured; initialize the mapping database dependency to resolve which mocks are needed for test execution")
+		return nil, nil, nil, nil, fmt.Errorf("mappingDB not configured; initialize the mapping database dependency to resolve which mocks are needed for test execution")
 	}
 	testMockMappings, hasMeaningful, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, err)
+	}
+
+	// Startup mocks are absent from `tests:` by design, so Get cannot surface
+	// them. Read separately; a failure costs the startup names, not the run.
+	// Skipped when mapping is disabled, matching replay's early return: the names
+	// are only consumed by the mapping-based loader, so reading them would be a
+	// wasted file read per test set and a divergence between the two paths.
+	var startupNames []string
+	if r.config != nil && r.config.DisableMapping {
+		return testMockMappings, map[string]bool{}, map[string]bool{}, startupNames, nil
+	}
+	if startup, serr := r.mappingDB.GetStartup(ctx, testSetID); serr != nil {
+		r.logger.Debug("failed to read startup mocks from mappings; continuing without them",
+			zap.String("testSetID", testSetID), zap.Error(serr))
+	} else {
+		startupNames = (&models.Mapping{Startup: startup}).StartupMockNames()
 	}
 	if !hasMeaningful {
 		// No mappings on disk (OSS-shape recordings, e.g. local sandbox
@@ -521,17 +672,24 @@ func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[
 		// takes when DisableMapping is set. Returning an error here
 		// would break every repo-mode sandbox replay that lacks the
 		// enterprise-only mappings.yaml.
-		return map[string][]models.MockEntry{}, map[string]bool{}, map[string]bool{}, nil
+		return map[string][]models.MockEntry{}, map[string]bool{}, map[string]bool{}, startupNames, nil
 	}
 	mocksThatHaveMappings := make(map[string]bool)
 	mocksWeNeed := make(map[string]bool)
+	// Startup names go into BOTH maps. GetFilteredMocks prunes on
+	// `isMappedToSpecificTest && !isNeededForCurrentRun`, so a name in only the
+	// first map is dropped whenever a subset of tests runs.
+	for _, n := range startupNames {
+		mocksThatHaveMappings[n] = true
+		mocksWeNeed[n] = true
+	}
 	for _, mocks := range testMockMappings {
 		for _, m := range mocks {
 			mocksThatHaveMappings[m.Name] = true
 			mocksWeNeed[m.Name] = true
 		}
 	}
-	return testMockMappings, mocksThatHaveMappings, mocksWeNeed, nil
+	return testMockMappings, mocksThatHaveMappings, mocksWeNeed, startupNames, nil
 }
 
 // expectedMocksForTest returns this step's expected mock-name list from
@@ -543,15 +701,17 @@ func expectedMocksForTest(setup *testSetSetup, testCaseName string) []string {
 	if setup == nil {
 		return nil
 	}
-	entries, ok := setup.mappings[testCaseName]
-	if !ok {
-		return nil
-	}
-	expected := make([]string, 0, len(entries))
-	for _, m := range entries {
-		expected = append(expected, m.Name)
-	}
-	return expected
+	// Per-test names PLUS the test-set's startup names. sendPerTestParams hands
+	// this to the agent as MockFilterParams.MockMapping, which on the
+	// mapping-based path is loaded via disk.LoadByNames and nothing else — so
+	// omitting startup names leaves the app's boot mocks (handshake, auth, pool
+	// warm-up) out of the pool for every test.
+	//
+	// No local guard on an empty entry list: MergeStartupMockNames returns nil in
+	// that case by design, so a test with no per-test mapping keeps an empty
+	// MockMapping and the agent's wide-pool fallback rather than being narrowed
+	// to the boot mocks alone.
+	return models.MergeStartupMockNames(setup.mappings[testCaseName], setup.startupMockNames)
 }
 
 // expectedEntriesForTest returns this step's expected mocks as
@@ -592,15 +752,26 @@ func (r *Runner) sendPerTestParams(ctx context.Context, setup *testSetSetup, exp
 		BeforeTime:         tcRespTime,
 		UseMappingBased:    setup.useMappingBased,
 		MockMapping:        expected,
-		TotalConsumedMocks: setup.snapshotConsumed(),
+		TotalConsumedMocks: setup.snapshotConsumed(r.agentReadsConsumedPerTestOnly()),
 		StrictMockWindow:   r.strictMockWindow(),
 	}
 	return r.instrumentation.UpdateMockParams(ctx, params)
 }
 
-// checkMockMismatches filters DNS entries from both the expected and
-// consumed sets before reporting — DNS resolution order is
-// non-deterministic (replay.go:1499-1517 does the same). MockEntry.Kind
+// agentReadsConsumedPerTestOnly reports whether the agent has said it reads the
+// consumed history only for the per-test mocks it stages (see
+// models.ConsumedScopeHeader); until then the whole history is sent, because
+// agents from v3.0.0-beta1 through v3.3.22 also applied it to the session pool.
+func (r *Runner) agentReadsConsumedPerTestOnly() bool {
+	s, ok := r.instrumentation.(keployPkg.ConsumedScopeReader)
+	return ok && s.AgentReadsConsumedPerTestOnly()
+}
+
+// checkMockMismatches filters the kinds the per-test dependency comparison
+// leaves out (models.ExcludedFromDependencyAssertion: DNS, whose resolution
+// order is non-deterministic, and connection failures, which nothing consumes
+// at replay yet) from both the expected and consumed sets before reporting,
+// as the replayer's RunTestSet does. MockEntry.Kind
 // in mappings is frequently empty, so we fall back to the kind registry
 // built from the loaded mock pool.
 //
@@ -614,12 +785,34 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 	if r.instrumentation == nil {
 		return nil
 	}
-	isDNS := func(name string, kind models.Kind) bool {
-		if kind == models.DNS {
+	unasserted := func(name string, kind models.Kind) bool {
+		if models.ExcludedFromDependencyAssertion(kind) {
 			return true
 		}
 		if setup != nil {
-			if k, ok := setup.mockKindByName[name]; ok && k == models.DNS {
+			if k, ok := setup.mockKindByName[name]; ok && models.ExcludedFromDependencyAssertion(k) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Startup mocks are excluded from BOTH sides, for the same reason DNS is:
+	// they belong to the test SET, not to any one step, so neither their presence
+	// nor their absence in a given step is a mismatch.
+	//
+	// Excluding rather than adding them to `expected` is deliberate. They are now
+	// merged into the names sent to the agent (expectedMocksForTest), so a step
+	// that re-handshakes legitimately consumes one — it would otherwise surface
+	// as an unexpected consumption. But listing them as EXPECTED would be worse:
+	// every step that did not happen to re-consume one would then report it
+	// missing.
+	isStartup := func(name string) bool {
+		if setup == nil {
+			return false
+		}
+		for _, n := range setup.startupMockNames {
+			if n == name {
 				return true
 			}
 		}
@@ -628,13 +821,15 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 
 	filteredExpected := make([]MockRef, 0, len(expected))
 	for _, e := range expected {
-		if !isDNS(e.Name, models.Kind(e.Kind)) {
-			filteredExpected = append(filteredExpected, e)
+		if unasserted(e.Name, models.Kind(e.Kind)) || isStartup(e.Name) {
+			continue
 		}
+		filteredExpected = append(filteredExpected, e)
 	}
+
 	filteredConsumed := make([]MockRef, 0, len(consumed))
 	for _, s := range consumed {
-		if isDNS(s.Name, s.Kind) {
+		if unasserted(s.Name, s.Kind) || isStartup(s.Name) {
 			continue
 		}
 		filteredConsumed = append(filteredConsumed, MockRef{
@@ -648,8 +843,42 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 	}
 }
 
+// appWaitBudget bounds the wait for an app whose caller gave no end of its run
+// (RunTestOpts.AppEnded nil). A variable for tests.
+var appWaitBudget = 2 * time.Minute
+
+// appProbeTick is how long the wait leaves between two probes the app did not
+// answer, and appSayEvery how many unanswered probes pass between the lines an
+// unbudgeted wait says it still waits with. appProbeTimeout ends one probe the
+// app has not answered in that long (0: none), and the wait probes again.
+// Pacing only: none of them is a verdict. Variables for tests.
+var (
+	appProbeTick    = 2 * time.Second
+	appSayEvery     = 30
+	appProbeTimeout = 3 * time.Second
+)
+
+// answerNeverAccepted reports whether a probe's error says the app answered in
+// a way that no later probe, nor the test's own request (it verifies the app's
+// certificate as the probe does), can accept: a certificate that fails
+// verification (an unknown authority, another host's, an expired one), or
+// plain HTTP from an app the ServiceURL names as https. Refused connections
+// and other TLS handshake errors (a TLS sidecar can send those while it
+// starts) are not ready yet, not this.
+func answerNeverAccepted(err error) bool {
+	var verifyErr *tls.CertificateVerificationError
+	return errors.As(err, &verifyErr) || errors.Is(err, http.ErrSchemeMismatch)
+}
+
 // waitForApp blocks until the app at serviceURL responds to an HTTP
-// request, or the timeout elapses. TCP reachability is no longer
+// request. Given ended, the end of the app's run (RunTestOpts.AppEnded), it
+// has no budget: it also ends when ended closes, with an error that says the
+// app stopped before it answered, when ctx ends, or at once on an answer
+// the test can never accept (answerNeverAccepted). An app compose holds
+// from starting until a slow dependency is healthy is waited for however
+// long that takes (enterprise atg-with-mocks pipelines 13105 and 13112: the
+// two-minute budget ran out 8 s before compose started the app). With ended
+// nil it ends, too, once timeout has elapsed. TCP reachability is no longer
 // checked separately — the HTTP probe's underlying dial subsumes it
 // and catches the strictly larger set of not-ready conditions (see
 // below).
@@ -675,7 +904,7 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 // and each of those conditions legitimately represents an app that
 // isn't yet ready to serve traffic end-to-end, which is the signal
 // we want during startup.
-func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, logger *zap.Logger) error {
+func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, ended <-chan struct{}, logger *zap.Logger) error {
 	parsed, err := url.Parse(serviceURL)
 	if err != nil || parsed.Host == "" {
 		return fmt.Errorf("invalid service URL %q: check the ServiceURL and ensure it includes a valid host", serviceURL)
@@ -702,12 +931,21 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	// attempt — including the very first — is cancelled when the
 	// budget runs out. Using the parent ctx for the probe while the
 	// outer select watches waitCtx would let a single slow probe run
-	// past the budget.
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	// past the budget. A wait given the app's end has no budget: its
+	// probes end with ctx alone.
+	var (
+		waitCtx context.Context
+		cancel  context.CancelFunc
+	)
+	if ended == nil {
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		waitCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	probeClient := &http.Client{
-		Timeout: 3 * time.Second,
+		Timeout: appProbeTimeout,
 		// New connection each probe so we're exercising real readiness
 		// rather than a cached keep-alive from an earlier attempt.
 		Transport: &http.Transport{DisableKeepAlives: true},
@@ -736,7 +974,9 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	//   nil          — response received (any status code; we care
 	//                  about liveness, not correctness).
 	//   fatal=true   — deterministic request-construction error; no
-	//                  point retrying.
+	//                  point retrying. Also, for a wait with no budget,
+	//                  an answer no later probe can accept (see
+	//                  answerNeverAccepted).
 	//   fatal=false  — transport error (connect refused, reset, TLS
 	//                  handshake fail, etc.); retry on the next tick.
 	//
@@ -759,6 +999,14 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		}
 		resp, httpErr := probeClient.Do(req)
 		if httpErr != nil {
+			// A wait with no budget would hold the run for as long as the
+			// app runs on an answer no later probe can accept: it ends at
+			// once instead. A budgeted wait retries it until its budget, as
+			// before: a k8s ingress serves a placeholder certificate until
+			// its own is loaded.
+			if ended != nil && answerNeverAccepted(httpErr) {
+				return true, fmt.Errorf("the app answered, but in a way the test's request can never accept: check the ServiceURL (--app-url)'s scheme and the app's certificate: %w", httpErr)
+			}
 			return false, httpErr
 		}
 		_ = resp.Body.Close()
@@ -780,17 +1028,47 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		lastErr = err
 	}
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(appProbeTick)
 	defer ticker.Stop()
 
+	// unanswered counts the probes the app has not answered: an unbudgeted
+	// wait says every appSayEvery of them that it still waits, and on what,
+	// so a run held by an app that does not come up says why it is held.
+	unanswered := 1
+	// stopped is the error of a wait whose waitCtx ended, and appEnded that of
+	// one whose app's run ended before the app answered.
+	stopped := func() error {
+		if ctx.Err() != nil {
+			// The caller's ctx ended (a signal, the caller's own bound):
+			// no budget ran out.
+			return fmt.Errorf("stopped waiting for app at %s: %w", addr, ctx.Err())
+		}
+		if lastErr != nil {
+			return fmt.Errorf("timed out waiting for app at %s (last probe error: %v); check that the service is running and the ServiceURL is correct", addr, lastErr)
+		}
+		return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
+	}
+	appEnded := func() error {
+		return fmt.Errorf("the app's run ended before the app at %s answered (last probe error: %v); see the app's output for why it stopped", addr, lastErr)
+	}
 	for {
 		select {
 		case <-waitCtx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("timed out waiting for app at %s (last probe error: %v); check that the service is running and the ServiceURL is correct", addr, lastErr)
-			}
-			return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
+			return stopped()
+		case <-ended:
+			// Never ready when ended is nil (a nil channel never receives).
+			return appEnded()
 		case <-ticker.C:
+			// A tick can be ready with waitCtx or the end (a probe that
+			// outlasted the tick leaves one ready), and select picks at
+			// random: they win over it, so no probe follows them.
+			select {
+			case <-waitCtx.Done():
+				return stopped()
+			case <-ended:
+				return appEnded()
+			default:
+			}
 			if fatal, err := probe(); err == nil {
 				logger.Debug("app is reachable", zap.String("addr", addr))
 				return nil
@@ -798,6 +1076,11 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 				return fmt.Errorf("failed to probe %s: %w", addr, err)
 			} else {
 				lastErr = err
+			}
+			unanswered++
+			if ended != nil && unanswered%appSayEvery == 0 {
+				logger.Info("still waiting for the app to answer before running the test; its run has not ended: a compose stack may still be starting the app's dependencies, or the app listens elsewhere than the ServiceURL (--app-url) names",
+					zap.String("addr", addr), zap.Int("unansweredProbes", unanswered), zap.NamedError("lastProbeError", lastErr))
 			}
 		}
 	}

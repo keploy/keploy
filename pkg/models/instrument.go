@@ -1,7 +1,9 @@
 package models
 
 import (
+	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"time"
 )
 
@@ -25,6 +27,46 @@ const (
 	OR  MatchType = "OR"
 	AND MatchType = "AND"
 )
+
+// MissPolicy decides what the proxy does in MODE_TEST when an outgoing call
+// matches no recorded mock. It is the VCR-style "record mode" for the
+// `keploy mock replay` flow.
+type MissPolicy string
+
+const (
+	// MissFail is the historical, deterministic behaviour: a miss is a hard
+	// failure (HTTP 502 / protocol error, connection torn down) and never
+	// reaches the real dependency. This is the default.
+	MissFail MissPolicy = "fail"
+	// MissPassthrough dials the real upstream on a miss, relays the exchange,
+	// and does NOT persist it. The equivalent of VCR's `once` on an existing
+	// cassette / go-vcr passthrough — new calls succeed against the real
+	// dependency but the cassette is not grown.
+	MissPassthrough MissPolicy = "passthrough"
+	// MissRecord dials the real upstream on a miss, relays the exchange, AND
+	// captures it back into the active mock set (VCR `new_episodes`). Newly
+	// observed calls are appended so the next replay serves them from the mock.
+	MissRecord MissPolicy = "record"
+)
+
+// Valid reports whether p is a recognised policy; the empty string is treated
+// as MissFail by callers.
+func (p MissPolicy) Valid() bool {
+	switch p {
+	case "", MissFail, MissPassthrough, MissRecord:
+		return true
+	}
+	return false
+}
+
+// RecordsOnMiss reports whether the policy captures newly-seen calls.
+func (p MissPolicy) RecordsOnMiss() bool { return p == MissRecord }
+
+// PassesThroughOnMiss reports whether the policy dials the real upstream on a
+// miss (both passthrough and record do).
+func (p MissPolicy) PassesThroughOnMiss() bool {
+	return p == MissPassthrough || p == MissRecord
+}
 
 type FilterPolicy string
 
@@ -51,23 +93,101 @@ type IngressEvent struct {
 	_           uint16 // Padding
 }
 
+// AppListenAddrs is the agent's answer to where the app's sockets listen on one
+// of its ports (GET /agent/app/listen-addrs): each address as net/netip prints
+// it, "0.0.0.0" and "::" for a wildcard. Empty when nothing listens there yet.
+type AppListenAddrs struct {
+	Addrs []string `json:"addrs"`
+}
+
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
 	TLSPrivateKey string
-	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay               time.Duration // This is the same as Application delay.
-	Mocking                bool          // used to enable/disable mocking
+	SQLDelay time.Duration // This is the same as Application delay.
+	// Synchronous sits with Mocking and SwapIDs, in one word: the word it
+	// took alone before SQLDelay holds LearnTests.
+	Synchronous bool
+	Mocking     bool // used to enable/disable mocking
+	SwapIDs     bool
+	// SrcInstance is the test worker instance the kernel stamped THIS
+	// connection with (0: none). Runtime, per-connection: json:"-" like
+	// SrcPid. It sits in the word the three bools above leave four bytes
+	// of: supervisor.Session holds these options by value, once per
+	// connection, and stays in the 640 B size class only so
+	// (TestASessionStaysInThe640ByteSizeClass).
+	SrcInstance uint32 `json:"-"`
+	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
+	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
+	// default), "passthrough" (dial the real upstream, don't persist), or
+	// "record" (dial the real upstream AND capture the exchange back into the
+	// active mock set). Only consulted on the `keploy mock replay` path.
+	OnMiss                 MissPolicy
 	DstCfg                 *ConditionalDstCfg
 	Backdate               time.Time                      // used to set backdate in cacert request
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
-	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
-	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
-	SkipTLSMITM            bool
-	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	// DisableStatefulMocks turns OFF cursor-consumption of stateful data-plane
+	// mocks. Default (false) = ON: repeated identical dependency requests are
+	// served successive recorded responses in record order (then saturate on the
+	// last), so a stateful sequence (a counter, a created-then-read row) replays
+	// as 1,2,3 instead of 1,1,1. Set true to restore the legacy "serve the first
+	// recorded response every time" behaviour. Only affects mocks classified
+	// ConsumeCursorSaturate (DeriveLifetime rules #4/#5); at one recorded
+	// response it is a no-op.
+	DisableStatefulMocks bool
+	// DisableMockCorrelation turns OFF request→response echo correlation: when
+	// the app sends an app-minted random value (UUID / nonce / idempotency key)
+	// that the dependency reflects back, replay captures the live request value
+	// and renders it into the served response instead of replaying the stale
+	// recorded one. Default (false) = ON. Set true to fall back to serving the
+	// recorded value. Only affects mocks carrying Spec.Correlations.
+	DisableMockCorrelation bool
+	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
+	//
+	// MockNoiseDetection: detect request-body field drift vs the recorded mock
+	// and record it as field-path noise (req_body_noise) on the matched mock.
+	//
+	// MockNoiseStrict (replay/enforcement path): a mock (any parser) that
+	// carries learned req_body_noise must match strictly — every request-body
+	// field must match except the learned-noise paths, so a non-noise drift
+	// rejects the mock.
+	MockNoiseDetection bool
+	MockNoiseStrict    bool
+
+	// SchemaNoiseDetection / SchemaNoiseStrict are the previous spelling, kept
+	// as a mirror rather than removed.
+	//
+	// Go has no field aliases, so unlike the package rename (see
+	// integrations/schemanoise) this cannot be solved with `=`. Both fields are
+	// therefore carried and NormalizeMockNoise reconciles them. An unmigrated
+	// producer — a k8s-proxy or enterprise build from before the rename, or a
+	// stored config written by one — sets only these, and its intent must
+	// survive: JSON/YAML decoding silently drops unknown keys, so a mismatch
+	// here is not an error anywhere, it is a toggle that quietly does nothing.
+	//
+	// Deprecated: set MockNoiseDetection / MockNoiseStrict. Read through
+	// NoiseDetection() / NoiseStrict(), never directly.
+	SchemaNoiseDetection bool
+	SchemaNoiseStrict    bool
+	// ConnKey names THIS connection's socket, as an opaque token on which the
+	// connection's two capture legs agree: the raw leg that carries its
+	// cleartext prelude (a MySQL greeting and SSLRequest) and the decrypted leg
+	// that carries what follows the TLS handshake. The TLSHandshakeStore pairs
+	// the two by it (HandshakeOwner), so a decrypted stream is stitched with its
+	// OWN connection's greeting, salt and timestamp, and never with another's.
+	// The enterprise proxyless capture sets it to the kernel socket cookie on
+	// both legs. Empty means unknown; the legs then pair by ConnProc, and
+	// without that by arrival order on the destination port.
+	ConnKey string
+	// ConnProc names the process that made THIS connection, as an opaque token
+	// both capture legs agree on. It is the fallback pairing identity when
+	// ConnKey is unknown on either leg: a stream is then only ever stitched with
+	// a greeting captured from its own process, never another app's. Runtime,
+	// per-connection: json:"-" like SrcPid.
+	ConnProc string `json:"-"`
 	// PreferH2, on the REPLAY path, tells the TLS MITM to advertise h2 in ALPN
 	// (instead of the default http/1.1 downgrade) so a dual-protocol client
 	// stays on HTTP/2 and its request matches a recorded kind:Http2 mock.
@@ -93,6 +213,43 @@ type OutgoingOptions struct {
 	// Surfaced via --opportunistic-tls-intercept so the agent can
 	// pick the right per-connection branch in handleConnection.
 	OpportunisticTLSIntercept bool
+	// SkipTLSMITM sits with the other TLS switches, in the padding after them.
+	// OutgoingOptions is held by value in each connection's supervisor.Session,
+	// so a field placed where it takes a word of its own grows the Session of
+	// every connection.
+	SkipTLSMITM bool
+	// Learn turns the learn step on (design v14 §7.2, row L; package
+	// matcher/learn): the agent pairs a request no recorded mock answers
+	// exactly with the mock it drifted from and learns what drifted, and a
+	// miss carries its reason. Only record's full round sets it, under the
+	// proven switch: the round that replays the build that was just
+	// recorded. Like SkipTLSMITM it sits in the padding after the TLS
+	// switches.
+	Learn bool `json:"Learn,omitempty"`
+	// LearnPool lets the learn step pair pool mocks too, not only the test's
+	// own: a full record replaces the pool, a partial one never changes it
+	// (design §7.2 step 10, §7.5).
+	LearnPool bool `json:"LearnPool,omitempty"`
+	// StartsTestSet says this session starts a test set of the replay
+	// (another set, or the run's first on an agent kept from an earlier
+	// one), not a re-registration of the current set with an agent the
+	// replay took for replaced. What the agent recorded consumed and nobody
+	// drained was then consumed of the previous set's pool, under its mock
+	// names, which every set numbers afresh: the set's staging drops it
+	// (MockManager.ArmSetFence). Like Learn it sits in the padding after the
+	// TLS switches.
+	StartsTestSet bool `json:"StartsTestSet,omitempty"`
+	// LearnTests, when not nil, are the tests whose recordings the round
+	// learns onto (config.Test.LearnTests: the tests a record has just
+	// recorded anew). A test outside it keeps an earlier record's recording
+	// (a partial record, or a test that failed against real infra), so it
+	// holds that record's times: run after a test recorded later, it is no
+	// test begun out of its recorded order, and its own recording learns
+	// nothing (pkg/service/agent keepRecordedOrder, holdLearn). nil: every
+	// test's recording learns (a CLI from before it). Never omitted, so an
+	// empty list (no test learns) is not read as nil. A map, one word: a
+	// Session holds these options by value (supervisor.Session).
+	LearnTests map[string]bool `json:"LearnTests"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial
@@ -100,7 +257,49 @@ type OutgoingOptions struct {
 	// protocol; the generic dispatch path waits to peek client bytes
 	// before dialing and deadlocks otherwise. When nil/empty, the
 	// proxy falls back to the built-in defaults [3306, 4000].
+	//
+	// Since automatic detection landed this list is an optimisation and
+	// an escape hatch rather than a requirement: a port listed here
+	// skips the detection probe entirely, pinned to MySQL, so an HTTP
+	// service on a listed port gets no answer. The built-in defaults are
+	// only a hint: at record whichever end speaks first decides (a client
+	// that speaks first is not MySQL), and at replay the recording does.
+	// With DisableMysqlAutoDetect the defaults are pinned as listed ports
+	// are.
 	MysqlPorts []uint32
+	// PassThroughPorts / PassThroughHosts mark telemetry / noisy egress that
+	// keploy should not record normally (see PassThroughRule). Ports gate on the
+	// destination port; Hosts gate on the destination host/authority (needed for
+	// TLS egress where the port is not observable at capture). A matched rule is
+	// either "skip" (never record; synth success on replay) or "recordOne"
+	// (keep one exchange per (host,port,path,method); serve it body-agnostic on
+	// replay). Empty ⇒ built-in telemetry defaults only (see MergePassThroughDefaults).
+	PassThroughPorts []PassThroughRule
+	PassThroughHosts []PassThroughRule
+	// PassThroughScope isolates recordOne de-duplication to one app/session. The
+	// HTTP integration (and its ptRecorder) is a single instance shared across
+	// apps in a long-lived proxyless/DaemonSet agent, so without a scope the first
+	// app's recordOne capture would suppress a second app's identical endpoint.
+	// Callers that share a recorder across tenants (the enterprise DaemonSet gate)
+	// set this to a per-app/per-session key; the classic sidecar leaves it empty
+	// (process-per-session, so the plain key already isolates).
+	PassThroughScope string
+	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
+	// restoring the strict "MysqlPorts or nothing" behaviour. With
+	// detection on (the default), a MySQL server on any port is
+	// identified from its handshake at record time and recalled from
+	// the recorded mocks' destAddr at replay time.
+	DisableMysqlAutoDetect bool
+	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
+	// mocks on a port the recording never saw. Detection still runs; only the
+	// judgement that covers a moved endpoint (by its container or host) is
+	// turned off. See Config.DisableMysqlEndpointDrift.
+	DisableMysqlEndpointDrift bool
+	// DisablePgTimeSliceCohort turns off the PostgreSQL v3 replayer's
+	// time-slice fallback: a query that matches no recording on its
+	// parameter types and values is then a miss, not served the query's
+	// recordings in record order. See Config.DisablePgTimeSliceCohort.
+	DisablePgTimeSliceCohort bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
 	// Kind=RevokedTests control frame (it diverts it into a revoke set and
@@ -109,35 +308,200 @@ type OutgoingOptions struct {
 	// older CLI that never sets it never receives one — the version-skew
 	// guard for the deferred-orphan revoke protocol. Record path only.
 	SupportsDroppedRevoke bool
+	// SupportsRevokeByRequest is a capability flag set by the CLI on the
+	// /outgoing request, beside SupportsDroppedRevoke: when true, the CLI
+	// finds a revoked test case the agent sent with no name by the name a
+	// RevokedTests frame gives it (RevokeNameByRequest), its window's request
+	// time. Without it, such a test case, sent before a mock it needed was
+	// lost, cannot be revoked, and the agent says it may stay recorded
+	// without the mock. Record path only.
+	SupportsRevokeByRequest bool
+	// SupportsCaptureIDs is a capability flag set by the CLI on the /outgoing
+	// request: when true, the CLI reads capture ids (models.CaptureIDPrefix).
+	// It names a test case that came with a CaptureID as it saves it, and
+	// files every mapping entry and revoke that names the CaptureID under
+	// that name. The agent gives a request captured without --sync a capture
+	// id ONLY when this is true; an older CLI keeps getting such test cases,
+	// and their mappings, with no name. Record path only.
+	SupportsCaptureIDs bool
+	// ReadsSetEnds is a capability flag set by the CLI on the replay
+	// session's /mock request: when true, the CLI reads each of its test
+	// sets' end with a set's end read (WithSetEndRead) and fails the set
+	// with a call it files there, as keploy test does under the proven
+	// switch. The run's mock manager takes a parser's
+	// set's end registration (integrations.SetEndFiler), which the parser
+	// makes at each call it would hold for a later test, ONLY in a session
+	// that sets it, so under a client that does not (keploy mock; keploy
+	// test without the switch, whose read of a set's end fails nothing; one
+	// from before the read) a parser holds no call for a later test: it
+	// misses it at once instead.
+	// The agent passes it on only to a Proxy that files those calls at the
+	// read (agent.SetEndFilingProxy), and false to any other. Replay path
+	// only.
+	ReadsSetEnds bool
+	// UpstreamTLSVerify mirrors config.Record.UpstreamTLS.Verify: when true,
+	// keploy's own dial to the REAL destination validates the server's
+	// certificate chain and hostname instead of skipping verification.
+	//
+	// Default false, and deliberately so — a recording proxy must never be
+	// stricter than the application it records. An app on sslmode=require /
+	// tls=skip-verify chose not to authenticate its upstream; verifying on its
+	// behalf would break connections the app would have made, and the failure
+	// is silent (the supervisor falls through to raw passthrough and the mock
+	// is dropped). This is NOT a CA-bundle limitation: crypto/tls uses the
+	// system pool for free when RootCAs is nil.
+	UpstreamTLSVerify bool
+	// UpstreamTLSRootCAs is the trust anchor set for those verifying dials.
+	// nil means "use Go's default" (crypto/tls falls back to the platform
+	// root pool) — it never means "trust nothing".
+	//
+	// json:"-" is load-bearing, not cosmetic. OutgoingOptions is JSON-encoded
+	// on the CLI → agent /outgoing request (pkg/platform/http/agent.go), and
+	// x509.CertPool has only unexported fields: it would marshal to `{}` and
+	// decode on the agent into a NON-NIL EMPTY pool, i.e. a trust store that
+	// trusts nothing, failing every handshake. The pool is therefore built
+	// agent-side from UpstreamTLSCACert, which does travel: proxy.New settles
+	// only the argv-vs-yaml precedence for the CA PATH, and the pool itself is
+	// read from disk lazily, under a sync.Once, on the first record session.
+	UpstreamTLSRootCAs *x509.CertPool `json:"-"`
+	// SrcPid is the kernel (root-namespace) PID of the process that opened THIS
+	// outgoing connection, taken from the eBPF redirect map per connection. It
+	// is a runtime, per-connection value — never session config — so it is
+	// json:"-" (OutgoingOptions is JSON-marshaled CLI→agent and this must not
+	// travel as a rule). The proxy stamps it on its per-connection copy of the
+	// options and uses it to pick the worker's scoped mock view (per-PID
+	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
+	SrcPid uint32 `json:"-"`
+	// SrcNsPid is that process's PID in keploy's agent's own PID namespace
+	// (the eBPF redirect's agentNsPid), by which the agent reads it in its own
+	// /proc: the kernel's PID for an agent in the initial namespace, another
+	// number for one in a container's. 0 when the process is outside the
+	// agent's namespace or unknown. Runtime, per-connection: json:"-" like
+	// SrcPid.
+	SrcNsPid uint32 `json:"-"`
+	// NetNS names the network namespace THIS connection was made from, as an
+	// opaque token. It exists because some destination addresses name a
+	// different server in every network namespace: 127.0.0.0/8, ::1, link-local
+	// addresses and unresolved hostnames (see AddrIsNetnsLocal). A long-lived
+	// capture layer that records many pods in one agent (the enterprise
+	// DaemonSet) sees "127.0.0.1:3306" from every pod with a MySQL sidecar, and
+	// each is a different server. Anything that keys per-server state on such an
+	// address must qualify it by this token (see HandshakeServerKey).
+	//
+	// Two connections with EQUAL tokens must have been made from the same live
+	// network namespace. A token may be finer than that (one per process, say):
+	// that only costs extra per-server work. It must never be coarser, and in
+	// particular must not be a bare netns inode number, which the kernel reuses
+	// as soon as a namespace is freed.
+	//
+	// Empty means unknown, and per-server state for a namespace-local address is
+	// then not shared with any other connection at all (HandshakeServerKey
+	// returns ""): an app/session scope does not name a namespace, since every
+	// replica of a deployment shares it. A capture layer may leave it empty for
+	// a connection whose destination is routable, since nothing keys a routable
+	// address by namespace. Runtime, per-connection: json:"-" like SrcPid.
+	NetNS string `json:"-"`
 }
 
 type ConditionalDstCfg struct {
 	Addr   string // Destination Addr (ip:port)
 	Port   uint
 	TLSCfg *tls.Config
+	// AddrFabricated marks Addr/Port as a stand-in the capture layer
+	// synthesized because it could not resolve the connection's REAL
+	// destination (e.g. the proxyless SSL-uprobe path substitutes
+	// 127.0.0.1:0 when the pid→dest cache is ambiguous, and content
+	// matching later forces the well-known port, yielding
+	// "127.0.0.1:3306"). Such an address is good enough for parser
+	// selection and mock metadata (grouping), but it does NOT point at
+	// the server this connection actually talked to — consumers MUST
+	// NOT dial it (the MySQL recorder's fetchServerGreeting fallback
+	// would otherwise connect to an unrelated local server, or fail
+	// instantly with ECONNREFUSED and abort the capture).
+	AddrFabricated bool
 }
 
 type IncomingOptions struct {
 	Filters  []Filter
 	BasePath string
+	// IgnoreStaticAssets skips recording successful HTTP GET/HEAD responses
+	// for web static assets (CSS, JavaScript, fonts, images, audio, video)
+	// unless an explicit Include filter matches the request.
+	IgnoreStaticAssets bool
+}
+
+// AppDNS is an app container's resolver settings, as docker run takes them:
+// name servers (IP addresses), search domains and resolver options.
+type AppDNS struct {
+	Servers []string
+	Search  []string
+	Options []string
+}
+
+// Empty says the app set none of its own.
+func (d AppDNS) Empty() bool {
+	return len(d.Servers) == 0 && len(d.Search) == 0 && len(d.Options) == 0
 }
 
 type SetupOptions struct {
-	ClientNSPID     uint32
-	Container       string
-	KeployContainer string
-	DockerDelay     uint64
-	Synchronous     bool
+	ClientNSPID uint32
+	// ClientPIDNS is the pid namespace keploy's CLI said it runs in, beside
+	// its pid (--client-pid-ns, utils.OwnPIDNamespace): "<inode>@<boot_id>",
+	// utils.ClientPIDNSNone for a CLI in no Linux pid namespace, or "" when
+	// the CLI did not say it. What reads ClientNSPID as a pid of the agent's
+	// own /proc reads it through utils.ClientPIDHere with this.
+	ClientPIDNS string
+	Container   string
+	// FromContainer is the already-running container to re-create under
+	// keploy's namespaces. Set only for utils.FromContainer runs.
+	FromContainer string
+	// FromContainerWasRunning records whether that container was up when
+	// keploy stopped it, so teardown knows whether to start it again. The stop
+	// happens before the agent starts - the agent publishes the app's ports and
+	// cannot bind them while the original still holds them - so it is decided
+	// there rather than in App.
+	FromContainerWasRunning bool
+	KeployContainer         string
+	DockerDelay             uint64
+	Synchronous             bool
 	// Cmd               string
-	AgentURI                  string
-	IsDocker                  bool
-	CommandType               string
-	EnableTesting             bool
-	ProxyPort                 uint32
-	IncomingProxyPort         uint16
-	DnsPort                   uint32
-	Mode                      Mode
-	GlobalPassthrough         bool
+	AgentURI          string
+	IsDocker          bool
+	CommandType       string
+	EnableTesting     bool
+	ProxyPort         uint32
+	IncomingProxyPort uint16
+	DnsPort           uint32
+	Mode              Mode
+	// MockMode marks a `keploy mock record|replay` session: the agent must
+	// NOT relocate the application's listening ports (no ingress/bind hooks)
+	// because the wrapped process is a test runner, not a server whose
+	// incoming traffic becomes test cases. Only outgoing calls are captured
+	// (record) or served (replay). Forwarded to the agent via --mock-mode.
+	MockMode bool
+	// RecordRequests keeps the ingress hooks on in mock mode so the app's incoming requests become test cases; forwarded as --record-requests.
+	RecordRequests bool
+	// SettleReads has the agent settle a test's calls before a replay reads
+	// its misses, as the proven switch always does: from the agent's start its
+	// proxy listens marked for the kernel's count of the connections waiting
+	// for it, keeps each connection from its accept, and each read waits until
+	// every call the application made is in its hands and answered
+	// (Agent.GetMockErrors). Set for a run that learns noise from the misses
+	// it reads (config.Test.LearnsNoise): a miss
+	// decided after the app answered its test is then read with that test.
+	// The agent's, from its start: its proxy's listener is marked for the
+	// kernel's count before it listens. Forwarded as --settle-reads.
+	SettleReads       bool
+	GlobalPassthrough bool
+	// AllowEgress mirrors config.Test.AllowEgress: what a replay may reach for
+	// real, by the entries models.NormalizeAllowEgress accepts. Forwarded to the
+	// agent as --allow-egress; record ignores it.
+	AllowEgress []string
+	// DisableHandshakeHold turns off holding each redirected connection's
+	// handshake until its destination answers (pkg/agent/proxy/synhold), so
+	// the proxy accepts every connection at once as it used to. Forwarded to
+	// the agent via --disable-handshake-hold.
+	DisableHandshakeHold      bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool
 	// ChannelBindingShim mirrors config.Record.ChannelBindingShim. Forwarded
@@ -146,14 +510,48 @@ type SetupOptions struct {
 	// so containerised agents honour the user's choice without seeing the
 	// host's keploy.yml.
 	ChannelBindingShim bool
-	AgentPort          uint32
-	AppPorts           []string
-	AppNetworks        []string
-	NetworkAliases     map[string][]string
-	BuildDelay         uint64
-	PassThroughPorts   []uint
-	MemoryLimit        uint64
-	ConfigPath         string
+	// UpstreamTLSVerify / UpstreamTLSCACert mirror config.Record.UpstreamTLS.
+	// Forwarded orchestrator → agent over the --upstream-tls-verify /
+	// --upstream-tls-ca-cert argv flags, the same propagation channel
+	// CapturePackets / OpportunisticTLSIntercept / ChannelBindingShim use, so a
+	// containerised agent honours the operator's choice without ever seeing the
+	// host's keploy.yml.
+	//
+	// The CA pool itself cannot travel — see OutgoingOptions.UpstreamTLSRootCAs
+	// — so the PATH travels and the agent loads it locally. That path is
+	// resolved on the AGENT's filesystem; for docker/k8s runs the operator must
+	// bind-mount the PEM or point at a path that exists inside the container.
+	UpstreamTLSVerify bool
+	UpstreamTLSCACert string
+	AgentPort         uint32
+	AppPorts          []string
+	AppNetworks       []string
+	NetworkAliases    map[string][]string
+	BuildDelay        uint64
+	PassThroughPorts  []uint
+	MemoryLimit       uint64
+	ConfigPath        string
+	// AppExtraHosts are the app's own host entries, "name:address" (docker
+	// run --add-host, a container's ExtraHosts). The app joins the agent
+	// container's network namespace, where Docker refuses host entries of the
+	// app's own, so the agent container carries them, and the app reads them
+	// from the /etc/hosts it shares with it. A compose service's extra_hosts
+	// are moved onto the keploy-agent service instead (ModifyComposeForAgent).
+	AppExtraHosts []string
+	// AppDNS is the app's own resolver settings (docker run --dns,
+	// --dns-search, --dns-option; a container's DNS, DNSSearch and
+	// DNSOptions). Under the agent container's network mode Docker refuses
+	// DNS servers of the app's own ("conflicting options: dns and the network
+	// mode") and ignores its search list and options: the app shares the
+	// agent container's /etc/resolv.conf. So the agent container carries
+	// them. A compose service's dns, dns_search and dns_opt are moved onto the
+	// keploy-agent service instead (ModifyComposeForAgent).
+	AppDNS AppDNS
+	// HostGateway says the daemon resolves the address host-gateway (Docker
+	// Engine 20.10, API 1.41; Podman 4.7): the agent container then maps
+	// host.docker.internal to it, as Docker Desktop does for every container,
+	// unless the app maps that name itself.
+	HostGateway bool
 	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
 	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
 	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have
@@ -165,8 +563,18 @@ type SetupOptions struct {
 	// RecordBufferQueueSize mirrors config.Record.RecordBuffer.QueueSize.
 	// See RecordBufferMaxMemoryPerConn for the propagation rationale.
 	RecordBufferQueueSize int
-	ExtraArgs             []string
-	EnableSampling        int
+	// RecordBufferConsumerStallGrace mirrors
+	// config.Record.RecordBuffer.ConsumerStallGrace. See
+	// RecordBufferMaxMemoryPerConn for the propagation rationale.
+	RecordBufferConsumerStallGrace time.Duration
+
+	// RecordBufferHalfCloseGrace mirrors
+	// config.RecordBuffer.HalfCloseGrace. Zero means "unset, use the
+	// relay default"; NEGATIVE means "disable half-close", so the value
+	// must be forwarded on != 0 rather than > 0.
+	RecordBufferHalfCloseGrace time.Duration
+	ExtraArgs                  []string
+	EnableSampling             int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF
@@ -198,6 +606,13 @@ type SetupOptions struct {
 type RunOptions struct {
 	//IgnoreErrors bool
 	AppCommand string // command to run the application
+	// BeforeStop, when set, is called once the application's command has
+	// exited on its own, before keploy stops what the application left
+	// running (its daemons), and only when some of it still runs: running
+	// says, each time it is called, whether any of it does. ctx ends when
+	// the run is stopped (the user's interrupt). The run's stop waits for it
+	// to return; it holds no call the application makes.
+	BeforeStop func(ctx context.Context, running func() bool)
 }
 
 //For test bench

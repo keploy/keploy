@@ -4,26 +4,26 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
-// startRefuseThenServe reserves a free port, releases it so connects are REFUSED
-// for `refuse`, then re-binds it and serves GET /ping -> 200 {"msg":"pong"}.
+// startRefuseThenServe holds a free port so connects to it are REFUSED for
+// `refuse`, then listens there and serves GET /ping -> 200 {"msg":"pong"}.
 // This reproduces an app container that briefly refuses connections while it is
-// still coming up (the CI contention scenario the retry exists for).
+// still coming up (the CI contention scenario the retry exists for). The port
+// is held for the test's life (testnet.SharedPort), so no other socket can
+// take it and answer meanwhile. stop ends the server, and the wait if the
+// server has not listened yet.
 func startRefuseThenServe(t *testing.T, refuse time.Duration) (baseURL string, stop func()) {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close() // the port now actively refuses until we re-bind below
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", func(w http.ResponseWriter, _ *http.Request) {
@@ -32,15 +32,22 @@ func startRefuseThenServe(t *testing.T, refuse time.Duration) (baseURL string, s
 		_, _ = w.Write([]byte(`{"msg":"pong"}`))
 	})
 	srv := &http.Server{Handler: mux}
+	done, served := make(chan struct{}), make(chan struct{})
 	go func() {
-		time.Sleep(refuse) // connects to addr are refused during this window
-		ln, lerr := net.Listen("tcp", addr)
+		defer close(served)
+		select {
+		case <-time.After(refuse): // connects to addr are refused during this window
+		case <-done:
+			return
+		}
+		ln, lerr := testnet.OpenShared("tcp4", addr)
 		if lerr != nil {
+			t.Errorf("the server could not listen at the held port %s: %v", addr, lerr)
 			return
 		}
 		_ = srv.Serve(ln)
 	}()
-	return "http://" + addr, func() { _ = srv.Close() }
+	return "http://" + addr, func() { close(done); _ = srv.Close(); <-served }
 }
 
 func pingTestCase(baseURL string) *models.TestCase {
