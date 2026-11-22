@@ -21,9 +21,10 @@ import (
 // A recording the application used in its test, again while keploy waited
 // for the series the run owes, and once more as it stopped, is in the reads
 // of all three: each read hands back only what was served since the one
-// before. It is one recording consumed: the receipt, the replay summary and
-// the metered count say five recordings, not the seven the reads carry, and
-// its test's line names it once.
+// before. The end's read also carries a recording no earlier read saw. It is
+// one recording consumed per name: the receipt, the replay summary and the
+// metered count say six recordings, not the eight the reads carry, and its
+// test's line names it once.
 func TestARecordingEveryReadCarriesIsConsumedOnce(t *testing.T) {
 	var metered []ReplayOutcome
 	RegisterReplayOutcomeReporter(func(_ context.Context, o ReplayOutcome) { metered = append(metered, o) })
@@ -34,15 +35,15 @@ func TestARecordingEveryReadCarriesIsConsumedOnce(t *testing.T) {
 	code, r, tr, logs, instr := seriesWaitRun(t, w, [][]models.MockState{
 		{{Name: "mock-0", Timestamp: inA}, {Name: "mock-1", Timestamp: inB}, {Name: "mock-6", Timestamp: inB}},
 		{{Name: "mock-3", Timestamp: after}, {Name: "mock-0", Timestamp: after}, {Name: "mock-5", Timestamp: after}},
-	}, []models.MockState{{Name: "mock-0", Timestamp: after + 1}}, runsOnForGood, 3)
+	}, []models.MockState{{Name: "mock-0", Timestamp: after + 1}, {Name: "mock-4", Timestamp: after + 1}}, runsOnForGood, 3)
 	require.Zero(t, code)
 	require.Equal(t, 3, instr.consumedReadCount, "the wait's first read, one wake-up, and the run's end")
-	require.Equal(t, 5, r.Consumed)
+	require.Equal(t, 6, r.Consumed)
 	summary := logs.FilterMessage("mock replay summary").All()
 	require.Len(t, summary, 1)
-	require.Equal(t, int64(5), summary[0].ContextMap()["consumed"])
+	require.Equal(t, int64(6), summary[0].ContextMap()["consumed"])
 	require.Len(t, metered, 1)
-	require.Equal(t, 5, metered[0].Consumed)
+	require.Equal(t, 6, metered[0].Consumed)
 	require.Equal(t, 1, testLine(t, tr, "o::TestA").Consumed)
 	for _, f := range metered[0].Mocks {
 		if f.Flow == "o::TestA" {
