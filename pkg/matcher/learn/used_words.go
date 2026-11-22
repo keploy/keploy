@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // ServedNamed is Served of Named(e, vars, clocks), and keeps, while test
@@ -29,6 +28,7 @@ func (t *Tracker) ServedNamed(n uint64, e Earlier, vars models.MockVariables, cl
 	}
 	for _, u := range used {
 		t.usedWords[e.Mock+"\x00"+u.place] = u.name
+		t.usedWordPlaces[wordPlaceOf(e.Mock+"\x00"+u.place)] = true
 	}
 }
 
@@ -80,13 +80,18 @@ func (t *Tracker) UsedWords(n uint64, mock string, s Seen) []BoundWord {
 	if t == nil || s.Side != Request {
 		return nil
 	}
-	rec, live := variables.Words(s.Leaf.Value), variables.Words(s.Live)
-	if len(rec) != len(live) {
-		return nil
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.epoch != n {
+		return nil
+	}
+	// A place no variable is used at a word of names none, and its
+	// leaf's words are not split (BoundWords).
+	if !t.usedWordPlaces[mock+"\x00"+s.Place+"#"] {
+		return nil
+	}
+	rec, live := boundWordsOf(s.Leaf.Value), boundWordsOf(s.Live)
+	if len(rec) != len(live) {
 		return nil
 	}
 	var out []BoundWord

@@ -7,10 +7,6 @@ import (
 	"syscall"
 )
 
-// UnreadBytes does not ask the socket here: 0, which can only fall short of
-// what has arrived.
-func UnreadBytes(net.Conn) int64 { return 0 }
-
 // OwnSocket finds no socket here: nothing is read past its consumer.
 func OwnSocket(net.Conn) (syscall.RawConn, bool) { return nil, false }
 

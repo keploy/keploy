@@ -316,15 +316,25 @@ type OutgoingOptions struct {
 	// lost, cannot be revoked, and the agent says it may stay recorded
 	// without the mock. Record path only.
 	SupportsRevokeByRequest bool
+	// SupportsCaptureIDs is a capability flag set by the CLI on the /outgoing
+	// request: when true, the CLI reads capture ids (models.CaptureIDPrefix).
+	// It names a test case that came with a CaptureID as it saves it, and
+	// files every mapping entry and revoke that names the CaptureID under
+	// that name. The agent gives a request captured without --sync a capture
+	// id ONLY when this is true; an older CLI keeps getting such test cases,
+	// and their mappings, with no name. Record path only.
+	SupportsCaptureIDs bool
 	// ReadsSetEnds is a capability flag set by the CLI on the replay
 	// session's /mock request: when true, the CLI reads each of its test
-	// sets' end with a set's end read (WithSetEndRead), as keploy test does
-	// under the proven switch. The run's mock manager takes a parser's
+	// sets' end with a set's end read (WithSetEndRead) and fails the set
+	// with a call it files there, as keploy test does under the proven
+	// switch. The run's mock manager takes a parser's
 	// set's end registration (integrations.SetEndFiler), which the parser
 	// makes at each call it would hold for a later test, ONLY in a session
-	// that sets it, so under a client that never makes the read (keploy
-	// mock, a keploy test without the switch or from before the read) a
-	// parser holds no call for a later test: it misses it at once instead.
+	// that sets it, so under a client that does not (keploy mock; keploy
+	// test without the switch, whose read of a set's end fails nothing; one
+	// from before the read) a parser holds no call for a later test: it
+	// misses it at once instead.
 	// The agent passes it on only to a Proxy that files those calls at the
 	// read (agent.SetEndFilingProxy), and false to any other. Replay path
 	// only.
@@ -414,6 +424,10 @@ type ConditionalDstCfg struct {
 type IncomingOptions struct {
 	Filters  []Filter
 	BasePath string
+	// IgnoreStaticAssets skips recording successful HTTP GET/HEAD responses
+	// for web static assets (CSS, JavaScript, fonts, images, audio, video)
+	// unless an explicit Include filter matches the request.
+	IgnoreStaticAssets bool
 }
 
 // AppDNS is an app container's resolver settings, as docker run takes them:

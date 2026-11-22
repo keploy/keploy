@@ -709,6 +709,17 @@ func TestACallDecidedTheTestsOwnIsRefusedTheBackgroundAtEveryDoorAndWalk(t *test
 				}
 				return walked(names, mk.Name)
 			}, false, true},
+		{"RangePerTestMocksWithKey", func(s staged) *models.Mock { return s.worker },
+			func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) bool {
+				var names []string
+				if err := db.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(oneKey, "PING", func(m *models.Mock) bool {
+					names = append(names, m.Name)
+					return true
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return walked(names, mk.Name)
+			}, false, true},
 		{"RangeSessionMocksWithKey", func(s staged) *models.Mock { return s.pool },
 			func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) bool {
 				var names []string

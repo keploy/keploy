@@ -70,6 +70,12 @@ testdata
 # the parser is tested against what the runners actually emit.
 !pkg/platform/coverage/report/testdata/
 !pkg/platform/coverage/report/testdata/**
+# The secret detector's corpus: samples and the findings sanitize must give.
+!pkg/service/tools/testdata/
+!pkg/service/tools/testdata/**
+# The secret detector's synthetic configs: the findings gitleaks gave for them.
+!pkg/service/tools/internal/secretscan/testdata/
+!pkg/service/tools/internal/secretscan/testdata/**
 # Mocks as the recorder writes them (a production-shape recording's): the
 # in-place YAML encoder must write them byte for byte as EncodeMock did.
 !pkg/platform/yaml/mockdb/testdata/

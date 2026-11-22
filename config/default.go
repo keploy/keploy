@@ -107,6 +107,8 @@ test:
 record:
   recordTimer: 0s
   filters: []
+  # Skip recording successful GET/HEAD web static asset responses (CSS, JS, fonts, images, audio, video).
+  ignoreStaticAssets: false
   sync: false
   memoryLimit: 0
   testCaseNaming: descriptive

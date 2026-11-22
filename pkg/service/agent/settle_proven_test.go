@@ -31,6 +31,19 @@ type countHooks struct {
 	appSettled            uint64
 	err                   error
 	sig                   chan struct{}
+	// failReads is how many of the next capture-loss reads fail
+	// (CaptureLossesErr).
+	failReads atomic.Int32
+}
+
+// CaptureLossesErr fails the read it is asked after while failReads holds
+// one (coreAgent.CaptureLossErrReporter).
+func (h *countHooks) CaptureLossesErr() error {
+	if h.failReads.Add(-1) >= 0 {
+		return errors.New("the hooks' capture-loss count could not be read")
+	}
+	h.failReads.Store(0)
+	return nil
 }
 
 func (h *countHooks) ProxyConnsEstablished(context.Context) (uint64, error) {

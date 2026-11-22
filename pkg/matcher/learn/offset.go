@@ -225,6 +225,14 @@ type offsetPlaces struct {
 // and the parts of the test case's own request keploy test sent with
 // another value than recorded.
 func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, set []GivenPlaces) *offsetPlaces {
+	return dc.offsetPlacesBy(at, served, raw, set, true)
+}
+
+// offsetPlacesBy is offsetPlacesOf's places, with the words and instants of
+// raw's recordings of another test (Raw.elsewhere) read where others is set,
+// and left to the caller otherwise (decider.offsetPlaces), which reads them
+// its own way: every other place of raw is read alike either way.
+func (dc *DriftCache) offsetPlacesBy(at time.Time, served []Earlier, raw []Raw, set []GivenPlaces, others bool) *offsetPlaces {
 	op := &offsetPlaces{at: at}
 	// One recording read once, whether F gave it the application before
 	// the call as any of its readings says: a payload a leaf-by-leaf
@@ -232,7 +240,9 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 	// (offsetSource.key). Its serves, where two readings of it number them,
 	// span both: an order read wider than it is fails closed
 	// (inRecordedOrder).
-	var srcs []offsetSource
+	// One block for the sources and one for their keys: a few allocations
+	// per call, however many recordings it reads.
+	srcs, keys := make([]offsetSource, 0, len(raw)+len(served)+len(set)), newOffsetKeys(len(raw)+len(served)+len(set))
 	// What F served at the leaves of an exchange's answer with another value
 	// than recorded (a template value: Raw.moves), each where the payload
 	// holds it, of each exchange: places F gave the application, never the
@@ -256,7 +266,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			moves = append(moves, moved{mock: x.mock, call: x.call, at: x.at, first: x.first, last: x.last, moves: x.moves})
 			continue
 		}
-		srcs = append(srcs, offsetSource{key: offsetKeyOf(x.mock, x.at), x: x, given: x.served, first: x.first, last: x.last})
+		srcs = append(srcs, offsetSource{key: keys.of(x.mock, x.at), x: x, given: x.served, first: x.first, last: x.last})
 	}
 	for i := range served {
 		e := &served[i]
@@ -270,7 +280,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 				}
 				where := e.Mock + " at " + s.Leaf.Path
 				for _, f := range [][2]string{{s.Leaf.Value, s.Live}, {dc.rawExtra(s.Leaf.Value), dc.rawExtra(s.Live)}} {
-					for _, p := range driftedInstants(f[0], f[1]) {
+					for _, p := range dc.driftedInstantsOf(f[0], f[1]) {
 						op.given = append(op.given, [2]offsetPlace{{m: p.rec, mock: e.Mock, where: where, recorded: true}, {m: p.live, mock: e.Mock, where: where, given: true}})
 					}
 				}
@@ -279,7 +289,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		}
 		if e.Payload.isRead() {
 			x := &e.Payload
-			srcs = append(srcs, offsetSource{key: offsetKeyOf(x.mock, x.at), x: x, given: true, first: x.first, last: x.last})
+			srcs = append(srcs, offsetSource{key: keys.of(x.mock, x.at), x: x, given: true, first: x.first, last: x.last})
 			if mv := e.servedMoves(); len(mv) > 0 {
 				moves = append(moves, moved{mock: e.Mock, call: x.call, at: e.At, first: x.first, last: x.last, moves: mv})
 			}
@@ -292,7 +302,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		}
 	}
 	for _, x := range raw {
-		if x.isRead() && x.elsewhere {
+		if others && x.isRead() && x.elsewhere {
 			op.words = append(op.words, dc.wordsOf(x))
 			op.answers = append(op.answers, dc.answerMoments(x)...)
 		}
@@ -300,7 +310,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 	payloads := len(srcs)
 	for i := range set {
 		if g := &set[i]; g.read {
-			srcs = append(srcs, offsetSource{key: offsetKeyOf(g.mock, g.at), g: g, given: true, first: g.first, last: g.last})
+			srcs = append(srcs, offsetSource{key: keys.of(g.mock, g.at), g: g, given: true, first: g.first, last: g.last})
 		}
 	}
 	// The set's index, shared by its handlers; past its budget, one of the
@@ -1031,6 +1041,9 @@ func (dc *DriftCache) readAnswerWords(x Raw, keep bool) []map[string]bool {
 	xb := x.payload()
 	text := blankStamps(xb.text, xb.stamps)
 	keys := clockKeys(x)
+	if len(keys) == 0 {
+		return dc.fieldTokens(text, xb.fields)
+	}
 	var forms []string
 	for _, f := range xb.fields {
 		if f.end > len(text) || !answerPath(f.path) {
@@ -1044,6 +1057,34 @@ func (dc *DriftCache) readAnswerWords(x Raw, keep bool) []map[string]bool {
 		}
 	}
 	return tokensOfForms(forms)
+}
+
+// fieldTokens are the words of the answer fields of text (fields, as
+// readAnswerWords reads them where no clock read is blanked), in every
+// declared form, by reading: each field's words are its own text's
+// (rawTokens), read once for the test where dc keeps them, and joined here.
+// A word stands within one form of one field, so the join is what one list
+// of every field's forms holds. A recording handed again to a later call
+// (an earlier serve of no set, read in each call), or a view of it that
+// holds the same values (Raw.live), reads no field text it read before:
+// tokenizing an outside recording's answer again in each call was most of a
+// slow call's time.
+func (dc *DriftCache) fieldTokens(text string, fields []rawField) []map[string]bool {
+	out := make([]map[string]bool, len(readings))
+	for i := range out {
+		out[i] = map[string]bool{}
+	}
+	for _, f := range fields {
+		if f.end > len(text) || !answerPath(f.path) {
+			continue
+		}
+		for i, words := range dc.rawTokens(text[f.start:f.end]) {
+			for w := range words {
+				out[i][w] = true
+			}
+		}
+	}
+	return out
 }
 
 // holdsAnswer reports whether a recording whose fields are fields holds an

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -110,7 +111,7 @@ func GenerateCoverageReport(ctx context.Context) error {
 	reportDir := "target/site/keployE2E"
 
 	// Ensure that the report dir exists
-	if err := os.MkdirAll(reportDir, 0777); err != nil {
+	if err := utils.MkdirAllForUser(nil, reportDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create report directory: %w", err)
 	}
 

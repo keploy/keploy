@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,27 @@ type GrpcSpec struct {
 type GrpcHeaders struct {
 	PseudoHeaders   map[string]string `json:"pseudo_headers" yaml:"pseudo_headers"`
 	OrdinaryHeaders map[string]string `json:"ordinary_headers" yaml:"ordinary_headers"`
+}
+
+// Ordinary is the value of the ordinary header named name, whatever the case
+// of the name it was read under, or "" with none. The headers hold names as
+// they came off the wire, and HTTP/2 carries them lowercase: grpc-go
+// lowercases every metadata key, and an uppercase name is malformed. So a
+// lookup by a name as it is usually spelled, such as "Keploy-Test-Name",
+// never matches a real call's header. A name of exactly that spelling wins;
+// of names that differ from it only in case (no compliant peer sends two),
+// the one that sorts first.
+func (h GrpcHeaders) Ordinary(name string) string {
+	if v, ok := h.OrdinaryHeaders[name]; ok {
+		return v
+	}
+	var key, value string
+	for k, v := range h.OrdinaryHeaders {
+		if strings.EqualFold(k, name) && (key == "" || k < key) {
+			key, value = k, v
+		}
+	}
+	return value
 }
 
 type GrpcLengthPrefixedMessage struct {

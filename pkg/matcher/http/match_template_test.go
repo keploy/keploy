@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/internal/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -76,6 +77,25 @@ func hexMD5(body string) string {
 func b64SHA256(body string) string {
 	sum := sha256.Sum256([]byte(body))
 	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// The line that says a digest header was asserted over the answer's body
+// names the header and the verdict, never the digest: it is the answer's own
+// header value (an ETag a client sends back), computed from the answer's
+// body, and the line reaches the log of a program that embeds the replay.
+func TestMatch_ADigestAssertedOverTheAnswersBodyIsLoggedByItsHeaderOnly(t *testing.T) {
+	want := expressETag(liveBody)
+	tc, actual := etagCase("Etag", expressETag(recordedBody), want)
+	logger, logs := logleak.Observe()
+	pass, _ := Match(tc, actual, nil, false, false, logger, false, WithAutoHeaderNoise(false), WithRecordedBody(recordedBody))
+	require.True(t, pass, "precondition: the answer's digest passes")
+	said := logs.FilterMessage("a digest header of a templated body is asserted over the answer's body").All()
+	require.Len(t, said, 1, "precondition: the digest's line was logged (%v)", logs.All())
+	assert.Equal(t, "Etag", said[0].ContextMap()["header"])
+	// The digest's SHA-1 part (Express's W/"<length>-<SHA-1>"), and the
+	// recorded one, are the secrets here.
+	logleak.Check(t, logs, want[len(`W/"23-`):len(want)-1], "Match")
+	logleak.Check(t, logs, expressETag(recordedBody)[len(`W/"23-`):len(want)-1], "Match")
 }
 
 // THE DIGEST OF A RENDERED BODY. A templated expected body resolves to this

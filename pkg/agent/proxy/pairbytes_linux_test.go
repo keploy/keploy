@@ -108,6 +108,11 @@ func heldPairBound(t *testing.T, p *Proxy, appSeq uint64, network, addr, listenD
 	p.paired.add(proxySide, appSeq, 0)
 	tracked := p.inflight.track(proxySide)
 	tracked.beforeClose = func() { p.pairClosing(context.Background(), proxySide, tracked) }
+	// Its use counted as the proxy's accept counts it, and used once by
+	// the test open now: a close that cannot tell what was on its way is
+	// that test's (pairUntold).
+	tracked.pairUse = p.paired.useOf(proxySide)
+	tracked.pairUse.Add(1)
 	t.Cleanup(func() { p.inflight.forget(tracked) })
 	return app, proxySide, tracked
 }

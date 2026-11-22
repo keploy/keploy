@@ -89,6 +89,12 @@ func TestDefaultConfigParses(t *testing.T) {
 		t.Error("test.disableAppReadyProbe defaults to true; it must default to false or every " +
 			"app silently loses the readiness gate that stops the first test firing early")
 	}
+
+	// Opt-in static asset filtering must default to false so existing recordings
+	// and binary/media endpoints are never silently dropped.
+	if cfg.Record.IgnoreStaticAssets {
+		t.Error("record.ignoreStaticAssets defaults to true; it must default to false")
+	}
 }
 
 // TestDefaultConfigUpstreamTLSBlockPosition pins WHERE the upstreamTls block
@@ -109,6 +115,9 @@ func TestDefaultConfigUpstreamTLSBlockPosition(t *testing.T) {
 	record, ok := doc["record"].(map[string]any)
 	if !ok {
 		t.Fatalf("default config has no `record:` mapping (got %T)", doc["record"])
+	}
+	if ignoreStatic, ok := record["ignoreStaticAssets"].(bool); !ok || ignoreStatic {
+		t.Errorf("record.ignoreStaticAssets = %v (%T), want false", record["ignoreStaticAssets"], record["ignoreStaticAssets"])
 	}
 	upstream, ok := record["upstreamTls"].(map[string]any)
 	if !ok {

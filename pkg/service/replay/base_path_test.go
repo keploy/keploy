@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -473,6 +475,12 @@ func newBasePathRunOf(t *testing.T, basePath string, template map[string]interfa
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Path = t.TempDir()
+	// --must-pass backs a test set up before it deletes from it, and deletes
+	// nothing when the backup fails, so the set has a directory on disk as a
+	// recorded set does.
+	if err := os.MkdirAll(filepath.Join(cfg.Path, "test-set-0"), 0755); err != nil {
+		t.Fatalf("create the test set's directory: %v", err)
+	}
 	cfg.Test.BasePath = basePath
 	// What config/default.go sets, which a bare config.Config does not.
 	cfg.Test.Host = "localhost"
@@ -1450,8 +1458,11 @@ func TestBasePathSaysOnceThatTestHostIsNotUsed(t *testing.T) {
 			if len(said) != tc.want {
 				t.Fatalf("the run said %d time(s) that test.host is not used, want %d: %+v", len(said), tc.want, said)
 			}
-			if tc.want == 1 && (said[0].ContextMap()["host"] != tc.host || said[0].ContextMap()["next_step"] == nil) {
-				t.Fatalf("it said %v; want the host %q and a next step", said[0].ContextMap(), tc.host)
+			// test.host by its labels' shape beside its tag (the run's
+			// context carries no session: the process's key), never whole.
+			if want := models.HostLogName(context.Background(), tc.host); tc.want == 1 &&
+				(said[0].ContextMap()["host"] != want || strings.Contains(want, tc.host) || said[0].ContextMap()["next_step"] == nil) {
+				t.Fatalf("it said %v; want the host as %q (%q by its shape and tag) and a next step", said[0].ContextMap(), want, tc.host)
 			}
 		})
 	}

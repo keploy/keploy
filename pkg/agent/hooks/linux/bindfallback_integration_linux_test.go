@@ -196,7 +196,7 @@ func boundInCgroup(t *testing.T, cg, arg string) int {
 		t.Fatal(err)
 	}
 	defer cgf.Close()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd := exec.Command(appExe(), "-test.run=^$")
 	cmd.Env = append(os.Environ(), bindMoveHelperEnv+"="+arg)
 	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd()), Pdeathsig: syscall.SIGKILL}
 	stdin, _ := cmd.StdinPipe()

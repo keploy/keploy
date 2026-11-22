@@ -26,9 +26,11 @@ type tcpClientSocket struct {
 	ask func(fd uintptr)
 	// getInfo is the SIO_TCP_INFO call (getTCPInfo); a row gives a short or
 	// failing one.
-	getInfo  func(fd uintptr, buf *[wtcpInfoSize]byte) (int, error)
-	log      *zap.Logger
-	fallback *infoFallback
+	getInfo func(fd uintptr, buf *[wtcpInfoSize]byte) (int, error)
+	// recvAgain is readAgain's read (recvOnce); a row gives a scripted one.
+	recvAgain func(fd uintptr) error
+	log       *zap.Logger
+	fallback  *infoFallback
 
 	// buf and got are look's; no two looks run at once (clientSocket).
 	buf [wtcpInfoSize]byte
@@ -65,7 +67,7 @@ type tcpClientSocket struct {
 // newTCPClientSocket is the client socket rc (clientSocketOf); log is where
 // a SIO_TCP_INFO that cannot answer is said, once.
 func newTCPClientSocket(rc syscall.RawConn, log *zap.Logger) *tcpClientSocket {
-	s := &tcpClientSocket{rc: rc, getInfo: getTCPInfo, log: log, fallback: &tcpInfoFallback}
+	s := &tcpClientSocket{rc: rc, getInfo: getTCPInfo, recvAgain: recvOnce, log: log, fallback: &tcpInfoFallback}
 	s.ask = s.lookAt
 	return s
 }
@@ -217,21 +219,42 @@ func (s *tcpClientSocket) pendingError(finRead bool) error {
 // finBeforeReset reports whether the reset the client's forwarder read
 // (readErr) came after the client's FIN: a look found the FIN in before it
 // (no data comes after a FIN, so the relay had all the client sent), or the
-// read's code and the socket's TCP_INFO now say it did (winTCPInfo's
-// resetAfterFIN), for a FIN that came in after the relay's last look. Windows'
-// read returns the reset then, as macOS's does (client_end.go). False when
-// the socket cannot answer: the read is then a reset, as before.
+// read's code, or the code of one more read of the socket (readAgain), and
+// the socket's TCP_INFO now say it did (winTCPInfo's resetAfterFIN), for a
+// FIN that came in after the relay's last look. Windows' read returns the
+// reset then, as macOS's does (client_end.go). False when the socket cannot
+// answer: the read is then a reset, as before.
 func (s *tcpClientSocket) finBeforeReset(readErr error) bool {
 	if s.finIn.Load() {
 		return true
 	}
-	after := false
+	var info winTCPInfo
+	ok := false
 	_ = s.rc.Control(func(fd uintptr) {
-		if info, ok := s.tcpInfo(fd, &s.rbuf); ok {
-			after = info.resetAfterFIN(readErr, s.finSent.Load())
-		}
+		info, ok = s.tcpInfo(fd, &s.rbuf)
 	})
-	return after
+	return ok && info.resetAfterFIN(readErr, s.finSent.Load(), s.readAgain)
+}
+
+// readAgain reads the socket once more, after its read failed, and returns
+// that read's error (recvAgain): nil when it cannot be read. Asked only of a
+// connection that is closed (winTCPInfo.resetAfterFIN), whose read fails at
+// once; the client's forwarder, the socket's only reader, has returned.
+func (s *tcpClientSocket) readAgain() error {
+	var err error
+	_ = s.rc.Read(func(fd uintptr) bool {
+		err = s.recvAgain(fd)
+		return true
+	})
+	return err
+}
+
+// recvOnce reads one byte of the socket fd with no overlapped call, which
+// returns once the read is done, and returns the read's error.
+func recvOnce(fd uintptr) error {
+	var b byte
+	var n, flags uint32
+	return windows.WSARecv(windows.Handle(fd), &windows.WSABuf{Len: 1, Buf: &b}, 1, &n, &flags, nil, nil)
 }
 
 // proxyFINSent is the relay's word that it sent the client its own TCP FIN

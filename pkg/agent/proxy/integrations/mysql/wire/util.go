@@ -50,8 +50,8 @@ type DecodeContext struct {
 	// the packet and rejects the command. That is what dropped every
 	// streamed-BLOB EXECUTE from the recording (#4262).
 	//
-	// The server discards long data when the statement executes or resets,
-	// so the entry is cleared at both points.
+	// The server discards long data when the statement executes, resets, or
+	// closes, so the entry is cleared at all three points.
 	LongDataParams map[uint32]map[uint16]bool
 
 	// StmtParamTypes holds, per prepared statement (by ID), the types of

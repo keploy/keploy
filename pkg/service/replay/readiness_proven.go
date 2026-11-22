@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -165,7 +164,12 @@ type publishedPortReader interface {
 // provenReadiness is one set's wait for its application.
 type provenReadiness struct {
 	logger *zap.Logger
-	cfg    *config.Config
+	// keys is the session the run's lines are logged in (models.LogKeys of
+	// its ctx): the lines that name the replay target's host name it by its
+	// labels' shape beside its tag under it (HostLogName), as every other
+	// line of the run does.
+	keys *models.LogKeySession
+	cfg  *config.Config
 	// agent is asked for the application's listens and progress; nil when
 	// keploy did not start the application (none of its processes are
 	// keploy's to watch).
@@ -396,10 +400,10 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 			p.agent = nil
 			if health == "" {
 				p.dial = true
-				p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", zap.Error(r.err), zap.String("address", net.JoinHostPort(p.host, p.port)))
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", zap.Error(r.err), zap.String("address", p.keys.HostLogName(net.JoinHostPort(p.host, p.port))))
 				startProbe()
 			} else {
-				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", sanitizeHealthURL(health)))
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(health))))
 			}
 		case r.err != nil:
 			// No progress seen (a transient failure, the agent
@@ -578,15 +582,20 @@ func (p provenReadiness) progressOf(st models.AppReadiness, restarts0 uint64) pr
 
 // sayStillWaiting says, every readyStatusEvery wake-ups of a wait, what it
 // waits on and what moved since it last said: an endless wait is told.
+// It names the host the set's first test dials, and the health URL's, by
+// their labels' shape beside their tags in the run's session (HostLogName;
+// an IP address whole), in what it waits for and in its last probe's text (a
+// dial's error names the host): a host name is traffic. The not-judged reason
+// (stalled) names them whole, for the report and the console.
 func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st models.AppReadiness, was, now progressMark, stalls int, restarts uint64) {
-	waits := fmt.Sprintf("a listen on :%d, where the set's first test dials %s", p.listen, net.JoinHostPort(p.host, p.port))
+	waits := fmt.Sprintf("a listen on :%d, where the set's first test dials %s", p.listen, p.keys.HostLogName(net.JoinHostPort(p.host, p.port)))
 	switch {
 	case p.resolve != nil && p.listen == 0 && health == "" && !p.dial:
-		waits = fmt.Sprintf("a listen where the set's first test dials %s (docker has not said which container port that is)", net.JoinHostPort(p.host, p.port))
+		waits = fmt.Sprintf("a listen where the set's first test dials %s (docker has not said which container port that is)", p.keys.HostLogName(net.JoinHostPort(p.host, p.port)))
 	case health != "":
-		waits = sanitizeHealthURL(health) + "'s answer"
+		waits = targetLogNameIn(p.keys, sanitizeHealthURL(health)) + "'s answer"
 	case p.dial:
-		waits = net.JoinHostPort(p.host, p.port) + " taking a connect (keploy's agent cannot tell when the application listens)"
+		waits = p.keys.HostLogName(net.JoinHostPort(p.host, p.port)) + " taking a connect (keploy's agent cannot tell when the application listens)"
 	}
 	fields := []zap.Field{zap.String("waitingFor", waits), zap.Int("wakeUpsWithNoProgress", stalls), zap.Int("notJudgedAt", readyStallLimit),
 		zap.Duration("noProgressFor", time.Duration(stalls)*readyWakeEvery), zap.Duration("notJudgedAfter", time.Duration(readyStallLimit)*readyWakeEvery)}
@@ -603,7 +612,11 @@ func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st m
 		}
 	}
 	if lastProbe != "" {
-		fields = append(fields, zap.String("lastProbe", lastProbe))
+		hosts := []string{p.host}
+		if h, _, ok := healthURLAddress(health); ok {
+			hosts = append(hosts, h)
+		}
+		fields = append(fields, zap.String("lastProbe", p.keys.HostsInText(lastProbe, hosts...)))
 	}
 	if lastErr != "" {
 		fields = append(fields, zap.String("lastReadError", lastErr))
@@ -881,30 +894,8 @@ func firstDialTarget(ctx context.Context, testCfg config.Test, testCases []*mode
 				return sc, h, p, true
 			}
 		case models.GRPC_EXPORT:
-			// Where the test is sent (pkg.SimulateGRPC, as the replay hooks
-			// configure it): test.host for the authority's host, its app
-			// port, test.grpcPort, replaceWith, and the one host port its
-			// app port is published on.
-			authority := tc.GrpcReq.Headers.PseudoHeaders[":authority"]
-			if authority == "" {
-				continue
-			}
-			h := testCfg.Host
-			if h == "" {
-				h = "localhost"
-			}
-			port := testCfg.GRPCPort
-			if ps, ok := testCfg.Protocol["grpc"]; ok && ps.Port > 0 {
-				port = ps.Port
-			}
-			urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
-			target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, h, tc.AppPort, port, false, logger.With(zap.String("testcase", tc.Name)))
-			if err != nil {
-				continue
-			}
-			target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{ConfigPort: port, URLReplacements: urlReplacements, PortMappings: portMappings, PublishedPort: published}, authority, target, tc.AppPort, false)
-			if th, tp, err := net.SplitHostPort(target); err == nil && tp != "" {
-				return "", th, tp, true
+			if h, p, ok := resolveGRPCProbeTarget(ctx, testCfg, tc, testSetID, logger, published); ok {
+				return "", h, p, true
 			}
 		}
 	}
@@ -1167,18 +1158,25 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 		if !started {
 			return true, ""
 		}
-		return waitForAppReady(ctx, r.logger, r.config, resolveTestSetProbeTarget(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), publishedPortsOf(r.logger, r.instrumentation).of(testSetID))), ""
+		return waitForAppReady(ctx, r.logger, r.config, probeTargetForSet(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), publishedPortsOf(r.logger, r.instrumentation).of(testSetID))), ""
 	}
-	p := provenReadiness{logger: r.logger, cfg: r.config, docker: utils.IsDockerCmd(utils.CmdType(r.config.CommandType))}
+	p := provenReadiness{logger: r.logger, cfg: r.config, docker: utils.IsDockerCmd(utils.CmdType(r.config.CommandType)), keys: models.LogKeys(ctx)}
 	scheme, host, port, ok := firstDialTarget(ctx, r.config.Test, testCases, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID))
 	if ok {
 		p.scheme, p.host, p.port = scheme, host, port
 	}
+	// The hosts the set's not-ready reason may name whole (the report's and
+	// the console's), which its log line names by their shape and tag.
+	readyHosts := []string{p.host}
+	if h, _, ok := healthURLAddress(r.config.Test.HealthURL); ok {
+		readyHosts = append(readyHosts, h)
+	}
+	r.readyHosts.Store(testSetID, readyHosts)
 	if u := strings.TrimSpace(r.config.Test.HealthURL); u != "" {
 		if reason, valid := validateHealthURL(u); !valid {
 			r.badHealthURLSaid.Do(func() {
 				r.logger.Error("invalid --health-url; the application's listen is the event instead",
-					zap.String("healthUrl", sanitizeHealthURL(u)), zap.String("reason", reason),
+					zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(u))), zap.String("reason", reason),
 					zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host"))
 			})
 		}
@@ -1203,7 +1201,7 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 			r.logger.Warn("this keploy cannot ask its agent when the application listens; the health URL alone decides")
 			return p.wait(ctx)
 		}
-		r.logger.Warn("this keploy cannot ask its agent when the application listens; the first test's address taking a connect decides", zap.String("address", net.JoinHostPort(p.host, p.port)))
+		r.logger.Warn("this keploy cannot ask its agent when the application listens; the first test's address taking a connect decides", zap.String("address", p.keys.HostLogName(net.JoinHostPort(p.host, p.port))))
 		p.dial = true
 		return p.wait(ctx)
 	}

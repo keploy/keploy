@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -72,7 +73,7 @@ func TestAChargedMissIsWholeOnTheConsoleAndShapedInTheLogAndReceipts(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			var got missesReport
+			var got localfile.MissesReport
 			if err := yaml.Unmarshal(b, &got); err != nil {
 				t.Fatal(err)
 			}
@@ -146,7 +147,7 @@ func TestAChargedMissIsNamedWholeWithItsValuesAndItsOperationOnce(t *testing.T) 
 	if charged.ActualSummary == whole.ActualSummary || charged.NextSteps == whole.NextSteps {
 		t.Fatalf("evidence keeps the value: %q, %q", charged.ActualSummary, charged.NextSteps)
 	}
-	calls := missedCalls([]models.UnmatchedCall{charged})
+	calls := localfile.MissedCalls([]models.UnmatchedCall{charged}, missDefaultNext)
 	if len(calls) != 1 || calls[0].Call != "POST "+path+" {createUser}" || calls[0].NextStep != whole.NextSteps || calls[0].PathTag != "#1f2e3d4c5b6a" {
 		t.Errorf("the console names %+v, want the call whole, its operation once, its next step whole", calls)
 	}
@@ -190,7 +191,7 @@ func TestACallMadeAgainKeepsEachWholeNextStepInTheMissesFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var got missesReport
+			var got localfile.MissesReport
 			if err := yaml.Unmarshal(b, &got); err != nil {
 				t.Fatal(err)
 			}

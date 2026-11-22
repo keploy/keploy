@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
@@ -65,6 +66,13 @@ func (d *stoppedAgentDocker) CopyFromContainer(_ context.Context, name, path str
 // fake has to implement it or ComposeDown nil-derefs the embedded interface.
 // Removal is a no-op here: `removed` is what this fixture uses to say the
 // containers are gone.
+// Events is the daemon's events stream, as keploy's watch of the app's
+// container asks for it: open and quiet, since these rows' app exits only with
+// its stack.
+func (d *stoppedAgentDocker) Events(context.Context, events.ListOptions) (<-chan events.Message, <-chan error) {
+	return make(chan events.Message), make(chan error)
+}
+
 func (d *stoppedAgentDocker) ContainerRemove(context.Context, string, container.RemoveOptions) error {
 	return nil
 }
@@ -105,8 +113,8 @@ func composeReplayApp(d docker.Client) *App {
 // TestRunReadsTheStoppedAgentBeforeTheTeardown pins the ORDER that makes a
 // compose replay provable at all.
 //
-// Compose stops the agent service the moment the app exits, so what the agent
-// served and missed exists only as the file it left in its stopped container
+// Once the stack has ended, what the agent served and missed exists only as
+// the file it left in its stopped container
 // -- and ComposeDown removes that container. Read after the teardown, the file
 // is gone on every run, and every compose replay reports its outcome as
 // unknown: consumed -1, missed -1, never isolated, and --strict failing a

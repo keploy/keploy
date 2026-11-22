@@ -44,6 +44,7 @@ func TestAReadOfARefusedWorkerIsRefusedUntilItsTestEnds(t *testing.T) {
 			"GetSessionScopedMocks":     errOfRead(conn.GetSessionScopedMocks()),
 			"GetStartupMocks":           errOfRead(conn.GetStartupMocks()),
 			"RangePerTestMocksInWindow": conn.(integrations.PerTestRanger).RangePerTestMocksInWindow(func(*models.Mock) bool { return true }),
+			"RangePerTestMocksWithKey":  conn.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(liveCounterIndex, "counter", func(*models.Mock) bool { return true }),
 			"RangeSessionMocksWithKey":  liveKeyedErr(conn),
 		} {
 			if err == nil {
@@ -176,9 +177,9 @@ func TestALiveKeyedSessionWalkWithNoTestOpenShowsWhatItsReadsShow(t *testing.T) 
 	}
 }
 
-// With the marks, a walk of the per-test tier (MySQL's per-test lookup)
-// shows a connection the open test's recordings only, as its other reads do,
-// not every test's.
+// With the marks, a walk of the per-test tier (MySQL's per-test lookup),
+// and a keyed walk of it (Mongo's), shows a connection the open test's
+// recordings only, as its other reads do, not every test's.
 func TestALivePerTestWalkShowsOnlyTheOpenTestsMocks(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
@@ -197,6 +198,16 @@ func TestALivePerTestWalkShowsOnlyTheOpenTestsMocks(t *testing.T) {
 	}
 	if got, want := strings.Join(names, ","), "b1,b2"; got != want {
 		t.Fatalf("during t2 a per-test walk showed %s, want %s", got, want)
+	}
+	names = nil
+	if err := conn.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(liveCounterIndex, "counter", func(mk *models.Mock) bool {
+		names = append(names, mk.Name)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(names, ","), "b1,b2"; got != want {
+		t.Fatalf("during t2 a keyed per-test walk showed %s, want %s", got, want)
 	}
 }
 

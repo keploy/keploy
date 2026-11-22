@@ -199,6 +199,32 @@ func TestShareConcurrentSplitsDefiniteFromCandidates(t *testing.T) {
 	}
 }
 
+// A test's candidates of one request time are served in the order mockdb
+// wrote them: by the number it gave each (mock-9 before mock-10, which text
+// order reverses), then a name with no number by name. An HTTP/1.1 pipeline's
+// or one write's reads share one request time.
+func TestShareConcurrentServesCandidatesOfOneTimeInTheOrderWritten(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	registerShareKeys(t)
+	early := shMock("mock-11", 100, "INSERT", "bind.$1=e", "ok")
+	m10 := shMock("mock-10", 200, "INSERT", "bind.$1=x10", "ok")
+	m9 := shMock("mock-9", 200, "INSERT", "bind.$1=x9", "ok")
+	m2 := shMock("mock-2", 200, "INSERT", "bind.$1=x2", "ok")
+	named := shMock("aaa-named", 200, "INSERT", "bind.$1=n", "ok")
+	groups := []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}
+	mappings := map[string][]models.MockEntry{
+		"a": {shEntry(named, "g1"), shEntry(m10, "g1"), shEntry(early, "g1"), shEntry(m9, "g1"), shEntry(m2, "g1")},
+		"b": {},
+	}
+	s := newShareSet(t, groups, mappings, nil, nil, named, m10, early, m9, m2)
+	want := []string{"mock-11", "mock-2", "mock-9", "mock-10", "aaa-named"}
+	for _, test := range []string{"a", "b"} {
+		if got := s.p.concurrentServing(test); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s's candidates %v; want %v: by request time, then by mockdb's number, then by name", test, got, want)
+		}
+	}
+}
+
 // Each candidate a test consumed is pinned to it; nobody is charged.
 func TestSettleSharesPinsEachCallToTheTestThatMadeIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")

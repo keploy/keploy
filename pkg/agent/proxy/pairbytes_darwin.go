@@ -10,11 +10,14 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 )
 
 // The bytes wait on darwin. Linux reads, through sock_diag, how much the
@@ -47,6 +50,9 @@ func (p *Proxy) WaitPairedBytes(ctx context.Context, n uint64) error {
 	if err := xnuTableReadable(); err != nil {
 		return err
 	}
+	// What the proxy had moved on each connection as this end began is
+	// this wait's to answer for (pairUntold).
+	p.paired.markEnd(n, agent.EndWorkerOf(ctx))
 	pending, err := p.pairTargets(n)
 	if err != nil {
 		return err
@@ -536,7 +542,8 @@ const heldUncounted = "macOS's TCP table does not list this socket to keploy's a
 // lists with the first sequence number the proxy's side began from (gone:
 // reset, its reset the last it sent), as Linux makes none for a socket it
 // cannot read: the close then finds nothing on its way. A table that cannot
-// be read tells nothing: every wait is unknown from then on (closeUnknown).
+// be read tells nothing: the tests the connection could have served are left
+// without a verdict (closeUnknown).
 //
 // An application socket not listed is gone only once one of the
 // application's has been (paired.visible). Before, it may be hidden from the
@@ -548,9 +555,11 @@ const heldUncounted = "macOS's TCP table does not list this socket to keploy's a
 // acknowledged (FIN_WAIT_1, CLOSING, LAST_ACK), and no holder's read finds
 // it. The table shows a FIN taken in the proxy's side's entry; a reset it
 // shows by dropping that entry, which the side's own socket then tells
-// (noteUnlistedAtClose). Otherwise what was on its way cannot be told, and
-// every wait is unknown from then on.
-func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
+// (noteUnlistedAtClose). The side's own read, as the close begins, may show
+// one the table's read did not (noteUnheldAtClose). Before either, what was
+// on its way cannot be told: the tests the connection could have served are
+// left without a verdict (closeUnknown).
+func (p *Proxy) noteWroteAtClose(ctx context.Context, pc *pairedConn) {
 	if xnuTableReadable() != nil {
 		return
 	}
@@ -567,7 +576,7 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 		case listed && p.noteHeldAtClose(pc, pr):
 		case listed && peerEnded(pr.state):
 		case listed:
-			p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset: bytes it wrote may still be on their way, as a socket its holder closed lives on until they are acknowledged (%s)", models.ErrProxyConnsUnsupported, pc.app, xnuHidden))
+			p.noteUnheldAtClose(ctx, pc)
 		default:
 			p.noteUnlistedAtClose(pc)
 		}
@@ -578,6 +587,89 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 		return
 	}
 	pc.wroteAtClose.Store(&appWrote{want: pc.count(app.writeSeq() - app.iss - 1), fin: app.finPending(), base: targetBase{isn: app.iss}})
+}
+
+// noteUnheldAtClose is noteWroteAtClose for an application socket the table
+// does not list and no process the agent may read holds, the proxy's side not
+// past the application's FIN or reset as the table was read. Its holder closed
+// it (an HTTP client that read the proxy's answer with Connection: close, as
+// the answer to a call no mock answers is, and closed at once), or a process
+// of another user holds it. A socket its holder closed sends its FIN at once,
+// after every byte it wrote, but loopback's input thread hands that FIN to the
+// proxy's side some time later, the longer the busier the host: the close
+// waits for it (unheldSideAtClose), and a side that takes the FIN or a reset
+// has nothing on its way, and no record is made, as for one the table shows
+// past it. Otherwise what the application wrote cannot be counted, and bytes
+// the open test wrote may be on their way before that FIN, unseen: the close
+// is unknown, and the tests the connection could have served, the open test
+// of its worker among them whether or not the proxy moved bytes on it, are
+// left without a verdict (closeUnknown: the side has not taken the FIN).
+// keploy's own stop (ctx) ends the wait and charges nothing.
+func (p *Proxy) noteUnheldAtClose(ctx context.Context, pc *pairedConn) {
+	ps, why := p.unheldSideAtClose(ctx, pc)
+	switch {
+	case ctx.Err() != nil:
+	case ps.err != nil:
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side of it cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
+	case peerEnded(ps.state):
+	default:
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset (it is in %s): bytes it wrote may still be on their way, as a socket its holder closed lives on until they are acknowledged (%s); %s", models.ErrProxyConnsUnsupported, pc.app, tcpStateName(ps.state), xnuHidden, why))
+	}
+}
+
+// unheldSideAtClose reads the proxy's side of pc for noteUnheldAtClose until
+// it shows the application's FIN or reset taken, or cannot be read, or the
+// close can wait no longer, and says why it stopped short of the FIN (why).
+// It waits only while the application's sockets have been read from their
+// holders (paired.held): no process keploy's agent may read holding this one
+// says its holder closed it, so its FIN is on its way. Before that, a process
+// the agent may not read (another user's) may hold it open, as a pool's idle
+// socket, and send no FIN: the close does not wait. Nor does it while the
+// side holds bytes unread: the close tosses them, a loss it charges whatever
+// comes after (pairClosing), and a receive window they filled may keep that
+// FIN from ever coming. It looks again on looks of its own, the first a
+// stall.Tick on, then twice as far apart, up to
+// stall.CheckEvery(orphanFINBudget), as a bytes wait looks at an orphan, and
+// stops once keploy could run for orphanFINBudget (stall.Meter): a starved
+// agent accrues that budget only as fast as it gets to run, and a socket
+// another process keeps open ends the wait at the budget, never holding the
+// close for good.
+func (p *Proxy) unheldSideAtClose(ctx context.Context, pc *pairedConn) (proxySide, string) {
+	ps := readHeldProxySide(pc.conn)
+	if ps.err != nil || peerEnded(ps.state) {
+		return ps, ""
+	}
+	if !p.paired.held.Load() {
+		return ps, "no application socket has been read from its holder yet, so a process keploy's agent may not read may hold this one open, and the close does not wait for its FIN"
+	}
+	meter := stall.NewMeter(p.paired.clk, orphanFINBudget)
+	defer meter.Stop()
+	for every := stall.Tick; ; every = min(2*every, stall.CheckEvery(orphanFINBudget)) {
+		// A socket whose count cannot be read fails the side's read too,
+		// which ends the wait.
+		if n, _ := readUnread(pc.conn); n > 0 {
+			return ps, "the proxy's side holds bytes unread, which the close tosses, so it does not wait for the FIN behind them"
+		}
+		if meter.Expired() {
+			return ps, fmt.Sprintf("keploy waited for its FIN while it could run for %v", orphanFINBudget)
+		}
+		var look <-chan time.Time
+		var stop func() bool
+		if p.paired.clk == nil {
+			look, stop = stall.ProcessClock().After(every)
+		} else {
+			look, stop = p.paired.clk.After(every)
+		}
+		select {
+		case <-look:
+		case <-ctx.Done():
+			stop()
+			return ps, ""
+		}
+		if ps = readHeldProxySide(pc.conn); ps.err != nil || peerEnded(ps.state) {
+			return ps, ""
+		}
+	}
 }
 
 // noteUnlistedAtClose is noteWroteAtClose for a connection the table lists
@@ -612,10 +704,10 @@ func (p *Proxy) noteUnlistedAtClose(pc *pairedConn) {
 // taken it: the record (exact, as the table's). A reset socket's buffer is
 // emptied unsent: it is gone, and no record is made. Bytes in that buffer the
 // side had not acknowledged, its FIN not taken, may be data on its way or
-// bytes received: which cannot be told (heldUncounted), and every wait is
-// unknown from then on, said in one log line naming the connection and the
-// bytes (closeUnknown). So is every wait when the processes or the proxy's
-// side cannot be read.
+// bytes received: which cannot be told (heldUncounted), and the tests the
+// connection could have served are left without a verdict, said in one
+// log line naming the connection and the bytes (closeUnknown). So it is when
+// the processes or the proxy's side cannot be read.
 //
 // With the holder not yet known (pairedConn.holder) the read is of every
 // process the agent may read, as a wait's is (heldSockets): on macOS 27 a

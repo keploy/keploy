@@ -1078,3 +1078,189 @@ func TestBodyNoiseFromJSONDiff_KnownGlobalKeysDifferingOnlyInCase(t *testing.T) 
 		})
 	}
 }
+
+// idMapDoc renders {"options":{<id>:{"traceId":..,"rate":..}}, "traceId": top}
+// for n ids, the traceId under id i being trace(i).
+func idMapDoc(n int, trace func(i int) string, top string) string {
+	var b strings.Builder
+	b.WriteString(`{"options":{`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `"%s":{"traceId":"%s","rate":%d}`, testUUID(i), trace(i), i)
+	}
+	b.WriteString(`},"traceId":"` + top + `"}`)
+	return b.String()
+}
+
+// A field that drifts under every id key of a map is one entry, not one per id:
+// forty ids whose traceId moves give one path, which the matcher then honours
+// and the next derivation finds nothing left in.
+func TestBodyNoiseFromJSONDiff_IDKeyedMapCollapses(t *testing.T) {
+	exp := idMapDoc(40, func(i int) string { return fmt.Sprintf("rec-%d", i) }, "top")
+	act := idMapDoc(40, func(i int) string { return fmt.Sprintf("rep-%d", i) }, "top")
+	paths, skipped := BodyNoiseFromJSONDiff(exp, act, nil, false)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if want := []string{"options.{id}.traceId"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	if !bodyMatches(t, exp, act, noiseFor(paths)) {
+		t.Fatalf("the derived entry does not make the matcher accept the response")
+	}
+	again, skippedAgain := BodyNoiseFromJSONDiff(exp, act, noiseFor(paths), false)
+	if len(again) != 0 || len(skippedAgain) != 0 {
+		t.Fatalf("second round: paths=%v skipped=%v, want nothing", again, skippedAgain)
+	}
+	// The entry did not take the rest of each option with it.
+	moved := strings.Replace(act, `"rate":3`, `"rate":33`, 1)
+	if bodyMatches(t, exp, moved, noiseFor(paths)) {
+		t.Fatalf("a sibling field under an id key is no longer asserted")
+	}
+}
+
+// When the field drifted under SOME ids only, the id-key spelling would also
+// silence it under the ids where it did not, so the derivation keeps today's
+// per-id entries for exactly the ids that drifted.
+func TestBodyNoiseFromJSONDiff_IDKeyedMapPartialDriftStaysPerID(t *testing.T) {
+	exp := idMapDoc(3, func(i int) string { return fmt.Sprintf("rec-%d", i) }, "top")
+	act := idMapDoc(3, func(i int) string {
+		if i == 2 {
+			return "rec-2"
+		}
+		return fmt.Sprintf("rep-%d", i)
+	}, "top")
+	paths, skipped := BodyNoiseFromJSONDiff(exp, act, nil, false)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	want := []string{"options." + testUUID(0) + ".traceId", "options." + testUUID(1) + ".traceId"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	if !bodyMatches(t, exp, act, noiseFor(paths)) {
+		t.Fatalf("the per-id entries do not make the matcher accept the response")
+	}
+	third := strings.Replace(exp, `"rec-2"`, `"later"`, 1)
+	if bodyMatches(t, exp, third, noiseFor(paths)) {
+		t.Fatalf("the id whose traceId never drifted is no longer asserted")
+	}
+}
+
+// Ids whose field the case's noise already ignores are not collateral, so a
+// drift on the remaining ids completes the set and is written as one entry.
+func TestBodyNoiseFromJSONDiff_IDKeyedMapCountsAlreadySilencedIDs(t *testing.T) {
+	exp := idMapDoc(3, func(i int) string { return fmt.Sprintf("rec-%d", i) }, "top")
+	act := idMapDoc(3, func(i int) string { return fmt.Sprintf("rep-%d", i) }, "top")
+	known := noiseFor([]string{"options." + testUUID(0) + ".traceId"})
+	paths, skipped := BodyNoiseFromJSONDiff(exp, act, known, false)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if want := []string{"options.{id}.traceId"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+}
+
+// The id-key spelling names id keys only: a same-named field under an ordinary
+// key of the map is not silenced with them, and stays asserted.
+func TestBodyNoiseFromJSONDiff_IDKeyEntrySparesOrdinaryKeys(t *testing.T) {
+	u, v := testUUID(1), testUUID(2)
+	doc := func(t1, t2, s string) string {
+		return `{"options":{"` + u + `":{"traceId":"` + t1 + `"},"` + v + `":{"traceId":"` + t2 + `"},"summary":{"traceId":"` + s + `"}}}`
+	}
+	exp, act := doc("a", "b", "s"), doc("x", "y", "s")
+	paths, skipped := BodyNoiseFromJSONDiff(exp, act, nil, false)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if want := []string{"options.{id}.traceId"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	if bodyMatches(t, exp, doc("x", "y", "changed"), noiseFor(paths)) {
+		t.Fatalf("traceId under the ordinary key summary is no longer asserted")
+	}
+}
+
+// Every id key on the path collapses, at any depth, including a map at the
+// root. A dot-free candidate is a global field name and is left as it is.
+func TestBodyNoiseFromJSONDiff_IDKeysAtEveryDepth(t *testing.T) {
+	u, v := testUUID(1), testUUID(2)
+	exp := `{"` + u + `":{"rooms":{"` + v + `":{"t":1}}},"` + v + `":{"rooms":{"` + u + `":{"t":2}}}}`
+	act := `{"` + u + `":{"rooms":{"` + v + `":{"t":3}}},"` + v + `":{"rooms":{"` + u + `":{"t":4}}}}`
+	paths, skipped := BodyNoiseFromJSONDiff(exp, act, nil, false)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if want := []string{"{id}.rooms.{id}.t"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	if !bodyMatches(t, exp, act, noiseFor(paths)) {
+		t.Fatalf("the derived entry does not make the matcher accept the response")
+	}
+
+	paths, skipped = BodyNoiseFromJSONDiff(`{"`+u+`":"a"}`, `{"`+u+`":"b"}`, nil, false)
+	if len(skipped) != 0 || !reflect.DeepEqual(paths, []string{u}) {
+		t.Fatalf("a dot-free candidate: paths=%v skipped=%v, want [%s]", paths, skipped, u)
+	}
+}
+
+// An entry naming id keys is alive wherever an id-keyed map carries its field,
+// and dead where none does.
+func TestUnmatchableBodyNoise_IDKeyEntries(t *testing.T) {
+	body := idMapDoc(2, func(i int) string { return "t" }, "top")
+	noise := map[string][]string{
+		"options.{id}.traceId": {},
+		"options.{id}.missing": {},
+		"traceId.{id}":         {},
+	}
+	got := UnmatchableBodyNoise(noise, body, body)
+	if want := []string{"options.{id}.missing", "traceId.{id}"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("dead = %v, want %v", got, want)
+	}
+}
+
+// A member an existing entry already addresses keeps the group per id: that
+// entry has a pattern its value did not match, a per-id one outranks the
+// id-key spelling in the matcher, and the per-id candidate is what lets the
+// caller name the pattern that is too narrow. The rest of the ids are per id
+// too, and the matcher is still the last word: nothing here is resolved.
+func TestBodyNoiseFromJSONDiff_IDKeyedMapAddressedMemberStaysPerID(t *testing.T) {
+	exp := idMapDoc(3, func(i int) string { return fmt.Sprintf("rec-%d", i) }, "top")
+	act := idMapDoc(3, func(i int) string { return fmt.Sprintf("rep-%d", i) }, "top")
+	for name, known := range map[string]map[string][]string{
+		"per-id guard": {"options." + testUUID(0) + ".traceid": {"^rec-"}},
+		"id-key guard": {"options.{id}.traceid": {"^rec-"}},
+		"global guard": {"traceid": {"^rec-"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			paths, _ := BodyNoiseFromJSONDiff(exp, act, known, false)
+			for _, p := range paths {
+				if strings.Contains(p, NoiseIDKey) {
+					t.Fatalf("paths = %v: collapsed a group an existing entry addresses", paths)
+				}
+			}
+		})
+	}
+}
+
+// A group that cannot be written once falls back per id, and each per-id
+// candidate is still checked on its own: "options.<u0>.id" also silences
+// "options.<u0>.identifier", which did not drift, so it is refused OVER_BROAD
+// and nothing is emitted.
+func TestBodyNoiseFromJSONDiff_IDKeyedMapPerIDFallbackIsStillChecked(t *testing.T) {
+	u0, u1 := testUUID(1), testUUID(2)
+	doc := func(id0 string) string {
+		return `{"options":{"` + u0 + `":{"id":"` + id0 + `","identifier":"k"},"` + u1 + `":{"id":"2","identifier":"k"}}}`
+	}
+	exp, act := doc("1"), doc("9")
+	paths, skipped := BodyNoiseFromJSONDiff(exp, act, nil, false)
+	if len(paths) != 0 {
+		t.Fatalf("paths = %v: an entry that also silences options.<u0>.identifier was emitted", paths)
+	}
+	if len(skipped) != 1 || skipped[0].Path != "options."+u0+".id" || skipped[0].Reason != NoiseSkipOverBroad {
+		t.Fatalf("skipped = %+v, want options.<u0>.id refused %s", skipped, NoiseSkipOverBroad)
+	}
+}

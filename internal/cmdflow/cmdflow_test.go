@@ -51,6 +51,7 @@ var keploy = Rules{
 		"pkg/client/app.composeProjectFlag":          "the project compose's own options name (-p, before its subcommand)",
 		"pkg/client/app.composeProjectEnvAssignment": "the project a compose command names (COMPOSE_PROJECT_NAME=)",
 		"pkg/client/app.composeUpSemantics":          "the services a compose command names (--exit-code-from)",
+		"pkg/client/app.composeUserAbort":            "the abort flags and services a compose up names (--abort-on-container-exit, --exit-code-from, --attach)",
 		"utils.DetectLanguage#1":                     "the program's path",
 		"pkg/platform/coverage/report.FromCommand":   "the coverage report a test command names (-coverprofile, --cov-report)",
 		// keploy's own command line (os.Args, through a package-level
