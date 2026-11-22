@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1101,6 +1102,18 @@ func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
 // stops distinguishing the two.
 const urlNoisePlaceholder = "{{keploy.urlnoise}}"
 
+// urlNoisePlaceholderOf is the placeholder for the i-th compiled url-noise
+// pattern: distinct per pattern so two whole-path entries (such as
+// "^/users/[0-9]+$" and "^/orders/[^/]+$") never collapse their matched paths
+// onto the same masked string. Index 0 keeps urlNoisePlaceholder so a
+// single-pattern configuration keeps its placeholder bytes unchanged.
+func urlNoisePlaceholderOf(i int) string {
+	if i == 0 {
+		return urlNoisePlaceholder
+	}
+	return "{{keploy.urlnoise." + strconv.Itoa(i) + "}}"
+}
+
 // urlNoiseCache memoizes compiled url-noise patterns. MatchURLPath and
 // QueryParamsMatch both run once per CANDIDATE MOCK per proxied request, so
 // compiling the configured patterns inline cost O(mocks x patterns)
@@ -1138,10 +1151,12 @@ func compileURLNoise(logger *zap.Logger, urlNoise []string) []*regexp.Regexp {
 	return res
 }
 
-// maskURLNoise replaces every url-noise match in s with the placeholder.
+// maskURLNoise replaces every url-noise match in s with its pattern's own
+// placeholder, so two strings compare equal only where the same patterns
+// masked the same places.
 func maskURLNoise(s string, noiseRes []*regexp.Regexp) string {
-	for _, re := range noiseRes {
-		s = re.ReplaceAllString(s, urlNoisePlaceholder)
+	for i, re := range noiseRes {
+		s = re.ReplaceAllLiteralString(s, urlNoisePlaceholderOf(i))
 	}
 	return s
 }

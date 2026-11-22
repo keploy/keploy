@@ -1207,6 +1207,7 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 			for k := range un {
 				urlNoise = append(urlNoise, k)
 			}
+			slices.Sort(urlNoise)
 		}
 	}
 	return RequestNoise{Header: headerNoise, Body: bodyNoise, URL: urlNoise}
