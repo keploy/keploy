@@ -18,6 +18,8 @@ import (
 	"go.uber.org/zap"
 )
 
+//TODO: rename this file.
+
 // redirectKey is redirect_proxy_map's key (struct redirect_key_t): the
 // application's end of a connection, its address (IPv4 as v4-mapped, word by
 // word in network order) and port.

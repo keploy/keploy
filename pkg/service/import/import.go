@@ -532,9 +532,16 @@ func processFormdataBody(body []map[string]interface{}) []models.FormData {
 		}
 		if fieldType, _ := formData["type"].(string); fieldType == "file" {
 			var paths []string
-			for _, p := range stringValues(formData["src"]) {
-				if p != "" {
-					paths = append(paths, p)
+			switch src := formData["src"].(type) {
+			case string:
+				if src != "" {
+					paths = []string{src}
+				}
+			case []interface{}:
+				for _, elem := range src {
+					if p, ok := elem.(string); ok && p != "" {
+						paths = append(paths, p)
+					}
 				}
 			}
 			// Note: Postman exports typically record host absolute paths in src;
@@ -546,42 +553,14 @@ func processFormdataBody(body []map[string]interface{}) []models.FormData {
 			})
 			continue
 		}
-		var values []string
-		if vals := stringValues(formData["values"]); len(vals) > 0 {
-			values = vals
-		} else if val, ok := formData["value"].(string); ok {
-			values = []string{val}
-		}
-		if len(values) > 0 {
+		if value, okVal := formData["value"].(string); okVal {
 			form = append(form, models.FormData{
 				Key:    key,
-				Values: values,
+				Values: []string{value},
 			})
 		}
 	}
 	return form
-}
-
-func stringValues(v interface{}) []string {
-	switch v := v.(type) {
-	case string:
-		return []string{v}
-	case []string:
-		if len(v) == 0 {
-			return nil
-		}
-		return append([]string(nil), v...)
-	case []interface{}:
-		values := make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				values = append(values, s)
-			}
-		}
-		return values
-	default:
-		return nil
-	}
 }
 
 func constructResponse(res PostmanResponse) models.HTTPResp {
