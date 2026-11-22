@@ -921,29 +921,51 @@ func decodedRequestValue(v any) (decoded any, plain bool) {
 		}
 		return out, true
 	case float64:
-		return x, !math.IsNaN(x) && !math.IsInf(x, 0)
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return nil, false
+		}
+		return jsonNumberFromFloat64(x), true
 	case int:
-		return float64(x), true
+		return json.Number(strconv.FormatInt(int64(x), 10)), true
 	case int8:
-		return float64(x), true
+		return json.Number(strconv.FormatInt(int64(x), 10)), true
 	case int16:
-		return float64(x), true
+		return json.Number(strconv.FormatInt(int64(x), 10)), true
 	case int32:
-		return float64(x), true
+		return json.Number(strconv.FormatInt(int64(x), 10)), true
 	case int64:
-		return float64(x), true
+		return json.Number(strconv.FormatInt(x, 10)), true
 	case uint:
-		return float64(x), true
+		return json.Number(strconv.FormatUint(uint64(x), 10)), true
 	case uint8:
-		return float64(x), true
+		return json.Number(strconv.FormatUint(uint64(x), 10)), true
 	case uint16:
-		return float64(x), true
+		return json.Number(strconv.FormatUint(uint64(x), 10)), true
 	case uint32:
-		return float64(x), true
+		return json.Number(strconv.FormatUint(uint64(x), 10)), true
 	case uint64:
-		return float64(x), true
+		return json.Number(strconv.FormatUint(x, 10)), true
 	}
 	return nil, false
+}
+
+// jsonNumberFromFloat64 formats a finite float64 into the exact json.Number
+// text encoding/json.Marshal produces (matching matcher.UnmarshallJSON).
+func jsonNumberFromFloat64(f float64) json.Number {
+	abs := math.Abs(f)
+	fmtByte := byte('f')
+	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		fmtByte = 'e'
+	}
+	b := strconv.AppendFloat(make([]byte, 0, 24), f, fmtByte, -1, 64)
+	if fmtByte == 'e' {
+		n := len(b)
+		if n >= 4 && b[n-4] == 'e' && b[n-3] == '-' && b[n-2] == '0' {
+			b[n-2] = b[n-1]
+			b = b[:n-1]
+		}
+	}
+	return json.Number(b)
 }
 
 // decodedParameter is a parameter as decodedRequestValue decodes it: the
@@ -954,7 +976,7 @@ func decodedParameter(p mysql.Parameter) (any, bool) {
 	if !ok || !utf8.ValidString(p.Name) {
 		return nil, false
 	}
-	out := map[string]any{"type": float64(p.Type), "unsigned": p.Unsigned, "value": value}
+	out := map[string]any{"type": json.Number(strconv.FormatUint(uint64(p.Type), 10)), "unsigned": p.Unsigned, "value": value}
 	if p.Name != "" {
 		out["name"] = p.Name
 	}

@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -319,8 +320,8 @@ func checkDecodedBody(message any, statementParams int, query string, doc map[st
 	if err != nil {
 		panic(fmt.Sprintf("a body made decoded does not encode: %v (decoded %#v)", err, decoded))
 	}
-	var want any
-	if err := json.Unmarshal(raw, &want); err != nil {
+	want, err := matcher.UnmarshallJSON(string(raw), nil)
+	if err != nil {
 		panic(fmt.Sprintf("a body made decoded encodes to %s, which does not decode: %v", raw, err))
 	}
 	if !reflect.DeepEqual(want, decoded) {

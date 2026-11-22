@@ -29,7 +29,6 @@ import (
 var jsonValid234 = json.Valid
 var fmtSprint234 = fmt.Sprint
 var ppNew234 = pp.New
-var jsonUnmarshal234 = json.Unmarshal
 
 // MatchOption tunes Match without changing its signature — enterprise and
 // k8s-proxy both call Match, so a new parameter would break them on their next

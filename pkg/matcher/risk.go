@@ -2,7 +2,6 @@ package matcher
 
 import (
 	"encoding/json"
-	"fmt"
 	"slices"
 	"sort"
 	"strconv"
@@ -120,11 +119,12 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		return nil, nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil, err
 	}
 
@@ -274,11 +274,12 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, t
 		return nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil
 	}
 	return ChangedDecodedJSONFieldPaths(exp, act, known, typeStrict, valueChangesOnly, excludeRecordedValue)
@@ -377,11 +378,12 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 		return nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil
 	}
 
@@ -493,7 +495,7 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps, recor
 		for _, e := range t {
 			collectJSON(e, p, ni, out, recorded)
 		}
-	case string, float64, bool, nil:
+	case string, float64, json.Number, bool, nil:
 		typ, val := scalarTypeValue(t)
 		out.types[path] = typ
 		if !typeStrict {
@@ -520,19 +522,22 @@ func eachJSONScalar(v interface{}, path string, fn func(path string, v interface
 		for _, e := range t {
 			eachJSONScalar(e, path+"[]", fn)
 		}
-	case string, float64, bool, nil:
+	case string, float64, json.Number, bool, nil:
 		fn(path, t)
 	}
 }
 
-// scalarTypeValue is a JSON scalar's type and value as the path maps hold
-// them.
+// scalarTypeValue is a JSON scalar's type and human-readable value as the path
+// maps hold them (preserving exact JSON decimal text for reports, shape
+// diagnostics, and recorded-value exclusion).
 func scalarTypeValue(v interface{}) (typ, val string) {
 	switch t := v.(type) {
 	case string:
 		return "string", t
+	case json.Number:
+		return "number", t.String()
 	case float64:
-		return "number", fmt.Sprintf("%v", t)
+		return "number", formatJSONNumber(t)
 	case bool:
 		return "boolean", strconv.FormatBool(t)
 	}
@@ -565,6 +570,9 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 		av, aok := act.values[k]
 		// If both present and differ -> value change
 		if eok && aok && ev != av {
+			if expType == "number" && equalJSONNumbers(json.Number(ev), json.Number(av)) {
+				continue
+			}
 			valueChanges = append(valueChanges, k)
 		}
 	}

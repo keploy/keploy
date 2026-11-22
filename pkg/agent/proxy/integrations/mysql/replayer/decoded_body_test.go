@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -16,8 +17,8 @@ import (
 // TestARecordingsBodyIsMadeDecodedAsItsBytesDecode checks the body the strict
 // gate compares a recording on (mysqlRequestJSONBody) against the bytes it was
 // compared on before (mysqlRequestBody): the same bytes, whether it has a body
-// at all, and, for a body made decoded, the value json.Unmarshal makes of
-// those bytes, which the engine then neither validates nor decodes. A value
+// at all, and, for a body made decoded, the value matcher.UnmarshallJSON makes
+// of those bytes, which the engine then neither validates nor decodes. A value
 // whose encoding is not plain is encoded and decoded as before.
 func TestARecordingsBodyIsMadeDecodedAsItsBytesDecode(t *testing.T) {
 	type param = mysql.Parameter
@@ -46,7 +47,8 @@ func TestARecordingsBodyIsMadeDecodedAsItsBytesDecode(t *testing.T) {
 			param{Type: 8, Value: int64(1<<53 + 1)}, param{Type: 8, Value: int64(math.MaxInt64)}, param{Type: 8, Value: int64(math.MinInt64)},
 			param{Type: 1, Unsigned: true, Value: uint8(200)}, param{Type: 2, Unsigned: true, Value: uint16(65535)}, param{Type: 3, Unsigned: true, Value: uint32(4000000000)},
 			param{Type: 8, Unsigned: true, Value: uint64(math.MaxUint64)}, param{Type: 8, Value: 7}, param{Type: 8, Unsigned: true, Value: uint(9)}), true},
-		{"doubles", executeBundle(1, param{Type: 5, Value: 0.1}, param{Type: 5, Value: -1e300}, param{Type: 5, Value: math.Copysign(0, -1)}, param{Type: 5, Value: 5e-324}), true},
+		{"doubles", executeBundle(1, param{Type: 5, Value: 0.1}, param{Type: 5, Value: -1e300}, param{Type: 5, Value: math.Copysign(0, -1)}, param{Type: 5, Value: 5e-324},
+			param{Type: 5, Value: 1e-7}, param{Type: 5, Value: -1e-9}, param{Type: 5, Value: 1e-6}, param{Type: 5, Value: 1e20}, param{Type: 5, Value: 1e21}), true},
 		{"strings, booleans and nulls", executeBundle(1, param{Type: 253, Value: "héllo <&>  "}, param{Type: 253, Value: ""}, param{Type: 6, Value: nil},
 			param{Type: 1, Value: true}, param{Type: 253, Name: "tenant", Value: "acme"}), true},
 		{"a value that is an object", executeBundle(1, param{Type: 245, Value: map[string]any{"a": 1, "b": map[string]any{"c": "d", "e": nil}}}), true},
@@ -86,8 +88,8 @@ func TestARecordingsBodyIsMadeDecodedAsItsBytesDecode(t *testing.T) {
 				return
 			}
 			if plain {
-				var want any
-				if err := json.Unmarshal(raw, &want); err != nil {
+				want, err := matcher.UnmarshallJSON(string(raw), nil)
+				if err != nil {
 					t.Fatalf("the bytes %s do not decode: %v", raw, err)
 				}
 				if !reflect.DeepEqual(value, want) {
