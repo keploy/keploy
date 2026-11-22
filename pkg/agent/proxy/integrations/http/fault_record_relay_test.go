@@ -1,20 +1,19 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -116,7 +115,7 @@ func TestRecordV2_FaultUpstreamResetBeforeAnswer(t *testing.T) {
 	}
 	_ = c.src.Close()
 	got, rerr := appRead(t, c.app)
-	if got != "" || !errors.Is(rerr, syscall.ECONNRESET) {
+	if got != "" || !neterr.IsConnReset(rerr) {
 		t.Errorf("the application read %q, %v; want nothing, then a reset, as the upstream gave", got, rerr)
 	}
 	mocks, err := c.finish(t)
@@ -151,7 +150,7 @@ func TestRecordV2_FaultUpstreamNeverAnswersAndTheAppGivesUp(t *testing.T) {
 		t.Fatalf("the upstream read %v; want the application's close forwarded (EOF)", err)
 	}
 	mocks, err := c.finish(t)
-	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 }
 
 func TestRecordV2_FaultUpstreamTruncatesItsBody(t *testing.T) {
@@ -245,7 +244,7 @@ func TestRecordV2_FaultUpstreamResetsAfterTheHead(t *testing.T) {
 	<-c.relayDone
 	_ = c.src.Close()
 	got, rerr := appRead(t, c.app)
-	if got != "" || !errors.Is(rerr, syscall.ECONNRESET) {
+	if got != "" || !neterr.IsConnReset(rerr) {
 		t.Errorf("the application read %q, %v after the head and 5 bytes; want a reset, as the upstream gave", got, rerr)
 	}
 	mocks, err := c.finish(t)
@@ -302,7 +301,9 @@ func TestRecordV2_FaultUpstreamGoesSilentAfterTheHeadAndTheAppGivesUp(t *testing
 		t.Fatalf("the upstream read %v; want the application's close forwarded (EOF)", err)
 	}
 	mocks, err := c.finish(t)
-	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5})
+	m := oneMock(t, mocks, err)
+	wantFault(t, m, models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 20, AppEndedFirst: true})
+	wantStoppedReading(t, m, "01234", sentAs{length: 20})
 }
 
 func TestRecordV2_FaultChunkedBodyTruncatedKeepsItsFraming(t *testing.T) {
@@ -348,7 +349,7 @@ func TestRecordV2_FaultBeforeAnswerOnAReusedConnectionIsNotRecorded(t *testing.T
 		}
 		// The upstream's end reaches the application before it closes.
 		got, rerr := appRead(t, c.app)
-		if want := error(io.EOF); reset && !errors.Is(rerr, syscall.ECONNRESET) || !reset && rerr != want || got != "" {
+		if want := error(io.EOF); reset && !neterr.IsConnReset(rerr) || !reset && rerr != want || got != "" {
 			t.Errorf("reset %v: the application read %q, %v; want nothing, then the upstream's end", reset, got, rerr)
 		}
 		mocks, err := c.finish(t)
@@ -379,7 +380,7 @@ func TestRecordV2_FaultTimeoutOnAReusedConnectionIsRecorded(t *testing.T) {
 	if mocks[0].Spec.Fault != nil {
 		t.Errorf("the first call recorded with fault %v, want the answer it got", mocks[0].Spec.Fault)
 	}
-	wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 }
 
 // Server bytes no request asked for before a request (its 408 on a keep-alive
@@ -421,7 +422,7 @@ func TestRecordV2_FaultNotRecordedAfterServerBytesNoRequestAskedFor(t *testing.T
 		if err != nil || len(mocks) != 2 {
 			t.Fatalf("recorded %d mocks, %v; want 2: the answered call, then the one the application gave up on", len(mocks), err)
 		}
-		wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout})
+		wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 	})
 }
 
@@ -440,7 +441,7 @@ func TestRecordV2_FaultTimeoutAfterTheAnswerInFlightWhenTheCaptureJoined(t *test
 	relayed(t, c.dest, faultReq)
 	closeUnread(t, c)
 	mocks, err := c.finish(t)
-	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 	if n := c.mgr.MocksLeftOut(); n != 1 {
 		t.Errorf("%d mocks left out, want 1: the answer in flight when the capture joined", n)
 	}
@@ -884,11 +885,11 @@ func TestRecordV2_FaultTimeoutRecordedWhenTheAppGaveUpBeforeTheStop(t *testing.T
 		c.start(t)
 		write(t, c.app, c.src, faultReq)
 		relayed(t, c.dest, faultReq)
-		want := models.Fault{Kind: models.FaultTimeout}
+		want := models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true}
 		if afterHead {
 			write(t, c.dest, c.dst, head+"01234")
 			relayed(t, c.app, head+"01234")
-			want = models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5}
+			want = models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 20, AppEndedFirst: true}
 		}
 		appClosed(t, c)
 		awaitPeerEnd(t, c, fakeconn.FromClient)
