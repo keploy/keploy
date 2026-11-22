@@ -74,13 +74,13 @@ func newWorkerMarks(rules []models.WorkerMockRule, db MappingDb, logger *zap.Log
 
 // add marks m when a rule matches it. m is on disk: a worker entry must name a
 // mock that is.
-func (w *workerMarks) add(m *models.Mock) {
+func (w *workerMarks) add(m *models.Mock) *markedCall {
 	if w == nil || m == nil || m.Name == "" {
-		return
+		return nil
 	}
 	id, ok := models.MatchWorkerMockRules(w.rules, m)
 	if !ok {
-		return
+		return nil
 	}
 	e := models.MockEntry{
 		Name:             m.Name,
@@ -94,7 +94,7 @@ func (w *workerMarks) add(m *models.Mock) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if _, done := w.marked[call]; done {
-		return
+		return nil
 	}
 	if len(w.marked) >= maxWorkerMarkCalls {
 		if !w.overflowed {
@@ -103,13 +103,43 @@ func (w *workerMarks) add(m *models.Mock) {
 				zap.Int("calls", len(w.marked)),
 				zap.String("next_step", "a worker-mock rule names a call each worker makes once: narrow a rule that matches a call per request"))
 		}
-		return
+		return nil
 	}
 	w.pending = append(w.pending, e)
 	if w.marked == nil {
 		w.marked = map[[sha256.Size]byte]struct{}{}
 	}
 	w.marked[call] = struct{}{}
+	return &markedCall{entry: e, call: call}
+}
+
+// markedCall is a call a worker-mock rule marked: its worker-scope entry, and
+// the call it stands for.
+type markedCall struct {
+	entry models.MockEntry
+	call  [sha256.Size]byte
+}
+
+// adopt marks calls in w as add marked them in another set's marks: a test set
+// a recording rolls over to starts with the calls the set before it marked
+// (setRoll's carry), since a replay of the new set alone meets cold workers
+// that make them again.
+func (w *workerMarks) adopt(calls []markedCall) {
+	if w == nil || len(calls) == 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.marked == nil {
+		w.marked = map[[sha256.Size]byte]struct{}{}
+	}
+	for _, c := range calls {
+		if _, done := w.marked[c.call]; done {
+			continue
+		}
+		w.marked[c.call] = struct{}{}
+		w.pending = append(w.pending, c.entry)
+	}
 }
 
 // workerAdder is the mapping store's AddToWorker.

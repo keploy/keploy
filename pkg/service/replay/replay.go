@@ -8399,14 +8399,15 @@ func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
 
 // addMockDisplayInfo adds each mock's display info to the lookup, keyed by
 // name; a later mock of the same name replaces an earlier one. A mock whose
-// payload is on disk is kept itself, and asked when a report names it. Each
+// payload is on disk is kept as its view (models.OnDiskView), not itself, and
+// asked when a report names it. Each
 // says whether it is a carry-over mock, and its place, for the mapping
 // (carryOverAttribution.unattributedCarryOverOwners).
 func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
 	for _, mock := range mocks {
 		var info mockDisplayInfo
 		if mock.PayloadOnDisk() {
-			info = mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}
+			info = mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock.OnDiskView()}
 		} else {
 			info = mockDisplayInfo{
 				summary:    models.MockSummaryFromSpec(mock),

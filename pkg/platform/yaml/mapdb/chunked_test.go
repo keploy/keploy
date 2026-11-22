@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -271,4 +272,65 @@ func TestATestOfManyMocksReadAFewAtATimeIsTheTestReadWhole(t *testing.T) {
 			t.Fatal("the test of many mock entries in keploy's file was not read a few mock entries at a time")
 		}
 	})
+}
+
+// A read of a mappings file holding a test of many mock entries holds little
+// more than what it returns, however many the test holds: the parse tree of
+// one such test of a long recording, read at once, held 510 MB: 29 and 113 MB
+// here for 10,000 and 40,000. Read a few entries at a time it holds a few MB,
+// and the bound leaves room for what a busy machine adds.
+func TestAReadOfATestOfManyMocksHoldsLittleMoreThanWhatItReturns(t *testing.T) {
+	sizes := []int{10000, 40000}
+	files := map[int][]byte{}
+	for _, n := range sizes {
+		m := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: "set-0",
+			TestCases: []models.MappedTestCase{manyMocks("", n, []string{"plain"}), manyMocks("test-1", 3, []string{"plain"})}}
+		data, err := marshalMappingYAML(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[n] = data
+	}
+	over := map[int]int64{}
+	for _, n := range sizes {
+		data := files[n]
+		// What the read returns: the heap it adds, kept.
+		base := liveHeap()
+		returned := func() uint64 {
+			kept, err := DecodeMappingF(data, zap.NewNop(), yaml.FormatYAML)
+			if err != nil || len(kept.TestCases) != 2 || len(kept.TestCases[0].Mocks) != n {
+				t.Fatalf("read %v, err %v", kept != nil, err)
+			}
+			held := liveHeap() - base
+			runtime.KeepAlive(kept)
+			return held
+		}()
+		// The least of three reads: what a read holds, not a moment the
+		// machine was busy.
+		var peak uint64
+		for i := 0; i < 3; i++ {
+			var readErr error
+			var mocks int
+			p := peakLiveOf(func() {
+				got, err := DecodeMappingF(data, zap.NewNop(), yaml.FormatYAML)
+				readErr = err
+				if err == nil {
+					mocks = len(got.TestCases[0].Mocks)
+				}
+			})
+			if readErr != nil || mocks != n {
+				t.Fatalf("read again: %d mocks, err %v", mocks, readErr)
+			}
+			if i == 0 || p < peak {
+				peak = p
+			}
+		}
+		over[n] = int64(peak) - int64(returned)
+		t.Logf("a read of a %d-byte mappings file, one test of %d mock entries, held %d bytes of heap at most, %d of them what it returns (%d more)", len(data), n, peak, returned, over[n])
+	}
+	runtime.KeepAlive(files)
+	if over[10000] > 16<<20 || over[40000] > 16<<20 {
+		t.Fatalf("a read of a mappings file of one test of 10,000 / 40,000 mock entries (%d / %d bytes) held %d / %d bytes of heap more than what it returns: it parsed the test whole",
+			len(files[10000]), len(files[40000]), over[10000], over[40000])
+	}
 }
