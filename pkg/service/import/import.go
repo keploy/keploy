@@ -69,6 +69,10 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 
 	pi.validatePostmanSchema(postmanCollection.Info.Schema)
 
+	if err := validateCollectionTestSetNames(postmanCollection); err != nil {
+		return err
+	}
+
 	globalVariables := pi.extractGlobalVariables(postmanCollection.Variables)
 
 	// Check for empty responses if basePath is not provided
@@ -221,6 +225,10 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 		return fmt.Errorf("failed to get current working directory: %w", err)
 	}
 
+	if err := validateCollectionTestSetNames(collection); err != nil {
+		return err
+	}
+
 	testCounter := 0
 	var itemsToProcess []TestData
 
@@ -238,6 +246,8 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testSet := item.Name
 			if item.Name == "" {
 				testSet = pi.generateTestSetName()
+			} else if err := validateTestSetName(testSet); err != nil {
+				return err
 			}
 
 			testSetPath := filepath.Join(cwd, "keploy", testSet)
@@ -277,6 +287,45 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 	}
 
 	return nil
+}
+
+func validateCollectionTestSetNames(collection *PostmanCollectionStruct) error {
+	for _, item := range collection.Items.PostmanItems {
+		if len(item.Item) == 0 || item.Name == "" {
+			continue
+		}
+		if err := validateTestSetName(item.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTestSetName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || !filepath.IsLocal(name) ||
+		hasWindowsDrivePrefix(name) || strings.ContainsAny(name, `/\`) ||
+		strings.TrimRight(name, " .") == "" || hasControlChar(name) {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
+	return nil
+}
+
+func hasWindowsDrivePrefix(name string) bool {
+	return len(name) >= 2 &&
+		((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) &&
+		name[1] == ':'
+}
+
+func hasControlChar(name string) bool {
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func (pi *PostmanImporter) generateTestSetName() string {
