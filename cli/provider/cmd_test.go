@@ -799,3 +799,29 @@ func TestTheCmdTypeRefusalNamesTheProgramAlone(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateFlags_BasePathBypassesNativeGate is the regression guard for
+// #5257: a --base-path replay targets an already-running remote service, so
+// ValidateFlags must not refuse it with nativeUnsupportedError on platforms
+// where this build cannot intercept a native app (macOS/Windows).
+func TestValidateFlags_BasePathBypassesNativeGate(t *testing.T) {
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return false })
+
+	cfg := config.New()
+	c := NewCmdConfigurator(zap.NewNop(), cfg)
+	cmd := &cobra.Command{Use: "test"}
+	if err := c.AddFlags(cmd); err != nil {
+		t.Fatalf("AddFlags: %v", err)
+	}
+	if err := cmd.ParseFlags([]string{"--base-path", "http://localhost:8080"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	cfg.Test.BasePath = "http://localhost:8080"
+
+	err := c.ValidateFlags(context.Background(), cmd)
+	if err != nil && strings.Contains(err.Error(), "is not supported") {
+		t.Fatalf("ValidateFlags refused base-path replay with native gate: %v", err)
+	}
+}

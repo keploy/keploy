@@ -1950,7 +1950,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return err
 		}
 		c.cfg.CommandType = commandType
-		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !nativeCommandSupportedHere() {
+		// A --base-path replay targets an already-running remote service, so it
+		// never runs or intercepts a local native process: bypass the
+		// nativeCommandSupportedHere() gate even on platforms where this build
+		// cannot intercept a native app (macOS/Windows).
+		if c.cfg.Test.BasePath == "" && (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !nativeCommandSupportedHere() {
 			return nativeUnsupportedError(runtime.GOOS, runtime.GOARCH)
 		}
 		// memory-limit non-Docker gate is applied after flag parsing below
