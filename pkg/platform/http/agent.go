@@ -202,6 +202,11 @@ type agentRun struct {
 	// what waits for its exit waits no more.
 	letGo     chan struct{}
 	letGoOnce sync.Once
+	// engine is a docker agent's run's wait on the container engine at its
+	// stop and end (engineWait): begun by the stop (dockerAgentCancel), or
+	// by the run's end, and ended once the run's volumes have been asked to
+	// go.
+	engine engineWait
 	// bootReport is the file a native agent reports its start's progress in
 	// (utils.BootProgressFileName, next to its teardown progress file), set
 	// before it starts; "" for a containerised one, whose report is read out
@@ -2853,11 +2858,14 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 			// The run's own volumes (its CA's, and an embedder's) go with its
 			// agent, once the engine has removed the agent's container. The engine keeps it while a
 			// container still mounts it: an agent the stop could not reach,
-			// or an application container run without --rm.
-			rmCtx, cancelRm := daemonAsk()
+			// or an application container run without --rm. Asked within
+			// the run's wait on the engine, begun by the stop or now, which
+			// holds the drains until they have been asked, within its bound
+			// (engineWait).
+			rmCtx := run.engine.begin(a.logger, opts.KeployContainer, run.scope)
 			removal.Wait(rmCtx, a.logger)
 			kdocker.RemoveRunVolumes(rmCtx, a.logger, a.dockerClient, opts.KeployContainer)
-			cancelRm()
+			run.engine.end()
 			// `docker run` exits with the agent's own status, so this carries
 			// the reason an agent that could not start gave for it.
 			exited <- err
@@ -4659,9 +4667,16 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 // say when it is removed (removal), within keploy's bound on an answer from
 // its daemon (daemonAsk): a daemon that does not take that question does not
 // hold the stop, nor one that does not answer the stop's signals
-// (engineCLI.ask).
+// (engineCLI.ask). The stop begins the run's wait on the engine (engineWait),
+// which holds the drains until the run's volumes have been asked to go
+// (startAgent). The stop's signals and its wait for the container's exit
+// end at that wait's bound too (engineCLI.wait), and the question of the
+// removal, asked as the wait begins, at a bound of the same length of its
+// own: a daemon that answers none of them holds the stop for that one bound,
+// not one bound a question.
 func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string, removal *kdocker.RemovalWatch) func() error {
 	return func() error {
+		run.engine.begin(logger, name, run.scope)
 		ask, release := daemonAsk()
 		removal.Watch(ask)
 		release()
@@ -4686,7 +4701,12 @@ func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name st
 // (resendSIGTERM).
 func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
 	logger.Debug("Context cancelled. Stopping the keploy agent container and waiting for it to exit.")
-	if stopAgentContainer(logger, name, !run.ready.Load(), run.scope) {
+	logger = logger.With(zap.String("container", name))
+	cli := newEngineCLI(logger)
+	// Every question of the stop to the engine ends at the run's wait on it
+	// too, once the stop has begun that (engineWait).
+	cli.wait = run.engine.begun()
+	if signalAndAwaitAgentContainer(logger, cli, name, !run.ready.Load(), run.scope) {
 		run.stoppedAtOnce()
 	}
 }
@@ -4762,6 +4782,10 @@ func runEngine(ctx context.Context, c *exec.Cmd, unsignalled <-chan struct{}, ou
 type engineCLI struct {
 	logger *zap.Logger
 	mode   atomic.Int32 // engineUndecided, engineDirect or engineSudo
+	// wait, when set, is the run's wait on the engine (engineWait): every
+	// question of the stop (ask, and the wait for the container's exit)
+	// ends at its end too.
+	wait context.Context
 }
 
 const (
@@ -4853,8 +4877,10 @@ var daemonAsk = func() (context.Context, func()) {
 // question the bound ended is said at WARN: what it asked may not have been
 // done, and the agent's container may still run.
 func (e *engineCLI) ask(args ...string) ([]byte, error) {
-	ctx, release := daemonAsk()
+	ask, release := daemonAsk()
 	defer release()
+	ctx, unhook := withinEngineWait(ask, e.wait)
+	defer unhook()
 	out, err := e.combined(ctx, args...)
 	if err != nil && ctx.Err() != nil {
 		if cause := context.Cause(ctx); !errors.Is(err, cause) {
@@ -4899,7 +4925,12 @@ var dockerStopPoll = time.Second
 // teardown (resendSIGTERM).
 func stopAgentContainer(logger *zap.Logger, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	logger = logger.With(zap.String("container", name))
-	cli := newEngineCLI(logger)
+	return signalAndAwaitAgentContainer(logger, newEngineCLI(logger), name, unanswered, moved)
+}
+
+// signalAndAwaitAgentContainer is stopAgentContainer through cli, whose
+// logger is logger, which names the container.
+func signalAndAwaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	if out, err := cli.ask("kill", "--signal", "SIGTERM", name); err != nil {
 		logger.Debug("Could not signal the agent container. It may have already stopped.",
 			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
@@ -4932,8 +4963,10 @@ func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unansw
 		return err
 	}
 	// The wait returns when the container has stopped; at once, with an
-	// error, when it is already gone (--rm removed it).
-	waitCtx, stopWaiting := context.WithCancel(context.Background())
+	// error, when it is already gone (--rm removed it); and when the run's
+	// wait on the engine ends at its bound (cli.wait, engineWait), the
+	// daemon not having said by then that the container has exited.
+	waitCtx, stopWaiting := withinEngineWait(context.Background(), cli.wait)
 	defer stopWaiting()
 	gone := make(chan struct{})
 	go func() {

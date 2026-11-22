@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/volume"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.uber.org/zap"
 )
 
@@ -86,11 +87,19 @@ type VolumeRemover interface {
 // RemoveRunVolumes removes a run's own volumes once its agent's container is
 // gone. Never forced: the engine refuses to remove a volume a container still
 // mounts (an application container a run's own `docker run` keeps, without
-// --rm), and that one is left for SweepRunVolumes.
+// --rm), and that one is left for SweepRunVolumes. A volume left because ctx
+// ended before the engine answered (keploy's bound on its daemon's answers)
+// stays on the host until a later docker-mode run removes it: it is said at
+// WARN, with its name and the command that removes it.
 func RemoveRunVolumes(ctx context.Context, logger *zap.Logger, api VolumeRemover, agentContainer string) {
 	for _, base := range runVolumeBases() {
 		name := RunVolumeFor(base, agentContainer)
 		if err := api.VolumeRemove(ctx, name, false); err != nil {
+			if ctx.Err() != nil {
+				logger.Warn("Could not remove the run's volume: the container engine's daemon did not answer within keploy's bound. Remove it once no container mounts it: "+engine.Active().CLI+" volume rm "+name,
+					zap.String("volume", name), zap.NamedError("cause", context.Cause(ctx)), zap.Error(err))
+				continue
+			}
 			logger.Debug("left the run's volume; a later docker-mode run removes it once no container mounts it",
 				zap.String("volume", name), zap.Error(err))
 		}
