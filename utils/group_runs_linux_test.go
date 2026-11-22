@@ -121,6 +121,27 @@ func TestGroupGoneWaitsForEachProcessItsSignalReached(t *testing.T) {
 	case <-time.After(time.Minute):
 		t.Fatal("the group was not gone once each of its processes had exited")
 	}
+
+	// The leader's exit ends no wait but its own: a process its signal
+	// reached that is listed after the leader, and runs on once the leader
+	// has exited, holds the group. groupReached lists the group in /proc's
+	// name order, which often puts the leader before the rest.
+	leader, l := start()
+	member, m := start()
+	gone, release = groupGone(l.PID, []Reached{l, m})
+	defer release()
+	_ = leader.Process.Signal(syscall.SIGKILL)
+	_ = leader.Wait()
+	if isClosed(gone) {
+		t.Fatal("a group whose leader exited is gone while a process after the leader runs")
+	}
+	_ = member.Process.Signal(syscall.SIGKILL)
+	_ = member.Wait()
+	select {
+	case <-gone:
+	case <-time.After(time.Minute):
+		t.Fatal("the group was not gone once its leader and the process after it had exited")
+	}
 }
 
 // A process whose main thread has exited while another thread of it runs
