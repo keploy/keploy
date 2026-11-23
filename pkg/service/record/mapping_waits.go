@@ -31,8 +31,10 @@ const (
 	fateUnknown mockFate = iota
 	// fateMapped: the mock is saved and belongs to the test's mock set.
 	fateMapped
-	// fateExcluded: the mock is async egress or one a RecordHook skipped. It
-	// is never part of a test's mock set, and its absence is no loss.
+	// fateExcluded: the mock is async egress, one a RecordHook skipped, or
+	// one the stop's drain left out as traffic after the stop
+	// (leftOutMarker). It is never part of a test's mock set, and its absence
+	// is no loss.
 	fateExcluded
 	// fateLost: the recorder failed to save the mock; its test is revoked.
 	fateLost
