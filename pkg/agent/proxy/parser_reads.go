@@ -22,15 +22,12 @@ import (
 // (supervisor.Session.dropped, MySQL's ERR at wait_timeout among them).
 //
 // "Read" is taken for "recorded", and losses fall outside what this sees,
-// each its own fix, among them: a mock the session refuses because the
-// parser's context is done is dropped without being reported (Session.EmitMock
-// after the recording stopped or the parser was retired, or from a helper
-// goroutine of the parser after its Run returned, whose context Run cancels
-// on the way out); and a parser that returns nil in the middle of an exchange
-// on a cancelled context without reporting it (the MySQL recorder) leaves
-// that exchange's request read and its answer unread. The first wants
-// EmitMock to report what it refuses (ReportLeftOut); the second, the parser
-// to report the exchange it stops on.
+// each its own fix: a mock the session refuses because the parser's context
+// is done is reported left out by Session.EmitMock itself (ReportLeftOut,
+// LeftOutRefusedAtStop), so it is never dropped silently; a parser that
+// returns nil in the middle of an exchange on a cancelled context without
+// reporting it leaves that exchange's request read and its answer unread and
+// wants the parser to report the exchange it stops on.
 //
 // The spans the return records are closed spans, recorded when it comes. Proxy
 // mode checks each test case as it streams it, so a span recorded late, from

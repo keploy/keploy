@@ -600,7 +600,15 @@ func (t *tee) drain() {
 	// waits on done and then closes the FakeConns, so that close comes after
 	// endStream has read consumerGone. Signalled first, it could land before
 	// that read and leave open a stream that ended normally (ErrClosed).
+	// look is the drain's look at a parser that takes none of what it was
+	// handed while its connection is open (parserLook): it is not abandoned
+	// for that, but the process's stacks are written down once
+	// (parserStalled). Armed as the drain waits, on an empty queue or a full
+	// channel, it goes on across chunks, so it measures from when the parser
+	// last took anything, however few bytes wait.
+	var look parserLook
 	defer func() {
+		look.stop()
 		t.endStream()
 		close(t.done)
 	}()
@@ -630,6 +638,8 @@ func (t *tee) drain() {
 			select {
 			case <-t.wake:
 			case <-t.shutdown:
+			case <-t.armLook(&look):
+				t.lookedAt(&look, len(t.out))
 			}
 			continue
 		}
@@ -701,6 +711,10 @@ func (t *tee) drain() {
 		// against a consumer that is about to take the chunk. That abandoned
 		// a live consumer's chunks (TestTee_SlowConsumerLosesNothing, at
 		// host load 9). See utils/stall for how the time is measured.
+		//
+		// look watches the parser here too: a look armed before close() goes
+		// on; a drain that first waits after close() has the stall bound's
+		// own verdict to say it.
 	deliver:
 		for {
 			var meter *stall.Meter
@@ -730,6 +744,10 @@ func (t *tee) drain() {
 					t.abandon(c)
 					return
 
+				case <-t.armLook(&look):
+					t.lookedAt(&look, len(t.out)+1)
+					continue
+
 				case <-stallC:
 					if !meter.Expired() {
 						stallC = meter.Wait()
@@ -743,7 +761,11 @@ func (t *tee) drain() {
 					// flush tempting in the first place. Deciding once gets
 					// both: a progressing consumer never trips the window, a
 					// stopped one costs one window total.
+					stalled := meter.Stalled()
 					meter.Stop()
+					look.stop()
+					_, waiting := t.parserWaiting()
+					parserStalled(t.logger, t.dir, stalled, len(t.out)+1, waiting)
 					t.abandon(c)
 					return
 
