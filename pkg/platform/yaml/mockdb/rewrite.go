@@ -91,7 +91,7 @@ type fileDoc struct {
 // the error decoding a parsed one. Either fails the whole test set, except for
 // the file's last document when the file ends part-way through a line
 // (yaml.MockReader.Unterminated): a write that was interrupted (the recorder
-// killed, the disk full; appendMock writes a large document in pieces) leaves
+// killed, the disk full; writeMockDoc writes a large document in pieces) leaves
 // exactly that, and losing that one mock must not fail every test in the set.
 //
 // Such a YAML document is never served. That it parses, or even decodes,

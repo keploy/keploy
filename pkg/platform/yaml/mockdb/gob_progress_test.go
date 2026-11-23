@@ -593,6 +593,30 @@ func TestInsertMock_AYamlMockFileThatFailedAsItClosedFailsTheInsert(t *testing.T
 	}
 }
 
+// A mock that cannot be encoded fails the insert as one (models.ErrMockEncode,
+// which the recorder drops and goes on from) even when its set's file then
+// fails as it closes: nothing of the mock was written to it, so the file's
+// error is not the insert's, as it was not before inserts were split in steps.
+func TestInsertMock_AnUnencodableMockIsAnEncodeErrorWhateverTheFileDoesAsItCloses(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "yaml")
+	saved := closeMockFile
+	closeMockFile = func(f *os.File) error {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		return syscall.EIO
+	}
+	t.Cleanup(func() { closeMockFile = saved })
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		ys := New(zap.NewNop(), t.TempDir(), "mocks")
+		ys.Format = format
+		err := ys.InsertMock(context.Background(), &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.Kind("ThisKindDoesNotExist")}, "set-0")
+		if !errors.Is(err, models.ErrMockEncode) || errors.Is(err, syscall.EIO) {
+			t.Fatalf("%s: InsertMock returned %v, want an encode error and not the file's", format, err)
+		}
+	}
+}
+
 // An insert whose caller has already given up (its ctx is done) may still be
 // queued while the queue has room, or not: one that is not queued is not
 // counted as handed to the writer, so Close does not say a mock was not
