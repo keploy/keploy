@@ -79,6 +79,25 @@ func waitStacks(t *testing.T, n int32) {
 	}
 }
 
+// waitWarned waits until logs hold a stall WARN, advancing with step, if any,
+// between checks. parserStalled writes the stacks first and only then says
+// so, in the WARN that names their file, so a test that reads the WARN waits
+// for the WARN: one that waited for the file could read the log between the
+// two, with the drain that wrote it not yet run on, and find no WARN.
+func waitWarned(t *testing.T, logs *observer.ObservedLogs, step func()) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for logs.FilterMessageSnippet(StalledParserMsg).Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no stall WARN, with %d stack files written", stacksFiles.Load())
+		}
+		if step != nil {
+			step()
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // waitDelivered waits until tt's drain has handed every chunk queued on to its
 // channel, n chunks in it.
 func waitDelivered(t *testing.T, tt *tee, n int) {
@@ -142,13 +161,7 @@ func TestTee_AStalledParserWritesTheStacksOnceWhileItsConnectionIsOpen(t *testin
 				time.Sleep(time.Millisecond)
 			}
 			// The process runs on, and the parser takes nothing.
-			for stacksFiles.Load() == 0 {
-				if time.Now().After(deadline) {
-					t.Fatal("no stacks written for a parser that took nothing")
-				}
-				clk.Advance(stall.CheckEvery(testStallGrace))
-				time.Sleep(time.Millisecond)
-			}
+			waitWarned(t, logs, func() { clk.Advance(stall.CheckEvery(testStallGrace)) })
 			warns := logs.FilterMessageSnippet(StalledParserMsg).All()
 			if len(warns) != 1 || warns[0].Level != zapcore.WarnLevel {
 				t.Fatalf("%d stall WARNs; want one: %v", len(warns), warns)
@@ -255,7 +268,7 @@ func TestTee_ASecondStallWritesNoSecondFile(t *testing.T) {
 	first, _, _, firstLogs := stalledTee(t, &stall.ManualClock{Step: stall.OnTime}, 1)
 	first.push(mkChunk("a"))
 	first.push(mkChunk("b"))
-	waitStacks(t, 1)
+	waitWarned(t, firstLogs, nil)
 	clk := &stall.ManualClock{Step: stall.OnTime}
 	second, _, _, secondLogs := stalledTee(t, clk, 16)
 	second.push(mkChunk("a"))
