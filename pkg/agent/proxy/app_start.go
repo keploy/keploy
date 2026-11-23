@@ -170,8 +170,10 @@ func (m *MockManager) rearmAppStart(learnNewSet func() error, set uint64) error 
 	if m.servedCount != nil {
 		m.servedCount = make(map[string]uint64)
 	}
+	m.setServed = nil
 	m.takenThisSession = nil
 	m.consumedMu.Unlock()
+	m.ownership.resetCounts()
 	m.ResetStatefulCursors()
 	filtered := append([]*models.Mock(nil), start.filtered...)
 	unfiltered := append([]*models.Mock(nil), start.unfiltered...)

@@ -177,6 +177,12 @@ func (p *mgrProxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bo
 	return p.mm.CarryOverLoadRange(start)
 }
 
+// edgeMgrProxy is mgrProxy naming the recorded windows its manager applies the
+// edge rule by, as the proxy does (Proxy.EdgeWindows).
+type edgeMgrProxy struct{ *mgrProxy }
+
+func (p edgeMgrProxy) EdgeWindows() *models.WindowSchedule { return p.mm.EdgeWindows() }
+
 // A retry cycle's filter carries the consumed history's rewinds: the agent
 // hands them to the proxy before it sets the cycle's first window, so the
 // manager counts a pass there even at the start the last cycle ended in. The
@@ -771,5 +777,147 @@ func TestAStagingCallsMappingIsServedWithNoPollPlacedInItsWindow(t *testing.T) {
 	}
 	if got := namesOf(loaded); !reflect.DeepEqual(got, []string{"own-1"}) {
 		t.Fatalf("a staging call whose mapping is [own-1] reads %v from disk; want its mapping alone", got)
+	}
+}
+
+// The window's read from disk is widened by models.MockWindowEdgeSkew for the
+// edge rule, and of its two margins keeps only the mocks the rule gives this
+// window (models.WindowSchedule.EdgeOwnedBy, over the windows the proxy names):
+// a carry-over mock or a poll placed at its answer just past the window is
+// left to the loads that read it before (the carry-over lookahead, the window
+// that holds its answer), and one beyond the skew is not read. Nor is the read
+// widened when the proxy names no windows. An inverted window (its response
+// stamped before its request) is read as before: LoadWindow clamps it to its
+// start, which a widened read would move.
+func TestLoadPerTestMocksReadsOnlyEdgeEligibleMocksPastTheWindow(t *testing.T) {
+	carry := models.Kind("TestEdgeLoadCarry")
+	t.Cleanup(models.RegisterCarryOver(carry, func(*models.Mock) bool { return true }))
+	t.Cleanup(models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Spec.Metadata["poll"] == "yes" }))
+	ms := func(n int) time.Time { return stageT0.Add(time.Duration(n) * time.Millisecond) }
+	past := func(us int) time.Time { return ms(100).Add(time.Duration(us) * time.Microsecond) }
+	carried := stageMock("carried", "/carried", past(30))
+	carried.Kind = carry
+	poll := stageMock("poll", "/poll", past(20))
+	poll.Spec.Metadata["poll"] = "yes"
+	poll.Spec.ResTimestampMock = past(40)
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	recording := []*models.Mock{stageMock("own", "/own", ms(50)), stageMock("anchor", "/anchor", ms(100)),
+		stageMock("edge", "/edge", past(30)), stageMock("far", "/far", past(150)), carried, poll}
+	// No windows named: the window's own read.
+	unseeded := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer unseeded.Close()
+	b := diskAgent(t, edgeMgrProxy{&mgrProxy{mm: unseeded}}, recording...)
+	stb, _ := b.clientMocks.Load(uint64(0))
+	if loaded, err := b.loadPerTestMocks(nil, stb.(*ClientMockStorage).diskMocks, models.MockFilterParams{AfterTime: ms(0), BeforeTime: ms(100), StrictMockWindow: true}, time.Time{}); err != nil {
+		t.Fatal(err)
+	} else if got := namesOf(loaded); len(got) != 2 || !slices.Contains(got, "anchor") || !slices.Contains(got, "own") {
+		t.Errorf("the window [0, 100 ms], no windows named, reads %v; want its own mocks", got)
+	}
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: ms(0), End: ms(100)}})
+	a := diskAgent(t, edgeMgrProxy{&mgrProxy{mm: mm}}, recording...)
+	st, _ := a.clientMocks.Load(uint64(0))
+	disk := st.(*ClientMockStorage).diskMocks
+	load := func(after, before time.Time) []string {
+		loaded, err := a.loadPerTestMocks(nil, disk, models.MockFilterParams{AfterTime: after, BeforeTime: before, StrictMockWindow: true}, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := namesOf(loaded)
+		sort.Strings(got)
+		return got
+	}
+	if got := load(ms(0), ms(100)); !reflect.DeepEqual(got, []string{"anchor", "edge", "own"}) {
+		t.Errorf("the window [0, 100 ms] reads %v; want its own mocks and edge, the one plain per-test mock in its margins", got)
+	}
+	if got := load(ms(100), ms(100).Add(-300*time.Microsecond)); !reflect.DeepEqual(got, []string{"anchor"}) {
+		t.Errorf("an inverted window starting at 100 ms reads %v; want [anchor], what its start holds", got)
+	}
+}
+
+// The edge rule gives a plain per-test mock placed just outside every window
+// to one window, the one whose edge is nearest, whether its recorder stated a
+// lifetime or not: the agent reads it from disk for that window alone and
+// files it in that window's per-test mocks, never in a session pool, and the
+// mock manager stages it so. A = [1000, 1100 ms] and B = [1100.15, 1200 ms],
+// over unstated Mongo calls: (i) edge-a, sent 60 us past A's end and answered
+// 10 us later, nearer A's end than B's start, is A's, and B's widened read,
+// which reaches it, leaves it; (ii) in-flight-b, sent 30 us past A's end and
+// answered in B, is in flight into B, which the in-flight rule gives it, so
+// A's widened read leaves it.
+func TestMocksForParamsGivesAnUnstatedEdgeMockToOneWindowsPerTestMocks(t *testing.T) {
+	ms := func(n float64) time.Time { return stageT0.Add(time.Duration(n * float64(time.Millisecond))) }
+	ws := []models.TestWindow{
+		{TestCase: "test-a", Start: ms(1000), End: ms(1100)},
+		{TestCase: "test-b", Start: ms(1100.15), End: ms(1200)},
+	}
+	pastA := func(us int) time.Time { return ws[0].End.Add(time.Duration(us) * time.Microsecond) }
+	unstated := func(name string, req, res time.Time) *models.Mock {
+		m := stageMock(name, "/"+name, req)
+		m.Kind = models.Mongo
+		m.Spec.ResTimestampMock = res
+		m.TestModeInfo = models.TestModeInfo{}
+		m.DeriveLifetime()
+		if m.StatesLifetime() || m.TestModeInfo.Lifetime != models.LifetimePerTest || !models.EdgeSkewEligible(m) {
+			t.Fatalf("precondition: %s is not an unstated per-test mock the edge rule can take", name)
+		}
+		return m
+	}
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	a := diskAgent(t, edgeMgrProxy{&mgrProxy{mm: mm}},
+		unstated("own-a", ms(1050), ms(1051)), unstated("own-b", ms(1150), ms(1151)),
+		unstated("edge-a", pastA(60), pastA(70)), unstated("in-flight-b", pastA(30), ms(1110)))
+	ctx := context.Background()
+	staging := models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now(), StrictMockWindow: true, FirstRecordedTestStart: ws[0].Start, RecordedWindows: ws}
+	if err := a.UpdateMockParams(ctx, staging); err != nil {
+		t.Fatal(err)
+	}
+	perTestNames := []string{"edge-a", "in-flight-b", "own-a", "own-b"}
+	sorted := func(got []*models.Mock) []string {
+		names := namesOf(got)
+		sort.Strings(names)
+		return names
+	}
+	noPerTest := func(where string, got []*models.Mock) {
+		t.Helper()
+		for _, n := range namesOf(got) {
+			if slices.Contains(perTestNames, n) {
+				t.Errorf("%s holds %s, a per-test mock", where, n)
+			}
+		}
+	}
+	for _, c := range []struct {
+		w       models.TestWindow
+		perTest []string
+	}{
+		{ws[0], []string{"edge-a", "own-a"}},
+		{ws[1], []string{"in-flight-b", "own-b"}},
+	} {
+		params := models.MockFilterParams{AfterTime: c.w.Start, BeforeTime: c.w.End, StrictMockWindow: true}
+		filtered, session, err := a.mocksForParams(ctx, params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sorted(filtered); !reflect.DeepEqual(got, c.perTest) {
+			t.Errorf("%s: the agent's per-test mocks are %v; want %v", c.w.TestCase, got, c.perTest)
+		}
+		noPerTest(c.w.TestCase+": the agent's session pool", session)
+		if err := a.UpdateMockParams(ctx, params); err != nil {
+			t.Fatal(err)
+		}
+		staged, err := mm.GetFilteredMocks()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sorted(staged); !reflect.DeepEqual(got, c.perTest) {
+			t.Errorf("%s: the mock manager stages %v as per-test; want %v", c.w.TestCase, got, c.perTest)
+		}
+		pool, err := mm.GetUnFilteredMocks()
+		if err != nil {
+			t.Fatal(err)
+		}
+		noPerTest(c.w.TestCase+": the mock manager's session pool", pool)
 	}
 }

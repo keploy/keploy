@@ -53,6 +53,13 @@ func RunWindows(ws []TestWindow) []TestWindow {
 // noWindowEnd is the End of a window that has none: later than any recording.
 var noWindowEnd = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
+// MockWindowEdgeSkew is the maximum distance outside every recorded test window
+// at which an unmapped mock is still attributed as edge skew to the window
+// whose nearer edge is closest. Small enough to absorb capture/handler
+// timestamp skew at a window boundary (e.g. tens of microseconds) without
+// claiming genuine startup or between-tests traffic.
+const MockWindowEdgeSkew = 100 * time.Microsecond
+
 // WindowSchedule is every recorded test window of one test set, sorted by
 // Start — the unselected and ignored tests included, because traffic the
 // application produced during a test that is not replayed still belongs to that
@@ -284,6 +291,24 @@ func InFlightEligible(m *Mock) bool {
 	return m != nil && !WindowBound(m.Kind) && lifetimeOf(m) == LifetimePerTest && !IsCarryOver(m) && !IsAnswerPlaced(m)
 }
 
+// EdgeSkewEligible reports whether the edge rule may give m to a window: a
+// mock placed (PlaceOf) outside every recorded window, within
+// MockWindowEdgeSkew of one's edge, is that window's test's (OwnerOf). Only a
+// plain per-test timed mock is: the shape the in-flight rule applies to
+// (InFlightEligible: per-test, neither carry-over, window-bound nor placed at
+// its answer), not one a StagingWithStartup need stages with the set's
+// startup (IsStagedAtStaging), and not one whose consume outside its window
+// is flagged for the replay to attribute by the release rule
+// (MarksOutOfWindow: every per-test mock of a carry-over kind, whatever its
+// own predicate says). Every other shape has its own rule for where it is
+// served (a carry-over mock its release window, a window-bound one its own
+// window, one placed at its answer the window its answer is in, a declared
+// one the set's staging, a carry-over kind's the release rule), and keeps it:
+// the edge rule never routes one.
+func EdgeSkewEligible(m *Mock) bool {
+	return InFlightEligible(m) && !IsStagedAtStaging(m) && !MarksOutOfWindow(m)
+}
+
 // Contains reports whether t is inside one of the windows, ends included.
 func (s *WindowSchedule) Contains(t time.Time) bool {
 	return s.IndexOf(t) >= 0
@@ -355,4 +380,236 @@ func (s *WindowSchedule) ReleaseHorizon(currentStart time.Time) (horizon time.Ti
 		horizon = s.maxEnd[c]
 	}
 	return horizon, true
+}
+
+// OwnerOf returns the recorded test window index that owns timestamp t:
+//
+//  1. When one or more windows contain t (Start <= t <= End), the smallest
+//     containing window owns it (the innermost request in a nested pair).
+//     Partly overlapping (non-nested) windows that both contain t are ranked
+//     by closest request start (smallest t - Start, i.e. latest Start), then
+//     smallest End (shortest duration on equal Start), then stable ID
+//     (TestCase lexicographically, then schedule index).
+//  2. When t is outside every recorded window and maxSkew > 0, the window
+//     whose nearer edge is closest within maxSkew (dist <= maxSkew) owns it
+//     (edge skew), tie-breaking by closer request start, shorter duration,
+//     then stable ID.
+//
+// inside reports whether t was contained in the returned window (true for
+// rule 1, false for edge-skew rule 2). ok is false when the schedule is empty,
+// t is zero, or t lies outside every window beyond maxSkew.
+func (s *WindowSchedule) OwnerOf(t time.Time, maxSkew time.Duration) (index int, inside, ok bool) {
+	n := s.Len()
+	if n == 0 || t.IsZero() {
+		return -1, false, false
+	}
+	p := s.CurrentIndex(t) + 1 // windows[0:p] started at or before t
+	if p > 0 {
+		first := sort.Search(p, func(i int) bool { return !s.maxEnd[i].Before(t) })
+		best := -1
+		for i := first; i < p; i++ {
+			w := s.windows[i]
+			if w.End.Before(t) {
+				continue
+			}
+			if best < 0 || betterContainingOwner(w, i, s.windows[best], best) {
+				best = i
+			}
+		}
+		if best >= 0 {
+			return best, true, true
+		}
+	}
+	if maxSkew <= 0 {
+		return -1, false, false
+	}
+	best := -1
+	var bestDist time.Duration
+	if p > 0 {
+		cutoff := t.Add(-maxSkew)
+		first := sort.Search(p, func(i int) bool { return !s.maxEnd[i].Before(cutoff) })
+		for i := first; i < p; i++ {
+			w := s.windows[i]
+			if w.End.Before(cutoff) {
+				continue
+			}
+			dist := t.Sub(w.End)
+			if best < 0 || betterEdgeOwner(t, w, i, dist, s.windows[best], best, bestDist) {
+				best, bestDist = i, dist
+			}
+		}
+	}
+	limit := t.Add(maxSkew)
+	for i := p; i < n && !s.windows[i].Start.After(limit); i++ {
+		w := s.windows[i]
+		dist := w.Start.Sub(t)
+		if best < 0 || betterEdgeOwner(t, w, i, dist, s.windows[best], best, bestDist) {
+			best, bestDist = i, dist
+		}
+	}
+	if best >= 0 {
+		return best, false, true
+	}
+	return -1, false, false
+}
+
+// EdgeOutcome is what the edge rule decides for a mock (EdgeDecision).
+type EdgeOutcome uint8
+
+const (
+	// EdgeNone: the edge rule gives the mock to no window.
+	EdgeNone EdgeOutcome = iota
+	// EdgeOwned: the edge rule gives the mock to the window.
+	EdgeOwned
+	// EdgeLeftInFlight: the edge rule would give the mock to the window, but
+	// leaves it to the in-flight rule: it is in flight into the next window,
+	// which that rule gives it.
+	EdgeLeftInFlight
+)
+
+// EdgeDecision is the edge rule for m: a plain per-test timed mock
+// (EdgeSkewEligible) placed (PlaceOf) outside every window, within
+// MockWindowEdgeSkew of a window's edge, belongs to the window whose edge is
+// nearest (OwnerOf). It gives no window a mock another rule places: one
+// placed before the first window began is startup traffic (EdgeNone), and one
+// in flight into the window after the gap it is in (sent in the gap, answered
+// at or after that window's start: InFlightInto) is that window's
+// (EdgeLeftInFlight, with the window the rule would have given it to). Every
+// site that applies the edge rule reads it, through EdgeOwner: the mock
+// manager's staging, its windowed read and its reclaim, the MySQL matcher's
+// ownership rank, the agent's disk read, and the replay's mapping of what a
+// test consumed (MockState.EdgeOwned).
+func (s *WindowSchedule) EdgeDecision(m *Mock) (index int, outcome EdgeOutcome) {
+	if m == nil || s.Len() == 0 {
+		return -1, EdgeNone
+	}
+	place := PlaceOf(m)
+	if place.IsZero() || place.Before(s.windows[0].Start) {
+		return -1, EdgeNone
+	}
+	idx, inside, owned := s.OwnerOf(place, MockWindowEdgeSkew)
+	if !owned || inside || !EdgeSkewEligible(m) {
+		return -1, EdgeNone
+	}
+	if next := s.CurrentIndex(place) + 1; next < s.Len() && s.InFlightInto(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, s.windows[next].Start) {
+		return idx, EdgeLeftInFlight
+	}
+	return idx, EdgeOwned
+}
+
+// EdgeOwnedBy reports whether the edge rule gives m to the window
+// [start, end] (EdgeOwner). A mock not placed within MockWindowEdgeSkew
+// outside one of that window's edges is no edge mock of it, which is told
+// before the schedule is searched. False on a nil schedule.
+func (s *WindowSchedule) EdgeOwnedBy(m *Mock, start, end time.Time) bool {
+	if m == nil || s.Len() == 0 || start.IsZero() || end.IsZero() {
+		return false
+	}
+	place := PlaceOf(m)
+	nearStart := place.Before(start) && !place.Before(start.Add(-MockWindowEdgeSkew))
+	nearEnd := place.After(end) && !place.After(end.Add(MockWindowEdgeSkew))
+	if place.IsZero() || (!nearStart && !nearEnd) {
+		return false
+	}
+	idx, ok := s.EdgeOwner(m)
+	if !ok {
+		return false
+	}
+	w := s.windows[idx]
+	return w.Start.Equal(start) && w.End.Equal(end)
+}
+
+// EdgeOwner is the window the edge rule gives m to (EdgeDecision's EdgeOwned).
+func (s *WindowSchedule) EdgeOwner(m *Mock) (index int, ok bool) {
+	idx, outcome := s.EdgeDecision(m)
+	if outcome != EdgeOwned {
+		return -1, false
+	}
+	return idx, true
+}
+
+// OwnerOfSpan returns the recorded test window index that owns the recorded
+// interval [start, end] (w.Start <= start && end <= w.End), using the same
+// smallest-containing-window and partly-overlapping ranking as OwnerOf. When
+// end is zero or before start, it reduces to the containing-window rule at
+// start. Returns (-1, false) when no recorded window contains the full span.
+func (s *WindowSchedule) OwnerOfSpan(start, end time.Time) (index int, ok bool) {
+	n := s.Len()
+	if n == 0 || start.IsZero() {
+		return -1, false
+	}
+	if end.IsZero() || end.Before(start) {
+		end = start
+	}
+	p := s.CurrentIndex(start) + 1 // windows[0:p] started at or before start
+	if p <= 0 {
+		return -1, false
+	}
+	first := sort.Search(p, func(i int) bool { return !s.maxEnd[i].Before(end) })
+	best := -1
+	for i := first; i < p; i++ {
+		w := s.windows[i]
+		if w.End.Before(end) {
+			continue
+		}
+		if best < 0 || betterContainingOwner(w, i, s.windows[best], best) {
+			best = i
+		}
+	}
+	if best >= 0 {
+		return best, true
+	}
+	return -1, false
+}
+
+// betterContainingOwner reports whether candidate a (at schedule index ia)
+// outranks b (at ib) among windows containing a timestamp t:
+//   - If one strictly encloses the other, the nested (inner) window wins.
+//   - For partly overlapping (non-nested) windows, the closer request start
+//     (larger Start, since Start <= t) wins, then shorter duration (earlier
+//     End on equal Start), then stable TestCase ID, then schedule index.
+//
+// Because any window enclosing another has Start <= inner.Start (and strictly
+// larger End when starts are equal), comparing (Start desc, End asc, TestCase
+// asc, index asc) yields the exact winner of dropping enclosing windows first
+// and ranking the remaining non-nested windows by closest Start then stable ID.
+func betterContainingOwner(a TestWindow, ia int, b TestWindow, ib int) bool {
+	if !a.Start.Equal(b.Start) {
+		return a.Start.After(b.Start)
+	}
+	if !a.End.Equal(b.End) {
+		return a.End.Before(b.End)
+	}
+	if a.TestCase != b.TestCase {
+		return a.TestCase < b.TestCase
+	}
+	return ia < ib
+}
+
+// betterEdgeOwner reports whether candidate a (at schedule index ia, distance
+// da to nearer edge) outranks b (at ib, distance db) for an edge-skewed
+// timestamp t outside every recorded window.
+func betterEdgeOwner(t time.Time, a TestWindow, ia int, da time.Duration, b TestWindow, ib int, db time.Duration) bool {
+	if da != db {
+		return da < db
+	}
+	sa, sb := absDuration(t.Sub(a.Start)), absDuration(t.Sub(b.Start))
+	if sa != sb {
+		return sa < sb
+	}
+	dura, durb := a.End.Sub(a.Start), b.End.Sub(b.Start)
+	if dura != durb {
+		return dura < durb
+	}
+	if a.TestCase != b.TestCase {
+		return a.TestCase < b.TestCase
+	}
+	return ia < ib
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }

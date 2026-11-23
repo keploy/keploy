@@ -4249,7 +4249,17 @@ func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logge
 // strictWindow is the user's window mode (MockFilterParams.StrictMockWindow),
 // which decides that, whatever strict says. A zero inFlightFrom keeps none.
 func FilterPerTestAndLaxPromotedInFlightAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
-	perTestInWindow, promotedToSession := filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow)
+	return FilterPerTestAndLaxPromotedWithWindows(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, nil)
+}
+
+// FilterPerTestAndLaxPromotedWithWindows is
+// FilterPerTestAndLaxPromotedInFlightAware that also keeps in the per-test
+// slice, under the strict window, a plain per-test mock the edge rule gives
+// the window (ServeWindow.Windows, models.WindowSchedule.EdgeOwner), as the
+// mock manager's staging then stages it: the set's recorded windows. Nil
+// windows keep none, as FilterPerTestAndLaxPromotedInFlightAware.
+func FilterPerTestAndLaxPromotedWithWindows(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, windows)
 
 	sort.SliceStable(perTestInWindow, func(i, j int) bool {
 		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
@@ -4549,7 +4559,7 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 // the reader fall through to the zero-time behaviour and remain
 // functionally identical to the pre-fix blanket-drop contract.
 func filterByTimeStampTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
-	return filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, time.Time{}, false)
+	return filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, time.Time{}, false, nil)
 }
 
 // filterByTimeStampInFlightAware is filterByTimeStampTierAware that also keeps
@@ -4569,8 +4579,11 @@ func filterByTimeStampTierAware(ctx context.Context, logger *zap.Logger, m []*mo
 // stated its lifetime is kept, since lax mode drops a stated mock out of its
 // window, and an unstated one is promoted to the session pool as every
 // unstated per-test mock out of the window is, as before. A zero inFlightFrom
-// keeps none.
-func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
+// keeps none. Given windows, the recorded windows, it keeps in the per-test
+// slice too, under the strict window, a plain per-test mock the edge rule
+// gives the window (models.WindowSchedule.EdgeOwnedBy), stated lifetime or
+// not; nil: no edge rule.
+func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -4584,7 +4597,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 	}
 
 	strict := strictWindowEnabled(strictPerCall)
-	w := ServeWindow{Start: afterTime, End: beforeTime, FirstStart: firstWindowStart, InFlightFrom: inFlightFrom, StrictPerCall: strictPerCall, StrictWindow: strictWindow}
+	w := ServeWindow{Start: afterTime, End: beforeTime, FirstStart: firstWindowStart, InFlightFrom: inFlightFrom, StrictPerCall: strictPerCall, StrictWindow: strictWindow, Windows: windows}
 	isNonKeploy := false
 	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 
@@ -4678,7 +4691,11 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		case ruleSessionLifetime, ruleLaxPromoted:
 			p.TestModeInfo.IsFiltered = false
 			unfilteredMocks = append(unfilteredMocks, p)
-		case ruleInWindow, ruleInFlight:
+		case ruleInWindow, ruleInFlight, ruleEdge:
+			// ruleEdge: under the strict window, given w.Windows, a plain
+			// per-test mock the edge rule gives this window (EdgeOwnedBy),
+			// stated lifetime or not, which the mock manager then stages by
+			// the same rule.
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 		case ruleStartup:

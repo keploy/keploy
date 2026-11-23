@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // startSet is a test set staged as the replay stages it: its boundary, its
@@ -805,5 +806,50 @@ func TestAConnectionWithNoManagerIsHandedNoSet(t *testing.T) {
 	p.beforeServing(Process{Pid: 1}, 0)
 	if set != 0 || !errors.Is(err, errNoWorkerInstance) {
 		t.Fatalf("a connection no manager serves is handed set %d, re-arm %v; want 0 and no worker instance", set, err)
+	}
+}
+
+// A per-test-tagged recording answered while the first app instance started
+// must not remain in setServed across RearmAppStart, or the ownership summary
+// would report the re-armed second instance's serve as served twice.
+func TestRearmAppStartResetsSetServedForOwnershipSummary(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	mm := NewMockManager(nil, nil, zap.New(core))
+	t.Cleanup(mm.Close)
+	mm.ResetForReplaySession()
+
+	m := inFlightMock("boot-pertest-1", 300, 310)
+	m.TestModeInfo.Lifetime = models.LifetimePerTest
+	mm.SetMocksWithWindow([]*models.Mock{m}, nil, models.BaseTime, time.Unix(2000, 0))
+
+	if err := mm.flagMockAsUsed(models.MockState{Name: m.Name, Lifetime: models.LifetimePerTest}, 0); err != nil {
+		t.Fatalf("first start serve: %v", err)
+	}
+	if err := mm.RearmAppStart(); err != nil {
+		t.Fatalf("RearmAppStart: %v", err)
+	}
+	if err := mm.flagMockAsUsed(models.MockState{Name: m.Name, Lifetime: models.LifetimePerTest}, 0); err != nil {
+		t.Fatalf("re-armed start serve: %v", err)
+	}
+	mm.logSetOwnership()
+
+	var summary map[string]any
+	for _, entry := range logs.All() {
+		if strings.Contains(entry.Message, "window ownership summary for the test set") {
+			summary = entry.ContextMap()
+			break
+		}
+	}
+	if summary == nil {
+		t.Fatal("missing window ownership summary log entry")
+	}
+	if got := summary["per_test_recordings_served"]; got != int64(1) {
+		t.Fatalf("per_test_recordings_served=%v, want 1", got)
+	}
+	if got := summary["per_test_serves"]; got != int64(1) {
+		t.Fatalf("per_test_serves=%v, want 1", got)
+	}
+	if got := summary["per_test_recordings_served_twice_or_more"]; got != int64(0) {
+		t.Fatalf("per_test_recordings_served_twice_or_more=%v, want 0", got)
 	}
 }

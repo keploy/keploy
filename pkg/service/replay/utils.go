@@ -1779,6 +1779,25 @@ func recordReqResTimestamps(tc *models.TestCase) (time.Time, time.Time) {
 	return req, resp
 }
 
+// mockEntryOf is the mapping entry of a consumed mock: its name, kind and
+// recorded times, and its Timestamp, the request time's second when it has
+// one, else when it was first served.
+func mockEntryOf(m models.MockState) models.MockEntry {
+	timestamp := m.Timestamp
+	if m.ReqTimestampMock != "" {
+		if t, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
+			timestamp = t.Unix()
+		}
+	}
+	return models.MockEntry{
+		Name:             m.Name,
+		Kind:             string(m.Kind),
+		Timestamp:        timestamp,
+		ReqTimestampMock: m.ReqTimestampMock,
+		ResTimestampMock: m.ResTimestampMock,
+	}
+}
+
 // upsertActualTestMockMapping updates the actual test-to-mock mappings with the mocks
 // consumed during the replay of a specific test case.
 //
@@ -1800,12 +1819,10 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 
 	newMocks := make([]models.MockEntry, 0, len(consumedMocks))
 	for _, m := range consumedMocks {
-		timestamp := m.Timestamp
 		var parsedReqTime, parsedResTime time.Time
 		if m.ReqTimestampMock != "" {
 			if t, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
 				parsedReqTime = t
-				timestamp = t.Unix()
 			}
 		}
 		if m.ResTimestampMock != "" {
@@ -1856,13 +1873,7 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 			}
 		}
 
-		newMocks = append(newMocks, models.MockEntry{
-			Name:             m.Name,
-			Kind:             string(m.Kind),
-			Timestamp:        timestamp,
-			ReqTimestampMock: m.ReqTimestampMock,
-			ResTimestampMock: m.ResTimestampMock,
-		})
+		newMocks = append(newMocks, mockEntryOf(m))
 	}
 
 	if len(newMocks) == 0 {

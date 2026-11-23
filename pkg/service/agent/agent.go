@@ -1867,7 +1867,30 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 				zap.String("firstRecordedTest", cutoff.UTC().Format(time.RFC3339Nano)))
 			break
 		}
-		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
+		// Widen the on-disk window read by MockWindowEdgeSkew so a plain
+		// per-test mock the edge rule gives this window
+		// (models.WindowSchedule.EdgeOwnedBy), placed just outside it,
+		// reaches the window filter instead of being left unread on disk. Of
+		// the margins only such mocks are kept (edgeMargin): every other
+		// margin mock, one the edge rule gives the other window or leaves to
+		// the in-flight rule among them, is left unread as on main. Not
+		// widened when the proxy applies no edge rule (no recorded windows,
+		// or exact serving), nor for an inverted window (its response before
+		// its request), which LoadWindow clamps to its start.
+		loadStart, loadEnd := params.AfterTime, params.BeforeTime
+		var edgeWindows *models.WindowSchedule
+		if r, ok := a.Proxy.(interface{ EdgeWindows() *models.WindowSchedule }); ok {
+			edgeWindows = r.EdgeWindows()
+		}
+		widen := edgeWindows.Len() > 0 && !loadStart.Equal(models.BaseTime) && !loadEnd.Before(loadStart)
+		if widen {
+			loadStart = loadStart.Add(-models.MockWindowEdgeSkew)
+			loadEnd = loadEnd.Add(models.MockWindowEdgeSkew)
+		}
+		loaded, err = disk.LoadWindow(loadStart, loadEnd)
+		if err == nil && widen {
+			loaded = edgeMargin(loaded, edgeWindows, params.AfterTime, params.BeforeTime)
+		}
 		if err == nil && !firstWindowStart.IsZero() {
 			var startup []*models.Mock
 			startup, err = disk.LoadBefore(firstWindowStart)
@@ -1904,6 +1927,24 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 		zap.Int("loadedFromDisk", len(loaded)),
 		zap.Int("residentIneligible", len(resident)))
 	return dedupByName(resident, loaded), nil
+}
+
+// edgeMargin is loaded, a read of the window [start, end] widened by
+// models.MockWindowEdgeSkew on both sides, less the margin mocks the edge rule
+// does not give this window (models.WindowSchedule.EdgeOwnedBy over windows):
+// what the window's own read holds (placed in it, models.PlaceOf), and of the
+// margins only the mocks the edge rule gives it. The filter is in place.
+func edgeMargin(loaded []*models.Mock, windows *models.WindowSchedule, start, end time.Time) []*models.Mock {
+	out := loaded[:0]
+	for _, m := range loaded {
+		if m == nil {
+			continue
+		}
+		if place := models.PlaceOf(m); (!place.Before(start) && !place.After(end)) || windows.EdgeOwnedBy(m, start, end) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // seedStatementCatalog hands the proxy the stored set's statement catalog
@@ -2539,8 +2580,18 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		// per-test mocks in the user's window mode (params.StrictMockWindow),
 		// not agentStrict's: on a windowed proxy the agent's filter is never
 		// strict, and the mock manager filters what it is handed.
+		// The edge rule is the mock manager's too: a plain per-test mock
+		// placed just outside every window, nearest this one's edge, is
+		// handed to it as this window's per-test mock, stated lifetime or
+		// not (pkg.ServeWindow.Windows), which it stages by the same rule.
+		// The proxy names the recorded windows it was seeded with, none
+		// under exact serving.
 		inFlightFrom, _ := a.inFlightFrom(params)
-		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedInFlightAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart, inFlightFrom, params.StrictMockWindow)
+		var edgeWindows *models.WindowSchedule
+		if r, ok := a.Proxy.(interface{ EdgeWindows() *models.WindowSchedule }); ok {
+			edgeWindows = r.EdgeWindows()
+		}
+		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedWithWindows(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart, inFlightFrom, params.StrictMockWindow, edgeWindows)
 		filteredMocks = perTestIn
 		unfilteredMocks = pkg.FilterConfigMocksTierAware(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
 		if len(promotedToSession) > 0 {

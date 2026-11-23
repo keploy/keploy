@@ -1491,6 +1491,67 @@ type RecordedWindowIndex interface {
 	RecordedWindowIndex(t time.Time) (index int, known bool)
 }
 
+// WindowOwnership is an optional TestWindows capability: which recorded test
+// window of the staged set owns a mock's recorded timestamp
+// (models.WindowSchedule.OwnerOf). Smallest containing window owns nested
+// pairs; partly overlapping (non-nested) windows rank by closest request start
+// then stable ID; a mock just outside every window goes to the window whose
+// nearer edge is closest within models.MockWindowEdgeSkew.
+type WindowOwnership interface {
+	// OwnerTestWindow returns the recorded test window owning t, whether t
+	// lies inside that window (false when attributed by bounded edge skew),
+	// and whether the store has seeded recorded windows and found an owner.
+	OwnerTestWindow(t time.Time) (owner models.TestWindow, inside, owned bool)
+	// OwnerTestWindowSpan returns the smallest recorded test window containing
+	// the entire interval [start, end] (models.WindowSchedule.OwnerOfSpan).
+	OwnerTestWindowSpan(start, end time.Time) (owner models.TestWindow, owned bool)
+	// EdgeOwnerWindow returns the recorded test window the edge rule gives m
+	// to (models.WindowSchedule.EdgeOwner): only a plain per-test timed mock
+	// placed just outside every window, which no other rule places.
+	EdgeOwnerWindow(m *models.Mock) (owner models.TestWindow, owned bool)
+}
+
+// OwnershipTally is an optional MockMemDb capability: a matcher reports what
+// the window ownership rules decided for a call, which the store counts for
+// the test set being replayed and says at its end.
+type OwnershipTally interface {
+	TallyOwnership(e OwnershipEvent)
+}
+
+// OwnershipEvent is one decision OwnershipTally counts.
+type OwnershipEvent uint8
+
+const (
+	// OwnershipEdgeAnswered: a call was answered by a recording the edge rule
+	// gives the open window (models.WindowSchedule.EdgeOwner).
+	OwnershipEdgeAnswered OwnershipEvent = iota + 1
+	// OwnershipDeferred: the first exact match of a call in the open window
+	// did not answer at once, because another recorded window owns it, it is
+	// the open window's by the edge rule alone, or its recorded transaction
+	// status disagrees with the live connection's.
+	OwnershipDeferred
+	// OwnershipPassedOver: of those, the call was answered by another
+	// recording.
+	OwnershipPassedOver
+	// OwnershipDriftRanked: a drifted query's score fallback answered with a
+	// recording ranked by ownership, the bound connection or the transaction
+	// status above a higher-scoring one.
+	OwnershipDriftRanked
+)
+
+// WindowReclaim is an optional MockMemDb capability used in windowed replay
+// (without exact serving) to reclaim a previously consumed mock inside the
+// open test window by atomically consuming a still-unconsumed identical
+// alternative recorded inside the earlier overlapping window.
+type WindowReclaim interface {
+	RecordWindowAlternatives(consumed *models.Mock, winStart, winEnd time.Time, alts []*models.Mock)
+	ReclaimableInWindow(winStart, winEnd time.Time) []*models.Mock
+	// CommitWindowReclaim takes reclaimed back for the window [winStart,
+	// winEnd] the call was matched in, and credits the earlier holders on
+	// the path the next copy (MockState.CreditTo).
+	CommitWindowReclaim(reclaimed *models.Mock, winStart, winEnd time.Time) (replacement *models.Mock, ok bool)
+}
+
 // VariableScopes is an optional MockMemDb capability, beside VariableStore:
 // the scope a call binds test variables in, by the mock that answers it. Under
 // exact serving, between tests, the next test's calls in flight the pool view
