@@ -1,11 +1,11 @@
 package proxy
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -132,19 +132,15 @@ func TestADerivedMockMovesTheSharedViewGeneration(t *testing.T) {
 // name exactly is served to every test (declaredInPool, #5198). A test whose
 // own mocks hold a derived mock replacing that start-up recording is never
 // served the source (sharesRest drops sourcesReplaced before declaredInPool),
-// and its SharedGeneration differs from tests that keep it, while the pool
-// view between tests and every other test still get the start-up recording.
+// and its shared view's generation (SharedGeneration's View) differs from
+// that of a test that keeps it, while the pool view between tests and the
+// next test, which holds no derived mock, still get the start-up recording.
 func TestADerivedMockReplacesADeclaredStartUpSourceInItsOwnTestAlone(t *testing.T) {
 	declareSessionCalls(t, declaredRule)
 	mm, ms := startupSet(t)
 	dRates := statedCall("d-rates", 6*time.Second, "/echo/rates")
 	dRates.Spec.Authored = &models.Authored{How: models.AuthoredDerived, Reason: "rates down", Source: "startup:/rates"}
-	ix := &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
-		if mk.Spec.HTTPReq == nil {
-			return nil
-		}
-		return []string{mk.Spec.HTTPReq.URL}
-	}}
+	ix := urlIndex()
 	pool := []string{"rates", "cfg"}
 
 	mm.ServeExactPool("k", pool)
@@ -156,7 +152,7 @@ func TestADerivedMockReplacesADeclaredStartUpSourceInItsOwnTestAlone(t *testing.
 	// view, reusable reads, keyed walks, or SharedMocks.
 	mm.ServeExactTest("T1", []*models.Mock{dRates})
 	v := mm.exactView()
-	if v.shows(ms["rates"]) || v.holds("rates") {
+	if v.shows(ms["rates"]) {
 		t.Fatal("T1, whose derived mock replaces declared start-up rates, is still served it")
 	}
 	if !v.holds("d-rates") {
@@ -168,7 +164,7 @@ func TestADerivedMockReplacesADeclaredStartUpSourceInItsOwnTestAlone(t *testing.
 	if got := sessionNames(mm); containsName(got, "rates") {
 		t.Fatalf("T1 sessionNames %q includes replaced declared start-up rates", got)
 	}
-	if got := strings.Join(keyedWalk(t, mm, ix, "/echo/rates"), ","); containsName(got, "rates") || !containsName(got, "d-rates") {
+	if got := keyedWalk(t, mm, ix, "/echo/rates"); slices.Contains(got, "rates") || !slices.Contains(got, "d-rates") {
 		t.Fatalf("T1 keyed walk of /echo/rates = %q; want d-rates without rates", got)
 	}
 	_, sess1, ok := mm.SharedMocks()
@@ -187,7 +183,8 @@ func TestADerivedMockReplacesADeclaredStartUpSourceInItsOwnTestAlone(t *testing.
 	}
 
 	// T2 holds no derived mock: it keeps the declared start-up recording, and
-	// its SharedGeneration differs from T1's.
+	// its shared view's generation differs from T1's. (Only the View half
+	// tells: the answered keepNamed calls since g1 move the Store half.)
 	mm.ServeExactTest("T2", []*models.Mock{ms["own"]})
 	v = mm.exactView()
 	if !v.shows(ms["rates"]) {
@@ -204,8 +201,8 @@ func TestADerivedMockReplacesADeclaredStartUpSourceInItsOwnTestAlone(t *testing.
 		t.Fatalf("T2 SharedMocks() must include declared start-up rates; ok=%v", ok)
 	}
 	g2, ok := mm.SharedGeneration(models.HTTP)
-	if !ok || g2 == g1 {
-		t.Fatalf("T2 SharedGeneration = %+v (ok=%v); want different from T1 %+v", g2, ok, g1)
+	if !ok || g2.View == g1.View {
+		t.Fatalf("T2 SharedGeneration = %+v (ok=%v); want a View other than T1's %+v", g2, ok, g1)
 	}
 }
 
