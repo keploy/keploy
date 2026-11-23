@@ -82,6 +82,9 @@ func TestStatedLifetimeOfMySQLMocks(t *testing.T) {
 		{"CURRENT_USER()", "mocks", "COM_QUERY", "SELECT CURRENT_USER()", session},
 		{"CONNECTION_ID()", "mocks", "COM_QUERY", "SELECT CONNECTION_ID()", session},
 
+		{"Django connection setup", "mocks", "COM_QUERY", "\n                SELECT VERSION(),\n                       @@sql_mode,\n                       @@default_storage_engine,\n                       @@sql_auto_is_null,\n                       @@lower_case_table_names,\n                       CONVERT_TZ('2001-01-01 01:00:00', 'UTC', 'UTC') IS NOT NULL\n            ", session},
+		{"IS NULL of a system variable", "mocks", "COM_QUERY", "SELECT @@sql_mode IS NULL", session},
+
 		{"connection setup after a comment", "mocks", "COM_QUERY", "-- pool check\n/* jdbc */ SELECT @@tx_isolation", session},
 		{"setup in an executable comment", "mocks", "COM_QUERY", "/*!40101 SET NAMES utf8mb4 */", session},
 		{"data write in an executable comment", "mocks", "COM_QUERY", "/*!40101 DELETE FROM users */", perTest},
@@ -102,6 +105,12 @@ func TestStatedLifetimeOfMySQLMocks(t *testing.T) {
 		{"RAND()", "mocks", "COM_QUERY", "SELECT RAND()", perTest},
 		{"arithmetic", "mocks", "COM_QUERY", "SELECT 41 + 1", perTest},
 		{"user variable", "mocks", "COM_QUERY", "SELECT @last_id", perTest},
+		{"CONVERT_TZ of NOW()", "mocks", "COM_QUERY", "SELECT CONVERT_TZ(NOW(), 'UTC', 'UTC') IS NOT NULL", perTest},
+		{"CONVERT_TZ of a user variable", "mocks", "COM_QUERY", "SELECT CONVERT_TZ(@booked_at, 'UTC', '+05:30')", perTest},
+		{"IS NULL of data", "mocks", "COM_QUERY", "SELECT LAST_INSERT_ID() IS NULL", perTest},
+		{"other function of literals", "mocks", "COM_QUERY", "SELECT CONCAT('a', 'b')", perTest},
+		{"CONVERT_TZ of literals outside an IS test", "mocks", "COM_QUERY", "SELECT CONVERT_TZ('2026-03-01 09:00:00', 'UTC', 'America/New_York')", perTest},
+		{"CONVERT_TZ of literals in arithmetic", "mocks", "COM_QUERY", "SELECT CONVERT_TZ('2026-03-01 09:00:00', 'UTC', '+05:30') + 0", perTest},
 		{"system variable beside data", "mocks", "COM_QUERY", "SELECT @@version, UUID()", perTest},
 		{"table read", "mocks", "COM_QUERY", "SELECT name FROM users WHERE id = 1", perTest},
 		{"SELECT 1 from a table", "mocks", "COM_QUERY", "SELECT 1 FROM users LIMIT 1", perTest},

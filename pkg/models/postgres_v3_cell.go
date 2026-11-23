@@ -777,6 +777,10 @@ func toYAMLNode(v any) (*yaml.Node, error) {
 // table data going into mocks). Fields like enum-like Severity / Code
 // don't strictly need it but using it consistently across the Notice
 // shape keeps the type contract uniform.
+//
+// keploy/yaml, the fork go.mod replaces gopkg.in/yaml.v3 with, writes these
+// block scalars readably. This is kept: mock files keep the format they have
+// been written in, and a module built without the fork stays safe.
 type PostgresV3SafeString string
 
 // MarshalYAML emits the string with DoubleQuotedStyle when the value

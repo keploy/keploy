@@ -50,20 +50,23 @@ func readAFewEntriesAtATime(t *testing.T) {
 		"    - id: test-1\n", "    - id: &first test-1\n", 1), "    - id: test-190\n", "    - id: *first\n", 1)), true, false, false}
 	// YAML reads a stream's first document: so does the read of a few
 	// entries at a time.
-	// yaml.v3 writes a block of text whose first line alone is indented
-	// with an indent it cannot read back: read whole or a few entries at a
-	// time, the file is refused alike.
-	bad := generatedMapping()
-	bad.TestCases[70].Key = "  leading spaces\nthen none"
-	if enc, err := marshalMappingYAML(bad); err == nil {
-		fixtures["generated, a value YAML cannot read back"] = fixture{data: enc}
+	// A block of text whose first line alone is indented: yaml.v3 wrote it
+	// with an indent it could not read back; keploy/yaml writes it under an
+	// indentation indicator, so it reads back, a few entries at a time as
+	// whole, and the file is the encoding of what it holds.
+	firstIndented := generatedMapping()
+	firstIndented.TestCases[70].Key = "  leading spaces\nthen none"
+	if enc, err := marshalMappingYAML(firstIndented); err == nil {
+		fixtures["generated, a value whose first line alone is indented"] = fixture{enc, true, true, true}
 	}
-	// And one it reads back without the indent its every line starts with:
-	// read either way it is the same, and its encoding is not the file's.
-	lossy := generatedMapping()
-	lossy.TestCases[70].Key = "  two\n  indented lines\n"
-	if enc, err := marshalMappingYAML(lossy); err == nil {
-		fixtures["generated, a value YAML reads back without its indent"] = fixture{enc, true, true, false}
+	// And one whose every line starts with an indent: yaml.v3 wrote it so it
+	// read back without that indent, and its encoding was not the file's.
+	// keploy/yaml writes its indent with an indicator, so it reads back whole
+	// and the file is the encoding of what it holds: no hand edit.
+	indented := generatedMapping()
+	indented.TestCases[70].Key = "  two\n  indented lines\n"
+	if enc, err := marshalMappingYAML(indented); err == nil {
+		fixtures["generated, a value every line of which is indented"] = fixture{enc, true, true, true}
 	}
 	fixtures["generated, a second document"] = fixture{append(append([]byte{}, enc...), "---\nversion: x\n"...), true, true, false}
 	for _, f := range []string{"mappings.yaml", "moved.yaml"} {
@@ -208,21 +211,15 @@ func TestTheRoundsReadsAndWriteOfTheLiveMappingsFileAndTheNextFlushHoldLittleMor
 // key column that is no key, a comment at that column among the entries.
 func TestATestOfManyMocksReadAFewAtATimeIsTheTestReadWhole(t *testing.T) {
 	eachSwitch(t, func(t *testing.T) {
-		// Values YAML reads back (entryValues less the block of text whose
-		// first line alone is indented, which it does not).
-		var readable []string
-		for _, v := range entryValues {
-			if !strings.HasPrefix(v, "  leading spaces") {
-				readable = append(readable, v)
-			}
-		}
-		big := manyMocks("", 3*chunkMocks+17, readable)
+		// Every value of entryValues, the block of text whose first line alone
+		// is indented among them: keploy/yaml writes it so it reads back.
+		big := manyMocks("", 3*chunkMocks+17, entryValues)
 		m := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: "set-0"}
 		m.TestCases = append(m.TestCases, big)
 		for i := 0; i < mappingChunk+5; i++ {
-			m.TestCases = append(m.TestCases, manyMocks(fmt.Sprintf("test-%d", i), 1+i%3, readable))
+			m.TestCases = append(m.TestCases, manyMocks(fmt.Sprintf("test-%d", i), 1+i%3, entryValues))
 		}
-		bare := manyMocks("last", chunkMocks+40, readable)
+		bare := manyMocks("last", chunkMocks+40, entryValues)
 		bare.Cases, bare.CaseMocks, bare.CaseSteps, bare.Dir, bare.Starts = nil, nil, nil, "", 0
 		bare.At, bare.End, bare.Real, bare.Given, bare.Key, bare.Seed = time.Time{}, time.Time{}, nil, nil, "", ""
 		m.TestCases = append(m.TestCases, bare)
@@ -238,11 +235,6 @@ func TestATestOfManyMocksReadAFewAtATimeIsTheTestReadWhole(t *testing.T) {
 			"an alias to another part":    []byte(strings.Replace(strings.Replace(string(enc), "        - name: mock-1\n", "        - name: &one mock-1\n", 1), "        - name: mock-700\n", "        - name: *one\n", 1)),
 			"a line at the key column that is no key":       []byte(strings.Replace(string(enc), "        - name: mock-300\n", "      - name: mock-300\n", 1)),
 			"a comment at the key column among the entries": []byte(strings.Replace(string(enc), "        - name: mock-300\n", "      # a note\n        - name: mock-300\n", 1)),
-		}
-		unreadable := manyMocks("unreadable", chunkMocks+40, entryValues)
-		if enc, err := marshalMappingYAML(&models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: "set-0",
-			TestCases: []models.MappedTestCase{unreadable}}); err == nil {
-			files["a value YAML cannot read back"] = enc
 		}
 		for name, data := range files {
 			var whole, chunked models.Mapping
