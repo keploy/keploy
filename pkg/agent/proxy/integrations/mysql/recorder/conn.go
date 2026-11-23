@@ -191,7 +191,7 @@ func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.Ou
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("read greeting header: %w", err)
+		return nil, fmt.Errorf("read greeting header from %s: %w", addr, hungUpBeforeGreeting(err))
 	}
 	payloadLen := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
 	payload := make([]byte, payloadLen)
@@ -199,13 +199,25 @@ func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.Ou
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("read greeting payload: %w", err)
+		return nil, fmt.Errorf("read greeting payload from %s: %w", addr, hungUpBeforeGreeting(err))
 	}
 
 	buf := make([]byte, 4+payloadLen)
 	copy(buf, header)
 	copy(buf[4:], payload)
 	return buf, nil
+}
+
+// hungUpBeforeGreeting is err, a read of the greeting's failure, with a server
+// that hung up before sending any of it said as io.ErrUnexpectedEOF, never
+// io.EOF. To the recorder io.EOF is the end of a stream it captured, which
+// ends a connection with nothing said (RecordV2); the end of the fetch's own
+// connection is a failed fetch.
+func hungUpBeforeGreeting(err error) error {
+	if errors.Is(err, io.EOF) {
+		return fmt.Errorf("the server hung up before its greeting: %w", io.ErrUnexpectedEOF)
+	}
+	return err
 }
 
 // greetingFetches coalesces concurrent direct greeting fetches for the same
@@ -265,7 +277,10 @@ type greetingFetchResult struct {
 //     stream's teardown does not fail the others waiting on it. It stays bounded
 //     by fetchServerGreeting's own dial and read limits. Each caller stops
 //     waiting when its own ctx ends, and a caller whose ctx has already ended
-//     never STARTS a dial: recording stop is not a reason to reach the server.
+//     never STARTS a dial. It still takes a greeting remembered for the server,
+//     which reaches none. The recorder's ctx for it ends with its parser, not
+//     at the recording's stop (untilParserEnds): a connection captured before
+//     the stop still lacks only its greeting, and is recorded with it.
 //   - A failed fetch caches nothing as a success. Callers already waiting share
 //     its error, and callers arriving within greetingFetchFailureBackoff get
 //     that error without dialling again. After that the next caller dials. A
@@ -287,6 +302,15 @@ func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore 
 		// address, or a stand-in address (which fetchServerGreeting refuses).
 		return fetchServerGreeting(ctx, logger, opts)
 	}
+	// Same order as inside the flight: a remembered greeting (for instance one a
+	// raw leg recorded since the last failure) beats a remembered failure. It
+	// is read before the caller's end is: it reaches no server, so a caller
+	// whose ctx has ended takes it too.
+	if g, ok := hsStore.ServerGreeting(key); ok {
+		logger.Debug("post-TLS MySQL: using the greeting remembered for this server; not dialling",
+			zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))))
+		return g, nil
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -294,13 +318,6 @@ func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore 
 	// across stores (each has its own cache), and a flight must remember into
 	// the store its callers read.
 	flight := fmt.Sprintf("%p|%s", hsStore, key)
-	// Same order as inside the flight: a remembered greeting (for instance one a
-	// raw leg recorded since the last failure) beats a remembered failure.
-	if g, ok := hsStore.ServerGreeting(key); ok {
-		logger.Debug("post-TLS MySQL: using the greeting remembered for this server; not dialling",
-			zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))))
-		return g, nil
-	}
 	if err := recentGreetingFetchFailure(flight); err != nil {
 		logger.Debug("post-TLS MySQL: not dialling the server for its greeting again; a fetch failed moments ago",
 			zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))), zap.Error(models.HostsInError(ctx, err, dstAddrOf(opts))))

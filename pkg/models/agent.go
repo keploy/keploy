@@ -376,7 +376,14 @@ type ScopeWindow struct {
 	// whatever worker's; and two windows open at once in one worker (parallel
 	// tests of one go test binary) share its PID, so the later-begun one takes
 	// both tests' calls.
-	PID     uint32    `json:"pid,omitempty"`
+	PID uint32 `json:"pid,omitempty"`
+	// Seq is the agent's id of a test window it held open, unique in its
+	// run, which the mock states a replay's consumed read returns name
+	// (MockState.AnsweredIn); 0 on a window keploy held open for no
+	// serving: a test not run or refused at its begin, an application's
+	// start, a claim, and every window of a proxy that cannot say what it
+	// answered in.
+	Seq     uint64    `json:"seq,omitempty"`
 	Dir     string    `json:"dir,omitempty"`
 	Suite   bool      `json:"suite,omitempty"`
 	App     bool      `json:"app,omitempty"`
@@ -845,6 +852,16 @@ type MockFilterParams struct {
 	// (which is O(testcases^2) marshaling). Default false = legacy behaviour.
 	AgentOwnsConsumed  bool                 `json:"agentOwnsConsumed,omitempty"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// ConsumedRewinds is how many times keploy test rewound the set's
+	// consumed history for a retry cycle (ConsumedHistory.RewoundTo) to
+	// reach the history this filter is built from, whether or not the map is
+	// sent. Every keploy test filter carries it, exact serving's too. A
+	// change of it starts a pass over the set again, at the window the call
+	// sets, even one at the start the last pass ended in (the agent's
+	// integrations.WindowRewindCounter), and a higher one starts a new pass
+	// of the manager's once-claims (integrations.MockMemDb.ClaimOnce). Zero
+	// for a set's own history, and from a client that predates it.
+	ConsumedRewinds uint64 `json:"consumedRewinds,omitempty"`
 	// ConsumedHistory, when set, is the history TotalConsumedMocks is the live
 	// map of (ConsumedHistory.Map). It lets the client send an agent that
 	// already holds an earlier state of it only the entries written since

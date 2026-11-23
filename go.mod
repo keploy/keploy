@@ -175,3 +175,15 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+// gopkg.in/yaml.v3 is archived and gets no release. Keploy's fork,
+// github.com/keploy/yaml (branch v3-keploy), carries v3.0.1 plus two emitter
+// fixes: its event queue reuses its slots instead of growing and copying them
+// for every event (most of the garbage encoding a mock made); and a block
+// scalar whose value starts with a line break, a space or a tab is written
+// under the right indentation indicator, keeping a leading line break. Before,
+// a report holding such a body could not be read back
+// (TestGetReportReadsBackBodiesStartingWithABreakSpaceOrTab). Output differs
+// from v3.0.1 only for those block scalars. A replace only applies from the
+// main module: enterprise and k8s-proxy carry their own.
+replace gopkg.in/yaml.v3 => github.com/keploy/yaml v0.0.0-20261123121504-5aa603cfb02f

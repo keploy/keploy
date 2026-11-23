@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -53,9 +54,11 @@ func (p *Proxy) newDNSServer(network string) *dnsServer {
 		Addr:    fmt.Sprintf(":%v", p.DNSPort),
 		Net:     network,
 		Handler: p,
-		// miekg/dns calls it just before it serves on the socket, on the
-		// goroutine that called ActivateAndServe. A serve call that fails
-		// before it serves never calls it.
+		// miekg/dns calls it just before it enters its accept/read loop, on
+		// the goroutine that called ActivateAndServe — before Accept on TCP
+		// (every OS) and before touching the UDP socket on Windows. serve's
+		// preBoundReady check stops a closed or unverifiable pre-bound socket
+		// from reaching ActivateAndServe and being notified as started.
 		NotifyStartedFunc: func() { s.settleAs(true, nil) },
 	}
 	return s
@@ -86,7 +89,9 @@ func (s *dnsServer) serve() (err error) {
 		defer func() { _ = sock.Close() }()
 	}
 	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
-	err = s.srv.ActivateAndServe()
+	if err = preBoundReady(s.srv); err == nil {
+		err = s.srv.ActivateAndServe()
+	}
 	if err != nil {
 		utils.LogError(s.logger, err, fmt.Sprintf("the %s DNS server failed to serve or stopped serving", s.name()), zap.String("addr", s.srv.Addr))
 	}
@@ -1328,22 +1333,31 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// asked when keploy captured no upstream of the app's: resolv.conf
 	// is missing or unreadable, or names no resolver keploy can use (no
 	// nameserver given as a plain IP, or only keploy's own listener),
-	// and always on Windows, where keploy reads none. The forwarder
-	// treats this as "no upstream" and we would otherwise be stuck.
-	// Those servers are keploy's pick, not the app's, so a failure to
-	// reach them is not marked errNoUpstreamAnswered, and it stays an
-	// ERROR.
-	var addrs []string
+	// or on Windows when no adapter that is up has a DNS server. The
+	// forwarder treats this as "no upstream" and we would otherwise be
+	// stuck. Those servers are keploy's pick, not the app's, so a
+	// failure to reach them is not marked errNoUpstreamAnswered, and it
+	// stays an ERROR.
+	type upstreamTarget struct {
+		server string
+		addr   string
+	}
+	var targets []upstreamTarget
 	appUpstream := p.hasDNSUpstream()
 	if appUpstream {
 		for _, server := range p.dnsUpstreamServers {
-			addrs = append(addrs, net.JoinHostPort(server, p.dnsUpstreamPort))
+			targets = append(targets, upstreamTarget{
+				server: server,
+				addr:   net.JoinHostPort(server, p.dnsUpstreamPort),
+			})
 		}
 	} else {
 		// captureDNSUpstream already logs once at startup if it cannot
 		// snapshot a real resolver, so we don't re-log per-query here
 		// (that path runs on every cache miss and would burst the log).
-		addrs = recordDNSFallback
+		for _, addr := range recordDNSFallback {
+			targets = append(targets, upstreamTarget{server: addr, addr: addr})
+		}
 	}
 
 	c := new(dns.Client)
@@ -1358,12 +1372,21 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		resolveErr error
 	)
 
-	for _, addr := range addrs {
+	// The servers are asked as the application's resolver asks them
+	// (upstreamSearch): past a server's failure or refusal on every OS, and
+	// on Windows adapter by adapter, so a recording holds the answer the
+	// application gets.
+	search := newUpstreamSearch(p.dnsUpstreamAdapter)
+	for _, target := range targets {
+		server, addr := target.server, target.addr
+		if search.passes(server) {
+			continue
+		}
 		// Per-server-attempt logs fire on every cache miss (worst case, multiple
 		// servers per miss) so we keep only the diagnostic ones — silent success
 		// path, log the rare failure / truncation / TCP-retry transitions.
 		c.Net = "udp"
-		resp, _, err := c.Exchange(m, addr)
+		resp, _, err := p.exchange(c, m, addr)
 		if err != nil {
 			resolveErr = err
 			p.logger.Debug("upstream DNS exchange failed",
@@ -1381,7 +1404,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 				append(p.dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
 			)
 			c.Net = "tcp"
-			resp, _, err = c.Exchange(m, addr)
+			resp, _, err = p.exchange(c, m, addr)
 			if err != nil {
 				resolveErr = err
 				p.logger.Debug("upstream DNS TCP retry failed",
@@ -1396,9 +1419,27 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		}
 
 		if resp != nil {
+			if !search.ends(server, resp) {
+				p.logger.Debug("upstream DNS server did not answer the name (a failure, a refusal, or its adapter denies it); asking the next server",
+					append(p.dnsQuestionFields(question),
+						zap.String("upstream_addr", addr),
+						zap.String("rcode", dns.RcodeToString[resp.Rcode]),
+					)...,
+				)
+				continue
+			}
 			in = resp
 			resolveErr = nil
 			break
+		}
+	}
+	// No server's answer was the answer: every adapter that answered said
+	// the name does not exist (the preferred adapter's NXDOMAIN is the
+	// answer), or every server that answered failed or refused (the first
+	// failure is), whatever a later server's transport error was.
+	if in == nil {
+		if answer := search.answer(); answer != nil {
+			in, resolveErr = answer, nil
 		}
 	}
 
@@ -1606,4 +1647,28 @@ func preBound(srv *dns.Server) io.Closer {
 		return srv.PacketConn
 	}
 	return nil
+}
+
+// preBoundReady verifies that a pre-bound socket handed to srv is still open
+// before miekg/dns enters ActivateAndServe. miekg/dns invokes NotifyStartedFunc
+// before Accept on TCP (every OS) and before ReadFrom on UDP on Windows (where
+// miekg/dns's setUDPSocketOptions is a no-op). Without this check, a socket
+// closed between bindDNS and ActivateAndServe settles the server as serving and
+// lets startDNSServers return nil while serve fails immediately on the closed
+// socket. A non-nil socket that does not implement syscall.Conn fails closed so
+// an unverifiable wrapper can never bypass the check silently.
+func preBoundReady(srv *dns.Server) error {
+	sock := preBound(srv)
+	if sock == nil {
+		return nil
+	}
+	sc, ok := sock.(syscall.Conn)
+	if !ok {
+		return fmt.Errorf("cannot verify the DNS socket is serving: %T does not expose its OS handle", sock)
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	return raw.Control(func(uintptr) {})
 }

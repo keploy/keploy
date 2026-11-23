@@ -337,22 +337,65 @@ func TestFetchServerGreetingShared_FailureIsNotRemembered(t *testing.T) {
 }
 
 // A caller whose connection is already torn down never starts a dial: recording
-// stop is not a reason to reach the server.
+// stop is not a reason to reach the server. Both ways in: a loopback address
+// with no namespace has no key to remember under (a dial of its own), and one
+// with a namespace has a key but nothing remembered under it (a shared flight).
 func TestFetchServerGreetingShared_CancelledCallerNeverDials(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		netNS string
+	}{
+		{"no key to remember under", ""},
+		{"a key with nothing remembered", testNetNS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)
+			store := models.NewTLSHandshakeStore()
+			opts := models.OutgoingOptions{
+				DstCfg:           &models.ConditionalDstCfg{Addr: srv.addr, Port: 3306},
+				PassThroughScope: "ns/app/ts0",
+				NetNS:            tc.netNS,
+			}
+			if haveKey := greetingMemoKey(opts) != ""; haveKey != (tc.netNS != "") {
+				t.Fatalf("greetingMemoKey = %q: the case does not take the path it names", greetingMemoKey(opts))
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := fetchServerGreetingShared(ctx, zap.NewNop(), store, opts); !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled", err)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if got := srv.accepted.Load(); got != 0 {
+				t.Fatalf("a torn-down caller dialled the server %d times", got)
+			}
+		})
+	}
+}
+
+// A caller at the recording's stop takes the greeting remembered for its server:
+// that reaches no server, and the connection's capture, still being read, needs
+// it. Before, the stop refused it as it refuses a dial, and the connection was
+// left out.
+func TestFetchServerGreetingShared_ACallerAtTheStopTakesTheRememberedGreeting(t *testing.T) {
+	t.Parallel()
 	srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)
 	store := models.NewTLSHandshakeStore()
 	opts := models.OutgoingOptions{
 		DstCfg:           &models.ConditionalDstCfg{Addr: srv.addr, Port: 3306},
 		PassThroughScope: "ns/app/ts0",
+		NetNS:            testNetNS,
 	}
+	remembered := cannedHandshakeV10(t)
+	store.RememberServerGreeting(greetingMemoKey(opts), remembered, "server-a")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := fetchServerGreetingShared(ctx, zap.NewNop(), store, opts); !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
+	got, err := fetchServerGreetingShared(ctx, zap.NewNop(), store, opts)
+	if err != nil || !bytes.Equal(got, remembered) {
+		t.Fatalf("got %d bytes, err %v; want the remembered greeting", len(got), err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	if got := srv.accepted.Load(); got != 0 {
-		t.Fatalf("a torn-down caller dialled the server %d times", got)
+	if n := srv.accepted.Load(); n != 0 {
+		t.Fatalf("a caller at the stop dialled the server %d times", n)
 	}
 }
 

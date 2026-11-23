@@ -1,6 +1,7 @@
 package yaml
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -292,6 +293,45 @@ func WriteRecordingFileF(ctx context.Context, logger *zap.Logger, root, path, fi
 		return nil
 	}
 
+	return replaceRecordingFile(ctx, logger, root, path, fileName, format, func(w io.Writer) error {
+		_, err := w.Write(docData)
+		return err
+	})
+}
+
+// WriteRecordingFileStreamF replaces a file of the recording at root, inside
+// it, as WriteRecordingFileF does with isAppend false, with what write writes
+// to the writer it is handed: the file's bytes are made as they are written,
+// never held whole. Writes go through a buffer of streamWriteBuffer bytes. A
+// write that fails, or ctx ending, leaves the file as it was.
+func WriteRecordingFileStreamF(ctx context.Context, logger *zap.Logger, root, path, fileName string, format Format, write func(io.Writer) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	err := replaceRecordingFile(ctx, logger, root, path, fileName, format, func(w io.Writer) error {
+		bw := bufio.NewWriterSize(w, streamWriteBuffer)
+		if err := write(bw); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return bw.Flush()
+	})
+	if err == nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+// streamWriteBuffer is how many bytes WriteRecordingFileStreamF gathers
+// before it writes them to the file.
+const streamWriteBuffer = 256 << 10
+
+// replaceRecordingFile is WriteRecordingFileF without append: the file's
+// bytes are what write writes.
+func replaceRecordingFile(ctx context.Context, logger *zap.Logger, root, path, fileName string, format Format, write func(io.Writer) error) error {
+	filePath := filepath.Join(path, fileName+"."+format.FileExtension())
 	// Non-append (truncate-and-replace): write to a temp file in the same dir and
 	// atomically rename it over the destination, so a concurrent or volume-lagging
 	// reader (report-upload, localTestsPassed, reportdb.GetReport) never observes a
@@ -302,18 +342,6 @@ func WriteRecordingFileF(ctx context.Context, logger *zap.Logger, root, path, fi
 	// same way. The destination is never created ahead of the rename (only
 	// its directory, fileDirF): a new file comes into being whole, with no
 	// empty file before it for a reader to find.
-	return WriteRecordingFileStreamF(ctx, logger, root, path, fileName, format, func(w io.Writer) error {
-		_, err := w.Write(docData)
-		return err
-	})
-}
-
-// WriteRecordingFileStreamF atomically replaces fileName in path (under root)
-// with the bytes write writes to w, using the same temp-file, sync, mode
-// preservation, and rename sequence as WriteRecordingFileF (non-append) without
-// requiring the caller to buffer the entire document in memory first.
-func WriteRecordingFileStreamF(ctx context.Context, logger *zap.Logger, root, path, fileName string, format Format, write func(w io.Writer) error) error {
-	filePath := filepath.Join(path, fileName+"."+format.FileExtension())
 	_, exists, err := fileDirF(ctx, logger, root, path, fileName, format)
 	if err != nil {
 		utils.LogError(logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))

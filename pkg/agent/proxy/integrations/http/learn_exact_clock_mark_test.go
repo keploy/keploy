@@ -149,3 +149,52 @@ func TestServedClocksPutsTheCallsLearnedReadsOverTheRecordings(t *testing.T) {
 		t.Errorf("the recording's clocks changed: %+v", m.Spec.Clocks)
 	}
 }
+
+// The full-round exact fast path (tryExactLearnMatch, reached via RoundMeta)
+// must mark the recording's clock reads in the tracker just as the slow path
+// does.
+func TestFullRoundExactServeMarksTheRecordingsClockReads(t *testing.T) {
+	const touch = `{"data":{"lastUsedAt":1794899281,"name":"k"}}`
+	for _, row := range []struct {
+		what, method, target, body, leaf string
+		off                              models.ClockOffset
+		plain                            bool
+	}{
+		{"a write's plain read", "PUT", "/v1/keys/k", touch, "body.data.lastUsedAt", models.ClockOffset{Res: time.Second}, true},
+		{"a write's read cut to its second", "PUT", "/v1/keys/k", touch, "body.data.lastUsedAt", models.ClockOffset{Min: -time.Second, Res: time.Second}, false},
+	} {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		tr.Begin()
+		m := learnRecorded("mock-0", 0, row.method, row.target, row.body, nil, `{}`)
+		m.Spec.Clocks = map[string]models.ClockOffset{row.leaf: row.off}
+		db := newFullRoundTestDb("T1", []*models.Mock{m}, nil, nil)
+		ctx := learn.WithTracker(context.Background(), tr)
+		hitsBefore := fullRoundFastHits.Load()
+		if served, miss, err := h.learnMatch(ctx, live(row.method, row.target, row.body, nil), db, n, opts); err != nil || served == nil || miss != nil {
+			t.Fatalf("%s: the call is served: %v %+v %v", row.what, served, miss, err)
+		}
+		if fullRoundFastHits.Load() <= hitsBefore {
+			t.Fatalf("%s: expected tryExactLearnMatch fast path hit", row.what)
+		}
+		_, earlier, _, _ := tr.Test()
+		if len(earlier) != 1 {
+			t.Fatalf("%s: %d earlier exchanges, want the call's", row.what, len(earlier))
+		}
+		marked, other := 0, 0
+		for _, s := range earlier[0].Seen {
+			switch {
+			case s.Leaf.Path == row.leaf:
+				if s.Clock != row.plain || s.Offset == nil || s.Offset.Min != row.off.Min || s.Offset.Max != row.off.Max || s.Offset.Res != row.off.Res {
+					t.Errorf("%s: %s marked Clock=%v Offset=%+v; want Clock=%v, the recording's read %+v", row.what, row.leaf, s.Clock, s.Offset, row.plain, row.off)
+				}
+				marked++
+			case s.Clock || s.Offset != nil:
+				other++
+			}
+		}
+		if marked != 1 || other != 0 {
+			t.Errorf("%s: %d %s places, %d other leaves marked as reads; want 1 and 0", row.what, marked, row.leaf, other)
+		}
+	}
+}

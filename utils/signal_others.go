@@ -26,6 +26,13 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 		if errno, ok := err.(syscall.Errno); ok && errno == syscall.ESRCH {
 			return nil
 		}
+		// A process group of zombies only has exited too: macOS answers
+		// its signal EPERM, which is no refusal when no process of the
+		// group runs.
+		if errno, ok := err.(syscall.Errno); ok && errno == syscall.EPERM && pid < -1 && groupExited(-pid) {
+			logger.Debug("the process group has exited; its zombies wait to be reaped", zap.Int("pgid", -pid), zap.String("signal", sig.String()))
+			return nil
+		}
 		logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
 		return err
 	}

@@ -77,3 +77,12 @@ func WithCAReadyTestLock(fn func()) {
 	defer CAReadyTestMu.Unlock()
 	fn()
 }
+
+// SetUntrustedStoreWhyForTest has UntrustedStoreWhy answer why, as a Windows
+// CA setup in a session with no trust prompt leaves it; the returned func puts
+// back what it answered before.
+func SetUntrustedStoreWhyForTest(why string) (restore func()) {
+	before := UntrustedStoreWhy()
+	noteUntrustedStore(why)
+	return func() { noteUntrustedStore(before) }
+}

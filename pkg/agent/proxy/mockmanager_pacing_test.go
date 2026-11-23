@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -298,6 +299,333 @@ func TestWindowPacerSurvivesTheWorkerScopeWrap(t *testing.T) {
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	if !fired(ch) || p.StagingEpoch() != mm.StagingEpoch() || p.StagingEpoch() == 0 {
 		t.Fatal("the wrapped WindowPacer does not follow the manager")
+	}
+}
+
+// WindowRewinds counts the window changes whose start went back to before the
+// one set before them, in the same staging: not a move on, not the same
+// window set again, not a window cleared, not a set's first window after the
+// last set's last one. Each count is visible once the channel taken before
+// its change is closed, with the window start it was set with.
+func TestWindowRewindsCountsTheWindowsThatGoBack(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	steps := []struct {
+		name string
+		do   func()
+		want uint64
+	}{
+		{"staging", func() { mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) }, 0},
+		{"test-1", func() { mm.SetMocksWithWindow(nil, nil, pms(1000), pms(1100)) }, 0},
+		{"test-2", func() { mm.SetMocksWithWindow(nil, nil, pms(2000), pms(2100)) }, 0},
+		{"test-2 set again", func() { mm.SetMocksWithWindow(nil, nil, pms(2000), pms(2100)) }, 0},
+		{"back to test-1", func() { mm.SetMocksWithWindow(nil, nil, pms(1000), pms(1100)) }, 1},
+		{"test-2 after the rewind", func() { mm.SetMocksWithWindow(nil, nil, pms(2000), pms(2100)) }, 1},
+		{"SetCurrentTestWindow back", func() { mm.SetCurrentTestWindow(pms(500), pms(600)) }, 2},
+		{"three-tier on", func() { mm.SetMocksWithWindowThreeTier(nil, nil, nil, pms(3000), pms(3100)) }, 2},
+		{"three-tier back", func() { mm.SetMocksWithWindowThreeTier(nil, nil, nil, pms(2000), pms(2100)) }, 3},
+		{"window cleared", func() { mm.SetCurrentTestWindow(time.Time{}, time.Time{}) }, 3},
+		{"back from the window before the clear", func() { mm.SetMocksWithWindow(nil, nil, pms(1500), pms(1600)) }, 4},
+		{"the next set's staging", func() { mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) }, 4},
+		{"the next set's first window, before the last set's last", func() { mm.SetMocksWithWindow(nil, nil, pms(1000), pms(1100)) }, 4},
+		{"back in the next set", func() { mm.SetMocksWithWindow(nil, nil, pms(900), pms(950)) }, 5},
+	}
+	for _, s := range steps {
+		ch := mm.WindowChanged()
+		s.do()
+		if !fired(ch) {
+			t.Fatalf("%s: WindowChanged did not fire", s.name)
+		}
+		checkRewinds(t, mm, s.name, s.want)
+	}
+}
+
+// A retry cycle keploy test rewound the set's consumed history for starts a
+// pass at its first window, at whatever start: the one the last cycle ended
+// in included, which no start going back shows. The count moves once, with
+// that window (a start that also went back counts one), and not again while
+// the count handed stays the same, handed again or not. A test's window set
+// again within the pass, with no rewind of the history, is no pass; nor is a
+// set's first window after its staging, whatever the count, nor a count
+// handed while no window is set, until the next window. Any change of the
+// count counts, one that went down too (another history).
+func TestWindowRewindsCountsAConsumedHistoryRewindAtAnyStart(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	set := func(n uint64, from, to int) func() {
+		return func() {
+			mm.SeedConsumedRewinds(n)
+			mm.SetMocksWithWindow(nil, nil, pms(from), pms(to))
+		}
+	}
+	steps := []struct {
+		name string
+		do   func()
+		want uint64
+	}{
+		{"staging", func() { mm.SeedConsumedRewinds(0); mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) }, 0},
+		{"test-1", set(0, 1000, 1100), 0},
+		{"test-2", set(0, 2000, 2100), 0},
+		{"test-2 loaded again within the pass", set(0, 2000, 2100), 0},
+		{"the retry cycle's first window, test-2 again", set(1, 2000, 2100), 1},
+		{"test-2 loaded again within the retry", set(1, 2000, 2100), 1},
+		{"test-3 on in the retry", set(1, 3000, 3100), 1},
+		{"the next cycle, back to test-1", set(2, 1000, 1100), 2},
+		{"SetCurrentTestWindow after a rewind", func() { mm.SeedConsumedRewinds(3); mm.SetCurrentTestWindow(pms(1000), pms(1100)) }, 3},
+		{"three-tier after a rewind", func() { mm.SeedConsumedRewinds(4); mm.SetMocksWithWindowThreeTier(nil, nil, nil, pms(1000), pms(1100)) }, 4},
+		{"a count handed with the window cleared", func() { mm.SeedConsumedRewinds(5); mm.SetCurrentTestWindow(time.Time{}, time.Time{}) }, 4},
+		{"the window after it", set(5, 1000, 1100), 5},
+		{"a count that changed down, with no staging", set(4, 1000, 1100), 6},
+		{"the next set's staging, its history new", func() { mm.SeedConsumedRewinds(0); mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) }, 6},
+		{"the next set's first window", set(0, 1000, 1100), 6},
+		{"a staging handed a count, then its first window", func() {
+			mm.SeedConsumedRewinds(1)
+			mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		}, 6},
+		{"the first window after that staging", set(1, 2000, 2100), 6},
+	}
+	for _, s := range steps {
+		ch := mm.WindowChanged()
+		s.do()
+		if !fired(ch) {
+			t.Fatalf("%s: WindowChanged did not fire", s.name)
+		}
+		checkRewinds(t, mm, s.name, s.want)
+	}
+}
+
+// checkRewinds fails unless mm's WindowRewinds and GetPerTestMocksWithRewinds
+// read want with the window start CurrentTestWindow reads, and the second the
+// tier GetPerTestMocksInWindow reads.
+func checkRewinds(t *testing.T, mm *MockManager, step string, want uint64) {
+	t.Helper()
+	cur, _ := mm.CurrentTestWindow()
+	if got, start := mm.WindowRewinds(); got != want || !start.Equal(cur) {
+		t.Fatalf("%s: WindowRewinds = %d at %v once woken, want %d at %v", step, got, start, want, cur)
+	}
+	tier, got, start, err := mm.GetPerTestMocksWithRewinds()
+	plain, _ := mm.GetPerTestMocksInWindow()
+	if err != nil || got != want || !start.Equal(cur) || len(tier) != len(plain) {
+		t.Fatalf("%s: GetPerTestMocksWithRewinds = %d mocks, %d at %v (%v), want %d mocks, %d at %v", step, len(tier), got, start, err, len(plain), want, cur)
+	}
+}
+
+// The count, the window start and the per-test tier are read as one window
+// change's: a reader racing a runner that moves on and back again, each time
+// to a window of its own with a mock of its own, never pairs a count with
+// another change's start (WindowRewinds), nor either with another change's
+// tier (GetPerTestMocksWithRewinds). Read apart (the count, CurrentTestWindow,
+// GetPerTestMocksInWindow), a change between two of the reads paired them.
+func TestWindowRewindsReadsTheCountWithItsStartAndTier(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	// Cycle i moves on to on(i), then back to back(i): the i-th rewind.
+	const cycles = 3000
+	on := func(i int) int { return 1000*i + 500 }
+	back := func(i int) int { return 1000 * i }
+	set := func(ms int) {
+		m := scopeMock(fmt.Sprintf("at-%d", ms), pms(ms+10))
+		mm.SetMocksWithWindow([]*models.Mock{m}, nil, pms(ms), pms(ms+100))
+	}
+	// want is the count the window at start was set with, and its mock.
+	want := func(start time.Time) (uint64, string) {
+		ms := int(start.Sub(pms(0)) / time.Millisecond)
+		if ms%1000 != 0 {
+			return uint64(ms/1000 - 1), fmt.Sprintf("at-%d", ms)
+		}
+		return uint64(ms / 1000), fmt.Sprintf("at-%d", ms)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 1; i <= cycles; i++ {
+			set(on(i))
+			set(back(i))
+		}
+	}()
+	for running, reads := true, 0; running; reads++ {
+		select {
+		case <-done:
+			running = false
+		default:
+		}
+		if n, start := mm.WindowRewinds(); !start.IsZero() {
+			if w, _ := want(start); n != w {
+				t.Fatalf("read %d: WindowRewinds = %d at %v, want %d: the count of another window change", reads, n, start, w)
+			}
+		}
+		tier, n, start, err := mm.GetPerTestMocksWithRewinds()
+		if err != nil || start.IsZero() {
+			continue
+		}
+		w, name := want(start)
+		if n != w || len(tier) != 1 || tier[0].Name != name {
+			names := make([]string, 0, len(tier))
+			for _, m := range tier {
+				names = append(names, m.Name)
+			}
+			t.Fatalf("read %d: GetPerTestMocksWithRewinds = %v, %d at %v, want [%s], %d: another window change's", reads, names, n, start, name, w)
+		}
+	}
+	checkRewinds(t, mm, "after the last cycle", cycles)
+}
+
+// SetCurrentTestWindow moves the window and the rewind count under windowMu
+// alone, with no swapMu to wait for a tier read to let go of: a read that took
+// the count after it let go of windowMu, apart from the window, paired a
+// window with a later change's count whenever a move landed between the two.
+// Readers race a writer that only moves the window, back and on; each read's
+// count must be the one its window was set with.
+func TestWindowRewindsTierReadHoldsTheCountAgainstAWindowOnlyMove(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	// Cycle i moves on to on(i), then back to back(i): the i-th rewind.
+	const cycles, readers = 100000, 4
+	on := func(i int) int { return 1000*i + 500 }
+	back := func(i int) int { return 1000 * i }
+	set := func(ms int) { mm.SetCurrentTestWindow(pms(ms), pms(ms+100)) }
+	want := func(start time.Time) uint64 {
+		ms := int(start.Sub(pms(0)) / time.Millisecond)
+		if ms%1000 != 0 {
+			return uint64(ms/1000 - 1)
+		}
+		return uint64(ms / 1000)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 1; i <= cycles; i++ {
+			set(on(i))
+			set(back(i))
+		}
+	}()
+	errs := make(chan string, readers)
+	var wg sync.WaitGroup
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for reads := 0; ; reads++ {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				_, n, start, err := mm.GetPerTestMocksWithRewinds()
+				if err != nil || start.IsZero() {
+					continue
+				}
+				if w := want(start); n != w {
+					errs <- fmt.Sprintf("read %d: GetPerTestMocksWithRewinds = %d at %v, want %d: another window change's count", reads, n, start, w)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatal(e)
+	}
+	checkRewinds(t, mm, "after the last cycle", cycles)
+}
+
+// Under exact serving no recorded window narrows what a test is served, and
+// CurrentTestWindow reads zero: the start WindowRewinds reads with its count
+// is that zero too, not the window set before exact serving began.
+func TestWindowRewindsReadsNoStartUnderExactServing(t *testing.T) {
+	mm := stagedManager(t, nil, nil)
+	mm.SetCurrentTestWindow(pms(2000), pms(2100))
+	mm.SetCurrentTestWindow(pms(1000), pms(1100))
+	mm.ServeExactTest("T", nil)
+	if n, start := mm.WindowRewinds(); n != 1 || !start.IsZero() {
+		t.Fatalf("under exact serving WindowRewinds = %d at %v, want 1 at no start", n, start)
+	}
+	if _, n, start, _ := mm.GetPerTestMocksWithRewinds(); n != 1 || !start.IsZero() {
+		t.Fatalf("under exact serving GetPerTestMocksWithRewinds reads %d at %v, want 1 at no start", n, start)
+	}
+	checkRewinds(t, mm, "exact serving", 1)
+}
+
+// The proxy hands the count to the run's manager, as a staging it keeps for a
+// worker's manager.
+func TestProxyHandsTheConsumedRewindsToItsManager(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	p := &Proxy{logger: zap.NewNop(), mockManager: mm}
+	p.SeedConsumedRewinds(3)
+	mm.windowMu.RLock()
+	got := mm.consumedRewinds
+	mm.windowMu.RUnlock()
+	if got != 3 {
+		t.Fatalf("the manager holds consumed rewinds %d, want 3", got)
+	}
+}
+
+// A worker's scoped view passes the count through; over a store without the
+// facet it counts none.
+func TestWindowRewindsSurvivesTheWorkerScopeWrap(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	var db interface{} = &scopedMockDb{MockMemDb: mm}
+	r, ok := db.(integrations.WindowRewindCounter)
+	if !ok {
+		t.Fatal("the worker-scope wrap erases WindowRewindCounter")
+	}
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow(nil, nil, pms(2000), pms(2100))
+	mm.SetMocksWithWindow(nil, nil, pms(1000), pms(1100))
+	if got, start := r.WindowRewinds(); got != 1 || !start.Equal(pms(1000)) {
+		t.Fatalf("the wrapped count is %d at %v, want the manager's 1 at %v", got, start, pms(1000))
+	}
+	if _, got, start, err := r.GetPerTestMocksWithRewinds(); err != nil || got != 1 || !start.Equal(pms(1000)) {
+		t.Fatalf("the wrapped per-test read counts %d at %v (%v), want the manager's 1 at %v", got, start, err, pms(1000))
+	}
+	bare := &scopedMockDb{MockMemDb: noPlaceDb{mm}}
+	if got, start := bare.WindowRewinds(); got != 0 || !start.Equal(pms(1000)) {
+		t.Fatalf("a wrap of a store without the facet counts %d at %v, want 0 at its start %v", got, start, pms(1000))
+	}
+	if _, got, start, err := bare.GetPerTestMocksWithRewinds(); err != nil || got != 0 || !start.Equal(pms(1000)) {
+		t.Fatalf("a wrap of a store without the facet reads %d at %v (%v), want 0 at its start %v", got, start, err, pms(1000))
+	}
+}
+
+// A worker's scoped view reads the tier with the count through the name
+// filter its GetPerTestMocksInWindow reads through, over a store with the
+// facet and over one without it: the worker sees its own mocks either way.
+func TestWindowRewindsTierReadThroughAWorkersScope(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.SetMocksWithWindow([]*models.Mock{scopeMock("a", pms(1010)), scopeMock("b", pms(1020))}, nil, pms(1000), pms(1100))
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a", "b"})
+	const worker = 4102
+	p.SetWorkerScope(worker, []string{"a"})
+	for _, c := range []struct {
+		name  string
+		store integrations.MockMemDb
+	}{{"the manager", mm}, {"a store without the facet", noPlaceDb{mm}}} {
+		view := p.scopedFor(worker, c.store)
+		if view == c.store {
+			t.Fatalf("%s: precondition: the worker's connection got the bare store", c.name)
+		}
+		plain, err := view.GetPerTestMocksInWindow()
+		if err != nil {
+			t.Fatalf("%s: GetPerTestMocksInWindow: %v", c.name, err)
+		}
+		equalNames(t, c.name+": the worker's per-test read", plain, "a")
+		tier, _, _, err := view.(integrations.WindowRewindCounter).GetPerTestMocksWithRewinds()
+		if err != nil {
+			t.Fatalf("%s: GetPerTestMocksWithRewinds: %v", c.name, err)
+		}
+		equalNames(t, c.name+": the worker's per-test read with the count", tier, "a")
 	}
 }
 
@@ -793,7 +1121,15 @@ func TestCarryOverLeavesUnregisteredKindsAlone(t *testing.T) {
 				mm.MarkMockAsUsed(*m)
 			}
 			for _, st := range mm.GetConsumedMocks() {
+				// When it was served is the clock's, not the carry-over's:
+				// where it answered stays in the trace.
 				st.Timestamp = 0
+				if st.AnsweredOutsideAt != 0 {
+					st.AnsweredOutsideAt = 1
+				}
+				for j := range st.AnsweredIn {
+					st.AnsweredIn[j].First = 0
+				}
 				trace = append(trace, fmt.Sprintf("  consumed %+v", st))
 			}
 		}

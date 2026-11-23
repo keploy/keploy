@@ -96,6 +96,7 @@ func (f *fakeMockDb) IsTestWindowActive() bool                  { return !f.winS
 func (f *fakeMockDb) HasFirstTestFired() bool                   { return true }
 func (f *fakeMockDb) FirstTestWindowStart() time.Time           { return f.winStart }
 func (f *fakeMockDb) WindowSnapshot() models.WindowSnapshot     { return models.WindowSnapshot{} }
+func (f *fakeMockDb) ClaimOnce(string) bool                     { return true }
 
 // readbackMock builds a session-tier COM_QUERY data mock: same SQL text across
 // all of them, a distinct response payload marker, and a recorded request

@@ -44,6 +44,16 @@ const (
 // it is not kept, but named (jsonDropped), unless old is the file this db
 // last encoded for the set, which holds none.
 func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) ([]byte, error) {
+	out, err := db.encodeOverOut(mapping, format, old, doc, h, testSetID)
+	if err != nil {
+		return nil, err
+	}
+	return out.bytes()
+}
+
+// encodeOverOut is encodeOver, the encoding made as it is written (encoded)
+// when the file holds no hand edit.
+func (db *MappingDb) encodeOverOut(mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) (encoded, error) {
 	if format == yaml.FormatJSON {
 		// old that is the file this db last encoded for the set, byte for
 		// byte, holds only the fields keploy writes: naming the fields a
@@ -55,9 +65,9 @@ func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old
 		// data is nil when the encoding fails, and no file holds that.
 		data, err := EncodeMappingF(mapping, db.logger, format)
 		db.jsonWritten.set(testSetID, data)
-		return data, err
+		return encoded{data: data}, err
 	}
-	return encodeOver(db.logger, mapping, format, old, doc, h, testSetID)
+	return encodeOverOut(db.logger, mapping, format, old, doc, h, testSetID)
 }
 
 // EncodeOverF is mapping encoded in format to replace old, testSetID's
@@ -78,14 +88,30 @@ func EncodeOverF(logger *zap.Logger, mapping *models.Mapping, format yaml.Format
 
 // encodeOver is MappingDb.encodeOver, its warnings on logger.
 func encodeOver(logger *zap.Logger, mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) ([]byte, error) {
-	if format == yaml.FormatJSON {
-		warnJSONDropped(logger, old, testSetID)
-		return EncodeMappingF(mapping, logger, format)
+	out, err := encodeOverOut(logger, mapping, format, old, doc, h, testSetID)
+	if err != nil {
+		return nil, err
 	}
-	data, unkept, err := encodeYAMLOver(mapping, old, doc, nil, h)
+	data, err := out.bytes()
 	if err != nil {
 		logger.Error("failed to marshal mapping", zap.Error(err))
 		return nil, err
+	}
+	return data, nil
+}
+
+// encodeOverOut is encodeOver, the encoding made as it is written (encoded)
+// when the file holds no hand edit.
+func encodeOverOut(logger *zap.Logger, mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, h header, testSetID string) (encoded, error) {
+	if format == yaml.FormatJSON {
+		warnJSONDropped(logger, old, testSetID)
+		data, err := EncodeMappingF(mapping, logger, format)
+		return encoded{data: data}, err
+	}
+	out, unkept, err := encodeYAMLOverOut(mapping, old, doc, nil, h)
+	if err != nil {
+		logger.Error("failed to marshal mapping", zap.Error(err))
+		return encoded{}, err
 	}
 	if unkept.Comments > 0 {
 		logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d comment line(s) it could not place again", unkept.Comments),
@@ -102,7 +128,7 @@ func encodeOver(logger *zap.Logger, mapping *models.Mapping, format yaml.Format,
 			zap.String("testSetID", testSetID), zap.Strings("fields", unkept.Dropped),
 			zap.String("next_step", "the entry each field was on is gone from the file (removed, or its call recorded anew): add the field again where it belongs now"))
 	}
-	return data, nil
+	return out, nil
 }
 
 // warnJSONDropped says on logger which fields a person added to old,
@@ -243,25 +269,38 @@ func writePlainYAML(w io.Writer, mapping *models.Mapping, head []byte) error {
 // starts with no comment, and doc, the document old parses to when the
 // caller parsed it (nil: keepEdits parses old).
 func encodeYAMLOver(mapping *models.Mapping, old []byte, doc *yamlLib.Node, renames map[string]string, h header) ([]byte, Unkept, error) {
+	out, unkept, err := encodeYAMLOverOut(mapping, old, doc, renames, h)
+	if err != nil {
+		return nil, Unkept{}, err
+	}
+	data, err := out.bytes()
+	if err != nil {
+		return nil, Unkept{}, err
+	}
+	return data, unkept, nil
+}
+
+// encodeYAMLOverOut is encodeYAMLOver, the encoding made as it is written
+// (encoded) when old holds no hand edit.
+func encodeYAMLOverOut(mapping *models.Mapping, old []byte, doc *yamlLib.Node, renames map[string]string, h header) (encoded, Unkept, error) {
 	head := commentHead(old)
 	if len(head) == 0 && (h == headerAlways || h == headerOnNew && old == nil) {
 		head = []byte(utils.GetVersionAsComment())
 	}
 	if len(old) == 0 || doc == plainDoc {
-		// Nothing of old to keep but its head (keepEdits): the encoding is
-		// made after the head, in one buffer about old's size.
-		data, err := marshalMappingYAMLAfter(head, mapping, len(old))
-		return data, Unkept{}, err
+		// Nothing of old to keep but its head (keepEdits): the encoding goes
+		// after the head, made as it is written.
+		return encoded{head: head, mapping: mapping}, Unkept{}, nil
 	}
 	data, err := marshalMappingYAML(mapping)
 	if err != nil {
-		return nil, Unkept{}, err
+		return encoded{}, Unkept{}, err
 	}
 	data, unkept := keepEdits(old, doc, data, renames)
 	if len(head) > 0 {
 		data = append(head, data...)
 	}
-	return data, unkept, nil
+	return encoded{data: data}, unkept, nil
 }
 
 // commentHead is the comment lines data starts with, and the blank lines

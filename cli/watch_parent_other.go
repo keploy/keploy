@@ -1,4 +1,4 @@
-//go:build !unix
+//go:build !unix && !windows
 
 package cli
 
@@ -8,8 +8,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// watchParentProcess is a no-op on non-unix platforms. The orphaned-agent
-// problem it guards against is specific to the eBPF hooks, DNS takeover and
-// proxy/ingress listeners keploy installs on Unix; on Windows the agent is run
-// differently (and typically inside a container that bounds its lifetime).
+// watchParentProcess is a no-op where keploy runs no native agent (neither
+// unix nor Windows): there is no agent process to outlive its client.
 func watchParentProcess(_ context.Context, _ *zap.Logger, _ int) {}

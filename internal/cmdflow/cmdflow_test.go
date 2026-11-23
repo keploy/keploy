@@ -47,7 +47,7 @@ var keploy = Rules{
 		"pkg/platform/http.runFlagsOf#3":             "the --add-host entries a docker command names",
 		"utils.ContainerNameFromDockerRun":           "the container a docker command names (--name)",
 		"utils.NewAppCommand":                        "an AppCommand prints its program and how many words follow it",
-		"pkg/client/app.findComposeFile":             "the compose files a compose command names (-f)",
+		"pkg/platform/docker.FindComposeFiles":       "the compose files a compose command names (-f, --file, COMPOSE_FILE, or default files)",
 		"pkg/client/app.composeProjectFlag":          "the project compose's own options name (-p, before its subcommand)",
 		"pkg/client/app.composeProjectEnvAssignment": "the project a compose command names (COMPOSE_PROJECT_NAME=)",
 		"pkg/client/app.composeUpSemantics":          "the services a compose command names (--exit-code-from)",
@@ -67,7 +67,9 @@ var keploy = Rules{
 		`pkg/platform/docker.Impl.ExtractNetworksForContainer: zap.String("containerName", containerName)`: "the container a docker start command names (ParseDockerCmd)",
 	},
 	AllowedRedacted: map[string]string{
-		"utils.JSONWriter.Write: string(data)": "a test report printed with --json, its cmdUsed redacted as the report's file holds it",
+		"utils.JSONWriter.Write: string(data)":                                             "a test report printed with --json, its cmdUsed redacted as the report's file holds it",
+		"pkg/service/replay.Replayer.logSetCalls: r.outsideFields(testSetID, c.MadeIn, c)": "the outside_every_test next_step command, its app command redacted (RedactCommandLine) before building the record-again line",
+		`pkg/service/replay.Replayer.takeEarlierSetCalls: append(r.outsideFields(c.set, c.call.EarlierSetTest, c.call), zap.String("read-in-test-set", readIn))`: "the outside_every_test next_step command for an earlier set's call, its app command redacted (RedactCommandLine) before building the record-again line",
 	},
 	Sinks: map[string]string{
 		"utils.LogError": "ERROR",

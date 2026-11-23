@@ -22,15 +22,12 @@ import (
 // (supervisor.Session.dropped, MySQL's ERR at wait_timeout among them).
 //
 // "Read" is taken for "recorded", and losses fall outside what this sees,
-// each its own fix, among them: a mock the session refuses because the
-// parser's context is done is dropped without being reported (Session.EmitMock
-// after the recording stopped or the parser was retired, or from a helper
-// goroutine of the parser after its Run returned, whose context Run cancels
-// on the way out); and a parser that returns nil in the middle of an exchange
-// on a cancelled context without reporting it (the MySQL recorder) leaves
-// that exchange's request read and its answer unread. The first wants
-// EmitMock to report what it refuses (ReportLeftOut); the second, the parser
-// to report the exchange it stops on.
+// each its own fix: a mock the session refuses because the parser's context
+// is done is reported left out by Session.EmitMock itself (ReportLeftOut,
+// LeftOutRefusedAtStop), so it is never dropped silently; a parser that
+// returns nil in the middle of an exchange on a cancelled context without
+// reporting it leaves that exchange's request read and its answer unread and
+// wants the parser to report the exchange it stops on.
 //
 // The spans the return records are closed spans, recorded when it comes. Proxy
 // mode checks each test case as it streams it, so a span recorded late, from
@@ -69,8 +66,10 @@ import (
 // span, and its requests the parser never read that were captured before the
 // stop are left out here. A recording that is stopping
 // (Session.RecordingStopping) tears the connection down with it, and what it
-// carries from the recording's stop on is no loss; the requests captured
-// before it, while the recording ran, still are.
+// carries after the recording's stop is no loss; the requests captured
+// before it, while the recording ran, still are, and so are those captured
+// at the stop's very clock reading, which may have come before it
+// (beforeCutoff).
 type parserReads struct {
 	mu        sync.Mutex
 	conn      unrecordedConn
@@ -101,6 +100,11 @@ type parserReads struct {
 	read     int64
 	teedAt   [2]int64
 	cutoff   time.Time
+	// cutAtStop, set by parserReturned when the recording's stop cut the
+	// parser short, is where the spans the return leaves out go instead of
+	// leftOut (Session.RecordStopCutWindow), those told of after it too:
+	// nil when the return was no such cut.
+	cutAtStop func(start, end time.Time)
 
 	// unread[head:] holds, until the parser returns, the client chunks it had
 	// not read when last looked at, in stream order.
@@ -223,23 +227,42 @@ func (p *parserReads) keep(through int64, at time.Time) {
 	p.unread = append(p.unread, carriedChunk{through: through, at: at})
 }
 
-// beforeCutoff reports whether a chunk read at `at` came before the stop or
-// the recording's stop that bounds what the return leaves out.
+// beforeCutoff reports whether a chunk read at `at` may have come before the
+// stop or the recording's stop that bounds what the return leaves out: read
+// before it, or at its very reading. A clock read in steps (Windows') gives a
+// chunk the app sent just before the stop the stop's own reading, and nothing
+// else covers such a chunk after the recording's stop, so the test case over
+// it would be saved without its mocks. One read at the stop's instant is left
+// out, the fail-closed side.
 func (p *parserReads) beforeCutoff(at time.Time) bool {
-	return p.cutoff.IsZero() || wall(at).Before(p.cutoff)
+	return p.cutoff.IsZero() || !wall(at).After(p.cutoff)
+}
+
+// leftOutRequests is what leaveOut left out: how many unread client chunks,
+// and the earliest and latest instants of the spans over them. Zero when it
+// left out none.
+type leftOutRequests struct {
+	chunks   int
+	from, to time.Time
 }
 
 // parserReturned says the parser's Run has returned: the parser returned on
 // its own, or it was retired, after a stop, and may still be reading. Call it
 // before the tees are paused: a chunk refused by a paused tee is told of as
-// not teed, which counts as after the return.
-func (p *parserReads) parserReturned() {
+// not teed, which counts as after the return. It returns what the return left
+// out; a chunk teed before the return and told of only after it is left out
+// later, as it is told of (carried), and is not in it. cutAtStop is nil, or,
+// when the recording's stop cut the parser short (the hang watchdog found it
+// making no progress after the stop), where the spans the return leaves out
+// go instead of leftOut, now and as they are told of.
+func (p *parserReads) parserReturned(cutAtStop func(start, end time.Time)) leftOutRequests {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.returned {
-		return
+		return leftOutRequests{}
 	}
 	p.returned = true
+	p.cutAtStop = cutAtStop
 	if p.client != nil {
 		p.read = p.client.ReadThrough()
 	}
@@ -265,12 +288,19 @@ func (p *parserReads) parserReturned() {
 			at = append(at, c.at)
 		}
 	}
-	p.leaveOut(at)
+	return p.leaveOut(at)
 }
 
 // leaveOut records the closed spans over the runs of the unread client chunks
-// read at `at`, in stream order (so in the order the relay read them).
-func (p *parserReads) leaveOut(at []time.Time) {
+// read at `at`, in stream order (so in the order the relay read them), and
+// returns what it left out. They go to cutAtStop when the return was a cut at
+// the stop, else to leftOut.
+func (p *parserReads) leaveOut(at []time.Time) leftOutRequests {
+	left := leftOutRequests{chunks: len(at)}
+	record := p.leftOut
+	if p.cutAtStop != nil {
+		record = p.cutAtStop
+	}
 	spans := 0
 	for k := 0; k < len(at); {
 		start, last := wall(at[k]), wall(at[k])
@@ -283,11 +313,19 @@ func (p *parserReads) leaveOut(at []time.Time) {
 				start = t
 			}
 		}
-		p.leftOut(start, last.Add(p.idleGrace))
+		end := last.Add(p.idleGrace)
+		record(start, end)
+		// A run starts past the grace after the one before, so the last one
+		// ends latest; a wall clock stepped back can start one earlier.
+		if spans == 0 || start.Before(left.from) {
+			left.from = start
+		}
+		left.to = end
 		spans++
 	}
 	if spans > 0 && p.logger != nil {
 		p.logger.Debug("left out the requests a connection's parser returned without recording",
 			zap.Int("chunks", len(at)), zap.Int("spans", spans), zap.Time("from", at[0]))
 	}
+	return left
 }

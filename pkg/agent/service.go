@@ -393,6 +393,61 @@ type ShimReporter interface {
 	ShimClaimedBy(pid int)
 }
 
+// RunMemberReporter is the optional extension implemented by hooks that hold
+// the run's processes themselves: Windows's, whose job object every process
+// the run's command starts joins, with no breakaway. A claim is the run's when
+// its process descends from keploy's client. On Linux the client, as the
+// run's child subreaper, adopts a process whose parent exited, so its chain
+// stays whole; on Windows that process keeps its exited parent's number,
+// which names no process or a later one, and descends from no one. The agent
+// then asks these hooks: a process they hold is the run's, wherever its chain
+// was cut. With hooks that do not implement it, nothing is asked.
+type RunMemberReporter interface {
+	// HoldsInRun reports whether process pid, created at start (its
+	// creation time as the agent read it for the claim: on Windows, FILETIME
+	// ticks), is one of the run's processes now. It never waits.
+	HoldsInRun(pid int, start uint64) bool
+}
+
+// CallerSocketReporter is the optional extension implemented by hooks that
+// see, from inside each process, which process connected a socket and which
+// sockets a process hands to another: Windows's shim. Windows's TCP tables
+// name the process that created a socket, whichever process it was later
+// given to (a child that inherited it, one it was duplicated into), so the
+// process they name for a call to the agent is its sender only when these
+// hooks say so. With hooks that do not implement it, nothing is asked.
+type CallerSocketReporter interface {
+	// CallerSocketWhy is "" when process pid, which the kernel's tables name
+	// as the owner of the client socket at client connected to the agent at
+	// server, is the process that sends on it; otherwise why keploy cannot
+	// tell which process called. It may wait, bounded by the
+	// implementation (Windows's: a process of the run that started just
+	// now has a short grace to say what it holds, and the shim's report of
+	// the socket a short time to arrive), and never longer.
+	CallerSocketWhy(pid int, client, server netip.AddrPort) string
+}
+
+// AppSendCounter is the optional extension implemented by hooks that count,
+// from inside the application's process, what it hands to each connection it
+// made to the proxy: Windows's shim, where no table the agent may read as a
+// standard user says how much an application socket has written. The proxy
+// asks it for the bytes a test's end waits for (PairedBytesWaiter); with
+// hooks that do not implement it, a proxy that needs it cannot count them.
+type AppSendCounter interface {
+	// AppSent is what the application had handed to its connection from
+	// app to the proxy when it is read: done, every byte a send call
+	// completed with (in the kernel's hands, on its way to the proxy);
+	// started, every byte handed to a send call, never below what the
+	// proxy's side can have received; pending, the send calls whose
+	// outcome is not known yet (done counts none of them). It fails when
+	// the counts cannot be told: no count is kept for the connection, its
+	// process cannot be read, or another process may send on it. It may
+	// wait, bounded as CallerSocketWhy is: the proxy asks it as it closes a
+	// paired connection too, which holds that close, and no other, by as
+	// much.
+	AppSent(app netip.AddrPort) (done, started uint64, pending uint32, err error)
+}
+
 // ListenerCountTaker is the optional extension implemented by proxies that can
 // have their listener counted by the hooks. The agent hands it the hooks
 // (ListenerCounter) whenever they can count, switch or not, before
@@ -824,6 +879,20 @@ type RecordedDestinationsSeeder interface {
 // consumers then release everything at once, the pre-existing behaviour.
 type RecordedWindowsSeeder interface {
 	SeedRecordedWindows(ws []models.TestWindow)
+}
+
+// ConsumedRewindsSeeder is the optional extension implemented by proxies whose
+// mock manager counts the passes a replay starts over its set
+// (integrations.WindowRewindCounter): SeedConsumedRewinds hands it, before the
+// call's window is set, how many times keploy test rewound the set's consumed
+// history for a retry cycle (models.MockFilterParams.ConsumedRewinds), so a
+// retry cycle that starts at the window the last one ended in starts a pass
+// too, and starts a new pass of the manager's once-claims
+// (integrations.MockMemDb.ClaimOnce), under exact serving as well. An agent
+// whose proxy lacks it counts a pass only where a window start went back, as
+// before, and its once-claims last the whole staging.
+type ConsumedRewindsSeeder interface {
+	SeedConsumedRewinds(n uint64)
 }
 
 // RunPlaceSeeder is the optional extension implemented by proxies that hold
@@ -1343,6 +1412,16 @@ type ExactKeyRestarter interface {
 type InstanceServer interface {
 	ServeInstance(inst uint32) (ExactServer, error)
 	StopServingInstance(inst uint32) error
+}
+
+// TestWindowNoter is an optional Proxy capability: the agent tells it each
+// test window it opens and closes (models.ScopeWindow.Seq), so its consumed
+// read says, of each mock, every test window it answered in
+// (models.MockState.AnsweredIn). A proxy without it reports none, and the
+// agent gives its windows no Seq.
+type TestWindowNoter interface {
+	OpenTestWindow(seq uint64)
+	CloseTestWindow(seq uint64)
 }
 
 // ScopeStager is an optional Proxy capability: it stages the pool of a test

@@ -280,6 +280,14 @@ type MockMemDb interface {
 	MockWriter
 	MockConsumer
 	WindowAware
+	// ClaimOnce atomically records key in the store's current pass over the
+	// set and returns true only for the first caller. The manager clears its
+	// claimed set under its own lock as each pass starts: each staging (the
+	// same step that bumps StagingEpoch) and each retry cycle of keploy test
+	// (models.MockFilterParams.ConsumedRewinds), so separate managers
+	// (parallel workers) never interfere and per-connection wrappers delegate
+	// to their underlying manager.
+	ClaimOnce(key string) bool
 }
 
 // MockCursor is an optional MockMemDb capability that serves stateful
@@ -1160,6 +1168,7 @@ func (unheldRound) DeleteFilteredMock(models.Mock) bool                       { 
 func (unheldRound) DeleteUnFilteredMock(models.Mock) bool                     { return false }
 func (unheldRound) DeleteStartupMock(models.Mock) bool                        { return false }
 func (unheldRound) MarkMockAsUsed(models.Mock) bool                           { return false }
+func (unheldRound) ClaimOnce(string) bool                                     { return false }
 
 func (u unheldRound) SetCurrentTestWindow(start, end time.Time) {
 	u.window.SetCurrentTestWindow(start, end)
@@ -2102,6 +2111,45 @@ type RecordedWindowsReader interface {
 type WindowPacer interface {
 	WindowChanged() <-chan struct{}
 	StagingEpoch() uint64
+}
+
+// WindowRewindCounter is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it) for a WindowPacer consumer that must tell
+// a replay going back to an earlier recorded window (a retry cycle, the
+// deferred streaming tests) from one moving on, however many window changes
+// it did not wake for in between.
+//
+//   - WindowRewinds returns, in one read, rewinds, the count of the
+//     test-window changes that start a pass over the set again, and start,
+//     the start of the test window in force with that count, which is what
+//     CurrentTestWindow reads at the same moment (zero between tests and
+//     under exact serving). A rewind is, within one staging, a window whose
+//     start went back to before the start set before it, and the first
+//     window set after keploy test rewound the set's consumed history for a
+//     retry cycle (models.MockFilterParams.ConsumedRewinds), at any start,
+//     the same one included. Each window change counts one at most, and the
+//     count never goes down. A window set again at the same start with no
+//     rewind of the history (the window loaded again within the pass) is not
+//     counted.
+//
+//   - GetPerTestMocksWithRewinds is GetPerTestMocksInWindow read with
+//     WindowRewinds in one snapshot: the per-test mocks, the count and the
+//     start are one window change's.
+//
+// The count, the start and the per-test tier move together, under the
+// manager's locks, and are read together: a consumer that files the per-test
+// tier by the count or the start MUST take all three from one
+// GetPerTestMocksWithRewinds call, and one that reads the count with the start
+// alone from one WindowRewinds call. Read apart (the count, then
+// CurrentTestWindow, then the tier), a change between two of the reads pairs
+// one window change's count with another's start or tier. Take WindowChanged's
+// channel before the call, and read again if it closed meanwhile. A store that
+// wraps another without the facet reports a zero count and the wrapped store's
+// start and tier, read apart, so a consumer still treats a window start that
+// went back as a rewind.
+type WindowRewindCounter interface {
+	WindowRewinds() (rewinds uint64, start time.Time)
+	GetPerTestMocksWithRewinds() (mocks []*models.Mock, rewinds uint64, start time.Time, err error)
 }
 
 // SetEndFiler is an OPTIONAL MockMemDb facet (type-assert for it; the agent's

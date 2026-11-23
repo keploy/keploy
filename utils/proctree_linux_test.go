@@ -248,3 +248,53 @@ func TestTheTreeToInterruptGroupsADescendantInANestedPidNamespace(t *testing.T) 
 		t.Fatalf("the groups to signal are %v; want only unshare's group %d", groups, cmd.Process.Pid)
 	}
 }
+
+// A process is a zombie, exited and waiting for its parent to reap it, when
+// its stat's state is Z, read after the command name's last ')'. One that
+// runs or sleeps, one whose stat is not there or cannot be parsed, and one
+// whose name only holds a Z is none.
+func TestExitedUnreapedReadsTheStateInStat(t *testing.T) {
+	proc := fstest.MapFS{
+		"10/stat": statLine(10, "server", 'Z', 1, 10),
+		"11/stat": statLine(11, "server", 'S', 1, 11),
+		"12/stat": statLine(12, "server", 'R', 1, 12),
+		"13/stat": {Data: []byte("13 (server) Z 1")},
+		"14/stat": statLine(14, "a) Z (b", 'S', 1, 14),
+		"16/stat": statLine(16, "a) S (b", 'Z', 1, 16),
+	}
+	for pid, want := range map[int]bool{10: true, 11: false, 12: false, 13: false, 14: false, 15: false, 16: true} {
+		if got := exitedUnreapedIn(proc, pid); got != want {
+			t.Errorf("exitedUnreapedIn(%d) = %v; want %v", pid, got, want)
+		}
+	}
+}
+
+// This host's /proc: a child that exited unreaped is a zombie; one that runs,
+// and this test, are not.
+func TestExitedUnreapedReadsThisHostsProcfs(t *testing.T) {
+	done := exec.Command("true")
+	if err := done.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = done.Wait() })
+	runs := exec.Command("sleep", "60")
+	if err := runs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runs.Process.Kill(); _ = runs.Wait() })
+	for deadline := time.Now().Add(10 * time.Second); !isZombie(t, done.Process.Pid); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the exited child never showed as a zombie")
+		}
+	}
+	if !exitedUnreaped(done.Process.Pid) || exitedUnreaped(runs.Process.Pid) || exitedUnreaped(os.Getpid()) {
+		t.Fatalf("exitedUnreaped: zombie %v, sleep %v, this test %v; want true, false, false",
+			exitedUnreaped(done.Process.Pid), exitedUnreaped(runs.Process.Pid), exitedUnreaped(os.Getpid()))
+	}
+	if running, err := isProcessRunning(done.Process.Pid); err != nil || running {
+		t.Fatalf("isProcessRunning of a zombie = %v, %v; want false: it has exited", running, err)
+	}
+	if running, err := isProcessRunning(runs.Process.Pid); err != nil || !running {
+		t.Fatalf("isProcessRunning of a sleep = %v, %v; want true", running, err)
+	}
+}

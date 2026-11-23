@@ -77,6 +77,12 @@ type exactPlan struct {
 	// mainPass is how many test cases of order, from its start, the set's
 	// main loop takes up: those before the streaming ones (passOrder).
 	mainPass int
+	// rewinds: the retry cycles the set's consumed history was rewound for
+	// (rewindConsumedForRetryCycle), and every filter the plan sends carries
+	// it (models.MockFilterParams.ConsumedRewinds), as the windows' filters
+	// carry their history's: the agent starts a new pass over the set at a
+	// retry cycle's first filter.
+	rewinds uint64
 	// ordered says the staging handed the agent order (stagedOrder), and
 	// passed how many of order, from its start, the replay has told the
 	// agent the run passed as a pass of it ended (passExactRun).
@@ -919,10 +925,11 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 	// that ran beside it, after its own.
 	ex.Concurrent = plan.concurrentServing(name)
 	params := models.MockFilterParams{
-		Variables:   open.vars,
-		TestRequest: open.request,
-		Exact:       ex,
-		LearnEnded:  plan.learnEnded,
+		Variables:       open.vars,
+		TestRequest:     open.request,
+		Exact:           ex,
+		LearnEnded:      plan.learnEnded,
+		ConsumedRewinds: plan.rewinds,
 	}
 	err := r.sendFilter(ctx, params)
 	if err != nil {
@@ -1012,7 +1019,7 @@ func (r *Replayer) serveExactPoolPassed(ctx context.Context, plan *exactPlan, ne
 	// Named only once the agent has them: a test case whose naming failed
 	// is named again at its loop head (serveExactAhead).
 	plan.aheadNamed = ""
-	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...), Passed: passed}, LearnEnded: plan.learnEnded, Learned: learned})
+	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...), Passed: passed}, LearnEnded: plan.learnEnded, Learned: learned, ConsumedRewinds: plan.rewinds})
 	if err != nil {
 		return err
 	}
