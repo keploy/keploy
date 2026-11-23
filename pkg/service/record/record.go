@@ -1956,7 +1956,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	reqErrGrp, _ := errgroup.WithContext(ctx)
 	reqCtx := context.WithoutCancel(ctx)
-	reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+	// Cancelled with the instant of its cancel (utils.WithStop): what the
+	// frame drains date the recording's stop by (stopCut), not the moment a
+	// goroutine that saw the cancel first ran.
+	reqCtx, reqCtxCancel := utils.WithStop(reqCtx)
 	reqCtx = context.WithValue(reqCtx, models.ErrGroupKey, reqErrGrp)
 
 	var stopReason string
@@ -3562,6 +3565,11 @@ func hasMappingTestName(name string) bool {
 	return strings.TrimSpace(name) != ""
 }
 
+// GetTestAndMockChans returns the recording's frame streams. Its ctx should
+// be one a stop cancels with the instant of the stop (utils.WithStop), as
+// Start's is: the mappings of requests made after that instant are left out
+// (stopCut); with a plain cancel the cut is when the drains first see the
+// stop.
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// This recording's streams end by the agent's markers when it can
 	// (stream_end.go): its token names them to the agent.
@@ -3621,7 +3629,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// persisting the last one sees the stop only once the consumer takes
 	// it, and fixed by the first drain to look, the cut came after every
 	// request made meanwhile, and those were recorded.
-	cut := &stopCut{}
+	cut := &stopCut{ctx: ctx}
 	context.AfterFunc(ctx, func() { cut.at() })
 	// Under docker compose the app runs on while the agent drains (Start's
 	// stop): what it serves after the stop is not recorded. postStopTests

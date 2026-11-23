@@ -46,7 +46,9 @@ func newStopDrainHarnessFor(t *testing.T, commandType utils.CmdType) *stopDrainH
 	cfg.CommandType = string(commandType)
 	r := &Recorder{logger: zap.NewNop(), instrumentation: f, config: cfg}
 	g, gctx := errgroup.WithContext(context.Background())
-	ctx, cancel := context.WithCancel(gctx)
+	// Stopped as Start stops the frame drains (its reqCtx): with the
+	// instant of the stop (utils.WithStop).
+	ctx, cancel := utils.WithStop(gctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	frames, err := r.GetTestAndMockChans(ctx)
 	if err != nil {
