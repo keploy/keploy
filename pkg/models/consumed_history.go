@@ -20,6 +20,8 @@ type ConsumedHistory struct {
 	mu  sync.Mutex
 	m   map[string]MockState
 	log []MockState
+	// rewinds counts the rewinds that led to this history (RewoundTo).
+	rewinds uint64
 }
 
 // NewConsumedHistory returns an empty history with room for n entries.
@@ -35,6 +37,24 @@ func ConsumedHistoryOf(m map[string]MockState) *ConsumedHistory {
 		h.Set(s)
 	}
 	return h
+}
+
+// RewoundTo returns the history a retry cycle starts from: a new one holding
+// the entries of baseline, which counts one rewind more than h (Rewinds). The
+// caller's map is not kept, and h is left as it is.
+func (h *ConsumedHistory) RewoundTo(baseline map[string]MockState) *ConsumedHistory {
+	n := ConsumedHistoryOf(baseline)
+	n.rewinds = h.Rewinds() + 1
+	return n
+}
+
+// Rewinds is how many times the history was rewound (RewoundTo) to reach h:
+// zero for a set's own history, and for a nil one.
+func (h *ConsumedHistory) Rewinds() uint64 {
+	if h == nil {
+		return 0
+	}
+	return h.rewinds
 }
 
 // Set records s as the latest state of the mock it names.
@@ -77,6 +97,7 @@ func (h *ConsumedHistory) Clone() *ConsumedHistory {
 		c.m[s.Name] = s
 		c.log = append(c.log, s)
 	}
+	c.rewinds = h.rewinds
 	return c
 }
 
