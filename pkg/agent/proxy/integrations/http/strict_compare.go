@@ -246,10 +246,9 @@ type strictKnown struct {
 	// (declaredClockFields): no noise learned on one, or on a container
 	// holding it, excuses its value (noiseBarred).
 	declared map[string]models.ClockOffset
-	// declaredRules maps each leaf path in declared to the name of
-	// keploy.yml's clock rule that declared it (declaredClockRules), so a
-	// refusal at a clock-barred field names the rule.
-	declaredRules map[string]string
+	// mock is the recording's name, for lazy clock-rule lookup on refusal
+	// (clockBarredWhy).
+	mock string
 }
 
 // clocksOf is what the learn step learned of m as reads of the
@@ -302,24 +301,6 @@ func declaredClockFields(m *models.Mock, d declaredRules) map[string]models.Cloc
 	return learn.DeclaredClocks(d.sources(m.Name), nil)
 }
 
-// declaredClockRules maps each body leaf path in declared to the name of
-// keploy.yml's clock rule that declared it (learn.DeclaredBodySources), so
-// a refusal at a clock-barred field names the rule. nil where declared is
-// empty.
-func declaredClockRules(m *models.Mock, d declaredRules, declared map[string]models.ClockOffset) map[string]string {
-	if len(declared) == 0 {
-		return nil
-	}
-	src := learn.DeclaredBodySources(d.sources(m.Name))
-	out := make(map[string]string, len(declared))
-	for leaf := range declared {
-		if s, ok := src(leaf); ok {
-			out[leaf] = s.Rule
-		}
-	}
-	return out
-}
-
 // noiseBarred reports whether exact is a field a clock rule names
 // (k.declared) at which nothing was learned as a read of the clock
 // (k.clocks): no learned noise excuses its value.
@@ -333,13 +314,16 @@ func (k strictKnown) noiseBarred(exact string) bool {
 // clock rule bars learned noise and claim checks from excusing
 // (noiseBarred: a clock rule names it and no clock check applies on this
 // recording), the reason it is compared as recorded, naming the rule; ""
-// otherwise.
+// otherwise. Computed lazily on refusal so passing diffs do not re-parse
+// declared sources.
 func (k strictKnown) clockBarredWhy(exact, shape string) string {
-	if !k.noiseBarred(exact) {
+	if !k.noiseBarred(exact) || k.n.sources == nil {
 		return ""
 	}
-	if rule := k.declaredRules[exact]; rule != "" {
-		return shape + " is named by keploy.yml's clock rule " + rule + " with no clock check on this recording, so it is compared as recorded"
+	if src := learn.DeclaredBodySources(k.n.sources(k.mock)); src != nil {
+		if s, ok := src(exact); ok {
+			return shape + " is named by keploy.yml's clock rule " + s.Rule + " with no clock check on this recording, so it is compared as recorded"
+		}
 	}
 	return ""
 }
@@ -410,8 +394,12 @@ func (k strictKnown) claimsAt(exact string) []models.ClockOffset {
 // (learn.HoldsClaimsByForm, under the time default the store says the
 // replay turned on) and why not: each such claim a time of its learned
 // form, the token's header and every other claim as recorded, its
-// signature of the recorded one's form.
+// signature of the recorded one's form. A field a clock rule bars
+// (noiseBarred) is decided by that rule alone, never by claim times.
 func (k strictKnown) claimsHeld(exact, rec, live string) (learned, held bool, why string) {
+	if k.noiseBarred(exact) {
+		return false, false, ""
+	}
 	cs := k.claimsAt(exact)
 	if len(cs) == 0 {
 		return false, false, ""
@@ -532,8 +520,7 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}
 	}
 	strictDiffs.Add(1)
-	declared := declaredClockFields(m, n.declaredRules)
-	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declared, declaredRules: declaredClockRules(m, n.declaredRules, declared)}
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declaredClockFields(m, n.declaredRules), mock: m.Name}
 	var out []strictField
 	if string(r.Method) != input.method {
 		out = append(out, field(valueDiff("method", string(r.Method), input.method)))
@@ -1504,7 +1491,7 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		// read them (formValue): a key of more than one value holds no one
 		// token, and is refused. keploy.yml's patterns and a clock rule
 		// decide a field they name alone.
-		if !guarded && !k.noiseBarred(path) {
+		if !guarded {
 			if claims, ok, claimWhy := k.claimsHeld(path, formValue(rv), formValue(lv)); claims {
 				if ok {
 					continue
@@ -1638,7 +1625,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			// A JWT whose claims hold times the learn step learned is held
 			// to that check (claimsHeld). keploy.yml's patterns and a clock
 			// rule decide a field they name alone.
-			if !k.guards(rp[i].name) && !k.noiseBarred(path) {
+			if !k.guards(rp[i].name) {
 				if claims, ok, claimWhy := k.claimsHeld(path, string(rp[i].data), string(lp[i].data)); claims {
 					if ok {
 						continue
@@ -1752,7 +1739,12 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	learned = !guarded && !k.noiseBarred(exact) && (learned || k.learnedAt(exact, name))
 	if jsonKind(r) != jsonKind(l) {
 		f := shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l))
-		k.refuseField(&f, refusal, exact, shape)
+		refusal.refuse(&f, shape)
+		if f.why == "" {
+			if _, declared := k.declared[exact]; declared {
+				f.why = shape + " type changed (recorded " + jsonKind(r) + ", live " + jsonKind(l) + ")"
+			}
+		}
 		*out = append(*out, f)
 		return
 	}
@@ -1809,7 +1801,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 		// that check (claimsHeld); keploy.yml's patterns and a clock rule
 		// decide a field they name alone.
 		claims, held, claimWhy := false, false, ""
-		if okR && okL && !guarded && !k.noiseBarred(exact) {
+		if okR && okL && !guarded {
 			claims, held, claimWhy = k.claimsHeld(exact, rs, ls)
 		}
 		if held {

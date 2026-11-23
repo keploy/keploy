@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/base64"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -571,8 +572,9 @@ func TestAReorderedRepeatedFormKeyLearnsNoNoise(t *testing.T) {
 // A JSON field barred by a clock rule (noiseBarred: named by a clock rule
 // with no clock check on this recording) names that rule in its refusal
 // reason rather than leaving why empty, while a keploy.yml pattern refusal
-// keeps its own reason, and a field that does have a clock check on this
-// recording is not blamed on having none when its JSON type changes.
+// keeps its own reason, a non-clock minted rule is never blamed as a clock
+// rule, and a JSON type change at any field a clock rule names reports that
+// the type changed rather than blaming the clock rule.
 func TestAClockRuleBarredJSONFieldNamesItsRule(t *testing.T) {
 	base := time.Date(2026, 11, 11, 14, 16, 33, 0, time.UTC)
 	recAt := time.Date(2026, 11, 11, 14, 6, 39, 0, time.UTC)
@@ -580,40 +582,72 @@ func TestAClockRuleBarredJSONFieldNamesItsRule(t *testing.T) {
 	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
 	lastUsed := models.DeclaredSource{Rule: "pat-last-used-at", Kind: models.DeclaredSourceClock, Field: "body.data.lastUsedAt", Clock: plain}
 	updated := models.DeclaredSource{Rule: "pat-updated-at", Kind: models.DeclaredSourceClock, Field: "body.data.updatedAt", Clock: plain}
+	mintedName := models.DeclaredSource{Rule: "pat-name-minted", Kind: models.DeclaredSourceMinted, Field: "body.data.name", Minted: &models.MintedForm{MinLen: 1, MaxLen: 16}}
 	never := []string{"^never$"}
 	for _, c := range []struct {
 		name       string
 		background bool
+		sources    []models.DeclaredSource
 		body       string
 		bodyPats   map[string][]string
+		at         string
 		wantWhy    string
 		wantPrefix bool
 		notWhy     string
 	}{
 		{
 			name:       "learned noise barred by a clock rule names the rule",
+			sources:    []models.DeclaredSource{lastUsed, updated},
+			at:         "body.data.lastUsedAt",
 			wantWhy:    "pat-last-used-at",
 			wantPrefix: true,
 		},
 		{
-			name: "a type change on a clock-barred field names the rule",
+			name:    "a type change on a clock-barred field says the type changed",
+			sources: []models.DeclaredSource{lastUsed, updated},
 			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":"` +
 				strconv.FormatInt(now.Unix(), 10) + `","name":"e2e-go","status":"active","updatedAt":"` + recAt.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
-			wantWhy:    "pat-last-used-at",
+			at:         "body.data.lastUsedAt",
+			wantWhy:    "type changed (recorded number, live string)",
 			wantPrefix: true,
+			notWhy:     "pat-last-used-at",
 		},
 		{
 			name:     "a pattern refusal keeps its own reason",
+			sources:  []models.DeclaredSource{lastUsed, updated},
 			bodyPats: map[string][]string{"data.lastUsedAt": never},
+			at:       "body.data.lastUsedAt",
 			wantWhy:  "keploy.yml's noise lets",
 			notWhy:   "pat-last-used-at",
 		},
 		{
-			name:       "a type change on a clock-checked field is not blamed on no clock check",
+			name:     "a pattern refusal on a type change keeps its own reason",
+			sources:  []models.DeclaredSource{lastUsed, updated},
+			bodyPats: map[string][]string{"data.lastUsedAt": never},
+			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":"` +
+				strconv.FormatInt(now.Unix(), 10) + `","name":"e2e-go","status":"active","updatedAt":"` + recAt.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
+			at:      "body.data.lastUsedAt",
+			wantWhy: "keploy.yml's noise lets",
+			notWhy:  "type changed",
+		},
+		{
+			name:       "a type change on a clock-checked field says the type changed",
 			background: true,
+			sources:    []models.DeclaredSource{lastUsed, updated},
 			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":"` +
 				strconv.FormatInt(now.Unix(), 10) + `","name":"e2e-go","status":"active","updatedAt":"` + now.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
-			notWhy: "pat-last-used-at",
+			at:         "body.data.lastUsedAt",
+			wantWhy:    "type changed (recorded number, live string)",
+			wantPrefix: true,
+			notWhy:     "pat-last-used-at",
+		},
+		{
+			name:    "a minted rule at another field is not blamed as a clock rule",
+			sources: []models.DeclaredSource{lastUsed, updated, mintedName},
+			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":` +
+				strconv.FormatInt(recAt.Unix(), 10) + `,"name":"other-name","status":"active","updatedAt":"` + recAt.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
+			at:     "body.data.name",
+			notWhy: "pat-name-minted",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -627,7 +661,7 @@ func TestAClockRuleBarredJSONFieldNamesItsRule(t *testing.T) {
 			in.arrived = base.Add(2 * time.Second)
 			db := sourcedDb{
 				mockMemDb:  &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true},
-				sources:    map[string][]models.DeclaredSource{"mock-220": {lastUsed, updated}},
+				sources:    map[string][]models.DeclaredSource{"mock-220": c.sources},
 				background: map[string]bool{"mock-220": c.background},
 				timeForm:   true,
 			}
@@ -636,10 +670,10 @@ func TestAClockRuleBarredJSONFieldNamesItsRule(t *testing.T) {
 				t.Fatalf("match: %v", err)
 			}
 			if ok {
-				t.Fatalf("answered; want refused at body.data.lastUsedAt")
+				t.Fatalf("answered; want refused at %s", c.at)
 			}
-			if got := differs(diag); len(got) != 1 || !hasField(got, "body.data.lastUsedAt") {
-				t.Fatalf("differs %v; want only body.data.lastUsedAt", got)
+			if got := differs(diag); len(got) != 1 || !hasField(got, c.at) {
+				t.Fatalf("differs %v; want only %s", got, c.at)
 			}
 			f := diag.differs[0]
 			if c.wantWhy != "" && !strings.Contains(f.why, c.wantWhy) {
@@ -652,5 +686,36 @@ func TestAClockRuleBarredJSONFieldNamesItsRule(t *testing.T) {
 				t.Fatalf("%s refused for %q; want a reason that does not say %q", f.shape, f.why, c.notWhy)
 			}
 		})
+	}
+}
+
+// claimsHeld enforces noiseBarred itself (as learnedAt does), so every
+// caller — headerDiffs included — refuses a JWT whose field is barred by a
+// clock rule rather than answering it by its learned claim times.
+func TestAHeaderClockRuleBarsClaimCheckByConstruction(t *testing.T) {
+	recAt := learnAt.Add(1300 * time.Millisecond)
+	liveAt := learnAt.Add(2 * time.Hour)
+	recTok := claimJWT(hs256Head, notifyClaims("svc-1", recAt, ""), recSig)
+	movedTok := claimJWT(hs256Head, notifyClaims("svc-1", liveAt, ""), liveSig)
+	clocks := map[string]models.ClockOffset{
+		learn.ClaimClockKey("header.x-api-token", "iat"): {Form: "number 9999999999", Claim: "iat"},
+		learn.ClaimClockKey("header.x-api-token", "exp"): {Form: "number 9999999999", Claim: "exp"},
+	}
+	rec := map[string]string{"X-Api-Token": recTok}
+	liveHdr := http.Header{"X-Api-Token": {movedTok}}
+
+	unbarred := strictKnown{n: strictNoise{timeForm: true}, clocks: clocks}
+	if diffs := unbarred.headerDiffs(rec, liveHdr, nil); len(diffs) != 0 {
+		t.Fatalf("unbarred header diffs %+v; want answered by learned claim times", diffs)
+	}
+
+	barred := strictKnown{
+		n:        strictNoise{timeForm: true},
+		clocks:   clocks,
+		declared: map[string]models.ClockOffset{"header.x-api-token": {Res: time.Second}},
+	}
+	diffs := barred.headerDiffs(rec, liveHdr, nil)
+	if len(diffs) != 1 || diffs[0].diff.Path != "header.x-api-token" {
+		t.Fatalf("clock-barred header diffs %+v; want header.x-api-token refused", diffs)
 	}
 }
