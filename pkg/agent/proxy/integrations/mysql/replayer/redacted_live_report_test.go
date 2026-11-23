@@ -570,3 +570,43 @@ func TestMySQLStrictMissRedactsATemplateThatKeepsALiteral(t *testing.T) {
 		t.Fatalf("the summary shows %q; want %q", got, want)
 	}
 }
+
+// When strict rejects multiple non-exact COM_QUERY candidates, the miss report's
+// closest mock keeps the highest-scoring candidate rather than letting a later
+// lower-scoring candidate overwrite it, on both the first pass and the full scan.
+func TestMySQLStrictMissClosestKeepsHighestScore(t *testing.T) {
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	live := "SELECT name FROM users WHERE api_key = 'k-live' AND org = 'globex'"
+	highSQL := "SELECT name FROM users WHERE api_key = 'k-high' AND org = 'acmecp'"
+	lowSQL1 := "SELECT name FROM users WHERE api_key = 'k-low-longer' AND org = 'initech-corp'"
+	lowSQL2 := "SELECT name FROM users WHERE api_key = 'k-low-longer2' AND org = 'initech-corp2'"
+	// high has the exact same PayloadLength as live (+1 score over low).
+	mk := func(name, sql string) *models.Mock {
+		m := queryRecorded(name, sql, nil)
+		m.Spec.MySQLRequests[0].Header.Header.PayloadLength = uint32(len(sql) + 1)
+		return m
+	}
+	req := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: uint32(len(live) + 1)}, Type: "COM_QUERY"},
+		Message: &mysql.QueryPacket{Query: live},
+	}}
+	for _, tc := range []struct {
+		name string
+		pool []*models.Mock
+	}{
+		{"best first", []*models.Mock{mk("mock-high-score", highSQL), mk("mock-low-1", lowSQL1)}},
+		{"best last", []*models.Mock{mk("mock-low-1", lowSQL1), mk("mock-high-score", highSQL)}},
+		{"best between", []*models.Mock{mk("mock-low-1", lowSQL1), mk("mock-high-score", highSQL), mk("mock-low-2", lowSQL2)}},
+	} {
+		for _, fullScan := range []bool{false, true} {
+			db := &fakeMockDb{session: tc.pool}
+			_, ok, miss, err := matchCommandWith(ctx, zap.NewNop(), req, db, newDecodeCtx(), mocknoise.New(mysqlNoiseAdapter{}, false, true), nil, matchOptions{fullScan: fullScan})
+			if err != nil || ok || miss == nil {
+				t.Fatalf("%s (fullScan=%v): strict served the COM_QUERY (%v, %v)", tc.name, fullScan, err, miss)
+			}
+			if miss.closestMock != "mock-high-score" {
+				t.Errorf("%s (fullScan=%v): the miss names %q; want %q, the highest-scoring candidate", tc.name, fullScan, miss.closestMock, "mock-high-score")
+			}
+		}
+	}
+}

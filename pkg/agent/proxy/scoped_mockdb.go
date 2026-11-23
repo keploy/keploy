@@ -1081,9 +1081,68 @@ func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	return -1, false
 }
 
+// OwnerTestWindow forwards integrations.WindowOwnership.
+func (s *scopedMockDb) OwnerTestWindow(t time.Time) (models.TestWindow, bool, bool) {
+	if w, ok := s.MockMemDb.(integrations.WindowOwnership); ok {
+		return w.OwnerTestWindow(t)
+	}
+	return models.TestWindow{}, false, false
+}
+
+// OwnerTestWindowSpan forwards integrations.WindowOwnership.
+func (s *scopedMockDb) OwnerTestWindowSpan(start, end time.Time) (models.TestWindow, bool) {
+	if w, ok := s.MockMemDb.(integrations.WindowOwnership); ok {
+		return w.OwnerTestWindowSpan(start, end)
+	}
+	return models.TestWindow{}, false
+}
+
+// EdgeOwnerWindow forwards integrations.WindowOwnership.
+func (s *scopedMockDb) EdgeOwnerWindow(m *models.Mock) (models.TestWindow, bool) {
+	if w, ok := s.MockMemDb.(integrations.WindowOwnership); ok {
+		return w.EdgeOwnerWindow(m)
+	}
+	return models.TestWindow{}, false
+}
+
+// TallyOwnership forwards integrations.OwnershipTally.
+func (s *scopedMockDb) TallyOwnership(e integrations.OwnershipEvent) {
+	if w, ok := s.MockMemDb.(integrations.OwnershipTally); ok {
+		w.TallyOwnership(e)
+	}
+}
+
+// RecordWindowAlternatives forwards integrations.WindowReclaim.
+func (s *scopedMockDb) RecordWindowAlternatives(consumed *models.Mock, winStart, winEnd time.Time, alts []*models.Mock) {
+	if w, ok := s.MockMemDb.(integrations.WindowReclaim); ok {
+		w.RecordWindowAlternatives(consumed, winStart, winEnd, alts)
+	}
+}
+
+// ReclaimableInWindow forwards integrations.WindowReclaim.
+func (s *scopedMockDb) ReclaimableInWindow(winStart, winEnd time.Time) []*models.Mock {
+	if w, ok := s.MockMemDb.(integrations.WindowReclaim); ok {
+		return w.ReclaimableInWindow(winStart, winEnd)
+	}
+	return nil
+}
+
+// CommitWindowReclaim forwards integrations.WindowReclaim.
+func (s *scopedMockDb) CommitWindowReclaim(reclaimed *models.Mock, winStart, winEnd time.Time) (*models.Mock, bool) {
+	if w, ok := s.MockMemDb.(integrations.WindowReclaim); ok {
+		return w.CommitWindowReclaim(reclaimed, winStart, winEnd)
+	}
+	return nil, false
+}
+
 var (
 	_ integrations.RecordedWindowIndex = (*MockManager)(nil)
 	_ integrations.RecordedWindowIndex = (*scopedMockDb)(nil)
+	_ integrations.WindowOwnership     = (*MockManager)(nil)
+	_ integrations.WindowOwnership     = (*scopedMockDb)(nil)
+	_ integrations.WindowReclaim       = (*MockManager)(nil)
+	_ integrations.WindowReclaim       = (*scopedMockDb)(nil)
+	_ integrations.OwnershipTally      = (*scopedMockDb)(nil)
 )
 
 // SameRecordedTestWindow forwards integrations.TestWindows.

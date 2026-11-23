@@ -144,7 +144,8 @@ func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unan
 // is. It asks the agent's own decision (pkg.ServeInWindow), and keeps:
 //
 //   - what the window's per-test pool gets: placed in it, in flight when it
-//     began, with no recorded time, a window-bound mock recorded in it;
+//     began, with no recorded time, a window-bound mock recorded in it, and
+//     under the strict window a plain per-test mock the edge rule gives it;
 //   - what it releases first: a carry-over mock the carry-over tier reaches
 //     from it, a server push the push hub delivers from it;
 //   - of what the session pool hands every window, a mock placed in the
@@ -179,10 +180,15 @@ func heldFor(m *models.Mock, session bool, w pkg.ServeWindow) bool {
 // agent keeps them resident when it cannot make the store), so the hold asks
 // for the disk's: it holds the carry-over mocks the tier reaches first at w,
 // where the resident filter would promote them to the session pool, which
-// every window is served and the hold keeps only when recorded in w. Holding
-// one more mock is safe; deleting one the agent serves is not.
+// every window is served and the hold keeps only when recorded in w. It asks
+// the edge rule by sched (pkg.ServeWindow.Windows) under the strict window,
+// which the agent does not apply under exact serving (KEPLOY_PROVEN=1, where
+// the test's mapping says what it owns) and has not said whether it does:
+// there the hold keeps, beside what the agent serves, the mocks the edge rule
+// gives w. Holding one more mock is safe; deleting one the agent serves
+// is not.
 func serveWindowOf(sched *models.WindowSchedule, w models.TestWindow, agent models.MockWindowsSaid) pkg.ServeWindow {
-	sw := pkg.ServeWindow{Start: w.Start, End: w.End, StrictWindow: agent.Strict, Resolved: true, Recorded: sched, Lookahead: agent.Lookahead}
+	sw := pkg.ServeWindow{Start: w.Start, End: w.End, StrictWindow: agent.Strict, Resolved: true, Recorded: sched, Windows: sched, Lookahead: agent.Lookahead}
 	if sched.Len() > 0 {
 		sw.FirstStart = sched.Window(0).Start
 	}
