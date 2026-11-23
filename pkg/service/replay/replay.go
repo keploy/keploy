@@ -4011,6 +4011,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		activeTestCases = append(activeTestCases, testCase)
 	}
+	// Under strict window containment without exact per-test mappings, replay
+	// active tests in earliest-deadline-first order (window End ascending,
+	// tie-breaking by Start ascending). Every non-overlapping causal pair
+	// (End(A) <= Start(B)) and every partially overlapping pair
+	// (Start(A) < Start(B) < End(A) < End(B)) keeps its exact Start order;
+	// only strictly nested concurrent tests (Start(outer) < Start(inner) <=
+	// End(inner) < End(outer)) run inner before outer. By Glover's convex
+	// bipartite matching theorem, earliest-deadline-first order combined with
+	// earliest-available (FIFO) mock matching inside [Start, End] prevents
+	// outer windows from starving nested inner windows at any concurrency
+	// depth without loosening any window or adding extra candidate walks.
+	orderActiveTestCasesForWindowReplay(activeTestCases, r.exact != nil, r.strictMockWindow())
 	for _, tc := range activeTestCases {
 		runOrder.note(tc.Name)
 	}
@@ -11047,4 +11059,29 @@ func (r *Replayer) strictMockWindow() bool {
 		return true
 	}
 	return r.config.Test.StrictMockWindow
+}
+
+// orderActiveTestCasesForWindowReplay reorders activeTestCases in place by
+// window End (ResTimestamp) ascending when strict window containment is active
+// without exact serving (exactActive == false && strictMockWindow == true).
+// Missing or skewed (End < Start) response timestamps fall back to Start.
+func orderActiveTestCasesForWindowReplay(activeTestCases []*models.TestCase, exactActive, strictMockWindow bool) {
+	if exactActive || !strictMockWindow || len(activeTestCases) < 2 {
+		return
+	}
+	windowDeadline := func(tc *models.TestCase) (start, end time.Time) {
+		start, end = recordReqResTimestamps(tc)
+		if end.Before(start) {
+			end = start
+		}
+		return start, end
+	}
+	sort.SliceStable(activeTestCases, func(i, j int) bool {
+		startI, endI := windowDeadline(activeTestCases[i])
+		startJ, endJ := windowDeadline(activeTestCases[j])
+		if !endI.Equal(endJ) {
+			return endI.Before(endJ)
+		}
+		return startI.Before(startJ)
+	})
 }

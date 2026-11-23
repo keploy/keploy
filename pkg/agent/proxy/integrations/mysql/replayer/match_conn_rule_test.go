@@ -1375,3 +1375,73 @@ func TestConnectionRuleReadsTransactionControl(t *testing.T) {
 		t.Errorf("COM_STMT_EXECUTE: %s, want none", got)
 	}
 }
+
+// Inside a transaction right after START TRANSACTION (before any connection
+// is bound), an overlapping non-transactional read of the same SQL
+// (SERVER_STATUS_IN_TRANS clear, e.g. GET /customers/{id}/summary overlapping
+// POST /orders) must not be picked ahead of the transaction's own recording
+// (SERVER_STATUS_IN_TRANS set): picking the non-transactional recording would
+// both steal the other test's mock and clear d.InTx in bindAfter, dropping
+// the binding for the rest of the transaction. Outside a transaction the
+// reverse holds: a non-transactional recording beats an in-transaction one.
+// Both COM_QUERY and COM_STMT_EXECUTE follow the rule, and a recording on the
+// bound connection whose status disagrees (an implicit-commit DDL) still
+// outranks an off-connection recording whose status agrees.
+// When a COM_QUERY falls back to non-exact scoring (drifted DML structure or
+// drifted SELECT inline literal), candidates owned by the open test outrank
+// out-of-window mocks (even when an out-of-window mock scores higher via equal
+// PayloadLength, in both unset and KEPLOY_PROVEN=1 modes), and within the open
+// test's own recordings a match on the bound connection outranks another
+// connection's recording even when the other connection's recording happens to
+// match PayloadLength (+1).
+func TestConnectionRuleRanksDriftedQueryByOwnerAndBoundConnection(t *testing.T) {
+	const (
+		custA = "SELECT id FROM customers WHERE id = 'cust-a'"
+		insB  = "INSERT INTO orders (id, total_cents) VALUES ('ord-bbbb', 100)"
+		insA  = "INSERT INTO orders (id, total_cents) VALUES ('ord-aaaa', 12345)"
+		// Live drifted INSERT has the exact same length as insB (equalPayloadLength = +1)
+		// and a different length from insA (equalPayloadLength = 0).
+		insLive = "INSERT INTO orders (id, total_cents) VALUES ('ord-aaaa', 999)"
+	)
+	recs := []connRec{
+		{"a-cust/on+tx", "cA", custA, 1000 * time.Microsecond, 0},
+		{"b-ins/on+tx", "cB", insB, 1200 * time.Microsecond, 0},
+		{"a-ins/on+tx", "cA", insA, 1500 * time.Microsecond, 0},
+	}
+	checkConnSet(t, recs, []connTest{{0, 4 * time.Millisecond, []connCall{
+		{"L1", "START TRANSACTION", "*"},
+		{"L1", custA, "a-cust/on+tx"},
+		{"L1", insLive, "a-ins/on+tx"},
+	}}}, modeTest, modeTestScan)
+
+	// Outside any transaction (unbound): an in-window owned recording with a
+	// different PayloadLength still beats an earlier out-of-window session
+	// recording of identical PayloadLength (higher raw score).
+	const (
+		selOut  = "SELECT price_cents FROM products WHERE id = 'p-out1'"
+		selB    = "SELECT price_cents FROM products WHERE id = 'p-bbb1'"
+		selA    = "SELECT price_cents FROM products WHERE id = 'p-aaaa-long'"
+		selLive = "SELECT price_cents FROM products WHERE id = 'p-live'"
+	)
+	checkConnSet(t, []connRec{
+		{"out-sel/on", "cOut", selOut, -500 * time.Microsecond, -1},
+		{"in-sel/on", "cA", selA, 1200 * time.Microsecond, 0},
+	}, []connTest{{0, 4 * time.Millisecond, []connCall{
+		{"L1", selLive, "in-sel/on"},
+	}}}, modeTest, modeTestScan)
+
+	// Inside a bound transaction: an in-window recording beats an earlier
+	// out-of-window session recording of identical PayloadLength, and the
+	// bound connection beats an earlier off-bound in-window recording.
+	selRecs := []connRec{
+		{"out-sel/on", "cOut", selOut, -500 * time.Microsecond, -1},
+		{"a-cust/on+tx", "cA", custA, 1000 * time.Microsecond, 0},
+		{"b-sel/on+tx", "cB", selB, 1200 * time.Microsecond, 0},
+		{"a-sel/on+tx", "cA", selA, 1500 * time.Microsecond, 0},
+	}
+	checkConnSet(t, selRecs, []connTest{{0, 4 * time.Millisecond, []connCall{
+		{"L1", "START TRANSACTION", "*"},
+		{"L1", custA, "a-cust/on+tx"},
+		{"L1", selLive, "a-sel/on+tx"},
+	}}}, modeTest, modeTestScan)
+}

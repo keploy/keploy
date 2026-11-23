@@ -1444,10 +1444,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		//   matchedMock     — the mock owning matchedResp; consumed/updated
 		//                     via updateMock once selected.
 		maxMatchedCount  int
+		bestScoreOwn     bool
+		bestScoreOnBound bool
 		matchedResp      *mysql.Response
 		matchedMock      *models.Mock
 		queryMatched     bool
 		stmtMatched      bool
+		bestPartialScore int
 		bestPartialMock  *models.Mock // closest non-exact match for diff reporting
 		bestPartialQuery string       // query of the closest partial match
 
@@ -1779,12 +1782,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
 							trackNearest(mock, qp.Query, recordedIdentity)
 						}
-						if c > maxMatchedCount {
-							// Track the closest candidate for the mismatch report even
-							// when strict rejects it as a servable match below.
-							bestPartialMock = mock
-							if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
-								bestPartialQuery = qp.Query
+						if c > 0 {
+							// Track the highest-scoring candidate for the mismatch
+							// report even when strict rejects it below (ties keep
+							// the later candidate, matching pre-existing behavior).
+							if c >= bestPartialScore {
+								bestPartialScore = c
+								bestPartialMock = mock
+								if qp, qok := mockReq.Message.(*mysql.QueryPacket); qok {
+									bestPartialQuery = qp.Query
+								}
 							}
 							// Under exact serving a recording of the statement
 							// made with other inline literals answers only when
@@ -1799,7 +1806,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							if !gate.allows(mock) {
 								continue
 							}
-							maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+							candOwn := testsOwn(mock)
+							candOnBound := candOwn && !waitsForBound(mock)
+							better := matchedMock == nil ||
+								(candOwn && !bestScoreOwn) ||
+								(candOwn && bestScoreOwn && candOnBound && !bestScoreOnBound) ||
+								(candOwn == bestScoreOwn && candOnBound == bestScoreOnBound && c > maxMatchedCount)
+							if better {
+								bestScoreOwn, bestScoreOnBound, maxMatchedCount = candOwn, candOnBound, c
+								matchedResp, matchedMock = &mock.Spec.MySQLResponses[0], mock
+							}
 						}
 					}
 
@@ -2077,7 +2093,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		candidates = slices.Values(pool)
 		maxMatchedCount, matchedResp, matchedMock = 0, nil, nil
+		bestScoreOwn, bestScoreOnBound, bestPartialScore = false, false, 0
 		queryMatched, stmtMatched, execDecided = false, false, false
+		queryWaitingResp, queryWaitingMock = nil, nil
+		execWaitingResp, execWaitingMock = nil, nil
 		bestPartialMock, bestPartialQuery = nil, ""
 		nearestMock, nearestQuery, nearestPrefix = nil, "", 0
 		fallbacks.reset()

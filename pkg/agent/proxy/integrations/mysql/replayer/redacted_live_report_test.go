@@ -482,6 +482,33 @@ func TestMySQLStrictMissRedactsByEveryRecordingItNames(t *testing.T) {
 	}
 }
 
+// When strict rejects multiple non-exact COM_QUERY candidates, the miss report's
+// closest mock keeps the highest-scoring candidate rather than letting a later
+// lower-scoring candidate overwrite it.
+func TestMySQLStrictMissClosestKeepsHighestScore(t *testing.T) {
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	live := "SELECT name FROM users WHERE api_key = 'k-live' AND org = 'globex'"
+	highSQL := "SELECT name FROM users WHERE api_key = 'k-high' AND org = 'acmecp'"
+	lowSQL := "SELECT name FROM users WHERE api_key = 'k-low-longer' AND org = 'initech-corp'"
+	// high has the exact same PayloadLength as live (+1 score over low).
+	high := queryRecorded("mock-high-score", highSQL, nil)
+	high.Spec.MySQLRequests[0].Header.Header.PayloadLength = uint32(len(live) + 1)
+	low := queryRecorded("mock-low-score", lowSQL, nil)
+	low.Spec.MySQLRequests[0].Header.Header.PayloadLength = uint32(len(lowSQL) + 1)
+	db := &fakeMockDb{session: []*models.Mock{high, low}}
+	req := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: uint32(len(live) + 1)}, Type: "COM_QUERY"},
+		Message: &mysql.QueryPacket{Query: live},
+	}}
+	_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, newDecodeCtx(), mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+	if err != nil || ok || miss == nil {
+		t.Fatalf("strict served the COM_QUERY (%v, %v)", err, miss)
+	}
+	if miss.closestMock != high.Name {
+		t.Fatalf("the miss names %q; want %q, the highest-scoring candidate", miss.closestMock, high.Name)
+	}
+}
+
 // sessionUnreadable is a store whose session tier cannot be read whole; its
 // keyed walk still can.
 type sessionUnreadable struct{ *fakeMockDb }
