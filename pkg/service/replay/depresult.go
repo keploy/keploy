@@ -177,6 +177,11 @@ func eligibleExpectedEntries(
 // read as unconsumed. Only the excluded kinds and the recorder-tagged
 // protocol-phase mocks are left out.
 func consumedOutsideAssertion(m models.MockState) bool {
+	// A mock a window reclaim credits to another test's call (CreditTo) is
+	// that test's consumption, not the one whose drain caught it.
+	if m.CreditTo != "" {
+		return true
+	}
 	if provenswitch.On() {
 		return models.ExcludedFromDependencyAssertion(m.Kind) || ((m.Type == "config" || m.Type == "connection") && !m.DataPlane)
 	}

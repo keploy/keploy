@@ -454,6 +454,24 @@ func TestConsumedOutsideAssertionFollowsTheSwitch(t *testing.T) {
 	}
 }
 
+// A mock the drain credits to another test's call (MockState.CreditTo: the
+// agent's window reclaim) is that test's consumption: the running test's
+// expected-against-consumed comparison leaves it out, under either switch.
+func TestConsumedOutsideAssertionLeavesOutACredit(t *testing.T) {
+	credit := models.MockState{Name: "m-out", Kind: models.MySQL, Type: "mocks", Lifetime: models.LifetimePerTest, CreditTo: "outer", CreditReplaces: "m-in"}
+	own := credit
+	own.CreditTo, own.CreditReplaces = "", ""
+	for _, on := range []bool{false, true} {
+		setSwitch(t, on)
+		if !consumedOutsideAssertion(credit) {
+			t.Errorf("switch %v: a mock credited to another test is inside the running test's assertion", on)
+		}
+		if consumedOutsideAssertion(own) {
+			t.Errorf("switch %v: the running test's own per-test consume is outside its assertion", on)
+		}
+	}
+}
+
 func TestUnconsumedTestMocks(t *testing.T) {
 	expected := []models.MockEntry{{Name: "m1", Kind: "Http"}, {Name: "m2", Kind: "Http"}, {Name: "dns", Kind: "DNS"}, {Name: "hs", Kind: "Postgres"}}
 	kinds := map[string]models.Kind{"m1": models.HTTP, "m2": models.HTTP, "dns": models.DNS, "hs": models.Postgres}
@@ -775,6 +793,19 @@ func TestMarkConsumedByNamesTheSibling(t *testing.T) {
 	got := results[0].FailureInfo.UnconsumedMocks
 	if got[0].ConsumedBy != "test-2" || got[1].ConsumedBy != "" || len(pairs) != 1 {
 		t.Fatalf("unconsumed %+v, pairs %v; want mock-a consumed by test-2 and mock-b by no one", got, pairs)
+	}
+}
+
+// A mock a drain credits to another test's call (MockState.CreditTo) is
+// noted as that test's consumption, not the draining test's.
+func TestNoteConsumersNotesACreditUnderItsTest(t *testing.T) {
+	consumers := map[string][]string{}
+	noteConsumers(consumers, "inner", []models.MockState{{Name: "m-in"}, {Name: "m-out", CreditTo: "outer", CreditReplaces: "m-in"}})
+	if got := consumers["m-out"]; !reflect.DeepEqual(got, []string{"outer"}) {
+		t.Errorf("m-out consumed by %v; want [outer], whose call it is credited with", got)
+	}
+	if got := consumers["m-in"]; !reflect.DeepEqual(got, []string{"inner"}) {
+		t.Errorf("m-in consumed by %v; want [inner]", got)
 	}
 }
 

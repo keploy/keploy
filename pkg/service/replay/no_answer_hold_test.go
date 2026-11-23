@@ -896,6 +896,41 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 	}
 }
 
+// The edge rule is the agent's serve decision too (pkg.ServeWindow.Windows):
+// a plain per-test mock placed 30 µs past the unanswered test's window and
+// nearer it than any other is served to it under the strict window, by the
+// real agent on both residencies, whether its recorder stated its lifetime or
+// not, and the hold keeps it; one 150 µs past is no window's, nor is the edge
+// one in lax mode, where an unstated one is promoted to the session pool as
+// any other out of its window. (MySQL and Mongo mocks: the table above
+// registers its HTTP and gRPC mocks' kinds carry-over, which the edge rule
+// never takes; an unstated MySQL mock is session-lifetime.)
+func TestHoldNoAnswerMocksHoldsTheEdgeRulesMock(t *testing.T) {
+	cases, at := holdTableSet()
+	edge := func(op string, s float64) *models.Mock {
+		return statedPerTest(noAnswerHoldMock(models.MySQL, op, at(s)))
+	}
+	unstated := func(op string, s float64) *models.Mock {
+		m := noAnswerHoldMock(models.Mongo, op, at(s))
+		m.DeriveLifetime()
+		if m.StatesLifetime() || m.TestModeInfo.Lifetime != models.LifetimePerTest {
+			t.Fatalf("precondition: %s is not an unstated per-test mock", op)
+		}
+		return m
+	}
+	for _, tc := range []holdRow{
+		{"an unstated mock 30 µs past the window's end", unstated("EdgeUnstated", 72.00003), false, true, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"an unstated mock 30 µs past the window's end, lax mode (promoted)", unstated("EdgeUnstatedLax", 72.00003), false, false, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, false},
+		{"a stated mock 30 µs past the window's end", edge("Edge", 72.00003), false, true, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"a stated mock 150 µs past the window's end", edge("Far", 72.00015), false, true, pkg.NotServed, pkg.NotServed, pkg.NotServed, false},
+		// Lax mode drops a stated mock out of its window, and the edge rule
+		// is the strict window's.
+		{"a stated mock 30 µs past the window's end, lax mode", edge("EdgeLax", 72.00003), false, false, pkg.NotServed, pkg.NotServed, pkg.NotServed, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) { checkHoldRow(t, cases, tc, byWindow) })
+	}
+}
+
 // A server push recorded in the gap after the unanswered test, which the push
 // hub delivers from that test's window on (models.WindowSchedule.Released), and
 // which went unconsumed, survives the prune around that test on both formats,

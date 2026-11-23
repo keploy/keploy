@@ -600,11 +600,16 @@ func attachStreamDepResults(result *models.TestResult, status models.TestStatus,
 	attachDepResults(result, status, buildDepResults(expected, consumed, valid, excluded, kinds, lookup), true)
 }
 
-// noteConsumers records that test consumed each of consumed.
+// noteConsumers records that test consumed each of consumed: each mock its
+// drain credits to another test's call (MockState.CreditTo) that test.
 func noteConsumers(consumers map[string][]string, test string, consumed []models.MockState) {
 	for _, m := range consumed {
-		if !slices.Contains(consumers[m.Name], test) {
-			consumers[m.Name] = append(consumers[m.Name], test)
+		by := test
+		if m.CreditTo != "" {
+			by = m.CreditTo
+		}
+		if !slices.Contains(consumers[m.Name], by) {
+			consumers[m.Name] = append(consumers[m.Name], by)
 		}
 	}
 }

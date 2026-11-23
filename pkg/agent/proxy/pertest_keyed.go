@@ -45,8 +45,9 @@ func (m *MockManager) rangePerTestMocksWithKeyIn(v *exactView, ix *integrations.
 	if v == nil {
 		keeps := func(*models.Mock) bool { return true }
 		if !start.IsZero() && !end.IsZero() {
-			gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
-			keeps = func(mk *models.Mock) bool { return inRecordedWindow(mk, start, end, gapFrom, hasGap) }
+			windows := m.testWindows.Load()
+			gapFrom, hasGap := windows.GapBefore(start)
+			keeps = func(mk *models.Mock) bool { return inRecordedWindow(mk, start, end, gapFrom, hasGap, windows) }
 		}
 		tree.rangeKeyed(ix, key, func(mk *models.Mock) bool { return !keeps(mk) || fn(mk) })
 		return nil
