@@ -12,9 +12,26 @@ import (
 	"go.keploy.io/server/v3/utils/textcut"
 )
 
+// pathReport holds extra metadata collected during JSONFieldDiffsWithTypeStrict
+// and left nil on matching/count paths so hot-path allocations and struct size
+// stay identical to main.
+type pathReport struct {
+	// strictValues holds the scalar stringified value for type-strict
+	// (learned-dynamic) primitives so missing and type-changed diffs keep
+	// their recorded/live values without affecting diffMaps value suppression.
+	strictValues map[string]string
+	// containers holds the JSON container kind ("object" or "array") for
+	// container paths (both empty and non-empty) so scalar<->container and
+	// object<->array shape changes are reported as one type_changed diff
+	// rather than removed + added leaves.
+	containers map[string]string
+}
+
 type pathMaps struct {
 	types  map[string]string // path -> type ("string","number","boolean","null")
-	values map[string]string // path -> scalar stringified value (only for primitives)
+	values map[string]string // path -> scalar stringified value (only for non-typeStrict primitives)
+	// report is non-nil only when collecting for JSONFieldDiffsWithTypeStrict.
+	report *pathReport
 	// coveredTypes and coveredValues hold, as types and values do, the
 	// scalars a pattern-guarded noise entry matched. They are set aside, not
 	// dropped: a pattern excuses a field only when the recorded and the live
@@ -41,7 +58,14 @@ func (m *pathMaps) coveredOnly(path string) bool {
 // collectBoth collects the recorded (exp) and the live (act) document under
 // one noise index and applies bothSides to them.
 func collectBoth(exp, act interface{}, ni noiseIndex) (expMaps, actMaps pathMaps) {
+	return collectBothWithDetails(exp, act, ni, false)
+}
+
+func collectBothWithDetails(exp, act interface{}, ni noiseIndex, reportDetails bool) (expMaps, actMaps pathMaps) {
 	expMaps, actMaps = newPathMaps(), newPathMaps()
+	if reportDetails {
+		expMaps.report, actMaps.report = &pathReport{}, &pathReport{}
+	}
 	collectJSON(exp, "", ni, &expMaps, nil)
 	collectJSON(act, "", ni, &actMaps, ni.recordedPaths(exp))
 	bothSides(&expMaps, &actMaps)
@@ -364,6 +388,8 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 	return out
 }
 
+const redactedDiffValue = "(redacted)"
+
 // JSONFieldDiffs returns field-level diffs between two JSON documents with
 // recorded/live values attached, for mock-mismatch reporting. It walks both
 // documents with the same traversal as ComputeFailureAssessmentJSON (arrays
@@ -374,6 +400,28 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 // rune boundary) to keep reports and yaml output bounded. Returns nil when
 // either side isn't valid JSON.
 func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPrefix string, maxVal int) []models.MockFieldDiff {
+	return jsonFieldDiffs(expJSON, actJSON, known, nil, pathPrefix, maxVal, false, nil)
+}
+
+// JSONFieldDiffsWithTypeStrict is JSONFieldDiffs where paths in `typeStrict`
+// (learned-dynamic paths, also carried in `known`) ignore same-type value
+// drift while still reporting missing fields and JSON type changes, including
+// scalar-to-container, container-to-scalar, and object-to-array/array-to-object
+// shape changes.
+func JSONFieldDiffsWithTypeStrict(expJSON, actJSON string, known map[string][]string, typeStrict map[string]struct{}, pathPrefix string, maxVal int) []models.MockFieldDiff {
+	return jsonFieldDiffs(expJSON, actJSON, known, typeStrict, pathPrefix, maxVal, true, nil)
+}
+
+// JSONFieldDiffsWithTypeStrictRedacted is JSONFieldDiffsWithTypeStrict where
+// `redactValue`, when non-nil, is consulted with each uncut scalar value BEFORE
+// maxVal truncation. Returning true replaces that scalar with "(redacted)" (or
+// "<type>: (redacted)" on type_changed diffs), so maxVal truncation only ever
+// applies to values already judged printable.
+func JSONFieldDiffsWithTypeStrictRedacted(expJSON, actJSON string, known map[string][]string, typeStrict map[string]struct{}, pathPrefix string, maxVal int, redactValue func(string) bool) []models.MockFieldDiff {
+	return jsonFieldDiffs(expJSON, actJSON, known, typeStrict, pathPrefix, maxVal, true, redactValue)
+}
+
+func jsonFieldDiffs(expJSON, actJSON string, known map[string][]string, typeStrict map[string]struct{}, pathPrefix string, maxVal int, reportDetails bool, redactValue func(string) bool) []models.MockFieldDiff {
 	if !json.Valid([]byte(expJSON)) || !json.Valid([]byte(actJSON)) {
 		return nil
 	}
@@ -388,8 +436,9 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 	}
 
 	idx := buildNoiseIndex(known, nil)
+	idx.markTypeStrict(typeStrict)
 
-	expMaps, actMaps := collectBoth(exp, act, idx)
+	expMaps, actMaps := collectBothWithDetails(exp, act, idx, reportDetails)
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
@@ -401,39 +450,152 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 		// would garble the report yaml/json encoders downstream.
 		return textcut.Prefix(s, maxVal) + "…"
 	}
+	formatScalar := func(raw string) string {
+		if redactValue != nil && redactValue(raw) {
+			return redactedDiffValue
+		}
+		return trunc(raw)
+	}
+	formatTyped := func(typ, raw string) string {
+		if redactValue != nil && redactValue(raw) {
+			return typ + ": " + redactedDiffValue
+		}
+		return trunc(typ + ": " + raw)
+	}
+	valueOf := func(m pathMaps, p string) string {
+		if v, ok := m.values[p]; ok {
+			return v
+		}
+		if m.report == nil {
+			return ""
+		}
+		return m.report.strictValues[p]
+	}
 
 	var out []models.MockFieldDiff
 	for _, p := range valueChanges {
 		out = append(out, models.MockFieldDiff{
 			Path:     pathPrefix + p,
 			Kind:     models.DiffKindValueChanged,
-			Expected: trunc(expMaps.values[p]),
-			Actual:   trunc(actMaps.values[p]),
+			Expected: formatScalar(expMaps.values[p]),
+			Actual:   formatScalar(actMaps.values[p]),
 		})
 	}
+
+	typeDiffs := make([]models.MockFieldDiff, 0, len(typeChanges))
 	for _, p := range typeChanges {
-		out = append(out, models.MockFieldDiff{
+		typeDiffs = append(typeDiffs, models.MockFieldDiff{
 			Path:     pathPrefix + p,
 			Kind:     models.DiffKindTypeChanged,
-			Expected: trunc(expMaps.types[p] + ": " + expMaps.values[p]),
-			Actual:   trunc(actMaps.types[p] + ": " + actMaps.values[p]),
+			Expected: formatTyped(expMaps.types[p], valueOf(expMaps, p)),
+			Actual:   formatTyped(actMaps.types[p], valueOf(actMaps, p)),
 		})
 	}
+
+	if reportDetails {
+		var retypedContainers, retypedToContainer, retypedFromContainer []string
+		for p, expKind := range expMaps.report.containers {
+			if actKind, ok := actMaps.report.containers[p]; ok && expKind != actKind {
+				retypedContainers = append(retypedContainers, p)
+			}
+		}
+		if len(retypedContainers) > 0 {
+			sort.Strings(retypedContainers)
+			for _, p := range retypedContainers {
+				typeDiffs = append(typeDiffs, models.MockFieldDiff{
+					Path:     pathPrefix + p,
+					Kind:     models.DiffKindTypeChanged,
+					Expected: expMaps.report.containers[p],
+					Actual:   actMaps.report.containers[p],
+				})
+			}
+		}
+		var keptRemoved, keptAdded []string
+		for _, p := range removed {
+			if HasAncestorPath(p, retypedContainers) {
+				continue
+			}
+			if actKind, ok := actMaps.report.containers[p]; ok {
+				if expKind, both := expMaps.report.containers[p]; both && expKind != actKind {
+					continue
+				}
+				retypedToContainer = append(retypedToContainer, p)
+				typeDiffs = append(typeDiffs, models.MockFieldDiff{
+					Path:     pathPrefix + p,
+					Kind:     models.DiffKindTypeChanged,
+					Expected: formatTyped(expMaps.types[p], valueOf(expMaps, p)),
+					Actual:   actKind,
+				})
+				continue
+			}
+			keptRemoved = append(keptRemoved, p)
+		}
+		for _, p := range added {
+			if HasAncestorPath(p, retypedToContainer) || HasAncestorPath(p, retypedContainers) {
+				continue
+			}
+			if expKind, ok := expMaps.report.containers[p]; ok {
+				if actKind, both := actMaps.report.containers[p]; both && expKind != actKind {
+					continue
+				}
+				retypedFromContainer = append(retypedFromContainer, p)
+				typeDiffs = append(typeDiffs, models.MockFieldDiff{
+					Path:     pathPrefix + p,
+					Kind:     models.DiffKindTypeChanged,
+					Expected: expKind,
+					Actual:   formatTyped(actMaps.types[p], valueOf(actMaps, p)),
+				})
+				continue
+			}
+			keptAdded = append(keptAdded, p)
+		}
+		if len(retypedFromContainer) > 0 {
+			filtered := keptRemoved[:0]
+			for _, p := range keptRemoved {
+				if !HasAncestorPath(p, retypedFromContainer) {
+					filtered = append(filtered, p)
+				}
+			}
+			keptRemoved = filtered
+		}
+		removed, added = keptRemoved, keptAdded
+		if len(retypedToContainer) > 0 || len(retypedFromContainer) > 0 || len(retypedContainers) > 0 {
+			sort.Slice(typeDiffs, func(i, j int) bool { return typeDiffs[i].Path < typeDiffs[j].Path })
+		}
+	}
+
+	out = append(out, typeDiffs...)
 	for _, p := range removed {
 		out = append(out, models.MockFieldDiff{
 			Path:     pathPrefix + p,
 			Kind:     models.DiffKindMissingInLive,
-			Expected: trunc(expMaps.values[p]),
+			Expected: formatScalar(valueOf(expMaps, p)),
 		})
 	}
 	for _, p := range added {
 		out = append(out, models.MockFieldDiff{
 			Path:   pathPrefix + p,
 			Kind:   models.DiffKindMissingInMock,
-			Actual: trunc(actMaps.values[p]),
+			Actual: formatScalar(valueOf(actMaps, p)),
 		})
 	}
 	return out
+}
+
+// HasAncestorPath reports whether path is a strict descendant of any path in
+// ancestors under collectJSON's "." / "[]" path segment boundaries. A sibling
+// sharing only a string prefix (e.g. "meta.ts2" vs "meta.ts") returns false.
+func HasAncestorPath(path string, ancestors []string) bool {
+	for _, parent := range ancestors {
+		if len(path) <= len(parent) || !strings.HasPrefix(path, parent) {
+			continue
+		}
+		rest := path[len(parent):]
+		if rest[0] == '.' || strings.HasPrefix(rest, "[]") {
+			return true
+		}
+	}
+	return false
 }
 
 // collectJSON collects v's leaves at path into out, as the matcher reads them
@@ -477,6 +639,12 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps, recor
 
 	switch t := v.(type) {
 	case map[string]interface{}:
+		if out.report != nil && path != "" {
+			if out.report.containers == nil {
+				out.report.containers = map[string]string{}
+			}
+			out.report.containers[path] = "object"
+		}
 		for k, child := range t {
 			p := k
 			if path != "" {
@@ -485,6 +653,12 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps, recor
 			collectJSON(child, p, ni, out, recorded)
 		}
 	case []interface{}:
+		if out.report != nil && path != "" {
+			if out.report.containers == nil {
+				out.report.containers = map[string]string{}
+			}
+			out.report.containers[path] = "array"
+		}
 		// normalize array paths using [] suffix so we don't depend on indices
 		p := path
 		if p != "" {
@@ -500,6 +674,11 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps, recor
 		out.types[path] = typ
 		if !typeStrict {
 			out.values[path] = val
+		} else if out.report != nil {
+			if out.report.strictValues == nil {
+				out.report.strictValues = map[string]string{}
+			}
+			out.report.strictValues[path] = val
 		}
 	default:
 		// other JSON forms won't appear here

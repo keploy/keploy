@@ -201,6 +201,50 @@ func TestJSONBodyDiffs_RespectsIgnoreAndReportsValues(t *testing.T) {
 	}
 }
 
+func TestJSONBodyDiffsWithTypeStrict_ReportsMissingAndTypeChange(t *testing.T) {
+	ignore := map[string][]string{"ts": {}, "skip": {}}
+	ts := map[string]struct{}{"ts": {}}
+
+	// Missing learned field names the field, kind, and recorded value.
+	diffs := JSONBodyDiffsWithTypeStrict(`{"q":"ada","ts":1}`, `{"q":"ada"}`, ignore, ts)
+	if len(diffs) != 1 || diffs[0].Path != "body.ts" || diffs[0].Kind != models.DiffKindMissingInLive || diffs[0].Expected != "1" {
+		t.Fatalf("missing learned field: got %+v", diffs)
+	}
+	if got := RenderFieldDiffs(diffs); got != `body.ts: recorded "1", absent in live call` {
+		t.Fatalf("rendered diff = %q", got)
+	}
+
+	// Type-changed learned field names the field, kind, and both typed values.
+	diffs = JSONBodyDiffsWithTypeStrict(`{"q":"ada","ts":1}`, `{"q":"ada","ts":"1"}`, ignore, ts)
+	if len(diffs) != 1 || diffs[0].Path != "body.ts" || diffs[0].Kind != models.DiffKindTypeChanged || diffs[0].Expected != "number: 1" || diffs[0].Actual != "string: 1" {
+		t.Fatalf("type-changed learned field: got %+v", diffs)
+	}
+
+	// Same-type value drift on learned field produces no diff.
+	if diffs = JSONBodyDiffsWithTypeStrict(`{"q":"ada","ts":1}`, `{"q":"ada","ts":2}`, ignore, ts); len(diffs) != 0 {
+		t.Fatalf("same-type learned drift must produce no diff: %+v", diffs)
+	}
+
+	// User-ignored field (not in typeStrict) stays ignored even when absent.
+	if diffs = JSONBodyDiffsWithTypeStrict(`{"q":"ada","skip":1}`, `{"q":"ada"}`, ignore, ts); len(diffs) != 0 {
+		t.Fatalf("user-ignored missing field must produce no diff: %+v", diffs)
+	}
+
+	// Pre-cut redaction redacts placeholders exceeding maxFieldDiffValueLen (256B) before truncation.
+	longPH := "OBFPH77" + strings.Repeat("q", 293) // 300 bytes
+	diffs = JSONBodyDiffsWithTypeStrictRedacted(
+		`{"meta":{"s":"`+longPH+`"}}`,
+		`{"meta":"`+longPH+`","extra":"`+longPH+`"}`,
+		nil, nil,
+		func(raw string) bool { return raw == longPH },
+	)
+	if len(diffs) != 2 ||
+		diffs[0].Path != "body.meta" || diffs[0].Kind != models.DiffKindTypeChanged || diffs[0].Expected != "object" || diffs[0].Actual != "string: (redacted)" ||
+		diffs[1].Path != "body.extra" || diffs[1].Kind != models.DiffKindMissingInMock || diffs[1].Actual != "(redacted)" {
+		t.Fatalf("pre-cut redaction failed for 300B placeholder: got %+v", diffs)
+	}
+}
+
 func TestHeaderKeyDiffs_SkipsNoiseAndKeployHeaders(t *testing.T) {
 	recorded := map[string]string{
 		"Authorization":  "sig",      // in noise → skipped
@@ -310,8 +354,10 @@ func TestRenderFieldDiffs_NoValuesNamesTheFieldAlone(t *testing.T) {
 	got := RenderFieldDiffs([]models.MockFieldDiff{
 		{Path: "body.x", Kind: models.DiffKindValueChanged},
 		{Path: "body.y", Kind: models.DiffKindValueChanged, Expected: "", Actual: "b"},
+		{Path: "body.m", Kind: models.DiffKindMissingInLive},
+		{Path: "body.a", Kind: models.DiffKindMissingInMock},
 	})
-	if want := `body.x: differs (values not shown); body.y: recorded "", live "b"`; got != want {
+	if want := `body.x: differs (values not shown); body.y: recorded "", live "b"; body.m: absent in live call; body.a: absent in recording`; got != want {
 		t.Fatalf("RenderFieldDiffs = %q, want %q", got, want)
 	}
 }
