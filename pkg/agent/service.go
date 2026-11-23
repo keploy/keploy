@@ -405,7 +405,11 @@ type ShimReporter interface {
 type RunMemberReporter interface {
 	// HoldsInRun reports whether process pid, created at start (its
 	// creation time as the agent read it for the claim: on Windows, FILETIME
-	// ticks), is one of the run's processes now. It never waits.
+	// ticks), is one of the run's processes now. It never waits. It is also
+	// asked about the child a claim names (models.InstanceReq.Child), which
+	// may have been created a moment ago, suspended, and run nothing yet: it
+	// answers from the run's membership itself, not from what the process
+	// has said or anything the hooks have been told of it so far.
 	HoldsInRun(pid int, start uint64) bool
 }
 

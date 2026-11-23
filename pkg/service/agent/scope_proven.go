@@ -425,6 +425,13 @@ func (a *Agent) hooksHoldInRun(pid int, start uint64) bool {
 	return ok && h.HoldsInRun(pid, start)
 }
 
+// inRun reports whether process pid is one of the run's processes: it
+// descends from root, keploy's client (clientRoot), by pid, or the hooks
+// hold it, created at start, in the run (hooksHoldInRun).
+func (a *Agent) inRun(pid int, start uint64, root int) bool {
+	return procDescends(pid, root) || a.hooksHoldInRun(pid, start)
+}
+
 // CallerSocketWhy is "" when process pid, which the kernel's tables name as
 // the owner of the client socket at client connected to the agent at server,
 // is the process that sends on it, as hooks that see sockets handed between
@@ -524,13 +531,15 @@ func (a *Agent) resetSession(ctx context.Context) error {
 // ClaimInstance claims the run for caller (a process ID in the agent's PID
 // namespace, read from the connection), or for the child it names
 // (req.Child): a running process the caller started, its parent read from
-// the kernel with both creation times, so a pid another process took is
-// never taken for it. A caller outside the run's own processes is refused:
-// keploy does not intercept it, so its tests' calls would reach real
-// infrastructure. So is a child that is not the caller's running child. A run another live process claimed is
-// refused (the first release runs one test process at a time), and so is a
-// second claim of the claimer while its test is open. A claim whose process
-// exited is ended first: its open test, if any, fails.
+// the kernel with both creation times (directChild). A caller outside the
+// run's own processes is refused: keploy does not intercept it, so its
+// tests' calls would reach real infrastructure. So is a child that is not
+// the caller's running child, and one that is but is not itself one of the
+// run's processes (inRun): the child is checked as the caller is, never
+// taken as the run's because its parent is. A run another live process
+// claimed is refused (the first release runs one test process at a time),
+// and so is a second claim of the claimer while its test is open. A claim
+// whose process exited is ended first: its open test, if any, fails.
 //
 // In a replay, the misses made before a new process claims the run are the
 // run's, not a test's: they were made by the run's earlier processes (the
@@ -574,7 +583,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrNoCaller,
 			"keploy's agent could not tell which process called it", "run the test command natively, on the machine the agent runs on")
 	}
-	if !procDescends(caller, root) && !a.hooksHoldInRun(caller, start) {
+	if !a.inRun(caller, start, root) {
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			fmt.Sprintf("process %d is not part of this keploy run, so keploy cannot capture or mock its calls", caller),
 			`run the test command through keploy, to record: keploy mock record -c "<command>"; to replay: keploy mock replay -c "<command>"`)
@@ -584,10 +593,25 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		// no exec that keeps the launcher's pid) claims for it before it
 		// runs: from here the claim is the child's, as if it had made it.
 		childStart, ok := procChildStart(req.Child, caller)
+		// The child is checked as the caller was, never taken as the run's
+		// because its parent is. A child the run does not hold that has
+		// exited by then is answered as one that does not run: its exit, not
+		// the run, is why it was not found. One that exits once it was found
+		// is claimed as an exited process (directChild), which every begin
+		// refuses.
+		member := ok && a.inRun(req.Child, childStart, root)
+		if ok && !member {
+			ok = procAlive(req.Child, childStart)
+		}
 		if !ok {
 			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 				fmt.Sprintf("process %d claimed this keploy run for process %d, which is not a running process it started", caller, req.Child),
 				"claim for the test process while it runs, from the process that started it, or let the test process claim for itself")
+		}
+		if !member {
+			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
+				fmt.Sprintf("process %d claimed this keploy run for process %d, which the system names as its child but which is not part of this keploy run, so keploy cannot capture or mock its calls", caller, req.Child),
+				"start the test process inside the keploy run (on Windows, inside the run's job object)")
 		}
 		caller, start = req.Child, childStart
 	}

@@ -95,3 +95,82 @@ func TestAClaimForAProcessThatIsNotTheCallersRunningChildIsRefused(t *testing.T)
 		})
 	}
 }
+
+// A claim for a running child is taken only when the child is itself one of
+// the run's processes, as its caller must be, never because its parent is.
+// A launcher the hooks hold in the run (on Windows, through the run's job
+// object, its chain to keploy's client cut) that claims for a child the
+// hooks do not hold, or hold under another creation time, is refused, and
+// nothing is claimed. Once the hooks hold the child, by its own creation
+// time, the claim is the child's. A child that exits before the hooks answer
+// for it is refused as one that does not run.
+func TestAClaimForAChildOutsideTheRunIsRefusedThoughItsLauncherIsInIt(t *testing.T) {
+	launcher := os.Getpid()
+	launcherStart, ok := procStart(launcher)
+	require.True(t, ok)
+	c := child(t).Process.Pid
+	childStart, ok := procStart(c)
+	require.True(t, ok)
+	// keploy's client: neither the launcher nor its child descends from it.
+	root := child(t).Process.Pid
+	claim := func(held map[int]uint64) (*runMemberHooks, claimant, *models.ScopeError) {
+		a, _ := wireAgent(t, models.MODE_RECORD)
+		a.config.Agent.ClientNSPID = uint32(root)
+		h := &runMemberHooks{held: held}
+		a.Hooks = h
+		_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "k", Child: c}, launcher)
+		a.provenMu.Lock()
+		got := a.proven.claim
+		a.provenMu.Unlock()
+		return h, got, serr
+	}
+	refused := fmt.Sprintf("process %d claimed this keploy run for process %d, which the system names as its child but which is not part of this keploy run, so keploy cannot capture or mock its calls", launcher, c)
+
+	h, got, serr := claim(map[int]uint64{launcher: launcherStart})
+	require.NotNil(t, serr, "the launcher is the run's, the child it started is not")
+	require.Equal(t, models.ScopeErrNotInRun, serr.Code)
+	require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
+	require.Equal(t, refused, serr.Message)
+	require.Equal(t, []int{launcher, c}, h.asked, "the hooks are asked about the child itself")
+	require.Equal(t, claimant{}, got, "the refused claim claims nothing")
+
+	_, got, serr = claim(map[int]uint64{launcher: launcherStart, c: childStart + 1})
+	require.NotNil(t, serr, "held under another creation time")
+	require.Equal(t, refused, serr.Message)
+	require.Equal(t, claimant{}, got)
+
+	_, got, serr = claim(map[int]uint64{launcher: launcherStart, c: childStart})
+	require.Nil(t, serr, "a child the hooks hold in the run is the run's")
+	require.Equal(t, claimant{pid: c, start: childStart}, got)
+
+	ending := child(t)
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	a.config.Agent.ClientNSPID = uint32(root)
+	h = &runMemberHooks{held: map[int]uint64{launcher: launcherStart}}
+	a.Hooks = &exitingHooks{runMemberHooks: h, exit: ending}
+	_, serr = a.ClaimInstance(context.Background(), models.InstanceReq{Key: "k", Child: ending.Process.Pid}, launcher)
+	require.NotNil(t, serr, "the child exited while it was checked")
+	require.Equal(t, models.ScopeErrNotInRun, serr.Code)
+	require.Equal(t, fmt.Sprintf("process %d claimed this keploy run for process %d, which is not a running process it started", launcher, ending.Process.Pid), serr.Message)
+	require.Equal(t, []int{launcher, ending.Process.Pid}, h.asked)
+	a.provenMu.Lock()
+	got = a.proven.claim
+	a.provenMu.Unlock()
+	require.Equal(t, claimant{}, got)
+}
+
+// exitingHooks are run-member hooks (runMemberHooks) that, asked about
+// exit's process, end it first and reap it: a process that exits while the
+// agent checks it.
+type exitingHooks struct {
+	*runMemberHooks
+	exit *exec.Cmd
+}
+
+func (h *exitingHooks) HoldsInRun(pid int, start uint64) bool {
+	if pid == h.exit.Process.Pid {
+		_ = h.exit.Process.Kill()
+		_, _ = h.exit.Process.Wait()
+	}
+	return h.runMemberHooks.HoldsInRun(pid, start)
+}
