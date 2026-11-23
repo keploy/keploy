@@ -258,7 +258,7 @@ func (tel *Telemetry) sendTracked(eventType string, output ...map[string]interfa
 }
 
 func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[string]interface{}) {
-	if !tel.Enabled {
+	if !tel.Enabled || !sendsTo(teleURL) {
 		return
 	}
 
@@ -291,6 +291,14 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 		}
 		return true
 	})
+	// keploy's own run (InternalWhy) says so on every event, as the
+	// enterprise CLI's and the VS Code extension's do, so the daily analysis
+	// leaves it out of the users' numbers. Here, before the goroutine: Meta
+	// may be the caller's map.
+	if why := InternalWhy(tel.KeployVersion); why != "" {
+		event.Meta["internal"] = true
+		event.Meta["internal_why"] = why
+	}
 
 	event.InstallationID = tel.InstallationID
 	event.OS = runtime.GOOS
@@ -307,7 +315,7 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 
 		func() {
 			defer func() { _ = recover() }()
-			event.IsCI, event.CIProvider = detectCI()
+			event.IsCI, event.CIProvider = detectCIOrInvoker()
 			event.GitRepo = detectGitRepo()
 		}()
 
