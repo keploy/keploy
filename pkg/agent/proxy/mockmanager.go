@@ -201,7 +201,8 @@ type MockManager struct {
 	elsewhereCounts                 map[elsewhereOp]map[string]int
 	elsewhereCounted, elsewhereSaid int
 	// servedCount counts, per mock name, every time the mock answered a
-	// request this session, reset with consumedPersistent. A mock that may
+	// request this session, reset with consumedPersistent, and on its own as
+	// the set's start is served again (RearmAppStart). A mock that may
 	// answer more than once keeps its first-use timestamp and its usage in
 	// consumedPersistent, so only a count tells that it answered again.
 	servedCount map[string]uint64
@@ -441,6 +442,21 @@ type MockManager struct {
 	// scope tests is not the app's startup (TreeDb.bootBuilt). Written under
 	// swapMu.
 	scopeFiredThisSet bool
+
+	// appStart is the set's start as its staging staged it, while no test of
+	// the set has run (noteAppStartLocked): what RearmAppStart stages again
+	// for a new instance of the application. Written under swapMu.
+	appStart *appStartStaging
+	// rearmMu orders a re-arm of the set's start (RearmAppStart) and what
+	// runs a test: a staging (SetMocksWithWindow, SetMocksWithWindowThreeTier,
+	// OpenTestWithWindow, SetScopeMocksWithReplaced) and an exact test's opening
+	// (serveExactTest). Each takes it first, before any other lock of the
+	// manager, so no test opens between a re-arm's check and its staging.
+	rearmMu sync.Mutex
+	// testHookRearm, set only by a test before the manager is shared, runs
+	// in a re-arm (rearmAppStart) once it checked and began the new variable
+	// set, before it stages.
+	testHookRearm func()
 
 	// cutoffSeeded parks the startup-init cutoff the replayer supplies for the
 	// NEXT set, until that set's staging call installs it.
@@ -1544,6 +1560,8 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 // Also resets the per-test droppedOutOfWindow counter, and closes the channel
 // WindowChanged handed out once the new trees and window are visible.
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	m.keepRunOnlyForAnExactStartUp(start)
 	m.setMocksWithWindow(filtered, unfiltered, start, end)
 	m.placeWindowAt(start)
@@ -1626,6 +1644,8 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 // replace (so carry-over mocks belonging to other tests never leak replacements
 // into the open test's background serving).
 func (m *MockManager) SetScopeMocksWithReplaced(filtered, unfiltered []*models.Mock, open bool, replaced map[string]struct{}) {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	defer m.signalWindowChange()
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
@@ -1872,6 +1892,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	if scope {
 		m.scopeFiredThisSet = true
 	}
+	// The set's start, as this staging stages it, while no test of the set
+	// has run: what a new instance of the application is staged again
+	// (RearmAppStart). Noted before a carry-over mock the app consumed is
+	// left out, as that re-arm forgets those consumes.
+	m.noteAppStartLocked(filtered, unfiltered, explicitStartup, end,
+		isInitialStaging && !scope && (m.boundaryPending || (!m.testFiredThisSet && !m.scopeFiredThisSet)))
 	if !fenced {
 		// A carry-over mock the app consumed as it started is not staged
 		// again, whatever this staging was handed (bootTaken). The previous
@@ -2420,6 +2446,8 @@ func (m *MockManager) getUnFilteredMocksIn(v *exactView) ([]*models.Mock, error)
 // gRPC, Kafka, etc.) can pass nil for `startup` and get behaviour
 // identical to SetMocksWithWindow.
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	m.keepRunOnlyForAnExactStartUp(start)
 	// The run's place moves once the window is visible.
 	defer m.placeWindowAt(start)
@@ -3012,6 +3040,8 @@ func (m *MockManager) carriedInto(v *exactView) []models.VariableBinding {
 // answered between them bound in the run's, which every later test of the
 // set reads (NewVariableSet).
 func (m *MockManager) OpenTestWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time, given []models.VariableBinding) {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	m.keepRunOnlyForAnExactStartUp(start)
 	carry := m.carriedInto(m.exactView())
 	m.vars.StartOpening(func() { m.setMocksWithWindow(filtered, unfiltered, start, end) }, given, carry)

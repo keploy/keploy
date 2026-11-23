@@ -1764,6 +1764,9 @@ func (m *MockManager) OpenExactTestConcurrent(test string, owned, cands []*model
 // serveExactTest is ServeExactTest and ServeExactTestConcurrent, and, with
 // begin, OpenExactTest and OpenExactTestConcurrent.
 func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, begin bool, given []models.VariableBinding) {
+	// No test opens while the set's start is staged again (rearmMu).
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	// The run's place reaches test's window once its view is in force.
 	defer m.reachTest(test, true)
 	answered, ahead := m.closeAhead()
