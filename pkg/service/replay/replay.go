@@ -498,7 +498,10 @@ func (r *Replayer) rewindConsumedForRetryCycle(total *models.ConsumedHistory, ba
 		allAcrossCycles[k] = v
 	}
 	r.agentHistoryStaleForSet.Store(true)
-	return models.ConsumedHistoryOf(baseline)
+	// It counts one rewind more (models.MockFilterParams.ConsumedRewinds): the
+	// agent starts a pass over the set again at the cycle's first window,
+	// even one that starts where the last cycle ended.
+	return total.RewoundTo(baseline)
 }
 
 // agentConsumedHistoryUnusable reports whether the agent's own consumption
@@ -8663,6 +8666,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		UseMappingBased:        useMappingBased,
 		AgentOwnsConsumed:      agentOwnsConsumed,
 		TotalConsumedMocks:     consumedForAgent,
+		ConsumedRewinds:        consumed.Rewinds(),
 		ConsumedHistory:        history,
 		ConsumedRegion:         region,
 		StrictMockWindow:       strictMockWindow,
