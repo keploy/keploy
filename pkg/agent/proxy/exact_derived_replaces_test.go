@@ -129,12 +129,16 @@ func TestADerivedMockMovesTheSharedViewGeneration(t *testing.T) {
 }
 
 // Under the proven switch a start-up recording that keploy.yaml's sessionCalls
-// name exactly is served to every test (declaredInPool, #5198). A test whose
-// own mocks hold a derived mock replacing that start-up recording is never
-// served the source (sharesRest drops sourcesReplaced before declaredInPool),
-// and its shared view's generation (SharedGeneration's View) differs from
-// that of a test that keeps it, while the pool view between tests and the
-// next test, which holds no derived mock, still get the start-up recording.
+// name exactly is shown by each test's exact view that does not replace it
+// (declaredInPool). A test whose own mocks hold a derived mock replacing that
+// start-up recording omits the source from its view, reusable reads, keyed
+// walks, and SharedMocks (sharesRest drops sourcesReplaced before
+// declaredInPool), and its shared view's generation (SharedGeneration's View)
+// differs from that of a test that keeps it, while the pool view between tests
+// and the next test's view, which holds no derived mock, still show the
+// start-up recording. This row checks the manager's exact view and its reads
+// directly without putting d-rates in the manager's trees (StagedMocks) or
+// driving HTTP bandWalk.
 func TestADerivedMockReplacesADeclaredStartUpSourceInItsOwnTestAlone(t *testing.T) {
 	declareSessionCalls(t, declaredRule)
 	mm, ms := startupSet(t)
@@ -182,8 +186,8 @@ func TestADerivedMockReplacesADeclaredStartUpSourceInItsOwnTestAlone(t *testing.
 		t.Fatalf("the pool view between tests lost declared start-up rates: %s", got)
 	}
 
-	// T2 holds no derived mock: it keeps the declared start-up recording, and
-	// its shared view's generation differs from T1's. (Only the View half
+	// T2 holds no derived mock: its view keeps the declared start-up recording,
+	// and its shared view's generation differs from T1's. (Only the View half
 	// tells: the answered keepNamed calls since g1 move the Store half.)
 	mm.ServeExactTest("T2", []*models.Mock{ms["own"]})
 	v = mm.exactView()
