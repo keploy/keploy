@@ -4236,7 +4236,8 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 // log. The scan runs before the insert that names the test case, so a
 // recording usually has only the call to go by. The query string is left out
 // because it can hold the very values being reported, and a name or path that
-// itself holds PII is replaced by the method and host.
+// itself holds PII is replaced by the method and host (or the method alone if
+// the host holds PII too).
 func piiSafeLabel(testCase *models.TestCase) string {
 	if name := strings.TrimSpace(testCase.Name); name != "" && !holdsPII(name) {
 		return name
@@ -4253,11 +4254,11 @@ func piiSafeLabel(testCase *models.TestCase) string {
 	if label := strings.TrimSpace(method + " " + target); label != "" && !holdsPII(label) {
 		return label
 	}
-	if u, err := url.Parse(target); err == nil && u.Host != "" {
+	if u, err := url.Parse(target); err == nil && u.Host != "" && !holdsPII(u.Host) {
 		return strings.TrimSpace(method + " " + u.Scheme + "://" + u.Host + " (path withheld: it contains PII)")
 	}
 	if method != "" {
-		return method + " request (path withheld: it contains PII)"
+		return method + " request (URL withheld: it contains PII)"
 	}
 	return "unknown-test-case"
 }

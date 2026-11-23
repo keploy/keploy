@@ -103,6 +103,24 @@ func TestPIIWarningDoesNotRepeatPIIFromThePath(t *testing.T) {
 	}
 }
 
+func TestPIIWarningDoesNotRepeatPIIFromTheHost(t *testing.T) {
+	got := piiWarnings(t, &models.TestCase{
+		HTTPReq: models.HTTPReq{
+			Method: models.Method("GET"),
+			URL:    "http://123-45-6789.example.com/users",
+		},
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d warnings, want 1: %q", len(got), got)
+	}
+	if strings.Contains(got[0], "123-45-6789") {
+		t.Errorf("warning %q repeats the SSN from the host", got[0])
+	}
+	if !strings.Contains(got[0], "GET request") {
+		t.Errorf("warning %q does not fall back to the method-only label", got[0])
+	}
+}
+
 func TestPIIWarningDoesNotRepeatPIIFromTheTestName(t *testing.T) {
 	got := piiWarnings(t, &models.TestCase{
 		Name: "signup-user@example.com",
