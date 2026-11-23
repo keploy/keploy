@@ -577,16 +577,16 @@ type MockSpec struct {
 	// ignores it.
 	Authored *Authored `json:"Authored,omitempty" yaml:"authored,omitempty" bson:"authored,omitempty"`
 
-	// learned and learnedBinds are, on a mock the learn step of record's
-	// full round just paired (agent side, in memory), the variables it
-	// learned on the mock and those it learned that are bound at an earlier
-	// mock of the same test (by that mock's name). They ride out on the
-	// consumed mock's state (MockState.Variables, MockState.Binds), and are
-	// never encoded (unexported: no gob, JSON or YAML of a mock carries
-	// them) nor served: a reused mock the learn step paired is the same
-	// recording to the next call.
-	learned      MockVariables
-	learnedBinds map[string]MockVariables
+	// learned holds, on a mock the learn step of record's full round just
+	// paired (agent side, in memory), the variables it learned on the mock
+	// and those it learned that are bound at an earlier mock of the same
+	// test (by that mock's name). They ride out on the consumed mock's state
+	// (MockState.Variables, MockState.Binds), and are never encoded
+	// (unexported: no gob, JSON or YAML of a mock carries them) nor served:
+	// a reused mock the learn step paired is the same recording to the next
+	// call. Kept behind one pointer (nil on every other mock) so adding
+	// Authored keeps Mock in the 640 B size class.
+	learned *mockLearned
 
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
@@ -1341,7 +1341,7 @@ func (m *Mock) DeepCopy() *Mock {
 		Start:        m.Start,
 		StartRef:     m.StartRef,
 	}
-	c.Spec.learned, c.Spec.learnedBinds = m.Spec.learned.Clone(), cloneBinds(m.Spec.learnedBinds)
+	c.Spec.learned = m.Spec.learned.clone()
 
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
@@ -1524,16 +1524,47 @@ func (m *Mock) DeepCopy() *Mock {
 	return &c
 }
 
+// mockLearned is the in-memory learning held behind MockSpec.learned so
+// adding MockSpec.Authored keeps Mock in the 640 B size class.
+type mockLearned struct {
+	vars  MockVariables
+	binds map[string]MockVariables
+}
+
+func (l *mockLearned) clone() *mockLearned {
+	if l == nil {
+		return nil
+	}
+	return &mockLearned{
+		vars:  l.vars.Clone(),
+		binds: cloneBinds(l.binds),
+	}
+}
+
 // SetLearned records on s, in memory only, the variables the learn step
 // learned on its mock (vars) and those bound at earlier mocks (binds): see
 // MockSpec.learned.
 func (s *MockSpec) SetLearned(vars MockVariables, binds map[string]MockVariables) {
-	s.learned, s.learnedBinds = vars, binds
+	if vars == nil && binds == nil {
+		s.learned = nil
+		return
+	}
+	s.learned = &mockLearned{vars: vars, binds: binds}
 }
 
 // Learned is the variables the learn step learned on s's mock (SetLearned).
-func (s *MockSpec) Learned() MockVariables { return s.learned }
+func (s *MockSpec) Learned() MockVariables {
+	if s.learned == nil {
+		return nil
+	}
+	return s.learned.vars
+}
 
 // LearnedBinds is the variables the learn step learned while answering s's
 // mock that are bound at an earlier mock, by its name (SetLearned).
-func (s *MockSpec) LearnedBinds() map[string]MockVariables { return s.learnedBinds }
+func (s *MockSpec) LearnedBinds() map[string]MockVariables {
+	if s.learned == nil {
+		return nil
+	}
+	return s.learned.binds
+}

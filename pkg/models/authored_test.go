@@ -3,6 +3,7 @@ package models
 import (
 	"reflect"
 	"testing"
+	"unsafe"
 )
 
 // A deep copy of an authored mock shares nothing of its `authored:` block:
@@ -170,4 +171,51 @@ func withoutReplacedOrFail(t *testing.T, mocks []*Mock, replaced map[string]stru
 		}
 	}()
 	return WithoutReplaced(mocks, replaced)
+}
+
+// Authored lives behind one pointer on MockSpec (nil for every recorded mock)
+// and Mock stays in the 640 B size class; packing MockSpec's in-memory
+// learning behind one pointer preserves SetLearned, Learned, LearnedBinds and
+// DeepCopy isolation.
+func TestAuthoredFieldIsOnePointerAndLearnedClones(t *testing.T) {
+	f, ok := reflect.TypeOf(MockSpec{}).FieldByName("Authored")
+	if !ok {
+		t.Fatal("MockSpec has no Authored field")
+	}
+	if f.Type.Kind() != reflect.Pointer {
+		t.Fatalf("MockSpec.Authored is %s, want a single pointer", f.Type.Kind())
+	}
+	if n := unsafe.Sizeof(Mock{}); n > 640 {
+		t.Fatalf("Mock is %d B, want <= 640 B", n)
+	}
+	var zero Mock
+	if zero.Spec.Authored != nil || zero.Spec.Learned() != nil || zero.Spec.LearnedBinds() != nil {
+		t.Fatal("zero Mock carries non-nil Authored or learning")
+	}
+
+	m := &Mock{Name: "mock-1", Kind: HTTP}
+	vars := MockVariables{"id": {Bind: "body.id", Recorded: "r1"}}
+	binds := map[string]MockVariables{"mock-0": {"tok": {Bind: "header.X-Tok", Recorded: "t1"}}}
+	m.Spec.SetLearned(vars, binds)
+	if !reflect.DeepEqual(m.Spec.Learned(), vars) {
+		t.Fatalf("Learned() = %+v, want %+v", m.Spec.Learned(), vars)
+	}
+	if !reflect.DeepEqual(m.Spec.LearnedBinds(), binds) {
+		t.Fatalf("LearnedBinds() = %+v, want %+v", m.Spec.LearnedBinds(), binds)
+	}
+
+	cp := m.DeepCopy()
+	cp.Spec.Learned()["id"] = MockVariable{Recorded: "mutated"}
+	cp.Spec.LearnedBinds()["mock-0"]["tok"] = MockVariable{Recorded: "mutated"}
+	if m.Spec.Learned()["id"].Recorded != "r1" {
+		t.Fatalf("mutating DeepCopy's Learned wrote the original: %+v", m.Spec.Learned())
+	}
+	if m.Spec.LearnedBinds()["mock-0"]["tok"].Recorded != "t1" {
+		t.Fatalf("mutating DeepCopy's LearnedBinds wrote the original: %+v", m.Spec.LearnedBinds())
+	}
+
+	m.Spec.SetLearned(nil, nil)
+	if m.Spec.Learned() != nil || m.Spec.LearnedBinds() != nil || m.Spec.learned != nil {
+		t.Fatal("SetLearned(nil, nil) did not clear learning")
+	}
 }
