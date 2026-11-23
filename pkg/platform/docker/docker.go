@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -853,6 +854,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Add installation ID if available
 	if installationID := os.Getenv("INSTALLATION_ID"); installationID != "" {
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
+	}
+	// A run that is keploy's own (KEPLOY_INTERNAL, a CI run of a keploy/
+	// repository) says so to its agent's container, which gets neither the
+	// variable nor the CI's: its telemetry is then not counted as a user's.
+	if e := telemetry.AgentEnv(); e != "" {
+		envVars = append(envVars, e)
 	}
 
 	// The debug knob that forces a memory-guard pause by request count is
