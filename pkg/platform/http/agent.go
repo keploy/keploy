@@ -92,6 +92,11 @@ type AgentClient struct {
 	// watches its start.
 	agentContainer   *namedContainer
 	agentContainerAt string
+	// composeStaticPorts holds the host ports statically published by other
+	// services in the current compose document (under mu), excluded from both
+	// Setup's initial draw and composeAgentPortRefused's move draw so keploy's
+	// agent never takes a port another service in the same compose up publishes.
+	composeStaticPorts []uint32
 
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
@@ -1023,7 +1028,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
 	}
 
-	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/outgoing", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/outgoing", a.conf.AgentURI()), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return nil, fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -1142,7 +1147,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 
 	a.logger.Debug("Connecting to mappings stream...")
 
-	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/mappings", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/mappings", a.conf.AgentURI()), nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mappings")
 		return nil, fmt.Errorf("error creating request for mappings: %s", err.Error())
@@ -1289,7 +1294,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	}
 
 	// mock outgoing request
-	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/mock", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/mock", a.conf.AgentURI()), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -1476,7 +1481,7 @@ func (a *AgentClient) AppStartsAnew(ctx context.Context, testSetID string, first
 // line, where a flag it does not know would end it, and never fails the run.
 func (a *AgentClient) handClockRun(ctx context.Context) {
 	s, ok := agent.StartupAgentHook.(agent.ClockRunStarter)
-	if !ok || a.conf.Agent.AgentURI == "" {
+	if !ok || a.conf.AgentURI() == "" {
 		return
 	}
 	run := s.ClockRun(ctx)
@@ -1490,7 +1495,7 @@ func (a *AgentClient) handClockRun(ctx context.Context) {
 	}
 	hctx, stop := a.whileAgentRuns(ctx)
 	defer stop()
-	req, err := newAgentRequest(hctx, http.MethodPost, a.conf.Agent.AgentURI+"/hooks/clock-run", bytes.NewReader(body))
+	req, err := newAgentRequest(hctx, http.MethodPost, a.conf.AgentURI()+"/hooks/clock-run", bytes.NewReader(body))
 	if err != nil {
 		a.sayNoClockRun(fmt.Sprintf("its request could not be made: %v", err), noClockRunOther)
 		return
@@ -1599,7 +1604,7 @@ var (
 // on as if the hook were done, and the next hook call overlapped it. A call
 // that ends without an answer is an error, as a refusal is.
 func (a *AgentClient) callHook(ctx context.Context, endpoint string, payload any) error {
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return nil
 	}
 	body, err := json.Marshal(payload)
@@ -1608,7 +1613,7 @@ func (a *AgentClient) callHook(ctx context.Context, endpoint string, payload any
 	}
 	hctx, stop := a.whileAgentRuns(ctx)
 	defer stop()
-	req, err := newAgentRequest(hctx, http.MethodPost, a.conf.Agent.AgentURI+endpoint, bytes.NewReader(body))
+	req, err := newAgentRequest(hctx, http.MethodPost, a.conf.AgentURI()+endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -1766,7 +1771,7 @@ const storeMocksEncodingProbeTimeout = 30 * time.Second
 func (a *AgentClient) storeMocksEncoding(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, storeMocksEncodingProbeTimeout)
 	defer cancel()
-	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.AgentURI()), nil)
 	if err != nil {
 		return ""
 	}
@@ -1939,7 +1944,7 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 	}()
 
 	req, err := newAgentRequest(ctx, http.MethodPost,
-		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), pr)
+		fmt.Sprintf("%s/storemocks", a.conf.AgentURI()), pr)
 	if err != nil {
 		// The transport never took ownership of pr, so nothing else will ever
 		// close it — close the pipe so the encoder goroutine's blocked pw.Write
@@ -2160,7 +2165,7 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 		return nil, false, fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
 	}
 
-	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
+	req, err := newAgentRequest(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.AgentURI()), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for updatemockparams")
 		return nil, false, fmt.Errorf("error creating request for update mock params: %s", err.Error())
@@ -2206,7 +2211,7 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	// Create the URL with query parameters
-	url := fmt.Sprintf("%s/consumedmocks", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/consumedmocks", a.conf.AgentURI())
 	if models.SetEndRead(ctx) {
 		// The read of what was consumed after a set's last test, with the
 		// proven switch off: the agent moves the run's place to the set's
@@ -2256,7 +2261,7 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 // only (the agent's /mock/learned-elsewhere): one state per recording, none
 // of it consumption. An agent that cannot say (404, 501) learned none: nil.
 func (a *AgentClient) GetLearnedElsewhere(ctx context.Context) ([]models.MockState, error) {
-	url := fmt.Sprintf("%s/mock/learned-elsewhere", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/mock/learned-elsewhere", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %s", err.Error())
@@ -2291,7 +2296,7 @@ func (a *AgentClient) GetLearnedElsewhere(ctx context.Context) ([]models.MockSta
 // flight: the agent answers from its never-drained map, so polling it does not
 // consume the state that the end-of-run outcome report and --strict depend on.
 func (a *AgentClient) GetServedMocks(ctx context.Context) (map[string]models.MockState, error) {
-	url := fmt.Sprintf("%s/mock/served", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/mock/served", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %s", err.Error())
@@ -2334,7 +2339,7 @@ func (a *AgentClient) GetServedMocks(ctx context.Context) (map[string]models.Moc
 // in the bring-up retry, had it not been set up again) reports a loaded count
 // of zero.
 func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error) {
-	url := fmt.Sprintf("%s/mock/stats", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/mock/stats", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, "GET", url, nil)
 	if err != nil {
 		return models.MockStats{}, fmt.Errorf("failed to create request: %s", err.Error())
@@ -2384,7 +2389,7 @@ func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error
 // route (404) or one that cannot count them (501) gives
 // models.ErrPIDMapRefusalsUnsupported, which is "unknown", not "none".
 func (a *AgentClient) GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error) {
-	url := fmt.Sprintf("%s/pidmaps", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/pidmaps", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return models.PIDMapRefusals{}, fmt.Errorf("failed to create request: %w", err)
@@ -2448,7 +2453,7 @@ type lossesAnswer struct {
 
 // getCaptureLossesAndAgent is GetCaptureLossesAndAgent's exchange, unbounded.
 func (a *AgentClient) getCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
-	url := fmt.Sprintf("%s/capturelosses", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/capturelosses", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create request: %w", err)
@@ -2489,7 +2494,7 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 // getUnchargedCaptureLosses is GetUnchargedCaptureLosses's exchange,
 // unbounded.
 func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
-	url := fmt.Sprintf("%s/capturelosses/uncharged", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/capturelosses/uncharged", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -2532,7 +2537,7 @@ func (a *AgentClient) DrainCaptureLosses(ctx context.Context) error {
 
 // drainCaptureLosses is DrainCaptureLosses's exchange, unbounded.
 func (a *AgentClient) drainCaptureLosses(ctx context.Context) error {
-	url := fmt.Sprintf("%s/capturelosses/drain", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/capturelosses/drain", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -2567,7 +2572,7 @@ func (a *AgentClient) TakeOwnedCaptureLosses(ctx context.Context) ([]models.Owne
 
 // takeOwnedCaptureLosses is TakeOwnedCaptureLosses's exchange, unbounded.
 func (a *AgentClient) takeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error) {
-	url := fmt.Sprintf("%s/capturelosses/owned", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/capturelosses/owned", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -3117,7 +3122,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-		if a.conf.Agent.AgentURI == "" {
+		if a.conf.AgentURI() == "" {
 			return nil
 		}
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
@@ -3252,7 +3257,7 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-		if a.conf.Agent.AgentURI == "" {
+		if a.conf.AgentURI() == "" {
 			return nil
 		}
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
@@ -3268,14 +3273,14 @@ func (a *AgentClient) requestAgentStop() error {
 	if a.conf == nil {
 		return fmt.Errorf("agent config is nil")
 	}
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return fmt.Errorf("agent URI is not configured")
 	}
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), agentStopRequestTimeout)
 	defer cancel()
 
-	req, err := newAgentRequest(stopCtx, http.MethodPost, fmt.Sprintf("%s/stop", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(stopCtx, http.MethodPost, fmt.Sprintf("%s/stop", a.conf.AgentURI()), nil)
 	if err != nil {
 		return err
 	}
@@ -3685,7 +3690,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	// The headers of the health answer that finds the agent ready, which its
 	// proven switch is read from (below).
 	answers := make(chan http.Header, 1)
-	go pkg.AgentHealthTickerWithAnswer(agentCtx, a.logger, a.conf.Agent.AgentURI, answers)
+	go pkg.AgentHealthTickerWithAnswer(agentCtx, a.logger, a.conf.AgentURI, answers)
 
 	// What the agent reports of its start, and whether its process runs:
 	// judged once a bootLook (watchStart).
@@ -3809,7 +3814,7 @@ func (a *AgentClient) agentReady(ctx context.Context, exited <-chan error, isDoc
 // transport failure or a status other than 200 is an error: the header of
 // such an answer says nothing about the agent.
 func (a *AgentClient) readAgentSwitch(ctx context.Context) (string, error) {
-	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.AgentURI()), nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to build the agent health request: %w", err)
 	}
@@ -3909,7 +3914,7 @@ func relaxPerfEventParanoid() error {
 // token, so this inherits the same guard as every other control-plane call. The
 // returned bytes are a PEM certificate — public material, never the private key.
 func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
-	url := fmt.Sprintf("%s/ca", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/ca", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build CA request: %w", err)
@@ -3997,15 +4002,33 @@ func agentPortFor(docker bool, keep ...uint32) (uint32, error) {
 }
 
 // agentPorts picks the ports a new agent's server (agentPortFor), proxy and
-// DNS server (proxyPorts) listen on.
-func (a *AgentClient) agentPorts(docker bool) (agentPort, proxyPort, dnsPort uint32, err error) {
-	if agentPort, err = agentPortFor(docker, a.conf.ProxyPort, a.conf.DNSPort); err != nil {
+// DNS server (proxyPorts) listen on. extraKeep holds any additional ports the
+// agent's own port must stay off (such as host ports statically published by
+// other services in a compose document).
+func (a *AgentClient) agentPorts(docker bool, extraKeep ...uint32) (agentPort, proxyPort, dnsPort uint32, err error) {
+	keep := make([]uint32, 0, 2+len(extraKeep))
+	keep = append(keep, a.conf.ProxyPort, a.conf.DNSPort)
+	keep = append(keep, extraKeep...)
+	if agentPort, err = agentPortFor(docker, keep...); err != nil {
 		return 0, 0, 0, fmt.Errorf("failed to find available port for agent: %w", err)
 	}
 	if proxyPort, dnsPort, err = a.proxyPorts(docker, agentPort); err != nil {
 		return 0, 0, 0, err
 	}
 	return agentPort, proxyPort, dnsPort, nil
+}
+
+// composeExcludedPorts returns the host ports statically published by other
+// services in the compose document for a docker compose run, so agentPortFor
+// does not draw one before docker compose up binds it.
+func (a *AgentClient) composeExcludedPorts(cmd string, opts models.SetupOptions) []uint32 {
+	if utils.CmdType(opts.CommandType) != utils.DockerCompose {
+		return nil
+	}
+	if len(opts.InMemoryCompose) > 0 {
+		return kdocker.ComposePublishedHostPortsFromYAML(opts.InMemoryCompose)
+	}
+	return kdocker.ComposePublishedHostPortsFromFiles(a.logger, kdocker.FindComposeFiles(cmd))
 }
 
 // agentRunsOnLinux says whether a native agent, one Setup starts as a process
@@ -4073,6 +4096,16 @@ func (a *AgentClient) portOrMove(server string, available func(port uint32, excl
 	return moved, nil
 }
 
+// addressAgent makes uri the address keploy reaches its agent at
+// (config.(*Config).AgentURI), safely while that is read: the one Setup chose,
+// or the one a compose start moved the agent to. What keploy knew of the
+// containers and network names at uri was another agent's, and is forgotten.
+func (a *AgentClient) addressAgent(uri string) {
+	a.conf.SetAgentURI(uri)
+	forgetContainers(uri)
+	forgetNetworkNames(uri)
+}
+
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
@@ -4082,7 +4115,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// container.
 	a.forgetAgentContainer()
 
-	agentPort, proxyPort, dnsPort, err := a.agentPorts(isDockerCmd)
+	composeStatic := a.composeExcludedPorts(cmd, opts)
+	a.mu.Lock()
+	a.composeStaticPorts = composeStatic
+	a.mu.Unlock()
+
+	agentPort, proxyPort, dnsPort, err := a.agentPorts(isDockerCmd, composeStatic...)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find the agent's ports")
 		return err
@@ -4121,9 +4159,10 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.Agent.DnsPort = dnsPort
 	a.conf.ProxyPort = proxyPort
 	a.conf.DNSPort = dnsPort
+	// The field is the record of what Setup chose, for a caller that set
+	// it; keploy reads the address through a.conf.AgentURI() (addressAgent).
 	a.conf.Agent.AgentURI = opts.AgentURI
-	forgetContainers(opts.AgentURI)
-	forgetNetworkNames(opts.AgentURI)
+	a.addressAgent(opts.AgentURI)
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
@@ -5043,7 +5082,7 @@ func (a *AgentClient) GetErrorChannel() <-chan error {
 
 // GetMockErrors fetches mock-not-found errors from the agent via HTTP.
 func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
-	url := fmt.Sprintf("%s/mockerrors", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/mockerrors", a.conf.AgentURI())
 	if models.SetEndRead(ctx) {
 		// A set's end read: the agent has its parsers file what they hold
 		// for a test of the set first. An agent that predates the parameter
@@ -5106,7 +5145,7 @@ func (a *AgentClient) ContinueTestErrorCapture(ctx context.Context) error {
 }
 
 func (a *AgentClient) openTestErrorCapture(ctx context.Context, carry bool) error {
-	url := fmt.Sprintf("%s/test-capture/begin", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/test-capture/begin", a.conf.AgentURI())
 	if carry {
 		url += "?carry=1"
 	}
@@ -5148,12 +5187,12 @@ const agentBacklogProbeTimeout = 2 * time.Second
 // a capture without a watermark), when the stop can only go by its streams'
 // quiet. A look that cannot tell is never read as clear.
 func (a *AgentClient) BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error) {
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return models.AgentBacklog{Verdict: models.BacklogUnsupported}, nil
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, agentBacklogProbeTimeout)
 	defer cancel()
-	url := fmt.Sprintf("%s/record/pending?before=%d", a.conf.Agent.AgentURI, before.UnixNano())
+	url := fmt.Sprintf("%s/record/pending?before=%d", a.conf.AgentURI(), before.UnixNano())
 	req, err := newAgentRequest(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return models.AgentBacklog{}, err
@@ -5196,10 +5235,10 @@ func (a *AgentClient) BacklogBefore(ctx context.Context, before time.Time) (mode
 // recording's stop asks once the agent has said it holds nothing more from
 // before it, if the agent said it can (models.AgentBacklog.EndMarkers).
 func (a *AgentClient) EndRecordingStreams(ctx context.Context, token string) error {
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return errors.New("no agent to end the streams of")
 	}
-	req, err := newAgentRequest(ctx, http.MethodPost, a.conf.Agent.AgentURI+models.StreamEndPath+"?token="+neturl.QueryEscape(token), nil)
+	req, err := newAgentRequest(ctx, http.MethodPost, a.conf.AgentURI()+models.StreamEndPath+"?token="+neturl.QueryEscape(token), nil)
 	if err != nil {
 		return err
 	}
@@ -5234,7 +5273,7 @@ var agentStopNoticeRetry = time.Second
 // this client's address, until ctx is done.
 func (a *AgentClient) WatchAgentStop(ctx context.Context) <-chan struct{} {
 	stopping := make(chan struct{})
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return stopping
 	}
 	go func() {
@@ -5263,7 +5302,7 @@ func (a *AgentClient) WatchAgentStop(ctx context.Context) <-chan struct{} {
 // the agent said a stop reached it; neither answered nor an error from an
 // agent without the route.
 func (a *AgentClient) awaitStopNotice(ctx context.Context) (answered bool, err error) {
-	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.Agent.AgentURI+models.StopNoticePath, nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.AgentURI()+models.StopNoticePath, nil)
 	if err != nil {
 		return false, err
 	}
@@ -5309,10 +5348,10 @@ func (a *AgentClient) newStreamEnd(kind models.FrameStream) *atomic.Bool {
 // (the agent's /stop-begun). Unlike NotifyGracefulShutdown it changes nothing
 // else in the agent. It errors when the agent did not take it.
 func (a *AgentClient) NotifyStopBegun(ctx context.Context) error {
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return nil
 	}
-	req, err := newAgentRequest(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/stop-begun", nil)
+	req, err := newAgentRequest(ctx, http.MethodPost, a.conf.AgentURI()+"/stop-begun", nil)
 	if err != nil {
 		return err
 	}
@@ -5341,12 +5380,12 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 	// leave the user's container stopped and keploy's copy of it behind.
 	defer a.RestoreFromContainer()
 
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		a.logger.Debug("Agent URI is empty, skipping graceful shutdown notification")
 		return nil
 	}
 
-	url := fmt.Sprintf("%s/graceful-shutdown", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/graceful-shutdown", a.conf.AgentURI())
 
 	// Use a short timeout since this is a best-effort notification
 	reqCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
@@ -5385,6 +5424,8 @@ type restartHooks interface {
 	SetAgentReleaseHold(func(ctx context.Context) (resume func(failed error)))
 	SetAgentReleaseRefusal(func(failed error))
 	SetAgentHeldRelease(func(ctx context.Context, current func(ctx context.Context) bool) error)
+	SetAgentAddress(func() string)
+	SetOnAgentPortRefused(func(ctx context.Context, said string) (uint32, error))
 }
 
 // registerApp makes the application client of this run and keeps it as the
@@ -5414,6 +5455,11 @@ func (a *AgentClient) handRestartHooks(app restartHooks) {
 	app.SetAgentHeldRelease(func(ctx context.Context, current func(ctx context.Context) bool) error {
 		return a.session().releaseHeld(ctx, current)
 	})
+	// The application client reads the agent's address where this client
+	// does (config's AgentURI), and has it moved when compose could not
+	// publish the agent's port (composeAgentPortRefused).
+	app.SetAgentAddress(a.conf.AgentURI)
+	app.SetOnAgentPortRefused(a.composeAgentPortRefused)
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
@@ -5486,7 +5532,7 @@ func (a *AgentClient) makeAgentReady(ctx context.Context, setup bool) (retErr er
 		}
 	}
 
-	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/agent/ready", a.conf.AgentURI())
 
 	for {
 		// With the switch on, the agent's proven switch must be read and be
@@ -5619,7 +5665,7 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 // errors. Context cancellation returns nil so callers don't see
 // spurious errors at recording stop.
 func (a *AgentClient) streamPcapArtifact(ctx context.Context, recording, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
-	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, urlPath)
+	url := fmt.Sprintf("%s%s", a.conf.AgentURI(), urlPath)
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("build pcap stream request: %w", err)
@@ -5719,7 +5765,7 @@ func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, recording, p
 // is an error. Under the switch the read is the run's last (?final=1), which
 // closes the run: call it only once the test command has exited.
 func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
-	url := fmt.Sprintf("%s/scope/windows", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/scope/windows", a.conf.AgentURI())
 	if provenswitch.On() {
 		// Every read the CLI makes is the run's last, once its command
 		// exited: the agent fails a test still open. With the switch off
@@ -5769,7 +5815,7 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 	if err != nil {
 		return fmt.Errorf("failed to marshal the set table: %w", err)
 	}
-	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.AgentURI()), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -5833,7 +5879,7 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
-	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.AgentURI()), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create scope-table request: %w", err)
 	}
@@ -5894,7 +5940,7 @@ func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
 	}
-	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/clock", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/clock", a.conf.AgentURI()), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -5925,7 +5971,7 @@ func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]str
 			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushScopeTable(c, recorded, recordedWindows) })
 		}
 	}()
-	url := fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/scope/table", a.conf.AgentURI())
 	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Windows: windows})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
@@ -5968,7 +6014,7 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 	if err != nil {
 		return fmt.Errorf("failed to marshal the scope gate: %w", err)
 	}
-	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.AgentURI()), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create the scope-gate request: %w", err)
 	}
@@ -6007,7 +6053,7 @@ func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
 	}
-	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.AgentURI()), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create the scope-gate request: %w", err)
 	}
@@ -6037,7 +6083,7 @@ func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string
 // DrainCapturedMocks fetches (and clears) the mocks the proxy captured on miss
 // during a `--on-miss record` replay session. The CLI appends them to the set.
 func (a *AgentClient) DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error) {
-	url := fmt.Sprintf("%s/mock/captured", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/mock/captured", a.conf.AgentURI())
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create captured-mocks request: %w", err)
@@ -6771,7 +6817,7 @@ func (a *AgentClient) restoreShortfall(ctx context.Context, name string) (proble
 }
 
 func (a *AgentClient) GetIDPairs(ctx context.Context) (map[string]string, error) {
-	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/ids", nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.AgentURI()+"/ids", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -6794,10 +6840,10 @@ func (a *AgentClient) GetIDPairs(ctx context.Context) (map[string]string, error)
 // TestVariables returns the test variables the agent bound in the current test
 // (GET /agent/variables; proven switch).
 func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBinding, error) {
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return nil, errors.New("keploy has no agent to read the test's variables from")
 	}
-	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/variables", nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.AgentURI()+"/variables", nil)
 	if err != nil {
 		return nil, err
 	}
