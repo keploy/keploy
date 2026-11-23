@@ -87,7 +87,7 @@ type DecodeContext struct {
 	AutocommitOffAtConnect bool
 }
 
-const CLIENT_DEPRECATE_EOF = 0x01000000
+const CLIENT_DEPRECATE_EOF = 0x00200000
 
 // rememberParamTypes notes the types params were sent with, for the
 // statement's EXECUTEs that send none (StmtParamTypes). It keeps no value,
