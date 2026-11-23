@@ -602,15 +602,18 @@ func assertQueryMock(t *testing.T, m *models.Mock) {
 //
 // enforceReqMonotonic raises ReqTimestampMock to lastReq+1ns to keep the
 // matcher's ordering invariant, and does not touch ResTimestampMock. On a mock
-// that arrived well-ordered that can push req PAST res, and filterByTimeStamp
-// then drops any mock with res < req (pkg/util.go) -- so the mock is orphaned by
-// this step, not by the recorder.
+// that arrived well-ordered that can push req PAST res, and a replay without
+// the proven switch leaves out a mock answered before it was asked
+// (pkg.LeaveOutAnsweredBeforeAsked) -- so the mock is orphaned by this step,
+// not by the recorder.
 //
-// The timestamps are deliberately NOT repaired here; see the comment at the call
-// site for the two attempts that regressed go-memory-load-mongo, the second of
-// which produced recordings the RELEASED replayer could not consume. What this
-// pins is that the loss is announced rather than silent: the first instance of it
-// was found only by diffing recorded YAML by hand.
+// The timestamps are deliberately NOT repaired here; see the comment at
+// enforceReqMonotonic for the two attempts that regressed go-memory-load-mongo,
+// the second of which produced recordings the RELEASED replayer could not
+// consume. What this pins is that the loss is announced rather than silent (the
+// first instance of it was found only by diffing recorded YAML by hand), once
+// for the connection, as its parser returns (Session.ReportClampedOut), not once
+// for each mock.
 //
 // The inverted values are the real ones from k8s-proxy pipeline 6303, mock-61.
 func TestEmitMockV2ReportsAWindowInvertedByMonotonicClamping(t *testing.T) {
@@ -657,13 +660,25 @@ func TestEmitMockV2ReportsAWindowInvertedByMonotonicClamping(t *testing.T) {
 				"the fixture no longer exercises the branch",
 				m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 		}
+		// A second one on the same connection is counted, not said again.
+		_ = emit(h, base.Add(800*time.Millisecond), base.Add(820*time.Millisecond))
+		if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 0 {
+			t.Fatalf("got %d WARN entries before the parser returned, want 0: the clamp's loss is said once for "+
+				"the connection, not once for each mock", n)
+		}
+		h.sess.ReportClampedOut() // as the supervisor does when the parser returns
+		h.sess.ReportClampedOut() // and a second call says nothing more
 		warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
 		if len(warns) != 1 {
 			t.Fatalf("got %d WARN entries, want 1 — a mock that replay will silently DROP "+
 				"was orphaned with no diagnostic at all", len(warns))
 		}
-		if got := warns[0].ContextMap()["inversion"]; got == nil {
-			t.Error("the warning does not carry the inversion magnitude")
+		ctx := warns[0].ContextMap()
+		if got := ctx["mocks"]; got != int64(2) {
+			t.Errorf("the warning counts %v mocks, want 2", got)
+		}
+		if got, want := ctx["mostAnsweredBeforeAskedBy"], base.Add(900*time.Millisecond+time.Nanosecond).Sub(base.Add(750*time.Millisecond)); got != want {
+			t.Errorf("the warning carries an inversion of %v, want the largest, %v", got, want)
 		}
 	})
 
@@ -676,6 +691,7 @@ func TestEmitMockV2ReportsAWindowInvertedByMonotonicClamping(t *testing.T) {
 		if m.Spec.ResTimestampMock.Before(m.Spec.ReqTimestampMock) {
 			t.Fatalf("fixture inverted unexpectedly: req=%v res=%v", m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 		}
+		h.sess.ReportClampedOut()
 		if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 0 {
 			t.Errorf("got %d WARN entries for a well-ordered window, want 0", n)
 		}

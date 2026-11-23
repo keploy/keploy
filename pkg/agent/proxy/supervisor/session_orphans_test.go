@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -726,12 +727,11 @@ func TestEmitMockOnShutdownLeavesOutAMockTheFullChannelCannotTake(t *testing.T) 
 }
 
 // EmitMockOutcome says whether the session left the mock out instead of
-// handing it on: for the capture's incomplete flag, on either path, and at
-// shutdown for a channel that is full. A mock handed on is not left out, nor
-// is one a session with no context sends, nor one a session with no channel
-// takes, and one refused (the context ended, not at shutdown) is neither
-// handed on nor left out. The manager counts only the mocks it says it left
-// out.
+// handing it on: for the capture's incomplete flag, on either path, for a
+// refusal on an ended context (not at shutdown), for a missing direct channel
+// (Mocks == nil), and at shutdown for a channel that is full. A mock handed on
+// is not left out, nor is one a session with no context sends. The manager
+// counts only the mocks the session says it left out.
 // Not parallel: the WARN limit is process-wide.
 func TestEmitMockOutcomeSaysWhetherTheSessionLeftTheMockOut(t *testing.T) {
 	ended, cancel := context.WithCancel(context.Background())
@@ -749,13 +749,13 @@ func TestEmitMockOutcomeSaysWhetherTheSessionLeftTheMockOut(t *testing.T) {
 		{name: "handed on", room: 1, ctx: context.Background()},
 		{name: "handed on with no context", room: 1},
 		{name: "handed on with no context at shutdown", shutdown: true, room: 1},
-		{name: "no channel", noChannel: true, ctx: context.Background()},
-		{name: "no channel at shutdown", shutdown: true, noChannel: true, ctx: ended},
+		{name: "no channel", noChannel: true, ctx: context.Background(), leftOut: true},
+		{name: "no channel at shutdown", shutdown: true, noChannel: true, ctx: ended, leftOut: true},
 		{name: "handed on at shutdown", shutdown: true, room: 1, ctx: ended},
 		{name: "incomplete", incomplete: true, room: 1, ctx: context.Background(), leftOut: true},
 		{name: "incomplete at shutdown", shutdown: true, incomplete: true, room: 1, ctx: ended, leftOut: true},
 		{name: "channel full at shutdown", shutdown: true, ctx: ended, leftOut: true},
-		{name: "refused", ctx: ended, refused: true},
+		{name: "refused", ctx: ended, leftOut: true, refused: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			mgr := syncMock.New(nil)
@@ -783,6 +783,171 @@ func TestEmitMockOutcomeSaysWhetherTheSessionLeftTheMockOut(t *testing.T) {
 			}
 			if handed := len(s.Mocks) == 1; handed != (!c.leftOut && !c.refused && !c.noChannel) {
 				t.Fatalf("the channel holds %d mock(s), want it only if the mock was handed on", len(s.Mocks))
+			}
+		})
+	}
+}
+
+// EmitMock itself reports every mock it refuses for an ended context — on the
+// sync-mock path (whether ctx ended before EmitMock or during its post-record
+// hooks) and on the direct-channel path — as left out with
+// LeftOutRefusedAtStop: counted on the manager, spanned over the mock's own
+// times, warned with its reason, and pending work cleared. A direct caller of
+// EmitMock can therefore never drop a refused mock silently.
+// Not parallel: resets the process-wide left-out WARN limiter.
+func TestEmitMockRefusalReportsLeftOut(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		viaSyncMock bool
+		cancelInHk  bool
+		viaOutcome  bool
+	}{
+		{name: "syncMock/ctx already ended/EmitMock", viaSyncMock: true},
+		{name: "syncMock/ctx ended in hook/EmitMock", viaSyncMock: true, cancelInHk: true},
+		{name: "syncMock/ctx ended in hook/EmitMockOutcome", viaSyncMock: true, cancelInHk: true, viaOutcome: true},
+		{name: "direct channel/ctx already ended/EmitMock", viaSyncMock: false},
+		{name: "direct channel/ctx ended in hook/EmitMockOutcome", viaSyncMock: false, cancelInHk: true, viaOutcome: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetLeftOutWarningsForTest()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			mgr := syncMock.New(nil)
+			spans := &rawSpans{}
+			core, logs := observer.New(zapcore.DebugLevel)
+			cleared := 0
+			s := &Session{
+				Mgr:                   mgr,
+				Orphans:               spans,
+				Mocks:                 make(chan *models.Mock),
+				Logger:                zap.New(core),
+				Ctx:                   ctx,
+				ClientConnID:          "refused-conn",
+				RouteMocksViaSyncMock: tc.viaSyncMock,
+				OnPendingCleared:      func() { cleared++ },
+			}
+			if tc.cancelInHk {
+				s.OnMockRecorded = func(*models.Mock) { cancel() }
+			} else {
+				cancel()
+			}
+			reqAt := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+			resAt := reqAt.Add(5 * time.Millisecond)
+			m := &models.Mock{
+				Kind: models.GENERIC,
+				Name: "refused-mock",
+				Spec: models.MockSpec{ReqTimestampMock: reqAt, ResTimestampMock: resAt},
+			}
+			var (
+				lost bool
+				err  error
+			)
+			if tc.viaOutcome {
+				lost, err = s.EmitMockOutcome(m, false)
+			} else {
+				err = s.EmitMock(m)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled", err)
+			}
+			if tc.viaOutcome && !lost {
+				t.Fatalf("EmitMockOutcome lost = false, want true on refusal")
+			}
+			if n := mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("mgr.MocksLeftOut() = %d, want 1", n)
+			}
+			if cleared != 1 {
+				t.Fatalf("OnPendingCleared called %d times, want 1", cleared)
+			}
+			if len(spans.got) != 1 || !spans.got[0][0].Equal(reqAt) || !spans.got[0][1].Equal(resAt) {
+				t.Fatalf("spans = %v, want [[%v %v]]", spans.got, reqAt, resAt)
+			}
+			var warnReasons []string
+			for _, e := range logs.All() {
+				if e.Level == zapcore.WarnLevel && e.Message == LeftOutWarnMsg {
+					warnReasons = append(warnReasons, fmt.Sprint(e.ContextMap()["reason"]))
+				}
+			}
+			if len(warnReasons) != 1 || warnReasons[0] != LeftOutRefusedAtStop {
+				t.Fatalf("WARN left-out reasons = %q, want [%q]", warnReasons, LeftOutRefusedAtStop)
+			}
+		})
+	}
+}
+
+// On the direct-channel path with no mock channel (Session.Mocks == nil),
+// EmitMock, EmitMockOnShutdown, and EmitMockOutcome report the mock as left
+// out with LeftOutNoMocksChannel (counted, spanned, warned, pending cleared)
+// and return lost=true instead of dropping it silently.
+// Not parallel: resets the process-wide left-out WARN limiter.
+func TestEmitMockNoChannelReportsLeftOut(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		shutdown bool
+		viaOut   bool
+	}{
+		{name: "EmitMock"},
+		{name: "EmitMockOnShutdown", shutdown: true},
+		{name: "EmitMockOutcome/normal", viaOut: true},
+		{name: "EmitMockOutcome/shutdown", shutdown: true, viaOut: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetLeftOutWarningsForTest()
+			mgr := syncMock.New(nil)
+			spans := &rawSpans{}
+			core, logs := observer.New(zapcore.DebugLevel)
+			cleared := 0
+			s := &Session{
+				Mgr:              mgr,
+				Orphans:          spans,
+				Mocks:            nil,
+				Logger:           zap.New(core),
+				Ctx:              context.Background(),
+				ClientConnID:     "no-chan-conn",
+				OnPendingCleared: func() { cleared++ },
+			}
+			reqAt := time.Date(2026, 11, 22, 13, 0, 0, 0, time.UTC)
+			resAt := reqAt.Add(4 * time.Millisecond)
+			m := &models.Mock{
+				Kind: models.GENERIC,
+				Name: "dropped-no-chan",
+				Spec: models.MockSpec{ReqTimestampMock: reqAt, ResTimestampMock: resAt},
+			}
+			var (
+				lost bool
+				err  error
+			)
+			switch {
+			case tc.viaOut:
+				lost, err = s.EmitMockOutcome(m, tc.shutdown)
+			case tc.shutdown:
+				err = s.EmitMockOnShutdown(m)
+			default:
+				err = s.EmitMock(m)
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if tc.viaOut && !lost {
+				t.Fatalf("EmitMockOutcome lost = false, want true when Mocks is nil")
+			}
+			if n := mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("mgr.MocksLeftOut() = %d, want 1", n)
+			}
+			if cleared != 1 {
+				t.Fatalf("OnPendingCleared called %d times, want 1", cleared)
+			}
+			if len(spans.got) != 1 || !spans.got[0][0].Equal(reqAt) || !spans.got[0][1].Equal(resAt) {
+				t.Fatalf("spans = %v, want [[%v %v]]", spans.got, reqAt, resAt)
+			}
+			var warnReasons []string
+			for _, e := range logs.All() {
+				if e.Level == zapcore.WarnLevel && e.Message == LeftOutWarnMsg {
+					warnReasons = append(warnReasons, fmt.Sprint(e.ContextMap()["reason"]))
+				}
+			}
+			if len(warnReasons) != 1 || warnReasons[0] != LeftOutNoMocksChannel {
+				t.Fatalf("WARN left-out reasons = %q, want [%q]", warnReasons, LeftOutNoMocksChannel)
 			}
 		})
 	}
