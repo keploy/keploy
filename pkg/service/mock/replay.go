@@ -49,6 +49,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// it, and the drain below waits while it moves (teardownDrain).
 	ctx, teardown := utils.NewTeardownScope(ctx)
 	m.ids = nil
+	// What the run consumed is this run's reads only: a service that
+	// replays again counts and meters none of an earlier run's.
+	m.consumed = consumedReads{}
 	name := m.setName()
 	requests := m.requests()
 	started := time.Now()
@@ -885,6 +888,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			zap.Int("missed", counts.missedData),
 			zap.String("next_step", "a dependency contract drifted; re-record the set (keploy mock record) or add the new calls with --on-miss record"))
 	}
+	// A call answered with another call's recording passed on an answer
+	// that is not its own: --strict, which fails unless every call was
+	// answered from the recording, fails on it as on a miss.
+	if m.config.Mock.Strict && len(counts.asAnother) > 0 && utils.ErrCode == 0 {
+		utils.ErrCode = 1
+		failedBy = FailedByStrict
+		m.logger.Error("replay failed under --strict: calls were answered with the recording of another call, not their own",
+			zap.Int("answered_as_another", len(counts.asAnother)),
+			zap.String("next_step", "follow each call's next step above: record a new input (keploy mock record), or mark as noise in keploy.yml what changes on every run, so each call is answered with its own recording"))
+	}
 
 	// A replay that served NONE of the recorded calls verified nothing: the test
 	// command never exercised the recording, so a green exit would be a false
@@ -1023,14 +1036,17 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.logger.Info("this replay ran with every dependency answered from the recording",
 			zap.String("mock-set", name), zap.Int("served", counts.consumed))
 	} else {
-		// The note as a log line carries it: a loss's hosts by their shape
-		// (the receipt keeps them whole).
+		// The note as a log line carries it: a loss's hosts by their shape,
+		// a call answered with another call's recording by its shape and
+		// path tag (the receipt keeps them whole).
 		isolationLog := isolationNote
 		switch {
 		case isolationNote == captureIncomplete && captureIncompleteLog != "":
 			isolationLog = captureIncompleteLog
 		case isolationNote == captureUnverified && captureUnverifiedLog != "":
 			isolationLog = captureUnverifiedLog
+		case isolationNote == answeredAsAnotherNote(counts.asAnother):
+			isolationLog = answeredAsAnotherLogNote(counts.asAnother)
 		}
 		m.logger.Info("this replay did not prove the tests run with the dependencies off",
 			zap.String("mock-set", name), zap.String("reason", isolationLog))
@@ -1068,6 +1084,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		UnchargedMisses: counts.uncharged,
 		RequiredNotMade: counts.requiredNotMade,
 		RequiredNotDue:  counts.requiredNotDue,
+
+		AnsweredAsAnother: answeredAsAnotherReceipt(counts.asAnother),
 
 		CaptureIncomplete: incompleteLosses,
 
@@ -2817,8 +2835,10 @@ func gitTop() string {
 // ReplayOutcome is what a replay produced, for a wrapping build that meters or
 // reports usage. Counts only; no payloads, no destinations.
 type ReplayOutcome struct {
-	SetName  string
-	Loaded   int
+	SetName string
+	Loaded  int
+	// Consumed is how many recordings the run consumed, each once however
+	// many of the run's reads of the agent carried it (consumedReads).
 	Consumed int
 	Missed   int
 	// Cases is each recorded request replayed, with the app's answer compared to the recording.
@@ -2846,6 +2866,13 @@ type replayCounts struct {
 	consumed   int
 	missed     int
 	missedData int
+	// asAnother are the calls the agent answered with the recording of
+	// another call (models.AnsweredAsAnother), with the proven switch off:
+	// served, so missed does not count them, but nothing shows the call's
+	// own answer was served, so the run is not counted as proven
+	// (isolation) and --strict fails it. From a read that was incomplete
+	// (missesUnread), the calls it gave, each also said in its WARN.
+	asAnother []models.UnmatchedCall
 	// missesUnread is why the read of the calls no mock answered was
 	// incomplete (models.UnreadCause), when missed is -1.
 	missesUnread string
@@ -2944,7 +2971,7 @@ func composeUnsettled(why string) error {
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
 func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail, stopped func() bool) replayCounts {
-	var consumed, elsewhere []models.MockState
+	var elsewhere []models.MockState
 	var misses []models.UnmatchedCall
 	var consumedErr, missesErr, settleErr error
 	// Under docker compose the runner exiting is what stops the whole project,
@@ -2955,7 +2982,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	fromCompose = fromCompose && m.isDockerCompose()
 	if fromCompose {
 		outcome, err := composeOutcome.ComposeAgentOutcome()
-		consumed, misses, consumedErr, missesErr = outcome.Consumed, outcome.Missed, err, err
+		// The account is the run's end's read, added to what the run read
+		// before it as that read is.
+		m.consumed.add(outcome.Consumed)
+		misses, consumedErr, missesErr = outcome.Missed, err, err
 		elsewhere = outcome.LearnedElsewhere
 		// The agent stopped with the project: its account carries no count
 		// of the series' repeats, and the RULE USED lines say so.
@@ -2988,13 +3018,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				// so no test is judged on it.
 				settleErr = m.settleRun(outcomeCtx)
 				if consumedErr = settleErr; consumedErr == nil {
-					consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+					var read []models.MockState
+					read, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+					m.consumed.add(read)
 				}
-				// What the wait for the owed series read was served,
-				// whatever this read gives: a read cut short still names
-				// each fault served (logFaultsServed), and every verdict
-				// on consumed reads it only when consumedErr is nil.
-				consumed = m.withSeriesRead(consumed)
 				if len(m.placed) > 0 {
 					m.repeats = readSeriesRepeats(outcomeCtx, m.instrumentation)
 				}
@@ -3014,6 +3041,12 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				return nil
 			})
 	}
+	// What the run consumed is every read's, each recording once
+	// (consumedReads): what the wait for the owed series read was served,
+	// whatever the end's read gives. A read cut short still names each fault
+	// served (logFaultsServed), and every verdict on consumed reads it only
+	// when consumedErr is nil.
+	consumed := m.consumed.list()
 	if consumedErr == nil && m.config.Mock.EmitMockEvents {
 		// Flush the tail. The poll loop stops when the runner exits, so
 		// anything served in the last poll interval would be counted in the
@@ -3040,6 +3073,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// a clean replay when in truth nothing is known. Each count says "unknown"
 	// only for the read that actually failed; the other still carries its real
 	// value.
+	// A call the agent answered with another call's recording was served:
+	// no miss, counted apart (replayCounts.asAnother).
+	misses, asAnother := splitAnsweredAsAnother(misses)
 	summary := []zap.Field{zap.Int("loaded", loaded)}
 	if consumedErr != nil {
 		summary = append(summary, zap.String("consumed", "unknown"))
@@ -3050,6 +3086,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		summary = append(summary, zap.String("missed", "unknown"))
 	} else {
 		summary = append(summary, zap.Int("missed", len(misses)))
+		if len(asAnother) > 0 {
+			summary = append(summary, zap.Int("answered_as_another", len(asAnother)))
+		}
 	}
 	if consumedErr == nil && missesErr == nil {
 		m.logger.Info("mock replay summary", summary...)
@@ -3086,6 +3125,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	for _, miss := range misses {
 		logMiss(m.logger, miss)
 	}
+	sayAnsweredAsAnother(m.logger, m.console, asAnother)
 	// Each call whole, beside the path tag the lines above name it by: on
 	// the console, the first missConsoleMax calls, and every one in
 	// MissesFile.
@@ -3130,7 +3170,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			})
 		}
 	}
-	counts := replayCounts{consumed: len(consumed), missed: len(misses)}
+	counts := replayCounts{consumed: len(consumed), missed: len(misses), asAnother: asAnother}
 	for _, miss := range misses {
 		if miss.CountsAgainstTest() {
 			counts.missedData++

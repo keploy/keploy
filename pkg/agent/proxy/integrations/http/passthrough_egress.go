@@ -304,7 +304,7 @@ func (p *ptRecorder) take(key string, statusCode int) *ptMark {
 		st = &ptSeenState{}
 		p.seen[key] = st
 	}
-	if st.recorded2xx {
+	if !st.takes(statusCode) {
 		return nil
 	}
 	mark := &ptMark{p: p, st: st}
@@ -315,12 +315,30 @@ func (p *ptRecorder) take(key string, statusCode int) *ptMark {
 		st.recordedAny = true
 		return mark
 	}
-	if !st.recordedAny {
-		mark.setAny = true
-		st.recordedAny = true
-		return mark
+	mark.setAny = true
+	st.recordedAny = true
+	return mark
+}
+
+// takes is take's rule for a key whose state is st: a capture of statusCode
+// is kept until the key's first 2xx is, and one not a 2xx only while the
+// key has kept nothing.
+func (st *ptSeenState) takes(statusCode int) bool {
+	return !st.recorded2xx && (isSuccessStatus(statusCode) || !st.recordedAny)
+}
+
+// dropsDuplicate reports whether take would drop a capture of key with
+// statusCode as a duplicate of one its key has kept, as of now, setting
+// nothing: a key with no state yet takes any capture. Nil-safe: a nil
+// recorder drops nothing, as buildHTTPMock dedups nothing without one.
+func (p *ptRecorder) dropsDuplicate(key string, statusCode int) bool {
+	if p == nil {
+		return false
 	}
-	return nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.seen[key]
+	return st != nil && !st.takes(statusCode)
 }
 
 // passThroughRecordDecision is the record-side counterpart of

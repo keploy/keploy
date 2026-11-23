@@ -60,8 +60,8 @@ var seriesWake = func(context.Context) (func() <-chan time.Time, func()) {
 // every owed series answered, when the application no longer runs, when the
 // run is stopped (ctx), or when none of them answers across seriesStallLimit
 // wake-ups in a row: the wake-ups count the application's progress on them,
-// not keploy's. What it reads of the consumed recordings is kept in
-// m.seriesRead, which the run's end reads with the rest (reportOutcome): a
+// not keploy's. What it reads of the consumed recordings is added to
+// m.consumed, to which the run's end adds its own read (reportOutcome): a
 // read hands back only what was consumed since the read before. A read that
 // fails ends the wait; the run's end reads again, and judges on its read.
 // The tests that ran are those of the run's windows as the agent has them;
@@ -123,8 +123,8 @@ func (m *mockService) awaitRequiredSeries(ctx context.Context, running func() bo
 	}
 }
 
-// readOwedSeries reads what the agent consumed since its last read into
-// m.seriesRead and returns the series still owed by ran that hold the wait
+// readOwedSeries adds what the agent consumed since its last read to
+// m.consumed and returns the series still owed by ran that hold the wait
 // (seriesDue.holdsWait, by the tests that passed): none when the read failed,
 // which ends the wait as none owed does.
 func (m *mockService) readOwedSeries(ctx context.Context, ran, passed map[string]bool) []string {
@@ -133,8 +133,8 @@ func (m *mockService) readOwedSeries(ctx context.Context, ran, passed map[string
 		m.logger.Debug("keploy could not read the recordings consumed while it waited for the series the run owes; the run's end reads them again", zap.Error(err))
 		return nil
 	}
-	m.seriesRead = append(m.seriesRead, read...)
-	return slices.DeleteFunc(owedSeries(m.series, ran, usedNames(m.seriesRead), true), func(id string) bool {
+	m.consumed.add(read)
+	return slices.DeleteFunc(owedSeries(m.series, ran, usedNames(m.consumed.list()), true), func(id string) bool {
 		return !m.series[id].holdsWait(passed)
 	})
 }
@@ -149,14 +149,4 @@ func (m *mockService) readOwedSeries(ctx context.Context, ran, passed map[string
 // whole stall for the series of the tests it left failed.
 func (s seriesDue) holdsWait(passed map[string]bool) bool {
 	return s.Trails == "" || passed[s.Trails]
-}
-
-// withSeriesRead is consumed, the run's end's read, after what the wait for
-// the owed series read before it (m.seriesRead): the agent handed those to
-// the wait, and no later read.
-func (m *mockService) withSeriesRead(consumed []models.MockState) []models.MockState {
-	if len(m.seriesRead) == 0 {
-		return consumed
-	}
-	return append(append([]models.MockState(nil), m.seriesRead...), consumed...)
 }

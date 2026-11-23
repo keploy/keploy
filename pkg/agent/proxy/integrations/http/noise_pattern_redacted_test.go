@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,7 +16,8 @@ import (
 // patterns and the live side, in the strict comparison's header, JSON, form
 // and multipart readers. A live value inside them is served, and a field no
 // pattern guards keeps main's rule. Before, the redacted recorded value
-// excused the field whatever the live value.
+// excused the field whatever the live value. The miss's hint, which names
+// each side's values outside the patterns, names no redacted value.
 func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 	ct := map[string]string{"Content-Type": "application/json"}
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
@@ -40,6 +42,7 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 		obfuscated             []string
 		served                 bool
 		field, why             string
+		recorded               []string // the recorded values' shapes the hint names
 	}{
 		{name: "a header, the live value outside", headerNoise: key, header: withKey("REDACTED_abc"), liveHeader: withKey("evil"), recBody: `{}`, body: `{}`,
 			field: "header.x-key", why: "the live value (a string of 4 bytes)"},
@@ -82,7 +85,7 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 		// are held to the patterns, as the live ones are.
 		{name: "a repeated form key, a recorded value inside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&token=t-3`, body: `token=t-1&token=t-2`, obfuscated: byKey, served: true},
 		{name: "a repeated form key, a recorded value outside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&token=bbbbbbb`, body: `token=t-1&token=t-2`, obfuscated: byKey,
-			field: "body.token", why: "the recorded value (a string of 7 bytes)"},
+			field: "body.token", why: "the recorded value (a string of 7 bytes)", recorded: []string{"a string of 7 bytes"}},
 		{name: "a multipart field, the live value outside", bodyNoise: token, header: mp, recBody: part("REDACTED_abc"), body: part("evil"),
 			field: "body.token", why: "the live value (a string of 4 bytes)"},
 		{name: "a multipart field, the live value inside", bodyNoise: token, header: mp, recBody: part("REDACTED_abc"), body: part("t-1"), served: true},
@@ -107,6 +110,11 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 			}
 			if why := whyOf(diag, c.field); !strings.Contains(why, c.why) || !strings.Contains(why, "vary only within") || strings.Contains(why, "evil") || strings.Contains(why, "bbbbbbb") {
 				t.Fatalf("reason %q for %s; want the pattern and %q, never the value (differs %v)", why, c.field, c.why, differs(diag))
+			}
+			for _, f := range diag.differs {
+				if f.diff.Path == c.field && (f.pattern == nil || !slices.Equal(f.pattern.Recorded.Shapes(), c.recorded)) {
+					t.Fatalf("the hint's facts of %s are %+v; want the recorded values %q", c.field, f.pattern, c.recorded)
+				}
 			}
 		})
 	}

@@ -9,15 +9,17 @@
 // keep viper's own read of the file -- case-insensitivity, merge keys,
 // duplicate-key, parse and type errors in viper's words -- and add only a
 // bound: the file must be a regular file of at most MaxConfigBytes.
+// test.globalNoise is the one part viper does not read as written; Files
+// keeps it as written for its Unmarshal.
 //
-// PreProcessFlags reads keploy.yml and the override through Find, Read and
-// Merge. They are exported so that a reader outside the CLI -- `keploy status`,
-// which the VS Code extension runs on every sidebar render -- reads keploy.yml
-// with the same code, and does not drift from the CLI.
+// PreProcessFlags reads keploy.yml and the override through Find and Files;
+// Read and Merge are Files' reads, for a reader that does not decode
+// test.globalNoise. They are exported so that a reader outside the CLI --
+// `keploy status`, which the VS Code extension runs on every sidebar render
+// -- reads keploy.yml with the same code, and does not drift from the CLI.
 package loader
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,23 +56,16 @@ func Find(dir string) string {
 // The error is viper's, or why keploy did not read the file, naming it: it is
 // not a regular file (safeyaml.ErrNotRegular), it changed as it was read
 // (safeyaml.ErrSizeChanged), or it is past one of keploy's limits
-// (safeyaml.IsRefused).
+// (safeyaml.IsRefused). A reader that decodes keploy's whole Config reads
+// through Files instead, which keeps test.globalNoise as the file writes it.
 func Read(v *viper.Viper, file string) error {
-	raw, err := readConfigFile(file)
-	if err != nil {
-		return err
-	}
-	return v.ReadConfig(bytes.NewReader(raw))
+	return New(v).Read(file)
 }
 
 // Merge merges the config file over the config v holds, as viper.MergeInConfig
 // does, once the file is within keploy's limits. Its error is Read's.
 func Merge(v *viper.Viper, file string) error {
-	raw, err := readConfigFile(file)
-	if err != nil {
-		return err
-	}
-	return v.MergeConfig(bytes.NewReader(raw))
+	return New(v).Merge(file)
 }
 
 // readConfigFile reads a config file for viper: a regular file of at most

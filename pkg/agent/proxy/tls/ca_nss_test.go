@@ -253,7 +253,7 @@ func TestNativeInstallAddsTheCAToTheAppUsersNSSDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, ""); err != nil {
+	if err := setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	db := "sql:" + filepath.Join(home, ".pki", "nssdb")

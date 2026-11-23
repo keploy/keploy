@@ -70,6 +70,8 @@ type HTTP struct {
 	// strictIx is the strict pass's index of the last staging generation, or
 	// shared part of an open test's reads, a strict call read (strictIndex).
 	strictIx strictIndexes
+	// ownBodies is each recording's request body as sameCallBodies read it.
+	ownBodies ownBodies
 	// verify is the exact view's verify mode of this handler's own reads
 	// (verifying): nil follows the process's (integrations.ExactViewVerify),
 	// what every handler the proxy makes does; a row gives a handler its
@@ -78,6 +80,10 @@ type HTTP struct {
 	// answerFaultHook is the fault hook replay asks before it serves a
 	// mock's answer (SetAnswerFault, answerFault); nil when none is set.
 	answerFaultHook atomic.Pointer[AnswerFault]
+	// held is, for each recording, the newest answer served from it that
+	// replay holds (heldAnswers), so a recording served again ends the hold
+	// past the FIN of the answer before.
+	held heldAnswers
 }
 
 // verifying is whether h's reads run in the exact view's verify mode: each
@@ -333,9 +339,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 		h.Logger.Debug("read the response body", zap.Int("bytes", len(respBody)))
 		//Set the content length to the headers, except on a response with no
-		//body by rule (to a HEAD, a 1xx, 204 or 304), which keeps its own (as
+		//body by rule (to a HEAD, a 1xx, 204 or 304), which keeps its own, and
+		//on a CONNECT's 2xx, whose head opens a tunnel and carries none (as
 		//buildHTTPMock does).
-		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
+		if !responseHasNoBody(req.Method, respParsed.StatusCode) && !tunnelFollows(req.Method, respParsed.StatusCode) {
 			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 		}
 	}
@@ -428,7 +435,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 				// Replay serves this response: keep what it takes to serve a
 				// repeated header (Set-Cookie) on its own lines.
 				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
-				Chunked:           sentChunked(respParsed),
+				Chunked:           respChunked(respParsed),
 			},
 			Created: time.Now().Unix(),
 

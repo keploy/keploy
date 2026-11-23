@@ -18,8 +18,6 @@ import (
 	"go.uber.org/zap"
 )
 
-//TODO: rename this file.
-
 // redirectKey is redirect_proxy_map's key (struct redirect_key_t): the
 // application's end of a connection, its address (IPv4 as v4-mapped, word by
 // word in network order) and port.
@@ -202,6 +200,16 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 			<-ctx.Done()
 			rb.Close()
 		}()
+
+		// The ports a restarted agent steers again, which the application
+		// bound before this agent was there: as their bind events would be.
+		for _, e := range h.steeredAgainEvents() {
+			select {
+			case <-ctx.Done():
+				return
+			case eventChan <- e:
+			}
+		}
 
 		for {
 			// Read raw data from the ring buffer

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
@@ -19,26 +20,29 @@ func init() {
 // Update retrieves the command to tools Keploy
 func Update(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var updateCmd = &cobra.Command{
-		Use:     "update",
-		Short:   "Update Keploy ",
-		Example: "keploy update",
+		Use:          "update",
+		Short:        "Update Keploy ",
+		Example:      "keploy update",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 			svc, err := serviceFactory.GetService(ctx, "update")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				err := errors.New("service doesn't satisfy tools service interface")
+				utils.LogError(logger, err, "service doesn't satisfy tools service interface")
+				return err
 			}
 			err = tools.Update(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to update")
+				return err
 			}
 			return nil
 		},

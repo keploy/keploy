@@ -241,7 +241,7 @@ func TestTheSeriesWaitEndsOnAReadThatFails(t *testing.T) {
 	instr.consumedErr = errors.New("connection reset")
 	m := awaitAlone(t, instr)
 	require.Equal(t, 1, instr.consumedReadCount)
-	require.Empty(t, m.seriesRead)
+	require.Empty(t, m.consumed.list())
 }
 
 // A run stopped while the wait sleeps ends the wait at once: it does not

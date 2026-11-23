@@ -12,11 +12,11 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	// vitesslog must load before any vitess code logs: see that package.
 	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -637,7 +637,7 @@ func (s *queryShape) bytes() int {
 // the same scan-resistance reason documented on newQuerySigCache.
 var queryShapeCache = newQueryShapeCache()
 
-func newQueryShapeCache() *lru.TwoQueueCache[string, *queryShape] {
+func newQueryShapeCache() *lru.TwoQueue[string, *queryShape] {
 	c, err := lru.New2Q[string, *queryShape](queryShapeCacheSize)
 	if err != nil {
 		// Unreachable: New2Q only errors on a non-positive size. Fail loudly

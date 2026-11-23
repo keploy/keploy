@@ -216,23 +216,37 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		upgraded := status == http.StatusSwitchingProtocols
 		// The stream ended before readResponseV2 found the response's end.
 		// Where keploy relays the connection it has read all the server sent,
-		// so that is the server's doing, unless the relay ended the stream
-		// where the client stopped taking it (EndedWhereClientStopped): the
-		// client closed its socket partway through the response, and refused
-		// the rest. That exchange is left out, and said so
-		// (LeftOutClientClosedPartway): the client gave up on the call (its
-		// timeout) or wanted no more of it, and nothing tells which. Recorded
-		// as far as the client had it, a call that timed out at record would
-		// be served a complete-looking shorter response at replay. Unless
-		// what it refused, of what the destination sent before the client's
-		// FIN reached the proxy, ended the response with framing alone
-		// (chunkedEndRefused): then it had every byte of content, and the
-		// exchange is whole. An
+		// so that is the server's doing (its reset or its close), unless the
+		// client ended the call: it closed its socket partway through the
+		// response, and read no more of it. The stream then holds the response
+		// as far as the client read it, whether the server sent nothing more
+		// before the client's close (the client closed first:
+		// Session.FirstPeerEnded) or went on sending what the client refused
+		// (the relay ended the stream where the client stopped taking it:
+		// Session.EndedWhereClientStopped). The two are one call, as the app
+		// saw it, and one mock (partAnswerFault): the response as far as the
+		// app read it, with the fault models.FaultStoppedReading, which
+		// replay serves without its end and holds until the app closes the
+		// connection, as it did here. An app that had all it wanted (the
+		// JSON it decoded, before the last chunk came) closes again; one that
+		// gave up on the rest (a stream it abandoned, its own timeout) waits
+		// on it again. Whether the server wrote after the client's close is
+		// the server's timing, never the app's: it does not decide the mock.
+		// The exchange is left out, and said so (LeftOutClientClosedPartway),
+		// where what the client read is no response: it closed before the
+		// whole head came. It is left out too, with that end's reason, where
+		// the client's own end records no fault (partAnswerLeftOut: the
+		// recording's stop, its process's own exit, or an end the hooks
+		// cannot judge): that close is not the app's stopping reading. The
+		// client's own end is asked (clientEndJudges), never the first end
+		// the relay read: the server's own close, once its last bytes are
+		// sent or with nothing sent after the client's FIN, can be read
+		// before the client's FIN that came first. An
 		// observe-only capture carries only what the client read, so when its
 		// stream ended with the connection (EndedWithConnection) it is the
 		// client that stopped reading and closed, and the response is
 		// recorded as the client had it (FinalHTTP.RespReadInPart).
-		streamEnded := false
+		streamEnded, readClosed := false, false
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
@@ -243,6 +257,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// ended the stream (its tee gave up on a consumer) marked the
 				// mock incomplete for them.
 				streamEnded = errors.Is(err, io.EOF)
+				readClosed = !streamEnded
 				if !gotLastWritten.IsZero() {
 					resTs = gotLastWritten
 				}
@@ -257,51 +272,12 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		} else if !gotLastWritten.IsZero() {
 			resTs = gotLastWritten
 		}
-		if streamEnded && sess.EndedWhereClientStopped() {
-			whole, ok := chunkedEndRefused(finalResp, sess.NotTakenWhereClientStopped())
-			if !ok || sess.IsMockIncomplete() {
-				// The client closed the connection partway through the
-				// response: no whole exchange to record. Its stream has
-				// ended, and so has every answer after it. A mark on the
-				// incomplete-mock flag is a chunk the capture lost, the
-				// likelier cause, so the exchange is reported under it;
-				// and what the client refused does not follow on from
-				// what the stream holds across a chunk the capture lost,
-				// so it does not end the response then.
-				reason := supervisor.LeftOutClientClosedPartway
-				if mark, ok := sess.TakeMockIncomplete(); ok {
-					reason = mark + ": " + reason
-				}
-				logger.Debug("V2 HTTP record: the client closed the connection partway through the response; the exchange is left out")
-				sess.ReportLeftOut(&models.Mock{
-					Kind: models.HTTP,
-					Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
-				}, reason)
-				return nil
-			}
-			// What the client refused was the end of the chunked body's
-			// framing alone, the last chunk, which a server that flushes
-			// its body writes only as its handler returns, and it reached
-			// the proxy before the client's FIN: the client had all the
-			// response carries, and closed before the last chunk came,
-			// which the destination wrote before it could know. The
-			// response is whole, and recorded so. A client whose own
-			// timeout fired in that gap closed the same way, and its call
-			// failed: nothing its stack did tells the two apart, so its
-			// call is recorded whole too, and at replay the app gets the
-			// response its call timed out on at record. A last chunk that
-			// reached the proxy after the client's FIN, as a streaming
-			// server writes one once its client has gone, ends nothing
-			// here: that exchange is left out above.
-			finalResp, streamEnded = whole, false
-		}
-
 		// Build and emit the mock. Identical shape to the legacy path.
 		var fault *models.Fault
 		if streamEnded {
 			if reason, ok := partAnswerLeftOut(sess); ok {
-				// The client's end came first, partway through the response,
-				// and records no fault: the response is not known to be
+				// The client's own end, partway through the response, records
+				// no fault: the response is not known to be
 				// whole, and no fault is known to record it with. Recorded
 				// as far as it came, a call cut short would be served a
 				// complete-looking shorter response at replay.
@@ -317,6 +293,60 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 			fault = partAnswerFault(sess)
 		}
+		if streamEnded && (sess.EndedWhereClientStopped() || fault != nil && fault.Kind == models.FaultStoppedReading) {
+			if _, _, _, headWhole := messageHead(finalResp, true); fault == nil || !headWhole || sess.IsMockIncomplete() {
+				// The client closed the connection before the response's
+				// head came whole: no response to record. Or a capture hole,
+				// or the recording's stop read on the server's side with the
+				// client's end never read (a client's end at the stop is left
+				// out above), ended the stream where the client stopped
+				// taking it (partAnswerFault). Its stream has
+				// ended, and so has every answer after it. A mark on the
+				// incomplete-mock flag is a chunk the capture lost, the
+				// likelier cause, so the exchange is reported under it:
+				// what the stream holds is then not what the client read.
+				reason := supervisor.LeftOutClientClosedPartway
+				if mark, ok := sess.TakeMockIncomplete(); ok {
+					reason = mark + ": " + reason
+				}
+				logger.Debug("V2 HTTP record: the client closed the connection partway through the response; the exchange is left out")
+				sess.ReportLeftOut(&models.Mock{
+					Kind: models.HTTP,
+					Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+				}, reason)
+				return nil
+			}
+			logger.Debug("V2 HTTP record: the client stopped reading the response partway; it is recorded as far as the client read it")
+		}
+		method := requestMethod(finalReq)
+		if fault == nil && bodyEndsAtClose(finalResp, method) && !closeEnded(sess, streamEnded) {
+			_, _, status, _ := messageHead(finalResp, true)
+			if h.recordsNothing(ctx, finalReq, status, destPort, sess.Opts) {
+				// keploy records nothing of this call (a bypass rule's, a
+				// skip pass-through's, or a recordOne rule's duplicate of
+				// its endpoint's representative): there is no mock to
+				// leave out, and no test case over it is left out for it.
+				// Its read ended, so nothing more of the connection is
+				// read.
+				sess.MarkMockComplete()
+				return nil
+			}
+			// The body ends at the upstream's close, and its read did not
+			// end there (closeEnded): it is not known to be whole, and no
+			// fault is known to record it with. Recorded as far as it
+			// came, the call would be served a complete-looking shorter
+			// response at replay.
+			reason := supervisor.LeftOutCloseNotRead
+			if mark, ok := sess.TakeMockIncomplete(); ok {
+				reason = mark + ": " + reason
+			}
+			logger.Debug("V2 HTTP record: the response's body ends at the upstream's close, which its read did not reach; the exchange is left out")
+			sess.ReportLeftOut(&models.Mock{
+				Kind: models.HTTP,
+				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+			}, reason)
+			return nil
+		}
 		final := &FinalHTTP{
 			Req:              finalReq,
 			Resp:             finalResp,
@@ -328,6 +358,27 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			Fault:            fault,
 		}
 		mock, err := h.buildHTTPMock(ctx, final, destPort, sess.ClientConnID, sess.Opts)
+		if err != nil && readClosed {
+			// The session closed the response's stream under its read (the
+			// supervisor's abort, once the parser's context has ended or the
+			// parser is retired) before the response's end came, as its
+			// Content-Length, its chunked framing or its head's end sets it:
+			// what was read of it does not parse whole because the read was
+			// cut there, which is no decode error. It is not known to be
+			// whole, and no fault is known to record it with. The streams are
+			// closed: nothing more of the connection can be read.
+			reason := supervisor.LeftOutReadAborted
+			if mark, ok := sess.TakeMockIncomplete(); ok {
+				reason = mark + ": " + reason
+			}
+			// The error can quote what the application sent: withheld.
+			logger.Debug("V2 HTTP record: the response's read was closed before its end; the exchange is left out", zap.Error(utils.WithholdInput(err)))
+			sess.ReportLeftOut(&models.Mock{
+				Kind: models.HTTP,
+				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+			}, reason)
+			return nil
+		}
 		if err != nil {
 			// The error can quote what the application sent (a parser's
 			// does): withheld wherever it goes.
@@ -359,6 +410,13 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		}
 		if upgraded {
 			passUpgradeThrough(sess)
+			return nil
+		}
+		if tunnelFollows(method, status) {
+			// The connection is a tunnel from here (RFC 9110 9.3.6), whose
+			// bytes are no HTTP/1 exchange: there is nothing more of it for
+			// this parser to record, and that is said (ReportTunnel).
+			sess.ReportTunnel(requestTarget(finalReq))
 			return nil
 		}
 	}
@@ -399,9 +457,12 @@ func passUpgradeThrough(sess *supervisor.Session) {
 //     idled out as the client sent it): the end that follows is its idle
 //     close, which the application's HTTP client meets by retrying the
 //     request on a new connection, where it is recorded;
-//   - the client's side ended first: the application gave up on the call (its
-//     client's timeout) and closed, with no answer (FaultTimeout), on any
-//     request of the connection;
+//   - the client's own end judges it (clientEndJudges: it came before the
+//     destination's end reached the client, whichever end the relay read
+//     first):
+//     the application gave up on the call (its client's timeout) and closed,
+//     with no answer (FaultTimeout), on any request of the connection, unless
+//     that end records no fault (Session.ClientEndNoFault, below);
 //   - the destination's side ended first: it reset the connection
 //     (FaultReset) or closed it (FaultEOF), on the connection's first request
 //     only. On a later one that is the keep-alive idle-close race (the
@@ -411,8 +472,9 @@ func passUpgradeThrough(sess *supervisor.Session) {
 //   - neither side ended it: the relay ended the stream (the recording's
 //     stop), the session closed it (err is not io.EOF: the supervisor's
 //     abort), or the capture lost part of it (Session.EndedAtHole);
-//   - the first end was the application's stop (Session.EndFollowedStop):
-//     read after the recording's stop began (keploy stops the application),
+//   - the client's own end, or else the first end, was the application's
+//     stop (Session.ClientEndNoFault, Session.EndFollowedStop): read after
+//     the recording's stop began (keploy stops the application),
 //     or the client's end as its process exited (the command's own exit
 //     included). The close of a call it had in flight is the stop's, not its
 //     client's timeout. So is a client's end the hooks cannot tell from its
@@ -429,12 +491,14 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 	if sess.ServerSpokeUnasked() {
 		return nil
 	}
-	first, ok := sess.FirstPeerEnded()
-	if !ok || sess.EndFollowedStop() {
-		return nil
+	if clientEndJudges(sess) {
+		if sess.ClientEndNoFault() != supervisor.EndMayBeFault {
+			return nil
+		}
+		return &models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true, Observed: "the application closed the connection with no answer"}
 	}
-	if first == fakeconn.FromClient {
-		return &models.Fault{Kind: models.FaultTimeout, Observed: "the application closed the connection with no answer"}
+	if _, ok := sess.FirstPeerEnded(); !ok || sess.EndFollowedStop() {
+		return nil
 	}
 	if exchanges != 1 || sess.JoinedMidConnection {
 		return nil
@@ -445,10 +509,48 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 	return &models.Fault{Kind: models.FaultEOF, Observed: "the upstream closed the connection with no answer"}
 }
 
+// clientEndJudges reports whether a call whose response stream ended before
+// the response did is judged by the client's own end
+// (Session.ClientEndNoFault), as the relay read it: the client's end came
+// before the destination's end reached it, and the relay has read the
+// client's end. The relay says so by events, never by which of the two ends
+// it read first: the relay ended the stream where the client stopped taking
+// what the destination still sent (Session.EndedWhereClientStopped), or its
+// look at the client's socket as it read the destination's end found the
+// client's side ended (Session.ClientEndedBeforeDest), or it read the
+// client's end first. Which end the relay read first is the scheduler's,
+// never the app's: an upstream that closes once its last bytes are sent
+// (keep-alives off), or that closes on its own with nothing after the
+// client's FIN, closes as the client does, and its forwarder can read that
+// close first. A client that closed only once it had the destination's end
+// (its read of a cut answer ended) is judged by the destination's end. A
+// client's end the relay never read (it ended the read itself) leaves the
+// call to the end it did read, as before. A client that only half-closed
+// (shutdown(SHUT_WR)) is judged by its FIN too, though it may read on: its
+// later close of a socket whose FIN is out sends nothing, and the hooks keep
+// no record of that release, so nothing tells one that read to the
+// destination's end from one that gave up partway, unless the destination
+// sent bytes after that close. Its call is recorded as far as it read
+// (stopped_reading), or as a timeout, marked as one whose client ended its
+// side first (models.Fault.AppEndedFirst), which replay holds past any FIN
+// the app sends (holdUntilClosed), before the answer or after it: one that
+// read on waits there until its own timeout, never served an end it may not
+// have had.
+func clientEndJudges(sess *supervisor.Session) bool {
+	if sess.PeerEnded(fakeconn.FromClient) == supervisor.PeerOpen {
+		return false
+	}
+	if sess.EndedWhereClientStopped() || sess.ClientEndedBeforeDest() {
+		return true
+	}
+	first, _ := sess.FirstPeerEnded()
+	return first == fakeconn.FromClient
+}
+
 // partAnswerLeftOut reports the reason an exchange is left out for whose
 // response stream ended before the response did (recordV2's streamEnded), when
-// the connection's first end was the client's and records no fault
-// (Session.FirstEndNoFault): the recording's stop, the client's process's own
+// the client's own end judges it (clientEndJudges) and records no fault
+// (Session.ClientEndNoFault): the recording's stop, the client's process's own
 // exit, or an end the hooks cannot judge. Its response is not known to be
 // whole: its framing had not ended, or its body is framed by the upstream's
 // close, which had not come. And no fault is known to record it with. ok is
@@ -458,10 +560,10 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
 		return "", false
 	}
-	if first, ok := sess.FirstPeerEnded(); !ok || first != fakeconn.FromClient {
+	if !clientEndJudges(sess) {
 		return "", false
 	}
-	switch sess.FirstEndNoFault() {
+	switch sess.ClientEndNoFault() {
 	case supervisor.EndAtStop:
 		return supervisor.LeftOutPartwayAtStop, true
 	case supervisor.EndAtExit:
@@ -475,29 +577,106 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 // partAnswerFault is the fault a call ends in whose response stream ended
 // before the response did, as the relay saw the connection end, or nil: the
 // destination reset the connection (FaultReset after the head) or closed it
-// (FaultTruncate), or the client closed first, the upstream silent, and gave
-// up on the rest (FaultTimeout after the head). Where the client closed while
-// the destination still sent (Session.EndedWhereClientStopped), or its end came
-// first and records no fault (partAnswerLeftOut), the exchange is left out
-// before this is asked. The upstream's end read once the recording's stop had
-// begun (Session.EndFollowedStop) records no fault, as in noAnswerFault.
-// buildHTTPMock records the fault only when the response is in fact
-// unfinished (FinalHTTP.Fault).
+// (FaultTruncate), or the client stopped reading the rest and closed
+// (FaultStoppedReading): it closed first, or the relay ended the stream where
+// it stopped taking what the destination still sent
+// (Session.EndedWhereClientStopped). Those two are one fault, with one
+// Observed: what the destination did once the client had closed, the client
+// never saw. The client's own end judges it (clientEndJudges): one that
+// records no fault records none here, whichever end the relay read first
+// (recordV2 leaves the exchange out before this is asked: partAnswerLeftOut).
+// Otherwise an end that was the application's stop (Session.EndFollowedStop),
+// or a stream that ended at a capture hole, records no fault, as in
+// noAnswerFault. buildHTTPMock records the fault only when the response is in
+// fact unfinished (FinalHTTP.Fault).
 func partAnswerFault(sess *supervisor.Session) *models.Fault {
 	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
 		return nil
 	}
-	first, ok := sess.FirstPeerEnded()
-	if !ok || sess.EndFollowedStop() {
+	if clientEndJudges(sess) {
+		if sess.ClientEndNoFault() != supervisor.EndMayBeFault {
+			return nil
+		}
+		return stoppedReadingFault()
+	}
+	if sess.EndFollowedStop() {
 		return nil
 	}
-	if first == fakeconn.FromClient {
-		return &models.Fault{Kind: models.FaultTimeout, AfterHead: true, Observed: "the application closed the connection partway through the answer"}
+	if sess.EndedWhereClientStopped() {
+		return stoppedReadingFault()
+	}
+	if _, ok := sess.FirstPeerEnded(); !ok {
+		return nil
 	}
 	if sess.PeerEnded(fakeconn.FromDest) == supervisor.PeerReset {
 		return &models.Fault{Kind: models.FaultReset, AfterHead: true, Observed: "the upstream reset the connection partway through the answer"}
 	}
 	return &models.Fault{Kind: models.FaultTruncate, Observed: "the upstream closed the connection partway through the answer"}
+}
+
+// stoppedReadingFault is the fault of a call whose client stopped reading the
+// answer partway and closed (partAnswerFault). Its client's end came before
+// the destination's (AppEndedFirst): it judged the call (clientEndJudges),
+// or the relay found its FIN in before the chunk it did not take
+// (Session.EndedWhereClientStopped).
+func stoppedReadingFault() *models.Fault {
+	return &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, AppEndedFirst: true, Observed: "the application stopped reading partway through the answer and closed the connection"}
+}
+
+// bodyEndsAtClose reports whether resp, a response as readResponseV2 read it to
+// the request of method, has a body framed by the upstream's close: its final
+// head has come whole (messageHead), it has a body (not framedHeadOnly, nor a
+// CONNECT's 2xx, which ends at its head: what follows is the tunnel), and the
+// head names neither a Content-Length nor a chunked Transfer-Encoding, as
+// readResponseV2 frames it (parseHeaders).
+func bodyEndsAtClose(resp []byte, method string) bool {
+	head, _, status, ok := messageHead(resp, true)
+	if !ok || framedHeadOnly(method, status) || tunnelFollows(method, status) {
+		return false
+	}
+	contentLength, chunked, err := parseHeaders(head, true)
+	return err == nil && contentLength < 0 && !chunked
+}
+
+// tunnelFollows reports whether a response of status to a request of method
+// opens a tunnel: a CONNECT's 2xx, after whose head the connection carries
+// the tunnel's bytes (RFC 9110 9.3.6), not its body (RFC 9112 6.3).
+func tunnelFollows(method string, status int) bool {
+	return method == http.MethodConnect && status/100 == 2
+}
+
+// requestTarget is req's request-target, between its request line's first
+// and second space: a CONNECT's is the tunnel's host and port (RFC 9112
+// 3.2.3).
+func requestTarget(req []byte) string {
+	line, _, _ := bytes.Cut(req[emptyLinesBefore(req):], []byte("\n"))
+	_, rest, _ := strings.Cut(strings.TrimSpace(string(line)), " ")
+	target, _, _ := strings.Cut(rest, " ")
+	return target
+}
+
+// closeEnded reports whether a response's read, which ended at the stream's
+// end where streamEnded (io.EOF) and else at its reader's close, ended at the
+// upstream's close, the one end of a body framed by it (bodyEndsAtClose): the
+// stream ran out, not at a capture hole (Session.EndedAtHole), and the
+// upstream's side had ended with its FIN (Session.PeerEnded), which the relay
+// marks before it ends the stream; not with its reset, nor with no end of its
+// own, as where the relay ends the stream at the recording's stop or when its
+// read of a side fails otherwise. An observe-only capture (Opts.SkipTLSMITM),
+// with no relay to mark it, says instead that the stream ended because its
+// connection did (Session.EndedWithConnection): the client read the body to
+// that end.
+func closeEnded(sess *supervisor.Session, streamEnded bool) bool {
+	if !streamEnded {
+		return false
+	}
+	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
+		return false
+	}
+	if sess.Opts.SkipTLSMITM {
+		return sess.EndedWithConnection(fakeconn.FromDest)
+	}
+	return sess.PeerEnded(fakeconn.FromDest) == supervisor.PeerClosed
 }
 
 // recordFault builds and emits the mock of a call that got no answer, with the
@@ -630,8 +809,9 @@ func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqM
 // *finalResp each chunk it took bytes of ended and when the relay wrote it to
 // the client (respWrite): the answer's marks (answerMarks). The answer to a
 // HEAD, a 204, a 304 and a 101 is its head alone whatever its headers say
-// (framedHeadOnly): what came after the head in its read is no part of it (a
-// 101's: the switched-to protocol's), and stays on the stream.
+// (framedHeadOnly), and so is a CONNECT's 2xx (tunnelFollows): what came after
+// the head in its read is no part of it (a 101's: the switched-to protocol's;
+// a CONNECT's 2xx: the tunnel's), and stays on the stream.
 func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string, writes *[]respWrite) (time.Time, error) {
 	return readMessageV2(stream, finalResp, &messageFrame{response: true, reqMethod: reqMethod, body: chunkedBody{response: true}}, writes)
 }
@@ -690,9 +870,10 @@ func readMessageV2(stream *fakeconn.FakeConn, msg *[]byte, frame *messageFrame, 
 // messageFrame finds where one HTTP/1 message ends as its bytes arrive. The
 // header section that governs its body (a response's final one, past any
 // interim 1xx: messageHead) says how the body is framed: none (the answer to a
-// HEAD, a 204, a 304 or a 101: framedHeadOnly; a request with neither field
-// below), a Content-Length, chunked framing (chunkedBody), or, for a response
-// with neither, the stream's end.
+// HEAD, a 204, a 304 or a 101: framedHeadOnly; a CONNECT's 2xx, whose head
+// opens a tunnel: tunnelFollows; a request with neither field below), a
+// Content-Length, chunked framing (chunkedBody), or, for a response with
+// neither, the stream's end.
 type messageFrame struct {
 	response  bool
 	reqMethod string      // a response's request's method
@@ -715,7 +896,9 @@ func (f *messageFrame) end(msg []byte) (int, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
-	if f.response && framedHeadOnly(f.reqMethod, status) {
+	if f.response && (framedHeadOnly(f.reqMethod, status) || tunnelFollows(f.reqMethod, status)) {
+		// What follows the head is no part of the response (a 101's: the
+		// switched-to protocol's; a CONNECT's 2xx: the tunnel's).
 		return bodyStart, true, nil
 	}
 	if contentLength >= 0 {
@@ -922,6 +1105,13 @@ func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
 // final one's status line) is an error wrapping io.ErrUnexpectedEOF, as a
 // response cut short is.
 func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, cut bool, err error) {
+	defer func() {
+		// net/http reads a CONNECT's 2xx as a response whose body ends at
+		// the close: what follows its head is the tunnel's bytes.
+		if err == nil && tunnelFollows(req.Method, resp.StatusCode) {
+			resp.Body, resp.ContentLength = http.NoBody, 0
+		}
+	}()
 	rd := bytes.NewReader(m.Resp)
 	br := bufio.NewReader(rd)
 	interim, final := 0, 0 // final: where the response after the interims begins
@@ -988,6 +1178,72 @@ func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, er
 	return out, nil
 }
 
+// recordedDestPort is the destination port a call is recorded and its
+// pass-through decided with: the resolved one, opts.DstCfg.Port, where it is
+// set. The V2 recorder derives destPort from the DestStream FakeConn, which in
+// proxyless (observe-only) capture has no real remote port (0) — breaking
+// port-keyed telemetry-passthrough matching. routeEgressToParser sets
+// DstCfg.Port authoritatively; equal to the FakeConn port on the proxy path,
+// so this is a no-op there.
+func recordedDestPort(destPort uint, opts models.OutgoingOptions) uint {
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		return opts.DstCfg.Port
+	}
+	return destPort
+}
+
+// passThroughHost is the host a pass-through rule is matched against: req's
+// Host, else its URL's.
+func passThroughHost(req *http.Request) string {
+	if req.Host == "" && req.URL != nil {
+		return req.URL.Host
+	}
+	return req.Host
+}
+
+// passThrough is buildHTTPMock's pass-through decision for req to destPort
+// (recordedDestPort): skip where keploy records nothing of the call, as a
+// bypass rule (utils.IsPassThrough) or an egress pass-through rule in skip
+// mode says; else rule, where an egress pass-through rule matched it
+// (matched), which keeps one representative exchange (recordOne).
+func (h *HTTP) passThrough(ctx context.Context, req *http.Request, destPort uint, opts models.OutgoingOptions) (skip bool, rule models.PassThroughRule, matched bool) {
+	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
+		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+		return true, rule, false
+	}
+	rule, matched = passThroughRecordDecision(opts, passThroughHost(req), uint32(destPort), req.Method, req.URL, req.Header)
+	if matched && rule.Mode == models.PassThroughSkip {
+		h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+		return true, rule, matched
+	}
+	return false, rule, matched
+}
+
+// recordsNothing reports whether keploy records nothing of the call whose
+// request is reqBytes, to destPort, answered with status, as buildHTTPMock
+// decides it: a pass-through (passThrough), or a recordOne rule's call that
+// its ptRecorder drops as a duplicate of the representative its endpoint
+// has kept (ptRecorder.dropsDuplicate), which it asks without taking: the
+// call is not recorded here, so it is no representative. A request that
+// does not parse is not known to record nothing.
+func (h *HTTP) recordsNothing(ctx context.Context, reqBytes []byte, status int, destPort uint, opts models.OutgoingOptions) bool {
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBytes)))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Host", req.Host)
+	destPort = recordedDestPort(destPort, opts)
+	skip, rule, matched := h.passThrough(ctx, req, destPort, opts)
+	return skip || matched && h.ptRecorder.dropsDuplicate(ptRecordKeyOf(opts, req, destPort, rule), status)
+}
+
+// ptRecordKeyOf is the endpoint key a recordOne rule's call to destPort
+// (recordedDestPort) is deduplicated by (ptRecordKey).
+func ptRecordKeyOf(opts models.OutgoingOptions, req *http.Request, destPort uint, rule models.PassThroughRule) string {
+	return ptRecordKey(opts.PassThroughScope, req.Method, passThroughHost(req), uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+}
+
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy
 // parseFinalHTTP produces. Returns (nil, nil) when the request is a
 // pass-through (IsPassThrough true) so the caller skips emission.
@@ -1000,14 +1256,7 @@ func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, er
 // input bytes (modulo timestamps, which are allowed to differ because
 // legacy uses time.Now() and V2 uses chunk timestamps).
 func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
-	// Prefer the resolved destination port. The V2 recorder derives destPort from
-	// the DestStream FakeConn, which in proxyless (observe-only) capture has no
-	// real remote port (0) — breaking port-keyed telemetry-passthrough matching.
-	// routeEgressToParser sets DstCfg.Port authoritatively; equal to the FakeConn
-	// port on the proxy path, so this is a no-op there.
-	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
-		destPort = opts.DstCfg.Port
-	}
+	destPort = recordedDestPort(destPort, opts)
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
 		// The parser's error quotes the request: withheld, as the error
@@ -1050,14 +1299,32 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 	var wire []byte
 	if respParsed.Body != nil {
 		respBody, err = io.ReadAll(respParsed.Body)
-		// The answer ended unfinished, in a fault: its body was cut short of
-		// its framing, or it is close-delimited and the upstream reset it or
-		// the client gave up on it (a close is its end). Recorded as the
-		// upstream sent it, its head as it came (Content-Length and
-		// Transfer-Encoding as sent) and its body as the bytes on the wire,
-		// undecoded, so replay sends the same bytes and then the fault.
-		if m.Fault != nil && (errors.Is(err, io.ErrUnexpectedEOF) ||
+		if m.Fault != nil && m.Fault.Kind == models.FaultStoppedReading {
+			// The app stopped reading partway (partAnswerFault): its body is
+			// recorded as far as it read it, decoded, under a whole answer's
+			// head (the Content-Length set below), with the fault, which
+			// keeps the upstream's framing of the body, and replay sends it
+			// so, without the end (serveFault). Cut short of its
+			// framing, or after its last chunk (in the trailer section, which
+			// net/http reads to its own error: it has all of its content), or
+			// close-delimited (a close is its end, which the app never saw),
+			// it is unfinished. A response that came whole before the app
+			// closed (one with no body by rule, past which the upstream sent
+			// bytes the app did not take) has no fault.
+			if errors.Is(err, io.ErrUnexpectedEOF) || err != nil && lastChunkRead(m.Resp) ||
+				err == nil && closeDelimited(respParsed, req.Method) {
+				f := *m.Fault
+				f.ContentLength, f.Chunked = max(respParsed.ContentLength, 0), len(respParsed.TransferEncoding) > 0
+				fault, cut, err = &f, true, nil
+			}
+		} else if m.Fault != nil && (errors.Is(err, io.ErrUnexpectedEOF) ||
 			err == nil && m.Fault.Kind != models.FaultTruncate && closeDelimited(respParsed, req.Method)) {
+			// The answer ended unfinished, in a fault: its body was cut short
+			// of its framing, or it is close-delimited and the upstream reset
+			// it (a close is its end). Recorded as the upstream sent it, its
+			// head as it came (Content-Length and Transfer-Encoding as sent)
+			// and its body as the bytes on the wire, undecoded, so replay
+			// sends the same bytes and then the fault.
 			return h.buildFaultAfterHead(ctx, m, req, respParsed, destPort, connID, opts)
 		}
 		// A body its client read in part is recorded as far as it read it:
@@ -1090,8 +1357,17 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 		// A response with no body by rule (to a HEAD, a 1xx, 204 or 304)
 		// keeps the Content-Length it was sent with: a HEAD's is the size of
 		// the body a GET gets (an S3 client's Stat), not its own 0.
-		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
+		// Nor is one set on a CONNECT's 2xx, whose head opens a tunnel
+		// (RFC 9110 9.3.6: it carries no Content-Length).
+		if !responseHasNoBody(req.Method, respParsed.StatusCode) && !tunnelFollows(req.Method, respParsed.StatusCode) {
 			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		}
+		// The app read the head and this much of the body (decoded), the
+		// bytes replay sends before it holds the connection. A fault set by
+		// now is the stopped_reading one above: one before the head has no
+		// body to read.
+		if fault != nil {
+			fault.BodyBytes = int64(len(respBody))
 		}
 	}
 	// When each part of the answer reached the client: replay writes each
@@ -1111,9 +1387,8 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 		"operation": req.Method,
 		"connID":    connID,
 	}
-	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
-		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
-			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+	skip, rule, matched := h.passThrough(ctx, req, destPort, opts)
+	if skip {
 		return nil, nil
 	}
 
@@ -1126,19 +1401,11 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 	var ptRecordOne bool
 	var ptKey string
 	{
-		ptHost := req.Host
-		if ptHost == "" && req.URL != nil {
-			ptHost = req.URL.Host
-		}
-		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
-			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
-				return nil, nil
-			}
+		if matched {
 			// recordOne: defer the dedup decision to emit time (below) so a later
 			// drop can't burn the one representative and leave zero mocks.
 			ptRecordOne = true
-			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+			ptKey = ptRecordKeyOf(opts, req, destPort, rule)
 			meta["type"] = "config"
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
@@ -1196,7 +1463,7 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 				// repeated header (Set-Cookie) on its own lines.
 				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 				Marks:             marks,
-				Chunked:           sentChunked(respParsed),
+				Chunked:           respChunked(respParsed),
 			},
 			Fault:            fault,
 			Created:          time.Now().Unix(),
@@ -1277,10 +1544,10 @@ func (h *HTTP) buildFaultAfterHead(ctx context.Context, m *FinalHTTP, req *http.
 	return mock, nil
 }
 
-// sentChunked reports whether resp came chunked (HTTPResp.Chunked): net/http
+// respChunked reports whether resp came chunked (HTTPResp.Chunked): net/http
 // read it so, which it does only for an HTTP/1.1 or later answer, chunked
 // being the one transfer coding it takes.
-func sentChunked(resp *http.Response) bool {
+func respChunked(resp *http.Response) bool {
 	return len(resp.TransferEncoding) > 0
 }
 

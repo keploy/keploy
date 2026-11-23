@@ -147,6 +147,11 @@ type Receipt struct {
 	// than one test binary at once): keploy's verdict fails the run naming
 	// each. Absent with the switch off.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// AnsweredAsAnother are, with the proven switch off, the calls the agent
+	// answered with the recording of another call (models.AnsweredAsAnother):
+	// served, so Missed does not count them, but the run is not counted as
+	// Isolated on them, and --strict fails it. Absent for none.
+	AnsweredAsAnother []AnsweredAsAnother `yaml:"answeredAsAnother,omitempty" json:"answeredAsAnother,omitempty"`
 	// CannotCapture is what the test command did that keploy cannot capture at
 	// all (decision 20: a call over a Unix socket, or Unix sockets keploy
 	// cannot see; CaptureLossKind.NotJudged), counted over the whole run
@@ -468,6 +473,10 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 		// the proxy's own answer, and a connection whose client sent
 		// nothing made no call, so neither reached a real service.
 		return false, fmt.Sprintf("%d call(s) matched nothing in the recording", counts.missedData)
+	case len(counts.asAnother) > 0:
+		// Served from the recording, but another call's: nothing shows the
+		// tests pass on their own dependencies' answers.
+		return false, answeredAsAnotherNote(counts.asAnother)
 	case counts.consumed < 0:
 		return false, "the agent never reported which recorded calls it served"
 	case counts.consumed == 0:

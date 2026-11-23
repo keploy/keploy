@@ -99,15 +99,18 @@ func (r *Relay) clientFINBeforeReset(readErr error) bool {
 type finSentSocket interface {
 	clientSocket
 	// closedBeforeFIN is asked just before the relay half-closes the
-	// client's socket: whether the connection has closed already, so the
-	// half-close sends no FIN, though it succeeds.
+	// client's socket: whether the connection has closed already, so a
+	// half-close would send no FIN, though it succeeds. The relay then
+	// takes the connection as over, as a failed half-close says on Linux
+	// and macOS, and does not half-close it.
 	closedBeforeFIN() bool
 	proxyFINSent()
 }
 
 // clientClosedBeforeFIN is asked before the relay half-closes the client
 // conn: whether the client's socket says the connection has closed already,
-// so no FIN can go and its socket is not told of one (noteClientFINSent).
+// so no FIN can go: the connection is over (errClientClosedBeforeFIN), and
+// its socket is not told of a FIN (noteClientFINSent).
 func (r *Relay) clientClosedBeforeFIN() bool {
 	s, ok := r.client.(finSentSocket)
 	return ok && s.closedBeforeFIN()

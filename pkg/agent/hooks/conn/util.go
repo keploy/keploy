@@ -180,6 +180,14 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}()
 
+	if ShouldSkipStaticAsset(logger, req, resp, opts) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		logger.Debug("skipping static asset test case (--ignore-static-assets)")
+		return
+	}
+
 	// What the decodes below hold reserved with the caller's
 	// DecodeReserveFunc, their output buffers: given back once the test case
 	// is built from them, before it is handed on, or as the capture returns
@@ -451,18 +459,27 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
+	filtered, _ := evalFilters(logger, req, opts)
+	return filtered
+}
+
+func evalFilters(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) (filtered bool, matchedInclude bool) {
+	if req == nil {
+		return false, false
+	}
 	dstPort := 0
 	var err error
-	if p := req.URL.Port(); p != "" {
-		dstPort, err = strconv.Atoi(p)
-		if err != nil {
-			utils.LogError(logger, err, "failed to obtain destination port from request")
-			return false
+	if req.URL != nil {
+		if p := req.URL.Port(); p != "" {
+			dstPort, err = strconv.Atoi(p)
+			if err != nil {
+				utils.LogError(logger, err, "failed to obtain destination port from request")
+				return false, false
+			}
 		}
 	}
 
 	hasInclude := false
-	matchedInclude := false
 
 	type cond struct {
 		eligible bool
@@ -556,16 +573,16 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			}
 		} else { // Exclude (default)
 			if isMatch {
-				return true // Exclude ALWAYS takes priority
+				return true, false // Exclude ALWAYS takes priority
 			}
 		}
 	}
 
 	if hasInclude && !matchedInclude {
-		return true
+		return true, false
 	}
 
-	return false
+	return false, matchedInclude
 }
 
 // RemoveFormFiles deletes the files ExtractFormData wrote the file parts of a
