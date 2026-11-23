@@ -130,8 +130,8 @@ type OutgoingOptions struct {
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
 	// RedisDrawn lists the Redis key shapes keploy.yaml declares as holding a
-	// word the app drew in this run (redis.drawn), handed on for the Redis
-	// parser; nothing here judges them.
+	// word the app drew in this run (redis.drawn), handed on for the enterprise
+	// Redis parser; nothing in OSS judges or acts on them (enterprise-only).
 	RedisDrawn []string
 	// KeepAppAlive reports that the replay keeps the application running across
 	// test-set boundaries (--keep-app-alive), so stateful parsers carry live
