@@ -87,14 +87,19 @@ const sentinelName = "sentinel.keploy.test."
 // and the row fails rather than read "no mock" from a stream it did not see.
 func recordQuestions(t *testing.T, host, port string, qs ...dns.Question) ([]*models.Mock, []dnsCacheEntry) {
 	t.Helper()
-	mc := make(chan *models.Mock, 64)
-	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
-	p := &Proxy{
+	return recordThrough(t, &Proxy{
 		logger:             zap.NewNop(),
 		dnsUpstreamServers: []string{host},
 		dnsUpstreamPort:    port,
-		recordedDNSMocks:   newRecordedDNSMocksCache(),
-	}
+	}, qs...)
+}
+
+// recordThrough is recordQuestions against p's upstream servers.
+func recordThrough(t *testing.T, p *Proxy, qs ...dns.Question) ([]*models.Mock, []dnsCacheEntry) {
+	t.Helper()
+	mc := make(chan *models.Mock, 64)
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	p.recordedDNSMocks = newRecordedDNSMocksCache()
 	session := &agent.Session{Mode: models.MODE_RECORD, MC: mc}
 
 	var answers []dnsCacheEntry
@@ -236,6 +241,37 @@ func TestAResolverFailureIsNotRecorded(t *testing.T) {
 			}
 			if len(mocks) != 0 {
 				t.Fatalf("recorded %d mock(s) for a %s, want none: %+v", len(mocks), dns.RcodeToString[rcode], mocks[0].Spec.DNSResp)
+			}
+		})
+	}
+}
+
+// A server that fails or refuses to answer passes a recording's question to
+// the next server, as the application's resolver passes it, and the
+// recording holds the next server's answer, the one the application gets: a
+// replay then serves it, where a recording that kept the first server's
+// failure held nothing for the name.
+func TestARecordingHoldsTheAnswerOfTheServerAfterOneThatFailsOrRefuses(t *testing.T) {
+	q := dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	for _, failure := range failures {
+		t.Run(failure, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop(), dnsUpstreamServers: []string{"10.0.0.1", "10.8.0.1"}, dnsUpstreamPort: "53"}
+			asked := byServers(p, map[string]string{"10.0.0.1": failure, "10.8.0.1": "10.8.0.9"})
+			mocks, answers := recordThrough(t, p, q)
+			if got := answeredBy(answers[0].Msg); got != "NOERROR 10.8.0.9 from 10.8.0.1" {
+				t.Errorf("record answer to the app = %q, want the next server's NOERROR 10.8.0.9 from 10.8.0.1", got)
+			}
+			if len(*asked) < 2 || !equalStrings((*asked)[:2], []string{"10.0.0.1", "10.8.0.1"}) {
+				t.Errorf("asked %v, want 10.0.0.1 then 10.8.0.1 for the question", *asked)
+			}
+			if len(mocks) != 1 || mocks[0].Spec.DNSResp == nil {
+				t.Fatalf("recorded %d mock(s), want the next server's answer", len(mocks))
+			}
+			if got, want := mocks[0].Spec.DNSResp.Answers, answerA(q, "10.8.0.9"); mocks[0].Spec.DNSResp.Rcode != dns.RcodeSuccess || !equalStrings(got, want) {
+				t.Errorf("recorded %s %v, want NOERROR %v", dns.RcodeToString[mocks[0].Spec.DNSResp.Rcode], got, want)
+			}
+			if got, _ := replayIsolated(t, mocks, q); got.Msg == nil || got.Rcode != dns.RcodeSuccess || !equalStrings(rrStrings(got.Answer), answerA(q, "10.8.0.9")) {
+				t.Errorf("an isolated replay served %+v, want the recorded NOERROR 10.8.0.9", got.Msg)
 			}
 		})
 	}

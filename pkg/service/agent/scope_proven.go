@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -406,6 +407,29 @@ func (a *Agent) clientRoot() (int, string) {
 	return int(here.PID), here.Why
 }
 
+// hooksHoldInRun reports whether hooks that hold the run's processes
+// themselves (coreAgent.RunMemberReporter: Windows's job object) hold process
+// pid, created at start: one whose chain to keploy's client an exited parent
+// cut is still the run's then.
+func (a *Agent) hooksHoldInRun(pid int, start uint64) bool {
+	h, ok := a.Hooks.(coreAgent.RunMemberReporter)
+	return ok && h.HoldsInRun(pid, start)
+}
+
+// CallerSocketWhy is "" when process pid, which the kernel's tables name as
+// the owner of the client socket at client connected to the agent at server,
+// is the process that sends on it, as hooks that see sockets handed between
+// processes (coreAgent.CallerSocketReporter: Windows's shim) read it; why
+// keploy cannot tell which process called, otherwise. With any other hooks
+// it is "": Linux's and macOS's tables list every holder of a socket.
+func (a *Agent) CallerSocketWhy(pid int, client, server netip.AddrPort) string {
+	h, ok := a.Hooks.(coreAgent.CallerSocketReporter)
+	if !ok {
+		return ""
+	}
+	return h.CallerSocketWhy(pid, client, server)
+}
+
 // agentPID is this agent's process: a claim read as its own is refused.
 var agentPID = os.Getpid()
 
@@ -538,7 +562,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrNoCaller,
 			"keploy's agent could not tell which process called it", "run the test command natively, on the machine the agent runs on")
 	}
-	if !procDescends(caller, root) {
+	if !procDescends(caller, root) && !a.hooksHoldInRun(caller, start) {
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			fmt.Sprintf("process %d is not part of this keploy run, so keploy cannot capture or mock its calls", caller),
 			`run the test command through keploy, to record: keploy mock record -c "<command>"; to replay: keploy mock replay -c "<command>"`)
