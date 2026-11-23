@@ -1,5 +1,10 @@
 #!/bin/bash
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+# keploy runs under sudo here, which hands it only the variables its command
+# line names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
@@ -91,7 +96,7 @@ echo "go binary built"
 
 # The step above removed any config, so this always generates; the guard is
 # here so the line stays correct if that removal is ever dropped.
-[ -f keploy.yml ] || sudo "$RECORD_BIN" config --generate
+[ -f keploy.yml ] || sudo env "${SUDO_ENV[@]}" "$RECORD_BIN" config --generate
 
 send_request() {
     sleep 6

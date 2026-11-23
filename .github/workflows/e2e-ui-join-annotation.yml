@@ -63,6 +63,10 @@ on:
 permissions:
   contents: read
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   e2e:
     # Two recording sessions measured ~25s locally (4 runs, 24-26s),

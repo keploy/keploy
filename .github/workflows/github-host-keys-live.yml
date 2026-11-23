@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   live:
     # One API read and four SSH handshakes, each tried at most three times:

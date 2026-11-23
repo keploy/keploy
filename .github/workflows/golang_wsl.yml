@@ -3,6 +3,10 @@ name: Golang On WSL (Windows host)
 on:
   workflow_call:
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   golang_wsl:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
@@ -261,8 +265,10 @@ jobs:
         shell: wsl-bash {0}
         env:
           WSL_WS: ${{ github.workspace }}
-          # Propagate WSL_WS as a path so Windows -> Linux path translation happens
-          WSLENV: WSL_WS/p
+          # Propagate WSL_WS as a path so Windows -> Linux path translation happens,
+          # and the workflow's KEPLOY_INTERNAL as it is: WSL passes in only what
+          # WSLENV names, and the keploy this step runs is keploy's own CI.
+          WSLENV: WSL_WS/p:KEPLOY_INTERNAL
         run: |
           set -euo pipefail
           # keploy's eBPF hooks need debugfs (or tracefs), which WSL does not

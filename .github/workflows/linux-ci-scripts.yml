@@ -142,6 +142,10 @@ on:
 permissions:
   contents: read
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   apt-install:
     # Eleven ubuntu containers that fetch the package lists once or more each
