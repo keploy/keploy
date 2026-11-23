@@ -411,6 +411,12 @@ const xnuHidden = "macOS lists to a process only its own sockets in some cases (
 // XNU's names.
 func tcpStateName(s uint8) string { return xnuTCPStateName(s) }
 
+// appSocketClosed reports whether no process holds pc's application socket
+// any more (the drain's word to a handler waiting past the application's
+// FIN, pairedConn.appClosed): on darwin it is not read, and false leaves such
+// a wait to a reset or the run's end, as before.
+func (*Proxy) appSocketClosed(*pairedConn) bool { return false }
+
 // PairedBytesErr is why the bytes on the proxy's paired connections cannot be
 // counted, nil while they can: macOS's TCP table cannot be read in the layout
 // keploy reads (found once, xnuTableReadable), or a failure since makes every

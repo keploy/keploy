@@ -262,7 +262,9 @@ func heldPastFIN(c net.Conn, fault *models.Fault) bool {
 // holdAnswer holds c (holdUntilClosed) once an answer served from the
 // recording named name is written. pastFIN (heldPastFIN) says the app's FIN
 // may be a half-close: the hold then outlasts it, until a reset, ctx's end,
-// or a later answer of the same recording held (heldAnswers).
+// a later answer of the same recording held (heldAnswers), or the proxy's
+// word (at the session's last read, PairedBytesDrain) that no process holds
+// the app's socket (integrations.AppClosed).
 func (h *HTTP) holdAnswer(ctx context.Context, name string, c net.Conn, pastFIN bool) {
 	outlived, done := h.held.hold(ctx, name)
 	defer done()
@@ -278,23 +280,49 @@ func (h *HTTP) holdAnswer(ctx context.Context, name string, c net.Conn, pastFIN 
 // timeout answers nothing more, and it is the application's own client that
 // gives up. A past that is not nil says the app's FIN may be a half-close
 // (heldPastFIN), after which it reads on, not its close: the end of c's
-// stream does not let the app go then. Only a reset or past's end (ctx's, or
-// a later answer of the same recording held: heldAnswers) ends the hold
-// (pUtil.AwaitPeerReset; past alone where c's socket cannot be asked): an app
-// that half-closed and then gave up sends nothing more, and waits until its
-// own timeout as it did at record. Meanwhile the connection is marked idle
-// (integrations.MarkIdle): its handler waits on the app, and holds no work a
-// test's end waits for.
+// stream does not let the app go then. Only a reset, past's end (ctx's, or
+// a later answer of the same recording held: heldAnswers), or the proxy's
+// word that no process holds the app's socket (integrations.AppClosed) ends
+// the hold (pUtil.AwaitPeerReset; past and AppClosed alone where c's socket
+// cannot be asked): an app that half-closed and then gave up sends nothing
+// more, and waits until its own timeout as it did at record. Meanwhile the
+// connection is marked idle (integrations.MarkIdle): its handler waits on the
+// app, and holds no work a test's end waits for. When the app closed its
+// socket whole, or exited, nothing reads on, and a reset, which an app sends
+// only at bytes that reach its closed socket, never comes; held on until the
+// run's end, the connection's close came after the session's last read had
+// given up waiting for it (PairedBytesDrain), and left the run with no
+// verdict.
 func holdUntilClosed(ctx context.Context, c net.Conn, past context.Context) {
 	var buf [512]byte
 	for ctx.Err() == nil {
 		if _, err := c.Read(buf[:]); err != nil {
 			if past != nil && errors.Is(err, io.EOF) {
 				release := integrations.MarkIdle(ctx)
-				pUtil.AwaitPeerReset(past, c)
-				release()
+				defer release()
+				held, stop := untilAppClosed(past, integrations.AppClosed(ctx))
+				defer stop()
+				pUtil.AwaitPeerReset(held, c)
 			}
 			return
 		}
 	}
+}
+
+// untilAppClosed is past, ended also once closed is (integrations.AppClosed);
+// stop ends it, and its watch of closed, once the wait on it is over. A nil
+// closed (no word can come) leaves it ending with past alone.
+func untilAppClosed(past context.Context, closed <-chan struct{}) (held context.Context, stop context.CancelFunc) {
+	held, stop = context.WithCancel(past)
+	if closed == nil {
+		return held, stop
+	}
+	go func() {
+		select {
+		case <-closed:
+			stop()
+		case <-held.Done():
+		}
+	}()
+	return held, stop
 }

@@ -79,6 +79,14 @@ type pairedConn struct {
 	// session's, once, and no later drain waits for it.
 	dest        atomic.Pointer[string]
 	drainGaveUp atomic.Bool
+	// appClosed is closed, once (markAppClosed), when a drain finds that no
+	// process holds the application's socket any more (appSocketClosed):
+	// the application closed it whole, or exited, so nothing reads on, and
+	// a handler that waits past the application's FIN for it to read on or
+	// reset (integrations.AppClosed, a held answer) can end. nil for a
+	// connection no add made.
+	appClosed     chan struct{}
+	appClosedOnce sync.Once
 	// cuts are the ends cut short on the connection, oldest first: each a
 	// test whose bytes wait ended before the proxy's side had received what
 	// the application had written when the wait began (cutShort). Bytes up
@@ -605,7 +613,43 @@ func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64, instance uint32) {
 	}
 	session := s.session.Load()
 	s.byConn[conn] = &pairedConn{appSeq: appSeq, instance: instance, app: app, proxy: proxy, conn: conn, done: make(chan struct{}),
-		sessions: &s.session, session: session, marks: []sessionMark{{session: session, from: 1}}}
+		appClosed: make(chan struct{}), sessions: &s.session, session: session, marks: []sessionMark{{session: session, from: 1}}}
+}
+
+// markAppClosed says, once, that no process holds pc's application socket
+// any more (pairedConn.appClosed). A connection no add made has none to say
+// it on.
+func (pc *pairedConn) markAppClosed() {
+	if pc.appClosed == nil {
+		return
+	}
+	pc.appClosedOnce.Do(func() { close(pc.appClosed) })
+}
+
+// appClosedSaid reports whether markAppClosed has said it of pc; true for a
+// connection no add made, which has none to say.
+func (pc *pairedConn) appClosedSaid() bool {
+	if pc.appClosed == nil {
+		return true
+	}
+	select {
+	case <-pc.appClosed:
+		return true
+	default:
+		return false
+	}
+}
+
+// appClosedOf is the word that no process holds the application's socket of
+// conn's paired connection any more (pairedConn.appClosed), nil for a
+// connection it does not keep.
+func (s *pairedConns) appClosedOf(conn net.Conn) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pc := s.byConn[pairKey(conn)]; pc != nil {
+		return pc.appClosed
+	}
+	return nil
 }
 
 // remove forgets conn once the proxy is done with it, its socket closed. A

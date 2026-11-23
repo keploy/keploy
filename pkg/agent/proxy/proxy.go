@@ -2793,6 +2793,7 @@ func (p *Proxy) acceptedConn(ctx context.Context, raw net.Conn) (clientConn net.
 		}
 		tracked.beforeClose = func() { p.pairClosing(ctx, raw, tracked) }
 		tracked.pairUse, tracked.pairRead = p.paired.useOf(raw), p.paired.readOf(raw)
+		tracked.appClosed = p.paired.appClosedOf(raw)
 	}
 	return clientConn, tracked
 }

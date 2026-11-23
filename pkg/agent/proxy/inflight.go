@@ -135,8 +135,12 @@ type trackedConn struct {
 	// each read of it that moved bytes, and each write of bytes as it
 	// begins, for the paired connection it is (pairedConn.used); pairRead,
 	// set with it, counts the bytes its reads returned (pairedConn.read).
-	pairUse   *atomic.Uint64
-	pairRead  *atomic.Uint64
+	pairUse  *atomic.Uint64
+	pairRead *atomic.Uint64
+	// appClosed, set with pairUse, is closed once a drain finds that no
+	// process holds the application's socket any more (pairedConn.appClosed,
+	// AppClosed); nil for a connection the proxy does not pair.
+	appClosed <-chan struct{}
 	closeOnce sync.Once
 	// closing: its Close has begun. A read from then on is the close's own
 	// (pairClosing reads through the TLS layer what the socket holds) or one
@@ -919,6 +923,11 @@ func (c *trackedConn) MarkIdle() (release func()) {
 		})
 	}
 }
+
+// AppClosed is closed once a drain finds that no process holds the
+// application's socket of c any more (integrations.AppClosedWatcher): nil,
+// which never closes, for a connection the proxy does not pair.
+func (c *trackedConn) AppClosed() <-chan struct{} { return c.appClosed }
 
 // SyscallConn is the socket under c (syscall.Conn), for what reads the
 // kernel's state of it (util.ReceivedNothing) or peeks at it (MSG_PEEK): c

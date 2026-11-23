@@ -105,6 +105,31 @@ func (p *Proxy) pairTargets(n uint64) ([]*pairTarget, error) {
 	return pending, nil
 }
 
+// appSocketClosed reports whether no process holds pc's application socket
+// any more: it is gone from the kernel's tables (only once the proxy has
+// seen an application socket in this namespace, so a hidden socket in
+// another network namespace is never read as closed), a timewait socket,
+// closed, or an orphan (no file holds it: its process closed it whole, or
+// exited). One its process only shut down (a half-close) is still held, and
+// reads on. false where the socket cannot be read: whether it is held cannot
+// be told.
+func (p *Proxy) appSocketClosed(pc *pairedConn) bool {
+	ds, _, err := takeDiag()
+	if err != nil {
+		return false
+	}
+	d, err := lookupWritten(ds, pc, false)
+	if errors.Is(err, errNoSocket) {
+		giveDiag(ds, nil)
+		return p.paired.visible.Load()
+	}
+	giveDiag(ds, err)
+	if err != nil {
+		return false
+	}
+	return d.state == tcpClose || d.state == tcpTimeWait || d.inode == 0
+}
+
 // tcpStateName names the TCP states a bytes wait reports.
 func tcpStateName(s uint8) string {
 	switch s {

@@ -124,6 +124,32 @@ func MarkIdle(ctx context.Context) (release func()) {
 	return func() {}
 }
 
+// AppClosedWatcher is a connection the proxy can say no process holds the
+// application's socket of any more.
+type AppClosedWatcher interface {
+	// AppClosed is closed once the proxy has found that no process holds
+	// the application's socket of the connection: the application closed
+	// it, or exited. Never closes (or is nil) where the proxy cannot tell.
+	AppClosed() <-chan struct{}
+}
+
+// AppClosed is closed once the proxy has found that no process holds the
+// application's socket of ctx's connection any more (it closed it whole, or
+// exited): nothing can read what the connection still sends, so a wait for
+// the application to read on, or to reset, after its FIN (a held answer past
+// that FIN, which may have been a half-close) can end. The proxy looks as the
+// session's last read waits for the closes the application's stop ended
+// (PairedBytesDrain). Returns a channel that never closes for a paired
+// connection whose application socket cannot be read (e.g. on darwin), and
+// nil, which never closes either, for a connection the proxy does not pair or
+// from a stand-in holder that is not an AppClosedWatcher.
+func AppClosed(ctx context.Context) <-chan struct{} {
+	if w, ok := ctx.Value(requestHolderKey{}).(AppClosedWatcher); ok && w != nil {
+		return w.AppClosed()
+	}
+	return nil
+}
+
 // RequestHolding is the optional capability of a parser that marks every
 // request it holds (HoldRequest). The proxy type-asserts the parser it
 // serves a connection with, as it does GapResyncCapable.

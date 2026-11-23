@@ -21,9 +21,11 @@ import (
 // ended its side first (models.Fault.AppEndedFirst, which a recording writes
 // on each stopped_reading and timeout it judges by the app's end) holds past
 // the app's FIN, sent before the answer or after it: a FIN cannot say whether
-// the app closed or only half-closed and reads on. Only a reset or the run's
-// end ends it. No look at the app's socket decides it, so it holds the same
-// where the socket cannot be asked (Windows). A fault without the mark ends
+// the app closed or only half-closed and reads on. Only a reset, the run's
+// end, or (on Linux, at the session's last read) the proxy's word that no
+// process holds the app's socket (replay_app_closed_test.go) ends it; where
+// the socket cannot be asked (Windows, darwin) or while a process still holds
+// it, it holds until a reset or the run's end. A fault without the mark ends
 // the hold at a FIN after the answer, as before.
 
 // idleMarks is a request holder (integrations.WithRequestHolder) that keeps

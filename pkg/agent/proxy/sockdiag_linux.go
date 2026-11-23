@@ -32,6 +32,7 @@ const (
 	diagReqV2Len   = 56 // family, protocol, ext, pad, states, sockid
 	diagMsgLen     = 72 // family, state, timer, retrans, sockid, expires, rqueue, wqueue, uid, inode
 	diagMsgWqueue  = 60 // idiag_wqueue's offset in inet_diag_msg
+	diagMsgInode   = 68 // idiag_inode's offset in inet_diag_msg
 	diagSockidLen  = 48
 	diagIfOff      = 36 // idiag_if's offset in inet_diag_sockid
 	diagCookieOff  = 40 // idiag_cookie's offset in inet_diag_sockid
@@ -52,6 +53,12 @@ type diagTCP struct {
 	// dev is idiag_if, the index of the device the socket is bound to: 0
 	// for none.
 	dev uint32
+	// inode is idiag_inode, the inode of the file that holds the socket: 0
+	// for one no file holds, an orphan (its process closed it whole, or
+	// exited) or a timewait socket (sock_i_ino of a socket with no
+	// sk_socket). A socket its process only shut down (a half-close) is
+	// still held.
+	inode uint32
 }
 
 // errNoSocket is lookupTCP's error when no socket has those two ends.
@@ -466,6 +473,7 @@ func parseDiagMsg(b []byte) (diagTCP, error) {
 		state:  b[1],
 		wqueue: binary.NativeEndian.Uint32(b[diagMsgWqueue:]),
 		dev:    binary.NativeEndian.Uint32(id[diagIfOff:]),
+		inode:  binary.NativeEndian.Uint32(b[diagMsgInode:]),
 	}
 	if d.state == tcpListen {
 		return diagTCP{}, errNoSocket

@@ -49,7 +49,8 @@ func (p *Proxy) PairedBytesDrain(ctx context.Context) error {
 		if len(closing) == 0 {
 			return nil
 		}
-		if drainMoved(waited, closing) {
+		signalled := p.sayAppClosed(closing)
+		if signalled || drainMoved(waited, closing) {
 			meter.Reset()
 		}
 		waited = make(map[*pairedConn]bool, len(closing))
@@ -70,6 +71,31 @@ func (p *Proxy) PairedBytesDrain(ctx context.Context) error {
 	}
 }
 
+// sayAppClosed tells the handler of each connection of closing whose close it
+// has not begun that no process holds its application socket any more, once
+// that is so (appSocketClosed, pairedConn.markAppClosed): the application
+// closed it whole, or exited, as the session's application has once its
+// last read is asked for. A handler that waits past the application's FIN
+// for it to read on or reset (a held answer, integrations.AppClosed) then
+// ends, and its close is counted in this drain. Without the word it waited
+// for the run's end, which comes after the drain, and the drain held it
+// stuck: the run was left with no verdict. A socket still held, as a
+// half-closed one is, gets no word; one that cannot be read or is hidden in
+// another network namespace gets none either. Reports whether any handler was
+// told on this look, so the drain counts the word as progress.
+func (p *Proxy) sayAppClosed(closing []*pairedConn) (signalled bool) {
+	for _, pc := range closing {
+		if pc.atClose.Load() != nil || pc.appClosedSaid() {
+			continue
+		}
+		if p.appSocketClosed(pc) {
+			pc.markAppClosed()
+			signalled = true
+		}
+	}
+	return signalled
+}
+
 // drainBudget is how long, in time the agent could run, a drain waits with
 // no connection it waits for forgotten or its close begun, before it holds
 // their handlers stuck (PairedBytesDrain): stall.HangBudget, the one hang
@@ -77,9 +103,15 @@ func (p *Proxy) PairedBytesDrain(ctx context.Context) error {
 // bounded by it, from a start before the drain's own or at a close begun
 // (which starts the drain's bound again): a parser that stopped reading (the
 // parser supervisor), and a close's wait for the application's FIN
-// (orphanFINBudget). So a handler the proxy's own bounds will end is never
-// held stuck, and the drain answers within the bound the CLI gives the read
-// it comes before (the client's capture-loss reads that drain).
+// (orphanFINBudget). A held answer's wait past the application's FIN, for it
+// to read on or reset, has no bound of its own: on Linux the drain ends it
+// once no process holds the application's socket (sayAppClosed), while on
+// darwin (where the socket is not read for open descriptors), when sock_diag
+// cannot read the socket or no application socket has been seen, or while a
+// process still holds the socket, it stays held and can still be held stuck.
+// Otherwise a handler the proxy's own bounds will end is never held stuck,
+// and the drain answers within the bound the CLI gives the read it comes
+// before (the client's capture-loss reads that drain).
 const drainBudget = stall.HangBudget
 
 // drainMoved says whether a drain made progress since its last look, at
