@@ -229,7 +229,7 @@ func firstTen(s []string) []string {
 	return s
 }
 
-// halfAppended starts what appendMock does for a mock larger than its 4 KB
+// halfAppended starts what writeMockDoc does for a mock larger than its 4 KB
 // buffer, between its two writes: it holds the set's mock file lock and has
 // written the separator and the first half of a whole document. finish
 // writes the rest and lets the lock go.
