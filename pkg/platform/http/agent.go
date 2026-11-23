@@ -47,6 +47,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -2962,6 +2963,10 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// The proven model's staging switch: sudo drops KEPLOY_PROVEN on the way to
 	// the agent, so it travels as a flag.
 	args = append(args, provenswitch.AgentArgs()...)
+	// Whether the run is keploy's own (KEPLOY_INTERNAL, a CI run of a keploy/
+	// repository), which sudo drops too, so the agent's telemetry is not
+	// counted as a user's.
+	args = append(args, telemetry.AgentArgs()...)
 	// And the Docker endpoint the tests' containers run on, which sudo drops
 	// too, so the agent can name container destinations (containerkey).
 	args = append(args, containerkey.AgentArgs()...)
