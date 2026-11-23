@@ -18,6 +18,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -31,7 +33,8 @@ FAIL=0
 # Names of this run's own: two runs on one runner never share a container.
 ID=$$
 # The app's port on this host.
-PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
+PORT=$(free_port) || exit 1
 
 # The project leg 3 names with -p: a name that starts with "up", which keploy's
 # command rewrite once took for the `up` subcommand.
@@ -150,10 +153,10 @@ PY
 # its own, 0. The log is NAME.log. With FLAGS (compose's global -p NAME), the
 # app container must run in that project.
 record() {
-  local name=$1 proven=$2 flags=${3:-} log="$1.log" pid rc i before=$FAIL
+  local name=$1 proven=$2 flags=${3:-} log="$1.log" pid rc i before=$FAIL failed=0
   sudo rm -rf keploy
   : > "$log"
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "docker compose ${flags:+$flags }up" --container-name "cae-app-$ID" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "docker compose ${flags:+$flags }up" --container-name "cae-app-$ID" \
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
@@ -166,8 +169,12 @@ record() {
       FAIL=1
     fi
     for i in $(seq 1 "$N"); do
-      curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/s$i" || { echo "FAIL: $name: GET /price/s$i through the app failed"; FAIL=1; }
+      curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/s$i" || { echo "FAIL: $name: GET /price/s$i through the app failed"; FAIL=1; failed=1; }
     done
+    # The app exits only once it has answered N calls: a call that failed
+    # leaves it waiting for one more, and keploy running with it, so the
+    # lane stops keploy rather than wait on it until the job is cancelled.
+    [ "$failed" -eq 0 ] || sudo kill -INT "$pid" 2>/dev/null
   else
     echo "FAIL: $name: keploy exited before the app listened"
     FAIL=1
@@ -176,6 +183,7 @@ record() {
   wait "$pid"
   rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: $name: keploy record exited $rc"; FAIL=1; }
+  verify_ran "$proven" "$log" || FAIL=$((FAIL + 1))
   grep -q "APP ANSWERED ALL $N" "$log" || { echo "FAIL: $name: the app did not answer all $N calls"; FAIL=1; }
   [ "$FAIL" -eq "$before" ] || tail -80 "$log"
 }
@@ -205,7 +213,7 @@ saved_all() {
 ended_at_markers() {
   local log="$1.log" frames
   for frames in "test cases" mocks mappings; do
-    if ! grep "read the stream to the keploy agent's end marker" "$log" | grep -q "\"frames\": \"$frames\""; then
+    if ! grep "read the stream to the keploy agent's end marker" "$log" | grep "\"frames\": \"$frames\"" >/dev/null; then
       echo "FAIL: $1: the $frames drain did not end at the agent's marker"
       grep -n "end marker\|ended its\|recording complete" "$log"
       FAIL=1

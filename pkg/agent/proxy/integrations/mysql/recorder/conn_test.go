@@ -15,9 +15,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	connPhase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
-	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -423,91 +421,6 @@ func TestFetchServerGreetingShared_LeaderCancelDoesNotFailWaiters(t *testing.T) 
 	}
 }
 
-// The legacy post-TLS reader shares the same fetch: N pre-recording pooled
-// connections with nothing captured cost the server ONE dial, and every one of
-// them still records its command, promptly. Each used to wait out
-// handlePostTLSRecord's 5s PopWait on the (empty) port-only key first, for a
-// greeting that a connection joined mid-stream never gets.
-func TestLegacyPostTLS_ConcurrentPooledConnsDialTheServerOnce(t *testing.T) {
-	handshakeBuf := cannedHandshakeV10(t)
-	greeting, err := connPhase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
-	if err != nil {
-		t.Fatalf("decode handshake v10: %v", err)
-	}
-	srv := startFakeMySQLGreeter(t, handshakeBuf, time.Second)
-	store := models.NewTLSHandshakeStore()
-	mocks := make(chan *models.Mock, 64)
-	mgr := syncMock.New(zap.NewNop())
-	mgr.SetOutputChannel(mocks)
-
-	opts := models.OutgoingOptions{
-		DstCfg:           &models.ConditionalDstCfg{Addr: srv.addr, Port: 3306},
-		PassThroughScope: "ns/app/ts0",
-		NetNS:            testNetNS,
-	}
-
-	query := cannedCOMQuery(t, 0, "SELECT 1")
-	okResp := cannedOK(t, 1, greeting.CapabilityFlags)
-	const n = 4
-	errs := make([]error, n)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		clientConn, clientPeer := net.Pipe()
-		destConn, destPeer := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = destConn.Close()
-		})
-		// A pooled connection joined mid-stream: one command, then it idles out.
-		go func() {
-			_, _ = clientPeer.Write(query)
-			buf := make([]byte, 4096)
-			_, _ = destPeer.Read(buf) // the recorder forwards the command
-			_, _ = destPeer.Write(okResp)
-			_, _ = clientPeer.Read(buf) // and the response back
-			_ = clientPeer.Close()
-			_ = destPeer.Close()
-		}()
-		ctx := context.WithValue(postTLSCtxWithStore(store), models.ClientConnectionIDKey, fmt.Sprintf("pooled-%d", i))
-		ctx = syncMock.NewContext(ctx, mgr)
-		wg.Add(1)
-		go func(i int, ctx context.Context) {
-			defer wg.Done()
-			cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			defer cancel()
-			errs[i] = handlePostTLSRecord(cctx, zap.NewNop(), clientConn, destConn, mocks,
-				buildPostHandshakeDecodeCtx(clientConn), opts)
-		}(i, ctx)
-	}
-	start := time.Now()
-	wg.Wait()
-	// The fake server holds its greeting for 1s so the callers pile up on one
-	// dial; anything near 5s is the PopWait again.
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Fatalf("pooled connections took %v to record; they waited for a greeting that cannot come", elapsed)
-	}
-
-	for i, err := range errs {
-		if err != nil && strings.Contains(err.Error(), "direct fetch failed") {
-			t.Fatalf("connection %d could not get a greeting: %v", i, err)
-		}
-	}
-	if got := srv.accepted.Load(); got != 1 {
-		t.Fatalf("%d pooled connections dialled the server %d times, want 1", n, got)
-	}
-	close(mocks)
-	queries := 0
-	for m := range mocks {
-		if m != nil && len(m.Spec.MySQLRequests) > 0 && m.Spec.MySQLRequests[0].Header != nil &&
-			m.Spec.MySQLRequests[0].Header.Type == "COM_QUERY" {
-			queries++
-		}
-	}
-	if queries != n {
-		t.Fatalf("recorded %d COM_QUERY mocks, want %d — every connection sharing the one fetched greeting must still decode its command", queries, n)
-	}
-}
-
 // A greeting a raw leg captures while a fetch is in flight is newer evidence of
 // what the server is, and the fetch must not overwrite it. The server withholds
 // its greeting until the raw leg's write has landed, so the write is always
@@ -768,58 +681,6 @@ func TestFetchServerGreeting_DialsThroughTheConnectionsDialer(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatal("a fetch with no dialer in its context used one")
-	}
-}
-
-// The legacy raw path records the greeting it captured as the server's too, so
-// the V2 and legacy post-TLS readers learn the server from either path. And it
-// queues the capture ONCE, under its connection's identity, for that
-// connection's decrypted stream.
-func TestLegacyRawLegRemembersTheServerGreeting(t *testing.T) {
-	store := models.NewTLSHandshakeStore()
-	live := cannedHandshakeV10Variant(t, "8.0.36-live", 11)
-	opts := models.OutgoingOptions{
-		DstCfg:           &models.ConditionalDstCfg{Addr: "10.244.0.24:3306", Port: 3306},
-		PassThroughScope: "ns/app/test-set-0",
-		SkipTLSMITM:      true,
-		ConnKey:          "sk:11",
-		ConnProc:         "pid:100",
-	}
-	clientConn, clientPeer := net.Pipe()
-	destConn, destPeer := net.Pipe()
-	defer func() { _ = clientConn.Close(); _ = destConn.Close() }()
-	go func() {
-		_, _ = destPeer.Write(live)
-		buf := make([]byte, 256)
-		_, _ = clientPeer.Read(buf) // the greeting, relayed to the client
-		_, _ = clientPeer.Write(cannedSSLRequest(t, 1))
-		_, _ = destPeer.Read(buf) // the SSLRequest, relayed to the server
-	}()
-	ctx := context.WithValue(context.Background(), models.TLSHandshakeStoreKey, store)
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	res, err := handleInitialHandshake(ctx, zap.NewNop(), clientConn, destConn, &wire.DecodeContext{
-		Mode:               models.MODE_RECORD,
-		LastOp:             wire.NewLastOpMap(),
-		ServerGreetings:    wire.NewGreetings(),
-		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
-	}, opts, nil)
-	if err != nil || !res.skipConfigMock {
-		t.Fatalf("legacy raw leg: skipConfigMock=%v err=%v", res.skipConfigMock, err)
-	}
-	other := opts
-	other.PassThroughScope = "ns/other/test-set-5"
-	if g, ok := store.ServerGreeting(greetingMemoKey(other)); !ok || !bytes.Equal(g, live) {
-		t.Fatalf("server greeting after the legacy raw leg = %x (found=%v), want the captured one", g, ok)
-	}
-	// Its greeting is queued once, for its own connection's decrypted stream.
-	portKey := models.HandshakeStoreKey("", 3306)
-	e, owner, ok := store.PopWaitFor(portKey, models.HandshakeOwnerOf(opts), true, 0)
-	if !ok || owner != models.HandshakeOwnerOf(opts) || !bytes.Equal(e.RespPackets[0], live) {
-		t.Fatalf("queued entry for the connection = %v (owner %v, %v), want its greeting under its identity", e, owner, ok)
-	}
-	if extra, ok := store.PopWait(portKey, 0); ok {
-		t.Fatalf("the capture was queued twice: %v is left for another stream to take", extra)
 	}
 }
 

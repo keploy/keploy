@@ -5,19 +5,26 @@ import (
 	"context"
 	"io"
 	"net"
-	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/memconn"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
-// testDrainIdle keeps these quick; the drain's logic does not depend on
-// the size of the window, only on whether the survivor moved bytes during
-// one. The production value is pinned separately, in the util package.
-const testDrainIdle = 400 * time.Millisecond
+// memProdPair returns an in-memory connected pair where the proxy side is
+// wrapped in SafeConn just as proxy.buildRecordSession wraps real sockets.
+func memProdPair(withReader bool) (peer *memconn.Conn, proxySide net.Conn, rawProxy *memconn.Conn) {
+	peer, rawProxy = memconn.Pair()
+	if withReader {
+		return peer, proxyutil.NewSafeConnWithReader(rawProxy, rawProxy, zap.NewNop()), rawProxy
+	}
+	return peer, proxyutil.NewSafeConn(rawProxy, zap.NewNop()), rawProxy
+}
 
 // splitReadConn fails on Read while Write keeps working — what Go's
 // tls.Conn does, since it keeps c.in.err and c.out.err separate. Recording
@@ -70,76 +77,117 @@ func TestEncodeGeneric_DrainsTheSurvivorInBothDirections(t *testing.T) {
 		{"upstream read half fails, request survives", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			clientApp, srcProxy := prodPair(t, true)
-			destSvc, dstProxy := prodPair(t, false)
+			synctest.Test(t, func(t *testing.T) {
+				clientApp, srcProxy, srcRaw := memProdPair(true)
+				destSvc, dstProxy, dstRaw := memProdPair(false)
+				defer func() {
+					_ = clientApp.Close()
+					_ = destSvc.Close()
+					_ = srcRaw.Close()
+					_ = dstRaw.Close()
+				}()
 
-			clientConn, destConn := srcProxy, dstProxy
-			var sender, receiver net.Conn
-			if tc.breakDest {
-				destConn = &splitReadConn{Conn: dstProxy, readErr: io.ErrUnexpectedEOF}
-				sender, receiver = clientApp, destSvc
-			} else {
-				clientConn = &splitReadConn{Conn: srcProxy, readErr: io.ErrUnexpectedEOF}
-				sender, receiver = destSvc, clientApp
-			}
+				clientConn, destConn := srcProxy, dstProxy
+				var sender, receiver *memconn.Conn
+				if tc.breakDest {
+					destConn = &splitReadConn{Conn: dstProxy, readErr: io.ErrUnexpectedEOF}
+					sender, receiver = clientApp, destSvc
+				} else {
+					clientConn = &splitReadConn{Conn: srcProxy, readErr: io.ErrUnexpectedEOF}
+					sender, receiver = destSvc, clientApp
+				}
 
-			// Paced so the transfer is still ARRIVING when the other
-			// direction breaks, and so it outlasts a whole idle window —
-			// a wall clock truncates this, an idle timer does not.
-			const chunks, chunkSize = 12, 16 * 1024
-			gap := testDrainIdle / 3
-			payload := bytes.Repeat([]byte("G"), chunks*chunkSize)
-			go func() {
-				for i := 0; i < chunks; i++ {
-					if _, err := sender.Write(payload[i*chunkSize : (i+1)*chunkSize]); err != nil {
-						return
+				const windows, chunksPerWindow, chunkSize = 6, 2, 16 * 1024
+				payload := bytes.Repeat([]byte("G"), windows*chunksPerWindow*chunkSize)
+				got := make([]byte, len(payload))
+
+				ctx := syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop()))
+				mocks := make(chan *models.Mock, 64)
+				returned := make(chan struct{})
+				go func() {
+					_ = encodeGeneric(ctx, zap.NewNop(), nil, clientConn, destConn, mocks, models.OutgoingOptions{})
+					close(returned)
+				}()
+
+				// Wait until the broken direction has failed and WaitForSurvivor
+				// has armed its real proxyutil.RelayDrainIdle timer before the
+				// multi-window transfer begins.
+				synctest.Wait()
+				select {
+				case <-returned:
+					closeUnderlying(t, srcProxy)
+					closeUnderlying(t, dstProxy)
+					t.Fatal("encodeGeneric returned immediately on the first copy error without draining the survivor")
+				default:
+				}
+
+				step := proxyutil.RelayDrainIdle * 2 / 3
+				rem := proxyutil.RelayDrainIdle - step
+				for w := 0; w < windows; w++ {
+					// Stay silent for 2/3 of the production idle window before
+					// sending: this catches both a shortened initial window at
+					// encodeGeneric and a shortened Reset duration (e.g. idle/2).
+					time.Sleep(step)
+					synctest.Wait()
+					select {
+					case <-returned:
+						closeUnderlying(t, srcProxy)
+						closeUnderlying(t, dstProxy)
+						t.Fatalf("window %d of %d: the surviving direction was abandoned after %d of %d bytes "+
+							"before its %v idle window expired",
+							w+1, windows, w*chunksPerWindow*chunkSize, len(payload), proxyutil.RelayDrainIdle)
+					default:
 					}
-					time.Sleep(gap)
+
+					for c := 0; c < chunksPerWindow; c++ {
+						off := (w*chunksPerWindow + c) * chunkSize
+						if _, err := sender.Write(payload[off : off+chunkSize]); err != nil {
+							t.Fatalf("window %d chunk %d write: %v", w+1, c+1, err)
+						}
+						if _, err := io.ReadFull(receiver, got[off:off+chunkSize]); err != nil {
+							t.Fatalf("window %d chunk %d read: %v", w+1, c+1, err)
+						}
+					}
+					synctest.Wait()
+
+					// Advance across the idle timer tick; WaitForSurvivor must
+					// observe the delivered bytes and reset for another window.
+					time.Sleep(rem)
+					synctest.Wait()
+					select {
+					case <-returned:
+						closeUnderlying(t, srcProxy)
+						closeUnderlying(t, dstProxy)
+						t.Fatalf("window %d of %d: the surviving direction was abandoned after %d of %d bytes. "+
+							"On this path an early return, a fixed grace, or watching the dead direction's "+
+							"counter costs the user's bytes AND the mocks the tee captured from them.",
+							w+1, windows, (w+1)*chunksPerWindow*chunkSize, len(payload))
+					default:
+					}
 				}
-			}()
 
-			got := make(chan int, 1)
-			go func() {
-				buf := make([]byte, len(payload))
-				n, _ := io.ReadFull(receiver, buf)
-				got <- n
-			}()
-
-			mocks := make(chan *models.Mock, 64)
-			returned := make(chan struct{})
-			go func() {
-				_ = encodeGenericWithDrain(context.Background(), zap.NewNop(), nil,
-					clientConn, destConn, mocks, models.OutgoingOptions{}, testDrainIdle)
-				close(returned)
-			}()
-
-			select {
-			case <-returned:
-			case <-time.After(30 * time.Second):
-				t.Fatal("encodeGeneric never returned")
-			}
-			// Model the caller: handleConnection closes the real sockets the
-			// moment this returns. Without that close the test proves nothing,
-			// because the copy goroutines would keep delivering on their own.
-			//
-			// It must be the REAL socket. SafeConn.Close is a no-op — that is
-			// the whole reason keploy cannot wake a stranded io.Copy — so
-			// closing the wrapper here would model nothing and quietly turn
-			// this into a test that passes against a truncating build.
-			closeUnderlying(t, srcProxy)
-			closeUnderlying(t, dstProxy)
-
-			select {
-			case n := <-got:
-				if n < len(payload) {
-					t.Fatalf("the surviving direction delivered %d of %d bytes over %v. On this "+
-						"path an early return or a fixed grace costs the user's bytes AND the "+
-						"mocks the tee captured from them.",
-						n, len(payload), time.Duration(chunks)*gap)
+				if !bytes.Equal(got, payload) {
+					t.Fatal("surviving direction delivered corrupted bytes")
 				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("reader never completed")
-			}
+
+				// Go silent without closing: the drain must stall after one
+				// full RelayDrainIdle window with no new bytes.
+				silenceStart := time.Now()
+				select {
+				case <-returned:
+				case <-time.After(2 * proxyutil.RelayDrainIdle):
+					t.Fatal("drain kept resetting after the surviving direction went silent")
+				}
+				if wait := time.Since(silenceStart); wait != proxyutil.RelayDrainIdle {
+					t.Fatalf("drain stalled after %v of silence, want %v", wait, proxyutil.RelayDrainIdle)
+				}
+
+				// Model the caller: handleConnection closes the real sockets the
+				// moment this returns.
+				closeUnderlying(t, srcProxy)
+				closeUnderlying(t, dstProxy)
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -151,8 +199,7 @@ func TestEncodeGeneric_DrainsTheSurvivorInBothDirections(t *testing.T) {
 // still works.
 func TestCaptureTeeWriterCountsWhatItDelivered(t *testing.T) {
 	var sink bytes.Buffer
-	ch := make(chan []byte, 8)
-	tee := &captureTeeWriter{dest: &sink, ch: ch, closeOnce: &sync.Once{}}
+	tee := &captureTeeWriter{dest: &sink, stream: newCaptureStream(8, 1), fromClient: true}
 
 	if got := tee.delivered(); got != 0 {
 		t.Fatalf("a fresh tee reports %d bytes delivered, want 0", got)
@@ -186,109 +233,155 @@ func closeUnderlying(t *testing.T, c net.Conn) {
 	_ = sc.Unwrap().Close()
 }
 
-// TestEncodeGeneric_ProductionEntryPointDrainsTheSurvivor drives
-// encodeGeneric itself, on the production window, through the survivor
-// path.
+// TestEncodeGeneric_ProductionEntryPointDrainsTheSurvivor drives encodeGeneric
+// over multi-second chunk gaps followed by a clean survivor FIN.
 //
-// The tests above call encodeGenericWithDrain so they can run at 400ms,
-// which means the one line that wires proxyutil.RelayDrainIdle into the
-// drain is executed but never checked. Passing a window too small to cover
-// a real transfer abandons the survivor immediately — the original bug —
-// and nothing else here would notice.
+// Each gap is proxyutil.RelayDrainIdle/2 (15s), which catches an encodeGeneric
+// call site that wires a sub-second window instead of RelayDrainIdle, and the
+// ending CloseWrite verifies that a survivor finishing cleanly returns
+// immediately without sitting out a trailing idle window.
 func TestEncodeGeneric_ProductionEntryPointDrainsTheSurvivor(t *testing.T) {
-	clientApp, srcProxy := prodPair(t, true)
-	destSvc, dstProxy := prodPair(t, false)
+	synctest.Test(t, func(t *testing.T) {
+		clientApp, srcProxy, srcRaw := memProdPair(true)
+		destSvc, dstProxy, dstRaw := memProdPair(false)
+		defer func() {
+			_ = clientApp.Close()
+			_ = destSvc.Close()
+			_ = srcRaw.Close()
+			_ = dstRaw.Close()
+		}()
 
-	broken := &splitReadConn{Conn: srcProxy, readErr: io.ErrUnexpectedEOF}
+		broken := &splitReadConn{Conn: srcProxy, readErr: io.ErrUnexpectedEOF}
 
-	const chunks, chunkSize = 10, 16 * 1024
-	payload := bytes.Repeat([]byte("E"), chunks*chunkSize)
-	go func() {
+		ctx := syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop()))
+		mocks := make(chan *models.Mock, 64)
+		returned := make(chan struct{})
+		start := time.Now()
+		go func() {
+			_ = encodeGeneric(ctx, zap.NewNop(), nil, broken, dstProxy, mocks, models.OutgoingOptions{})
+			close(returned)
+		}()
+
+		synctest.Wait()
+		select {
+		case <-returned:
+			closeUnderlying(t, srcProxy)
+			closeUnderlying(t, dstProxy)
+			t.Fatal("encodeGeneric returned immediately without draining the survivor")
+		default:
+		}
+
+		const chunks, chunkSize = 10, 16 * 1024
+		gap := proxyutil.RelayDrainIdle / 2
+		payload := bytes.Repeat([]byte("E"), chunks*chunkSize)
+		got := make([]byte, len(payload))
 		for i := 0; i < chunks; i++ {
-			if _, err := destSvc.Write(payload[i*chunkSize : (i+1)*chunkSize]); err != nil {
-				return
+			time.Sleep(gap)
+			synctest.Wait()
+			select {
+			case <-returned:
+				closeUnderlying(t, srcProxy)
+				closeUnderlying(t, dstProxy)
+				t.Fatalf("the surviving direction delivered %d of %d bytes through encodeGeneric "+
+					"after %v. The drain is only as good as the window wired in at that call site (%v).",
+					i*chunkSize, len(payload), time.Since(start), proxyutil.RelayDrainIdle)
+			default:
 			}
-			time.Sleep(20 * time.Millisecond)
+			off := i * chunkSize
+			if _, err := destSvc.Write(payload[off : off+chunkSize]); err != nil {
+				t.Fatalf("chunk %d write: %v", i+1, err)
+			}
+			if _, err := io.ReadFull(clientApp, got[off:off+chunkSize]); err != nil {
+				t.Fatalf("chunk %d read: %v", i+1, err)
+			}
+			synctest.Wait()
 		}
-		// Ends the survivor's copy so this returns without sitting out the
-		// production idle window.
-		if tc, ok := destSvc.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if !bytes.Equal(got, payload) {
+			t.Fatal("surviving direction delivered corrupted bytes")
 		}
-	}()
 
-	got := make(chan int, 1)
-	go func() {
-		buf := make([]byte, len(payload))
-		n, _ := io.ReadFull(clientApp, buf)
-		got <- n
-	}()
-
-	mocks := make(chan *models.Mock, 64)
-	returned := make(chan struct{})
-	go func() {
-		_ = encodeGeneric(context.Background(), zap.NewNop(), nil, broken, dstProxy,
-			mocks, models.OutgoingOptions{})
-		close(returned)
-	}()
-	select {
-	case <-returned:
-	case <-time.After(60 * time.Second):
-		t.Fatal("encodeGeneric never returned")
-	}
-	closeUnderlying(t, srcProxy)
-	closeUnderlying(t, dstProxy)
-
-	select {
-	case n := <-got:
-		if n < len(payload) {
-			t.Fatalf("the surviving direction delivered %d of %d bytes through encodeGeneric "+
-				"on the production window. The drain is only as good as the window wired in "+
-				"at that call site.", n, len(payload))
+		// Ends the survivor's copy so encodeGeneric must return immediately
+		// without sitting out the production idle window.
+		finAt := time.Now()
+		if err := destSvc.CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite: %v", err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("reader never completed")
-	}
+		select {
+		case <-returned:
+		case <-time.After(2 * proxyutil.RelayDrainIdle):
+			t.Fatal("encodeGeneric never returned after survivor half-closed")
+		}
+		if waitAfterFIN := time.Since(finAt); waitAfterFIN != 0 {
+			t.Fatalf("encodeGeneric waited %v after survivor FIN, want 0", waitAfterFIN)
+		}
+
+		closeUnderlying(t, srcProxy)
+		closeUnderlying(t, dstProxy)
+		synctest.Wait()
+	})
 }
 
 // TestEncodeGeneric_CleanThenResetReturnsPromptly guards generic's copy of
 // the early return: when both copy results are already in hand there is
 // nothing to drain, and waiting anyway costs a full idle window — 30s in
 // production — on the case the code itself calls "very common".
+//
+// Running inside testing/synctest guarantees the first clean outcome is
+// consumed before the peer resets and asserts exact zero fake elapsed time on
+// return, catching both a missing early return and any fixed sleep on that
+// branch without wall-clock flakiness.
 func TestEncodeGeneric_CleanThenResetReturnsPromptly(t *testing.T) {
-	clientApp, srcProxy := prodPair(t, true)
-	destSvc, dstProxy := prodPair(t, false)
+	synctest.Test(t, func(t *testing.T) {
+		clientApp, srcProxy, srcRaw := memProdPair(true)
+		destSvc, dstProxy, dstRaw := memProdPair(false)
+		defer func() {
+			_ = clientApp.Close()
+			_ = destSvc.Close()
+			_ = srcRaw.Close()
+			_ = dstRaw.Close()
+		}()
 
-	go func() {
-		_, _ = clientApp.Write([]byte("hello"))
-		if tc, ok := clientApp.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-	}()
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		if tc, ok := destSvc.(*net.TCPConn); ok {
-			_ = tc.SetLinger(0)
-		}
-		_ = destSvc.Close()
-	}()
+		ctx := syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop()))
+		mocks := make(chan *models.Mock, 64)
+		returned := make(chan struct{})
+		go func() {
+			_ = encodeGeneric(ctx, zap.NewNop(), nil, srcProxy, dstProxy, mocks, models.OutgoingOptions{})
+			close(returned)
+		}()
 
-	mocks := make(chan *models.Mock, 64)
-	start := time.Now()
-	returned := make(chan struct{})
-	go func() {
-		_ = encodeGenericWithDrain(context.Background(), zap.NewNop(), nil, srcProxy, dstProxy,
-			mocks, models.OutgoingOptions{}, testDrainIdle)
-		close(returned)
-	}()
-	select {
-	case <-returned:
-	case <-time.After(10 * time.Second):
-		t.Fatal("encodeGenericWithDrain never returned")
-	}
-	if elapsed := time.Since(start); elapsed > testDrainIdle*3/4 {
-		t.Fatalf("returned after %v, most of one %v window, with both copy results already "+
-			"available. In production that dead time is %v per clean-then-reset connection.",
-			elapsed, testDrainIdle, proxyutil.RelayDrainIdle)
-	}
+		if _, err := clientApp.Write([]byte("hello")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := clientApp.CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite: %v", err)
+		}
+		got, err := io.ReadAll(destSvc)
+		if err != nil {
+			t.Fatalf("ReadAll: %v", err)
+		}
+		if string(got) != "hello" {
+			t.Fatalf("dest got %q, want %q", got, "hello")
+		}
+
+		// Ensure the clean client->dest outcome has already been consumed by
+		// encodeGeneric (i == 0) before the destination resets, so the reset
+		// is guaranteed to land on i == 1.
+		synctest.Wait()
+
+		start := time.Now()
+		destSvc.Reset()
+
+		select {
+		case <-returned:
+		case <-time.After(2 * proxyutil.RelayDrainIdle):
+			t.Fatal("encodeGeneric did not return after clean EOF followed by reset")
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("encodeGeneric waited %v after both copy results were in hand, want 0", elapsed)
+		}
+
+		closeUnderlying(t, srcProxy)
+		closeUnderlying(t, dstProxy)
+		synctest.Wait()
+	})
 }

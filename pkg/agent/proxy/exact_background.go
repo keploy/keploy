@@ -19,9 +19,10 @@ import (
 // four ways, and only for such a set:
 //
 //   - In a test, the view shows the pool's data-plane recordings too, after
-//     the open test's own and the worker scope (exactView.shows, keep). One a
-//     parser consumes through a delete door is spent for the staging, as one
-//     consumed outside every test is.
+//     the open test's own and the worker scope (exactView.shows, keep). One
+//     of them, unless an async lane's, is spent for the staging through
+//     whichever door a parser consumes it (exactConsumeIn), in a test or
+//     between tests.
 //   - The worker scope the view shows is ordered by its places: the earlier
 //     place first, and within one place a delivering answer before an idle
 //     one, in recorded order (ServeExactWorker's order, which the agent
@@ -151,19 +152,42 @@ func (m *MockManager) SetLearnEnded(ended bool) {
 	}
 }
 
+// SetLearnHeld holds the learn step, or releases it: while it is held the
+// session pairs nothing (pairing), and the learn tracker's classification
+// refuses every changed value (learn.Tracker.SetLearnHeld, which the proxy
+// sets beside it), but nothing else changes: it has not ended (LearnEnded),
+// so every parser's learn step still decides the requests, serves what is
+// exactly a recording as it is, and states what it served, as for any test,
+// and releasing it takes the learn step back up as it was. The agent holds
+// it while a test of record's full round whose recording the round does not
+// learn onto is open (a test that keeps an earlier record's recording):
+// what its calls differ in would otherwise be learned in memory onto a
+// recording that keeps none of it, so the round would judge it on learning
+// no later replay has. A session's start releases it.
+func (m *MockManager) SetLearnHeld(held bool) {
+	m.exact.learnHeld.Store(held)
+}
+
+// LearnHeld reports whether the learn step is held (SetLearnHeld).
+func (m *MockManager) LearnHeld() bool {
+	return m.exact.learnHeld.Load()
+}
+
 // LearnEnded implements integrations.LearnEnder: the set's learn step has
-// ended (SetLearnEnded).
+// ended (SetLearnEnded). A held one (SetLearnHeld) has not.
 func (m *MockManager) LearnEnded() bool {
 	return m.exact.learnEnded.Load()
 }
 
 var _ integrations.LearnEnder = (*MockManager)(nil)
 
-// SetRecordedOfKind sets where the pairing reads the staged set's recordings
-// of a kind the trees do not hold (the agent's on-disk store of per-test
-// mocks: DiskMocks.RangeKind, which decodes one only as visit loads it); nil
-// for none, when every one is in the trees. The agent sets it as it stages a
-// set.
+// SetRecordedOfKind sets where the pairing, and HasUnservedRecording, read
+// the staged set's recordings of a kind the trees do not hold (the agent's
+// on-disk store of per-test mocks: DiskMocks.RangeKind, which decodes one
+// only as visit loads it); nil for none, when every one is in the trees. The
+// agent sets it at every staging, under either switch, before the staging,
+// which installs it as the source of the set as recorded (RangeRecordedSet)
+// with its trees.
 func (m *MockManager) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) {
 	m.exact.ofKind.mu.Lock()
 	defer m.exact.ofKind.mu.Unlock()
@@ -171,10 +195,25 @@ func (m *MockManager) SetRecordedOfKind(src func(kind models.Kind, visit func(na
 }
 
 // recordedOfKindSource is where the pairing reads recordings of a kind the
-// trees do not hold (SetRecordedOfKind).
+// trees do not hold (SetRecordedOfKind): src as the agent handed it, and
+// staged as the last staging installed it (installRecordedOfKindLocked).
+// mu is a leaf, taken under swapMu by the staging and by RangeRecordedSet.
 type recordedOfKindSource struct {
-	mu  sync.Mutex
-	src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	mu     sync.Mutex
+	src    func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	staged func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+}
+
+// installRecordedOfKindLocked makes the source the agent handed last
+// (SetRecordedOfKind) the staging's, holding swapMu, which the staging holds
+// as it changes the trees and moves the staging epoch: a reader of the set
+// as recorded that takes swapMu (RangeRecordedSet) reads one staging's trees
+// and source, never one set's trees with the next set's source, which the
+// agent hands before it stages that set.
+func (m *MockManager) installRecordedOfKindLocked() {
+	m.exact.ofKind.mu.Lock()
+	m.exact.ofKind.staged = m.exact.ofKind.src
+	m.exact.ofKind.mu.Unlock()
 }
 
 // stagedOfKind is the staged trees' recordings of kind (per-test, session,
@@ -315,7 +354,7 @@ func (m *MockManager) spendByKindAt(mk *models.Mock, g *roundGuard) (spent bool,
 			}
 			return false, wait
 		}
-		ok, wait := m.spendByKindIn(v, mk)
+		ok, wait := m.spendByKindIn(v, mk, g)
 		m.exact.round.mu.Unlock()
 		if ok {
 			why = ""
@@ -328,9 +367,15 @@ func (m *MockManager) spendByKindAt(mk *models.Mock, g *roundGuard) (spent bool,
 
 // spendByKindIn is SpendByKind settled against v, holding the round lock.
 // wait, when not nil, says v is closed: nothing was spent, and the spend is
-// to be settled again once wait is closed.
-func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock) (bool, <-chan struct{}) {
-	if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) || v.spentBackground(mk.Name) {
+// to be settled again once wait is closed. A worker-scope recording is read
+// and spent for the view g's call was read in (roundGuard.windowed), as
+// exactConsumeIn does.
+func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock, g *roundGuard) (bool, <-chan struct{}) {
+	if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) {
+		return false, nil
+	}
+	windowed := g.windowed(v)
+	if v.spentIn(mk.Name) || v.spentOutsideIn(mk.Name, windowed) {
 		return false, nil
 	}
 	// The view's closed check and the spend are one step, as exactConsume's.
@@ -339,7 +384,19 @@ func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock) (bool, <-chan
 		v.mu.Unlock()
 		return false, wait
 	}
-	verdict := m.consumeOutside(mk)
+	if v.spendsBetween(mk, windowed) {
+		// Outside every window one of the worker scope's answers again
+		// (consumeBetween): it is listed spent for the next by-kind answer
+		// between tests (spentBackground), which reuses it once its kind's
+		// unused ones are used up, and the other doors still read it.
+		verdict, first := m.consumeBetween(mk)
+		v.mu.Unlock()
+		if first {
+			m.bumpGapOrder(mk.Kind)
+		}
+		return verdict == exactServed, nil
+	}
+	verdict := m.consumeOutside(mk, v.spendsInTests(mk, windowed))
 	v.mu.Unlock()
 	if verdict != exactServed {
 		return false, nil
@@ -353,7 +410,15 @@ var _ integrations.ByKindBackground = (*MockManager)(nil)
 // spentBackground reports whether name, one of the background's recordings,
 // is spent: consumed in the view, or for the staging.
 func (v *exactView) spentBackground(name string) bool {
-	return v.spentIn(name) || v.spentOutside(name)
+	return v.spentIn(name) || v.spentOutside(name) || v.usedBetween(name)
+}
+
+// usedBetween reports whether name, one of the worker scope's, answered a
+// call read with no test open in the staging, read in a view with no test
+// open (outsideState.between): it is no spend, and orders the gap's reads
+// alone.
+func (v *exactView) usedBetween(name string) bool {
+	return v.test == "" && v.outside != nil && v.isWorker(name) && v.outside.consumedBetween(name, v.epoch.Load())
 }
 
 // BackgroundCursor is, under the background rules, the stateful cursor of
@@ -372,8 +437,28 @@ func (m *MockManager) BackgroundCursor() (integrations.MockCursor, bool) {
 	return backgroundCursor{m: m}, true
 }
 
-// backgroundCursor is the background's stateful cursor (BackgroundCursor),
-// and, in a test under any rules, the worker scope's (SequenceView.Between):
+// InBackground implements integrations.BackgroundMember: name is one of the
+// background's recordings, and the view in force holds it as no test's own
+// (one judging moved into a test is that test's, as hidesName reads it): the
+// pool's or the worker scope's of a set the view serves by the background
+// rules, or, in a test under any rules, one of the worker scope the run
+// reached (isWorker). False with exact serving off.
+func (m *MockManager) InBackground(name string) bool {
+	v := m.exactView()
+	if v == nil {
+		return false
+	}
+	// Neither the background's nor, in a test, the reached worker scope's.
+	if !v.bg.has(name) && (v.test == "" || !v.isWorker(name)) {
+		return false
+	}
+	_, own := v.index[name]
+	return !own
+}
+
+var _ integrations.BackgroundMember = (*MockManager)(nil)
+
+// backgroundCursor is the background's stateful cursor (BackgroundCursor):
 // the one the calls between tests advance.
 type backgroundCursor struct{ m *MockManager }
 
@@ -397,19 +482,42 @@ func (m *MockManager) backgroundCursorKey(key string) string {
 
 var _ integrations.BackgroundCursor = (*MockManager)(nil)
 
+// windowsCursor is, in a test under any rules, the worker scope's stateful
+// cursor (SequenceView.Between): one sequence across the test windows of the
+// staging, kept apart from the one the calls between tests advance
+// (backgroundCursor), so no gap call walks or saturates what a window reads.
+// It is under the key of the pool view installed last, as the calls between
+// tests are, so a test process claimed again (RestartExactKey) starts it
+// over and two keys' windows never share a sequence.
+type windowsCursor struct{ m *MockManager }
+
+// windowsCursorTag sets the windows' cursors apart from the calls between
+// tests' under one pool key; no request key begins with a NUL.
+const windowsCursorTag = "\x00windows\x00"
+
+func (c windowsCursor) MockCursorIndex(key string, n int) int {
+	return c.m.cursorIndexAt(cursorSlot{key: c.m.backgroundCursorKey(windowsCursorTag + key)}, n)
+}
+
+func (c windowsCursor) AdvanceMockCursor(key string, servedIdx, n int) {
+	c.m.advanceCursorAt(cursorSlot{key: c.m.backgroundCursorKey(windowsCursorTag + key)}, servedIdx, n)
+}
+
 // learns reports whether the running set's learn step is on: the session is
 // record's full round (SetPairing) and the set's learn step has not ended
-// (SetLearnEnded).
+// (SetLearnEnded). A held one (SetLearnHeld) is on: it still reads the set's
+// recordings to serve what is exactly one, so the staging's read of them
+// (warmLearnSet) stands while it is held.
 func (m *MockManager) learns() bool {
 	return m.exact.pairs.Load() && !m.exact.learnEnded.Load()
 }
 
 // pairing is the view to pair in, and the staging's epoch: a view of a set
 // served by the background rules, its background named (not settling), while
-// the session pairs and the set's learn step has not ended (SetLearnEnded);
-// nil when none is.
+// the session pairs and the set's learn step has not ended (SetLearnEnded)
+// and is not held (SetLearnHeld); nil when none is.
 func (m *MockManager) pairing() (*exactView, uint64) {
-	if !m.exact.pairs.Load() || m.exact.learnEnded.Load() {
+	if !m.exact.pairs.Load() || m.exact.learnEnded.Load() || m.exact.learnHeld.Load() {
 		return nil, 0
 	}
 	v := m.exactView()
@@ -464,17 +572,67 @@ func (m *MockManager) PairingCandidates(kind models.Kind) []*models.Mock {
 	if v == nil {
 		return nil
 	}
+	return m.pairableOfKind(v, epoch, kind)
+}
+
+// pairableOfKind is kind's recordings a pairing may take in v (pairable), in
+// recorded order: those the trees hold, then those the agent keeps on disk
+// (SetRecordedOfKind), each once.
+func (m *MockManager) pairableOfKind(v *exactView, epoch uint64, kind models.Kind) []*models.Mock {
+	m.exact.ofKind.mu.Lock()
+	src := m.exact.ofKind.src
+	m.exact.ofKind.mu.Unlock()
+	return m.pairableFrom(v, epoch, kind, m.stagedOfKind(kind), src)
+}
+
+// pairableUnderKeys is pairableOfKind of the recordings filed under any of
+// keys (models.RequestKeys) alone: the trees' by their index
+// (TreeDb.keyedValues), and those the agent keeps on disk by its store's
+// (SetRecordingSource), so a recording filed under none is never decoded.
+func (m *MockManager) pairableUnderKeys(v *exactView, epoch uint64, kind models.Kind, keys []string) []*models.Mock {
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	seen := map[string]bool{}
+	var staged []*models.Mock
+	for _, t := range trees {
+		if t == nil {
+			continue
+		}
+		for _, mk := range t.keyedValues(requestKeyIndex, keys, kind) {
+			if mk.Name == "" || seen[mk.Name] {
+				continue
+			}
+			seen[mk.Name] = true
+			staged = append(staged, mk)
+		}
+	}
+	m.exact.recorded.mu.Lock()
+	src := m.exact.recorded.src
+	m.exact.recorded.mu.Unlock()
+	var ofKind func(models.Kind, func(string, func() (*models.Mock, error)) bool) error
+	if src != nil {
+		ofKind = func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
+			return src(kind, keys, visit)
+		}
+	}
+	return m.pairableFrom(v, epoch, kind, staged, ofKind)
+}
+
+// pairableFrom is, of staged (the trees' recordings of kind) and of what src
+// visits (those the agent keeps on disk), the recordings a pairing may take
+// in v (pairable), in recorded order, each once: one on disk is decoded only
+// once its name passed (pairableName).
+func (m *MockManager) pairableFrom(v *exactView, epoch uint64, kind models.Kind, staged []*models.Mock,
+	src func(models.Kind, func(string, func() (*models.Mock, error)) bool) error) []*models.Mock {
 	seen := map[string]bool{}
 	var out []*models.Mock
-	for _, mk := range m.stagedOfKind(kind) {
+	for _, mk := range staged {
 		seen[mk.Name] = true
 		if m.pairable(v, epoch, mk) {
 			out = append(out, mk)
 		}
 	}
-	m.exact.ofKind.mu.Lock()
-	src := m.exact.ofKind.src
-	m.exact.ofKind.mu.Unlock()
 	if src != nil {
 		err := src(kind, func(name string, load func() (*models.Mock, error)) bool {
 			if seen[name] {

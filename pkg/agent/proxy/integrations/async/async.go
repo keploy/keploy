@@ -3,7 +3,11 @@
 // injects the shared Engine into opted-in parsers via AsyncAware.
 package async
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"context"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // AsyncParser is the capability interface a protocol parser implements to
 // participate in async egress. The engine holds only *models.Mock and
@@ -16,8 +20,10 @@ type AsyncParser interface {
 
 	// MatchRequestShape compares a live request against a recorded async
 	// mock's request, treating lane.VolatileParams as noise. ok=false with a
-	// human-readable detail on drift.
-	MatchRequestShape(live, recorded *models.Mock, lane models.AsyncLane) (ok bool, detail string)
+	// human-readable detail on drift. ctx is the live request's (its
+	// connection's): a detail that names the request by a path tag makes it
+	// under the session ctx carries.
+	MatchRequestShape(ctx context.Context, live, recorded *models.Mock, lane models.AsyncLane) (ok bool, detail string)
 
 	// EmptyResponse returns the parser's "no data yet" keep-alive payload for
 	// the lane, served when no async mock is armed. Always synthesizable.

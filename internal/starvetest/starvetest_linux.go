@@ -62,6 +62,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,8 +96,36 @@ func TakesACPU(t *testing.T) {
 // at the test's cleanup), after which they run again. It skips the test where
 // the host is not one for it (TakesACPU), or the scheduler will not hold them
 // (no CPU to pin to, or the calls refused, as a sandbox may). Its hogs die
-// with this process, however it ends (see above).
+// with this process, however it ends (see above). It starts its hogs before
+// it holds pids, which run free meanwhile: a test whose process a stop judges
+// from its start holds the process that will start it (StartHold,
+// Holding.Take), and takes it once it is known (Holding.TakeChild), held
+// from its start.
 func Hold(t *testing.T, pids ...int) (release func()) {
+	t.Helper()
+	h := StartHold(t)
+	h.Take(t, pids...)
+	return h.Release
+}
+
+// Holding is a hold whose hogs hold its CPU: processes it takes are held off
+// the CPU once their threads are moved there, with no hog to start first.
+// A process a held one starts is held from its start (it takes its CPUs and
+// policy from the thread that starts it), before the test can know it: a
+// stop judges a child an app starts as it stops from that child's start, so
+// one the test held only once it read its pid ran free until then, and was
+// killed for a stall where that took longer than the stall bound.
+type Holding struct {
+	mu      sync.Mutex
+	cpu     unix.CPUSet
+	endHogs func()
+	held    []*heldProcess
+}
+
+// StartHold starts a hold, its hogs running, to take processes with
+// (Holding.Take) until it is released (Holding.Release; also run at the
+// test's cleanup). It skips the test as Hold does.
+func StartHold(t *testing.T) *Holding {
 	t.Helper()
 	TakesACPU(t)
 	if _, ok := Ran(os.Getpid()); !ok {
@@ -115,24 +144,10 @@ func Hold(t *testing.T, pids ...int) (release func()) {
 	if cpu < 0 {
 		t.Skip("this process may run on no CPU")
 	}
-	var one unix.CPUSet
-	one.Set(cpu)
-
-	var mu sync.Mutex
-	endHogs := func() {}
-	var held []*heldProcess
-	stop := func() {
-		mu.Lock()
-		defer mu.Unlock()
-		endHogs()
-		endHogs = func() {}
-		for _, p := range held {
-			p.let()
-		}
-		held = nil
-	}
-	t.Cleanup(stop)
-	end, err := startHogs(hogs, &one)
+	h := &Holding{endHogs: func() {}}
+	h.cpu.Set(cpu)
+	t.Cleanup(h.Release)
+	end, err := startHogs(hogs, &h.cpu)
 	if err != nil {
 		var refused pinRefused
 		if errors.As(err, &refused) {
@@ -140,17 +155,109 @@ func Hold(t *testing.T, pids ...int) (release func()) {
 		}
 		t.Fatal(err)
 	}
-	mu.Lock()
-	endHogs = end
-	mu.Unlock()
+	h.mu.Lock()
+	h.endHogs = end
+	h.mu.Unlock()
+	return h
+}
+
+// Take holds processes pids off the CPU, on the hold's, until it is
+// released.
+func (h *Holding) Take(t *testing.T, pids ...int) {
+	t.Helper()
 	for _, pid := range pids {
-		p := holdProcess(t, pid, &one)
-		mu.Lock()
-		held = append(held, p)
-		mu.Unlock()
+		p := holdProcess(t, pid, &h.cpu)
+		h.mu.Lock()
+		h.held = append(h.held, p)
+		h.mu.Unlock()
 	}
-	var once sync.Once
-	return func() { once.Do(stop) }
+}
+
+// TakeChild takes process pid, which held process parent started while the
+// hold held it: the thread that starts a process gives it its CPUs and
+// policy, so it was held from its start, before its pid could be read. That
+// is how a test holds a process a stop judges from its start: the stop
+// judges a process held from its start for no time it ran free, however
+// late its pid is read. It fails the test where parent is not held here, or
+// where pid is not held as it was started (its thread a CPU, or a policy,
+// other than the hold's). Let go, it runs as parent's first thread did
+// before the hold.
+func (h *Holding) TakeChild(t *testing.T, pid, parent int) {
+	t.Helper()
+	h.mu.Lock()
+	var from *heldProcess
+	for _, p := range h.held {
+		if p.pid == parent {
+			from = p
+		}
+	}
+	h.mu.Unlock()
+	if from == nil {
+		t.Fatalf("process %d is not held here: its child %d was not started held", parent, pid)
+	}
+	tasks, err := os.ReadDir("/proc/" + strconv.Itoa(pid) + "/task")
+	if err != nil {
+		t.Fatalf("read the threads of process %d: %v", pid, err)
+	}
+	for _, task := range tasks {
+		tid, err := strconv.Atoi(task.Name())
+		if err != nil {
+			continue
+		}
+		var cpus unix.CPUSet
+		if err := unix.SchedGetaffinity(tid, &cpus); err != nil {
+			continue // exited meanwhile
+		}
+		attr, err := unix.SchedGetAttr(tid, 0)
+		if err != nil {
+			continue // exited meanwhile
+		}
+		if cpus != h.cpu || attr.Policy != unix.SCHED_IDLE {
+			t.Fatalf("thread %d of process %d, started by held process %d, is not held (CPUs %v, policy %d): it ran free from its start", tid, pid, parent, cpuList(cpus), attr.Policy)
+		}
+	}
+	p := holdProcess(t, pid, &h.cpu)
+	p.before, p.first = nil, from.first
+	h.mu.Lock()
+	h.held = append(h.held, p)
+	h.mu.Unlock()
+}
+
+// cpuList is the CPUs of set, by number.
+func cpuList(set unix.CPUSet) []int {
+	var cpus []int
+	for cpu := range len(set) * 64 {
+		if set.IsSet(cpu) {
+			cpus = append(cpus, cpu)
+		}
+	}
+	return cpus
+}
+
+// Let lets process pid go, as Release does, while the hold holds the rest.
+func (h *Holding) Let(pid int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.held = slices.DeleteFunc(h.held, func(p *heldProcess) bool {
+		if p.pid != pid {
+			return false
+		}
+		p.let()
+		return true
+	})
+}
+
+// Release ends the hold: its hogs end, and the processes it held run again
+// as they did before (idempotent).
+func (h *Holding) Release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.endHogs()
+	h.endHogs = func() {}
+	for _, p := range h.held {
+		p.let()
+	}
+	h.held = nil
 }
 
 // pinRefused is a hog the kernel would not pin to the hold's CPU.

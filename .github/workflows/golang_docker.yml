@@ -153,6 +153,74 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # A keploy agent records and replays an application on a single-stack IPv6
+  # Kubernetes cluster (kind, ipFamily ipv6), as the application Pod's native
+  # sidecar (`agent --is-docker`, the image's entrypoint). The agent looked
+  # only for an IPv4 address of its container to have the kernel send the
+  # application's connections to, found none in an IPv6-only Pod, and exited
+  # at start: nothing was recorded or replayed there. A driver Pod plays
+  # keploy's client over the agent's API at the Pod's IPv6 address: it records
+  # the application's test cases and its call to a dependency, deletes the
+  # dependency, and replays them against a replaying agent. Once with the
+  # proven switch unset and once with it on (KEPLOY_PROVEN=1, the agents'
+  # exact view in verify mode): the proven model tracks every connection
+  # between the application and the agent's proxy, and here each one is
+  # native IPv6. Only the PR's image: the published one is what this guards
+  # against.
+  agent_ipv6_only_kind:
+    # A healthy run takes a few minutes, most of it the cluster's start.
+    timeout-minutes: 30
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        proven: ['', '1']
+    name: agent on an IPv6-only kind cluster (image_build${{ matrix.proven == '1' && ', KEPLOY_PROVEN' || '' }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - name: Install kind and kubectl
+        uses: helm/kind-action@v1.12.0
+        with:
+          install_only: true
+          version: v0.27.0
+          kubectl_version: v1.32.2
+
+      # The agent image is download-image's ghcr.io/keploy/keploy:v3-dev,
+      # run.sh's default. The proven switch is named on run.sh's command, not
+      # in env: (sudo_env.tests.sh): unset off the switch, 1 under it.
+      - name: Record and replay on an IPv6-only cluster
+        env:
+          PROVEN: ${{ matrix.proven }}
+          KEPLOY_EXACT_VIEW_VERIFY: '1'
+          ARTIFACTS: ${{ runner.temp }}/ipv6-only-kind
+        run: |
+          if [ "$PROVEN" = 1 ]; then
+            KEPLOY_PROVEN=1 bash tests/e2e/ipv6-only-kind/run.sh
+          else
+            env -u KEPLOY_PROVEN bash tests/e2e/ipv6-only-kind/run.sh
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-ipv6-only-kind-logs${{ matrix.proven == '1' && '-proven' || '' }}
+          path: ${{ runner.temp }}/ipv6-only-kind/
+          if-no-files-found: warn
+          retention-days: 7
+
   # keploy record --disable-tele looks no telemetry host up in Docker: the
   # agent container, a keploy process of its own that pings telemetry at its
   # start, never got the CLI's --disable-tele (its alias was built from a
@@ -210,6 +278,52 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/docker_dns/docker-dns-linux.sh"
+
+  # Two `keploy record -c "docker run ..."` runs at once on one Docker host
+  # each keep their own CA. Every run's agent wrote its CA to one volume,
+  # keploy-tls-certs, so the second run's CA replaced the first's while the
+  # first ran, and the first run's app then refused its own agent's
+  # certificates: its HTTPS calls failed and went unrecorded. Each run now has
+  # its own volume, removed once its agent's container is gone; a run's start
+  # removes those earlier runs left, and keeps a compose project's and an
+  # older keploy's. Ordered by events (A calls, B calls, A calls again). Only
+  # the PR's binary and image: the published ones are what this guards
+  # against.
+  two_runs_docker:
+    # A healthy run takes about a minute; this bounds a hung step.
+    timeout-minutes: 20
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    name: two docker runs on one host (record_build, image_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run two docker run recordings at once
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          LANE_WORK: ${{ runner.temp }}/two-runs-docker
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/docker-run-two-runs-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-runs-docker-logs
+          path: ${{ runner.temp }}/two-runs-docker/
+          if-no-files-found: warn
+          retention-days: 7
 
   # Replay network isolation. A probe app tries every way out of a replay
   # (TCP, a port-only bypass port, a double-forked child, TCP fast open, an

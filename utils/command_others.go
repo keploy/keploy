@@ -50,14 +50,16 @@ func CommandContext(ctx context.Context, cmdStr string) (*exec.Cmd, error) {
 	}
 
 	if i := strings.IndexAny(cmdStr, shellOperators); i >= 0 {
+		// The command is named by its program alone (AppCommand): an error
+		// reaches the log at ERROR, and the command's arguments only DEBUG.
 		return nil, fmt.Errorf(
-			"command needs a shell to interpret %q but no /bin/sh is present in this image: %s",
-			string(cmdStr[i]), cmdStr)
+			"the %q command needs a shell to interpret %q but no /bin/sh is present in this image",
+			NewAppCommand(cmdStr).Program(), string(cmdStr[i]))
 	}
 
 	args, err := shlex.Split(cmdStr)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse command without a shell: %q: %w", cmdStr, err)
+		return nil, fmt.Errorf("could not parse the %q command without a shell: %w", NewAppCommand(cmdStr).Program(), err)
 	}
 	if len(args) == 0 {
 		return nil, fmt.Errorf("empty command")

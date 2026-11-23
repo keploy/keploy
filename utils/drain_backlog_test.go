@@ -6,6 +6,7 @@ import (
 	"net"
 	"testing"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -91,12 +92,7 @@ func TestBacklogLooks(t *testing.T) {
 	})
 	t.Run("a look the agent was gone for goes by the look before it", func(t *testing.T) {
 		// A real refused dial: its error is the platform's own.
-		ln, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := ln.Addr().String()
-		_ = ln.Close()
+		addr := testnet.RefusedAddr(t, "tcp")
 		_, refused := net.Dial("tcp4", addr)
 		if refused == nil {
 			t.Fatal("a dial to a closed port connected")

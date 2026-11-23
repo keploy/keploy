@@ -190,6 +190,7 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 		rec           *models.Mock
 		live          *req
 		header, url   []string
+		targetPattern string
 		want          bool
 		offeredOthers bool
 	}{
@@ -203,11 +204,16 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 		{name: "a target learned", rec: learned(post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), "header.x-amz-target"), live: postTo("/", "AmazonSQS.SendMessage"), want: true},
 		{name: "keploy.yml url noise", rec: onHost("rec", "/orders/123", host), live: getTo("/orders/456", host), url: []string{"[0-9]+"}, want: true, offeredOthers: true},
 		{name: "keploy.yml header noise on the target", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.SendMessage"), header: []string{"x-amz-target"}, want: true, offeredOthers: true},
+		{name: "a keploy.yml pattern on the target both match", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.SendMessage"), targetPattern: `^AmazonSQS\.`, want: true, offeredOthers: true},
+		{name: "a keploy.yml pattern on the target the call is outside", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "DynamoDB_20120810.GetItem"), targetPattern: `^AmazonSQS\.`, offeredOthers: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hn := map[string][]string{}
 			for _, h := range tc.header {
 				hn[h] = nil
+			}
+			if tc.targetPattern != "" {
+				hn["X-Amz-Target"] = []string{tc.targetPattern}
 			}
 			n := newHTTP().newStrictNoise(hn, nil, tc.url)
 			// The recordings of another path and of another method, which the

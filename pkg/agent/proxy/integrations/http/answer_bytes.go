@@ -3,7 +3,9 @@ package http
 import (
 	"net/http"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"weak"
@@ -21,7 +23,24 @@ type answerRewrite func(header http.Header, body string) (http.Header, string)
 // encodeRecordedAnswer is stub's answer as recorded: the only encoder
 // keptAnswers is given.
 func (h *HTTP) encodeRecordedAnswer(stub *models.Mock) ([]byte, error) {
-	return h.encodeAnswer(stub, nil)
+	return h.encodeAnswer(stub, nil, nil)
+}
+
+// reasonPhrase is the reason phrase resp's status line is served with: the one
+// recorded (HTTPResp.StatusMessage, set when the upstream's was not the
+// standard one, "402 Card Declined"), else the standard one for its code. A
+// message written with its code in front ("402 Card Declined", as net/http's
+// Response.Status spells it) is served without it; one that would break the
+// status line (a CR or LF in it) is not served.
+func reasonPhrase(resp *models.HTTPResp) string {
+	if resp.StatusMessage == "" {
+		return http.StatusText(resp.StatusCode) // as recorded almost always: no allocation
+	}
+	reason := strings.TrimPrefix(resp.StatusMessage, strconv.Itoa(resp.StatusCode)+" ")
+	if reason == "" || strings.ContainsAny(reason, "\r\n") {
+		return http.StatusText(resp.StatusCode)
+	}
+	return reason
 }
 
 // encodeAnswer is a recorded answer's wire bytes: the status line, the header
@@ -30,7 +49,30 @@ func (h *HTTP) encodeRecordedAnswer(stub *models.Mock) ([]byte, error) {
 // rewrite, if any. stub's response is in its Spec (withResponse). The bytes are
 // written into one buffer of their size: each header line was a fmt.Sprintf
 // and a new string holding every line before it.
-func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
+//
+// The header lines are written with their names sorted, as net/http's
+// Header.Write writes them, a name's lines in their recorded order: the same
+// answer built twice is the same bytes. Built in the header map's order, an
+// answer built again (its kept bytes gone with a collected entry, or a table
+// with no room) could be other bytes than its serves before.
+//
+// held, when not nil, frames the answer without its end, for an answer the
+// app stopped reading at record (a models.FaultStoppedReading, served by
+// serveFault, which then holds the connection until the app closes it). Its
+// recorded head is a whole answer's (buildHTTPMock), so a reader of the mock
+// that drops the fault serves it whole; held, the head frames the body as the
+// upstream did (held.ContentLength, held.Chunked) and the body goes without
+// its end: under the upstream's Content-Length, which it does not reach; as
+// one chunk with no last chunk after it; or, framed by the connection's
+// close, as it is, the close never coming. A compressed body's stream is
+// flushed, not ended. An app reads at replay the bytes it read at record and
+// waits on the rest as it did. Two framings are not the upstream's: an
+// answer older than HTTP/1.1, which has no chunks (HTTP/1.0, or a mock with
+// no proto_major, served as HTTP/0.0), goes framed by the close; and a body
+// keploy's compressor makes as long as the upstream's Content-Length or
+// longer, which that length would end, goes chunked (by the close below
+// HTTP/1.1).
+func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite, held *models.Fault) ([]byte, error) {
 	resp := stub.Spec.HTTPResp
 	protoMajor, protoMinor := 1, 1
 	method := ""
@@ -45,7 +87,11 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	}
 	respBody := body
 	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
+		compress := pkg.Compress
+		if held != nil {
+			compress = pkg.CompressWithoutEnd
+		}
+		compressed, err := compress(h.Logger, encoding[0], []byte(body))
 		if err != nil {
 			return nil, err
 		}
@@ -59,11 +105,33 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	noBody := responseHasNoBody(method, resp.StatusCode)
 	var lengthDigits [20]byte
 	length := strconv.AppendInt(lengthDigits[:0], int64(len(respBody)), 10)
-	status := http.StatusText(resp.StatusCode)
+	var chunkHead []byte
+	if held != nil {
+		header.Del("Content-Length")
+		header.Del("Transfer-Encoding")
+		noChunks := protoMajor < 1 || protoMajor == 1 && protoMinor < 1
+		switch {
+		case held.ContentLength > int64(len(respBody)):
+			length = strconv.AppendInt(lengthDigits[:0], held.ContentLength, 10)
+			header.Set("Content-Length", string(length))
+		case noChunks || held.ContentLength == 0 && !held.Chunked:
+			// Framed by the close.
+		default:
+			header.Set("Transfer-Encoding", "chunked")
+			if respBody != "" {
+				chunkHead = strconv.AppendInt(make([]byte, 0, 18), int64(len(respBody)), 16)
+				chunkHead = append(chunkHead, "\r\n"...)
+			}
+		}
+	}
+	status := reasonPhrase(resp)
 
 	// "HTTP/" major "." minor " " code " " text CRLF, each int at most 20 bytes.
-	size := len("HTTP/. \r\n ") + 3*20 + len(status) + len("\r\n") + len(respBody)
+	size := len("HTTP/. \r\n ") + 3*20 + len(status) + len("\r\n") + len(chunkHead) + len(respBody) + len("\r\n")
+	var nameSpace [32]string
+	names := nameSpace[:0]
 	for key, values := range header {
+		names = append(names, key)
 		if key == "Content-Length" && !noBody {
 			size += len(key) + len(": \r\n") + len(length)
 			continue
@@ -82,7 +150,9 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	out = append(out, ' ')
 	out = append(out, status...)
 	out = append(out, "\r\n"...)
-	for key, values := range header {
+	slices.Sort(names)
+	for _, key := range names {
+		values := header[key]
 		if key == "Content-Length" && !noBody {
 			out = append(out, key...)
 			out = append(out, ": "...)
@@ -95,6 +165,11 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 		}
 	}
 	out = append(out, "\r\n"...)
+	if chunkHead != nil {
+		out = append(out, chunkHead...)
+		out = append(out, respBody...)
+		return append(out, "\r\n"...), nil
+	}
 	out = append(out, respBody...)
 	return out, nil
 }

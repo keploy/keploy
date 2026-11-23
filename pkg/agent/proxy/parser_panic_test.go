@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -38,8 +39,8 @@ func TestAParserThatPanickedIsACaptureLoss(t *testing.T) {
 	if !errors.Is(err, util.ErrParserPanicked) {
 		t.Fatalf("mockGenericOutgoing = %v, want the parser's panic", err)
 	}
-	want := models.CaptureLosses{{Kind: models.CaptureLossParserPanic, Count: 1, What: "the generic parser, on a connection to 10.0.0.5:6379"}}
-	if got := p.CaptureLosses(); len(got) != 1 || got[0] != want[0] {
+	want := models.CaptureLosses{{Kind: models.CaptureLossParserPanic, Count: 1, What: "the generic parser, on a connection to 10.0.0.5:6379", HostsListed: true}}
+	if got := p.CaptureLosses(); len(got) != 1 || !reflect.DeepEqual(got[0], want[0]) {
 		t.Fatalf("capture losses %+v, want %+v", got, want)
 	}
 }
@@ -48,12 +49,12 @@ func TestAParserThatPanickedIsACaptureLoss(t *testing.T) {
 func TestOnlyAPanicIsAParserPanicLoss(t *testing.T) {
 	p := &Proxy{}
 	for _, err := range []error{nil, io.EOF, context.Canceled, models.ErrNoMockMatched, errors.New("decode failed")} {
-		p.countParserPanic(err, integrations.HTTP, "10.0.0.5:80")
+		p.countParserPanic(context.Background(), err, integrations.HTTP, "10.0.0.5:80")
 	}
 	if got := p.CaptureLosses(); len(got) != 0 {
 		t.Fatalf("capture losses %+v, want none", got)
 	}
-	p.countParserPanic(util.ErrParserPanicked, integrations.HTTP, "10.0.0.5:80")
+	p.countParserPanic(context.Background(), util.ErrParserPanicked, integrations.HTTP, "10.0.0.5:80")
 	if got := p.CaptureLosses(); len(got) != 1 || got[0].Kind != models.CaptureLossParserPanic || got[0].Count != 1 {
 		t.Fatalf("capture losses %+v, want one parser panic", got)
 	}

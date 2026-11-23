@@ -2,6 +2,7 @@ package mockdb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -68,20 +69,21 @@ var ErrGobMockFile = errors.New("a replay reads the set's mocks from its gob moc
 
 // NewMockFileReader opens the mock file name (no extension) in dir that a
 // replay of the set reads, with preferred the configured format: the file
-// in that format, else the one in the other (yaml.NewMockReaderAny). When
+// in that format, else the one in the other, opened only inside root, the
+// recording's directory dir is under (yaml.NewRecordingMockReaderAny). When
 // dir has name.gob, which a replay reads before either, the error wraps
 // ErrGobMockFile and names it (see MockYaml.SkippedMocks for what a replay
 // skips of one). logger takes what the replay's read logs for each document
 // it skips; nil discards it. Otherwise the error is the open's (wrapping
 // fs.ErrNotExist when there is no such file).
-func NewMockFileReader(ctx context.Context, logger *zap.Logger, dir, name string, preferred yaml.Format) (*MockFileReader, error) {
+func NewMockFileReader(ctx context.Context, logger *zap.Logger, root, dir, name string, preferred yaml.Format) (*MockFileReader, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	if gobPath := filepath.Join(dir, name+".gob"); gobFileReadFirst(gobPath) {
 		return nil, fmt.Errorf("%w: %s", ErrGobMockFile, gobPath)
 	}
-	r, err := yaml.NewMockReaderAny(ctx, logger, dir, name, preferred)
+	r, err := yaml.NewRecordingMockReaderAny(ctx, logger, root, dir, name, preferred)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +116,7 @@ func (fr *MockFileReader) Next() (MockFileDoc, error) {
 		case d.separator:
 			continue // the start of a separator, ending the file: no document
 		case len(d.mocks) == 0:
-			out.Skip = skipReason(d.kind, fr.r.Format() == yaml.FormatJSON)
+			out.Skip = skipReason(d.kind, fr.r.Format() == yaml.FormatJSON, docSpecFault(d) != nil)
 		}
 		return out, nil
 	}
@@ -122,21 +124,41 @@ func (fr *MockFileReader) Next() (MockFileDoc, error) {
 
 // skipReason is why the decoders (decodeMocks, decodeMocksJSON) took no mock
 // from a document of kind that parsed and decoded without error: they skip
-// only a document with no kind, a kind they have no decoder for, and a
-// connection failure they cannot replay. Of an NDJSON document (json), a
-// kind with a "-" in it, or one a registered mapper decodes, is one
-// decodeMocksJSON skips in every build: only the YAML decoder reads it, and
-// a "-" kind only with keploy enterprise's mapper.
-func skipReason(kind models.Kind, json bool) models.MockSkip {
+// only a document with no kind, a kind they have no decoder for, a
+// connection failure they cannot replay, a document of kind HttpFault with
+// no fault, and a document whose spec holds a fault (fault, found as the
+// decoders find it: docSpecFault) of any kind but HTTP, of kind Http, or
+// that they cannot enact (faultKindSupported). Of an NDJSON
+// document (json), a kind with a "-" in it, or one a registered mapper
+// decodes, is one decodeMocksJSON skips in every build: only the YAML
+// decoder reads it, and a "-" kind only with keploy enterprise's mapper.
+func skipReason(kind models.Kind, json, fault bool) models.MockSkip {
 	switch {
+	case fault:
+		return models.MockSkipFault
 	case kind == "":
 		return models.MockSkipNoKind
 	case kind == models.ConnectionFailure:
 		return models.MockSkipConnFailure
+	case kind == models.HTTPFault:
+		return models.MockSkipFault
 	case json && (strings.Contains(string(kind), "-") || hasMapperForKind(kind)):
 		return models.MockSkipYAMLOnlyKind
 	}
 	return models.MockSkipUnknownKind
+}
+
+// docSpecFault is the fault under d's spec's `fault:` key (yamlSpecFault,
+// jsonSpecFault), nil for none, or for a document that does not parse.
+func docSpecFault(d fileDoc) *models.Fault {
+	if d.doc != nil {
+		return yamlSpecFault(&d.doc.Spec)
+	}
+	var j struct {
+		Spec json.RawMessage `json:"spec"`
+	}
+	_ = json.Unmarshal(d.raw, &j) // an error leaves j.Spec nil, which has none
+	return jsonSpecFault(j.Spec)
 }
 
 // Format is the format of the file it opened.
@@ -152,7 +174,8 @@ func (fr *MockFileReader) Close() error { return fr.r.Close() }
 // (GetTestSetMocks: a mocks.gob first, else the YAML or NDJSON one), and by
 // name each named document of it the read skips, with why: of two such
 // documents with one name, the last, as TestSetMocks.Skipped lists it. A gob
-// file skips only a connection failure this keploy cannot replay. With no
+// file skips only a connection failure this keploy cannot replay and a mock
+// whose fault it cannot enact. With no
 // mock file, "" and none; nil when the file cannot be read.
 func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string, map[string]models.SkippedMock) {
 	mockFileName := ys.MockName
@@ -160,12 +183,11 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 		mockFileName = "mocks"
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
-	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
-	lock.RLock()
-	defer lock.RUnlock()
+	// No lock is held for the read, as for the replay's (readMockPoolsVisiting):
+	// a text file is read up to its length when it is pinned (live_pass.go).
 	out := map[string]models.SkippedMock{}
 	if gobPath := filepath.Join(path, mockFileName+".gob"); gobFileReadFirst(gobPath) {
-		mocks, _, err := readGobMocksCut(gobPath)
+		mocks, _, err := readGobMocksCut(ys.MockPath, gobPath)
 		if err != nil {
 			return gobPath, nil
 		}
@@ -173,10 +195,13 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 			if mock.Kind == models.ConnectionFailure && mock.Name != "" && !connFailureSupported(mock, zap.NewNop(), false) {
 				out[mock.Name] = models.SkippedMock{Name: mock.Name, Kind: mock.Kind, Why: models.MockSkipConnFailure}
 			}
+			if mock.Name != "" && (mock.Kind == models.HTTPFault || mock.Spec.Fault != nil && !faultSupported(mock, zap.NewNop(), false)) {
+				out[mock.Name] = models.SkippedMock{Name: mock.Name, Kind: mock.Kind, Why: models.MockSkipFault}
+			}
 		}
 		return gobPath, out
 	}
-	fr, err := NewMockFileReader(ctx, nil, path, mockFileName, ys.Format)
+	fr, err := NewMockFileReader(ctx, nil, ys.MockPath, path, mockFileName, ys.Format)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", out // no mock file: the read skips nothing
 	}
@@ -187,6 +212,9 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 		return mockFileTried(path, mockFileName, ys.Format), nil
 	}
 	defer func() { _ = fr.Close() }()
+	if _, _, err := pinMockFile(path, mockFileName, fr.r, nil); err != nil {
+		return fr.Path(), nil
+	}
 	for {
 		d, err := fr.Next()
 		if err != nil {

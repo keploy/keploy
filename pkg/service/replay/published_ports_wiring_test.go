@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -50,12 +51,7 @@ func newPublishedApp(t *testing.T) *publishedApp {
 	srv.Start()
 	t.Cleanup(srv.Close)
 	a.hostPort = portOfAddr(t, srv.Listener.Addr().String())
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.appPort = portOfAddr(t, ln.Addr().String())
-	_ = ln.Close() // the recorded port: nothing answers there
+	a.appPort = portOfAddr(t, testnet.RefusedAddr(t, "tcp")) // the recorded port: nothing answers there
 	return a
 }
 
@@ -116,7 +112,7 @@ func TestTheReadinessGateProbesWhereTheTestsGo(t *testing.T) {
 func TestTheResetReSendGateProbesWhereTheTestGoes(t *testing.T) {
 	app := newPublishedApp(t)
 	r := &Replayer{logger: zap.NewNop(), config: replayConfig(), instrumentation: app.instrumentation()}
-	r.waitForResetResendReady(context.Background(), app.httpTest(), "test-set-0")
+	r.waitForResetResendReady(context.Background(), app.httpTest(), "test-set-0", new(bool))
 	app.reachedSince(t, 0, "the re-send gate")
 }
 
@@ -215,12 +211,7 @@ func TestEachRunOfASetSendsItsTestsWhereTheAppsPortIsPublishedNow(t *testing.T) 
 		mux.HandleFunc("/x", func(w http.ResponseWriter, r *http.Request) { a.record(r); writeJSON(w, 200, `{"ok":true}`) })
 	}
 	first, second := newTmplApp(t, routes), newTmplApp(t, routes)
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	appPort := portOfAddr(t, ln.Addr().String())
-	_ = ln.Close() // the recorded port: nothing answers there
+	appPort := portOfAddr(t, testnet.RefusedAddr(t, "tcp")) // the recorded port: nothing answers there
 	tc := tmplCase(1, "127.0.0.1:"+strconv.Itoa(int(appPort)), "GET", "/x", nil, "", recorded(200, nil, `{"ok":true}`, nil))
 	tc.AppPort = appPort
 

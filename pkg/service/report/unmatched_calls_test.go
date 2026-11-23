@@ -241,3 +241,81 @@ func TestRenderUnmatchedCalls_AVariableThatDidNotHold(t *testing.T) {
 		t.Errorf("the variable's value is rendered as the recording's:\n%s", out)
 	}
 }
+
+// A miss names the operation it carries after its call.
+func TestRenderUnmatchedCalls_NamesTheOperation(t *testing.T) {
+	var sb strings.Builder
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /query", Operation: "query GetAppLabels"}
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	if !strings.Contains(sb.String(), "  [HTTP] POST /query {query GetAppLabels}") {
+		t.Fatalf("the miss does not name its operation:\n%s", sb.String())
+	}
+}
+
+// A background miss is listed apart from the test's own misses, counted,
+// under a heading that says it counts against no test, never under "likely
+// root cause"; a test with only background misses has no root-cause block.
+func TestRenderUnmatchedCalls_ListsBackgroundMissesApart(t *testing.T) {
+	poll := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "findAndModify ptw_endpoints", MatchPhase: models.MatchPhaseBody, Background: true}
+	own := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "find users", MatchPhase: models.MatchPhaseBody}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{poll, own, poll}}})
+	out := sb.String()
+	root := strings.Index(out, "(likely root cause)")
+	bg := strings.Index(out, "=== 2 BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===")
+	if root < 0 || bg < 0 || bg < root {
+		t.Fatalf("want the own miss under the root-cause heading, then 2 background misses apart:\n%s", out)
+	}
+	if strings.Contains(out[root:bg], "ptw_endpoints") || !strings.Contains(out[root:bg], "find users") {
+		t.Fatalf("the root-cause block holds a background miss, or not the test's own:\n%s", out)
+	}
+	if strings.Count(out[bg:], "findAndModify ptw_endpoints") != 2 || strings.Contains(out[bg:], "find users") {
+		t.Fatalf("the background block does not list exactly the two background misses:\n%s", out)
+	}
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{poll}}})
+	if out := sb.String(); strings.Contains(out, "likely root cause") || !strings.Contains(out, "1 BACKGROUND CALL(S)") {
+		t.Fatalf("a test with only a background miss:\n%s", out)
+	}
+}
+
+// A background miss that differs from its background recording by a value
+// its test bound is listed with the place and where the test bound it; a
+// background miss with no bound place writes no such line.
+func TestRenderUnmatchedCalls_NamesABackgroundMissesBoundPlaces(t *testing.T) {
+	del := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on api-server.uiSessionBatches", MatchPhase: models.MatchPhaseBody, Background: true,
+		BackgroundBound: []models.BackgroundBinding{{Recording: "mock-2954", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId"}}}
+	poll := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "findAndModify ptw_endpoints", MatchPhase: models.MatchPhaseBody, Background: true}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{del, poll}}})
+	out := sb.String()
+	want := "  delete on api-server.uiSessionBatches: like background recording mock-2954 but at body.docs.msgs.0.q.app_id, which holds appId as this test bound it at mock-226 body.docs.msgs.0.appId\n"
+	if !strings.Contains(out, want) {
+		t.Fatalf("report lacks the bound place line %q:\n%s", want, out)
+	}
+	if strings.Count(out, "like background recording") != 1 {
+		t.Fatalf("report names bound places for a miss with none:\n%s", out)
+	}
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{del.Sanitized()}}})
+	want = "  delete on api-server.{}: like background recording mock-2954 but at body.docs.msgs.{}.q.app_id, which holds a value as this test bound it at mock-226 body.docs.msgs.{}.appId\n"
+	if out := sb.String(); !strings.Contains(out, want) {
+		t.Fatalf("a sanitized miss, which keeps no learned variable's name, lacks %q:\n%s", want, out)
+	}
+}
+
+// A background miss whose place holds a value an ended test bound (the
+// recording trails that test) names that test as the binder, not "this
+// test", and a sanitized miss keeps the test's name.
+func TestRenderUnmatchedCalls_NamesTheTrailedTestThatBoundAPlace(t *testing.T) {
+	del := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "delete on api-server.uiJourneyPins", MatchPhase: models.MatchPhaseBody, Background: true,
+		BackgroundBound: []models.BackgroundBinding{{Recording: "mock-233", Place: "body.docs.msgs.0.q.app_id", Variable: "appId", BoundMock: "mock-226", BoundPlace: "body.docs.msgs.0.appId", BoundTest: ".::TestAppCRUD"}}}
+	for _, uc := range []models.UnmatchedCall{del, del.Sanitized()} {
+		var sb strings.Builder
+		renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{uc}}})
+		out := sb.String()
+		if !strings.Contains(out, "as .::TestAppCRUD bound it at mock-226 ") || strings.Contains(out, "as this test bound it") {
+			t.Fatalf("report does not name the trailed test as the binder:\n%s", out)
+		}
+	}
+}

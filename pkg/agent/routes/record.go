@@ -55,6 +55,14 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
+// appReleasedFilePath is where MakeAgentReady notes that it released this
+// pod's application, with markAppReleased (kdocker.MarkAppReleased):
+// variables so tests write it elsewhere and see the call.
+var (
+	appReleasedFilePath = kdocker.AppReleasedFile
+	markAppReleased     = kdocker.MarkAppReleased
+)
+
 // massSuppressionPercent is the share of a session's test cases that must be
 // suppressed before the completion summary is raised from Info to Warn.
 //
@@ -67,6 +75,33 @@ const massSuppressionPercent = 25
 // maxNamedPressureConns is how many connections the summary's warning of the
 // requests a pause of the memory guard cost names, those with the most first.
 const maxNamedPressureConns = 8
+
+// notHandedOnSaid is the summary's warning of a session's test cases that
+// never reached its stream because the ingress that served their requests
+// stopped first (syncMock NoteNotHandedOn).
+const notHandedOnSaid = "agent: some test cases were lost: the app served their requests, and the ingress stopped (the agent, or its forwarder for the app's port, was stopping) before their test cases reached the recording"
+
+// unnamedCallerConnsSaid is the summary's warning of a session's connections
+// to a listener of the run's own process tree whose callers the agent could
+// not name in its PID namespace (syncMock NoteUnnamedCallerConn): it could not
+// tell whether a test made the calls they carried, and recorded none as a
+// test case. It counts connections: the proxy relays them unread.
+const unnamedCallerConnsSaid = "agent: the calls some connections to the app carried were not recorded as test cases: keploy could not name their callers in its PID namespace, so it could not tell whether a test made them"
+
+// tlsRelayedConnsSaid is the summary's warning of a session's connections to
+// the app that opened with a TLS handshake (syncMock NoteTLSRelayedConn): the
+// ingress relayed each to the app's own TLS unread, so none of the calls they
+// carried was recorded as a test case. It counts connections, not calls.
+const tlsRelayedConnsSaid = "agent: the calls some connections to the app carried were not recorded as test cases: they were TLS (HTTPS), which keploy relayed to the app's own TLS without reading"
+
+// tlsRelayedNextStep is what the user can do so the calls tlsRelayedConnsSaid
+// counts are recorded.
+const tlsRelayedNextStep = "serve the app's API over plain HTTP (or h2c gRPC) to the tests while recording, for example with TLS ended in front of the app, so keploy can read and record these calls"
+
+// streamEndMarkerSent is what the agent logs (debug) once an incoming
+// stream's end marker is flushed, with the counts it carried: the session's
+// summary, deferred, follows it and says the same counts (sessionLost).
+const streamEndMarkerSent = "agent: incoming stream ended with its marker"
 
 // massSuppressed reports whether a session that sent sent test cases and
 // suppressed suppressed of them suppressed a large share
@@ -129,6 +164,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// per test. See pkg/agent/routes/scope.go.
 		r.Post("/scope/begin", a.HandleScopeBegin)
 		r.Post("/scope/end", a.HandleScopeEnd)
+		// A value the open test gave the application (scope_proven.go).
+		// Any method: with the proven switch off the plain 404.
+		r.HandleFunc("/scope/given", a.HandleScopeGiven)
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Post("/replay/gate", a.HandleScopeGate)
@@ -172,6 +210,8 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/capturelosses", a.HandleCaptureLosses)
 		// What of it no test was charged with (a loss after the last test).
 		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
+		r.Post("/capturelosses/owned", a.HandleOwnedCaptureLosses)
+		r.Post("/capturelosses/drain", a.HandleDrainCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		// The application's listens and its start's progress, for keploy
 		// test's readiness under the proven switch (readiness.go).
@@ -181,8 +221,13 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// Pollable, non-draining view of which mocks have been served. Distinct
 		// from /consumedmocks, which drains and is read once at end of run.
 		r.Get("/mock/served", a.HandleServedMocks)
+		// What record's full round learned onto recordings from calls
+		// made in other windows than theirs: no consumption, read once
+		// at the round's end beside /consumedmocks.
+		r.Get("/mock/learned-elsewhere", a.HandleLearnedElsewhere)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
+		r.Post("/stop-begun", a.HandleStopBegun)
 		// Long-lived streaming endpoints. /pcap/traffic emits a
 		// pcap-format byte stream (file header + one record per
 		// packet) over chunked transfer-encoding; /pcap/keylog
@@ -197,6 +242,8 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
+		r.Post("/hooks/app-starts-anew", a.HandleAppStartsAnew)
+		r.Post("/hooks/clock-run", a.HandleClockRun)
 	})
 }
 
@@ -252,6 +299,52 @@ func (a *Agent) HandleBeforeTestSetCompose(w http.ResponseWriter, r *http.Reques
 
 	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestSetID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleAppStartsAnew tells the hooks that keploy starts the application
+// anew for a test set (agent.AppStartHook); hooks without the capability
+// have nothing to drop.
+func (a *Agent) HandleAppStartsAnew(w http.ResponseWriter, r *http.Request) {
+	var req models.AppStartsAnewReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if h, ok := agent.ActiveHooks.(agent.AppStartHook); ok {
+		if err := h.AppStartsAnew(r.Context(), req.TestSetID, req.FirstRecorded); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleClockRun hands the hooks the run id of the process that started the
+// agent (agent.ClockRunTaker). Hooks that take none keep no clock timeline
+// (OSS's own, and a native macOS or Windows agent's): they answer 501 with
+// NoTimelineHooks, which the starter takes as nothing to hand. 404 stays
+// what an agent older than the route answers. An id the hooks refuse is
+// answered 409 with their reason.
+func (a *Agent) HandleClockRun(w http.ResponseWriter, r *http.Request) {
+	h, ok := agent.ActiveHooks.(agent.ClockRunTaker)
+	if !ok {
+		http.Error(w, models.NoTimelineHooks, http.StatusNotImplemented)
+		return
+	}
+	var req models.ClockRunReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Run == "" {
+		http.Error(w, "the run id is empty", http.StatusBadRequest)
+		return
+	}
+	if err := h.TakeClockRun(r.Context(), req.Run); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -347,6 +440,7 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	// --proven flag; the CLI refuses an agent whose switch is not its own
 	// (provenswitch.CheckAgent).
 	w.Header().Set(provenswitch.HealthHeader, provenswitch.State())
+	a.setCapabilities(w)
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
 }
@@ -463,6 +557,49 @@ func streamWriteFailed(logger *zap.Logger, r *http.Request, msg string, err erro
 	logger.Error(msg, zap.Error(err))
 }
 
+// spanWindow is the window HandleIncoming checks a test case over against the
+// memory guard's pauses and the holes in a connection's capture
+// (WasPressureActiveInWindow, WasMockOrphanedInWindow), on which a zero bound
+// makes no claim. A test case with no response time is read as ending now, the
+// latest it can have ended. One with no request time to trust (none, or one
+// after its end) is read as holding every request of its recording made before
+// its end, any of which may be its own (fail closed), as SendingTestCase reads
+// it: from from, the earliest one can have come (requestsFrom); with from
+// unknown (zero) or after its end, whatever recording it is of, as holding
+// every request made before its end.
+func spanWindow(req, resp, from time.Time) (time.Time, time.Time) {
+	if resp.IsZero() {
+		resp = time.Now()
+	}
+	if !req.IsZero() && !req.After(resp) {
+		return req, resp
+	}
+	if from.IsZero() || from.After(resp) {
+		from = time.Unix(0, 0)
+	}
+	return from, resp
+}
+
+// requestsFrom is the earliest a request of a test case an incoming stream
+// checks can have come: the start of its recording (recording,
+// StartRecordSession), of the stream itself (stream, before its ingress
+// started), or a request the stop of a recording that has ended found in
+// flight (leftovers, by Unix nanoseconds), whose test case can come to this
+// stream. Zero, unknown, when no recording has started (a zero recording):
+// no time is before it.
+func requestsFrom(recording, stream time.Time, leftovers map[int64]struct{}) time.Time {
+	from := recording
+	if stream.Before(from) {
+		from = stream
+	}
+	for at := range leftovers {
+		if l := time.Unix(0, at); l.Before(from) {
+			from = l
+		}
+	}
+	return from
+}
+
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// A recording's client that drains this stream after its stop holds it
 	// open until it has: a stop signal waits for that (holdForDrain).
@@ -508,6 +645,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		k.KeepRealUses(true)
 		defer k.KeepRealUses(false)
 	}
+	// Before the ingress starts: no request of this stream's own comes
+	// before it (requestsFrom).
+	streamFrom := time.Now()
 	tc, err := a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
@@ -548,9 +688,62 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// life. None is ever taken back, so this session's are what that count
 	// grows by from here.
 	mocksLeftOutBefore := syncmgr.Get().MocksLeftOut()
+	// The manager's drop counts are of its life too, and it outlives a
+	// session: what they grow by from here is this session's.
+	dropMark := syncmgr.Get().StartDropSession()
 	// The requests the ingress did not record because the memory guard had
 	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
 	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
+	// The requests the ingress served and was recording whose test cases
+	// never reached this stream's queue because the ingress stopped first
+	// (NoteNotHandedOn), counted the same way.
+	notHandedOnBefore := syncmgr.Get().NotHandedOn()
+	// The connections to a listener of the run's own process tree whose
+	// callers the agent could not name in its PID namespace, none of whose
+	// calls was recorded as a test case (NoteUnnamedCallerConn), counted the
+	// same way.
+	unnamedBefore := syncmgr.Get().UnnamedCallerConns()
+	// The connections to the app that opened with a TLS handshake, relayed to
+	// the app's TLS unread, none of whose calls was recorded as a test case
+	// (NoteTLSRelayedConn), counted the same way. Their start here also
+	// starts the session's ports: its first TLS connection to each app port
+	// is said at WARN as it comes (a stream that opens while another is
+	// still open starts them again, so one may be said at WARN twice, never
+	// at Debug alone).
+	tlsRelayedBefore := syncmgr.Get().StartTLSRelayedSession()
+	// The requests the ingress serves and does not record as test cases
+	// (syncMock NoteNotRecorded), each told to this stream's client as it
+	// comes (tellNotRecorded), from here: the agent's line names each by
+	// its shape and path tag, and the client's console prints its path
+	// beside the same tag. Opened before the headers go out, as the tallies
+	// above.
+	notRecorded, closeNotRecorded := syncmgr.Get().OpenNotRecordedFeed()
+	defer func() {
+		if n := closeNotRecorded(); n > 0 {
+			a.logger.Warn("the agent did not tell the recording's client of some requests it did not record as test cases: they came faster than the client took them",
+				zap.Uint64("requests", n))
+		}
+	}()
+	// sessionLost reads, once, what this session lost to its ingress stopping
+	// (NoteNotHandedOn), to callers the agent could not name
+	// (NoteUnnamedCallerConn), to TLS connections relayed unread
+	// (NoteTLSRelayedConn) and to mocks dropped as their parsers handed them
+	// over or after (DropsSince): the end marker, the summary and its warnings say
+	// the same counts, whichever of them reads first. The handler's own
+	// goroutine calls it (the marker, and the summary it defers).
+	var lostRead bool
+	var notHandedOnLost, unnamedLost, tlsRelayedLost uint64
+	var mocksDropped syncmgr.SessionDrops
+	sessionLost := func() (notHandedOn, unnamed, tlsRelayed uint64, drops syncmgr.SessionDrops) {
+		if !lostRead {
+			lostRead = true
+			notHandedOnLost = syncmgr.Get().NotHandedOn() - notHandedOnBefore
+			unnamedLost = syncmgr.Get().UnnamedCallerConns() - unnamedBefore
+			tlsRelayedLost = syncmgr.Get().TLSRelayedConns() - tlsRelayedBefore
+			mocksDropped = syncmgr.Get().DropsSince(dropMark)
+		}
+		return notHandedOnLost, unnamedLost, tlsRelayedLost, mocksDropped
+	}
 	// The ingress requests that come during the memory guard's pauses, from
 	// here: counted by the order of events (the request count read at each
 	// pause's start and end), apart from what the capture then decided, so
@@ -576,6 +769,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
 	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// A body that is not UTF-8 goes as a body object only to a client that
+	// says it reads one (models.BodyEncodingHeader); to any other client, one
+	// built before it among them, each test case goes as encoding/json writes it.
+	bodyObjects := models.ReadsBodyObjects(r.Header)
 	// send checks one test case and streams it unless it is left out. It
 	// reports false once the stream is broken.
 	send := func(t *models.TestCase) bool {
@@ -592,13 +789,18 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Time("request_time", tcReqTime))
 			return true
 		}
+		// The window the span checks below read (spanWindow): a zero bound
+		// makes no claim there, so a test case with no request or response
+		// time was streamed over any pause or hole.
+		spanFrom, spanTo := spanWindow(tcReqTime, tcRespTime,
+			requestsFrom(syncmgr.Get().RecordingFrom(), streamFrom, leftovers))
 		// Skip this test case if memory pressure overlapped its window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the
 		// TC window against recorded pressure ranges (not individual mock
 		// drops) because that check is race-free regardless of when the
 		// mock's goroutine runs relative to this handler.
-		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(tcReqTime, tcRespTime)
+		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(spanFrom, spanTo)
 		// An exchange a connection carried but did not record as a mock
 		// strands its TC mock-less, whether or not a pressure range covers
 		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
@@ -611,14 +813,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// only the TCs checked after it: without a watermark (the hold
 		// below), a TC streamed before it is saved without the mock, as the
 		// WARN that reports the exchange says.
-		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(tcReqTime, tcRespTime)
+		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(spanFrom, spanTo)
 		// A capacity drop (outChan overflow / already-closed channel)
 		// feeds nothing into pressureRanges, so the pressure-overlap check
 		// above cannot catch it. Suppress by EXACT owning test name so a
 		// TC whose mock was capacity-dropped is not streamed mock-less
 		// (replay: match_phase=no_mocks), without over-suppressing any
-		// concurrent TC that kept all its mocks.
-		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
+		// concurrent TC that kept all its mocks. A test case is known by
+		// its capture id when it has one (its mocks are owned by it).
+		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.AgentName())
 
 		if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
@@ -626,9 +829,26 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.String("tc_name", t.Name),
 				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+				zap.Int64("checked_from_ms", spanFrom.UnixMilli()),
+				zap.Int64("checked_to_ms", spanTo.UnixMilli()),
 				zap.Int("pressure_overlaps", pressureOverlaps),
 				zap.Int("orphan_overlaps", orphanOverlaps),
 				zap.Bool("capacity_drop", mockDropped),
+				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
+			)
+			return true
+		}
+		// Asked last, as it notes the test case sent: a mock any test may
+		// need, lost from now on and requested before its window ended, or a
+		// mock no test owns lost and requested inside its window, revokes it
+		// by name, and one
+		// lost since the checks above leaves it out here
+		// (SyncMockManager.SendingTestCase).
+		if !syncmgr.Get().SendingTestCase(t.AgentName(), tcReqTime, tcRespTime) {
+			tcsSuppressedSoFar++
+			a.logger.Debug("agent: TC suppressed — a mock it may need was lost: one any test of the recording may need, requested before its window ended, or one no test owns requested inside its window; not sent to CLI",
+				zap.String("tc_name", t.Name),
+				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 			)
 			return true
@@ -657,14 +877,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			streamWriteFailed(a.logger, r, "failed to create metadata part", err)
 			return false
 		}
-		if err := json.NewEncoder(part).Encode(t); err != nil {
+		if err := json.NewEncoder(part).Encode(models.TestCaseJSON(t, bodyObjects)); err != nil {
 			streamWriteFailed(a.logger, r, "failed to encode metadata", err)
 			return false
 		}
 
 		// 2. Write file part if exists
 		if t.HasBinaryFile {
-			a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+			a.logger.Debug("Starting binary file streaming for test case", zap.Int("form_parts", len(t.HTTPReq.Form)))
 			for _, form := range t.HTTPReq.Form {
 				for i, path := range form.Paths {
 					if path == "" {
@@ -689,7 +909,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 					f, err := os.Open(path)
 					if err != nil {
-						a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+						a.logger.Error("failed to open file for streaming",
+							zap.String("path", models.FormFilePathLogText(path)),
+							zap.Error(models.FormFilePathsInError(err, path)))
 						return false
 					}
 					if _, err := io.Copy(filePart, f); err != nil {
@@ -698,7 +920,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 						return false
 					}
 					f.Close()
-					a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
+					// The file's name is the app's client's (filename=):
+					// named by its size.
+					a.logger.Debug("Successfully streamed file part", zap.String("file", models.FormFileNameLogText(fileName)))
 				}
 			}
 		}
@@ -715,6 +939,33 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 
 		flusher.Flush() // Immediately send data to the client
+		return true
+	}
+
+	// tellNotRecorded tells the client of c, a request the ingress did not
+	// record as a test case (models.NotRecordedPart), then a delimiter, so
+	// the client reads the part whole at once (as send's), and flushes. It
+	// reports false once the stream is broken.
+	tellNotRecorded := func(c models.NotRecordedCall) bool {
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", `form-data; name="`+models.NotRecordedPart+`"`)
+		header.Set("Content-Type", "application/json")
+		part, err := mw.CreatePart(header)
+		if err != nil {
+			streamWriteFailed(a.logger, r, "failed to create a not-recorded part", err)
+			return false
+		}
+		if err := json.NewEncoder(part).Encode(c); err != nil {
+			streamWriteFailed(a.logger, r, "failed to encode a not-recorded part", err)
+			return false
+		}
+		delimiterHeader := textproto.MIMEHeader{}
+		delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
+		if _, err := mw.CreatePart(delimiterHeader); err != nil {
+			streamWriteFailed(a.logger, r, "failed to create delimiter part", err)
+			return false
+		}
+		flusher.Flush()
 		return true
 	}
 
@@ -787,7 +1038,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// end left unsent.
 	endedBy := "client"
 	summarize := func() {
-		_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
 		orphanRecorded, orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
 		pressureRecorded, pressureSpans := syncmgr.Get().PressureRangeCount()
 		// Suppression protects replay from test cases whose mocks
@@ -829,6 +1079,40 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("connections", notRecorded.Connections()),
 				zap.Strings("connections_most", notRecorded.Most(maxNamedPressureConns)))
 		}
+		// Read once (sessionLost): the warnings, the summary and the end
+		// marker say the same.
+		notHandedOn, unnamedConns, tlsRelayedConns, drops := sessionLost()
+		if drops.Pressure > 0 || drops.Capacity > 0 {
+			// The manager says the first of each kind and every 1024th as
+			// they come; this is the session's count, and which they were.
+			a.logger.Warn(models.MocksDroppedSaid,
+				zap.Int64("by_memory_pressure", drops.Pressure),
+				zap.Uint64("for_the_output", drops.Capacity),
+				zap.Strings("first_dropped", drops.Named))
+		}
+		if notHandedOn > 0 {
+			// The app served each, and the ingress stopped before its test
+			// case reached this stream: the manager warns of the first and
+			// every 1024th as they come; this is the session's count.
+			a.logger.Warn(notHandedOnSaid,
+				zap.Uint64("test_cases", notHandedOn))
+		}
+		if unnamedConns > 0 {
+			// Each was passed to the app's listener and none of its calls
+			// recorded: the proxy warned of the agent's first as it came;
+			// this is the session's count.
+			a.logger.Warn(unnamedCallerConnsSaid,
+				zap.Uint64("connections", unnamedConns),
+				zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
+		}
+		if tlsRelayedConns > 0 {
+			// Each reached the app's TLS and none of its calls was
+			// recorded: the ingress warned of the session's first to each
+			// app port as it came; this is the session's count.
+			a.logger.Warn(tlsRelayedConnsSaid,
+				zap.Uint64("connections", tlsRelayedConns),
+				zap.String("next_step", tlsRelayedNextStep))
+		}
 		if tcsUnsettled > 0 {
 			// The capture's parsers ran more than the hold's bound
 			// behind: these were checked against what was known then.
@@ -852,7 +1136,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("orphan_ranges_total", orphanRecorded),
 			zap.Int("orphan_spans_closed", orphanClosed),
 			zap.Int("orphan_ranges_still_open", orphanOpen),
-			zap.Int64("mocks_dropped_by_pressure", finalDropped),
+			zap.Int64("mocks_dropped_by_pressure", drops.Pressure),
 			// Requests the ingress did not record because the memory guard
 			// had paused recording when they came (the WARN above names
 			// their connections).
@@ -894,11 +1178,23 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// recording stopped is in the orphan spans above, not
 			// here: it was never parsed into mocks to count.
 			zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
-			zap.Int64("mocks_added_successfully", finalAdded),
-			zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
-			zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
+			zap.Int64("mocks_added_successfully", drops.Added),
+			zap.Uint64("mocks_dropped_capacity", drops.Capacity),
+			// Which mocks those two dropped, and why: the session's first
+			// few. Each count has them all.
+			zap.Strings("mocks_dropped_named", drops.Named),
+			zap.Int64("tcs_dropped_capacity", drops.TestCases),
 			zap.Int("tcs_released_unsettled", tcsUnsettled),
 			zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),
+			// Served by the app and never handed to this stream: the
+			// ingress that served them stopped first (the WARN above).
+			zap.Uint64("tcs_not_handed_on", notHandedOn),
+			// Calls to the app none of which was recorded: the agent could
+			// not name their callers (the WARN above).
+			zap.Uint64("connections_from_unnamed_callers", unnamedConns),
+			// TLS connections relayed to the app unread, none of whose
+			// calls was recorded (the WARN above).
+			zap.Uint64("connections_relayed_tls", tlsRelayedConns),
 			// Held for their verdicts when the stream ended, and not sent
 			// (the hold's Drain). A client ends its stream holding none from
 			// before its stop unless its drain gave up, which it says: these
@@ -944,6 +1240,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					if !take(t) {
 						return
 					}
+				case c := <-notRecorded:
+					if !tellNotRecorded(c) {
+						return
+					}
 				default:
 					break drain
 				}
@@ -962,6 +1262,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
 			}
+			notHandedOn, unnamedConns, tlsRelayedConns, drops := sessionLost()
 			if err := json.NewEncoder(part).Encode(models.StreamEndSummary{
 				TestCasesSent:       tcsSentSoFar,
 				TestCasesSuppressed: tcsSuppressedSoFar,
@@ -970,17 +1271,34 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					n := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
 					return models.PressureSkipSummary{Requests: n.Total, Connections: n.Connections()}
 				}(),
-				Unsettled:      tcsUnsettled,
-				MassSuppressed: massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				NotHandedOn:        notHandedOn,
+				UnnamedCallerConns: unnamedConns,
+				TLSRelayedConns:    tlsRelayedConns,
+				Unsettled:          tcsUnsettled,
+				MassSuppressed:     massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				MocksDropped: models.MockDropSummary{
+					ByPressure: drops.Pressure,
+					Capacity:   drops.Capacity,
+					Named:      drops.Named,
+				},
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
 			}
 			flusher.Flush()
+			a.logger.Debug(streamEndMarkerSent,
+				zap.Int("tcs_sent_to_cli", tcsSentSoFar),
+				zap.Uint64("tcs_not_handed_on", notHandedOn),
+				zap.Uint64("connections_from_unnamed_callers", unnamedConns),
+				zap.Uint64("connections_relayed_tls", tlsRelayedConns))
 			endedBy = "end"
 			return
 		case <-tickC:
 			if !release() {
+				return
+			}
+		case c := <-notRecorded:
+			if !tellNotRecorded(c) {
 				return
 			}
 		case t, ok := <-tc:
@@ -1421,9 +1739,34 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.logger.Debug("Agent marked as ready", zap.String("file", agentReadyFilePath))
+	// The pod's application is released from here: an agent restarted in
+	// the pod is ready once its own start is over, as nothing has to start
+	// the application again (kdocker.AppReleasedFile). Without the note it
+	// waits for a release, as an agent of a new pod does.
+	if err := markAppReleased(appReleasedFilePath); err != nil {
+		a.logger.Warn("could not note that this pod's application was released; a restarted keploy agent then waits for the recorder's release before it is ready",
+			zap.String("file", appReleasedFilePath), zap.Error(err))
+	}
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
+}
+
+// HandleStopBegun tells the agent that the recording's stop has begun: the
+// recording client is about to stop the application, so the connection ends
+// read from now on are the stop's, and a call the stop cuts records no fault.
+// An agent that cannot note it answers 501, and the client says so.
+func (a *Agent) HandleStopBegun(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.svc.(interface{ NoteStopBegun(context.Context) error })
+	if !ok {
+		http.Error(w, "this agent cannot note that a recording's stop has begun", http.StatusNotImplemented)
+		return
+	}
+	if err := s.NoteStopBegun(r.Context()); err != nil {
+		http.Error(w, fmt.Sprintf("failed to note the recording's stop: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // HandleGracefulShutdown sets a flag to indicate the application is shutting down gracefully.

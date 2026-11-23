@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -355,8 +356,9 @@ func procChildrenIn(root string, parent int) ([]child, error) {
 // procStat reads process pid's stat from the /proc at root
 // (utils.ParseProcStat); gone says it is not there: it exited and was reaped
 // before, or while, it was read (a task being reaped reads as state X, dead,
-// or Z, its parent and group gone: 0 and -1, which no line of a process that
-// is there has).
+// or, in any state, as a task released: utils.ReleasedTask). A line that does
+// not parse for another reason (a read cut short, a parent of 0 with a group,
+// or no stat line at all) is no process gone, but one keploy could not read.
 func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 	b, err := os.ReadFile(root + "/" + strconv.Itoa(pid) + "/stat")
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
@@ -371,28 +373,12 @@ func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 	}
 	st, ok := utils.ParseProcStat(b)
 	if !ok {
-		if state == 'Z' && reaped(b) {
+		if utils.ReleasedTask(b) {
 			return utils.ProcStat{}, true, nil
 		}
 		return utils.ProcStat{}, false, fmt.Errorf("its stat line does not parse: %q", b)
 	}
 	return st, false, nil
-}
-
-// reaped reports whether a stat line is a task's being released: its parent
-// and group, the two fields after its state, gone (0 and -1). The group's -1
-// is the one field of such a line utils.ParseProcStat refuses, so a line the
-// kernel wrote that says Z and does not parse is always one; both fields are
-// asked all the same, so a line that does not parse for another reason (a
-// read cut short, a parent of 0 included, or no stat line at all) is no
-// process gone, but one keploy could not read (procStat's error).
-func reaped(line []byte) bool {
-	end := bytes.LastIndexByte(line, ')')
-	if end < 0 {
-		return false
-	}
-	f := bytes.Fields(line[end+1:])
-	return len(f) >= 3 && string(f[1]) == "0" && string(f[2]) == "-1"
 }
 
 // statState is the state letter of a stat line, the field after the command
@@ -680,6 +666,22 @@ func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.Teard
 	return why, leftRunning(read, after)
 }
 
+// appRunsOn says whether a daemon the application left runs, one this
+// process adopted and may stop (adoptedRunning), or whether its children keep
+// changing so that it cannot tell, once the application's command has exited:
+// keploy's stop of them (stopAdopted) has not begun. False where it adopts
+// nothing, or cannot read its children: it then does not wait on them.
+func appRunsOn(logger *zap.Logger, _ *app.App) bool {
+	if !adopting.Load() {
+		return false
+	}
+	read, err := adoptedRunning(logger)
+	if err != nil {
+		return false
+	}
+	return len(read.pids) > 0 || !read.settled
+}
+
 // stopAll stops daemons as stopAdopted does, and says why it had to kill
 // one.
 func stopAll(logger *zap.Logger, daemons []int, reached []utils.Reached, moved *utils.TeardownScope) string {
@@ -867,7 +869,13 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	}
 	clock, meter, stopMeter := utils.NewExitMeter(procs, stopStall())
 	defer stopMeter()
-	meter.Advance(markExit(ms))
+	var uncompared utils.FilesUncomparedNote
+	look := func() utils.ExitMark {
+		m := markExit(ms)
+		uncompared.Say(logger, m)
+		return m
+	}
+	meter.Advance(look())
 	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
@@ -899,7 +907,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
 				zap.Ints("pids", left))
 		}
-		if meter.Advance(markExit(ms)) {
+		if meter.Advance(look()) {
 			moved.Note()
 			continue
 		}

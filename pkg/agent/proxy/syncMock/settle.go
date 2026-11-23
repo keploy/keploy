@@ -499,6 +499,8 @@ func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 	// stop found (NoteStop).
 	m.stopHolds()
 	m.NoteStop(before)
+	// Its streams' closing ends the recording from here (StopWasAsked).
+	m.ended.stopAsked.Store(true)
 	var backlogs []Backlog
 	for _, w := range m.watermarks() {
 		if b, ok := w.(Backlog); ok {

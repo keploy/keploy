@@ -7,16 +7,19 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
-	"syscall"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -24,145 +27,19 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
-func TestWaitForIngressTargetReady(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
-	accepted := make(chan struct{})
-	go func() {
-		conn, err := ln.Accept()
-		if err == nil {
-			_ = conn.Close()
-		}
-		close(accepted)
-	}()
-
-	if err := waitForIngressTarget(context.Background(), ln.Addr().String(), 250*time.Millisecond); err != nil {
-		t.Fatalf("waitForIngressTarget returned error: %v", err)
-	}
-
-	select {
-	case <-accepted:
-	case <-time.After(250 * time.Millisecond):
-		t.Fatal("waitForIngressTarget did not dial the ready listener")
-	}
-}
-
-func TestWaitForIngressTargetTimeout(t *testing.T) {
-	addr := testnet.RefusedAddr(t, "tcp")
-
-	if err := waitForIngressTarget(context.Background(), addr, 40*time.Millisecond); err == nil {
-		t.Fatal("expected timeout waiting for unused port")
-	}
-}
-
-func TestWaitForIngressTargetWhenKnownSkipsUnknownPort(t *testing.T) {
-	start := time.Now()
-	waited, err := waitForIngressTargetWhenKnown(context.Background(), 0, "127.0.0.1:0", 5*time.Second)
-	if err != nil {
-		t.Fatalf("waitForIngressTargetWhenKnown returned error: %v", err)
-	}
-	if waited {
-		t.Fatal("expected unknown redirected port to skip target wait")
-	}
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("unknown redirected port should skip immediately, took %s", elapsed)
-	}
-}
-
-func TestDialIngressTargetWaitsForAppToListen(t *testing.T) {
-	// The port is held for the test's life (testnet.SharedPort): a dial to
-	// it is refused until the app listens there, and no other socket can
-	// take it meanwhile.
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
-
-	listening := make(chan net.Listener, 1)
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		l, err := testnet.OpenShared("tcp4", addr)
-		if err != nil {
-			listening <- nil
-			return
-		}
-		listening <- l
-	}()
-
-	conn, err := dialIngressTarget(context.Background(), addr, 2*time.Second)
-	if err != nil {
-		t.Fatalf("dialIngressTarget returned error: %v", err)
-	}
-	_ = conn.Close()
-	if l := <-listening; l == nil {
-		t.Fatal("app listener could not rebind the port")
-	} else {
-		_ = l.Close()
-	}
-}
-
-func TestDialIngressTargetGivesUpAfterTimeout(t *testing.T) {
-	addr := testnet.RefusedAddr(t, "tcp")
-
-	start := time.Now()
-	if _, err := dialIngressTarget(context.Background(), addr, 100*time.Millisecond); err == nil {
-		t.Fatal("expected an error dialing a port nothing listens on")
-	}
-	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > time.Second {
-		t.Fatalf("expected to retry for the timeout then give up, took %s", elapsed)
-	}
-}
-
-func TestDialIngressTargetStopsOnCanceledContext(t *testing.T) {
-	addr := testnet.RefusedAddr(t, "tcp")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	start := time.Now()
-	if _, err := dialIngressTarget(ctx, addr, 5*time.Second); err == nil {
-		t.Fatal("expected an error dialing a port nothing listens on")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("canceled context should stop retries immediately, took %s", elapsed)
-	}
-}
-
 func newTestIngressHook() *goTCPIngressHook {
 	return newGoTCPIngressHook(&IngressProxyManager{logger: zap.NewNop()})
 }
 
-func freeTCPPort(t *testing.T) uint16 {
-	t.Helper()
-	// Probe on 0.0.0.0 (the address the forwarder binds) so the port we hand back
-	// is actually free for that bind, then release it for the caller to claim.
-	ln, err := net.Listen("tcp4", "0.0.0.0:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := uint16(ln.Addr().(*net.TCPAddr).Port)
-	_ = ln.Close()
-	return port
-}
-
-// startIngressAtFreePort starts hook's forwarder at a free port and returns
-// the port. Nothing holds the port between freeTCPPort and the forwarder's
-// bind: the forwarder binds it with net.Listen, and no hold can sit beside
-// that. So when another socket took the port meanwhile, it tries another.
-// On Windows the bind's error there is WSAEADDRINUSE, which errors.Is does
-// not match to EADDRINUSE, so it fails at once, as the test did before.
+// startIngressAtFreePort starts hook's forwarder at a port no other socket
+// is given while the test runs (testnet.ReservedPort) and returns the port.
 func startIngressAtFreePort(t *testing.T, ctx context.Context, hook *goTCPIngressHook) uint16 {
 	t.Helper()
-	for i := 0; ; i++ {
-		port := freeTCPPort(t)
-		err := hook.StartIngress(ctx, port, 0)
-		if err == nil {
-			return port
-		}
-		if !errors.Is(err, syscall.EADDRINUSE) || i == 19 {
-			t.Fatalf("StartIngress: %v", err)
-		}
+	port := uint16(testnet.ReservedPort(t))
+	if err := hook.StartIngress(ctx, port, 0); err != nil {
+		t.Fatalf("StartIngress: %v", err)
 	}
+	return port
 }
 
 // bindAgain binds port at every IPv4 address and closes it, as the next
@@ -305,7 +182,7 @@ func TestBindAgainFailsAPortASocketOfThisProcessTookAfterItsFirstLook(t *testing
 func TestStartIngressSkipsBindWhenContextCanceled(t *testing.T) {
 	testnet.HoldFinalizers(t)
 	hook := newTestIngressHook()
-	port := freeTCPPort(t)
+	port := uint16(testnet.ReservedPort(t))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // agent already shutting down
@@ -354,6 +231,220 @@ func TestStartIngressReleasesPortOnStop(t *testing.T) {
 	}
 }
 
+// The forwarder listens at the application's own port, on every interface, so
+// it is plain TCP: Go's default would make that port MPTCP, which the
+// application never chose.
+func TestStartIngressListensPlainTCP(t *testing.T) {
+	hook := newTestIngressHook()
+	port := startIngressAtFreePort(t, context.Background(), hook)
+	t.Cleanup(func() { _ = hook.StopIngress(port) })
+	plaintcptest.RequirePlainTCP(t, forwarderOf(t, hook, port).listener)
+}
+
+// newCapturingIngressHook is a forwarder hook whose manager records into
+// nothing and has holder (nil: no hold) hold the moved ports; each recorded
+// call's path arrives on the channel, and its log, debug level up, in the
+// logs.
+func newCapturingIngressHook(t *testing.T, holder IngressPortHolder) (*goTCPIngressHook, <-chan string, *observer.ObservedLogs) {
+	t.Helper()
+	stubIngressPaused(t, func() bool { return false })
+	captured := make(chan string, 4)
+	stubCaptureHook(t, func(_ context.Context, _ *zap.Logger, _ chan *models.TestCase,
+		req *http.Request, _ *http.Response, _ time.Time, _ time.Time,
+		_ models.IncomingOptions, _ bool, _ bool, _ uint16) {
+		captured <- req.URL.Path
+	})
+	core, logs := observer.New(zapcore.DebugLevel)
+	pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
+	t.Cleanup(pm.captures.Wait)
+	return newGoTCPIngressHook(pm), captured, logs
+}
+
+// requireIPv6 skips the test where this host has no IPv6 loopback.
+func requireIPv6(t *testing.T) {
+	t.Helper()
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback here: %v", err)
+	}
+	_ = ln.Close()
+}
+
+// answeredAndRecorded calls the forwarder over c, and fails the test unless
+// the application's answer comes back and the call is recorded.
+func answeredAndRecorded(t *testing.T, c net.Conn, captured <-chan string, how string) {
+	t.Helper()
+	if status := <-callAndRead(t, c, "/v6"); status != "200 OK" {
+		t.Fatalf("a call %s: %s, want the application's answer", how, status)
+	}
+	select {
+	case path := <-captured:
+		if path != "/v6" {
+			t.Fatalf("recorded a call to %q, want /v6", path)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("a call %s was not recorded", how)
+	}
+}
+
+// Without the hold, nothing takes an application port's IPv6 calls but
+// keploy's forwarder: the application's bind on :: was moved off the port.
+// So the forwarder listens on both families, and a call over IPv6 (in an
+// IPv6-only Pod, every call) is answered and recorded. It used to listen on
+// IPv4 only, and every IPv6 call was refused for the whole recording.
+func TestAForwarderWithoutAHoldTakesIPv6Calls(t *testing.T) {
+	requireIPv6(t)
+	hook, captured, logs := newCapturingIngressHook(t, nil)
+	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
+	defer cancel()
+	app := oneShotUpstream(t, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	orig := uint16(testnet.ReservedPort(t))
+	if err := hook.StartIngress(ctx, orig, portOf(t, app)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hook.StopIngress(orig) })
+
+	c6, err := net.Dial("tcp6", net.JoinHostPort("::1", strconv.Itoa(int(orig))))
+	if err != nil {
+		t.Fatalf("the forwarder took no IPv6 call: %v", err)
+	}
+	defer func() { _ = c6.Close() }()
+	answeredAndRecorded(t, c6, captured, "over IPv6")
+	c4, err := net.Dial("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(orig))))
+	if err != nil {
+		t.Fatalf("the forwarder took no IPv4 call: %v", err)
+	}
+	defer func() { _ = c4.Close() }()
+	answeredAndRecorded(t, c4, captured, "over IPv4")
+	if warns := logs.FilterLevelExact(zapcore.WarnLevel).All(); len(warns) != 0 {
+		t.Fatalf("WARNs from a forwarder that took both families of a free port: %v", warns)
+	}
+	for _, not := range []string{"holds the application's port on IPv6", "cannot listen on the application's port over IPv6"} {
+		if said := logs.FilterMessageSnippet(not).All(); len(said) != 0 {
+			t.Fatalf("a forwarder that took the port's IPv6 says it did not: %v", said)
+		}
+	}
+}
+
+// With the hold, the forwarder listens on IPv4 only, as before: the hold
+// takes the port's IPv6 calls (its lookup can hand them only to an IPv6
+// socket, the park), so the forwarder leaves the port's IPv6 free.
+func TestAForwarderWithAHoldListensOnIPv4Only(t *testing.T) {
+	requireIPv6(t)
+	hook, _, _ := newCapturingIngressHook(t, &fakePortHolder{held: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	orig := uint16(testnet.ReservedPort(t))
+	if err := hook.StartIngress(ctx, orig, 1); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hook.StopIngress(orig) })
+	if a := forwarderOf(t, hook, orig).listener.Addr().(*net.TCPAddr); a.IP.To4() == nil {
+		t.Fatalf("the forwarder listens at %s, want IPv4", a)
+	}
+	ln, err := net.Listen("tcp6", net.JoinHostPort("::", strconv.Itoa(int(orig))))
+	if err != nil {
+		t.Fatalf("the port's IPv6 is not free beside a forwarder with the hold: %v", err)
+	}
+	_ = ln.Close()
+}
+
+// Without the hold, the forwarder keeps other listeners off both families
+// of the port's wildcard address, as its listener on IPv4 alone kept them
+// off IPv4: one listener on both families would not. On Windows a later
+// bind of 0.0.0.0:P succeeds beside a socket on both families, and takes
+// the port's IPv4 calls from the forwarder.
+func TestAForwarderWithoutAHoldKeepsOtherListenersOffThePort(t *testing.T) {
+	requireIPv6(t)
+	hook, _, _ := newCapturingIngressHook(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	orig := testnet.ReservedPort(t)
+	if err := hook.StartIngress(ctx, uint16(orig), 1); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hook.StopIngress(uint16(orig)) })
+	for _, other := range []struct{ network, host string }{{"tcp4", "0.0.0.0"}, {"tcp6", "::"}} {
+		ln, err := net.Listen(other.network, net.JoinHostPort(other.host, strconv.Itoa(orig)))
+		if err == nil {
+			_ = ln.Close()
+			t.Fatalf("another listener bound %s %s beside the forwarder", other.network, ln.Addr())
+		}
+		if !neterr.IsAddrInUse(err) {
+			t.Fatalf("another listener at %s [%s]:%d: %v, want address in use", other.network, other.host, orig, err)
+		}
+	}
+}
+
+// Without the hold, a listener that is not keploy's and holds the port on
+// IPv6 alone keeps the port's IPv6 calls, as without keploy, and the
+// forwarder takes its IPv4 ones, as it always did. The listener is at the
+// IPv6 loopback, or at :: with IPV6_V6ONLY (Go sets it for "tcp6"). At ::
+// the forwarder's IPv6 bind fails everywhere ("address in use"; on Windows
+// WSAEADDRINUSE, which syscall.EADDRINUSE does not match), and its debug log
+// says another listener holds the port's IPv6, naming the port, and nothing
+// is logged as a warning; at ::1 the bind fails on Linux only.
+func TestAForwarderWithoutAHoldLeavesIPv6ToAnIPv6OnlyListener(t *testing.T) {
+	for _, at := range []string{"::1", "::"} {
+		t.Run("at ["+at+"]", func(t *testing.T) {
+			hook, captured, logs := newCapturingIngressHook(t, nil)
+			ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
+			defer cancel()
+			app := oneShotUpstream(t, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+			orig := testnet.ReservedPort(t)
+			// tcp6: IPV6_V6ONLY, beside the reservation.
+			other, err := net.Listen("tcp6", net.JoinHostPort(at, strconv.Itoa(orig)))
+			if err != nil {
+				t.Skipf("no IPv6 here: %v", err)
+			}
+			t.Cleanup(func() { _ = other.Close() })
+			if err := hook.StartIngress(ctx, uint16(orig), portOf(t, app)); err != nil {
+				t.Fatalf("the forwarder did not start beside an IPv6-only listener at [%s]: %v", at, err)
+			}
+			t.Cleanup(func() { _ = hook.StopIngress(uint16(orig)) })
+
+			c4, err := net.Dial("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(orig)))
+			if err != nil {
+				t.Fatalf("the forwarder took no IPv4 call: %v", err)
+			}
+			defer func() { _ = c4.Close() }()
+			answeredAndRecorded(t, c4, captured, "over IPv4")
+
+			accepted := make(chan error, 1)
+			go func() {
+				c, err := other.Accept()
+				if err == nil {
+					_ = c.Close()
+				}
+				accepted <- err
+			}()
+			c6, err := net.Dial("tcp6", net.JoinHostPort("::1", strconv.Itoa(orig)))
+			if err != nil {
+				t.Fatalf("the IPv6-only listener took no IPv6 call: %v", err)
+			}
+			_ = c6.Close()
+			select {
+			case err := <-accepted:
+				if err != nil {
+					t.Fatalf("the IPv6-only listener's accept: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the IPv6 call did not reach the IPv6-only listener")
+			}
+			if at != "::" {
+				return
+			}
+			said := logs.FilterMessageSnippet("another listener holds the application's port on IPv6").All()
+			if len(said) != 1 || said[0].ContextMap()["port"] != uint16(orig) || said[0].ContextMap()["family"] != "IPv6" {
+				t.Fatalf("logged %v, want one line saying another listener holds port %d on IPv6", said, orig)
+			}
+			if warns := logs.FilterLevelExact(zapcore.WarnLevel).All(); len(warns) != 0 {
+				t.Fatalf("WARNs %v, want none: the port's IPv6 calls go where they went before", warns)
+			}
+		})
+	}
+}
+
 // The teardown guard in StartIngressProxy must be SILENT: a bind event drained
 // after context cancel must not arm a forwarder AND must not emit an ERROR log
 // (the flask-secret CI lane fails on any ERROR in the record output).
@@ -366,7 +457,7 @@ func TestStartIngressProxySilentOnCanceledContext(t *testing.T) {
 	}
 	pm.ingressHook = newGoTCPIngressHook(pm)
 
-	port := freeTCPPort(t)
+	port := uint16(testnet.ReservedPort(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // agent already shutting down
 
@@ -406,15 +497,15 @@ func TestStartIngressReleasesPortWhenAcceptLoopExits(t *testing.T) {
 	}
 }
 
-func TestDialIngressTargetReachesAnIPv6App(t *testing.T) {
+func TestDialAppReachesAnIPv6App(t *testing.T) {
 	ln, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
 		t.Skipf("no IPv6 loopback: %v", err)
 	}
 	defer ln.Close()
-	conn, err := dialIngressTarget(context.Background(), ln.Addr().String(), time.Second)
+	conn, err := New(zap.NewNop(), nil, &config.Config{}).dialApp(context.Background(), ln.Addr().String(), nil)
 	if err != nil {
-		t.Fatalf("dialIngressTarget(%s): %v", ln.Addr(), err)
+		t.Fatalf("dialApp(%s): %v", ln.Addr(), err)
 	}
 	_ = conn.Close()
 }

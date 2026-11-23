@@ -17,11 +17,13 @@ import (
 )
 
 // EscalationSignal is what the CLI sends a stopping agent it has judged to
-// have stopped making progress, or to have detached everything and not exited
-// (pkg/platform/http, stopWatch); and, in place of SIGKILL, one it may not
-// signal itself: an agent elevated by sudo runs as root, which the user who
-// ran keploy cannot send SIGKILL, while sudo keeps that user's uid and hands
-// this signal on to the agent (checked with sudo 1.9.16p2).
+// have stopped making progress, or, if its reporter beats on after its detach
+// report (an older agent's: a current agent's detach report is its last), to
+// have detached everything and not exited (pkg/platform/http, stopWatch); and,
+// in place of SIGKILL, one it may not signal itself: an agent elevated by sudo
+// runs as root, which the user who ran keploy cannot send SIGKILL, while sudo
+// keeps that user's uid and hands this signal on to the agent (checked with
+// sudo 1.9.16p2).
 const EscalationSignal = syscall.SIGUSR2
 
 // DieOnEscalation has EscalationSignal end this process. Before its stop has

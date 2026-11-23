@@ -3,6 +3,7 @@ package proxy
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -36,13 +37,18 @@ func TestServedCountsCountEveryAnswer(t *testing.T) {
 	}
 }
 
-// The served observer (the learn step's earlier places of any kind) is told
-// of a mock before a parser's claim takes it out of the pool, a claim that
-// fails included (another connection served it), never of a call that names
-// no mock, and an observer taken away is told nothing more.
+// The served observer (the learn step's earlier places) is told of each mock
+// a door consumed, once the consume went through, never of one a door refused
+// (a claim that fails: nothing served it) or of a call that names no mock, and
+// an observer taken away is told nothing more.
 func TestServedObserverIsToldOfEveryServedMock(t *testing.T) {
-	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	perTest := newMockForTest("taken", exactT0, models.LifetimePerTest)
+	startup := newMockForTest("startup-1", exactT0.Add(time.Second), models.LifetimeSession)
+	session := newMockForTest("session-1", exactT0.Add(2*time.Second), models.LifetimeSession)
+	reused := newMockForTest("reused-1", exactT0.Add(3*time.Second), models.LifetimeSession)
+	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
+	mm.SetMocksWithWindow([]*models.Mock{perTest, startup}, []*models.Mock{session, reused}, models.BaseTime, time.Now())
 	var told []string
 	mm.SetServedObserver(func(m *models.Mock) { told = append(told, m.Name) })
 
@@ -52,12 +58,21 @@ func TestServedObserverIsToldOfEveryServedMock(t *testing.T) {
 	if mm.MarkMockAsUsed(models.Mock{}) {
 		t.Fatal("a mock with no name was marked as used")
 	}
-	if mm.DeleteFilteredMock(models.Mock{Name: "taken", Kind: models.HTTP}) {
-		t.Fatal("a mock the manager does not hold was consumed")
+	if !mm.DeleteFilteredMock(*perTest) {
+		t.Fatal("the per-test tier's mock was not consumed")
 	}
-	mm.DeleteUnFilteredMock(models.Mock{Name: "session-1", Kind: models.HTTP})
-	mm.DeleteStartupMock(models.Mock{Name: "startup-1", Kind: models.HTTP})
-	mm.UpdateUnFilteredMock(&models.Mock{Name: "reused-1"}, &models.Mock{Name: "reused-1", Kind: models.HTTP})
+	if mm.DeleteFilteredMock(*perTest) {
+		t.Fatal("a mock another connection took was consumed again")
+	}
+	if !mm.DeleteUnFilteredMock(*session) {
+		t.Fatal("the session tier's mock was not consumed")
+	}
+	if !mm.DeleteStartupMock(*startup) {
+		t.Fatal("the startup tier's mock was not consumed")
+	}
+	if !mm.UpdateUnFilteredMock(reused, reused.DeepCopy()) {
+		t.Fatal("the session tier's mock was not updated")
+	}
 	if want := []string{"pg-1", "taken", "session-1", "startup-1", "reused-1"}; !reflect.DeepEqual(told, want) {
 		t.Fatalf("observer told %v, want %v", told, want)
 	}

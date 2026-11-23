@@ -53,6 +53,13 @@
 # Ports: 8096 (app), 3306 (MySQL). Env: RECORD_BIN, REPLAY_BIN; MYSQL_IMAGE
 # (default mysql:8.0); LEGACY_RECORD_BIN (default: LEGACY_VERSION, v3.6.126,
 # downloaded); WORK (default: a new temporary directory).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../../docker-build-retry.sh"
@@ -161,7 +168,7 @@ tests_of() {
     local f n=0
     for f in keploy/test-set-0/tests/*.yaml; do
         [ -f "$f" ] || continue
-        yq -e '.spec.req.url' "$f" 2>/dev/null | grep -Eq "$1" && n=$((n + 1))
+        yq -e '.spec.req.url' "$f" 2>/dev/null | grep -E "$1" >/dev/null && n=$((n + 1))
     done
     echo "$n"
 }
@@ -172,7 +179,7 @@ replay() {
     local name="$1" rc report status
     shift
     sudo rm -rf keploy/reports
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "java -cp $CP Loop" --delay 3 --health-path /healthz \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "java -cp $CP Loop" --delay 3 --health-path /healthz \
         --generateGithubActions=false --disable-tele "$@" >"test-$name.log" 2>&1 </dev/null
     rc=$?
     own
@@ -227,7 +234,7 @@ run() {
         return
     }
 
-    sudo -E env PATH="$PATH" "$bin" record -c "java -cp $CP Loop" --generateGithubActions=false --disable-tele \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$bin" record -c "java -cp $CP Loop" --generateGithubActions=false --disable-tele \
         >record.log 2>&1 </dev/null &
     REC_PID=$!
     until curl -fsS http://127.0.0.1:8096/healthz >/dev/null 2>&1; do

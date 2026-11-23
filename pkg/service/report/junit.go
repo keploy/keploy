@@ -6,10 +6,10 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 type junitTestSuites struct {
@@ -95,11 +95,11 @@ type junitSkipped struct {
 	// combination, and an unbounded attribute (one clause per unconsumed mock)
 	// would put kilobytes on one XML line.
 	//
-	// The one exception is a case keploy quarantined: its message is
-	// "quarantined by keploy (<reason>)", as a test framework's own skip
-	// shows its reason (the proven model's contract), so it groups by reason.
-	// It stays one line and bounded (quarantinedSkipMessage); the whole
-	// reason is the body.
+	// The one exception is a case keploy skipped for a reason: its message is
+	// its kind's words and its reason, "quarantined by keploy (<reason>)" for
+	// a quarantine (skipLine), as a test framework's own skip shows its reason
+	// (the proven model's contract), so it groups by reason. It stays one line
+	// and bounded (skipMessage); the whole reason is the body.
 	Text string `xml:",chardata"`
 }
 
@@ -346,8 +346,11 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 	// The calls its application made outside every test that no mock
 	// answered (after its last test, or before its first as it started)
 	// failed the set while its tests may all have passed: a case of its own,
-	// failed, naming them.
-	if calls := rep.UnclaimedCalls; len(calls) > 0 {
+	// failed, naming them. A call a parser held for a later test's recording
+	// that none answered (UnmatchedCall.Held) may have been made in a test:
+	// it fails a case of its own (junitHeldCase).
+	calls, held := splitHeld(rep.UnclaimedCalls)
+	if len(calls) > 0 {
 		lines := make([]string, 0, len(calls))
 		message := "a call after the last test got no recorded answer"
 		before := false
@@ -358,10 +361,7 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 			message = "a call outside every test got no recorded answer"
 		}
 		for _, c := range calls {
-			l := strings.TrimSpace(c.Protocol + " " + c.ActualSummary)
-			if c.Destination != "" {
-				l += " to " + c.Destination
-			}
+			l := junitCallLine(c)
 			switch {
 			case c.BeforeSet:
 				l = "before the first test: " + l
@@ -378,6 +378,24 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 			Time:      fmtSeconds(0),
 			Failure: &junitFailure{
 				Message: message,
+				Type:    "UnclaimedCall",
+				Text:    strings.Join(lines, "\n"),
+			},
+		})
+	}
+	if len(held) > 0 {
+		lines := make([]string, 0, len(held))
+		for _, c := range held {
+			lines = append(lines, junitCallLine(c))
+		}
+		suite.Tests++
+		suite.Failures++
+		suite.Cases = append(suite.Cases, junitTestCase{
+			Name:      junitHeldCase,
+			Classname: name,
+			Time:      fmtSeconds(0),
+			Failure: &junitFailure{
+				Message: "a call held for a later test's recording got no recorded answer by the set's end",
 				Type:    "UnclaimedCall",
 				Text:    strings.Join(lines, "\n"),
 			},
@@ -406,6 +424,36 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 // after its last test that no mock answered carries, failed with the calls
 // (buildJUnitSuite).
 const junitUnclaimedCase = "keploy calls after the last test"
+
+// junitHeldCase is the test case a suite carries, failed with the calls,
+// whose set's calls include calls a parser held for a later test's
+// recording that no test of the set answered (UnmatchedCall.Held;
+// buildJUnitSuite).
+const junitHeldCase = "keploy calls held for a later test"
+
+// junitCallLine names an unclaimed call: its protocol, what it was, and
+// where it went.
+func junitCallLine(c models.UnmatchedCall) string {
+	l := strings.TrimSpace(c.Protocol + " " + c.Named())
+	if c.Destination != "" {
+		l += " to " + c.Destination
+	}
+	return l
+}
+
+// splitHeld splits a set's unclaimed calls into those made outside every
+// test and those a parser held for a later test (UnmatchedCall.Held), each
+// in order.
+func splitHeld(calls []models.UnmatchedCall) (outside, held []models.UnmatchedCall) {
+	for _, c := range calls {
+		if c.Held {
+			held = append(held, c)
+			continue
+		}
+		outside = append(outside, c)
+	}
+	return outside, held
+}
 
 // junitCaptureCase is the test case a suite whose capture was incomplete
 // carries, failed with the reason (buildJUnitSuite).
@@ -517,6 +565,11 @@ func failureOf(t models.TestResult, proven bool) *junitFailure {
 		// Refused when its set loaded: nothing was sent or asserted.
 		msg = "test case refused when its test set loaded, not sent"
 	}
+	if t.FailureInfo.NotFound != "" {
+		// Selected and not on disk: nothing was sent or asserted.
+		msg = "selected test case not found in its test set, not run"
+		parts = append(parts, "not run: "+t.FailureInfo.NotFound)
+	}
 	if t.FailureInfo.Risk != "" && t.FailureInfo.Risk != models.None {
 		msg = fmt.Sprintf("%s [%s-RISK]", msg, t.FailureInfo.Risk)
 	}
@@ -616,30 +669,42 @@ func depFailureLines(deps []models.DepResult) []string {
 }
 
 // ignoredSkip is the <skipped> element of an IGNORED case. A case keploy
-// skipped with a reason (a quarantine) says so in the message, which is what
-// every CI dashboard shows for a skipped case: "quarantined by keploy
-// (<reason>)", with the reason in the body too. A case skipped without one
+// skipped with a reason says so in the message, which is what every CI
+// dashboard shows for a skipped case: its kind's words and its reason
+// (skipLine), with the reason in the body too. A case skipped without one
 // keeps the historical literal, byte for byte.
 func ignoredSkip(t models.TestResult) *junitSkipped {
 	if t.SkipReason == "" {
 		return &junitSkipped{Message: ignoredSkipMessage}
 	}
 	return &junitSkipped{
-		Message: quarantinedSkipMessage(t.SkipReason),
+		Message: skipMessage(t.SkipKind, t.SkipReason),
 		Text:    t.SkipReason,
 	}
 }
 
-// quarantinedSkipMessage is the <skipped message> of a case keploy skipped for
-// a reason: the reason on one line, cut at maxSkipMessageReason bytes (at a
-// character's start, marked "…").
-func quarantinedSkipMessage(reason string) string {
-	return quarantinedLine(capBytes(models.SkipReasonOneLine(reason), maxSkipMessageReason))
+// skipMessage is the <skipped message> of a case keploy skipped for a reason:
+// its kind's words and the reason on one line, cut at maxSkipMessageReason
+// bytes (at a character's start, marked "…").
+func skipMessage(kind models.SkipKind, reason string) string {
+	return skipLine(kind, capBytes(models.SkipReasonOneLine(reason), maxSkipMessageReason))
 }
 
-// quarantinedLine says a case was quarantined, and why.
-func quarantinedLine(reason string) string {
-	return "quarantined by keploy (" + reason + ")"
+// skipLine says a case was skipped, as what kind of skip, and why: only a
+// quarantine is called quarantined, in the words every skip had before there
+// were kinds. A test skipped for that run only, or until it is re-recorded,
+// says so, and a kind keploy does not know (models.SkipOther) says only that
+// keploy skipped it.
+func skipLine(kind models.SkipKind, reason string) string {
+	switch kind {
+	case models.SkipQuarantined:
+		return "quarantined by keploy (" + reason + ")"
+	case models.SkipThisRunOnly:
+		return "skipped by keploy for this run only (" + reason + ")"
+	case models.SkipUntilRerecorded:
+		return "skipped by keploy until it is re-recorded (" + reason + ")"
+	}
+	return "skipped by keploy (" + reason + ")"
 }
 
 // maxSkipMessageReason bounds the reason in a <skipped message>: a
@@ -653,11 +718,7 @@ func capBytes(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	cut := n
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "…"
+	return textcut.Prefix(s, n) + "…"
 }
 
 // ignoredSkipMessage is the historical <skipped message> literal for an IGNORED

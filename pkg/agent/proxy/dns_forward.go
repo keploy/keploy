@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -300,6 +301,18 @@ func (p *Proxy) replayMissServers(mockingEnabled bool, name string, qtype uint16
 	if !mockingEnabled || p.GlobalPassthrough || p.allowEgressDNS {
 		return p.dnsUpstreamServers
 	}
+	return p.inNetworkServers(name, qtype)
+}
+
+// inNetworkServers are the resolvers inside the replay's own network that a
+// question for name, of type qtype, may be put to without leaving the machine:
+// the in-network resolvers for a name that network owns (networkOwnsName) and
+// a type its resolver answers for that name itself (inNetworkAnswersItself),
+// none otherwise. They are part of the replay's environment, not real egress,
+// so a replay asks them whatever the egress knobs say: for a DNS mock miss
+// (replayMissServers), and for a question whose recorded answer is negative
+// (replayDNSAnswer), as the name may exist in the replay's network now.
+func (p *Proxy) inNetworkServers(name string, qtype uint16) []string {
 	if !p.inNetworkAnswersItself(qtype) || !p.networkOwnsName(name) {
 		return nil
 	}
@@ -447,7 +460,7 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 		if err != nil {
 			p.logger.Debug("upstream DNS forward failed (udp); trying next server",
 				zap.String("server", addr),
-				zap.String("question", question.Name),
+				zap.String("question", p.dnsName(question.Name)),
 				zap.Error(err))
 			lastErr = err
 			continue
@@ -467,7 +480,7 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 			if terr != nil {
 				p.logger.Debug("upstream DNS forward failed (tcp); trying next server",
 					zap.String("server", addr),
-					zap.String("question", question.Name),
+					zap.String("question", p.dnsName(question.Name)),
 					zap.Error(terr))
 				lastErr = terr
 				continue
@@ -482,10 +495,17 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 	}
 
 	if lastErr == nil {
-		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", question.Name)
+		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", p.dnsName(question.Name))
 	}
-	return nil, lastErr
+	return nil, fmt.Errorf("%w: %w", errNoUpstreamAnswered, lastErr)
 }
+
+// errNoUpstreamAnswered marks the error of a lookup keploy made for the app
+// (forwardDNS, recordDNSMock) when it asked the app's upstream resolvers and
+// none answered in time (a timeout, a refused or a failed exchange), as
+// against the errors where it asked none of them: no upstream to ask, a
+// question type it does not forward, or public resolvers keploy picked.
+var errNoUpstreamAnswered = errors.New("no upstream DNS server answered")
 
 // isForwardableQType is the allowlist of DNS query types the
 // forwarder will relay. See forwardDNSUpstream for the rationale.

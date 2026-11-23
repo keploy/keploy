@@ -6,17 +6,20 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"testing"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/listeners"
 )
 
+// The first port is held for the test's life (testnet.SharedPort) and its
+// listener opens beside the hold: once the listener closes, a server another
+// test or process starts at port 0 is not given the port, so the dial that
+// finds it closed is refused.
 func TestListenerOwnerOnMacUsesReportedListens(t *testing.T) {
 	ip := net.ParseIP("127.0.0.1")
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ln := testnet.ListenShared(t, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t))))
 	port := uint32(ln.Addr().(*net.TCPAddr).Port)
 	if pid, listening := listenerOwner(ip, port); pid != 0 || !listening {
 		t.Fatalf("a live port nobody reported must be left to the mock path, got %d %v", pid, listening)
@@ -36,7 +39,7 @@ func TestListenerOwnerOnMacUsesReportedListens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln2.Close()
+	defer func() { _ = ln2.Close() }()
 	cmd := exec.Command("true")
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)

@@ -350,6 +350,15 @@ func TestOrderServedViewReadsTheViewItsAdaptersStatedOfEachServe(t *testing.T) {
 			Payload: noSet(clockedDrifts()).LazyRawOf(m, true, nil),
 			Seen:    []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.n", Type: String, Value: "5"}, Live: "5"}}}
 	}
+	// tellViews serves m once for each loader, each told under a key of its own.
+	tellViews := func(loads ...func() (*models.Mock, error)) func(tr *Tracker) {
+		return func(tr *Tracker) {
+			for i, load := range loads {
+				tr.ServedMock(m)
+				tr.ServedMockLive(m, strconv.Itoa(i), load)
+			}
+		}
+	}
 	for _, c := range []struct {
 		name       string
 		run        func(tr *Tracker)
@@ -390,12 +399,10 @@ func TestOrderServedViewReadsTheViewItsAdaptersStatedOfEachServe(t *testing.T) {
 		{"told with no loader", func(tr *Tracker) { tr.ServedMock(m); tr.ServedMockLive(m, "a", nil) }, unread, false},
 		{"told with no key", func(tr *Tracker) { tr.ServedMock(m); tr.ServedMockLive(m, "", benign) }, unread, false},
 		{"told with a view that cannot be read", func(tr *Tracker) { tr.ServedMock(m); tr.ServedMockLive(m, "a", broken) }, unread, false},
-		{"told with more different views than a set keeps", func(tr *Tracker) {
-			for i := 0; i <= maxLiveViews; i++ {
-				tr.ServedMock(m)
-				tr.ServedMockLive(m, strconv.Itoa(i), benign)
-			}
-		}, unread, false},
+		// The cap written out: a row that read maxLiveViews would move with it.
+		{"told with four different views, as many as a set keeps", tellViews(benign, benign, benign, benign), learns, false},
+		{"told with four different views, the fourth holding the word", tellViews(benign, benign, benign, holding), inAView, false},
+		{"told with five different views, one more than a set keeps", tellViews(benign, benign, benign, benign, benign), unread, false},
 		{"told before its serve", func(tr *Tracker) { tr.ServedMockLive(m, "a", benign); tr.ServedMock(m) }, unstated, false},
 		{"told in the previous set", func(tr *Tracker) {
 			tr.ServedMock(m)

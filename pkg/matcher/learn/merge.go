@@ -42,15 +42,23 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // bind|use)", "<place> (echo <name>)" or "<path> (<offset>)" ("clock",
 // "clock + 30m"). Noise and variables are monotonic (what is on disk
 // stays), with two exceptions: a place that is a variable's is never noise,
-// so learned noise there is dropped (the learn step may have learned a
+// so learned noise there is dropped (at the leaf the replay reads the place
+// at, VariableLeafPath: a word's field; the learn step may have learned a
 // value as noise at the call that first sent it, before a later call showed
-// it flowed on); and a place that is a clock read is never noise, so noise
-// there, learned or on disk (an older keploy learned a clock read as
-// noise), is dropped too: the place stays compared. A clock read learned at
-// a place that holds one meets it (models.ClockOffset.Meet), so it holds
-// only the offsets both do, and is added when that changed it; one that
-// shares no offset with it is Empty and refuses every value there. A clock
-// read at a variable's place stays: the replay checks both.
+// it flowed on), but for a cookie read by name, whose value alone places it
+// (noiseDroppedAt): the replay compares that value whatever the noise, and
+// the noise stays for the rest of the header; and a place that is a clock
+// read is never noise, so noise there, learned or on disk (an older keploy
+// learned a clock read as noise), is dropped too: the place stays compared.
+// A clock read learned at a place that holds one meets it
+// (models.ClockOffset.Meet), so it holds only the offsets both do, and is
+// added when that changed it; one that shares no offset with it is Empty
+// and refuses every value there. A clock read at a variable's place stays:
+// the replay checks both. A value can be the application's clock and flow
+// on to a later call (an insert's createdAt that a read returns), so
+// dropping either check lets a wrong value pass. The Mongo replay checks
+// both; the HTTP replay refuses such a place (it cannot hold one value to
+// both yet), which fails closed.
 func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
 	var added []string
 	if !provenswitch.On() {
@@ -107,7 +115,7 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 	varPlaces := map[string]bool{}
 	for _, v := range mock.Spec.Variables {
 		for _, place := range append([]string{v.Bind}, v.Use...) {
-			if p, ok := LeafPath(place); ok {
+			if p, ok := noiseDroppedAt(mock, place); ok {
 				varPlaces[p] = true
 			}
 		}
@@ -161,7 +169,10 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 // bind place from either, every use and answer place of both, and an echo
 // only when both say so (a call another uses the value of is not its echo).
 // A clock read goes with its bind, and holds for one both bind only when
-// both say so (models.MergeVariables).
+// both say so (models.MergeVariables). The why stays: a's, else b's, so a
+// variable bound at another recording keeps the line saying why it is one.
+// A use's check by form holds only where no learning checks it exactly
+// (models.MergeByForm).
 func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	if a.Recorded == "" {
 		a.Recorded, a.Echo = b.Recorded, b.Echo
@@ -173,8 +184,12 @@ func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	} else if b.Bind != "" && len(b.Clock) == 0 {
 		a.Clock = nil
 	}
+	a.ByForm = models.MergeByForm(a.Use, a.ByForm, b.Use, b.ByForm)
 	a.Use = unionSorted(a.Use, b.Use)
 	a.Answer = unionSorted(a.Answer, b.Answer)
+	if a.Why == "" {
+		a.Why = b.Why
+	}
 	return a
 }
 
@@ -215,6 +230,118 @@ func variableAdded(name string, was, next models.MockVariable) []string {
 		}
 	}
 	return out
+}
+
+// Taken is a test's own variable the run's variable took the place of
+// (RunTakesPlaces): Own, of Test, was bound or used at Place of Mock, where
+// the run's Run is bound, and is read as Run.
+type Taken struct {
+	Test, Own, Run, Mock, Place string
+}
+
+// RunTakesPlaces gives each request place of the set's recordings one
+// variable. A later test's call that sends a value an earlier test's call
+// sent binds the run's variable (models.RunVariable) at that earlier call's
+// place (Tracker.RunName). When the earlier test's own variable is bound or
+// used at that place too, the two are one value, and the run's takes the
+// place: every state of that test reads the run's name for its own. A
+// replay so binds it once, where the earlier test's call sends it, and keeps
+// it for the set: the earlier test's later calls read it as the later
+// tests' do. testOf names the test each mock's state was learned in, ""
+// for none (the start-up's, which carries no test's variable). states is
+// left as it is: the result is a copy, with each state of such a test
+// renamed. taken is what was renamed, sorted, for the log (no value).
+func RunTakesPlaces(states map[string]models.MockState, testOf func(mock string) string) (map[string]models.MockState, []Taken) {
+	type place struct{ mock, at string }
+	run := map[place]string{}
+	for _, st := range states {
+		for target, vs := range st.Binds {
+			for name, v := range vs {
+				if models.RunVariable(name) && v.Bind != "" {
+					run[place{target, v.Bind}] = name
+				}
+			}
+		}
+	}
+	if len(run) == 0 {
+		return states, nil
+	}
+	// By test and own name: what takes it. Two run's names at one test's
+	// value (no ranking gives that) take it by the lesser, whatever order
+	// the states are read in.
+	takes := map[string]map[string]Taken{}
+	take := func(state, mock, own, at string) {
+		r, ok := run[place{mock, at}]
+		test := testOf(state)
+		if !ok || test == "" || models.RunVariable(own) {
+			return
+		}
+		if cur, ok := takes[test][own]; ok && cur.Run <= r {
+			return
+		}
+		if takes[test] == nil {
+			takes[test] = map[string]Taken{}
+		}
+		takes[test][own] = Taken{Test: test, Own: own, Run: r, Mock: mock, Place: at}
+	}
+	for name, st := range states {
+		for target, vs := range st.Binds {
+			for own, v := range vs {
+				take(name, target, own, v.Bind)
+			}
+		}
+		for own, v := range st.Variables {
+			for _, at := range append([]string{v.Bind}, v.Use...) {
+				take(name, name, own, at)
+			}
+		}
+	}
+	if len(takes) == 0 {
+		return states, nil
+	}
+	renamed := func(vs models.MockVariables, to map[string]Taken) models.MockVariables {
+		if vs == nil {
+			return nil
+		}
+		out := make(models.MockVariables, len(vs))
+		for name, v := range vs {
+			if t, ok := to[name]; ok {
+				name = t.Run
+			}
+			if was, ok := out[name]; ok {
+				v = MergeVariable(was, v)
+			}
+			out[name] = v
+		}
+		return out
+	}
+	out := make(map[string]models.MockState, len(states))
+	for name, st := range states {
+		if to := takes[testOf(name)]; to != nil {
+			st.Variables = renamed(st.Variables, to)
+			if st.Binds != nil {
+				binds := make(map[string]models.MockVariables, len(st.Binds))
+				for target, vs := range st.Binds {
+					binds[target] = renamed(vs, to)
+				}
+				st.Binds = binds
+			}
+		}
+		out[name] = st
+	}
+	var taken []Taken
+	for _, to := range takes {
+		for _, t := range to {
+			taken = append(taken, t)
+		}
+	}
+	sort.Slice(taken, func(i, j int) bool {
+		if taken[i].Test != taken[j].Test {
+			return taken[i].Test < taken[j].Test
+		}
+		return taken[i].Own < taken[j].Own
+	})
+	return out, taken
 }
 
 // FoldLearned is, of states (by mock name), the states that carry learning

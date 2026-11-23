@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -171,7 +172,7 @@ func TestAUnixReportThatStoppedLeavesEveryTestNotJudged(t *testing.T) {
 // agent. No one bound there, or a path the kernel could not read, is counted:
 // unknown is never safe.
 func TestUnixReportsWithNoPeerAreJudgedByWhoIsBoundToThePath(t *testing.T) {
-	dir := t.TempDir()
+	dir := testnet.SocketDir(t)
 	sock := dir + "/dep.sock"
 	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {

@@ -1,9 +1,13 @@
 package proxy
 
 import (
+	"cmp"
 	"fmt"
+	"math"
 	"os"
+	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,22 +27,23 @@ type DiskMocks struct {
 	f        *os.File
 	path     string
 	offset   int64
-	entries  []diskEntry          // sorted by placeTsNano after Finalize
+	entries  []diskEntry          // by place, then offset, after Finalize (sortRecorded)
 	byName   map[string]diskEntry // name -> entry, by value so it survives sorting entries
 	finalize bool
 	logger   *zap.Logger
 	closed   bool
 
 	// carry indexes the carry-over entries (models.IsCarryOver at Add: a
-	// RegisterCarryOver kind's, a StagingRelease need's), sorted with
-	// entries, so the lookahead load reads only them. Empty while nothing is
-	// registered.
+	// RegisterCarryOver kind's, a StagingRelease need's), sorted by request
+	// time when Finalize sorts entries, so the lookahead load reads only
+	// them. Empty while nothing is registered.
 	carry []diskEntry
 
 	// staged indexes the entries a models.StagingWithStartup need declares
-	// (models.IsStagedAtStaging at Add), sorted with entries, so the set's
-	// staging call reads only them beside the startup band (LoadStaged).
-	// Empty while no kind declares one.
+	// (models.IsStagedAtStaging at Add), sorted by request time when
+	// Finalize sorts entries, so the set's staging call reads only them
+	// beside the startup band (LoadStaged). Empty while no kind declares
+	// one.
 	staged []diskEntry
 
 	// placed indexes the entries placed at their answer (models.IsAnswerPlaced
@@ -62,6 +67,18 @@ type DiskMocks struct {
 	// is decoded (readAt): what a test set's first cycle learned, put on the
 	// recordings its retry cycles are served (SetOnLoad). nil until then.
 	onLoad atomic.Pointer[func(*models.Mock)]
+	// id names the store among the agent's, and loadGen how many times
+	// its onLoad was set (SetOnLoad), in the keys of the recordings a
+	// keeper keeps (SetRecordingKeeper): a key names one record as the
+	// store reads it now.
+	id      uint64
+	loadGen atomic.Uint64
+	// keeper keeps the recordings RangeRecordedBefore decodes
+	// (SetRecordingKeeper); nil: each is decoded at each read.
+	keeper atomic.Pointer[RecordingKeeper]
+	// recordedReads counts the records RangeRecordedBefore decoded, for
+	// the rows.
+	recordedReads atomic.Int64
 
 	// byKey names, by kind and request key (models.RequestKeys), every mock
 	// on disk under each key its parser declares, in the order Add took them
@@ -70,7 +87,8 @@ type DiskMocks struct {
 
 	// byKind names, by kind, every mock on disk, in the order Add took them
 	// (RangeKind), each name once under the kind it was last added as
-	// (kindOf); kept under the proven switch only.
+	// (kindOf); kept under the proven switch, and in either switch mode for
+	// a kind placed at its answer (models.AnswerPlacedKind).
 	byKind map[models.Kind][]string
 	kindOf map[string]models.Kind
 
@@ -78,6 +96,13 @@ type DiskMocks struct {
 	// (models.Mock.IsProtocolPhase at Add): few, so only those are listed
 	// (RangeTimes); kept under the proven switch only. nil while none is.
 	phase map[string]bool
+
+	// clockOf is, of each mock on disk on a clock (models.Origin.Clock), its
+	// clock's place in clocks (RangeTimes); a mock on none is not listed.
+	// One record run stamps its mocks on one clock, so clocks holds few.
+	// Kept under the proven switch only, nil while no mock is on a clock.
+	clockOf map[string]uint16
+	clocks  []string
 
 	// budget is how many bytes of records the store keeps in memory
 	// (residentBudgetBytes); the first records up to it stay there, in mem by
@@ -146,6 +171,7 @@ func newDiskMocks(logger *zap.Logger, budget int64) (*DiskMocks, error) {
 		path = ""
 	}
 	return &DiskMocks{
+		id:      diskStores.Add(1),
 		f:       f,
 		path:    path,
 		byName:  make(map[string]diskEntry),
@@ -238,13 +264,11 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		return fmt.Errorf("disk mocks: write %q: %w", m.Name, err)
 	}
 	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), resTsNano: m.Spec.ResTimestampMock.UnixNano(),
-		placeTsNano: models.PlaceOf(m).UnixNano(), off: off, length: n, respOff: respOff, respLen: respLen}
+		placeTsNano: placeNano(models.PlaceOf(m)), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
-	// Record's full round pairs by kind (RangeKind), under the proven
-	// switch: every replay under the switch keeps the index (a name per
-	// on-disk mock), so that one can; none without the switch.
-	if provenswitch.On() {
+	// Listed by kind (RangeKind) for the kinds diskListsKind names.
+	if diskListsKind(m.Kind) {
 		if d.byKind == nil {
 			d.byKind, d.kindOf = make(map[models.Kind][]string), make(map[string]models.Kind)
 		}
@@ -266,6 +290,7 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		} else {
 			delete(d.phase, m.Name)
 		}
+		d.noteClockLocked(m.Name, mockClock(m))
 	}
 	for _, k := range models.RequestKeys(m) {
 		if d.byKey == nil {
@@ -366,19 +391,49 @@ func (d *DiskMocks) bytesAt(off int64, n int) ([]byte, error) {
 // Finalize sorts the index and the answer-placed one by place
 // (models.PlaceOf: the request timestamp, or the answer's for a mock placed
 // at its answer) for binary search, and the carry-over and staged indexes by
-// request timestamp. Idempotent.
+// request timestamp, which their loads search by, the mocks of one time in
+// the order they were added (sortRecorded). A carry-over or staged mock is
+// never placed at its answer (models.IsAnswerPlaced, held so by
+// models.TestPlaceOfIsTheAnswerForAMockPlacedAtItsAnswer), so its place is
+// its request time, and a sort of those two by place would order them
+// alike. Idempotent.
 func (d *DiskMocks) Finalize() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.finalize {
 		return
 	}
-	sort.Slice(d.entries, func(i, j int) bool { return d.entries[i].placeTsNano < d.entries[j].placeTsNano })
-	sort.Slice(d.carry, func(i, j int) bool { return d.carry[i].reqTsNano < d.carry[j].reqTsNano })
-	sort.Slice(d.staged, func(i, j int) bool { return d.staged[i].reqTsNano < d.staged[j].reqTsNano })
-	sort.Slice(d.placed, func(i, j int) bool { return d.placed[i].placeTsNano < d.placed[j].placeTsNano })
+	sortRecorded(d.entries, entryPlace)
+	sortRecorded(d.carry, entryRequest)
+	sortRecorded(d.staged, entryRequest)
+	sortRecorded(d.placed, entryPlace)
 	d.finalize = true
 }
+
+// sortRecorded sorts entries by at, and the entries of one time by their
+// offset in the store: the order Add took them in, as it writes each at a
+// running offset, which is the mock file's order, the order they were
+// recorded in. Every frame of one client write is read at that write's time,
+// so a pipeline of commands records many mocks of one request time, and a
+// parser answers a repeated command from its recordings in turn (a counter
+// read again and again): a sort by time alone, which may reorder entries of
+// one time, would have them answered out of turn. No two entries share an
+// offset, so the order is total.
+func sortRecorded(entries []diskEntry, at func(diskEntry) int64) {
+	slices.SortFunc(entries, func(a, b diskEntry) int { return recordedFirst(a, b, at) })
+}
+
+// recordedFirst compares two entries by at, and two of one time by their
+// offset (sortRecorded).
+func recordedFirst(a, b diskEntry, at func(diskEntry) int64) int {
+	if c := cmp.Compare(at(a), at(b)); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.off, b.off)
+}
+
+func entryPlace(e diskEntry) int64   { return e.placeTsNano }
+func entryRequest(e diskEntry) int64 { return e.reqTsNano }
 
 // readAt decodes the mock at an entry, into a mock of its own (gobRecords).
 // Stored records never change, so reads are concurrency-safe. Elided
@@ -395,6 +450,7 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	if f := d.onLoad.Load(); f != nil {
 		(*f)(m)
 	}
+	m.SetStoredSize(int64(e.length + e.respLen))
 	if e.respOff >= 0 {
 		respOff, respLen := e.respOff, e.respLen
 		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
@@ -413,6 +469,13 @@ func (d *DiskMocks) DecodersBuilt() int64 { return d.records.built.Load() }
 // set's first cycle learned, for its retry cycles (learn.KeptLearning.Into).
 // A mock read before keeps what it was read with.
 func (d *DiskMocks) SetOnLoad(f func(*models.Mock)) {
+	// The generation the keeper's keys name (recordedAt) moves only after
+	// the Store, deferred. Moved before it, a read in between would take
+	// the new generation's key, decode with the old onLoad, and the keeper
+	// would hand that stale recording to every later read of the set. In
+	// this order a read in between keys its recording by the old generation,
+	// which no read after the bump asks again.
+	defer d.loadGen.Add(1)
 	if f == nil {
 		d.onLoad.Store(nil)
 		return
@@ -637,9 +700,10 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 		}
 	}
 	d.mu.Unlock()
-	sort.SliceStable(sel, func(i, j int) bool { return sel[i].reqTsNano < sel[j].reqTsNano })
+	sortRecorded(sel, entryRequest)
+	keep := d.keeper.Load()
 	for _, e := range sel {
-		m, err := d.readAt(e)
+		m, err := d.recordedAt(e, keep)
 		if err != nil {
 			return err
 		}
@@ -648,6 +712,50 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 		}
 	}
 	return nil
+}
+
+// RecordingKeeper keeps a recording key names as decode reads it, for the
+// learn step's reads of the set's recordings (learn.Tracker.KeepRecording):
+// size is about the bytes the decoded recording holds. It hands each read a
+// recording of its own, as decode does.
+type RecordingKeeper func(key string, size int64, decode func() (*models.Mock, error)) (*models.Mock, error)
+
+// SetRecordingKeeper has k keep the recordings RangeRecordedBefore decodes,
+// so the learn step's calls, each of which reads every recording of the set
+// made before it, decode one once for the set where k has room, and at
+// each read where it has none, as with no keeper (nil).
+func (d *DiskMocks) SetRecordingKeeper(k RecordingKeeper) {
+	if k == nil {
+		d.keeper.Store(nil)
+		return
+	}
+	d.keeper.Store(&k)
+}
+
+// RecordedReads is how many records RangeRecordedBefore has decoded, for
+// the rows.
+func (d *DiskMocks) RecordedReads() int64 { return d.recordedReads.Load() }
+
+// diskStores numbers the agent's stores (DiskMocks.id).
+var diskStores atomic.Uint64
+
+// decodedOverhead is about the bytes a decoded recording holds past its
+// record's: its struct, its spec's and the maps and slices they hold.
+const decodedOverhead = 1 << 10
+
+// recordedAt is e's recording as RangeRecordedBefore hands it: kept by
+// keep where one is set (nil: decoded now). Its key names the store, how
+// its onLoad was set when it was read, and e's record.
+func (d *DiskMocks) recordedAt(e diskEntry, keep *RecordingKeeper) (*models.Mock, error) {
+	decode := func() (*models.Mock, error) {
+		d.recordedReads.Add(1)
+		return d.readAt(e)
+	}
+	if keep == nil {
+		return decode()
+	}
+	key := strconv.FormatUint(d.id, 10) + ":" + strconv.FormatUint(d.loadGen.Load(), 10) + ":" + strconv.FormatInt(e.off, 10)
+	return (*keep)(key, 2*int64(e.length)+decodedOverhead, decode)
 }
 
 // LoadStatements returns the statement catalog: for each statement the mocks
@@ -667,12 +775,7 @@ func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
 		sel = append(sel, e)
 	}
 	d.mu.Unlock()
-	sort.Slice(sel, func(i, j int) bool {
-		if sel[i].reqTsNano != sel[j].reqTsNano {
-			return sel[i].reqTsNano < sel[j].reqTsNano
-		}
-		return sel[i].off < sel[j].off
-	})
+	sortRecorded(sel, entryRequest)
 	return d.decodeAll(sel)
 }
 
@@ -698,12 +801,7 @@ func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 		}
 	}
 	d.mu.Unlock()
-	sort.Slice(sel, func(i, j int) bool {
-		if sel[i].reqTsNano != sel[j].reqTsNano {
-			return sel[i].reqTsNano < sel[j].reqTsNano
-		}
-		return sel[i].off < sel[j].off
-	})
+	sortRecorded(sel, entryRequest)
 	return d.decodeAll(sel)
 }
 
@@ -755,7 +853,7 @@ func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name s
 		}
 	}
 	d.mu.Unlock()
-	sort.SliceStable(cs, func(i, j int) bool { return cs[i].e.reqTsNano < cs[j].e.reqTsNano })
+	slices.SortFunc(cs, func(a, b candidate) int { return recordedFirst(a.e, b.e, entryRequest) })
 	for _, c := range cs {
 		e := c.e
 		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {
@@ -765,11 +863,25 @@ func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name s
 	return nil
 }
 
+// diskListsKind reports whether the on-disk store lists kind's mocks by kind
+// (Add, RangeKind). Record's full round pairs by kind under the proven switch:
+// every replay under the switch keeps the index (a name per on-disk mock), so
+// that one can. Without the switch it lists only the kinds whose parser holds
+// a call while the set still holds an unserved recording of it
+// (models.AnswerPlacedKind), which reads them by kind. The set as recorded
+// (MockManager.RangeRecordedSet) tells a whole set only for a kind this
+// names, so a kind the disk does not list is never told whole with its
+// on-disk recordings missing.
+func diskListsKind(kind models.Kind) bool {
+	return provenswitch.On() || models.AnswerPlacedKind(kind)
+}
+
 // RangeKind calls visit, in recorded order (request time), with each on-disk
 // mock of kind, once each, until visit returns false: its name, and load,
 // which decodes it. Only what visit loads is decoded. What record's full
 // round's pairing reads of the recordings of a test not begun yet
-// (MockManager.PairingCandidates's source).
+// (MockManager.PairingCandidates's source), and a parser of the staged set
+// as recorded (MockManager.RangeRecordedSet).
 func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
 	type candidate struct {
 		name string
@@ -793,7 +905,7 @@ func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load fun
 		}
 	}
 	d.mu.Unlock()
-	sort.SliceStable(cs, func(i, j int) bool { return cs[i].e.reqTsNano < cs[j].e.reqTsNano })
+	slices.SortFunc(cs, func(a, b candidate) int { return recordedFirst(a.e, b.e, entryRequest) })
 	for _, c := range cs {
 		e := c.e
 		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {
@@ -804,26 +916,82 @@ func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load fun
 }
 
 // RangeTimes calls visit with every mock on disk, each once, in no order:
-// its name, its request and answer times, and whether it is protocol-phase
-// (models.Mock.IsProtocolPhase; told under the proven switch only, the only
-// one the teardown bound reads it under), until visit returns false. Nothing is
-// decoded: the times are the store's own, kept as each mock was added. It
+// its name, its place (models.PlaceOf, as Add computed it; the zero time for
+// a mock with none, which bounds nothing), whether it is
+// protocol-phase (models.Mock.IsProtocolPhase) and its clock
+// (models.Origin.Clock, "" for none; both told under the proven switch
+// only, the only one the teardown bound reads them under), until visit
+// returns false. Nothing is decoded: the places are the store's own, kept
+// as each mock was added. It
 // is what bounds a set's teardown under keploy mock replay
 // (MockManager.SetRecordingTimes): the latest recording of the set's tests,
 // which the staging does not read. visit runs under the store's lock, so it
 // must not call the store.
-func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, protocolPhase bool) bool) error {
+func (d *DiskMocks) RangeTimes(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
 		return fmt.Errorf("disk mocks: store closed")
 	}
 	for name, e := range d.byName {
-		if !visit(name, time.Unix(0, e.reqTsNano), time.Unix(0, e.resTsNano), d.phase[name]) {
+		clock := ""
+		if i, ok := d.clockOf[name]; ok {
+			clock = d.clocks[i]
+		}
+		// A mock with no place (placeNano) is told the zero time, as the
+		// trees tell it, not the Unix epoch.
+		var place time.Time
+		if e.placeTsNano != 0 {
+			place = time.Unix(0, e.placeTsNano)
+		}
+		if !visit(name, place, d.phase[name], clock) {
 			return nil
 		}
 	}
 	return nil
+}
+
+// placeNano is place (models.PlaceOf) in Unix nanoseconds as the store keeps
+// it: 0 for the zero place of a mock with no request time, which RangeTimes
+// tells as the zero time, not the zero time's UnixNano, which overflows to a
+// time in 1754 that it told as a place. Like that time, 0 sorts before every
+// recorded place.
+func placeNano(place time.Time) int64 {
+	if place.IsZero() {
+		return 0
+	}
+	return place.UnixNano()
+}
+
+// noteClockLocked notes name's clock for RangeTimes, "" for none: a mock
+// added again under its name takes its latest clock. The store's lock is
+// held.
+func (d *DiskMocks) noteClockLocked(name, clock string) {
+	if clock == "" {
+		delete(d.clockOf, name)
+		return
+	}
+	i := -1
+	for j, c := range d.clocks {
+		if c == clock {
+			i = j
+			break
+		}
+	}
+	if i < 0 {
+		if len(d.clocks) > math.MaxUint16 {
+			// Never in practice (a record run names one clock); past it a
+			// mock reads as on no clock, which bounds every one: fail closed.
+			delete(d.clockOf, name)
+			return
+		}
+		i = len(d.clocks)
+		d.clocks = append(d.clocks, clock)
+	}
+	if d.clockOf == nil {
+		d.clockOf = make(map[string]uint16)
+	}
+	d.clockOf[name] = uint16(i)
 }
 
 // diskKey is the byKey index of kind and request key.

@@ -549,7 +549,7 @@ func TestAPlainPasswordIsNotCompared(t *testing.T) {
 				refused, err := simulatePlainPassword(context.Background(), zap.NewNop(), agentEnd, testDBAddr, reqResp{
 					req:  []mysql.Request{{PacketBundle: bundle(5, "plain password", "cmVjb3JkZWQtc2VjcmV0AA==")}}, // "recorded-secret\x00"
 					resp: []mysql.Response{okAnswer(6)},
-				}, hs, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
+				}, &servedHandshake{mock: hs}, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
 				ret <- outcome{refused, err}
 			}()
 			c := mysqlClient{t: t, c: app}
@@ -763,11 +763,14 @@ func TestARecordingOfOnlyTheCredentialsLengthIsServed(t *testing.T) {
 			err     error
 		}
 		ret := make(chan outcome, 1)
+		recorded := bundle(5, mysql.PlainPassword, zeros(len("app-password\x00")))
+		recorded.Header.Header.PayloadLength = uint32(len("app-password\x00"))
+		served := &servedHandshake{mock: hs}
 		go func() {
 			refused, err := simulatePlainPassword(context.Background(), zap.NewNop(), agentEnd, testDBAddr, reqResp{
-				req:  []mysql.Request{{PacketBundle: bundle(5, mysql.PlainPassword, zeros(len("app-password\x00")))}},
+				req:  []mysql.Request{{PacketBundle: recorded}},
 				resp: []mysql.Response{okAnswer(6)},
-			}, hs, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
+			}, served, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
 			ret <- outcome{refused, err}
 		}()
 		c := mysqlClient{t: t, c: app}
@@ -778,6 +781,13 @@ func TestARecordingOfOnlyTheCredentialsLengthIsServed(t *testing.T) {
 		}
 		if len(verdict) == 0 || verdict[0] != mysql.OK {
 			t.Fatalf("the client read %x; want the recorded OK", verdict)
+		}
+		// What the serve states it gave holds the password as the recording
+		// does, by its length only: the recorded packet, never the password.
+		sent, _ := packetKeys(served.sent)
+		want, _ := packetKey(&recorded)
+		if len(sent) != 1 || sent[0] != want || strings.Contains(sent[0], "app-password") {
+			t.Fatalf("the serve noted the client sent %q; want the recorded password packet %q, never the password", sent, want)
 		}
 	})
 }
@@ -824,6 +834,9 @@ func TestEveryUnansweredHandshakeStepIsAMiss(t *testing.T) {
 		summary string
 		phase   string
 		diff    string
+		// unlogged is what the report's diff says and the error's text,
+		// which is logged, does not: a login's user.
+		unlogged string
 	}{{
 		name:    "a recorded handshake response that cannot be read",
 		session: []*models.Mock{unreadableHR41()},
@@ -890,12 +903,13 @@ func TestEveryUnansweredHandshakeStepIsAMiss(t *testing.T) {
 		phase:   models.MatchPhaseNoMocks,
 		diff:    "server greeting",
 	}, {
-		name:    "a HandshakeResponse41 no recorded handshake matches",
-		session: []*models.Mock{nativeHandshake()},
-		client:  func(c mysqlClient) { c.greetAndAnswer("intruder", mysql.Native) },
-		summary: "connection phase: HandshakeResponse41",
-		phase:   models.MatchPhaseExhausted,
-		diff:    "username mismatch",
+		name:     "a HandshakeResponse41 no recorded handshake matches",
+		session:  []*models.Mock{nativeHandshake()},
+		client:   func(c mysqlClient) { c.greetAndAnswer("intruder", mysql.Native) },
+		summary:  "connection phase: HandshakeResponse41",
+		phase:    models.MatchPhaseExhausted,
+		diff:     "username mismatch",
+		unlogged: "intruder",
 	}, {
 		name:    "the recording ends before the answer to the HandshakeResponse41",
 		session: []*models.Mock{answerless},
@@ -958,7 +972,14 @@ func TestEveryUnansweredHandshakeStepIsAMiss(t *testing.T) {
 			client.t = t
 			tc.client(client)
 			_ = client.c.Close()
-			requireConnectionMiss(t, <-done, tc.summary, tc.phase, tc.diff)
+			err := <-done
+			requireConnectionMiss(t, err, tc.summary, tc.phase, tc.diff)
+			if tc.unlogged != "" {
+				var r reportCarrier
+				if errors.As(err, &r); !strings.Contains(r.MismatchReport().Diff, tc.unlogged) || strings.Contains(err.Error(), tc.unlogged) {
+					t.Fatalf("the report's diff %q and the error %q; want %q in the diff only: the error's text is logged", r.MismatchReport().Diff, err.Error(), tc.unlogged)
+				}
+			}
 		})
 	}
 }

@@ -581,9 +581,18 @@ func TestDebugFileSink_RotateForScope_RejectsSymlinkEscape(t *testing.T) {
 	}
 	defer SetDebugFileSink(nil)
 
+	// Each refusal is said plainly: the debug log, the link, and where it
+	// leads, not in os.Root's words.
+	says := map[string]string{
+		"dir-link":  fmt.Sprintf("it leads through %q, a link that leads out of it, to %q", "dir-link", outsideDir),
+		"file-link": fmt.Sprintf("it is a link that leads out of it, to %q", victimViaFile),
+	}
 	for _, scope := range []string{"dir-link", "file-link"} {
-		if err := sink.RotateForScope(scope); err == nil {
+		err := sink.RotateForScope(scope)
+		if err == nil {
 			t.Errorf("RotateForScope(%q): expected rejection of a symlinked target, got nil", scope)
+		} else if want := fmt.Sprintf("debug file sink: the debug log %q is written only inside %q: %s; replace the link with what it leads to", filepath.Join(scope, "agent-debug.log"), originDir, says[scope]); err.Error() != want {
+			t.Errorf("RotateForScope(%q) said %q; want %q", scope, err, want)
 		}
 		if got := sink.CurrentScope(); got != "" {
 			t.Errorf("RotateForScope(%q) was accepted: CurrentScope=%q", scope, got)

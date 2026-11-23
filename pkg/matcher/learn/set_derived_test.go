@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,16 +64,16 @@ func TestASetsSecondTestReadsNoEarlierPayloadAgain(t *testing.T) {
 	// payload, and each of its fields, holds a "filler" word.
 	spans, words := instantSpans, tokensOfForms
 	defer func() { instantSpans, tokensOfForms = spans, words }()
-	read := 0
+	var read atomic.Int64
 	instantSpans = func(s string) []instant {
 		if strings.Contains(s, "filler") {
-			read++
+			read.Add(1)
 		}
 		return spans(s)
 	}
 	tokensOfForms = func(forms []string) []map[string]bool {
 		if strings.Contains(strings.Join(forms, "\n"), "filler") {
-			read++
+			read.Add(1)
 		}
 		return words(forms)
 	}
@@ -81,17 +82,17 @@ func TestASetsSecondTestReadsNoEarlierPayloadAgain(t *testing.T) {
 	tr := NewTracker()
 	tr.NewSet()
 	tr.Begin()
-	read = 0
+	read.Store(0)
 	first := classify(tr.Drifts())
-	if read == 0 {
+	if read.Load() == 0 {
 		t.Fatalf("the first test read no payload: the row reads nothing")
 	}
 	tr.End()
 	tr.Begin()
-	read = 0
+	read.Store(0)
 	second := classify(tr.Drifts())
-	if read != 0 {
-		t.Errorf("the second test of the set read the instants or words of payloads %d times again, want 0: what is read of a recording's payload alone is kept for the set", read)
+	if read.Load() != 0 {
+		t.Errorf("the second test of the set read the instants or words of payloads %d times again, want 0: what is read of a recording's payload alone is kept for the set", read.Load())
 	}
 	tr.End()
 	if !reflect.DeepEqual(first, want) || !reflect.DeepEqual(second, want) {
@@ -100,11 +101,11 @@ func TestASetsSecondTestReadsNoEarlierPayloadAgain(t *testing.T) {
 
 	tr.NewSet()
 	tr.Begin()
-	read = 0
+	read.Store(0)
 	if again := classify(tr.Drifts()); !reflect.DeepEqual(again, want) {
 		t.Errorf("learned %v in the next set, want %v", again, want)
 	}
-	if read == 0 {
+	if read.Load() == 0 {
 		t.Errorf("the next set read no payload: a recording staged again for another set must be read again")
 	}
 }
@@ -309,31 +310,31 @@ func echoesAcrossTests(t *testing.T, inField bool, mocks []*models.Mock, sent, g
 	}
 	spans := instantSpans
 	defer func() { instantSpans = spans }()
-	read := 0
+	var read atomic.Int64
 	instantSpans = func(s string) []instant {
 		if strings.Contains(s, "filler") {
-			read++
+			read.Add(1)
 		}
 		return spans(s)
 	}
 	tr := NewTracker()
 	tr.NewSet()
 	tr.Begin()
-	read = 0
+	read.Store(0)
 	if first := classify(tr.Drifts()); !reflect.DeepEqual(first, want) {
 		t.Errorf("in a field %v: learned %v in the first test, want %v", inField, first, want)
 	}
-	if read == 0 {
+	if read.Load() == 0 {
 		t.Fatalf("in a field %v: the first test read no filler's instants: the row reads nothing", inField)
 	}
 	tr.End()
 	tr.Begin()
-	read = 0
+	read.Store(0)
 	if second := classify(tr.Drifts()); !reflect.DeepEqual(second, want) {
 		t.Errorf("in a field %v: learned %v in the second test, want %v", inField, second, want)
 	}
-	if read != 0 {
-		t.Errorf("in a field %v: the second test of the set read the instants of earlier payloads' fields %d times again, want 0", inField, read)
+	if read.Load() != 0 {
+		t.Errorf("in a field %v: the second test of the set read the instants of earlier payloads' fields %d times again, want 0", inField, read.Load())
 	}
 	tr.End()
 }

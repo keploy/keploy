@@ -186,7 +186,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		return bufio.NewReader(app), ended
 	}
 	reqMeta := func(path string) map[string]interface{} {
-		return map[string]interface{}{"method": "POST", "host": "api.example", "path": path, "query keys": "token"}
+		return map[string]interface{}{"method": "POST", "host": "{}.{} " + models.HostTag(context.Background(), "api.example"), "path": path, "path_tag": models.PathTag(context.Background(), "POST", "/u"), "query keys": "token"}
 	}
 	metadataOf := func(e observer.LoggedEntry) interface{} {
 		m, _ := e.ContextMap()["metadata"].(map[string]string)
@@ -214,7 +214,8 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		bodyLen := int64(len(shapeBody("live")))
 		wantOnce(t, logs, "decodeHTTP debug logs for input", map[string]interface{}{
 			"method":       "POST",
-			"path":         "/u",
+			"path":         "/{}",
+			"path_tag":     models.PathTag(context.Background(), "POST", "/u"),
 			"header names": []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
 			"body bytes":   bodyLen,
 		})
@@ -254,7 +255,10 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			"input header keys":    []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
 		})
 		wantOnce(t, logs, "The url path of mock and request aren't the same", map[string]interface{}{
-			"mock name": "mock-path", "input path": "/u", "mock path": "/v",
+			"mock name": "mock-path", "input path": "/{}", "mock path": "/{}", "differs at segment": int64(0),
+			// The call's tag, which the console prints where it misses; the
+			// recording's path by its shape alone.
+			"path_tag": models.PathTag(context.Background(), "POST", "/u"),
 		})
 		wantOnce(t, logs, "after matching the http request", map[string]interface{}{"isMatched": true, "mock name": "mock-live"})
 		noValueLogged(t, logs, append(append(shapeValues("live"), shapeValues("rec2")...), shapeValues("rec3")...))
@@ -322,7 +326,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			// Every field, so one added beside these (a header of the
 			// answer, a value's first characters) fails the row too.
 			wantOnce(t, logs, msg, map[string]interface{}{
-				"metadata": map[string]string{"method": "POST", "host": "api.example", "path": "/u", "query keys": "token"},
+				"metadata": map[string]string{"method": "POST", "host": "{}.{} " + models.HostTag(context.Background(), "api.example"), "path": "/{}", "path_tag": models.PathTag(context.Background(), "POST", "/u"), "query keys": "token"},
 				"policy":   string(policy),
 			})
 			noValueLogged(t, logs, append(shapeValues("live"), "dep-an5wer", "dep-c00k1e"))
@@ -342,8 +346,8 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			t.Fatalf("decodeHTTP = %v", err)
 		}
 		pt := logs.FilterMessage("egress passthrough: serving without mock match").All()
-		if len(pt) != 1 || pt[0].ContextMap()["path"] != "/u" || !reflect.DeepEqual(metadataOf(pt[0]), reqMeta("/u")) {
-			t.Errorf("logged the passthrough as %v, want its path and the request's method, host, path and query keys", pt)
+		if len(pt) != 1 || pt[0].ContextMap()["path"] != "/{}" || !reflect.DeepEqual(metadataOf(pt[0]), reqMeta("/{}")) {
+			t.Errorf("logged the passthrough as %v, want its path shape and the request's method, host, path shape and query keys", pt)
 		}
 		noValueLogged(t, logs, shapeValues("live"))
 	})
@@ -357,7 +361,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			t.Fatalf("decodeHTTP = nil, want the body's decode error")
 		}
 		failed := logs.FilterMessage("failed to decode the http request body").All()
-		if len(failed) != 1 || failed[0].Level != zapcore.ErrorLevel || !reflect.DeepEqual(metadataOf(failed[0]), reqMeta("/u")) {
+		if len(failed) != 1 || failed[0].Level != zapcore.ErrorLevel || !reflect.DeepEqual(metadataOf(failed[0]), reqMeta("/{}")) {
 			t.Errorf("logged the failure as %v, want one error entry with the request's method, host, path and query keys", failed)
 		}
 		noValueLogged(t, logs, shapeValues("live"))
@@ -419,7 +423,7 @@ func noValueLogged(t *testing.T, logs *observer.ObservedLogs, values []string) {
 // serves it, again and again.
 func serveHTTPMock(t *testing.T, h *HTTP, req, resp string) *mockMemDb {
 	t.Helper()
-	m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(req), Resp: []byte(resp), ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+	m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(req), Resp: []byte(resp), ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 		80, "test-conn", models.OutgoingOptions{})
 	if err != nil || m == nil {
 		t.Fatalf("buildHTTPMock = (%v, %v)", m, err)
@@ -532,7 +536,7 @@ func TestAServedCallBuildsNoDebugEntryWithDebugOff(t *testing.T) {
 		t.Skip("the allocation budgets are Linux's, without -race")
 	}
 	// Allocations of a call with a 16 B body and answer.
-	smallBudget, ok := map[string]float64{"amd64": 105, "arm64": 105}[runtime.GOARCH]
+	smallBudget, ok := map[string]float64{"amd64": 102, "arm64": 102}[runtime.GOARCH]
 	if !ok {
 		t.Skipf("no allocation budget for %s", runtime.GOARCH)
 	}
@@ -565,8 +569,8 @@ func TestAServedCallLogsItsDebugEntriesWithDebugOn(t *testing.T) {
 		t.Fatalf("served %q, want the mock's answer", got)
 	}
 	input := logs.FilterMessage("decodeHTTP debug logs for input").All()
-	if len(input) != 1 || input[0].ContextMap()["path"] != "/u" || input[0].ContextMap()["body bytes"] != int64(4) {
-		t.Errorf("logged the input as %v, want its path and body length", input)
+	if len(input) != 1 || input[0].ContextMap()["path"] != "/{}" || input[0].ContextMap()["body bytes"] != int64(4) {
+		t.Errorf("logged the input as %v, want its path shape and body length", input)
 	}
 	for _, msg := range []string{"header noise", "body noise", "url noise", "after matching the http request",
 		"mocks under consideration for match function", "http mock schema match results", "exact body match found"} {

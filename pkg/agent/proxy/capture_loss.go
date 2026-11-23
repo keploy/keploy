@@ -33,7 +33,7 @@ import (
 // the order of events, not by a timer.
 func (p *Proxy) CaptureLosses() models.CaptureLosses {
 	for _, h := range p.caTrust.settle() {
-		p.losses.Add(models.CaptureLossTLSAbandoned, "to "+h.dst)
+		p.losses.Add(models.CaptureLossTLSAbandoned, h.what, h.hosts...)
 	}
 	return p.losses.Snapshot()
 }
@@ -154,6 +154,10 @@ type clientTLS struct {
 	// tgid is the client's process (its kernel tgid, the eBPF redirect's);
 	// 0 when unknown, which no call ever makes trusted.
 	tgid uint32
+	// nsPid is the same process in the agent's own PID namespace (the eBPF
+	// redirect's agentNsPid), 0 when it is outside it: what a build's gate
+	// reads the process by (process).
+	nsPid uint32
 
 	mu sync.Mutex
 	// began is the scope the handshake began in.
@@ -182,9 +186,15 @@ func (c *clientTLS) inScope() bool {
 }
 
 // withClientTLS is ctx carrying the events of the client-side handshakes made
-// under it by the process tgid (0: unknown), charged to dst (clientTLS).
-func (p *Proxy) withClientTLS(ctx context.Context, dst string, tgid uint32) context.Context {
-	return pTls.WithClientEvents(ctx, &clientTLS{p: p, ctx: ctx, dst: dst, tgid: tgid})
+// under it by the process proc (KernelPid 0: unknown), charged to dst
+// (clientTLS).
+func (p *Proxy) withClientTLS(ctx context.Context, dst string, proc Process) context.Context {
+	return pTls.WithClientEvents(ctx, &clientTLS{p: p, ctx: ctx, dst: dst, tgid: proc.KernelPid, nsPid: proc.Pid})
+}
+
+// srcProcess is the process that opened the connection o was stamped for.
+func srcProcess(o models.OutgoingOptions) Process {
+	return Process{Pid: o.SrcNsPid, KernelPid: o.SrcPid}
 }
 
 // caTrust is the client processes, by kernel tgid, that sent a call through
@@ -211,11 +221,19 @@ type caTrust struct {
 }
 
 // heldHangUp is a hang-up caTrust holds: by the process tgid, in the scope
-// its handshake began and ended in, on a connection to dst.
+// its handshake began and ended in, on a connection to dst; what is the loss
+// it is charged as if no call cancels it (clientTLS.lossText, read as it hung
+// up: the destination, and a build's gate's why for the process).
 type heldHangUp struct {
 	tgid  uint32
 	scope testScope
-	dst   string
+	// dstLog is the destination as a line names it: its host by its shape
+	// and tag (models.HostLogName), an address whole.
+	dstLog string
+	what   string
+	// hosts is the host what names, where it stands, with that tag
+	// (clientTLS.lossText).
+	hosts models.LossHosts
 }
 
 // hangUpVerdict is what caTrust.hangUp makes of a hang-up.
@@ -232,13 +250,13 @@ const (
 )
 
 // hangUp is a hang-up by the process tgid in scope, on a connection to dst,
-// under the proven switch: a cancel when the process sent a call through
+// charged as what if it is a loss, under the proven switch: a cancel when the process sent a call through
 // keploy's certificate in this run; held when it has not, until a call of
 // the process in the same scope cancels it (noteCall) or the next read of
 // the counts charges it (settle). It is charged now when the process is
 // unknown (0: no process, which no call makes trusted), and without the
 // switch, as before, whatever the process sent.
-func (t *caTrust) hangUp(tgid uint32, scope testScope, dst string) hangUpVerdict {
+func (t *caTrust) hangUp(tgid uint32, scope testScope, dstLog, what string, hosts models.LossHosts) hangUpVerdict {
 	if tgid == 0 || !provenswitch.On() {
 		return hangUpCharged
 	}
@@ -247,7 +265,7 @@ func (t *caTrust) hangUp(tgid uint32, scope testScope, dst string) hangUpVerdict
 	if _, ok := t.trusted[tgid]; ok {
 		return hangUpCancelled
 	}
-	t.held = append(t.held, heldHangUp{tgid: tgid, scope: scope, dst: dst})
+	t.held = append(t.held, heldHangUp{tgid: tgid, scope: scope, dstLog: dstLog, what: what, hosts: hosts})
 	return hangUpHeld
 }
 
@@ -291,7 +309,7 @@ func (t *caTrust) settle() []heldHangUp {
 func (p *Proxy) noteTLSCall(tgid uint32) {
 	for _, h := range p.caTrust.noteCall(tgid, p.testScopeNow()) {
 		p.logger.Debug("a client process sent a call through keploy's certificate after hanging up in the same test: that hang-up is a cancel, not a capture loss",
-			zap.Uint32("tgid", h.tgid), zap.String("destination", h.dst))
+			zap.Uint32("tgid", h.tgid), zap.String("destination", h.dstLog))
 	}
 }
 
@@ -301,19 +319,50 @@ func (c *clientTLS) hungUp(how string) {
 	c.mu.Lock()
 	began := c.began
 	c.mu.Unlock()
-	switch c.p.caTrust.hangUp(c.tgid, began, c.dst) {
+	what, hosts := c.lossText()
+	// The destination as a line names it: a CONNECT target's host by its
+	// shape and tag, in the connection's session (c.ctx carries it).
+	dstLog := models.HostLogName(c.ctx, c.dst)
+	switch c.p.caTrust.hangUp(c.tgid, began, dstLog, what, hosts) {
 	case hangUpCancelled:
 		c.p.logger.Debug("a client process that sent a call through keploy's certificate in this run "+how+": a cancel, not a capture loss",
-			zap.Uint32("tgid", c.tgid), zap.String("destination", c.dst))
+			zap.Uint32("tgid", c.tgid), zap.String("destination", dstLog))
 	case hangUpHeld:
 		c.p.logger.Debug("a client process that has not sent a call through keploy's certificate yet "+how+": a cancel if it sends one in this test, a capture loss otherwise",
-			zap.Uint32("tgid", c.tgid), zap.String("destination", c.dst))
+			zap.Uint32("tgid", c.tgid), zap.String("destination", dstLog))
 	default:
-		c.p.losses.Add(models.CaptureLossTLSAbandoned, "to "+c.dst)
+		c.p.losses.Add(models.CaptureLossTLSAbandoned, what, hosts...)
 	}
 }
 
+// process is the client's process, as a build's gate is told it.
+func (c *clientTLS) process() Process { return Process{Pid: c.nsPid, KernelPid: c.tgid} }
+
+// lossText is what a handshake c lost is charged as: its destination, and
+// what a build's gate knows of why its process failed it (OnClientTLS's
+// Why), so the test's reason names the process and the cause, not only the
+// call; and the host it names (a CONNECT target's name), where it stands,
+// with its tag in the connection's session (c.ctx), as the connection's
+// lines name it. None for an address.
+func (c *clientTLS) lossText() (string, models.LossHosts) {
+	what := models.NewLossText(c.ctx).Say("to ").Host(c.dst)
+	if g := OnClientTLS; g != nil && c.tgid != 0 {
+		if why := g.Why(c.process()); why != "" {
+			what.Say(": " + why)
+		}
+	}
+	return what.String(), what.Hosts()
+}
+
+// HandshakeBegin waits, before keploy's proxy answers the client, for a
+// build's gate to have the client's process ready (OnClientTLS's Ready): the
+// gate's work, keploy's TLS pin bypass, has to be in place before the client
+// checks the certificate keploy answers with. The handshake's scope begins
+// once the gate returns.
 func (c *clientTLS) HandshakeBegin() {
+	if g := OnClientTLS; g != nil && c.tgid != 0 {
+		g.Ready(c.ctx, c.process(), c.p.realOrPassthroughLabels(c.tgid))
+	}
 	now := c.p.testScopeNow()
 	c.mu.Lock()
 	c.began = now
@@ -326,7 +375,8 @@ func (c *clientTLS) HandshakeFailed(err error) {
 	case errors.Is(err, net.ErrClosed):
 		// keploy closed its own end: the client gave nothing up.
 	case !pTls.IsClientGiveUp(err):
-		c.p.losses.Add(models.CaptureLossTLSAbort, "to "+c.dst)
+		what, hosts := c.lossText()
+		c.p.losses.Add(models.CaptureLossTLSAbort, what, hosts...)
 	case pTls.CertificateSent(err) && c.inScope():
 		c.hungUp("gave a TLS handshake up")
 	}
@@ -341,13 +391,13 @@ func (c *clientTLS) SilentHangUp(err error) {
 
 // clientTLSHandler is pTls.HandleTLSConnection for a parser's TLS upgrader
 // on the record path (util.ConnTLSUpgrader: MySQL's SSLRequest, Postgres's)
-// on a connection to dstAddr from the process tgid: its handshake is charged
+// on a connection to dstAddr from the process proc: its handshake is charged
 // as every client-side handshake is (clientTLS), and its own error
 // (pTls.HandshakeCause) is returned, which the parsers above it tell a
 // client's EOF apart by identity with.
-func (p *Proxy) clientTLSHandler(dstAddr string, tgid uint32) util.ClientTLSHandlerFunc {
+func (p *Proxy) clientTLSHandler(dstAddr string, proc Process) util.ClientTLSHandlerFunc {
 	return func(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
-		c, isMTLS, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr, tgid), logger, conn, backdate)
+		c, isMTLS, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr, proc), logger, conn, backdate)
 		return c, isMTLS, pTls.HandshakeCause(err)
 	}
 }
@@ -386,9 +436,11 @@ func remoteOf(c net.Conn) string {
 // call was never answered could pass.
 //
 // dst is the destination's address, as a string or a net.Addr, read only for
-// a panic.
-func (p *Proxy) countParserPanic(err error, parser integrations.IntegrationType, dst any) {
+// a panic; a name it holds (a CONNECT target's, an upstream's) is listed
+// with its tag in ctx's session, the connection's.
+func (p *Proxy) countParserPanic(ctx context.Context, err error, parser integrations.IntegrationType, dst any) {
 	if errors.Is(err, util.ErrParserPanicked) {
-		p.losses.Add(models.CaptureLossParserPanic, "the "+string(parser)+" parser, on a connection to "+fmt.Sprint(dst))
+		what := models.NewLossText(ctx).Say("the " + string(parser) + " parser, on a connection to ").Host(fmt.Sprint(dst))
+		p.losses.Add(models.CaptureLossParserPanic, what.String(), what.Hosts()...)
 	}
 }

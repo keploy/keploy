@@ -3,7 +3,6 @@ package conn
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -95,6 +94,29 @@ func SkipUnderPressure(ctx context.Context, req *http.Request, resp *http.Respon
 	return true
 }
 
+// SkipEndedRecording reports whether no recording takes the exchange a
+// capture hook is about to record: the recording of ctx's manager has ended
+// (its client ended its streams: syncMock EndRecording) and none has started
+// since. When none does, it closes the exchange's bodies, so the proxied
+// connection's readers do not leak, and counts the request as not captured
+// (syncMock NoteNotCaptured), which the agent says once. A capture hook asks
+// it first and returns when it says true: nothing of the exchange is read,
+// deduplicated or handed on.
+func SkipEndedRecording(ctx context.Context, req *http.Request, resp *http.Response) bool {
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	if mgr.Recording() {
+		return false
+	}
+	if req != nil && req.Body != nil {
+		_ = req.Body.Close()
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	mgr.NoteNotCaptured()
+	return true
+}
+
 // SkipGRPCUnderPressure reports whether a pause of the memory guard costs a
 // gRPC call, as CaptureGRPC decides whether to record it: the guard has
 // paused recording now, or had as the forwarder read the call's request
@@ -120,8 +142,32 @@ func SkipGRPCUnderPressure(ctx context.Context, pausedAtRequest bool) bool {
 	return paused
 }
 
+// HandOn hands testCase, which a capture built, to t, the recording's queue,
+// and reports whether it did. A capture runs on its ingress's context (ctx),
+// which ends as that ingress stops: its forwarder for the app's port, or the
+// agent, is stopping. A test case that ctx's end beats to the queue never
+// reaches the recording, though the app served its request: it is counted on
+// the manager ctx carries (syncMock NoteNotHandedOn), so the recording says
+// how many it lost so. A CaptureFunc that builds its own test cases hands them
+// on with it.
+func HandOn(ctx context.Context, t chan<- *models.TestCase, testCase *models.TestCase) bool {
+	// A capture that began as its recording ended (SkipEndedRecording)
+	// hands on nothing: no stream of a recording reads t past its end.
+	if mgr := syncMock.FromContextOrGlobal(ctx); !mgr.Recording() {
+		mgr.NoteNotCaptured()
+		return false
+	}
+	select {
+	case t <- testCase:
+		return true
+	case <-ctx.Done():
+		syncMock.FromContextOrGlobal(ctx).NoteNotHandedOn()
+		return false
+	}
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
-	if SkipUnderPressure(ctx, req, resp) {
+	if SkipEndedRecording(ctx, req, resp) || SkipUnderPressure(ctx, req, resp) {
 		return
 	}
 
@@ -133,6 +179,14 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			utils.LogError(logger, err, "failed to close the http response body")
 		}
 	}()
+
+	if ShouldSkipStaticAsset(logger, req, resp, opts) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		logger.Debug("skipping static asset test case (--ignore-static-assets)")
+		return
+	}
 
 	// What the decodes below hold reserved with the caller's
 	// DecodeReserveFunc, their output buffers: given back once the test case
@@ -146,7 +200,9 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		var err error
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
-			logger.Debug("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
+			// Its size, never its bytes: a request body holds what the
+			// application was sent (a login's password, a token).
+			logger.Debug("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)), zap.Int64("of size", int64(len(reqBody))), zap.Error(err))
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {
@@ -162,11 +218,10 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 					// decompression MaxTestCaseSize check further down, hit
 					// earlier — log it the same way, not as a decode failure.
 					logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
-						zap.String("url", req.URL.String()),
-						zap.String("method", req.Method))
+						zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 					return
 				}
-				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return
 			}
 		}
@@ -219,8 +274,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			}
 			if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
-					zap.String("url", req.URL.String()),
-					zap.String("method", req.Method))
+					zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return
 			}
 			utils.LogError(logger, err, "failed to decompress the response body")
@@ -235,8 +289,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Int("totalSize", totalSize),
 			zap.Int("reqBodySize", len(reqBody)),
 			zap.Int("respBodySize", len(respBody)),
-			zap.String("url", req.URL.String()),
-			zap.String("method", req.Method))
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		return
 	}
 
@@ -248,8 +301,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		respBodySize = int64(len(respBody))
 		logger.Debug("response body exceeds 1MB during recording, storing only body size",
 			zap.Int64("body_size_bytes", respBodySize),
-			zap.String("url", req.URL.String()),
-			zap.String("method", req.Method))
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		respBody = []byte{} // clear the body — only size is stored
 	}
 
@@ -264,7 +316,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	for _, fd := range formData {
 		if len(fd.Paths) > 0 {
 			hasBinaryFile = true
-			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Strings("paths", fd.Paths))
+			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Int("files", len(fd.Paths)))
 			break
 		}
 	}
@@ -323,17 +375,32 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// A left-out request's verdict prunes nothing. It is not a duplicate:
 		// it ran for long, and a keep=false resolve over its whole span would
 		// drop the mocks of every call that ran beside it and is not decided
-		// yet (a gRPC call opens no window to hold them). What is left of its
+		// yet (one whose window was given up holds none). What is left of its
 		// window is claimed by whoever's it is, or goes at the stale cutoff.
 		//
 		// The window is on the manager its ingress opened it on, the one the
 		// ctx carries (or the global one): the test-id counter's, and the one
 		// resolved here.
+		//
+		// The window is claimed only once the test case is in the
+		// recording's queue (HandOn), not before: a claimed window is never
+		// given up, so it pins every mock held from its start on, and the
+		// queue stays full for as long as the recording's stream is slow.
+		// Claimed while the test case waited, the hold grew with all the
+		// traffic captured meanwhile, past its bound. So the window stays
+		// open and unclaimed until the test case is queued, and the mocks
+		// are resolved to it (ResolveKept) after that:
+		//   - given up already: left out, as before, and never handed on;
+		//   - not handed on (the ingress stopped first, and HandOn counted
+		//     it): nothing is resolved to a test case the recording never
+		//     gets; the ingress ends the window, as for a left-out request;
+		//   - given up while the test case waited for the queue: it went out
+		//     without mocks it may own, and RevokeTestCase leaves it out.
 		mgr := syncMock.FromContextOrGlobal(ctx)
 		win := syncMock.WindowFromContext(ctx)
-		if !win.Keep() {
-			// The manager warned of it as Keep found the window given up; the
-			// ingress ends the window.
+		if win.LeftOut() {
+			// The manager warned of it as LeftOut found the window given up;
+			// the ingress ends the window.
 			logger.Debug("Test case left out: its request's window was given up while it was in flight",
 				zap.String("method", req.Method),
 				zap.Time("in_flight_since", reqTimeTest))
@@ -353,11 +420,27 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// the taint flow and stops the go/clear-text-logging false
 		// positives that fire downstream (syncMock.go diag/Info
 		// logs include test_name for ResolveRange traceability).
+		if !HandOn(ctx, t, testCase) {
+			return
+		}
+		sent = true
+		if !win.Keep() {
+			// Given up while the test case waited for the queue: the manager
+			// warned of it as Keep found it so, and the test case is left out
+			// after all; the ingress ends the window.
+			mgr.RevokeTestCase(testName)
+			logger.Debug("Test case left out: its request's window was given up while its test case waited for the recording's queue",
+				zap.String("method", req.Method),
+				zap.Time("in_flight_since", reqTimeTest))
+			return
+		}
 		// Dumping the test case from the mock manager in synchronous mode:
 		// takes what was held for the request and ends its window before
-		// handing the mocks on.
+		// handing the mocks on. ResolveKept noted the test case's span.
 		mgr.ResolveKept(win, reqTimeTest, resTimeTest, testName, mapping)
-	} else if syncMock.WindowFromContext(ctx).LeftAtStop() {
+		return
+	}
+	if syncMock.WindowFromContext(ctx).LeftAtStop() {
 		// Without --sync nothing is resolved here, but a request that was in
 		// flight across its recording's stop is left out as Keep leaves it
 		// out with --sync: the recording it began in has ended without it,
@@ -367,30 +450,36 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Time("in_flight_since", reqTimeTest))
 		return
 	}
-	select {
-	case <-ctx.Done():
+	if !HandOn(ctx, t, testCase) {
 		return
-	case t <- testCase:
-		sent = true
-		// Without --sync no resolve ends the window: it is noted a test
-		// case's here, before the ingress ends it (syncMock.TestSpanAt).
-		// With --sync ResolveKept noted it, and its window has ended.
-		syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 	}
+	sent = true
+	// Without --sync no resolve ends the window: it is noted a test case's
+	// here, before the ingress ends it (syncMock.TestSpanAt).
+	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
+	filtered, _ := evalFilters(logger, req, opts)
+	return filtered
+}
+
+func evalFilters(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) (filtered bool, matchedInclude bool) {
+	if req == nil {
+		return false, false
+	}
 	dstPort := 0
 	var err error
-	if p := req.URL.Port(); p != "" {
-		dstPort, err = strconv.Atoi(p)
-		if err != nil {
-			utils.LogError(logger, err, "failed to obtain destination port from request")
-			return false
+	if req.URL != nil {
+		if p := req.URL.Port(); p != "" {
+			dstPort, err = strconv.Atoi(p)
+			if err != nil {
+				utils.LogError(logger, err, "failed to obtain destination port from request")
+				return false, false
+			}
 		}
 	}
 
 	hasInclude := false
-	matchedInclude := false
 
 	type cond struct {
 		eligible bool
@@ -484,16 +573,16 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			}
 		} else { // Exclude (default)
 			if isMatch {
-				return true // Exclude ALWAYS takes priority
+				return true, false // Exclude ALWAYS takes priority
 			}
 		}
 	}
 
 	if hasInclude && !matchedInclude {
-		return true
+		return true, false
 	}
 
-	return false
+	return false, matchedInclude
 }
 
 // RemoveFormFiles deletes the files ExtractFormData wrote the file parts of a
@@ -506,7 +595,7 @@ func RemoveFormFiles(logger *zap.Logger, forms []models.FormData) {
 				continue
 			}
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				utils.LogError(logger, err, "failed to remove the file a form's file part was written to", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "failed to remove the file a form's file part was written to", zap.String("path", models.FormFilePathLogText(path)))
 			}
 		}
 	}
@@ -599,7 +688,10 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 // process than this one: the DaemonSet agent streams its test cases to
 // k8s-proxy's control plane, which cannot read this pod's temp files. Each temp
 // file is removed once read and its path cleared, so the persister writes the
-// asset from the bytes. A file that cannot be read keeps its path.
+// asset from the bytes. A file that cannot be read loses its path too: the path
+// names a file of this process only, which the persister cannot read, and a test
+// store refuses an absolute path it was given no contents for. So the part goes
+// with neither, and the persister keeps the test case without that part's file.
 func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 	for i := range tc.HTTPReq.Form {
 		form := &tc.HTTPReq.Form[i]
@@ -609,7 +701,8 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 			}
 			content, err := os.ReadFile(path)
 			if err != nil {
-				utils.LogError(logger, err, "Error reading multipart temp file", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "Error reading multipart temp file: the part goes without its file", zap.String("path", models.FormFilePathLogText(path)))
+				form.Paths[j] = ""
 				continue
 			}
 			if len(form.FileContents) < len(form.Paths) {
@@ -618,23 +711,33 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 			form.FileContents[j] = content
 			form.Paths[j] = ""
 			if err := os.Remove(path); err != nil {
-				utils.LogError(logger, err, "Error removing temp file", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "Error removing temp file", zap.String("path", models.FormFilePathLogText(path)))
 			}
 		}
 	}
 }
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel.
-// Mirrors NewCapture (HTTP) exactly:
-//   - GRPCCaptureHook is invoked unconditionally before ResolveRange, so
-//     ResolveRange always runs — even for duplicates (with keep=false to flush
-//     their mocks cleanly).
-//   - Counter is always incremented so concurrent duplicate streams each get a
-//     unique window name; keep=false discards their mocks without saving the TC.
-//   - Duplicate streams return after ResolveRange, before the test case is sent.
-//
-// A call a pause of the memory guard costs (SkipGRPCUnderPressure) is left out
-// and counted before any of that.
+// It decides the call's window, which ctx carries (syncMock.WindowFromContext:
+// the gRPC ingress opened it before the app could read the call's request), as
+// Capture decides an HTTP request's; its ingress ends the window once it has
+// returned, on every path:
+//   - a call a pause of the memory guard costs (SkipGRPCUnderPressure) is left
+//     out and counted before any of the rest;
+//   - GRPCCaptureHook is invoked before any resolve. With --sync every call,
+//     duplicate or not, takes a name of the manager's (test-N): concurrent
+//     duplicates would otherwise share one in the manager's window map;
+//   - a duplicate ends its window BEFORE its prune (a keep=false resolve,
+//     with --sync), so the window does not hold its own debris, and is not
+//     handed on;
+//   - a call over the 5 MB cap is not recorded, and nothing is resolved to it;
+//   - with --sync a window given up while the call was in flight (the hold's
+//     bound, memory pressure, its recording's stop) leaves it out; else its
+//     test case is handed on with the window still unclaimed, then claimed
+//     (Keep): given up meanwhile, the test case is revoked; kept, ResolveKept
+//     takes what was held and ends the window;
+//   - without --sync a call in flight across its recording's stop is left
+//     out, and a test case handed on notes its span (Window.Tested).
 func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
@@ -646,39 +749,36 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	}
 
-	if SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
+	if SkipEndedRecording(ctx, nil, nil) || SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
 		return
 	}
 
-	testName := http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]
+	reqTime, resTime := http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp
+	// Read whatever its case: a real call sends it lowercase, as HTTP/2 does
+	// every header name (GrpcHeaders.Ordinary).
+	testName := http2Stream.GRPCReq.Headers.Ordinary("Keploy-Test-Name")
 	var isDuplicate bool
 	var schemaKey string
 	if GRPCCaptureHook != nil {
 		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
 	}
 
-	// Bin buffered outgoing mocks into this stream's window before any early
-	// return. For non-duplicates keep=true attributes the mocks; for duplicates
-	// keep=false releases them from the buffer so they don't accumulate as
-	// orphans. Must run before the isDuplicate early-return below.
+	// The call's manager: the one its context carries, as Capture's, so an
+	// HTTP request's and a gRPC call's names never share one, and the call's
+	// mocks resolve on the manager its window is on.
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	win := syncMock.WindowFromContext(ctx)
 	if synchronous {
-		// Always increment the counter so every stream — duplicate or not —
-		// gets a unique window name. Concurrent duplicates would otherwise all
-		// share "test-0" and collide in the mock manager's window map.
-		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
-		testName = fmt.Sprintf("test-%d", currentID)
-		if mgr := syncMock.Get(); mgr != nil {
-			mgr.ResolveRange(
-				http2Stream.GRPCReq.Timestamp,
-				http2Stream.GRPCResp.Timestamp,
-				testName,
-				!isDuplicate,
-				mapping,
-			)
-		}
+		// The name its mocks are mapped to and its test case's (below), as an
+		// HTTP request's is (Capture): the recording joins a mapping to its
+		// test case by it.
+		testName = fmt.Sprintf("test-%d", mgr.NextTestID())
 	}
-
 	if isDuplicate {
+		win.Close()
+		if synchronous {
+			mgr.ResolveRange(reqTime, resTime, testName, false, mapping)
+		}
 		return
 	}
 
@@ -687,15 +787,19 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// easily exceed this threshold.
 	totalSize := len(http2Stream.GRPCReq.Body.DecodedData) + len(http2Stream.GRPCResp.Body.DecodedData)
 	if totalSize > MaxTestCaseSize {
+		// The method by its path's shape and per-session tag, as an HTTP call
+		// over the limit is named by its request's: the path is the app's.
+		u := &url.URL{Path: http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]}
 		logger.Error("gRPC test case data exceeds 5MB limit, skipping capture",
 			zap.Int("totalSize", totalSize),
-			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+			zap.String("path", utils.URLPathShape(u)),
+			utils.PathTagField(models.URLPathTag(ctx, http.MethodPost, u)))
 		return
 	}
 
 	testCase := &models.TestCase{
 		Version:   models.GetVersion(),
-		Name:      http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Name:      testName,
 		Kind:      models.GRPC_EXPORT,
 		Created:   time.Now().Unix(),
 		SourcePod: SourcePodFromContext(ctx),
@@ -708,11 +812,33 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
 
-	select {
-	case <-ctx.Done():
+	if synchronous {
+		// As Capture: the window is claimed only once the test case is in
+		// the recording's queue, as a claimed window pins the hold.
+		if win.LeftOut() {
+			logger.Debug("gRPC test case left out: its call's window was given up while it was in flight",
+				zap.Time("in_flight_since", reqTime))
+			return
+		}
+		if !HandOn(ctx, t, testCase) {
+			return
+		}
+		if !win.Keep() {
+			mgr.RevokeTestCase(testName)
+			logger.Debug("gRPC test case left out: its call's window was given up while its test case waited for the recording's queue",
+				zap.Time("in_flight_since", reqTime))
+			return
+		}
+		mgr.ResolveKept(win, reqTime, resTime, testName, mapping)
 		return
-	case t <- testCase:
-		logger.Debug("Captured gRPC test case",
-			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
 	}
+	if win.LeftAtStop() {
+		logger.Debug("gRPC test case left out: its call was in flight across its recording's stop",
+			zap.Time("in_flight_since", reqTime))
+		return
+	}
+	if !HandOn(ctx, t, testCase) {
+		return
+	}
+	win.Tested(reqTime, resTime)
 }

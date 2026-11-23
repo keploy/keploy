@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -120,6 +121,9 @@ func Prepare(ctx context.Context, logger *zap.Logger, name string) error {
 		if err := os.Setenv("DOCKER_HOST", rt.Host); err != nil {
 			return fmt.Errorf("failed to point the Engine API client at %s: %w", name, err)
 		}
+		// DOCKER_HOST is the engine's now, not a docker context's: the
+		// processes keploy starts must not be told it came from one.
+		clearContextEnv(logger)
 	}
 	mu.Lock()
 	active = rt
@@ -138,9 +142,8 @@ func Active() Runtime {
 // drive.
 func Unsupported(name string) error {
 	if name == Podman {
-		return fmt.Errorf("this keploy build cannot record or test applications that run in Podman. " +
-			"Keploy from keploy.io (free with an account) can: " +
-			"curl --silent -O -L https://keploy.io/install.sh && source install.sh")
+		return fmt.Errorf("this keploy build cannot record or test applications that run in Podman. "+
+			"Keploy from keploy.io (free with an account) can: %s", models.InstallCommand)
 	}
 	return fmt.Errorf("container engine %q is not supported", name)
 }
@@ -336,6 +339,102 @@ func readOption(a string, bools, valued map[string]bool, valueLetters string) (d
 // value; the others (-d -i -t -P) take none.
 const runValueLetters = "acehlmpuvw"
 
+// Publishes are the port mappings (-p, --publish) the command gives the
+// containers it creates: each of its commands whose program is docker or
+// podman (behind wrappers and assignments, as Invocation reads it) running
+// run, create, container run or container create, or compose's run, read
+// from that subcommand's own options, before its image or service. A word
+// after the image is the container's own argument, and a word of any other
+// program is that program's: neither is a mapping (./app -p <password>,
+// docker run img --port -p, docker compose -p <project> up). Each mapping is
+// the word as the command writes it (rawCommands), its quotes kept, for the
+// caller to read as the shell hands it to the engine.
+func Publishes(command string) []string {
+	var out []string
+	for _, words := range rawCommands(command) {
+		i := program(words)
+		if i < 0 {
+			continue
+		}
+		args := words[i+1:]
+		switch programName(strings.ToLower(words[i])) {
+		case Docker, Podman:
+			if sub, at, found := subcommand(args); found {
+				out = append(out, enginePublishes(strings.ToLower(sub), args[at+1:])...)
+			}
+		case "docker-compose", "podman-compose":
+			out = append(out, composeRunPublishes(args)...)
+		}
+	}
+	return out
+}
+
+// enginePublishes are the mappings an engine subcommand, with its args,
+// gives the container it creates.
+func enginePublishes(sub string, args []string) []string {
+	switch sub {
+	case "run", "create":
+		return optionPublishes(args, runBoolFlags, nil, runValueLetters)
+	case "container":
+		if len(args) > 0 {
+			if next := strings.ToLower(args[0]); next == "run" || next == "create" {
+				return enginePublishes(next, args[1:])
+			}
+		}
+	case "compose":
+		return composeRunPublishes(args)
+	}
+	return nil
+}
+
+// composeRunPublishes are the mappings of compose's run, read from its
+// options before its service; compose's global options (-p is its project
+// there) come first, and no other subcommand takes one.
+func composeRunPublishes(args []string) []string {
+	i := composeSubcommandAt(args)
+	if i >= len(args) || !strings.EqualFold(args[i], "run") {
+		return nil
+	}
+	return optionPublishes(args[i+1:], nil, composeFlagsWithValue, composeValueLetters)
+}
+
+// optionPublishes are the -p and --publish values among options, up to the
+// first word that is none (the image or service): -p v, -pv, -p=v, a short
+// cluster that ends in p (-itp v), --publish v and --publish=v. Every other
+// option is passed over with its value (readOption), so a value is never
+// read as an option: -e -p=1, --name -p.
+func optionPublishes(args []string, bools, valued map[string]bool, valueLetters string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") || a == "-" || a == "--" {
+			return out
+		}
+		_, takesNext := readOption(a, bools, valued, valueLetters)
+		switch {
+		case a == "--publish":
+			if i+1 < len(args) {
+				out = append(out, args[i+1])
+			}
+		case strings.HasPrefix(a, "--publish="):
+			out = append(out, a[len("--publish="):])
+		case !strings.HasPrefix(a, "--"):
+			letters := a[1:]
+			if at := strings.IndexAny(letters, valueLetters); at >= 0 && letters[at] == 'p' {
+				if v := strings.TrimPrefix(letters[at+1:], "="); v != "" {
+					out = append(out, v)
+				} else if i+1 < len(args) {
+					out = append(out, args[i+1])
+				}
+			}
+		}
+		if takesNext {
+			i++
+		}
+	}
+	return out
+}
+
 // runBoolFlags are the long options of docker and podman run that take no
 // value.
 var runBoolFlags = map[string]bool{
@@ -354,13 +453,7 @@ var runBoolFlags = map[string]bool{
 // (after it comes the container's command), start and restart. down, build,
 // pull, ps, logs, exec, stop and the rest start nothing.
 func composeStart(args []string) (detached, ok bool) {
-	i := 0
-	for i < len(args) && strings.HasPrefix(args[i], "-") {
-		if !strings.Contains(args[i], "=") && composeGlobalFlagsWithValue[args[i]] {
-			i++
-		}
-		i++
-	}
+	i := composeSubcommandAt(args)
 	if i >= len(args) {
 		return false, false
 	}
@@ -393,11 +486,132 @@ func composeStart(args []string) (detached, ok bool) {
 	return false, false
 }
 
+// composeSubcommandAt is the index in args, a compose command's arguments
+// (after `compose`, or after docker-compose/podman-compose), of its
+// subcommand: the first word past compose's own options and their values
+// (-p up up is the project "up", then up); len(args) when there is none.
+func composeSubcommandAt(args []string) int {
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "-") {
+		if !strings.Contains(args[i], "=") && composeGlobalFlagsWithValue[args[i]] {
+			i++
+		}
+		i++
+	}
+	return min(i, len(args))
+}
+
+// ComposeOptions are compose's own options in command: the words of the
+// compose command that runs the application from its first argument up to
+// its subcommand (docker compose -p shop -f a.yml up gives -p shop -f a.yml),
+// each as the shell hands it on, its quotes removed. The compose command is
+// docker's or podman's (past the engine's own global options),
+// docker-compose or podman-compose, behind wrappers and assignments as
+// Invocation reads it, also inside a shell's command (sh -c '...'); of
+// several, the first that starts the application attached (as Invocation
+// picks it), else the first that starts containers, else the first. A word
+// after the subcommand is the subcommand's or a container's own (docker
+// compose run app ./tool -p <password>), and a word of any other program is
+// that program's (./seed.sh -p <password> && docker compose up): neither is
+// compose's. nil when command runs no compose.
+func ComposeOptions(command string) []string {
+	var first, starting, attached []string
+	found, foundStarting, foundAttached := false, false, false
+	var read func(command string, depth int)
+	read = func(command string, depth int) {
+		for _, words := range commands(command) {
+			if script, ok := shellScript(words); ok {
+				if depth < 4 {
+					read(script, depth+1)
+				}
+				continue
+			}
+			args, ok := composeArgs(words)
+			if !ok {
+				continue
+			}
+			opts := args[:composeSubcommandAt(args)]
+			detached, starts := composeStart(args)
+			switch {
+			case starts && !detached && !foundAttached:
+				attached, foundAttached = opts, true
+			case starts && !foundStarting:
+				starting, foundStarting = opts, true
+			}
+			if !found {
+				first, found = opts, true
+			}
+		}
+	}
+	read(command, 0)
+	switch {
+	case foundAttached:
+		return attached
+	case foundStarting:
+		return starting
+	}
+	return first
+}
+
+// composeArgs are a simple command's compose arguments, after `compose`
+// (docker's or podman's, past the engine's global options) or after
+// docker-compose or podman-compose; ok is false for any other command.
+func composeArgs(words []string) ([]string, bool) {
+	i := program(words)
+	if i < 0 {
+		return nil, false
+	}
+	args := words[i+1:]
+	switch programName(strings.ToLower(words[i])) {
+	case Docker, Podman:
+		if sub, at, found := subcommand(args); found && strings.EqualFold(sub, "compose") {
+			return args[at+1:], true
+		}
+	case "docker-compose", "podman-compose":
+		return args, true
+	}
+	return nil, false
+}
+
+// shells are the programs whose -c takes a command line.
+var shells = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": true, "ksh": true, "ash": true}
+
+// shellScript is the command line a shell runs from its -c (sh -c '...',
+// bash -lc "...", behind wrappers): its first argument that is no option,
+// once an option cluster holding c is read; ok is false for any other
+// command, and for a shell that runs a file.
+func shellScript(words []string) (string, bool) {
+	i := program(words)
+	if i < 0 || !shells[programName(strings.ToLower(words[i]))] {
+		return "", false
+	}
+	c := false
+	for j := i + 1; j < len(words); j++ {
+		w := words[j]
+		switch {
+		case w == "-o" || w == "+o" || w == "-O" || w == "+O":
+			j++ // set -o's option name
+		case w == "--":
+		case strings.HasPrefix(w, "--"):
+		case len(w) > 1 && (w[0] == '-' || w[0] == '+'):
+			if w[0] == '-' && strings.ContainsRune(w[1:], 'c') {
+				c = true
+			}
+		default:
+			return w, c
+		}
+	}
+	return "", false
+}
+
 // composeGlobalFlagsWithValue are compose's global options (docker compose,
 // docker-compose, podman-compose) whose value can be the next argument.
 var composeGlobalFlagsWithValue = map[string]bool{
 	"-f": true, "--file": true, "-p": true, "--project-name": true, "--profile": true, "--env-file": true,
 	"--project-directory": true, "--ansi": true, "--progress": true, "--parallel": true,
+	// compose's hidden ones: --workdir (--project-directory's old name),
+	// --insecure-registry.
+	"--workdir": true, "--insecure-registry": true,
 	"--in-pod": true, "--pod-args": true, "--podman-path": true, "--podman-args": true,
 	"--podman-pull-args": true, "--podman-push-args": true, "--podman-build-args": true,
 	"--podman-inspect-args": true, "--podman-run-args": true, "--podman-start-args": true,
@@ -501,7 +715,16 @@ func isWrapperArgument(w string) bool {
 // redirection (2>&1, &>, >|) does not split, and a backslash before a newline
 // continues the line. A backslash escapes only inside double quotes, as sh's
 // does there; elsewhere it is kept, so a Windows path stays one.
-func commands(command string) [][]string {
+func commands(command string) [][]string { return splitCommands(command, false) }
+
+// rawCommands is commands with each word as the command writes it: its
+// quotes, and a backslash that escapes inside double quotes, kept, and a
+// parameter's expansion (${PORT}, ${PORT:-8080}) one part of its word, so
+// that a caller can read the word as the shell hands it on (which variables
+// it expands, and which a single quote keeps).
+func rawCommands(command string) [][]string { return splitCommands(command, true) }
+
+func splitCommands(command string, raw bool) [][]string {
 	var (
 		all     [][]string
 		words   []string // the current command's words so far
@@ -545,7 +768,13 @@ func commands(command string) [][]string {
 		case quote != 0:
 			if c == quote {
 				quote = 0
+				if raw {
+					word.WriteRune(c)
+				}
 			} else if c == '\\' && quote == '"' && strings.ContainsRune("\"\\$`", next) {
+				if raw {
+					word.WriteRune(c)
+				}
 				word.WriteRune(next)
 				i++
 			} else {
@@ -553,6 +782,21 @@ func commands(command string) [][]string {
 			}
 		case c == '\'' || c == '"':
 			quote, inWord = c, true
+			if raw {
+				word.WriteRune(c)
+			}
+		case raw && c == '$' && next == '{':
+			// ${NAME...}: one part of the word, its braces no group's.
+			end := i + 1
+			for end < len(runes) && runes[end] != '}' {
+				end++
+			}
+			if end == len(runes) {
+				end--
+			}
+			word.WriteString(string(runes[i : end+1]))
+			inWord = true
+			i, c = end, runes[end]
 		case c == ' ' || c == '\t' || c == '\r' || c == '(' || c == ')' || c == '{' || c == '}':
 			endWord()
 		case c == '&' && (prev == '>' || prev == '<' || next == '>'):

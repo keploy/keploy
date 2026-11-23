@@ -1,6 +1,7 @@
 package async
 
 import (
+	"context"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -14,7 +15,7 @@ type fakeParser struct {
 }
 
 func (f *fakeParser) MatchesLane(_ *models.Mock, _ models.AsyncLane) bool { return f.matches }
-func (f *fakeParser) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
+func (f *fakeParser) MatchRequestShape(_ context.Context, _, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	if f.shapeOK {
 		return true, ""
 	}
@@ -31,7 +32,7 @@ func TestFakeParserSatisfiesInterface(t *testing.T) {
 	if !p.MatchesLane(nil, models.AsyncLane{}) {
 		t.Fatal("MatchesLane should be true")
 	}
-	if ok, _ := p.MatchRequestShape(nil, nil, models.AsyncLane{}); !ok {
+	if ok, _ := p.MatchRequestShape(context.Background(), nil, nil, models.AsyncLane{}); !ok {
 		t.Fatal("MatchRequestShape should be ok")
 	}
 	b, _ := p.EmptyResponse(models.AsyncLane{})

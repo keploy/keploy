@@ -97,10 +97,57 @@ type TestCase struct {
 	// each capture, not be inferred from mutable registries. Never set by
 	// agents or on the wire ("-" everywhere).
 	SourceNode string `json:"-" yaml:"-" bson:"-"`
+	// CaptureID is the identity the agent gave this test case's request when
+	// it captured it without --sync and without a Keploy-Test-Name: its
+	// mocks' mapping entries, their owner and any revoke of it name it so
+	// (CaptureIDPrefix). The test case itself is sent with no Name; the
+	// recorder names it as it saves it and files what names the CaptureID
+	// under that name. It rides only the agent's test-case stream; yaml/bson
+	// "-" keeps it out of stored test cases. Empty for a test case with a
+	// name of its own, and for a client that does not read capture ids
+	// (OutgoingOptions.SupportsCaptureIDs).
+	CaptureID string `json:"capture_id,omitempty" yaml:"-" bson:"-"`
+	// ExpectedRewrite is set only on the copy of a test case a replay hands
+	// to SimulateRequest for one send (replay's toSend), by a hook that
+	// rewrote that copy's expected body before the answer is compared with
+	// it: what the body was as recorded, and each place it rewrote. The
+	// matcher then asserts each body-digest header recorded over that body
+	// (an ETag) as the same digest of the answer's body, and the test's
+	// result names the places (TestResult.Rewritten). Never persisted.
+	ExpectedRewrite *ExpectedRewrite `json:"-" yaml:"-" bson:"-"`
+}
+
+// ExpectedRewrite is how a replay hook rewrote the expected body of the copy
+// of a test case it was handed for one send (TestCase.ExpectedRewrite).
+type ExpectedRewrite struct {
+	// RecordedBody is the expected body as it was recorded, before the
+	// rewrite: the body its digest headers were computed over.
+	RecordedBody string
+	// Places are the places rewritten.
+	Places []RewrittenPlace
+}
+
+// RewrittenPlace is one place of a test case's expected response that a
+// replay hook rewrote for one send, before the app's answer was compared with
+// it: where, what it held as recorded, and why the hook rewrote it.
+type RewrittenPlace struct {
+	Where    string `json:"where" yaml:"where"`
+	Recorded string `json:"recorded" yaml:"recorded"`
+	Why      string `json:"why" yaml:"why"`
 }
 
 func (tc *TestCase) GetKind() string {
 	return string(tc.Kind)
+}
+
+// AgentName is the name the agent knows tc by, and names it by in its
+// mappings and revokes: its CaptureID when it has one, else its Name (which a
+// recorder may change as it saves it).
+func (tc *TestCase) AgentName() string {
+	if tc.CaptureID != "" {
+		return tc.CaptureID
+	}
+	return tc.Name
 }
 
 // CompletedAt is when the test case's exchange was complete, from the wire

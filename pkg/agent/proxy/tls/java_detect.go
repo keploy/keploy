@@ -24,19 +24,23 @@
 //
 // The fix in this file: given the app's PID, read /proc/<pid>/environ
 // for JAVA_HOME, falling back to /proc/<pid>/exe's symlink target. The
-// caller (installJavaCA via installJavaCAForHome) then passes the
-// detected path to keytool -keystore $javaHome/lib/security/cacerts,
-// using $javaHome/bin/keytool as the executable, so the import lands
-// in the app's actual truststore regardless of what's on PATH.
+// caller (installJavaCAForHome) then passes the detected path's
+// cacerts to keytool -keystore ($javaHome/lib/security/cacerts, or
+// $javaHome/jre/lib/security/cacerts on JDK 8: jdkCacerts), using
+// $javaHome/bin/keytool as the executable, so the import lands in the
+// app's actual truststore regardless of what's on PATH.
 package tls
 
 import (
 	"bytes"
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 )
 
@@ -133,7 +137,7 @@ func detectJavaHomeForPID(pid int) string {
 //     absolute-path launch case where no JAVA_HOME is set. If
 //     exeLink ends in /bin/java (or /bin/java.exe on Windows/WSL),
 //     trimming the final two path components gives the JDK root
-//     whose lib/security/cacerts is the right target.
+//     whose cacerts (jdkCacerts) is the right target.
 //
 // Both empty → "" → caller falls back to PATH keytool.
 func detectJavaHomeFromSources(environ []byte, exeLink string) string {
@@ -222,4 +226,48 @@ func javaHomeFromExeLink(exeLink string) string {
 		return ""
 	}
 	return javaHome
+}
+
+// pathJavaHome returns the java.home of the `java` first on PATH: the JDK
+// that keytool -import falls back to when neither an override nor the app's
+// process names one.
+//
+// It is read off the JDK's layout, as the java launcher derives java.home
+// itself (javaHomeFromPATHLayout). Asking a JVM (`java -XshowSettings`,
+// util.GetJavaHome) is left for a `java` keploy cannot read that way -- a
+// version manager's shim script, say. A JVM takes seconds to start on a
+// starved host, and the agent's start waited for this one on every run that
+// had a JDK on PATH, before its proxy listened.
+func pathJavaHome(ctx context.Context) (string, error) {
+	if home := javaHomeFromPATHLayout(); home != "" {
+		return home, nil
+	}
+	return util.GetJavaHome(ctx)
+}
+
+// javaHomeFromPATHLayout resolves the `java` on PATH through its symlinks
+// (/usr/bin/java -> /etc/alternatives/java -> <jdk>/bin/java) and returns
+// the directory above its bin/ that holds lib/security/cacerts: the JDK's
+// root on JDK 9 and later, its jre/ on JDK 8 (whose <jdk>/bin/java reports
+// java.home as <jdk>/jre). "" when the resolved binary is not <home>/bin/java
+// or no such cacerts is there: the caller then asks the JVM.
+func javaHomeFromPATHLayout() string {
+	exe, err := exec.LookPath("java")
+	if err != nil {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return ""
+	}
+	home := javaHomeFromExeLink(resolved)
+	if home == "" {
+		return ""
+	}
+	for _, h := range []string{home, filepath.Join(home, "jre")} {
+		if fileExists(filepath.Join(h, "lib", "security", "cacerts")) {
+			return h
+		}
+	}
+	return ""
 }

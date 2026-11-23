@@ -118,7 +118,7 @@ func TestMismatchReportsLeaveConnectionFailuresOut(t *testing.T) {
 		{Name: "mock-1", Kind: "Http"},
 		{Name: "mock-2", Kind: "ConnectionFailure"},
 		{Name: "mock-3"},
-	}, map[string]models.Kind{"mock-3": models.ConnectionFailure})
+	}, map[string]models.Kind{"mock-3": models.ConnectionFailure}, nil)
 	assert.Equal(t, []models.MockMismatchMock{{Name: "mock-1", Kind: "Http"}}, expected)
 
 	actual := buildActualMockInfos([]models.MockState{consumed("mock-1", models.HTTP), consumed("mock-2", models.ConnectionFailure)}, true)

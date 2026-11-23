@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
@@ -60,7 +66,7 @@ section() {
 
 run_with_keploy_privileges() {
     if command -v sudo >/dev/null 2>&1; then
-        sudo -E env PATH="$PATH" "$@"
+        sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$@"
     else
         env PATH="$PATH" "$@"
     fi
@@ -213,7 +219,7 @@ check_for_errors() {
 }
 
 check_recorded_tests() {
-    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep -q .; then
+    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep . >/dev/null; then
         echo "No recorded test cases were generated."
         return 1
     fi

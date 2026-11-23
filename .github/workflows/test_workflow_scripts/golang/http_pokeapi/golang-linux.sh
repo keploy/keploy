@@ -164,7 +164,7 @@ if [ ${#yaml_reports[@]} -eq 0 ]; then
     exit 1
 fi
 for report_file in "${yaml_reports[@]}"; do
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    test_status=$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')
     echo "yaml report $(basename "$report_file"): $test_status"
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
@@ -221,7 +221,7 @@ if [ "$strict_phase" = true ]; then
         exit 1
     fi
     for report_file in "${strict_reports[@]}"; do
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        test_status=$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')
         echo "strict mock-window report $(basename "$report_file"): $test_status"
         if [ "$test_status" != "PASSED" ]; then
             echo "::error::$(basename "$report_file") is $test_status under strict mock windows. A likely cause is a mock whose response the agent kept on disk being served without it; see the replay log below (test_logs_strict.txt)."

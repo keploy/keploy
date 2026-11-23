@@ -69,12 +69,20 @@ func (p *servingProxy) ServeExactWorker(names []string) error {
 	p.mm.ServeExactWorker(names)
 	return nil
 }
+func (p *servingProxy) ServeExactWorkerSkipped(names, skipped []string) error {
+	p.mm.ServeExactWorkerSkipped(names, skipped)
+	return nil
+}
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)
 	return nil
 }
 func (p *servingProxy) ExactTestOutcome() (string, []string, []string, bool) {
 	return p.mm.ExactTestOutcome()
+}
+func (p *servingProxy) ExactTestServed() string { return p.mm.ExactTestServed() }
+func (p *servingProxy) ExactTestInstalled(test string) (uint64, uint64, bool) {
+	return p.mm.ExactTestInstalled(test)
 }
 func (p *servingProxy) ResetStatefulCursors()      { p.mm.ResetStatefulCursors() }
 func (p *servingProxy) ContinueTestErrorCapture()  {}
@@ -89,9 +97,12 @@ func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 }
 
 // noteMiss files a miss the matcher reported, as the proxy does
-// (sendMockNotFoundError, GetMockErrors): by the view served when it is
-// filed, an extra call as its matcher found it, with the fields its report
-// says differ, and stamped with when its report was built.
+// (sendMockNotFoundErrorFrom, GetMockErrors): by the view served when it is
+// filed, or where its parser marked its call (integrations.StampMark: in a
+// test or outside every test, and the round, models.MissMark), an extra call
+// as its matcher found it, with the fields its report
+// says differ, whether it is a recording made elsewhere, its repeat note,
+// and stamped with when its report was built.
 func (p *servingProxy) noteMiss(err error) {
 	uc := models.UnmatchedCall{Protocol: "HTTP", Kind: models.MissOutsideTest, At: time.Now()}
 	if p.mm.WindowSnapshot().Active {
@@ -103,12 +114,21 @@ func (p *servingProxy) noteMiss(err error) {
 	if errors.As(err, &r) && r.MismatchReport() != nil {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
-		uc.ClosestMock = rep.ClosestMock
+		uc.ClosestMock, uc.NotOwned, uc.Repeat = rep.ClosestMock, rep.NotOwned, rep.Repeat.Clone()
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
+		if rep.Mark != models.RoundUnmarked {
+			uc.Kind = models.MissOutsideTest
+			if rep.MarkedInTest {
+				uc.Kind = models.MissInTest
+			}
+			if rep.MarkRound {
+				uc.Marked = models.MissMark{Epoch: rep.MarkEpoch, Bounds: rep.MarkBounds, Test: rep.MarkedTest, Known: true}
+			}
+		}
 		if rep.MissKind == models.MissExtraCall {
-			uc.Kind, uc.Recorded = models.MissExtraCall, rep.Recorded
+			uc.Kind, uc.Recorded, uc.SkippedReads = models.MissExtraCall, rep.Recorded, rep.SkippedReads
 		}
 	}
 	p.mu.Lock()
@@ -231,6 +251,61 @@ func TestIdenticalCallsReplayedOutOfOrderAreEachAnsweredByTheirOwn(t *testing.T)
 	}
 }
 
+// A miss keploy decides only after the replay began the next test is placed
+// by the round its call was marked in, on the real store: a call made in a
+// test after its end's read was made, and one made between two tests, whose
+// misses keploy files only once the next test's view serves, fail no test,
+// and the first names the test it was made in. Filed by when keploy decided
+// them, both failed the next test, which made neither call. A call the next
+// test makes is still its own.
+func TestAMissDecidedAfterTheNextBeginFailsNoTestThatDidNotMakeIt(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-a", "/a", "a", t0), pingMock("mock-b", "/b", "b", t0.Add(time.Second))},
+		map[string][]string{"o::TestA": {"mock-a"}, "o::TestB": {"mock-b"}}, map[string][]string{})
+	ctx := context.Background()
+	// marked is a miss's report of a call keploy marked now, as its parser
+	// does at the call's first read of the round.
+	marked := func(what string) *models.MockMismatchReport {
+		r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: what, Destination: "127.0.0.1:18093"}
+		integrations.StampMark(r, p.mm.MarkCallRound())
+		return r
+	}
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	code, _ := p.call(t, "/a")
+	require.Equal(t, 200, code)
+	late := marked("GET /late")
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, "TestA failed: %s", e.Reason)
+	between := marked("DELETE /sweep")
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	// keploy decides both calls only now, with TestB's view serving.
+	p.noteMiss(models.NewMockMismatchError(models.ErrNoMockMatched, late))
+	p.noteMiss(models.NewMockMismatchError(models.ErrNoMockMatched, between))
+	code, _ = p.call(t, "/b")
+	require.Equal(t, 200, code)
+	own := marked("GET /own")
+	p.noteMiss(models.NewMockMismatchError(models.ErrNoMockMatched, own))
+	e, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action, "TestB's own call missed")
+	require.Contains(t, e.Reason, "GET /own")
+	require.NotContains(t, e.Reason, "/late", "TestB failed for TestA's call")
+	require.NotContains(t, e.Reason, "/sweep", "TestB failed for a call made between tests")
+	windows := map[string]string{}
+	for _, m := range a.takeChargedMisses() {
+		if m.ChargedTo == "" {
+			windows[m.ActualSummary] = m.WindowOf
+			continue
+		}
+		require.Equal(t, "o::TestB", m.ChargedTo, m.ActualSummary)
+		require.Equal(t, "GET /own", m.ActualSummary)
+	}
+	require.Equal(t, map[string]string{"GET /late": "o::TestA", "DELETE /sweep": ""}, windows, "the misses charged to no test, and the window each names")
+}
+
 // Each test mock answers at most one request, in recorded order; one more
 // identical call is a miss of its own kind, and the test fails saying how
 // often it called and recorded it.
@@ -350,7 +425,8 @@ func TestAnotherTestsMockNeverAnswers(t *testing.T) {
 }
 
 // Between tests the key's pool slice answers, as often as asked; no test's
-// mock answers there, and inside a test no data-plane pool mock answers.
+// mock answers there, and inside a test no data-plane pool mock answers. A
+// call between tests that nothing answers is charged to no test.
 func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/health", "ok", t0), pingMock("mock-2", "/a", "a", t0.Add(time.Second))},
@@ -371,7 +447,51 @@ func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	for _, m := range ev.Misses {
 		kinds = append(kinds, m.Kind)
 	}
-	require.ElementsMatch(t, []string{models.MissOutsideTest, models.MissInTest}, kinds, "the miss between tests is charged to the next test")
+	require.Equal(t, []string{models.MissInTest}, kinds, "a miss between tests is charged to no test, not to the next one")
+}
+
+// A worker: mock of the claiming key's (one keploy mock record listed as made
+// between the tests, or one a reader moved out of a test's list, such as a
+// token's first-use read) answers in a test's window too, after the test's
+// own, each at most once in the set's windows, and between tests as the pool
+// does, and no test is required to make it. Another key's worker scope answers none of this
+// key's calls. Before, a test that made it missed: inside a test only its
+// own mocks answer, and a worker: entry was served as the pool, between
+// tests only.
+func TestAWorkerMockAnswersInAnyTestOnceAndIsRequiredOfNone(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+		pingMock("mock-1", "/a", "a", t0),
+		pingMock("mock-2", "/token", "first-use", t0.Add(time.Second)),
+		pingMock("mock-3", "/token", "again", t0.Add(2*time.Second)),
+		pingMock("mock-4", "/never", "unused", t0.Add(3*time.Second)),
+		pingMock("mock-5", "/other", "other key", t0.Add(4*time.Second)),
+	}))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {}, "o::TestC": {}}))
+	require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-2", "mock-3", "mock-4"}, "p": {"mock-5"}}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-2", "mock-3", "mock-4"}, "p": {"mock-5"}}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p, "TestA", "/a", "/token")
+	require.Equal(t, []string{"200 a", "200 first-use"}, got, "a worker: mock answers in a test's window, in recorded order")
+	require.Empty(t, e.Action, e.Reason)
+	// Between tests the calls walk their own sequence, from its first
+	// recording, whatever the windows answered (main walked one sequence
+	// for both, so this call's answer moved with the windows' calls).
+	code, body := p.call(t, "/token")
+	require.Equal(t, "200 first-use", fmt.Sprintf("%d %s", code, body), "and between tests, on the calls between tests' own sequence")
+	_, e = runTest(t, a, p, "TestB")
+	require.Empty(t, e.Action, "a worker: mock no call answered (mock-4) is required of no test: %s", e.Reason)
+	// The windows' sequence goes on after TestA's mock-2, whatever the call
+	// between tests answered: mock-3 answers TestC's first /token, and is
+	// then spent for the set's windows, as mock-2 was in TestA's.
+	got, e = runTest(t, a, p, "TestC", "/token", "/token", "/other")
+	require.Equal(t, "200 again", got[0], "a worker: mock no window spent answers a test's call")
+	require.True(t, strings.HasPrefix(got[1], "502"), "a worker: mock answers at most once in the set's windows: %s", got[1])
+	require.True(t, strings.HasPrefix(got[2], "502"), "another key's worker scope answered: %s", got[2])
+	require.Equal(t, models.ScopeActionFail, e.Action)
 }
 
 // sqsEmpty is the answer enterprise SQS's parser writes for a ReceiveMessage
@@ -551,7 +671,7 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
 		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
-	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}))
+	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
 	b, serr := a.ProvenBegin(context.Background(), begin("TestSkipped"))
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionSkip, b.Action)
@@ -560,6 +680,38 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	require.True(t, strings.HasPrefix(got[1], "502"), "the skipped test's recording answered the next test: %s", got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "was called 2 times, recorded 1")
+}
+
+// A test the replay's gate skips never opens, so its recordings answer no
+// call, yet each is still an unserved recording to a parser that holds a
+// call while the set holds one (integrations.UnservedRecordingFinder). Such
+// a call (a worker's blocking pop for a job the skipped test pushed at
+// record) waits, as the server waits with nothing pushed, instead of missing
+// at once in whichever test is open and failing that test for the skip. The
+// next test's own recording, once it answered, is no longer one.
+func TestASkippedTestsRecordingStillBoundsAHeldCall(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
+		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
+	b, serr := a.ProvenBegin(ctx, begin("TestSkipped"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	_, serr = a.ProvenBegin(ctx, begin("TestNext"))
+	require.Nil(t, serr)
+	code, body := p.call(t, "/n")
+	require.Equal(t, "200 next", fmt.Sprintf("%d %s", code, strings.TrimSpace(body)))
+	unserved := func(name string) bool {
+		found, err := p.mm.HasUnservedRecording(models.HTTP, func(m *models.Mock) bool { return m.Name == name })
+		require.NoError(t, err)
+		return found
+	}
+	require.True(t, unserved("mock-1"), "the skipped test's recording no longer bounds a held call")
+	require.False(t, unserved("mock-2"), "the next test's recording that answered still bounds a held call")
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestNext", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, e.Reason)
 }
 
 // keploy #4745's F20 scenarios under ConsumeExact. Tests whose recorded
@@ -907,9 +1059,9 @@ func (p *inFlightProxy) ServeExactPool(key string, names []string) error {
 }
 
 // A test's call that lands as its end stops serving it misses, fails the
-// test, and is said to be made as the test ended, not before it began; a
-// call made between tests is still said to precede the next test (round-3
-// review).
+// test, and is said to be made as the test ended, not before it began
+// (round-3 review); a call made between tests is charged to no test, and
+// fails neither test.
 func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	a, rp := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second)), pingMock("mock-3", "/c", "c", t0.Add(2*time.Second))},
@@ -932,8 +1084,16 @@ func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	require.Equal(t, 502, code)
 	got, e := runTest(t, a, p.servingProxy, "TestB", "/c")
 	require.Equal(t, []string{"200 c"}, got)
-	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /zzz to 127.0.0.1:18093, made before this one began, had no recorded answer")
+	require.Empty(t, e.Action, e.Reason)
+	all, err := a.GetMockErrors(ctx)
+	require.NoError(t, err)
+	charged := map[string]string{}
+	for _, m := range all {
+		charged[m.ActualSummary] = m.ChargedTo
+	}
+	require.Equal(t, "o::TestA", charged["GET /b"], "the call landing as TestA ended is TestA's")
+	require.Contains(t, charged, "GET /zzz", "the call between tests is the run's miss")
+	require.Empty(t, charged["GET /zzz"], "the call between tests is charged to no test")
 }
 
 // lateProxy holds a miss between its report being built and its filing
@@ -1197,11 +1357,12 @@ func (p *servingProxy) lateCall(path string) (built, release, filed chan struct{
 	return built, release, filed, done
 }
 
-// A call an earlier test made, still in flight as that test ended, is filed
-// once a later test is open or between tests, and charged to the later one,
-// which never made it: its reason says the call was made before it began,
-// never that it called it (round-5 and round-6 reviews). Its own calls are
-// judged as before.
+// A call an earlier test made, still in flight as that test ended, whose
+// miss is filed between tests or once a later test is open, fails no test
+// that did not make it: its parser marked it in the earlier test's view, so
+// it is charged to no test and names the test it was made in. Filed by when
+// keploy decided it, it failed the later test, which never made it. The
+// later test's own calls are judged as before.
 func TestAnEarlierTestsLateCallIsNotTheNextTests(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1210,11 +1371,10 @@ func TestAnEarlierTestsLateCallIsNotTheNextTests(t *testing.T) {
 		path string
 		// duringB: filed once TestB began; else between the tests.
 		duringB bool
-		want    string
 	}{
-		{"an extra call filed between tests", "/a", false, "GET /a to 127.0.0.1:18093, made before this one began, had no recorded answer"},
-		{"an extra call filed during the next test", "/a", true, "GET /a to 127.0.0.1:18093, made before this one began, had no recorded answer"},
-		{"a miss filed during the next test", "/zzz", true, "GET /zzz to 127.0.0.1:18093, made before this one began, had no recorded answer"},
+		{"an extra call filed between tests", "/a", false},
+		{"an extra call filed during the next test", "/a", true},
+		{"a miss filed during the next test", "/zzz", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, rp := exactAgent(t,
@@ -1244,9 +1404,13 @@ func TestAnEarlierTestsLateCallIsNotTheNextTests(t *testing.T) {
 			require.Equal(t, 200, code)
 			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", CanSkip: true, Outcome: models.ScopeOutcomePassed})
 			require.Nil(t, serr)
-			require.Equal(t, models.ScopeActionFail, e.Action)
-			require.Contains(t, e.Reason, tc.want)
-			require.NotContains(t, e.Reason, "was called")
+			require.Empty(t, e.Action, "TestB failed for TestA's call: %s", e.Reason)
+			var late []string
+			for _, m := range a.takeChargedMisses() {
+				require.Empty(t, m.ChargedTo, "%s was charged to a test", m.ActualSummary)
+				late = append(late, m.WindowOf)
+			}
+			require.Equal(t, []string{"o::TestA"}, late, "TestA's late call is listed, naming the test it was made in")
 			// TestB's own extra call is still counted.
 			got, e := runTest(t, a, rp, "TestB", "/b", "/b")
 			require.Equal(t, "200 b", got[0])
@@ -1272,7 +1436,8 @@ func TestThePoolIsServedWhenTheCallsInFlightCannotBeRead(t *testing.T) {
 }
 
 // keploy test with a worker scope: a worker mock answers from its place in
-// the set's run on, in a test case or between them, once in the set; a test
+// the set's run on, in a test case once in the set's test cases, and between
+// them as the pool does (this parser's door keeps it: every call); a test
 // case begun reaches the worker mocks placed after it, and no earlier one.
 // The worker mocks are staged with the pool, by name, and are not the
 // pool's.
@@ -1309,8 +1474,8 @@ func TestKeployTestServesTheWorkerScopeFromItsPlaces(t *testing.T) {
 	code, body := p.call(t, "/late")
 	require.Equal(t, 200, code, "a worker mock placed after a begun test case does not answer between test cases")
 	require.Equal(t, "late", body)
-	code, _ = p.call(t, "/late")
-	require.Equal(t, 502, code, "a worker mock answered twice in the set")
+	code, body = p.call(t, "/late")
+	require.Equal(t, "200 late", fmt.Sprintf("%d %s", code, body), "between test cases a worker mock is served as the pool's: again")
 	code, _ = p.call(t, "/own")
 	require.Equal(t, 502, code, "a test case's mock answered between test cases")
 }
@@ -1444,7 +1609,7 @@ func TestKeployTestRefusesATestCaseItCannotOpenWithItsVariables(t *testing.T) {
 	}
 	require.Zero(t, p.served, "a test case was opened apart from its variables")
 	a.scopeMu.Lock()
-	begun := a.testBegun["test-1"]
+	begun := a.testReached["test-1"]
 	a.scopeMu.Unlock()
 	require.False(t, begun, "the refused test case was marked begun: it was refused after it was settled and served the worker's scope")
 	got := p.postTo(t, "/own-1", "x-1")

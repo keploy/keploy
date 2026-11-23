@@ -16,6 +16,14 @@
 #   3. "N1:8080" and "N2:8080", two host ports: nothing to choose between, so
 #      replay sends the tests to 8080 as before and fails them, saying the
 #      port is published on both and how to send the tests to one.
+#   4. Recorded with the app on P ("P:P"), replayed the way a CI lane gives
+#      each phase its own ports: the app on Q ("Q:Q", --port Q), keploy's
+#      proxy on P (--proxy-port P) and its DNS server on another (--dns-port).
+#      The app takes longer to listen than --delay. keploy's own proxy socket
+#      on P is not the app's: replay waits for the app on Q, and every test
+#      passes. It used to be taken for the app listening on the port the tests
+#      were recorded on, so the publish of Q was called the wrong one, the
+#      wait was dropped and every test failed.
 #
 # Every wait here is on an event: a line in the run's log, read in whole
 # lines, or keploy's own exit.
@@ -25,6 +33,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -35,7 +45,7 @@ FAIL=0
 # Names of this run's own: two runs on one runner never share a container.
 ID=$$
 APP="pp-app-$ID"
-free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])'; }
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
 
 # Tear down only this run's project and container, by name. Never a blanket
 # prune.
@@ -53,15 +63,17 @@ trap finish EXIT
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 docker_pull_retry "$IMAGE"
 
-# The app: answers each GET with its path, on APP_PORT (8080 unless set).
+# The app: answers each GET with its path, on APP_PORT (8080 unless set),
+# after sleeping APP_DELAY seconds (0 unless set), as an app slow to start.
 cat > app.py <<'PY'
-import http.server, json, os
+import http.server, json, os, time
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         b = json.dumps({"path": self.path}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
+time.sleep(float(os.environ.get("APP_DELAY", "0")))
 s = http.server.HTTPServer(("0.0.0.0", int(os.environ.get("APP_PORT", "8080"))), H)
 print("APP LISTENING", flush=True)
 s.serve_forever()
@@ -74,7 +86,8 @@ test:
 YML
 
 # compose APP_PORT PORTS...: the compose file of an app listening on APP_PORT,
-# published as each of PORTS.
+# published as each of PORTS, that sleeps APP_DELAY seconds (0 unless set)
+# before it listens.
 compose() {
   local app_port=$1 ports=""
   shift
@@ -90,6 +103,7 @@ services:
     ports: [${ports%, }]
     environment:
       - APP_PORT=$app_port
+      - APP_DELAY=${APP_DELAY:-0}
 YML
 }
 
@@ -128,13 +142,13 @@ record() {
   local name=$1 hp=$2 log="$1-record.log" pid rc made=0
   sudo rm -rf keploy
   : > "$log"
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
     --disable-tele --disable-ansi > "$log" 2>&1 &
   pid=$!
-  # Once the app listens, keploy's agent moves its socket and listens on its
-  # port itself (ingress forwarding); a call before that is reset, so the
-  # calls wait for it.
-  if await "$log" "$pid" "APP LISTENING" 1 && await "$log" "$pid" "Started ingress forwarding" 1; then
+  # The calls go as soon as the app says it listens, as a user's would: keploy
+  # holds the app's port from its bind until its own forwarder listens there,
+  # so a call in between is answered and recorded, not reset.
+  if await "$log" "$pid" "APP LISTENING" 1; then
     for p in /hello/one /hello/two; do
       if curl -fsS -o /dev/null --max-time 10 "http://127.0.0.1:$hp$p"; then
         made=$((made + 1))
@@ -155,16 +169,20 @@ record() {
   cleanup
 }
 
-# replay NAME [ENV...]: keploy test of the recording, ENV set; the log is
-# NAME-test.log, and the report's status and keploy's exit are echoed.
+# replay NAME [ENV...] [-- FLAG...]: keploy test of the recording, ENV set
+# and each FLAG added to its command line; the log is NAME-test.log, and the
+# report's status and keploy's exit are echoed.
 replay() {
-  local name=$1 log="$1-test.log" rc
+  local name=$1 log="$1-test.log" rc env=()
   shift
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do env+=("$1"); shift; done
+  [ $# -gt 0 ] && shift
   # Only this replay's report is read: an earlier one's is no answer.
   sudo rm -rf keploy/reports
-  sudo -E env PATH="$PATH" "$@" "$RECORD_BIN" test -c "docker compose up" --container-name "$APP" \
-    --delay 5 --disable-tele --disable-ansi > "$log" 2>&1
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "${env[@]}" "$RECORD_BIN" test -c "docker compose up" --container-name "$APP" \
+    --delay 5 "$@" --disable-tele --disable-ansi > "$log" 2>&1
   rc=$?
+  verify_ran "$(proven_of "${env[@]}")" "$log" || FAIL=$((FAIL + 1))
   cleanup
   REPORT_STATUS=$(sudo sh -c 'cat keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null' | sed -n 's/^status: //p' | tail -n 1)
   REPLAY_RC=$rc
@@ -174,7 +192,7 @@ replay() {
 redirect_line() { echo "app port 8080 is published on host port $1; sending these tests there"; }
 
 echo "== 1. published on another host port =="
-HP=$(free_port)
+HP=$(free_port) || exit 1
 compose 8080 "$HP:8080"
 record remapped "$HP"
 if grep -q "cannot be replayed" remapped-record.log; then
@@ -194,7 +212,7 @@ for leg in "remapped-off" "remapped-on KEPLOY_PROVEN=1"; do
 done
 
 echo "== 2. published as itself =="
-P=$(free_port)
+P=$(free_port) || exit 1
 compose "$P" "$P:$P"
 record same "$P"
 replay same
@@ -205,8 +223,8 @@ if grep -q "sending these tests there" same-test.log; then
 fi
 
 echo "== 3. published on two host ports =="
-HP1=$(free_port)
-HP2=$(free_port)
+HP1=$(free_port) || exit 1
+HP2=$(free_port "$HP1") || exit 1
 compose 8080 "$HP1:8080" "$HP2:8080"
 record two "$HP1"
 replay two
@@ -219,6 +237,24 @@ grep -qF "$want" two-test.log ||
   { echo "FAIL: two: the failure does not say: $want"; grep "cannot be reached" two-test.log | head -3; FAIL=1; }
 if grep -q "sending these tests there" two-test.log; then
   echo "FAIL: two: said a redirect with two host ports to choose from"; FAIL=1
+fi
+
+echo "== 4. replayed with keploy's proxy on the port the tests were recorded on =="
+P=$(free_port) || exit 1
+Q=$(free_port "$P") || exit 1
+D=$(free_port "$P" "$Q") || exit 1
+compose "$P" "$P:$P"
+record ownport "$P"
+# 25 s: well past --delay 5, so the tests are sent only once replay has waited
+# for the app.
+APP_DELAY=25 compose "$Q" "$Q:$Q"
+replay ownport -- --port "$Q" --proxy-port "$P" --dns-port "$D"
+[ "$REPORT_STATUS" = PASSED ] && [ "$REPLAY_RC" -eq 0 ] ||
+  { echo "FAIL: ownport: want the set PASSED and exit 0"; tail -60 ownport-test.log; FAIL=1; }
+grep -q "Proxy started at port:$P" ownport-test.log ||
+  { echo "FAIL: ownport: keploy's proxy did not say it listens on port $P, the port the tests were recorded on"; FAIL=1; }
+if grep -q "cannot be reached from the host" ownport-test.log; then
+  echo "FAIL: ownport: a test was said to be unreachable"; grep "cannot be reached" ownport-test.log | head -3; FAIL=1
 fi
 
 if [ "$FAIL" -ne 0 ]; then

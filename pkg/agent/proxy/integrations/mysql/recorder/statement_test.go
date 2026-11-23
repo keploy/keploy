@@ -12,7 +12,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 // A command that names a prepared statement is recorded with the query the
@@ -96,52 +95,6 @@ func requireStamped(t *testing.T, mocks []*models.Mock, want []string) {
 	}
 }
 
-// TestAsyncMySQLDecode_StatementCommandsKeepTheirQuery: the legacy recorder
-// stamps each command as it decodes it, so a pipelined CLOSE behind an
-// EXECUTE does not end the statement before the EXECUTE is stamped.
-func TestAsyncMySQLDecode_StatementCommandsKeepTheirQuery(t *testing.T) {
-	clientConn := newPipeConn()
-	decodeCtx := buildPostHandshakeDecodeCtx(clientConn)
-	decodeCtx.LastOp.Store(clientConn, wire.RESET)
-
-	mocks := make(chan *models.Mock, 16)
-	wireSyncMockOutput(t, mocks)
-	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "stamped")
-
-	base := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
-	items := []mysqlDecodeItem{
-		{fromClient: true, data: prepareCmd(0, "SELECT NOW()")},
-		{data: prepareOkShort(1, 1)},
-		{fromClient: true, data: stmtExecuteCommand(0, 1)},
-		{data: okResponseWithAffectedRows(1, 0)},
-		// Pipelined: the EXECUTE and the CLOSE of the same statement before
-		// the EXECUTE's answer.
-		{fromClient: true, data: stmtExecuteCommand(0, 1)},
-		{fromClient: true, data: stmtCloseCommand(0, 1)},
-		{data: okResponseWithAffectedRows(1, 1)},
-		// The same query prepared again, under a new ID.
-		{fromClient: true, data: prepareCmd(0, "SELECT NOW()")},
-		{data: prepareOkShort(1, 2)},
-		{fromClient: true, data: stmtExecuteCommand(0, 2)},
-		{data: okResponseWithAffectedRows(1, 0)},
-	}
-	decodeItems := make(chan mysqlDecodeItem, len(items))
-	for i, it := range items {
-		it.ts = base.Add(time.Duration(i) * time.Millisecond)
-		decodeItems <- it
-	}
-	close(decodeItems)
-
-	asyncMySQLDecode(ctx, zaptest.NewLogger(t), decodeItems, mocks, decodeCtx, clientConn,
-		models.OutgoingOptions{DstCfg: &models.ConditionalDstCfg{Addr: "127.0.0.1:3306"}})
-
-	var got []*models.Mock
-	for len(mocks) > 0 {
-		got = append(got, <-mocks)
-	}
-	requireStamped(t, got, []string{"SELECT NOW()", "SELECT NOW()", "SELECT NOW()", "SELECT NOW()"})
-}
-
 // TestRecordV2_StatementCommandsKeepTheirQuery: the same, through RecordV2.
 func TestRecordV2_StatementCommandsKeepTheirQuery(t *testing.T) {
 	t.Parallel()
@@ -173,7 +126,7 @@ func TestRecordV2_StatementCommandsKeepTheirQuery(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 	var got []*models.Mock
 	for len(got) < recorded {
@@ -192,4 +145,29 @@ func TestRecordV2_StatementCommandsKeepTheirQuery(t *testing.T) {
 		got = append(got, <-h.mocks)
 	}
 	requireStamped(t, got, []string{"SELECT NOW()", "SELECT NOW()", "SELECT CURDATE()"})
+}
+
+// prepareCmd builds a COM_STMT_PREPARE command packet.
+func prepareCmd(seq byte, q string) []byte {
+	payload := make([]byte, 1+len(q))
+	payload[0] = mysql.COM_STMT_PREPARE
+	copy(payload[1:], q)
+	hdr := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), seq}
+	return append(hdr, payload...)
+}
+
+// prepareOkShort builds a minimal COM_STMT_PREPARE_OK response with
+// zero columns and zero params, which the decoder treats as a single
+// "head packet" and emits the mock immediately on.
+func prepareOkShort(seq byte, stmtID uint32) []byte {
+	payload := []byte{
+		0x00,                                                                    // status (OK marker)
+		byte(stmtID), byte(stmtID >> 8), byte(stmtID >> 16), byte(stmtID >> 24), // statement_id
+		0x00, 0x00, // num_columns
+		0x00, 0x00, // num_params
+		0x00,       // reserved
+		0x00, 0x00, // warnings
+	}
+	hdr := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), seq}
+	return append(hdr, payload...)
 }

@@ -3,6 +3,7 @@
 package http
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -12,11 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testproc"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
@@ -154,7 +157,7 @@ func TestAPausedContainerIsNotRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	running := containerRunning(newEngineCLI(zap.NewNop()), &namedContainer{name: "keploy-v3"})
+	running := containerRunning(newContainerLook(zap.NewNop(), nil), &namedContainer{name: "keploy-v3"})
 	for _, tc := range []struct {
 		status string
 		want   bool
@@ -173,20 +176,32 @@ func TestAPausedContainerIsNotRunning(t *testing.T) {
 // ("absent" while the engine does not know it, as before docker compose has
 // created it, and once it is removed; else its status), with what docker says
 // of a container it does not know, on stderr, and notes the state each inspect
-// found. Nothing else it is asked answers.
+// found. Nothing else it is asked answers. An inspect the test holds
+// (holdNextLook) is answered only once a child it starts has ended. A sudo
+// beside it (putSudoOnPath) refuses, unless the row lets it run the engine;
+// either way, a row fails at its end if sudo ran at all.
 type standInEngine struct {
 	state, looks string
+	// hold, while there, has the next inspect held; held is the FIFO its
+	// child says its pid on, and heldAt the test's end of it.
+	hold, held string
+	heldAt     *os.File
 }
 
 func newStandInEngine(t *testing.T) *standInEngine {
 	t.Helper()
 	dir := t.TempDir()
-	e := &standInEngine{state: filepath.Join(dir, "state"), looks: filepath.Join(dir, "looks")}
+	e := &standInEngine{state: filepath.Join(dir, "state"), looks: filepath.Join(dir, "looks"),
+		hold: filepath.Join(dir, "hold"), held: filepath.Join(dir, "held")}
 	e.set(t, "absent")
 	script := `#!/bin/sh
 s=$(cat "` + e.state + `")
 [ "$1" = inspect ] || exit 1
 for last; do :; done
+if [ -e "` + e.hold + `" ] && mv "` + e.hold + `" "` + e.hold + `.taken" 2>/dev/null; then
+  sh -c 'echo $$ 1<>"$1"; exec ` + testproc.UntilTheTestEnds + `' sh "` + e.held + `" &
+  wait
+fi
 echo "$s" >> "` + e.looks + `"
 if [ "$s" = absent ]; then
   echo "Error: No such object: $last" >&2
@@ -200,6 +215,16 @@ esac
 	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	sudoCalls := filepath.Join(dir, "sudo-calls")
+	putSudoOnPath(t, dir, sudoCalls)
+	// The engine here answers only as its daemon does (a container's state,
+	// or that it has no such container), and never refuses keploy's user, so
+	// no command a row has it run is one for sudo to run again.
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(sudoCalls); err == nil && len(b) > 0 {
+			t.Errorf("sudo ran after the engine's daemon had answered: %q", b)
+		}
+	})
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return e
 }
@@ -277,6 +302,109 @@ func (e *standInEngine) awaitRelease(t *testing.T, done <-chan error, withinLook
 	}
 }
 
+// holdNextLook has the engine hold the next inspect it is asked: the command
+// starts a child, in the command's process group, that runs until the test
+// ends (testproc.UntilTheTestEnds) unless it is killed, and answers once
+// that child has ended, as an engine's CLI that does part of its work in a
+// child process does. The child says its pid on a FIFO that both ends open
+// for reading and writing, so neither waits for the other to open it.
+func (e *standInEngine) holdNextLook(t *testing.T) {
+	t.Helper()
+	if err := testproc.SetLifeline(); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(e.held, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(e.held, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Its close ends a read of it that is still waiting (awaitHeld's).
+	t.Cleanup(func() { _ = f.Close() })
+	e.heldAt = f
+	if err := os.WriteFile(e.hold, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// heldChild is the child of the inspect the engine holds (holdNextLook), as
+// /proc said of it once it ran: its pid, process group and start time.
+type heldChild struct {
+	pid int
+	st  utils.ProcStat
+}
+
+// awaitHeld waits until the engine holds an inspect (holdNextLook), and
+// returns its child, failing the test if done says the wait it serves ended
+// first. The child, and the process group it is in, are killed when the test
+// ends while it still runs. (A child that a look begun after the wait ended
+// starts runs until the test process ends: testproc.UntilTheTestEnds.)
+func (e *standInEngine) awaitHeld(t *testing.T, done <-chan error) heldChild {
+	t.Helper()
+	said := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(e.heldAt).ReadString('\n')
+		said <- strings.TrimSpace(line)
+	}()
+	var s string
+	select {
+	case s = <-said:
+	case err := <-done:
+		t.Fatalf("the wait ended with %v before the engine held a look", err)
+	}
+	pid, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("the held look's child said %q, not its pid", s)
+	}
+	st, gone, err := procStat("/proc", pid)
+	if err != nil || gone {
+		t.Fatalf("the held look's child, process %d, cannot be read (gone: %v): %v", pid, gone, err)
+	}
+	c := heldChild{pid: pid, st: st}
+	t.Cleanup(func() {
+		// Only while it runs: its group's number, which a process of it
+		// keeps from being taken, may be another's once none is left.
+		if c.runs() {
+			_ = syscall.Kill(-c.st.PGRP, syscall.SIGKILL)
+			_ = syscall.Kill(c.pid, syscall.SIGKILL)
+		}
+	})
+	return c
+}
+
+// pfExiting is the PF_EXITING task flag (include/linux/sched.h,
+// utils.ProcStat.Flags).
+const pfExiting = 0x4
+
+// runs reports whether the held look's child still runs: it is there, the
+// same process (its start time), not a zombie, has not begun to exit
+// (PF_EXITING), and has no SIGKILL pending. A SIGKILL sent to its process
+// group stays pending for it (/proc's ShdPnd) from the kill until it is
+// reaped, and a process with one runs no more of its own code: so a child
+// that its command's kill reached no longer runs, however long the host
+// takes to let it exit.
+func (c heldChild) runs() bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", c.pid))
+	if err != nil {
+		return false
+	}
+	st, gone, err := procStat("/proc", c.pid)
+	if err != nil || gone || st.StartTime != c.st.StartTime || st.State == 'Z' || st.Flags&pfExiting != 0 {
+		return false
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(l, ":")
+		if !ok || (k != "ShdPnd" && k != "SigPnd") {
+			continue
+		}
+		if mask, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64); err == nil && mask&(1<<(syscall.SIGKILL-1)) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // standInComposeAgent is the agent the engine e runs: it answers only while
 // its container runs (else the connection is dropped, unanswered, as nothing
 // serves the agent's address then), with answer's status (200 for a nil
@@ -342,11 +470,109 @@ func TestTheReleaseWaitsForAContainerComposeHasNotCreatedYet(t *testing.T) {
 	}
 }
 
+// No process of a look's engine command runs on once a wait on the agent
+// that watches its start has returned: the release of the app, the wait for
+// the agent keploy started, and the wait for an agent docker compose started
+// again. The look out as the wait ends is cancelled, and the engine command
+// it runs is killed with every process of its process group, and waited for
+// (TestAWaitOnTheAgentEndsOnlyOnceItsWatchHas pins the waits themselves, by
+// event). The look here is held: its command does part of its work in a
+// child process, which runs until the test ends unless it is killed, and
+// the agent answers, ending the wait, while it does. Before, the wait
+// returned with that child running: nothing waited for the look, and its
+// command's cancel killed the command's first process alone.
+func TestAWaitOnTheAgentLeavesNoProcessOfItsLookRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wait func(a *AgentClient, container string) error
+	}{
+		{"the release of the app", func(a *AgentClient, _ string) error {
+			return a.MakeAgentReadyForDockerCompose(context.Background())
+		}},
+		{"the wait for the agent keploy started", func(a *AgentClient, container string) error {
+			return a.waitForAgent(context.Background(), nil, true, models.SetupOptions{KeployContainer: container})
+		}},
+		{"the wait for an agent compose started again", func(a *AgentClient, _ string) error {
+			return a.awaitAgentAnswers(context.Background())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fastLooks(t)
+			e := newStandInEngine(t)
+			srv := standInComposeAgent(t, e, nil)
+			t.Setenv("KEPLOY_PROVEN", "")
+			a := clientFor(srv.URL)
+			container := fmt.Sprintf("keploy-v3-held-%d", os.Getpid())
+			a.nameAgentContainer(container)
+			t.Cleanup(a.forgetAgentContainer)
+			e.holdNextLook(t)
+			done := make(chan error, 1)
+			go func() { done <- tc.wait(a, container) }()
+			child := e.awaitHeld(t, done)
+			e.set(t, "running")
+			if err := <-done; err != nil {
+				t.Fatalf("the wait ended with %v; want the agent's answer, once its container runs", err)
+			}
+			if child.runs() {
+				t.Fatalf("the wait ended with its look's engine command still running: process %d of it runs", child.pid)
+			}
+		})
+	}
+}
+
+// An engine command whose context has ended is killed, with its process
+// group, and its run returns only once it has ended, with what its end
+// said (an *exec.ExitError: killed). One whose kill keploy is refused (a
+// sudo before 1.9.4, which makes itself root in full so that the user who
+// ran it cannot kill it) does not hold its run: the run returns its
+// context's cause, and the command is left running, to end by itself. The
+// look is held as in the row above; for the second case its kill is refused
+// as such a sudo refuses it (killEngineCommand).
+func TestACancelledEngineCommandIsWaitedForUnlessItsKillIsRefused(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		t.Run(map[bool]string{false: "its kill done", true: "its kill refused"}[refused], func(t *testing.T) {
+			if refused {
+				kill := killEngineCommand
+				t.Cleanup(func() { killEngineCommand = kill })
+				killEngineCommand = func(*exec.Cmd) error { return syscall.EPERM }
+			}
+			e := newStandInEngine(t)
+			e.holdNextLook(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				_, err := newEngineCLI(zap.NewNop()).stdout(ctx, "inspect", "-f", "{{.State.Status}}", "keploy-v3-cancelled")
+				done <- err
+			}()
+			child := e.awaitHeld(t, done)
+			cancel()
+			err := <-done
+			var exit *exec.ExitError
+			switch {
+			case refused && (!errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "keploy may not signal")):
+				t.Fatalf("the run ended with %v; want its context's cause, the command left to end by itself", err)
+			case refused && !child.runs():
+				t.Fatal("a command whose kill was refused was ended all the same")
+			case !refused && (!errors.As(err, &exit) || strings.Contains(err.Error(), "keploy may not signal")):
+				t.Fatalf("the run ended with %v; want the killed command's own end", err)
+			case !refused && child.runs():
+				t.Fatalf("the run ended with the command's process %d still running", child.pid)
+			}
+		})
+	}
+}
+
 // Once keploy has known the agent's container to be there, the engine not
 // knowing it is its end: the release ends, saying it is gone, whether keploy
 // knew it from a look at it (the engine said it runs) or from the agent's
-// answer alone (its container removed before any look got to it).
+// answer alone (its container removed before any look got to it). So under
+// either sudo: the engine's answer is not one sudo is asked to replace.
 func TestTheReleaseEndsOnTheRemovalOfAContainerKeployKnew(t *testing.T) {
+	underEitherSudo(t, theReleaseEndsOnTheRemovalOfAContainerKeployKnew)
+}
+
+func theReleaseEndsOnTheRemovalOfAContainerKeployKnew(t *testing.T) {
 	for _, knownBy := range []string{"a look", "the agent's answer"} {
 		t.Run(knownBy, func(t *testing.T) {
 			fastLooks(t)
@@ -489,8 +715,13 @@ func TestNamingTheAgentsContainerForgetsWhatWasKnownOfTheName(t *testing.T) {
 // container, while it is there, does not make the later client's known, so
 // that the later one, not created yet, is waited for, not taken for gone
 // once the earlier one is removed. The release goes through Run and
-// MakeAgentReadyForDockerCompose, as enterprise's callers drive it.
+// MakeAgentReadyForDockerCompose, as enterprise's callers drive it. So under
+// either sudo: the engine's answer is not one sudo is asked to replace.
 func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
+	underEitherSudo(t, anotherClientsContainerOfTheSameNameIsNotThisClients)
+}
+
+func anotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 	failingApp := func() *app.App {
 		return app.NewApp(zap.NewNop(), "exit 3", nil, models.SetupOptions{CommandType: string(utils.Native)})
 	}
@@ -544,7 +775,7 @@ func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 		if err := syscall.Mkfifo(began, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		earlier.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec sleep 600", nil, models.SetupOptions{CommandType: string(utils.Native)}))
+		earlier.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec "+testproc.UntilTheTestEnds, nil, models.SetupOptions{CommandType: string(utils.Native)}))
 		ctx, cancel := context.WithCancel(context.Background())
 		ran := make(chan models.AppError, 1)
 		go func() { ran <- earlier.Run(ctx, models.RunOptions{}) }()
@@ -601,8 +832,13 @@ func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 // two), and whether the run's app ran or the run ended before it could (no
 // app to run); at the watch's first look after the run's end. The project's
 // run here is an `up` that fails before compose creates the agent's
-// container: the stand-in engine never has it.
+// container: the stand-in engine never has it. So under either sudo: the
+// engine's answer is not one sudo is asked to replace.
 func TestTheReleaseEndsOnceTheRunEndedWithoutTheAgentsContainer(t *testing.T) {
+	underEitherSudo(t, theReleaseEndsOnceTheRunEndedWithoutTheAgentsContainer)
+}
+
+func theReleaseEndsOnceTheRunEndedWithoutTheAgentsContainer(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		releaseFirst  bool
@@ -704,7 +940,7 @@ func TestTheReleaseEndsOnceTheRunEndedLeavingTheAgentsContainerNotRunning(t *tes
 				t.Fatalf("the release ended with %v; want the run ended with the agent's container not running", err)
 			}
 
-			exited := containerExited(newEngineCLI(zap.NewNop()), a.containerNamed(name))
+			exited := containerExited(newContainerLook(zap.NewNop(), nil), a.containerNamed(name))
 			e.set(t, "running")
 			if code, ended := exited(context.Background()); ended {
 				t.Fatalf("containerExited = %d, %v of a container that runs, once its run is over; want not ended", code, ended)
@@ -745,7 +981,7 @@ func TestTheReleaseWaitsForTheContainerOfARunBegunAgain(t *testing.T) {
 	if err := syscall.Mkfifo(began, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec sleep 600", nil, models.SetupOptions{CommandType: string(utils.Native)}))
+	a.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec "+testproc.UntilTheTestEnds, nil, models.SetupOptions{CommandType: string(utils.Native)}))
 	ctx, cancel := context.WithCancel(context.Background())
 	ran := make(chan models.AppError, 1)
 	go func() { ran <- a.Run(ctx, models.RunOptions{}) }()

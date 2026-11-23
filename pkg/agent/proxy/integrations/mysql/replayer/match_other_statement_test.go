@@ -486,6 +486,25 @@ func TestConfiguredNoiseLetsTheStatementsRecordingAnswer(t *testing.T) {
 	})
 }
 
+// Under exact serving, keploy.yml's requestBody entry with patterns lets a
+// parameter vary only within them: a recording made with another parameter
+// answers when the recorded and the live value each match one, and is turned
+// away when either is outside them. Before, the patterns were dropped on the
+// way to the matcher and any value answered.
+func TestConfiguredNoisePatternHoldsBothParameterValues(t *testing.T) {
+	prep := diffPrepareMock("prep-c1", "c1", poolQuery, 1, diffBase.Add(time.Millisecond))
+	exec := diffMock("exec-small-7", "c1", []mysql.Request{executeReq(1, "7")}, diffBase.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+	stmts := map[uint32]string{1: poolQuery}
+	pattern := func(p string) map[string]map[string][]string {
+		return map[string]map[string][]string{"requestbody": {"body.parameters.0.value": {p}}}
+	}
+	runOtherStatementCases(t, []*models.Mock{prep, exec}, []*models.Mock{exec}, []otherStatementCase{
+		{name: "both values inside", stmts: stmts, req: executeReq(1, "5"), noise: pattern(`^[57]$`), exact: "exec-small-7", notExact: "exec-small-7"},
+		{name: "the live value outside", stmts: stmts, req: executeReq(1, "5"), noise: pattern(`^7$`), notExact: "exec-small-7", nearest: "exec-small-7"},
+		{name: "the recorded value outside", stmts: stmts, req: executeReq(1, "5"), noise: pattern(`^5$`), notExact: "exec-small-7", nearest: "exec-small-7"},
+	})
+}
+
 // withAttributes is r, a COM_QUERY, sent with the query attributes kv
 // (name, value, ...), in that order.
 func withAttributes(r mysql.Request, kv ...string) mysql.Request {

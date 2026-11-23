@@ -2,8 +2,15 @@ package learn
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
 	"math/rand"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -144,7 +151,10 @@ func tzif(offs []int, at []time.Time) []byte {
 }
 
 // tzifRules is the zone file data's rules from 1901 to 2038 hold, written
-// as a version 1 file (tzif): other bytes of the same rules there.
+// as a version 1 file (tzif): other bytes of the same rules there, one
+// transition at each change of offset (models.ZoneEnd steps to the start
+// of each UTC year too, where most read none). tzif names a transition's
+// offset by a byte, so it holds at most 255 of them.
 func tzifRules(t *testing.T, data []byte) []byte {
 	t.Helper()
 	loc, err := time.LoadLocationFromTZData("", data)
@@ -155,18 +165,241 @@ func tzifRules(t *testing.T, data []byte) []byte {
 	_, off := from.In(loc).Zone()
 	offs, at := []int{off}, []time.Time(nil)
 	for tt := from; ; {
-		_, end := tt.In(loc).ZoneBounds()
+		end := models.ZoneEnd(tt.In(loc))
 		if end.IsZero() || !end.Before(to) {
 			break
 		}
-		_, off := end.In(loc).Zone()
-		offs, at, tt = append(offs, off), append(at, end), end
+		if _, off := end.In(loc).Zone(); off != offs[len(offs)-1] {
+			offs, at = append(offs, off), append(at, end)
+		}
+		tt = end
+	}
+	if len(at) > 255 {
+		t.Fatalf("tzifRules: %d changes of offset, more than a version 1 file of tzif's holds", len(at))
 	}
 	b := tzif(offs, at)
 	if bytes.Equal(b, data) {
 		t.Fatal("tzifRules wrote the bytes it read")
 	}
 	return b
+}
+
+// tzifSlim is a zone file (version 2) as zic -b slim writes one: an empty
+// 32-bit block; the transitions at, the zone std seconds east of UTC
+// before at[0], turning to dst at each even one and back at each odd one;
+// and rule, its TZ footer, which gives every instant after the last of
+// them: no transition is listed after the year it took over.
+func tzifSlim(std, dst int, at []time.Time, rule string) []byte {
+	var b []byte
+	header := func(counts ...int) {
+		b = append(b, "TZif2"...)
+		b = append(b, make([]byte, 15)...)
+		for _, n := range counts {
+			b = binary.BigEndian.AppendUint32(b, uint32(n))
+		}
+	}
+	// isutcnt, isstdcnt, leapcnt, timecnt, typecnt, charcnt.
+	header(0, 0, 0, 0, 0, 0)
+	header(0, 0, 0, len(at), 2, 8)
+	for _, t := range at {
+		b = binary.BigEndian.AppendUint64(b, uint64(t.Unix()))
+	}
+	for i := range at {
+		b = append(b, byte(1-i%2))
+	}
+	b = binary.BigEndian.AppendUint32(b, uint32(int32(std)))
+	b = append(b, 0, 0)
+	b = binary.BigEndian.AppendUint32(b, uint32(int32(dst)))
+	b = append(b, 1, 4)
+	b = append(b, "STD\x00DST\x00"...)
+	return append(b, "\n"+rule+"\n"...)
+}
+
+// alternate is the offsets of a zone that turns from a to b and back at
+// each of n transitions: a before the first (tzif's offs).
+func alternate(a, b, n int) []int {
+	offs := []int{a}
+	for i := 0; i < n; i++ {
+		offs = append(offs, []int{b, a}[i%2])
+	}
+	return offs
+}
+
+// sundayAt is the n-th Sunday (the last for n -1) of month m in year y,
+// at h:00 in zone.
+func sundayAt(y int, m time.Month, n, h int, zone *time.Location) time.Time {
+	if n < 0 {
+		last := time.Date(y, m+1, 0, h, 0, 0, 0, zone)
+		return last.AddDate(0, 0, -int(last.Weekday()))
+	}
+	first := time.Date(y, m, 1, h, 0, 0, 0, zone)
+	return first.AddDate(0, 0, (7-int(first.Weekday()))%7+7*(n-1))
+}
+
+// euTurns are Europe/Berlin's changes of offset from 1980 through the
+// year to, worked out from its rules, never read from a zone file: summer
+// time (UTC+02:00) from the last Sunday of March (1980: April 6) to the
+// last of September (from 1996, of October), both at 01:00 UTC.
+func euTurns(to int) []time.Time {
+	at := []time.Time{time.Date(1980, 4, 6, 1, 0, 0, 0, time.UTC), time.Date(1980, 9, 28, 1, 0, 0, 0, time.UTC)}
+	for y := 1981; y <= to; y++ {
+		end := time.September
+		if y >= 1996 {
+			end = time.October
+		}
+		at = append(at, sundayAt(y, time.March, -1, 1, time.UTC), sundayAt(y, end, -1, 1, time.UTC))
+	}
+	return at
+}
+
+// usTurns are the changes of offset of a zone of America/New_York's rule
+// since 2007 from 2007 through the year to (UTC-05:00 before): summer time
+// (UTC-04:00) from the second Sunday of March at 02:00 EST to the first of
+// November at 02:00 EDT.
+func usTurns(to int) []time.Time {
+	est, edt := time.FixedZone("EST", -5*3600), time.FixedZone("EDT", -4*3600)
+	var at []time.Time
+	for y := 2007; y <= to; y++ {
+		at = append(at, sundayAt(y, time.March, 2, 2, est), sundayAt(y, time.November, 1, 2, edt))
+	}
+	return at
+}
+
+// auTurns are the changes of offset of a zone of Australia/Sydney's rule
+// from 1970 through the year to, in summer time (UTC+11:00) on 1970-01-01:
+// standard time (UTC+10:00) from the first Sunday of April at 03:00 AEDT,
+// summer time from the first of October at 02:00 AEST.
+func auTurns(to int) []time.Time {
+	aest, aedt := time.FixedZone("AEST", 10*3600), time.FixedZone("AEDT", 11*3600)
+	var at []time.Time
+	for y := 1970; y <= to; y++ {
+		at = append(at, sundayAt(y, time.April, 1, 3, aedt), sundayAt(y, time.October, 1, 2, aest))
+	}
+	return at
+}
+
+// turnMoved is at with at[i] moved to to.
+func turnMoved(at []time.Time, i int, to time.Time) []time.Time {
+	m := append([]time.Time(nil), at...)
+	m[i] = to
+	return m
+}
+
+// returnsWithin runs f, failing t at once where it has not returned after
+// d: a walk that stops advancing never returns (its goroutine spins on
+// until the test binary ends).
+func returnsWithin(t *testing.T, d time.Duration, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s: did not return within %s: the walk of the two zones' changes of offset stopped advancing", what, d)
+	}
+}
+
+// zoneRulesDiffer compares two zones at every change of offset either makes
+// from 1970 to 2038, whichever of zic's two forms each zone file is in, and
+// returns. A slim file (zic -b slim, zic's default: Go's own zoneinfo.zip and
+// so the zone data built into keploy) lists no transition after the year its
+// rule (the TZ footer) took over, and Go reads every later instant through
+// that rule, ending the last zone of a leap year at the start of its last day
+// (golang/go#81583): a walk that steps to ZoneBounds' end stops there
+// (Europe/Berlin's slim file on 1996-12-31, America/New_York's on 2008-12-31)
+// and never returns, so keploy hung reading such a zone, either side of the
+// comparison slim. A fat file (zic -b fat: the distributions' tzdata) lists
+// every change to 2037. The rows' files are written from each zone's rules
+// worked out by hand (euTurns, usTurns, auTurns), never from Go's reading of a
+// rule: a slim file of Berlin's rule (transitions to 1996), of New York's
+// (2007) and of Sydney's (its rule alone, so its first such day is 1972-12-31,
+// in summer time), each the same as its fat file, and other than a fat file
+// one change of offset moved, after such a day: the first instant they differ
+// is named, either way round.
+func TestAZoneFileOfARuleOfSummerTimeIsComparedAtEveryChangeInEitherForm(t *testing.T) {
+	load := func(b []byte) *time.Location {
+		loc, err := time.LoadLocationFromTZData("", b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loc
+	}
+	eu, us, au := euTurns(2037), usTurns(2037), auTurns(2037)
+	euSlim := load(tzifSlim(3600, 7200, euTurns(1996), "CET-1CEST,M3.5.0,M10.5.0/3"))
+	usSlim := load(tzifSlim(-5*3600, -4*3600, usTurns(2007), "EST5EDT,M3.2.0,M11.1.0"))
+	auSlim := load(tzifSlim(11*3600, 10*3600, nil, "AEST-10AEDT,M10.1.0,M4.1.0/3"))
+	euFat := func(at []time.Time) *time.Location { return load(tzif(alternate(3600, 7200, len(at)), at)) }
+	usFat := func(at []time.Time) *time.Location { return load(tzif(alternate(-5*3600, -4*3600, len(at)), at)) }
+	auFat := func(at []time.Time) *time.Location { return load(tzif(alternate(11*3600, 10*3600, len(at)), at)) }
+	// Berlin's turns of 1997 are eu[34] and eu[35]; an hour of summer
+	// time on 1997-01-01, the first instant after the day the slim file's
+	// walk stopped on, is set in before them.
+	blip := append(append(append([]time.Time(nil), eu[:34]...), time.Date(1997, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(1997, 1, 1, 1, 0, 0, 0, time.UTC)), eu[34:]...)
+	for _, row := range []struct {
+		what string
+		a, b *time.Location
+		at   time.Time // the first instant they differ; zero for none
+	}{
+		{"Berlin's slim file and itself", euSlim, euSlim, time.Time{}},
+		{"Berlin's slim file and its fat one", euSlim, euFat(eu), time.Time{}},
+		{"Berlin's slim file and a fat one of an hour of summer time on 1997-01-01", euSlim, euFat(blip), time.Date(1997, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"Berlin's slim file and a fat one whose summer time of 2030 starts a week late", euSlim, euFat(turnMoved(eu, 2*(2030-1980), time.Date(2030, 4, 7, 1, 0, 0, 0, time.UTC))), time.Date(2030, 3, 31, 1, 0, 0, 0, time.UTC)},
+		{"New York's slim file and its fat one", usSlim, usFat(us), time.Time{}},
+		{"New York's slim file and a fat one whose summer time of 2009 ends a week early", usSlim, usFat(turnMoved(us, 2*(2009-2007)+1, time.Date(2009, 10, 25, 6, 0, 0, 0, time.UTC))), time.Date(2009, 10, 25, 6, 0, 0, 0, time.UTC)},
+		{"Sydney's rule alone and its fat file", auSlim, auFat(au), time.Time{}},
+		{"Sydney's rule alone and a fat file whose summer time of 1973 ends a week late", auSlim, auFat(turnMoved(au, 2*(1973-1970), time.Date(1973, 4, 7, 16, 0, 0, 0, time.UTC))), time.Date(1973, 3, 31, 16, 0, 0, 0, time.UTC)},
+	} {
+		for _, swap := range []bool{false, true} {
+			a, b := row.a, row.b
+			if swap {
+				a, b = b, a
+			}
+			var at time.Time
+			var differ bool
+			returnsWithin(t, 10*time.Second, row.what, func() { at, differ = zoneRulesDiffer(a, b) })
+			if differ != !row.at.IsZero() || !at.Equal(row.at) {
+				t.Errorf("%s (swapped %v): differ %v at %s; want %v at %s", row.what, swap, differ, at, !row.at.IsZero(), row.at)
+			}
+		}
+	}
+}
+
+// The zone keploy reads of a process whose /etc/localtime links to a slim
+// file of Europe/Berlin (zic's default form, Go's own zoneinfo.zip's) is
+// Berlin, whatever form keploy's own zone data holds it in (the host's
+// files, or the slim ones built into keploy): the slim file's rules are
+// Berlin's from 1970 to 2038
+// (TestAZoneFileOfARuleOfSummerTimeIsComparedAtEveryChangeInEitherForm).
+// keploy compared the two at every change of offset and never returned, so
+// the agent hung where it read the zone: its own as it started, an
+// application's process's at each of its connections.
+func TestAProcessWhoseLocaltimeIsASlimZoneFileOfSummerTimeIsReadInItsZone(t *testing.T) {
+	r := t.TempDir()
+	p := filepath.Join(r, "usr/share/zoneinfo/Europe/Berlin")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, tzifSlim(3600, 7200, euTurns(1996), "CET-1CEST,M3.5.0,M10.5.0/3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(r, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/share/zoneinfo/Europe/Berlin", filepath.Join(r, "etc/localtime")); err != nil {
+		t.Fatal(err)
+	}
+	var loc *time.Location
+	var err error
+	returnsWithin(t, 10*time.Second, "ReadZone of a slim Europe/Berlin", func() { loc, err = ReadZone(r, "", false) })
+	if err != nil {
+		t.Fatalf("ReadZone of a slim Europe/Berlin: %v", err)
+	}
+	if _, off := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC).In(loc).Zone(); loc.String() != "Europe/Berlin" || off != 7200 {
+		t.Errorf("ReadZone of a slim Europe/Berlin: %q at %d on 2026-07-01; want Europe/Berlin at 7200", loc.String(), off)
+	}
 }
 
 // A zone file whose rules are not those of the zone its link or its
@@ -319,11 +552,11 @@ func TestAZoneWhoseFileInKeploysOwnIsAnotherZonesIsRefusedByName(t *testing.T) {
 	v := Leaf{Path: wp, Noise: wp, Type: String, Value: call.In(berlin).Format("2006-01-02 15:04:05")}
 
 	mount(root + "2 1 8:1 /usr/share/zoneinfo/Asia/Kolkata " + dir + "/Europe/Berlin ro - xfs /dev/sda1 rw\n")
-	const mounted = "which is a file mounted from /usr/share/zoneinfo/Asia/Kolkata, the zone file of \"Asia/Kolkata\""
+	const mounted = "which is a file mounted from the zone file of \"Asia/Kolkata\""
 	if loc, err := javaZone("Europe/Berlin"); loc != nil || !isLasting(err) || !strings.Contains(err.Error(), mounted) {
 		t.Errorf("a JVM's user.timezone Europe/Berlin, keploy's own file of it Kolkata's: %v %v; want a lasting error naming the mount", loc, err)
 	}
-	if loc, err := loadZone("Europe/Berlin", data); loc != nil || !isLasting(err) || !strings.Contains(err.Error(), `cannot be checked against "Europe/Berlin"'s rules`) || !strings.Contains(err.Error(), mounted) {
+	if loc, _, err := loadZone("Europe/Berlin", data, zoneSourceOf{}); loc != nil || !isLasting(err) || !strings.Contains(err.Error(), `cannot be checked against "Europe/Berlin"'s rules`) || !strings.Contains(err.Error(), mounted) {
 		t.Errorf("a zone file named Europe/Berlin, keploy's own file of it Kolkata's: %v %v; want a lasting error naming the mount", loc, err)
 	}
 	if ok, why := CheckClockRead(wp, o, v, s, true); ok || !strings.Contains(why, "the application's zone the learn step read it in, but keploy's own file of that zone is another zone's here") || !strings.Contains(why, mounted) {
@@ -335,7 +568,7 @@ func TestAZoneWhoseFileInKeploysOwnIsAnotherZonesIsRefusedByName(t *testing.T) {
 		t.Errorf("a JVM's user.timezone Europe/Berlin, nothing mounted: %v %v; want Europe/Berlin", loc, err)
 	}
 	if data != nil {
-		if loc, err := loadZone("Europe/Berlin", data); err != nil || loc.String() != "Europe/Berlin" {
+		if loc, _, err := loadZone("Europe/Berlin", data, zoneSourceOf{}); err != nil || loc.String() != "Europe/Berlin" {
 			t.Errorf("a zone file named Europe/Berlin holding its rules, nothing mounted: %v %v; want Europe/Berlin", loc, err)
 		}
 	}
@@ -840,7 +1073,7 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 		w := (&Window{Rec: Span{From: call.Add(-70 * time.Minute), To: call}, F: Span{From: fcall.Add(-70 * time.Minute), To: fcall}}).ComparesOffsets()
 		shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
 		c := ClassifyIn(dc, []string{p}, shape(cutIn(ist, fcall, time.Hour).Add(day)), shape(cutIn(ist, call, time.Hour).Add(day)), call, nil, nil, nil, w)[0]
-		if c.Kind != KindUnaccounted || c.Offset != nil || !strings.Contains(c.Why, "a whole number of 1h") || !strings.HasSuffix(c.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it") || strings.Contains(c.Why, "no clock read by the app matched it") {
+		if c.Kind != KindUnaccounted || c.Offset != nil || !strings.Contains(c.Why, "a whole number of 1h") || !strings.HasSuffix(c.Why, ". If your test supplies this value, "+clientGiveWhy) || !strings.Contains(c.Why, "keploytest.Given(t, ") || strings.Contains(c.Why, "no clock read by the app matched it") {
 			t.Errorf("a client test's value a day on, cut to the IST hour, a slow call's windows, the zone unread: %s %+v (%s); want refused as ambiguous, naming the hour and how to correct it", c.Kind, c.Offset, c.Why)
 		}
 	}
@@ -1292,7 +1525,7 @@ func TestAClientTestsTextOffsetCutToAnHourIsLearnedInTheApplicationsZone(t *test
 	if slow := learn(ist, inUTC, 70*time.Minute); slow.Kind != KindClockOffset || slow.Offset == nil || slow.Offset.Res != time.Hour || slow.Offset.AppZone != "+05:30" {
 		t.Fatalf("FALSE RED: a client test's text written in UTC, a slow call's windows, learned in IST: %s %+v (%s); want clock + 1d at the IST hour, naming +05:30", slow.Kind, slow.Offset, slow.Why)
 	}
-	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindUnaccounted || slow.Bindable || slow.Offset != nil || !strings.HasPrefix(slow.Why, p+" = clock + 1d") || !strings.Contains(slow.Why, "stand 1h apart, a whole number of 1h") || !strings.Contains(slow.Why, "keploy cannot tell at which cut a replay must check it, so it refuses it. Record the test again") || !strings.HasSuffix(slow.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it") || strings.Contains(slow.Why, "no clock read by the app matched it") {
+	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindUnaccounted || slow.Bindable || slow.Offset != nil || !strings.HasPrefix(slow.Why, p+" = clock + 1d") || !strings.Contains(slow.Why, "stand 1h apart, a whole number of 1h") || !strings.Contains(slow.Why, "keploy cannot tell at which cut a replay must check it, so it refuses it. Record the test again") || !strings.HasSuffix(slow.Why, ". If your test supplies this value, "+clientGiveWhy) || strings.Contains(slow.Why, "no clock read by the app matched it") {
 		t.Errorf("FALSE GREEN: a client test's text written in UTC, a slow call's windows, the zone unread: %s %+v bindable=%v (%s); want no offset learned, refused naming the two cuts and how to correct it, never bound as the test's own value", slow.Kind, slow.Offset, slow.Bindable, slow.Why)
 	}
 	for _, row := range []struct {
@@ -2054,12 +2287,778 @@ func unreadZoneUnclear(why, otherwise string) string {
 // alone (ZoneOfFile). A zone of another name, or of none, with no bytes is
 // an error, never UTC.
 func TestAZoneHandedWithNoZoneFileIsUTCByNameAlone(t *testing.T) {
-	if z, err := ZoneOfFile("UTC", nil); err != nil || z.Loc != time.UTC || z.Name != "UTC" {
+	if z, err := ZoneOfFile("UTC", ZoneFile{}); err != nil || z.Loc != time.UTC || z.Name != "UTC" {
 		t.Fatalf("UTC with no bytes: %+v, %v; want UTC", z, err)
 	}
 	for _, name := range []string{"Asia/Kolkata", "", "Etc/UTC"} {
-		if z, err := ZoneOfFile(name, nil); err == nil || z.Loc != nil {
+		if z, err := ZoneOfFile(name, ZoneFile{}); err == nil || z.Loc != nil {
 			t.Errorf("the zone %q handed with no zone file read as %v, %v; want an error, never UTC", name, z.Loc, err)
+		}
+	}
+}
+
+// casablancaOf is the real zone file of Africa/Casablanca of IANA's tzdata
+// release rel, in testdata/zoneinfo-<rel>: copied from Go's zoneinfo.zip of
+// that release (Go 1.23.12's for 2024a, Go 1.27.3's for 2026c). The two
+// read UTC+01:00 and UTC+00:00 from 2026-09-20 on, and agree before it.
+func casablancaOf(t *testing.T, rel string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "zoneinfo-"+rel, "Africa", "Casablanca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// zoneReleaseAt is an instant at which the two releases of
+// Africa/Casablanca in testdata part, and zoneReleaseOffsets each's offset
+// there.
+var (
+	zoneReleaseAt      = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	zoneReleaseOffsets = map[string]int{"2024a": 3600, "2026c": 0}
+)
+
+// otherRelease is the testdata release of Africa/Casablanca other than rel.
+func otherRelease(rel string) string {
+	if rel == "2024a" {
+		return "2026c"
+	}
+	return "2024a"
+}
+
+// inZoneRelease runs the test named run again in a child process for each
+// release of rels (2026c and 2024a where none is given), whose own zone
+// data (Go's $ZONEINFO, read once a process, so never in this one) is
+// testdata's files of that release, with extra's files too where extra is
+// not nil, every other zone the host's or keploy's built-in, with
+// KEPLOY_TEST_ZONE_RELEASE=the release. child is false in the parent, which
+// ran it for each release; true in the child, which then runs its rows.
+func inZoneRelease(t *testing.T, run string, extra map[string][]byte, rels ...string) (own string, child bool) {
+	t.Helper()
+	if own = os.Getenv("KEPLOY_TEST_ZONE_RELEASE"); own != "" {
+		return own, true
+	}
+	if len(rels) == 0 {
+		rels = []string{"2026c", "2024a"}
+	}
+	for _, rel := range rels {
+		dir, err := filepath.Abs(filepath.Join("testdata", "zoneinfo-"+rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if extra != nil {
+			tmp := t.TempDir()
+			if err := os.CopyFS(tmp, os.DirFS(dir)); err != nil {
+				t.Fatal(err)
+			}
+			writeTree(t, tmp, extra, nil)
+			dir = tmp
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+run+"$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), "KEPLOY_TEST_ZONE_RELEASE="+rel, "ZONEINFO="+dir)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil || !bytes.Contains(out, []byte("--- PASS: "+run)) {
+			t.Errorf("keploy's own zone data of tzdata %s: %v\n%s", rel, err, out)
+		}
+	}
+	return "", false
+}
+
+// keploysCasablancaIs fails the test unless keploy's own zone data reads
+// Africa/Casablanca as release own does, and not as the other release's
+// file does: the row's two releases part where it reads.
+func keploysCasablancaIs(t *testing.T, own string) {
+	t.Helper()
+	loc, err := models.ZoneLocation("Africa/Casablanca")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, off := zoneReleaseAt.In(loc).Zone(); off != zoneReleaseOffsets[own] {
+		t.Fatalf("precondition: keploy's own Africa/Casablanca reads %d s east of UTC on %s; want tzdata %s's %d", off, zoneReleaseAt.Format(time.DateOnly), own, zoneReleaseOffsets[own])
+	}
+	file, err := time.LoadLocationFromTZData("Africa/Casablanca", casablancaOf(t, otherRelease(own)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, differ := zoneRulesDiffer(file, loc); !differ {
+		t.Fatalf("precondition: tzdata %s's Africa/Casablanca holds keploy's own rules", otherRelease(own))
+	}
+}
+
+// A zone file of another release of IANA's data than keploy's own is its
+// zone's (loadZone), whichever is the older: Africa/Casablanca, whose
+// rules tzdata 2026c changed (UTC+00:00 from 2026-09-20; 2024a UTC+01:00),
+// read by keploy with the other release, is Africa/Casablanca, in the
+// file's rules, which the C library, Go and Python read. So it is through
+// /etc/localtime's link, a TZ naming it, a process's root read through its
+// own mounts (nothing mounted over it), and the bytes the keploy CLI read
+// of a container, which a docker-mode agent takes (ZoneOfFile). keploy
+// writes into a recording only a name read back as the file's rules
+// (models.ZoneNameOf): UTC for 2026c's, at UTC+00:00 with no change after
+// 2026-09-20; none for 2024a's where keploy's own (2026c) reads the name
+// otherwise in the year after; the name in a year both read alike.
+func TestAZoneFileOfAnotherReleaseOfItsZoneIsReadInItsZone(t *testing.T) {
+	own, child := inZoneRelease(t, "TestAZoneFileOfAnotherReleaseOfItsZoneIsReadInItsZone", nil)
+	if !child {
+		return
+	}
+	keploysCasablancaIs(t, own)
+	rel := otherRelease(own)
+	data := casablancaOf(t, rel)
+	want := zoneReleaseOffsets[rel]
+	zi := "usr/share/zoneinfo/"
+	check := func(what string, loc *time.Location, err error) {
+		t.Helper()
+		if err != nil || loc == nil {
+			t.Errorf("%s, tzdata %s, keploy's %s: %v %v; want Africa/Casablanca", what, rel, own, loc, err)
+			return
+		}
+		if _, off := zoneReleaseAt.In(loc).Zone(); loc.String() != "Africa/Casablanca" || off != want {
+			t.Errorf("%s, tzdata %s, keploy's %s: %q at %d s on %s; want Africa/Casablanca at the file's %d", what, rel, own, loc.String(), off, zoneReleaseAt.Format(time.DateOnly), want)
+		}
+	}
+	r := t.TempDir()
+	writeTree(t, r, map[string][]byte{zi + "Africa/Casablanca": data}, map[string]string{"etc/localtime": "/" + zi + "Africa/Casablanca"})
+	loc, err := ReadZone(r, "", false)
+	check("/etc/localtime linking the file", loc, err)
+	loc, err = ReadZone(r, "Africa/Casablanca", true)
+	check("TZ=Africa/Casablanca", loc, err)
+	loc, err = ReadZone(r, ":Africa/Casablanca", true)
+	check("TZ=:Africa/Casablanca", loc, err)
+
+	proc := t.TempDir()
+	fakeProc(t, proc, "931", "500", nil, map[string][]byte{zi + "Africa/Casablanca": data}, map[string]string{"etc/localtime": "/" + zi + "Africa/Casablanca"})
+	if err := os.WriteFile(filepath.Join(proc, "931", "mountinfo"), []byte(rootMount), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	z, err := ReadProcZone(proc, 931)
+	check("a process's root, nothing mounted over the file", z.Loc, err)
+
+	// The image's Europe/Berlin a copy of it (cp through a link to
+	// Berlin): the file read is the original, its rules Casablanca's.
+	r = t.TempDir()
+	writeTree(t, r, map[string][]byte{zi + "Africa/Casablanca": data, zi + "Europe/Berlin": data}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
+	loc, err = ReadZone(r, "Africa/Casablanca", true)
+	check("TZ=Africa/Casablanca in a root whose Europe/Berlin is a copy of it", loc, err)
+
+	z, err = ZoneOfFile("Africa/Casablanca", ZoneFile{Data: data})
+	check("the bytes the CLI read of a container", z.Loc, err)
+	if z.Loc != nil {
+		// 2026c's holds UTC+00:00 with no change after 2026-09-20: written
+		// as UTC, read back so anywhere. 2024a's changes, and keploy's own
+		// 2026c reads the name otherwise: no name.
+		if n, want := models.ZoneNameOf(z.Loc, zoneReleaseAt), map[string]string{"2024a": "", "2026c": "UTC"}[rel]; n != want {
+			t.Errorf("the name keploy writes for tzdata %s's Africa/Casablanca on %s, its own %s: %q; want %q", rel, zoneReleaseAt.Format(time.DateOnly), own, n, want)
+		}
+		if n, at := models.ZoneNameOf(z.Loc, time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)), "2025-06-01"; n != "Africa/Casablanca" {
+			t.Errorf("the name keploy writes for tzdata %s's Africa/Casablanca on %s, a year both releases read alike: %q; want Africa/Casablanca", rel, at, n)
+		}
+	}
+}
+
+// writeTree writes files and links (each by its path under r) under r.
+func writeTree(t *testing.T, r string, files map[string][]byte, links map[string]string) {
+	t.Helper()
+	for name, data := range files {
+		p := filepath.Join(r, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range links {
+		p := filepath.Join(r, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// testZone is testdata's zone file of name of IANA's tzdata release rel,
+// copied from Go's zoneinfo.zip of that release.
+func testZone(t *testing.T, rel, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "zoneinfo-"+rel, filepath.FromSlash(name)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// hostZone is the host's zone file of name: a distribution's, fat (every
+// change to 2037 listed), where Go's zoneinfo.zip is slim.
+func hostZone(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile("/usr/share/zoneinfo/" + name)
+	if err != nil {
+		t.Fatalf("the host's zone file of %s: %v", name, err)
+	}
+	return b
+}
+
+// zoneRow is a root's zone files (files, links, and hard links: each path
+// a hard link of the file at the other), the TZ its process runs with, and
+// what a refusal of its zone says (why: each part).
+type zoneRow struct {
+	what  string
+	files map[string][]byte
+	links map[string]string
+	hard  map[string]string
+	tz    string
+	why   []string
+}
+
+// write writes the row's root at r.
+func (row zoneRow) write(t *testing.T, r string) {
+	t.Helper()
+	writeTree(t, r, row.files, row.links)
+	for p, of := range row.hard {
+		to := filepath.Join(r, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(filepath.Join(r, filepath.FromSlash(of)), to); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// refused fails the test unless err is a lasting refusal saying each part
+// of why.
+func refused(t *testing.T, what string, loc *time.Location, err error, why []string) {
+	t.Helper()
+	if err == nil || !isLasting(err) {
+		t.Errorf("%s: %v %v; want unknown, a lasting error", what, loc, err)
+		return
+	}
+	for _, w := range why {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("%s: %v; want it to say %q", what, err, w)
+		}
+	}
+}
+
+// Another zone's file at a zone's path is unknown, whatever its bytes are
+// of (loadZone: its offsets from 1970 to 2038 are no release's of the zone
+// its path names): a copy written through an image's link to the zone (a
+// Dockerfile's COPY and docker cp onto /etc/localtime write the file the
+// link names) of a file from outside the image's own zone data (Go's slim
+// Asia/Kolkata in a root of fat files, the host's or tzdata 2024a's
+// America/Phoenix over America/Denver), of another release (tzdata 2021a's
+// America/Pangnirtung over America/New_York), of keploy's own release or
+// the other one (Africa/Casablanca over Europe/Berlin, in a root holding
+// no other zone file); a hard link of another zone's file that the image's
+// maker made; the file TZ names; Etc/UTC's file holding another zone's.
+// Each is read in a root keploy reads itself (twice: the second read is of
+// a name and bytes keploy has read), in a process's root read through its
+// own mounts (nothing mounted there), and as the bytes the keploy CLI hands
+// a docker-mode agent (ZoneOfFile). The refusal names the zone a release
+// reads the file's offsets as. A file mounted from a host's file of another
+// zone, or from one whose path names no zone, is unknown too, naming the
+// zone the mount's source names but never the host's path.
+func TestAnotherZonesFileAtAZonesPathIsUnknownWhereverItsBytesCameFrom(t *testing.T) {
+	own, child := inZoneRelease(t, "TestAnotherZonesFileAtAZonesPathIsUnknownWhereverItsBytesCameFrom", nil)
+	if !child {
+		return
+	}
+	keploysCasablancaIs(t, own)
+	rel := otherRelease(own)
+	other, ours := casablancaOf(t, rel), casablancaOf(t, own)
+	slimKolkata, fatKolkata := testZone(t, "2026c", "Asia/Kolkata"), hostZone(t, "Asia/Kolkata")
+	if bytes.Equal(slimKolkata, fatKolkata) {
+		t.Fatal("precondition: the host's Asia/Kolkata is Go's own slim file")
+	}
+	zi := "usr/share/zoneinfo/"
+	link := func(name string) map[string]string { return map[string]string{"etc/localtime": "/" + zi + name} }
+	kolkataIs := []string{"one gives them Asia/Calcutta, Asia/Kolkata: it is that zone's file"}
+	rows := []zoneRow{
+		{"Europe/Berlin's file a copy of keploy's own release's Africa/Casablanca, the root holding no other file", map[string][]byte{zi + "Europe/Berlin": ours}, link("Europe/Berlin"), nil, "",
+			[]string{`does not hold "Europe/Berlin"'s rules: their offsets first differ on 1970-01-01T00:00:00Z, where it reads UTC+00:00 and "Europe/Berlin" UTC+01:00`, "one gives them Africa/Casablanca: it is that zone's file"}},
+		{"Europe/Berlin's file a copy of the other release's Africa/Casablanca", map[string][]byte{zi + "Europe/Berlin": other, zi + "Africa/Casablanca": ours}, link("Europe/Berlin"), nil, "",
+			[]string{"one gives them Africa/Casablanca: it is that zone's file"}},
+		{"Europe/Berlin's file Go's slim Asia/Kolkata, the root's own Asia/Kolkata fat", map[string][]byte{zi + "Europe/Berlin": slimKolkata, zi + "Asia/Kolkata": fatKolkata}, link("Europe/Berlin"), nil, "", kolkataIs},
+		{"Europe/Berlin a hard link of the root's Asia/Kolkata", map[string][]byte{zi + "Asia/Kolkata": fatKolkata}, link("Europe/Berlin"), map[string]string{zi + "Europe/Berlin": zi + "Asia/Kolkata"}, "", kolkataIs},
+		{"TZ=Europe/Berlin, its file Go's slim Asia/Kolkata", map[string][]byte{zi + "Europe/Berlin": slimKolkata}, nil, nil, "Europe/Berlin", kolkataIs},
+		{"America/Denver's file the host's America/Phoenix", map[string][]byte{zi + "America/Denver": hostZone(t, "America/Phoenix")}, link("America/Denver"), nil, "",
+			[]string{`first differ on 1970-04-26T09:00:00Z, where it reads UTC-07:00 and "America/Denver" UTC-06:00`, "America/Phoenix"}},
+		{"America/Denver's file tzdata 2024a's America/Phoenix", map[string][]byte{zi + "America/Denver": testZone(t, "2024a", "America/Phoenix")}, link("America/Denver"), nil, "", []string{"America/Phoenix"}},
+		{"America/New_York's file tzdata 2021a's America/Pangnirtung", map[string][]byte{zi + "America/New_York": testZone(t, "2021a", "America/Pangnirtung")}, link("America/New_York"), nil, "",
+			[]string{"one gives them America/Pangnirtung: it is that zone's file"}},
+		{"Etc/UTC's file the other release's Africa/Casablanca", map[string][]byte{zi + "Etc/UTC": other}, link("Etc/UTC"), nil, "", []string{`does not hold "Etc/UTC"'s rules`, "one gives them Africa/Casablanca"}},
+		// UTC's offset to 2027, then another: a file of no release, in a
+		// root of no zone source to say otherwise.
+		{"Etc/UTC's file UTC to 2027, then UTC+01:00", map[string][]byte{zi + "Etc/UTC": laterZone(t, time.UTC, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), 3600)}, link("Etc/UTC"), nil, "",
+			[]string{`does not hold "Etc/UTC"'s rules`, "nor does a tzdata.zi of the root's own zone data, which it holds none of"}},
+	}
+	for i, row := range rows {
+		r := t.TempDir()
+		row.write(t, r)
+		for _, read := range []string{"read", "read again"} {
+			loc, err := ReadZone(r, row.tz, row.tz != "")
+			refused(t, fmt.Sprintf("%s (keploy's %s), %s", row.what, own, read), loc, err, row.why)
+		}
+		proc := t.TempDir()
+		pid := strconv.Itoa(950 + i)
+		var env []string
+		if row.tz != "" {
+			env = []string{"TZ=" + row.tz}
+		}
+		fakeProc(t, proc, pid, "500", env, nil, nil)
+		row.write(t, filepath.Join(proc, pid, "root"))
+		z, err := ReadProcZone(proc, uint32(950+i))
+		refused(t, row.what+", a process's root", z.Loc, err, row.why)
+		name := row.tz
+		if name == "" {
+			name = strings.TrimPrefix(row.links["etc/localtime"], "/"+zi)
+		}
+		data, err := os.ReadFile(filepath.Join(r, zi, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		z, err = ZoneOfFile(name, ZoneFile{Data: data})
+		refused(t, row.what+", the bytes the CLI hands a docker-mode agent", z.Loc, err, row.why)
+	}
+	// Mounted from a host's file: the process's own mounts tell, and the
+	// refusal names the zone the mount's source names, never its path.
+	t.Run("mounted", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("no mount table off Linux")
+		}
+		for i, m := range []struct{ src, why string }{
+			{"/home/alice/zoneinfo/Africa/Casablanca", `is a file mounted from the zone file of "Africa/Casablanca"`},
+			{"/home/alice/localtime", "is a file mounted from a file whose path names no zone (a copy)"},
+		} {
+			proc := t.TempDir()
+			pid := strconv.Itoa(970 + i)
+			fakeProc(t, proc, pid, "500", nil, map[string][]byte{zi + "Europe/Berlin": other}, link("Europe/Berlin"))
+			mounts := rootMount + "700 600 252:0 " + m.src + " /usr/share/zoneinfo/Europe/Berlin ro,relatime - xfs /dev/sda1 rw\n"
+			if err := os.WriteFile(filepath.Join(proc, pid, "mountinfo"), []byte(mounts), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			z, err := ReadProcZone(proc, uint32(970+i))
+			refused(t, "Europe/Berlin's file mounted from "+m.src, z.Loc, err, []string{m.why})
+			if err != nil && strings.Contains(err.Error(), "/home/alice") {
+				t.Errorf("Europe/Berlin's file mounted from %s: %v; want no host path in it", m.src, err)
+			}
+		}
+	})
+}
+
+// A file mounted from a host's file of an alias of its zone (Asia/Calcutta,
+// a link to Asia/Kolkata), over an image's link to the zone, is the zone's
+// (models.ZoneFileMount: keploy's own zone data reads the two names alike
+// from 1970 to 2038), as is the file it holds. One mounted from a zone
+// keploy reads otherwise (America/Detroit over America/New_York: apart
+// from 1970 to 1975) is not, whatever its file holds.
+func TestAZoneFileMountedFromAnAliasOfItsZoneIsItsZone(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("no mount table off Linux")
+	}
+	zi := "usr/share/zoneinfo/"
+	for i, row := range []struct {
+		zone, src string
+		data      []byte
+		want      string
+		off       int
+	}{
+		{"Asia/Kolkata", "/usr/share/zoneinfo/Asia/Calcutta", hostZone(t, "Asia/Kolkata"), "Asia/Kolkata", 19800},
+		{"America/New_York", "/usr/share/zoneinfo/America/Detroit", hostZone(t, "America/New_York"), "", 0},
+	} {
+		proc := t.TempDir()
+		pid := strconv.Itoa(990 + i)
+		fakeProc(t, proc, pid, "500", nil, map[string][]byte{zi + row.zone: row.data}, map[string]string{"etc/localtime": "/" + zi + row.zone})
+		mounts := rootMount + "700 600 252:0 " + row.src + " /usr/share/zoneinfo/" + row.zone + " ro,relatime - xfs /dev/sda1 rw\n"
+		if err := os.WriteFile(filepath.Join(proc, pid, "mountinfo"), []byte(mounts), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		z, err := ReadProcZone(proc, uint32(990+i))
+		if row.want == "" {
+			refused(t, row.zone+"'s file mounted from "+row.src, z.Loc, err, []string{`is a file mounted from the zone file of "America/Detroit"`})
+			continue
+		}
+		if err != nil || z.Loc.String() != row.want {
+			t.Errorf("%s's file mounted from %s: %v %v; want %s", row.zone, row.src, z.Loc, err, row.want)
+		} else if _, off := zoneReleaseAt.In(z.Loc).Zone(); off != row.off {
+			t.Errorf("%s's file mounted from %s: %d s east of UTC; want %d", row.zone, row.src, off, row.off)
+		}
+	}
+}
+
+// A zone file at its zone's path is that zone's where its offsets are
+// another zone's too, as long as a release gives them its zone: zones share
+// rules in some releases, and some releases correct others. So
+// Antarctica/Vostok of tzdata 2021a, whose rules from 1970 are Asia/Urumqi's
+// (2023d corrected Vostok's history), read by a keploy of 2026c's data;
+// EET, WET and Asia/Choibalsan of 2024a, separate zones, read by a keploy
+// of 2026c's, where 2024b made them links to Europe/Athens, Europe/Lisbon
+// and Asia/Ulaanbaatar (whose pre-2008 history they never held); and the
+// same three of 2026c read by a keploy of 2024a's, each in a root holding
+// it as tzdata installs a link: a hard link of its target, one file. The
+// same bytes at another zone's path (a copy over Asia/Kolkata's link) are
+// that zone's no more, and unknown.
+func TestAZoneFileHoldingAnotherZonesRulesIsNamedByItsPath(t *testing.T) {
+	own, child := inZoneRelease(t, "TestAZoneFileHoldingAnotherZonesRulesIsNamedByItsPath", nil)
+	if !child {
+		return
+	}
+	zi := "usr/share/zoneinfo/"
+	rows := []struct{ name, rel, target string }{{"Antarctica/Vostok", "2021a", ""}, {"EET", "2024a", ""}, {"WET", "2024a", ""}, {"Asia/Choibalsan", "2024a", ""}}
+	if own == "2024a" {
+		rows = []struct{ name, rel, target string }{{"EET", "2026c", "Europe/Athens"}, {"WET", "2026c", "Europe/Lisbon"}, {"Asia/Choibalsan", "2026c", "Asia/Ulaanbaatar"}}
+	}
+	for _, r := range rows {
+		data := testZone(t, r.rel, r.name)
+		f, err := time.LoadLocationFromTZData(r.name, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kn, err := models.ZoneLocation(r.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, differ := zoneRulesDiffer(f, kn); !differ {
+			t.Fatalf("precondition: tzdata %s's %s reads keploy's own %s rules", r.rel, r.name, own)
+		}
+		_, want := zoneReleaseAt.In(f).Zone()
+		root := t.TempDir()
+		row := zoneRow{files: map[string][]byte{zi + r.name: data}, links: map[string]string{"etc/localtime": "/" + zi + r.name}}
+		if r.target != "" {
+			row.hard = map[string]string{zi + r.target: zi + r.name}
+		}
+		row.write(t, root)
+		for _, tz := range []string{"", r.name} {
+			loc, err := ReadZone(root, tz, tz != "")
+			if err != nil || loc.String() != r.name {
+				t.Errorf("tzdata %s's %s, keploy's %s, TZ=%q: %v %v; want %s", r.rel, r.name, own, tz, loc, err, r.name)
+				continue
+			}
+			if _, off := zoneReleaseAt.In(loc).Zone(); off != want {
+				t.Errorf("tzdata %s's %s, TZ=%q: %d s east of UTC on %s; want the file's %d", r.rel, r.name, tz, off, zoneReleaseAt.Format(time.DateOnly), want)
+			}
+		}
+		copied := t.TempDir()
+		writeTree(t, copied, map[string][]byte{zi + r.name: data, zi + "Asia/Kolkata": data}, map[string]string{"etc/localtime": "/" + zi + "Asia/Kolkata"})
+		loc, err := ReadZone(copied, "", false)
+		refused(t, fmt.Sprintf("tzdata %s's %s copied over Asia/Kolkata's link, keploy's %s", r.rel, r.name, own), loc, err, []string{`does not hold "Asia/Kolkata"'s rules`, r.name})
+	}
+}
+
+// laterZone is a zone file (version 1) of loc's offsets from 1970 up to
+// from, and off (seconds east of UTC) from there on: a file of a later
+// release that changes loc's zone at from, or of another zone.
+func laterZone(t *testing.T, loc *time.Location, from time.Time, off int) []byte {
+	t.Helper()
+	start := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, first := start.In(loc).Zone()
+	offs, at := []int{first}, []time.Time(nil)
+	for u := start; u.Before(from); {
+		end := models.ZoneEnd(u.In(loc))
+		if end.IsZero() || !end.Before(from) {
+			break
+		}
+		u = end.UTC()
+		if _, o := u.In(loc).Zone(); o != offs[len(offs)-1] {
+			offs, at = append(offs, o), append(at, u)
+		}
+	}
+	if offs[len(offs)-1] == off {
+		t.Fatalf("precondition: %s reads %d s east of UTC before %s", loc, off, from.Format(time.RFC3339))
+	}
+	return tzif(append(offs, off), append(at, from))
+}
+
+// laterSource is the zone source (tzdata.zi) of a release later than every
+// one keploy knows, "2099a": the newest release's tzdata.zi (models'
+// testdata, which tools/zonereleases writes with the table), each edit
+// (an old text, then its new one) made once.
+func laterSource(t *testing.T, edits ...string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "models", "testdata", "tzdata.zi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.Replace(string(b), "# version "+models.ZoneReleasesLast+"\n", "# version 2099a\n", 1)
+	for i := 0; i+1 < len(edits); i += 2 {
+		if strings.Count(s, edits[i]) != 1 {
+			t.Fatalf("precondition: tzdata %s's tzdata.zi holds %q %d times; want once", models.ZoneReleasesLast, edits[i], strings.Count(s, edits[i]))
+		}
+		s = strings.Replace(s, edits[i], edits[i+1], 1)
+	}
+	return []byte(s)
+}
+
+// unmountedFiles are the files of a root keploy reads no mount of, as the
+// keploy CLI reads a container's through Docker (containerkey's).
+type unmountedFiles struct{ dirFiles }
+
+func (unmountedFiles) ZoneMount(string, string) (*models.ZoneMount, error) { return nil, nil }
+
+// The edits of laterSource by which 2099a keeps Europe/Berlin at UTC+03:00
+// from 2027 (berlinLater), parts Europe/Oslo from it so (osloParts: Berlin
+// unchanged), and corrects Berlin's past, its first summer time of 1980 a
+// week later (berlinMoved: from 1980-04-13 01:00 UTC).
+var (
+	berlinLater = []string{"1 DE CE%sT 1980\n1 E CE%sT\n", "1 DE CE%sT 1980\n1 E CE%sT 2027\n3 - +03\n"}
+	osloParts   = []string{"L Europe/Berlin Europe/Oslo\n", "Z Europe/Oslo 1 - CET 1980\n1 E CE%sT 2027\n3 - +03\n"}
+	berlinMoved = []string{"1 DE CE%sT 1980\n", "1 DE CE%sT 1980\n1 - CET 1980 Ap 13 1u\n"}
+)
+
+// laterBerlin is the zone file of Europe/Berlin's rules (the host's) up to
+// 2027 (2026-12-31T23:00:00Z, the start of 2027 in Berlin), then UTC+03:00:
+// 2099a's Europe/Berlin of berlinLater, and its Europe/Oslo of osloParts.
+func laterBerlin(t *testing.T) []byte {
+	t.Helper()
+	berlin, err := time.LoadLocationFromTZData("Europe/Berlin", hostZone(t, "Europe/Berlin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return laterZone(t, berlin, time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC), 3*3600)
+}
+
+// movedBerlin is the zone file of Europe/Berlin's rules (the host's) with
+// its first summer time of 1980 a week late: 2099a's of berlinMoved.
+func movedBerlin(t *testing.T) []byte {
+	t.Helper()
+	berlin, err := time.LoadLocationFromTZData("Europe/Berlin", hostZone(t, "Europe/Berlin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, first := from.In(berlin).Zone()
+	offs, at := []int{first}, []time.Time(nil)
+	for u := from; ; {
+		end := models.ZoneEnd(u.In(berlin))
+		if end.IsZero() || !end.Before(time.Date(2038, 1, 1, 0, 0, 0, 0, time.UTC)) {
+			break
+		}
+		u = end.UTC()
+		if _, o := u.In(berlin).Zone(); o != offs[len(offs)-1] {
+			offs, at = append(offs, o), append(at, u)
+		}
+	}
+	if !at[0].Equal(time.Date(1980, 4, 6, 1, 0, 0, 0, time.UTC)) {
+		t.Fatalf("precondition: Berlin's first change from 1970 is at %s", at[0])
+	}
+	at[0] = time.Date(1980, 4, 13, 1, 0, 0, 0, time.UTC)
+	return tzif(offs, at)
+}
+
+// A zone file of a release later than every one keploy knows is its
+// zone's where the root it is read in says so: its own zone source, the
+// tzdata.zi IANA's Makefile writes beside a release's zone files from the
+// same data (and Debian, Ubuntu, Fedora and RHEL install), compiled by
+// keploy (models.ZoneSource), gives the zone the file's offsets from 1970
+// to 2038. So 2099a's Europe/Berlin, at UTC+03:00 from 2027, is
+// Europe/Berlin in its root (linked by /etc/localtime, named by TZ, read
+// as a process's root, and by the keploy CLI, whose docker-mode agent
+// reads it in the extract of the source the CLI gives with it: without it,
+// unknown), as is 2099a's Berlin whose summer time of 1980 began a week
+// late (a correction of the past, which six of the ten releases after 2024a
+// made of some zone). The same bytes where 2099a parts Europe/Oslo from
+// Berlin so are Oslo's file at Oslo's path, and at Berlin's (a copy of
+// Oslo's through the link) another zone's, named so: no content alone
+// tells the two apart, and keploy's table cannot (2099a is no release it
+// knows), but the root's own source does. A root of no tzdata.zi gives
+// nothing to read the file in: unknown.
+func TestAZoneFileOfALaterReleaseIsItsZonesWhereItsRootsOwnSourceGivesIt(t *testing.T) {
+	zi := "usr/share/zoneinfo/"
+	later, moved := laterBerlin(t), movedBerlin(t)
+	at := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)
+	want := func(what string, loc *time.Location, err error, name string, off int, when time.Time) {
+		t.Helper()
+		if err != nil || loc == nil || loc.String() != name {
+			t.Errorf("%s: %v %v; want %s", what, loc, err, name)
+			return
+		}
+		if _, o := when.In(loc).Zone(); o != off {
+			t.Errorf("%s: %d s east of UTC on %s; want the file's %d", what, o, when.Format(time.RFC3339), off)
+		}
+	}
+	rows := []struct {
+		what     string
+		source   []byte
+		name     string
+		data     []byte
+		off      int
+		when     time.Time
+		refusals []string
+	}{
+		{"2099a's Europe/Berlin, UTC+03:00 from 2027", laterSource(t, berlinLater...), "Europe/Berlin", later, 3 * 3600, at, nil},
+		{"2099a's Europe/Berlin, its first summer time of 1980 a week late", laterSource(t, berlinMoved...), "Europe/Berlin", moved, 3600, time.Date(1980, 4, 10, 0, 0, 0, 0, time.UTC), nil},
+		{"2099a's Europe/Oslo, parted from Berlin at UTC+03:00 from 2027", laterSource(t, osloParts...), "Europe/Oslo", later, 3 * 3600, at, nil},
+		{"Europe/Berlin's file a copy of 2099a's Europe/Oslo, parted from Berlin", laterSource(t, osloParts...), "Europe/Berlin", later, 0, at,
+			[]string{`does not hold "Europe/Berlin"'s rules`, "nor does the root's own zone data (tzdata.zi, release 2099a)", "Europe/Oslo"}},
+		{"2099a's Europe/Berlin in a root of no tzdata.zi", nil, "Europe/Berlin", later, 0, at,
+			[]string{`does not hold "Europe/Berlin"'s rules`, "nor does a tzdata.zi of the root's own zone data, which it holds none of"}},
+	}
+	for i, row := range rows {
+		files := map[string][]byte{zi + row.name: row.data}
+		if row.source != nil {
+			files[zi+"tzdata.zi"] = row.source
+		}
+		if strings.HasPrefix(row.what, "Europe/Berlin's file a copy") {
+			files[zi+"Europe/Oslo"] = row.data
+		}
+		r := t.TempDir()
+		writeTree(t, r, files, map[string]string{"etc/localtime": "/" + zi + row.name})
+		check := func(what string, loc *time.Location, err error) {
+			t.Helper()
+			if row.refusals != nil {
+				refused(t, row.what+", "+what, loc, err, row.refusals)
+				return
+			}
+			want(row.what+", "+what, loc, err, row.name, row.off, row.when)
+		}
+		for _, read := range []string{"linked by /etc/localtime", "read again"} {
+			loc, err := ReadZone(r, "", false)
+			check(read, loc, err)
+		}
+		loc, err := ReadZone(r, row.name, true)
+		check("TZ="+row.name, loc, err)
+		proc := t.TempDir()
+		pid := strconv.Itoa(1010 + i)
+		fakeProc(t, proc, pid, "500", nil, files, map[string]string{"etc/localtime": "/" + zi + row.name})
+		if err := os.WriteFile(filepath.Join(proc, pid, "mountinfo"), []byte(rootMount), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		z, err := ReadProcZone(proc, uint32(1010+i))
+		check("a process's root", z.Loc, err)
+		cz, file, err := ReadZoneOf(unmountedFiles{dirFiles{root: r}}, "", false)
+		check("read by the keploy CLI", cz.Loc, err)
+		if err != nil {
+			continue
+		}
+		z, err = ZoneOfFile(row.name, file)
+		check("read by a docker-mode agent, with the CLI's extract of the root's source", z.Loc, err)
+		z, err = ZoneOfFile(row.name, ZoneFile{Data: file.Data})
+		refused(t, row.what+", read by a docker-mode agent with no extract of the root's source", z.Loc, err, []string{"which it holds none of"})
+	}
+}
+
+// A file at a name of UTC (UTC, Zulu, Universal, Etc/UTC) that reads UTC
+// until 2027 and UTC+01:00 from it is no file of UTC, whose every release
+// (and the root's own source, here tzdata 2026f's) reads UTC throughout:
+// unknown, linked by /etc/localtime or named by TZ.
+func TestAFileOfANameOfUTCThatLeavesUTCLaterIsUnknown(t *testing.T) {
+	zi := "usr/share/zoneinfo/"
+	data := laterZone(t, time.UTC, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), 3600)
+	src, err := os.ReadFile(filepath.Join("..", "..", "models", "testdata", "tzdata.zi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"UTC", "Zulu", "Universal", "Etc/UTC"} {
+		r := t.TempDir()
+		writeTree(t, r, map[string][]byte{zi + name: data, zi + "tzdata.zi": src}, map[string]string{"etc/localtime": "/" + zi + name})
+		why := []string{`does not hold "` + name + `"'s rules`, "nor does the root's own zone data (tzdata.zi, release " + models.ZoneReleasesLast + ")"}
+		loc, err := ReadZone(r, "", false)
+		refused(t, name+"'s file, UTC until 2027, linked by /etc/localtime", loc, err, why)
+		if name != "UTC" {
+			loc, err = ReadZone(r, name, true)
+			refused(t, name+"'s file, UTC until 2027, TZ="+name, loc, err, why)
+		}
+	}
+}
+
+// failingSource is a root whose tzdata.zi keploy cannot read (an I/O
+// error, no absence).
+type failingSource struct{ unmountedFiles }
+
+func (f failingSource) OpenRegular(p string) (io.ReadCloser, error) {
+	if path.Base(p) == "tzdata.zi" {
+		return nil, errors.New("input/output error")
+	}
+	return f.unmountedFiles.OpenRegular(p)
+}
+
+// The zone source read is the one beside the file read: a TZ naming a file
+// in a zoneinfo directory of its own (/opt/tz/zoneinfo) is read in that
+// directory's tzdata.zi, never /usr/share/zoneinfo's (here tzdata 2026f's,
+// which reads the file otherwise). A tzdata.zi keploy cannot read (an I/O
+// error) gives no answer, not a lasting one: the read is tried again.
+func TestAZoneFilesSourceIsTheTzdataZiOfItsOwnZoneinfoDirectory(t *testing.T) {
+	later := laterBerlin(t)
+	src2026f, err := os.ReadFile(filepath.Join("..", "..", "models", "testdata", "tzdata.zi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := t.TempDir()
+	writeTree(t, r, map[string][]byte{
+		"opt/tz/zoneinfo/Europe/Berlin":   later,
+		"opt/tz/zoneinfo/tzdata.zi":       laterSource(t, berlinLater...),
+		"usr/share/zoneinfo/tzdata.zi":    src2026f,
+		"usr/share/zoneinfo/Europe/Paris": later,
+	}, nil)
+	loc, err := ReadZone(r, "/opt/tz/zoneinfo/Europe/Berlin", true)
+	if err != nil || loc.String() != "Europe/Berlin" {
+		t.Errorf("TZ naming 2099a's Europe/Berlin in /opt/tz/zoneinfo, beside its tzdata.zi: %v %v; want Europe/Berlin", loc, err)
+	}
+	loc, err = ReadZone(r, "Europe/Paris", true)
+	refused(t, "TZ=Europe/Paris, its file 2099a's Berlin, /usr/share/zoneinfo's tzdata.zi of "+models.ZoneReleasesLast, loc, err, []string{"nor does the root's own zone data (tzdata.zi, release " + models.ZoneReleasesLast + ")"})
+
+	r = t.TempDir()
+	writeTree(t, r, map[string][]byte{"usr/share/zoneinfo/Europe/Berlin": later, "usr/share/zoneinfo/tzdata.zi": laterSource(t, berlinLater...)},
+		map[string]string{"etc/localtime": "/usr/share/zoneinfo/Europe/Berlin"})
+	z, _, err := ReadZoneOf(failingSource{unmountedFiles{dirFiles{root: r}}}, "", false)
+	if err == nil || isLasting(err) || !strings.Contains(err.Error(), "keploy cannot read the zone source /usr/share/zoneinfo/tzdata.zi") {
+		t.Errorf("2099a's Europe/Berlin, its tzdata.zi unreadable: %v %v; want an error that is not lasting, naming the source", z.Loc, err)
+	}
+	if z, _, err := ReadZoneOf(unmountedFiles{dirFiles{root: r}}, "", false); err != nil || z.Loc.String() != "Europe/Berlin" {
+		t.Errorf("2099a's Europe/Berlin, its tzdata.zi read again once readable: %v %v; want Europe/Berlin", z.Loc, err)
+	}
+}
+
+// Where keploy's own zone data alone reads a file as its name's (its own
+// data a release later than the table: here a ZONEINFO holding 2099a's
+// Europe/Berlin), the keploy CLI gives a docker-mode agent, whose own data
+// may be another release, the extract of the container's own source that
+// reads the file so, where the container holds one; none where it holds
+// none, or keploy cannot read it, the file read by the CLI's own data
+// alone.
+func TestTheCLIGivesTheRootsSourceWhereOnlyItsOwnDataReadsTheFileAsItsZone(t *testing.T) {
+	later := laterBerlin(t)
+	_, child := inZoneRelease(t, "TestTheCLIGivesTheRootsSourceWhereOnlyItsOwnDataReadsTheFileAsItsZone", map[string][]byte{"Europe/Berlin": later}, "2026c")
+	if !child {
+		return
+	}
+	zi := "usr/share/zoneinfo/"
+	for _, row := range []struct {
+		what    string
+		source  []byte
+		failing bool
+	}{{"its tzdata.zi 2099a's", laterSource(t, berlinLater...), false}, {"no tzdata.zi", nil, false}, {"its tzdata.zi unreadable", nil, true}} {
+		files := map[string][]byte{zi + "Europe/Berlin": later}
+		if row.source != nil {
+			files[zi+"tzdata.zi"] = row.source
+		}
+		r := t.TempDir()
+		writeTree(t, r, files, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
+		var f ZoneFiles = unmountedFiles{dirFiles{root: r}}
+		if row.failing {
+			writeTree(t, r, map[string][]byte{zi + "tzdata.zi": laterSource(t, berlinLater...)}, nil)
+			f = failingSource{unmountedFiles{dirFiles{root: r}}}
+		}
+		z, file, err := ReadZoneOf(f, "", false)
+		if err != nil || z.Loc.String() != "Europe/Berlin" {
+			t.Errorf("2099a's Europe/Berlin, keploy's own data 2099a's, %s: %v %v; want Europe/Berlin", row.what, z.Loc, err)
+			continue
+		}
+		if (len(file.Source) > 0) != (row.source != nil) {
+			t.Errorf("2099a's Europe/Berlin, keploy's own data 2099a's, %s: the CLI gives %d bytes of the root's source; want them where the root holds one", row.what, len(file.Source))
+			continue
+		}
+		if row.source != nil {
+			src, err := models.ParseZoneSource(file.Source)
+			loc, _ := time.LoadLocationFromTZData("Europe/Berlin", later)
+			if err != nil || !models.ReadZoneReleases(loc).Of(src, "Europe/Berlin") {
+				t.Errorf("the extract the CLI gives of 2099a's Europe/Berlin: %v; want one that reads the file as Berlin\n%s", err, file.Source)
+			}
 		}
 	}
 }

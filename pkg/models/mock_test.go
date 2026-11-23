@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"reflect"
 	"testing"
+	"time"
 
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -311,5 +312,18 @@ func TestLearnedVariablesAreNeverEncoded(t *testing.T) {
 	}
 	if len(c.Spec.Learned()) != 1 || len(c.Spec.LearnedBinds()) != 1 {
 		t.Fatal("the learned variables are kept in memory")
+	}
+}
+
+// IsCaptureID reads the reserved prefix only: no saved test name, request-time
+// revoke name or name that merely contains the words is one.
+func TestIsCaptureID(t *testing.T) {
+	if !IsCaptureID(CaptureIDPrefix + "n0nce-1") {
+		t.Fatal("a capture id is not read as one")
+	}
+	for _, n := range []string{"", "test-1", "get-keploy-capture-1", RevokeNameByRequest(time.Unix(1, 0))} {
+		if IsCaptureID(n) {
+			t.Fatalf("%q is read as a capture id", n)
+		}
 	}
 }

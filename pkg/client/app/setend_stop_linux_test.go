@@ -186,6 +186,27 @@ func TestTheDockerRunStopSaysWhenItKilled(t *testing.T) {
 	}
 }
 
+// A docker run app whose container exited at keploy's interrupt is not
+// killed when the daemon is slow to say so (2.2 s, inside the 5 s grace):
+// the grace's reads had 2 s budgets, every slow answer was cut, and the
+// container that had exited was killed, the kill said.
+func TestTheDockerRunStopReadsTheDaemonsSlowAnswer(t *testing.T) {
+	client := exec.Command("sh", "-c", `trap "" INT; exec sleep 600`) // the docker client, which outlives the interrupt
+	client.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := make(chan struct{})
+	go func() { _ = client.Wait(); close(reaped) }()
+	t.Cleanup(func() { _ = syscall.Kill(-client.Process.Pid, syscall.SIGKILL); <-reaped })
+	inspects, kills := 0, 0
+	d := &slowDaemon{Client: stateDocker{states: []*container.State{{Status: "exited"}}, inspect: &inspects, kills: &kills}, latency: 2200 * time.Millisecond}
+	a := &App{logger: zap.NewNop(), docker: d}
+	if killed, err := a.stopDockerRun(client, false); killed || kills != 0 {
+		t.Fatalf("stopDockerRun said killed %v (err %v) after %d kills; want the exited container read, no kill", killed, err, kills)
+	}
+}
+
 // Under the switch an app's steps on its way out at a set's end move the
 // teardown scope of the run that ran it (Run's context), which that run's
 // drains wait on. The app closes one of its files at each step file the test

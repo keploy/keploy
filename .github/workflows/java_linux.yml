@@ -45,11 +45,9 @@ jobs:
           path: samples-java
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: ./.github/actions/setup-java-maven
         with:
-          distribution: temurin
           java-version: "17"
-          cache: maven
           cache-dependency-path: samples-java/${{ matrix.app.path }}/pom.xml
 
       - name: Run the ${{ matrix.app.name }} app
@@ -66,6 +64,11 @@ jobs:
           cd samples-java/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/${{ matrix.app.script_dir }}/java-linux.sh
 
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
+
       - name: Upload ${{ matrix.app.name }} recorded mocks and replay logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -76,6 +79,7 @@ jobs:
             samples-java/${{ matrix.app.path }}/test_logs.txt
             samples-java/${{ matrix.app.path }}/javaApp_*.txt
             samples-java/${{ matrix.app.path }}/mvn_build.log
+            samples-java/${{ matrix.app.path }}/keploy-start-evidence/
           if-no-files-found: warn
           retention-days: 7
 
@@ -128,11 +132,9 @@ jobs:
           path: samples-java
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: ./.github/actions/setup-java-maven
         with:
-          distribution: temurin
           java-version: "17"
-          cache: maven
           cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
 
       - name: Run mysql-dual-conn app
@@ -143,6 +145,23 @@ jobs:
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
+
+      # keploy's log and its agent's boot.json, which keploy removes when it
+      # exits: the lane copies them here when it gives up on keploy's start or
+      # the app's (keploy-start-wait.sh).
+      - name: Upload keploy's logs and start reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-dual-conn-${{ matrix.config.job }}-${{ strategy.job-index }}-keploy-start
+          path: samples-java/mysql-dual-conn/keploy-start-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Automatic MySQL port detection: same sample, relocated to :3307 by the
   # script so nothing in the default port list or the config covers it.
@@ -196,11 +215,9 @@ jobs:
           path: samples-java
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: ./.github/actions/setup-java-maven
         with:
-          distribution: temurin
           java-version: "17"
-          cache: maven
           cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
 
       - name: Run mysql-dual-conn app on a non-default MySQL port
@@ -212,6 +229,11 @@ jobs:
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_auto_port/java-linux.sh
 
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
+
       - name: Upload mysql-auto-port recordings and logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -219,6 +241,7 @@ jobs:
           name: mysql-auto-port-${{ matrix.config.job }}-recordings
           path: |
             samples-java/mysql-dual-conn/keploy/
+            samples-java/mysql-dual-conn/keploy-start-evidence/
             samples-java/mysql-dual-conn/test_logs.txt
             samples-java/mysql-dual-conn/test_logs_drift.txt
             samples-java/mysql-dual-conn/application.properties
@@ -277,11 +300,9 @@ jobs:
           path: samples-java
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: ./.github/actions/setup-java-maven
         with:
-          distribution: temurin
           java-version: "17"
-          cache: maven
           cache-dependency-path: samples-java/tidb-stmt-cache/pom.xml
 
       - name: Run tidb-stmt-cache app
@@ -292,6 +313,11 @@ jobs:
           cd samples-java/tidb-stmt-cache
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/tidb_stmt_cache/java-linux.sh
 
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
+
       - name: Upload tidb-stmt-cache recordings and replay logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -299,6 +325,7 @@ jobs:
           name: tidb-stmt-cache-${{ matrix.config.job }}-recordings
           path: |
             samples-java/tidb-stmt-cache/keploy/
+            samples-java/tidb-stmt-cache/keploy-start-evidence/
             samples-java/tidb-stmt-cache/test_logs_*.txt
             samples-java/tidb-stmt-cache/record.txt
             samples-java/tidb-stmt-cache/mvn_build.log
@@ -333,11 +360,9 @@ jobs:
           src: build
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: ./.github/actions/setup-java-maven
         with:
-          distribution: temurin
           java-version: "17"
-          cache: maven
           cache-dependency-path: |
             .github/workflows/test_workflow_scripts/java/mysql_unbound_types/app/pom.xml
             .github/workflows/test_workflow_scripts/java/mysql_unbound_types/app/pom51.xml
@@ -362,6 +387,11 @@ jobs:
           WORK: ${{ runner.temp }}/mysql_unbound_types
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_unbound_types/java-linux.sh"
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
 
       - name: Upload mysql_unbound_types recordings and keploy logs
         if: always()
@@ -429,11 +459,9 @@ jobs:
       # Spring Boot 1.5 sample -> Java 8 (not the Java 17 the other jobs use);
       # the run script deliberately does not source update-java.sh.
       - name: Set up Java 8
-        uses: actions/setup-java@v4
+        uses: ./.github/actions/setup-java-maven
         with:
-          distribution: temurin
           java-version: "8"
-          cache: maven
           cache-dependency-path: samples-java/async-config-poll/pom.xml
 
       - name: Set up Go (for the config-service stub)
@@ -452,9 +480,18 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
           SCENARIO: ${{ matrix.scenario }}
+          # One cell starts the record run's app JVM 75 s late (a stalled
+          # runner): the lane's waits end on events, never on a count of
+          # seconds, so a slow boot still passes.
+          SLOW_BOOT_SECONDS: ${{ matrix.scenario == 'boot_blocking' && '75' || '0' }}
         run: |
           cd samples-java/async-config-poll
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/async_config_poll/java-linux.sh
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
 
       - name: Upload async-config-poll recordings and replay logs
         if: always()
@@ -463,6 +500,7 @@ jobs:
           name: async-config-poll-${{ matrix.config.job }}-recordings
           path: |
             samples-java/async-config-poll/keploy/
+            samples-java/async-config-poll/keploy-start-evidence/
             samples-java/async-config-poll/test_logs.txt
             samples-java/async-config-poll/record.txt
             samples-java/async-config-poll/mvn_build.log

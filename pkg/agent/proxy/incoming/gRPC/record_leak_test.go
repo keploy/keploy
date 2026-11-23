@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 
@@ -73,4 +74,52 @@ func TestRecordIncomingOfAnIdleConversationReturnsWhenTheIngressStops(t *testing
 	}
 	ctx.Cancel()
 	<-done
+}
+
+// A client that goes away with its call unanswered leaves no window open, with
+// --sync or without. The parser reads its channel to its end and does not give
+// up, so the connection's end is the only thing that ends that call's window
+// (callWindows.stop). Left open, the window would hold the call's mocks until
+// the bound gave it up, and a window given up while in flight turns the
+// outside-requests marking off for the agent's life. Nothing reads a clock:
+// go test's -timeout is the hang guard.
+func TestRecordIncomingEndsAnUnansweredCallsWindowAtTheConnectionsEnd(t *testing.T) {
+	for _, synchronous := range []bool{true, false} {
+		t.Run(map[bool]string{true: "sync", false: "async"}[synchronous], func(t *testing.T) {
+			m := syncMock.New(zap.NewNop())
+			ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), m))
+			defer cancel()
+			cliApp, cliProxy := net.Pipe()
+			appProxy, appApp := net.Pipe()
+			// Both pipes close however the row ends: a t.Fatal before the
+			// connection's end leaves no RecordIncoming reading them.
+			t.Cleanup(func() {
+				for _, c := range []net.Conn{cliApp, cliProxy, appProxy, appApp} {
+					_ = c.Close()
+				}
+			})
+			tcCh := make(chan *models.TestCase, 4)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", synchronous, false)
+			}()
+			req, _ := pingCall(t)
+			go func() { _, _ = cliApp.Write(req) }()
+			// The forwarder opens the call's window before it writes the
+			// call's bytes on, so once the app has read them it is open.
+			if _, err := io.ReadFull(appApp, make([]byte, len(req))); err != nil {
+				t.Fatal(err)
+			}
+			if n := m.OpenWindows(); n != 1 {
+				t.Fatalf("%d windows open as the app read the call, want 1", n)
+			}
+			_ = cliApp.Close()
+			_ = appApp.Close()
+			<-done
+			if n := m.OpenWindows(); n != 0 {
+				t.Fatalf("%d windows left open after the connection ended with its call unanswered", n)
+			}
+		})
+	}
 }

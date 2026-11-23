@@ -24,6 +24,10 @@ type LiveRow struct {
 	Exe string `json:"exe" yaml:"exe"`
 	// Port is the port the call was made to.
 	Port uint16 `json:"port" yaml:"port"`
+	// Instance is the keploy instance of the test worker whose process
+	// made the call (0: no worker's, or the run's one test process): the
+	// instance whose open test is Test. Never written.
+	Instance uint32 `json:"-" yaml:"-"`
 }
 
 // MockedRow is a call keploy records, and a replay answers from the
@@ -59,6 +63,10 @@ type MockedRow struct {
 	Exe string `json:"exe,omitempty" yaml:"exe,omitempty"`
 	// Port is the port the call was made to.
 	Port uint16 `json:"port" yaml:"port"`
+	// Instance is the keploy instance of the test worker whose process
+	// made the call (0: no worker's, or the run's one test process): the
+	// instance whose open test is Test. Never written.
+	Instance uint32 `json:"-" yaml:"-"`
 }
 
 // UnmarshalYAML reads a row, its container key under containerKey or, as an

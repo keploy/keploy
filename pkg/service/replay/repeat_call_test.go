@@ -28,10 +28,10 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 	results := []models.TestResult{
 		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7")},
-			{ActualSummary: "GET /alone", ClosestMock: "mock-8", Repeat: note("mock-8")},
-			{ActualSummary: "GET /other", NextSteps: "as it was"},
-			{ActualSummary: "GET /named", ClosestMock: "mock-6", Repeat: named("mock-6", "test-4")},
+			{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7")},
+			{Protocol: "HTTP", ActualSummary: "GET /alone", ClosestMock: "mock-8", Repeat: note("mock-8")},
+			{Protocol: "HTTP", ActualSummary: "GET /other", NextSteps: "as it was"},
+			{Protocol: "HTTP", ActualSummary: "GET /named", ClosestMock: "mock-6", Repeat: named("mock-6", "test-4")},
 		}}},
 	}
 	consumers := map[string][]string{"mock-7": {"test-9", "test-3", "test-5"}, "mock-8": {"test-9"}, "mock-6": {"test-2", "test-4"}}
@@ -67,7 +67,7 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	if calls[3].Repeat.Test != "test-4" || !strings.Contains(calls[3].NextSteps, "test test-4's call") {
 		t.Fatalf("a note that named test-4 now names %q: %s", calls[3].Repeat.Test, calls[3].NextSteps)
 	}
-	if len(lines) != 3 || !strings.Contains(lines[0], "test-9: GET /count repeats mock-7, answered for test-3 6.00s before this test began at replay, 2.00s after mock-7 at record") {
+	if len(lines) != 3 || !strings.Contains(lines[0], "test-9: GET /{} repeats mock-7, answered for test-3 6.00s before this test began at replay, 2.00s after mock-7 at record") {
 		t.Fatalf("the set log lines are %q", lines)
 	}
 
@@ -109,7 +109,7 @@ func TestMarkRepeatOfNamesTheRepeatAPairingAnswered(t *testing.T) {
 	// after mock-1 answered.
 	agent := models.NewRepeatNote("mock-1", replay, rec, replay.Add(9100*time.Millisecond))
 	results := []models.TestResult{{TestCaseID: "get-cachedrate-7", Status: models.TestStatusPassed, Answers: []models.UnmatchedCall{
-		{ActualSummary: "GET /rates", ClosestMock: "mock-3", NotOwned: true, Answer: models.AnswerProvisional, Repeat: agent},
+		{Protocol: "HTTP", ActualSummary: "GET /rates", ClosestMock: "mock-3", NotOwned: true, Answer: models.AnswerProvisional, Repeat: agent},
 		{ActualSummary: "GET /tick", ClosestMock: "mock-6", NotOwned: true, Answer: models.AnswerProvisional, NextSteps: "as it was"},
 	}}}
 	tcs := []*models.TestCase{{Name: "get-cachedrate-7", HTTPReq: models.HTTPReq{Timestamp: rec.Add(20020 * time.Millisecond)}}}
@@ -125,7 +125,7 @@ func TestMarkRepeatOfNamesTheRepeatAPairingAnswered(t *testing.T) {
 	if a[0].NextSteps != "" || a[1].NextSteps != "as it was" || a[1].Repeat != nil {
 		t.Fatalf("the answers' next steps are %q and %q (note %+v); want both as they were", a[0].NextSteps, a[1].NextSteps, a[1].Repeat)
 	}
-	if len(named) != 1 || answered != 1 || likely != 1 || !strings.Contains(named[0], "get-cachedrate-7: GET /rates repeats mock-1, answered for get-cachedrate-2") || !strings.Contains(named[0], "answered with mock-3, another test's recording (a pairing)") {
+	if len(named) != 1 || answered != 1 || likely != 1 || !strings.Contains(named[0], "get-cachedrate-7: GET /{} repeats mock-1, answered for get-cachedrate-2") || !strings.Contains(named[0], "answered with mock-3, another test's recording (a pairing)") {
 		t.Fatalf("the set log lines are %q (%d answered, %d likely)", named, answered, likely)
 	}
 }
@@ -754,5 +754,43 @@ func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
 	sort.Strings(writes)
 	if want := []string{"replayStarts[tc.Name] = started", "replayStarts[testCase.Name] = started"}; strings.Join(writes, "; ") != strings.Join(want, "; ") {
 		t.Fatalf("RunTestSet notes the tests' starts as %v, want %v: without a start a note's replay gap runs to the call, and its cause is not judged", writes, want)
+	}
+}
+
+// A call that repeats a recording of the set's background (its note's
+// Background: the worker scope's, or the pool's) is named with the test that
+// consumed it, and its next step and the set log's line say which scope the
+// recording is of and that it answers once: never that it is an earlier
+// test's own recording.
+func TestMarkRepeatOfSaysABackgroundRecordingsScope(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	note := func(mock, scope string) *models.RepeatNote {
+		n := anchoredNote(mock, rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))
+		n.Background = scope
+		return n
+	}
+	results := []models.TestResult{
+		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+			{ActualSummary: "GET /tokens", ClosestMock: "mock-7", Repeat: note("mock-7", models.RepeatBackgroundWorker)},
+			{ActualSummary: "GET /leases", ClosestMock: "mock-8", Repeat: note("mock-8", models.RepeatBackgroundPool)},
+		}}},
+	}
+	consumers := map[string][]string{"mock-7": {"test-3"}, "mock-8": {"test-4"}}
+	lines, _, _ := markRepeatOf(results, consumers, nil, nil, nil)
+	calls := results[0].FailureInfo.UnmatchedCalls
+	for i, want := range []struct{ test, scope, phrase string }{
+		{"test-3", models.RepeatBackgroundWorker, "worker scope (mappings.yaml worker:), which answers at most one call in a replay's test windows"},
+		{"test-4", models.RepeatBackgroundPool, "the set's pool), which answers at most one call in a replay"},
+	} {
+		c := calls[i]
+		if c.Repeat.Test != want.test || !strings.Contains(c.NextSteps, want.phrase) || !strings.Contains(c.NextSteps, "consumed by test "+want.test) {
+			t.Fatalf("call %d's note names %q; next step: %s", i, c.Repeat.Test, c.NextSteps)
+		}
+		if strings.Contains(c.NextSteps, "earlier test") {
+			t.Fatalf("call %d's next step calls a %s recording an earlier test's: %s", i, want.scope, c.NextSteps)
+		}
+		if len(lines) != 2 || !strings.Contains(lines[i], c.Repeat.Mock+" ("+want.scope+"), answered for "+want.test) {
+			t.Fatalf("the set log lines are %q", lines)
+		}
 	}
 }

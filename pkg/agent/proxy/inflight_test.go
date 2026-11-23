@@ -161,7 +161,7 @@ func TestAClosedConnectionHoldsNothingOnceItsHandlerIsDone(t *testing.T) {
 func TestAScopeIsHeldOnlyByTheWorkItBeganWith(t *testing.T) {
 	tr := &inflight{}
 	app, proxy := acceptedPair(t, tr)
-	sc := tr.scope()
+	sc := tr.scope(0)
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's call in flight: scope pending %d, want 1", n)
 	}
@@ -244,7 +244,7 @@ func TestAPooledConnectionKeptBusyByLaterCallsReleasesTheScope(t *testing.T) {
 		t.Fatalf("read %q", r)
 	}
 	// The test's call is read, its answer not written: the scope begins.
-	sc := tr.scope()
+	sc := tr.scope(0)
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's call read and not answered: scope pending %d, want 1", n)
 	}
@@ -285,7 +285,7 @@ func TestBytesReceivedBeforeTheScopeHoldItUntilAnswered(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitInq(t, proxy, len(call))
-	sc := tr.scope()
+	sc := tr.scope(0)
 	if n, _ := sc.State(false); n != 1 {
 		t.Fatalf("the test's call not taken: scope pending %d in a record, want 1", n)
 	}
@@ -301,7 +301,7 @@ func TestBytesReceivedBeforeTheScopeHoldItUntilAnswered(t *testing.T) {
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's call read with a later one, neither answered: scope pending %d in a replay, want 1", n)
 	}
-	recordScope := tr.scope()
+	recordScope := tr.scope(0)
 	if n, _ := recordScope.State(false); n != 0 {
 		t.Fatalf("every byte taken: scope pending %d in a record, want 0", n)
 	}
@@ -327,7 +327,7 @@ func TestAHeldRequestOrABegunCloseHoldsTheScope(t *testing.T) {
 	}
 	<-got
 	release := proxy.Hold()
-	sc := tr.scope()
+	sc := tr.scope(0)
 	go readOnce(proxy, got)
 	waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
 	if n, _ := sc.State(true); n != 1 {
@@ -344,7 +344,7 @@ func TestAHeldRequestOrABegunCloseHoldsTheScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-got
-	sc = tr.scope()
+	sc = tr.scope(0)
 	if err := closing.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestAConnectionASettleGaveUpOnHoldsNoLaterScopeUntilItsHandlerPassesIt(t *t
 	<-got
 	// The handler never answers it: the end's scope holds it, and its
 	// watchdog gives up on it.
-	sc := tr.scope()
+	sc := tr.scope(0)
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's call read and not answered: scope pending %d, want 1", n)
 	}
@@ -392,7 +392,7 @@ func TestAConnectionASettleGaveUpOnHoldsNoLaterScopeUntilItsHandlerPassesIt(t *t
 	}
 
 	// The next test's begin.
-	next := tr.scope()
+	next := tr.scope(0)
 	if n, _ := next.State(true); n != 0 {
 		t.Fatalf("a connection given up on: next scope pending %d, want 0", n)
 	}
@@ -408,7 +408,7 @@ func TestAConnectionASettleGaveUpOnHoldsNoLaterScopeUntilItsHandlerPassesIt(t *t
 		t.Fatal(err)
 	}
 	waitInq(t, proxy, len(tick))
-	end := tr.scope()
+	end := tr.scope(0)
 	if n, _ := end.State(true); n != 0 {
 		t.Fatalf("a call queued behind the lost work: scope pending %d, want 0", n)
 	}
@@ -417,7 +417,7 @@ func TestAConnectionASettleGaveUpOnHoldsNoLaterScopeUntilItsHandlerPassesIt(t *t
 		t.Fatalf("a call queued behind the lost work: behind %q", b)
 	}
 	charge()
-	after := tr.scope()
+	after := tr.scope(0)
 	_, _ = after.State(true)
 	if b, _ := after.Behind(); len(b) != 0 {
 		t.Fatalf("charged once: behind %q", b)
@@ -429,7 +429,7 @@ func TestAConnectionASettleGaveUpOnHoldsNoLaterScopeUntilItsHandlerPassesIt(t *t
 	if r := <-got; r != tick {
 		t.Fatalf("read %q", r)
 	}
-	again := tr.scope()
+	again := tr.scope(0)
 	if n, _ := again.State(true); n != 1 {
 		t.Fatalf("its handler past the lost work, a call read and not answered: scope pending %d, want 1", n)
 	}
@@ -494,7 +494,7 @@ func TestALaterStreamOnAMultiplexedConnectionDoesNotHoldTheScope(t *testing.T) {
 	const call = "HEADERS stream 1"
 	p := newStreamParser(t)
 	test := p.open(call, false)
-	sc := p.tr.scope()
+	sc := p.tr.scope(0)
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's request held: scope pending %d, want 1", n)
 	}
@@ -527,7 +527,7 @@ func TestALaterStreamOnAMultiplexedConnectionDoesNotHoldTheScope(t *testing.T) {
 	waitSettled(t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
 	// A scope that begins now waits for the request held now, and only
 	// until it is answered.
-	next := p.tr.scope()
+	next := p.tr.scope(0)
 	if n, _ := next.State(true); n != 1 {
 		t.Fatalf("a request held as a scope begins: next scope pending %d, want 1", n)
 	}
@@ -552,7 +552,7 @@ func TestARequestReceivedBeforeTheCutAndHeldAfterItHoldsTheScope(t *testing.T) {
 	}
 	p.send(call)
 	waitInq(t, p.proxy, len(call))
-	sc := p.tr.scope()
+	sc := p.tr.scope(0)
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's request in the socket: scope pending %d, want 1", n)
 	}
@@ -581,7 +581,7 @@ func TestARequestReceivedBeforeTheCutAndHeldAfterItHoldsTheScope(t *testing.T) {
 func TestAStreamOpenedBeforeTheWindowBeganDoesNotHoldTheTestsEnd(t *testing.T) {
 	p := newStreamParser(t)
 	before := p.open("HEADERS stream 1", false)
-	p.tr.beginWindow()
+	p.tr.beginWindow(0)
 	test := p.open("HEADERS stream 3", false)
 	// The stream opened before keeps sending.
 	for i := 0; i < 3; i++ {
@@ -592,7 +592,7 @@ func TestAStreamOpenedBeforeTheWindowBeganDoesNotHoldTheTestsEnd(t *testing.T) {
 		go readOnce(p.proxy, p.got)
 		waitSettled(t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
 	}
-	sc := p.tr.scope()
+	sc := p.tr.scope(0)
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's stream held: scope pending %d, want 1", n)
 	}
@@ -605,12 +605,12 @@ func TestAStreamOpenedBeforeTheWindowBeganDoesNotHoldTheTestsEnd(t *testing.T) {
 	test()
 	// The give-up ends with the test's stream: a scope cut now waits for
 	// nothing, the stream opened before the window still held.
-	if n, _ := p.tr.scope().State(true); n != 0 {
+	if n, _ := p.tr.scope(0).State(true); n != 0 {
 		t.Fatalf("the test's stream answered, one opened before its window still held: scope pending %d, want 0", n)
 	}
 	// One opened in the window and still sending holds a scope cut now.
 	next := p.open("HEADERS stream 5", false)
-	again := p.tr.scope()
+	again := p.tr.scope(0)
 	if n, _ := again.State(true); n != 1 {
 		t.Fatalf("a stream opened in the window: scope pending %d, want 1", n)
 	}
@@ -634,7 +634,7 @@ func TestAStreamOpenedBeforeTheWindowBeganDoesNotHoldTheTestsEnd(t *testing.T) {
 	release := proxy.Hold()
 	go readOnce(proxy, got)
 	waitSettled(t, p.tr, func() bool { return proxy.reading.Load() == 1 })
-	late := p.tr.scope()
+	late := p.tr.scope(0)
 	if n, _ := late.State(true); n != 1 {
 		t.Fatalf("a request on a connection accepted in the window: scope pending %d, want 1", n)
 	}
@@ -657,15 +657,15 @@ func TestAStreamInTheSocketAsTheWindowBeganIsNotTheTests(t *testing.T) {
 	}
 	p.send(before)
 	waitInq(t, p.proxy, len(before))
-	p.tr.beginWindow()
-	early := p.tr.scope()
+	p.tr.beginWindow(0)
+	early := p.tr.scope(0)
 	go readOnce(p.proxy, p.got)
 	held := p.open(before, true)
 	if n, _ := early.State(true); n != 0 {
 		t.Fatalf("an end cut as the window began, the stream in the socket then held: scope pending %d, want 0", n)
 	}
 	test := p.open(call, false)
-	sc := p.tr.scope()
+	sc := p.tr.scope(0)
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's stream held: scope pending %d, want 1", n)
 	}
@@ -682,7 +682,7 @@ func TestAStreamInTheSocketAsTheWindowBeganIsNotTheTests(t *testing.T) {
 func TestAGiveUpOnAMultiplexedConnectionNamesTheRequestsItCovered(t *testing.T) {
 	p := newStreamParser(t)
 	p.open("HEADERS stream 1", false)
-	sc := p.tr.scope()
+	sc := p.tr.scope(0)
 	p.send("HEADERS stream 3")
 	if r := <-p.got; r != "HEADERS stream 3" {
 		t.Fatalf("read %q", r)
@@ -707,7 +707,7 @@ func TestAGiveUpOnAMultiplexedConnectionEndsWithTheRequestsItCovered(t *testing.
 	}
 	p.send(call)
 	waitInq(t, p.proxy, len(call))
-	sc := p.tr.scope()
+	sc := p.tr.scope(0)
 	var ids []uint64
 	for id := range sc.PendingProgress(true) {
 		ids = append(ids, id)
@@ -719,13 +719,13 @@ func TestAGiveUpOnAMultiplexedConnectionEndsWithTheRequestsItCovered(t *testing.
 	go readOnce(p.proxy, p.got)
 	test := p.open(call, true)
 	later := p.open("HEADERS stream 3", false)
-	if n, _ := p.tr.scope().State(true); n != 0 {
+	if n, _ := p.tr.scope(0).State(true); n != 0 {
 		t.Fatalf("a connection given up on: next scope pending %d, want 0", n)
 	}
 	test()
 	// The given-up request answered: a scope that begins now waits for the
 	// request held now.
-	again := p.tr.scope()
+	again := p.tr.scope(0)
 	if n, _ := again.State(true); n != 1 {
 		t.Fatalf("the given-up request answered, a later one held: scope pending %d, want 1", n)
 	}
@@ -765,8 +765,8 @@ func TestAScopeNamesTheConnectionsWhoseHeldRequestsCannotBeTold(t *testing.T) {
 	ahead.servedBy(integrations.MONGO_V2, readAheadParser{holds: false})
 	go readOnce(ahead, got)
 	waitSettled(t, tr, func() bool { return ahead.reading.Load() == 1 })
-	named(tr.scope(), "a read-ahead parser that does not say what it holds", string(integrations.MONGO_V2))
-	if _, u := tr.scope().State(false); len(u) != 0 {
+	named(tr.scope(0), "a read-ahead parser that does not say what it holds", string(integrations.MONGO_V2))
+	if _, u := tr.scope(0).State(false); len(u) != 0 {
 		t.Fatalf("a record: unknown %q, want none", u)
 	}
 
@@ -779,7 +779,7 @@ func TestAScopeNamesTheConnectionsWhoseHeldRequestsCannotBeTold(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-got
-	sc := tr.scope()
+	sc := tr.scope(0)
 	release := marked.MarkUnknown("mysql (a statement's result sets open)")
 	go readOnce(marked, got)
 	waitSettled(t, tr, func() bool { return marked.reading.Load() == 1 })
@@ -797,7 +797,7 @@ func TestAScopeNamesTheConnectionsWhoseHeldRequestsCannotBeTold(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-got
-	named(tr.scope(), "a mark standing while its handler waits out an idle answer", "mongo_v2 (a moreToCome group open)")
+	named(tr.scope(0), "a mark standing while its handler waits out an idle answer", "mongo_v2 (a moreToCome group open)")
 	releaseMark()
 	releaseIdle()
 }
@@ -816,7 +816,7 @@ func TestAHoldOrMarkChangeWhileTheHandlerAnswersDoesNotSettleTheScope(t *testing
 		t.Fatal(err)
 	}
 	<-got
-	sc := tr.scope()
+	sc := tr.scope(0)
 	proxy.Hold()()
 	proxy.MarkUnknown("mongo_v2 (a moreToCome group open)")()
 	if n, _ := sc.State(true); n != 1 {
@@ -848,7 +848,7 @@ func TestAGiveUpKeepsTheConnectionsItDoesNotName(t *testing.T) {
 		}
 		<-got
 	}
-	sc := tr.scope()
+	sc := tr.scope(0)
 	if n, _ := sc.State(true); n != 2 {
 		t.Fatalf("two calls read and not answered: scope pending %d, want 2", n)
 	}

@@ -7,18 +7,18 @@ import (
 	"net"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"golang.org/x/net/http2"
 )
 
-// Deciding gRPC from h2c by bytes (release-1 row W3). An HTTP/2 client
-// connection starts with the client preface and its SETTINGS. The protocol
-// matchers tell gRPC from h2c by the content-type of the first request's
-// HEADERS, which a client may send at once (h2c clients usually do) or only
-// once it has the server's connection preface (a gRPC client waits for the
-// server's SETTINGS). On replay keploy is the server, so it answers the
-// client preface with its own: then every client sends its HEADERS, and the
-// connection is read until they arrive, however long the client takes. No
-// silence decides anything.
+// Deciding gRPC from h2c by bytes. An HTTP/2 client connection starts with
+// the client preface and its SETTINGS. The protocol matchers tell gRPC from
+// h2c by the content-type of the first request's HEADERS, which a client may
+// send at once (h2c clients usually do) or only once it has the server's
+// connection preface (a gRPC client waits for the server's SETTINGS). On
+// replay keploy is the server, so it answers the client preface with its own:
+// then every client sends its HEADERS, and the connection is read until they
+// arrive, however long the client takes. No silence decides anything.
 //
 // The parser the connection is handed to answers as a server too: it sends
 // its own SETTINGS and acknowledges the client's. The client acknowledges
@@ -63,9 +63,10 @@ func isHTTP2PrefacePrefix(buf []byte) bool {
 // only part of the client preface (buf) until it holds all of it, or its
 // bytes leave the preface: a client writes the whole preface at once, and
 // keploy reads on to it rather than deciding on how much came in the first
-// read. It returns what was read. A client that closes first returns what
-// came, without an error; one whose ctx ends returns ctx's error (the read
-// is cut short by a deadline already past, never by a budget).
+// read. It returns what was read. A client that hangs up first
+// (h2ClientHungUp) returns what came, without an error; one whose ctx ends
+// returns ctx's error (the read is cut short by a deadline already past,
+// never by a budget).
 func readHTTP2Preface(ctx context.Context, conn net.Conn, buf []byte) ([]byte, error) {
 	defer cutOnDone(ctx, conn)()
 	chunk := make([]byte, len(http2.ClientPreface))
@@ -76,13 +77,22 @@ func readHTTP2Preface(ctx context.Context, conn net.Conn, buf []byte) ([]byte, e
 			if ctx.Err() != nil {
 				return buf, ctx.Err()
 			}
-			if errors.Is(err, io.EOF) {
+			if h2ClientHungUp(err) {
 				return buf, nil
 			}
 			return buf, err
 		}
 	}
 	return buf, nil
+}
+
+// h2ClientHungUp reports whether a read's error is the client hanging up: its
+// FIN (io.EOF) or its reset (ECONNRESET). A client may reset a connection it
+// never sent a request on, a pool's idle connection dropped as its app stops:
+// before the first HEADERS that ends the connection as a FIN would, and is no
+// failure of keploy's to log.
+func h2ClientHungUp(err error) bool {
+	return errors.Is(err, io.EOF) || neterr.IsConnReset(err)
 }
 
 // cutOnDone cuts conn's reads short when ctx ends, with a read deadline
@@ -124,11 +134,12 @@ func splitH2Frames(buf []byte) (whole, part []byte) {
 // parser read first, every frame up to and including that HEADERS frame and
 // whatever followed it in the last read (but for a frame whose header has
 // not all come, which the filter reads first), and the connection to read
-// the rest from. Neither holds the client's acknowledgement of keploy's SETTINGS, nor a
-// PING keploy answered. A connection the client closes before its HEADERS
-// returns what was read, without an error: the matchers decide on it as they
-// would have. One ctx ends while it waits returns ctx's error: the read is
-// cut short by a deadline already past, set when ctx ends, never by a budget.
+// the rest from. Neither holds the client's acknowledgement of keploy's
+// SETTINGS, nor a PING keploy answered. A connection the client hangs up
+// (h2ClientHungUp) before its HEADERS returns what was read, without an
+// error: the matchers decide on it as they would have. One whose ctx ends
+// while it waits returns ctx's error: the read is cut short by a deadline
+// already past, set when ctx ends, never by a budget.
 func readHTTP2UntilHeaders(ctx context.Context, conn net.Conn, initialBuf []byte) ([]byte, net.Conn, error) {
 	if _, err := conn.Write(h2ServerPreface); err != nil {
 		return initialBuf, conn, err
@@ -163,7 +174,7 @@ func readHTTP2UntilHeaders(ctx context.Context, conn net.Conn, initialBuf []byte
 			if ctx.Err() != nil {
 				return append(out, part...), conn, ctx.Err()
 			}
-			if sawHeaders || errors.Is(rerr, io.EOF) {
+			if sawHeaders || h2ClientHungUp(rerr) {
 				break
 			}
 			return append(out, part...), conn, rerr

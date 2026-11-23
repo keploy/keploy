@@ -3,11 +3,13 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -20,6 +22,8 @@ import (
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -27,6 +31,13 @@ import (
 
 	_ "net/http/pprof"
 	"runtime/pprof"
+
+	// Mozilla's root list, which pkg/agent/proxy/tls already links, as Go's
+	// system roots when the host has none (a distroless image, or a k8s
+	// sidecar whose /etc/ssl/certs is an empty volume). keploy loads its own
+	// roots before it points SSL_CERT_FILE at files meant for the app, so
+	// without this such a host would leave keploy's own TLS with no roots.
+	_ "golang.org/x/crypto/x509roots/fallback"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -38,6 +49,11 @@ var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
+	// Load this process's TLS roots before anything can change what
+	// crypto/x509 would read: keploy points SSL_CERT_FILE at files meant for
+	// the app, and in native mode adds its CA to the system store
+	// (pkg/agent/proxy/tls, loadOwnRoots).
+	_, _ = x509.SystemCertPool()
 	setVersion()
 	ctx := utils.NewCtx()
 	// An agent's teardown records its steps, and its long stages as work in
@@ -46,7 +62,9 @@ func main() {
 	utils.DeclareTeardownSteps()
 	start(ctx)
 	// An agent has detached everything by now: what is left is the exit
-	// (utils.MarkDetachDone).
+	// (utils.MarkDetachDone). Its report is the agent's last, and nothing
+	// after it is watched, so nothing may come between the two, and
+	// os.Exit's argument calls nothing (TestMainReportsItsTeardownSteps).
 	utils.MarkDetachDone()
 	os.Exit(utils.ErrCode)
 }
@@ -99,15 +117,11 @@ func start(ctx context.Context) {
 		}
 	}()
 
-	// If KEPLOY_DEBUG_FILE is set, tee debug-level log records into that
-	// file in addition to whatever sinks log.New configured. Used by
-	// `keploy cloud replay` to capture the agent container's debug
-	// stream into the user's keploy folder via a bind mount; the
-	// support-bundle pipeline picks the file up automatically since it
-	// lives under cfg.Path. Also useful as a generic "give me the full
-	// debug log without --debug printing it to my terminal" knob for
-	// any keploy invocation.
-	debugFile, debugSink := maybeAttachDebugFileSink(logger)
+	// If KEPLOY_DEBUG_FILE is set and this run asked for its debug log
+	// (--debug, or --debug-file), tee debug-level log records into that
+	// file in addition to whatever sinks log.New configured
+	// (maybeAttachDebugFileSink says when, and where it lands).
+	debugFile, debugSink := maybeAttachDebugFileSink(logger, os.Args[1:])
 	if debugFile != nil {
 		defer func() {
 			if debugSink != nil {
@@ -170,6 +184,11 @@ func start(ctx context.Context) {
 			}
 		}()
 	}
+
+	// Reach the docker daemon the docker CLI reaches (its current context, such
+	// as Rancher Desktop's), before the sudo re-exec: root's docker
+	// configuration does not name the user's context.
+	engine.UseDockerContext(logger)
 
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
@@ -277,6 +296,7 @@ func start(ctx context.Context) {
 	// does not have points at `keploy record --help`, where record's flags
 	// are, not at the root's, which lists only commands.
 	if cmd, err := rootCmd.ExecuteC(); err != nil {
+		err = cli.HintUnknownCommand(rootCmd, err)
 		utils.ErrCode = finalExitCode(err, utils.ErrCode, cmd.CommandPath(), os.Stderr)
 	}
 
@@ -330,20 +350,46 @@ func writesKeployFolder(root *cobra.Command, args []string) bool {
 	return false
 }
 
-// maybeAttachDebugFileSink reads KEPLOY_DEBUG_FILE and, if set, opens that
-// path and attaches a debug-level file sink onto logger via the same
-// in-place pointee mutation pattern the rest of the codebase uses for
-// runtime logger swaps (see ChangeLogLevel / RedirectToStderr). Returns
-// the opened file and sink handle so the caller can defer Flush + Close.
+// maybeAttachDebugFileSink reads KEPLOY_DEBUG_FILE and, when the run asked
+// for its debug log, opens that path and attaches a debug-level file sink
+// onto logger via the same in-place pointee mutation pattern the rest of the
+// codebase uses for runtime logger swaps (see ChangeLogLevel /
+// RedirectToStderr). Returns the opened file and sink handle so the caller
+// can defer Flush + Close.
+//
+// In docker-compose mode, KEPLOY_DEBUG_FILE points at
+// /keploy-host/agent-debug.log (the user's keploy folder bind-mounted into
+// the agent container), and the agent rotates the file into each test set's
+// folder as it records or replays it (test-set-N/agent-debug.log,
+// log.RotateDebugFileForTestSet). Those folders are what users commit, and
+// the file carries every DEBUG line. So it is written only when this run
+// asked for it on its own command line (args): --debug (the CLI forwards its
+// own --debug to the agent), or --debug-file. Nothing left in the folder
+// asks for it: a run after a --debug run writes no debug file unless it asks
+// too. Before opening the file, it adds the file's basename (unanchored, so
+// per-test-set copies at every depth are ignored too) to the folder's
+// .gitignore: a folder whose .gitignore cannot be written gets no debug file.
 //
 // All errors are non-fatal — if the file can't be opened (read-only mount,
 // permission, etc.), the process continues with the original logger.
-func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink) {
+func maybeAttachDebugFileSink(logger *zap.Logger, args []string) (*os.File, *log.DebugFileSink) {
 	path := strings.TrimSpace(os.Getenv("KEPLOY_DEBUG_FILE"))
 	if path == "" {
 		return nil, nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if !flagOn(args, "debug") && !flagOn(args, "debug-file") {
+		return nil, nil
+	}
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	// Ignored at every depth (no leading slash): the per-test-set copies too.
+	if err := utils.AddToGitIgnore(logger, dir, name); err != nil {
+		logger.Warn("KEPLOY_DEBUG_FILE set, but its folder's .gitignore could not be made to ignore it; continuing without the debug file, which would land in a folder users commit",
+			zap.Error(err))
+		return nil, nil
+	}
+	// Only inside the folder path is in: in the agent container that is the
+	// host's keploy folder, whose files come with the repository.
+	f, err := log.OpenDebugFile(path)
 	if err != nil {
 		logger.Warn("KEPLOY_DEBUG_FILE set but could not be opened; continuing without debug capture",
 			zap.String("path", path), zap.Error(err))
@@ -361,6 +407,31 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 	log.SetDebugFileSink(sink)
 	logger.Debug("KEPLOY_DEBUG_FILE attached", zap.String("path", path))
 	return f, sink
+}
+
+// flagOn reports whether args (a command line, before any "--" terminator)
+// turn the boolean flag name on: --name, -name, --name=<bool>, or
+// -name=<bool>. The last occurrence decides, matching Go's and pflag's
+// boolean flag parsing.
+func flagOn(args []string, name string) bool {
+	on := false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "--"+name || a == "-"+name {
+			on = true
+			continue
+		}
+		for _, p := range []string{"--" + name + "=", "-" + name + "="} {
+			if v, ok := strings.CutPrefix(a, p); ok {
+				if b, err := strconv.ParseBool(v); err == nil {
+					on = b
+				}
+			}
+		}
+	}
+	return on
 }
 
 // printEnterpriseUpgradeBanner emits a high-visibility nudge to install
@@ -442,7 +513,7 @@ func printEnterpriseUpgradeBanner() {
 	fmt.Fprintln(os.Stderr, "    • Recording and testing apps that run in Podman")
 	fmt.Fprintln(os.Stderr, "    • AI-powered test generation, sandbox replay, MCP for AI agents")
 	fmt.Fprintln(os.Stderr, "      (Claude Code, Cursor, Copilot, Gemini, …)")
-	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/install.sh && source install.sh"+reset)
+	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+models.InstallCommand+reset)
 	fmt.Fprintln(os.Stderr, orange+bar+reset)
 	fmt.Fprintln(os.Stderr)
 }

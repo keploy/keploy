@@ -1,10 +1,7 @@
 package proxy
 
 import (
-	"fmt"
 	"net"
-	"os"
-	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -48,7 +45,7 @@ func (p *Proxy) topologySink() TopologySink {
 func localListener(owner int, dstAddr string, port uint32) *models.MockedRow {
 	row := &models.MockedRow{Addr: dstAddr, Port: uint16(port)}
 	if owner > 0 {
-		row.PID, row.Exe = owner, programOf(owner)
+		row.PID, row.Exe = owner, ProgramOf(owner)
 	}
 	return row
 }
@@ -59,31 +56,36 @@ func localListener(owner int, dstAddr string, port uint32) *models.MockedRow {
 // containerkey.Label, when containerkey named the connection), whether it was
 // reached at a published port or at its own address, else an address of
 // this machine outside the run's tree (outside, from serveTreeListener). Any
-// other destination is not listed. Only keploy mock's runs list them.
-func (p *Proxy) noteMockedLocal(dstAddr string, port uint32, outside *models.MockedRow, ctrKey string) {
+// other destination is not listed. Only keploy mock's runs list them. inst
+// is the instance of the test worker whose process made the call
+// (DestInfo.Instance).
+func (p *Proxy) noteMockedLocal(dstAddr string, port uint32, outside *models.MockedRow, ctrKey string, inst uint32) {
 	s := p.topologySink()
 	if s == nil || !p.mockMode {
 		return
 	}
 	switch {
 	case ctrKey != "":
-		s.NoteMocked(models.MockedRow{Addr: dstAddr, Container: ctrKey, Port: uint16(port)})
+		s.NoteMocked(models.MockedRow{Addr: dstAddr, Container: ctrKey, Port: uint16(port), Instance: inst})
 	case outside != nil:
-		s.NoteMocked(*outside)
+		row := *outside
+		row.Instance = inst
+		s.NoteMocked(row)
 	}
 }
 
 // liveConn tells the sink about a LIVE call: conn, the caller's end of a
 // call relayed to a listener another process of the run's tree owns, says so
 // each time it reads the caller's bytes, so a connection a client keeps open
-// across tests (HTTP keep-alive) is listed for every test that used it. With
-// no sink, conn is returned as it is.
-func (p *Proxy) liveConn(conn net.Conn, owner int, port uint32) net.Conn {
+// across tests (HTTP keep-alive) is listed for every test that used it. inst
+// is the instance of the test worker whose process made it
+// (DestInfo.Instance). With no sink, conn is returned as it is.
+func (p *Proxy) liveConn(conn net.Conn, owner int, port uint32, inst uint32) net.Conn {
 	s := p.topologySink()
 	if s == nil {
 		return conn
 	}
-	return &liveReader{Conn: conn, sink: s, row: models.LiveRow{Exe: programOf(owner), Port: uint16(port)}}
+	return &liveReader{Conn: conn, sink: s, row: models.LiveRow{Exe: ProgramOf(owner), Port: uint16(port), Instance: inst}}
 }
 
 // liveReader is a caller's connection that reports each read of its bytes as
@@ -109,15 +111,7 @@ func (c *liveReader) CloseWrite() error {
 	return util.CloseWriteIfPossible(c.Conn)
 }
 
-// programOf is the program process pid runs: its executable, else its
-// command name; "" when neither can be read.
-func programOf(pid int) string {
-	if p, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
-		return strings.TrimSuffix(p, " (deleted)")
-	}
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}
+// NetConn is the connection underneath: what looks for the socket under a
+// live call's conn (util.WatchPeerEnd, watching the caller for its hang-up)
+// looks through it.
+func (c *liveReader) NetConn() net.Conn { return c.Conn }

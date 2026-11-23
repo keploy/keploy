@@ -144,7 +144,13 @@ var bypassRulesWarned sync.Map
 // rule and the port-only rule that says so. keploy refuses such a rule at
 // start where the port's protocol is known then (config.CheckBypassRules,
 // mysqlPorts).
-func warnBypassRulesUndecided(logger *zap.Logger, rules []models.BypassRule, dst, host string) {
+//
+// dst and host are named as a line logged under ctx names them: a host name
+// by its labels' shape beside its tag in ctx's session
+// (models.HostLogName), an address whole. The connection's host (its SNI, a
+// CONNECT target) is the app's, not the rule's.
+func warnBypassRulesUndecided(ctx context.Context, logger *zap.Logger, rules []models.BypassRule, dst, host string) {
+	dst, host = models.HostLogName(ctx, dst), models.HostLogName(ctx, host)
 	for _, rule := range rules {
 		key := fmt.Sprintf("%q|%q|%d", rule.Host, rule.Path, rule.Port)
 		if _, warned := bypassRulesWarned.LoadOrStore(key, true); warned {
@@ -175,15 +181,17 @@ func warnBypassRulesUndecided(logger *zap.Logger, rules []models.BypassRule, dst
 // reaches, kept in *dst so the connection's end closes it. host is the host
 // the connection showed, "" for none.
 func (p *Proxy) passBypassRulesUndecided(ctx context.Context, logger *zap.Logger, src net.Conn, dst *net.Conn, dial func() (net.Conn, error), undecided []models.BypassRule, dstAddr, host string) error {
-	warnBypassRulesUndecided(logger, undecided, dstAddr, host)
+	warnBypassRulesUndecided(ctx, logger, undecided, dstAddr, host)
 	if *dst == nil {
 		conn, err := dial()
 		if err != nil {
+			// A dial of a CONNECT target names its host: by its shape.
+			err = models.HostsInError(ctx, err, dstAddr, host)
 			if refusedLocally(err) {
-				logger.Debug("nothing is listening at the destination a bypassRule passes the connection through to; the caller sees the connection refused", zap.String("server address", dstAddr))
+				logger.Debug("nothing is listening at the destination a bypassRule passes the connection through to; the caller sees the connection refused", zap.String("server address", models.HostLogName(ctx, dstAddr)))
 				return err
 			}
-			utils.LogError(logger, err, "failed to dial the server a bypassRule passes the connection through to", zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+			utils.LogError(logger, err, "failed to dial the server a bypassRule passes the connection through to", zap.String("server address", models.HostLogName(ctx, dstAddr)), zap.String("next_step", util.NextStepDialDestination))
 			return err
 		}
 		*dst = conn

@@ -491,7 +491,7 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 	if err != nil {
 		h.logger.Warn("keploy could not load its report of the application's calls over Unix sockets, and Unix sockets are not supported: a call over one is neither recorded nor mocked, and no test is said to have made one",
 			zap.Error(err), zap.String("kernel", kernelName()),
-			zap.String("next_step", "on a kernel keploy supports (amd64 5.10 or later, arm64 6.6 or later) the report loads: report this error to keploy"))
+			zap.String("next_step", "reach every dependency over a TCP address (mocked, or listed in mock.real): on this kernel keploy cannot say which tests call one over a Unix socket; to have this report here, report this error to keploy"))
 		return
 	}
 	if u.fallback {

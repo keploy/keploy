@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func recordBoth(t *testing.T, req, resp string) map[string]*models.Mock {
 	t.Helper()
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	at := time.Unix(1_700_002_000, 0)
-	v2, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(req), Resp: []byte(resp), ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)},
+	v2, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(req), Resp: []byte(resp), ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)},
 		8083, "conn-1", models.OutgoingOptions{})
 	if err != nil || v2 == nil {
 		t.Fatalf("V2 recorder: mock %v, err %v", v2, err)

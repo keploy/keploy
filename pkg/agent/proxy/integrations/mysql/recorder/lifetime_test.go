@@ -6,10 +6,8 @@ import (
 	"testing"
 	"time"
 
-	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
-	"go.uber.org/zap"
 )
 
 func queryRequest(q string) []mysql.Request {
@@ -126,10 +124,10 @@ func TestStatedLifetimeOfMySQLMocks(t *testing.T) {
 	}
 }
 
-// Both recorders write the lifetime they state into the mock's metadata, where
-// a replay reads it (models.MetadataLifetimeKey), beside the type tag they
-// always wrote, and stamp the same lifetime in memory.
-func TestRecordersWriteTheStatedLifetime(t *testing.T) {
+// The recorder writes the lifetime it states into the mock's metadata, where
+// a replay reads it (models.MetadataLifetimeKey), beside the type tag it
+// always wrote, and stamps the same lifetime in memory.
+func TestRecorderWritesTheStatedLifetime(t *testing.T) {
 	ts := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
 	resps := []mysql.Response{{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Type: "OK"}}}}
 	command := func(op string) []mysql.Request {
@@ -147,17 +145,6 @@ func TestRecordersWriteTheStatedLifetime(t *testing.T) {
 			t.Fatalf("in memory %v (derived %v), want %v", m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived, lifetime)
 		}
 	}
-
-	// The legacy recorder delivers through the sync mock manager, which hands
-	// on a config mock as it comes; the others wait for their test's window.
-	t.Run("recorder", func(t *testing.T) {
-		out := make(chan *models.Mock, 1)
-		mgr := syncMock.New(zap.NewNop())
-		mgr.SetOutputChannel(out)
-		ctx := syncMock.NewContext(context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1"), mgr)
-		recordMock(ctx, command("HandshakeResponse41"), resps, "config", "HandshakeResponse41", "OK", nil, ts, ts.Add(time.Millisecond), models.OutgoingOptions{})
-		check(t, <-out, "config", models.MetadataLifetimeSession, models.LifetimeSession)
-	})
 
 	for _, tc := range []struct {
 		name, mockType, op string

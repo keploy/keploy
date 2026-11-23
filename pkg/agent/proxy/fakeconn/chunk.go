@@ -112,11 +112,15 @@ type Chunk struct {
 	// orders the directions refuses a chunk without one (ErrUnnumbered). It
 	// is 32 bits, compared as a serial number, so it sits in the padding
 	// after Dir and a queued chunk costs no more memory than it did.
-	ConnSeq   uint32
-	Bytes     []byte
-	ReadAt    time.Time // when the relay's Read() returned on the source socket
-	WrittenAt time.Time // when the relay's Write() returned on the opposite socket
-	SeqNo     uint64    // monotonic, scoped to (connection, direction)
+	ConnSeq uint32
+	Bytes   []byte
+	ReadAt  time.Time // when the relay's Read() returned on the source socket
+	// WrittenAt is when the relay wrote the bytes on to the opposite
+	// socket, stamped just before its Write: no later than the peer could
+	// take them, so whatever the peer did with them comes after it, and no
+	// earlier than ReadAt.
+	WrittenAt time.Time
+	SeqNo     uint64 // monotonic, scoped to (connection, direction)
 }
 
 // Clock is the clock a chunk's ReadAt is on. Only a producer

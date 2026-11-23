@@ -35,7 +35,13 @@ func ExitOf(Reached) (<-chan struct{}, func()) {
 
 // WaitExitByEvents waits for exited for StopStallBudget here, where no
 // progress can be read, and then says a kill is due; bound is StopStallSaid.
-func WaitExitByEvents(_ *zap.Logger, exited <-chan struct{}, _ []Reached, _ *TeardownScope) (end StopEnd, bound string) {
+func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope) (end StopEnd, bound string) {
+	return WaitExitOffered(logger, exited, procs, moved, nil, OfferKillNow)
+}
+
+// WaitExitOffered is WaitExitByEvents here: no offer to end at a Ctrl+C is
+// made, as no wait here outlasts its grace.
+func WaitExitOffered(_ *zap.Logger, exited <-chan struct{}, _ []Reached, _ *TeardownScope, _ *StopNowNotice, _ string) (end StopEnd, bound string) {
 	grace := time.NewTimer(StopStallBudget)
 	defer grace.Stop()
 	select {

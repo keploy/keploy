@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -371,7 +372,7 @@ func TestLearnMatchMissReasons(t *testing.T) {
 				t.Fatalf("served %v miss %+v err %v, want reason %s", served, miss, err, tc.reason)
 			}
 			r := &models.MockMismatchReport{NextSteps: "re-record"}
-			miss.explain(r)
+			miss.explain(r, false)
 			if r.Reason != tc.reason || !strings.HasPrefix(r.NextSteps, "keploy's learn step: ") || !strings.HasSuffix(r.NextSteps, " re-record") {
 				t.Fatalf("report %+v", r)
 			}
@@ -544,6 +545,61 @@ func TestLearnMatchOutsideATestPairsOnlyThePool(t *testing.T) {
 	}
 	if served, _, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"x"}`, nil), db, n, opts); served == nil {
 		t.Fatal("an exact match is served outside a test, as before")
+	}
+}
+
+// bgLearnDb is a learnDb whose session mocks named in bg are the background
+// the store shows the open test (integrations.BackgroundMember).
+type bgLearnDb struct {
+	*learnDb
+	bg map[string]bool
+}
+
+func (d *bgLearnDb) InBackground(name string) bool { return d.bg[name] }
+
+// The learn step, on a store that reads no round snapshot (learnRules),
+// holds a request one more than the open test recorded as a miss whatever
+// the background the store shows the test holds of it: an exact copy among
+// the background (integrations.InBackground) answers no request the test's
+// own answered recording matches exactly (learn.Candidate.Background). Read
+// as any other candidate, it answered the test's second POST /a, and a test
+// that made its recorded call twice passed. A request the test never
+// recorded is still answered by the background.
+func TestLearnMatchTheBackgroundNeverAnswersOneCallMoreThanTheTestRecorded(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	own := learnRecorded("mock-0", 0, "POST", "/a", `{"id":"x"}`, nil, `{"from":"own"}`)
+	bg := learnRecorded("bg-0", 5*time.Second, "POST", "/a", `{"id":"x"}`, nil, `{"from":"bg"}`)
+	other := learnRecorded("bg-1", 6*time.Second, "POST", "/b", `{"id":"x"}`, nil, `{"from":"bg"}`)
+	db := &bgLearnDb{
+		learnDb: &learnDb{
+			mockMemDb: mockMemDb{mocks: []*models.Mock{bg, other}},
+			perTest:   []*models.Mock{own},
+			pool:      map[time.Time]bool{bg.Spec.ReqTimestampMock: true, other.Spec.ReqTimestampMock: true},
+			observe:   tr.ServedMock,
+		},
+		bg: map[string]bool{bg.Name: true, other.Name: true},
+	}
+	call := func(path string) string {
+		served, _, err := h.learnMatch(ctx, live("POST", path, `{"id":"x"}`, nil), db, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if served == nil {
+			return ""
+		}
+		return served.Name
+	}
+	if got := call("/a"); got != own.Name {
+		t.Fatalf("the test's POST /a was answered by %q; want its own %s", got, own.Name)
+	}
+	if got := call("/a"); got != "" {
+		t.Fatalf("the test's second POST /a, one more than it recorded, was answered by %q", got)
+	}
+	if got := call("/b"); got != other.Name {
+		t.Fatalf("the test's POST /b, a request it never recorded, was answered by %q; want the background's %s", got, other.Name)
 	}
 }
 
@@ -757,6 +813,193 @@ func TestWhatFLearnsTheVariablePassFollows(t *testing.T) {
 	ok, _, diag = matchVar(t, h, ci, live("GET", "/v1/orders/o-56", "", nil))
 	if ok || diag == nil || diag.phase != models.MatchPhaseVariable {
 		t.Fatalf("a read of another id is a variable miss: ok %v diag %+v", ok, diag)
+	}
+}
+
+// A value one test's call made, which a later test of the set's call sends
+// again, is followed as the run's variable: F binds it at test A's call and
+// uses it at test B's, by the run's name, never as noise. The replay holds
+// B's call to what A's call sent in the same run: B's call that sends
+// another value is a variable miss, and B replayed without A's call before
+// it is one that says the test set's call that binds it was not made.
+func TestLearnMatchAValueATestMadeIsFollowedInALaterTest(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	ctx := learn.WithTracker(context.Background(), tr)
+	create := learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`)
+	read := learnRecorded("mock-1", time.Second, "GET", "/v1/orders/o-1", "", nil, `{"id":"o-1","state":"new"}`)
+	tr.Begin()
+	a := &learnDb{perTest: []*models.Mock{create}}
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"o-9"}`, nil), a, n, opts); served == nil || miss != nil {
+		t.Fatalf("test A's create: %+v", miss)
+	}
+	tr.End()
+	tr.Begin()
+	b := &learnDb{perTest: []*models.Mock{read}}
+	if served, miss, _ := h.learnMatch(ctx, live("GET", "/v1/orders/o-9", "", nil), b, n, opts); served == nil || miss != nil {
+		t.Fatalf("test B's read of test A's order: %+v", miss)
+	}
+	name := models.RunVariablePrefix + "order"
+	use, bind := b.consumed[0].Spec.Learned(), b.consumed[0].Spec.LearnedBinds()["mock-0"]
+	if len(use) != 1 || len(use[name].Use) != 1 || len(bind) != 1 || bind[name].Bind != "body.order" {
+		t.Fatalf("test B uses %+v and binds %+v at test A's call, want the run's %s", use, bind, name)
+	}
+	if len(b.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("test B's read learned test A's order as noise too: %v", b.consumed[0].Spec.ReqBodyNoise)
+	}
+	// The replay writes the use onto test B's recording and the bind onto
+	// test A's, as it writes every consumed state.
+	recA, recB := *create, *read
+	recA.Spec.Variables, recB.Spec.Variables = models.MockVariables{name: bind[name]}, models.MockVariables{name: use[name]}
+	replay := func(tests ...[]*models.Mock) *varDb {
+		ci := &varDb{}
+		ci.table.KeepRun()
+		for _, mocks := range tests {
+			ci.table.Start(nil)
+			ci.perTest = mocks
+			if len(mocks) == 1 && mocks[0].Name == "mock-0" {
+				if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/orders", `{"order":"o-55"}`, nil)); !ok {
+					t.Fatalf("test A's create in CI: %+v", diag)
+				}
+			}
+		}
+		return ci
+	}
+	ci := replay([]*models.Mock{&recA}, []*models.Mock{&recB})
+	if ok, stub, diag := matchVar(t, h, ci, live("GET", "/v1/orders/o-55", "", nil)); !ok || stub.Spec.HTTPResp.Body != `{"id":"o-55","state":"new"}` {
+		t.Fatalf("test B's read of test A's order in CI: ok %v diag %+v", ok, diag)
+	}
+	ci = replay([]*models.Mock{&recA}, []*models.Mock{&recB})
+	ok, _, diag := matchVar(t, h, ci, live("GET", "/v1/orders/o-56", "", nil))
+	if ok || diag == nil || diag.phase != models.MatchPhaseVariable {
+		t.Fatalf("test B's read of another order than test A made is answered: ok %v diag %+v", ok, diag)
+	}
+	ci = replay([]*models.Mock{&recB})
+	ok, _, diag = matchVar(t, h, ci, live("GET", "/v1/orders/o-55", "", nil))
+	wantProblem(t, ok, diag, "made by the test set's start-up or an earlier test, was not made before it")
+}
+
+// A value test B both binds for itself (it makes an order and reads it
+// back) and a later test C reads again is one variable at one place: the
+// run's, bound at B's create, which B's own read uses too
+// (learn.RunTakesPlaces). A full replay of B then C, with the application
+// behaving as recorded, serves all three calls, and C reading another order
+// misses.
+func TestLearnMatchATestsOwnVariableALaterTestReusesIsTheRunsAtOnePlace(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	ctx := learn.WithTracker(context.Background(), tr)
+	create := learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`)
+	read := learnRecorded("mock-1", time.Second, "GET", "/v1/orders/o-1", "", nil, `{"id":"o-1","state":"new"}`)
+	read2 := learnRecorded("mock-2", 2*time.Second, "GET", "/v1/orders/o-1", "", nil, `{"id":"o-1","state":"new"}`)
+	tr.Begin()
+	b := &learnDb{perTest: []*models.Mock{create, read}}
+	for _, r := range []*req{live("POST", "/v1/orders", `{"order":"o-9"}`, nil), live("GET", "/v1/orders/o-9", "", nil)} {
+		if served, miss, _ := h.learnMatch(ctx, r, b, n, opts); served == nil || miss != nil {
+			t.Fatalf("test B's %s: %+v", r.method, miss)
+		}
+	}
+	tr.End()
+	tr.Begin()
+	c := &learnDb{perTest: []*models.Mock{read2}}
+	if served, miss, _ := h.learnMatch(ctx, live("GET", "/v1/orders/o-9", "", nil), c, n, opts); served == nil || miss != nil {
+		t.Fatalf("test C's read of test B's order: %+v", miss)
+	}
+	tr.End()
+	owner := map[string]string{"mock-0": "TestB", "mock-1": "TestB", "mock-2": "TestC"}
+	recs := learnedOntoTaking([]*models.Mock{create, read, read2}, append(append([]models.Mock{}, b.consumed...), c.consumed...), owner)
+	name := models.RunVariablePrefix + "order"
+	if vs := recs[0].Spec.Variables; len(vs) != 1 || vs[name].Bind != "body.order" {
+		t.Fatalf("test B's create carries %+v; want only the run's %s, bound at body.order", vs, name)
+	}
+	for _, m := range recs[1:] {
+		if vs := m.Spec.Variables; len(vs) != 1 || len(vs[name].Use) != 1 || vs[name].Bind != "" {
+			t.Fatalf("%s carries %+v; want it to use the run's %s only", m.Name, vs, name)
+		}
+	}
+	replay := func(cRead string) (bool, *matchDiag) {
+		ci := &varDb{}
+		ci.table.KeepRun()
+		ci.table.Start(nil)
+		ci.perTest = []*models.Mock{recs[0], recs[1]}
+		if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/orders", `{"order":"o-55"}`, nil)); !ok {
+			t.Fatalf("a full replay: test B's create is a miss: %+v", diag)
+		}
+		if ok, _, diag := matchVar(t, h, ci, live("GET", "/v1/orders/o-55", "", nil)); !ok {
+			t.Fatalf("a full replay: test B's read is a miss: %+v", diag)
+		}
+		ci.table.Start(nil)
+		ci.perTest = []*models.Mock{recs[2]}
+		ok, _, diag := matchVar(t, h, ci, live("GET", cRead, "", nil))
+		return ok, diag
+	}
+	if ok, diag := replay("/v1/orders/o-55"); !ok {
+		t.Fatalf("a full replay: test C's read of the order B made is a miss: %+v", diag)
+	}
+	if ok, _ := replay("/v1/orders/o-56"); ok {
+		t.Fatal("a full replay: test C read another order than the one B made and was served")
+	}
+}
+
+// A later test's second call that sends again the value an earlier test
+// made uses the run's variable, as its first call does: the first call is
+// where the run's variable is used, not where a variable of the test's own
+// is bound. A replay of A then B answers both of B's calls with the value A
+// sent in it, and B's second call that sends another value is a variable
+// miss.
+func TestLearnMatchALaterTestsSecondCallOfAnEarlierTestsValueUsesTheRunsVariable(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	ctx := learn.WithTracker(context.Background(), tr)
+	create := learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`)
+	read := learnRecorded("mock-1", time.Second, "GET", "/v1/orders/o-1", "", nil, `{"id":"o-1","state":"new"}`)
+	del := learnRecorded("mock-2", 2*time.Second, "DELETE", "/v1/orders/o-1", "", nil, `{}`)
+	tr.Begin()
+	a := &learnDb{perTest: []*models.Mock{create}}
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"o-9"}`, nil), a, n, opts); served == nil || miss != nil {
+		t.Fatalf("test A's create: %+v", miss)
+	}
+	tr.End()
+	tr.Begin()
+	b := &learnDb{perTest: []*models.Mock{read, del}}
+	for _, r := range []*req{live("GET", "/v1/orders/o-9", "", nil), live("DELETE", "/v1/orders/o-9", "", nil)} {
+		if served, miss, _ := h.learnMatch(ctx, r, b, n, opts); served == nil || miss != nil {
+			t.Fatalf("test B's %s of test A's order: %+v", r.method, miss)
+		}
+	}
+	tr.End()
+	name := models.RunVariablePrefix + "order"
+	for _, c := range b.consumed {
+		use, binds := c.Spec.Learned(), c.Spec.LearnedBinds()
+		if len(use) != 1 || len(use[name].Use) != 1 || len(binds) != 1 || len(binds["mock-0"]) != 1 || binds["mock-0"][name].Bind != "body.order" {
+			t.Fatalf("test B's %s uses %+v and binds %+v, want only the run's %s, bound at test A's call", c.Name, use, binds, name)
+		}
+	}
+	recs := learnedOnto([]*models.Mock{create, read, del}, append(append([]models.Mock{}, a.consumed...), b.consumed...))
+	replay := func(deleted string) (bool, *matchDiag) {
+		ci := &varDb{}
+		ci.table.KeepRun()
+		ci.table.Start(nil)
+		ci.perTest = recs[:1]
+		if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/orders", `{"order":"o-55"}`, nil)); !ok {
+			t.Fatalf("test A's create in CI: %+v", diag)
+		}
+		ci.table.Start(nil)
+		ci.perTest = recs[1:]
+		if ok, stub, diag := matchVar(t, h, ci, live("GET", "/v1/orders/o-55", "", nil)); !ok || stub.Spec.HTTPResp.Body != `{"id":"o-55","state":"new"}` {
+			t.Fatalf("test B's read of test A's order in CI: ok %v diag %+v", ok, diag)
+		}
+		ok, _, diag := matchVar(t, h, ci, live("DELETE", "/v1/orders/"+deleted, "", nil))
+		return ok, diag
+	}
+	if ok, diag := replay("o-55"); !ok {
+		t.Fatalf("test B's delete of test A's order in CI: %+v", diag)
+	}
+	if ok, diag := replay("o-56"); ok || diag == nil || diag.phase != models.MatchPhaseVariable {
+		t.Fatalf("test B's delete of another order than test A made is answered: ok %v diag %+v", ok, diag)
 	}
 }
 
@@ -1022,6 +1265,23 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 		}
 	}
 	return out
+}
+
+// learnedOntoTaking is learnedOnto after what the replay does first
+// (learn.RunTakesPlaces), each consumed mock read as learned in its test
+// (owner).
+func learnedOntoTaking(recs []*models.Mock, consumed []models.Mock, owner map[string]string) []*models.Mock {
+	states := map[string]models.MockState{}
+	for _, c := range consumed {
+		states[c.Name] = models.MockState{Name: c.Name, Variables: c.Spec.Learned(), Binds: c.Spec.LearnedBinds()}
+	}
+	states, _ = learn.RunTakesPlaces(states, func(m string) string { return owner[m] })
+	out := make([]models.Mock, len(consumed))
+	for i, c := range consumed {
+		c.Spec.SetLearned(states[c.Name].Variables, states[c.Name].Binds)
+		out[i] = c
+	}
+	return learnedOnto(recs, out)
 }
 
 // fullRound runs calls through the learn step against recs and returns the
@@ -2574,6 +2834,129 @@ func TestLearnMatchRefusesAWordTheSetsStartUpHeld(t *testing.T) {
 	}
 }
 
+// An earlier test's own call that sent a value the run made is the run's
+// too (learn.Earlier.Run, not the start-up's): a later test's drifted value
+// that holds a word it held is refused as one the start-up held is, and the
+// reason names the earlier test, not the start-up.
+func TestLearnMatchRefusesAWordAnEarlierTestHeld(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	ctx := learn.WithTracker(context.Background(), tr)
+	tr.Begin()
+	a := &learnDb{perTest: []*models.Mock{learnRecorded("mock-a", time.Second, "POST", "/v1/register", `{"node":"n-1"}`, nil, `{}`)}}
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"node":"n-2"}`, nil), a, n, opts); err != nil || served == nil || miss != nil {
+		t.Fatalf("test A's call: served %v miss %+v err %v", served, miss, err)
+	}
+	tr.End()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", 2*time.Second, "POST", "/v1/charges", `{"key":"k-1"}`, nil, `{}`)}}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/charges", `{"key":"k-3"}`, nil), db, n, opts)
+	const why = "appears in an earlier test of the set, in mock-a at body.node"
+	if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, why) {
+		t.Fatalf("served %v miss %+v err %v; want the call refused: %s", served, miss, err, why)
+	}
+}
+
+// A value an earlier test's call sent where its learn step learned a plain
+// read of the clock (api-server's vault PUT's lastUsedAt), which a later
+// test's call carries where its window does not hold it (a login code's
+// authTime nine seconds later, the session token's auth time the test's
+// client minted in the PUT's second), is refused, naming the earlier call
+// and its place: keploy cannot tell a copy of the read from another read of
+// the clock it does not see. Followed, the PUT's place would carry the run's
+// variable and a clock read at once, and the PUT would be refused for every
+// test. In a call keploy knows no window of (keploy record's calls under a
+// moved clock), the later call's value is its own read of the clock, as the
+// leaf learns one there with the switch off too, which every replay checks
+// in its call's span: an application that writes the second it read for
+// each call sends the earlier call's text again in that second.
+func TestLearnMatchRefusesAnEarlierTestsClockReadNoWindowOfTheCallHolds(t *testing.T) {
+	lead := learn.FullRoundLead
+	for _, window := range []bool{true, false} {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		if window {
+			// keploy mock's client tests: each test's first call has a
+			// window from its begin, in the recording and in F.
+			tr.SetClientTests(true)
+			tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		}
+		tr.NewSet()
+		ctx := learn.WithTracker(context.Background(), tr)
+		if window {
+			boot := learnRecorded("mock-0", 0, "GET", "/v1/health", "", nil, `{}`)
+			tr.ServedMockAt(boot, learnAt.Add(lead))
+			tr.ServedMockAsRecorded(boot)
+			tr.RecordedBegin(learnAt.Add(time.Second))
+			tr.BeginAt(learnAt.Add(lead + time.Second))
+		} else {
+			tr.Begin()
+		}
+		recA := learnRecorded("mock-a", 1100*time.Millisecond, "PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":1791972001}}`, nil, `{}`)
+		a := &learnDb{perTest: []*models.Mock{recA}}
+		in := live("PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":1791972062}}`, nil)
+		in.arrived = learnAt.Add(lead + 1100*time.Millisecond)
+		if served, miss, err := h.learnMatch(ctx, in, a, n, opts); err != nil || served == nil || miss != nil || !learnedClockRead(a.consumed[0].Spec, "body.data.lastUsedAt") {
+			t.Fatalf("window %v: test A's call: served %v miss %+v err %v; want lastUsedAt learned as a read of the clock", window, served, miss, err)
+		}
+		tr.End()
+		at := 10 * time.Second
+		if window {
+			tr.RecordedBegin(learnAt.Add(at))
+			tr.BeginAt(learnAt.Add(lead + at))
+		} else {
+			// The application read its clock for this call in the PUT's second.
+			at = 1400 * time.Millisecond
+			tr.Begin()
+		}
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", at+100*time.Millisecond, "POST", "/v1/codes", `{"authTime":1791972001}`, nil, `{}`)}}
+		in = live("POST", "/v1/codes", `{"authTime":1791972062}`, nil)
+		in.arrived = learnAt.Add(lead + at + 100*time.Millisecond)
+		served, miss, err := h.learnMatch(ctx, in, db, n, opts)
+		const why = "body.authTime changed, and its recorded value was sent in mock-a at body.data.lastUsedAt, an earlier test's call, where keploy learned it as a read of the application's clock"
+		switch {
+		case err != nil:
+			t.Fatalf("window %v: %v", window, err)
+		case window && (served != nil || miss == nil || !strings.Contains(miss.res.Why, why) || strings.Contains(miss.res.Why, "179197")):
+			t.Fatalf("window %v: served %v miss %+v; want the call refused: %s, never the value", window, served, miss, why)
+		case !window && (served == nil || miss != nil || !learnedClockRead(db.consumed[0].Spec, "body.authTime")):
+			t.Fatalf("window %v: served %v miss %+v; want authTime learned as the call's own read of the clock", window, served, miss)
+		}
+		if v := a.consumed[0].Spec.Variables; len(v) != 0 {
+			t.Fatalf("window %v: test A's PUT binds %+v; want nothing bound at its clock read", window, v)
+		}
+	}
+}
+
+// A word of an earlier test's leaf that did not drift is no source of a
+// later test's value: the run keeps of test A's call only the request
+// leaves that drifted (learn's ranCalls). A's call drifts at node and sends
+// qty as recorded ("7"); test B's key, which drifted and holds a 7 too, but
+// came from nowhere in A, is learned as noise, as it is within one test,
+// never refused for A's qty.
+func TestLearnMatchAWordOfAnEarlierTestsLeafThatDidNotDriftIsNoSource(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	ctx := learn.WithTracker(context.Background(), tr)
+	tr.Begin()
+	a := &learnDb{perTest: []*models.Mock{learnRecorded("mock-a", time.Second, "POST", "/v1/register", `{"node":"n-1","qty":"7"}`, nil, `{}`)}}
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"node":"n-2","qty":"7"}`, nil), a, n, opts); err != nil || served == nil || miss != nil {
+		t.Fatalf("test A's call: served %v miss %+v err %v", served, miss, err)
+	}
+	tr.End()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", 2*time.Second, "POST", "/v1/charges", `{"key":"k-7"}`, nil, `{}`)}}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/charges", `{"key":"k-8"}`, nil), db, n, opts)
+	if miss != nil {
+		t.Fatalf("test B's call was refused: %s", miss.res.Why)
+	}
+	if err != nil || served == nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.key": {}}) {
+		t.Fatalf("served %v err %v consumed %d; want test B's key learned as noise", served, err, len(db.consumed))
+	}
+}
+
 // An exchange the learn step served whose parked answer read back for the
 // claim and then cannot be read back again is not kept as an exchange with
 // no answer: a later value from it is refused, naming the recording it
@@ -3264,10 +3647,14 @@ func TestInServeOrderNumbersTheLeafedPayloadsByTheServedMocks(t *testing.T) {
 // ("at <instant>") alike, and the window, its provenance, decides: read in
 // the call's window (the receive served before it, its arrival, on the app's
 // clock) it is a clock read, learned as noise, whether the boot took 2 s or
-// 30 s longer; read by the lead alone (no app clock, or a test's own call,
-// which is read so: F sets each test's clock), nothing shows it is one, and
-// the minute and second that changed are words of the receive's Date header,
-// a value that may have flowed from the receive: refused, naming it.
+// 30 s longer. A test's own call is read in its own window (learn.OwnCall)
+// where the store tells whose each serve is, as the proxy's does under the
+// switch: the receive is the start-up's, so the window runs from it, and the
+// read is learned the same. Read by the lead alone (no app clock, or a
+// test's own call where no store tells whose a serve is), nothing shows it
+// is one, and the minute and second that changed are words of the receive's
+// Date header, a value that may have flowed from the receive: refused,
+// naming it.
 func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	recRead := learnAt.Add(3 * time.Millisecond)
@@ -3283,12 +3670,16 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 			boot  time.Duration
 			clock bool
 			own   bool
+			// owner: the store tells whose each serve is (the test's own
+			// or the start-up's: learn.Tracker.SetServeOwner).
+			owner bool
 			noise bool
 		}{
-			{"a 2 s longer boot", 2 * time.Second, true, false, true},
-			{"a 30 s longer boot", 30 * time.Second, true, false, true},
-			{"no app clock", 2 * time.Second, false, false, false},
-			{"a test's own call", 2 * time.Second, true, true, false},
+			{"a 2 s longer boot", 2 * time.Second, true, false, false, true},
+			{"a 30 s longer boot", 30 * time.Second, true, false, false, true},
+			{"no app clock", 2 * time.Second, false, false, false, false},
+			{"a test's own call, the store tells whose a serve is", 2 * time.Second, true, true, true, true},
+			{"a test's own call, no store tells whose a serve is", 2 * time.Second, true, true, false, false},
 		} {
 			t.Run(form.name+", "+tc.name, func(t *testing.T) {
 				h, n, opts := learnOn(t)
@@ -3305,6 +3696,10 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 					db = &learnDb{perTest: []*models.Mock{event}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
 					tr.Begin()
 				}
+				if tc.owner {
+					// Both are the test's own or the start-up's.
+					tr.SetServeOwner(func(*models.Mock) bool { return true })
+				}
 				offset := learn.FullRoundLead + tc.boot - 40*time.Second
 				read := 0
 				if tc.clock {
@@ -3318,8 +3713,8 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if tc.own && read != 0 {
-					t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
+				if tc.own && (read != 0) != tc.owner {
+					t.Fatalf("a test's own call read the app's clock %d times; want its window read only where the store tells whose a serve is (%v)", read, tc.owner)
 				}
 				if !tc.noise {
 					if got != nil || miss == nil || !strings.Contains(miss.res.Why, "earlier") || !strings.Contains(miss.res.Why, "mock-0") {
@@ -3437,7 +3832,7 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 				if !tc.windowed {
 					head = field + " changed, and keploy saw no read of the app's clock for its call (an instant, its characters 1 to "
 				}
-				if got != nil || miss == nil || !strings.Contains(miss.res.Why, head) || !strings.Contains(miss.res.Why, "If your test supplies this value, have it supply the same value in every run") {
+				if got != nil || miss == nil || !strings.Contains(miss.res.Why, head) || !strings.Contains(miss.res.Why, "If your test supplies this value, give it to keploy where the test makes it, in Go v = keploytest.Given(t, \"v\", v), and each replay checks") {
 					t.Fatalf("served %v miss %+v; want %s refused, saying keploy saw no read of the app's clock that matched it", got, miss, field)
 				}
 				return
@@ -4154,7 +4549,7 @@ func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 				// The miss says where the call was read and what moved, and
 				// gives no reason: nothing of the request was compared.
 				r := &models.MockMismatchReport{}
-				d.miss.explain(r)
+				d.miss.explain(r, false)
 				if r.Reason != "" || !strings.HasPrefix(r.NextSteps, movedWhy(store.where, store.moved)+": keploy learns nothing of a call in a round it was not made in") {
 					t.Fatalf("%s, %s: the miss reads reason %q, next steps %q; want no reason, and the round that moved", store.name, c.name, r.Reason, r.NextSteps)
 				}
@@ -4803,5 +5198,158 @@ func TestLearnMatchATokenAnotherTestsServeMayHaveGivenIsRefusedUnlessItsAdapterS
 				t.Fatalf("FALSE REASON: refused %s (%q); want request_changed saying %q", miss.res.Reason, miss.res.Why, tc.why)
 			}
 		})
+	}
+}
+
+// A consumer that fell behind makes a call of an older test in a later
+// test's window (test 4's): it carries the id a serve of test 2 gave it
+// (mock-22, read as the word rule reads a recording F gave earlier in the
+// set: GivenPlaces of the tracker's order), while the call's recording holds
+// the id of a recording of the window's own test (mock-60), which F gave the
+// application as recorded. The refusal named mock-60 as where the value
+// came from ("holds earlier (in mock-60), where keploy cannot bind it yet"),
+// so the user could not act on it; it names the late call and mock-22, and
+// refuses as before. Where mock-22 gave another id, keploy cannot name the
+// value's source, and the refusal says so with the leaf's reason, never that
+// mock-60 holds it earlier where keploy cannot bind it. A serve of test 3,
+// the test F ran just before the call's, recorded in another recorded test's
+// window, is no earlier place of the call's own test (ofPairedTest): HTTP
+// reads it among the set's too (GivenPlaces), which says its test is the
+// one F ran just before the call's, and the refusal names it so.
+func TestALateCallsRefusalNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
+	const (
+		path   = "body.Key.Id.S"
+		recID  = "fb77a0c2-5d1e-4c3b-9a8f-0e6d2c4b1a90"
+		liveID = "7f7e49f4-2b6c-4e1d-8f3a-5c9b0d7e6a12"
+		// otherID is an id neither the call nor its recording holds.
+		otherID = "0a0b0c0d-1e1f-4a4b-8c8d-9e9f0a0b0c0d"
+		// unnamed is HTTP's refusal where keploy cannot name the source,
+		// with the leaf's reason after it, which says so.
+		unnamed = path + " carries a value keploy cannot name a source of: its recorded value stands whole in mock-60"
+	)
+	for _, c := range []struct {
+		name, gave string
+		previous   bool
+		want       string
+		not        []string
+	}{
+		{"an older test's serve gave it", liveID, false, path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in an older test than the call's", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot name"}},
+		{"no older test's serve gave it", otherID, false, unnamed, []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot bind", "late call", "mock-22"}},
+		{"the previous test's serve gave it", liveID, true, path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in the test record's full round ran just before the call's", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot name", "an older test"}},
+		{"the previous test's serve gave another id", otherID, true, unnamed, []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot bind", "late call", "mock-22"}},
+	} {
+		t.Run(c.name, func(t *testing.T) { lateCallRefusal(t, path, recID, liveID, c.gave, c.previous, c.want, c.not) })
+	}
+}
+
+// lateCallRefusal is the refusal HTTP gives a call of test 4 that carries
+// liveID where its recording holds recID, which mock-60, served as recorded
+// in the call's own test, holds, where a serve of test 2 (mock-22; of test
+// 3, the test F ran just before the call's, where previous) gave the
+// application the id gave: it starts want, says none of not, and refuses
+// the call.
+func lateCallRefusal(t *testing.T, path, recID, liveID, gave string, previous bool, want string, not []string) {
+	t.Helper()
+	servedIn := 2
+	if previous {
+		servedIn = 3
+	}
+	lateCallRefusalIn(t, path, recID, liveID, gave, 4, servedIn, want, not)
+}
+
+// A test the replay skips (a selection, an ignored test) is never begun,
+// and a streaming test is run after the rest, so the order F ran its tests
+// in is no test case's number. The refusal names the serve by its
+// recording and says whether its test is the one F ran just before the
+// call's, by the order F ran them in; it never names a test by a number.
+func TestALateCallsRefusalNamesNoTestByTheOrderTheReplayRanThem(t *testing.T) {
+	const (
+		path   = "rows.0.0"
+		recID  = "evt-8Q2KX7MZ4PRDH5TB"
+		liveID = "evt-3N9WB5TJ6HCAQ8MV"
+		older  = path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in an older test than the call's"
+		prev   = path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in the test record's full round ran just before the call's"
+	)
+	for _, c := range []struct {
+		name           string
+		runs, servedIn int
+		want           string
+	}{
+		// Test cases 1 to 4, test 2 left out: F runs 1, 3, 4. mock-22,
+		// served in test case 3, is of the test F ran just before the
+		// call's (test case 4).
+		{"test case 3's serve, test case 2 left out", 3, 2, prev},
+		// Test case 2 streams, so F runs 1, 3, 4, then 2, where the call
+		// is. Test case 1 is the case before the call's, but F ran two
+		// tests between them.
+		{"test case 1's serve, the call in test case 2 run last", 4, 1, older},
+		// The same order: test case 4, whose number is after the call's,
+		// is the test F ran just before it.
+		{"test case 4's serve, the call in test case 2 run last", 4, 3, prev},
+	} {
+		t.Run(c.name, func(t *testing.T) { lateCallRefusalIn(t, path, recID, liveID, liveID, c.runs, c.servedIn, c.want, nil) })
+	}
+}
+
+// lateCallRefusalIn runs a late call in the window of the runs-th test F
+// begins in the set, which carries liveID; mock-22, served as recorded in
+// the servedIn-th, gave the application gave, and is read as HTTP reads a
+// recording of another recorded test's window F served earlier in the set
+// (GivenPlaces), whichever test F served it in. The refusal starts with
+// want, says keploy cannot name the value's source where want does, says
+// none of not, names no test by a number, and refuses the call.
+func lateCallRefusalIn(t *testing.T, path, recID, liveID, gave string, runs, servedIn int, want string, not []string) {
+	t.Helper()
+	at := time.Date(2026, 10, 24, 9, 55, 53, 938177550, time.UTC)
+	pg := func(name string, before time.Duration, id string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: at.Add(-before),
+			ResTimestampMock: at.Add(-before + time.Millisecond),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+				SQLNormalized: "SELECT id FROM lead_events",
+				Response:      &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: id}}}, CommandComplete: "SELECT 1"},
+			}},
+		}}
+	}
+	older := pg("mock-22", 40*time.Second, gave)
+	tr := learn.NewTracker()
+	tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real, true })
+	tr.NewSet()
+	for run := 1; run < runs; run++ {
+		tr.Begin()
+		if run == servedIn {
+			tr.ServedMock(older)
+			tr.ServedMockAsRecorded(older)
+		}
+		tr.End()
+	}
+	tr.Begin()
+	o := tr.Placed().Order
+	given := func() ([]learn.GivenPlaces, error) {
+		g, err := o.GivenPlaces(older)
+		return []learn.GivenPlaces{g}, err
+	}
+	window := learn.RawOf(pg("mock-60", 200*time.Millisecond, recID), false).ServedAs(9).ServedAsRecorded()
+	rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: recID}}}
+	live := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: liveID}}}
+	learned := learn.ClassifyGiven(tr.Drifts(), []string{path}, live, rec, at, nil, []learn.Raw{window}, nil, nil, given)
+	p, why := learnPlan(tr, uint64(runs), &models.Mock{Name: "mock-61"}, rec, true, learned, nil, nil)
+	if !strings.HasPrefix(why, want) {
+		t.Errorf("why %q; want it to start %q", why, want)
+	}
+	const cannot = "keploy cannot name where the value the call carries now came from"
+	if strings.Contains(want, "cannot name a source") && !strings.Contains(why, cannot) {
+		t.Errorf("why %q; want it to say %q", why, cannot)
+	}
+	for _, n := range not {
+		if strings.Contains(why, n) {
+			t.Errorf("why %q says %q", why, n)
+		}
+	}
+	if n := regexp.MustCompile(`\btests? \d`).FindString(why); n != "" {
+		t.Errorf("why %q names a test by a number (%q)", why, n)
+	}
+	if len(p.noise) != 0 || len(p.vars) != 0 {
+		t.Errorf("noise %v, variables %v; want the call refused", p.noise, p.vars)
 	}
 }

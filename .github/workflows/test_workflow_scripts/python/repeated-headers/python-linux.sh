@@ -61,12 +61,19 @@
 # reads it and serves the mock as HTTP. Without it the replay took 4000 for
 # MySQL by its port and greeted the app, and /login failed.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
 set +e
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock-kinds.sh"
 
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
 APP_PORT=8000
@@ -103,7 +110,7 @@ cd "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/repeated-he
 wait_for_port() {
     local port=$1 what=$2
     for i in $(seq 1 30); do
-        if ss -tln | awk '{print $4}' | grep -q ":${port}$"; then
+        if ss -tln | awk '{print $4}' | grep ":${port}$" >/dev/null; then
             echo "$what listening after ${i}s"
             return 0
         fi
@@ -218,7 +225,7 @@ KEPLOY_CFG
         sudo pkill -INT keploy 2>/dev/null || true
     ) > "driver_logs_${format}.txt" 2>&1 &
     local driver_pid=$!
-    sudo -E "${pin[@]}" env PATH="$PATH" "$RECORD_BIN" record --sync \
+    sudo "${pin[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record --sync \
         -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" \
         --generateGithubActions=false > "record_logs_${format}.txt" 2>&1
     local record_status=$?
@@ -232,13 +239,18 @@ KEPLOY_CFG
         tail -100 "record_logs_${format}.txt"
         return 1
     fi
-    local logins mocks mapped
+    local logins mocks mocks_rc mapped
     logins=$(grep -l "url: http://127.0.0.1:${APP_PORT}/login" keploy/test-set-0/tests/*.yaml 2>/dev/null | wc -l)
-    mocks=$(grep -c '^kind:' keploy/test-set-0/mocks.yaml 2>/dev/null)
+    # One Http mock a /login call: its upstream call. DNS mocks besides them
+    # are the runner's, not the app's calls: app.py's HTTPServer looks up the
+    # host's own name at start, which reaches DNS on a runner whose
+    # /etc/hosts lacks it (mock-kinds.sh).
+    mocks=$(http_mocks_are keploy/test-set-0/mocks.yaml "$n")
+    mocks_rc=$?
     mapped=$(grep -cE '^[[:space:]]*- id: test-' keploy/test-set-0/mappings.yaml 2>/dev/null)
-    echo "busy --sync recording: $logins /login test cases, $mocks mocks, $mapped tests mapped, of $n calls"
-    if [ "$logins" -ne "$n" ] || [ "$mocks" -ne "$n" ] || [ "$mapped" -ne "$n" ]; then
-        echo "::error::a busy --sync recording lost test cases, mocks or mappings: $logins test cases, $mocks mocks, $mapped mapped, of $n calls ($format)"
+    echo "busy --sync recording: $logins /login test cases, $mapped tests mapped, of $n calls; $mocks"
+    if [ "$logins" -ne "$n" ] || [ "$mocks_rc" -ne 0 ] || [ "$mapped" -ne "$n" ]; then
+        echo "::error::a busy --sync recording lost test cases, mocks or mappings: $logins test cases, $mapped mapped, of $n calls; $mocks, want $n Http and no kind but Http and DNS ($format)"
         tail -60 "record_logs_${format}.txt"
         return 1
     fi
@@ -252,7 +264,7 @@ run_format() {
     # the lagging run recorded with --sync (each test's mapping), "proven"
     # for a normal run recorded and replayed under KEPLOY_PROVEN=1, "vhost"
     # for a normal run whose app sends its upstream a Host with no port.
-    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo -E) stop_copy="" sync_flag=() lagging="" proven_env=() upstream_host=""
+    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo) stop_copy="" sync_flag=() lagging="" proven_env=() upstream_host=""
     [ "$format" = json ] && fmt_flag=(--storage-format json)
     [ "$mode" = sync_lag ] && sync_flag=(--sync)
     if [ "$mode" = lag ] || [ "$mode" = sudo_lag ] || [ "$mode" = sync_lag ]; then
@@ -295,7 +307,7 @@ KEPLOY_CFG
 
     STOP_AFTER=$stop_after STOP_COPY=$stop_copy drive_requests > "driver_logs_${format}.txt" 2>&1 &
     local driver_pid=$!
-    "${as_root[@]}" env PATH="$PATH" "${lag_env[@]}" "${proven_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" "${sync_flag[@]}" \
+    "${as_root[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "${lag_env[@]}" "${proven_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" "${sync_flag[@]}" \
         -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT} ${upstream_host}" \
         --generateGithubActions=false > "record_logs_${format}.txt" 2>&1
     local record_status=$?
@@ -416,7 +428,7 @@ KEPLOY_CFG
         grep -hoE 'destAddr: .*' keploy/test-set-0/mocks.* | sort | uniq -c
     fi
 
-    sudo -E env PATH="$PATH" "${proven_env[@]}" "$REPLAY_BIN" test "${fmt_flag[@]}" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "${proven_env[@]}" "$REPLAY_BIN" test "${fmt_flag[@]}" \
         -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT} ${upstream_host}" --delay 5 \
         --generateGithubActions=false > "test_logs_${format}.txt" 2>&1
     echo "test exit status: $?"

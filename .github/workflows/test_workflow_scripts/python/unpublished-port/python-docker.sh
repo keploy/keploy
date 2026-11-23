@@ -42,6 +42,12 @@
 #           gate waited for the app's answer before any test went; the probe
 #           did not time out; every 8095 test passes.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
 set +e
@@ -77,7 +83,7 @@ drive_requests() {
     local port=${1:-8095}
     local up=0
     for _ in $(seq 1 90); do
-        if docker logs "$NAME" 2>&1 | grep -q 'self-check passed'; then
+        if docker logs "$NAME" 2>&1 | grep 'self-check passed' >/dev/null; then
             up=1
             break
         fi
@@ -105,7 +111,7 @@ drive_requests() {
 echo "=== record ==="
 drive_requests > driver_logs.txt 2>&1 &
 driver_pid=$!
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$RUN_CMD" --container-name "$NAME" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$RUN_CMD" --container-name "$NAME" \
     --generateGithubActions=false --disable-ansi > record_logs.txt 2>&1
 echo "record exit status: $?"
 if ! wait "$driver_pid"; then
@@ -123,12 +129,12 @@ if [ "$(grep -c "$warn" record_logs.txt)" -ne 1 ]; then
     echo "::error::want exactly one record-time warning for port 8096, got $(grep -c "$warn" record_logs.txt)"
     fail=1
 fi
-if ! grep "$warn" record_logs.txt | grep -q -- 'Publish it: add -p 8096:8096 to the docker command'; then
+if ! grep "$warn" record_logs.txt | grep -- 'Publish it: add -p 8096:8096 to the docker command' >/dev/null; then
     echo "::error::the record-time warning does not give the fix (-p 8096:8096)"
     fail=1
 fi
 # The agent saw the app listen on 0.0.0.0:8096, so publishing is the whole fix.
-if grep "$warn" record_logs.txt | grep -q 'does not reach a socket on 127.0.0.1'; then
+if grep "$warn" record_logs.txt | grep 'does not reach a socket on 127.0.0.1' >/dev/null; then
     echo "::error::the 8096 warning could not tell where the app listens"
     fail=1
 fi
@@ -137,11 +143,11 @@ if [ "$(grep -c "$warn97" record_logs.txt)" -ne 1 ]; then
     echo "::error::want exactly one record-time warning for the loopback-only port 8097, got $(grep -c "$warn97" record_logs.txt)"
     fail=1
 fi
-if ! grep "$warn97" record_logs.txt | grep -q 'the app listens on port 8097 only on 127.0.0.1 inside the container'; then
+if ! grep "$warn97" record_logs.txt | grep 'the app listens on port 8097 only on 127.0.0.1 inside the container' >/dev/null; then
     echo "::error::the 8097 warning does not say the app listens only on 127.0.0.1"
     fail=1
 fi
-if grep "$warn97" record_logs.txt | grep -q 'Publish it'; then
+if grep "$warn97" record_logs.txt | grep 'Publish it' >/dev/null; then
     echo "::error::the 8097 warning advises publishing a port that is published and still unreachable"
     fail=1
 fi
@@ -158,7 +164,7 @@ fi
 
 echo "=== replay ==="
 start=$(date +%s)
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$RUN_CMD" --container-name "$NAME" --delay 10 \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "$RUN_CMD" --container-name "$NAME" --delay 10 \
     --generateGithubActions=false --disable-ansi > test_logs.txt 2>&1
 echo "test exit status: $? after $(( $(date +%s) - start ))s"
 
@@ -200,7 +206,7 @@ for id in $failed_ids; do
         fail=1
     fi
     # Not re-sent: a reset there comes back on every try.
-    if grep "re-sending" test_logs.txt | grep -qF "\"testCaseID\": \"$id\""; then
+    if grep "re-sending" test_logs.txt | grep -F "\"testCaseID\": \"$id\"" >/dev/null; then
         echo "::error::test $id on the unreachable $port was re-sent"
         fail=1
     fi
@@ -213,7 +219,7 @@ for id in $passed_ids; do
     fi
 done
 for port in 8096 8097; do
-    if ! echo "$failed_ports" | grep -qw "$port"; then
+    if ! echo "$failed_ports" | grep -w "$port" >/dev/null; then
         echo "::error::no test on port $port failed; want tests on 8095 passing and on 8096 and 8097 failing"
         fail=1
     fi
@@ -237,7 +243,7 @@ REMAP_RECORD_CMD="docker run -p 18095:8095 --rm --name $NAME $IMAGE"
 REMAP_TEST_CMD="docker run -p 18095:8095 -e PUBLIC_START_DELAY=25 --rm --name $NAME $IMAGE"
 drive_requests 18095 > remap_driver_logs.txt 2>&1 &
 driver_pid=$!
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$REMAP_RECORD_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$REMAP_RECORD_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
     --generateGithubActions=false --disable-ansi > remap_record_logs.txt 2>&1
 echo "record exit status: $?"
 if ! wait "$driver_pid"; then
@@ -264,7 +270,7 @@ remap_replay() {
     echo "=== remapped port: replay $*, the app serving 25s after it starts ==="
     sudo rm -rf "$REMAP_DIR/keploy/reports"
     start=$(date +%s)
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$REMAP_TEST_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "$REMAP_TEST_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
         --delay 5 "$@" --generateGithubActions=false --disable-ansi > "$log" 2>&1
     echo "test exit status: $? after $(( $(date +%s) - start ))s"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -281,7 +287,7 @@ remap_replay() {
     # at all. The probe is an OPTIONS, so a router answers it without running
     # a GET handler; this app has no do_OPTIONS, so http.server answers it 501.
     first95=$(grep -m1 -F '[app:8095] "' "$log")
-    if ! printf '%s\n' "$first95" | grep -qF '"OPTIONS /keploy/__readiness_probe__ '; then
+    if ! printf '%s\n' "$first95" | grep -F '"OPTIONS /keploy/__readiness_probe__ ' >/dev/null; then
         echo "::error::$name: the first request the app served on 8095 was not the readiness gate's HTTP probe: ${first95:-it served none}"
         fail=1
     fi

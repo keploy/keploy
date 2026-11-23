@@ -14,7 +14,21 @@
 #       local issuer certificate") — this is the bug we are fixing: trusting
 #       ONLY the Keploy MITM CA breaks non-proxied HTTPS.
 #
-# Both probes use `--cacert` (not REQUESTS_CA_BUNDLE) because that's what the
+# And for the trust-store sources other than the image's CA bundle (see the
+# corp-* and ca-writer-* services in docker-compose.yml):
+#   [C] no CA bundle in the writer (/etc/ssl/certs an empty volume): its merged
+#       bundle still verifies AWS STS (keploy's built-in Mozilla roots), and the
+#       writer logs nothing at WARN or above and no advice to install a CA
+#       package.
+#   [D] SSL_CERT_DIR naming a corporate CA, no CA bundle: the merged bundle
+#       verifies both the corporate server and AWS STS.
+#   [E] SSL_CERT_FILE naming a corporate CA: the merged bundle verifies the
+#       corporate server.
+#   [F] control: the plain and the no-bundle writers' merged bundles do NOT
+#       verify the corporate server (curl exit 60), so [D] and [E] pass because
+#       of the variables.
+#
+# All probes use `--cacert` (not REQUESTS_CA_BUNDLE) because that's what the
 # actual shared-volume webhook wiring ends up setting at the app runtime:
 # REQUESTS_CA_BUNDLE/SSL_CERT_FILE point at `/tmp/keploy-tls/ca.crt`, curl's
 # `--cacert` is the equivalent override. Using `--cacert` here avoids a stray
@@ -61,8 +75,15 @@ docker_pull_retry "${DEBIAN_IMAGE}"
 echo "=== building the harness image ==="
 docker_build_retry "${DC[@]}" build
 
-echo "=== bringing up ca-writer + tls-probe ==="
-"${DC[@]}" up -d
+echo "=== bringing up the writers, the corporate server and tls-probe ==="
+# tls-probe waits for every writer to complete successfully, so `up` itself
+# fails when one does not; print the logs before the EXIT trap removes the
+# containers with them.
+if ! "${DC[@]}" up -d; then
+    echo "[ASSERT][FAIL] docker compose up failed; service logs follow"
+    "${DC[@]}" logs --no-color || true
+    exit 1
+fi
 # Wait for the writer to finish. depends_on: service_completed_successfully on
 # the probe gates on newer compose, but older docker-compose versions (which
 # this script explicitly supports via the DC fallback above) ignore that
@@ -80,41 +101,49 @@ echo "=== bringing up ca-writer + tls-probe ==="
 # We MUST fail the script if the writer has not reached an exited state
 # within the timeout — falling through and running probes against a
 # still-writing shared volume would produce confusing race failures.
-echo "=== waiting for ca-writer to finish writing ==="
-writer_container_id=""
-writer_exit_code=""
-writer_done=0
-for _ in $(seq 1 60); do
-    # `-a` includes stopped/exited containers; omitting it would drop the
-    # writer from output the instant it finishes (seen on GHA where the
-    # writer exits in <1s) and cause a spurious 60s timeout.
-    writer_container_id=$("${DC[@]}" ps -aq ca-writer 2>/dev/null || true)
-    if [ -n "${writer_container_id}" ]; then
-        state=$(docker inspect -f '{{.State.Status}}' "${writer_container_id}" 2>/dev/null || true)
-        if [ "${state}" = "exited" ]; then
-            writer_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "${writer_container_id}" 2>/dev/null || echo "?")
-            writer_done=1
-            break
+# wait_for_writer waits for one writer service to exit, failing the script
+# unless it exited 0. Prints the container ID.
+wait_for_writer() {
+    local service="$1" container_id="" exit_code="" done_=0 state
+    for _ in $(seq 1 60); do
+        # `-a` includes stopped/exited containers; omitting it would drop the
+        # writer from output the instant it finishes (seen on GHA where the
+        # writer exits in <1s) and cause a spurious 60s timeout.
+        container_id=$("${DC[@]}" ps -aq "${service}" 2>/dev/null || true)
+        if [ -n "${container_id}" ]; then
+            state=$(docker inspect -f '{{.State.Status}}' "${container_id}" 2>/dev/null || true)
+            if [ "${state}" = "exited" ]; then
+                exit_code=$(docker inspect -f '{{.State.ExitCode}}' "${container_id}" 2>/dev/null || echo "?")
+                done_=1
+                break
+            fi
         fi
+        sleep 1
+    done
+    if [ "${done_}" -ne 1 ]; then
+        echo "[ASSERT][FAIL] ${service} did not reach 'exited' state within 60s" >&2
+        if [ -n "${container_id}" ]; then
+            echo "--- ${service} last state ---" >&2
+            docker inspect -f '{{.State.Status}} exitCode={{.State.ExitCode}} error={{.State.Error}}' "${container_id}" >&2 || true
+            echo "--- ${service} logs (tail) ---" >&2
+            docker logs --tail 200 "${container_id}" >&2 || true
+        fi
+        exit 1
     fi
-    sleep 1
-done
-if [ "${writer_done}" -ne 1 ]; then
-    echo "[ASSERT][FAIL] ca-writer did not reach 'exited' state within 60s"
-    if [ -n "${writer_container_id}" ]; then
-        echo "--- ca-writer last state ---"
-        docker inspect -f '{{.State.Status}} exitCode={{.State.ExitCode}} error={{.State.Error}}' "${writer_container_id}" || true
-        echo "--- ca-writer logs (tail) ---"
-        docker logs --tail 200 "${writer_container_id}" || true
+    if [ "${exit_code}" != "0" ]; then
+        echo "[ASSERT][FAIL] ${service} exited with non-zero status: ${exit_code}" >&2
+        docker logs --tail 200 "${container_id}" >&2 || true
+        exit 1
     fi
-    exit 1
-fi
-if [ "${writer_exit_code}" != "0" ]; then
-    echo "[ASSERT][FAIL] ca-writer exited with non-zero status: ${writer_exit_code}"
-    docker logs --tail 200 "${writer_container_id}" || true
-    exit 1
-fi
-echo "ca-writer exited cleanly (exit=${writer_exit_code})"
+    echo "${service} exited cleanly (exit=${exit_code})" >&2
+    echo "${container_id}"
+}
+
+echo "=== waiting for the writers to finish writing ==="
+wait_for_writer ca-writer >/dev/null
+nobundle_container_id=$(wait_for_writer ca-writer-nobundle)
+wait_for_writer ca-writer-certdir >/dev/null
+wait_for_writer ca-writer-certfile >/dev/null
 
 echo "=== verifying files on the shared volume ==="
 "${DC[@]}" exec -T tls-probe ls -la /shared
@@ -128,6 +157,71 @@ if [ "${CA_MERGED}" -le "${CA_KEPLOY}" ]; then
     exit 1
 fi
 
+FAIL=0
+
+echo ""
+echo "=== [C] no CA bundle: the writer's log ==="
+nobundle_log=$(docker logs "${nobundle_container_id}" 2>&1)
+grep -E 'Merged system CA bundle' <<<"${nobundle_log}" || true
+if ! grep -q 'embedded:mozilla-roots.pem' <<<"${nobundle_log}"; then
+    echo "[ASSERT][FAIL] the no-bundle writer did not use keploy's built-in Mozilla roots"
+    FAIL=1
+elif grep -E $'\t(WARN|ERROR|DPANIC|PANIC|FATAL)\t' <<<"${nobundle_log}"; then
+    echo "[ASSERT][FAIL] the no-bundle writer logged at WARN or above (the built-in roots are the normal path)"
+    FAIL=1
+elif grep -E 'apt-get|apk add|install .ca-certificates.' <<<"${nobundle_log}"; then
+    echo "[ASSERT][FAIL] the no-bundle writer told the operator to install a CA package"
+    FAIL=1
+else
+    echo "[ASSERT][PASS] the no-bundle writer used the built-in roots quietly"
+fi
+
+# corp_probe BUNDLE: curl the corporate server trusting only BUNDLE; prints
+# curl's exit code. The server is local, so no egress is needed.
+corp_probe() {
+    local rc
+    set +e
+    "${DC[@]}" exec -T tls-probe \
+        curl -sS --max-time 10 --retry 5 --retry-connrefused --retry-delay 1 \
+            --capath /nonexistent --cacert "$1" \
+            -o /dev/null https://corp-server:8443/ >&2
+    rc=$?
+    set -e
+    echo "${rc}"
+}
+
+echo ""
+echo "=== [D] [E] [F] the corporate server ==="
+CERTDIR_CORP_RC=$(corp_probe /shared-certdir/ca.crt)
+CERTFILE_CORP_RC=$(corp_probe /shared-certfile/ca.crt)
+PLAIN_CORP_RC=$(corp_probe /shared/ca.crt)
+NOBUNDLE_CORP_RC=$(corp_probe /shared-nobundle/ca.crt)
+CORP_FAIL=0
+# Exit codes are compared as strings, so an empty or odd capture fails closed.
+if [ "${CERTDIR_CORP_RC}" != 0 ]; then
+    echo "[ASSERT][FAIL] SSL_CERT_DIR's corporate CA is not in the merged bundle: curl rc=${CERTDIR_CORP_RC}"
+    CORP_FAIL=1
+else
+    echo "[ASSERT][PASS] SSL_CERT_DIR's corporate CA is in the merged bundle"
+fi
+if [ "${CERTFILE_CORP_RC}" != 0 ]; then
+    echo "[ASSERT][FAIL] SSL_CERT_FILE's corporate CA is not in the merged bundle: curl rc=${CERTFILE_CORP_RC}"
+    CORP_FAIL=1
+else
+    echo "[ASSERT][PASS] SSL_CERT_FILE's corporate CA is in the merged bundle"
+fi
+if [ "${PLAIN_CORP_RC}" != 60 ] || [ "${NOBUNDLE_CORP_RC}" != 60 ]; then
+    echo "[ASSERT][FAIL] control: a bundle without the corporate CA did not fail with curl exit 60 (plain rc=${PLAIN_CORP_RC}, no-bundle rc=${NOBUNDLE_CORP_RC})"
+    CORP_FAIL=1
+else
+    echo "[ASSERT][PASS] control: the plain and no-bundle merged bundles do not trust the corporate CA (curl exit 60)"
+fi
+if [ "${CORP_FAIL}" != 0 ]; then
+    FAIL=1
+    echo "--- corp-server logs ---"
+    "${DC[@]}" logs --no-color corp-server || true
+fi
+
 # Let callers skip both probes when there's no AWS STS egress on the
 # runner (restricted build farm, offline developer laptops). In that
 # mode we still run the byte-size assertion above — which is what
@@ -135,8 +229,12 @@ fi
 if [ "${SKIP_EGRESS_PROBE:-0}" = "1" ]; then
     echo ""
     echo "=== SKIP_EGRESS_PROBE=1 — skipping AWS STS egress probes ==="
-    echo "[ASSERT][SKIP] merged / keploy-only bundle probes skipped"
+    echo "[ASSERT][SKIP] the AWS STS probes ([A] [B] [C] [D]) skipped"
     echo ""
+    if [ "${FAIL}" -ne 0 ]; then
+        echo "[RESULT] FAIL"
+        exit 1
+    fi
     echo "[RESULT] PASS"
     exit 0
 fi
@@ -186,9 +284,36 @@ KEPLOY_RC=$?
 set -e
 cat /tmp/keploy-only.out
 
+# sts_probe BUNDLE: curl AWS STS trusting only BUNDLE; prints "rc http".
+sts_probe() {
+    local out rc
+    set +e
+    out=$("${DC[@]}" exec -T tls-probe \
+        curl -sS --max-time 20 "${CURL_RETRY[@]}" \
+            --capath /nonexistent --cacert "$1" \
+            -o /dev/null -w "%{http_code}" \
+            https://sts.us-east-1.amazonaws.com/)
+    rc=$?
+    set -e
+    echo "${rc} ${out}"
+}
+
+echo ""
+echo "=== [C] [D] AWS STS with the no-bundle and SSL_CERT_DIR bundles ==="
+read -r NOBUNDLE_RC NOBUNDLE_HTTP <<<"$(sts_probe /shared-nobundle/ca.crt)"
+read -r CERTDIR_RC CERTDIR_HTTP <<<"$(sts_probe /shared-certdir/ca.crt)"
+
 echo ""
 echo "=== assertions ==="
-FAIL=0
+for probe in "no-bundle:${NOBUNDLE_RC}:${NOBUNDLE_HTTP}" "SSL_CERT_DIR:${CERTDIR_RC}:${CERTDIR_HTTP}"; do
+    IFS=: read -r name rc http <<<"${probe}"
+    if [ "${rc}" != 0 ] || ! [[ "${http}" =~ ^(200|301|302|400|403)$ ]]; then
+        echo "[ASSERT][FAIL] ${name} merged bundle did not verify AWS STS: rc=${rc} http=${http}"
+        FAIL=1
+    else
+        echo "[ASSERT][PASS] ${name} merged bundle verified AWS STS: rc=${rc} http=${http}"
+    fi
+done
 if [ "${MERGED_RC}" -ne 0 ] || ! [[ "${MERGED_HTTP}" =~ ^(200|301|302|400|403)$ ]]; then
     echo "[ASSERT][FAIL] merged bundle did not succeed: rc=${MERGED_RC} http=${MERGED_HTTP}"
     FAIL=1

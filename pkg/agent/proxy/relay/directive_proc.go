@@ -1146,14 +1146,14 @@ func publishRealCertFromUpgraded(r *Relay, upgraded net.Conn, log *zap.Logger) {
 	}
 	r.cfg.RealCertHook(strconv.Itoa(tcpAddr.Port), leaf.Raw, leaf.SignatureAlgorithm)
 	if log != nil {
-		// Gated under log.Check so leaf.Subject.String() (an x509
-		// pkix.Name format/escape walk) doesn't run on every TLS
-		// upgrade when debug is off. Fires per UpgradeTLS directive,
-		// so the cost is non-trivial under load.
+		// The leaf by its size and signature algorithm, never its
+		// subject: the upstream's certificate names the host the
+		// application called (its CN) and the organisation behind it.
 		if ce := log.Check(zap.DebugLevel, "relay: RealCertHook fired"); ce != nil {
 			ce.Write(
 				zap.String("conn_id", strconv.Itoa(tcpAddr.Port)),
-				zap.String("subject", leaf.Subject.String()),
+				zap.Int("leaf_bytes", len(leaf.Raw)),
+				zap.String("signature_algorithm", leaf.SignatureAlgorithm.String()),
 			)
 		}
 	}

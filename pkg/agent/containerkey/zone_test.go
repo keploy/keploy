@@ -10,7 +10,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // zoneFile is one file of a fakeZoneAPI container: a link (link set), a
@@ -26,6 +30,10 @@ type zoneFile struct {
 	data []byte
 	link string
 	dir  bool
+	// hardlink is the path of the file this one is a hard link of: its
+	// own archive gives its bytes, a directory's archive an entry naming
+	// that file (tar.TypeLink), as Docker's does.
+	hardlink string
 }
 
 // fakeZoneAPI is Docker's API over one container's files (files, by path),
@@ -55,6 +63,11 @@ type fakeZoneAPI struct {
 	// rawRead how many of its bytes keploy read.
 	raw     map[string][]byte
 	rawRead map[string]*int
+	// mounts is what Docker's inspect lists of the container's mounts,
+	// and dirCopies how many archives of its zoneinfo directory keploy
+	// asked for.
+	mounts    []container.MountPoint
+	dirCopies int
 }
 
 // countedReader counts in *n the bytes read from r.
@@ -76,7 +89,7 @@ func (f *fakeZoneAPI) ContainerInspect(context.Context, string) (container.Inspe
 	if f.inspects++; f.vanish {
 		f.gone = true
 	}
-	return container.InspectResponse{Config: &container.Config{Env: f.env, Entrypoint: f.entrypoint, Cmd: f.cmd}}, nil
+	return container.InspectResponse{Config: &container.Config{Env: f.env, Entrypoint: f.entrypoint, Cmd: f.cmd}, Mounts: f.mounts}, nil
 }
 
 // file is the file at p, a directory where p holds others.
@@ -122,6 +135,52 @@ func (f *fakeZoneAPI) ContainerStatPath(_ context.Context, _, p string) (contain
 	return container.PathStat{Name: p, Mode: z.mode(), Size: int64(len(z.data))}, nil
 }
 
+// dirArchive is the archive Docker gives of the directory dir: its own
+// entry, then each file and link below it, named from dir's last name.
+func (f *fakeZoneAPI) dirArchive(dir string) io.Reader {
+	var buf bytes.Buffer
+	w := tar.NewWriter(&buf)
+	base := path.Base(dir)
+	if err := w.WriteHeader(&tar.Header{Name: base + "/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		f.t.Fatal(err)
+	}
+	var names []string
+	for p := range f.files {
+		if strings.HasPrefix(p, dir+"/") {
+			names = append(names, p)
+		}
+	}
+	sort.Strings(names)
+	for _, p := range names {
+		z := f.files[p]
+		hdr := &tar.Header{Name: base + "/" + strings.TrimPrefix(p, dir+"/"), Mode: int64(z.mode().Perm())}
+		switch {
+		case z.hardlink != "":
+			hdr.Typeflag, hdr.Linkname = tar.TypeLink, base+"/"+strings.TrimPrefix(z.hardlink, dir+"/")
+			if err := w.WriteHeader(hdr); err != nil {
+				f.t.Fatal(err)
+			}
+			continue
+		case z.link != "":
+			hdr.Typeflag, hdr.Linkname = tar.TypeSymlink, z.link
+		case z.dir:
+			hdr.Typeflag = tar.TypeDir
+		default:
+			hdr.Typeflag, hdr.Size = tar.TypeReg, int64(len(z.data))
+		}
+		if err := w.WriteHeader(hdr); err != nil {
+			f.t.Fatal(err)
+		}
+		if _, err := w.Write(z.data); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		f.t.Fatal(err)
+	}
+	return &buf
+}
+
 func (f *fakeZoneAPI) CopyFromContainer(_ context.Context, _, p string) (io.ReadCloser, container.PathStat, error) {
 	z, err := f.file(p)
 	if err != nil {
@@ -129,6 +188,12 @@ func (f *fakeZoneAPI) CopyFromContainer(_ context.Context, _, p string) (io.Read
 	}
 	if s, ok := f.swapped[p]; ok {
 		z = s
+	}
+	if z.dir && p == "/usr/share/zoneinfo" {
+		// The zoneinfo directory alone, read whole for a copy of
+		// another zone's file (SameZoneFiles).
+		f.dirCopies++
+		return io.NopCloser(f.dirArchive(p)), container.PathStat{Name: p, Mode: z.mode()}, nil
 	}
 	if z.dir {
 		f.t.Errorf("keploy asked Docker for an archive of the directory %s, which holds all its files", p)
@@ -317,7 +382,7 @@ func zoneOfApp(t *testing.T, api zoneAPI) (learn.ProcZone, error) {
 	if err := json.Unmarshal(b, &took); err != nil {
 		return learn.ProcZone{}, err
 	}
-	agent, err := learn.ZoneOfFile(took.Name, took.Data)
+	agent, err := learn.ZoneOfFile(took.Name, learn.ZoneFile{Data: took.Data, Source: took.Source})
 	if err != nil {
 		return learn.ProcZone{}, fmt.Errorf("the agent cannot take the zone %v containerZone read: %w", z.Loc, err)
 	}
@@ -488,4 +553,229 @@ func TestAContainersArchiveIsReadAsTheOneFileAsked(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `holds "../../../../tmp/x" too`) {
 		t.Fatalf("a zone file whose archive holds a second entry read as %v (%v); want unknown, saying why", z.Loc, err)
 	}
+}
+
+// learnZone is learn's testdata zone file of name of IANA's tzdata release
+// rel, copied from Go's zoneinfo.zip of that release (Go 1.17.13's for
+// 2021a, Go 1.23.12's for 2024a, Go 1.27.3's for 2026c). Africa/Casablanca
+// of 2024a and of 2026c read UTC+01:00 and UTC+00:00 from 2026-09-20 on.
+func learnZone(t *testing.T, rel, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "matcher", "learn", "testdata", "zoneinfo-"+rel, filepath.FromSlash(name)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A container's zone file is its zone's where a release of IANA's zone
+// data reads its offsets so, whatever release the keploy CLI's own zone
+// data is, and so is the agent's reading of the bytes the CLI hands it: an
+// image's own Africa/Casablanca of the other release, linked or named by
+// TZ; one in a host's zoneinfo directory mounted over the image's; the
+// host's /etc/localtime, the other release's Africa/Casablanca, over the
+// image's own; the host's /etc/localtime, the CLI's own Europe/Berlin, over
+// the image's; a host's Asia/Calcutta (Asia/Kolkata's link) over the
+// image's link to Asia/Kolkata; tzdata 2026c's WET, a hard link of its
+// Europe/Lisbon, read by a CLI of 2024a's data. Another zone's file at a
+// zone's path is unknown however it got there and whatever its bytes are of
+// (the CLI reads the file's content, never the container's mounts): a
+// Dockerfile's COPY of a file of Asia/Kolkata (Go's slim one, the image's
+// own fat one elsewhere) or docker cp writing through the image's link to
+// Europe/Berlin; tzdata 2024a's America/Phoenix over America/Denver; a copy
+// of the image's own Africa/Casablanca, or of the other release's, written
+// through its link to Europe/Berlin; Europe/Berlin made a hard link of the
+// image's Asia/Kolkata; a host's file of another zone mounted over the link,
+// from a zoneinfo directory or from a path that names no zone (the host's
+// /etc/localtime); TZ=Europe/Berlin naming such a file. The refusal names
+// the zone a release reads the file's offsets as, and never the host's
+// path a mount reads it from. Each runs in a child process whose own zone
+// data ($ZONEINFO) holds learn's testdata files of one release.
+func TestAContainersZoneFileIsItsZonesWhereAReleaseReadsItSo(t *testing.T) {
+	const run = "TestAContainersZoneFileIsItsZonesWhereAReleaseReadsItSo"
+	own := os.Getenv("KEPLOY_TEST_ZONE_RELEASE")
+	if own == "" {
+		for _, rel := range []string{"2026c", "2024a"} {
+			dir, err := filepath.Abs(filepath.Join("..", "..", "matcher", "learn", "testdata", "zoneinfo-"+rel))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+run+"$", "-test.count=1", "-test.v")
+			cmd.Env = append(os.Environ(), "KEPLOY_TEST_ZONE_RELEASE="+rel, "ZONEINFO="+dir)
+			out, err := cmd.CombinedOutput()
+			cancel()
+			if err != nil || !bytes.Contains(out, []byte("--- PASS: "+run)) {
+				t.Errorf("the CLI's own zone data of tzdata %s: %v\n%s", rel, err, out)
+			}
+		}
+		return
+	}
+	rel := map[string]string{"2026c": "2024a", "2024a": "2026c"}[own]
+	other, ours := learnZone(t, rel, "Africa/Casablanca"), learnZone(t, own, "Africa/Casablanca")
+	berlin, fatKolkata, slimKolkata := zoneData(t, "Europe/Berlin"), zoneData(t, "Asia/Kolkata"), learnZone(t, "2026c", "Asia/Kolkata")
+	laterBerlin := laterZone(t, berlin, time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC), 3*3600)
+	if bytes.Equal(fatKolkata, slimKolkata) {
+		t.Fatal("precondition: the host's Asia/Kolkata is Go's own slim file")
+	}
+	offsets := map[string]int{"2024a": 3600, "2026c": 0}
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	if loc, err := time.LoadLocation("Africa/Casablanca"); err != nil {
+		t.Fatal(err)
+	} else if _, off := at.In(loc).Zone(); off != offsets[own] {
+		t.Fatalf("precondition: the CLI's own Africa/Casablanca reads %d s east of UTC on %s; want tzdata %s's", off, at.Format(time.DateOnly), own)
+	}
+	const zi = "/usr/share/zoneinfo/"
+	casa := map[string]zoneFile{"/etc/localtime": {link: zi + "Africa/Casablanca"}, zi + "Africa/Casablanca": {data: other}}
+	linked := func(name string, data []byte, more ...string) map[string]zoneFile {
+		files := map[string]zoneFile{"/etc/localtime": {link: zi + name}, zi + name: {data: data}}
+		for i := 0; i+1 < len(more); i += 2 {
+			files[zi+more[i]] = zoneFile{data: []byte(more[i+1])}
+		}
+		return files
+	}
+	bind := func(src, dst string) []container.MountPoint {
+		return []container.MountPoint{{Type: "bind", Source: src, Destination: dst}, {Type: "volume", Source: "/var/lib/docker/volumes/data/_data", Destination: "/data"}}
+	}
+	hardKolkata := map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}, zi + "Asia/Kolkata": {data: fatKolkata}, zi + "Europe/Berlin": {data: fatKolkata, hardlink: zi + "Asia/Kolkata"}}
+	kolkataIs := "one gives them Asia/Calcutta, Asia/Kolkata: it is that zone's file"
+	rows := []struct {
+		name   string
+		env    []string
+		files  map[string]zoneFile
+		mounts []container.MountPoint
+		want   string
+		offset int
+		err    string
+	}{
+		{name: "an image's own Africa/Casablanca of the other release", files: casa, want: "Africa/Casablanca", offset: offsets[rel]},
+		{name: "TZ=Africa/Casablanca, the image's own of the other release", env: []string{"TZ=Africa/Casablanca"}, files: casa, want: "Africa/Casablanca", offset: offsets[rel]},
+		{name: "a host's zoneinfo directory mounted over the image's, of the other release", files: casa, mounts: bind("/usr/share/zoneinfo", "/usr/share/zoneinfo"), want: "Africa/Casablanca", offset: offsets[rel]},
+		{name: "the host's /etc/localtime, the other release's Africa/Casablanca, over the image's own", files: casa, mounts: bind("/etc/localtime", "/etc/localtime"), want: "Africa/Casablanca", offset: offsets[rel]},
+		{name: "the host's /etc/localtime, the CLI's own Europe/Berlin, over the image's", files: linked("Europe/Berlin", berlin), mounts: bind("/etc/localtime", "/etc/localtime"), want: "Europe/Berlin", offset: 3600},
+		{name: "a host's Asia/Calcutta over the image's link to Asia/Kolkata", files: linked("Asia/Kolkata", fatKolkata), mounts: bind("/home/alice/zoneinfo/Asia/Calcutta", "/etc/localtime"), want: "Asia/Kolkata", offset: 19800},
+		{name: "a COPY of Go's slim Asia/Kolkata through the image's link to Europe/Berlin, no other zone file in the image", files: linked("Europe/Berlin", slimKolkata), err: kolkataIs},
+		{name: "a COPY of Go's slim Asia/Kolkata through the image's link to Europe/Berlin, the image's own Asia/Kolkata fat", files: linked("Europe/Berlin", slimKolkata, "Asia/Kolkata", string(fatKolkata)), err: kolkataIs},
+		{name: "TZ=Europe/Berlin, its file Go's slim Asia/Kolkata", env: []string{"TZ=Europe/Berlin"}, files: linked("Europe/Berlin", slimKolkata), err: kolkataIs},
+		{name: "Europe/Berlin a hard link of the image's Asia/Kolkata", files: hardKolkata, err: kolkataIs},
+		{name: "tzdata 2024a's America/Phoenix over the image's link to America/Denver", files: linked("America/Denver", learnZone(t, "2024a", "America/Phoenix")),
+			err: `first differ on 1970-04-26T09:00:00Z, where it reads UTC-07:00 and "America/Denver" UTC-06:00`},
+		{name: "a copy of the image's own Africa/Casablanca of the other release through its link to Europe/Berlin", files: linked("Europe/Berlin", other, "Africa/Casablanca", string(other)),
+			err: "one gives them Africa/Casablanca: it is that zone's file"},
+		{name: "a copy of the CLI's own release's Africa/Casablanca through the image's link to Europe/Berlin", files: linked("Europe/Berlin", ours), err: "one gives them Africa/Casablanca: it is that zone's file"},
+		{name: "a host's Africa/Casablanca of the other release over the image's link to Europe/Berlin", files: linked("Europe/Berlin", other), mounts: bind("/home/alice/zoneinfo/Africa/Casablanca", "/etc/localtime"),
+			err: "one gives them Africa/Casablanca: it is that zone's file"},
+		{name: "the host's /etc/localtime, Asia/Kolkata's, over the image's link to Europe/Berlin", files: linked("Europe/Berlin", fatKolkata), mounts: bind("/home/alice/localtime", "/etc/localtime"), err: kolkataIs},
+		// An image of a release later than keploy knows (2099a), its own
+		// tzdata.zi beside its files: its Europe/Berlin at UTC+03:00 from
+		// 2027 is Berlin's; where 2099a parts Europe/Oslo from Berlin so, a
+		// COPY of the image's Oslo through its link to Berlin is Oslo's
+		// file; with no tzdata.zi, nothing tells the file's release.
+		{name: "an image of a later release, its Europe/Berlin UTC+03:00 from 2027, its tzdata.zi saying so",
+			files: linked("Europe/Berlin", laterBerlin, "tzdata.zi", string(laterSource(t, "1 DE CE%sT 1980\n1 E CE%sT\n", "1 DE CE%sT 1980\n1 E CE%sT 2027\n3 - +03\n"))), want: "Europe/Berlin", offset: 3600},
+		{name: "a COPY of an image's Europe/Oslo of a later release, which parts it from Berlin, through its link to Europe/Berlin",
+			files: linked("Europe/Berlin", laterBerlin, "Europe/Oslo", string(laterBerlin), "tzdata.zi", string(laterSource(t, "L Europe/Berlin Europe/Oslo\n", "Z Europe/Oslo 1 - CET 1980\n1 E CE%sT 2027\n3 - +03\n"))),
+			err:   "nor does the root's own zone data (tzdata.zi, release 2099a), and one gives them Europe/Oslo: it is that zone's file"},
+		{name: "an image of a later release, its Europe/Berlin UTC+03:00 from 2027, no tzdata.zi", files: linked("Europe/Berlin", laterBerlin),
+			err: "nor does a tzdata.zi of the root's own zone data, which it holds none of"},
+	}
+	if own == "2024a" {
+		// tzdata 2026c's WET, which 2024b made a link to Europe/Lisbon,
+		// installed as tzdata installs a link: a hard link of Lisbon's, one
+		// file, which Docker's archive of the directory gives as an entry
+		// naming Lisbon's. At a path naming WET it is WET.
+		wet := learnZone(t, "2026c", "WET")
+		rows = append(rows, struct {
+			name   string
+			env    []string
+			files  map[string]zoneFile
+			mounts []container.MountPoint
+			want   string
+			offset int
+			err    string
+		}{name: "tzdata 2026c's WET, a hard link of its Europe/Lisbon", files: map[string]zoneFile{"/etc/localtime": {link: zi + "WET"}, zi + "Europe/Lisbon": {data: wet}, zi + "WET": {data: wet, hardlink: zi + "Europe/Lisbon"}}, want: "WET", offset: 0})
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			api := &fakeZoneAPI{t: t, env: r.env, files: r.files, mounts: r.mounts}
+			z, err := zoneOfApp(t, api)
+			switch {
+			case r.err != "":
+				if err == nil || !strings.Contains(err.Error(), r.err) {
+					t.Fatalf("tzdata %s, the CLI's %s: %v %v; want unknown, saying %q", rel, own, z.Loc, err, r.err)
+				}
+				if strings.Contains(err.Error(), "/home/alice") {
+					t.Fatalf("tzdata %s, the CLI's %s: %v; want no host path in it", rel, own, err)
+				}
+			case err != nil:
+				t.Fatalf("tzdata %s, the CLI's %s: %v; want %s", rel, own, err, r.want)
+			default:
+				if _, off := at.In(z.Loc).Zone(); z.Loc.String() != r.want || off != r.offset {
+					t.Fatalf("tzdata %s, the CLI's %s: %q at %d s on %s; want %s at %d", rel, own, z.Loc, off, at.Format(time.DateOnly), r.want, r.offset)
+				}
+			}
+		})
+	}
+}
+
+// laterSource is the zone source (tzdata.zi) of a release later than every
+// one keploy knows, "2099a": the newest release's tzdata.zi (models'
+// testdata), each edit (an old text, then its new one) made once.
+func laterSource(t *testing.T, edits ...string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "models", "testdata", "tzdata.zi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.Replace(string(b), "# version "+models.ZoneReleasesLast+"\n", "# version 2099a\n", 1)
+	for i := 0; i+1 < len(edits); i += 2 {
+		if strings.Count(s, edits[i]) != 1 {
+			t.Fatalf("precondition: tzdata %s's tzdata.zi holds %q %d times; want once", models.ZoneReleasesLast, edits[i], strings.Count(s, edits[i]))
+		}
+		s = strings.Replace(s, edits[i], edits[i+1], 1)
+	}
+	return []byte(s)
+}
+
+// laterZone is a zone file (version 1) of data's offsets from 1970 up to
+// from, and off (seconds east of UTC) from there on: a file of a later
+// release that changes the zone at from.
+func laterZone(t *testing.T, data []byte, from time.Time, off int) []byte {
+	t.Helper()
+	loc, err := time.LoadLocationFromTZData("", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, first := start.In(loc).Zone()
+	offs, at := []int{first}, []time.Time(nil)
+	for u := start; ; {
+		end := models.ZoneEnd(u.In(loc))
+		if end.IsZero() || !end.Before(from) {
+			break
+		}
+		u = end.UTC()
+		if _, o := u.In(loc).Zone(); o != offs[len(offs)-1] {
+			offs, at = append(offs, o), append(at, u)
+		}
+	}
+	offs, at = append(offs, off), append(at, from)
+	var b []byte
+	put := func(v int32) { b = append(b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v)) }
+	b = append(b, "TZif"...)
+	b = append(b, make([]byte, 16)...)
+	for _, n := range []int{0, 0, 0, len(at), len(offs), 2} {
+		put(int32(n))
+	}
+	for _, tt := range at {
+		put(int32(tt.Unix()))
+	}
+	for i := range at {
+		b = append(b, byte(i+1))
+	}
+	for _, o := range offs {
+		put(int32(o))
+		b = append(b, 0, 0)
+	}
+	return append(b, "Z\x00"...)
 }

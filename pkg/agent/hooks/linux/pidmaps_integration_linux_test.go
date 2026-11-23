@@ -50,6 +50,15 @@ func TestMain(m *testing.M) {
 	if mode := os.Getenv(readyHelperEnv); mode != "" {
 		os.Exit(runReadyHelper(mode))
 	}
+	if port := os.Getenv(heldConnHelperEnv); port != "" {
+		os.Exit(runHeldConnHelper(port))
+	}
+	if os.Getenv(ingressSockHelperEnv) == "1" {
+		os.Exit(runIngressSockHelper())
+	}
+	if arg := os.Getenv(bindMoveHelperEnv); arg != "" {
+		os.Exit(runBindMoveHelper(arg))
+	}
 	if os.Getenv(socketHelperEnv) == "1" {
 		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 		if err != nil {
@@ -61,7 +70,61 @@ func TestMain(m *testing.M) {
 		_ = unix.Close(fd)
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	if os.Getenv(appExeEnv) != "" {
+		// A run inOwnPIDNamespace (or a sibling) started: its parent's copy.
+		os.Exit(m.Run())
+	}
+	dir, err := copyAppExe()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "the application's file:", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// appExeEnv names the file the tests' application processes run (appExe).
+const appExeEnv = "KEPLOY_HOOKS_TEST_APP_EXE"
+
+// appExe is the file the tests' application processes run, every one but the
+// agent: a copy of this test binary. The agent here is the test process, and
+// the hooks leave alone every process that runs the agent's own file, as
+// they leave keploy's own commands, while an application runs a file of its
+// own. TestMain makes the copy before any test starts a process and names it
+// in the environment, so every helper and every process a helper starts runs
+// it too. A re-run of a test as the agent (inOwnPIDNamespace and its
+// siblings) runs the agent's own file, /proc/self/exe.
+func appExe() string { return os.Getenv(appExeEnv) }
+
+// copyAppExe copies this test binary into a directory of its own and names
+// the copy in appExeEnv. It returns the directory, for TestMain to remove.
+func copyAppExe() (string, error) {
+	self, err := os.Open("/proc/self/exe")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = self.Close() }()
+	dir, err := os.MkdirTemp("", "keploy-hooks-app-")
+	if err != nil {
+		return "", err
+	}
+	path := dir + "/app.test"
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err == nil {
+		_, err = io.Copy(out, self)
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err == nil {
+		err = os.Setenv(appExeEnv, path)
+	}
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	return dir, nil
 }
 
 // inOwnPIDNamespace runs the calling test again, alone, as the first process
@@ -92,11 +155,17 @@ func inOwnPIDNamespace(t *testing.T) bool {
 	return false
 }
 
-// startSocketHelper starts a process that calls socket() once and stays
-// alive until the test ends, and waits for its call.
+// startSocketHelper starts an application's process that calls socket() once
+// and stays alive until the test ends, and waits for its call.
 func startSocketHelper(t *testing.T) {
 	t.Helper()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	startSocketHelperOf(t, appExe())
+}
+
+// startSocketHelperOf is startSocketHelper with the file the process runs.
+func startSocketHelperOf(t *testing.T, file string) {
+	t.Helper()
+	cmd := exec.Command(file, "-test.run=^$")
 	cmd.Env = append(os.Environ(), socketHelperEnv+"=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

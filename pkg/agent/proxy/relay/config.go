@@ -117,9 +117,10 @@ type Config struct {
 
 	// OnCaptureLoss, when set, is told of each call the relay could not
 	// capture: today a TLS upgrade (STARTTLS, Postgres SSLRequest) it could
-	// not make, after which the connection is not parsed. kind and what are
-	// as for models.CaptureLoss. Nil is safe.
-	OnCaptureLoss func(kind models.CaptureLossKind, what string)
+	// not make, after which the connection is not parsed. kind, what and the
+	// hosts what names are as for models.CaptureLoss (captureloss.Counter's
+	// Add). Nil is safe.
+	OnCaptureLoss func(kind models.CaptureLossKind, what string, hosts ...models.LossHost)
 
 	// OnClientHandshakeFailed, when set, is handed the error of a
 	// client-side TLS upgrade that failed in its handshake (TLSUpgradeFn
@@ -520,6 +521,53 @@ type Config struct {
 	// short. It is called before the stream ends, and must not block. Nil is
 	// safe.
 	ClientStopped func()
+
+	// ClientEndedBeforeDest, when set, is told once, on the destination's
+	// forwarder, when a look at the client's socket, taken as that forwarder
+	// reads the destination's end (its FIN or its reset), once PeerEnded is
+	// told of it and before the relay forwards it to the client, finds the
+	// client had ended its side by then: its FIN in, or the connection
+	// closed (its reset) (client_took.go). The client ended its side before
+	// the destination's end reached it, whichever of the two ends the
+	// forwarders read, and so told PeerEnded of, first: on a busy host the
+	// destination's forwarder can read a close the destination made on its
+	// own before the client's forwarder reads a FIN that came first. A
+	// client's end that comes after this look comes after the
+	// destination's end was told, so PeerEnded is told of it second. It is
+	// not told where the client's socket cannot be asked (off Linux, or a
+	// client connection that is no TCP socket). The proxy wires it to
+	// supervisor.Session.MarkClientEndedBeforeDest, so the HTTP recorder
+	// judges such a call by the client's own end, never by the order the
+	// two ends were read in. It is called before the stream ends, and must
+	// not block. Nil is safe: no look is taken.
+	ClientEndedBeforeDest func()
+
+	// PeerEnded, when set, is told once per direction, as that direction's
+	// read finds its peer ended its side: a FIN (reset false) or a reset
+	// (reset true; the read failed with ECONNRESET). It is told on that
+	// direction's forwarder, before the relay forwards the end to the other
+	// side, so a side whose end answers the first one's is told after it,
+	// and before the stream ends. An end the relay makes itself (the
+	// context's, a pause, the other forwarder's teardown) and a write that
+	// fails are not a peer's end, and are not told. The proxy wires it to
+	// its peerEndMarker, which marks the end on the supervisor.Session
+	// (MarkPeerEndedBy), so a parser whose stream ended with a call
+	// unanswered knows which side ended it, and how (the HTTP recorder
+	// records the upstream's fault, or the client giving up, unless the end
+	// records no fault). It must not block. Nil is safe.
+	PeerEnded func(dir fakeconn.Direction, reset bool)
+
+	// ClientEndError, when set, is told at most once, as the relay ends and
+	// before the streams end, of the error the client's socket gave after
+	// the relay's last read of it and last write to it: the error a write
+	// to the client failed with, or else the error the socket holds then
+	// (SO_ERROR). It is what PeerEnded cannot say: a client that sent its
+	// FIN and then reset the bytes that reached it after (client_end.go).
+	// Not told when there is none, or where the client's socket cannot be
+	// asked and no write to it failed. The proxy wires it to
+	// supervisor.Session.MarkClientEndError. It must not block. Nil is
+	// safe: the relay does not look.
+	ClientEndError func(err error)
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

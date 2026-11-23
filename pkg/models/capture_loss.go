@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // CaptureLossKind names one way a run's capture can be incomplete: a call the
@@ -89,6 +90,18 @@ const (
 	// proxy closed it, first. What they carried was neither recorded nor
 	// mocked.
 	CaptureLossAppBytesLost CaptureLossKind = "app_bytes_lost"
+	// CaptureLossAppBytesUntold: the proxy closed a connection it holds and
+	// keploy cannot tell whether bytes the application had written to it
+	// were still on their way (macOS's TCP table no longer lists the
+	// application's end, no process the agent may read holds it, and the
+	// proxy's side had not taken its FIN or reset; or the close's own read
+	// failed). That is no loss keploy saw: it leaves without a verdict
+	// (NotJudged), never failed, only the tests the connection could have
+	// served -- one whose end was cut short with bytes on it unsettled, and
+	// the test open at the close when the proxy moved bytes on it since the
+	// last end that waited for them -- a test's own kind (PerTest). A test
+	// keploy saw miss a call keeps that verdict.
+	CaptureLossAppBytesUntold CaptureLossKind = "app_bytes_untold"
 	// CaptureLossUnixSocket (4c a, decision 20): a process of the
 	// application connected, or sent a datagram, to a Unix socket no process
 	// of it owns and that is not on the allow-list (UnixAllowList): a call
@@ -241,7 +254,61 @@ const (
 	// (NotJudged). What names both agent processes. Only under the proven
 	// switch.
 	CaptureLossAgentStartedAgain CaptureLossKind = "agent_started_again"
+	// CaptureLossProcessUnshimmed: where keploy intercepts through a library
+	// each process of the run loads (macOS: its shim, which every armed
+	// process announces), a process of the run ran a program the shim did
+	// not announce itself in: macOS drops DYLD_INSERT_LIBRARIES for a
+	// platform binary (/usr/bin/curl, /bin/sh), a hardened-runtime or a
+	// restricted one. keploy sees none of that program's calls, so whether
+	// it called a dependency cannot be told: NOT JUDGED (NotJudged), a
+	// test's own (PerTest), charged to each test the program runs in (the
+	// hooks count it when it starts, and again at each read of the counts
+	// it outlives). What names the latest program and its pid. Only under
+	// the proven switch.
+	CaptureLossProcessUnshimmed CaptureLossKind = "process_unshimmed"
+	// CaptureLossUnattributed: in a run of test workers, the application
+	// made a call from a process in no test worker's keploy instance (one
+	// the test command did not start inside a worker, such as a server
+	// every worker shares) while workers' tests were open, or, in a replay,
+	// from a process of a worker keploy does not serve (it ended, or keploy
+	// never began serving it), or, while workers are served, a DNS question
+	// no DNS mock answers (it carries no stamp of the worker that asked it,
+	// and keploy answers it as any DNS miss): keploy cannot tell which test
+	// made it. A record keeps it in none of the tests' recordings, and
+	// charges it itself to each test open at its time, from the mocks it
+	// recorded. A replay refuses a connection's call unanswered, and the
+	// proxy counts the refusal, which is a test's own (PerTest): it charges
+	// each test open when it was made (the call may have been any of
+	// theirs), and, made while none was, the next test. Either way a test
+	// charged with it is left without a verdict (NotJudged), never failed.
+	// What names the latest such call and its process.
+	CaptureLossUnattributed CaptureLossKind = "call_unattributed"
+	// CaptureLossUnseenConnection: the application made calls, while a test
+	// ran, on a connection to a dependency that it opened while no keploy
+	// agent ran (the agent died and was restarted while the application ran
+	// on): keploy takes a connection as it begins, so it never saw that one,
+	// and the calls on it were neither recorded nor mocked. keploy cannot
+	// tell which of the test's calls those were, so the test is NOT JUDGED
+	// (NotJudged), never failed. A test's own kind (PerTest): the agent
+	// counts each read at which such a connection had carried data since the
+	// read before, or had closed since (what it carried then cannot be read
+	// any more). What names the latest such connection by its ports and its
+	// peer's address.
+	CaptureLossUnseenConnection CaptureLossKind = "connection_unseen"
 )
+
+// AppBytesUntoldRemedy is what to do about a close of the proxy's that
+// keploy could not account for (CaptureLossAppBytesUntold).
+const AppBytesUntoldRemedy = "run the test again (the close raced the application's own; keploy's agent log names the connection), and report it to keploy if it comes back"
+
+// UnseenConnectionRemedy is what to do about the application's connections
+// opened while no keploy agent ran (CaptureLossUnseenConnection).
+const UnseenConnectionRemedy = "find why keploy's agent restarted (its container's restart count, an OOM kill, its log); keploy records every connection the application opens while it runs, so restart the application, or let it replace the connections it opened while the agent was down, to record the calls on them"
+
+// UnattributedRemedy is what to do about a call from a process in no test
+// worker's keploy instance while workers' tests were open
+// (CaptureLossUnattributed).
+const UnattributedRemedy = "start the process that made the call inside each test worker (a worker fixture that starts the application on its own port), and stop it before its worker ends, or run one test worker"
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
 // with when the Docker daemon did not answer keploy's read of its
@@ -257,7 +324,7 @@ const ContainerUnreadMetadata = "containerUnread"
 // kernel dropped at keploy's listener, which keploy cannot tell lost a call,
 // as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed || k == CaptureLossAppBytesUntold || k == CaptureLossUnseenConnection
 }
 
 // Evidence reports whether a loss of kind k is evidence only, never a
@@ -343,11 +410,18 @@ func (l CaptureLosses) Evidence() CaptureLosses {
 
 // EvidenceText is keploy's sentence for l's evidence (Evidence), "" for
 // none: what the kernel skipped during the recording, which judges nothing.
-func (l CaptureLosses) EvidenceText() string {
+func (l CaptureLosses) EvidenceText() string { return l.evidenceText(captureReportWhat) }
+
+// EvidenceLogText is EvidenceText as a log line carries it: each What with
+// the hosts it names by their shape and tag (captureLogWhat).
+func (l CaptureLosses) EvidenceLogText() string { return l.evidenceText(captureLogWhat(true)) }
+
+// evidenceText is EvidenceText with each loss's What written by what.
+func (l CaptureLosses) evidenceText(what func(CaptureLoss) string) string {
 	var parts []string
 	for _, c := range l.Evidence() {
 		s := captureLossText(c)
-		if w := captureWhatShape(c.What); w != "" {
+		if w := what(c); w != "" {
 			s += " (" + w + ")"
 		}
 		parts = append(parts, s)
@@ -412,14 +486,24 @@ func (l CaptureLosses) SinceWithin(b LossBases) CaptureLosses {
 // verdict (Split's notJudged): what keploy cannot capture, and that it
 // therefore cannot prove the test's calls were all captured.
 func (l CaptureLosses) NotJudgedText() string {
+	return l.notJudgedText(func(c CaptureLoss) string { return c.reportWhat(false) })
+}
+
+// NotJudgedLogText is NotJudgedText as a log line carries it: each What with
+// the hosts it names by their shape and tag (captureLogWhat). The report's
+// and the console's text keeps them whole, each beside its tag.
+func (l CaptureLosses) NotJudgedLogText() string { return l.notJudgedText(captureLogWhat(false)) }
+
+// notJudgedText is NotJudgedText with each loss's What written by what.
+func (l CaptureLosses) notJudgedText(what func(CaptureLoss) string) string {
 	var parts []string
 	for _, c := range l {
 		if c.Kind.Evidence() {
 			continue // no verdict: EvidenceText says it
 		}
 		s := captureLossText(c)
-		if c.What != "" {
-			s += " (" + c.What + ")"
+		if w := what(c); w != "" {
+			s += " (" + w + ")"
 		}
 		parts = append(parts, s)
 	}
@@ -458,15 +542,30 @@ const AgentStartedAgainRemedy = "find why the agent restarted (its container's r
 // once than the queues hold.
 const ListenerDroppedRemedy = "find why the kernel dropped connection attempts at keploy's proxy listener (`nstat -az TcpExtListenDrops TcpExtListenOverflows` counts them: a host loaded enough to starve keploy's agent, or more connects at once than net.core.somaxconn and net.ipv4.tcp_max_syn_backlog let its queues hold)"
 
+// ProcessUnshimmedRemedy is what to do when a process of the run ran a
+// program keploy's shim was not in (CaptureLossProcessUnshimmed): macOS lets
+// no library into a platform, hardened-runtime or restricted binary, so the
+// program's calls are seen only where keploy's kernel hooks see every
+// process.
+const ProcessUnshimmedRemedy = "run the test where keploy sees every process (Linux), or have it run a build of the program macOS loads keploy's shim into (not a platform binary under /usr/bin, /bin or /sbin, not signed with the hardened runtime, not setuid)"
+
 // NotJudgedRemedy is what to do about losses that leave a test without a
 // verdict (Split's notJudged), for a next_step: reach a Unix-socket
 // dependency over TCP; report to keploy why it cannot see those calls at
 // all; make a TLS client that abandoned its handshake trust keploy's CA; list
 // a server-first destination in mock.real. Empty for none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, unseen, tls, serverFirst, refused, docker, dropped, unclassified, restarted bool
+	var unix, unseen, tls, serverFirst, refused, docker, dropped, unclassified, restarted, unshimmed, unattributed, untold, unseenConn bool
 	for _, c := range l {
 		switch c.Kind {
+		case CaptureLossAppBytesUntold:
+			untold = true
+		case CaptureLossUnseenConnection:
+			unseenConn = true
+		case CaptureLossProcessUnshimmed:
+			unshimmed = true
+		case CaptureLossUnattributed:
+			unattributed = true
 		case CaptureLossAgentStartedAgain:
 			restarted = true
 		case CaptureLossUnclassified:
@@ -515,12 +614,25 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	if restarted {
 		do = append(do, AgentStartedAgainRemedy)
 	}
+	if unshimmed {
+		do = append(do, ProcessUnshimmedRemedy)
+	}
+	if unattributed {
+		do = append(do, UnattributedRemedy)
+	}
+	if untold {
+		do = append(do, AppBytesUntoldRemedy)
+	}
+	if unseenConn {
+		do = append(do, UnseenConnectionRemedy)
+	}
 	return strings.Join(do, ", and ")
 }
 
 // ErrMocksNotWritten says mocks the recording captured were not written to
-// the mock file (its writer was stuck, or a write failed): the recording is
-// incomplete, a capture loss as much as a call never captured.
+// the mock file (a write failed, or the stop was asked to end before a slow
+// or stuck disk had taken them): the recording is incomplete, a capture loss
+// as much as a call never captured.
 var ErrMocksNotWritten = errors.New("mocks the recording captured were not written to the mock file")
 
 // CaptureLoss is how many times one kind of capture loss happened in the
@@ -531,6 +643,91 @@ type CaptureLoss struct {
 	Kind  CaptureLossKind `json:"kind"`
 	Count uint64          `json:"count"`
 	What  string          `json:"what,omitempty"`
+	// Err is, on a PID map's loss (CaptureLossPIDMap,
+	// CaptureLossPIDMapExcluded), the kernel's (negative, Linux) errno for
+	// that map's latest refusal (PIDMapRefusals.LastTargetErr,
+	// LastExcludedErr), so a reader takes each map's cause from its own
+	// loss, never out of What; 0 when the agent did not say (an older
+	// agent), and on every other kind.
+	Err int32 `json:"err,omitempty" yaml:"err,omitempty"`
+	// Hosts are the host names What names whole (a connection's host, a
+	// DNS question's name, a call's Host header, a mock.real connection's
+	// other name), each where the agent wrote it, with the tag the
+	// agent's own lines name it by (LossHost): a log line writes each by
+	// its shape beside that tag (LogText), the report and the console
+	// whole beside it (Text), there alone. Nothing else in What is read
+	// as a host, the same word elsewhere included.
+	Hosts LossHosts `json:"hosts,omitempty" yaml:"hosts,omitempty"`
+	// HostsListed says Hosts lists every host name What names (none, for a
+	// What that names none): every loss an agent that lists them counts
+	// (captureloss.Counter), and each loss of a kind that may name a host
+	// (not namesNoHost) keploy builds itself. A loss of an agent that
+	// predates Hosts has neither, and a log line writes its What by its
+	// size alone (UnlistedLogText), but for a kind whose What names no host
+	// (namesNoHost).
+	HostsListed bool `json:"hosts_listed,omitempty" yaml:"hosts_listed,omitempty"`
+}
+
+// SetWhatOf makes o's What c's, with the hosts it names (Hosts,
+// HostsListed): a count that takes the What of the latest loss.
+func (c *CaptureLoss) SetWhatOf(o CaptureLoss) {
+	c.What, c.Hosts, c.HostsListed = o.What, o.Hosts, o.HostsListed
+}
+
+// JoinWhat adds o's What to c's after "; " (o's alone when c has none),
+// with the hosts each names, o's at their places after c's What: c's are
+// then listed only where both were. An o with no What changes nothing.
+func (c *CaptureLoss) JoinWhat(o CaptureLoss) {
+	switch {
+	case o.What == "":
+	case c.What == "":
+		c.SetWhatOf(o)
+	default:
+		c.Hosts = c.Hosts.With(o.Hosts.Shifted(len(c.What) + len("; ")))
+		c.What += "; " + o.What
+		c.HostsListed = c.HostsListed && o.HostsListed
+	}
+}
+
+// Untagged is l with no host tag (LossHosts.Untagged): the losses a test's
+// harness and the receipts are given, which outlive the session a tag names
+// a host in. Each host's name, and whether they are listed, is kept.
+func (l CaptureLosses) Untagged() CaptureLosses {
+	if l == nil {
+		return nil
+	}
+	out := make(CaptureLosses, len(l))
+	for i, c := range l {
+		c.Hosts = c.Hosts.Untagged()
+		out[i] = c
+	}
+	return out
+}
+
+// MaxSessionSets is how many of its latest sessions' test sets an agent
+// names an earlier session's loss by (OwnedCaptureLoss.Set).
+const MaxSessionSets = 1024
+
+// OwnedCaptureLoss is a capture loss of bytes a test wrote to a connection,
+// which its end could not wait for, counted later, under another test or
+// none: Test's own (agent.OwnedLoss), in none of the agent's counts. Test is
+// "between test cases" for the gap's bytes in keploy test, and "" for the
+// run's (a bound passed).
+type OwnedCaptureLoss struct {
+	Test string      `json:"test"`
+	Loss CaptureLoss `json:"loss"`
+	// EarlierSession says the loss was made in an earlier session of keploy
+	// test's run than the one open (TestSetSession): counted after that
+	// session ended, on a connection it used, or counted in it and never
+	// read by it. It is a verdict of Set's that came after that set's end:
+	// keploy test reports it as that set's, naming Test where it is known
+	// ("" for bytes written in none of its tests), and its run ends not
+	// judged for it. It charges no test or verdict of the set open.
+	EarlierSession bool `json:"earlier_session,omitempty"`
+	// Set is, for an EarlierSession loss, the test set that session served;
+	// "" where the agent no longer holds its name (it holds the names of its
+	// last MaxSessionSets sessions).
+	Set string `json:"set,omitempty"`
 }
 
 // CaptureLosses are the agent's counts of every kind of capture loss, each
@@ -562,7 +759,18 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 //     charged but for the one place listenerDropWhere names;
 //   - one call's bytes the capture skipped, could not read, or stopped
 //     recording (kernel_skipped_call, capture_unread,
-//     connection_unrecorded, counted for each piece the connection carries).
+//     connection_unrecorded, counted for each piece the connection carries);
+//   - bytes the application wrote to a connection that ended before they
+//     reached the proxy (app_bytes_lost), counted once for the connection:
+//     it is over, so no later call goes with it, and the application's next
+//     call, on another connection, is captured or lost on its own;
+//   - a program of the run keploy's shim is not in (process_unshimmed),
+//     counted as it starts and again at each read it outlives, so each
+//     test it runs in is charged it, and no test after it ends.
+//   - a connection a replay of test workers refused unanswered, made by a
+//     process in no served worker's instance (call_unattributed): no test
+//     can be told to have made it, so the count lands in each test open
+//     then, every one of them charged.
 //
 // One between two tests is the next test's, as a miss between tests is;
 // one before a test process's claim, or after the run's last test, is the
@@ -571,8 +779,8 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // (pid_map_refused, pid_map_refused_excluded, process_unclassified,
 // app_subtree_untracked); a connection keploy stopped parsing, failed
 // serving, or dropped bytes of, whose later calls may go with it
-// (starttls_failed, parser_stalled, parser_panicked, capture_dropped,
-// app_bytes_lost); a connection that never reached keploy's proxy whole, so
+// (starttls_failed, parser_stalled, parser_panicked, capture_dropped); a
+// connection that never reached keploy's proxy whole, so
 // that no call of it was read and which test made one cannot be told
 // (app_connection_lost, unpaired_connection); what keploy cannot capture at
 // all (unix_socket, unix_unseen, udp_reply); the kernel's count of skipped
@@ -580,7 +788,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // build does not know. (CaptureLossRealUncaptured is a test's own too, but never in the
 // agent's counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossAppBytesLost || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed || k == CaptureLossAppBytesUntold || k == CaptureLossUnseenConnection
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -633,7 +841,9 @@ func (l CaptureLosses) Since(base CaptureLosses) CaptureLosses {
 		b := was[c.Kind]
 		switch {
 		case c.Count > b:
-			out = append(out, CaptureLoss{Kind: c.Kind, Count: c.Count - b, What: c.What})
+			d := c
+			d.Count = c.Count - b
+			out = append(out, d)
 		case c.Count < b && c.Count > 0:
 			out = append(out, c)
 		}
@@ -664,7 +874,8 @@ func (l CaptureLosses) Max(o CaptureLosses) CaptureLosses {
 }
 
 // Plus is l and o added kind by kind (each with the What of the later of
-// the two, o's, when it has one). Sorted by kind.
+// the two, o's, when it has one, with the hosts it names, and its Err
+// likewise). Sorted by kind.
 func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 	at := make(map[CaptureLossKind]int, len(l)+len(o))
 	var out CaptureLosses
@@ -672,7 +883,10 @@ func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 		if i, ok := at[c.Kind]; ok {
 			out[i].Count += c.Count
 			if c.What != "" {
-				out[i].What = c.What
+				out[i].SetWhatOf(c)
+			}
+			if c.Err != 0 {
+				out[i].Err = c.Err
 			}
 			continue
 		}
@@ -685,15 +899,27 @@ func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 
 // Text is keploy's sentence for the losses, for a test's reason: what was
 // not captured, and that the test's verdict therefore rests on calls keploy
-// never saw.
-func (l CaptureLosses) Text() string {
+// never saw. Each host a What names (Hosts) is whole, beside its tag
+// (LossHosts.ReportText).
+func (l CaptureLosses) Text() string { return l.text(captureReportWhat) }
+
+// LogText is Text as a log line, or an error a caller logs, carries it: each
+// What with the hosts it names by their shape and tag (captureLogWhat). A
+// What names a destination whole (a connection's host and port, a DNS
+// question's name, a mock.real connection's other name) for the report and
+// the console, where the user reads it beside its tag; a host is traffic,
+// and the CLI's log reaches log stores.
+func (l CaptureLosses) LogText() string { return l.text(captureLogWhat(true)) }
+
+// text is Text with each loss's What written by what.
+func (l CaptureLosses) text(what func(CaptureLoss) string) string {
 	if len(l) == 0 {
 		return ""
 	}
 	var parts []string
 	for _, c := range l {
 		s := captureLossText(c)
-		if w := captureWhatShape(c.What); w != "" {
+		if w := what(c); w != "" {
 			s += " (" + w + ")"
 		}
 		parts = append(parts, s)
@@ -709,14 +935,141 @@ func (l CaptureLosses) Text() string {
 // (hostPort), an absolute URL keeps only its path's shape, credentials and
 // the host they precede are {}, query values are {}, and path segments are
 // shaped by PathShape, which keeps a segment that reads as a name.
-func captureWhatShape(what string) string {
-	words := strings.Fields(what)
-	for i, w := range words {
-		if strings.ContainsAny(w, "/?#@=") {
-			words[i] = targetShape(w)
+func captureWhatShape(what string) string { return shapeWords(what, nil, nil) }
+
+// shapeWords is text as captureWhatShape writes it, its words (runs of what
+// is not white space) joined by one space, with each of places (in text's
+// order, each within one word) written host(h), and the rest of its word
+// on either side shaped as a word is (shapeWord).
+func shapeWords(text string, places LossHosts, host func(LossHost) string) string {
+	var words []string
+	next := 0
+	word := func(start, end int) {
+		var b strings.Builder
+		from := start
+		for next < len(places) && places[next].At < end {
+			h := places[next]
+			b.WriteString(shapeWord(text[from:h.At]))
+			b.WriteString(host(h))
+			from = h.At + len(h.Name)
+			next++
+		}
+		b.WriteString(shapeWord(text[from:end]))
+		words = append(words, b.String())
+	}
+	start := -1
+	for i, r := range text {
+		switch {
+		case unicode.IsSpace(r):
+			if start >= 0 {
+				word(start, i)
+				start = -1
+			}
+		case start < 0:
+			start = i
 		}
 	}
+	if start >= 0 {
+		word(start, len(text))
+	}
 	return strings.Join(words, " ")
+}
+
+// shapeWord is w, a word of a capture loss's text or a part of one beside a
+// host, as captureWhatShape writes it: by targetShape when it carries one of
+// / ? # @ =, else as it is.
+func shapeWord(w string) string {
+	if strings.ContainsAny(w, "/?#@=") {
+		return targetShape(w)
+	}
+	return w
+}
+
+// captureReportWhat is c's What as the report names it (captureWhatShape),
+// each host it names beside its tag at its place (LossHost); with no tag
+// where the agent did not list them, or listed them at places What does not
+// hold.
+func captureReportWhat(c CaptureLoss) string { return c.reportWhat(true) }
+
+// reportWhat is c's What as the report names it, shaped as captureWhatShape
+// shapes it with shape, else as it is.
+func (c CaptureLoss) reportWhat(shape bool) string {
+	if c.HostsListed {
+		if out, ok := c.Hosts.write(c.What, shape, reportHost); ok {
+			return out
+		}
+	}
+	if shape {
+		return captureWhatShape(c.What)
+	}
+	return c.What
+}
+
+// LogWhat is c's What as a log line carries it, alone (LogText carries it in
+// its sentence): as the report writes it, each host it names by its shape and
+// tag (logWhat). "" for none.
+func (c CaptureLoss) LogWhat() string { return c.logWhat(true) }
+
+// ReportWhat is c's What as the report and the console name it, alone (Text
+// names it in its sentence): each host it names whole beside its tag
+// (captureReportWhat). "" for none.
+func (c CaptureLoss) ReportWhat() string { return captureReportWhat(c) }
+
+// captureLogWhat is a loss's What as a log line names it, shaped as
+// captureWhatShape shapes it with shape (logWhat).
+func captureLogWhat(shape bool) func(CaptureLoss) string {
+	return func(c CaptureLoss) string { return c.logWhat(shape) }
+}
+
+// logWhat is c's What as a log line carries it, its words as the report
+// writes them (shaped by captureWhatShape with shape): each host the agent
+// listed (Hosts) by its shape and tag at the place the agent wrote it, and
+// nothing else read as a host. A What whose hosts were not listed
+// (HostsListed: an agent that predates Hosts) is written by its size alone
+// (UnlistedLogText), never whole: nothing tells its hosts from keploy's
+// words; so is one listed at places it does not hold. A kind whose What
+// never names a host (namesNoHost) is kept as the report writes it either
+// way.
+func (c CaptureLoss) logWhat(shape bool) string {
+	if c.What == "" {
+		return ""
+	}
+	w := c.What
+	if shape {
+		w = captureWhatShape(w)
+	}
+	switch {
+	case c.HostsListed:
+		if out, ok := c.Hosts.write(c.What, shape, logHost); ok {
+			return out
+		}
+		return misplacedLogText(w)
+	case c.Kind.namesNoHost():
+		return w
+	}
+	return UnlistedLogText(w)
+}
+
+// namesNoHost reports whether a loss of kind k has a What that names no host
+// name in any keploy agent, an older one included (logWhat): keploy's own
+// facts or the machine's (a container's name and image, the kernel's
+// programs, a PID map, a process or its program, a Unix socket's path, the
+// agent's processes, the proxy listener's count, a TLS upgrade a parser
+// asked for), or the kernel's addresses and ports alone (a connection that
+// never reached the proxy whole, one keploy could not pair, bytes the
+// application lost or that a close could not account for, a UDP answer, a
+// connection's queue keploy dropped). A kind not listed here, a new one among
+// them, may name one.
+func (k CaptureLossKind) namesNoHost() bool {
+	switch k {
+	case CaptureLossContainerUnread, CaptureLossKernelSkip, CaptureLossKernelSkipCall, CaptureLossPIDMap, CaptureLossPIDMapExcluded,
+		CaptureLossUnclassified, CaptureLossAppSubtreeUntracked, CaptureLossProcessUnshimmed, CaptureLossAgentStartedAgain,
+		CaptureLossUnixSocket, CaptureLossUnixUnseen, CaptureLossListenerDropped,
+		CaptureLossAppConnLost, CaptureLossUnpairedConn, CaptureLossAppBytesLost, CaptureLossAppBytesUntold, CaptureLossUDPReply, CaptureLossSTARTTLS,
+		CaptureLossParserStall, CaptureLossDropped, CaptureLossUnseenConnection:
+		return true
+	}
+	return false
 }
 
 // listenerDropWhere is where a listener_dropped loss is charged: where a call
@@ -746,6 +1099,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d connection(s) reached keploy's proxy that it could not tie to a connection of the application's (another address in between, a NAT among the causes), so keploy could not tell where they were going and refused them", c.Count)
 	case CaptureLossAppBytesLost:
 		return fmt.Sprintf("on %d connection(s) to keploy's proxy, bytes the application had written never reached the proxy (the connection was reset, or closed, first), so what they carried was neither recorded nor mocked", c.Count)
+	case CaptureLossAppBytesUntold:
+		return fmt.Sprintf("keploy's proxy closed %d connection(s) this test used, and keploy cannot tell whether bytes the application had written to them were still on their way, so whether a call of this test was lost cannot be told", c.Count)
 	case CaptureLossAppConnLost:
 		return fmt.Sprintf("%d connection(s) of the application's to keploy's proxy closed before the proxy received them, so what they carried was neither recorded nor mocked", c.Count)
 	case CaptureLossRealUncaptured:
@@ -783,6 +1138,12 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
 	case CaptureLossAppSubtreeUntracked:
 		return fmt.Sprintf("keploy could not mark %d process(es) forked in the application's subtree as the application's (its map of the subtree was full, or it could not read the fork's start time), so their calls may have been neither recorded nor mocked while this test ran, or before it; report it to keploy with the agent's log, which names the process", c.Count)
+	case CaptureLossProcessUnshimmed:
+		return fmt.Sprintf("a process of the run ran a program keploy's shim is not in (macOS drops DYLD_INSERT_LIBRARIES for a platform, hardened-runtime or restricted binary), so keploy saw none of its calls while this test ran (found %d time(s): as it started, and at each test end it outlived)", c.Count)
+	case CaptureLossUnattributed:
+		return fmt.Sprintf("the application made %d call(s) from a process in no test worker's keploy instance, or in that of a worker keploy does not serve, while this test was open (or, in a replay, while no test was, before it began), in a run of test workers, so keploy cannot tell which test made them: a record keeps them in none of the tests' recordings, and a replay refuses them unanswered", c.Count)
+	case CaptureLossUnseenConnection:
+		return fmt.Sprintf("the application carried data %d time(s) on a connection to a dependency that it opened while no keploy agent ran (keploy's agent was restarted while the application ran on), which keploy does not see, or such a connection closed before keploy could read what it carried, so the calls on it while this test ran were neither recorded nor mocked", c.Count)
 	case CaptureLossAgentStartedAgain:
 		return "keploy's agent was started again while the application ran on, and what the agent before counted went with it: a process of the application's that it could not place, or a call keploy cannot capture at all, may taint this test, and the new agent cannot see it (keploy judges the tests again once it starts the application anew)"
 	default:

@@ -185,6 +185,18 @@ jobs:
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}
+
+      # keploy's log and its agent's boot.json, which keploy removes when it
+      # exits: the lane copies them here when it gives up on keploy's start or
+      # the app's (keploy-start-wait.sh).
+      - name: Upload keploy's logs and start reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grpc-fuzzer-${{ matrix.mode }}-${{ matrix.config.job }}-keploy-start
+          path: keploy-start-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
   
   postgres_fuzzer:
     if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'postgres_fuzzer') }}
@@ -360,5 +372,5 @@ jobs:
         run: |
           cd go-fuzzers/mongo
           echo "::group::Keploy Report"
-          sudo -E "$REPLAY_KEPLOY_BIN" report || echo "Failed to generate report"
+          sudo "$REPLAY_KEPLOY_BIN" report || echo "Failed to generate report"
           echo "::endgroup::"

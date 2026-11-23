@@ -125,7 +125,7 @@ record() {
     local port=${BROKER##*:} verdicts
     verdicts=$(grep 'mysql probe result' "$log" | grep "\"destPort\": $port" || true)
     [ -n "$verdicts" ] || fail "$name: keploy logged no MySQL probe verdict for the dependency's port $port" "$log"
-    if echo "$verdicts" | grep -qv '"reason": "client-spoke-first"'; then
+    if echo "$verdicts" | grep -v '"reason": "client-spoke-first"' >/dev/null; then
         echo "$verdicts"
         fail "$name: the probe decided the pooled connection by something other than its client speaking first" "$log"
     fi

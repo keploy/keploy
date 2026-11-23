@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -463,6 +464,11 @@ func TestTheExitClockCountsOnlyTheTimeTheProcessesCouldRun(t *testing.T) {
 		r.ok = false
 		if got := r.look(w, 70*ms, nil); got != 70*ms {
 			t.Fatalf("added %v, want keploy's 70ms", got)
+		}
+		// Keploy's clock read over a longer span than the look's: no more
+		// than the look.
+		if got := r.look(w, 2*w, nil); got != w {
+			t.Fatalf("added %v with keploy's clock %v on, want no more than the look's %v", got, 2*w, w)
 		}
 	})
 	t.Run("a look that read nothing sets the next one's account against none", func(t *testing.T) {
@@ -1189,6 +1195,43 @@ func TestTheExitClockCreditsWaitsInTheKernelForTheHungTaskTimeInAll(t *testing.T
 			t.Fatalf("the look after the credit was spent added %v, want the %v keploy could run", got, w/4)
 		}
 	})
+	t.Run("a keploy held off the CPU spends the credit before the stall", func(t *testing.T) {
+		// The thread runs 20 ms of each look between its waits in the
+		// kernel, there for the other 80 ms, its storage serving. Where
+		// keploy could run less than the thread could, its time is set
+		// against the thread's waits first: the stall counts only what it
+		// could run past them while the credit stands, then all of it.
+		const ran = 20 * time.Millisecond
+		for _, tc := range []struct {
+			name        string
+			own, before time.Duration // keploy's time a look; what the stall counts a look while the credit stands
+			creditLooks int
+		}{
+			{"keploy runnable throughout", w, ran, 4},
+			{"keploy runnable for half of it", w / 2, 0, 6},
+			{"keploy runnable for a tenth of it", w / 10, 0, 30},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				r := stop(map[int]taskTime{1: held})
+				step := func(m map[int]taskTime) {
+					adds(1, ran, 0, 1, false)(m)
+					th := m[1]
+					th.blocked = true
+					m[1] = th
+				}
+				for i := range tc.creditLooks + 2 {
+					want := tc.before
+					if i >= tc.creditLooks {
+						want = tc.own
+					}
+					r.serves(w)
+					if got := r.look(w, tc.own, step); got != want {
+						t.Fatalf("look %d, keploy runnable for %v of it, added %v, want %v (credit spent: %v of %v)", i, tc.own, got, want, r.c.credited, wedge)
+					}
+				}
+			})
+		}
+	})
 	t.Run("a thread standing in the kernel spends the credit too", func(t *testing.T) {
 		// A credit of two looks, short of the hung-task time of three.
 		r := newClockRigCredited(map[int]taskTime{1: held}, wedge, wedge, 2*w, diskMark{"259:0": {}})
@@ -1703,10 +1746,11 @@ func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	counts := 0
+	// The count is the server goroutine's: it serves the stat again at the
+	// exit clock's read below, after the check of it.
+	var counts atomic.Int32
 	serveStat(t, filepath.Join(root, "700", "stat"), func(int) string {
-		counts++
-		if counts == 1 {
+		if counts.Add(1) == 1 {
 			if err := os.Rename(filepath.Join(root, "700", "task", "701"), filepath.Join(root, "701-hidden")); err != nil {
 				t.Error(err)
 			}
@@ -1717,8 +1761,8 @@ func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
 	if err != nil || gone || whole || !slices.Equal(ids, []string{"700", "701"}) {
 		t.Fatalf("taskIDs = %v, whole %v, gone %v, %v; want 700 and 701, every thread the listings held, not whole", ids, whole, gone, err)
 	}
-	if counts != taskListings {
-		t.Fatalf("%d counts read; want %d", counts, taskListings)
+	if n := int(counts.Load()); n != taskListings {
+		t.Fatalf("%d counts read; want %d", n, taskListings)
 	}
 	// Read by the exit clock, the same process is marked: its look counts
 	// only what its threads ran.
@@ -1743,10 +1787,9 @@ func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	counts = 0
+	counts.Store(0)
 	serveStat(t, filepath.Join(root, "800", "stat"), func(int) string {
-		counts++
-		if counts == 1 {
+		if counts.Add(1) == 1 {
 			dir := filepath.Join(root, "800", "task", "803")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Error(err)
@@ -1755,8 +1798,8 @@ func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
 		return withCount(3)
 	})
 	ids, whole, gone, err = taskIDs(root, 800)
-	if err != nil || gone || !whole || !slices.Equal(ids, []string{"800", "801", "803"}) || counts != 2 {
-		t.Fatalf("a thread started as the count was read: taskIDs = %v, whole %v, gone %v, %v, after %d counts; want 800, 801 and 803, whole, after 2", ids, whole, gone, err, counts)
+	if err != nil || gone || !whole || !slices.Equal(ids, []string{"800", "801", "803"}) || counts.Load() != 2 {
+		t.Fatalf("a thread started as the count was read: taskIDs = %v, whole %v, gone %v, %v, after %d counts; want 800, 801 and 803, whole, after 2", ids, whole, gone, err, counts.Load())
 	}
 	// A look with such a thread counts only what the threads ran: here
 	// one waited for a CPU all the look, which, missed by a listing, would

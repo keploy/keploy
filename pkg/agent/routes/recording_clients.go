@@ -237,11 +237,14 @@ func (a *Agent) HandleStopNotice(w http.ResponseWriter, r *http.Request) {
 // stream its client reopens after the request (a reconnect) ends at once;
 // endedKept of them, a bound that holds a few bytes each, not one per
 // recording the agent ever served.
+// current is the token of the recording whose streams attached last: the
+// recording the agent captures for, which its end ends (endRecording).
 var recordingStreamsEnd struct {
 	mu         sync.Mutex
 	open       map[string]*openStreams
 	ended      map[string]bool
 	endedOrder []string
+	current    string
 }
 
 // openStreams is one recording's open frame streams: what they wait on to end,
@@ -260,6 +263,14 @@ const endedKept = 256
 // opened asks the agent to end its recording's streams (models.StreamEndPath),
 // and the func the stream calls once it closes: nil, which never does, for a
 // stream with no recording token (a client that never asks).
+//
+// A stream of a recording not ended yet whose token is not the current one's
+// is a new recording's: the agent captures for it (syncMock ResumeRecording)
+// from here, if the last one had ended. The last of the current recording's
+// streams to close, once its stop has asked what the agent holds (syncMock
+// StopWasAsked), ends it (endRecording), whether or not its client asked for
+// the markers: one whose drain gave up, or that went away mid-stop, reads no
+// more of it, and no client resumes a stopped recording.
 func streamEnding(r *http.Request) (ending <-chan struct{}, closed func()) {
 	tok := r.Header.Get(models.StreamEndTokenHeader)
 	if tok == "" {
@@ -267,12 +278,14 @@ func streamEnding(r *http.Request) (ending <-chan struct{}, closed func()) {
 	}
 	e := &recordingStreamsEnd
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.ended[tok] {
+		e.mu.Unlock()
 		c := make(chan struct{})
 		close(c)
 		return c, func() {}
 	}
+	starts := tok != e.current
+	e.current = tok
 	if e.open == nil {
 		e.open = make(map[string]*openStreams)
 	}
@@ -282,22 +295,53 @@ func streamEnding(r *http.Request) (ending <-chan struct{}, closed func()) {
 		e.open[tok] = o
 	}
 	o.n++
+	e.mu.Unlock()
+	if starts {
+		syncmgr.Get().ResumeRecording()
+	}
 	var once sync.Once
 	return o.end, func() {
 		once.Do(func() {
 			e.mu.Lock()
-			defer e.mu.Unlock()
+			last := false
 			if o.n--; o.n == 0 && e.open[tok] == o {
 				delete(e.open, tok)
+				last = tok == e.current
+			}
+			e.mu.Unlock()
+			if last && syncmgr.Get().StopWasAsked() {
+				endRecording(tok)
 			}
 		})
 	}
 }
 
+// endRecording ends the capture of the recording whose token is tok when it
+// is the current one (syncMock EndRecording): from here the agent captures
+// nothing until a recording starts. Another's end leaves the current one's
+// capture as it is. The check and the end are not one step: a new
+// recording's first stream attaching between them would have its capture
+// ended. No client does that today (a sidecar agent serves one recording,
+// keploy mock record one round at a time, each ending before the next
+// opens its streams).
+func endRecording(tok string) {
+	e := &recordingStreamsEnd
+	e.mu.Lock()
+	current := tok == e.current
+	e.mu.Unlock()
+	if current {
+		syncmgr.Get().EndRecording()
+	}
+}
+
 // endRecordingStreams ends every frame stream of the recording whose token is
 // tok (streamEnding): each puts on the stream what it still has, then its end
-// marker, and ends; one it reopens later ends at once.
+// marker, and ends; one it reopens later ends at once. Its client has read
+// all the agent owed it from before its stop: the recording ends first
+// (endRecording), so nothing the agent captures meanwhile reaches its streams
+// after what they put before their markers.
 func endRecordingStreams(tok string) {
+	endRecording(tok)
 	e := &recordingStreamsEnd
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -20,7 +20,13 @@
 #            with where the proxy is reached: loopback, which only its debug
 #            log can show, as the kernel sends a native application's calls
 #            to the proxy whatever address they are made at. The calls must
-#            still reach both mocks
+#            still reach both mocks. The agent's log names the question by
+#            its labels' shape and tag, never the name (a name is traffic):
+#            the replay's misses file names the lookup whole
+#   The record phases that reach the dependency by its name (online,
+#   hosts-record, and their *-proven runs) run at debug level too, and their
+#   agent's whole log must not name it either: a recording names the DNS
+#   question it records, and the calls it makes to the name.
 #   loopback loopback only: record a dependency on 127.0.0.1, stop it, and
 #            replay it
 #
@@ -36,13 +42,25 @@
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
 
-# This lane's directory: lane_switch.sh.
+# This lane's directory: lane_switch.sh; its parent: sudo_env.sh.
 # shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A lane that could not load it would skip both halves and pass: fail instead.
 # shellcheck source=lane_switch.sh
 if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
   echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+# shellcheck source=../sudo_env.sh
+if ! source "$MOCK_DIR/../sudo_env.sh" || ! declare -F verify_ran >/dev/null; then
+  echo "FAIL: could not load sudo_env.sh from $MOCK_DIR/.."
+  exit 1
+fi
+# http_mocks_are and http_mocks_only: what a record kept is the client's two
+# calls, as Http mocks, and DNS mocks only where the phase looks the name up.
+# shellcheck source=../mock-kinds.sh
+if ! source "$MOCK_DIR/../mock-kinds.sh" || ! declare -F http_mocks_only >/dev/null; then
+  echo "FAIL: could not load mock-kinds.sh from $MOCK_DIR/.."
   exit 1
 fi
 
@@ -195,9 +213,13 @@ ip -brief addr > "$WORK/$PHASE.addr"
 python3 client.py "$URL" > /dev/null 2>&1
 echo $? > "$WORK/$PHASE.direct"
 # Only the debug log says what keploy's DNS server answered a name it has no
-# recorded answer for, which hosts-replay has to show.
+# recorded answer for, which hosts-replay has to show. The record phases that
+# call the dependency by its name run at debug level too: their agent's whole
+# log is checked for the name (hostcheck), at the level production runs it.
 DEBUG=""
-[ "$PHASE" = hosts-replay ] && DEBUG="--debug"
+case "$PHASE" in
+  hosts-replay|online|hosts-record|online-proven|hosts-record-proven) DEBUG="--debug" ;;
+esac
 KEPLOY_PROVEN="$PROVEN" "$BIN" mock "$SUB" -c "python3 client.py $URL" --name "$SET" --disable-tele $DEBUG > "$WORK/$PHASE.log" 2>&1
 echo $? > "$WORK/$PHASE.exit"
 exit 0
@@ -209,7 +231,7 @@ phase() {
   local name=$1 direct=$2 failed=$FAIL
   FAIL=0
   echo "--- $name ---"
-  sudo env PATH="$PATH" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
     unshare -n -m --propagation private "$WORK/inside.sh" "$name" || fail "$name: the namespace itself failed"
   cat "$WORK/$name.addr" 2>/dev/null
   [ "$(cat "$WORK/$name.direct" 2>/dev/null)" = "$direct" ] ||
@@ -217,7 +239,9 @@ phase() {
   local got
   got="$(cat "$WORK/$name.exit" 2>/dev/null)"
   [ "$got" = 0 ] || fail "$name: keploy exited ${got:-nothing}, want 0"
-  grep -c "^ok /" "$WORK/$name.log" | grep -qx 2 || fail "$name: the test command did not get both answers"
+  # A *-proven phase records under the switch (inside.sh).
+  [ "${name%-proven}" = "$name" ] || verify_ran 1 "$WORK/$name.log" || FAIL=1
+  grep -c "^ok /" "$WORK/$name.log" | grep -x 2 >/dev/null || fail "$name: the test command did not get both answers"
   if [ "$FAIL" -ne 0 ]; then
     echo "--- $name: the last 40 lines keploy logged ---"
     tail -n 40 "$WORK/$name.log" 2>/dev/null
@@ -235,23 +259,80 @@ proven_offline() {
   fi
 }
 
+# No line of the agent's names the dependency: not its DNS lines, nor any
+# other (an egress, proxy, ingress or miss line), each naming a host by its
+# labels' shape and tag (a name is traffic). One field is exempt, by its key:
+# the agent's config dump ("config has been initialised") quotes the user's
+# own command line in config.command, which names the dependency as the user
+# wrote it, and is no traffic. The dump must be there exactly once, so a
+# change in its form fails the check instead of exempting more.
+hostcheck() {
+  python3 -I - "$1" dep.keploy.test <<'PY'
+import json, re, sys
+log, name = sys.argv[1], sys.argv[2]
+text = re.sub(r"\x1b\[[0-9;]*m", "", open(log, encoding="utf-8", errors="replace").read())
+leaks, dumps = [], 0
+for line in text.splitlines():
+    if "Keploy(agent):" not in line:
+        continue
+    parts = line.split("\t")
+    if len(parts) >= 4 and parts[2] == "config has been initialised":
+        dumps += 1
+        try:
+            fields = json.loads(parts[3])
+            fields["config"].pop("command")
+        except (ValueError, KeyError, TypeError) as e:
+            leaks.append("the config dump has no config.command to exempt (%s): %s" % (e, line[:300]))
+            continue
+        if name in json.dumps(fields):
+            leaks.append("the config dump names it outside config.command: " + line[:400])
+        continue
+    if name in line:
+        leaks.append(line[:400])
+if dumps != 1:
+    leaks.append("want the agent's config dump exactly once, found %d" % dumps)
+for l in leaks[:5]:
+    print(l)
+sys.exit(1 if leaks else 0)
+PY
+}
+# record_hostcheck <phase>: a record phase's agent names the dependency
+# nowhere in its log (hostcheck).
+record_hostcheck() {
+  local out
+  if ! out=$(hostcheck "$WORK/$1.log"); then
+    fail "$1: the recording agent's log names the dependency dep.keploy.test outside the user's command line: $out"
+  fi
+}
+
 if half off; then
 phase online 0
+record_hostcheck online
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/online/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
   fail "online: no DNS lookup was recorded"
-[ "$(grep -c '^kind: Http' "$WORK/keploy/online/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "online: want 2 HTTP mocks"
+MOCKS=$(http_mocks_are "$WORK/keploy/online/mocks.yaml" 2) ||
+  fail "online: want 2 Http mocks and no mock but DNS beside them, got $MOCKS"
 phase offline 1
 proven_offline online
 
 phase hosts-record 0
+record_hostcheck hosts-record
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/hosts/mocks.yaml" 2>/dev/null)" -eq 0 ] ||
   fail "hosts-record: a DNS lookup was recorded for a name /etc/hosts answers"
-[ "$(grep -c '^kind: Http' "$WORK/keploy/hosts/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "hosts-record: want 2 HTTP mocks"
+MOCKS=$(http_mocks_only "$WORK/keploy/hosts/mocks.yaml" 2) ||
+  fail "hosts-record: want 2 Http mocks and no other, got $MOCKS"
 phase hosts-replay 1
-grep -aq 'synthesized A fallback.*"query": "dep.keploy.test.".*"proxy_ip4": "127.0.0.1"' "$WORK/hosts-replay.log" ||
-  fail "hosts-replay: keploy's DNS server did not answer dep.keploy.test with loopback"
+# The answer, by its line: the question by its labels' shape and its tag
+# under the replay's session, never its name, which the agent's log never
+# holds; the lookup itself, whole, where the replay names each call no mock
+# answered (keploy/<set>/last-replay-misses.yaml).
+grep -aqE 'synthesized A fallback.*"query": "\{\}\.\{\}\.\{\}\. #[0-9a-f]{12}".*"proxy_ip4": "127\.0\.0\.1"' "$WORK/hosts-replay.log" ||
+  fail "hosts-replay: keploy's DNS server did not say it answered the name, by its shape and tag, with loopback"
+if ! out=$(hostcheck "$WORK/hosts-replay.log"); then
+  fail "hosts-replay: the agent's log names the dependency dep.keploy.test outside the user's command line: $out"
+fi
+grep -aqE '^[ -]*call: A dep\.keploy\.test\.$' "$WORK/keploy/hosts/last-replay-misses.yaml" 2>/dev/null ||
+  fail "hosts-replay: the replay's misses file does not name the lookup of dep.keploy.test: $(cat "$WORK/keploy/hosts/last-replay-misses.yaml" 2>/dev/null | head -20)"
 # Not proven_offline: the lookups have no recorded answer, so the receipt
 # counts them as misses and the set as not isolated. What this phase can
 # prove is that the calls made at the answer reached both recorded mocks.
@@ -259,8 +340,8 @@ grep -qx 'consumed: 2' "$WORK/keploy/hosts/last-replay.yaml" 2>/dev/null ||
   fail "hosts-replay: the calls did not reach both recorded mocks"
 
 phase loopback-record 0
-[ "$(grep -c '^kind: Http' "$WORK/keploy/loopback/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "loopback-record: want 2 HTTP mocks"
+MOCKS=$(http_mocks_only "$WORK/keploy/loopback/mocks.yaml" 2) ||
+  fail "loopback-record: want 2 Http mocks and no other, got $MOCKS"
 phase loopback-replay 1
 proven_offline loopback
 fi
@@ -268,23 +349,25 @@ fi
 if half on; then
 # Under the proven switch: the same records.
 phase online-proven 0
+record_hostcheck online-proven
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
   fail "online-proven: no DNS lookup was recorded"
-[ "$(grep -c '^kind: Http' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "online-proven: want 2 HTTP mocks"
+MOCKS=$(http_mocks_are "$WORK/keploy/online-proven/mocks.yaml" 2) ||
+  fail "online-proven: want 2 Http mocks and no mock but DNS beside them, got $MOCKS"
 phase hosts-record-proven 0
+record_hostcheck hosts-record-proven
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 0 ] ||
   fail "hosts-record-proven: a DNS lookup was recorded for a name /etc/hosts answers"
-[ "$(grep -c '^kind: Http' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "hosts-record-proven: want 2 HTTP mocks"
+MOCKS=$(http_mocks_only "$WORK/keploy/hosts-proven/mocks.yaml" 2) ||
+  fail "hosts-record-proven: want 2 Http mocks and no other, got $MOCKS"
 phase loopback-record-proven 0
-[ "$(grep -c '^kind: Http' "$WORK/keploy/loopback-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "loopback-record-proven: want 2 HTTP mocks"
+MOCKS=$(http_mocks_only "$WORK/keploy/loopback-proven/mocks.yaml" 2) ||
+  fail "loopback-record-proven: want 2 Http mocks and no other, got $MOCKS"
 
 # ...and this build refuses the replay under it, offline, before the test
 # command runs.
 echo "--- offline-proven ---"
-sudo env PATH="$PATH" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
   unshare -n -m --propagation private "$WORK/inside.sh" offline-proven || fail "offline-proven: the namespace itself failed"
 [ "$(cat "$WORK/offline-proven.exit" 2>/dev/null)" = 1 ] ||
   fail "offline-proven: keploy exited $(cat "$WORK/offline-proven.exit" 2>/dev/null), want this build's refusal (1)"

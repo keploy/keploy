@@ -17,7 +17,10 @@ var ErrFakeConnNoWrite = errors.New("fakeconn: Write is not permitted; parsers m
 // ErrClosed is returned by Read/ReadChunk after Close, once the reader has
 // taken every chunk already on the channel, while the producer has not ended
 // the stream (closed its channel). A stream its producer ended reads io.EOF,
-// Close or not. io.EOF says only that: the producer ended the stream, not that
+// Close or not. The relay never ends a stream whose reader was closed before
+// its end (its tee leaves the channel open), so a reader the session closed
+// reads ErrClosed after what it was handed, however far behind its capture it
+// gets there. io.EOF says only that: the producer ended the stream, not that
 // every chunk the connection carried reached the channel. A producer that ends
 // a stream before the connection's end (it gave up on its consumer, or the
 // capture lost a chunk) says so itself, apart from the stream.
@@ -100,21 +103,24 @@ type FakeConn struct {
 	runFirst       uint32
 	runFrom, runTo int64
 	reportRun      func(Dropped)
-	// pos is the absolute offset, in bytes of this stream, of the next
-	// byte the parser will be handed. Equivalently: how many bytes have
-	// already left this FakeConn, counting bytes delivered to the parser,
-	// bytes swallowed on its behalf by [FakeConn.DiscardBefore], and chunks
-	// the floor dropped ([FakeConn.DropBefore]).
-	//
-	// pending therefore holds the bytes at offsets [pos, pos+len(pending)),
-	// and pos+len(pending) is the number of bytes pulled off ch so far — the
-	// quantity the producer counts on its side.
-	pos int64
+	// tap is Tap's: told of every byte as it leaves the FakeConn, nil while
+	// there is none. It takes the place of a copy of consumed kept under mu,
+	// so the FakeConn is no larger for it.
+	tap func([]byte)
 	// discardTo is the discard watermark set by [FakeConn.DiscardBefore]:
 	// every byte below it is swallowed rather than delivered. Monotonic.
 	// Written under mu, and atomic so ReadThrough takes no lock.
 	discardTo atomic.Int64
-	// consumed mirrors pos, for Consumed.
+	// consumed is the absolute offset, in bytes of this stream, of the next
+	// byte the parser will be handed. Equivalently: how many bytes have
+	// already left this FakeConn, counting bytes delivered to the parser,
+	// bytes swallowed on its behalf by [FakeConn.DiscardBefore], and chunks
+	// the floor dropped ([FakeConn.DropBefore]). Written under mu, and atomic
+	// so Consumed takes no lock.
+	//
+	// pending therefore holds the bytes at offsets [consumed,
+	// consumed+len(pending)), and consumed+len(pending) is the number of bytes
+	// pulled off ch so far — the quantity the producer counts on its side.
 	consumed atomic.Int64
 	// waits counts the times the reader found nothing to take and blocked
 	// for the next chunk; waiting is set while it is blocked so. See
@@ -143,9 +149,16 @@ type FakeConn struct {
 	closed          atomic.Bool
 	// first is the first floor DropBefore was given (guarded by mu), 0 until
 	// then: the stream's start is what was captured before it (started). In
-	// the padding after closed, so a FakeConn stays in the 288 B size class.
-	first   uint32
-	closeCh chan struct{}
+	// the padding after closed.
+	first uint32
+	// lastReadSeq is the ConnSeq of the chunk the reader was last handed
+	// bytes of (LastReadConnSeq), 0 until one with a number was. In the
+	// padding after first.
+	lastReadSeq atomic.Uint32
+	closeCh     chan struct{}
+	// endCh is closed (under mu) as the reader is first handed io.EOF: it has
+	// read the stream to the end its producer gave it (ReadToEnd).
+	endCh chan struct{}
 
 	deadlineMu        sync.Mutex
 	deadlineCh        chan struct{}
@@ -199,6 +212,7 @@ func newWithLogger(ch <-chan Chunk, localAddr, remoteAddr net.Addr, log logger) 
 		ch:      ch,
 		logger:  log,
 		closeCh: make(chan struct{}),
+		endCh:   make(chan struct{}),
 		local:   localAddr,
 		remote:  remoteAddr,
 	}
@@ -280,22 +294,46 @@ func (f *FakeConn) skipLocked(n int) {
 	f.partial = f.partial || n > 0
 }
 
-// advanceLocked counts n bytes as having left the FakeConn. Caller holds mu.
-func (f *FakeConn) advanceLocked(n int) {
-	f.pos += int64(n)
-	f.consumed.Store(f.pos)
+// advanceLocked counts b, the stream's next bytes, as having left the FakeConn,
+// and tells the tap of them. Caller holds mu.
+func (f *FakeConn) advanceLocked(b []byte) {
+	f.consumed.Add(int64(len(b)))
+	if f.tap != nil {
+		f.tap(b)
+	}
+}
+
+// Tap makes tap be told of every byte of the stream as it leaves the
+// FakeConn, in the stream's order, from the next one on: handed to the reader
+// (Read, ReadChunk), swallowed for it (DiscardBefore), dropped by the floor
+// (DropBefore, SettleStart) or discarded by SkipThrough's cut. A peeked chunk
+// has not left it. nil removes the tap. A parser that has to know where the
+// messages of a stream begin across bytes it does not read (a cut it makes
+// after a message it could not frame) follows them so.
+//
+// tap runs on the reader's goroutine (bytes leave the FakeConn only in the
+// reader's own calls), with the FakeConn's lock held: it must not call the
+// FakeConn, and must not keep b, which is the producer's. It is the reader's
+// own call, as a Read is.
+func (f *FakeConn) Tap(tap func(b []byte)) {
+	f.mu.Lock()
+	f.tap = tap
+	f.mu.Unlock()
 }
 
 // deliverLocked hands the reader n bytes of c: they leave the FakeConn, and
-// c's times are the last delivered (LastReadTime, LastWrittenTime). Caller
-// holds mu.
+// c's times and capture number are the last delivered (LastReadTime,
+// LastWrittenTime, LastReadConnSeq). Caller holds mu.
 func (f *FakeConn) deliverLocked(c Chunk, n int) {
-	f.advanceLocked(n)
+	f.advanceLocked(c.Bytes[:n])
 	if !c.ReadAt.IsZero() {
 		f.lastReadNano.Store(c.ReadAt.UnixNano())
 	}
 	if !c.WrittenAt.IsZero() {
 		f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
+	}
+	if c.ConnSeq != 0 {
+		f.lastReadSeq.Store(c.ConnSeq)
 	}
 }
 
@@ -309,11 +347,11 @@ func (f *FakeConn) deliverLocked(c Chunk, n int) {
 func (f *FakeConn) next() error {
 	for {
 		f.mu.Lock()
-		if n := min(f.discardTo.Load()-f.pos, int64(len(f.pending.Bytes))); n > 0 {
+		if n := min(f.discardTo.Load()-f.consumed.Load(), int64(len(f.pending.Bytes))); n > 0 {
+			f.advanceLocked(f.pending.Bytes[:n])
 			f.skipLocked(int(n))
-			f.advanceLocked(int(n))
 		}
-		if f.hasPending && f.pos >= f.discardTo.Load() {
+		if f.hasPending && f.consumed.Load() >= f.discardTo.Load() {
 			f.mu.Unlock()
 			return nil
 		}
@@ -374,7 +412,7 @@ func (f *FakeConn) floorCoversLocked(c Chunk) bool {
 // to the reader. Caller holds mu.
 func (f *FakeConn) dropPendingLocked() {
 	f.dropLocked(f.pending)
-	f.advanceLocked(len(f.pending.Bytes))
+	f.advanceLocked(f.pending.Bytes)
 	f.pending, f.hasPending, f.partial = Chunk{}, false, false
 }
 
@@ -467,7 +505,7 @@ func (f *FakeConn) AtChunkBoundary() bool {
 func (f *FakeConn) SkipThrough(t time.Time) (n int64, last time.Time, err error) {
 	for {
 		f.mu.Lock()
-		if !f.hasPending && f.pos >= f.discardTo.Load() {
+		if !f.hasPending && f.consumed.Load() >= f.discardTo.Load() {
 			// Nothing in hand: the last chunk read, all of it, was captured
 			// at t or after it. (A chunk the skip discards was captured
 			// before t, so this holds or not for the whole of the skip.)
@@ -580,7 +618,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 			select {
 			case c, ok := <-f.ch:
 				if !ok {
-					return Chunk{}, io.EOF
+					return Chunk{}, f.readEnd()
 				}
 				return c, nil
 			default:
@@ -591,7 +629,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 		select {
 		case c, ok := <-f.ch:
 			if !ok {
-				return Chunk{}, io.EOF
+				return Chunk{}, f.readEnd()
 			}
 			return c, nil
 		default:
@@ -607,7 +645,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 		case c, ok := <-f.ch:
 			f.waiting.Store(false)
 			if !ok {
-				return Chunk{}, io.EOF
+				return Chunk{}, f.readEnd()
 			}
 			return c, nil
 		case <-f.closeCh:
@@ -622,6 +660,29 @@ func (f *FakeConn) receive() (Chunk, error) {
 		}
 	}
 }
+
+// readEnd notes that the reader has read the stream to its end (ReadToEnd),
+// and returns the io.EOF it reads there.
+func (f *FakeConn) readEnd() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	select {
+	case <-f.endCh:
+	default:
+		close(f.endCh)
+	}
+	return io.EOF
+}
+
+// ReadToEnd returns a channel closed once the reader has read this stream to
+// the end its producer gave it: it was handed every chunk the producer put on
+// the channel, and then io.EOF. Nothing more can reach the reader then. The
+// relay ends a stream so only once its tee has handed on every chunk it
+// captured for it (or where a hole cut the stream, which it says itself:
+// Config.EndAtHole), so a reader past it holds nothing of the capture unread.
+// A reader closed before its producer ended the stream reads ErrClosed, not
+// the end, and never gets there.
+func (f *FakeConn) ReadToEnd() <-chan struct{} { return f.endCh }
 
 // Dropped is a run of chunks the floor dropped (FakeConn.DropBefore), reported
 // once as it ends.
@@ -831,7 +892,7 @@ func (f *FakeConn) DiscardBefore(offset int64) int64 {
 	if offset > f.discardTo.Load() {
 		f.discardTo.Store(offset)
 	}
-	if n := f.discardTo.Load() - f.pos; n > 0 {
+	if n := f.discardTo.Load() - f.consumed.Load(); n > 0 {
 		return n
 	}
 	return 0
@@ -860,11 +921,19 @@ func (f *FakeConn) LastReadTime() time.Time {
 	return time.Unix(0, n)
 }
 
+// LastReadConnSeq returns the capture sequence (Chunk.ConnSeq) of the chunk
+// the reader was last handed bytes of (Read, ReadChunk, and what SkipThrough
+// discards, which it delivers; not Peek, nor a chunk the floor dropped), or 0
+// if none carried one. It orders what was read
+// against the other direction's chunks (Chunk.CapturedBefore) where their
+// capture times cannot: two chunks stamped alike, or one not stamped at all.
+func (f *FakeConn) LastReadConnSeq() uint32 { return f.lastReadSeq.Load() }
+
 // LastWrittenTime returns the WrittenAt timestamp of the most recently
 // delivered Chunk, or the zero time if no Chunk has been delivered or
 // no chunk carried a non-zero WrittenAt. Parsers that need response-
-// side semantics (time the relay handed the byte off to the real peer)
-// should prefer this over LastReadTime for consistency with other V2
+// side semantics (time the relay began handing the bytes to the real
+// peer, Chunk.WrittenAt) should prefer this over LastReadTime for consistency with other V2
 // recorders that anchor ResTimestampMock to chunk.WrittenAt.
 func (f *FakeConn) LastWrittenTime() time.Time {
 	n := f.lastWrittenNano.Load()
@@ -901,8 +970,10 @@ func (f *FakeConn) Close() error {
 // session's abort, as its parser is retired; by the proxy's dispatcher once
 // the parser has returned; or by the relay at its teardown, once its tees'
 // drains have returned (a parser behind its capture may still be reading what
-// the channel holds then). The relay's tee selects on this while delivering:
-// a consumer that is merely slow must never cost a recorded chunk, so
+// the channel holds then). The relay's tee reads it as it ends the stream,
+// and leaves open a stream closed before its end, so its reader reads
+// ErrClosed there. It selects on it while delivering, too: a consumer that is
+// merely slow must never cost a recorded chunk, so
 // delivery blocks, and this is the only signal that says the consumer is
 // genuinely gone rather than behind. At the relay's teardown no tee selects
 // on it any more.

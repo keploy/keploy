@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -205,14 +204,11 @@ func TestVerifyModeCatchesALearnedSieveThatDropsAMatch(t *testing.T) {
 	lp := liveParts(context.Background(), live("GET", "/item/1", "", nil))
 	ls := n.shape(lp, sameDest)
 	wrong := &learnSieve{masked: "item/2"}
-	was := integrations.ExactViewVerify.Load()
-	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
-
-	integrations.ExactViewVerify.Store(false)
+	r.verify = false
 	if group, _ := r.learnedGroup(lp, ls, n, wrong); len(group) != 0 {
 		t.Fatalf("verify off: group %v; want the wrong sieve's none", strictNames(group))
 	}
-	integrations.ExactViewVerify.Store(true)
+	r.verify = true
 	func() {
 		defer func() {
 			if p := recover(); p == nil || !strings.Contains(fmt.Sprint(p), "learned group") {
@@ -243,9 +239,7 @@ func TestVerifyModeReadsWhatTheTestAnsweredOnce(t *testing.T) {
 		answeredMocks: func() []*models.Mock { return nil }}
 	lp := liveParts(context.Background(), live("GET", "/item/1", "", nil))
 	ls := n.shape(lp, sameDest)
-	was := integrations.ExactViewVerify.Load()
-	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
-	integrations.ExactViewVerify.Store(true)
+	r.verify = true
 	if group, _ := r.learnedGroup(lp, ls, n, n.learnSieveOf(lp)); len(group) != 1 {
 		t.Fatalf("group %v; want mock-0, as the first read found it", strictNames(group))
 	}

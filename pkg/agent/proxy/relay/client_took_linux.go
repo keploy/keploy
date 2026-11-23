@@ -3,16 +3,12 @@
 package relay
 
 import (
-	"net"
 	"syscall"
 	"unsafe"
 
+	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
-
-// canAskClientSockets: on Linux a client connection that is a TCP socket is
-// asked what its client did (clientSocketOf).
-const canAskClientSockets = true
 
 // tcpClientSocket is the proxy's end of a client connection that is a TCP
 // socket. Its look asks the socket for its TCP_INFO: the state, and
@@ -21,11 +17,11 @@ const canAskClientSockets = true
 // SIOCOUTQ, the bytes written to it its peer has not acknowledged yet. Made
 // once per connection, with its questions, so neither allocates. The client's
 // forwarder looks as it reads the client's end and the destination's
-// forwarder before it writes, one at a time (Relay.finMu) and only until the
-// FIN is found; resolve looks while chunks wait for the client's answer, only
-// after. No two looks run at once. written is the destination's forwarder's,
-// once the FIN is found, and may run while resolve looks: it has an answer of
-// its own.
+// forwarder before it writes and as it reads the destination's end, one at a
+// time (Relay.finMu) and only until the FIN is found; resolve looks while
+// chunks wait for the client's answer, only after. No two looks run at once.
+// written is the destination's forwarder's, once the FIN is found, and may
+// run while resolve looks: it has an answer of its own.
 //
 // The states (include/net/tcp_states.h, as golang.org/x/sys/unix names them)
 // the socket can be in while the relay asks it: ESTABLISHED, the client has
@@ -82,28 +78,13 @@ func unsentOf(fd uintptr, n *int32) bool {
 	return errno == 0 && *n >= 0
 }
 
-// clientSocketOf is the TCP socket under the client conn c, through the conns
-// that wrap one and say so (NetConn: util.Conn, *tls.Conn, the proxy's
-// trackedConn and recordConn); nil for a conn that is not a TCP socket, which
-// is not asked.
-func clientSocketOf(c net.Conn) clientSocket {
-	for i := 0; c != nil && i < 16; i++ { // bounded: a cycle must not hang
-		if tc, ok := c.(*net.TCPConn); ok {
-			rc, err := tc.SyscallConn()
-			if err != nil {
-				return nil
-			}
-			s := &tcpClientSocket{rc: rc, askInfo: tcpInfo, askUnsent: unsentOf}
-			s.ask, s.count = s.lookAt, s.countAt
-			return s
-		}
-		u, ok := c.(interface{ NetConn() net.Conn })
-		if !ok {
-			return nil
-		}
-		c = u.NetConn()
-	}
-	return nil
+// newTCPClientSocket is the client socket rc (clientSocketOf), with its
+// questions. Linux's TCP_INFO and SIOCOUTQ have no answer that a look must
+// say it cannot read: nothing is logged.
+func newTCPClientSocket(rc syscall.RawConn, _ *zap.Logger) *tcpClientSocket {
+	s := &tcpClientSocket{rc: rc, askInfo: tcpInfo, askUnsent: unsentOf}
+	s.ask, s.count = s.lookAt, s.countAt
+	return s
 }
 
 func (s *tcpClientSocket) look() clientLook {

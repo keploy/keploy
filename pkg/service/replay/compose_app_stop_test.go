@@ -13,6 +13,8 @@ import (
 	"go.keploy.io/server/v3/utils"
 )
 
+var _ composeAppStopper = (*composeInstr)(nil)
+
 // composeInstr is the harness's instrumentation with the stop and start of a
 // compose app's container (AgentClient's), counting each.
 type composeInstr struct {
@@ -21,11 +23,15 @@ type composeInstr struct {
 	killed        string
 	stopErr       error
 	startErr      error
-	// order is the agent's readiness and the app's starts, as they came.
+	// order is the agent's readiness, the notices that the app starts anew
+	// (noticedCompose) and the app's starts, as they came.
 	order []string
 	// stopped: the last stop ended the app's container, so a start starts
 	// it anew; a stop that failed leaves it running.
 	stopped bool
+	// unread: the daemon gives keploy's start no answer of the container,
+	// so the start cannot tell whether it starts it anew.
+	unread bool
 }
 
 func (c *composeInstr) StopComposeApp(context.Context) (string, error) {
@@ -36,15 +42,28 @@ func (c *composeInstr) StopComposeApp(context.Context) (string, error) {
 	return c.killed, c.stopErr
 }
 
-func (c *composeInstr) StartComposeApp(context.Context) (bool, error) {
+// StartComposeApp answers as app.App's: startErr is a container it cannot
+// tell (no inspect, so no notice); a container read not running is told to
+// anew before its docker start.
+func (c *composeInstr) StartComposeApp(_ context.Context, anew func()) (models.ComposeAppStart, error) {
 	c.starts++
-	c.order = append(c.order, "start")
 	if c.startErr != nil {
-		return false, c.startErr
+		c.order = append(c.order, "start")
+		return models.ComposeAppUnread, c.startErr
 	}
-	anew := c.stopped
+	start := models.ComposeAppFoundRunning
+	if c.stopped {
+		start = models.ComposeAppStartedAnew
+	}
+	if c.unread {
+		start = models.ComposeAppUnread
+	}
+	if start == models.ComposeAppStartedAnew {
+		anew()
+	}
+	c.order = append(c.order, "start")
 	c.stopped = false
-	return anew, nil
+	return start, nil
 }
 
 func (c *composeInstr) MakeAgentReadyForDockerCompose(ctx context.Context) error {
@@ -101,7 +120,8 @@ func TestAComposeSetStopsItsAppBeforeItsEndsRead(t *testing.T) {
 
 // A compose app's stop that had to kill it, or that failed, leaves the set's
 // end not judged, naming why; an app that could not be started again halts
-// the set; with the switch off nothing is stopped.
+// the set; with the switch off nothing is stopped at the end of a kept stack's
+// set that another follows (compose_report_stop_test.go).
 func TestAComposeAppsStopThatKilledOrFailedLeavesTheSetUnjudged(t *testing.T) {
 	provenOn(t, true)
 	for _, tc := range []struct {

@@ -84,6 +84,13 @@ type Upstream struct {
 	// first, and restErr the error that came with it.
 	rest    []byte
 	restErr error
+	// reading says a Read is in the conn beneath. A layer above it (a TLS
+	// conn, or the relay) reads it only once it has handed on every whole
+	// chunk it held, so none of them is left to be numbered then
+	// (PendingBefore).
+	reading bool
+	// onRead is told as such a Read begins (OnRead).
+	onRead func()
 }
 
 // cut is a client chunk's: at is the count of the bytes the destination had
@@ -200,12 +207,18 @@ func (u *Upstream) Read(p []byte) (int, error) {
 		u.mu.Unlock()
 		return n, err
 	}
+	u.reading = true
+	onRead := u.onRead
 	u.mu.Unlock()
+	if onRead != nil {
+		onRead()
+	}
 
 	n, err := u.Conn.Read(p)
 
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	u.reading = false
 	if keep := u.roomLocked(n); keep < n {
 		u.rest = append([]byte(nil), p[keep:n]...)
 		u.restErr, err = err, nil
@@ -213,6 +226,47 @@ func (u *Upstream) Read(p []byte) (int, error) {
 	}
 	u.read += uint64(n)
 	return n, err
+}
+
+// OnRead has f told each time a Read on the conn beneath begins: from then on
+// no chunk read so far is left to be numbered (PendingBefore), which f, told
+// without u's lock held, may ask. f must not block.
+func (u *Upstream) OnRead(f func()) {
+	u.mu.Lock()
+	u.onRead = f
+	u.mu.Unlock()
+}
+
+// PendingBefore reports whether a chunk of direction dir not numbered yet may
+// still be numbered before seq, a number already given. A client chunk never
+// may: it is numbered after every number given. A chunk read from the
+// destination may while a cut numbered before seq is not behind it: some of
+// the bytes the destination had sent when the client chunk that placed it was
+// numbered are still to be read, or every one of them is read and a layer
+// above (a TLS conn holding whole records, or the relay with what a Read has
+// just returned) may still hand on a chunk that ends at the cut, which takes
+// the cut's number (FromDest). That ends once a Read on the conn beneath has
+// begun (reading, OnRead): a layer reads it only once it has handed on every
+// whole chunk it held, and what it reads then passes the cut. For a seq not
+// given yet, a chunk of either direction may.
+func (u *Upstream) PendingBefore(dir fakeconn.Direction, seq uint32) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.n == 0 || (fakeconn.Chunk{ConnSeq: fakeconn.ConnSeqOf(u.n)}).CapturedBefore(seq) {
+		return true
+	}
+	if dir == fakeconn.FromClient {
+		return false
+	}
+	for _, c := range u.cuts {
+		if !(fakeconn.Chunk{ConnSeq: fakeconn.ConnSeqOf(c.n)}).CapturedBefore(seq) {
+			return false // cuts ascend: none after it is before seq either
+		}
+		if c.at > u.read || c.at == u.read && !u.reading {
+			return true
+		}
+	}
+	return false
 }
 
 // roomLocked is how many of the next n bytes a Read may return: up to the

@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -40,16 +39,33 @@ func legacyCAFingerprint() (fp [32]byte, ok bool) {
 	return fp, true
 }
 
-// SweepLegacyCA removes every trace of the retired static MITM CA this host may
+// SweepLegacyCA removes the traces of the retired static MITM CA this host may
 // carry from past keploy runs or from the documented "bake it into the image"
-// recipe: the anchor files in the system store, the fixed JDK keystore alias,
-// and the world-writable temp files the old client left behind. It is
-// best-effort and idempotent — a host that was never touched, or already
-// cleaned, is a no-op. With fresh=true the system trust bundle is rebuilt from
-// scratch (update-ca-certificates --fresh on Debian) so hash-linked copies of a
-// removed anchor cannot linger.
+// recipe that need no JVM: the anchor files in the system store and the
+// world-writable temp files the old client left behind. The agent's start
+// runs it; the fixed JDK keystore alias goes in SweepLegacyJavaAlias, which
+// the agent runs once its proxy listens, as keytool may be needed and a JVM
+// takes seconds on a starved host. It is best-effort and idempotent — a host
+// that was never touched, or already cleaned, is a no-op. With fresh=true the
+// system trust bundle is rebuilt from scratch (update-ca-certificates --fresh
+// on Debian) so hash-linked copies of a removed anchor cannot linger.
 func SweepLegacyCA(ctx context.Context, logger *zap.Logger, fresh bool) {
 	sweepLegacyCA(ctx, logger, fresh, false)
+}
+
+// SweepLegacyJavaAlias removes the retired CA's fixed alias from the JDK
+// keystore keploy finds (JAVA_HOME, then the keytool on PATH), when its entry
+// is that CA. It reads a JKS keystore in Go: keytool runs only to delete the
+// alias, or to read a keystore Go cannot (PKCS12, as a JDK 18 or later
+// ships its cacerts). Off the agent's start path: the app reads keploy's
+// merged truststore (JAVA_TOOL_OPTIONS), not this keystore, and keytool's
+// writes to it are serialised with the run's own (jdkKeystoreMu).
+func SweepLegacyJavaAlias(ctx context.Context, logger *zap.Logger) {
+	fp, ok := legacyCAFingerprint()
+	if !ok {
+		return
+	}
+	removeLegacyJavaAlias(ctx, logger, fp)
 }
 
 // SweepLegacyCAAggressive is the explicit `keploy ca clean` path. It does
@@ -59,6 +75,7 @@ func SweepLegacyCA(ctx context.Context, logger *zap.Logger, fresh bool) {
 // name, and the boot sweep of one could delete the other's live store).
 func SweepLegacyCAAggressive(ctx context.Context, logger *zap.Logger, fresh bool) {
 	sweepLegacyCA(ctx, logger, fresh, true)
+	SweepLegacyJavaAlias(ctx, logger)
 }
 
 func sweepLegacyCA(ctx context.Context, logger *zap.Logger, fresh, includeTruststores bool) {
@@ -72,12 +89,11 @@ func sweepLegacyCA(ctx context.Context, logger *zap.Logger, fresh, includeTrusts
 	if removed > 0 {
 		logger.Info("removed retired static MITM CA anchors from the system trust store",
 			zap.Int("count", removed))
-		if err := refreshCaStore(ctx, fresh); err != nil {
+		if err := refreshCaStore(ctx, logger, fresh); err != nil {
 			logger.Debug("could not refresh the system CA store after removing legacy anchors", zap.Error(err))
 		}
 	}
 
-	removeLegacyJavaAlias(ctx, logger, fp)
 	removeLegacyTempFiles(logger, fp, includeTruststores)
 }
 
@@ -144,24 +160,34 @@ func fileIsExactlyCert(path string, fp [32]byte) bool {
 }
 
 // removeLegacyJavaAlias deletes the fixed "keployCA" alias from a JDK keystore,
-// but only after reading that entry back and confirming its certificate is the
-// retired CA — so a user's own entry under the same alias is never clobbered.
+// but only after reading that entry back and confirming its certificate is
+// fp's — so a user's own entry under the same alias is never clobbered. The
+// entry is read in Go when the keystore is a JKS (jdkKeystoreAliasCert), and
+// with keytool -exportcert only when it is not: with no such alias, or one
+// of another certificate, no JVM runs.
 func removeLegacyJavaAlias(ctx context.Context, logger *zap.Logger, fp [32]byte) {
 	keytool, cacerts, ok := resolveKeytoolAndCacerts()
 	if !ok {
 		return
 	}
-	der, ok := exportJavaAliasCert(ctx, keytool, cacerts, legacyCAAlias)
-	if !ok {
-		return
+	jdkKeystoreMu.Lock()
+	defer jdkKeystoreMu.Unlock()
+	der, read := jdkKeystoreAliasCert(cacerts, "changeit", legacyCAAlias)
+	if !read {
+		der = exportJavaAliasCert(ctx, keytool, cacerts, legacyCAAlias)
+	}
+	if der == nil {
+		return // no such alias
 	}
 	if sha256.Sum256(der) != fp {
 		logger.Debug("a 'keployCA' JDK alias exists but is not the retired CA; leaving it", zap.String("cacerts", cacerts))
 		return
 	}
-	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
-	out, err := cmd.CombinedOutput()
-	utils.BootStep("keytool -delete is over")
+	var out []byte
+	err := withStoreLock(ctx, logger, func() (err error) {
+		out, err = exec.CommandContext(ctx, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+		return err
+	})
 	if err != nil {
 		logger.Debug("could not delete the legacy JDK alias", zap.String("cacerts", cacerts), zap.ByteString("output", out), zap.Error(err))
 		return
@@ -170,26 +196,27 @@ func removeLegacyJavaAlias(ctx context.Context, logger *zap.Logger, fp [32]byte)
 }
 
 // exportJavaAliasCert returns the DER of alias's certificate from cacerts, or
-// ok=false when the alias is absent or keytool fails.
-func exportJavaAliasCert(ctx context.Context, keytool, cacerts, alias string) (der []byte, ok bool) {
+// nil when the alias is absent or keytool fails.
+func exportJavaAliasCert(ctx context.Context, keytool, cacerts, alias string) []byte {
 	cmd := exec.CommandContext(ctx, keytool, "-exportcert", "-rfc", "-alias", alias, "-keystore", cacerts, "-storepass", "changeit")
 	out, err := cmd.Output()
-	utils.BootStep("keytool -exportcert is over")
 	if err != nil {
-		return nil, false
+		return nil
 	}
 	block, _ := pem.Decode(out)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, false
+		return nil
 	}
 	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-		return nil, false
+		return nil
 	}
-	return block.Bytes, true
+	return block.Bytes
 }
 
 // resolveKeytoolAndCacerts finds a keytool and the cacerts it manages, from
-// JAVA_HOME first then PATH. ok=false when no JDK is reachable.
+// JAVA_HOME first then PATH. A keytool on PATH is often a link into its JDK
+// (/usr/bin/keytool through the alternatives), so its JDK is the one above
+// the file the link names. ok=false when no JDK is reachable.
 func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	exe := "keytool"
 	if runtime.GOOS == "windows" {
@@ -197,8 +224,7 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	}
 	if jh := os.Getenv("JAVA_HOME"); jh != "" {
 		kt := filepath.Join(jh, "bin", exe)
-		cc := filepath.Join(jh, "lib", "security", "cacerts")
-		if fileExists(kt) && fileExists(cc) {
+		if cc, found := jdkCacerts(jh); found && fileExists(kt) {
 			return kt, cc, true
 		}
 	}
@@ -206,10 +232,13 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	// Derive JAVA_HOME from <home>/bin/keytool -> <home>/lib/security/cacerts.
-	home := filepath.Dir(filepath.Dir(kt))
-	cc := filepath.Join(home, "lib", "security", "cacerts")
-	if !fileExists(cc) {
+	if resolved, err := filepath.EvalSymlinks(kt); err == nil {
+		kt = resolved
+	}
+	// Derive JAVA_HOME from <home>/bin/keytool, then its cacerts (jdkCacerts:
+	// JDK 8 keeps it under jre/).
+	cc, found := jdkCacerts(filepath.Dir(filepath.Dir(kt)))
+	if !found {
 		return "", "", false
 	}
 	return kt, cc, true
@@ -251,16 +280,20 @@ func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, includeTruststores b
 // On Debian/Ubuntu update-ca-certificates --fresh also prunes stale hash-links
 // to a deleted anchor (a plain run leaves dangling /etc/ssl/certs symlinks that
 // Go ignores but that are confusing); other distros' tools regenerate wholesale.
-func refreshCaStore(ctx context.Context, fresh bool) error {
-	if commandExists("update-ca-certificates") {
-		args := []string{}
-		if fresh {
-			args = append(args, "--fresh")
+//
+// It holds the store lock, as updateCaStore does.
+func refreshCaStore(ctx context.Context, logger *zap.Logger, fresh bool) error {
+	return withStoreLock(ctx, logger, func() error {
+		if commandExists("update-ca-certificates") {
+			args := []string{}
+			if fresh {
+				args = append(args, "--fresh")
+			}
+			return exec.CommandContext(ctx, "update-ca-certificates", args...).Run()
 		}
-		return exec.CommandContext(ctx, "update-ca-certificates", args...).Run()
-	}
-	// update-ca-trust / the rest take no --fresh; a bare extract regenerates.
-	return updateCaStore(ctx)
+		// update-ca-trust / the rest take no --fresh; a bare extract regenerates.
+		return runCaStoreUpdate(ctx)
+	})
 }
 
 func fileExists(path string) bool {

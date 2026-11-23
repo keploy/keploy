@@ -159,8 +159,10 @@ func TestTheTestRequestIsAnEarlierPlace(t *testing.T) {
 	}
 	for _, f := range [][2]string{{"ref-3f2b8c-ord-77", "ref-3f2b8c-ord-78"}, {"ref-ord-77", "ref-ord-78"}, {"ord-77", "ord-78"}} {
 		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(f[1]), shape(f[0]), at, given, nil, nil, nil)[0]
-		if ln.Kind != KindVariable || !ln.From.Given || ln.From.Mock != "test case test-1" || ln.From.Path != "body.order" || ln.From.Whole != (f[0] == "ord-77") {
-			t.Errorf("%q -> %q, drifted with the request's template value: %s from %+v (%s); want a variable of the request's body.order", f[0], f[1], ln.Kind, ln.From, ln.Why)
+		// keploy test sent the request: no client test's (Place.Client),
+		// so its test case binds nothing there.
+		if ln.Kind != KindVariable || !ln.From.Given || ln.From.Client || ln.From.Mock != "test case test-1" || ln.From.Path != "body.order" || ln.From.Whole != (f[0] == "ord-77") {
+			t.Errorf("%q -> %q, drifted with the request's template value: %s from %+v (%s); want a variable of the request's body.order, keploy test's request", f[0], f[1], ln.Kind, ln.From, ln.Why)
 		}
 	}
 	// A call of the test that sent it, inside a longer value, names it
@@ -751,7 +753,7 @@ func clientTestRefusal(why, part string, windowed bool, values ...string) bool {
 	if !windowed {
 		head = "keploy saw no read of the app's clock for its call" + which + ": "
 	}
-	if !strings.HasPrefix(why, head) || !strings.Contains(why, "If your test supplies this value, have it supply the same value in every run") || strings.Contains(why, "template variable") {
+	if !strings.HasPrefix(why, head) || !strings.Contains(why, "If your test supplies this value, give it to keploy where the test makes it, in Go v = keploytest.Given(t, \"v\", v), and each replay checks") || strings.Contains(why, "template variable") {
 		return false
 	}
 	for _, v := range values {

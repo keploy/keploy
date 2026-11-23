@@ -158,9 +158,12 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		// A test keploy could not judge says why, right under its status:
 		// whatever its row's status, nothing vouches for it.
 		fmt.Fprint(r.out, notJudgedLines(t))
-		// A test keploy skipped for a reason says why, right under its status.
+		// A test keploy skipped for a reason says why, and what kind of skip
+		// it was, right under its status.
 		if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
-			fmt.Fprintf(r.out, "  %s\n", quarantinedLine(models.SkipReasonOneLine(t.SkipReason)))
+			if _, err := r.out.WriteString("  " + skipLine(t.SkipKind, models.SkipReasonOneLine(t.SkipReason)) + "\n"); err != nil {
+				return fmt.Errorf("failed to print why a test was skipped in printTests: %w", err)
+			}
 		}
 		// ... but a PASSED test can still have stopped making a recorded
 		// outgoing call. That is the silent-green case; it gets one line here
@@ -302,13 +305,23 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	if obsolete > 0 {
 		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
 	}
-	// Tests keploy quarantined, with their reasons. Only a run whose caller
-	// skipped a test for a reason writes one (TestResult.SkipReason: the
-	// proven switch's gate, or a cloud replay skipping a test with no mapping
-	// entry), so a report without one prints exactly what it printed before.
-	quarantined := quarantinedTests(reports)
-	if len(quarantined) > 0 {
-		fmt.Fprintf(r.out, "\tTotal test quarantined: %d\n", len(quarantined))
+	// Tests keploy skipped for a reason, counted by kind of skip
+	// (TestResult.SkipKind: a quarantine, a skip for that run only, or one
+	// until the test is re-recorded), each kind in its own words. Only a run
+	// whose caller skipped a test for a reason writes one
+	// (TestResult.SkipReason: the proven switch's gate, a cloud replay, or a
+	// judge rerun), so a report without one prints exactly what it printed
+	// before, and one whose skips are all quarantines prints what it printed
+	// before skips had kinds.
+	skipped := skippedTests(reports)
+	for _, kind := range models.SkipKinds() {
+		if len(skipped[kind]) == 0 {
+			continue
+		}
+		total, _ := skipSummaryWords(kind)
+		if _, err := fmt.Fprintf(r.out, "\t%s: %d\n", total, len(skipped[kind])); err != nil {
+			return fmt.Errorf("failed to print the count of skipped tests in printSummary: %w", err)
+		}
 	}
 
 	// Dependencies that the recording says a test exercises but that the test
@@ -446,11 +459,13 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		}
 	}
 
-	if len(quarantined) > 0 {
-		fmt.Fprintln(r.out, "\nQUARANTINED TEST CASES:")
-		for _, q := range quarantined {
-			fmt.Fprintf(r.out, "\t- %s/%s: %s\n", q.set, q.test, models.SkipReasonOneLine(q.reason))
-		}
+	var lists strings.Builder
+	for _, kind := range models.SkipKinds() {
+		_, heading := skipSummaryWords(kind)
+		lists.WriteString(skippedTestsBlock(heading, skipped[kind]))
+	}
+	if _, err := r.out.WriteString(lists.String()); err != nil {
+		return fmt.Errorf("failed to print the skipped tests in printSummary: %w", err)
 	}
 
 	fmt.Fprintln(r.out, "<=========================================>")
@@ -461,27 +476,62 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	return nil
 }
 
-// quarantinedTest is a test keploy skipped for a reason.
-type quarantinedTest struct{ set, test, reason string }
+// skippedTest is a test keploy skipped for a reason.
+type skippedTest struct{ set, test, reason string }
 
-// quarantinedTests are the IGNORED tests of the reports that carry a skip
-// reason, by test set and then in report order.
-func quarantinedTests(reports map[string]*models.TestReport) []quarantinedTest {
+// skipSummaryWords are the summary's words for the tests skipped as kind: its
+// count's, and its list's heading. A quarantine's are what they were before
+// skips had kinds, and only a quarantine's say quarantined: the tests of a
+// kind keploy does not know (models.SkipOther) are counted and listed as
+// skipped by keploy for other reasons.
+func skipSummaryWords(kind models.SkipKind) (total, heading string) {
+	switch kind {
+	case models.SkipQuarantined:
+		return "Total test quarantined", "QUARANTINED TEST CASES:"
+	case models.SkipThisRunOnly:
+		return "Total test skipped for this run only", "TEST CASES SKIPPED FOR THIS RUN ONLY:"
+	case models.SkipUntilRerecorded:
+		return "Total test skipped until re-recorded", "TEST CASES SKIPPED UNTIL RE-RECORDED:"
+	}
+	return "Total test skipped by keploy for other reasons", "TEST CASES SKIPPED BY KEPLOY FOR OTHER REASONS:"
+}
+
+// skippedTestsBlock is the summary's list of tests under heading, each with
+// its reason on one line; "" when there are none, so no heading is printed.
+func skippedTestsBlock(heading string, tests []skippedTest) string {
+	if len(tests) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n" + heading + "\n")
+	for _, q := range tests {
+		fmt.Fprintf(&b, "\t- %s/%s: %s\n", q.set, q.test, models.SkipReasonOneLine(q.reason))
+	}
+	return b.String()
+}
+
+// skippedTests are the IGNORED tests of the reports that carry a skip reason,
+// by the kind they are said as (models.SkipKind.Said: a kind keploy does not
+// know as models.SkipOther, apart from the quarantined, as skipLine says it),
+// each kind's by test set and then in report order.
+func skippedTests(reports map[string]*models.TestReport) map[models.SkipKind][]skippedTest {
 	names := make([]string, 0, len(reports))
 	for name := range reports {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var out []quarantinedTest
+	out := make(map[models.SkipKind][]skippedTest)
 	for _, name := range names {
 		rep := reports[name]
 		if rep == nil {
 			continue
 		}
 		for _, t := range rep.Tests {
-			if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
-				out = append(out, quarantinedTest{set: name, test: t.TestCaseID, reason: t.SkipReason})
+			if t.Status != models.TestStatusIgnored || t.SkipReason == "" {
+				continue
 			}
+			kind := t.SkipKind.Said()
+			out[kind] = append(out[kind], skippedTest{set: name, test: t.TestCaseID, reason: t.SkipReason})
 		}
 	}
 	return out
@@ -1088,6 +1138,14 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 	sb.WriteString(header + "\n")
 	sb.WriteString(demotedLines(test))
+	if notRun := notFoundLine(test); notRun != "" {
+		// Selected and not on disk: nothing was sent, so nothing was
+		// compared, and no status, header or body section may read as if
+		// it had been.
+		sb.WriteString(notRun)
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
 
 	// Mock-miss diagnostics FIRST: when an outgoing call had no matching
 	// mock, the response diff below is usually a downstream symptom (the app
@@ -1190,17 +1248,66 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 // (FailureInfo.UnmatchedCalls) for a test. Field-diff paths use the noise
 // vocabulary, so the rendered output doubles as copy-paste material for
 // test.globalNoise / spec.assertions.noise.
+//
+// A background miss (models.UnmatchedCall.Background: the same request as one
+// of the set's background recordings, which counts against no test) is listed
+// apart, after the test's own, with how many there were: never under the
+// "likely root cause" heading, which it is not.
 func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
-	if len(test.FailureInfo.UnmatchedCalls) == 0 {
-		return
+	var own, background []models.UnmatchedCall
+	for _, uc := range test.FailureInfo.UnmatchedCalls {
+		if uc.Background {
+			background = append(background, uc)
+			continue
+		}
+		own = append(own, uc)
 	}
-	sb.WriteString("=== OUTGOING CALLS WITH NO MATCHING MOCK (likely root cause) ===\n")
+	if len(own) > 0 {
+		sb.WriteString("=== OUTGOING CALLS WITH NO MATCHING MOCK (likely root cause) ===\n")
+		renderMissList(sb, own)
+	}
+	if len(background) > 0 {
+		fmt.Fprintf(sb, "=== %d BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===\n", len(background))
+		sb.WriteString("  each is the same request as a recording of the set's background (mappings.yaml worker: or startup:), made once more than one was left to answer it\n")
+		renderBackgroundBound(sb, background)
+		renderMissList(sb, background)
+	}
+}
+
+// renderBackgroundBound writes, for each background miss that differs from
+// its background recording by values its test bound (UnmatchedCall.
+// BackgroundBound), which places do and where the test bound each: the
+// evidence that the call is that recording's, by names alone. A sanitized
+// miss keeps no learned variable's name (BackgroundBinding.Sanitized): its
+// place holds "a value" the test bound. A value an ended test bound, which
+// the call carries as its clean-up (BackgroundBinding.BoundTest), names that
+// test as its binder.
+func renderBackgroundBound(sb *strings.Builder, calls []models.UnmatchedCall) {
+	for _, uc := range calls {
+		for _, b := range uc.BackgroundBound {
+			held := b.Variable
+			if held == "" {
+				held = "a value"
+			}
+			by := "this test"
+			if b.BoundTest != "" {
+				by = b.BoundTest
+			}
+			fmt.Fprintf(sb, "  %s: like background recording %s but at %s, which holds %s as %s bound it at %s %s\n", uc.ActualSummary, b.Recording, b.Place, held, by, b.BoundMock, b.BoundPlace)
+		}
+	}
+}
+
+// renderMissList writes each of calls, and the shared explanation of an
+// out-of-scope destination once if any call has one, then a blank line.
+func renderMissList(sb *strings.Builder, calls []models.UnmatchedCall) {
 	// Set by any out-of-scope call below; the shared explanation is written
 	// ONCE for the whole test after the loop, never once per call — see
 	// models.OutOfScopeDestinationCauses.
 	var outOfScope bool
-	for _, uc := range test.FailureInfo.UnmatchedCalls {
-		sb.WriteString(fmt.Sprintf("  [%s] %s", uc.Protocol, uc.ActualSummary))
+	for _, uc := range calls {
+		// Beside the path tag the agent's miss line names the call by.
+		fmt.Fprintf(sb, "  [%s] %s%s", uc.Protocol, models.WithPathTag(uc.Named(), uc.PathTag), models.DestinationNamed(uc.Destination, uc.HostTag))
 		if uc.MatchPhase != "" {
 			sb.WriteString(fmt.Sprintf(" (match stopped at: %s", uc.MatchPhase))
 			if uc.CandidateCount > 0 {
@@ -1364,6 +1471,12 @@ func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings
 	// Write header via printer.Sprintf (no stdout)
 	header := r.generateTestHeader(test, r.printer) // returns string via Sprintf already
 	sb.WriteString(header)
+	if notRun := notFoundLine(test); notRun != "" {
+		// Selected and not on disk: nothing was sent or compared.
+		sb.WriteString(notRun)
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
 
 	// Template variable places the answer did not satisfy: each fails the
 	// test case on its own, also where every row below is normal.
@@ -1439,6 +1552,16 @@ func demotedLines(test models.TestResult) string {
 		return ""
 	}
 	return notJudgedLines(test)
+}
+
+// notFoundLine says, under a rendered test's header, why a test case the run
+// selected by name was never run: its test set holds none of that name
+// (FailureInfo.NotFound). "" for any other test.
+func notFoundLine(test models.TestResult) string {
+	if test.FailureInfo.NotFound == "" {
+		return ""
+	}
+	return "  not run: " + test.FailureInfo.NotFound + "\n"
 }
 
 // notJudgedLines says, under a rendered test's header, why it has no verdict

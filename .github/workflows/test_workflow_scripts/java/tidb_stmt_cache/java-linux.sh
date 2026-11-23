@@ -21,6 +21,7 @@
 set -Eeuo pipefail
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
@@ -56,7 +57,7 @@ wait_for_app() {
     fi
     sleep 1
   done
-  echo "::error::App did not start in time"; endsec; return 1
+  echo "::error::App did not start in time"; save_keploy_start_evidence; endsec; return 1
 }
 
 run_maven_build() {
@@ -206,6 +207,9 @@ JAR_NAME=$(ls target/tidb-stmt-cache-*.jar 2>/dev/null | head -n1)
 section "Record"
 "$RECORD_BIN" record -c "java -jar $JAR_NAME" > record.txt 2>&1 &
 KEPLOY_PID=$!
+# The app starts once keploy's agent is ready: its wait, with its full
+# budget, starts there (keploy-start-wait.sh).
+await_agent_ready record.txt "$KEPLOY_PID" || exit 1
 send_request "$KEPLOY_PID"
 set +e; wait "$KEPLOY_PID"; echo "Record exit: $?"; set -e
 if grep -q "WARNING: DATA RACE" record.txt; then echo "::error::Data race during record"; cat record.txt; exit 1; fi

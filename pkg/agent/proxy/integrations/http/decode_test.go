@@ -321,7 +321,7 @@ func TestAMockServesRepeatedResponseHeaderLinesAsRecorded(t *testing.T) {
 	want := []string{"a=1; Path=/", "b=2; Expires=Wed, 21 Oct 2015 07:28:00 GMT"}
 
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
-	v2, err := h.buildHTTPMock(&FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+	v2, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 		80, "test-conn", models.OutgoingOptions{})
 	if err != nil || v2 == nil {
 		t.Fatalf("buildHTTPMock = (%v, %v)", v2, err)
@@ -387,7 +387,7 @@ func TestANoBodyResponseKeepsItsContentLength(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := []byte(tc.method + " /bucket/mocks.bin HTTP/1.1\r\nHost: s3\r\n\r\n")
 			h := &HTTP{Logger: zaptest.NewLogger(t)}
-			v2, err := h.buildHTTPMock(&FinalHTTP{Req: req, Resp: []byte(tc.resp), ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+			v2, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: req, Resp: []byte(tc.resp), ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 				80, "test-conn", models.OutgoingOptions{})
 			if err != nil || v2 == nil {
 				t.Fatalf("buildHTTPMock = (%v, %v)", v2, err)

@@ -43,7 +43,7 @@ while IFS= read -r line; do
     done
 
     # Check only direct dependencies
-    if echo "$direct_deps" | grep -qx "$mod_path"; then
+    if echo "$direct_deps" | grep -x "$mod_path" >/dev/null; then
         if [[ "$line" == *"deprecated"* || "$line" == *"retracted"* ]]; then
             echo "Deprecated/retracted direct dependency found: $line"
             found_deprecated=true

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // clientHello starts a TLS client on one end of a pipe and returns the other
@@ -346,4 +347,62 @@ func TestReadNameDecidesARequestLineAsWholeHoweverItArrives(t *testing.T) {
 func TestReadNameOfALongMethodIsUnreadable(t *testing.T) {
 	_, err := ReadName(holds(t, strings.Repeat("G", 40)+" / HTTP/1.1\r\nHost: evil.example.com\r\n\r\n"))
 	require.ErrorIs(t, err, ErrUnreadable)
+}
+
+// unreadRequestLines are request heads whose request line is plainly HTTP
+// that keploy does not read (looseRequestLine, not requestLine): an
+// extension method with '-' (RFC 3253), a version other than 1.0 and 1.1
+// with an absolute target that names a host, a trailing space, a lowercase
+// method. Each line's target holds a token in its query.
+var unreadRequestLines = []string{
+	"VERSION-CONTROL /repo/secret.txt?token=s3cr3tQ7 HTTP/1.1\r\nHost: canary7q.tenant.example\r\n\r\n",
+	"GET http://canary7q.tenant.example/pay?token=s3cr3tQ7 HTTP/1.2\r\nHost: canary7q.tenant.example\r\n\r\n",
+	"GET /pay?token=s3cr3tQ7 HTTP/1.1 \r\nHost: canary7q.tenant.example\r\n\r\n",
+	"get /pay?token=s3cr3tQ7 HTTP/1.1\r\nHost: canary7q.tenant.example\r\n\r\n",
+}
+
+// requireNoRequestBytes fails t when text holds a byte of what line's
+// request line carries: its token, its path, its host.
+func requireNoRequestBytes(t *testing.T, text, line string) {
+	t.Helper()
+	for _, b := range []string{"s3cr3tQ7", "token", "canary7q", "secret", "/pay", "VERSION-CONTROL", "HTTP/1.2"} {
+		require.NotContains(t, text, b, "%q: %q holds the request line's %q", line, text, b)
+	}
+}
+
+// A request line keploy does not read is described, never quoted, in the
+// error ReadName returns (ErrUnreadable): a connection to a mock.real
+// address that several names share, closed unnamed for it, is
+// capture_incomplete with that error in its why, which the agent's WARN
+// logs, keploy's CLI logs (LogWhy, RealUncapturedLosses' LogText) and the
+// report names (ReportWhy, Text). None of them holds the line's path, query
+// or host.
+func TestAnUnreadRequestLineIsDescribedNeverQuoted(t *testing.T) {
+	for _, line := range unreadRequestLines {
+		_, err := ReadName(holds(t, line))
+		require.ErrorIs(t, err, ErrUnreadable, "%q", line)
+		require.Contains(t, err.Error(), "its request line is HTTP keploy does not read (", "%q", line)
+		requireNoRequestBytes(t, err.Error(), line)
+		tr := newTracker()
+		tr.BeginTest()
+		done := tr.Pending(Origin{}, 1, "10.0.0.7:443", []string{"a.example.com", "b.example.com"})
+		done(Origin{}, UnreadableWhy("10.0.0.7:443", []string{"a.example.com", "b.example.com"}, err.Error()))
+		_, inc := tr.EndTest()
+		require.Len(t, inc, 1, "%q", line)
+		require.True(t, inc[0].HostsListed)
+		lost := models.RealUncapturedLosses(inc)
+		for form, text := range map[string]string{
+			"Why": inc[0].Why, "LogWhy": inc[0].LogWhy(), "ReportWhy": inc[0].ReportWhy(),
+			"RealUncapturedLosses LogText": lost.LogText(), "RealUncapturedLosses Text": lost.Text(),
+		} {
+			require.NotEmpty(t, text, "%s", form)
+			requireNoRequestBytes(t, text, line)
+		}
+	}
+	_, err := ReadName(holds(t, unreadRequestLines[0]))
+	require.Contains(t, err.Error(), "its request line is HTTP keploy does not read (56 bytes in 3 words: a method of 15 characters, upper-case letters, a dash and upper-case letters; an origin-form target of 31 bytes; a version keploy reads; single spaces)")
+	_, err = ReadName(holds(t, unreadRequestLines[1]))
+	require.Contains(t, err.Error(), "a method of 3 characters, upper-case letters; an absolute-form target of 49 bytes; a version of 8 characters keploy does not read (it reads HTTP 1.0 and 1.1, in upper case); single spaces)")
+	_, err = ReadName(holds(t, unreadRequestLines[2]))
+	require.Contains(t, err.Error(), "a version keploy reads; spaced other than by single spaces)")
 }

@@ -25,6 +25,7 @@ const (
 	signalAtWindows = "windows" // after the test command exited, while keploy reads what each test did
 	signalAtReal    = "real"    // after the test command exited, while keploy reads the run's mock.real
 	signalAtCounts  = "counts"  // while keploy judges, reading the agent's counts of what it served
+	signalAtSettle  = "settle"  // while keploy judges, waiting for the agent's end-of-run hook (proven)
 )
 
 // signalInstr is a replay's agent client that the user's Ctrl+C reaches at
@@ -71,6 +72,15 @@ func (s *signalInstr) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 		return nil, s.interrupt(ctx)
 	}
 	return s.composeInstr.GetScopeWindows(ctx)
+}
+
+// AfterTestRun is the agent's end-of-run hook (RunSettler), which a proven
+// replay calls before it reads the agent's counts.
+func (s *signalInstr) AfterTestRun(ctx context.Context, _ string, _ []string, _ models.TestCoverage) error {
+	if s.at == signalAtSettle && s.ran.Load() {
+		return s.interrupt(ctx)
+	}
+	return nil
 }
 
 func (s *signalInstr) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
@@ -127,6 +137,7 @@ func TestAReplayTheUserStopsBeforeItIsJudgedExits128PlusN(t *testing.T) {
 		{"while keploy judges", false, signalAtCounts, false},
 		{"while keploy judges, --strict", false, signalAtCounts, true},
 		{"while keploy judges, proven", true, signalAtCounts, false},
+		{"while the agent finishes the run's end, proven", true, signalAtSettle, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -189,6 +200,9 @@ func TestAReplayTheUserStopsBeforeItIsJudgedExits128PlusN(t *testing.T) {
 			// failure: nothing tells the user to look in the agent's logs.
 			if n := logs.FilterMessage("mock replay summary (incomplete: the agent did not report the whole outcome)").Len(); n != 0 {
 				t.Error("a replay the user stopped said the agent did not report the whole outcome")
+			}
+			if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+				t.Errorf("a replay the user stopped logged %d ERROR line(s), the first %q: the stop is not keploy's failure", n, logs.FilterLevelExact(zapcore.ErrorLevel).All()[0].Message)
 			}
 			if _, err := os.Stat(filepath.Join(keployDir, "set", ReceiptFile)); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("a replay the user stopped wrote a receipt (%v): the last run's must stand", err)

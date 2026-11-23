@@ -34,10 +34,19 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
-IMAGE="${LOCALSTACK_IMAGE:-localstack/localstack:4.0.3}"
+# 4.14.0, not 4.0.3: 4.0.3 is Debian 12 with glibc 2.36, whose setenv frees
+# the environ array it outgrows while another thread's getenv may still read
+# it. LocalStack sets its AWS credentials in the environment at startup while
+# its analytics thread resolves a host (getaddrinfo reads the environment),
+# so it can die of SIGSEGV before it is ready, as 3.0.2 (the same glibc) does
+# in other lanes. 4.14.0 (glibc 2.41) keeps the old array, and starts without
+# an auth token.
+IMAGE="${LOCALSTACK_IMAGE:-localstack/localstack:4.14.0}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP=8091
 LS=4566
@@ -120,7 +129,7 @@ curl -sf -X PUT "http://127.0.0.1:$LS/$BUCKET" >/dev/null || { echo "::error::ca
 # Record two GET /run, with LocalStack up.
 rm -rf keploy
 # shellcheck disable=SC2086
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "env $ENVS ./aws-app" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "env $ENVS ./aws-app" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -144,9 +153,10 @@ replay() {
     shift
     before="$(newest_run)"
     # shellcheck disable=SC2086
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" ${PROVEN:+KEPLOY_PROVEN=1} "$REPLAY_BIN" test -c "env $ENVS $* ./aws-app" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" ${PROVEN:+KEPLOY_PROVEN=1} "$REPLAY_BIN" test -c "env $ENVS $* ./aws-app" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
+    verify_ran "${PROVEN:+1}" "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
         fail "$name: keploy test wrote no report (exit $RC)"

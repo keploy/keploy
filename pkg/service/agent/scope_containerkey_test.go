@@ -125,7 +125,7 @@ func TestASkippedTestOpensNoScope(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestGated": "flaky"}))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestGated": "flaky"}, nil))
 	require.Equal(t, keyed, use(40001))
 	b, serr := a.ProvenBegin(ctx, begin("TestGated"))
 	require.Nil(t, serr)

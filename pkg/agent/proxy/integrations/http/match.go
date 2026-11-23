@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -19,8 +22,10 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -38,12 +43,24 @@ type req struct {
 	header http.Header
 	body   []byte
 	raw    []byte
+	// client is the connection the call came on, watched for its end while
+	// a heavy call waits and is matched (admit); nil for none.
+	client net.Conn
 	// encoded is the body as the client sent it, before its Content-Encoding
 	// was undone into body; nil when it had none.
 	encoded []byte
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
+	// written is, for a call of another parser that the learn step decides
+	// (LearnMatch), the answer that parser writes for a recording the learn
+	// step serves it: it may write another one than the learn step gives it
+	// (SQS sets a send's digests over the message sent), or none (nil),
+	// which the learn step asks before it takes the recording, and then
+	// refuses it. nil written: the answer served is the one written. The
+	// learn step states its view of a serve with the answer written
+	// (servedExchange).
+	written func(served *models.Mock) *models.Mock
 }
 
 // sentBody is the body as the client sent it: what a hash of the payload
@@ -113,8 +130,22 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 // (integrations.HoldToRound), or base itself: the strict pass's index of a
 // staging generation is kept for base (strictIndexed). A nil base keeps none.
 func (h *HTTP) matchOf(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+	return h.matchServing(ctx, nil, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+}
+
+// matchServing is matchOf for the match that serves the call (decodeHTTP's
+// replay), noting in how, when it is not nil, how matchCascade served it
+// (servedAs). The matcher's other reads of the store, which only diagnose a
+// call (ownCall, answeredMatch), pass none, so nothing they match is
+// reported as served.
+func (h *HTTP) matchServing(ctx context.Context, how *servedAs, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 	ctx = context.WithValue(ctx, statefulMocksKey{}, statefulMocks)
-	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	ok, stub, diag, err := h.matchCascade(ctx, how, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+		// Only its client's end (admit) cancels a match its caller's
+		// context still runs.
+		err = errClientGone
+	}
 	if diag != nil && provenswitch.On() {
 		// Under the proven switch a miss names where the call went too
 		// (strict.go), so its report can name a destination that differs.
@@ -136,6 +167,16 @@ type keepForRepeatsKey struct{}
 // ownedKey carries, on a match's context, whether a per-test recording is the
 // open test's own (openTestOwner), for updateMock.
 type ownedKey struct{}
+
+// storeKey carries, in a match's context, the store the match reads
+// (storeOf), for a debug line of a pass that is handed the pool alone.
+type storeKey struct{}
+
+// storeOf is the store ctx's match reads; nil for none.
+func storeOf(ctx context.Context) integrations.MockMemDb {
+	db, _ := ctx.Value(storeKey{}).(integrations.MockMemDb)
+	return db
+}
 
 // openTestOwner returns whether a mock is the open test's own recording, as
 // the store tells it (integrations.TestOwner), from whichever pool it is
@@ -171,12 +212,29 @@ func ownedBy(ctx context.Context) func(*models.Mock) bool {
 }
 
 // matchCascade is match without its proven-switch report additions.
-func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
-	// Shared schema-noise engine for this match. HTTP is a full client of the
-	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
-	// only the HTTP-specific bits (body extraction, JSON/form diff).
-	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
+	// Mock-noise engine for this match, built from HTTP's own adapter so it is
+	// ALWAYS present. keploy.yml request-body patterns (PatternDrift) are a user
+	// feature that must hold whether or not schema-noise detection/strict are on,
+	// so the engine cannot come from ctx (the proxy attaches none when both noise
+	// flags are off) — it is built here, like main, with the flags gating only
+	// learning and strict enforcement. The per-call schemaNoiseDetection turns
+	// learning OFF for THIS match (never on): the proven-switch fallback and the
+	// dry own/extra-call matches pass false because record's learn step is the
+	// one noise learner. Other parsers (MySQL) read the proxy's ctx-attached
+	// engine via EngineFrom; HTTP's match path is also driven directly in tests
+	// with no ctx engine, so it owns its construction from the same adapter.
+	// h.MockNoise() (not the httpNoiseAdapter{} literal) so the declaration and
+	// the use stay one source of truth; it never returns nil for HTTP, so New
+	// cannot be handed a nil adapter here.
+	noiseEngine := mocknoise.New(h.MockNoise(), schemaNoiseDetection, schemaNoiseStrict)
+	// The call's body, read once for this match, the first time a check
+	// reads it (callBodyRead): every check below that compares it with
+	// recordings (filterStrictNoiseMatches, noteFieldsOnOneSide,
+	// sameCallBodies, bodyFieldsDiffering) reads this one, and a call
+	// served before any of them makes none.
+	callBody := callBodyRead{raw: input.body}
 
 	// Under the proven switch no path segment or query value is relaxed for
 	// its shape (design v14 row S1): what may differ between record and
@@ -186,7 +244,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	var strict strictNoise
 	if provenswitch.On() {
 		autoURLDynamic = false
-		strict = h.newStrictNoise(headerNoise, userBodyNoise, urlNoise)
+		strict = h.newStrictNoise(headerNoise, userBodyNoise, urlNoise).withSources(mockDb)
 	}
 
 	// reread: a claim through the strict pass's index failed (another call
@@ -194,6 +252,14 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	// on, so a recording the index still lists and the store no longer hands
 	// out is never chosen again.
 	reread := false
+	// endTurn ends the call's turn (admit), taken once, before the first pass
+	// that reads every recording's body.
+	var endTurn func()
+	defer func() {
+		if endTurn != nil {
+			endTurn()
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
@@ -258,6 +324,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		}
 		own := openTestOwner(mockDb, perTestMocks)
 		ctx = context.WithValue(ctx, ownedKey{}, own)
+		ctx = context.WithValue(ctx, storeKey{}, mockDb)
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get session mocks")
@@ -286,62 +353,25 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// sees it, so it is never served on a call whose variables do not
 		// hold. With the switch off nothing here runs.
 		comparedPool := unfilteredMocks
-		var vp *varProblem
 		if provenswitch.On() {
-			withVars, rest := splitVariableMocks(unfilteredMocks)
-			if len(withVars) > 0 {
-				hits, problem, err := h.variablePass(ctx, input, withVars, scope, headerNoise, userBodyNoise, urlNoise)
-				if err != nil {
-					return false, nil, nil, err
-				}
-				if len(hits) > 0 {
-					hit, commitCursor, answered := h.pickHit(hits, ownedBy(ctx), mockDb, statefulMocks, h.variableMember(ctx, input, scope, headerNoise, userBodyNoise, urlNoise))
-					if answered != nil {
-						return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, answered: answered}, nil
-					}
-					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb)
-					if err != nil {
-						return false, nil, nil, err
-					}
-					if retry {
-						continue
-					}
-					if problem != nil {
-						if scope.moved() {
-							continue // a test began meanwhile: check the call against it
-						}
-						return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: problem}, nil
-					}
-					if commitCursor != nil {
-						commitCursor()
-					}
-					return true, served, nil, nil
-				}
-				vp = problem
-				unfilteredMocks = rest
-				if vp != nil {
-					// A recording fit this call but its variables did not
-					// hold: only an exact recording of this very call may
-					// still answer it, never a lenient pass.
-					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, userBodyNoise, urlNoise, statefulMocks)
-					if err != nil {
-						return false, nil, nil, err
-					}
-					if retry {
-						continue
-					}
-					if ok {
-						return true, served, nil, nil
-					}
-					if scope.moved() {
-						continue // a test began meanwhile: check the call against it
-					}
-					return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: vp}, nil
-				}
-				if len(unfilteredMocks) == 0 {
-					return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
-				}
+			vs, err := h.variableStage(ctx, input, mockDb, scope, unfilteredMocks, headerNoise, userBodyNoise, urlNoise, statefulMocks)
+			if err != nil {
+				return false, nil, nil, err
 			}
+			if vs.retry {
+				continue
+			}
+			if vs.served != nil {
+				return true, vs.served, nil, nil
+			}
+			if vs.diag != nil {
+				return false, nil, vs.diag, nil
+			}
+			if len(vs.rest) == 0 {
+				// Every recording declares variables, and none fits.
+				return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
+			}
+			unfilteredMocks = vs.rest
 		}
 
 		// Under the proven switch the rest are answered only by a recording
@@ -362,6 +392,12 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			return true, served, nil, nil
 		}
 
+		if endTurn == nil {
+			if ctx, endTurn, err = admit(ctx, input.client, int64(len(input.body))+recordedBytes(unfilteredMocks, models.Method(input.method))); err != nil {
+				return false, nil, nil, err
+			}
+		}
+
 		// Matching process
 		// Pass 1: exact URL + configured url-noise only. Deterministic and
 		// genuinely-distinct calls match here and are never relaxed.
@@ -373,12 +409,17 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// or under url-noise, retry allowing auto-detected dynamic id segments
 		// (numeric/uuid/hex/long token) to vary — so a non-deterministic path id
 		// doesn't 502 with no config. Disable via OutgoingOptions.DisableAutoURLDynamic.
+		// A recording this pass finds is of another path: the call is
+		// served with it, and reported as answered with another call's
+		// recording (noteServedAs, reportServedAnother), never as its own.
+		idVaried := false
 		if len(schemaMatched) == 0 && autoURLDynamic {
 			schemaMatched, err = h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, true)
 			if err != nil {
 				return false, nil, nil, err
 			}
 			if len(schemaMatched) > 0 {
+				idVaried = true
 				if ce := h.Logger.Check(zap.DebugLevel, "http url: matched via auto-detected dynamic path segment(s) after no exact/url-noise match"); ce != nil {
 					ce.Write(zap.Int("candidates", len(schemaMatched)))
 				}
@@ -395,7 +436,11 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		}
 
 		// Exact body match
-		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
+		// A value the obfuscator redacted is excused there, but one that
+		// keploy.yml's request-body patterns guard holds the live value.
+		ok, bestMatch := h.exactBodyMatch(input.body, schemaMatched, func(m *models.Mock) bool {
+			return len(noiseEngine.PatternDrift(m, input.body, userBodyNoise)) == 0
+		})
 		if ok {
 			// Stateful dependency: when several recorded responses share this
 			// exact request (a counter, a created-then-read row), serve them in
@@ -423,6 +468,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if commitCursor != nil {
 				commitCursor()
 			}
+			noteServedAs(how, idVaried, false)
 			return true, served, nil, nil
 		}
 
@@ -453,6 +499,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if !claimed {
 				continue
 			}
+			noteServedAs(how, idVaried, false)
 			return true, served, nil, nil
 		}
 
@@ -464,16 +511,17 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				return false, nil, nil, err
 			}
 
-			// Strict enforcement (replay path): every candidate's request-body
-			// fields must match the recorded body except the user's configured
-			// body noise and any learned req_body_noise paths. A drift on a
-			// non-noise field rejects that candidate, so a changed-but-unmarked
-			// field fails the test instead of being silently served. This applies
+			// Strict enforcement (replay path): a candidate's recorded body
+			// must be the call's, both ways and whole, except the user's
+			// configured body noise and any learned req_body_noise paths. A
+			// drift on a non-noise field, a field only one side holds among
+			// them, rejects that candidate, so a changed-but-unmarked field
+			// fails the test instead of being silently served. This applies
 			// even to candidates with no learned noise — strict mode value-checks
 			// the whole body, not just the lenient key/schema match above.
 			beforeStrict := len(bodyMatched)
 			if schemaNoiseStrict {
-				bodyMatched = h.filterStrictNoiseMatches(noiseEngine, bodyMatched, input.body, userBodyNoise)
+				bodyMatched = h.filterStrictNoiseMatches(bodyMatched, callBody.get(), userBodyNoise)
 			}
 
 			if len(bodyMatched) == 0 {
@@ -497,16 +545,54 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				if !claimed {
 					continue
 				}
+				// The one recording whose body keys the call's holds is
+				// another call's where a field only one of the two
+				// bodies holds is outside noise (noteFieldsOnOneSide).
+				noteServedAs(how, idVaried, false)
+				h.noteFieldsOnOneSide(how, bodyMatched[0], callBody.get(), userBodyNoise)
 				return true, served, nil, nil
 			}
 
 			// More than one match, perform fuzzy match
 			shortListed = bodyMatched
+		} else if schemaNoiseStrict {
+			// A body that is not JSON (a form) is value-checked only where
+			// keploy.yml's request-body patterns guard a field: they hold
+			// both values, or the live one where the obfuscator redacted
+			// the recorded one.
+			var held []*models.Mock
+			for _, m := range shortListed {
+				if len(noiseEngine.PatternDrift(m, input.body, userBodyNoise)) == 0 {
+					held = append(held, m)
+				}
+			}
+			if len(held) == 0 {
+				return false, nil, &matchDiag{phase: models.MatchPhaseStrict, candidates: len(comparedPool), schemaMatched: schemaMatched, pool: comparedPool}, nil
+			}
+			shortListed = held
 		}
 
-		h.Logger.Debug("Performing fuzzy match for req buffer")
-		// Perform fuzzy match on the request
-		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
+		// A recording whose body is the call's outside the noise keploy.yml
+		// declares and the record learned (sameCallBodies: compared both
+		// ways and whole, so key order and spacing are no difference while
+		// a field only one side holds is) is a recording
+		// of this very call, and the call is served as its own: the first
+		// of them in the order the store holds them (the test's own in
+		// recorded order, then the session's), never the closest string,
+		// so a noise value that changes on every run never changes which
+		// recording serves it. Only when none is, the closest of several
+		// recordings is a guess between calls.
+		sameCall := h.sameCallBodies(shortListed, callBody.get(), userBodyNoise)
+		isMatched := len(sameCall) > 0
+		if isMatched {
+			bestMatch = sameCall[0]
+		} else {
+			h.Logger.Debug("Performing fuzzy match for req buffer")
+			isMatched, bestMatch, err = h.performFuzzyMatch(ctx, shortListed, input.body)
+			if err != nil {
+				return false, nil, nil, err
+			}
+		}
 		if isMatched {
 			if ce := h.Logger.Check(zap.DebugLevel, "fuzzy match found a matching mock"); ce != nil {
 				ce.Write(zap.String("mock name", bestMatch.Name))
@@ -519,6 +605,18 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if !claimed {
 				continue
 			}
+			// The closest of several recordings, none of which is the
+			// call's outside noise (sameCall), is a guess between calls: it is
+			// another call's recording, and the report names the body
+			// fields it differs at (bodyFieldsDiffering). One recording
+			// left is another call's, as the body-keys pass's one match
+			// is, where a field only one of the two bodies holds is outside
+			// noise (noteFieldsOnOneSide).
+			noteServedAs(how, idVaried, len(sameCall) == 0 && len(shortListed) > 1)
+			if how != nil && how.answer == models.AnswerClosestBody {
+				how.fields = h.bodyFieldsDiffering(bestMatch, callBody.get(), userBodyNoise)
+			}
+			h.noteFieldsOnOneSide(how, bestMatch, callBody.get(), userBodyNoise)
 			return true, served, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil
@@ -623,8 +721,8 @@ func servedPick(group []*models.Mock, cs integrations.MockCursor) (int, func()) 
 // fixed whichever of them earlier calls spent: it answers the first of them
 // that is live and not served in the view, else the last of them again,
 // while it is live. When the last can answer no more (spent: one of the
-// worker scope's answers at most one request in the staging; or not
-// offered) the call is answered nothing (answered, the miss's reason), never
+// worker scope's answers at most one request in the windows of the staging;
+// or not offered) the call is answered nothing (answered, the miss's reason), never
 // a recording outside them: an earlier one again, which would take the
 // sequence back, or another test's. The index is into live; the commit
 // marks the answer served in the same view's cursor, whichever view is in
@@ -658,7 +756,7 @@ func servedWalk(live, full []*models.Mock, sv integrations.SequenceView) (int, f
 	}
 	a := &answeredSequence{test: sv.Test, held: hi - lo}
 	if hi > lo {
-		a.last = full[hi-1].Name
+		a.last, a.lastMock = full[hi-1].Name, full[hi-1]
 		windowed := sv.Test != "" && !sv.Start.IsZero() && !full[lo].Spec.ReqTimestampMock.Before(sv.Start)
 		a.inWindow = windowed && (sv.End.IsZero() || !full[lo].Spec.ReqTimestampMock.After(sv.End))
 		a.after = windowed && !a.inWindow
@@ -703,6 +801,9 @@ type answeredSequence struct {
 	held     int    // how many it holds
 	inWindow bool   // whether they are the test's recorded window's
 	after    bool   // whether it is the first recorded after the window (none in or before it)
+
+	// lastMock is the last itself: the miss redacts the places it redacted.
+	lastMock *models.Mock
 }
 
 // why is the miss's reason. It names recordings, never a value.
@@ -797,11 +898,18 @@ func sameCursorRequest(m, want *models.Mock) bool {
 
 // recordedBefore orders recordings as they were recorded: the request
 // timestamp is stable across replay (SortOrder is mutated on every match, so
-// it cannot be used); ID then Name break ties.
+// it cannot be used); the number mockdb gave each as it wrote it
+// (models.CompareRecordedNumbers) breaks a tie, the order of the reads of
+// one write (an HTTP/1.1 pipeline), and ID then Name break the ties left.
+// The number comes before ID, which a tier stamps from its own slice and the
+// startup tier not at all.
 func recordedBefore(a, b *models.Mock) bool {
 	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
 	if !ta.Equal(tb) {
 		return ta.Before(tb)
+	}
+	if c := models.CompareRecordedNumbers(a.Name, b.Name); c != 0 {
+		return c < 0
 	}
 	if a.TestModeInfo.ID != b.TestModeInfo.ID {
 		return a.TestModeInfo.ID < b.TestModeInfo.ID
@@ -844,10 +952,10 @@ func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 }
 
 // recordedPaths memoises the path of each recorded request URL. SchemaMatch
-// checks every mock of the pool on every proxied call, and url.Parse of the
-// mock's URL was the largest share of that (49% of agent CPU at a pool of 10k
+// checks every mock of the pool on every proxied call, and parsing the mock's
+// URL was the largest share of that (49% of agent CPU at a pool of 10k
 // mocks: about 0.75 us and 7 allocations per mock, every call). The URL of a
-// recording does not change and url.Parse is a pure function of it, so each
+// recording does not change and parseRecordedURL is a pure function of it, so each
 // URL is parsed once and its path (or that it does not parse) is read back.
 // Keyed by the URL string, not the mock, so it holds no mock alive; bounded
 // by recordedPathsCap entries, emptied when full (the URLs of the pool in use
@@ -857,7 +965,7 @@ var recordedPaths struct {
 	n atomic.Int64 // entries stored since the last empty
 }
 
-// recordedPath is url.Parse(URL).Path of a recorded URL; ok is false when the
+// recordedPath is parseRecordedURL(URL).Path of a recorded URL; ok is false when the
 // URL does not parse, which matches no request path.
 type recordedPath struct {
 	path string
@@ -866,10 +974,10 @@ type recordedPath struct {
 
 const recordedPathsCap = 1 << 16
 
-// recordedPathParses counts url.Parse calls of recorded URLs; the rows read it.
+// recordedPathParses counts parseRecordedURL calls of recorded URLs; the rows read it.
 var recordedPathParses atomic.Int64
 
-// recordedURLPath returns url.Parse(mockURL).Path, and false when it does not
+// recordedURLPath returns parseRecordedURL(mockURL).Path, and false when it does not
 // parse, parsing each URL once.
 func recordedURLPath(mockURL string) (string, bool) {
 	if v, ok := recordedPaths.m.Load(mockURL); ok {
@@ -880,7 +988,7 @@ func recordedURLPath(mockURL string) (string, bool) {
 	// A copy, so the memo keeps no larger buffer the URL may sit in alive.
 	key := strings.Clone(mockURL)
 	p := &recordedPath{}
-	if parsed, err := url.Parse(key); err == nil {
+	if parsed, err := parseRecordedURL(key); err == nil {
 		p.path, p.ok = parsed.Path, true
 	}
 	if recordedPaths.n.Add(1) > recordedPathsCap {
@@ -897,7 +1005,11 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 		return false
 	}
 	if ce := h.Logger.Check(zap.DebugLevel, "parsed URL"); ce != nil {
-		ce.Write(zap.Any("parsed URL", mockPath), zap.Any("req path", reqPath))
+		// Both paths in their shape: a segment of either can hold a token
+		// (a reset link's, a signed URL's), the recording's as much as the
+		// call's. No path tag: no method is at hand, and a tag of a path
+		// alone is one no console or report line prints (models.PathTag).
+		ce.Write(zap.Any("parsed URL", utils.URLPathShape(&url.URL{Path: mockPath})), zap.Any("req path", utils.URLPathShape(&url.URL{Path: reqPath})))
 	}
 	if mockPath == reqPath {
 		return true
@@ -989,6 +1101,30 @@ func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
 // stops distinguishing the two.
 const urlNoisePlaceholder = "{{keploy.urlnoise}}"
 
+// urlNoisePlaceholderOf is the placeholder for the i-th compiled url-noise
+// pattern: distinct per pattern so two whole-path entries (such as
+// "^/users/[0-9]+$" and "^/orders/[^/]+$") never collapse their matched paths
+// onto the same masked string. Index 0 keeps urlNoisePlaceholder so a
+// single-pattern configuration keeps its placeholder bytes unchanged.
+// Indices >= 1 are spelled in lowercase ASCII letters only (no digits), so
+// queryValueTypeClass classifies every placeholder as "" (never "token") and
+// pass 2 never relaxes one pattern's masked value against another pattern's
+// or against an unmasked token.
+func urlNoisePlaceholderOf(i int) string {
+	if i <= 0 {
+		return urlNoisePlaceholder
+	}
+	var buf [16]byte
+	pos := len(buf)
+	for n := i; n > 0; {
+		n--
+		pos--
+		buf[pos] = byte('a' + n%26)
+		n /= 26
+	}
+	return "{{keploy.urlnoise." + string(buf[pos:]) + "}}"
+}
+
 // urlNoiseCache memoizes compiled url-noise patterns. MatchURLPath and
 // QueryParamsMatch both run once per CANDIDATE MOCK per proxied request, so
 // compiling the configured patterns inline cost O(mocks x patterns)
@@ -1026,10 +1162,12 @@ func compileURLNoise(logger *zap.Logger, urlNoise []string) []*regexp.Regexp {
 	return res
 }
 
-// maskURLNoise replaces every url-noise match in s with the placeholder.
+// maskURLNoise replaces every url-noise match in s with its pattern's own
+// placeholder, so two strings compare equal only where the same patterns
+// masked the same places.
 func maskURLNoise(s string, noiseRes []*regexp.Regexp) string {
-	for _, re := range noiseRes {
-		s = re.ReplaceAllString(s, urlNoisePlaceholder)
+	for i, re := range noiseRes {
+		s = re.ReplaceAllLiteralString(s, urlNoisePlaceholderOf(i))
 	}
 	return s
 }
@@ -1306,7 +1444,7 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 				// The param's name and the class only: its values are
 				// the application's content (a rotating token, most often).
 				if ce := h.Logger.Check(zap.DebugLevel, "http query: value treated as auto-detected dynamic"); ce != nil {
-					ce.Write(zap.String("param", key), zap.String("type class", c))
+					ce.Write(zap.String("param", models.KeyShape(key)), zap.String("type class", c))
 				}
 				continue
 			}
@@ -1362,8 +1500,17 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
 			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
+				// Both paths in their shape: a segment of either can hold
+				// a token, whatever a recording redacted.
 				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
-				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", input.url.Path), zap.String("mock path", mockPath))
+				recorded := &url.URL{Path: mockPath}
+				// The call by its path tag, which the console and the report
+				// print beside it where it misses; the recording's path by
+				// its shape alone: no console or report line prints a
+				// recording's path beside a tag.
+				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", utils.URLPathShape(input.url)), utils.PathTagField(models.URLPathTag(ctx, input.method, input.url)),
+					zap.String("mock path", utils.URLPathShape(recorded)),
+					zap.Int("differs at segment", pathDiffersAt(recorded.EscapedPath(), input.url.EscapedPath())))
 			}
 			continue
 		}
@@ -1381,7 +1528,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 				inputMediaTypes = parseMediaTypes(strings.Join(inputCTValues, ","))
 				inputMediaTypesRead = true
 			}
-			if len(mockMediaTypes) == 0 || len(inputMediaTypes) == 0 || !mediaTypesOverlap(mockMediaTypes, inputMediaTypes) {
+			if mediaTypesRefused(mockMediaTypes, inputMediaTypes) {
 				if ce := h.Logger.Check(zap.DebugLevel, "The content type of mock and request aren't the same"); ce != nil {
 					ce.Write(zap.String("mock name", mock.Name),
 						zap.Strings("input media types", inputMediaTypes),
@@ -1441,6 +1588,13 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 //     produce byte-identical request bodies at replay.
 //  3. JSON — field-by-field comparison via JSONBodyMatchScore.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
+	return h.exactBodyMatch(body, schemaMatched, func(*models.Mock) bool { return true })
+}
+
+// exactBodyMatch is ExactBodyMatch whose second pass, which excuses the
+// values the obfuscator redacted, matches a mock only when held allows it:
+// the replay holds keploy.yml's request-body patterns there (PatternDrift).
+func (h *HTTP) exactBodyMatch(body []byte, schemaMatched []*models.Mock, held func(*models.Mock) bool) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for exact body match"); ce != nil {
 		ce.Write(zap.Strings("mock names", mockNamesOf(schemaMatched)), zap.Int("req body bytes", len(body)))
@@ -1483,7 +1637,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 
 		// If the entire body is a single noisy value, auto-match
 		// (schema match already filtered by URL, method, headers)
-		if nc.IsNoisy(mockBody) {
+		if nc.IsNoisy(mockBody) && held(mock) {
 			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
 				ce.Write(zap.String("mock", mock.Name),
 					zap.Float64("match_percentage", 100.0),
@@ -1498,7 +1652,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		// segment. The remaining keys must be the same set on both sides
 		// and each non-wildcarded value(s) must be byte-equal.
 		if reqIsForm && looksLikeFormEncoded(mockBody) {
-			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) {
+			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) && held(mock) {
 				if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
 					ce.Write(zap.String("mock", mock.Name),
 						zap.Float64("match_percentage", 100.0),
@@ -1538,7 +1692,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		if matched == total {
 			// Verify the request has no extra non-noisy keys beyond
 			// what the mock defines — otherwise this isn't truly exact.
-			if !util.HasExtraNonNoisyKeys(mockData, reqData, nc) {
+			if !util.HasExtraNonNoisyKeys(mockData, reqData, nc) && held(mock) {
 				return true, mock
 			}
 		}
@@ -1547,18 +1701,22 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	return false, nil
 }
 
-func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
-
+// bodyMatch reports whether the call's body reqBody has every top-level key
+// of mock's recorded body. A body that does not read as a JSON object is
+// logged by its size alone.
+func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte) (bool, error) {
+	mockBody := []byte(mock.Spec.HTTPReq.Body)
 	var mockData map[string]any
 	var reqData map[string]any
 	err := json.Unmarshal(mockBody, &mockData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
+		// Sizes only, here and below: a body is the application's data.
+		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.Int("body_bytes", len(mockBody)))
 		return false, err
 	}
 	err = json.Unmarshal(reqBody, &reqData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.String("Req", string(reqBody)))
+		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.Int("body_bytes", len(reqBody)))
 		return false, err
 	}
 
@@ -1571,7 +1729,8 @@ func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
 	return true, nil
 }
 
-// PerformBodyMatch Perform body match for JSON data
+// PerformBodyMatch Perform body match for JSON data. A reqBody that does
+// not read as a JSON object is logged by its size alone.
 func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte) ([]*models.Mock, error) {
 	h.Logger.Debug("Performing schema match for body")
 
@@ -1586,7 +1745,7 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 			return nil, ctx.Err()
 		}
 
-		ok, err := h.bodyMatch([]byte(mock.Spec.HTTPReq.Body), reqBody)
+		ok, err := h.bodyMatch(mock, reqBody)
 		if err != nil {
 			h.Logger.Error("failed to do schema matching on request body", zap.Error(err))
 			break
@@ -1608,124 +1767,6 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 	return bodyMatched, nil
 }
 
-// findStringMatch returns the index of the closest mock string and the
-// Levenshtein distance so callers don't need to recompute it.
-func (h *HTTP) findStringMatch(req string, mockStrings []string) (int, int) {
-	minDist := int(^uint(0) >> 1)
-	bestMatch := -1
-	for idx, mock := range mockStrings {
-		if !util.IsASCII(mock) {
-			continue
-		}
-		dist := levenshtein.ComputeDistance(req, mock)
-		if dist == 0 {
-			return idx, 0
-		}
-		if dist < minDist {
-			minDist = dist
-			bestMatch = idx
-		}
-	}
-	return bestMatch, minDist
-}
-
-// jaccardBestMatch finds the mock body with the highest Jaccard similarity
-// to reqBuff. mockBodies are pre-decoded/stripped byte slices so the caller
-// controls noise handling. Returns the best index and similarity score.
-func (h *HTTP) jaccardBestMatch(mockBodies [][]byte, reqBuff []byte) (int, float64) {
-	mxSim := -1.0
-	mxIdx := -1
-	k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
-	reqShingles := util.CreateShingles(reqBuff, k)
-	for idx, body := range mockBodies {
-		mockShingles := util.CreateShingles(body, k)
-		similarity := util.JaccardSimilarity(mockShingles, reqShingles)
-		if similarity > mxSim {
-			mxSim = similarity
-			mxIdx = idx
-		}
-	}
-	return mxIdx, mxSim
-}
-
-// findBinaryMatch decodes mock bodies and delegates to jaccardBestMatch.
-func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
-	bodies := make([][]byte, len(mocks))
-	for i, mock := range mocks {
-		bodies[i], _ = decode(mock.Spec.HTTPReq.Body)
-	}
-	idx, _ := h.jaccardBestMatch(bodies, reqBuff)
-	return idx
-}
-
-// PerformFuzzyMatch performs fuzzy matching on the request body.
-// Noisy (obfuscated) values are stripped from mock bodies before computing
-// similarity so that redacted padding doesn't skew the score.
-func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
-	// Log all mock names in a single line for better readability
-	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for performfuzzyMatch function"); ce != nil {
-		ce.Write(zap.Strings("mock names", mockNamesOf(tcsMocks)))
-	}
-
-	encodedReq := encode(reqBuff)
-	for _, mock := range tcsMocks {
-		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
-		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
-			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-				ce.Write(zap.String("mock", mock.Name),
-					zap.Float64("match_percentage", 100.0),
-					zap.String("match_type", "fuzzy_exact"))
-			}
-			return true, mock
-		}
-	}
-
-	// Build mock body strings, stripping noisy values for fair comparison
-	mockStrings := make([]string, len(tcsMocks))
-	for i := range tcsMocks {
-		nc := util.NewNoiseChecker(tcsMocks[i].Noise)
-		mockStrings[i] = util.StripNoisyJSON(tcsMocks[i].Spec.HTTPReq.Body, nc)
-	}
-
-	// String-based fuzzy matching (Levenshtein distance)
-	reqStr := string(reqBuff)
-	if util.IsASCII(reqStr) {
-		idx, dist := h.findStringMatch(reqStr, mockStrings)
-		if idx != -1 {
-			maxLen := len(reqStr)
-			if len(mockStrings[idx]) > maxLen {
-				maxLen = len(mockStrings[idx])
-			}
-			pct := 0.0
-			if maxLen > 0 {
-				pct = (1.0 - float64(dist)/float64(maxLen)) * 100
-			}
-			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-				ce.Write(zap.String("mock", tcsMocks[idx].Name),
-					zap.Float64("match_percentage", pct),
-					zap.String("match_type", "fuzzy_levenshtein"))
-			}
-			return true, tcsMocks[idx]
-		}
-	}
-
-	// Binary fuzzy matching (Jaccard similarity) with stripped mock bodies
-	mockBodies := make([][]byte, len(mockStrings))
-	for i := range mockStrings {
-		mockBodies[i] = []byte(mockStrings[i])
-	}
-	mxIdx, mxSim := h.jaccardBestMatch(mockBodies, reqBuff)
-	if mxIdx != -1 {
-		if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
-			ce.Write(zap.String("mock", tcsMocks[mxIdx].Name),
-				zap.Float64("match_percentage", mxSim*100),
-				zap.String("match_type", "fuzzy_jaccard"))
-		}
-		return true, tcsMocks[mxIdx]
-	}
-	return false, nil
-}
-
 // parseMediaTypes splits a (possibly comma-joined) Content-Type header
 // value into individual media types using mime.ParseMediaType. Malformed
 // entries are skipped so that a single non-conformant value (e.g. a
@@ -1743,6 +1784,32 @@ func parseMediaTypes(raw string) []string {
 			continue
 		}
 		out = append(out, mt)
+	}
+	return out
+}
+
+// mediaTypesRefused reports whether the schema phase refuses a recording for
+// a call by the media types their Content-Types name (rec, live): the two
+// share none (a side that names none that parses shares none).
+func mediaTypesRefused(rec, live []string) bool {
+	return !mediaTypesOverlap(rec, live)
+}
+
+// schemaTypeDiffs are the differences in Content-Type and body type the
+// schema phase refuses a recording on (SchemaMatch), which no keploy.yml noise
+// changes: a Content-Type both sides send whose media types the phase
+// refuses, and a body whose type (pkg.GuessContentType, as MatchBodyType
+// reads it) is another.
+func (h *HTTP) schemaTypeDiffs(rec *models.HTTPReq, live http.Header, liveBody []byte) []models.MockFieldDiff {
+	var out []models.MockFieldDiff
+	liveCT := live.Values("Content-Type")
+	if recCT := rec.Header["Content-Type"]; recCT != "" && len(liveCT) > 0 &&
+		mediaTypesRefused(parseMediaTypes(recCT), parseMediaTypes(strings.Join(liveCT, ","))) {
+		out = append(out, models.MockFieldDiff{Path: "header.Content-Type", Kind: models.DiffKindValueChanged, Expected: recCT, Actual: strings.Join(liveCT, ",")})
+	}
+	if !h.MatchBodyType(rec.Body, liveBody) {
+		out = append(out, models.MockFieldDiff{Path: "body", Kind: models.DiffKindTypeChanged,
+			Expected: string(pkg.GuessContentType([]byte(rec.Body))), Actual: string(pkg.GuessContentType(liveBody))})
 	}
 	return out
 }
@@ -2041,27 +2108,34 @@ func (h *HTTP) consumeWith(ctx context.Context, matchedMock *models.Mock, mockDb
 }
 
 // filterStrictNoiseMatches enforces strict request-body matching on the
-// replay path. Under strict enforcement EVERY candidate is value-compared
-// against its recorded body — not just those carrying learned req_body_noise.
-// A candidate is dropped when a field OUTSIDE the known-noise set (configured
-// global/user body noise ∪ anything the mock already learned) drifted from the
-// recorded body, i.e. an unmarked value or type changed. So a mock with no
-// learned noise no longer passes by default: only fields explicitly marked as
+// replay path: it keeps only the candidates that are recordings of this very
+// call, those whose recorded body is the call's outside the known-noise set
+// (configured global/user body noise and anything the mock learned, a
+// learned path still held to its type), compared both ways and whole
+// (mocknoise.SameCallDrift, as sameCallBodies compares them). A field only
+// the call holds, a field only the recording holds, an unmarked value or type
+// that changed, or an array with another element or length drops the
+// candidate, so a changed-but-unmarked input fails the match instead of
+// being served another call's recording as the call's own. A candidate with
+// no learned noise passes only so too: only fields explicitly marked as
 // noise may differ.
 //
-// It delegates to schemanoise.Engine.StrictReject. The JSON/form comparison and
-// known-noise merge are owned by the shared engine + httpNoiseAdapter; the
-// returned drift names the offending field path(s) for the rejection log.
-func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
+// Each recording's body is read whole once (ownRead.json), the call's
+// (live) once per match; the drift names the offending field path(s) for the rejection log, and the
+// miss's report names them as JSONBodyDiffs reads them.
+func (h *HTTP) filterStrictNoiseMatches(candidates []*models.Mock, live *mocknoise.JSONBody, userBodyNoise map[string][]string) []*models.Mock {
 	var kept []*models.Mock
 	for _, m := range candidates {
-		allowed, drift := eng.StrictReject(m, reqBody, userBodyNoise)
-		if allowed {
+		recorded, ok := h.ownBodies.read(m)
+		drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded.json(), ok, live, userBodyNoise)
+		if len(drift) == 0 {
 			kept = append(kept, m)
 			continue
 		}
 		if ce := h.Logger.Check(zap.DebugLevel, "strict req-body match rejected mock: non-noise field drift"); ce != nil {
-			ce.Write(zap.String("mock name", m.Name), zap.Any("drift", drift))
+			// The drifted fields by their shape: a body's keys can be
+			// values (a session id); never the patterns or values.
+			ce.Write(zap.String("mock name", m.Name), zap.Strings("drift", models.FieldShapes(slices.Sorted(maps.Keys(drift)))))
 		}
 	}
 	return kept
@@ -2110,17 +2184,61 @@ func isFormURLEncoded(header map[string]string) bool {
 	return false
 }
 
+// obfuscatedKey reports whether one of a recorded form key's raw values is in
+// a "key=value" segment the obfuscator's patterns match: per occurrence, on
+// the full raw segment, as Mock.Noise is read for form bodies.
+func obfuscatedKey(rawKey string, mv []string, isObfuscated func(string) bool) bool {
+	for _, v := range mv {
+		if isObfuscated(rawKey + "=" + v) {
+			return true
+		}
+	}
+	return false
+}
+
+// unobfuscated are the raw form values of mv the obfuscator did not redact,
+// in their order: each value it redacts matches a pattern of its own, as
+// it reads decoded.
+func unobfuscated(mv []string, isObfuscated func(string) bool) []string {
+	var out []string
+	for _, v := range mv {
+		// A value that does not unescape reads "", which no value the
+		// obfuscator redacted is.
+		if d, _ := url.QueryUnescape(v); !isObfuscated(d) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // formReqBodyNoise diffs two form-encoded bodies key-by-key and returns the
-// drifted/removed keys as body.<key> field-path noise. Keys already known or
-// covered by the obfuscator value-regexes are skipped.
-func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
+// drifted/removed keys as body.<key> field-path noise. Keys covered by the
+// obfuscator value-regexes are skipped, and so are keys known with no
+// patterns. A key known with patterns is skipped only when both bodies hold
+// it and each of its values, on each side, matches one (formValuesMatch):
+// otherwise its values are compared. The entry with patterns that decides a
+// key is found as the strict comparison and PatternDrift find it
+// (formGuards: on the decoded key, without case, whole fields at any depth).
+// Such a key is read on both sides by its decoded key, raw spellings that
+// decode alike as one key, their values read in body order and compared as
+// the strict comparison compares them (sameFormValues: decoded, in any
+// order, where both bodies parse), and its drift is named by it, which
+// PatternDrift's filter reads. Any other key is read by its raw text and its
+// raw values are compared in order, as before. It is skipped where an entry
+// with no patterns names it, as written or by its decoded key as the strict
+// comparison reads it (formKeyExcused: keploy.yml writes a key in any case,
+// and keploy reads it in lower case). byName names its drift by its decoded
+// key (formKeyName), as the strict comparison names a field, so an entry
+// naming that drift excuses the key; else as written, as before.
+func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool, byName bool) map[string][]string {
 	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
 	// url.ParseQuery so the "key=value" segment handed to isObfuscated carries
 	// the same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
 	// (^<raw_key>=[^&]+$) — exactly as formBodiesMatchModuloNoise does. Passing
 	// only the decoded value here would never match a key-anchored regex, so
 	// obfuscated form fields would be wrongly re-flagged as schema noise.
-	rawValuesByKey := func(body string) map[string][]string {
+	// The raw values of each key, in body order, the key as name gives it.
+	rawValuesByKey := func(body string, name func(string) string) map[string][]string {
 		out := map[string][]string{}
 		for _, seg := range strings.Split(body, "&") {
 			if seg == "" {
@@ -2130,37 +2248,67 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 			if i := strings.IndexByte(seg, '='); i >= 0 {
 				key, val = seg[:i], seg[i+1:]
 			}
-			out[key] = append(out[key], val)
+			out[name(key)] = append(out[name(key)], val)
 		}
 		return out
 	}
-	mockVals := rawValuesByKey(mockBody)
-	reqVals := rawValuesByKey(reqBody)
+	asWritten := func(k string) string { return k }
+	mockVals := rawValuesByKey(mockBody, asWritten)
+	reqVals := rawValuesByKey(reqBody, asWritten)
+	// By decoded key, built for the first key an entry with patterns guards.
+	var mockByName, reqByName map[string][]string
+	if isObfuscated == nil {
+		isObfuscated = func(string) bool { return false } // no value-regex noise on the mock
+	}
 
+	guards := formGuards(known)
+	excused := formKeyExcused(known)
+	read := map[string]bool{} // decoded keys a guarded key was read under
 	out := map[string][]string{}
 	for rawKey, mv := range mockVals {
 		key := "body." + rawKey
-		if _, ok := known[key]; ok {
-			continue
-		}
-		// Obfuscator exclusion is per-occurrence on the full raw key=value
-		// segment, matching how Mock.Noise is evaluated for form bodies.
-		// isObfuscated may be nil (no value-regex noise on the mock).
-		obfuscated := false
-		if isObfuscated != nil {
-			for _, v := range mv {
-				if isObfuscated(rawKey + "=" + v) {
-					obfuscated = true
-					break
-				}
+		pats, ok := known[key]
+		rv, inLive := reqVals[rawKey]
+		gp := guards(rawKey)
+		if len(gp) > 0 {
+			name := formKeyName(rawKey)
+			if read[name] {
+				continue
 			}
+			read[name] = true
+			if mockByName == nil {
+				mockByName, reqByName = rawValuesByKey(mockBody, formKeyName), rawValuesByKey(reqBody, formKeyName)
+			}
+			pats, ok, key = gp, true, "body."+name
+			mv = mockByName[name]
+			rv, inLive = reqByName[name]
+		} else if byName {
+			key = "body." + formKeyName(rawKey)
 		}
-		if obfuscated {
+		if ok && len(pats) == 0 || excused(rawKey, false) {
 			continue
 		}
-		rv, ok := reqVals[rawKey]
-		if !ok {
+		if len(pats) > 0 {
+			// The patterns decide the key, before the obfuscator's
+			// exclusion: a recorded value it redacted is not held to them
+			// (it matches a pattern of its own), the key's other recorded
+			// values and the live ones are.
+			if inLive && formValuesMatch(unobfuscated(mv, isObfuscated), pats) && formValuesMatch(rv, pats) {
+				continue
+			}
+		} else if obfuscatedKey(rawKey, mv, isObfuscated) {
+			continue
+		}
+		if !inLive {
 			out[key] = []string{} // key dropped on replay
+			continue
+		}
+		if len(gp) > 0 {
+			// A key the patterns guard is compared as the strict
+			// comparison compares it, so a miss and the switch agree.
+			if !sameFormValues(mv, rv, mockBody, reqBody) {
+				out[key] = []string{} // value drifted
+			}
 			continue
 		}
 		// Compare occurrences element-wise (order-sensitive) rather than
@@ -2183,6 +2331,98 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 	return out
 }
 
+// sameFormValues reports whether a form key's raw values a, of the form
+// body rec, and b, of live, are the same values as the strict comparison
+// reads them (formDiffs). Where url.ParseQuery reads both bodies, they are
+// compared as the application sent them (URL-decoded), in any order
+// (sameMembers): a value escaped another way ("+" or "%20" for a space) or a
+// repeated key's values in another order are the same values. Otherwise
+// (the strict comparison reads such a body, changed, as changed whole) they
+// are the same only as written, in order.
+func sameFormValues(a, b []string, rec, live string) bool {
+	if slices.Equal(a, b) {
+		return true
+	}
+	return formParses(rec) && formParses(live) && sameMembers(decodedFormValues(a), decodedFormValues(b))
+}
+
+// decodedFormValues are raw form values of a body url.ParseQuery reads,
+// URL-decoded (each does), in their order.
+func decodedFormValues(raw []string) []string {
+	out := make([]string, len(raw))
+	for i, v := range raw {
+		out[i], _ = url.QueryUnescape(v)
+	}
+	return out
+}
+
+// formParses reports whether url.ParseQuery reads body, as the strict
+// comparison reads a form; it does not where, for example, a segment holds
+// a ';', a key or a value does not decode, or the body holds more
+// parameters than it reads.
+func formParses(body string) bool {
+	_, err := url.ParseQuery(body)
+	return err == nil
+}
+
+// formGuards returns, for a raw form key, the patterns of the entry of known
+// ("body."-prefixed) that names its decoded key as matcher.NoiseLookup reads
+// it; none where no entry does, or the one that does has none (an entry with
+// none is read by its exact key, as before).
+func formGuards(known map[string][]string) func(rawKey string) []string {
+	for _, pats := range known {
+		if len(pats) > 0 {
+			lookup := matcher.NewNoiseLookup(stripBodyPrefix(known))
+			return func(rawKey string) []string {
+				pats, _ := lookup.Patterns(formKeyName(rawKey))
+				return pats
+			}
+		}
+	}
+	return func(string) []string { return nil }
+}
+
+// formKeyExcused returns, for a raw form key, whether an entry of known
+// ("body."-prefixed) with no patterns names its decoded key as the strict
+// comparison's formDiffs reads it (matcher.NoiseLookup: without case, whole
+// fields at any depth), so the key is no drift whatever it holds. For a key
+// only the live body holds (added), that entry must not name id keys, as
+// NoiseLookup.CoversAdded reads it: one that does speaks for the recorded
+// keys.
+func formKeyExcused(known map[string][]string) func(rawKey string, added bool) bool {
+	lookup := matcher.NewNoiseLookup(stripBodyPrefix(known))
+	return func(rawKey string, added bool) bool {
+		if added {
+			return lookup.CoversAdded(formKeyName(rawKey))
+		}
+		return lookup.Covers(formKeyName(rawKey), "", false)
+	}
+}
+
+// formKeyName is a raw form key as the application named it (URL-decoded),
+// or as written when it does not decode.
+func formKeyName(rawKey string) string {
+	if d, err := url.QueryUnescape(rawKey); err == nil {
+		return d
+	}
+	return rawKey
+}
+
+// formValuesMatch reports whether each of a form key's raw values, read as
+// the application sent it (URL-decoded), matches one of patterns. A pattern
+// that does not compile matches nothing.
+func formValuesMatch(raw []string, patterns []string) bool {
+	for _, v := range raw {
+		if d, err := url.QueryUnescape(v); err == nil {
+			v = d
+		}
+		if ok, _ := matcher.MatchesAnyRegex(v, patterns); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // mergeReqBodyNoise returns a fresh map combining existing and newly-detected
 // request-body noise. Existing entries win on key collision (noise is
 // monotonic — once a field is flagged it stays flagged), and every slice is
@@ -2202,30 +2442,106 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // computed against a candidate the matcher actually considered close — not
 // just the lowest-Levenshtein path. If httpMocks is nil, it fetches from
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
-func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
-	r := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
-	// Under the proven switch a test is served what its mapping names, and a
-	// declared call does not change that: the hint would not help.
-	if r != nil && !provenswitch.On() && statesHTTPLifetimes(mockDb, httpMocks) {
-		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request))
+func (h *HTTP) buildHTTPMismatchReport(ctx context.Context, request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
+	r, hint := h.buildHTTPMismatchReportHinted(ctx, request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	if hint != "" {
+		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + hint)
 	}
 	return r
 }
 
+// buildHTTPMismatchReportHinted is buildHTTPMismatchReport with the hint for
+// a call shared across tests (sessionCallHint) apart, not yet in the next
+// steps: "" when the recording does not state its HTTP mocks' lifetimes. A
+// repeat note keeps it (markRepeat), so the hint outlives the note's own
+// next step.
+func (h *HTTP) buildHTTPMismatchReportHinted(ctx context.Context, request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (*models.MockMismatchReport, string) {
+	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	if r != nil && request != nil {
+		// The call's path tag, of its method and the path it sent, in the
+		// session of ctx, the connection's: the summary may write a segment
+		// a recording redacted {}, and the agent's other lines about the
+		// request (utils.GetReqMeta) tag the path it sent.
+		r.PathTag = models.URLPathTag(ctx, request.Method, request.URL)
+	}
+	if r == nil || !statesHTTPLifetimes(mockDb, httpMocks) {
+		return r, ""
+	}
+	return r, sessionCallHint(request, places, provenswitch.On())
+}
+
+// viewless makes r the miss of a call whose view a test's begin or end
+// replaced before keploy finished diagnosing it
+// (integrations.CallViewGoneWhy): it drops all that r read of a recording,
+// whichever view the read was of. That is the closest recording, its
+// rendered request, the diff, the field diffs and their reasons, and the
+// compared set's destination scope, and its next steps: each is advice from
+// that comparison (record again, declare noise), which a call keploy could
+// not compare in its own view does not take. The caller says why it has
+// none (CallViewGoneWhy). The call's own summary and rendering stay
+// redacted by the places r was built with.
+func viewless(r *models.MockMismatchReport) {
+	plain := mismatch.NewReport(r.Protocol, r.ActualSummary).
+		WithDestination(r.Destination).
+		WithPhase(r.MatchPhase, r.CandidateCount).Build()
+	r.ClosestMock, r.ClosestMockReq, r.Diff = "", "", ""
+	r.FieldDiffs, r.Differs, r.FieldReasons = nil, nil, nil
+	r.DestinationScope, r.NextSteps = plain.DestinationScope, ""
+}
+
 // sessionCallHint tells how to serve a call to every test, for a recording
 // that serves each test its own HTTP calls only: a test that never recorded
-// a call misses it though another test recorded it.
-func sessionCallHint(request *http.Request) string {
+// a call misses it though another test, or the application outside every
+// test, recorded it. Without the proven switch a declared call is served to
+// every test from any test's recording of it; under the switch from a
+// recording made outside every test only (in TestMain or at start-up), of a
+// call a keploy.yaml entry names exactly, by its method and whole path
+// (models.SessionCallDeclared), and another test's recording of it stays
+// that test's. Under the switch, a call an entry names is told what the
+// declaration serves, and one an entry covers only by a path prefix or with
+// no method the exact entry to declare. places are the report's
+// (poolPlaces): a path the hint names stops before the first segment a
+// recording of the pool redacted (redactedPlaces.pathPrefix).
+func sessionCallHint(request *http.Request, places redactedPlaces, proven bool) string {
 	host := request.Host
 	if host == "" && request.URL != nil {
 		host = request.URL.Host
 	}
+	// buildHTTPMismatchReportOf gave the request a URL when it had none.
 	path := "/"
-	if request.URL != nil && request.URL.Path != "" {
-		path = request.URL.Path
+	if prefix := places.pathPrefix(request.URL.EscapedPath()); prefix != "" {
+		path = prefix
 	}
-	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
-		host, request.Method, path, mismatch.RecordCommand())
+	record := mismatch.RecordCommand()
+	if !proven {
+		return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
+			host, request.Method, path, record)
+	}
+	// The rules read the call's real path; the hint names only the part of
+	// it the report may show.
+	covered, named := models.SessionCallDeclared(request.Method, host, request.URL.Path)
+	entry := exactSessionCall(host, request.Method, path, strings.Contains(places.decodedPath(request.URL.EscapedPath()), valueRedacted))
+	switch {
+	case named:
+		return fmt.Sprintf("keploy.yaml declares this call a session call, which serves a recording of it made outside every test (in TestMain or at start-up) to every test; a recording another test made of it is served to that test only. Record again with '%s' so this test records it.", record)
+	case covered:
+		return fmt.Sprintf("A keploy.yaml sessionCalls entry covers this call only by a path prefix or with no method. Under the proven switch a recording made outside every test (in TestMain or at start-up) is served to every test only for a call an entry names exactly, by its method and whole path, so that no recording is served to a call no one declared: to serve this one so, declare %s. A recording another test made of it is served to that test only, declared or not. Or record again with '%s' so this test records it.",
+			entry, record)
+	}
+	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If the application made this call outside every test (in TestMain or at start-up) and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve that recording to every test (%s); a recording another test made of it is served to that test only, declared or not. Or record again with '%s' so this test records it.",
+		entry, record)
+}
+
+// exactSessionCall is the keploy.yaml sessionCalls entry that names a call
+// of method to host exactly, as a hint shows it: path is the call's path up
+// to the first segment a recording redacted, and cut says one did, so the
+// entry's pathPrefix is said to go on with the rest of the call's path,
+// which the hint does not show.
+func exactSessionCall(host, method, path string, cut bool) string {
+	if cut {
+		return fmt.Sprintf("sessionCalls: [{host: %q, method: %q, pathPrefix: the call's whole path}], a path that begins %q and goes on with segments a recording redacted, which keploy does not show", host, method, path)
+	}
+	return fmt.Sprintf("sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]", host, method, path)
 }
 
 // statesHTTPLifetimes reports whether the recording being replayed states its
@@ -2242,8 +2558,14 @@ func statesHTTPLifetimes(mockDb integrations.MockMemDb, compared []*models.Mock)
 }
 
 // buildHTTPMismatchReportOf is buildHTTPMismatchReport without the hint for a
-// call shared across tests.
-func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
+// call shared across tests; closest is the recording the report names the
+// call against (nil: none), whose redacted places the report redacts.
+//
+// places are those the report is redacted by (poolPlaces), for the hint
+// buildHTTPMismatchReport adds. When the pool cannot be read, the summary
+// names the call's path by its shape only (shapeSummary): keploy cannot tell
+// there which segment holds a secret.
+func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (r *models.MockMismatchReport, places redactedPlaces) {
 	// Defensive: this diagnostic builder and its callees (pickClosestCandidate,
 	// renderLiveRequest) — plus decode.go's 502 error line — dereference
 	// request.URL throughout. http.ReadRequest always sets a non-nil URL on the
@@ -2252,7 +2574,11 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if request.URL == nil {
 		request.URL = &url.URL{}
 	}
-	actualKey := request.Method + " " + request.URL.Path
+	// The report names the operation the call carries in a field of its
+	// own (MockMismatchReport.Operation), never in its summary. Every
+	// return below builds a report.
+	liveOp := liveOperation(request, liveBody)
+	defer func() { r.Operation = liveOp }()
 	// Destination identifies WHICH upstream this missed call targeted; the same
 	// method+path can hit several hosts. Host header first, URL authority next.
 	dest := request.Host
@@ -2265,15 +2591,15 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// same order the matcher saw. Per-test FIRST, session second.
 		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
-			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, shapeSummary(request)).
 				WithDestination(dest).
-				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb))
+				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb), unreadPlaces()), unreadPlaces()
 		}
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
-			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, shapeSummary(request)).
 				WithDestination(dest).
-				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb))
+				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb), unreadPlaces()), unreadPlaces()
 		}
 		mocks := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
 		mocks = append(mocks, perTestMocks...)
@@ -2284,21 +2610,24 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if diag != nil && diag.answered != nil {
 		// Each recording of the call the stateful walk holds has answered
 		// (servedWalk): the miss names the last, and no request diff, as
-		// the call is that recording's.
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		// the call is that recording's. Its path shows the segments that
+		// recording redacted redacted.
+		last := diag.answered.lastMock
+		places := heldPlaces(mockDb, last, diag.pool, request.URL.EscapedPath())
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDestinations(diag.pool, diag.candidates)).
 			WithPhase(diag.phase, diag.candidates).
 			WithClosest(diag.answered.last, nil).
 			WithDiff(diag.answered.why()).
-			WithNextSteps(diag.answered.next()).Build(), request, nil, diag.pool, variableTable(mockDb))
+			WithNextSteps(diag.answered.next()).Build(), request, last, diag.pool, variableTable(mockDb), places), places
 	}
 	if diag != nil && diag.variable != nil {
 		// A variable's place counts the segments of the escaped path
 		// (variables.go), so this miss names its path escaped too: a %2F
 		// stays inside its segment, and the place names the segment the
 		// miss's shape writes {} (models.MissShape).
-		return variableMismatchReport(request, liveBody, dest, request.Method+" "+request.URL.EscapedPath(), diag, httpMocks, variableTable(mockDb))
+		return variableMismatchReport(request, liveBody, dest, diag, httpMocks, mockDb)
 	}
 
 	phase := models.MatchPhaseExhausted
@@ -2315,9 +2644,13 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 
 	if candidateCount == 0 && len(schemaSurvivors) == 0 {
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		// No recording is left to compare: the call is named redacted by
+		// the places of those of the set that answered before (heldPlaces),
+		// as it is sent when none redacted anything.
+		places := heldPlaces(mockDb, nil, nil, request.URL.EscapedPath())
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 			WithDestination(dest).
-			WithPhase(models.MatchPhaseNoMocks, 0).Build(), request, nil, nil, variableTable(mockDb))
+			WithPhase(models.MatchPhaseNoMocks, 0).Build(), request, nil, nil, variableTable(mockDb), places), places
 	}
 
 	// Does anything the matcher just compared against even target this
@@ -2345,8 +2678,9 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
 		// Under the proven switch: the strict comparison's closest recording,
 		// and the fields it found differ.
-		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, actualKey, diag, comparedDests, phase, candidateCount),
-			request, diag.closest, comparedPool, variableTable(mockDb))
+		places := heldPlaces(mockDb, diag.closest, comparedPool, request.URL.EscapedPath())
+		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, diag, comparedDests, phase, candidateCount, places),
+			request, diag.closest, comparedPool, variableTable(mockDb), places), places
 	}
 	closestPool := httpMocks
 	if diag != nil && diag.live != nil {
@@ -2357,12 +2691,14 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 			closestPool = same
 		}
 	}
-	closestMock := pickClosestCandidate(request, schemaSurvivors, closestPool)
+	closestMock := pickClosestCandidate(request, liveOp, schemaSurvivors, closestPool)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		// Named redacted by the places of every recording compared.
+		places := heldPlaces(mockDb, nil, comparedPool, request.URL.EscapedPath())
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDests).
-			WithPhase(phase, candidateCount).Build(), request, nil, comparedPool, variableTable(mockDb))
+			WithPhase(phase, candidateCount).Build(), request, nil, comparedPool, variableTable(mockDb), places), places
 	}
 	// The call the field diffs are computed from: under the proven switch a
 	// closest mock with variables is diffed with its recorded values at their
@@ -2388,7 +2724,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 	mockPath := mockReq.URL
 	var mockQuery url.Values
-	if parsed, err := url.Parse(mockReq.URL); err == nil {
+	if parsed, err := parseRecordedURL(mockReq.URL); err == nil {
 		mockPath = parsed.Path
 		mockQuery = parsed.Query()
 	}
@@ -2411,29 +2747,80 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 	fieldDiffs = append(fieldDiffs, mismatch.QueryParamDiffs(recordedQuery, diffReq.URL.Query())...)
 	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, diffReq.Header, headerNoise)...)
+	// Without the proven switch the schema phase also refuses a recording on
+	// its Content-Type's media type and its body's type, whatever keploy.yml's
+	// noise says: the miss names them, and the hint offers no noise for them.
+	// (Under the switch the strict comparison reads both, noise aware.)
+	var schemaTyped []string
+	if !provenswitch.On() {
+		for _, d := range h.schemaTypeDiffs(mockReq, diffReq.Header, diffBody) {
+			fieldDiffs = append(fieldDiffs, d)
+			schemaTyped = append(schemaTyped, d.Path)
+		}
+	}
 
 	// Body diffs: JSON bodies get field-level diffs excluding everything the
-	// matcher itself ignores (learned req_body_noise + user body noise).
+	// matcher itself ignores (learned req_body_noise + user body noise). The
+	// user's entry wins on a key both name: its patterns decide that field,
+	// so a value outside them stays in the diffs.
 	if len(diffBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(diffBody) {
-		ignore := mergeNoiseMaps(stripBodyPrefix(closestMock.Spec.ReqBodyNoise), userBodyNoise)
+		ignore := mergeNoiseMaps(userBodyNoise, stripBodyPrefix(closestMock.Spec.ReqBodyNoise))
 		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(diffBody), ignore)...)
+	}
+
+	// A refusal under strict enforcement without the switch (the switch's
+	// own is reported above) can be of a field keploy.yml's request-body
+	// patterns guard, a side's value outside them (PatternDrift,
+	// StrictReject): the miss names it, the patterns and that side, as the
+	// switch's does.
+	var guarded []strictField
+	if phase == models.MatchPhaseStrict {
+		guarded = patternRefusals(closestMock, request.Header, liveBody, userBodyNoise)
+		for _, f := range guarded {
+			if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == f.diff.Path }) {
+				fieldDiffs = append(fieldDiffs, f.diff)
+			}
+		}
+		// The strict check compares JSON bodies both ways and whole
+		// (filterStrictNoiseMatches): a field it refused at that the
+		// diffs above do not name (an array element before the last, a
+		// learned field of another type) is named too, by its path alone.
+		// A form is refused only by the patterns that guard it (named
+		// above); its other fields are no reason. (A call that is not JSON
+		// against a JSON recording differs whole, which names no field.)
+		// A field only one side holds is named missing on the other
+		// (sides.kind), any other as changed in value.
+		if pkg.IsJSON([]byte(mockReq.Body)) {
+			live := mocknoise.NewJSONBody(diffBody)
+			recorded, _ := h.ownBodies.read(closestMock) // mockReq is its request
+			oneSide := fieldsOnOneSide(closestMock, recorded.json(), live)
+			for _, p := range h.bodyFieldsDiffering(closestMock, live, userBodyNoise) {
+				if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == p }) {
+					fieldDiffs = append(fieldDiffs, models.MockFieldDiff{Path: p, Kind: oneSide[p].kind()})
+				}
+			}
+		}
 	}
 
 	// Redact secret / obfuscated values out of the structured diffs before they
 	// are attached — they (and the Diff string derived from them) are persisted
 	// into the report YAML and the platform API.
-	redactFieldDiffs(fieldDiffs, closestMock.Noise)
+	places = heldPlaces(mockDb, closestMock, comparedPool, request.URL.EscapedPath())
+	redactFieldDiffs(fieldDiffs, places, diffReq.URL.EscapedPath())
 
-	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
+		WithPatternMisses(patternMisses(guarded)...).
+		WithoutNoise(schemaTyped...).
+		WithoutNoise(payloadHashPaths()...).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
 		// passed so obfuscated values stay redacted on both sides.
 		WithRenderedRequests(
 			renderMockRequest(mockReq, closestMock.Noise),
-			renderLiveRequest(request, liveBody, closestMock.Noise),
+			renderLiveRequest(request, liveBody, places),
 		)
 	if len(fieldDiffs) == 0 {
 		// Nothing structurally differs vs the closest candidate, yet the
@@ -2441,7 +2828,27 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// of the misleading legacy "headers or body differ".
 		b = b.WithDiff(fmt.Sprintf("closest mock %q has no field-level differences; match stopped at phase %q", closestMock.Name, phase))
 	}
-	return withRoutePlaces(b.Build(), request, closestMock, comparedPool, variableTable(mockDb))
+	r = b.Build()
+	if r != nil {
+		r.FieldReasons = reasonsOf(guarded)
+	}
+	return withRoutePlaces(r, request, closestMock, comparedPool, variableTable(mockDb), places), places
+}
+
+// patternRefusals are the fields of m's recorded request body that
+// keploy.yml's request-body entry with patterns (userBodyNoise) guards and a
+// side's value is outside of, each with its reason (matcher.PatternWhy), as
+// the strict comparison reads them: a recorded value the obfuscator redacted
+// is not held to the patterns, the live one is.
+func patternRefusals(m *models.Mock, header http.Header, liveBody []byte, userBodyNoise map[string][]string) []strictField {
+	k := strictKnown{n: strictNoise{body: matcher.NewNoiseLookup(userBodyNoise)}, values: util.NewNoiseChecker(m.Noise)}
+	var out []strictField
+	for _, f := range k.bodyDiffs(m.Spec.HTTPReq, &req{header: header, body: liveBody}) {
+		if f.why != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // comparedDestinations returns the upstream authority of every mock in the
@@ -2507,16 +2914,30 @@ func comparedDestinations(pool []*models.Mock, candidateCount int) []string {
 
 // pickClosestCandidate prefers a schema-match survivor (already same
 // method/path/keys) and falls back to the lowest-Levenshtein "METHOD path"
-// candidate across the pool, same-method candidates first.
-func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models.Mock) *models.Mock {
-	if len(schemaSurvivors) > 0 {
-		for _, m := range schemaSurvivors {
-			if m != nil && m.Spec.HTTPReq != nil {
-				return m
-			}
+// candidate across the pool, same-method candidates first. A call that
+// carries an operation (liveOp, its models.HTTPOperationLabel) is diffed
+// against a recording of the same operation where there is one: the first
+// survivor of it, else the first survivor; in the pool, each key is named
+// with its operation (models.WithHTTPOperation), so one of the same
+// operation is nearer. A recording's operation is read once
+// (recordedOperations).
+func pickClosestCandidate(request *http.Request, liveOp string, schemaSurvivors, pool []*models.Mock) *models.Mock {
+	var survivor *models.Mock
+	for _, m := range schemaSurvivors {
+		if m == nil || m.Spec.HTTPReq == nil {
+			continue
+		}
+		if liveOp == "" || recordedOperations.of(m.Spec.HTTPReq) == liveOp {
+			return m
+		}
+		if survivor == nil {
+			survivor = m
 		}
 	}
-	actualKey := request.Method + " " + request.URL.Path
+	if survivor != nil {
+		return survivor
+	}
+	actualKey := models.WithHTTPOperation(request.Method+" "+request.URL.Path, liveOp)
 	bestDist := -1
 	var closest *models.Mock
 	for pass := 0; pass < 2; pass++ {
@@ -2529,10 +2950,10 @@ func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models
 			}
 			// Parse mock URL to extract just the path (mocks store full URL strings)
 			mockPath := mock.Spec.HTTPReq.URL
-			if parsed, err := url.Parse(mock.Spec.HTTPReq.URL); err == nil {
+			if parsed, err := parseRecordedURL(mock.Spec.HTTPReq.URL); err == nil {
 				mockPath = parsed.Path
 			}
-			mockKey := string(mock.Spec.HTTPReq.Method) + " " + mockPath
+			mockKey := models.WithHTTPOperation(string(mock.Spec.HTTPReq.Method)+" "+mockPath, recordedOperations.of(mock.Spec.HTTPReq))
 			dist := levenshtein.ComputeDistance(actualKey, mockKey)
 			if bestDist < 0 || dist < bestDist {
 				bestDist = dist

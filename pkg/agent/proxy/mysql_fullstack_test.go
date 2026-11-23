@@ -90,11 +90,11 @@ func TestMySQLV2_FullStackAgainstARealServer(t *testing.T) {
 			if tc.relayOff != "" {
 				t.Setenv("KEPLOY_NEW_RELAY", tc.relayOff)
 				// Assert the DISPATCH DECISION, not just that mocks appear.
-				// MySQL's legacy path also routes its mocks through the
-				// SyncMockManager, so every downstream assertion in
-				// runFullStackMySQL is satisfied on either surface — this case
-				// stayed green with the kill switch restored until this check
-				// was added.
+				// A diverted connection would fail runFullStackMySQL too
+				// (MySQL declines a session without V2 streams and records
+				// nothing), but only as "ZERO mocks", whose listed causes
+				// all point away from the dispatch. This check's failure
+				// names the dispatch.
 				if !shouldRecordViaSupervisor(mysqlparser.New(zap.NewNop())) {
 					t.Fatal("a stale KEPLOY_NEW_RELAY in the environment diverted MySQL off " +
 						"the supervisor path; the rollback knob was removed and must be inert")
@@ -169,13 +169,13 @@ func runFullStackMySQL(t *testing.T, wrapDest func(net.Conn, *zap.Logger) (net.C
 		}
 
 		errGrp, gctx := errgroup.WithContext(ctx)
-		// handleConnection seeds these three before dispatching (proxy.go
-		// ~2010). Without them the LEGACY half of this dispatcher is
-		// unrunnable — recordLegacy fails with "failed to get the error group
-		// from the context", and recorder/record.go does an unchecked
-		// ctx.Value(ClientConnectionIDKey).(string) — so a gate mutation
-		// failed here after 80s blaming cleartext leakage when the real cause
-		// was a missing context value.
+		// handleConnection seeds these three values into parserCtx before
+		// it dispatches. Neither half of the dispatcher reads them today: its
+		// V2 half runs the supervisor, and its other half hands MySQL a
+		// session without V2 streams, which MySQL declines before reading a
+		// byte, so the connection is relayed raw with nothing recorded. They
+		// are seeded here so that a reader added to either half finds them,
+		// as it would in production.
 		gctx = context.WithValue(gctx, models.ErrGroupKey, errGrp)
 		gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "1")
 		gctx = context.WithValue(gctx, models.DestConnectionIDKey, "2")

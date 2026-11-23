@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -522,6 +523,14 @@ func TestAMultipartFileReachesReplayWhereverItsTestCaseIsPersisted(t *testing.T)
 					t.Fatal(err)
 				}
 				tc = &streamed
+			} else {
+				// What the agent client does with each test case it reads
+				// from its agent (capturedByAgent): the part's path is the
+				// file the capture left it in. The test store copies a part
+				// only from such a file.
+				for i := range tc.HTTPReq.Form {
+					tc.HTTPReq.Form[i].Captured = slices.Clone(tc.HTTPReq.Form[i].Paths)
+				}
 			}
 
 			keployPath := t.TempDir()
@@ -560,6 +569,91 @@ func TestAMultipartFileReachesReplayWhereverItsTestCaseIsPersisted(t *testing.T)
 					got.files, got.fileNames, got.fields, file)
 			}
 		})
+	}
+}
+
+// A part whose temp file is gone when its test case leaves for another process
+// goes with no path, never the path of a file that process cannot read: a test
+// store refuses an absolute path that comes with no contents, and would lose the
+// whole test case for one part. It keeps the case, with that part's file lost,
+// and the other part's bytes still ride it.
+func TestAPartInlineFormFilesCannotReadGoesWithNoPath(t *testing.T) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for _, name := range []string{"gone.bin", "kept.bin"} {
+		fw, err := mw.CreateFormFile("bundle", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	form := ExtractFormData(zap.NewNop(), body.Bytes(), mw.FormDataContentType())
+	if len(form) != 2 || len(form[0].Paths) != 1 || len(form[1].Paths) != 1 {
+		t.Fatalf("capture form = %+v, want two file parts with a temp file each", form)
+	}
+	gone, kept := form[0].Paths[0], form[1].Paths[0]
+	t.Cleanup(func() { _ = os.Remove(gone); _ = os.Remove(kept) })
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	tc := &models.TestCase{
+		Kind:          models.HTTP,
+		HasBinaryFile: true,
+		HTTPReq: models.HTTPReq{
+			Method: http.MethodPost,
+			URL:    "http://localhost:8080/upload",
+			Header: map[string]string{"Content-Type": mw.FormDataContentType()},
+			Form:   form,
+		},
+		HTTPResp: models.HTTPResp{StatusCode: http.StatusOK},
+	}
+	core, logs := observer.New(zap.ErrorLevel)
+	InlineFormFiles(zap.New(core), tc)
+
+	if f := tc.HTTPReq.Form[0]; len(f.Paths) != 1 || f.Paths[0] != "" || (len(f.FileContents) > 0 && f.FileContents[0] != nil) {
+		t.Fatalf("gone part = %+v, want no path and no contents", f)
+	}
+	if f := tc.HTTPReq.Form[1]; len(f.Paths) != 1 || f.Paths[0] != "" || len(f.FileContents) != 1 || string(f.FileContents[0]) != "kept.bin" {
+		t.Fatalf("kept part = %+v, want its bytes and no path", f)
+	}
+	wantPath := models.FormFilePathLogText(gone)
+	if said := logs.FilterField(zap.String("path", wantPath)).All(); len(said) != 1 {
+		t.Fatalf("logged %+v, want one line naming %s", logs.All(), wantPath)
+	}
+
+	// What the DaemonSet stream carries, persisted as k8s-proxy's control plane does.
+	payload, err := json.Marshal(tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var streamed models.TestCase
+	if err := json.Unmarshal(payload, &streamed); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	keployPath := t.TempDir()
+	db := testdb.New(zap.NewNop(), keployPath)
+	if err := db.InsertTestCase(ctx, &streamed, "test-set-0", false); err != nil {
+		t.Fatalf("insert test case: %v: a part with no file cost the whole test case", err)
+	}
+	stored, err := db.GetTestCases(ctx, "test-set-0")
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("stored test cases = %d (err %v), want 1", len(stored), err)
+	}
+	if f := stored[0].HTTPReq.Form[0]; len(f.Paths) != 0 {
+		t.Fatalf("stored gone part = %+v, want no file", f)
+	}
+	f := stored[0].HTTPReq.Form[1]
+	if len(f.Paths) != 1 {
+		t.Fatalf("stored kept part = %+v, want its file", f)
+	}
+	if onDisk, err := os.ReadFile(filepath.Join(keployPath, f.Paths[0])); err != nil || string(onDisk) != "kept.bin" {
+		t.Fatalf("asset %s = %q (err %v), want kept.bin", f.Paths[0], onDisk, err)
 	}
 }
 
@@ -628,5 +722,86 @@ func TestSkipGRPCUnderPressureDecidesByThePauseAsTheRequestWasRead(t *testing.T)
 	}
 	if got := mgr.NotRecordedUnderPressure(); got.Total != 3 || got.ByConn["10.0.0.1:5000 -> 127.0.0.1:50051"] != 3 {
 		t.Fatalf("not recorded under pressure: %+v, want the three calls left out, on their connection", got)
+	}
+}
+
+// A test case a capture built reaches the recording's queue, or, when its
+// ingress's context ends first, is counted on the manager the context carries
+// as one not handed on (syncMock NoteNotHandedOn): never a silent loss. The
+// gRPC capture hands its test cases on the same way.
+func TestATestCaseTheCaptureCannotHandOnIsCounted(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	live := syncMock.NewContext(context.Background(), mgr)
+	stopped, stop := context.WithCancel(live)
+	stop()
+
+	queue := make(chan *models.TestCase, 1)
+	if !HandOn(live, queue, &models.TestCase{Name: "kept"}) || len(queue) != 1 || mgr.NotHandedOn() != 0 {
+		t.Fatalf("a running ingress with room in the queue: queued %d, counted %d; want it queued, none counted", len(queue), mgr.NotHandedOn())
+	}
+	if HandOn(stopped, make(chan *models.TestCase), &models.TestCase{Name: "lost"}) || mgr.NotHandedOn() != 1 {
+		t.Fatalf("a stopped ingress with no reader: counted %d, want the test case counted as not handed on", mgr.NotHandedOn())
+	}
+
+	stream := &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{}, GRPCResp: &models.GrpcResp{}}
+	origHook := GRPCCaptureHook
+	GRPCCaptureHook = nil
+	defer func() { GRPCCaptureHook = origHook }()
+	CaptureGRPC(stopped, zap.NewNop(), make(chan *models.TestCase), stream, 9090, false, false)
+	if mgr.NotHandedOn() != 2 {
+		t.Fatalf("a gRPC call's test case its stopped ingress could not hand on: counted %d in all, want 2", mgr.NotHandedOn())
+	}
+}
+
+// With --sync a gRPC call's test case is named as its mocks' mapping is
+// (TestMockMapping.TestName), as an HTTP request's is (Capture): the recording
+// joins a mapping to its test case by that name, so a test case named
+// otherwise (by its Keploy-Test-Name header, which a call seldom has, so the
+// recorder names it) is saved without the mocks its call made. The name comes
+// off the manager the call's context carries, the one an HTTP request's name
+// comes off, so the two never share a name in its window map, and the call's
+// mocks resolve on that manager.
+func TestASyncGRPCTestCaseIsNamedAsItsMocksMapping(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	out := make(chan *models.Mock, 4)
+	mgr.SetOutputChannel(out)
+	maps := make(chan models.TestMockMapping, 4)
+	mctx, mcancel := context.WithCancel(context.Background())
+	defer mcancel()
+	mgr.SetMappingChannel(mctx, maps)
+	mgr.SetFirstRequestSignaled()
+	old := time.Now().Add(-time.Minute)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		mgr.ResolveRange(old, old, "", true, false)
+	}
+	origHook := GRPCCaptureHook
+	GRPCCaptureHook = nil
+	defer func() { GRPCCaptureHook = origHook }()
+
+	// An HTTP request's capture on this manager took the name before.
+	httpID := mgr.NextTestID()
+	start := time.Now().Add(-time.Second)
+	mgr.AddMock(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: start.Add(time.Millisecond)},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}})
+	stream := &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{Timestamp: start}, GRPCResp: &models.GrpcResp{Timestamp: time.Now()}}
+	queue := make(chan *models.TestCase, 1)
+	CaptureGRPC(syncMock.NewContext(context.Background(), mgr), zap.NewNop(), queue, stream, 9090, true, true)
+
+	var tc *models.TestCase
+	select {
+	case tc = <-queue:
+	default:
+		t.Fatal("the gRPC call's test case was not handed on")
+	}
+	if want := fmt.Sprintf("test-%d", httpID+1); tc.Name != want {
+		t.Fatalf("the gRPC call's test case is named %q, want %q: the next name on its context's manager, after the HTTP request's", tc.Name, want)
+	}
+	select {
+	case m := <-maps:
+		if m.TestName != tc.Name || len(m.MockIDs) != 1 {
+			t.Fatalf("the call's mocks were mapped to %q (%d mocks), want its test case %q with its one mock", m.TestName, len(m.MockIDs), tc.Name)
+		}
+	case <-time.After(10 * time.Second): // only turns a hang into a failure
+		t.Fatal("the call's mocks were not mapped on its context's manager")
 	}
 }

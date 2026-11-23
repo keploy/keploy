@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -20,6 +21,13 @@ import (
 // the replay keeps them out of that test's verdict and fails the set with
 // them at its end, naming each, as it does a call made after the set's last
 // test (unclaimed_calls.go).
+//
+// A call a parser held past its own window for a later test's recording that
+// none answered (models.UnmatchedCall.Held) is the set's too: its miss is
+// filed at the set's end read, or at its connection's end, which may fall in
+// any test's window. Whichever read takes it, it fails the set, named as
+// held, and charges no test: the test open when its connection ended did not
+// make it.
 
 // setCalls are the calls of the set RunTestSet is running that no mock
 // answered and that are the set's, no test's (setsCall): a read hands them
@@ -28,17 +36,55 @@ import (
 type setCalls struct {
 	mu    sync.Mutex
 	calls []models.UnmatchedCall
+	// after are the calls the set's end read returned, made after its last
+	// test, that no mock answered, kept for its report (outside), with the
+	// proven switch on or off.
+	after []models.UnmatchedCall
 }
 
 // setsCall reports whether c is the set's, no test's: made before the set's
-// first test (models.UnmatchedCall.BeforeSet).
-func setsCall(c models.UnmatchedCall) bool { return c.BeforeSet }
+// first test (models.UnmatchedCall.BeforeSet), or held by a parser for a
+// later test's recording that none answered (models.UnmatchedCall.Held).
+func setsCall(c models.UnmatchedCall) bool { return c.BeforeSet || c.Held }
 
 // reset forgets the previous set's calls.
 func (s *setCalls) reset() {
 	s.mu.Lock()
-	s.calls = nil
+	s.calls, s.after = nil, nil
 	s.mu.Unlock()
+}
+
+// keepAfter keeps calls, those the set's end read returned as made after its
+// last test, for the set's report, which names those that are misses and
+// fail nothing (outside).
+func (s *setCalls) keepAfter(calls []models.UnmatchedCall) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.after = append(s.after, calls...)
+}
+
+// outside is the set's calls that no mock answered and that fail nothing
+// (TestReport.OutsideTestMisses), in the order they were read, those made
+// after its last test (keepAfter) last. With the proven switch off (proven
+// false) none fails the set, so each is one: those the set's first test's
+// read handed over (made as its application started,
+// models.UnmatchedCall.BeforeSet), and those its end read returned. With it
+// on, only those that count against no test (a DNS lookup, a background
+// call): failing and the set's end read (unclaimedCalls) fail the set with
+// the others.
+func (s *setCalls) outside(proven bool) []models.UnmatchedCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []models.UnmatchedCall
+	for _, read := range [][]models.UnmatchedCall{s.calls, s.after} {
+		for _, c := range read {
+			if c.Answer != "" || (proven && c.CountsAgainstTest()) {
+				continue
+			}
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // take keeps the calls of read that are the set's (setsCall), and returns the
@@ -78,29 +124,47 @@ func (s *setCalls) answers() []models.UnmatchedCall {
 	return answers
 }
 
-// setCallsWhy says why the set's calls fail it, naming each: today every one
-// was made before the set's first test (setsCall).
+// setCallsWhy says why the set's calls fail it, naming each: those made
+// before the set's first test, and those a parser held for a later test's
+// recording that none answered (models.UnmatchedCall.Held), wherever they
+// were made.
 func setCallsWhy(calls []models.UnmatchedCall) string {
-	if len(calls) == 0 {
-		return ""
-	}
-	names := make([]string, 0, len(calls))
+	var before, held []string
 	for _, c := range calls {
-		names = append(names, describeUnclaimed(c))
+		if c.Held {
+			held = append(held, describeUnclaimed(c))
+			continue
+		}
+		before = append(before, describeUnclaimed(c))
 	}
-	return fmt.Sprintf("the application made %d call(s) before the set's first test that no mock answered: %s",
-		len(calls), strings.Join(names, "; "))
+	var why []string
+	if len(before) > 0 {
+		why = append(why, fmt.Sprintf("the application made %d call(s) before the set's first test that no mock answered: %s",
+			len(before), strings.Join(before, "; ")))
+	}
+	if len(held) > 0 {
+		why = append(why, fmt.Sprintf("the application made %d call(s) that keploy held for a later test's recording, which no test of the set answered: %s",
+			len(held), strings.Join(held, "; ")))
+	}
+	return strings.Join(why, "; ")
 }
 
 // logSetCalls says, at ERROR, each of the set's calls that fails it.
 func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 	for _, c := range calls {
-		r.logger.Error("test-set failed: the application made a call before its first test that no mock answered (KEPLOY_PROVEN=1)",
+		msg := "test-set failed: the application made a call before its first test that no mock answered (KEPLOY_PROVEN=1)"
+		next := "a call the application makes before the set's first test (as it starts, or while it waits for the set) is no test's; it changed or is new since the recording: fix the application, or re-record if the change is intended"
+		if c.Held {
+			msg = "test-set failed: keploy held a call of the application for a later test's recording, and no test of the set answered it (KEPLOY_PROVEN=1)"
+			next = "a call held for a later test (a consumer's poll whose recorded answer came in a later test) found no recording there: the application's calls changed since the recording; fix the application, or re-record if the change is intended"
+		}
+		r.logger.Error(msg,
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
-			zap.String("call", c.ActualSummary),
-			zap.String("destination", c.Destination),
-			zap.String("diff", c.Diff),
-			zap.String("next_step", "a call the application makes before the set's first test (as it starts, or while it waits for the set) is no test's; it changed or is new since the recording: fix the application, or re-record if the change is intended"))
+			zap.String("call", models.UnmatchedCallLogShape(c)),
+			utils.PathTagField(c.PathTag),
+			zap.String("destination", models.HostShape(c.Destination)), utils.HostTagField(c.HostTag),
+			zap.Strings("differs", models.FieldShapes(c.Differs)),
+			zap.String("next_step", next))
 	}
 }

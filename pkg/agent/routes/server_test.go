@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -17,20 +16,26 @@ import (
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// grabPort binds an ephemeral port and returns the listener (still holding the
-// port), the numeric port, and the ":port" address StartAgentServer would use.
+// grabPort binds an ephemeral port on the address the agent binds outside
+// docker (agentBindAddr: loopback) and returns the listener (still holding the
+// port), the numeric port, and that address. The hold is on that same address
+// because on macOS a listener on every interface does not stop another from
+// binding one address of its port (BSD's SO_REUSEADDR, which Go sets): a hold
+// on ":0" left the agent's start there free to bind, and the row that waits on
+// a held port to give up waited forever.
 func grabPort(t *testing.T) (net.Listener, int, string) {
 	t.Helper()
-	ln, err := net.Listen("tcp", ":0")
+	ln, err := net.Listen("tcp", agentBindAddr(0, false))
 	if err != nil {
 		t.Fatalf("listen ephemeral: %v", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	return ln, port, fmt.Sprintf(":%d", port)
+	return ln, port, agentBindAddr(port, false)
 }
 
 // TestListenWithRetry_RecoversWhenPortFrees reproduces the couchbase-node flake:
@@ -51,6 +56,17 @@ func TestListenWithRetry_RecoversWhenPortFrees(t *testing.T) {
 		t.Fatalf("expected bind to recover after the port freed, got: %v", err)
 	}
 	_ = ln.Close()
+}
+
+// In docker the agent's HTTP listener is on every interface of its container,
+// so it is plain TCP, never Go's default MPTCP.
+func TestListenWithRetry_ListensPlainTCP(t *testing.T) {
+	ln, err := listenWithRetry(context.Background(), zap.NewNop(), agentBindAddr(0, true), time.Second, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	plaintcptest.RequirePlainTCP(t, ln)
 }
 
 // TestListenWithRetry_GivesUpAfterBudget ensures the retry is bounded: a port
@@ -220,10 +236,8 @@ func TestNewAgentHTTPServer_BoundsIdleClientsWithoutCuttingStreams(t *testing.T)
 // agent lives on without its server, and nothing else would say so. Run in a
 // process of its own: the start's report is the process's.
 func TestABindThatFailsForGoodFailsTheStart(t *testing.T) {
-	if os.Getenv("KEPLOY_TEST_BOOT_CHILD") != "1" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestABindThatFailsForGoodFailsTheStart$", "-test.count=1", "-test.v")
-		cmd.Env = append(os.Environ(), "KEPLOY_TEST_BOOT_CHILD=1")
-		if out, err := cmd.CombinedOutput(); err != nil {
+	if os.Getenv(bootChildEnv) != "1" {
+		if out, err := runTestChild(t, "TestABindThatFailsForGoodFailsTheStart", []string{bootChildEnv + "=1"}); err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
 		return
@@ -259,10 +273,11 @@ func TestABindThatFailsForGoodFailsTheStart(t *testing.T) {
 // CLI to give up on as stalled, which retries. Run in a process of its own:
 // the start's report is the process's.
 func TestABindToAPortStillHeldDoesNotFailTheStart(t *testing.T) {
-	if os.Getenv("KEPLOY_TEST_BOOT_CHILD") != "1" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestABindToAPortStillHeldDoesNotFailTheStart$", "-test.count=1", "-test.v")
-		cmd.Env = append(os.Environ(), "KEPLOY_TEST_BOOT_CHILD=1")
-		if out, err := cmd.CombinedOutput(); err != nil {
+	if os.Getenv(bootChildEnv) != "1" {
+		// Its own timeout: a start that bound the port after all serves
+		// forever, and must fail this row, not the package's whole run. The
+		// child ends with this test however the test ends (startTestChild).
+		if out, err := runTestChild(t, "TestABindToAPortStillHeldDoesNotFailTheStart", []string{bootChildEnv + "=1"}, "-test.timeout=2m"); err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
 		return

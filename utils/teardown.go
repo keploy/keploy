@@ -18,9 +18,13 @@ import (
 // A keploy agent removes what it attached to the kernel as it shuts down, and
 // an agent killed part way through removing a TLS uprobe leaks it: the
 // breakpoint stays in every process that maps the probed library. So the CLI
-// kills a stopping agent only once it has stopped making progress, or has
-// detached everything and still not exited (pkg/platform/http, stopWatch).
-// What it judges by is what ReportTeardownProgress writes here.
+// kills a stopping agent only once it has stopped making progress, or, if its
+// reporter beats on after its report of the detach's end, has detached
+// everything and still not exited (pkg/platform/http, stopWatch). What it
+// judges by is what ReportTeardownProgress writes here, where the report of
+// the detach's end is the last: the exit that follows takes no check, so a
+// clean exit is never judged one that has not come. Only an older agent's
+// reporter beats on after that report.
 
 // TeardownProgress is what an agent reports of its teardown once it has begun.
 type TeardownProgress struct {
@@ -46,7 +50,8 @@ type TeardownProgress struct {
 	// agent is killed for want of progress.
 	Steps bool `json:"steps"`
 	// Done says the agent has detached everything it attached
-	// (MarkDetachDone): nothing a kill can cut short is left.
+	// (MarkDetachDone): nothing of its teardown is left. It is the agent's
+	// last report: no beat comes after it (reportTeardownProgress).
 	Done bool `json:"done"`
 	// Pid is the agent's own process id, by which a CLI that cannot kill it
 	// itself (sudo runs it as root) sees it has been killed and is dying.
@@ -99,9 +104,15 @@ func DeclareTeardownSteps() {
 func TeardownSteps() uint64 { return teardownSeq.Load() }
 
 // MarkDetachDone records that the agent has detached everything it attached:
-// all that is left is to exit, and the CLI may kill it if it does not. It is
+// all that is left is to exit. The report that says so is the reporter's
+// last. The exit is the Go runtime's own work, which can take longer than a
+// beat -- a race-detector build waits there for races at exit (GORACE's
+// atexit_sleep_ms, a second by default), a coverage build writes its counters
+// -- and a beat during it would have the CLI take an agent on its way out for
+// one that does not exit, and kill it, saying so at WARN (stopWatch). It is
 // called as late as the process allows -- by main, once the command has
-// returned and anything that main itself removes is gone.
+// returned and anything that main itself removes is gone, just before the
+// exit.
 func MarkDetachDone() {
 	teardownDone.Store(true)
 	kickTeardownReport()
@@ -121,10 +132,11 @@ type progressSink interface {
 
 // reporting is the reporters the agent's entry points started --
 // ReportTeardownProgress, ReportTeardownProgressTo, ReportBootProgress and
-// ReportBootProgressTo -- which run until the process exits (a boot reporter:
-// until the agent's start is over) unless StopTeardownReporting ends them:
-// stop is closed then and cleared, and the next reporter started makes a new
-// one.
+// ReportBootProgressTo -- which run until the process exits (a teardown
+// reporter: until its last report, the detach's end, MarkDetachDone; a boot
+// reporter: until the agent's start is over) unless StopTeardownReporting
+// ends them: stop is closed then and cleared, and the next reporter started
+// makes a new one.
 var reporting struct {
 	mu      sync.Mutex
 	stop    chan struct{}
@@ -163,11 +175,12 @@ func trackReporter(start func(stop <-chan struct{}) <-chan struct{}) <-chan stru
 // StopTeardownReporting ends every reporter ReportTeardownProgress,
 // ReportTeardownProgressTo, ReportBootProgress and ReportBootProgressTo
 // started, and returns once none writes any more. An agent's teardown reporter
-// runs until its process exits, and its boot reporter until its start is over;
-// this is for a test that starts them (through the agent command) and must
-// stop them before the directory they write in is removed. Tests only: an agent whose reports stop
-// is one its CLI never kills for want of progress. It ends the reporters of
-// the whole process, so a test that calls it must not run in parallel with
+// runs until its last report, the detach's end (MarkDetachDone), or until its
+// process exits, and its boot reporter until its start is over; this is for a
+// test that starts them (through the agent command) and must stop them before
+// the directory they write in is removed. Tests only: an agent whose reports
+// stop is one its CLI never kills for want of progress. It ends the reporters
+// of the whole process, so a test that calls it must not run in parallel with
 // another that starts one.
 func StopTeardownReporting() {
 	reporting.mu.Lock()
@@ -212,12 +225,13 @@ func ReportTeardownProgressTo(ctx context.Context, logger *zap.Logger, path stri
 
 // reportTeardownProgress writes the agent's teardown progress
 // (TeardownProgress, as JSON) to sink once ctx is done -- the root context,
-// whose cancel begins the teardown: at once, on every step and on
-// MarkDetachDone, and on every beat (TeardownBeat) until the process exits, or
-// stop is closed (StopTeardownReporting, and tests; nil: never). Whatever an
-// earlier agent left is cleared now, so a CLI never reads it as this agent's.
-// A failed write is only logged: the CLI that reads no progress never kills
-// for want of it.
+// whose cancel begins the teardown: at once, on every step, and on every beat
+// (TeardownBeat) until MarkDetachDone, whose report is the last -- what is
+// left is the exit, which takes no check (MarkDetachDone) -- or until stop is
+// closed (StopTeardownReporting, and tests; nil: never). Whatever an earlier
+// agent left is cleared now, so a CLI never reads it as this agent's. A failed
+// write is only logged: the CLI that reads no progress never kills for want
+// of it.
 //
 // Each report is taken by snapshotTeardown, which runs between (tests; nil
 // otherwise) between its loads of Busy and Seq. The returned channel is
@@ -237,7 +251,7 @@ func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progre
 	go func() {
 		defer close(done)
 		// A sink that holds something open lets it go once its reporter has
-		// stopped (the agent's never does: it reports until it exits).
+		// stopped (the agent's, at its last report).
 		if c, ok := sink.(interface{ close() }); ok {
 			defer c.close()
 		}
@@ -251,13 +265,19 @@ func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progre
 		var beat uint64
 		logged := false
 		for {
-			b, err := json.Marshal(snapshotTeardown(beat, between))
+			p := snapshotTeardown(beat, between)
+			b, err := json.Marshal(p)
 			if err == nil {
 				err = sink.write(b)
 			}
 			if err != nil && !logged && logger != nil {
 				logged = true
 				logger.Debug("failed to write the agent's teardown progress", zap.Error(err))
+			}
+			if p.Done {
+				// The detach is over: the last report. A beat from here on
+				// would come from the exit itself, which can outlast one.
+				return
 			}
 			select {
 			case <-beats.C:

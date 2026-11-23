@@ -21,7 +21,8 @@ import (
 // seconds, one second apart from the leaf in F) is then learned as one, not
 // as a variable of the leaf; a value that is no read stays refused by the
 // word rule (it lost the leaf's recorded word with it); and an echo of the
-// call's answer is refused, naming the place set aside, as is a moment of
+// call's answer, a read of the clock that an echo would leave unchecked, is
+// refused, naming the place set aside and why, as is a moment of
 // the test case's request keploy test sent another value at (requestHolds).
 // A read is checked against its call's clock at every replay, so no order of
 // its sources is needed; a value left noise (a read inside a longer value)
@@ -59,7 +60,7 @@ func TestALeafIsAValuesSourceOnlyWhereItHeldTheValueInBothRuns(t *testing.T) {
 		{"a read inside a longer value, at a leaf whose recorded time keploy cannot read", "at " + rec, "at " + live, []Earlier{eLeaf(time.Time{}, 6, "at "+rec, "at "+other)}, nil, refused, setAside + "; keploy cannot read when the recording gave the application mock-8"},
 		{"a read inside a longer value, at a leaf recorded at the call's own instant", "at " + rec, "at " + live, []Earlier{eLeaf(eRecAt, 6, "at "+rec, "at "+other)}, nil, refused, setAside + "; the recording and record's full round gave the application the earlier answers in a different order"},
 		{"a read inside a longer value, at a leaf F saw hold the value F saw", "at " + rec, "at " + live, []Earlier{eLeaf(before, 6, "at "+rec, "at "+live)}, nil, KindVariable, ""},
-		{"the call's recorded answer holds the recorded value", rec, live, []Earlier{eLeaf(before, 6, rec, other)}, []Leaf{{Path: "body.n", Noise: "body.n", Type: Number, Value: rec}}, refused, setAside + "; but the call's recorded answer holds it"},
+		{"the call's recorded answer holds the recorded value", rec, live, []Earlier{eLeaf(before, 6, rec, other)}, []Leaf{{Path: "body.n", Noise: "body.n", Type: Number, Value: rec}}, refused, setAside + echoSetAside + "an instant of it changed, and as an echo a read of the clock would go unchecked where every replay checks it"},
 		{"the test case's own request, sent another value", rec, live, []Earlier{{Mock: givenPlace("test-1"), Given: true, Seen: []Seen{
 			{Side: Request, Leaf: Leaf{Path: "body.retries", Type: Number, Value: rec}, Live: other},
 		}}}, nil, refused, "the moment it was recorded with stands in test case test-1 at body.retries"},
@@ -202,7 +203,9 @@ func TestAReasonSaysTheFullRoundNeverServedTheValuesSource(t *testing.T) {
 	millis := func(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) }
 	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
 	escaped := func(at time.Time) string { return url.QueryEscape(at.Format(time.RFC3339)) }
-	const echo = "the moment it was recorded with stands in mock-31%s, and the moment record's full round saw in it stands earlier in the test too; "
+	// The echo's reason names both halves: where the recorded moment
+	// stands, and where the moment F saw does (mock-11).
+	const echo = "the moment it was recorded with stands in mock-31%s, and the moment record's full round saw in it stands earlier in the test too, in mock-11 at spec.resp.body; "
 	for _, tc := range []struct {
 		name      string
 		body      string // what the recording's message holds

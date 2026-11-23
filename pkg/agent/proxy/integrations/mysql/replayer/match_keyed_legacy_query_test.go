@@ -59,7 +59,7 @@ func TestNoWindowQueryReadAsAnOlderKeployReadItServesWhatTheFullScanServes(t *te
 		attrQueryMock("legacy", string(rune(len(legacyTraceparent)))+legacyTraceparent+sql, []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Value: "traceparent"}}, 1),
 		attrQueryMock("current", sql, []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "traceparent", Value: legacyTraceparent}}, 2),
 	}
-	ref, fast := newDiffSide(pool), newDiffSide(pool)
+	ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
 	for _, s := range []*diffSide{ref, fast} {
 		s.stageNoWindow()
 	}
