@@ -80,7 +80,7 @@ type pairedConn struct {
 	dest        atomic.Pointer[string]
 	drainGaveUp atomic.Bool
 	// appClosed is closed, once (markAppClosed), when a drain finds that no
-	// process holds the application's socket any more (appSocketClosed):
+	// process holds the application's socket any more (appClosedChecker):
 	// the application closed it whole, or exited, so nothing reads on, and
 	// a handler that waits past the application's FIN for it to read on or
 	// reset (integrations.AppClosed, a held answer) can end. nil for a

@@ -18,7 +18,10 @@ import (
 
 // The layout of the records (struct xinpgen, struct xtcpcb64 of the SDK's
 // netinet/in_pcb.h and netinet/tcp_var.h, packed to 4 bytes), as measured on
-// macOS 26 arm64 with offsetof. A record of any other length is a layout
+// macOS 26 arm64 with offsetof (xnuOffSoState is derived from the same
+// 4-byte-packed struct xsocket64 layout, cross-checked against so_snd.sb_cc
+// at 228 and t_state at 292, and verified at runtime by proveXNUAppClosed
+// before any early release). A record of any other length is a layout
 // this code does not know: the table is refused (errXNUTableLayout), never
 // read at the wrong offsets.
 const (
@@ -29,6 +32,7 @@ const (
 	xnuOffVflag     = 96  // xt_inpcb.inp_vflag
 	xnuOffFaddr     = 100 // xt_inpcb.inp_dependfaddr (16 bytes)
 	xnuOffLaddr     = 116 // xt_inpcb.inp_dependladdr (16 bytes)
+	xnuOffSoState   = 166 // xt_inpcb.xi_socket.so_state (int16)
 	xnuOffSndCC     = 228 // xt_inpcb.xi_socket.so_snd.sb_cc
 	xnuOffState     = 292 // t_state
 	xnuOffSndUna    = 304 // snd_una
@@ -39,6 +43,11 @@ const (
 	xnuInpIPv4      = 0x1 // INP_IPV4
 	xnuInpIPv6      = 0x2 // INP_IPV6
 	xnuIn4in6Offset = 12  // struct in_addr_4in6: three pad words, then the address
+	// XNU socket state flags in xsocket64.so_state (bsd/sys/socketvar.h).
+	xnuSSNoFDRef     uint16 = 0x0001 // SS_NOFDREF: no file table reference left
+	xnuSSIsConnected uint16 = 0x0002 // SS_ISCONNECTED: socket connected to a peer
+	xnuSSCantSend    uint16 = 0x0010 // SS_CANTSENDMORE: shutdown(SHUT_WR)
+	xnuSSCantRecv    uint16 = 0x0020 // SS_CANTRCVMORE: shutdown(SHUT_RD) / peer FIN
 )
 
 // errXNUTableLayout: the table's records are not the layout this code reads.
@@ -48,6 +57,11 @@ var errXNUTableLayout = errors.New("macOS's TCP connection table (net.inet.tcp.p
 type xnuPCB struct {
 	local, remote netip.AddrPort
 	state         uint8
+	// soState is xt_inpcb.xi_socket.so_state (bsd/sys/socketvar.h):
+	// xnuSSNoFDRef is set once no process holds a file descriptor for the
+	// socket (closed whole, or its process exited); a half-closed socket
+	// (shutdown(SHUT_WR)) still has a descriptor and leaves it unset.
+	soState uint16
 	// sndUna is the first sequence number the peer has not acknowledged,
 	// sndCC what the send buffer holds: written, not yet acknowledged (sent
 	// or not). Neither counts the FIN.
@@ -98,15 +112,16 @@ func parseXNUPCBs(buf []byte) ([]xnuPCB, error) {
 		remote, ok2 := xnuAddr(r, xnuOffFaddr, xnuOffFport)
 		if ok1 && ok2 {
 			out = append(out, xnuPCB{
-				local:  local,
-				remote: remote,
-				state:  uint8(binary.LittleEndian.Uint32(r[xnuOffState:])),
-				sndUna: binary.LittleEndian.Uint32(r[xnuOffSndUna:]),
-				sndCC:  binary.LittleEndian.Uint32(r[xnuOffSndCC:]),
-				iss:    binary.LittleEndian.Uint32(r[xnuOffIss:]),
-				irs:    binary.LittleEndian.Uint32(r[xnuOffIrs:]),
-				rcvNxt: binary.LittleEndian.Uint32(r[xnuOffRcvNxt:]),
-				sndWnd: binary.LittleEndian.Uint32(r[xnuOffSndWnd:]),
+				local:   local,
+				remote:  remote,
+				state:   uint8(binary.LittleEndian.Uint32(r[xnuOffState:])),
+				soState: binary.LittleEndian.Uint16(r[xnuOffSoState:]),
+				sndUna:  binary.LittleEndian.Uint32(r[xnuOffSndUna:]),
+				sndCC:   binary.LittleEndian.Uint32(r[xnuOffSndCC:]),
+				iss:     binary.LittleEndian.Uint32(r[xnuOffIss:]),
+				irs:     binary.LittleEndian.Uint32(r[xnuOffIrs:]),
+				rcvNxt:  binary.LittleEndian.Uint32(r[xnuOffRcvNxt:]),
+				sndWnd:  binary.LittleEndian.Uint32(r[xnuOffSndWnd:]),
 			})
 		}
 		off += l
@@ -172,4 +187,62 @@ func checkXNUCounts(table []xnuPCB, writer, reader netip.AddrPort, ps proxySide,
 		return fmt.Errorf("the socket's tcp_info (rcv_nxt %d, state %d) disagrees with macOS's TCP table (rcv_nxt %d, state %d)", ps.rcvNxt, ps.state, rd.rcvNxt, xnuTCPEstablished)
 	}
 	return nil
+}
+
+// checkXNUAppClosed is the verdict of the SS_NOFDREF layout proof
+// (proveXNUAppClosed): on a loopback pair keploy opened, liveTable (read while
+// both descriptors are open) must list a -> r with SS_ISCONNECTED set and
+// SS_NOFDREF / SS_CANTSENDMORE / SS_CANTRCVMORE clear, and closedTable (read
+// after a closed whole while r stays open) must list a -> r with SS_NOFDREF
+// set. A layout where so_state moved fails this check, leaving early release
+// off (fail closed) without affecting WaitPairedBytes. Plain Go with no build
+// tag so its rows run on every platform.
+func checkXNUAppClosed(liveTable, closedTable []xnuPCB, a, r netip.AddrPort) error {
+	live, ok := findXNUPCB(liveTable, a, r)
+	if !ok {
+		return fmt.Errorf("macOS's TCP table does not list keploy's open loopback socket %s -> %s", a, r)
+	}
+	if live.soState&xnuSSIsConnected == 0 || live.soState&(xnuSSNoFDRef|xnuSSCantSend|xnuSSCantRecv) != 0 {
+		return fmt.Errorf("macOS's TCP table gives open loopback socket %s -> %s so_state 0x%x, not connected with an open descriptor", a, r, live.soState)
+	}
+	closed, ok := findXNUPCB(closedTable, a, r)
+	if !ok {
+		return fmt.Errorf("macOS's TCP table does not list keploy's closed loopback socket %s -> %s while its peer stays open", a, r)
+	}
+	if closed.soState&xnuSSNoFDRef == 0 {
+		return fmt.Errorf("macOS's TCP table gives closed loopback socket %s -> %s so_state 0x%x without SS_NOFDREF", a, r, closed.soState)
+	}
+	return nil
+}
+
+// xnuAppSocketClosed reports whether macOS's TCP table — or, when the table
+// hides application sockets (!visible, e.g. macOS 27 without root), the
+// process-descriptor lookup lookupHeld — shows that no process holds the
+// application socket app -> proxy any more (the drain's word to a handler held
+// past the application's FIN, pairedConn.appClosed). noFDRefProven gates only
+// the xsocket64.so_state & SS_NOFDREF read; CLOSED/TIME_WAIT (already proven
+// by xnuTableReadable), vanished-while-visible, and the process-descriptor
+// fallback do not depend on so_state and stay active even if the SS_NOFDREF
+// proof fails. It also reports whether the socket was seen in the TCP table
+// (sawVisible) or in a readable process's descriptor table (sawHeld) so the
+// caller can update paired.visible / paired.held. Plain Go with no build tag
+// so every branch runs on every platform.
+func xnuAppSocketClosed(table []xnuPCB, app, proxy netip.AddrPort, visible, held, noFDRefProven bool, lookupHeld func() (state uint8, found bool, err error)) (closed, sawVisible, sawHeld bool) {
+	if b, ok := findXNUPCB(table, app, proxy); ok {
+		return b.state == xnuTCPClosed || b.state == xnuTCPTimeWait || (noFDRefProven && b.soState&xnuSSNoFDRef != 0), true, false
+	}
+	if visible {
+		return true, false, false
+	}
+	if lookupHeld == nil {
+		return false, false, false
+	}
+	state, found, err := lookupHeld()
+	if err != nil {
+		return false, false, false
+	}
+	if found {
+		return state == xnuTCPClosed || state == xnuTCPTimeWait, false, true
+	}
+	return held, false, false
 }

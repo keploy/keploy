@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -134,4 +135,57 @@ func proveXNUCounts() error {
 		return err
 	}
 	return checkXNUCounts(table, a, r, readProxySide(s.(*net.TCPConn)), n)
+}
+
+// proveXNUAppClosed proves, once, on a loopback connection of its own, that
+// macOS reports xsocket64.so_state at xnuOffSoState with SS_NOFDREF clear on a
+// live socket and set once that socket is closed whole while its peer remains
+// open (checkXNUAppClosed). Kept separate from proveXNUCounts so a failure
+// only disables early release of held faults (fail closed) and never breaks
+// WaitPairedBytes.
+func proveXNUAppClosed() error {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("listen for the app-closed proof: %w", err)
+	}
+	defer func() { _ = ln.Close() }()
+	c, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		return fmt.Errorf("dial the app-closed proof: %w", err)
+	}
+	s, err := ln.Accept()
+	if err != nil {
+		_ = c.Close()
+		return fmt.Errorf("accept the app-closed proof: %w", err)
+	}
+	defer func() { _ = s.Close() }()
+	a, ok1 := addrPortOf(c.LocalAddr())
+	r, ok2 := addrPortOf(s.LocalAddr())
+	if !ok1 || !ok2 {
+		_ = c.Close()
+		return errors.New("the app-closed proof's addresses are not TCP")
+	}
+	liveTable, err := readXNUTable()
+	if err != nil {
+		_ = c.Close()
+		return err
+	}
+	_ = c.Close()
+	// Drain s to EOF so c's FIN has been delivered and c is orphaned in
+	// FIN_WAIT_1/FIN_WAIT_2 while s remains open in CLOSE_WAIT.
+	_ = s.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_, _ = io.Copy(io.Discard, s)
+	deadline := time.Now().Add(200 * time.Millisecond)
+	var lastErr error
+	for {
+		closedTable, err := readXNUTable()
+		if err != nil {
+			return err
+		}
+		lastErr = checkXNUAppClosed(liveTable, closedTable, a, r)
+		if lastErr == nil || time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }

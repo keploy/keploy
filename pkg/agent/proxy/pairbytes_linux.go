@@ -105,6 +105,12 @@ func (p *Proxy) pairTargets(n uint64) ([]*pairTarget, error) {
 	return pending, nil
 }
 
+// appClosedChecker returns a per-connection check for one sayAppClosed pass:
+// on Linux sock_diag looks up one socket at a time via appSocketClosed.
+func (p *Proxy) appClosedChecker() func(*pairedConn) bool {
+	return p.appSocketClosed
+}
+
 // appSocketClosed reports whether no process holds pc's application socket
 // any more: it is gone from the kernel's tables (only once the proxy has
 // seen an application socket in this namespace, so a hidden socket in

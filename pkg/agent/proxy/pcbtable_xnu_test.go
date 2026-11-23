@@ -36,6 +36,7 @@ func xnuRecord(local, remote netip.AddrPort, b xnuPCB) []byte {
 	put(xnuOffLaddr, local.Addr())
 	put(xnuOffFaddr, remote.Addr())
 	binary.LittleEndian.PutUint32(r[xnuOffState:], uint32(b.state))
+	binary.LittleEndian.PutUint16(r[xnuOffSoState:], b.soState)
 	binary.LittleEndian.PutUint32(r[xnuOffSndUna:], b.sndUna)
 	binary.LittleEndian.PutUint32(r[xnuOffSndCC:], b.sndCC)
 	binary.LittleEndian.PutUint32(r[xnuOffIss:], b.iss)
@@ -66,8 +67,8 @@ func TestMacOSsTCPTableIsReadAtItsLayout(t *testing.T) {
 	proxy := netip.MustParseAddrPort("127.0.0.1:16789")
 	app6 := netip.MustParseAddrPort("[::1]:50124")
 	proxy6 := netip.MustParseAddrPort("[::1]:16790")
-	want := xnuPCB{state: xnuTCPEstablished, sndUna: 0x101, sndCC: 572, iss: 0xFFFFFF00, irs: 7, rcvNxt: 8, sndWnd: 0}
-	want6 := xnuPCB{state: xnuTCPLastAck, sndUna: 11, sndCC: 3, iss: 10, irs: 20, rcvNxt: 22, sndWnd: 65535}
+	want := xnuPCB{state: xnuTCPEstablished, soState: xnuSSIsConnected, sndUna: 0x101, sndCC: 572, iss: 0xFFFFFF00, irs: 7, rcvNxt: 8, sndWnd: 0}
+	want6 := xnuPCB{state: xnuTCPLastAck, soState: xnuSSNoFDRef | xnuSSIsConnected, sndUna: 11, sndCC: 3, iss: 10, irs: 20, rcvNxt: 22, sndWnd: 65535}
 	table, err := parseXNUPCBs(xnuTable(xnuRecord(app, proxy, want), xnuRecord(app6, proxy6, want6)))
 	if err != nil {
 		t.Fatal(err)
@@ -177,6 +178,106 @@ func TestTheCountsProofRefusesWhatAMovedLayoutReads(t *testing.T) {
 			}
 			if c.says != "" && !strings.Contains(err.Error(), c.says) {
 				t.Fatalf("the counts' proof refuses %s with %q, which does not say %q", c.name, err, c.says)
+			}
+		})
+	}
+}
+
+// checkXNUAppClosed passes only when the live loopback socket shows
+// SS_ISCONNECTED with SS_NOFDREF/SS_CANTSENDMORE/SS_CANTRCVMORE clear and the
+// closed-whole socket shows SS_NOFDREF set.
+func TestCheckXNUAppClosedProvesLiveAndOrphanSSNoFDRef(t *testing.T) {
+	a := netip.MustParseAddrPort("127.0.0.1:51000")
+	r := netip.MustParseAddrPort("127.0.0.1:41000")
+	goodLive := []xnuPCB{{local: a, remote: r, state: xnuTCPEstablished, soState: xnuSSIsConnected}}
+	goodClosed := []xnuPCB{{local: a, remote: r, state: xnuTCPFinWait2, soState: xnuSSNoFDRef | xnuSSCantSend}}
+	if err := checkXNUAppClosed(goodLive, goodClosed, a, r); err != nil {
+		t.Fatalf("valid live+closed tables refused: %v", err)
+	}
+	for _, c := range []struct {
+		name         string
+		live, closed []xnuPCB
+		says         string
+	}{
+		{"live socket missing", nil, goodClosed, "open loopback"},
+		{"live missing SS_ISCONNECTED", []xnuPCB{{local: a, remote: r, soState: 0}}, goodClosed, "so_state"},
+		{"live has SS_NOFDREF", []xnuPCB{{local: a, remote: r, soState: xnuSSIsConnected | xnuSSNoFDRef}}, goodClosed, "so_state"},
+		{"live has SS_CANTSENDMORE", []xnuPCB{{local: a, remote: r, soState: xnuSSIsConnected | xnuSSCantSend}}, goodClosed, "so_state"},
+		{"live has SS_CANTRCVMORE", []xnuPCB{{local: a, remote: r, soState: xnuSSIsConnected | xnuSSCantRecv}}, goodClosed, "so_state"},
+		{"closed socket missing", goodLive, nil, "closed loopback"},
+		{"closed lacks SS_NOFDREF", goodLive, []xnuPCB{{local: a, remote: r, state: xnuTCPFinWait2, soState: xnuSSIsConnected | xnuSSCantSend}}, "without SS_NOFDREF"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := checkXNUAppClosed(c.live, c.closed, a, r)
+			if err == nil {
+				t.Fatalf("checkXNUAppClosed passed %s", c.name)
+			}
+			if !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("checkXNUAppClosed(%s) = %q, want %q", c.name, err, c.says)
+			}
+		})
+	}
+}
+
+// xnuAppSocketClosed decides from macOS's pcblist64 table — or, when the table
+// hides application sockets (!visible), from the process-descriptor lookup —
+// whether no process holds the application socket any more: SS_NOFDREF,
+// CLOSED/TIME_WAIT, vanished once visible, or absent from readable holders
+// once held has been proven. Half-closed sockets, hidden sockets with neither
+// visible nor held proven, and lookup errors return false (fail closed).
+func TestMacOSsAppSocketClosedUsesSSNoFDRefAndVisibility(t *testing.T) {
+	app := netip.MustParseAddrPort("127.0.0.1:51234")
+	proxy := netip.MustParseAddrPort("127.0.0.1:16789")
+	for _, c := range []struct {
+		name           string
+		rec            *xnuPCB
+		visible, held  bool
+		noFDRefProven  bool
+		forbidLookup   bool
+		lookup         func() (uint8, bool, error)
+		wantClosed     bool
+		wantSawVisible bool
+		wantSawHeld    bool
+	}{
+		{"live socket held by process", &xnuPCB{state: xnuTCPEstablished, soState: xnuSSIsConnected}, true, false, true, true, nil, false, true, false},
+		{"half-closed FIN_WAIT_2 still held by process", &xnuPCB{state: xnuTCPFinWait2, soState: xnuSSIsConnected}, true, false, true, true, nil, false, true, false},
+		{"FIN_WAIT_1 orphan with SS_NOFDREF", &xnuPCB{state: xnuTCPFinWait1, soState: xnuSSNoFDRef | xnuSSIsConnected}, false, false, true, true, nil, true, true, false},
+		{"FIN_WAIT_2 orphan with SS_NOFDREF", &xnuPCB{state: xnuTCPFinWait2, soState: xnuSSNoFDRef}, false, false, true, true, nil, true, true, false},
+		{"FIN_WAIT_2 with SS_NOFDREF but proof failed stays held", &xnuPCB{state: xnuTCPFinWait2, soState: xnuSSNoFDRef}, false, false, false, true, nil, false, true, false},
+		{"CLOSED socket", &xnuPCB{state: xnuTCPClosed}, false, false, true, true, nil, true, true, false},
+		{"TIME_WAIT socket stays closed even if SS_NOFDREF proof failed", &xnuPCB{state: xnuTCPTimeWait}, false, false, false, true, nil, true, true, false},
+		{"vanished while app sockets never seen and no lookup", nil, false, false, true, false, nil, false, false, false},
+		{"vanished once app sockets are visible", nil, true, false, true, true, nil, true, false, false},
+		{"hidden table, holder still open (ESTABLISHED)", nil, false, false, true, false, func() (uint8, bool, error) { return xnuTCPEstablished, true, nil }, false, false, true},
+		{"hidden table, holder half-closed (FIN_WAIT_2)", nil, false, true, true, false, func() (uint8, bool, error) { return xnuTCPFinWait2, true, nil }, false, false, true},
+		{"hidden table, holder reports CLOSED", nil, false, false, true, false, func() (uint8, bool, error) { return xnuTCPClosed, true, nil }, true, false, true},
+		{"hidden table, holder reports TIME_WAIT", nil, false, false, true, false, func() (uint8, bool, error) { return xnuTCPTimeWait, true, nil }, true, false, true},
+		{"hidden table, holder closed whole and held proven (proof failed still works)", nil, false, true, false, false, func() (uint8, bool, error) { return 0, false, nil }, true, false, false},
+		{"hidden table, holder absent and held never proven", nil, false, false, true, false, func() (uint8, bool, error) { return 0, false, nil }, false, false, false},
+		{"hidden table, holder lookup error fails closed", nil, false, true, true, false, func() (uint8, bool, error) { return 0, false, errors.New("proc_pidinfo failed") }, false, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var raw []byte
+			if c.rec != nil {
+				raw = xnuTable(xnuRecord(app, proxy, *c.rec))
+			} else {
+				raw = xnuTable()
+			}
+			table, err := parseXNUPCBs(raw)
+			if err != nil {
+				t.Fatalf("parseXNUPCBs: %v", err)
+			}
+			lookup := c.lookup
+			if c.forbidLookup {
+				lookup = func() (uint8, bool, error) {
+					t.Fatal("lookupHeld must not be called when the socket is listed or visible")
+					return 0, false, nil
+				}
+			}
+			closed, sawVis, sawHeld := xnuAppSocketClosed(table, app, proxy, c.visible, c.held, c.noFDRefProven, lookup)
+			if closed != c.wantClosed || sawVis != c.wantSawVisible || sawHeld != c.wantSawHeld {
+				t.Fatalf("xnuAppSocketClosed = (closed=%v, sawVisible=%v, sawHeld=%v); want (%v, %v, %v)",
+					closed, sawVis, sawHeld, c.wantClosed, c.wantSawVisible, c.wantSawHeld)
 			}
 		})
 	}

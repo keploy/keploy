@@ -56,12 +56,12 @@ type Fault struct {
 	// cannot say whether the application closed or only half-closed
 	// (shutdown(SHUT_WR)) and read on, so at replay its FIN, before the
 	// answer or after it, does not end the hold: only a reset, the run's
-	// end, a later answer served from the same mock and held, or (on Linux,
-	// at the session's last read) the proxy finding that no process holds
-	// the application's socket any more (it closed it whole, or exited)
-	// does. A fault without it (written by hand, or by a keploy that did
-	// not record it) ends the hold at the application's FIN, unless its
-	// socket says that FIN was in before the answer was written.
+	// end, a later answer served from the same mock and held, or (on Linux
+	// and darwin, at the session's last read) the proxy finding that no
+	// process holds the application's socket any more (it closed it whole,
+	// or exited) does. A fault without it (written by hand, or by a keploy
+	// that did not record it) ends the hold at the application's FIN, unless
+	// its socket says that FIN was in before the answer was written.
 	AppEndedFirst bool `json:"app_ended_first,omitempty" yaml:"app_ended_first,omitempty" bson:"app_ended_first,omitempty"`
 	// Delay, for a delay, is how long the whole answer is held before it is
 	// sent, bounded by the run. Only a delay takes one.
@@ -88,8 +88,8 @@ const (
 	// ends it, never a clock: replay answers nothing more and holds the
 	// connection until the application closes it or the run ends; one
 	// recorded with AppEndedFirst, until a reset, the run's end, a later
-	// answer served from the same mock and held, or (on Linux, at the
-	// session's last read) the proxy finding that no process holds the
+	// answer served from the same mock and held, or (on Linux and darwin, at
+	// the session's last read) the proxy finding that no process holds the
 	// application's socket any more.
 	FaultTimeout FaultKind = "timeout"
 	// FaultTruncate: the upstream sent the head, with the Content-Length it
@@ -109,9 +109,9 @@ const (
 	// flushed, not ended. Then it holds the connection until the
 	// application closes it or the run ends (with AppEndedFirst, as a
 	// recording writes it, until a reset, the run's end, a later answer
-	// served from the same mock and held, or on Linux, at the session's
-	// last read, the proxy finding that no process holds the application's
-	// socket any more), never ended by a clock.
+	// served from the same mock and held, or on Linux and darwin, at the
+	// session's last read, the proxy finding that no process holds the
+	// application's socket any more), never ended by a clock.
 	// AfterHead always.
 	FaultStoppedReading FaultKind = "stopped_reading"
 	// FaultDelay: the whole answer, sent once Delay has passed. A recording

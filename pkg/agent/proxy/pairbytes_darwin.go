@@ -192,14 +192,17 @@ type pairedConnOS struct {
 type pairedConnsOS struct {
 	// visible: an application socket has been listed in macOS's TCP table
 	// as the agent reads it (proveAppVisible, pairTarget,
-	// noteWroteAtClose): one the table does not list is gone, not hidden.
-	// Until one is, an application socket not listed may be one hidden
-	// from the agent, and what it wrote is not known.
+	// noteWroteAtClose, appSocketClosedIn): one the table does not list is
+	// gone, not hidden. Until one is, an application socket not listed may
+	// be one hidden from the agent, and what it wrote is not known.
 	visible atomic.Bool
 	// held: an application socket the table did not list was read from its
 	// holder's descriptor table (pairedConn.appSocket), so one no process
 	// the agent may read holds is gone, not hidden.
 	held atomic.Bool
+	// appClosedLogOnce logs a failed xnuAppClosedReadable proof once per proxy
+	// so operators can diagnose stuck holds from the agent log.
+	appClosedLogOnce sync.Once
 }
 
 // wroteCount extends darwin's counts of what the application had written to a
@@ -417,11 +420,57 @@ const xnuHidden = "macOS lists to a process only its own sockets in some cases (
 // XNU's names.
 func tcpStateName(s uint8) string { return xnuTCPStateName(s) }
 
-// appSocketClosed reports whether no process holds pc's application socket
-// any more (the drain's word to a handler waiting past the application's
-// FIN, pairedConn.appClosed): on darwin it is not read, and false leaves such
-// a wait to a reset or the run's end, as before.
-func (*Proxy) appSocketClosed(*pairedConn) bool { return false }
+// appClosedChecker returns a per-connection check for one sayAppClosed pass:
+// on darwin it reads macOS's TCP table (net.inet.tcp.pcblist64) once for the
+// whole pass rather than copying the full table per connection, and keeps one
+// heldSockets cache for unresolved holders when the table hides application
+// sockets (macOS 27 without root). A table whose counts layout is not proven
+// (xnuTableReadable) or cannot be read fails closed; a failed SS_NOFDREF proof
+// (xnuAppClosedReadable) logs once and disables only the SS_NOFDREF bit while
+// keeping CLOSED/TIME_WAIT, visible-unlisted, and hidden-table holder checks
+// active.
+func (p *Proxy) appClosedChecker() func(*pairedConn) bool {
+	if xnuTableReadable() != nil {
+		return func(*pairedConn) bool { return false }
+	}
+	noFDRefProven := true
+	if err := xnuAppClosedReadable(); err != nil {
+		noFDRefProven = false
+		if p.logger != nil {
+			p.paired.appClosedLogOnce.Do(func() {
+				p.logger.Warn("macOS SS_NOFDREF layout proof failed; SS_NOFDREF early release is disabled while CLOSED/TIME_WAIT and hidden-table holder checks remain active",
+					zap.Error(err),
+					zap.String("next_step", "when pcblist64 lists the socket, held faults end only on CLOSED/TIME_WAIT, reset, or the run's end; report this line and your sw_vers output to Keploy"),
+				)
+			})
+		}
+	}
+	table, err := readXNUTable()
+	if err != nil {
+		return func(*pairedConn) bool { return false }
+	}
+	var held heldSockets
+	return func(pc *pairedConn) bool {
+		return p.appSocketClosedIn(table, pc, &held, noFDRefProven)
+	}
+}
+
+// appSocketClosedIn checks whether table (or, when the table hides application
+// sockets, pc.appSocket via h) shows pc's application socket has no remaining
+// process holder, updating paired.visible / paired.held when seen.
+func (p *Proxy) appSocketClosedIn(table []xnuPCB, pc *pairedConn, h *heldSockets, noFDRefProven bool) bool {
+	closed, sawVisible, sawHeld := xnuAppSocketClosed(table, pc.app, pc.proxy, p.paired.visible.Load(), p.paired.held.Load(), noFDRefProven, func() (uint8, bool, error) {
+		s, found, err := pc.appSocket(h)
+		return s.State, found, err
+	})
+	if sawVisible {
+		p.paired.visible.Store(true)
+	}
+	if sawHeld {
+		p.paired.held.Store(true)
+	}
+	return closed
+}
 
 // PairedBytesErr is why the bytes on the proxy's paired connections cannot be
 // counted, nil while they can: macOS's TCP table cannot be read in the layout
@@ -443,6 +492,14 @@ func (p *Proxy) PairedBytesErr() error {
 // received (inflight_darwin.go), unknown from the start, as Linux's canary
 // does (checkPairedBytes).
 var xnuTableReadable = xnuCountsProven(proveXNUCounts)
+
+// xnuAppClosedReadable proves once (proveXNUAppClosed) that macOS reports
+// xsocket64.so_state at xnuOffSoState with SS_NOFDREF clear on a live loopback
+// socket and set once that socket is closed whole while its peer remains open.
+// Kept separate from xnuTableReadable (and not wrapped in
+// ErrProxyConnsUnsupported) so a failure here only keeps holds open (fail
+// closed) and never breaks WaitPairedBytes or reports counts as broken.
+var xnuAppClosedReadable = sync.OnceValue(proveXNUAppClosed)
 
 // xnuCountsProven runs proof once, its failure an ErrProxyConnsUnsupported:
 // xnuTableReadable, and its rows' proof of a moved layout.

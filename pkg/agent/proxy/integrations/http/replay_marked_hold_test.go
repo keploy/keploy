@@ -22,10 +22,11 @@ import (
 // on each stopped_reading and timeout it judges by the app's end) holds past
 // the app's FIN, sent before the answer or after it: a FIN cannot say whether
 // the app closed or only half-closed and reads on. Only a reset, the run's
-// end, or (on Linux, at the session's last read) the proxy's word that no
-// process holds the app's socket (replay_app_closed_test.go) ends it; where
-// the socket cannot be asked (Windows, darwin) or while a process still holds
-// it, it holds until a reset or the run's end. A fault without the mark ends
+// end, or (on Linux and darwin, at the session's last read) the proxy's word
+// that no process holds the app's socket (replay_app_closed_test.go) ends it;
+// where the socket cannot be asked (Windows, or when the socket table is
+// unreadable or hidden) or while a process still holds it, it holds until a
+// reset or the run's end. A fault without the mark ends
 // the hold at a FIN after the answer, as before.
 
 // idleMarks is a request holder (integrations.WithRequestHolder) that keeps

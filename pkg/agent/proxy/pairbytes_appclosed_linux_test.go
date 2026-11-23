@@ -206,6 +206,26 @@ func TestADrainTellsAHandlerHeldPastTheAppsFINThatItsSocketIsClosed(t *testing.T
 			t.Fatal("errNoSocket did not count as closed once app sockets are known to be visible")
 		}
 	})
+	t.Run("sayAppClosed skips a connection whose close has already begun", func(t *testing.T) {
+		p, app, tracked := untoldPair(t)
+		use(t, app, tracked)
+		pc := pairedConnOf(t, p, 1)
+		if err := app.Close(); err != nil {
+			t.Fatal(err)
+		}
+		awaitState(t, pc.conn, peerEnded, "the application's FIN")
+		if !p.appSocketClosed(pc) {
+			t.Fatal("premise: appSocketClosed must be true for the closed app socket before setting atClose")
+		}
+		ps := readProxySide(pc.conn)
+		pc.atClose.Store(&ps)
+		if p.sayAppClosed([]*pairedConn{pc}) {
+			t.Fatal("sayAppClosed signalled a connection whose close had already begun (atClose != nil)")
+		}
+		if pc.appClosedSaid() {
+			t.Fatal("markAppClosed ran on a connection whose close had already begun")
+		}
+	})
 }
 
 // End-to-end: the real HTTP parser holding a timeout-before-head fault marked
@@ -252,14 +272,32 @@ func TestADrainEndsARealHeldHTTPFaultOnceTheAppsSocketIsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			awaitState(t, raw, peerEnded, "the application's FIN")
-			// Confirm the hold outlasts the app's FIN before the drain runs.
+			// Deterministically wait until holdUntilClosed has consumed the
+			// app's FIN and entered MarkIdle, then confirm the hold did not
+			// exit at the FIN before the drain runs.
+			deadline := time.Now().Add(10 * time.Second)
+			for tracked.idle.Load() == 0 {
+				select {
+				case err := <-done:
+					t.Fatalf("handleConnection ended (%v) at the app's FIN before the drain ran", err)
+				default:
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("holdUntilClosed did not mark the connection idle after the app's FIN")
+				}
+				time.Sleep(time.Millisecond)
+			}
 			select {
 			case err := <-done:
 				t.Fatalf("handleConnection ended (%v) at the app's FIN before the drain ran", err)
-			case <-time.After(300 * time.Millisecond):
+			default:
 			}
+			pc := pairedConnOf(t, p, 1)
 			if err := drainAnswers(t, drainReturns(context.Background(), p), "once the real HTTP fault hold ended"); err != nil {
 				t.Fatalf("the drain: %v", err)
+			}
+			if !pc.appClosedSaid() {
+				t.Fatal("the drain did not signal appClosed to end the held fault")
 			}
 			select {
 			case err := <-done:
