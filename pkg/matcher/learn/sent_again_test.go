@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"strconv"
 	"strings"
 	"testing"
@@ -239,5 +240,286 @@ func TestASlotIsTheValuesSourceOnlyByItsTextInBothRuns(t *testing.T) {
 		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "test case post-auth-temp-code-1" || ds[0].From.Path != "header.X-Signed" {
 			t.Errorf("authTime %d -> %d, a stamp of a second in the longer text %q sent twice: %s; want a Value of test case post-auth-temp-code-1's header.X-Signed, the first send", r.rSecond, r.fSecond, rec, oDescribe(ds))
 		}
+	}
+}
+
+func authTimeDecision(ds []Decision) *Decision {
+	for i := range ds {
+		if ClaimName(ds[i].At) == "auth_time" {
+			return &ds[i]
+		}
+	}
+	return nil
+}
+
+// TestAJWTTokenLookupPrefersTheRequestCarryingThatExactJWT: during a device
+// login, the browser sends its session JWT in Cookie (twice), the CLI sends
+// its access JWT in Authorization: Bearer, and logout sends the refresh JWT in
+// Cookie (refresh_token=<refresh>; refresh_token_staging=<refresh>). All three
+// JWTs share the same auth_time claim. When the server queries refreshToken by
+// the whole refresh JWT, its auth_time claim is bound at the logout request
+// that carries that exact refresh JWT whole, never refused as two-sources
+// against the browser/access JWTs. A call carrying a different JWT (or a bare
+// authTime, not a JWT), or matching the token in only one run, or carrying the
+// same token in mixed wrappers, still fails closed as two-sources.
+func TestAJWTTokenLookupPrefersTheRequestCarryingThatExactJWT(t *testing.T) {
+	r := newSentAgainRun()
+	r.rCall, r.fCall = r.rReq.Add(4*r.sendGap), r.fReq.Add(4*r.sendGap)
+	makeJWT := func(authTime int64, role, sid string) string {
+		hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+		pay := base64.RawURLEncoding.EncodeToString([]byte(`{"auth_time":` + strconv.FormatInt(authTime, 10) + `,"role":"` + role + `","sid":"` + sid + `"}`))
+		sig := base64.RawURLEncoding.EncodeToString([]byte("sig-" + role + "-" + sid))
+		return hdr + "." + pay + "." + sig
+	}
+	rBrowser, fBrowser := makeJWT(r.rSecond, "browser", "sid-br-r"), makeJWT(r.fSecond, "browser", "sid-br-f")
+	rAccess, fAccess := makeJWT(r.rSecond, "access", "sid-ac-r"), makeJWT(r.fSecond, "access", "sid-ac-f")
+	rRefresh, fRefresh := makeJWT(r.rSecond, "refresh", "sid-rf-r"), makeJWT(r.fSecond, "refresh", "sid-rf-f")
+	rOther, fOther := makeJWT(r.rSecond, "other", "sid-ot-r"), makeJWT(r.fSecond, "other", "sid-ot-f")
+
+	reqs := func(at time.Time, browser, access, refresh string) []*models.HTTPReq {
+		return []*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: at, Header: map[string]string{"Cookie": "jwt_token_staging=" + browser}},
+			{Method: "POST", URL: "http://localhost:8083/oauth/device/decision", Timestamp: at.Add(r.sendGap), Header: map[string]string{"Cookie": "jwt_token_staging=" + browser}},
+			{Method: "GET", URL: "http://localhost:8083/auth/token", Timestamp: at.Add(2 * r.sendGap), Header: map[string]string{"Authorization": "Bearer " + access}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: at.Add(3 * r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + refresh + "; refresh_token_staging=" + refresh}},
+		}
+	}
+	earlier := clientSent(t,
+		[]string{"get-oauth-device-1", "post-oauth-device-decision-1", "get-auth-token-1", "post-auth-logout-1"},
+		reqs(r.rReq, rBrowser, rAccess, rRefresh),
+		reqs(r.fReq, fBrowser, fAccess, fRefresh),
+	)
+
+	// 1. Refresh JWT in Cookie matches post-auth-logout-1 whole.
+	ds := r.clientValue("body.cmd.filter.token", String, rRefresh, fRefresh, earlier)
+	authDec := authTimeDecision(ds)
+	if authDec == nil || authDec.Outcome != OutcomeValue || authDec.From.Mock != "test case post-auth-logout-1" || authDec.From.Path != "header.Cookie" {
+		t.Fatalf("refresh JWT lookup auth_time: %s; want Value from test case post-auth-logout-1 header.Cookie", oDescribe(ds))
+	}
+	if wantAt := "header.Cookie|cookie.refresh_token|jwt.auth_time#0"; authDec.FromAt.String() != wantAt {
+		t.Fatalf("refresh JWT lookup FromAt=%q; want %q", authDec.FromAt.String(), wantAt)
+	}
+	if wantLine := "did not carry that token whole (as its text, a Bearer credential or a cookie value)"; !strings.Contains(authDec.Line, wantLine) {
+		t.Errorf("refresh JWT lookup line %q does not contain %q", authDec.Line, wantLine)
+	}
+
+	// 2. Access JWT in Authorization: Bearer matches get-auth-token-1 whole.
+	dsAcc := r.clientValue("body.cmd.filter.token", String, rAccess, fAccess, earlier)
+	authDec = authTimeDecision(dsAcc)
+	if authDec == nil || authDec.Outcome != OutcomeValue || authDec.From.Mock != "test case get-auth-token-1" || authDec.From.Path != "header.Authorization" {
+		t.Fatalf("access JWT lookup auth_time: %s; want Value from test case get-auth-token-1 header.Authorization", oDescribe(dsAcc))
+	}
+
+	// 3. Browser JWT sent twice in identical Cookie headers narrows to >=2 slots
+	// and binds "sent again" at the first send.
+	dsBr := r.clientValue("body.cmd.filter.token", String, rBrowser, fBrowser, earlier)
+	authDec = authTimeDecision(dsBr)
+	if authDec == nil || authDec.Outcome != OutcomeValue || authDec.From.Mock != "test case get-oauth-device-1" || authDec.From.Path != "header.Cookie" {
+		t.Fatalf("browser JWT sent twice auth_time: %s; want Value from test case get-oauth-device-1 header.Cookie", oDescribe(dsBr))
+	}
+	if wantAt := "header.Cookie|jwt.auth_time#0"; authDec.FromAt.String() != wantAt {
+		t.Fatalf("browser JWT sent twice FromAt=%q; want %q", authDec.FromAt.String(), wantAt)
+	}
+	if wantAgain := "; sent again: test case post-oauth-device-decision-1 header.Cookie"; !strings.Contains(authDec.Line, wantAgain) {
+		t.Errorf("browser JWT sent twice line %q does not contain %q", authDec.Line, wantAgain)
+	}
+
+	// 4. Multi-JWT Cookie header (jwt_token_staging=<browser>; refresh_token=<refresh>)
+	// binds cookie.refresh_token|jwt.auth_time, NOT the earlier jwt_token_staging pair.
+	multiCookieEarlier := clientSent(t,
+		[]string{"get-oauth-device-1", "post-auth-logout-1"},
+		[]*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: r.rReq, Header: map[string]string{"Cookie": "jwt_token_staging=" + rBrowser}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.rReq.Add(r.sendGap), Header: map[string]string{"Cookie": "jwt_token_staging=" + rBrowser + "; refresh_token=" + rRefresh}},
+		},
+		[]*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: r.fReq, Header: map[string]string{"Cookie": "jwt_token_staging=" + fBrowser}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.fReq.Add(r.sendGap), Header: map[string]string{"Cookie": "jwt_token_staging=" + fBrowser + "; refresh_token=" + fRefresh}},
+		},
+	)
+	dsMulti := r.clientValue("body.cmd.filter.token", String, rRefresh, fRefresh, multiCookieEarlier)
+	authDec = authTimeDecision(dsMulti)
+	if authDec == nil || authDec.Outcome != OutcomeValue || authDec.From.Mock != "test case post-auth-logout-1" {
+		t.Fatalf("multi-JWT Cookie lookup auth_time: %s; want Value from test case post-auth-logout-1", oDescribe(dsMulti))
+	}
+	if wantAt := "header.Cookie|cookie.refresh_token|jwt.auth_time#0"; authDec.FromAt.String() != wantAt {
+		t.Fatalf("multi-JWT Cookie lookup bound wrong pair: FromAt=%q; want %q", authDec.FromAt.String(), wantAt)
+	}
+
+	// 5. Mixed-wrapper cases (same JWT in Bearer + Cookie, or in different Cookie headers) stay two-sources.
+	for name, pairs := range map[string][2][]*models.HTTPReq{
+		"Bearer and Cookie holding same JWT": {
+			{
+				{Method: "GET", URL: "http://localhost:8083/auth/token", Timestamp: r.rReq, Header: map[string]string{"Authorization": "Bearer " + rRefresh}},
+				{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.rReq.Add(r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + rRefresh}},
+			},
+			{
+				{Method: "GET", URL: "http://localhost:8083/auth/token", Timestamp: r.fReq, Header: map[string]string{"Authorization": "Bearer " + fRefresh}},
+				{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.fReq.Add(r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + fRefresh}},
+			},
+		},
+		"two different Cookie wrappers holding same JWT": {
+			{
+				{Method: "POST", URL: "http://localhost:8083/auth/refresh", Timestamp: r.rReq, Header: map[string]string{"Cookie": "refresh_token=" + rRefresh}},
+				{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.rReq.Add(r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + rRefresh + "; refresh_token_staging=" + rRefresh}},
+			},
+			{
+				{Method: "POST", URL: "http://localhost:8083/auth/refresh", Timestamp: r.fReq, Header: map[string]string{"Cookie": "refresh_token=" + fRefresh}},
+				{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.fReq.Add(r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + fRefresh + "; refresh_token_staging=" + fRefresh}},
+			},
+		},
+	} {
+		mixEarlier := clientSent(t, []string{"req-1", "req-2"}, pairs[0], pairs[1])
+		dsMix := r.clientValue("body.cmd.filter.token", String, rRefresh, fRefresh, mixEarlier)
+		authDec = authTimeDecision(dsMix)
+		if authDec == nil || authDec.Refusal == nil || authDec.Refusal.Kind != RefusalTwoSources {
+			t.Errorf("%s: %s; want refused (two-sources)", name, oDescribe(dsMix))
+		}
+	}
+
+	// 6. Both-runs safety guards: slot must carry the exact JWT in BOTH runs,
+	// and the field must parse as a JWT in BOTH runs.
+	recOnlyEarlier := clientSent(t,
+		[]string{"get-oauth-device-1", "post-auth-logout-1"},
+		[]*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: r.rReq, Header: map[string]string{"Cookie": "jwt_token_staging=" + rBrowser}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.rReq.Add(r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + rRefresh}},
+		},
+		[]*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: r.fReq, Header: map[string]string{"Cookie": "jwt_token_staging=" + fBrowser}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.fReq.Add(r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + fOther}},
+		},
+	)
+	if authDec = authTimeDecision(r.clientValue("body.cmd.filter.token", String, rRefresh, fRefresh, recOnlyEarlier)); authDec == nil || authDec.Refusal == nil || authDec.Refusal.Kind != RefusalTwoSources {
+		t.Errorf("logout carries exact JWT in recording only: want refused (two-sources); got %+v", authDec)
+	}
+
+	liveOnlyEarlier := clientSent(t,
+		[]string{"get-oauth-device-1", "post-auth-logout-1"},
+		[]*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: r.rReq, Header: map[string]string{"Cookie": "jwt_token_staging=" + rBrowser}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.rReq.Add(r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + rOther}},
+		},
+		[]*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: r.fReq, Header: map[string]string{"Cookie": "jwt_token_staging=" + fBrowser}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.fReq.Add(r.sendGap), Header: map[string]string{"Cookie": "refresh_token=" + fRefresh}},
+		},
+	)
+	if authDec = authTimeDecision(r.clientValue("body.cmd.filter.token", String, rRefresh, fRefresh, liveOnlyEarlier)); authDec == nil || authDec.Refusal == nil || authDec.Refusal.Kind != RefusalTwoSources {
+		t.Errorf("logout carries exact JWT in round F only: want refused (two-sources); got %+v", authDec)
+	}
+
+	// Field parses as a JWT in one run only: slot carries the exact text of both
+	// runs (so carriesToken WOULD match if the okR && okL JWT guard were removed).
+	// oneSource must stay unnarrowed (len == 2, again == "").
+	x := newReaderIndex(nil)
+	makeSlot := func(mock, path, recText, liveText string) evPlace {
+		return evPlace{
+			mock: mock, path: path, name: mock + " " + path,
+			rec: recText, live: liveText,
+			t: &placeText{rec: x.text(recText), live: x.text(liveText)},
+		}
+	}
+	pBr := makeSlot("test case get-oauth-device-1", "header.Cookie", "jwt_token_staging="+rBrowser, "jwt_token_staging="+fBrowser)
+	notJWTR, notJWTF := "not-a-jwt-"+nanos(r.rSecond), "not-a-jwt-"+nanos(r.fSecond)
+	for _, tc := range []struct {
+		label string
+		pRf   evPlace
+		c     changedInstant
+	}{
+		{
+			label: "JWT in rec only",
+			pRf:   makeSlot("test case post-auth-logout-1", "header.Cookie", "refresh_token="+rRefresh, "refresh_token="+notJWTF),
+			c:     changedInstant{text: true, rec: rRefresh, live: notJWTF},
+		},
+		{
+			label: "JWT in live only",
+			pRf:   makeSlot("test case post-auth-logout-1", "header.Cookie", "refresh_token="+notJWTR, "refresh_token="+fRefresh),
+			c:     changedInstant{text: true, rec: notJWTR, live: fRefresh},
+		},
+	} {
+		if !carriesToken(tc.pRf.path, tc.pRf.rec, tc.pRf.live, tc.c.rec, tc.c.live) {
+			t.Fatalf("%s: precondition failed (slot must carry both texts so test exercises okR && okL guard)", tc.label)
+		}
+		if got, again := oneSource([]evPlace{pBr, tc.pRf}, tc.c); len(got) != 2 || again != "" {
+			t.Errorf("oneSource(%s) = len %d, %q; want len 2, empty", tc.label, len(got), again)
+		}
+	}
+
+	// Duplicate cookie names (skipped by cookieSpans) must NOT narrow, so narrowing
+	// and cookieTokenFor share one addressing model and never bind the wrong JWT pair.
+	dupCookieEarlier := clientSent(t,
+		[]string{"get-oauth-device-1", "post-auth-logout-1"},
+		[]*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: r.rReq, Header: map[string]string{"Cookie": "jwt_token_staging=" + rBrowser}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.rReq.Add(r.sendGap), Header: map[string]string{"Cookie": "jwt_token_staging=" + rBrowser + "; refresh_token=" + rRefresh + "; refresh_token=" + rRefresh}},
+		},
+		[]*models.HTTPReq{
+			{Method: "GET", URL: "http://localhost:8083/oauth/device", Timestamp: r.fReq, Header: map[string]string{"Cookie": "jwt_token_staging=" + fBrowser}},
+			{Method: "POST", URL: "http://localhost:8083/auth/logout", Timestamp: r.fReq.Add(r.sendGap), Header: map[string]string{"Cookie": "jwt_token_staging=" + fBrowser + "; refresh_token=" + fRefresh + "; refresh_token=" + fRefresh}},
+		},
+	)
+	if authDec = authTimeDecision(r.clientValue("body.cmd.filter.token", String, rRefresh, fRefresh, dupCookieEarlier)); authDec == nil || authDec.Refusal == nil || authDec.Refusal.Kind != RefusalTwoSources {
+		t.Errorf("duplicate refresh_token cookie name: want refused (two-sources); got %+v", authDec)
+	}
+
+	// 7. Unrelated JWT not carried by any request stays refused (two-sources).
+	dsOther := r.clientValue("body.cmd.filter.token", String, rOther, fOther, earlier)
+	authDec = authTimeDecision(dsOther)
+	if authDec == nil || authDec.Refusal == nil || authDec.Refusal.Kind != RefusalTwoSources {
+		t.Fatalf("unrelated JWT lookup auth_time: %s; want refused (two-sources)", oDescribe(dsOther))
+	}
+
+	// 8. Bare authTime (not a JWT) beside different JWT headers stays refused (two-sources).
+	dsBare := Decide(authTimeCall(r.rSecond, r.fSecond, r.rCall, r.fCall, earlier))
+	if len(dsBare) != 1 || dsBare[0].Refusal == nil || dsBare[0].Refusal.Kind != RefusalTwoSources {
+		t.Fatalf("bare authTime beside distinct JWT headers: %s; want refused (two-sources)", oDescribe(dsBare))
+	}
+}
+
+func TestCarriesToken(t *testing.T) {
+	const (
+		tokR = "eyJhbGciOiJIUzI1NiJ9.eyJhdXRoX3RpbWUiOjE3OTU0MjYzMzF9.sig_rec"
+		tokL = "eyJhbGciOiJIUzI1NiJ9.eyJhdXRoX3RpbWUiOjE3OTU0MjY0MDB9.sig_live"
+	)
+	cases := []struct {
+		name  string
+		path  string
+		pRec  string
+		pLive string
+		want  bool
+	}{
+		{"exact whole text", "body.token", tokR, tokL, true},
+		{"exact whole text with suffix", "body.token", tokR + "x", tokL + "x", false},
+		{"exact whole text with prefix", "body.token", "x" + tokR, "x" + tokL, false},
+		{"Bearer exact", "header.Authorization", "Bearer " + tokR, "Bearer " + tokL, true},
+		{"bearer lowercase", "header.Authorization", "bearer " + tokR, "bearer " + tokL, true},
+		{"Bearer with suffix", "header.Authorization", "Bearer " + tokR + "x", "Bearer " + tokL + "x", false},
+		{"Bearer with prefix", "header.Authorization", "Bearer x" + tokR, "Bearer x" + tokL, false},
+		{"Bearer with extra word", "header.Authorization", "Bearer " + tokR + " extra", "Bearer " + tokL + " extra", false},
+		{"Token scheme", "header.Authorization", "Token " + tokR, "Token " + tokL, false},
+		{"Bearer tab rejected by StepBearer", "header.Authorization", "Bearer\t" + tokR, "Bearer\t" + tokL, false},
+		{"Bearer leading space rejected", "header.Authorization", " Bearer " + tokR, " Bearer " + tokL, false},
+		{"Bearer trailing space rejected", "header.Authorization", "Bearer " + tokR + " ", "Bearer " + tokL + " ", false},
+		{"Cookie pair exact", "header.Cookie", "a=1; refresh_token=" + tokR + "; b=2", "a=1; refresh_token=" + tokL + "; b=2", true},
+		{"Set-Cookie pair exact", "header.Set-Cookie", "refresh_token=" + tokR + "; HttpOnly; Path=/", "refresh_token=" + tokL + "; HttpOnly; Path=/", true},
+		{"Cookie pair suffix", "header.Cookie", "refresh_token=" + tokR + "x", "refresh_token=" + tokL + "x", false},
+		{"Cookie pair prefix", "header.Cookie", "refresh_token=x" + tokR, "refresh_token=x" + tokL, false},
+		{"Cookie quoted value", "header.Cookie", `refresh_token="` + tokR + `"`, `refresh_token="` + tokL + `"`, false},
+		{"Cookie trailing space and tab trimmed", "header.Cookie", "refresh_token=" + tokR + " \t; HttpOnly", "refresh_token=" + tokL + " \t; HttpOnly", true},
+		{"Cookie name with no equals", "header.Cookie", tokR + "; HttpOnly", tokL + "; HttpOnly", false},
+		{"Cookie duplicate name rejected (matches cookieSpans)", "header.Cookie", "refresh_token=" + tokR + "; refresh_token=" + tokR, "refresh_token=" + tokL + "; refresh_token=" + tokL, false},
+		{"Cookie different pair names across runs rejected", "header.Cookie", "a=" + tokR, "b=" + tokL, false},
+		{"mixed carrier Bearer in R and Cookie in F rejected", "header.Cookie", "Bearer " + tokR, "refresh_token=" + tokL, false},
+		{"empty text", "header.Cookie", "", "", false},
+		{"non-Cookie header with key=tok rejected", "header.X-Foo", "refresh_token=" + tokR, "refresh_token=" + tokL, false},
+		{"body leaf with key=tok rejected", "body.meta", "refresh_token=" + tokR, "refresh_token=" + tokL, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := carriesToken(tc.path, tc.pRec, tc.pLive, tokR, tokL); got != tc.want {
+				t.Errorf("carriesToken(%q, %q, %q, tokR, tokL) = %v; want %v", tc.path, tc.pRec, tc.pLive, got, tc.want)
+			}
+		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // THE TEST CASE'S OWN REQUEST.
@@ -75,10 +76,14 @@ func oneSlotEach(slots []evPlace) []evPlace {
 // read, and what the value's line adds; slots as they are, and "", where it
 // cannot (two sources). c's leaf is the changed field's whole text.
 //
-// (a) A slot whose whole text is the field's in both runs is its source: one
-// that holds only the moment's word in another text does not compete (a
-// suite renamed from "e2e-vh-<nanos>" to "e2e-vh-<nanos>-renamed", the name
-// written the second's).
+// (a) A slot whose whole text is the field's in both runs — or, where the
+// field's whole text parses as a JWT in both runs, a slot that carries that
+// exact token whole as its whole text, Bearer credential, or a Cookie/Set-Cookie
+// pair value in both runs — is its source: one that holds only the moment's word
+// in another text (or inside a different JWT) does not compete (a suite renamed
+// from "e2e-vh-<nanos>" to "e2e-vh-<nanos>-renamed", or a refresh-token lookup
+// beside earlier requests carrying an access/browser JWT with the same
+// auth_time claim).
 //
 // (b) Slots that hold one and the same whole text in both runs are one value
 // the client sent again (a name, a session cookie), its place the first
@@ -97,8 +102,22 @@ func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
 	}
 	rec, live := c.leaf()
 	src := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.rec != rec || p.live != live })
+	byToken := false
+	if len(src) == 0 && rec != "" && live != "" {
+		_, _, okR := jwtClaims(rec)
+		_, _, okL := jwtClaims(live)
+		if okR && okL {
+			src = slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool {
+				return !carriesToken(p.path, p.rec, p.live, rec, live)
+			})
+			byToken = len(src) > 0
+		}
+	}
 	if len(src) == 1 {
 		word := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.name == src[0].name })
+		if byToken {
+			return src, "; " + strings.Join(names(word), ", ") + " did not carry that token whole (as its text, a Bearer credential or a cookie value)"
+		}
 		return src, "; " + strings.Join(names(word), ", ") + " held only its word"
 	}
 	if len(src) == 0 {
@@ -112,6 +131,32 @@ func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
 	}
 	again := slices.DeleteFunc(slices.Clone(src), func(p evPlace) bool { return p.name == first.name })
 	return []evPlace{first}, "; sent again: " + strings.Join(names(again), ", ") + ", first sent at " + first.name
+}
+
+// carriesToken reports whether a slot at path holds (rec, live) in both runs
+// in the same whole-token carrier: as its whole text, as a Bearer credential
+// (variables.StepBearer), or — for a Cookie or Set-Cookie header — as the same
+// uniquely-named Cookie pair in cookieSpans (matching cookieTokenFor's addressing
+// model so narrowing never picks a pair that fromAtFor cannot address).
+func carriesToken(path, pRec, pLive, rec, live string) bool {
+	if pRec == rec && pLive == live {
+		return true
+	}
+	if bR, okR := variables.Decode(variables.StepBearer, pRec); okR && bR == rec {
+		if bL, okL := variables.Decode(variables.StepBearer, pLive); okL && bL == live {
+			return true
+		}
+	}
+	if strings.EqualFold(path, "header.Cookie") || strings.EqualFold(path, "header.Set-Cookie") {
+		if spans, ok := cookieSpans(pRec, pLive); ok {
+			for _, s := range spans {
+				if pair := s.Parts[0]; pair.Rec == rec && pair.Live == live {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // bareStamp reports whether t's text is, whole, one instant of a second or a

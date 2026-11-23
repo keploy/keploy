@@ -3615,7 +3615,8 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	if first.trailed {
 		rule += ", sent in " + dc.in.Trails.Test + ", which this call trails"
 	}
-	fromAt, name, places := dc.fromAt(first, c.r, c.l), first.name, names(src)
+	leafRec, leafLive := c.leaf()
+	fromAt, name, places := dc.fromAtFor(first, c.r, c.l, leafRec, leafLive), first.name, names(src)
 	if claim := ClaimName(fromAt); claim != "" {
 		// Bound inside a token, the line names the claim that holds it,
 		// and so does its place in the line's places.
@@ -4238,14 +4239,23 @@ func addrList(as []variables.Address) string {
 // through |pct at its word (pctWord), never the text whole. A Cookie or
 // Set-Cookie header holds a token as one pair's value, beside other pairs
 // (refresh_token=<JWT>; refresh_token_staging=<JWT>), which no JWT step reads
-// whole: its signature and its claims are read in the first pair that holds
-// them (cookieToken), at that pair's step (|cookie.<name>|jwtsig,
+// whole: its signature and its claims are read in the pair matching the
+// changed leaf's whole token when present, else the first pair that holds them
+// (cookieTokenFor), at that pair's step (|cookie.<name>|jwtsig,
 // |cookie.<name>|jwt.<claim>#<n>), each where the whole header's would be.
 // Words and claims are read in the text the address's own steps open (an
 // adapter's PlaceOf may name a decode step), so the claim's step follows
 // them; a leaf they do not open has no word or claim there: it is named
 // whole, as before.
 func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
+	return dc.fromAtFor(p, v, f, "", "")
+}
+
+// fromAtFor is fromAt, preferring a Cookie pair whose whole token matches
+// (prefRec, prefLive) when non-empty (so a multi-JWT Cookie header binds the
+// exact JWT that justified choosing this slot rather than an earlier pair with
+// the same claim value).
+func (dc *decider) fromAtFor(p evPlace, v, f, prefRec, prefLive string) variables.Address {
 	if p.leaf.Path == "" {
 		return variables.Address{Word: -1}
 	}
@@ -4256,7 +4266,7 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), variables.StepJWTSig), -1
 		return a
 	}
-	if st, _, ok := cookieToken(a, rec, live, v, f, false); ok {
+	if st, _, ok := cookieTokenFor(a, rec, live, v, f, prefRec, prefLive, false); ok {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), st...), -1
 		return a
 	}
@@ -4287,7 +4297,7 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 	}
 	if st, n, ok := claimWord(rec, live, v, f); ok {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), st), n
-	} else if st, n, ok := cookieToken(a, rec, live, v, f, true); ok {
+	} else if st, n, ok := cookieTokenFor(a, rec, live, v, f, prefRec, prefLive, true); ok {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), st...), n
 	}
 	return a
@@ -4397,20 +4407,42 @@ var tokenCuts = []struct {
 // pair by name. ok is false where a is no such header's text, or no pair
 // holds them so.
 func cookieToken(a variables.Address, rec, live, v, f string, claims bool) ([]variables.Step, int, bool) {
+	return cookieTokenFor(a, rec, live, v, f, "", "", claims)
+}
+
+// cookieTokenFor is cookieToken; when prefRec and prefLive are non-empty, it
+// prefers the cookieSpans pair whose whole values equal (prefRec, prefLive)
+// before falling back to the first pair in recording order.
+func cookieTokenFor(a variables.Address, rec, live, v, f, prefRec, prefLive string, claims bool) ([]variables.Step, int, bool) {
 	if !cookiePlace(a) {
 		return nil, 0, false
 	}
 	spans, _ := cookieSpans(rec, live)
-	for _, s := range spans {
-		pair := s.Parts[0]
+	matchPair := func(pair openedStep) ([]variables.Step, int, bool) {
 		if !claims {
 			if sigAt(pair.Rec, pair.Live, v, f) {
 				return []variables.Step{pair.Step, variables.StepJWTSig}, -1, true
 			}
-			continue
+			return nil, 0, false
 		}
 		if st, n, ok := claimWord(pair.Rec, pair.Live, v, f); ok {
 			return []variables.Step{pair.Step, st}, n, true
+		}
+		return nil, 0, false
+	}
+	if prefRec != "" && prefLive != "" {
+		for _, s := range spans {
+			pair := s.Parts[0]
+			if pair.Rec == prefRec && pair.Live == prefLive {
+				if st, n, ok := matchPair(pair); ok {
+					return st, n, true
+				}
+			}
+		}
+	}
+	for _, s := range spans {
+		if st, n, ok := matchPair(s.Parts[0]); ok {
+			return st, n, true
 		}
 	}
 	return nil, 0, false
