@@ -500,8 +500,14 @@ func (r *Replayer) rewindConsumedForRetryCycle(total *models.ConsumedHistory, ba
 	r.agentHistoryStaleForSet.Store(true)
 	// It counts one rewind more (models.MockFilterParams.ConsumedRewinds): the
 	// agent starts a pass over the set again at the cycle's first window,
-	// even one that starts where the last cycle ended.
-	return total.RewoundTo(baseline)
+	// even one that starts where the last cycle ended, and under exact
+	// serving at the cycle's first filter, which carries the count too
+	// (exactPlan.rewinds).
+	next := total.RewoundTo(baseline)
+	if r.exact != nil {
+		r.exact.rewinds = next.Rewinds()
+	}
+	return next
 }
 
 // agentConsumedHistoryUnusable reports whether the agent's own consumption

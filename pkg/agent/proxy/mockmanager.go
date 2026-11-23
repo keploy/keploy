@@ -849,7 +849,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.exact.last.Store(nil)
 	m.exact.ended.Store(nil)
 	m.exact.round.bound = nil
-	m.exact.round.onceClaims = nil
+	m.startPassLocked()
 	m.exact.round.mu.Unlock()
 	// Nor any of its worker scope (models.Mapping.Worker), or its recording
 	// source: names are unique only within a set, and the next set names its
@@ -4920,12 +4920,24 @@ func (m *MockManager) WindowRewinds() (uint64, time.Time) {
 // SeedConsumedRewinds hands the manager the count of retry cycles the consumed
 // history of the set being served was rewound for
 // (models.MockFilterParams.ConsumedRewinds), before the call that carries it
-// sets its window: the next window set counts a change of it as a rewind
-// (WindowRewinds).
+// sets its window or serves its test: the next window set counts a change of
+// it as a rewind (WindowRewinds), and a count above the highest one handed
+// since the last staging, or before it (the count the staging carries), starts
+// a new pass over the set (startPassLocked), as a retry cycle runs the set's
+// test cases again. The two locks are taken one after the other, never one
+// inside the other.
 func (m *MockManager) SeedConsumedRewinds(n uint64) {
 	m.windowMu.Lock()
 	m.consumedRewinds = n
 	m.windowMu.Unlock()
+	m.lockRound()
+	defer m.exact.round.mu.Unlock()
+	r := &m.exact.round
+	r.seededRewinds = n
+	if n > r.passRewinds {
+		r.passRewinds = n
+		m.startPassLocked()
+	}
 }
 
 // noteWindowStartLocked counts start, the window start being set, when it

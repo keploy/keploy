@@ -78,10 +78,18 @@ type roundState struct {
 	// else learnBinding.set. One the tracker began after it is a set the
 	// store has not staged (integrations.LearnRead.SetAhead).
 	stagedSet uint64
-	// onceClaims holds the keys claimed in the current staging
-	// (MockManager.ClaimOnce), reset under mu in bumpStagingEpoch and
-	// ResetForReplaySession.
+	// onceClaims holds the keys claimed in the current pass over the set
+	// (MockManager.ClaimOnce), reset under mu as each pass starts
+	// (MockManager.startPassLocked).
 	onceClaims map[string]struct{}
+	// seededRewinds is the count of consumed-history rewinds last handed to
+	// the manager (MockManager.SeedConsumedRewinds), and passRewinds the
+	// highest one handed since the last staging, set to seededRewinds by
+	// each staging (bumpStagingEpoch): a count above it is a retry cycle,
+	// which starts a pass. Within a staging the count only rises, so a lower
+	// one (a filter that carries none) starts nothing.
+	seededRewinds uint64
+	passRewinds   uint64
 	// onWait and onRead are test seams, nil outside tests: onWait runs as a
 	// change is about to take the lock (lockRound), onRead inside a
 	// snapshot after each of its reads, with that read's name, and in
@@ -476,7 +484,8 @@ func (m *MockManager) bumpStagingEpoch() {
 		f()
 	}
 	m.stagingEpoch.Add(1)
-	m.exact.round.onceClaims = nil
+	m.startPassLocked()
+	m.exact.round.passRewinds = m.exact.round.seededRewinds
 	// The set the tracker began last is staged now, whichever it is: the
 	// tracker's own (SetTrackerSetAt), as its set may have begun before any
 	// of its boundaries reached this manager.
@@ -489,11 +498,28 @@ func (m *MockManager) bumpStagingEpoch() {
 	m.exact.round.mu.Unlock()
 }
 
-// ClaimOnce atomically records key in this manager's current staging and
-// returns true only for the first caller. The claimed set is reset under the
-// round lock in bumpStagingEpoch and ResetForReplaySession, so separate
+// startPassLocked starts a new pass over the set on m: what the pass before
+// claimed (ClaimOnce) is not this pass's, so a recorded occurrence is
+// delivered once in each pass. Every pass start calls it, holding the round
+// lock: a staging (bumpStagingEpoch), a replay session
+// (ResetForReplaySession), and a retry cycle of keploy test, which the agent
+// hands the manager as a higher count of the set's consumed-history rewinds
+// (SeedConsumedRewinds) before the cycle's first test is served. A staging is
+// a set's (keploy test's, or an attempt of it), and with the proven switch
+// off also each begin and end of a keploy mock replay test that has no worker
+// pid (SetScopeMocks): those stage the pool again, so what it carries is
+// delivered once per such test. The deferred streaming tests going back to
+// an earlier window start no pass: they run the test cases the pass left for
+// last, once each, so what the pass claimed stays claimed.
+func (m *MockManager) startPassLocked() {
+	m.exact.round.onceClaims = nil
+}
+
+// ClaimOnce atomically records key in this manager's current pass over the
+// set and returns true only for the first caller. The claimed set is reset
+// under the round lock as each pass starts (startPassLocked), so separate
 // managers stay independent and per-connection wrappers delegating here share
-// one per-staging claim set.
+// one per-pass claim set.
 func (m *MockManager) ClaimOnce(key string) bool {
 	if m == nil {
 		return true
