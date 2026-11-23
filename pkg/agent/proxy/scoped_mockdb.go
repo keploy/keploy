@@ -1255,6 +1255,14 @@ func (s *scopedMockDb) GetPerTestMocksWithRewinds() ([]*models.Mock, uint64, tim
 	return mocks, 0, start, err
 }
 
+// ClaimOnce delegates to the underlying store so distinct per-connection
+// wrappers over one MockManager share its once-per-staging claim set.
+func (s *scopedMockDb) ClaimOnce(key string) bool {
+	return s.MockMemDb.ClaimOnce(key)
+}
+
+var _ integrations.MockMemDb = (*scopedMockDb)(nil)
+
 func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
 	if bk, ok := s.MockMemDb.(interface {
 		GetFilteredMocksByKind(models.Kind) ([]*models.Mock, error)

@@ -280,6 +280,12 @@ type MockMemDb interface {
 	MockWriter
 	MockConsumer
 	WindowAware
+	// ClaimOnce atomically records key in the store's current staging and
+	// returns true only for the first caller. The manager clears its claimed
+	// set under its own lock at each staging (the same step that bumps
+	// StagingEpoch), so separate managers (parallel workers) never interfere
+	// and per-connection wrappers delegate to their underlying manager.
+	ClaimOnce(key string) bool
 }
 
 // MockCursor is an optional MockMemDb capability that serves stateful
@@ -1160,6 +1166,7 @@ func (unheldRound) DeleteFilteredMock(models.Mock) bool                       { 
 func (unheldRound) DeleteUnFilteredMock(models.Mock) bool                     { return false }
 func (unheldRound) DeleteStartupMock(models.Mock) bool                        { return false }
 func (unheldRound) MarkMockAsUsed(models.Mock) bool                           { return false }
+func (unheldRound) ClaimOnce(string) bool                                     { return false }
 
 func (u unheldRound) SetCurrentTestWindow(start, end time.Time) {
 	u.window.SetCurrentTestWindow(start, end)

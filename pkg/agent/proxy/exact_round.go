@@ -78,6 +78,10 @@ type roundState struct {
 	// else learnBinding.set. One the tracker began after it is a set the
 	// store has not staged (integrations.LearnRead.SetAhead).
 	stagedSet uint64
+	// onceClaims holds the keys claimed in the current staging
+	// (MockManager.ClaimOnce), reset under mu in bumpStagingEpoch and
+	// ResetForReplaySession.
+	onceClaims map[string]struct{}
 	// onWait and onRead are test seams, nil outside tests: onWait runs as a
 	// change is about to take the lock (lockRound), onRead inside a
 	// snapshot after each of its reads, with that read's name, and in
@@ -461,6 +465,7 @@ func (m *MockManager) bumpStagingEpoch() {
 		f()
 	}
 	m.stagingEpoch.Add(1)
+	m.exact.round.onceClaims = nil
 	// The set the tracker began last is staged now, whichever it is: the
 	// tracker's own (SetTrackerSetAt), as its set may have begun before any
 	// of its boundaries reached this manager.
@@ -472,6 +477,33 @@ func (m *MockManager) bumpStagingEpoch() {
 	m.exact.round.wakeLocked()
 	m.exact.round.mu.Unlock()
 }
+
+// ClaimOnce atomically records key in this manager's current staging and
+// returns true only for the first caller. The claimed set is reset under the
+// round lock in bumpStagingEpoch and ResetForReplaySession, so separate
+// managers stay independent and per-connection wrappers delegating here share
+// one per-staging claim set.
+func (m *MockManager) ClaimOnce(key string) bool {
+	if m == nil {
+		return true
+	}
+	m.lockRound()
+	defer m.exact.round.mu.Unlock()
+	if m.exact.round.onceClaims == nil {
+		m.exact.round.onceClaims = make(map[string]struct{})
+	}
+	if _, exists := m.exact.round.onceClaims[key]; exists {
+		return false
+	}
+	m.exact.round.onceClaims[key] = struct{}{}
+	return true
+}
+
+var (
+	_ integrations.MockMemDb = (*MockManager)(nil)
+	_ integrations.MockMemDb = (*roundScope)(nil)
+	_ integrations.MockMemDb = (*heldScope)(nil)
+)
 
 // roundGuard is a take checked against a snapshot's round (at): refused, and
 // why kept, once the store moved from it. in is the request the take serves,
