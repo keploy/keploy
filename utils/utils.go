@@ -1749,7 +1749,24 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
 // one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, 0)
+	return GetAvailablePortExcept()
+}
+
+// GetAvailablePortExcept is GetAvailablePort never returning one of exclude,
+// ports handed out already that nothing binds yet: its search skips them. A
+// caller that drew GetAvailablePort again while it returned one of them could
+// fail with a port free, in a band whose free ports were an excluded one and
+// one other: most draws returned the excluded one.
+func GetAvailablePortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, 0, false, exclude...)
+}
+
+// GetAvailableDNSPortExcept is GetAvailablePortExcept for a DNS server's
+// port, which the server binds over UDP and over TCP: a port either socket
+// holds is passed over. A port free over TCP alone failed the server's UDP
+// bind.
+func GetAvailableDNSPortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, 0, true, exclude...)
 }
 
 // hostEphemeralRange reads the host's ephemeral port range for
@@ -1773,13 +1790,21 @@ const containerEphemeralHi = defaultEphemeralHi
 // 60999, or reaches 65535, or is unknown (macOS, Windows), would otherwise
 // hand out ports inside it.
 func GetAvailableContainerPort() (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, containerEphemeralHi)
+	return GetAvailableContainerPortExcept()
+}
+
+// GetAvailableContainerPortExcept is GetAvailableContainerPort never
+// returning one of exclude, as GetAvailablePortExcept.
+func GetAvailableContainerPortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi, false, exclude...)
 }
 
 // availablePortAbove is GetAvailablePort with the host's ephemeral range read
 // by ephemeral (ephemeralPortRange's signature), whose candidates are above
-// floor too.
-func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32) (uint32, error) {
+// floor too, and never one of exclude: the search skips those, it does not
+// draw again after it returns one. With udp, a candidate is free only where a
+// UDP socket binds it too (GetAvailableDNSPortExcept).
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32, udp bool, exclude ...uint32) (uint32, error) {
 	top := floor
 	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
 		top = ephemeralHi
@@ -1787,27 +1812,47 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	if top > 0 {
 		lo := top + 1
 		span := 65536 - lo // inclusive of 65535
-		// A random start, not a scan from the bottom. Scanning upward returns
-		// the LOWEST free port every time, so two keploy processes started
-		// moments apart — the ordinary CI pattern — are handed an identical
-		// number, each having verified it free; whichever binds second loses.
+		// Candidates drawn at random, each on its own (randomProbes of them),
+		// then every port from a random start. Not a scan from the bottom:
+		// it returns the LOWEST free port every time, so two keploy processes
+		// started moments apart — the ordinary CI pattern — are handed an
+		// identical number, each having verified it free; whichever binds
+		// second loses. Nor a scan from a random start alone: every start
+		// inside a run of held ports leads it to the first free port after
+		// the run, so beside such a run (a process holding a block of ports
+		// above the range) the draws of processes started together met there.
+		for i := 0; i < randomProbes; i++ {
+			off, ok := portOffset(span)
+			if !ok {
+				break
+			}
+			if slices.Contains(exclude, lo+off) {
+				continue
+			}
+			free, err := portProbe(lo+off, udp)
+			if err != nil {
+				return 0, err
+			}
+			if free {
+				return lo + off, nil
+			}
+		}
 		start := lo
-		if n, err := rand.Int(rand.Reader, big.NewInt(int64(span))); err == nil {
-			start = lo + uint32(n.Int64())
+		if off, ok := portOffset(span); ok {
+			start = lo + off
 		}
 		for i := uint32(0); i < span; i++ {
 			port := lo + ((start - lo + i) % span)
-			ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
-			if err != nil {
+			if slices.Contains(exclude, port) {
 				continue
 			}
-			// A failed Close leaves this process holding the port for its
-			// lifetime, so the candidate is unusable AND leaked — return the
-			// error rather than continuing and leaking one fd per candidate.
-			if err := ln.Close(); err != nil {
-				return 0, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+			free, err := portProbe(port, udp)
+			if err != nil {
+				return 0, err
 			}
-			return port, nil
+			if free {
+				return port, nil
+			}
 		}
 	}
 
@@ -1817,14 +1862,119 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	// is strictly better than no port at all, and this is the historical
 	// behaviour. A container's port that then meets one of the resolver's
 	// fails the agent's start at its bind, as no port at all would.
-	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
-	if err != nil {
-		return 0, fmt.Errorf("failed to find available port: %w", err)
-	}
-	defer listener.Close()
+	return osAssignedPort(exclude, udp)
+}
 
-	addr := listener.Addr().(*net.TCPAddr)
-	return uint32(addr.Port), nil
+// osAssignedPort is a port the OS assigns (a listener on ":0", let go before
+// it returns) other than exclude, and, with udp, one a UDP socket binds too.
+// A pick in exclude, or one a UDP socket holds, stays held while the OS is
+// asked again, so the OS cannot hand it back: len(exclude)+1 asks always reach
+// a port outside exclude, and udpHeldPicks more pass over as many picks held
+// over UDP, the OS's picks being its own ephemeral ports, which a UDP socket
+// seldom holds.
+func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
+	var held []net.Listener
+	defer func() {
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+	}()
+	asks := len(exclude) + 1
+	if udp {
+		asks += udpHeldPicks
+	}
+	for i := 0; i < asks; i++ {
+		ln, err := portListen(context.Background(), "tcp", ":0")
+		if err != nil {
+			return 0, fmt.Errorf("failed to find available port: %w", err)
+		}
+		held = append(held, ln)
+		port := uint32(ln.Addr().(*net.TCPAddr).Port)
+		if slices.Contains(exclude, port) {
+			continue
+		}
+		if !udp {
+			return port, nil
+		}
+		free, err := udpFree(port)
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return port, nil
+		}
+	}
+	if udp {
+		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, in %d of the OS's picks", exclude, asks)
+	}
+	return 0, fmt.Errorf("failed to find a port other than %v", exclude)
+}
+
+// udpHeldPicks is how many of the OS's picks held over UDP osAssignedPort
+// passes over for a DNS server's port before it fails.
+const udpHeldPicks = 8
+
+// randomProbes is how many candidates availablePortAbove draws at random
+// before it scans: with half the ports held, all 32 miss about once in four
+// billion tries.
+const randomProbes = 32
+
+// portOffset draws availablePortAbove's candidates (randomOffset) and
+// portProbe checks each (probePort).
+var portOffset, portProbe = randomOffset, probePort
+
+// portListen opens probePort's and osAssignedPort's listeners: plain TCP,
+// never Go's default MPTCP, which for as long as it is open listens on every
+// interface.
+var portListen = plaintcp.Listen
+
+// udpListen opens udpFree's UDP sockets.
+var udpListen = net.ListenPacket
+
+// randomOffset is a random offset in [0, span), and false where no random
+// number could be read.
+func randomOffset(span uint32) (uint32, bool) {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(span)))
+	if err != nil {
+		return 0, false
+	}
+	return uint32(n.Int64()), true
+}
+
+// probePort says whether port is free: whether a plain TCP listener binds it,
+// and, with udp, a UDP socket too while the listener holds it (udpFree); it
+// then lets them go. A failed Close leaves this process holding the port for
+// its lifetime, so the candidate is unusable AND leaked: that is an error,
+// not a candidate passed over, which would leak one fd per candidate.
+func probePort(port uint32, udp bool) (bool, error) {
+	ln, err := portListen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	free := true
+	if udp {
+		if free, err = udpFree(port); err != nil {
+			_ = ln.Close()
+			return false, err
+		}
+	}
+	if err := ln.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+	}
+	return free, nil
+}
+
+// udpFree says whether a UDP socket binds port, which it then lets go; a
+// failed Close is an error, as probePort's.
+func udpFree(port uint32) (bool, error) {
+	pc, err := udpListen("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	if err := pc.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe socket on UDP port %d: %w", port, err)
+	}
+	return true, nil
 }
 
 // isPortAvailable checks if a specific port is available on the system, with
@@ -1849,31 +1999,60 @@ func isPortAvailable(port uint32) bool {
 // it. Narrowing allocation to above the ephemeral range makes the pool smaller
 // and that coincidence correspondingly more likely, so the exclusion is not
 // optional bookkeeping.
+//
+// The search for another port skips them (GetAvailablePortExcept). It used to
+// draw GetAvailablePort's port again while that was an excluded one, 16 times
+// at most: in a band whose free ports were an excluded one and one other, the
+// draws kept returning the excluded port and the search failed with a port
+// free.
 func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
-	taken := make(map[uint32]struct{}, len(exclude))
-	for _, p := range exclude {
-		taken[p] = struct{}{}
-	}
-	if _, clash := taken[port]; !clash && isPortAvailable(port) {
+	return EnsureFreePort(isPortAvailable, port, exclude...)
+}
+
+// EnsureAvailableDNSPort is EnsureAvailablePorts for a DNS server's port,
+// which the server binds over UDP and over TCP: port is kept only where both
+// bind it, and the port drawn in its place is free over both
+// (GetAvailableDNSPortExcept). A check over TCP alone kept a port a UDP
+// socket held, and the DNS server's start failed on it, as each start again
+// did, handed the same port.
+func EnsureAvailableDNSPort(port uint32, exclude ...uint32) (uint32, error) {
+	return EnsureFreeDNSPort(isDNSPortAvailable, port, exclude...)
+}
+
+// isDNSPortAvailable says whether a DNS server binds port: a plain TCP
+// listener and a UDP socket both (probePort).
+func isDNSPortAvailable(port uint32) bool {
+	free, _ := probePort(port, true) // false on any error
+	return free
+}
+
+// EnsureFreePort is EnsureAvailablePorts with free saying whether port is
+// free, in place of a probe listener on it. A test that calls a port free
+// holds it with a listener of its own, so that no other process can take it,
+// and hands in a probe that says it is free: a port it let go of for the
+// probe could be taken by another process before the probe bound it, and the
+// port would then move with the test's answer wrong.
+func EnsureFreePort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	return ensureFree(free, GetAvailablePortExcept, port, exclude...)
+}
+
+// EnsureFreeDNSPort is EnsureAvailableDNSPort with free in place of its
+// probe, as EnsureFreePort.
+func EnsureFreeDNSPort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	return ensureFree(free, GetAvailableDNSPortExcept, port, exclude...)
+}
+
+// ensureFree is port where free says so and it is not one of exclude, and
+// otherwise draw's port.
+func ensureFree(free func(port uint32) bool, draw func(exclude ...uint32) (uint32, error), port uint32, exclude ...uint32) (uint32, error) {
+	if !slices.Contains(exclude, port) && free(port) {
 		return port, nil
 	}
-	var newPort uint32
-	var err error
-	// Bounded: a handful of draws is plenty to miss a set this small, and a
-	// bound means an exhausted pool surfaces as an error rather than a hang.
-	for i := 0; i < 16; i++ {
-		newPort, err = GetAvailablePort()
-		if err != nil {
-			break
-		}
-		if _, clash := taken[newPort]; !clash {
-			return newPort, nil
-		}
+	newPort, err := draw(exclude...)
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate new port: %w", err)
 	}
-	if err == nil {
-		return 0, fmt.Errorf("failed to allocate a port distinct from %v", exclude)
-	}
-	return 0, fmt.Errorf("failed to allocate new port: %w", err)
+	return newPort, nil
 }
 
 type shellWord struct {
