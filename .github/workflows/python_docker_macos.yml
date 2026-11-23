@@ -6,6 +6,10 @@ on:
         description: "Keychain password for macOS runner"
         required: true
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   python_docker_macos:
     runs-on: [self-hosted, macOS, native]

@@ -15,6 +15,10 @@ on:
         required: false
         default: 'ubuntu-latest'
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   held_request_under_load_linux:
     runs-on: ${{ inputs.runner }}

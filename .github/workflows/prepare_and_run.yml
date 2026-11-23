@@ -21,6 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  KEPLOY_INTERNAL: "1"
   # Must match the default $IsoRoot in setup-git-isolation.ps1 / cleanup-git-isolation.ps1
   _ISO_ROOT: .git-isolation
   # Central ref for the keploy/integrations commit every build leg in

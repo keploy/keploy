@@ -318,8 +318,9 @@ if [ -n "$AS" ]; then
 fi
 # The CLI's log is a temp file (keploy-logs-*.txt): in the case's own temp
 # directory, where run_case looks for one the CLI left. The workflow's
-# KEPLOY_EXACT_VIEW_VERIFY, only while it is set (sudo_env.sh).
-set -- "$@" env KEPLOY_PROVEN="$PROVEN" TMPDIR="$D/tmp" ${KEPLOY_EXACT_VIEW_VERIFY+"KEPLOY_EXACT_VIEW_VERIFY=$KEPLOY_EXACT_VIEW_VERIFY"}
+# KEPLOY_EXACT_VIEW_VERIFY and KEPLOY_INTERNAL, each only while it is set
+# (sudo_env.sh).
+set -- "$@" env KEPLOY_PROVEN="$PROVEN" TMPDIR="$D/tmp" ${KEPLOY_EXACT_VIEW_VERIFY+"KEPLOY_EXACT_VIEW_VERIFY=$KEPLOY_EXACT_VIEW_VERIFY"} ${KEPLOY_INTERNAL+"KEPLOY_INTERNAL=$KEPLOY_INTERNAL"}
 # shellcheck disable=SC2086 # EXTRA is flags, split on purpose
 "$@" python3 "$WORK/hangup.py" "$MODE" "$GAP" "$D/started" "$D/out" \
   "$WORK/bin/keploy" mock record -c "python3 $WORK/slowtest.py $D http://127.0.0.1:$PORT $LATE" \

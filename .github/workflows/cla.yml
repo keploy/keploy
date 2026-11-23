@@ -13,6 +13,10 @@ on:
       # reopening it is how a maintainer kicks off its checks, CLA included.
       - "reopened"
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   cla-assistant:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
