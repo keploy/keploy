@@ -25,12 +25,14 @@ import (
 // (newDecider; a list placesFrom made: every place). A nil list has no
 // place, as a decider a row makes with none.
 type placeList struct {
-	in     Input
-	x      *readerIndex
-	trails map[string]bool
-	ex     []exPlaces
-	leaves int
-	rest   []evPlace
+	in         Input
+	x          *readerIndex
+	trails     map[string]bool
+	ex         []exPlaces
+	leaves     int
+	rest       []evPlace
+	exByMock   map[string][]int
+	restByMock map[string][]int
 }
 
 // exPlaces is one earlier exchange's places in a call's list: e, its index
@@ -121,6 +123,43 @@ func (l *placeList) mocks() iter.Seq2[int, string] {
 		for n, p := range l.rest {
 			if !yield(l.leaves+n, p.mock) {
 				return
+			}
+		}
+	}
+}
+
+// indicesOf yields the place indices of every place in l whose mock name is in
+// cand, building no leaf place: an O(|cand|) lookup via a lazy per-mock index
+// instead of walking every leaf of every exchange.
+func (l *placeList) indicesOf(cand map[string]bool) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		if l == nil || len(cand) == 0 {
+			return
+		}
+		if l.exByMock == nil && l.restByMock == nil {
+			l.exByMock = make(map[string][]int, len(l.ex))
+			for k, x := range l.ex {
+				m := l.in.Earlier[x.e].Mock
+				l.exByMock[m] = append(l.exByMock[m], k)
+			}
+			l.restByMock = make(map[string][]int, len(l.rest))
+			for n, p := range l.rest {
+				l.restByMock[p.mock] = append(l.restByMock[p.mock], n)
+			}
+		}
+		for m := range cand {
+			for _, k := range l.exByMock[m] {
+				x := l.ex[k]
+				for n := range len(l.in.Earlier[x.e].Seen) {
+					if !yield(x.off + n) {
+						return
+					}
+				}
+			}
+			for _, n := range l.restByMock[m] {
+				if !yield(l.leaves + n) {
+					return
+				}
 			}
 		}
 	}

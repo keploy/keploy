@@ -378,12 +378,7 @@ func headPlace(c ClientCase, live *models.HTTPReq, at time.Time) Earlier {
 // Place.Client): a keploy test case's request, a value the test gave and a
 // recording are not.
 func (dc *decider) clientCase(mock string) bool {
-	for _, e := range dc.in.Earlier {
-		if e.Mock == mock {
-			return e.incoming
-		}
-	}
-	return false
+	return dc.clientMap()[mock]
 }
 
 // readOverClients is served without the requests of client tests

@@ -4989,6 +4989,37 @@ func (eh *earlierHeld) of(dc *DriftCache, at time.Time, served []Earlier, raw []
 	return eh.held, eh.recorded
 }
 
+// bothMoments computes earlierMoments and recordedMoments in one pass over
+// raw and served so each payload and Seen leaf's rawExtra is read once.
+func (dc *DriftCache) bothMoments(at time.Time, served []Earlier, raw []Raw) (held, recorded *heldMoments) {
+	var h, r heldMoments
+	for _, x := range raw {
+		if x.earlierThan(at) {
+			ms := dc.payloadMoments(x)
+			h.addMoments(ms)
+			r.addMoments(ms)
+		}
+	}
+	for _, e := range served {
+		for _, s := range e.Seen {
+			extra := dc.rawExtra(s.Leaf.Value)
+			dc.heldIn(&h, s.Leaf.Value, extra)
+			heldSeen(&h, s.Leaf, s.Leaf.Value)
+			dc.heldIn(&r, s.Leaf.Value, extra)
+			heldSeen(&r, s.Leaf, s.Leaf.Value)
+			if s.Side == Response || e.Given || s.Live == s.Leaf.Value {
+				if s.Live == s.Leaf.Value {
+					dc.heldIn(&h, s.Live, extra)
+				} else {
+					dc.heldIn(&h, s.Live, dc.rawExtra(s.Live))
+				}
+				heldSeen(&h, s.Leaf, s.Live)
+			}
+		}
+	}
+	return &h, &r
+}
+
 // earlierMoments are the moments the earlier places of a call recorded at
 // at hold, as the echo reads them (echoedIn): every payload served earlier
 // in the test or recorded before at (raw), in every form, as it stands, and

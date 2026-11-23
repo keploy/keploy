@@ -156,6 +156,11 @@ type readerText struct {
 	// none, so the call's own index answers.
 	fields   *fieldsEntry
 	noFields bool
+	// moments is the set's entry for the text's moment index (setMoments),
+	// once the set answers from it; noMoments: the set was asked and keeps
+	// none, so the call's own index answers.
+	moments   *momentsEntry
+	noMoments bool
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -575,6 +580,14 @@ type setFilters struct {
 	fieldTexts  map[fieldsTextKey]*fieldsEntry
 	fieldsUsed  int64
 	fieldBuilds int
+	// momentOf and momentTexts are the set's moment indices (setMoments),
+	// by recording id (Raw.id) or by text hash (filterTextKey); momentsUsed
+	// is what their indices count on the set's budget, and momentBuilds the
+	// indices built, for the rows.
+	momentOf     map[string]*momentsEntry
+	momentTexts  map[filterTextKey]*momentsEntry
+	momentsUsed  int64
+	momentBuilds int
 }
 
 // filterTextKey is a text by what it holds: its length and two hashes of
@@ -634,7 +647,8 @@ func filtersOf(s *setDerived) *setFilters {
 	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{},
 		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{},
 		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}, runs: map[string][]int32{},
-		short: map[string]*filterEntry{}, fieldTexts: map[fieldsTextKey]*fieldsEntry{}})
+		short: map[string]*filterEntry{}, fieldTexts: map[fieldsTextKey]*fieldsEntry{},
+		momentOf: map[string]*momentsEntry{}, momentTexts: map[filterTextKey]*momentsEntry{}})
 	if !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
 	}
@@ -1701,6 +1715,130 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 	variables.EachToken(s, from, len(s), yield)
 }
 
+// momentsEntry is the set's momentIndex of one recording or text, built once
+// for the set (once): ok where it was read and fit; else every call answers
+// from its own index, as before, and the set never builds it again.
+type momentsEntry struct {
+	once sync.Once
+	v    momentIndex
+	ok   bool
+}
+
+var (
+	momentsEntryBytes     = allocBytes(unsafe.Sizeof(momentsEntry{}), true)
+	momentsIDSlotBytes    = mapSlotBytes(slotOf[string, *momentsEntry](), true)
+	momentsIDGroupBytes   = mapGroupBytes(slotOf[string, *momentsEntry](), true)
+	momentsTextSlotBytes  = mapSlotBytes(slotOf[filterTextKey, *momentsEntry](), true)
+	momentsTextGroupBytes = mapGroupBytes(slotOf[filterTextKey, *momentsEntry](), true)
+)
+
+// setMoments is the set's momentIndex of t's recording (by Raw.id, without
+// re-reading its payload on a hit) or text (by filterTextKey), built once for
+// the set and kept on its budget within readerBudgetBytes, as setFields keeps
+// field views: every later call asks the kept momentIndex instead of running
+// b64Read and scanInstants again.
+func (t *readerText) setMoments() (momentIndex, bool) {
+	if t.moments != nil {
+		return t.moments.v, true
+	}
+	fs := t.x.filters
+	if fs == nil || t.rawUnread || t.noMoments {
+		return momentIndex{}, false
+	}
+	t.noMoments = true
+	var e *momentsEntry
+	var s string
+	var hasText bool
+	if t.raw != nil && t.raw.id != "" {
+		id := t.raw.id
+		fs.mu.Lock()
+		e = fs.momentOf[id]
+		first := len(fs.momentOf) == 0
+		fs.mu.Unlock()
+		if e == nil {
+			b := t.raw.payload()
+			if !b.read {
+				return momentIndex{}, false
+			}
+			s, hasText = b.text, true
+			n := momentsEntryBytes + momentsIDSlotBytes + allocBytes(len(id), false)
+			if first {
+				n += momentsIDGroupBytes
+			}
+			e = newSetEntry(fs, t.x.set, fs.momentOf, id, strings.Clone, n, &momentsEntry{})
+			if e == nil {
+				return momentIndex{}, false
+			}
+		}
+	} else {
+		s = t.text
+		if t.raw != nil {
+			b := t.raw.payload()
+			if !b.read {
+				return momentIndex{}, false
+			}
+			s = b.text
+		}
+		hasText = true
+		k := filterTextKey{n: len(s), a: maphash.String(fs.seeds[0], s), b: maphash.String(fs.seeds[1], s)}
+		fs.mu.Lock()
+		e = fs.momentTexts[k]
+		first := len(fs.momentTexts) == 0
+		fs.mu.Unlock()
+		if e == nil {
+			n := momentsEntryBytes + momentsTextSlotBytes
+			if first {
+				n += momentsTextGroupBytes
+			}
+			e = newSetEntry(fs, t.x.set, fs.momentTexts, k, sameKey[filterTextKey], n, &momentsEntry{})
+			if e == nil {
+				return momentIndex{}, false
+			}
+		}
+	}
+	e.once.Do(func() {
+		if !hasText {
+			b := t.raw.payload()
+			if !b.read {
+				return
+			}
+			s = b.text
+		}
+		e.v, e.ok = t.buildSetMoments(fs, s)
+	})
+	if !e.ok {
+		return momentIndex{}, false
+	}
+	t.moments = e
+	return e.v, true
+}
+
+func (t *readerText) buildSetMoments(fs *setFilters, s string) (momentIndex, bool) {
+	spans := instantSpans(s)
+	if ex := extraOf(s); ex != "" {
+		spans = slices.Concat(spans, instantSpans(ex))
+	}
+	ix := newMomentIndex(spans)
+	n, room := momentIndexBytes(ix), readerBudgetBytes(t.x.set)
+	fs.mu.Lock()
+	fs.momentBuilds++
+	fits := fs.momentsUsed+n <= room
+	if fits {
+		fs.momentsUsed += n
+	}
+	fs.mu.Unlock()
+	if !fits {
+		return momentIndex{}, false
+	}
+	if n > 0 && !setClaim(t.x.set, n) {
+		fs.mu.Lock()
+		fs.momentsUsed -= n
+		fs.mu.Unlock()
+		return momentIndex{}, false
+	}
+	return ix, true
+}
+
 // holdsMoment reports whether an instant of the text names m by moment
 // (byMoment), and whether one does so at a fine cut, in the text or any of
 // its declared forms, the forms main reads an instant in (holdsExact(text)
@@ -1711,6 +1849,10 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 	dc := t.x.dc
 	asked := func() { t.x.momentAsks++ }
+	if ix, ok := t.setMoments(); ok {
+		held, fine = ix.holds(m, asked)
+		return held, fine, true
+	}
 	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
 		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(dc.instantsOfForms(s)) }), momentIndexBytes,
 		func(s string, _ []rawField) {
@@ -1748,6 +1890,9 @@ func (dc *DriftCache) instantsOfForms(s string) []instant {
 // the call, or past the budget built for the question alone: it is asked
 // only of a place that holds a changed moment, never of every place.
 func (t *readerText) formsName(by func(h moment) bool) (named, read bool) {
+	if ix, ok := t.setMoments(); ok {
+		return slices.ContainsFunc(ix.moments, by), true
+	}
 	dc := t.x.dc
 	ix, _, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
 		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(dc.instantsOfForms(s)) }), momentIndexBytes, nil)

@@ -270,6 +270,24 @@ type decider struct {
 	// a Reader's index serves several Decides, and each refuses only for a
 	// recording it asked about itself (unreadHere).
 	unreadFrom int
+	// echoState caches the earlier/recorded/late moments built for
+	// echoedOutside across the call's drifted instants: index 0 with client
+	// tests included, index 1 with client tests excluded (readOverClients).
+	echoState [2]*echoMoments
+}
+
+// clientMap returns Earlier.incoming by mock name, built once per decider.
+func (dc *decider) clientMap() map[string]bool {
+	if dc.clients == nil {
+		dc.clientMaps++
+		dc.clients = make(map[string]bool, len(dc.in.Earlier))
+		for _, e := range dc.in.Earlier {
+			if _, ok := dc.clients[e.Mock]; !ok {
+				dc.clients[e.Mock] = e.incoming
+			}
+		}
+	}
+	return dc.clients
 }
 
 // unreadHere reports whether this decider asked about a recording keploy
@@ -848,16 +866,7 @@ func (dc *decider) textsOf(i int, p evPlace) *placeTexts {
 	l, _ := a.WordOf(p.live)
 	t := &placeTexts{rec: open(r), live: open(l)}
 	if t.rec.dot || t.live.dot {
-		if dc.clients == nil {
-			dc.clientMaps++
-			dc.clients = map[string]bool{}
-			for _, e := range dc.in.Earlier {
-				if _, ok := dc.clients[e.Mock]; !ok {
-					dc.clients[e.Mock] = e.incoming
-				}
-			}
-		}
-		t.client = dc.clients[p.mock]
+		t.client = dc.clientMap()[p.mock]
 	}
 	if dc.texts == nil {
 		dc.texts = map[int]*placeTexts{}
@@ -2776,26 +2785,34 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
 	var untold []evPlace
-	held := func(p evPlace) bool {
-		hr, _, _ := dc.holds(p, p.t.rec, r, c.rm, c.byText)
-		hl, _, _ := dc.holds(p, p.t.live, l, c.lm, c.byText)
-		return hr || hl
-	}
 	for i, q := range dc.ps.all() {
+		if overClients && dc.clientCase(q.mock) {
+			continue
+		}
 		// A moment a recording's request holds is what the application
 		// sent there: a send, placed by when it was sent and decided by the
 		// send rules (4, 5, 6), as an exchange's request leaf is, whenever
 		// (or if ever) it was answered. Its answer is what the recording gave
 		// the application, placed by when it was answered (halves).
-		ps := []evPlace{q}
-		if q.raw > 0 && held(q) {
-			req, ans := dc.halves(i, q)
-			ps = []evPlace{req, ans}
-		}
-		for _, p := range ps {
-			if overClients && dc.clientCase(p.mock) {
+		var ps []evPlace
+		if q.raw > 0 {
+			hr, _, okR := dc.holds(q, q.t.rec, r, c.rm, c.byText)
+			hl, _, okL := dc.holds(q, q.t.live, l, c.lm, c.byText)
+			if !okR || !okL {
+				return dc.refuse(path, at, n, r, l, RefusalUnread, "instant-unread", dc.unreadWhy(), nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
+			}
+			if !hr && !hl {
+				if q.fUnstated && q.side == Response && !q.given && q.state == stateBefore && inScope(q) && dc.inAView(q, c) {
+					untold = append(untold, q)
+				}
 				continue
 			}
+			req, ans := dc.halves(i, q)
+			ps = []evPlace{req, ans}
+		} else {
+			ps = []evPlace{q}
+		}
+		for _, p := range ps {
 			hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 			hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
 			if !okR || !okL {

@@ -645,6 +645,28 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 	return why
 }
 
+// echoMoments holds the prebuilt moment sets echoedElsewhereWith queries,
+// reused across all drifted instants of a decider.
+type echoMoments struct {
+	held, recorded *heldMoments
+	late           heldMoments
+}
+
+func (dc *DriftCache) buildEchoMoments(at time.Time, served []Earlier, raw []Raw, op *offsetPlaces) *echoMoments {
+	held, recorded := dc.bothMoments(at, served, raw)
+	em := &echoMoments{held: held, recorded: recorded}
+	for _, g := range op.answers {
+		em.held.addMoment(g.m)
+		if !g.at.After(at) {
+			em.recorded.addMoment(g.m)
+		}
+		if !g.at.Before(at) {
+			em.late.addMoment(g.m)
+		}
+	}
+	return em
+}
+
 // echoedElsewhereAt is echoedElsewhere, and fine: an instant the echo read
 // names a moment of one of the pairs it took for a copy (echoMatch) apart
 // from the other run's at a cut finer than a millisecond, by any rule
@@ -658,19 +680,13 @@ func (dc *DriftCache) echoedElsewhereAt(pairs []driftedInstant, at time.Time, se
 	if len(op.answers) == 0 {
 		return "", false
 	}
-	held, recorded := dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)
-	var late heldMoments
-	for _, g := range op.answers {
-		held.addMoment(g.m)
-		if !g.at.After(at) {
-			recorded.addMoment(g.m)
-		}
-		if !g.at.Before(at) {
-			late.addMoment(g.m)
-		}
-	}
+	return dc.echoedElsewhereWith(pairs, at, served, raw, op, dc.buildEchoMoments(at, served, raw, op))
+}
+
+func (dc *DriftCache) echoedElsewhereWith(pairs []driftedInstant, at time.Time, served []Earlier, raw []Raw, op *offsetPlaces, em *echoMoments) (why string, fine bool) {
+	held, recorded := em.held, em.recorded
 	echoed := echoedPairs(pairs, held, recorded)
-	echoed = append(echoed, lateEchoes(pairs, echoed, &late)...)
+	echoed = append(echoed, lateEchoes(pairs, echoed, &em.late)...)
 	if len(echoed) == 0 {
 		return "", false
 	}

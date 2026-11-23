@@ -708,10 +708,7 @@ func orderUnknown(in Input, ps *wordPlaces, cand map[string]bool) (marked bool) 
 	if why == "" {
 		return false
 	}
-	for i, m := range ps.base.mocks() {
-		if !cand[m] {
-			continue
-		}
+	for i := range ps.base.indicesOf(cand) {
 		if p := ps.at(i); p.state == stateBefore {
 			p.state, p.why, p.check = stateUnknown, why, "order-unknown"
 			marked = true
@@ -1336,7 +1333,16 @@ func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock strin
 	if len(op.answers) == 0 {
 		return "", false, false
 	}
-	why, fine := dc.dr.echoedElsewhereAt(pair, dc.in.At, served, dc.in.Raw, func() *offsetPlaces { return op })
+	slot := 0
+	if len(served) < len(dc.in.Earlier) {
+		slot = 1
+	}
+	em := dc.echoState[slot]
+	if em == nil {
+		em = dc.dr.buildEchoMoments(dc.in.At, served, dc.in.Raw, op)
+		dc.echoState[slot] = em
+	}
+	why, fine := dc.dr.echoedElsewhereWith(pair, dc.in.At, served, dc.in.Raw, op, em)
 	if why == "" {
 		return "", false, false
 	}

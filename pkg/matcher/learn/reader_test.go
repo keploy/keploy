@@ -430,13 +430,18 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 		t.Errorf("a recording past the budget answered without reading it again (%d loads, want more than %d): something keeps its text", got, loads)
 	}
 	// Past the budget each question reads the recording once: its text and
-	// its fields from one read, its instants and their declared forms from
-	// one read. A word the set's filter of the recording's words rules out
-	// (setFilter) reads it not at all.
+	// its fields from one read, its spans from one read. A word the set's
+	// filter of the recording's words rules out (setFilter), and a moment
+	// answered by the set's kept moment index (setMoments), read it not at
+	// all.
 	last := places[n-1]
 	loads = dc.Loads()
 	if held, read := last.holdsWord("zzz"); held || !read || dc.Loads() != loads {
 		t.Errorf("a word the recording's filter rules out, past the budget: held %v, read %v, %d loads; want not held, read, none", held, read, dc.Loads()-loads)
+	}
+	loads = dc.Loads()
+	if _, _, read := last.holdsMoment(moment{}); !read || dc.Loads() != loads {
+		t.Errorf("an instant answered by setMoments, past the per-call budget: read %v, %d loads; want read, none", read, dc.Loads()-loads)
 	}
 	for _, q := range []struct {
 		name string
@@ -445,7 +450,6 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 		{"a word its filter may hold", func() { last.holdsWord("w") }},
 		{"a base64 run", func() { last.holdsToken(tokenB64, "QUJDREVGR0g") }},
 		{"a word's fields", func() { last.fieldsWith(id(n - 1)) }},
-		{"an instant", func() { last.holdsMoment(moment{}) }},
 		{"its instants", func() { last.spansOf() }},
 	} {
 		loads = dc.Loads()
