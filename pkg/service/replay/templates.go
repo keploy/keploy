@@ -319,12 +319,12 @@ func (r *Replayer) refuseUntiedArrayUses(testSetID string, check *templates.Chec
 			byName[tc.Name] = tc
 		}
 	}
-	global := r.httpNoiseConfig(testSetID)
 	for _, p := range check.Places {
 		tc := byName[p.TestCase]
 		if tc == nil || p.Placeholder.Capture || p.Stream || !inArray(p.Path) {
 			continue
 		}
+		global := r.httpNoiseConfig(testSetID, tc)
 		untied := "nothing ties it to its element: any element holding " + p.Placeholder.Key + "'s value would satisfy it, whatever the element's other fields say"
 		literal := "write " + p.Placeholder.Key + "'s recorded value in place of the placeholder (as the test case was recorded)"
 		var why string
@@ -420,14 +420,13 @@ func (r *Replayer) warnNoiseOverVariables(testSetID string, places []templates.P
 			byName[tc.Name] = tc
 		}
 	}
-	global := r.httpNoiseConfig(testSetID)
 	warned := map[string]bool{}
 	for _, p := range places {
 		tc := byName[p.TestCase]
 		if tc == nil || len(refused[p.TestCase]) > 0 {
 			continue
 		}
-		entry := r.noiseCovering(p, tc, global)
+		entry := r.noiseCovering(p, tc, r.httpNoiseConfig(testSetID, tc))
 		if entry == "" || warned[p.TestCase+"\x00"+p.Where+"\x00"+entry] {
 			continue
 		}
@@ -464,6 +463,9 @@ func (r *Replayer) noiseCovering(p templates.Place, tc *models.TestCase, global 
 			return "header (globalNoise)"
 		}
 		if k := bestKey(p.Header, global["header"]); k != "" {
+			if name, ok := strings.CutPrefix(k, matcherUtils.ExactKeyPrefix); ok {
+				return "header." + name + " (globalNoise.endpoints)"
+			}
 			return "header." + k + " (globalNoise)"
 		}
 		if !r.config.Test.DisableAutoHeaderNoise && models.IsVolatileResponseHeader(p.Header) {
@@ -539,7 +541,7 @@ func bestKey(header string, noise map[string][]string) string {
 	}
 	best := ""
 	for k := range noise {
-		if strings.Contains(strings.ToLower(header), strings.ToLower(k)) && (len(k) > len(best) || (len(k) == len(best) && k < best)) {
+		if matcherUtils.HeaderKeyCovers(header, k) && (len(k) > len(best) || (len(k) == len(best) && k < best)) {
 			best = k
 		}
 	}

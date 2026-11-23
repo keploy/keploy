@@ -146,6 +146,12 @@ func (ni noiseIndex) entryWholeFields(keyLower string, idKeys bool) (noiseEntry,
 			}
 			path = collapsed
 		}
+		if e.exact {
+			if exactCovers(path, e.keyLower) {
+				return e, true
+			}
+			continue
+		}
 		if namesWholeFields(path, e.keyLower) {
 			return e, true
 		}

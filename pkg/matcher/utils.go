@@ -153,6 +153,7 @@ type noiseEntry struct {
 	// held with its id keys collapsed and is matched against the traversal
 	// key's collapsed form (noise_idkey.go).
 	idKeys bool
+	exact  bool
 }
 type noiseIndex struct {
 	entries []noiseEntry
@@ -167,12 +168,19 @@ func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 	}
 	out := noiseIndex{entries: make([]noiseEntry, 0, len(mp))}
 	for k, arr := range mp {
-		keyLower, idKeys := NoiseEntryKey(k)
+		name, exact := exactPath(k)
+		if !exact {
+			name = k
+		} else if name == "" {
+			continue
+		}
+		keyLower, idKeys := NoiseEntryKey(name)
 		out.entries = append(out.entries, noiseEntry{
 			keyLower: keyLower,
 			key:      k,
 			regexps:  compilePatterns(arr, logger),
 			idKeys:   idKeys,
+			exact:    exact,
 		})
 		out.idKeys = out.idKeys || idKeys
 	}
@@ -244,6 +252,12 @@ func (ni noiseIndex) lookup(keyLower string, idKeys bool) (regs []*regexp.Regexp
 				continue
 			}
 			key = collapsed
+		}
+		if e.exact {
+			if exactCovers(key, e.keyLower) {
+				return e.regexps, true, e.typeStrict
+			}
+			continue
 		}
 		if e.typeStrict && provenswitch.On() {
 			// Under the proven switch a learned entry names exactly the field
@@ -2370,7 +2384,7 @@ func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
 	// precedence buildNoiseIndex uses.
 	best, found := "", false
 	for key := range mp {
-		if !strings.Contains(sLower, strings.ToLower(key)) {
+		if !headerKeyCovers(sLower, key) {
 			continue
 		}
 		if !found || len(key) > len(best) || (len(key) == len(best) && key < best) {

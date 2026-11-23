@@ -714,8 +714,16 @@ type Report struct {
 }
 
 type Globalnoise struct {
-	Global   GlobalNoise  `json:"global" yaml:"global" mapstructure:"global"`
-	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
+	Global    GlobalNoise     `json:"global" yaml:"global" mapstructure:"global"`
+	Testsets  TestsetNoise    `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
+	Endpoints []EndpointNoise `json:"endpoints,omitempty" yaml:"endpoints,omitempty" mapstructure:"endpoints"`
+}
+
+type EndpointNoise struct {
+	Method string `json:"method,omitempty" yaml:"method,omitempty" mapstructure:"method"`
+	Path   string `json:"path" yaml:"path" mapstructure:"path"`
+	Body   Noise  `json:"body,omitempty" yaml:"body,omitempty" mapstructure:"body"`
+	Header Noise  `json:"header,omitempty" yaml:"header,omitempty" mapstructure:"header"`
 }
 
 type ReplaceWith struct {
