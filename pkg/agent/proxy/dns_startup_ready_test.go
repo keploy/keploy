@@ -193,6 +193,79 @@ func TestATCPDNSServerThatCannotServeFailsTheDNSServersStart(t *testing.T) {
 	}
 }
 
+// opaqueListener and opaquePacketConn wrap a real socket without forwarding
+// syscall.Conn so preBoundReady cannot inspect the underlying OS handle.
+type opaqueListener struct{ inner net.Listener }
+
+func (l opaqueListener) Accept() (net.Conn, error) { return l.inner.Accept() }
+func (l opaqueListener) Close() error              { return l.inner.Close() }
+func (l opaqueListener) Addr() net.Addr            { return l.inner.Addr() }
+
+type opaquePacketConn struct{ inner net.PacketConn }
+
+func (c opaquePacketConn) ReadFrom(p []byte) (int, net.Addr, error) { return c.inner.ReadFrom(p) }
+func (c opaquePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	return c.inner.WriteTo(p, addr)
+}
+func (c opaquePacketConn) Close() error                       { return c.inner.Close() }
+func (c opaquePacketConn) LocalAddr() net.Addr                { return c.inner.LocalAddr() }
+func (c opaquePacketConn) SetDeadline(t time.Time) error      { return c.inner.SetDeadline(t) }
+func (c opaquePacketConn) SetReadDeadline(t time.Time) error  { return c.inner.SetReadDeadline(t) }
+func (c opaquePacketConn) SetWriteDeadline(t time.Time) error { return c.inner.SetWriteDeadline(t) }
+
+// A pre-bound socket that does not expose its OS handle (does not implement
+// syscall.Conn) fails closed instead of silently bypassing preBoundReady:
+// serve refuses to start, settles as not serving with an explicit error, and
+// closes the socket.
+func TestADNSServerWithAnUnverifiableSocketFailsClosed(t *testing.T) {
+	for _, network := range []string{"tcp", "udp"} {
+		t.Run(network, func(t *testing.T) {
+			core, logs := observer.New(zap.InfoLevel)
+			s := (&Proxy{logger: zap.New(core)}).newDNSServer(network)
+			var closed func() bool
+			if network == "tcp" {
+				ln, err := plaintcp.Listen(context.Background(), "tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ln.Close() })
+				s.srv.Listener = opaqueListener{inner: ln}
+				closed = func() bool { return errors.Is(ln.(*net.TCPListener).SetDeadline(time.Now()), net.ErrClosed) }
+			} else {
+				pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = pc.Close() })
+				s.srv.PacketConn = opaquePacketConn{inner: pc}
+				closed = func() bool { return errors.Is(pc.SetReadDeadline(time.Now()), net.ErrClosed) }
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- s.serve() }()
+			<-s.settled
+			if s.serving {
+				_ = s.stop()
+				<-done
+				t.Fatal("server with unverifiable socket started serving instead of failing closed")
+			}
+			err := <-done
+			if err == nil || !strings.Contains(err.Error(), "cannot verify the DNS socket is serving") {
+				t.Fatalf("serve returned %v; want error containing %q", err, "cannot verify the DNS socket is serving")
+			}
+			if s.err == nil {
+				t.Fatalf("settled with nil error; want unverifiable-socket error")
+			}
+			if !closed() {
+				t.Fatal("serve failed closed on unverifiable socket but left the underlying socket open")
+			}
+			if errs := logs.FilterLevelExact(zap.ErrorLevel).All(); len(errs) != 1 {
+				t.Fatalf("serve logged %d ERRORs; want 1: %v", len(errs), errs)
+			}
+		})
+	}
+}
+
 // A serve call that returns without serving lets go of the socket it was
 // handed: nothing else would, and the port would be held for the life of the
 // process. miekg/dns refuses to start a server twice, so a server that serves

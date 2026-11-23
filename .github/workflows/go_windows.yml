@@ -136,7 +136,7 @@ jobs:
       # ActivateAndServe. Running these rows here keeps that contract covered on
       # Windows alongside Linux.
       - name: Test the proxy's DNS server startup readiness (amd64)
-        run: go test -count=1 -run "^(TestStartedDNSServersServeOnTheirBoundPort|TestTheTCPDNSServerListensPlainTCP|TestADNSServerThatCannotServeSettlesWithItsError|TestADNSServerThatCannotServeFailsTheDNSServersStart|TestATCPDNSServerThatCannotServeFailsTheDNSServersStart|TestADNSServerThatReturnsWithoutServingLetsItsSocketGo|TestADNSServerCancelledBeforeItServesIsStoppedOnceItServes)$" ./pkg/agent/proxy/
+        run: go test -count=1 -run "^(TestStartedDNSServersServeOnTheirBoundPort|TestTheTCPDNSServerListensPlainTCP|TestADNSServerThatCannotServeSettlesWithItsError|TestADNSServerThatCannotServeFailsTheDNSServersStart|TestATCPDNSServerThatCannotServeFailsTheDNSServersStart|TestADNSServerWithAnUnverifiableSocketFailsClosed|TestADNSServerThatReturnsWithoutServingLetsItsSocketGo|TestADNSServerCancelledBeforeItServesIsStoppedOnceItServes)$" ./pkg/agent/proxy/
         shell: cmd
 
       # The look at a socket's TCP state (util.PeerGone, util.AwaitPeerReset:
