@@ -42,7 +42,7 @@ func (a *AgentClient) pushRealDeps(ctx context.Context, req0 models.RealDepsReq)
 	if err != nil {
 		return fmt.Errorf("failed to marshal mock.real: %w", err)
 	}
-	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/real", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	req, err := newAgentRequest(ctx, http.MethodPost, fmt.Sprintf("%s/real", a.conf.AgentURI()), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func (a *AgentClient) pushRealDeps(ctx context.Context, req0 models.RealDepsReq)
 // takes the capture_incomplete evidence charged to no test. It has no deadline:
 // the agent's answer, or the connection's close, ends it.
 func (a *AgentClient) RealRun(ctx context.Context) (models.RealRun, error) {
-	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/real/run", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/real/run", a.conf.AgentURI()), nil)
 	if err != nil {
 		return models.RealRun{}, err
 	}
@@ -99,7 +99,7 @@ func (a *AgentClient) RealRun(ctx context.Context) (models.RealRun, error) {
 // it. It has no deadline: the agent's answer, or the connection's close,
 // ends it.
 func (a *AgentClient) RealTest(ctx context.Context) (models.RealTest, error) {
-	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/real/test", a.conf.Agent.AgentURI), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/real/test", a.conf.AgentURI()), nil)
 	if err != nil {
 		return models.RealTest{}, err
 	}

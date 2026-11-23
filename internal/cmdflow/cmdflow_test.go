@@ -47,7 +47,7 @@ var keploy = Rules{
 		"pkg/platform/http.runFlagsOf#3":             "the --add-host entries a docker command names",
 		"utils.ContainerNameFromDockerRun":           "the container a docker command names (--name)",
 		"utils.NewAppCommand":                        "an AppCommand prints its program and how many words follow it",
-		"pkg/client/app.findComposeFile":             "the compose files a compose command names (-f)",
+		"pkg/platform/docker.FindComposeFiles":       "the compose files a compose command names (-f, --file, COMPOSE_FILE, or default files)",
 		"pkg/client/app.composeProjectFlag":          "the project compose's own options name (-p, before its subcommand)",
 		"pkg/client/app.composeProjectEnvAssignment": "the project a compose command names (COMPOSE_PROJECT_NAME=)",
 		"pkg/client/app.composeUpSemantics":          "the services a compose command names (--exit-code-from)",

@@ -19,6 +19,20 @@ func WithOutputTee(tee func() io.Writer) ExecOption {
 	return func(o *execOptions) { o.outputTee = tee }
 }
 
+// WithOutputAlso has the child's output, as WithOutputTee has it, written to
+// w as well, beside the tee an earlier option set: a `docker compose up` keeps
+// what it said last, for the refusal of a port it could not publish.
+func WithOutputAlso(w io.Writer) ExecOption {
+	return func(o *execOptions) {
+		prev := o.outputTee
+		if prev == nil {
+			o.outputTee = func() io.Writer { return w }
+			return
+		}
+		o.outputTee = func() io.Writer { return io.MultiWriter(prev(), w) }
+	}
+}
+
 func execOptionsOf(opts []ExecOption) execOptions {
 	var o execOptions
 	for _, opt := range opts {

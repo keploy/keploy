@@ -1,14 +1,19 @@
 package app
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // SetupCompose can only splice `-f <generated>.yaml` into a command that is a
@@ -254,4 +259,123 @@ func TestComposeCommandRewriteFindsTheUpSubcommand(t *testing.T) {
 	if _, ok := composeUpOffset(`bash -c "docker compose up"`, false); ok {
 		t.Error("a wrapper's quoted script has no `up` of the command's own")
 	}
+}
+
+// TestSetupComposeWrapperDoesNotLeakComposeFileEnvAcrossTestSets pins the
+// per-test-set replay flow (runner.go:376) for wrapper commands such as
+// `make up`. SetupCompose must hand COMPOSE_FILE only to the wrapper child's
+// environment (withAgentToken -> ExecuteCommand extraEnv) and NEVER mutate
+// keploy's own process environment via os.Setenv: otherwise the next test set's
+// FindComposeFiles reads keploy's own generated docker-compose-tmp.yaml (which
+// already defines keploy-agent), drops user overrides / original COMPOSE_FILE
+// published ports from composeExcludedPorts, and fails in
+// AddKeployAgentToCompose.
+func TestSetupComposeWrapperDoesNotLeakComposeFileEnvAcrossTestSets(t *testing.T) {
+	dc, err := docker.New(zap.NewNop(), &config.Config{})
+	if err != nil {
+		t.Fatalf("docker.New: %v", err)
+	}
+
+	const baseYAML = "services:\n  app:\n    image: alpine:3.21\n    container_name: app\n    ports:\n      - \"61560:8080\"\n"
+	const overrideYAML = "services:\n  sidecar:\n    image: alpine:3.21\n    ports:\n      - \"61561:9000\"\n"
+	const customYAML = "services:\n  app:\n    image: alpine:3.21\n    container_name: app\n    ports:\n      - \"61562:8080\"\n"
+
+	t.Run("default compose + override across two test sets", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(baseYAML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "docker-compose.override.yml"), []byte(overrideYAML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		opts1 := models.SetupOptions{CommandType: string(utils.DockerCompose), Container: "app", AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791}
+		a1 := NewApp(zap.NewNop(), "make up", dc, opts1)
+		if err := a1.SetupCompose(context.Background(), nil); err != nil {
+			t.Fatalf("test set 1 SetupCompose: %v", err)
+		}
+
+		// Test set 2 SetupCompose in the same process must succeed (fails in
+		// AddKeployAgentToCompose if COMPOSE_FILE leaked docker-compose-tmp.yaml).
+		opts2 := models.SetupOptions{CommandType: string(utils.DockerCompose), Container: "app", AgentPort: 16792, ProxyPort: 16790, DnsPort: 16791}
+		a2 := NewApp(zap.NewNop(), "make up", dc, opts2)
+		if err := a2.SetupCompose(context.Background(), nil); err != nil {
+			t.Fatalf("test set 2 SetupCompose failed: %v", err)
+		}
+
+		// keploy's own process env must remain untouched.
+		if got := os.Getenv("COMPOSE_FILE"); got != "" {
+			t.Fatalf("SetupCompose leaked COMPOSE_FILE=%q into keploy's own process env", got)
+		}
+
+		// The wrapper child's env carries COMPOSE_FILE pointing at the generated file.
+		wantGenerated, err := filepath.Abs("docker-compose-tmp.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		setEffectiveUID(t, 1000)
+		_, env1 := a1.withAgentToken(a1.cmd.WholeUnredacted())
+		if !slices.Contains(env1, "COMPOSE_FILE="+wantGenerated) {
+			t.Fatalf("wrapper runEnv = %v, want COMPOSE_FILE=%s", env1, wantGenerated)
+		}
+		gotSudoCmd, envSudo := a1.withAgentToken("sudo make up")
+		if wantSudo := "sudo --preserve-env=" + token.Env + ",COMPOSE_FILE make up"; gotSudoCmd != wantSudo {
+			t.Fatalf("sudo wrapper cmd = %q, want %q", gotSudoCmd, wantSudo)
+		}
+		if !slices.Contains(envSudo, "COMPOSE_FILE="+wantGenerated) {
+			t.Fatalf("sudo wrapper runEnv = %v, want COMPOSE_FILE=%s", envSudo, wantGenerated)
+		}
+
+		// Next test set's FindComposeFiles and port exclusion still see the user's
+		// original base + override files, not docker-compose-tmp.yaml.
+		gotPaths := docker.FindComposeFiles("make up")
+		if wantPaths := []string{"docker-compose.yml", "docker-compose.override.yml"}; !slices.Equal(gotPaths, wantPaths) {
+			t.Fatalf("test set 2 FindComposeFiles = %v, want %v", gotPaths, wantPaths)
+		}
+		gotPorts := docker.ComposePublishedHostPortsFromFiles(zap.NewNop(), gotPaths)
+		if !slices.Contains(gotPorts, 61560) || !slices.Contains(gotPorts, 61561) {
+			t.Fatalf("test set 2 excluded ports = %v, want 61560 and 61561", gotPorts)
+		}
+	})
+
+	t.Run("user COMPOSE_FILE preserved across two test sets", func(t *testing.T) {
+		dir := t.TempDir()
+		customPath := filepath.Join(dir, "custom-compose.yml")
+		if err := os.WriteFile(customPath, []byte(customYAML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", customPath)
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		opts1 := models.SetupOptions{CommandType: string(utils.DockerCompose), Container: "app", AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791}
+		a1 := NewApp(zap.NewNop(), "make up", dc, opts1)
+		if err := a1.SetupCompose(context.Background(), nil); err != nil {
+			t.Fatalf("test set 1 SetupCompose: %v", err)
+		}
+
+		// Test set 2 SetupCompose in the same process must still read customPath.
+		opts2 := models.SetupOptions{CommandType: string(utils.DockerCompose), Container: "app", AgentPort: 16792, ProxyPort: 16790, DnsPort: 16791}
+		a2 := NewApp(zap.NewNop(), "make up", dc, opts2)
+		if err := a2.SetupCompose(context.Background(), nil); err != nil {
+			t.Fatalf("test set 2 SetupCompose failed: %v", err)
+		}
+		if got := os.Getenv("COMPOSE_FILE"); got != customPath {
+			t.Fatalf("keploy process COMPOSE_FILE = %q, want preserved user value %q", got, customPath)
+		}
+		wantGenerated, err := filepath.Abs("docker-compose-tmp.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, env1 := a1.withAgentToken(a1.cmd.WholeUnredacted())
+		if !slices.Contains(env1, "COMPOSE_FILE="+wantGenerated) {
+			t.Fatalf("wrapper runEnv = %v, want COMPOSE_FILE=%s", env1, wantGenerated)
+		}
+		if gotPaths := docker.FindComposeFiles("make up"); !slices.Equal(gotPaths, []string{customPath}) {
+			t.Fatalf("test set 2 FindComposeFiles = %v, want [%s]", gotPaths, customPath)
+		}
+	})
 }
