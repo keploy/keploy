@@ -290,9 +290,7 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		}
 		s.Fixed["body"] = "form"
 		for k, vs := range form {
-			vs = append([]string(nil), vs...)
-			sort.Strings(vs)
-			add("body."+k, strings.Join(vs, ", "), strings.ContainsAny(k, ".[]"))
+			add("body."+k, formValue(vs), strings.ContainsAny(k, ".[]"))
 		}
 	case p.mediaType == "multipart/form-data":
 		if !multipartLeaves(p, s.Leaves, s.Fixed) {
@@ -420,6 +418,15 @@ func unwrittenWhy(m *models.Mock) string {
 	return "the call's parser cannot write an answer from " + m.Name + "'s recorded answer for this request"
 }
 
+// formValue is a form key's values as the learn step reads them, one leaf:
+// sorted, then joined by ", ", so that a repeated key's values in any order
+// are one value. A key of one value is that value.
+func formValue(vs []string) string {
+	vs = append([]string(nil), vs...)
+	sort.Strings(vs)
+	return strings.Join(vs, ", ")
+}
+
 // multipartLeaves reads a multipart/form-data body by its own boundary: each
 // field part is a leaf (body.<name>), each file part a fixed part (its file
 // name and bytes), so a boundary minted per request is no difference. It
@@ -510,6 +517,27 @@ func boundTimesOf(learned []learn.Learned, sources func(mock string) []models.De
 		learned[i] = learn.BoundTimeLearned(l, declared, w, timeForm)
 	}
 	return learned
+}
+
+// claimTimesOf is learned, the drifted leaves of a call, with each JWT at a
+// header or a body field whose claims that changed are all times learned as
+// those times, each checked by its form alone at its claim
+// (learn.ClaimTimesLearned: under the time default where timeForm is set,
+// in w, the call's window); a replay checks the rest of the token as
+// recorded (strictKnown.claimsHeld). Every other leaf as it is.
+func claimTimesOf(learned []learn.Learned, w *learn.Window, timeForm bool) []learn.Learned {
+	if !timeForm {
+		return learned
+	}
+	out := make([]learn.Learned, 0, len(learned))
+	for _, l := range learned {
+		if claims, ok := learn.ClaimTimesLearned(l, w, timeForm); ok {
+			out = append(out, claims...)
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 // knownAsRecorded is known without the noise learned onto m: the recording
@@ -1932,7 +1960,8 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				learned[i] = learn.OffsetReadUnder(l, timeForm)
 			}
 			learned = declaredClocksOf(learned, n.sources, m, w, timeForm, tracker.DriftsOf(ctx), answer)
-			return boundTimesOf(learned, n.sources, m, w, timeForm), answered, earlier, ""
+			learned = boundTimesOf(learned, n.sources, m, w, timeForm)
+			return claimTimesOf(learned, w, timeForm), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
