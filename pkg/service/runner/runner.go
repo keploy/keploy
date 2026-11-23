@@ -353,7 +353,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	}()
 
 	if r.config != nil {
-		if err := r.instrumentation.Setup(gCtx, r.config.Command, models.SetupOptions{
+		setupOpts := models.SetupOptions{
 			Container:   r.config.ContainerName,
 			CommandType: r.config.CommandType,
 			DockerDelay: r.config.BuildDelay,
@@ -367,6 +367,13 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			AllowEgress:       r.config.Test.AllowEgress,
 
 			DisableHandshakeHold: r.config.Record.DisableHandshakeHold,
+		}
+		logger := r.logger
+		if logger == nil {
+			logger = zap.NewNop()
+		}
+		if err := keployPkg.RetryAgentSetup(gCtx, logger, func(c context.Context, _ int) error {
+			return r.instrumentation.Setup(c, r.config.Command, setupOpts)
 		}); err != nil {
 			return nil, fmt.Errorf("setup failed: %w", err)
 		}

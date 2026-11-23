@@ -230,6 +230,12 @@ func makeRawInputOnly(fd int) (*term.State, error) {
 // StartCommandWithPTY starts a command with a PTY for interactive input (e.g., sudo password).
 // Returns a PTYHandle that must be used to wait for the command and clean up resources.
 func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) {
+	return StartCommandWithPTYTee(cmd, logger, nil)
+}
+
+// StartCommandWithPTYTee is StartCommandWithPTY that also writes what the
+// command prints, as keploy's console gets it, to tee (nil: none).
+func StartCommandWithPTYTee(cmd *exec.Cmd, logger *zap.Logger, tee io.Writer) (*PTYHandle, error) {
 	// Start the command with a PTY
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -282,7 +288,7 @@ func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) 
 	// ChildConsole's is. It ends at EIO, once the command and all it left
 	// holding the terminal have closed it: Wait waits for that before it
 	// closes ptmx.
-	handle.output = keployutils.StartChildOutputCopy(os.Stdout, ptmx, false)
+	handle.output = keployutils.StartChildOutputCopy(keployutils.TeeWriter(os.Stdout, tee), ptmx, false)
 
 	// Copy stdin to PTY (for password input, etc.)
 	// NOTE: We do NOT add this to WaitGroup because io.Copy blocks on os.Stdin.Read()

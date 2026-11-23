@@ -148,6 +148,15 @@ jobs:
         run: go test -count=1 -run "^(TestPeerGone|TestPeerGoneByTheSocketsState|TestAwaitPeerReset|TestTCPStateOnWindows)$" ./pkg/agent/proxy/util/
         shell: cmd
 
+      # A taken port on Windows: the proxy's bind and the DNS servers' tell
+      # Winsock's WSAEADDRINUSE as a taken port (neterr.IsAddrInUse), and a
+      # port the proxy may not move off fails the start as one to start again
+      # on new ports (utils.ErrPortTaken). Only these rows of
+      # ./pkg/agent/proxy/ run here (see the package's line above).
+      - name: Test the proxy's taken port on Windows (amd64)
+        run: go test -count=1 -run "^(TestATakenPortThatMayNotMoveFailsAsOneToStartAgain|TestTheDNSServersBindIsAStageOfTheAgentsStart)$" ./pkg/agent/proxy/
+        shell: cmd
+
       # The Windows stop of a native app (utils.interruptProcessTree): one that
       # had to force-kill the app says so, so a test set's end it cut is not
       # judged (P101-b-o). It takes ~30 s, most of it the stop's own 10 s
@@ -156,8 +165,15 @@ jobs:
       # which must answer the directory a Windows run is in. Only these tests
       # of ./utils/ run here: the package as a whole has not been shown to
       # pass on Windows.
-      - name: Test the Windows stop and working directory (amd64)
-        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled|TestGetLastDirectory" ./utils/
+      - name: Test the Windows stop, working directory, and child console pipe (amd64)
+        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled|TestGetLastDirectory|TestChildConsoleWindowsDrainsWithoutWaitingForAGrandchildHoldingThePipe|TestChildConsoleWindowsPipeHasOwnerOnlyDACLAndReadAttributes" ./utils/
+        shell: cmd
+
+      # The agent's start on Windows, which has no PTY: what the command
+      # prints reaches the tee the CLI reads a failed start's reason from, and
+      # with no tee the command prints to keploy's own console.
+      - name: Test the agent command's output on Windows (amd64)
+        run: go test -count=1 -run "TestAWindowsCommandsOutputReachesItsTee" ./pkg/platform/http/utils/
         shell: cmd
 
       # The run's log on Windows: a full log is sealed with the read-only
