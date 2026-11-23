@@ -206,12 +206,18 @@ type MockManager struct {
 	// learnedElsewhere.
 	elsewhereCounts                 map[elsewhereOp]map[string]int
 	elsewhereCounted, elsewhereSaid int
-	// servedCount counts, per mock name, every time the mock answered a
-	// request this session, reset with consumedPersistent, and on its own as
-	// the set's start is served again (RearmAppStart). A mock that may
-	// answer more than once keeps its first-use timestamp and its usage in
-	// consumedPersistent, so only a count tells that it answered again.
+	// servedCount counts, per mock name, every call the mock is credited with
+	// this session (ServedCounts), reset with consumedPersistent by a reset of
+	// the replay session, and on its own as the set's start is served again
+	// (RearmAppStart). A mock that may answer more than once keeps its
+	// first-use timestamp and its usage in consumedPersistent, so only a count
+	// tells that it answered again.
 	servedCount map[string]uint64
+	// setServed is servedCount for the per-test mocks of the test set being
+	// replayed, as the set's ownership summary says it (sayOwnership, which
+	// empties it); a set boundary and a re-arm of the set's start
+	// (RearmAppStart) empty it too.
+	setServed map[string]uint64
 	// takenThisSession names each mock a take settled holding the round
 	// lock answered this session (takeLocked: one of a view's own consumed,
 	// a staged recording spent), less a pool view's ahead answer voided
@@ -679,6 +685,21 @@ type MockManager struct {
 	// hitIndexBuilt, when set, runs between building a new hit index and
 	// swapping it in. Tests only: it lets one land a seed in that gap.
 	hitIndexBuilt func()
+
+	// reclaim tracks unconsumed equivalent alternatives recorded inside active
+	// overlapping windows so a later overlapping window can reclaim a consumed
+	// mock by consuming a still-unconsumed alternative instead (WindowReclaim).
+	reclaim windowReclaimState
+	// edgeStaged names the mocks the last staging took by the edge rule
+	// (recordConsume marks a consume of one MockState.EdgeOwned); ownership
+	// counts what the window ownership rules did in the set being replayed,
+	// said at its end (logSetOwnership).
+	edgeStaged atomic.Pointer[map[string]struct{}]
+	ownership  ownershipTally
+	// consumeRecorded, a test's hook, runs after each section of the drain's
+	// lock that recorded consumes (recordConsumes) is left: where a drain
+	// can come between two. Nil outside tests.
+	consumeRecorded func()
 }
 
 // defaultConnectionIdleRetention is the baseline for how long a
@@ -860,6 +881,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.spentMu.Lock()
 	m.spent = nil
 	m.spentMu.Unlock()
+	m.clearWindowReclaim()
 	m.connMu.Lock()
 	m.connectionTrees = make(map[string]*TreeDb)
 	m.connectionLastTs = make(map[string]time.Time)
@@ -1335,6 +1357,37 @@ func (m *MockManager) RecordedWindowIndex(t time.Time) (index int, known bool) {
 	return s.CurrentIndex(t), true
 }
 
+// OwnerTestWindow returns the recorded test window that owns t
+// (models.WindowSchedule.OwnerOf with models.MockWindowEdgeSkew), whether t
+// lies inside that window, and whether an owner exists
+// (integrations.WindowOwnership).
+func (m *MockManager) OwnerTestWindow(t time.Time) (owner models.TestWindow, inside, owned bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 || t.IsZero() {
+		return models.TestWindow{}, false, false
+	}
+	idx, in, ok := s.OwnerOf(t, models.MockWindowEdgeSkew)
+	if !ok {
+		return models.TestWindow{}, false, false
+	}
+	return s.Window(idx), in, true
+}
+
+// OwnerTestWindowSpan returns the smallest recorded test window containing the
+// interval [start, end] (models.WindowSchedule.OwnerOfSpan;
+// integrations.WindowOwnership).
+func (m *MockManager) OwnerTestWindowSpan(start, end time.Time) (owner models.TestWindow, owned bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 || start.IsZero() {
+		return models.TestWindow{}, false
+	}
+	idx, ok := s.OwnerOfSpan(start, end)
+	if !ok {
+		return models.TestWindow{}, false
+	}
+	return s.Window(idx), true
+}
+
 // SameRecordedTestWindow reports whether a and b were recorded inside one
 // recorded test's window; known is false when the replay seeded none.
 func (m *MockManager) SameRecordedTestWindow(a, b time.Time) (same, known bool) {
@@ -1510,6 +1563,9 @@ func (m *MockManager) getFilteredMocksInWindowAt(v *exactView) ([]*models.Mock, 
 			out = append(out, mock)
 		case inFlightAtStart(mock, req, res, gapFrom, start, hasGap):
 			// In flight when the window's test began: its own.
+			out = append(out, mock)
+		case m.isEdgeOwnedByWindow(mock, start, end):
+			// Bounded edge skew outside every recorded window, nearest to this window.
 			out = append(out, mock)
 		default:
 			droppedOutOfWindow++
@@ -1941,6 +1997,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// snapshot too.
 		m.carry.reset()
 		m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
+		m.clearWindowReclaim()
 		// Staging is the set boundary as far as routing is concerned: this is
 		// where the previous set's window bits and startup-init cutoff go, so
 		// they are replaced in the same call that replaces the trees rather
@@ -2044,7 +2101,15 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// the session pool (KEPLOY_STRICT_MOCK_WINDOW=0: an unstated per-test mock
 	// out of the window), as the agent's window filter promotes it.
 	var sessionIn []*models.Mock
+	// edgeNames names the mocks this staging took by the edge rule: a consume
+	// of one of them is the open test's though its recorded window leaves it
+	// out (MockState.EdgeOwned). Replaced at every staging.
+	var edgeNames map[string]struct{}
+	// Under exact serving the test's mapping says which recordings it owns:
+	// the edge rule, a rule of recorded times, is off there.
+	edgeOn := m.exactView() == nil
 	if !isInitialStaging && !start.IsZero() && !end.IsZero() {
+		m.pruneWindowReclaim(start)
 		out := make([]*models.Mock, 0, len(filtered))
 		// Every mock is staged by the agent's one serve decision
 		// (pkg.StageInWindow, the window filter's own rule, which the
@@ -2073,13 +2138,22 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		//     ReceiveMessage, a BLPOP) the app keeps outstanding between
 		//     tests, whose answer the test waits for (models.InFlightEligible);
 		//   - a window-bound mock (a connection failure): its own window or
-		//     the startup band, nowhere else.
+		//     the startup band, nowhere else;
+		//   - after every other rule, a plain per-test timed mock placed just
+		//     outside every window, within models.MockWindowEdgeSkew of this
+		//     window's edge and nearer it than any other's (the edge rule,
+		//     models.WindowSchedule.EdgeOwner, through sw.Windows): its own.
+		//     Off under exact serving.
 		//
 		// A carry-over mock no rule serves here (loaded ahead of its window,
 		// or mapped to this test from a gap) is offered to the carry-over
 		// tier below, which serves it from its release window on
 		// (models.WindowSchedule.CarryOverReachable).
 		sw := pkg.ServeWindow{Start: start, End: end, FirstStart: firstStart, StrictPerCall: true, StrictWindow: true}
+		if edgeOn {
+			// The edge rule (pkg.StageInWindow's, as every site asks it).
+			sw.Windows = m.testWindows.Load()
+		}
 		if gapFrom, hasGap := m.testWindows.Load().GapBefore(start); hasGap {
 			sw.InFlightFrom = gapFrom
 		}
@@ -2087,10 +2161,22 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			if mock == nil {
 				continue
 			}
+			if m.isReclaimConsumed(mock.Name) {
+				continue
+			}
 			serve, answeredBeforeAsked := pkg.StageInWindow(m.logger, mock, sw)
 			switch {
 			case serve == pkg.ServedPerTest:
 				out = append(out, mock)
+				// Taken by the edge rule: a mock it gives this window lies
+				// outside every window, so no other rule served it here.
+				if edgeOn && m.isEdgeOwnedByWindow(mock, start, end) {
+					if edgeNames == nil {
+						edgeNames = make(map[string]struct{})
+					}
+					edgeNames[mock.Name] = struct{}{}
+					m.ownership.edgeStaged.Add(1)
+				}
 			case serve == pkg.ServedStartup:
 				startupInit = append(startupInit, mock)
 			case serve == pkg.ServedSession:
@@ -2101,10 +2187,14 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 				carryIn = append(carryIn, mock)
 			default:
 				droppedOutOfWindow++
+				if edgeOn && m.edgeLeftInFlight(mock, start, end) {
+					m.ownership.edgeLeftInFlight.Add(1)
+				}
 			}
 		}
 		filteredForTree = out
 	}
+	m.edgeStaged.Store(&edgeNames)
 
 	// Wave 2/3: rebuild the dedicated startup tree from the startupInit
 	// slice extracted above. The legacy GetSessionMocks shim will
@@ -2826,7 +2916,8 @@ func (m *MockManager) unkeep(name string, gen uint64) {
 // the per-test pool served for it: under exact serving, the test's mapping
 // (ServeExactTest); else the per-test tier, by the test's recorded window when
 // it has one, as GetPerTestMocksInWindow serves it: a call of the window, or
-// one in flight when the test began (inFlightAtStart). With no test open (the
+// one in flight when the test began (inFlightAtStart), or one the edge rule
+// gives the window. With no test open (the
 // staging before the first test, between tests, or a replay that opens none)
 // no mock is.
 func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
@@ -2865,8 +2956,9 @@ func (m *MockManager) ownedByOpenTest(mk *models.Mock, read func()) bool {
 	if start.IsZero() || end.IsZero() {
 		return true
 	}
-	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
-	return inRecordedWindow(mk, start, end, gapFrom, hasGap)
+	windows := m.testWindows.Load()
+	gapFrom, hasGap := windows.GapBefore(start)
+	return inRecordedWindow(mk, start, end, gapFrom, hasGap, windows)
 }
 
 // InFlightIntoOpenTest reports whether mk was in flight when the open test
@@ -2903,11 +2995,12 @@ func (m *MockManager) InFlightIntoOpenTest(mk *models.Mock) bool {
 // test's recorded window [start, end]: placed inside it (models.PlaceOf: its
 // request, or its answer for a mock placed at its answer), in flight when
 // the test began (inFlightAtStart, with gapFrom and hasGap the window's
-// models.WindowSchedule.GapBefore), or no recorded times. A mock whose
-// response is stamped before its request is in no window, as that read leaves
-// it out, but under the proven switch, where the read keeps it
-// (pkg.LeaveOutAnsweredBeforeAsked).
-func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap bool) bool {
+// models.WindowSchedule.GapBefore), given to it by the edge rule
+// (models.WindowSchedule.EdgeOwnedBy over windows, the recorded windows;
+// nil: none), or no recorded times. A mock whose response is stamped before
+// its request is in no window, as that read leaves it out, but under the
+// proven switch, where the read keeps it (pkg.LeaveOutAnsweredBeforeAsked).
+func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap bool, windows *models.WindowSchedule) bool {
 	req, res := mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock
 	if req.IsZero() || res.IsZero() {
 		return true
@@ -2918,7 +3011,7 @@ func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap boo
 	if place := models.PlaceOf(mk); !place.Before(start) && !place.After(end) {
 		return true
 	}
-	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap)
+	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap) || windows.EdgeOwnedBy(mk, start, end)
 }
 
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].
@@ -5009,8 +5102,12 @@ func (m *MockManager) WindowRewinds() (uint64, time.Time) {
 // inside the other.
 func (m *MockManager) SeedConsumedRewinds(n uint64) {
 	m.windowMu.Lock()
+	changed := n != m.consumedRewinds
 	m.consumedRewinds = n
 	m.windowMu.Unlock()
+	if changed {
+		m.clearWindowReclaim()
+	}
 	m.lockRound()
 	defer m.exact.round.mu.Unlock()
 	r := &m.exact.round
@@ -5712,16 +5809,75 @@ var errPreviousSet = errors.New("the mock was pooled for an earlier test set")
 // the record, as the fence moves the generation with its drop (zero: not
 // checked).
 func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error {
-	if mock.Name == "" {
-		return fmt.Errorf("mock is empty")
+	return m.recordConsume(mock, staged, true)
+}
+
+// recordConsume is flagMockAsUsed, which counts the consume as a serve of
+// mock (servedCount) when served is set. A window reclaim's re-credit
+// (CommitWindowReclaim) records a recording that served a call before under
+// another test, or one that takes over a call served before, and counts only
+// the latter: each call is one serve. A state credited to another test
+// (MockState.CreditTo) answered no call of the open test, so no window is
+// noted for it (noteAnsweredInLocked). A per-test mock the open window's
+// staging took by the edge rule (models.WindowSchedule.EdgeOwner) is said to
+// be (MockState.EdgeOwned), so the replay lists it under the open test.
+func (m *MockManager) recordConsume(mock models.MockState, staged uint64, served bool) error {
+	return m.recordConsumes([]consumeRecord{{state: mock, staged: staged, served: served}})
+}
+
+// consumeRecord is one state recordConsumes records: recordConsume's
+// arguments.
+type consumeRecord struct {
+	state  models.MockState
+	staged uint64
+	served bool
+}
+
+// recordConsumes is recordConsume for each of recs, in order, in one section
+// of the drain's lock (consumedMu), so a drain (GetConsumedMocks) takes all
+// of them or none: a window reclaim's states (CommitWindowReclaim) are one
+// move of credits, which a drain between two of them would split. It returns
+// the first error; a state that errs is not recorded, the others are.
+func (m *MockManager) recordConsumes(recs []consumeRecord) error {
+	var first error
+	keep := make([]consumeRecord, 0, len(recs))
+	inScope := make([]bool, 0, len(recs))
+	for _, r := range recs {
+		mock := r.state
+		if mock.Name == "" {
+			if first == nil {
+				first = fmt.Errorf("mock is empty")
+			}
+			continue
+		}
+		if mock.CreditTo == "" && !mock.EdgeOwned && m.edgeStagedNow(mock.Name) {
+			mock.EdgeOwned = true
+		}
+		if mock.Timestamp == 0 {
+			mock.Timestamp = time.Now().UnixNano() // when it was first served, so a client can tell which test used it
+		}
+		r.state = mock
+		keep = append(keep, r)
+		inScope = append(inScope, mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen())
 	}
-	if mock.Timestamp == 0 {
-		mock.Timestamp = time.Now().UnixNano() // when it was first served, so a client can tell which test used it
-	}
-	inScope := mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen()
 	m.consumedMu.Lock()
+	for i, r := range keep {
+		if err := m.recordConsumeLocked(r.state, r.staged, r.served, inScope[i]); err != nil && first == nil {
+			first = err
+		}
+	}
+	m.consumedMu.Unlock()
+	if hook := m.consumeRecorded; hook != nil {
+		hook()
+	}
+	return first
+}
+
+// recordConsumeLocked is recordConsume's record of mock, with consumedMu
+// held; inScope is whether it is a per-test mock consumed while a scope is
+// open (scopeIsOpen, read before the lock).
+func (m *MockManager) recordConsumeLocked(mock models.MockState, staged uint64, served, inScope bool) error {
 	if staged != 0 && staged != m.setGen.Load() {
-		m.consumedMu.Unlock()
 		return errPreviousSet
 	}
 	// What a reusable mock learns is cumulative across its states, because the
@@ -5755,6 +5911,21 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 	if inScope && m.scopeConsumed != nil {
 		m.scopeConsumed[mock.Name] = struct{}{}
 	}
+	// A credit off a recording this drain already credits to the same test
+	// (an earlier reclaim of the open test moved that test's call onto it,
+	// in place of the recording its entry lists): the drain keeps one state
+	// per name, so that credit is overwritten in this reclaim (the recording
+	// it moved off is the open test's or the next holder's now), and this
+	// credit takes the place of what that one replaced. A reclaim's states
+	// are recorded in one section of the drain's lock (recordConsumes), so no
+	// drain splits this credit from the state that overwrites that one.
+	if mock.CreditTo != "" && mock.CreditReplaces != "" {
+		if idx, exists := m.consumedIndex[mock.CreditReplaces]; exists {
+			if via := m.consumedList[idx]; via.CreditTo == mock.CreditTo && via.CreditReplaces != "" {
+				mock.CreditReplaces = via.CreditReplaces
+			}
+		}
+	}
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
 		mock.Timestamp = m.consumedList[idx].Timestamp
 		// A consume in this drain that learned after the learn step ended
@@ -5762,6 +5933,13 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 		// were served through it. Only the drain's: another drain's
 		// consumers were not.
 		mock.LearnedAfterEnd = mock.LearnedAfterEnd || m.consumedList[idx].LearnedAfterEnd
+		// A consume of the open test's that the edge rule gave it stays said
+		// so (MockState.EdgeOwned) when a later state for it, recorded after
+		// a staging that no longer holds it, does not say it; a credit to
+		// another test replaces it whole.
+		if mock.CreditTo == "" && m.consumedList[idx].CreditTo == "" {
+			mock.EdgeOwned = mock.EdgeOwned || m.consumedList[idx].EdgeOwned
+		}
 		m.consumedList[idx] = mock // update state, preserve position and first use
 	} else {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
@@ -5773,16 +5951,26 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 	if m.consumedPersistent != nil {
 		m.consumedPersistent[mock.Name] = mock
 	}
-	if m.servedCount != nil {
+	if served && m.servedCount != nil {
 		m.servedCount[mock.Name]++
 	}
-	m.noteAnsweredInLocked(mock.Name, time.Now().UnixNano())
-	m.consumedMu.Unlock()
+	if served && mock.Lifetime == models.LifetimePerTest {
+		if m.setServed == nil {
+			m.setServed = make(map[string]uint64)
+		}
+		m.setServed[mock.Name]++
+	}
+	if mock.CreditTo == "" {
+		m.noteAnsweredInLocked(mock.Name, time.Now().UnixNano())
+	}
 	return nil
 }
 
-// ServedCounts returns a copy of how many times each mock answered a request
-// this session. Never drained.
+// ServedCounts returns a copy of how many calls each mock is credited with
+// this session: each time it answered a request, except that after a window
+// reclaim (CommitWindowReclaim) the copy an earlier call is credited with
+// counts that call, and the recording reclaimed for the open test does not
+// count it again. Never drained.
 func (m *MockManager) ServedCounts() map[string]uint64 {
 	m.consumedMu.Lock()
 	defer m.consumedMu.Unlock()
@@ -6039,6 +6227,9 @@ func (m *MockManager) ArmSetFence() {
 // flags before both or is refused after (flagMockAsUsed). Caller holds
 // swapMu; consumedMu and bootTakenMu are leaves.
 func (m *MockManager) dropPreviousSetConsumes() {
+	// The previous set's ownership summary, if its end read never said it,
+	// and the next set's counts from nothing.
+	m.sayOwnership(true)
 	m.consumedMu.Lock()
 	// The answered log follows the generation (answeredLog.fence); its
 	// lock is a leaf.

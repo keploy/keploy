@@ -4513,7 +4513,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					// No test's mapping reads this drain: its flagged mocks go
 					// to their owners by the release rule.
-					carryAttr.mapDrained(actualTestMockMappings, drainedConsumed)
+					carryAttr.mapDrained(actualTestMockMappings, passingTotalConsumedMocks, drainedConsumed)
 					if drainErr != nil && unreadDrain == "" {
 						unreadDrain = "what " + testCase.Name + " consumed before its connection reset"
 					}
@@ -5722,7 +5722,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					for _, m := range drainedConsumed {
 						totalConsumedMocks.Set(m)
 					}
-					carryAttr.mapDrained(actualTestMockMappings, drainedConsumed)
+					carryAttr.mapDrained(actualTestMockMappings, passingTotalConsumedMocks, drainedConsumed)
 					if drainErr != nil && unreadDrain == "" {
 						unreadDrain = "what " + tc.Name + " consumed before its connection reset"
 					}
@@ -6971,7 +6971,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				allConsumedAcrossCycles[m.Name] = m
 			}
 			carryAttr.keepWhateverTheVerdict(passingTotalConsumedMocks, "", late)
-			carryAttr.mapDrained(actualTestMockMappings, late)
+			carryAttr.mapDrained(actualTestMockMappings, passingTotalConsumedMocks, late)
 		}
 	}
 	// With the proven switch off nothing read either what the application

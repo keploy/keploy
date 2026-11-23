@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -275,34 +276,98 @@ func (a *carryOverAttribution) consumedOutsideOwnWindow(st models.MockState, run
 }
 
 // keepWhateverTheVerdict adds to passing every mock the running test consumed
-// outside that mock's own window. Call it for every test, passed or not.
+// outside that mock's own window, and every mock its drain credits to an
+// earlier test (creditedElsewhere): that test's consumption, which the
+// running test's verdict does not judge. Call it for every test, passed or not.
 func (a *carryOverAttribution) keepWhateverTheVerdict(passing map[string]models.MockState, running string, consumed []models.MockState) {
 	for _, st := range consumed {
-		if a.consumedOutsideOwnWindow(st, running) {
+		if a.consumedOutsideOwnWindow(st, running) || creditedElsewhere(st, running) {
 			passing[st.Name] = st
 		}
 	}
+}
+
+// creditedElsewhere reports whether st, in the drain of the test running, is
+// credited to another test's call (MockState.CreditTo: the agent's window
+// reclaim moved that test's credit to it).
+func creditedElsewhere(st models.MockState, running string) bool {
+	return st.CreditTo != "" && st.CreditTo != running
+}
+
+// recredit applies a window reclaim's credits (MockState.CreditTo), each to
+// the entry of the test it names: the mock takes the place of the recording
+// that test was credited with (CreditReplaces), so each recording is listed
+// for one call and each call lists one. An entry that does not list that
+// recording gets the mock added; a test not mapped yet gets it when it is
+// (early), as a flagged mock's owner does.
+func (a *carryOverAttribution) recredit(mapping *models.Mapping, credits []models.MockState) {
+	for _, st := range credits {
+		if _, mapped := a.mapped[st.CreditTo]; !mapped {
+			a.early[st.CreditTo] = append(a.early[st.CreditTo], st)
+			continue
+		}
+		if !replaceMockEntry(mapping, st.CreditTo, st.CreditReplaces, mockEntryOf(st)) {
+			upsertActualTestMockMapping(mapping, st.CreditTo, []models.MockState{st}, time.Time{}, time.Time{})
+		}
+	}
+}
+
+// replaceMockEntry puts entry in the place of the mock named old in test's
+// entry of mapping, and reports whether test's entry lists entry after it: an
+// entry that lists it already (a credit a retry cycle applied before) drops
+// old and keeps its one listing. It reports false when the entry lists
+// neither, or there is no entry for test.
+func replaceMockEntry(mapping *models.Mapping, test, old string, entry models.MockEntry) bool {
+	for i := range mapping.TestCases {
+		tc := &mapping.TestCases[i]
+		if tc.ID != test {
+			continue
+		}
+		at := slices.IndexFunc(tc.Mocks, func(e models.MockEntry) bool { return e.Name == old })
+		listed := slices.ContainsFunc(tc.Mocks, func(e models.MockEntry) bool { return e.Name == entry.Name })
+		switch {
+		case at >= 0 && listed:
+			tc.Mocks = slices.Delete(tc.Mocks, at, at+1)
+		case at >= 0:
+			tc.Mocks[at] = entry
+		case !listed:
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // mapConsumed records what the running test consumed: its own mocks through
 // upsertActualTestMockMapping's window filter, as before, and each flagged
 // mock under the test (or startup section) it belongs to, unfiltered. A
 // flagged mock whose test is not mapped yet is held for that test (early) and
-// added when it is mapped.
+// added when it is mapped. A mock the edge rule gave the running test's window
+// (MockState.EdgeOwned), which its recorded window does not hold, is listed
+// under it unfiltered too; and a window reclaim's credits to earlier tests
+// (MockState.CreditTo) go to those tests' entries (recredit).
 func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running string, tcReq, tcResp time.Time, consumed []models.MockState) {
 	if mapping == nil || running == "" {
 		return
 	}
 	a.mapped[running] = struct{}{}
 	own := make([]models.MockState, 0, len(consumed))
-	var startup []models.MockState
+	var startup, edge, credits []models.MockState
 	byOwner := map[int][]models.MockState{}
 	// othersFlagged counts the flagged mocks of consumed that another test
-	// owns by the release rule: its, not the running test's consumption.
+	// owns by the release rule, and the mocks credited to another test's
+	// call: theirs, not the running test's consumption.
 	othersFlagged := 0
 	for _, st := range consumed {
+		if creditedElsewhere(st, running) {
+			credits = append(credits, st)
+			othersFlagged++
+			continue
+		}
 		idx, ok := a.releaseIndex(st)
 		switch {
+		case !ok && st.EdgeOwned:
+			edge = append(edge, st)
 		case !ok:
 			own = append(own, st)
 		case idx < 0:
@@ -342,6 +407,12 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 		a.caughtOthers[running] = struct{}{}
 	}
 	upsertActualTestMockMapping(mapping, running, own, tcReq, tcResp)
+	// Zero window: no filter. The edge rule gave these to the running test,
+	// placed just outside every recorded window.
+	if len(edge) > 0 {
+		upsertActualTestMockMapping(mapping, running, edge, time.Time{}, time.Time{})
+	}
+	a.recredit(mapping, credits)
 	// A call in flight when the running test began (sent in the gap before
 	// it, answered after it ended) is its own, though the window filter
 	// above drops it: no request or response time of it is in the window.
@@ -349,10 +420,22 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 		upsertActualTestMockMapping(mapping, running, late, time.Time{}, time.Time{})
 	}
 	if held := a.early[running]; len(held) > 0 {
+		delete(a.early, running)
+		var heldOwn, heldCredits []models.MockState
+		for _, st := range held {
+			if st.CreditTo != "" {
+				heldCredits = append(heldCredits, st)
+			} else {
+				heldOwn = append(heldOwn, st)
+			}
+		}
 		// Zero window: no filter. These are the running test's own by the
 		// release rule, consumed while an earlier test ran.
-		upsertActualTestMockMapping(mapping, running, held, time.Time{}, time.Time{})
-		delete(a.early, running)
+		upsertActualTestMockMapping(mapping, running, heldOwn, time.Time{}, time.Time{})
+		// A reclaim's credits to the running test, made while an earlier
+		// test ran: each takes the place of the recording the running
+		// test's own drain, mapped above, lists (recredit).
+		a.recredit(mapping, heldCredits)
 	}
 	owners := make([]int, 0, len(byOwner))
 	for idx := range byOwner {
@@ -374,12 +457,28 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 // So a test whose carry-over (a publish it made after it answered, a send it
 // made early) landed in such a drain consumed it all the same, and is not
 // taken for one that consumed nothing. A mock its owner's entry already lists
-// is not listed again. Every other mock of the drain is left out of the
-// mapping, as before.
-func (a *carryOverAttribution) mapDrained(mapping *models.Mapping, consumed []models.MockState) {
+// is not listed again. A window reclaim's credits go to the tests they name
+// (recredit) and into passing, the prune's keep set. Every other mock of the
+// drain is left out of the mapping, as before.
+func (a *carryOverAttribution) mapDrained(mapping *models.Mapping, passing map[string]models.MockState, consumed []models.MockState) {
 	if a == nil || mapping == nil {
 		return
 	}
+	// A window reclaim's credits name their test (recredit), whichever drain
+	// caught them, and are kept whatever any verdict says: each is the
+	// credited test's consumption, which this drain's test (none, or one whose
+	// request failed) does not judge. Kept here, with the mapping, so no drain
+	// a mapping lists a credit from leaves the prune to delete it.
+	var credits []models.MockState
+	for _, st := range consumed {
+		if st.CreditTo != "" {
+			credits = append(credits, st)
+			if passing != nil {
+				passing[st.Name] = st
+			}
+		}
+	}
+	a.recredit(mapping, credits)
 	listed := map[string]map[string]bool{}
 	for _, tc := range mapping.TestCases {
 		for _, m := range tc.Mocks {
@@ -391,6 +490,10 @@ func (a *carryOverAttribution) mapDrained(mapping *models.Mapping, consumed []mo
 	}
 	byOwner := map[int][]models.MockState{}
 	for _, st := range consumed {
+		if st.CreditTo != "" {
+			// Its test's by the credit, above, not by the release rule.
+			continue
+		}
 		idx, ok := a.releaseIndex(st)
 		if !ok || idx < 0 {
 			continue

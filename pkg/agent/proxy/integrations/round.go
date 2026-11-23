@@ -401,6 +401,42 @@ func (p roundScopeParts) RecordedWindowIndex(t time.Time) (index int, known bool
 	return p.windows.CurrentIndex(t), true
 }
 
+// OwnerTestWindow implements WindowOwnership over the staging's recorded test
+// windows, as the store's own does (MockManager's).
+func (p roundScopeParts) OwnerTestWindow(t time.Time) (owner models.TestWindow, inside, owned bool) {
+	if p.windows.Len() == 0 || t.IsZero() {
+		return models.TestWindow{}, false, false
+	}
+	idx, in, ok := p.windows.OwnerOf(t, models.MockWindowEdgeSkew)
+	if !ok {
+		return models.TestWindow{}, false, false
+	}
+	return p.windows.Window(idx), in, true
+}
+
+// OwnerTestWindowSpan implements WindowOwnership over the staging's recorded
+// test windows, as the store's own does (MockManager's).
+func (p roundScopeParts) OwnerTestWindowSpan(start, end time.Time) (owner models.TestWindow, owned bool) {
+	if p.windows.Len() == 0 || start.IsZero() {
+		return models.TestWindow{}, false
+	}
+	idx, ok := p.windows.OwnerOfSpan(start, end)
+	if !ok {
+		return models.TestWindow{}, false
+	}
+	return p.windows.Window(idx), true
+}
+
+// EdgeOwnerWindow implements WindowOwnership over the staging's recorded test
+// windows, as the store's own does (MockManager's).
+func (p roundScopeParts) EdgeOwnerWindow(m *models.Mock) (owner models.TestWindow, owned bool) {
+	idx, ok := p.windows.EdgeOwner(m)
+	if !ok {
+		return models.TestWindow{}, false
+	}
+	return p.windows.Window(idx), true
+}
+
 // InPool is the store's PoolMembership (the replay's scope table).
 func (p roundScopeParts) InPool(m *models.Mock) (pool, known bool) {
 	if p.poolNames == nil || m == nil {
@@ -740,6 +776,7 @@ func (s RoundSnapshot) BeforeTestWindow(t time.Time) (before, known bool) {
 var (
 	_ RecordedTests       = RoundSnapshot{}
 	_ RecordedWindowIndex = RoundSnapshot{}
+	_ WindowOwnership     = RoundSnapshot{}
 )
 
 // InBackground implements BackgroundMember: name is one of the background's
@@ -1225,6 +1262,7 @@ var (
 	_ RecordedTests       = RoundMeta{}
 	_ RecordedTestBegins  = RoundMeta{}
 	_ RecordedWindowIndex = RoundMeta{}
+	_ WindowOwnership     = RoundMeta{}
 )
 
 // ExactRoundReader is an optional RoundReader capability that reads round
