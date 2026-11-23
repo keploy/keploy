@@ -694,7 +694,7 @@ func TestASkippedTestsRecordingStillBoundsAHeldCall(t *testing.T) {
 		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
 		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
 	ctx := context.Background()
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil, nil, false))
 	b, serr := a.ProvenBegin(ctx, begin("TestSkipped"))
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionSkip, b.Action)
