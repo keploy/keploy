@@ -64,8 +64,9 @@ type HTTP struct {
 	// placeWarned holds the recordings (placeWarning) whose unreadable
 	// variable place the learn step warned of.
 	placeWarned sync.Map
-	// learnIx is the learn step's index of the last staging generation, or
-	// shared part of an open test's reads, a learned call read (learnIndex).
+	// learnIx is the learn step's unified index of the last staging generation,
+	// shared part of an open test's reads, and open test's owned recordings
+	// (shared by both replay's learnedMatchOf and record's learnMatchIn).
 	learnIx learnIndexes
 	// strictIx is the strict pass's index of the last staging generation, or
 	// shared part of an open test's reads, a strict call read (strictIndex).

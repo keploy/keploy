@@ -46,7 +46,7 @@ func TestRoundSnapshotTakenAnswersAsAScanOfTheLog(t *testing.T) {
 		"twice": {true, false}, "keeps-own": {true, false}, "never": {false, false},
 	}
 	log := takenLog()
-	literal := RoundSnapshot{Taken: log, viewGen: 2}
+	literal := RoundSnapshot{Taken: log, roundScopeParts: roundScopeParts{viewGen: 2}}
 	stored := RoundSnapshot{Taken: log}.WithParts(RoundParts{ViewGen: 2})
 	for name, w := range want {
 		for _, s := range []struct {

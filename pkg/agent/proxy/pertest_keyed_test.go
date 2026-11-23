@@ -123,6 +123,11 @@ func TestAKeyedPerTestWalkIsThePerTestReadUnderItsKey(t *testing.T) {
 		mk.Kind = kinds[i%2]
 		perTest = append(perTest, mk)
 	}
+	// e, of the window, was answered before it was asked: the read leaves it
+	// out (pkg.LeaveOutAnsweredBeforeAsked), and so must the walk.
+	early := newMockForTest("e", base.Add(5*time.Millisecond), models.LifetimePerTest)
+	early.Spec.ResTimestampMock = early.Spec.ReqTimestampMock.Add(-time.Millisecond)
+	perTest = append(perTest, early)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 	mm.SetMocksWithWindow(perTest, nil, base, base.Add(time.Second))
@@ -137,6 +142,10 @@ func TestAKeyedPerTestWalkIsThePerTestReadUnderItsKey(t *testing.T) {
 		liveSame(t, "exact serving off, key "+key, want, keyedPerTestWalk(t, mm, byKindAndName, key, -1))
 		liveSame(t, "exact serving off, key "+key+", stopped at one", want[:1], keyedPerTestWalk(t, mm, byKindAndName, key, 1))
 	}
+	if got := perTestUnder(t, mm, byKindAndName, "name:e"); len(got) != 0 {
+		t.Fatalf("precondition: the read keeps the mock answered before it was asked: [%s]", verifyNames(got))
+	}
+	liveSame(t, "exact serving off, the mock answered before it was asked", nil, keyedPerTestWalk(t, mm, byKindAndName, "name:e", -1))
 }
 
 // keyedCallCost answers, in recorded order, every even mock of one test that
