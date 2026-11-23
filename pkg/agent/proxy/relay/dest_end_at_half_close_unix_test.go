@@ -32,9 +32,11 @@ type tlsCloseNotifyRaceConn struct {
 	*net.TCPConn
 	gate         atomic.Bool
 	onDeadline   bool
+	readEntered  chan struct{}
 	releaseRead  chan struct{}
 	readReturned chan struct{}
 	abort        chan struct{}
+	enterOnce    sync.Once
 	releaseOnce  sync.Once
 	readOnce     sync.Once
 	mu           sync.Mutex
@@ -43,6 +45,9 @@ type tlsCloseNotifyRaceConn struct {
 
 func (c *tlsCloseNotifyRaceConn) Read(p []byte) (int, error) {
 	if c.gate.Load() {
+		if c.readEntered != nil {
+			c.enterOnce.Do(func() { close(c.readEntered) })
+		}
 		select {
 		case <-c.releaseRead:
 		case <-c.abort:
@@ -117,9 +122,11 @@ func TestOverTLSRealSocketResetEatenByCloseNotifyIsNotToldAsAClose(t *testing.T)
 			proxyServer, server := loopbackPair(t)
 			t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
 			abort := make(chan struct{})
+			readEntered := make(chan struct{})
 			dest := &tlsCloseNotifyRaceConn{
 				TCPConn:      proxyServer.(*net.TCPConn),
 				onDeadline:   tc.onDeadline,
+				readEntered:  readEntered,
 				releaseRead:  make(chan struct{}),
 				readReturned: make(chan struct{}),
 				abort:        abort,
@@ -175,6 +182,11 @@ func TestOverTLSRealSocketResetEatenByCloseNotifyIsNotToldAsAClose(t *testing.T)
 			}
 			_ = server.Close()
 			awaitTCPState(t, proxyServer, stateClosed, "the destination's reset")
+			select {
+			case <-readEntered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("destination forwarder did not enter Read within 10s")
+			}
 			close(destEnded)
 			awaitDone(t, done, "the relay did not end")
 
@@ -197,8 +209,10 @@ func TestOverTLSRealSocketResetEatenByCloseNotifyIsNotToldAsAClose(t *testing.T)
 		proxyServer, server := loopbackPair(t)
 		t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
 		abort := make(chan struct{})
+		readEntered := make(chan struct{})
 		client := &tlsCloseNotifyRaceConn{
 			TCPConn:      proxyClient.(*net.TCPConn),
+			readEntered:  readEntered,
 			releaseRead:  make(chan struct{}),
 			readReturned: make(chan struct{}),
 			abort:        abort,
@@ -249,6 +263,11 @@ func TestOverTLSRealSocketResetEatenByCloseNotifyIsNotToldAsAClose(t *testing.T)
 		}
 		_ = app.Close()
 		awaitTCPState(t, proxyClient, stateClosed, "the client's reset")
+		select {
+		case <-readEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("client forwarder did not enter Read within 10s")
+		}
 		close(clientEnded)
 		awaitDone(t, done, "the relay did not end")
 

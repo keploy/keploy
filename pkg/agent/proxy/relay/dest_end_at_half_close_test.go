@@ -560,9 +560,11 @@ func TestHalfCloseTeardownSynchronizesWithOppositeEOF(t *testing.T) {
 			proxyServer, server := loopbackPair(t)
 			t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
 			abort := make(chan struct{})
+			readEntered := make(chan struct{})
 			dest := &eofRaceConn{
 				TCPConn:      proxyServer.(*net.TCPConn),
 				onDeadline:   tc.onDeadline,
+				readEntered:  readEntered,
 				releaseRead:  make(chan struct{}),
 				readReturned: make(chan struct{}),
 				abort:        abort,
@@ -573,6 +575,11 @@ func TestHalfCloseTeardownSynchronizesWithOppositeEOF(t *testing.T) {
 			cfg.Logger = logger
 			done := runRelay(t, New(cfg, &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, connseq.NewUpstream(dest)))
 			t.Cleanup(func() { close(abort) })
+			select {
+			case <-readEntered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("destination forwarder did not enter Read within 10s")
+			}
 			if err := app.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -593,8 +600,10 @@ func TestHalfCloseTeardownSynchronizesWithOppositeEOF(t *testing.T) {
 		proxyServer, server := loopbackPair(t)
 		t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
 		abort := make(chan struct{})
+		readEntered := make(chan struct{})
 		client := &eofRaceConn{
 			TCPConn:      proxyClient.(*net.TCPConn),
+			readEntered:  readEntered,
 			releaseRead:  make(chan struct{}),
 			readReturned: make(chan struct{}),
 			abort:        abort,
@@ -605,6 +614,11 @@ func TestHalfCloseTeardownSynchronizesWithOppositeEOF(t *testing.T) {
 		cfg.Logger = logger
 		done := runRelay(t, New(cfg, client, connseq.NewUpstream(proxyServer)))
 		t.Cleanup(func() { close(abort) })
+		select {
+		case <-readEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("client forwarder did not enter Read within 10s")
+		}
 		if err := server.Close(); err != nil {
 			t.Fatal(err)
 		}
