@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -504,6 +505,15 @@ type Proxy struct {
 	// missing or unparseable; the forwarder falls back to the legacy
 	// synthetic response in that case.
 	dnsUpstreamServers []string
+	// dnsUpstreamAdapter is, on Windows, the network adapter each of the
+	// dnsUpstreamServers is asked on (upstreamConfig): a recording and a
+	// forward ask the other adapters' servers a name one adapter's server
+	// says does not exist, as Windows does (upstreamSearch). Nil from
+	// resolv.conf.
+	dnsUpstreamAdapter map[string]int
+	// dnsExchange asks one server; nil is (*dns.Client).Exchange. A row
+	// hands recordDNSMock and forwardDNS servers of its own through it.
+	dnsExchange dnsExchanger
 	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
 	// Defaults to "53" when resolv.conf does not specify one.
 	dnsUpstreamPort string
@@ -1087,6 +1097,20 @@ func (p *Proxy) javaHomePID() uint32 {
 // setupCAForApp is pTls.SetupCAForApp; a test swaps it to see the pid the
 // JAVA_HOME auto-detect is given.
 var setupCAForApp = pTls.SetupCAForApp
+
+// caSetupNextStep is what a failed CA setup on goos says to do. Native
+// Windows has no volume or system bundle to fix: keploy's CA goes in the
+// user's own trust store, with no administrator, as the setup's error says.
+func caSetupNextStep(goos string) string {
+	if goos == "windows" {
+		return "follow the next_step of the CA install error above: keploy's CA goes in your Windows user's Trusted Root store, which needs no administrator. Run keploy again after fixing."
+	}
+	return "Verify the agent container has write access to the " +
+		"shared /tmp/keploy-tls volume (docker/k8s mode) or " +
+		"to the host's CA trust store under /usr/local/share/" +
+		"ca-certificates or /etc/pki/ca-trust/source/anchors " +
+		"(native mode). Restart the agent after fixing."
+}
 
 // setupCA installs keploy's CA for the app, the JAVA_HOME auto-detect reading
 // the CLI's process only (javaHomePID).
@@ -2172,11 +2196,7 @@ func (p *Proxy) startContainerKeys(ctx context.Context) {
 // Error (not Warn) to match the severity, with a next_step so operators see
 // the likely fix without grepping source.
 func logSetupCAFailure(logger *zap.Logger, err error) {
-	nextStep := "Verify the agent container has write access to the " +
-		"shared /tmp/keploy-tls volume (docker/k8s mode) or " +
-		"to the host's CA trust store under /usr/local/share/" +
-		"ca-certificates or /etc/pki/ca-trust/source/anchors " +
-		"(native mode). Restart the agent after fixing."
+	nextStep := caSetupNextStep(runtime.GOOS)
 	if errors.Is(err, pTls.ErrStoreLockHeld) {
 		// The native Linux install's store update did not run because
 		// another process held the trust stores' lock past its bound: no
