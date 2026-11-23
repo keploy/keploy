@@ -182,6 +182,25 @@ func (m *Mock) DeriveLifetime() {
 	m.derive(true)
 }
 
+// RecordedAsState reports whether m is session or connection state by what
+// its recording says of it: its type tag, its stated lifetime, its command, a
+// declared session call. It leaves out what DeriveLifetime gives a mock that
+// says nothing of its lifetime by its kind alone (an untagged or "mocks" HTTP,
+// MySQL, Postgres, generic or DNS mock is session-lifetime unless
+// KEPLOY_STRICT_MOCK_WINDOW is set): a recorder asks which mocks a test set it
+// rolls over to must start with (the state a later test of the same
+// connections and session needs), and a recording's every exchange is not
+// that. m is not changed, and no fallback is counted.
+func (m *Mock) RecordedAsState() bool {
+	c := *m
+	c.TestModeInfo = TestModeInfo{}
+	c.deriveLifetimeOf(false, false)
+	if c.TestModeInfo.Lifetime == LifetimePerTest && c.StatesLifetime() && declaredSessionCall(&c) {
+		return true
+	}
+	return c.TestModeInfo.Lifetime != LifetimePerTest
+}
+
 // lifetimeOf is m's lifetime as DeriveLifetime gives it, without deriving m: a
 // mock not derived yet is derived through a copy, which no fallback count
 // counts (derive). One derived already is read as it is.
@@ -206,7 +225,12 @@ func (m *Mock) derive(count bool) {
 }
 
 // deriveLifetime is derive without the declared session calls.
-func (m *Mock) deriveLifetime(count bool) {
+func (m *Mock) deriveLifetime(count bool) { m.deriveLifetimeOf(count, true) }
+
+// deriveLifetimeOf is deriveLifetime, with fallback false leaving out the
+// lifetime a mock that says nothing of it is given by its kind alone
+// (RecordedAsState).
+func (m *Mock) deriveLifetimeOf(count, fallback bool) {
 	defer func() { m.TestModeInfo.LifetimeDerived = true }()
 
 	// A window-bound kind (a connection failure) is per-test whatever its tag,
@@ -341,7 +365,7 @@ func (m *Mock) deriveLifetime(count bool) {
 	// lifetime at record time; it's a diagnostic, not an alarm. We
 	// deliberately avoid per-call logging because DeriveLifetime runs
 	// on every mock load.
-	if tag == "" && kindsWithImplicitSessionLifetime(m.Kind) {
+	if fallback && tag == "" && kindsWithImplicitSessionLifetime(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		// Data-plane mocks promoted to session here are the ones whose repeated
 		// identical requests must advance through the recorded responses (a
@@ -375,7 +399,7 @@ func (m *Mock) deriveLifetime(count bool) {
 	// kind-based session fallback for any non-canonical tag when
 	// the kind is in the implicit-session list. Strict mode takes
 	// the narrow path above and returns before reaching here.
-	if !laxKindFallbackDisabled() && kindsWithImplicitSessionLifetime(m.Kind) {
+	if fallback && !laxKindFallbackDisabled() && kindsWithImplicitSessionLifetime(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		// Same rationale as the untagged branch above: a non-canonical tag on a
 		// data-plane kind under lax mode is still a data mock whose repeated
