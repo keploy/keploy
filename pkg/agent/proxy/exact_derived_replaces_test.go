@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -236,26 +239,41 @@ func TestADerivedMockReplacesADeclaredStartUpSourceInItsOwnTestAlone(t *testing.
 	}
 }
 
+func withHTTPResponse(m *models.Mock, status int, body string) *models.Mock {
+	m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, 1
+	m.Spec.HTTPReq.URL = "http://127.0.0.1:9000" + m.Spec.HTTPReq.URL
+	m.Spec.HTTPResp = &models.HTTPResp{
+		StatusCode: status,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     map[string]string{"Content-Type": "text/plain", "Content-Length": strconv.Itoa(len(body))},
+		Body:       body,
+	}
+	return m
+}
+
 // With KEPLOY_PROVEN unset and @startup background serving active, a test
 // whose own mocks hold a derived mock replacing a seeded background recording
-// is not served that recording from the background engine (Background,
-// SpentBackground, RoundSnapshot, or DeleteFilteredMock), while ConsumeRefused
-// still treats that refusal as binding and the next test without a derived
-// mock still gets the recording.
+// is answered by its derived mock and is not served the replaced recording
+// from the background engine (Background, SpentBackground, RoundSnapshot, or
+// DeleteFilteredMock), while ConsumeRefused still treats that refusal as
+// binding and the next test without a derived mock still gets the recording.
 func TestADerivedMockReplacesItsBackgroundSourceInUnsetMode(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	defer mm.Close()
-	boot := statedCall("boot", 1*time.Second, "/echo/boot")
+	boot := withHTTPResponse(statedCall("boot", 1*time.Second, "/echo/boot"), http.StatusOK, "boot")
 	own := statedCall("own", 5*time.Second, "/echo/own")
-	dBoot := derivedFrom("d-boot", "startup:/boot", 6*time.Second, "/echo/boot")
+	dBoot := withHTTPResponse(statedCall("d-boot", 6*time.Second, "/echo/boot"), http.StatusServiceUnavailable, "derived-boot")
+	dBoot.Spec.Authored = &models.Authored{How: models.AuthoredDerived, Reason: "declined card", Source: "startup:/boot"}
 
 	mm.SeedBackgroundRecordings([]models.BackgroundRecording{{Mock: boot}})
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"boot"}, nil)
 
 	// T1 holds d-boot replacing startup:/boot: boot must not appear in
-	// Background, SpentBackground, RoundSnapshot, or be consumable in T1, and
-	// ConsumeRefused treats the refusal as binding.
+	// Background, SpentBackground, RoundSnapshot, or be consumable in T1,
+	// ConsumeRefused treats the refusal as binding, and a T1 HTTP call is
+	// answered by d-boot.
 	mm.SetScopeMocks([]*models.Mock{dBoot}, nil, true)
 	if bg := mm.Background(models.HTTP); mockSliceHas(bg, "boot") {
 		t.Fatalf("T1 Background(HTTP) includes replaced background source boot")
@@ -275,6 +293,15 @@ func TestADerivedMockReplacesItsBackgroundSourceInUnsetMode(t *testing.T) {
 	}
 	if !integrations.ConsumeRefused(mm, "boot") {
 		t.Fatal("T1 ConsumeRefused(boot) = false; want true so the refusal is binding")
+	}
+	h := httpint.New(zap.NewNop())
+	const bootReq = "GET /echo/boot HTTP/1.1\r\nHost: 127.0.0.1:9000\r\n\r\n"
+	resp, body, err := serveOne(t, h, mm, bootReq)
+	if err != nil || resp == nil {
+		t.Fatalf("T1 GET /echo/boot failed to serve derived mock: resp=%v err=%v", resp, err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable || string(body) != "derived-boot" {
+		t.Fatalf("T1 GET /echo/boot served status=%d body=%q; want 503 %q (derived mock d-boot)", resp.StatusCode, string(body), "derived-boot")
 	}
 
 	// Between tests, then T2 without a derived mock (even if another test's
