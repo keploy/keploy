@@ -46,9 +46,13 @@ type InstanceReq struct {
 	// runs as its child, before it runs (keploy's Go launcher on Windows,
 	// which has no exec that keeps the launcher's pid). The agent takes the
 	// claim as the child's only when the kernel names the caller as the
-	// child's parent, the child runs, and the caller was created no later
-	// than it (a pid another process took is not the child's parent);
-	// otherwise it refuses it (ScopeErrNotInRun). 0 claims for the caller.
+	// child's parent, the child runs, the caller was created no later than
+	// it, and the child is itself one of the run's processes, as the caller
+	// must be; otherwise it refuses it (ScopeErrNotInRun). The creation times
+	// keep a process created after the child, on its exited parent's pid,
+	// from counting as that parent; one created in the same clock tick as
+	// the child is taken, since the system stamps creation at its clock's
+	// tick. 0 claims for the caller.
 	Child int `json:"child,omitempty"`
 }
 

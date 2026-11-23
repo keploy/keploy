@@ -40,8 +40,9 @@ func descendsByCreation(pid, ancestor int, parent func(pid int) (int, bool), cre
 // is answered with its own time, which the pid's next process does not have:
 // the claim it makes is of a process that has exited. On Windows a process
 // keeps the pid of a parent that has exited, and a later process can take
-// that pid, but it was created after the child, so it is never taken for the
-// child's parent.
+// that pid: one created after the child is not taken for its parent, but one
+// created in the child's own clock tick is, as descendsByCreation takes equal
+// times.
 func directChild(child, parent int, parentOf func(pid int) (int, bool), created func(pid int) (uint64, bool)) (uint64, bool) {
 	born, alive := created(child)
 	if !alive {
