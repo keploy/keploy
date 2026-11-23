@@ -6,9 +6,10 @@
 #   bash .github/workflows/test_workflow_scripts/sudo_env.tests.sh
 #
 # SUDO_ENV names each of its switches (KEPLOY_EXACT_VIEW_VERIFY,
-# KEPLOY_PG_V3_LOG_BIND_VALUES) with its value while it is set, an empty value
+# KEPLOY_PG_V3_LOG_BIND_VALUES, KEPLOY_INTERNAL) with its value while it is set, an empty value
 # included, and nothing while it is unset, and every KEPLOY_ variable a
 # workflow's env: block sets is one of them or one keploy does not read. Every
+# workflow sets KEPLOY_INTERNAL: "1" in its top-level env. Every
 # script that sources sudo_env.sh does so by its own path, never through the
 # workspace, so it loads where a workflow checks keploy out at a path; a script
 # that copies a script's functions into a file to run them there checks that
@@ -63,6 +64,8 @@ sudo_env_is pg KEPLOY_PG_V3_LOG_BIND_VALUES=1 "KEPLOY_PG_V3_LOG_BIND_VALUES=1"
 sudo_env_is pg-empty KEPLOY_PG_V3_LOG_BIND_VALUES= "KEPLOY_PG_V3_LOG_BIND_VALUES="
 sudo_env_is both "KEPLOY_PG_V3_LOG_BIND_VALUES=1|KEPLOY_EXACT_VIEW_VERIFY=1" "KEPLOY_EXACT_VIEW_VERIFY=1|KEPLOY_PG_V3_LOG_BIND_VALUES=1"
 sudo_env_is other-keploy-name "KEPLOY_PROVEN=1|KEPLOY_EXACT_VIEW_VERIFY=1" "KEPLOY_EXACT_VIEW_VERIFY=1"
+sudo_env_is internal KEPLOY_INTERNAL=1 "KEPLOY_INTERNAL=1"
+sudo_env_is internal-with-verify "KEPLOY_INTERNAL=1|KEPLOY_EXACT_VIEW_VERIFY=1" "KEPLOY_EXACT_VIEW_VERIFY=1|KEPLOY_INTERNAL=1"
 
 # Every KEPLOY_ variable a workflow sets in an env: block is a switch SUDO_ENV
 # names, or one keploy does not read: a script's own (the binary or flags it
@@ -105,6 +108,49 @@ unnamed_is new-switch-yml "$tmp/wf" "new-yml.yml sets KEPLOY_NEW_YML"
 printf 'jobs:\n  a:\n    steps:\n      - env:\n          KEPLOY_NEW_SWITCH: 1\n        run: echo "KEPLOY_IN_RUN: 1"\n' > "$tmp/wf/new.yaml"
 unnamed_is new-switch-yaml "$tmp/wf" "new-yml.yml sets KEPLOY_NEW_YML|new.yaml sets KEPLOY_NEW_SWITCH"
 
+# Every workflow sets KEPLOY_INTERNAL: "1" in its top-level env, so every
+# keploy its jobs run marks its telemetry as keploy's own and the daily product
+# metrics leave keploy's CI out of the users' numbers; sudo_env.sh carries it
+# through sudo. A workflow is read as written: its top-level `env:` block (a
+# line `env:` alone) holds the line `  KEPLOY_INTERNAL: "1"` (or 1, or true);
+# any other spelling, an env set only on a job or a step, or none, fails.
+# unmarked_workflows DIR: each workflow in DIR that does not, by file name.
+unmarked_workflows() {
+  local wf
+  for wf in "$1"/*.yml "$1"/*.yaml; do
+    [ -e "$wf" ] || continue
+    awk '
+      /^env:[[:space:]]*(#.*)?$/ { inenv = 1; next }
+      /^[^[:space:]#]/ { inenv = 0 }
+      inenv && /^  KEPLOY_INTERNAL:[[:space:]]*("1"|1|"true"|true)[[:space:]]*(#.*)?$/ { found = 1 }
+      END { exit !found }
+    ' "$wf" || basename "$wf"
+  done
+}
+# unmarked_workflows_is NAME DIR WANT: unmarked_workflows DIR, its lines joined
+# by "|", is WANT.
+unmarked_workflows_is() {
+  local got
+  cases=$((cases + 1))
+  got=$(unmarked_workflows "$2" | sort | paste -sd'|')
+  if [ "$got" != "$3" ]; then
+    echo "FAIL $1: workflows whose top-level env does not set KEPLOY_INTERNAL: \"1\": '$got', want '$3'"
+    fails=$((fails + 1))
+  fi
+}
+unmarked_workflows_is internal-workflows "$here/.." ""
+mkdir -p "$tmp/iw"
+printf 'on: push\nenv:\n  KEPLOY_INTERNAL: "1"\njobs:\n  a:\n    runs-on: x\n' > "$tmp/iw/marked.yml"
+printf 'on: push\n# why\nenv:\n  A: b\n  # a comment\n  KEPLOY_INTERNAL: 1\n\njobs:\n  a:\n    runs-on: x\n' > "$tmp/iw/among.yaml"
+printf 'on: push\njobs:\n  a:\n    runs-on: x\n' > "$tmp/iw/none.yml"
+printf 'on: push\njobs:\n  a:\n    env:\n      KEPLOY_INTERNAL: "1"\n    steps:\n      - env:\n          KEPLOY_INTERNAL: "1"\n' > "$tmp/iw/job-only.yml"
+printf 'on: push\nenv:\n  KEPLOY_INTERNAL: "0"\njobs:\n  a:\n    runs-on: x\n' > "$tmp/iw/zero.yml"
+printf 'on: push\nenv: {KEPLOY_INTERNAL: "1"}\njobs:\n  a:\n    runs-on: x\n' > "$tmp/iw/flow.yml"
+printf 'on: push\nenv:\n  A: b\njobs:\n  a:\n    env:\n  KEPLOY_INTERNAL: "1"\n' > "$tmp/iw/after.yml"
+# CRLF line ends are YAML's too: a CR reads as the space it is.
+printf 'on: push\r\nenv:\r\n  KEPLOY_INTERNAL: "1"\r\njobs:\r\n  a:\r\n    runs-on: x\r\n' > "$tmp/iw/crlf.yml"
+unmarked_workflows_is internal-forms "$tmp/iw" "after.yml|flow.yml|job-only.yml|none.yml|zero.yml"
+
 # A script sources sudo_env.sh by its own path, never through the workspace:
 # sampling-test.yml and keploy-performance-test.yml check keploy out at
 # `path: keploy`, where $GITHUB_WORKSPACE/.github does not exist.
@@ -138,8 +184,9 @@ printf '. ./.github/workflows/test_workflow_scripts/%s.sh\n' "$name" > "$tmp/src
 printf 'source "$GITHUB_WORKSPACE/scripts/%s.sh"\n' "$name" > "$tmp/src/ws-only.sh"
 from_workspace_is workspace-forms "$tmp/src" "a/ws.sh:2|rel.sh:1|ws-only.sh:1"
 
-# No command under .github/ hands sudo -E or a bare --preserve-env, or runs
-# env through sudo, without naming SUDO_ENV, whatever command it runs: sudo-rs
+# No command under .github/ hands sudo -E or a bare --preserve-env, runs env
+# through sudo, or runs keploy through a bare sudo, without naming SUDO_ENV
+# (whatever command it runs, for the first two): sudo-rs
 # ignores -E, and a sudo'd env passes only what it names, so such a run gets
 # none of the switches its workflow sets. A script written from an older one's
 # `sudo -E` line then fails this job instead of passing without them.
@@ -166,7 +213,7 @@ sudo_env_free=(
   'workflows/go-test.yaml|env (KEPLOY_TEST_[[:upper:]_]+=1 )+/tmp/[[:lower:]]+[.]test '
   # Drops from root to the user of the case, in a here-document, where
   # SUDO_ENV is not defined; the keploy run it starts names
-  # KEPLOY_EXACT_VIEW_VERIFY itself.
+  # KEPLOY_EXACT_VIEW_VERIFY and KEPLOY_INTERNAL itself.
   'workflows/test_workflow_scripts/mock/mock-hangup-linux.sh|-u "[$]AS" env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="[$]HOME" PATH="[$]PATH"$'
   # A row of the guard, as root, with a fake sudo first on PATH: no keploy.
   'workflows/test_workflow_scripts/hang_guard.tests.sh|-n env PATH="[$]tmp/fakesudo:/usr/sbin:/usr/bin:/sbin:/bin" FAKE_SUDO_LOG="[$]tmp/sudo-calls" bash -c +'"'"'[.] "[$]1"$'
@@ -211,8 +258,12 @@ sudo_unnamed() {
               if (w[k] == "--preserve-env" || w[k] ~ /^-[[:alpha:]]*E[[:alpha:]]*$/) e = 1
               if (w[k] ~ /^-[[:alpha:]]*[CDghpRrTtUu]$/) k++
             }
-            if (!e && word !~ /^(.*\/)?env$/) continue
-            if (seg ~ /SUDO_ENV/ || (!e && free_env(seg))) continue
+            # A bare sudo of keploy itself (a keploy binary by name or path, or
+            # a $..._BIN variable): it hands keploy none of the switches either.
+            # Its --version reads none of them and sends nothing.
+            bare = !e && word ~ /^"?(\$\{?[[:upper:]_]*BIN\}?|[^[:space:]]*keploy[^[:space:]\/]*)"?$/ && seg !~ /[[:space:]]--version([[:space:]]|$)/
+            if (!e && !bare && word !~ /^(.*\/)?env$/) continue
+            if (seg ~ /SUDO_ENV/ || (!e && !bare && free_env(seg))) continue
             print file ":" start
             break
           }
@@ -249,12 +300,13 @@ printf 'sudo %s keploy test -c ./app; echo "${SUDO_ENV[@]}"\nsudo env PATH="$PAT
 printf 'out=$(sudo %s keploy test -c "./app")\n' -nE > "$tmp/se/bundled.sh"
 # Two on one line: the line once.
 printf 'sudo %s keploy test -c ./app; sudo %s keploy report\n' -E -E > "$tmp/se/twice.sh"
-# A list sudo keeps (sudo-rs honours one) names its variables.
+# A list sudo keeps (sudo-rs honours one) names its variables: one without
+# the switches is a bare sudo of keploy.
 printf 'sudo %s "$BIN" test -c ./app\nsudo %s "$BIN" mock record\n' --preserve-env=GOCOVERDIR --preserve-env > "$tmp/se/preserve.sh"
 # A sudo'd env, after options and their arguments, or by its path.
 printf 'sudo env PATH="$PATH" "$BIN" test\nsudo -u "$AS" env HOME="$HOME" "$BIN" record\nsudo -nu "$AS" env A=1 "$BIN" record\nsudo -u root %s "$BIN" test\nsudo -- /usr/bin/env A=1 keploy record\n' -E > "$tmp/se/env.sh"
-# Not a sudo'd env, and no -E: envsubst, an -E that is the command's own, a
-# sudo that is part of a word.
+# Not a sudo'd env, and no -E: envsubst, an -E that is the command's own (on a
+# bare sudo of keploy, refused as that), a sudo that is part of a word.
 printf 'sudo envsubst < a > b\nsudo "$REPLAY_BIN" test -c "grep -E ok out.txt"\nfakesudo %s keploy record\nsudo.sh %s keploy record\n' -E -E > "$tmp/se/other.sh"
 printf '# sudo %s keploy record\ntrue # sudo %s keploy record\n' -E -E > "$tmp/se/comment.sh"
 printf 'jobs:\n  a:\n    steps:\n      - run: sudo  %s /usr/local/bin/keploy test -c ./app\n' -E > "$tmp/se/wf.yml"
@@ -269,7 +321,24 @@ mkdir -p "$tmp/se/workflows/test_workflow_scripts/mock"
 } > "$tmp/se/workflows/go-test.yaml"
 printf 'sudo env KEPLOY_TEST_A=1 /tmp/utils.test -test.v\n' > "$tmp/se/workflows/other.yaml"
 printf 'set -- %s -u "$AS" env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="$HOME" PATH="$PATH"%s\n' sudo "" sudo " A=1" sudo " | cat" > "$tmp/se/workflows/test_workflow_scripts/mock/mock-hangup-linux.sh"
-sudo_unnamed_is sudo-forms "$tmp/se" "any.sh:1|any.sh:2|any.sh:3|bundled.sh:1|env.sh:1|env.sh:2|env.sh:3|env.sh:4|env.sh:5|later.sh:1|later.sh:2|preserve.sh:2|spellings.sh:1|spellings.sh:2|spellings.sh:3|spellings.sh:4|spellings.sh:5|spellings.sh:6|spellings.sh:7|tmpl.sh:2|twice.sh:1|wf.yml:4|workflows/go-test.yaml:2|workflows/go-test.yaml:3|workflows/go-test.yaml:4|workflows/other.yaml:1|workflows/test_workflow_scripts/mock/mock-hangup-linux.sh:2"
+sudo_unnamed_is sudo-forms "$tmp/se" "any.sh:1|any.sh:2|any.sh:3|bundled.sh:1|env.sh:1|env.sh:2|env.sh:3|env.sh:4|env.sh:5|later.sh:1|later.sh:2|other.sh:2|preserve.sh:1|preserve.sh:2|spellings.sh:1|spellings.sh:2|spellings.sh:3|spellings.sh:4|spellings.sh:5|spellings.sh:6|spellings.sh:7|tmpl.sh:2|twice.sh:1|wf.yml:4|workflows/go-test.yaml:2|workflows/go-test.yaml:3|workflows/go-test.yaml:4|workflows/other.yaml:1|workflows/test_workflow_scripts/mock/mock-hangup-linux.sh:2"
+# A bare sudo of keploy, by a $..._BIN variable or a path or name holding
+# keploy, names SUDO_ENV or is refused; its --version, and a sudo of anything
+# else, is not read.
+mkdir -p "$tmp/bare"
+{
+  printf '[ -f keploy.yml ] || %s "$RECORD_BIN" config --generate\n' sudo
+  printf '%s -n "$WORK/bin/keploy" record -c ./app\n' sudo
+  printf '%s $REPLAY_BIN report\n' sudo
+  printf '%s ./keployv2 test -c ./app\n' sudo
+  printf '%s env "${SUDO_ENV[@]}" "$RECORD_BIN" config --generate\n' sudo
+  printf '%s $RECORD_BIN --version\n' sudo
+  printf '%s kill $pid\n' sudo
+  # Any $..._BIN is read as keploy: naming SUDO_ENV costs another binary
+  # nothing, and a keploy is never missed for its variable's name.
+  printf '%s "$MONGO_BIN" --port 1\n' sudo
+} > "$tmp/bare/bare.sh"
+sudo_unnamed_is bare-keploy "$tmp/bare" "bare.sh:1|bare.sh:2|bare.sh:3|bare.sh:4|bare.sh:8"
 # An entry never lets an -E through, even one whose regex matches it.
 free_kept=("${sudo_env_free[@]}")
 sudo_env_free=('e.sh|-E env A=1 true$' 'e.sh|env A=1 true$')

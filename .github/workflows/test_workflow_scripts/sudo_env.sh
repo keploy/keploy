@@ -11,10 +11,14 @@
 #   (provenswitch.AgentArgs).
 # - KEPLOY_PG_V3_LOG_BIND_VALUES=1 puts the raw bind values in the Postgres
 #   replayer's miss lines.
+# - KEPLOY_INTERNAL=1, which every workflow sets, marks the run's telemetry as
+#   keploy's own (pkg/platform/telemetry InternalWhy), so the daily product
+#   metrics leave keploy's CI out of the users' numbers; sudo drops it, and a
+#   keploy started under sudo would send its events as a user's.
 # A workflow that sets another KEPLOY_ variable in an env: block adds it here,
 # or to the names keploy does not read in sudo_env.tests.sh, whose case for
 # that fails until it is in one of them.
-SUDO_SWITCHES=(KEPLOY_EXACT_VIEW_VERIFY KEPLOY_PG_V3_LOG_BIND_VALUES)
+SUDO_SWITCHES=(KEPLOY_EXACT_VIEW_VERIFY KEPLOY_PG_V3_LOG_BIND_VALUES KEPLOY_INTERNAL)
 SUDO_ENV=()
 for _sudo_switch in "${SUDO_SWITCHES[@]}"; do
   if [ -n "${!_sudo_switch+x}" ]; then

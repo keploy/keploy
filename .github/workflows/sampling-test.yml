@@ -23,6 +23,10 @@ concurrency:
   group: sampling-test-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   sampling-test:
     runs-on: ubuntu-latest

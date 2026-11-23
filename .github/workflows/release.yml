@@ -8,6 +8,7 @@ permissions:
   contents: write
 
 env:
+  KEPLOY_INTERNAL: "1"
   # Central ref for the keploy/integrations commit every build leg in
   # this workflow checks out via setup-private-parsers. Mirrors the
   # default in prepare_and_run.yml + golangci-lint.yml so all three

@@ -49,6 +49,7 @@ permissions:
   pull-requests: write
 
 env:
+  KEPLOY_INTERNAL: "1"
   # Report-only by default: a ratio shortfall is logged, never fatal. Set to
   # "true" (here, or via the workflow_dispatch input) to make it blocking.
   PERF_GATE_BLOCKING: ${{ github.event.inputs.gate_blocking || 'false' }}

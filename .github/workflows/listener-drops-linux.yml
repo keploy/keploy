@@ -27,6 +27,10 @@ name: Listener Drops (Linux)
 on:
   workflow_call:
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   listener_drops:
     timeout-minutes: 30

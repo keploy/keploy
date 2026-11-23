@@ -21,6 +21,10 @@ name: Unpublished App Port (Docker)
 on:
   workflow_call:
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   unpublished_port_docker:
     # The PR's agent image is only built for non-fork runs.
