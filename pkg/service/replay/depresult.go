@@ -31,11 +31,12 @@ type mockDisplayInfo struct {
 	// lifetime is the mock's (models.TestModeInfo.Lifetime), for a mock
 	// whose payload is in memory.
 	lifetime models.Lifetime
-	// onDisk is the mock when a replay's read left its payload on disk
-	// (models.Mock.LeavePayloadOnDisk): its summary and target, which can
-	// carry a whole recorded command, are worked out when a report names it
-	// rather than held for every mock of the set.
-	onDisk *models.Mock
+	// onDisk is the mock's view (models.OnDiskView) when a replay's read left
+	// its payload on disk (models.Mock.LeavePayloadOnDisk): its summary and
+	// target, which can carry a whole recorded command, are worked out when a
+	// report names it rather than held for every mock of the set, and the
+	// mock itself, the set's read, is not held for the set's run.
+	onDisk *models.OnDiskView
 	// carryOver: a carry-over mock (models.IsCarryOver), the application's
 	// asynchronous output, placed at place (models.PlaceOf), which the release
 	// rule gives to the test whose window or gap after it holds it.
@@ -50,7 +51,7 @@ type mockDisplayInfo struct {
 // summaryOf is the mock's summary (models.MockSummaryFromSpec).
 func (i mockDisplayInfo) summaryOf() string {
 	if i.onDisk != nil {
-		return models.MockSummaryFromSpec(i.onDisk)
+		return i.onDisk.Summary()
 	}
 	return i.summary
 }
@@ -66,7 +67,7 @@ func (i mockDisplayInfo) requestOf() string {
 // recordedAtOf is when the mock's request was recorded.
 func (i mockDisplayInfo) recordedAtOf() time.Time {
 	if i.onDisk != nil {
-		return i.onDisk.Spec.ReqTimestampMock
+		return i.onDisk.RecordedAt()
 	}
 	return i.recordedAt
 }
@@ -74,15 +75,25 @@ func (i mockDisplayInfo) recordedAtOf() time.Time {
 // lifetimeOf is the mock's lifetime (models.TestModeInfo.Lifetime).
 func (i mockDisplayInfo) lifetimeOf() models.Lifetime {
 	if i.onDisk != nil {
-		return i.onDisk.TestModeInfo.Lifetime
+		return i.onDisk.Lifetime()
 	}
 	return i.lifetime
+}
+
+// operationOf is the operation of the mock's request (models.MockOperation)
+// for a mock whose payload a replay left on disk, read back from it; "" for
+// one the lookup describes from memory, whose request it does not keep.
+func (i mockDisplayInfo) operationOf() string {
+	if i.onDisk != nil {
+		return i.onDisk.Operation()
+	}
+	return ""
 }
 
 // targetOf is the mock's target (mockTargetFromSpec).
 func (i mockDisplayInfo) targetOf() string {
 	if i.onDisk != nil {
-		return mockTargetFromSpec(i.onDisk)
+		return i.onDisk.Target()
 	}
 	return i.target
 }

@@ -55,6 +55,18 @@ func (w *windowMappings) noteStop(at time.Time) {
 	w.mu.Unlock()
 }
 
+// clear drops the buffered test and mock windows once an aged rolled set no
+// longer needs window-derived mappings (the agent streamed mappings itself).
+func (w *windowMappings) clear() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.tests = nil
+	w.mocks = nil
+	w.mu.Unlock()
+}
+
 // lostTestPrefix starts the window name of a test case the recording failed
 // to persist. No test case is named so: a test case's name is a file name.
 const lostTestPrefix = "\x00lost-"
@@ -168,8 +180,13 @@ func (w *windowMappings) addMock(m *models.Mock) {
 	if w == nil {
 		return
 	}
-	wm := models.NewWindowedMock(m)
-	if !wm.TestMock || wm.At.IsZero() {
+	w.addWindowed(models.NewWindowedMock(m))
+}
+
+// addWindowed is addMock of a mock already windowed (models.NewWindowedMock):
+// a mock a test set a recording rolls over to starts with (setRoll's carry).
+func (w *windowMappings) addWindowed(wm models.WindowedMock) {
+	if w == nil || !wm.TestMock || wm.At.IsZero() {
 		return
 	}
 	w.mu.Lock()

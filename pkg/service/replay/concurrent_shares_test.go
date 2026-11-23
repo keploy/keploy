@@ -1355,11 +1355,14 @@ func TestASharedCallNamesItsOperation(t *testing.T) {
 		return &models.Mock{Name: "mock-" + op, Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
 			Method: "POST", URL: "http://localhost:8083/query", Body: op}}}
 	}
+	// A mock a replay's read left on disk names the operation of its
+	// request read back from its file.
 	held, onDisk := gql("GetAppLabels"), gql("GetSubscription")
+	onDisk.LeavePayloadOnDisk(readsBack{gql("GetSubscription")}, models.PayloadAt{Name: onDisk.Name})
 	s := &settlement{
 		lookup: map[string]mockDisplayInfo{
 			held.Name:   {protocol: "HTTP", summary: "POST http://localhost:8083/query"},
-			onDisk.Name: {protocol: "HTTP", onDisk: onDisk},
+			onDisk.Name: {protocol: "HTTP", onDisk: onDisk.OnDiskView()},
 		},
 		sp: &sharePlan{info: map[string]*shareInfo{held.Name: {mock: held}}},
 	}
@@ -1374,3 +1377,13 @@ func TestASharedCallNamesItsOperation(t *testing.T) {
 		}
 	}
 }
+
+// readsBack is a mock file whose one mock reads back as recorded.
+type readsBack struct{ recorded *models.Mock }
+
+func (r readsBack) LoadPayload(context.Context, models.PayloadAt) (*models.Mock, error) {
+	c := *r.recorded
+	return &c, nil
+}
+func (readsBack) SetPayloadMutator(models.PayloadMutator) {}
+func (readsBack) PayloadMutator() models.PayloadMutator   { return nil }
