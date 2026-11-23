@@ -62,6 +62,25 @@ func TestLastWrittenTimeZeroBeforeAnyChunk(t *testing.T) {
 	}
 }
 
+// HeldFrom is the zero time until a parser holds a call, then the time it set,
+// and the zero time again once the zero time clears it.
+func TestHeldFromIsWhatHoldFromLastSet(t *testing.T) {
+	t.Parallel()
+	f := New(make(chan Chunk), nil, nil)
+	if got := f.HeldFrom(); !got.IsZero() {
+		t.Errorf("HeldFrom before any hold = %v, want zero", got)
+	}
+	at := time.Unix(1700000000, 123456789)
+	f.HoldFrom(at)
+	if got := f.HeldFrom(); !got.Equal(at) {
+		t.Errorf("HeldFrom = %v, want %v", got, at)
+	}
+	f.HoldFrom(time.Time{})
+	if got := f.HeldFrom(); !got.IsZero() {
+		t.Errorf("HeldFrom once cleared = %v, want zero", got)
+	}
+}
+
 // TestReadStashExhaustionNotEOF pins the invariant that draining
 // the internal byte-stash does NOT surface as io.EOF to the caller.
 // bytes.Buffer.Read returns io.EOF whenever it empties the buffer,
