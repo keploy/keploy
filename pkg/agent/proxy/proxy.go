@@ -5826,16 +5826,32 @@ var (
 	_ agent.LearnedElsewhereReader = (*Proxy)(nil)
 )
 
-// GetConsumedMocks returns the consumed filtered mocks.
-func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
+// GetConsumedMocks returns the consumed filtered mocks. keploy test's read of
+// a set's end (models.SetEndRead) also says what the window ownership rules
+// did in the set (MockManager.logSetOwnership).
+func (p *Proxy) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	m := p.getMockManager()
 	if m == nil {
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
-	return m.GetConsumedMocks(), nil
+	consumed := m.GetConsumedMocks()
+	if models.SetEndRead(ctx) {
+		m.logSetOwnership()
+	}
+	return consumed, nil
 }
 
-// ServedCounts forwards how many times each mock answered a request this
+// EdgeWindows forwards the mock manager's EdgeWindows: the recorded windows
+// the agent's window filter reads for the edge rule; nil when no manager.
+func (p *Proxy) EdgeWindows() *models.WindowSchedule {
+	m := p.getMockManager()
+	if m == nil {
+		return nil
+	}
+	return m.EdgeWindows()
+}
+
+// ServedCounts forwards how many calls each mock is credited with this
 // session (the mock manager's ServedCounts); nil when no manager.
 func (p *Proxy) ServedCounts() map[string]uint64 {
 	m := p.getMockManager()
@@ -6672,6 +6688,14 @@ func (p *Proxy) FileAtSetEnd(ctx context.Context) error {
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
 func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	// keploy test's read of a set's end under the proven switch, which reads
+	// no consumed drain then (unclaimedCalls): the set's ownership summary
+	// is said here (MockManager.logSetOwnership says it once a set).
+	if models.SetEndRead(ctx) {
+		if m := p.getMockManager(); m != nil {
+			defer m.logSetOwnership()
+		}
+	}
 	return p.getMockErrorsOn(ctx, &p.missWindow)
 }
 

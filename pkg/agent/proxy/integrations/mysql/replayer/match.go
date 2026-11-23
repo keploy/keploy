@@ -646,13 +646,26 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		winStart, winEnd = time.Time{}, time.Time{}
 	}
 	windowActive := !winStart.IsZero() && !winEnd.IsZero()
+	windowOwner, _ := mockDb.(integrations.WindowOwnership)
+	windowReclaim, _ := mockDb.(integrations.WindowReclaim)
+	// edgeOwnedByOpenWindow reports whether the edge rule gives mk to the open
+	// window (models.WindowSchedule.EdgeOwner): a plain per-test timed mock
+	// placed just outside every recorded window, nearest the open window's
+	// edge within models.MockWindowEdgeSkew, which no other rule places.
+	edgeOwnedByOpenWindow := func(mk *models.Mock) bool {
+		if windowOwner == nil || exactServing || !windowActive {
+			return false
+		}
+		owner, owned := windowOwner.EdgeOwnerWindow(mk)
+		return owned && owner.Start.Equal(winStart) && owner.End.Equal(winEnd)
+	}
 	// mockInCurrentWindow reports whether a mock's recorded request timestamp
-	// lies within the active outer-test window, or the mock was in flight
-	// when the window's test began (sent in the gap before it and answered
-	// inside it: integrations.InFlightOwner), which the windowed read serves
-	// as the test's own. When no window is active (initial staging / between
-	// tests) every mock is treated as in-window so behaviour matches the
-	// pre-fix path.
+	// lies within the active outer-test window, was in flight when the
+	// window's test began (sent in the gap before it and answered inside it:
+	// integrations.InFlightOwner), or lies just outside every recorded window
+	// and belongs to this window by bounded edge skew (edgeOwnedByOpenWindow).
+	// When no window is active (initial staging / between tests) every mock is
+	// treated as in-window so behaviour matches the pre-fix path.
 	mockInCurrentWindow := func(mk *models.Mock) bool {
 		if !windowActive {
 			return true
@@ -664,7 +677,65 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if !req.Before(winStart) && !req.After(winEnd) {
 			return true
 		}
-		return integrations.InFlightIntoOpenTest(mockDb, mk)
+		if integrations.InFlightIntoOpenTest(mockDb, mk) {
+			return true
+		}
+		return edgeOwnedByOpenWindow(mk)
+	}
+	// pointOwnerRank ranks mk by its place alone (models.PlaceOf; for a
+	// MySQL mock its request time): by the smallest recorded window that
+	// holds it (models.WindowSchedule.OwnerOf), and outside every window by
+	// the edge rule (EdgeOwnerWindow):
+	//   0 — the open window owns it, no window owns it, it is undated, or no
+	//       windows are seeded
+	//   1 — outside every window, the edge rule gives it to the open window
+	//   2 — another recorded window owns it
+	// When pointOwnerRank returns 0 for a mock inside the open window, no
+	// later-starting window contains its place.
+	pointOwnerRank := func(mk *models.Mock) int {
+		if windowOwner == nil || exactServing || !windowActive {
+			return 0
+		}
+		place := models.PlaceOf(mk)
+		if place.IsZero() {
+			return 0
+		}
+		owner, inside, owned := windowOwner.OwnerTestWindow(place)
+		if !owned {
+			return 0
+		}
+		if !inside {
+			// Outside every window only the edge rule owns a mock, and only
+			// one of its shape that no other rule places.
+			if owner, owned = windowOwner.EdgeOwnerWindow(mk); !owned {
+				return 0
+			}
+			if owner.Start.Equal(winStart) && owner.End.Equal(winEnd) {
+				return 1
+			}
+			return 2
+		}
+		if owner.Start.Equal(winStart) && owner.End.Equal(winEnd) {
+			return 0
+		}
+		return 2
+	}
+	// txAgrees reports whether mk's recorded session status agrees with
+	// whether the live connection is currently inside a transaction
+	// (decodeCtx.InTx) for non-control commands when exact serving is off.
+	// This prevents an in-transaction query (e.g. a transactional read before
+	// the connection binds) from stealing a non-transactional read recorded
+	// on another connection in the same window, and vice versa.
+	liveTxKnown := !exactServing && decodeCtx != nil && txControlOf(req) == txNone
+	txAgrees := func(mk *models.Mock) bool {
+		if !liveTxKnown {
+			return true
+		}
+		status, known := answeredStatus(mk)
+		if !known {
+			return true
+		}
+		return (status&serverStatusInTrans != 0) == decodeCtx.InTx
 	}
 
 	// sameStatementOnly is the rule of a fallback under exact serving: a
@@ -805,7 +876,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// pass has read the per-test and connection tiers, they are kept in
 	// perTestTier / connectionTier (tiersRead) and only the session tier is
 	// read again.
-	var pool, perTestTier, connectionTier []*models.Mock
+	var pool, perTestTier, connectionTier, windowCandidates []*models.Mock
 	tiersRead := false
 
 	// fetchTiers reads the three pools the scan merges. sessionOf is the
@@ -1148,23 +1219,67 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			}
 		}
 	case windowPass && hasWindowReader:
+		readStart, readEnd := winStart, winEnd
+		if windowOwner != nil && !exactServing {
+			readStart = winStart.Add(-models.MockWindowEdgeSkew)
+			readEnd = winEnd.Add(models.MockWindowEdgeSkew)
+		}
 		perTestMocks, sessionMocks, connectionMocks, err := fetchTiers(func() ([]*models.Mock, error) {
-			return windowReader.GetSessionMocksInWindow(winStart, winEnd)
+			return windowReader.GetSessionMocksInWindow(readStart, readEnd)
 		})
 		if err != nil {
 			return nil, false, nil, err
 		}
 		perTestTier, connectionTier, tiersRead = perTestMocks, connectionMocks, true
-		candidates = slices.Values(merge(inWindowOnly(perTestMocks), sessionMocks, inWindowOnly(connectionMocks)))
+		windowCandidates = merge(inWindowOnly(perTestMocks), inWindowOnly(sessionMocks), inWindowOnly(connectionMocks))
+		candidates = slices.Values(windowCandidates)
 	default:
 		if err := loadPool(); err != nil {
 			return nil, false, nil, err
 		}
 		if windowPass {
-			candidates = slices.Values(inWindowOnly(pool))
+			windowCandidates = inWindowOnly(pool)
+			candidates = slices.Values(windowCandidates)
 		} else {
 			candidates = slices.Values(pool)
 		}
+	}
+
+	getWindowCandidates := func() []*models.Mock {
+		if windowCandidates != nil {
+			return windowCandidates
+		}
+		if pool != nil && windowActive {
+			windowCandidates = inWindowOnly(pool)
+		}
+		return windowCandidates
+	}
+	// ownerRank extends pointOwnerRank with span ownership (OwnerTestWindowSpan):
+	// if another shorter concurrent window overlaps mk's request timestamp, check
+	// whether the open window is the smallest window containing mk's full
+	// transaction span (for unbound transactional commands) or [Req, Res] span.
+	ownerRank := func(mk *models.Mock) int {
+		r := pointOwnerRank(mk)
+		if r != 2 || windowOwner == nil || exactServing || !windowActive {
+			return r
+		}
+		reqTs := mk.Spec.ReqTimestampMock
+		if reqTs.IsZero() {
+			return 0
+		}
+		if liveTxKnown && decodeCtx.InTx && bound == nil {
+			if txStart, txEnd, ok := txSpanOf(mk, getWindowCandidates(), winEnd); ok {
+				if owner, owned := windowOwner.OwnerTestWindowSpan(txStart, txEnd); owned && owner.Start.Equal(winStart) && owner.End.Equal(winEnd) {
+					return 0
+				}
+			}
+		}
+		if resTs := mk.Spec.ResTimestampMock; !resTs.IsZero() && resTs.After(reqTs) && !resTs.After(winEnd) {
+			if owner, owned := windowOwner.OwnerTestWindowSpan(reqTs, resTs); owned && owner.Start.Equal(winStart) && owner.End.Equal(winEnd) {
+				return 0
+			}
+		}
+		return r
 	}
 
 	debugOn := logger.Core().Enabled(zapcore.DebugLevel)
@@ -1429,7 +1544,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	}
 	// fallbacks are a COM_STMT_EXECUTE's FIFO and score candidates, gated
 	// after the walk, in the selection's rank (execFallbacks).
-	fallbacks := execFallbacks{gate: gate, sameStatementOnly: sameStatementOnly, testsOwn: testsOwn, eager: opts.eagerGate}
+	fallbacks := execFallbacks{gate: gate, sameStatementOnly: sameStatementOnly, testsOwn: testsOwn, ownerRank: ownerRank, eager: opts.eagerGate}
 
 	var (
 		// Score-based candidate tracking. Every non-definitive matcher returns
@@ -1530,12 +1645,6 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		queryExactResp *mysql.Response
 		queryExactMock *models.Mock
 
-		// queryWaitingResp/Mock and execWaitingResp/Mock are the first exact
-		// match of a COM_QUERY, and the first definitive match of a
-		// COM_STMT_EXECUTE, that waited for the bound connection
-		// (waitsForBound).
-		queryWaitingResp, execWaitingResp *mysql.Response
-		queryWaitingMock, execWaitingMock *models.Mock
 		// queryUnowned is set at a COM_QUERY's first exact match the open
 		// test does not own, under exact serving: the walk stops there.
 		queryUnowned bool
@@ -1656,8 +1765,73 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	if gapsKnown {
 		decidedGapRank = 0
 	}
+	betterWaiting := func(curMock *models.Mock, curOnBound, curTxOk bool, curRank int, candOnBound, candTxOk bool, candRank int) bool {
+		if curMock == nil {
+			return true
+		}
+		if candOnBound != curOnBound {
+			return candOnBound
+		}
+		if candTxOk != curTxOk {
+			return candTxOk
+		}
+		return candRank < curRank
+	}
+	// commitReclaim commits the reclaim of the best candidate whose path the
+	// store takes (integrations.WindowReclaim.CommitWindowReclaim), trying
+	// them in betterWaiting's order, the first met first on a tie: a refused
+	// path (one the open test holds a step of, or one gone since) leaves the
+	// call to the next candidate. Nil when none commits.
+	commitReclaim := func(cands []reclaimCand) *models.Mock {
+		slices.SortStableFunc(cands, func(a, b reclaimCand) int {
+			switch {
+			case betterWaiting(b.mock, b.onBound, b.txOk, b.rank, a.onBound, a.txOk, a.rank):
+				return -1
+			case betterWaiting(a.mock, a.onBound, a.txOk, a.rank, b.onBound, b.txOk, b.rank):
+				return 1
+			}
+			return 0
+		})
+		for _, c := range cands {
+			if _, committed := windowReclaim.CommitWindowReclaim(c.mock, winStart, winEnd); committed {
+				return c.mock
+			}
+		}
+		return nil
+	}
 	decidesOnDefinitive := req.Header.Type == sCOM_STMT_EXEC && !windowActive && !exactServing && !opts.wholeWalk
+	reclaimed := false
+	// firstExact is the first exact match of the call the walk met in the
+	// open window, and firstDeferred whether the ownership rules kept it from
+	// answering at once (another window owns it, the edge rule alone gives it
+	// the open window, or its recorded transaction status disagrees);
+	// scoreTop is the highest score of a drifted candidate
+	// the gate let through in the pass that answered. What the store counts of
+	// them (integrations.OwnershipTally) says which rule decided the call.
+	var (
+		firstExact    *models.Mock
+		firstDeferred bool
+		scoreTop      int
+	)
+	var (
+		exactWindowMatches []*models.Mock
+		dmlWindowMatches   []*models.Mock
+	)
 	for {
+		// Per-pass waiting and score-ranking state: scoped inside the loop so
+		// a full-scan retry always starts clean by construction.
+		var (
+			queryWaitingResp, execWaitingResp       *mysql.Response
+			queryWaitingMock, execWaitingMock       *models.Mock
+			queryWaitingOnBound, execWaitingOnBound bool
+			queryWaitingTxOk, execWaitingTxOk       bool
+			queryWaitingRank, execWaitingRank       int
+			bestScoreOwn, bestScoreOnBound          bool
+			bestScoreTxOk                           bool
+			bestScoreRank, bestPartialScore         int
+		)
+		exactWindowMatches = exactWindowMatches[:0]
+		dmlWindowMatches = dmlWindowMatches[:0]
 		for mock := range candidates {
 			if opts.examined != nil {
 				*opts.examined++
@@ -1766,12 +1940,26 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 								queryExactResp, queryExactMock = &mock.Spec.MySQLResponses[0], mock
 							}
 							queryUnowned = true
-						case waitsForBound(mock):
-							if queryWaitingMock == nil {
-								queryWaitingResp, queryWaitingMock = &mock.Spec.MySQLResponses[0], mock
-							}
 						default:
-							matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+							candOnBound := !waitsForBound(mock)
+							candTxOk := txAgrees(mock)
+							candPointRank := pointOwnerRank(mock)
+							candRank := ownerRank(mock)
+							answersAtOnce := candTxOk && candRank == 0 && (candPointRank == 0 || windowReclaim == nil)
+							if firstExact == nil {
+								firstExact, firstDeferred = mock, candOnBound && !answersAtOnce
+							}
+							if candOnBound && answersAtOnce {
+								matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+							} else {
+								if windowReclaim != nil && !exactServing && windowActive && candTxOk && isConsumablePerTestMock(mock) {
+									exactWindowMatches = append(exactWindowMatches, mock)
+								}
+								if betterWaiting(queryWaitingMock, queryWaitingOnBound, queryWaitingTxOk, queryWaitingRank, candOnBound, candTxOk, candRank) {
+									queryWaitingResp, queryWaitingMock = &mock.Spec.MySQLResponses[0], mock
+									queryWaitingOnBound, queryWaitingTxOk, queryWaitingRank = candOnBound, candTxOk, candRank
+								}
+							}
 						}
 					} else {
 						// Reporting only — see nearestMock. A score-0 candidate is
@@ -1779,12 +1967,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
 							trackNearest(mock, qp.Query, recordedIdentity)
 						}
-						if c > maxMatchedCount {
-							// Track the closest candidate for the mismatch report even
-							// when strict rejects it as a servable match below.
-							bestPartialMock = mock
-							if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
-								bestPartialQuery = qp.Query
+						if c > 0 {
+							// Track the highest-scoring candidate for the mismatch
+							// report even when strict rejects it below (ties keep
+							// the later candidate, matching pre-existing behavior).
+							if c >= bestPartialScore {
+								bestPartialScore = c
+								bestPartialMock = mock
+								if qp, qok := mockReq.Message.(*mysql.QueryPacket); qok {
+									bestPartialQuery = qp.Query
+								}
 							}
 							// Under exact serving a recording of the statement
 							// made with other inline literals answers only when
@@ -1799,7 +1991,27 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							if !gate.allows(mock) {
 								continue
 							}
-							maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+							scoreTop = max(scoreTop, c)
+							candOwn := testsOwn(mock)
+							candOnBound := candOwn && !waitsForBound(mock)
+							candTxOk := candOwn && txAgrees(mock)
+							candRank := 0
+							if candOwn {
+								candRank = ownerRank(mock)
+								if windowReclaim != nil && !exactServing && windowActive && candTxOk && live.isDML && isConsumablePerTestMock(mock) && maskSQLLiterals(recordedIdentity) == live.maskedLiterals() {
+									dmlWindowMatches = append(dmlWindowMatches, mock)
+								}
+							}
+							better := matchedMock == nil ||
+								(candOwn && !bestScoreOwn) ||
+								(candOwn && bestScoreOwn && candOnBound && !bestScoreOnBound) ||
+								(candOwn == bestScoreOwn && candOnBound == bestScoreOnBound && candTxOk && !bestScoreTxOk) ||
+								(candOwn == bestScoreOwn && candOnBound == bestScoreOnBound && candTxOk == bestScoreTxOk && candRank < bestScoreRank) ||
+								(candOwn == bestScoreOwn && candOnBound == bestScoreOnBound && candTxOk == bestScoreTxOk && candRank == bestScoreRank && c > maxMatchedCount)
+							if better {
+								bestScoreOwn, bestScoreOnBound, bestScoreTxOk, bestScoreRank, maxMatchedCount = candOwn, candOnBound, candTxOk, candRank, c
+								matchedResp, matchedMock = &mock.Spec.MySQLResponses[0], mock
+							}
 						}
 					}
 
@@ -1950,12 +2162,26 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							if paramsOnlyMock == nil {
 								paramsOnlyResp, paramsOnlyMock = &mock.Spec.MySQLResponses[0], mock
 							}
-						case inWindow && waitsForBound(mock):
-							if execWaitingMock == nil {
-								execWaitingResp, execWaitingMock = &mock.Spec.MySQLResponses[0], mock
-							}
 						case inWindow:
-							matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
+							candOnBound := !waitsForBound(mock)
+							candTxOk := txAgrees(mock)
+							candPointRank := pointOwnerRank(mock)
+							candRank := ownerRank(mock)
+							answersAtOnce := candTxOk && candRank == 0 && (candPointRank == 0 || windowReclaim == nil)
+							if firstExact == nil {
+								firstExact, firstDeferred = mock, candOnBound && !answersAtOnce
+							}
+							if candOnBound && answersAtOnce {
+								matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
+							} else {
+								if windowReclaim != nil && !exactServing && windowActive && candTxOk && isConsumablePerTestMock(mock) {
+									exactWindowMatches = append(exactWindowMatches, mock)
+								}
+								if betterWaiting(execWaitingMock, execWaitingOnBound, execWaitingTxOk, execWaitingRank, candOnBound, candTxOk, candRank) {
+									execWaitingResp, execWaitingMock = &mock.Spec.MySQLResponses[0], mock
+									execWaitingOnBound, execWaitingTxOk, execWaitingRank = candOnBound, candTxOk, candRank
+								}
+							}
 						case recordedInATestsWindow(mock):
 							if defExecMockTest == nil {
 								defExecRespTest, defExecMockTest = &mock.Spec.MySQLResponses[0], mock
@@ -2040,6 +2266,59 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if !stmtMatched && execWaitingMock != nil {
 			matchedResp, matchedMock, stmtMatched = execWaitingResp, execWaitingMock, true
 		}
+		// Online augmenting-path reclaim: if no unconsumed in-window exact
+		// match exists, check whether an earlier overlapping window consumed an
+		// exact match inside [winStart, winEnd] while leaving an identical
+		// alternative still unconsumed inside its own window.
+		if windowActive && !exactServing && windowReclaim != nil && opts.probed == nil {
+			if req.Header.Type == sCOM_QUERY && !queryMatched {
+				var cands []reclaimCand
+				for _, cand := range windowReclaim.ReclaimableInWindow(winStart, winEnd) {
+					if cand == nil || cand.Kind != models.MySQL || len(cand.Spec.MySQLResponses) == 0 || skippedAtCommandPhase(cand) {
+						continue
+					}
+					for _, mr := range cand.Spec.MySQLRequests {
+						if ok, _, _ := matchQueryLive(logger, mr.PacketBundle, req.PacketBundle, &live, queryPacketText); ok {
+							if !gate.allows(cand) {
+								continue
+							}
+							cands = append(cands, reclaimCand{cand, !waitsForBound(cand), txAgrees(cand), ownerRank(cand)})
+							break
+						}
+					}
+				}
+				if rec := commitReclaim(cands); rec != nil {
+					matchedResp, matchedMock, queryMatched, reclaimed = &rec.Spec.MySQLResponses[0], rec, true, true
+				}
+			} else if req.Header.Type == sCOM_STMT_EXEC && !stmtMatched {
+				var cands []reclaimCand
+				for _, cand := range windowReclaim.ReclaimableInWindow(winStart, winEnd) {
+					if cand == nil || cand.Kind != models.MySQL || len(cand.Spec.MySQLResponses) == 0 || skippedAtCommandPhase(cand) {
+						continue
+					}
+					for _, mr := range cand.Spec.MySQLRequests {
+						expMsg, eOk := mr.Message.(*mysql.StmtExecutePacket)
+						if !eOk || expMsg == nil {
+							continue
+						}
+						expectedQuery, err := statementQuery(&mr.PacketBundle, cand.Spec.Metadata["connID"], expMsg.StatementID)
+						if err != nil || expectedQuery == "" {
+							continue
+						}
+						if ok, _, _ := matchStmtExecuteLive(logger, mr.PacketBundle, req.PacketBundle, expectedQuery, liveExec, liveStatementParams, cand.Name, util.NewNoiseChecker(cand.Noise)); ok {
+							if !gate.allows(cand) {
+								continue
+							}
+							cands = append(cands, reclaimCand{cand, !waitsForBound(cand), txAgrees(cand), ownerRank(cand)})
+							break
+						}
+					}
+				}
+				if rec := commitReclaim(cands); rec != nil {
+					matchedResp, matchedMock, stmtMatched, reclaimed = &rec.Spec.MySQLResponses[0], rec, true, true
+				}
+			}
+		}
 		settled := queryMatched || stmtMatched ||
 			// See firstPass: the window's FIFO candidate, and its match on the
 			// parameters alone, outrank every other fallback.
@@ -2076,7 +2355,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			}
 		}
 		candidates = slices.Values(pool)
-		maxMatchedCount, matchedResp, matchedMock = 0, nil, nil
+		maxMatchedCount, matchedResp, matchedMock, scoreTop = 0, nil, nil, 0
 		queryMatched, stmtMatched, execDecided = false, false, false
 		bestPartialMock, bestPartialQuery = nil, ""
 		nearestMock, nearestQuery, nearestPrefix = nil, "", 0
@@ -2099,6 +2378,38 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// candidate rather than dropping to the score-based partial pick.
 	if req.Header.Type == sCOM_QUERY && !queryMatched && queryExactMock != nil {
 		matchedResp, matchedMock, queryMatched = queryExactResp, queryExactMock, true
+	}
+	// Drifted DML reclaim: if a transactional/DML COM_QUERY (e.g. INSERT with a
+	// replay-generated UUID) found no unconsumed in-window match, reclaim a
+	// consumed same-masked-SQL DML mock in [winStart, winEnd] whose earlier
+	// overlapping window still holds an unconsumed identical-response copy.
+	if req.Header.Type == sCOM_QUERY && !queryMatched && (matchedMock == nil || !testsOwn(matchedMock)) &&
+		windowActive && !exactServing && windowReclaim != nil && opts.probed == nil {
+		if !live.ready {
+			if qp, _ := req.Message.(*mysql.QueryPacket); qp != nil {
+				live.fill(qp.Query)
+			}
+		}
+		if live.isDML {
+			var cands []reclaimCand
+			wantMask := live.maskedLiterals()
+			for _, cand := range windowReclaim.ReclaimableInWindow(winStart, winEnd) {
+				if cand == nil || cand.Kind != models.MySQL || len(cand.Spec.MySQLResponses) == 0 || skippedAtCommandPhase(cand) {
+					continue
+				}
+				sqlText := queryMockSQL(cand)
+				if sqlText == "" || !sqlparser.IsDML(sqlText) || maskSQLLiterals(sqlText) != wantMask {
+					continue
+				}
+				if !gate.allows(cand) {
+					continue
+				}
+				cands = append(cands, reclaimCand{cand, !waitsForBound(cand), txAgrees(cand), ownerRank(cand)})
+			}
+			if rec := commitReclaim(cands); rec != nil {
+				matchedResp, matchedMock, reclaimed = &rec.Spec.MySQLResponses[0], rec, true
+			}
+		}
 	}
 
 	// COM_STMT_EXECUTE FIFO fallback. If the scan found no definitive
@@ -2664,11 +2975,79 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 	}
 
-	// Update the mock in the database BEFORE modifying the response
-	// This ensures we update using the original mock state
-	if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise); !okk {
-		logger.Debug("failed to update the matched mock")
-		return nil, false, nil, &refusedConsume{mock: matchedMock}
+	// Update the mock in the database BEFORE modifying the response.
+	// A reclaimed mock was already consumed by its earlier overlapping window
+	// and CommitWindowReclaim just consumed its unconsumed replacement.
+	if !reclaimed {
+		if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise); !okk {
+			logger.Debug("failed to update the matched mock")
+			return nil, false, nil, &refusedConsume{mock: matchedMock}
+		}
+		if !exactServing && windowActive && windowReclaim != nil && opts.probed == nil && isConsumablePerTestMock(matchedMock) && pointOwnerRank(matchedMock) != 0 {
+			var alts []*models.Mock
+			addAlt := func(alt *models.Mock) {
+				if alt != nil && alt != matchedMock && alt.Name != matchedMock.Name && sameRecordedResponse(matchedMock, alt) {
+					alts = append(alts, alt)
+				}
+			}
+			switch {
+			case queryMatched || stmtMatched:
+				for _, alt := range exactWindowMatches {
+					addAlt(alt)
+				}
+				// Also link already-consumed reclaimable exact matches inside
+				// this window so multi-hop augmenting paths remain connected.
+				for _, cand := range windowReclaim.ReclaimableInWindow(winStart, winEnd) {
+					if cand == nil || cand == matchedMock || cand.Name == matchedMock.Name || cand.Kind != models.MySQL || !sameRecordedResponse(matchedMock, cand) {
+						continue
+					}
+					if req.Header.Type == sCOM_QUERY {
+						for _, mr := range cand.Spec.MySQLRequests {
+							if ok, _, _ := matchQueryLive(logger, mr.PacketBundle, req.PacketBundle, &live, queryPacketText); ok {
+								alts = append(alts, cand)
+								break
+							}
+						}
+					} else if req.Header.Type == sCOM_STMT_EXEC {
+						for _, mr := range cand.Spec.MySQLRequests {
+							expMsg, eOk := mr.Message.(*mysql.StmtExecutePacket)
+							if !eOk || expMsg == nil {
+								continue
+							}
+							expectedQuery, err := statementQuery(&mr.PacketBundle, cand.Spec.Metadata["connID"], expMsg.StatementID)
+							if err != nil || expectedQuery == "" {
+								continue
+							}
+							if ok, _, _ := matchStmtExecuteLive(logger, mr.PacketBundle, req.PacketBundle, expectedQuery, liveExec, liveStatementParams, cand.Name, util.NewNoiseChecker(cand.Noise)); ok {
+								alts = append(alts, cand)
+								break
+							}
+						}
+					}
+				}
+			case req.Header.Type == sCOM_QUERY && !queryMatched && live.isDML:
+				for _, alt := range dmlWindowMatches {
+					addAlt(alt)
+				}
+				wantMask := live.maskedLiterals()
+				for _, cand := range windowReclaim.ReclaimableInWindow(winStart, winEnd) {
+					if cand == nil || cand == matchedMock || cand.Name == matchedMock.Name || cand.Kind != models.MySQL || !sameRecordedResponse(matchedMock, cand) {
+						continue
+					}
+					if sqlText := queryMockSQL(cand); sqlText != "" && sqlparser.IsDML(sqlText) && maskSQLLiterals(sqlText) == wantMask {
+						alts = append(alts, cand)
+					}
+				}
+			}
+			if len(alts) > 0 {
+				windowReclaim.RecordWindowAlternatives(matchedMock, winStart, winEnd, alts)
+			}
+		}
+	}
+
+	if tally, ok := mockDb.(integrations.OwnershipTally); ok && windowActive && !exactServing && opts.probed == nil {
+		tallyOwnership(tally, matchedMock, pointOwnerRank(matchedMock), firstExact, firstDeferred,
+			req.Header.Type == sCOM_QUERY && !queryMatched && !reclaimed && maxMatchedCount > 0 && maxMatchedCount < scoreTop)
 	}
 
 	// Create a copy of the response to avoid modifying the original mock

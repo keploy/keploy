@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // TestRunTestSetStagesEveryRecordedWindow: the staging call carries the window of
@@ -516,4 +518,370 @@ func TestCarryOverAttributionMapsAPollPlacedAtItsAnswerByItsAnswer(t *testing.T)
 	if !bootAsked(boot, attrAt(1000)) {
 		t.Fatal("a call asked as the app booted is no longer start-up traffic")
 	}
+}
+
+// creditedAt is a consume a window reclaim credits to test's call in place of
+// replaces (MockState.CreditTo, CreditReplaces).
+func creditedAt(name string, ms int, test, replaces string) models.MockState {
+	st := consumedAt(name, ms, models.Deleted, false)
+	st.CreditTo, st.CreditReplaces = test, replaces
+	return st
+}
+
+// mappedList is test's entry of m, in order.
+func mappedList(m *models.Mapping, test string) []string {
+	var out []string
+	for _, tc := range m.TestCases {
+		if tc.ID == test {
+			for _, e := range tc.Mocks {
+				out = append(out, e.Name)
+			}
+		}
+	}
+	return out
+}
+
+// A window reclaim's credits (the agent's CommitWindowReclaim) move each
+// earlier test's entry to the recording its call is credited with now, in the
+// place of the one it was: the outer test lists m-out, the inner test m-in,
+// each recording once; along a two-hop path each holder moves one step. Only
+// the running test's own consumes are judged by its verdict: a credit is kept
+// whatever it is. Before, the inner test's drain was mapped as its own (m-out
+// dropped by its window filter, m-in kept), and the outer test kept m-in: m-in
+// was listed for two tests and m-out for none, so the next replay missed.
+func TestCarryOverAttributionMovesAReclaimsCredits(t *testing.T) {
+	win := func(name string, from, to int) *models.TestCase {
+		return &models.TestCase{Name: name, Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(from)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(to)}}
+	}
+	t.Run("one hop", func(t *testing.T) {
+		cases := []*models.TestCase{win("outer", 1000, 1100), win("inner", 1010, 1020), win("unrelated", 1080, 1090)}
+		a := newCarryOverAttribution(cases)
+		mapping := &models.Mapping{}
+		a.mapConsumed(mapping, "outer", attrAt(1000), attrAt(1100), []models.MockState{consumedAt("m-in", 1015, models.Deleted, false)})
+		inner := []models.MockState{creditedAt("m-out", 1085, "outer", "m-in"), consumedAt("m-in", 1015, models.Deleted, false)}
+		a.mapConsumed(mapping, "inner", attrAt(1010), attrAt(1020), inner)
+		if got := mappedList(mapping, "outer"); !reflect.DeepEqual(got, []string{"m-out"}) {
+			t.Errorf("outer lists %v; want [m-out], the copy its call is credited with now", got)
+		}
+		if got := mappedList(mapping, "inner"); !reflect.DeepEqual(got, []string{"m-in"}) {
+			t.Errorf("inner lists %v; want [m-in], its own", got)
+		}
+		passing := map[string]models.MockState{}
+		a.keepWhateverTheVerdict(passing, "inner", inner)
+		if _, ok := passing["m-out"]; !ok {
+			t.Error("m-out, credited to outer, is not kept whatever inner's verdict")
+		}
+		if _, ok := passing["m-in"]; ok {
+			t.Error("m-in, inner's own consume, is kept whatever inner's verdict")
+		}
+	})
+	t.Run("two hops", func(t *testing.T) {
+		cases := []*models.TestCase{win("A", 2000, 2100), win("B", 2010, 2060), win("C", 2045, 2055)}
+		a := newCarryOverAttribution(cases)
+		mapping := &models.Mapping{}
+		a.mapConsumed(mapping, "A", attrAt(2000), attrAt(2100), []models.MockState{consumedAt("m1", 2015, models.Deleted, false)})
+		a.mapConsumed(mapping, "B", attrAt(2010), attrAt(2060), []models.MockState{consumedAt("m3", 2050, models.Deleted, false)})
+		a.mapConsumed(mapping, "C", attrAt(2045), attrAt(2055), []models.MockState{
+			creditedAt("m2", 2085, "A", "m1"), creditedAt("m1", 2015, "B", "m3"), consumedAt("m3", 2050, models.Deleted, false),
+		})
+		for test, want := range map[string][]string{"A": {"m2"}, "B": {"m1"}, "C": {"m3"}} {
+			if got := mappedList(mapping, test); !reflect.DeepEqual(got, want) {
+				t.Errorf("%s lists %v; want %v", test, got, want)
+			}
+		}
+	})
+	t.Run("a credit applied again lists the spare once", func(t *testing.T) {
+		cases := []*models.TestCase{win("outer", 1000, 1100), win("inner", 1010, 1020)}
+		a := newCarryOverAttribution(cases)
+		mapping := &models.Mapping{}
+		a.mapConsumed(mapping, "outer", attrAt(1000), attrAt(1100), []models.MockState{consumedAt("m-in", 1015, models.Deleted, false), consumedAt("own", 1050, models.Deleted, false)})
+		inner := []models.MockState{creditedAt("m-out", 1085, "outer", "m-in"), consumedAt("m-in", 1015, models.Deleted, false)}
+		a.mapConsumed(mapping, "inner", attrAt(1010), attrAt(1020), inner)
+		a.mapDrained(mapping, nil, inner[:1]) // a retry cycle's drain hands the credit over again
+		if got := mappedList(mapping, "outer"); !reflect.DeepEqual(got, []string{"m-out", "own"}) {
+			t.Errorf("outer lists %v; want [m-out own]: the spare once, in m-in's place", got)
+		}
+		// The entry lists the spare and, again, the recording it replaced (a
+		// retry re-mapped it): the credit leaves the spare's one listing.
+		mapping.TestCases[0].Mocks = append(mapping.TestCases[0].Mocks, models.MockEntry{Name: "m-in"})
+		a.mapDrained(mapping, nil, inner[:1])
+		if got := mappedList(mapping, "outer"); !reflect.DeepEqual(got, []string{"m-out", "own"}) {
+			t.Errorf("outer lists %v; want [m-out own]", got)
+		}
+		// A credit in place of a recording the entry does not list adds it.
+		a.mapDrained(mapping, nil, []models.MockState{creditedAt("m-y", 1090, "outer", "m-z")})
+		if got := mappedList(mapping, "outer"); !reflect.DeepEqual(got, []string{"m-out", "own", "m-y"}) {
+			t.Errorf("outer lists %v; want [m-out own m-y]", got)
+		}
+	})
+	t.Run("a credit in a drain no test's mapping reads", func(t *testing.T) {
+		cases := []*models.TestCase{win("outer", 1000, 1100), win("inner", 1010, 1020)}
+		a := newCarryOverAttribution(cases)
+		mapping := &models.Mapping{}
+		a.mapConsumed(mapping, "outer", attrAt(1000), attrAt(1100), []models.MockState{consumedAt("m-in", 1015, models.Deleted, false)})
+		// A connection reset's drain (the request is not retried, its test
+		// fails): the spare credited to outer is listed for outer and kept by
+		// the prune; the drain's other mocks are left to the prune as before.
+		passing := map[string]models.MockState{}
+		a.mapDrained(mapping, passing, []models.MockState{creditedAt("m-out", 1085, "outer", "m-in"), consumedAt("pushed", 1090, models.Deleted, false)})
+		if got := mappedList(mapping, "outer"); !reflect.DeepEqual(got, []string{"m-out"}) {
+			t.Errorf("outer lists %v; want [m-out]", got)
+		}
+		if _, ok := passing["m-out"]; !ok {
+			t.Error("m-out, listed for outer, is not kept by the prune")
+		}
+		if _, ok := passing["pushed"]; ok {
+			t.Error("the drain's own mock is kept by mapDrained; the prune decides it, as before")
+		}
+	})
+	t.Run("a credit flagged carry-over goes to its credited test alone", func(t *testing.T) {
+		// The release rule would list it for the test whose window it was
+		// recorded in; the credit names the test whose call it answers.
+		cases := []*models.TestCase{win("outer", 1000, 1100), win("inner", 1010, 1020), win("later", 1200, 1300)}
+		a := newCarryOverAttribution(cases)
+		mapping := &models.Mapping{}
+		a.mapConsumed(mapping, "outer", attrAt(1000), attrAt(1100), []models.MockState{consumedAt("m-in", 1015, models.Deleted, false)})
+		a.mapConsumed(mapping, "later", attrAt(1200), attrAt(1300), nil)
+		credit := creditedAt("m-out", 1250, "outer", "m-in")
+		credit.CarryOver = true
+		a.mapDrained(mapping, map[string]models.MockState{}, []models.MockState{credit})
+		if got := mappedList(mapping, "outer"); !reflect.DeepEqual(got, []string{"m-out"}) {
+			t.Errorf("outer lists %v; want [m-out]", got)
+		}
+		if got := mappedList(mapping, "later"); len(got) != 0 {
+			t.Errorf("later lists %v; want none: m-out is credited to outer", got)
+		}
+	})
+	t.Run("a credit held for a test mapped later replaces what its drain lists", func(t *testing.T) {
+		cases := []*models.TestCase{win("outer", 1000, 1100), win("inner", 1010, 1020)}
+		a := newCarryOverAttribution(cases)
+		mapping := &models.Mapping{}
+		a.mapConsumed(mapping, "inner", attrAt(1010), attrAt(1020), []models.MockState{creditedAt("m-out", 1085, "outer", "m-in"), consumedAt("m-in", 1015, models.Deleted, false)})
+		a.mapConsumed(mapping, "outer", attrAt(1000), attrAt(1100), []models.MockState{consumedAt("m-in", 1015, models.Deleted, false)})
+		if got := mappedList(mapping, "outer"); !reflect.DeepEqual(got, []string{"m-out"}) {
+			t.Errorf("outer lists %v; want [m-out], in m-in's place", got)
+		}
+		if got := mappedList(mapping, "inner"); !reflect.DeepEqual(got, []string{"m-in"}) {
+			t.Errorf("inner lists %v; want [m-in]", got)
+		}
+	})
+	t.Run("a credit to a test not mapped yet waits for it", func(t *testing.T) {
+		cases := []*models.TestCase{win("outer", 1000, 1100), win("inner", 1010, 1020)}
+		a := newCarryOverAttribution(cases)
+		mapping := &models.Mapping{}
+		a.mapConsumed(mapping, "inner", attrAt(1010), attrAt(1020), []models.MockState{creditedAt("m-out", 1085, "outer", "m-in"), consumedAt("m-in", 1015, models.Deleted, false)})
+		if got := mappedList(mapping, "inner"); !reflect.DeepEqual(got, []string{"m-in"}) {
+			t.Errorf("inner lists %v; want [m-in]", got)
+		}
+		a.mapConsumed(mapping, "outer", attrAt(1000), attrAt(1100), nil)
+		if got := mappedList(mapping, "outer"); !reflect.DeepEqual(got, []string{"m-out"}) {
+			t.Errorf("outer lists %v once mapped; want [m-out]", got)
+		}
+	})
+}
+
+// A consume the edge rule gave the running test's window (MockState.EdgeOwned:
+// placed 30 µs past its end, outside every recorded window) is listed under
+// the running test, as any of its own: its recorded window does not hold it,
+// so the window filter used to leave it in no entry, and the next replay,
+// which loads each test's mocks by name, never served it. One the agent did
+// not give it so is still left out.
+func TestCarryOverAttributionMapsAnEdgeConsumeToItsTest(t *testing.T) {
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(1000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(2000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(2100)}},
+	}
+	a := newCarryOverAttribution(cases)
+	mapping := &models.Mapping{}
+	past := func(name string, us int, edge bool) models.MockState {
+		at := attrAt(1100).Add(time.Duration(us) * time.Microsecond)
+		return models.MockState{
+			Name: name, Kind: models.MySQL, Usage: models.Deleted, Lifetime: models.LifetimePerTest, EdgeOwned: edge,
+			ReqTimestampMock: models.FormatMockTimestamp(at),
+			ResTimestampMock: models.FormatMockTimestamp(at.Add(time.Millisecond)),
+		}
+	}
+	a.mapConsumed(mapping, "test-1", attrAt(1000), attrAt(1100), []models.MockState{
+		consumedAt("own-1", 1050, models.Deleted, false), past("edge-1", 30, true), past("stray-1", 50, false),
+	})
+	got := mappedNames(mapping, "test-1")
+	if !got["own-1"] || !got["edge-1"] || got["stray-1"] || len(got) != 2 {
+		t.Errorf("test-1 maps %v; want own-1 and edge-1 (the edge rule's), not stray-1", got)
+	}
+}
+
+// The real mock manager's drains, mapped as RunTestSet maps them
+// (mapConsumed, then passingEntriesOf): after a reclaim each recording is
+// listed for one test and each test lists the recordings its calls are
+// credited with. One hop: outer m-out, inner m-in. Two hops: A m2, B m1, C m3.
+// One holder holding two
+// steps of a path (H consumed u0 and u1, each with the next as its spare; I
+// reclaims u0): H's entry moves off u1 first, then off u0, and lists u1 and
+// u2; I lists u0. Two reclaims of one test in one drain, the second through
+// the credit the first gave: each holder lists its last copy. Each recording
+// is served once.
+func TestTheManagersReclaimDrainsMapEachRecordingOnce(t *testing.T) {
+	mk := func(name string, at time.Time) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.MySQL,
+			Spec:         models.MockSpec{Metadata: map[string]string{"type": "mocks"}, ReqTimestampMock: at, ResTimestampMock: at.Add(100 * time.Microsecond)},
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true, IsFiltered: true}}
+	}
+	win := func(name string, from, to int) *models.TestCase {
+		return &models.TestCase{Name: name, Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(from)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(to)}}
+	}
+	staged := func(t *testing.T, mm *proxyPkg.MockManager) map[string]*models.Mock {
+		ms, err := mm.GetPerTestMocksInWindow()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]*models.Mock{}
+		for _, m := range ms {
+			out[m.Name] = m
+		}
+		return out
+	}
+	consume := func(t *testing.T, mm *proxyPkg.MockManager, m *models.Mock) {
+		if m == nil || !mm.DeleteFilteredMock(*m) {
+			t.Fatalf("could not consume %v", m)
+		}
+	}
+	check := func(t *testing.T, cases []*models.TestCase, drains map[string][]models.MockState, order []string, want map[string][]string, served map[string]uint64) {
+		a := newCarryOverAttribution(cases)
+		mapping := &models.Mapping{}
+		passing := map[string]bool{}
+		for _, name := range order {
+			for _, tc := range cases {
+				if tc.Name == name {
+					a.mapConsumed(mapping, name, tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp, drains[name])
+				}
+			}
+			passing[name] = true
+		}
+		out, _ := passingEntriesOf(mapping, passing)
+		for test, w := range want {
+			got := mappedList(out, test)
+			sort.Strings(got)
+			if !reflect.DeepEqual(got, w) {
+				t.Errorf("%s lists %v; want %v", test, got, w)
+			}
+		}
+		for name, n := range served {
+			if n != 1 {
+				t.Errorf("%s served %d times; want once", name, n)
+			}
+		}
+		// And every recording a test lists was served: once, above.
+		for test, w := range want {
+			for _, name := range w {
+				if served[name] == 0 {
+					t.Errorf("%s, listed for %s, was never served", name, test)
+				}
+			}
+		}
+	}
+	t.Run("one hop", func(t *testing.T) {
+		cases := []*models.TestCase{win("outer", 1000, 1100), win("inner", 1010, 1020), win("unrelated", 1080, 1090)}
+		mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+		defer mm.Close()
+		mm.SeedRecordedWindows(recordedTestWindows(cases))
+		drains := map[string][]models.MockState{}
+		mm.SetMocksWithWindow([]*models.Mock{mk("m-in", attrAt(1015)), mk("m-out", attrAt(1085))}, nil, attrAt(1000), attrAt(1100))
+		s := staged(t, mm)
+		consume(t, mm, s["m-in"])
+		mm.RecordWindowAlternatives(s["m-in"], attrAt(1000), attrAt(1100), []*models.Mock{s["m-out"]})
+		drains["outer"] = mm.GetConsumedMocks()
+		mm.SetMocksWithWindow(nil, nil, attrAt(1010), attrAt(1020))
+		if _, ok := mm.CommitWindowReclaim(s["m-in"], attrAt(1010), attrAt(1020)); !ok {
+			t.Fatal("inner could not reclaim m-in")
+		}
+		drains["inner"] = mm.GetConsumedMocks()
+		check(t, cases, drains, []string{"outer", "inner"}, map[string][]string{"outer": {"m-out"}, "inner": {"m-in"}}, mm.ServedCounts())
+	})
+	t.Run("two hops", func(t *testing.T) {
+		// A takes m1 (m3 and m2 its spares), B takes m3 (m1 linked), C
+		// reclaims m3 along B -> m1 -> A -> m2.
+		cases := []*models.TestCase{win("A", 3000, 3100), win("B", 3010, 3060), win("C", 3045, 3055)}
+		mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+		defer mm.Close()
+		mm.SeedRecordedWindows(recordedTestWindows(cases))
+		drains := map[string][]models.MockState{}
+		all := func() []*models.Mock {
+			return []*models.Mock{mk("m1", attrAt(3015)), mk("m3", attrAt(3050)), mk("m2", attrAt(3085))}
+		}
+		mm.SetMocksWithWindow(all(), nil, attrAt(3000), attrAt(3100))
+		a := staged(t, mm)
+		consume(t, mm, a["m1"])
+		mm.RecordWindowAlternatives(a["m1"], attrAt(3000), attrAt(3100), []*models.Mock{a["m3"], a["m2"]})
+		drains["A"] = mm.GetConsumedMocks()
+		mm.SetMocksWithWindow(all()[1:], nil, attrAt(3010), attrAt(3060))
+		b := staged(t, mm)
+		consume(t, mm, b["m3"])
+		mm.RecordWindowAlternatives(b["m3"], attrAt(3010), attrAt(3060), []*models.Mock{a["m1"]})
+		drains["B"] = mm.GetConsumedMocks()
+		mm.SetMocksWithWindow(nil, nil, attrAt(3045), attrAt(3055))
+		if _, ok := mm.CommitWindowReclaim(b["m3"], attrAt(3045), attrAt(3055)); !ok {
+			t.Fatal("C could not reclaim m3")
+		}
+		drains["C"] = mm.GetConsumedMocks()
+		check(t, cases, drains, []string{"A", "B", "C"}, map[string][]string{"A": {"m2"}, "B": {"m1"}, "C": {"m3"}}, mm.ServedCounts())
+	})
+	t.Run("one holder, two steps", func(t *testing.T) {
+		cases := []*models.TestCase{win("H", 2000, 2100), win("I", 2010, 2020)}
+		mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+		defer mm.Close()
+		mm.SeedRecordedWindows(recordedTestWindows(cases))
+		drains := map[string][]models.MockState{}
+		mm.SetMocksWithWindow([]*models.Mock{mk("u0", attrAt(2015)), mk("u1", attrAt(2050)), mk("u2", attrAt(2060))}, nil, attrAt(2000), attrAt(2100))
+		s := staged(t, mm)
+		consume(t, mm, s["u0"])
+		mm.RecordWindowAlternatives(s["u0"], attrAt(2000), attrAt(2100), []*models.Mock{s["u1"]})
+		consume(t, mm, s["u1"])
+		mm.RecordWindowAlternatives(s["u1"], attrAt(2000), attrAt(2100), []*models.Mock{s["u2"]})
+		drains["H"] = mm.GetConsumedMocks()
+		mm.SetMocksWithWindow(nil, nil, attrAt(2010), attrAt(2020))
+		if _, ok := mm.CommitWindowReclaim(s["u0"], attrAt(2010), attrAt(2020)); !ok {
+			t.Fatal("I could not reclaim u0")
+		}
+		drains["I"] = mm.GetConsumedMocks()
+		check(t, cases, drains, []string{"H", "I"}, map[string][]string{"H": {"u1", "u2"}, "I": {"u0"}}, mm.ServedCounts())
+	})
+	twoReclaims := func(t *testing.T, split bool) {
+		// H takes u0 (v0, a1, a2 its spares), G takes v0 (a1 its spare);
+		// X reclaims u0 along H -> a1, then v0 along G -> a1 -> H -> a2:
+		// the second reclaim moves H's call off a1, the credit the first one
+		// gave it in this same drain, so H's entry, which lists u0, moves
+		// to a2; G's to a1.
+		cases := []*models.TestCase{win("H", 4000, 4100), win("G", 4005, 4060), win("X", 4010, 4020), win("W", 4045, 4055), win("U", 4080, 4090)}
+		mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+		defer mm.Close()
+		mm.SeedRecordedWindows(recordedTestWindows(cases))
+		drains := map[string][]models.MockState{}
+		mm.SetMocksWithWindow([]*models.Mock{mk("u0", attrAt(4012)), mk("v0", attrAt(4018)), mk("a1", attrAt(4050)), mk("a2", attrAt(4085))}, nil, attrAt(4000), attrAt(4100))
+		h := staged(t, mm)
+		consume(t, mm, h["u0"])
+		mm.RecordWindowAlternatives(h["u0"], attrAt(4000), attrAt(4100), []*models.Mock{h["v0"], h["a1"], h["a2"]})
+		drains["H"] = mm.GetConsumedMocks()
+		mm.SetMocksWithWindow([]*models.Mock{mk("v0", attrAt(4018)), mk("a1", attrAt(4050))}, nil, attrAt(4005), attrAt(4060))
+		g := staged(t, mm)
+		consume(t, mm, g["v0"])
+		mm.RecordWindowAlternatives(g["v0"], attrAt(4005), attrAt(4060), []*models.Mock{h["a1"]})
+		drains["G"] = mm.GetConsumedMocks()
+		mm.SetMocksWithWindow(nil, nil, attrAt(4010), attrAt(4020))
+		if _, ok := mm.CommitWindowReclaim(h["u0"], attrAt(4010), attrAt(4020)); !ok {
+			t.Fatal("X could not reclaim u0")
+		}
+		// split: X streams, and its first drain is read between its two
+		// reclaims; the replay joins its drains in order.
+		var early []models.MockState
+		if split {
+			early = mm.GetConsumedMocks()
+		}
+		if _, ok := mm.CommitWindowReclaim(g["v0"], attrAt(4010), attrAt(4020)); !ok {
+			t.Fatal("X could not reclaim v0")
+		}
+		drains["X"] = append(early, mm.GetConsumedMocks()...)
+		check(t, cases, drains, []string{"H", "G", "X"}, map[string][]string{"H": {"a2"}, "G": {"a1"}, "X": {"u0", "v0"}}, mm.ServedCounts())
+	}
+	t.Run("two reclaims in one drain", func(t *testing.T) { twoReclaims(t, false) })
+	t.Run("two reclaims, a drain read between them", func(t *testing.T) { twoReclaims(t, true) })
 }

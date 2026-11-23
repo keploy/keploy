@@ -1284,6 +1284,25 @@ type MockState struct {
 	AnsweredIn        []WindowAnswer `json:"answeredIn,omitempty"`
 	AnsweredOutsideAt int64          `json:"answeredOutsideAt,omitempty"`
 	AnsweredInLost    int            `json:"answeredInLost,omitempty"`
+	// CreditTo names, on a state in a replay's consumed drain, the test whose
+	// call the mock is credited with when that is not the running test, and
+	// CreditReplaces the recording that test was credited with until then.
+	// The agent's window reclaim sets them: it gave the running test back a
+	// recording made in its window that an earlier test's identical call
+	// (with the same recorded answer) had taken, and credits that earlier call
+	// with an unused identical recording of the earlier test's window
+	// instead, so each recording is credited with one call and each call with
+	// one recording. The replay moves that test's mapping entry from
+	// CreditReplaces to this mock, and keeps the mock whatever the running
+	// test's verdict. Empty on every other state. An agent that predates them
+	// reports none; the agent and the CLI are one keploy.
+	CreditTo       string `json:"creditTo,omitempty"`
+	CreditReplaces string `json:"creditReplaces,omitempty"`
+	// EdgeOwned says the running test's window was given the mock by the edge
+	// rule (WindowSchedule.EdgeOwner): a plain per-test mock placed just
+	// outside every recorded window, nearest the running test's. The replay
+	// maps it to the running test, whose recorded window does not hold it.
+	EdgeOwned bool `json:"edgeOwned,omitempty"`
 }
 
 // WindowAnswer is one test window a mock answered in (MockState.AnsweredIn):
