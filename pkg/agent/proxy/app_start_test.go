@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -210,10 +211,11 @@ func TestNoSetStartIsServedAgainWhereNoneIsStaged(t *testing.T) {
 func TestBeforeServingIsHandedAReplayConnectionsProcess(t *testing.T) {
 	type call struct {
 		proc Process
+		set  uint64
 		err  error
 	}
 	calls := make(chan call, 4)
-	BeforeServing = func(proc Process, rearm func() error) { calls <- call{proc, rearm()} }
+	BeforeServing = func(proc Process, _ uint32, set uint64, rearm func() error) { calls <- call{proc, set, rearm()} }
 	t.Cleanup(func() { BeforeServing = nil })
 
 	upstream, _, _ := echoUpstream(t)
@@ -239,8 +241,34 @@ func TestBeforeServingIsHandedAReplayConnectionsProcess(t *testing.T) {
 		t.Fatalf("handed %+v, re-arm %v; want the connection's process, and ErrNoSetStart before the set is staged", c.proc, c.err)
 	}
 	p.getMockManager().SetMocksWithWindow([]*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now())
-	if c := connect(); c.err != nil {
-		t.Fatalf("the re-arm of a staged set's start: %v", c.err)
+	first := connect()
+	if first.err != nil {
+		t.Fatalf("the re-arm of a staged set's start: %v", first.err)
+	}
+	if want := p.getMockManager().setGen.Load(); first.set != want {
+		t.Fatalf("the connection is handed set %d; want the serving manager's, %d", first.set, want)
+	}
+	// Within the set the number holds: after a re-arm, and after a
+	// re-registration of the set's mocks (a Mock without StartsTestSet and
+	// its staging), so a restart within the set is told as one.
+	if again := connect(); again.set != first.set {
+		t.Fatalf("a connection after the set's re-arm is handed set %d; want the same set, %d", again.set, first.set)
+	}
+	if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+		t.Fatal(err)
+	}
+	p.getMockManager().SetMocksWithWindow([]*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now())
+	if again := connect(); again.set != first.set {
+		t.Fatalf("a connection after a re-registration of the set's mocks is handed set %d; want the same set, %d", again.set, first.set)
+	}
+	// The next test set: its number moves, so an instance of the
+	// application that started in the set before is told apart.
+	if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true, StartsTestSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	p.getMockManager().SetMocksWithWindow([]*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now())
+	if next := connect(); next.set == first.set || next.set == 0 || next.err != nil {
+		t.Fatalf("the next set's connection is handed set %d (the set before's was %d), re-arm %v; want another set, re-armed", next.set, first.set, next.err)
 	}
 
 	rec := New(zap.NewNop(), fakeDestInfo{dest: dest}, config.New())
@@ -356,7 +384,7 @@ func TestANewInstanceBindsItsStartUpAnew(t *testing.T) {
 		t.Fatal("precondition: the earlier instance's start-up did not bind")
 	}
 	began := false
-	if err := mm.rearmAppStart(func() error { began = true; return nil }); err != nil {
+	if err := mm.rearmAppStart(func() error { began = true; return nil }, 0); err != nil {
 		t.Fatal(err)
 	}
 	if b, ok := mm.vars.Lookup("session"); ok {
@@ -384,7 +412,7 @@ func TestTheProxysReArmBeginsTheLearnStepsNewSet(t *testing.T) {
 	p.getMockManager().SetMocksWithWindow([]*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now())
 	before := p.learnTracker.SetAt()
 	var err error
-	BeforeServing = func(_ Process, rearm func() error) { err = rearm() }
+	BeforeServing = func(_ Process, _ uint32, _ uint64, rearm func() error) { err = rearm() }
 	t.Cleanup(func() { BeforeServing = nil })
 	p.beforeServing(Process{Pid: 1}, 0)
 	if err != nil {
@@ -501,7 +529,7 @@ func TestARestartOnceATestsCaptureBeganIsRefused(t *testing.T) {
 	p.getMockManager().SetMocksWithWindow([]*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now())
 	p.BeginTestCaseCapture()
 	var err error
-	BeforeServing = func(_ Process, rearm func() error) { err = rearm() }
+	BeforeServing = func(_ Process, _ uint32, _ uint64, rearm func() error) { err = rearm() }
 	t.Cleanup(func() { BeforeServing = nil })
 	p.beforeServing(Process{Pid: 1}, 0)
 	if !errors.Is(err, ErrSetStarted) {
@@ -530,12 +558,20 @@ func TestAWorkersReArmLeavesTheLearnStepAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := p.learnTracker.SetAt()
+	// The worker's own count, apart from the run's.
+	worker := p.instanceManager(1)
+	worker.setGen.Add(5)
 	var err error
-	BeforeServing = func(_ Process, rearm func() error) { err = rearm() }
+	var handed uint64
+	var handedWorker uint32
+	BeforeServing = func(_ Process, w uint32, set uint64, rearm func() error) { handedWorker, handed, err = w, set, rearm() }
 	t.Cleanup(func() { BeforeServing = nil })
 	p.beforeServing(Process{Pid: 1}, 1)
 	if err != nil {
 		t.Fatalf("the worker's re-arm: %v", err)
+	}
+	if want := worker.setGen.Load(); handed != want || handed == p.getMockManager().setGen.Load() || handedWorker != 1 {
+		t.Fatalf("a worker's connection is handed worker %d, set %d; want worker 1 and its manager's set, %d", handedWorker, handed, want)
 	}
 	if p.learnTracker.SetAt() != before {
 		t.Fatal("a worker's re-arm began the run's learn step's new set")
@@ -549,5 +585,170 @@ func TestAReArmIsRefusedWhileAScopeRuns(t *testing.T) {
 	mm.SetScopeMocks([]*models.Mock{inFlightMock("own-1", 1010, 1020)}, nil, true)
 	if err := mm.RearmAppStart(); !errors.Is(err, ErrSetStarted) {
 		t.Fatalf("a re-arm while a scope runs: %v, want ErrSetStarted", err)
+	}
+}
+
+// A re-arm decided in one test set does not re-arm another's: once the
+// manager moved to the next set, it says there is no set's start to serve
+// again for it.
+func TestAReArmDecidedInAnotherSetIsRefused(t *testing.T) {
+	mm := startSet(t, false)
+	set := mm.setGen.Load()
+	if err := mm.rearmAppStart(nil, set+1); !errors.Is(err, ErrNoSetStart) {
+		t.Fatalf("a re-arm decided in another set: %v, want ErrNoSetStart", err)
+	}
+	if err := mm.rearmAppStart(nil, set); err != nil {
+		t.Fatalf("a re-arm decided in the manager's set: %v", err)
+	}
+}
+
+// The build may decide while the proxy moves on (it waits on another
+// connection's re-arm): a re-arm decided about one manager's set does not
+// re-arm another's. Once the next set began, it re-arms nothing of it; once
+// the worker that served the connection ended, it says so; once the run's
+// manager was replaced, it re-arms nothing either.
+func TestAReArmDecidedBeforeTheProxyMovedOnReArmsNothing(t *testing.T) {
+	newProxy := func(t *testing.T) *Proxy {
+		cfg := config.New()
+		cfg.Agent.Mode = models.MODE_TEST
+		p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+		p.nsswitchData = []byte("preseeded-by-test")
+		if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.SetMocksWithWindow(context.Background(), []*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	decideAfter := func(t *testing.T, p *Proxy, inst uint32, meanwhile func()) error {
+		var err error
+		BeforeServing = func(_ Process, _ uint32, _ uint64, rearm func() error) { meanwhile(); err = rearm() }
+		t.Cleanup(func() { BeforeServing = nil })
+		p.beforeServing(Process{Pid: 1}, inst)
+		return err
+	}
+	t.Run("the next set began", func(t *testing.T) {
+		p := newProxy(t)
+		var epoch uint64
+		err := decideAfter(t, p, 0, func() {
+			if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true, StartsTestSet: true}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.SetMocksWithWindow(context.Background(), []*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			epoch = p.getMockManager().StagingGeneration()
+		})
+		if !errors.Is(err, ErrNoSetStart) {
+			t.Fatalf("a re-arm decided in the set before: %v, want ErrNoSetStart", err)
+		}
+		if p.getMockManager().StagingGeneration() != epoch {
+			t.Fatal("a re-arm decided in the set before re-staged the next set's start")
+		}
+	})
+	t.Run("the worker ended", func(t *testing.T) {
+		p := newProxy(t)
+		if _, err := p.ServeInstance(1); err != nil {
+			t.Fatal(err)
+		}
+		err := decideAfter(t, p, 1, func() {
+			if err := p.StopServingInstance(1); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if err == nil || !strings.Contains(err.Error(), "is not served") {
+			t.Fatalf("a re-arm of a worker that ended: %v, want the worker not served", err)
+		}
+	})
+	t.Run("the worker was served again", func(t *testing.T) {
+		p := newProxy(t)
+		if _, err := p.ServeInstance(1); err != nil {
+			t.Fatal(err)
+		}
+		var again *MockManager
+		var epoch uint64
+		err := decideAfter(t, p, 1, func() {
+			if err := p.StopServingInstance(1); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := p.ServeInstance(1); err != nil {
+				t.Fatal(err)
+			}
+			again = p.instanceManager(1)
+			epoch = again.StagingGeneration()
+		})
+		if !errors.Is(err, ErrNoSetStart) {
+			t.Fatalf("a re-arm decided about the worker's earlier manager: %v, want ErrNoSetStart", err)
+		}
+		if again.StagingGeneration() != epoch {
+			t.Fatal("the worker's new manager was re-staged for a decision about its earlier one")
+		}
+	})
+	t.Run("the run's manager was replaced", func(t *testing.T) {
+		p := newProxy(t)
+		var replacement *MockManager
+		var epoch uint64
+		err := decideAfter(t, p, 0, func() {
+			replacement = p.shareWindows(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop()))
+			p.setMockManager(replacement)
+			if err := p.SetMocksWithWindow(context.Background(), []*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			epoch = replacement.StagingGeneration()
+		})
+		if !errors.Is(err, ErrNoSetStart) {
+			t.Fatalf("a re-arm of a manager replaced meanwhile: %v, want ErrNoSetStart", err)
+		}
+		if replacement.StagingGeneration() != epoch {
+			t.Fatal("the replacement was re-staged for a decision about the manager it replaced")
+		}
+	})
+	t.Run("a worker began to be served", func(t *testing.T) {
+		p := newProxy(t)
+		run := p.getMockManager()
+		epoch := run.StagingGeneration()
+		err := decideAfter(t, p, 0, func() {
+			if _, err := p.ServeInstance(1); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if !errors.Is(err, errNoWorkerInstance) {
+			t.Fatalf("a re-arm decided before a worker was served: %v, want no worker instance", err)
+		}
+		if run.StagingGeneration() != epoch {
+			t.Fatal("the run's manager was re-staged for a connection it no longer serves")
+		}
+	})
+}
+
+// A connection with no manager to serve it (no worker instance while workers
+// are served) is handed set 0, and its rearm says why, whatever the proxy
+// does meanwhile.
+func TestAConnectionWithNoManagerIsHandedNoSet(t *testing.T) {
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_TEST
+	p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+	p.nsswitchData = []byte("preseeded-by-test")
+	if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetMocksWithWindow(context.Background(), []*models.Mock{inFlightMock("boot-1", 300, 310)}, nil, models.BaseTime, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ServeInstance(1); err != nil {
+		t.Fatal(err)
+	}
+	var set uint64
+	var err error
+	BeforeServing = func(_ Process, _ uint32, s uint64, rearm func() error) {
+		set = s
+		p.endInstances()
+		err = rearm()
+	}
+	t.Cleanup(func() { BeforeServing = nil })
+	p.beforeServing(Process{Pid: 1}, 0)
+	if set != 0 || !errors.Is(err, errNoWorkerInstance) {
+		t.Fatalf("a connection no manager serves is handed set %d, re-arm %v; want 0 and no worker instance", set, err)
 	}
 }
