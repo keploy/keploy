@@ -2315,6 +2315,18 @@ func (a *Agent) opensWithoutVariables(given []models.VariableBinding) error {
 	return nil
 }
 
+// seedConsumedRewinds hands the proxy the retry cycles the history params is
+// built from was rewound for (models.MockFilterParams.ConsumedRewinds), before
+// anything params asks is staged or served: a higher count starts a new pass
+// over the set (MockManager.SeedConsumedRewinds). Every keploy test filter
+// does it, exact serving's (serveKeployTestExactly) and the windows'
+// (mocksForParams) alike; the same count handed again changes nothing.
+func (a *Agent) seedConsumedRewinds(params models.MockFilterParams) {
+	if seeder, ok := a.Proxy.(coreAgent.ConsumedRewindsSeeder); ok {
+		seeder.SeedConsumedRewinds(params.ConsumedRewinds)
+	}
+}
+
 // mocksForParams is the pool UpdateMockParams stages for params: the per-test
 // and the session tier, filtered as params ask. It also applies what the
 // staging call carries beside the pool (the startup cutoff, the recorded
@@ -2346,9 +2358,7 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// from was rewound for: the staging below counts a change of it with the
 	// window it sets, as a new pass over the set
 	// (integrations.WindowRewindCounter).
-	if seeder, ok := a.Proxy.(coreAgent.ConsumedRewindsSeeder); ok {
-		seeder.SeedConsumedRewinds(params.ConsumedRewinds)
-	}
+	a.seedConsumedRewinds(params)
 	// A staging call (recordedSetShape populated: FirstRecordedTestStart and/or
 	// RecordedWindows) marks a new test-set. Reset the stateful-dependency
 	// cursors so each test-set replays its sequences (1,2,3…) from the start

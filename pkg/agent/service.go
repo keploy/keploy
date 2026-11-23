@@ -887,8 +887,10 @@ type RecordedWindowsSeeder interface {
 // call's window is set, how many times keploy test rewound the set's consumed
 // history for a retry cycle (models.MockFilterParams.ConsumedRewinds), so a
 // retry cycle that starts at the window the last one ended in starts a pass
-// too. An agent whose proxy lacks it counts a pass only where a window start
-// went back, as before.
+// too, and starts a new pass of the manager's once-claims
+// (integrations.MockMemDb.ClaimOnce), under exact serving as well. An agent
+// whose proxy lacks it counts a pass only where a window start went back, as
+// before, and its once-claims last the whole staging.
 type ConsumedRewindsSeeder interface {
 	SeedConsumedRewinds(n uint64)
 }

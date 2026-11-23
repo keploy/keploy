@@ -157,3 +157,76 @@ func TestScopedMockDb_ClaimOnce_DelegatesToManager(t *testing.T) {
 		t.Fatalf("concurrent ClaimOnce across %d distinct wrappers won %d times, want 1", goroutines, got)
 	}
 }
+
+// A retry cycle of keploy test (--retry-passing-test) runs the set's passing
+// test cases again without staging the set again: the agent hands the manager
+// the cycle's count of consumed-history rewinds (SeedConsumedRewinds) before
+// the cycle's first test. Each cycle is a new pass, so an occurrence claimed in
+// one cycle is claimed again, once, in the next; the same count handed again
+// within a cycle, a lower one (a filter that carries none), and the deferred
+// streaming tests going back to an earlier window after the last cycle, start
+// no pass. A staging starts the count over from what it carries. Seen through
+// a per-connection wrapper, as a parser claims. (keploy runs up to three
+// cycles; the manager takes any number.)
+func TestMockManager_ClaimOnce_EachRetryCycleIsANewPass(t *testing.T) {
+	m := newTestClaimManager()
+	var db integrations.MockMemDb = &scopedMockDb{MockMemDb: m}
+	const key = "occ-retry\x00mock-1\x000"
+	base := time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC)
+
+	m.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	m.SeedConsumedRewinds(0)
+	m.SetCurrentTestWindow(base, base.Add(time.Second))
+	if !db.ClaimOnce(key) {
+		t.Fatal("the first cycle's ClaimOnce = false, want true")
+	}
+	if db.ClaimOnce(key) {
+		t.Fatal("a repeat in the first cycle = true, want false")
+	}
+	for cycle := uint64(1); cycle <= 4; cycle++ {
+		m.SeedConsumedRewinds(cycle)
+		m.SetCurrentTestWindow(base, base.Add(time.Second))
+		if !db.ClaimOnce(key) {
+			t.Fatalf("retry cycle %d's ClaimOnce = false, want true: the retried test misses what the recording delivered it", cycle+1)
+		}
+		m.SeedConsumedRewinds(cycle)
+		if db.ClaimOnce(key) {
+			t.Fatalf("retry cycle %d: the same count handed again started a pass; a repeat = true, want false", cycle+1)
+		}
+		m.SeedConsumedRewinds(0)
+		m.SeedConsumedRewinds(cycle)
+		if db.ClaimOnce(key) {
+			t.Fatalf("retry cycle %d: a filter carrying no count, then the cycle's again, started a pass; a repeat = true, want false", cycle+1)
+		}
+	}
+	// The deferred streaming tests, after the last cycle, go back to an
+	// earlier window with the same count: no new pass, nothing twice.
+	m.SeedConsumedRewinds(4)
+	m.SetCurrentTestWindow(base.Add(-time.Minute), base.Add(-time.Minute+time.Second))
+	if db.ClaimOnce(key) {
+		t.Fatal("the deferred streaming tail's ClaimOnce = true, want false: one recorded occurrence delivered twice in one pass")
+	}
+	// A staging that carries the set's count (keploy test registering the
+	// set's mocks again part way, on an agent it found replaced) starts a
+	// pass; the cycle's next filter, with the same count, does not.
+	m.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if !db.ClaimOnce(key) {
+		t.Fatal("ClaimOnce after a staging that carries the count = false, want true")
+	}
+	m.SeedConsumedRewinds(4)
+	if db.ClaimOnce(key) {
+		t.Fatal("the cycle's next filter after a staging that carried its count started a pass; a repeat = true, want false")
+	}
+	// The next staging (another set, or another attempt of it) starts the
+	// count over from its own, zero, and a pass with it; that set's first
+	// retry cycle is a pass again, below the last set's count.
+	m.SeedConsumedRewinds(0)
+	m.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if !db.ClaimOnce(key) {
+		t.Fatal("ClaimOnce after the next staging = false, want true")
+	}
+	m.SeedConsumedRewinds(1)
+	if !db.ClaimOnce(key) {
+		t.Fatal("the next set's first retry cycle ClaimOnce = false, want true: the last set's count held it back")
+	}
+}

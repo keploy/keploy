@@ -280,11 +280,13 @@ type MockMemDb interface {
 	MockWriter
 	MockConsumer
 	WindowAware
-	// ClaimOnce atomically records key in the store's current staging and
-	// returns true only for the first caller. The manager clears its claimed
-	// set under its own lock at each staging (the same step that bumps
-	// StagingEpoch), so separate managers (parallel workers) never interfere
-	// and per-connection wrappers delegate to their underlying manager.
+	// ClaimOnce atomically records key in the store's current pass over the
+	// set and returns true only for the first caller. The manager clears its
+	// claimed set under its own lock as each pass starts: each staging (the
+	// same step that bumps StagingEpoch) and each retry cycle of keploy test
+	// (models.MockFilterParams.ConsumedRewinds), so separate managers
+	// (parallel workers) never interfere and per-connection wrappers delegate
+	// to their underlying manager.
 	ClaimOnce(key string) bool
 }
 
