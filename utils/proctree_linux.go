@@ -5,6 +5,7 @@ package utils
 import (
 	"io/fs"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -71,6 +72,121 @@ func readProcTable(proc fs.FS) (procTable, error) {
 	}
 	return table, nil
 }
+
+// exitedUnreaped reports whether pid is a zombie: it has exited, and waits
+// for its parent to reap it (state Z in its stat, and no thread of it runs).
+// kill(2) of a zombie succeeds, as of a process that runs, so the interrupt
+// asks this too: a group leader that is a zombie has exited, and costs the
+// interrupt no grace wait and no SIGKILL. A stat that cannot be read or
+// parsed is no zombie. Nor is a process whose main thread exited while
+// another thread of it runs on: its stat reads Z, but it holds its files (a
+// SIGKILLed Go server's port, until its last thread has exited), and a
+// stop that took it for exited returned with its port still bound.
+func exitedUnreaped(pid int) bool {
+	return exitedUnreapedIn(os.DirFS("/proc"), pid) && !zombieRuns(pid)
+}
+
+// zombieRuns reports whether process pid, whose main thread is a zombie,
+// still runs: a thread of it runs (RunningThread), or that cannot be read.
+func zombieRuns(pid int) bool {
+	_, runs, err := RunningThread("/proc", pid)
+	return err != nil || runs
+}
+
+// exitedUnreapedIn is exitedUnreaped over proc, a /proc.
+func exitedUnreapedIn(proc fs.FS, pid int) bool {
+	line, err := readStat(proc, strconv.Itoa(pid), make([]byte, statBufSize))
+	if err != nil {
+		return false
+	}
+	stat, ok := ParseProcStat(line)
+	return ok && stat.State == 'Z'
+}
+
+// groupRunsExcept reports whether a process of process group pgid runs, as
+// /proc shows it now: one in that group whose stat says it is neither a
+// zombie nor dead, and that is not one of except (its pid and start time). A
+// /proc that cannot be listed is an error.
+func groupRunsExcept(pgid int, except []Reached) (bool, error) {
+	return groupRunsIn(os.DirFS("/proc"), pgid, except, zombieRuns, leftToDaemonStop)
+}
+
+// groupRunsIn is groupRunsExcept over proc, a /proc, with zombieRuns telling
+// whether a process whose stat reads Z runs on in a thread of it, and
+// leftToDaemons whether keploy's stop of the daemons ends a process
+// (LeaveToDaemonStop; nil: none). A process of the group that runs is not
+// counted when it, or a process it runs under, as proc's parents show, is
+// one of except, or, but the group's leader, one leftToDaemons ends: what a
+// process the caller or the stop of the daemons ends runs, they end with it
+// (stopHanded and stopAdopted read each one's children), and a shell left so
+// that starts a `sleep` each second would keep the group running for good.
+func groupRunsIn(proc fs.FS, pgid int, except []Reached, zombieRuns func(pid int) bool, leftToDaemons func(pid int, start uint64) bool) (bool, error) {
+	if pgid <= 1 {
+		return false, nil
+	}
+	entries, err := fs.ReadDir(proc, ".")
+	if err != nil {
+		return false, err
+	}
+	buf := make([]byte, statBufSize)
+	table := make(map[int]ProcStat, len(entries))
+	var group []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !entry.IsDir() {
+			continue
+		}
+		line, err := readStat(proc, entry.Name(), buf)
+		if err != nil {
+			continue
+		}
+		stat, ok := ParseProcStat(line)
+		if !ok {
+			continue
+		}
+		table[pid] = stat
+		if stat.PGRP == pgid && stat.State != 'X' {
+			group = append(group, pid)
+		}
+	}
+	// left reports whether process pid, or one it runs under, is one the
+	// caller or the stop of the daemons ends. The walk ends at a parent proc
+	// does not show, at init, and after as many steps as proc has processes
+	// (a loop of parents, as a /proc read while it changes can show).
+	left := func(pid int) bool {
+		for p, n := pid, 0; n <= len(table); n++ {
+			st, ok := table[p]
+			if !ok {
+				return false
+			}
+			if slices.Contains(except, Reached{PID: p, Start: st.StartTime, Ignores: true}) {
+				return true
+			}
+			if p != pgid && leftToDaemons != nil && leftToDaemons(p, st.StartTime) {
+				return true
+			}
+			if st.PPID <= 1 {
+				return false
+			}
+			p = st.PPID
+		}
+		return false
+	}
+	for _, pid := range group {
+		if stat := table[pid]; stat.State == 'Z' && !zombieRuns(pid) {
+			continue
+		}
+		if !left(pid) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// groupExited reads no group on Linux: kill(2) of a group of zombies only
+// succeeds there, so a signal Linux refuses a group is never one of a group
+// that has exited.
+func groupExited(int) bool { return false }
 
 // groupReached is each process of process group pgid as /proc shows it now,
 // and whether it ignores sig: what a signal sent to the group next reaches.

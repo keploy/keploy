@@ -55,6 +55,14 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
+// appReleasedFilePath is where MakeAgentReady notes that it released this
+// pod's application, with markAppReleased (kdocker.MarkAppReleased):
+// variables so tests write it elsewhere and see the call.
+var (
+	appReleasedFilePath = kdocker.AppReleasedFile
+	markAppReleased     = kdocker.MarkAppReleased
+)
+
 // massSuppressionPercent is the share of a session's test cases that must be
 // suppressed before the completion summary is raised from Info to Warn.
 //
@@ -432,6 +440,7 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	// --proven flag; the CLI refuses an agent whose switch is not its own
 	// (provenswitch.CheckAgent).
 	w.Header().Set(provenswitch.HealthHeader, provenswitch.State())
+	a.setCapabilities(w)
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
 }
@@ -760,6 +769,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
 	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// The TCs left out over the requests a parser never read because the
+	// recording's stop cut it short: named at WARN once, as the session
+	// ends (summarize).
+	var stopCut stopCutLeftOut
 	// A body that is not UTF-8 goes as a body object only to a client that
 	// says it reads one (models.BodyEncodingHeader); to any other client, one
 	// built before it among them, each test case goes as encoding/json writes it.
@@ -816,6 +829,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 		if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
+			// A stop cut's span is recorded before its orphan span
+			// (SyncMockManager.RecordStopCutWindow): one this orphan check
+			// saw is read here.
+			if hasOrphan && syncmgr.Get().WasStopCutInWindow(spanFrom, spanTo) {
+				stopCut.add(t.Name)
+			}
 			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
 				zap.String("tc_name", t.Name),
 				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
@@ -1111,6 +1130,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("test_cases", tcsUnsettled),
 				zap.Duration("held_without_progress_for", testCaseHoldMax))
 		}
+		// One line per stop, naming the test cases its cut of a parser
+		// left out; every other suppression stays at Debug, per test case.
+		stopCut.say(a.logger)
 		logRecordingComplete("agent: recording complete",
 			// How the stream ended: "capture" (it closed its channel),
 			// "end" (its client asked the agent to end it, after it was
@@ -1730,6 +1752,14 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.logger.Debug("Agent marked as ready", zap.String("file", agentReadyFilePath))
+	// The pod's application is released from here: an agent restarted in
+	// the pod is ready once its own start is over, as nothing has to start
+	// the application again (kdocker.AppReleasedFile). Without the note it
+	// waits for a release, as an agent of a new pod does.
+	if err := markAppReleased(appReleasedFilePath); err != nil {
+		a.logger.Warn("could not note that this pod's application was released; a restarted keploy agent then waits for the recorder's release before it is ready",
+			zap.String("file", appReleasedFilePath), zap.Error(err))
+	}
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))

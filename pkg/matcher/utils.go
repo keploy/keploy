@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"mime"
 	"net/http"
 	"os"
@@ -665,12 +666,11 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		}
 		return out, nil
 
-	case float64:
-		a, ok := actual.(float64)
-		if !ok {
+	case float64, json.Number:
+		if !isJSONNumber(actual) {
 			return out, errors.New("type not matched")
 		}
-		if e == a || ancestorNoisy || noisyForValues(ni, key, formatJSONNumber(e), formatJSONNumber(a)) {
+		if equalJSONNumbers(e, actual) || ancestorNoisy || noisyForValues(ni, key, jsonNumberToString(expected), jsonNumberToString(actual)) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -1015,8 +1015,241 @@ func jsonScalarToString(v interface{}) (string, bool) {
 		return strconv.FormatBool(t), true
 	case float64:
 		return formatJSONNumber(t), true
+	case json.Number:
+		return t.String(), true
 	}
 	return "", false
+}
+
+func isJSONNumber(v interface{}) bool {
+	switch v.(type) {
+	case float64, json.Number:
+		return true
+	default:
+		return false
+	}
+}
+
+// normalizeDecimalNumber validates an RFC 8259 JSON number string and returns
+// a unique canonical decimal representation in O(len(raw)) time and memory,
+// without expanding scientific-notation exponents into huge big.Rat values.
+// All mathematical zeros ("0", "-0", "-0.0", "0e99999999") normalize to "0".
+// Non-zero values normalize to "<opt-minus><sigDigits>e<exp>" where sigDigits
+// has no leading or trailing zeros and exp is the base-10 exponent of its
+// leading digit.
+func normalizeDecimalNumber(raw string) (string, bool) {
+	n := len(raw)
+	if n == 0 {
+		return "", false
+	}
+	i := 0
+	neg := false
+	if raw[i] == '-' {
+		neg = true
+		i++
+		if i == n {
+			return "", false
+		}
+	}
+
+	// Integer part: "0" or ([1-9][0-9]*).
+	intStart := i
+	if raw[i] == '0' {
+		i++
+	} else if raw[i] >= '1' && raw[i] <= '9' {
+		i++
+		for i < n && raw[i] >= '0' && raw[i] <= '9' {
+			i++
+		}
+	} else {
+		return "", false
+	}
+	intPart := raw[intStart:i]
+
+	// Optional fractional part: "." [0-9]+
+	var fracPart string
+	if i < n && raw[i] == '.' {
+		i++
+		fracStart := i
+		for i < n && raw[i] >= '0' && raw[i] <= '9' {
+			i++
+		}
+		if i == fracStart {
+			return "", false
+		}
+		fracPart = raw[fracStart:i]
+	}
+
+	// Optional exponent part: [eE] [+-]? [0-9]+
+	expNeg := false
+	var expDigits string
+	if i < n && (raw[i] == 'e' || raw[i] == 'E') {
+		i++
+		if i < n && (raw[i] == '+' || raw[i] == '-') {
+			expNeg = raw[i] == '-'
+			i++
+		}
+		expStart := i
+		for i < n && raw[i] >= '0' && raw[i] <= '9' {
+			i++
+		}
+		if i == expStart {
+			return "", false
+		}
+		expDigits = raw[expStart:i]
+	}
+
+	if i != n {
+		return "", false
+	}
+
+	// Locate first and last non-zero digit across intPart + fracPart without allocating
+	// if we only need a slice when all digits live in one part.
+	totalDigits := len(intPart) + len(fracPart)
+	digitAt := func(idx int) byte {
+		if idx < len(intPart) {
+			return intPart[idx]
+		}
+		return fracPart[idx-len(intPart)]
+	}
+
+	first := -1
+	for idx := 0; idx < totalDigits; idx++ {
+		if digitAt(idx) != '0' {
+			first = idx
+			break
+		}
+	}
+	if first == -1 {
+		return "0", true
+	}
+	last := totalDigits - 1
+	for last > first && digitAt(last) == '0' {
+		last--
+	}
+
+	var sig string
+	if last < len(intPart) {
+		sig = intPart[first : last+1]
+	} else if first >= len(intPart) {
+		sig = fracPart[first-len(intPart) : last-len(intPart)+1]
+	} else {
+		var sb strings.Builder
+		sb.Grow(last - first + 1)
+		sb.WriteString(intPart[first:])
+		sb.WriteString(fracPart[:last-len(intPart)+1])
+		sig = sb.String()
+	}
+
+	shift := int64(len(intPart) - 1 - first)
+	// Strip leading zeros from exponent digits for compact parsing.
+	expTrim := strings.TrimLeft(expDigits, "0")
+	var expStr string
+	if expTrim == "" {
+		expStr = strconv.FormatInt(shift, 10)
+	} else if len(expTrim) <= 18 {
+		ev, err := strconv.ParseInt(expTrim, 10, 64)
+		if err != nil {
+			return "", false
+		}
+		if expNeg {
+			ev = -ev
+		}
+		expStr = strconv.FormatInt(ev+shift, 10)
+	} else {
+		e := new(big.Int)
+		if _, ok := e.SetString(expTrim, 10); !ok {
+			return "", false
+		}
+		if expNeg {
+			e.Neg(e)
+		}
+		e.Add(e, big.NewInt(shift))
+		expStr = e.String()
+	}
+
+	var out strings.Builder
+	out.Grow(len(sig) + len(expStr) + 2)
+	if neg {
+		out.WriteByte('-')
+	}
+	out.WriteString(sig)
+	out.WriteByte('e')
+	out.WriteString(expStr)
+	return out.String(), true
+}
+
+// canonicalJSONNumber converts a JSON numeric value (json.Number, float64, or
+// Go integer values used in programmatic json_contains expectations) to a
+// canonical decimal form in linear time.
+func canonicalJSONNumber(v interface{}) (string, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		return normalizeDecimalNumber(string(x))
+	case float64:
+		if math.IsNaN(x) {
+			return "", false
+		}
+		if math.IsInf(x, 1) {
+			return "+Inf", true
+		}
+		if math.IsInf(x, -1) {
+			return "-Inf", true
+		}
+		return normalizeDecimalNumber(strconv.FormatFloat(x, 'g', -1, 64))
+	case int:
+		return normalizeDecimalNumber(strconv.FormatInt(int64(x), 10))
+	case int64:
+		return normalizeDecimalNumber(strconv.FormatInt(x, 10))
+	case uint64:
+		return normalizeDecimalNumber(strconv.FormatUint(x, 10))
+	}
+	return "", false
+}
+
+func equalJSONNumbers(e, a interface{}) bool {
+	if en, ok1 := e.(json.Number); ok1 {
+		if an, ok2 := a.(json.Number); ok2 && en == an {
+			_, valid := normalizeDecimalNumber(string(en))
+			return valid
+		}
+	}
+	c1, ok1 := canonicalJSONNumber(e)
+	if !ok1 {
+		return false
+	}
+	c2, ok2 := canonicalJSONNumber(a)
+	if !ok2 {
+		return false
+	}
+	return c1 == c2
+}
+
+func jsonNumberToString(v interface{}) string {
+	switch t := v.(type) {
+	case json.Number:
+		return t.String()
+	case float64:
+		return formatJSONNumber(t)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func areJSONTypesEqual(e, a interface{}) bool {
+	if e == nil && a == nil {
+		return true
+	}
+	if e == nil || a == nil {
+		return false
+	}
+	if reflect.TypeOf(e) == reflect.TypeOf(a) {
+		return true
+	}
+	if isJSONNumber(e) && isJSONNumber(a) {
+		return true
+	}
+	return false
 }
 
 // formatJSONNumber renders a JSON number exactly as encoding/json would, so a
@@ -1052,12 +1285,12 @@ func findAndClaimPrimitiveEqual(x interface{}, arr []interface{}, used []bool) (
 				return i, true
 			}
 		}
-	case float64:
+	case float64, json.Number:
 		for i, y := range arr {
 			if used[i] {
 				continue
 			}
-			if yf, ok := y.(float64); ok && yf == v {
+			if isJSONNumber(y) && equalJSONNumbers(v, y) {
 				return i, true
 			}
 		}
@@ -1249,7 +1482,7 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 
 	validatedJSON.expected = expected
 	validatedJSON.actual = actual
-	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
+	if !areJSONTypesEqual(expected, actual) {
 		validatedJSON.isIdentical = false
 		return validatedJSON, nil
 	}
@@ -1273,8 +1506,21 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 	if s == "" {
 		return nil, nil
 	}
-	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
+	d := json.NewDecoder(strings.NewReader(s))
+	d.UseNumber()
+	if err := d.Decode(&result); err != nil {
+		if log != nil {
+			utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
+		}
+		return nil, err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		if err == nil {
+			err = errors.New("invalid character after top-level value")
+		}
+		if log != nil {
+			utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
+		}
 		return nil, err
 	}
 	return result, nil
@@ -2230,6 +2476,8 @@ func InterfaceToString(val interface{}) string {
 	switch v := val.(type) {
 	case int:
 		return fmt.Sprintf("%d", v)
+	case json.Number:
+		return v.String()
 	case float64:
 		return fmt.Sprintf("%f", v)
 	case bool:
@@ -2242,13 +2490,56 @@ func InterfaceToString(val interface{}) string {
 }
 
 func JsonContains(actualJSON string, expectedJSON map[string]interface{}) (bool, error) {
-	var actual interface{}
-	err := json.Unmarshal([]byte(actualJSON), &actual)
+	if strings.TrimSpace(actualJSON) == "" {
+		return false, fmt.Errorf("failed to unmarshal actual JSON: unexpected end of JSON input")
+	}
+	actual, err := UnmarshallJSON(actualJSON, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to unmarshal actual JSON: %v", err)
 	}
 
 	return containsRecursive(actual, expectedJSON), nil
+}
+
+// JSONValueEqual compares two decoded JSON values with mathematical equality
+// for numbers regardless of whether they are json.Number, float64, or Go ints.
+func JSONValueEqual(actual, expected interface{}) bool {
+	return jsonValueEqual(actual, expected)
+}
+
+// jsonValueEqual compares two decoded JSON values with mathematical equality
+// for numbers regardless of whether they are json.Number, float64, or Go ints.
+func jsonValueEqual(actual, expected interface{}) bool {
+	if equalJSONNumbers(actual, expected) {
+		return true
+	}
+	switch ev := expected.(type) {
+	case map[string]interface{}:
+		av, ok := actual.(map[string]interface{})
+		if !ok || len(av) != len(ev) {
+			return false
+		}
+		for k, eChild := range ev {
+			aChild, exists := av[k]
+			if !exists || !jsonValueEqual(aChild, eChild) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		av, ok := actual.([]interface{})
+		if !ok || len(av) != len(ev) {
+			return false
+		}
+		for i := range ev {
+			if !jsonValueEqual(av[i], ev[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(actual, expected)
+	}
 }
 
 // containsRecursive recursively checks if the expected data is in the actual data.
@@ -2273,7 +2564,7 @@ func containsRecursive(actual interface{}, expected map[string]interface{}) bool
 				return false
 			}
 		default:
-			if !reflect.DeepEqual(actualValue, expectedValue) {
+			if !jsonValueEqual(actualValue, expectedValue) {
 				return false
 			}
 		}
@@ -2369,8 +2660,8 @@ func NormalizeNestedJSONForNoise(raw string, noise map[string][]string, log *zap
 		return raw
 	}
 
-	var v interface{}
-	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+	v, err := UnmarshallJSON(raw, nil)
+	if err != nil {
 		utils.LogError(log, err, "failed to unmarshal decoded gRPC data for normalization")
 		return raw
 	}
@@ -2397,8 +2688,7 @@ func normalizeNestedJSONValue(v interface{}, rootKeys map[string]bool) {
 			// If this key is in rootKeys and the value is a JSON string, unwrap it.
 			if rootKeys[lowerKey] {
 				if s, ok := val.(string); ok && pkg.LooksLikeJSON(s) && json.Valid([]byte(s)) {
-					var inner interface{}
-					if err := json.Unmarshal([]byte(s), &inner); err == nil {
+					if inner, err := UnmarshallJSON(s, nil); err == nil {
 						t[k] = inner
 						val = inner
 					}

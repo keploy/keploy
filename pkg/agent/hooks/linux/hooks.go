@@ -89,6 +89,10 @@ type Hooks struct {
 	// through it (utils.ClientPIDIn).
 	clientMu    sync.Mutex
 	clientPIDNS string
+	// passThroughPorts is the kernel's pass-through list the registered
+	// client was given (-1 ends it), under clientMu: the application's
+	// connections to those ports pass keploy by on purpose (unseen.go).
+	passThroughPorts [10]int32
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -150,6 +154,23 @@ type Hooks struct {
 	// while a call uses it.
 	ingressMu sync.RWMutex
 	ingress   *ingressHold
+	// steering is whether the agent info sent to the kernel has
+	// structs.FlagIngressSteer (sendFinalAgentInfo): the bind hooks move no
+	// bind.
+	steering atomic.Bool
+	// steeredAgain is the ports a restarted agent steers again
+	// (startSteering), which WatchBindEvents gives first; under ingressMu.
+	steeredAgain []uint16
+	// unseen is the census of the application's connections keploy does
+	// not see, and their watch (unseen.go).
+	unseen unseenState
+	// appSocketsFn, when set (a test), is appSockets' answer.
+	appSocketsFn func() (map[uint32]bool, error)
+	// shmSrc, when set (a test), is the pod's /dev/shm and namespaces the
+	// steer table is kept in (shmSource), in place of this process's.
+	shmSrc *recordingStartSource
+	// steerTableWarn says once that the steer table could not be kept.
+	steerTableWarn sync.Once
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -317,7 +338,8 @@ func (h *Hooks) sendFinalAgentInfo(info structs.AgentInfo, start func(*structs.A
 	info.Flags = classifyFlag(info.Flags, h.socket != nil)
 	// The bind hooks note what the app binds for the ingress hold only
 	// once both its programs are attached (ingressport.go).
-	info.Flags = ingressHoldFlag(info.Flags, h.IngressHeld())
+	info.Flags = ingressHoldFlag(info.Flags, h.IngressHeld(), h.kernelPortAlloc && info.Flags&structs.FlagObserveOnly == 0)
+	h.steering.Store(info.Flags&structs.FlagIngressSteer != 0)
 	if err := start(&info); err != nil {
 		return err
 	}
@@ -326,6 +348,11 @@ func (h *Hooks) sendFinalAgentInfo(info structs.AgentInfo, start func(*structs.A
 		return err
 	}
 	h.sayBindFallback(info.Flags)
+	// The bind hooks steer from here (the flags are sent): a restarted
+	// agent steers again the sockets an earlier agent of the pod steered,
+	// which the application bound before this agent's hooks were there
+	// (ingress_steer.go).
+	h.startSteering(h.shmSource())
 	return nil
 }
 
@@ -982,6 +1009,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		}
 
 	}
+	h.unseenEnd()
 	h.logger.Debug("eBPF resources released successfully...")
 
 }
@@ -991,6 +1019,7 @@ func (h *Hooks) registerClient(clientInfo structs.ClientInfo, opts config.Agent)
 	h.logger.Debug("Registering the client Info with keploy")
 	h.clientMu.Lock()
 	h.clientPIDNS = opts.ClientPIDNS
+	h.passThroughPorts = clientInfo.PassThroughPorts
 	h.clientMu.Unlock()
 
 	return h.SendClientInfo(clientInfo)

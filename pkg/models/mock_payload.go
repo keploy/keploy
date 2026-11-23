@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 	"unsafe"
 )
 
@@ -189,6 +190,68 @@ func (d *payloadOnDisk) display(m *Mock, of func(*Mock) string, unknown string) 
 	c.Spec = read.Spec
 	return of(&c)
 }
+
+// OnDiskView is what a report reads of a mock whose payload a replay's read
+// left on disk (LeavePayloadOnDisk), kept without the mock: its name and kind,
+// when its request was recorded, its lifetime, and what the read kept to name
+// it (its summary, target and request fingerprint), the payload read back
+// for what it did not keep. A replay's lookup of a set's mocks holds a view
+// of each, not the mock: the mock (the Mock, its metadata) is the set's read,
+// about a kilobyte a mock, and goes once the mocks are on the agent, rather
+// than for the rest of the set's run.
+type OnDiskView struct {
+	name       string
+	kind       Kind
+	recordedAt time.Time
+	lifetime   Lifetime
+	d          *payloadOnDisk
+}
+
+// OnDiskView is m's view (above); nil when m's payload is in memory.
+func (m *Mock) OnDiskView() *OnDiskView {
+	if !m.PayloadOnDisk() {
+		return nil
+	}
+	return &OnDiskView{name: m.Name, kind: m.Kind, recordedAt: m.Spec.ReqTimestampMock, lifetime: m.TestModeInfo.Lifetime, d: m.onDisk}
+}
+
+// skeleton is the mock the view is of, as display reads it: its name and
+// kind, its payload on disk.
+func (v *OnDiskView) skeleton() *Mock {
+	return &Mock{Name: v.name, Kind: v.kind}
+}
+
+// Summary is MockSummaryFromSpec of the mock.
+func (v *OnDiskView) Summary() string {
+	if v.d.longSummary {
+		return v.d.display(v.skeleton(), MockSummaryFromSpec, string(v.kind))
+	}
+	return v.d.summary
+}
+
+// Target is MockTargetFromSpec of the mock.
+func (v *OnDiskView) Target() string {
+	if v.d.longTarget {
+		return v.d.display(v.skeleton(), MockTargetFromSpec, "")
+	}
+	return v.d.target
+}
+
+// Operation is MockOperation of the mock as recorded, its payload read back:
+// a read keeps none of it.
+func (v *OnDiskView) Operation() string {
+	return v.d.display(v.skeleton(), MockOperation, "")
+}
+
+// RequestFingerprint is the mock's Mock.RequestFingerprint.
+func (v *OnDiskView) RequestFingerprint() string { return v.d.fingerprint }
+
+// RecordedAt is when the mock's request was recorded (its
+// Spec.ReqTimestampMock).
+func (v *OnDiskView) RecordedAt() time.Time { return v.recordedAt }
+
+// Lifetime is the mock's TestModeInfo.Lifetime.
+func (v *OnDiskView) Lifetime() Lifetime { return v.lifetime }
 
 // IndexEntryFrom is a copy of m, a mock whose payload is on disk
 // (LeavePayloadOnDisk), whose payload src reads back from the same place in

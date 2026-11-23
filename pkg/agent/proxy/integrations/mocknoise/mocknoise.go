@@ -160,6 +160,30 @@ func (e *Engine) KnownNoise(m *models.Mock, userNoise map[string][]string) map[s
 	return MergeKnown(userNoise, userDecided(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m))))
 }
 
+// StrictNoise returns the root-relative known-noise set and learned type-strict
+// set that strict enforcement applies to stored learned noise alongside
+// userNoise. Learned paths keep their values ignored while their presence and
+// JSON type stay enforced; user-configured entries keep their full-ignore or
+// value-pattern semantics.
+func StrictNoise(userNoise, stored map[string][]string) (known map[string][]string, typeStrict map[string]struct{}) {
+	_, known, typeStrict = strictNoiseSets(userNoise, stored)
+	return known, typeStrict
+}
+
+// StrictNoise returns the root-relative known-noise set and learned type-strict
+// set for m under strict enforcement, matching StrictRejectRecordedJSONBody.
+func (e *Engine) StrictNoise(m *models.Mock, userNoise map[string][]string) (known map[string][]string, typeStrict map[string]struct{}) {
+	if e == nil {
+		return userNoise, nil
+	}
+	return StrictNoise(userNoise, e.adapter.StoredNoise(m))
+}
+
+func strictNoiseSets(userNoise, stored map[string][]string) (learned, known map[string][]string, typeStrict map[string]struct{}) {
+	learned = userDecided(userNoise, StripBodyPrefix(stored))
+	return learned, knownWithLearned(userNoise, learned), learnedTypeStrict(userNoise, learned)
+}
+
 // Detect returns the new "body."-prefixed schema-noise to record on the mock for
 // a live request body, plus whether the bodies were comparable (both JSON).
 //
@@ -291,9 +315,7 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 	// typeStrict, still fully exclude learned noise; typeStrict additionally marks
 	// them so a JSON parser type-enforces rather than fully ignores (collectJSON
 	// consults typeStrict first). User-configured noise stays full-ignore/regex.
-	learned := userDecided(userNoise, StripBodyPrefix(stored))
-	known := knownWithLearned(userNoise, learned)
-	typeStrict := learnedTypeStrict(userNoise, learned)
+	learned, known, typeStrict := strictNoiseSets(userNoise, stored)
 	guarded := e.userGuardedDrift(m, recorded, live, userNoise, learned)
 	var d map[string][]string
 	var comparable bool
@@ -472,8 +494,7 @@ type JSONBody struct {
 	// as bytes.
 	rawFrom func() []byte
 	// checked, valid: json.Valid's answer, once asked. read, decoded,
-	// value: json.Unmarshal's, once asked (decoded false: a body that is
-	// JSON but does not decode, a number past float64's range).
+	// value: matcher.UnmarshallJSON's, once asked.
 	checked, valid, read, decoded bool
 	value                         any
 	// reads counts the times the body was validated or decoded, so a test
@@ -486,12 +507,12 @@ func NewJSONBody(raw []byte) *JSONBody {
 	return &JSONBody{raw: raw}
 }
 
-// NewDecodedJSONBody is a JSON body given as the value json.Unmarshal
-// decodes its bytes into (an interface{}: map[string]any, []any, float64,
-// string, bool, nil) and a function that makes those bytes, called on the
-// first read of them (Raw), if any. The caller vouches that value is what
-// json.Unmarshal makes of raw's bytes, which are JSON: the body is neither
-// validated nor decoded (Reads stays 0).
+// NewDecodedJSONBody is a JSON body given as the value matcher.UnmarshallJSON
+// decodes its bytes into (map[string]any, []any, json.Number, string, bool,
+// nil — or float64 when values fit losslessly in IEEE-754) and a function that
+// makes those bytes, called on the first read of them (Raw), if any. The caller
+// vouches that value matches what matcher.UnmarshallJSON makes of raw's bytes,
+// which are JSON: the body is neither validated nor decoded (Reads stays 0).
 func NewDecodedJSONBody(value any, raw func() []byte) *JSONBody {
 	return &JSONBody{rawFrom: raw, checked: true, valid: true, read: true, decoded: true, value: value}
 }
@@ -519,13 +540,17 @@ func (b *JSONBody) isJSON() bool {
 	return b.valid
 }
 
-// decodedValue is the body as json.Unmarshal decodes it into an interface{}
-// (ok false: it does not decode), decoded once.
+// decodedValue is the body as matcher.UnmarshallJSON decodes it into an
+// interface{} (preserving JSON number precision via json.Number), decoded once.
 func (b *JSONBody) decodedValue() (value any, ok bool) {
 	if !b.read {
 		b.read = true
 		b.reads++
-		b.decoded = json.Unmarshal(b.raw, &b.value) == nil
+		v, err := matcher.UnmarshallJSON(string(b.raw), nil)
+		if err == nil && len(b.raw) > 0 {
+			b.value = v
+			b.decoded = true
+		}
 	}
 	return b.value, b.decoded
 }

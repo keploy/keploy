@@ -24,10 +24,11 @@
 //
 // The fix in this file: given the app's PID, read /proc/<pid>/environ
 // for JAVA_HOME, falling back to /proc/<pid>/exe's symlink target. The
-// caller (installJavaCA via installJavaCAForHome) then passes the
-// detected path to keytool -keystore $javaHome/lib/security/cacerts,
-// using $javaHome/bin/keytool as the executable, so the import lands
-// in the app's actual truststore regardless of what's on PATH.
+// caller (installJavaCAForHome) then passes the detected path's
+// cacerts to keytool -keystore ($javaHome/lib/security/cacerts, or
+// $javaHome/jre/lib/security/cacerts on JDK 8: jdkCacerts), using
+// $javaHome/bin/keytool as the executable, so the import lands in the
+// app's actual truststore regardless of what's on PATH.
 package tls
 
 import (
@@ -136,7 +137,7 @@ func detectJavaHomeForPID(pid int) string {
 //     absolute-path launch case where no JAVA_HOME is set. If
 //     exeLink ends in /bin/java (or /bin/java.exe on Windows/WSL),
 //     trimming the final two path components gives the JDK root
-//     whose lib/security/cacerts is the right target.
+//     whose cacerts (jdkCacerts) is the right target.
 //
 // Both empty → "" → caller falls back to PATH keytool.
 func detectJavaHomeFromSources(environ []byte, exeLink string) string {

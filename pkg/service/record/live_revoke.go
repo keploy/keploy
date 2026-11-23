@@ -141,6 +141,12 @@ type liveCapture struct {
 	deleted bool
 	// window is its test window in windows, -1 for none.
 	window int
+	// set is the test set the capture is saved in, and windows that set's
+	// test windows (inSet): a recording that rolls over (setRoll) saves its
+	// captures in several sets. "" and nil: the recording's (lr.setID,
+	// lr.windows).
+	set     string
+	windows *windowMappings
 }
 
 // startLiveRevokes starts applying revokes as they come. td nil (a store that
@@ -353,8 +359,35 @@ func (lr *liveRevokes) placed(c *liveCapture, window int) {
 	defer lr.mu.Unlock()
 	c.window = window
 	if c.deleted {
-		lr.windows.lose(window)
+		lr.windowsOf(c).lose(window)
 	}
+}
+
+// inSet says the capture c is saved in test set set, whose test windows are
+// windows (a recording that rolls over: setRoll). Called before it is saved.
+func (lr *liveRevokes) inSet(c *liveCapture, set string, windows *windowMappings) {
+	if lr == nil || c == nil {
+		return
+	}
+	lr.mu.Lock()
+	defer lr.mu.Unlock()
+	c.set, c.windows = set, windows
+}
+
+// windowsOf is the test windows c's window is in. Caller holds lr.mu.
+func (lr *liveRevokes) windowsOf(c *liveCapture) *windowMappings {
+	if c.windows != nil {
+		return c.windows
+	}
+	return lr.windows
+}
+
+// setOf is the test set c is saved in.
+func (lr *liveRevokes) setOf(c *liveCapture) string {
+	if c.set != "" {
+		return c.set
+	}
+	return lr.setID
 }
 
 // revokeByAgent applies the agent's revoke of each of names: a mock of the
@@ -527,7 +560,9 @@ func (lr *liveRevokes) apply(ctx context.Context) {
 	}
 	lr.mu.Lock()
 	var batch []*liveCapture
-	var names []string
+	// Each is deleted from the set its capture was saved in.
+	bySet := map[string][]string{}
+	var sets []string
 	rest := lr.queue[:0]
 	for _, c := range lr.queue {
 		switch {
@@ -537,7 +572,11 @@ func (lr *liveRevokes) apply(ctx context.Context) {
 		default:
 			lr.busy[c.name] = true
 			batch = append(batch, c)
-			names = append(names, c.name)
+			set := lr.setOf(c)
+			if _, ok := bySet[set]; !ok {
+				sets = append(sets, set)
+			}
+			bySet[set] = append(bySet[set], c.name)
 		}
 	}
 	lr.queue = rest
@@ -545,12 +584,15 @@ func (lr *liveRevokes) apply(ctx context.Context) {
 	if len(batch) == 0 {
 		return
 	}
-	deleted := deleteRevoked(context.WithoutCancel(ctx), lr.logger, lr.td, lr.setID, names)
+	deletedIn := map[string]map[string]struct{}{}
+	for _, set := range sets {
+		deletedIn[set] = deleteRevoked(context.WithoutCancel(ctx), lr.logger, lr.td, set, bySet[set])
+	}
 	lr.mu.Lock()
 	n := 0
 	for _, c := range batch {
 		delete(lr.busy, c.name)
-		if _, ok := deleted[c.name]; ok {
+		if _, ok := deletedIn[lr.setOf(c)][c.name]; ok {
 			lr.gone(c)
 			lr.deleted[c.name] = struct{}{}
 			n++
@@ -572,7 +614,7 @@ func (lr *liveRevokes) apply(ctx context.Context) {
 func (lr *liveRevokes) gone(c *liveCapture) {
 	c.gone, c.deleted = true, true
 	if c.window >= 0 {
-		lr.windows.lose(c.window)
+		lr.windowsOf(c).lose(c.window)
 	}
 }
 
@@ -618,6 +660,38 @@ func (lr *liveRevokes) end() (deleted map[string]struct{}, notRecorded int, left
 
 // revokedLeft is each saved capture revoked and not gone, once per name; with
 // lr.mu held.
+// revokedIn is a set and the names of the revoked captures saved in it.
+type revokedIn struct {
+	set   string
+	names []string
+}
+
+// leftBySet is what end returned as left, by the set each capture was saved
+// in (def for a capture saved before sets were told: the recording's).
+func (lr *liveRevokes) leftBySet(def string) []revokedIn {
+	if lr == nil {
+		return nil
+	}
+	lr.mu.Lock()
+	defer lr.mu.Unlock()
+	var out []revokedIn
+	at := map[string]int{}
+	for _, c := range lr.revokedLeft() {
+		set := c.set
+		if set == "" {
+			set = def
+		}
+		i, ok := at[set]
+		if !ok {
+			i = len(out)
+			at[set] = i
+			out = append(out, revokedIn{set: set})
+		}
+		out[i].names = append(out[i].names, c.name)
+	}
+	return out
+}
+
 func (lr *liveRevokes) revokedLeft() []*liveCapture {
 	var out []*liveCapture
 	seen := map[string]bool{}

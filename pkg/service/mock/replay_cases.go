@@ -83,7 +83,10 @@ func (m *mockService) watchIncoming(ctx context.Context, on bool) *actualCapture
 	if !on {
 		return nil
 	}
-	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(ctx, models.IncomingOptions{Filters: m.config.Record.Filters})
+	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(ctx, models.IncomingOptions{
+		Filters:            m.config.Record.Filters,
+		IgnoreStaticAssets: m.config.Record.IgnoreStaticAssets,
+	})
 	if err != nil {
 		m.logger.Warn("the app's responses will not be compared with the recording: could not read its incoming requests", zap.Error(err))
 		return nil
@@ -200,7 +203,10 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 	return out
 }
 
-// attributeMocks puts each served mock and each miss under the test that was running when it happened.
+// attributeMocks puts each served mock and each miss under the test that was
+// running when it happened. A mock the agent says every test window of is
+// put under each test it answered in (answeredInKnown); an older agent's,
+// by when it first answered, under one test.
 func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.MockEntry, consumed []models.MockState, misses []models.UnmatchedCall) []FlowMocks {
 	byFlow := make(map[string]*FlowMocks)
 	get := func(flow string) *FlowMocks {
@@ -214,7 +220,30 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 	for flow, entries := range expected {
 		get(flow).Expected = entries
 	}
+	bySeq := make(map[uint64]string)
+	for _, w := range windows {
+		bySeq[w.Seq] = w.Name // no answer names 0: the agent's ids start at 1
+	}
+	// consumed holds each recording once, with where it answered over every
+	// read of the run (consumedReads).
 	for _, c := range consumed {
+		if answeredInKnown(c) {
+			// Under every test whose window was open at one of its serves,
+			// once each: two of its windows can be one test's runs.
+			var under map[string]bool
+			for _, a := range c.AnsweredIn {
+				flow, ok := bySeq[a.Seq]
+				if !ok || under[flow] {
+					continue
+				}
+				if under == nil {
+					under = make(map[string]bool)
+				}
+				under[flow] = true
+				get(flow).Consumed = append(get(flow).Consumed, c)
+			}
+			continue
+		}
 		if c.Timestamp == 0 {
 			continue // an older agent does not say when it served a mock
 		}

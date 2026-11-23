@@ -8,10 +8,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -87,48 +91,34 @@ func TestGetAvailablePortAvoidsTheEphemeralRange(t *testing.T) {
 //
 // Asserting "the returned port is bindable" is not enough: on an idle box
 // almost any port above the ephemeral range binds, so that assertion holds by
-// luck even if the bindability probe is deleted entirely. Instead, hold a block
-// of candidates and require the function to return something outside it.
+// luck even if the bindability probe is deleted entirely. Instead, hold a port
+// with a real listener, put it at the bottom of the band, draw it, and require
+// the function to pass over it. One port, the kernel's pick: not a block of
+// ports above the range, which every process on the host draws from (another
+// test binary's draws met at the first free port past such a block).
 func TestGetAvailablePortSkipsPortsAlreadyHeld(t *testing.T) {
-	if _, _, known := ephemeralPortRange(); !known {
-		t.Skip("platform range unknown; GetAvailablePort falls back to :0 here")
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("hold a port: %v", err)
 	}
-	_, hi, _ := ephemeralPortRange()
-	if hi >= 65535 {
-		t.Skip("no space above the ephemeral range on this host")
+	t.Cleanup(func() { _ = ln.Close() })
+	held := uint32(ln.Addr().(*net.TCPAddr).Port)
+
+	if free, err := probePort(held, false); free || err != nil {
+		t.Fatalf("probePort(%d) = %v, %v while this test listens on it; want false, nil", held, free, err)
 	}
 
-	// Occupy a contiguous block so a probe-less implementation, which returns
-	// whatever candidate it lands on, has a high chance of returning a held one.
-	held := map[uint32]bool{}
-	var lns []net.Listener
-	for p := hi + 1; p <= 65535 && len(lns) < 2000; p++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
-		if err != nil {
-			continue
-		}
-		lns = append(lns, ln)
-		held[p] = true
+	defer func(r func() (uint32, uint32, bool)) { hostEphemeralRange = r }(hostEphemeralRange)
+	hostEphemeralRange = func() (uint32, uint32, bool) { return 1024, held - 1, true }
+	probed := drawsAndProbes(t, []uint32{0}, func(p uint32) (bool, error) { return probePort(p, false) }) // the draw lands on held, as does the scan's start
+	port, err := GetAvailablePort()
+	if err != nil {
+		t.Fatalf("GetAvailablePort: %v", err)
 	}
-	defer func() {
-		for _, ln := range lns {
-			_ = ln.Close()
-		}
-	}()
-	if len(held) < 100 {
-		t.Skipf("could only hold %d ports; too few to discriminate", len(held))
-	}
-
-	for i := 0; i < 200; i++ {
-		port, err := GetAvailablePort()
-		if err != nil {
-			t.Fatalf("GetAvailablePort: %v", err)
-		}
-		if held[port] {
-			t.Fatalf("GetAvailablePort returned %d, a port THIS TEST is holding: the "+
-				"candidate was never verified bindable, so callers are handed ports "+
-				"that are already in use", port)
-		}
+	if port == held || len(*probed) < 2 || (*probed)[0] != held || (*probed)[1] != held {
+		t.Fatalf("GetAvailablePort returned %d after probing %v; want a port other than %d, "+
+			"which THIS TEST holds and which the draw and the scan probed first: a "+
+			"candidate not verified bindable hands callers ports already in use", port, *probed, held)
 	}
 }
 
@@ -226,16 +216,22 @@ func TestParseEphemeralPortRange(t *testing.T) {
 // that coincidence correspondingly more likely.
 func TestEnsureAvailablePortsHonoursTheExclusionSet(t *testing.T) {
 	// A port that IS free: without the exclusion set it is returned unchanged.
-	free, err := GetAvailablePort()
+	// This test holds it from the kernel's pick on, so that no other process
+	// takes it before the check, and the check's probe says it is free
+	// (EnsureFreePort).
+	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
-		t.Fatalf("GetAvailablePort: %v", err)
+		t.Fatalf("hold a free port: %v", err)
 	}
+	t.Cleanup(func() { _ = ln.Close() })
+	free := uint32(ln.Addr().(*net.TCPAddr).Port)
+	isFree := func(port uint32) bool { return port == free }
 
-	if got, err := EnsureAvailablePorts(free); err != nil || got != free {
+	if got, err := EnsureFreePort(isFree, free); err != nil || got != free {
 		t.Fatalf("precondition: a free port must be returned unchanged, got %d (%v)", got, err)
 	}
 
-	got, err := EnsureAvailablePorts(free, free)
+	got, err := EnsureFreePort(isFree, free, free)
 	if err != nil {
 		t.Fatalf("EnsureAvailablePorts: %v", err)
 	}
@@ -243,6 +239,20 @@ func TestEnsureAvailablePortsHonoursTheExclusionSet(t *testing.T) {
 		t.Fatalf("EnsureAvailablePorts returned %d, which the caller had already claimed: "+
 			"nothing is bound to it yet, so isPortAvailable says free and two subsystems "+
 			"end up racing for the same port", got)
+	}
+}
+
+// EnsureAvailablePorts is EnsureFreePort with a TCP probe listener on the port:
+// a port this test holds is taken, and another is drawn in its place.
+func TestEnsureAvailablePortsMovesOffAHeldPort(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("hold a free port: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	held := uint32(ln.Addr().(*net.TCPAddr).Port)
+	if got, err := EnsureAvailablePorts(held); err != nil || got == held || got == 0 {
+		t.Fatalf("EnsureAvailablePorts(%d) = %d, %v while this test holds it; want another port", held, got, err)
 	}
 }
 
@@ -397,6 +407,572 @@ func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
 	got, err := getGitHubRelease(context.Background(), zap.NewNop(), srv.URL)
 	if err != nil || got.TagName != "v3.6.200" || len(got.Assets) != 1 || got.Assets[0].Digest != "sha256:ab" {
 		t.Errorf("getGitHubRelease = %+v, %v; want the release with its asset digest", got, err)
+	}
+}
+
+func TestMakeDirectory(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		oldMask := SetUmask()
+		defer RestoreUmask(oldMask)
+	}
+	base := t.TempDir()
+	parent := filepath.Join(base, "testdir")
+	dir := filepath.Join(parent, "nested")
+	if err := makeDirectory(dir); err != nil {
+		t.Fatalf("makeDirectory failed: %v", err)
+	}
+	for _, p := range []string{parent, dir} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat on created directory %q failed: %v", p, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("expected directory at %q, got file", p)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+			t.Errorf("makeDirectory(%q) mode = %o, want 0o755", p, info.Mode().Perm())
+		}
+	}
+}
+
+func TestMkdirAllForUser_EdgeCases(t *testing.T) {
+	t.Run("empty path returns error", func(t *testing.T) {
+		if err := MkdirAllForUser(zap.NewNop(), "", 0o755); err == nil {
+			t.Fatal("MkdirAllForUser(\"\") succeeded; want error")
+		}
+	})
+
+	t.Run("pre-existing directory preserves mode", func(t *testing.T) {
+		existing := filepath.Join(t.TempDir(), "existing")
+		if err := os.Mkdir(existing, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := MkdirAllForUser(zap.NewNop(), existing, 0o755); err != nil {
+			t.Fatalf("MkdirAllForUser on existing dir failed: %v", err)
+		}
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(existing)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if got := info.Mode().Perm(); got != 0o700 {
+				t.Errorf("existing dir mode = %o, want 0o700 preserved", got)
+			}
+		}
+	})
+
+	t.Run("existing regular file at target or ancestor returns error", func(t *testing.T) {
+		base := t.TempDir()
+		filePath := filepath.Join(base, "regular-file")
+		if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		if err := MkdirAllForUser(zap.NewNop(), filePath, 0o755); err == nil {
+			t.Error("MkdirAllForUser on existing file succeeded; want error")
+		}
+		if err := MkdirAllForUser(zap.NewNop(), filepath.Join(filePath, "child"), 0o755); err == nil {
+			t.Error("MkdirAllForUser beneath existing file succeeded; want error")
+		}
+	})
+
+	t.Run("symlink escaping base directory is refused", func(t *testing.T) {
+		base := t.TempDir()
+		outside := t.TempDir()
+		work := filepath.Join(base, "work")
+		if err := os.MkdirAll(work, 0o755); err != nil {
+			t.Fatalf("mkdir work: %v", err)
+		}
+		link := filepath.Join(work, "target")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		t.Chdir(work)
+		if err := MkdirAllForUser(zap.NewNop(), filepath.Join("target", "site", "keployE2E"), 0o755); err == nil {
+			t.Fatal("MkdirAllForUser followed escaping symlink; want error")
+		}
+		if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+			t.Fatalf("escaping symlink created entries outside base: %v (err=%v)", entries, err)
+		}
+	})
+
+	t.Run("existing child beneath read-only parent succeeds", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("read-only parent permission test requires non-root POSIX")
+		}
+		parent := filepath.Join(t.TempDir(), "ro-parent")
+		child := filepath.Join(parent, "existing-child")
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatalf("mkdir child: %v", err)
+		}
+		if err := os.Chmod(parent, 0o555); err != nil {
+			t.Fatalf("chmod parent: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+		if err := MkdirAllForUser(zap.NewNop(), child, 0o755); err != nil {
+			t.Fatalf("MkdirAllForUser on existing child under read-only parent failed: %v", err)
+		}
+	})
+}
+
+func TestReplaceHost(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		ipAddress  string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "valid http URL",
+			currentURL: "http://example.com/api/v1",
+			ipAddress:  "192.168.1.100",
+			want:       "http://192.168.1.100/api/v1",
+			wantErr:    false,
+		},
+		{
+			name:       "valid http URL with port",
+			currentURL: "http://example.com:8080/api/v1",
+			ipAddress:  "10.0.0.1",
+			want:       "http://10.0.0.1:8080/api/v1",
+			wantErr:    false,
+		},
+		{
+			name:       "empty ip address",
+			currentURL: "http://example.com/api/v1",
+			ipAddress:  "",
+			want:       "http://example.com/api/v1",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid URL",
+			currentURL: "://invalid-url",
+			ipAddress:  "10.0.0.1",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceHost(tc.currentURL, tc.ipAddress)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceHost(%q, %q) error = %v, wantErr = %v", tc.currentURL, tc.ipAddress, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceHost(%q, %q) = %q, want %q", tc.currentURL, tc.ipAddress, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplaceGrpcHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		authority string
+		ipAddress string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "valid authority with hostname",
+			authority: "localhost:50051",
+			ipAddress: "127.0.0.1",
+			want:      "127.0.0.1:50051",
+			wantErr:   false,
+		},
+		{
+			name:      "valid authority with ipv6",
+			authority: "[::1]:50051",
+			ipAddress: "10.0.0.1",
+			want:      "10.0.0.1:50051",
+			wantErr:   false,
+		},
+		{
+			name:      "empty ip address",
+			authority: "localhost:50051",
+			ipAddress: "",
+			want:      "localhost:50051",
+			wantErr:   true,
+		},
+		{
+			name:      "invalid authority format",
+			authority: "[fd00::1",
+			ipAddress: "127.0.0.1",
+			want:      "[fd00::1",
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceGrpcHost(tc.authority, tc.ipAddress)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceGrpcHost(%q, %q) error = %v, wantErr = %v", tc.authority, tc.ipAddress, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceGrpcHost(%q, %q) = %q, want %q", tc.authority, tc.ipAddress, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplaceGrpcPort(t *testing.T) {
+	cases := []struct {
+		name      string
+		authority string
+		port      string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "authority with port",
+			authority: "localhost:50051",
+			port:      "9090",
+			want:      "localhost:9090",
+			wantErr:   false,
+		},
+		{
+			name:      "authority without port fallback",
+			authority: "localhost",
+			port:      "9090",
+			want:      "localhost:9090",
+			wantErr:   false,
+		},
+		{
+			name:      "empty port",
+			authority: "localhost:50051",
+			port:      "",
+			want:      "localhost:50051",
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceGrpcPort(tc.authority, tc.port)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceGrpcPort(%q, %q) error = %v, wantErr = %v", tc.authority, tc.port, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceGrpcPort(%q, %q) = %q, want %q", tc.authority, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplaceBaseURL(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		baseURL    string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "valid baseURL replacement",
+			currentURL: "http://old-domain.com:8080/api/v1/resource?id=123",
+			baseURL:    "https://new-domain.com:9000",
+			want:       "https://new-domain.com:9000/api/v1/resource?id=123",
+			wantErr:    false,
+		},
+		{
+			name:       "empty baseURL",
+			currentURL: "http://old-domain.com/api",
+			baseURL:    "",
+			want:       "http://old-domain.com/api",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid currentURL",
+			currentURL: "://invalid-url",
+			baseURL:    "http://new-domain.com",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid baseURL",
+			currentURL: "http://old-domain.com/api",
+			baseURL:    "://invalid-base",
+			want:       "http://old-domain.com/api",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceBaseURL(tc.currentURL, tc.baseURL)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceBaseURL(%q, %q) error = %v, wantErr = %v", tc.currentURL, tc.baseURL, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceBaseURL(%q, %q) = %q, want %q", tc.currentURL, tc.baseURL, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplacePort(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		port       string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "URL without port",
+			currentURL: "http://example.com/api",
+			port:       "8080",
+			want:       "http://example.com:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "URL with existing port",
+			currentURL: "http://example.com:8080/api",
+			port:       "9090",
+			want:       "http://example.com:9090/api",
+			wantErr:    false,
+		},
+		{
+			name:       "empty port",
+			currentURL: "http://example.com/api",
+			port:       "",
+			want:       "http://example.com/api",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid URL",
+			currentURL: "://invalid-url",
+			port:       "8080",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplacePort(tc.currentURL, tc.port)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplacePort(%q, %q) error = %v, wantErr = %v", tc.currentURL, tc.port, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplacePort(%q, %q) = %q, want %q", tc.currentURL, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKeys(t *testing.T) {
+	m := map[string][]string{
+		"header-a": {"val1", "val2"},
+		"header-b": {"val3"},
+		"header-c": {},
+	}
+	got := Keys(m)
+	sort.Strings(got)
+	want := []string{"header-a", "header-b", "header-c"}
+	if len(got) != len(want) {
+		t.Fatalf("Keys() returned %d keys, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Keys()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	emptyGot := Keys(nil)
+	if len(emptyGot) != 0 {
+		t.Errorf("Keys(nil) = %v, want empty slice", emptyGot)
+	}
+}
+
+func TestIsDockerCmdAndHasUserCommand(t *testing.T) {
+	cases := []struct {
+		name       string
+		kind       CmdType
+		isDocker   bool
+		hasUserCmd bool
+	}{
+		{"docker-run", DockerRun, true, true},
+		{"docker-start", DockerStart, true, true},
+		{"docker-compose", DockerCompose, true, true},
+		{"from-container", FromContainer, true, false},
+		{"native", Native, false, true},
+		{"empty", Empty, false, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsDockerCmd(tc.kind); got != tc.isDocker {
+				t.Errorf("IsDockerCmd(%q) = %v, want %v", tc.kind, got, tc.isDocker)
+			}
+			if got := HasUserCommand(tc.kind); got != tc.hasUserCmd {
+				t.Errorf("HasUserCommand(%q) = %v, want %v", tc.kind, got, tc.hasUserCmd)
+			}
+		})
+	}
+}
+
+func TestHash(t *testing.T) {
+	emptyHash := Hash([]byte(""))
+	wantEmpty := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if emptyHash != wantEmpty {
+		t.Errorf("Hash(\"\") = %q, want %q", emptyHash, wantEmpty)
+	}
+
+	dataHash := Hash([]byte("keploy"))
+	wantKeploy := "787009cfb43f5e53579a025af080167b9b32519140d8b42c48d32cee7a9baf3a"
+	if dataHash != wantKeploy {
+		t.Errorf("Hash(\"keploy\") = %q, want %q", dataHash, wantKeploy)
+	}
+}
+
+func TestTrimSpaces(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "trims spaces around equal and comma",
+			input: "foo = bar , baz = qux",
+			want:  "foo=bar,baz=qux",
+		},
+		{
+			name:  "respects escaped comma",
+			input: "foo\\, bar = 1",
+			want:  "foo\\, bar=1",
+		},
+		{
+			name:  "respects escaped equal",
+			input: "foo\\= bar = 1",
+			want:  "foo\\= bar=1",
+		},
+		{
+			name:  "handles already trimmed string",
+			input: "a=1,b=2",
+			want:  "a=1,b=2",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TrimSpaces(tc.input); got != tc.want {
+				t.Errorf("TrimSpaces(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseMetadata(t *testing.T) {
+	t.Run("empty string returns nil", func(t *testing.T) {
+		m, err := ParseMetadata("")
+		if err != nil || m != nil {
+			t.Fatalf("ParseMetadata(\"\") = %v, %v; want nil, nil", m, err)
+		}
+	})
+
+	t.Run("valid key-value string parses into map", func(t *testing.T) {
+		m, err := ParseMetadata("name=keploy,env=test")
+		if err != nil {
+			t.Fatalf("ParseMetadata failed: %v", err)
+		}
+		if len(m) != 2 || m["name"] != "keploy" || m["env"] != "test" {
+			t.Errorf("ParseMetadata returned unexpected map: %v", m)
+		}
+	})
+
+	t.Run("invalid syntax returns error", func(t *testing.T) {
+		if m, err := ParseMetadata("invalid[unclosed=1"); err == nil {
+			t.Errorf("ParseMetadata invalid syntax = %v, nil; want error", m)
+		}
+	})
+}
+
+func TestExtractFlagsFromArgs(t *testing.T) {
+	t.Run("ExtractCmdTypeFromArgs", func(t *testing.T) {
+		cases := []struct {
+			args []string
+			want string
+		}{
+			{[]string{"keploy", "record", "--cmd-type", "Docker"}, "docker"},
+			{[]string{"keploy", "record", "--cmdType=DOCKER"}, "docker"},
+			{[]string{"keploy", "record", "--cmd-type", "Native"}, "native"},
+			{[]string{"keploy", "record", "--cmd-type", "Docker", "--cmd-type", "Native"}, "native"},
+			{[]string{"keploy", "record", "--cmd-type"}, ""},
+			{[]string{"keploy", "record"}, ""},
+			{[]string{"keploy", "record", "--", "--cmd-type", "Docker"}, ""},
+		}
+		for _, tc := range cases {
+			if got := ExtractCmdTypeFromArgs(tc.args); got != tc.want {
+				t.Errorf("ExtractCmdTypeFromArgs(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("ExtractFromContainerFromArgs", func(t *testing.T) {
+		cases := []struct {
+			args []string
+			want string
+		}{
+			{[]string{"keploy", "record", "--from-container", "MyContainer"}, "MyContainer"},
+			{[]string{"keploy", "record", "--fromContainer=App1"}, "App1"},
+			{[]string{"keploy", "record"}, ""},
+			{[]string{"keploy", "record", "--", "--from-container", "App1"}, ""},
+		}
+		for _, tc := range cases {
+			if got := ExtractFromContainerFromArgs(tc.args); got != tc.want {
+				t.Errorf("ExtractFromContainerFromArgs(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		}
+	})
+}
+
+func TestIsXMLResponse(t *testing.T) {
+	cases := []struct {
+		name string
+		resp *models.HTTPResp
+		want bool
+	}{
+		{
+			name: "nil response",
+			resp: nil,
+			want: false,
+		},
+		{
+			name: "response with no headers",
+			resp: &models.HTTPResp{},
+			want: false,
+		},
+		{
+			name: "response with application/xml",
+			resp: &models.HTTPResp{
+				Header: map[string]string{"Content-Type": "application/xml; charset=utf-8"},
+			},
+			want: true,
+		},
+		{
+			name: "response with text/xml",
+			resp: &models.HTTPResp{
+				Header: map[string]string{"Content-Type": "text/xml"},
+			},
+			want: true,
+		},
+		{
+			name: "response with application/json",
+			resp: &models.HTTPResp{
+				Header: map[string]string{"Content-Type": "application/json"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsXMLResponse(tc.resp); got != tc.want {
+				t.Errorf("IsXMLResponse() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

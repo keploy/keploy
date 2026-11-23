@@ -14,3 +14,5 @@ import (
 const canAskClientSockets = false
 
 func clientSocketOf(net.Conn, *zap.Logger) clientSocket { return nil }
+
+func tcpStateSocketOf(net.Conn) clientSocket { return nil }

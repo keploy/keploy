@@ -63,6 +63,11 @@ func clockMissWhere(t *testing.T, appClock bool, in *req, body map[string][]stri
 	if r == nil {
 		t.Fatal("no miss report")
 	}
+	// No caller declares patterns: a clock read the call does not hold is
+	// warned as one alone, never as a pattern's refusal too.
+	if n := logs.FilterMessage("a keploy.yml noise pattern does not excuse a field").Len(); n != 0 {
+		t.Errorf("a clock read's miss warned %d times of a pattern; want none", n)
+	}
 	return r, logs.FilterMessage("a learned read of the application's clock does not hold").All()
 }
 

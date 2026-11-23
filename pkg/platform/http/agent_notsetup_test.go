@@ -31,6 +31,13 @@ type recordingApp struct {
 	hold    func(ctx context.Context) (resume func(failed error))
 	refuse  func(failed error)
 	held    func(ctx context.Context, current func(ctx context.Context) bool) error
+	address func() string
+	refused func(ctx context.Context, said string) (uint32, error)
+}
+
+func (r *recordingApp) SetAgentAddress(f func() string) { r.address = f }
+func (r *recordingApp) SetOnAgentPortRefused(f func(ctx context.Context, said string) (uint32, error)) {
+	r.refused = f
 }
 
 func (r *recordingApp) SetOnAgentRestart(f func(ctx context.Context) error) { r.restart = f }

@@ -55,11 +55,18 @@ import (
 //   - Records the pre-TLS prelude mock.
 //   - Sends directive.UpgradeTLS on sess.Directives with dest and client
 //     TLS configs derived from sess.Opts.
-//   - Blocks on sess.Acks. On OK==true, subsequent chunks from
-//     ClientStream/DestStream are plaintext; reads the re-sent
-//     HandshakeResponse41 and continues.
-//   - On OK==false, calls sess.MarkMockIncomplete and returns the err;
-//     the supervisor falls through to raw passthrough.
+//   - Blocks on sess.Acks until the relay answers, the relay ends, or the
+//     parser ends (untilParserEnds: not the recording's stop). On
+//     OK==true, subsequent chunks from ClientStream/DestStream are
+//     plaintext; reads the re-sent HandshakeResponse41 and continues.
+//   - On OK==false while the recording runs, returns the err without a
+//     mark on the incomplete-mock flag (no mock is emitted after it to
+//     take one); the supervisor leaves out the rest of the connection.
+//   - An upgrade the relay fails at the recording's stop, or never
+//     answers because it ended (it closes Acks), ends the capture at the
+//     SSLRequest: RecordV2 returns nil and nothing is said or counted.
+//     Past the SSLRequest the capture holds TLS records only, which no
+//     recorder reads, so nothing captured is lost.
 //
 // Each command starts where Session.NextRequest finds it, and RecordV2 ends
 // with Session.EndExchanges, however it ends: server bytes captured before the
@@ -125,6 +132,24 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 			return nil
 		}
 		if ctx.Err() != nil {
+			if !sess.RecordingStopping() {
+				return ctx.Err()
+			}
+			// The recording's stop. The handshake was captured before it and
+			// read on after it (a TLS connection's greeting is fetched then
+			// too, and the relay's answer to a directive waited for:
+			// untilParserEnds). Only two ends leave the connection out
+			// with nothing said here: its streams' (returned above) and the
+			// parser's own (parserEnded: its retirement, whose loss the
+			// supervisor tells). Every other failure leaves it out: counted,
+			// named, and spanned from its first client packet where that is
+			// known (Session.ReportStoppedOn), as the exchange a lost frame
+			// is in. A context's end inside err decides nothing: a fetch that
+			// hit its own dial bound carries one, and is a failed fetch.
+			// Before, the stop made those silent.
+			if !parserEnded(ctx, sess) {
+				sess.ReportStoppedOn(models.MySQL, handshake.firstCmdAt, leftOutReason(err))
+			}
 			return ctx.Err()
 		}
 		if errors.Is(err, ErrFramingLost) {
@@ -150,6 +175,14 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 	// (not decodable command traffic), so stop here.
 	if handshake.preTLSStored {
 		logger.Debug("V2: pre-TLS handshake stored; raw stream ends here, post-TLS capture continues on the decrypted tls-* stream")
+		return nil
+	}
+
+	// The relay did not upgrade the connection, and that loses nothing
+	// captured (performTLSUpgradeV2): what the stream holds past the
+	// SSLRequest is TLS records no recorder reads, so the capture ends here.
+	if handshake.notUpgraded {
+		logger.Debug("V2: the relay did not upgrade the connection to TLS; its capture ends at the SSLRequest")
 		return nil
 	}
 
@@ -182,6 +215,11 @@ type v2HandshakeResult struct {
 	// stop after the handshake: the remaining bytes on THIS raw stream
 	// are opaque TLS records, not decodable MySQL command traffic.
 	preTLSStored bool
+	// notUpgraded is set when the relay did not upgrade the connection to
+	// TLS and that loses nothing captured (performTLSUpgradeV2). The caller
+	// must stop after the handshake, recording nothing: past the SSLRequest
+	// the capture holds TLS records only.
+	notUpgraded bool
 	// firstCmd carries a command-phase packet that the post-TLS handshake
 	// (handlePostTLSHandshakeV2) had to read off ClientStream to distinguish a
 	// fresh connection (HandshakeResponse41, seq>=1) from a pre-warmed pool
@@ -310,12 +348,18 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		if sess.ClientWritesHeld {
 			clientFlush = len(clientFirst)
 		}
-		if err := performTLSUpgradeV2(ctx, logger, sess, clientFlush); err != nil {
+		upgraded, err := performTLSUpgradeV2(ctx, logger, sess, clientFlush)
+		if err != nil {
 			// No mark on the incomplete-mock flag: the recorder returns,
 			// and no mock is emitted after it to take one. The supervisor
 			// falls through on the error and leaves out the rest of the
 			// connection.
 			return res, err
+		}
+		if !upgraded {
+			res.skipConfigMock = true
+			res.notUpgraded = true
+			return res, nil
 		}
 
 		// After TLS upgrade, the relay is writing plaintext into our
@@ -483,13 +527,14 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	// under CPU pressure it can land arbitrarily late — a short fixed timeout
 	// here converted that lateness into total capture loss (the CI "served but
 	// NOT recorded" shortfall). For a fresh connection resolvePreTLSGreeting
-	// waits (bounded by ctx and by the store TTL) for this connection's own
+	// waits (bounded by the parser's teardown, not the recording's stop, and by
+	// the store TTL) for this connection's own
 	// greeting, but falls back FAST to the port's last-greeting cache when the
 	// raw leg was genuinely dropped — so a dropped leg does not stall the whole
 	// overall window and push the COM_QUERY decode past the CI (2a) gate. A
 	// connection that joined mid-stream does not wait at all: see
 	// resolvePreTLSGreeting.
-	entry, taker, source := resolvePreTLSGreeting(ctx, hsStore, models.HandshakeOwnerOf(sess.Opts), dstPort, sess.Opts.PassThroughScope, sess.Opts.NetNS, sess.Opts.DstCfg, joinedMidStream)
+	entry, taker, source := resolvePreTLSGreeting(ctx, sess, hsStore, models.HandshakeOwnerOf(sess.Opts), dstPort, sess.Opts.PassThroughScope, sess.Opts.NetNS, sess.Opts.DstCfg, joinedMidStream)
 	// A greetingShared entry came off the port's queue without being provably
 	// this connection's (the capture layer could not name its connection on one
 	// of the legs), so it may be another stream's, which draws from the same
@@ -571,8 +616,14 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// server counts against the dialling host). fetchServerGreeting refuses
 		// fabricated destinations (see models.ConditionalDstCfg.AddrFabricated),
 		// so this cannot dial an address the capture layer merely invented.
+		// The recording's stop does not refuse it (untilParserEnds): this
+		// connection was captured before the stop, and the greeting is all its
+		// capture lacks. The fetch reads the greeting and hangs up, bounded by
+		// its own dial and read limits; the parser's end cuts it short.
 		var gErr error
-		greetingBuf, gErr = fetchServerGreetingShared(ctx, logger, hsStore, sess.Opts)
+		fetchCtx, endFetch := untilParserEnds(ctx, sess)
+		greetingBuf, gErr = fetchServerGreetingShared(fetchCtx, logger, hsStore, sess.Opts)
+		endFetch()
 		if gErr != nil {
 			return res, fmt.Errorf("post-TLS V2: no greeting in store (key port %d) and direct fetch failed: %w", dstPort, gErr)
 		}
@@ -1044,6 +1095,62 @@ const (
 	greetingCached
 )
 
+// parserEnded reports whether ctx ended with the parser itself: its teardown
+// while the recording runs (a hang, a panic, the memory cap), or, at the
+// recording's stop, its retirement (Session.Retired). The recording's stop alone
+// ends ctx too, but not the parser: it reads on what was captured before the
+// stop, and what that needs, a TLS connection's greeting, is still worth
+// waiting for and fetching.
+func parserEnded(ctx context.Context, sess *supervisor.Session) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	if !sess.RecordingStopping() {
+		return true
+	}
+	select {
+	case <-sess.Retired():
+		return true
+	default:
+		return false
+	}
+}
+
+// untilParserEnds is ctx, with its values, for what the parser waits on from
+// outside its capture (the server's greeting it fetches, the relay's answer to
+// a handshake directive): it ends when the parser does (parserEnded), not at
+// the recording's stop. The caller calls the returned
+// func once it is done with it. A parser that has ended already gets a ctx
+// that has ended: the end ctx had is not left to a goroutine to pass on while
+// the fetch dials.
+func untilParserEnds(ctx context.Context, sess *supervisor.Session) (context.Context, context.CancelFunc) {
+	fetch, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	if parserEnded(ctx, sess) {
+		cancel()
+		return fetch, cancel
+	}
+	stop := context.AfterFunc(ctx, func() {
+		// Only the stop waits for the retirement. A teardown while the
+		// recording runs is the parser's end itself and ends the wait at
+		// once. At the stop the wait lasts until the retirement or done():
+		// a session no supervisor runs has no retirement (Retired is nil),
+		// so its wait lasts until done(). No recording session is one:
+		// only proxy_v2.go sets RecordingDone, always for a session
+		// Supervisor.Run runs.
+		if sess.RecordingStopping() {
+			select {
+			case <-sess.Retired():
+			case <-fetch.Done():
+			}
+		}
+		cancel()
+	})
+	return fetch, func() {
+		stop()
+		cancel()
+	}
+}
+
 // resolvePreTLSGreeting obtains the pre-TLS greeting (+SSLRequest) for a
 // decrypted tls-* stream, and the owner the stashed entry was pushed with. It
 // prefers THIS connection's own raw-leg stash, but a genuinely-dropped raw leg
@@ -1061,8 +1168,14 @@ const (
 //     `overall`, since nothing better can serve this connection. The caller
 //     then consults the per-server memo, and only then dials.
 //
-// ctx cancellation (stream/session teardown) cuts any wait short within one
-// poll slice. On a final miss it returns greetingNone so the caller can
+// The parser's end (parserEnded: its teardown while the recording runs, a
+// hang, a panic, the memory cap, or its retirement at the stop) cuts any wait
+// short within one poll slice. The recording's stop alone, which cancels ctx
+// too, does not: the raw leg's greeting was captured before the stop as this
+// stream's bytes were, and its parser reads what was captured to its stream's
+// end and pushes the greeting then, so the wait goes on to its bounds, or until
+// the supervisor retires this parser (Session.Retired), from when nothing it
+// records is kept. On a final miss it returns greetingNone so the caller can
 // fetchServerGreetingShared / abort cleanly.
 //
 // Every raw leg pushes its entry once, under the destination port's key,
@@ -1101,7 +1214,7 @@ const (
 // greeting. Main waited out the stash bound (30s default) per pooled
 // connection at every recording start, and took every entry that landed on the
 // port meanwhile.
-func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, owner models.HandshakeOwner, dstPort uint16, scope, netNS string, dst *models.ConditionalDstCfg, joinedMidStream bool) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
+func resolvePreTLSGreeting(ctx context.Context, sess *supervisor.Session, hsStore *models.TLSHandshakeStore, owner models.HandshakeOwner, dstPort uint16, scope, netNS string, dst *models.ConditionalDstCfg, joinedMidStream bool) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
 	portKey := models.HandshakeStoreKey("", dstPort)
 	// The cross-connection fallback has TWO keys. One names the destination: the
 	// fields it lets us reuse (capability flags, protocol version, auth plugin)
@@ -1236,8 +1349,9 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 				return entry, models.HandshakeOwner{}, greetingCached
 			}
 		}
-		// 3. Overall bound / teardown.
-		if !now.Before(overallDeadline) || ctx.Err() != nil {
+		// 3. Overall bound / the parser's end. Not the recording's stop: the
+		//    raw leg's parser still pushes what was captured before it.
+		if !now.Before(overallDeadline) || parserEnded(ctx, sess) {
 			break
 		}
 		// 4. Block on the port's queue, waking the moment a Push broadcasts the
@@ -1373,19 +1487,29 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 // the connection was never blocked in the first place. Treating that
 // refusal as fatal would make the parser's correctness depend on how
 // the relay beneath it was configured.
+//
+// The recording's stop does not end the wait for the relay, only the
+// parser's end does (untilParserEnds): a handshake read at the stop was
+// captured before it, under the hold, so the server has seen nothing of
+// it, and the relay's answer, or its end, decides, then the streams' end.
+// A relay that ends unanswered has ended both streams and flushed the
+// hold first (relay.Run), so the handshake reads on to its streams' end.
 func releaseClientHoldV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) error {
+	wait, done := untilParserEnds(ctx, sess)
+	defer done()
 	select {
-	case <-ctx.Done():
+	case <-wait.Done():
 		return ctx.Err()
 	case sess.Directives <- directive.ReleaseClient("mysql plaintext handshake"):
 	}
 
 	select {
-	case <-ctx.Done():
+	case <-wait.Done():
 		return ctx.Err()
 	case ack, ok := <-sess.Acks:
 		if !ok {
-			return errors.New("directive channel closed before client-hold release ack")
+			logger.Debug("V2: the relay ended before it acked the client-hold release; reading on to the streams' end")
+			return nil
 		}
 		if !ack.OK {
 			logger.Debug("V2: relay declined the client-hold release; assuming no hold was armed",
@@ -1397,9 +1521,19 @@ func releaseClientHoldV2(ctx context.Context, logger *zap.Logger, sess *supervis
 
 // performTLSUpgradeV2 builds TLS configs from the session options and
 // sends a KindUpgradeTLS directive on sess.Directives, blocking on the
-// ack. Returns nil on OK, an error on failure. Failure cases MUST call
-// sess.MarkMockIncomplete at the call site.
-func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, clientFlushBytes int) error {
+// ack. It reports whether the relay upgraded the connection. An upgrade
+// that did not happen is an error when it loses what the connection
+// carries next: the relay failed it while the recording runs. It is false
+// with no error when it loses nothing captured: past the SSLRequest the
+// capture holds TLS records only, which no recorder reads, and nothing
+// the connection carries next is recorded, because the relay has ended
+// (it ends both streams, then closes Acks: relay.Run) or because the
+// recording has stopped (Session.RecordingStopping) when the relay fails
+// it.
+//
+// The recording's stop does not end the wait for the relay, only the
+// parser's end does (untilParserEnds), as for releaseClientHoldV2.
+func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, clientFlushBytes int) (bool, error) {
 	destCfg := buildDestTLSConfigV2(sess)
 	clientCfg := buildClientTLSConfigV2(sess)
 
@@ -1411,26 +1545,33 @@ func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervis
 	d := directive.UpgradeTLS(destCfg, clientCfg, "mysql client_ssl")
 	d.TLS.ClientFlushBytes = clientFlushBytes
 
+	wait, done := untilParserEnds(ctx, sess)
+	defer done()
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-wait.Done():
+		return false, ctx.Err()
 	case sess.Directives <- d:
 	}
 
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-wait.Done():
+		return false, ctx.Err()
 	case ack, ok := <-sess.Acks:
 		if !ok {
-			return fmt.Errorf("directive channel closed before TLS upgrade ack")
+			logger.Debug("V2: the relay ended before it acked the TLS upgrade")
+			return false, nil
 		}
 		if !ack.OK {
-			if ack.Err != nil {
-				return fmt.Errorf("tls upgrade: %w", ack.Err)
+			if sess.RecordingStopping() {
+				logger.Debug("V2: the relay failed the TLS upgrade at the recording's stop", zap.Error(ack.Err))
+				return false, nil
 			}
-			return errors.New("tls upgrade rejected by relay")
+			if ack.Err != nil {
+				return false, fmt.Errorf("tls upgrade: %w", ack.Err)
+			}
+			return false, errors.New("tls upgrade rejected by relay")
 		}
-		return nil
+		return true, nil
 	}
 }
 
@@ -1550,7 +1691,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			taken.flush()
 		}
 		if held != nil {
-			held.leaveOut(sess, decodeCtx, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
+			held.leaveOut(sess, decodeCtx, notRecorded("the connection's recording ended before a packet settled the %s response's framing", held.what))
 		}
 	}()
 	// carry is the first packet of the response about to be read, read by
@@ -1812,11 +1953,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					}
 					t.flush()
 				}
-				if held != nil && ctx.Err() == nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
+				if held != nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
 					// The client's stream ended with a PREPARE held: what the
 					// server sent after it is all on its stream, and an ERR
 					// 1835 to a command without an answer that did not decode
-					// after it is that command's answer.
+					// after it is that command's answer. At the recording's
+					// stop too: the relay ends both streams once it has
+					// handed on what it captured before the stop.
 					h := held
 					held = nil
 					if endErr := h.end(ctx, logger, sess, decodeCtx, malformed); endErr != nil {
@@ -2811,19 +2954,25 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 	_ = ctx
 }
 
-// leftOutRefusedAtStop is the reason emitV2 leaves out a mock the session
-// refused as its context ended.
-const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
+// leftOutRefusedAtStop is the reason the session leaves out a mock it refused
+// as its context ended (supervisor.LeftOutRefusedAtStop).
+const leftOutRefusedAtStop = supervisor.LeftOutRefusedAtStop
 
 // emitV2 hands the session m, the mock of an exchange read whole, whether or
-// not the session's context (Session.Ctx) has ended: EmitMock while it lasts,
-// EmitMockOnShutdown once it has ended, as at the recording's stop, where
-// EmitMock refuses every mock. A mock EmitMock refuses all the same, as the
-// context ends between the check and its own, is left out and said so
-// (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only for its
-// context's end.
+// not the session's context (Session.Ctx) has ended. Through the sync-mock
+// manager, as the agent records (RouteMocksViaSyncMock), it is always
+// EmitMockOnShutdown: there it differs from EmitMock only in skipping
+// EmitMock's look at the context, which comes after the post-record hooks, so
+// a recording's stop that came while the hooks ran would refuse a mock
+// captured before the stop, which the supervisor's stop waits for the
+// recorder to record. Straight to the session's channel: EmitMock while the
+// context lasts, EmitMockOnShutdown once it has ended, as at the recording's
+// stop, where EmitMock refuses every mock. A mock EmitMock refuses all the
+// same, as the context ends between the check and its own, is left out and
+// said so by EmitMock itself (supervisor.LeftOutRefusedAtStop), not dropped:
+// EmitMock refuses a mock only for its context's end.
 func emitV2(sess *supervisor.Session, m *models.Mock) {
-	if c := sess.Ctx; c != nil && c.Err() != nil {
+	if c := sess.Ctx; sess.RouteMocksViaSyncMock || (c != nil && c.Err() != nil) {
 		_ = sess.EmitMockOnShutdown(m)
 		return
 	}
@@ -2831,7 +2980,6 @@ func emitV2(sess *supervisor.Session, m *models.Mock) {
 		if sess.Logger != nil {
 			sess.Logger.Debug("V2: the session refused a mock as its context ended", zap.Error(err))
 		}
-		sess.ReportLeftOut(m, leftOutRefusedAtStop)
 	}
 }
 

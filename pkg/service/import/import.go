@@ -69,6 +69,10 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 
 	pi.validatePostmanSchema(postmanCollection.Info.Schema)
 
+	if err := validateCollectionTestSetNames(postmanCollection); err != nil {
+		return err
+	}
+
 	globalVariables := pi.extractGlobalVariables(postmanCollection.Variables)
 
 	// Check for empty responses if basePath is not provided
@@ -119,7 +123,7 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 
 	for _, variable := range variables {
 		// Skip disabled variables
-		if variable["disabled"] != nil && variable["disabled"].(bool) {
+		if disabled, ok := variable["disabled"].(bool); ok && disabled {
 			continue
 		}
 
@@ -221,6 +225,10 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 		return fmt.Errorf("failed to get current working directory: %w", err)
 	}
 
+	if err := validateCollectionTestSetNames(collection); err != nil {
+		return err
+	}
+
 	testCounter := 0
 	var itemsToProcess []TestData
 
@@ -231,25 +239,28 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 
 	if len(collection.Items.PostmanItems) > 0 {
 		for _, item := range collection.Items.PostmanItems {
-			if len(item.Item) == 0 {
+			requests := item.CollectRequests()
+			if len(requests) == 0 {
 				continue
 			}
 
 			testSet := item.Name
 			if item.Name == "" {
 				testSet = pi.generateTestSetName()
+			} else if err := validateTestSetName(testSet); err != nil {
+				return err
 			}
 
 			testSetPath := filepath.Join(cwd, "keploy", testSet)
 			testsPath := filepath.Join(testSetPath, "tests")
 
 			folderCounter := folderCounters[testSet]
-			for _, testItem := range item.Item {
-				if err := pi.processEmptyResponse(&testItem, globalVariables, basePath); err != nil {
+			for i := range requests {
+				if err := pi.processEmptyResponse(&requests[i], globalVariables, basePath); err != nil {
 					return err
 				}
 
-				if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &folderCounter); err != nil {
+				if err := pi.writeTestData(requests[i], filepath.Join(cwd, "keploy"), testsPath, globalVariables, &folderCounter); err != nil {
 					return fmt.Errorf("failed to write test data: %w", err)
 				}
 			}
@@ -279,6 +290,45 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 	return nil
 }
 
+func validateCollectionTestSetNames(collection *PostmanCollectionStruct) error {
+	for _, item := range collection.Items.PostmanItems {
+		if len(item.CollectRequests()) == 0 || item.Name == "" {
+			continue
+		}
+		if err := validateTestSetName(item.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTestSetName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || !filepath.IsLocal(name) ||
+		hasWindowsDrivePrefix(name) || strings.ContainsAny(name, `/\`) ||
+		strings.TrimRight(name, " .") == "" || hasControlChar(name) {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
+	return nil
+}
+
+func hasWindowsDrivePrefix(name string) bool {
+	return len(name) >= 2 &&
+		((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) &&
+		name[1] == ':'
+}
+
+func hasControlChar(name string) bool {
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func (pi *PostmanImporter) generateTestSetName() string {
 	maxTestSetNumber := 0
 	files, err := os.ReadDir(filepath.Join("keploy"))
@@ -296,9 +346,9 @@ func (pi *PostmanImporter) generateTestSetName() string {
 }
 
 func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionStruct) bool {
-
 	for _, item := range collection.Items.PostmanItems {
-		for _, testItem := range item.Item {
+		requests := item.CollectRequests()
+		for _, testItem := range requests {
 			if len(testItem.Response) == 0 {
 				pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 				return true
@@ -436,7 +486,11 @@ func constructRequest(req *PostmanRequest, variables map[string]string) models.H
 func extractHeaders(headers []map[string]interface{}) map[string]string {
 	headersMap := make(map[string]string)
 	for _, header := range headers {
-		headersMap[header["key"].(string)] = header["value"].(string)
+		key, okKey := header["key"].(string)
+		value, okVal := header["value"].(string)
+		if okKey && okVal {
+			headersMap[key] = value
+		}
 	}
 	return headersMap
 }
@@ -446,17 +500,23 @@ func extractURL(url interface{}) string {
 	case string:
 		return v
 	case map[string]interface{}:
-		url := v["raw"].(string)
-		return url
+		if raw, ok := v["raw"].(string); ok {
+			return raw
+		}
+		return ""
 	default:
 		return ""
 	}
 }
 
 func processUrlencodedBody(body []map[string]interface{}) string {
-	keyValues := []string{}
+	var keyValues []string
 	for _, item := range body {
-		keyValues = append(keyValues, url.QueryEscape(item["key"].(string))+"="+url.QueryEscape(item["value"].(string)))
+		key, okKey := item["key"].(string)
+		value, okVal := item["value"].(string)
+		if okKey && okVal {
+			keyValues = append(keyValues, url.QueryEscape(key)+"="+url.QueryEscape(value))
+		}
 	}
 	return strings.Join(keyValues, "&")
 }
@@ -464,12 +524,65 @@ func processUrlencodedBody(body []map[string]interface{}) string {
 func processFormdataBody(body []map[string]interface{}) []models.FormData {
 	form := []models.FormData{}
 	for _, formData := range body {
-		form = append(form, models.FormData{
-			Key:    formData["key"].(string),
-			Values: []string{formData["value"].(string)},
-		})
+		if disabled, ok := formData["disabled"].(bool); ok && disabled {
+			continue
+		}
+		key, okKey := formData["key"].(string)
+		if !okKey || key == "" {
+			continue
+		}
+		if fieldType, _ := formData["type"].(string); fieldType == "file" {
+			var paths []string
+			for _, p := range stringValues(formData["src"]) {
+				if p != "" {
+					paths = append(paths, p)
+				}
+			}
+			// Note: Postman exports typically record host absolute paths in src;
+			// replay's OpenRecordingFile enforces recording-directory containment,
+			// so absolute paths must be made relative to the recording if replayed.
+			form = append(form, models.FormData{
+				Key:   key,
+				Paths: paths,
+			})
+			continue
+		}
+		var values []string
+		if vals := stringValues(formData["values"]); len(vals) > 0 {
+			values = vals
+		} else if val, ok := formData["value"].(string); ok {
+			values = []string{val}
+		}
+		if len(values) > 0 {
+			form = append(form, models.FormData{
+				Key:    key,
+				Values: values,
+			})
+		}
 	}
 	return form
+}
+
+func stringValues(v interface{}) []string {
+	switch v := v.(type) {
+	case string:
+		return []string{v}
+	case []string:
+		if len(v) == 0 {
+			return nil
+		}
+		return append([]string(nil), v...)
+	case []interface{}:
+		values := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				values = append(values, s)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
 }
 
 func constructResponse(res PostmanResponse) models.HTTPResp {
@@ -527,8 +640,59 @@ type ItemsContainer struct {
 
 type PostmanItem struct {
 	Name      string              `json:"name"`
-	Variables []map[string]string `json:"variable"`
-	Item      []TestData          `json:"item"`
+	Variables []map[string]string `json:"variable,omitempty"`
+	Item      []PostmanItemNode   `json:"item"`
+}
+
+// CollectRequests returns all leaf requests contained in the folder and its
+// nested subfolders in depth-first traversal order.
+func (pi *PostmanItem) CollectRequests() []TestData {
+	if pi == nil {
+		return nil
+	}
+	var reqs []TestData
+	for i := range pi.Item {
+		pi.Item[i].collectRequests(&reqs)
+	}
+	return reqs
+}
+
+// PostmanItemNode represents a Postman collection item entry, which may be a
+// leaf request, a nested subfolder of items, or both.
+type PostmanItemNode struct {
+	Name      string                   `json:"name"`
+	Request   *PostmanRequest          `json:"request,omitempty"`
+	Response  []PostmanResponse        `json:"response,omitempty"`
+	Item      []PostmanItemNode        `json:"item,omitempty"`
+	Variables []map[string]interface{} `json:"variable,omitempty"`
+}
+
+// CollectRequests returns all requests at or beneath this node in depth-first
+// traversal order.
+func (n *PostmanItemNode) CollectRequests() []TestData {
+	if n == nil {
+		return nil
+	}
+	var reqs []TestData
+	n.collectRequests(&reqs)
+	return reqs
+}
+
+func (n *PostmanItemNode) collectRequests(out *[]TestData) {
+	if n == nil {
+		return
+	}
+	if n.Request != nil {
+		*out = append(*out, TestData{
+			Name:      n.Name,
+			Request:   *n.Request,
+			Response:  n.Response,
+			Variables: n.Variables,
+		})
+	}
+	for i := range n.Item {
+		n.Item[i].collectRequests(out)
+	}
 }
 
 type TestData struct {
@@ -599,6 +763,16 @@ func (ic *ItemsContainer) UnmarshalJSON(data []byte) error {
 }
 
 func (ic ItemsContainer) MarshalJSON() ([]byte, error) {
+	if len(ic.PostmanItems) > 0 && len(ic.TestDataItems) > 0 {
+		all := make([]interface{}, 0, len(ic.PostmanItems)+len(ic.TestDataItems))
+		for _, pi := range ic.PostmanItems {
+			all = append(all, pi)
+		}
+		for _, td := range ic.TestDataItems {
+			all = append(all, td)
+		}
+		return json.Marshal(all)
+	}
 	if len(ic.PostmanItems) > 0 {
 		return json.Marshal(ic.PostmanItems)
 	}

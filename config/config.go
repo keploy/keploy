@@ -165,6 +165,9 @@ type Record struct {
 	BasePath    string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata    string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// IgnoreStaticAssets skips recording successful GET/HEAD responses for web
+	// static assets (CSS, JavaScript, fonts, images, audio, video) as test cases.
+	IgnoreStaticAssets bool `json:"ignoreStaticAssets" yaml:"ignoreStaticAssets" mapstructure:"ignoreStaticAssets"`
 	// TestCaseNaming controls how default test case filenames are generated.
 	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
 	// "sequential" preserves the legacy `test-N.yaml` numbering.
@@ -638,6 +641,15 @@ type Test struct {
 	// no mapping entry), never read from keploy.yml. The replayer writes it
 	// into the IGNORED result's SkipReason, with the proven switch on or off.
 	SkipReasons map[string]map[string]string `json:"-" yaml:"-" mapstructure:"-"`
+	// SkipKinds names the kind of each skip SkipReasons gives a reason for, by
+	// the same test set -> test case, so the run does not call a skip that is
+	// no quarantine quarantined: models.SkipThisRunOnly for a test skipped for
+	// this run only, models.SkipUntilRerecorded for one skipped until it is
+	// recorded again. A skip it names no kind for is a quarantine
+	// (models.SkipQuarantined). Set at run time, never read from keploy.yml,
+	// and afresh each round by a caller that runs rounds, as SkipReasons is;
+	// a kind for a test SkipReasons gives no reason for says nothing.
+	SkipKinds map[string]map[string]models.SkipKind `json:"-" yaml:"-" mapstructure:"-"`
 	// AllowEgress names what a replay may reach on the real network, by the
 	// entries models.NormalizeAllowEgress accepts (models.AllowEgressDNS). What a
 	// replay does not answer from its mocks otherwise stays inside the replay;

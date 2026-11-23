@@ -382,7 +382,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return err
 		}
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
-		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
+		_ = cmd.Flags().MarkDeprecated("app-id", "DEPRECATED: was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
@@ -557,6 +557,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	case "record":
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
+		cmd.Flags().Bool("ignore-static-assets", c.cfg.Record.IgnoreStaticAssets, "Skip recording successful GET/HEAD web static asset responses (CSS, JS, fonts, images, audio, video) as test cases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
@@ -678,6 +679,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"goCoverage":                "go-coverage",
 		"fallBackOnMiss":            "fallBack-on-miss",
 		"basePath":                  "base-path",
+		"ignoreStaticAssets":        "ignore-static-assets",
 		"updateTemplate":            "update-template",
 		"mocking":                   "mocking",
 		"configPath":                "config-path",
@@ -981,15 +983,19 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	configFile := loader.Find(configPath)
 	ConfigFile = configFile
 	viper.SetConfigType("yml")
+	// files keeps test.globalNoise as keploy.yml and the override write it,
+	// for the Unmarshal below: viper lowercases its keys and splits them on
+	// ".", and they are url regexes and field paths (loader.Files).
+	files := loader.New(viper.GetViper())
 	if configFile == "" {
 		IsConfigFileFound = false
 		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
 		// keploy.yml is a file of the repository keploy runs in, which a cloned
-		// repo decides: loader.Read is viper's read of it, bounded -- a FIFO,
+		// repo decides: files.Read is viper's read of it, bounded -- a FIFO,
 		// a link to /dev/zero or a file past keploy's limits is refused, where
 		// viper.ReadInConfig blocked for good or ran out of memory.
-		if err := loader.Read(viper.GetViper(), configFile); err != nil {
+		if err := files.Read(configFile); err != nil {
 			errMsg := "failed to read config file"
 			utils.LogError(c.logger, err, errMsg, zap.String("file", configFile))
 			return errors.New(errMsg)
@@ -1018,7 +1024,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 			// appName, or a given --app-name or KEPLOY_APPNAME, which no
 			// file overrides.
 			named := viper.GetString("appName")
-			if err := loader.Merge(viper.GetViper(), overridePath); err != nil {
+			if err := files.Merge(overridePath); err != nil {
 				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
@@ -1039,8 +1045,8 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		IsConfigFileFound = true
 	}
 
-	// 7) Unmarshal
-	if err := viper.Unmarshal(c.cfg); err != nil {
+	// 7) Unmarshal, with test.globalNoise as the files write it
+	if err := files.Unmarshal(c.cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
@@ -2939,6 +2945,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	case "record":
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
 		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
+		cmd.Flags().Bool("ignore-static-assets", c.cfg.Record.IgnoreStaticAssets, "Skip recording successful GET/HEAD web static asset responses (CSS, JS, fonts, images, audio, video) as test cases when --record-requests is enabled")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if a call missed its recorded mock (dependency contract drift); a DNS lookup or a connection that sent nothing does not count")
@@ -3221,6 +3228,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			c.cfg.Mock.RecordTimer = d
 		}
 		if err := c.readMockBool(cmd, "record-requests", "mock.recordRequests", &c.cfg.Mock.RecordRequests); err != nil {
+			return err
+		}
+		if err := c.readMockBool(cmd, "ignore-static-assets", "record.ignoreStaticAssets", &c.cfg.Record.IgnoreStaticAssets); err != nil {
 			return err
 		}
 	case "replay":

@@ -52,7 +52,10 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 	if !on {
 		return nil
 	}
-	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(captureCtx, models.IncomingOptions{Filters: m.config.Record.Filters})
+	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(captureCtx, models.IncomingOptions{
+		Filters:            m.config.Record.Filters,
+		IgnoreStaticAssets: m.config.Record.IgnoreStaticAssets,
+	})
 	if err != nil {
 		m.logger.Warn("the app's incoming requests are not recorded: could not read them from the agent", zap.Error(err))
 		return nil

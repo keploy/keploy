@@ -168,7 +168,11 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				utils.LogError(logger, err, "failed to read the test files", zap.String("path", testsDir))
 				continue
 			}
-			keployRequests := make(map[interface{}]int, 0)
+			// An identical request is exported once, at the place its first
+			// test case gave it: a map alone would list a folder's requests
+			// in a different order on every run.
+			keployRequests := make(map[string]struct{})
+			var requestOrder []string
 			for _, testFile := range testFiles {
 				// Pick the unmarshaler based on the file extension so testcases
 				// recorded in either StorageFormat are exported correctly.
@@ -215,17 +219,27 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				}
 
 				requestJSON := ConvertKeployHTTPToPostmanCollection(logger, &httpSchema)
+				if requestJSON == nil {
+					// The URL could not be made a request (it was logged): leave
+					// the test case out, not a null item Postman cannot import.
+					logger.Warn("skipping a testcase whose URL cannot be exported", zap.String("testcase name", testFile.Name()))
+					continue
+				}
 				requestJSONString, err := json.Marshal(requestJSON)
 				if err != nil {
 					utils.LogError(logger, err, "failed to marshal requestJSON to string")
 					continue
 				}
-				keployRequests[string(requestJSONString)]++
+				if _, seen := keployRequests[string(requestJSONString)]; !seen {
+					reqStr := string(requestJSONString)
+					keployRequests[reqStr] = struct{}{}
+					requestOrder = append(requestOrder, reqStr)
+				}
 			}
-			var uniqueRequests []interface{}
-			for request := range keployRequests {
+			uniqueRequests := make([]interface{}, 0, len(requestOrder))
+			for _, request := range requestOrder {
 				var curlRequest interface{}
-				err := json.Unmarshal([]byte(request.(string)), &curlRequest)
+				err := json.Unmarshal([]byte(request), &curlRequest)
 				if err != nil {
 					utils.LogError(logger, err, "failed to unmarshal the request JSON")
 					continue

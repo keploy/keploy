@@ -78,7 +78,7 @@ func TestAReplayerBuiltWithDefaultsWritesNothingToStdout(t *testing.T) {
 	}
 	for _, want := range []string{
 		"  Mock mismatch: [HTTP] POST /v1/reset/t0k3n [path tag #0123456789ab]  →  auth:80",
-		"  Mock mismatch of an earlier test set: [HTTP] POST /v1/reset/t0k3n [path tag #0123456789ab]  →  auth:80   (made in no test (between two of its tests, or after its last) of test-set-a)",
+		"  Mock mismatch of an earlier test set: [HTTP] POST /v1/reset/t0k3n [path tag #0123456789ab]  →  auth:80   (made in no test of test-set-a, at a time keploy cannot place among its tests)",
 	} {
 		if !strings.Contains(console.String(), want) {
 			t.Errorf("the console said\n%s\nwant it to hold %q", console.String(), want)

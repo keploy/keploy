@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"slices"
@@ -19,21 +21,26 @@ import (
 )
 
 // defaultResolvConfPath is the production path captureDNSUpstream
-// reads on non-Windows hosts. Kept as a typed constant so the
-// Windows-short-circuit check below compares against the actual
-// production literal rather than re-spelling it.
+// reads on non-Windows hosts. Kept as a typed constant so upstreamConfig's
+// Windows check compares against the actual production literal rather
+// than re-spelling it.
 const defaultResolvConfPath = "/etc/resolv.conf"
+
+// dnsGOOS is the OS whose resolver configuration captureDNSUpstream reads
+// (upstreamConfig): runtime.GOOS, or the one a row reads on another.
+var dnsGOOS = runtime.GOOS
 
 // resolvConfPath is the file the forwarder snapshots at startup to
 // discover real upstream resolvers. A package-level var so tests can
 // swap in a temp file without hitting host DNS.
 var resolvConfPath = defaultResolvConfPath
 
-// captureDNSUpstream snapshots the cluster resolver list from
-// /etc/resolv.conf into p.dnsUpstreamServers / p.dnsUpstreamPort. Must
-// be called exactly once, at proxy startup, BEFORE p.DNSPort is bound
-// as the app container's resolver — see the call site in StartProxy
-// for the ordering rationale.
+// captureDNSUpstream snapshots the machine's resolver list
+// (upstreamConfig: /etc/resolv.conf, or the DNS servers of the adapters on
+// Windows) into p.dnsUpstreamServers / p.dnsUpstreamPort. Must be called
+// exactly once, at proxy startup, BEFORE p.DNSPort is bound as the app
+// container's resolver — see the call site in StartProxy for the ordering
+// rationale.
 //
 // A loopback nameserver is filtered out ONLY when the effective
 // resolver port in use matches the proxy's own DNS listen port
@@ -56,28 +63,19 @@ var resolvConfPath = defaultResolvConfPath
 // returning "no upstream configured" and letting the caller fall back
 // to the legacy synthetic response.
 //
-// Windows has no /etc/resolv.conf and this feature — forward-on-miss
-// to cluster resolvers — is only meaningful in Linux sidecar
-// environments where the k8s injector has rewritten resolv.conf. On
-// Windows with the default path we short-circuit to a clean no-op
-// so we neither burn a stat on a path that can never exist nor log
-// a misleading "file not found" at every agent startup.
-// hasDNSUpstream() then returns false and the proxy's DNS handler
-// falls back to the legacy synthetic response, matching pre-feature
-// behavior exactly.
-//
-// The `resolvConfPath == defaultResolvConfPath` guard means tests
-// that swap in a temp resolv.conf (via the resolvConfPath package
-// var) still exercise the full parsing/filter path on every GOOS,
-// so `go test ./...` on Windows stays green.
+// On Windows a recording asks these servers what a name it records
+// resolves to, as it does on Linux: a name only the machine's own resolvers
+// answer (a VPN's or a LAN's internal name, a private address's PTR) is
+// recorded with the answer the application gets, not a public resolver's.
+// Each server's adapter is kept with it, so a name one adapter's server
+// denies is asked on the next adapter, as Windows asks it (forwardDNS).
+// The search list stays empty there: the shim asks keploy for the name the
+// application passed, before Windows appends a suffix to it.
 func (p *Proxy) captureDNSUpstream() {
-	if runtime.GOOS == "windows" && resolvConfPath == defaultResolvConfPath {
-		return
-	}
-	config, err := dns.ClientConfigFromFile(resolvConfPath)
+	config, adapter, source, err := upstreamConfig(dnsGOOS)
 	if err != nil {
-		p.logger.Info("could not read resolv.conf for upstream forwarding; a DNS query no mock answers gets a synthetic response",
-			zap.String("path", resolvConfPath),
+		p.logger.Info("could not read the machine's DNS resolvers for upstream forwarding; a DNS query no mock answers gets a synthetic response",
+			zap.String("source", source),
 			zap.Error(err))
 		return
 	}
@@ -101,8 +99,12 @@ func (p *Proxy) captureDNSUpstream() {
 
 	filtered := make([]string, 0, len(config.Servers))
 	for _, s := range config.Servers {
-		ip := net.ParseIP(s)
-		if ip == nil {
+		// netip, not net.ParseIP: a link-local IPv6 server carries the
+		// zone it is reached in (fe80::1%12), which net.ParseIP refuses.
+		// netip's IsLoopback takes an IPv4-mapped 127.0.0.1 as loopback,
+		// as net.IP's does.
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
 			continue
 		}
 		// Only drop loopback when it points at our own listener.
@@ -118,6 +120,7 @@ func (p *Proxy) captureDNSUpstream() {
 		filtered = append(filtered, s)
 	}
 	p.dnsUpstreamServers = filtered
+	p.dnsUpstreamAdapter = adapter
 	p.dnsUpstreamPort = nsPort
 	inCluster := agentInCluster(p.IsDocker, os.Getenv)
 	p.dnsInNetworkServers = inNetworkResolvers(filtered, p.IsDocker, inCluster, localNetworks())
@@ -130,7 +133,8 @@ func (p *Proxy) captureDNSUpstream() {
 		zap.Strings("in_network", p.dnsInNetworkServers),
 		zap.String("cluster_domain", p.dnsClusterDomain),
 		zap.String("port", p.dnsUpstreamPort),
-		zap.Strings("search", p.dnsSearch))
+		zap.Strings("search", p.dnsSearch),
+		zap.String("source", source))
 	p.logReplayDNSForwarding()
 }
 
@@ -359,7 +363,7 @@ func (p *Proxy) logReplayDNSForwarding() {
 		knob = "--global-passthrough"
 	}
 	if knob != "" {
-		agent.LogRealEgress(p.logger, knob, "a DNS query no mock answers is forwarded to the resolvers in resolv.conf",
+		agent.LogRealEgress(p.logger, knob, "a DNS query no mock answers is forwarded to the machine's resolvers",
 			zap.Strings("resolvers", p.dnsUpstreamServers))
 		return
 	}
@@ -384,12 +388,14 @@ func (p *Proxy) hasDNSUpstream() bool {
 }
 
 // forwardDNSUpstream performs a single DNS Exchange against each
-// snapshotted upstream server in turn, returning the first non-nil
-// response regardless of rcode (NOERROR, NXDOMAIN, SERVFAIL, …) — the
-// caller discriminates on Rcode/Answer count (a valid answer vs NODATA
-// vs a genuinely negative rcode). On timeout or transport error we
-// advance to the next server; if all fail we return an error so the
-// caller can fall through to the legacy default response.
+// snapshotted upstream server in turn, returning the answer upstreamSearch
+// says is the application's: the first that is not a server's failure or
+// refusal to answer, nor, on Windows, an adapter's NXDOMAIN; failing that,
+// the preferred adapter's NXDOMAIN or the first failure. The caller
+// discriminates on Rcode/Answer count (a valid answer vs NODATA vs a
+// genuinely negative rcode). On timeout or transport error we advance to
+// the next server; if no server answers we return an error so the caller
+// can fall through to the legacy default response.
 //
 // Transport rules:
 //   - Start on UDP (cheapest).
@@ -408,8 +414,102 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	return p.forwardDNS(question, p.dnsUpstreamServers)
 }
 
+// dnsExchanger asks one DNS server, as (*dns.Client).Exchange does.
+type dnsExchanger func(c *dns.Client, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error)
+
+// exchange asks addr through p.dnsExchange, or the client itself.
+func (p *Proxy) exchange(c *dns.Client, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
+	if p.dnsExchange != nil {
+		return p.dnsExchange(c, m, addr)
+	}
+	return c.Exchange(m, addr)
+}
+
+// upstreamSearch asks the upstream servers a name as the application's own
+// resolver asks them, so a recording holds the answer the application gets:
+//
+//   - A server that fails or refuses to answer (SERVFAIL, REFUSED, NOTIMP)
+//     passes the question to the next server, on every OS: glibc's resolver
+//     (res_send) asks the next server on each of the three, musl's
+//     (res_msend) ignores them and waits for another server's answer, and
+//     Windows asks the next server. Its adapter is not ruled out.
+//   - On Windows the servers are asked adapter by adapter, in the order
+//     Windows asks them (p.dnsUpstreamAdapter): an NXDOMAIN from one
+//     adapter's server rules that adapter out, its other servers are not
+//     asked, and the next adapter's servers are. A name only a VPN's or a
+//     LAN's own resolver knows is then recorded with the answer the
+//     application gets, not the NXDOMAIN of the adapter Windows prefers.
+//     That is what Windows answers: with a name the preferred adapter's
+//     server denies and another adapter's server resolves, Windows 11
+//     (10.0.26200) gives the application the other adapter's address; with a
+//     type the preferred adapter's server has no record of and the other's
+//     has, it gives the preferred adapter's NODATA
+//     (TestOnWindowsARecordingAsksEachAdapterAsWindowsDoes).
+//   - Any other answer is the answer: one with records, NODATA (NOERROR with
+//     no record of the type), and an NXDOMAIN from a server on no adapter
+//     (all of resolv.conf's), as Linux's resolver takes it.
+//
+// When no answer is the answer, the preferred adapter's NXDOMAIN, the first,
+// is (every adapter that answered denied the name); failing that, the first
+// server's failure or refusal (no server answered otherwise), which the
+// application's resolver takes as a failure to resolve.
+type upstreamSearch struct {
+	adapter  map[string]int
+	ruledOut map[int]bool
+	// denied is the first adapter's NXDOMAIN, kept while another adapter
+	// may still answer.
+	denied *dns.Msg
+	// failed is the first server's failure or refusal to answer, kept while
+	// another server may still answer.
+	failed *dns.Msg
+}
+
+func newUpstreamSearch(adapter map[string]int) *upstreamSearch {
+	return &upstreamSearch{adapter: adapter, ruledOut: map[int]bool{}}
+}
+
+// passes reports whether server is on an adapter that already denied the
+// name, so it is not asked.
+func (s *upstreamSearch) passes(server string) bool {
+	adapter, onAdapter := s.adapter[server]
+	return onAdapter && s.ruledOut[adapter]
+}
+
+// ends takes server's answer and reports whether it is the answer. A failure
+// or a refusal to answer is not, and is kept (failed); nor is an adapter's
+// NXDOMAIN: it rules the adapter out and is kept (denied).
+func (s *upstreamSearch) ends(server string, resp *dns.Msg) bool {
+	switch resp.Rcode {
+	case dns.RcodeServerFailure, dns.RcodeRefused, dns.RcodeNotImplemented:
+		if s.failed == nil {
+			s.failed = resp
+		}
+		return false
+	case dns.RcodeNameError:
+		adapter, onAdapter := s.adapter[server]
+		if !onAdapter {
+			return true
+		}
+		s.ruledOut[adapter] = true
+		if s.denied == nil {
+			s.denied = resp
+		}
+		return false
+	}
+	return true
+}
+
+// answer is the answer when no server's answer ended the search: the
+// preferred adapter's NXDOMAIN, else the first failure or refusal, else none.
+func (s *upstreamSearch) answer() *dns.Msg {
+	if s.denied != nil {
+		return s.denied
+	}
+	return s.failed
+}
+
 // forwardDNS is forwardDNSUpstream against the given subset of the upstream
-// servers (replayMissServers).
+// servers (replayMissServers), asked in the order upstreamSearch says.
 func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, error) {
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("no upstream DNS resolver this replay may forward to")
@@ -446,7 +546,11 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 	m.RecursionDesired = true
 
 	var lastErr error
+	search := newUpstreamSearch(p.dnsUpstreamAdapter)
 	for _, server := range servers {
+		if search.passes(server) {
+			continue
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			lastErr = fmt.Errorf("dns forward deadline exceeded before trying %s", server)
@@ -455,7 +559,7 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 		addr := net.JoinHostPort(server, p.dnsUpstreamPort)
 
 		c := &dns.Client{Net: "udp", Timeout: remaining}
-		resp, _, err := c.Exchange(m, addr)
+		resp, _, err := p.exchange(c, m, addr)
 		if err != nil {
 			p.logger.Debug("upstream DNS forward failed (udp); trying next server",
 				zap.String("server", addr),
@@ -475,7 +579,7 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 				break
 			}
 			tc := &dns.Client{Net: "tcp", Timeout: tcpRemaining}
-			tcpResp, _, terr := tc.Exchange(m, addr)
+			tcpResp, _, terr := p.exchange(tc, m, addr)
 			if terr != nil {
 				p.logger.Debug("upstream DNS forward failed (tcp); trying next server",
 					zap.String("server", addr),
@@ -490,14 +594,31 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 		if resp == nil {
 			continue
 		}
+		if !search.ends(server, resp) {
+			p.logger.Debug("upstream DNS server did not answer the name (a failure, a refusal, or its adapter denies it); asking the next server",
+				zap.String("server", addr),
+				zap.String("question", question.Name),
+				zap.String("rcode", dns.RcodeToString[resp.Rcode]))
+			continue
+		}
 		return resp, nil
 	}
 
+	if answer := search.answer(); answer != nil {
+		return answer, nil
+	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", p.dnsName(question.Name))
 	}
-	return nil, lastErr
+	return nil, fmt.Errorf("%w: %w", errNoUpstreamAnswered, lastErr)
 }
+
+// errNoUpstreamAnswered marks the error of a lookup keploy made for the app
+// (forwardDNS, recordDNSMock) when it asked the app's upstream resolvers and
+// none answered in time (a timeout, a refused or a failed exchange), as
+// against the errors where it asked none of them: no upstream to ask, a
+// question type it does not forward, or public resolvers keploy picked.
+var errNoUpstreamAnswered = errors.New("no upstream DNS server answered")
 
 // isForwardableQType is the allowlist of DNS query types the
 // forwarder will relay. See forwardDNSUpstream for the rationale.

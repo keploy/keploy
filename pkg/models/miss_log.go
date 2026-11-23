@@ -83,8 +83,17 @@ func MissLogNextStep(r *MockMismatchReport) string {
 	if r == nil || r.NextSteps == "" {
 		return ""
 	}
-	return adviceShape(r.NextSteps, r.FieldDiffs, logPaths(r.LogPathTag()))
+	return adviceShape(r.NextSteps, r.FieldDiffs, r.Differs, logPaths(r.LogPathTag()))
 }
+
+// LazyMissLogNextStep is r's next step as a log line carries it
+// (MissLogNextStep), shaped only when a line that holds it is written
+// (zap.Stringer): a Debug line that is off shapes nothing.
+func LazyMissLogNextStep(r *MockMismatchReport) fmt.Stringer { return lazyNextStep{r} }
+
+type lazyNextStep struct{ r *MockMismatchReport }
+
+func (l lazyNextStep) String() string { return MissLogNextStep(l.r) }
 
 // advicePaths is how advice's shaping writes a URL path it quotes. Evidence
 // (zero: evidence) writes its shape, each segment {}. A log line
@@ -99,6 +108,50 @@ func MissLogNextStep(r *MockMismatchReport) string {
 type advicePaths struct {
 	log  bool   // a log line's advice, not evidence's
 	call string // the path tag of the call the advice is about; "" for none
+	// bodyKeys are the request-body keys of the fields the call differs at
+	// (bodyKeysNamed), which advice quotes as keploy.yml's requestbody
+	// noise entries do: each is written as the field is named in its
+	// differs (bodyKeyShape), not {}.
+	bodyKeys []string
+}
+
+// namesBodyKey reports whether u, a string advice quotes, is one of a's
+// bodyKeys, as written or in its shape (a field diff's key is shaped in the
+// text before its quotes are read: UnmatchedCall.shapedText).
+func (a advicePaths) namesBodyKey(u string) bool {
+	for _, k := range a.bodyKeys {
+		if u == k || u == bodyKeyShape(k) {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyKeysNamed are the request-body keys, root-relative as keploy.yml's
+// test.globalNoise requestbody entries write them (data.id), of the body
+// fields named by diffs' paths and by differs (body.data.id).
+func bodyKeysNamed(diffs []MockFieldDiff, differs []string) []string {
+	var keys []string
+	for _, d := range diffs {
+		if k, ok := strings.CutPrefix(d.Path, "body."); ok {
+			keys = append(keys, k)
+		}
+	}
+	for _, f := range differs {
+		if k, ok := strings.CutPrefix(f, "body."); ok {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// bodyKeyShape is k, a request body's root-relative key, in the shape its
+// field is named by in a log line's differs (FieldShape of body.<k>, as
+// MissLogDiffers and the answered-as-another WARN name it), without the
+// root: one rule for both, so a key and its field read alike (data.id and
+// body.data.id; sessions.{}.user and body.sessions.{}.user).
+func bodyKeyShape(k string) string {
+	return strings.TrimPrefix(FieldShape("body."+k), "body.")
 }
 
 // evidencePaths is how evidence writes advice's URL paths: by their shapes,
@@ -133,11 +186,14 @@ func (a advicePaths) host(q, h string) string {
 	return strconv.Quote(HostShape(h))
 }
 
-// adviceShape is text, keploy's advice about a call whose fields diffs are,
-// with no value of the call, its URL paths written as paths says:
-// MissLogNextStep's shaping, which evidence's next step
-// (UnmatchedCall.SanitizedNextStep) shares.
-func adviceShape(text string, diffs []MockFieldDiff, paths advicePaths) string {
+// adviceShape is text, keploy's advice about a call whose fields diffs are
+// and which differs at the fields differs names, with no value of the call,
+// its URL paths written as paths says and the request-body keys of those
+// fields as their differs name them (bodyKeyShape): MissLogNextStep's
+// shaping, which evidence's next step (UnmatchedCall.SanitizedNextStep)
+// shares.
+func adviceShape(text string, diffs []MockFieldDiff, differs []string, paths advicePaths) string {
+	paths.bodyKeys = bodyKeysNamed(diffs, differs)
 	next := refusedWordsInLogForm(text)
 	next = UnmatchedCall{NextSteps: next, FieldDiffs: diffs}.shapedText(next)
 	shaped, ok := quotedInLogForm(next, paths)
@@ -158,7 +214,7 @@ func AdviceLogText(text string) string {
 	if text == "" {
 		return ""
 	}
-	return adviceShape(text, nil, logPaths(""))
+	return adviceShape(text, nil, nil, logPaths(""))
 }
 
 // refusedValues begin a refused word's line after its where: its two
@@ -324,7 +380,9 @@ func quoteEdge(text string, i int) bool {
 
 // quotedLogShape is a quoted string of advice as a log line writes it, by
 // the text before it: a URL path as paths writes it (advicePaths.quoted), a
-// field path in its shape (FieldShape), an HTTP method, keploy's placeholder <regex>, a
+// field path in its shape (FieldShape), the request-body key of a field the
+// call differs at as its differs name it (advicePaths.namesBodyKey,
+// bodyKeyShape), an HTTP method, keploy's placeholder <regex>, a
 // template placeholder ("{{capture string .id}}"), a header
 // named as one (header "Content-Encoding"), or the host a sessionCalls entry
 // names ({host: "api.example.com"}) as paths writes it (advicePaths.host: an
@@ -338,6 +396,8 @@ func quotedLogShape(q, before string, paths advicePaths) string {
 		return paths.quoted(u)
 	case fieldRoot.MatchString(u):
 		return strconv.Quote(FieldShape(u))
+	case paths.namesBodyKey(u):
+		return strconv.Quote(bodyKeyShape(u))
 	case httpMethods[u] || u == "<regex>" || placeholderText.MatchString(u):
 		return q
 	case strings.HasSuffix(before, "header ") && headerName.MatchString(u):
@@ -451,13 +511,13 @@ func UnmatchedCallLogName(m UnmatchedCall) string {
 
 // UnmatchedCallLogText is text, keploy's own words about the call m (its
 // next step, its reason), as a log line carries it: MissLogNextStep's
-// shaping, by m's field diffs, a URL path it quotes named by the path tag m
-// carries (UnmatchedCallLogShape).
+// shaping, by m's field diffs and differs, a URL path it quotes named by the
+// path tag m carries (UnmatchedCallLogShape).
 func UnmatchedCallLogText(m UnmatchedCall, text string) string {
 	if text == "" {
 		return ""
 	}
-	return adviceShape(text, m.FieldDiffs, logPaths(m.PathTag))
+	return adviceShape(text, m.FieldDiffs, m.Differs, logPaths(m.PathTag))
 }
 
 // FieldPathsInTextShaped is each of texts, keploy's words naming fields

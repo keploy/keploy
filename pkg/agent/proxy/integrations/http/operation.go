@@ -33,18 +33,37 @@ func liveOperation(request *http.Request, body []byte) string {
 // miss.
 var recordedOperations = &operationTable{}
 
+// recordedRoutes keeps the key a miss compares each recording of its pool by
+// (pickClosestCandidate): "METHOD path", the path of the recorded URL (the
+// URL as recorded when it does not parse), named with the recording's
+// operation (models.WithHTTPOperation). A miss compares every recording of
+// its pool, so each URL is parsed once, not once per miss.
+var recordedRoutes = &operationTable{read: routeKeyOf}
+
+func routeKeyOf(r *models.HTTPReq) string {
+	path := r.URL
+	if parsed, err := parseRecordedURL(r.URL); err == nil {
+		path = parsed.Path
+	}
+	return models.WithHTTPOperation(string(r.Method)+" "+path, recordedOperations.of(r))
+}
+
 // operationTable keeps the label of the operation a recorded request carries
 // (models.HTTPOperationLabel, "" for none), by the identity of the request
 // (Mock.Spec.HTTPReq). Pooled mocks are never changed, and the mock manager's
 // copies of a pooled mock share its request (answerTable), so a request's
 // label is the one read first. The table holds no request: an entry goes
 // when its request is collected.
+//
+// read, when set, is what the table keeps of a request in place of its label:
+// a string that, like the label, depends on the request alone.
 type operationTable struct {
 	entries sync.Map // weak.Pointer[models.HTTPReq] -> string
+	read    func(*models.HTTPReq) string
 }
 
-// of is the label of the operation r carries, read the first time r is asked
-// for: "" for a nil request.
+// of is the label of the operation r carries (or what read reads of it), read
+// the first time r is asked for: "" for a nil request.
 func (t *operationTable) of(r *models.HTTPReq) string {
 	if r == nil {
 		return ""
@@ -53,7 +72,11 @@ func (t *operationTable) of(r *models.HTTPReq) string {
 	if v, ok := t.entries.Load(key); ok {
 		return v.(string)
 	}
-	label := models.HTTPOperationLabel(r)
+	read := models.HTTPOperationLabel
+	if t.read != nil {
+		read = t.read
+	}
+	label := read(r)
 	if _, loaded := t.entries.LoadOrStore(key, label); !loaded {
 		runtime.AddCleanup(r, t.forget, key)
 	}

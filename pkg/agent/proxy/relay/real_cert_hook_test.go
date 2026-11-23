@@ -109,8 +109,7 @@ func TestPublishRealCertFromUpgraded_FiresWithExpectedArgs(t *testing.T) {
 			},
 		},
 	}
-	src := net.Conn(fakeSrcWithPort{port: wantSourcePort})
-	r.src.Store(&src)
+	r.src.Store(wrapPeerConn(fakeSrcWithPort{port: wantSourcePort}, &r.srcWrites))
 
 	publishRealCertFromUpgraded(r, clientConn, zap.NewNop())
 
@@ -162,8 +161,7 @@ func TestTheRealCertHooksLineNamesNoHost(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = clientConn.Close(); <-serverDone })
 	r := &Relay{cfg: Config{RealCertHook: func(string, []byte, x509.SignatureAlgorithm) {}}}
-	src := net.Conn(fakeSrcWithPort{port: 54322})
-	r.src.Store(&src)
+	r.src.Store(wrapPeerConn(fakeSrcWithPort{port: 54322}, &r.srcWrites))
 	logger, logs := logleak.Observe()
 	publishRealCertFromUpgraded(r, clientConn, logger)
 	if logs.FilterMessage("relay: RealCertHook fired").Len() != 1 {
@@ -179,8 +177,7 @@ func TestTheRealCertHooksLineNamesNoHost(t *testing.T) {
 // dereferenced a nil RealCertHook would surface here first.
 func TestPublishRealCertFromUpgraded_NoCallWhenHookNil(t *testing.T) {
 	r := &Relay{cfg: Config{}} // RealCertHook left nil
-	src := net.Conn(fakeSrcWithPort{port: 1234})
-	r.src.Store(&src)
+	r.src.Store(wrapPeerConn(fakeSrcWithPort{port: 1234}, &r.srcWrites))
 	// Even with no TLS conn, the function must early-return cleanly.
 	publishRealCertFromUpgraded(r, nil, zap.NewNop())
 	publishRealCertFromUpgraded(r, &net.IPConn{}, zap.NewNop()) // non-TLS conn

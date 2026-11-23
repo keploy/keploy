@@ -79,7 +79,7 @@ func (c *ChildConsole) file(dst *os.File) (*os.File, error) {
 	if c.tee == nil && !keployLog.CutsChildOutput() {
 		return dst, nil
 	}
-	r, w, err := os.Pipe()
+	r, w, err := childConsolePipe()
 	if err != nil {
 		return nil, fmt.Errorf("make the pipe the child's output is cut through: %w", err)
 	}
@@ -175,8 +175,8 @@ func StartChildOutputCopy(dst io.Writer, src *os.File, keep bool) *ChildOutputCo
 // returns. Call it once the child has exited: what it wrote is then all in
 // src. It reads no more than src held when it began, so a process the child
 // left running that writes on cannot keep it from returning. Without
-// deadlines on src (no poller, as on Windows) it returns at once and the
-// copy goes on to src's end.
+// deadlines on src (no poller) it returns at once and the copy goes on to
+// src's end.
 func (c *ChildOutputCopy) Drain() {
 	c.drainOnce.Do(func() {
 		// Not a time budget: a deadline in the past is how a read blocked
@@ -236,6 +236,16 @@ func teeTo(dst io.Writer, tee func() io.Writer) io.Writer {
 		return dst
 	}
 	return teeWriter{dst: dst, tee: t}
+}
+
+// TeeWriter is dst that also writes each write to tee (nil: dst alone), a
+// failing one dropped without keeping it from the other, as a ChildConsole's
+// tee is.
+func TeeWriter(dst, tee io.Writer) io.Writer {
+	if tee == nil {
+		return dst
+	}
+	return teeWriter{dst: dst, tee: tee}
 }
 
 type teeWriter struct{ dst, tee io.Writer }

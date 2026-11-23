@@ -372,6 +372,12 @@ func (s *scopedMockDb) RoundSnapshot(q integrations.RoundQuery) (integrations.Ro
 	return integrations.SnapshotRound(s.MockMemDb, q)
 }
 
+// RoundMeta forwards the store's O(1) round metadata read
+// (integrations.ExactRoundReader).
+func (s *scopedMockDb) RoundMeta(tracker *learn.Tracker) (integrations.RoundMeta, bool) {
+	return integrations.ReadRoundMeta(s.MockMemDb, tracker)
+}
+
 // AwaitRoundMove forwards the store's wait for its round to move
 // (integrations.RoundWaiter); false, at once, from a store that has none.
 func (s *scopedMockDb) AwaitRoundMove(ctx context.Context, at integrations.RoundAt) (bool, error) {
@@ -398,8 +404,9 @@ func (s *scopedMockDb) TakenLog(epoch uint64, from, to int) []integrations.Take 
 }
 
 var (
-	_ integrations.RoundReader = (*scopedMockDb)(nil)
-	_ integrations.RoundWaiter = (*scopedMockDb)(nil)
+	_ integrations.RoundReader      = (*scopedMockDb)(nil)
+	_ integrations.RoundWaiter      = (*scopedMockDb)(nil)
+	_ integrations.ExactRoundReader = (*scopedMockDb)(nil)
 )
 
 // MarkCallRound forwards the store's (integrations.StagedFinder): the zero
@@ -1230,6 +1237,38 @@ func (s *scopedMockDb) StagingEpoch() uint64 {
 	}
 	return 0
 }
+
+// WindowRewinds carries no mock data either. A wrapped store without the facet
+// counts none, with its window start.
+func (s *scopedMockDb) WindowRewinds() (uint64, time.Time) {
+	if r, ok := s.MockMemDb.(integrations.WindowRewindCounter); ok {
+		return r.WindowRewinds()
+	}
+	start, _ := s.CurrentTestWindow()
+	return 0, start
+}
+
+// GetPerTestMocksWithRewinds is the wrapped store's, through the same name
+// filter as GetPerTestMocksInWindow. A wrapped store without the facet counts
+// none, and its start and tier are read apart.
+func (s *scopedMockDb) GetPerTestMocksWithRewinds() ([]*models.Mock, uint64, time.Time, error) {
+	if r, ok := s.MockMemDb.(integrations.WindowRewindCounter); ok {
+		mocks, rewinds, start, err := r.GetPerTestMocksWithRewinds()
+		mocks, err = s.keep(mocks, err)
+		return mocks, rewinds, start, err
+	}
+	_, start := s.WindowRewinds()
+	mocks, err := s.GetPerTestMocksInWindow()
+	return mocks, 0, start, err
+}
+
+// ClaimOnce delegates to the underlying store so distinct per-connection
+// wrappers over one MockManager share its once-per-staging claim set.
+func (s *scopedMockDb) ClaimOnce(key string) bool {
+	return s.MockMemDb.ClaimOnce(key)
+}
+
+var _ integrations.MockMemDb = (*scopedMockDb)(nil)
 
 func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
 	if bk, ok := s.MockMemDb.(interface {

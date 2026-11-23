@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
@@ -524,7 +525,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
-# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
+# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configuration file.
 `
 
 // ErrNoAnswer is returned when there was nobody to answer the question: stdin
@@ -1153,13 +1154,121 @@ func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	return path
 }
 
-// makeDirectory creates a directory if not exists with all user access
-func makeDirectory(path string) error {
-	err := os.MkdirAll(path, 0777)
+// MkdirAllForUser creates path and any missing parent directories with perm
+// using os.OpenRoot (refusing symlinks escaping the anchor directory). When
+// running under sudo, it restores ownership of only the directories newly
+// created by this call to the invoking user via open file descriptors in
+// bottom-up order, avoiding symlink-following chown races as root.
+func MkdirAllForUser(logger *zap.Logger, path string, perm os.FileMode) error {
+	if path == "" {
+		return os.MkdirAll(path, perm)
+	}
+	clean := filepath.Clean(path)
+	perm = perm.Perm()
+
+	var base string
+	var relParts []string
+	if !filepath.IsAbs(clean) {
+		parts := strings.Split(filepath.ToSlash(clean), "/")
+		i := 0
+		for i < len(parts) && (parts[i] == "." || parts[i] == "..") {
+			i++
+		}
+		if i == 0 {
+			base = "."
+		} else {
+			base = filepath.FromSlash(strings.Join(parts[:i], "/"))
+		}
+		relParts = parts[i:]
+	} else {
+		parent := filepath.Dir(clean)
+		if parent == clean {
+			// Filesystem root already exists.
+			return nil
+		}
+		relParts = append(relParts, filepath.Base(clean))
+		base = parent
+		for {
+			if _, err := os.Lstat(base); err == nil {
+				break
+			}
+			nextParent := filepath.Dir(base)
+			if nextParent == base {
+				break
+			}
+			relParts = append(relParts, filepath.Base(base))
+			base = nextParent
+		}
+		for i, j := 0, len(relParts)-1; i < j; i, j = i+1, j-1 {
+			relParts[i], relParts[j] = relParts[j], relParts[i]
+		}
+	}
+
+	r, err := os.OpenRoot(base)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = r.Close() }()
+
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	type createdDir struct {
+		f    *os.File
+		path string
+	}
+	var created []createdDir
+	defer func() {
+		for i := len(created) - 1; i >= 0; i-- {
+			RestoreFileOwnershipOf(logger, created[i].f, created[i].path)
+			_ = created[i].f.Close()
+		}
+	}()
+
+	cur := r
+	defer func() {
+		if cur != nil && cur != r {
+			_ = cur.Close()
+		}
+	}()
+	at := base
+	for _, seg := range relParts {
+		if seg == "" || seg == "." {
+			continue
+		}
+		mkErr := cur.Mkdir(seg, perm)
+		didCreate := mkErr == nil
+		next, err := cur.OpenRoot(seg)
+		if err != nil {
+			if mkErr != nil && !errors.Is(mkErr, fs.ErrExist) {
+				return mkErr
+			}
+			return err
+		}
+		nextPath := filepath.Join(at, seg)
+		if didCreate {
+			if linfo, lerr := cur.Lstat(seg); lerr == nil && linfo.IsDir() && linfo.Mode()&os.ModeSymlink == 0 {
+				if f, ferr := cur.Open(seg); ferr == nil {
+					if finfo, serr := f.Stat(); serr == nil && os.SameFile(linfo, finfo) {
+						created = append(created, createdDir{f: f, path: nextPath})
+					} else {
+						_ = f.Close()
+					}
+				}
+			}
+		}
+		if cur != r {
+			_ = cur.Close()
+		}
+		cur, at = next, nextPath
+	}
 	return nil
+}
+
+// makeDirectory creates a directory if not exists with standard permissions (0o755)
+func makeDirectory(path string) error {
+	return MkdirAllForUser(nil, path, 0o755)
 }
 
 // SetCoveragePath takes a goCovPath and sets the coverage path accordingly.
@@ -1173,7 +1282,7 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 			return "", err
 		}
 		goCovPath = currentPath + "/coverage-reports"
-		if err := makeDirectory(goCovPath); err != nil {
+		if err := MkdirAllForUser(logger, goCovPath, 0o755); err != nil {
 			LogError(logger, err, "failed to create coverage-reports directory", zap.String("CoverageReportPath", goCovPath))
 			return "", err
 		}
@@ -1231,8 +1340,9 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 // CTRL_BREAK, and was force-killed (taskkill /F). A stop that could not tell
 // that the tree had exited without a kill says so too: one whose signal could
 // not be sent, whose force-kill failed, or whose state it could not read. As
-// InterruptProcessTree, it waits for each group's leader, not for the rest of
-// the group.
+// InterruptProcessTree, it waits for each group until no process of it runs
+// (groupRunning): a leader that has exited can leave processes in its group
+// that run on, and a group of zombies only has exited.
 func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
 	killed, _, err = interruptProcessTree(logger, ppid, sig, nil, false, nil)
 	return killed, err
@@ -1259,8 +1369,9 @@ func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signa
 
 // InterruptProcessTreeStop is InterruptProcessTreeReached for a stop that
 // waits on the app's exit, not for a number of seconds (a test set's end, a
-// recording's end, under the proven switch): it waits for each group's
-// leader to exit, on its exit event (Linux, stop_events_linux.go), and kills
+// recording's end, under the proven switch): it waits for each process its
+// signal reached in each group to exit, on its exit event (Linux,
+// stop_events_linux.go), and kills
 // a group only when it made no progress on its way out for StopStallBudget
 // of the time both it and keploy could run (ExitClock). A starved group,
 // whether the host is or only the group is, takes as long as it takes.
@@ -1273,14 +1384,15 @@ func InterruptProcessTreeStop(logger *zap.Logger, ppid int, sig syscall.Signal, 
 }
 
 // groupStopByEvents, where it is set (Linux), is how InterruptProcessTreeStop
-// waits for a group it signalled: until its leader exits, while its members
+// waits for a group it signalled: until each of its members exits, while they
 // (as the signal reached them) make progress. It kills the group on a stall,
 // or at the user's Ctrl+C, and says why ("" when it did not kill).
 // Each step the group takes on its way out is a movement of moved.
 var groupStopByEvents func(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string)
 
 // TreeInterruptGrace is how long InterruptProcessTree waits for each process
-// group of the tree to exit after its signal before it sends SIGKILL.
+// group of the tree to exit (no process of it runs) after its signal before
+// it sends SIGKILL.
 const TreeInterruptGrace = 3 * time.Second
 
 // windowsInterruptGrace is how long InterruptProcessTree waits on Windows for
@@ -1421,7 +1533,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if snapshot != nil {
 			members = snapshot(pid, sig)
 		}
-		err := signalGroup(logger, -pid, sig)
+		sent, err := signalGroup(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
 			// The group was not asked to stop: what ends it now (the
@@ -1440,26 +1552,34 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			}
 			continue
 		}
-		// Wait for this particular process to exit with a timeout of 3 seconds
-		err = waitForProcessExit(pid, TreeInterruptGrace, logger)
-		if err != nil {
-			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
+		// Wait, up to the grace, until no process of the group runs: its
+		// leader, or one it left in its group, such as the server of
+		// `sh -c 'server &'` whose sh no one reaps (a zombie leader). One
+		// the caller was handed, as it ignored the signal, is the caller's.
+		// Where the signal went to each process by its pid (macOS), one
+		// that joined the group after it is sent it at the wait's next
+		// read of the group, once (signalJoined).
+		handed := handedOver(pid, members)
+		var joined func()
+		if signalJoined != nil {
+			joined = func() { signalJoined(logger, pid, sig, sent) }
 		}
+		waitForGroupExit(pid, handed, TreeInterruptGrace, logger, joined)
 		// If it ignored the graceful signal (or was too contention-slow to exit
 		// within the wait), escalate to SIGKILL so it cannot keep holding resources
 		// (e.g. a listening port) and race the next app start with
 		// "address already in use" (the go-docker-timefreeze flake).
-		if running, rerr := isProcessRunning(pid); rerr != nil {
+		if running, rerr := groupRunning(pid, handed); rerr != nil {
 			logger.Debug("could not verify process state after graceful signal", zap.Int("pid", pid), zap.Error(rerr))
 		} else if running {
 			logger.Debug("process still alive after graceful signal; escalating to SIGKILL", zap.Int("pgid", pid))
 			if killed == "" {
 				killed = fmt.Sprintf("a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", TreeInterruptGrace)
 			}
-			if killErr := SendSignal(logger, -pid, syscall.SIGKILL); killErr != nil {
+			if _, killErr := signalGroup(logger, -pid, syscall.SIGKILL); killErr != nil {
 				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
 			} else {
-				_ = waitForProcessExit(pid, 3*time.Second, logger)
+				waitForGroupExit(pid, handed, 3*time.Second, logger, nil)
 			}
 		}
 	}
@@ -1467,11 +1587,88 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 }
 
 // processTree and signalGroup are the tree interrupt's reads of the process
-// tree and its signals to a process group; a test fails them.
+// tree and its signals to a process group (on macOS, signalGroupByMembers);
+// a test fails them. signalGroup says which processes its signal reached by
+// their pids (sent) where it signals each process by its pid (macOS), and
+// nil where its one signal went to the group, as Linux's does.
+//
+// signalJoined, where it is set (macOS, signalJoinedMembers), is the group
+// wait's signal, at each of its reads, to each process of group pgid that
+// joined it after signalGroup's signal sig reached the others: sig once to
+// each that sent does not name, which it then names.
 var (
-	processTree = findChildPIDs
-	signalGroup = SendSignal
+	processTree  = findChildPIDs
+	signalGroup  = signalGroupAsOne
+	signalJoined func(logger *zap.Logger, pgid int, sig syscall.Signal, sent map[int]bool)
 )
+
+// signalGroupAsOne is SendSignal of a process group (pid < 0): one signal,
+// which reaches each process of it.
+func signalGroupAsOne(logger *zap.Logger, pid int, sig syscall.Signal) (map[int]bool, error) {
+	return nil, SendSignal(logger, pid, sig)
+}
+
+// groupExitPoll is how often waitForGroupExit reads whether a group runs.
+const groupExitPoll = 100 * time.Millisecond
+
+// waitForGroupExit waits until no process of process group pgid runs but
+// those in except (groupRunning), or timeout has passed. A group whose state
+// cannot be read is waited for no more: the caller reads it again, and says
+// why. joined, if set, is called at each read, before it: it signals what
+// joined the group since the last (signalJoined).
+func waitForGroupExit(pgid int, except []Reached, timeout time.Duration, logger *zap.Logger, joined func()) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if joined != nil {
+			joined()
+		}
+		if running, err := groupRunning(pgid, except); err != nil || !running {
+			logger.Debug("Process group exited", zap.Int("pgid", pgid), zap.Error(err))
+			return
+		}
+		if time.Now().After(deadline) {
+			logger.Debug("Timed out waiting for process group to exit", zap.Int("pgid", pgid))
+			return
+		}
+		time.Sleep(groupExitPoll)
+	}
+}
+
+// groupRunning reports whether a process of process group pgid has not
+// exited: its leader, pid pgid, runs (isProcessRunning; a zombie has
+// exited), or another process of its group does (groupRuns). A group counts
+// as exited only when no process of it runs: a leader that has exited,
+// reaped or a zombie, can leave processes in its group that run on, as
+// `sh -c 'server &'` leaves its server, and those can still hold the app's
+// port. A group of zombies only has exited, and costs no wait. A process of
+// except (handedOver), named by its pid and start time, is not counted, nor
+// is one, but the leader, that keploy's stop of the daemons ends
+// (LeaveToDaemonStop), nor what either runs (Linux).
+func groupRunning(pgid int, except []Reached) (bool, error) {
+	if running, err := isProcessRunning(pgid); err != nil || running {
+		return running, err
+	}
+	return groupRunsExcept(pgid, except)
+}
+
+// handedOver is what of members, the processes of group leader's that its
+// signal reached (InterruptProcessTreeReached and InterruptProcessTreeStop
+// return them), the stop leaves to its caller: each that ignored the
+// signal, but the leader. Its interrupt neither waits for them nor kills
+// them: the caller ends each that runs on (adopt_linux.go, stopAdopted and
+// stopHanded: SIGTERM, then a kill once it makes no progress on its way
+// out, waited for), whether keploy adopted it or not. The leader, and every process the signal
+// reached that acts on it, the interrupt waits for. Where no snapshot is
+// read (InterruptProcessTreeKilled; macOS) nothing is handed over.
+func handedOver(leader int, members []Reached) []Reached {
+	var handed []Reached
+	for _, m := range members {
+		if m.Ignores && m.PID != leader {
+			handed = append(handed, m)
+		}
+	}
+	return handed
+}
 
 // waitForProcessExit waits for the process to exit or times out after the specified duration
 func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) error {
@@ -1539,6 +1736,10 @@ func isProcessRunning(pid int) (bool, error) {
 			return false, nil
 		}
 		return true, nil
+	}
+	// A zombie has exited: it only waits for its parent to reap it.
+	if exitedUnreaped(pid) {
+		return false, nil
 	}
 
 	// No error means the process is running
@@ -1640,7 +1841,24 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
 // one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, 0)
+	return GetAvailablePortExcept()
+}
+
+// GetAvailablePortExcept is GetAvailablePort never returning one of exclude,
+// ports handed out already that nothing binds yet: its search skips them. A
+// caller that drew GetAvailablePort again while it returned one of them could
+// fail with a port free, in a band whose free ports were an excluded one and
+// one other: most draws returned the excluded one.
+func GetAvailablePortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, 0, false, exclude...)
+}
+
+// GetAvailableDNSPortExcept is GetAvailablePortExcept for a DNS server's
+// port, which the server binds over UDP and over TCP: a port either socket
+// holds is passed over. A port free over TCP alone failed the server's UDP
+// bind.
+func GetAvailableDNSPortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, 0, true, exclude...)
 }
 
 // hostEphemeralRange reads the host's ephemeral port range for
@@ -1664,13 +1882,21 @@ const containerEphemeralHi = defaultEphemeralHi
 // 60999, or reaches 65535, or is unknown (macOS, Windows), would otherwise
 // hand out ports inside it.
 func GetAvailableContainerPort() (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, containerEphemeralHi)
+	return GetAvailableContainerPortExcept()
+}
+
+// GetAvailableContainerPortExcept is GetAvailableContainerPort never
+// returning one of exclude, as GetAvailablePortExcept.
+func GetAvailableContainerPortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi, false, exclude...)
 }
 
 // availablePortAbove is GetAvailablePort with the host's ephemeral range read
 // by ephemeral (ephemeralPortRange's signature), whose candidates are above
-// floor too.
-func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32) (uint32, error) {
+// floor too, and never one of exclude: the search skips those, it does not
+// draw again after it returns one. With udp, a candidate is free only where a
+// UDP socket binds it too (GetAvailableDNSPortExcept).
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32, udp bool, exclude ...uint32) (uint32, error) {
 	top := floor
 	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
 		top = ephemeralHi
@@ -1678,27 +1904,47 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	if top > 0 {
 		lo := top + 1
 		span := 65536 - lo // inclusive of 65535
-		// A random start, not a scan from the bottom. Scanning upward returns
-		// the LOWEST free port every time, so two keploy processes started
-		// moments apart — the ordinary CI pattern — are handed an identical
-		// number, each having verified it free; whichever binds second loses.
+		// Candidates drawn at random, each on its own (randomProbes of them),
+		// then every port from a random start. Not a scan from the bottom:
+		// it returns the LOWEST free port every time, so two keploy processes
+		// started moments apart — the ordinary CI pattern — are handed an
+		// identical number, each having verified it free; whichever binds
+		// second loses. Nor a scan from a random start alone: every start
+		// inside a run of held ports leads it to the first free port after
+		// the run, so beside such a run (a process holding a block of ports
+		// above the range) the draws of processes started together met there.
+		for i := 0; i < randomProbes; i++ {
+			off, ok := portOffset(span)
+			if !ok {
+				break
+			}
+			if slices.Contains(exclude, lo+off) {
+				continue
+			}
+			free, err := portProbe(lo+off, udp)
+			if err != nil {
+				return 0, err
+			}
+			if free {
+				return lo + off, nil
+			}
+		}
 		start := lo
-		if n, err := rand.Int(rand.Reader, big.NewInt(int64(span))); err == nil {
-			start = lo + uint32(n.Int64())
+		if off, ok := portOffset(span); ok {
+			start = lo + off
 		}
 		for i := uint32(0); i < span; i++ {
 			port := lo + ((start - lo + i) % span)
-			ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
-			if err != nil {
+			if slices.Contains(exclude, port) {
 				continue
 			}
-			// A failed Close leaves this process holding the port for its
-			// lifetime, so the candidate is unusable AND leaked — return the
-			// error rather than continuing and leaking one fd per candidate.
-			if err := ln.Close(); err != nil {
-				return 0, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+			free, err := portProbe(port, udp)
+			if err != nil {
+				return 0, err
 			}
-			return port, nil
+			if free {
+				return port, nil
+			}
 		}
 	}
 
@@ -1708,14 +1954,119 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	// is strictly better than no port at all, and this is the historical
 	// behaviour. A container's port that then meets one of the resolver's
 	// fails the agent's start at its bind, as no port at all would.
-	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
-	if err != nil {
-		return 0, fmt.Errorf("failed to find available port: %w", err)
-	}
-	defer listener.Close()
+	return osAssignedPort(exclude, udp)
+}
 
-	addr := listener.Addr().(*net.TCPAddr)
-	return uint32(addr.Port), nil
+// osAssignedPort is a port the OS assigns (a listener on ":0", let go before
+// it returns) other than exclude, and, with udp, one a UDP socket binds too.
+// A pick in exclude, or one a UDP socket holds, stays held while the OS is
+// asked again, so the OS cannot hand it back: len(exclude)+1 asks always reach
+// a port outside exclude, and udpHeldPicks more pass over as many picks held
+// over UDP, the OS's picks being its own ephemeral ports, which a UDP socket
+// seldom holds.
+func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
+	var held []net.Listener
+	defer func() {
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+	}()
+	asks := len(exclude) + 1
+	if udp {
+		asks += udpHeldPicks
+	}
+	for i := 0; i < asks; i++ {
+		ln, err := portListen(context.Background(), "tcp", ":0")
+		if err != nil {
+			return 0, fmt.Errorf("failed to find available port: %w", err)
+		}
+		held = append(held, ln)
+		port := uint32(ln.Addr().(*net.TCPAddr).Port)
+		if slices.Contains(exclude, port) {
+			continue
+		}
+		if !udp {
+			return port, nil
+		}
+		free, err := udpFree(port)
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return port, nil
+		}
+	}
+	if udp {
+		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, in %d of the OS's picks", exclude, asks)
+	}
+	return 0, fmt.Errorf("failed to find a port other than %v", exclude)
+}
+
+// udpHeldPicks is how many of the OS's picks held over UDP osAssignedPort
+// passes over for a DNS server's port before it fails.
+const udpHeldPicks = 8
+
+// randomProbes is how many candidates availablePortAbove draws at random
+// before it scans: with half the ports held, all 32 miss about once in four
+// billion tries.
+const randomProbes = 32
+
+// portOffset draws availablePortAbove's candidates (randomOffset) and
+// portProbe checks each (probePort).
+var portOffset, portProbe = randomOffset, probePort
+
+// portListen opens probePort's and osAssignedPort's listeners: plain TCP,
+// never Go's default MPTCP, which for as long as it is open listens on every
+// interface.
+var portListen = plaintcp.Listen
+
+// udpListen opens udpFree's UDP sockets.
+var udpListen = net.ListenPacket
+
+// randomOffset is a random offset in [0, span), and false where no random
+// number could be read.
+func randomOffset(span uint32) (uint32, bool) {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(span)))
+	if err != nil {
+		return 0, false
+	}
+	return uint32(n.Int64()), true
+}
+
+// probePort says whether port is free: whether a plain TCP listener binds it,
+// and, with udp, a UDP socket too while the listener holds it (udpFree); it
+// then lets them go. A failed Close leaves this process holding the port for
+// its lifetime, so the candidate is unusable AND leaked: that is an error,
+// not a candidate passed over, which would leak one fd per candidate.
+func probePort(port uint32, udp bool) (bool, error) {
+	ln, err := portListen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	free := true
+	if udp {
+		if free, err = udpFree(port); err != nil {
+			_ = ln.Close()
+			return false, err
+		}
+	}
+	if err := ln.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+	}
+	return free, nil
+}
+
+// udpFree says whether a UDP socket binds port, which it then lets go; a
+// failed Close is an error, as probePort's.
+func udpFree(port uint32) (bool, error) {
+	pc, err := udpListen("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	if err := pc.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe socket on UDP port %d: %w", port, err)
+	}
+	return true, nil
 }
 
 // isPortAvailable checks if a specific port is available on the system, with
@@ -1740,31 +2091,60 @@ func isPortAvailable(port uint32) bool {
 // it. Narrowing allocation to above the ephemeral range makes the pool smaller
 // and that coincidence correspondingly more likely, so the exclusion is not
 // optional bookkeeping.
+//
+// The search for another port skips them (GetAvailablePortExcept). It used to
+// draw GetAvailablePort's port again while that was an excluded one, 16 times
+// at most: in a band whose free ports were an excluded one and one other, the
+// draws kept returning the excluded port and the search failed with a port
+// free.
 func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
-	taken := make(map[uint32]struct{}, len(exclude))
-	for _, p := range exclude {
-		taken[p] = struct{}{}
-	}
-	if _, clash := taken[port]; !clash && isPortAvailable(port) {
+	return EnsureFreePort(isPortAvailable, port, exclude...)
+}
+
+// EnsureAvailableDNSPort is EnsureAvailablePorts for a DNS server's port,
+// which the server binds over UDP and over TCP: port is kept only where both
+// bind it, and the port drawn in its place is free over both
+// (GetAvailableDNSPortExcept). A check over TCP alone kept a port a UDP
+// socket held, and the DNS server's start failed on it, as each start again
+// did, handed the same port.
+func EnsureAvailableDNSPort(port uint32, exclude ...uint32) (uint32, error) {
+	return EnsureFreeDNSPort(isDNSPortAvailable, port, exclude...)
+}
+
+// isDNSPortAvailable says whether a DNS server binds port: a plain TCP
+// listener and a UDP socket both (probePort).
+func isDNSPortAvailable(port uint32) bool {
+	free, _ := probePort(port, true) // false on any error
+	return free
+}
+
+// EnsureFreePort is EnsureAvailablePorts with free saying whether port is
+// free, in place of a probe listener on it. A test that calls a port free
+// holds it with a listener of its own, so that no other process can take it,
+// and hands in a probe that says it is free: a port it let go of for the
+// probe could be taken by another process before the probe bound it, and the
+// port would then move with the test's answer wrong.
+func EnsureFreePort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	return ensureFree(free, GetAvailablePortExcept, port, exclude...)
+}
+
+// EnsureFreeDNSPort is EnsureAvailableDNSPort with free in place of its
+// probe, as EnsureFreePort.
+func EnsureFreeDNSPort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	return ensureFree(free, GetAvailableDNSPortExcept, port, exclude...)
+}
+
+// ensureFree is port where free says so and it is not one of exclude, and
+// otherwise draw's port.
+func ensureFree(free func(port uint32) bool, draw func(exclude ...uint32) (uint32, error), port uint32, exclude ...uint32) (uint32, error) {
+	if !slices.Contains(exclude, port) && free(port) {
 		return port, nil
 	}
-	var newPort uint32
-	var err error
-	// Bounded: a handful of draws is plenty to miss a set this small, and a
-	// bound means an exhausted pool surfaces as an error rather than a hang.
-	for i := 0; i < 16; i++ {
-		newPort, err = GetAvailablePort()
-		if err != nil {
-			break
-		}
-		if _, clash := taken[newPort]; !clash {
-			return newPort, nil
-		}
+	newPort, err := draw(exclude...)
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate new port: %w", err)
 	}
-	if err == nil {
-		return 0, fmt.Errorf("failed to allocate a port distinct from %v", exclude)
-	}
-	return 0, fmt.Errorf("failed to allocate new port: %w", err)
+	return newPort, nil
 }
 
 type shellWord struct {

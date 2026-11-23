@@ -2,16 +2,15 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
-	"syscall"
 	"testing"
 	"time"
 
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -202,7 +201,7 @@ func TestDNSCacheLifecycle_RecordMode(t *testing.T) {
 	// Use a short TTL so we can validate expiry without sleeping the
 	// full production 30 s.
 	const testTTL = 100 * time.Millisecond
-	cache := expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, testTTL)
+	cache := lru.NewExpirable[string, dnsCacheEntry](dnsCacheMaxSize, nil, testTTL)
 
 	key := generateCacheKey("example.com", dns.TypeA)
 	entry := dnsCacheEntry{Msg: &dns.Msg{}, FromUpstream: true}
@@ -343,15 +342,9 @@ func TestResetRecordedDNSMocks_ClearsBothTrackers(t *testing.T) {
 	}
 }
 
-// TestResetRecordedDNSMocks_PurgesInPlace guards against reintroducing a
-// goroutine + heap leak that is worse than the retention this file fixes.
-//
-// expirable.NewLRU with a non-zero TTL starts a janitor goroutine whose done
-// channel is never closed, and that goroutine captures the cache. Allocating a
-// replacement tracker on every reset would therefore strand one goroutine per
-// reset and pin every discarded entry beyond the reach of the GC. The reset
-// must clear the existing trackers, not swap in new ones — which also keeps
-// the pointer stable for the DNS handler goroutines reading it concurrently.
+// TestResetRecordedDNSMocks_PurgesInPlace: the reset must clear the existing
+// trackers, not swap in new ones, because the DNS handler goroutines read the
+// tracker pointers concurrently and a swap would race with them.
 func TestResetRecordedDNSMocks_PurgesInPlace(t *testing.T) {
 	p := &Proxy{
 		logger:            zap.NewNop(),
@@ -363,10 +356,10 @@ func TestResetRecordedDNSMocks_PurgesInPlace(t *testing.T) {
 	p.ResetRecordedDNSMocks()
 
 	if p.recordedDNSMocks != beforeMocks {
-		t.Error("recordedDNSMocks was reallocated: the discarded cache and its janitor goroutine leak for the process lifetime")
+		t.Error("recordedDNSMocks was reallocated: the DNS handlers read this pointer concurrently")
 	}
 	if p.nodataRelayLogged != beforeNodata {
-		t.Error("nodataRelayLogged was reallocated: the discarded cache and its janitor goroutine leak for the process lifetime")
+		t.Error("nodataRelayLogged was reallocated: the DNS handlers read this pointer concurrently")
 	}
 }
 
@@ -523,8 +516,8 @@ func TestTheDNSServersBindIsAStageOfTheAgentsStart(t *testing.T) {
 		t.Cleanup(func() { _ = held.Close() })
 		begun := recordBootWork(t)
 		p := &Proxy{logger: zap.NewNop(), DNSPort: uint32(held.Addr().(*net.TCPAddr).Port)}
-		if err := start(p); !errors.Is(err, syscall.EADDRINUSE) {
-			t.Fatalf("startDNSServers on a port another socket holds: %v; want EADDRINUSE", err)
+		if err := start(p); !neterr.IsAddrInUse(err) {
+			t.Fatalf("startDNSServers on a port another socket holds: %v; want EADDRINUSE (WSAEADDRINUSE on Windows)", err)
 		}
 		assertOneOwnStage(t, begun(), "the DNS servers' bind")
 	})

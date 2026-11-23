@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -46,8 +47,11 @@ func TestStrictGate_ExecuteTypesAreComparedOnlyWhenBothPacketsSentThem(t *testin
 			t.Errorf("%s: allowed = %v, want %v", tc.name, got, tc.allowed)
 			continue
 		}
-		if !tc.allowed && (len(gate.fieldDiffs) != 1 || gate.fieldDiffs[0].Path != tc.drift) {
-			t.Errorf("%s: the report names %+v, want only %s", tc.name, gate.fieldDiffs, tc.drift)
+		if !tc.allowed {
+			diffs := gate.reportDiffs(gate.closestPlaces)
+			if len(diffs) != 1 || diffs[0].Path != tc.drift {
+				t.Errorf("%s: the report names %+v, want only %s", tc.name, diffs, tc.drift)
+			}
 		}
 	}
 }
@@ -164,5 +168,191 @@ func TestAStrictCommandComparesEachRecordingWithItsOwnReading(t *testing.T) {
 	}
 	if compared != 2 || len(docs) != 2 {
 		t.Errorf("the gate compared %d recordings with %d bodies, want 2 with 2 (one for each reading)", compared, len(docs))
+	}
+}
+
+// TestStrictGate_LearnedFieldMissingOrRetypedNamesFieldAndKind pins that
+// MySQL's strict gate mismatch diffs also treat learned ReqBodyNoise as
+// type-strict, naming a missing or retyped learned parameter rather than
+// leaving fieldDiffs empty.
+func TestStrictGate_LearnedFieldMissingOrRetypedNamesFieldAndKind(t *testing.T) {
+	type param = mysql.Parameter
+	for _, mode := range []struct {
+		name string
+		env  string
+	}{
+		{name: "proven_unset", env: ""},
+		{name: "proven_1", env: "1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, mode.env)
+
+			cases := []struct {
+				name         string
+				rec          mysql.PacketBundle
+				live         mysql.PacketBundle
+				learned      map[string][]string
+				wantPath     string
+				wantKind     models.MockFieldDiffKind
+				wantExpected string
+				wantActual   string
+			}{
+				{
+					name:         "learned parameter missing in live",
+					rec:          executeBundle(0, param{Type: 254, Value: "a"}, param{Type: 3, Value: int32(1)}),
+					live:         executeBundle(0, param{Type: 254, Value: "a"}),
+					learned:      map[string][]string{"body.parameters.1.value": {}},
+					wantPath:     "body.parameters.1.value",
+					wantKind:     models.DiffKindMissingInLive,
+					wantExpected: "1",
+					wantActual:   "",
+				},
+				{
+					name:         "learned parameter changed JSON type",
+					rec:          executeBundle(0, param{Type: 3, Value: int32(5)}),
+					live:         executeBundle(0, param{Type: 254, Value: "5"}),
+					learned:      map[string][]string{"body.parameters.0.value": {}},
+					wantPath:     "body.parameters.0.value",
+					wantKind:     models.DiffKindTypeChanged,
+					wantExpected: "number: 5",
+					wantActual:   "string: 5",
+				},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					live := tc.live
+					gate := newStrictGate(mocknoise.New(mysqlNoiseAdapter{}, false, true), zap.NewNop(), "COM_STMT_EXECUTE", &live, -1, "", nil)
+					rec := &models.Mock{Name: "rec-learned", Kind: models.MySQL}
+					rec.Spec.MySQLRequests = []mysql.Request{{PacketBundle: tc.rec}}
+					rec.Spec.ReqBodyNoise = tc.learned
+
+					if gate.allows(rec) {
+						t.Fatalf("expected strict rejection for %s", tc.name)
+					}
+					diffs := gate.reportDiffs(gate.closestPlaces)
+					var found bool
+					for _, d := range diffs {
+						if d.Path == tc.wantPath && d.Kind == tc.wantKind {
+							if d.Expected != tc.wantExpected || d.Actual != tc.wantActual {
+								t.Fatalf("got Expected=%q Actual=%q; want Expected=%q Actual=%q (diff=%+v)", d.Expected, d.Actual, tc.wantExpected, tc.wantActual, d)
+							}
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Fatalf("expected gate.reportDiffs to contain path=%q kind=%q; got %+v", tc.wantPath, tc.wantKind, diffs)
+					}
+				})
+			}
+
+			t.Run("redacted learned parameter never leaks through reportDiffs", func(t *testing.T) {
+				const recSecret = "MYSQL_SECRET_PLACEHOLDER_77"
+				const liveSecret = "MYSQL_LIVE_SECRET_88"
+				rec := &models.Mock{Name: "rec-redacted", Kind: models.MySQL}
+				rec.Spec.MySQLRequests = []mysql.Request{{PacketBundle: executeBundle(0,
+					param{Type: 254, Value: "a"},
+					param{Type: 254, Value: recSecret},
+					param{Type: 3, Value: int32(99)},
+				)}}
+				rec.Spec.ReqBodyNoise = map[string][]string{
+					"body.parameters.1.value": {},
+					"body.parameters.2.value": {},
+				}
+				rec.Noise = []string{"^" + recSecret + "$", "^99$"}
+
+				// Missing redacted learned parameter (with param 0 also drifting so rejection is guaranteed).
+				liveMissing := executeBundle(0, param{Type: 254, Value: "b"})
+				gate := newStrictGate(mocknoise.New(mysqlNoiseAdapter{}, false, true), zap.NewNop(), "COM_STMT_EXECUTE", &liveMissing, -1, "", nil)
+				if gate.allows(rec) {
+					t.Fatal("expected strict rejection when param 0 drifted and param 1 omitted")
+				}
+				diffs := gate.reportDiffs(gate.closestPlaces)
+				var sawMissing bool
+				for _, d := range diffs {
+					if strings.Contains(d.Expected, recSecret) || strings.Contains(d.Actual, recSecret) {
+						t.Fatalf("recorded secret leaked in reportDiffs: %+v", d)
+					}
+					if d.Path == "body.parameters.1.value" && d.Kind == models.DiffKindMissingInLive {
+						if d.Expected != valueRedacted || d.Actual != "" {
+							t.Fatalf("want Expected=%q Actual=\"\"; got %+v", valueRedacted, d)
+						}
+						sawMissing = true
+					}
+				}
+				if !sawMissing {
+					t.Fatalf("expected redacted body.parameters.1.value missing_in_live; got %+v", diffs)
+				}
+
+				// Retyped redacted learned parameters: param 1 string -> number, param 2 number -> live secret string.
+				liveRetyped := executeBundle(0,
+					param{Type: 254, Value: "b"},
+					param{Type: 3, Value: int32(42)},
+					param{Type: 254, Value: liveSecret},
+				)
+				gate2 := newStrictGate(mocknoise.New(mysqlNoiseAdapter{}, false, true), zap.NewNop(), "COM_STMT_EXECUTE", &liveRetyped, -1, "", nil)
+				if gate2.allows(rec) {
+					t.Fatal("expected strict rejection when param 0 drifted and params 1 & 2 retyped")
+				}
+				// Confirm raw diffs carry liveSecret before reportDiffs redacts it.
+				var rawHasLiveSecret bool
+				for _, d := range gate2.rawFieldDiffs() {
+					if strings.Contains(d.Actual, liveSecret) {
+						rawHasLiveSecret = true
+					}
+				}
+				if !rawHasLiveSecret {
+					t.Fatalf("precondition: expected rawFieldDiffs to contain liveSecret before redaction; got %+v", gate2.rawFieldDiffs())
+				}
+				diffs2 := gate2.reportDiffs(gate2.closestPlaces)
+				var sawRetyped1, sawRetyped2 bool
+				for _, d := range diffs2 {
+					if strings.Contains(d.Expected, recSecret) || strings.Contains(d.Actual, "42") || strings.Contains(d.Actual, liveSecret) || strings.Contains(d.Expected, "99") {
+						t.Fatalf("secret or unredacted value leaked at redacted param position: %+v", d)
+					}
+					if d.Path == "body.parameters.1.value" && d.Kind == models.DiffKindTypeChanged {
+						if d.Expected != valueRedacted || d.Actual != valueRedacted {
+							t.Fatalf("want both sides redacted on param 1; got %+v", d)
+						}
+						sawRetyped1 = true
+					}
+					if d.Path == "body.parameters.2.value" && d.Kind == models.DiffKindTypeChanged {
+						if d.Expected != valueRedacted || d.Actual != valueRedacted {
+							t.Fatalf("want both sides redacted on param 2; got %+v", d)
+						}
+						sawRetyped2 = true
+					}
+				}
+				if !sawRetyped1 || !sawRetyped2 {
+					t.Fatalf("expected redacted type_changed on params 1 and 2; got %+v", diffs2)
+				}
+			})
+
+			t.Run("allowsDrift with nil gate engine uses strict compare engine noise for report", func(t *testing.T) {
+				rec := &models.Mock{Name: "rec-drift", Kind: models.MySQL}
+				rec.Spec.MySQLRequests = []mysql.Request{{PacketBundle: executeBundle(0, param{Type: 254, Value: "a"}, param{Type: 3, Value: int32(5)})}}
+				rec.Spec.ReqBodyNoise = map[string][]string{
+					"body.parameters.0.value": {},
+					"body.parameters.1.value": {},
+				}
+				live := executeBundle(0, param{Type: 254, Value: "b"}, param{Type: 254, Value: "5"})
+				// nil engine simulates noise flags off while allowsDrift still runs exact serving.
+				gate := newStrictGate(nil, zap.NewNop(), "COM_STMT_EXECUTE", &live, -1, "", nil)
+				if gate.allowsDrift(rec) {
+					t.Fatal("expected allowsDrift to reject retyped learned param 1")
+				}
+				diffs := gate.reportDiffs(gate.closestPlaces)
+				if len(diffs) != 1 || diffs[0].Path != "body.parameters.1.value" ||
+					diffs[0].Kind != models.DiffKindTypeChanged ||
+					diffs[0].Expected != "number: 5" || diffs[0].Actual != "string: 5" {
+					t.Fatalf("expected only retyped body.parameters.1.value (ignoring same-type learned param 0 drift); got %+v", diffs)
+				}
+				// resetDiagnostics clears the lazy diff input too.
+				gate.resetDiagnostics()
+				if cleared := gate.reportDiffs(gate.closestPlaces); len(cleared) != 0 {
+					t.Fatalf("expected empty reportDiffs after resetDiagnostics; got %+v", cleared)
+				}
+			})
+		})
 	}
 }

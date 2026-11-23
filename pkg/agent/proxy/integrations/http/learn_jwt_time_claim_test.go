@@ -1,0 +1,721 @@
+package http
+
+import (
+	"context"
+	"encoding/base64"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// timedLearnDb is learnDb in a run that turned the time default on
+// (integrations.TimeFormReader), as keploy.yml's times setting at its
+// default says.
+type timedLearnDb struct{ *learnDb }
+
+func (timedLearnDb) TimeForm() bool { return true }
+
+// claimJWT is a token of the header head and the claims given, signed sig
+// (its third part, as given, unencoded).
+func claimJWT(head, claims, sig string) string {
+	enc := base64.RawURLEncoding
+	return enc.EncodeToString([]byte(head)) + "." + enc.EncodeToString([]byte(claims)) + "." + sig
+}
+
+const (
+	hs256Head = `{"alg":"HS256","typ":"JWT"}`
+	// recSig and liveSig are two HS256 signatures: base64url of 32 bytes.
+	recSig  = "c2lnbmF0dXJlLWJ5dGVzLXJlY29yZGVkLTAwMDAwMDA"
+	liveSig = "c2lnbmF0dXJlLWJ5dGVzLW9mLXRoaXMtcnVuLTExMTE"
+)
+
+// notifyClaims are a notify call's token claims: its subject, issued at
+// at (iat, epoch seconds), expiring an hour on (exp), and extra, more
+// members written after them ("" for none).
+func notifyClaims(sub string, at time.Time, extra string) string {
+	s := at.Unix()
+	return `{"sub":"` + sub + `","iat":` + strconv.FormatInt(s, 10) + `,"exp":` + strconv.FormatInt(s+3600, 10) + extra + `}`
+}
+
+// notifyBody and notifyHeader are a notify call carrying token in its body
+// and in its X-Api-Token header.
+func notifyBody(token string) string { return `{"to":"u-1","token":"` + token + `"}` }
+
+func notifyHeader(token string) map[string]string { return map[string]string{"X-Api-Token": token} }
+
+// learnNotify runs the learn step on a client test's notify call whose
+// token (in its body and its X-Api-Token header) the application minted at
+// its call, recorded with claims rec and in round F with claims made by
+// liveClaims at round F's call, under the time default where timeForm is
+// set. It returns the mock the step consumed (nil where it refused the
+// call) and its refusal.
+func learnNotify(t *testing.T, rec string, liveClaims func(call time.Time) string, timeForm bool) (*models.Mock, string) {
+	t.Helper()
+	return learnNotifyIn(t, notifyBody, rec, liveClaims, timeForm)
+}
+
+// learnNotifyIn is learnNotify of a call whose body body writes of its
+// token.
+func learnNotifyIn(t *testing.T, body func(token string) string, rec string, liveClaims func(call time.Time) string, timeForm bool) (*models.Mock, string) {
+	t.Helper()
+	return learnCarrying(t, func(token string) (string, map[string]string) { return body(token), notifyHeader(token) }, rec, liveClaims, timeForm)
+}
+
+// learnCarrying is learnNotify of a call whose body and headers (beside
+// its host and its JSON content type, which a Content-Type of its own
+// replaces) carry writes of its token.
+func learnCarrying(t *testing.T, carry func(token string) (string, map[string]string), rec string, liveClaims func(call time.Time) string, timeForm bool) (*models.Mock, string) {
+	t.Helper()
+	recToken := claimJWT(hs256Head, rec, recSig)
+	recBody, recHeader := carry(recToken)
+	m := learnRecorded("mock-0", 1300*time.Millisecond, "POST", "/v1/notify", recBody, recHeader, `{"ok":true}`)
+	h, n, opts := learnOn(t)
+	began := learnAt.Add(10 * time.Minute)
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	tr.RecordedBegin(learnAt.Add(time.Second))
+	tr.BeginAt(began)
+	ctx := learn.WithTracker(context.Background(), tr)
+	call := began.Add(300 * time.Millisecond)
+	token := claimJWT(hs256Head, liveClaims(call), liveSig)
+	liveBody, liveHeader := carry(token)
+	in := live("POST", "/v1/notify", liveBody, liveHeader)
+	in.arrived = call.Add(2 * time.Millisecond)
+	ldb := &learnDb{perTest: []*models.Mock{m}}
+	var db integrations.MockMemDb = ldb
+	if timeForm {
+		db = timedLearnDb{ldb}
+	}
+	served, miss, err := h.learnMatch(ctx, in, db, n, opts)
+	if err != nil {
+		t.Fatalf("learnMatch: %v", err)
+	}
+	if miss != nil {
+		return nil, miss.res.Why
+	}
+	if served == nil || len(ldb.consumed) != 1 {
+		t.Fatalf("served %v, consumed %d; want the recording served", served != nil, len(ldb.consumed))
+	}
+	c := ldb.consumed[0]
+	return &c, ""
+}
+
+// The places a notify call's token times are learned at: each claim of the
+// token in its body and in its header.
+var notifyClaimKeys = []string{
+	learn.ClaimClockKey("body.token", "exp"), learn.ClaimClockKey("body.token", "iat"),
+	learn.ClaimClockKey("header.x-api-token", "exp"), learn.ClaimClockKey("header.x-api-token", "iat"),
+}
+
+// A JWT the application signs at each call, carried in a call's body and
+// header, whose time claims (iat, exp) differ between the two record runs,
+// is learned under the time default as those times, each checked by its
+// form alone at its claim (models.ClockOffset.Claim), and nothing of the
+// token as noise. Under strict times it stays refused, as before. A token
+// one of whose other claims changed too, and one whose changed claim is no
+// time (a moment learning did not read as the application's clock, under a
+// name no JWT specification types a time), are not learned so.
+func TestAJWTsTimeClaimsAreLearnedAsTimesCheckedByForm(t *testing.T) {
+	recCall := learnAt.Add(1300 * time.Millisecond)
+	rec := notifyClaims("svc-1", recCall, "")
+	sameSub := func(call time.Time) string { return notifyClaims("svc-1", call, "") }
+
+	t.Run("time default: the time claims learned by form", func(t *testing.T) {
+		m, why := learnNotify(t, rec, sameSub, true)
+		if m == nil {
+			t.Fatalf("refused: %s; want the token's times learned by form", why)
+		}
+		for _, k := range notifyClaimKeys {
+			o, ok := m.Spec.Clocks[k]
+			claim := k[strings.LastIndex(k, ".")+1:]
+			if !ok || o.Claim != claim || o.Form == "" {
+				t.Fatalf("clocks %+v; want %s learned as a time in the %s claim, checked by form", m.Spec.Clocks, k, claim)
+			}
+		}
+		if len(m.Spec.Clocks) != len(notifyClaimKeys) {
+			t.Fatalf("clocks %+v; want only %v", m.Spec.Clocks, notifyClaimKeys)
+		}
+		for p := range m.Spec.ReqBodyNoise {
+			if p == "body.token" || p == "header.x-api-token" {
+				t.Fatalf("noise %v; want no noise at the token", m.Spec.ReqBodyNoise)
+			}
+		}
+	})
+	t.Run("time default: no claim key of a field whose name holds a '|'", func(t *testing.T) {
+		barred := func(token string) string { return `{"to":"u-1","a|b":"` + token + `"}` }
+		m, _ := learnNotifyIn(t, barred, rec, sameSub, true)
+		if m == nil {
+			return
+		}
+		for k := range m.Spec.Clocks {
+			if strings.HasPrefix(k, "body.a|b|") {
+				t.Fatalf("clocks %+v; want no key a replay cannot read as a claim's (%s)", m.Spec.Clocks, k)
+			}
+		}
+	})
+	t.Run("strict: refused as before", func(t *testing.T) {
+		m, why := learnNotify(t, rec, sameSub, false)
+		if m != nil {
+			t.Fatalf("served with clocks %+v noise %v; want the token refused under strict times", m.Spec.Clocks, m.Spec.ReqBodyNoise)
+		}
+		if !strings.Contains(why, "no clock read by the app matched it") {
+			t.Fatalf("refused: %s; want the token refused as no read of the clock", why)
+		}
+	})
+	t.Run("time default: a non-time claim changed too", func(t *testing.T) {
+		m, _ := learnNotify(t, rec, func(call time.Time) string { return notifyClaims("svc-2", call, "") }, true)
+		if m != nil {
+			for k := range m.Spec.Clocks {
+				if strings.Contains(k, "|") {
+					t.Fatalf("clocks %+v; want no claim learned where the token's sub changed", m.Spec.Clocks)
+				}
+			}
+		}
+	})
+	t.Run("time default: a claim of a moment no read of the clock", func(t *testing.T) {
+		// "ref" names a moment two days before each run's call: an instant
+		// near the call, under a name no JWT specification types a time,
+		// that learning read as no read of the clock.
+		ref := func(at time.Time) string { return `,"ref":` + strconv.FormatInt(at.Add(-48*time.Hour).Unix(), 10) }
+		m, _ := learnNotify(t, notifyClaims("svc-1", recCall, ref(recCall)), func(call time.Time) string { return notifyClaims("svc-1", call, ref(call)) }, true)
+		if m != nil {
+			for k := range m.Spec.Clocks {
+				if strings.Contains(k, "|") {
+					t.Fatalf("clocks %+v; want no claim learned where a claim that is no time changed", m.Spec.Clocks)
+				}
+			}
+		}
+	})
+	t.Run("time default: an auth_time, a sign-in before the call", func(t *testing.T) {
+		signIn := func(at time.Time) string {
+			return `,"auth_time":` + strconv.FormatInt(at.Add(-10*time.Minute).Unix(), 10)
+		}
+		m, why := learnNotify(t, notifyClaims("svc-1", recCall, signIn(recCall)), func(call time.Time) string { return notifyClaims("svc-1", call, signIn(call)) }, true)
+		if m == nil {
+			t.Fatalf("refused: %s; want the token's times learned by form", why)
+		}
+		if o, ok := m.Spec.Clocks[learn.ClaimClockKey("body.token", "auth_time")]; !ok || o.Claim != "auth_time" || o.Form == "" {
+			t.Fatalf("clocks %+v; want the auth_time claim, a NumericDate, learned by form", m.Spec.Clocks)
+		}
+	})
+	t.Run("time default: a claim of another name read as the clock", func(t *testing.T) {
+		issued := func(at time.Time) string { return `,"issued":` + strconv.FormatInt(at.Unix(), 10) }
+		m, why := learnNotify(t, notifyClaims("svc-1", recCall, issued(recCall)), func(call time.Time) string { return notifyClaims("svc-1", call, issued(call)) }, true)
+		if m == nil {
+			t.Fatalf("refused: %s; want the token's times learned by form", why)
+		}
+		if o, ok := m.Spec.Clocks[learn.ClaimClockKey("body.token", "issued")]; !ok || o.Claim != "issued" {
+			t.Fatalf("clocks %+v; want the issued claim, a read of the clock in its call's window, learned by form", m.Spec.Clocks)
+		}
+	})
+}
+
+// A replay of a call whose token times were learned by form at their claims
+// passes a token whose times moved again, under the time default alone; a
+// token whose other claim, header or signature form differs, or whose time
+// is of another type, is refused, at the token's field, and nothing at a
+// claim's key is checked as a leaf of its own.
+func TestAJWTsTimeClaimsLearnedByFormAreCheckedAtReplay(t *testing.T) {
+	recCall := learnAt.Add(1300 * time.Millisecond)
+	m, why := learnNotify(t, notifyClaims("svc-1", recCall, ""), func(call time.Time) string { return notifyClaims("svc-1", call, "") }, true)
+	if m == nil {
+		t.Fatalf("refused at learn: %s", why)
+	}
+	base := learnAt.Add(2 * time.Hour)
+	now := base.Add(time.Second)
+	moved := notifyClaims("svc-1", now, "")
+	both := []string{"body.token", "header.x-api-token"}
+	never := []string{"^never$"}
+	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
+	for _, c := range []struct {
+		name       string
+		token      string
+		timeForm   bool
+		differs    []string
+		why        string            // each differing field's reason holds it
+		notWhy     string            // and none holds it
+		body       string            // the call's body, where not notifyBody(token)
+		header     map[string]string // the call's headers beside its token's
+		headerPats map[string][]string
+		bodyPats   map[string][]string
+		sources    []models.DeclaredSource
+	}{
+		{name: "times moved, the time default", token: claimJWT(hs256Head, moved, liveSig), timeForm: true},
+		{name: "the recorded token, the time default", token: claimJWT(hs256Head, notifyClaims("svc-1", recCall, ""), recSig), timeForm: true},
+		{name: "the recorded token, strict times", token: claimJWT(hs256Head, notifyClaims("svc-1", recCall, ""), recSig)},
+		{name: "times moved, another signature of the form", token: claimJWT(hs256Head, moved, strings.Repeat("A", len(recSig))), timeForm: true},
+		{name: "times moved, strict times", token: claimJWT(hs256Head, moved, liveSig), differs: both, why: "learned under the time default"},
+		{name: "another subject", token: claimJWT(hs256Head, notifyClaims("svc-2", now, ""), liveSig), timeForm: true, differs: both, why: "outside the times learned in its claims"},
+		{name: "another header", token: claimJWT(`{"alg":"HS384","typ":"JWT"}`, moved, liveSig), timeForm: true, differs: both, why: "its header or another claim changed"},
+		{name: "a signature of another length", token: claimJWT(hs256Head, moved, liveSig+"AAAA"), timeForm: true, differs: both, why: "signature is not of the recorded one's form"},
+		{name: "a signature that is no base64url", token: claimJWT(hs256Head, moved, "+"+liveSig[1:]), timeForm: true, differs: both, why: "signature is not of the recorded one's form"},
+		{name: "exp written as a string", token: claimJWT(hs256Head, `{"sub":"svc-1","iat":`+strconv.FormatInt(now.Unix(), 10)+`,"exp":"`+strconv.FormatInt(now.Unix()+3600, 10)+`"}`, liveSig), timeForm: true, differs: both, why: "exp claim was learned as a time"},
+		{name: "a claim added", token: claimJWT(hs256Head, notifyClaims("svc-1", now, `,"role":"admin"`), liveSig), timeForm: true, differs: both, why: "another claim changed"},
+		{name: "times moved, a header pattern the token is outside", token: claimJWT(hs256Head, moved, liveSig), timeForm: true, headerPats: map[string][]string{"x-api-token": never}, differs: []string{"header.x-api-token"}},
+		{name: "times moved, a body pattern the token is outside", token: claimJWT(hs256Head, moved, liveSig), timeForm: true, bodyPats: map[string][]string{"token": never}, differs: []string{"body.token"}},
+		{name: "times moved, a clock rule at the body token", token: claimJWT(hs256Head, moved, liveSig), timeForm: true,
+			sources: []models.DeclaredSource{{Rule: "token-clock", Kind: models.DeclaredSourceClock, Field: "body.token", Clock: plain}}, differs: []string{"body.token"}, why: "token-clock"},
+		// A token's claims are read only where both runs hold a text: a
+		// number where the token was is a changed value, never a claim's
+		// time of no form.
+		{name: "a number where the body's token was", token: claimJWT(hs256Head, notifyClaims("svc-1", recCall, ""), recSig), body: `{"to":"u-1","token":17}`, timeForm: true,
+			differs: []string{"body.token"}, notWhy: "claim"},
+		// A header that holds no token's times is compared as any other:
+		// a content type of another parameter is the recorded one.
+		{name: "times moved, a content type of another parameter", token: claimJWT(hs256Head, moved, liveSig), header: map[string]string{"Content-Type": "application/json; charset=utf-8"}, timeForm: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", "1")
+			rm := *m
+			body := notifyBody(c.token)
+			if c.body != "" {
+				body = c.body
+			}
+			header := notifyHeader(c.token)
+			for k, v := range c.header {
+				header[k] = v
+			}
+			in := live("POST", "/v1/notify", body, header)
+			in.arrived = base.Add(2 * time.Second)
+			db := sourcedDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{&rm}, updateUnFilteredReturn: true}, timeForm: c.timeForm,
+				sources: map[string][]models.DeclaredSource{rm.Name: c.sources}}
+			hn := models.ProvenFlakyHeaderNoise()
+			for k, v := range c.headerPats {
+				hn[k] = v
+			}
+			ok, stub, diag, err := newHTTP().match(clockConn(true, base), in, db, hn, c.bodyPats, nil, true, false, false, true, true)
+			if err != nil {
+				t.Fatalf("match: %v", err)
+			}
+			if len(c.differs) == 0 {
+				if !ok || stub == nil {
+					t.Fatalf("refused (%v); want it answered", differs(diag))
+				}
+				return
+			}
+			if ok {
+				t.Fatalf("answered; want refused naming %v", c.differs)
+			}
+			got := differs(diag)
+			for _, f := range c.differs {
+				if !hasField(got, f) {
+					t.Fatalf("differs %v; want it to name %s", got, f)
+				}
+			}
+			if len(got) != len(c.differs) {
+				t.Fatalf("differs %v; want only %v", got, c.differs)
+			}
+			for _, f := range diag.differs {
+				if c.why != "" && (!strings.HasPrefix(f.why, f.shape+" ") || !strings.Contains(f.why, c.why)) {
+					t.Fatalf("%s refused for %q; want a reason prefixed by %q that says %q", f.shape, f.why, f.shape+" ", c.why)
+				}
+				if c.notWhy != "" && strings.Contains(f.why, c.notWhy) {
+					t.Fatalf("%s refused for %q; want a reason that does not say %q", f.shape, f.why, c.notWhy)
+				}
+			}
+		})
+	}
+}
+
+// The times learned in a token's claims are the ones at that field's own
+// claim keys (learn.ClaimClockField): a claim's offset at a key of no claim,
+// of another claim, or of a field whose name holds a '|', is none of them.
+func TestATokensTimesAreTheOnesAtItsOwnClaimKeys(t *testing.T) {
+	o := models.ClockOffset{Form: "number 9999999999", Claim: "exp"}
+	k := strictKnown{clocks: map[string]models.ClockOffset{
+		learn.ClaimClockKey("body.token", "exp"): o,
+		"body.token":                             o,
+		learn.ClaimClockKey("body.token", "iat"): o,
+		learn.ClaimClockKey("body.a|b", "exp"):   o,
+	}}
+	if got := k.claimsAt("body.token"); len(got) != 1 || got[0] != o {
+		t.Fatalf("times at body.token %+v; want the one at its exp claim's key", got)
+	}
+	if got := k.claimsAt("body.a|b"); len(got) != 0 {
+		t.Fatalf("times at body.a|b %+v; want none", got)
+	}
+}
+
+// jwtBearer is the grant type of an OAuth 2.0 JWT bearer assertion
+// (RFC 7523).
+const jwtBearer = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+
+// formCall and multipartCall carry a token as an OAuth 2.0 JWT bearer
+// assertion: a form body's assertion field, and a multipart form's
+// assertion part, each beside its grant type grant.
+func formCall(grant, token string) (string, map[string]string) {
+	return "grant_type=" + url.QueryEscape(grant) + "&assertion=" + token,
+		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+}
+
+func multipartCall(grant, token string) (string, map[string]string) {
+	part := func(name, value string) string {
+		return "--BOUNDARY\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n"
+	}
+	return part("grant_type", grant) + part("assertion", token) + "--BOUNDARY--\r\n",
+		map[string]string{"Content-Type": "multipart/form-data; boundary=BOUNDARY"}
+}
+
+// assertionReplay is a replay of a call that carries a token as its
+// assertion: the token, its grant type where it is not jwtBearer, the
+// call's body where it is not the carrier's of the two, the time default,
+// keploy.yml's body patterns and declared sources, and the field it is
+// refused at (none where it is answered) with the reason its refusal gives
+// (whyPrefix pins the leading "<shape> " prefix).
+type assertionReplay struct {
+	name      string
+	token     string
+	grant     string
+	body      string
+	timeForm  bool
+	bodyPats  map[string][]string
+	sources   []models.DeclaredSource
+	at, why   string
+	whyPrefix bool
+}
+
+// A JWT carried in a form or a multipart body field (an OAuth 2.0 JWT
+// bearer assertion, RFC 7523) whose time claims moved between the two
+// record runs is learned as those times, checked by their form alone at
+// the field's claims, as one in a JSON body field or a header is, and its
+// replay checks it so: times moved again pass under the time default
+// alone; strict times, a changed claim that is no time, a form key of two
+// values, a token keploy.yml's patterns refuse, and a clock rule at the
+// assertion are refused at the field, each with its reason. A changed
+// field beside it that holds no token is refused as before, for no reason
+// of a token's.
+func TestAJWTInAFormOrMultipartFieldIsCheckedByItsClaimTimes(t *testing.T) {
+	recCall := learnAt.Add(1300 * time.Millisecond)
+	iatOnly := func(sub string, at time.Time) string {
+		return `{"sub":"` + sub + `","iat":` + strconv.FormatInt(at.Unix(), 10) + `}`
+	}
+	iatExp := func(sub string, at time.Time) string { return notifyClaims(sub, at, "") }
+	never := []string{"^never$"}
+	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
+	for _, carry := range []struct {
+		name string
+		call func(grant, token string) (string, map[string]string)
+		form bool
+	}{{name: "form", call: formCall, form: true}, {name: "multipart", call: multipartCall}} {
+		bearer := func(token string) (string, map[string]string) { return carry.call(jwtBearer, token) }
+		for _, shape := range []struct {
+			name   string
+			claims func(sub string, at time.Time) string
+			times  []string
+		}{{name: "iat", claims: iatOnly, times: []string{"iat"}}, {name: "iat and exp", claims: iatExp, times: []string{"exp", "iat"}}} {
+			t.Run(carry.name+", "+shape.name, func(t *testing.T) {
+				m, why := learnCarrying(t, bearer, shape.claims("svc-1", recCall), func(call time.Time) string { return shape.claims("svc-1", call) }, true)
+				if m == nil {
+					t.Fatalf("refused at learn: %s; want the token's times learned by form", why)
+				}
+				for _, c := range shape.times {
+					if o, ok := m.Spec.Clocks[learn.ClaimClockKey("body.assertion", c)]; !ok || o.Claim != c || o.Form == "" {
+						t.Fatalf("clocks %+v; want the %s claim of body.assertion learned as a time checked by form", m.Spec.Clocks, c)
+					}
+				}
+				if len(m.Spec.Clocks) != len(shape.times) {
+					t.Fatalf("clocks %+v; want only the assertion's %v", m.Spec.Clocks, shape.times)
+				}
+				if _, ok := m.Spec.ReqBodyNoise["body.assertion"]; ok {
+					t.Fatalf("noise %v; want no noise at the assertion", m.Spec.ReqBodyNoise)
+				}
+				base := learnAt.Add(2 * time.Hour)
+				now := base.Add(time.Second)
+				moved := claimJWT(hs256Head, shape.claims("svc-1", now), liveSig)
+				cases := []assertionReplay{
+					{name: "times moved, the time default", token: moved, timeForm: true},
+					{name: "times moved, strict times", token: moved, at: "body.assertion", why: "learned under the time default", whyPrefix: true},
+					{name: "another subject", token: claimJWT(hs256Head, shape.claims("svc-2", now), liveSig), timeForm: true, at: "body.assertion", why: "outside the times learned in its claims", whyPrefix: true},
+					{name: "times moved, a body pattern the token is outside", token: moved, timeForm: true, bodyPats: map[string][]string{"assertion": never}, at: "body.assertion", why: "keploy.yml's noise lets"},
+					{name: "times moved, a clock rule at the assertion", token: moved, timeForm: true,
+						sources: []models.DeclaredSource{{Rule: "assertion-clock", Kind: models.DeclaredSourceClock, Field: "body.assertion", Clock: plain}},
+						at:      "body.assertion", why: "assertion-clock", whyPrefix: true},
+					// A field that holds no token keeps its reason: none.
+					{name: "times moved, another grant type", token: moved, grant: "client_credentials", timeForm: true, at: "body.grant_type"},
+				}
+				if carry.form {
+					body, _ := bearer(moved)
+					cases = append(cases, assertionReplay{name: "a second assertion beside it", token: moved, body: body + "&assertion=" + moved, timeForm: true, at: "body.assertion", why: "holds 2 values where one token was recorded", whyPrefix: true})
+				}
+				for _, c := range cases {
+					t.Run(c.name, func(t *testing.T) {
+						t.Setenv("KEPLOY_PROVEN", "1")
+						rm := *m
+						grant := jwtBearer
+						if c.grant != "" {
+							grant = c.grant
+						}
+						body, header := carry.call(grant, c.token)
+						if c.body != "" {
+							body = c.body
+						}
+						in := live("POST", "/v1/notify", body, header)
+						in.arrived = base.Add(2 * time.Second)
+						db := sourcedDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{&rm}, updateUnFilteredReturn: true}, timeForm: c.timeForm,
+							sources: map[string][]models.DeclaredSource{rm.Name: c.sources}}
+						ok, stub, diag, err := newHTTP().match(clockConn(true, base), in, db, models.ProvenFlakyHeaderNoise(), c.bodyPats, nil, true, false, false, true, true)
+						if err != nil {
+							t.Fatalf("match: %v", err)
+						}
+						if c.at == "" {
+							if !ok || stub == nil {
+								t.Fatalf("refused (%v); want it answered", differs(diag))
+							}
+							return
+						}
+						if ok {
+							t.Fatalf("answered; want refused at %s", c.at)
+						}
+						if got := differs(diag); len(got) != 1 || !hasField(got, c.at) {
+							t.Fatalf("differs %v; want only %s", got, c.at)
+						}
+						for _, f := range diag.differs {
+							if c.why == "" && f.why != "" || !strings.Contains(f.why, c.why) {
+								t.Fatalf("%s refused for %q; want a reason that says %q", f.shape, f.why, c.why)
+							}
+							if c.whyPrefix && !strings.HasPrefix(f.why, f.shape+" ") {
+								t.Fatalf("%s refused for %q; want a reason prefixed by %q", f.shape, f.why, f.shape+" ")
+							}
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
+// httpUUID7 is a version 7 UUID of the instant at, with the random bits
+// random (18 hex digits).
+func httpUUID7(at time.Time, random string) string {
+	h := strconv.FormatInt(at.UnixMilli(), 16)
+	h = strings.Repeat("0", 12-len(h)) + h
+	return h[:8] + "-" + h[8:] + "-7" + random[:3] + "-8" + random[3:6] + "-" + random[6:18]
+}
+
+// A token whose jti is a time-ordered UUID the application mints at its
+// call changed in a claim that is an id, not a time, though its bits read
+// as the application's clock in its call's window: no claim of it is
+// learned as a time checked by its form, as MongoDB's learning learns
+// none. It is left as learning had it: a token of an iat and a jti is
+// noise at its fields, and one whose exp, an instant the application read
+// no clock for, moved too stays refused under the time default as under
+// strict times.
+func TestATokensTimeOrderedUUIDClaimIsLeftAsLearned(t *testing.T) {
+	recCall := learnAt.Add(1300 * time.Millisecond)
+	iatJti := func(at time.Time, random string) string {
+		return `{"sub":"svc-1","iat":` + strconv.FormatInt(at.Unix(), 10) + `,"jti":"` + httpUUID7(at, random) + `"}`
+	}
+	withExp := func(at time.Time, random string) string {
+		return notifyClaims("svc-1", at, `,"jti":"`+httpUUID7(at, random)+`"`)
+	}
+	for _, c := range []struct {
+		name   string
+		claims func(at time.Time, random string) string
+		why    string // "" where it is learned as noise
+	}{
+		{name: "an iat and a jti", claims: iatJti},
+		{name: "an iat, an exp and a jti", claims: withExp, why: "no clock read by the app matched it"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m, why := learnNotify(t, c.claims(recCall, strings.Repeat("1", 18)), func(call time.Time) string { return c.claims(call, strings.Repeat("2", 18)) }, true)
+			if c.why != "" {
+				if m != nil {
+					t.Fatalf("served with clocks %+v noise %v; want the token refused, as before", m.Spec.Clocks, m.Spec.ReqBodyNoise)
+				}
+				if !strings.Contains(why, c.why) {
+					t.Fatalf("refused: %s; want it refused as %q", why, c.why)
+				}
+				return
+			}
+			if m == nil {
+				t.Fatalf("refused at learn: %s; want the token learned as noise, as before", why)
+			}
+			for k := range m.Spec.Clocks {
+				if strings.Contains(k, "|") {
+					t.Fatalf("clocks %+v; want no claim of a token whose jti changed learned as a time", m.Spec.Clocks)
+				}
+			}
+			for _, p := range []string{"body.token", "header.x-api-token"} {
+				if _, ok := m.Spec.ReqBodyNoise[p]; !ok {
+					t.Fatalf("noise %v; want the token at %s learned as noise, as before", m.Spec.ReqBodyNoise, p)
+				}
+			}
+		})
+	}
+}
+
+// A repeated form key whose values only reorder between the two record
+// runs is one value as the learn step reads it (formValue sorts before
+// joining), so learning learns no noise at it.
+func TestAReorderedRepeatedFormKeyLearnsNoNoise(t *testing.T) {
+	h, n, opts := learnOn(t)
+	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	m := learnRecorded("mock-0", 0, "POST", "/v1/notify", "tag=b&tag=a", ct, `{"ok":true}`)
+	db := &learnDb{perTest: []*models.Mock{m}}
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/notify", "tag=a&tag=b", ct), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v; want the reordered form served", served != nil, miss, err)
+	}
+	if len(db.consumed) != 1 || len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v; want no noise learned for a reordered repeated form key", db.consumed[0].Spec.ReqBodyNoise)
+	}
+}
+
+// A JSON field barred by a clock rule (noiseBarred: named by a clock rule
+// with no clock check on this recording) names that rule in its refusal
+// reason rather than leaving why empty, while a keploy.yml pattern refusal
+// keeps its own reason, a non-clock minted rule is never blamed as a clock
+// rule, and a JSON type change at any field a clock rule names reports that
+// the type changed rather than blaming the clock rule.
+func TestAClockRuleBarredJSONFieldNamesItsRule(t *testing.T) {
+	base := time.Date(2026, 11, 11, 14, 16, 33, 0, time.UTC)
+	recAt := time.Date(2026, 11, 11, 14, 6, 39, 0, time.UTC)
+	now := base.Add(time.Second)
+	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
+	lastUsed := models.DeclaredSource{Rule: "pat-last-used-at", Kind: models.DeclaredSourceClock, Field: "body.data.lastUsedAt", Clock: plain}
+	updated := models.DeclaredSource{Rule: "pat-updated-at", Kind: models.DeclaredSourceClock, Field: "body.data.updatedAt", Clock: plain}
+	mintedName := models.DeclaredSource{Rule: "pat-name-minted", Kind: models.DeclaredSourceMinted, Field: "body.data.name", Minted: &models.MintedForm{MinLen: 1, MaxLen: 16}}
+	never := []string{"^never$"}
+	for _, c := range []struct {
+		name       string
+		background bool
+		sources    []models.DeclaredSource
+		body       string
+		bodyPats   map[string][]string
+		at         string
+		wantWhy    string
+		wantPrefix bool
+		notWhy     string
+	}{
+		{
+			name:       "learned noise barred by a clock rule names the rule",
+			sources:    []models.DeclaredSource{lastUsed, updated},
+			at:         "body.data.lastUsedAt",
+			wantWhy:    "pat-last-used-at",
+			wantPrefix: true,
+		},
+		{
+			name:    "a type change on a clock-barred field says the type changed",
+			sources: []models.DeclaredSource{lastUsed, updated},
+			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":"` +
+				strconv.FormatInt(now.Unix(), 10) + `","name":"e2e-go","status":"active","updatedAt":"` + recAt.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
+			at:         "body.data.lastUsedAt",
+			wantWhy:    "type changed (recorded number, live string)",
+			wantPrefix: true,
+			notWhy:     "pat-last-used-at",
+		},
+		{
+			name:     "a pattern refusal keeps its own reason",
+			sources:  []models.DeclaredSource{lastUsed, updated},
+			bodyPats: map[string][]string{"data.lastUsedAt": never},
+			at:       "body.data.lastUsedAt",
+			wantWhy:  "keploy.yml's noise lets",
+			notWhy:   "pat-last-used-at",
+		},
+		{
+			name:     "a pattern refusal on a type change keeps its own reason",
+			sources:  []models.DeclaredSource{lastUsed, updated},
+			bodyPats: map[string][]string{"data.lastUsedAt": never},
+			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":"` +
+				strconv.FormatInt(now.Unix(), 10) + `","name":"e2e-go","status":"active","updatedAt":"` + recAt.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
+			at:      "body.data.lastUsedAt",
+			wantWhy: "keploy.yml's noise lets",
+			notWhy:  "type changed",
+		},
+		{
+			name:       "a type change on a clock-checked field says the type changed",
+			background: true,
+			sources:    []models.DeclaredSource{lastUsed, updated},
+			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":"` +
+				strconv.FormatInt(now.Unix(), 10) + `","name":"e2e-go","status":"active","updatedAt":"` + now.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
+			at:         "body.data.lastUsedAt",
+			wantWhy:    "type changed (recorded number, live string)",
+			wantPrefix: true,
+			notWhy:     "pat-last-used-at",
+		},
+		{
+			name:    "a minted rule at another field is not blamed as a clock rule",
+			sources: []models.DeclaredSource{lastUsed, updated, mintedName},
+			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":` +
+				strconv.FormatInt(recAt.Unix(), 10) + `,"name":"other-name","status":"active","updatedAt":"` + recAt.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
+			at:     "body.data.name",
+			notWhy: "pat-name-minted",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", "1")
+			m, call := patTouch(recAt)
+			m.Spec.ReqBodyNoise = map[string][]string{"body.data.lastUsedAt": {}}
+			in := call(now, recAt)
+			if c.body != "" {
+				in = patTouchCall(c.body)
+			}
+			in.arrived = base.Add(2 * time.Second)
+			db := sourcedDb{
+				mockMemDb:  &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true},
+				sources:    map[string][]models.DeclaredSource{"mock-220": c.sources},
+				background: map[string]bool{"mock-220": c.background},
+				timeForm:   true,
+			}
+			ok, _, diag, err := newHTTP().match(clockConn(true, base), in, db, models.ProvenFlakyHeaderNoise(), c.bodyPats, nil, true, false, false, true, true)
+			if err != nil {
+				t.Fatalf("match: %v", err)
+			}
+			if ok {
+				t.Fatalf("answered; want refused at %s", c.at)
+			}
+			if got := differs(diag); len(got) != 1 || !hasField(got, c.at) {
+				t.Fatalf("differs %v; want only %s", got, c.at)
+			}
+			f := diag.differs[0]
+			if c.wantWhy != "" && !strings.Contains(f.why, c.wantWhy) {
+				t.Fatalf("%s refused for %q; want a reason that says %q", f.shape, f.why, c.wantWhy)
+			}
+			if c.wantPrefix && !strings.HasPrefix(f.why, f.shape+" ") {
+				t.Fatalf("%s refused for %q; want a reason prefixed by %q", f.shape, f.why, f.shape+" ")
+			}
+			if c.notWhy != "" && strings.Contains(f.why, c.notWhy) {
+				t.Fatalf("%s refused for %q; want a reason that does not say %q", f.shape, f.why, c.notWhy)
+			}
+		})
+	}
+}
+
+// claimsHeld enforces noiseBarred itself (as learnedAt does), so every
+// caller — headerDiffs included — refuses a JWT whose field is barred by a
+// clock rule rather than answering it by its learned claim times.
+func TestAHeaderClockRuleBarsClaimCheckByConstruction(t *testing.T) {
+	recAt := learnAt.Add(1300 * time.Millisecond)
+	liveAt := learnAt.Add(2 * time.Hour)
+	recTok := claimJWT(hs256Head, notifyClaims("svc-1", recAt, ""), recSig)
+	movedTok := claimJWT(hs256Head, notifyClaims("svc-1", liveAt, ""), liveSig)
+	clocks := map[string]models.ClockOffset{
+		learn.ClaimClockKey("header.x-api-token", "iat"): {Form: "number 9999999999", Claim: "iat"},
+		learn.ClaimClockKey("header.x-api-token", "exp"): {Form: "number 9999999999", Claim: "exp"},
+	}
+	rec := map[string]string{"X-Api-Token": recTok}
+	liveHdr := http.Header{"X-Api-Token": {movedTok}}
+
+	unbarred := strictKnown{n: strictNoise{timeForm: true}, clocks: clocks}
+	if diffs := unbarred.headerDiffs(rec, liveHdr, nil); len(diffs) != 0 {
+		t.Fatalf("unbarred header diffs %+v; want answered by learned claim times", diffs)
+	}
+
+	barred := strictKnown{
+		n:        strictNoise{timeForm: true},
+		clocks:   clocks,
+		declared: map[string]models.ClockOffset{"header.x-api-token": {Res: time.Second}},
+	}
+	diffs := barred.headerDiffs(rec, liveHdr, nil)
+	if len(diffs) != 1 || diffs[0].diff.Path != "header.x-api-token" {
+		t.Fatalf("clock-barred header diffs %+v; want header.x-api-token refused", diffs)
+	}
+}

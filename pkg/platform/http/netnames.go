@@ -65,7 +65,7 @@ func (a *AgentClient) pushNetworkNames(ctx context.Context) {
 		!utils.IsDockerCmd(utils.CmdType(a.conf.CommandType)) {
 		return
 	}
-	uri := a.conf.Agent.AgentURI
+	uri := a.conf.AgentURI()
 	agentContainer := a.conf.KeployContainer
 	if v, ok := namePushers.Load(uri); ok && v == noNamePusher {
 		return

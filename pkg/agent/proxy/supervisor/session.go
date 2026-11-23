@@ -151,15 +151,18 @@ type Session struct {
 	RouteMocksViaSyncMock bool
 	// peerEnds: how each side of the connection ended, which ended first
 	// (MarkPeerEndedBy; peerEndFirstShift), and whether that first end
-	// records no fault (EndFollowedStop) and, from noFaultEndShift, which
-	// such end it was (FirstEndNoFault); whether the server spoke unasked
-	// before the current request (ServerSpokeUnasked); and, from
+	// records no fault (EndFollowedStop); whether the server spoke unasked
+	// before the current request (ServerSpokeUnasked); whether the
+	// destination's stream ended where the client stopped taking it
+	// (endedWhereClientStoppedBit); whether the client had ended its side
+	// before the destination's end reached it (ClientEndedBeforeDest); from
 	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
-	// ended because its connection did (MarkEndedWithConnection); and, from
-	// clientEndErrnoShift, the errno the client's socket gave after the
-	// relay was done with it (MarkClientEndError). Internal;
-	// one word here, in the padding after the bools, so a Session stays in
-	// its size class with clientStopped.
+	// ended because its connection did (MarkEndedWithConnection); from
+	// clientEndShift, which end that records no fault the client's own end
+	// was, first or not (ClientEndNoFault); and, from clientEndErrnoShift,
+	// the errno the client's socket gave after the relay was done with it
+	// (MarkClientEndError). Internal; one word here, in the padding after
+	// the bools, so a Session stays in its size class with clientStopped.
 	peerEnds atomic.Uint32
 
 	// --- Backward-compatibility (populated by the migration shim) ---
@@ -252,18 +255,19 @@ type Session struct {
 
 	// exchanges is NextRequest's state.
 	exchanges exchanges
-	// clientStopped is nil until the destination's stream ended where the
-	// client stopped taking it (MarkEndedWhereClientStopped), and then what
-	// reads the start of what the client refused there.
-	clientStopped atomic.Pointer[func() []byte]
 	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
 	// hole, and why (MarkEndedAtHole). nil while it has not.
 	endedAtHole [2]atomic.Pointer[string]
 	// emitMu guards OnMockRecorded's chain (AddMockHook, EmitMock) and
-	// lastReqTimestamp (enforceReqMonotonic), each taken alone, never one
-	// inside the other. One mutex for both keeps a Session in its size class.
-	emitMu           sync.Mutex
-	lastReqTimestamp time.Time // most recent ReqTimestampMock emitted on this session
+	// order (enforceReqMonotonic, countClampedOut), each taken alone, never
+	// one inside the other. One mutex for both keeps a Session in its size
+	// class.
+	emitMu sync.Mutex
+	// order is what enforceReqMonotonic keeps of the mocks emitted on this
+	// session: nil until the first one with a request stamp. Out of line, so
+	// a connection that records nothing pays nothing for it and a Session
+	// stays in its size class.
+	order *emitOrder
 
 	// incomplete is the incomplete-mock flag (MarkMockIncomplete): nil while
 	// it is clear, else why it was set, the first reason since it was last
@@ -279,6 +283,33 @@ type Session struct {
 	// (StoppedAt), in Unix nanoseconds: 0 until StoppedAt first reads the
 	// clock. The call that stores it tells OnStop.
 	stoppedAt atomic.Int64
+
+	// progressed notes that the parser made progress on what it has read
+	// since the supervisor's last look (handedOver, taken by takeHandedOver).
+	// Its own atomic, never a bit in peerEnds, so peer-end marks and
+	// progress can never share a bit.
+	progressed atomic.Bool
+
+	// retired is the supervisor's, closed as it retires the parser (Retired);
+	// Supervisor.Run sets it before the parser runs.
+	retired <-chan struct{}
+}
+
+// Retired is closed once the supervisor running this session's parser retires
+// it: a hang, a panic, the memory cap, an error the parser returned, or, at the
+// recording's stop, no progress for its fold window once it has read its
+// streams to their end (Config.FoldWindow), or the stop's own deadline where
+// its caller set one (Supervisor.Run). From then on nothing the parser records
+// is kept. Unlike Ctx, which the recording's stop ends as well, it says the
+// parser itself is done: a parser that still reads, at the stop, what was
+// captured before it waits on what that needs (a TLS connection's greeting,
+// say) until this is closed, never longer. nil, never closed, for a session no
+// supervisor runs. Nil-safe.
+func (s *Session) Retired() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.retired
 }
 
 // AddPostRecordHook adds h to the front of the session's post-record chain
@@ -390,41 +421,41 @@ func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
 // never read, and a half-closed client that reset before its acknowledgement
 // went out may have read some of what was cut. The caller calls it before the
 // stream ends, so a parser that reaches the end sees it. Nil-safe.
-//
-// notTaken returns the start of what the client refused from there on, which
-// the stream does not hold, up to what reached the proxy after the client's
-// FIN (relay.Config.ClientStopped): all of it once the stream has ended.
-// NotTakenWhereClientStopped calls it.
-func (s *Session) MarkEndedWhereClientStopped(notTaken func() []byte) {
+func (s *Session) MarkEndedWhereClientStopped() {
 	if s == nil {
 		return
 	}
-	s.clientStopped.Store(&notTaken)
+	s.peerEnds.Or(endedWhereClientStoppedBit)
 }
 
 // EndedWhereClientStopped reports whether the destination's stream ended where
 // the client stopped taking it (MarkEndedWhereClientStopped). Nil-safe.
 func (s *Session) EndedWhereClientStopped() bool {
-	return s != nil && s.clientStopped.Load() != nil
+	return s != nil && s.peerEnds.Load()&endedWhereClientStoppedBit != 0
 }
 
-// NotTakenWhereClientStopped is the start of what the client refused where the
-// destination's stream ended (MarkEndedWhereClientStopped): bytes the
-// destination sent that the client never took, and the stream never held, up
-// to the first that reached the proxy after the client's FIN, which may be the
-// destination's answer to the client's close. A parser that reached the end of
-// the stream in the middle of a message reads in it how the destination went
-// on before it could know the client had closed. Nil while the stream has not
-// ended so, when nothing was given to read it, and for a nil session. The
-// caller must not change it.
-func (s *Session) NotTakenWhereClientStopped() []byte {
+// MarkClientEndedBeforeDest says the client had ended its side of the
+// connection (its FIN in, or the connection reset) before the destination's end
+// reached it: a look at the proxy's end of the client connection, taken as the
+// relay read the destination's end and before it forwarded it, found it so
+// (relay.Config.ClientEndedBeforeDest). The client's end then came first,
+// whichever of the two ends the relay read first: a destination that closes on
+// its own as the client closes can have its close read first on a busy host.
+// The caller calls it before the stream ends, so a parser that reaches the end
+// sees it. Nil-safe.
+func (s *Session) MarkClientEndedBeforeDest() {
 	if s == nil {
-		return nil
+		return
 	}
-	if p := s.clientStopped.Load(); p != nil && *p != nil {
-		return (*p)()
-	}
-	return nil
+	s.peerEnds.Or(clientEndedBeforeDestBit)
+}
+
+// ClientEndedBeforeDest reports whether the client had ended its side before
+// the destination's end reached it (MarkClientEndedBeforeDest). False where the
+// relay cannot look at the client's socket (off Linux), and where the
+// destination's end was never read. Nil-safe.
+func (s *Session) ClientEndedBeforeDest() bool {
+	return s != nil && s.peerEnds.Load()&clientEndedBeforeDestBit != 0
 }
 
 // StreamedBefore reports whether every chunk of dir captured before the chunk
@@ -475,9 +506,18 @@ const spokeUnaskedBit = 1 << (peerEndFirstShift + 2)
 // endFollowedStopBit, in peerEnds, after spokeUnaskedBit: EndFollowedStop.
 const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
 
+// endedWhereClientStoppedBit, in peerEnds, after endFollowedStopBit:
+// EndedWhereClientStopped.
+const endedWhereClientStoppedBit = 1 << (peerEndFirstShift + 4)
+
+// clientEndedBeforeDestBit, in peerEnds, after endedWhereClientStoppedBit:
+// ClientEndedBeforeDest.
+const clientEndedBeforeDestBit = 1 << (peerEndFirstShift + 5)
+
 // EndFollowedStop reports whether the first end of the connection
 // (FirstPeerEnded) was the application's stop, which records no fault
-// (MarkPeerEndedBy, FirstEndNoFault says which): read after the recording's
+// (MarkPeerEndedBy; ClientEndNoFault says which, of the client's end): read
+// after the recording's
 // stop had begun (keploy stops the application only once it has told the
 // agent), the client's end as its process exited, or the client's end where
 // the hooks cannot say how the application released it (the proxy's
@@ -490,13 +530,13 @@ func (s *Session) EndFollowedStop() bool {
 	return s != nil && s.peerEnds.Load()&endFollowedStopBit != 0
 }
 
-// NoFaultEnd is which end that records no fault the first end of a
-// connection was (MarkPeerEndedBy, FirstEndNoFault), as the relay read it.
+// NoFaultEnd is which end that records no fault an end of a connection was
+// (MarkPeerEndedBy, ClientEndNoFault), as the relay read it.
 type NoFaultEnd uint32
 
 const (
-	// EndMayBeFault: the first end is none of the ones below (the
-	// application's giving up, the upstream's fault), or none has come.
+	// EndMayBeFault: the end is none of the ones below (the application's
+	// giving up, the upstream's fault), or none has come.
 	EndMayBeFault NoFaultEnd = iota
 	// EndAtStop: an end read once the recording's stop had begun.
 	EndAtStop
@@ -511,18 +551,24 @@ const (
 	EndUnjudged
 )
 
-// noFaultEndShift: peerEnds holds, from this bit, the first end's NoFaultEnd
-// in two bits, past MarkEndedWithConnection's bits.
-const noFaultEndShift = endedWithConnectionShift + 2
+// clientEndShift: peerEnds holds, from this bit, the client's own end's
+// NoFaultEnd in two bits, past MarkEndedWithConnection's bits.
+const clientEndShift = endedWithConnectionShift + 2
 
-// FirstEndNoFault reports which end that records no fault the connection's
-// first end was (MarkPeerEndedBy): EndMayBeFault where EndFollowedStop is
-// false. Nil-safe.
-func (s *Session) FirstEndNoFault() NoFaultEnd {
+// ClientEndNoFault reports which end that records no fault the client's own
+// end was (MarkPeerEndedBy, FromClient), whether or not it was the
+// connection's first: EndMayBeFault where it may be a fault, and while the
+// relay has not read it (PeerEnded(FromClient) is PeerOpen). A call the client
+// stopped taking is the client's to judge, by its own end, whichever end the
+// relay read first: an upstream that closes once it has sent its last bytes
+// (keep-alives off) closes on its own, and its forwarder can read that close
+// before the client's forwarder reads the client's FIN, which came before it.
+// Nil-safe.
+func (s *Session) ClientEndNoFault() NoFaultEnd {
 	if s == nil {
 		return EndMayBeFault
 	}
-	return NoFaultEnd(s.peerEnds.Load() >> noFaultEndShift & 3)
+	return NoFaultEnd(s.peerEnds.Load() >> clientEndShift & 3)
 }
 
 // ServerSpokeUnasked reports whether the server sent bytes that answer no
@@ -559,8 +605,8 @@ func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
 // agent before they stop the application), the client's process was exiting
 // as its end was read (EndAtExit), or the hooks cannot say how the client
 // released its end (EndUnjudged), as the proxy's peerEndMarker reads it. Such
-// an end is not a fault (EndFollowedStop, FirstEndNoFault). Only the first
-// end's is kept. Nil-safe.
+// an end is not a fault: the first end's says so (EndFollowedStop), and the
+// client's, first or not, says which it was (ClientEndNoFault). Nil-safe.
 func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaultEnd) {
 	if s == nil || dir > fakeconn.FromDest {
 		return
@@ -576,10 +622,13 @@ func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaul
 			return
 		}
 		next := old | uint32(end)<<shift
+		if dir == fakeconn.FromClient {
+			next |= uint32(why) << clientEndShift
+		}
 		if (old>>peerEndFirstShift)&3 == 0 {
 			next |= (uint32(dir) + 1) << peerEndFirstShift
 			if why != EndMayBeFault {
-				next |= endFollowedStopBit | uint32(why)<<noFaultEndShift
+				next |= endFollowedStopBit
 			}
 		}
 		if s.peerEnds.CompareAndSwap(old, next) {
@@ -852,6 +901,26 @@ func (s *Session) RecordOrphanWindow(start, end time.Time) {
 	s.manager().RecordOrphanWindow(start, end)
 }
 
+// RecordStopCutWindow records [start, end] as a span of requests the
+// session's parser never read because the recording's stop cut it short: the
+// hang watchdog found it making no progress after the stop on what its
+// connection carried before the stop. It is an orphan span, as
+// RecordOrphanWindow records one, and on the session's manager a stop cut's
+// too (SyncMockManager.RecordStopCutWindow), by which routes/record.go names
+// at WARN the test cases it leaves out. A caller that keeps its own spans
+// (Orphans: a DaemonSet agent, per pod) gets it as an orphan span alone: it
+// leaves out the same test cases, which are not named by test case there.
+func (s *Session) RecordStopCutWindow(start, end time.Time) {
+	if s == nil {
+		return
+	}
+	if s.Orphans != nil {
+		s.Orphans.Record(start, end)
+		return
+	}
+	s.manager().RecordStopCutWindow(start, end)
+}
+
 // manager is the SyncMockManager this session's mocks, counts and spans go to:
 // Mgr, the per-app manager a multi-app caller sets, or the package-global one
 // (syncMock.Get) when Mgr is nil, the single-session default. It is the one
@@ -907,20 +976,24 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 //
 //   - Direct-channel path (RouteMocksViaSyncMock=false, s.Mocks bound):
 //     EmitMock selects between `s.Mocks <- m` and `<-ctx.Done()`. While
-//     the send is not yet ready, cancellation causes EmitMock to return
-//     ctx.Err(). If ctx is ALREADY cancelled AND the send is also ready
-//     (e.g. s.Mocks is buffered with spare capacity), Go's select is
-//     free to pick either case — the outcome is non-deterministic:
-//     EmitMock may emit the mock and return nil, OR it may pick the
-//     ctx.Done() arm and return ctx.Err() without emitting. Once the
-//     send case wins, delivery is guaranteed; callers that want a
-//     strict "no emit past cancel" barrier must probe ctx.Err()
-//     themselves before calling EmitMock.
+//     the send is not yet ready, cancellation causes EmitMock to report
+//     the refused mock as left out (ReportLeftOut, LeftOutRefusedAtStop:
+//     counted, spanned, warned, pending cleared) and return ctx.Err(). If
+//     ctx is ALREADY cancelled AND the send is also ready (e.g. s.Mocks
+//     is buffered with spare capacity), Go's select is free to pick
+//     either case — the outcome is non-deterministic: EmitMock may emit
+//     the mock and return nil, OR it may pick the ctx.Done() arm, report
+//     it left out, and return ctx.Err() without emitting. Once the send
+//     case wins, delivery is guaranteed; callers that want a strict "no
+//     emit past cancel" barrier must probe ctx.Err() themselves before
+//     calling EmitMock.
 //
 //   - SyncMock path (RouteMocksViaSyncMock=true): ctx is checked ONCE
 //     before calling mgr.AddMock. If ctx was already cancelled,
-//     EmitMock returns ctx.Err() without touching the manager. If ctx
-//     cancels AFTER the AddMock call starts, AddMock runs to completion
+//     EmitMock reports the refused mock as left out (ReportLeftOut,
+//     LeftOutRefusedAtStop: counted, spanned, warned, pending cleared)
+//     and returns ctx.Err() without touching the manager. If ctx cancels
+//     AFTER the AddMock call starts, AddMock runs to completion
 //     (buffers the mock, or hands it to the manager's out queue, which
 //     never blocks it) and EmitMock returns nil. AddMock may also
 //     drop the mock as it is handed over (memory pressure, the output
@@ -947,6 +1020,14 @@ func (s *Session) EmitMock(m *models.Mock) error {
 // LeftOutChannelFullAtStop is the reason EmitMockOnShutdown leaves out a
 // mock that found the session's channel (Session.Mocks) full.
 const LeftOutChannelFullAtStop = "the recording stopped with the session's mock channel full as this mock was handed over"
+
+// LeftOutRefusedAtStop is the reason EmitMock leaves out a mock it refused
+// because the session's context had ended.
+const LeftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
+
+// LeftOutNoMocksChannel is the reason EmitMock leaves out a mock on the
+// direct-channel path when the session has no mock channel (Session.Mocks == nil).
+const LeftOutNoMocksChannel = "the session has no mock channel to deliver this mock to"
 
 // EmitMockOnShutdown is the shutdown-time variant of EmitMock used by
 // parsers that have just reconstructed an in-flight invocation from
@@ -982,19 +1063,24 @@ func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
 // EmitMockOutcome is EmitMock, or EmitMockOnShutdown when shutdown is set,
 // saying also whether m was lost instead of taken by the recording: the
 // session left it out (ReportLeftOut), for the capture's incomplete flag
-// (LeaveOutIfIncomplete) or at shutdown for a full channel
-// (LeftOutChannelFullAtStop), or the session's manager dropped it as it was
-// handed over (syncMock.SyncMockManager.AddMock's MockDrop: memory pressure,
-// the output closed or at its byte bound), which the manager counts and says,
-// naming the mock and why. Either way m is counted once, and spanned: a mock
-// the manager dropped is not counted again as left out, and the session spans
-// it as it spans one left out, unless memory pressure's spans cover it already
-// or the client never read it. A span leaves out only the test cases that
-// overlap it (syncMock.MockDrop says what that leaves). A mock refused (err
-// set) is neither taken nor lost: what to do with it is the caller's. A parser
-// that says it kept a mock says so only when this says it was not lost, and
-// one that reports the rest of an exchange as left out unless the exchange
-// itself was lost asks this, so it counts the exchange once.
+// (LeaveOutIfIncomplete), for a refusal on an ended context
+// (LeftOutRefusedAtStop, with err set), for a missing direct channel
+// (LeftOutNoMocksChannel, when RouteMocksViaSyncMock is false and Mocks is
+// nil), or at shutdown for a full channel (LeftOutChannelFullAtStop), or the
+// session's manager dropped it as it was handed over
+// (syncMock.SyncMockManager.AddMock's MockDrop: memory pressure, the output
+// closed or at its byte bound), which the manager counts and says, naming the
+// mock and why. Either way m is counted once, and spanned: a mock the manager
+// dropped is not counted again as left out, and the session spans it as it
+// spans one left out, unless memory pressure's spans cover it already or the
+// client never read it. A span leaves out only the test cases that overlap it
+// (syncMock.MockDrop says what that leaves). A mock refused (err set) is
+// already reported left out (lost is true), so callers never need to call
+// ReportLeftOut again and a direct caller of EmitMock cannot drop a mock
+// silently. A parser that says it kept a mock says so only when this says it
+// was not lost, and one that reports the rest of an exchange as left out
+// unless the exchange itself was lost asks this, so it counts the exchange
+// once.
 //
 // So not lost means taken, and no more: what befalls m after (a drop on its way
 // out, memory pressure letting it go) is decided after this returns, and a
@@ -1010,15 +1096,44 @@ func (s *Session) EmitMockOutcome(m *models.Mock, shutdown bool) (lost bool, err
 // (OnPendingCleared), as an emitted mock clears it. Work left pending through
 // the next idle spell is taken for a hung parser. Nil-safe.
 func (s *Session) MockHeld() {
+	s.handedOver()
 	if s != nil && s.OnPendingCleared != nil {
 		s.OnPendingCleared()
 	}
 }
 
+// handedOver notes that the parser made progress on what it has read: it
+// handed a mock over (taken, left out or refused: emitMockCore), reported an
+// exchange or a part of one left out (ReportLeftOut, ReportLeftOutPart, and so
+// ReportStoppedOn), held a mock it made (MockHeld), or folded bytes it read
+// (Folded). At the recording's stop, once the parser has read both its
+// streams to their end, the supervisor waits for it for as long as it makes
+// such progress (Supervisor.Run). Nil-safe.
+func (s *Session) handedOver() {
+	if s != nil {
+		s.progressed.Store(true)
+	}
+}
+
+// takeHandedOver reports whether the parser made progress (handedOver) since
+// the last take, and clears the mark.
+func (s *Session) takeHandedOver() bool {
+	return s.progressed.Swap(false)
+}
+
+// Folded tells the session its parser folded bytes it had read into what it
+// will hand over, with nothing to hand over yet. At the recording's stop that
+// is progress, as a hand-over is: the supervisor waits for a parser that has
+// read both its streams to their end for as long as it makes progress
+// (Supervisor.Run). A parser that folds a long stretch of what it read between
+// two hand-overs calls it as it goes. Nil-safe.
+func (s *Session) Folded() { s.handedOver() }
+
 func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	if s == nil || m == nil {
 		return false, nil
 	}
+	s.handedOver()
 	if s.LeaveOutIfIncomplete(m) {
 		// Left out, and the flag reset, so the next mock in this cycle
 		// gets a fresh chance; a retired session's mark stays set, and
@@ -1053,7 +1168,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	// lastReq + 1ns so the matcher's ordering invariant still holds.
 	// The clamp is strictly within the same connection; sessions
 	// across connections are independent.
-	s.enforceReqMonotonic(m)
+	raisedFrom := s.enforceReqMonotonic(m)
 
 	s.emitMu.Lock()
 	hook := s.OnMockRecorded
@@ -1061,6 +1176,10 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	if hook != nil {
 		hook(m)
 	}
+	// Whether the clamp left the mock answered before it was asked is known
+	// only now: a hook may move its stamps (zookeeper's carries its response
+	// stamp up to the clamped request's).
+	s.countClampedOut(m, raisedFrom)
 
 	// Route through the session's SyncMockManager (Session.manager)
 	// when the caller opts in. Legacy parsers (http, mysql, generic, etc.)
@@ -1105,7 +1224,8 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 		if !shutdown {
 			if ctx := s.Ctx; ctx != nil {
 				if err := ctx.Err(); err != nil {
-					return false, err
+					s.ReportLeftOut(m, LeftOutRefusedAtStop)
+					return true, err
 				}
 			}
 		}
@@ -1131,10 +1251,8 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	}
 
 	if s.Mocks == nil {
-		if s.OnPendingCleared != nil {
-			s.OnPendingCleared()
-		}
-		return false, nil
+		s.ReportLeftOut(m, LeftOutNoMocksChannel)
+		return true, nil
 	}
 	ctx := s.Ctx
 	if ctx == nil {
@@ -1171,7 +1289,8 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 		}
 		return false, nil
 	case <-ctx.Done():
-		return false, ctx.Err()
+		s.ReportLeftOut(m, LeftOutRefusedAtStop)
+		return true, ctx.Err()
 	}
 }
 
@@ -1183,10 +1302,11 @@ const leftOutWarnEvery = 10 * time.Second
 // leftOutCause, or past maxOpenKinds causes by leftOutClass.
 var leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
 
-// ResetLeftOutWarningsForTest forgets every left-out WARN let through and
-// held back so far, so a test in another package (a parser's) can count the
-// ones it causes: the limit is process-wide. Production code never calls it.
-func ResetLeftOutWarningsForTest() { leftOutWarns.Reset() }
+// ResetLeftOutWarningsForTest forgets every left-out WARN, and every tunnel
+// WARN (ReportTunnel), let through and held back so far, so a test in another
+// package (a parser's) can count the ones it causes: the limits are
+// process-wide. Production code never calls it.
+func ResetLeftOutWarningsForTest() { leftOutWarns.Reset(); tunnelWarns.Reset() }
 
 // ReportLeftOut reports m as a mock left out of the recording, for reason: an
 // exchange its connection could not record. It has five callers, and each
@@ -1262,6 +1382,7 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	if s == nil {
 		return
 	}
+	s.handedOver()
 	if m == nil {
 		m = &models.Mock{}
 	}
@@ -1303,6 +1424,7 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 // the span exists. It does not touch the session's pending work: the report
 // of the exchange the part belongs to dealt with it. Nil-safe.
 func (s *Session) ReportLeftOutPart(start, end time.Time) {
+	s.handedOver()
 	s.spanLeftOut(start, end)
 }
 
@@ -1319,6 +1441,66 @@ func (s *Session) spanLeftOut(start, end time.Time) bool {
 	}
 	s.RecordOrphanWindow(start, end)
 	return true
+}
+
+// tunnelWarnEvery is how often ReportTunnel's WARN may be logged for each
+// host.
+const tunnelWarnEvery = 10 * time.Second
+
+// tunnelWarns limits ReportTunnel's WARN, process-wide, keyed by the tunnel's
+// host, or, past the hosts AllowOr keeps apart, by tunnelWarnOverflow.
+var tunnelWarns = NewWarnLimiters(tunnelWarnEvery)
+
+// tunnelWarnOverflow is the kind tunnelWarns limits a host under once it
+// keeps no more hosts apart.
+const tunnelWarnOverflow = "tunnel"
+
+// TunnelWarnMsg is ReportTunnel's line, at WARN, and at Debug for one the
+// limit holds back or one reported as the recording stops. Exported for a
+// parser's tests.
+const TunnelWarnMsg = "a CONNECT opened a tunnel on a recorded connection: the calls through the tunnel are not recorded"
+
+// tunnelNextStep is ReportTunnel's next_step. It promises the test cases' fate
+// only where it holds: keploy's proxy follows a connection whose parser has
+// returned, and leaves out the test cases recorded while it carries traffic
+// (syncMock.UnrecordedConn); a capture that does not follow it saves them.
+const tunnelNextStep = "the app's traffic is unaffected. From the CONNECT's 2xx answer on, the connection carries the " +
+	"tunnel's own protocol (TLS to the host, most often), which is no HTTP/1 exchange, so its recording ends at that " +
+	"answer and no call through the tunnel is recorded as a mock. keploy's proxy leaves out the test cases recorded " +
+	"while the connection carries the tunnel's traffic; a capture that does not follow the connection once its " +
+	"parser has returned saves them without these mocks, and their replay fails with no_mocks. keploy's proxy " +
+	"records the calls through a tunnel when the CONNECT is its connection's first request, as an app using an " +
+	"HTTP proxy sends it"
+
+// ReportTunnel reports that the connection's recording ends at a CONNECT's
+// 2xx, which opened a tunnel to host (the CONNECT's request-target): the
+// calls the tunnel carries are no HTTP/1 exchange its parser can record, and
+// it returns there, so a connection reports it once. It is logged at WARN once
+// per tunnelWarnEvery for each host, process-wide, with how many of that
+// host's were held back since the last such WARN (sameWarningsHeldBack), and
+// each one held back at Debug: a call that is not recorded must not be
+// silent, and an app that opens a tunnel per call must not log a line per
+// call. As the recording itself stops (RecordingStopping), the connection is
+// torn down with it, and no span opens for what it carries after: it is
+// logged at Debug, and the limit is not spent on it. Nil-safe.
+func (s *Session) ReportTunnel(host string) {
+	if s == nil || s.Logger == nil {
+		return
+	}
+	fields := []zap.Field{zap.String("connID", s.ClientConnID), zap.String("host", host)}
+	if s.RecordingStopping() {
+		s.Logger.Debug(TunnelWarnMsg, append(fields, zap.Bool("recordingStopping", true))...)
+		return
+	}
+	ok, held, _ := tunnelWarns.AllowOr(host, tunnelWarnOverflow)
+	if !ok {
+		s.Logger.Debug(TunnelWarnMsg, fields...)
+		return
+	}
+	if held > 0 {
+		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
+	}
+	s.Logger.Warn(TunnelWarnMsg, append(fields, zap.String("next_step", tunnelNextStep))...)
 }
 
 // ReportStoppedOn reports the exchange a parser stops on, as it returns
@@ -1481,19 +1663,23 @@ const (
 
 // LeftOutClientClosedPartway is the cause an HTTP/1 recorder leaves an
 // exchange out for when the client closed the connection partway through its
-// response: the relay ended the response's stream where the client stopped
-// taking it (EndedWhereClientStopped), and the response had not ended there.
-// The client gave up on the call (its timeout, a cancelled call) or wanted no
-// more of it, and the capture cannot tell which. Recorded as far as the client
-// had it, replay would serve a complete-looking shorter response to a call
-// that saw a timeout at record. Neither is a capture loss: the call itself did
-// not complete, so there is no whole exchange to record. Of class
-// leftOutClientClosed.
+// response and what it read is not recorded: it closed before the response's
+// head came whole (no response to record), the capture lost a chunk of it
+// (the mark comes before the reason), or the stream ended where the client
+// stopped taking it (EndedWhereClientStopped) with no fault of the client's
+// to record it with (a capture hole, or the recording's stop read on the
+// server's side where the relay never read the client's end). A response the
+// client read past its head, and
+// stopped reading, is recorded as far as it read it, with the fault
+// models.FaultStoppedReading, instead. The call itself did not complete, so
+// there is no whole exchange to record. Of class leftOutClientClosed.
 const LeftOutClientClosedPartway = "the client closed the connection partway through the response"
 
 // The reasons an HTTP/1 recorder leaves an exchange out for when the client's
-// end came first, partway through the response, and was an end that records
-// no fault (FirstEndNoFault): the response is not known to be whole (its
+// own end, partway through the response, was an end that records no fault
+// (ClientEndNoFault), whichever end the relay read first, where the client's
+// end came first or the destination's stream ended where the client stopped
+// taking it: the response is not known to be whole (its
 // framing had not ended, or its body is framed by the upstream's close, which
 // had not come), and no fault is known to record it with. Each is
 // LeftOutClientClosedPartway with a detail after its colon, so of its cause
@@ -1510,6 +1696,36 @@ const (
 	LeftOutPartwayUnjudged = LeftOutClientClosedPartway + ": the client's end cannot be judged on this platform " +
 		"(its hooks do not say how the application released the connection), so keploy cannot tell a whole answer from a cut one"
 )
+
+// LeftOutCloseNotRead is the reason an HTTP/1 recorder leaves an exchange out
+// for whose response's body ends where the upstream closes the connection (no
+// Content-Length, not chunked), when its read did not end at that close: the
+// response is not known to be whole, and no fault is known to record it with.
+// The stream was closed under the read (the supervisor's abort), or ended with
+// no side's end (the relay ends the stream so at the recording's stop, and
+// when its read of a side fails otherwise, as at a TLS record cut short), or
+// at the upstream's reset once the recording's stop had begun, which is not
+// the close that ends such a body. In an observe-only capture
+// (Opts.SkipTLSMITM), with no relay to see the upstream's close, it is a
+// stream that ended without the connection's end marked on it
+// (Session.EndedWithConnection): a capture whose close can overtake its
+// stream's tail does not mark it, so no close-delimited body such a capture
+// carries is recorded. Recorded as far as it came, replay would serve a
+// complete-looking shorter response. The text before its colon is its cause,
+// of class leftOutCloseNotRead.
+const LeftOutCloseNotRead = leftOutCloseNotReadCause + ": the response's body ends at that close, and its read ended before it"
+
+// leftOutCloseNotReadCause is LeftOutCloseNotRead's cause (leftOutCause).
+const leftOutCloseNotReadCause = "the upstream's close was not read"
+
+// LeftOutReadAborted is the reason an HTTP/1 recorder leaves an exchange out
+// whose response's stream the session closed under its read (the supervisor's
+// abort, once the parser's context has ended or the parser is retired) before
+// the response's end, as its Content-Length, its chunked framing or its head's
+// end sets it, came: what was read does not parse whole because the read was
+// cut there, which is no decode error, and it is not known to be whole.
+const LeftOutReadAborted = "the response's read was aborted partway through it: keploy closed the connection's capture " +
+	"before the response's end came"
 
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
 const maxLeftOutCause = 64
@@ -1566,6 +1782,9 @@ const (
 	// leftOutClientClosed is an exchange whose client closed the connection
 	// partway through the response (LeftOutClientClosedPartway).
 	leftOutClientClosed = "client_closed"
+	// leftOutCloseNotRead is an exchange whose response's body ends at the
+	// upstream's close, which its read did not reach (LeftOutCloseNotRead).
+	leftOutCloseNotRead = "close_not_read"
 	leftOutOther        = "other"
 )
 
@@ -1579,6 +1798,8 @@ func leftOutClass(cause string) string {
 		return leftOutReset
 	case LeftOutClientClosedPartway:
 		return leftOutClientClosed
+	case leftOutCloseNotReadCause:
+		return leftOutCloseNotRead
 	}
 	return leftOutOther
 }
@@ -1650,75 +1871,152 @@ func leftOutKnob(class string) string {
 			"recording's stop closed it, with the call in flight), so there is no whole exchange to " +
 			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
 			"app's timeout for it and re-record"
+	case leftOutCloseNotRead:
+		return "reason=the upstream's close was not read: the response has no Content-Length and is not chunked, " +
+			"so only the upstream's close ends its body, and its read ended before that close (the recording stopped, " +
+			"the upstream reset the connection, keploy's read of it broke or was aborted, or, in an observe-only " +
+			"capture, the capture's stream ended without the connection's end marked on it), so the body is not known " +
+			"to be whole and the exchange was left out to keep the recording true. No setting changes this: an " +
+			"exchange whose upstream closes the connection after the whole body is recorded where the capture sees " +
+			"that close, as keploy's proxy does, and an observe-only capture only where it marks the connection's end"
 	}
 	return "Re-run with --debug to see each mock left out and why it could not be recorded"
 }
 
-// enforceReqMonotonic clamps m.Spec.ReqTimestampMock to at least
-// s.lastReqTimestamp + 1ns when a regression is detected, and
-// updates the session's last-seen timestamp. In debug builds we
-// panic instead so regressions surface during testing. Thread-safe:
-// holds emitMu while comparing + writing back.
+// emitOrder is what enforceReqMonotonic keeps of a session's mocks
+// (Session.order), under emitMu.
+type emitOrder struct {
+	// lastReq is the latest ReqTimestampMock emitted on the session.
+	lastReq time.Time
+	// clampedOut is how many of its mocks the clamp left answered before they
+	// were asked (countClampedOut); first names the first of them, and most is
+	// the largest such inversion.
+	clampedOut int
+	first      string
+	most       time.Duration
+}
+
+// enforceReqMonotonic clamps m.Spec.ReqTimestampMock to at least the
+// session's latest request stamp + 1ns when a regression is detected, and
+// updates the session's latest stamp. In debug builds we panic instead so
+// regressions surface during testing. Thread-safe: holds emitMu while
+// comparing + writing back. When it raises m's request stamp it returns the
+// stamp m's parser gave it, and otherwise the zero time.
 //
 // Zero-valued ReqTimestampMock values pass through untouched
 // (parsers that haven't populated them, e.g. tests with pre-built
 // minimal mocks, shouldn't trigger the clamp).
-func (s *Session) enforceReqMonotonic(m *models.Mock) {
+//
+// Raising the request stamp can push it PAST the response stamp on a mock
+// that arrived perfectly well-ordered, and a replay without the proven switch
+// leaves out a mock answered before it was asked
+// (pkg.LeaveOutAnsweredBeforeAsked). Measured: a pair (req 17.820597769, res
+// 17.607310086) leaves EmitMock inverted by 79.4ms. Whether it does is known
+// only once the post-record hooks have run, so countClampedOut decides it
+// after them, and ReportClampedOut says it once for the connection.
+//
+// The clamp does not repair the response stamp, deliberately. Two attempts to
+// repair it by adjusting ResTimestampMock both regressed
+// go-memory-load-mongo, and the second one narrowly:
+//
+//   - clamping every inverted window resurrected mocks the filter had been
+//     discarding, and they were consumed ahead of the real ones: the lane
+//     went from green to 52 "no matching mock" failures.
+//   - carrying the response stamp along ONLY for the inversion introduced
+//     here still broke record_build_replay_latest with candidates=0, while
+//     record_build_replay_build passed. Same recording, different replay
+//     binary, different outcome -- i.e. it produced recordings the
+//     RELEASED replayer cannot consume. Those lanes exist to catch exactly
+//     that.
+//
+// So ResTimestampMock is load-bearing at replay in ways this call site
+// cannot see, and mutating it here is the wrong lever; a parser that knows
+// its stamps may (zookeeper's hook does).
+func (s *Session) enforceReqMonotonic(m *models.Mock) (raisedFrom time.Time) {
 	req := m.Spec.ReqTimestampMock
 	if req.IsZero() {
-		return
+		return time.Time{}
 	}
 	s.emitMu.Lock()
 	defer s.emitMu.Unlock()
-	if s.lastReqTimestamp.IsZero() {
-		s.lastReqTimestamp = req
-		return
+	if s.order == nil {
+		s.order = &emitOrder{lastReq: req}
+		return time.Time{}
 	}
-	if req.Before(s.lastReqTimestamp) {
-		clamped := s.lastReqTimestamp.Add(time.Nanosecond)
+	if req.Before(s.order.lastReq) {
+		clamped := s.order.lastReq.Add(time.Nanosecond)
 		if debugMonotonic.Load() {
 			panic("supervisor.Session.EmitMock: out-of-order ReqTimestampMock detected; parser emitted a mock with a timestamp earlier than a previously-emitted mock on the same session — this violates I5 in PLAN.md and would cause wrong-mock selection at replay time")
 		}
 		m.Spec.ReqTimestampMock = clamped
-
-		// Raising the request stamp can push it PAST the response stamp on a mock
-		// that arrived perfectly well-ordered. filterByTimeStamp drops any mock
-		// with res < req (pkg/util.go), so that mock is then silently discarded at
-		// replay -- orphaned by this function, not by the recorder. Measured: a
-		// pair (req 17.820597769, res 17.607310086) leaves EmitMock inverted by
-		// 79.4ms.
-		//
-		// This REPORTS it and does not repair it, deliberately. Two attempts to
-		// repair it by adjusting ResTimestampMock both regressed
-		// go-memory-load-mongo, and the second one narrowly:
-		//
-		//   - clamping every inverted window resurrected mocks the filter had been
-		//     discarding, and they were consumed ahead of the real ones: the lane
-		//     went from green to 52 "no matching mock" failures.
-		//   - carrying the response stamp along ONLY for the inversion introduced
-		//     here still broke record_build_replay_latest with candidates=0, while
-		//     record_build_replay_build passed. Same recording, different replay
-		//     binary, different outcome -- i.e. it produced recordings the
-		//     RELEASED replayer cannot consume. Those lanes exist to catch exactly
-		//     that.
-		//
-		// So ResTimestampMock is load-bearing at replay in ways this call site
-		// cannot see, and mutating it here is the wrong lever. The real repair
-		// belongs where the ordering invariant and the window filter are designed
-		// together. Until then this makes the loss visible instead of silent,
-		// which is what was actually missing: the first instance was found only by
-		// diffing recorded YAML by hand.
-		if s.Logger != nil && !m.Spec.ResTimestampMock.IsZero() && m.Spec.ResTimestampMock.Before(clamped) {
-			s.Logger.Warn("monotonic clamping inverted this mock's window; replay will DROP it (filterByTimeStamp discards res < req)",
-				zap.String("mock", m.Name),
-				zap.Duration("inversion", clamped.Sub(m.Spec.ResTimestampMock)),
-				zap.Time("reqTimestampMock", clamped),
-				zap.Time("resTimestampMock", m.Spec.ResTimestampMock),
-				zap.Time("originalReqTimestampMock", req))
-		}
+		raisedFrom = req
 		req = clamped
 	}
-	s.lastReqTimestamp = req
+	s.order.lastReq = req
+	return raisedFrom
+}
+
+// countClampedOut counts m, after the post-record hooks, when the clamp
+// raised its request stamp (enforceReqMonotonic, which gave raisedFrom, the
+// stamp its parser gave it) and left it answered before it was asked: its
+// parser stamped it well-ordered, and it is not any more. A replay without the
+// proven switch leaves such a mock out (pkg.LeaveOutAnsweredBeforeAsked),
+// unless its kind is placed by its window alone (models.WindowBound), which
+// that rule never asks of. One its parser stamped answered before asked is
+// warnAnsweredBeforeAsked's, said as it is recorded; one a hook carried back
+// into order loses nothing.
+func (s *Session) countClampedOut(m *models.Mock, raisedFrom time.Time) {
+	// A mock the clamp did not raise is not its to count, whatever a hook
+	// stamped on it since. One it raised has a session order to count in: the
+	// clamp raises a stamp only past one it keeps there.
+	if raisedFrom.IsZero() {
+		return
+	}
+	req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+	if !res.Before(req) || res.Before(raisedFrom) || models.WindowBound(m.Kind) {
+		return
+	}
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	o := s.order
+	if o.clampedOut == 0 {
+		o.first = m.Name
+	}
+	o.clampedOut++
+	o.most = max(o.most, req.Sub(res))
+}
+
+// ClampedOutMsg is the warning ReportClampedOut logs.
+const ClampedOutMsg = "keeping this connection's requests in order left mocks answered before they were asked: a replay without KEPLOY_PROVEN leaves them out"
+
+// ReportClampedOut says, once for the session, how many of its mocks the
+// request clamp left answered before they were asked (countClampedOut), and
+// nothing when it left none. The supervisor calls it as the session's parser
+// returns: nothing is emitted on the session after that.
+func (s *Session) ReportClampedOut() {
+	if s == nil || s.Logger == nil {
+		return
+	}
+	s.emitMu.Lock()
+	o := s.order
+	var n int
+	var first string
+	var most time.Duration
+	if o != nil {
+		n, first, most = o.clampedOut, o.first, o.most
+		o.clampedOut = 0
+	}
+	s.emitMu.Unlock()
+	if n == 0 {
+		return
+	}
+	s.Logger.Warn(ClampedOutMsg,
+		zap.String("connID", s.ClientConnID),
+		zap.Int("mocks", n),
+		zap.String("firstMock", first),
+		zap.Duration("mostAnsweredBeforeAskedBy", most),
+		zap.String("next_step", "the parser emitted these mocks out of their requests' order, and raising each one's request stamp "+
+			"to keep the order put it after its response; a replay with KEPLOY_PROVEN=1 keeps them. Report the kind with this line"))
 }
 
 // AnsweredBeforeAskedMsg is the warning EmitMock logs for a mock its parser
@@ -1737,8 +2035,8 @@ var answeredBeforeAskedWarns = NewWarnLimiters(answeredBeforeAskedWarnEvery)
 // warnAnsweredBeforeAsked says, as m is recorded, that its parser stamped it
 // answered before it was asked: its response time before its request time. A
 // correct parser never does: its request is read before its answer is
-// written. The stamps are the parser's (enforceReqMonotonic, which runs after,
-// says of an inversion it makes itself). What it costs depends on the replay:
+// written. The stamps are the parser's (an inversion enforceReqMonotonic, which
+// runs after, makes itself is countClampedOut's). What it costs depends on the replay:
 // one without the proven switch leaves a per-test mock like this out
 // (pkg.LeaveOutAnsweredBeforeAsked), so a call it recorded is answered by
 // another mock or by none, and said only there it is found as a miss, a
