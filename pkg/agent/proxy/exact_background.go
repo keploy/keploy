@@ -274,7 +274,7 @@ func (m *MockManager) SpentBackground(kind models.Kind) []*models.Mock {
 	}
 	var out []*models.Mock
 	for _, mk := range m.stagedOfKind(kind) {
-		if v.isBackgroundRecording(mk) && v.spentBackground(mk.Name) {
+		if v.isBackgroundRecording(mk) && v.servedBackground(mk.Name) {
 			out = append(out, mk)
 		}
 	}
@@ -412,6 +412,21 @@ var _ integrations.ByKindBackground = (*MockManager)(nil)
 // is spent: consumed in the view, or for the staging.
 func (v *exactView) spentBackground(name string) bool {
 	return v.spentIn(name) || v.spentOutside(name) || v.usedBetween(name)
+}
+
+// servedBackground reports whether name has already answered in this staging,
+// including a repeating worker series' last-placed recording that stays
+// visible for further repeats (seriesAgain) and a worker recording answered
+// between tests when read from a test window.
+func (v *exactView) servedBackground(name string) bool {
+	if v.spentBackground(name) {
+		return true
+	}
+	if v.outside == nil || !v.isWorker(name) {
+		return false
+	}
+	e := v.epoch.Load()
+	return v.outside.hiddenInTests(name, e) || v.outside.consumedBetween(name, e)
 }
 
 // usedBetween reports whether name, one of the worker scope's, answered a

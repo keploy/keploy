@@ -1203,3 +1203,51 @@ func TestARecordingJudgingMovedIntoTheTestIsNotTheBackgrounds(t *testing.T) {
 		})
 	}
 }
+
+// A repeating worker series' last-placed recording remains visible in
+// Background to answer further repeats once every member answered, yet
+// SpentBackground must still report it as served in this staging so
+// carried/repeat checks see the list response it already delivered.
+func TestSpentBackgroundIncludesRepeatingSeriesLastRecording(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	s1 := httpCall("s1", time.Second, "/marks")
+	s2 := httpCall("s2", 2*time.Second, "/marks")
+	own := httpCall("own", 3*time.Second, "/own")
+	mm := stagedManager(t, nil, []*models.Mock{s1, s2, own})
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, []string{"s1", "s2"})
+	mm.ServeExactWorker([]string{"s1", "s2"})
+	mm.SetPoolSeries(map[string][]string{"marks/-/1": {"s1", "s2"}})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+
+	if got := mm.SpentBackground(models.HTTP); len(got) != 0 {
+		t.Fatalf("before serving, SpentBackground = %v; want empty", exactNames(got))
+	}
+	if got := pollFirst(t, mm, "s"); got != "s1" {
+		t.Fatalf("first serve = %s; want s1", got)
+	}
+	equalNames(t, "after s1", mm.SpentBackground(models.HTTP), "s1")
+
+	if got := pollFirst(t, mm, "s"); got != "s2" {
+		t.Fatalf("second serve = %s; want s2", got)
+	}
+	// s2 is the last member of the series so it repeats in Background,
+	// yet SpentBackground must still include both s1 and s2.
+	equalNames(t, "Background still repeats s2", mm.Background(models.HTTP), "s2")
+	equalNames(t, "SpentBackground includes repeating s2", mm.SpentBackground(models.HTTP), "s1", "s2")
+	if got := pollFirst(t, mm, "s"); got != "s2" {
+		t.Fatalf("third serve (repeat) = %s; want s2", got)
+	}
+	equalNames(t, "SpentBackground after repeat", mm.SpentBackground(models.HTTP), "s1", "s2")
+
+	// Also verify a worker recording served in the gap between tests stays in
+	// SpentBackground once a test window opens.
+	mm2 := stagedManager(t, nil, []*models.Mock{s1, s2, own})
+	mm2.ServeExactBackground(models.RecordedWithS12Routing, nil, []string{"s1", "s2"})
+	mm2.ServeExactWorker([]string{"s1", "s2"})
+	mm2.ServeExactPool(models.PoolKeyNone, nil)
+	if !mm2.SpendByKind(s2) {
+		t.Fatal("failed to spend s2 between tests")
+	}
+	mm2.ServeExactTest("T1", []*models.Mock{own})
+	equalNames(t, "SpentBackground inside test includes between-test worker serve", mm2.SpentBackground(models.HTTP), "s2")
+}
