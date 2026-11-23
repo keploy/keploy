@@ -1132,6 +1132,77 @@ func noteJavaImport(j javaInstall) {
 	}
 }
 
+// installJavaCAForHomeFn is installJavaCAForHome, as setupNativeWindows
+// reaches it; rows swap it.
+var installJavaCAForHomeFn = installJavaCAForHome
+
+// setupNativeWindows is setupNativeForApp's Windows install: keploy's CA in
+// the user's Windows trust store (trustOnWindows), in the JDK's keystore, and
+// in the agent's runtime trust env vars. A user who answered No to Windows'
+// prompt to trust it gets it in no trust store: not the Windows ones, not the
+// JDK's; the run goes on with the env vars only, Java through the merged
+// truststore the client points JAVA_TOOL_OPTIONS at (SetupCaCertEnv).
+func setupNativeWindows(ctx context.Context, logger *zap.Logger, ca *caState, store caStore, resolvedJavaHome, alias string) error {
+	caDER := ca.cert.Raw
+	// Extract certificate to a temporary file
+	tempCertPath, err := extractCertToTemp(ca.certPEM)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to extract certificate to temp folder")
+		return err
+	}
+	defer func() {
+		if err := os.Remove(tempCertPath); err != nil {
+			logger.Debug("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
+		}
+	}()
+
+	// Recorded before the install, as on Linux: whatever it leaves in the
+	// ROOT store is removed by this run's teardown however the install ends
+	// (removeWindowsCAByName finds nothing to remove when it added nothing). A
+	// persisted per-user CA is kept across runs (so once the user answers
+	// Yes, later runs reuse it with no prompt); an ephemeral one is removed
+	// at teardown.
+	recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey(), caDER: caDER})
+
+	// Install certificate using certutil. A session that cannot show
+	// Windows' trust prompt, or a user who answers No to it, leaves it out of
+	// the store, and the app is given keploy's CA where its runtime reads one
+	// instead.
+	keptAt := ""
+	if fs, ok := store.(*fileStore); ok {
+		keptAt = filepath.Join(fs.dir, caCertFileName)
+	}
+	declined, err := trustOnWindows(ctx, logger, tempCertPath, caDER, keptAt)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to install CA certificate on Windows")
+		return err
+	}
+
+	// install CA in the java keystore if java is installed. Non-fatal: Java
+	// also trusts the keploy CA via the JAVA_TOOL_OPTIONS merged truststore
+	// the client sets (SetupCaCertEnv), so a missing/failing keytool must not
+	// fail CA setup for a run that may not even use Java. Not for a user who
+	// answered No: the JDK's keystore is a trust store too, read by every
+	// program of that JDK.
+	if !declined {
+		jdk, err := installJavaCAForHomeFn(ctx, logger, tempCertPath, resolvedJavaHome, alias)
+		noteJavaImport(jdk)
+		if err != nil {
+			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
+		}
+	}
+
+	// Set environment variables for Node.js and Python to use the custom CA
+	if err := SetEnvForPath(logger, tempCertPath); err != nil {
+		return err
+	}
+	// Mirror the shared-volume path: only signal readiness when the
+	// full install chain (cert import + java keystore + env vars)
+	// has succeeded.
+	markCAReady()
+	return nil
+}
+
 // setupNativeForApp is the PID-aware native-install path. It installs this run's
 // generated CA public certificate into the OS trust store under a unique
 // filename for the duration of the run (removed at teardown; crashed-run copies
@@ -1161,57 +1232,7 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 
 	// Windows Specific Logic
 	if runtime.GOOS == "windows" {
-		// Extract certificate to a temporary file
-		tempCertPath, err := extractCertToTemp(ca.certPEM)
-		if err != nil {
-			utils.LogError(logger, err, "Failed to extract certificate to temp folder")
-			return err
-		}
-		defer func() {
-			if err := os.Remove(tempCertPath); err != nil {
-				logger.Debug("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
-			}
-		}()
-
-		// Recorded before the install, as on Linux below: whatever it leaves
-		// in the ROOT store is removed by this run's teardown however the
-		// install ends (removeWindowsCAByName finds nothing to remove when it
-		// added nothing). A persisted per-user CA is kept across runs (so the
-		// ROOT-store prompt fires at most once); an ephemeral one is removed
-		// at teardown.
-		recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey(), caDER: caDER})
-
-		// Install certificate using certutil. A session that cannot show
-		// Windows' trust prompt leaves it out of the store, and the app is
-		// given keploy's CA where its runtime reads one instead.
-		keptAt := ""
-		if fs, ok := store.(*fileStore); ok {
-			keptAt = filepath.Join(fs.dir, caCertFileName)
-		}
-		if err = trustOnWindows(ctx, logger, tempCertPath, caDER, keptAt); err != nil {
-			utils.LogError(logger, err, "Failed to install CA certificate on Windows")
-			return err
-		}
-
-		// install CA in the java keystore if java is installed. Non-fatal: Java
-		// also trusts the keploy CA via the JAVA_TOOL_OPTIONS merged truststore
-		// the client sets (SetupCaCertEnv), so a missing/failing keytool must not
-		// fail CA setup for a run that may not even use Java.
-		jdk, err := installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome, alias)
-		noteJavaImport(jdk)
-		if err != nil {
-			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
-		}
-
-		// Set environment variables for Node.js and Python to use the custom CA
-		if err := SetEnvForPath(logger, tempCertPath); err != nil {
-			return err
-		}
-		// Mirror the shared-volume path: only signal readiness when the
-		// full install chain (cert import + java keystore + env vars)
-		// has succeeded.
-		markCAReady()
-		return nil
+		return setupNativeWindows(ctx, logger, ca, store, resolvedJavaHome, alias)
 	}
 
 	// macOS Specific Logic
@@ -1988,24 +2009,41 @@ func jdkCacerts(home string) (path string, found bool) {
 //
 // A CA the user's store or the machine's already holds (keploy keeps its
 // Windows CA across runs, castore.go) is not added again, and nothing is said
-// about it beyond a debug line: Windows asks the user at most once, a later
+// about it beyond a debug line: once the user answers Yes, Windows asks no more, a later
 // run in a session with no desktop reuses what the user trusted, and a CA an
 // administrator or a company's group policy put in LocalMachine\Root for
 // every user is trust as well (trustedWindowsStore).
 //
 // The machine store is kept as a fallback only for an elevated run (an
-// administrator past UAC, or a service account with no loaded profile), which
-// is what preserves the previous behaviour there, a session with no desktop
-// among them; a CA it puts there is said in one INFO line, since every user
-// of the machine then trusts it. A standard user never asks it: it can only
-// refuse them, and keploy needs no administrator.
+// administrator past UAC, or a service account: LocalSystem's user-store add
+// fails with that code too, measured on Windows 11 26200) whose user store
+// could not ask, in a session with no desktop (errNoTrustPrompt's
+// ERROR_NOT_SUPPORTED),
+// which is what preserves the previous behaviour there; a CA it puts there is
+// said in one INFO line, since every user of the machine then trusts it. Any
+// other failure of the user store's add is the setup's, elevated or not: one
+// keploy cannot name could be a No in a form it does not know. A standard
+// user never asks the machine store: it can only refuse them, and keploy
+// needs no administrator.
 //
 // A session that has no desktop to show Windows' trust prompt in (a CI
 // runner's service, an OpenSSH session, a scheduled task) makes certutil fail
 // the user-store add with ERROR_NOT_SUPPORTED: that is errNoTrustPrompt.
+//
+// A user who answers No to Windows' prompt makes certutil fail the add with
+// ERROR_CANCELLED: that is errUserDeclined, and it ends the install with no
+// store changed, elevated or not. The machine store is never the fallback for
+// a No: it asks nobody, so an elevated run would put the CA the user refused
+// in every user's trust. The No is recorded beside the kept CA
+// (declinedRecord), so a later run whose add fails without asking ends the
+// same way (errDeclinedEarlier); a Yes, or the CA found in a store, clears
+// it.
 func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string, der []byte, keptAt string) error {
 	if store := trustedWindowsStore(logger, der); store != "" {
 		logger.Debug("keploy's CA is already in "+store+"; not adding it again", zap.String("store", store))
+		// The user trusts it now, by hand or through an administrator: a No
+		// an earlier run recorded no longer holds.
+		clearDeclined(logger, keptAt)
 		return nil
 	}
 	// Windows asks the user, in a dialog, whether to trust a certificate added
@@ -2017,10 +2055,31 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string, 
 	if userErr == nil {
 		logger.Debug("installed the keploy CA in the current user's Windows ROOT store",
 			zap.String("output", string(userOut)))
+		clearDeclined(logger, keptAt)
 		return nil
 	}
-	if !tokenElevatedFn() {
-		if noTrustPrompt(userOut, userErr) {
+	// The user's answer, before the token is read: a No holds for an elevated
+	// run as for any, and for later runs that cannot ask (declinedRecord).
+	if userDeclined(userOut, userErr) {
+		logger.Debug("Windows' prompt to trust keploy's CA was answered No; adding it to no store", zap.String("output", string(userOut)))
+		noteDeclined(logger, keptAt)
+		return errUserDeclined
+	}
+	cannotAsk := noTrustPrompt(userOut, userErr)
+	// An add that could not ask (no desktop), after a No an earlier run
+	// recorded: that No stands, for a standard user's run as for an elevated
+	// one, and no store, a JDK's included, gets the CA. Any other failure is
+	// the setup's, said as it is (below).
+	if cannotAsk && declinedBefore(keptAt) {
+		logger.Debug("this session cannot show Windows' prompt to trust keploy's CA, and an earlier run recorded the user's No to it; adding it to no store",
+			zap.String("output", string(userOut)), zap.String("record", declinedRecord(keptAt)))
+		return errDeclinedEarlier
+	}
+	// The machine store is the fallback only for an elevated run whose user
+	// store could not ask (no desktop): never for a failure keploy cannot
+	// name, which could be a No in a form it does not know.
+	if !tokenElevatedFn() || !cannotAsk {
+		if cannotAsk {
 			logger.Debug("this session cannot show Windows' prompt to trust keploy's CA", zap.String("output", string(userOut)))
 			return errNoTrustPrompt
 		}

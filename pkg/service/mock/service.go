@@ -131,6 +131,16 @@ type ScopePusher interface {
 	PushScopeTable(ctx context.Context, table map[string][]string, windows []models.TestWindow) error
 }
 
+// ScopeBackgroundPusher is an optional extension of ScopePusher: with the
+// proven switch off, Replay uses it to also pass pool slices, worker-scope,
+// @startup background mock names, series, once series, and whether a declared
+// startup rule applies so both KEPLOY_PROVEN modes share the exact same
+// ServeExactBackground engine.
+type ScopeBackgroundPusher interface {
+	ScopePusher
+	PushScopeTableWithBackground(ctx context.Context, table map[string][]string, windows []models.TestWindow, pool, worker map[string][]string, background []string, series map[string][]string, once []string, startupRules bool) error
+}
+
 // ScopeGatePusher is an optional Instrumentation extension: Replay uses it to
 // tell the agent which tests should run this replay (see ScopeGateSource).
 // run == nil lets every test run.
@@ -165,11 +175,20 @@ type SetPusher interface {
 // (models.ScopeTableReq.NotRequired), and the names of the set's background
 // recordings, its worker: and startup: mocks (models.ScopeTableReq.Background),
 // the interval of each once series that answers again after it
-// (models.ScopeTableReq.Every), and whether the learn step checks a
+// (models.ScopeTableReq.Every), each series' gate
+// (models.ScopeTableReq.Gates), and whether the learn step checks a
 // changed time by its form alone
 // (models.ScopeTableReq.TimeForm, config.MockCmd.TimeForm).
 type ProvenTablePusher interface {
 	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm bool) error
+}
+
+// ProvenTableWithStartupRulesPusher is an optional extension of
+// ProvenTablePusher that also forwards models.ScopeTableReq.StartupRules when
+// the set carries a declared startup-capable background rule.
+type ProvenTableWithStartupRulesPusher interface {
+	ProvenTablePusher
+	PushProvenTableWithStartupRules(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm, startupRules bool) error
 }
 
 type MappingReader interface {

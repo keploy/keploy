@@ -371,6 +371,24 @@ type SequenceView struct {
 	// cursor), so a window's answers never depend on how many calls landed
 	// between tests.
 	Between MockCursor
+	// Declared reports whether a data-plane recording is one a keploy.yaml
+	// sessionCalls entry serves to every test: a recording of the view's pool
+	// slice (a pool view's own; in a test, the one served before it opened),
+	// made outside every test, of a call an entry names exactly
+	// (models.Mock.DeclaredSessionCall). nil with no session call declared,
+	// and in a view whose pool slice is empty or none. A recording the view
+	// never offers (another test's; another pool slice's, but in a test
+	// under the background rules, which offers it the whole pool) is never
+	// served for such a call, so a walk of it holds only what the view
+	// offers (Offers).
+	Declared func(*models.Mock) bool
+	// Offers reports, with Declared, whether the view offers a recording,
+	// spent or not: one it holds (in a test, the test's own, in flight into
+	// it, shared with it; on a pool view, the next test's in flight), or one
+	// it shows (exactView.showsStatic: the protocol phase, the reached worker
+	// scope, between tests the pool slice, in a test the declared session
+	// calls and under the background rules the pool's but an async lane's).
+	Offers func(*models.Mock) bool
 }
 
 // Span returns the recordings, of n of one reusable request in record order

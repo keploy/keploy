@@ -172,8 +172,13 @@ func (v *exactView) showsStaticRest(mk *models.Mock) bool {
 // sharesRest is what the view shows of a mock that is not protocol-phase, its
 // own apart: one of the reached worker scope; in a test, one of the pool
 // under the background rules, or one a declared session call names
-// (declaredInPool); between tests, one of the pool slice served.
+// (declaredInPool); between tests, one of the pool slice served. It never
+// shows a recording the open test's derived mocks replace
+// (exactView.sourcesReplaced).
 func (v *exactView) sharesRest(mk *models.Mock) bool {
+	if _, gone := v.sourcesReplaced[mk.Name]; gone {
+		return false
+	}
 	if v.isWorker(mk.Name) {
 		return true
 	}
@@ -183,8 +188,10 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 		// lane's recording keeps today's rules.
 		return v.declaredInPool(mk) || v.bg.inPool(mk.Name) && !mk.IsAsync()
 	}
-	_, ok := v.pool[mk.Name]
-	return ok
+	if _, ok := v.pool[mk.Name]; ok {
+		return true
+	}
+	return v.bg.inPool(mk.Name) && !mk.IsAsync()
 }
 
 // declaredInPool reports whether mk, in a test's view, is a recording made
@@ -194,7 +201,9 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 // (models.Mock.DeclaredSessionCall). Every test of the run is served it,
 // whatever test opened: a call the app makes once at start-up and caches
 // (a token, a configuration read) that a test makes again. Another test's
-// recording of it is that test's alone.
+// recording of it is that test's alone. On a pool view it reports the same
+// of the view's own slice, for a stateful walk (sequenceViewOf), never for
+// what the view shows.
 func (v *exactView) declaredInPool(mk *models.Mock) bool {
 	return v.declared.has(mk.Name) && mk.DeclaredSessionCall()
 }
@@ -228,7 +237,7 @@ func (v *exactView) extraLocked(db *TreeDb, ix *integrations.MockIndex, key stri
 		return s.extra
 	}
 	shownBuilds.Add(1)
-	var pool, declared map[string]struct{}
+	var pool, bgPool, declared map[string]struct{}
 	if v.test != "" {
 		if v.bg != nil {
 			pool = v.bg.pool
@@ -238,15 +247,21 @@ func (v *exactView) extraLocked(db *TreeDb, ix *integrations.MockIndex, key stri
 		}
 	} else {
 		pool = v.pool
+		if v.bg != nil {
+			bgPool = v.bg.pool
+		}
 	}
 	var extra []keyedEntry
-	if looks := len(v.worker) + len(pool) + len(declared); looks < len(p.rest) {
+	if looks := len(v.worker) + len(pool) + len(bgPool) + len(declared); looks < len(p.rest) {
 		keyedExamined.Add(uint64(looks))
 		var pos []int
 		for name := range v.worker {
 			pos = append(pos, p.byName[name]...)
 		}
 		for name := range pool {
+			pos = append(pos, p.byName[name]...)
+		}
+		for name := range bgPool {
 			pos = append(pos, p.byName[name]...)
 		}
 		for name := range declared {

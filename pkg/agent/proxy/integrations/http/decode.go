@@ -686,12 +686,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// The miss was decided where the request first read the
 				// round: whether that read found a staging is told from it.
 				integrations.StampMark(report, call)
-				// A call that is one more run of the application's
-				// background work (the same request as one of the set's
-				// worker: or startup: recordings, apart from noise and
-				// reads of the clock) is marked so: listed, it counts
-				// against no test (background_mark.go).
-				h.markBackground(reqCtx, report, input, mockDb, call, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(mockDb))
 				// A call that is a recording made elsewhere (another test's,
 				// or a worker-scope one not reached yet) is named as that
 				// recording: it did not change, so no learn-step reason
@@ -851,8 +845,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 				}
 
-				// No mock matched — send a 502 so the application gets a
-				// proper HTTP error instead of a silent connection close.
+				// No mock matched — mark whether the miss is one more run
+				// of the application's background work (a worker: or
+				// startup: recording of the set the call was marked in,
+				// apart from noise, bound values, and reads of the clock),
+				// after any on-miss passthrough above so live-served calls
+				// pay nothing (background_mark.go).
+				h.markBackground(reqCtx, report, input, db, mockDb, call, staged, headerNoise, bodyNoise, urlNoise)
+
+				// Send a 502 so the application gets a proper HTTP error
+				// instead of a silent connection close.
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)

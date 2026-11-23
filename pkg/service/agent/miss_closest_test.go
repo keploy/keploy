@@ -18,7 +18,7 @@ import (
 // full round: before this, such a reason named three fields and no recording.
 func TestAFailedTestsReasonNamesTheClosestRecordingAndWhereEveryFieldIs(t *testing.T) {
 	reason := func(misses ...models.UnmatchedCall) string {
-		return evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: misses}, nil, time.Time{}, nil)
+		return evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: misses}, nil, time.Time{}, nil, scopeSet{})
 	}
 	whole := missesListedWhole(models.ReplayTestsFile)
 	since := "body.since was learned as clock, a read of the application's clock, and the call sends no value there: it changed"
@@ -80,7 +80,7 @@ func TestAFailedTestsReasonNamesTheClosestRecordingAndWhereEveryFieldIs(t *testi
 	// What keploy could not capture comes first and takes a line: the fifth
 	// miss is then left out, and what it names is not said.
 	lost := evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: six[1:],
-		CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}}, nil, time.Time{}, nil)
+		CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}}, nil, time.Time{}, nil, scopeSet{})
 	require.Contains(t, lost, "; and 1 more. "+whole)
 	require.NotContains(t, lost, comparedText)
 
@@ -107,11 +107,11 @@ func TestAFailedTestsReasonNamesTheClosestRecordingAndWhereEveryFieldIs(t *testi
 	late := miss("mock-15", []string{"body.a", "body.b", "body.c", "body.d"})
 	late.Kind, late.At = models.MissOutsideTest, began.Add(time.Second)
 	for _, m := range []models.UnmatchedCall{early, late} {
-		r := evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, began, nil)
+		r := evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, began, nil, scopeSet{})
 		require.Contains(t, r, "(closest recording "+m.ClosestMock+": body.a, body.b, body.c and 1 more differ). "+comparedText+" "+whole)
 		// Three fields are each named: no file.
 		m.Differs = m.Differs[:3]
-		r = evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, began, nil)
+		r = evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, began, nil, scopeSet{})
 		require.Contains(t, r, "(closest recording "+m.ClosestMock+": body.a, body.b and body.c differ). "+comparedText)
 		require.NotContains(t, r, whole)
 	}

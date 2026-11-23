@@ -1440,6 +1440,18 @@ func (r *Recorder) SetRecordHooks(hooks RecordHooks) {
 // reassigned in production code.
 var maxLiveDroppedMockIDs = 10000
 
+// maxLeftOutAtStopMarks bounds how many mocks left out after the stop are
+// marked at once for the mapping entries that name them (leftOutMarker):
+// about 100 bytes each, so under 10 MB. A mark is freed when an entry consumes
+// it, and the mapping drain leaves out the mappings it can tell are of
+// requests after the stop (a dated one, or one of a test case it left out), so
+// most marks of an agent that dates its mappings are never consumed; and the
+// drain of what the agent held before the stop has no time bound.
+//
+// A package-level var, not a const, only so a test can shrink it. Never
+// reassigned in production code.
+var maxLeftOutAtStopMarks = 100000
+
 // droppedMockSet is the set of mock tempIDs the recorder FAILED to persist, so
 // the mapping consumer revokes the test that owns one instead of replaying it
 // with a short mock pool.
@@ -1507,7 +1519,8 @@ func (d *droppedMockSet) takeAt(tempID string) (time.Time, bool) {
 // the tempID, so a run with mappings disabled (--disable-mapping), or a skipped
 // mock no mapping ever references, retains its entry for the whole session.
 // Those runs are back to the pre-marker growth; the marker helps the common
-// case, it does not cap the worst one.
+// case, it does not cap the worst one. The marks of mocks left out after the
+// stop are leftOutMock instead, and capped (leftOutMarker).
 type skippedMock struct{}
 
 var skippedMockMarker = skippedMock{}
@@ -1526,6 +1539,16 @@ func markSkippedMock(asyncMockIDs *sync.Map, tempID string) {
 	asyncMockIDs.Store(tempID, skippedMockMarker)
 }
 
+// isSkipMarker reports whether v, an asyncMockIDs entry, marks a mock the
+// recording decided not to persist (skippedMock or leftOutMock).
+func isSkipMarker(v any) bool {
+	switch v.(type) {
+	case skippedMock, leftOutMock:
+		return true
+	}
+	return false
+}
+
 // releaseSkippedMock frees a SKIP-marked asyncMockIDs entry once a mapping has
 // consumed it. Ordinary async entries are deliberately left in place.
 //
@@ -1535,8 +1558,14 @@ func markSkippedMock(asyncMockIDs *sync.Map, tempID string) {
 // persisted, so a later mapping referencing a pruned entry simply never
 // correlates: no revoke, no leak, at worst one counter tick at the end.
 func releaseSkippedMock(asyncMockIDs *sync.Map, tempID string, v any) {
-	if _, skipped := v.(skippedMock); skipped {
+	switch m := v.(type) {
+	case skippedMock:
 		asyncMockIDs.Delete(tempID)
+	case leftOutMock:
+		// Counted once, by whichever consumer takes the entry.
+		if _, had := asyncMockIDs.LoadAndDelete(tempID); had {
+			m.live.Add(-1)
+		}
 	}
 }
 
@@ -1573,11 +1602,9 @@ func settleMock(tempID string, correlationMap, asyncMockIDs *sync.Map, droppedMo
 		return lost, fateLost
 	}
 	// A skip is an outcome of its own: the mock is never saved.
-	if v, ok := asyncMockIDs.Load(tempID); ok {
-		if _, skipped := v.(skippedMock); skipped {
-			asyncMockIDs.Delete(tempID)
-			return models.MockEntry{}, fateExcluded
-		}
+	if v, ok := asyncMockIDs.Load(tempID); ok && isSkipMarker(v) {
+		releaseSkippedMock(asyncMockIDs, tempID, v)
+		return models.MockEntry{}, fateExcluded
 	}
 	return models.MockEntry{}, fateUnknown
 }
@@ -2881,6 +2908,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		streamCtx = models.WithAgentStopNotice(reqCtx)
 		agentStopping = w.WatchAgentStop(reqCtx)
 	}
+	// A mock the stop's drain leaves out as traffic the app served after the
+	// stop is settled for the mapping entries that name it as one a hook
+	// skipped (leftOutMarker).
+	leftOut := &leftOutMarker{asyncMockIDs: &asyncMockIDs, waits: mappingHolds, logger: r.logger, off: r.config.DisableMapping}
+	streamCtx = withMockLeftOutAtStop(streamCtx, leftOut.mark)
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(streamCtx)
 	if err != nil {
@@ -3817,7 +3849,20 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			// requested after it belongs to a test case that is not (a recorded
 			// one ended before the stop, and so did its mocks). An undated
 			// mock is kept: at worst it is a mock no test case uses.
+			//
+			// The recording is told of each one it leaves out
+			// (withMockLeftOutAtStop): the agent still names it in the mapping
+			// of its request. An agent that does not date its mappings
+			// (models.TestMockMapping.RequestedAt) sends that mapping undated,
+			// and the mapping drain hands it on when it cannot tell it is of a
+			// request after the stop: an unnamed one (an async capture) until
+			// the frame drains end, a named one that comes before its test case
+			// is judged. Without this, each of its entries was settled as a
+			// mock the recording lost.
 			opts.afterStop = func(*models.Mock) {}
+			if leftOut := mockLeftOutAtStop(ctx); leftOut != nil {
+				opts.afterStop = leftOut
+			}
 			opts.keepUndated = true
 		}
 		forwardUntilDrained(ctx, r, outgoingStream, outgoingChan, abandoned, opts)

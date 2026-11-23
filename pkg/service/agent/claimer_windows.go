@@ -83,3 +83,17 @@ func processParents() (map[int]int, error) {
 	}
 	return parents, nil
 }
+
+// procChildStart is process child's creation time when it is a running child
+// of process parent (directChild), its parent read from a snapshot of the
+// system's processes taken after its creation time is read.
+func procChildStart(child, parent int) (uint64, bool) {
+	return directChild(child, parent, func(pid int) (int, bool) {
+		parents, err := processParents()
+		if err != nil {
+			return 0, false
+		}
+		ppid, ok := parents[pid]
+		return ppid, ok
+	}, procStart)
+}

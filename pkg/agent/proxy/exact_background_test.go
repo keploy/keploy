@@ -1251,3 +1251,198 @@ func TestSpentBackgroundIncludesRepeatingSeriesLastRecording(t *testing.T) {
 	mm2.ServeExactTest("T1", []*models.Mock{own})
 	equalNames(t, "SpentBackground inside test includes between-test worker serve", mm2.SpentBackground(models.HTTP), "s2")
 }
+
+// TestWorkerManagerUnsetMatchesMainExactServingAndBackgroundOff permanently
+// embeds the Review-5 worker-manager probe (W1): with KEPLOY_PROVEN unset,
+// arming ServeExactPool on a worker MockManager after StageExactBackground /
+// ServeExactBackground MUST keep exactView, ExactServing, ConsumeRefused(own),
+// ConsumeRefused(bg), S12Background, Background, OwnRepeatRead, and
+// scopedMockDb.passThrough identical to main (never entering a mixed state).
+func TestWorkerManagerUnsetMatchesMainExactServingAndBackgroundOff(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	wm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(wm.Close)
+	seed := httpCall("mock-startup-seed", 0, "/seed")
+	own := httpCall("mock-own-1", time.Second, "/own")
+	wm.SetMocksWithWindow(nil, []*models.Mock{seed, own}, models.BaseTime, time.Now().Add(time.Hour))
+
+	wm.StageExactBackground(models.RecordedWithS12Routing)
+	wm.ServeExactPool(models.PoolKeyNone, nil)
+	wm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-startup-seed"}, nil)
+	wm.ServeExactPool(models.PoolKeyNone, []string{"mock-startup-seed"})
+
+	if wm.exactView() == nil {
+		t.Fatal("exactView must be armed after ServeExactPool")
+	}
+	if wm.exactView().bg != nil {
+		t.Fatal("an exact view must never carry the background rules with KEPLOY_PROVEN unset")
+	}
+	if bg, exact := wm.servedBackground(wm.exactView()); bg != nil || exact {
+		t.Fatal("servedBackground must serve no background through an exact view with KEPLOY_PROVEN unset")
+	}
+	if bg, exact := wm.servedBackground(nil); bg != nil || exact {
+		t.Fatal("servedBackground must serve no background by the rules while an exact view is armed")
+	}
+	if !wm.ExactServing() {
+		t.Fatal("ExactServing must stay true when exactView is armed (identical to main)")
+	}
+	if why := integrations.UnheldWhy(wm); why != "" {
+		t.Fatalf("UnheldWhy = %q; want empty", why)
+	}
+	if !integrations.ConsumeRefused(wm, "mock-own-1") {
+		t.Fatal("ConsumeRefused(own) must stay true on an exact-view worker manager (identical to main)")
+	}
+	if !integrations.ConsumeRefused(wm, "mock-startup-seed") {
+		t.Fatal("ConsumeRefused(bg) must stay true on an exact-view worker manager (identical to main)")
+	}
+	if integrations.S12Background(wm) {
+		t.Fatal("S12Background must stay false on an exact-view worker manager with KEPLOY_PROVEN unset (identical to main)")
+	}
+	if bg := wm.Background(models.HTTP); bg != nil {
+		t.Fatalf("Background must be nil on an exact-view worker manager with KEPLOY_PROVEN unset; got %v", exactNames(bg))
+	}
+	if wrapped := integrations.OwnRepeatRead(wm, wm.MarkCallRound(), func() bool { return true }); integrations.OwnRepeat(wrapped) {
+		t.Fatal("OwnRepeatRead must remain a no-op on an exact-view worker manager with KEPLOY_PROVEN unset")
+	}
+	sc := &scopedMockDb{MockMemDb: wm}
+	if !sc.passThrough() {
+		t.Fatal("scopedMockDb.passThrough() must stay true over an exact-view worker manager (identical to main)")
+	}
+
+	// Single-process unset mode (exactView == nil): servedBackground serves
+	// the background by the rules ONLY inside an open test scope, keeping
+	// ExactServing and ConsumeRefused(own) false.
+	sm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(sm.Close)
+	sm.SetMocksWithWindow(nil, []*models.Mock{seed, own}, models.BaseTime, time.Now().Add(time.Hour))
+	sm.StageExactBackground(models.RecordedWithS12Routing)
+	sm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-startup-seed"}, nil)
+	if integrations.S12Background(sm) || sm.InBackground("mock-startup-seed") {
+		t.Fatal("outside an open test scope in unset mode, servedBackground must not serve the background by the rules")
+	}
+	sm.SetScopeMocks([]*models.Mock{own}, nil, true)
+	if sm.ExactServing() || integrations.ConsumeRefused(sm, "mock-own-1") {
+		t.Fatal("inside an open test scope in unset mode, ExactServing and ConsumeRefused(own) must stay false")
+	}
+	if !integrations.S12Background(sm) || !integrations.ConsumeRefused(sm, "mock-startup-seed") {
+		t.Fatal("inside an open test scope in unset mode, S12Background and ConsumeRefused(bg) must be active")
+	}
+	if (&scopedMockDb{MockMemDb: sm}).passThrough() {
+		t.Fatal("scopedMockDb.passThrough() must stay false in single-process unset mode")
+	}
+	// StageExactBackground during an open scope clears the prior set's
+	// background until ServeExactBackground settles the next set.
+	sm.StageExactBackground(models.RecordedWithS12Routing)
+	if bg := sm.exact.bg.Load(); bg == nil || !bg.settling {
+		t.Fatal("StageExactBackground in unset mode must store settling backgroundState")
+	}
+	if integrations.S12Background(sm) {
+		t.Fatal("StageExactBackground in unset mode must mark background as settling (S12Background == false)")
+	}
+}
+
+// TestServedBackgroundDecidesEveryReadInBothModes pins servedBackground as the
+// one place in the manager that decides background serving, per KEPLOY_PROVEN
+// mode: with an exact view armed (a test worker's manager, or the run's under
+// the switch) and without one, between tests and in an open test, with the
+// set's background named and while it is still settling. The manager's
+// readers built on it (S12Background through BackgroundCursor, InBackground,
+// and with no exact view Background, RoundSnapshot and OwnedRecordings) give
+// the same answer. A test's own reads stay as for a set without a
+// background: ExactServing and ConsumeRefused of the test's own recording
+// follow only whether an exact view is armed.
+func TestServedBackgroundDecidesEveryReadInBothModes(t *testing.T) {
+	seed := httpCall("mock-startup-seed", 0, "/seed")
+	own := httpCall("mock-own-1", time.Second, "/own")
+	for _, tc := range []struct {
+		name string
+		// proven is KEPLOY_PROVEN; view arms an exact view (ServeExactPool);
+		// open opens a test scope (SetScopeMocks); settling stages the set
+		// (StageExactBackground) without naming its background.
+		proven                  string
+		view, open, settling    bool
+		wantBg, wantExact       bool
+		wantS12, wantInBackgrnd bool
+	}{
+		// Under the switch the agent arms the view before it names the
+		// background; this row guards against the switch-off rules for a
+		// manager with no view ever running under the switch.
+		{name: "proven no view in a test", proven: "1", open: true},
+		{name: "proven exact view", proven: "1", view: true, wantBg: true, wantExact: true, wantS12: true, wantInBackgrnd: true},
+		{name: "proven exact view settling", proven: "1", view: true, settling: true, wantBg: true, wantExact: true, wantS12: true},
+		{name: "unset exact view between tests", proven: "", view: true},
+		{name: "unset exact view in a test", proven: "", view: true, open: true},
+		{name: "unset exact view settling", proven: "", view: true, settling: true},
+		{name: "unset no view between tests", proven: "", wantBg: true},
+		{name: "unset no view in a test", proven: "", open: true, wantBg: true, wantExact: true, wantS12: true, wantInBackgrnd: true},
+		{name: "unset no view in a test settling", proven: "", open: true, settling: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, tc.proven)
+			m := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+			t.Cleanup(m.Close)
+			m.SetMocksWithWindow(nil, []*models.Mock{seed, own}, models.BaseTime, time.Now().Add(time.Hour))
+			m.StageExactBackground(models.RecordedWithS12Routing)
+			if !tc.settling {
+				m.ServeExactBackground(models.RecordedWithS12Routing, []string{seed.Name}, nil)
+			}
+			// As the agent seeds them with the background (serveUnsetBackground):
+			// a test's staging does not keep the set's startup recordings.
+			m.SeedBackgroundRecordings([]models.BackgroundRecording{{Mock: seed}})
+			if tc.view {
+				m.ServeExactPool(models.PoolKeyNone, []string{seed.Name})
+			}
+			if tc.open {
+				m.SetScopeMocks([]*models.Mock{own}, nil, true)
+			}
+			v := m.exactView()
+			if (v != nil) != tc.view {
+				t.Fatalf("exact view armed = %v; want %v", v != nil, tc.view)
+			}
+			bg, exact := m.servedBackground(v)
+			if (bg != nil) != tc.wantBg || exact != tc.wantExact {
+				t.Fatalf("servedBackground = (%v, %v); want (%v, %v)", bg != nil, exact, tc.wantBg, tc.wantExact)
+			}
+			if got := integrations.S12Background(m); got != tc.wantS12 {
+				t.Fatalf("S12Background = %v; want %v", got, tc.wantS12)
+			}
+			if got := m.InBackground(seed.Name); got != tc.wantInBackgrnd {
+				t.Fatalf("InBackground(%s) = %v; want %v", seed.Name, got, tc.wantInBackgrnd)
+			}
+			if got := m.ExactServing(); got != tc.view {
+				t.Fatalf("ExactServing = %v; want %v (an exact view armed)", got, tc.view)
+			}
+			if got := integrations.ConsumeRefused(m, own.Name); got != tc.view {
+				t.Fatalf("ConsumeRefused(own) = %v; want %v (as without a background)", got, tc.view)
+			}
+			if v != nil {
+				if (v.bg != nil) != tc.wantBg {
+					t.Fatalf("the exact view carries the background rules = %v; want %v", v.bg != nil, tc.wantBg)
+				}
+				if bg, exact := m.servedBackground(nil); bg != nil || exact {
+					t.Fatalf("servedBackground(nil) with an exact view armed = (%v, %v); want none", bg != nil, exact)
+				}
+				return
+			}
+			// With no exact view, the readers that ask the predicate on
+			// each read.
+			unused := m.Background(models.HTTP)
+			if tc.wantExact != (len(unused) == 1 && unused[0].Name == seed.Name) {
+				t.Fatalf("Background(HTTP) = %v; want [%s] only when served by the rules (%v)", exactNames(unused), seed.Name, tc.wantExact)
+			}
+			if spent := m.SpentBackground(models.HTTP); len(spent) != 0 {
+				t.Fatalf("SpentBackground(HTTP) = %v; want none", exactNames(spent))
+			}
+			snap, ok := m.RoundSnapshot(integrations.RoundQuery{Kind: models.HTTP})
+			if ok != tc.wantExact || snap.Background != tc.wantExact {
+				t.Fatalf("RoundSnapshot = (Background %v, ok %v); want %v", snap.Background, ok, tc.wantExact)
+			}
+			if ok && (len(snap.BackgroundUnused) != 1 || snap.BackgroundUnused[0].Name != seed.Name || !snap.Open) {
+				t.Fatalf("RoundSnapshot unused = %v open %v; want [%s] in an open test", exactNames(snap.BackgroundUnused), snap.Open, seed.Name)
+			}
+			if _, owned, ok := m.OwnedRecordings(); ok != tc.wantExact || (ok && (len(owned) != 1 || owned[0].Name != own.Name)) {
+				t.Fatalf("OwnedRecordings = (%v, %v); want [%s] only when served by the rules (%v)", exactNames(owned), ok, own.Name, tc.wantExact)
+			}
+		})
+	}
+}

@@ -48,6 +48,10 @@ func (p *servingProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock
 	p.mm.SetMocksWithWindow(f, u, s, e)
 	return nil
 }
+func (p *servingProxy) SetScopeMocks(_ context.Context, f, u []*models.Mock, open bool) error {
+	p.mm.SetScopeMocks(f, u, open)
+	return nil
+}
 func (p *servingProxy) SetMocks(_ context.Context, f, u []*models.Mock) error {
 	p.mm.SetFilteredMocks(f)
 	p.mm.SetUnFilteredMocks(u)
@@ -72,6 +76,17 @@ func (p *servingProxy) ServeExactWorker(names []string) error {
 func (p *servingProxy) ServeExactWorkerSkipped(names, skipped []string) error {
 	p.mm.ServeExactWorkerSkipped(names, skipped)
 	return nil
+}
+func (p *servingProxy) StageExactBackground(rules string) error {
+	p.mm.StageExactBackground(rules)
+	return nil
+}
+func (p *servingProxy) ServeExactBackground(rules string, pool, worker []string) error {
+	p.mm.ServeExactBackground(rules, pool, worker)
+	return nil
+}
+func (p *servingProxy) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
+	p.mm.SeedBackgroundRecordings(recs)
 }
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)
@@ -673,7 +688,7 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
 		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
-	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
+	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil, nil, false))
 	b, serr := a.ProvenBegin(context.Background(), begin("TestSkipped"))
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionSkip, b.Action)
@@ -696,7 +711,7 @@ func TestASkippedTestsRecordingStillBoundsAHeldCall(t *testing.T) {
 		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
 		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
 	ctx := context.Background()
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil, nil, false))
 	b, serr := a.ProvenBegin(ctx, begin("TestSkipped"))
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionSkip, b.Action)

@@ -294,13 +294,20 @@ jobs:
       # is an administrator (KEPLOY_ROW_TOKEN_ELEVATED=1): that check must
       # say so, and must say no on a thread impersonating the same token
       # restricted to Administrators deny-only, which still reports
-      # TokenElevation. The rows that run as a standard user with no desktop
-      # need a second account: they run where one exists, with
+      # TokenElevation. certutil's ERROR_CANCELLED exit code, as cmd passes
+      # one on, is read as a No (a real click on No is not driven here; the
+      # rows that a No adds keploy's CA to no store run on Linux, through the
+      # store seam); the removal failures Windows' prompt names; and the sweep of the retired "My Custom CA": the user's own
+      # ROOT store is listed apart from the machine's roots its view takes
+      # in, and an elevated sweep removes that CA from the machine's store and
+      # leaves another certificate of its subject. The
+      # rows that run as a standard user with no desktop need a second
+      # account: they run where one exists, with
       # KEPLOY_ROW_NO_DESKTOP_STANDARD_USER=1.
       # Only these rows of ./pkg/agent/proxy/tls/ run here (see the first test
       # step for why).
       - name: Test keploy's CA trust (amd64)
-        run: go test -count=1 -v -run "TestOnWindowsTheRootStoresAreReadForTheCAsTheyHold|TestOnWindowsCertutilsNotSupportedExitIsANoTrustPrompt|TestOnWindowsTokenElevatedReadsTheRunsToken|TestOnWindowsATokenWithAdministratorsDenyOnlyIsNotElevated" ./pkg/agent/proxy/tls/
+        run: go test -count=1 -v -run "TestOnWindowsTheRootStoresAreReadForTheCAsTheyHold|TestOnWindowsCertutilsNotSupportedExitIsANoTrustPrompt|TestOnWindowsTokenElevatedReadsTheRunsToken|TestOnWindowsATokenWithAdministratorsDenyOnlyIsNotElevated|TestOnWindowsCertutilsCancelledExitIsAUserNo|TestOnWindowsRemovalErrorsNameWhatThePromptRefused|TestOnWindowsTheRootStoresAreListedForTheSweep|TestOnWindowsAnElevatedSweepRemovesOnlyTheRetiredCAFromTheMachineStore" ./pkg/agent/proxy/tls/
         shell: cmd
         env:
           KEPLOY_ROW_TOKEN_ELEVATED: "1"

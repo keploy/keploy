@@ -336,6 +336,16 @@ type ScopeGateReq struct {
 	// their calls send in the same run (a run's variable), so it cannot run
 	// without them.
 	Needs map[string][]ScopeNeed `json:"needs,omitempty"`
+	// SetFlags, read with Skip, are the flags that make a command a failed
+	// test's reason names (keploy mock quarantine, keploy mock derive
+	// --remove) act on the set this replay serves, as the replay CLI names
+	// it ("--local", "--name", "<set>"). None: the commands carry no flags.
+	SetFlags []string `json:"set_flags,omitempty"`
+	// CloudSet, read with SetFlags, says the replayed set is Keploy Cloud's
+	// recordings, which keploy mock derive does not change: a failed test's
+	// reason names no command that takes an authored mock out of it, and its
+	// quarantine command carries SetFlags as for any set.
+	CloudSet bool `json:"cloud_set,omitempty"`
 }
 
 // ScopeNeed is one test a replayed test needs to have begun before it
@@ -654,6 +664,11 @@ type ScopeTableReq struct {
 	// of them: they are tests' calls. Absent from an older CLI and from a
 	// set with none: every miss stays its test's.
 	Background []string `json:"background,omitempty"`
+	// StartupRules is true when the set's mappings.yaml carries at least one
+	// worker: entry placed by a declared kind: background rule with
+	// startup: true (MockEntry.Rule != "" && MockEntry.Startup). Plain
+	// recorded startup: entries do not set this flag.
+	StartupRules bool `json:"startupRules,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its

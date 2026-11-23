@@ -68,9 +68,31 @@ func (a *Agent) stageScope(ctx context.Context, names []string, open bool) error
 	if err != nil {
 		return err
 	}
-	if err := stager.SetScopeMocks(ctx, filtered, unfiltered, open); err != nil {
-		utils.LogError(a.logger, err, "failed to stage the mocks of a test on the proxy")
-		return err
+	var stageErr error
+	if rs, ok := a.Proxy.(coreAgent.ScopeReplacedStager); ok {
+		var replaced map[string]struct{}
+		if open && len(names) > 0 {
+			inMapping := make(map[string]struct{}, len(names))
+			for _, n := range names {
+				inMapping[n] = struct{}{}
+			}
+			var own []*models.Mock
+			for _, mk := range filtered {
+				if mk != nil {
+					if _, in := inMapping[mk.Name]; in {
+						own = append(own, mk)
+					}
+				}
+			}
+			replaced = models.ReplacedBy(own)
+		}
+		stageErr = rs.SetScopeMocksWithReplaced(ctx, filtered, unfiltered, open, replaced)
+	} else {
+		stageErr = stager.SetScopeMocks(ctx, filtered, unfiltered, open)
+	}
+	if stageErr != nil {
+		utils.LogError(a.logger, stageErr, "failed to stage the mocks of a test on the proxy")
+		return stageErr
 	}
 	return nil
 }
