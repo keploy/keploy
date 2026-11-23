@@ -63,6 +63,16 @@ func (m *MockManager) noteAppStartLocked(filtered, unfiltered, startup []*models
 	}
 }
 
+// appStartRearmableInLocked is appStartRearmableLocked for a re-arm decided
+// in test set set (0: whichever): ErrNoSetStart once the manager's set is
+// another. Caller holds swapMu.
+func (m *MockManager) appStartRearmableInLocked(set uint64) error {
+	if set != 0 && m.setGen.Load() != set {
+		return ErrNoSetStart
+	}
+	return m.appStartRearmableLocked()
+}
+
 // appStartRearmableLocked says why the set's start cannot be served again
 // now, nil when it can (RearmAppStart). Caller holds swapMu.
 func (m *MockManager) appStartRearmableLocked() error {
@@ -107,7 +117,7 @@ func (m *MockManager) appStartRearmableLocked() error {
 // began meanwhile. No test of the set opens while it runs: a test's window is
 // staged, and an exact test opened, holding rearmMu, which it holds from its
 // check to its staging.
-func (m *MockManager) RearmAppStart() error { return m.rearmAppStart(nil) }
+func (m *MockManager) RearmAppStart() error { return m.rearmAppStart(nil, 0) }
 
 // rearmAppStart is RearmAppStart, with learnNewSet, when not nil, the learn
 // step's new set it begins under the proven switch before the variables'
@@ -115,11 +125,14 @@ func (m *MockManager) RearmAppStart() error { return m.rearmAppStart(nil) }
 // learnNewSet refuses (ErrSetStarted) once a test of the set began on the
 // learn step: the replay begins a test there before it stages the test's
 // mocks, so no flag of the manager's says it yet. Then nothing is re-armed.
-func (m *MockManager) rearmAppStart(learnNewSet func() error) error {
+// set, when not 0, is the test set the caller decided about
+// (BeforeServing's): another set's start is not re-armed for it
+// (ErrNoSetStart).
+func (m *MockManager) rearmAppStart(learnNewSet func() error, set uint64) error {
 	m.rearmMu.Lock()
 	defer m.rearmMu.Unlock()
 	m.swapMu.RLock()
-	err := m.appStartRearmableLocked()
+	err := m.appStartRearmableInLocked(set)
 	m.swapMu.RUnlock()
 	if err != nil {
 		return err
@@ -140,7 +153,7 @@ func (m *MockManager) rearmAppStart(learnNewSet func() error) error {
 	// A test cannot have run since the check (rearmMu), but the next set's
 	// session may have begun (ResetForReplaySession, which takes swapMu):
 	// the set's start is that session's to stage then.
-	if err := m.appStartRearmableLocked(); err != nil {
+	if err := m.appStartRearmableInLocked(set); err != nil {
 		m.swapMu.Unlock()
 		return err
 	}
@@ -178,15 +191,40 @@ func (m *MockManager) forgetAllBootTaken() {
 }
 
 // BeforeServing, when a build sets it, is handed the process of each
-// connection the proxy accepts in a replay (keploy test), with rearm, in
-// either state of the proven switch, on the connection's own goroutine,
-// before anything on the connection is served. A build that tells from it
-// that the process is a new instance of the application, started again
-// within the test set (its earlier instance gone), calls rearm before it
-// returns: the set's start is served again (MockManager.RearmAppStart) on
-// the manager that serves the connection, and every call on the connection
-// is served from it. It returns what RearmAppStart returned
-// (ErrSetStarted, ErrNoSetStart), or why the connection has no manager.
+// connection the proxy accepts in a replay (keploy test), the test worker
+// and test set it is served in, and rearm, in either state of the proven switch, on the
+// connection's own goroutine, before anything on the connection is served.
+// A build that tells from it that the process is a new instance of the
+// application, started again within the test set (its earlier instance, one
+// that started in the same set, gone), calls rearm before it returns: the
+// set's start is served again (MockManager.RearmAppStart) on the manager that
+// serves the connection, and every call on the connection is served from it.
+// It returns what RearmAppStart returned (ErrSetStarted, ErrNoSetStart), or
+// why the connection has no manager.
+//
+// set is the serving manager's test set: its set generation, which moves at
+// the first staging of each test set whose session the client began as a set
+// (models.OutgoingOptions.StartsTestSet, ArmSetFence), and nowhere else (a
+// re-registration of the set's mocks, a re-arm); 0 when the connection has no
+// manager. It is the manager's own count: worker is the test worker instance
+// whose manager serves the connection (0: the run's), and a worker's manager
+// counts from its own start, so a build compares sets of the same worker
+// alone (a worker served again counts afresh too). An
+// instance of the application that started in an earlier set started on that
+// set's start, not this one's: where keploy starts the application again for
+// each set (a docker run app joins the agent's PID namespace), the next set's
+// instance is no restart, and its set's staging served it the set's start
+// already. A CLI that sends no StartsTestSet (one before 2026-10-17) leaves it
+// at one number for the whole run: a build then reads such an instance as a
+// restart, and re-arms the set's start it was just staged, before its first
+// test. A connection made between a set's Mock and its staging is handed the
+// set before's number while its instance's start-up is served from the new
+// set's start: a build records an instance under the latest set any of its
+// connections was handed. rearm re-arms only that set's start, on that
+// manager: once the manager moved to another set, or another manager serves
+// the connection, it returns ErrNoSetStart; once a worker began to be served,
+// or the connection's worker ended, why the connection has no manager
+// (connManager).
 //
 // The connections of the new instance must wait for the decision: a build
 // that lets one of them be served before rearm returned has it served from
@@ -195,7 +233,7 @@ func (m *MockManager) forgetAllBootTaken() {
 // first's rearm.
 //
 // Set it before the proxy starts: it is read without synchronisation.
-var BeforeServing func(proc Process, rearm func() error)
+var BeforeServing func(proc Process, worker uint32, set uint64, rearm func() error)
 
 // beforeServing hands BeforeServing the process proc of a connection served
 // from the manager of the test worker instance inst (connManager).
@@ -204,20 +242,35 @@ func (p *Proxy) beforeServing(proc Process, inst uint32) {
 	if f == nil {
 		return
 	}
-	f(proc, func() error {
-		m, err := p.connManager(inst)
+	m, err := p.connManager(inst)
+	if err == nil && m == nil {
+		err = errNoMockManager
+	}
+	var set uint64
+	if err == nil {
+		set = m.setGen.Load()
+	}
+	f(proc, inst, set, func() error {
 		if err != nil {
 			return err
 		}
-		if m == nil {
-			return errNoMockManager
+		// The manager that serves the connection now: the build may have
+		// waited (on another connection's re-arm) while a worker was served
+		// or ended, or the run's manager was replaced. Its decision was about
+		// m's set; another manager's is not re-armed for it.
+		cur, curErr := p.connManager(inst)
+		if curErr != nil {
+			return curErr
+		}
+		if cur != m {
+			return ErrNoSetStart
 		}
 		if m != p.getMockManager() {
 			// A test worker's manager: the learn step is the run's, and
 			// follows no worker's tests.
-			return m.rearmAppStart(nil)
+			return m.rearmAppStart(nil, set)
 		}
-		return m.rearmAppStart(p.learnNewSetForRearm)
+		return m.rearmAppStart(p.learnNewSetForRearm, set)
 	})
 }
 
