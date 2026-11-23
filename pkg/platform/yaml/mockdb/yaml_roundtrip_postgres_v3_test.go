@@ -447,6 +447,8 @@ func TestYAMLRoundTrip_PostgresV3_NilPayloadDecodeRejected(t *testing.T) {
 // rewrites those scalars to DoubleQuotedStyle in EncodeMock; this
 // test pins the contract by feeding the suspect shapes through every
 // PostgresV3 string field that can carry user-controlled text.
+// keploy/yaml (go.mod's replace) writes such scalars readably; the
+// rewrite is kept, and this holds it.
 func TestYAMLRoundTrip_PostgresV3_TabBearingFieldsSurvive(t *testing.T) {
 	tabSQL := "SELECT\n\tid,\n\tname\nFROM\n\tcustomer_tag\nWHERE\n\tid = $1"
 	leadingNlTab := "\n\thello"

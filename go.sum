@@ -200,6 +200,8 @@ github.com/keploy/jsonDiff v1.0.8 h1:B/75cfLNZ7kayAjF1Jox70Iwa/nwCjBYNOuSt+RHH5A
 github.com/keploy/jsonDiff v1.0.8/go.mod h1:wUuLbVs3Oe3mIQ61C7G88bppP//ArLtoDU0S9Awwv+s=
 github.com/keploy/shlex v1.0.0 h1:HDZ8FxTLAchqd9h4JV0BoJfCYmTa77/Dq4fVY3s3DN8=
 github.com/keploy/shlex v1.0.0/go.mod h1:6G8OTfg8MjG37MqNuUoAgdA6QnO45/Ifj+RMQaTuiw8=
+github.com/keploy/yaml v0.0.0-20261123121504-5aa603cfb02f h1:sp1MxJcRswXsC+/mBDHWOKPrfBHSzudVI4LfS4PyLng=
+github.com/keploy/yaml v0.0.0-20261123121504-5aa603cfb02f/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 github.com/klauspost/compress v1.19.2 h1:hMRETovs/pu/dVWN7zIT1PGG8t509MwT6bO7XSi26R8=
 github.com/klauspost/compress v1.19.2/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
@@ -417,8 +419,6 @@ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntN
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
 gopkg.in/yaml.v2 v2.4.0 h1:D8xgwECY7CYvx+Y2n4sBz93Jn9JRvxdiyyo8CTfuKaY=
 gopkg.in/yaml.v2 v2.4.0/go.mod h1:RDklbk79AGWmwhnvt/jBztapEOGDOx6ZbXqjP6csGnQ=
-gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
-gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 gotest.tools/v3 v3.5.2 h1:7koQfIKdy+I8UTetycgUqXWSDwpgv193Ka+qRsmBY8Q=
 gotest.tools/v3 v3.5.2/go.mod h1:LtdLGcnqToBH83WByAAi/wiwSFCArdFIUV/xxN4pcjA=
 helm.sh/helm/v3 v3.18.3 h1:+cvyGKgs7Jt7BN3Klmb4SsG4IkVpA7GAZVGvMz6VO4I=

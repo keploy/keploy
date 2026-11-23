@@ -253,7 +253,9 @@ func (failingYAML) MarshalYAML() (any, error) { return nil, errors.New("cannot b
 // literal block scalar that does not read back: a first tab has no
 // indentation indicator, and the indicator it writes for a first space or line
 // break is wrong in a nested block. Tab-indented SQL and JSON, and text that
-// opens with a line break, are ordinary payloads.
+// opens with a line break, are ordinary payloads. keploy/yaml (go.mod's
+// replace) writes them readably; the encoder still quotes them, and these hold
+// it to that.
 var blockScalarTraps = []string{
 	"\tleading tab\nx",
 	"\n\thello",

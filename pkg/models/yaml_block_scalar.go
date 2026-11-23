@@ -20,6 +20,10 @@ import (
 // line break, are ordinary payloads. Such a string is written double-quoted
 // instead, which yaml.v3 escapes and reads back exactly anywhere.
 //
+// keploy/yaml, the fork go.mod replaces gopkg.in/yaml.v3 with, writes these
+// block scalars readably. This is kept: mock files keep the format they have
+// been written in, and a module built without the fork stays safe.
+//
 // A string that is not valid UTF-8 is written as base64 (!!binary), which
 // never starts with whitespace, so it is never unsafe here.
 func YAMLBlockScalarUnsafe(s string) bool {
