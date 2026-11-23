@@ -222,6 +222,11 @@ type Agent struct {
 	// (takeGatedOutcome), and whether noteEndOfGated warned this session.
 	gatedScopes    map[scopeKey]string
 	gatedEndWarned bool
+	// openSeq is each open window's id (models.ScopeWindow.Seq) as the proxy
+	// was told it (coreAgent.TestWindowNoter); lastSeq the latest given.
+	// Guarded by scopeMu.
+	openSeq map[scopeKey]uint64
+	lastSeq uint64
 
 	// provenMu guards proven, the single-worker integration wire's state
 	// (scope_proven.go), served under the proven switch. Never held while
@@ -710,7 +715,12 @@ const (
 func (a *Agent) resetScopeState() {
 	a.scopeMu.Lock()
 	a.workerOpen, a.openProc = nil, nil
-	// A test a previous session left open is no test case of this one.
+	// A test a previous session left open is no test case of this one, and
+	// the proxy must not keep tagging serves with its window id.
+	for k := range a.openSeq {
+		a.closeSeqLocked(k)
+	}
+	a.openSeq = nil
 	for _, s := range a.openScopes {
 		s.Abandon()
 	}

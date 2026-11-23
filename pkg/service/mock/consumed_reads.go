@@ -1,6 +1,11 @@
 package mock
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"cmp"
+	"slices"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // consumedReads is what the agent consumed over a run, as every read of it
 // the run made reads it, one entry per recording: the reads of the wait for
@@ -25,6 +30,13 @@ import "go.keploy.io/server/v3/pkg/models"
 // one that did not, and an earlier read's is, as the agent ORs it within one
 // drain only (flagMockAsUsed: another drain's consumers were not served
 // through it), so the two keep one rule.
+//
+// Where it answered is every read's: a read hands back where it answered
+// since the read before (the agent forgets it as it is read), so the entry
+// holds every read's test windows (answeredInBoth), its first answer
+// outside every window, and every read's count of the window ids the agent
+// could not keep. A recording that answered a test before the wait's read
+// and another test after it is under both tests' lines.
 type consumedReads struct {
 	states []models.MockState
 	at     map[string]int
@@ -49,9 +61,33 @@ func (c *consumedReads) add(read []models.MockState) {
 		if inRead[st.Name] {
 			st.LearnedAfterEnd = st.LearnedAfterEnd || first.LearnedAfterEnd
 		}
+		st.AnsweredIn = answeredInBoth(first.AnsweredIn, st.AnsweredIn)
+		if first.AnsweredOutsideAt != 0 {
+			st.AnsweredOutsideAt = first.AnsweredOutsideAt
+		}
+		st.AnsweredInLost += first.AnsweredInLost
 		inRead[st.Name] = true
 		c.states[i] = st
 	}
+}
+
+// answeredInBoth is the test windows a recording answered in by an earlier
+// read's and a later read's account (models.MockState.AnsweredIn): each
+// window once, ascending by window, at its first answer, which is the
+// earlier read's when both name it (a window open across a read).
+func answeredInBoth(earlier, later []models.WindowAnswer) []models.WindowAnswer {
+	out := append([]models.WindowAnswer(nil), earlier...)
+	held := make(map[uint64]bool, len(out))
+	for _, w := range out {
+		held[w.Seq] = true
+	}
+	for _, w := range later {
+		if !held[w.Seq] { // a read lists a window once
+			out = append(out, w)
+		}
+	}
+	slices.SortFunc(out, func(x, y models.WindowAnswer) int { return cmp.Compare(x.Seq, y.Seq) })
+	return out
 }
 
 // list is the run's consumed, each recording once, in the order its reads

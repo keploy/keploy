@@ -24,18 +24,25 @@ import (
 // before. The end's read also carries a recording no earlier read saw. It is
 // one recording consumed per name: the receipt, the replay summary and the
 // metered count say six recordings, not the eight the reads carry, and its
-// test's line names it once.
+// test's line names it once, with where it answered over the reads.
 func TestARecordingEveryReadCarriesIsConsumedOnce(t *testing.T) {
 	var metered []ReplayOutcome
 	RegisterReplayOutcomeReporter(func(_ context.Context, o ReplayOutcome) { metered = append(metered, o) })
 	t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
 	w := seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomePassed)
+	w[0].Seq, w[1].Seq = 1, 2
 	inA, inB := w[0].Start.Add(time.Millisecond).UnixNano(), w[1].Start.Add(time.Millisecond).UnixNano()
 	after := w[1].End.Add(time.Second).UnixNano()
+	in := func(name string, seq uint64, at int64) models.MockState {
+		return models.MockState{Name: name, Timestamp: at, AnsweredIn: []models.WindowAnswer{{Seq: seq, First: at}}}
+	}
+	outside := func(name string, at int64) models.MockState {
+		return models.MockState{Name: name, Timestamp: at, AnsweredOutsideAt: at}
+	}
 	code, r, tr, logs, instr := seriesWaitRun(t, w, [][]models.MockState{
-		{{Name: "mock-0", Timestamp: inA}, {Name: "mock-1", Timestamp: inB}, {Name: "mock-6", Timestamp: inB}},
-		{{Name: "mock-3", Timestamp: after}, {Name: "mock-0", Timestamp: after}, {Name: "mock-5", Timestamp: after}},
-	}, []models.MockState{{Name: "mock-0", Timestamp: after + 1}, {Name: "mock-4", Timestamp: after + 1}}, runsOnForGood, 3)
+		{in("mock-0", 1, inA), in("mock-1", 2, inB), in("mock-6", 2, inB)},
+		{outside("mock-3", after), outside("mock-0", after), outside("mock-5", after)},
+	}, []models.MockState{outside("mock-0", after+1), outside("mock-4", after+1)}, runsOnForGood, 3)
 	require.Zero(t, code)
 	require.Equal(t, 3, instr.consumedReadCount, "the wait's first read, one wake-up, and the run's end")
 	require.Equal(t, 6, r.Consumed)
@@ -47,7 +54,8 @@ func TestARecordingEveryReadCarriesIsConsumedOnce(t *testing.T) {
 	require.Equal(t, 1, testLine(t, tr, "o::TestA").Consumed)
 	for _, f := range metered[0].Mocks {
 		if f.Flow == "o::TestA" {
-			require.Equal(t, []models.MockState{{Name: "mock-0", Timestamp: inA}}, f.Consumed, "at its first use, in its test")
+			require.Equal(t, []models.MockState{{Name: "mock-0", Timestamp: inA, AnsweredIn: []models.WindowAnswer{{Seq: 1, First: inA}}, AnsweredOutsideAt: after}},
+				f.Consumed, "at its first use, in its test, and its first answer outside every test")
 		}
 	}
 }
