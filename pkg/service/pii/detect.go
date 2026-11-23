@@ -249,9 +249,10 @@ func RedactField(field string) string {
 const maxRedactSegments = 6
 
 // segmentsHoldPII reports whether the joined segments are PII. One segment
-// counts when PII appears anywhere in it; a run of several counts only when
-// the whole run is one value, and an email must start in the first segment,
-// so "request.body.user@example.com" redacts "user@example.com" alone.
+// counts when PII appears anywhere in it; a run of several counts when the
+// whole run is one value, or when an email spans from the first segment into
+// the last, so "request.body.user@example.com" redacts "user@example.com"
+// alone while decorated keys like "mailto:user@example.com" are still caught.
 func segmentsHoldPII(segments []string) bool {
 	text := strings.Join(segments, ".")
 	if len(segments) == 1 {
@@ -261,8 +262,14 @@ func segmentsHoldPII(segments []string) bool {
 	// A key that holds an array gets an index appended in the path, as in
 	// "user@example.com[0]"; the value itself ends before the index.
 	text = arrayIndexSuffix.ReplaceAllString(text, "")
-	if strings.Contains(segments[0], "@") && emailWhole.MatchString(text) {
-		return true
+	if strings.Contains(segments[0], "@") {
+		last := arrayIndexSuffix.ReplaceAllString(segments[len(segments)-1], "")
+		lastStart := len(text) - len(last)
+		for _, loc := range emailRegex.FindAllStringIndex(text, -1) {
+			if loc[0] < len(segments[0]) && loc[1] > lastStart {
+				return true
+			}
+		}
 	}
 	return ssnWhole.MatchString(text) ||
 		(cardWhole.MatchString(text) && hasCreditCard(text)) ||
@@ -271,7 +278,6 @@ func segmentsHoldPII(segments []string) bool {
 
 var (
 	arrayIndexSuffix = regexp.MustCompile(`(?:\[\d+\])+$`)
-	emailWhole       = regexp.MustCompile(`(?i)^[a-z0-9_%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$`)
 	ssnWhole         = regexp.MustCompile(`^\d{3}-\d{2}-\d{4}$`)
 	cardWhole        = regexp.MustCompile(`^[\d -]+$`)
 	phoneWhole       = regexp.MustCompile(`^` + phoneRegex.String() + `$`)

@@ -144,6 +144,10 @@ func TestRedactField(t *testing.T) {
 		{"request.body.jane.doe@example.com[2][1]", "request.body.jane.[redacted][2][1]"},
 		{"request.body.123-45-6789[0]", "request.body.[redacted][0]"},
 		{"request.body.415.555.2671[0].note", "request.body.[redacted][0].note"},
+		{"request.body.contact=user@example.com.password", "request.body.[redacted].password"},
+		{"request.body.mailto:user@example.com", "request.body.[redacted]"},
+		{"request.body.<user@example.com>.name", "request.body.[redacted].name"},
+		{"request.body.mailto:user@example.com[0]", "request.body.[redacted][0]"},
 	}
 	for _, tt := range tests {
 		if got := RedactField(tt.field); got != tt.want {
