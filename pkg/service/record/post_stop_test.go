@@ -3,6 +3,8 @@ package record
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -471,4 +473,299 @@ func TestGetTestAndMockChans_SaysHowManyMappingsAfterTheStopItLeftOut(t *testing
 	require.Len(t, said, 1)
 	assert.EqualValues(t, 3, said[0].ContextMap()["mappings"])
 	assert.NotContains(t, said[0].ContextMap(), "test")
+}
+
+// liveWorkloadInstr is the agent of a workload that goes on serving after the
+// recording's stop, as a k8s-proxy sidecar recording's pod does: its "app"
+// runs until the recorder lets it go, and nothing it does takes the agent down.
+// It hands the test the context agentStopWatcher is given, the parent of the
+// one the recorder opens its frame streams under: its end is the stop as the
+// drains see it (they read it as they take each frame).
+type liveWorkloadInstr struct {
+	*fakeInstr
+	streams chan context.Context
+}
+
+func (l *liveWorkloadInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+func (l *liveWorkloadInstr) WatchAgentStop(ctx context.Context) <-chan struct{} {
+	select {
+	case l.streams <- ctx:
+	default: // the first one is the recording's
+	}
+	return make(chan struct{}) // the agent never says it is stopping
+}
+
+// A workload that serves on after the stop (a k8s-proxy sidecar recording,
+// which records as docker compose) has its agent go on sending each request's
+// mocks and mapping. The stop's drains leave out those mocks and the request's
+// test case. An agent that does not date its mappings (RequestedAt) sends the
+// mapping undated, and for an async capture unnamed, so the mapping drain
+// hands it on. Each of its entries then waited for a mock the recording had
+// left out itself and was settled at the end as a lost mock: a "Failed to
+// correlate mock mapping" ERROR per Redis or MySQL call of every request after
+// the stop on older releases, and a stop summary saying those tests are saved
+// without their mocks on newer ones. No test is: the requests are not
+// recorded. A mock the agent never sent at all is still a loss, and is still
+// said.
+func TestStart_AMappingOfARequestServedAfterTheStopNamesNoLostMock(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // the sidecar agent's health check
+	}))
+	defer agent.Close()
+	cfg := &config.Config{}
+	cfg.CommandType = string(utils.DockerCompose) // as k8s-proxy records a sidecar
+	cfg.Agent.AgentURI = agent.URL
+	core, logs := observer.New(zapcore.DebugLevel)
+	instr := &liveWorkloadInstr{fakeInstr: f, streams: make(chan context.Context, 1)}
+	waitsMade := make(chan *mappingWaits, 1)
+	testDB := &recTestDB{}
+	mockDB := &recMockDB{unencodable: map[string]bool{}}
+	mappingDB := &recMappingDB{}
+	tele := &recTelemetry{}
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          testDB,
+		mockDB:          mockDB,
+		mappingDb:       mappingDB,
+		telemetry:       tele,
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          cfg,
+		// The stop's drains stay open this long after their last frame from
+		// before the stop, however loaded the host: every frame this row
+		// sends after the stop is taken well inside it.
+		frameQuiet:       5 * time.Second,
+		mappingWaitsMade: func(w *mappingWaits) { waitsMade <- w },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	give := func(what string, send func() bool) {
+		t.Helper()
+		if !send() {
+			t.Fatalf("%s was not taken", what)
+		}
+	}
+	mock := func(name string, at time.Time) func() bool {
+		return func() bool {
+			select {
+			case f.outgoing <- mockAt(name, at):
+				return true
+			case <-time.After(30 * time.Second):
+				return false
+			}
+		}
+	}
+	mapping := func(m models.TestMockMapping) func() bool {
+		return func() bool {
+			select {
+			case f.mappings <- m:
+				return true
+			case <-time.After(30 * time.Second):
+				return false
+			}
+		}
+	}
+	testCase := func(tc *models.TestCase) func() bool {
+		return func() bool {
+			select {
+			case f.incoming <- tc:
+				return true
+			case <-time.After(30 * time.Second):
+				return false
+			}
+		}
+	}
+
+	// Before the stop: a recorded request, its Redis and MySQL calls, and
+	// its mapping, which also names a mock the agent never sends.
+	before := time.Now()
+	give("redis-pre", mock("redis-pre", before))
+	give("mysql-pre", mock("mysql-pre", before))
+	give("test-1", testCase(tcAt("test-1", before)))
+	give("test-1's mapping", mapping(models.TestMockMapping{TestName: "test-1", MockIDs: []string{"redis-pre", "mysql-pre", "never-sent"}}))
+	waitForPersistedTestCase(t, testDB, "test-1")
+
+	var waits *mappingWaits
+	select {
+	case waits = <-waitsMade:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the recorder never made its mapping waits")
+	}
+	var streamCtx context.Context
+	select {
+	case streamCtx = <-instr.streams:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the recorder never opened its frame streams")
+	}
+	held := func(want int, what string) {
+		t.Helper()
+		deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+		for waits.heldCount() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: %d mapping entries held, want %d", what, waits.heldCount(), want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	// test-1's mocks are saved, so the one entry held from here on is its
+	// never-sent mock's.
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for {
+		mockDB.mu.Lock()
+		n := len(mockDB.inserted)
+		mockDB.mu.Unlock()
+		if n == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("test-1's mocks were never saved")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	held(1, "test-1's never-sent mock")
+
+	cancel() // the stop; the workload serves on
+
+	// Traffic after the stop is judged so only once the drains have seen the
+	// stop: one they take before that is the recording's, as it should be. So
+	// wait for the stop to reach them (the end of their context's parent), and
+	// for the test-case drain to leave out a test case served after it.
+	<-streamCtx.Done()
+	// Dated well past the stop's cut-off, which is fixed at that end.
+	after := time.Now().Add(time.Minute)
+	give("request a's test case", testCase(&models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: after}}))
+	waitForLog(t, logs, "not recording a test case served after the stop")
+
+	// A request after the stop, as the agent sends it: its mocks, then its
+	// undated, unnamed mapping.
+	give("redis-post-a", mock("redis-post-a", after))
+	give("mysql-post-a", mock("mysql-post-a", after))
+	give("request a's mapping", mapping(models.TestMockMapping{MockIDs: []string{"redis-post-a", "mysql-post-a"}}))
+	// Another, whose mapping reaches the recording before its mock (the two
+	// come on separate streams): its entry waits, and is handed back as soon
+	// as the drain leaves the mock out, long before the mock stream ends, so
+	// the traffic after the stop does not fill the waits.
+	give("request b's mapping", mapping(models.TestMockMapping{MockIDs: []string{"redis-post-b"}}))
+	held(2, "request b's entry")
+	give("redis-post-b", mock("redis-post-b", after))
+	held(1, "request b's entry once its mock was left out")
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Minute):
+		t.Fatal("Start did not return")
+	}
+
+	mockDB.mu.Lock()
+	saved := append([]string(nil), mockDB.inserted...)
+	mockDB.mu.Unlock()
+	assert.ElementsMatch(t, []string{"redis-pre", "mysql-pre"}, saved, "a mock of a request after the stop was saved")
+
+	var unmapped []string
+	for _, e := range logs.FilterMessage(unmappedEntryLog).All() {
+		unmapped = append(unmapped, e.ContextMap()["tempMockID"].(string))
+	}
+	assert.Equal(t, []string{"never-sent"}, unmapped,
+		"only the mock the agent never sent is missing from a recorded test; the mocks of requests served after the stop are left out with them")
+	summary := logs.FilterMessage(UnmappedSummaryLog).All()
+	require.Len(t, summary, 1, "the mock the agent never sent is still said at the stop")
+	assert.EqualValues(t, 1, summary[0].ContextMap()["mappingEntries"], "%v", summary[0].ContextMap())
+
+	// test-1 keeps both of its mocks.
+	var got []string
+	mappingDB.mu.Lock()
+	for _, b := range mappingDB.batches {
+		for _, e := range b["test-1"] {
+			got = append(got, e.Name)
+		}
+	}
+	mappingDB.mu.Unlock()
+	assert.ElementsMatch(t, []string{"redis-pre", "mysql-pre"}, got)
+
+	tele.mu.Lock()
+	suite := tele.suite
+	tele.mu.Unlock()
+	require.NotNil(t, suite)
+	assert.EqualValues(t, 1, suite["mocks-uncorrelated"], "%v", suite)
+	assert.EqualValues(t, 1, suite["tests-short-pool"], "%v", suite)
+}
+
+// waitForLog waits for a line with msg (logs only grow).
+func waitForLog(t *testing.T, logs *observer.ObservedLogs, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for logs.FilterMessage(msg).Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q line", msg)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A mock the stop's drain leaves out settles the entries that name it, the
+// one already waiting at once, and its mark is freed when an entry consumes
+// it. The marks alive at once are capped: past the cap a mock is not marked,
+// so an entry naming it counts as lost, as before, and the cap is said once.
+// A recording that maps nothing marks nothing.
+func TestLeftOutMarker_SettlesItsEntriesUnderACapOfLiveMarks(t *testing.T) {
+	old := maxLeftOutAtStopMarks
+	maxLeftOutAtStopMarks = 1
+	t.Cleanup(func() { maxLeftOutAtStopMarks = old })
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	var asyncMockIDs, correlationMap sync.Map
+	var dropped droppedMockSet
+	waits := newMappingWaits()
+	l := &leftOutMarker{asyncMockIDs: &asyncMockIDs, waits: waits, logger: zap.New(core)}
+	settle := func(id string) mockFate {
+		_, fate := settleMock(id, &correlationMap, &asyncMockIDs, &dropped)
+		return fate
+	}
+	after := time.Now()
+
+	// An entry already waiting for "a" is handed back as soon as it is left
+	// out, and settles as no loss; its mark is then freed.
+	c := waits.claim("", "a", func() (models.MockEntry, mockFate) {
+		_, fate := settleMock("a", &correlationMap, &asyncMockIDs, &dropped)
+		return models.MockEntry{}, fate
+	})
+	require.True(t, c.held)
+	l.mark(mockAt("a", after))
+	assert.Equal(t, 0, waits.heldCount(), "the waiting entry was not handed back")
+	ready := waits.takeReady()
+	require.Len(t, ready, 1)
+	assert.Equal(t, fateExcluded, settle(ready[0].tempID))
+	assert.EqualValues(t, 0, l.live.Load(), "a consumed mark is still counted")
+
+	// "b" takes the one place; "c" and "d" are past the cap, said once.
+	l.mark(mockAt("b", after))
+	l.mark(mockAt("c", after))
+	l.mark(mockAt("d", after))
+	assert.Equal(t, 1, logs.FilterMessageSnippet("too many mocks of traffic after the stop").Len())
+	assert.Equal(t, fateUnknown, settle("c"), "a mock past the cap must count as lost, as before")
+	assert.Equal(t, fateExcluded, settle("b"))
+	assert.Equal(t, fateUnknown, settle("b"), "a mark is consumed once")
+	assert.EqualValues(t, 0, l.live.Load())
+	// Its place is free again.
+	l.mark(mockAt("e", after))
+	assert.Equal(t, fateExcluded, settle("e"))
+
+	off := &leftOutMarker{asyncMockIDs: &asyncMockIDs, waits: waits, logger: zap.NewNop(), off: true}
+	off.mark(mockAt("f", after))
+	_, marked := asyncMockIDs.Load("f")
+	assert.False(t, marked, "a recording that maps nothing marked a mock no entry will consume")
 }
