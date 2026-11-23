@@ -24,6 +24,7 @@ on:
         default: 'all'
 
 env:
+  KEPLOY_INTERNAL: "1"
   # Every run under the proven switch (KEPLOY_PROVEN=1) runs the agent's exact
   # view in verify mode: each read the view keeps materialised is recomputed,
   # and any difference fails that read (pkg/agent/proxy exact_view_verify.go).

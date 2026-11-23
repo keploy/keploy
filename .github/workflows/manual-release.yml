@@ -16,6 +16,10 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   trigger-release:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.

@@ -27,6 +27,10 @@ concurrency:
   group: keploy-performance-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   performance-test:
     runs-on: ubuntu-latest

@@ -41,6 +41,10 @@ on:
 # concurrency cap. This mirrors the other self-hosted Windows lanes,
 # which also runs with no concurrency group.
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]

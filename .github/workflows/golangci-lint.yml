@@ -15,6 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  KEPLOY_INTERNAL: "1"
   # Central ref for the keploy/integrations commit this workflow checks
   # out via setup-private-parsers. Mirrors the default in
   # prepare_and_run.yml + release.yml so all three workflows track the
