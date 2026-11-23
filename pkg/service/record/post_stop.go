@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -90,9 +91,18 @@ func (l *leftOutMarker) mark(m *models.Mock) {
 // first): one cut-off for the three drains (test cases, mocks, mappings), so
 // a test case kept as captured before the stop never has its mapping judged
 // to be of a request after it.
+//
+// The cut-off is the instant the stop was made when the stop says it
+// (utils.StoppedAt: the recording's frame drains run on a context its stop
+// cancels so, Start's reqCtx), else the instant the cut is first asked for. A
+// request made between the stop and that ask (the goroutine that runs it
+// scheduled later on a loaded host) would be dated before a cut fixed then,
+// and recorded.
 type stopCut struct {
 	once sync.Once
 	t    time.Time
+	// ctx is the recording's context, whose stop's instant the cut is.
+	ctx context.Context
 }
 
 // at fixes the cut-off at its first call, and returns it. A nil cut is now.
@@ -100,7 +110,13 @@ func (c *stopCut) at() time.Time {
 	if c == nil {
 		return time.Now()
 	}
-	c.once.Do(func() { c.t = time.Now() })
+	c.once.Do(func() {
+		if t, ok := utils.StoppedAt(c.ctx); ok {
+			c.t = t
+			return
+		}
+		c.t = time.Now()
+	})
 	return c.t
 }
 

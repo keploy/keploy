@@ -634,3 +634,77 @@ func TestBacklogBefore_AReusableMockInTheBufferIsPendingUntilTheFlush(t *testing
 		t.Fatalf("%+v: still pending once the flush handed the mock on", st)
 	}
 }
+
+// PendingIn answers for the buffer as a walk of its mocks would, whether their
+// request times are read from the settled prefix beside it or from the mocks
+// added after it: windows inside, around, at the edges of and between them.
+func TestSyncMockManager_PendingInReadsTheSettledPrefixAsTheMocks(t *testing.T) {
+	// Past the startup window, so that a pass settles the mocks it keeps.
+	m := openWindowManager(make(chan *models.Mock, 1024), make(chan models.TestMockMapping, 1024))
+	t0 := time.Now() // fresh: no pass cuts them as stale
+	var times []time.Time
+	for i := range 200 {
+		at := t0.Add(time.Duration(i*7%200) * time.Millisecond)
+		m.AddMock(httpMockAt(at))
+		times = append(times, at)
+	}
+	walk := func(start, end time.Time) bool {
+		for _, at := range times {
+			if !at.IsZero() && !at.Before(start) && !at.After(end) {
+				return true
+			}
+		}
+		return false
+	}
+	check := func(stage string) {
+		t.Helper()
+		// Windows that start and end on a mock's own request time.
+		for _, at := range times {
+			if at.IsZero() {
+				continue
+			}
+			for _, w := range [][2]time.Time{{at, at}, {at, at.Add(time.Millisecond)}, {at.Add(-time.Millisecond), at},
+				{at.Add(time.Nanosecond), at.Add(time.Millisecond)}, {at.Add(-time.Millisecond), at.Add(-time.Nanosecond)}} {
+				if got, want := m.PendingIn(w[0], w[1]), walk(w[0], w[1]); got != want {
+					t.Fatalf("%s: PendingIn(%v, %v) = %v, want %v", stage, w[0].Sub(t0), w[1].Sub(t0), got, want)
+				}
+			}
+		}
+		for lo := -5; lo < 210; lo += 3 {
+			for _, width := range []int{0, 1, 4, 50, 400} {
+				start := t0.Add(time.Duration(lo)*time.Millisecond + 500*time.Microsecond)
+				end := start.Add(time.Duration(width) * time.Millisecond)
+				if got, want := m.PendingIn(start, end), walk(start, end); got != want {
+					t.Fatalf("%s: PendingIn(%v, %v) = %v, want %v", stage, start.Sub(t0), end.Sub(t0), got, want)
+				}
+			}
+		}
+		if m.PendingIn(t0.Add(time.Second), t0) {
+			t.Fatalf("%s: a window that ends before it starts holds a mock", stage)
+		}
+	}
+	check("none settled")
+	settled := func() int {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.settledLocked()
+	}
+	// A resolve of a window far from every mock takes none and leaves them
+	// all settled, their times beside the buffer, as a recording's passes do.
+	far := t0.Add(time.Hour)
+	m.ResolveRange(far, far.Add(time.Millisecond), "elsewhere", true, false)
+	if got := settled(); got != len(times) {
+		t.Fatalf("%d of %d mocks settled by a pass", got, len(times))
+	}
+	check("all settled")
+	// Mocks added after the prefix are read from themselves.
+	for i := range 20 {
+		at := t0.Add(time.Duration(300+i*11) * time.Millisecond)
+		m.AddMock(httpMockAt(at))
+		times = append(times, at)
+	}
+	if got := settled(); got != 200 {
+		t.Fatalf("%d mocks settled after the later ones were added, want the 200 before them", got)
+	}
+	check("settled prefix and later mocks")
+}

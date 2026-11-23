@@ -84,3 +84,30 @@ func (m *SyncMockManager) keepSettledLocked(n int, at []time.Time) {
 	clear(at[n:])
 	m.settled = settledPrefix{n: n, last: m.buffer[n-1], gen: m.windowsLocked().gen, proven: provenswitch.On(), at: at[:n]}
 }
+
+// bufferPendingInLocked reports whether a mock in the buffer was requested
+// within [start, end] (PendingIn). A test case's hold asks it for each test
+// case as it settles, so it must cost little when the buffer is long, as it is
+// when the test cases fall behind the mocks: walking the buffer's mocks there
+// took three quarters of a CPU at a few thousand test cases a second, and the
+// test cases fell further behind while the mocks waiting for them piled up.
+//
+// The settled prefix's request times are read from the one array beside the
+// buffer (settledPrefix.at), as the resolve passes read them, and only the
+// mocks added since the last pass from the mocks themselves: a buffered
+// mock's request time does not change. Caller holds mu.
+func (m *SyncMockManager) bufferPendingInLocked(start, end time.Time) bool {
+	in := func(t time.Time) bool { return !t.IsZero() && !t.Before(start) && !t.After(end) }
+	settled := m.settledLocked()
+	for _, t := range m.settled.at[:settled] {
+		if in(t) {
+			return true
+		}
+	}
+	for _, mk := range m.buffer[settled:] {
+		if mk != nil && in(mk.Spec.ReqTimestampMock) {
+			return true
+		}
+	}
+	return false
+}
