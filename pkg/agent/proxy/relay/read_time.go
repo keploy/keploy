@@ -50,6 +50,9 @@ func joinStashed(parts []stashedPayload) stashedPayload {
 }
 
 func observedReadAt(conn net.Conn, fallback time.Time) time.Time {
+	if tc, ok := conn.(*trackedPeerConn); ok {
+		conn = tc.Conn
+	}
 	if p, ok := conn.(readTimeProvider); ok {
 		if ts := p.LastReadTime(); !ts.IsZero() {
 			return ts
@@ -83,6 +86,8 @@ func observedRead(conn net.Conn, fallback time.Time) (time.Time, fakeconn.Clock)
 // fed from elsewhere, a FakeConn) is another producer's.
 func proxyStamped(conn net.Conn) bool {
 	switch c := conn.(type) {
+	case *trackedPeerConn:
+		return proxyStamped(c.Conn)
 	case *readTrackingConn:
 		return proxyStamped(c.Conn)
 	case *prependingConn:
