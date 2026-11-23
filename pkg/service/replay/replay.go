@@ -574,6 +574,9 @@ func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, testSetID string,
 	// hold a call for a later test of the set only then
 	// (models.OutgoingOptions.ReadsSetEnds).
 	opts.ReadsSetEnds = provenswitch.On()
+	if r.config != nil && r.config.Test.KeepAppAlive {
+		opts.KeepAppAlive = true
+	}
 	// The session serves testSetID, of this run: a capture loss the agent
 	// finds after the set's end is named as the set's (earlierSetLosses).
 	if err := r.instrumentation.MockOutgoing(r.withTestSetSession(ctx, testSetID), opts); err != nil {
@@ -3251,6 +3254,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// ensureAgentHoldsStoredMocks.
 		outgoingOpts := models.OutgoingOptions{
 			RedisDrawn:                r.config.Redis.DrawnKeys(),
+			KeepAppAlive:              r.config.Test.KeepAppAlive,
 			Rules:                     r.config.BypassRules,
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
@@ -3452,6 +3456,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		err = beginSession(runTestSetCtx, models.OutgoingOptions{
 			RedisDrawn:                r.config.Redis.DrawnKeys(),
+			KeepAppAlive:              r.config.Test.KeepAppAlive,
 			Rules:                     r.config.BypassRules,
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,

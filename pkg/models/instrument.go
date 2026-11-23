@@ -133,6 +133,10 @@ type OutgoingOptions struct {
 	// word the app drew in this run (redis.drawn), handed on for the Redis
 	// parser; nothing here judges them.
 	RedisDrawn []string
+	// KeepAppAlive reports that the replay keeps the application running across
+	// test-set boundaries (--keep-app-alive), so stateful parsers carry live
+	// overlay state and run-born bindings across staging epochs.
+	KeepAppAlive bool
 	// DisableStatefulMocks turns OFF cursor-consumption of stateful data-plane
 	// mocks. Default (false) = ON: repeated identical dependency requests are
 	// served successive recorded responses in record order (then saturate on the
