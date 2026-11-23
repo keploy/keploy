@@ -2,12 +2,16 @@ package proxy
 
 import (
 	"context"
+	"net/http"
 	"reflect"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -117,5 +121,114 @@ func TestTheMissReadKeepsTheTrailMark(t *testing.T) {
 		if c.TrailsOf != want || !c.CountsAgainstTest() {
 			t.Errorf("%s: TrailsOf %q, counts against the tests %v; want %q, true", c.ActualSummary, c.TrailsOf, c.CountsAgainstTest(), want)
 		}
+	}
+}
+
+// An HTTP health poll on the application's own timer inside a test window,
+// matching a worker: or startup: recording seeded on MockManager, is marked
+// Background and counts against no test under both KEPLOY_PROVEN unset and =1.
+// A test's own HTTP call (including an extra-call miss) and an unowned call
+// matching another test's per-test recording are never marked Background.
+func TestHTTPBackgroundPollInsideTestWindowCountsAgainstNoTest(t *testing.T) {
+	start := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	mkHTTP := func(name, method, path, body, resp string, at time.Time) *models.Mock {
+		return r3Mock(name, at, method, path, body, resp)
+	}
+	for _, proven := range []string{"", "1"} {
+		mode := "proven=unset"
+		if proven == "1" {
+			mode = "proven=1"
+		}
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			p := startedDrainProxy(t, 32)
+			if proven == "1" {
+				p.learnTracker = learn.NewTracker()
+			}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			workerHealth := mkHTTP("worker-health-0", "GET", "/v1/sys/health", "", `{"initialized":true}`, start.Add(-5*time.Second))
+			startupInit := mkHTTP("startup-init-0", "GET", "/v1/sys/init", "", `{"initialized":true}`, start.Add(-10*time.Second))
+			ownSeal := mkHTTP("test-a-seal", "GET", "/v1/sys/seal-status", "", `{"sealed":false}`, start.Add(100*time.Millisecond))
+			otherTestKV := mkHTTP("test-b-kv", "GET", "/v1/kv/data/other", "", `{"data":{}}`, start.Add(1100*time.Millisecond))
+
+			if proven == "1" {
+				mm.SeedRecordedWindows([]models.TestWindow{
+					{TestCase: "test-a", Start: start, End: start.Add(900 * time.Millisecond)},
+					{TestCase: "test-b", Start: start.Add(time.Second), End: start.Add(1900 * time.Millisecond)},
+				})
+				mm.SetMocksWithWindow(nil, []*models.Mock{ownSeal, otherTestKV}, models.BaseTime, start.Add(time.Hour))
+				mm.ServeExactPool(models.PoolKeyNone, nil)
+				mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, "test-a-seal")})
+			} else {
+				// Stage both test-a's and test-b's per-test recordings in
+				// MockManager while narrowing the active window to test-a,
+				// so otherTestKV is genuinely present as another test's
+				// per-test mock (outside test-a's window, not in worker:/startup:).
+				mm.SetMocksWithWindow([]*models.Mock{ownSeal, otherTestKV}, nil, start, start.Add(900*time.Millisecond))
+			}
+			mm.SeedBackgroundRecordings([]models.BackgroundRecording{
+				{Mock: startupInit, From: start.Add(-15 * time.Second)},
+				{Mock: workerHealth, From: start.Add(-10 * time.Second)},
+			})
+			p.setMockManager(mm)
+			t.Cleanup(func() { p.setMockManager(nil) })
+			h := httpint.New(zap.NewNop())
+			opts := models.OutgoingOptions{}
+
+			// 1. Health poll on app timer inside test-a's window -> 502, marked Background, does not count.
+			p.ContinueTestErrorCapture()
+			if code, _ := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/v1/sys/health")); code != http.StatusBadGateway {
+				t.Fatalf("health poll got %d; want 502 miss", code)
+			}
+			calls, err := p.GetMockErrors(context.Background())
+			if err != nil || len(calls) != 1 || !calls[0].Background || calls[0].CountsAgainstTest() {
+				t.Fatalf("health poll misses = %+v, err=%v; want 1 Background miss with CountsAgainstTest=false", calls, err)
+			}
+
+			// 2. Startup poll inside test-a's window -> 502, marked Background, does not count.
+			p.ContinueTestErrorCapture()
+			if code, _ := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/v1/sys/init")); code != http.StatusBadGateway {
+				t.Fatalf("startup poll got %d; want 502 miss", code)
+			}
+			calls, err = p.GetMockErrors(context.Background())
+			if err != nil || len(calls) != 1 || !calls[0].Background || calls[0].CountsAgainstTest() {
+				t.Fatalf("startup poll misses = %+v, err=%v; want 1 Background miss with CountsAgainstTest=false", calls, err)
+			}
+
+			// 3. Test-a's own call: first answered 200; second misses and MUST count against test-a.
+			p.ContinueTestErrorCapture()
+			if code, _ := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/v1/sys/seal-status")); code != http.StatusOK {
+				t.Fatalf("test-a own call got %d; want 200", code)
+			}
+			if code, _ := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/v1/sys/seal-status")); code != http.StatusBadGateway {
+				t.Fatalf("test-a second own call got %d; want 502 miss", code)
+			}
+			calls, err = p.GetMockErrors(context.Background())
+			if err != nil || len(calls) != 1 || calls[0].Background || !calls[0].CountsAgainstTest() {
+				t.Fatalf("test-a own extra-call misses = %+v, err=%v; want 1 non-Background miss with CountsAgainstTest=true", calls, err)
+			}
+
+			// 4. Call matching test-b's per-test recording (NOT in worker:/startup:) MUST count against test-a.
+			p.ContinueTestErrorCapture()
+			if code, _ := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/v1/kv/data/other")); code != http.StatusBadGateway {
+				t.Fatalf("other-test call got %d; want 502 miss", code)
+			}
+			calls, err = p.GetMockErrors(context.Background())
+			if err != nil || len(calls) != 1 || calls[0].Background || !calls[0].CountsAgainstTest() {
+				t.Fatalf("other-test per-test call misses = %+v, err=%v; want 1 non-Background miss with CountsAgainstTest=true", calls, err)
+			}
+
+			// 5. With no worker:/startup: recordings seeded, health poll MUST count.
+			mm.SeedBackgroundRecordings(nil)
+			p.ContinueTestErrorCapture()
+			if code, _ := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/v1/sys/health")); code != http.StatusBadGateway {
+				t.Fatalf("unseeded health poll got %d; want 502 miss", code)
+			}
+			calls, err = p.GetMockErrors(context.Background())
+			if err != nil || len(calls) != 1 || calls[0].Background || !calls[0].CountsAgainstTest() {
+				t.Fatalf("unseeded health poll misses = %+v, err=%v; want 1 non-Background miss with CountsAgainstTest=true", calls, err)
+			}
+		})
 	}
 }
