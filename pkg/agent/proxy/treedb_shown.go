@@ -201,7 +201,9 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 // (models.Mock.DeclaredSessionCall). Every test of the run is served it,
 // whatever test opened: a call the app makes once at start-up and caches
 // (a token, a configuration read) that a test makes again. Another test's
-// recording of it is that test's alone.
+// recording of it is that test's alone. On a pool view it reports the same
+// of the view's own slice, for a stateful walk (sequenceViewOf), never for
+// what the view shows.
 func (v *exactView) declaredInPool(mk *models.Mock) bool {
 	return v.declared.has(mk.Name) && mk.DeclaredSessionCall()
 }

@@ -163,7 +163,8 @@ type exactView struct {
 	// declared session call names (models.Mock.DeclaredSessionCall),
 	// recorded outside every test, are shown too (sharesRest). A pool view
 	// shows none of them so, and carries it for its ident (sharedIdent).
-	// nil otherwise.
+	// Either view tells the declared ones to a stateful walk
+	// (sequenceViewOf: integrations.SequenceView.Declared). nil otherwise.
 	declared *poolSlice
 	// sourcesReplaced names, on a test view, the recordings the open test's
 	// derived mocks replace in it (models.ReplacedBy): the view never shows
@@ -4476,12 +4477,22 @@ func (m *MockManager) SequenceView() (integrations.SequenceView, bool) {
 // the test windows wherever its calls land in them: the worker scope belongs
 // to no test. The calls between tests walk their own cursor (the pool
 // view's), so a window's answers never depend on how many calls landed
-// between tests.
+// between tests. In a view that may serve declared session calls it tells
+// them too (Declared: declaredInPool), with every recording the view offers
+// (Offers: those it holds, and those it shows), so a declared call's
+// sequence is walked over what the view offers alone: a recording it never
+// offers (another test's; another pool slice's, but in a test under the
+// background rules, which offers it the whole pool) never fixes what the
+// declaration serves.
 func (m *MockManager) sequenceViewOf(v *exactView) integrations.SequenceView {
 	sv := integrations.SequenceView{Cursor: viewCursor{m: m, v: v}, Test: v.test, Start: v.winStart, End: v.winEnd}
 	if v.test != "" && len(v.worker) > 0 {
 		sv.Worker = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.isWorker(mk.Name) }
 		sv.Between = windowsCursor{m: m}
+	}
+	if v.declared != nil && len(v.declared.names) > 0 {
+		sv.Declared = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.declaredInPool(mk) }
+		sv.Offers = func(mk *models.Mock) bool { return mk != nil && (v.holds(mk.Name) || v.showsStatic(mk)) }
 	}
 	return sv
 }

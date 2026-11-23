@@ -662,11 +662,32 @@ func bandPick(group []*models.Mock, cs integrations.MockCursor, bg bool, mockDb 
 // whichever test's window it lands, and how many calls landed between tests
 // before it moves nothing a window is answered. A test's own recordings are
 // never walked here (a test view serves them ConsumeReuse, each once), so
-// under today's rules a band in a test is the worker scope's; one that holds
-// any other recording keeps the test's window. Each worker-scope recording
-// is spent in the windows as it answers, so today the cursor's served marks
-// only restate the spends: what the band changes is the window.
+// under today's rules a band in a test is the worker scope's or a declared
+// session call's; one that is not all the worker scope's keeps the test's
+// window, a declared session call's too (below). Each worker-scope
+// recording is spent in the windows as it answers, so in a band of the
+// worker scope alone the cursor's served marks only restate the spends: what
+// the band changes is the window. A declared recording is never spent, so
+// its served mark is what moves a walk on from it.
+//
+// A band that holds a recording a keploy.yaml sessionCalls entry serves every
+// test (sv.Declared: made outside every test, of the view's pool slice) is
+// fixed by the recordings the view offers alone (sv.Offers: those it holds,
+// the protocol phase, the reached worker scope, the pool slice or the
+// declared calls, under the background rules the pool; declaredMember),
+// spent or not, on the cursor and window it is walked with otherwise (the
+// test's, the pool view's, or the background's). A recording the view never
+// offers (another test's; another pool slice's, but in a test under the
+// background rules, which offers it the whole pool) is never served by it:
+// held in the walk, one could fix where the sequence stands (one in the
+// test's window, or the last before it, or the last of all where no window
+// applies), and the call the declaration serves would miss. Every recording
+// the view offers stays in it, spent or not. A walk with no declared
+// recording live is left as it is (declaredMember).
 func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv integrations.SequenceView, mockDb integrations.MockMemDb, member func(*models.Mock) bool) (int, func(), *answeredSequence) {
+	if member != nil {
+		member = declaredMember(group, sv, member)
+	}
 	switch {
 	case bg:
 		sv = integrations.SequenceView{Cursor: cs}
@@ -679,6 +700,29 @@ func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv inte
 		}
 	}
 	return servedWalk(group, stagedGroup(mockDb, group, member), sv)
+}
+
+// declaredMember is member (non-nil) narrowed, for a band (group) that holds
+// a declared session call's recording (sv.Declared), to the recordings the
+// view offers (sv.Offers); member as given for any other band (bandWalk).
+// The trigger scopes the narrowing to declared calls' walks; the worker
+// scope's band is narrowed to the worker scope already (bandWalk).
+func declaredMember(group []*models.Mock, sv integrations.SequenceView, member func(*models.Mock) bool) func(*models.Mock) bool {
+	declared, offers := sv.Declared, sv.Offers
+	if declared == nil || offers == nil || !anyOf(group, declared) {
+		return member
+	}
+	return func(m *models.Mock) bool { return member(m) && offers(m) }
+}
+
+// anyOf reports whether is holds for a recording of group.
+func anyOf(group []*models.Mock, is func(*models.Mock) bool) bool {
+	for _, m := range group {
+		if is(m) {
+			return true
+		}
+	}
+	return false
 }
 
 // allOf reports whether is holds for every recording of group, and group has
