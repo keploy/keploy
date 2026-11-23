@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -190,14 +191,7 @@ func agentSecurityOptFlags() string {
 }
 
 func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) (keployAlias string, err error) {
-	// Preserves your environment variable setup
-	if DockerConfig.Envs == nil {
-		DockerConfig.Envs = map[string]string{
-			"INSTALLATION_ID": conf.InstallationID,
-		}
-	} else {
-		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
-	}
+	setAgentEnvs(conf)
 
 	// Preserves your Docker client initialization and setup
 	client, err := New(logger, conf)
@@ -221,6 +215,24 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	}
 
 	return keployalias, nil
+}
+
+// setAgentEnvs puts on DockerConfig.Envs the variables the agent's container
+// is given (-e): this machine's installation id, and KEPLOY_INTERNAL=1 when
+// the run is keploy's own (telemetry.AgentEnv: KEPLOY_INTERNAL, a CI run of a
+// keploy/ repository), since the container gets neither that variable nor the
+// CI's, and its telemetry would be counted as a user's.
+func setAgentEnvs(conf *config.Config) {
+	if DockerConfig.Envs == nil {
+		DockerConfig.Envs = map[string]string{}
+	}
+	DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
+	if e := telemetry.AgentEnv(); e != "" {
+		k, v, _ := strings.Cut(e, "=")
+		DockerConfig.Envs[k] = v
+	} else {
+		delete(DockerConfig.Envs, telemetry.InternalEnv)
+	}
 }
 
 // getAlias constructs the docker run command.
