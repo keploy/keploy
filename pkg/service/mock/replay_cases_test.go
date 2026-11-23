@@ -555,7 +555,7 @@ func TestATestsLineNamesARecordingOnceWhenTwoReadsCarryIt(t *testing.T) {
 	mm.OpenTestWindow(1) // pkg.TestA, open when the test command exited
 	serve("mock-21", models.LifetimeSession)
 	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: drainInstr{mm: mm}}
-	m.readOwedSeries(context.Background(), nil) // the wait's read
+	m.readOwedSeries(context.Background(), nil, nil) // the wait's read
 	read := m.consumed.list()
 	require.Len(t, read, 1)
 	require.Len(t, read[0].AnsweredIn, 1)

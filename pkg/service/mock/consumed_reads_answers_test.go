@@ -63,7 +63,7 @@ func TestARecordingTwoReadsCarryIsUnderEveryTestItAnsweredIn(t *testing.T) {
 	aEnd := tick()
 	mm.OpenTestWindow(2) // pkg.TestB, open when the test command exited
 	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: drainInstr{mm: mm}}
-	m.readOwedSeries(context.Background(), nil) // the wait's read
+	m.readOwedSeries(context.Background(), nil, nil) // the wait's read
 	read := m.consumed.list()
 	require.Len(t, read, 2, "%+v", read)
 	early := read[0]
