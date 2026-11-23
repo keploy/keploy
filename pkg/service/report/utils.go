@@ -160,16 +160,15 @@ func applyCliColorsToDiff(diff string) string {
 	var sb strings.Builder
 	sb.Grow(len(diff) + 100)
 
-	scanner := bufio.NewScanner(strings.NewReader(diff))
-	first := true
+	cleaned := strings.TrimSuffix(diff, "\n")
+	lines := strings.Split(cleaned, "\n")
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for i, rawLine := range lines {
+		line := strings.TrimSuffix(rawLine, "\r")
 
-		if !first {
+		if i > 0 {
 			sb.WriteByte('\n')
 		}
-		first = false
 
 		switch {
 		case strings.HasPrefix(line, "Path: "):
