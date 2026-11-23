@@ -261,7 +261,7 @@ func TestAJWTsTimeClaimsLearnedByFormAreCheckedAtReplay(t *testing.T) {
 		{name: "times moved, a header pattern the token is outside", token: claimJWT(hs256Head, moved, liveSig), timeForm: true, headerPats: map[string][]string{"x-api-token": never}, differs: []string{"header.x-api-token"}},
 		{name: "times moved, a body pattern the token is outside", token: claimJWT(hs256Head, moved, liveSig), timeForm: true, bodyPats: map[string][]string{"token": never}, differs: []string{"body.token"}},
 		{name: "times moved, a clock rule at the body token", token: claimJWT(hs256Head, moved, liveSig), timeForm: true,
-			sources: []models.DeclaredSource{{Rule: "token-clock", Kind: models.DeclaredSourceClock, Field: "body.token", Clock: plain}}, differs: []string{"body.token"}},
+			sources: []models.DeclaredSource{{Rule: "token-clock", Kind: models.DeclaredSourceClock, Field: "body.token", Clock: plain}}, differs: []string{"body.token"}, why: "token-clock"},
 		// A token's claims are read only where both runs hold a text: a
 		// number where the token was is a changed value, never a claim's
 		// time of no form.
@@ -313,8 +313,8 @@ func TestAJWTsTimeClaimsLearnedByFormAreCheckedAtReplay(t *testing.T) {
 				t.Fatalf("differs %v; want only %v", got, c.differs)
 			}
 			for _, f := range diag.differs {
-				if c.why != "" && !strings.Contains(f.why, c.why) {
-					t.Fatalf("%s refused for %q; want a reason that says %q", f.shape, f.why, c.why)
+				if c.why != "" && (!strings.HasPrefix(f.why, f.shape+" ") || !strings.Contains(f.why, c.why)) {
+					t.Fatalf("%s refused for %q; want a reason prefixed by %q that says %q", f.shape, f.why, f.shape+" ", c.why)
 				}
 				if c.notWhy != "" && strings.Contains(f.why, c.notWhy) {
 					t.Fatalf("%s refused for %q; want a reason that does not say %q", f.shape, f.why, c.notWhy)
@@ -366,16 +366,19 @@ func multipartCall(grant, token string) (string, map[string]string) {
 // assertionReplay is a replay of a call that carries a token as its
 // assertion: the token, its grant type where it is not jwtBearer, the
 // call's body where it is not the carrier's of the two, the time default,
-// keploy.yml's body patterns, and the field it is refused at (none where
-// it is answered) with the reason its refusal gives.
+// keploy.yml's body patterns and declared sources, and the field it is
+// refused at (none where it is answered) with the reason its refusal gives
+// (whyPrefix pins the leading "<shape> " prefix).
 type assertionReplay struct {
-	name     string
-	token    string
-	grant    string
-	body     string
-	timeForm bool
-	bodyPats map[string][]string
-	at, why  string
+	name      string
+	token     string
+	grant     string
+	body      string
+	timeForm  bool
+	bodyPats  map[string][]string
+	sources   []models.DeclaredSource
+	at, why   string
+	whyPrefix bool
 }
 
 // A JWT carried in a form or a multipart body field (an OAuth 2.0 JWT
@@ -384,9 +387,10 @@ type assertionReplay struct {
 // the field's claims, as one in a JSON body field or a header is, and its
 // replay checks it so: times moved again pass under the time default
 // alone; strict times, a changed claim that is no time, a form key of two
-// values, and a token keploy.yml's patterns refuse are refused at the
-// field, each with its reason. A changed field beside it that holds no
-// token is refused as before, for no reason of a token's.
+// values, a token keploy.yml's patterns refuse, and a clock rule at the
+// assertion are refused at the field, each with its reason. A changed
+// field beside it that holds no token is refused as before, for no reason
+// of a token's.
 func TestAJWTInAFormOrMultipartFieldIsCheckedByItsClaimTimes(t *testing.T) {
 	recCall := learnAt.Add(1300 * time.Millisecond)
 	iatOnly := func(sub string, at time.Time) string {
@@ -394,6 +398,7 @@ func TestAJWTInAFormOrMultipartFieldIsCheckedByItsClaimTimes(t *testing.T) {
 	}
 	iatExp := func(sub string, at time.Time) string { return notifyClaims(sub, at, "") }
 	never := []string{"^never$"}
+	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
 	for _, carry := range []struct {
 		name string
 		call func(grant, token string) (string, map[string]string)
@@ -426,15 +431,18 @@ func TestAJWTInAFormOrMultipartFieldIsCheckedByItsClaimTimes(t *testing.T) {
 				moved := claimJWT(hs256Head, shape.claims("svc-1", now), liveSig)
 				cases := []assertionReplay{
 					{name: "times moved, the time default", token: moved, timeForm: true},
-					{name: "times moved, strict times", token: moved, at: "body.assertion", why: "learned under the time default"},
-					{name: "another subject", token: claimJWT(hs256Head, shape.claims("svc-2", now), liveSig), timeForm: true, at: "body.assertion", why: "outside the times learned in its claims"},
+					{name: "times moved, strict times", token: moved, at: "body.assertion", why: "learned under the time default", whyPrefix: true},
+					{name: "another subject", token: claimJWT(hs256Head, shape.claims("svc-2", now), liveSig), timeForm: true, at: "body.assertion", why: "outside the times learned in its claims", whyPrefix: true},
 					{name: "times moved, a body pattern the token is outside", token: moved, timeForm: true, bodyPats: map[string][]string{"assertion": never}, at: "body.assertion", why: "keploy.yml's noise lets"},
+					{name: "times moved, a clock rule at the assertion", token: moved, timeForm: true,
+						sources: []models.DeclaredSource{{Rule: "assertion-clock", Kind: models.DeclaredSourceClock, Field: "body.assertion", Clock: plain}},
+						at:      "body.assertion", why: "assertion-clock", whyPrefix: true},
 					// A field that holds no token keeps its reason: none.
 					{name: "times moved, another grant type", token: moved, grant: "client_credentials", timeForm: true, at: "body.grant_type"},
 				}
 				if carry.form {
 					body, _ := bearer(moved)
-					cases = append(cases, assertionReplay{name: "a second assertion beside it", token: moved, body: body + "&assertion=" + moved, timeForm: true, at: "body.assertion", why: "claim was learned as a time"})
+					cases = append(cases, assertionReplay{name: "a second assertion beside it", token: moved, body: body + "&assertion=" + moved, timeForm: true, at: "body.assertion", why: "holds 2 values where one token was recorded", whyPrefix: true})
 				}
 				for _, c := range cases {
 					t.Run(c.name, func(t *testing.T) {
@@ -450,7 +458,8 @@ func TestAJWTInAFormOrMultipartFieldIsCheckedByItsClaimTimes(t *testing.T) {
 						}
 						in := live("POST", "/v1/notify", body, header)
 						in.arrived = base.Add(2 * time.Second)
-						db := sourcedDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{&rm}, updateUnFilteredReturn: true}, timeForm: c.timeForm}
+						db := sourcedDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{&rm}, updateUnFilteredReturn: true}, timeForm: c.timeForm,
+							sources: map[string][]models.DeclaredSource{rm.Name: c.sources}}
 						ok, stub, diag, err := newHTTP().match(clockConn(true, base), in, db, models.ProvenFlakyHeaderNoise(), c.bodyPats, nil, true, false, false, true, true)
 						if err != nil {
 							t.Fatalf("match: %v", err)
@@ -470,6 +479,9 @@ func TestAJWTInAFormOrMultipartFieldIsCheckedByItsClaimTimes(t *testing.T) {
 						for _, f := range diag.differs {
 							if c.why == "" && f.why != "" || !strings.Contains(f.why, c.why) {
 								t.Fatalf("%s refused for %q; want a reason that says %q", f.shape, f.why, c.why)
+							}
+							if c.whyPrefix && !strings.HasPrefix(f.why, f.shape+" ") {
+								t.Fatalf("%s refused for %q; want a reason prefixed by %q", f.shape, f.why, f.shape+" ")
 							}
 						}
 					})
@@ -534,6 +546,110 @@ func TestATokensTimeOrderedUUIDClaimIsLeftAsLearned(t *testing.T) {
 				if _, ok := m.Spec.ReqBodyNoise[p]; !ok {
 					t.Fatalf("noise %v; want the token at %s learned as noise, as before", m.Spec.ReqBodyNoise, p)
 				}
+			}
+		})
+	}
+}
+
+// A repeated form key whose values only reorder between the two record
+// runs is one value as the learn step reads it (formValue sorts before
+// joining), so learning learns no noise at it.
+func TestAReorderedRepeatedFormKeyLearnsNoNoise(t *testing.T) {
+	h, n, opts := learnOn(t)
+	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	m := learnRecorded("mock-0", 0, "POST", "/v1/notify", "tag=b&tag=a", ct, `{"ok":true}`)
+	db := &learnDb{perTest: []*models.Mock{m}}
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/notify", "tag=a&tag=b", ct), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v; want the reordered form served", served != nil, miss, err)
+	}
+	if len(db.consumed) != 1 || len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v; want no noise learned for a reordered repeated form key", db.consumed[0].Spec.ReqBodyNoise)
+	}
+}
+
+// A JSON field barred by a clock rule (noiseBarred: named by a clock rule
+// with no clock check on this recording) names that rule in its refusal
+// reason rather than leaving why empty, while a keploy.yml pattern refusal
+// keeps its own reason, and a field that does have a clock check on this
+// recording is not blamed on having none when its JSON type changes.
+func TestAClockRuleBarredJSONFieldNamesItsRule(t *testing.T) {
+	base := time.Date(2026, 11, 11, 14, 16, 33, 0, time.UTC)
+	recAt := time.Date(2026, 11, 11, 14, 6, 39, 0, time.UTC)
+	now := base.Add(time.Second)
+	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
+	lastUsed := models.DeclaredSource{Rule: "pat-last-used-at", Kind: models.DeclaredSourceClock, Field: "body.data.lastUsedAt", Clock: plain}
+	updated := models.DeclaredSource{Rule: "pat-updated-at", Kind: models.DeclaredSourceClock, Field: "body.data.updatedAt", Clock: plain}
+	never := []string{"^never$"}
+	for _, c := range []struct {
+		name       string
+		background bool
+		body       string
+		bodyPats   map[string][]string
+		wantWhy    string
+		wantPrefix bool
+		notWhy     string
+	}{
+		{
+			name:       "learned noise barred by a clock rule names the rule",
+			wantWhy:    "pat-last-used-at",
+			wantPrefix: true,
+		},
+		{
+			name: "a type change on a clock-barred field names the rule",
+			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":"` +
+				strconv.FormatInt(now.Unix(), 10) + `","name":"e2e-go","status":"active","updatedAt":"` + recAt.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
+			wantWhy:    "pat-last-used-at",
+			wantPrefix: true,
+		},
+		{
+			name:     "a pattern refusal keeps its own reason",
+			bodyPats: map[string][]string{"data.lastUsedAt": never},
+			wantWhy:  "keploy.yml's noise lets",
+			notWhy:   "pat-last-used-at",
+		},
+		{
+			name:       "a type change on a clock-checked field is not blamed on no clock check",
+			background: true,
+			body: `{"data":{"_id":"e2e-go-key","cid":"keploy.io","createdAt":1767225600,"keyType":"pat","lastUsedAt":"` +
+				strconv.FormatInt(now.Unix(), 10) + `","name":"e2e-go","status":"active","updatedAt":"` + now.UTC().Format(time.RFC3339) + `"},"options":{"cas":1}}`,
+			notWhy: "pat-last-used-at",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", "1")
+			m, call := patTouch(recAt)
+			m.Spec.ReqBodyNoise = map[string][]string{"body.data.lastUsedAt": {}}
+			in := call(now, recAt)
+			if c.body != "" {
+				in = patTouchCall(c.body)
+			}
+			in.arrived = base.Add(2 * time.Second)
+			db := sourcedDb{
+				mockMemDb:  &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true},
+				sources:    map[string][]models.DeclaredSource{"mock-220": {lastUsed, updated}},
+				background: map[string]bool{"mock-220": c.background},
+				timeForm:   true,
+			}
+			ok, _, diag, err := newHTTP().match(clockConn(true, base), in, db, models.ProvenFlakyHeaderNoise(), c.bodyPats, nil, true, false, false, true, true)
+			if err != nil {
+				t.Fatalf("match: %v", err)
+			}
+			if ok {
+				t.Fatalf("answered; want refused at body.data.lastUsedAt")
+			}
+			if got := differs(diag); len(got) != 1 || !hasField(got, "body.data.lastUsedAt") {
+				t.Fatalf("differs %v; want only body.data.lastUsedAt", got)
+			}
+			f := diag.differs[0]
+			if c.wantWhy != "" && !strings.Contains(f.why, c.wantWhy) {
+				t.Fatalf("%s refused for %q; want a reason that says %q", f.shape, f.why, c.wantWhy)
+			}
+			if c.wantPrefix && !strings.HasPrefix(f.why, f.shape+" ") {
+				t.Fatalf("%s refused for %q; want a reason prefixed by %q", f.shape, f.why, f.shape+" ")
+			}
+			if c.notWhy != "" && strings.Contains(f.why, c.notWhy) {
+				t.Fatalf("%s refused for %q; want a reason that does not say %q", f.shape, f.why, c.notWhy)
 			}
 		})
 	}

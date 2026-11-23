@@ -246,6 +246,10 @@ type strictKnown struct {
 	// (declaredClockFields): no noise learned on one, or on a container
 	// holding it, excuses its value (noiseBarred).
 	declared map[string]models.ClockOffset
+	// declaredRules maps each leaf path in declared to the name of
+	// keploy.yml's clock rule that declared it (declaredClockRules), so a
+	// refusal at a clock-barred field names the rule.
+	declaredRules map[string]string
 }
 
 // clocksOf is what the learn step learned of m as reads of the
@@ -298,6 +302,24 @@ func declaredClockFields(m *models.Mock, d declaredRules) map[string]models.Cloc
 	return learn.DeclaredClocks(d.sources(m.Name), nil)
 }
 
+// declaredClockRules maps each body leaf path in declared to the name of
+// keploy.yml's clock rule that declared it (learn.DeclaredBodySources), so
+// a refusal at a clock-barred field names the rule. nil where declared is
+// empty.
+func declaredClockRules(m *models.Mock, d declaredRules, declared map[string]models.ClockOffset) map[string]string {
+	if len(declared) == 0 {
+		return nil
+	}
+	src := learn.DeclaredBodySources(d.sources(m.Name))
+	out := make(map[string]string, len(declared))
+	for leaf := range declared {
+		if s, ok := src(leaf); ok {
+			out[leaf] = s.Rule
+		}
+	}
+	return out
+}
+
 // noiseBarred reports whether exact is a field a clock rule names
 // (k.declared) at which nothing was learned as a read of the clock
 // (k.clocks): no learned noise excuses its value.
@@ -305,6 +327,31 @@ func (k strictKnown) noiseBarred(exact string) bool {
 	_, declared := k.declared[exact]
 	_, clock := k.clocks[exact]
 	return declared && !clock
+}
+
+// clockBarredWhy is, for a field at exact (named shape) that keploy.yml's
+// clock rule bars learned noise and claim checks from excusing
+// (noiseBarred: a clock rule names it and no clock check applies on this
+// recording), the reason it is compared as recorded, naming the rule; ""
+// otherwise.
+func (k strictKnown) clockBarredWhy(exact, shape string) string {
+	if !k.noiseBarred(exact) {
+		return ""
+	}
+	if rule := k.declaredRules[exact]; rule != "" {
+		return shape + " is named by keploy.yml's clock rule " + rule + " with no clock check on this recording, so it is compared as recorded"
+	}
+	return ""
+}
+
+// refuseField sets f's refusal reason from keploy.yml's noise pattern
+// refusal where one refused it, else from keploy.yml's clock rule where
+// one bars learned noise and claim checks at exact (clockBarredWhy).
+func (k strictKnown) refuseField(f *strictField, refusal *patternRefusal, exact, shape string) {
+	refusal.refuse(f, shape)
+	if f.why == "" {
+		f.why = k.clockBarredWhy(exact, shape)
+	}
 }
 
 // learnedAt reports whether the mock learned the field at exact (the learn
@@ -485,7 +532,8 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}
 	}
 	strictDiffs.Add(1)
-	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declaredClockFields(m, n.declaredRules)}
+	declared := declaredClockFields(m, n.declaredRules)
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declared, declaredRules: declaredClockRules(m, n.declaredRules, declared)}
 	var out []strictField
 	if string(r.Method) != input.method {
 		out = append(out, field(valueDiff("method", string(r.Method), input.method)))
@@ -1454,16 +1502,22 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		// A JWT whose claims hold times the learn step learned is held to
 		// that check (claimsHeld), of the key's values as the learn step
 		// read them (formValue): a key of more than one value holds no one
-		// token, and is refused. One keploy.yml's patterns guard is decided
-		// by them alone.
-		if claims, ok, claimWhy := k.claimsHeld(path, formValue(rv), formValue(lv)); claims && !guarded {
-			if ok {
+		// token, and is refused. keploy.yml's patterns and a clock rule
+		// decide a field they name alone.
+		if !guarded && !k.noiseBarred(path) {
+			if claims, ok, claimWhy := k.claimsHeld(path, formValue(rv), formValue(lv)); claims {
+				if ok {
+					continue
+				}
+				f := shaped(path, shape, models.DiffKindValueChanged, "", "")
+				if len(lv) != 1 {
+					f.why = shape + " holds " + strconv.Itoa(len(lv)) + " values where one token was recorded"
+				} else {
+					f.why = shape + " " + claimWhy
+				}
+				out = append(out, f)
 				continue
 			}
-			f := shaped(path, shape, models.DiffKindValueChanged, "", "")
-			f.why = shape + " " + claimWhy
-			out = append(out, f)
-			continue
 		}
 		// A recorded value the obfuscator redacted is not held to the
 		// patterns; the key's other recorded values and the live ones are.
@@ -1472,7 +1526,7 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 			continue
 		}
 		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
-		refusal.refuse(&f, shape)
+		k.refuseField(&f, refusal, path, shape)
 		out = append(out, f)
 	}
 	return out
@@ -1582,14 +1636,16 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			continue
 		case rp[i].file == "":
 			// A JWT whose claims hold times the learn step learned is held
-			// to that check (claimsHeld). One keploy.yml's patterns guard is
-			// decided by them alone.
-			if claims, ok, claimWhy := k.claimsHeld(path, string(rp[i].data), string(lp[i].data)); claims && !k.guards(rp[i].name) {
-				if ok {
-					continue
+			// to that check (claimsHeld). keploy.yml's patterns and a clock
+			// rule decide a field they name alone.
+			if !k.guards(rp[i].name) && !k.noiseBarred(path) {
+				if claims, ok, claimWhy := k.claimsHeld(path, string(rp[i].data), string(lp[i].data)); claims {
+					if ok {
+						continue
+					}
+					why = shape + " " + claimWhy
+					break
 				}
-				why = shape + " " + claimWhy
-				break
 			}
 			// A recorded value the obfuscator redacted is not held to the
 			// patterns; the live one is.
@@ -1603,7 +1659,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			}
 		}
 		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
-		refusal.refuse(&f, shape)
+		k.refuseField(&f, refusal, path, shape)
 		if why != "" {
 			f.why = why
 		}
@@ -1696,7 +1752,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	learned = !guarded && !k.noiseBarred(exact) && (learned || k.learnedAt(exact, name))
 	if jsonKind(r) != jsonKind(l) {
 		f := shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l))
-		refusal.refuse(&f, shape)
+		k.refuseField(&f, refusal, exact, shape)
 		*out = append(*out, f)
 		return
 	}
@@ -1760,7 +1816,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			return
 		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
-		refusal.refuse(&f, shape)
+		k.refuseField(&f, refusal, exact, shape)
 		if claims {
 			f.why = shape + " " + claimWhy
 		}
