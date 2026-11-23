@@ -228,6 +228,10 @@ type MockManager struct {
 	scopeOwnedMu  sync.Mutex
 	scopeOwned    []*models.Mock
 	scopeOwnedGen uint64
+	// scopeReplaced names recordings replaced by the open test's derived mocks
+	// under SetScopeMocks (KEPLOY_PROVEN unset), so unset-mode background
+	// serving omits them while the test is open.
+	scopeReplaced map[string]struct{}
 	// answered keeps, of the per-test recordings that answered a call in this
 	// test set, the request side, by request key and bounded by bytes, for a
 	// miss's diagnosis (FindAnsweredEarlier).
@@ -950,6 +954,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.consumedMu.Unlock()
 	m.scopeOwnedMu.Lock()
 	m.scopeOwned = nil
+	m.scopeReplaced = nil
 	m.scopeOwnedMu.Unlock()
 
 	m.swapMu.Lock()
@@ -1609,22 +1614,44 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, st
 // trees and the window of one staging; the others see each change as it
 // lands, the trees before the window, as with any staging.
 func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bool) {
+	var replaced map[string]struct{}
+	if open {
+		replaced = models.ReplacedBy(filtered)
+	}
+	m.SetScopeMocksWithReplaced(filtered, unfiltered, open, replaced)
+}
+
+// SetScopeMocksWithReplaced stages the scope mocks like SetScopeMocks, using
+// replaced as the exact set of sources the open test's own derived mocks
+// replace (so carry-over mocks belonging to other tests never leak replacements
+// into the open test's background serving).
+func (m *MockManager) SetScopeMocksWithReplaced(filtered, unfiltered []*models.Mock, open bool, replaced map[string]struct{}) {
 	defer m.signalWindowChange()
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	if !open {
-		m.scopeOwnedMu.Lock()
-		m.scopeOwned = nil
-		m.scopeOwnedMu.Unlock()
 		served := m.scopeServed()
 		filtered, unfiltered = withoutScopeServed(filtered, served), withoutScopeServed(unfiltered, served)
 		ownForStaging(&filtered, &unfiltered)
 		m.setMocksWithWindowLocked(filtered, unfiltered, nil, models.BaseTime, time.Now(), false)
+		m.scopeOwnedMu.Lock()
+		m.scopeOwned = nil
+		m.scopeReplaced = nil
+		m.scopeOwnedMu.Unlock()
 		return
 	}
 	ownForStaging(&filtered, &unfiltered)
 	m.scopeOwnedMu.Lock()
 	m.scopeOwned = slices.Clone(filtered)
+	if len(replaced) > 0 {
+		cp := make(map[string]struct{}, len(replaced))
+		for k := range replaced {
+			cp[k] = struct{}{}
+		}
+		m.scopeReplaced = cp
+	} else {
+		m.scopeReplaced = nil
+	}
 	m.scopeOwnedGen++
 	m.scopeOwnedMu.Unlock()
 	// The epoch and carry-over bookkeeping a BaseTime staging resets, which

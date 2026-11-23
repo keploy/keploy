@@ -58,6 +58,9 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// The places the learn step learned as a read of the application's
 		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
 		Clocks: maps.Clone(mock.Spec.Clocks),
+		// That the mock was written rather than recorded, how and why
+		// (models.MockSpec.Authored), a kind-agnostic top-level block.
+		Authored: mock.Spec.Authored.Clone(),
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
@@ -338,6 +341,9 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		// The places the learn step learned as a read of the application's
 		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
 		Clocks: maps.Clone(mock.Spec.Clocks),
+		// That the mock was written rather than recorded, how and why
+		// (models.MockSpec.Authored), a kind-agnostic top-level block.
+		Authored: mock.Spec.Authored.Clone(),
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
@@ -728,6 +734,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			mock.Spec.Async = m.Async
 			mock.Spec.Variables = m.Variables.Clone()
 			mock.Spec.Clocks = maps.Clone(m.Clocks)
+			mock.Spec.Authored = m.Authored.Clone()
 			mock.Origin = m.Origin // the mapper may have rebuilt the mock whole
 			mocks = append(mocks, &mock)
 			continue
@@ -921,6 +928,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
 		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
 		mock.Spec.Clocks = maps.Clone(m.Clocks)   // kind-agnostic, like variables
+		mock.Spec.Authored = m.Authored.Clone()   // kind-agnostic, like clocks
 		mocks = append(mocks, &mock)
 	}
 
@@ -2078,6 +2086,7 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
 		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
 		mock.Spec.Clocks = maps.Clone(m.Clocks)   // kind-agnostic, like variables
+		mock.Spec.Authored = m.Authored.Clone()   // kind-agnostic, like clocks
 		mocks = append(mocks, &mock)
 	}
 	return mocks, nil

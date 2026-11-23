@@ -24,6 +24,17 @@ func statedCall(name string, at time.Duration, path string) *models.Mock {
 	return m
 }
 
+// urlIndex files an HTTP recording under its request's URL, as a parser
+// that walks the recordings filed under the request reads them.
+func urlIndex() *integrations.MockIndex {
+	return &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
+		if mk.Spec.HTTPReq == nil {
+			return nil
+		}
+		return []string{mk.Spec.HTTPReq.URL}
+	}}
+}
+
 // declareSessionCalls installs rules for the row, and none after it.
 func declareSessionCalls(t *testing.T, rules ...models.SessionCallRule) {
 	t.Helper()
@@ -108,12 +119,7 @@ func TestADeclaredSessionCallRecordedAtStartUpIsServedToEveryTest(t *testing.T) 
 	// A keyed read (a parser that walks the recordings filed under the
 	// request) finds it too, and none of the other tests' recordings filed
 	// under the same request, whichever way the view walks the key.
-	ix := &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
-		if mk.Spec.HTTPReq == nil {
-			return nil
-		}
-		return []string{mk.Spec.HTTPReq.URL}
-	}}
+	ix := urlIndex()
 	if got := strings.Join(keyedWalk(t, mm, ix, "/echo/rates"), ","); got != "rates" {
 		t.Fatalf("a keyed read of the declared call in a test shows %q; want rates", got)
 	}
@@ -225,12 +231,7 @@ func TestAPoolViewOfOtherNamesOfTheSameCountReplacesTheDeclaredSlice(t *testing.
 func TestTestsWithAPoolViewOfTheSameNamesBetweenThemShareTheirSharedPart(t *testing.T) {
 	declareSessionCalls(t, declaredRule)
 	mm, ms := startupSet(t)
-	ix := &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
-		if mk.Spec.HTTPReq == nil {
-			return nil
-		}
-		return []string{mk.Spec.HTTPReq.URL}
-	}}
+	ix := urlIndex()
 	mm.ServeExactPool("k", []string{"rates", "cfg"})
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	g1, _ := mm.SharedGeneration("")
