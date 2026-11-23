@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
@@ -33,13 +35,14 @@ import (
 type Relay struct {
 	cfg Config
 
-	// src is the real client-side socket. Held behind an atomic
-	// pointer so the directive processor can swap it for a TLS-
-	// wrapped version without synchronising on the forwarder's hot
-	// path. The forwarder reloads on every iteration.
-	src atomic.Pointer[net.Conn]
+	// src is the real client-side socket wrapped once in trackedPeerConn so
+	// every write and half-close updates srcWrites by construction. Held
+	// behind an atomic pointer so the directive processor can swap it for a
+	// TLS-wrapped version without synchronising on the forwarder's hot path.
+	// The forwarder reloads on every iteration.
+	src atomic.Pointer[trackedPeerConn]
 	// dst is the real destination-side socket; same treatment as src.
-	dst atomic.Pointer[net.Conn]
+	dst atomic.Pointer[trackedPeerConn]
 
 	// teeC2D handles chunks flowing client → destination (Dir=FromClient).
 	teeC2D *tee
@@ -267,8 +270,8 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	// the count of every byte written to it that the proxy put on it at its
 	// accept (countFromAccept).
 	countFromAccept(src, r.client)
-	r.src.Store(&src)
-	r.dst.Store(&dst)
+	r.src.Store(wrapPeerConn(src, &r.srcWrites))
+	r.dst.Store(wrapPeerConn(dst, &r.dstWrites))
 	r.lastLook = make(chan struct{})
 	if r.client == nil && canAskClientSockets && src != nil && cfg.Logger != nil {
 		cfg.Logger.Debug("relay: the client conn has no TCP socket under it to ask; what the destination sends "+
@@ -599,7 +602,7 @@ func (r *Relay) run(ctx context.Context) error {
 	// that end at once, so it is drained as a half-close is, and the end is
 	// read and told (Config.PeerEnded). Torn down, the opposite forwarder
 	// would stop at its nudged read, with the end in its socket unread.
-	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn], writes *peerWriteState) {
+	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[trackedPeerConn]) {
 		halfClose := r.cfg.HalfCloseGrace >= 0 && errors.Is(err, io.EOF)
 		if !halfClose {
 			closeStopping()
@@ -621,8 +624,10 @@ func (r *Relay) run(ctx context.Context) error {
 		var cerr error
 		if toClient && r.clientClosedBeforeFIN() {
 			cerr = errClientClosedBeforeFIN
+		} else if c := writeSide.Load(); c == nil {
+			cerr = errNoHalfClose
 		} else {
-			cerr = writes.closeWrite(writeSide.Load())
+			cerr = c.CloseWrite()
 		}
 		clientFIN := toClient && cerr == nil
 		if cerr != nil && !connOver(cerr) {
@@ -633,7 +638,7 @@ func (r *Relay) run(ctx context.Context) error {
 		// A FIN not forwarded (cerr: the client's connection over already)
 		// was never sent.
 		if c := writeSide.Load(); clientFIN && c != nil {
-			r.noteClientFINSent(*c)
+			r.noteClientFINSent(c)
 		}
 		if log := r.cfg.Logger; log != nil {
 			// over: the FIN was not forwarded, the other side's connection
@@ -656,18 +661,18 @@ func (r *Relay) run(ctx context.Context) error {
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
-		err := r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D, &r.srcWrites, &r.dstWrites)
+		err := r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D, &r.srcWrites)
 		recordErr(err)
-		onForwarderExit(err, &r.dst, &r.dst, &r.dstWrites)
+		onForwarderExit(err, &r.dst, &r.dst)
 	}()
 
 	// Forwarder dst → src (Dir=FromDest).
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
-		err := r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C, &r.dstWrites, &r.srcWrites)
+		err := r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C, &r.dstWrites)
 		recordErr(err)
-		onForwarderExit(err, &r.src, &r.src, &r.srcWrites)
+		onForwarderExit(err, &r.src, &r.src)
 	}()
 
 	// Block until both forwarders exit.
@@ -696,7 +701,7 @@ func (r *Relay) run(ctx context.Context) error {
 	// stream it did not get. Both forwarders are gone, so nothing writes to
 	// the client any more.
 	if c := r.src.Load(); r.destReset.Load() && c != nil {
-		reset := resetClientOnClose(ctx, *c, r.cfg.HalfCloseGrace)
+		reset := resetClientOnClose(ctx, c, r.cfg.HalfCloseGrace)
 		if log := r.cfg.Logger; log != nil {
 			log.Debug("relay: the destination reset the connection; the client's socket is reset as well",
 				zap.Bool("reset", reset))
@@ -784,13 +789,12 @@ func (r *Relay) forward(
 	ctx context.Context,
 	stopping <-chan struct{},
 	dir fakeconn.Direction,
-	srcPtr *atomic.Pointer[net.Conn],
-	dstPtr *atomic.Pointer[net.Conn],
+	srcPtr *atomic.Pointer[trackedPeerConn],
+	dstPtr *atomic.Pointer[trackedPeerConn],
 	t *tee,
 	seq *atomic.Uint64,
 	readWrites *peerWriteState,
-	writeWrites *peerWriteState,
-) error {
+) (retErr error) {
 	bufSize := r.cfg.ForwardBuf
 	buf := make([]byte, bufSize)
 	log := r.cfg.Logger
@@ -800,6 +804,21 @@ func (r *Relay) forward(
 	// the TLS layer it read through still holds will reach the parser either.
 	defer t.noteReleased()
 	defer t.noteLayerGone()
+	// If any write to this side observed a peer reset (consuming sk_err) and
+	// this forwarder stopped before reporting the peer's end — for example, on
+	// a nudged read deadline followed by <-stopping — report that reset once
+	// here so every exit path gives the same single verdict.
+	var reported bool
+	defer func() {
+		if !reported {
+			if resetErr := readWrites.recordedReset(); resetErr != nil {
+				perr := r.peerResetRead(dir, resetErr)
+				if retErr == nil {
+					retErr = perr
+				}
+			}
+		}
+	}()
 
 	for {
 		t.noteReleased()
@@ -839,7 +858,7 @@ func (r *Relay) forward(
 			}
 		}
 
-		src := *srcPtr.Load()
+		src := srcPtr.Load()
 		n, err := src.Read(buf)
 		// The chunk the Read returned, made once, here, and teed as it is by
 		// whichever path below takes the bytes (written on, stashed, held):
@@ -1059,7 +1078,7 @@ func (r *Relay) forward(
 		}
 
 		if n > 0 {
-			dst := *dstPtr.Load()
+			dst := dstPtr.Load()
 			// Whether the client's FIN had reached the proxy before this
 			// destination chunk is written to it, and how many bytes had
 			// been written to the client's socket before it (client_took.go):
@@ -1080,7 +1099,7 @@ func (r *Relay) forward(
 			// milliseconds. Taken here it is no later than the peer could
 			// have seen any of them, and no earlier than ReadAt.
 			chunk.WrittenAt = time.Now()
-			wn, werr := writeWrites.write(dst, chunk.Bytes)
+			wn, werr := dst.Write(chunk.Bytes)
 
 			// The incomplete-mock mark this chunk's Write earns, set below
 			// once the chunk is teed.
@@ -1176,13 +1195,16 @@ func (r *Relay) forward(
 				// EOFs (no write-observed reset on this side) are still told
 				// as peer FINs even if teardown has already started.
 				if resetErr := readWrites.resetOnEOF(ctx); resetErr != nil {
+					reported = true
 					return r.peerResetRead(dir, resetErr)
 				}
+				reported = true
 				return r.peerFINRead(dir)
 			}
 			// A reset, as each OS's socket gives it (on Windows,
 			// Winsock's own errors: neterr.IsPeerReset).
 			if neterr.IsPeerReset(err) {
+				reported = true
 				return r.peerResetRead(dir, err)
 			}
 			// A SetReadDeadline-driven timeout fired by beginPause
@@ -1211,15 +1233,55 @@ func (r *Relay) forward(
 	}
 }
 
+// trackedPeerConn is the single write-tracking wrapper stored in Relay.src
+// and Relay.dst. Every data Write and CloseWrite anywhere in the relay
+// package goes through it so no caller can write to a side's raw net.Conn
+// without updating peerWriteState.
+//
+// Embedding net.Conn as an interface deliberately promotes only net.Conn's
+// methods (not io.ReaderFrom / sendfile), so no copy helper can write around
+// trackedPeerConn.Write.
+type trackedPeerConn struct {
+	net.Conn
+	writes *peerWriteState
+}
+
+func wrapPeerConn(c net.Conn, w *peerWriteState) *trackedPeerConn {
+	if c == nil {
+		return nil
+	}
+	if tc, ok := c.(*trackedPeerConn); ok && tc.writes == w {
+		return tc
+	}
+	return &trackedPeerConn{Conn: c, writes: w}
+}
+
+func (c *trackedPeerConn) Write(p []byte) (int, error) {
+	return c.writes.write(c.Conn, p)
+}
+
+func (c *trackedPeerConn) CloseWrite() error {
+	return c.writes.closeWrite(&c.Conn)
+}
+
+// NetConn exposes the wrapped conn to socket/TLS unwrappers (resetCloser,
+// tcpConnUnder, noteClientFINSent).
+func (c *trackedPeerConn) NetConn() net.Conn { return c.Conn }
+
+// HoldTLSLayer passes the TLS layer served over c to the underlying conn
+// (pTls.TLSLayerHolder), as readTrackingConn and prependingConn do.
+func (c *trackedPeerConn) HoldTLSLayer(l *tls.Conn) { pTls.PassTLSLayer(c.Conn, l) }
+
 // peerWriteState tracks in-flight data writes and CloseWrite calls to one side
 // of the relay and records the first peer-reset error (ECONNRESET, EPIPE, or
 // Windows Winsock reset) any write observes.
 //
-// On Linux and macOS, any write (data or TLS close_notify) to a reset TCP
-// socket consumes the socket's pending error (sk_err), leaving a concurrent or
+// On Linux, any write (data or TLS close_notify) to a reset TCP socket
+// consumes the socket's pending error (sk_err), leaving a concurrent or
 // subsequent Read on that socket to return io.EOF instead of the reset.
-// Consulting this state on io.EOF lets the reader recover and report the peer
-// reset rather than telling the reset as a clean close.
+// Consulting this state on io.EOF (or on teardown exit) lets the reader
+// recover and report the peer reset rather than telling the reset as a clean
+// close or nothing.
 type peerWriteState struct {
 	// sock is a dedicated TCP state socket for this side (initialized in New
 	// before any TLS upgrade wraps src/dst), read only by this side's
@@ -1231,6 +1293,15 @@ type peerWriteState struct {
 	dataWait           chan struct{}
 	closeWriteWait     chan struct{}
 	resetErr           error
+}
+
+// recordedReset returns the first peer-reset error any write to this side
+// recorded, or nil if none has been recorded.
+func (w *peerWriteState) recordedReset() error {
+	w.mu.Lock()
+	err := w.resetErr
+	w.mu.Unlock()
+	return err
 }
 
 func (w *peerWriteState) write(dst net.Conn, p []byte) (int, error) {
@@ -1737,11 +1808,11 @@ var errClientClosedBeforeFIN = fmt.Errorf("relay: the client's socket says its c
 // clearDeadline drops any read deadline previously installed on the
 // conn. Mirror of nudgeDeadline; errors are swallowed for the same
 // reason (not every conn honours deadlines, conn may be torn down).
-func clearDeadline(c *net.Conn) {
-	if c == nil || *c == nil {
+func clearDeadline(c *trackedPeerConn) {
+	if c == nil || c.Conn == nil {
 		return
 	}
-	_ = (*c).SetReadDeadline(time.Time{})
+	_ = c.SetReadDeadline(time.Time{})
 }
 
 // stashInflightFromPause is called by the forwarder when its post-Read
@@ -1817,11 +1888,11 @@ func (r *Relay) releaseClientHold() error {
 	if held.len() == 0 {
 		return nil
 	}
-	dstPtr := r.dst.Load()
-	if dstPtr == nil {
+	dst := r.dst.Load()
+	if dst == nil {
 		return fmt.Errorf("relay: client hold release: no destination to flush %d held bytes to", held.len())
 	}
-	if err := r.writeHeldBytes(*dstPtr, held.bytes); err != nil {
+	if err := r.writeHeldBytes(dst, held.bytes); err != nil {
 		return err
 	}
 	return nil
@@ -1845,14 +1916,14 @@ const heldFlushWriteTimeout = 5 * time.Second
 //
 // SetWriteDeadline, never SetReadDeadline: the forwarders' Reads drive
 // the pause machinery and must not be disturbed by a flush.
-func (r *Relay) writeHeldBytes(dst net.Conn, payload []byte) error {
-	if dst == nil {
+func (r *Relay) writeHeldBytes(dst *trackedPeerConn, payload []byte) error {
+	if dst == nil || dst.Conn == nil {
 		return errors.New("relay: no destination to flush held bytes to")
 	}
 	_ = dst.SetWriteDeadline(time.Now().Add(heldFlushWriteTimeout))
 	defer func() { _ = dst.SetWriteDeadline(time.Time{}) }()
 
-	wn, err := r.dstWrites.write(dst, payload)
+	wn, err := dst.Write(payload)
 	if err != nil {
 		return err
 	}
@@ -1984,11 +2055,11 @@ func (r *Relay) flushHeldRemainder() error {
 	if held.len() == 0 {
 		return nil
 	}
-	dstPtr := r.dst.Load()
-	if dstPtr == nil {
+	dst := r.dst.Load()
+	if dst == nil {
 		return fmt.Errorf("relay: no destination to flush %d held bytes to", held.len())
 	}
-	return r.writeHeldBytes(*dstPtr, held.bytes)
+	return r.writeHeldBytes(dst, held.bytes)
 }
 
 // takeStashed returns and clears the stash for the given direction.
@@ -2079,11 +2150,11 @@ func splitStashedPrefix(parts []stashedPayload, n int) (stashedPayload, []stashe
 // nudgeDeadline sets a deadline in the past on the conn if non-nil.
 // Errors are swallowed because (a) not every net.Conn honours
 // deadlines, and (b) the conn may already be in teardown.
-func (r *Relay) nudgeDeadline(c *net.Conn) {
-	if c == nil || *c == nil {
+func (r *Relay) nudgeDeadline(c *trackedPeerConn) {
+	if c == nil || c.Conn == nil {
 		return
 	}
-	_ = (*c).SetReadDeadline(time.Unix(1, 0))
+	_ = c.SetReadDeadline(time.Unix(1, 0))
 }
 
 // isBenignNetErr returns true for errors that are expected during

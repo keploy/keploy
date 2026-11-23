@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -107,21 +109,21 @@ func (c *writeResetRaceConn) observedReadErr() error {
 	return c.readErr
 }
 
-// assertSocketReadAfterWriteReset checks that on Linux and macOS the real
-// kernel socket actually returned io.EOF (proving the write consumed sk_err
-// and the relay recovered the reset from peerWriteState), while on Windows
-// Winsock may return either io.EOF or a sticky peer reset error.
+// assertSocketReadAfterWriteReset checks that on Linux the real kernel socket
+// actually returned io.EOF (proving the write consumed sk_err and the relay
+// recovered the reset from peerWriteState), while on macOS (XNU) and Windows
+// (Winsock) Read after a failed Write may return either io.EOF or a sticky
+// peer reset error.
 func assertSocketReadAfterWriteReset(t *testing.T, readErr error) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Logf("windows underlying socket Read after failed Write returned: %v", readErr)
-		if !errors.Is(readErr, io.EOF) && !neterr.IsPeerReset(readErr) {
-			t.Fatalf("underlying socket Read after failed Write returned %v, want io.EOF or peer reset", readErr)
+	if runtime.GOOS == "linux" {
+		if !errors.Is(readErr, io.EOF) {
+			t.Fatalf("underlying socket Read after failed Write returned %v, want io.EOF", readErr)
 		}
 		return
 	}
-	if !errors.Is(readErr, io.EOF) {
-		t.Fatalf("underlying socket Read after failed Write returned %v, want io.EOF", readErr)
+	if !errors.Is(readErr, io.EOF) && !neterr.IsPeerReset(readErr) {
+		t.Fatalf("underlying socket Read after failed Write returned %v, want io.EOF or peer reset", readErr)
 	}
 }
 
@@ -483,20 +485,22 @@ func TestWriteEatsPeerResetOnRealSocketsIsToldAsReset(t *testing.T) {
 }
 
 // simulatedWriteResetConn deterministically interleaves a failing Write or
-// CloseWrite (returning writeErr) with Read returning io.EOF on every OS,
+// CloseWrite (returning writeErr) with Read returning io.EOF (or
+// os.ErrDeadlineExceeded when readReturnsDeadline is set) on every OS,
 // including Windows where Winsock may keep recv errors sticky.
 type simulatedWriteResetConn struct {
 	*net.TCPConn
-	failDataWrite bool
-	onDeadline    bool
-	writeErr      error
-	readEntered   chan struct{}
-	releaseRead   chan struct{}
-	readReturned  chan struct{}
-	abort         chan struct{}
-	enterOnce     sync.Once
-	releaseOnce   sync.Once
-	readOnce      sync.Once
+	failDataWrite       bool
+	onDeadline          bool
+	readReturnsDeadline bool
+	writeErr            error
+	readEntered         chan struct{}
+	releaseRead         chan struct{}
+	readReturned        chan struct{}
+	abort               chan struct{}
+	enterOnce           sync.Once
+	releaseOnce         sync.Once
+	readOnce            sync.Once
 }
 
 func (c *simulatedWriteResetConn) SyscallConn() (syscall.RawConn, error) {
@@ -512,6 +516,9 @@ func (c *simulatedWriteResetConn) Read(_ []byte) (int, error) {
 	case <-c.abort:
 	}
 	c.readOnce.Do(func() { close(c.readReturned) })
+	if c.readReturnsDeadline {
+		return 0, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	}
 	return 0, io.EOF
 }
 
@@ -654,11 +661,12 @@ func (c *blockingWriteConn) Write(p []byte) (int, error) {
 //     genuine destination FIN.
 func TestWriteResetAndGenuineFINOrderingAcrossOSes(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		failDataWrite bool
-		onDeadline    bool
-		writeErr      error
-		want          []string
+		name                string
+		failDataWrite       bool
+		onDeadline          bool
+		readReturnsDeadline bool
+		writeErr            error
+		want                []string
 	}{
 		{
 			name:          "dest read EOF during failed CloseWrite with ECONNRESET tells reset",
@@ -685,6 +693,22 @@ func TestWriteResetAndGenuineFINOrderingAcrossOSes(t *testing.T) {
 			writeErr:      syscall.EPIPE,
 			want:          []string{"the destination's end (reset)"},
 		},
+		{
+			name:                "dest read deadline exit after failed CloseWrite still tells reset",
+			failDataWrite:       false,
+			onDeadline:          true,
+			readReturnsDeadline: true,
+			writeErr:            syscall.ECONNRESET,
+			want:                []string{"the client's end", "the destination's end (reset)", "the client's end before the destination's"},
+		},
+		{
+			name:                "dest read deadline exit after failed data Write still tells reset",
+			failDataWrite:       true,
+			onDeadline:          true,
+			readReturnsDeadline: true,
+			writeErr:            syscall.EPIPE,
+			want:                []string{"the destination's end (reset)"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app, proxyClient := loopbackPair(t)
@@ -693,14 +717,15 @@ func TestWriteResetAndGenuineFINOrderingAcrossOSes(t *testing.T) {
 			abort := make(chan struct{})
 			readEntered := make(chan struct{})
 			dest := &simulatedWriteResetConn{
-				TCPConn:       proxyServer.(*net.TCPConn),
-				failDataWrite: tc.failDataWrite,
-				onDeadline:    tc.onDeadline,
-				writeErr:      tc.writeErr,
-				readEntered:   readEntered,
-				releaseRead:   make(chan struct{}),
-				readReturned:  make(chan struct{}),
-				abort:         abort,
+				TCPConn:             proxyServer.(*net.TCPConn),
+				failDataWrite:       tc.failDataWrite,
+				onDeadline:          tc.onDeadline,
+				readReturnsDeadline: tc.readReturnsDeadline,
+				writeErr:            tc.writeErr,
+				readEntered:         readEntered,
+				releaseRead:         make(chan struct{}),
+				readReturned:        make(chan struct{}),
+				abort:               abort,
 			}
 			logger, drains := newDrainObserver()
 			ends := newEndsTold()
@@ -739,46 +764,57 @@ func TestWriteResetAndGenuineFINOrderingAcrossOSes(t *testing.T) {
 		})
 	}
 
-	t.Run("client read EOF during failed CloseWrite tells reset", func(t *testing.T) {
-		app, proxyClient := loopbackPair(t)
-		proxyServer, server := loopbackPair(t)
-		t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
-		abort := make(chan struct{})
-		readEntered := make(chan struct{})
-		client := &simulatedWriteResetConn{
-			TCPConn:      proxyClient.(*net.TCPConn),
-			writeErr:     syscall.ECONNRESET,
-			readEntered:  readEntered,
-			releaseRead:  make(chan struct{}),
-			readReturned: make(chan struct{}),
-			abort:        abort,
-		}
-		logger, drains := newDrainObserver()
-		ends := newEndsTold()
-		cfg := ends.config()
-		cfg.Logger = logger
-		done := runRelay(t, New(cfg, client, connseq.NewUpstream(proxyServer)))
-		t.Cleanup(func() { close(abort) })
+	for _, tc := range []struct {
+		name                string
+		onDeadline          bool
+		readReturnsDeadline bool
+	}{
+		{name: "client read EOF during failed CloseWrite tells reset"},
+		{name: "client read deadline exit after failed CloseWrite still tells reset", onDeadline: true, readReturnsDeadline: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, proxyClient := loopbackPair(t)
+			proxyServer, server := loopbackPair(t)
+			t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
+			abort := make(chan struct{})
+			readEntered := make(chan struct{})
+			client := &simulatedWriteResetConn{
+				TCPConn:             proxyClient.(*net.TCPConn),
+				onDeadline:          tc.onDeadline,
+				readReturnsDeadline: tc.readReturnsDeadline,
+				writeErr:            syscall.ECONNRESET,
+				readEntered:         readEntered,
+				releaseRead:         make(chan struct{}),
+				readReturned:        make(chan struct{}),
+				abort:               abort,
+			}
+			logger, drains := newDrainObserver()
+			ends := newEndsTold()
+			cfg := ends.config()
+			cfg.Logger = logger
+			done := runRelay(t, New(cfg, client, connseq.NewUpstream(proxyServer)))
+			t.Cleanup(func() { close(abort) })
 
-		select {
-		case <-readEntered:
-		case <-time.After(10 * time.Second):
-			t.Fatal("client forwarder did not enter Read within 10s")
-		}
-		if err := server.Close(); err != nil {
-			t.Fatal(err)
-		}
-		awaitDone(t, done, "the relay did not end")
-		select {
-		case <-drains:
-			t.Fatal("the relay drained after a failing CloseWrite to client, want teardown")
-		default:
-		}
-		want := []string{"the destination's end", "the client's end (reset)"}
-		if got := ends.all(); !slices.Equal(got, want) {
-			t.Fatalf("told %q, want %q", got, want)
-		}
-	})
+			select {
+			case <-readEntered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("client forwarder did not enter Read within 10s")
+			}
+			if err := server.Close(); err != nil {
+				t.Fatal(err)
+			}
+			awaitDone(t, done, "the relay did not end")
+			select {
+			case <-drains:
+				t.Fatal("the relay drained after a failing CloseWrite to client, want teardown")
+			default:
+			}
+			want := []string{"the destination's end", "the client's end (reset)"}
+			if got := ends.all(); !slices.Equal(got, want) {
+				t.Fatalf("told %q, want %q", got, want)
+			}
+		})
+	}
 
 	t.Run("client FIN racing destination reset tells both ends identically across OSes", func(t *testing.T) {
 		app, proxyClient := loopbackPair(t)
@@ -1044,6 +1080,321 @@ func TestWriteResetAndGenuineFINOrderingAcrossOSes(t *testing.T) {
 		awaitDone(t, done, "the relay did not end")
 		if got := ends.all(); !slices.Contains(got, "the destination's end") {
 			t.Fatalf("told %q, want the destination's genuine FIN", got)
+		}
+	})
+}
+
+// directivePauseGateConn holds a forwarder's Read while still honouring
+// pause-barrier read-deadline nudges WITHOUT issuing a kernel read syscall
+// (keeping sk_err pending until a directive Write fails and releases the gate).
+type directivePauseGateConn struct {
+	*net.TCPConn
+	gate         atomic.Bool
+	readEntered  chan struct{}
+	releaseRead  chan struct{}
+	readReturned chan struct{}
+	abort        chan struct{}
+	enterOnce    sync.Once
+	releaseOnce  sync.Once
+	readOnce     sync.Once
+	mu           sync.Mutex
+	readErr      error
+	deadlinePast bool
+	deadlineCh   chan struct{}
+}
+
+func newDirectivePauseGateConn(c net.Conn, abort chan struct{}) *directivePauseGateConn {
+	g := &directivePauseGateConn{
+		TCPConn:      c.(*net.TCPConn),
+		readEntered:  make(chan struct{}),
+		releaseRead:  make(chan struct{}),
+		readReturned: make(chan struct{}),
+		abort:        abort,
+		deadlineCh:   make(chan struct{}),
+	}
+	g.gate.Store(true)
+	return g
+}
+
+func (c *directivePauseGateConn) NetConn() net.Conn { return c.TCPConn }
+
+func (c *directivePauseGateConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	past := !t.IsZero() && t.Before(time.Now())
+	if past && !c.deadlinePast {
+		c.deadlinePast = true
+		close(c.deadlineCh)
+	} else if !past && c.deadlinePast {
+		c.deadlinePast = false
+		c.deadlineCh = make(chan struct{})
+	}
+	c.mu.Unlock()
+	return c.TCPConn.SetReadDeadline(t)
+}
+
+func (c *directivePauseGateConn) Read(p []byte) (int, error) {
+	if c.gate.Load() {
+		c.enterOnce.Do(func() { close(c.readEntered) })
+		c.mu.Lock()
+		past := c.deadlinePast
+		dch := c.deadlineCh
+		c.mu.Unlock()
+		if past {
+			return 0, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+		}
+		select {
+		case <-c.releaseRead:
+		case <-c.abort:
+		case <-dch:
+			return 0, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+		}
+		n, err := c.TCPConn.Read(p)
+		c.mu.Lock()
+		c.readErr = err
+		c.mu.Unlock()
+		c.gate.Store(false)
+		c.readOnce.Do(func() { close(c.readReturned) })
+		return n, err
+	}
+	return c.TCPConn.Read(p)
+}
+
+func (c *directivePauseGateConn) Write(p []byte) (int, error) {
+	n, err := c.TCPConn.Write(p)
+	if c.gate.Load() && err != nil {
+		c.releaseOnce.Do(func() { close(c.releaseRead) })
+	}
+	return n, err
+}
+
+func (c *directivePauseGateConn) observedReadErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readErr
+}
+
+// TestDirectiveWritesEatingPeerResetAreToldAsReset proves on real loopback TCP
+// sockets that directive-processor writes (ReleaseClient D2C pause-stash
+// flush, ResumePreDispatch C2D/D2C drains, UpgradeTLS client-hold C2D flush)
+// all route through trackedPeerConn / peerWriteState so a peer reset consumed
+// by any directive write is reported as a reset rather than a clean close.
+func TestDirectiveWritesEatingPeerResetAreToldAsReset(t *testing.T) {
+	t.Run("ReleaseClient D2C stash write eats client reset", func(t *testing.T) {
+		app, proxyClient := loopbackPair(t)
+		proxyServer, server := loopbackPair(t)
+		t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
+		abort := make(chan struct{})
+		cli := newDirectivePauseGateConn(proxyClient, abort)
+		ends := newEndsTold()
+		cfg := ends.config()
+		cfg.HoldClientWrites = true
+		r := New(cfg, &proxyutil.Conn{Conn: cli, Reader: cli, Logger: zap.NewNop()}, connseq.NewUpstream(proxyServer))
+		done := runRelay(t, r)
+		t.Cleanup(func() { close(abort) })
+
+		greeting := []byte{0x0a, 'm', 'y', 's', 'q', 'l', 0x00}
+		if _, err := server.Write(greeting); err != nil {
+			t.Fatal(err)
+		}
+		_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.ReadFull(app, make([]byte, len(greeting))); err != nil {
+			t.Fatalf("no greeting: %v", err)
+		}
+		select {
+		case <-cli.readEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("client forwarder did not enter Read within 10s")
+		}
+		if err := app.(*net.TCPConn).SetLinger(0); err != nil {
+			t.Fatal(err)
+		}
+		_ = app.Close()
+		awaitTCPState(t, proxyClient, stateClosed, "the client's reset")
+
+		r.stashInflightFromPause(fakeconn.FromDest, []byte("server-bytes-at-boundary\n"), time.Now())
+		r.Directives() <- directive.ReleaseClient("release stash write eats client reset")
+		select {
+		case <-r.Acks():
+		case <-time.After(10 * time.Second):
+			t.Fatal("no ReleaseClient ack within 10s")
+		}
+		select {
+		case <-cli.readReturned:
+		case <-time.After(10 * time.Second):
+			t.Fatal("client forwarder did not complete Read after ReleaseClient stash write")
+		}
+		awaitDone(t, done, "the relay did not end after client reset")
+
+		assertSocketReadAfterWriteReset(t, cli.observedReadErr())
+		want := []string{"the client's end (reset)"}
+		if got := ends.all(); !slices.Equal(got, want) {
+			t.Fatalf("told %q, want %q", got, want)
+		}
+	})
+
+	t.Run("ResumePreDispatch C2D drain write eats destination reset", func(t *testing.T) {
+		app, proxyClient := loopbackPair(t)
+		proxyServer, server := loopbackPair(t)
+		t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
+		abort := make(chan struct{})
+		dest := newDirectivePauseGateConn(proxyServer, abort)
+		ends := newEndsTold()
+		cfg := ends.config()
+		cfg.PreDispatchPause = true
+		clientStashed := make(chan struct{})
+		var stashOnce sync.Once
+		cfg.OnClientChunkTeed = func() { stashOnce.Do(func() { close(clientStashed) }) }
+		r := New(cfg, &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, connseq.NewUpstream(dest))
+		done := runRelay(t, r)
+		t.Cleanup(func() { close(abort) })
+
+		req := []byte("pre-dispatch-request")
+		if _, err := app.Write(req); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-clientStashed:
+		case <-time.After(10 * time.Second):
+			t.Fatal("client pre-dispatch chunk was not stashed within 10s")
+		}
+		select {
+		case <-dest.readEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("destination forwarder did not enter Read within 10s")
+		}
+		if err := server.(*net.TCPConn).SetLinger(0); err != nil {
+			t.Fatal(err)
+		}
+		_ = server.Close()
+		awaitTCPState(t, proxyServer, stateClosed, "the destination's reset")
+
+		r.Directives() <- directive.ResumePreDispatch("c2d drain eats dest reset")
+		select {
+		case ack := <-r.Acks():
+			if ack.OK {
+				t.Fatalf("ResumePreDispatch ack.OK = true, want false on reset destination")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("no ResumePreDispatch ack within 10s")
+		}
+		awaitDone(t, done, "the relay did not end after destination reset")
+
+		assertSocketReadAfterWriteReset(t, dest.observedReadErr())
+		want := []string{"the destination's end (reset)"}
+		if got := ends.all(); !slices.Equal(got, want) {
+			t.Fatalf("told %q, want %q", got, want)
+		}
+		if !r.destReset.Load() {
+			t.Fatal("destReset is false, want true")
+		}
+	})
+
+	t.Run("ResumePreDispatch D2C drain write eats client reset", func(t *testing.T) {
+		app, proxyClient := loopbackPair(t)
+		proxyServer, server := loopbackPair(t)
+		t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
+		abort := make(chan struct{})
+		cli := newDirectivePauseGateConn(proxyClient, abort)
+		ends := newEndsTold()
+		cfg := ends.config()
+		cfg.PreDispatchPause = true
+		r := New(cfg, &proxyutil.Conn{Conn: cli, Reader: cli, Logger: zap.NewNop()}, connseq.NewUpstream(proxyServer))
+		done := runRelay(t, r)
+		t.Cleanup(func() { close(abort) })
+
+		select {
+		case <-cli.readEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("client forwarder did not enter Read within 10s")
+		}
+		if err := app.(*net.TCPConn).SetLinger(0); err != nil {
+			t.Fatal(err)
+		}
+		_ = app.Close()
+		awaitTCPState(t, proxyClient, stateClosed, "the client's reset")
+
+		r.stashInflightFromPause(fakeconn.FromDest, []byte("pre-dispatch-server-greeting"), time.Now())
+		r.Directives() <- directive.ResumePreDispatch("d2c drain eats client reset")
+		select {
+		case ack := <-r.Acks():
+			if ack.OK {
+				t.Fatalf("ResumePreDispatch ack.OK = true, want false on reset client")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("no ResumePreDispatch ack within 10s")
+		}
+		awaitDone(t, done, "the relay did not end after client reset")
+
+		assertSocketReadAfterWriteReset(t, cli.observedReadErr())
+		want := []string{"the client's end (reset)"}
+		if got := ends.all(); !slices.Equal(got, want) {
+			t.Fatalf("told %q, want %q", got, want)
+		}
+	})
+
+	t.Run("UpgradeTLS client-hold C2D flush eats destination reset", func(t *testing.T) {
+		app, proxyClient := loopbackPair(t)
+		proxyServer, server := loopbackPair(t)
+		t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
+		abort := make(chan struct{})
+		dest := newDirectivePauseGateConn(proxyServer, abort)
+		ends := newEndsTold()
+		cfg := ends.config()
+		cfg.HoldClientWrites = true
+		clientHeld := make(chan struct{})
+		var holdOnce sync.Once
+		cfg.OnClientChunkTeed = func() { holdOnce.Do(func() { close(clientHeld) }) }
+		cfg.TLSUpgradeFn = func(_ context.Context, conn net.Conn, _ bool, _ *tls.Config) (net.Conn, error) {
+			return conn, nil
+		}
+		r := New(cfg, &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, connseq.NewUpstream(dest))
+		done := runRelay(t, r)
+		t.Cleanup(func() { close(abort) })
+
+		req := []byte("SSLRequest")
+		if _, err := app.Write(req); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-clientHeld:
+		case <-time.After(10 * time.Second):
+			t.Fatal("client hold chunk was not stashed within 10s")
+		}
+		select {
+		case <-dest.readEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("destination forwarder did not enter Read within 10s")
+		}
+		if err := server.(*net.TCPConn).SetLinger(0); err != nil {
+			t.Fatal(err)
+		}
+		_ = server.Close()
+		awaitTCPState(t, proxyServer, stateClosed, "the destination's reset")
+
+		r.Directives() <- directive.Directive{
+			Kind:   directive.KindUpgradeTLS,
+			Reason: "hold flush eats dest reset",
+			TLS: &directive.UpgradeTLSParams{
+				ClientFlushBytes: len(req),
+			},
+		}
+		select {
+		case ack := <-r.Acks():
+			if ack.OK {
+				t.Fatalf("UpgradeTLS ack.OK = true, want false on reset destination")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("no UpgradeTLS ack within 10s")
+		}
+		awaitDone(t, done, "the relay did not end after destination reset")
+
+		assertSocketReadAfterWriteReset(t, dest.observedReadErr())
+		want := []string{"the destination's end (reset)"}
+		if got := ends.all(); !slices.Equal(got, want) {
+			t.Fatalf("told %q, want %q", got, want)
+		}
+		if !r.destReset.Load() {
+			t.Fatal("destReset is false, want true")
 		}
 	})
 }
