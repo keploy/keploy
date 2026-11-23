@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -55,8 +56,13 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 		reportDB: reportDB,
 		testDB:   testDB,
 	}
-	// 1MB buffered writer
-	r.out = bufio.NewWriterSize(os.Stdout, 1<<20)
+	// 1MB buffered writer. In normal mode the TESTRUN SUMMARY and per-test
+	// diffs go to Discard so the output stays clean; --debug restores them.
+	out := io.Writer(os.Stdout)
+	if !cfg.Debug {
+		out = io.Discard
+	}
+	r.out = bufio.NewWriterSize(out, 1<<20)
 	// Reuse one pretty printer
 	pr := pp.New()
 	pr.WithLineInfo = false

@@ -63,7 +63,11 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	// never goes to a log: the mismatch table, a call of an earlier set. A
 	// program that embeds the replayer has none unless it sets one.
 	if r, ok := replaySvc.(*replay.Replayer); ok {
-		r.SetConsole(os.Stdout)
+		// In normal mode, suppress the replayer's verbose per-test output
+		// and TESTRUN SUMMARY boxes. --debug restores them.
+		if cfg.Debug {
+			r.SetConsole(os.Stdout)
+		}
 	}
 	// mockSvc reuses the SAME AgentClient instrumentation, mock/mapping DBs and
 	// (in enterprise) RecordHooks that record/replay use, so every runtime

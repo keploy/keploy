@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -136,7 +138,16 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		}
 	}()
 
-	err = runner.Up(upCtx, opts, os.Stdout, os.Stderr)
+	// In normal mode, suppress docker compose's container creation and
+	// agent container log lines. --debug restores the full stream.
+	// Check the global log level (set by ChangeLogLevel in the CLI layer)
+	// rather than the App's own logger, which may have been created before
+	// the CLI raised the level.
+	composeOut := io.Writer(os.Stdout)
+	if log.LogCfg.Level.Level() > zap.InfoLevel {
+		composeOut = io.Discard
+	}
+	err = runner.Up(upCtx, opts, composeOut, os.Stderr)
 	close(upDone)
 
 	// Wait for the teardown to finish before returning.
