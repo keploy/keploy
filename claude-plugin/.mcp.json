@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "keploy": {
+      "url": "https://api.keploy.io/client/v1/mcp",
+      "headers": {
+        "X-API-Key": "${user_config.api_key}"
+      }
+    }
+  }
+}
