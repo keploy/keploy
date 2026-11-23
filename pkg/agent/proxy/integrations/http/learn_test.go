@@ -1,7 +1,9 @@
 package http
 
 import (
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -9,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -441,6 +445,98 @@ func TestOrderMissOutsideTheFullRound(t *testing.T) {
 	}
 	if miss := h.orderMiss(context.Background(), live("POST", "/a", `{"ids":[1,2,3],"x":1}`, nil), db, n); miss != nil {
 		t.Fatalf("a changed request is not an order miss: %+v", miss.res)
+	}
+}
+
+// A gzip-encoded JSON array request whose raw wire bytes contain no '[' still
+// gets its unstable_order mismatch label in decodeHTTP outside record's full
+// round: the '[' shortcut inspects the decoded body, the same bytes orderMiss
+// reads.
+func TestDecodeHTTPGzipJSONArrayMissKeepsUnstableOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const host = "api.example"
+
+	gzipBody := func(t *testing.T, plain string) []byte {
+		t.Helper()
+		var gz bytes.Buffer
+		w := gzip.NewWriter(&gz)
+		if _, err := io.WriteString(w, plain); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return gz.Bytes()
+	}
+
+	runMiss := func(t *testing.T, recBody, liveBody string) (*models.MockMismatchReport, []byte) {
+		t.Helper()
+		rec := learnRecorded("m", 0, "POST", "/items", recBody, map[string]string{
+			"Host":             host,
+			"Content-Type":     "application/json",
+			"Content-Encoding": "gzip",
+		}, `{}`)
+		rec.Spec.HTTPReq.ProtoMajor, rec.Spec.HTTPReq.ProtoMinor = 1, 1
+
+		gz := gzipBody(t, liveBody)
+		head := fmt.Sprintf("POST /items HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n", host, len(gz))
+		wire := append([]byte(head), gz...)
+
+		var reported error
+		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
+		app, prox := net.Pipe()
+		defer func() { _ = app.Close() }()
+		done := make(chan error, 1)
+		go func() {
+			done <- (&HTTP{Logger: zaptest.NewLogger(t)}).MockOutgoing(ctx, prox, nil, &learnDb{perTest: []*models.Mock{rec}}, models.OutgoingOptions{})
+		}()
+		if _, err := app.Write(wire); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+		if err != nil {
+			t.Fatalf("reading miss response: %v", err)
+		}
+		_ = resp.Body.Close()
+		_ = app.Close()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("decodeHTTP did not return after miss")
+		}
+		var withReport interface {
+			MismatchReport() *models.MockMismatchReport
+		}
+		if !errors.As(reported, &withReport) || withReport.MismatchReport() == nil {
+			t.Fatalf("miss reported as %v without mismatch report", reported)
+		}
+		return withReport.MismatchReport(), gz
+	}
+
+	const (
+		recArray  = `{"service":"billing-checkout","region":"us-east-1","items":["alpha-item-001","beta-item-002","gamma-item-003","delta-item-004"]}`
+		liveArray = `{"service":"billing-checkout","region":"us-east-1","items":["delta-item-004","gamma-item-003","beta-item-002","alpha-item-001"]}`
+		extraKey  = `{"service":"billing-checkout","region":"us-east-1","items":["alpha-item-001","beta-item-002","gamma-item-003","delta-item-004"],"x":1}`
+	)
+	report, rawGz := runMiss(t, recArray, liveArray)
+	if bytes.IndexByte(rawGz, '[') >= 0 {
+		t.Fatalf("precondition failed: raw gzip bytes unexpectedly contain '[': %x", rawGz)
+	}
+	if report.Reason != models.MissUnstableOrder {
+		t.Fatalf("gzip JSON array miss reason = %q (next_steps=%q), want %q", report.Reason, report.NextSteps, models.MissUnstableOrder)
+	}
+	if report.ClosestMock != "m" {
+		t.Fatalf("gzip JSON array closest mock = %q, want %q", report.ClosestMock, "m")
+	}
+
+	changed, _ := runMiss(t, recArray, extraKey)
+	if changed.Reason == models.MissUnstableOrder {
+		t.Fatalf("gzip changed JSON array got Reason=%q, want non-unstable_order", changed.Reason)
+	}
+
+	plainObj, _ := runMiss(t, `{"id":1}`, `{"id":2}`)
+	if plainObj.Reason == models.MissUnstableOrder {
+		t.Fatalf("gzip non-array object got Reason=%q, want non-unstable_order", plainObj.Reason)
 	}
 }
 

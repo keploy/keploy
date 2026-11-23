@@ -46,6 +46,9 @@ type strictIndex struct {
 	// read's.
 	vars     []*models.Mock
 	varSplit int
+	// bodies are buckets of byPath filed by their recordings' bodies
+	// (plainPrint), each on the first call that reads it so.
+	bodies *bodyFilings
 }
 
 // strictIndexBuilds counts the strict indexes built, and strictVisits the
@@ -60,7 +63,7 @@ var (
 // buildStrictIndex files the strict pool of the reads perTest and session.
 func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise) *strictIndex {
 	strictIndexBuilds.Add(1)
-	ix := &strictIndex{gen: gen, byPath: map[string][]int{}, wild: map[string][]int{}}
+	ix := &strictIndex{gen: gen, byPath: map[string][]int{}, wild: map[string][]int{}, bodies: newBodyFilings(&strictBodyFilings)}
 	for i, mocks := range [][]*models.Mock{perTest, session} {
 		if i == 1 {
 			ix.split, ix.varSplit = len(ix.entries), len(ix.vars)
@@ -88,15 +91,25 @@ func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise
 }
 
 // positions are the entries a call of the sieve's method and masked path may
-// be (strictSieve.mayBe), in the pool's order.
-func (ix *strictIndex) positions(s strictSieve) []int {
-	exact, wild := ix.byPath[s.method+" "+s.masked], ix.wild[s.method]
+// be (strictSieve.mayBe), in the pool's order: of its bucket, where the call's
+// body has a print (body, livePrint), only the recordings of that print and
+// those whose body does not compare plainly (plainPrint).
+func (ix *strictIndex) positions(ctx context.Context, s strictSieve, body uint64, printed bool) ([]int, error) {
+	key := s.method + " " + s.masked
+	exact, wild := ix.byPath[key], ix.wild[s.method]
+	if printed && len(exact) > 0 {
+		b, err := ix.bodies.file(ctx, key, exact, func(p int) (uint64, bool) { return plainPrint(ix.entries[p]) })
+		if err != nil {
+			return nil, err
+		}
+		exact = b.of(body)
+	}
 	if len(wild) == 0 {
-		return exact
+		return exact, nil
 	}
 	out := append(append(make([]int, 0, len(exact)+len(wild)), exact...), wild...)
 	slices.Sort(out)
-	return out
+	return out, nil
 }
 
 // strictKey is what buildStrictIndex files m under, a recording that learned
@@ -133,9 +146,11 @@ type strictLook struct {
 }
 
 // of is the strict pass's indexed read of what db reads now, for base, for a
-// call of the sieve's method and path, or false where the call reads the
-// store instead (learnIndexes.of's rule).
-func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise, s strictSieve) (strictLook, bool) {
+// call of the sieve's method and path whose body has the print body where
+// printed (livePrint), or false where the call reads the store instead
+// (learnIndexes.of's rule). err is ctx's, where it ends while the test's own
+// recordings are filed by their bodies.
+func (x *strictIndexes) of(ctx context.Context, base, db integrations.MockMemDb, n strictNoise, s strictSieve, body uint64, printed bool) (strictLook, bool, error) {
 	url := urlNoiseKey(n.url)
 	if sr, ok := db.(integrations.SharedReads); ok {
 		var perTest, session []*models.Mock
@@ -151,11 +166,15 @@ func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise, s str
 		if ok {
 			own, view, owned, ok := x.owned.of(base, sr, url, func(owned []*models.Mock) *strictOwned { return buildStrictOwned(owned, n) })
 			if !ok {
-				return strictLook{}, false
+				return strictLook{}, false, nil
 			}
-			gen, live, ok := ownedLive(sr, key, view, own.at(s))
+			at, err := own.atBody(ctx, s, owned, body, printed)
+			if err != nil {
+				return strictLook{}, false, err
+			}
+			gen, live, ok := ownedLive(sr, key, view, at)
 			if !ok {
-				return strictLook{}, false
+				return strictLook{}, false, nil
 			}
 			look := strictLook{ix: ix, shared: true, gen: gen}
 			for _, p := range live {
@@ -165,7 +184,7 @@ func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise, s str
 					look.owned = append(look.owned, m)
 				}
 			}
-			return look, true
+			return look, true, nil
 		}
 	}
 	var perTest, session []*models.Mock
@@ -177,9 +196,9 @@ func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise, s str
 		return buildStrictIndex(key.gen, perTest, session, n)
 	})
 	if !ok {
-		return strictLook{}, false
+		return strictLook{}, false, nil
 	}
-	return strictLook{ix: ix, gen: ix.gen}, true
+	return strictLook{ix: ix, gen: ix.gen}, true, nil
 }
 
 // variables are the recordings the variable pass reads for a call, as
@@ -215,8 +234,12 @@ func (l strictLook) variables(mockSpent func(string) bool, spent func(*models.Mo
 // of an open test's shared part the pool is the per-test read (the test's
 // unanswered recordings, then the tier's shared part) then the session read
 // (the test's unanswered recordings, then the tier's shared part less those).
-func (l strictLook) candidates(s strictSieve, n strictNoise, mockSpent func(string) bool, spent func(*models.Mock) bool) []*models.Mock {
-	ps := l.ix.positions(s)
+// body and printed are the call's body's print (livePrint).
+func (l strictLook) candidates(ctx context.Context, s strictSieve, body uint64, printed bool, mockSpent func(string) bool, spent func(*models.Mock) bool) ([]*models.Mock, error) {
+	ps, err := l.ix.positions(ctx, s, body, printed)
+	if err != nil {
+		return nil, err
+	}
 	var owned []*models.Mock
 	if l.shared {
 		// l.owned is the test's own the call may be already (strictOwned.at).
@@ -238,7 +261,7 @@ func (l strictLook) candidates(s strictSieve, n strictNoise, mockSpent func(stri
 			out = append(out, m)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // spentReaderOf is db's account of the recordings a test kept for its
@@ -306,9 +329,10 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 	}
 	scope := readVarScope(db)
 	sieve := newStrictSieve(input, n)
-	look, ok := h.strictIx.of(base, db, n, sieve)
-	if !ok {
-		return nil, false, nil
+	body, printed := livePrint(db, n, input.body)
+	look, ok, err := h.strictIx.of(ctx, base, db, n, sieve, body, printed)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 	own := owner.OwnedByOpenTest
 	ctx = context.WithValue(ctx, ownedKey{}, own)
@@ -347,7 +371,10 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 		}
 	}
 	live := liveDestination(ctx, input)
-	cands := look.candidates(sieve, n, mockSpent, spent)
+	cands, err := look.candidates(ctx, sieve, body, printed, mockSpent, spent)
+	if err != nil {
+		return nil, false, err
+	}
 	strictVisits.Add(int64(len(cands)))
 	var fits []*models.Mock
 	for _, m := range cands {
