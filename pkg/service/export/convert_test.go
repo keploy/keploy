@@ -122,3 +122,62 @@ func TestConvertRequestBodyOptionsFollowTheRequestContentType(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertKeployHTTPToPostmanCollection_DeterministicHeaderOrder(t *testing.T) {
+	schema := &models.HTTPSchema{
+		Request: models.HTTPReq{
+			Method: "GET",
+			URL:    "http://example.com/items",
+			Header: map[string]string{
+				"X-Request-Id":  "req-1",
+				"Authorization": "Bearer token",
+				"Accept":        "application/json",
+				"Content-Type":  "application/json",
+			},
+		},
+		Response: models.HTTPResp{
+			StatusCode: 200,
+			Header: map[string]string{
+				"X-Trace":       "trace-1",
+				"Cache-Control": "no-store",
+				"Content-Type":  "application/json",
+				"Vary":          "Origin",
+			},
+			Body: `{"ok":true}`,
+		},
+	}
+
+	wantReqKeys := []string{"Accept", "Authorization", "Content-Type", "X-Request-Id"}
+	wantRespKeys := []string{"Cache-Control", "Content-Type", "Vary", "X-Trace"}
+
+	for run := 0; run < 10; run++ {
+		c := ConvertKeployHTTPToPostmanCollection(zap.NewNop(), schema)
+		if c == nil {
+			t.Fatal("collection is nil")
+		}
+		req, ok := c["request"].(postmanimport.PostmanRequest)
+		if !ok {
+			t.Fatalf("request has type %T, want PostmanRequest", c["request"])
+		}
+		var gotReqKeys []string
+		for _, h := range req.Header {
+			k, _ := h["key"].(string)
+			gotReqKeys = append(gotReqKeys, k)
+		}
+		if !reflect.DeepEqual(gotReqKeys, wantReqKeys) {
+			t.Fatalf("run %d: request header order = %v, want %v", run, gotReqKeys, wantReqKeys)
+		}
+
+		resps, ok := c["response"].([]postmanimport.PostmanResponse)
+		if !ok || len(resps) != 1 {
+			t.Fatalf("response = %#v, want 1 PostmanResponse", c["response"])
+		}
+		var gotRespKeys []string
+		for _, h := range resps[0].Header {
+			gotRespKeys = append(gotRespKeys, h["key"])
+		}
+		if !reflect.DeepEqual(gotRespKeys, wantRespKeys) {
+			t.Fatalf("run %d: response header order = %v, want %v", run, gotRespKeys, wantRespKeys)
+		}
+	}
+}
