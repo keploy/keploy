@@ -132,3 +132,53 @@ func parseTCP(b []byte) (TCP, bool) {
 		SndCC:  binary.LittleEndian.Uint32(b[offSndCC:]),
 	}, true
 }
+
+// The processes are listed and read through proc_info too, never through
+// the kern.proc sysctls that list them (kern.proc.all, .pgrp, .uid and the
+// others ps(1) reads). Those wait, uninterruptibly, for every process they
+// list that is in the middle of an exec or a posix_spawn, whoever owns it: a
+// spawn held in its file actions, such as an open of a FIFO no one reads,
+// holds every such listing on the machine, ps(1)'s included, for as long as
+// it is held, and keploy's agent stopped answering with it. proc_info's list
+// and short record wait on no other process.
+const (
+	procInfoCallListPIDs = 1  // PROC_INFO_CALL_LISTPIDS
+	procAllPIDs          = 1  // PROC_ALL_PIDS
+	procPGRPOnly         = 2  // PROC_PGRP_ONLY
+	procPIDTShortBSDInfo = 13 // PROC_PIDT_SHORTBSDINFO: struct proc_bsdshortinfo
+)
+
+// PIDs lists every process (libproc's proc_listallpids).
+func PIDs() ([]int, error) { return listPIDs(procAllPIDs, 0) }
+
+// GroupPIDs lists the processes of process group pgid, a zombie's included
+// (libproc's proc_listpids with PROC_PGRP_ONLY).
+func GroupPIDs(pgid int) ([]int, error) { return listPIDs(procPGRPOnly, pgid) }
+
+func listPIDs(kind, arg int) ([]int, error) {
+	return readPIDs(func(buf []byte) (int, error) {
+		return procInfo(procInfoCallListPIDs, kind, arg, 0, buf)
+	})
+}
+
+// Info reads process pid's short BSD record, which any user may read. A
+// process that has exited answers ESRCH, as one that has gone does: a
+// zombie its parent has not reaped yet too, since proc_info reads a zombie's
+// record only when its argument asks for zombies, and Info's does not.
+func Info(pid int) (Proc, error) { return shortInfo(pid, 0) }
+
+// InfoOrZombie reads process pid's short BSD record as Info does, and a
+// zombie's too (Proc.Zombie): its argument asks proc_info for zombies, which
+// it finds through proc_find_zombref. That waits only while another thread
+// reaps or reads that same zombie, never for a held spawn. Only a process
+// that has gone answers ESRCH.
+func InfoOrZombie(pid int) (Proc, error) { return shortInfo(pid, 1) }
+
+func shortInfo(pid int, zombies uint64) (Proc, error) {
+	buf := make([]byte, shortBSDInfoSize)
+	n, err := procInfo(procInfoCallPIDInfo, pid, procPIDTShortBSDInfo, zombies, buf)
+	if err != nil {
+		return Proc{}, err
+	}
+	return shortRecord(pid, buf, n)
+}

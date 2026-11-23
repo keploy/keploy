@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // notOwnedRecording is, for a request no mock answered under exact serving
@@ -144,6 +145,13 @@ func (n strictNoise) loose() bool {
 // recordedRequestKeys are a recorded HTTP mock's request keys
 // (RequestKeysOf); none for one with no request.
 func recordedRequestKeys(m *models.Mock) []string {
+	return requestKeysIn(m, provenswitch.On())
+}
+
+// requestKeysIn is recordedRequestKeys as the proven switch, set as proven
+// says, reads m: a read of the application's clock the learn step learned in
+// m's path or target counts only with it on (clocksOf).
+func requestKeysIn(m *models.Mock, proven bool) []string {
 	if m == nil || m.Spec.HTTPReq == nil {
 		return nil
 	}
@@ -162,7 +170,11 @@ func recordedRequestKeys(m *models.Mock) []string {
 	}
 	// A read of the application's clock learned in the path or the target
 	// is a value made anew each run there, filed as learned noise is.
-	k := strictKnown{learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
+	var clocks map[string]models.ClockOffset
+	if proven {
+		clocks = m.Spec.Clocks
+	}
+	k := strictKnown{learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocks}
 	learned := hasTarget && (k.learnedAt("header."+strings.ToLower(amzTargetHeader), "") || k.redacted(target))
 	for i := range segs {
 		if learned {

@@ -78,6 +78,18 @@ type roundState struct {
 	// else learnBinding.set. One the tracker began after it is a set the
 	// store has not staged (integrations.LearnRead.SetAhead).
 	stagedSet uint64
+	// onceClaims holds the keys claimed in the current pass over the set
+	// (MockManager.ClaimOnce), reset under mu as each pass starts
+	// (MockManager.startPassLocked).
+	onceClaims map[string]struct{}
+	// seededRewinds is the count of consumed-history rewinds last handed to
+	// the manager (MockManager.SeedConsumedRewinds), and passRewinds the
+	// highest one handed since the last staging, set to seededRewinds by
+	// each staging (bumpStagingEpoch): a count above it is a retry cycle,
+	// which starts a pass. Within a staging the count only rises, so a lower
+	// one (a filter that carries none) starts nothing.
+	seededRewinds uint64
+	passRewinds   uint64
 	// onWait and onRead are test seams, nil outside tests: onWait runs as a
 	// change is about to take the lock (lockRound), onRead inside a
 	// snapshot after each of its reads, with that read's name, and in
@@ -144,6 +156,9 @@ type roundLog struct {
 	// its own and the shared recordings it consumed, and the ahead answers
 	// carried into it (their TakeConsumed entries).
 	byTest map[string][]int
+	// voided holds the names of TakeVoided entries in takes as a copy-on-write
+	// immutable map so RoundMeta can share it in O(1) with zero copies.
+	voided map[string]struct{}
 }
 
 // lockRound takes the round lock for a change (onWait first).
@@ -280,6 +295,14 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 	case integrations.TakeRestored:
 		delete(l.taken, t.Mock.Name)
 	case integrations.TakeVoided:
+		if _, exists := l.voided[t.Mock.Name]; !exists {
+			next := make(map[string]struct{}, len(l.voided)+1)
+			for k := range l.voided {
+				next[k] = struct{}{}
+			}
+			next[t.Mock.Name] = struct{}{}
+			l.voided = next
+		}
 		m.forgetVoidedLocked(t.Mock.Name)
 	case integrations.TakeCarried:
 		if t.Of >= 0 {
@@ -461,6 +484,8 @@ func (m *MockManager) bumpStagingEpoch() {
 		f()
 	}
 	m.stagingEpoch.Add(1)
+	m.startPassLocked()
+	m.exact.round.passRewinds = m.exact.round.seededRewinds
 	// The set the tracker began last is staged now, whichever it is: the
 	// tracker's own (SetTrackerSetAt), as its set may have begun before any
 	// of its boundaries reached this manager.
@@ -472,6 +497,50 @@ func (m *MockManager) bumpStagingEpoch() {
 	m.exact.round.wakeLocked()
 	m.exact.round.mu.Unlock()
 }
+
+// startPassLocked starts a new pass over the set on m: what the pass before
+// claimed (ClaimOnce) is not this pass's, so a recorded occurrence is
+// delivered once in each pass. Every pass start calls it, holding the round
+// lock: a staging (bumpStagingEpoch), a replay session
+// (ResetForReplaySession), and a retry cycle of keploy test, which the agent
+// hands the manager as a higher count of the set's consumed-history rewinds
+// (SeedConsumedRewinds) before the cycle's first test is served. A staging is
+// a set's (keploy test's, or an attempt of it), and with the proven switch
+// off also each begin and end of a keploy mock replay test that has no worker
+// pid (SetScopeMocks): those stage the pool again, so what it carries is
+// delivered once per such test. The deferred streaming tests going back to
+// an earlier window start no pass: they run the test cases the pass left for
+// last, once each, so what the pass claimed stays claimed.
+func (m *MockManager) startPassLocked() {
+	m.exact.round.onceClaims = nil
+}
+
+// ClaimOnce atomically records key in this manager's current pass over the
+// set and returns true only for the first caller. The claimed set is reset
+// under the round lock as each pass starts (startPassLocked), so separate
+// managers stay independent and per-connection wrappers delegating here share
+// one per-pass claim set.
+func (m *MockManager) ClaimOnce(key string) bool {
+	if m == nil {
+		return true
+	}
+	m.lockRound()
+	defer m.exact.round.mu.Unlock()
+	if m.exact.round.onceClaims == nil {
+		m.exact.round.onceClaims = make(map[string]struct{})
+	}
+	if _, exists := m.exact.round.onceClaims[key]; exists {
+		return false
+	}
+	m.exact.round.onceClaims[key] = struct{}{}
+	return true
+}
+
+var (
+	_ integrations.MockMemDb = (*MockManager)(nil)
+	_ integrations.MockMemDb = (*roundScope)(nil)
+	_ integrations.MockMemDb = (*heldScope)(nil)
+)
 
 // roundGuard is a take checked against a snapshot's round (at): refused, and
 // why kept, once the store moved from it. in is the request the take serves,
@@ -949,9 +1018,103 @@ func (m *MockManager) WithinRound(at integrations.RoundAt) integrations.RoundSco
 	return &roundScope{MockManager: m, g: roundGuard{at: at}}
 }
 
+// RoundMeta implements integrations.ExactRoundReader: an O(1) read of the
+// round's state and view identity under swapMu (read) and the round lock,
+// copying no mock or tracker slices. Returns false when exact serving is off
+// or when the onRead test seam is installed (so interleaving tests continue to
+// drive the full RoundSnapshot path).
+func (m *MockManager) RoundMeta(tracker *learn.Tracker) (integrations.RoundMeta, bool) {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	r := &m.exact.round
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v := m.exact.view.Load()
+	if v == nil || r.onRead != nil {
+		return integrations.RoundMeta{}, false
+	}
+	l := m.logLocked()
+	meta := integrations.RoundMeta{
+		At:         integrations.RoundAt{Epoch: l.epoch, Gen: r.gen, Bounds: r.bounds, Taken: len(l.takes)},
+		Reads:      m.windowReads.Load(),
+		Test:       v.test,
+		Ahead:      v.test == "" && len(v.owned) > 0,
+		Fired:      m.exact.fired.Load(),
+		Background: v.bg != nil,
+		Staging:    v.staging,
+		OwnedGen:   v.gen,
+		Owned:      v.owned,
+	}
+	var learnRead integrations.LearnRead
+	if tracker != nil {
+		ps := tracker.PlacedState()
+		setAhead := r.learn.routed && ps.SetAt != r.stagedSet
+		learnRead = integrations.LearnRead{
+			Bound:    true,
+			Number:   ps.Test,
+			Open:     ps.Open,
+			Begun:    ps.Begun,
+			SetAhead: setAhead,
+			Awaiting: ps.Awaiting,
+		}
+		meta.Learn = learnRead
+		meta.LearnHasHTTPPut = ps.HasHTTPPut
+	}
+	meta.Phase, meta.Boundary, meta.Ended = m.phaseLocked(v, learnRead)
+	meta.Open = meta.Phase == integrations.RoundInTest
+
+	// Read HTTP stored/staging generations in O(1).
+	m.revMu.RLock()
+	storedPtr := m.storedByKind[models.HTTP]
+	genPtr := m.stagedByKind[models.HTTP]
+	m.revMu.RUnlock()
+	var stored uint64
+	if storedPtr != nil {
+		stored = atomic.LoadUint64(storedPtr)
+	}
+	if genPtr != nil {
+		meta.StagingGen = atomic.LoadUint64(genPtr)
+	}
+	if v.test != "" {
+		meta.HasShared = true
+		meta.SharedGen = integrations.SharedGen{View: v.shared, Store: stored}
+	}
+
+	parts := integrations.RoundMetaParts{
+		ViewGen:    v.round,
+		OwnedIndex: v.index,
+		Voided:     l.voided,
+		InFlight: func(mk *models.Mock) bool {
+			if mk == nil || v.test == "" {
+				return false
+			}
+			i, ok := v.index[mk.Name]
+			return ok && !v.isCand(i) && v.inFlight[mk.Name]
+		},
+		Unspent:   v.unspentFrom,
+		Spent:     v.spentNow,
+		Pool:      v.pool,
+		Worker:    v.worker,
+		Windows:   m.testWindows.Load(),
+		PoolNames: m.exact.poolNames.Load(),
+		View:      viewCursor{m: m, v: v},
+	}
+	if b := r.bound; meta.Ended != "" && b != nil {
+		parts.EndedIndex = b.index
+	}
+	if v.bg != nil {
+		parts.BGPool, parts.BGWorker = v.bg.pool, v.bg.worker
+	}
+	m.windowMu.RLock()
+	parts.WindowStart, parts.WindowEnd = m.windowStart, m.windowEnd
+	m.windowMu.RUnlock()
+	return meta.WithMetaParts(parts), true
+}
+
 var (
-	_ integrations.RoundReader = (*MockManager)(nil)
-	_ integrations.RoundWaiter = (*MockManager)(nil)
+	_ integrations.RoundReader      = (*MockManager)(nil)
+	_ integrations.RoundWaiter      = (*MockManager)(nil)
+	_ integrations.ExactRoundReader = (*MockManager)(nil)
 )
 
 // roundScope is the manager whose consume doors settle only while it is at

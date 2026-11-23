@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -75,25 +76,72 @@ func (l *liveMappings) forget() { l.p.Store(nil) }
 
 // encodeKept is mapping encoded as a write of a file that holds no hand edit
 // encodes it: what encodeOver writes over the file the kept mapping is of,
-// with no read of it. size is about how long the file was: the encoding is
-// made in one buffer of about that size.
-func encodeKept(mapping *models.Mapping, format yaml.Format, head []byte, size int) ([]byte, error) {
+// with no read of it.
+func encodeKept(mapping *models.Mapping, format yaml.Format, head []byte) (encoded, error) {
 	if format == yaml.FormatJSON {
-		return marshalMapping(format, mapping)
+		data, err := marshalMapping(format, mapping)
+		return encoded{data: data}, err
 	}
-	return marshalMappingYAMLAfter(head, mapping, size)
+	return encoded{head: head, mapping: mapping}, nil
 }
 
-// keep keeps mapping, which data, just written to the set's file at path,
-// encodes, when data is what encodeKept makes of it: the file then holds no
-// hand edit. Otherwise nothing is kept.
-func (l *liveMappings) keep(root, testSetID, path string, format yaml.Format, mapping *models.Mapping, data []byte, encodedKept bool) {
-	var head []byte
-	if format != yaml.FormatJSON {
-		head = commentHead(data)
+// encoded is a mappings file a write makes: data, its bytes; or, for a YAML
+// file that holds no hand edit (mapping set), head followed by mapping's
+// encoding (marshalMappingYAML), which writeTo makes a few entries at a time
+// as it writes them: such a file is never whole in memory. A recording's
+// file reaches tens of MB, and a buffer of it, made at every flush, held
+// that much again.
+type encoded struct {
+	data    []byte
+	head    []byte
+	mapping *models.Mapping
+}
+
+// writeTo writes the file to w.
+func (e encoded) writeTo(w io.Writer) error {
+	if e.mapping == nil {
+		_, err := w.Write(e.data)
+		return err
 	}
-	if !encodedKept {
-		var plain bool
+	if _, err := w.Write(e.head); err != nil {
+		return err
+	}
+	var werr error
+	err := encodeMappingYAML(e.mapping, func(p []byte) bool {
+		_, werr = w.Write(p)
+		return werr == nil
+	})
+	if werr != nil {
+		return werr
+	}
+	return err
+}
+
+// bytes is the file, whole, for a caller that hands it on as bytes.
+func (e encoded) bytes() ([]byte, error) {
+	if e.mapping == nil {
+		return e.data, nil
+	}
+	return marshalMappingYAMLAfter(e.head, e.mapping, 0)
+}
+
+// keep keeps mapping, which out, just written to the set's file at path,
+// encodes, when the file holds no hand edit: out is mapping's encoding after
+// a head (encoded.mapping), or its bytes are what encodeKept makes of it.
+// Otherwise nothing is kept.
+func (l *liveMappings) keep(root, testSetID, path string, format yaml.Format, mapping *models.Mapping, out encoded, encodedKept bool) {
+	var head []byte
+	plain := encodedKept || out.mapping != nil
+	switch {
+	case out.mapping != nil:
+		// The encoding starts with a key: the comment lines the file starts
+		// with are out's head's.
+		head = commentHead(out.head)
+	case format != yaml.FormatJSON:
+		head = commentHead(out.data)
+	}
+	if !plain {
+		data := out.data
 		if format == yaml.FormatJSON {
 			enc, err := marshalMapping(format, mapping)
 			plain = err == nil && bytes.Equal(enc, data)

@@ -125,18 +125,21 @@ func TestAnOwnedIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 	verifyOff(t)
 	rng := rand.New(rand.NewSource(23))
 	paths := []string{"/v1/item/1", "/v2/item/1", "/v1/item/2", "/v1/item", "/v1/user/1", "/v3/item/7"}
-	compared, grouped, wide, reordered := 0, 0, 0, 0
+	compared, grouped, wide, reordered, narrowed, narrowedGrouped := 0, 0, 0, 0, 0, 0
 	for round := 0; round < 400; round++ {
 		urlNoise := []string(nil)
 		if rng.Intn(2) == 0 {
 			urlNoise = []string{`v[0-9]+`}
 		}
-		n := h.newLearnNoise(models.OutgoingOptions{Learn: true}, nil, urlNoise)
+		n := h.newLearnNoise(models.OutgoingOptions{Learn: true}, learnBodyNoiseOf(rng), urlNoise)
 		var perTest, session []*models.Mock
 		for i := 0; i < 2+rng.Intn(14); i++ {
 			method := []string{"GET", "POST"}[rng.Intn(2)]
-			m := learnRecorded(fmt.Sprintf("r%d-%d", round, i), time.Duration(rng.Intn(4)), method, paths[rng.Intn(len(paths))], "", nil, `{}`)
-			switch rng.Intn(6) {
+			body, header := learnBodyOf(rng)
+			m := learnRecorded(fmt.Sprintf("r%d-%d", round, i), time.Duration(rng.Intn(4)), method, paths[rng.Intn(len(paths))], body, header, `{}`)
+			switch rng.Intn(7) {
+			case 3:
+				m.Spec.ReqBodyNoise = map[string][]string{"body.a": {}}
 			case 0:
 				m.Spec.ReqBodyNoise = map[string][]string{"url.path.2": {}}
 			case 1:
@@ -163,8 +166,9 @@ func TestAnOwnedIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 			if len(db.perTest) > 0 && rng.Intn(3) == 0 {
 				_ = db.DeleteFilteredMock(*db.perTest[rng.Intn(len(db.perTest))])
 			}
-			in := live([]string{"GET", "POST"}[rng.Intn(2)], paths[rng.Intn(len(paths))], "", nil)
+			in := learnCallOf(rng, paths, append(slices.Clone(perTest), session...))
 			lp := liveParts(ctx, in)
+			narrows := learnNarrows(n, lp, append(slices.Clone(perTest), session...))
 			ls := n.shape(lp, sameDest)
 			r, err := h.learnReads(db, learn.TrackerFrom(ctx))
 			if err != nil {
@@ -173,8 +177,8 @@ func TestAnOwnedIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 			sc := r.scope(lp, ls, n, true)
 			want, wantOwner := exactGroup(ls, sc, false), sc.owner()
 			// Twice: a staging's second read builds the shared part's index.
-			_, _, _ = h.learnedGroupOf(db, db, learn.TrackerFrom(ctx), lp, ls, n, false)
-			got, gotOwner, err := h.learnedGroupOf(db, db, learn.TrackerFrom(ctx), lp, ls, n, false)
+			_, _, _ = h.learnedGroupOf(ctx, db, db, learn.TrackerFrom(ctx), lp, ls, n, false)
+			got, gotOwner, err := h.learnedGroupOf(ctx, db, db, learn.TrackerFrom(ctx), lp, ls, n, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,6 +197,12 @@ func TestAnOwnedIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 			if len(want) > 0 {
 				grouped++
 			}
+			if narrows {
+				narrowed++
+				if len(want) > 0 {
+					narrowedGrouped++
+				}
+			}
 			for _, m := range want {
 				if learnsWide(m) && n.maskedPath(recordedParts(m).path) != n.learnSieveOf(lp).masked {
 					wide++
@@ -204,8 +214,8 @@ func TestAnOwnedIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 			}
 		}
 	}
-	if grouped < compared/5 || wide < 20 || reordered < 20 {
-		t.Fatalf("%d of %d calls had a group, %d an own recording of another path whose segment may be excused, %d own recordings out of the list's order: the row compares too little", grouped, compared, wide, reordered)
+	if grouped < compared/5 || wide < 20 || reordered < 20 || narrowed < compared/20 || narrowedGrouped < 30 {
+		t.Fatalf("%d of %d calls had a group, %d an own recording of another path whose segment may be excused, %d own recordings out of the list's order, %d were read through a bucket their body's print narrowed, %d of those had a group: the row compares too little", grouped, compared, wide, reordered, narrowed, narrowedGrouped)
 	}
 }
 

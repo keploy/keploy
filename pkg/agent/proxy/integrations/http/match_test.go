@@ -102,6 +102,7 @@ func (m *mockMemDb) WindowSnapshot() models.WindowSnapshot               { retur
 func (m *mockMemDb) CurrentTestWindow() (time.Time, time.Time)           { return time.Time{}, time.Time{} }
 func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error) { return nil, nil }
 func (m *mockMemDb) SessionMockHitCounts() map[string]uint64             { return nil }
+func (m *mockMemDb) ClaimOnce(_ string) bool                             { return true }
 
 func newHTTP() *HTTP {
 	return &HTTP{Logger: zap.NewNop()}

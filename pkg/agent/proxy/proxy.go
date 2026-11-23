@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -50,6 +51,7 @@ import (
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -273,6 +275,10 @@ type Proxy struct {
 	sessionMu   sync.RWMutex
 	session     *agent.Session
 	mockManager *MockManager
+	// windows is the test windows the agent holds open, which every mock
+	// manager of the proxy serves under (testWindowsShared).
+	windowsOnce sync.Once
+	windows     *testWindows
 	// instances serves each test worker of a replay from a manager of its
 	// own (instance_serving.go).
 	instances instanceServing
@@ -499,6 +505,15 @@ type Proxy struct {
 	// missing or unparseable; the forwarder falls back to the legacy
 	// synthetic response in that case.
 	dnsUpstreamServers []string
+	// dnsUpstreamAdapter is, on Windows, the network adapter each of the
+	// dnsUpstreamServers is asked on (upstreamConfig): a recording and a
+	// forward ask the other adapters' servers a name one adapter's server
+	// says does not exist, as Windows does (upstreamSearch). Nil from
+	// resolv.conf.
+	dnsUpstreamAdapter map[string]int
+	// dnsExchange asks one server; nil is (*dns.Client).Exchange. A row
+	// hands recordDNSMock and forwardDNS servers of its own through it.
+	dnsExchange dnsExchanger
 	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
 	// Defaults to "53" when resolv.conf does not specify one.
 	dnsUpstreamPort string
@@ -600,6 +615,11 @@ type Proxy struct {
 	// negative disables half-close, so it is NOT clamped to zero the way
 	// recordBufferStallGrace is.
 	recordBufferHalfCloseGrace time.Duration
+
+	// supervisorClock is the clock of recordViaSupervisor's supervisors
+	// (supervisor.Config.Clock): nil is the process's own runnable clock;
+	// tests run it slower or faster than the wall clock.
+	supervisorClock stall.Clock
 
 	// capture follows the relays of the connections whose parser is
 	// recording, for the recording's capture watermark
@@ -1077,6 +1097,20 @@ func (p *Proxy) javaHomePID() uint32 {
 // setupCAForApp is pTls.SetupCAForApp; a test swaps it to see the pid the
 // JAVA_HOME auto-detect is given.
 var setupCAForApp = pTls.SetupCAForApp
+
+// caSetupNextStep is what a failed CA setup on goos says to do. Native
+// Windows has no volume or system bundle to fix: keploy's CA goes in the
+// user's own trust store, with no administrator, as the setup's error says.
+func caSetupNextStep(goos string) string {
+	if goos == "windows" {
+		return "follow the next_step of the CA install error above: keploy's CA goes in your Windows user's Trusted Root store, which needs no administrator. Run keploy again after fixing."
+	}
+	return "Verify the agent container has write access to the " +
+		"shared /tmp/keploy-tls volume (docker/k8s mode) or " +
+		"to the host's CA trust store under /usr/local/share/" +
+		"ca-certificates or /etc/pki/ca-trust/source/anchors " +
+		"(native mode). Restart the agent after fixing."
+}
 
 // setupCA installs keploy's CA for the app, the JAVA_HOME auto-detect reading
 // the CLI's process only (javaHomePID).
@@ -2162,11 +2196,7 @@ func (p *Proxy) startContainerKeys(ctx context.Context) {
 // Error (not Warn) to match the severity, with a next_step so operators see
 // the likely fix without grepping source.
 func logSetupCAFailure(logger *zap.Logger, err error) {
-	nextStep := "Verify the agent container has write access to the " +
-		"shared /tmp/keploy-tls volume (docker/k8s mode) or " +
-		"to the host's CA trust store under /usr/local/share/" +
-		"ca-certificates or /etc/pki/ca-trust/source/anchors " +
-		"(native mode). Restart the agent after fixing."
+	nextStep := caSetupNextStep(runtime.GOOS)
 	if errors.Is(err, pTls.ErrStoreLockHeld) {
 		// The native Linux install's store update did not run because
 		// another process held the trust stores' lock past its bound: no
@@ -4609,7 +4639,7 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	// mocks to (the first session's had none: a connection under it was
 	// dropped). The manager is put in place just before the session, so
 	// a replay session before it serves from its own until then.
-	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger)
+	mm := p.shareWindows(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 	if opts.CapturePackets {
 		// Agent picks its own scratch dir on its OWN filesystem; the
 		// recorder cannot pass a path here because the two processes
@@ -4753,7 +4783,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		p.serveClock.NewSet()
 	}
 	if mm := p.getMockManager(); mm == nil {
-		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+		p.setMockManager(p.shareWindows(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger)))
 	} else {
 		// Every test worker's manager starts the session as the run's does.
 		p.stage(mm, "session", func(m *MockManager) {
@@ -5044,6 +5074,13 @@ func (p *Proxy) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
 // RecordedWindowsSeeder extension interface.
 func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
 	_ = p.stageOn("recordedWindows", func(m *MockManager) { m.SeedRecordedWindows(ws) })
+}
+
+// SeedConsumedRewinds hands the underlying MockManager how many times the set's
+// consumed history was rewound for a retry cycle (MockManager.SeedConsumedRewinds).
+// Satisfies the agent's optional ConsumedRewindsSeeder extension interface.
+func (p *Proxy) SeedConsumedRewinds(n uint64) {
+	_ = p.stageOn("consumedRewinds", func(m *MockManager) { m.SeedConsumedRewinds(n) })
 }
 
 // SeedRunPlaceWindows hands the underlying MockManager the recorded window of
@@ -6000,14 +6037,19 @@ func asBeforeSet(err error) error {
 }
 
 // asEarlierSet is err, a miss an earlier set made (keptAsEarlierSet), as
-// that earlier set's call (earlierSetMiss), in
-// place of a wrap as made before the running set's first test: a read
-// unwraps one wrap alone.
+// that earlier set's call (earlierSetMiss), in place of a wrap as made
+// before the running set's first test, between two of its tests
+// (betweenTestsMiss) or late in one (lateInTestMiss), which a last test's
+// window never read still holds: a read unwraps one wrap alone.
 func asEarlierSet(err error) error {
 	switch e := err.(type) {
 	case earlierSetMiss:
 		return e
 	case beforeSetMiss:
+		return earlierSetMiss(e)
+	case betweenTestsMiss:
+		return earlierSetMiss(e)
+	case lateInTestMiss:
 		return earlierSetMiss(e)
 	}
 	return earlierSetMiss{err}
@@ -6059,6 +6101,47 @@ type beforeSetMiss struct{ error }
 
 // Unwrap is the miss itself, for errors.As.
 func (b beforeSetMiss) Unwrap() error { return b.error }
+
+// betweenTestsMiss is a miss made between two tests of a set, under the
+// proven switch: filed while no test's window was open, and made while no
+// test's view served (models.MissOutsideTest). The next test's window
+// carries it, so it is read in order with every other miss, and the read
+// returns it marked (models.UnmatchedCall.Between) for the replay to fail
+// the set with, charging no test: the test framework opens each test, and
+// the next test did not make it. A miss made in a test and decided after its
+// read (models.MissInTest) is carried unmarked.
+type betweenTestsMiss struct{ error }
+
+// Unwrap is the miss itself, for errors.As.
+func (b betweenTestsMiss) Unwrap() error { return b.error }
+
+// madeOutsideEveryTest reports whether the miss err was made while no
+// test's view served (models.ParserError.MissKind is models.MissOutsideTest).
+func madeOutsideEveryTest(err error) bool {
+	var pe models.ParserError
+	return errors.As(err, &pe) && pe.MissKind == models.MissOutsideTest
+}
+
+// lateInTestMiss is a miss made in a test, under the proven switch, that
+// keploy decided only after that test's end was read: filed into the read
+// window, or with none open, while a test's view served
+// (models.MissInTest, models.MissExtraCall). The next test's window carries
+// it, and the read returns it marked (models.UnmatchedCall.Late, MadeIn the
+// test its mark names) for the replay to fail the set with, named under the
+// test it was made in, charging no test: the test that reads it began after
+// it was made (its capture window opens before its view is installed).
+type lateInTestMiss struct{ error }
+
+// Unwrap is the miss itself, for errors.As.
+func (l lateInTestMiss) Unwrap() error { return l.error }
+
+// madeInATestView reports whether the miss err was made while a test's view
+// served (models.ParserError.MissKind is models.MissInTest or
+// models.MissExtraCall).
+func madeInATestView(err error) bool {
+	var pe models.ParserError
+	return errors.As(err, &pe) && (pe.MissKind == models.MissInTest || pe.MissKind == models.MissExtraCall)
+}
 
 // noteMissLost records that a miss was lost, and why: the next read is then
 // incomplete, naming the first cause, rather than silently short. With the
@@ -6319,7 +6402,9 @@ func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false, false) }
 // reported, as a miss that lands in a later test's window is that test's.
 // Discarding it would drop a real miss silently: a SEND the app publishes in
 // reaction to something the replay did between two tests is reported against
-// no test at all.
+// no test at all. Under the proven switch the read marks such a miss, one
+// made while no test's view served, as the set's (betweenTestsMiss): the
+// replay fails the set with it and charges the next test nothing.
 func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true, false) }
 
 // openTestErrorCapture opens the next test's capture window (carry: as
@@ -6373,6 +6458,23 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 	// (cutMissesAtSetStart).
 	if carry {
 		for _, err := range between {
+			// Under the proven switch a miss made between two tests, with no
+			// test's view serving, is the set's (betweenTestsMiss), and so is
+			// one made in the test whose read came before, which keploy
+			// decided after that read (lateInTestMiss): the test this window
+			// opens for begins only after it, and made neither. An earlier
+			// set's test's call (earlierSetMiss) is no call of this set's,
+			// and keeps its wrap: a read unwraps one alone.
+			if provenswitch.On() {
+				_, isEarlier := err.(earlierSetMiss)
+				switch {
+				case isEarlier:
+				case madeOutsideEveryTest(err):
+					err = betweenTestsMiss{err}
+				case madeInATestView(err):
+					err = lateInTestMiss{err}
+				}
+			}
 			if !acc.addBounded(err, maxPendingMockErrors) {
 				p.missDroppedForRoom(err)
 			}
@@ -6650,6 +6752,9 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 	}
 	p.captureMu.Unlock()
 
+	// The test whose end keploy test reads, when it reads one: a miss marked
+	// in another test was not made in it.
+	endOf, endRead := models.TestEndRead(ctx)
 	var errs []models.UnmatchedCall
 	for _, err := range rawErrs {
 		// A miss made before the set's first test (beforeSetMiss) is read
@@ -6663,6 +6768,18 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 		earlier, isEarlier := err.(earlierSetMiss)
 		if isEarlier {
 			err = earlier.error
+		}
+		// A miss made between two tests (betweenTestsMiss) is read as the
+		// set's too.
+		gap, isBetween := err.(betweenTestsMiss)
+		if isBetween {
+			err = gap.error
+		}
+		// So is one made in an earlier test and decided after its read
+		// (lateInTestMiss).
+		late, isLate := err.(lateInTestMiss)
+		if isLate {
+			err = late.error
 		}
 		first := len(errs)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
@@ -6761,6 +6878,11 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 				errs[i].Kind = models.MissOutsideTest
 			}
 		}
+		if isBetween {
+			for i := first; i < len(errs); i++ {
+				errs[i].Between = true
+			}
+		}
 		if isEarlier {
 			// The test whose view the call was marked in: an earlier
 			// set's (markedInATest), named with or without its round;
@@ -6775,6 +6897,18 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 				errs[i].EarlierSetTest = test
 				errs[i].EarlierSet = back
 				errs[i].Kind = models.MissOutsideTest
+			}
+		}
+		// keploy test's read of a test's end (models.TestEndRead): a miss
+		// whose mark names another test was made in that one, and keploy
+		// decided it only after that test's end was read. It is the set's
+		// too, never the reading test's. An earlier set's test's call
+		// (earlierSetMiss) is no call of this set's.
+		madeElsewhere := !isBefore && !isEarlier && endRead && provenswitch.On()
+		for i := first; i < len(errs); i++ {
+			if isLate || (madeElsewhere && errs[i].Marked.Test != "" && errs[i].Marked.Test != endOf) {
+				errs[i].Late = true
+				errs[i].MadeIn = errs[i].Marked.Test
 			}
 		}
 	}

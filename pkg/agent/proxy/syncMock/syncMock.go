@@ -719,6 +719,15 @@ type SyncMockManager struct {
 	// span narrow is the recorder's responsibility. Spans has its own lock.
 	orphans Spans
 
+	// stopCuts is the spans of the requests a connection's parser never read
+	// because the recording's stop cut it short: the hang watchdog found it
+	// making no progress after the stop on what its connection carried before
+	// it (RecordStopCutWindow). Each is an orphan span too, recorded in
+	// orphans after it here, so a test case that one leaves out is left out
+	// by orphans, and routes/record.go names it among those the stop cut
+	// (WasStopCutInWindow). Spans has its own lock.
+	stopCuts Spans
+
 	// lostOver is the requests, each an instant, of the calls whose mock, no
 	// test's own and not one any test may need, was dropped on its way out
 	// (leaveOutOver): recorded under sharedLossMu, and checked under it by
@@ -1741,6 +1750,9 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 			return false
 		}
 	}
+	// What noteDelivered records of mock, read now: once trySend delivers it,
+	// mock is the consumer's (deliveryNote).
+	note := noteOf(mock)
 	// sent ends a send that trySend delivered, under outQueueMu and
 	// outChanMu's read lock, which it lets go: the recording's consumer took
 	// mock (noteDelivered).
@@ -1748,7 +1760,7 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 		epoch := m.out.epoch
 		m.outQueueMu.Unlock()
 		m.outChanMu.RUnlock()
-		m.noteDelivered(mock, epoch)
+		m.noteDelivered(note, epoch)
 		tell(true, 0)
 		return MockTaken
 	}
@@ -1834,13 +1846,14 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 		epoch := lane.epoch
 		m.outQueueMu.Unlock()
 
+		note := noteOf(q.mock) // before the hand-over (deliveryNote)
 		if !m.deliverQueued(lane.ch, q.mock, &meter, &closing) {
 			m.giveUpOutQueue(lane, q, "the consumer took no mock for the stall bound of the time the process could run")
 			meter.Reset() // what was queued since waits from now
 			continue
 		}
 		meter.Reset() // the consumer took one
-		m.noteDelivered(q.mock, epoch)
+		m.noteDelivered(note, epoch)
 		m.handedOn.Add(1)
 		if q.done != nil {
 			q.done(true, 0)
@@ -5326,6 +5339,35 @@ func (m *SyncMockManager) RecordOrphanWindow(start, end time.Time) {
 	m.orphans.Record(start, end)
 }
 
+// RecordStopCutWindow records [start, end] as a span of requests a
+// connection's parser never read because the recording's stop cut it short:
+// the hang watchdog found it making no progress after the stop on what its
+// connection carried before it. It is an orphan span (RecordOrphanWindow),
+// which leaves out the test cases over it, and a stop cut's
+// (WasStopCutInWindow), by which routes/record.go names them at WARN: a cut
+// at the stop drops test cases the user is told of by name. Recorded as a
+// stop cut's before it is recorded as an orphan span, so a test case left out
+// by that orphan span is read as the stop cut's. Nil-safe.
+func (m *SyncMockManager) RecordStopCutWindow(start, end time.Time) {
+	if m == nil {
+		return
+	}
+	m.stopCuts.Record(start, end)
+	m.orphans.Record(start, end)
+}
+
+// WasStopCutInWindow reports whether a span RecordStopCutWindow recorded
+// overlaps [start, end]: a test case left out over [start, end] by an orphan
+// span was left out because the recording's stop cut a parser short. Same
+// degenerate-input guard as WasMockOrphanedInWindow (Spans.Overlaps).
+func (m *SyncMockManager) WasStopCutInWindow(start, end time.Time) bool {
+	if m == nil {
+		return false
+	}
+	over, _ := m.stopCuts.Overlaps(start, end)
+	return over
+}
+
 // CheckedBefore says that every test case of this recording still to be
 // checked against its pressure and orphan spans starts at or after t
 // (Spans.CheckedBefore): routes/record.go's hold holds none that starts
@@ -5336,6 +5378,7 @@ func (m *SyncMockManager) CheckedBefore(t time.Time) {
 	}
 	m.pressure.CheckedBefore(t)
 	m.orphans.CheckedBefore(t)
+	m.stopCuts.CheckedBefore(t)
 	m.lostOver.CheckedBefore(t)
 	m.cutLost.CheckedBefore(t)
 }

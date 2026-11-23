@@ -1,6 +1,7 @@
 package yaml
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -292,6 +293,45 @@ func WriteRecordingFileF(ctx context.Context, logger *zap.Logger, root, path, fi
 		return nil
 	}
 
+	return replaceRecordingFile(ctx, logger, root, path, fileName, format, func(w io.Writer) error {
+		_, err := w.Write(docData)
+		return err
+	})
+}
+
+// WriteRecordingFileStreamF replaces a file of the recording at root, inside
+// it, as WriteRecordingFileF does with isAppend false, with what write writes
+// to the writer it is handed: the file's bytes are made as they are written,
+// never held whole. Writes go through a buffer of streamWriteBuffer bytes. A
+// write that fails, or ctx ending, leaves the file as it was.
+func WriteRecordingFileStreamF(ctx context.Context, logger *zap.Logger, root, path, fileName string, format Format, write func(io.Writer) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	err := replaceRecordingFile(ctx, logger, root, path, fileName, format, func(w io.Writer) error {
+		bw := bufio.NewWriterSize(w, streamWriteBuffer)
+		if err := write(bw); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return bw.Flush()
+	})
+	if err == nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+// streamWriteBuffer is how many bytes WriteRecordingFileStreamF gathers
+// before it writes them to the file.
+const streamWriteBuffer = 256 << 10
+
+// replaceRecordingFile is WriteRecordingFileF without append: the file's
+// bytes are what write writes.
+func replaceRecordingFile(ctx context.Context, logger *zap.Logger, root, path, fileName string, format Format, write func(io.Writer) error) error {
+	filePath := filepath.Join(path, fileName+"."+format.FileExtension())
 	// Non-append (truncate-and-replace): write to a temp file in the same dir and
 	// atomically rename it over the destination, so a concurrent or volume-lagging
 	// reader (report-upload, localTestsPassed, reportdb.GetReport) never observes a
@@ -321,7 +361,7 @@ func WriteRecordingFileF(ctx context.Context, logger *zap.Logger, root, path, fi
 	}()
 
 	cw := &ctxWriter{ctx: ctx, writer: tmpFile}
-	if _, err = cw.Write(docData); err != nil {
+	if err = write(cw); err != nil {
 		_ = tmpFile.Close()
 		if err == ctx.Err() {
 			return nil // Ignore context cancellation error

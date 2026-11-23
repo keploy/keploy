@@ -541,6 +541,12 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// (endingTestCase, settledSince), which its owned losses then say.
 		unknown = a.settledSince(ctx, true, 0, endingTestCase(es))
 	}
+	// A retry cycle's filters carry the rewinds of its consumed history, as
+	// the windows' do: the cycle is a new pass over the set, whose test cases
+	// are served again from its first filter on (seedConsumedRewinds). Handed
+	// once the calls made before are settled, which are the pass before's,
+	// and before anything the filter asks is served.
+	a.seedConsumedRewinds(params)
 	switch {
 	case ex.Stage:
 		staging := params

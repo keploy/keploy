@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package proxy
 
@@ -42,6 +42,10 @@ type pairTarget struct {
 	// seen is the most the proxy's side was seen to have received: more is
 	// progress, for the watchdog.
 	seen uint64
+	// sent is, on Windows, the most the application's send calls on the
+	// connection were seen to have completed with (appSends.done): more
+	// is progress too. 0 elsewhere.
+	sent uint64
 	// orphan is, while the wait waits for the proxy's socket of a
 	// connection it closed one FIN short to take that FIN (pairReached),
 	// the socket's state at the last look (FIN_WAIT1, FIN_WAIT2, or
@@ -107,7 +111,7 @@ func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) (err
 		moved := false
 		next := pending[:0]
 		for _, t := range pending {
-			seen, orphan := t.seen, t.orphan
+			seen, orphan, sent := t.seen, t.orphan, t.sent
 			reached, err := p.pairReached(t)
 			if err != nil {
 				return err
@@ -118,7 +122,7 @@ func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) (err
 				moved = true
 				continue
 			}
-			moved = moved || t.seen != seen || t.orphan != orphan
+			moved = moved || t.seen != seen || t.orphan != orphan || t.sent != sent
 			next = append(next, t)
 		}
 		pending = next
@@ -225,7 +229,7 @@ func orphansUnmoved(pending []*pairTarget) error {
 		why = append(why, fmt.Sprintf("keploy waited for the application's FIN to reach the proxy's socket of %s%s, which the proxy closed one FIN short of what the application wrote, and the socket took neither that FIN nor a byte it would refuse", what, strings.Join(waited, ", ")))
 	}
 	if len(held) > 0 {
-		why = append(why, fmt.Sprintf("macOS's TCP table does not list the application's end of the connections to the proxy from %s to keploy's agent, so keploy read each from the descriptor table of the process holding it, and the proxy's side received no more while the application's send buffer kept bytes it had not acknowledged", strings.Join(held, ", ")))
+		why = append(why, looksUnmoved(strings.Join(held, ", ")))
 	}
 	return fmt.Errorf("%w: while keploy could run for %v, nothing it waited on moved: %s", models.ErrProxyConnsUnsupported, orphanFINBudget, strings.Join(why, "; and "))
 }

@@ -565,7 +565,7 @@ func (a *AgentClient) nameAgentContainer(name string) {
 	c := &namedContainer{name: name}
 	a.mu.Lock()
 	a.agentContainer, a.agentContainerAt = c, ""
-	if uri := a.conf.Agent.AgentURI; uri != "" {
+	if uri := a.conf.AgentURI(); uri != "" {
 		a.agentContainerAt = agentHost(uri)
 	}
 	at := a.agentContainerAt
@@ -587,6 +587,33 @@ func (a *AgentClient) forgetAgentContainer() {
 	a.mu.Unlock()
 	if c != nil && at != "" {
 		containerAt.CompareAndDelete(at, c)
+	}
+}
+
+// stageMoveAgentContainer updates this client's agentContainerAt to newURI's
+// host and maps its *namedContainer in containerAt under that host before the
+// new address is published, so answeredAt at the moved address marks the
+// container known and forgetAgentContainer drops the moved entry later.
+func (a *AgentClient) stageMoveAgentContainer(newURI string) (*namedContainer, string) {
+	newAt := ""
+	if newURI != "" {
+		newAt = agentHost(newURI)
+	}
+	a.mu.Lock()
+	c, oldAt := a.agentContainer, a.agentContainerAt
+	if c == nil || newAt == "" || newAt == oldAt {
+		a.mu.Unlock()
+		return nil, ""
+	}
+	a.agentContainerAt = newAt
+	a.mu.Unlock()
+	containerAt.Store(newAt, c)
+	return c, oldAt
+}
+
+func finishMoveAgentContainer(oldAt string, c *namedContainer) {
+	if oldAt != "" && c != nil {
+		containerAt.CompareAndDelete(oldAt, c)
 	}
 }
 
@@ -1132,8 +1159,8 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) (errs <-ch
 		if run.bootPrompt {
 			running = run.sudoRanAgent
 		}
-	case a.conf != nil && a.conf.Agent.AgentURI != "":
-		return a.watchAgentAt(ctx, a.conf.Agent.AgentURI)
+	case a.conf != nil && a.conf.AgentURI() != "":
+		return a.watchAgentAt(ctx, a.conf.AgentURI())
 	default:
 		return nil, nil
 	}
@@ -1155,7 +1182,7 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) (errs <-ch
 			}
 			return fmt.Errorf("the keploy agent's container exited with code %d", j.p.ExitCode)
 		}
-		return a.agentReportedStartFailure(j.p.ExitCode, j.why, inContainer)
+		return a.agentReportedStartFailure(j.p, j.why, inContainer)
 	})
 }
 

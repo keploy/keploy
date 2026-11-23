@@ -19,6 +19,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -232,9 +233,33 @@ type stopHarness struct {
 
 func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.Logger) *stopHarness {
 	t.Helper()
+	return newStopHarnessWithClock(t, parser, logger, nil)
+}
+
+// newStopHarnessWithClock is newStopHarness with the clock of the record
+// path's supervisor (Proxy.supervisorClock) set to clk: nil is the process's
+// own.
+func newStopHarnessWithClock(t *testing.T, parser integrations.Integrations, logger *zap.Logger, clk stall.Clock) *stopHarness {
+	t.Helper()
+	return newStopHarnessOn(t, parser, logger, clk, syncMock.New(nil))
+}
+
+// newStopHarnessOn is newStopHarnessWithClock on the manager mgr, which the
+// record path's context carries (syncMock.NewContext), as a multi-app
+// caller's does. A nil mgr is the process's own (syncMock.Get), which the
+// record path reaches as the agent's does, with no manager on its context:
+// the one the record route checks its test cases against (routes/record.go).
+func newStopHarnessOn(t *testing.T, parser integrations.Integrations, logger *zap.Logger, clk stall.Clock, mgr *syncMock.SyncMockManager) *stopHarness {
+	t.Helper()
 	supervisor.ResetLeftOutWarningsForTest()
-	h := &stopHarness{mgr: syncMock.New(nil), done: make(chan error, 1)}
-	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), h.mgr), 30*time.Second)
+	h := &stopHarness{mgr: mgr, done: make(chan error, 1)}
+	ctx := context.Background()
+	if mgr == nil {
+		h.mgr = syncMock.Get()
+	} else {
+		ctx = syncMock.NewContext(ctx, mgr)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	t.Cleanup(cancel)
 	h.cancel = cancel
 
@@ -266,6 +291,7 @@ func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.
 		recordBufferQueueSize:      64,
 		recordBufferStallGrace:     2 * time.Second,
 		recordBufferHalfCloseGrace: 200 * time.Millisecond,
+		supervisorClock:            clk,
 	}
 	go func() {
 		h.done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, integrations.HTTP,
@@ -587,6 +613,15 @@ func TestRecordViaSupervisor_TrafficAfterAnIdleCloseOpensNoSpanAsTheRecordingSto
 		return open == 0
 	})
 	before, _, _ := h.mgr.OrphanRangeCount()
+	// The span ended at a reading of the wall clock no later than this one,
+	// and a span overlaps a window that starts at its end. A coarse wall
+	// clock (Windows reads it in steps of about 0.3 ms) can give the stop
+	// that very reading, and the span closed before the stop would then
+	// read as one after it: the stop is taken at a later reading.
+	closedBy := time.Now().Round(0)
+	for !time.Now().Round(0).After(closedBy) {
+		time.Sleep(time.Millisecond)
+	}
 
 	stopped := time.Now()
 	h.cancel()

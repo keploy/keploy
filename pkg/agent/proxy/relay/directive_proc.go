@@ -328,8 +328,8 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				}
 			}
 			c2dForward := r.takeStashedPrefix(fakeconn.FromClient, params.ClientFlushBytes)
-			dstPtr := r.dst.Load()
-			if dstPtr == nil || *dstPtr == nil {
+			dst := r.dst.Load()
+			if dst == nil || dst.Conn == nil {
 				r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
 				return directive.Ack{
 					Kind: d.Kind,
@@ -337,7 +337,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 					Err:  errors.New("TLS upgrade client-hold C2D flush: no destination conn"),
 				}
 			}
-			wn, werr := (*dstPtr).Write(c2dForward.bytes)
+			wn, werr := dst.Write(c2dForward.bytes)
 			if werr == nil && wn != c2dForward.len() {
 				werr = fmt.Errorf("short write %d of %d bytes", wn, c2dForward.len())
 			}
@@ -366,7 +366,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	} else if r.preDispatchActive.Load() {
 		c2dForward := r.takeStashed(fakeconn.FromClient)
 		if c2dForward.len() > 0 {
-			dst := *r.dst.Load()
+			dst := r.dst.Load()
 			if _, werr := dst.Write(c2dForward.bytes); werr != nil {
 				if log != nil {
 					log.Debug("relay: TLS upgrade pre-dispatch C2D flush failed",
@@ -401,7 +401,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				preamblePayload = make([]byte, params.PreambleReadFromDest)
 				copy(preamblePayload, stashed.bytes)
 				clearDeadline(r.dst.Load())
-				dst := *r.dst.Load()
+				dst := r.dst.Load()
 				_, err := readFullPreamble(dst, preamblePayload[stashed.len():])
 				if err != nil {
 					if log != nil {
@@ -439,7 +439,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			// (no-op since it sets the zero deadline anyway).
 			preamblePayload = make([]byte, params.PreambleReadFromDest)
 			clearDeadline(r.dst.Load())
-			dst := *r.dst.Load()
+			dst := r.dst.Load()
 			n, err := readFullPreamble(dst, preamblePayload)
 			if err != nil {
 				if log != nil {
@@ -468,7 +468,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			// propagate deadlines to both directions, so the
 			// belt-and-braces clear keeps the Write below clean.
 			clearDeadline(r.src.Load())
-			src := *r.src.Load()
+			src := r.src.Load()
 			if _, werr := src.Write(preamblePayload); werr != nil {
 				if log != nil {
 					log.Debug("relay: TLS upgrade preamble forward failed",
@@ -563,7 +563,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		if params.DestTLSConfig == nil {
 			return nil
 		}
-		dst := *r.dst.Load()
+		var dst net.Conn = r.dst.Load()
 		// If the D2C forwarder stashed any cleartext bytes beyond the
 		// preamble window (e.g. a protocol that frames more than the
 		// parser's PreambleReadFromDest tells us about), prepend them
@@ -641,7 +641,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		if params.ClientTLSConfig == nil {
 			return nil
 		}
-		src := *r.src.Load()
+		var src net.Conn = r.src.Load()
 		// If the C2D forwarder stashed any bytes (canonically the
 		// SUT's TLS ClientHello, which can land in the C2D forwarder's
 		// pre-pause Read when the SUT pipelines its SSLRequest tightly
@@ -724,10 +724,10 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	// above will observe the new conns the instant we call
 	// r.endPause below. Until then, no side has seen the swap.
 	if upgradedDst != nil {
-		r.dst.Store(&upgradedDst)
+		r.dst.Store(wrapPeerConn(upgradedDst, &r.dstWrites))
 	}
 	if upgradedSrc != nil {
-		r.src.Store(&upgradedSrc)
+		r.src.Store(wrapPeerConn(upgradedSrc, &r.srcWrites))
 	}
 
 	boundaryWrittenAt := time.Now()
@@ -934,8 +934,8 @@ func (r *Relay) handleReleaseClient(ctx context.Context, stopping <-chan struct{
 	// user-traffic loss on a directive whose whole contract is "our
 	// brake comes off, nothing else changes".
 	if held := r.takeStashed(fakeconn.FromDest); held.len() > 0 {
-		if srcPtr := r.src.Load(); srcPtr != nil {
-			if _, werr := (*srcPtr).Write(held.bytes); werr != nil && log != nil {
+		if src := r.src.Load(); src != nil {
+			if _, werr := src.Write(held.bytes); werr != nil && log != nil {
 				log.Debug("relay: delivering the D2C pause stash on release failed",
 					zap.Error(werr),
 					zap.Int("bytes", held.len()),
@@ -1016,7 +1016,7 @@ func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan str
 
 	var drainErr error
 	if len(c2dStash) > 0 {
-		dst := *r.dst.Load()
+		dst := r.dst.Load()
 		for _, p := range c2dStash {
 			if dst == nil {
 				break
@@ -1046,7 +1046,7 @@ func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan str
 		}
 	}
 	if drainErr == nil && len(d2cStash) > 0 {
-		src := *r.src.Load()
+		src := r.src.Load()
 		for _, p := range d2cStash {
 			if src == nil {
 				break
@@ -1131,10 +1131,10 @@ func publishRealCertFromUpgraded(r *Relay, upgraded net.Conn, log *zap.Logger) {
 	leaf := state.PeerCertificates[0]
 
 	src := r.src.Load()
-	if src == nil || *src == nil {
+	if src == nil || src.Conn == nil {
 		return
 	}
-	tcpAddr, ok := (*src).RemoteAddr().(*net.TCPAddr)
+	tcpAddr, ok := src.RemoteAddr().(*net.TCPAddr)
 	if !ok || tcpAddr == nil || tcpAddr.Port == 0 {
 		// Port==0 means the addr resolution returned a sentinel /
 		// unspecified port (typically a wrapped conn that doesn't

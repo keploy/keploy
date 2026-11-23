@@ -146,12 +146,16 @@ func TestRenderRequestPreview_RedactsEverywhere(t *testing.T) {
 }
 
 func TestRedactFieldDiffs(t *testing.T) {
-	nc := []string{"^drift-[0-9]+$"}
+	nc := []string{"^drift-[0-9]+$", "^999$"}
 	diffs := []models.MockFieldDiff{
 		{Path: "header.Authorization", Expected: "Bearer old", Actual: "Bearer new"}, // keyword path
 		{Path: "body.note", Expected: "drift-111", Actual: "drift-222"},              // noise value, benign path
 		{Path: "body.assertion", Expected: jwtSecret, Actual: "x"},                   // value-shape backstop
 		{Path: "body.qty", Expected: "2", Actual: "5"},                               // benign -> must remain
+		{Path: "body.meta", Kind: models.DiffKindTypeChanged, Expected: "object", Actual: "string: drift-111"},
+		{Path: "body.num", Kind: models.DiffKindTypeChanged, Expected: "number: 999", Actual: "string: ok"},
+		{Path: "body.tok_shape", Kind: models.DiffKindTypeChanged, Expected: "null: null", Actual: "string: " + jwtSecret},
+		{Path: "body.token", Kind: models.DiffKindMissingInLive, Expected: "plain-secret", Actual: ""},
 	}
 	redactFieldDiffs(diffs, redactedPlacesOf(nil, nc), "")
 	if diffs[0].Expected != valueRedacted || diffs[0].Actual != valueRedacted {
@@ -165,6 +169,18 @@ func TestRedactFieldDiffs(t *testing.T) {
 	}
 	if diffs[3].Expected != "2" || diffs[3].Actual != "5" {
 		t.Errorf("benign qty diff should remain visible: %+v", diffs[3])
+	}
+	if diffs[4].Expected != "object" || diffs[4].Actual != "string: "+valueRedacted {
+		t.Errorf("type_changed anchored noise value not redacted: %+v", diffs[4])
+	}
+	if diffs[5].Expected != "number: "+valueRedacted || diffs[5].Actual != "string: ok" {
+		t.Errorf("type_changed numeric noise value not redacted cleanly: %+v", diffs[5])
+	}
+	if diffs[6].Expected != "null: null" || diffs[6].Actual != "string: "+valueRedacted {
+		t.Errorf("type_changed credential-shaped value not redacted cleanly: %+v", diffs[6])
+	}
+	if diffs[7].Expected != valueRedacted || diffs[7].Actual != "" {
+		t.Errorf("missing_in_live sensitive key should redact Expected and keep Actual empty: %+v", diffs[7])
 	}
 }
 

@@ -3,6 +3,8 @@ package yaml
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,5 +115,59 @@ func TestWriteFileF_AtomicPreservesContentAndMode(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o640 {
 		t.Fatalf("mode = %v, want 0o640 preserved across atomic replace", info.Mode().Perm())
+	}
+}
+
+// A file written as it is made (WriteRecordingFileStreamF) is what was
+// written, in pieces larger and smaller than its buffer, and replaces the
+// file whole; a write that fails part way leaves the file as it was, and no
+// temp file beside it.
+func TestWriteRecordingFileStreamF_WritesWhatWasWrittenOrLeavesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	logger := zap.NewNop()
+	before := []byte("before\n")
+	if err := WriteRecordingFileF(ctx, logger, dir, dir, "mappings", before, false, FormatYAML); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "mappings."+FormatYAML.FileExtension())
+	var want bytes.Buffer
+	pieces := [][]byte{[]byte("small\n"), bytes.Repeat([]byte("x"), streamWriteBuffer+17), []byte("\n"), bytes.Repeat([]byte("y\n"), streamWriteBuffer), []byte("the last line\n")}
+	for _, p := range pieces {
+		want.Write(p)
+	}
+	if err := WriteRecordingFileStreamF(ctx, logger, dir, dir, "mappings", FormatYAML, func(w io.Writer) error {
+		for _, p := range pieces {
+			if _, err := w.Write(p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, want.Bytes()) {
+		t.Fatalf("the file holds %d bytes (err %v), want the %d written", len(got), err, want.Len())
+	}
+	failed := errors.New("encoding failed")
+	if err := WriteRecordingFileStreamF(ctx, logger, dir, dir, "mappings", FormatYAML, func(w io.Writer) error {
+		if _, err := w.Write(bytes.Repeat([]byte("z"), 3*streamWriteBuffer)); err != nil {
+			return err
+		}
+		return failed
+	}); !errors.Is(err, failed) {
+		t.Fatalf("a write that failed returned %v, want its error", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, want.Bytes()) {
+		t.Fatalf("a write that failed left the file %d bytes (err %v), want it as it was", len(got), err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(target) {
+			t.Fatalf("a write that failed left %s beside the file", e.Name())
+		}
 	}
 }

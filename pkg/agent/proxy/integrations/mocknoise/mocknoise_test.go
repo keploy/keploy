@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // fakeAdapter is a minimal Adapter for exercising the engine independently of
@@ -296,6 +297,66 @@ func TestEngineKnownNoiseMergesStoredAndUser(t *testing.T) {
 	}
 	if _, ok := known["sessionId"]; !ok {
 		t.Fatalf("user noise must be present: %v", known)
+	}
+}
+
+func TestStrictNoiseSetsAndNilSafety(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		env  string
+	}{
+		{name: "proven_unset", env: ""},
+		{name: "proven_1", env: "1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, mode.env)
+
+			user := map[string][]string{
+				"userid": {},
+				"id":     {`^\d+$`},
+			}
+			stored := map[string][]string{
+				"body.ts":        {},
+				"body.userId":    {}, // case twin of user full-ignore
+				"body.user.id":   {}, // covered by user pattern on id
+				"header.x-trace": {}, // non-body learned entry (dropped under KEPLOY_PROVEN=1)
+			}
+
+			a := &fakeAdapter{stored: stored}
+			e := New(a, false, true)
+			known, ts := e.StrictNoise(&models.Mock{}, user)
+
+			if _, ok := known["ts"]; !ok {
+				t.Fatalf("expected learned ts in known: %v", known)
+			}
+			if _, ok := ts["ts"]; !ok {
+				t.Fatalf("expected learned ts in typeStrict: %v", ts)
+			}
+			if _, ok := ts["userId"]; ok {
+				t.Fatalf("user full-ignore case twin must not be typeStrict: %v", ts)
+			}
+			if _, ok := ts["user.id"]; ok {
+				t.Fatalf("user pattern-guarded path must not be typeStrict: %v", ts)
+			}
+			if _, ok := known["user.id"]; ok {
+				t.Fatalf("user pattern-guarded learned path must not override user pattern in known: %v", known)
+			}
+			if mode.env == "1" {
+				if _, ok := known["header.x-trace"]; ok {
+					t.Fatalf("under proven switch non-body learned entry must not enter known: %v", known)
+				}
+				if _, ok := ts["header.x-trace"]; ok {
+					t.Fatalf("under proven switch non-body learned entry must not enter typeStrict: %v", ts)
+				}
+			}
+
+			// Nil engine stays safe and returns userNoise with no typeStrict.
+			var nilEngine *Engine
+			nk, nts := nilEngine.StrictNoise(&models.Mock{}, user)
+			if !reflect.DeepEqual(nk, user) || nts != nil {
+				t.Fatalf("nil engine StrictNoise: got (%v, %v), want (%v, nil)", nk, nts, user)
+			}
+		})
 	}
 }
 

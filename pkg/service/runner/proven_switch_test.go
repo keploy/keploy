@@ -107,3 +107,26 @@ func TestSetupTestSetEndsOnTheAgentsStalledStart(t *testing.T) {
 		t.Fatalf("setupTestSet = %v after %d watch(es); want the agent's stalled start, watched once", err, instr.watched)
 	}
 }
+
+// When Setup or a compose move sets the agent's address through SetAgentURI,
+// setupTestSet gates on and reports that address rather than the stale field.
+func TestSetupTestSetFollowsAMovedAgentURI(t *testing.T) {
+	moved := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
+	cfg := &config.Config{}
+	cfg.SetAgentURI(moved)
+	instr := &startWatchInstr{}
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: instr,
+		config:          cfg,
+		mappingDB:       &stubMappingDB{mappings: map[string][]models.MockEntry{}},
+		mockDB:          &skippingMockDB{},
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err == nil {
+		setup.cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), moved) || instr.watched != 1 {
+		t.Fatalf("setupTestSet = %v after %d watch(es); want error naming moved URI %q, watched once", err, instr.watched, moved)
+	}
+}

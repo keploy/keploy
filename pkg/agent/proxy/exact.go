@@ -888,6 +888,12 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 		}
 	}
 	m.restoreLocked(names)
+	// Parsers that keep an index of what they read (including per-kind
+	// staging-generation indexes and pool cursors) must see the bumped
+	// generation atomically with the post-restart round generation.
+	for k := range m.stagedKinds() {
+		m.bumpViewKind(k)
+	}
 	m.exact.round.mu.Unlock()
 	// A carry-over mock of the pool the app consumed as it started is the
 	// retried package's to consume again.
@@ -900,7 +906,6 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 		}
 	}
 	m.cursorMu.Unlock()
-	// Parsers that keep an index of what they read read again.
 	m.bumpRevisionAll()
 }
 
@@ -3080,6 +3085,56 @@ func (v *exactView) unansweredAt(at []int) []int {
 	}
 	unansweredVisited.Add(uint64(len(at)))
 	return out
+}
+
+// unspentFrom scans positions[from:] under v.mu for the first position whose
+// owned recording is neither consumed nor claimed by another test. nextFrom
+// advances only across leading permanently-consumed positions (v.consumed[p]
+// never transitions back to false in v), so callers can amortise repeated
+// lookups of identical-request buckets to O(1) without skipping transiently
+// unconsumed or shared-claimed entries.
+func (v *exactView) unspentFrom(posMap, positions []int, from int) (idx, nextFrom int, ok bool) {
+	if from < 0 {
+		from = 0
+	}
+	n := len(positions)
+	if positions == nil {
+		n = len(v.owned)
+	}
+	if from >= n {
+		return 0, n, false
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	nextFrom = from
+	leading := true
+	for i := from; i < n; i++ {
+		p := i
+		if positions != nil {
+			p = positions[i]
+			if posMap != nil {
+				if p < 0 || p >= len(posMap) {
+					if leading {
+						nextFrom = i + 1
+					}
+					continue
+				}
+				p = posMap[p]
+			}
+		}
+		if p < 0 || p >= len(v.owned) || v.consumed[p] {
+			if leading {
+				nextFrom = i + 1
+			}
+			continue
+		}
+		leading = false
+		if v.takenByOther(p) {
+			continue
+		}
+		return i, nextFrom, true
+	}
+	return 0, nextFrom, false
 }
 
 // ownedKeys is the view's index of its owned copies' keys under ix (keyed,

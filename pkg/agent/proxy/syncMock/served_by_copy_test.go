@@ -3,6 +3,8 @@ package manager
 import (
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -212,20 +214,20 @@ func TestTheCopiesARecordingHoldsAreBounded(t *testing.T) {
 	m.SetOutputChannel(make(chan *models.Mock, 1))
 	m.SetOutputChannel(make(chan *models.Mock, 1)) // the second recording: an older one's epoch is a real one
 	ep := m.revokeEpoch.Load()
-	m.noteDelivered(copyAt(t, "cur", t0), ep)
-	m.noteDelivered(copyAt(t, "none", t0), ep)     // needs no mock: no key to hold
-	m.noteDelivered(copyAt(t, "needed:k", t0), ep) // needed in itself: no copy of k
+	m.noteDelivered(noteOf(copyAt(t, "cur", t0)), ep)
+	m.noteDelivered(noteOf(copyAt(t, "none", t0)), ep)     // needs no mock: no key to hold
+	m.noteDelivered(noteOf(copyAt(t, "needed:k", t0)), ep) // needed in itself: no copy of k
 	if m.neededByNone(copyAt(t, "k", t0.Add(time.Second)), ep) {
 		t.Fatal("a mock its kind needs in itself was held as a copy")
 	}
-	m.noteDelivered(copyAt(t, "older", t0), ep-1)
+	m.noteDelivered(noteOf(copyAt(t, "older", t0)), ep-1)
 	if m.neededByNone(copyAt(t, "older", t0.Add(time.Second)), ep) {
 		t.Fatal("a copy taken for an older recording's channel is held")
 	}
 	for i := 0; i < heldCopiesMax-1; i++ { // "cur" holds one
-		m.noteDelivered(copyAt(t, fmt.Sprint(i), t0), ep)
+		m.noteDelivered(noteOf(copyAt(t, fmt.Sprint(i), t0)), ep)
 	}
-	m.noteDelivered(copyAt(t, "past", t0), ep)
+	m.noteDelivered(noteOf(copyAt(t, "past", t0)), ep)
 	if m.neededByNone(copyAt(t, "past", t0.Add(time.Second)), ep) {
 		t.Fatal("a key past the bound is held")
 	}
@@ -235,11 +237,11 @@ func TestTheCopiesARecordingHoldsAreBounded(t *testing.T) {
 	if m.neededByNone(copyAt(t, "0", t0.Add(-time.Second)), ep) {
 		t.Fatal("a mock requested before its key's copy is held")
 	}
-	m.noteDelivered(copyAt(t, "0", t0.Add(time.Hour)), ep)
+	m.noteDelivered(noteOf(copyAt(t, "0", t0.Add(time.Hour))), ep)
 	if !m.neededByNone(copyAt(t, "0", t0.Add(time.Second)), ep) {
 		t.Fatal("a later copy moved its key's time")
 	}
-	m.noteDelivered(copyAt(t, "0", t0.Add(-2*time.Second)), ep)
+	m.noteDelivered(noteOf(copyAt(t, "0", t0.Add(-2*time.Second))), ep)
 	if !m.neededByNone(copyAt(t, "0", t0.Add(-time.Second)), ep) {
 		t.Fatal("an earlier copy did not move its key's time")
 	}
@@ -261,5 +263,52 @@ func TestTheCopiesARecordingHoldsAreBounded(t *testing.T) {
 	RegisterServedByCopy(copyKind, nil)
 	if _, ok := ServedByCopyOf(copyKind); ok || m.neededByNone(copyAt(t, "none", t0), ep) {
 		t.Fatal("a kind whose ServedByCopy was unregistered still has one")
+	}
+}
+
+// A mock the consumer took is the consumer's: the agent's record stream
+// writes its metadata as it streams it (starts.Registry.Stamp). So the send
+// reads what it notes of a copy (noteOf) before the hand-over, on an
+// immediate send and on the drainer's alike: a read after it races that
+// write, which -race (CI runs this package under it) reports here, and which
+// ended the agent with "concurrent map read and map write" under load, a
+// recording's in-flight captures lost with it. The channel holds one, so the
+// sends take both ways out.
+func TestASendReadsNothingOfAMockItsConsumerTook(t *testing.T) {
+	var taken sync.Map // the mocks the consumer took
+	var late atomic.Int64
+	RegisterServedByCopy(copyKind, func(mock *models.Mock) (string, bool) {
+		if _, was := taken.Load(mock); was {
+			late.Add(1)
+		}
+		return mock.Spec.Metadata["copy"], true
+	})
+	t.Cleanup(func() { RegisterServedByCopy(copyKind, nil) })
+	m := New(zap.NewNop())
+	ch := make(chan *models.Mock, 1)
+	m.SetOutputChannel(ch)
+	const n = 400
+	consumed := make(chan struct{})
+	go func() {
+		defer close(consumed)
+		for i := 0; i < n; i++ {
+			mock := <-ch
+			taken.Store(mock, struct{}{})
+			mock.Spec.Metadata["startedByTests"] = "true" // as starts.Registry.Stamp writes it
+		}
+	}()
+	t0 := time.Now().Add(-time.Minute)
+	for i := 0; i < n; i++ {
+		if got := sendNow(m, copyAt(t, fmt.Sprint(i%8), t0), ""); got != MockTaken {
+			t.Fatalf("send %d: %q, want it taken", i, got)
+		}
+	}
+	select {
+	case <-consumed:
+	case <-time.After(time.Minute):
+		t.Fatal("the consumer did not take every mock sent within a minute")
+	}
+	if l := late.Load(); l > 0 {
+		t.Errorf("the send read %d mocks after its consumer took them", l)
 	}
 }

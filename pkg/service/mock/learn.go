@@ -79,14 +79,29 @@ func (m *mockService) keepLearned(ctx context.Context, set string, consumed []mo
 
 // learnedOut is what record's full round wrote onto the set's mocks
 // (persistLearned), as the record says it: byTest by test, each field as
-// "<mock> <what was added>"; pool what it wrote onto mocks no test consumed
-// (the set's start-up and pool), sorted; elsewhere what calls made in other
+// "<mock> <what was added>", onto the test's own recordings its own calls
+// consumed; answeredElsewhere by test, as byTest, onto the test's own
+// recordings that only other tests' calls consumed (its owner's line
+// lists them, marked); pool what it wrote onto mocks no test consumed (the
+// set's start-up and pool), sorted; elsewhere what calls made in other
 // windows than their recordings' taught them, by recording
 // (LearnedElsewhere). A field only such a call taught is in elsewhere alone.
 type learnedOut struct {
-	byTest    map[string][]string
-	pool      []string
-	elsewhere []LearnedElsewhere
+	byTest            map[string][]string
+	answeredElsewhere map[string][]string
+	pool              []string
+	elsewhere         []LearnedElsewhere
+}
+
+// withLearned puts on each test's line (tests) what learned says the learn
+// step wrote onto that test's own recordings: those its own calls consumed
+// (Learned), and those only other tests' calls consumed
+// (LearnedAnsweredElsewhere).
+func withLearned(tests []TestReceipt, learned learnedOut) {
+	for i := range tests {
+		tests[i].Learned = learned.byTest[tests[i].Name]
+		tests[i].LearnedAnsweredElsewhere = learned.answeredElsewhere[tests[i].Name]
+	}
 }
 
 // clientTestsRemedy is what to do about a round whose agent did not say it
@@ -222,11 +237,48 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 		return learnedOut{}, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
 	}
 	added, taught := learn.SplitTaught(added, elsewhere, owner)
-	byTest := map[string][]string{}
+	byTest, answeredElsewhere := map[string][]string{}, map[string][]string{}
 	seen := map[string]bool{}
+	// ownUse is each recording its owner's own calls consumed.
+	ownUse := map[string]bool{}
+	for _, f := range flows {
+		for _, st := range f.Consumed {
+			if owner[st.Name] == f.Flow {
+				ownUse[st.Name] = true
+			}
+		}
+	}
+	for _, f := range flows {
+		for _, st := range f.Consumed {
+			// A test's own recording that only other tests' calls consumed
+			// is listed once, on its owner's line, marked: ownership is what
+			// a reader looks for first, whether or not its owner ran in the
+			// round: every test the mapping lists has its line. One its
+			// owner consumed is its own (ownUse), and one no test owns (a
+			// start-up, session or worker recording) is the set's.
+			o := owner[st.Name]
+			if o == "" || ownUse[st.Name] || seen[st.Name] {
+				continue
+			}
+			for _, a := range added[st.Name] {
+				answeredElsewhere[o] = append(answeredElsewhere[o], st.Name+" "+a)
+			}
+			seen[st.Name] = true
+		}
+	}
+	for _, test := range slices.Sorted(maps.Keys(answeredElsewhere)) {
+		m.logger.Info("learned fields that changed between record and replay, on the test's own mocks that only other tests' calls consumed", zap.String("test", test), zap.Strings("fields", models.FieldPathsInTextShaped(answeredElsewhere[test])))
+	}
 	for _, f := range flows {
 		var fields []string
 		for _, st := range f.Consumed {
+			if owner[st.Name] != f.Flow {
+				// A recording is listed once, in its own scope: a test's own
+				// on its line (answeredElsewhere when only other tests'
+				// calls consumed it), the set's (a session's, a worker's)
+				// with the set's, never under each test it answered in.
+				continue
+			}
 			for _, a := range added[st.Name] {
 				fields = append(fields, st.Name+" "+a)
 			}
@@ -253,12 +305,12 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 	}
 	if len(rest) > 0 {
 		sort.Strings(rest)
-		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", models.FieldPathsInTextShaped(rest)))
+		m.logger.Info("learned fields that changed between record and replay, on the set's mocks (start-up, session, worker) and mocks no test consumed", zap.Strings("fields", models.FieldPathsInTextShaped(rest)))
 	}
 	voided = slices.DeleteFunc(voided, func(v models.MockState) bool { return !m.learnsOnto(owner[v.Name]) })
 	// keploy mock record serves a worker: entry as the pool's (unknownBesideTests).
 	learn.SayLearnedElsewhere(m.logger, taught, voided, owner, nil)
-	return learnedOut{byTest: byTest, pool: rest, elsewhere: taught}, nil
+	return learnedOut{byTest: byTest, answeredElsewhere: answeredElsewhere, pool: rest, elsewhere: taught}, nil
 }
 
 // takeCaseBinds takes out of st's binds those at a client test case's
