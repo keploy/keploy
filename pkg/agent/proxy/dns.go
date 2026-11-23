@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -53,9 +54,11 @@ func (p *Proxy) newDNSServer(network string) *dnsServer {
 		Addr:    fmt.Sprintf(":%v", p.DNSPort),
 		Net:     network,
 		Handler: p,
-		// miekg/dns calls it just before it serves on the socket, on the
-		// goroutine that called ActivateAndServe. A serve call that fails
-		// before it serves never calls it.
+		// miekg/dns calls it just before it enters its accept/read loop, on
+		// the goroutine that called ActivateAndServe — before Accept on TCP
+		// (every OS) and before touching the UDP socket on Windows. serve's
+		// preBoundReady check stops a closed or unverifiable pre-bound socket
+		// from reaching ActivateAndServe and being notified as started.
 		NotifyStartedFunc: func() { s.settleAs(true, nil) },
 	}
 	return s
@@ -86,7 +89,9 @@ func (s *dnsServer) serve() (err error) {
 		defer func() { _ = sock.Close() }()
 	}
 	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
-	err = s.srv.ActivateAndServe()
+	if err = preBoundReady(s.srv); err == nil {
+		err = s.srv.ActivateAndServe()
+	}
 	if err != nil {
 		utils.LogError(s.logger, err, fmt.Sprintf("the %s DNS server failed to serve or stopped serving", s.name()), zap.String("addr", s.srv.Addr))
 	}
@@ -1606,4 +1611,28 @@ func preBound(srv *dns.Server) io.Closer {
 		return srv.PacketConn
 	}
 	return nil
+}
+
+// preBoundReady verifies that a pre-bound socket handed to srv is still open
+// before miekg/dns enters ActivateAndServe. miekg/dns invokes NotifyStartedFunc
+// before Accept on TCP (every OS) and before ReadFrom on UDP on Windows (where
+// miekg/dns's setUDPSocketOptions is a no-op). Without this check, a socket
+// closed between bindDNS and ActivateAndServe settles the server as serving and
+// lets startDNSServers return nil while serve fails immediately on the closed
+// socket. A non-nil socket that does not implement syscall.Conn fails closed so
+// an unverifiable wrapper can never bypass the check silently.
+func preBoundReady(srv *dns.Server) error {
+	sock := preBound(srv)
+	if sock == nil {
+		return nil
+	}
+	sc, ok := sock.(syscall.Conn)
+	if !ok {
+		return fmt.Errorf("cannot verify the DNS socket is serving: %T does not expose its OS handle", sock)
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	return raw.Control(func(uintptr) {})
 }
