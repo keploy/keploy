@@ -55,6 +55,7 @@ type Config struct {
 	SessionCalls []models.SessionCallRule `json:"sessionCalls,omitempty" yaml:"sessionCalls,omitempty" mapstructure:"sessionCalls"`
 	// Redis declares, for a Redis the app writes in the run, the key shapes
 	// that hold a word the app drew itself, such as a job's uuid.
+	// Enterprise-only: consumed by the enterprise Redis parser; ignored in OSS builds.
 	Redis RedisConfig `json:"redis,omitempty" yaml:"redis,omitempty" mapstructure:"redis"`
 	// MysqlPorts pins destination ports to the MySQL parser, skipping
 	// auto-detection for them; a non-empty list replaces the built-in
@@ -488,14 +489,16 @@ type Normalize struct {
 // otherwise pass.
 const DefaultHealthPollTimeout = 3 * time.Minute
 
-// RedisConfig is keploy.yaml's redis block.
+// RedisConfig is keploy.yaml's redis block (enterprise-only: parsed here and
+// forwarded to the enterprise Redis parser; ignored in OSS builds).
 type RedisConfig struct {
 	Drawn []RedisDrawnPlace `json:"drawn,omitempty" yaml:"drawn,omitempty" mapstructure:"drawn"`
 }
 
-// RedisDrawnPlace is one key shape: literal text, {draw} where a word the app
-// drew stands (32 hex digits or a dashed uuid) and {same} where a word must
-// equal the recording's, as in rq:job:{draw}.
+// RedisDrawnPlace is one enterprise-only Redis key shape: literal text, {draw}
+// where a word the app drew stands (32 hex digits or a dashed uuid) and {same}
+// where a word must equal the recording's, as in rq:job:{draw}. Ignored in OSS
+// builds.
 type RedisDrawnPlace struct {
 	Key string `json:"key" yaml:"key" mapstructure:"key"`
 }
