@@ -71,7 +71,7 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 
 // LargeBodyThreshold is the size threshold (1MB) above which response bodies
 // are skipped during recording and only body size is stored.
-const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
+const LargeBodyThreshold = 1 * 1024 * 1024 // 1 M
 
 // SkipUnderPressure reports whether the memory guard has paused recording, as
 // a capture hook decides whether to record an exchange. When it has, it closes
