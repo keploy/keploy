@@ -362,9 +362,9 @@ func ResetInterruptedAgain() {
 
 func NewCtx() context.Context {
 	// Create a context that can be canceled
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, c := context.WithCancel(context.Background())
 
-	SetCancel(cancel)
+	SetCancel(c)
 	// Set up a channel to listen for signals
 	sigs := make(chan os.Signal, 1)
 	// os.Interrupt is more portable than syscall.SIGINT
