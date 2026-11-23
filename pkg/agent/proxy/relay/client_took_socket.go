@@ -4,6 +4,7 @@ package relay
 
 import (
 	"net"
+	"syscall"
 
 	"go.uber.org/zap"
 )
@@ -25,6 +26,28 @@ func clientSocketOf(c net.Conn, log *zap.Logger) clientSocket {
 				return nil
 			}
 			return newTCPClientSocket(rc, log)
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			return nil
+		}
+		c = u.NetConn()
+	}
+	return nil
+}
+
+// tcpStateSocketOf returns a dedicated clientSocket for querying TCP state on
+// c (used only by that side's forwarder in peerWriteState.resetOnEOF, never
+// shared with Relay.client so look() has a single caller). It walks NetConn()
+// wrappers and also accepts syscall.Conn wrappers such as connseq.Upstream.
+func tcpStateSocketOf(c net.Conn) clientSocket {
+	for i := 0; c != nil && i < 16; i++ { // bounded: a cycle must not hang
+		if sc, ok := c.(syscall.Conn); ok {
+			rc, err := sc.SyscallConn()
+			if err != nil {
+				return nil
+			}
+			return newTCPClientSocket(rc, nil)
 		}
 		u, ok := c.(interface{ NetConn() net.Conn })
 		if !ok {

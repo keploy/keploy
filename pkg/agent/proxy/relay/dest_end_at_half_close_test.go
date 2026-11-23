@@ -149,10 +149,9 @@ func (d *gatedDest) Read(p []byte) (int, error) {
 // alert, written, not a shutdown(2): met by the destination's reset in its
 // socket, that write fails with the reset itself (or EPIPE), never ENOTCONN,
 // and takes the reset out of the socket, so a read after it finds only its
-// end, an EOF. The relay keeps the teardown there: the destination's end is
-// left untold rather than told as a close. Draining as for a plain socket
-// whose connection is over would read that EOF and tell the reset as the
-// destination's close.
+// end, an EOF (or a nudged read deadline). The relay keeps the teardown (no
+// drain) and tells the destination's reset from the failed close_notify —
+// never as a clean close and never silently dropped on the deadline exit.
 func TestOverTLSADestinationsResetMetAsTheClientsFINIsForwardedIsNotToldAsAClose(t *testing.T) {
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
@@ -231,8 +230,15 @@ func TestOverTLSADestinationsResetMetAsTheClientsFINIsForwardedIsNotToldAsAClose
 		t.Fatal("the relay drained after a close_notify that met the destination's reset, want the teardown")
 	default:
 	}
-	if got := ends.all(); len(got) != 1 || got[0] != "the client's end" {
-		t.Fatalf("told %q, want only the client's end: the destination's reset, taken by the failed close_notify, is never told as its close", got)
+	want := []string{"the client's end", "the destination's end (reset)", "the client's end before the destination's"}
+	got := ends.all()
+	if len(got) != len(want) {
+		t.Fatalf("told %q, want %q: the destination's reset, taken by the failed close_notify, must be told as a reset (not as a close and not dropped)", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("told %q, want %q: the destination's reset, taken by the failed close_notify, must be told as a reset (not as a close and not dropped)", got, want)
+		}
 	}
 }
 
