@@ -152,8 +152,7 @@ type recording struct {
 	streams [2]*fakeconn.FakeConn
 	chans   [2]chan fakeconn.Chunk
 	ended   [2]bool // the stream has ended (endStream)
-	want    [2]int64
-	read    bool // the client's first chunk is put: the dest's reader starts once it is read
+	read    bool    // the client's first chunk is put: the dest's reader starts once it is read
 	mocks   chan *models.Mock
 	mgr     *syncMock.SyncMockManager
 	done    chan error
@@ -216,24 +215,19 @@ func (r *recording) push(c fakeconn.Chunk) {
 	r.taken(c)
 }
 
-// taken waits until the reader of c's stream has taken every chunk put on it,
-// c's included (the dest's reader starts once the client's first chunk is
-// read, so none put before that is waited for).
+// taken waits until the parser has done all it can with c (awaitRest): the
+// dest's reader starts only once the client's first chunk is peeked, so a
+// chunk put on the dest stream before that is not waited on. A chunk the
+// merge holds for the other direction stays unconsumed on its stream until it
+// is placed, so ReadThrough is not awaited here.
 func (r *recording) taken(c fakeconn.Chunk) {
 	r.t.Helper()
 	i := dirIndex(c.Dir)
-	r.want[i] += int64(len(c.Bytes))
 	r.read = r.read || i == 0
 	if i == 1 && !r.read {
 		return
 	}
-	bound := time.Now().Add(10 * time.Second) // only turns a hang into a failure
-	for r.streams[i].ReadThrough() < r.want[i] {
-		if time.Now().After(bound) {
-			r.t.Fatalf("the %s's reader never took %q off its stream", c.Dir, c.Bytes)
-		}
-		time.Sleep(time.Millisecond)
-	}
+	r.awaitRest()
 }
 
 // putAtRest puts c on its stream, and waits until the parser has done all it
@@ -854,7 +848,6 @@ func TestV2_AHeldAnswerGoesOnAheadOfAnUnnumberedChunkReceivedAfterIt(t *testing.
 			r.put(reqs[1])
 			r.put(resps[1])
 			r.awaitWaiting(0)
-			r.awaitWaiting(1)
 			r.awaitMergeWaits()
 			r.push(reqs[2])
 			ok := r.recorded("req1|resp1")
@@ -895,7 +888,6 @@ func TestV2_AHeldAnswerGoesOnBehindARequestChunkCapturedBeforeIt(t *testing.T) {
 			r.order.accept(second, int64(len(second.Bytes)))
 			r.put(resps[1])
 			r.awaitWaiting(0)
-			r.awaitWaiting(1)
 			r.awaitMergeWaits()
 			r.push(second)
 			got := r.end()
@@ -928,7 +920,6 @@ func TestV2_TheMergeWaitsForAChunkOnItsStreamItsReaderHasNotHandedOn(t *testing.
 			r.put(resps[1])
 			r.put(resps[2])
 			r.awaitWaiting(0)
-			r.awaitWaiting(1)
 			r.awaitMergeWaits()
 			r.push(reqs[1])
 			r.push(reqs[2])
@@ -1048,12 +1039,11 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 // recorded nothing.
 func TestV2_TheFirstClientChunkGoesOnAheadOfTheReply(t *testing.T) {
 	at := time.Unix(6000, 0)
-	var dest *fakeconn.FakeConn // the connection's dest stream, set before its parser starts
 	started := make(chan bool, 1)
 	prev := testHookBeforeMerge
-	testHookBeforeMerge = func() {
+	testHookBeforeMerge = func(destQueued func() bool) {
 		bound := time.Now().Add(waitBound)
-		for waiting, _ := dest.Waiting(); !waiting; waiting, _ = dest.Waiting() {
+		for !destQueued() {
 			if time.Now().After(bound) {
 				started <- false
 				return
@@ -1071,7 +1061,6 @@ func TestV2_TheFirstClientChunkGoesOnAheadOfTheReply(t *testing.T) {
 		sess.Logger = zap.NewNop()
 		mgr := syncMock.New(nil)
 		sess.Mgr = mgr
-		dest = sess.DestStream
 		done := make(chan error, 1)
 		go func() { done <- dispatch(t, sess) }()
 		select {
