@@ -360,6 +360,41 @@ func ResetInterruptedAgain() {
 	repeatInterrupts.mu.Unlock()
 }
 
+// StopCause is the cause a stop cancels its context with (WithStop): the
+// instant the stop was made. A reader that dates what came after the stop
+// (a recording's stop cut-off, whose frame drains run on such a context)
+// reads it with StoppedAt, rather than the time it saw the context done: that
+// comes later, after a goroutine was scheduled, and a request made in between
+// would be dated before the stop. It wraps context.Canceled, so a caller
+// asking errors.Is(err, context.Canceled) of it is told so.
+type StopCause struct {
+	At time.Time
+}
+
+func (c StopCause) Error() string {
+	return "context canceled (stopped at " + c.At.Format(time.RFC3339Nano) + ")"
+}
+
+// Unwrap is context.Canceled: a stop is a cancel.
+func (c StopCause) Unwrap() error { return context.Canceled }
+
+// WithStop is a context that stop cancels with the instant of the stop
+// (StopCause).
+func WithStop(parent context.Context) (ctx context.Context, stop context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	return ctx, func() { cancel(StopCause{At: time.Now()}) }
+}
+
+// StoppedAt is the instant ctx's stop was made, when a stop cancelled it
+// (WithStop); false otherwise.
+func StoppedAt(ctx context.Context) (time.Time, bool) {
+	var c StopCause
+	if ctx == nil || !errors.As(context.Cause(ctx), &c) || c.At.IsZero() {
+		return time.Time{}, false
+	}
+	return c.At, true
+}
+
 func NewCtx() context.Context {
 	// Create a context that can be canceled
 	ctx, cancel := context.WithCancel(context.Background())

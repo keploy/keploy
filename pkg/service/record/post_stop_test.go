@@ -472,3 +472,32 @@ func TestGetTestAndMockChans_SaysHowManyMappingsAfterTheStopItLeftOut(t *testing
 	assert.EqualValues(t, 3, said[0].ContextMap()["mappings"])
 	assert.NotContains(t, said[0].ContextMap(), "test")
 }
+
+// The cut-off is the instant the stop was made, however late it is first
+// asked for: a request made after the stop, before the goroutine that fixes
+// the cut runs, is dated after it.
+func TestStopCut_IsTheInstantOfTheStop(t *testing.T) {
+	ctx, stop := utils.WithStop(context.Background())
+	cut := &stopCut{ctx: ctx}
+	stop()
+	stoppedBy := time.Now()
+	time.Sleep(10 * time.Millisecond)
+	requested := time.Now() // a request made after the stop, before the cut is asked for
+	at := cut.at()
+	if at.After(stoppedBy) {
+		t.Fatalf("the cut-off is %v after the stop", at.Sub(stoppedBy))
+	}
+	if !mappingAfterStop(models.TestMockMapping{RequestedAt: requested}, at) {
+		t.Fatal("a mapping of a request made after the stop is dated before its cut-off")
+	}
+	if again := cut.at(); !again.Equal(at) {
+		t.Fatalf("the cut-off moved from %v to %v", at, again)
+	}
+	// A context cancelled with no stop's instant: the first ask fixes it.
+	plain, cancel := context.WithCancel(context.Background())
+	cancel()
+	before := time.Now()
+	if c := (&stopCut{ctx: plain}).at(); c.Before(before) {
+		t.Fatalf("a cut-off of a context cancelled with no instant is %v before it was asked for", before.Sub(c))
+	}
+}
