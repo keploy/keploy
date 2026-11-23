@@ -736,19 +736,19 @@ func ExitOf(p Reached) (<-chan struct{}, func()) {
 	if p.PID <= 0 {
 		return gone()
 	}
-	fd, err := unix.PidfdOpen(p.PID, 0)
+	fd, err := OpenOwnPidfd(p.PID)
 	if err != nil {
 		return gone()
 	}
 	// The pidfd first, then its pid's start: a pid reused before the open
 	// shows another start time. Once open, the pidfd names this process.
 	if st, ok := ReadProcStat(p.PID); !ok || st.StartTime != p.Start {
-		unix.Close(fd)
+		CloseOwnPidfd(fd)
 		return gone()
 	}
 	exited, done := make(chan struct{}), make(chan struct{})
 	go func() {
-		defer unix.Close(fd)
+		defer CloseOwnPidfd(fd)
 		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 		for {
 			// The poll returns on the exit; its bound only lets the watch
@@ -769,13 +769,24 @@ func ExitOf(p Reached) (<-chan struct{}, func()) {
 	return exited, func() { once.Do(func() { close(done) }) }
 }
 
+// waitedFor is members without what handedOver leaves to the caller.
+func waitedFor(leader int, members []Reached) []Reached {
+	var waited []Reached
+	for _, m := range members {
+		if !m.Ignores || m.PID == leader {
+			waited = append(waited, m)
+		}
+	}
+	return waited
+}
+
 // stopGroupByEvents is interruptProcessTree's wait, under the switch, for a
-// process group it signalled: its leader's exit event (as its signal reached
-// it, members), while the group makes progress. It kills the group on a stall,
+// process group it signalled: the exit event of each process its signal
+// reached (members, groupGone), while the group makes progress. It kills the group on a stall,
 // or at the user's press, and says why; "" when the group exited, or was gone
 // by the kill.
 func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string) {
-	exited, release := leaderExited(leader, members)
+	exited, release := groupGone(leader, waitedFor(leader, members))
 	defer release()
 	var why string
 	switch end, bound := WaitExitByEvents(logger, exited, members, moved); end {
@@ -802,15 +813,110 @@ func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved 
 	return why
 }
 
-// leaderExited is ExitOf a group's leader as its signal reached it
-// (members): a leader not among them (gone, or a zombie, by then) has exited.
-func leaderExited(leader int, members []Reached) (<-chan struct{}, func()) {
-	for _, m := range members {
-		if m.PID == leader {
-			return ExitOf(m)
+// daemonStopEnds is LeaveToDaemonStop's ends; nil where keploy adopts
+// nothing (a binary without pkg/platform/http, which sets it).
+var daemonStopEnds atomic.Pointer[func(pid int, start uint64) bool]
+
+// LeaveToDaemonStop is how keploy's adoption of the processes an application
+// leaves behind (pkg/platform/http, Linux) tells the interrupt of the
+// application which processes of a group it signalled keploy adopted. ends
+// says, of a process named by its pid and start time, whether keploy's stop
+// of the application's daemons, which follows the interrupt in every run,
+// ends it: asks it to stop with SIGTERM (or waits for it, when it acts on
+// the interrupt already), kills it once it makes no progress on its way out,
+// and waits for it. A shell that dies on the interrupt at once (`app &
+// wait`) leaves its app so: adopted, still stopping. The interrupt neither
+// waits for such a process, but the group's leader, nor for what it runs,
+// nor kills it at its grace's end for itself: the stop of the daemons ends
+// each, as it ends what the interrupt handed its caller (handedOver). One
+// that stop would leave running (one keploy cannot see) the interrupt waits
+// for, as any other.
+func LeaveToDaemonStop(ends func(pid int, start uint64) bool) {
+	daemonStopEnds.Store(&ends)
+}
+
+// leftToDaemonStop is LeaveToDaemonStop's ends of process pid, started at
+// start; false where none is set.
+func leftToDaemonStop(pid int, start uint64) bool {
+	if ends := daemonStopEnds.Load(); ends != nil {
+		return (*ends)(pid, start)
+	}
+	return false
+}
+
+// groupGone is a channel closed once each of members, a group's processes as
+// its signal reached them (ExitOf each), has exited, or, but leader, is one
+// keploy's stop of the daemons ends (LeaveToDaemonStop), and the func that
+// releases the watch. A group counts as exited only when no process of it
+// that its signal reached runs, its leader or not: a leader that is a zombie
+// (`sh -c 'server &'` whose sh no one reaps) is not among them, and the
+// server it left in its group is waited for. With no members (a group of
+// zombies only) it is closed at once. A process becomes one keploy adopted
+// when the parent it had exits, as a shell that dies on the interrupt at
+// once (`app & wait`) leaves its app: each wait watches that exit too
+// (leftOnParentExit).
+func groupGone(leader int, members []Reached) (<-chan struct{}, func()) {
+	gone, done := make(chan struct{}), make(chan struct{})
+	exits := make([]<-chan struct{}, len(members))
+	releases := make([]func(), len(members))
+	for i, m := range members {
+		exits[i], releases[i] = ExitOf(m)
+	}
+	go func() {
+		for i, exit := range exits {
+			if members[i].PID == leader {
+				select {
+				case <-exit:
+				case <-done:
+					return
+				}
+				continue
+			}
+			if !leftOnParentExit(members[i], exit, done) {
+				return
+			}
+		}
+		close(gone)
+	}()
+	var once sync.Once
+	return gone, func() {
+		once.Do(func() {
+			close(done)
+			for _, release := range releases {
+				release()
+			}
+		})
+	}
+}
+
+// leftOnParentExit waits until process m exits (exit, its ExitOf) or is one
+// keploy's stop of the daemons ends (leftToDaemonStop), which it reads at
+// first and again each time the parent m runs under exits (ExitOf of it): a
+// process is adopted only as its parent exits. It returns false once done is
+// closed first. One whose parent cannot be read is waited for to exit.
+func leftOnParentExit(m Reached, exit, done <-chan struct{}) bool {
+	for {
+		if leftToDaemonStop(m.PID, m.Start) {
+			return true
+		}
+		var parentExit <-chan struct{}
+		release := func() {}
+		if st, ok := ReadProcStat(m.PID); ok && st.StartTime == m.Start && st.PPID > 1 {
+			if parent, ok := ReadProcStat(st.PPID); ok {
+				parentExit, release = ExitOf(Reached{PID: st.PPID, Start: parent.StartTime})
+			}
+		}
+		select {
+		case <-exit:
+			release()
+			return true
+		case <-done:
+			release()
+			return false
+		case <-parentExit:
+			release()
 		}
 	}
-	return ExitOf(Reached{})
 }
 
 func init() { groupStopByEvents = stopGroupByEvents }

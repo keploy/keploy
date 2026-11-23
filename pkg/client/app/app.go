@@ -2510,7 +2510,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 			if provenswitch.On() {
 				// What the interrupt reached and acts on is stopping:
 				// the stop of what the app leaves behind waits for it
-				// rather than ask it again (TakeStopReached).
+				// rather than ask it again (TakeStopReached), and ends
+				// what it left to its caller, as it ignored the
+				// interrupt (stopHanded).
 				var reached []utils.Reached
 				if setEnd || recordEnd {
 					// The stop waits on the app's exit, and kills only
