@@ -127,3 +127,76 @@ func TestOutcomeCoarseOutsideAnswerYieldsToSinceBeginInClientTests(t *testing.T)
 		t.Fatalf("client test fine outside answer: %s; want refused", oDescribe(df))
 	}
 }
+
+// TestMillisecondClockReadAfterSameMillisecondClockSendIsNotConflict verifies
+// that two consecutive clock reads (e.g. a nanosecond audit stamp in mock-1386
+// followed by a millisecond BSON created_at in mock-1388) that land in the
+// same millisecond during record and different milliseconds in round F are
+// learned as a plain clock read when the earlier send was itself a clock read
+// and this call's own window holds both instants. Non-clock sends, finer-than-
+// millisecond values, and out-of-window values stay refused as instant-conflict.
+func TestMillisecondClockReadAfterSameMillisecondClockSendIsNotConflict(t *testing.T) {
+	rT := time.Date(2026, 11, 23, 1, 40, 0, 112_000_000, time.UTC)
+	fT := time.Date(2026, 11, 23, 1, 44, 3, 693_000_000, time.UTC)
+	rAuditNs := strconv.FormatInt(rT.UnixNano()+30_939, 10)
+	fAuditNs := strconv.FormatInt(fT.Add(-629*time.Millisecond).UnixNano()+345_230, 10)
+	rMs := rT.Format("2006-01-02T15:04:05.000Z")
+	fMs := fT.Format("2006-01-02T15:04:05.000Z")
+
+	winOwn := &Window{
+		Rec: Span{From: rT.Add(-5 * time.Millisecond), To: rT.Add(5 * time.Millisecond), Began: rT.Add(-time.Second)},
+		F:   Span{From: fT.Add(-5 * time.Millisecond), To: fT.Add(5 * time.Millisecond), Began: fT.Add(-time.Second)},
+	}
+	winOut := &Window{
+		Rec: Span{From: rT.Add(2 * time.Second), To: rT.Add(3 * time.Second), Began: rT.Add(-time.Second)},
+		F:   Span{From: fT.Add(2 * time.Second), To: fT.Add(3 * time.Second), Began: fT.Add(-time.Second)},
+	}
+	mkAudit := func(isClock bool) Earlier {
+		at := rT.Add(-500 * time.Microsecond)
+		return Earlier{
+			Mock:    "mock-1386",
+			At:      at,
+			Own:     true,
+			Payload: oPayload("mock-1386", at),
+			Seen: []Seen{{
+				Side:  Request,
+				Leaf:  Leaf{Path: "body.docs.msgs.0.auditedAtNanos.$numberLong", Noise: "body.docs.msgs.0.auditedAtNanos.$numberLong", Type: Number, Value: rAuditNs},
+				Live:  fAuditNs,
+				Place: "body.docs.msgs.0.auditedAtNanos.$numberLong",
+				Clock: isClock,
+			}},
+		}
+	}
+	const p = "body.docs.msgs.0.created_at.$date.$numberLong"
+	run := func(typ Type, rVal, lVal string, w *Window, isClock bool) Decision {
+		in := iCall(p, typ, rVal, lVal, rT.Add(time.Millisecond), fT.Add(time.Millisecond), w, []Earlier{mkAudit(isClock)}, nil)
+		in.Drifts = oClientDrifts()
+		d := Decide(in)
+		if len(d) != 1 {
+			t.Fatalf("%d decisions: %s", len(d), oDescribe(d))
+		}
+		return d[0]
+	}
+
+	// Positive: earlier send is a clock read, current value is ms, own window holds it -> Clock.
+	d := run(Instant, rMs, fMs, winOwn, true)
+	iClock(t, "ms clock read after same-ms nanosecond clock send", d)
+
+	// Fail closed 1: earlier send is NOT a clock read -> instant-conflict.
+	dNoClk := run(Instant, rMs, fMs, winOwn, false)
+	if dNoClk.Refusal == nil || dNoClk.Refusal.Check != "instant-conflict" {
+		t.Fatalf("non-clock earlier send: %s; want refused instant-conflict", oDescribe([]Decision{dNoClk}))
+	}
+
+	// Fail closed 2: current value is outside its own call window -> instant-conflict.
+	dOut := run(Instant, rMs, fMs, winOut, true)
+	if dOut.Refusal == nil || dOut.Refusal.Check != "instant-conflict" {
+		t.Fatalf("out-of-window ms value: %s; want refused instant-conflict", oDescribe([]Decision{dOut}))
+	}
+
+	// Fail closed 3: current value is finer than 1ms (nanoseconds) -> instant-conflict.
+	dNs := run(Number, rAuditNs, strconv.FormatInt(fT.UnixNano()+111, 10), winOwn, true)
+	if dNs.Refusal == nil || dNs.Refusal.Check != "instant-conflict" {
+		t.Fatalf("nanosecond value conflicting with earlier nanosecond clock send: %s; want refused instant-conflict", oDescribe([]Decision{dNs}))
+	}
+}

@@ -2863,7 +2863,19 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		return h.p.side == Response && held
 	}
 	copied := len(copies(true)) > 0
+	// Two consecutive clock reads (e.g. a nanosecond audit stamp followed by
+	// a millisecond BSON created_at) can fall in the same millisecond during
+	// record and different milliseconds in round F. When the earlier place is
+	// itself a clock read of a send, this value is millisecond or coarser,
+	// and this call's own window holds both recorded and live instants as a
+	// plain clock read (which replay still checks via ClockOffset), it is not
+	// a conflict: let Step 5 learn it as this call's own clock read.
+	ownClockRead := c.rm != nil && c.lm != nil && max(c.rm.res, c.lm.res) >= time.Millisecond &&
+		dc.in.Window.holdsRead(*c.rm, *c.lm, dc.dr.zone)
 	conflict := heldWhere(hs, func(h instantHold) bool {
+		if ownClockRead && h.p.side == Request && h.p.clock && !h.p.gave {
+			return false
+		}
 		return before(h.p) && inScope(h.p) && h.hr && !h.hl && (h.fr || h.p.gave) && (!copied || !asRecorded(h))
 	})
 	if len(conflict) > 0 {
