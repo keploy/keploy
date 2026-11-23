@@ -144,7 +144,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	// rather than the App's own logger, which may have been created before
 	// the CLI raised the level.
 	composeOut := io.Writer(os.Stdout)
-	if log.LogCfg.Level.Level() > zap.InfoLevel {
+	if log.IsQuietMode() {
 		composeOut = io.Discard
 	}
 	err = runner.Up(upCtx, opts, composeOut, os.Stderr)

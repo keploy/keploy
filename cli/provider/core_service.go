@@ -30,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/report"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -63,9 +64,10 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	// never goes to a log: the mismatch table, a call of an earlier set. A
 	// program that embeds the replayer has none unless it sets one.
 	if r, ok := replaySvc.(*replay.Replayer); ok {
-		// In normal mode, suppress the replayer's verbose per-test output
-		// and TESTRUN SUMMARY boxes. --debug restores them.
-		if cfg.Debug {
+		// The console is suppressed only when the caller (the enterprise
+		// CLI's cloud replay) raises the global log level above Info.
+		// The OSS CLI and CI keep InfoLevel, so their console stays.
+		if !log.IsQuietMode() {
 			r.SetConsole(os.Stdout)
 		}
 	}

@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -56,10 +57,11 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 		reportDB: reportDB,
 		testDB:   testDB,
 	}
-	// 1MB buffered writer. In normal mode the TESTRUN SUMMARY and per-test
-	// diffs go to Discard so the output stays clean; --debug restores them.
+	// 1MB buffered writer. Suppressed only when the caller (the enterprise
+	// CLI's cloud replay) has raised the global log level above Info.
+	// The OSS CLI and CI keep InfoLevel, so their report output stays.
 	out := io.Writer(os.Stdout)
-	if !cfg.Debug {
+	if log.IsQuietMode() {
 		out = io.Discard
 	}
 	r.out = bufio.NewWriterSize(out, 1<<20)
