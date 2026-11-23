@@ -18,7 +18,7 @@ import (
 // length of the file.
 //
 // The file's lock (getMockFileLock) is what each append takes, and a mock file
-// is only ever appended to between the rewrites that replace it: appendMock
+// is only ever appended to between the rewrites that replace it: writeMockDoc
 // writes a whole document and flushes it before it lets the lock go. So while
 // the lock is held against appends the file ends on a document boundary, and
 // the bytes before that point do not change until a rewrite replaces the file.
@@ -124,7 +124,7 @@ func (rw *mockFileRewriter) copyAppended(pinned os.FileInfo) error {
 	return nil
 }
 
-// yamlDocSeparator is what appendMock writes before every document of a YAML
+// yamlDocSeparator is what writeMockDoc writes before every document of a YAML
 // mock file but its first.
 const yamlDocSeparator = "---\n"
 

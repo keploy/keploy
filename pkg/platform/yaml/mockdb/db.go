@@ -189,7 +189,7 @@ var gobFileOf = func(f *os.File) io.Writer { return f }
 // reports only then) in its place.
 var closeGobFile = func(f *os.File) error { return f.Close() }
 
-// closeMockFile is how appendMock closes the yaml or json mock file it
+// closeMockFile is how writeMockDoc closes the yaml or json mock file it
 // appended to: the file's own Close. Tests stand a file whose close fails in
 // its place.
 var closeMockFile = func(f *os.File) error { return f.Close() }
@@ -924,11 +924,50 @@ func (ys *MockYaml) persistLearnedLocked(ctx context.Context, testSetID, path, m
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
+	p := ys.PrepareMock(ctx, mock, testSetID)
+	return ys.WritePrepared(ctx, p)
+}
+
+// PreparedMock is one InsertMock in three steps, so that a recorder can make
+// the documents of the mocks it has in hand on several CPUs while it writes
+// them in the order they came (record.Recorder's mock loop): PrepareMock names
+// the mock and chooses the file and format it goes to, in that order; Encode
+// makes its document, on any goroutine, touching nothing but the mock and the
+// PreparedMock; WritePrepared writes it, in the order the mocks were prepared.
+// Making the document was nearly all an insert's time, on the one goroutine
+// that takes every mock the agent records, and a recording whose app called
+// out faster than one CPU's worth of encoding lost mocks on the agent's side.
+type PreparedMock struct {
+	mock         *models.Mock
+	mockPath     string
+	mockFileName string
+	format       yaml.Format
+	// err is what the insert returns without writing: the mock's fault would
+	// be dropped, or the set's files could not be read.
+	err    error
+	useGob bool
+	// inline: the mock's kind is encoded by a registered MockYAMLMapper,
+	// whose Encode is not known to be safe on several goroutines at once:
+	// WritePrepared encodes it, on the writer's goroutine, and Encode does
+	// nothing.
+	inline bool
+	// buf is the document Encode made; encErr why it could not.
+	buf    *bytes.Buffer
+	encErr error
+	logger *zap.Logger
+}
+
+// Mock is the mock prepared.
+func (p *PreparedMock) Mock() *models.Mock { return p.mock }
+
+// PrepareMock names mock and chooses where it is written, as InsertMock does
+// first. It names mocks in the order it is called. An error is the insert's:
+// WritePrepared returns it.
+func (ys *MockYaml) PrepareMock(ctx context.Context, mock *models.Mock, testSetID string) *PreparedMock {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
-	mockPath := filepath.Join(ys.MockPath, testSetID)
-	mockFileName := ys.MockName
-	if mockFileName == "" {
-		mockFileName = "mocks"
+	p := &PreparedMock{mock: mock, mockPath: filepath.Join(ys.MockPath, testSetID), mockFileName: ys.MockName, logger: ys.Logger}
+	if p.mockFileName == "" {
+		p.mockFileName = "mocks"
 	}
 	// A fault on a call of any kind but HTTP is refused in every format
 	// (faultDropped): a text document of that kind, written by EncodeMock or
@@ -937,17 +976,59 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// recorded answer whole. Refused, the call's test goes with it.
 	if err := faultDropped(mock); err != nil {
 		utils.LogError(ys.Logger, err, "refusing to write a mock whose fault would be dropped", zap.String("mock_name", mock.Name))
-		return fmt.Errorf("%w: %w", models.ErrMockEncode, err)
+		p.err = fmt.Errorf("%w: %w", models.ErrMockEncode, err)
+		return p
 	}
 	// An insert writes to the mock file the set already has, in that file's
 	// format; only a set with none takes the configured format (insertFormat).
 	// gob is the binary record-time format (async writer, ~28% CPU win over
 	// yaml).
-	useGob, effFormat, err := ys.insertFormat(ctx, mockPath, mockFileName)
-	if err != nil {
-		return err
+	p.useGob, p.format, p.err = ys.insertFormat(ctx, p.mockPath, p.mockFileName)
+	p.inline = hasMapperForKind(mock.Kind)
+	return p
+}
+
+// Encode makes the prepared mock's document. It reads the mock and writes the
+// PreparedMock alone, so mocks prepared one after another may be encoded at
+// once on several goroutines; the mock must not change meanwhile. A gob mock
+// is encoded by its file's writer instead, and a mock a registered mapper
+// encodes by WritePrepared.
+func (p *PreparedMock) Encode() {
+	if !p.inline {
+		p.encode()
 	}
-	if useGob {
+}
+
+// encode makes the document, once, unless the insert fails without one.
+func (p *PreparedMock) encode() {
+	if p.err != nil || p.useGob || p.buf != nil || p.encErr != nil {
+		return
+	}
+	p.buf = getDocBuffer()
+	if err := encodeMockDoc(p.mock, p.format, p.buf, p.logger); err != nil {
+		p.encErr = err
+	}
+}
+
+// Release gives back what an encoded mock holds, for one that will not be
+// written (WritePrepared releases what it writes).
+func (p *PreparedMock) Release() {
+	if p.buf != nil {
+		putDocBuffer(p.buf)
+		p.buf = nil
+	}
+}
+
+// WritePrepared writes a mock PrepareMock prepared and Encode encoded (it
+// encodes one that was not), as InsertMock writes, and returns what InsertMock
+// returns. Mocks are written in the order this is called.
+func (ys *MockYaml) WritePrepared(ctx context.Context, p *PreparedMock) error {
+	defer p.Release()
+	if p.err != nil {
+		return p.err
+	}
+	mock := p.mock
+	if p.useGob {
 		// gob writes the struct as it is, with no per-kind encoder to refuse
 		// a connection failure the readers would skip (see
 		// connFailureSchemaOf), so refuse it here.
@@ -964,12 +1045,26 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 				return fmt.Errorf("%w (gob): %w", models.ErrMockEncode, err)
 			}
 		}
-		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
+		return ys.insertMockGob(ctx, mock, p.mockPath, p.mockFileName)
 	}
-
-	buf := getDocBuffer()
-	defer putDocBuffer(buf)
-	if err := ys.appendMock(ctx, mock, mockPath, mockFileName, effFormat, buf); err != nil {
+	// A recording that is ending takes no more mocks: as before the split,
+	// that is what an insert says then, whether or not its document could be
+	// made. Nothing is encoded for it here.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	p.encode()
+	if p.encErr != nil {
+		// As the insert always has: the set's file is made (and a new YAML
+		// file's version comment written) before the mock is found
+		// unencodable, so a set whose every mock is reads as one with no
+		// mocks, not as one with no file. Nothing of the mock is written.
+		if err := ys.writeMockDoc(ctx, p.mockPath, p.mockFileName, p.format, nil); err != nil {
+			return err
+		}
+		return p.encErr
+	}
+	if err := ys.writeMockDoc(ctx, p.mockPath, p.mockFileName, p.format, p.buf.Bytes()); err != nil {
 		return err
 	}
 	// The mock's document is written: hand it to the recorder's receiver,
@@ -980,7 +1075,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// whose lock stripe this one shares, and may call back into the MockDB.
 	// The format is spelled as the file's extension: what was written, even
 	// for a MockYaml whose Format was left empty (written as YAML).
-	models.HandMockDoc(ctx, mock, buf.Bytes(), effFormat.FileExtension())
+	models.HandMockDoc(ctx, mock, p.buf.Bytes(), p.format.FileExtension())
 	return nil
 }
 
@@ -1047,9 +1142,96 @@ func (ys *MockYaml) textMockFileBeside(ctx context.Context, path, mockFileName s
 	return filepath.Join(path, mockFileName+"."+detected.FileExtension())
 }
 
-// appendMock appends mock's document to the mocks file in effFormat, under the
-// file's lock. The document is made in buf, and buf is what is written.
-func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath, mockFileName string, effFormat yaml.Format, buf *bytes.Buffer) (err error) {
+// encodeMockDoc makes mock's document in effFormat in buf: what writeMockDoc
+// writes after the "---" between documents (YAML) or as its line (NDJSON).
+// It reads mock and writes buf alone.
+func encodeMockDoc(mock *models.Mock, effFormat yaml.Format, buf *bytes.Buffer, logger *zap.Logger) error {
+	// Each format takes a different in-memory representation: JSON builds
+	// NetworkTrafficDocJSON directly (no yaml.Node anywhere), YAML writes the
+	// document EncodeMock's yaml.Node would (below). Either way the mock's
+	// document is made in buf first, and buf is what is written, so it is
+	// also what InsertMock hands the recorder's receiver. Nothing of a
+	// document that cannot be made is written, not even the "---" before it
+	// (WritePrepared makes the set's file, as an insert always has).
+	switch effFormat {
+	case yaml.FormatJSON:
+		jsonDoc, handled, err := EncodeMockJSON(mock, logger)
+		if err != nil {
+			// No errMapperEncode arm here on purpose: EncodeMockJSON projects
+			// the OSS kinds itself and never invokes a registered mapper, so
+			// every error it returns is json.Marshal on keploy's own spec —
+			// i.e. genuinely a payload fault. The mapper case arrives as
+			// handled=false and is caught below.
+			return fmt.Errorf("%w (json): %w", models.ErrMockEncode, err)
+		}
+		if !handled {
+			// EncodeMockJSON projects only the OSS kinds; it never consults the
+			// mapper registry. A kind an enterprise mapper owns therefore lands
+			// here looking exactly like "keploy cannot encode this" — and
+			// tagging it ErrMockEncode would make the recorder skip EVERY mock
+			// of that kind and revoke every test that touched it, finishing
+			// green with an empty test set. That is the outcome errMapperEncode
+			// exists to prevent, so stay fatal when a mapper is registered.
+			if hasMapperForKind(mock.Kind) {
+				return fmt.Errorf("%w: mockdb: kind %q has a registered MockYAMLMapper but the json format cannot encode it; record with storageFormat yaml", errMapperEncode, mock.Kind)
+			}
+			return fmt.Errorf("%w (json): unsupported mock kind %q", models.ErrMockEncode, mock.Kind)
+		}
+		if err := json.NewEncoder(buf).Encode(jsonDoc); err != nil {
+			return fmt.Errorf("failed to encode mock json: %w", err)
+		}
+		// json.Encoder appends the trailing '\n' — NDJSON-ready.
+		return nil
+	default:
+		// A kind whose spec can be marshaled in place is written in one pass
+		// (encode_inplace.go); the others through EncodeMock's yaml.Node.
+		// Either way the document is made in memory first: marshaling in
+		// place can fail partway (a value YAML cannot marshal), and what the
+		// emitter had streamed by then would be half a document in the file.
+		if v, inPlace := encodeMockInPlace(mock); inPlace {
+			// A mock that holds a string a block scalar cannot carry is
+			// written with it double-quoted (yaml.EncodeQuoted): as the
+			// literal block yaml.v3 picks, it would not read back, and
+			// the file would stop loading from it on.
+			if yaml.NeedsQuoting(v) {
+				q, err := yaml.EncodeQuoted(v)
+				if err != nil {
+					return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+				}
+				v = q
+			}
+			if err := encodeYAMLDoc(buf, v); err != nil {
+				// A payload fault, as EncodeMock's Node encode of the same
+				// value is: skippable.
+				return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+			}
+			return nil
+		}
+		doc, err := EncodeMock(mock, logger)
+		if err != nil {
+			// Only keploy's own encoders are pure enough to be skippable. A
+			// registered mapper can fail for environmental reasons, so those
+			// stay fatal — see errMapperEncode.
+			if errors.Is(err, errMapperEncode) {
+				return fmt.Errorf("failed to encode mock (yaml): %w", err)
+			}
+			return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
+		}
+		if err := encodeYAMLDoc(buf, &doc); err != nil {
+			return fmt.Errorf("failed to encode mock yaml: %w", err)
+		}
+		return nil
+	}
+}
+
+// writeMockDoc appends a mock's document, made by encodeMockDoc, to the mocks
+// file in effFormat, under the file's lock. A nil doc makes the file, and a
+// new YAML file's version comment, and writes nothing else.
+func (ys *MockYaml) writeMockDoc(ctx context.Context, mockPath, mockFileName string, effFormat yaml.Format, doc []byte) (err error) {
+	// headerOnly: the insert fails on its mock, which the caller returns. As
+	// before the split, a flush or close of the file then is not the
+	// insert's error: the mock's is.
+	headerOnly := doc == nil
 	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName, effFormat))
 	lock.Lock()
 	defer lock.Unlock()
@@ -1082,7 +1264,7 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 	// look complete. It runs after the deferred flush below. An error already
 	// returned is kept.
 	defer func() {
-		if cerr := closeMockFile(file); cerr != nil && err == nil {
+		if cerr := closeMockFile(file); cerr != nil && err == nil && !headerOnly {
 			err = fmt.Errorf("the mock file failed as it was closed: %w", cerr)
 		}
 	}()
@@ -1105,40 +1287,11 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 		}
 	}()
 
-	// Encode, then write. Each branch takes a different in-memory
-	// representation: JSON builds NetworkTrafficDocJSON directly (no yaml.Node
-	// anywhere), YAML writes the document EncodeMock's yaml.Node would (below).
-	// Either way the mock's document is made in buf first, and buf is what is
-	// written, so it is also what InsertMock hands the recorder's receiver.
-	switch effFormat {
-	case yaml.FormatJSON:
-		jsonDoc, handled, err := EncodeMockJSON(mock, ys.Logger)
-		if err != nil {
-			// No errMapperEncode arm here on purpose: EncodeMockJSON projects
-			// the OSS kinds itself and never invokes a registered mapper, so
-			// every error it returns is json.Marshal on keploy's own spec —
-			// i.e. genuinely a payload fault. The mapper case arrives as
-			// handled=false and is caught below.
-			return fmt.Errorf("%w (json): %w", models.ErrMockEncode, err)
-		}
-		if !handled {
-			// EncodeMockJSON projects only the OSS kinds; it never consults the
-			// mapper registry. A kind an enterprise mapper owns therefore lands
-			// here looking exactly like "keploy cannot encode this" — and
-			// tagging it ErrMockEncode would make the recorder skip EVERY mock
-			// of that kind and revoke every test that touched it, finishing
-			// green with an empty test set. That is the outcome errMapperEncode
-			// exists to prevent, so stay fatal when a mapper is registered.
-			if hasMapperForKind(mock.Kind) {
-				return fmt.Errorf("%w: mockdb: kind %q has a registered MockYAMLMapper but the json format cannot encode it; record with storageFormat yaml", errMapperEncode, mock.Kind)
-			}
-			return fmt.Errorf("%w (json): unsupported mock kind %q", models.ErrMockEncode, mock.Kind)
-		}
-		if err := json.NewEncoder(buf).Encode(jsonDoc); err != nil {
-			return fmt.Errorf("failed to encode mock json: %w", err)
-		}
-		// json.Encoder appends the trailing '\n' — NDJSON-ready.
-		if _, err := writer.Write(buf.Bytes()); err != nil {
+	switch {
+	case headerOnly && effFormat == yaml.FormatJSON:
+		return nil
+	case effFormat == yaml.FormatJSON:
+		if _, err := writer.Write(doc); err != nil {
 			return fmt.Errorf("failed to write mock json: %w", err)
 		}
 	default:
@@ -1147,7 +1300,6 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 		// reports true for the call that CREATED the file. So it has exactly one
 		// chance: skip it here and the whole test set loses its provenance
 		// comment, because every later InsertMock sees a file that exists.
-		// Write it before the encode.
 		if isFileEmpty {
 			if version := utils.GetVersionAsComment(); version != "" {
 				if _, err := writer.WriteString(version); err != nil {
@@ -1155,54 +1307,19 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 				}
 			}
 		}
-		// The SEPARATOR, by contrast, must wait for a successful encode. A
-		// skippable failure returns below and the deferred flush commits
-		// whatever is already buffered, so writing "---" first injected a stray
-		// empty YAML document into mocks.yaml for every dropped mock.
-		//
-		// A kind whose spec can be marshaled in place is written in one pass
-		// (encode_inplace.go); the others through EncodeMock's yaml.Node.
-		// Either way the document is made in memory first: marshaling in
-		// place can fail partway (a value YAML cannot marshal), and what the
-		// emitter had streamed by then would be half a document in the file.
-		if v, inPlace := encodeMockInPlace(mock); inPlace {
-			// A mock that holds a string a block scalar cannot carry is
-			// written with it double-quoted (yaml.EncodeQuoted): as the
-			// literal block yaml.v3 picks, it would not read back, and
-			// the file would stop loading from it on.
-			if yaml.NeedsQuoting(v) {
-				q, err := yaml.EncodeQuoted(v)
-				if err != nil {
-					return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
-				}
-				v = q
-			}
-			if err := encodeYAMLDoc(buf, v); err != nil {
-				// A payload fault, as EncodeMock's Node encode of the same
-				// value is: skippable.
-				return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
-			}
-		} else {
-			doc, err := EncodeMock(mock, ys.Logger)
-			if err != nil {
-				// Only keploy's own encoders are pure enough to be skippable. A
-				// registered mapper can fail for environmental reasons, so those
-				// stay fatal — see errMapperEncode.
-				if errors.Is(err, errMapperEncode) {
-					return fmt.Errorf("failed to encode mock (yaml): %w", err)
-				}
-				return fmt.Errorf("%w (yaml): %w", models.ErrMockEncode, err)
-			}
-			if err := encodeYAMLDoc(buf, &doc); err != nil {
-				return fmt.Errorf("failed to encode mock yaml: %w", err)
-			}
+		// The SEPARATOR, by contrast, comes only with a document: a mock
+		// that could not be encoded writes no "---", which would be a stray
+		// empty YAML document in mocks.yaml.
+		if headerOnly {
+			// The deferred flush writes the comment; its error is logged.
+			return nil
 		}
 		if !isFileEmpty {
 			if _, err := writer.WriteString("---\n"); err != nil {
 				return fmt.Errorf("failed to write document separator: %w", err)
 			}
 		}
-		if _, err := writer.Write(buf.Bytes()); err != nil {
+		if _, err := writer.Write(doc); err != nil {
 			return fmt.Errorf("failed to write mock yaml: %w", err)
 		}
 	}
