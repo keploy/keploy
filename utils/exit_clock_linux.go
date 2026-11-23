@@ -369,6 +369,18 @@ func (m *ExitMeter) Advance(r ExitMark) bool {
 	return true
 }
 
+// Rebase sets the mark at reading r, as Advance's first reading does, for a
+// stop that from now on reads other processes than it did (stopMembers,
+// pkg/platform/http/adopt_linux.go, reads at its kill each it did not read
+// before): passed against the mark of the others, a reading of them would
+// take their counts for steps back, and their way out after it for none.
+// The stall and the clock's credit go on as they were. Called from the
+// stop's own loop only.
+func (m *ExitMeter) Rebase(r ExitMark) {
+	m.mark = ExitRatchet{}
+	m.mark.Advance(r)
+}
+
 // Reset starts the stall again (stall.Meter), the clock's credit of their
 // waits in the kernel spent as it was, and its count of their waits as they
 // go forgotten (ExitClock).

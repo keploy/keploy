@@ -95,6 +95,43 @@ func TestStopHelperProcess(t *testing.T) {
 		<-terms
 		wayOut()
 		note(name + ".term")
+	case "stalls":
+		// Ignores SIGINT, takes SIGTERM, and never gets out.
+		signal.Ignore(syscall.SIGINT)
+		terms := make(chan os.Signal, 1)
+		signal.Notify(terms, syscall.SIGTERM)
+		note(name + ".ready")
+		<-terms
+		note(name + ".term")
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "deaf":
+		// Ignores SIGINT and SIGTERM, and never gets out.
+		signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+		note(name + ".ready")
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "busy":
+		// Ignores SIGINT and SIGTERM, and runs on busily: it writes a page
+		// to a file over and over, as fast as it can, and never gets out.
+		// It does not sync it: one that waited on storage would be judged
+		// on the kernel's credit of those waits (utils.ExitClock), which
+		// the host's hung-task time sets, and not on the stall alone.
+		signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+		f, err := os.Create(filepath.Join(dir, name+".data"))
+		if err != nil {
+			os.Exit(3)
+		}
+		note(name + ".ready")
+		page := make([]byte, 4096)
+		for i := 0; ; i++ {
+			page[0] = byte(i)
+			if _, err := f.WriteAt(page, 0); err != nil {
+				os.Exit(3)
+			}
+		}
 	case "hangs":
 		// Acts on SIGINT, ignores SIGTERM, and never gets out.
 		signal.Ignore(syscall.SIGTERM)
