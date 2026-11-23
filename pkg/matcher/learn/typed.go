@@ -503,7 +503,8 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// (readOverClients).
 	served = readOverClients(withoutGave(served), w, []driftedInstant{{rec: rec, live: live}}, dc.zone)
 	// The echo, before any provenance excuses the instant.
-	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)); len(echoed) > 0 {
+	held, recM := dc.bothMoments(at, served, raw)
+	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, held, recM); len(echoed) > 0 {
 		where := dc.heldAt(echoed, at, served, raw)
 		if from, ok := dc.instantEchoFrom(r, echoed, at, served, raw); ok {
 			from.liveAt = where

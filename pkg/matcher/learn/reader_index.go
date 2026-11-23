@@ -147,9 +147,9 @@ type readerText struct {
 	filter   *filterEntry
 	noFilter bool
 	// held is the recording's payload a question's build of the set's view
-	// read (setFields) where the set keeps no view of it: the call's index
-	// answers that one question from it (read), not from the recording
-	// read again, and lets it go.
+	// read (setFields or setMoments) where the set keeps no view of it: the
+	// call's index answers that one question from it (read), not from the
+	// recording read again, and lets it go.
 	held *rawBody
 	// fields is the set's entry for the text's field view, once the set
 	// answers from it (setFields); noFields: the set was asked and keeps
@@ -1715,13 +1715,11 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 	variables.EachToken(s, from, len(s), yield)
 }
 
-// momentsEntry is the set's momentIndex of one recording or text, built once
-// for the set (once): ok where it was read and fit; else every call answers
-// from its own index, as before, and the set never builds it again.
+// momentsEntry is the set's immutable momentIndex of one recording or text,
+// built before publishing into setFilters so concurrent readers never observe
+// a half-built or poisoned entry.
 type momentsEntry struct {
-	once sync.Once
-	v    momentIndex
-	ok   bool
+	v momentIndex
 }
 
 var (
@@ -1733,10 +1731,12 @@ var (
 )
 
 // setMoments is the set's momentIndex of t's recording (by Raw.id, without
-// re-reading its payload on a hit) or text (by filterTextKey), built once for
-// the set and kept on its budget within readerBudgetBytes, as setFields keeps
-// field views: every later call asks the kept momentIndex instead of running
-// b64Read and scanInstants again.
+// re-reading its payload on a hit) or text (by filterTextKey), built before
+// publishing and kept on the set's budget with both entry overhead and index
+// bytes counted against readerBudgetBytes: every later call asks the kept
+// momentIndex instead of running b64Read and scanInstants again. When it
+// cannot keep the index after reading t.raw.payload(), it hands the payload
+// back via t.held so the caller's fallback does not reload the recording.
 func (t *readerText) setMoments() (momentIndex, bool) {
 	if t.moments != nil {
 		return t.moments.v, true
@@ -1746,97 +1746,135 @@ func (t *readerText) setMoments() (momentIndex, bool) {
 		return momentIndex{}, false
 	}
 	t.noMoments = true
-	var e *momentsEntry
-	var s string
-	var hasText bool
-	if t.raw != nil && t.raw.id != "" {
-		id := t.raw.id
+	room := readerBudgetBytes(t.x.set)
+	byID := t.raw != nil && t.raw.id != ""
+	var id string
+	var idKeyBytes int64
+	if byID {
+		id = t.raw.id
+		idKeyBytes = allocBytes(len(id), false)
 		fs.mu.Lock()
-		e = fs.momentOf[id]
-		first := len(fs.momentOf) == 0
-		fs.mu.Unlock()
-		if e == nil {
-			b := t.raw.payload()
-			if !b.read {
-				return momentIndex{}, false
-			}
-			s, hasText = b.text, true
-			n := momentsEntryBytes + momentsIDSlotBytes + allocBytes(len(id), false)
-			if first {
-				n += momentsIDGroupBytes
-			}
-			e = newSetEntry(fs, t.x.set, fs.momentOf, id, strings.Clone, n, &momentsEntry{})
-			if e == nil {
-				return momentIndex{}, false
-			}
+		if e := fs.momentOf[id]; e != nil {
+			fs.mu.Unlock()
+			t.moments = e
+			return e.v, true
 		}
-	} else {
-		s = t.text
-		if t.raw != nil {
-			b := t.raw.payload()
-			if !b.read {
-				return momentIndex{}, false
-			}
-			s = b.text
+		minN := momentsEntryBytes + momentsIDSlotBytes + idKeyBytes
+		if len(fs.momentOf) == 0 {
+			minN += momentsIDGroupBytes
 		}
-		hasText = true
-		k := filterTextKey{n: len(s), a: maphash.String(fs.seeds[0], s), b: maphash.String(fs.seeds[1], s)}
-		fs.mu.Lock()
-		e = fs.momentTexts[k]
-		first := len(fs.momentTexts) == 0
+		over := fs.momentsUsed+minN > room
 		fs.mu.Unlock()
-		if e == nil {
-			n := momentsEntryBytes + momentsTextSlotBytes
-			if first {
-				n += momentsTextGroupBytes
-			}
-			e = newSetEntry(fs, t.x.set, fs.momentTexts, k, sameKey[filterTextKey], n, &momentsEntry{})
-			if e == nil {
-				return momentIndex{}, false
-			}
+		if over {
+			return momentIndex{}, false
 		}
 	}
-	e.once.Do(func() {
-		if !hasText {
-			b := t.raw.payload()
-			if !b.read {
-				return
-			}
-			s = b.text
+	b := rawBody{text: t.text, read: true}
+	if t.raw != nil {
+		b = t.raw.payload()
+		if !b.read {
+			t.held = &b
+			return momentIndex{}, false
 		}
-		e.v, e.ok = t.buildSetMoments(fs, s)
-	})
-	if !e.ok {
-		return momentIndex{}, false
 	}
-	t.moments = e
-	return e.v, true
-}
-
-func (t *readerText) buildSetMoments(fs *setFilters, s string) (momentIndex, bool) {
-	spans := instantSpans(s)
-	if ex := extraOf(s); ex != "" {
+	var tk filterTextKey
+	if !byID {
+		tk = filterTextKey{n: len(b.text), a: maphash.String(fs.seeds[0], b.text), b: maphash.String(fs.seeds[1], b.text)}
+		fs.mu.Lock()
+		if e := fs.momentTexts[tk]; e != nil {
+			fs.mu.Unlock()
+			t.moments = e
+			return e.v, true
+		}
+		minN := momentsEntryBytes + momentsTextSlotBytes
+		if len(fs.momentTexts) == 0 {
+			minN += momentsTextGroupBytes
+		}
+		over := fs.momentsUsed+minN > room
+		fs.mu.Unlock()
+		if over {
+			if t.raw != nil {
+				t.held = &b
+			}
+			return momentIndex{}, false
+		}
+	}
+	spans := instantSpans(b.text)
+	if ex := extraOf(b.text); ex != "" {
 		spans = slices.Concat(spans, instantSpans(ex))
 	}
 	ix := newMomentIndex(spans)
-	n, room := momentIndexBytes(ix), readerBudgetBytes(t.x.set)
+	valN := momentIndexBytes(ix)
+
+	lookup := func() *momentsEntry {
+		if byID {
+			return fs.momentOf[id]
+		}
+		return fs.momentTexts[tk]
+	}
+	entryBytes := func() int64 {
+		if byID {
+			n := momentsEntryBytes + momentsIDSlotBytes + idKeyBytes
+			if len(fs.momentOf) == 0 {
+				n += momentsIDGroupBytes
+			}
+			return n
+		}
+		n := momentsEntryBytes + momentsTextSlotBytes
+		if len(fs.momentTexts) == 0 {
+			n += momentsTextGroupBytes
+		}
+		return n
+	}
+
 	fs.mu.Lock()
+	if e := lookup(); e != nil {
+		fs.mu.Unlock()
+		t.moments = e
+		return e.v, true
+	}
 	fs.momentBuilds++
-	fits := fs.momentsUsed+n <= room
-	if fits {
-		fs.momentsUsed += n
+	totalN := entryBytes() + valN
+	if fs.momentsUsed+totalN > room {
+		fs.mu.Unlock()
+		if t.raw != nil {
+			t.held = &b
+		}
+		return momentIndex{}, false
+	}
+	fs.momentsUsed += totalN
+	fs.mu.Unlock()
+
+	if !setClaim(t.x.set, totalN) {
+		fs.mu.Lock()
+		fs.momentsUsed -= totalN
+		fs.mu.Unlock()
+		if t.raw != nil {
+			t.held = &b
+		}
+		return momentIndex{}, false
+	}
+
+	fs.mu.Lock()
+	if e := lookup(); e != nil {
+		fs.momentsUsed -= totalN
+		fs.mu.Unlock()
+		s := t.x.set
+		s.mu.Lock()
+		s.budget.used -= totalN
+		s.mu.Unlock()
+		t.moments = e
+		return e.v, true
+	}
+	e := &momentsEntry{v: ix}
+	if byID {
+		fs.momentOf[strings.Clone(id)] = e
+	} else {
+		fs.momentTexts[tk] = e
 	}
 	fs.mu.Unlock()
-	if !fits {
-		return momentIndex{}, false
-	}
-	if n > 0 && !setClaim(t.x.set, n) {
-		fs.mu.Lock()
-		fs.momentsUsed -= n
-		fs.mu.Unlock()
-		return momentIndex{}, false
-	}
-	return ix, true
+	t.moments = e
+	return e.v, true
 }
 
 // holdsMoment reports whether an instant of the text names m by moment
@@ -1853,6 +1891,7 @@ func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 		held, fine = ix.holds(m, asked)
 		return held, fine, true
 	}
+	defer func() { t.held = nil }()
 	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
 		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(dc.instantsOfForms(s)) }), momentIndexBytes,
 		func(s string, _ []rawField) {
@@ -1893,6 +1932,7 @@ func (t *readerText) formsName(by func(h moment) bool) (named, read bool) {
 	if ix, ok := t.setMoments(); ok {
 		return slices.ContainsFunc(ix.moments, by), true
 	}
+	defer func() { t.held = nil }()
 	dc := t.x.dc
 	ix, _, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
 		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(dc.instantsOfForms(s)) }), momentIndexBytes, nil)

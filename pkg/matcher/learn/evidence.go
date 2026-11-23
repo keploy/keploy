@@ -1321,7 +1321,7 @@ func namesApart(ms []givenMoment, m, other moment) bool {
 // hour's whole second) may hold it only as two stamps the runs' timing put
 // in one cut, as an answer of the scope may, and the instant order reads it
 // as such (step 5's window, else this refusal).
-func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock string, fine, ok bool) {
+func (dc *decider) echoedOutside(c changedInstant, served []Earlier, overClients bool) (mock string, fine, ok bool) {
 	if c.rm == nil || c.lm == nil {
 		return "", false, false
 	}
@@ -1334,7 +1334,7 @@ func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock strin
 		return "", false, false
 	}
 	slot := 0
-	if len(served) < len(dc.in.Earlier) {
+	if overClients {
 		slot = 1
 	}
 	em := dc.echoState[slot]

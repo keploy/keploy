@@ -128,9 +128,10 @@ func (l *placeList) mocks() iter.Seq2[int, string] {
 	}
 }
 
-// indicesOf yields the place indices of every place in l whose mock name is in
-// cand, building no leaf place: an O(|cand|) lookup via a lazy per-mock index
-// instead of walking every leaf of every exchange.
+// indicesOf yields the place indices of every place in l whose mock name is
+// true in cand, building no leaf place: an O(|cand|) lookup via a lazy
+// per-mock index instead of walking every leaf of every exchange. Keys of cand
+// are visited in sorted mock-name order so iteration is deterministic.
 func (l *placeList) indicesOf(cand map[string]bool) iter.Seq[int] {
 	return func(yield func(int) bool) {
 		if l == nil || len(cand) == 0 {
@@ -147,7 +148,14 @@ func (l *placeList) indicesOf(cand map[string]bool) iter.Seq[int] {
 				l.restByMock[p.mock] = append(l.restByMock[p.mock], n)
 			}
 		}
-		for m := range cand {
+		names := make([]string, 0, len(cand))
+		for m, ok := range cand {
+			if ok {
+				names = append(names, m)
+			}
+		}
+		sort.Strings(names)
+		for _, m := range names {
 			for _, k := range l.exByMock[m] {
 				x := l.ex[k]
 				for n := range len(l.in.Earlier[x.e].Seen) {

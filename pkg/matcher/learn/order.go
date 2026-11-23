@@ -3165,7 +3165,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			gaveOutside, fine = append(gaveOutside, p.mock), fine || h.fr || h.fl
 		}
 	}
-	if mock, echoFine, ok := dc.echoedOutside(c, earlier); ok {
+	if mock, echoFine, ok := dc.echoedOutside(c, earlier, overClients); ok {
 		gaveOutside, fine = append(gaveOutside, mock), fine || echoFine
 	}
 	if len(gaveOutside) > 0 {

@@ -4984,7 +4984,7 @@ type earlierHeld struct {
 // once.
 func (eh *earlierHeld) of(dc *DriftCache, at time.Time, served []Earlier, raw []Raw) (held, recorded *heldMoments) {
 	if eh.held == nil {
-		eh.held, eh.recorded = dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)
+		eh.held, eh.recorded = dc.bothMoments(at, served, raw)
 	}
 	return eh.held, eh.recorded
 }
@@ -5007,68 +5007,13 @@ func (dc *DriftCache) bothMoments(at time.Time, served []Earlier, raw []Raw) (he
 			heldSeen(&h, s.Leaf, s.Leaf.Value)
 			dc.heldIn(&r, s.Leaf.Value, extra)
 			heldSeen(&r, s.Leaf, s.Leaf.Value)
-			if s.Side == Response || e.Given || s.Live == s.Leaf.Value {
-				if s.Live == s.Leaf.Value {
-					dc.heldIn(&h, s.Live, extra)
-				} else {
-					dc.heldIn(&h, s.Live, dc.rawExtra(s.Live))
-				}
+			if (s.Side == Response || e.Given) && s.Live != s.Leaf.Value {
+				dc.heldIn(&h, s.Live, dc.rawExtra(s.Live))
 				heldSeen(&h, s.Leaf, s.Live)
 			}
 		}
 	}
 	return &h, &r
-}
-
-// earlierMoments are the moments the earlier places of a call recorded at
-// at hold, as the echo reads them (echoedIn): every payload served earlier
-// in the test or recorded before at (raw), in every form, as it stands, and
-// every value of an exchange F served earlier (served), on either side, as
-// recorded and as F served it, in every form, and the test case's own
-// request, as recorded and as sent.
-func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) *heldMoments {
-	var held heldMoments
-	for _, x := range raw {
-		if x.earlierThan(at) {
-			held.addMoments(dc.payloadMoments(x))
-		}
-	}
-	for _, e := range served {
-		for _, s := range e.Seen {
-			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
-			heldSeen(&held, s.Leaf, s.Leaf.Value)
-			// What F served (an answer's value, or a request's that did not
-			// drift), and the test case's request as keploy test sent it
-			// (Earlier.Given). What the application itself sent in F, where
-			// it drifted, is its own output, whose co-drift with v sources
-			// reads: two reads of the clock in one moment drift alike.
-			if s.Side == Response || e.Given || s.Live == s.Leaf.Value {
-				dc.heldIn(&held, s.Live, dc.rawExtra(s.Live))
-				heldSeen(&held, s.Leaf, s.Live)
-			}
-		}
-	}
-	return &held
-}
-
-// recordedMoments are the moments the recordings of a call's earlier places
-// hold, as recorded: every payload served earlier in the test or recorded
-// before at (raw), and every value of an exchange F served earlier (served)
-// as recorded, in every form, and the test case's own request as recorded.
-func (dc *DriftCache) recordedMoments(at time.Time, served []Earlier, raw []Raw) *heldMoments {
-	var held heldMoments
-	for _, x := range raw {
-		if x.earlierThan(at) {
-			held.addMoments(dc.payloadMoments(x))
-		}
-	}
-	for _, e := range served {
-		for _, s := range e.Seen {
-			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
-			heldSeen(&held, s.Leaf, s.Leaf.Value)
-		}
-	}
-	return &held
 }
 
 // Echoes are the answer leaves that hold r's recorded value: a scalar equal
