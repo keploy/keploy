@@ -22,23 +22,45 @@ import (
 //
 // own is what the view leaves out of its shared part for being its own
 // (ownShared): two views that own different recordings of the pool or the
-// worker scope show different shared parts.
+// worker scope show different shared parts. replaced is what the view leaves
+// out because its own derived mocks replace those sources (replacedShared).
 type sharedIdent struct {
 	worker   *reachedWorker
 	bg       *backgroundState
 	declared *poolSlice
 	kept     *keptLoad
 	own      string
+	replaced string
 }
 
 // sharedIdentOf is v's ident now; w is the reached worker scope it was
 // installed with.
 func sharedIdentOf(v *exactView, w *reachedWorker) sharedIdent {
-	id := sharedIdent{worker: w, bg: v.bg, declared: v.declared, own: v.ownShared()}
+	id := sharedIdent{worker: w, bg: v.bg, declared: v.declared, own: v.ownShared(), replaced: v.replacedShared()}
 	if v.kept != nil {
 		id.kept = v.kept.cur.Load()
 	}
 	return id
+}
+
+// replacedShared is, sorted and each ended by a NUL, the names of recordings
+// the open test's derived mocks replace in its view (exactView.sourcesReplaced).
+// "" when there are none.
+func (v *exactView) replacedShared() string {
+	if len(v.sourcesReplaced) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(v.sourcesReplaced))
+	for n := range v.sourcesReplaced {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, n := range names {
+		b.WriteString(n)
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 // ownShared is, sorted and each ended by a NUL, the names of v's own

@@ -74,6 +74,67 @@ func TestADerivedMockReplacesItsSourceInItsOwnTestAloneUnderExactServing(t *test
 	}
 }
 
+// SharedGeneration must change when a test's derived mocks replace a shared
+// recording so a parser caching SharedMocks by SharedGen never serves a
+// replaced source from the previous test's cached shared view.
+func TestADerivedMockMovesTheSharedViewGeneration(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot"})
+	mm.ServeExactWorker([]string{"w-boot"})
+
+	mm.ServeExactTest("T1", []*models.Mock{ms["other"]})
+	g1, ok := mm.SharedGeneration(models.HTTP)
+	if !ok {
+		t.Fatal("T1 has no SharedGeneration")
+	}
+	_, sess1, ok := mm.SharedMocks()
+	if !ok || !mockSliceHas(sess1, "w-boot") {
+		t.Fatalf("T1 SharedMocks() must include w-boot; ok=%v", ok)
+	}
+
+	dWorker := derivedFrom("d-worker", "startup:/w-boot", 5*time.Second, "/w-boot")
+	mm.ServeExactTest("T2", []*models.Mock{dWorker})
+	g2, ok := mm.SharedGeneration(models.HTTP)
+	if !ok {
+		t.Fatal("T2 has no SharedGeneration")
+	}
+	if g2 == g1 {
+		t.Fatalf("T2 replaces w-boot but kept T1's SharedGeneration %+v", g2)
+	}
+	_, sess2, ok := mm.SharedMocks()
+	if !ok || mockSliceHas(sess2, "w-boot") {
+		t.Fatalf("T2 SharedMocks() must omit replaced w-boot; ok=%v", ok)
+	}
+
+	// Another test replacing the same source reuses T2's shared view; a test
+	// replacing nothing moves the generation again and sees w-boot.
+	dWorker2 := derivedFrom("d-worker-2", "startup:/w-boot", 6*time.Second, "/w-boot")
+	mm.ServeExactTest("T2b", []*models.Mock{dWorker2})
+	g2b, _ := mm.SharedGeneration(models.HTTP)
+	if g2b != g2 {
+		t.Fatalf("T2b replaces the same source as T2: got %+v, want %+v", g2b, g2)
+	}
+
+	mm.ServeExactTest("T3", []*models.Mock{ms["other"]})
+	g3, _ := mm.SharedGeneration(models.HTTP)
+	if g3 == g2 {
+		t.Fatalf("T3 replaces nothing but kept T2's SharedGeneration %+v", g3)
+	}
+	_, sess3, _ := mm.SharedMocks()
+	if !mockSliceHas(sess3, "w-boot") {
+		t.Fatal("T3 SharedMocks() must include w-boot again")
+	}
+}
+
+func mockSliceHas(mocks []*models.Mock, name string) bool {
+	for _, m := range mocks {
+		if m != nil && m.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func containsName(list, name string) bool {
 	for _, n := range splitNames(list) {
 		if n == name {
