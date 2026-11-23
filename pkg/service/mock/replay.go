@@ -1087,6 +1087,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		At:            started.UTC().Truncate(time.Second),
 		MocksDigest:   digest,
 		Tests:         counts.tests,
+		Windows:       counts.windows,
 		Live:          m.live,
 		Mocked:        m.mocked,
 		Real:          realRun,
@@ -2728,6 +2729,9 @@ type replayCounts struct {
 	// incomplete (models.UnreadCause), when missed is -1.
 	missesUnread string
 	tests        []TestReceipt
+	// windows are, under the proven switch, the run's test windows
+	// (TestsReceipt.Windows).
+	windows []TestWindow
 	// learnedPool is what the learn step wrote onto mocks no test consumed.
 	learnedPool []string
 	// learnedElsewhere is what it wrote onto recordings from calls made in
@@ -3060,6 +3064,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.requiredNotDue = notYetDue(series, counts.tests, consumed, consumedErr == nil)
 		counts.tests = failUnmadeTrails(counts.tests, notMadeByName(counts.requiredNotMade), counts.trailsUnread)
 		counts.ruleUses = ruleUses(placed, counts.tests, consumed, consumedErr == nil, m.repeats, misses, missesErr == nil)
+		counts.windows = testWindowsOf(detail.windows)
 	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]
@@ -3403,6 +3408,25 @@ func withBegan(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt 
 		}
 	}
 	return tests
+}
+
+// testWindowsOf is TestsReceipt.Windows of windows, the run's test windows
+// (testWindows): each named one, in the order they began (a tie in the
+// order the agent listed them), in UTC.
+func testWindowsOf(windows []models.ScopeWindow) []TestWindow {
+	var out []TestWindow
+	for _, w := range windows {
+		if w.Name == "" {
+			continue
+		}
+		tw := TestWindow{Test: w.Name, Began: w.Start.UTC()}
+		if !w.End.IsZero() {
+			tw.Ended = w.End.UTC()
+		}
+		out = append(out, tw)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Began.Before(out[j].Began) })
+	return out
 }
 
 // testReceipts is each test's line in the receipt: its verdict and what it
