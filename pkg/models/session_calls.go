@@ -173,11 +173,20 @@ func rulesCover(rules []SessionCallRule, method, host, path string) bool {
 // session call covers (SetSessionCalls).
 func declaredSessionCall(m *Mock) bool {
 	rules := sessionCalls.Load()
-	if rules == nil || len(*rules) == 0 {
+	if rules == nil {
+		return false
+	}
+	return sessionCallsCover(*rules, m)
+}
+
+// sessionCallsCover reports whether m is an HTTP or HTTP/2 call one of rules
+// covers.
+func sessionCallsCover(rules []SessionCallRule, m *Mock) bool {
+	if len(rules) == 0 {
 		return false
 	}
 	method, host, path, ok := httpCallOf(m)
-	return ok && rulesCover(*rules, method, host, path)
+	return ok && rulesCover(rules, method, host, path)
 }
 
 // namedSessionCall reports whether m is an HTTP or HTTP/2 call a declared

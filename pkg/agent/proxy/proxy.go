@@ -5010,11 +5010,21 @@ func opensTestWindow(start time.Time) bool {
 // MockManager.SetScopeMocks. Satisfies the agent's optional ScopeStager
 // extension interface. Everything else a staging does, it does as
 // SetMocksWithWindow does.
-func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.Mock, open bool) error {
+func (p *Proxy) SetScopeMocks(ctx context.Context, filtered, unFiltered []*models.Mock, open bool) error {
+	var replaced map[string]struct{}
+	if open {
+		replaced = models.ReplacedBy(filtered)
+	}
+	return p.SetScopeMocksWithReplaced(ctx, filtered, unFiltered, open, replaced)
+}
+
+// SetScopeMocksWithReplaced satisfies agent.ScopeReplacedStager, forwarding
+// the test's own replaced source names to MockManager.SetScopeMocksWithReplaced.
+func (p *Proxy) SetScopeMocksWithReplaced(_ context.Context, filtered, unFiltered []*models.Mock, open bool, replaced map[string]struct{}) error {
 	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
 	recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
-		m.SetScopeMocks(filtered, unFiltered, open)
+		m.SetScopeMocksWithReplaced(filtered, unFiltered, open, replaced)
 		p.dnsCache.Purge()
 	}
 	if p.asyncEngine != nil && open {
@@ -5025,7 +5035,10 @@ func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.
 	return nil
 }
 
-var _ agent.ScopeStager = (*Proxy)(nil)
+var (
+	_ agent.ScopeStager         = (*Proxy)(nil)
+	_ agent.ScopeReplacedStager = (*Proxy)(nil)
+)
 
 // FirstTestWindowStart returns the earliest test window start observed
 // by the underlying MockManager, or zero before any non-BaseTime

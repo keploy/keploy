@@ -1420,6 +1420,13 @@ type ScopeStager interface {
 	SetScopeMocks(ctx context.Context, filtered, unFiltered []*models.Mock, open bool) error
 }
 
+// ScopeReplacedStager is an optional ScopeStager extension that receives the
+// exact set of sources replaced by the open test's own derived mocks (computed
+// before any other test's carry-over mocks are appended to filtered).
+type ScopeReplacedStager interface {
+	SetScopeMocksWithReplaced(ctx context.Context, filtered, unFiltered []*models.Mock, open bool, replaced map[string]struct{}) error
+}
+
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.

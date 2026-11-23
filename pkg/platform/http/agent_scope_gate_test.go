@@ -84,14 +84,14 @@ func TestAgentClient_PushScopeSkips(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
 
-	if err := a.PushScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil); err != nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil, nil, false); err != nil {
 		t.Fatalf("skips: %v", err)
 	}
 	answer = `{"v":1,"status":"ok","skips":0}`
-	if err := a.PushScopeSkips(ctx, map[string]string{}, nil); err != nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{}, nil, nil, false); err != nil {
 		t.Fatalf("no skips: %v", err)
 	}
-	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil); err == nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false); err == nil {
 		t.Fatal("an agent that applies fewer entries than were sent did not acknowledge the list")
 	}
 	bodies = bodies[:2]
@@ -103,24 +103,24 @@ func TestAgentClient_PushScopeSkips(t *testing.T) {
 	// sent (one that predates them) did not acknowledge them.
 	bodies = nil
 	needs := map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: "r"}}}
-	if err := a.PushScopeSkips(ctx, nil, needs); err == nil {
+	if err := a.PushScopeSkips(ctx, nil, needs, nil, false); err == nil {
 		t.Fatal("an agent that applies none of the needs sent did not acknowledge them")
 	}
 	answer = `{"v":1,"status":"ok","skips":0,"needs":1}`
-	if err := a.PushScopeSkips(ctx, nil, needs); err != nil {
+	if err := a.PushScopeSkips(ctx, nil, needs, nil, false); err != nil {
 		t.Fatalf("needs: %v", err)
 	}
 	if w := `{"run":null,"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"}]}}`; len(bodies) != 2 || bodies[1] != w {
 		t.Fatalf("posted %v, want %s", bodies, w)
 	}
 	answer = `{"status":"ok"}`
-	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil); err == nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false); err == nil {
 		t.Fatal("an agent that answers without the wire's version did not acknowledge the list")
 	}
 	answer = `{"v":1,"status":"ok","skips":1}`
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusUnprocessableEntity, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil); err == nil {
+		if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false); err == nil {
 			t.Fatalf("status %d: a refused list must be an error", s)
 		}
 	}
@@ -128,7 +128,9 @@ func TestAgentClient_PushScopeSkips(t *testing.T) {
 
 // A restarted agent is handed the gate again, its needs with it: one handed
 // the skips alone would run a test selected without the test it needs, and
-// that test would fail on the value it misses.
+// that test would fail on the value it misses. The set's flags go with
+// them, as they were pushed, so a failed test's commands name the set on
+// the restarted agent too; so does whether it is Keploy Cloud's recordings.
 func TestAgentClient_PushScopeSkipsAgainToARestartedAgent(t *testing.T) {
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,13 +142,15 @@ func TestAgentClient_PushScopeSkipsAgainToARestartedAgent(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	s := storeSession(t, srv.URL, true)
 	needs := map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: "r"}}}
-	if err := a.PushScopeSkips(context.Background(), map[string]string{"o::TestGated": "listed"}, needs); err != nil {
+	flags := []string{"--local", "--name", "checkout"}
+	if err := a.PushScopeSkips(context.Background(), map[string]string{"o::TestGated": "listed"}, needs, flags, true); err != nil {
 		t.Fatal(err)
 	}
+	flags[2] = "other"
 	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"run":null,"skip":{"o::TestGated":"listed"},"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"}]}}`
+	want := `{"run":null,"skip":{"o::TestGated":"listed"},"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"}]},"set_flags":["--local","--name","checkout"],"cloud_set":true}`
 	if len(bodies) != 2 || bodies[0] != want || bodies[1] != want {
 		t.Fatalf("pushed %v, want %s to the agent and again to the restarted one", bodies, want)
 	}

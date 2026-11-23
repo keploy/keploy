@@ -287,19 +287,38 @@ func (m *MockManager) stagedOfKind(kind models.Kind) []*models.Mock {
 
 // isBackgroundRecording reports whether mk is a data-plane recording of v's
 // background (the worker scope or the pool, the background rules), which an async lane
-// does not serve: protocol-phase mocks and async lanes keep today's reuse.
+// does not serve: protocol-phase mocks, async lanes, and sources replaced by
+// the open test's derived mocks are excluded.
 func (v *exactView) isBackgroundRecording(mk *models.Mock) bool {
-	return mk != nil && v.bg.has(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync()
+	if mk == nil || !v.bg.has(mk.Name) || mk.IsProtocolPhase() || mk.IsAsync() {
+		return false
+	}
+	_, gone := v.sourcesReplaced[mk.Name]
+	return !gone
+}
+
+// scopeReplacedSet returns the open unset-mode scope's replaced source names
+// (nil when none). The map is immutable once published by SetScopeMocks.
+func (m *MockManager) scopeReplacedSet() map[string]struct{} {
+	m.scopeOwnedMu.Lock()
+	r := m.scopeReplaced
+	m.scopeOwnedMu.Unlock()
+	return r
 }
 
 // unsetBackgroundCandidates returns kind's data-plane recordings that belong to
 // bg when exactView is off (KEPLOY_PROVEN unset), gathered from both the seeded
 // background recordings (which persist across legacy stageScope narrowings) and
-// the staged trees, de-duplicated by name.
+// the staged trees, de-duplicated by name, omitting any source replaced by the
+// open test's derived mocks.
 func (m *MockManager) unsetBackgroundCandidates(kind models.Kind, bg *backgroundState) map[string]*models.Mock {
 	byName := make(map[string]*models.Mock)
+	replaced := m.scopeReplacedSet()
 	add := func(mk *models.Mock) {
 		if mk == nil || mk.Name == "" || !bg.has(mk.Name) || mk.IsProtocolPhase() || mk.IsAsync() {
+			return
+		}
+		if _, gone := replaced[mk.Name]; gone {
 			return
 		}
 		if _, exists := byName[mk.Name]; !exists {
@@ -419,6 +438,9 @@ func (m *MockManager) consumeUnsetBackground(mk *models.Mock, evicts bool, g *ro
 	}
 	if g.checks() && m.stagingEpoch.Load() != g.at.Epoch {
 		g.refuse("the staging moved under the call")
+		return true, false
+	}
+	if _, gone := m.scopeReplacedSet()[mk.Name]; gone {
 		return true, false
 	}
 	if !bg.trySpend(mk.Name) {
