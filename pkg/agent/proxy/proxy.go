@@ -3030,6 +3030,13 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
 	}
 
+	// In a replay, a build that tells a new instance of the application from
+	// the connection's process re-arms the set's start for it here, before
+	// anything on the connection is served (BeforeServing).
+	if rule.Mode == models.MODE_TEST {
+		p.beforeServing(Process{Pid: destInfo.AgentNsPid, KernelPid: destInfo.KernelPid}, destInfo.Instance)
+	}
+
 	// The proven model names a container destination by its container key,
 	// not by the address it was reached at (containerkey): in the scope open
 	// now, from the index of the local daemon's containers, which never waits
