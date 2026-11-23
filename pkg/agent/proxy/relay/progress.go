@@ -468,7 +468,10 @@ func minNonZero(a, b int64) int64 {
 // over (or reported) what it had from before it. One that reads each
 // direction in a goroutine of its own and waits on one while the other is in
 // the middle of a chunk is taken as done with it: the same reading the
-// enterprise capture watermark makes of such a parser.
+// enterprise capture watermark makes of such a parser. A parser that reads on
+// while it holds a call it parsed, its mock not handed on, says so
+// (FakeConn.HoldFrom): it is not done with t while that call's first chunk
+// was captured at or before t, whatever it has read since.
 //
 // A chunk in a forwarder's hand not stamped yet is taken as view says.
 //
@@ -481,6 +484,13 @@ func (r *Relay) passedThrough(t int64, view stampView) (bool, string) {
 		}
 	}
 	last := max(r.clientStream.LastReadTime().UnixNano(), r.destStream.LastReadTime().UnixNano())
+	// The hold is read after last: a parser sets it before it takes the
+	// chunk that moves last past the call, so a look that sees that read
+	// sees the hold.
+	if held := r.heldFrom(); held != 0 && held <= t {
+		return false, fmt.Sprintf("parser holds a call it parsed, its mock not handed on, whose first chunk was captured at %s",
+			time.Unix(0, held).Format(time.RFC3339Nano))
+	}
 	if last > t {
 		return true, ""
 	}
@@ -490,6 +500,27 @@ func (r *Relay) passedThrough(t int64, view stampView) (bool, string) {
 	return false, fmt.Sprintf("parser is working on what it took (last read %s); %s; %s",
 		time.Unix(0, last).Format(time.RFC3339Nano), r.teeC2D.directionState(), r.teeD2C.directionState())
 }
+
+// heldFrom is the earliest hold the parser has set on either stream
+// (FakeConn.HoldFrom), as UnixNano, 0 while it holds no call.
+func (r *Relay) heldFrom() int64 {
+	var held int64
+	for _, fc := range [2]*fakeconn.FakeConn{r.clientStream, r.destStream} {
+		if at := fc.HeldFrom(); !at.IsZero() {
+			held = minNonZero(held, at.UnixNano())
+		}
+	}
+	if h := afterHoldLook.Load(); h != nil {
+		(*h)()
+	}
+	return held
+}
+
+// afterHoldLook, when set, runs as heldFrom has read the holds, before
+// passedThrough uses them. It is for tests, which put a parser's hold and its
+// read past the window there every time instead of by chance; nil outside
+// them.
+var afterHoldLook atomic.Pointer[func()]
 
 // caughtUp reports whether the parser has consumed every byte the connection
 // carried and is blocked waiting for more on at least one direction, and
