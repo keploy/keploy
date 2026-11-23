@@ -769,6 +769,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
 	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// The TCs left out over the requests a parser never read because the
+	// recording's stop cut it short: named at WARN once, as the session
+	// ends (summarize).
+	var stopCut stopCutLeftOut
 	// A body that is not UTF-8 goes as a body object only to a client that
 	// says it reads one (models.BodyEncodingHeader); to any other client, one
 	// built before it among them, each test case goes as encoding/json writes it.
@@ -825,6 +829,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 		if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
+			// A stop cut's span is recorded before its orphan span
+			// (SyncMockManager.RecordStopCutWindow): one this orphan check
+			// saw is read here.
+			if hasOrphan && syncmgr.Get().WasStopCutInWindow(spanFrom, spanTo) {
+				stopCut.add(t.Name)
+			}
 			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
 				zap.String("tc_name", t.Name),
 				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
@@ -1120,6 +1130,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("test_cases", tcsUnsettled),
 				zap.Duration("held_without_progress_for", testCaseHoldMax))
 		}
+		// One line per stop, naming the test cases its cut of a parser
+		// left out; every other suppression stays at Debug, per test case.
+		stopCut.say(a.logger)
 		logRecordingComplete("agent: recording complete",
 			// How the stream ended: "capture" (it closed its channel),
 			// "end" (its client asked the agent to end it, after it was
