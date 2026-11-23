@@ -134,7 +134,7 @@ func TestADNSServerThatCannotServeSettlesWithItsError(t *testing.T) {
 // the DNS servers' start with its own error: startDNSServers never returns
 // as if a server served that does not. Here the UDP server's socket is closed
 // as the server logs that it starts, on its serving goroutine, just before
-// miekg/dns sets the socket's options to serve on it.
+// serve checks the pre-bound socket and enters miekg/dns.
 func TestADNSServerThatCannotServeFailsTheDNSServersStart(t *testing.T) {
 	core, _ := observer.New(zap.InfoLevel)
 	var p *Proxy
@@ -159,6 +159,37 @@ func TestADNSServerThatCannotServeFailsTheDNSServersStart(t *testing.T) {
 	}
 	if !errors.Is(err, p.udpDNS.err) {
 		t.Fatalf("startDNSServers returned %v; want the UDP server's own error, %v", err, p.udpDNS.err)
+	}
+}
+
+// The TCP counterpart of TestADNSServerThatCannotServeFailsTheDNSServersStart:
+// miekg/dns invokes NotifyStartedFunc before Accept on every OS, so without
+// checking the pre-bound listener before ActivateAndServe a closed TCP socket
+// would let startDNSServers return nil while TCP serving immediately fails.
+func TestATCPDNSServerThatCannotServeFailsTheDNSServersStart(t *testing.T) {
+	core, _ := observer.New(zap.InfoLevel)
+	var p *Proxy
+	closeTCP := zap.Hooks(func(e zapcore.Entry) error {
+		if strings.HasPrefix(e.Message, "starting TCP DNS server") {
+			_ = p.tcpDNS.srv.Listener.Close()
+		}
+		return nil
+	})
+	p = &Proxy{logger: zap.New(core, closeTCP), DNSPort: uint32(freeDNSPort(t))}
+	p.SetPortMover(func(uint32, uint32) error { return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	var g errgroup.Group
+	t.Cleanup(func() { cancel(); _ = g.Wait() })
+
+	err := p.startDNSServers(ctx, &g)
+	if err == nil {
+		t.Fatal("startDNSServers returned nil while the TCP DNS server does not serve")
+	}
+	if p.tcpDNS.serving || !errors.Is(p.tcpDNS.err, net.ErrClosed) {
+		t.Fatalf("the TCP server settled as serving=%v err=%v; want not serving, failed on its closed socket", p.tcpDNS.serving, p.tcpDNS.err)
+	}
+	if !errors.Is(err, p.tcpDNS.err) {
+		t.Fatalf("startDNSServers returned %v; want the TCP server's own error, %v", err, p.tcpDNS.err)
 	}
 }
 

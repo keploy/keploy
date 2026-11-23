@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -86,7 +87,9 @@ func (s *dnsServer) serve() (err error) {
 		defer func() { _ = sock.Close() }()
 	}
 	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
-	err = s.srv.ActivateAndServe()
+	if err = preBoundReady(s.srv); err == nil {
+		err = s.srv.ActivateAndServe()
+	}
 	if err != nil {
 		utils.LogError(s.logger, err, fmt.Sprintf("the %s DNS server failed to serve or stopped serving", s.name()), zap.String("addr", s.srv.Addr))
 	}
@@ -1604,6 +1607,28 @@ func preBound(srv *dns.Server) io.Closer {
 	}
 	if srv.PacketConn != nil {
 		return srv.PacketConn
+	}
+	return nil
+}
+
+// preBoundReady verifies that a pre-bound socket handed to srv is still open
+// before miekg/dns enters ActivateAndServe. miekg/dns invokes NotifyStartedFunc
+// before Accept on TCP (every OS) and before ReadFrom on UDP on Windows (where
+// miekg/dns's setUDPSocketOptions is a no-op). Without this check, a socket
+// closed between bindDNS and ActivateAndServe settles the server as serving and
+// lets startDNSServers return nil while serve fails immediately on the closed
+// socket.
+func preBoundReady(srv *dns.Server) error {
+	sock := preBound(srv)
+	if sock == nil {
+		return nil
+	}
+	if sc, ok := sock.(syscall.Conn); ok {
+		raw, err := sc.SyscallConn()
+		if err != nil {
+			return err
+		}
+		return raw.Control(func(uintptr) {})
 	}
 	return nil
 }

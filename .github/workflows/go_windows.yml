@@ -129,6 +129,16 @@ jobs:
         run: go test -count=1 -run "^(TestTheAcceptedSocketIsFoundUnderTheCountOfWrites|TestEveryAcceptedSocketIsCountedWhetherKeptOrPaired)$" ./pkg/agent/proxy/
         shell: cmd
 
+      # The DNS servers' startup readiness and start-failure contract on Windows
+      # (dns.go + dns_startup_ready_test.go): miekg/dns's setUDPSocketOptions is
+      # a no-op on Windows and NotifyStartedFunc runs before Accept on TCP, so
+      # dnsServer.serve verifies the pre-bound socket is still open before
+      # ActivateAndServe. Running these rows here keeps that contract covered on
+      # Windows alongside Linux.
+      - name: Test the proxy's DNS server startup readiness (amd64)
+        run: go test -count=1 -run "^(TestStartedDNSServersServeOnTheirBoundPort|TestTheTCPDNSServerListensPlainTCP|TestADNSServerThatCannotServeSettlesWithItsError|TestADNSServerThatCannotServeFailsTheDNSServersStart|TestATCPDNSServerThatCannotServeFailsTheDNSServersStart|TestADNSServerThatReturnsWithoutServingLetsItsSocketGo|TestADNSServerCancelledBeforeItServesIsStoppedOnceItServes)$" ./pkg/agent/proxy/
+        shell: cmd
+
       # The look at a socket's TCP state (util.PeerGone, util.AwaitPeerReset:
       # SIO_TCP_INFO here) that the http package's held answers above ask on
       # Windows: a peer's FIN and its reset are seen, and a wait past the FIN
