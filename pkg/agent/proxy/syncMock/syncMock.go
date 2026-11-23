@@ -2904,10 +2904,8 @@ func (m *SyncMockManager) PendingIn(start, end time.Time) bool {
 	in := func(t time.Time) bool { return !t.IsZero() && !t.Before(start) && !t.After(end) }
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, mk := range m.buffer {
-		if mk != nil && in(mk.Spec.ReqTimestampMock) {
-			return true
-		}
+	if m.bufferPendingInLocked(start, end) {
+		return true
 	}
 	if m.heldShared > 0 {
 		lo, hi := m.heldRangeLocked(start, end)
