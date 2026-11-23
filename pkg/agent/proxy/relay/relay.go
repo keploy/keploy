@@ -553,6 +553,18 @@ func (r *Relay) run(ctx context.Context) error {
 	// proxy.go::handleConnection per the contract in doc.go.
 	var stopOnce sync.Once
 	closeStopping := func() { stopOnce.Do(func() { close(stopping) }) }
+	// halfCloseSrc and halfCloseDst serialize a forwarder's half-close of a
+	// side (and the teardown decision if that half-close fails) against the
+	// opposite forwarder treating an io.EOF read from that side as a peer FIN.
+	// Over TLS, CloseWrite writes a close_notify alert onto the underlying TCP
+	// socket; if the peer has already reset the connection, that write fails
+	// with ECONNRESET/EPIPE and consumes the socket's pending error (sk_err),
+	// so a concurrent Read by the opposite forwarder observes io.EOF instead of
+	// the reset. Holding the side's mutex across closeWrite and closeStopping
+	// ensures the opposite forwarder waits for the teardown decision and sees
+	// stopping closed instead of telling the reset as a clean close or
+	// draining the opposite direction.
+	var halfCloseSrc, halfCloseDst sync.Mutex
 
 	// bothDone lets a half-close grace timer stop as soon as the other
 	// forwarder has returned, instead of always running to term.
@@ -592,11 +604,20 @@ func (r *Relay) run(ctx context.Context) error {
 	// that end at once, so it is drained as a half-close is, and the end is
 	// read and told (Config.PeerEnded). Torn down, the opposite forwarder
 	// would stop at its nudged read, with the end in its socket unread.
-	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn]) {
+	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn], halfCloseMu *sync.Mutex) {
 		halfClose := r.cfg.HalfCloseGrace >= 0 && errors.Is(err, io.EOF)
 		if !halfClose {
 			closeStopping()
 			r.nudgeDeadline(nudgeSide.Load())
+			return
+		}
+		// Serialize half-closing writeSide and any resulting teardown
+		// (closeStopping) against the opposite forwarder acting on an io.EOF
+		// read from writeSide. If teardown has already started (e.g. the
+		// opposite forwarder already hit a reset), skip half-close and drain.
+		halfCloseMu.Lock()
+		if isRelayStopping(ctx, stopping) {
+			halfCloseMu.Unlock()
 			return
 		}
 		// The client's socket is asked before the half-close whether a FIN
@@ -613,8 +634,12 @@ func (r *Relay) run(ctx context.Context) error {
 			cerr = closeWrite(writeSide.Load())
 		}
 		clientFIN := toClient && cerr == nil
-		if cerr != nil && !connOver(cerr) {
+		teardown := cerr != nil && !connOver(cerr)
+		if teardown {
 			closeStopping()
+		}
+		halfCloseMu.Unlock()
+		if teardown {
 			r.nudgeDeadline(nudgeSide.Load())
 			return
 		}
@@ -644,18 +669,18 @@ func (r *Relay) run(ctx context.Context) error {
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
-		err := r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D)
+		err := r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D, &halfCloseSrc)
 		recordErr(err)
-		onForwarderExit(err, &r.dst, &r.dst)
+		onForwarderExit(err, &r.dst, &r.dst, &halfCloseDst)
 	}()
 
 	// Forwarder dst → src (Dir=FromDest).
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
-		err := r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C)
+		err := r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C, &halfCloseDst)
 		recordErr(err)
-		onForwarderExit(err, &r.src, &r.src)
+		onForwarderExit(err, &r.src, &r.src, &halfCloseSrc)
 	}()
 
 	// Block until both forwarders exit.
@@ -776,6 +801,7 @@ func (r *Relay) forward(
 	dstPtr *atomic.Pointer[net.Conn],
 	t *tee,
 	seq *atomic.Uint64,
+	readHalfCloseMu *sync.Mutex,
 ) error {
 	bufSize := r.cfg.ForwardBuf
 	buf := make([]byte, bufSize)
@@ -1155,6 +1181,19 @@ func (r *Relay) forward(
 
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				// Wait for any in-flight half-close of our read side (from the
+				// opposite forwarder) to commit its teardown decision before
+				// treating io.EOF as a genuine peer FIN. If that half-close
+				// failed and triggered teardown (for instance a TLS close_notify
+				// consumed a pending reset on the socket, turning this Read into
+				// io.EOF), stopping is closed before readHalfCloseMu unlocks,
+				// so this EOF is not told as a peer close.
+				readHalfCloseMu.Lock()
+				stopped := isRelayStopping(ctx, stopping)
+				readHalfCloseMu.Unlock()
+				if stopped {
+					return nil
+				}
 				return r.peerFINRead(dir)
 			}
 			// A reset, as each OS's socket gives it (on Windows,
@@ -1204,6 +1243,19 @@ func (r *Relay) forward(
 			}
 			return err
 		}
+	}
+}
+
+// isRelayStopping reports whether the relay is already tearing down via
+// context cancellation or the shared stopping signal.
+func isRelayStopping(ctx context.Context, stopping <-chan struct{}) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-stopping:
+		return true
+	default:
+		return false
 	}
 }
 
