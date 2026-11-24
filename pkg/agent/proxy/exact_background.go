@@ -76,6 +76,18 @@ func (b *backgroundState) trySpend(name string) bool {
 	return true
 }
 
+// forgetSpends forgets every unset-mode spend (trySpend): a new instance of
+// the application starts the set's start again (RearmAppStart), and what the
+// earlier one consumed as it started is not spent for the new one.
+func (b *backgroundState) forgetSpends() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clear(b.spent)
+}
+
 // inWorker reports whether name is one of the background's worker entries.
 func (b *backgroundState) inWorker(name string) bool {
 	if b == nil {
