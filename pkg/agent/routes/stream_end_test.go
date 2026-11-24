@@ -143,6 +143,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// name.
 		syncmgr.Get().NoteNotHandedOn()
 		syncmgr.Get().NoteUnnamedCallerConn()
+		// A test case of an earlier session whose response was dated before
+		// its request.
+		syncmgr.Get().NoteInvertedTestCase("", time.Now(), time.Now().Add(-time.Millisecond))
 		// And a TLS connection of an earlier session the ingress relayed to
 		// the app unread.
 		syncmgr.Get().NoteTLSRelayedConn(8443)
@@ -168,6 +171,10 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// could not name in its PID namespace.
 		syncmgr.Get().NoteUnnamedCallerConn()
 		syncmgr.Get().NoteUnnamedCallerConn()
+		// Two test cases this session whose response was dated before their
+		// request: kept, with their mocks.
+		syncmgr.Get().NoteInvertedTestCase("", time.Now(), time.Now().Add(-time.Millisecond))
+		syncmgr.Get().NoteInvertedTestCase("", time.Now(), time.Now().Add(-time.Millisecond))
 		// Two TLS connections to the app this session, relayed to the app's
 		// TLS unread.
 		syncmgr.Get().NoteTLSRelayedConn(8443)
@@ -255,13 +262,14 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		sumLine := fields("agent: recording complete")
 		for name, want := range map[string]uint64{
-			"tcs_not_recorded_under_pressure":  3,
-			"requests_during_pauses":           2,
-			"requests_before_first_pause":      1,
-			"tcs_not_handed_on":                2,
-			"connections_from_unnamed_callers": 2,
-			"connections_relayed_tls":          2,
-			"mocks_dropped_capacity":           1,
+			"tcs_not_recorded_under_pressure":   3,
+			"requests_during_pauses":            2,
+			"requests_before_first_pause":       1,
+			"tcs_not_handed_on":                 2,
+			"tcs_response_dated_before_request": 2,
+			"connections_from_unnamed_callers":  2,
+			"connections_relayed_tls":           2,
+			"mocks_dropped_capacity":            1,
 		} {
 			if got := sumLine[name]; got != want {
 				t.Errorf("the summary says %s=%v, want %d", name, got, want)
@@ -279,6 +287,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		if got := fields(notHandedOnSaid)["test_cases"]; got != uint64(2) {
 			t.Errorf("the warning of test cases not handed on says %v, want 2", got)
+		}
+		if got := fields(invertedSaid)["test_cases"]; got != uint64(2) {
+			t.Errorf("the line of test cases whose response was dated before their request says %v, want this session's 2", got)
 		}
 		if got := fields(unnamedCallerConnsSaid)["connections"]; got != uint64(2) {
 			t.Errorf("the warning of connections from unnamed callers says %v, want 2", got)

@@ -295,7 +295,8 @@ func (h *TestCaseHold) stalled(e *heldEntry, now time.Duration) time.Duration {
 	w, ok := h.w.(HeldProgressor)
 	var p uint64
 	if ok {
-		p = w.HeldProgress(e.Namespace, e.Pod, e.TC.HTTPReq.Timestamp, e.TC.HTTPResp.Timestamp)
+		start, end := heldWindow(e.TC)
+		p = w.HeldProgress(e.Namespace, e.Pod, start, end)
 	}
 	if ok && (!e.counted || p != e.progress) {
 		if e.counted {
@@ -309,7 +310,8 @@ func (h *TestCaseHold) stalled(e *heldEntry, now time.Duration) time.Duration {
 // final reports whether e's verdict is final: settled, and past its fence
 // when the watermark has one (Fenced), which it opens the first time.
 func (h *TestCaseHold) final(e *heldEntry) bool {
-	if !h.w.Settled(e.Namespace, e.Pod, e.TC.HTTPReq.Timestamp, e.TC.HTTPResp.Timestamp) {
+	start, end := heldWindow(e.TC)
+	if !h.w.Settled(e.Namespace, e.Pod, start, end) {
 		return false
 	}
 	f, ok := h.w.(Fenced)
@@ -329,7 +331,25 @@ func (h *TestCaseHold) heldBy(e *heldEntry) fmt.Stringer {
 	if !ok {
 		return nil
 	}
-	return x.HeldBy(e.Namespace, e.Pod, e.TC.HTTPReq.Timestamp, e.TC.HTTPResp.Timestamp, e.fence)
+	start, end := heldWindow(e.TC)
+	return x.HeldBy(e.Namespace, e.Pod, start, end, e.fence)
+}
+
+// heldWindow is the window the hold asks the watermark about for tc: its
+// request and its response, or, for one whose response is dated before its
+// request, from its request to where the agent ended its window as it took
+// the exchange (models.TestCase.WindowEnd), the window its mocks were
+// resolved over. Read as the two stamps, that window ended before it began
+// and held nothing, so such a test case went at once, before its mocks had
+// settled. A gRPC test case's stamps are its GrpcReq's and GrpcResp's, which
+// the hold does not read: it asks about the zero window for one, as it did
+// before WindowEnd.
+func heldWindow(tc *models.TestCase) (start, end time.Time) {
+	start, end = tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+	if !start.IsZero() && !tc.WindowEnd.IsZero() {
+		end = tc.WindowEnd
+	}
+	return start, end
 }
 
 // testCaseSize is about how many bytes a test case holds.

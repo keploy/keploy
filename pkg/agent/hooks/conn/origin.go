@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -46,4 +47,34 @@ func StampOrigin(ctx context.Context, tc *models.TestCase) {
 	if clock := WindowClockFromContext(ctx); clock != "" {
 		tc.Origin = &models.Origin{Clock: clock}
 	}
+}
+
+// arrivalCtxKey carries, through the capture context, when the ingress had
+// the captured exchange complete (WithArrival).
+type arrivalCtxKey struct{}
+
+// WithArrival returns a context carrying when the ingress had the captured
+// exchange complete, read from the process's clock as it found the
+// response's end: where the window of a test case whose response is dated
+// before its request ends (models.InvertedWindowEnd). A capture that runs
+// later, as a busy agent's do, then takes no call made after that into the
+// window. A zero time carries nothing.
+func WithArrival(ctx context.Context, at time.Time) context.Context {
+	if at.IsZero() {
+		return ctx
+	}
+	return context.WithValue(ctx, arrivalCtxKey{}, at)
+}
+
+// ArrivalOf is when the exchange ctx carries was had complete (WithArrival),
+// or now, as the capture takes it, when no ingress said. A capture hook of
+// its own (CaptureHook) gives it to EndWindow and to its resolve
+// (syncMock.ResolveKeptAt), as Capture does.
+func ArrivalOf(ctx context.Context) time.Time {
+	if ctx != nil {
+		if at, ok := ctx.Value(arrivalCtxKey{}).(time.Time); ok {
+			return at
+		}
+	}
+	return time.Now()
 }

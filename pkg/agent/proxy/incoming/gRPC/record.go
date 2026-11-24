@@ -106,10 +106,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// The capture takes the call's window and decides it (CaptureGRPC); it
 	// ends here once the capture has, on every path.
 	windowCtx := Utils.WithWindowClock(ctx, fakeconn.NameProxyClock())
-	captureStream := func(stream *pkg.HTTP2Stream) {
+	captureStream := func(stream *pkg.HTTP2Stream, arrived time.Time) {
 		win := calls.take(stream.ID)
 		defer win.Close()
-		Utils.CaptureGRPC(syncMock.WithWindow(windowCtx, win), logger, t, stream, appPort, synchronous, mapping)
+		if !stream.CompletedAt.IsZero() {
+			arrived = stream.CompletedAt
+		}
+		Utils.CaptureGRPC(Utils.WithArrival(syncMock.WithWindow(windowCtx, win), arrived), logger, t, stream, appPort, synchronous, mapping)
 	}
 
 	// Single emitter goroutine to avoid duplicate test case emission. Each
@@ -542,12 +545,16 @@ func drainFrameChunks(ch <-chan frameChunk) {
 // pressure too, when capture leaves it out (CaptureGRPC): a pass that skipped
 // it would leave it for a later pass after the chunks it was built of were
 // released, so a stop told nothing was pending could be followed by it.
-func emitCompleteStreams(ctx context.Context, logger *zap.Logger, sm *pkg.DefaultStreamManager, capture func(*pkg.HTTP2Stream)) {
+func emitCompleteStreams(ctx context.Context, logger *zap.Logger, sm *pkg.DefaultStreamManager, capture func(*pkg.HTTP2Stream, time.Time)) {
 	if capture == nil {
 		return
 	}
 
 	streams := sm.GetCompleteStreams()
+	// When these calls were found complete, for one whose stream does not
+	// say (HTTP2Stream.CompletedAt): each one's capture waits behind the
+	// ones before it (Utils.WithArrival).
+	arrived := clockNow()
 	for _, stream := range streams {
 		if stream.GRPCReq == nil || stream.GRPCResp == nil {
 			continue
@@ -561,7 +568,7 @@ func emitCompleteStreams(ctx context.Context, logger *zap.Logger, sm *pkg.Defaul
 		logger.Debug("captured gRPC test case (passthrough)",
 			zap.String("method", utils.URLPathShape(u)),
 			utils.PathTagField(models.URLPathTag(ctx, http.MethodPost, u)))
-		capture(stream)
+		capture(stream, arrived)
 		sm.CleanupStream(stream.ID)
 	}
 }

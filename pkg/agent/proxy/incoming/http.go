@@ -904,11 +904,22 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// past its headers overlaps the requests run beside the rest of it,
 		// and the yield at the headers (above) keeps what they claim theirs.
 		respTimestamp = endAt()
+		// When the exchange was had complete: where the window of one whose
+		// response is dated before its request ends (hooksUtils.WithArrival,
+		// models.InvertedWindowEnd), read before its capture runs.
+		arrivedAt := clockNow()
 		// The exchange is over: from its last byte on its request is in flight
 		// no more, and claims nothing over the requests that run beside a
 		// stream still being sent (a no-op for one that yielded at its
-		// headers already).
-		win.Yield(respTimestamp)
+		// headers already). One whose response is dated before its request
+		// yields where its window ends, its arrival, and the clock is let
+		// pass it, as it passed the response's end, before anything after.
+		if yieldAt := models.InvertedWindowEnd(reqTimestamp, respTimestamp, arrivedAt); !yieldAt.Equal(respTimestamp) {
+			win.Yield(yieldAt)
+			waitPastYield(win, yieldAt)
+		} else {
+			win.Yield(respTimestamp)
+		}
 
 		shouldCapture := captureEnabled
 		if forceCloseMode {
@@ -994,6 +1005,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		capturedResp := appResp
 		capturedReqTS := reqTimestamp
 		capturedRespTS := respTimestamp
+		capturedArrived := arrivedAt
 		capturedWin := win
 		win = nil
 
@@ -1074,7 +1086,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(syncMock.WithIngressConn(ctx, connName), capturedWin)), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+			hooksUtils.CaptureHook(hooksUtils.WithArrival(proxyWindowClock(syncMock.WithWindow(syncMock.WithIngressConn(ctx, connName), capturedWin)), capturedArrived), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 		}()
 
 		// Exit the loop in sync/sampling mode or when memory pressure requires closing.
@@ -2040,6 +2052,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			// client could have it; one whose end the write did not read
 			// is noted here. A stop waits for it while it waits for a slot.
 			building.note(ctx, respTimestamp)
+			// When the exchange was had complete, before the capture waits
+			// for its slot (hooksUtils.WithArrival).
+			arrived := clockNow()
 			releaseCaptureSlot, ok := takeCaptureSlot(ctx)
 			if !ok {
 				// The ingress stopped before a slot came: the app served
@@ -2068,6 +2083,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			capturedResp := appResp
 			capturedReqTS := reqTimestamp
 			capturedRespTS := respTimestamp
+			capturedArrived := arrived
 			actualPort := appPort
 			capturedWin := win
 			win = nil
@@ -2106,7 +2122,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				defer parsedReq.Body.Close()
 				defer parsedResp.Body.Close()
-				hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(syncMock.WithIngressConn(ctx, connName), capturedWin)), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+				hooksUtils.CaptureHook(hooksUtils.WithArrival(proxyWindowClock(syncMock.WithWindow(syncMock.WithIngressConn(ctx, connName), capturedWin)), capturedArrived), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 			}()
 		}
 		// Not captured: nothing will decide it.

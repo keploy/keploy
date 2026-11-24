@@ -81,6 +81,13 @@ const maxNamedPressureConns = 8
 // stopped first (syncMock NoteNotHandedOn).
 const notHandedOnSaid = "agent: some test cases were lost: the app served their requests, and the ingress stopped (the agent, or its forwarder for the app's port, was stopping) before their test cases reached the recording"
 
+// invertedSaid is the summary's line of a session's test cases whose
+// response was dated before their request, as their captures kept them
+// (syncMock InvertedTestCases): each was matched the mocks requested from its
+// request until the agent had it complete (models.InvertedWindowEnd). The
+// stream's checks may still leave one out, as any other.
+const invertedSaid = "agent: some test cases had a response dated before their request; their mocks were matched by when the agent received them"
+
 // unnamedCallerConnsSaid is the summary's warning of a session's connections
 // to a listener of the run's own process tree whose callers the agent could
 // not name in its PID namespace (syncMock NoteUnnamedCallerConn): it could not
@@ -562,11 +569,12 @@ func streamWriteFailed(logger *zap.Logger, r *http.Request, msg string, err erro
 // (WasPressureActiveInWindow, WasMockOrphanedInWindow), on which a zero bound
 // makes no claim. A test case with no response time is read as ending now, the
 // latest it can have ended. One with no request time to trust (none, or one
-// after its end) is read as holding every request of its recording made before
-// its end, any of which may be its own (fail closed), as SendingTestCase reads
-// it: from from, the earliest one can have come (requestsFrom); with from
-// unknown (zero) or after its end, whatever recording it is of, as holding
-// every request made before its end.
+// after its end, which a test case the stream takes no longer has: it ends at
+// its arrival, models.EndInvertedWindow) is read as holding every request of
+// its recording made before its end, any of which may be its own (fail
+// closed), as SendingTestCase reads it: from from, the earliest one can have
+// come (requestsFrom); with from unknown (zero) or after its end, whatever
+// recording it is of, as holding every request made before its end.
 func spanWindow(req, resp, from time.Time) (time.Time, time.Time) {
 	if resp.IsZero() {
 		resp = time.Now()
@@ -698,6 +706,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// never reached this stream's queue because the ingress stopped first
 	// (NoteNotHandedOn), counted the same way.
 	notHandedOnBefore := syncmgr.Get().NotHandedOn()
+	// The kept test cases whose response was dated before their request
+	// (NoteInvertedTestCase), counted the same way.
+	invertedBefore := syncmgr.Get().InvertedTestCases()
 	// The connections to a listener of the run's own process tree whose
 	// callers the agent could not name in its PID namespace, none of whose
 	// calls was recorded as a test case (NoteUnnamedCallerConn), counted the
@@ -1107,6 +1118,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			a.logger.Warn(notHandedOnSaid,
 				zap.Uint64("test_cases", notHandedOn))
 		}
+		// Kept, each with its mocks: the manager warns of the first and
+		// every 1024th as they come, naming the times; this is the session's
+		// count.
+		inverted := syncmgr.Get().InvertedTestCases() - invertedBefore
+		if inverted > 0 {
+			a.logger.Warn(invertedSaid,
+				zap.Uint64("test_cases", inverted))
+		}
 		if unnamedConns > 0 {
 			// Each was passed to the app's listener and none of its calls
 			// recorded: the proxy warned of the agent's first as it came;
@@ -1202,6 +1221,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// Served by the app and never handed to this stream: the
 			// ingress that served them stopped first (the WARN above).
 			zap.Uint64("tcs_not_handed_on", notHandedOn),
+			// Kept with a response dated before their request, their mocks
+			// matched up to when the agent received them (the WARN above).
+			zap.Uint64("tcs_response_dated_before_request", inverted),
 			// Calls to the app none of which was recorded: the agent could
 			// not name their callers (the WARN above).
 			zap.Uint64("connections_from_unnamed_callers", unnamedConns),
@@ -1221,6 +1243,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// take hands a test case the ingress built to the hold, or, without one,
 	// to the stream. It reports false once the stream is broken.
 	take := func(t *models.TestCase) bool {
+		// One whose response is dated before its request is checked, held
+		// and sent over the window its mocks were matched over: to where its
+		// capture ended it, or, for a capture that did not, to now, as it is
+		// taken (models.EndInvertedWindow). Read as its two stamps, that
+		// window ends before it starts: the hold let it go before its mocks
+		// had settled, and the checks read it as holding every request of
+		// its recording.
+		models.EndInvertedWindow(t, time.Now())
 		if hold == nil {
 			return send(t)
 		}
@@ -1335,16 +1365,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if hold == nil {
-				if !send(t) {
-					return
-				}
-				continue
-			}
 			// One that is final at once goes at once; behind held ones, it
 			// waits for the tick, which looks at them all.
-			wasEmpty := hold.Len() == 0
-			hold.Add(t, "", "")
+			wasEmpty := heldLen(hold) == 0
+			if !take(t) {
+				return
+			}
+			if hold == nil {
+				continue
+			}
 			if wasEmpty {
 				if !release() {
 					return

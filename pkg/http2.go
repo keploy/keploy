@@ -170,6 +170,8 @@ type HTTP2StreamState struct {
 
 	// Completion
 	isComplete bool
+	// completedAt is when the stream was found complete (checkStreamCompletion).
+	completedAt time.Time
 }
 
 // HTTP2Stream represents a complete HTTP/2 stream
@@ -181,6 +183,10 @@ type HTTP2Stream struct {
 	// frame was read (HandleFrameRead): the order of the read and the pause,
 	// not the request's time, puts the call in the pause.
 	RequestPaused bool
+	// CompletedAt is when the frame that completed the call was handled,
+	// read from the process's clock: where the window of a call whose
+	// response is dated before its request ends (models.InvertedWindowEnd).
+	CompletedAt time.Time
 }
 
 // DefaultStreamManager implements stream management
@@ -500,6 +506,7 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 				GRPCReq:       stream.grpcReq,
 				GRPCResp:      stream.grpcResp,
 				RequestPaused: stream.startPaused,
+				CompletedAt:   stream.completedAt,
 			}
 			completed = append(completed, http2Stream)
 		}
@@ -577,6 +584,7 @@ func (sm *DefaultStreamManager) checkStreamCompletion(streamID uint32) {
 		if reqDone && respDone {
 			sm.logger.Debug("Stream completed", zap.Any("stream", s))
 			s.isComplete = true
+			s.completedAt = time.Now()
 		}
 	}
 }

@@ -2942,14 +2942,14 @@ func (m *SyncMockManager) PendingIn(start, end time.Time) bool {
 
 // invertedWarning is logged for a kept test case whose response is dated
 // before its request (noteInverted).
-const invertedWarning = "syncMock: a test case's response is dated before its request, so its window holds none of the mocks requested between the two"
+const invertedWarning = "syncMock: a test case's response is dated before its request; its mocks are matched by when the agent received it"
 
 // noteInverted counts a kept test case whose response is dated before its
 // request, and logs the first and every sendDropSampleRate-th with its name
-// and both times. Its window [request, response] holds no time
-// (heldRangeLocked, sentClaimRangeLocked), so none of the mocks requested
-// between the two are mapped to it: the capture that dated it is to be found
-// from these lines.
+// and both times, so the capture that dated it can be found. Its window ends
+// when the agent received the completed exchange instead
+// (models.InvertedWindowEnd): it keeps the mocks requested from its request
+// until then.
 func (m *SyncMockManager) noteInverted(testName string, request, response time.Time) {
 	if m == nil {
 		return
@@ -2960,6 +2960,15 @@ func (m *SyncMockManager) noteInverted(testName string, request, response time.T
 			zap.String("test", testName), zap.Time("request", request), zap.Time("response", response),
 			zap.Duration("by", request.Sub(response)), zap.Uint64("inverted_so_far", n))
 	}
+}
+
+// NoteInvertedTestCase counts a kept test case whose response is dated
+// before its request that no resolve counts: one a capture without --sync
+// handed on, with its window's end (models.InvertedWindowEnd,
+// TestCase.WindowEnd). A kept resolve of such a window counts its own.
+// request and response are its stamps as captured. Nil-safe.
+func (m *SyncMockManager) NoteInvertedTestCase(testName string, request, response time.Time) {
+	m.noteInverted(testName, request, response)
 }
 
 // InvertedTestCases is how many kept test cases had a response dated before
@@ -4560,9 +4569,20 @@ func (c claims) covers(t time.Time) bool {
 // in the ring's order, for the kept resolve of a window that yielded. Caller
 // holds mu.
 func (m *SyncMockManager) claimsLocked(self *Window, after, end time.Time) claims {
+	return m.claimsSinceLocked(self, after, end, time.Time{})
+}
+
+// claimsSinceLocked is claimsLocked of the windows that started at or after
+// since alone (all of them for a zero since); with no self, of those that
+// started after it, as self may be one that started at since. Caller holds
+// mu.
+func (m *SyncMockManager) claimsSinceLocked(self *Window, after, end, since time.Time) claims {
+	before := func(at time.Time) bool {
+		return !since.IsZero() && (at.Before(since) || self == nil && at.Equal(since))
+	}
 	var c claims
 	for _, o := range m.open {
-		if o == self || o.start.After(end) || (o.yieldAt != 0 && o.yieldAt <= after.UnixNano()) {
+		if o == self || o.start.After(end) || (o.yieldAt != 0 && o.yieldAt <= after.UnixNano()) || before(o.start) {
 			continue
 		}
 		var to time.Time
@@ -4573,7 +4593,7 @@ func (m *SyncMockManager) claimsLocked(self *Window, after, end time.Time) claim
 	}
 	for _, i := range inRingOrder(m.windowsLocked().reaching(after, end)) {
 		r := m.recentWindows[i]
-		if !r.keep || r.start.After(end) || !r.end.After(after) {
+		if !r.keep || r.start.After(end) || !r.end.After(after) || before(r.start) {
 			continue
 		}
 		c = append(c, claim{from: r.start, to: r.end})
@@ -4756,8 +4776,9 @@ func (m *SyncMockManager) unholdLocked(lo, hi int) {
 
 // heldRangeLocked returns the bounds [lo, hi) of the held mocks requested
 // within [start, end]: an empty range, lo == hi, for a window that ends
-// before it starts (a test case whose response is dated before its request),
-// which holds no time. Caller holds mu.
+// before it starts, which holds no time (a duplicate's prune over a response
+// dated before its request; a kept resolve ends such a window at its
+// arrival). Caller holds mu.
 func (m *SyncMockManager) heldRangeLocked(start, end time.Time) (lo, hi int) {
 	lo = sort.Search(len(m.held), func(i int) bool { return !m.held[i].mock.Spec.ReqTimestampMock.Before(start) })
 	hi = sort.Search(len(m.held), func(i int) bool { return m.held[i].mock.Spec.ReqTimestampMock.After(end) })
@@ -4771,7 +4792,9 @@ func (m *SyncMockManager) heldRangeLocked(start, end time.Time) (lo, hi int) {
 // request does not take them; and those already owed back to a window decided
 // before it (heldMock.owner), which it would otherwise take once the ring has
 // let go of that window. Caller holds mu.
-func (m *SyncMockManager) takeHeldLocked(start, end, sharedFrom time.Time, others claims, self func() *resolvedWindow) []*models.Mock {
+//
+// byClaims (a widened window: resolveRange) leaves only what others claim.
+func (m *SyncMockManager) takeHeldLocked(start, end, sharedFrom time.Time, others claims, byClaims bool, self func() *resolvedWindow) []*models.Mock {
 	lo, hi := m.heldRangeLocked(start, end)
 	if lo >= hi {
 		return nil
@@ -4788,7 +4811,7 @@ func (m *SyncMockManager) takeHeldLocked(start, end, sharedFrom time.Time, other
 	stay := lo
 	for i := lo; i < hi; i++ {
 		h := m.held[i]
-		if at := h.mock.Spec.ReqTimestampMock; at.After(sharedFrom) && (h.owner != nil || others.covers(at)) {
+		if at := h.mock.Spec.ReqTimestampMock; at.After(sharedFrom) && (h.owner != nil && !byClaims || others.covers(at)) {
 			if h.owner == nil { // left in this window's part after its yield
 				h.owner = self()
 				m.heldShared++
@@ -5835,14 +5858,16 @@ func (m *SyncMockManager) sentClaimRangeLocked(start, end time.Time) (lo, hi int
 // any mock of its own, and the name, which the recording never got, is left
 // out. One still being sent is told to the test if it drops it
 // (sentClaimDone). Caller holds m.mu.
-func (m *SyncMockManager) takeSentClaimedLocked(start, end, sharedFrom time.Time, others claims, testName string, self func() *resolvedWindow, ids []string) []string {
+//
+// byClaims (a widened window: resolveRange) leaves only what others claim.
+func (m *SyncMockManager) takeSentClaimedLocked(start, end, sharedFrom time.Time, others claims, byClaims bool, testName string, self func() *resolvedWindow, ids []string) []string {
 	lo, hi := m.sentClaimRangeLocked(start, end)
 	stay := lo
 	for i := lo; i < hi; i++ {
 		c := m.sentClaimed[i]
 		switch {
 		case c.takenBy != "":
-		case !sharedFrom.IsZero() && c.at.After(sharedFrom) && (c.owner != nil || others.covers(c.at)):
+		case !sharedFrom.IsZero() && c.at.After(sharedFrom) && (c.owner != nil && !byClaims || others.covers(c.at)):
 			if c.owner == nil { // left in this window's part after its yield
 				c.owner = self()
 			}
@@ -5967,7 +5992,7 @@ func (m *SyncMockManager) openClaimsStartupLocked(at, cutoff time.Time) bool {
 // pruned, bar what a request still in flight may own. For a kept request with
 // an open window, use ResolveKept, which also ends its window.
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
-	m.resolveRange(start, end, testName, keep, mapping, nil)
+	m.resolveRange(start, end, time.Now(), testName, keep, mapping, nil)
 }
 
 // ResolveKept is the kept ResolveRange of a request with an open window w
@@ -5978,12 +6003,35 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 // by the resolved window, as any kept window's are. A nil w, or one of another
 // manager, is just ResolveRange's; the caller still owes Close.
 func (m *SyncMockManager) ResolveKept(w *Window, start, end time.Time, testName string, mapping bool) {
-	m.resolveRange(start, end, testName, true, mapping, w)
+	m.resolveRange(start, end, time.Now(), testName, true, mapping, w)
 }
 
-func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, keep bool, mapping bool, w *Window) {
-	if keep && !end.IsZero() && end.Before(start) {
+// ResolveKeptAt is ResolveKept for a test case whose exchange the capture
+// took complete at arrived: a window whose response is dated before its
+// request ends there (models.InvertedWindowEnd), which the capture gives its
+// test case too (TestCase.WindowEnd), so the resolve, the hold and the
+// stream's checks read one window. ResolveKept ends such a window as it
+// resolves.
+func (m *SyncMockManager) ResolveKeptAt(w *Window, start, end, arrived time.Time, testName string, mapping bool) {
+	m.resolveRange(start, end, arrived, testName, true, mapping, w)
+}
+
+// resolveRange resolves [start, end] (ResolveRange, ResolveKept). arrived is
+// when the exchange was taken complete: a kept window whose response is
+// dated before its request ends there instead.
+func (m *SyncMockManager) resolveRange(start, end, arrived time.Time, testName string, keep bool, mapping bool, w *Window) {
+	// widened: a kept test case whose response is dated before its request
+	// (by the wall readings, which every mock is placed by), resolved over
+	// its request to arrived (models.InvertedWindowEnd), after every call its
+	// request caused: it keeps its mocks, and is counted once, here. Of that
+	// window, what another request claims is that request's (sharedFrom,
+	// below), as a yielded window's part after its yield. A duplicate's prune
+	// over such a window stays empty: what its stamps say is no time, and
+	// its debris goes at the stale cutoff, as a left-out request's does.
+	widened := false
+	if keep && !start.IsZero() && !end.IsZero() && end.UnixNano() < start.UnixNano() {
 		m.noteInverted(testName, start, end)
+		end, widened = models.InvertedWindowEnd(start, end, arrived), true
 	}
 	// Collect mocks and mapping data under the lock, then send to the
 	// outgoing channels AFTER releasing it. Holding m.mu across a
@@ -6033,9 +6081,31 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// once resolved, or waits, or is held, for it).
 	var sharedFrom time.Time
 	var others claims
+	// byClaims: of a widened window, only what others claim is left, not
+	// what is owed back to a window decided before it, which a window in
+	// order that did not yield takes too; and it is recorded once resolved
+	// as one that did not yield (ringShared).
+	byClaims := false
 	if keep && w != nil && w.m == m && w.yieldAt != 0 && w.yieldAt < end.UnixNano() {
 		sharedFrom = time.Unix(0, w.yieldAt)
 		others = m.claimsLocked(w, sharedFrom, end)
+	} else if widened {
+		// Its window reaches past its stamps to when it was had complete:
+		// what a request that came after it claims of that time, in flight
+		// or resolved kept, is that request's. A request that came before
+		// it claims nothing of it, as of a window in order that did not
+		// yield; nor does its own window, still open or not, which started
+		// at its request.
+		ownW := w
+		if ownW != nil && ownW.m != m {
+			ownW = nil
+		}
+		sharedFrom, byClaims = start, true
+		others = m.claimsSinceLocked(ownW, sharedFrom, end, start)
+	}
+	ringShared := sharedFrom
+	if byClaims {
+		ringShared = time.Time{}
 	}
 	// self is this window as it is recorded once resolved, for what it leaves
 	// to a request in flight: owed back to it if that request does not take
@@ -6043,7 +6113,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	var selfW *resolvedWindow
 	self := func() *resolvedWindow {
 		if selfW == nil {
-			selfW = &resolvedWindow{start: start, end: end, testName: testName, mapping: mapping, keep: true, sharedFrom: unixNanoOrZero(sharedFrom), recording: m.recording}
+			selfW = &resolvedWindow{start: start, end: end, testName: testName, mapping: mapping, keep: true, sharedFrom: unixNanoOrZero(ringShared), recording: m.recording}
 		}
 		return selfW
 	}
@@ -6420,7 +6490,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// a resolved kept window's (ownerWindowLocked).
 	heldTaken := 0
 	if keep {
-		taken := m.takeHeldLocked(start, end, sharedFrom, others, self)
+		taken := m.takeHeldLocked(start, end, sharedFrom, others, byClaims, self)
 		if outChanBound {
 			fromHold := make([]ownedMock, 0, len(taken))
 			for _, mock := range taken {
@@ -6450,7 +6520,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// The startup mocks sent while this request was in flight, which it
 	// takes: in its mapping too.
 	if keep {
-		associatedMockIDs = m.takeSentClaimedLocked(start, end, sharedFrom, others, testName, self, associatedMockIDs)
+		associatedMockIDs = m.takeSentClaimedLocked(start, end, sharedFrom, others, byClaims, testName, self, associatedMockIDs)
 	}
 	if len(associatedMockIDs) > 0 && mappingChan != nil && mapping {
 		mappingEntry = &models.TestMockMapping{
@@ -6756,6 +6826,10 @@ type DedupJob struct {
 	TestName    string
 	Resolved    bool
 	IsDuplicate bool
+	// Arrived is when ResolveJob was told the job's request was decided:
+	// the end of its window when its response is dated before its request
+	// (models.InvertedWindowEnd), however long the queue's head waits.
+	Arrived time.Time
 }
 
 type DedupQueue struct {
@@ -6808,6 +6882,7 @@ func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp t
 	job.IsDuplicate = isDuplicate
 	job.Resolved = true
 	job.ResTimestamp = resTimestamp
+	job.Arrived = time.Now()
 	// Stamp the anchor onto the job itself so the head-draining loop
 	// below forwards the correct testName even when an earlier job at
 	// the head is resolved by a LATER caller (strict-FIFO drain can
@@ -6828,7 +6903,7 @@ func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp t
 		if head.IsDuplicate && mockMgr != nil {
 			mockMgr.DeleteMocksStrictlyBefore(head.ReqTimestamp)
 		} else if head.IsDuplicate == false && mockMgr != nil {
-			mockMgr.ResolveRange(head.ReqTimestamp, head.ResTimestamp, head.TestName, true, enableMapping)
+			mockMgr.resolveRange(head.ReqTimestamp, head.ResTimestamp, head.Arrived, head.TestName, true, enableMapping, nil)
 
 		}
 

@@ -167,6 +167,9 @@ func HandOn(ctx context.Context, t chan<- *models.TestCase, testCase *models.Tes
 }
 
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
+	// When the exchange was had complete: the window of one whose response is
+	// dated before its request ends there (windowEnd, below).
+	arrived := ArrivalOf(ctx)
 	if SkipEndedRecording(ctx, req, resp) || SkipUnderPressure(ctx, req, resp) {
 		return
 	}
@@ -358,6 +361,12 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
+	// Its window, which its mocks are resolved over, its hold waits on and
+	// its stream checks: [request, response], or, for a response dated
+	// before its request, from the request to when the exchange was had
+	// complete (models.InvertedWindowEnd). It is kept, and keeps the mocks
+	// its request caused; its stamps stay as captured.
+	windowEnd, inverted := EndWindow(testCase, reqTimeTest, resTimeTest, arrived)
 	// The test case holds its own copies of the bodies: the decoded buffers
 	// are the capture's no longer, and their room goes back before the test
 	// case waits to be handed on.
@@ -437,7 +446,9 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// Dumping the test case from the mock manager in synchronous mode:
 		// takes what was held for the request and ends its window before
 		// handing the mocks on. ResolveKept noted the test case's span.
-		mgr.ResolveKept(win, reqTimeTest, resTimeTest, testName, mapping)
+		// Over the window its test case carries: the resolve ends an
+		// inverted one at arrived too, and counts it.
+		mgr.ResolveKeptAt(win, reqTimeTest, resTimeTest, arrived, testName, mapping)
 		return
 	}
 	if syncMock.WindowFromContext(ctx).LeftAtStop() {
@@ -456,7 +467,27 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	sent = true
 	// Without --sync no resolve ends the window: it is noted a test case's
 	// here, before the ingress ends it (syncMock.TestSpanAt).
-	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
+	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, windowEnd)
+	if inverted {
+		// Named by no name of the request's: it has only its own here.
+		syncMock.FromContextOrGlobal(ctx).NoteInvertedTestCase("", reqTimeTest, resTimeTest)
+	}
+}
+
+// EndWindow is where tc's window [req, res] ends (models.InvertedWindowEnd):
+// res, or, for a response dated before its request, arrived, when the
+// exchange was had complete, never before req. tc carries such an end
+// (WindowEnd), the one its resolve takes from the same times
+// (ResolveKeptAt), so its hold and its stream's checks read the window its
+// mocks were resolved over; inverted says it is one. A capture hook of its
+// own calls it before it hands its test case on, with ArrivalOf.
+func EndWindow(tc *models.TestCase, req, res, arrived time.Time) (end time.Time, inverted bool) {
+	end = models.InvertedWindowEnd(req, res, arrived)
+	if end.Equal(res) {
+		return res, false
+	}
+	tc.WindowEnd = end
+	return end, true
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	filtered, _ := evalFilters(logger, req, opts)
@@ -749,6 +780,9 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	}
 
+	// When the call was had complete: the window of one whose response is
+	// dated before its request ends there (EndWindow, as Capture's).
+	arrived := ArrivalOf(ctx)
 	if SkipEndedRecording(ctx, nil, nil) || SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
 		return
 	}
@@ -811,6 +845,8 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	}
 	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
+	// Its window, as Capture's (EndWindow).
+	windowEnd, inverted := EndWindow(testCase, reqTime, resTime, arrived)
 
 	if synchronous {
 		// As Capture: the window is claimed only once the test case is in
@@ -829,7 +865,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 				zap.Time("in_flight_since", reqTime))
 			return
 		}
-		mgr.ResolveKept(win, reqTime, resTime, testName, mapping)
+		mgr.ResolveKeptAt(win, reqTime, resTime, arrived, testName, mapping)
 		return
 	}
 	if win.LeftAtStop() {
@@ -840,5 +876,8 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	if !HandOn(ctx, t, testCase) {
 		return
 	}
-	win.Tested(reqTime, resTime)
+	win.Tested(reqTime, windowEnd)
+	if inverted {
+		mgr.NoteInvertedTestCase("", reqTime, resTime)
+	}
 }

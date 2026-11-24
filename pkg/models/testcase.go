@@ -107,6 +107,15 @@ type TestCase struct {
 	// name of its own, and for a client that does not read capture ids
 	// (OutgoingOptions.SupportsCaptureIDs).
 	CaptureID string `json:"capture_id,omitempty" yaml:"-" bson:"-"`
+	// WindowEnd is where the window the agent matched the test case's mocks
+	// over ends, set only for one whose response is dated before its
+	// request: then the window ends when the agent received the completed
+	// exchange, never before its request (InvertedWindowEnd), and every check
+	// of its window reads it there (TestCaseWindow). Zero for any other test
+	// case, whose window ends at its response. Its stamps are kept as they
+	// were captured. It rides only the agent's test-case stream; yaml/bson
+	// "-" keeps it out of stored test cases.
+	WindowEnd time.Time `json:"window_end,omitzero" yaml:"-" bson:"-"`
 	// ExpectedRewrite is set only on the copy of a test case a replay hands
 	// to SimulateRequest for one send (replay's toSend), by a hook that
 	// rewrote that copy's expected body before the answer is compared with

@@ -142,12 +142,59 @@ func IsCaptureID(name string) bool {
 
 // TestCaseWindow is a test case's window, by its kind: a gRPC test case's
 // times are its GrpcReq's and GrpcResp's, any other's its HTTPReq's and
-// HTTPResp's.
+// HTTPResp's. One whose response is dated before its request ends where the
+// agent matched its mocks to (TestCase.WindowEnd), when it says.
 func TestCaseWindow(tc *TestCase) (time.Time, time.Time) {
+	start, end := tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
 	if tc.Kind == GRPC_EXPORT {
-		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+		start, end = tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
 	}
-	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+	if !tc.WindowEnd.IsZero() {
+		end = tc.WindowEnd
+	}
+	return start, end
+}
+
+// InvertedWindowEnd is where the window [start, end] of a test case's
+// exchange ends when the agent matches mocks to it: end, unless end is
+// before start (a response dated before its request); then arrived, when the
+// agent received the completed exchange, or start if arrived is not after it,
+// so the window never ends before it starts. A zero start or end is returned
+// as it is. arrived is read from the process's clock once the exchange is
+// complete, so it comes after every call the exchange's request caused: the
+// window holds what was requested from the request's stamp until then. A call
+// stamped before the request's stamp is not in it: one made after a wall
+// clock stepped back, or before a request stamped late.
+//
+// It compares wall readings (Unix nanoseconds), as every mock is placed in a
+// window by its wall reading: a stamp carries a monotonic reading only when
+// read from time.Now() in this process, and Before and After compare those
+// when both stamps have one, so a wall clock stepped back between the two
+// readings would pass a check that the wall readings fail. The end returned
+// for such a window carries no monotonic reading. A wall clock stepped back
+// past the request by arrived ends the window where it starts.
+func InvertedWindowEnd(start, end, arrived time.Time) time.Time {
+	if start.IsZero() || end.IsZero() || end.UnixNano() >= start.UnixNano() {
+		return end
+	}
+	if !arrived.IsZero() && arrived.UnixNano() > start.UnixNano() {
+		return arrived.Round(0)
+	}
+	return start.Round(0)
+}
+
+// EndInvertedWindow gives tc, if its response is dated before its request
+// and its capture gave it no window end, the one it is received at, arrived
+// (InvertedWindowEnd, TestCase.WindowEnd). Any other test case is left as it
+// is.
+func EndInvertedWindow(tc *TestCase, arrived time.Time) {
+	if tc == nil || !tc.WindowEnd.IsZero() {
+		return
+	}
+	start, end := TestCaseWindow(tc)
+	if e := InvertedWindowEnd(start, end, arrived); !e.Equal(end) {
+		tc.WindowEnd = e
+	}
 }
 
 // MockName constants for the PostgresV3 parser. The integrations-side

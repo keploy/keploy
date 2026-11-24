@@ -377,16 +377,20 @@ func TestRequestsFrom(t *testing.T) {
 	}
 }
 
-// A test case with no request time (or one after its end) is checked against
-// the memory guard's pauses and the holes in a connection's capture over every
-// request of its recording made before its end, as any may be its own (fail
-// closed): one whose recording paused or lost a hole before its end is left
-// out, and one that ended before it is streamed: a span from before its
-// recording started leaves none out. A test case with no response time is
-// checked to now. With a zero bound the checks made no claim, so such test
-// cases were streamed without the mocks a pause or a hole cost them. On the
-// real clock, each in a recording and stream of its own, which start after
-// every span an earlier test recorded.
+// A test case with no request time is checked against the memory guard's
+// pauses and the holes in a connection's capture over every request of its
+// recording made before its end, as any may be its own (fail closed): one
+// whose recording paused or lost a hole before its end is left out, and one
+// that ended before it is streamed: a span from before its recording started
+// leaves none out. A test case with no response time is checked to now. One
+// whose response is dated before its request is checked from its request to
+// when the stream took it (models.EndInvertedWindow): a span inside that
+// leaves it out, one before its request does not. Read as holding every
+// request of its recording, it was left out over any span before it. With a
+// zero bound the checks made no claim, so such test cases were streamed
+// without the mocks a pause or a hole cost them. On the real clock, each in
+// a recording and stream of its own, which start after every span an earlier
+// test recorded.
 func TestHandleIncoming_ATestCaseWithNoRequestTimeIsCheckedOverItsRecording(t *testing.T) {
 	mgr := syncmgr.Get()
 	mgr.SetWatermark(nil)
@@ -415,7 +419,7 @@ func TestHandleIncoming_ATestCaseWithNoRequestTimeIsCheckedOverItsRecording(t *t
 			// stream's: those reach back to that test's spans.
 			mgr.TakeLeftovers()
 			from := mgr.RecordingFrom()
-			tcs := make(chan *models.TestCase, 5)
+			tcs := make(chan *models.TestCase, 6)
 			resp := openStream(t, tcs)
 			clean := time.Now()
 			if over, n := mgr.WasPressureActiveInWindow(from, clean); over {
@@ -434,14 +438,16 @@ func TestHandleIncoming_ATestCaseWithNoRequestTimeIsCheckedOverItsRecording(t *t
 			tcs <- noRequestTime("over-it", after)
 			tcs <- &models.TestCase{Name: "request-after-its-end", Kind: models.HTTP,
 				HTTPReq: models.HTTPReq{Timestamp: after.Add(time.Second)}, HTTPResp: models.HTTPResp{Timestamp: after}}
+			tcs <- &models.TestCase{Name: "inverted-over-it", Kind: models.HTTP,
+				HTTPReq: models.HTTPReq{Timestamp: beforeSpan}, HTTPResp: models.HTTPResp{Timestamp: beforeSpan.Add(-time.Millisecond)}}
 			tcs <- &models.TestCase{Name: "no-response-time", Kind: models.HTTP,
 				HTTPReq: models.HTTPReq{Timestamp: beforeSpan}}
 			tcs <- &models.TestCase{Name: "both-times-before-it", Kind: models.HTTP,
 				HTTPReq: models.HTTPReq{Timestamp: from}, HTTPResp: models.HTTPResp{Timestamp: clean}}
 			close(tcs)
 			got := streamedNames(t, resp)
-			if strings.Join(got, ",") != "ended-before-it,both-times-before-it" {
-				t.Fatalf("streamed %v, want only [ended-before-it both-times-before-it]", got)
+			if strings.Join(got, ",") != "ended-before-it,request-after-its-end,both-times-before-it" {
+				t.Fatalf("streamed %v, want only [ended-before-it request-after-its-end both-times-before-it]", got)
 			}
 		})
 	}

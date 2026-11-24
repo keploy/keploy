@@ -15,17 +15,17 @@ import (
 
 // RecordedWindow is the window a recorded test case opens when it runs: its
 // [request, response] span, for an HTTP or a gRPC test case. A test case of any
-// other kind opens none: its Start is zero.
+// other kind opens none: its Start is zero. One whose response is dated before
+// its request, as the agent's stream hands it on, ends where the agent ended
+// its window (TestCase.WindowEnd), as its mocks were matched over.
 func RecordedWindow(tc *TestCase) TestWindow {
 	if tc == nil {
 		return TestWindow{}
 	}
 	w := TestWindow{TestCase: tc.Name, Clock: tc.Origin.clock()}
 	switch tc.Kind {
-	case HTTP:
-		w.Start, w.End = tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
-	case GRPC_EXPORT:
-		w.Start, w.End = tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	case HTTP, GRPC_EXPORT:
+		w.Start, w.End = TestCaseWindow(tc)
 	}
 	return w
 }
