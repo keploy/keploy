@@ -71,6 +71,22 @@ func (r *Replayer) notJudged(testSetID string) bool {
 	return r.notJudgedSets[testSetID]
 }
 
+func (r *Replayer) notJudgedSetIDs() []string {
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	if len(r.notJudgedSets) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(r.notJudgedSets))
+	for id, ok := range r.notJudgedSets {
+		if ok {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // markNeverReady records that testSetID was not judged because its
 // application never got ready (proven switch): it ran no test.
 func (r *Replayer) markNeverReady(testSetID string) {
@@ -260,6 +276,10 @@ func markAnswerStalled(result *models.TestResult, err error) {
 // stall rule or the app's keepalives ended, that it is not judged and what
 // was waited for, not an ordinary failure; else what as says, with the
 // error. Each names the test, which the report names the request under.
+// appTimeoutRemedy is the actionable next step when the app does not answer a
+// test request within test.apiTimeout.
+const appTimeoutRemedy = "raise test.apiTimeout in keploy.yaml (or --api-timeout) if the app needs more time (for example on slow startup or cross-architecture emulation), or check why the app stalled handling this request"
+
 func sayNoAnswer(ctx context.Context, logger *zap.Logger, test string, err error, as string) {
 	// The line names the request by its shape (pkg.LoggableAnswerError);
 	// the test report keeps it whole.
@@ -267,6 +287,14 @@ func sayNoAnswer(ctx context.Context, logger *zap.Logger, test string, err error
 		logger.Error("not judged: "+pkg.LoggableAnswerError(err),
 			zap.String("testcase", test),
 			zap.String("next_step", stalledAnswerRemedy(err)))
+		return
+	}
+	var timeoutErr *pkg.AppTimeoutError
+	if errors.As(err, &timeoutErr) && timeoutErr.Duration > 0 {
+		logger.Error(fmt.Sprintf("the app did not answer %s within test.apiTimeout (%s)", test, timeoutErr.Duration),
+			zap.String("testcase", test),
+			zap.Duration("apiTimeout", timeoutErr.Duration),
+			zap.String("next_step", appTimeoutRemedy))
 		return
 	}
 	// A host the error names outside a quoted URL (a dial's lookup of the

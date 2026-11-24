@@ -118,9 +118,9 @@ func TestProvenSwitchVetoesTheObsoleteDemotion(t *testing.T) {
 				// what keeps the test FAILED, not a flag never passed. (The
 				// streamed test here also left its recorded call unconsumed,
 				// which O-2 names as the reason; either way it is the switch.)
-				said := logs.FilterMessageSnippet("mock mapping mismatch detected").All()
-				if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || !strings.Contains(fmt.Sprint(said[0].ContextMap()["reason"]), provenswitch.Env+"=1") || strings.Contains(fmt.Sprint(said[0].ContextMap()["reason"]), "--strict-failure") {
-					t.Errorf("the mismatch was said %+v; want once, as FAILED, with %s=1 as the reason", said, provenswitch.Env)
+				said := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()
+				if len(said) != 1 || !strings.Contains(fmt.Sprint(said[0].ContextMap()["kept_failed_by"]), provenswitch.Env+"=1") || strings.Contains(fmt.Sprint(said[0].ContextMap()["kept_failed_by"]), "--strict-failure") {
+					t.Errorf("the mismatch was said %+v; want once, kept FAILED, with %s=1 as kept_failed_by", said, provenswitch.Env)
 				}
 			})
 		}
@@ -228,9 +228,9 @@ func TestAMissVetoesTheObsoleteDemotionWithTheSwitchOff(t *testing.T) {
 				if c.want != models.TestStatusFailed {
 					return
 				}
-				said := logs.FilterMessageSnippet("mock mapping mismatch detected").All()
-				if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || said[0].ContextMap()["reason"] != vetoUnmatchedCallSwitchOff {
-					t.Fatalf("the mismatch was said %+v; want once, as FAILED, for the miss", said)
+				said := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()
+				if len(said) != 1 || said[0].ContextMap()["kept_failed_by"] != vetoUnmatchedCallSwitchOff {
+					t.Fatalf("the mismatch was said %+v; want once, kept FAILED, for the miss", said)
 				}
 				if n := len(logs.FilterMessageSnippet("obsolete").All()) - len(logs.FilterMessageSnippet("not obsolete").All()); n != 0 {
 					t.Fatalf("the test was also said obsolete (%d lines)", n)

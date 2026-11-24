@@ -904,6 +904,10 @@ type Replayer struct {
 	// whose request the agent did not say its learn step took
 	// (test_request_read.go).
 	requestsUnread requestsUnread
+	// wholeSetIdx indexes the current test set's full mock lookup and test
+	// ownership so miss next steps and failure blame lines can name the
+	// recording test/mock across the whole set (whole_set_lookup.go).
+	wholeSetIdx *wholeSetMockIndex
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -1834,6 +1838,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// was 0. A run that failed already says why.
 	r.completeTestReportMu.RLock()
 	judged := r.totalTestPassed + r.totalTestFailed + r.totalTestObsolete
+	failedTestCount := r.totalTestFailed
 	r.completeTestReportMu.RUnlock()
 	// verifiedNothing: the run fails for this alone, so no mock difference
 	// failed it, and its mismatch table (the misses of tests that got no
@@ -1851,6 +1856,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// So does a capture loss of an earlier set's that the agent found only
 	// after that set had ended: that set is not judged.
 	testRunResult = r.passesEarlierSetLosses(testRunResult)
+	stopReason = finalStopReason(stopReason, stopReasonInput{
+		testRunResult:    testRunResult,
+		verifiedNothing:  verifiedNothing,
+		failedTests:      failedTestCount,
+		notJudgedSets:    r.notJudgedSetIDs(),
+		hasEarlierCalls:  len(r.earlierSetCalls.failing()) > 0,
+		hasEarlierLosses: len(r.earlierSetLosses.all()) > 0,
+		keepAliveErr:     keepAliveAppErr.Load(),
+	})
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
@@ -1935,7 +1949,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			} else {
 				r.logger.Info("Some testsets failed due to mock differences.",
 					zap.String("test_sets", testSets),
-					zap.String("next_step", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record'. A failed test keeps its recorded mapping (--update-test-mapping updates only a passing test's); to remap tests whose mapping is stale, run with --disable-mapping --update-test-mapping, which serves each its recorded window and maps the ones that pass."))
+					zap.String("next_step", failedMismatchNextStep(mismatchRows)))
 			}
 
 			r.printMockMismatches()
@@ -3962,6 +3976,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// to describe.
 		mockLookup = r.readMockLookup(runTestSetCtx, testSetID)
 	}
+	r.wholeSetIdx = newWholeSetMockIndex(mockLookup, expectedTestMockMappings, r.exact.ownersOf(), testCases)
+	defer func() { r.wholeSetIdx = nil }()
 
 	// A run that started no application (an agent already up, no -c) has
 	// not marked the capture losses its tests count from: its first test set
@@ -4959,10 +4975,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.Int("unmatchedCalls", earlyMissed))
 			} else if missed > 0 && outcome.Status == models.TestStatusObsolete {
 				outcome = failOnMisses(outcome)
-				r.logger.Error("mock mapping mismatch detected; marking testcase as FAILED, not obsolete: calls it made got no recorded answer, and the report lists each under unmatched_calls",
+				r.logger.Error(formatVetoedFailureMessage(testCase, resp, read.calls),
 					zap.String("testcase", testCase.Name),
 					zap.String("testset", testSetID),
-					zap.String("reason", vetoUnmatchedCallSwitchOff),
+					zap.String("kept_failed_by", vetoUnmatchedCallSwitchOff),
 					zap.Int("unmatchedCalls", missed))
 			}
 			// A test that lost a call fails in this cycle, as one with a miss
@@ -5007,10 +5023,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.Strings("expectedMocks", filteredExpectedNames),
 					zap.Strings("actualMocks", filteredMockNames))
 			case mismatchLogVetoedFailure:
-				r.logger.Error("mock mapping mismatch detected; marking testcase as FAILED",
+				r.logger.Error(formatVetoedFailureMessage(testCase, resp, read.calls),
 					zap.String("testcase", testCase.Name),
 					zap.String("testset", testSetID),
-					zap.String("reason", outcome.VetoFlags),
+					zap.String("kept_failed_by", outcome.VetoFlags),
 					zap.Strings("expectedMocks", filteredExpectedNames),
 					zap.Strings("actualMocks", filteredMockNames))
 			case mismatchLogObsolete:
@@ -6121,10 +6137,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
 				} else if len(streamTemplateFailures) > 0 {
-					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
+					r.logger.Error(formatVetoedFailureMessage(tc, httpResp, streamRead.calls),
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
-						zap.String("reason", vetoTemplateFailure),
+						zap.String("kept_failed_by", vetoTemplateFailure),
 						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
 				} else if len(streamUnconsumed) > 0 || streamCallsMissed > 0 || streamLostCapture {
@@ -6138,10 +6154,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					default:
 						reason = vetoCaptureLoss
 					}
-					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
+					r.logger.Error(formatVetoedFailureMessage(tc, httpResp, streamRead.calls),
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
-						zap.String("reason", reason),
+						zap.String("kept_failed_by", reason),
 						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
 				} else if r.strictFailure() {
@@ -6149,10 +6165,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// FAILED whatever the mock set did (the verdict below): the
 					// set's other consumption (a session-tier mock it shares) is
 					// no reason to re-record it.
-					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
+					r.logger.Error(formatVetoedFailureMessage(tc, httpResp, streamRead.calls),
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
-						zap.String("reason", vetoFlagName(false, true)),
+						zap.String("kept_failed_by", vetoFlagName(false, true)),
 						zap.Strings("expectedMocks", reportedExpected),
 						zap.Strings("actualMocks", mockNames))
 				} else {
@@ -9924,7 +9940,15 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 	// TestResult.FailureInfo) triage it as infra rather than a STATUS_CODE_CHANGED
 	// regression. Raw StatusCode stays 0. The error is classified, not its text:
 	// the reset re-send and the unreachable-port check read the same error.
-	if pkg.IsAppConnectionError(err) {
+	if pkg.IsAppTimeout(err) {
+		// The app did not answer within test.apiTimeout: categorize the
+		// failure as APP_TIMEOUT rather than synthetic STATUS_CODE_CHANGED or
+		// SCHEMA_BROKEN content regressions from the status_code=0 stand-in.
+		testCaseResult.FailureInfo.Category = []models.FailureCategory{models.AppTimeout}
+		if result != nil {
+			testCaseResult.Result.FailureInfo.Category = []models.FailureCategory{models.AppTimeout}
+		}
+	} else if pkg.IsAppConnectionError(err) {
 		testCaseResult.FailureInfo.Category = appendCategoryUnique(testCaseResult.FailureInfo.Category, models.AppConnectionError)
 	}
 
@@ -10591,6 +10615,7 @@ func (r *Replayer) readMockErrors(ctx context.Context, test string) testMisses {
 	calls = r.setCalls.takeOf(calls, test)
 	// An answered call is no miss: it is the test's answer (TestResult.Answers).
 	calls, answers := splitAnswers(calls)
+	r.wholeSetIdx.enrichCalls(calls, test) //nolint:contextcheck // models.OnDiskView.Summary does not take a context
 	read := testMisses{calls: calls, answers: answers, err: err, asked: true}
 	if provenswitch.On() {
 		read.lost, read.lostErr = r.testCaptureLosses(ctx)

@@ -76,6 +76,10 @@ type consoleEncoder struct {
 	colour bool
 	// lineEnding is what zap ends each line with.
 	lineEnding string
+	// linePrefix is written at the start of every encoded log line (e.g.
+	// "🐰 Keploy: " or "🐰 Keploy(agent): "), keeping EncodeTime pure
+	// RFC3339Nano so structured zap.Time fields never carry the line prefix.
+	linePrefix string
 }
 
 // NewANSIConsoleEncoder returns the encoder of the default, "ansiConsole",
@@ -97,6 +101,10 @@ func newPlainConsoleEncoder(cfg zapcore.EncoderConfig) consoleEncoder {
 }
 
 func newConsoleEncoder(cfg zapcore.EncoderConfig, colour bool) consoleEncoder {
+	return newConsoleEncoderWithPrefix(cfg, colour, "")
+}
+
+func newConsoleEncoderWithPrefix(cfg zapcore.EncoderConfig, colour bool, linePrefix string) consoleEncoder {
 	lineEnding := cfg.LineEnding // as zap's encoder settles it
 	switch {
 	case cfg.SkipLineEnding:
@@ -104,7 +112,13 @@ func newConsoleEncoder(cfg zapcore.EncoderConfig, colour bool) consoleEncoder {
 	case lineEnding == "":
 		lineEnding = zapcore.DefaultLineEnding
 	}
-	return consoleEncoder{EncoderConfig: &cfg, Encoder: zapcore.NewConsoleEncoder(cfg), colour: colour, lineEnding: lineEnding}
+	return consoleEncoder{
+		EncoderConfig: &cfg,
+		Encoder:       zapcore.NewConsoleEncoder(cfg),
+		colour:        colour,
+		lineEnding:    lineEnding,
+		linePrefix:    linePrefix,
+	}
 }
 
 func (e consoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (*buffer.Buffer, error) {
@@ -116,6 +130,9 @@ func (e consoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (
 	}
 	defer line.Free()
 	out := linePool.Get()
+	if e.linePrefix != "" {
+		out.AppendString(e.linePrefix)
+	}
 	sanitizeLine(out, line.Bytes(), msg, e.lineEnding, e.colour)
 	return out, nil
 }
@@ -151,6 +168,7 @@ func (e consoleEncoder) Clone() zapcore.Encoder {
 		Encoder:       e.Encoder.Clone(),
 		colour:        e.colour,
 		lineEnding:    e.lineEnding,
+		linePrefix:    e.linePrefix,
 	}
 }
 

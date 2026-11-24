@@ -648,6 +648,11 @@ func isGRPCCanceled(err error) bool {
 	return status.Code(err) == codes.Canceled
 }
 
+// isGRPCTimeout reports whether err is a gRPC call that exceeded its deadline.
+func isGRPCTimeout(err error) bool {
+	return status.Code(err) == codes.DeadlineExceeded
+}
+
 // unreachableGRPCAuthority is err, or, when a gRPC call lost its connection
 // after the dial went through (isGRPCConnectionLost) at an address reach says
 // the app's server on appPort (the port the test was recorded on, 0 when not
@@ -824,14 +829,34 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// clock: the drain ends on the app's end of the stream (rule 15, row
 	// W1), or, on a stream the app holds open past its recording, on its
 	// keepalives (pingWatch): the test then has no verdict.
+	parentCtx := ctx
+	var apiTimeout time.Duration
+	var apiTimeoutCtx context.Context
 	if !cfg.Unbounded {
 		timeout := time.Duration(cfg.APITimeout) * time.Second
-		if timeout <= 0 {
+		if timeout > 0 {
+			apiTimeout = timeout
+		} else {
 			timeout = defaultGrpcCallTimeout
 		}
 		var cancelCall context.CancelFunc
 		ctx, cancelCall = context.WithTimeout(ctx, timeout)
 		defer cancelCall()
+		if apiTimeout > 0 {
+			apiTimeoutCtx = ctx
+		}
+	}
+	wrapAPITimeout := func(err error) error {
+		if apiTimeout <= 0 || apiTimeoutCtx == nil || !errors.Is(apiTimeoutCtx.Err(), context.DeadlineExceeded) {
+			return nil
+		}
+		if parentCtx.Err() != nil || isNonAPITimeoutTransportErr(err) {
+			return nil
+		}
+		if isGRPCTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
+			return &AppTimeoutError{TestCase: tc.Name, Duration: apiTimeout, Err: err}
+		}
+		return nil
 	}
 
 	// Create context with metadata
@@ -861,6 +886,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		if answer.didStall() {
 			return nil, answer.err()
 		}
+		if te := wrapAPITimeout(err); te != nil {
+			return nil, te
+		}
 		return nil, fmt.Errorf("failed to create stream: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, tc.AppPort, err))
 	}
 
@@ -889,6 +917,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			if answer.didStall() {
 				return stalledStart(stream, answer), answer.err()
 			}
+			if te := wrapAPITimeout(err); te != nil {
+				return nil, te
+			}
 			return nil, fmt.Errorf("failed to send request (message %d of %d): %w", i, len(reqMsgs), err)
 		}
 	}
@@ -897,6 +928,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	if err := stream.CloseSend(); err != nil {
 		if answer.didStall() {
 			return stalledStart(stream, answer), answer.err()
+		}
+		if te := wrapAPITimeout(err); te != nil {
+			return nil, te
 		}
 		return nil, fmt.Errorf("failed to close send: %w", err)
 	}
@@ -908,6 +942,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	if err != nil {
 		if answer.didStall() {
 			return stalledStart(stream, answer), answer.err()
+		}
+		if te := wrapAPITimeout(err); te != nil {
+			return nil, te
 		}
 		return nil, fmt.Errorf("failed to get response headers: %w", err)
 	}

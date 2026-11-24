@@ -208,8 +208,8 @@ func TestARefusedMockFailsItsSetAloneAndTheRunGoesOn(t *testing.T) {
 				t.Fatalf("the run ran the sets %v and stopped with %q, want all of %v: a refused mock fails its set alone", ran, reasons, threeSets)
 			}
 			assertRefusalSaid(t, logs, c.refused)
-			if len(reasons) != 1 || reasons[0] != runCompletedReason {
-				t.Errorf("the run stops with the reasons %q, want one: %q", reasons, runCompletedReason)
+			if len(reasons) != 1 || reasons[0] != runFailedReason {
+				t.Errorf("the run stops with the reasons %q, want one: %q", reasons, runFailedReason)
 			}
 			if code != 1 {
 				t.Errorf("exit code %d, want 1: a set failed", code)
