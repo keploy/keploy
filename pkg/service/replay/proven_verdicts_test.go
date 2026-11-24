@@ -553,9 +553,9 @@ func TestRunTestSet_AStreamedTestWithAnUnconsumedTestMockIsNeverObsolete(t *test
 				if want := []models.UnconsumedMock{{Name: "mock-1", Kind: string(models.HTTP)}}; !reflect.DeepEqual(h.result(t, "test-1").FailureInfo.UnconsumedMocks, want) {
 					t.Errorf("unconsumed mocks %+v, want %+v: the evidence names the mock", h.result(t, "test-1").FailureInfo.UnconsumedMocks, want)
 				}
-				said := logs.FilterMessageSnippet("mock mapping mismatch detected for streaming testcase; marking it as FAILED").All()
-				if len(said) != 1 || said[0].ContextMap()["reason"] != vetoUnconsumedTestMock {
-					t.Errorf("the mismatch was said %+v; want once, as FAILED, for the unconsumed test mock", said)
+				said := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()
+				if len(said) != 1 || said[0].ContextMap()["kept_failed_by"] != vetoUnconsumedTestMock {
+					t.Errorf("the mismatch was said %+v; want once, kept FAILED, for the unconsumed test mock", said)
 				}
 				if n := len(logs.FilterMessageSnippet("marking as obsolete").All()) + len(logs.FilterMessageSnippet("mismatch ignored because streaming testcase passed").All()); n != 0 {
 					t.Errorf("the mismatch was also said as obsolete or ignored (%d)", n)
@@ -919,9 +919,9 @@ func TestRunTestSet_AStreamedWrongAnswerIsNeverObsoleteUnderTheSwitch(t *testing
 			if !on {
 				return
 			}
-			said := logs.FilterMessageSnippet("mock mapping mismatch detected for streaming testcase").All()
-			if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || said[0].ContextMap()["reason"] != provenswitch.Env+"=1" {
-				t.Fatalf("the mismatch was said %+v; want once, as FAILED, naming the switch", said)
+			said := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()
+			if len(said) != 1 || said[0].ContextMap()["kept_failed_by"] != provenswitch.Env+"=1" {
+				t.Fatalf("the mismatch was said %+v; want once, kept FAILED, naming the switch", said)
 			}
 		})
 	}

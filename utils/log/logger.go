@@ -449,11 +449,15 @@ func defaultLogCfg() zap.Config {
 // (ChangeLogLevel, AddMode, RedirectToStderr, a debug file sink) keeps ESC off
 // the terminal, as it keeps the sink RedirectToStderr chose.
 func consoleCore(cfg zap.Config, ws zapcore.WriteSyncer, level zapcore.LevelEnabler) zapcore.Core {
+	return consoleCoreWithPrefix(cfg, ws, level, Emoji+" ")
+}
+
+func consoleCoreWithPrefix(cfg zap.Config, ws zapcore.WriteSyncer, level zapcore.LevelEnabler, prefix string) zapcore.Core {
 	var encoder consoleEncoder
 	if cfg.Encoding == "console" {
-		encoder = newPlainConsoleEncoder(cfg.EncoderConfig)
+		encoder = newConsoleEncoderWithPrefix(cfg.EncoderConfig, false, prefix)
 	} else {
-		encoder = newANSIConsoleEncoder(cfg.EncoderConfig)
+		encoder = newConsoleEncoderWithPrefix(cfg.EncoderConfig, true, prefix)
 	}
 	return zapcore.NewCore(encoder, wrapWriter(ws, encoder), level)
 }
@@ -546,11 +550,15 @@ func newLogger(withFile bool) (*zap.Logger, *os.File, error) {
 // the tee was already gone by the time the first BeforeSimulate
 // rotation ran.
 func reattachDebugFileSink(logger *zap.Logger) *zap.Logger {
+	return reattachDebugFileSinkWithPrefix(logger, Emoji+" ")
+}
+
+func reattachDebugFileSinkWithPrefix(logger *zap.Logger, prefix string) *zap.Logger {
 	sink := GetDebugFileSink()
 	if sink == nil || sink.buffered == nil {
 		return logger
 	}
-	debugCore := newRedactingCore(consoleCore(LogCfg, sink.buffered, debugSinkLevel{sink.capped}))
+	debugCore := newRedactingCore(consoleCoreWithPrefix(LogCfg, sink.buffered, debugSinkLevel{sink.capped}, prefix))
 	return logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(c, debugCore)
 	}))
@@ -624,18 +632,12 @@ func RedirectToStderr() (*zap.Logger, error) {
 func AddMode(mode string) (*zap.Logger, error) {
 	ensureLogCfg()
 	cfg := LogCfg
-	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-		emoji := "\U0001F430"
-		modeStr := fmt.Sprintf("Keploy(%s):", mode)
-		// To the nanosecond, as the CLI's own lines (customTimeEncoder): a
-		// stall of a second or two shows between two of the agent's lines.
-		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339Nano))
-	}
+	prefix := fmt.Sprintf("\U0001F430 Keploy(%s): ", mode)
 
-	core := consoleCore(cfg, primarySyncer(), cfg.Level)
+	core := consoleCoreWithPrefix(cfg, primarySyncer(), cfg.Level, prefix)
 
 	logger := zap.New(newRedactingCore(core))
-	return reattachDebugFileSink(logger), nil
+	return reattachDebugFileSinkWithPrefix(logger, prefix), nil
 }
 
 func ChangeColorEncoding() (*zap.Logger, error) {
