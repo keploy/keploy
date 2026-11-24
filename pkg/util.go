@@ -1372,6 +1372,73 @@ func isClosedOnTheDrop(err error) bool {
 	return errors.Is(err, net.ErrClosed)
 }
 
+// AppTimeoutError marks a test request whose app response exceeded
+// test.apiTimeout, carrying the configured timeout duration so replay can
+// emit one clear timeout line naming test.apiTimeout and classify the result
+// as APP_TIMEOUT.
+type AppTimeoutError struct {
+	TestCase string
+	Duration time.Duration
+	Err      error
+}
+
+func (e *AppTimeoutError) Error() string {
+	if e.Duration > 0 {
+		return fmt.Sprintf("the app did not answer %s within test.apiTimeout (%s): %v", e.TestCase, e.Duration, e.Err)
+	}
+	return fmt.Sprintf("the app did not answer %s within test.apiTimeout: %v", e.TestCase, e.Err)
+}
+
+func (e *AppTimeoutError) Unwrap() error { return e.Err }
+
+// Timeout implements the standard net.Error / timeout interface so callers
+// checking interface{ Timeout() bool } recognize AppTimeoutError directly.
+func (e *AppTimeoutError) Timeout() bool { return true }
+
+// IsAppTimeout reports whether err is an AppTimeoutError produced when
+// keploy's configured test.apiTimeout deadline fired while waiting for the
+// app's answer, excluding ErrAnswerStalled, DNS timeouts, TCP dial timeouts,
+// unbounded mode, and gRPC's fallback default timeout when apiTimeout == 0.
+func IsAppTimeout(err error) bool {
+	if err == nil || errors.Is(err, ErrAnswerStalled) {
+		return false
+	}
+	var te *AppTimeoutError
+	return errors.As(err, &te)
+}
+
+// isNonAPITimeoutTransportErr reports whether err is a DNS resolver timeout or
+// TCP dial error (such as ETIMEDOUT) rather than the app failing to answer a
+// connected request within test.apiTimeout.
+func isNonAPITimeoutTransportErr(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	return false
+}
+
+// isClientAPITimeout reports whether err was caused by the HTTP client's
+// configured RequestTimeout (test.apiTimeout) expiring while awaiting the
+// app's response, and not by parent context cancellation, a DNS timeout, or a
+// TCP dial timeout.
+func isClientAPITimeout(parentCtx context.Context, err error, timeout time.Duration) bool {
+	if err == nil || timeout <= 0 || errors.Is(err, ErrAnswerStalled) {
+		return false
+	}
+	if parentCtx != nil && parentCtx.Err() != nil {
+		return false
+	}
+	if isNonAPITimeoutTransportErr(err) {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
 // IsAppConnectionError reports whether err says a test request failed because
 // the connection to the app failed: it was refused (isPreResponseConnRefused,
 // which the refusal re-send and the gRPC dial ask), the app's host was not
@@ -1608,6 +1675,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
 		}
+		if isClientAPITimeout(ctx, errHTTPReq, cfg.RequestTimeout) {
+			return nil, &AppTimeoutError{TestCase: tc.Name, Duration: cfg.RequestTimeout, Err: errHTTPReq}
+		}
 		// The line withholds what the client's error quotes (the request's
 		// URL, query and all), and names a host the error names outside its
 		// quotes (a lookup's: "lookup <host>: no such host") by its labels'
@@ -1646,6 +1716,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 				Header:        ToYamlHTTPHeader(httpResp.Header),
 				Body:          decodedPart(httpResp.Header.Get("Content-Encoding"), respBody),
 			}, cfg.answer.err()
+		}
+		if isClientAPITimeout(ctx, errReadRespBody, cfg.RequestTimeout) {
+			return nil, &AppTimeoutError{TestCase: tc.Name, Duration: cfg.RequestTimeout, Err: errReadRespBody}
 		}
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
@@ -1724,6 +1797,9 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		prepared.Client.CloseIdleConnections()
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
+		}
+		if isClientAPITimeout(ctx, errHTTPReq, cfg.RequestTimeout) {
+			return nil, &AppTimeoutError{TestCase: tc.Name, Duration: cfg.RequestTimeout, Err: errHTTPReq}
 		}
 		// The line withholds what the client's error quotes (the request's
 		// URL, query and all), and names a host the error names outside its

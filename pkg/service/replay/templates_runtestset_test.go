@@ -1243,7 +1243,7 @@ func TestRunTestSet_AGRPCCaseSendsAndAssertsTheRunsValue(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
 			h.r.logger = zap.New(core)
 			st := h.run(t)
-			if c.diverged && (st != models.TestSetStatusFailed || len(logs.FilterMessageSnippet("mock mapping mismatch detected; marking testcase as FAILED").All()) != 1) {
+			if c.diverged && (st != models.TestSetStatusFailed || len(logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()) != 1) {
 				t.Errorf("a gRPC template failure with a diverged mock set: set %s; want FAILED, said as FAILED", st)
 			}
 			stub.mu.Lock()
@@ -3364,12 +3364,12 @@ func TestRunTestSet_ATemplateFailureIsNeverDemotedToObsolete(t *testing.T) {
 			if len(logs.FilterMessageSnippet("marking testcase as obsolete").All()) != 0 {
 				t.Errorf("a template failure was said to be obsolete")
 			}
-			said := logs.FilterMessageSnippet("mock mapping mismatch detected; marking testcase as FAILED").All()
+			said := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()
 			if len(said) != 1 {
 				t.Fatalf("the mismatch was said %d time(s); want once, as FAILED", len(said))
 			}
-			if reason := fmt.Sprint(said[0].ContextMap()["reason"]); !c.strict && reason != vetoTemplateFailure {
-				t.Errorf("the line gives the reason %q; want %q", reason, vetoTemplateFailure)
+			if reason := fmt.Sprint(said[0].ContextMap()["kept_failed_by"]); !c.strict && reason != vetoTemplateFailure {
+				t.Errorf("the line gives kept_failed_by %q; want %q", reason, vetoTemplateFailure)
 			}
 			// The diverged mock set is still recorded for the end-of-run
 			// mismatch table, as for any failure it would have demoted.
@@ -3471,9 +3471,9 @@ func TestRunTestSet_AStreamedTemplateFailureIsNeverDemotedToObsolete(t *testing.
 			if len(r.TemplateFailures) != 1 || r.TemplateFailures[0].Where != "body frame 0.orders[0].id" {
 				t.Errorf("test-1 saved template failures %+v; want the one at body frame 0.orders[0].id", r.TemplateFailures)
 			}
-			said := logs.FilterMessageSnippet("mock mapping mismatch detected for streaming testcase; marking it as FAILED").All()
-			if len(said) != 1 || said[0].ContextMap()["reason"] != vetoTemplateFailure {
-				t.Errorf("the mismatch was said %+v; want once, as FAILED, with the template failure as its reason", said)
+			said := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()
+			if len(said) != 1 || said[0].ContextMap()["kept_failed_by"] != vetoTemplateFailure {
+				t.Errorf("the mismatch was said %+v; want once, kept FAILED, with the template failure as kept_failed_by", said)
 			}
 			if !mismatchRecorded(h.r, "test-1") {
 				t.Errorf("the mock mismatch of the streamed test-1 is not recorded: %+v", h.r.GetMockMismatchFailures())

@@ -747,7 +747,7 @@ func TestOnlyTheJSONContextIsUnescaped(t *testing.T) {
 		Message:    `message \u001b[31m`,
 		Stack:      "goroutine 1 [running]:\nmain.main()\n\tC:\\src\\u001b[31m\\main.go:10 \x1b[2J\nmain.run()\n\tC:\\src\\run.go:4",
 	}, zap.String("k", "\x1b[32mgreen\x1b[0m"))
-	want := "🐰 Keploy: 2026-09-24T10:00:00.123456789Z \t\x1b[34mINFO\x1b[0m\tname \\u001b[31m\tmessage \\u001b[31m\t{\"k\": \"\x1b[32mgreen\x1b[0m\"}\n" +
+	want := "2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\tname \\u001b[31m\tmessage \\u001b[31m\t{\"k\": \"\x1b[32mgreen\x1b[0m\"}\n" +
 		"goroutine 1 [running]:\nmain.main()\n\tC:\\src\\u001b[31m\\main.go:10 \\u001b[2J\nmain.run()\n\tC:\\src\\run.go:4\n"
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
@@ -769,7 +769,7 @@ func TestALoggerNameCannotStandInForTheMessage(t *testing.T) {
 			LoggerName: tc.name,
 			Message:    "hello",
 		}, zap.String("k", "v"))
-		want := "🐰 Keploy: 2026-09-24T10:00:00.123456789Z \t\x1b[34mINFO\x1b[0m\t" + tc.shown + "\thello\t{\"k\": \"v\"}\n"
+		want := "2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\t" + tc.shown + "\thello\t{\"k\": \"v\"}\n"
 		if got != want {
 			t.Errorf("logger %q:\n got %q\nwant %q", tc.name, got, want)
 		}
@@ -784,7 +784,7 @@ func TestWithoutAMessageKeyEveryEscapeStaysText(t *testing.T) {
 	cfg.MessageKey = ""
 	got := encodeLine(t, NewANSIConsoleEncoder(cfg), zapcore.Entry{Level: zapcore.InfoLevel, Time: fixedClock{}.Now(), Message: "dropped"},
 		zap.String("k", "\x1b[32mgreen\x1b[0m"), zap.String("b", "\u009b2J"))
-	want := "🐰 Keploy: 2026-09-24T10:00:00.123456789Z \t\x1b[34mINFO\x1b[0m\t{\"k\": \"\\u001b[32mgreen\\u001b[0m\", \"b\": \"\\u009b2J\"}\n"
+	want := "2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\t{\"k\": \"\\u001b[32mgreen\\u001b[0m\", \"b\": \"\\u009b2J\"}\n"
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
@@ -796,7 +796,7 @@ func TestWithoutAMessageKeyEveryEscapeStaysText(t *testing.T) {
 // writes when none is configured, and none when it is told to skip it, so a
 // newline the stacktrace ends with stays in the line.
 func TestTheLineEndingIsKept(t *testing.T) {
-	const prefix = "🐰 Keploy: 2026-09-24T10:00:00.123456789Z \t\x1b[34mINFO\x1b[0m\t"
+	const prefix = "2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\t"
 	for _, tc := range []struct {
 		name       string
 		lineEnding string
@@ -824,7 +824,7 @@ func TestTheLineEndingIsKept(t *testing.T) {
 // user's shell prompt. A line whose last SGR turns everything off, as every
 // line Keploy colours itself does, is written as it is.
 func TestDataColourEndsWithItsLine(t *testing.T) {
-	const prefix = "🐰 Keploy: 2026-09-24T10:00:00.123456789Z \t\x1b[34mINFO\x1b[0m\t"
+	const prefix = "2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\t"
 	enc := NewANSIConsoleEncoder(defaultLogCfg().EncoderConfig)
 	for _, tc := range []struct {
 		name, message string
@@ -903,7 +903,7 @@ func TestDisableANSIWritesNoESC(t *testing.T) {
 		Message:    "\x1b[32mTotal Coverage Percentage: 85.5%\x1b[0m",
 		Stack:      "main.main()\x1b[31m",
 	}, zap.String("k", "\x1b[32mv\x1b[0m"))
-	want := "🐰 Keploy: 2026-09-24T10:00:00.123456789Z \tINFO\t\\u001b[1mname\t\\u001b[32mTotal Coverage Percentage: 85.5%\\u001b[0m\t{\"k\": \"\\u001b[32mv\\u001b[0m\"}\n" +
+	want := "2026-09-24T10:00:00.123456789Z\tINFO\t\\u001b[1mname\t\\u001b[32mTotal Coverage Percentage: 85.5%\\u001b[0m\t{\"k\": \"\\u001b[32mv\\u001b[0m\"}\n" +
 		"main.main()\\u001b[31m\n"
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
@@ -943,7 +943,7 @@ func TestRedactingWriterAppliesItsEncodersRule(t *testing.T) {
 	cfg.LineEnding = "\r" // a lone \r, which the rule alone would neutralise
 	plain := cfg          // what ChangeColorEncoding sets
 	plain.EncodeLevel = zapcore.CapitalLevelEncoder
-	const prefix = "🐰 Keploy: 2026-09-24T10:00:00.123456789Z \t\x1b[34mINFO\x1b[0m\t"
+	const prefix = "2026-09-24T10:00:00.123456789Z\t\x1b[34mINFO\x1b[0m\t"
 	header := zap.Any("input header", map[string]string{"Authorization": "\x1b[9mBearer" + strings.Repeat("x", 17)})
 	token := zap.String("k", "token")
 	// shortening rewrites the header's value into a request for a cursor
@@ -986,7 +986,7 @@ func TestRedactingWriterAppliesItsEncodersRule(t *testing.T) {
 		{"a line the redactor leaves as it is", redactorFunc(func(line string) string { return line }), newANSIConsoleEncoder(cfg), "done\x1b[0m", nil,
 			prefix + "done\x1b[0m\r"},
 		{"--disable-ansi", insertingRedactor{}, newPlainConsoleEncoder(plain), msg, []zapcore.Field{header, token},
-			"🐰 Keploy: 2026-09-24T10:00:00.123456789Z \tINFO\tfailed to match headers\t{\"input header\": {\"Authorization\":\"\\u001b[9mBearerxxxxxxxxxxxxxxxxx\"}, \"k\": \"\\u001b[1mtoken\"}\r"},
+			"2026-09-24T10:00:00.123456789Z\tINFO\tfailed to match headers\t{\"input header\": {\"Authorization\":\"\\u001b[9mBearerxxxxxxxxxxxxxxxxx\"}, \"k\": \"\\u001b[1mtoken\"}\r"},
 	} {
 		SetRedactor(tc.redactor)
 		line := []byte(encodeLine(t, tc.enc, zapcore.Entry{Level: zapcore.InfoLevel, Time: fixedClock{}.Now(), Message: tc.msg}, tc.fields...))

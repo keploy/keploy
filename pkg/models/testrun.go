@@ -1355,6 +1355,11 @@ const (
 	// a content regression. The synthetic status_code=0 such a failure records
 	// must not be read as a STATUS_CODE_CHANGED regression.
 	AppConnectionError FailureCategory = "APP_CONNECTION_ERROR"
+	// AppTimeout means the app did not answer within test.apiTimeout — a
+	// timeout failure, not a content regression. The synthetic status_code=0
+	// such a failure records must not be read as STATUS_CODE_CHANGED or
+	// SCHEMA_BROKEN.
+	AppTimeout FailureCategory = "APP_TIMEOUT"
 	// DependencyMissing means a per-test dependency the recording says this
 	// test exercised (a mapped, non-reusable-tier mock) went unconsumed during
 	// replay — the app stopped making an outgoing call it used to make. Set by
