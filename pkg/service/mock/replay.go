@@ -2175,7 +2175,7 @@ func failUnmadeTrails(tests []TestReceipt, unmade map[string]string, unread map[
 			if len(t.Evidence.Misses) == 0 {
 				t.Evidence.Unread = true
 			}
-			t.Evidence.Reason = strings.TrimPrefix(t.Evidence.Reason+"; "+trailsUnreadReason, "; ")
+			t.Evidence.Reason = strings.TrimPrefix(t.Evidence.Reason+"\n"+trailsUnreadReason, "\n")
 		}
 	}
 	return tests

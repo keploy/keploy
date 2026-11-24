@@ -113,10 +113,10 @@ func TestChargeNotJudgedWritesOneSentenceWithTheSummedCount(t *testing.T) {
 	}
 
 	unix := CaptureLosses{{Kind: CaptureLossUnixSocket, Count: 1}}
-	ev = ScopeEvidence{CannotCapture: unix, Reason: "keploy: a value it gave is not recorded. Also " + unix.NotJudgedText() + "."}
+	ev = ScopeEvidence{CannotCapture: unix, Reason: "keploy: a value it gave is not recorded.\nAlso " + unix.NotJudgedText() + "."}
 	ev.ChargeNotJudged(unattributed(1, mock))
 	both := unix.Plus(unattributed(1, mock))
-	if wantReason := "keploy: a value it gave is not recorded. Also " + both.NotJudgedText() + "."; ev.Reason != wantReason {
+	if wantReason := "keploy: a value it gave is not recorded.\nAlso " + both.NotJudgedText() + "."; ev.Reason != wantReason {
 		t.Fatalf("Reason = %q, want %q", ev.Reason, wantReason)
 	}
 	if strings.Count(ev.Reason, "not judged:") != 1 {
@@ -125,7 +125,7 @@ func TestChargeNotJudgedWritesOneSentenceWithTheSummedCount(t *testing.T) {
 
 	ev = ScopeEvidence{Reason: "keploy: a miss."}
 	ev.ChargeNotJudged(unattributed(1, mock))
-	if wantReason := "keploy: a miss. Also " + unattributed(1, mock).NotJudgedText() + "."; ev.Reason != wantReason {
+	if wantReason := "keploy: a miss.\nAlso " + unattributed(1, mock).NotJudgedText() + "."; ev.Reason != wantReason {
 		t.Fatalf("Reason = %q, want %q", ev.Reason, wantReason)
 	}
 

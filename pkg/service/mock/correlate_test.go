@@ -276,7 +276,7 @@ func TestEachTestOpenAtACallFromNoWorkerIsNotJudged(t *testing.T) {
 		{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock early, from process 4", HostsListed: true},
 		{Kind: models.CaptureLossUnixSocket, Count: 1},
 	}, windows[0].Evidence.CannotCapture, "a: the call made in it, beside what its end charged")
-	require.True(t, strings.HasPrefix(windows[0].Evidence.Reason, "keploy: a miss. Also not judged: the application made 1 call(s) from a process in no test worker's keploy instance"), windows[0].Evidence.Reason)
+	require.True(t, strings.HasPrefix(windows[0].Evidence.Reason, "keploy: a miss.\nAlso not judged: the application made 1 call(s) from a process in no test worker's keploy instance"), windows[0].Evidence.Reason)
 	require.Len(t, agentEv.CannotCapture, 1, "the agent's evidence is not written to")
 	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 2, What: "the latest: mock late, from process 9", HostsListed: true}}, windows[1].Evidence.CannotCapture,
 		"b: both calls, the later named, whatever order they were captured in")
