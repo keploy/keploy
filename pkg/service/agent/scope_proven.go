@@ -2122,7 +2122,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		ev.FailedOnItsOwn = !ev.Unanswered()
 	}
 	a.NoteScopeOutcome(id, 0, outcome)
-	if ev != nil && (ev.Reason != "" || !ev.Empty()) {
+	if ev.Kept() {
 		a.noteScopeEvidence(id, ev)
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
@@ -2454,6 +2454,8 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // a connection that sent nothing made no call), and the test mocks it did not
 // consume while it was open (exact serving tells which). A failed read is an
 // error. Every miss is still charged to the run, so its next step is said.
+// Its background misses (models.UnmatchedCall.Background) fail nothing: they
+// are listed apart (models.ScopeEvidence.Background), never in Misses.
 //
 // began is where exact serving began serving the test (its time zero, and
 // its round not known, when it is not known). A miss made outside every test
@@ -2535,6 +2537,13 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 	a.charge(misses, id)
 	for _, m := range misses {
 		if !m.CountsAgainstTest() {
+			// A background miss of the test's window fails nothing, and is
+			// listed with its recording and next step (ScopeEvidence.
+			// Background); a DNS lookup's, or a connection's that sent
+			// nothing, is no call of the test's.
+			if m.Background && m.Answer == "" {
+				ev.Background = append(ev.Background, sanitizedMiss(a.asRecorded(m)))
+			}
 			continue
 		}
 		ev.Misses = append(ev.Misses, sanitizedMiss(a.asRecorded(m)))

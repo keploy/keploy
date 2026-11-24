@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	nethttp "net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +39,9 @@ type servingProxy struct {
 	mm     *proxyPkg.MockManager
 	mu     sync.Mutex
 	misses []models.UnmatchedCall
+	// background, when set, marks a filed miss as its parser's background
+	// mark does (the proxy's miss read keeps MismatchReport.Background).
+	background func(*models.UnmatchedCall)
 }
 
 func newServingProxy() *servingProxy {
@@ -130,6 +134,8 @@ func (p *servingProxy) noteMiss(err error) {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
 		uc.ClosestMock, uc.NotOwned, uc.Repeat = rep.ClosestMock, rep.NotOwned, rep.Repeat.Clone()
+		// The proxy's read keeps the parser's background mark (proxy.go).
+		uc.Background, uc.BackgroundBound = rep.Background, slices.Clone(rep.BackgroundBound)
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
@@ -147,6 +153,9 @@ func (p *servingProxy) noteMiss(err error) {
 		}
 	}
 	p.mu.Lock()
+	if p.background != nil {
+		p.background(&uc)
+	}
 	p.misses = append(p.misses, uc)
 	p.mu.Unlock()
 }
