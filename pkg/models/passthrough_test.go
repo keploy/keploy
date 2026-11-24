@@ -1,8 +1,13 @@
 package models
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // MatchPassThrough is single-tier: host/port/path/method must all match, most
@@ -104,15 +109,34 @@ func TestResolvePassThrough(t *testing.T) {
 	if r, ok := ResolvePassThrough(nil, nil, "", 0, "POST", "/api/v1/write"); !ok || r.Mode != PassThroughSkip {
 		t.Fatalf("prometheus built-in should skip: ok=%v mode=%q", ok, r.Mode)
 	}
+	// Elastic APM intake v2 built-in skips (POST) on its default port 8200,
+	// and does NOT match an app's /intake/v2/events on another port (8080)
+	// without the application/x-ndjson header.
+	if r, ok := ResolvePassThrough(nil, nil, "apm-server", 8200, "POST", "/intake/v2/events"); !ok || r.Mode != PassThroughSkip || r.ID != "elastic-apm-v2-events" {
+		t.Fatalf("elastic APM built-in should skip on port 8200: ok=%v rule=%+v", ok, r)
+	}
+	if r, ok := ResolvePassThrough(nil, nil, "app", 8080, "POST", "/intake/v2/events"); ok {
+		t.Fatalf("app POST /intake/v2/events on port 8080 without NDJSON header must not be passthrough: %+v", r)
+	}
 
 	// #1 regression guards: app routes / wrong method are NOT passthrough.
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/ingestData"}, {"POST", "/ingestData"}, {"POST", "/v1/tracesearch"},
 		{"GET", "/v1/traces"}, {"POST", "/api/v1/writeReview"},
+		{"GET", "/intake/v2/events"}, {"POST", "/intake/v2/eventsList"},
 	} {
 		if _, ok := ResolvePassThrough(nil, nil, "", 0, c.method, c.path); ok {
 			t.Fatalf("%s %s must not be passthrough", c.method, c.path)
 		}
+	}
+	// OpenBao / Vault POST on port 8200 must NOT match Elastic APM's /intake/v2/events rule
+	// (POST exercises the path check rather than being rejected early by method).
+	if r, ok := ResolvePassThrough(nil, nil, "openbao.staging.svc.cluster.local", 8200, "POST", "/v1/transit/encrypt/k"); ok {
+		t.Fatalf("OpenBao POST /v1/transit/encrypt/k on port 8200 must not be passthrough: %+v", r)
+	}
+	// Elastic APM can be disabled by its stable ID.
+	if _, ok := ResolvePassThrough(nil, []PassThroughRule{{ID: "elastic-apm-v2-events", Mode: PassThroughOff}}, "apm-server", 8200, "POST", "/intake/v2/events"); ok {
+		t.Fatal("user off by ID must disable elastic-apm-v2-events")
 	}
 
 	// #4 two-tier: a user rule beats a MORE-SPECIFIC built-in host rule.
@@ -215,8 +239,18 @@ func TestTelemetryDefaults_SingleSource(t *testing.T) {
 			t.Fatalf("path built-in %q should be POST-gated, got method %q", r.Path, r.Method)
 		}
 	}
-	if TelemetryDefaultsVersion < 1 {
-		t.Fatal("TelemetryDefaultsVersion must be >= 1")
+	raw, err := json.Marshal(defs)
+	if err != nil {
+		t.Fatalf("marshal TelemetryDefaults: %v", err)
+	}
+	gotDigest := fmt.Sprintf("%x", sha256.Sum256(raw))
+	const (
+		wantTelemetryDefaultsVersion = 4
+		wantTelemetryDefaultsDigest  = "3843fa7775a651782f013fdb2e62c7f577f1974b63a5809066c60bc0a77335b7"
+	)
+	if TelemetryDefaultsVersion != wantTelemetryDefaultsVersion || gotDigest != wantTelemetryDefaultsDigest {
+		t.Fatalf("TelemetryDefaults() content/version mismatch (version=%d digest=%s; pinned version=%d digest=%s): bump TelemetryDefaultsVersion and update the pinned digest together",
+			TelemetryDefaultsVersion, gotDigest, wantTelemetryDefaultsVersion, wantTelemetryDefaultsDigest)
 	}
 }
 
@@ -242,6 +276,12 @@ func TestResolveProvenNeedsTheFingerprint(t *testing.T) {
 		{"Datadog on its port", "dd", 8126, "/v0.7/traces", nil, "datadog-v07-traces"},
 		{"remote_write by its header", "prom", 9090, "/api/v1/write", map[string][]string{"X-Prometheus-Remote-Write-Version": {"0.1.0"}}, "prometheus-remote-write"},
 		{"an app's /api/v1/write", "app", 9090, "/api/v1/write", nil, ""},
+		{"Elastic APM on its port", "apm-server", 8200, "/intake/v2/events", nil, "elastic-apm-v2-events"},
+		{"Elastic APM by its content type", "apm.elastic.cloud", 443, "/intake/v2/events", map[string][]string{"Content-Type": {"application/x-ndjson"}}, "elastic-apm-v2-events"},
+		{"Elastic APM by content type with charset", "apm.elastic.cloud", 443, "/intake/v2/events", map[string][]string{"Content-Type": {"application/x-ndjson; charset=utf-8"}}, "elastic-apm-v2-events"},
+		{"Elastic APM segment boundary", "apm.elastic.cloud", 443, "/intake/v2/eventsList", map[string][]string{"Content-Type": {"application/x-ndjson"}}, ""},
+		{"an app's /intake/v2/events", "app", 8080, "/intake/v2/events", map[string][]string{"Content-Type": {"application/json"}}, ""},
+		{"OpenBao POST on port 8200", "openbao", 8200, "/v1/transit/encrypt/k", map[string][]string{"Content-Type": {"application/json"}}, ""},
 		{"a SaaS host", "intake.datadoghq.com", 443, "/anything", nil, "datadog-saas"},
 		{"the OTLP/gRPC service", "collector", 4317, "/opentelemetry.proto.collector.trace.v1.TraceService/Export", nil, "otlp-grpc"},
 	}
@@ -256,6 +296,13 @@ func TestResolveProvenNeedsTheFingerprint(t *testing.T) {
 		if !ok || rule.ID != c.want {
 			t.Errorf("%s: got %q (%v), want %s", c.name, rule.ID, ok, c.want)
 		}
+		if c.want == "elastic-apm-v2-events" && rule.Mode != PassThroughSkip {
+			t.Errorf("%s: got mode %q, want %q", c.name, rule.Mode, PassThroughSkip)
+		}
+	}
+	// GET /intake/v2/events must NOT match Elastic APM's POST-only rule even with port/header fingerprint.
+	if r, ok := ResolveProven(nil, nil, "apm-server", 8200, "GET", "/intake/v2/events", map[string][]string{"Content-Type": {"application/x-ndjson"}}); ok {
+		t.Errorf("GET /intake/v2/events must not match under ResolveProven: %+v", r)
 	}
 }
 
@@ -335,5 +382,147 @@ func TestEveryFingerprintedTelemetryRowNeedsItsFingerprint(t *testing.T) {
 				t.Errorf("built-in path row %s has no fingerprint", r.ID)
 			}
 		}
+	}
+}
+
+// Default mode (KEPLOY_PROVEN unset) enforces the exact same tight match for
+// elastic-apm-v2-events as KEPLOY_PROVEN=1: POST /intake/v2/events AND
+// (port == 8200 OR Content-Type starts with application/x-ndjson).
+func TestResolvePassThroughWithHeader_ElasticAPMTightMatch(t *testing.T) {
+	ndjson := map[string][]string{"Content-Type": {"application/x-ndjson"}}
+	ndjsonCharset := map[string][]string{"Content-Type": {"application/x-ndjson; charset=utf-8"}}
+	appJSON := map[string][]string{"Content-Type": {"application/json"}}
+
+	cases := []struct {
+		name   string
+		host   string
+		port   uint32
+		method string
+		path   string
+		header map[string][]string
+		wantID string
+	}{
+		{"port 8200 without Content-Type", "apm-server", 8200, "POST", "/intake/v2/events", nil, "elastic-apm-v2-events"},
+		{"443 with application/x-ndjson", "apm.elastic.cloud", 443, "POST", "/intake/v2/events", ndjson, "elastic-apm-v2-events"},
+		{"443 with charset parameter", "apm.elastic.cloud", 443, "POST", "/intake/v2/events", ndjsonCharset, "elastic-apm-v2-events"},
+		{"app JSON on 8080 stays dependency", "app", 8080, "POST", "/intake/v2/events", appJSON, ""},
+		{"OpenBao POST on 8200 stays dependency", "openbao", 8200, "POST", "/v1/transit/encrypt/k", appJSON, ""},
+		{"GET on 8200 with NDJSON stays dependency", "apm-server", 8200, "GET", "/intake/v2/events", ndjson, ""},
+		{"non-segment suffix stays dependency", "apm-server", 8200, "POST", "/intake/v2/eventsList", ndjson, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := ResolvePassThroughWithHeader(nil, nil, tc.host, tc.port, tc.method, tc.path, tc.header)
+			if tc.wantID == "" {
+				if ok {
+					t.Fatalf("matched %+v, want normal dependency", r)
+				}
+				return
+			}
+			if !ok || r.ID != tc.wantID || r.Mode != PassThroughSkip {
+				t.Fatalf("got (%+v, %v), want ID=%q Mode=%q", r, ok, tc.wantID, PassThroughSkip)
+			}
+		})
+	}
+	off := []PassThroughRule{{ID: "elastic-apm-v2-events", Mode: PassThroughOff}}
+	if r, ok := ResolvePassThroughWithHeader(nil, off, "apm-server", 8200, "POST", "/intake/v2/events", ndjson); ok {
+		t.Fatalf("disable-by-ID must turn off elastic-apm-v2-events in default mode: %+v", r)
+	}
+}
+
+type noopPayloadSource struct{}
+
+func (noopPayloadSource) LoadPayload(context.Context, PayloadAt) (*Mock, error) { return nil, nil }
+func (noopPayloadSource) SetPayloadMutator(PayloadMutator)                      {}
+func (noopPayloadSource) PayloadMutator() PayloadMutator                        { return nil }
+
+// AnsweredByPassThrough uses the exact same ResolvePassThroughEgress decision
+// on recorded HTTP mocks — both in-memory and after LeavePayloadOnDisk /
+// IndexEntryFrom — while respecting {id, mode:"off"} overrides.
+func TestMock_AnsweredByPassThrough(t *testing.T) {
+	httpMock := func(method, rawURL string, hdr map[string]string) *Mock {
+		return &Mock{
+			Name: "m1",
+			Kind: HTTP,
+			Spec: MockSpec{
+				HTTPReq: &HTTPReq{Method: Method(method), URL: rawURL, Header: hdr},
+			},
+		}
+	}
+	disableAPM := []PassThroughRule{{ID: "elastic-apm-v2-events", Mode: PassThroughOff}}
+
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+
+			cases := []struct {
+				name      string
+				mock      *Mock
+				userHosts []PassThroughRule
+				want      bool
+			}{
+				{
+					name: "APM port 8200 full URL",
+					mock: httpMock("POST", "http://apm-server:8200/intake/v2/events", map[string]string{"Host": "apm-server:8200"}),
+					want: true,
+				},
+				{
+					name: "APM relative URL with Host port 8200",
+					mock: httpMock("POST", "/intake/v2/events", map[string]string{"Host": "apm-server:8200"}),
+					want: true,
+				},
+				{
+					name: "APM 443 with NDJSON content type",
+					mock: httpMock("POST", "https://apm.elastic.cloud/intake/v2/events", map[string]string{"content-type": "application/x-ndjson; charset=utf-8"}),
+					want: true,
+				},
+				{
+					name:      "APM disabled by ID stays asserted",
+					mock:      httpMock("POST", "http://apm-server:8200/intake/v2/events", map[string]string{"Content-Type": "application/x-ndjson"}),
+					userHosts: disableAPM,
+					want:      false,
+				},
+				{
+					name: "app JSON POST /intake/v2/events on 8080 stays asserted",
+					mock: httpMock("POST", "http://app:8080/intake/v2/events", map[string]string{"Content-Type": "application/json"}),
+					want: false,
+				},
+				{
+					name: "OpenBao POST on 8200 stays asserted",
+					mock: httpMock("POST", "http://openbao:8200/v1/transit/encrypt/k", map[string]string{"Content-Type": "application/json"}),
+					want: false,
+				},
+				{
+					name: "non-HTTP mock is false",
+					mock: &Mock{Name: "pg1", Kind: Postgres},
+					want: false,
+				},
+				{
+					name: "HTTP mock without HTTPReq is false",
+					mock: &Mock{Name: "bare", Kind: HTTP},
+					want: false,
+				},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					if got := tc.mock.AnsweredByPassThrough(nil, tc.userHosts); got != tc.want {
+						t.Fatalf("in-memory AnsweredByPassThrough = %v, want %v", got, tc.want)
+					}
+					if tc.mock.Kind == HTTP && tc.mock.Spec.HTTPReq != nil {
+						onDisk := *tc.mock
+						onDisk.LeavePayloadOnDisk(noopPayloadSource{}, PayloadAt{Name: onDisk.Name})
+						if got := onDisk.AnsweredByPassThrough(nil, tc.userHosts); got != tc.want {
+							t.Fatalf("on-disk AnsweredByPassThrough = %v, want %v", got, tc.want)
+						}
+						if cached := onDisk.IndexEntryFrom(noopPayloadSource{}); cached == nil || cached.AnsweredByPassThrough(nil, tc.userHosts) != tc.want {
+							t.Fatalf("IndexEntryFrom AnsweredByPassThrough mismatch, want %v", tc.want)
+						}
+						if onDisk.IndexEntryBytes() <= 0 {
+							t.Fatal("IndexEntryBytes must be positive for on-disk HTTP mock")
+						}
+					}
+				})
+			}
+		})
 	}
 }
