@@ -1472,6 +1472,11 @@ type Result struct {
 	HeadersResult  []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
 	BodyResult     []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
 	BodySizeResult IntResult      `json:"body_size_result,omitempty" bson:"body_size_result,omitempty" yaml:"body_size_result,omitempty"` // used when body was skipped (>1MB)
+	// GrpcDecode says how a failed gRPC test's bodies are shown: which schema
+	// decoded each side, or why a side is shown as recorded. Display only:
+	// the verdict is always the field-number comparison. Nil for HTTP and for
+	// a run given no protos at all.
+	GrpcDecode *GrpcDecodeInfo `json:"grpc_decode,omitempty" bson:"grpc_decode,omitempty" yaml:"grpc_decode,omitempty"`
 	// DepResult carries per-test DEPENDENCY assertions: ONE ROW PER OUTGOING
 	// DEPENDENCY THAT WENT MISSING — a call the recording says this test
 	// exercised that was NOT observed during the test's window
@@ -1619,4 +1624,27 @@ type (
 type TeachingWindow struct {
 	Test string    `json:"test,omitempty" yaml:"test,omitempty"`
 	At   time.Time `json:"at" yaml:"at"`
+}
+
+// GrpcDecodeInfo describes the decoded view of a failed gRPC test.
+type GrpcDecodeInfo struct {
+	// Expected and Actual name the schema each side was decoded with:
+	// "release:<image ref>" (uploaded for that release), "local" (the run's
+	// --proto-dir), or "" when that side is shown as recorded.
+	Expected string `json:"expected,omitempty" bson:"expected,omitempty" yaml:"expected,omitempty"`
+	Actual   string `json:"actual,omitempty" bson:"actual,omitempty" yaml:"actual,omitempty"`
+	// ExpectedJSON and ActualJSON are the first differing message of each
+	// side with field names (MessageIndex says which message of a stream).
+	// Display only; BodyResult keeps the recorded protoscope the verdict read.
+	ExpectedJSON string `json:"expected_json,omitempty" bson:"expected_json,omitempty" yaml:"expected_json,omitempty"`
+	ActualJSON   string `json:"actual_json,omitempty" bson:"actual_json,omitempty" yaml:"actual_json,omitempty"`
+	MessageIndex int    `json:"message_index,omitempty" bson:"message_index,omitempty" yaml:"message_index,omitempty"`
+	// ExpectedUnknownFields and ActualUnknownFields count the fields each
+	// side carries that its schema does not define (shown as "#<number>").
+	ExpectedUnknownFields int `json:"expected_unknown_fields,omitempty" bson:"expected_unknown_fields,omitempty" yaml:"expected_unknown_fields,omitempty"`
+	ActualUnknownFields   int `json:"actual_unknown_fields,omitempty" bson:"actual_unknown_fields,omitempty" yaml:"actual_unknown_fields,omitempty"`
+	// Note says why the bodies are not decoded, or what to look at: a schema
+	// not uploaded for the recorded release, a method no schema defines, or
+	// a difference only in encoding.
+	Note string `json:"note,omitempty" bson:"note,omitempty" yaml:"note,omitempty"`
 }

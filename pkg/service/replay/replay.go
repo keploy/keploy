@@ -623,6 +623,9 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// grpcSchemas holds the schemas gRPC bodies are shown with and noise
+	// names are read against (grpc_proto_view.go): display only.
+	grpcSchemas grpcSchemas
 	// readyHosts holds, per test set, the hosts its readiness check waited on
 	// (appReady): its not-ready reason names them whole for the report and
 	// the console, and its log line by their shape and tag.
@@ -4909,45 +4912,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// copy: gRPC responses never capture.
 				grpcExpected := noAnswerView(tmplRun, &sent)
 
-				if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
-					// get the :path header from the request
-					method, ok := grpcExpected.GrpcReq.Headers.PseudoHeaders[":path"]
-					if !ok {
-						utils.LogError(r.logger, nil, "failed to get :path header from the request, cannot convert grpc response to json")
-						goto compareResp
-					}
-
-					pc := models.ProtoConfig{
-						ProtoFile:    r.config.Test.ProtoFile,
-						ProtoDir:     r.config.Test.ProtoDir,
-						ProtoInclude: r.config.Test.ProtoInclude,
-						RequestURI:   method,
-					}
-
-					// get the proto message descriptor
-					md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
-					if err != nil {
-						utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
-						goto compareResp
-					}
-
-					// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-					actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-					testJSON, testOK := utils.ProtoTextToJSON(md, files, grpcExpected.GrpcResp.Body.DecodedData, r.logger)
-
-					if actOK && testOK {
-						respCopy.Body.DecodedData = string(actJSON)
-						grpcExpected.GrpcResp.Body.DecodedData = string(testJSON)
-					}
-				}
-
-			compareResp:
 				// Each use place is asserted on its own, against the answer
 				// as it came, whatever the comparison and its noise say. It
 				// is read first, so a test case it fails never prints the
 				// comparison's pass line.
 				templateFailures = reportFailures(r.grpcTemplateFailures(tmplRun, &tmplCheck, &sent, grpcResp, testSetID))
-				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || noPassLine)
+				// The protos never decide the verdict (grpc_proto_view.go).
+				testPass, testResult = r.compareGRPCWithSchemas(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || noPassLine)
 				if len(templateFailures) > 0 {
 					testPass = false
 					markTemplateFailures(testResult)
@@ -9465,17 +9436,17 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 // compareGRPCResp is CompareGRPCResp for a test case that may already have
 // failed on its own (failedElsewhere: a template variable's place): a
 // comparison that matches then prints no pass line for it.
-func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs, failedElsewhere bool) (bool, *models.Result) {
+func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs, failedElsewhere bool, extra ...grpcMatcher.MatchOption) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	// The matcher's lines on the run's console alone (Replayer.console).
 	opts := []grpcMatcher.MatchOption{grpcMatcher.WithConsole(r.console)}
 	if failedElsewhere {
 		opts = append(opts, grpcMatcher.WithoutPassLine())
 	}
+	opts = append(opts, extra...)
 	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, emitFailureLogs, opts...)
 }
 
@@ -9971,40 +9942,8 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 		respCopy := *actualResponse
 
-		if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
-			// get the :path header from the request
-			method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
-			if !ok {
-				utils.LogError(r.logger, nil, "failed to get :path header from the request, cannot convert grpc response to json")
-				goto compareResp
-			}
-
-			pc := models.ProtoConfig{
-				ProtoFile:    r.config.Test.ProtoFile,
-				ProtoDir:     r.config.Test.ProtoDir,
-				ProtoInclude: r.config.Test.ProtoInclude,
-				RequestURI:   method,
-			}
-
-			// get the proto message descriptor
-			md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
-				goto compareResp
-			}
-
-			// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-			actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-			testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
-
-			if actOK && testOK {
-				respCopy.Body.DecodedData = string(actJSON)
-				testCase.GrpcResp.Body.DecodedData = string(testJSON)
-			}
-		}
-
-	compareResp:
-		_, result = r.CompareGRPCResp(testCase, &respCopy, testSetID, true)
+		// The protos never decide the verdict (grpc_proto_view.go).
+		_, result = r.compareGRPCWithSchemas(testCase, &respCopy, testSetID, true, false)
 
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = *actualResponse
