@@ -1536,6 +1536,34 @@ type StreamEndSummary struct {
 	// MocksDropped: mocks the agent dropped as their parsers handed them over
 	// or after, which the recording does not hold.
 	MocksDropped MockDropSummary `json:"mocks_dropped,omitzero"`
+	// NotRecordedOverSizeLimit: requests the app served that were not
+	// recorded as test cases because each was over keploy's size limit for
+	// a test case.
+	NotRecordedOverSizeLimit OverSizeSkipSummary `json:"not_recorded_over_size_limit,omitzero"`
+}
+
+// OverSizeLimitSaid is what the agent's summary and its client say of the
+// requests a session did not record as test cases because each was over
+// keploy's size limit for one (OverSizeSkipSummary).
+const OverSizeLimitSaid = "the keploy agent did not record some requests the app served as test cases: each was over keploy's size limit for a test case (limit_bytes, body_limit_bytes); the console named up to 50 not-recorded calls per recording as they came, then counted the rest"
+
+// OverSizeLimitNextStep is what the user can do about the requests
+// OverSizeLimitSaid counts.
+const OverSizeLimitNextStep = "these limits are fixed: no flag or setting raises them. While recording, call these endpoints with payloads under the limits, so that their test cases are recorded"
+
+// OverSizeSkipSummary is how many requests a recording did not record as test
+// cases because each was over keploy's size limit for one, the calls with the
+// most of them, each named by its method, its path's shape and its path tag
+// (the console printed its path beside the same tag), and the agent's limits
+// (StreamEndSummary).
+type OverSizeSkipSummary struct {
+	Requests uint64   `json:"requests"`
+	Calls    []string `json:"calls_most,omitempty"`
+	// LimitBytes is the most a request and its response together may hold
+	// to be recorded as a test case; BodyLimitBytes the most either body
+	// may, as the agent reads it.
+	LimitBytes     int `json:"limit_bytes,omitempty"`
+	BodyLimitBytes int `json:"body_limit_bytes,omitempty"`
 }
 
 // MocksDroppedSaid is what the agent's summary and its client say of the mocks

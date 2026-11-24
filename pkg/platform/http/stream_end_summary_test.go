@@ -186,3 +186,30 @@ func TestAnIncomingStreamHasNoSummaryBeforeItsMarker(t *testing.T) {
 		t.Fatalf("a stream with no marker yet reads as ended with the last one's summary %+v", got)
 	}
 }
+
+// A session whose agent did not record requests over keploy's size limit for
+// a test case is said by the client at WARN, with how many, the calls with
+// the most and the agent's limits, and what the user can do: for an agent the
+// client did not start, this is where the user learns of them. One that lost
+// none says nothing of it.
+func TestTheClientSaysASessionThatLostRequestsOverTheSizeLimit(t *testing.T) {
+	o := models.OverSizeSkipSummary{Requests: 3, Calls: []string{"POST /{} [path tag #1f2e3d4c5b6a] (3)"}, LimitBytes: 5 << 20, BodyLimitBytes: 5 << 19}
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := &AgentClient{logger: zap.New(core)}
+	a.sayAgentSummary(models.StreamEndSummary{NotRecordedOverSizeLimit: o})
+	said := logs.FilterMessage(models.OverSizeLimitSaid).All()
+	if len(said) != 1 || said[0].Level != zapcore.WarnLevel {
+		t.Fatalf("a session that lost requests over the size limit was said %v, want once at WARN", said)
+	}
+	f := said[0].ContextMap()
+	if f["requests"] != uint64(3) || f["limit_bytes"] != int64(5<<20) || f["body_limit_bytes"] != int64(5<<19) ||
+		fmt.Sprint(f["calls_most"]) != "[POST /{} [path tag #1f2e3d4c5b6a] (3)]" || f["next_step"] != models.OverSizeLimitNextStep {
+		t.Fatalf("a session that lost %+v was said with %v", o, f)
+	}
+	core, logs = observer.New(zapcore.InfoLevel)
+	a = &AgentClient{logger: zap.New(core)}
+	a.sayAgentSummary(models.StreamEndSummary{})
+	if n := logs.FilterMessage(models.OverSizeLimitSaid).Len(); n != 0 {
+		t.Fatalf("a session that lost nothing to the size limit was said %d times", n)
+	}
+}
