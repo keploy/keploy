@@ -554,3 +554,69 @@ func TestKeployTestsStagingHandsTheAgentTheDeclaredSessionCalls(t *testing.T) {
 	stage(a, &models.DeclaredSessionCalls{})
 	require.False(t, models.SessionCallsDeclared(), "a declaration of none left the earlier one in force")
 }
+
+// A call made only inside a test, identical to a plain startup: recording
+// the test's window does not show, is named as that recording, made outside
+// every test, with the sessionCalls entry that declares it, and nothing of
+// the comparison the miss's report first made with another recording (here
+// TestReload's own GET /b, unconsumed when GET /rates came: "Only values
+// drifted (path) … re-record"), which is advice about a recording the miss
+// no longer names: re-recording does not help a call the app makes at
+// start-up again. So for keploy mock replay and for keploy test's staging,
+// by s12-routing and by today's rules.
+// Mutation: keep the report's earlier next steps beside the outside-tests
+// one, or drop the entry that declares the call.
+func TestAnUnspentPlainStartupMissSaysNothingOfAnotherRecording(t *testing.T) {
+	check := func(t *testing.T, m models.UnmatchedCall) {
+		t.Helper()
+		require.Equal(t, "GET /rates", m.ActualSummary)
+		require.Equal(t, "mock-0", m.ClosestMock, "the miss does not name the plain startup recording")
+		require.Contains(t, m.NextSteps, "made outside every test", "%s", m.NextSteps)
+		require.Contains(t, m.NextSteps, "sessionCalls", "%s", m.NextSteps)
+		require.Contains(t, m.NextSteps, "pathPrefix", "the next step names no keploy.yaml entry that declares the call: %s", m.NextSteps)
+		require.NotContains(t, m.NextSteps, "drifted", "the next step keeps the comparison with another recording: %s", m.NextSteps)
+		require.NotContains(t, m.NextSteps, "re-record", "the next step keeps the comparison with another recording: %s", m.NextSteps)
+	}
+	t.Run("keploy mock replay", func(t *testing.T) {
+		a, p := startupOwnAgent(t, startupOwn{noBoot: true})
+		got, e := runTest(t, a, p, "TestReload", "/rates", "/b")
+		require.True(t, strings.HasPrefix(got[0], "502"), "TestReload was served the unspent plain startup recording: %s", got[0])
+		require.Equal(t, "200 b", got[1])
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		ev := evidenceOf(t, a, "o::TestReload")
+		require.Len(t, ev.Misses, 1)
+		check(t, ev.Misses[0])
+	})
+	for _, rules := range []string{models.RecordedWithS12Routing, ""} {
+		t.Run("keploy test, rules "+rules, func(t *testing.T) {
+			ctx := context.Background()
+			a, _ := wireAgent(t, models.MODE_TEST)
+			t.Setenv(provenswitch.Env, "1")
+			p := newServingProxy()
+			a.Proxy = p
+			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{statedRates("mock-0"), pingMock("mock-1", "/b", "b", t0.Add(2*time.Second))}))
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
+				AfterTime: models.BaseTime, BeforeTime: time.Now(), StrictMockWindow: true,
+				FirstRecordedTestStart: t0.Add(time.Second),
+				BackgroundMocks:        []string{"mock-0"},
+				StartupMocks:           []string{"mock-0"},
+				Exact:                  &models.ExactServing{Stage: true, Background: rules, Pool: []string{"mock-0"}, Order: []string{"test-1"}},
+			}))
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}))
+			code, body := p.call(t, "/rates")
+			require.Equal(t, 502, code, "test-1 was served the unspent plain startup recording: %s", body)
+			code, body = p.call(t, "/b")
+			require.Equal(t, 200, code, "test-1's own call: %s", body)
+			misses, err := p.GetMockErrors(ctx)
+			require.NoError(t, err)
+			var found bool
+			for _, m := range misses {
+				if m.ActualSummary == "GET /rates" {
+					found = true
+					check(t, m)
+				}
+			}
+			require.True(t, found, "no miss of GET /rates in %+v", misses)
+		})
+	}
+}

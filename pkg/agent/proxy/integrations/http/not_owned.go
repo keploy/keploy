@@ -235,15 +235,17 @@ func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 // window, that is m, one of the set's plain startup: recordings
 // (integrations.OwnsStartup): made outside every test (in TestMain or at
 // start-up) and declared by no rule, so the test is not served it. m is its
-// closest, and its next steps say why it was not served and keep what the
-// report already advises (sessionCallHint: the keploy.yaml entry that
-// declares the call). It is no recording made elsewhere (NotOwned): judging
-// moves nothing for it.
-func markOutsideTests(report *models.MockMismatchReport, m *models.Mock) {
+// closest, and its next steps say why it was not served, then hint, the
+// keploy.yaml entry that declares the call (sessionCallHint). They keep
+// nothing of the report's comparison with another recording (a drifted
+// value, re-record it), which is advice about a recording the miss no
+// longer names, as markNotOwned keeps none. It is no recording made
+// elsewhere (NotOwned): judging moves nothing for it.
+func markOutsideTests(report *models.MockMismatchReport, m *models.Mock, hint string) {
 	report.ClosestMock, report.NotOwned, report.Diff = m.Name, false, ""
 	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
-	report.NextSteps = strings.TrimSpace(outsideTestsNextSteps(m.Name) + " " + report.NextSteps)
+	report.NextSteps = strings.TrimSpace(outsideTestsNextSteps(m.Name) + " " + hint)
 }
 
 // outsideTestsNextSteps says why a test's call was not served m, a plain
