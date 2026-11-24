@@ -440,16 +440,23 @@ func (m *MockManager) consumeUnsetBackground(mk *models.Mock, evicts bool, g *ro
 	if !exact {
 		// Outside an open test scope (boot / between tests), main's legacy
 		// trees own consumption so DeleteFilteredMock can fall through to
-		// deleteStartupMock without stranding the mock in m.startup. Record a
-		// successful evicting consume of a @startup pool mock as spent in bg
-		// so it is never re-served once a test scope opens.
+		// deleteStartupMock without stranding the mock in m.startup. What a
+		// successful consume here spends in bg, so a test's window is not
+		// shown it again: a @startup pool mock consumed by an evicting door;
+		// and a once series' recording (answersOnce), consumed by an
+		// evicting door or one that does not evict, as exact serving spends
+		// it outside every test (consumeBetween). A declared startup: true
+		// rule places a createIndexes made at the application's boot in
+		// worker: as such a series. A guarded consume returns below before
+		// any spend, and a reusable unfiltered mock's non-evicting consume
+		// returned above.
 		if g.checks() {
 			return false, false
 		}
 		if tier == nil || !tier() {
 			return true, false
 		}
-		if evicts && bg.inPool(mk.Name) {
+		if (evicts && bg.inPool(mk.Name)) || answersOnce(&m.exact.poolTrails, m.exact.poolSeries.Load(), mk.Name) {
 			bg.trySpend(mk.Name)
 		}
 		if observe != nil {
