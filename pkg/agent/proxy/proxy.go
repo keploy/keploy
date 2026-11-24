@@ -240,6 +240,13 @@ type Proxy struct {
 	// the events of a client's connection to tell whether they happened
 	// within one (testScopeNow).
 	testWindows atomic.Uint64
+	// hasTestCaptureReader is true once BeginTestErrorCapture /
+	// ContinueTestErrorCapture has opened a per-test capture window in the
+	// current Mock session (i.e. a `keploy test` run whose replayer reads
+	// misses and prints the end-of-run outgoing-diff table or failure blocks).
+	// Reset on every Proxy.Mock session start so `keploy mock` and agent-only
+	// sessions with no end-of-run table reader still emit a Warn line.
+	hasTestCaptureReader atomic.Bool
 	// captureMu serializes the drain goroutine's routing decision (read
 	// activeTestErrors, then add) against BeginTestErrorCapture / GetMockErrors
 	// opening or closing the window. Without it, the goroutine could add a miss
@@ -1492,7 +1499,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 		if !models.IsMismatchReported(err) {
 			p.sendMockNotFoundErrorFrom(parserCtx, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
 		}
-		if provenswitch.On() && isMockMiss(err) {
+		if isMockMiss(err) {
 			return reportedMiss{err}
 		}
 		return err
@@ -2509,6 +2516,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// buffered mocks on a 1 s cadence while recording is live, then runs
 		// one final best-effort drain on shutdown. See runSkipListenerFlush.
 		p.runSkipListenerFlush(ctx, 1*time.Second)
+		if mm := p.getMockManager(); mm != nil {
+			mm.LogCarryOverOverflowSummary()
+		}
 		// Intentionally do NOT close p.session.MC in the skipListener
 		// path. The non-skip path above closes MC only after
 		// clientConnErrGrp.Wait() guarantees every per-conn producer
@@ -2647,6 +2657,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// Every connection's handler has returned: the count of the
 		// connections the proxy could not route is final (untracked.go).
 		p.untrackedTotal()
+		if mm := p.getMockManager(); mm != nil {
+			mm.LogCarryOverOverflowSummary()
+		}
 		// Each stage of the proxy's shutdown is a step of the agent's
 		// teardown, which the CLI that stopped it reads (utils.TeardownStep).
 		utils.TeardownStep()
@@ -4364,6 +4377,9 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	if p.asyncEngine != nil {
 		p.asyncEngine.LogReport(p.logger)
 	}
+	if mm := p.getMockManager(); mm != nil {
+		mm.LogCarryOverOverflowSummary()
+	}
 
 	// Coordinated shutdown sequence (PLAN.md §3.7, partial I8).
 	//
@@ -4777,6 +4793,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// what is missed after, as its application starts, is the set's, and
 	// its first test's read hands it over as the set's (beforeSetMiss).
 	p.missCutPending.Store(true)
+	p.hasTestCaptureReader.Store(false)
 	if provenswitch.On() {
 		// A new test set: what the previous set served is no earlier place
 		// of this one's, whose mocks reuse its names (package matcher/learn).
@@ -6440,6 +6457,7 @@ func (p *Proxy) openTestErrorCapture(carry, awaits bool) {
 // or a test worker's (instanceExact), whose tests the learn step does not
 // follow.
 func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
+	p.hasTestCaptureReader.Store(true)
 	if provenswitch.On() && w == &p.missWindow {
 		// The learn step's earlier places are the running test's.
 		p.learnBoundary(func(t *learn.Tracker) {
@@ -7032,10 +7050,10 @@ func isMockMiss(err error) bool {
 }
 
 // mockFailedFrom reports a MockOutgoing failure and returns the error the
-// connection handler gets. Under the proven switch, whose verdict names each
-// miss once with its test at the end of the run, a miss is logged at Debug
-// and returned as reportedMiss; anything else, and every run with the switch
-// off, keeps the error log it always had.
+// connection handler gets. Every mock miss is logged once through mismatchLog
+// and returned as reportedMiss so the connection handler logs it at Debug
+// rather than echoing duplicate ERROR lines; parser panics and non-miss I/O or
+// parser failures keep their ERROR logs.
 //
 // The connection was made by process pid (0 when the redirect gave none),
 // whom its miss names, of test worker inst (0: none), whose tests alone it
@@ -7051,7 +7069,7 @@ func (p *Proxy) mockFailedFrom(ctx context.Context, logger *zap.Logger, err erro
 		utils.LogError(logger, err, "failed to mock the outgoing message")
 		return err
 	}
-	quiet := provenswitch.On() && isMockMiss(err)
+	quiet := isMockMiss(err)
 	if quiet {
 		logger.Debug("failed to mock the outgoing message", zap.Error(err))
 	} else {
@@ -7069,12 +7087,28 @@ func (p *Proxy) mockFailedFrom(ctx context.Context, logger *zap.Logger, err erro
 	return err
 }
 
-// mismatchLog is how the mock-mismatch line is logged: Warn, so a replay
-// shows each miss as it happens, except under the proven switch, whose
-// verdict names each miss once with its test at the end (Debug there, or the
-// miss would be printed twice).
-func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
-	if provenswitch.On() {
+// missInOpenTestWindow reports whether a miss for worker inst occurred while a
+// test window was open. Misses with no open test window are summarized once at
+// the end of the test set, so the agent logs them at Debug rather than Warn.
+func (p *Proxy) missInOpenTestWindow(inst uint32, r *models.MockMismatchReport) bool {
+	if r != nil && r.Mark != models.RoundUnmarked {
+		return r.MarkedInTest
+	}
+	m := p.missManager(inst)
+	if m == nil {
+		return true
+	}
+	return m.WindowSnapshot().Active
+}
+
+// mismatchLog is how the mock-mismatch line is logged: Debug under the proven
+// switch, for misses outside any open test window (which the test-set summary
+// reports once), and under keploy test sessions with an end-of-run replay
+// reader (hasTestCaptureReader, where the end-of-run outgoing-diff table or
+// failure blocks report each miss once). Keep Warn only for sessions with no
+// end-of-run replay reader (agent-only or `keploy mock` flows).
+func (p *Proxy) mismatchLog(inOpenWindow bool) func(string, ...zap.Field) {
+	if provenswitch.On() || !inOpenWindow || p.hasTestCaptureReader.Load() {
 		return p.logger.Debug
 	}
 	return p.logger.Warn
@@ -7187,6 +7221,18 @@ func (p *Proxy) sendMockNotFoundErrorFrom(ctx context.Context, err error, pid, i
 			// so (stagingMissNote), told where its call was decided.
 			proxyErr.Staging = m.missMadeInStaging(proxyErr.MismatchReport)
 		}
+		if r := proxyErr.MismatchReport; r != nil && r.Answer == "" {
+			if evictedName := m.findEvictedCarryOver(r); evictedName != "" {
+				stamped := *r
+				note := fmt.Sprintf("The recorded mock %s was evicted from the carry-over tier because earlier unconsumed carry-over mocks filled the tier cap.", evictedName)
+				if stamped.NextSteps == "" {
+					stamped.NextSteps = note
+				} else if !strings.Contains(stamped.NextSteps, evictedName) {
+					stamped.NextSteps = note + " " + stamped.NextSteps
+				}
+				proxyErr.MismatchReport = &stamped
+			}
+		}
 	} else if p.stoppedWorker(inst) {
 		// A miss of a test worker keploy had stopped serving as the call
 		// missed (decided here, at the call): a process the worker left
@@ -7251,11 +7297,11 @@ func (p *Proxy) sendMockNotFoundErrorFrom(ctx context.Context, err error, pid, i
 		if r.DestinationScope != models.DestinationScopeUnknown {
 			fields = append(fields, zap.String("destination_scope", r.DestinationScope))
 		}
-		p.mismatchLog()("mock mismatch: no matching mock for outgoing call", fields...)
+		p.mismatchLog(p.missInOpenTestWindow(inst, r))("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
 		// The error's kind and size, never its text: a parser that built
 		// no report may have written the call into it, quoted or not.
-		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)",
+		p.mismatchLog(p.missInOpenTestWindow(inst, nil))("mock mismatch: no matching mock for outgoing call (no structured report)",
 			zap.String("error_type", fmt.Sprintf("%T", err)), zap.Int("error_bytes", len(err.Error())), zap.Bool("no_mock_matched", errors.Is(err, models.ErrNoMockMatched)))
 	}
 	p.SendError(proxyErr)

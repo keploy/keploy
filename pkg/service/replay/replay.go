@@ -792,6 +792,7 @@ type Replayer struct {
 	consumedMockNames     map[string]struct{} // distinct mock names consumed across all test sets in the current run; size emitted as Mocks-Consumed on the TestRun event
 	totalTestTimeTaken    time.Duration
 	failedTCsBySetID      map[string][]string
+	passedTCsBySetID      map[string][]string
 	mockMismatchFailures  *TestFailureStore
 	fallbackDeprecateOnce sync.Once
 	// quarantined is each test this run skipped for a reason, with its reason
@@ -908,6 +909,11 @@ type Replayer struct {
 	// ownership so miss next steps and failure blame lines can name the
 	// recording test/mock across the whole set (whole_set_lookup.go).
 	wholeSetIdx *wholeSetMockIndex
+	// unexercisedMocksByTest records the missing per-test mock names per test
+	// in the current test set so warnUnexercisedDependencies folds a PASSED
+	// test into the outgoing-call diff table only when every unexercised mock
+	// matches a missed call's ClosestMock.
+	unexercisedMocksByTest map[string][]string
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -993,6 +999,12 @@ func (r *Replayer) sayReportsTracked(testRunID string) {
 // (TestFailureStore.PrintFailuresTable): nothing with no console.
 func (r *Replayer) printMockMismatches() {
 	r.mockMismatchFailures.PrintFailuresTable(r.console)
+}
+
+// printOutgoingDiffTable prints a deduplicated (TEST, CALL, FIELDS) table on
+// the console for passing default-mode runs with outgoing-call diffs.
+func (r *Replayer) printOutgoingDiffTable(rows []TestFailure) {
+	r.mockMismatchFailures.PrintOutgoingDiffTable(r.console, rows)
 }
 
 func (r *Replayer) SetTestHooks(testHooks TestHooks) {
@@ -1081,6 +1093,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.setSessionRun = newSetSessionRun()
 	r.reportsTrackedSaid.Store(false)
 	r.failedTCsBySetID = make(map[string][]string)
+	r.passedTCsBySetID = make(map[string][]string)
 	r.mockMismatchFailures = NewTestFailureStore()
 	defer func() { r.armStartExitCode(stoppedByItsUser(parentCtx), err, testRunResult, verdictReached) }()
 
@@ -1672,6 +1685,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 			failedTcIDs := getFailedTCs(tcResults)
 			r.failedTCsBySetID[testSet] = failedTcIDs
+			r.passedTCsBySetID[testSet] = getPassedTCs(tcResults)
 
 			// checking for flakiness when --must-pass flag is not set
 			// else if --must-pass is set, delete the failed testcases and rerun
@@ -1908,51 +1922,68 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		r.sayUnattributed()
 		r.sayKeptInside()
 
-		// Print the mismatch table whenever there ARE mock mismatches — not
-		// only when the run as a whole failed. A green run with mock misses
-		// (e.g. tests demoted to OBSOLETE, or a protocol whose misses can't
-		// fail a test) is exactly the case the user must not stay blind to.
+		// Partition recorded mismatches by whether they belong to FAILED tests
+		// or to other tests, applying the counting filter (so synthetic DNS
+		// misses and MatchPhaseNoRequest connections never noise up the output)
+		// and keeping outgoing-call diffs visible even under --disable-mapping
+		// and on mixed runs where another test failed.
 		//
-		// Exception on green runs: DNS misses are answered with a synthetic
-		// response by design (the app keeps working), so on a fully passing
-		// run they are routine, not actionable — without this filter every
-		// healthy run with app-startup DNS chatter would print the table.
-		// So are connections that sent nothing (models.MatchPhaseNoRequest):
-		// no call was made, and the warning names their port once per
-		// endpoint; a health check would otherwise add a row per connection.
-		mismatchRows := r.mockMismatchFailures.GetFailures()
-		if testRunResult {
-			actionable := make([]TestFailure, 0, len(mismatchRows))
-			for _, f := range mismatchRows {
-				if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && !f.MismatchReport.CountsAgainstTest() {
-					continue
+		// "Some testsets failed due to mock differences." is emitted ONLY in
+		// strict mode (where mock/dependency diffs themselves fail tests). In
+		// default mode, the verdict is the app's response diff: failed tests'
+		// payload diffs stay in the single OUTGOING CALL DIFFS table, and any
+		// non-payload failed-test mock block uses neutral wording pointing to
+		// each test's response diff.
+		if !verifiedNothing {
+			failedTests := make(map[[2]string]bool)
+			for setID, ids := range r.failedTCsBySetID {
+				for _, id := range ids {
+					failedTests[[2]string{setID, id}] = true
 				}
-				actionable = append(actionable, f)
 			}
-			mismatchRows = actionable
-		}
-		if len(mismatchRows) > 0 && !r.config.DisableMapping && !verifiedNothing {
-			failuresByTestSet := make(map[string]bool)
-			for _, failure := range mismatchRows {
-				failuresByTestSet[failure.TestSetID] = true
+			passedTests := make(map[[2]string]bool)
+			for setID, ids := range r.passedTCsBySetID {
+				for _, id := range ids {
+					passedTests[[2]string{setID, id}] = true
+				}
 			}
-
-			var testSetIDs []string
-			for testSetID := range failuresByTestSet {
-				testSetIDs = append(testSetIDs, testSetID)
+			mocksFailTests := r.mocksCanFailTests()
+			failedRows, tableUnmatched, mappingOnly := partitionRunMismatches(
+				r.mockMismatchFailures.GetFailures(),
+				failedTests,
+				testRunResult,
+				r.config.DisableMapping,
+				mocksFailTests,
+			)
+			if len(failedRows) > 0 {
+				msg := "Failed tests also made outgoing calls that did not match the recorded mocks (see each test's response diff for why it failed)."
+				if mocksFailTests {
+					msg = "Some testsets failed due to mock differences."
+				}
+				r.logger.Info(msg,
+					zap.String("test_sets", joinSortedTestSets(failedRows)),
+					zap.String("next_step", failedMismatchNextStep(failedRows)))
+				r.mockMismatchFailures.PrintFailuresTableRows(r.console, failedRows)
 			}
-			testSets := strings.Join(testSetIDs, ", ")
-			if testRunResult {
-				r.logger.Warn("Tests passed, but some outgoing calls did not match the recorded mocks.",
-					zap.String("test_sets", testSets),
-					zap.String("next_step", "Review the mismatch summary below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."))
-			} else {
-				r.logger.Info("Some testsets failed due to mock differences.",
-					zap.String("test_sets", testSets),
-					zap.String("next_step", failedMismatchNextStep(mismatchRows)))
+			if len(tableUnmatched) > 0 {
+				warnMsg := outgoingDiffTableWarnMessage(tableUnmatched, passedTests, testRunResult, failedTestCount)
+				r.logger.Warn(warnMsg,
+					zap.String("test_sets", joinSortedTestSets(tableUnmatched)),
+					zap.String("next_step", "Review the outgoing call diffs table below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."))
+				r.printOutgoingDiffTable(tableUnmatched)
 			}
-
-			r.printMockMismatches()
+			if len(mappingOnly) > 0 {
+				if len(tableUnmatched) == 0 {
+					mapMsg := "Tests passed, but some recorded mock mappings diverged."
+					if !testRunResult {
+						mapMsg = "Some recorded mock mappings diverged."
+					}
+					r.logger.Warn(mapMsg,
+						zap.String("test_sets", joinSortedTestSets(mappingOnly)),
+						zap.String("next_step", "Review the mock mapping differences below, or re-record the test-set with 'keploy record' if the outgoing calls changed."))
+				}
+				r.mockMismatchFailures.PrintMappingDiffs(r.console, mappingOnly)
+			}
 		}
 		coverageData := models.TestCoverage{}
 		var err error
@@ -3064,7 +3095,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		if ok && !provenswitch.On() && (!serveTest || r.noLaterSetRuns && r.finalAttempt) {
 			stopAppBeforeReport = func() {
-				_, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
+				_, err := stopper.StopComposeApp(utils.WithTestsDone(context.WithoutCancel(runTestSetCtx)))
 				r.composeAppStopped = true
 				switch {
 				case errors.Is(err, models.ErrAppExitedOnItsOwn):
@@ -3086,7 +3117,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		if ok && provenswitch.On() {
 			stopAppBeforeSetEnd = func() string {
-				killed, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
+				killed, err := stopper.StopComposeApp(utils.WithTestsDone(context.WithoutCancel(runTestSetCtx)))
 				r.composeAppStopped = true
 				switch {
 				case errors.Is(err, models.ErrAppExitedOnItsOwn):
@@ -3977,7 +4008,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		mockLookup = r.readMockLookup(runTestSetCtx, testSetID)
 	}
 	r.wholeSetIdx = newWholeSetMockIndex(mockLookup, expectedTestMockMappings, r.exact.ownersOf(), testCases)
-	defer func() { r.wholeSetIdx = nil }()
+	r.unexercisedMocksByTest = map[string][]string{}
+	defer func() {
+		r.wholeSetIdx = nil
+		r.unexercisedMocksByTest = nil
+	}()
 
 	// A run that started no application (an agent already up, no -c) has
 	// not marked the capture losses its tests count from: its first test set
@@ -5296,6 +5331,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					depAssert := buildDepResults(expectedMocks, perTestConsumed, depAssertionValid && perTestConsumedKnown, reusableMockNames, mockKindByName, mockLookup)
 					missingDepNames, depLevel := attachDepResults(testCaseResult, testStatus, depAssert, r.assertTestMocks())
 					recordUnexercised(depMissingTests, testCase.Name, testStatus, depLevel)
+					recordUnexercisedMocks(r.unexercisedMocksByTest, testCase.Name, depAssert.Missing, depLevel)
 					switch depLevel {
 					case depLogError:
 						r.logger.Error("dependency assertion failed: an expected dependency was not observed during this test's window",

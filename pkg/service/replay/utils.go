@@ -15,8 +15,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
 	"sync"
+	"text/tabwriter"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -1664,6 +1664,16 @@ func getFailedTCs(results []models.TestResult) []string {
 	return ids
 }
 
+func getPassedTCs(results []models.TestResult) []string {
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.Status == models.TestStatusPassed {
+			ids = append(ids, r.TestCaseID)
+		}
+	}
+	return ids
+}
+
 // retainNoisyTestCaseMocks injects mocks used by noisy test cases into the
 // consumed-mocks set used for pruning so those mocks are not deleted.
 func retainNoisyTestCaseMocks(noisyTestCaseNames []string, mapping *models.Mapping, consumed map[string]models.MockState) int {
@@ -2097,9 +2107,329 @@ func CompareMockSlices(expected, actual []string) []MockDifference {
 	return differences
 }
 
+// partitionPassingMismatches splits passing-test mismatch rows into actionable
+// unmatched outgoing calls (which render in the TEST/CALL/COUNT/FIELDS table)
+// and mapping-only divergence rows (so passing runs with mapping diffs still
+// print them and never emit a warning followed by empty output).
+func partitionPassingMismatches(rows []TestFailure) (unmatched, mapping []TestFailure) {
+	for _, f := range rows {
+		if f.FailureReason == models.ErrMockNotFound {
+			if f.MismatchReport != nil && !f.MismatchReport.CountsAgainstTest() {
+				continue
+			}
+			unmatched = append(unmatched, f)
+			continue
+		}
+		if len(f.ExpectedMocks) > 0 || len(f.ActualMocks) > 0 {
+			mapping = append(mapping, f)
+		}
+	}
+	return unmatched, mapping
+}
+
+// isPayloadDiffRow reports whether f is an outgoing-call payload/body diff
+// against a compared candidate mock (as opposed to a no-candidate upstream
+// miss or a mapping-only row). In default mode, payload diffs do not fail a
+// test and stay in the deduplicated OUTGOING CALL DIFFS table.
+func isPayloadDiffRow(f TestFailure) bool {
+	if f.FailureReason != models.ErrMockNotFound || f.MismatchReport == nil {
+		return false
+	}
+	r := f.MismatchReport
+	if len(r.FieldDiffs) > 0 || len(r.Differs) > 0 {
+		return true
+	}
+	switch r.MatchPhase {
+	case models.MatchPhaseBody, models.MatchPhaseStrict, models.MatchPhaseVariable:
+		return true
+	}
+	return false
+}
+
+// outgoingDiffTableWarnMessage chooses an accurate headline above the
+// OUTGOING CALL DIFFS table: only labels rows as "Passing tests" when every
+// row belongs to a confirmed PASSED test (never for failed tests' payload
+// diffs, OBSOLETE tests, or sets whose results could not be read).
+func outgoingDiffTableWarnMessage(rows []TestFailure, passedTests map[[2]string]bool, testRunResult bool, failedTestCount int) string {
+	if testRunResult {
+		return "Tests passed, but some outgoing calls did not match the recorded mocks."
+	}
+	allPassed := len(rows) > 0
+	for _, f := range rows {
+		if !passedTests[[2]string{f.TestSetID, f.TestID}] {
+			allPassed = false
+			break
+		}
+	}
+	if allPassed {
+		return "Passing tests had outgoing calls that did not match the recorded mocks."
+	}
+	if failedTestCount > 0 {
+		return "Outgoing calls did not match the recorded mocks (see each failed test's response diff for why it failed)."
+	}
+	return "Some outgoing calls did not match the recorded mocks."
+}
+
+// partitionRunMismatches separates the run's recorded mismatch rows into:
+//   - failedRows: actionable mock/mapping rows printed in verbose MOCK
+//     MISMATCH blocks for FAILED tests. In default mode (!mocksFailTests),
+//     failed tests' payload-diff rows stay in tableUnmatched instead so they
+//     render as concise table rows and never blame mocks for response failures.
+//   - tableUnmatched: actionable outgoing-call diffs printed in the single
+//     deduplicated OUTGOING CALL DIFFS table (passing tests' diffs, plus
+//     default-mode failed tests' payload diffs, even under --disable-mapping).
+//   - mappingOnly: mapping-only divergence rows on non-failed tests (suppressed
+//     when disableMapping is true).
+func partitionRunMismatches(rows []TestFailure, failedTests map[[2]string]bool, testRunResult, disableMapping, mocksFailTests bool) (failedRows, tableUnmatched, mappingOnly []TestFailure) {
+	var tableRows []TestFailure
+	for _, f := range rows {
+		if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && !f.MismatchReport.CountsAgainstTest() {
+			continue
+		}
+		isFailedTest := failedTests[[2]string{f.TestSetID, f.TestID}] || (f.TestID == "" && !testRunResult)
+		if isFailedTest {
+			if !mocksFailTests && isPayloadDiffRow(f) {
+				tableRows = append(tableRows, f)
+				continue
+			}
+			if f.FailureReason != models.ErrMockNotFound && disableMapping {
+				continue
+			}
+			if f.FailureReason == models.ErrMockNotFound || len(f.ExpectedMocks) > 0 || len(f.ActualMocks) > 0 {
+				failedRows = append(failedRows, f)
+			}
+			continue
+		}
+		tableRows = append(tableRows, f)
+	}
+	tableUnmatched, mappingOnly = partitionPassingMismatches(tableRows)
+	if disableMapping {
+		mappingOnly = nil
+	}
+	return failedRows, tableUnmatched, mappingOnly
+}
+
+// joinSortedTestSets returns a deterministic comma-separated list of distinct
+// TestSetIDs present in rows.
+func joinSortedTestSets(rows []TestFailure) string {
+	seen := make(map[string]struct{}, len(rows))
+	ids := make([]string, 0, len(rows))
+	for _, f := range rows {
+		if _, ok := seen[f.TestSetID]; ok {
+			continue
+		}
+		seen[f.TestSetID] = struct{}{}
+		ids = append(ids, f.TestSetID)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ", ")
+}
+
+// sanitizeTableCell keeps tabwriter columns aligned even when a call summary
+// or diff contains tabs or newlines.
+func sanitizeTableCell(s string) string {
+	return strings.NewReplacer("\t", " ", "\r", " ", "\n", " ").Replace(s)
+}
+
+const maxOutgoingDiffFieldsLen = 120
+
+// capTableCell bounds a table cell to maxLen runes so a raw body diff never
+// blows up console table width, pointing the reader to the report when capped.
+func capTableCell(s string, maxLen int) string {
+	s = strings.TrimSpace(sanitizeTableCell(s))
+	runes := []rune(s)
+	if maxLen <= 0 || len(runes) <= maxLen {
+		return s
+	}
+	return strings.TrimRight(string(runes[:maxLen]), " ") + "... (see report)"
+}
+
+func formatOutgoingCallText(r *models.MockMismatchReport) (text string, emptySummary bool) {
+	if r == nil {
+		return "(no structured report)", true
+	}
+	summary := strings.TrimSpace(r.ActualSummary)
+	proto := strings.TrimSpace(r.Protocol)
+	if summary == "" {
+		switch {
+		case proto != "":
+			text = fmt.Sprintf("[%s] (no summary)", proto)
+		default:
+			text = "(no structured report)"
+		}
+		if r.Destination != "" {
+			text += " -> " + r.Destination
+		}
+		return text, true
+	}
+	text = fmt.Sprintf("[%s] %s", proto, models.WithHTTPOperation(summary, r.Operation))
+	if r.Destination != "" && !strings.Contains(summary, r.Destination) {
+		text += " -> " + r.Destination
+	}
+	return text, false
+}
+
+// PrintMappingDiffs prints mapping-only divergence notes on w for rows that
+// have no outgoing-call MismatchReport.
+func (tfs *TestFailureStore) PrintMappingDiffs(w io.Writer, rows []TestFailure) {
+	if w == nil || len(rows) == 0 {
+		return
+	}
+	headerPrinted := false
+	for _, f := range rows {
+		diffs := CompareMockSlices(f.ExpectedMocks, f.ActualMocks)
+		var missingMocks, extraMocks []string
+		for _, d := range diffs {
+			switch d.DiffType {
+			case "missing":
+				missingMocks = append(missingMocks, d.Key)
+			case "extra":
+				extraMocks = append(extraMocks, d.Key)
+			}
+		}
+		if len(missingMocks) == 0 && len(extraMocks) == 0 {
+			continue
+		}
+		if !headerPrinted {
+			_, _ = fmt.Fprintln(w, "\n=========================== MOCK MAPPING DIFFS ===========================")
+			headerPrinted = true
+		}
+		_, _ = fmt.Fprintf(w, "Test: %s / %s\n", f.TestSetID, f.TestID)
+		if len(missingMocks) > 0 {
+			_, _ = fmt.Fprintf(w, "  Expected mocks not consumed: %s\n", strings.Join(missingMocks, ", "))
+		}
+		if len(extraMocks) > 0 {
+			_, _ = fmt.Fprintf(w, "  Unexpected mocks consumed: %s\n", strings.Join(extraMocks, ", "))
+		}
+	}
+	if headerPrinted {
+		_, _ = fmt.Fprintln(w)
+	}
+}
+
+// PrintOutgoingDiffTable prints a single deduplicated summary table of
+// outgoing-call payload diffs (TEST | CALL | COUNT | FIELDS) on w for passing
+// tests' outgoing diffs, so each unique diff is printed once with its xN count
+// without duplicate lines or verbose boxes. Rows with empty call summaries are
+// never merged together.
+func (tfs *TestFailureStore) PrintOutgoingDiffTable(w io.Writer, rows []TestFailure) {
+	if w == nil {
+		return
+	}
+	type diffKey struct {
+		test   string
+		call   string
+		fields string
+	}
+	type diffRow struct {
+		test   string
+		call   string
+		fields string
+		count  int
+	}
+	seen := map[diffKey]int{}
+	out := make([]diffRow, 0, len(rows))
+	for _, f := range rows {
+		if f.FailureReason != models.ErrMockNotFound {
+			continue
+		}
+		r := f.MismatchReport
+		if r != nil && !r.CountsAgainstTest() {
+			continue
+		}
+		testName := f.TestID
+		if f.TestSetID != "" {
+			testName = f.TestSetID + " / " + f.TestID
+		}
+		callText, emptySummary := formatOutgoingCallText(r)
+		fieldsText := "no matching mock"
+		if r != nil {
+			fieldsText = summarizeChangedFields(r)
+		}
+		uncappedFields := strings.TrimSpace(sanitizeTableCell(fieldsText))
+		row := diffRow{
+			test:   sanitizeTableCell(testName),
+			call:   sanitizeTableCell(callText),
+			fields: capTableCell(fieldsText, maxOutgoingDiffFieldsLen),
+			count:  1,
+		}
+		if emptySummary {
+			out = append(out, row)
+			continue
+		}
+		key := diffKey{test: row.test, call: row.call, fields: uncappedFields}
+		if idx, dup := seen[key]; dup {
+			out[idx].count++
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, row)
+	}
+	if len(out) == 0 {
+		return
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].test != out[j].test {
+			return out[i].test < out[j].test
+		}
+		if out[i].call != out[j].call {
+			return out[i].call < out[j].call
+		}
+		return out[i].fields < out[j].fields
+	})
+	_, _ = fmt.Fprintln(w, "\n=========================== OUTGOING CALL DIFFS ===========================")
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "TEST\tCALL\tCOUNT\tFIELDS")
+	for _, row := range out {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\tx%d\t%s\n", row.test, row.call, row.count, row.fields)
+	}
+	_ = tw.Flush()
+	_, _ = fmt.Fprintln(w)
+}
+
+func summarizeChangedFields(r *models.MockMismatchReport) string {
+	if r == nil {
+		return ""
+	}
+	var fields []string
+	seen := map[string]struct{}{}
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			fields = append(fields, p)
+		}
+	}
+	for _, fd := range r.FieldDiffs {
+		add(fd.Path)
+	}
+	if len(fields) == 0 {
+		for _, d := range r.Differs {
+			add(d)
+		}
+	}
+	if len(fields) > 0 {
+		sort.Strings(fields)
+		return strings.Join(fields, ", ")
+	}
+	if d := strings.TrimSpace(strings.ReplaceAll(r.Diff, "\n", " ")); d != "" {
+		return d
+	}
+	if r.DestinationScope == models.DestinationScopeNotInComparedSet {
+		return "no recorded mock for destination"
+	}
+	if r.RecordedIn != "" {
+		return fmt.Sprintf("no matching mock (recorded in %s)", r.RecordedIn)
+	}
+	return "no matching mock"
+}
+
 // PrintFailuresTable prints all failures on w, keploy's console, one block
-// per failed test case: a "Mock mismatch" heading for each unmatched outgoing
-// call followed by the same Expect/Actual diff used for HTTP test-case
+// per failed test case: a "Mock mismatch" heading for each unique unmatched
+// outgoing call followed by the same Expect/Actual diff used for HTTP test-case
 // mismatches, and the hint. The console only, never a log: it names each call
 // whole (Replayer.console). Nothing for a nil w.
 func (tfs *TestFailureStore) PrintFailuresTable(w io.Writer) {
@@ -2107,17 +2437,81 @@ func (tfs *TestFailureStore) PrintFailuresTable(w io.Writer) {
 		return
 	}
 	tfs.mu.Lock()
-	defer tfs.mu.Unlock()
-
-	if len(tfs.failures) == 0 {
+	rows := append([]TestFailure(nil), tfs.failures...)
+	tfs.mu.Unlock()
+	if len(rows) == 0 {
 		_, _ = fmt.Fprintln(w, "No test failures recorded.")
+		return
+	}
+	tfs.PrintFailuresTableRows(w, rows)
+}
+
+// failedMissDedupKey builds an exact dedup key for a failed test's verbose
+// mock-mismatch block: distinct field values, raw diffs, or hints (such as
+// eviction notes or RecordedIn) produce distinct keys so evidence is never
+// collapsed onto the first occurrence, while truly identical repeats still
+// dedup with (occurred xN).
+func failedMissDedupKey(callText string, r *models.MockMismatchReport) string {
+	var b strings.Builder
+	writeField := func(s string) {
+		_, _ = fmt.Fprintf(&b, "%d:%s|", len(s), s)
+	}
+	writeField(callText)
+	if r == nil {
+		return b.String()
+	}
+	writeField(r.ClosestMock)
+	writeField(string(r.MatchPhase))
+	writeField(string(r.DestinationScope))
+	writeField(r.RecordedIn)
+	writeField(r.NextSteps)
+	if len(r.FieldDiffs) > 0 {
+		fds := append([]models.MockFieldDiff(nil), r.FieldDiffs...)
+		sort.Slice(fds, func(i, j int) bool {
+			if fds[i].Path != fds[j].Path {
+				return fds[i].Path < fds[j].Path
+			}
+			if fds[i].Kind != fds[j].Kind {
+				return fds[i].Kind < fds[j].Kind
+			}
+			if fds[i].Expected != fds[j].Expected {
+				return fds[i].Expected < fds[j].Expected
+			}
+			return fds[i].Actual < fds[j].Actual
+		})
+		for _, fd := range fds {
+			writeField(fd.Path)
+			writeField(string(fd.Kind))
+			writeField(fd.Expected)
+			writeField(fd.Actual)
+		}
+	}
+	if len(r.Differs) > 0 {
+		differs := append([]string(nil), r.Differs...)
+		sort.Strings(differs)
+		for _, d := range differs {
+			writeField(d)
+		}
+	}
+	writeField(r.Diff)
+	writeField(r.ClosestMockReq)
+	writeField(r.ReceivedReq)
+	return b.String()
+}
+
+// PrintFailuresTableRows prints verbose mock-mismatch failure blocks for rows
+// only (so a mixed run prints verbose blocks only for FAILED tests' own rows),
+// deduplicating repeated identical (test, call, field values, hint) misses
+// within a test while preserving every distinct value or hint.
+func (tfs *TestFailureStore) PrintFailuresTableRows(w io.Writer, rows []TestFailure) {
+	if w == nil || len(rows) == 0 {
 		return
 	}
 
 	_, _ = fmt.Fprintln(w, "\n=========================== MOCK MISMATCH ===========================")
 
 	testSetGroups := make(map[string][]TestFailure)
-	for _, failure := range tfs.failures {
+	for _, failure := range rows {
 		testSetGroups[failure.TestSetID] = append(testSetGroups[failure.TestSetID], failure)
 	}
 	var testSetIDs []string
@@ -2140,14 +2534,33 @@ func (tfs *TestFailureStore) PrintFailuresTable(w io.Writer) {
 		for _, testID := range testIDs {
 			_, _ = fmt.Fprintf(w, "\nTest: %s / %s\n", testSetID, testID)
 
+			type missEntry struct {
+				report *models.MockMismatchReport
+				count  int
+			}
+			var dedupedMisses []missEntry
+			seenMiss := map[string]int{}
 			var mappingNotes []string
+			seenNotes := map[string]struct{}{}
 			var anyOutOfScope bool
+
 			for _, failure := range testIDGroups[testID] {
 				if failure.FailureReason == models.ErrMockNotFound {
-					printMismatchReport(w, failure.MismatchReport)
-					if failure.MismatchReport != nil &&
-						failure.MismatchReport.DestinationScope == models.DestinationScopeNotInComparedSet {
+					r := failure.MismatchReport
+					if r != nil && r.DestinationScope == models.DestinationScopeNotInComparedSet {
 						anyOutOfScope = true
+					}
+					callText, emptySummary := formatOutgoingCallText(r)
+					if emptySummary {
+						dedupedMisses = append(dedupedMisses, missEntry{report: r, count: 1})
+					} else {
+						k := failedMissDedupKey(callText, r)
+						if idx, ok := seenMiss[k]; ok {
+							dedupedMisses[idx].count++
+						} else {
+							seenMiss[k] = len(dedupedMisses)
+							dedupedMisses = append(dedupedMisses, missEntry{report: r, count: 1})
+						}
 					}
 				}
 				if len(failure.ExpectedMocks) > 0 || len(failure.ActualMocks) > 0 {
@@ -2162,11 +2575,25 @@ func (tfs *TestFailureStore) PrintFailuresTable(w io.Writer) {
 						}
 					}
 					if len(missingMocks) > 0 {
-						mappingNotes = append(mappingNotes, fmt.Sprintf("Expected mocks not consumed: %s", strings.Join(missingMocks, ", ")))
+						note := fmt.Sprintf("Expected mocks not consumed: %s", strings.Join(missingMocks, ", "))
+						if _, ok := seenNotes[note]; !ok {
+							seenNotes[note] = struct{}{}
+							mappingNotes = append(mappingNotes, note)
+						}
 					}
 					if len(extraMocks) > 0 {
-						mappingNotes = append(mappingNotes, fmt.Sprintf("Unexpected mocks consumed: %s", strings.Join(extraMocks, ", ")))
+						note := fmt.Sprintf("Unexpected mocks consumed: %s", strings.Join(extraMocks, ", "))
+						if _, ok := seenNotes[note]; !ok {
+							seenNotes[note] = struct{}{}
+							mappingNotes = append(mappingNotes, note)
+						}
 					}
+				}
+			}
+			for _, m := range dedupedMisses {
+				printMismatchReport(w, m.report)
+				if m.count > 1 {
+					_, _ = fmt.Fprintf(w, "  (occurred x%d)\n", m.count)
 				}
 			}
 			for _, note := range mappingNotes {

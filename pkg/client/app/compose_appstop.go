@@ -1347,7 +1347,11 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// in the look that found the app's processes gone, ends the second.
 	notice := utils.NewStopNowNotice(utils.StopOffer)
 	defer notice.Withdraw()
-	end, bound := utils.WaitExitOffered(a.logger, stopped, w.procs, a.teardown.Load(), notice, utils.OfferKillNow)
+	waitBudget := utils.ComposeStopGrace()
+	if w.stopTimeout > waitBudget {
+		waitBudget = w.stopTimeout
+	}
+	end, bound := utils.WaitExitOfferedWithBudget(a.logger, stopped, w.procs, a.teardown.Load(), notice, utils.OfferKillNow, waitBudget)
 	switch end {
 	case utils.StopExited:
 		return "", a.awaitComposeStopRecorded(recorded, notice)
@@ -1357,13 +1361,17 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 		if w.readable {
 			killed = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", bound)
 		} else {
-			killed = fmt.Sprintf("keploy could not read its container's processes, and the docker daemon did not say it had stopped, for %s after keploy interrupted it, so keploy killed it", utils.StopStallSaid())
+			killed = fmt.Sprintf("keploy could not read its container's processes, and the docker daemon did not say it had stopped, for %s after keploy interrupted it, so keploy killed it", bound)
 		}
 	}
 	// The kill's waits make their own offer: a press the first offer took
 	// was its answer (the kill).
 	notice.Withdraw()
-	a.logger.Warn("keploy is killing the app it stopped: "+killed, zap.String("container", a.container))
+	if utils.TestsDone(ctx) {
+		a.logger.Info("keploy is killing the app it stopped: "+killed, zap.String("container", a.container))
+	} else {
+		a.logger.Warn("keploy is killing the app it stopped: "+killed, zap.String("container", a.container))
+	}
 	if err := a.signalComposeApp(wctx, id, "SIGKILL"); err != nil {
 		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
 			// It had stopped, or was gone, by the kill: no kill reached it.

@@ -24,6 +24,14 @@ func (r *Replayer) assertTestMocks() bool {
 	return r.config.Test.AssertDependencies || provenswitch.On()
 }
 
+// mocksCanFailTests reports whether mock/dependency differences themselves can
+// fail a test in this run (strict / proven / assert-dependencies /
+// schema-noise-strict mode). In default mode the verdict is the app's response
+// diff, never an outgoing payload diff.
+func (r *Replayer) mocksCanFailTests() bool {
+	return provenswitch.On() || r.config.Test.AssertDependencies || r.config.Test.NoiseStrict()
+}
+
 // excludedFromTestMockAssertion reports whether a loaded mock is left out of
 // the per-test consumed-vs-expected assertion by name: a reusable-tier mock
 // today, and only a protocol-phase mock under the proven switch. An answer
