@@ -741,7 +741,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if earlierRec != nil {
 					report.Earlier = earlierRec.Name
 				}
-				if elsewhere != nil {
+				if elsewhere != nil && integrations.OwnsStartup(db, call, elsewhere.Name) {
+					// One of the set's plain startup: recordings, which a
+					// call in a test's window is that test's own call of:
+					// made outside every test, not elsewhere.
+					markOutsideTests(report, elsewhere)
+				} else if elsewhere != nil {
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
 					lmiss.explain(report, gone != "")

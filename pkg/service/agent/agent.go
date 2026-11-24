@@ -2443,6 +2443,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// set's background recordings, read from every mock held for the set,
 	// served or not: a set that names none clears the previous set's.
 	if params.ExactStaging || !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+		// The session calls the client declares, before the set's
+		// recordings are marked: an agent container reads no keploy.yaml
+		// (models.DeclaredSessionCalls). A call that carries none leaves
+		// the agent's as they are.
+		params.SessionCalls.Install()
 		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
 	}
 
