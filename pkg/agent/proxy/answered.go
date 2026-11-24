@@ -717,6 +717,14 @@ func (m *MockManager) noteSkippedReadSpent(mk *models.Mock) {
 // own (recorded inside its window, or in its exact view). ok is false when
 // there is none.
 func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
+	return m.findAnsweredEarlierIn(m.exactView(), kind, keys, match)
+}
+
+// findAnsweredEarlierIn is FindAnsweredEarlier for a call read in the view
+// read (nil: with exact serving off): a plain startup: recording found again
+// by a call read in a test's window is no background run of it
+// (testOwnsStartupAt), whatever view is in force as the miss is decided.
+func (m *MockManager) findAnsweredEarlierIn(read *exactView, kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
 	if match == nil || len(keys) == 0 {
 		return integrations.AnsweredCall{}, false
 	}
@@ -740,7 +748,18 @@ func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match
 	if best.mock == nil {
 		return integrations.AnsweredCall{}, false
 	}
-	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at, Background: best.background, SkippedRead: best.skippedRead}, true
+	a := integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at, Background: best.background, SkippedRead: best.skippedRead}
+	if a.Background == models.RepeatBackgroundPool && read != nil && read.test != "" && read.startupOwned(best.mock.Name) {
+		// A plain startup: recording that answered outside every test,
+		// found again by a call read in a test's window: the test's own
+		// call, and its miss the test's, saying the recording was made
+		// outside every test (models.RepeatNote.OutsideTests), not one more
+		// run of the set's background (testOwnsStartupAt). The store says
+		// so itself: keploy test's staging installs no scope table
+		// (integrations.InPool) to tell it by.
+		a.Background, a.OutsideTests = "", true
+	}
+	return a, true
 }
 
 var _ integrations.AnsweredFinder = (*MockManager)(nil)

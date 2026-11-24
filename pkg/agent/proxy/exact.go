@@ -2517,7 +2517,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	r.boundary("a view was installed")
 	v.round = r.gen
 	v.installed = integrations.RoundAt{Epoch: m.stagingEpoch.Load(), Gen: r.gen, Bounds: r.bounds}
-	m.exact.shared.of(v, w)
+	m.exact.shared.of(v, w, m.background.Load().at(v.installed.Epoch))
 	if v.test != "" {
 		r.bindLocked(v)
 	}
@@ -3203,7 +3203,7 @@ func (v *exactView) showsTo(mk *models.Mock, windowed bool) bool {
 	if mk == nil {
 		return false
 	}
-	return !v.spentIn(mk.Name) && !v.spentOutsideIn(mk.Name, windowed) && v.showsStatic(mk)
+	return !v.spentIn(mk.Name) && !v.spentOutsideIn(mk.Name, windowed) && v.showsStaticTo(mk, windowed)
 }
 
 // inBackgroundPool reports whether mk, consumed in an open test, is one of

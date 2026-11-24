@@ -147,13 +147,20 @@ type shownExtra struct {
 // pooled (models.Mock.MarkPooled): a change stores a new value, and moves the
 // tree's generation.
 func (v *exactView) showsStatic(mk *models.Mock) bool {
+	return v.showsStaticTo(mk, v.test != "")
+}
+
+// showsStaticTo is showsStatic to a call read in a test's window (windowed)
+// or between tests, whatever view is in force as it settles (showsTo,
+// sharesRestTo).
+func (v *exactView) showsStaticTo(mk *models.Mock, windowed bool) bool {
 	if mk == nil {
 		return false
 	}
 	if mk.IsProtocolPhase() {
 		return true
 	}
-	return v.showsStaticRest(mk)
+	return !v.holds(mk.Name) && v.sharesRestTo(mk, windowed)
 }
 
 // showsStaticRest is showsStatic of a mock that is not protocol-phase.
@@ -170,17 +177,30 @@ func (v *exactView) showsStaticRest(mk *models.Mock) bool {
 }
 
 // sharesRest is what the view shows of a mock that is not protocol-phase, its
-// own apart: one of the reached worker scope; in a test, one of the pool
-// under the background rules, or one a declared session call names
-// (declaredInPool); between tests, one of the pool slice served. It never
-// shows a recording the open test's derived mocks replace
-// (exactView.sourcesReplaced).
+// own apart, to a call read in it (sharesRestTo).
 func (v *exactView) sharesRest(mk *models.Mock) bool {
+	return v.sharesRestTo(mk, v.test != "")
+}
+
+// sharesRestTo is sharesRest to a call read in a test's window (windowed) or
+// between tests, whatever view is in force as it settles
+// (roundGuard.windowed): one of the reached worker scope; in a test, one of
+// the pool under the background rules, or one a declared session call names
+// (declaredInPool); between tests, one of the pool slice served. To a call
+// read in a test's window it never shows one of the set's plain startup:
+// recordings (startupOwned), which such a call is the test's own call in,
+// and to one read between tests it shows them as the pool's, though the
+// next test opened before it settled. It never shows a recording the open
+// test's derived mocks replace (exactView.sourcesReplaced).
+func (v *exactView) sharesRestTo(mk *models.Mock, windowed bool) bool {
 	if _, gone := v.sourcesReplaced[mk.Name]; gone {
 		return false
 	}
 	if v.isWorker(mk.Name) {
 		return true
+	}
+	if windowed && v.startupOwned(mk.Name) {
+		return false
 	}
 	if v.test != "" {
 		// Under the background rules the pool answers in a test too,

@@ -8502,10 +8502,14 @@ func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
 //     startup: mocks (models.MockFilterParams.BackgroundMocks), which the
 //     agent hands the proxy read-only so a parser can tell a miss is one more
 //     run of one of them. Set by the Replayer's recordedSetShape alone.
+//   - startup names, of background, the set's plain startup: mocks under
+//     the proven switch (models.MockFilterParams.StartupMocks,
+//     backgroundMocksOf): a test's call identical to one is the test's own.
 type recordedSetShape struct {
 	firstTestStart time.Time
 	windows        []models.TestWindow
 	background     []string
+	startup        []string
 }
 
 func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
@@ -8523,7 +8527,7 @@ func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
 // hand them most of the recording.
 func (r *Replayer) recordedSetShape(ctx context.Context, testSetID string, testCases []*models.TestCase) recordedSetShape {
 	shape := recordedSetShapeOf(testCases)
-	shape.background = r.backgroundMockNames(ctx, testSetID)
+	shape.background, shape.startup = r.backgroundMocksOf(ctx, testSetID)
 	reader, ok := r.testDB.(RecordedStartReader)
 	if !ok {
 		return shape
@@ -8572,32 +8576,65 @@ func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
 // no mapping store, no file, or a file that cannot be read: every miss then
 // stays its test's, as before.
 func (r *Replayer) backgroundMockNames(ctx context.Context, testSetID string) []string {
+	all, _ := r.backgroundMocksOf(ctx, testSetID)
+	return all
+}
+
+// backgroundMocksOf is backgroundMockNames (all), with, under the proven
+// switch, the names of its plain startup: mocks (startup,
+// models.MockFilterParams.StartupMocks): its startup: mocks in no worker:
+// entry of the file, a worker-mock rule's included, and not in the worker
+// scope this run serves. A declared rule's recording is in worker: (a
+// startup: true rule's, moved there with its Rule set; a worker-mock rule's),
+// and so is one learned between tests, so neither is one; the agent leaves
+// out the ones a keploy.yaml sessionCalls entry names. A test's call
+// identical to a plain one is the test's own call, and its miss counts
+// against the test. nil startup with the switch off: every background
+// recording is then the background's in a test's window too, as before.
+func (r *Replayer) backgroundMocksOf(ctx context.Context, testSetID string) (all, startup []string) {
 	if r.mappingDB == nil {
-		return nil
+		return nil, nil
 	}
-	var worker, startup []models.MockEntry
+	var worker, fileWorker, startupEntries []models.MockEntry
 	if mr, ok := r.mappingDB.(mappingReader); ok {
 		m, err := mr.GetMapping(ctx, testSetID)
 		if err != nil {
 			r.logger.Debug("could not read the test set's background recordings from its mappings.yaml; every miss stays its test's",
 				zap.String("testSetID", testSetID), zap.Error(err))
-			return nil
+			return nil, nil
 		}
 		if m != nil {
-			worker, startup = models.WithoutWorkerRuleEntries(m.Worker), m.Startup
+			fileWorker, startupEntries = m.Worker, m.Startup
+			worker = models.WithoutWorkerRuleEntries(m.Worker)
 		}
 	} else {
 		var err error
-		if startup, err = r.mappingDB.GetStartup(ctx, testSetID); err != nil {
+		if startupEntries, err = r.mappingDB.GetStartup(ctx, testSetID); err != nil {
 			r.logger.Debug("could not read the test set's startup recordings from its mappings.yaml; every miss stays its test's",
 				zap.String("testSetID", testSetID), zap.Error(err))
-			return nil
+			return nil, nil
 		}
 	}
 	if r.exact != nil {
 		worker = r.exact.worker
 	}
-	return (&models.Mapping{Worker: worker, Startup: startup}).BackgroundMockNames()
+	all = (&models.Mapping{Worker: worker, Startup: startupEntries}).BackgroundMockNames()
+	if !provenswitch.On() {
+		return all, nil
+	}
+	covered := map[string]bool{}
+	for _, list := range [][]models.MockEntry{fileWorker, worker} {
+		for _, e := range list {
+			covered[e.Name] = true
+		}
+	}
+	for _, e := range startupEntries {
+		if e.Name != "" && !covered[e.Name] {
+			covered[e.Name] = true
+			startup = append(startup, e.Name)
+		}
+	}
+	return all, startup
 }
 
 // workerRuleMockNames is the names of the mocks testSetID's worker-mock rules
@@ -8669,6 +8706,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		FirstRecordedTestStart: shape.firstTestStart,
 		RecordedWindows:        shape.windows,
 		BackgroundMocks:        shape.background,
+		StartupMocks:           shape.startup,
 		MockMapping:            expectedMockMapping,
 		UseMappingBased:        useMappingBased,
 		AgentOwnsConsumed:      agentOwnsConsumed,
