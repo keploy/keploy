@@ -512,11 +512,13 @@ func (p *Proxy) recordViaSupervisor(
 			// error detected in record.txt" and kill the lane before it
 			// reaches its report. Status names the mechanism; the full
 			// error follows at Debug.
+			held := r.HeldAtParserEnd()
 			logger.Warn("parser retired; this connection can no longer be recorded",
 				zap.String("parser", string(parserType)),
 				zap.String("status", result.Status.String()),
 				zap.String("clientConnID", svSess.ClientConnID),
-				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"),
+				zap.Bool("traffic_held", held),
+				zap.String("next_step", retiredNextStep(held)),
 			)
 		}
 		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
@@ -973,4 +975,18 @@ func applyEndAtHole(cfg *relay.Config, sess *supervisor.Session, parser integrat
 func parserCanEndAtHole(parser integrations.Integrations) bool {
 	ep, ok := parser.(integrations.EndAtHoleCapable)
 	return ok && ep.CanEndAtHole()
+}
+
+// retiredNextStep is the next step of the "parser retired" warning. It says
+// user traffic is unaffected only when the relay was not holding the
+// connection's bytes for the parser as it retired (Relay.HeldAtParserEnd):
+// a held connection forwarded nothing while the parser was stuck -- a hung
+// parser's hang budget -- so the application may have seen it stall or time
+// out, though the relay releases the hold as the parser goes.
+func retiredNextStep(held bool) string {
+	const rest = "no further mock can be captured on this connection. From here on, every test case recorded while this connection carries traffic is left out of the recording rather than saved without its mocks: all of them, not only the ones that used this connection. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"
+	if held {
+		return "user traffic on this connection WAS AFFECTED: keploy held its bytes for the parser until the parser stopped, so the application may have seen it stall or time out; the relay has released them and forwards raw bytes from here, but " + rest
+	}
+	return "user traffic is unaffected — the relay keeps forwarding raw bytes — but " + rest
 }
