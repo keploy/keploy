@@ -49,7 +49,7 @@ func ownNoise(noise map[string][]string) (body, header map[string]bool) {
 	b, h, _ := matcherUtils.SplitNoise(noise, nil)
 	body = make(map[string]bool, len(b))
 	for k := range b {
-		body[matcherUtils.ExactPath(k)] = true
+		body[strings.ToLower(k)] = true
 	}
 	header = make(map[string]bool, len(h))
 	for k := range h {

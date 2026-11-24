@@ -1,8 +1,10 @@
 package http
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
@@ -218,10 +220,21 @@ func TestBodyNoiseCoveringNamesAnEndpointRuleWithAnIDKey(t *testing.T) {
 func TestEndpointRulesKeepTheRegexShapedNoiseWarning(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
 	tc := endpointCase("GET", "http://api/version", `{"ts":"a"}`)
-	tc.Noise = map[string][]string{"body": {"^endpointRuleTs.*"}}
+	tc.Noise = map[string][]string{"body": {fmt.Sprintf("^endpointRuleTs%d.*", time.Now().UnixNano())}}
 	noise := AddEndpointNoise(nil, []config.EndpointNoise{{Path: "/version", Body: config.Noise{"version": {}}}}, tc)
 	Match(tc, &models.HTTPResp{StatusCode: 200, Body: `{"ts":"a"}`}, noise, false, false, zap.New(core), false)
 	if logs.FilterMessageSnippet("looks like a regex").Len() != 1 {
 		t.Fatal("the warning for a regex-shaped test-case noise value was not said")
+	}
+}
+
+func TestATestCaseKeyThatMatchesNothingLeavesTheRuleOn(t *testing.T) {
+	for _, own := range []string{"body.$.data.version", "body.data[].version"} {
+		rules := []config.EndpointNoise{{Path: "/version", Body: config.Noise{"data.version": {}}}}
+		tc := endpointCase("GET", "http://api/version", `{"data":{"version":"1"}}`)
+		tc.Noise = map[string][]string{own: {}}
+		if !matchWith(t, tc, `{"data":{"version":"2"}}`, nil, rules) {
+			t.Fatalf("the test case's key %q, which ignores nothing, turned the rule off", own)
+		}
 	}
 }
