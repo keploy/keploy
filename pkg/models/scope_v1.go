@@ -256,7 +256,8 @@ func (e *ScopeEvidence) Unanswered() bool {
 // verdict (CaptureLosses.Split's notJudged), never failed: on CannotCapture,
 // and in the reason one sentence names all of CannotCapture with its summed
 // counts. The sentence the reason already holds for CannotCapture is written
-// again in its place; else the sentence goes after what the reason says.
+// again in its place; else the sentence goes on a line of its own after what
+// the reason says, so a command the reason ends with stays alone on its line.
 // What the agent charged (a worker's REAL use) and what the record charges
 // (a mock), or each late mock whose container keploy could not read, are one
 // count: a reader sees one number, and each What charged, once.
@@ -287,7 +288,7 @@ func (e *ScopeEvidence) ChargeNotJudged(l CaptureLosses) {
 	case e.Reason == "":
 		e.Reason = "keploy: " + text + "."
 	default:
-		e.Reason = strings.TrimSpace(e.Reason + " Also " + text + ".")
+		e.Reason = strings.TrimSpace(e.Reason + "\nAlso " + text + ".")
 	}
 }
 

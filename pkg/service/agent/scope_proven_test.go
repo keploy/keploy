@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/keploy/shlex"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
@@ -1872,12 +1873,12 @@ func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
 	r := evidenceReason("api::TestSlowStep", &models.ScopeEvidence{Misses: []models.UnmatchedCall{learned, learned}}, nil, time.Time{}, nil, scopeSet{})
 	require.Equal(t, "keploy: a Mongo call to mongo:27017 had no recorded answer (body.docs.msgs.{}.appId differs); a Mongo call to mongo:27017 had no recorded answer (body.docs.msgs.{}.appId differs).\n"+
 		"a Mongo call to mongo:27017 missed (request_changed): The record round's replay saw body.docs.msgs.{}.appId differ: it carries a value keploy cannot follow yet.\n"+
-		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting api::TestSlowStep>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine api::TestSlowStep --reason \"<why>\".", r, "one line per reason, said once")
+		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting api::TestSlowStep>\"\n"+
+		"If it is flaky, not broken: keploy mock quarantine api::TestSlowStep --reason \"<why>\"", r, "one line per reason, said once")
 
 	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", NextSteps: "Re-record."}}}, nil, time.Time{}, nil, scopeSet{})
-	require.Equal(t, "keploy: GET /x had no recorded answer. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting t>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine t --reason \"<why>\".", plain, "a miss without the learn step's reason reads as it did")
+	require.Equal(t, "keploy: GET /x had no recorded answer. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting t>\"\n"+
+		"If it is flaky, not broken: keploy mock quarantine t --reason \"<why>\"", plain, "a miss without the learn step's reason reads as it did")
 
 	began := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	early := learned
@@ -1905,8 +1906,8 @@ func TestAFailedTestsReasonSaysWhyAMissWhoseViewWentMissed(t *testing.T) {
 	ev := &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Reason: models.MissViewReplaced, NextSteps: gone}}}
 	require.Equal(t, "keploy: POST /orders had no recorded answer.\n"+
 		"POST /orders missed (view_replaced): "+gone+"\n"+
-		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting test-2>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine test-2 --reason \"<why>\".", evidenceReason("test-2", ev, nil, time.Time{}, nil, scopeSet{}))
+		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting test-2>\"\n"+
+		"If it is flaky, not broken: keploy mock quarantine test-2 --reason \"<why>\"", evidenceReason("test-2", ev, nil, time.Time{}, nil, scopeSet{}))
 }
 
 // End to end on the agent: the test's end answers fail with the learn
@@ -2016,8 +2017,8 @@ func TestWhatTheAgentTellsAHarnessGoesThroughRunnableText(t *testing.T) {
 	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestPlaceOrder", Outcome: "passed"})
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Equal(t, "[keploy: GET /x to 127.0.0.1:18282 had no recorded answer. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting orders::TestPlaceOrder>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine orders::TestPlaceOrder --reason \"<why>\".]", e.Reason)
+	require.Equal(t, "[keploy: GET /x to 127.0.0.1:18282 had no recorded answer. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting orders::TestPlaceOrder>\"\n"+
+		"If it is flaky, not broken: keploy mock quarantine orders::TestPlaceOrder --reason \"<why>\"]", e.Reason)
 
 	refused := scopeErr(http.StatusConflict, models.ScopeErrNotInRun, "not in a run", "run it through keploy")
 	require.Equal(t, "not in a run", refused.Message)
@@ -3377,17 +3378,18 @@ func TestANeverMadeAuthoredMockIsGivenItsRemoveCommand(t *testing.T) {
 	require.Contains(t, only, `authored call POST pay.internal/charge (mock-12) was never made ("card declined")`)
 	require.Contains(t, only, `authored call POST pay.internal/charge (mock-13) was never made ("payments hangs")`, "a fault mock is named by its request too")
 	require.NotContains(t, only, "recorded call")
-	require.Contains(t, only, "A re-record keeps an authored mock. If the test no longer makes its call, remove it: "+
-		"keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12; keploy mock derive --remove checkout::TestCheckoutDeclined/mock-13. "+
-		"If the call changed, derive or generate it again into this test.")
+	require.Contains(t, only, "A re-record keeps an authored mock. If the test no longer makes its call, remove it:\n"+
+		"keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12\n"+
+		"keploy mock derive --remove checkout::TestCheckoutDeclined/mock-13\n"+
+		"If the call changed, derive or generate it again into this test.\n")
 	require.NotContains(t, only, "re-record it", "a re-record keeps the authored mocks, so it cannot clear this test")
 	require.Contains(t, only, "keploy mock quarantine checkout::TestCheckoutDeclined --reason")
 
 	mixed := evidenceReason("checkout::TestCheckoutDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12", "mock-2"}}, mocks, time.Time{}, nil, scopeSet{})
 	require.Contains(t, mixed, "recorded call GET pay.internal/rates (mock-2) was never made")
 	require.Contains(t, mixed, "re-record it: keploy mock record", "a recorded call never made is still re-recorded")
-	require.Contains(t, mixed, "keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12. If the call changed")
-	require.NotContains(t, mixed, "mock-2. If the call changed", "a recorded mock is not authored")
+	require.Contains(t, mixed, "\nkeploy mock derive --remove checkout::TestCheckoutDeclined/mock-12\nIf the call changed")
+	require.NotContains(t, mixed, "derive --remove checkout::TestCheckoutDeclined/mock-2", "a recorded mock is not authored")
 
 	missed := evidenceReason("checkout::TestCheckoutDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12"},
 		Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Destination: "pay.internal"}}}, mocks, time.Time{}, nil, scopeSet{})
@@ -3436,16 +3438,16 @@ func TestAFailedTestsCommandsCarryTheSetsFlags(t *testing.T) {
 	const named = ` --local --name checkout --path '/srv/my app'`
 
 	only := evidenceReason("checkout::TestDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12"}}, mocks, time.Time{}, nil, scopeSet{flags: flags})
-	require.Contains(t, only, "remove it: keploy mock derive --remove checkout::TestDeclined/mock-12"+named+". If the call changed")
-	require.Contains(t, only, `keploy mock quarantine checkout::TestDeclined --reason "<why>"`+named+".")
+	require.Contains(t, only, "remove it:\nkeploy mock derive --remove checkout::TestDeclined/mock-12"+named+"\nIf the call changed")
+	require.Equal(t, `If it is flaky, not broken: keploy mock quarantine checkout::TestDeclined --reason "<why>"`+named, lastLine(only))
 
 	mixed := evidenceReason("checkout::TestDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12", "mock-2"}}, mocks, time.Time{}, nil, scopeSet{flags: flags})
-	require.Contains(t, mixed, "keploy mock derive --remove checkout::TestDeclined/mock-12"+named+". If the call changed")
-	require.Contains(t, mixed, `keploy mock quarantine checkout::TestDeclined --reason "<why>"`+named+".")
+	require.Contains(t, mixed, "\nkeploy mock derive --remove checkout::TestDeclined/mock-12"+named+"\nIf the call changed")
+	require.Equal(t, `If it is flaky, not broken: keploy mock quarantine checkout::TestDeclined --reason "<why>"`+named, lastLine(mixed))
 
 	none := evidenceReason("checkout::TestDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12"}}, mocks, time.Time{}, nil, scopeSet{})
-	require.Contains(t, none, "keploy mock derive --remove checkout::TestDeclined/mock-12. If the call changed")
-	require.Contains(t, none, `keploy mock quarantine checkout::TestDeclined --reason "<why>".`)
+	require.Contains(t, none, "\nkeploy mock derive --remove checkout::TestDeclined/mock-12\nIf the call changed")
+	require.Equal(t, `If it is flaky, not broken: keploy mock quarantine checkout::TestDeclined --reason "<why>"`, lastLine(none))
 
 	// A set of Keploy Cloud's recordings: keploy mock derive refuses it, so
 	// no remove (or derive-again) command is named, the reason says why,
@@ -3458,9 +3460,110 @@ func TestAFailedTestsCommandsCarryTheSetsFlags(t *testing.T) {
 		require.NotContains(t, r, "derive or generate it again", unmade)
 		require.Contains(t, r, "authored call POST pay.internal/charge (mock-12) was never made", unmade)
 		require.Contains(t, r, "A re-record keeps an authored mock, and keploy mock derive takes one out only of a set on disk, not of Keploy Cloud's recordings.", unmade)
-		require.Contains(t, r, `keploy mock quarantine checkout::TestDeclined --reason "<why>"`+cloudNamed+".", unmade)
+		require.Equal(t, `If it is flaky, not broken: keploy mock quarantine checkout::TestDeclined --reason "<why>"`+cloudNamed, lastLine(r), unmade)
 	}
 }
+
+// Each command a failed test's reason names is read by a shell, pasted as
+// printed, as exactly its words: the set's last flag value is the set's
+// name, with no period, semicolon or other punctuation of the sentence
+// around it. Before, the quarantine command ended its sentence's period
+// ("--name t2-go." named set "t2-go."), and the remove commands were joined
+// by "; " and ended the same way.
+func TestAFailedTestsCommandsParseAsPrinted(t *testing.T) {
+	authored := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredDerived, Reason: "card declined"}}}
+	recorded := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://pay.internal/rates"}}}
+	mocks := map[string]*models.Mock{"mock-12": authored, "mock-13": authored, "mock-2": recorded}
+	const id = "checkout::TestDeclined"
+	flags := []string{"--local", "--path", "/srv/my app", "--branch", "it's", "--name", "t2-go"}
+	cmd := func(words ...string) []string { return append(words, flags...) }
+	record := []string{"keploy", "mock", "record", "-c", "<your command, selecting " + id + ">"}
+	quarantine := cmd("keploy", "mock", "quarantine", id, "--reason", "<why>")
+	remove := func(n string) []string { return cmd("keploy", "mock", "derive", "--remove", id+"/"+n) }
+
+	for _, c := range []struct {
+		name string
+		ev   *models.ScopeEvidence
+		set  scopeSet
+		want [][]string
+	}{
+		{"authored mocks only", &models.ScopeEvidence{Unconsumed: []string{"mock-12", "mock-13"}}, scopeSet{flags: flags},
+			[][]string{remove("mock-12"), remove("mock-13"), quarantine}},
+		{"authored and recorded", &models.ScopeEvidence{Unconsumed: []string{"mock-12", "mock-2"}}, scopeSet{flags: flags},
+			[][]string{record, remove("mock-12"), quarantine}},
+		{"a call with no answer", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Destination: "pay.internal"}}}, scopeSet{flags: flags},
+			[][]string{record, quarantine}},
+		{"Keploy Cloud's set", &models.ScopeEvidence{Unconsumed: []string{"mock-12"}}, scopeSet{flags: flags, cloud: true},
+			[][]string{quarantine}},
+		{"no set named", &models.ScopeEvidence{Unconsumed: []string{"mock-12", "mock-2"}}, scopeSet{},
+			[][]string{record, {"keploy", "mock", "derive", "--remove", id + "/mock-12"}, {"keploy", "mock", "quarantine", id, "--reason", "<why>"}}},
+	} {
+		r := evidenceReason(id, c.ev, mocks, time.Time{}, nil, c.set)
+		require.Equal(t, c.want, commandsIn(t, r), "%s:\n%s", c.name, r)
+
+		// What keploy could not judge, said after the reason, goes on a
+		// line of its own: the reason's last command keeps its words.
+		ev := &models.ScopeEvidence{Reason: r}
+		ev.ChargeNotJudged(models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock m3, from process 9"}})
+		require.Contains(t, ev.Reason, "\nAlso not judged: ", c.name)
+		require.Equal(t, c.want, commandsIn(t, ev.Reason), "%s, a loss not judged added:\n%s", c.name, ev.Reason)
+	}
+}
+
+// A test keploy saw miss a call, beside a call over a Unix socket that
+// keploy cannot capture, stays failed, and its reason says the call it could
+// not judge on a line of its own: the quarantine command keeps its words.
+func TestAFailedTestsCommandsKeepTheirWordsBesideALossNotJudged(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	a.Hooks = unixHooks{losses: models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}}}
+	require.NoError(t, a.SetScopeSkips(context.Background(), nil, nil, []string{"--local", "--name", "t2-go"}, false))
+	claimSelf(t, a)
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Destination: "pay.internal"}}
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	r := windowOf(t, a, "o::TestA").Evidence.Reason
+	require.Contains(t, r, "\nAlso not judged: ", r)
+	require.Equal(t, [][]string{
+		{"keploy", "mock", "record", "-c", "<your command, selecting o::TestA>"},
+		{"keploy", "mock", "quarantine", "o::TestA", "--reason", "<why>", "--local", "--name", "t2-go"},
+	}, commandsIn(t, r), r)
+}
+
+// commandsIn is each keploy mock command in text, as a shell splits it,
+// where a command starts: at the start of a line, or after a word that ends
+// in ":" and a blank ("quarantine it: keploy mock ..."), as a build that
+// rewrites the commands finds them (RunnableText). A command runs to the end
+// of its line, which is how a developer copies it. "keploy mock" in prose
+// ("and keploy mock derive takes ...") is no command.
+func commandsIn(t *testing.T, text string) [][]string {
+	t.Helper()
+	const name = "keploy mock "
+	var out [][]string
+	for _, line := range strings.Split(text, "\n") {
+		i := -1
+		if strings.HasPrefix(line, name) {
+			i = 0
+		} else if j := strings.Index(line, ": "+name); j >= 0 {
+			i = j + 2
+		}
+		if i < 0 {
+			continue
+		}
+		words, err := shlex.Split(line[i:])
+		require.NoError(t, err, line)
+		out = append(out, words)
+	}
+	return out
+}
+
+// lastLine is text's last line.
+func lastLine(text string) string { return text[strings.LastIndexByte(text, '\n')+1:] }
 
 // The flags the replay's gate names its set with (SetScopeSkips) are the
 // agent's own copy, and go into the reason of each test the replay fails:
@@ -3483,23 +3586,23 @@ func TestTheReplaysSetFlagsReachEachFailedTestsReason(t *testing.T) {
 		require.Equal(t, models.ScopeActionFail, e.Action)
 		return e.Reason
 	}
-	require.Contains(t, fail("TestA"), `keploy mock quarantine o::TestA --reason "<why>" --local --name checkout.`)
+	require.Equal(t, `If it is flaky, not broken: keploy mock quarantine o::TestA --reason "<why>" --local --name checkout`, lastLine(fail("TestA")))
 
 	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Excluded: 1}}
 	lost := fail("TestB")
 	require.Contains(t, lost, "excluded_pids", "the reason is written again with the loss")
-	require.Contains(t, lost, `keploy mock quarantine o::TestB --reason "<why>" --local --name checkout.`)
+	require.Equal(t, `If it is flaky, not broken: keploy mock quarantine o::TestB --reason "<why>" --local --name checkout`, lastLine(lost))
 
 	require.NoError(t, a.resetSession(ctx))
 	claimSelf(t, a)
-	require.Contains(t, fail("TestC"), `keploy mock quarantine o::TestC --reason "<why>".`, "the flags belong to the session whose gate named them")
+	require.Equal(t, `If it is flaky, not broken: keploy mock quarantine o::TestC --reason "<why>"`, lastLine(fail("TestC")), "the flags belong to the session whose gate named them")
 	require.Equal(t, scopeSet{}, a.scopeSetFlags(), "a new session forgets the set")
 
 	// A gate that names a set of Keploy Cloud's recordings: its flags end
 	// the quarantine line, and the agent keeps that it is Keploy Cloud's.
 	require.NoError(t, a.SetScopeSkips(ctx, nil, nil, []string{"--name", "checkout", "--app", "pay"}, true))
 	require.Equal(t, scopeSet{flags: []string{"--name", "checkout", "--app", "pay"}, cloud: true}, a.scopeSetFlags())
-	require.Contains(t, fail("TestD"), `keploy mock quarantine o::TestD --reason "<why>" --name checkout --app pay.`)
+	require.Equal(t, `If it is flaky, not broken: keploy mock quarantine o::TestD --reason "<why>" --name checkout --app pay`, lastLine(fail("TestD")))
 }
 
 // noPayloadSource is a PayloadSource that reads nothing back.
