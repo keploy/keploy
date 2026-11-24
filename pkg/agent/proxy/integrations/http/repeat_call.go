@@ -172,9 +172,12 @@ func sameRequest(diffs []strictField) bool {
 // from the set's recordings, which the agent does not hold.
 //
 // outside says a is a recording made outside every test
-// (models.RepeatNote.OutsideTests), and hint is the miss's word on serving
-// the call to its test (sessionCallHint), which the note keeps so that the
-// replay's rewrite of the next step (markRepeatOf) keeps it too.
+// (models.RepeatNote.OutsideTests), as the store's scope table tells it
+// (madeOutsideTests) or the store's finder does (AnsweredCall.OutsideTests:
+// a plain startup: recording, which no scope table need name), and hint is
+// the miss's word on serving the call to its test (sessionCallHint), which
+// the note keeps so that the replay's rewrite of the next step
+// (markRepeatOf) keeps it too.
 func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall, outside bool, hint string) {
 	m := a.Mock
 	if !report.NotOwned {
@@ -184,7 +187,7 @@ func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall, 
 	}
 	report.Repeat = models.NewRepeatNote(m.Name, a.AnsweredAt, m.Spec.ReqTimestampMock, report.At)
 	report.Repeat.Background, report.Repeat.SkippedRead = a.Background, a.SkippedRead
-	report.Repeat.OutsideTests = outside && a.Background == "" && !a.SkippedRead
+	report.Repeat.OutsideTests = (outside || a.OutsideTests) && a.Background == "" && !a.SkippedRead
 	report.Repeat.Hint = hint
 	report.NextSteps = report.Repeat.ExplainMiss(report.NotOwned, report.ClosestMock, "", mismatch.RecordCommand())
 }

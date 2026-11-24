@@ -47,6 +47,10 @@ type backgroundState struct {
 	settling    bool
 	mu          sync.Mutex
 	spent       map[string]bool
+	// ownedInTest reports whether a recording of the background in force in
+	// a staging epoch is one a test's identical call is the test's own call
+	// in (MockManager.testOwnsStartupAt); nil: none is.
+	ownedInTest func(epoch uint64, name string) bool
 }
 
 // isSpent reports whether name was consumed in unset-mode background serving.
@@ -146,9 +150,10 @@ func (m *MockManager) ServeExactBackground(rules string, pool, worker []string) 
 		return
 	}
 	b := &backgroundState{
-		pool:   make(map[string]struct{}, len(pool)),
-		worker: make(map[string]struct{}, len(worker)),
-		spent:  make(map[string]bool),
+		pool:        make(map[string]struct{}, len(pool)),
+		worker:      make(map[string]struct{}, len(worker)),
+		spent:       make(map[string]bool),
+		ownedInTest: m.testOwnsStartupAt,
 	}
 	for _, n := range pool {
 		if n != "" {
@@ -295,6 +300,22 @@ func (v *exactView) isBackgroundRecording(mk *models.Mock) bool {
 	}
 	_, gone := v.sourcesReplaced[mk.Name]
 	return !gone
+}
+
+// isBackgroundRecordingTo is isBackgroundRecording to a call read in a test's
+// window (windowed) or between tests: to one read in a test's window the
+// set's plain startup: recordings are none (startupOwned), as the view shows
+// them none (sharesRestTo). A by-kind answer reads and spends by it.
+func (v *exactView) isBackgroundRecordingTo(mk *models.Mock, windowed bool) bool {
+	return v.isBackgroundRecording(mk) && !(windowed && v.startupOwned(mk.Name))
+}
+
+// startupOwned reports whether name is one of the plain startup: recordings
+// of the background in force in the staging epoch the view was installed in
+// (MockManager.testOwnsStartupAt): a call read in a test's window is the
+// test's own call in it. False with no background rules.
+func (v *exactView) startupOwned(name string) bool {
+	return v.bg != nil && v.bg.ownedInTest != nil && v.bg.ownedInTest(v.installed.Epoch, name)
 }
 
 // scopeReplacedSet returns the open unset-mode scope's replaced source names
@@ -466,22 +487,32 @@ func (m *MockManager) consumeUnsetBackground(mk *models.Mock, evicts bool, g *ro
 func (m *MockManager) Background(kind models.Kind) []*models.Mock {
 	v := m.exactView()
 	if v != nil {
-		if v.bg == nil {
-			return nil
-		}
-		var shown []*models.Mock
-		for _, mk := range v.keep(m.stagedOfKind(kind)) {
-			if v.isBackgroundRecording(mk) {
-				shown = append(shown, mk)
-			}
-		}
-		return shown
+		return m.backgroundTo(v, v.test != "", kind)
 	}
 	bg, exact := m.servedBackground(nil)
 	if !exact {
 		return nil
 	}
 	return m.unsetBackground(kind, bg)
+}
+
+// backgroundTo is Background in v to a call read in a test's window
+// (windowed) or between tests, whatever view is in force as it reads
+// (roundGuard.windowed): what v shows that call (showsTo), so to one read
+// between tests the set's plain startup: recordings are the pool's though
+// the next test opened before the read, and to one read in a test's window
+// they are none (isBackgroundRecordingTo).
+func (m *MockManager) backgroundTo(v *exactView, windowed bool, kind models.Kind) []*models.Mock {
+	if v.bg == nil {
+		return nil
+	}
+	var shown []*models.Mock
+	for _, mk := range v.keepWith(m.stagedOfKind(kind), func(mk *models.Mock) bool { return v.showsTo(mk, windowed) }) {
+		if v.isBackgroundRecordingTo(mk, windowed) {
+			shown = append(shown, mk)
+		}
+	}
+	return shown
 }
 
 // unsetBackground is Background with no exact view, for bg, the background
@@ -515,29 +546,37 @@ func (m *MockManager) unsetBackground(kind models.Kind, bg *backgroundState) []*
 // SpentBackground is, under the background rules, kind's background
 // recordings this staging consumed (integrations.ExactBackground), read-only,
 // in recorded order: what an answer by kind reuses once its kind's recordings
-// are used up. nil for a set served by today's rules.
+// are used up. In a test's view it leaves out the set's plain startup:
+// recordings (spentBackgroundTo). nil for a set served by today's rules.
 func (m *MockManager) SpentBackground(kind models.Kind) []*models.Mock {
 	v := m.exactView()
 	if v != nil {
-		if v.bg == nil {
-			return nil
-		}
-		var out []*models.Mock
-		for _, mk := range m.stagedOfKind(kind) {
-			if v.isBackgroundRecording(mk) && v.spentBackground(mk.Name) {
-				out = append(out, mk)
-			}
-		}
-		sort.SliceStable(out, func(i, j int) bool {
-			return out[i].Spec.ReqTimestampMock.Before(out[j].Spec.ReqTimestampMock)
-		})
-		return out
+		return m.spentBackgroundTo(v, v.test != "", kind)
 	}
 	bg, exact := m.servedBackground(nil)
 	if !exact {
 		return nil
 	}
 	return m.unsetSpentBackground(kind, bg)
+}
+
+// spentBackgroundTo is SpentBackground in v to a call read in a test's
+// window (windowed) or between tests: to one read in a test's window, none
+// of the set's plain startup: recordings (isBackgroundRecordingTo).
+func (m *MockManager) spentBackgroundTo(v *exactView, windowed bool, kind models.Kind) []*models.Mock {
+	if v.bg == nil {
+		return nil
+	}
+	var out []*models.Mock
+	for _, mk := range m.stagedOfKind(kind) {
+		if v.isBackgroundRecordingTo(mk, windowed) && v.spentBackground(mk.Name) {
+			out = append(out, mk)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Spec.ReqTimestampMock.Before(out[j].Spec.ReqTimestampMock)
+	})
+	return out
 }
 
 // unsetSpentBackground is SpentBackground with no exact view, for bg, the
@@ -565,15 +604,27 @@ var _ integrations.ExactBackground = (*MockManager)(nil)
 // data-plane recordings, no async lane's, of the worker scope at every place,
 // reached or not, and of the pool, split into those unused and those this
 // staging spent, each in recorded order. By-kind answers ignore Place, so its
-// answer does not depend on the places the run has reached.
+// answer does not depend on the places the run has reached. In a test's view
+// it leaves out the set's plain startup: recordings (kindBackgroundTo).
 // nil, nil for a set served by today's rules, and with exact serving off.
 func (m *MockManager) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
 	v := m.exactView()
-	if v == nil || v.bg == nil {
+	if v == nil {
+		return nil, nil
+	}
+	return m.kindBackgroundTo(v, v.test != "", kind)
+}
+
+// kindBackgroundTo is KindBackground in v to a call read in a test's window
+// (windowed) or between tests: to one read in a test's window, none of the
+// set's plain startup: recordings (isBackgroundRecordingTo), which such a
+// call is the test's own call in.
+func (m *MockManager) kindBackgroundTo(v *exactView, windowed bool, kind models.Kind) (unused, spent []*models.Mock) {
+	if v.bg == nil {
 		return nil, nil
 	}
 	for _, mk := range m.stagedOfKind(kind) {
-		if !v.isBackgroundRecording(mk) {
+		if !v.isBackgroundRecordingTo(mk, windowed) {
 			continue
 		}
 		if v.spentBackground(mk.Name) {
@@ -613,7 +664,7 @@ func (m *MockManager) SpendByKind(mk *models.Mock) bool {
 func (m *MockManager) spendByKindAt(mk *models.Mock, g *roundGuard) (spent bool, why string) {
 	why = "it is no unused background recording of the set"
 	spent = settleInForce(m, false, func(v *exactView) (bool, <-chan struct{}) {
-		if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) {
+		if v == nil || v.bg == nil || !v.isBackgroundRecordingTo(mk, g.windowed(v)) {
 			if g != nil && v == nil {
 				why = "exact serving is off"
 			}
@@ -646,10 +697,13 @@ func (m *MockManager) spendByKindAt(mk *models.Mock, g *roundGuard) (spent bool,
 // and spent for the view g's call was read in (roundGuard.windowed), as
 // exactConsumeIn does.
 func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock, g *roundGuard) (bool, <-chan struct{}) {
-	if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) {
+	if v == nil || v.bg == nil {
 		return false, nil
 	}
 	windowed := g.windowed(v)
+	if !v.isBackgroundRecordingTo(mk, windowed) {
+		return false, nil
+	}
 	if v.spentIn(mk.Name) || v.spentOutsideIn(mk.Name, windowed) {
 		return false, nil
 	}

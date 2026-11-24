@@ -9,6 +9,7 @@ import (
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +25,7 @@ func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, residen
 	if !ok {
 		return
 	}
-	recs, err := backgroundRecordingsOf(params.BackgroundMocks, resident, disk)
+	recs, err := backgroundRecordingsOf(params.BackgroundMocks, params.StartupMocks, resident, disk)
 	if err != nil {
 		a.logger.Warn("could not read the test set's background recordings (mappings.yaml worker: and startup:); every call that misses stays its test's miss",
 			zap.Int("background", len(params.BackgroundMocks)), zap.Error(err))
@@ -44,15 +45,29 @@ type bgCallTime struct {
 // (models.BackgroundRecording.From): the request time of the latest
 // data-plane recording sent before it, not itself, and not answered after
 // it was sent, the rule learn.PreviousCall reads a call's previous call by.
-// Each recording on disk is decoded once, and only the named ones are kept.
-// nil for no names; err when disk cannot be read.
-func backgroundRecordingsOf(names []string, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
+// Under the proven switch each one startup names is a plain startup:
+// recording (models.BackgroundRecording.Startup) when a user can declare a
+// call identical to it (models.StartupDeclarable: an HTTP or HTTP/2
+// recording that states its lifetime, and any of a kind a rule system
+// registered) and no keploy.yaml sessionCalls entry
+// names it exactly (models.Mock.DeclaredSessionCall): a declared session
+// call stays the background's, and so does a recording no one can declare,
+// as in v3.7.18. With the switch off none is, whatever the CLI
+// sent. Each recording on disk is decoded once, and only
+// the named ones are kept. nil for no names; err when disk cannot be read.
+func backgroundRecordingsOf(names, startup []string, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
 	want := make(map[string]bool, len(names))
 	for _, n := range names {
 		want[n] = true
+	}
+	plain := make(map[string]bool, len(startup))
+	if provenswitch.On() {
+		for _, n := range startup {
+			plain[n] = true
+		}
 	}
 	var recs []models.BackgroundRecording
 	var calls []bgCallTime
@@ -69,7 +84,7 @@ func backgroundRecordingsOf(names []string, resident [][]*models.Mock, disk *pro
 		seen[id] = true
 		if want[mk.Name] && !got[mk.Name] {
 			got[mk.Name] = true
-			recs = append(recs, models.BackgroundRecording{Mock: mk})
+			recs = append(recs, models.BackgroundRecording{Mock: mk, Startup: plain[mk.Name] && models.StartupDeclarable(mk) && !mk.DeclaredSessionCall()})
 		}
 		if !mk.IsProtocolPhase() && !mk.Spec.ReqTimestampMock.IsZero() {
 			calls = append(calls, bgCallTime{req: mk.Spec.ReqTimestampMock, res: mk.Spec.ResTimestampMock})

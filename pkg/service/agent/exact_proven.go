@@ -145,6 +145,33 @@ func (a *Agent) mockBackgroundRules() string {
 	return models.RecordedWithS12Routing
 }
 
+// plainStartupNames is, of the set's background recordings (background: its
+// worker: and startup: mocks, as the CLI's table names them), its plain
+// startup: mocks under the proven switch (models.MockFilterParams.
+// StartupMocks): the ones in no worker scope of any key. A declared
+// startup: true rule's recording is placed in worker: (mapdb's MoveToWorker),
+// and a recording made between tests is learned there, so neither is one.
+// nil with the switch off: every background recording is then the
+// background's in a test's window too, as before. Caller holds a.provenMu.
+func plainStartupNames(background []string, worker map[string][]string) []string {
+	if !provenswitch.On() || len(background) == 0 {
+		return nil
+	}
+	inWorker := map[string]bool{}
+	for _, ws := range worker {
+		for _, n := range ws {
+			inWorker[n] = true
+		}
+	}
+	var out []string
+	for _, n := range background {
+		if n != "" && !inWorker[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // serveUnsetBackground arms ONLY the shared ServeExactBackground engine (and
 // seeds the background recordings on the proxy) when KEPLOY_PROVEN is unset.
 // It never calls ServeExactPool or ServeExactTest, so m.exactView() stays nil
@@ -377,6 +404,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	}
 	a.provenMu.Lock()
 	first, pool, background := a.proven.firstRecorded, a.proven.pool, a.proven.background
+	startup := plainStartupNames(background, a.proven.worker)
 	a.provenMu.Unlock()
 	names := poolNames(pool)
 	// The set's background recordings (its worker: and startup: mocks, as
@@ -390,6 +418,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 		ExactStaging:           true,
 		FirstRecordedTestStart: first,
 		BackgroundMocks:        background,
+		StartupMocks:           startup,
 	}
 	if err := a.stageMocks(ctx, params, names, nil); err != nil {
 		return false, fmt.Errorf("stage the recording's mocks: %w", err)
@@ -404,6 +433,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	a.provenMu.Lock()
 	a.proven.stagedPool = staged
 	a.proven.stagedBackground = background
+	a.proven.stagedStartup = startup
 	a.provenMu.Unlock()
 	// The learn step reads the set's recordings now, in the background, not
 	// on its first drifted call's answer path: keploy mock's replay of

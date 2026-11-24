@@ -69,6 +69,9 @@ func TestAgentClient_GetScopeWindowsIsTheFinalRead(t *testing.T) {
 // scope in one request, an empty pool as {}, the time default only when it
 // is on, and any answer but 200 is an error.
 func TestAgentClient_PushProvenTable(t *testing.T) {
+	// The bodies below carry no declared session calls, which the table
+	// carries under the switch (TestTheScopeTableCarriesTheDeclaredSessionCalls).
+	t.Setenv(provenswitch.Env, "")
 	var bodies []string
 	status := http.StatusOK
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +155,9 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 // make, and without its background recordings' names it would charge each
 // test for one more run of the application's own polls.
 func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
+	// The body below carries no declared session calls, which the table
+	// carries under the switch (TestTheScopeTableCarriesTheDeclaredSessionCalls).
+	t.Setenv(provenswitch.Env, "")
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/scope/table" {
@@ -190,6 +196,62 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]},"worker":{"o":["mock-1"]},"trails":{"mock-1":"o::TestA"},"timeForm":true,"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-3"]}]},"notRequired":{"o::TestA":["mock-3"]},"skippedReads":{"mock-1":"o::TestCRUD"},"background":["mock-1"]}`
 	if !slices.Equal(bodies, []string{want, want}) {
 		t.Fatalf("posted %q, want the table, its windows, its givens, its worker scope, its trails, its repeated reads, its not-required marks, its skipped reads, its background recordings and its time default twice: %q", bodies, want)
+	}
+}
+
+// Under the proven switch the table carries the session calls the client
+// declares (models.DeclaredSessionCalls), none an empty declaration, so the
+// agent's are replaced each set. An agent whose answer does not acknowledge
+// them (an older one, which would neither serve a declared call nor tell it
+// from a plain startup: recording) is refused when the client declares any
+// (ErrAgentIgnoresRules), and taken when it declares none. Off the switch the
+// table carries none.
+// Mutation: leave the declaration out, or take an agent that ignores it.
+func TestTheScopeTableCarriesTheDeclaredSessionCalls(t *testing.T) {
+	t.Cleanup(func() { models.SetSessionCalls(nil) })
+	var answer string
+	var posted models.ScopeTableReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted = models.ScopeTableReq{}
+		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+			t.Errorf("the posted table does not decode: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, answer)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	push := func() error {
+		return a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {}}, map[string][]string{"o": {}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
+	}
+	rule := models.SessionCallRule{Host: "rates.example.com", Method: "GET", PathPrefix: "/rates"}
+	t.Setenv(provenswitch.Env, "1")
+	models.SetSessionCalls([]models.SessionCallRule{rule})
+	answer = `{"status":"ok","served":["sessionCalls"]}`
+	if err := push(); err != nil {
+		t.Fatal(err)
+	}
+	if posted.SessionCalls == nil || !slices.Equal(posted.SessionCalls.Rules, []models.SessionCallRule{rule}) {
+		t.Fatalf("the table carried %+v; want the declared session call", posted.SessionCalls)
+	}
+	answer = `{"status":"ok"}`
+	if err := push(); !errors.Is(err, ErrAgentIgnoresRules) {
+		t.Fatalf("an agent that does not acknowledge the declared session calls: got %v, want ErrAgentIgnoresRules", err)
+	}
+	models.SetSessionCalls(nil)
+	if err := push(); err != nil {
+		t.Fatalf("none declared, an older agent: %v", err)
+	}
+	if posted.SessionCalls == nil || len(posted.SessionCalls.Rules) != 0 {
+		t.Fatalf("none declared: the table carried %+v; want an empty declaration", posted.SessionCalls)
+	}
+	t.Setenv(provenswitch.Env, "")
+	models.SetSessionCalls([]models.SessionCallRule{rule})
+	if err := push(); err != nil {
+		t.Fatal(err)
+	}
+	if posted.SessionCalls != nil {
+		t.Fatalf("off the switch the table carried %+v", posted.SessionCalls)
 	}
 }
 
