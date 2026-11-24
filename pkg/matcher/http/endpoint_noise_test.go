@@ -8,6 +8,7 @@ import (
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func endpointCase(method, url, recorded string) *models.TestCase {
@@ -69,6 +70,7 @@ func TestEndpointNoiseNamesAnExactPathFromTheTop(t *testing.T) {
 		{"a whole subtree", "data.app", `{"data":{"app":{"id":"a1","updatedAt":1}},"n":1}`, `{"data":{"app":{"id":"a2","updatedAt":2}},"n":1}`, true},
 		{"a sibling with a longer name", "data.ver", `{"data":{"version":"1"}}`, `{"data":{"version":"2"}}`, false},
 		{"case does not matter", "Data.Version", `{"data":{"version":"1"}}`, `{"data":{"version":"2"}}`, true},
+		{"a JSONPath-style root", "$.data.version", `{"data":{"version":"1"}}`, `{"data":{"version":"2"}}`, true},
 		{"a map keyed by ids", "results.{id}.traceId", `{"results":{"0b7c5d9e-1c1f-4a55-9a8e-7f3c2e1d4b6a":{"traceId":"t1","n":1}}}`, `{"results":{"0b7c5d9e-1c1f-4a55-9a8e-7f3c2e1d4b6a":{"traceId":"t2","n":1}}}`, true},
 	}
 	for _, c := range cases {
@@ -137,6 +139,7 @@ func TestEndpointMatches(t *testing.T) {
 		{"", "/Version", "GET", "http://api/version", false},
 		{"", "/files/{name}", "GET", "http://api/files/a%2Fb", true},
 		{"", "/files/a b", "GET", "http://api/files/a%20b", true},
+		{"", "/files/a%20b", "GET", "http://api/files/a%20b", true},
 	}
 	for _, c := range cases {
 		r := config.EndpointNoise{Method: c.method, Path: c.path, Body: config.Noise{"v": {}}}
@@ -209,5 +212,16 @@ func TestBodyNoiseCoveringNamesAnEndpointRuleWithAnIDKey(t *testing.T) {
 	}
 	if got := matcherUtils.BodyNoiseCovering([]string{"results", "0b7c5d9e-1c1f-4a55-9a8e-7f3c2e1d4b6a", "n"}, nil, global, zap.NewNop()); got != "" {
 		t.Fatalf("a sibling field is covered by %q", got)
+	}
+}
+
+func TestEndpointRulesKeepTheRegexShapedNoiseWarning(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	tc := endpointCase("GET", "http://api/version", `{"ts":"a"}`)
+	tc.Noise = map[string][]string{"body": {"^endpointRuleTs.*"}}
+	noise := AddEndpointNoise(nil, []config.EndpointNoise{{Path: "/version", Body: config.Noise{"version": {}}}}, tc)
+	Match(tc, &models.HTTPResp{StatusCode: 200, Body: `{"ts":"a"}`}, noise, false, false, zap.New(core), false)
+	if logs.FilterMessageSnippet("looks like a regex").Len() != 1 {
+		t.Fatal("the warning for a regex-shaped test-case noise value was not said")
 	}
 }

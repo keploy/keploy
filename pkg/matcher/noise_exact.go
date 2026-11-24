@@ -10,8 +10,8 @@ func ExactKey(path string) string {
 
 func ExactPath(path string) string {
 	var segs []string
-	for _, s := range strings.Split(strings.ReplaceAll(path, "[]", ""), ".") {
-		if s != "" {
+	for i, s := range strings.Split(strings.ReplaceAll(path, "[]", ""), ".") {
+		if s != "" && (i > 0 || s != "$") {
 			segs = append(segs, s)
 		}
 	}
@@ -30,9 +30,7 @@ func exactCovers(path, entry string) bool {
 	if entry == "" {
 		return false
 	}
-	if strings.Contains(path, "[]") {
-		path = strings.TrimLeft(strings.ReplaceAll(path, "[]", ""), ".")
-	}
+	path = strings.TrimLeft(strings.ReplaceAll(path, "[]", ""), ".")
 	return path == entry || strings.HasPrefix(path, entry+".")
 }
 

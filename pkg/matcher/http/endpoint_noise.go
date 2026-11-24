@@ -8,7 +8,6 @@ import (
 	"go.keploy.io/server/v3/config"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.uber.org/zap"
 )
 
 func AddEndpointNoise(noise map[string]map[string][]string, rules []config.EndpointNoise, tc *models.TestCase) map[string]map[string][]string {
@@ -47,7 +46,7 @@ func AddEndpointNoise(noise map[string]map[string][]string, rules []config.Endpo
 }
 
 func ownNoise(noise map[string][]string) (body, header map[string]bool) {
-	b, h, _ := matcherUtils.SplitNoise(noise, zap.NewNop())
+	b, h, _ := matcherUtils.SplitNoise(noise, nil)
 	body = make(map[string]bool, len(b))
 	for k := range b {
 		body[matcherUtils.ExactPath(k)] = true
@@ -85,6 +84,9 @@ func pathMatches(pattern string, u *url.URL) bool {
 				return false
 			}
 			continue
+		}
+		if pw, err := url.PathUnescape(w); err == nil {
+			w = pw
 		}
 		if w != g {
 			return false

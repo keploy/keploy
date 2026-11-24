@@ -24,6 +24,7 @@ func TestExactCovers(t *testing.T) {
 		{"[].heartbeats[].at", "heartbeats.at", true},
 		{"[].heartbeats[].at", "heartbeats", true},
 		{"version", "", false},
+		{".version", "version", true},
 	} {
 		if got := exactCovers(c.path, c.entry); got != c.want {
 			t.Errorf("exactCovers(%q, %q) = %v, want %v", c.path, c.entry, got, c.want)
