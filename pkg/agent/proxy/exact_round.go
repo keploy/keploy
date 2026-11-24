@@ -884,8 +884,11 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	read("consumed")
 
 	if q.Kind != "" && v.bg != nil {
+		// A call marked from the snapshot is read in v: in a test's
+		// window, the set's plain startup: recordings are none of its
+		// background (isBackgroundRecordingTo).
 		for _, mk := range m.stagedOfKind(q.Kind) {
-			if !v.isBackgroundRecording(mk) {
+			if !v.isBackgroundRecordingTo(mk, v.test != "") {
 				continue
 			}
 			if v.spentBackground(mk.Name) {
@@ -1584,20 +1587,37 @@ func (h *heldScope) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, e
 	return h.held(h.getCarryOverMocksByKindIn(h.readView(), kind))
 }
 
+// Background is the manager's to h's call, read in a test's window or
+// between tests (roundGuard.windowed): to one read between tests the set's
+// plain startup: recordings are the pool's though the next test opened
+// before it read them, and to one read in a test's window they are none
+// (backgroundTo).
 func (h *heldScope) Background(kind models.Kind) []*models.Mock {
+	if v := h.exactView(); v != nil {
+		return h.heldOf(h.backgroundTo(v, h.g.windowed(v), kind))
+	}
 	return h.heldOf(h.MockManager.Background(kind))
 }
 
+// SpentBackground is the manager's to h's call, read in a test's window or
+// between tests (roundGuard.windowed): to one read in a test's window, none
+// of the set's plain startup: recordings (isBackgroundRecordingTo).
 func (h *heldScope) SpentBackground(kind models.Kind) []*models.Mock {
+	if v := h.exactView(); v != nil {
+		return h.heldOf(h.spentBackgroundTo(v, h.g.windowed(v), kind))
+	}
 	return h.heldOf(h.MockManager.SpentBackground(kind))
 }
 
-// KindBackground is the manager's, what h hides kept: no parser reads it
+// KindBackground is the manager's to h's call, read in a test's window or
+// between tests (roundGuard.windowed), what h hides kept: no parser reads it
 // from a call's held store (answering by kind reads the round,
 // integrations.SnapshotRound), and SpendByKind's door refuses a recording h
 // hides all the same.
 func (h *heldScope) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
-	unused, spent = h.MockManager.KindBackground(kind)
+	if v := h.exactView(); v != nil {
+		unused, spent = h.kindBackgroundTo(v, h.g.windowed(v), kind)
+	}
 	if h.moved() || h.viewGone() {
 		return nil, nil
 	}
@@ -1655,13 +1675,13 @@ func (h *heldScope) SkippedReadsAnswered() []*models.Mock {
 	return h.heldOf(h.MockManager.SkippedReadsAnswered())
 }
 
-// FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
-// the staging is still h's call's after the lookup: the answered log is the
-// staged set's, and recordings' names restart in each set, so a call of one
-// set is never named a repeat of a recording another set staged under it
-// answered.
+// FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) for h's
+// call, read in the view its reads are (readView), while the staging is
+// still h's call's after the lookup: the answered log is the staged set's,
+// and recordings' names restart in each set, so a call of one set is never
+// named a repeat of a recording another set staged under it answered.
 func (h *heldScope) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
-	a, ok := h.MockManager.FindAnsweredEarlier(kind, keys, match)
+	a, ok := h.findAnsweredEarlierIn(h.readView(), kind, keys, match)
 	if h.moved() {
 		return integrations.AnsweredCall{}, false
 	}

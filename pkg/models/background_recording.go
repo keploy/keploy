@@ -20,6 +20,21 @@ import "time"
 type BackgroundRecording struct {
 	Mock *Mock
 	From time.Time
+	// Startup says the recording is one of the set's plain startup: mocks
+	// (MockFilterParams.StartupMocks), keploy mock replay's or keploy
+	// test's: made outside every test, before the first, of a kind a user
+	// can declare a call of (StartupDeclarable), and covered by no declared
+	// rule (no keploy.yaml sessionCalls entry names it exactly,
+	// Mock.DeclaredSessionCall, and no startup: true rule placed it, which
+	// moves it to worker:). Under the proven switch a call made inside an
+	// open test's window that is the same request as it is that test's own
+	// call: the test is not served it, and its miss counts against the test
+	// and says how to declare it (RepeatNote.OutsideTests), as before keploy
+	// mock replay served the set's startup background. Outside every test,
+	// and with the switch off, it is the background's as any other
+	// background recording. A learned background recording (worker:,
+	// recorded between tests) is never Startup.
+	Startup bool
 }
 
 // TrailRecording is a background recording (BackgroundRecording.Mock) that

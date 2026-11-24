@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	nethttp "net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +39,9 @@ type servingProxy struct {
 	mm     *proxyPkg.MockManager
 	mu     sync.Mutex
 	misses []models.UnmatchedCall
+	// background, when set, marks a filed miss as its parser's background
+	// mark does (the proxy's miss read keeps MismatchReport.Background).
+	background func(*models.UnmatchedCall)
 }
 
 func newServingProxy() *servingProxy {
@@ -117,7 +121,7 @@ func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 // test or outside every test, and the round, models.MissMark), an extra call
 // as its matcher found it, with the fields its report
 // says differ, whether it is a recording made elsewhere, its repeat note,
-// and stamped with when its report was built.
+// its next steps, and stamped with when its report was built.
 func (p *servingProxy) noteMiss(err error) {
 	uc := models.UnmatchedCall{Protocol: "HTTP", Kind: models.MissOutsideTest, At: time.Now()}
 	if p.mm.WindowSnapshot().Active {
@@ -130,6 +134,9 @@ func (p *servingProxy) noteMiss(err error) {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
 		uc.ClosestMock, uc.NotOwned, uc.Repeat = rep.ClosestMock, rep.NotOwned, rep.Repeat.Clone()
+		uc.NextSteps = rep.NextSteps
+		// The proxy's read keeps the parser's background mark (proxy.go).
+		uc.Background, uc.BackgroundBound = rep.Background, slices.Clone(rep.BackgroundBound)
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
@@ -147,6 +154,9 @@ func (p *servingProxy) noteMiss(err error) {
 		}
 	}
 	p.mu.Lock()
+	if p.background != nil {
+		p.background(&uc)
+	}
 	p.misses = append(p.misses, uc)
 	p.mu.Unlock()
 }
@@ -154,6 +164,12 @@ func (p *servingProxy) noteMiss(err error) {
 // call sends GET path, through the real HTTP matcher, and returns the status
 // and body the app got.
 func (p *servingProxy) call(t *testing.T, path string) (int, string) {
+	t.Helper()
+	return p.callWith(t, path, "")
+}
+
+// callWith is call with headers (each "Name: value\r\n") sent after Host.
+func (p *servingProxy) callWith(t *testing.T, path, headers string) (int, string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -169,7 +185,7 @@ func (p *servingProxy) call(t *testing.T, path string) (int, string) {
 	go func() {
 		_ = httpparser.New(zap.NewNop()).MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Port: 18093}, p.mm, models.OutgoingOptions{})
 	}()
-	_, err = io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:18093\r\n\r\n")
+	_, err = io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:18093\r\n"+headers+"\r\n")
 	require.NoError(t, err)
 	resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil)
 	require.NoError(t, err)

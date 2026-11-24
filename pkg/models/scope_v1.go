@@ -31,7 +31,11 @@ type InstanceReq struct {
 	Key string `json:"key"`
 	// Dir is the test process's working directory, absolute: where its tests
 	// run (a Go package's directory). Kept on each test's window, so the
-	// recording's mapping names the folder each test runs in.
+	// recording's mapping names the folder each test runs in. A claim without
+	// one runs its tests in the folder Key names below the project (the
+	// folder keploy.yml is read from), as an integration written by hand
+	// claims; an integration whose Key is not a folder (@keploy/jest's, its
+	// project's displayName) sends Dir.
 	Dir string `json:"dir,omitempty"`
 	// Workers is how many test workers of the run its framework runs at
 	// once (Playwright's workers, go test's -p), each claiming for itself.
@@ -219,6 +223,18 @@ type ScopeEvidence struct {
 	// keploy's error answer to a call (a miss) may have failed on that
 	// answer: it never has it. It is no evidence: Empty ignores it.
 	FailedOnItsOwn bool `json:"failedOnItsOwn,omitempty" yaml:"failedOnItsOwn,omitempty"`
+	// Background is, in a replay, the test's background misses: the calls
+	// made in its window that keploy found the same request as one of the
+	// set's background recordings (worker: or startup:), apart from noise
+	// and reads of the application's clock, with none left to answer them
+	// (UnmatchedCall.Background, no Answer). Each names its closest
+	// recording (UnmatchedCall.ClosestMock) and its next step. They count
+	// against no test (UnmatchedCall.CountsAgainstTest) and fail none, so
+	// they are never in Misses, and they are no evidence against the test:
+	// Empty and Unanswered ignore them. They are listed (Kept) so a test
+	// that failed on the answer it did not get is shown the call and how
+	// to serve it.
+	Background []UnmatchedCall `json:"background,omitempty" yaml:"background,omitempty"`
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID
@@ -245,15 +261,27 @@ func IDPart(s string) bool {
 	return !strings.Contains(s, "::") && !strings.HasPrefix(s, ":") && !strings.HasSuffix(s, ":")
 }
 
-// Empty reports whether there is no evidence.
+// Empty reports whether there is no evidence against the test. Its
+// background misses (Background) are none.
 func (e *ScopeEvidence) Empty() bool {
 	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0 && len(e.CannotCapture) == 0)
+}
+
+// Kept reports whether there is anything to keep of the test's end: evidence
+// against it (not Empty), a reason it was failed or not judged with, or a
+// background miss of its window (Background), which is listed though it
+// fails nothing.
+func (e *ScopeEvidence) Kept() bool {
+	return e != nil && (!e.Empty() || e.Reason != "" || len(e.Background) > 0)
 }
 
 // Unanswered reports whether the evidence holds a call of the test keploy
 // did not answer from a recording, or could not tell it answered: any
 // evidence but the recordings the test did not make (a miss, a call keploy
 // could not capture), or keploy could not read all the test did (Unread).
+// A background miss (Background) is none: keploy left it unanswered as the
+// set's background, not as the test's call, and it says nothing of where
+// the application makes the test's calls (FailedOnItsOwn).
 func (e *ScopeEvidence) Unanswered() bool {
 	if e == nil {
 		return false

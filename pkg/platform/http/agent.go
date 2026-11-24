@@ -5904,7 +5904,10 @@ func (a *AgentClient) PushProvenTableWithBackgroundRules(ctx context.Context, ta
 			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, Every: every, Gates: gates, TimeForm: timeForm, StartupRules: startupRules, BackgroundMongo: backgroundMongo, BackgroundHTTP: backgroundHTTP})
+	// The session calls keploy.yaml declares go with the set: an agent
+	// container reads no keploy.yaml (models.DeclaredSessionCalls).
+	sessionCalls := models.DeclaredSessionCallsToHand()
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, Every: every, Gates: gates, TimeForm: timeForm, StartupRules: startupRules, BackgroundMongo: backgroundMongo, BackgroundHTTP: backgroundHTTP, SessionCalls: sessionCalls})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -5925,14 +5928,16 @@ func (a *AgentClient) PushProvenTableWithBackgroundRules(ctx context.Context, ta
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("the agent refused the per-test table and pool slices (status %d): %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
-	if len(series) == 0 && len(sources) == 0 && len(once) == 0 && len(every) == 0 && len(gates) == 0 {
+	declares := sessionCalls != nil && len(sessionCalls.Rules) > 0
+	if len(series) == 0 && len(sources) == 0 && len(once) == 0 && len(every) == 0 && len(gates) == 0 && !declares {
 		return nil
 	}
 	// An older agent answers with no field named: it would serve a series'
 	// recordings once each, so a slower replay's repeat would miss, it
 	// would learn a declared field as if no rule declared it, it would
-	// answer a once series' request again and again, and an every series'
-	// next round would miss.
+	// answer a once series' request again and again, an every series'
+	// next round would miss, and it would neither serve a declared session
+	// call nor tell it from a plain startup: one.
 	var ack models.ScopeTableResp
 	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&ack); err != nil {
 		return ErrAgentIgnoresRules
@@ -5941,7 +5946,8 @@ func (a *AgentClient) PushProvenTableWithBackgroundRules(ctx context.Context, ta
 		len(once) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedOnce) ||
 		len(every) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedEvery) ||
 		len(gates) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedGates) ||
-		endsRepeats(gates) && !slices.Contains(ack.Served, models.ScopeTableServedAgainGates) {
+		endsRepeats(gates) && !slices.Contains(ack.Served, models.ScopeTableServedAgainGates) ||
+		declares && !slices.Contains(ack.Served, models.ScopeTableServedSessionCalls) {
 		return ErrAgentIgnoresRules
 	}
 	return nil
@@ -5962,7 +5968,7 @@ func endsRepeats(gates map[string]models.SeriesGate) bool {
 // ErrAgentIgnoresRules is PushProvenTable's refusal of an agent that does
 // not acknowledge a scope table's series or declared sources
 // (models.ScopeTableResp.Served).
-var ErrAgentIgnoresRules = errors.New("this keploy agent does not acknowledge the scope table's series, once series, every series or declared sources (an older agent ignores them): keploy mock does not run a set with declared rules on it; update the agent")
+var ErrAgentIgnoresRules = errors.New("this keploy agent does not acknowledge the scope table's series, once series, every series, declared sources or declared session calls (an older agent ignores them): keploy mock does not run a set with declared rules on it; update the agent")
 
 // PushTestBegins hands the agent when each test of the replayed recording
 // began, so it moves the run's clock per test, and the seed each test's

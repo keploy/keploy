@@ -464,7 +464,9 @@ type TestReceipt struct {
 	// connections keploy could not capture; or what left it not judged
 	// (CannotCapture: a call keploy cannot capture at all, a Unix socket).
 	// A miss that is a recording another test owns names that test
-	// (recorded_in, withRecordedIn).
+	// (recorded_in, withRecordedIn). It also lists the test's background
+	// misses (ScopeEvidence.Background), which fail nothing: a test that
+	// passed, or failed on its own, may carry evidence holding only those.
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
 	// Real is, under the proven wire, the mock.real destinations the test
 	// used while it was open: its REAL rows (design v14 §4).
@@ -712,6 +714,7 @@ func persistedTests(r TestsReceipt) TestsReceipt {
 		}
 		ev := *tr.Evidence
 		ev.Misses, _ = models.PersistedCalls(tr.Evidence.Misses)
+		ev.Background, _ = models.PersistedCalls(tr.Evidence.Background)
 		ev.CaptureIncomplete, ev.CannotCapture = ev.CaptureIncomplete.Untagged(), ev.CannotCapture.Untagged()
 		ev.Incomplete = models.UntaggedIncomplete(ev.Incomplete)
 		r.Tests[i].Evidence = &ev

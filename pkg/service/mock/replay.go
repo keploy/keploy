@@ -3562,7 +3562,7 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 	for _, w := range windows {
 		// Evidence with only a reason (a test whose process exited, or
 		// whose evidence could not be read) is keploy's verdict too.
-		if w.Evidence == nil || (w.Evidence.Empty() && w.Evidence.Reason == "") {
+		if !w.Evidence.Kept() {
 			continue
 		}
 		if byName == nil {
@@ -3584,8 +3584,13 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 			// Else one attempt keploy could not read leaves the test
 			// unread, with that attempt's reason.
 			ev.Unread, ev.Reason = true, w.Evidence.Reason
+		case ev.Reason == "":
+			// Else the first attempt with a reason gives it: an attempt
+			// kept for its background misses alone (Kept) has none.
+			ev.Reason = w.Evidence.Reason
 		}
 		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
+		ev.Background = append(ev.Background, w.Evidence.Background...)
 		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
 		ev.Incomplete = append(ev.Incomplete, w.Evidence.Incomplete...)
 		// One attempt its harness failed on its own makes what keploy saw

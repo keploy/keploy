@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -71,6 +72,10 @@ func TestTheMismatchStoreKeepsTheBackgroundMark(t *testing.T) {
 // is not one: keploy test serves it to every test as a session mock
 // (models.ServeAsSession), not as a background recording.
 func TestTheStagingCallNamesTheSetsBackgroundRecordings(t *testing.T) {
+	// With the switch off: under it the staging call also names the plain
+	// startup mocks and the declared session calls
+	// (TestTheStagingCallNamesThePlainStartupMocksUnderTheSwitch).
+	t.Setenv(provenswitch.Env, "")
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{
 		Worker:  []models.MockEntry{{Name: "poll-1"}, {Name: "jwks-1", Reason: models.WorkerRuleReason("jwks")}, {Name: "poll-2"}},
@@ -93,6 +98,12 @@ func TestTheStagingCallNamesTheSetsBackgroundRecordings(t *testing.T) {
 		staged++
 		if want := []string{"poll-1", "poll-2", "boot-1"}; !reflect.DeepEqual(p.BackgroundMocks, want) {
 			t.Fatalf("the staging call named %v; want %v", p.BackgroundMocks, want)
+		}
+		if len(p.StartupMocks) != 0 {
+			t.Fatalf("with the switch off the staging call named plain startup mocks %v", p.StartupMocks)
+		}
+		if p.SessionCalls != nil {
+			t.Fatalf("with the switch off the staging call handed the agent session calls %+v", p.SessionCalls)
 		}
 	}
 	if staged != 1 {
@@ -177,6 +188,77 @@ func TestTheBackgroundRecordingsAreTheWorkerScopeTheRunServes(t *testing.T) {
 	}
 	if got := (&Replayer{logger: zap.NewNop()}).backgroundMockNames(context.Background(), "s"); got != nil {
 		t.Fatalf("no mapping store named %v", got)
+	}
+}
+
+// Under the proven switch keploy test's staging call names, of the set's
+// background, its plain startup: mocks (models.MockFilterParams.StartupMocks,
+// recordedSetShape): its startup: mocks in no worker: entry of the file (a
+// worker-mock rule's too) and not in the worker scope the run serves, each
+// once. A test's call identical to one is the test's own. With the switch off
+// it names none. Mutation: name a covered startup: mock plain, name one
+// twice, name any with the switch off, or leave them out of the shape.
+func TestTheStagingCallNamesThePlainStartupMocksUnderTheSwitch(t *testing.T) {
+	ctx := context.Background()
+	mapping := &models.Mapping{
+		Worker:  []models.MockEntry{{Name: "poll-1"}, {Name: "jwks-1", Reason: models.WorkerRuleReason("jwks")}, {Name: "both-1"}},
+		Startup: []models.MockEntry{{Name: "boot-1"}, {Name: "jwks-1"}, {Name: "both-1"}, {Name: "served-1"}, {Name: "boot-1"}, {Name: "boot-2"}},
+	}
+	r := newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}, mapping: mapping})
+	t.Setenv(provenswitch.Env, "")
+	if _, got := r.backgroundMocksOf(ctx, "s"); got != nil {
+		t.Fatalf("switch off: named plain startup mocks %v", got)
+	}
+	if got := r.recordedSetShape(ctx, "s", nil).startup; got != nil {
+		t.Fatalf("switch off: the staging call's shape names plain startup mocks %v", got)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	r.exact = &exactPlan{worker: []models.MockEntry{{Name: "poll-1"}, {Name: "served-1"}}}
+	all, got := r.backgroundMocksOf(ctx, "s")
+	if want := []string{"boot-1", "boot-2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switch on: plain startup mocks %v, want %v", got, want)
+	}
+	if want := r.backgroundMockNames(ctx, "s"); !reflect.DeepEqual(all, want) {
+		t.Fatalf("switch on: the background %v differs from backgroundMockNames' %v", all, want)
+	}
+	shape := r.recordedSetShape(ctx, "s", nil)
+	if got, want := shape.startup, []string{"boot-1", "boot-2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switch on: the staging call's shape names %v, want %v", got, want)
+	}
+
+	// The staging call carries them to the agent.
+	f := &rearmInstr{}
+	sender := newRearmReplayer(f)
+	if err := sender.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), nil, nil, false, shape, nil); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+	f.mu.Lock()
+	p := f.lastParams
+	f.mu.Unlock()
+	if want := []string{"boot-1", "boot-2"}; !reflect.DeepEqual(p.StartupMocks, want) {
+		t.Fatalf("the staging call sent plain startup mocks %v, want %v", p.StartupMocks, want)
+	}
+	// And the session calls keploy.yaml declares, none an empty declaration:
+	// an agent container reads no keploy.yaml.
+	if p.SessionCalls == nil || len(p.SessionCalls.Rules) != 0 {
+		t.Fatalf("none declared: the staging call sent %+v; want an empty declaration", p.SessionCalls)
+	}
+	t.Cleanup(func() { models.SetSessionCalls(nil) })
+	rule := models.SessionCallRule{Host: "rates.example.com", Method: "GET", PathPrefix: "/rates"}
+	models.SetSessionCalls([]models.SessionCallRule{rule})
+	shape = r.recordedSetShape(ctx, "s", nil)
+	if err := sender.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), nil, nil, false, shape, nil); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+	f.mu.Lock()
+	p = f.lastParams
+	f.mu.Unlock()
+	if p.SessionCalls == nil || !reflect.DeepEqual(p.SessionCalls.Rules, []models.SessionCallRule{rule}) {
+		t.Fatalf("the staging call sent %+v; want the declared session call", p.SessionCalls)
+	}
+	t.Setenv(provenswitch.Env, "")
+	if got := r.recordedSetShape(ctx, "s", nil).sessionCalls; got != nil {
+		t.Fatalf("switch off: the staging call's shape hands %+v", got)
 	}
 }
 

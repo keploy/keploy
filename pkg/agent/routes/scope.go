@@ -264,6 +264,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if provenswitch.On() && req.Sets == nil && req.SessionCalls != nil {
+		// The session calls the client declares, before anything of the
+		// set is staged: an agent container reads no keploy.yaml.
+		req.SessionCalls.Install()
+		served = append(served, models.ScopeTableServedSessionCalls)
+	}
 	if provenswitch.On() && req.Sets == nil {
 		// The values each test gave when it was recorded: a replay's given
 		// is bound with its recorded value. An agent that cannot take them
@@ -321,6 +327,23 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		if !provenswitch.On() && len(req.Background) > 0 {
 			if ws, ok := a.svc.(scopeWorkerSetter); ok {
 				if err := ws.SetScopeWorker(r.Context(), req.Worker); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			// The worker scope's series and those that answer once in a
+			// run, before the pool, whose serving hands them to the proxy
+			// with it: the background answers a once series' recording one
+			// call in the run wherever the application makes it, at its
+			// boot too, as under the switch.
+			if ss, ok := a.svc.(scopeSeriesSetter); ok {
+				if err := ss.SetScopeSeries(r.Context(), req.Series); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if ons, ok := a.svc.(scopeOnceSetter); ok {
+				if err := ons.SetScopeOnce(r.Context(), req.Once); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}

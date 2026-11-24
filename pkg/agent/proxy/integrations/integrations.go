@@ -704,12 +704,19 @@ func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
 // the recording is of (models.RepeatNote.Background), empty for a test's own.
 // SkippedRead says it is the read of a test the replay's gate skips, moved
 // to the worker scope for the replay (models.RepeatNote.SkippedRead): no
-// recording of the background, so Background is empty.
+// recording of the background, so Background is empty. OutsideTests says
+// the store knows the recording was made outside every test and is no
+// background of the call: one of the set's plain startup: recordings
+// (models.BackgroundRecording.Startup) found again by a call read in a
+// test's window, whose Background is empty
+// (models.RepeatNote.OutsideTests). Whatever else the store knows of the
+// set's scope table, the call's note then says so.
 type AnsweredCall struct {
-	Mock        *models.Mock
-	AnsweredAt  time.Time
-	Background  string
-	SkippedRead bool
+	Mock         *models.Mock
+	AnsweredAt   time.Time
+	Background   string
+	SkippedRead  bool
+	OutsideTests bool
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the
@@ -1616,8 +1623,10 @@ type ExactBackground interface {
 type ByKindBackground interface {
 	// KindBackground is kind's background recordings (data-plane, no async
 	// lane's), the worker scope at every place and the pool: those unused,
-	// and those this staging spent, each in recorded order. nil, nil for a
-	// set served by today's rules.
+	// and those this staging spent, each in recorded order. To a call read
+	// in a test's window, none of the set's plain startup: recordings
+	// (models.BackgroundRecording.Startup): such a call is the test's own.
+	// nil, nil for a set served by today's rules.
 	KindBackground(kind models.Kind) (unused, spent []*models.Mock)
 	// SpendByKind spends m, one of KindBackground's unused, for the staging:
 	// a by-kind answer's consumption, whatever m's place. False when m is

@@ -20,6 +20,10 @@ import (
 // stored generation of every kind it touches (setMocksWithWindowLocked), the
 // SharedGen's other half: the ident leaves the epoch out.
 //
+// startup is the background install in force in the view's staging epoch
+// (backgroundInstall.at): its plain startup: recordings are no part of a
+// test's view (exactView.startupOwned).
+//
 // own is what the view leaves out of its shared part for being its own
 // (ownShared): two views that own different recordings of the pool or the
 // worker scope show different shared parts. replaced is what the view leaves
@@ -27,6 +31,7 @@ import (
 type sharedIdent struct {
 	worker   *reachedWorker
 	bg       *backgroundState
+	startup  *backgroundInstall
 	declared *poolSlice
 	kept     *keptLoad
 	own      string
@@ -34,9 +39,9 @@ type sharedIdent struct {
 }
 
 // sharedIdentOf is v's ident now; w is the reached worker scope it was
-// installed with.
-func sharedIdentOf(v *exactView, w *reachedWorker) sharedIdent {
-	id := sharedIdent{worker: w, bg: v.bg, declared: v.declared, own: v.ownShared(), replaced: v.replacedShared()}
+// installed with, bgIn the background install in force in its staging epoch.
+func sharedIdentOf(v *exactView, w *reachedWorker, bgIn *backgroundInstall) sharedIdent {
+	id := sharedIdent{worker: w, bg: v.bg, startup: bgIn, declared: v.declared, own: v.ownShared(), replaced: v.replacedShared()}
 	if v.kept != nil {
 		id.kept = v.kept.cur.Load()
 	}
@@ -99,9 +104,10 @@ type sharedViews struct {
 }
 
 // of sets v's shared number and ident (exactView.shared), w being the reached
-// worker scope v is installed with.
-func (s *sharedViews) of(v *exactView, w *reachedWorker) {
-	id := sharedIdentOf(v, w)
+// worker scope v is installed with, bgIn the background install in force in
+// its staging epoch.
+func (s *sharedViews) of(v *exactView, w *reachedWorker, bgIn *backgroundInstall) {
+	id := sharedIdentOf(v, w, bgIn)
 	if s.lastID == 0 || s.last != id {
 		s.seq++
 		s.last, s.lastID = id, s.seq

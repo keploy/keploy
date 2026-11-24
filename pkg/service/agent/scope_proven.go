@@ -187,6 +187,11 @@ type provenWire struct {
 	// staging for miss classification of rare unrecorded periodic HTTP polls.
 	backgroundHTTP       []models.BackgroundHTTPRule
 	stagedBackgroundHTTP []models.BackgroundHTTPRule
+	// stagedStartup is the plain startup: names the last staging handed the
+	// proxy (plainStartupNames: the background less the worker scope then,
+	// models.MockFilterParams.StartupMocks): a worker scope that changes
+	// them stages the set again (SetScopeWorker).
+	stagedStartup []string
 	// startupRules is true when the replay's set carries at least one worker:
 	// entry placed by a declared kind: background rule with startup: true
 	// (models.ScopeTableReq.StartupRules). Plain recorded startup: entries do
@@ -581,6 +586,11 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	if key == "" || strings.ContainsRune(key, 0) || !models.IDPart(key) || len(key) > 4096 || !filepath.IsLocal(key) || filepath.ToSlash(filepath.Clean(key)) != key {
 		return models.InstanceResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
 			"the instance key is not a clean path inside the project", `send the package directory relative to the project directory, with slashes and nothing to clean up ("." for the project's own), without "::" and neither beginning nor ending with ":"`)
+	}
+	if req.Dir == "" {
+		// The claim of an integration written by hand names its folder by
+		// its key alone (models.ScopeUpgradeRemedy): its tests run there.
+		req.Dir = a.keyFolder(key)
 	}
 	if a.wireClosed() {
 		return models.InstanceResp{}, errClosed()
@@ -1064,6 +1074,12 @@ func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) 
 	}
 	a.provenMu.Lock()
 	a.proven.worker = cp
+	// The staging marked the set's plain startup: recordings by the worker
+	// scope it read: one that moves a recording into or out of it stages the
+	// set again before it is served, so no mark outlives its scope.
+	if a.proven.staged && !slices.Equal(a.proven.stagedStartup, plainStartupNames(a.proven.background, cp)) {
+		a.proven.staged = false
+	}
 	a.provenMu.Unlock()
 	return nil
 }
@@ -2256,7 +2272,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		ev.FailedOnItsOwn = !ev.Unanswered()
 	}
 	a.NoteScopeOutcome(id, 0, outcome)
-	if ev != nil && (ev.Reason != "" || !ev.Empty()) {
+	if ev.Kept() {
 		a.noteScopeEvidence(id, ev)
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
@@ -2588,6 +2604,8 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // a connection that sent nothing made no call), and the test mocks it did not
 // consume while it was open (exact serving tells which). A failed read is an
 // error. Every miss is still charged to the run, so its next step is said.
+// Its background misses (models.UnmatchedCall.Background) fail nothing: they
+// are listed apart (models.ScopeEvidence.Background), never in Misses.
 //
 // began is where exact serving began serving the test (its time zero, and
 // its round not known, when it is not known). A miss made outside every test
@@ -2629,7 +2647,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 	}
 	ev := &models.ScopeEvidence{}
 	all, err := a.missesOf(ctx, a.scopeInstance(id))
-	var misses, outside []models.UnmatchedCall
+	var misses, outside, repeats []models.UnmatchedCall
 	for _, m := range all {
 		if m.EarlierSetTest != "" || m.EarlierSet > 0 {
 			// An earlier set's call, which keploy decided only after this
@@ -2660,15 +2678,33 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 		if backgroundRepeat(m) {
 			m.WindowOf = missWindow(m, id, began)
 			outside = append(outside, m)
+			if m.WindowOf == id && m.Background && m.Answer == "" {
+				// Made in this test's window, with no recording left to
+				// answer it: listed as the test's background miss
+				// (ScopeEvidence.Background), as one the proxy did not
+				// name a repeat is, so a test that failed on the answer it
+				// did not get is shown the call.
+				repeats = append(repeats, m)
+			}
 			continue
 		}
 		misses = append(misses, m)
 	}
 	a.charge(outside, "")
+	for _, m := range repeats {
+		ev.Background = append(ev.Background, sanitizedMiss(a.asRecorded(m)))
+	}
 	// Misses a read returned with its error are this test's all the same.
 	a.charge(misses, id)
 	for _, m := range misses {
 		if !m.CountsAgainstTest() {
+			// A background miss of the test's window fails nothing, and is
+			// listed with its recording and next step (ScopeEvidence.
+			// Background); a DNS lookup's, or a connection's that sent
+			// nothing, is no call of the test's.
+			if m.Background && m.Answer == "" {
+				ev.Background = append(ev.Background, sanitizedMiss(a.asRecorded(m)))
+			}
 			continue
 		}
 		ev.Misses = append(ev.Misses, sanitizedMiss(a.asRecorded(m)))
