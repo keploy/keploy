@@ -3,6 +3,7 @@ package record
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sync"
 
@@ -33,13 +34,44 @@ import (
 //
 // A recording that rolls over to a new test set does not look ahead: a mock's
 // set is chosen as the one before it is written (setRoll), which taking mocks
-// ahead would change. Nor does any MockDB but a bare mockdb.MockYaml: one that
-// wraps it and overrides InsertMock must see each insert.
+// ahead would change. Nor does a MockDB that wraps MockYaml unless it
+// explicitly opts in through PreparedMockDB, so a wrapper that overrides
+// InsertMock never has its inserts bypassed by method promotion.
 
 // mockPreparer is a MockDB that inserts a mock in steps (mockdb.PreparedMock).
 type mockPreparer interface {
 	PrepareMock(ctx context.Context, mock *models.Mock, testSetID string) *mockdb.PreparedMock
 	WritePrepared(ctx context.Context, p *mockdb.PreparedMock) error
+}
+
+// PreparedMockDB is a MockDB (typically a pointer wrapper around
+// *mockdb.MockYaml) that opts into the recorder's look-ahead encoding by
+// implementing PrepareMock and WritePrepared with the same side-effects as
+// InsertMock.
+//
+// Opt-in is identity-checked: PreparedMockStore must return the receiver
+// itself (a non-nil pointer equal to the MockDB handed to the recorder), or
+// nil to fall back to InsertMock. Because a wrapper that embeds another
+// PreparedMockDB and overrides InsertMock inherits PreparedMockStore returning
+// the inner pointer, identity comparison is false at every nesting depth and
+// accidental opt-in by method promotion cannot happen.
+//
+// The recorder passes every prepared mock to WritePrepared once, in arrival
+// order, even after cancellation.
+//
+// Contract for implementers:
+//   - PrepareMock must never return nil (Encode is called on it).
+//   - WritePrepared must not mutate p.Mock() (text formats are already encoded
+//     before WritePrepared runs; gob encodes at write time).
+//   - WritePrepared for mock N may run after BeforeMockInsert and PrepareMock
+//     for mocks N+1..N+depth; side-effects must not assume strict isolation
+//     across adjacent mocks.
+//   - PrepareMock and WritePrepared must delegate to the same *mockdb.MockYaml.
+type PreparedMockDB interface {
+	MockDB
+	PrepareMock(ctx context.Context, mock *models.Mock, testSetID string) *mockdb.PreparedMock
+	WritePrepared(ctx context.Context, p *mockdb.PreparedMock) error
+	PreparedMockStore() MockDB
 }
 
 // maxMockEncoders bounds the encoders a recording's mock loop uses.
@@ -74,11 +106,24 @@ type aheadMock struct {
 // (rolls) or db cannot insert in steps. finish does what follows a mock's
 // write.
 func lookaheadFor(logger *zap.Logger, db MockDB, rolls bool, doc *InsertedMockDoc, finish func(mock *models.Mock, tempID string, set *rollSet, encoded []byte, encodedFormat string, err error)) *mockLookahead {
-	// The MockYaml itself, not a MockDB that wraps one: a wrapper that
-	// overrides InsertMock (as k8s-proxy's counts what it writes) must see
-	// every mock go through it, which steps taken around it would not.
-	p, ok := db.(*mockdb.MockYaml)
-	if !ok || p == nil || rolls {
+	// A bare *mockdb.MockYaml or a pointer wrapper that explicitly opts in
+	// through PreparedMockDB (identity-checked so embedding never promotes
+	// opt-in to an outer wrapper that overrides InsertMock).
+	var p mockPreparer
+	if !rolls {
+		switch v := db.(type) {
+		case *mockdb.MockYaml:
+			if v != nil {
+				p = v
+			}
+		case PreparedMockDB:
+			rv := reflect.ValueOf(v)
+			if rv.Kind() == reflect.Pointer && !rv.IsNil() && v.PreparedMockStore() == db {
+				p = v
+			}
+		}
+	}
+	if p == nil {
 		if logger != nil {
 			logger.Debug("the mock loop writes each mock before it takes the next: no look-ahead",
 				zap.String("mockStore", fmt.Sprintf("%T", db)), zap.Bool("rollsOver", rolls))
