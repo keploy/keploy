@@ -299,7 +299,8 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 // compareCase checks the app's answer against the recorded one, forgiving the case's own noise and volatile headers.
 func (m *mockService) compareCase(tc *models.TestCase, actual *models.HTTPResp) (bool, *models.Result) {
 	tc = m.withRunIDs(tc)
-	return httpMatcher.Match(tc, actual, m.config.Test.GlobalNoise.Global, m.config.Test.IgnoreOrdering, m.config.Test.CompareAll, m.logger, false, httpMatcher.WithAutoHeaderNoise(true))
+	noise := httpMatcher.AddEndpointNoise(m.config.Test.GlobalNoise.Global, m.config.Test.GlobalNoise.Endpoints, tc)
+	return httpMatcher.Match(tc, actual, noise, m.config.Test.IgnoreOrdering, m.config.Test.CompareAll, m.logger, false, httpMatcher.WithAutoHeaderNoise(true))
 }
 
 // recordedCases loads the cases each flow recorded, keyed by flow, in recorded order.

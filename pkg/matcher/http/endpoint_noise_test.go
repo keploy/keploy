@@ -1,9 +1,11 @@
 package http
 
 import (
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -18,7 +20,7 @@ func endpointCase(method, url, recorded string) *models.TestCase {
 
 func matchWith(t *testing.T, tc *models.TestCase, live string, global map[string]map[string][]string, rules []config.EndpointNoise) bool {
 	t.Helper()
-	noise := AddEndpointNoise(global, rules, tc.HTTPReq)
+	noise := AddEndpointNoise(global, rules, tc)
 	pass, _ := Match(tc, &models.HTTPResp{StatusCode: 200, Body: live}, noise, false, false, zap.NewNop(), false)
 	return pass
 }
@@ -94,7 +96,7 @@ func TestEndpointNoiseNamesAHeaderExactly(t *testing.T) {
 	rules := []config.EndpointNoise{{Path: "/version", Header: config.Noise{"x-build": {}}}}
 	tc := endpointCase("GET", "http://api/version", `{}`)
 	tc.HTTPResp.Header = map[string]string{"X-Build": "a", "X-Build-Id": "1"}
-	noise := AddEndpointNoise(nil, rules, tc.HTTPReq)
+	noise := AddEndpointNoise(nil, rules, tc)
 	live := &models.HTTPResp{StatusCode: 200, Body: `{}`, Header: map[string]string{"X-Build": "b", "X-Build-Id": "1"}}
 	if pass, _ := Match(tc, live, noise, false, false, zap.NewNop(), false); !pass {
 		t.Fatal("the named header failed")
@@ -133,11 +135,13 @@ func TestEndpointMatches(t *testing.T) {
 		{"", "/", "GET", "http://api/version", false},
 		{"", "", "GET", "http://api/version", false},
 		{"", "/Version", "GET", "http://api/version", false},
+		{"", "/files/{name}", "GET", "http://api/files/a%2Fb", true},
+		{"", "/files/a b", "GET", "http://api/files/a%20b", true},
 	}
 	for _, c := range cases {
 		r := config.EndpointNoise{Method: c.method, Path: c.path, Body: config.Noise{"v": {}}}
 		req := models.HTTPReq{Method: models.Method(c.reqMethod), URL: c.url}
-		_, got := AddEndpointNoise(nil, []config.EndpointNoise{r}, req)["body"]["$.v"]
+		_, got := AddEndpointNoise(nil, []config.EndpointNoise{r}, &models.TestCase{HTTPReq: req})["body"][matcherUtils.ExactKey("v")]
 		if got != c.want {
 			t.Errorf("rule %s %q on %s %s: %v, want %v", c.method, c.path, c.reqMethod, c.url, got, c.want)
 		}
@@ -147,14 +151,63 @@ func TestEndpointMatches(t *testing.T) {
 func TestAddEndpointNoiseLeavesTheConfigAlone(t *testing.T) {
 	global := map[string]map[string][]string{"body": {"id": {}}}
 	rules := []config.EndpointNoise{{Path: "/version", Body: config.Noise{"version": {}}}}
-	got := AddEndpointNoise(global, rules, models.HTTPReq{Method: "GET", URL: "http://api/version"})
-	if _, ok := got["body"]["$.version"]; !ok {
+	got := AddEndpointNoise(global, rules, &models.TestCase{HTTPReq: models.HTTPReq{Method: "GET", URL: "http://api/version"}})
+	if _, ok := got["body"][matcherUtils.ExactKey("version")]; !ok {
 		t.Fatalf("the rule's field is missing: %v", got)
 	}
-	if _, ok := global["body"]["$.version"]; ok || len(global["body"]) != 1 {
+	if _, ok := global["body"][matcherUtils.ExactKey("version")]; ok || len(global["body"]) != 1 {
 		t.Fatalf("the shared config was changed: %v", global)
 	}
-	if other := AddEndpointNoise(global, rules, models.HTTPReq{Method: "GET", URL: "http://api/charts"}); len(other["body"]) != 1 {
+	if other := AddEndpointNoise(global, rules, &models.TestCase{HTTPReq: models.HTTPReq{Method: "GET", URL: "http://api/charts"}}); len(other["body"]) != 1 {
 		t.Fatalf("a rule for another endpoint added fields: %v", other)
+	}
+}
+
+func TestTheTestCasesOwnNoiseWinsOverAnEndpointRule(t *testing.T) {
+	rules := []config.EndpointNoise{{Path: "/version", Body: config.Noise{"data.version": {`^\d+$`}}, Header: config.Noise{"X-Build": {"^b-"}}}}
+	tc := endpointCase("GET", "http://api/version", `{"data":{"version":"1"}}`)
+	tc.HTTPResp.Header = map[string]string{"X-Build": "b-1"}
+	live := &models.HTTPResp{StatusCode: 200, Body: `{"data":{"version":"dev-1"}}`, Header: map[string]string{"X-Build": "dev"}}
+	if pass, _ := Match(tc, live, AddEndpointNoise(nil, rules, tc), false, false, zap.NewNop(), false); pass {
+		t.Fatal("values outside the rule's patterns passed")
+	}
+	tc.Noise = map[string][]string{"body.data.version": {}, "header.x-build": {}}
+	if pass, _ := Match(tc, live, AddEndpointNoise(nil, rules, tc), false, false, zap.NewNop(), false); !pass {
+		t.Fatal("the test case's own noise, which ignores any value, lost to the endpoint rule's patterns")
+	}
+}
+
+func TestAKeyThatLooksLikeAPathFromTheRootKeepsItsMeaning(t *testing.T) {
+	tc := endpointCase("GET", "http://api/version", `{"data":{"token":"a"}}`)
+	noise := map[string]map[string][]string{"body": {"$.data.token": {}}}
+	if pass, _ := Match(tc, &models.HTTPResp{StatusCode: 200, Body: `{"data":{"token":"b"}}`}, noise, false, false, zap.NewNop(), false); pass {
+		t.Fatal("a global noise key written as $.data.token now ignores data.token; it never matched a field before")
+	}
+}
+
+func TestEndpointNoiseUnderARootArrayIsLeftOutOfTheAssessment(t *testing.T) {
+	noise := map[string][]string{matcherUtils.ExactKey("heartbeats"): {}}
+	got, err := matcherUtils.ComputeFailureAssessmentJSON(`[{"heartbeats":[{"at":1}]}]`, `[{"heartbeats":[{"v":"x"}],"region":"eu"}]`, noise, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range append(append(append([]string{}, got.RemovedFields...), got.AddedFields...), got.ValueChanges...) {
+		if strings.Contains(f, "heartbeats") {
+			t.Fatalf("an ignored field is graded as a change: %+v", got)
+		}
+	}
+	if len(got.AddedFields) != 1 {
+		t.Fatalf("want only region added, got %+v", got)
+	}
+}
+
+func TestBodyNoiseCoveringNamesAnEndpointRuleWithAnIDKey(t *testing.T) {
+	global := map[string]map[string][]string{"body": {matcherUtils.ExactKey("results.{id}.traceId"): {}}}
+	keys := []string{"results", "0b7c5d9e-1c1f-4a55-9a8e-7f3c2e1d4b6a", "traceId"}
+	if got, want := matcherUtils.BodyNoiseCovering(keys, nil, global, zap.NewNop()), "body.results.{id}.traceId (globalNoise.endpoints)"; got != want {
+		t.Fatalf("covering %q, want %q", got, want)
+	}
+	if got := matcherUtils.BodyNoiseCovering([]string{"results", "0b7c5d9e-1c1f-4a55-9a8e-7f3c2e1d4b6a", "n"}, nil, global, zap.NewNop()); got != "" {
+		t.Fatalf("a sibling field is covered by %q", got)
 	}
 }

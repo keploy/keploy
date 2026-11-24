@@ -197,7 +197,7 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	// 5. Global noise.
 	noise := r.globalNoise
 	if r.config != nil {
-		noise = httpMatcher.AddEndpointNoise(noise, r.config.Test.GlobalNoise.Endpoints, tc.HTTPReq)
+		noise = httpMatcher.AddEndpointNoise(noise, r.config.Test.GlobalNoise.Endpoints, tc)
 	}
 
 	// 6. Execute: rewrite URL, fire HTTP request, compare response.

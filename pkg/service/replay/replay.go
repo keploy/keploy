@@ -9141,7 +9141,7 @@ func (r *Replayer) httpNoiseConfig(testSetID string, tc *models.TestCase) map[st
 		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 	if tc != nil {
-		noiseConfig = httpMatcher.AddEndpointNoise(noiseConfig, r.config.Test.GlobalNoise.Endpoints, tc.HTTPReq)
+		noiseConfig = httpMatcher.AddEndpointNoise(noiseConfig, r.config.Test.GlobalNoise.Endpoints, tc)
 	}
 
 	return noiseConfig

@@ -362,7 +362,8 @@ func (t *Tools) untiedInArray(testSetID string, tcs []*models.TestCase) func(*lo
 		if t.config.Test.SchemaMatch {
 			return "test.schemaMatch is on, which compares no value"
 		}
-		if entry := matcherUtils.BodyNoiseCovering(l.keys, tcs[l.tc].Noise, global, t.logger); entry != "" {
+		noise := httpMatcher.AddEndpointNoise(global, t.config.Test.GlobalNoise.Endpoints, tcs[l.tc])
+		if entry := matcherUtils.BodyNoiseCovering(l.keys, tcs[l.tc].Noise, noise, t.logger); entry != "" {
 			return "the noise entry " + entry + " covers it"
 		}
 		if names := httpMatcher.AssertionsUntieBody(tcs[l.tc]); names != "" {

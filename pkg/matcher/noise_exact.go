@@ -2,10 +2,20 @@ package matcher
 
 import "strings"
 
-const ExactKeyPrefix = "$."
+const ExactKeyPrefix = "\x00."
 
 func ExactKey(path string) string {
 	return ExactKeyPrefix + path
+}
+
+func ExactPath(path string) string {
+	var segs []string
+	for _, s := range strings.Split(strings.ReplaceAll(path, "[]", ""), ".") {
+		if s != "" {
+			segs = append(segs, s)
+		}
+	}
+	return strings.ToLower(strings.Join(segs, "."))
 }
 
 func exactPath(key string) (string, bool) {
@@ -13,20 +23,16 @@ func exactPath(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	var segs []string
-	for _, s := range strings.Split(strings.ReplaceAll(rest, "[]", ""), ".") {
-		if s != "" {
-			segs = append(segs, s)
-		}
-	}
-	return strings.ToLower(strings.Join(segs, ".")), true
+	return ExactPath(rest), true
 }
 
 func exactCovers(path, entry string) bool {
 	if entry == "" {
 		return false
 	}
-	path = strings.ReplaceAll(path, "[]", "")
+	if strings.Contains(path, "[]") {
+		path = strings.TrimLeft(strings.ReplaceAll(path, "[]", ""), ".")
+	}
 	return path == entry || strings.HasPrefix(path, entry+".")
 }
 

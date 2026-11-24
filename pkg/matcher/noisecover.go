@@ -54,7 +54,11 @@ func bodyKeyCovering(keys []string, noise map[string][]string) string {
 	sort.Strings(names)
 	for _, k := range names {
 		if p, ok := exactPath(k); ok {
-			if exactCovers(path, p) {
+			at := path
+			if lp, idKeys := NoiseEntryKey(p); idKeys {
+				p, at = lp, CollapseIDKeys(path)
+			}
+			if exactCovers(at, p) {
 				return k
 			}
 			continue
