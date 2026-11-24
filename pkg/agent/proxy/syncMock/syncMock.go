@@ -614,6 +614,10 @@ type SyncMockManager struct {
 	// whose test case never reached the recording's queue: the ingress
 	// stopped first (NoteNotHandedOn).
 	notHandedOn atomic.Uint64
+
+	// invertedTestCases counts the kept test cases whose response is dated
+	// before their request (noteInverted).
+	invertedTestCases atomic.Uint64
 	// unnamedCallerConns counts the connections to a listener of the run's
 	// own process tree whose caller the agent could not name in its PID
 	// namespace, so that none of the calls they carried was recorded as a
@@ -2936,6 +2940,37 @@ func (m *SyncMockManager) PendingIn(start, end time.Time) bool {
 	return false
 }
 
+// invertedWarning is logged for a kept test case whose response is dated
+// before its request (noteInverted).
+const invertedWarning = "syncMock: a test case's response is dated before its request, so its window holds none of the mocks requested between the two"
+
+// noteInverted counts a kept test case whose response is dated before its
+// request, and logs the first and every sendDropSampleRate-th with its name
+// and both times. Its window [request, response] holds no time
+// (heldRangeLocked, sentClaimRangeLocked), so none of the mocks requested
+// between the two are mapped to it: the capture that dated it is to be found
+// from these lines.
+func (m *SyncMockManager) noteInverted(testName string, request, response time.Time) {
+	if m == nil {
+		return
+	}
+	n := m.invertedTestCases.Add(1)
+	if n == 1 || n%sendDropSampleRate == 0 {
+		m.dropLogger().Warn(invertedWarning,
+			zap.String("test", testName), zap.Time("request", request), zap.Time("response", response),
+			zap.Duration("by", request.Sub(response)), zap.Uint64("inverted_so_far", n))
+	}
+}
+
+// InvertedTestCases is how many kept test cases had a response dated before
+// their request (noteInverted), since the manager was made.
+func (m *SyncMockManager) InvertedTestCases() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.invertedTestCases.Load()
+}
+
 // drainPendingRevokes emits a revoke control frame for every test case queued
 // by recordDroppedTC. It SNAPSHOTS the queue under droppedMu, releases the
 // lock, then sends — holding droppedMu across trySendControlFrame (which takes
@@ -4720,11 +4755,13 @@ func (m *SyncMockManager) unholdLocked(lo, hi int) {
 }
 
 // heldRangeLocked returns the bounds [lo, hi) of the held mocks requested
-// within [start, end]. Caller holds mu.
+// within [start, end]: an empty range, lo == hi, for a window that ends
+// before it starts (a test case whose response is dated before its request),
+// which holds no time. Caller holds mu.
 func (m *SyncMockManager) heldRangeLocked(start, end time.Time) (lo, hi int) {
 	lo = sort.Search(len(m.held), func(i int) bool { return !m.held[i].mock.Spec.ReqTimestampMock.Before(start) })
 	hi = sort.Search(len(m.held), func(i int) bool { return m.held[i].mock.Spec.ReqTimestampMock.After(end) })
-	return lo, hi
+	return lo, max(lo, hi)
 }
 
 // takeHeldLocked removes and returns the held mocks requested within
@@ -5778,11 +5815,12 @@ func (m *SyncMockManager) settleLetGo() {
 }
 
 // sentClaimRangeLocked returns the notes requested within [start, end]:
-// sentClaimed[lo:hi]. Caller holds m.mu.
+// sentClaimed[lo:hi], empty (lo == hi) for a window that ends before it
+// starts, as heldRangeLocked's. Caller holds m.mu.
 func (m *SyncMockManager) sentClaimRangeLocked(start, end time.Time) (lo, hi int) {
 	lo = sort.Search(len(m.sentClaimed), func(i int) bool { return !m.sentClaimed[i].at.Before(start) })
 	hi = sort.Search(len(m.sentClaimed), func(i int) bool { return m.sentClaimed[i].at.After(end) })
-	return lo, hi
+	return lo, max(lo, hi)
 }
 
 // takeSentClaimedLocked is a kept resolve of [start, end], for testName,
@@ -5944,6 +5982,9 @@ func (m *SyncMockManager) ResolveKept(w *Window, start, end time.Time, testName 
 }
 
 func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, keep bool, mapping bool, w *Window) {
+	if keep && !end.IsZero() && end.Before(start) {
+		m.noteInverted(testName, start, end)
+	}
 	// Collect mocks and mapping data under the lock, then send to the
 	// outgoing channels AFTER releasing it. Holding m.mu across a
 	// channel send can deadlock on ordering: a buffer-full outChan
