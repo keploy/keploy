@@ -241,7 +241,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			// Telemetry / noisy-egress passthrough. Configurable via
 			// record.passThroughPorts / passThroughHosts (see models.PassThroughRule),
-			// with built-in defaults (POST /v1/traces, /ingest) as a "skip" fallback.
+			// with built-in defaults (models.TelemetryDefaults) as a fallback.
 			// These are live, fire-and-forget telemetry the app emits every run, not
 			// recorded dependencies — matching them falls through to the HTTP
 			// fuzzy-matcher, which reads the large (~150–200 KB) bodies against

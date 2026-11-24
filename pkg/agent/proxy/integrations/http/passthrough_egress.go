@@ -10,36 +10,28 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
 // passThroughEgressDecision reports whether an outgoing HTTP request should be
 // passed through and, if so, the winning rule (mode "skip" or "recordOne").
-// It delegates the whole decision to models.ResolvePassThrough — the single
-// off-aware, two-tier (user-beats-builtin) entry point — so this parser never
-// re-derives "does matched mean passthrough". A false result means either no
-// rule matched or the winning rule is mode:"off" (record normally). host is the
-// destination authority (request Host header preferred, URL host next); port
-// from dstCfg; method gates the built-ins (they are POST-only).
+// It delegates the whole decision to models.ResolvePassThroughEgress — the
+// single off-aware, two-tier (user-beats-builtin) entry point shared with
+// replay's per-test assertion exclusion — so this parser never re-derives
+// "does matched mean passthrough". A false result means either no rule matched
+// or the winning rule is mode:"off" (record normally). host is the destination
+// authority (request Host header preferred, URL host next); port from dstCfg;
+// method gates the built-ins (they are POST-only).
 //
-// Under the proven switch a built-in path row needs its protocol's
-// fingerprint (models.ResolveProven, design v14 §4, U19). The user's rules
-// are read as they are: keploy mock's CLI clears them (mock.real replaces
-// them, U18), keploy record and keploy test keep theirs until they read
-// mock.real.
+// Under the proven switch every fingerprinted built-in path row needs its
+// protocol's fingerprint (models.ResolveProven, design v14 §4, U19). With the
+// switch off, rows marked alwaysRequire (such as elastic-apm-v2-events) still
+// require their fingerprint via models.ResolvePassThroughWithHeader.
 func passThroughEgressDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL, header http.Header) (models.PassThroughRule, bool) {
 	if u == nil {
 		return models.PassThroughRule{}, false
 	}
-	if provenswitch.On() {
-		return models.ResolveProven(opts.PassThroughPorts, opts.PassThroughHosts, host, port, method, u.Path, header)
-	}
-	// ResolvePassThrough is the whole decision — built-ins (incl. the legacy
-	// /v1/traces and /ingest paths) are in the default set, and a user off rule
-	// correctly overrides them. There is deliberately no separate legacy fallback:
-	// one existed and re-skipped those paths even when the user set mode:"off".
-	return models.ResolvePassThrough(opts.PassThroughPorts, opts.PassThroughHosts, host, port, method, u.Path)
+	return models.ResolvePassThroughEgress(opts.PassThroughPorts, opts.PassThroughHosts, host, port, method, u.Path, header)
 }
 
 // serveOnePassThroughMock returns the raw response bytes of ONE recorded HTTP

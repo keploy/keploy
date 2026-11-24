@@ -2820,6 +2820,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (excludedFromTestMockAssertion): a test owns every data-plane mock its
 	// mapping lists, whatever tier DeriveLifetime gives it.
 	reusableMockNames := make(map[string]bool)
+	// passThroughMockNames marks recorded HTTP mocks that an active egress
+	// passthrough rule now answers without consuming (models.Mock.AnsweredByPassThrough):
+	// left out of per-test and worker-scope unconsumed-mock assertions on both sides.
+	passThroughMockNames := make(map[string]bool)
 	// undeliveredMockNames marks the answers the client never read
 	// (models.Mock.IsUndelivered), which no replay serves: the report's
 	// expected side leaves them out (buildExpectedMockInfos,
@@ -2833,7 +2837,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	addKinds := func(mocks []*models.Mock) {
 		for _, m := range mocks {
 			mockKindByName[m.Name] = m.Kind
-			if excludedFromTestMockAssertion(m) {
+			if m.AnsweredByPassThrough(r.config.Record.PassThroughPorts, r.config.Record.PassThroughHosts) {
+				passThroughMockNames[m.Name] = true
+			}
+			if excludedFromTestMockAssertion(m, r.config.Record.PassThroughPorts, r.config.Record.PassThroughHosts) {
 				reusableMockNames[m.Name] = true
 			}
 			if m.IsUndelivered() {
@@ -2992,7 +2999,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		perTestRegion = pkg.PerTestRegion(filtered)
 		if r.exactServing() {
-			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
+			r.exact = newExactPlanWithExcluded(expectedTestMockMappings, workerScope, passThroughMockNames, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
 			r.exact.order, r.exact.mainPass = passOrder(testCases)
 			if r.exact.share, err = newSharePlan(ctx, conc, workerScope, filtered, unfiltered); err != nil {
@@ -4625,7 +4632,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// the two sides exclude the same kinds.
 			filteredMockNames := make([]string, 0, len(consumedMocks))
 			for _, m := range consumedMocks {
-				if consumedOutsideAssertion(m) {
+				if consumedOutsideAssertion(m) || passThroughMockNames[m.Name] {
 					continue
 				}
 				filteredMockNames = append(filteredMockNames, m.Name)

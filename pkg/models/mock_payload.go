@@ -112,6 +112,10 @@ type payloadOnDisk struct {
 	// fault is a copy of the mock's Spec.Fault (FaultOf), nil for none: what
 	// a replay's summary names when the mock was served (FaultServed).
 	fault *Fault
+	// httpPassThrough keeps the minimal HTTP request metadata (host, port,
+	// method, path, and fingerprint headers only) needed to run
+	// AnsweredByPassThrough after Spec.HTTPReq is dropped.
+	httpPassThrough *httpPassThroughMeta
 }
 
 // onDiskPredicates is every registry whose predicates read a mock's payload;
@@ -145,6 +149,7 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
 	d.authored = m.Spec.Authored != nil
 	d.replaces = m.Spec.Authored.replaces()
+	d.httpPassThrough = extractHTTPPassThrough(m)
 	if f := m.Spec.Fault; f != nil {
 		kept := *f
 		kept.Observed = strings.Clone(f.Observed)
@@ -326,6 +331,18 @@ func (m *Mock) IndexEntryBytes() int64 {
 	n += str(d.summary) + str(d.target) + str(d.fingerprint)
 	if f := d.fault; f != nil {
 		n += int(unsafe.Sizeof(*f)) + str(f.Observed)
+	}
+	if pt := d.httpPassThrough; pt != nil {
+		n += int(unsafe.Sizeof(*pt)) + str(pt.host) + str(pt.method) + str(pt.path)
+		if pt.header != nil {
+			n += 48 + max(1, (len(pt.header)+6)/7)*(8+8*slot)
+			for k, vs := range pt.header {
+				n += str(k)
+				for _, v := range vs {
+					n += str(v)
+				}
+			}
+		}
 	}
 	return int64(n)
 }

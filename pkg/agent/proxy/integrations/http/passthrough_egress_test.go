@@ -1,12 +1,17 @@
 package http
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 func TestPassThroughEgressDecision(t *testing.T) {
@@ -212,5 +217,106 @@ func TestPassThroughEgressDecisionUnderTheSwitch(t *testing.T) {
 	h := http.Header{"Content-Type": {"application/x-protobuf"}}
 	if rule, ok := passThroughEgressDecision(opts, "collector", 8080, "POST", u, h); !ok || rule.ID != "otlp-http-traces" {
 		t.Fatalf("an OTLP export was not answered as telemetry: %+v %v", rule, ok)
+	}
+}
+
+// Elastic APM POST /intake/v2/events on default port 8200 or with
+// Content-Type: application/x-ndjson is answered as a built-in telemetry
+// passthrough (200 OK, no mock miss) in BOTH KEPLOY_PROVEN modes (unset and
+// =1). Ordinary application JSON POST /intake/v2/events on another port (8080)
+// and OpenBao POST /v1/transit/encrypt/k on port 8200 remain normal
+// dependencies (502 miss against an empty store) in BOTH modes.
+func TestDecodeHTTP_ElasticAPMIntakePassThrough(t *testing.T) {
+	ndjsonBody := "{\"metadata\":{\"service\":{\"name\":\"api-server\"}}}\n{\"metricset\":{\"timestamp\":1732435200000000,\"samples\":{\"cpu\":0.42}}}\n"
+	jsonBody := `{"event":"order.created"}`
+	baoBody := `{"plaintext":"aGVsbG8="}`
+
+	cases := []struct {
+		name       string
+		proven     bool
+		req        string
+		port       uint
+		wantPrefix string
+	}{
+		{
+			name:       "proven unset NDJSON on 443",
+			proven:     false,
+			req:        fmt.Sprintf("POST /intake/v2/events HTTP/1.1\r\nHost: apm.example.com\r\nContent-Type: application/x-ndjson\r\nContent-Length: %d\r\n\r\n%s", len(ndjsonBody), ndjsonBody),
+			port:       443,
+			wantPrefix: "HTTP/1.1 200",
+		},
+		{
+			name:       "proven unset default port 8200",
+			proven:     false,
+			req:        fmt.Sprintf("POST /intake/v2/events HTTP/1.1\r\nHost: apm-server:8200\r\nContent-Length: %d\r\n\r\n%s", len(ndjsonBody), ndjsonBody),
+			port:       8200,
+			wantPrefix: "HTTP/1.1 200",
+		},
+		{
+			name:       "proven unset app JSON on 8080 stays dependency",
+			proven:     false,
+			req:        fmt.Sprintf("POST /intake/v2/events HTTP/1.1\r\nHost: app:8080\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(jsonBody), jsonBody),
+			port:       8080,
+			wantPrefix: "HTTP/1.1 502",
+		},
+		{
+			name:       "proven unset OpenBao POST on port 8200 stays dependency",
+			proven:     false,
+			req:        fmt.Sprintf("POST /v1/transit/encrypt/k HTTP/1.1\r\nHost: openbao:8200\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(baoBody), baoBody),
+			port:       8200,
+			wantPrefix: "HTTP/1.1 502",
+		},
+		{
+			name:       "proven on NDJSON on 443",
+			proven:     true,
+			req:        fmt.Sprintf("POST /intake/v2/events HTTP/1.1\r\nHost: apm.example.com\r\nContent-Type: application/x-ndjson; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s", len(ndjsonBody), ndjsonBody),
+			port:       443,
+			wantPrefix: "HTTP/1.1 200",
+		},
+		{
+			name:       "proven on default port 8200",
+			proven:     true,
+			req:        fmt.Sprintf("POST /intake/v2/events HTTP/1.1\r\nHost: apm-server:8200\r\nContent-Length: %d\r\n\r\n%s", len(ndjsonBody), ndjsonBody),
+			port:       8200,
+			wantPrefix: "HTTP/1.1 200",
+		},
+		{
+			name:       "proven on app JSON on 8080 stays dependency",
+			proven:     true,
+			req:        fmt.Sprintf("POST /intake/v2/events HTTP/1.1\r\nHost: app:8080\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(jsonBody), jsonBody),
+			port:       8080,
+			wantPrefix: "HTTP/1.1 502",
+		},
+		{
+			name:       "proven on OpenBao POST on port 8200 stays dependency",
+			proven:     true,
+			req:        fmt.Sprintf("POST /v1/transit/encrypt/k HTTP/1.1\r\nHost: openbao:8200\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(baoBody), baoBody),
+			port:       8200,
+			wantPrefix: "HTTP/1.1 502",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			app, proxy := tcpPair(t)
+			h := &HTTP{Logger: zap.NewNop()}
+			ctx, cancel := context.WithCancel(context.Background())
+			returned := make(chan error, 1)
+			dst := &models.ConditionalDstCfg{Addr: fmt.Sprintf("127.0.0.1:%d", tc.port), Port: tc.port}
+			go func() {
+				returned <- h.decodeHTTP(ctx, []byte(tc.req), proxy, dst, &mockMemDb{}, models.OutgoingOptions{})
+			}()
+			t.Cleanup(func() { cancel(); _ = app.Close(); <-returned })
+
+			got := readUntil(app, "\r\n\r\n", 15*time.Second)
+			if !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Fatalf("got response %q, want prefix %q", got, tc.wantPrefix)
+			}
+		})
 	}
 }
