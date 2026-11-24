@@ -1317,3 +1317,29 @@ func TestTheRunsLogEndsWithOneNoteWhicheverProcessFillsIt(t *testing.T) {
 		})
 	}
 }
+
+// IsQuietMode is true only once the level is raised above Info, and false,
+// not a panic, before New() has set any level.
+func TestIsQuietMode(t *testing.T) {
+	saved := LogCfg
+	t.Cleanup(func() { LogCfg = saved })
+
+	LogCfg = zap.Config{}
+	if IsQuietMode() {
+		t.Error("an uninitialised LogCfg reads as quiet")
+	}
+	for _, tc := range []struct {
+		level zapcore.Level
+		quiet bool
+	}{
+		{zap.DebugLevel, false},
+		{zap.InfoLevel, false},
+		{zap.WarnLevel, true},
+		{zap.ErrorLevel, true},
+	} {
+		LogCfg.Level = zap.NewAtomicLevelAt(tc.level)
+		if got := IsQuietMode(); got != tc.quiet {
+			t.Errorf("level %v: IsQuietMode() = %v, want %v", tc.level, got, tc.quiet)
+		}
+	}
+}

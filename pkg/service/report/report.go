@@ -60,6 +60,9 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 	// 1MB buffered writer. Suppressed only when the caller (the enterprise
 	// CLI's cloud replay) has raised the global log level above Info.
 	// The OSS CLI and CI keep InfoLevel, so their report output stays.
+	// Every output path writes through r.out, the machine formats too
+	// (--format junit/ndjson, --json): a caller that raises the level before
+	// building a Report gets none of them. `keploy report` never does.
 	out := io.Writer(os.Stdout)
 	if log.IsQuietMode() {
 		out = io.Discard

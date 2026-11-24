@@ -217,9 +217,12 @@ var LogCfg zap.Config
 
 // IsQuietMode reports whether the global log level has been raised above
 // Info (e.g. to Warn or Error by the enterprise CLI's cloud replay).
-// Safe to call before New() — an uninitialised LogCfg returns false.
+// Safe to call before New(): an uninitialised LogCfg, whose zero AtomicLevel
+// would panic on Level(), returns false.
 func IsQuietMode() bool {
-	defer func() { recover() }() //nolint:errcheck // uninitialised AtomicLevel panics on Level()
+	if LogCfg.Level == (zap.AtomicLevel{}) {
+		return false
+	}
 	return LogCfg.Level.Level() > zap.InfoLevel
 }
 
