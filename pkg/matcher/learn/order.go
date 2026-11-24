@@ -965,16 +965,18 @@ func stdGroups(rec, live string) bool {
 }
 
 // wholeCopy decides a text whose two runs' words do not pair (a word was
-// added or dropped, or the text between them changed, rd.ChangedShape) as
-// one value where an earlier leaf holds the field whole in both runs: the
-// recorded text whole in R and round F's whole in F (a client_id of
-// base64url parts, sent back as it was given, whose '-' and '_' fall
-// elsewhere in each run). Word by word replay could never write it back;
-// whole, it is that leaf's value in each run, bound at the earliest such
-// leaf of the call's scope placed before it, as a word one place shows in
-// both runs is (wordBy). A text that holds an instant is left to the
-// instant's rules, and one no such leaf holds to the refusals after this:
-// ok is false there.
+// added or dropped, or the text between them changed, rd.ChangedShape), or a
+// plain multi-part text carrying a changed randomToken segment (such as a
+// signed client_id "<payload>.<hmac>" whose '-' and '_' may fall elsewhere on
+// a later replay even when record and round F happened to share a word count),
+// as one value where an earlier leaf holds the field whole in both runs: the
+// recorded text whole in R and round F's whole in F. Word by word replay
+// could never write it back once a later run's '-' or '_' shifts its word
+// count; whole, it is that leaf's value in each run, bound at the earliest
+// such leaf of the call's scope placed before it, as a word one place shows
+// in both runs is (wordBy). A text that holds an instant is left to the
+// instant's rules, and one no such leaf holds to the refusals or word rules
+// after this: ok is false there.
 //
 // The leaves read are an exchange's (p.rec and p.live: a recording's place
 // keeps its Raw, never a text), so stateBefore alone places one before the
@@ -984,7 +986,12 @@ func stdGroups(rec, live string) bool {
 // a longer value), so no echo is answered here, as none is for a whole word
 // wordBy binds.
 func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
-	if len(rd.Instants) > 0 || !rd.ChangedShape && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 }) {
+	// Gate randomPart on the reading being the whole un-opened leaf as-is
+	// (len(rd.At.Steps) == 0 && rd.Rec == rec && rd.Live == live) so opened
+	// spans such as JWT headers/claims or Cookie pairs are never bypassed by
+	// raw inter-span gaps.
+	randomPart := len(rd.At.Steps) == 0 && rd.Rec == rec && rd.Live == live && hasRandomTokenPart(rec, live)
+	if len(rd.Instants) > 0 || !rd.ChangedShape && !randomPart && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 }) {
 		return Decision{}, false
 	}
 	var src []evPlace
@@ -997,6 +1004,32 @@ func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live stri
 		return Decision{}, false
 	}
 	return dc.bound(path, bare, -1, changedInstant{r: rec, l: live, rec: rec}, src, ", the earliest place before the call that holds it whole in both runs"), true
+}
+
+// hasRandomTokenPart reports whether rec and live are dot-separated multi-part
+// values with the same number of non-empty parts where at least one changed
+// part is a randomToken (for example "<payload>.<hmac>"): its '-' and '_'
+// separators can shift word counts on a later replay even when record and
+// round F happened to have the same word count.
+func hasRandomTokenPart(rec, live string) bool {
+	if !strings.Contains(rec, ".") || !strings.Contains(live, ".") {
+		return false
+	}
+	rp, lp := strings.Split(rec, "."), strings.Split(live, ".")
+	if len(rp) != len(lp) {
+		return false
+	}
+	for i := range rp {
+		if rp[i] == "" || lp[i] == "" {
+			return false
+		}
+	}
+	for i := range rp {
+		if rp[i] != lp[i] && randomToken(rp[i], lp[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole

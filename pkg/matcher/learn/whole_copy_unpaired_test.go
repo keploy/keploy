@@ -77,9 +77,11 @@ func staffBlockCall(t *testing.T, rec, live, rq, fq string) Input {
 
 // TestAClientIDTheClientTestSentWholeIsBoundAtItsRequest: the insert's
 // client_id is the authorize request's url.query.client_id whole, in both
-// runs: a Value bound there whole, its words paired or not.
+// runs: a Value bound there whole, whether its base64url '-' and '_' shifted
+// word count between record and round F ("unpaired", "shape") or happened to
+// pair ("paired", where a later replay's HMAC can still shift word count).
 func TestAClientIDTheClientTestSentWholeIsBoundAtItsRequest(t *testing.T) {
-	for _, kind := range []string{"unpaired", "shape"} {
+	for _, kind := range []string{"unpaired", "shape", "paired"} {
 		t.Run(kind, func(t *testing.T) {
 			rec, live := sealedPair(t, 1794446576090003375, kind)
 			d := oWord(t, Decide(staffBlockCall(t, rec, live, rec, live)), rec, live)
@@ -93,9 +95,9 @@ func TestAClientIDTheClientTestSentWholeIsBoundAtItsRequest(t *testing.T) {
 
 // TestAClientIDNoEarlierLeafHoldsWholeInBothRunsStaysRefused: where no leaf
 // before the call holds the field whole in both runs (the request sent
-// another client_id in one run, or it is another test's), or the runs'
-// words pair, the whole-copy rule decides nothing: the field is refused as
-// before, or read word by word.
+// another client_id in one run, or it is another test's), or a plain dotted
+// value has no randomToken part and its words pair, the whole-copy rule
+// decides nothing: the field is refused as before, or read word by word.
 func TestAClientIDNoEarlierLeafHoldsWholeInBothRunsStaysRefused(t *testing.T) {
 	rec, live := sealedPair(t, 1794446576090003375, "unpaired")
 	other, _ := sealedPair(t, 1794446576090003375+int64(time.Hour), "unpaired")
@@ -120,11 +122,62 @@ func TestAClientIDNoEarlierLeafHoldsWholeInBothRunsStaysRefused(t *testing.T) {
 			t.Fatalf("bound whole to %s %s: %s; want no whole bind to another test's place", d.From.Mock, d.From.Path, d.Line)
 		}
 	})
-	t.Run("the words pair", func(t *testing.T) {
-		rec, live := sealedPair(t, 1794446576090003375, "paired")
-		for _, d := range Decide(staffBlockCall(t, rec, live, rec, live)) {
+	t.Run("plain dotted words pair without a random token part", func(t *testing.T) {
+		r, l := "tenant.item-101.v1", "tenant.item-202.v1"
+		ds := Decide(staffBlockCall(t, r, l, r, l))
+		if len(ds) == 0 {
+			t.Fatal("expected at least one word decision")
+		}
+		for _, d := range ds {
 			if d.At.Word < 0 {
 				t.Fatalf("decided whole: %s; want its changed words read one by one", d.Line)
+			}
+		}
+	})
+	t.Run("paired client_id with no whole source falls through to word rule", func(t *testing.T) {
+		r, l := sealedPair(t, 1794446576090003375, "paired")
+		ds := Decide(staffBlockCall(t, r, l, r, other))
+		sawWord := false
+		for _, d := range ds {
+			if d.Outcome == OutcomeValue && d.At.Word < 0 {
+				t.Fatalf("bound whole without a matching earlier leaf: %s", d.Line)
+			}
+			if d.At.Word >= 0 {
+				sawWord = true
+			}
+		}
+		if !sawWord {
+			t.Fatalf("expected at least one word-level decision (Word >= 0), got %+v", ds)
+		}
+	})
+	t.Run("paired client_id held only in another test is not bound whole", func(t *testing.T) {
+		r, l := sealedPair(t, 1794446576090003375, "paired")
+		in := staffBlockCall(t, r, l, r, other)
+		e := iSent("mock-9", in.At.Add(-time.Millisecond), "url.query.client_id", String, r, l)
+		e.Own, e.Run = false, true
+		in.Earlier = []Earlier{e}
+		for _, d := range Decide(in) {
+			if d.Outcome == OutcomeValue && d.At.Word < 0 {
+				t.Fatalf("bound whole to another test's place: %s", d.Line)
+			}
+		}
+	})
+	t.Run("opened JWT with changed header and claim is not bypassed by randomPart", func(t *testing.T) {
+		hdrR := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","kid":"k1"}`))
+		hdrL := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","kid":"k2"}`))
+		payR := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user-1","iat":1794446576}`))
+		payL := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user-1","iat":1794446643}`))
+		sigR := "aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV3wX4yZ5aB6c"
+		sigL := "zY9xW8vU7tS6rQ5pO4nM3lK2jI1hG0fE9dC8bA7zY6x"
+		jwtR := hdrR + "." + payR + "." + sigR
+		jwtL := hdrL + "." + payL + "." + sigL
+		ds := Decide(staffBlockCall(t, jwtR, jwtL, jwtR, jwtL))
+		if len(ds) == 0 {
+			t.Fatal("expected JWT decisions")
+		}
+		for _, d := range ds {
+			if len(d.At.Steps) == 0 && d.At.Word < 0 && d.Outcome == OutcomeValue {
+				t.Fatalf("JWT with opened spans was bound whole instead of via JWT steps: %+v", d)
 			}
 		}
 	})

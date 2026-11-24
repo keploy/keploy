@@ -5269,9 +5269,16 @@ func putBack(v interface{}, kept []keptBody) bool {
 // says where each of its values goes: the "1" of "$1" is no word of data.
 // Nor an HTTP answer's marks (models.HTTPAnswerMarks): when each part of it
 // reached the application on record, a clock as its resTimestampMock is.
+// Nor an empty HTTPResp placeholder on a no-answer fault (EOF, or Reset/Timeout
+// before the response head: faultGivesNoAnswer && emptyHTTPResp): the recorder
+// writes a zero-valued HTTPResp there even though the upstream wrote zero bytes,
+// and clearing it lets holdsAnswer report false while keeping any non-empty
+// response fail-closed if a fault hook swaps in another fault at replay.
 // spec is not changed: the copy is.
 func payloadSpec(spec models.MockSpec) models.MockSpec {
-	if r := spec.HTTPResp; r != nil && r.Marks != nil {
+	if faultGivesNoAnswer(spec.Fault) && emptyHTTPResp(spec.HTTPResp) {
+		spec.HTTPResp = nil
+	} else if r := spec.HTTPResp; r != nil && r.Marks != nil {
 		c := *r
 		c.Marks = nil
 		spec.HTTPResp = &c
@@ -5317,6 +5324,27 @@ func payloadSpec(spec models.MockSpec) models.MockSpec {
 		spec.MySQLResponses = resps
 	}
 	return spec
+}
+
+// faultGivesNoAnswer reports whether f is a fault where the upstream wrote no
+// response bytes at all (EOF, or Reset/Timeout before the head: !f.SendsHead()):
+// faults that write a head, partial body, or delayed full answer return false.
+func faultGivesNoAnswer(f *models.Fault) bool {
+	if f == nil {
+		return false
+	}
+	switch f.Kind {
+	case models.FaultEOF, models.FaultReset, models.FaultTimeout:
+		return !f.SendsHead()
+	default:
+		return false
+	}
+}
+
+// emptyHTTPResp reports whether r holds no response status, headers, or body
+// (the zero-valued placeholder written for a no-answer fault).
+func emptyHTTPResp(r *models.HTTPResp) bool {
+	return r == nil || (r.StatusCode == 0 && len(r.Header) == 0 && r.Body == "" && len(r.StreamBody) == 0 && !r.BodySkipped && r.StatusMessage == "" && r.Binary == "")
 }
 
 // unframed is a MySQL packet's info without its header (payloadSpec): its
