@@ -409,10 +409,11 @@ func TestHandleIncoming_EachDropIsInTheSummaryOfItsSessionOnce(t *testing.T) {
 		syncmgr.Get().SetOutputChannel(nil)
 	}, false)
 	summary := logs.FilterMessage("agent: recording complete").All()[0].ContextMap()
-	if summary["mocks_dropped_capacity"] != uint64(1) || summary["mocks_dropped_by_pressure"] != int64(1) ||
+	if summary["mocks_dropped_capacity"] != uint64(1) || summary["mocks_dropped_output_closed"] != uint64(1) ||
+		summary["mocks_dropped_by_pressure"] != int64(1) ||
 		summary["tcs_dropped_capacity"] != int64(1) || summary["mocks_added_successfully"] != int64(1) {
-		t.Fatalf("summary mocks_dropped_capacity = %v, mocks_dropped_by_pressure = %v, tcs_dropped_capacity = %v, mocks_added_successfully = %v, want 1 each",
-			summary["mocks_dropped_capacity"], summary["mocks_dropped_by_pressure"], summary["tcs_dropped_capacity"], summary["mocks_added_successfully"])
+		t.Fatalf("summary mocks_dropped_capacity = %v, mocks_dropped_output_closed = %v, mocks_dropped_by_pressure = %v, tcs_dropped_capacity = %v, mocks_added_successfully = %v, want 1 each",
+			summary["mocks_dropped_capacity"], summary["mocks_dropped_output_closed"], summary["mocks_dropped_by_pressure"], summary["tcs_dropped_capacity"], summary["mocks_added_successfully"])
 	}
 	named := fmt.Sprint(summary["mocks_dropped_named"])
 	for _, want := range []string{"during-output", string(syncmgr.MockDroppedOutputClosed), "during-pressure", string(syncmgr.MockDroppedUnderPressure)} {
@@ -424,6 +425,7 @@ func TestHandleIncoming_EachDropIsInTheSummaryOfItsSessionOnce(t *testing.T) {
 	warned := logs.FilterMessage(models.MocksDroppedSaid).All()
 	if len(warned) != 1 || warned[0].Level != zapcore.WarnLevel ||
 		warned[0].ContextMap()["by_memory_pressure"] != int64(1) || warned[0].ContextMap()["for_the_output"] != uint64(1) ||
+		warned[0].ContextMap()["output_closed"] != uint64(1) ||
 		!strings.Contains(fmt.Sprint(warned[0].ContextMap()["first_dropped"]), "during-pressure") {
 		t.Fatalf("the session's drops were warned of %v, want once, counting and naming them", warned)
 	}

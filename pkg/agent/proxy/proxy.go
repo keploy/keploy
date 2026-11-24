@@ -1649,6 +1649,23 @@ func (p *Proxy) setSession(s *agent.Session) {
 	p.sessionMu.Lock()
 	defer p.sessionMu.Unlock()
 	p.session = s
+	if s != nil && s.Mode == models.MODE_RECORD {
+		syncMock.Get().StartRecordSessionWithOutput(s.MC)
+	}
+}
+
+// bindSessionOutput binds session.MC onto mgr while holding p.sessionMu.RLock()
+// so checking p.session against session and calling SetOutputChannel are
+// atomic with respect to Proxy.Record installing a newer session.
+func (p *Proxy) bindSessionOutput(mgr *syncMock.SyncMockManager, session *agent.Session) {
+	if mgr == nil || session == nil {
+		return
+	}
+	p.sessionMu.RLock()
+	defer p.sessionMu.RUnlock()
+	if p.session == nil || p.session == session {
+		mgr.SetOutputChannel(session.MC)
+	}
 }
 
 // GetSession returns the current session in a thread-safe manner (exported for enterprise).
@@ -3080,8 +3097,11 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		starts.Default.Note(fmt.Sprint(clientConnID), outgoingOpts.SrcPid, time.Now())
 	}
 
+	// Guard against a stale connection goroutine (resolved before a reconnect's
+	// Proxy.Record installed a newer session) rolling syncMock.Get() back to
+	// the previous session's abandoned/closed channel.
 	mgr := syncMock.Get()
-	mgr.SetOutputChannel(rule.MC)
+	p.bindSessionOutput(mgr, rule)
 	// The address this connection reached, which every mock its parsers
 	// record names (starts.Registry.StampDest), under keploy record as under
 	// keploy mock: a replay tells by it what a port held. Kept until they are
@@ -4617,13 +4637,13 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	p.stopBegun.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
 	p.ResetRecordedDNSMocks()
-	// The process's mock manager starts the recording before its first
-	// request, whatever an earlier recording of this process left. An
-	// already-running application's request that reaches the ingress after
-	// the recording's incoming stream attached but before this Record is
-	// forgotten here: its calls from then on are recorded as startup calls
-	// (sent on at once, not windowed), and the next request signals again.
-	syncMock.Get().StartRecordSession()
+	// Finalize any prior stopped recording outside sessionMu so flushing
+	// buffered late mocks to the previous channel cannot block session
+	// readers; setSession then atomically publishes the new session and
+	// binds its output channel via StartRecordSessionWithOutput under
+	// sessionMu so no stale connection or DNS goroutine can rebind an
+	// abandoned channel in between.
+	syncMock.Get().EndStoppedRecording()
 	// Lift the per-session opportunistic-TLS toggle onto the proxy
 	// for handleConnection to read. Independent of GlobalPassthrough.
 	p.OpportunisticTLSIntercept = opts.OpportunisticTLSIntercept

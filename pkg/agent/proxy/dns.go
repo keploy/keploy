@@ -1562,7 +1562,10 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// A mock the manager drops (counted and said there) gives its question
 	// back (giveBack), so its next answer is recorded.
 	if mgr := syncMock.Get(); mgr != nil {
-		mgr.SetOutputChannel(session.MC)
+		// Only bind session.MC if no newer session has replaced it; serialized
+		// under p.sessionMu.RLock so a stale DNS goroutine cannot race
+		// Proxy.Record and roll syncMock back to an abandoned/closed channel.
+		p.bindSessionOutput(mgr, session)
 		var drop syncMock.MockDrop
 		if session.Synchronous {
 			drop = mgr.AddMock(mock)

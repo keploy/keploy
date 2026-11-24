@@ -2615,3 +2615,121 @@ func TestForwardMappingChannelCarriesWhetherTheClientReadsCaptureIDs(t *testing.
 		t.Fatalf("the recorder stopped reading capture ids, yet the app's manager gave %q", id)
 	}
 }
+
+// TestAddMockOnClosedChannelCountsAndWarnsLoud verifies that dropping a mock on
+// a closed output channel increments SessionDrops.OutputClosed alongside
+// Capacity, emits a WARN log, and recovers cleanly when a fresh channel is
+// bound via SetOutputChannel or StartRecordSessionWithOutput.
+func TestAddMockOnClosedChannelCountsAndWarnsLoud(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.WarnLevel)
+	mgr := New(zap.New(core))
+	mark := mgr.StartDropSession()
+
+	ch1 := make(chan *models.Mock, 4)
+	mgr.SetOutputChannel(ch1)
+	mgr.CloseOutChan()
+
+	now := time.Now()
+	for i := range 3 {
+		mk := &models.Mock{
+			Kind:         models.HTTP2,
+			ConnectionID: "h2-closed-conn",
+			Spec:         models.MockSpec{ReqTimestampMock: now.Add(time.Duration(i) * time.Millisecond)},
+		}
+		if drop := mgr.AddMock(mk); drop != MockDroppedOutputClosed {
+			t.Fatalf("AddMock #%d after CloseOutChan = %q, want %q", i+1, drop, MockDroppedOutputClosed)
+		}
+	}
+
+	drops := mgr.DropsSince(mark)
+	if drops.OutputClosed != 3 || drops.Capacity != 3 || drops.Added != 0 {
+		t.Fatalf("DropsSince = %+v, want OutputClosed=3 Capacity=3 Added=0", drops)
+	}
+	if logs.Len() == 0 {
+		t.Fatal("expected WARN log when AddMock drops on a closed output channel")
+	}
+	firstWarn := logs.All()[0]
+	if firstWarn.Level != zap.WarnLevel {
+		t.Fatalf("log level = %v, want warn", firstWarn.Level)
+	}
+	if gotCount, ok := firstWarn.ContextMap()["dropsSoFar"]; !ok || gotCount != uint64(1) {
+		t.Fatalf("first WARN dropsSoFar = %v (present=%v), want 1", gotCount, ok)
+	}
+
+	// Rebinding to a fresh channel reopens output without losing the prior count.
+	ch2 := make(chan *models.Mock, 4)
+	mgr.SetOutputChannel(ch2)
+	recovered := &models.Mock{
+		Kind:         models.Postgres,
+		ConnectionID: "pg-reopened",
+		Spec:         models.MockSpec{ReqTimestampMock: now.Add(10 * time.Millisecond)},
+	}
+	if drop := mgr.AddMock(recovered); drop != MockTaken {
+		t.Fatalf("AddMock after SetOutputChannel(ch2) = %q, want %q", drop, MockTaken)
+	}
+	select {
+	case got := <-ch2:
+		if got != recovered {
+			t.Fatalf("received unexpected mock %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reopened channel ch2 did not receive mock")
+	}
+	if drops := mgr.DropsSince(mark); drops.OutputClosed != 3 {
+		t.Fatalf("DropsSince(mark).OutputClosed after recovery = %d, want 3", drops.OutputClosed)
+	}
+
+	// Session 2 without calling StartDropSession: StartRecordSession resets the
+	// per-session WARN sampling counter so drop #1 of session 2 still logs WARN
+	// while DropsSince keeps accumulating across the mark.
+	mgr.StartRecordSession()
+	mgr.CloseOutChan()
+	warnsBefore := logs.Len()
+	for i := range 2 {
+		mk := &models.Mock{
+			Kind:         models.HTTP2,
+			ConnectionID: "h2-closed-session-2",
+			Spec:         models.MockSpec{ReqTimestampMock: now.Add(time.Duration(20+i) * time.Millisecond)},
+		}
+		if drop := mgr.AddMock(mk); drop != MockDroppedOutputClosed {
+			t.Fatalf("session 2 AddMock #%d after CloseOutChan = %q, want %q", i+1, drop, MockDroppedOutputClosed)
+		}
+	}
+	if logs.Len() <= warnsBefore {
+		t.Fatal("expected session 2 drop #1 to emit WARN even without StartDropSession")
+	}
+	s2Warn := logs.All()[warnsBefore]
+	if gotCount, ok := s2Warn.ContextMap()["dropsSoFar"]; !ok || gotCount != uint64(1) {
+		t.Fatalf("session 2 first WARN dropsSoFar = %v (present=%v), want 1", gotCount, ok)
+	}
+	if drops := mgr.DropsSince(mark); drops.OutputClosed != 5 {
+		t.Fatalf("DropsSince(mark).OutputClosed = %d, want 5", drops.OutputClosed)
+	}
+
+	// StartRecordSessionWithOutput atomically resets firstReqSeen, ends stopped
+	// recording, and binds ch3 so an immediate AddMock delivers to ch3.
+	mgr.SetFirstRequestSignaled()
+	ch3 := make(chan *models.Mock, 4)
+	mgr.StartRecordSessionWithOutput(ch3)
+	if mgr.GetFirstReqSeen() {
+		t.Fatal("StartRecordSessionWithOutput did not reset firstReqSeen")
+	}
+	s3Mock := &models.Mock{
+		Kind:         models.HTTP2,
+		ConnectionID: "h2-session-3",
+		Spec:         models.MockSpec{ReqTimestampMock: now.Add(40 * time.Millisecond)},
+	}
+	if drop := mgr.AddMock(s3Mock); drop != MockTaken {
+		t.Fatalf("AddMock after StartRecordSessionWithOutput(ch3) = %q, want %q", drop, MockTaken)
+	}
+	select {
+	case got := <-ch3:
+		if got != s3Mock {
+			t.Fatalf("ch3 received unexpected mock %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StartRecordSessionWithOutput(ch3) did not deliver mock to ch3")
+	}
+}

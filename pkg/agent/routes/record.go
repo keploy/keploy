@@ -1098,6 +1098,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			a.logger.Warn(models.MocksDroppedSaid,
 				zap.Int64("by_memory_pressure", drops.Pressure),
 				zap.Uint64("for_the_output", drops.Capacity),
+				zap.Uint64("output_closed", drops.OutputClosed),
 				zap.Strings("first_dropped", drops.Named))
 		}
 		if notHandedOn > 0 {
@@ -1193,6 +1194,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
 			zap.Int64("mocks_added_successfully", drops.Added),
 			zap.Uint64("mocks_dropped_capacity", drops.Capacity),
+			zap.Uint64("mocks_dropped_output_closed", drops.OutputClosed),
 			// Which mocks those two dropped, and why: the session's first
 			// few. Each count has them all.
 			zap.Strings("mocks_dropped_named", drops.Named),

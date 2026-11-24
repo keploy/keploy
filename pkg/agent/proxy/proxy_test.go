@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -24,17 +26,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 // newTestServerTLSConfig returns a server TLS config with a fresh self-signed
@@ -1387,5 +1393,611 @@ func TestSetAppClockIsTheLearnStepsClock(t *testing.T) {
 	p.SetAppClockRun(func(time.Time) (time.Time, bool) { return moved, true })
 	if s, ok := p.learnTracker.LiveSpan(served.Add(time.Millisecond)); !ok || !s.From.Equal(moved.Add(time.Hour)) {
 		t.Fatalf("span %+v,%v; want it from the run the agent handed the proxy", s, ok)
+	}
+}
+
+// h2KeepAliveParser is a real HTTP/2 framing parser that relays an open
+// persistent HTTP/2 connection between client and upstream and emits one
+// models.HTTP2 mock per completed stream exchange into syncMock.FromContextOrGlobal(ctx).
+type h2KeepAliveParser struct{}
+
+func (h2KeepAliveParser) MatchType(_ context.Context, buf []byte) bool {
+	return bytes.HasPrefix(buf, []byte(http2.ClientPreface))
+}
+
+func (h2KeepAliveParser) RecordOutgoing(ctx context.Context, sess *integrations.RecordSession) error {
+	preface := make([]byte, len(http2.ClientPreface))
+	if _, err := io.ReadFull(sess.Ingress, preface); err != nil {
+		return err
+	}
+	if _, err := sess.Egress.Write(preface); err != nil {
+		return err
+	}
+	inFramer := http2.NewFramer(sess.Ingress, sess.Ingress)
+	outFramer := http2.NewFramer(sess.Egress, sess.Egress)
+	for {
+		fr, err := inFramer.ReadFrame()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		reqTs := time.Now()
+		hf, ok := fr.(*http2.HeadersFrame)
+		if !ok {
+			continue
+		}
+		if err := outFramer.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      hf.StreamID,
+			BlockFragment: hf.HeaderBlockFragment(),
+			EndStream:     hf.StreamEnded(),
+			EndHeaders:    hf.HeadersEnded(),
+		}); err != nil {
+			return err
+		}
+		respFr, err := outFramer.ReadFrame()
+		if err != nil {
+			return err
+		}
+		resTs := time.Now()
+		rhf, ok := respFr.(*http2.HeadersFrame)
+		if !ok {
+			return fmt.Errorf("unexpected h2 upstream frame %T", respFr)
+		}
+		if err := inFramer.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      rhf.StreamID,
+			BlockFragment: rhf.HeaderBlockFragment(),
+			EndStream:     rhf.StreamEnded(),
+			EndHeaders:    rhf.HeadersEnded(),
+		}); err != nil {
+			return err
+		}
+		mk := &models.Mock{
+			Kind:         models.HTTP2,
+			ConnectionID: sess.ClientConnID,
+			Spec: models.MockSpec{
+				ReqTimestampMock: reqTs,
+				ResTimestampMock: resTs,
+				Metadata:         map[string]string{"stream_id": strconv.FormatUint(uint64(hf.StreamID), 10)},
+			},
+		}
+		syncMock.FromContextOrGlobal(ctx).AddMock(mk)
+	}
+}
+
+func (h2KeepAliveParser) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg, integrations.MockMemDb, models.OutgoingOptions) error {
+	return errors.New("h2KeepAliveParser records only")
+}
+
+func (h2KeepAliveParser) MockNoise() mocknoise.Adapter { return nil }
+
+// pgPoolKeepAliveParser relays a persistent Postgres wire-protocol simple-query
+// connection ('Q' query -> 'C' command-complete + 'Z' ready-for-query) and
+// emits one models.Postgres mock per query into syncMock.FromContextOrGlobal(ctx).
+type pgPoolKeepAliveParser struct{}
+
+func (pgPoolKeepAliveParser) MatchType(_ context.Context, buf []byte) bool {
+	return len(buf) >= 5 && buf[0] == 'Q'
+}
+
+func readPGMessage(r io.Reader) (byte, []byte, error) {
+	var hdr [5]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return 0, nil, err
+	}
+	msgLen := int(binary.BigEndian.Uint32(hdr[1:5]))
+	if msgLen < 4 || msgLen > 64*1024 {
+		return 0, nil, fmt.Errorf("invalid pg msg length %d", msgLen)
+	}
+	payload := make([]byte, msgLen-4)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return 0, nil, err
+	}
+	full := append(hdr[:], payload...)
+	return hdr[0], full, nil
+}
+
+func (pgPoolKeepAliveParser) RecordOutgoing(ctx context.Context, sess *integrations.RecordSession) error {
+	for {
+		msgType, qFrame, err := readPGMessage(sess.Ingress)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if msgType != 'Q' {
+			continue
+		}
+		reqTs := time.Now()
+		if _, err := sess.Egress.Write(qFrame); err != nil {
+			return err
+		}
+		// Relay upstream 'C' (CommandComplete) and 'Z' (ReadyForQuery).
+		for {
+			rt, respFrame, err := readPGMessage(sess.Egress)
+			if err != nil {
+				return err
+			}
+			if _, err := sess.Ingress.Write(respFrame); err != nil {
+				return err
+			}
+			if rt == 'Z' {
+				break
+			}
+		}
+		resTs := time.Now()
+		queryText := strings.TrimSuffix(string(qFrame[5:]), "\x00")
+		mk := &models.Mock{
+			Kind:         models.Postgres,
+			ConnectionID: sess.ClientConnID,
+			Spec: models.MockSpec{
+				ReqTimestampMock: reqTs,
+				ResTimestampMock: resTs,
+				Metadata:         map[string]string{"query": queryText},
+			},
+		}
+		syncMock.FromContextOrGlobal(ctx).AddMock(mk)
+	}
+}
+
+func (pgPoolKeepAliveParser) MockOutgoing(context.Context, net.Conn, *models.ConditionalDstCfg, integrations.MockMemDb, models.OutgoingOptions) error {
+	return errors.New("pgPoolKeepAliveParser records only")
+}
+
+func (pgPoolKeepAliveParser) MockNoise() mocknoise.Adapter { return nil }
+
+func startH2KeepAliveUpstream(t *testing.T) (string, *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen h2 upstream: %v", err)
+	}
+	var accepts atomic.Int32
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				preface := make([]byte, len(http2.ClientPreface))
+				if _, err := io.ReadFull(conn, preface); err != nil {
+					return
+				}
+				fr := http2.NewFramer(conn, conn)
+				var hbuf bytes.Buffer
+				enc := hpack.NewEncoder(&hbuf)
+				for {
+					f, err := fr.ReadFrame()
+					if err != nil {
+						return
+					}
+					hf, ok := f.(*http2.HeadersFrame)
+					if !ok {
+						continue
+					}
+					hbuf.Reset()
+					_ = enc.WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
+					if err := fr.WriteHeaders(http2.HeadersFrameParam{
+						StreamID:      hf.StreamID,
+						BlockFragment: append([]byte(nil), hbuf.Bytes()...),
+						EndStream:     true,
+						EndHeaders:    true,
+					}); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().String(), &accepts
+}
+
+func startPGPoolKeepAliveUpstream(t *testing.T) (string, *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen pg upstream: %v", err)
+	}
+	var accepts atomic.Int32
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				for {
+					mt, _, err := readPGMessage(conn)
+					if err != nil || mt != 'Q' {
+						return
+					}
+					tag := "SELECT 1\x00"
+					var cc [5]byte
+					cc[0] = 'C'
+					binary.BigEndian.PutUint32(cc[1:5], uint32(4+len(tag)))
+					if _, err := conn.Write(append(cc[:], []byte(tag)...)); err != nil {
+						return
+					}
+					rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+					if _, err := conn.Write(rfq); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().String(), &accepts
+}
+
+func sendH2Request(t *testing.T, fr *http2.Framer, streamID uint32, path string) {
+	t.Helper()
+	var hbuf bytes.Buffer
+	enc := hpack.NewEncoder(&hbuf)
+	_ = enc.WriteField(hpack.HeaderField{Name: ":method", Value: "GET"})
+	_ = enc.WriteField(hpack.HeaderField{Name: ":path", Value: path})
+	if err := fr.WriteHeaders(http2.HeadersFrameParam{
+		StreamID:      streamID,
+		BlockFragment: hbuf.Bytes(),
+		EndStream:     true,
+		EndHeaders:    true,
+	}); err != nil {
+		t.Fatalf("write h2 stream %d: %v", streamID, err)
+	}
+	f, err := fr.ReadFrame()
+	if err != nil {
+		t.Fatalf("read h2 response stream %d: %v", streamID, err)
+	}
+	if _, ok := f.(*http2.HeadersFrame); !ok {
+		t.Fatalf("stream %d response frame = %T, want *http2.HeadersFrame", streamID, f)
+	}
+}
+
+func sendPGQuery(t *testing.T, conn net.Conn, sql string) {
+	t.Helper()
+	payload := sql + "\x00"
+	var hdr [5]byte
+	hdr[0] = 'Q'
+	binary.BigEndian.PutUint32(hdr[1:5], uint32(4+len(payload)))
+	if _, err := conn.Write(append(hdr[:], []byte(payload)...)); err != nil {
+		t.Fatalf("write pg query %q: %v", sql, err)
+	}
+	for {
+		mt, _, err := readPGMessage(conn)
+		if err != nil {
+			t.Fatalf("read pg response for %q: %v", sql, err)
+		}
+		if mt == 'Z' {
+			return
+		}
+	}
+}
+
+// TestProxyRecordRebindsOutputChannelForKeptAliveHTTP2AndDBConns drives two
+// real kept-alive connections through Proxy.handleConnection — one HTTP/2
+// framed stream and one Postgres wire-protocol DB-pool connection — keeping
+// both sockets open across Session 1 -> Session 2 (abandoned m1) ->
+// CloseOutChan() -> Session 3 (m3). Every mock emitted on those persistent
+// connections must land on the active session's output channel without opening
+// a new connection or issuing a DNS lookup.
+func TestProxyRecordRebindsOutputChannelForKeptAliveHTTP2AndDBConns(t *testing.T) {
+	mgr := syncMock.Get()
+	t.Cleanup(func() { mgr.SetOutputChannel(nil) })
+
+	h2Addr, h2Accepts := startH2KeepAliveUpstream(t)
+	pgAddr, pgAccepts := startPGPoolKeepAliveUpstream(t)
+
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	dest := &switchableDestInfo{dest: ipv4Dest(t, h2Addr)}
+	p := New(zap.NewNop(), dest, cfg)
+	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
+		integrations.HTTP2:       h2KeepAliveParser{},
+		integrations.POSTGRES_V2: pgPoolKeepAliveParser{},
+	}
+	p.integrationsPriority = []ParserPriority{
+		{Priority: 1, ParserType: integrations.HTTP2},
+		{Priority: 2, ParserType: integrations.POSTGRES_V2},
+	}
+
+	ctx := context.Background()
+	opts := models.OutgoingOptions{DisableMysqlAutoDetect: true}
+
+	// Session 1: open persistent HTTP/2 and Postgres connections once.
+	m1 := make(chan *models.Mock, 16)
+	if err := p.Record(ctx, m1, opts); err != nil {
+		t.Fatalf("session 1 Proxy.Record: %v", err)
+	}
+
+	h2Client, h2Src := acceptedConn(t)
+	h2Done := make(chan error, 1)
+	go func() { h2Done <- p.handleConnection(ctx, h2Src) }()
+	if _, err := io.WriteString(h2Client, http2.ClientPreface); err != nil {
+		t.Fatalf("write h2 preface: %v", err)
+	}
+	h2Framer := http2.NewFramer(h2Client, h2Client)
+	sendH2Request(t, h2Framer, 1, "/s1")
+
+	dest.set(ipv4Dest(t, pgAddr))
+	pgClient, pgSrc := acceptedConn(t)
+	pgDone := make(chan error, 1)
+	go func() { pgDone <- p.handleConnection(ctx, pgSrc) }()
+	sendPGQuery(t, pgClient, "SELECT 1 /* s1 */")
+
+	t.Cleanup(func() {
+		_ = h2Client.Close()
+		_ = pgClient.Close()
+		select {
+		case <-h2Done:
+		case <-time.After(2 * time.Second):
+		}
+		select {
+		case <-pgDone:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	awaitKinds := func(ch <-chan *models.Mock, wantH2, wantPG int, label string) {
+		t.Helper()
+		gotH2, gotPG := 0, 0
+		for range wantH2 + wantPG {
+			select {
+			case got := <-ch:
+				switch got.Kind {
+				case models.HTTP2:
+					gotH2++
+				case models.Postgres:
+					gotPG++
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s: timed out waiting for mocks (got h2=%d pg=%d, want h2=%d pg=%d)", label, gotH2, gotPG, wantH2, wantPG)
+			}
+		}
+		if gotH2 != wantH2 || gotPG != wantPG {
+			t.Fatalf("%s: got h2=%d pg=%d, want h2=%d pg=%d", label, gotH2, gotPG, wantH2, wantPG)
+		}
+	}
+
+	awaitKinds(m1, 1, 1, "session 1")
+
+	// Session 2 (abandoned m1, simulating abrupt control-plane crash/restart):
+	// reuse the SAME already-open HTTP/2 and Postgres sockets with zero new
+	// accepts. Both pre-request startup mocks and windowed mocks must reach m2.
+	m2 := make(chan *models.Mock, 16)
+	if err := p.Record(ctx, m2, opts); err != nil {
+		t.Fatalf("session 2 Proxy.Record: %v", err)
+	}
+	sendH2Request(t, h2Framer, 3, "/s2-startup")
+	sendPGQuery(t, pgClient, "SELECT 2 /* s2-startup */")
+	awaitKinds(m2, 1, 1, "session 2 pre-request")
+
+	// Windowed (post-FirstRequestSeen) traffic on the same kept-alive sockets.
+	mgr.SetFirstRequestSignaled()
+	wStart := time.Now().Add(-50 * time.Millisecond)
+	sendH2Request(t, h2Framer, 5, "/s2-windowed")
+	sendPGQuery(t, pgClient, "SELECT 3 /* s2-windowed */")
+	mgr.ResolveRange(wStart, time.Now().Add(50*time.Millisecond), "test-resumed-1", true, true)
+	awaitKinds(m2, 1, 1, "session 2 windowed")
+
+	if len(m1) != 0 {
+		t.Fatalf("abandoned channel m1 received %d leaked mock(s)", len(m1))
+	}
+
+	// Session 3 (explicit CloseOutChan between sessions): Proxy.Record must
+	// reopen and bind m3 so kept-alive HTTP/2 and DB-pool mocks flow to m3.
+	mgr.CloseOutChan()
+	m3 := make(chan *models.Mock, 16)
+	if err := p.Record(ctx, m3, opts); err != nil {
+		t.Fatalf("session 3 Proxy.Record: %v", err)
+	}
+	sendH2Request(t, h2Framer, 7, "/s3-after-close")
+	sendPGQuery(t, pgClient, "SELECT 4 /* s3-after-close */")
+	awaitKinds(m3, 1, 1, "session 3 after CloseOutChan")
+
+	if got := h2Accepts.Load(); got != 1 {
+		t.Fatalf("h2 upstream accepted %d connections, want 1 (kept-alive)", got)
+	}
+	if got := pgAccepts.Load(); got != 1 {
+		t.Fatalf("pg upstream accepted %d connections, want 1 (kept-alive)", got)
+	}
+}
+
+type switchableDestInfo struct {
+	mu   sync.Mutex
+	dest *agent.NetworkAddress
+}
+
+func (s *switchableDestInfo) set(d *agent.NetworkAddress) {
+	s.mu.Lock()
+	s.dest = d
+	s.mu.Unlock()
+}
+
+func (s *switchableDestInfo) Get(_ context.Context, _ uint16) (*agent.NetworkAddress, error) {
+	s.mu.Lock()
+	d := s.dest
+	s.mu.Unlock()
+	return d, nil
+}
+
+func (s *switchableDestInfo) Delete(_ context.Context, _ uint16) error { return nil }
+
+// TestStaleSessionDNSDoesNotRollBackOutputChannel verifies that once
+// Proxy.Record installs a new session (m2), a delayed DNS mock callback
+// carrying the previous session (staleS1 -> m1) cannot roll syncMock.Get()
+// back to the abandoned/closed channel m1.
+func TestStaleSessionDNSDoesNotRollBackOutputChannel(t *testing.T) {
+	mgr := syncMock.Get()
+	t.Cleanup(func() { mgr.SetOutputChannel(nil) })
+
+	// Spin up a local UDP DNS responder answering A queries for stale.local.
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen udp dns: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var req dns.Msg
+			if err := req.Unpack(buf[:n]); err != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(&req)
+			for _, q := range req.Question {
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+					A:   net.ParseIP("10.0.0.42"),
+				})
+			}
+			raw, err := resp.Pack()
+			if err != nil {
+				continue
+			}
+			_, _ = pc.WriteTo(raw, addr)
+		}
+	}()
+	host, port, err := net.SplitHostPort(pc.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("split dns addr: %v", err)
+	}
+
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	p := New(zap.NewNop(), nil, cfg)
+	p.dnsUpstreamServers = []string{host}
+	p.dnsUpstreamPort = port
+	p.recordedDNSMocks = newRecordedDNSMocksCache()
+
+	m1 := make(chan *models.Mock, 8)
+	if err := p.Record(context.Background(), m1, models.OutgoingOptions{}); err != nil {
+		t.Fatalf("session 1 Proxy.Record: %v", err)
+	}
+	staleS1 := p.getSession()
+
+	// Session 2 replaces session 1.
+	m2 := make(chan *models.Mock, 8)
+	if err := p.Record(context.Background(), m2, models.OutgoingOptions{}); err != nil {
+		t.Fatalf("session 2 Proxy.Record: %v", err)
+	}
+
+	// Late DNS goroutine from session 1 finishes and invokes recordDNSMock
+	// with staleS1: it must NOT roll syncMock.Get() back to m1.
+	_, err = p.recordDNSMock(dns.Question{Name: "stale.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}, time.Now(), staleS1)
+	if err != nil {
+		t.Fatalf("recordDNSMock: %v", err)
+	}
+
+	// A subsequent mock on syncMock.Get() must still arrive on m2, never m1.
+	probe := &models.Mock{
+		Kind:         models.HTTP2,
+		ConnectionID: "after-stale-dns",
+		Spec:         models.MockSpec{ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+	}
+	if drop := mgr.AddMock(probe); drop != syncMock.MockTaken {
+		t.Fatalf("AddMock after stale DNS = %q, want %q", drop, syncMock.MockTaken)
+	}
+	foundProbe := false
+	deadline := time.After(time.Second)
+	for !foundProbe {
+		select {
+		case got := <-m2:
+			if got == probe {
+				foundProbe = true
+			}
+		case <-deadline:
+			t.Fatalf("probe mock did not arrive on m2 after stale DNS (m1 len=%d)", len(m1))
+		}
+	}
+	if len(m1) != 0 {
+		t.Fatalf("stale session channel m1 received %d mock(s); syncMock rolled back", len(m1))
+	}
+}
+
+// TestProxyRecordAtomicSessionBindPreventsStaleGoroutineRebind exercises the
+// transition from session 1 to session 2 while stale goroutines from session 1
+// hammer bindSessionOutput concurrently with Proxy.Record. Because Proxy.Record
+// publishes p.session and binds the new output channel atomically inside one
+// sessionMu.Lock critical section (setSession), a stale goroutine can never
+// rebind m1 after m2 has been bound.
+func TestProxyRecordAtomicSessionBindPreventsStaleGoroutineRebind(t *testing.T) {
+	mgr := syncMock.Get()
+	t.Cleanup(func() { mgr.SetOutputChannel(nil) })
+
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	p := New(zap.NewNop(), nil, cfg)
+
+	for iter := range 25 {
+		m1 := make(chan *models.Mock, 8)
+		if err := p.Record(context.Background(), m1, models.OutgoingOptions{}); err != nil {
+			t.Fatalf("iter %d session 1 Record: %v", iter, err)
+		}
+		staleS1 := p.getSession()
+
+		m2 := make(chan *models.Mock, 8)
+		stopStale := make(chan struct{})
+		var staleWG sync.WaitGroup
+		for range 4 {
+			staleWG.Add(1)
+			go func() {
+				defer staleWG.Done()
+				for {
+					select {
+					case <-stopStale:
+						return
+					default:
+						p.bindSessionOutput(mgr, staleS1)
+					}
+				}
+			}()
+		}
+
+		// Record(m2) runs while stale goroutines hammer bindSessionOutput(staleS1).
+		if err := p.Record(context.Background(), m2, models.OutgoingOptions{}); err != nil {
+			close(stopStale)
+			staleWG.Wait()
+			t.Fatalf("iter %d session 2 Record: %v", iter, err)
+		}
+
+		// Even while stale goroutines are still hammering bindSessionOutput(staleS1),
+		// every mock emitted after Record(m2) returns must land on m2, never m1.
+		probe := &models.Mock{
+			Kind:         models.HTTP2,
+			ConnectionID: fmt.Sprintf("atomic-bind-%d", iter),
+			Spec:         models.MockSpec{ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+		}
+		if drop := mgr.AddMock(probe); drop != syncMock.MockTaken {
+			close(stopStale)
+			staleWG.Wait()
+			t.Fatalf("iter %d AddMock = %q, want %q", iter, drop, syncMock.MockTaken)
+		}
+		close(stopStale)
+		staleWG.Wait()
+
+		select {
+		case got := <-m2:
+			if got != probe {
+				t.Fatalf("iter %d m2 received unexpected mock %v", iter, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("iter %d probe did not arrive on m2 (m1 len=%d)", iter, len(m1))
+		}
+		if len(m1) != 0 {
+			t.Fatalf("iter %d stale m1 received %d mock(s); atomic bind broken", iter, len(m1))
+		}
 	}
 }

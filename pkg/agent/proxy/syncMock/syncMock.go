@@ -644,9 +644,10 @@ type SyncMockManager struct {
 	// its loss costs no test case, and takes no sample. pressureSampled is
 	// the same for memory pressure's drops, which pressureDropped counts over
 	// the manager's life.
-	outChanClosedDrops atomic.Uint64
-	overflowDrops      atomic.Uint64
-	pressureSampled    atomic.Uint64
+	outChanClosedDrops      atomic.Uint64
+	totalOutChanClosedDrops atomic.Uint64
+	overflowDrops           atomic.Uint64
+	pressureSampled         atomic.Uint64
 
 	// dropNames names the first dropNamesMax mocks dropped since the session
 	// opened (StartDropSession), for its summary (DropsSince). dropNamesMu is
@@ -2022,10 +2023,14 @@ func (m *SyncMockManager) countDrop(mock *models.Mock, owner string, epoch uint6
 		left = m.leaveOutAfter(mock, owner, epoch, why)
 	}
 	switch {
+	case why == string(MockDroppedOutputClosed):
+		m.totalOutChanClosedDrops.Add(1)
+		if mock.IsUndelivered() {
+			return 0, left
+		}
+		return m.outChanClosedDrops.Add(1), left
 	case mock.IsUndelivered():
 		return 0, left
-	case why == string(MockDroppedOutputClosed):
-		return m.outChanClosedDrops.Add(1), left
 	}
 	return m.overflowDrops.Add(1), left
 }
@@ -3275,7 +3280,7 @@ func dnsQuestion(mock *models.Mock) string {
 // opened (StartDropSession).
 type DropMark struct {
 	added, pressure, testCases int64
-	capacity                   uint64
+	capacity, outputClosed     uint64
 }
 
 // SessionDrops is what a recording session's summary reports of the mocks its
@@ -3292,6 +3297,9 @@ type SessionDrops struct {
 	// Capacity is the mocks dropped for the output: closed or never set, at
 	// its byte bound, or its consumer stalled.
 	Capacity uint64
+	// OutputClosed is the subset of Capacity dropped specifically because the
+	// output channel was closed or unset when AddMock or send ran.
+	OutputClosed uint64
 	// TestCases is the test cases lost by name (WasMockDroppedForTC): the
 	// owner of a Capacity drop, or one revoked (RevokeTestCase). A name
 	// already in the set, from this session or an earlier one, is not counted
@@ -3320,10 +3328,11 @@ func (m *SyncMockManager) StartDropSession() DropMark {
 	m.cutDrops.Store(0)
 	m.cutLeftOut.Store(0)
 	return DropMark{
-		added:     m.totalAdded.Load(),
-		pressure:  m.pressureDropped.Load(),
-		capacity:  m.dropCount.Load(),
-		testCases: m.droppedTCsRecorded.Load(),
+		added:        m.totalAdded.Load(),
+		pressure:     m.pressureDropped.Load(),
+		capacity:     m.dropCount.Load(),
+		outputClosed: m.totalOutChanClosedDrops.Load(),
+		testCases:    m.droppedTCsRecorded.Load(),
 	}
 }
 
@@ -3331,10 +3340,11 @@ func (m *SyncMockManager) StartDropSession() DropMark {
 // since. Added stops at 0: this session can drop mocks an earlier one added.
 func (m *SyncMockManager) DropsSince(mark DropMark) SessionDrops {
 	d := SessionDrops{
-		Added:     max(m.totalAdded.Load()-mark.added, 0),
-		Pressure:  m.pressureDropped.Load() - mark.pressure,
-		Capacity:  m.dropCount.Load() - mark.capacity,
-		TestCases: m.droppedTCsRecorded.Load() - mark.testCases,
+		Added:        max(m.totalAdded.Load()-mark.added, 0),
+		Pressure:     m.pressureDropped.Load() - mark.pressure,
+		Capacity:     m.dropCount.Load() - mark.capacity,
+		OutputClosed: m.totalOutChanClosedDrops.Load() - mark.outputClosed,
+		TestCases:    m.droppedTCsRecorded.Load() - mark.testCases,
 	}
 	m.dropNamesMu.Lock()
 	defer m.dropNamesMu.Unlock()
@@ -4998,13 +5008,27 @@ func (h holdState) fields() []zap.Field {
 // (EndStoppedRecording). Called as a record session starts (the proxy's
 // Record).
 func (m *SyncMockManager) StartRecordSession() {
+	m.StartRecordSessionWithOutput(nil)
+}
+
+// StartRecordSessionWithOutput atomically transitions this manager to a fresh
+// recording session and, when out is non-nil, binds out as its output channel
+// before resuming capture so already-open persistent connections never see a
+// gap where mocks land on a prior session's closed or abandoned channel.
+// It also resets the per-session closed-channel WARN sampling counter
+// (outChanClosedDrops) while keeping totalOutChanClosedDrops monotonic.
+func (m *SyncMockManager) StartRecordSessionWithOutput(out chan<- *models.Mock) {
+	m.EndStoppedRecording()
+	if out != nil {
+		m.SetOutputChannel(out)
+	}
 	m.mu.Lock()
 	m.firstReqSeen = false
 	m.resolvedTestCount = 0
 	m.destTCs = nil
 	m.recordingFrom.Store(time.Now().UnixNano())
 	m.mu.Unlock()
-	m.EndStoppedRecording()
+	m.outChanClosedDrops.Store(0)
 	// A recording that ended (EndRecording) is over: this one captures.
 	m.ResumeRecording()
 }
