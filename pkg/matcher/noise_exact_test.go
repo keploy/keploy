@@ -46,3 +46,22 @@ func TestHeaderKeyCovers(t *testing.T) {
 		}
 	}
 }
+
+func TestExactKeyCovers(t *testing.T) {
+	for _, c := range []struct {
+		path, key, rank string
+		covers, exact   bool
+	}{
+		{"version", ExactKey("version"), "version", true, true},
+		{"data.Version", ExactKey("data.version"), "data.version", true, true},
+		{"data.version", ExactKey("version"), "version", false, true},
+		{"items[].at", ExactKey("items.at"), "items.at", true, true},
+		{"results.0b7c5d9e-1c1f-4a55-9a8e-7f3c2e1d4b6a.traceid", ExactKey("results.{id}.traceId"), "results.{id}.traceid", true, true},
+		{"data.version", "version", "", false, false},
+	} {
+		rank, covers, exact := ExactKeyCovers(c.path, c.key)
+		if rank != c.rank || covers != c.covers || exact != c.exact {
+			t.Errorf("ExactKeyCovers(%q, %q) = %q, %v, %v; want %q, %v, %v", c.path, c.key, rank, covers, exact, c.rank, c.covers, c.exact)
+		}
+	}
+}

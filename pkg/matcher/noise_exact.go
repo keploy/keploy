@@ -34,6 +34,19 @@ func exactCovers(path, entry string) bool {
 	return path == entry || strings.HasPrefix(path, entry+".")
 }
 
+func ExactKeyCovers(path, key string) (rank string, covers, exact bool) {
+	p, ok := exactPath(key)
+	if !ok {
+		return "", false, false
+	}
+	rank, idKeys := NoiseEntryKey(p)
+	at := strings.ToLower(path)
+	if idKeys {
+		at = CollapseIDKeys(at)
+	}
+	return rank, exactCovers(at, rank), true
+}
+
 func HeaderKeyCovers(name, key string) bool {
 	return headerKeyCovers(strings.ToLower(name), key)
 }
