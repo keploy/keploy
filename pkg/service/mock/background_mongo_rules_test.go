@@ -91,6 +91,21 @@ func TestUncoveredBackgroundRulesDropsRulesWithWorkerOrStartupEntries(t *testing
 	nilM, nilH := uncoveredBackgroundRules(nil, nil, mongoIn, httpIn, nil)
 	require.Nil(t, nilM)
 	require.Nil(t, nilH)
+
+	// When a custom filter evaluates per-(rule, collection) coverage, its
+	// trimmed multi-collection Mongo rule must be preserved even though a
+	// worker: entry carries the same rule ID for a covered sibling collection.
+	trimmed := []models.BackgroundMongoRule{{
+		ID:          "covered-mongo",
+		DB:          "api-server",
+		Command:     "listIndexes",
+		Collections: []string{"uiTestSetJoins", "testsets"},
+	}}
+	gotFilteredM, gotFilteredH := uncoveredBackgroundRules(mp, nil, mongoIn, httpIn, func(*models.Mapping, []*models.Mock) ([]models.BackgroundMongoRule, []models.BackgroundHTTPRule) {
+		return trimmed, []models.BackgroundHTTPRule{httpIn[1]}
+	})
+	require.Equal(t, trimmed, gotFilteredM)
+	require.Equal(t, []models.BackgroundHTTPRule{httpIn[1]}, gotFilteredH)
 }
 
 type bgRulesInstr struct {

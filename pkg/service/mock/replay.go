@@ -1932,11 +1932,13 @@ func hasDeclaredStartupRule(mp *models.Mapping) bool {
 
 // uncoveredBackgroundRules selects only declared background rules that have
 // zero covering worker: or startup: entries in mp (and decoded). When filter
-// is provided (e.g. enterprise CLI with mockrules), it evaluates full rule
-// coverage against mp and decoded; in all cases, any rule whose ID is already
-// placed on a worker: or startup: entry's Rule mark ("<id>@<hash>" or "<id>")
-// is dropped before pushing to the agent so strict per-recording checks can
-// never be bypassed even if the agent later cannot read a background mock.
+// is provided (e.g. enterprise CLI with mockrules), it evaluates full
+// per-(rule, collection) and per-HTTP-rule coverage against mp and decoded
+// (including fail-closed checks on missing or unreadable mocks) and its result
+// is returned directly so a recording on one collection does not drop
+// uncovered sibling collections of the same rule. When filter is nil, any rule
+// whose ID already appears on a worker: or startup: entry's Rule mark
+// ("<id>@<hash>" or "<id>") is dropped before pushing to the agent.
 func uncoveredBackgroundRules(
 	mp *models.Mapping,
 	decoded []*models.Mock,
@@ -1950,7 +1952,7 @@ func uncoveredBackgroundRules(
 		return nil, nil
 	}
 	if filter != nil {
-		mongoRules, httpRules = filter(mp, decoded)
+		return filter(mp, decoded)
 	}
 	if len(mongoRules) == 0 && len(httpRules) == 0 {
 		return mongoRules, httpRules
