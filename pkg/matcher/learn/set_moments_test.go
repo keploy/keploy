@@ -280,3 +280,110 @@ func TestPlaceListIndicesOfMatchesMocksAndIgnoresFalse(t *testing.T) {
 		}
 	}
 }
+
+// Property check pinning that momentIndex.holds (used by setMoments and the
+// indexed per-call path) returns the exact same (held, fine) pair as the full
+// linear byMoment scan across many instants, odd timezone offsets (+05:30,
+// -03:30, +12:45), wall clocks, time-of-day stamps, and coarse/fine cuts.
+func TestMomentIndexMatchesFullScanAcrossZonesAndCuts(t *testing.T) {
+	ist := time.FixedZone("IST", 5*3600+30*60)
+	nst := time.FixedZone("NST", -(3*3600 + 30*60))
+	chast := time.FixedZone("CHAST", 12*3600+45*60)
+	base := time.Date(2026, 6, 15, 14, 23, 45, 123456789, time.UTC)
+
+	parts := []string{
+		base.Format(time.RFC3339Nano),
+		base.Add(2 * time.Millisecond).Format(time.RFC3339),
+		base.In(ist).Format(time.RFC3339Nano),
+		base.In(nst).Format(time.RFC3339),
+		base.In(chast).Format(time.RFC3339),
+		base.Add(5 * time.Second).Format("2006-01-02T15:04:05"), // wall clock, no zone
+		base.Add(-3 * time.Minute).Format("2006-01-02"),         // date only
+		base.Add(11 * time.Second).Format("15:04:05"),           // time of day
+		base.Add(17 * time.Second).Format("Mon, 02 Jan 2006 15:04:05 GMT"),
+		fmt.Sprintf("%d", base.Add(30*time.Second).Unix()),
+		fmt.Sprintf("%d", base.Add(31*time.Second).UnixMilli()),
+		fmt.Sprintf("%d", base.Add(32*time.Second).UnixMicro()),
+		fmt.Sprintf("%d", base.Add(33*time.Second).UnixNano()),
+		base.Add(45 * time.Minute).In(ist).Format("2006-01-02T15:04:05.000-07:00"),
+	}
+	body := `{"stamps":["` + parts[0] + `"`
+	for _, p := range parts[1:] {
+		body += `,"` + p + `"`
+	}
+	body += `]}`
+
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	spans := dc.instantsOfForms(body)
+	if len(spans) < len(parts) {
+		t.Fatalf("premise: parsed only %d instants from %d parts", len(spans), len(parts))
+	}
+	ix := newMomentIndex(spans)
+
+	// Build probe moments: every parsed instant, coarse cuts at each unit,
+	// shifted instants in each zone, and non-matching neighbors.
+	var probes []moment
+	for _, sp := range spans {
+		if sp.keyed {
+			probes = append(probes, sp.moment())
+		}
+	}
+	for _, d := range []time.Duration{
+		0, time.Nanosecond, time.Microsecond, time.Millisecond, time.Second,
+		-time.Second, time.Minute, time.Hour, 24 * time.Hour, 30 * time.Minute,
+	} {
+		probeT := base.Add(d)
+		for _, res := range []time.Duration{time.Nanosecond, time.Microsecond, time.Millisecond, time.Second, time.Minute, time.Hour, 24 * time.Hour} {
+			at := probeT.Truncate(res).UnixNano()
+			probes = append(probes,
+				moment{key: instantKey{at: at}, wall: at, res: res, zoned: true},
+				moment{key: instantKey{at: at}, wall: at, res: res, zoned: true, typed: true},
+				moment{key: instantKey{at: at}, wall: at, res: res, zoned: false},
+			)
+		}
+		for _, loc := range []*time.Location{ist, nst, chast} {
+			lt := probeT.In(loc)
+			_, off := lt.Zone()
+			wall := time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), lt.Minute(), lt.Second(), lt.Nanosecond(), time.UTC)
+			probes = append(probes,
+				moment{key: instantKey{at: probeT.Truncate(time.Second).UnixNano()}, wall: wall.Truncate(time.Second).UnixNano(), res: time.Second, zone: int64(off) * int64(time.Second), zoned: true},
+				moment{key: instantKey{at: wall.Truncate(time.Second).UnixNano()}, wall: wall.Truncate(time.Second).UnixNano(), res: time.Second, zoned: false},
+			)
+		}
+		tod := time.Duration(probeT.Hour())*time.Hour + time.Duration(probeT.Minute())*time.Minute + time.Duration(probeT.Second())*time.Second
+		probes = append(probes, moment{key: instantKey{at: int64(tod), day: true}, res: time.Second})
+	}
+
+	fullScan := func(m moment) (held, fine bool) {
+		for _, sp := range spans {
+			if !sp.keyed {
+				continue
+			}
+			h, f := byMoment(sp.moment(), m)
+			held, fine = held || h, fine || f
+		}
+		return held, fine
+	}
+
+	var matchedHeld, matchedFine int
+	for i, m := range probes {
+		gotHeld, gotFine := ix.holds(m, func() {})
+		wantHeld, wantFine := fullScan(m)
+		if gotHeld != wantHeld || gotFine != wantFine {
+			t.Fatalf("probe %d (%+v): ix.holds=(%v,%v), fullScan=(%v,%v)", i, m, gotHeld, gotFine, wantHeld, wantFine)
+		}
+		if wantHeld {
+			matchedHeld++
+		}
+		if wantFine {
+			matchedFine++
+		}
+	}
+	if matchedHeld == 0 || matchedFine == 0 || matchedHeld == len(probes) {
+		t.Fatalf("non-discriminating probe set: matchedHeld=%d matchedFine=%d total=%d", matchedHeld, matchedFine, len(probes))
+	}
+}

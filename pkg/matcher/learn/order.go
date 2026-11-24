@@ -2768,7 +2768,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	return dc.timeDefault(path, at, n, c, d, declared)
 }
 
-// instantLearned is instant as learning alone decides it.
+// instantLearned is instant as learning decides it, with one use of a
+// declared clock rule: where a declared plain rule holds in both runs
+// (declaredPlainHolds) yet readOverClients dropped no client request (the
+// read sits just outside Window.holdsRead), it drops the client test's
+// requests (Earlier.incoming) all the same, so a coincidental client
+// request is no source beside the rule. The rest of the rule is applied
+// afterwards by declaredClock.
 func (dc *decider) instantLearned(path string, at variables.Address, n int, c changedInstant) Decision {
 	defer dc.letGoHalves()
 	r, l := c.r, c.l
@@ -2781,6 +2787,10 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		earlier = readOverClients(earlier, dc.in.Window, []driftedInstant{{rec: *c.rm, live: *c.lm}}, dc.dr.zone)
 	}
 	overClients := len(earlier) < len(dc.in.Earlier)
+	if !overClients && slices.ContainsFunc(earlier, func(e Earlier) bool { return e.incoming }) && dc.declaredPlainHolds(path, c) {
+		earlier = slices.DeleteFunc(slices.Clone(earlier), func(e Earlier) bool { return e.incoming })
+		overClients = true
+	}
 	// untold: answers of the scope before the call, whose view in round F
 	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
@@ -3063,13 +3073,34 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	if len(gave) > 0 {
 		return dc.bound(path, at, n, c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
 	}
+	fGaveIt := func(h instantHold) bool { return h.p.fMay || h.hl || dc.inAView(h.p, c) }
+	answer := func(h instantHold) bool {
+		p := h.p
+		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && fGaveIt(h) && byText(h)
+	}
+	var twoClientSlots []evPlace
 	switch len(slots) {
 	case 0:
 	case 1:
 		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs"+again)
 	default:
-		return dc.refuse(path, at, n, r, l, RefusalTwoSources, "instant-two-reads",
-			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.fieldNoise(path))
+		// If no client slot holds the field's whole text and an earlier
+		// in-scope dependency answer holds the exact whole leaf text in both
+		// runs (for example, a derived domain like "r:e2e-<ns>.blocked.example"
+		// already returned by an earlier MongoDB read), let step 3 alone decide
+		// it with all of step 3's conflict and ordering checks; if step 3 does
+		// not decide it (e.g. ownRead is true), the two-reads refusal still
+		// stands and later steps never run with ambiguous client slots.
+		leafRec, leafLive := c.leaf()
+		clientHoldsWhole := slices.ContainsFunc(slots, func(p evPlace) bool { return p.rec == leafRec && p.live == leafLive })
+		hasWholeAnswer := leafRec != "" && leafLive != "" && !clientHoldsWhole && slices.ContainsFunc(hs, func(h instantHold) bool {
+			return answer(h) && !h.p.fUnstated && h.hl && h.p.rec == leafRec && h.p.live == leafLive
+		})
+		if !hasWholeAnswer {
+			return dc.refuse(path, at, n, r, l, RefusalTwoSources, "instant-two-reads",
+				"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.fieldNoise(path))
+		}
+		twoClientSlots = slots
 	}
 
 	// 3. Answer: an answer of the call's scope or the start-up, given
@@ -3080,11 +3111,6 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	// it changed and no view it gave holds F's moment, F's application took
 	// its moment from elsewhere: the answer is no source, in or outside the
 	// call's scope alike (an answer F never served is never before in F).
-	fGaveIt := func(h instantHold) bool { return h.p.fMay || h.hl || dc.inAView(h.p, c) }
-	answer := func(h instantHold) bool {
-		p := h.p
-		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && fGaveIt(h) && byText(h)
-	}
 	answers := heldWhere(hs, answer)
 	// An answer that holds it only as a coarse cut of a finer instant is no
 	// source keploy can bind, and where the call's own window holds the
@@ -3141,6 +3167,10 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			return dc.copied(path, at, n, c, fine, fineCopy)
 		}
 		return dc.bound(path, at, n, c, answers, ": an answer given before the call holds it: the dependency's value")
+	}
+	if len(twoClientSlots) > 0 {
+		return dc.refuse(path, at, n, r, l, RefusalTwoSources, "instant-two-reads",
+			"the same moment was sent at "+twoClientSlots[0].name+" and "+twoClientSlots[1].name+", two separate reads", names(twoClientSlots), dc.fieldNoise(path))
 	}
 
 	if fine := copies(true); len(fine) > 0 {

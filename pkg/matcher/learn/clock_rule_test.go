@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -283,5 +285,134 @@ func TestAMintedRuleDecidesAFieldWithAnInstantWordWhole(t *testing.T) {
 	ds := Decide(in)
 	if len(ds) != 1 || ds[0].At.Word != -1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalChangedShape || ds[0].Refusal.Rule != cRule {
 		t.Fatalf("a minted rule on the field: %s; want the field refused whole as of another shape, naming the rule", oDescribe(ds))
+	}
+}
+
+// A declared plain clock rule (e.g. min: -1s, max: 0s, res: 1s) drops
+// coincidental client HTTP requests (Earlier.incoming) when a pre-call stamp
+// sits within the rule's CheckClockRead window just outside Window.holdsRead,
+// while preserving mock-to-mock copies (such as an update auditing a stored
+// app's createdAt) and keeping non-plain / out-of-range rules untouched.
+func TestDeclaredPlainClockRuleDropsCoincidentalClientRequest(t *testing.T) {
+	// Call spans [T+200ms, T+210ms]; createdAt was stamped at T-1s (the second
+	// before the call's span: outside Window.holdsRead, inside CheckClockRead
+	// with declaredOffset{Res: 1s}).
+	rBase := time.Date(2026, 11, 23, 17, 20, 10, 0, time.UTC)
+	fBase := rBase.Add(65 * time.Second)
+	rStamp, fStamp := rBase.Add(-time.Second), fBase.Add(-time.Second)
+	rCall, fCall := rBase.Add(200*time.Millisecond), fBase.Add(200*time.Millisecond)
+	rVal, fVal := strconv.FormatInt(rStamp.Unix(), 10), strconv.FormatInt(fStamp.Unix(), 10)
+	const auditPath = "body.docs.msgs.0.app.createdAt.$numberLong"
+
+	clientReq := func(at time.Time, ts int64) *models.HTTPReq {
+		return &models.HTTPReq{
+			Method: "POST", URL: "http://localhost:8083/cluster/status", Timestamp: at,
+			Header: map[string]string{"Content-Type": "application/json"},
+			Body:   `{"timestamp":` + strconv.FormatInt(ts, 10) + `}`,
+		}
+	}
+	clientEarlier := clientSent(t, []string{"post-cluster-status-3"},
+		[]*models.HTTPReq{clientReq(rBase.Add(-500*time.Millisecond), rStamp.Unix())},
+		[]*models.HTTPReq{clientReq(fBase.Add(-500*time.Millisecond), fStamp.Unix())},
+	)
+	makeIn := func(earlier []Earlier, clockOff models.ClockOffset, recStr, liveStr string) Input {
+		in := iCall(auditPath, Number, recStr, liveStr, rCall, fCall, nil, earlier, nil)
+		in.Window = (&Window{
+			Rec: Span{From: rCall, To: rCall.Add(10 * time.Millisecond)},
+			F:   Span{From: fCall, To: fCall.Add(10 * time.Millisecond)},
+		}).ComparesOffsets()
+		in.Drifts = oClientDrifts()
+		in.Source = func(p string) (Source, bool) {
+			if p == auditPath {
+				return Source{Kind: SourceClock, Rule: "app-audit-created-at", Clock: clockOff}, true
+			}
+			return Source{}, false
+		}
+		return in
+	}
+
+	// 1. Plain declared clock rule {min: -1s, max: 0s, res: 1s} stores the
+	// declared plain ClockOffset{Res: 1s} (not a narrow -1s look-back),
+	// uniformly with or without a coincidental client request, and both with
+	// and without ComparesOffsets() (under strict times, TimeForm off).
+	plain := models.ClockOffset{Min: -time.Second, Max: 0, Res: time.Second}
+	for _, withClient := range []bool{true, false} {
+		for _, compareOffsets := range []bool{true, false} {
+			var ear []Earlier
+			if withClient {
+				ear = clientEarlier
+			}
+			in := makeIn(ear, plain, rVal, fVal)
+			if !compareOffsets {
+				in.Window = &Window{
+					Rec: Span{From: rCall, To: rCall.Add(10 * time.Millisecond)},
+					F:   Span{From: fCall, To: fCall.Add(10 * time.Millisecond)},
+				}
+			}
+			in.TimeForm = false
+			ds := Decide(in)
+			if len(ds) != 1 || ds[0].Outcome != OutcomeClock || ds[0].Clock == nil || !ds[0].Clock.Plain() || ds[0].Clock.Res != time.Second {
+				t.Fatalf("declared plain clock (withClient=%v, compareOffsets=%v): %s; want plain Clock with Res=1s",
+					withClient, compareOffsets, oDescribe(ds))
+			}
+		}
+	}
+
+	// 2. Mock-to-mock copy (stored app from earlier Mongo answer) is NOT dropped -> Value.
+	at := rBase.Add(-50 * time.Millisecond)
+	mongoAns := Earlier{
+		Mock: "mock-500", At: at, Own: true,
+		Payload: RawOf(&models.Mock{Name: "mock-500", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true).ServedAs(1),
+		Seen:    []Seen{{Side: Response, Leaf: Leaf{Path: "body.cursor.firstBatch.0.createdAt.$numberLong", Type: Number, Value: rVal}, Live: fVal}},
+	}
+	dsMock := Decide(makeIn(append(slices.Clone(clientEarlier), mongoAns), plain, rVal, fVal))
+	if len(dsMock) != 1 || dsMock[0].Outcome != OutcomeValue || dsMock[0].From.Mock != "mock-500" {
+		t.Fatalf("declared plain clock with stored Mongo answer: %s; want Value from mock-500", oDescribe(dsMock))
+	}
+
+	// 3. Stale timestamp outside declared range (10s old) keeps client request -> Value.
+	rOld, fOld := strconv.FormatInt(rBase.Add(-10*time.Second).Unix(), 10), strconv.FormatInt(fBase.Add(-10*time.Second).Unix(), 10)
+	oldClient := clientSent(t, []string{"post-cluster-status-3"},
+		[]*models.HTTPReq{clientReq(rBase.Add(-500*time.Millisecond), rBase.Add(-10*time.Second).Unix())},
+		[]*models.HTTPReq{clientReq(fBase.Add(-500*time.Millisecond), fBase.Add(-10*time.Second).Unix())},
+	)
+	dsOld := Decide(makeIn(oldClient, plain, rOld, fOld))
+	if len(dsOld) != 1 || dsOld[0].Outcome != OutcomeValue || dsOld[0].From.Mock != "test case post-cluster-status-3" {
+		t.Fatalf("stale timestamp outside declared clock range: %s; want Value from client request", oDescribe(dsOld))
+	}
+
+	// 4. Non-plain future offset {min: 30m, max: 31m, res: 1s} does NOT drop client request.
+	rFut, fFut := strconv.FormatInt(rBase.Add(30*time.Minute).Unix(), 10), strconv.FormatInt(fBase.Add(30*time.Minute).Unix(), 10)
+	futClient := clientSent(t, []string{"post-cluster-status-3"},
+		[]*models.HTTPReq{clientReq(rBase.Add(-500*time.Millisecond), rBase.Add(30*time.Minute).Unix())},
+		[]*models.HTTPReq{clientReq(fBase.Add(-500*time.Millisecond), fBase.Add(30*time.Minute).Unix())},
+	)
+	dsFut := Decide(makeIn(futClient, models.ClockOffset{Min: 30 * time.Minute, Max: 31 * time.Minute, Res: time.Second}, rFut, fFut))
+	if len(dsFut) != 1 || dsFut[0].Outcome != OutcomeValue || dsFut[0].From.Mock != "test case post-cluster-status-3" {
+		t.Fatalf("non-plain expiry rule beside client request: %s; want Value from client request", oDescribe(dsFut))
+	}
+
+	// 5. Regression guard: a zero-containing declared rule whose plain CheckClockRead
+	// does NOT hold must NEVER replace a valid learned offset clock read (such as
+	// {min: 0s, max: 30m, res: 1s} on a +30m expiry, or {min: -10s, max: 0s, res: 1s}
+	// on a -5s look-back).
+	for _, tc := range []struct {
+		name string
+		off  models.ClockOffset
+		at   time.Duration
+	}{
+		{"zero-to-30m rule preserves learned +30m expiry", models.ClockOffset{Min: 0, Max: 30 * time.Minute, Res: time.Second}, 30 * time.Minute},
+		{"minus-10s-to-0 rule preserves learned -5s look-back", models.ClockOffset{Min: -10 * time.Second, Max: 0, Res: time.Second}, -5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rv := strconv.FormatInt(rBase.Add(tc.at).Unix(), 10)
+			fv := strconv.FormatInt(fBase.Add(tc.at).Unix(), 10)
+			in := makeIn(nil, tc.off, rv, fv)
+			in.TimeForm = false
+			ds := Decide(in)
+			if len(ds) != 1 || ds[0].Outcome != OutcomeClock || ds[0].Clock == nil || ds[0].Clock.Plain() {
+				t.Fatalf("%s: %s; want learned offset OutcomeClock preserved", tc.name, oDescribe(ds))
+			}
+		})
 	}
 }

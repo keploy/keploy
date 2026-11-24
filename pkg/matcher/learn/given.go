@@ -79,11 +79,15 @@ func oneSlotEach(slots []evPlace) []evPlace {
 // (a) A slot whose whole text is the field's in both runs — or, where the
 // field's whole text parses as a JWT in both runs, a slot that carries that
 // exact token whole as its whole text, Bearer credential, or a Cookie/Set-Cookie
-// pair value in both runs — is its source: one that holds only the moment's word
-// in another text (or inside a different JWT) does not compete (a suite renamed
-// from "e2e-vh-<nanos>" to "e2e-vh-<nanos>-renamed", or a refresh-token lookup
-// beside earlier requests carrying an access/browser JWT with the same
-// auth_time claim).
+// pair value in both runs; or, where a slot parses as a URL whose changed
+// hostname stands as a whole hostname segment in the field's text in both runs —
+// is its source: one that holds only the moment's word in another text (or
+// inside a different JWT, or another URL host) does not compete (a suite
+// renamed from "e2e-vh-<nanos>" to "e2e-vh-<nanos>-renamed", a refresh-token
+// lookup beside earlier requests carrying an access/browser JWT with the same
+// auth_time claim, or a redirect URI carrying "media.e2e-<ns>.blocked.example"
+// beside an earlier registration's "cb.e2e-<ns>.blocked.example" when the field
+// is "r:media.e2e-<ns>.blocked.example").
 //
 // (b) Slots that hold one and the same whole text in both runs are one value
 // the client sent again (a name, a session cookie), its place the first
@@ -102,7 +106,7 @@ func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
 	}
 	rec, live := c.leaf()
 	src := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.rec != rec || p.live != live })
-	byToken := false
+	byToken, byHost := false, false
 	if len(src) == 0 && rec != "" && live != "" {
 		_, _, okR := jwtClaims(rec)
 		_, _, okL := jwtClaims(live)
@@ -113,10 +117,19 @@ func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
 			byToken = len(src) > 0
 		}
 	}
+	if len(src) == 0 && rec != "" && live != "" {
+		src = slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool {
+			return !carriesURLHost(p.rec, p.live, rec, live)
+		})
+		byHost = len(src) > 0
+	}
 	if len(src) == 1 {
 		word := slices.DeleteFunc(slices.Clone(slots), func(p evPlace) bool { return p.name == src[0].name })
 		if byToken {
 			return src, "; " + strings.Join(names(word), ", ") + " did not carry that token whole (as its text, a Bearer credential or a cookie value)"
+		}
+		if byHost {
+			return src, "; " + strings.Join(names(word), ", ") + " did not carry that URL host"
 		}
 		return src, "; " + strings.Join(names(word), ", ") + " held only its word"
 	}
@@ -131,6 +144,47 @@ func oneSource(slots []evPlace, c changedInstant) ([]evPlace, string) {
 	}
 	again := slices.DeleteFunc(slices.Clone(src), func(p evPlace) bool { return p.name == first.name })
 	return []evPlace{first}, "; sent again: " + strings.Join(names(again), ", ") + ", first sent at " + first.name
+}
+
+// carriesURLHost reports whether pRec and pLive parse as URLs with schemes and
+// non-empty differing hostnames hR and hL such that hR stands as a whole
+// hostname segment in rec and hL stands as a whole hostname segment in live.
+func carriesURLHost(pRec, pLive, rec, live string) bool {
+	uR, errR := url.Parse(pRec)
+	uL, errL := url.Parse(pLive)
+	if errR != nil || errL != nil || uR.Scheme == "" || uL.Scheme == "" {
+		return false
+	}
+	hR, hL := uR.Hostname(), uL.Hostname()
+	if hR == "" || hL == "" || hR == hL {
+		return false
+	}
+	return hostInValue(rec, hR) && hostInValue(live, hL)
+}
+
+// hostInValue reports whether host stands in val bounded on both sides by the
+// start/end of val or a non-hostname character (not ASCII letter, digit, '-',
+// '.' or '_'), so "cb.e2e-1.example" matches "r:cb.e2e-1.example" while
+// "e2e-1.example" does not match inside "r:cb.e2e-1.example".
+func hostInValue(val, host string) bool {
+	isHostByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '.' || b == '_'
+	}
+	for off := 0; off <= len(val)-len(host); {
+		i := strings.Index(val[off:], host)
+		if i < 0 {
+			return false
+		}
+		start := off + i
+		end := start + len(host)
+		beforeOK := start == 0 || !isHostByte(val[start-1])
+		afterOK := end == len(val) || !isHostByte(val[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		off = start + 1
+	}
+	return false
 }
 
 // carriesToken reports whether a slot at path holds (rec, live) in both runs

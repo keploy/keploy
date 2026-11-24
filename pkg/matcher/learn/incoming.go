@@ -85,12 +85,18 @@ type caseCursor struct {
 // each counted once, and with the first of those in the recording's order.
 // A word every request left holds tells none from another, and one none
 // holds (a value this run made: a name from its clock, an id) is no nearer
-// one than another. So requests that send the same words but for the values
-// their run made pair by order, the n-th of the run with the n-th of the
-// recording, as do the requests of a test that keploy cannot tell apart; a
-// request paired with another's recording binds no variable there (the
-// recording does not hold the variable's value at its place) or a value no
-// call carries, and the call misses.
+// one than another. Second- and minute-resolution clock words on each
+// recorded request that lie near its own recorded Timestamp are omitted
+// (pairWordsNear) so that when replay shifts the application clock toward the
+// recording's time, a live step's clock reading cannot coincide with another
+// recorded step's clock reading and swap their pairing; the live request's
+// words are never filtered against replay wall-clock time. So requests that
+// send the same words but for the values their run made pair by order, the
+// n-th of the run with the n-th of the recording, as do the requests of a
+// test that keploy cannot tell apart; a request paired with another's
+// recording binds no variable there (the recording does not hold the
+// variable's value at its place) or a value no call carries, and the call
+// misses.
 func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) (int, bool) {
 	if live == nil {
 		return -1, false
@@ -116,7 +122,7 @@ func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) 
 	best, most := left[0], 0
 	for _, i := range left {
 		held := map[string]bool{}
-		pairWords(cases[i].Req, body, func(w string) {
+		pairWordsNear(cases[i].Req, body, cases[i].Req.Timestamp, func(w string) {
 			if sent[w] {
 				held[w] = true
 			}
@@ -134,9 +140,9 @@ const pairWordsBytes = 64 << 10
 
 // pairWords hands each word of what tells req from another request of its
 // call: of its URL, and, where body says keploy read it, of the first
-// pairWordsBytes of its body and of the values of its form's parts. Its
-// headers are not read: they hold what every run makes anew (a date, a
-// trace id, a signature).
+// pairWordsBytes of its body and of the values of its form's parts, with no
+// clock-word filtering. Its headers are not read: they hold what every run
+// makes anew (a date, a trace id, a signature).
 //
 // A word here is a whole value as its text delimits it: a run of bytes
 // with no space, quote, bracket, comma, nor a mark that parts a URL's or a
@@ -146,8 +152,19 @@ const pairWordsBytes = 64 << 10
 // another run's value holds by chance, pairing the request with a
 // recording that is not its own.
 func pairWords(req *models.HTTPReq, body bool, each func(string)) {
+	pairWordsNear(req, body, time.Time{}, each)
+}
+
+// pairWordsNear is pairWords omitting second- and minute-resolution clock
+// words within pairTimeWordWindow of ref (isPairTimeWordNear) when ref is non-zero.
+// PairCase calls this only on recorded requests with each recording's own
+// recorded Timestamp so pairing never depends on replay wall-clock time.
+func pairWordsNear(req *models.HTTPReq, body bool, ref time.Time, each func(string)) {
 	words := func(s string) {
 		for _, w := range strings.FieldsFunc(s, func(r rune) bool { return r <= ' ' || strings.ContainsRune(pairWordEnds, r) }) {
+			if isPairTimeWordNear(w, ref) {
+				continue
+			}
 			each(w)
 		}
 	}
@@ -165,6 +182,97 @@ func pairWords(req *models.HTTPReq, body bool, each func(string)) {
 			words(v)
 		}
 	}
+}
+
+// pairTimeWordWindow is how close to a recorded request's Timestamp a second-
+// or minute-resolution clock word must be for PairCase to skip it as a
+// clock-derived word rather than distinguishing request content. Chosen wide
+// enough to cover multi-minute test execution under a shifted replay clock;
+// a fixed time-of-day or date-time literal within this window of the recording time
+// falls back to pairing by order (which can only fail closed on a swapped pair,
+// never false-pass).
+const pairTimeWordWindow = 10 * time.Minute
+
+// isPairTimeWordNear reports whether w is a second- or minute-resolution clock
+// time of day (e.g. "17:19:13" from an embedded HTTP Date header) or instant
+// (e.g. RFC 3339 seconds/minutes or 10-digit epoch seconds) within
+// pairTimeWordWindow of ref. A cheap O(1) shape check runs before any time
+// parsing so ordinary words and short JSON numbers pay zero allocations.
+// Sub-second instants and time-embedding IDs (UUIDv7, UUIDv1, 13/16/19-digit
+// epochs), coarser dates, and values outside pairTimeWordWindow of ref are
+// kept as pairing words.
+func isPairTimeWordNear(w string, ref time.Time) bool {
+	if ref.IsZero() || len(w) < 5 {
+		return false
+	}
+	s := w
+	hadColon := false
+	if s[0] == ':' {
+		// JSON numeric fields tokenize with their leading colon (e.g. ":1795454353")
+		// because pairWordEnds keeps ':' inside timestamps and URIs.
+		s = s[1:]
+		hadColon = true
+		if len(s) != 10 {
+			return false
+		}
+	}
+	if s[0] < '0' || s[0] > '9' {
+		return false
+	}
+	// Time of day: HH:MM (5) or HH:MM:SS (8) with ':' at index 2.
+	if !hadColon && (len(s) == 5 || len(s) == 8) && s[2] == ':' {
+		t, res, ok := readTimeOfDay(s)
+		if !ok || res < time.Second || res > time.Minute {
+			return false
+		}
+		nearTOD := func(t, r time.Time) bool {
+			tod := time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute + time.Duration(t.Second())*time.Second
+			rtod := time.Duration(r.Hour())*time.Hour + time.Duration(r.Minute())*time.Minute + time.Duration(r.Second())*time.Second + time.Duration(r.Nanosecond())
+			d := tod - rtod
+			if d < 0 {
+				d = -d
+			}
+			if d > 12*time.Hour {
+				d = 24*time.Hour - d
+			}
+			return d <= pairTimeWordWindow
+		}
+		return nearTOD(t, ref.UTC()) || (ref.Location() != time.UTC && nearTOD(t, ref))
+	}
+	// 10-digit epoch seconds, ISO date-time ('-' at index 4), or compact date-time ('T' at index 8).
+	isEpoch10 := len(s) == 10
+	if isEpoch10 {
+		for i := range 10 {
+			if s[i] < '0' || s[i] > '9' {
+				isEpoch10 = false
+				break
+			}
+		}
+	}
+	isDateTime := !hadColon && ((len(s) >= 16 && s[4] == '-') || (len(s) >= 13 && s[8] == 'T'))
+	if !isEpoch10 && !isDateTime {
+		return false
+	}
+	at, res, wall, ok := readClockTextWall(s)
+	if !ok || res < time.Second || res > time.Minute {
+		return false
+	}
+	d := at.Sub(ref.UTC())
+	if d < 0 {
+		d = -d
+	}
+	if d <= pairTimeWordWindow {
+		return true
+	}
+	if wall && ref.Location() != time.UTC {
+		_, off := ref.Zone()
+		ld := at.Add(-time.Duration(off) * time.Second).Sub(ref.UTC())
+		if ld < 0 {
+			ld = -ld
+		}
+		return ld <= pairTimeWordWindow
+	}
+	return false
 }
 
 // pairWordEnds are the marks, beside a space and a control byte, that end a

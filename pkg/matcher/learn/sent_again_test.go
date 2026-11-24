@@ -309,6 +309,9 @@ func TestAJWTTokenLookupPrefersTheRequestCarryingThatExactJWT(t *testing.T) {
 	if authDec == nil || authDec.Outcome != OutcomeValue || authDec.From.Mock != "test case get-auth-token-1" || authDec.From.Path != "header.Authorization" {
 		t.Fatalf("access JWT lookup auth_time: %s; want Value from test case get-auth-token-1 header.Authorization", oDescribe(dsAcc))
 	}
+	if wantAt := "header.Authorization|jwt.auth_time#0"; authDec.FromAt.String() != wantAt {
+		t.Fatalf("access JWT lookup FromAt=%q; want %q", authDec.FromAt.String(), wantAt)
+	}
 
 	// 3. Browser JWT sent twice in identical Cookie headers narrows to >=2 slots
 	// and binds "sent again" at the first send.
@@ -521,5 +524,180 @@ func TestCarriesToken(t *testing.T) {
 				t.Errorf("carriesToken(%q, %q, %q, tokR, tokL) = %v; want %v", tc.path, tc.pRec, tc.pLive, got, tc.want)
 			}
 		})
+	}
+}
+
+// A URL host carried by redirect URI requests (e.g. cb.e2e-<ns>.blocked.example
+// or media.e2e-<ns>.blocked.example) narrows client slots when the field carries
+// that exact hostname segment (e.g. "r:cb.e2e-<ns>.blocked.example" or
+// "r:media.e2e-<ns>.blocked.example"), while a derived domain already returned
+// whole by an earlier in-scope dependency answer ("r:e2e-<ns>.blocked.example")
+// falls through to step 3 instead of failing on ambiguous client slots.
+// Unrelated texts, different URLs sharing a host, and missing whole answers
+// stay refused as two-sources.
+func TestURLHostNarrowingAndWholeAnswerFallbackBesideClientSlots(t *testing.T) {
+	rNanos := int64(1795454261160964245)
+	fNanos := int64(1795454365222964245)
+	rHost := "e2e-" + strconv.FormatInt(rNanos, 10) + ".blocked.example"
+	fHost := "e2e-" + strconv.FormatInt(fNanos, 10) + ".blocked.example"
+	rReq := time.Unix(0, rNanos).Add(time.Millisecond)
+	fReq := time.Unix(0, fNanos).Add(time.Millisecond)
+	rCall, fCall := rReq.Add(20*time.Millisecond), fReq.Add(20*time.Millisecond)
+
+	reqs := func(at time.Time, host string) []*models.HTTPReq {
+		cb := "https://cb." + host + "/callback"
+		media := "com.example.player://media." + host + "/callback"
+		return []*models.HTTPReq{
+			{Method: "POST", URL: "http://localhost:8083/oauth/register", Timestamp: at,
+				Header: map[string]string{"Content-Type": "application/json"},
+				Body:   `{"client_name":"E2E Hosted Agent","redirect_uris":["` + cb + `"]}`},
+			{Method: "GET", URL: "http://localhost:8083/oauth/authorize?redirect_uri=" + cb, Timestamp: at.Add(2 * time.Millisecond)},
+			{Method: "POST", URL: "http://localhost:8083/oauth/token", Timestamp: at.Add(4 * time.Millisecond),
+				Header: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+				Body:   "grant_type=authorization_code&redirect_uri=https%3A%2F%2Fcb." + host + "%2Fcallback"},
+			{Method: "POST", URL: "http://localhost:8083/oauth/register", Timestamp: at.Add(6 * time.Millisecond),
+				Header: map[string]string{"Content-Type": "application/json"},
+				Body:   `{"client_name":"E2E Media Agent","redirect_uris":["` + media + `"]}`},
+			{Method: "GET", URL: "http://localhost:8083/oauth/authorize?redirect_uri=" + media, Timestamp: at.Add(8 * time.Millisecond)},
+		}
+	}
+	earlier := clientSent(t,
+		[]string{"post-oauth-register-4", "get-oauth-authorize-4", "post-oauth-token-3", "post-oauth-register-5", "get-oauth-authorize-5"},
+		reqs(rReq, rHost), reqs(fReq, fHost),
+	)
+
+	// 1. "r:cb.<host>" narrows to post-oauth-register-4 + get-oauth-authorize-4 -> earliest.
+	inCB := iCall("body.docs.msgs.0.client_domains.1", String, "r:cb."+rHost, "r:cb."+fHost, rCall, fCall, nil, earlier, nil)
+	inCB.Drifts = oClientDrifts()
+	if ds := Decide(inCB); len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "test case post-oauth-register-4" || ds[0].From.Path != "body.redirect_uris[0]" {
+		t.Fatalf("cb host narrowing: %s; want Value from test case post-oauth-register-4 body.redirect_uris[0]", oDescribe(ds))
+	}
+
+	// 2. "r:media.<host>" narrows to post-oauth-register-5 + get-oauth-authorize-5 -> earliest.
+	inMedia := iCall("body.docs.msgs.0.client_domains.3", String, "r:media."+rHost, "r:media."+fHost, rCall, fCall, nil, earlier, nil)
+	inMedia.Drifts = oClientDrifts()
+	if ds := Decide(inMedia); len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "test case post-oauth-register-5" || ds[0].From.Path != "body.redirect_uris[0]" {
+		t.Fatalf("media host narrowing: %s; want Value from test case post-oauth-register-5 body.redirect_uris[0]", oDescribe(ds))
+	}
+
+	// 3. "r:<host>" with NO whole dependency answer stays refused (two-sources):
+	// neither cb.<host> nor media.<host> is a whole host segment matching <host>.
+	inParentNoAns := iCall("body.docs.msgs.0.client_domains.2", String, "r:"+rHost, "r:"+fHost, rCall, fCall, nil, earlier, nil)
+	inParentNoAns.Drifts = oClientDrifts()
+	if ds := Decide(inParentNoAns); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
+		t.Fatalf("parent domain with no whole answer: %s; want refused (two-sources)", oDescribe(ds))
+	}
+
+	// 4. "r:<host>" WITH an earlier in-scope MongoDB answer returning "r:<host>" whole
+	// falls through step 2 to step 3 and binds to that answer.
+	ansAt := rReq.Add(5 * time.Millisecond)
+	ansMock := Earlier{
+		Mock: "mock-1211", At: ansAt, Own: true,
+		Payload: RawOf(&models.Mock{Name: "mock-1211", Spec: models.MockSpec{ReqTimestampMock: ansAt, ResTimestampMock: ansAt.Add(time.Millisecond)}}, true).ServedAs(1),
+		Seen: []Seen{{
+			Side: Response,
+			Leaf: Leaf{Path: "body.value.client_domains.2", Type: String, Value: "r:" + rHost},
+			Live: "r:" + fHost,
+		}},
+	}
+	withAns := append(append([]Earlier(nil), earlier...), ansMock)
+	inParentWithAns := iCall("body.docs.msgs.0.client_domains.2", String, "r:"+rHost, "r:"+fHost, rCall, fCall, nil, withAns, nil)
+	inParentWithAns.Drifts = oClientDrifts()
+	if ds := Decide(inParentWithAns); len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "mock-1211" {
+		t.Fatalf("parent domain with whole in-scope answer: %s; want Value from mock-1211", oDescribe(ds))
+	}
+
+	// 5. Negative: two different URLs with the same host stay two-sources (fail closed).
+	diffURLEarlier := clientSent(t,
+		[]string{"req-1", "req-2"},
+		[]*models.HTTPReq{
+			{Method: "POST", URL: "http://localhost:8083/a", Timestamp: rReq, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"u":"https://cb.` + rHost + `/one"}`},
+			{Method: "POST", URL: "http://localhost:8083/b", Timestamp: rReq.Add(time.Millisecond), Header: map[string]string{"Content-Type": "application/json"}, Body: `{"u":"https://cb.` + rHost + `/two"}`},
+		},
+		[]*models.HTTPReq{
+			{Method: "POST", URL: "http://localhost:8083/a", Timestamp: fReq, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"u":"https://cb.` + fHost + `/one"}`},
+			{Method: "POST", URL: "http://localhost:8083/b", Timestamp: fReq.Add(time.Millisecond), Header: map[string]string{"Content-Type": "application/json"}, Body: `{"u":"https://cb.` + fHost + `/two"}`},
+		},
+	)
+	inDiff := iCall("body.docs.msgs.0.client_domains.1", String, "r:cb."+rHost, "r:cb."+fHost, rCall, fCall, nil, diffURLEarlier, nil)
+	inDiff.Drifts = oClientDrifts()
+	if ds := Decide(inDiff); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
+		t.Fatalf("two different URLs sharing a host: %s; want refused (two-sources)", oDescribe(ds))
+	}
+
+	// 6. Negative: bare second stamp sent twice in client requests beside an answer
+	// holding that same stamp whole must still stay refused (two-sources), because
+	// the client slots hold the whole text.
+	rSec, fSec := time.Unix(0, rNanos).Truncate(time.Second).Unix(), time.Unix(0, fNanos).Truncate(time.Second).Unix()
+	rSecStr, fSecStr := strconv.FormatInt(rSec, 10), strconv.FormatInt(fSec, 10)
+	bareEarlier := clientSent(t,
+		[]string{"req-1", "req-2"},
+		[]*models.HTTPReq{
+			{Method: "POST", URL: "http://localhost:8083/a", Timestamp: rReq, Header: map[string]string{"X-Signed-At": rSecStr}},
+			{Method: "POST", URL: "http://localhost:8083/b", Timestamp: rReq.Add(time.Millisecond), Header: map[string]string{"X-Signed-At": rSecStr}},
+		},
+		[]*models.HTTPReq{
+			{Method: "POST", URL: "http://localhost:8083/a", Timestamp: fReq, Header: map[string]string{"X-Signed-At": fSecStr}},
+			{Method: "POST", URL: "http://localhost:8083/b", Timestamp: fReq.Add(time.Millisecond), Header: map[string]string{"X-Signed-At": fSecStr}},
+		},
+	)
+	bareAns := Earlier{
+		Mock: "mock-bare-ans", At: ansAt, Own: true,
+		Payload: RawOf(&models.Mock{Name: "mock-bare-ans", Spec: models.MockSpec{ReqTimestampMock: ansAt, ResTimestampMock: ansAt.Add(time.Millisecond)}}, true).ServedAs(1),
+		Seen: []Seen{{
+			Side: Response,
+			Leaf: Leaf{Path: "body.signedAt", Type: Number, Value: rSecStr},
+			Live: fSecStr,
+		}},
+	}
+	inBare := authTimeCall(rSec, fSec, rCall, fCall, append(bareEarlier, bareAns))
+	if ds := Decide(inBare); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
+		t.Fatalf("bare second stamp sent twice beside whole answer: %s; want refused (two-sources)", oDescribe(ds))
+	}
+
+	// 7. Negative: two ambiguous client slots holding a second-resolution word in
+	// different texts beside a whole answer whose ownRead triggers (coarse clock
+	// send before the answer + window holds sinceBegin) must still return
+	// two-sources rather than falling through past step 3 to steps 4/5/7.
+	sendAt := rReq.Add(2 * time.Millisecond)
+	clockSend := Earlier{
+		Mock: "mock-clock-send", At: sendAt, Own: true,
+		Payload: RawOf(&models.Mock{Name: "mock-clock-send", Spec: models.MockSpec{ReqTimestampMock: sendAt, ResTimestampMock: sendAt.Add(time.Millisecond)}}, true).ServedAs(1),
+		Seen: []Seen{{
+			Side:  Request,
+			Leaf:  Leaf{Path: "body.sent_tag", Type: String, Value: "s:" + rSecStr},
+			Live:  "s:" + fSecStr,
+			Clock: true,
+		}},
+	}
+	wholeSecAns := Earlier{
+		Mock: "mock-sec-ans", At: sendAt.Add(2 * time.Millisecond), Own: true,
+		Payload: RawOf(&models.Mock{Name: "mock-sec-ans", Spec: models.MockSpec{ReqTimestampMock: sendAt.Add(2 * time.Millisecond), ResTimestampMock: sendAt.Add(3 * time.Millisecond)}}, true).ServedAs(1),
+		Seen: []Seen{{
+			Side: Response,
+			Leaf: Leaf{Path: "body.tag", Type: String, Value: "r:" + rSecStr},
+			Live: "r:" + fSecStr,
+		}},
+	}
+	diffSecClients := clientSent(t,
+		[]string{"req-1", "req-2"},
+		[]*models.HTTPReq{
+			{Method: "POST", URL: "http://localhost:8083/a", Timestamp: rReq, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"x":"one-` + rSecStr + `"}`},
+			{Method: "POST", URL: "http://localhost:8083/b", Timestamp: rReq.Add(time.Millisecond), Header: map[string]string{"Content-Type": "application/json"}, Body: `{"y":"two-` + rSecStr + `"}`},
+		},
+		[]*models.HTTPReq{
+			{Method: "POST", URL: "http://localhost:8083/a", Timestamp: fReq, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"x":"one-` + fSecStr + `"}`},
+			{Method: "POST", URL: "http://localhost:8083/b", Timestamp: fReq.Add(time.Millisecond), Header: map[string]string{"Content-Type": "application/json"}, Body: `{"y":"two-` + fSecStr + `"}`},
+		},
+	)
+	inOwnRead := iCall("body.tag", String, "r:"+rSecStr, "r:"+fSecStr, rCall.Add(2*time.Second), fCall.Add(2*time.Second),
+		&Window{
+			Rec: Span{From: rCall.Add(2 * time.Second), To: rCall.Add(2*time.Second + 10*time.Millisecond), Began: rReq.Add(-time.Second)},
+			F:   Span{From: fCall.Add(2 * time.Second), To: fCall.Add(2*time.Second + 10*time.Millisecond), Began: fReq.Add(-time.Second)},
+		},
+		append(diffSecClients, clockSend, wholeSecAns), nil)
+	inOwnRead.Drifts = oClientDrifts()
+	if ds := Decide(inOwnRead); len(ds) != 1 || ds[0].Refusal == nil || ds[0].Refusal.Kind != RefusalTwoSources {
+		t.Fatalf("ambiguous client slots with ownRead whole answer: %s; want refused (two-sources)", oDescribe(ds))
 	}
 }

@@ -828,3 +828,103 @@ func TestTwoWorkersRequestsArrivingSwappedAreEachPlacedAtTheirOwn(t *testing.T) 
 		t.Fatalf("a request keploy could not read placed %+v; want post-apps-1, the first in order", placed)
 	}
 }
+
+// Under a rewound replay clock, clock-derived words near the request's own
+// Timestamp (such as "17:19:13" inside an embedded HTTP Date header, an RFC
+// 3339 timestamp, a minute timestamp, or a 10-digit epoch second) can match a
+// later recorded step's clock word; PairCase skips those words so steps stay
+// paired in order while real distinguishing words, 10-digit path IDs, fixed
+// historical RFC 3339 query dates, and far-off fixed times of day still pair
+// by content.
+func TestPairCaseIgnoresRewoundClockWords(t *testing.T) {
+	recAt0 := time.Date(2026, 11, 23, 17, 19, 11, 0, time.UTC)
+	recAt1 := time.Date(2026, 11, 23, 17, 19, 13, 0, time.UTC)
+	liveAt := time.Date(2026, 11, 23, 17, 19, 13, 59_000_000, time.UTC)
+	url := "http://localhost:8083/atg/response/job-1/req-1"
+	req := func(method models.Method, u, body string, ts time.Time) *models.HTTPReq {
+		return &models.HTTPReq{Method: method, URL: u, Body: body, Timestamp: ts}
+	}
+	for _, tc := range []struct {
+		name string
+		rec0 *models.HTTPReq
+		rec1 *models.HTTPReq
+		live *models.HTTPReq
+		want int
+	}{
+		{
+			name: "HTTP Date time-of-day near request timestamp does not swap steps",
+			rec0: req("POST", url, `{"req_id":"r0","headers":{"Date":"Mon, 23 Nov 2026 17:19:11 GMT"},"body":"[]"}`, recAt0),
+			rec1: req("POST", url, `{"req_id":"r1","headers":{"Date":"Mon, 23 Nov 2026 17:19:13 GMT"},"body":"[]"}`, recAt1),
+			live: req("POST", url, `{"req_id":"live0","headers":{"Date":"Mon, 23 Nov 2026 17:19:13 GMT"},"body":"[]"}`, liveAt),
+			want: 0,
+		},
+		{
+			name: "RFC 3339 instant near request timestamp does not swap steps",
+			rec0: req("POST", url, `{"req_id":"r0","at":"2026-11-23T17:19:11Z","body":"[]"}`, recAt0),
+			rec1: req("POST", url, `{"req_id":"r1","at":"2026-11-23T17:19:13Z","body":"[]"}`, recAt1),
+			live: req("POST", url, `{"req_id":"live0","at":"2026-11-23T17:19:13Z","body":"[]"}`, liveAt),
+			want: 0,
+		},
+		{
+			name: "epoch second near request timestamp does not swap steps",
+			rec0: req("POST", url, `{"req_id":"r0","ts":1795454351,"body":"[]"}`, recAt0),
+			rec1: req("POST", url, `{"req_id":"r1","ts":1795454353,"body":"[]"}`, recAt1),
+			live: req("POST", url, `{"req_id":"live0","ts":1795454353,"body":"[]"}`, liveAt),
+			want: 0,
+		},
+		{
+			name: "non-time distinguishing word still pairs out-of-order",
+			rec0: req("POST", url, `{"req_id":"r0","step":"alpha","headers":{"Date":"Mon, 23 Nov 2026 17:19:11 GMT"}}`, recAt0),
+			rec1: req("POST", url, `{"req_id":"r1","step":"beta","headers":{"Date":"Mon, 23 Nov 2026 17:19:13 GMT"}}`, recAt1),
+			live: req("POST", url, `{"req_id":"live1","step":"beta","headers":{"Date":"Mon, 23 Nov 2026 17:19:11 GMT"}}`, liveAt),
+			want: 1,
+		},
+		{
+			name: "10-digit numeric path ID far from request timestamp still pairs by ID",
+			rec0: req("GET", "http://api/apps/1000000012", "", recAt0),
+			rec1: req("GET", "http://api/apps/1000000013", "", recAt1),
+			live: req("GET", "http://api/apps/1000000013", "", liveAt),
+			want: 1,
+		},
+		{
+			name: "fixed historical RFC 3339 query date still pairs by date",
+			rec0: req("GET", "http://api/events?since=2024-01-01T00:00:00Z", "", recAt0),
+			rec1: req("GET", "http://api/events?since=2024-02-01T00:00:00Z", "", recAt1),
+			live: req("GET", "http://api/events?since=2024-02-01T00:00:00Z", "", liveAt),
+			want: 1,
+		},
+		{
+			name: "UUIDv7 path ID minted seconds before request still pairs by ID",
+			// 2026-11-23T17:19:10.000Z = 1795454350000 ms = 0x01a2096b32b0
+			rec0: req("GET", "http://api/orders/01a2096b-32b0-7000-8000-000000000001", "", recAt0),
+			rec1: req("GET", "http://api/orders/01a2096b-32b0-7000-8000-000000000002", "", recAt1),
+			live: req("GET", "http://api/orders/01a2096b-32b0-7000-8000-000000000002", "", liveAt),
+			want: 1,
+		},
+		{
+			name: "13-digit millisecond ID minted seconds before request still pairs by ID",
+			rec0: req("GET", "http://api/orders/1795454350001", "", recAt0),
+			rec1: req("GET", "http://api/orders/1795454350002", "", recAt1),
+			live: req("GET", "http://api/orders/1795454350002", "", liveAt),
+			want: 1,
+		},
+		{
+			name: "fixed time-of-day slot does not depend on replay wall-clock time",
+			rec0: req("POST", "http://api/bookings", `{"slot":"09:30"}`, time.Date(2026, 11, 23, 14, 0, 0, 0, time.UTC)),
+			rec1: req("POST", "http://api/bookings", `{"slot":"09:45"}`, time.Date(2026, 11, 23, 14, 0, 1, 0, time.UTC)),
+			live: req("POST", "http://api/bookings", `{"slot":"09:45"}`, time.Date(2026, 11, 24, 9, 38, 0, 0, time.UTC)),
+			want: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cases := []ClientCase{
+				{Name: "post-atg-response-1", Req: tc.rec0},
+				{Name: "post-atg-response-2", Req: tc.rec1},
+			}
+			got, ok := PairCase(cases, nil, tc.live, true)
+			if !ok || got != tc.want {
+				t.Fatalf("PairCase = (%d, %v); want (%d, true)", got, ok, tc.want)
+			}
+		})
+	}
+}

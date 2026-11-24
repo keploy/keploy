@@ -21,11 +21,19 @@ import (
 // check reads its value in UTC: a wall clock of no zone the application
 // writes in its own zone is refused (fail closed).
 //
-// Learning's own facts come first: a word it bound to an earlier place, or
-// read as the clock itself, keeps learning's decision, and so does every
-// other refusal (what keploy could not read, its limit, a conflict, two
-// slots of the test case's request). A word learning read no instant in is
-// refused no-clock-read (clockOnly).
+// Learning's own facts come first: a word it bound to a dependency place, or
+// read as a plain read of the clock itself, keeps learning's decision, and so
+// does every other refusal (what keploy could not read, its limit, a conflict,
+// two slots of the test case's request). On the Decide path (e.g. MongoDB's
+// learn step), a declared plain clock rule (declaredOffset holding 0) whose
+// CheckClockRead holds in both runs against the call's window also drops
+// coincidental client HTTP requests (Earlier.incoming, just as readOverClients
+// drops them when Window.holdsRead holds) while keeping dependency mock-to-mock
+// copies intact, and settles a narrower learned look-back/offset clock read,
+// an uncompared-offset refusal ("instant-held-read"), or a no-clock-read
+// refusal to the declared plain check (leaving learning's decision untouched
+// whenever the declared plain check does not hold). A word learning read no
+// instant in is refused no-clock-read (clockOnly).
 
 // clockSettles are the refusals a clock rule settles: those of which
 // source a moment has.
@@ -47,14 +55,68 @@ func declaredOffset(o models.ClockOffset) (models.ClockOffset, bool) {
 	return models.ClockOffset{Min: o.Min, Max: o.Max, Res: o.Res}, true
 }
 
+// declaredPlainHolds reports whether path has a declared plain clock rule
+// (SourceClock with declaredOffset holding 0) whose CheckClockRead holds in
+// both runs against dc.in.Window. Checks the cheap rule lookup before
+// instantEchoed, and does not mutate dc.readClock. Used in instantLearned to
+// drop coincidental client requests (Earlier.incoming) when a pre-call read
+// (e.g. min: -1s, max: 0s) sits just outside Window.holdsRead, while preserving
+// all mock-to-mock copies (e.g. an update auditing an existing document's
+// createdAt), and in declaredClock before overriding a narrower learned offset
+// or uncompared-offset / no-clock-read refusal.
+func (dc *decider) declaredPlainHolds(path string, c changedInstant) bool {
+	if c.rm == nil || c.lm == nil || dc.in.Window == nil || dc.noPayload.why != "" {
+		return false
+	}
+	src, ok := dc.source(path)
+	if !ok || src.Kind != SourceClock {
+		return false
+	}
+	off, ok := declaredOffset(src.Clock)
+	if !ok || !off.Plain() {
+		return false
+	}
+	if dc.instantEchoed(c) != "" {
+		return false
+	}
+	if c.text {
+		lay := models.ClockOffset{Layout: clockTextLayout(c.r)}.MeetLayout(clockTextLayout(c.l))
+		if lay == "" || lay == models.LayoutApart || c.noWord != "" {
+			return false
+		}
+		off.Layout, off.Word = lay, c.word
+	} else {
+		off.Layout = models.LayoutTyped
+	}
+	if okR, _ := CheckClockRead(path, off, dc.in.Rec.Leaves[path], dc.in.Window.Rec, true); !okR {
+		return false
+	}
+	okL, _ := CheckClockRead(path, off, dc.in.Live.Leaves[path], dc.in.Window.F, true)
+	return okL
+}
+
 // declaredClock decides the changed instant c at path, which src declares
-// a read of the clock, from d, learning's decision of it (see above).
+// a read of the clock, from d, learning's decision of it (see above). A
+// declared plain clock rule (declaredOffset holding 0) whose CheckClockRead
+// holds in both runs (declaredPlainHolds) also settles a narrower learned
+// look-back/offset clock read, an uncompared-offset refusal
+// ("instant-held-read"), or a no-clock-read refusal uniformly whether or not
+// client requests were present; when the declared plain check does not hold,
+// d is returned untouched.
 func (dc *decider) declaredClock(path string, at variables.Address, n int, c changedInstant, src Source, d Decision) Decision {
 	switch {
-	case d.Outcome == OutcomeValue || d.Outcome == OutcomeClock:
+	case d.Outcome == OutcomeValue:
 		return d
+	case d.Outcome == OutcomeClock:
+		if d.Clock == nil || d.Clock.Plain() || !dc.declaredPlainHolds(path, c) {
+			return d
+		}
 	case d.Refusal != nil && !clockSettles[d.Refusal.Kind]:
-		return d
+		uncomparedOffset := d.Refusal.Kind == RefusalCannotCheck && d.Refusal.Check == "instant-held-read"
+		noClock := d.Refusal.Kind == RefusalNoClockRead
+		if (!uncomparedOffset && !noClock) || !dc.declaredPlainHolds(path, c) {
+			return d
+		}
 	}
 	why := "keploy.yml's rule " + src.Rule + " declares it a read of the clock from " + src.Clock.Min.String() + " to " + src.Clock.Max.String() + " of its call's span, at " + src.Clock.Res.String()
 	off, ok := declaredOffset(src.Clock)
@@ -100,9 +162,9 @@ func (dc *decider) clockOnly(path string, src Source, ds []Decision) []Decision 
 
 // DeclaredClockLearned is ln, a drifted leaf the classify path learned
 // (ClassifyArrived: the HTTP adapter's learn step), as src, a clock rule
-// keploy.yml declares at its field, decides it, the way Decide decides a
-// changed instant a rule declares (declaredClock, then timeDefault). A
-// declared clock is a time field, so it settles what learning could not
+// keploy.yml declares at its field, decides it (unlike Decide, ClassifyArrived
+// does not drop Earlier.incoming client requests or replace an already-learned
+// clock offset). A declared clock is a time field, so it settles what learning could not
 // tell of the value's source: an echo (a variable From.Echo: learning found
 // the value's moment in what the application was given earlier, and cannot
 // tell a copy of it, or a pick from it by the clock, from a read of the
