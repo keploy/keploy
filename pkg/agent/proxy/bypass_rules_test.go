@@ -1120,3 +1120,43 @@ func TestABypassRuleHostPatternIsCompiledOnce(t *testing.T) {
 		t.Fatal("compileRuleHost(*.example) again = nil error, want the pattern's, kept")
 	}
 }
+
+func TestTLSRuleHost(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sni, connect, dst, want string
+	}{
+		"the SNI wins":                       {"api.example.com", "proxy-target.example.com", "10.0.0.9:443", "api.example.com"},
+		"no SNI: the CONNECT target":         {"", "proxy-target.example.com", "10.0.0.9:443", "proxy-target.example.com"},
+		"no SNI, no CONNECT: the dialled IP": {"", "", "10.96.0.1:443", "10.96.0.1"},
+		"an IPv6 destination":                {"", "", "[fd00::1]:443", "fd00::1"},
+		"nothing usable":                     {"", "", "not-an-address", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := tlsRuleHost(tc.sni, tc.connect, tc.dst); got != tc.want {
+				t.Fatalf("tlsRuleHost(%q, %q, %q) = %q, want %q", tc.sni, tc.connect, tc.dst, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAHostRuleCanPassAnIPDialledTLSServer is the guard for in-cluster
+// Kubernetes clients: client-go dials the API server at its ClusterIP and so
+// sends no SNI. Matched against "" no host rule could pass it before keploy's
+// TLS, and the client, which trusts only the cluster's CA, refused keploy's
+// leaf on every call.
+func TestAHostRuleCanPassAnIPDialledTLSServer(t *testing.T) {
+	rules := []models.BypassRule{{Host: `^(10\.96\.0\.1|kubernetes\.default\.svc)$`, Port: 443}}
+
+	if _, ok := bypassByServerName(zap.NewNop(), rules, tlsRuleHost("", "", "10.96.0.1:443"), 443); !ok {
+		t.Fatal("a host rule naming the API server's ClusterIP did not pass a client that dialled that IP")
+	}
+	if _, ok := bypassByServerName(zap.NewNop(), rules, tlsRuleHost("", "", "10.96.0.7:443"), 443); ok {
+		t.Fatal("the rule passed a different IP")
+	}
+	if _, ok := bypassByServerName(zap.NewNop(), rules, tlsRuleHost("", "", "10.96.0.1:6443"), 6443); ok {
+		t.Fatal("the rule passed its IP on another port")
+	}
+	if _, ok := bypassByServerName(zap.NewNop(), rules, tlsRuleHost("kubernetes.default.svc", "", "10.96.0.1:443"), 443); !ok {
+		t.Fatal("the rule did not pass a client that named the API server by SNI")
+	}
+}

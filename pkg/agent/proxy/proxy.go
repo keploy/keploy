@@ -3654,16 +3654,15 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		// the client's handshake reaches its server untouched, so a client
 		// certificate (mTLS) and a pinned server certificate work as they
 		// do without keploy, and nothing of the connection is recorded or
-		// mocked. A ClientHello that names no server, on a port such a rule
-		// names, goes on to keploy's TLS, and then to the rules it cannot
-		// decide (bypassRulesUndecided). What was read of the client is
+		// mocked. A ClientHello that names no server is matched by the
+		// address the client dialled (tlsRuleHost); with no name at all it
+		// goes on to keploy's TLS, and then to the rules it cannot decide
+		// (bypassRulesUndecided). What was read of the client is
 		// handed on ahead of the rest, for whichever reads it next.
 		name, hello, helloErr := serverNameOf(srcConn)
 		read := srcConn
 		srcConn = &util.Conn{Conn: stripUtilConn(read), Reader: io.MultiReader(bytes.NewReader(hello), read), Logger: p.logger}
-		if name == "" {
-			name = connectTargetHost
-		}
+		name = tlsRuleHost(name, connectTargetHost, dstAddr)
 		hosts.add(name)
 		if bypassRule, ok := bypassByServerName(p.logger, outgoingOpts.Rules, name, uint(destInfo.Port)); ok && helloErr == nil {
 			p.logger.Debug("a bypassRule names the TLS server the client asks for; passing the connection through before keploy's TLS",

@@ -16,6 +16,28 @@ import (
 	"go.uber.org/zap"
 )
 
+// tlsRuleHost is the name a TLS connection's host bypassRules are matched
+// against: the SNI of its ClientHello, else the target of its CONNECT request,
+// else the host of the address it dialled. A client that dials an IP literal
+// sends no SNI (crypto/tls leaves it out for an IP, RFC 6066) and makes no
+// CONNECT, so without the last no host rule could ever pass such a
+// destination through before keploy's TLS. The case that needed it is an
+// in-cluster Kubernetes client: it dials the API server at its ClusterIP and
+// trusts only the ServiceAccount's ca.crt, so keploy's leaf was refused
+// ("x509: certificate signed by unknown authority") on every call.
+func tlsRuleHost(sni, connectTarget, dstAddr string) string {
+	if sni != "" {
+		return sni
+	}
+	if connectTarget != "" {
+		return connectTarget
+	}
+	if host, _, err := net.SplitHostPort(dstAddr); err == nil {
+		return host
+	}
+	return ""
+}
+
 // bypassByServerName is the bypassRule, if any, that passes a TLS connection
 // through whole: a rule with a host and no path, whose host pattern matches the
 // server name the client asked for (its SNI, else its CONNECT target), on the
