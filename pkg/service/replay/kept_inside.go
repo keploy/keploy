@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -156,10 +157,21 @@ func (r *Replayer) sayKeptInside() {
 		}
 		return dests[i].protocol < dests[j].protocol
 	})
+	const maxKeptInsideSample = 5
+	totalCalls := 0
+	sample := make([]string, 0, min(len(dests), maxKeptInsideSample))
+	for i, d := range dests {
+		totalCalls += d.calls
+		if i < maxKeptInsideSample {
+			sample = append(sample, fmt.Sprintf("%s %s (%d)", d.protocol, d.logName(), d.calls))
+		}
+	}
 	r.logger.Info(KeptInsidePrefix+"no recorded mock answered the app's calls to these destinations, so keploy answered each call itself and relayed none of them to its destination",
 		zap.Int("destinations", len(dests)),
+		zap.Int("calls", totalCalls),
+		zap.Strings("sample", sample),
 		zap.String("opt_in", keptInsideOptIn))
 	for _, d := range dests {
-		r.logger.Info(KeptInsidePrefix+d.protocol+" "+d.logName(), zap.Int("calls", d.calls))
+		r.logger.Debug(KeptInsidePrefix+d.protocol+" "+d.logName(), zap.Int("calls", d.calls))
 	}
 }

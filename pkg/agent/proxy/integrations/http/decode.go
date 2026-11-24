@@ -90,7 +90,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("handling the chunked requests to read the complete request")
 			err := h.HandleChunkedRequests(ctx, &reqBuf, client, nil)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to handle chunked requests")
+				if !errors.Is(err, io.EOF) {
+					utils.LogError(h.Logger, err, "failed to handle chunked requests")
+				}
 				errCh <- err
 				return
 			}

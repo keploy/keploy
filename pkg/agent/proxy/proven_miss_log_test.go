@@ -12,11 +12,12 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// Under the proven switch keploy's verdict names each miss once, with its
-// test, at the end of the run: the agent logs a miss at Debug and hands the
-// connection handler a reportedMiss. With the switch off a miss keeps its
-// error and Warn lines, and any failure that is not a miss keeps its error
-// line under the switch too.
+// Mock-miss deduplication is logging hygiene in both modes: the agent logs
+// "failed to mock the outgoing message" at Debug and hands the connection
+// handler a reportedMiss regardless of the proven switch (keeping the single
+// structured Warn line for in-window misses when the switch is off, and Debug
+// under the switch). Any failure that is not a miss keeps its Error line in
+// both modes.
 func TestAMissIsQuietUnderTheSwitchOnly(t *testing.T) {
 	miss := fmt.Errorf("decode: %w", models.ErrNoMockMatched)
 	other := errors.New("parser broke")
@@ -24,11 +25,13 @@ func TestAMissIsQuietUnderTheSwitchOnly(t *testing.T) {
 		on       bool
 		err      error
 		reported bool
-		loud     bool
+		wantErr  int
+		wantWarn int
 	}{
-		{on: true, err: miss, reported: true, loud: false},
-		{on: false, err: miss, reported: false, loud: true},
-		{on: true, err: other, reported: false, loud: true},
+		{on: true, err: miss, reported: true, wantErr: 0, wantWarn: 0},
+		{on: false, err: miss, reported: true, wantErr: 0, wantWarn: 1},
+		{on: true, err: other, reported: false, wantErr: 1, wantWarn: 0},
+		{on: false, err: other, reported: false, wantErr: 1, wantWarn: 1},
 	} {
 		t.Run(fmt.Sprintf("switch=%v/%v", tc.on, tc.err), func(t *testing.T) {
 			v := ""
@@ -46,9 +49,11 @@ func TestAMissIsQuietUnderTheSwitchOnly(t *testing.T) {
 			if !errors.Is(got, tc.err) {
 				t.Fatalf("the returned error %v does not wrap %v", got, tc.err)
 			}
-			loud := logs.FilterLevelExact(zapcore.ErrorLevel).Len()+logs.FilterLevelExact(zapcore.WarnLevel).Len() > 0
-			if loud != tc.loud {
-				t.Fatalf("Warn or Error lines logged = %v, want %v: %v", loud, tc.loud, logs.All())
+			if gotErr := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); gotErr != tc.wantErr {
+				t.Fatalf("Error lines = %d, want %d: %v", gotErr, tc.wantErr, logs.All())
+			}
+			if gotWarn := logs.FilterLevelExact(zapcore.WarnLevel).Len(); gotWarn != tc.wantWarn {
+				t.Fatalf("Warn lines = %d, want %d: %v", gotWarn, tc.wantWarn, logs.All())
 			}
 		})
 	}
@@ -56,9 +61,8 @@ func TestAMissIsQuietUnderTheSwitchOnly(t *testing.T) {
 
 // A miss its parser already queued for its test, before answering the app
 // (an HTTP 502), comes back marked reported (models.MismatchReported): it is
-// logged as any miss is with the switch off, and returned for the connection
-// to end, but not queued a second time, where it could count against the next
-// test.
+// logged at Debug and returned as reportedMiss for the connection to end, and
+// not queued a second time, where it could count against the next test.
 func TestAMissItsParserReportedIsNotQueuedAgain(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	miss := models.MismatchReported{Err: fmt.Errorf("decode: %w", models.ErrNoMockMatched)}
@@ -69,10 +73,16 @@ func TestAMissItsParserReportedIsNotQueuedAgain(t *testing.T) {
 	if !errors.Is(got, models.ErrNoMockMatched) || !models.IsMismatchReported(got) {
 		t.Fatalf("returned %v; want the miss, still marked reported", got)
 	}
+	if _, ok := got.(reportedMiss); !ok {
+		t.Fatalf("returned %T; want reportedMiss", got)
+	}
 	if n := len(p.errChannel); n != 0 {
 		t.Errorf("queued %d errors; want none: the parser queued the miss already", n)
 	}
-	if logs.FilterMessage("failed to mock the outgoing message").FilterLevelExact(zapcore.ErrorLevel).Len() != 1 {
-		t.Errorf("logged %v; want the miss's error line, as with the switch off always", logs.All())
+	if logs.FilterMessage("failed to mock the outgoing message").FilterLevelExact(zapcore.DebugLevel).Len() != 1 {
+		t.Errorf("logged %v; want the miss's debug line", logs.All())
+	}
+	if logs.FilterLevelExact(zapcore.ErrorLevel).Len() != 0 {
+		t.Errorf("logged %v; want zero error lines for a miss", logs.All())
 	}
 }
