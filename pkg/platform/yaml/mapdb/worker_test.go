@@ -196,14 +196,13 @@ func TestAddToWorkerAddsWithoutTakingFromTheTests(t *testing.T) {
 	}
 }
 
-// MoveToWorkerFromStartup takes a mock the start-up list holds and no test
-// lists (a timer's first call, recorded before the first test began) into
-// the worker scope at the move's place, with every mark the move names,
-// its recorded times and its own claim key, and no owner (no test's window
-// recorded it); the start-up list keeps its other entries. A mock a test
-// lists still moves as MoveToWorker moves it. MoveToWorker leaves the same
-// start-up mock where it is, as every other caller expects. Both hold with
-// the proven switch on and off.
+// MoveToWorkerFromStartup and MoveToWorker both take a mock the start-up
+// list holds and no test lists (a timer's first call, recorded before the
+// first test began) into the worker scope at the move's place, with every
+// mark the move names, its recorded times and its own claim key, and no
+// owner (no test's window recorded it); the start-up list keeps its other
+// entries. A mock a test lists still moves from that test's list. Both hold
+// with the proven switch on and off.
 func TestMoveToWorkerFromStartupTakesAStartupCallARuleNames(t *testing.T) {
 	at := func(s int) string { return models.FormatMockTimestamp(time.Unix(1000+int64(s), 0)) }
 	mapping := func() *models.Mapping {
@@ -234,7 +233,7 @@ func TestMoveToWorkerFromStartupTakesAStartupCallARuleNames(t *testing.T) {
 			if err := db.Insert(ctx, mapping()); err != nil {
 				t.Fatal(err)
 			}
-			moved, err := db.MoveToWorkerFromStartup(ctx, "test-set-0", moves)
+			moved, err := db.MoveToWorker(ctx, "test-set-0", moves)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -266,24 +265,21 @@ func TestMoveToWorkerFromStartupTakesAStartupCallARuleNames(t *testing.T) {
 				t.Fatalf("test-1 lists %v; want [own-1]", got)
 			}
 
-			// MoveToWorker leaves a start-up call alone.
+			// MoveToWorkerFromStartup delegates to MoveToWorker and produces the same result.
 			db2 := New(zap.NewNop(), t.TempDir(), "mappings")
 			if err := db2.Insert(ctx, mapping()); err != nil {
 				t.Fatal(err)
 			}
-			moved, err = db2.MoveToWorker(ctx, "test-set-0", moves)
+			moved2, err := db2.MoveToWorkerFromStartup(ctx, "test-set-0", moves)
 			if err != nil {
 				t.Fatal(err)
-			}
-			if want := []string{"touch-1"}; !reflect.DeepEqual(moved, want) {
-				t.Fatalf("MoveToWorker moved %v; want %v: it leaves a start-up call alone", moved, want)
 			}
 			m2, err := db2.GetMapping(ctx, "test-set-0")
 			if err != nil || m2 == nil {
 				t.Fatalf("GetMapping = %v, %v", m2, err)
 			}
-			if got, want := entryNames(m2.Startup), []string{"boot-read", "lease", "boot-ping"}; !reflect.DeepEqual(got, want) {
-				t.Fatalf("MoveToWorker left start-up %v; want %v", got, want)
+			if !reflect.DeepEqual(moved2, moved) || !reflect.DeepEqual(m2, m) {
+				t.Fatalf("MoveToWorkerFromStartup (%v, %+v) != MoveToWorker (%v, %+v)", moved2, m2, moved, m)
 			}
 
 			// A start-up call with a key of the move's takes the move's key.
@@ -291,7 +287,7 @@ func TestMoveToWorkerFromStartupTakesAStartupCallARuleNames(t *testing.T) {
 			if err := db3.Insert(ctx, mapping()); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db3.MoveToWorkerFromStartup(ctx, "test-set-0", []models.MockEntry{{Name: "lease", Key: "k-move", Owner: "test-1"}}); err != nil {
+			if _, err := db3.MoveToWorker(ctx, "test-set-0", []models.MockEntry{{Name: "lease", Key: "k-move", Owner: "test-1"}}); err != nil {
 				t.Fatal(err)
 			}
 			m3, err := db3.GetMapping(ctx, "test-set-0")
@@ -310,7 +306,7 @@ func TestMoveToWorkerFromStartupTakesAStartupCallARuleNames(t *testing.T) {
 			if err := db4.Insert(ctx, both); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db4.MoveToWorkerFromStartup(ctx, "test-set-0", []models.MockEntry{{Name: "touch-1", Place: "test-1"}}); err != nil {
+			if _, err := db4.MoveToWorker(ctx, "test-set-0", []models.MockEntry{{Name: "touch-1", Place: "test-1"}}); err != nil {
 				t.Fatal(err)
 			}
 			m4, err := db4.GetMapping(ctx, "test-set-0")
