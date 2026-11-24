@@ -13,29 +13,46 @@ import (
 )
 
 // seedBackgroundRecordings hands the proxy, as a set is staged, the set's
-// declared background Mongo rules (models.MockFilterParams.BackgroundMongoRules)
-// when the proxy implements BackgroundMongoRulesSeeder, and the set's
 // background recordings params names (models.MockFilterParams.BackgroundMocks)
 // with their recorded spans (backgroundRecordingsOf), read from every mock
 // the agent holds for the set: resident ones and those kept on disk, served
-// or not. A staging call that names none clears the previous set's. A set
-// whose recordings cannot be read is handed none: every miss stays its
-// test's, as before.
+// or not, together with any declared kind: background Mongo and HTTP rules
+// (models.MockFilterParams.BackgroundMongoRules, BackgroundHTTPRules). A
+// staging call that names none clears the previous set's. Whenever reading
+// the background recordings fails OR any named background recording is not
+// found, no declared background rules are seeded (fail closed) so every
+// unmatched call stays its test's miss and strict per-recording checks are
+// never bypassed.
 func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) {
-	if ruleSeeder, ok := a.Proxy.(coreAgent.BackgroundMongoRulesSeeder); ok {
-		ruleSeeder.SeedBackgroundMongoRules(params.BackgroundMongoRules)
-	}
-	seeder, ok := a.Proxy.(coreAgent.BackgroundRecordingsSeeder)
-	if !ok {
-		return
-	}
-	recs, err := backgroundRecordingsOf(params.BackgroundMocks, resident, disk)
+	recs, missing, err := backgroundRecordingsWithMissing(params.BackgroundMocks, resident, disk)
+	allowRules := true
 	if err != nil {
-		a.logger.Warn("could not read the test set's background recordings (mappings.yaml worker: and startup:); every call that misses stays its test's miss",
+		a.logger.Warn("could not read the test set's background recordings (mappings.yaml worker: and startup:); declared background rule fallback is disabled and every call that misses stays its test's miss",
 			zap.Int("background", len(params.BackgroundMocks)), zap.Error(err))
 		recs = nil
+		allowRules = false
+	} else if len(missing) > 0 {
+		a.logger.Warn("some background recordings named by mappings.yaml worker: and startup: were not found; declared background rule fallback is disabled so every unmatched call stays its test's miss",
+			zap.Strings("missing", missing))
+		allowRules = false
 	}
-	seeder.SeedBackgroundRecordings(recs)
+	if ruleSeeder, ok := a.Proxy.(coreAgent.BackgroundMongoRulesSeeder); ok {
+		if allowRules {
+			ruleSeeder.SeedBackgroundMongoRules(params.BackgroundMongoRules)
+		} else {
+			ruleSeeder.SeedBackgroundMongoRules(nil)
+		}
+	}
+	if httpRuleSeeder, ok := a.Proxy.(coreAgent.BackgroundHTTPRulesSeeder); ok {
+		if allowRules {
+			httpRuleSeeder.SeedBackgroundHTTPRules(params.BackgroundHTTPRules)
+		} else {
+			httpRuleSeeder.SeedBackgroundHTTPRules(nil)
+		}
+	}
+	if seeder, ok := a.Proxy.(coreAgent.BackgroundRecordingsSeeder); ok {
+		seeder.SeedBackgroundRecordings(recs)
+	}
 }
 
 // bgCallTime is what bounds a background recording's recorded span, of one
@@ -52,8 +69,15 @@ type bgCallTime struct {
 // Each recording on disk is decoded once, and only the named ones are kept.
 // nil for no names; err when disk cannot be read.
 func backgroundRecordingsOf(names []string, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
+	recs, _, err := backgroundRecordingsWithMissing(names, resident, disk)
+	return recs, err
+}
+
+// backgroundRecordingsWithMissing is backgroundRecordingsOf plus the sorted
+// list of unique names in names that were not found in resident or disk.
+func backgroundRecordingsWithMissing(names []string, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) ([]models.BackgroundRecording, []string, error) {
 	if len(names) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	want := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -88,14 +112,21 @@ func backgroundRecordingsOf(names []string, resident [][]*models.Mock, disk *pro
 	}
 	if disk != nil {
 		if err := disk.RangeRecordedBefore(time.Unix(0, math.MaxInt64), see); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
+	var missing []string
+	for n := range want {
+		if !got[n] {
+			missing = append(missing, n)
+		}
+	}
+	slices.Sort(missing)
 	slices.SortFunc(calls, func(a, b bgCallTime) int { return a.req.Compare(b.req) })
 	for i := range recs {
 		recs[i].From = previousCallAt(calls, recs[i].Mock)
 	}
-	return recs, nil
+	return recs, missing, nil
 }
 
 // previousCallAt is the request time of rec's previous call among calls (by

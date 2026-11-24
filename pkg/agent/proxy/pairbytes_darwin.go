@@ -106,6 +106,7 @@ func (p *Proxy) pairTarget(table []xnuPCB, pc *pairedConn, h *heldSockets) (*pai
 		// waits for (pairEnded).
 		return &pairTarget{pc: pc, gone: true}, nil
 	}
+	pc.seenInTable.Store(true)
 	p.paired.visible.Store(true)
 	if pr, ok := findXNUPCB(table, pc.proxy, pc.app); ok && pr.irs != app.iss {
 		// Two incarnations of one pair of ends: the table's application
@@ -141,6 +142,7 @@ func (p *Proxy) heldTarget(table []xnuPCB, pc *pairedConn, h *heldSockets) (t *p
 	if !found {
 		return nil, false, nil
 	}
+	pc.seenInHolder.Store(true)
 	p.paired.held.Store(true)
 	if s.State == xnuTCPTimeWait || s.State == xnuTCPFinWait2 {
 		// Closed, and its FIN acknowledged (pairTarget).
@@ -455,18 +457,22 @@ func (p *Proxy) appClosedChecker() func(*pairedConn) bool {
 	}
 }
 
-// appSocketClosedIn checks whether table (or, when the table hides application
-// sockets, pc.appSocket via h) shows pc's application socket has no remaining
-// process holder, updating paired.visible / paired.held when seen.
+// appSocketClosedIn checks whether table (or, when the table does not list
+// this socket, pc.appSocket via h) shows pc's application socket has no
+// remaining process holder, updating pc.seenInTable / pc.seenInHolder (and
+// paired.visible / paired.held) when seen. Only explicit sightings of THIS
+// socket allow an unlisted socket to be treated as closed.
 func (p *Proxy) appSocketClosedIn(table []xnuPCB, pc *pairedConn, h *heldSockets, noFDRefProven bool) bool {
-	closed, sawVisible, sawHeld := xnuAppSocketClosed(table, pc.app, pc.proxy, p.paired.visible.Load(), p.paired.held.Load(), noFDRefProven, func() (uint8, bool, error) {
+	closed, sawVisible, sawHeld := xnuAppSocketClosed(table, pc.app, pc.proxy, pc.seenInTable.Load(), pc.seenInHolder.Load(), noFDRefProven, func() (uint8, bool, error) {
 		s, found, err := pc.appSocket(h)
 		return s.State, found, err
 	})
 	if sawVisible {
+		pc.seenInTable.Store(true)
 		p.paired.visible.Store(true)
 	}
 	if sawHeld {
+		pc.seenInHolder.Store(true)
 		p.paired.held.Store(true)
 	}
 	return closed
@@ -493,13 +499,15 @@ func (p *Proxy) PairedBytesErr() error {
 // does (checkPairedBytes).
 var xnuTableReadable = xnuCountsProven(proveXNUCounts)
 
-// xnuAppClosedReadable proves once (proveXNUAppClosed) that macOS reports
+// xnuAppClosedReadable proves (proveXNUAppClosed) that macOS reports
 // xsocket64.so_state at xnuOffSoState with SS_NOFDREF clear on a live loopback
 // socket and set once that socket is closed whole while its peer remains open.
+// Caches ONLY success permanently (via atomic.Bool) and retries a transient
+// failure on later drains after a cooldown up to a bounded number of attempts.
 // Kept separate from xnuTableReadable (and not wrapped in
 // ErrProxyConnsUnsupported) so a failure here only keeps holds open (fail
 // closed) and never breaks WaitPairedBytes or reports counts as broken.
-var xnuAppClosedReadable = sync.OnceValue(proveXNUAppClosed)
+var xnuAppClosedReadable = newXNUAppClosedProbe(proveXNUAppClosed).check
 
 // xnuCountsProven runs proof once, its failure an ErrProxyConnsUnsupported:
 // xnuTableReadable, and its rows' proof of a moved layout.
@@ -651,6 +659,7 @@ func (p *Proxy) noteWroteAtClose(ctx context.Context, pc *pairedConn) {
 		}
 		return
 	}
+	pc.seenInTable.Store(true)
 	p.paired.visible.Store(true)
 	if pr, ok := findXNUPCB(table, pc.proxy, pc.app); !ok || pr.irs != app.iss {
 		return
@@ -790,6 +799,7 @@ func (p *Proxy) noteHeldAtClose(pc *pairedConn, pr xnuPCB) (done bool) {
 	case !found:
 		return false
 	}
+	pc.seenInHolder.Store(true)
 	p.paired.held.Store(true)
 	ps := readHeldProxySide(pc.conn)
 	switch {

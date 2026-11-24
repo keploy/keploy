@@ -5091,6 +5091,13 @@ func (p *Proxy) SeedBackgroundMongoRules(rules []models.BackgroundMongoRule) {
 	_ = p.stageOn("backgroundMongoRules", func(m *MockManager) { m.SeedBackgroundMongoRules(rules) })
 }
 
+// SeedBackgroundHTTPRules hands the underlying MockManager the set's declared
+// kind: background HTTP rules. Satisfies the agent's optional
+// BackgroundHTTPRulesSeeder extension interface.
+func (p *Proxy) SeedBackgroundHTTPRules(rules []models.BackgroundHTTPRule) {
+	_ = p.stageOn("backgroundHTTPRules", func(m *MockManager) { m.SeedBackgroundHTTPRules(rules) })
+}
+
 // SeedRecordedWindows hands the underlying MockManager the recorded window of
 // every test of the set being staged. Satisfies the agent's optional
 // RecordedWindowsSeeder extension interface.

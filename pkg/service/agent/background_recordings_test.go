@@ -13,17 +13,31 @@ import (
 )
 
 // backgroundProxy is pacingProxy that also takes the set's background
-// recordings.
+// recordings and declared background rules.
 type backgroundProxy struct {
 	pacingProxy
-	bgMu   sync.Mutex
-	bgSeen [][]models.BackgroundRecording
+	bgMu      sync.Mutex
+	bgSeen    [][]models.BackgroundRecording
+	mongoSeen [][]models.BackgroundMongoRule
+	httpSeen  [][]models.BackgroundHTTPRule
 }
 
 func (p *backgroundProxy) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
 	p.bgMu.Lock()
 	defer p.bgMu.Unlock()
 	p.bgSeen = append(p.bgSeen, recs)
+}
+
+func (p *backgroundProxy) SeedBackgroundMongoRules(rules []models.BackgroundMongoRule) {
+	p.bgMu.Lock()
+	defer p.bgMu.Unlock()
+	p.mongoSeen = append(p.mongoSeen, rules)
+}
+
+func (p *backgroundProxy) SeedBackgroundHTTPRules(rules []models.BackgroundHTTPRule) {
+	p.bgMu.Lock()
+	defer p.bgMu.Unlock()
+	p.httpSeen = append(p.httpSeen, rules)
 }
 
 var bgT0 = time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
@@ -151,4 +165,89 @@ func TestABackgroundRecordingsPreviousCallIsReadAcrossTheLists(t *testing.T) {
 	if got, want := bgFroms(recs), map[string]int{"poll": 3}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("spans' starts %v; want %v", got, want)
 	}
+}
+
+// Fail-closed: whenever reading the set's background recordings errors (e.g.
+// unreadable DiskMocks) OR any named background mock is missing from the
+// staged set, seedBackgroundRecordings must seed NO declared Mongo or HTTP
+// background rules so strict per-recording checks are never bypassed and every
+// unmatched call stays its test's miss.
+func TestSeedBackgroundRecordingsFailsClosedOnDiskErrorOrMissingMock(t *testing.T) {
+	mongoRules := []models.BackgroundMongoRule{{
+		ID:          "e2e-pack-sweep-unread",
+		DB:          "api-server",
+		Command:     "find",
+		Collections: []string{"e2eRecs"},
+		Where:       []models.BackgroundMongoWhere{{Field: "body.cmd.filter.kind", Equals: "startup"}},
+	}}
+	httpRules := []models.BackgroundHTTPRule{{
+		ID:     "openbao-liveness-check",
+		Method: "GET",
+		Host:   "localhost:8200",
+		Path:   "/v1/sys/health",
+	}}
+	poll := bgMock("poll-1", models.Mongo, 2, 2)
+
+	t.Run("all named background mocks found seeds rules", func(t *testing.T) {
+		p := &backgroundProxy{}
+		a := &Agent{logger: zap.NewNop(), Proxy: p}
+		a.seedBackgroundRecordings(models.MockFilterParams{
+			BackgroundMocks:      []string{"poll-1"},
+			BackgroundMongoRules: mongoRules,
+			BackgroundHTTPRules:  httpRules,
+		}, [][]*models.Mock{{poll}}, nil)
+		if len(p.mongoSeen) != 1 || !reflect.DeepEqual(p.mongoSeen[0], mongoRules) {
+			t.Fatalf("mongo rules seeded = %+v; want %+v", p.mongoSeen, mongoRules)
+		}
+		if len(p.httpSeen) != 1 || !reflect.DeepEqual(p.httpSeen[0], httpRules) {
+			t.Fatalf("http rules seeded = %+v; want %+v", p.httpSeen, httpRules)
+		}
+		if len(p.bgSeen) != 1 || len(p.bgSeen[0]) != 1 {
+			t.Fatalf("bg recs seeded = %+v; want 1", p.bgSeen)
+		}
+	})
+
+	t.Run("disk read error beside recorded rule disables declared rule fallback", func(t *testing.T) {
+		disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = disk.Close()
+		p := &backgroundProxy{}
+		a := &Agent{logger: zap.NewNop(), Proxy: p}
+		a.seedBackgroundRecordings(models.MockFilterParams{
+			BackgroundMocks:      []string{"poll-1"},
+			BackgroundMongoRules: mongoRules,
+			BackgroundHTTPRules:  httpRules,
+		}, [][]*models.Mock{{poll}}, disk)
+		if len(p.mongoSeen) != 1 || p.mongoSeen[0] != nil {
+			t.Fatalf("on disk error, mongo rules seeded = %+v; want nil", p.mongoSeen)
+		}
+		if len(p.httpSeen) != 1 || p.httpSeen[0] != nil {
+			t.Fatalf("on disk error, http rules seeded = %+v; want nil", p.httpSeen)
+		}
+		if len(p.bgSeen) != 1 || p.bgSeen[0] != nil {
+			t.Fatalf("on disk error, bg recs seeded = %+v; want nil", p.bgSeen)
+		}
+	})
+
+	t.Run("missing named background mock disables declared rule fallback", func(t *testing.T) {
+		p := &backgroundProxy{}
+		a := &Agent{logger: zap.NewNop(), Proxy: p}
+		a.seedBackgroundRecordings(models.MockFilterParams{
+			BackgroundMocks:      []string{"poll-1", "poll-missing"},
+			BackgroundMongoRules: mongoRules,
+			BackgroundHTTPRules:  httpRules,
+		}, [][]*models.Mock{{poll}}, nil)
+		if len(p.mongoSeen) != 1 || p.mongoSeen[0] != nil {
+			t.Fatalf("on missing background mock, mongo rules seeded = %+v; want nil", p.mongoSeen)
+		}
+		if len(p.httpSeen) != 1 || p.httpSeen[0] != nil {
+			t.Fatalf("on missing background mock, http rules seeded = %+v; want nil", p.httpSeen)
+		}
+		// The found recording itself is still seeded for exact recording matching.
+		if len(p.bgSeen) != 1 || len(p.bgSeen[0]) != 1 || p.bgSeen[0][0].Mock.Name != "poll-1" {
+			t.Fatalf("on missing background mock, bg recs seeded = %+v; want [poll-1]", p.bgSeen)
+		}
+	})
 }

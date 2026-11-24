@@ -24,16 +24,17 @@ import (
 // Learning's own facts come first: a word it bound to a dependency place, or
 // read as a plain read of the clock itself, keeps learning's decision, and so
 // does every other refusal (what keploy could not read, its limit, a conflict,
-// two slots of the test case's request). On the Decide path (e.g. MongoDB's
-// learn step), a declared plain clock rule (declaredOffset holding 0) whose
-// CheckClockRead holds in both runs against the call's window also drops
-// coincidental client HTTP requests (Earlier.incoming, just as readOverClients
-// drops them when Window.holdsRead holds) while keeping dependency mock-to-mock
-// copies intact, and settles a narrower learned look-back/offset clock read,
-// an uncompared-offset refusal ("instant-held-read"), or a no-clock-read
-// refusal to the declared plain check (leaving learning's decision untouched
-// whenever the declared plain check does not hold). A word learning read no
-// instant in is refused no-clock-read (clockOnly).
+// two slots of the test case's request). On both Decide (MongoDB) and
+// DeclaredClockLearned (HTTP), a declared plain clock rule (declaredOffset
+// holding 0) whose CheckClockRead holds in both runs against the call's window
+// drops coincidental client HTTP requests (Earlier.incoming / From.Client,
+// just as readOverClients drops them when Window.holdsRead holds) while
+// keeping dependency mock-to-mock copies intact, and settles a narrower
+// learned look-back/offset clock read, an uncompared-offset refusal
+// ("instant-held-read"), or a no-clock-read refusal to the declared plain
+// check (leaving learning's decision untouched whenever the declared plain
+// check does not hold). A word learning read no instant in is refused
+// no-clock-read (clockOnly).
 
 // clockSettles are the refusals a clock rule settles: those of which
 // source a moment has.
@@ -160,16 +161,48 @@ func (dc *decider) clockOnly(path string, src Source, ds []Decision) []Decision 
 	return ds
 }
 
+// declaredPlainClockHolds reports whether src is a declared plain clock rule
+// (SourceClock with declaredOffset holding 0) whose CheckClockRead holds on
+// both rec and live against w in one common layout. Mirrors decider.declaredPlainHolds
+// for the HTTP ClassifyArrived / DeclaredClockLearned path so a declared plain
+// clock rule decides identically across HTTP and MongoDB.
+func declaredPlainClockHolds(rec, live Leaf, src Source, w *Window) bool {
+	if src.Kind != SourceClock || w == nil {
+		return false
+	}
+	off, ok := declaredOffset(src.Clock)
+	if !ok || !off.Plain() {
+		return false
+	}
+	if !isInstant(rec) || !isInstant(live) {
+		return false
+	}
+	lay := models.ClockOffset{Layout: leafLayout(rec)}.MeetLayout(leafLayout(live))
+	if lay == "" || lay == models.LayoutApart {
+		return false
+	}
+	off.Layout = lay
+	if okR, _ := CheckClockRead(rec.Path, off, rec, w.Rec, true); !okR {
+		return false
+	}
+	okL, _ := CheckClockRead(live.Path, off, live, w.F, true)
+	return okL
+}
+
 // DeclaredClockLearned is ln, a drifted leaf the classify path learned
 // (ClassifyArrived: the HTTP adapter's learn step), as src, a clock rule
-// keploy.yml declares at its field, decides it (unlike Decide, ClassifyArrived
-// does not drop Earlier.incoming client requests or replace an already-learned
-// clock offset). A declared clock is a time field, so it settles what learning could not
-// tell of the value's source: an echo (a variable From.Echo: learning found
-// the value's moment in what the application was given earlier, and cannot
-// tell a copy of it, or a pick from it by the clock, from a read of the
-// clock: echoProvenance), noise, and a drift refused for its source alone
-// (Learned.sourceWhy). Such a value is a read of the clock when the rule's
+// keploy.yml declares at its field, decides it. A declared clock is a time
+// field, so it settles what learning could not tell of the value's source: an
+// echo (a variable From.Echo: learning found the value's moment in what the
+// application was given earlier, and cannot tell a copy of it, or a pick from
+// it by the clock, from a read of the clock: echoProvenance), noise, and a
+// drift refused for its source alone (Learned.sourceWhy). Matching Decide
+// (MongoDB), when src is a declared plain clock rule (declaredOffset holding
+// 0) whose CheckClockRead holds in both runs against w
+// (declaredPlainClockHolds), it also settles a coincidental client test
+// request binding (KindVariable with From.Client) and a narrower learned
+// clock offset (KindClockOffset) while keeping dependency mock-to-mock copies
+// intact. Such a value is a read of the clock when the rule's
 // range holds both runs' values in the call's span (w: Rec and F), in one
 // layout, as a replay checks it (CheckClockRead); else, under the time
 // default (timeForm), an instant each run writes in a form (TimeForm), an
@@ -180,9 +213,9 @@ func (dc *decider) clockOnly(path string, src Source, ds []Decision) []Decision 
 // is never let pass unchecked), and an echo or a refused drift keeps
 // learning's refusal. The caller leaves out, where the time default is off,
 // a value its call's recorded answer holds (a replay would serve that
-// answer's recorded moment). Every other decision stands: a value bound to an
-// earlier place that holds it whole, a read of the clock or an offset from
-// it learning found, an echo the answer carries, and every other refusal
+// answer's recorded moment). Every other decision stands: a value bound to a
+// dependency place that holds it whole, a plain read of the clock learning
+// found, an echo the answer carries, and every other refusal
 // (two layouts or zone forms, a value its call's answer holds, what keploy
 // could not read). A read the re-read since the test began learned in
 // place of the offset rule's refusal (Learned.offsetRefused), or the T2
@@ -203,7 +236,12 @@ func DeclaredClockLearned(ln Learned, src Source, w *Window, timeForm bool) Lear
 		// time rules learned as a read (Learned.placeRefused).
 		ln = *ln.placeRefused
 	}
-	settles := ln.Kind == KindVariable && ln.From.Echo || ln.Kind == KindNoise ||
+	typedUnread := ln.typedUnreadWhy != "" && ln.typedUnreadWhy == ln.Why
+	plainOverride := (ln.Kind == KindClockOffset ||
+		(ln.Kind == KindVariable && ln.From.Client) ||
+		(ln.Kind == KindUnaccounted && (unreadHeld(ln) || typedUnread))) &&
+		declaredPlainClockHolds(ln.Recorded, ln.Live, src, w)
+	settles := plainOverride || ln.Kind == KindVariable && ln.From.Echo || ln.Kind == KindNoise ||
 		ln.Kind == KindUnaccounted && ln.sourceWhy != "" && ln.sourceWhy == ln.Why
 	if src.Kind != SourceClock || !settles {
 		return ln

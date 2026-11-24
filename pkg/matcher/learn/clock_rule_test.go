@@ -415,4 +415,29 @@ func TestDeclaredPlainClockRuleDropsCoincidentalClientRequest(t *testing.T) {
 			}
 		})
 	}
+
+	// 6. Explicit instant-held-read refusal settlement: without the declared
+	// plain rule and without ComparesOffsets(), learning refuses with
+	// RefusalCannotCheck ("instant-held-read"); with the declared plain rule,
+	// declaredClock settles that refusal to plain Clock{Res: 1s}.
+	t.Run("declared plain rule settles instant-held-read refusal", func(t *testing.T) {
+		inUnruled := makeIn(nil, plain, rVal, fVal)
+		inUnruled.Window = &Window{
+			Rec: Span{From: rCall, To: rCall.Add(10 * time.Millisecond)},
+			F:   Span{From: fCall, To: fCall.Add(10 * time.Millisecond)},
+		}
+		inUnruled.Source = nil
+		inUnruled.TimeForm = false
+		dsUnruled := Decide(inUnruled)
+		if len(dsUnruled) != 1 || dsUnruled[0].Refusal == nil || dsUnruled[0].Refusal.Kind != RefusalCannotCheck || dsUnruled[0].Refusal.Check != "instant-held-read" {
+			t.Fatalf("premise: without rule expected instant-held-read refusal, got %s", oDescribe(dsUnruled))
+		}
+		inRuled := makeIn(nil, plain, rVal, fVal)
+		inRuled.Window = inUnruled.Window
+		inRuled.TimeForm = false
+		dsRuled := Decide(inRuled)
+		if len(dsRuled) != 1 || dsRuled[0].Outcome != OutcomeClock || dsRuled[0].Clock == nil || !dsRuled[0].Clock.Plain() || dsRuled[0].Clock.Res != time.Second {
+			t.Fatalf("with declared plain rule expected settled plain Clock, got %s", oDescribe(dsRuled))
+		}
+	})
 }

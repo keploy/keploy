@@ -1104,6 +1104,12 @@ type Learned struct {
 	// the test began reads again (classifyRead); stale (not Why) once a
 	// later step refuses it for another reason (unreadHeld).
 	unreadWhy string
+	// typedUnreadWhy: the client-test unread refusal of a protocol-typed
+	// instant (typed.go) that sits outside its call's window. Kept separate
+	// from unreadWhy so classifyRead's SinceTestBegin re-read is unchanged,
+	// while DeclaredClockLearned can still settle it under a declared plain
+	// clock rule.
+	typedUnreadWhy string
 	// wordRefused: the refusal is the word rule's (unaccounted, givenWhy):
 	// a word of what changed stands at a place the call cannot follow.
 	// Read without the rule a copy follows its source, the leaf is read

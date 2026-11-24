@@ -1152,6 +1152,23 @@ var (
 	_ integrations.RoundBackgroundMongoRuleReader = (*scopedMockDb)(nil)
 )
 
+// BackgroundHTTPRules is the set's declared kind: background HTTP rules
+// whatever this view's allowlist (integrations.BackgroundHTTPRuleReader).
+func (s *scopedMockDb) BackgroundHTTPRules() []models.BackgroundHTTPRule {
+	return integrations.BackgroundHTTPRulesOf(s.MockMemDb)
+}
+
+// BackgroundHTTPRulesIn is the declared kind: background HTTP rules of the
+// set call was marked in (integrations.RoundBackgroundHTTPRuleReader).
+func (s *scopedMockDb) BackgroundHTTPRulesIn(call integrations.CallRound) []models.BackgroundHTTPRule {
+	return integrations.BackgroundHTTPRulesAt(s.MockMemDb, call)
+}
+
+var (
+	_ integrations.BackgroundHTTPRuleReader      = (*scopedMockDb)(nil)
+	_ integrations.RoundBackgroundHTTPRuleReader = (*scopedMockDb)(nil)
+)
+
 // BoundValuesIn is the bound values of the set call was marked in
 // (integrations.RoundBoundReader): the store's, as Variables and TrailOf.
 func (s *scopedMockDb) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {

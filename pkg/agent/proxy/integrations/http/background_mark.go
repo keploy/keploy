@@ -44,107 +44,118 @@ import (
 
 // markBackground marks report Background when the call (input) is the same
 // request as one of the HTTP background recordings of the set it was marked
-// in (mark: integrations.BackgroundRecordingsAt). heldDb is the call's held
-// store (for round-scoped declared clock rules when !restaged), and mockDb is
-// the underlying store that serves round-scoped background recordings and
-// bound values. It changes nothing else of the report.
+// in (mark: integrations.BackgroundRecordingsAt), or matches an unrecorded
+// read-only declared kind: background HTTP rule of that set
+// (integrations.BackgroundHTTPRulesAt). heldDb is the call's held store (for
+// round-scoped declared clock rules when !restaged), and mockDb is the
+// underlying store that serves round-scoped background recordings, declared
+// rules, and bound values.
 func (h *HTTP) markBackground(ctx context.Context, report *models.MockMismatchReport, input *req, heldDb, mockDb integrations.MockMemDb, mark integrations.CallRound, restaged bool, headerNoise, bodyNoise map[string][]string, urlNoise []string) {
 	if report == nil || input == nil {
 		return
 	}
-	if ok, bound := h.backgroundCall(ctx, input, heldDb, mockDb, mark, restaged, headerNoise, bodyNoise, urlNoise); ok {
+	if ok, bound, ruleID := h.backgroundCall(ctx, input, heldDb, mockDb, mark, restaged, headerNoise, bodyNoise, urlNoise); ok {
 		report.Background, report.BackgroundBound = true, bound
+		if ruleID != "" {
+			report.NextSteps = strings.TrimSpace(report.NextSteps + " It matched the declared kind: background rule " + ruleID + " with no covering recording in the set, so it is counted against no test.")
+		}
 	}
 }
 
 // backgroundCall reports whether input is the same request as one of the HTTP
 // background recordings of the set it was marked in (mark), read any way the
-// comment above says, and, when it is so only by values its test bound, the
-// places that differ by them; false where the store hands none.
-func (h *HTTP) backgroundCall(ctx context.Context, input *req, heldDb, mockDb integrations.MockMemDb, mark integrations.CallRound, restaged bool, headerNoise, bodyNoise map[string][]string, urlNoise []string) (bool, []models.BackgroundBinding) {
+// comment above says (or matches an unrecorded read-only declared kind:
+// background HTTP rule, returning its rule ID), and, when it is so only by
+// values its test bound, the places that differ by them; false where the store
+// hands neither recordings nor declared rules.
+func (h *HTTP) backgroundCall(ctx context.Context, input *req, heldDb, mockDb integrations.MockMemDb, mark integrations.CallRound, restaged bool, headerNoise, bodyNoise map[string][]string, urlNoise []string) (bool, []models.BackgroundBinding, string) {
 	recs := integrations.BackgroundRecordingsAt(mockDb, mark, models.HTTP)
-	if len(recs) == 0 {
-		return false, nil
+	bgRules := integrations.BackgroundHTTPRulesAt(mockDb, mark)
+	if len(recs) == 0 && len(bgRules) == 0 {
+		return false, nil, ""
 	}
 	live := liveDestination(ctx, input)
-	n := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
-	// Declared clock rules belong to the call's round: do not apply a newly
-	// restaged set's sources (whose mock names restart) to an earlier set's
-	// recordings. Every recording returned by BackgroundRecordingsAt is a
-	// background recording (worker:/startup:), whether the call landed inside
-	// a test window or between tests.
-	if !restaged {
-		n = n.withSources(heldDb)
-		n.background = func(*models.Mock) bool { return true }
-	}
-	spans, spansKnown := learn.CallSpansOf(ctx, input.arrived)
-	var bgSpans []learn.Span
-	if spansKnown {
-		bgSpans = spans
-	}
+	if len(recs) > 0 {
+		n := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+		// Declared clock rules belong to the call's round: do not apply a newly
+		// restaged set's sources (whose mock names restart) to an earlier set's
+		// recordings. Every recording returned by BackgroundRecordingsAt is a
+		// background recording (worker:/startup:), whether the call landed inside
+		// a test window or between tests.
+		if !restaged {
+			n = n.withSources(heldDb)
+			n.background = func(*models.Mock) bool { return true }
+		}
+		spans, spansKnown := learn.CallSpansOf(ctx, input.arrived)
+		var bgSpans []learn.Span
+		if spansKnown {
+			bgSpans = spans
+		}
 
-	firstDiffs := make([][]strictField, len(recs))
-	anyCandidate := false
-	for i, r := range recs {
-		if !bgSameShape(input, live, r.Mock, n) {
-			continue
-		}
-		diffs := strictDiff(ctx, input, live, r.Mock, n)
-		if len(diffs) == 0 {
-			return true, nil
-		}
-		if bgSpans != nil && allClockDiffs(diffs) && len(strictDiffWith(ctx, input, live, r.Mock, n, nil, bgSpans)) == 0 {
-			return true, nil
-		}
-		firstDiffs[i] = diffs
-		anyCandidate = true
-	}
-
-	if !anyCandidate || input.url == nil {
-		return false, nil
-	}
-	liveLeaves := bgLeavesOf(liveParts(ctx, input), n)
-	cachedRecLeaves := make([]*bgLeaves, len(recs))
-	leavesOf := func(i int) bgLeaves {
-		if cachedRecLeaves[i] == nil {
-			l := bgLeavesOf(recordedParts(recs[i].Mock), n)
-			cachedRecLeaves[i] = &l
-		}
-		return *cachedRecLeaves[i]
-	}
-
-	if bv := integrations.BoundValuesAt(mockDb, mark); bv != nil {
-		own := bgHeldBy(bv.Own(), "")
+		firstDiffs := make([][]strictField, len(recs))
+		anyCandidate := false
 		for i, r := range recs {
-			if len(firstDiffs[i]) == 0 {
+			if !bgSameShape(input, live, r.Mock, n) {
 				continue
 			}
-			held := own
-			if tr := bv.TrailOf(r.Mock.Name); tr.Test != "" && tr.Test != mark.Test() {
-				held = append(own[:len(own):len(own)], bgHeldBy(bgMadeAt(bv.EndedOf(tr.Test), tr.Mocks), tr.Test)...)
+			diffs := strictDiff(ctx, input, live, r.Mock, n)
+			if len(diffs) == 0 {
+				return true, nil, ""
 			}
-			if len(held) == 0 {
-				continue
+			if bgSpans != nil && allClockDiffs(diffs) && len(strictDiffWith(ctx, input, live, r.Mock, n, nil, bgSpans)) == 0 {
+				return true, nil, ""
 			}
-			if bound, ok := bgBoundOnly(ctx, r.Mock, input, live, n, firstDiffs[i], leavesOf(i), liveLeaves, held, bgSpans); ok {
-				return true, bound
-			}
+			firstDiffs[i] = diffs
+			anyCandidate = true
 		}
-	}
 
-	if bgSpans == nil {
-		return false, nil
-	}
-	tried := map[string]bool{}
-	for i := range recs {
-		if len(firstDiffs[i]) == 0 {
-			continue
+		if anyCandidate && input.url != nil {
+			liveLeaves := bgLeavesOf(liveParts(ctx, input), n)
+			cachedRecLeaves := make([]*bgLeaves, len(recs))
+			leavesOf := func(i int) bgLeaves {
+				if cachedRecLeaves[i] == nil {
+					l := bgLeavesOf(recordedParts(recs[i].Mock), n)
+					cachedRecLeaves[i] = &l
+				}
+				return *cachedRecLeaves[i]
+			}
+
+			if bv := integrations.BoundValuesAt(mockDb, mark); bv != nil {
+				own := bgHeldBy(bv.Own(), "")
+				for i, r := range recs {
+					if len(firstDiffs[i]) == 0 {
+						continue
+					}
+					held := own
+					if tr := bv.TrailOf(r.Mock.Name); tr.Test != "" && tr.Test != mark.Test() {
+						held = append(own[:len(own):len(own)], bgHeldBy(bgMadeAt(bv.EndedOf(tr.Test), tr.Mocks), tr.Test)...)
+					}
+					if len(held) == 0 {
+						continue
+					}
+					if bound, ok := bgBoundOnly(ctx, r.Mock, input, live, n, firstDiffs[i], leavesOf(i), liveLeaves, held, bgSpans); ok {
+						return true, bound, ""
+					}
+				}
+			}
+
+			if bgSpans != nil {
+				tried := map[string]bool{}
+				for i := range recs {
+					if len(firstDiffs[i]) == 0 {
+						continue
+					}
+					if bgEpochsTrack(ctx, i, recs, input, live, n, firstDiffs[i], leavesOf, liveLeaves, bgSpans, tried) {
+						return true, nil, ""
+					}
+				}
+			}
 		}
-		if bgEpochsTrack(ctx, i, recs, input, live, n, firstDiffs[i], leavesOf, liveLeaves, bgSpans, tried) {
-			return true, nil
-		}
 	}
-	return false, nil
+	if ruleID, ok := matchesDeclaredBackgroundHTTP(input, live, recs, bgRules); ok {
+		return true, nil, ruleID
+	}
+	return false, nil, ""
 }
 
 // bgSameShape is a cheap O(1) pre-filter before strictDiff: m must be a valid
@@ -682,6 +693,86 @@ func bgEpochsTrack(ctx context.Context, rIdx int, recs []models.BackgroundRecord
 		}
 		off, ok := learn.EpochTrack(reads)
 		if !ok || !off.HoldsIn(lv.Value, spans) {
+			return false
+		}
+	}
+	return true
+}
+
+// isReadOnlyHTTPMethod reports whether method is a safe read-only HTTP method.
+// Unrecorded HTTP writes (POST, PUT, PATCH, DELETE) are never excused by the
+// declared-background fallback.
+func isReadOnlyHTTPMethod(method string) bool {
+	return method == "GET" || method == "HEAD" || method == "OPTIONS"
+}
+
+// matchesDeclaredBackgroundHTTP reports whether a missed HTTP call matches one
+// of the staged set's read-only declared kind: background HTTP rules AND zero
+// HTTP recordings in recs already cover that rule. Unreadable recordings in
+// recs fail closed (blocking the fallback). Serving remains strictly
+// fail-closed either way.
+func matchesDeclaredBackgroundHTTP(input *req, live destination, recs []models.BackgroundRecording, rules []models.BackgroundHTTPRule) (string, bool) {
+	if len(rules) == 0 || input == nil || input.url == nil || live.host == "" {
+		return "", false
+	}
+	for _, r := range rules {
+		if !isReadOnlyHTTPMethod(r.Method) || r.Host == "" || r.Path == "" {
+			continue
+		}
+		if !httpRuleCovers(r, input.method, live.host, input.url.Path) {
+			continue
+		}
+		if anyRecMatchesHTTPBgRule(recs, r) {
+			continue
+		}
+		return r.ID, true
+	}
+	return "", false
+}
+
+// anyRecMatchesHTTPBgRule reports whether any HTTP background recording in
+// recs already covers r. Any recording whose request, URL, or destination
+// cannot be read is treated fail-closed as covering so strict per-recording
+// checks are never bypassed.
+func anyRecMatchesHTTPBgRule(recs []models.BackgroundRecording, r models.BackgroundHTTPRule) bool {
+	for _, br := range recs {
+		if br.Mock == nil || br.Mock.Spec.HTTPReq == nil {
+			return true
+		}
+		u, err := models.ParseRequestURL(br.Mock.Spec.HTTPReq.URL)
+		if err != nil {
+			return true
+		}
+		dest, ok := br.Mock.RecordedDestination()
+		if !ok {
+			return true
+		}
+		if httpRuleCovers(r, string(br.Mock.Spec.HTTPReq.Method), dest, u.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+// httpRuleCovers reports whether r matches an HTTP call of method to host at
+// path (segment-by-segment, with "{}" matching exactly one non-empty segment),
+// matching mockrules.HTTPTarget.Covers.
+func httpRuleCovers(r models.BackgroundHTTPRule, method, host, path string) bool {
+	if r.Method != method || !strings.EqualFold(r.Host, host) {
+		return false
+	}
+	if r.Path == "/" || path == "/" {
+		return r.Path == path
+	}
+	if !strings.HasPrefix(r.Path, "/") || !strings.HasPrefix(path, "/") {
+		return false
+	}
+	want, got := strings.Split(r.Path[1:], "/"), strings.Split(path[1:], "/")
+	if len(want) != len(got) {
+		return false
+	}
+	for i, w := range want {
+		if got[i] == "" || (w != "{}" && w != got[i]) {
 			return false
 		}
 	}

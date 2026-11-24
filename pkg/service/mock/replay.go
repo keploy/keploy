@@ -1559,9 +1559,12 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	every := everySeries(served, worker, once)
 	gates := seriesGates(served, worker, ordered)
 	startupRules := hasDeclaredStartupRule(mp)
+	bgMongo, bgHTTP := uncoveredBackgroundRules(mp, decoded, m.config.Mock.BackgroundMongo, m.config.Mock.BackgroundHTTP, m.config.Mock.BackgroundRulesFilter)
 	var pushErr error
-	if pp3, ok := m.instrumentation.(ProvenTableWithBackgroundMongoPusher); ok {
-		pushErr = pp3.PushProvenTableWithBackgroundMongo(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), ordered, declaredSources(served, loaded), once, every, gates, m.config.Mock.TimeForm, startupRules, m.config.Mock.BackgroundMongo)
+	if pp4, ok := m.instrumentation.(ProvenTableWithBackgroundRulesPusher); ok {
+		pushErr = pp4.PushProvenTableWithBackgroundRules(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), ordered, declaredSources(served, loaded), once, every, gates, m.config.Mock.TimeForm, startupRules, bgMongo, bgHTTP)
+	} else if pp3, ok := m.instrumentation.(ProvenTableWithBackgroundMongoPusher); ok {
+		pushErr = pp3.PushProvenTableWithBackgroundMongo(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), ordered, declaredSources(served, loaded), once, every, gates, m.config.Mock.TimeForm, startupRules, bgMongo)
 	} else if pp2, ok := m.instrumentation.(ProvenTableWithStartupRulesPusher); ok {
 		pushErr = pp2.PushProvenTableWithStartupRules(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), ordered, declaredSources(served, loaded), once, every, gates, m.config.Mock.TimeForm, startupRules)
 	} else {
@@ -1925,6 +1928,65 @@ func hasDeclaredStartupRule(mp *models.Mapping) bool {
 		}
 	}
 	return false
+}
+
+// uncoveredBackgroundRules selects only declared background rules that have
+// zero covering worker: or startup: entries in mp (and decoded). When filter
+// is provided (e.g. enterprise CLI with mockrules), it evaluates full rule
+// coverage against mp and decoded; in all cases, any rule whose ID is already
+// placed on a worker: or startup: entry's Rule mark ("<id>@<hash>" or "<id>")
+// is dropped before pushing to the agent so strict per-recording checks can
+// never be bypassed even if the agent later cannot read a background mock.
+func uncoveredBackgroundRules(
+	mp *models.Mapping,
+	decoded []*models.Mock,
+	mongoRules []models.BackgroundMongoRule,
+	httpRules []models.BackgroundHTTPRule,
+	filter func(*models.Mapping, []*models.Mock) ([]models.BackgroundMongoRule, []models.BackgroundHTTPRule),
+) ([]models.BackgroundMongoRule, []models.BackgroundHTTPRule) {
+	// Fail closed when no mapping is available: without mappings.yaml we cannot
+	// tell which rules already have worker:/startup: recordings in the set.
+	if mp == nil {
+		return nil, nil
+	}
+	if filter != nil {
+		mongoRules, httpRules = filter(mp, decoded)
+	}
+	if len(mongoRules) == 0 && len(httpRules) == 0 {
+		return mongoRules, httpRules
+	}
+	covered := map[string]bool{}
+	mark := func(entries []models.MockEntry) {
+		for _, e := range entries {
+			if e.Rule == "" {
+				continue
+			}
+			id, _, _ := strings.Cut(e.Rule, "@")
+			if id != "" {
+				covered[id] = true
+			}
+		}
+	}
+	mark(mp.Worker)
+	mark(mp.Startup)
+	if len(covered) == 0 {
+		return mongoRules, httpRules
+	}
+	var outMongo []models.BackgroundMongoRule
+	for _, r := range mongoRules {
+		if r.ID != "" && covered[r.ID] {
+			continue
+		}
+		outMongo = append(outMongo, r)
+	}
+	var outHTTP []models.BackgroundHTTPRule
+	for _, r := range httpRules {
+		if r.ID != "" && covered[r.ID] {
+			continue
+		}
+		outHTTP = append(outHTTP, r)
+	}
+	return outMongo, outHTTP
 }
 
 // withoutSourceBoundWorkerSeries returns a shallow copy of mp omitting from

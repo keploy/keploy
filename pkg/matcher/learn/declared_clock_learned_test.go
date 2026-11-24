@@ -121,6 +121,9 @@ func TestDeclaredClockLearnedSettlesWhatLearningCannotTellOfItsSource(t *testing
 		{"a drift refused with no reason", Learned{Kind: KindUnaccounted, Recorded: held.Recorded, Live: held.Live}, clock, w, true, kept, "", ""},
 		{"a drift refused for its source, then for another reason", stale(as(KindUnaccounted, held)), clock, w, true, kept, "", ""},
 		{"an offset from the clock learning found", Learned{Kind: KindClockOffset, Recorded: lateF.Recorded, Live: lateF.Live, Offset: &models.ClockOffset{Min: time.Minute, Max: time.Minute, Res: time.Second}}, clock, w, true, kept, "", ""},
+		{"an offset from the clock within declared plain span settles to plain read", Learned{Kind: KindClockOffset, Recorded: held.Recorded, Live: held.Live, Offset: &models.ClockOffset{Min: -time.Second, Max: -time.Second, Res: time.Second}}, clock, w, false, ranged, "", ""},
+		{"a coincidental client request within declared plain span settles to plain read", Learned{Kind: KindVariable, Recorded: held.Recorded, Live: held.Live, From: Place{Mock: "test case post-apps-1", Path: "body.name", Client: true}}, clock, w, false, ranged, "", ""},
+		{"a coincidental client request outside declared plain span stays bound", Learned{Kind: KindVariable, Recorded: lateF.Recorded, Live: lateF.Live, From: Place{Mock: "test case post-apps-1", Path: "body.name", Client: true}}, clock, w, false, kept, "", ""},
 		{"a variable bound where it stands whole", Learned{Kind: KindVariable, Recorded: held.Recorded, Live: held.Live, From: Place{Mock: "mock-3", Path: "body.lastUsedAt", Whole: true}}, clock, w, true, kept, "", ""},
 		{"a read of the clock learning found", Learned{Kind: KindClockRead, Recorded: lateF.Recorded, Live: lateF.Live, Read: &models.ClockOffset{Res: time.Minute}}, clock, w, true, kept, "", ""},
 		{"an echo the answer carries", as(KindEcho, held), clock, w, true, kept, "", ""},
@@ -214,5 +217,88 @@ func TestDeclaredBodySourcesReadsABodyFieldAtItsLeafPath(t *testing.T) {
 	}
 	if DeclaredBodySources([]models.DeclaredSource{header}) != nil || DeclaredBodySources(nil) != nil {
 		t.Fatal("no body rule: want nil")
+	}
+}
+
+// TestDeclaredClockLearnedSettlesClientTestUnreadRefusalFromClassifyArrived
+// proves end-to-end (ClassifyArrived -> OffsetReadUnder -> DeclaredClockLearned)
+// that a declared plain clock rule settles a client-test unread refusal when a
+// pre-call instant sits inside the rule's span under w.ComparesOffsets() == nil
+// and strict times (timeForm == false), and keeps out-of-range instants refused.
+func TestDeclaredClockLearnedSettlesClientTestUnreadRefusalFromClassifyArrived(t *testing.T) {
+	recAt := time.Date(2026, 11, 24, 10, 0, 10, 600_000_000, time.UTC)
+	fAt := time.Date(2026, 11, 24, 10, 2, 11, 731_000_000, time.UTC)
+	w := &Window{
+		Rec: Span{From: recAt, To: recAt.Add(10 * time.Millisecond)},
+		F:   Span{From: fAt, To: fAt.Add(10 * time.Millisecond)},
+	}
+	if w.offsets {
+		t.Fatalf("test setup expected w.offsets == false")
+	}
+
+	plain := models.ClockOffset{Min: -time.Second, Max: 0, Res: time.Second}
+	clockSrc := Source{Kind: SourceClock, Rule: "sweep-now", Clock: plain}
+	// Truncated to 1s but written with millisecond zeros (.000Z), 600ms before
+	// [From, To]: ClassifyArrived with !w.offsets and clientTests rejects it
+	// under strict times (timeForm == false) as a client-test unread instant
+	// because it sits before From at its written 1ms resolution, while the
+	// declared plain clock rule {min: -1s, max: 0s, res: 1s} checks at the 1s cut.
+	inRec := recAt.Truncate(time.Second).Format("2006-01-02T15:04:05.000Z")
+	inF := fAt.Truncate(time.Second).Format("2006-01-02T15:04:05.000Z")
+
+	dc := oClientDrifts()
+	recShape := Shape{Leaves: map[string]Leaf{"body.processAfter": {Path: "body.processAfter", Type: String, Value: inRec}}}
+	liveShape := Shape{Leaves: map[string]Leaf{"body.processAfter": {Path: "body.processAfter", Type: String, Value: inF}}}
+
+	cl := ClassifyArrived(dc, []string{"body.processAfter"}, liveShape, recShape, recAt, fAt, nil, nil, nil, w, nil)
+	if len(cl) != 1 {
+		t.Fatalf("ClassifyArrived returned %d items, want 1", len(cl))
+	}
+	// Under mock.times: strict (timeForm == false), OffsetReadUnder restores the
+	// strict refusal (KindUnaccounted with unreadWhy set, sourceWhy == "").
+	strict := OffsetReadUnder(cl[0], false)
+	if strict.Kind != KindUnaccounted {
+		t.Fatalf("strict OffsetReadUnder = %+v; want KindUnaccounted client-test unread refusal", strict)
+	}
+	if got := DeclaredClockLearned(strict, clockSrc, w, false); got.Kind != KindClockRead || got.Read == nil || !got.Read.Plain() || got.Read.Res != time.Second || !strings.Contains(got.Read.Why, "sweep-now") {
+		t.Fatalf("in-span declared plain clock under strict times: got %+v; want plain KindClockRead (res=1s) settled by sweep-now", got)
+	}
+
+	// Out-of-span pre-call instant (-5s before call) must stay refused.
+	outRec := recAt.Add(-5 * time.Second).Format(time.RFC3339Nano)
+	outF := fAt.Add(-5 * time.Second).Format(time.RFC3339Nano)
+	recOut := Shape{Leaves: map[string]Leaf{"body.processAfter": {Path: "body.processAfter", Type: String, Value: outRec}}}
+	liveOut := Shape{Leaves: map[string]Leaf{"body.processAfter": {Path: "body.processAfter", Type: String, Value: outF}}}
+	clOut := ClassifyArrived(dc, []string{"body.processAfter"}, liveOut, recOut, recAt, fAt, nil, nil, nil, w, nil)
+	strictOut := OffsetReadUnder(clOut[0], false)
+	if got := DeclaredClockLearned(strictOut, clockSrc, w, false); got.Kind != KindUnaccounted {
+		t.Fatalf("out-of-span declared plain clock under strict times: got %+v; want KindUnaccounted", got)
+	}
+
+	// Protocol-typed instant (typed.go classifyInstant -> typedUnreadWhy)
+	// behaves identically through ClassifyArrived: in-span settles to plain
+	// KindClockRead while out-of-span stays refused, without leaking into unreadWhy.
+	typedRec := InstantLeaf("body.processAfter", "body.processAfter", recAt.Truncate(time.Second), time.Millisecond)
+	typedLive := InstantLeaf("body.processAfter", "body.processAfter", fAt.Truncate(time.Second), time.Millisecond)
+	typedCl := ClassifyArrived(dc, []string{"body.processAfter"},
+		Shape{Leaves: map[string]Leaf{"body.processAfter": typedLive}},
+		Shape{Leaves: map[string]Leaf{"body.processAfter": typedRec}},
+		recAt, fAt, nil, nil, nil, w, nil)
+	typedLn := OffsetReadUnder(typedCl[0], false)
+	if typedLn.Kind != KindUnaccounted || typedLn.typedUnreadWhy == "" || typedLn.unreadWhy != "" {
+		t.Fatalf("typed ClassifyArrived = %+v; want KindUnaccounted with typedUnreadWhy set and unreadWhy empty", typedLn)
+	}
+	if got := DeclaredClockLearned(typedLn, clockSrc, w, false); got.Kind != KindClockRead || got.Read == nil || !got.Read.Plain() || got.Read.Res != time.Second {
+		t.Fatalf("typed in-span declared plain clock: got %+v; want plain KindClockRead (res=1s)", got)
+	}
+	typedOutRec := InstantLeaf("body.processAfter", "body.processAfter", recAt.Add(-5*time.Second), time.Millisecond)
+	typedOutLive := InstantLeaf("body.processAfter", "body.processAfter", fAt.Add(-5*time.Second), time.Millisecond)
+	typedOutCl := ClassifyArrived(dc, []string{"body.processAfter"},
+		Shape{Leaves: map[string]Leaf{"body.processAfter": typedOutLive}},
+		Shape{Leaves: map[string]Leaf{"body.processAfter": typedOutRec}},
+		recAt, fAt, nil, nil, nil, w, nil)
+	typedOutLn := OffsetReadUnder(typedOutCl[0], false)
+	if got := DeclaredClockLearned(typedOutLn, clockSrc, w, false); got.Kind != KindUnaccounted {
+		t.Fatalf("typed out-of-span declared plain clock: got %+v; want KindUnaccounted", got)
 	}
 }

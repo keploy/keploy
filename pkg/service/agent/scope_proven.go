@@ -182,6 +182,11 @@ type provenWire struct {
 	// staging for miss classification of rare unrecorded periodic sweepers.
 	backgroundMongo       []models.BackgroundMongoRule
 	stagedBackgroundMongo []models.BackgroundMongoRule
+	// backgroundHTTP is the set's declared kind: background HTTP rules
+	// (models.ScopeTableReq.BackgroundHTTP), forwarded to the proxy on
+	// staging for miss classification of rare unrecorded periodic HTTP polls.
+	backgroundHTTP       []models.BackgroundHTTPRule
+	stagedBackgroundHTTP []models.BackgroundHTTPRule
 	// startupRules is true when the replay's set carries at least one worker:
 	// entry placed by a declared kind: background rule with startup: true
 	// (models.ScopeTableReq.StartupRules). Plain recorded startup: entries do
@@ -1135,6 +1140,25 @@ func (a *Agent) SetScopeBackgroundMongo(ctx context.Context, rules []models.Back
 	a.provenMu.Lock()
 	a.proven.backgroundMongo = cloned
 	if a.proven.staged && !reflect.DeepEqual(a.proven.stagedBackgroundMongo, cloned) {
+		a.proven.staged = false
+	}
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeBackgroundHTTP installs the set's declared kind: background HTTP
+// rules (models.ScopeTableReq.BackgroundHTTP) for replay miss classification.
+// None clears any previous set's rules. A set already staged with different
+// rules is staged again before it is served.
+func (a *Agent) SetScopeBackgroundHTTP(ctx context.Context, rules []models.BackgroundHTTPRule) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cloned := models.CloneBackgroundHTTPRules(rules)
+	a.provenMu.Lock()
+	a.proven.backgroundHTTP = cloned
+	if a.proven.staged && !reflect.DeepEqual(a.proven.stagedBackgroundHTTP, cloned) {
 		a.proven.staged = false
 	}
 	a.provenMu.Unlock()

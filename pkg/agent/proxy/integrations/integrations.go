@@ -1353,6 +1353,39 @@ func BackgroundMongoRulesAt(db MockMemDb, call CallRound) []models.BackgroundMon
 	return BackgroundMongoRulesOf(db)
 }
 
+// BackgroundHTTPRuleReader is an optional MockMemDb capability: the staged
+// set's declared kind: background HTTP rules (models.ScopeTableReq.BackgroundHTTP),
+// read-only for miss classification when a rare periodic HTTP background call
+// never fired during record.
+type BackgroundHTTPRuleReader interface {
+	BackgroundHTTPRules() []models.BackgroundHTTPRule
+}
+
+// RoundBackgroundHTTPRuleReader is an optional MockMemDb capability: the
+// declared kind: background HTTP rules of the set call was marked in.
+type RoundBackgroundHTTPRuleReader interface {
+	BackgroundHTTPRulesIn(call CallRound) []models.BackgroundHTTPRule
+}
+
+// BackgroundHTTPRulesOf returns db's current set's declared background HTTP
+// rules, or nil when db does not expose them.
+func BackgroundHTTPRulesOf(db MockMemDb) []models.BackgroundHTTPRule {
+	if r, ok := db.(BackgroundHTTPRuleReader); ok {
+		return r.BackgroundHTTPRules()
+	}
+	return nil
+}
+
+// BackgroundHTTPRulesAt returns db's declared background HTTP rules of the
+// set call was marked in (RoundBackgroundHTTPRuleReader); of a store that
+// keeps no earlier set's, those of the set staged now.
+func BackgroundHTTPRulesAt(db MockMemDb, call CallRound) []models.BackgroundHTTPRule {
+	if r, ok := db.(RoundBackgroundHTTPRuleReader); ok {
+		return r.BackgroundHTTPRulesIn(call)
+	}
+	return BackgroundHTTPRulesOf(db)
+}
+
 // BoundValues is what a set's test variables had bound, as a background
 // miss reads them (Mongo's markBackground): the bindings the variable scope
 // the call was marked in made itself (variables.Table.OwnIn, of the mark's

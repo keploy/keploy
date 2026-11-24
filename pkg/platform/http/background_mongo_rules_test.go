@@ -37,23 +37,32 @@ func TestAgentClient_PushProvenTableWithBackgroundMongoAndReapply(t *testing.T) 
 	a.session().configure(true)
 
 	rules := []models.BackgroundMongoRule{{
-		ID:          "onboarding-idle-sessions",
+		ID:          "ui-join-backfill-lease",
 		DB:          "api-server",
-		Command:     "find",
-		Collections: []string{"onboardingSessions"},
+		Command:     "insert",
+		Collections: []string{"janitor_leases"},
 		Where: []models.BackgroundMongoWhere{
-			{Field: "body.cmd.filter.status", Equals: "active"},
+			{Field: "body.docs.msgs.0._id", Prefix: "ui-join-backfill:"},
 			{Field: `body.cmd.filter.$or.1["intent.category"].$in`, Equals: []any{nil, ""}},
 		},
+		PeriodBy: "body.docs.msgs.0._id",
+	}}
+	httpRules := []models.BackgroundHTTPRule{{
+		ID:     "openbao-liveness-check",
+		Method: "GET",
+		Host:   "localhost:8200",
+		Path:   "/v1/sys/health",
 	}}
 	want := models.CloneBackgroundMongoRules(rules)
+	wantHTTP := models.CloneBackgroundHTTPRules(httpRules)
 
-	if err := a.PushProvenTableWithBackgroundMongo(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, true, rules); err != nil {
-		t.Fatalf("PushProvenTableWithBackgroundMongo: %v", err)
+	if err := a.PushProvenTableWithBackgroundRules(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, true, rules, httpRules); err != nil {
+		t.Fatalf("PushProvenTableWithBackgroundRules: %v", err)
 	}
 	// Mutating caller's slice/nested values must not alter the session reapply copy.
 	rules[0].Collections[0] = "mutated"
 	rules[0].Where[1].Equals.([]any)[1] = "mutated"
+	httpRules[0].Path = "/mutated"
 
 	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatalf("session reapply: %v", err)
@@ -67,6 +76,9 @@ func TestAgentClient_PushProvenTableWithBackgroundMongoAndReapply(t *testing.T) 
 		}
 		if !reflect.DeepEqual(req.BackgroundMongo, want) {
 			t.Fatalf("push %d: BackgroundMongo=%#v; want %#v", i, req.BackgroundMongo, want)
+		}
+		if !reflect.DeepEqual(req.BackgroundHTTP, wantHTTP) {
+			t.Fatalf("push %d: BackgroundHTTP=%#v; want %#v", i, req.BackgroundHTTP, wantHTTP)
 		}
 	}
 }

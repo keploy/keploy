@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // macOS's TCP connection table, as sysctl net.inet.tcp.pcblist64 lists it:
@@ -215,23 +218,84 @@ func checkXNUAppClosed(liveTable, closedTable []xnuPCB, a, r netip.AddrPort) err
 	return nil
 }
 
+// xnuAppClosedProbe caches a successful SS_NOFDREF layout proof permanently
+// (fast lock-free atomic read) while retrying a transient failure (for example
+// under heavy CPU load) on later drains after a cooldown up to a bounded
+// number of attempts. Plain Go with no build tag so its rows run on every
+// platform.
+type xnuAppClosedProbe struct {
+	proven   atomic.Bool
+	mu       sync.Mutex
+	attempts int
+	nextTry  time.Time
+	lastErr  error
+	proof    func() error
+	now      func() time.Time
+	maxTries int
+	cooldown time.Duration
+}
+
+const (
+	xnuAppClosedMaxTries = 5
+	xnuAppClosedCooldown = 5 * time.Second
+)
+
+func newXNUAppClosedProbe(proof func() error) *xnuAppClosedProbe {
+	return &xnuAppClosedProbe{
+		proof:    proof,
+		now:      time.Now,
+		maxTries: xnuAppClosedMaxTries,
+		cooldown: xnuAppClosedCooldown,
+	}
+}
+
+func (p *xnuAppClosedProbe) check() error {
+	if p.proven.Load() {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.proven.Load() {
+		return nil
+	}
+	if p.attempts > 0 {
+		if p.attempts >= p.maxTries {
+			return p.lastErr
+		}
+		if p.now().Before(p.nextTry) {
+			return p.lastErr
+		}
+	}
+	err := p.proof()
+	if err == nil {
+		p.proven.Store(true)
+		p.lastErr = nil
+		return nil
+	}
+	p.attempts++
+	p.lastErr = err
+	p.nextTry = p.now().Add(p.cooldown)
+	return err
+}
+
 // xnuAppSocketClosed reports whether macOS's TCP table — or, when the table
-// hides application sockets (!visible, e.g. macOS 27 without root), the
-// process-descriptor lookup lookupHeld — shows that no process holds the
-// application socket app -> proxy any more (the drain's word to a handler held
-// past the application's FIN, pairedConn.appClosed). noFDRefProven gates only
-// the xsocket64.so_state & SS_NOFDREF read; CLOSED/TIME_WAIT (already proven
-// by xnuTableReadable), vanished-while-visible, and the process-descriptor
-// fallback do not depend on so_state and stay active even if the SS_NOFDREF
-// proof fails. It also reports whether the socket was seen in the TCP table
-// (sawVisible) or in a readable process's descriptor table (sawHeld) so the
-// caller can update paired.visible / paired.held. Plain Go with no build tag
-// so every branch runs on every platform.
-func xnuAppSocketClosed(table []xnuPCB, app, proxy netip.AddrPort, visible, held, noFDRefProven bool, lookupHeld func() (state uint8, found bool, err error)) (closed, sawVisible, sawHeld bool) {
+// does not list this socket, the process-descriptor lookup lookupHeld — shows
+// that no process holds the application socket app -> proxy any more (the
+// drain's word to a handler held past the application's FIN,
+// pairedConn.appClosed). noFDRefProven gates only the xsocket64.so_state &
+// SS_NOFDREF read; CLOSED/TIME_WAIT (already proven by xnuTableReadable),
+// vanished-after-sighting, and the process-descriptor fallback do not depend
+// on so_state and stay active even if the SS_NOFDREF proof fails. seenInTable
+// and seenInHolder MUST reflect explicit prior sightings of THIS socket (never
+// proxy-wide sightings of another socket), so a socket hidden from a process
+// the agent cannot read is never treated as closed merely because another app
+// socket was visible. Plain Go with no build tag so every branch runs on every
+// platform.
+func xnuAppSocketClosed(table []xnuPCB, app, proxy netip.AddrPort, seenInTable, seenInHolder, noFDRefProven bool, lookupHeld func() (state uint8, found bool, err error)) (closed, sawVisible, sawHeld bool) {
 	if b, ok := findXNUPCB(table, app, proxy); ok {
 		return b.state == xnuTCPClosed || b.state == xnuTCPTimeWait || (noFDRefProven && b.soState&xnuSSNoFDRef != 0), true, false
 	}
-	if visible {
+	if seenInTable {
 		return true, false, false
 	}
 	if lookupHeld == nil {
@@ -244,5 +308,5 @@ func xnuAppSocketClosed(table []xnuPCB, app, proxy netip.AddrPort, visible, held
 	if found {
 		return state == xnuTCPClosed || state == xnuTCPTimeWait, false, true
 	}
-	return held, false, false
+	return seenInHolder, false, false
 }

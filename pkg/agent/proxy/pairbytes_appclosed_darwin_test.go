@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -188,6 +189,27 @@ func TestDarwinAppSocketClosedReadsRealSSNoFDRef(t *testing.T) {
 		}
 		if ls := stuckLosses(t, p); len(ls) != 0 {
 			t.Fatalf("the drain gave the close up as stuck: %+v", ls)
+		}
+	})
+
+	t.Run("unlisted socket never sighted stays held even when another socket was visible", func(t *testing.T) {
+		p := &Proxy{logger: zap.NewNop()}
+		// Simulate another app socket having been sighted in the TCP table and
+		// a holder table, while THIS pc has never been explicitly sighted.
+		p.paired.visible.Store(true)
+		p.paired.held.Store(true)
+		pc := &pairedConn{
+			app:   netip.MustParseAddrPort("127.0.0.1:59991"),
+			proxy: netip.MustParseAddrPort("127.0.0.1:16789"),
+		}
+		var h heldSockets
+		if p.appSocketClosedIn(nil, pc, &h, true) {
+			t.Fatal("unlisted socket never explicitly sighted must not be treated as closed merely because another socket was visible")
+		}
+		// Once THIS socket was sighted in the table and then vanishes, it is closed.
+		pc.seenInTable.Store(true)
+		if !p.appSocketClosedIn(nil, pc, &h, true) {
+			t.Fatal("socket explicitly sighted in table and now gone must be treated as closed")
 		}
 	})
 }

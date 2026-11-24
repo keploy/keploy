@@ -375,10 +375,16 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a set's worker: calls in a test's window", http.StatusNotImplemented)
 			return
 		}
-		// Declared kind: background Mongo rules (proven switch only): every
-		// table sets them (an empty slice clears any previous set's rules).
+		// Declared kind: background Mongo and HTTP rules (proven switch only):
+		// every table sets them (an empty slice clears any previous set's rules).
 		if bms, ok := a.svc.(scopeBackgroundMongoSetter); ok {
 			if err := bms.SetScopeBackgroundMongo(r.Context(), req.BackgroundMongo); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if bhs, ok := a.svc.(scopeBackgroundHTTPSetter); ok {
+			if err := bhs.SetScopeBackgroundHTTP(r.Context(), req.BackgroundHTTP); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -556,6 +562,12 @@ type scopeStartupRulesSetter interface {
 // Mongo rules (models.ScopeTableReq.BackgroundMongo).
 type scopeBackgroundMongoSetter interface {
 	SetScopeBackgroundMongo(ctx context.Context, rules []models.BackgroundMongoRule) error
+}
+
+// scopeBackgroundHTTPSetter installs a replay's declared kind: background
+// HTTP rules (models.ScopeTableReq.BackgroundHTTP).
+type scopeBackgroundHTTPSetter interface {
+	SetScopeBackgroundHTTP(ctx context.Context, rules []models.BackgroundHTTPRule) error
 }
 
 // scopeSkippedReadsSetter installs which of a replay's worker scope are the

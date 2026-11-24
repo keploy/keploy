@@ -376,7 +376,9 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 		r.ResetStatefulCursors()
 	}
 	a.provenMu.Lock()
-	first, pool, background, bgMongo := a.proven.firstRecorded, a.proven.pool, a.proven.background, models.CloneBackgroundMongoRules(a.proven.backgroundMongo)
+	first, pool, background := a.proven.firstRecorded, a.proven.pool, a.proven.background
+	bgMongo := models.CloneBackgroundMongoRules(a.proven.backgroundMongo)
+	bgHTTP := models.CloneBackgroundHTTPRules(a.proven.backgroundHTTP)
 	a.provenMu.Unlock()
 	names := poolNames(pool)
 	// The set's background recordings (its worker: and startup: mocks, as
@@ -391,6 +393,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 		FirstRecordedTestStart: first,
 		BackgroundMocks:        background,
 		BackgroundMongoRules:   bgMongo,
+		BackgroundHTTPRules:    bgHTTP,
 	}
 	if err := a.stageMocks(ctx, params, names, nil); err != nil {
 		return false, fmt.Errorf("stage the recording's mocks: %w", err)
@@ -406,6 +409,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	a.proven.stagedPool = staged
 	a.proven.stagedBackground = background
 	a.proven.stagedBackgroundMongo = bgMongo
+	a.proven.stagedBackgroundHTTP = bgHTTP
 	a.provenMu.Unlock()
 	// The learn step reads the set's recordings now, in the background, not
 	// on its first drifted call's answer path: keploy mock's replay of

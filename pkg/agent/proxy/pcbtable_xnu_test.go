@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // xnuRecord is one struct xtcpcb64 as macOS lays it out (pcbtable_xnu.go).
@@ -217,6 +218,75 @@ func TestCheckXNUAppClosedProvesLiveAndOrphanSSNoFDRef(t *testing.T) {
 			}
 		})
 	}
+}
+
+// xnuAppClosedProbe caches a successful SS_NOFDREF proof permanently, retries
+// a transient failure after its cooldown, and stops retrying once maxTries is
+// reached (fail closed without spinning).
+func TestXNUAppClosedProbeCachesSuccessAndRetriesTransientFailure(t *testing.T) {
+	t.Run("transient failure retries after cooldown and caches success", func(t *testing.T) {
+		now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+		calls := 0
+		p := newXNUAppClosedProbe(func() error {
+			calls++
+			if calls == 1 {
+				return errors.New("transient deadline under load")
+			}
+			return nil
+		})
+		p.now = func() time.Time { return now }
+
+		if err := p.check(); err == nil {
+			t.Fatal("first attempt: want error")
+		}
+		if calls != 1 {
+			t.Fatalf("calls = %d; want 1", calls)
+		}
+		// Within cooldown: does not re-run proof and returns cached error.
+		now = now.Add(p.cooldown - time.Second)
+		if err := p.check(); err == nil {
+			t.Fatal("within cooldown: want cached error")
+		}
+		if calls != 1 {
+			t.Fatalf("within cooldown calls = %d; want 1", calls)
+		}
+		// Past cooldown: retries and succeeds.
+		now = now.Add(2 * time.Second)
+		if err := p.check(); err != nil {
+			t.Fatalf("after cooldown retry: got %v; want nil", err)
+		}
+		if calls != 2 {
+			t.Fatalf("after cooldown calls = %d; want 2", calls)
+		}
+		// Once proven, subsequent checks hit atomic fast path without calling proof.
+		now = now.Add(time.Hour)
+		if err := p.check(); err != nil {
+			t.Fatalf("cached success: got %v; want nil", err)
+		}
+		if calls != 2 {
+			t.Fatalf("after success calls = %d; want 2 (cached permanently)", calls)
+		}
+	})
+
+	t.Run("persistent failure stops retrying after maxTries", func(t *testing.T) {
+		now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+		calls := 0
+		p := newXNUAppClosedProbe(func() error {
+			calls++
+			return errors.New("moved layout")
+		})
+		p.now = func() time.Time { return now }
+
+		for i := 0; i < p.maxTries+3; i++ {
+			if err := p.check(); err == nil {
+				t.Fatalf("attempt %d: want error", i)
+			}
+			now = now.Add(p.cooldown + time.Second)
+		}
+		if calls != p.maxTries {
+			t.Fatalf("calls = %d; want bounded maxTries=%d", calls, p.maxTries)
+		}
+	})
 }
 
 // xnuAppSocketClosed decides from macOS's pcblist64 table — or, when the table

@@ -446,6 +446,17 @@ type MockCmd struct {
 	// when a rare periodic sweeper had zero recordings. keploy.yml does not
 	// bind this field directly: the command that runs the replay populates it.
 	BackgroundMongo []models.BackgroundMongoRule `json:"-" yaml:"-" mapstructure:"-"`
+	// BackgroundHTTP carries non-once, non-chained, non-due read-only declared
+	// kind: background HTTP rules under the proven switch
+	// (models.ScopeTableReq.BackgroundHTTP) for replay miss classification
+	// when a rare periodic HTTP background call had zero recordings.
+	BackgroundHTTP []models.BackgroundHTTPRule `json:"-" yaml:"-" mapstructure:"-"`
+	// BackgroundRulesFilter, when set by the caller (e.g. enterprise CLI with
+	// mockrules), filters BackgroundMongo and BackgroundHTTP against the set's
+	// mappings.yaml (worker: and startup: entries and their decoded mocks)
+	// before pushing the scope table, keeping only rules with zero covering
+	// recordings in the set.
+	BackgroundRulesFilter func(mp *models.Mapping, decoded []*models.Mock) ([]models.BackgroundMongoRule, []models.BackgroundHTTPRule) `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Contract struct {

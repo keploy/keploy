@@ -671,11 +671,17 @@ type ScopeTableReq struct {
 	// recorded startup: entries do not set this flag.
 	StartupRules bool `json:"startupRules,omitempty"`
 	// BackgroundMongo carries, under the proven switch, non-once, non-chained,
-	// non-due declared kind: background Mongo rules so replay miss
-	// classification can recognize a rare periodic sweeper that never fired
-	// during record (and therefore has no recording in Background). Serving
-	// is unaffected and always fails closed.
+	// non-due declared kind: background Mongo rules (read-only or periodBy
+	// lease rules with where) whose rule has zero covering worker:/startup:
+	// recordings in the set, so replay miss classification can recognize a
+	// rare periodic sweeper that never fired during record. Serving is
+	// unaffected and always fails closed.
 	BackgroundMongo []BackgroundMongoRule `json:"backgroundMongo,omitempty"`
+	// BackgroundHTTP carries, under the proven switch, non-once, non-chained,
+	// non-due read-only declared kind: background HTTP rules whose rule has
+	// zero covering worker:/startup: recordings in the set, uniform with
+	// BackgroundMongo. Serving is unaffected and always fails closed.
+	BackgroundHTTP []BackgroundHTTPRule `json:"backgroundHTTP,omitempty"`
 }
 
 // BackgroundMongoWhere is one condition of a declared kind: background Mongo
@@ -698,6 +704,27 @@ type BackgroundMongoRule struct {
 	Command     string                 `json:"command"`
 	Collections []string               `json:"collections"`
 	Where       []BackgroundMongoWhere `json:"where,omitempty"`
+	PeriodBy    string                 `json:"periodBy,omitempty"`
+}
+
+// BackgroundHTTPRule is one non-once, non-chained, non-due read-only declared
+// kind: background HTTP rule forwarded under the proven switch so replay miss
+// classification can recognize a rare periodic HTTP background poll that had
+// zero recordings in the set.
+type BackgroundHTTPRule struct {
+	ID     string `json:"id,omitempty"`
+	Method string `json:"method"`
+	Host   string `json:"host"`
+	Path   string `json:"path"`
+}
+
+// CloneBackgroundHTTPRules returns a copy of rules so callers and the mock
+// manager share no mutable slice.
+func CloneBackgroundHTTPRules(rules []BackgroundHTTPRule) []BackgroundHTTPRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	return slices.Clone(rules)
 }
 
 // CloneBackgroundMongoRules returns a deep copy of rules so callers and the
@@ -943,6 +970,10 @@ type MockFilterParams struct {
 	// kind: background Mongo rules for the staged set
 	// (ScopeTableReq.BackgroundMongo), read-only for miss classification.
 	BackgroundMongoRules []BackgroundMongoRule `json:"backgroundMongoRules,omitempty"`
+	// BackgroundHTTPRules carries non-once, non-chained, non-due read-only
+	// declared kind: background HTTP rules for the staged set
+	// (ScopeTableReq.BackgroundHTTP), read-only for miss classification.
+	BackgroundHTTPRules []BackgroundHTTPRule `json:"backgroundHTTPRules,omitempty"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase

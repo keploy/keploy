@@ -596,6 +596,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 			return ln
 		}
 		why := instantNotClock
+		clientUnread := false
 		switch {
 		case rt.names != lt.names:
 			why = instantFormChangedWhy(rt.names, lt.names)
@@ -603,6 +604,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 			why = timeOfDayClientTestWhy
 		case dc.clientTests:
 			why = clientTestWhy("", w != nil)
+			clientUnread = true
 		case inClockRange(rt.at) && inClockRange(lt.at) && leadMoved(rt.at, lt.at, rt.res, lt.res, false):
 			// Moved by the lead, as a read made after its call would
 			// (readNoLaterThan): the reason says so, never that it did
@@ -616,6 +618,9 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		// the clock all the same, checked at every replay (noWindowRead).
 		if !dc.noWindowRead(rt, lt, w, at) {
 			ln.Kind, ln.Why = KindUnaccounted, why
+			if clientUnread {
+				ln.typedUnreadWhy = why
+			}
 			return ln
 		}
 		// Where keploy cannot tell which clock the application reads, no
