@@ -1987,7 +1987,7 @@ func ranCalls(served []Earlier, o Order) []Earlier {
 			}
 		}
 		if seen != nil {
-			out = append(out, Earlier{Mock: e.Mock, At: e.At, Run: true, Seen: seen, noTime: e.noTime, Payload: o.orderOf(e.Payload)})
+			out = append(out, Earlier{Mock: e.Mock, Kind: e.Kind, At: e.At, Run: true, Seen: seen, noTime: e.noTime, Payload: o.orderOf(e.Payload)})
 		}
 	}
 	return out

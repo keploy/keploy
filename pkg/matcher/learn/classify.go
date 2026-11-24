@@ -91,6 +91,11 @@ type Seen struct {
 // leaf by leaf: a variable found there has a place a runtime can bind it at.
 type Earlier struct {
 	Mock string
+	// Kind is the mock protocol kind (e.g. models.HTTP, models.Mongo) set by
+	// the adapter that served the exchange, preserved across start-up and
+	// ranCalls summaries so downstream adapters do not have to infer protocol
+	// from surviving leaf paths. Empty when unspecified or on unread stubs.
+	Kind models.Kind
 	// At is when the mock's request was recorded. One recorded after the
 	// call gave the recorded application nothing before the call: it is read
 	// as a recording made after the call is, which only what F served there

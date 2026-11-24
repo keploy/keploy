@@ -3413,7 +3413,7 @@ func (n learnNoise) unmaskedShape(live httpParts) learn.Shape {
 // back where a rule reads it and kept in the set's bounded store, so the
 // exchanges a test and its start-up keep do not hold every answer's text.
 func earlierOf(dc *learn.DriftCache, m, recorded *models.Mock, rec, live learn.Shape, served *models.Mock, own bool) learn.Earlier {
-	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own, Payload: lazyRaw(dc, m, true)}
+	e := learn.Earlier{Mock: m.Name, Kind: models.HTTP, At: m.Spec.ReqTimestampMock, Own: own, Payload: lazyRaw(dc, m, true)}
 	m = recorded
 	jsonReq := rec.Fixed["body"] == "json"
 	for p, r := range rec.Leaves {
