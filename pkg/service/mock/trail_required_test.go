@@ -125,7 +125,7 @@ func TestATrailedTestKeploySawMissStaysFailed(t *testing.T) {
 	require.Equal(t, models.ScopeOutcomeFailed, got[0].Outcome)
 	require.False(t, got[0].Evidence.Unread, "a miss keploy saw keeps the test's verdict")
 	require.Len(t, got[0].Evidence.Misses, 1)
-	require.Equal(t, "keploy: a miss; "+trailsUnreadReason, got[0].Evidence.Reason)
+	require.Equal(t, "keploy: a miss\n"+trailsUnreadReason, got[0].Evidence.Reason)
 	require.True(t, got[1].Evidence.Unread, "no miss: keploy could not tell")
 	require.Equal(t, trailsUnreadReason, got[1].Evidence.Reason)
 }

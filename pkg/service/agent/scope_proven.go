@@ -2318,7 +2318,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		// miss keploy saw is definite, and the test stays failed on it, the
 		// close named in its reason, never in what leaves it unjudged.
 		notJudged = notJudged.Without(models.CaptureLossAppBytesUntold)
-		ev.Reason = strings.TrimSpace(ev.Reason + " " + fmt.Sprintf("keploy also cannot tell whether bytes the application wrote to %d connection(s) this test used were on their way when keploy's proxy closed them; the call keploy saw miss fails the test whatever they held.", untold))
+		ev.Reason = strings.TrimSpace(ev.Reason + "\n" + fmt.Sprintf("keploy also cannot tell whether bytes the application wrote to %d connection(s) this test used were on their way when keploy's proxy closed them; the call keploy saw miss fails the test whatever they held.", untold))
 		if len(judged) == 0 && len(notJudged) == 0 {
 			return ev, outcome
 		}
@@ -2328,7 +2328,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		if ev.Reason == "" {
 			ev.Reason = "keploy: " + notJudged.NotJudgedText() + "."
 		} else {
-			ev.Reason = strings.TrimSpace(ev.Reason + " Also " + notJudged.NotJudgedText() + ".")
+			ev.Reason = strings.TrimSpace(ev.Reason + "\nAlso " + notJudged.NotJudgedText() + ".")
 		}
 		return ev, outcome
 	}
@@ -3006,7 +3006,10 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // the replayed set in each command it names (keploy mock quarantine, keploy
 // mock derive --remove), so the command acts on the set that failed
 // (SetScopeSkips); none, and they carry no flags. A set of Keploy Cloud's
-// recordings is told no remove command (authoredFix).
+// recordings is told no remove command (authoredFix). Each command ends its
+// line, after the sentence that introduces it, so no punctuation of the
+// text touches its last word: pasted as printed, a shell reads every flag
+// value as the set's, not with a period or a semicolon on it.
 func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string, set scopeSet) string {
 	var what []string
 	for _, c := range ev.Incomplete {
@@ -3109,7 +3112,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		head += " "
 	}
 	flags := quoteFlags(set.flags)
-	quarantine := fmt.Sprintf("If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\"%s.", shellQuote(id), flags)
+	quarantine := fmt.Sprintf("If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\"%s", shellQuote(id), flags)
 	if len(ev.Misses) == 0 && len(authored) == len(ev.Unconsumed) {
 		// Only authored mocks were left unmade: a re-record keeps them.
 		return RunnableText(head + authoredFix(id, authored, flags, set.cloud) + "\n" + quarantine)
@@ -3118,16 +3121,16 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	if len(authored) > 0 {
 		fix = authoredFix(id, authored, flags, set.cloud) + "\n"
 	}
-	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n%s%s",
+	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\"\n%s%s",
 		head, id, fix, quarantine))
 }
 
 // authoredFix is what a test (id) that never called its authored mocks
 // (names) is told: a re-record keeps them, the command that takes each out,
-// with the set's flags (quoteFlags), and that a call the test now makes
-// differently is authored again. A set of Keploy Cloud's recordings (cloud)
-// is told no command: keploy mock derive refuses them, so it is told why,
-// and its quarantine line is what it can run.
+// with the set's flags (quoteFlags), each on a line of its own, and that a
+// call the test now makes differently is authored again. A set of Keploy
+// Cloud's recordings (cloud) is told no command: keploy mock derive refuses
+// them, so it is told why, and its quarantine line is what it can run.
 func authoredFix(id string, names []string, flags string, cloud bool) string {
 	if cloud {
 		return "A re-record keeps an authored mock, and keploy mock derive takes one out only of a set on disk, not of Keploy Cloud's recordings."
@@ -3136,8 +3139,8 @@ func authoredFix(id string, names []string, flags string, cloud bool) string {
 	for _, n := range names {
 		cmds = append(cmds, "keploy mock derive --remove "+shellQuote(id+"/"+n)+flags)
 	}
-	return "A re-record keeps an authored mock. If the test no longer makes its call, remove it: " + strings.Join(cmds, "; ") +
-		". If the call changed, derive or generate it again into this test."
+	return "A re-record keeps an authored mock. If the test no longer makes its call, remove it:\n" + strings.Join(cmds, "\n") +
+		"\nIf the call changed, derive or generate it again into this test."
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the
