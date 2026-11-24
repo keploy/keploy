@@ -99,16 +99,17 @@ func (m *MockManager) appStartRearmableLocked() error {
 // every stateful cursor starts over, as the agent starts them over at the
 // set's staging (ResetStatefulCursors). What it consumed as it started of the
 // carry-over mocks is forgotten (bootTaken), and so are its serves
-// (servedCount, the round's takes), which HasUnservedRecording reads. What
-// the set's staging installed beside the trees stays as it is: the startup
-// cutoff and the recorded windows, the exact view the agent installed and the
-// pool it names, the background rules, the worker scope, the recording
-// sources. Under the proven switch, what the earlier instance's start-up
-// bound and served is not the new one's: as the set's own Mock does before
-// its staging, the learn step begins a new set (the Proxy's re-arm hands that
-// step, rearmAppStart), and a new variable set begins. What the earlier
-// instance consumed stays in the consumed history the replay drains: the new
-// instance consumes the same.
+// (servedCount, the round's takes), which HasUnservedRecording reads, and,
+// with the switch off, its spends of the set's background
+// (consumeUnsetBackground). What the set's staging installed beside the
+// trees stays as it is: the startup cutoff and the recorded windows, the
+// exact view the agent installed and the pool it names, the background
+// rules, the worker scope, the recording sources. Under the proven switch,
+// what the earlier instance's start-up bound and served is not the new one's:
+// as the set's own Mock does before its staging, the learn step begins a new
+// set (the Proxy's re-arm hands that step, rearmAppStart), and a new variable
+// set begins. What the earlier instance consumed stays in the consumed
+// history the replay drains: the new instance consumes the same.
 //
 // It refuses once a test of the set has run (ErrSetStarted): the test's
 // recordings are that test's, served once, and a set's start served again
@@ -159,6 +160,12 @@ func (m *MockManager) rearmAppStart(learnNewSet func() error, set uint64) error 
 	}
 	start := m.appStart
 	m.forgetAllBootTaken()
+	// With the switch off, a pool recording of the set's background that the
+	// earlier instance consumed as it started is spent for the background
+	// (consumeUnsetBackground): a call of the new instance that races into
+	// the first test would be refused it. The background stays as the set
+	// named it, every one of its recordings unspent.
+	m.exact.bg.Load().forgetSpends()
 	m.consumedMu.Lock()
 	if m.servedCount != nil {
 		m.servedCount = make(map[string]uint64)
