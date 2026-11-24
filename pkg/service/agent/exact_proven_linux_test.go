@@ -165,6 +165,12 @@ func (p *servingProxy) noteMiss(err error) {
 // and body the app got.
 func (p *servingProxy) call(t *testing.T, path string) (int, string) {
 	t.Helper()
+	return p.callWith(t, path, "")
+}
+
+// callWith is call with headers (each "Name: value\r\n") sent after Host.
+func (p *servingProxy) callWith(t *testing.T, path, headers string) (int, string) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer ln.Close()
@@ -179,7 +185,7 @@ func (p *servingProxy) call(t *testing.T, path string) (int, string) {
 	go func() {
 		_ = httpparser.New(zap.NewNop()).MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Port: 18093}, p.mm, models.OutgoingOptions{})
 	}()
-	_, err = io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:18093\r\n\r\n")
+	_, err = io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:18093\r\n"+headers+"\r\n")
 	require.NoError(t, err)
 	resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil)
 	require.NoError(t, err)

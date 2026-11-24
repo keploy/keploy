@@ -1,6 +1,9 @@
 package models
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // StartupDeclarable reports whether a call identical to m, made in a test's
 // window, can be declared a call every test may make, so that m, a plain
@@ -12,9 +15,13 @@ import "sync"
 // sessionCalls entry then declares it (Mock.DeclaredSessionCall), and one
 // that states none no entry can. Any other is not: a plain startup:
 // recording of it is the set's background in a test's window too, as in
-// v3.7.18, since its user has no way to declare the call.
+// v3.7.18, since its user has no way to declare the call. Nor is an HTTP or
+// HTTP/2 recording whose request names an AWS JSON API's action (an
+// X-Amz-Target header: DynamoDB, SQS, Kinesis), whatever rule system is
+// registered: such calls share one method and path, so a sessionCalls entry
+// cannot name one of them apart from the others.
 func StartupDeclarable(m *Mock) bool {
-	if m == nil {
+	if m == nil || namesAWSTarget(m) {
 		return false
 	}
 	startupDeclarable.mu.RLock()
@@ -65,4 +72,23 @@ func RegisterStartupDeclarableKinds(kinds ...Kind) (unregister func()) {
 var startupDeclarable struct {
 	mu    sync.RWMutex
 	kinds map[Kind]int
+}
+
+// namesAWSTarget reports whether m is an HTTP or HTTP/2 recording whose
+// request carries an X-Amz-Target header (an AWS JSON API's action), its
+// name read case-insensitively.
+func namesAWSTarget(m *Mock) bool {
+	var header map[string]string
+	switch {
+	case m.Kind == HTTP && m.Spec.HTTPReq != nil:
+		header = m.Spec.HTTPReq.Header
+	case m.Kind == HTTP2 && m.Spec.HTTP2Req != nil:
+		header = m.Spec.HTTP2Req.Headers
+	}
+	for k := range header {
+		if strings.EqualFold(k, "X-Amz-Target") {
+			return true
+		}
+	}
+	return false
 }

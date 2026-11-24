@@ -159,6 +159,16 @@ func TestPlainStartupNamesAreTheBackgroundLessTheWorkerScope(t *testing.T) {
 	require.Len(t, recs, 1)
 	require.False(t, recs[0].Startup, "an HTTP recording with no stated lifetime was marked plain startup")
 
+	// Nor is one that names an AWS JSON API's action (X-Amz-Target, its
+	// name in any case): no sessionCalls entry can narrow by it.
+	aws := pingMock("a1", "/", "a", t0)
+	aws.Spec.Metadata = map[string]string{"type": string(models.HTTPClient), models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	aws.Spec.HTTPReq.Header["x-amz-target"] = "AmazonSQS.ReceiveMessage"
+	recs, err = backgroundRecordingsOf([]string{"a1"}, []string{"a1"}, [][]*models.Mock{{aws}}, nil)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	require.False(t, recs[0].Startup, "an HTTP recording naming an AWS JSON API's action was marked plain startup")
+
 	// A recording of a kind no one can declare (Mongo, until a rule system
 	// registers it) is never marked.
 	base := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
@@ -317,11 +327,12 @@ func TestMockReplayDeclaredStartupCallIsServedToTheTestUnderTheSwitch(t *testing
 // So too in a set served by today's rules, which shows the pool in no test.
 // A recording keploy test names in no StartupMocks (covered: a declared or
 // worker: one) stays the background's: its repeat is a background miss; so
-// does one whose lifetime its recorder did not state, which no sessionCalls
-// entry can declare (models.StartupDeclarable), as in v3.7.18.
+// does one whose lifetime its recorder did not state, and one that names an
+// AWS JSON API's action (X-Amz-Target), which no sessionCalls entry can
+// declare (models.StartupDeclarable), as in v3.7.18.
 // Mutation: drop the finder's outside-tests flag or the note's read of it,
 // ask the set's background rules for the mark, or mark an undeclarable
-// recording.
+// recording (no stated lifetime, an AWS JSON API's action).
 func TestKeployTestPlainStartupRepeatIsTheTestsOwnMissNamingSessionCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -332,12 +343,16 @@ func TestKeployTestPlainStartupRepeatIsTheTestsOwnMissNamingSessionCalls(t *test
 		// unstated leaves mock-0's lifetime unstated, as a recorder before
 		// lifetimes did: no sessionCalls entry can declare it.
 		unstated bool
-		own      bool
+		// awsTarget gives mock-0's request an X-Amz-Target header (an AWS
+		// JSON API's action), which no sessionCalls entry can narrow by.
+		awsTarget bool
+		own       bool
 	}{
 		{name: "plain", startup: []string{"mock-0"}, rules: models.RecordedWithS12Routing, own: true},
 		{name: "plain, today's rules", startup: []string{"mock-0"}, own: true},
 		{name: "covered", rules: models.RecordedWithS12Routing},
 		{name: "plain, lifetime unstated", startup: []string{"mock-0"}, rules: models.RecordedWithS12Routing, unstated: true},
+		{name: "plain, AWS JSON API action", startup: []string{"mock-0"}, rules: models.RecordedWithS12Routing, awsTarget: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -348,6 +363,9 @@ func TestKeployTestPlainStartupRepeatIsTheTestsOwnMissNamingSessionCalls(t *test
 			rates := statedRates("mock-0")
 			if tc.unstated {
 				rates = pingMock("mock-0", "/rates", "rates", t0)
+			}
+			if tc.awsTarget {
+				rates.Spec.HTTPReq.Header["X-Amz-Target"] = "DynamoDB_20120810.DescribeTable"
 			}
 			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
 				rates,
@@ -360,12 +378,18 @@ func TestKeployTestPlainStartupRepeatIsTheTestsOwnMissNamingSessionCalls(t *test
 				StartupMocks:           tc.startup,
 				Exact:                  &models.ExactServing{Stage: true, Background: tc.rules, Pool: []string{"mock-0"}, Order: []string{"test-1"}},
 			}))
-			code, body := p.call(t, "/rates")
+			callRates := func() (int, string) {
+				if tc.awsTarget {
+					return p.callWith(t, "/rates", "X-Amz-Target: DynamoDB_20120810.DescribeTable\r\n")
+				}
+				return p.call(t, "/rates")
+			}
+			code, body := callRates()
 			require.Equal(t, 200, code, "the start-up call was not answered between tests: %s", body)
 			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}))
 			code, body = p.call(t, "/b")
 			require.Equal(t, 200, code, "test-1's own call: %s", body)
-			code, body = p.call(t, "/rates")
+			code, body = callRates()
 			require.Equal(t, 502, code, "test-1 was answered the spent start-up recording: %s", body)
 			misses, err := p.GetMockErrors(ctx)
 			require.NoError(t, err)
@@ -433,4 +457,35 @@ func TestABackgroundRepeatInATestsWindowIsListedAsItsBackgroundMiss(t *testing.T
 	require.Equal(t, "GET /rates", ev.Background[0].ActualSummary)
 	require.NotNil(t, ev.Background[0].Repeat)
 	require.Equal(t, models.RepeatBackgroundWorker, ev.Background[0].Repeat.Background)
+}
+
+// A background repeat read at a test's end that was made outside the test's
+// window (here, one the proxy stamped before the test began) is charged to no
+// test and is not listed in that test's evidence: only one made in its
+// window is its background miss.
+// Mutation: list a background repeat whatever window it was made in.
+func TestABackgroundRepeatMadeOutsideATestsWindowIsNotItsBackgroundMiss(t *testing.T) {
+	a, p := startupOwnAgent(t, startupOwn{worker: true})
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestReload"))
+	require.Nil(t, serr)
+	code, body := p.call(t, "/b")
+	require.Equal(t, 200, code, "TestReload's own call: %s", body)
+	p.mu.Lock()
+	p.misses = append(p.misses, models.UnmatchedCall{
+		Protocol: "HTTP", Kind: models.MissInTest, ActualSummary: "GET /rates", At: time.Now().Add(-time.Hour),
+		Background: true, ClosestMock: "mock-0", Repeat: &models.RepeatNote{Mock: "mock-0", Background: models.RepeatBackgroundWorker},
+	})
+	p.mu.Unlock()
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestReload", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.NotEqual(t, models.ScopeActionFail, e.Action, "a background repeat made outside TestReload's window failed it: %s", e.Reason)
+	ws, err := a.GetScopeWindows(ctx)
+	require.NoError(t, err)
+	for _, w := range ws {
+		if w.Name == "o::TestReload" && w.Evidence != nil {
+			require.Empty(t, w.Evidence.Background, "a background repeat made outside TestReload's window is listed as its background miss")
+			require.Empty(t, w.Evidence.Misses)
+		}
+	}
 }
