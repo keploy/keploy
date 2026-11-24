@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -176,6 +177,11 @@ type provenWire struct {
 	// the table had none.
 	background       []string
 	stagedBackground []string
+	// backgroundMongo is the set's declared kind: background Mongo rules
+	// (models.ScopeTableReq.BackgroundMongo), forwarded to the proxy on
+	// staging for miss classification of rare unrecorded periodic sweepers.
+	backgroundMongo       []models.BackgroundMongoRule
+	stagedBackgroundMongo []models.BackgroundMongoRule
 	// startupRules is true when the replay's set carries at least one worker:
 	// entry placed by a declared kind: background rule with startup: true
 	// (models.ScopeTableReq.StartupRules). Plain recorded startup: entries do
@@ -1112,6 +1118,25 @@ func (a *Agent) SetScopeStartupRules(ctx context.Context, on bool) error {
 	defer a.wire.unlock()
 	a.provenMu.Lock()
 	a.proven.startupRules = on
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeBackgroundMongo installs the set's declared kind: background Mongo
+// rules (models.ScopeTableReq.BackgroundMongo) for replay miss classification.
+// None clears any previous set's rules. A set already staged with different
+// rules is staged again before it is served.
+func (a *Agent) SetScopeBackgroundMongo(ctx context.Context, rules []models.BackgroundMongoRule) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cloned := models.CloneBackgroundMongoRules(rules)
+	a.provenMu.Lock()
+	a.proven.backgroundMongo = cloned
+	if a.proven.staged && !reflect.DeepEqual(a.proven.stagedBackgroundMongo, cloned) {
+		a.proven.staged = false
+	}
 	a.provenMu.Unlock()
 	return nil
 }

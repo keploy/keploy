@@ -440,6 +440,12 @@ type MockCmd struct {
 	// the replay does (keploy's T2 commands, unless keploy.yml asks for
 	// strict times). Off, times are decided by the clock checks alone.
 	TimeForm bool `json:"-" yaml:"-" mapstructure:"-"`
+	// BackgroundMongo carries non-once, non-chained, non-due declared
+	// kind: background Mongo rules under the proven switch
+	// (models.ScopeTableReq.BackgroundMongo) for replay miss classification
+	// when a rare periodic sweeper had zero recordings. keploy.yml does not
+	// bind this field directly: the command that runs the replay populates it.
+	BackgroundMongo []models.BackgroundMongoRule `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Contract struct {

@@ -1,0 +1,65 @@
+package mock
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+)
+
+type bgMongoInstr struct {
+	*gatedInstr
+	gotRules []models.BackgroundMongoRule
+	called   bool
+}
+
+func (f *bgMongoInstr) PushProvenTableWithStartupRules(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm, _ bool) error {
+	return f.PushProvenTable(ctx, table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background, series, sources, once, every, gates, timeForm)
+}
+
+func (f *bgMongoInstr) PushProvenTableWithBackgroundMongo(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm, startupRules bool, backgroundMongo []models.BackgroundMongoRule) error {
+	f.called = true
+	f.gotRules = models.CloneBackgroundMongoRules(backgroundMongo)
+	return f.PushProvenTableWithStartupRules(ctx, table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background, series, sources, once, every, gates, timeForm, startupRules)
+}
+
+func TestKeployMockReplayForwardsBackgroundMongoRules(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(x2Mappings), 0o644))
+	mongo := func(name string) *models.Mock {
+		return &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.Mongo, Name: name}
+	}
+	db := namedMockDB{mocks: []*models.Mock{mongo("mock-0"), mongo("mock-326"), mongo("mock-463"), mongo("mock-3733"), mongo("mock-3734"), mongo("mock-3735"), mongo("mock-dup"), httpMock("mock-pat", "GET"), httpMock("mock-put", "PUT")}}
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, nil, nil
+	})
+	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
+
+	want := []models.BackgroundMongoRule{{
+		ID:          "ui-join-backfill-index-ready",
+		DB:          "api-server",
+		Command:     "listIndexes",
+		Collections: []string{"uiTestSetJoins", "testsets"},
+	}}
+
+	instr := &bgMongoInstr{gatedInstr: &gatedInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	cfg.Mock.BackgroundMongo = want
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+
+	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.True(t, instr.called, "expected Replay to call PushProvenTableWithBackgroundMongo")
+	require.Equal(t, want, instr.gotRules)
+}

@@ -1560,7 +1560,9 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	gates := seriesGates(served, worker, ordered)
 	startupRules := hasDeclaredStartupRule(mp)
 	var pushErr error
-	if pp2, ok := m.instrumentation.(ProvenTableWithStartupRulesPusher); ok {
+	if pp3, ok := m.instrumentation.(ProvenTableWithBackgroundMongoPusher); ok {
+		pushErr = pp3.PushProvenTableWithBackgroundMongo(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), ordered, declaredSources(served, loaded), once, every, gates, m.config.Mock.TimeForm, startupRules, m.config.Mock.BackgroundMongo)
+	} else if pp2, ok := m.instrumentation.(ProvenTableWithStartupRulesPusher); ok {
 		pushErr = pp2.PushProvenTableWithStartupRules(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), ordered, declaredSources(served, loaded), once, every, gates, m.config.Mock.TimeForm, startupRules)
 	} else {
 		pushErr = pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), ordered, declaredSources(served, loaded), once, every, gates, m.config.Mock.TimeForm)

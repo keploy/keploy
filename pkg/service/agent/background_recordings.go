@@ -13,6 +13,8 @@ import (
 )
 
 // seedBackgroundRecordings hands the proxy, as a set is staged, the set's
+// declared background Mongo rules (models.MockFilterParams.BackgroundMongoRules)
+// when the proxy implements BackgroundMongoRulesSeeder, and the set's
 // background recordings params names (models.MockFilterParams.BackgroundMocks)
 // with their recorded spans (backgroundRecordingsOf), read from every mock
 // the agent holds for the set: resident ones and those kept on disk, served
@@ -20,6 +22,9 @@ import (
 // whose recordings cannot be read is handed none: every miss stays its
 // test's, as before.
 func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) {
+	if ruleSeeder, ok := a.Proxy.(coreAgent.BackgroundMongoRulesSeeder); ok {
+		ruleSeeder.SeedBackgroundMongoRules(params.BackgroundMongoRules)
+	}
 	seeder, ok := a.Proxy.(coreAgent.BackgroundRecordingsSeeder)
 	if !ok {
 		return

@@ -1135,6 +1135,23 @@ func (s *scopedMockDb) BackgroundRecordingsIn(call integrations.CallRound, kind 
 
 var _ integrations.RoundBackgroundReader = (*scopedMockDb)(nil)
 
+// BackgroundMongoRules is the set's declared kind: background Mongo rules
+// whatever this view's allowlist (integrations.BackgroundMongoRuleReader).
+func (s *scopedMockDb) BackgroundMongoRules() []models.BackgroundMongoRule {
+	return integrations.BackgroundMongoRulesOf(s.MockMemDb)
+}
+
+// BackgroundMongoRulesIn is the declared kind: background Mongo rules of the
+// set call was marked in (integrations.RoundBackgroundMongoRuleReader).
+func (s *scopedMockDb) BackgroundMongoRulesIn(call integrations.CallRound) []models.BackgroundMongoRule {
+	return integrations.BackgroundMongoRulesAt(s.MockMemDb, call)
+}
+
+var (
+	_ integrations.BackgroundMongoRuleReader      = (*scopedMockDb)(nil)
+	_ integrations.RoundBackgroundMongoRuleReader = (*scopedMockDb)(nil)
+)
+
 // BoundValuesIn is the bound values of the set call was marked in
 // (integrations.RoundBoundReader): the store's, as Variables and TrailOf.
 func (s *scopedMockDb) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {

@@ -191,6 +191,14 @@ type ProvenTableWithStartupRulesPusher interface {
 	PushProvenTableWithStartupRules(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm, startupRules bool) error
 }
 
+// ProvenTableWithBackgroundMongoPusher is an optional extension of
+// ProvenTableWithStartupRulesPusher that also forwards
+// models.ScopeTableReq.BackgroundMongo.
+type ProvenTableWithBackgroundMongoPusher interface {
+	ProvenTableWithStartupRulesPusher
+	PushProvenTableWithBackgroundMongo(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm, startupRules bool, backgroundMongo []models.BackgroundMongoRule) error
+}
+
 type MappingReader interface {
 	GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
 }

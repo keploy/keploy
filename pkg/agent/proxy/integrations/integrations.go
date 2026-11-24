@@ -1320,6 +1320,39 @@ func BackgroundRecordingsAt(db MockMemDb, call CallRound, kind models.Kind) []mo
 	return BackgroundRecordingsOf(db, kind)
 }
 
+// BackgroundMongoRuleReader is an optional MockMemDb capability: the staged
+// set's declared kind: background Mongo rules (models.ScopeTableReq.BackgroundMongo),
+// read-only for miss classification when a rare periodic sweeper never fired
+// during record.
+type BackgroundMongoRuleReader interface {
+	BackgroundMongoRules() []models.BackgroundMongoRule
+}
+
+// RoundBackgroundMongoRuleReader is an optional MockMemDb capability: the
+// declared kind: background Mongo rules of the set call was marked in.
+type RoundBackgroundMongoRuleReader interface {
+	BackgroundMongoRulesIn(call CallRound) []models.BackgroundMongoRule
+}
+
+// BackgroundMongoRulesOf returns db's current set's declared background Mongo
+// rules, or nil when db does not expose them.
+func BackgroundMongoRulesOf(db MockMemDb) []models.BackgroundMongoRule {
+	if r, ok := db.(BackgroundMongoRuleReader); ok {
+		return r.BackgroundMongoRules()
+	}
+	return nil
+}
+
+// BackgroundMongoRulesAt returns db's declared background Mongo rules of the
+// set call was marked in (RoundBackgroundMongoRuleReader); of a store that
+// keeps no earlier set's, those of the set staged now.
+func BackgroundMongoRulesAt(db MockMemDb, call CallRound) []models.BackgroundMongoRule {
+	if r, ok := db.(RoundBackgroundMongoRuleReader); ok {
+		return r.BackgroundMongoRulesIn(call)
+	}
+	return BackgroundMongoRulesOf(db)
+}
+
 // BoundValues is what a set's test variables had bound, as a background
 // miss reads them (Mongo's markBackground): the bindings the variable scope
 // the call was marked in made itself (variables.Table.OwnIn, of the mark's

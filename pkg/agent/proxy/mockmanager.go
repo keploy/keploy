@@ -483,6 +483,11 @@ type MockManager struct {
 	// (BackgroundRecordingsIn). Stored under swapMu, read lock-free.
 	background       atomic.Pointer[backgroundInstall]
 	backgroundSeeded map[models.Kind][]models.BackgroundRecording
+	// backgroundMongo is the current set's declared kind: background Mongo rules
+	// (SeedBackgroundMongoRules, BackgroundMongoRules), following the exact same
+	// set-boundary parking and epoch-history semantics as background.
+	backgroundMongo       atomic.Pointer[backgroundMongoInstall]
+	backgroundMongoSeeded []models.BackgroundMongoRule
 	// boundKept is the bound values of the set whose variables the last new
 	// set forgot (NewVariableSet), for that set's calls keploy decides after
 	// (BoundValuesIn), and scopeEnded the scope table's trails and tests the
@@ -972,6 +977,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.testWindowsSeeded = nil
 	m.placeWindowsSeeded = nil
 	m.backgroundSeeded = nil
+	m.backgroundMongoSeeded = nil
 	m.swapMu.Unlock()
 
 	// NOTE: the window bits and the startup-init cutoff are deliberately NOT
@@ -1900,6 +1906,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		if m.boundaryPending {
 			m.installBackgroundLocked(m.backgroundSeeded, m.stagingEpoch.Load()+1)
 			m.backgroundSeeded = nil
+			m.installBackgroundMongoLocked(m.backgroundMongoSeeded, m.stagingEpoch.Load()+1)
+			m.backgroundMongoSeeded = nil
 		}
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
@@ -4885,9 +4893,75 @@ func (in *backgroundInstall) of(kind models.Kind) []models.BackgroundRecording {
 }
 
 var (
-	_ integrations.BackgroundRecordingReader = (*MockManager)(nil)
-	_ integrations.RoundBackgroundReader     = (*MockManager)(nil)
+	_ integrations.BackgroundRecordingReader      = (*MockManager)(nil)
+	_ integrations.RoundBackgroundReader          = (*MockManager)(nil)
+	_ integrations.BackgroundMongoRuleReader      = (*MockManager)(nil)
+	_ integrations.RoundBackgroundMongoRuleReader = (*MockManager)(nil)
 )
+
+// backgroundMongoInstall is one install of a set's declared kind: background
+// Mongo rules, in force from staging epoch from on, plus the previous set's.
+type backgroundMongoInstall struct {
+	from  uint64
+	rules []models.BackgroundMongoRule
+	prev  *backgroundMongoInstall
+}
+
+// SeedBackgroundMongoRules installs the set's declared kind: background Mongo
+// rules (models.MockFilterParams.BackgroundMongoRules), read-only for miss
+// classification: at once, or parked at a set boundary until the next staging
+// call installs its trees. nil or empty installs none.
+func (m *MockManager) SeedBackgroundMongoRules(rules []models.BackgroundMongoRule) {
+	cloned := models.CloneBackgroundMongoRules(rules)
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	if m.boundaryPending {
+		m.backgroundMongoSeeded = cloned
+		return
+	}
+	m.installBackgroundMongoLocked(cloned, m.stagingEpoch.Load())
+}
+
+func (m *MockManager) installBackgroundMongoLocked(rules []models.BackgroundMongoRule, from uint64) {
+	in := &backgroundMongoInstall{from: from, rules: rules}
+	if cur := m.backgroundMongo.Load(); cur != nil {
+		if cur.from < from {
+			in.prev = &backgroundMongoInstall{from: cur.from, rules: cur.rules}
+		} else if cur.prev != nil {
+			in.prev = cur.prev
+		}
+	}
+	m.backgroundMongo.Store(in)
+}
+
+// BackgroundMongoRules returns the current set's declared kind: background
+// Mongo rules (integrations.BackgroundMongoRuleReader). The returned slice and
+// its entries are shared: callers read them and mutate nothing.
+func (m *MockManager) BackgroundMongoRules() []models.BackgroundMongoRule {
+	if in := m.backgroundMongo.Load(); in != nil {
+		return in.rules
+	}
+	return nil
+}
+
+// BackgroundMongoRulesIn returns the declared kind: background Mongo rules of
+// the set in force in the staging epoch call was marked in. The returned slice
+// and its entries are shared: callers read them and mutate nothing.
+func (m *MockManager) BackgroundMongoRulesIn(call integrations.CallRound) []models.BackgroundMongoRule {
+	in := m.backgroundMongo.Load()
+	if !call.Read() {
+		if in != nil {
+			return in.rules
+		}
+		return nil
+	}
+	for ; in != nil; in = in.prev {
+		if in.from <= call.Epoch() {
+			return in.rules
+		}
+	}
+	return nil
+}
 
 // RecordedWindows returns the current set's recorded test windows, or nil when
 // the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only

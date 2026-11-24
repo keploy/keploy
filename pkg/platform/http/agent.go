@@ -5874,6 +5874,13 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 // (models.ScopeTableReq.StartupRules) set when the set carries a declared
 // startup-capable background rule.
 func (a *AgentClient) PushProvenTableWithStartupRules(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm, startupRules bool) (retErr error) {
+	return a.PushProvenTableWithBackgroundMongo(ctx, table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background, series, sources, once, every, gates, timeForm, startupRules, nil)
+}
+
+// PushProvenTableWithBackgroundMongo is PushProvenTableWithStartupRules with
+// backgroundMongo (models.ScopeTableReq.BackgroundMongo) forwarded for miss
+// classification of rare unrecorded periodic background sweepers.
+func (a *AgentClient) PushProvenTableWithBackgroundMongo(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm, startupRules bool, backgroundMongo []models.BackgroundMongoRule) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
@@ -5881,12 +5888,13 @@ func (a *AgentClient) PushProvenTableWithStartupRules(ctx context.Context, table
 		if retErr == nil && a.session().recording() {
 			t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background), maps.Clone(series), maps.Clone(sources), slices.Clone(once)
 			ev, ga := maps.Clone(every), maps.Clone(gates)
+			bgm := models.CloneBackgroundMongoRules(backgroundMongo)
 			a.session().record(stepScopeTable, func(c context.Context) error {
-				return a.PushProvenTableWithStartupRules(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, ev, ga, timeForm, startupRules)
+				return a.PushProvenTableWithBackgroundMongo(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, ev, ga, timeForm, startupRules, bgm)
 			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, Every: every, Gates: gates, TimeForm: timeForm, StartupRules: startupRules})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, Every: every, Gates: gates, TimeForm: timeForm, StartupRules: startupRules, BackgroundMongo: backgroundMongo})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

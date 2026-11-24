@@ -933,6 +933,14 @@ type BackgroundRecordingsSeeder interface {
 	SeedBackgroundRecordings(recs []models.BackgroundRecording)
 }
 
+// BackgroundMongoRulesSeeder is the optional extension implemented by proxies
+// whose mock manager can be handed the staged set's declared kind: background
+// Mongo rules (models.MockFilterParams.BackgroundMongoRules), read-only, for
+// miss classification of rare periodic sweepers that never fired during record.
+type BackgroundMongoRulesSeeder interface {
+	SeedBackgroundMongoRules(rules []models.BackgroundMongoRule)
+}
+
 // StatefulCursorResetter is the optional extension implemented by proxies whose
 // mock manager keeps per-request cursors for stateful dependency replay (serving
 // successive recorded responses in record order). The agent calls it once per

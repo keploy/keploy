@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -669,6 +670,83 @@ type ScopeTableReq struct {
 	// startup: true (MockEntry.Rule != "" && MockEntry.Startup). Plain
 	// recorded startup: entries do not set this flag.
 	StartupRules bool `json:"startupRules,omitempty"`
+	// BackgroundMongo carries, under the proven switch, non-once, non-chained,
+	// non-due declared kind: background Mongo rules so replay miss
+	// classification can recognize a rare periodic sweeper that never fired
+	// during record (and therefore has no recording in Background). Serving
+	// is unaffected and always fails closed.
+	BackgroundMongo []BackgroundMongoRule `json:"backgroundMongo,omitempty"`
+}
+
+// BackgroundMongoWhere is one condition of a declared kind: background Mongo
+// rule (BackgroundMongoRule.Where): the value at Field equals Equals (when
+// Prefix is empty) or is a string starting with Prefix. Equals holds JSON
+// scalars (nil, bool, string, number) or []any of them.
+type BackgroundMongoWhere struct {
+	Field  string `json:"field"`
+	Equals any    `json:"equals"`
+	Prefix string `json:"prefix,omitempty"`
+}
+
+// BackgroundMongoRule is one non-once, non-chained, non-due declared
+// kind: background Mongo rule forwarded under the proven switch so replay miss
+// classification can recognize a rare periodic sweeper that had zero
+// recordings in the set.
+type BackgroundMongoRule struct {
+	ID          string                 `json:"id,omitempty"`
+	DB          string                 `json:"db"`
+	Command     string                 `json:"command"`
+	Collections []string               `json:"collections"`
+	Where       []BackgroundMongoWhere `json:"where,omitempty"`
+}
+
+// CloneBackgroundMongoRules returns a deep copy of rules so callers and the
+// mock manager share no mutable slices or maps.
+func CloneBackgroundMongoRules(rules []BackgroundMongoRule) []BackgroundMongoRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]BackgroundMongoRule, len(rules))
+	for i, r := range rules {
+		r.Collections = slices.Clone(r.Collections)
+		if len(r.Where) > 0 {
+			where := make([]BackgroundMongoWhere, len(r.Where))
+			for j, w := range r.Where {
+				w.Equals = cloneJSONValue(w.Equals)
+				where[j] = w
+			}
+			r.Where = where
+		}
+		out[i] = r
+	}
+	return out
+}
+
+func cloneJSONValue(v any) any {
+	switch x := v.(type) {
+	case []any:
+		cp := make([]any, len(x))
+		for i := range x {
+			cp[i] = cloneJSONValue(x[i])
+		}
+		return cp
+	case map[string]any:
+		cp := make(map[string]any, len(x))
+		for k, val := range x {
+			cp[k] = cloneJSONValue(val)
+		}
+		return cp
+	case map[any]any:
+		cp := make(map[string]any, len(x))
+		for k, val := range x {
+			if ks, ok := k.(string); ok {
+				cp[ks] = cloneJSONValue(val)
+			}
+		}
+		return cp
+	default:
+		return v
+	}
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its
@@ -861,6 +939,10 @@ type MockFilterParams struct {
 	// is served differently for it. Empty: the set has none, and every miss
 	// stays its test's.
 	BackgroundMocks []string `json:"backgroundMocks,omitempty"`
+	// BackgroundMongoRules carries non-once, non-chained, non-due declared
+	// kind: background Mongo rules for the staged set
+	// (ScopeTableReq.BackgroundMongo), read-only for miss classification.
+	BackgroundMongoRules []BackgroundMongoRule `json:"backgroundMongoRules,omitempty"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase
