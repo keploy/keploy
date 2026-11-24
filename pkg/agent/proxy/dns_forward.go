@@ -107,10 +107,14 @@ func (p *Proxy) captureDNSUpstream() {
 		if err != nil {
 			continue
 		}
-		// Only drop loopback when it points at our own listener.
-		// Anything else (systemd-resolved, dnsmasq, etc.) is a real
-		// resolver we can legitimately forward to.
-		if ip.IsLoopback() && nsPort == selfPort {
+		// Only drop loopback when it points at our own listener OR when it is
+		// systemd-resolved (127.0.0.53 or its IPv4-mapped form) on the standard
+		// DNS port (53). The eBPF hooks intercept all DNS traffic on port 53
+		// and redirect it to the proxy's DNSPort, so forwarding to 127.0.0.53:53
+		// would loop. Other loopback resolvers on port 53 (dnsmasq, docker's
+		// 127.0.0.11, etc.) are legitimate and must be kept.
+		isSystemdResolved := ip.Is4() && ip.As4() == [4]byte{127, 0, 0, 53}
+		if ip.IsLoopback() && (nsPort == selfPort || (nsPort == "53" && isSystemdResolved)) {
 			p.logger.Debug("dropping self-referential loopback upstream resolver from forwarder list",
 				zap.String("server", s),
 				zap.String("port", nsPort),

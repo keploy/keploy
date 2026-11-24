@@ -203,6 +203,60 @@ func TestCaptureKeepsAZonedServerAndDropsAMappedSelfLoopback(t *testing.T) {
 	}
 }
 
+// captureDNSUpstream drops systemd-resolved (127.0.0.53) on the standard DNS port
+// (53) even when the proxy's DNSPort is different, because the eBPF hooks
+// intercept all DNS traffic on port 53 and redirect it to the proxy's DNSPort.
+// This prevents the infinite loop with systemd-resolved where the host's iptables
+// redirect port 53 to the proxy's DNSPort.
+func TestCaptureDropsSystemdResolvedOnStandardDNSPort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	// Simulate systemd-resolved: nameserver 127.0.0.53 with options port=53
+	content := "nameserver 127.0.0.53\noptions port=53\nnameserver 10.96.0.10\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig := resolvConfPath
+	resolvConfPath = path
+	t.Cleanup(func() { resolvConfPath = orig })
+
+	// Proxy DNSPort is 26789 (default), not 53
+	p := &Proxy{logger: zap.NewNop(), DNSPort: 26789}
+	p.captureDNSUpstream()
+	// 127.0.0.53 on port 53 should be dropped (self-forward via eBPF hooks)
+	// 10.96.0.10 should be kept
+	if want := []string{"10.96.0.10"}; !slices.Equal(p.dnsUpstreamServers, want) {
+		t.Fatalf("dnsUpstreamServers = %v, want %v", p.dnsUpstreamServers, want)
+	}
+	if p.dnsUpstreamPort != "53" {
+		t.Fatalf("dnsUpstreamPort = %q, want \"53\"", p.dnsUpstreamPort)
+	}
+}
+
+// captureDNSUpstream keeps other loopback resolvers on port 53 (e.g. docker's
+// 127.0.0.11 or a local dnsmasq) because they are legitimate upstreams.
+func TestCaptureKeepsOtherLoopbackOnStandardDNSPort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	// Docker's embedded resolver or local dnsmasq
+	content := "nameserver 127.0.0.11\noptions port=53\nnameserver 10.96.0.10\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig := resolvConfPath
+	resolvConfPath = path
+	t.Cleanup(func() { resolvConfPath = orig })
+
+	p := &Proxy{logger: zap.NewNop(), DNSPort: 26789}
+	p.captureDNSUpstream()
+	// 127.0.0.11 on port 53 should be kept (legitimate upstream)
+	// 10.96.0.10 should be kept
+	if want := []string{"127.0.0.11", "10.96.0.10"}; !slices.Equal(p.dnsUpstreamServers, want) {
+		t.Fatalf("dnsUpstreamServers = %v, want %v", p.dnsUpstreamServers, want)
+	}
+	if p.dnsUpstreamPort != "53" {
+		t.Fatalf("dnsUpstreamPort = %q, want \"53\"", p.dnsUpstreamPort)
+	}
+}
+
 // A resolver list that cannot be read is said, naming where keploy looked,
 // and leaves no upstream.
 func TestAnUnreadableResolverListIsSaid(t *testing.T) {
