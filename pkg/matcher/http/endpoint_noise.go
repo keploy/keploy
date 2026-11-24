@@ -1,6 +1,7 @@
 package http
 
 import (
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -19,23 +20,25 @@ func AddEndpointNoise(noise map[string]map[string][]string, rules []config.Endpo
 		return noise
 	}
 	var out map[string]map[string][]string
-	var ownBody, ownHeader map[string]bool
+	var takenBody, takenHeader map[string]bool
 	for _, r := range rules {
 		if !endpointMatches(r, string(tc.HTTPReq.Method), u) {
 			continue
 		}
 		if out == nil {
 			out = cloneNoise(noise)
-			ownBody, ownHeader = ownNoise(tc.Noise)
+			takenBody, takenHeader = ownNoise(tc.Noise)
 		}
-		for k, v := range r.Body {
-			if !ownBody[matcherUtils.ExactPath(k)] {
-				addNoise(out, "body", matcherUtils.ExactKey(k), v)
+		for _, k := range slices.Sorted(maps.Keys(r.Body)) {
+			if name := matcherUtils.ExactPath(k); !takenBody[name] {
+				takenBody[name] = true
+				addNoise(out, "body", matcherUtils.ExactKey(k), r.Body[k])
 			}
 		}
-		for k, v := range r.Header {
-			if !ownHeader[strings.ToLower(k)] {
-				addNoise(out, "header", matcherUtils.ExactKey(k), v)
+		for _, k := range slices.Sorted(maps.Keys(r.Header)) {
+			if name := strings.ToLower(k); !takenHeader[name] {
+				takenHeader[name] = true
+				addNoise(out, "header", matcherUtils.ExactKey(k), r.Header[k])
 			}
 		}
 	}

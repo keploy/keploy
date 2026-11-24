@@ -238,3 +238,18 @@ func TestATestCaseKeyThatMatchesNothingLeavesTheRuleOn(t *testing.T) {
 		}
 	}
 }
+
+func TestTheFirstRuleThatNamesAFieldDecides(t *testing.T) {
+	tc := endpointCase("GET", "http://api/apps/a9/version", `{"items":[{"version":"v1.2"}]}`)
+	for _, rules := range [][]config.EndpointNoise{
+		{{Path: "/apps/{id}/version", Body: config.Noise{"items[].version": {`^v1\.`}}}, {Method: "GET", Path: "/apps/{appId}/version", Body: config.Noise{"items.version": {}}}},
+		{{Method: "get", Path: "/apps/{id}/version/", Body: config.Noise{"$.items.version": {`^v1\.`}}}, {Path: "/apps/{id}/version", Body: config.Noise{"Items.Version": {}}}},
+	} {
+		if !matchWith(t, tc, `{"items":[{"version":"v1.3"}]}`, nil, rules) {
+			t.Fatal("a value inside the first rule's pattern failed")
+		}
+		if matchWith(t, tc, `{"items":[{"version":"v2.0"}]}`, nil, rules) {
+			t.Fatalf("a later rule widened the first one's pattern: %+v", rules)
+		}
+	}
+}
