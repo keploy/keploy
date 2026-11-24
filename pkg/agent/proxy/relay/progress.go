@@ -495,6 +495,13 @@ func (r *Relay) passedThrough(t int64, view stampView) (bool, string) {
 		return true, ""
 	}
 	if r.caughtUp(view) {
+		// Re-check the hold after caughtUp: a parser may set HoldFrom,
+		// consume its chunk, and enter Waiting between the first heldFrom
+		// look and caughtUp's Waiting/Consumed reads.
+		if held := r.heldFrom(); held != 0 && held <= t {
+			return false, fmt.Sprintf("parser holds a call it parsed, its mock not handed on, whose first chunk was captured at %s",
+				time.Unix(0, held).Format(time.RFC3339Nano))
+		}
 		return true, ""
 	}
 	return false, fmt.Sprintf("parser is working on what it took (last read %s); %s; %s",

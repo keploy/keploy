@@ -155,3 +155,49 @@ func TestWatermark_AHoldSetAsALookReadsItIsSeenWithTheReadPastIt(t *testing.T) {
 		t.Error("PendingBefore(mid): false on the next look, with the hold set")
 	}
 }
+
+// A parser that sets its hold, finishes consuming a chunk captured after the
+// window, and enters Waiting between the first heldFrom look and caughtUp must
+// still be seen as holding the window: passedThrough re-checks heldFrom after
+// caughtUp returns true.
+func TestWatermark_AHoldSetBetweenLookAndCaughtUpIsStillSeen(t *testing.T) {
+	h := newHarness(t, Config{})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+	client, dest := h.r.ClientStream(), h.r.DestStream()
+
+	h.writeClient([]byte("req"))
+	h.readDest(3)
+	first := readChunk(t, client)
+	mid := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	h.writeDest([]byte("ans"))
+	h.readClient(3)
+	awaitState(t, "the reply to reach the parser's stream", func() bool {
+		return h.r.teeD2C.acceptedBytes() == 3
+	})
+
+	fired := false
+	hook := func() {
+		if fired {
+			return
+		}
+		fired = true
+		client.HoldFrom(first.ReadAt)
+		_ = readChunk(t, dest)
+		blockInRead(t, client)
+	}
+	afterHoldLook.Store(&hook)
+	t.Cleanup(func() { afterHoldLook.Store(nil) })
+
+	if !w.PendingBefore(mid) {
+		t.Error("PendingBefore(mid): false when parser set hold, took the late chunk, and entered Waiting before caughtUp")
+	}
+	if !fired {
+		t.Fatal("setup: afterHoldLook hook never ran")
+	}
+	client.HoldFrom(time.Time{})
+	if w.PendingBefore(mid) {
+		t.Errorf("PendingBefore(mid): true after clearing the hold: %v", w.PendingOn(mid))
+	}
+}
