@@ -300,7 +300,10 @@ func TestATrailReadsATestsRecordingOnlyWhereThatTestLeftIt(t *testing.T) {
 // the delete lands in the test's own window, after the query. directivesCall
 // is that delete, its id recorded rID and fID in round F, mock-807 the
 // test's own place (served in its window) and post-query-15 the client's.
-func directivesCall(t *testing.T, rID, fID string) Input {
+// directivesCallWith builds directivesCall with explicit request/insert times:
+// insertAt < qAt models an app-minted id (CreateApp insert before client echo);
+// qAt < insertAt models a client-supplied value sent before the app's insert.
+func directivesCallWith(t *testing.T, rID, fID string, qAt, insertAt time.Time) Input {
 	t.Helper()
 	rAt := time.Date(2026, 11, 10, 13, 27, 42, 979528237, time.UTC)
 	gap := 3*time.Minute + 41*time.Second
@@ -309,8 +312,6 @@ func directivesCall(t *testing.T, rID, fID string) Input {
 			Header: map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"},
 			Body:   `{"query":"query GetSchemaCoverage($appID: String!, $baseURL: String!, $schema: String!, $branchId: String) {\n  getSchemaCoverage(appID: $appID, baseURL: $baseURL, schema: $schema, branchId: $branchId) {\n    coveragePercentage\n  }\n}\n","variables":{"appID":"` + id + `","baseURL":"http://localhost:8083","schema":"type Query { ping: String }"}}`}
 	}
-	qAt := time.Date(2026, 11, 10, 13, 27, 42, 948756071, time.UTC)
-	insertAt := time.Date(2026, 11, 10, 13, 27, 42, 945562684, time.UTC)
 	insert := Earlier{Mock: "mock-807", At: insertAt, Own: true, Payload: oPayload("mock-807", insertAt), Seen: []Seen{
 		{Side: Request, Leaf: oText("body.docs.msgs.0.appId", rID), Live: fID, Place: "body.docs.msgs.0.appId"},
 	}}
@@ -321,6 +322,13 @@ func directivesCall(t *testing.T, rID, fID string) Input {
 	return in
 }
 
+func directivesCall(t *testing.T, rID, fID string) Input {
+	t.Helper()
+	qAt := time.Date(2026, 11, 10, 13, 27, 42, 948756071, time.UTC)
+	insertAt := time.Date(2026, 11, 10, 13, 27, 42, 945562684, time.UTC)
+	return directivesCallWith(t, rID, fID, qAt, insertAt)
+}
+
 // A call no test lists (a worker: recording keploy record marked trailing a
 // test) has no client test's request among its places: a value bound there
 // is a variable of the test whose list holds the call, and none holds this
@@ -328,8 +336,11 @@ func directivesCall(t *testing.T, rID, fID string) Input {
 // variable of mock-841 bound at test case post-query-15, from a recording
 // no test lists"). It reads its words as main does: each word of the id
 // stays bound at the trailed test's insert, the run's variable, which a
-// replay keeps past the test's end. The test's own call (no trail) still
-// binds the id at the client's request, which comes first.
+// replay keeps past the test's end. When the app minted the id before the
+// client echoed it (insertAt < qAt), even the test's own call binds it at
+// mock-807; when the client sent the value first (qAt < insertAt), the test's
+// own call binds it at the client's request while worker:/startup:/other-test
+// calls still bind at mock-807.
 func TestATrailingCallIsNoCallOfItsTestsClientRequests(t *testing.T) {
 	const rID, fID = "961ad63b-9151-4789-a680-acd90efec8f2", "0b7d4c1e-2f6a-4a39-8e15-d3c9a7b5e204"
 	in := directivesCall(t, rID, fID)
@@ -353,7 +364,19 @@ func TestATrailingCallIsNoCallOfItsTestsClientRequests(t *testing.T) {
 			t.Fatalf("the trailing delete's word %q -> %q beside a value the test gave: %s, from %+v; want it read with the given, no client's request", d.Recorded, d.Full, oDescribe([]Decision{d}), d.From)
 		}
 	}
-	own := directivesCall(t, rID, fID)
+	// When mock-807 minted the id before post-query-15 echoed it, even the
+	// test's own call binds to mock-807 (not the later client echo).
+	ownAppMinted := directivesCall(t, rID, fID)
+	for _, d := range Decide(ownAppMinted) {
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-807" || d.From.Client {
+			t.Fatalf("app-minted own call's word %q -> %q: %s, from %+v; want it bound at mock-807", d.Recorded, d.Full, oDescribe([]Decision{d}), d.From)
+		}
+	}
+	// When the client sent the value before mock-807 wrote it (qAt < insertAt),
+	// the test's own call binds at the client's request.
+	clientFirstAt := time.Date(2026, 11, 10, 13, 27, 42, 942000000, time.UTC)
+	insertAt := time.Date(2026, 11, 10, 13, 27, 42, 945562684, time.UTC)
+	own := directivesCallWith(t, rID, fID, clientFirstAt, insertAt)
 	for _, d := range Decide(own) {
 		if d.Outcome != OutcomeValue || d.From.Mock != "test case post-query-15" || !d.From.Client {
 			t.Fatalf("the test's own call's word %q -> %q: %s, from %+v; want it bound at the client's request", d.Recorded, d.Full, oDescribe([]Decision{d}), d.From)
@@ -371,7 +394,7 @@ func TestATrailingCallIsNoCallOfItsTestsClientRequests(t *testing.T) {
 		{ScopeStartup, false},
 		{ScopeTest("TestAppCRUD"), false},
 	} {
-		in := directivesCall(t, rID, fID)
+		in := directivesCallWith(t, rID, fID, clientFirstAt, insertAt)
 		in.Scope = func(mock string) Scope {
 			if mock == "mock-841" {
 				return tc.scope

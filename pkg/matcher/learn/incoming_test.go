@@ -758,3 +758,361 @@ func TestTwoWorkersRequestsArrivingSwappedAreEachPlacedAtTheirOwn(t *testing.T) 
 		t.Fatalf("a request keploy could not read placed %+v; want post-apps-1, the first in order", placed)
 	}
 }
+
+// TestAppMintedValueBindsBeforeLaterClientRequest: when the application mints
+// a value during an earlier dependency call (mock-1, e.g. CreateApp writing an
+// app_id) and a later client request of the same test echoes it (test-218,
+// GET /cluster/replay-verdict?appId=<id>), a subsequent or background app call
+// carrying that value must bind to mock-1, not to test-218. Binding to the
+// later client request made a background write flake whenever replay ran the
+// write before test-218 reached the application. A value the client itself
+// sent before any app call still binds to the client request; TestGiven,
+// start-up, and (in ModeElsewhere) earlier-test places recorded earlier win
+// over a later client echo.
+func TestAppMintedValueBindsBeforeLaterClientRequest(t *testing.T) {
+	base := time.Date(2026, 11, 24, 6, 45, 0, 0, time.UTC)
+	gap := 65 * time.Second
+	const (
+		recID   = "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
+		liveID  = "9f8e7d6c-5b4a-3210-fedc-ba9876543210"
+		bgField = "body.docs.msgs.0.appId"
+		m1Field = "body.docs.msgs.0._id"
+	)
+
+	verdictReq := func(id string, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{
+			Method:    "GET",
+			URL:       "http://localhost:8083/cluster/replay-verdict?appId=" + id,
+			Timestamp: at,
+			Header:    map[string]string{"Host": "localhost:8083"},
+		}
+	}
+	mockAt := func(name string, at time.Time, own, run, startUp bool) Earlier {
+		payload := RawOf(&models.Mock{
+			Name: name,
+			Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)},
+		}, true)
+		return Earlier{
+			Mock:    name,
+			At:      at,
+			Own:     own,
+			Run:     run,
+			StartUp: startUp,
+			Payload: payload.ServedAs(1),
+			Seen: []Seen{{
+				Side:  Request,
+				Leaf:  Leaf{Path: m1Field, Type: String, Value: recID},
+				Live:  liveID,
+				Place: m1Field,
+			}},
+		}
+	}
+	incomingOf := func(t *testing.T, name string, reqRec, reqLive time.Time, coming bool) []Earlier {
+		t.Helper()
+		tr := NewTracker()
+		tr.Begin()
+		tr.SetCases([]ClientCase{{Name: name, Req: verdictReq(recID, reqRec)}})
+		if coming {
+			if tr.IncomingComing(verdictReq(liveID, reqLive), reqLive, func() *RequestWords { return NewRequestWords() }) == nil {
+				t.Fatalf("coming request %s paired with none", name)
+			}
+		} else if !tr.Incoming(verdictReq(liveID, reqLive), "", reqLive) {
+			t.Fatalf("incoming request %s paired with none", name)
+		}
+		return tr.Placed().Earlier
+	}
+
+	cases := []struct {
+		name            string
+		build           func(t *testing.T) Input
+		wantMock        string
+		wantClient      bool
+		wantRun         bool
+		wantStartUp     bool
+		wantRefusal     RefusalKind
+		wantLineHas     string
+		wantLineNotHave string
+	}{
+		{
+			name: "app_minted_before_later_client_echo",
+			build: func(t *testing.T) Input {
+				earlier := append(
+					incomingOf(t, "test-218", base.Add(50*time.Millisecond), base.Add(gap+50*time.Millisecond), false),
+					mockAt("mock-1", base.Add(10*time.Millisecond), true, false, false),
+				)
+				in := iCall(bgField, String, recID, liveID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+				in.Drifts = clockedDrifts()
+				return in
+			},
+			wantMock: "mock-1",
+		},
+		{
+			name: "bg_before_client_echo_arrivedBefore",
+			build: func(t *testing.T) Input {
+				earlier := append(
+					incomingOf(t, "test-218", base.Add(50*time.Millisecond), base.Add(gap+50*time.Millisecond), false),
+					mockAt("mock-1", base.Add(10*time.Millisecond), true, false, false),
+				)
+				in := iCall(bgField, String, recID, liveID, base.Add(20*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+				in.Drifts = clockedDrifts()
+				return in
+			},
+			wantMock: "mock-1",
+		},
+		{
+			name: "client_made_value_before_app_call",
+			build: func(t *testing.T) Input {
+				earlier := append(
+					incomingOf(t, "test-1", base.Add(5*time.Millisecond), base.Add(gap+5*time.Millisecond), false),
+					mockAt("mock-1", base.Add(10*time.Millisecond), true, false, false),
+				)
+				in := iCall(bgField, String, recID, liveID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+				in.Drifts = clockedDrifts()
+				return in
+			},
+			wantMock:   "test case test-1",
+			wantClient: true,
+		},
+		{
+			name: "coming_request_after_app_minted",
+			build: func(t *testing.T) Input {
+				earlier := append(
+					incomingOf(t, "test-218", base.Add(50*time.Millisecond), base.Add(gap+50*time.Millisecond), true),
+					mockAt("mock-1", base.Add(10*time.Millisecond), true, false, false),
+				)
+				in := iCall(bgField, String, recID, liveID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+				in.Drifts = clockedDrifts()
+				return in
+			},
+			wantMock: "mock-1",
+		},
+		{
+			name: "test_given_beats_client_request",
+			build: func(t *testing.T) Input {
+				earlier := append(
+					incomingOf(t, "test-218", base.Add(50*time.Millisecond), base.Add(gap+50*time.Millisecond), false),
+					TestGiven("test o::TestApp", "given:app", recID, liveID),
+					mockAt("mock-1", base.Add(10*time.Millisecond), true, false, false),
+				)
+				in := iCall(bgField, String, recID, liveID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+				in.Drifts = clockedDrifts()
+				return in
+			},
+			wantMock: "test o::TestApp",
+		},
+		{
+			name: "startup_before_client_request",
+			build: func(t *testing.T) Input {
+				earlier := append(
+					incomingOf(t, "test-218", base.Add(50*time.Millisecond), base.Add(gap+50*time.Millisecond), false),
+					mockAt("mock-startup", base.Add(-30*time.Second), false, true, true),
+				)
+				in := iCall(bgField, String, recID, liveID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+				in.Drifts = clockedDrifts()
+				return in
+			},
+			wantMock:    "mock-startup",
+			wantRun:     true,
+			wantStartUp: true,
+		},
+		{
+			name: "earlier_test_allscope_before_client_request",
+			build: func(t *testing.T) Input {
+				earlier := append(
+					incomingOf(t, "test-218", base.Add(50*time.Millisecond), base.Add(gap+50*time.Millisecond), false),
+					mockAt("mock-prev", base.Add(-10*time.Second), false, true, false),
+				)
+				in := iCall(bgField, String, recID, liveID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+				in.Mode = ModeElsewhere
+				in.Drifts = clockedDrifts()
+				return in
+			},
+			wantRefusal:     RefusalLandedElsewhere,
+			wantLineHas:     "mock-prev",
+			wantLineNotHave: "test-218",
+		},
+		{
+			name: "same_instant_tie_client_wins",
+			build: func(t *testing.T) Input {
+				same := base.Add(10 * time.Millisecond)
+				earlier := append(
+					incomingOf(t, "test-1", same, base.Add(gap+10*time.Millisecond), false),
+					mockAt("mock-1", same, true, false, false),
+				)
+				in := iCall(bgField, String, recID, liveID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+				in.Drifts = clockedDrifts()
+				return in
+			},
+			wantMock:   "test case test-1",
+			wantClient: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ds := Decide(tc.build(t))
+			if len(ds) != 5 {
+				t.Fatalf("got %d decisions (%s); want 5 UUID word decisions", len(ds), oDescribe(ds))
+			}
+			for i, d := range ds {
+				if tc.wantRefusal != "" {
+					if d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != tc.wantRefusal || !strings.Contains(d.Line, tc.wantLineHas) || strings.Contains(d.Line, tc.wantLineNotHave) {
+						t.Errorf("decision[%d]: outcome=%v refusal=%v line=%q; want Refused(%s) naming %q and not %q",
+							i, d.Outcome, d.Refusal, d.Line, tc.wantRefusal, tc.wantLineHas, tc.wantLineNotHave)
+					}
+					continue
+				}
+				if d.Outcome != OutcomeValue || d.From.Mock != tc.wantMock || d.From.Client != tc.wantClient || d.From.Run != tc.wantRun || d.From.InStartUp != tc.wantStartUp {
+					t.Errorf("decision[%d]: outcome=%v from={Mock:%q Client:%v Run:%v InStartUp:%v} (%s); want Value from {Mock:%q Client:%v Run:%v InStartUp:%v}",
+						i, d.Outcome, d.From.Mock, d.From.Client, d.From.Run, d.From.InStartUp, d.Line,
+						tc.wantMock, tc.wantClient, tc.wantRun, tc.wantStartUp)
+				}
+			}
+		})
+	}
+}
+
+// TestUnbindableNonClientJWTFallsBackToEarliestBindable verifies that dc.bound's
+// fallback triggers ONLY when the earliest place is an unbindable non-client
+// JWT claim (Bearer or Cookie), and that it then chooses the earliest bindable
+// place across ALL of src (non-client plain leaf, non-client raw recording, or
+// client request) rather than skipping non-client places or overriding
+// non-JWT unbindable places such as a oneToken URL-split.
+func TestUnbindableNonClientJWTFallsBackToEarliestBindable(t *testing.T) {
+	base := time.Date(2026, 11, 24, 6, 45, 0, 0, time.UTC)
+	gap := 65 * time.Second
+
+	t.Run("non_client_plain_leaf_beats_later_client_after_jwt", func(t *testing.T) {
+		const (
+			rID = "6af47add8a9351dfdb7c457a"
+			fID = "6af47b1e0c22d4e8a91b03f6"
+		)
+		rTok := claimToken(t, map[string]any{"cid": "e2e", "cluster_id": rID}, "sig-r-1")
+		fTok := claimToken(t, map[string]any{"cid": "e2e", "cluster_id": fID}, "sig-f-1")
+		m0At := base.Add(10 * time.Millisecond)
+		m1At := base.Add(20 * time.Millisecond)
+		cAt := base.Add(50 * time.Millisecond)
+		mock0 := Earlier{
+			Mock: "mock-0", At: m0At, Own: true, Payload: oPayload("mock-0", m0At),
+			Seen: []Seen{{Side: Request, Leaf: oText("header.Authorization", "Bearer "+rTok), Live: "Bearer " + fTok, Place: "header.Authorization"}},
+		}
+		mock1 := Earlier{
+			Mock: "mock-1", At: m1At, Own: true, Payload: oPayload("mock-1", m1At),
+			Seen: []Seen{{Side: Request, Leaf: oText("body.id", rID), Live: fID, Place: "body.id"}},
+		}
+		clientReq := func(id string, at time.Time) *models.HTTPReq {
+			return &models.HTTPReq{Method: "GET", URL: "http://localhost:8083/cluster?appId=" + id, Timestamp: at, Header: map[string]string{"Host": "localhost:8083"}}
+		}
+		earlier := append([]Earlier{mock0, mock1}, clientPlaced(t, "test-218", clientReq(rID, cAt), clientReq(fID, cAt.Add(gap)), cAt.Add(gap))...)
+		in := iCall("body.cmd.filter._id", String, rID, fID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+		in.Drifts = oClientDrifts()
+		d := oWord(t, Decide(in), rID, fID)
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-1" || d.From.Client {
+			t.Fatalf("got %s (from %+v); want Value bound to mock-1 (not test-218)", oDescribe([]Decision{d}), d.From)
+		}
+	})
+
+	t.Run("non_client_cookie_jwt_falls_back_to_plain_leaf", func(t *testing.T) {
+		const (
+			rID = "6af47add8a9351dfdb7c457a"
+			fID = "6af47b1e0c22d4e8a91b03f6"
+		)
+		rTok := claimToken(t, map[string]any{"cid": "e2e", "cluster_id": rID}, "sig-r-2")
+		fTok := claimToken(t, map[string]any{"cid": "e2e", "cluster_id": fID}, "sig-f-2")
+		m0At := base.Add(10 * time.Millisecond)
+		m1At := base.Add(20 * time.Millisecond)
+		cAt := base.Add(50 * time.Millisecond)
+		mock0 := Earlier{
+			Mock: "mock-0", At: m0At, Own: true, Payload: oPayload("mock-0", m0At),
+			Seen: []Seen{{Side: Request, Leaf: oText("header.Cookie", "refresh_token="+rTok+"; jwt_token_staging="+rTok), Live: "refresh_token=" + fTok + "; jwt_token_staging=" + fTok, Place: "header.Cookie"}},
+		}
+		mock1 := Earlier{
+			Mock: "mock-1", At: m1At, Own: true, Payload: oPayload("mock-1", m1At),
+			Seen: []Seen{{Side: Request, Leaf: oText("body.id", rID), Live: fID, Place: "body.id"}},
+		}
+		clientReq := func(id string, at time.Time) *models.HTTPReq {
+			return &models.HTTPReq{Method: "GET", URL: "http://localhost:8083/cluster?appId=" + id, Timestamp: at, Header: map[string]string{"Host": "localhost:8083"}}
+		}
+		earlier := append([]Earlier{mock0, mock1}, clientPlaced(t, "test-218", clientReq(rID, cAt), clientReq(fID, cAt.Add(gap)), cAt.Add(gap))...)
+		in := iCall("body.cmd.filter._id", String, rID, fID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+		in.Drifts = oClientDrifts()
+		d := oWord(t, Decide(in), rID, fID)
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-1" || d.From.Client {
+			t.Fatalf("got %s (from %+v); want Value bound to mock-1 (not mock-0 cookie JWT or test-218)", oDescribe([]Decision{d}), d.From)
+		}
+	})
+
+	t.Run("non_client_raw_place_beats_later_client_after_jwt", func(t *testing.T) {
+		const (
+			rID = "6af47add8a9351dfdb7c457a"
+			fID = "6af47b1e0c22d4e8a91b03f6"
+		)
+		rTok := claimToken(t, map[string]any{"cid": "e2e", "cluster_id": rID}, "sig-r-3")
+		fTok := claimToken(t, map[string]any{"cid": "e2e", "cluster_id": fID}, "sig-f-3")
+		m0At := base.Add(10 * time.Millisecond)
+		m1At := base.Add(20 * time.Millisecond)
+		cAt := base.Add(50 * time.Millisecond)
+		mock0 := Earlier{
+			Mock: "mock-0", At: m0At, Own: true, Payload: oPayload("mock-0", m0At),
+			Seen: []Seen{{Side: Request, Leaf: oText("header.Authorization", "Bearer "+rTok), Live: "Bearer " + fTok, Place: "header.Authorization"}},
+		}
+		rawMock := func(id string) *models.Mock {
+			return &models.Mock{
+				Name: "mock-1",
+				Kind: models.HTTP,
+				Spec: models.MockSpec{
+					ReqTimestampMock: m1At,
+					ResTimestampMock: m1At.Add(time.Millisecond),
+					HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://dep/items", Body: `{"id":"` + id + `"}`},
+					HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`},
+				},
+			}
+		}
+		dc := oClientDrifts()
+		raw1 := dc.RawOf(rawMock(rID), true).ServedAs(2).ServedLive(dc.RawOf(rawMock(fID), true))
+		clientReq := func(id string, at time.Time) *models.HTTPReq {
+			return &models.HTTPReq{Method: "GET", URL: "http://localhost:8083/cluster?appId=" + id, Timestamp: at, Header: map[string]string{"Host": "localhost:8083"}}
+		}
+		earlier := append([]Earlier{mock0}, clientPlaced(t, "test-218", clientReq(rID, cAt), clientReq(fID, cAt.Add(gap)), cAt.Add(gap))...)
+		in := iCall("body.cmd.filter._id", String, rID, fID, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, []Raw{raw1})
+		in.Drifts = dc
+		d := oWord(t, Decide(in), rID, fID)
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-1" || d.From.Client {
+			t.Fatalf("got %s (from %+v); want Value bound to raw mock-1 (not test-218)", oDescribe([]Decision{d}), d.From)
+		}
+	})
+
+	t.Run("one_token_url_split_does_not_skip_to_later_client", func(t *testing.T) {
+		const (
+			rw    = "PnlPWeHYp6SxRRGMfFi0kUxyEdiumEmDVfOVZBrF68E"
+			lw    = "q4XtRm8LwZ2vNc7KbJ0sYh5GdP3fEa9TnU1oVi6WxQk"
+			rec   = "kepreq_" + rw
+			live  = "kepreq_" + lw
+			url   = "https://app.keploy.io/oauth/consent?request="
+			split = "x."
+		)
+		m0At := base.Add(10 * time.Millisecond)
+		cAt := base.Add(50 * time.Millisecond)
+		mock0 := Earlier{
+			Mock: "mock-0", At: m0At, Own: true, Payload: oPayload("mock-0", m0At),
+			Seen: []Seen{{Side: Request, Leaf: oText("body.user", url+rec), Live: url + split + live, Place: "body.user"}},
+		}
+		clientReq := func(tok string, at time.Time) *models.HTTPReq {
+			return &models.HTTPReq{Method: "GET", URL: "http://localhost:8083/echo?token=" + tok, Timestamp: at, Header: map[string]string{"Host": "localhost:8083"}}
+		}
+		earlier := append([]Earlier{mock0}, clientPlaced(t, "test-218", clientReq(rec, cAt), clientReq(live, cAt.Add(gap)), cAt.Add(gap))...)
+		in := iCall("body.cmd.query._id", String, rec, live, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+		in.Drifts = oClientDrifts()
+		ds := Decide(in)
+		if len(ds) != 1 {
+			t.Fatalf("got %d decisions (%s); want 1 word-by-word decision bound to mock-0", len(ds), oDescribe(ds))
+		}
+		d := ds[0]
+		if d.At.Word == -1 {
+			t.Fatalf("URL-split mock-0 silently bound whole at %s %s (client=%v); want word-by-word binding to mock-0", d.From.Mock, d.FromAt.String(), d.From.Client)
+		}
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-0" || d.From.Client {
+			t.Fatalf("got %s (from %+v); want Value bound to mock-0 (word-by-word), not test-218", oDescribe(ds), d.From)
+		}
+	})
+}
