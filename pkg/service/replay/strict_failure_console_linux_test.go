@@ -62,7 +62,7 @@ func TestRunTestSet_AStrictFailureTestPrintsItsDiff(t *testing.T) {
 			if !strings.Contains(console, "Testrun failed for testcase") || !strings.Contains(console, want) {
 				t.Fatalf("the console said nothing of why test-1 failed:\n%s", console)
 			}
-			mismatch := logs.FilterMessageSnippet("mock mapping mismatch detected")
+			mismatch := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)")
 			if mismatch.Len() != 1 || !strings.Contains(mismatch.All()[0].Message, "FAILED") {
 				t.Fatalf("the mock-mismatch line does not say test-1 is FAILED: %+v", mismatch.All())
 			}

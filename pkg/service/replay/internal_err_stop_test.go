@@ -106,8 +106,9 @@ func TestANotJudgedSetIsNoReasonTheRunStopped(t *testing.T) {
 	if !h.replayer.notJudged("test-set-0") {
 		t.Fatal("precondition: test-set-0 is judged; the case needs it not judged")
 	}
-	if reason != runCompletedReason {
-		t.Errorf("the run stops with the reason %q, want %q", reason, runCompletedReason)
+	want := "replay finished: test-set test-set-0 not judged (keploy could not read all evidence)"
+	if reason != want {
+		t.Errorf("the run stops with the reason %q, want %q", reason, want)
 	}
 	if code != 1 {
 		t.Errorf("exit code %d, want 1", code)
