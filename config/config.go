@@ -496,9 +496,9 @@ type RedisConfig struct {
 }
 
 // RedisDrawnPlace is one enterprise-only Redis key shape: literal text, {draw}
-// where a word the app drew stands (32 hex digits or a dashed uuid) and {same}
-// where a word must equal the recording's, as in rq:job:{draw}. Ignored in OSS
-// builds.
+// where a word the app drew stands (32 or 24 hex digits, or a dashed uuid) and
+// {same} where a word must equal the recording's, as in rq:job:{draw}. Ignored
+// in OSS builds.
 type RedisDrawnPlace struct {
 	Key string `json:"key" yaml:"key" mapstructure:"key"`
 }
