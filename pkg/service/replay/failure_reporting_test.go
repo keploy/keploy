@@ -347,9 +347,13 @@ func TestFailureBlameWholeSetLookupAndDerivedNextStep(t *testing.T) {
 				t.Errorf("expected per-test ERROR leading with 'response 200 -> 500 ... got no recorded answer', got errors: %v", errEntries)
 			}
 
-			summaryLines := logs.FilterMessage("Some testsets failed due to mock differences.").All()
+			wantSummaryMsg := "Failed tests also made outgoing calls that did not match the recorded mocks (see each test's response diff for why it failed)."
+			if tc.proven {
+				wantSummaryMsg = "Some testsets failed due to mock differences."
+			}
+			summaryLines := logs.FilterMessage(wantSummaryMsg).All()
 			if len(summaryLines) != 1 {
-				t.Fatalf("expected 1 end-of-run mock-differences line, got %d: %v", len(summaryLines), summaryLines)
+				t.Fatalf("expected 1 end-of-run mock-differences line (%q), got %d: %v", wantSummaryMsg, len(summaryLines), logs.All())
 			}
 			ns := fmt.Sprint(summaryLines[0].ContextMap()["next_step"])
 			if !strings.Contains(ns, "sessionCalls") {

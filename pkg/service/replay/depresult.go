@@ -1018,21 +1018,19 @@ func (r *Replayer) warnDependencyAssertionInert(testSetID string, useMappingBase
 		zap.String("reason", reason))
 }
 
-// unexercisedSummary splits the collected tests into a sorted name list, a
-// capped sample and the count whose RESPONSE still matched.
-//
-// The passed count is the one that matters and the one the wording has to be
-// careful about: for a PASSED test the response really did match, which is the
-// silent-green case; for an OBSOLETE test it did not — that is why it was
-// demoted — so a blanket "the response still matched" would be wrong for
-// exactly the subset a user is most likely to investigate.
+// unexercisedSummary collects ONLY the PASSED tests whose recorded
+// dependencies were not observed — the exact subset --assert-dependencies
+// would flip from PASS to FAIL. FAILED and OBSOLETE tests already failed or
+// were demoted and are excluded so they never produce noisy "not failed for
+// it" warnings.
 func unexercisedSummary(tests map[string]models.TestStatus) (names, sample []string, passed int) {
 	names = make([]string, 0, len(tests))
 	for name, status := range tests {
-		names = append(names, name)
-		if status == models.TestStatusPassed {
-			passed++
+		if status != models.TestStatusPassed {
+			continue
 		}
+		names = append(names, name)
+		passed++
 	}
 	sort.Strings(names)
 	sample = names
@@ -1042,27 +1040,91 @@ func unexercisedSummary(tests map[string]models.TestStatus) (names, sample []str
 	return names, sample, passed
 }
 
-// warnUnexercisedDependencies emits the single per-test-set summary for
-// dependencies that were recorded but not observed while the knob is off.
-// Under --assert-dependencies the per-test Error already fired and the run is
-// red, so this stays quiet.
-//
-// "not observed during the test's own window" is deliberate wording, not
-// hedging: GetConsumedMocks is drained immediately after the response comes
-// back, so an outgoing call the app makes AFTER writing its response (an audit
-// write, an analytics POST, a cache set) is attributed to the next test, not
-// this one. The data supports "keploy did not see this call inside this test's
-// window"; it does not support "the app never made this call".
+// recordUnexercisedMocks records the unexercised mock names for a test on the
+// current set (and clears them on a clean retry), so warnUnexercisedDependencies
+// folds a PASSED test into the outgoing-call diff table only when every
+// unexercised mock matches a missed call's ClosestMock.
+func recordUnexercisedMocks(byTest map[string][]string, testName string, missing []models.UnconsumedMock, level depLogLevel) {
+	if byTest == nil {
+		return
+	}
+	if level != depLogDebug || len(missing) == 0 {
+		delete(byTest, testName)
+		return
+	}
+	names := make([]string, 0, len(missing))
+	for _, m := range missing {
+		if m.Name != "" {
+			names = append(names, m.Name)
+		}
+	}
+	if len(names) == 0 {
+		delete(byTest, testName)
+		return
+	}
+	byTest[testName] = names
+}
+
+// warnUnexercisedDependencies emits a single per-test-set WARN for PASSED
+// tests whose recorded dependencies were not observed while
+// --assert-dependencies is off. Tests that already failed or were marked
+// OBSOLETE are ignored, nothing is emitted when 0 PASSED tests remain, and a
+// PASSED test is folded into the outgoing-call diff table only when every
+// unexercised mock matches a missed call's ClosestMock (never hiding an
+// unexercised dependency on a different mock in the same test).
 func (r *Replayer) warnUnexercisedDependencies(testSetID string, tests map[string]models.TestStatus) {
 	if len(tests) == 0 {
 		return
 	}
-	names, sample, passed := unexercisedSummary(tests)
+	filtered := tests
+	if r.mockMismatchFailures != nil {
+		missedClosest := map[string]map[string]bool{}
+		for _, f := range r.mockMismatchFailures.GetFailures() {
+			if f.TestSetID == testSetID && f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && f.MismatchReport.CountsAgainstTest() && f.MismatchReport.ClosestMock != "" {
+				if missedClosest[f.TestID] == nil {
+					missedClosest[f.TestID] = map[string]bool{}
+				}
+				missedClosest[f.TestID][f.MismatchReport.ClosestMock] = true
+			}
+		}
+		if len(missedClosest) > 0 {
+			filtered = make(map[string]models.TestStatus, len(tests))
+			for name, status := range tests {
+				closest := missedClosest[name]
+				if len(closest) > 0 && allUnexercisedCovered(r.unexercisedMocksByTest, name, closest) {
+					continue
+				}
+				filtered[name] = status
+			}
+		}
+	}
+	names, sample, passed := unexercisedSummary(filtered)
+	if passed == 0 {
+		return
+	}
 	r.logger.Warn("some tests did not exercise a dependency their recording says they use, and were not failed for it (run with --assert-dependencies to fail on this). Note that an outgoing call made AFTER the response is written is not attributable to this test's window",
 		zap.String("testset", testSetID),
 		zap.Int("tests", len(names)),
 		zap.Int("responseStillMatched", passed),
 		zap.Strings("sample", sample))
+}
+
+func allUnexercisedCovered(byTest map[string][]string, testName string, missedClosest map[string]bool) bool {
+	unexercised, known := byTest[testName]
+	if !known {
+		// Direct unit callers without per-mock breakdown: fold only when the
+		// test has a missed call naming a ClosestMock.
+		return len(missedClosest) > 0
+	}
+	if len(unexercised) == 0 {
+		return false
+	}
+	for _, m := range unexercised {
+		if !missedClosest[m] {
+			return false
+		}
+	}
+	return true
 }
 
 // depWarnSampleSize caps the per-test-set sample so a fully-drifted suite
