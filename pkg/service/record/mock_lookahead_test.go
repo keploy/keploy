@@ -183,8 +183,56 @@ func (h skippingHooks) BeforeMockInsert(_ context.Context, info *MockContext) er
 // is not written; a revoke frame mid-stream changes none of that; and a test's
 // mapping names its mocks by the names they were saved under.
 func TestStart_LooksAheadOverABareMockYaml(t *testing.T) {
-	const n = 300
 	dir := t.TempDir()
+	runStartLookaheadTest(t, dir, func(logger *zap.Logger) MockDB {
+		return mockdb.New(logger, dir, "mocks")
+	})
+}
+
+// A MockDB wrapper that explicitly opts in through PreparedMockDB gets the
+// recorder's look-ahead pipeline with full output parity against a bare store:
+// PrepareMock and WritePrepared run in arrival order, InsertMock is not called,
+// and Dir hands WritePrepared the test-set directory.
+func TestStart_LooksAheadOverPreparedMockDB(t *testing.T) {
+	bareDir := t.TempDir()
+	bareRaw := runStartLookaheadTest(t, bareDir, func(logger *zap.Logger) MockDB {
+		return mockdb.New(logger, bareDir, "mocks")
+	})
+
+	dir := t.TempDir()
+	var wrapper *optInMockYaml
+	optInRaw := runStartLookaheadTest(t, dir, func(logger *zap.Logger) MockDB {
+		wrapper = &optInMockYaml{
+			MockYaml: mockdb.New(logger, dir, "mocks"),
+			enabled:  true,
+		}
+		return wrapper
+	})
+
+	if !bytes.Equal(optInRaw, bareRaw) {
+		t.Fatalf("PreparedMockDB output (%d bytes) differs from bare MockYaml (%d bytes)", len(optInRaw), len(bareRaw))
+	}
+	const wantCount = 299 // 300 sent minus skipped t050
+	if wrapper.insertCalls != 0 {
+		t.Fatalf("InsertMock called %d times, want 0 (look-ahead must use PrepareMock/WritePrepared)", wrapper.insertCalls)
+	}
+	if wrapper.prepareCalls != wantCount || wrapper.writeCalls != wantCount {
+		t.Fatalf("PrepareMock=%d WritePrepared=%d, want %d each", wrapper.prepareCalls, wrapper.writeCalls, wantCount)
+	}
+	wantDir := filepath.Join(dir, "test-set-0")
+	for i, gotPath := range wrapper.writtenDirs {
+		if gotPath != wantDir {
+			t.Fatalf("WritePrepared[%d] Dir() = %q, want %q", i, gotPath, wantDir)
+		}
+		if wantName := fmt.Sprintf("mock-%d", i); wrapper.writtenNames[i] != wantName {
+			t.Fatalf("WritePrepared[%d] wrote %q, want %q (out of arrival order)", i, wrapper.writtenNames[i], wantName)
+		}
+	}
+}
+
+func runStartLookaheadTest(t *testing.T, dir string, makeDB func(*zap.Logger) MockDB) []byte {
+	t.Helper()
+	const n = 300
 	core, logs := observer.New(zap.DebugLevel)
 	logger := zap.New(core)
 	f := &fakeInstr{
@@ -193,7 +241,7 @@ func TestStart_LooksAheadOverABareMockYaml(t *testing.T) {
 		outgoing: make(chan *models.Mock),
 	}
 	hooks := skippingHooks{insertedHooks: insertedHooks{mocks: make(chan string, n+1)}, skip: "t050"}
-	r := New(logger, testdb.New(logger, dir), mockdb.New(logger, dir, "mocks"), mapdb.New(logger, dir, "mappings"),
+	r := New(logger, testdb.New(logger, dir), makeDB(logger), mapdb.New(logger, dir, "mappings"),
 		&recTelemetry{}, &blockingInstr{f}, recTestSetConf{}, hooks, &config.Config{}).(*Recorder)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -243,7 +291,7 @@ func TestStart_LooksAheadOverABareMockYaml(t *testing.T) {
 	}
 
 	if logs.FilterMessage("the mock loop encodes the mocks waiting for it ahead of their writes").Len() != 1 {
-		t.Fatal("the look-ahead was not on for a bare MockYaml that does not roll over")
+		t.Fatal("the look-ahead was not on")
 	}
 	ended := logs.FilterMessage("the mock loop's look-ahead ended").All()
 	if len(ended) != 1 {
@@ -283,4 +331,104 @@ func TestStart_LooksAheadOverABareMockYaml(t *testing.T) {
 	if got := strings.Join(names, ","); got != "mock-3,mock-4,mock-249" {
 		t.Fatalf("test-a's mapping names %s, want mock-3,mock-4,mock-249", got)
 	}
+	return raw
 }
+
+// PreparedMockDB opt-in enforces pointer identity at every nesting depth and
+// rejects nil, typed-nil, value-receiver, opted-out, and rolling stores.
+func TestMockLookahead_PreparedMockDBOptIn(t *testing.T) {
+	doc := NewInsertedMockDoc(context.Background(), BaseRecordHooks{})
+
+	if la := lookaheadFor(nil, nil, false, doc, nil); la != nil {
+		t.Fatal("an untyped nil MockDB took mocks ahead")
+	}
+	var nilYaml *mockdb.MockYaml
+	if la := lookaheadFor(nil, nilYaml, false, doc, nil); la != nil {
+		t.Fatal("a typed-nil MockYaml took mocks ahead")
+	}
+	var nilOptIn *optInMockYaml
+	if la := lookaheadFor(nil, nilOptIn, false, doc, nil); la != nil {
+		t.Fatal("a typed-nil PreparedMockDB took mocks ahead")
+	}
+	disabled := &optInMockYaml{MockYaml: mockdb.New(zap.NewNop(), t.TempDir(), "mocks"), enabled: false}
+	if la := lookaheadFor(nil, disabled, false, doc, nil); la != nil {
+		t.Fatal("an opted-out PreparedMockDB took mocks ahead")
+	}
+	enabled := &optInMockYaml{MockYaml: mockdb.New(zap.NewNop(), t.TempDir(), "mocks"), enabled: true}
+	if la := lookaheadFor(nil, enabled, true, doc, nil); la != nil {
+		t.Fatal("a PreparedMockDB on a rolling recording took mocks ahead")
+	}
+	if enabled.storeCalls != 0 {
+		t.Fatalf("PreparedMockStore called %d times on a rolling recording, want 0", enabled.storeCalls)
+	}
+	nested := &nestedOptInMockYaml{optInMockYaml: enabled}
+	if la := lookaheadFor(nil, nested, false, doc, nil); la != nil {
+		t.Fatal("a nested wrapper that embeds a PreparedMockDB and overrides InsertMock had its inserts bypassed")
+	}
+	valWrapper := valueOptInMockYaml{optInMockYaml: enabled, fn: func() {}}
+	if la := lookaheadFor(nil, valWrapper, false, doc, nil); la != nil {
+		t.Fatal("a non-pointer PreparedMockDB took mocks ahead")
+	}
+	la := lookaheadFor(nil, enabled, false, doc, nil)
+	if la == nil {
+		t.Fatal("an opted-in PreparedMockDB did not enable look-ahead")
+	}
+	la.stop()
+}
+
+// optInMockYaml wraps a MockYaml and opts into look-ahead through PreparedMockDB.
+type optInMockYaml struct {
+	*mockdb.MockYaml
+	enabled      bool
+	storeCalls   int
+	insertCalls  int
+	prepareCalls int
+	writeCalls   int
+	writtenNames []string
+	writtenDirs  []string
+}
+
+var _ PreparedMockDB = (*optInMockYaml)(nil)
+
+func (w *optInMockYaml) PreparedMockStore() MockDB {
+	w.storeCalls++
+	if !w.enabled {
+		return nil
+	}
+	return w
+}
+
+func (w *optInMockYaml) InsertMock(ctx context.Context, m *models.Mock, set string) error {
+	w.insertCalls++
+	return w.MockYaml.InsertMock(ctx, m, set)
+}
+
+func (w *optInMockYaml) PrepareMock(ctx context.Context, m *models.Mock, set string) *mockdb.PreparedMock {
+	w.prepareCalls++
+	return w.MockYaml.PrepareMock(ctx, m, set)
+}
+
+func (w *optInMockYaml) WritePrepared(ctx context.Context, p *mockdb.PreparedMock) error {
+	w.writeCalls++
+	w.writtenNames = append(w.writtenNames, p.Mock().Name)
+	w.writtenDirs = append(w.writtenDirs, p.Dir())
+	return w.MockYaml.WritePrepared(ctx, p)
+}
+
+// nestedOptInMockYaml embeds an already-opted-in wrapper and overrides
+// InsertMock without implementing PreparedMockStore itself.
+type nestedOptInMockYaml struct{ *optInMockYaml }
+
+func (w *nestedOptInMockYaml) InsertMock(ctx context.Context, m *models.Mock, set string) error {
+	return w.optInMockYaml.InsertMock(ctx, m, set)
+}
+
+// valueOptInMockYaml is an uncomparable value wrapper that returns itself from
+// PreparedMockStore; lookaheadFor must reject it via reflect.Pointer before
+// comparing interfaces, or v.PreparedMockStore() == db would panic.
+type valueOptInMockYaml struct {
+	*optInMockYaml
+	fn func()
+}
+
+func (w valueOptInMockYaml) PreparedMockStore() MockDB { return w }
