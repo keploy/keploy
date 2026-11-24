@@ -307,7 +307,7 @@ func (v *exactView) isBackgroundRecording(mk *models.Mock) bool {
 // set's plain startup: recordings are none (startupOwned), as the view shows
 // them none (sharesRestTo). A by-kind answer reads and spends by it.
 func (v *exactView) isBackgroundRecordingTo(mk *models.Mock, windowed bool) bool {
-	return v.isBackgroundRecording(mk) && !(windowed && v.startupOwned(mk.Name))
+	return v.isBackgroundRecording(mk) && (!windowed || !v.startupOwned(mk.Name))
 }
 
 // startupOwned reports whether name is one of the plain startup: recordings
