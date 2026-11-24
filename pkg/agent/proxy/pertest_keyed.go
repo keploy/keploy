@@ -32,21 +32,27 @@ func (m *MockManager) rangePerTestMocksWithKeyIn(v *exactView, ix *integrations.
 	// The tree and the window are read together, as the windowed read
 	// (getFilteredMocksInWindowIn) reads them.
 	var start, end time.Time
+	var handedOff gapSpan
 	m.swapMu.RLock()
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
 	if v == nil {
 		m.windowMu.RLock()
-		start, end = m.windowStart, m.windowEnd
+		start, end, handedOff = m.windowStart, m.windowEnd, m.handedOffGap
 		m.windowMu.RUnlock()
 	}
 	m.swapMu.RUnlock()
 	if v == nil {
 		keeps := func(*models.Mock) bool { return true }
 		if !start.IsZero() && !end.IsZero() {
-			gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
-			keeps = func(mk *models.Mock) bool { return inRecordedWindow(mk, start, end, gapFrom, hasGap) }
+			tw := m.testWindows.Load()
+			gapFrom, hasGap := tw.GapBefore(start)
+			gapAfterFrom, gapAfterTo, hasGapAfter := tw.GapAfter(start)
+			gapAfter := gapSpan{from: gapAfterFrom, to: gapAfterTo, valid: hasGapAfter}
+			keeps = func(mk *models.Mock) bool {
+				return inRecordedWindowOrGap(mk, start, end, gapFrom, hasGap, gapAfter, handedOff)
+			}
 		}
 		tree.rangeKeyed(ix, key, func(mk *models.Mock) bool { return !keeps(mk) || fn(mk) })
 		return nil

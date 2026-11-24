@@ -246,9 +246,77 @@ func (s *WindowSchedule) GapBefore(start time.Time) (from time.Time, ok bool) {
 	return from, true
 }
 
+// GapAfter returns the bounded open inter-test gap (from, to) immediately after
+// the unique window starting at start: from is maxEnd[i] (the latest End among
+// windows[0..i], so no earlier overlapping window covers the gap), and to is
+// windows[i+1].Start. Returns ok=false for the last window (no bounded gap),
+// when no unique window starts at start, or when the next window overlaps
+// maxEnd[i].
+func (s *WindowSchedule) GapAfter(start time.Time) (from, to time.Time, ok bool) {
+	n := s.Len()
+	if n == 0 || start.IsZero() {
+		return time.Time{}, time.Time{}, false
+	}
+	i := sort.Search(n, func(i int) bool { return !s.windows[i].Start.Before(start) })
+	if i == n || !s.windows[i].Start.Equal(start) {
+		return time.Time{}, time.Time{}, false
+	}
+	if i+1 >= n || s.windows[i+1].Start.Equal(start) {
+		return time.Time{}, time.Time{}, false
+	}
+	from = s.maxEnd[i]
+	to = s.windows[i+1].Start
+	if !from.Before(to) {
+		return time.Time{}, time.Time{}, false
+	}
+	return from, to, true
+}
+
+// MetadataInterTestGapKey is the Spec.Metadata key stamped ("true") by
+// SyncMockManager when rescuing an unowned per-test mock recorded strictly
+// inside a bounded inter-request gap between two kept test windows.
+const MetadataInterTestGapKey = "interTestGap"
+
+// IsInterTestGap reports whether m is a per-test mock explicitly stamped as a
+// bounded inter-request gap call (MetadataInterTestGapKey == "true"), eligible
+// for GapAfter staging and single-step handoff. Excludes carry-over and
+// staging-release (server push) mocks so their own release rules remain
+// authoritative, and excludes unstamped mocks so legacy or out-of-window
+// orphans in a gap keep their existing NotServed / prune contract.
+func IsInterTestGap(m *Mock) bool {
+	return m != nil &&
+		m.Spec.Metadata[MetadataInterTestGapKey] == "true" &&
+		InFlightEligible(m) &&
+		!IsStagedAtStaging(m) &&
+		!IsCarryOver(m)
+}
+
+// InGap reports whether a call recorded over [req, res] fell strictly inside
+// the inter-test gap (from, to): requested strictly after from and, when to is
+// non-zero, both requested and answered strictly before to. Disjoint from
+// SentInGapAnsweredBy (which requires res >= to): InGap matches post-response
+// async/background calls that started and finished completely between two test
+// windows (e.g. a background job kicked off by a 202 Accepted response).
+func InGap(req, res, from, to time.Time) bool {
+	if req.IsZero() || !req.After(from) {
+		return false
+	}
+	if !to.IsZero() {
+		if !req.Before(to) {
+			return false
+		}
+		if !res.IsZero() && !res.Before(to) {
+			return false
+		}
+	}
+	return true
+}
+
 // InFlightInto reports whether a request recorded at req and answered at res
 // was in flight when the window that starts at start began: sent in the gap
 // before it (GapBefore), answered at or after its start (SentInGapAnsweredBy).
+// A call both sent and answered strictly inside the gap is not in flight at
+// start (see InGap / GapAfter for bounded post-response gap calls).
 // Such a call is that window's test's, whenever its answer landed; one sent and
 // answered within the gap is no test's.
 func (s *WindowSchedule) InFlightInto(req, res, start time.Time) bool {

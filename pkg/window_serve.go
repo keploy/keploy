@@ -53,6 +53,14 @@ type ServeWindow struct {
 	// (models.WindowSchedule.GapBefore), exclusive. Zero: no call is in
 	// flight into it.
 	InFlightFrom time.Time
+	// GapAfterFrom, GapAfterTo, and HasGapAfter describe the open inter-test
+	// gap immediately after the window (models.WindowSchedule.GapAfter). A
+	// per-test mock recorded strictly inside that gap (models.InGap) belongs
+	// to post-response async work triggered by this window and is staged with
+	// it (and handed off once to the immediate next window if unconsumed).
+	GapAfterFrom time.Time
+	GapAfterTo   time.Time
+	HasGapAfter  bool
 	// StrictPerCall is the filter's strict flag, the agent's agentStrict:
 	// false on a windowed proxy, whose mock manager does the strict
 	// filtering.
@@ -107,7 +115,7 @@ func ServeInWindow(m *models.Mock, session bool, w ServeWindow) WindowServe {
 		// The agent filters its session pool with no call in flight, in the
 		// strict-window off mode, and hands both slices to the session pool
 		// (FilterConfigMocksTierAware).
-		w.InFlightFrom, w.StrictWindow, w.Recorded = time.Time{}, false, nil
+		w.InFlightFrom, w.GapAfterFrom, w.GapAfterTo, w.HasGapAfter, w.StrictWindow, w.Recorded = time.Time{}, time.Time{}, time.Time{}, false, false, nil
 		if serveRuleOf(nil, m, w).serve() == NotServed {
 			return NotServed
 		}
@@ -153,6 +161,7 @@ const (
 	ruleInWindow
 	ruleStartup
 	ruleInFlight
+	ruleInGap
 	ruleReleased
 	ruleOutOfWindow
 	ruleLaxPromoted
@@ -161,7 +170,7 @@ const (
 // serve is the pool a rule hands its mock to.
 func (r serveRule) serve() WindowServe {
 	switch r {
-	case ruleWindowBoundInWindow, ruleUntimed, ruleInWindow, ruleInFlight:
+	case ruleWindowBoundInWindow, ruleUntimed, ruleInWindow, ruleInFlight, ruleInGap:
 		return ServedPerTest
 	case ruleWindowBoundStartup, ruleStartup:
 		return ServedStartup
@@ -214,6 +223,10 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 	if !w.InFlightFrom.IsZero() && (w.enabled(w.StrictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
 		models.SentInGapAnsweredBy(req, res, w.InFlightFrom, w.Start) {
 		return ruleInFlight
+	}
+	if w.HasGapAfter && (w.enabled(w.StrictWindow) || p.StatesLifetime()) && models.IsInterTestGap(p) &&
+		models.InGap(req, res, w.GapAfterFrom, w.GapAfterTo) {
+		return ruleInGap
 	}
 	// The push hub delivers a server push the staging filed from its
 	// release window on, whatever the window mode: it pushes it, no

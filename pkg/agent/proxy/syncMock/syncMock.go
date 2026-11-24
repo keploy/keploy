@@ -317,8 +317,10 @@ type SyncMockManager struct {
 	// (sentClaimDone). They are not kept back: what is in the buffer at a stop
 	// is not counted as pending (BacklogBefore), and a mock kept there was lost
 	// when the stream closed first. Pruned once no request in flight can take
-	// one (pruneSentClaimedLocked; under SetWindowsOpenLate, owner-less notes
-	// also stay claimable within StaleHorizon); at most maxSentClaimed.
+	// one (pruneSentClaimedLocked; under SetWindowsOpenLate, owner-less startup
+	// notes stay claimable within StaleHorizon, and gap-rescue notes stay until
+	// recording reset or maxSentClaimed eviction so late-opening multi-goroutine
+	// parsers such as gRPC can still claim them); at most maxSentClaimed.
 	sentClaimed []sentClaim
 	// sentClaimedEvicted counts the notes forgotten at the bound
 	// (evictSentClaimedLocked).
@@ -333,6 +335,28 @@ type SyncMockManager struct {
 	// open[0]. A per-test mock requested at or after its start may be one of
 	// theirs, so no reaper drops it (see held). Guarded by mu.
 	open windowHeap
+	// usedOpenWindows is set once OpenWindow has been called on this manager,
+	// indicating its ingress tracks in-flight requests via open windows.
+	// firstKeptEnd is the earliest resolved kept window's end time and
+	// latestKeptStart is the latest resolved kept window's start time in the
+	// current recording session. unkeptSpans is a ring buffer (index
+	// unkeptSpansNext, capped at maxRecentWindows) recording [start, end] of
+	// windows closed without resolving (filtered, static-asset, oversized,
+	// left-out, or async-duplicate requests), so their egress is never mistaken
+	// for inter-request background calls. gapFlushed / gapCapWarned bound
+	// unowned gap mocks flushed per inter-test gap (keyed by the preceding kept
+	// window's end time) to maxGapMocksPerGap; gapKeyOrder / gapKeyNext evict
+	// the oldest gap key once maxRecentWindows distinct gaps have been tracked
+	// so long recordings never stop flushing gap mocks. All guarded by mu.
+	usedOpenWindows bool
+	firstKeptEnd    time.Time
+	latestKeptStart time.Time
+	unkeptSpans     []unkeptSpan
+	unkeptSpansNext int
+	gapFlushed      map[int64]int
+	gapCapWarned    map[int64]bool
+	gapKeyOrder     []int64
+	gapKeyNext      int
 	// lastWindowEnd is when the latest window ended, and givenUpInFlight
 	// how many windows were given up while their requests are still in
 	// flight (noteGivenUpInFlightLocked; stampOutsideRequestsLocked).
@@ -3547,10 +3571,11 @@ func (m *SyncMockManager) CloseOutChan() {
 	// ended, if one has, is said now (recording_end.go).
 	m.SayNotCaptured()
 	// Graceful-stop drain: flush every still-attributable buffered mock
+	// (including any bounded inter-request gap mocks once recording stops)
 	// before sealing the channel. The periodic flush ticker stops one step
 	// earlier in shutdown, so a late-decoded teardown mock would otherwise be
 	// discarded here and orphan its test case.
-	m.FlushOwnedWindows()
+	m.flushOwnedWindows(true)
 
 	// Closed to senders first: what comes after is dropped as closed. What
 	// is queued already goes on to a consumer that still reads (an older
@@ -3700,6 +3725,304 @@ func (m *SyncMockManager) flushTakeLocked(mock *models.Mock) (take flushTake, w 
 	return flushKeep, w, shared, behind
 }
 
+// maxGapMocksPerGap caps how many unowned bounded inter-request gap mocks may
+// be persisted for any single inter-test gap, so idle pollers or cron loops
+// between tests cannot inflate recordings without bound while long recordings
+// with many independent async tests remain unaffected.
+const maxGapMocksPerGap = 64
+
+type unkeptSpan struct {
+	start time.Time
+	end   time.Time
+}
+
+// noteUnkeptSpanLocked records the span of an opened request window that
+// closed without resolving (filtered, static-asset, oversized, left-out, or
+// duplicate without a prior keep=false resolve) in a maxRecentWindows ring.
+// Caller holds m.mu.
+func (m *SyncMockManager) noteUnkeptSpanLocked(start, end time.Time) {
+	if start.IsZero() {
+		return
+	}
+	if end.Before(start) {
+		end = start
+	}
+	sp := unkeptSpan{start: start, end: end}
+	if len(m.unkeptSpans) < maxRecentWindows {
+		m.unkeptSpans = append(m.unkeptSpans, sp)
+		return
+	}
+	m.unkeptSpans[m.unkeptSpansNext] = sp
+	m.unkeptSpansNext = (m.unkeptSpansNext + 1) % maxRecentWindows
+}
+
+// inUnkeptSpanLocked reports whether t falls within any unkept closed window
+// span recorded in the current session. Caller holds m.mu.
+func (m *SyncMockManager) inUnkeptSpanLocked(t time.Time) bool {
+	for i := len(m.unkeptSpans) - 1; i >= 0; i-- {
+		sp := m.unkeptSpans[i]
+		if !t.Before(sp.start) && !t.After(sp.end) {
+			return true
+		}
+	}
+	return false
+}
+
+// resetGapStateLocked clears all per-recording inter-request gap tracking and
+// drops any gap-rescue claim notes from sentClaimed so a new recording starts
+// clean regardless of whether it began via StartRecordSession or
+// ResumeRecording. Caller holds m.mu.
+func (m *SyncMockManager) resetGapStateLocked() {
+	m.firstKeptEnd = time.Time{}
+	m.latestKeptStart = time.Time{}
+	m.unkeptSpans = nil
+	m.unkeptSpansNext = 0
+	m.gapFlushed = nil
+	m.gapCapWarned = nil
+	m.gapKeyOrder = nil
+	m.gapKeyNext = 0
+	if len(m.sentClaimed) > 0 {
+		k := 0
+		for _, c := range m.sentClaimed {
+			if c.gap && c.takenBy == "" {
+				continue
+			}
+			m.sentClaimed[k] = c
+			k++
+		}
+		clear(m.sentClaimed[k:])
+		m.sentClaimed = m.sentClaimed[:k]
+	}
+}
+
+// pendingCache caches Backlog.PendingBefore answers within a single buffer
+// pass. Because PendingBefore(t) is monotonically non-decreasing in t (if
+// capture is already past maxClear, it is past any t <= maxClear; if capture
+// has not reached minPending, it has not reached any t >= minPending), a pass
+// under capture lag queries the registered Backlog watermarks at most a few
+// times instead of once per candidate mock under m.mu; once caught up, each
+// eligible candidate leaves the buffer on that pass.
+type pendingCache struct {
+	m          *SyncMockManager
+	inited     bool
+	backlogs   []Backlog
+	maxClear   time.Time
+	minPending time.Time
+}
+
+func (c *pendingCache) init() {
+	if c.inited {
+		return
+	}
+	c.inited = true
+	for _, w := range c.m.watermarks() {
+		if b, ok := w.(Backlog); ok {
+			c.backlogs = append(c.backlogs, b)
+		}
+	}
+}
+
+// pendingBefore reports whether any registered Backlog watermark still has
+// unparsed capture data from before `before`. Read-only: unlike BacklogBefore,
+// it does not signal recording stop or release exchange holds.
+func (c *pendingCache) pendingBefore(before time.Time) bool {
+	if before.IsZero() {
+		return false
+	}
+	c.init()
+	if len(c.backlogs) == 0 {
+		return false
+	}
+	if !c.maxClear.IsZero() && !before.After(c.maxClear) {
+		return false
+	}
+	if !c.minPending.IsZero() && !before.Before(c.minPending) {
+		return true
+	}
+	for _, b := range c.backlogs {
+		if b.PendingBefore(before) {
+			if c.minPending.IsZero() || before.Before(c.minPending) {
+				c.minPending = before
+			}
+			return true
+		}
+	}
+	if c.maxClear.IsZero() || before.After(c.maxClear) {
+		c.maxClear = before
+	}
+	return false
+}
+
+// mockLatestTime returns the later of req and res (or req when res is zero).
+func mockLatestTime(req, res time.Time) time.Time {
+	if !res.IsZero() && res.After(req) {
+		return res
+	}
+	return req
+}
+
+// hasDuplicateWindowAtLocked reports whether a keep=false duplicate window
+// starting at start was already recorded in recentWindows (so Window.Close
+// does not need to record a wider [start, time.Now()] unkept span). Caller
+// holds m.mu.
+func (m *SyncMockManager) hasDuplicateWindowAtLocked(start time.Time) bool {
+	for i := len(m.recentWindows) - 1; i >= 0; i-- {
+		rw := m.recentWindows[i]
+		if !rw.keep && rw.start.Equal(start) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasExchangeHolds reports whether any parser currently holds unresolved
+// exchanges. holdsMu is a leaf lock, safe to acquire while holding m.mu.
+func (m *SyncMockManager) hasExchangeHolds() bool {
+	m.holdsMu.Lock()
+	n := len(m.exchangeHolds)
+	m.holdsMu.Unlock()
+	return n > 0
+}
+
+// gapFlushGloballyAllowedLocked checks session-level preconditions for bounded
+// inter-request gap flushing. Caller holds m.mu.
+func (m *SyncMockManager) gapFlushGloballyAllowedLocked() bool {
+	if !m.usedOpenWindows || m.firstKeptEnd.IsZero() || m.latestKeptStart.IsZero() {
+		return false
+	}
+	return m.givenUpInFlight == 0 && len(m.scopes) == 0 && !m.hasExchangeHolds()
+}
+
+// gapKeyLocked identifies the inter-test gap containing req by the UnixNano
+// timestamp of the latest resolved kept window that ended strictly before req
+// (falling back to firstKeptEnd if the recentWindows ring has wrapped).
+// Caller holds m.mu.
+func (m *SyncMockManager) gapKeyLocked(req time.Time) int64 {
+	var best time.Time
+	for i := range m.recentWindows {
+		rw := m.recentWindows[i]
+		if !rw.keep || rw.end.IsZero() || !rw.end.Before(req) {
+			continue
+		}
+		if best.IsZero() || rw.end.After(best) {
+			best = rw.end
+		}
+	}
+	if !best.IsZero() {
+		return best.UnixNano()
+	}
+	return m.firstKeptEnd.UnixNano()
+}
+
+// canFlushGapLocked reports whether an unowned per-test mock (already known to
+// own no resolved kept or duplicate window) sits strictly inside a bounded
+// inter-request gap between two resolved kept windows (firstKeptEnd < req and
+// req, res < latestKeptStart), uncovered by any open window, unkept closed
+// window, open test scope, parser exchange hold, or given-up in-flight request.
+//
+// When windowsOpenLate is set (e.g. eBPF/k8s capture), any registered Backlog
+// watermark must also report that capture has progressed past the mock's answer
+// (!pc.pendingBefore) before the mock may be rescued as a gap call, reducing
+// early rescues while capture lags. For parsers whose watermark progress can
+// advance ahead of opening a request window (e.g. two-goroutine gRPC where the
+// response side reads ahead of request HEADERS), safety is preserved by the
+// retained gap claim in sentClaimed (noteGapSentClaimedLocked /
+// pruneSentClaimedLocked): the late window still claims the rescued mock into
+// its mapping or is left out if the send dropped.
+//
+// When rescuingOrStopping is false (periodic live FlushOwnedWindows ticks),
+// the mock must also be strictly older than StaleHorizon relative to now so
+// any in-flight late-opening or windowless request still has the full
+// StaleHorizon to claim its own mocks. When rescuingOrStopping is true
+// (StaleHorizon cutoff, duplicate prune horizon, or stop drain where the mock
+// would otherwise be dropped), bounded gap mocks are rescued immediately once
+// capture has progressed past them.
+//
+// Returns (gapKey, ok, capped): capped is true when the mock otherwise
+// qualifies for gap flushing but its gap has already reached maxGapMocksPerGap,
+// in which case the caller drops the mock rather than keeping it buffered.
+// Caller holds m.mu.
+func (m *SyncMockManager) canFlushGapLocked(mock *models.Mock, now time.Time, rescuingOrStopping bool, pc *pendingCache) (gapKey int64, ok bool, capped bool) {
+	if mock == nil || !m.gapFlushGloballyAllowedLocked() {
+		return 0, false, false
+	}
+	req := mock.Spec.ReqTimestampMock
+	if req.IsZero() || !req.After(m.firstKeptEnd) || !req.Before(m.latestKeptStart) {
+		return 0, false, false
+	}
+	res := mock.Spec.ResTimestampMock
+	if !res.IsZero() && !res.Before(m.latestKeptStart) {
+		return 0, false, false
+	}
+	if !rescuingOrStopping && !req.Before(now.Add(-StaleHorizon)) {
+		return 0, false, false
+	}
+	if len(m.open) > 0 && !m.open[0].start.After(req) {
+		return 0, false, false
+	}
+	if m.inUnkeptSpanLocked(req) {
+		return 0, false, false
+	}
+	if m.windowsOpenLate && pc.pendingBefore(mockLatestTime(req, res)) {
+		return 0, false, false
+	}
+	key := m.gapKeyLocked(req)
+	if m.gapFlushed[key] >= maxGapMocksPerGap {
+		return key, false, true
+	}
+	return key, true, false
+}
+
+// recordGapFlushLocked stamps mock with MetadataInterTestGapKey="true" for gap
+// persistence, advances the per-gap counter (evicting the oldest tracked gap
+// key in a ring once maxRecentWindows distinct gaps have been seen so long
+// recordings never stop flushing), and under late-opening windows notes the
+// mock in sentClaimed so a later-resolving window covering it still claims it
+// into its mapping (or is left out if its send dropped). Returns whether the
+// mock was noted in sentClaimed (caller passes noted to ownedMock). Does not
+// alter OutsideRequests (which is reserved for traffic outside per-test windows
+// on non-per-test recordings). Caller holds m.mu.
+func (m *SyncMockManager) recordGapFlushLocked(mock *models.Mock, gapKey int64) (noted bool) {
+	mock.Name = "mock-" + generateRandomString(8)
+	if mock.Spec.Metadata == nil {
+		mock.Spec.Metadata = make(map[string]string, 1)
+	}
+	mock.Spec.Metadata[models.MetadataInterTestGapKey] = "true"
+	if m.gapFlushed == nil {
+		m.gapFlushed = make(map[int64]int)
+	}
+	if _, exists := m.gapFlushed[gapKey]; !exists {
+		if len(m.gapKeyOrder) < maxRecentWindows {
+			m.gapKeyOrder = append(m.gapKeyOrder, gapKey)
+		} else {
+			old := m.gapKeyOrder[m.gapKeyNext]
+			delete(m.gapFlushed, old)
+			delete(m.gapCapWarned, old)
+			m.gapKeyOrder[m.gapKeyNext] = gapKey
+			m.gapKeyNext = (m.gapKeyNext + 1) % maxRecentWindows
+		}
+	}
+	m.gapFlushed[gapKey]++
+	return m.noteGapSentClaimedLocked(mock)
+}
+
+// noteGapCapDropLocked emits a single warning per gap key when an otherwise
+// eligible gap mock is actually dropped past maxGapMocksPerGap. Caller holds
+// m.mu.
+func (m *SyncMockManager) noteGapCapDropLocked(gapKey int64) {
+	if m.gapCapWarned[gapKey] {
+		return
+	}
+	if m.gapCapWarned == nil {
+		m.gapCapWarned = make(map[int64]bool)
+	}
+	m.gapCapWarned[gapKey] = true
+	if m.logger != nil {
+		m.logger.Warn("inter-request gap mock cap reached; dropping further unowned gap mocks for this gap",
+			zap.Int("cap", maxGapMocksPerGap))
+	}
+}
+
 // FlushOwnedWindows forwards every buffered mock that can be attributed
 // right now — session/connection mocks (reusable, never window-bound) and
 // per-test mocks whose ReqTimestampMock falls inside an already-resolved
@@ -3714,6 +4037,14 @@ func (m *SyncMockManager) flushTakeLocked(mock *models.Mock) (take flushTake, w 
 // ctx is cancelled and the relay, consumer, and InsertMock all drop it.
 // Order within the buffer is preserved for the mocks left behind.
 func (m *SyncMockManager) FlushOwnedWindows() {
+	m.flushOwnedWindows(false)
+}
+
+func (m *SyncMockManager) flushOwnedWindows(drainingAtStop bool) {
+	m.flushOwnedWindowsAt(time.Now(), drainingAtStop)
+}
+
+func (m *SyncMockManager) flushOwnedWindowsAt(now time.Time, drainingAtStop bool) {
 	if m == nil {
 		return
 	}
@@ -3732,7 +4063,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		return
 	}
 	mappingChan := m.mappingChan
-	mocksToSend, lateMappings, gaveUp := m.flushLocked(outChanBound, &tally)
+	mocksToSend, lateMappings, gaveUp := m.flushLocked(outChanBound, &tally, now, drainingAtStop)
 	hold := m.holdStateLocked()
 	m.noteTaken(mocksToSend)
 	// Owed before the mocks go: a stop asked between the two sends waits for
@@ -3770,13 +4101,49 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 // sent for a claim and what is owed, with the output bound (outChanBound): what
 // to send, the late mappings to send with it, and the windows the hold's bound
 // gave up. Counted in tally. Caller holds mu, and sends after letting it go.
-func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mocksToSend []ownedMock, lateMappings map[string][]string, gaveUp []*Window) {
+func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally, now time.Time, drainingAtStop bool) (mocksToSend []ownedMock, lateMappings map[string][]string, gaveUp []*Window) {
 	openFrom, open := m.openFromLocked()
 	var refs ownerRefs
+	pc := pendingCache{m: m}
 
 	// A settled mock (settledPrefix) is one the flush keeps (flushKeep): the
-	// prefix stays where it is, and the walk starts after it.
+	// prefix stays where it is, and the walk starts after it. When bounded
+	// inter-request gap flushing can apply on this pass, scan the settled
+	// prefix to find the first mock that could qualify for gap flushing
+	// (skipping young mocks within StaleHorizon on live ticks, out-of-range
+	// timestamps, open/unkept-covered timestamps, and responses at or after
+	// latestKeptStart).
+	gapCutoff := now.Add(-StaleHorizon)
 	settled := m.settledLocked()
+	if m.gapFlushGloballyAllowedLocked() {
+		for limit := 0; limit < settled; limit++ {
+			t := m.settled.at[limit]
+			if !drainingAtStop && !t.Before(gapCutoff) {
+				continue
+			}
+			if !t.After(m.firstKeptEnd) || !t.Before(m.latestKeptStart) {
+				continue
+			}
+			if open && !openFrom.After(t) {
+				continue
+			}
+			if m.inUnkeptSpanLocked(t) {
+				continue
+			}
+			var res time.Time
+			if mk := m.buffer[limit]; mk != nil {
+				res = mk.Spec.ResTimestampMock
+				if !res.IsZero() && !res.Before(m.latestKeptStart) {
+					continue
+				}
+			}
+			if m.windowsOpenLate && pc.pendingBefore(mockLatestTime(t, res)) {
+				continue
+			}
+			settled = limit
+			break
+		}
+	}
 	at := m.settledTimes(settled)
 	keepIdx := settled
 	for i := settled; i < len(m.buffer); i++ {
@@ -3838,6 +4205,26 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 			// in flight claims it: held for that request now, with the window
 			// it goes back to if that request ends without it.
 			m.holdForClaimLocked(mock, tally, refs.of(shared, true))
+			continue
+		}
+		// Bounded inter-request / post-response gap mock (e.g. background job
+		// triggered by a 202 Accepted response): owns no resolved kept or
+		// duplicate window, sits strictly between two resolved kept windows,
+		// and is uncovered by any open or unkept closed window.
+		if gapKey, ok, capped := m.canFlushGapLocked(mock, now, drainingAtStop, &pc); ok {
+			noted := m.recordGapFlushLocked(mock, gapKey)
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
+			continue
+		} else if capped {
+			m.noteGapCapDropLocked(gapKey)
+			tally.count(droppedOutsideAnyWindow)
+			if m.windowsOpenLate {
+				// Record the dropped mock in heldCut so settlePool ->
+				// settleLetGo -> cutDropped leaves out any late-opening window
+				// covering it, matching resolveRange's stale-cutoff path.
+				m.heldCut = append(m.heldCut, cutHeld{mock: mock, epoch: m.revokeEpoch.Load()})
+				m.letGo.Store(true)
+			}
 			continue
 		}
 		// Not attributable yet — a future (possibly out-of-order) request
@@ -3944,8 +4331,11 @@ func (c LossCause) String() string {
 //     first, hands the test case on with the window still unclaimed, and
 //     only then Keeps it: a Keep false then means the test case went out
 //     without mocks it may own, and RevokeTestCase leaves it out.
-//   - a duplicate: Close BEFORE the prune, so its own window does not hold its
-//     own debris.
+//   - a duplicate: in synchronous mode, record its keep=false window
+//     (ResolveRange) and Close; in asynchronous dedup-queue mode, Close the
+//     window (which records its [start, now] span in unkeptSpans so its egress
+//     is never mistaken for inter-request gap mocks) and let the dedup queue
+//     prune its debris in queue order via DeleteMocksStrictlyBefore.
 //   - given up on (an early exit, a failed read): Close.
 //
 // Ending a window drops the held mocks no window still open may own: each was
@@ -3980,6 +4370,7 @@ func (m *SyncMockManager) OpenWindow(start time.Time, lost func(LossCause) (take
 	}
 	w := &Window{m: m, start: start, lost: lost}
 	m.mu.Lock()
+	m.usedOpenWindows = true
 	heap.Push(&m.open, w)
 	m.noteOldestLocked()
 	m.mu.Unlock()
@@ -4282,6 +4673,9 @@ func (w *Window) Close() {
 		m := w.m
 		var t dropTally
 		m.mu.Lock()
+		if (w.idx >= 0 || w.inFlight) && !m.hasDuplicateWindowAtLocked(w.start) {
+			m.noteUnkeptSpanLocked(w.start, time.Now())
+		}
 		m.endWindowLocked(w, &t, false)
 		m.publishHoldLocked()
 		hold := m.holdStateLocked()
@@ -5007,6 +5401,9 @@ func (m *SyncMockManager) StartRecordSession() {
 	m.recordingFrom.Store(time.Now().UnixNano())
 	m.mu.Unlock()
 	m.EndStoppedRecording()
+	m.mu.Lock()
+	m.resetGapStateLocked()
+	m.mu.Unlock()
 	// A recording that ended (EndRecording) is over: this one captures.
 	m.ResumeRecording()
 }
@@ -5111,9 +5508,9 @@ func (m *SyncMockManager) EndStoppedRecording() {
 	var heldGaveUp []*Window
 	if outChanBound {
 		// What goes to the ended recording's test cases now (its buffered
-		// late mocks, what is owed back, its startup mocks' mappings) goes
-		// to its streams, in the step that ends it.
-		send, late, heldGaveUp = m.flushLocked(outChanBound, &t)
+		// late mocks, what is owed back, its startup mocks' mappings, and any
+		// bounded inter-request gap mocks) goes to its streams, in the step that ends it.
+		send, late, heldGaveUp = m.flushLocked(outChanBound, &t, time.Now(), true)
 	}
 	letGo := len(m.owed) // no stream of the ended recording is bound to take them
 	m.owed = nil
@@ -5626,6 +6023,13 @@ type sentClaim struct {
 	// dropEpoch is the revokeEpoch of its drop (claimDropped): the test it is
 	// told to later is revoked only in that epoch (recordDroppedTCFor).
 	dropEpoch uint64
+	// gap marks a bounded inter-request gap mock flushed under late-opening
+	// windows: retained in sentClaimed until a kept window takes it, the
+	// recording resets, or maxSentClaimed eviction runs, so a late-opening
+	// window covering it (including two-goroutine parsers such as gRPC where
+	// the response side can run ahead of request headers) still claims it into
+	// its mapping or is left out if dropped.
+	gap bool
 }
 
 // claimSend is how the send of a startup mock noted for a claim went.
@@ -5694,6 +6098,25 @@ func (m *SyncMockManager) noteSentClaimedLocked(mk *models.Mock, self *Window, o
 	return true
 }
 
+// noteGapSentClaimedLocked records a rescued inter-request gap mock in
+// sentClaimed when windowsOpenLate is active, so if a late-opening window later
+// resolves over mk's timestamp, takeSentClaimedLocked attaches mk.Name to that
+// test's mapping (or leaves it out if mk's send dropped). Caller holds m.mu.
+func (m *SyncMockManager) noteGapSentClaimedLocked(mk *models.Mock) bool {
+	if !m.windowsOpenLate || !mapsTo(mk) || mk.Spec.ReqTimestampMock.IsZero() {
+		return false
+	}
+	if len(m.sentClaimed) >= maxSentClaimed {
+		m.evictSentClaimedLocked()
+	}
+	at := mk.Spec.ReqTimestampMock
+	i := sort.Search(len(m.sentClaimed), func(i int) bool { return at.Before(m.sentClaimed[i].at) })
+	m.sentClaimed = append(m.sentClaimed, sentClaim{})
+	copy(m.sentClaimed[i+1:], m.sentClaimed[i:])
+	m.sentClaimed[i] = sentClaim{name: mk.Name, at: at, gap: true}
+	return true
+}
+
 // evictSentClaimedLocked forgets the oldest eighth of the notes at the bound
 // (maxSentClaimed), and counts them for settleLetGo to say once mu is let go
 // (sayEvicted): those a request took, or that were to go back to a window,
@@ -5701,8 +6124,14 @@ func (m *SyncMockManager) noteSentClaimedLocked(mk *models.Mock, self *Window, o
 // back to a window is in no mapping. Caller holds m.mu.
 func (m *SyncMockManager) evictSentClaimedLocked() {
 	evict := m.sentClaimed[:maxSentClaimed/8]
+	gapEvicted := 0
 	for _, c := range evict {
-		if c.takenBy != "" || c.owner != nil {
+		if c.gap {
+			gapEvicted++
+			if c.takenBy != "" || c.owner != nil {
+				m.evicted.gapFollowed++
+			}
+		} else if c.takenBy != "" || c.owner != nil {
 			m.evicted.followed++
 		}
 	}
@@ -5710,27 +6139,32 @@ func (m *SyncMockManager) evictSentClaimedLocked() {
 	clear(m.sentClaimed[n:])
 	m.sentClaimed = m.sentClaimed[:n]
 	m.sentClaimedEvicted.Add(uint64(len(evict)))
-	m.evicted.forgotten += len(evict)
+	m.evicted.forgotten += len(evict) - gapEvicted
+	m.evicted.gapForgotten += gapEvicted
 	m.letGo.Store(true)
 }
 
 // evictedNotes is what evictSentClaimedLocked forgot since it was last said.
-type evictedNotes struct{ forgotten, followed int }
+type evictedNotes struct{ forgotten, followed, gapForgotten, gapFollowed int }
 
 // sayEvicted says e, the notes forgotten at the bound, at WARN. Never called
 // under mu.
 func (m *SyncMockManager) sayEvicted(e evictedNotes) {
-	if e.forgotten == 0 {
-		return
+	if e.forgotten > 0 {
+		if ce := m.dropLogger().Check(zapcore.WarnLevel, "startup mocks sent while requests that may take them were in flight are past the bound kept for them; the oldest are forgotten, and a test case that takes one of them may be saved without it in its mapping"); ce != nil {
+			ce.Write(zap.Int("forgotten", e.forgotten), zap.Int("forgottenFollowed", e.followed),
+				zap.Uint64("forgottenSoFar", m.sentClaimedEvicted.Load()),
+				zap.Int("bound", maxSentClaimed),
+				zap.String("next_step", "a request in flight since the recording's start (a long stream) or high startup-mock traffic under late-opening windows (retained for StaleHorizon) keeps startup mocks claimable; end the long request, or record past the startup window, and re-record the test cases this run saved"))
+		}
 	}
-	ce := m.dropLogger().Check(zapcore.WarnLevel, "startup mocks sent while requests that may take them were in flight are past the bound kept for them; the oldest are forgotten, and a test case that takes one of them may be saved without it in its mapping")
-	if ce == nil {
-		return
+	if e.gapForgotten > 0 {
+		if ce := m.dropLogger().Check(zapcore.WarnLevel, "inter-request gap mocks retained for late-opening window claims are past the bound kept for them; the oldest are forgotten, and a delayed test case covering one may be saved without it in its mapping"); ce != nil {
+			ce.Write(zap.Int("gapForgotten", e.gapForgotten), zap.Int("gapForgottenFollowed", e.gapFollowed),
+				zap.Uint64("forgottenSoFar", m.sentClaimedEvicted.Load()),
+				zap.Int("bound", maxSentClaimed))
+		}
 	}
-	ce.Write(zap.Int("forgotten", e.forgotten), zap.Int("forgottenFollowed", e.followed),
-		zap.Uint64("forgottenSoFar", m.sentClaimedEvicted.Load()),
-		zap.Int("bound", maxSentClaimed),
-		zap.String("next_step", "a request in flight since the recording's start (a long stream) or high startup-mock traffic under late-opening windows (retained for StaleHorizon) keeps startup mocks claimable; end the long request, or record past the startup window, and re-record the test cases this run saved"))
 }
 
 // cutHeld is a mock the hold let go of that it held at the stale cutoff
@@ -5889,7 +6323,11 @@ func (m *SyncMockManager) pruneSentClaimedLocked(late *map[string][]string) {
 		switch {
 		case stays:
 		case c.owner == nil:
-			stays = m.openClaimsStartupLocked(c.at, cutoff)
+			// Keep gap-rescue claims until recording reset or maxSentClaimed
+			// eviction (never prune on Backlog.PendingBefore alone, since
+			// two-goroutine parsers like gRPC can advance response progress
+			// past a call before its request HEADERS open its window).
+			stays = c.gap || m.openClaimsStartupLocked(c.at, cutoff)
 		case m.openClaimLocked(c.at, nil) || c.sent == claimSending:
 			stays = true
 		case m.goneLocked(c.owner.recording):
@@ -6009,6 +6447,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		return selfW
 	}
 	var refs ownerRefs
+	pc := pendingCache{m: m}
 
 	// A kept resolve (keep==true) is one UNIQUE recorded test case; advance the
 	// startup-window counter so AddMock stops tagging mocks IsStartup once we are
@@ -6020,6 +6459,15 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// destination's too (destTCs), which a manager whose mocks go to several
 	// recordings tags by.
 	if keep {
+		// Advance kept bounds before the stale-cutoff loop so an aged gap mock
+		// strictly between an earlier kept window and THIS resolving kept
+		// window is rescued instead of dropped at cutoffTime.
+		if !end.IsZero() && (m.firstKeptEnd.IsZero() || end.Before(m.firstKeptEnd)) {
+			m.firstKeptEnd = end
+		}
+		if !start.IsZero() && start.After(m.latestKeptStart) {
+			m.latestKeptStart = start
+		}
 		m.resolvedTestCount++
 		if m.destTCs == nil {
 			m.destTCs = make(map[string]int)
@@ -6340,6 +6788,15 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		// are handled in the lifetime carve-out at the top of the loop
 		// and never reach this branch.)
 		if mockTime.Before(cutoffTime) {
+			if outChanBound {
+				if gapKey, ok, capped := m.canFlushGapLocked(mock, now, true, &pc); ok {
+					noted := m.recordGapFlushLocked(mock, gapKey)
+					mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
+					continue
+				} else if capped {
+					m.noteGapCapDropLocked(gapKey)
+				}
+			}
 			if m.holdOrDropLocked(mock, droppedOutsideAnyWindow, openFrom, open, &tally, nil) {
 				continue
 			}
@@ -6542,16 +6999,15 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 // ResolveRange, so without the rescue here the kept mocks are gone.
 //
 // Discriminator: a mock belongs to a kept test iff its ReqTimestampMock
-// falls inside a recently-resolved KEPT window. (In async mode, the only
-// caller, duplicates resolve through here rather than ResolveRange, so every
-// window in recentWindows is kept; a sync-mode ResolveRange(keep=false) window
-// is recorded with keep=false and never claims a mock here.) So a
-// before-the-horizon mock that owns a recent kept window is a late kept mock
-// → flush it (rescue); one that owns none is the skipped duplicate's own
-// debris → drop it, unless a request still in flight may own it
-// (OpenWindow): that one is held for it, however long the request takes.
-// Session/connection mocks are reusable across tests and are never reaped by
-// a per-test cleanup.
+// falls inside a recently-resolved KEPT window. (A duplicate window recorded
+// via ResolveRange with keep=false stays in recentWindows with keep=false and
+// never claims a mock here.) So a before-the-horizon mock that owns a recent
+// kept window is a late kept mock → flush it (rescue); one that owns none is
+// rescued as a bounded inter-request gap mock (stamped with interTestGap="true")
+// when eligible, or otherwise dropped as the skipped duplicate's own debris,
+// unless a request still in flight may own it (OpenWindow): that one is held
+// for it, however long the request takes. Session/connection mocks are reusable
+// across tests and are never reaped by a per-test cleanup.
 func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	if m == nil {
 		return
@@ -6567,6 +7023,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	openFrom, open := m.openFromLocked()
 	bufferLenBefore := len(m.buffer)
 	var refs ownerRefs
+	pc := pendingCache{m: m}
 
 	keepIdx := 0
 	// A settled mock (settledPrefix) this prune keeps stays settled: it keeps
@@ -6657,6 +7114,19 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			// Startup/boot traffic owns no specific test → owner "".
 			mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 			continue
+		}
+
+		// Bounded inter-request gap mock before a later duplicate's prune
+		// horizon: owns no resolved kept or duplicate window and is uncovered
+		// by any open or unkept closed window. Rescue it instead of wiping it.
+		if !ok && !behind && outChanBound {
+			if gapKey, eligible, capped := m.canFlushGapLocked(mock, time.Time{}, true, &pc); eligible {
+				noted := m.recordGapFlushLocked(mock, gapKey)
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
+				continue
+			} else if capped {
+				m.noteGapCapDropLocked(gapKey)
+			}
 		}
 
 		// Owns no kept window and is before the horizon → the skipped

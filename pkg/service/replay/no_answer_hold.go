@@ -160,6 +160,14 @@ func heldFor(m *models.Mock, session bool, w pkg.ServeWindow) bool {
 	case pkg.ServedSession:
 		return pkg.RecordedInWindow(m, w)
 	}
+	// Single-step post-response gap handoff: MockManager can also serve an
+	// unconsumed gap mock handed off from the bounded gap immediately before w
+	// (w.InFlightFrom, w.Start). Holding one more mock is safe; deleting one
+	// the agent serves is not.
+	if !session && !w.InFlightFrom.IsZero() && !w.Start.IsZero() &&
+		models.IsInterTestGap(m) && models.InGap(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, w.InFlightFrom, w.Start) {
+		return true
+	}
 	return false
 }
 
@@ -188,6 +196,9 @@ func serveWindowOf(sched *models.WindowSchedule, w models.TestWindow, agent mode
 	}
 	if from, ok := sched.GapBefore(w.Start); ok {
 		sw.InFlightFrom = from
+	}
+	if gapFrom, gapTo, ok := sched.GapAfter(w.Start); ok {
+		sw.GapAfterFrom, sw.GapAfterTo, sw.HasGapAfter = gapFrom, gapTo, true
 	}
 	return sw
 }

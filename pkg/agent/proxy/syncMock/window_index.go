@@ -429,6 +429,14 @@ func inRingOrder(found []int32) []int32 {
 // rest down over them: append copies the ring into a new array only once the
 // old one is used up, so a resolve does not copy the ring. Caller holds mu.
 func (m *SyncMockManager) addRecentWindowLocked(w resolvedWindow) {
+	if w.keep {
+		if !w.end.IsZero() && (m.firstKeptEnd.IsZero() || w.end.Before(m.firstKeptEnd)) {
+			m.firstKeptEnd = w.end
+		}
+		if !w.start.IsZero() && w.start.After(m.latestKeptStart) {
+			m.latestKeptStart = w.start
+		}
+	}
 	ix := m.windowsLocked()
 	w.seq = ix.nextSeq()
 	m.recentWindows = append(m.recentWindows, w)

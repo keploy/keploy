@@ -115,6 +115,7 @@ func (m *SyncMockManager) EndRecording() {
 	clear(m.buffer)
 	m.buffer = m.buffer[:0]
 	m.keepSettledLocked(0, m.settled.at[:0])
+	m.resetGapStateLocked()
 	m.mappingChan = nil
 	m.mappingOverflowMu.Lock()
 	queued := m.mappingOverflow
@@ -147,6 +148,9 @@ func (m *SyncMockManager) ResumeRecording() {
 	}
 	m.ended.stopAsked.Store(false)
 	if m.ended.on.Swap(false) {
+		m.mu.Lock()
+		m.resetGapStateLocked()
+		m.mu.Unlock()
 		m.sayNotCaptured("a recording started")
 	}
 }

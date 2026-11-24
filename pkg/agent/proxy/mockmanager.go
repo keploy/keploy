@@ -567,6 +567,15 @@ type MockManager struct {
 	carryLastStart time.Time
 	carryLoadedTo  time.Time
 
+	// prevGapAfter is the bounded inter-test gap (from, to) immediately after
+	// the last staged test window (guarded by swapMu). handedOffGap is the gap
+	// handed off from that window into the current window when the immediate
+	// successor opened with unconsumed gap mocks still in the per-test tree
+	// (guarded by windowMu alongside windowStart/windowEnd, and tagged with
+	// forStart so it only applies to that exact window).
+	prevGapAfter gapSpan
+	handedOffGap gapSpan
+
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
 	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
 	// RLock() the snapshot read so they cannot observe a torn (newMocks,
@@ -1260,6 +1269,9 @@ func (m *MockManager) getFilteredMocksIn(v *exactView) ([]*models.Mock, error) {
 // that is a per-field update, not a pool replacement.
 func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.windowMu.Lock()
+	if !m.windowStart.Equal(start) {
+		m.handedOffGap = gapSpan{}
+	}
 	m.windowStart = start
 	m.windowEnd = end
 	m.scopeOpen = false
@@ -1287,6 +1299,22 @@ func (m *MockManager) InTestWindow(t time.Time) bool {
 // the replay seeded no windows, for the first test, or with no gap.
 func (m *MockManager) InFlightFrom(start time.Time) (from time.Time, ok bool) {
 	return m.testWindows.Load().GapBefore(start)
+}
+
+// GapAfter is, for the test window that starts at start, the open inter-test
+// gap (from, to) immediately after it (models.WindowSchedule.GapAfter).
+func (m *MockManager) GapAfter(start time.Time) (from, to time.Time, ok bool) {
+	return m.testWindows.Load().GapAfter(start)
+}
+
+type gapSpan struct {
+	from, to time.Time
+	forStart time.Time
+	valid    bool
+}
+
+func (g gapSpan) activeFor(start time.Time) bool {
+	return g.valid && !start.IsZero() && g.forStart.Equal(start)
 }
 
 // InRecordedTestWindow reports whether a mock recorded at t was recorded
@@ -1430,7 +1458,7 @@ func (m *MockManager) getFilteredMocksInWindowAt(v *exactView) ([]*models.Mock, 
 	tree := m.filtered
 	m.treesMu.RUnlock()
 	m.windowMu.RLock()
-	start, end, rewinds := m.windowStart, m.windowEnd, m.rewinds
+	start, end, rewinds, handedOffGap := m.windowStart, m.windowEnd, m.rewinds, m.handedOffGap
 	m.windowMu.RUnlock()
 	m.swapMu.RUnlock()
 
@@ -1451,7 +1479,9 @@ func (m *MockManager) getFilteredMocksInWindowAt(v *exactView) ([]*models.Mock, 
 	}
 	out := make([]*models.Mock, 0, len(all))
 	var droppedOutOfWindow, droppedInvalidOrder, missingTs uint64
-	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
+	tw := m.testWindows.Load()
+	gapFrom, hasGap := tw.GapBefore(start)
+	gapAfterFrom, gapAfterTo, hasGapAfter := tw.GapAfter(start)
 	for _, mock := range all {
 		if mock == nil {
 			continue
@@ -1487,6 +1517,12 @@ func (m *MockManager) getFilteredMocksInWindowAt(v *exactView) ([]*models.Mock, 
 			out = append(out, mock)
 		case inFlightAtStart(mock, req, res, gapFrom, start, hasGap):
 			// In flight when the window's test began: its own.
+			out = append(out, mock)
+		case hasGapAfter && models.IsInterTestGap(mock) && models.InGap(req, res, gapAfterFrom, gapAfterTo):
+			// Post-response call in the gap immediately after this window.
+			out = append(out, mock)
+		case handedOffGap.activeFor(start) && models.IsInterTestGap(mock) && models.InGap(req, res, handedOffGap.from, handedOffGap.to):
+			// Unconsumed post-response call handed off once from the immediate predecessor window.
 			out = append(out, mock)
 		default:
 			droppedOutOfWindow++
@@ -1659,6 +1695,7 @@ func (m *MockManager) SetScopeMocksWithReplaced(filtered, unfiltered []*models.M
 	m.bumpStagingEpoch()
 	m.carry.reset()
 	m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
+	m.prevGapAfter = gapSpan{}
 	// A zero window is no time window: the per-test tier takes filtered as
 	// it is, the startup tier is rebuilt empty, and the published window
 	// stays zero, published with the open scope.
@@ -2011,6 +2048,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// the session pool (KEPLOY_STRICT_MOCK_WINDOW=0: an unstated per-test mock
 	// out of the window), as the agent's window filter promotes it.
 	var sessionIn []*models.Mock
+	var nextGapAfter gapSpan
 	if !isInitialStaging && !start.IsZero() && !end.IsZero() {
 		out := make([]*models.Mock, 0, len(filtered))
 		// Every mock is staged by the agent's one serve decision
@@ -2039,6 +2077,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		//     start): a consumer's long poll (a Kafka fetch, an SQS
 		//     ReceiveMessage, a BLPOP) the app keeps outstanding between
 		//     tests, whose answer the test waits for (models.InFlightEligible);
+		//   - recorded strictly in the open gap immediately after this window
+		//     (models.WindowSchedule.GapAfter, models.InGap): post-response
+		//     async work kicked off by this test;
 		//   - a window-bound mock (a connection failure): its own window or
 		//     the startup band, nowhere else.
 		//
@@ -2047,8 +2088,13 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// tier below, which serves it from its release window on
 		// (models.WindowSchedule.CarryOverReachable).
 		sw := pkg.ServeWindow{Start: start, End: end, FirstStart: firstStart, StrictPerCall: true, StrictWindow: true}
-		if gapFrom, hasGap := m.testWindows.Load().GapBefore(start); hasGap {
+		tw := m.testWindows.Load()
+		if gapFrom, hasGap := tw.GapBefore(start); hasGap {
 			sw.InFlightFrom = gapFrom
+		}
+		if gapAfterFrom, gapAfterTo, hasGapAfter := tw.GapAfter(start); hasGapAfter {
+			sw.GapAfterFrom, sw.GapAfterTo, sw.HasGapAfter = gapAfterFrom, gapAfterTo, true
+			nextGapAfter = gapSpan{from: gapAfterFrom, to: gapAfterTo, valid: true}
 		}
 		for _, mock := range filtered {
 			if mock == nil {
@@ -2165,6 +2211,66 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			}
 			return true
 		})
+	}
+
+	// Single-step post-response gap handoff: when the window opening now is the
+	// immediate successor across the previous window's bounded post-window gap,
+	// carry over any still-unconsumed gap mock from oldPerTest once
+	// (shallow-copied so pooled pointers are never mutated in place). Skipped
+	// under exact serving (where the view's own mapping rules) and for any mock
+	// already consumed in this session (including MarkMockAsUsed-updated mocks
+	// that remain in the tree). Any other transition (BaseTime, non-adjacent
+	// jump, or subsequent window) clears the handoff.
+	var handedOff gapSpan
+	if !isInitialStaging && m.exactView() == nil && !start.IsZero() && !end.IsZero() &&
+		m.prevGapAfter.valid && !m.prevGapAfter.to.IsZero() && m.prevGapAfter.to.Equal(start) && oldPerTest != nil {
+		var candidates []*models.Mock
+		oldPerTest.rangeValues(func(v interface{}) bool {
+			mk, ok := v.(*models.Mock)
+			if !ok || mk == nil {
+				return true
+			}
+			if !models.IsInterTestGap(mk) || !models.InGap(mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock, m.prevGapAfter.from, start) {
+				return true
+			}
+			candidates = append(candidates, mk)
+			return true
+		})
+		if len(candidates) > 0 {
+			seen := make(map[string]struct{}, len(filteredForTree))
+			for _, mk := range filteredForTree {
+				if mk != nil && mk.Name != "" {
+					seen[mk.Name] = struct{}{}
+				}
+			}
+			var handoff []*models.Mock
+			m.consumedMu.Lock()
+			for _, mk := range candidates {
+				if mk.Name != "" {
+					if _, alreadyUsed := m.consumedPersistent[mk.Name]; alreadyUsed {
+						continue
+					}
+					if _, dup := seen[mk.Name]; dup {
+						continue
+					}
+					seen[mk.Name] = struct{}{}
+				}
+				cp := mk.ShallowCopy()
+				cp.TestModeInfo.StagedSet = gen
+				cp.MarkPooled()
+				handoff = append(handoff, cp)
+			}
+			m.consumedMu.Unlock()
+			if len(handoff) > 0 {
+				filteredForTree = append(filteredForTree, handoff...)
+				handedOff = gapSpan{from: m.prevGapAfter.from, to: start, forStart: start, valid: true}
+			}
+		}
+	}
+	if isInitialStaging || start.IsZero() || end.IsZero() {
+		m.prevGapAfter = gapSpan{}
+	} else {
+		m.prevGapAfter = nextGapAfter
 	}
 
 	// What the test is staged with (OpenTestRecordings), kept before its
@@ -2347,11 +2453,13 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	if !isInitialStaging {
 		m.windowStart = start
 		m.windowEnd = end
+		m.handedOffGap = handedOff
 		m.noteWindowStartLocked(start)
 	} else {
 		// A staging starts what WindowRewinds compares over: the set's first
 		// window does not go back from the last set's last one.
 		m.rewindFrom = time.Time{}
+		m.handedOffGap = gapSpan{}
 	}
 	m.scopeOpen = scope
 	m.windowMu.Unlock()
@@ -2816,7 +2924,7 @@ func (m *MockManager) ownedByOpenTest(mk *models.Mock, read func()) bool {
 	}
 	m.windowMu.RLock()
 	active := m.windowActiveLocked()
-	start, end := m.windowStart, m.windowEnd
+	start, end, handedOff := m.windowStart, m.windowEnd, m.handedOffGap
 	m.windowMu.RUnlock()
 	if !active {
 		return false
@@ -2830,8 +2938,10 @@ func (m *MockManager) ownedByOpenTest(mk *models.Mock, read func()) bool {
 	if start.IsZero() || end.IsZero() {
 		return true
 	}
-	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
-	return inRecordedWindow(mk, start, end, gapFrom, hasGap)
+	tw := m.testWindows.Load()
+	gapFrom, hasGap := tw.GapBefore(start)
+	gapAfterFrom, gapAfterTo, hasGapAfter := tw.GapAfter(start)
+	return inRecordedWindowOrGap(mk, start, end, gapFrom, hasGap, gapSpan{from: gapAfterFrom, to: gapAfterTo, valid: hasGapAfter}, handedOff)
 }
 
 // InFlightIntoOpenTest reports whether mk was in flight when the open test
@@ -2884,6 +2994,26 @@ func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap boo
 		return true
 	}
 	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap)
+}
+
+// inRecordedWindowOrGap extends inRecordedWindow with post-response gap mocks:
+// calls recorded strictly in the open gap after this window (gapAfter) or
+// handed off once from the immediate predecessor window (handedOff).
+func inRecordedWindowOrGap(mk *models.Mock, start, end, gapFrom time.Time, hasGap bool, gapAfter, handedOff gapSpan) bool {
+	if inRecordedWindow(mk, start, end, gapFrom, hasGap) {
+		return true
+	}
+	req, res := mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock
+	if req.IsZero() || res.IsZero() || (res.Before(req) && !provenswitch.On()) {
+		return false
+	}
+	if !models.IsInterTestGap(mk) {
+		return false
+	}
+	if gapAfter.valid && models.InGap(req, res, gapAfter.from, gapAfter.to) {
+		return true
+	}
+	return handedOff.activeFor(start) && models.InGap(req, res, handedOff.from, handedOff.to)
 }
 
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].
@@ -6199,6 +6329,18 @@ func (m *MockManager) getCarryOverMocksByKindIn(v *exactView, kind models.Kind) 
 // began (models.InFlightEligible, sent in the gap before it and answered at
 // or after its start) is that window's, as its tier holds it: whichever door
 // consumes it, it is mapped to that test.
+// currentTestWindowAndHandoff reads the published test window and its
+// single-step handoff span atomically under windowMu, returning zero under
+// exact serving (matching CurrentTestWindow).
+func (m *MockManager) currentTestWindowAndHandoff() (time.Time, time.Time, gapSpan) {
+	if m.exactView() != nil {
+		return time.Time{}, time.Time{}, gapSpan{}
+	}
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return m.windowStart, m.windowEnd, m.handedOffGap
+}
+
 func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
 	if !models.MarksOutOfWindow(&mock) {
 		return false
@@ -6207,15 +6349,26 @@ func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
 	if req.IsZero() {
 		return false
 	}
-	start, end := m.CurrentTestWindow()
+	start, end, handedOff := m.currentTestWindowAndHandoff()
 	if start.IsZero() || end.IsZero() {
 		return false
 	}
 	if place := models.PlaceOf(&mock); !place.Before(start) && !place.After(end) {
 		return false
 	}
-	from, ok := m.testWindows.Load().GapBefore(start)
-	return !inFlightAtStart(&mock, req, mock.Spec.ResTimestampMock, from, start, ok)
+	tw := m.testWindows.Load()
+	from, ok := tw.GapBefore(start)
+	res := mock.Spec.ResTimestampMock
+	if inFlightAtStart(&mock, req, res, from, start, ok) {
+		return false
+	}
+	if gapAfterFrom, gapAfterTo, hasGapAfter := tw.GapAfter(start); hasGapAfter && models.IsInterTestGap(&mock) && models.InGap(req, res, gapAfterFrom, gapAfterTo) {
+		return false
+	}
+	if handedOff.activeFor(start) && models.IsInterTestGap(&mock) && models.InGap(req, res, handedOff.from, handedOff.to) {
+		return false
+	}
+	return true
 }
 
 // inFlightAtStart reports whether mk, its request recorded at req and its

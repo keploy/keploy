@@ -1041,6 +1041,17 @@ type InFlightPlanner interface {
 	InFlightFrom(start time.Time) (from time.Time, ok bool)
 }
 
+// GapAfterPlanner is the optional extension of a proxy that knows the set's
+// recorded test windows: for the test window that starts at start, the open
+// inter-test gap (from, to) immediately after it (models.WindowSchedule.GapAfter).
+// The agent loads eligible per-test mocks recorded strictly inside that gap
+// (models.InGap) beside the window's own mocks so post-response background
+// calls triggered by that test (and handed off once to the immediate next test
+// if unconsumed) can be served deterministically.
+type GapAfterPlanner interface {
+	GapAfter(start time.Time) (from, to time.Time, ok bool)
+}
+
 // ExactServer is the optional extension of a proxy that serves each test its
 // own mocks exactly, under the proven switch (design v14 §5.2): while a test
 // is open, each of its test mocks answers at most one request, in recorded

@@ -581,6 +581,50 @@ func (d *DiskMocks) LoadInFlight(from, at time.Time) ([]*models.Mock, error) {
 	return out, nil
 }
 
+// LoadInGap returns the per-test mocks recorded strictly inside the inter-test
+// gap (from, to): request time strictly after from and, when to is non-zero,
+// both request and response time strictly before to (models.InGap), eligible
+// under models.InFlightEligible.
+func (d *DiskMocks) LoadInGap(from, to time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo := from.UnixNano()
+	hasHi := !to.IsZero()
+	hi := to.UnixNano()
+	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].placeTsNano > lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.entries); i++ {
+		e := d.entries[i]
+		if hasHi && e.placeTsNano >= hi {
+			break
+		}
+		if hasHi && e.resTsNano > 0 && e.resTsNano >= hi {
+			continue
+		}
+		sel = append(sel, e)
+	}
+	d.mu.Unlock()
+	decoded, err := d.decodeAll(sel)
+	if err != nil {
+		return nil, err
+	}
+	out := decoded[:0]
+	for _, m := range decoded {
+		if models.IsInterTestGap(m) && models.InGap(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, from, to) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
 // LoadCarryOver returns the carry-over mocks (models.IsCarryOver) with request
 // timestamp in [from, to] (inclusive), for the agent's lookahead load of the
 // carry-over tier. It reads only those entries, whatever else the range holds.

@@ -1775,6 +1775,50 @@ func (a *Agent) inFlightFrom(params models.MockFilterParams) (time.Time, bool) {
 	return planner.InFlightFrom(params.AfterTime)
 }
 
+// gapAfter returns the open inter-test gap (from, to) immediately after
+// params' test window, when the proxy knows the set's recorded windows.
+func (a *Agent) gapAfter(params models.MockFilterParams) (time.Time, time.Time, bool) {
+	if !pkg.IsTestWindow(params.AfterTime, params.BeforeTime) {
+		return time.Time{}, time.Time{}, false
+	}
+	planner, ok := a.Proxy.(coreAgent.GapAfterPlanner)
+	if !ok {
+		return time.Time{}, time.Time{}, false
+	}
+	return planner.GapAfter(params.AfterTime)
+}
+
+// loadGapAfterMocks loads eligible per-test mocks recorded strictly inside the
+// open inter-test gap immediately after params' window, from disk (or resident
+// when disk is nil). Runs in both strict-window and mapping modes so a test
+// that kicks off post-response async work (e.g. 202 Accepted) stages its gap
+// mocks regardless of whether a stored mapping listed them.
+func (a *Agent) loadGapAfterMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams) ([]*models.Mock, error) {
+	if perTestLoadMode(params) == loadModeLaxAll {
+		return nil, nil
+	}
+	from, to, ok := a.gapAfter(params)
+	if !ok {
+		return nil, nil
+	}
+	var out []*models.Mock
+	for _, m := range resident {
+		if models.IsInterTestGap(m) && models.InGap(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, from, to) {
+			// Shallow-copy stored resident mocks before appendCarryOver stamps
+			// IsFiltered so earlier pooled stagings are never mutated in place.
+			out = append(out, m.ShallowCopy())
+		}
+	}
+	if disk != nil {
+		loaded, err := disk.LoadInGap(from, to)
+		if err != nil {
+			return nil, err
+		}
+		out = dedupByName(out, loaded)
+	}
+	return out, nil
+}
+
 // loadPerTestMocks reads, from the on-disk store disk, the per-test mocks
 // params' load mode (perTestLoadMode) asks for, beside resident. pool names
 // per-test mocks to read as well (the exact staging's pool, stageMocks):
@@ -2492,6 +2536,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		utils.LogError(a.logger, err, "failed to load the carry-over mocks for this test from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return nil, nil, err
 	}
+	gapMocks, err := a.loadGapAfterMocks(residentFiltered, disk, params)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to load the post-window gap mocks for this test from the agent's on-disk store")
+		return nil, nil, err
+	}
 
 	a.logger.Debug("Original mocks before filtering",
 		zap.Int("originalFiltered", len(originalFiltered)),
@@ -2581,14 +2630,21 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// window: a set's staging, the pool staged between tests) replaces
 	// nothing. The carry-over below is other tests' mocks, so it is added
 	// after.
+	// Merge post-window gap mocks BEFORE ReplacedBy / WithoutReplaced so a
+	// derived mock recorded in the gap replaces its source in the same window.
+	filteredMocks = appendCarryOver(filteredMocks, gapMocks)
+
 	windowed := !params.AfterTime.IsZero() && !params.AfterTime.Equal(models.BaseTime)
 	if mapped || windowed {
 		own := filteredMocks
 		if !mapped {
 			own = nil
 			w := pkg.ServeWindow{Start: params.AfterTime, End: params.BeforeTime}
+			if gapFrom, gapTo, ok := a.gapAfter(params); ok {
+				w.GapAfterFrom, w.GapAfterTo, w.HasGapAfter = gapFrom, gapTo, true
+			}
 			for _, m := range filteredMocks {
-				if pkg.RecordedInWindow(m, w) {
+				if pkg.RecordedInWindow(m, w) || (w.HasGapAfter && models.IsInterTestGap(m) && models.InGap(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, w.GapAfterFrom, w.GapAfterTo)) {
 					own = append(own, m)
 				}
 			}

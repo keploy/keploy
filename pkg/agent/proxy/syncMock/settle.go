@@ -64,6 +64,14 @@ type Explainer interface {
 // emit a test case or a mock captured before a time: a reader or a parser has
 // not got past it. A recording's stop drains the agent's streams until it
 // cannot (the agent's /record/pending, the CLI's drain).
+//
+// Implementations must satisfy two invariants used by bounded inter-request
+// gap checks under SetWindowsOpenLate:
+//   - Lock safety: PendingBefore may be called while SyncMockManager holds its
+//     lock and must not call back into SyncMockManager.
+//   - Monotonicity: PendingBefore(t) must be monotonically non-decreasing in t
+//     within a pass (if capture has progressed past t2, it has progressed past
+//     any t1 <= t2).
 type Backlog interface {
 	PendingBefore(before time.Time) bool
 }
