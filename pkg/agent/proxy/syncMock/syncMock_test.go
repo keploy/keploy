@@ -2180,9 +2180,9 @@ func (oneContainerAt) Fingerprint(context.Context, string) (string, bool) { retu
 func (oneContainerAt) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
 func (oneContainerAt) AwaitReadsOf(context.Context, []string)             {}
 
-func (oneContainerAt) Bind(context.Context)               {}
-func (oneContainerAt) Watch(context.Context, *zap.Logger) {}
-func (oneContainerAt) Endpoint() string                   { return "unix:///fake.sock" }
+func (oneContainerAt) Bind(context.Context) {}
+func (oneContainerAt) Start(*zap.Logger)    {}
+func (oneContainerAt) Endpoint() string     { return "unix:///fake.sock" }
 
 // Under the proven switch a mock a parser hands over is stamped with its
 // connection's container key, while that connection is still open; without

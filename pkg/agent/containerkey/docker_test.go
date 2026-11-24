@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -49,8 +51,10 @@ type fakeDocker struct {
 	imageErr   map[string]error
 	listErr    error
 	// hang makes the watch's list block until its context ends: a daemon
-	// that accepts and never answers.
-	hang bool
+	// that accepts and never answers; hangLists does so for that many lists
+	// of every container, the first ones asked.
+	hang      bool
+	hangLists int
 	// block holds the inspect of a container until its channel closes;
 	// entered is told each held inspect as it begins.
 	block   map[string]chan struct{}
@@ -139,7 +143,10 @@ func (f *fakeDocker) ContainerList(ctx context.Context, opts container.ListOptio
 	f.mu.Lock()
 	f.calls++
 	f.lists++
-	hang := f.hang
+	hang := f.hang || f.hangLists > 0
+	if f.hangLists > 0 {
+		f.hangLists--
+	}
 	out := f.listedLocked(nil)
 	err := f.listErr
 	f.mu.Unlock()
@@ -2511,4 +2518,205 @@ func TestAnIdenticalPutCountsNoChange(t *testing.T) {
 	if g := gen(); g != g0 {
 		t.Fatalf("an identical put of a container that shares its host port counted %d change(s)", g-g0)
 	}
+}
+
+// A native session starts its watch and never waits for the list (Start),
+// and a watch whose list is not in yet is kept for the next session: the end
+// of the session that started it says nothing of the daemon, and the list it
+// asked for is the one the next session's connections wait for. The daemon is
+// asked for one list, and a connection of the second session is placed once
+// it is in. A lookup never waits, and finds nothing until then.
+func TestTwoSessionsShareTheirWatchsFirstList(t *testing.T) {
+	f := newFakeDocker()
+	f.set("db", running("postgres:16", "sha256:db", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49153")}))
+	asked, release := heldList(t, f)
+	var asks atomic.Int32 // the lists of every container asked for
+	f.mu.Lock()
+	tell := f.beforeList
+	f.beforeList = func() { asks.Add(1); tell() }
+	f.mu.Unlock()
+	r, _ := newIndex(f)
+	began := make(chan struct{}, 4)
+	r.listWaitBegins = func() { began <- struct{}{} }
+	t.Cleanup(func() { release(); stopIndex(r) })
+	k := NewKeyer(r)
+	agent, stop := context.WithCancel(t.Context())
+	t.Cleanup(stop)
+	k.Bind(agent)
+
+	k.Watch(nil)
+	first := current(r)
+	within(t, asked, "the daemon was never asked for its list")
+	if _, ok, err := r.Lookup(netip.MustParseAddrPort("127.0.0.1:49153")); ok || err != nil {
+		t.Fatalf("a lookup before the list = %v, %v; want nothing, and no failure", ok, err)
+	}
+	k.Reset() // the first session ends
+	k.Watch(nil)
+	if current(r) != first || watchErr(r, first) != nil {
+		t.Fatalf("the next session dropped the watch whose list is out (failed: %v)", watchErr(r, first))
+	}
+
+	if _, _, isContainer := k.Name(zap.NewNop(), "pg", "127.0.0.1:49153"); isContainer {
+		t.Fatal("named a container before the daemon listed any")
+	}
+	placed := make(chan Container, 1)
+	go func() {
+		c, _ := k.Placed(t.Context(), "pg")
+		placed <- c
+	}()
+	within(t, began, "the second session's connection never waited for the list")
+	if n := asks.Load(); n != 1 {
+		t.Fatalf("the daemon was asked for %d lists before the first was in, want the first session's alone", n)
+	}
+	release()
+	if c := recv(t, placed, "the connection was not placed once the list was in"); c.ID != "db" {
+		t.Fatalf("the second session's connection was placed at %+v once the list was in, want db", c)
+	}
+}
+
+// A first list the daemon takes and never answers (a backend that hung, a
+// VM that was paused) stalls once keploy could run for the stall window with
+// no answer, never in wall time alone: the native watch fails, and keploy
+// says so at Warn, with what to do. A mock whose connection waited for the
+// list is stamped unread (UnreadKey), so its test is not judged, and the
+// record is told (OnUnreadMock): it is not filed under the address of what
+// may be a container. The next session's start reads the daemon afresh,
+// whose list places a connection.
+func TestAFirstListTheDaemonNeverAnswersStallsAndTheNextSessionReadsAfresh(t *testing.T) {
+	f := newFakeDocker()
+	f.set("db", running("postgres:16", "sha256:db", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49153")}))
+	f.hangLists = 1
+	r, _ := newIndex(f)
+	clk := &stall.ManualClock{}
+	r.stallClock = clk
+	began := make(chan struct{}, 4)
+	r.listWaitBegins = func() { began <- struct{}{} }
+	t.Cleanup(func() { stopIndex(r) })
+	k := NewKeyer(r)
+	told := make(chan string, 4)
+	k.OnUnreadMock(func(_ uint64, what string) { told <- what })
+	agent, stop := context.WithCancel(t.Context())
+	t.Cleanup(stop)
+	k.Bind(agent)
+	core, logs := observer.New(zap.InfoLevel)
+	k.Watch(zap.New(core))
+	first := current(r)
+
+	k.Name(zap.NewNop(), "pg", "127.0.0.1:49153")
+	stamped := make(chan *models.Mock, 1)
+	go func() {
+		m := &models.Mock{ConnectionID: "pg"}
+		k.Stamp(m)
+		stamped <- m
+	}()
+	within(t, began, "the mock's stamp never waited for the list")
+	for range 5 { // wall time passes, keploy given no CPU
+		waitStallLook(t, clk)
+		clk.Pass()
+	}
+	waitStallLook(t, clk)
+	select {
+	case <-stamped:
+		t.Fatal("the wait for a list keploy had no CPU to wait on ended")
+	default:
+	}
+	clk.Advance(readStallGrace)
+	m := recv(t, stamped, "the stamp went on waiting for a stalled list")
+	if !strings.Contains(m.Spec.Metadata[UnreadKey], "did not answer keploy's list") || m.Spec.Metadata[MetadataKey] != "" || m.Spec.Metadata[InstanceKey] != "" {
+		t.Fatalf("the mock whose stamp waited for the stalled list was stamped %v; want it unread, with no key and no container's instance", m.Spec.Metadata)
+	}
+	if what := recv(t, told, "the record was not told of the unread mock"); !strings.Contains(what, "127.0.0.1:49153") {
+		t.Fatalf("the record was told %q, want the destination named", what)
+	}
+	if err := watchErr(r, first); !errors.Is(err, errListStalled) {
+		t.Fatalf("the watch whose list stalled ended with %v, want errListStalled", err)
+	}
+	warned := logs.FilterMessageSnippet("has not answered keploy's list").FilterLevelExact(zap.WarnLevel)
+	if warned.Len() != 1 {
+		t.Fatalf("the stall was said %d times at Warn, want once with no later accept: %v", warned.Len(), logs.All())
+	}
+	if next, _ := warned.All()[0].ContextMap()["next_step"].(string); !strings.Contains(next, "docker ps") {
+		t.Errorf("the stall's warning says no next step: %v", warned.All()[0].ContextMap())
+	}
+
+	k.Reset()
+	k.Watch(nil)
+	if current(r) == first {
+		t.Fatal("the next session kept the watch whose list stalled")
+	}
+	within(t, current(r).synced, "the next session's watch never listed")
+	if _, _, isContainer := k.Name(zap.NewNop(), "pg2", "127.0.0.1:49153"); !isContainer {
+		t.Fatal("the next session's fresh list did not place the published port")
+	}
+}
+
+// The keploy CLI's watch (Watch, for a docker-mode agent) has its first list
+// in before it answers the agent at all: a Settle on it while that list is
+// still out returns at once, as it did, and waits for no list.
+func TestSettleNeverWaitsForTheFirstListOfACLIsWatch(t *testing.T) {
+	f := newFakeDocker()
+	asked, release := heldList(t, f)
+	r, _ := newIndex(f)
+	t.Cleanup(func() { release(); stopIndex(r) })
+	go r.Watch(t.Context(), nil)
+	within(t, asked, "the daemon was never asked for its list")
+	done := make(chan struct{})
+	go func() { r.Settle(t.Context()); close(done) }()
+	within(t, done, "a Settle on the CLI's watch waited for its first list")
+}
+
+// A connection's first use waits for an unlisted watch's list (Settle), and
+// says so once a watch at Info, on which daemon, with what to do; a use whose
+// context ends first gives up, and the watch is kept for the others.
+func TestSettleWaitsForTheFirstList(t *testing.T) {
+	f := newFakeDocker()
+	f.set("db", running("postgres:16", "sha256:db", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49153")}))
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	f.listGate = gate
+	core, logs := observer.New(zap.InfoLevel)
+	r, _ := newIndex(f)
+	began := make(chan struct{}, 4)
+	r.listWaitBegins = func() { began <- struct{}{} }
+	t.Cleanup(func() { release(); stopIndex(r) })
+	r.Start(zap.New(core))
+
+	gaveUp, giveUp := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { r.Settle(gaveUp); close(done) }()
+	within(t, began, "the use never began to wait for the list")
+	giveUp()
+	within(t, done, "a use that gave up went on waiting")
+	if err := watchErr(r, current(r)); err != nil {
+		t.Fatalf("a use that gave up failed the watch: %v", err)
+	}
+
+	done = make(chan struct{})
+	go func() { r.Settle(t.Context()); close(done) }()
+	within(t, began, "the use never began to wait for the list")
+	select {
+	case <-done:
+		t.Fatal("a use returned before the list was in")
+	default:
+	}
+	release()
+	within(t, done, "a use went on waiting once the list was in")
+	if c, ok := lookup(t, r, "127.0.0.1:49153"); !ok || c.ID != "db" {
+		t.Fatalf("after the wait the published port = %+v, %v; want db", c, ok)
+	}
+	said := logs.FilterMessageSnippet("a connection that may reach one waits")
+	if n := said.Len(); n != 1 {
+		t.Fatalf("the wait for the list was said %d times at Info, want once: %v", n, logs.All())
+	}
+	if next, _ := said.All()[0].ContextMap()["next_step"].(string); !strings.Contains(next, "check that Docker") {
+		t.Errorf("the wait for the list says no next step: %v", said.All()[0].ContextMap())
+	}
+}
+
+// watchErr is st's failure, read under r's lock.
+func watchErr(r *dockerIndex, st *watchState) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return st.err
 }

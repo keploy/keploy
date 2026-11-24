@@ -441,7 +441,7 @@ func (unreadableDocker) Fingerprint(context.Context, string) (string, bool) { re
 func (unreadableDocker) Pending(netip.AddrPort) ([]string, bool)            { return nil, false }
 func (unreadableDocker) AwaitReadsOf(context.Context, []string)             {}
 func (unreadableDocker) Bind(context.Context)                               {}
-func (unreadableDocker) Watch(context.Context, *zap.Logger)                 {}
+func (unreadableDocker) Start(*zap.Logger)                                  {}
 func (unreadableDocker) Endpoint() string                                   { return "unix:///fake.sock" }
 
 // With Docker unreadable, a run whose mock.real lists container: entries says
@@ -596,9 +596,9 @@ func (f placingContainer) AwaitReadsOf(ctx context.Context, _ []string) {
 	case <-ctx.Done():
 	}
 }
-func (placingContainer) Bind(context.Context)               {}
-func (placingContainer) Watch(context.Context, *zap.Logger) {}
-func (placingContainer) Endpoint() string                   { return "unix:///fake.sock" }
+func (placingContainer) Bind(context.Context) {}
+func (placingContainer) Start(*zap.Logger)    {}
+func (placingContainer) Endpoint() string     { return "unix:///fake.sock" }
 
 // A container: entry reaches a container Docker started a moment before the
 // connection, which the index was still placing at the accept: the accept
@@ -682,7 +682,7 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 		k := containerkey.NewKeyer(f)
 		session, end := context.WithCancel(context.Background())
 		k.Bind(session)
-		k.Watch(session, zap.NewNop())
+		k.Watch(zap.NewNop())
 		containerkey.Default = k
 		resolved := make(chan struct{}, 1)
 		p.realDialResolved = func() { resolved <- struct{}{} }
@@ -786,7 +786,7 @@ func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
 	session, end := context.WithCancel(context.Background())
 	t.Cleanup(end)
 	k.Bind(session)
-	k.Watch(session, zap.NewNop())
+	k.Watch(zap.NewNop())
 	containerkey.Default = k
 	// Two test workers' tests open: the failure is worker 4's, whose
 	// instance the kernel stamped the connect with.

@@ -93,9 +93,9 @@ func (containerAt) Fingerprint(context.Context, string) (string, bool) { return 
 func (containerAt) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
 func (containerAt) AwaitReadsOf(context.Context, []string)             {}
 
-func (containerAt) Bind(context.Context)               {}
-func (containerAt) Watch(context.Context, *zap.Logger) {}
-func (containerAt) Endpoint() string                   { return "unix:///fake.sock" }
+func (containerAt) Bind(context.Context) {}
+func (containerAt) Start(*zap.Logger)    {}
+func (containerAt) Endpoint() string     { return "unix:///fake.sock" }
 
 // A call served from the real dependency on a miss is captured with its
 // connection's container key, as every recorded mock is: the capture never

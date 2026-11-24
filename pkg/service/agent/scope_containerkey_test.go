@@ -27,7 +27,7 @@ func (portContainers) Fingerprint(context.Context, string) (string, bool) { retu
 func (portContainers) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
 func (portContainers) AwaitReadsOf(context.Context, []string)             {}
 func (portContainers) Bind(context.Context)                               {}
-func (portContainers) Watch(context.Context, *zap.Logger)                 {}
+func (portContainers) Start(*zap.Logger)                                  {}
 func (portContainers) Endpoint() string                                   { return "unix:///fake.sock" }
 
 // useTestKeyer makes the agent's keyer one over portContainers for the test,

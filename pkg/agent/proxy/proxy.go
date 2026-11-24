@@ -2181,13 +2181,23 @@ func (p *Proxy) bindContainerKeys(ctx context.Context) {
 }
 
 // startContainerKeys starts a session's container keys under the proven
-// switch: fresh scopes, and the local daemon's containers indexed before the
-// app runs (containerkey). Without the switch it does nothing.
-func (p *Proxy) startContainerKeys(ctx context.Context) {
-	if provenswitch.On() {
-		containerkey.Default.Reset()
-		containerkey.Default.Watch(ctx, p.logger)
+// switch: fresh scopes, and the local daemon's containers read. A record's
+// app never waits for them: only a connection that may reach a container
+// waits for the list, at its first use (containerkey.Keyer.Watch). A
+// replay's waits for the list before it starts (replay), as it always did, so
+// its calls are named as they were recorded and none waits on the app's
+// request past its test's timeout (containerkey.Keyer.WatchAndAwaitList).
+// Without the switch it does nothing.
+func (p *Proxy) startContainerKeys(replay bool) {
+	if !provenswitch.On() {
+		return
 	}
+	containerkey.Default.Reset()
+	if replay {
+		containerkey.Default.WatchAndAwaitList(p.logger)
+		return
+	}
+	containerkey.Default.Watch(p.logger)
 }
 
 // logSetupCAFailure logs that the CA's install failed with err. Terminal: the
@@ -4598,7 +4608,7 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	// store seeded before it.
 	recorded.forget()
 	p.serverFirstSaid.reset()
-	p.startContainerKeys(ctx)
+	p.startContainerKeys(false)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
 	// boundary: opts arrives over the agent API from a client that may predate
 	// the schema-noise -> mock-noise rename and therefore sets only the
@@ -4684,7 +4694,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// store (SeedRecordedDestinations), stay: keploy mock replay publishes
 	// the store after its Mock, keploy test may before.
 	recorded.reset()
-	p.startContainerKeys(ctx)
+	p.startContainerKeys(true)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
 	// boundary: opts arrives over the agent API from a client that may predate
 	// the schema-noise -> mock-noise rename and therefore sets only the

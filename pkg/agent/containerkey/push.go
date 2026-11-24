@@ -481,9 +481,9 @@ func (p *pushedIndex) AwaitReadsOf(ctx context.Context, ids []string) {
 // Bind does nothing: a docker-mode agent reads no daemon.
 func (p *pushedIndex) Bind(context.Context) {}
 
-// Watch never waits: the CLI gives the agent its list before it asks it to
+// Start never waits: the CLI gives the agent its list before it asks it to
 // start a session.
-func (p *pushedIndex) Watch(context.Context, *zap.Logger) {}
+func (p *pushedIndex) Start(*zap.Logger) {}
 
 // Endpoint names the daemon the CLI reads, for messages.
 func (p *pushedIndex) Endpoint() string {

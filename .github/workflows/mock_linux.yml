@@ -684,6 +684,19 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/daemonized/proven-daemonized-linux.sh"
 
+      # Under the proven switch, a record's app starts while the local Docker
+      # daemon is still listing its containers (a Docker Desktop waking its
+      # VM), for an app that reaches no container: here the daemon answers
+      # its list only after 20 s, and the app's one dependency is a server on
+      # this host. The record keeps its calls, and the replay passes.
+      - name: Run docker-slow e2e (an app that reaches no container never waits on Docker)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/docker-slow/proven-docker-slow-linux.sh"
+
   # keploy's own CLI flags on a native run: --pass-through-ports (both
   # spellings) and keploy.yml's bypassRules in keploy record and keploy test,
   # and --disable-tele (no telemetry or crash-report lookup, in the CLI and in

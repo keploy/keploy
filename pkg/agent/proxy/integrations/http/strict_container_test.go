@@ -24,7 +24,7 @@ func (containerIndex) Fingerprint(context.Context, string) (string, bool) { retu
 func (containerIndex) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
 func (containerIndex) AwaitReadsOf(context.Context, []string)             {}
 func (containerIndex) Bind(context.Context)                               {}
-func (containerIndex) Watch(context.Context, *zap.Logger)                 {}
+func (containerIndex) Start(*zap.Logger)                                  {}
 func (containerIndex) Endpoint() string                                   { return "unix:///fake.sock" }
 
 const (

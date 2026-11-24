@@ -49,6 +49,39 @@ type settler interface {
 	Settle(ctx context.Context)
 }
 
+// lister is a resolver that can say its first list of the daemon is still
+// out (dockerIndex.Listing): a destination it does not place now may be a
+// container once the list is in.
+type lister interface {
+	Listing() bool
+}
+
+// listStaller is a resolver that can say its watch failed because the daemon
+// never answered its first list (dockerIndex.ListStalled).
+type listStaller interface {
+	ListStalled() bool
+}
+
+// listStalled reports whether res's watch failed so (listStaller).
+func listStalled(res resolver) bool {
+	l, ok := res.(listStaller)
+	return ok && l.ListStalled()
+}
+
+// prober is a resolver that can tell, without asking the daemon, that no
+// container can be at a destination while its first list is out
+// (dockerIndex.MayBeContainer): a connection to it then waits for no list.
+type prober interface {
+	MayBeContainer(dst netip.AddrPort) bool
+}
+
+// mayBeContainer reports whether a container may be at dst by res: true for
+// an index that cannot tell (prober).
+func mayBeContainer(res resolver, dst netip.AddrPort) bool {
+	p, ok := res.(prober)
+	return !ok || p.MayBeContainer(dst)
+}
+
 // resolver finds the container behind a destination from its index, without
 // waiting on anything. err says the daemon cannot be read.
 type resolver interface {
@@ -69,9 +102,11 @@ type resolver interface {
 	// Bind makes ctx, the agent's own, the bound of the index's reading of
 	// Docker, so it stops with the agent.
 	Bind(ctx context.Context)
-	// Watch starts keeping the index, if it is not kept already, and returns
-	// once it holds what was running (or ctx ends).
-	Watch(ctx context.Context, logger *zap.Logger)
+	// Start starts keeping the index for a session, if it is not kept
+	// already, and returns at once: what was running is read beside the app,
+	// and only a connection that may reach a container waits for it, at its
+	// first use (settler, prober).
+	Start(logger *zap.Logger)
 	// Endpoint names the Docker endpoint read, for messages.
 	Endpoint() string
 }
@@ -222,6 +257,10 @@ type pendingConn struct {
 	renamed bool
 	got     Container
 	placed  bool
+	// unread is why its look-up could not tell what it reaches: the daemon
+	// did not answer the list it waited for (listStalled). The connection
+	// stays unplaced, and every use of it is told so.
+	unread string
 }
 
 // keptClosed bounds how many closed connections a keyer keeps for mocks
@@ -280,12 +319,16 @@ func (k *Keyer) endLocked(s *scope, at time.Time) {
 	}
 }
 
-// Watch starts reading Docker for a session, if k can, and returns once the
-// index holds what was already running, or ctx (the session's) ends: called
-// when a session starts under the proven switch, before the app runs. Only a
-// session start does: a daemon that cannot be read stays unread for the rest
-// of the session.
-func (k *Keyer) Watch(ctx context.Context, logger *zap.Logger) {
+// Watch starts reading Docker for a session, if k can, and returns at once:
+// called when a session starts under the proven switch, before the app runs,
+// which does not wait on the daemon. A connection that may reach a container
+// (prober) waits for the daemon's list instead, at its first use (place,
+// through the index's Settle; the handshake hold through PlacedOrPlacing), no
+// longer than that use. Only a session start reads a daemon
+// that could not be read afresh: one that cannot be read stays unread for the
+// rest of the session. The session's own context, which Watch opens, bounds
+// the waits of its connections' keys: no request's does.
+func (k *Keyer) Watch(logger *zap.Logger) {
 	k.mu.Lock()
 	res := k.res
 	k.endSessionLocked()
@@ -293,12 +336,33 @@ func (k *Keyer) Watch(ctx context.Context, logger *zap.Logger) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	// The session's own context, not ctx: ctx may be the request that
-	// started the session (the replay's), which ends as soon as it is
-	// answered.
 	k.session, k.endSession = context.WithCancel(parent)
 	k.mu.Unlock()
-	res.Watch(ctx, logger)
+	res.Start(logger)
+}
+
+// firstLister is a resolver whose first list of the daemon a session can wait
+// for before its app starts (dockerIndex.AwaitFirstList).
+type firstLister interface {
+	AwaitFirstList(ctx context.Context)
+}
+
+// WatchAndAwaitList is Watch for a session that replays (keploy test, keploy
+// mock replay): it returns once the index has the daemon's first list, the
+// daemon cannot be read, its list stalls (the stall window, in time keploy
+// could run), or the session ends. A replayed call is matched on the state of
+// its connection's destination, which a call made while the list is out would
+// wait for on the app's request, past its test's timeout: a replay's app
+// starts with the list in, as it always did, so its calls are named as they
+// were recorded. A record's app starts at once (Watch).
+func (k *Keyer) WatchAndAwaitList(logger *zap.Logger) {
+	k.Watch(logger)
+	k.mu.Lock()
+	res := k.res
+	k.mu.Unlock()
+	if l, ok := res.(firstLister); ok {
+		l.AwaitFirstList(k.sessionCtx())
+	}
 }
 
 // endSessionLocked ends the session's context, if one is open: what waits
@@ -445,6 +509,9 @@ func (k *Keyer) Name(logger *zap.Logger, connID, dst string) (Container, string,
 			zap.String("next_step", "let keploy's agent read the local Docker daemon the tests use: keploy passes it DOCKER_HOST, else the docker CLI's current context, else it reads the default socket")}
 		msg := "keploy cannot read the containers of the Docker daemon, so this run names container destinations by their address: a container on a random port, such as one Testcontainers starts, will not match its recording"
 		switch {
+		case errors.Is(warn, errListStalled):
+			// The index said it at the stall, with what to do.
+			logger.Debug(msg, fields...)
 		case !errors.Is(warn, errNoDaemon):
 			logger.Warn(msg, fields...)
 		case noDaemonSaid.CompareAndSwap(false, true):
@@ -481,15 +548,17 @@ func (k *Keyer) Lookup(dst string) (Container, bool, error) {
 // PlacedOrPlacing is the container dst reaches now (c, ok), or how to wait
 // for one the index is still placing: wait, non-nil, when the index places
 // none at dst now but is placing containers that could be there (a container
-// Docker started a moment before). wait(fn) then waits, off the caller's
-// path, for those placings only (never a configuration's read, nor a
-// container started since), no longer than the session or the index's
-// watch, and runs fn: ok is whether dst then reaches a container, resolved
-// false when the wait ended first and that cannot be told. Neither (ok false,
-// wait nil): no container is at dst and none could be, the index places
-// nothing now, or it cannot be read (a container: entry then matches
-// nothing, as at the accept). The placings are read before dst is looked up,
-// so one that ends between the two is seen placed, never missed.
+// Docker started a moment before), or has not got the daemon's first list
+// yet (lister). wait(fn) then waits, off the caller's path, for those
+// placings only (never a configuration's read, nor a container started
+// since), and for the first list if dst may be a container's (prober), no
+// longer than the session or the index's watch, and runs fn: ok is whether
+// dst then reaches a container, resolved false when the wait ended first and
+// that cannot be told. Neither (ok false, wait nil): no container is at dst
+// and none could be, the index places nothing now, or it cannot be read (a
+// container: entry then matches nothing, as at the accept). Whether the first
+// list is out and the placings are read before dst is looked up, so a list or
+// a placing that ends between the two is seen out, never missed.
 func (k *Keyer) PlacedOrPlacing(dst string) (c Container, ok bool, wait func(fn func(c Container, ok, resolved bool))) {
 	ap, err := ParseAddrPort(dst)
 	if err != nil || !couldBeContainer(ap.Addr()) {
@@ -498,16 +567,27 @@ func (k *Keyer) PlacedOrPlacing(dst string) (c Container, ok bool, wait func(fn 
 	k.mu.Lock()
 	res := k.res
 	k.mu.Unlock()
+	// The daemon's first list may not be in yet (a session's start does not
+	// wait for it): what is not placed now may be once it is. Read with the
+	// placings, before dst is looked up, so a list that lands between the
+	// two is seen out, and waited for, never missed.
+	l, isLister := res.(lister)
+	listing := isLister && l.Listing()
 	placing, could := res.Pending(ap)
 	if c, ok, err := res.Lookup(ap); err != nil || ok {
 		return c, ok && err == nil, nil
 	}
-	if !could || len(placing) == 0 {
+	if !could || (len(placing) == 0 && !listing) {
 		return Container{}, false, nil
 	}
 	ctx := k.sessionCtx()
 	return Container{}, false, func(fn func(c Container, ok, resolved bool)) {
 		go func() {
+			// Off the caller's path: whether dst may be a container is
+			// asked of this host (mayBeContainer), which may take a moment.
+			if s, can := res.(settler); listing && can && mayBeContainer(res, ap) {
+				s.Settle(ctx)
+			}
 			res.AwaitReadsOf(ctx, placing)
 			c, ok, err := res.Lookup(ap)
 			if err != nil || (!ok && ctx.Err() != nil) {
@@ -583,6 +663,16 @@ func couldBeContainer(a netip.Addr) bool {
 // by its event. A use while that look-up runs waits for it; a later use
 // takes its outcome.
 func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
+	c, ok, _ := k.placeOrUnread(ctx, connID)
+	return c, ok
+}
+
+// placeOrUnread is place, with unread saying why a connection that may reach
+// a container could not be placed: the daemon never answered the first list
+// its use waited for (listStalled). Its uses are then told so, a mock of it
+// is stamped unread (UnreadKey), and its test is not judged, as for a
+// container whose configuration's read stalled.
+func (k *Keyer) placeOrUnread(ctx context.Context, connID string) (Container, bool, string) {
 	k.mu.Lock()
 	p := k.unplaced[connID]
 	if p == nil {
@@ -590,7 +680,7 @@ func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
 		// unplaced.
 		c, ok := k.conns[connID]
 		k.mu.Unlock()
-		return c, ok
+		return c, ok, ""
 	}
 	if p.lookedUp != nil {
 		lookedUp := p.lookedUp
@@ -598,15 +688,15 @@ func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
 		select {
 		case <-lookedUp:
 		case <-ctx.Done():
-			return Container{}, false
+			return Container{}, false, ""
 		}
 		k.mu.Lock()
 		defer k.mu.Unlock()
-		if p.renamed {
-			return p.got, p.placed
+		if p.renamed || p.unread != "" {
+			return p.got, p.placed, p.unread
 		}
 		c, ok := k.conns[connID]
-		return c, ok
+		return c, ok, ""
 	}
 	p.lookedUp = make(chan struct{})
 	res := k.res
@@ -615,30 +705,41 @@ func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
 		res.AwaitReadsOf(ctx, p.placingAtAccept)
 	}
 	got, ok, err := res.Lookup(p.ap)
-	if s, can := res.(settler); can && err == nil && !ok {
+	unread := ""
+	if s, can := res.(settler); can && err == nil && !ok && mayBeContainer(res, p.ap) {
 		// Not placed yet, though its container may have started before
-		// this use: its start event can reach the index after it.
+		// this use: its start event can reach the index after it. While the
+		// first list is out, only a destination that may be a container's
+		// waits for it (prober).
 		s.Settle(ctx)
 		got, ok, err = res.Lookup(p.ap)
+		if err != nil && listStalled(res) {
+			unread = "behind " + p.ap.String() + ": the Docker daemon did not answer keploy's list of its containers"
+		}
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	defer close(p.lookedUp)
+	if unread != "" {
+		// Kept unplaced: every later use takes this outcome.
+		p.unread = unread
+		return Container{}, false, unread
+	}
 	if k.unplaced[connID] != p {
 		if p.renamed && err == nil && ok {
 			// Named again meanwhile: what it found is this connection's,
 			// for its uses; the ID's is the later Name's.
 			p.got, p.placed = got, true
-			return got, true
+			return got, true, ""
 		}
-		return Container{}, false // closed, or the session reset, meanwhile
+		return Container{}, false, "" // closed, or the session reset, meanwhile
 	}
 	delete(k.unplaced, connID)
 	if err != nil || !ok {
-		return Container{}, false
+		return Container{}, false, ""
 	}
 	k.conns[connID] = got
-	return got, true
+	return got, true, ""
 }
 
 // endpoint names the Docker endpoint k reads, for messages.
@@ -704,8 +805,17 @@ func (k *Keyer) keyOrUnread(ctx context.Context, connID string, tell bool) (c Co
 	res := k.res
 	k.mu.Unlock()
 	if !ok {
-		if c, ok = k.place(ctx, connID); !ok {
-			return Container{}, "", false, ""
+		var unread string
+		if c, ok, unread = k.placeOrUnread(ctx, connID); !ok {
+			if unread == "" {
+				return Container{}, "", false, ""
+			}
+			// Not named: a container may be behind it, which the daemon
+			// never listed.
+			if tell {
+				k.tellUnread(unread)
+			}
+			return Container{}, "", true, unread
 		}
 	}
 	if c.Fingerprint == "" {
@@ -832,7 +942,9 @@ func (k *Keyer) stampConn(id string, m *models.Mock) {
 	if key != "" {
 		md[MetadataKey] = key
 	}
-	md[InstanceKey] = instanceToken(c.ID)
+	if c.ID != "" {
+		md[InstanceKey] = instanceToken(c.ID)
+	}
 	md[ScopeKey] = scopeToken
 	if unread != "" {
 		// The mock's own test is not judged, whenever this is: a record

@@ -550,7 +550,7 @@ func (r containerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, e
 }
 
 func (containerAt) Bind(context.Context)                               {}
-func (containerAt) Watch(context.Context, *zap.Logger)                 {}
+func (containerAt) Start(*zap.Logger)                                  {}
 func (containerAt) Endpoint() string                                   { return "unix:///fake.sock" }
 func (containerAt) Fingerprint(context.Context, string) (string, bool) { return "", false }
 func (containerAt) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
@@ -672,7 +672,7 @@ func (s *sessionIndex) Lookup(dst netip.AddrPort) (containerkey.Container, bool,
 }
 
 func (s *sessionIndex) Bind(context.Context)                             { s.binds.Add(1) }
-func (s *sessionIndex) Watch(context.Context, *zap.Logger)               { s.watches.Add(1) }
+func (s *sessionIndex) Start(*zap.Logger)                                { s.watches.Add(1) }
 func (*sessionIndex) Endpoint() string                                   { return "unix:///fake.sock" }
 func (*sessionIndex) Fingerprint(context.Context, string) (string, bool) { return "", false }
 func (*sessionIndex) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }

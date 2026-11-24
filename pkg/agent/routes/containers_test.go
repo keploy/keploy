@@ -27,9 +27,9 @@ func (oneContainer) Fingerprint(context.Context, string) (string, bool) { return
 func (oneContainer) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
 func (oneContainer) AwaitReadsOf(context.Context, []string)             {}
 
-func (oneContainer) Bind(context.Context)               {}
-func (oneContainer) Watch(context.Context, *zap.Logger) {}
-func (oneContainer) Endpoint() string                   { return "unix:///fake.sock" }
+func (oneContainer) Bind(context.Context) {}
+func (oneContainer) Start(*zap.Logger)    {}
+func (oneContainer) Endpoint() string     { return "unix:///fake.sock" }
 
 // A docker-mode agent says it takes the CLI's container list and names
 // container destinations from it; an agent that reads Docker itself says

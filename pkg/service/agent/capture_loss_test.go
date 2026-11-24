@@ -965,7 +965,7 @@ func (stalledIndex) Fingerprint(context.Context, string) (string, bool) { return
 func (stalledIndex) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
 func (stalledIndex) AwaitReadsOf(context.Context, []string)             {}
 func (stalledIndex) Bind(context.Context)                               {}
-func (stalledIndex) Watch(context.Context, *zap.Logger)                 {}
+func (stalledIndex) Start(*zap.Logger)                                  {}
 func (stalledIndex) Endpoint() string                                   { return "unix:///fake.sock" }
 func (stalledIndex) FingerprintsOrStall(context.Context, string) (string, string, bool, string) {
 	return "", "", false, "pg (postgres:16)"

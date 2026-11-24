@@ -108,8 +108,8 @@ func (f *fakeIndex) AwaitReadsOf(ctx context.Context, ids []string) {
 	}
 }
 
-func (f *fakeIndex) Watch(context.Context, *zap.Logger) { f.watches++ }
-func (f *fakeIndex) Endpoint() string                   { return "unix:///fake.sock" }
+func (f *fakeIndex) Start(*zap.Logger) { f.watches++ }
+func (f *fakeIndex) Endpoint() string  { return "unix:///fake.sock" }
 
 const (
 	fpDefault = "aaaaaaaaaaaa" // postgres as the suite runs it
@@ -808,7 +808,7 @@ func TestKeyerWatchesOnlyWhenTold(t *testing.T) {
 	if f.watches != 0 {
 		t.Fatalf("naming a connection started the index %d times", f.watches)
 	}
-	k.Watch(t.Context(), zap.NewNop())
+	k.Watch(zap.NewNop())
 	if f.watches != 1 {
 		t.Fatalf("Watch started the index %d times", f.watches)
 	}
@@ -948,9 +948,9 @@ func TestKeyerTheSetupBetweenTestsIsAScope(t *testing.T) {
 }
 
 // A wait for a container's configuration no call bounds (Stamp) ends with
-// the session: at the next session's start, or the agent's end. The context
-// the session was started with does not bound it: the replay's is its
-// request's, which ends as soon as it is answered.
+// the session: at the next session's start, or the agent's end. No request's
+// context bounds it (Watch takes none): the replay's request, which started
+// the session, ends as soon as it is answered.
 func TestAStampWaitEndsWithTheSession(t *testing.T) {
 	// A connection to a container whose configuration is being read.
 	setup := func(t *testing.T) (*Keyer, *fakeIndex, chan struct{}) {
@@ -972,12 +972,12 @@ func TestAStampWaitEndsWithTheSession(t *testing.T) {
 		}()
 		return done
 	}
-	t.Run("the request that started it ends", func(t *testing.T) {
+	t.Run("the session is open", func(t *testing.T) {
 		k, f, read := setup(t)
 		k.Bind(t.Context())
-		req, answered := context.WithCancel(t.Context())
-		k.Watch(req, nil)
-		answered()
+		// Watch takes no request's context: none, answered as soon as the
+		// session starts, bounds it; only its end, or the agent's, does.
+		k.Watch(nil)
 		done := stamp(k)
 		<-f.asked // the stamp waits for the read
 		f.mu.Lock()
@@ -992,7 +992,7 @@ func TestAStampWaitEndsWithTheSession(t *testing.T) {
 		name string
 		end  func(k *Keyer, agentEnds context.CancelFunc)
 	}{
-		{"the next session starts", func(k *Keyer, _ context.CancelFunc) { k.Reset(); k.Watch(context.Background(), nil) }},
+		{"the next session starts", func(k *Keyer, _ context.CancelFunc) { k.Reset(); k.Watch(nil) }},
 		{"the agent ends", func(_ *Keyer, agentEnds context.CancelFunc) { agentEnds() }},
 	} {
 		t.Run(end.name, func(t *testing.T) {
@@ -1000,7 +1000,7 @@ func TestAStampWaitEndsWithTheSession(t *testing.T) {
 			agentCtx, agentEnds := context.WithCancel(t.Context())
 			defer agentEnds()
 			k.Bind(agentCtx)
-			k.Watch(t.Context(), nil)
+			k.Watch(nil)
 			done := stamp(k)
 			<-f.asked
 			end.end(k, agentEnds)
@@ -1103,7 +1103,7 @@ func TestKeyerPlacedOrPlacingWaitsOffThePathForThePlacingsNow(t *testing.T) {
 	f.reads = map[string]chan struct{}{"s": make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	k.Bind(ctx)
-	k.Watch(ctx, zap.NewNop())
+	k.Watch(zap.NewNop())
 	_, _, wait = k.PlacedOrPlacing("127.0.0.1:40091")
 	if wait == nil {
 		t.Fatal("no wait for the placing")
@@ -1445,4 +1445,343 @@ func (s stalling) FingerprintsOrStall(ctx context.Context, id string) (string, s
 	}
 	fp, ok := s.fakeIndex.Fingerprint(ctx, id)
 	return fp, "", ok, ""
+}
+
+// heldList is a fake daemon whose list of every container holds until the
+// test lets it go (release, also at the test's end): asked closes once the
+// index has asked for it.
+func heldList(t *testing.T, f *fakeDocker) (asked <-chan struct{}, release func()) {
+	t.Helper()
+	gate, ask := make(chan struct{}), make(chan struct{})
+	var askOnce, releaseOnce sync.Once
+	f.mu.Lock()
+	f.listGate = gate
+	f.beforeList = func() { askOnce.Do(func() { close(ask) }) }
+	f.mu.Unlock()
+	release = func() { releaseOnce.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	return ask, release
+}
+
+// within fails the test unless done closes: the bound only turns a wait that
+// should not be there into a failure, and is no measure of time.
+func within(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal(what)
+	}
+}
+
+// recv is the value ch gives, failing the test unless it gives one: the bound
+// only turns a wait that should not be there into a failure (within).
+func recv[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(time.Minute):
+		t.Fatal(what)
+	}
+	var zero T
+	return zero
+}
+
+// A session's start, the app's, never waits on the Docker daemon: it waited
+// for the daemon to list what was running, so an app that reaches no
+// container waited too, for as long as the daemon took. A connection to an
+// address no container can be at never waits for the list either. One that
+// may reach a container (here the port a running container publishes on this
+// host) waits for the list at its first use,
+// and is named by it; so does the handshake hold's look at it
+// (PlacedOrPlacing), off its caller; and its key waits for the container's
+// configuration, as it does once the list is in.
+func TestASessionsStartNeverWaitsOnTheDaemon(t *testing.T) {
+	f := newFakeDocker()
+	f.set("db", running("postgres:16", "sha256:db", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49153")}))
+	read := make(chan struct{})
+	f.block["db"] = read // db's configuration is read only once the test says
+	asked, release := heldList(t, f)
+	r, _ := newIndex(f)
+	r.reach = hostRoutes()
+	began := make(chan struct{}, 8)
+	r.listWaitBegins = func() { began <- struct{}{} }
+	readWaited := make(chan struct{}, 64)
+	r.readWaits = func(id string) {
+		if id == "db" {
+			readWaited <- struct{}{}
+		}
+	}
+	var readOnce sync.Once
+	t.Cleanup(func() { release(); readOnce.Do(func() { close(read) }); stopIndex(r) })
+	k := NewKeyer(r)
+	agent, stop := context.WithCancel(t.Context())
+	t.Cleanup(stop)
+	k.Bind(agent)
+	core, logs := observer.New(zapcore.InfoLevel)
+
+	started := make(chan struct{})
+	go func() { k.Watch(zap.New(core)); close(started) }()
+	within(t, asked, "the daemon was never asked for its list")
+	within(t, started, "the session's start waited for the daemon to list its containers")
+	if logs.FilterMessageSnippet("before the app starts").Len() != 0 {
+		t.Errorf("the start said it waits on the daemon: %v", logs.All())
+	}
+
+	if _, _, isContainer := k.Name(zap.NewNop(), "api", "93.184.216.34:443"); isContainer {
+		t.Fatal("a public address was named a container")
+	}
+	used := make(chan bool, 1)
+	go func() {
+		_, ok := k.Placed(t.Context(), "api")
+		used <- ok
+	}()
+	if ok := recv(t, used, "a connection no container can be at waited for the daemon's list"); ok {
+		t.Error("a public address was placed at a container")
+	}
+
+	// The connection's first use waits for the list.
+	if _, _, isContainer := k.Name(zap.NewNop(), "pg", "127.0.0.1:49153"); isContainer {
+		t.Fatal("named a container before the daemon listed any")
+	}
+	placed := make(chan Container, 1)
+	go func() {
+		c, _ := k.Placed(t.Context(), "pg")
+		placed <- c
+	}()
+	within(t, began, "the connection's first use never waited for the list")
+
+	// The handshake hold asks before its connection is accepted: it does not
+	// wait, and is told to; its wait, off the caller, waits for the list too.
+	_, held, wait := k.PlacedOrPlacing("127.0.0.1:49153")
+	if held || wait == nil {
+		t.Fatalf("the hold's look at the published port while the list is out = %v, wait %v; want a wait", held, wait != nil)
+	}
+	told := make(chan Container, 1)
+	wait(func(c Container, ok, resolved bool) {
+		if !ok || !resolved {
+			c = Container{}
+		}
+		told <- c
+	})
+	within(t, began, "the hold's wait never waited for the list")
+	select {
+	case c := <-placed:
+		t.Fatalf("the connection's first use went on, at %+v, before the list was in", c)
+	case c := <-told:
+		t.Fatalf("the hold was told %+v before the list was in", c)
+	default:
+	}
+	release()
+	if c := recv(t, placed, "the connection's first use went on waiting once the list was in"); c.ID != "db" {
+		t.Fatalf("the connection to the published port was placed at %+v once the list was in, want db", c)
+	}
+	if c := recv(t, told, "the hold went on waiting once the list was in"); c.ID != "db" {
+		t.Fatalf("the hold was told %+v once the list was in, want db", c)
+	}
+
+	// Its key waits for db's configuration, still being read.
+	keyed := make(chan string, 1)
+	go func() { keyed <- stamped(k, "pg") }()
+	within(t, readWaited, "the connection's key never waited for its container's configuration")
+	select {
+	case key := <-keyed:
+		t.Fatalf("the connection was keyed %q before its container's configuration was read", key)
+	default:
+	}
+	readOnce.Do(func() { close(read) })
+	key := recv(t, keyed, "the connection's key went on waiting once its container's configuration was read")
+	if want := name(t, k, "pg2", "127.0.0.1:49153"); key == "" || key != want {
+		t.Errorf("the connection placed before the list was keyed %q, want %q, the key of one made after", key, want)
+	}
+}
+
+// hostRoutes is how a host answers MayBeContainer by its routes: its default
+// route leaves from 10.0.0.5, and it routes 172.17.0.0/16 to a Docker
+// network's bridge (172.17.0.1).
+func hostRoutes() reach {
+	bridge := netip.MustParsePrefix("172.17.0.0/16")
+	return reach{source: func(a netip.Addr) (netip.Addr, bool) {
+		if bridge.Contains(a) {
+			return netip.MustParseAddr("172.17.0.1"), true
+		}
+		return netip.MustParseAddr("10.0.0.5"), true
+	}}
+}
+
+// While the daemon's first list is out, a connection that reaches no
+// container, as this host tells without the daemon (MayBeContainer), never
+// waits for it: one to a private address this host sends to through its
+// default route (a database in the VPC), and one to an address it has no
+// route to. The handshake hold's look at each is told no container without
+// waiting either. One to a port on this host (which a container may
+// publish), and one to an address routed to the daemon's bridge, wait.
+func TestAConnectionThatReachesNoContainerNeverWaitsForTheList(t *testing.T) {
+	f := newFakeDocker()
+	asked, release := heldList(t, f)
+	r, _ := newIndex(f)
+	rc := hostRoutes()
+	routes := rc.source
+	rc.source = func(a netip.Addr) (netip.Addr, bool) {
+		if a == netip.MustParseAddr("10.9.9.9") {
+			return netip.Addr{}, false
+		}
+		return routes(a)
+	}
+	r.reach = rc
+	began := make(chan struct{}, 8)
+	r.listWaitBegins = func() { began <- struct{}{} }
+	t.Cleanup(func() { release(); stopIndex(r) })
+	k := NewKeyer(r)
+	agent, stop := context.WithCancel(t.Context())
+	t.Cleanup(stop)
+	k.Bind(agent)
+	k.Watch(nil)
+	within(t, asked, "the daemon was never asked for its list")
+
+	for _, c := range []struct{ id, dst string }{
+		{"rds", "10.0.4.7:5432"},
+		{"gone", "10.9.9.9:5432"},
+	} {
+		if _, _, isContainer := k.Name(zap.NewNop(), c.id, c.dst); isContainer {
+			t.Fatalf("%s was named a container before the daemon listed any", c.dst)
+		}
+		used := make(chan bool, 1)
+		go func() {
+			_, ok := k.Placed(t.Context(), c.id)
+			used <- ok
+		}()
+		if ok := recv(t, used, c.dst+": a connection that reaches no container waited for the daemon's list"); ok {
+			t.Errorf("%s was placed at a container", c.dst)
+		}
+		if _, held, wait := k.PlacedOrPlacing(c.dst); held {
+			t.Errorf("the hold's look at %s found a container", c.dst)
+		} else if wait != nil {
+			told := make(chan bool, 1)
+			wait(func(_ Container, ok, resolved bool) { told <- ok || !resolved })
+			if recv(t, told, c.dst+": the hold's wait waited for the daemon's list") {
+				t.Errorf("the hold was told %s may be a container", c.dst)
+			}
+		}
+	}
+	select {
+	case <-began:
+		t.Fatal("a connection that reaches no container waited for the daemon's list")
+	default:
+	}
+
+	for _, c := range []struct{ id, dst string }{
+		{"pg", "127.0.0.1:5432"},
+		{"web", "172.17.0.2:80"},
+	} {
+		k.Name(zap.NewNop(), c.id, c.dst)
+		go func() { _, _ = k.Placed(t.Context(), c.id) }()
+		within(t, began, c.dst+": a connection that may reach a container did not wait for the daemon's list")
+	}
+}
+
+// landingList is an index whose first list lands while a destination is
+// looked up: it is listing until the first Lookup, which misses, and every
+// Lookup after finds what fakeIndex holds.
+type landingList struct {
+	*fakeIndex
+	landed sync.Mutex
+	looked bool
+}
+
+func (l *landingList) Listing() bool {
+	l.landed.Lock()
+	defer l.landed.Unlock()
+	return !l.looked
+}
+
+func (l *landingList) Lookup(dst netip.AddrPort) (Container, bool, error) {
+	l.landed.Lock()
+	first := !l.looked
+	l.looked = true
+	l.landed.Unlock()
+	if first {
+		return Container{}, false, nil
+	}
+	return l.fakeIndex.Lookup(dst)
+}
+
+func (l *landingList) Settle(context.Context) {}
+
+// The handshake hold reads whether the first list is out before it looks the
+// destination up: a list that lands between the two is seen out, so the hold
+// waits and is told the container, never told none at once for a container
+// the index now holds.
+func TestPlacedOrPlacingSeesAListThatLandsAsItLooks(t *testing.T) {
+	f := &fakeIndex{at: map[string]Container{"127.0.0.1:49153": {ID: "db", Image: "postgres", Port: 5432}}}
+	k := NewKeyer(&landingList{fakeIndex: f})
+	c, held, wait := k.PlacedOrPlacing("127.0.0.1:49153")
+	if held {
+		t.Fatalf("the hold found %+v at its first look, which the list had not placed", c)
+	}
+	if wait == nil {
+		t.Fatal("the hold was told no container at once, though the list was out when it looked")
+	}
+	told := make(chan Container, 1)
+	wait(func(c Container, ok, resolved bool) {
+		if !ok || !resolved {
+			c = Container{}
+		}
+		told <- c
+	})
+	if c := recv(t, told, "the hold's wait never ended"); c.ID != "db" {
+		t.Fatalf("the hold was told %+v once the list was in, want db", c)
+	}
+}
+
+// A replay's session starts its app with the daemon's first list in
+// (WatchAndAwaitList), as it always did: its calls are named as they were
+// recorded, and none waits on the app's request past its test's timeout. It
+// says so once at Info. A list that never comes is given up at the stall
+// window, in time keploy could run, and the session goes on.
+func TestAReplaysSessionStartsWithTheFirstListIn(t *testing.T) {
+	f := newFakeDocker()
+	f.set("db", running("postgres:16", "sha256:db", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49153")}))
+	asked, release := heldList(t, f)
+	r, _ := newIndex(f)
+	began := make(chan struct{}, 4)
+	r.listWaitBegins = func() { began <- struct{}{} }
+	t.Cleanup(func() { release(); stopIndex(r) })
+	k := NewKeyer(r)
+	agent, stop := context.WithCancel(t.Context())
+	t.Cleanup(stop)
+	k.Bind(agent)
+	core, logs := observer.New(zapcore.InfoLevel)
+	started := make(chan struct{})
+	go func() { k.WatchAndAwaitList(zap.New(core)); close(started) }()
+	within(t, asked, "the daemon was never asked for its list")
+	within(t, began, "the replay's session never waited for the list")
+	select {
+	case <-started:
+		t.Fatal("the replay's session started before the list was in")
+	default:
+	}
+	release()
+	within(t, started, "the replay's session went on waiting once the list was in")
+	if c, ok := lookup(t, r, "127.0.0.1:49153"); !ok || c.ID != "db" {
+		t.Fatalf("the published port once the replay's session started = %+v, %v; want db", c, ok)
+	}
+	if n := logs.FilterMessageSnippet("so the replay's calls are named as they were recorded").Len(); n != 1 {
+		t.Errorf("the replay's wait was said %d times at Info, want once: %v", n, logs.All())
+	}
+
+	g := newFakeDocker()
+	g.hangLists = 1
+	r2, _ := newIndex(g)
+	clk := &stall.ManualClock{}
+	r2.stallClock = clk
+	t.Cleanup(func() { stopIndex(r2) })
+	k2 := NewKeyer(r2)
+	k2.Bind(agent)
+	started2 := make(chan struct{})
+	go func() { k2.WatchAndAwaitList(nil); close(started2) }()
+	waitStallLook(t, clk)
+	clk.Advance(readStallGrace)
+	within(t, started2, "the replay's session went on waiting for a list that stalled")
 }

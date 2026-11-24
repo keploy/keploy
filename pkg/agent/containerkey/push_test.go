@@ -156,7 +156,7 @@ func TestASnapshotCarriesTheCLIsFailure(t *testing.T) {
 // of another source (a client of another process).
 func TestAPushedIndexKeepsTheNewestList(t *testing.T) {
 	p := newPushedIndex()
-	p.Watch(t.Context(), nil) // returns at once
+	p.Start(nil) // returns at once
 	// Before any list nothing is a container, and the lookup says why, so
 	// the session says it once (Keyer).
 	if _, ok, err := p.Lookup(netip.MustParseAddrPort("172.17.0.2:5432")); ok || !errors.Is(err, errNoList) {

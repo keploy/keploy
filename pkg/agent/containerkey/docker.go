@@ -80,6 +80,15 @@ type dockerIndex struct {
 	// and each time a list waits for the placings of containers an event
 	// spoke for while it was out (tests wait on it).
 	settleWaits func()
+	// listWaitBegins, when set, is told each time a connection begins to
+	// wait for a watch's first list (awaitList; tests wait on it).
+	listWaitBegins func()
+	// readWaits, when set, is told each time a use waits for the read of
+	// container id's configuration (FingerprintsOrStall; tests wait on it).
+	readWaits func(id string)
+	// reach tells, without the daemon, whether an address may be a
+	// container's while a watch's first list is out (MayBeContainer).
+	reach reach
 	// imageShared, if set, is told each read of a container that takes an
 	// image's defaults from another container's read of them in flight
 	// (imageConfig): tests see the image read once.
@@ -238,6 +247,10 @@ type watchState struct {
 	// index is read on the host; false in a docker-mode agent, whose
 	// loopback is the app container's own).
 	loopbackIsHost bool
+	// native: a native agent's session started this watch (Start), whose
+	// connections wait for its first list (awaitList); waitSaid: such a
+	// wait was said at Info.
+	native, waitSaid bool
 }
 
 // binding is a TCP port a container publishes on the host.
@@ -248,7 +261,7 @@ type binding struct {
 }
 
 func newDockerIndex() *dockerIndex {
-	return &dockerIndex{newAPI: newDockerAPI, hostAddrs: interfaceAddrs, socketExists: socketExists, readSlots: make(chan struct{}, maxReads)}
+	return &dockerIndex{newAPI: newDockerAPI, hostAddrs: interfaceAddrs, socketExists: socketExists, readSlots: make(chan struct{}, maxReads), reach: hostReach()}
 }
 
 func newDockerAPI(host string) (dockerAPI, error) {
@@ -288,37 +301,17 @@ func (r *dockerIndex) Bind(ctx context.Context) {
 
 // Watch starts a watch of the daemon, unless the current one is still good,
 // and returns once the index has the daemon's running containers, or knows it
-// cannot read them, or ctx (the session's) ends. A session's first
-// connections then find what was already running. A session that ends before
-// the list is in fails that watch, so the next session starts a fresh one. It
-// is called when a session starts, before the app runs; it says at Info when
-// it has to wait, and on which daemon.
+// cannot read them, or ctx (the session's) ends: the keploy CLI's pusher, which
+// gives a docker-mode agent the list (Pusher.Push), reads it so, for a run
+// whose app runs in Docker. A session that ends before the list is in fails
+// that watch, so the next session starts a fresh one. It says at Info when it
+// has to wait, and on which daemon. A native agent's session starts its watch
+// with Start instead, which never waits.
 func (r *dockerIndex) Watch(ctx context.Context, logger *zap.Logger) {
 	r.mu.Lock()
 	r.logger = logger
-	need, host, parent := !live(r.cur), r.host, r.parent
 	r.mu.Unlock()
-	if need {
-		// Built and checked outside r.mu: the accept path's lookups wait on
-		// it, and this reads files and lists the host's interfaces.
-		st, api, endpoint := r.begin(host, parent)
-		r.mu.Lock()
-		if !live(r.cur) {
-			r.cur, r.endpoint = st, endpoint
-			if api != nil {
-				st.api = api
-				go r.watch(st.ctx, st, api)
-			}
-		} else if api != nil {
-			// Another session started a watch meanwhile.
-			st.stop()
-			_ = api.Close()
-		}
-		r.mu.Unlock()
-	}
-	r.mu.Lock()
-	st := r.cur
-	r.mu.Unlock()
+	st := r.ensureWatch()
 	select {
 	case <-st.synced:
 		return
@@ -341,6 +334,171 @@ func (r *dockerIndex) Watch(ctx context.Context, logger *zap.Logger) {
 	case <-ctx.Done():
 		r.failUnlisted(st, fmt.Errorf("the session ended before the Docker daemon listed its containers: %w", ctx.Err()))
 	}
+}
+
+// ensureWatch makes the current watch one a session can use (live), starting
+// a fresh one when it is not, and returns it.
+func (r *dockerIndex) ensureWatch() *watchState {
+	r.mu.Lock()
+	need, host, parent := !live(r.cur), r.host, r.parent
+	r.mu.Unlock()
+	if need {
+		// Built and checked outside r.mu: the accept path's lookups wait on
+		// it, and this reads files and lists the host's interfaces.
+		st, api, endpoint := r.begin(host, parent)
+		r.mu.Lock()
+		if !live(r.cur) {
+			r.cur, r.endpoint = st, endpoint
+			if api != nil {
+				st.api = api
+				go r.watch(st.ctx, st, api)
+			}
+		} else if api != nil {
+			// Another session started a watch meanwhile.
+			st.stop()
+			_ = api.Close()
+		}
+		r.mu.Unlock()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cur
+}
+
+// Start starts a watch of the daemon for a native agent's session, unless the
+// current one is still good, and returns at once: no session's start, and so
+// no app's, waits on Docker. The daemon's list of what was already running is
+// waited for only by a connection that may reach a container (MayBeContainer),
+// at its first use (Settle, from Keyer.place, and the handshake hold's
+// Keyer.PlacedOrPlacing), no longer than that use. A watch whose first list is
+// not in yet is kept for the next session, bounded by the agent's context
+// (Bind) alone: a session's end says nothing of the daemon, and the list a
+// session started to read is the one the next waits for.
+func (r *dockerIndex) Start(logger *zap.Logger) {
+	r.mu.Lock()
+	r.logger = logger
+	r.mu.Unlock()
+	st := r.ensureWatch()
+	// The host's own addresses at once, not only once the watch has run: a
+	// connection accepted before then to a port published on one of them is
+	// looked at as this host's (find, MayBeContainer).
+	var local map[netip.Addr]bool
+	if r.hostAddrs != nil {
+		if addrs, err := r.hostAddrs(); err == nil {
+			local = make(map[netip.Addr]bool, len(addrs))
+			for _, a := range addrs {
+				local[a.Unmap()] = true
+			}
+		}
+	}
+	r.mu.Lock()
+	st.native = true
+	if st.local == nil && local != nil {
+		st.local = local
+	}
+	r.mu.Unlock()
+}
+
+// AwaitFirstList waits, for a replay's session, before its app starts
+// (Keyer.WatchAndAwaitList), for the current native watch's first list, the
+// watch's end (a daemon that cannot be read, a list that stalled) or ctx's
+// (the session's). It says so at Info the first time a watch waits, on which
+// daemon, the rest at Debug.
+func (r *dockerIndex) AwaitFirstList(ctx context.Context) {
+	r.mu.Lock()
+	st := r.cur
+	if st == nil || !st.native {
+		r.mu.Unlock()
+		return
+	}
+	first := !st.waitSaid
+	st.waitSaid = true
+	logger, begins := r.logger, r.listWaitBegins
+	r.mu.Unlock()
+	select {
+	case <-st.synced:
+		return
+	default:
+	}
+	if logger != nil {
+		msg, field := "keploy names container destinations by the containers of the local Docker daemon, and is waiting for it to list them before the app starts, so the replay's calls are named as they were recorded", zap.String("dockerEndpoint", r.Endpoint())
+		if first {
+			logger.Info(msg, field)
+		} else {
+			logger.Debug(msg, field)
+		}
+	}
+	if begins != nil {
+		begins()
+	}
+	select {
+	case <-st.synced:
+	case <-ctx.Done():
+	case <-st.ctx.Done():
+	}
+}
+
+// waitsForTheFirstList reports whether a use of st waits for its first list:
+// a native session's watch (Start). The keploy CLI's (Watch) has its list in
+// before it answers a docker-mode agent at all.
+func (r *dockerIndex) waitsForTheFirstList(st *watchState) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return st.native
+}
+
+// awaitList waits for st's first list (Start never does), or ctx or the watch
+// ending first, and reports whether the list is in. A native watch's first
+// wait is said at Info, on which daemon, the rest at Debug.
+func (r *dockerIndex) awaitList(ctx context.Context, st *watchState) bool {
+	listed := func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return st.listed
+	}
+	select {
+	case <-st.synced:
+		return listed()
+	default:
+	}
+	r.mu.Lock()
+	first, native := !st.waitSaid, st.native
+	if native {
+		st.waitSaid = true
+	}
+	logger, begins := r.logger, r.listWaitBegins
+	r.mu.Unlock()
+	if native && logger != nil {
+		msg := "keploy names container destinations by the containers of the local Docker daemon, and a connection that may reach one waits for the daemon to list them"
+		fields := []zap.Field{zap.String("dockerEndpoint", r.Endpoint()),
+			zap.String("next_step", "the wait ends once the daemon answers; if it does not, check that Docker (Docker Desktop's VM) is running and answers `docker ps`")}
+		if first {
+			logger.Info(msg, fields...)
+		} else {
+			logger.Debug(msg, fields...)
+		}
+	}
+	if begins != nil {
+		begins()
+	}
+	select {
+	case <-st.synced:
+		return listed()
+	case <-ctx.Done():
+		return false
+	case <-st.ctx.Done():
+		return false
+	}
+}
+
+// Listing reports whether the current watch is reading the daemon and its
+// first list is not in yet: what is not placed now may be placed once the
+// list is in (Keyer.PlacedOrPlacing).
+func (r *dockerIndex) Listing() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.cur
+	return st != nil && st.err == nil && st.api != nil && !st.listed
 }
 
 // live reports whether st is a watch a session can use: there is one, it has
@@ -432,7 +590,9 @@ func (r *dockerIndex) watch(ctx context.Context, st *watchState, api dockerAPI) 
 	}()
 	defer func() { <-received }()
 	r.refreshLocal(st)
+	listed := r.watchListStall(ctx, st)
 	list, err := api.ContainerList(ctx, container.ListOptions{})
+	listed()
 	if err != nil {
 		r.fail(st, err)
 		<-ctx.Done()
@@ -448,6 +608,73 @@ func (r *dockerIndex) watch(ctx context.Context, st *watchState, api dockerAPI) 
 	r.mu.Unlock()
 	<-ctx.Done()
 	r.fail(st, ctx.Err()) // the agent stopped: nothing reads this watch as current
+}
+
+// errListStalled fails a native watch whose first list the daemon has not
+// answered for readStallGrace of the time keploy could run (watchListStall):
+// a daemon that took the request and never answers it (a backend that hung, a
+// VM that was paused) is one keploy cannot read, and the next session's start
+// reads it afresh.
+var errListStalled = fmt.Errorf("the Docker daemon has not answered its list of containers for %v of the time keploy could run", readStallGrace)
+
+// watchListStall watches st's first list until the returned func says it is
+// in: once the list has been out for readStallGrace of the time keploy could
+// run (stall.Meter, never wall time: a starved agent's list is not stalled),
+// a native watch fails (errListStalled), which ends every wait for the list,
+// and keploy says so once (Keyer: the daemon cannot be read). A Docker Desktop
+// waking its VM answers well within it.
+func (r *dockerIndex) watchListStall(ctx context.Context, st *watchState) func() {
+	r.mu.Lock()
+	clk := r.stallClock
+	r.mu.Unlock()
+	m := stall.NewMeter(clk, readStallGrace)
+	done := make(chan struct{})
+	go func() {
+		defer m.Stop()
+		for {
+			select {
+			case <-m.Wait():
+				if !m.Expired() {
+					continue
+				}
+				r.mu.Lock()
+				native, logger := st.native, r.logger
+				r.mu.Unlock()
+				if native && r.failsStalled(st) && logger != nil {
+					logger.Warn("the local Docker daemon has not answered keploy's list of its containers: keploy names no container destination until the next session reads the daemon again, and the calls of connections that waited for the list are not judged",
+						zap.String("dockerEndpoint", r.Endpoint()), zap.Duration("waited", readStallGrace),
+						zap.String("next_step", "check that Docker (Docker Desktop's VM) is running and answers `docker ps`, then run again"))
+				}
+				return
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
+// failsStalled fails st with errListStalled, and reports whether it did (a
+// watch that failed already keeps its error).
+func (r *dockerIndex) failsStalled(st *watchState) bool {
+	r.mu.Lock()
+	failed := !st.listed && r.failLocked(st, errListStalled)
+	r.mu.Unlock()
+	if failed {
+		r.say(st, "the container index stopped", zap.Error(errListStalled))
+	}
+	return failed
+}
+
+// ListStalled reports whether the current watch failed because the daemon
+// never answered its first list (errListStalled).
+func (r *dockerIndex) ListStalled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cur != nil && errors.Is(r.cur.err, errListStalled)
 }
 
 // receive applies the stream's events as they come: a die drops its
@@ -1415,6 +1642,7 @@ func (r *dockerIndex) FingerprintsOrStall(ctx context.Context, id string) (strin
 		if st.stalled[id] {
 			stalled = st.describeLocked(id)
 		}
+		waits := r.readWaits
 		r.mu.Unlock()
 		switch {
 		case fp != "" && held:
@@ -1423,6 +1651,9 @@ func (r *dockerIndex) FingerprintsOrStall(ctx context.Context, id string) (strin
 			return "", "", false, ""
 		case stalled != "":
 			return "", "", false, stalled
+		}
+		if waits != nil {
+			waits(id)
 		}
 		select {
 		case <-ended:
@@ -1486,6 +1717,13 @@ func (r *dockerIndex) Settle(ctx context.Context) {
 	r.mu.Lock()
 	st, after := r.cur, r.settleAsked
 	r.mu.Unlock()
+	// A native session's watch may not have its first list yet (Start never
+	// waits for it): this use, one that may reach a container
+	// (MayBeContainer), waits for it, then for a list asked after it as any
+	// other.
+	if st != nil && r.waitsForTheFirstList(st) && !r.awaitList(ctx, st) {
+		return
+	}
 	for {
 		r.mu.Lock()
 		if r.cur != st || st == nil || st.err != nil || st.api == nil || !st.listed || r.settled > after {
