@@ -560,6 +560,11 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		return models.InstanceResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
 			"the instance key is not a clean path inside the project", `send the package directory relative to the project directory, with slashes and nothing to clean up ("." for the project's own), without "::" and neither beginning nor ending with ":"`)
 	}
+	if req.Dir == "" {
+		// The claim of an integration written by hand names its folder by
+		// its key alone (models.ScopeUpgradeRemedy): its tests run there.
+		req.Dir = a.keyFolder(key)
+	}
 	if a.wireClosed() {
 		return models.InstanceResp{}, errClosed()
 	}

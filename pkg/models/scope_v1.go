@@ -31,7 +31,11 @@ type InstanceReq struct {
 	Key string `json:"key"`
 	// Dir is the test process's working directory, absolute: where its tests
 	// run (a Go package's directory). Kept on each test's window, so the
-	// recording's mapping names the folder each test runs in.
+	// recording's mapping names the folder each test runs in. A claim without
+	// one runs its tests in the folder Key names below the project (the
+	// folder keploy.yml is read from), as an integration written by hand
+	// claims; an integration whose Key is not a folder (@keploy/jest's, its
+	// project's displayName) sends Dir.
 	Dir string `json:"dir,omitempty"`
 	// Workers is how many test workers of the run its framework runs at
 	// once (Playwright's workers, go test's -p), each claiming for itself.
