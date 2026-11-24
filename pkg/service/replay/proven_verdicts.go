@@ -28,8 +28,14 @@ func (r *Replayer) assertTestMocks() bool {
 // the per-test consumed-vs-expected assertion by name: a reusable-tier mock
 // today, and only a protocol-phase mock under the proven switch. An answer
 // the client never read (models.Mock.IsUndelivered) is left out under both:
-// no replay serves it, so no test makes the call it recorded.
-func excludedFromTestMockAssertion(m *models.Mock) bool {
+// no replay serves it, so no test makes the call it recorded. A recorded HTTP
+// mock now answered by an egress passthrough rule (models.Mock.AnsweredByPassThrough)
+// is left out under both too: decodeHTTP short-circuits matching calls without
+// consuming the mock, while respecting any user {id, mode:"off"} override.
+func excludedFromTestMockAssertion(m *models.Mock, passThroughPorts, passThroughHosts []models.PassThroughRule) bool {
+	if m.AnsweredByPassThrough(passThroughPorts, passThroughHosts) {
+		return true
+	}
 	if provenswitch.On() {
 		return m.OutsideTestScopes()
 	}
@@ -49,7 +55,7 @@ func unconsumedTestMocks(armed bool, expected []models.MockEntry, consumed []mod
 	eligible := eligibleExpectedEntries(expected, kinds, excluded)
 	got := make(map[string]bool, len(consumed))
 	for _, m := range consumed {
-		if !consumedOutsideAssertion(m) {
+		if !excluded[m.Name] && !consumedOutsideAssertion(m) {
 			got[m.Name] = true
 		}
 	}

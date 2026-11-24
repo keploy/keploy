@@ -268,7 +268,7 @@ func buildDepResults(
 
 	consumedNames := make(map[string]bool, len(consumed))
 	for _, m := range consumed {
-		if consumedOutsideAssertion(m) {
+		if consumedOutsideAssertion(m) || reusableMockNames[m.Name] {
 			continue
 		}
 		consumedNames[m.Name] = true
