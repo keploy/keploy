@@ -654,6 +654,16 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 			zap.Int64("by_memory_pressure", d.ByPressure), zap.Uint64("for_the_output", d.Capacity),
 			zap.Strings("first_dropped", d.Named))
 	}
+	if o := s.NotRecordedOverSizeLimit; o.Requests > 0 {
+		// The calls by their shape and path tag, as the agent's log names
+		// them: the console named each by its path beside the same tag as
+		// it came (models.NotRecordedPart).
+		a.logger.Warn(models.OverSizeLimitSaid,
+			zap.Uint64("requests", o.Requests),
+			zap.Int("limit_bytes", o.LimitBytes), zap.Int("body_limit_bytes", o.BodyLimitBytes),
+			zap.Strings("calls_most", o.Calls),
+			zap.String("next_step", models.OverSizeLimitNextStep))
+	}
 	if s.MassSuppressed {
 		a.logger.Warn("the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
 			zap.Int("suppressed", s.TestCasesSuppressed), zap.Int("recorded", s.TestCasesSent))
