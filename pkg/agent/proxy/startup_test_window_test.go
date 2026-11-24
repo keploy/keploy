@@ -245,8 +245,9 @@ func TestAHeldCallIsShownThePlainStartupRecordingsByTheWindowItWasReadIn(t *test
 // that set's marks after the next set's background is installed
 // (backgroundInstall.at, its prev keeping its marks), never the next set's;
 // and the next set's views read its own.
-// Mutation: drop the marks from the install a newer one keeps, or read the
-// latest install's marks for a view of an earlier epoch.
+// Mutation: drop the marks from the install a newer one keeps, read the
+// latest install's marks for a view of an earlier epoch, own one for a call
+// read between tests, or not forward the answer through a scoped view.
 func TestThePlainStartupMarksAreReadInTheEpochOfTheCallAndTheView(t *testing.T) {
 	mm, ms := s12Set(t)
 	mm.SeedBackgroundRecordings([]models.BackgroundRecording{{Mock: ms["pool"], Startup: true}, {Mock: ms["w-boot"]}})
@@ -275,6 +276,10 @@ func TestThePlainStartupMarksAreReadInTheEpochOfTheCallAndTheView(t *testing.T) 
 	}
 	if mm.OwnsStartup(integrations.NewCallRound(call.Epoch(), nil), "pool") {
 		t.Fatal("a call read between tests owns a plain startup recording")
+	}
+	// A wrapper forwards it: a parser asks the store it was handed.
+	if !integrations.OwnsStartup(&scopedMockDb{MockMemDb: mm}, call, "pool") {
+		t.Fatal("a scoped view over the store does not forward its plain startup owner")
 	}
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
 	mm.ServeExactWorker([]string{"w-boot"})
