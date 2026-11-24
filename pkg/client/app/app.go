@@ -213,7 +213,8 @@ func (a *App) Setup(ctx context.Context) error {
 		}
 	case utils.DockerCompose:
 		// Before anything else: compose starts the agent, and a sudo that
-		// cannot hand it the token would start it unauthenticated.
+		// cannot hand it the token would start it without one, which it
+		// refuses.
 		if err := a.checkAgentTokenHandoff(ctx); err != nil {
 			return err
 		}

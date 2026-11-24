@@ -275,11 +275,12 @@ fi
 
 # The agent keploy started for the session must have enforced its control-plane
 # token, which reaches the agent container through the `docker run` client's
-# environment. That handoff fails OPEN — an agent that got no token serves
-# everything, and every assertion above still passes — so the lines the agent
-# and keploy's own check print when it breaks are what fail the lane.
-if sudo grep -aqE "running WITHOUT authentication|NOT enforcing control-plane authentication" record.log; then
-  fail "the agent ran without its control-plane token: the docker run token handoff is broken"
+# environment. An agent of this release that got no token refuses to start; an
+# older agent image, or a regression, would serve everything while every
+# assertion above still passed — so the lines the agent and keploy's own check
+# print when it breaks are what fail the lane.
+if sudo grep -aqE "running WITHOUT authentication|NOT enforcing control-plane authentication|no control-plane token" record.log; then
+  fail "the agent had no control-plane token (it came up without one, or refused to start): the docker run token handoff is broken"
 fi
 
 # What keploy actually did, on success as well as failure. Whether the endpoint

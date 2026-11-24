@@ -220,6 +220,11 @@ spec:
       imagePullPolicy: Never
       restartPolicy: Always
       args: ["--port", "16000", "--proxy-port", "16789", "--dns-port", "26789", "--mode", "$2"$PROVEN_ARGS$DEBUG_ARG]
+      # Its control-plane token, from a Secret, as k8s-proxy gives every
+      # agent it starts one: an agent started without one refuses to start.
+      env:
+        - name: KEPLOY_AGENT_TOKEN
+          valueFrom: {secretKeyRef: {name: agent-token, key: token}}
       securityContext: {privileged: true}
       startupProbe:
         httpGet: {path: /agent/health, port: 16000}
@@ -242,6 +247,11 @@ EOF
 }
 
 $K create namespace "$NS" >/dev/null
+# The agents' control-plane token: the sidecars enforce it, and the driver,
+# which drives them through keploy's own client, presents it (keploy adopts
+# an inherited KEPLOY_AGENT_TOKEN as its session token).
+$K -n "$NS" create secret generic agent-token \
+  --from-literal=token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" >/dev/null
 $K apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Pod
@@ -276,6 +286,8 @@ spec:
       imagePullPolicy: Never
       args: ["idle"]
       env:
+        - name: KEPLOY_AGENT_TOKEN
+          valueFrom: {secretKeyRef: {name: agent-token, key: token}}
         - {name: KEPLOY_PROVEN, value: "${KEPLOY_PROVEN:-}"}
         - {name: KEPLOY_EXACT_VIEW_VERIFY, value: "${KEPLOY_EXACT_VIEW_VERIFY:-}"}
       volumeMounts: [{name: work, mountPath: /work}]

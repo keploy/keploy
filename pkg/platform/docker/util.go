@@ -149,9 +149,13 @@ func AgentTokenEnv() []string {
 	return []string{token.Env + "=" + tok}
 }
 
+// requireAgentToken is token.Require: the token every agent container this
+// package starts is handed. A variable so that a test can take it away.
+var requireAgentToken = token.Require
+
 // linuxDockerClient is how the linux `docker run` alias invokes the docker
 // client that starts the agent container: as root, with the control-plane
-// token in its environment when passToken is set (see getAlias).
+// token in its environment (see getAlias).
 //
 // A process that is already root runs docker itself, and that is every process
 // that normally gets here: utils.ReexecWithSudo re-executes keploy under sudo
@@ -167,16 +171,12 @@ func AgentTokenEnv() []string {
 //
 // Anything else goes through sudo, told to keep that one variable and no other
 // (sudoKeepingToken). PrepareDockerCommand refuses a sudo that would not.
-func linuxDockerClient(root, passToken bool) string {
+func linuxDockerClient(root bool) string {
 	cli := engine.Active().CLI
-	switch {
-	case root:
+	if root {
 		return cli
-	case passToken:
-		return sudoKeepingToken + " " + cli
-	default:
-		return "sudo " + cli
 	}
+	return sudoKeepingToken + " " + cli
 }
 
 // agentSecurityOptFlags are the engine's --security-opt flags for keploy's
@@ -197,6 +197,12 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 		}
 	} else {
 		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
+	}
+
+	// No agent container without its token (getAlias says so again): refused
+	// before anything is set up for one.
+	if _, err := requireAgentToken(); err != nil {
+		return "", fmt.Errorf("the keploy agent container is not started: %w", err)
 	}
 
 	// Preserves your Docker client initialization and setup
@@ -283,17 +289,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	// shows up in `docker inspect`. That is not a boundary this could hold
 	// anyway: membership of the docker group is equivalent to root.
 	//
-	// No token is not fatal: the agent starts unauthenticated and says so,
-	// which is how it behaved before this existed, rather than leaving the
-	// user unable to record at all. The launch is recorded either way, so the
-	// client still holds this agent to the token (see token.RecordLaunch).
-	token.RecordLaunch(opts.AgentURI)
-	passToken := token.Session() != ""
-	if passToken {
-		envParts = append(envParts, "-e "+token.Env)
-	} else {
-		logger.Warn("no control-plane token to hand to the agent container; it will start without authentication")
+	// No token is an error: an agent started without one refuses to start
+	// anyway, and this error says why it has none. The launch is recorded,
+	// so the client holds this agent to the token (see token.RecordLaunch).
+	if _, err := requireAgentToken(); err != nil {
+		return "", fmt.Errorf("the keploy agent container is not started: %w", err)
 	}
+	token.RecordLaunch(opts.AgentURI)
+	envParts = append(envParts, "-e "+token.Env)
 	envs := strings.Join(envParts, " ")
 	if envs != "" {
 		envs = envs + " "
@@ -419,7 +422,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	switch osName {
 	case "linux":
 
-		alias := linuxDockerClient(os.Geteuid() == 0, passToken) + " container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+		alias := linuxDockerClient(os.Geteuid() == 0) + " container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +

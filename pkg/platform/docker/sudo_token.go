@@ -16,10 +16,10 @@ const sudoKeepingToken = "sudo --preserve-env=" + token.Env
 // CheckSudoKeepsAgentToken refuses the `sudo` on PATH when it would start a
 // docker or docker compose client without the agent's control-plane token that
 // --preserve-env=KEPLOY_AGENT_TOKEN names. Such a client starts the agent
-// without a token, and the agent then serves its control plane to anyone who
-// can reach it. It is for the commands that hand the token through sudo, and
-// runs before they do: the linux `docker run` alias when keploy is not root
-// (PrepareDockerCommand), and a compose command under sudo (pkg/client/app).
+// without a token, and the agent then refuses to start. It is for the commands
+// that hand the token through sudo, and runs before they do: the linux
+// `docker run` alias when keploy is not root (PrepareDockerCommand), and a
+// compose command under sudo (pkg/client/app).
 //
 // root is whether keploy runs as root. A root keploy hands the token through
 // sudo only when that sudo has options it cannot drop, such as -u, and the
@@ -59,7 +59,7 @@ func sudoCannotKeepAgentToken(goos, version string, root bool) error {
 	case !ok:
 		return nil
 	case gap.Ignored:
-		return fmt.Errorf("keploy cannot hand its agent the control-plane token through this sudo: %s ignores --preserve-env=%s (sudo-rs implements it from %s on), so the agent would start without a token and serve its control plane to anyone who can reach it. %s. Or upgrade sudo-rs to %s or later",
+		return fmt.Errorf("keploy cannot hand its agent the control-plane token through this sudo: %s ignores --preserve-env=%s (sudo-rs implements it from %s on), so the agent would get no token and refuse to start. %s. Or upgrade sudo-rs to %s or later",
 			gap, token.Env, gap.SinceString(), remedy, gap.SinceString())
 	default:
 		return fmt.Errorf("keploy cannot hand its agent the control-plane token through this sudo: %s does not accept --preserve-env=%s (sudo accepts it from %s on). %s. Or upgrade sudo to %s or later",

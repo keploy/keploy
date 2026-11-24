@@ -45,23 +45,25 @@ func isDaemonSetAgent() bool {
 // local users, neighbouring containers, and the application under test (which
 // shares the agent's network namespace) can all reach it.
 //
-// An error means the agent was handed a token it cannot read, and must not
-// start; see routes.ConsumeSessionToken.
+// An error means the agent has no token it can enforce (none was handed to
+// it, or one was that it cannot read) and no explicit opt-out, and must not
+// start; see routes.Guard.
 //
 // A DaemonSet agent never serves this router (see the gate in Agent), so it
 // neither consumes a token nor says anything about one: telling every node's
-// log that a server it never starts is unauthenticated would be a false alarm.
+// log that a server it never starts has no token would be a false alarm. Its
+// guard, with no token, would answer /agent/health and nothing else.
 func newAgentRouter(logger *zap.Logger, a agent.Service, tokenFile string, isDocker, daemonSet bool) (chi.Router, error) {
-	sessionToken := ""
+	guard := routes.Authenticate(logger, "")
 	if !daemonSet {
-		tok, err := routes.ConsumeSessionToken(logger, tokenFile, isDocker)
+		g, err := routes.Guard(logger, tokenFile, isDocker)
 		if err != nil {
 			return nil, err
 		}
-		sessionToken = tok
+		guard = g
 	}
 	router := chi.NewRouter()
-	router.Use(routes.Authenticate(logger, sessionToken))
+	router.Use(guard)
 	routes.ActiveHooks.New(router, a, logger)
 	return router, nil
 }

@@ -12,16 +12,16 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// ConsumeSessionToken is the single point where the agent decides whether it
-// has a credential to enforce. If it returns "" the agent serves its whole
-// control plane unauthenticated while the CLI keeps sending a header nothing
-// checks — and nothing else in the process would notice.
+// consumeSessionToken is the single point where the agent decides whether it
+// has a credential to enforce. With no token it refuses (ErrNoToken), whatever
+// the opt-out says; only Guard reads the opt-out, the one case in which the
+// agent serves its control plane to any caller.
 
 func TestConsumeSessionToken_ReadsTheFileTheLauncherPassed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tok")
 	require.NoError(t, os.WriteFile(path, []byte(token.Env+"=a-real-token\n"), 0600))
 
-	got, err := ConsumeSessionToken(zap.NewNop(), path, false)
+	got, err := consumeSessionToken(zap.NewNop(), path, false)
 	require.NoError(t, err)
 	require.Equal(t, "a-real-token", got)
 }
@@ -33,7 +33,7 @@ func TestConsumeSessionToken_UnlinksTheFileOnceItHasBeenRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tok")
 	require.NoError(t, os.WriteFile(path, []byte(token.Env+"=a-real-token\n"), 0600))
 
-	_, err := ConsumeSessionToken(zap.NewNop(), path, false)
+	_, err := consumeSessionToken(zap.NewNop(), path, false)
 	require.NoError(t, err)
 
 	_, err = os.Stat(path)
@@ -45,7 +45,7 @@ func TestConsumeSessionToken_ReadsTheEnvironmentForContainerModes(t *testing.T) 
 	// var the docker or compose client passed through by name.
 	t.Setenv(token.Env, "token-from-the-container-env")
 
-	got, err := ConsumeSessionToken(zap.NewNop(), "", true)
+	got, err := consumeSessionToken(zap.NewNop(), "", true)
 	require.NoError(t, err)
 	require.Equal(t, "token-from-the-container-env", got)
 }
@@ -55,7 +55,7 @@ func TestConsumeSessionToken_PrefersTheFileOverTheEnvironment(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tok")
 	require.NoError(t, os.WriteFile(path, []byte(token.Env+"=fresh-file-token\n"), 0600))
 
-	got, err := ConsumeSessionToken(zap.NewNop(), path, false)
+	got, err := consumeSessionToken(zap.NewNop(), path, false)
 	require.NoError(t, err)
 	require.Equal(t, "fresh-file-token", got)
 }
@@ -79,7 +79,7 @@ func TestConsumeSessionToken_RefusesATokenFileItCannotUse(t *testing.T) {
 			// exactly the fallback that served the control plane open.
 			t.Setenv(token.Env, "token-from-the-environment")
 
-			got, err := ConsumeSessionToken(zap.NewNop(), path, false)
+			got, err := consumeSessionToken(zap.NewNop(), path, false)
 			require.Error(t, err)
 			require.Empty(t, got)
 			require.Contains(t, err.Error(), "will not start")
@@ -87,12 +87,27 @@ func TestConsumeSessionToken_RefusesATokenFileItCannotUse(t *testing.T) {
 	}
 }
 
-func TestConsumeSessionToken_ReportsNoTokenWhenThereIsNone(t *testing.T) {
+func TestConsumeSessionToken_RefusesToStartWithoutAToken(t *testing.T) {
 	t.Setenv(token.Env, "")
+	t.Setenv(token.InsecureNoAuthEnv, "")
 
-	got, err := ConsumeSessionToken(zap.NewNop(), "", false)
-	require.NoError(t, err, "an agent started with no handoff at all still serves, as before the token existed")
+	got, err := consumeSessionToken(zap.NewNop(), "", false)
+	require.ErrorIs(t, err, ErrNoToken, "an agent started with no token must not start")
 	require.Empty(t, got, "a token invented here would be enforced against clients that cannot know it")
+}
+
+// TestConsumeSessionToken_LeavesTheOptOutToGuard: consumeSessionToken refuses
+// an agent with no token whatever the opt-out says, and says nothing: only
+// Guard reads the opt-out.
+func TestConsumeSessionToken_LeavesTheOptOutToGuard(t *testing.T) {
+	t.Setenv(token.Env, "")
+	t.Setenv(token.InsecureNoAuthEnv, "true")
+	core, logs := observer.New(zapcore.DebugLevel)
+
+	got, err := consumeSessionToken(zap.New(core), "", true)
+	require.ErrorIs(t, err, ErrNoToken)
+	require.Empty(t, got)
+	require.Zero(t, logs.Len())
 }
 
 func TestConsumeSessionToken_MakesTheProcessAgreeWithWhatItEnforces(t *testing.T) {
@@ -101,62 +116,55 @@ func TestConsumeSessionToken_MakesTheProcessAgreeWithWhatItEnforces(t *testing.T
 	path := filepath.Join(t.TempDir(), "tok")
 	require.NoError(t, os.WriteFile(path, []byte(token.Env+"=the-enforced-token\n"), 0600))
 
-	got, err := ConsumeSessionToken(zap.NewNop(), path, false)
+	got, err := consumeSessionToken(zap.NewNop(), path, false)
 	require.NoError(t, err)
 	require.Equal(t, got, token.Session())
 }
 
-// TestConsumeSessionToken_SaysWhatIsTrueForTheAgentItIs pins the startup
-// message for an agent with no token. On a laptop or CI runner that is a
-// handoff that did not happen, and a warning naming the handoffs is right. In a
-// pod, only k8s-proxy hands an agent its token, and only in a sidecar install:
-// a sidecar, replay or sandbox pod it injected before its per-sidecar token
-// release, any such pod in a DaemonSet install, or one injected with
-// proxy.keployAgentControlPlaneAuth=false, has none. The local warning there
-// names remedies that do not exist in a pod, so the in-cluster agent says, once
-// and at info, which pods have no token and why — and must not give the old
-// reason, a trusted cluster network, which k8s-proxy's tokens made false.
-// keploy running natively as root in a CI pod starts its agent without sudo,
-// so that agent sees the pod's environment too, and it must still get the
-// warning.
+// TestConsumeSessionToken_SaysWhatIsTrueForTheAgentItIs pins why an agent
+// with no token does not start, and what to do about it. On a laptop or CI
+// runner that is a handoff that did not happen, and the remedy is to start it
+// through keploy or hand it KEPLOY_AGENT_TOKEN. In a pod, only k8s-proxy hands
+// an agent its token, so the remedy is k8s-proxy's. keploy running natively as
+// root in a CI pod starts its agent without sudo, so that agent sees the pod's
+// environment too, and it must still be told the local remedy. Only the local
+// message names the opt-out: in a cluster it would leave the agent open to
+// every pod. Nothing is logged here: the caller logs the refusal.
 func TestConsumeSessionToken_SaysWhatIsTrueForTheAgentItIs(t *testing.T) {
-	const warning = "no --token-file"
-	// In full: a substring and a list of forbidden words would let any other
-	// explanation through, the old "the cluster network is trusted" included.
-	const inCluster = "agent control-plane API is running without authentication: this in-cluster agent was started " +
-		"without a control-plane token (in a sidecar install, k8s-proxy supplies one to the recording sidecars and " +
-		"the replay and sandbox pods it injects, from its per-sidecar token release on; pods injected before that " +
-		"release, pods in a DaemonSet install, and pods injected with proxy.keployAgentControlPlaneAuth=false have " +
-		"none), so anything that can reach this pod's agent port can use the API"
+	const local = "no control-plane token: start the agent through keploy, or set KEPLOY_AGENT_TOKEN"
+	// In full for a pod's agent: a substring would let any other remedy
+	// through, the opt-out included.
+	const inCluster = "no control-plane token: this in-cluster agent was started without KEPLOY_AGENT_TOKEN. " +
+		"k8s-proxy gives every agent it starts its own token; upgrade k8s-proxy to a release that does (see k8s-proxy's " +
+		"UPGRADING.md). If you start this pod's agent yourself, give it KEPLOY_AGENT_TOKEN from a Secret " +
+		"(valueFrom.secretKeyRef) and the same value to its client"
 	for _, tc := range []struct {
-		name      string
-		isDocker  bool
-		k8sHost   string
-		wantLevel zapcore.Level
-		wantText  string // contained in the message
-		wantExact bool   // and is the whole of it
+		name     string
+		isDocker bool
+		k8sHost  string
+		want     string
 	}{
-		{"native agent", false, "", zapcore.WarnLevel, warning, false},
-		{"docker agent keploy launched", true, "", zapcore.WarnLevel, warning, false},
-		{"native agent keploy launched inside a CI pod", false, "10.96.0.1", zapcore.WarnLevel, warning, false},
-		{"in-cluster agent", true, "10.96.0.1", zapcore.InfoLevel, inCluster, true},
+		{"native agent", false, "", local},
+		{"docker agent keploy launched", true, "", local},
+		{"native agent keploy launched inside a CI pod", false, "10.96.0.1", local},
+		{"in-cluster agent", true, "10.96.0.1", inCluster},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(token.Env, "")
+			t.Setenv(token.InsecureNoAuthEnv, "")
 			t.Setenv("KUBERNETES_SERVICE_HOST", tc.k8sHost)
 			core, logs := observer.New(zapcore.DebugLevel)
 
-			_, err := ConsumeSessionToken(zap.New(core), "", tc.isDocker)
-			require.NoError(t, err)
-
-			require.Equal(t, 1, logs.Len(), "the agent must say, once, that its control plane is unauthenticated")
-			entry := logs.All()[0]
-			require.Equal(t, tc.wantLevel, entry.Level)
-			if tc.wantExact {
-				require.Equal(t, tc.wantText, entry.Message)
+			got, err := consumeSessionToken(zap.New(core), "", tc.isDocker)
+			require.ErrorIs(t, err, ErrNoToken)
+			require.Empty(t, got)
+			if tc.want == inCluster {
+				require.Equal(t, inCluster, err.Error(), "an in-cluster agent is pointed at k8s-proxy, not the opt-out")
 			} else {
-				require.Contains(t, entry.Message, tc.wantText)
+				require.Contains(t, err.Error(), tc.want)
+				require.Contains(t, err.Error(), token.InsecureNoAuthEnv+"=true")
 			}
+			require.Zero(t, logs.Len(), "the refusal is the caller's to log")
 		})
 	}
 }
@@ -164,16 +172,16 @@ func TestConsumeSessionToken_SaysWhatIsTrueForTheAgentItIs(t *testing.T) {
 // TestConsumeSessionToken_InClusterAgentKeepsTheTokenItWasGiven: in a sidecar
 // install k8s-proxy puts a KEPLOY_AGENT_TOKEN on every agent it injects (the
 // recording sidecars, and the replay and sandbox pods it creates), and that
-// agent is in-cluster by every test ConsumeSessionToken applies. It must
+// agent is in-cluster by every test consumeSessionToken applies. It must
 // enforce that token and say nothing, not take the tokenless in-cluster path:
-// checking for the pod before reading the environment would serve every such
-// agent open while k8s-proxy went on presenting a token nothing checks.
+// checking for the pod before reading the environment would refuse to start
+// every such agent, though k8s-proxy handed it a token.
 func TestConsumeSessionToken_InClusterAgentKeepsTheTokenItWasGiven(t *testing.T) {
 	t.Setenv(token.Env, "token-k8s-proxy-minted")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
 	core, logs := observer.New(zapcore.DebugLevel)
 
-	got, err := ConsumeSessionToken(zap.New(core), "", true)
+	got, err := consumeSessionToken(zap.New(core), "", true)
 	require.NoError(t, err)
 	require.Equal(t, "token-k8s-proxy-minted", got)
 	require.Equal(t, got, token.Session())

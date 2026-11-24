@@ -310,10 +310,11 @@ jobs:
 
       # Same argument, different subtree: pkg/agent/token holds the
       # control-plane token behind a mutex that Session and Adopt share, and a
-      # reader that slipped between them would hand the agent an empty token
-      # and serve the whole control plane unauthenticated. Plain `go test`
-      # cannot see that — the guard's absence is a data race, not a failed
-      # assertion — so the test that covers it only proves anything here.
+      # reader that slipped between them would hand the agent an empty token,
+      # and the agent would refuse to start (or, with the explicit opt-out,
+      # serve its control plane to any caller). Plain `go test` cannot see
+      # that — the guard's absence is a data race, not a failed assertion — so
+      # the test that covers it only proves anything here.
       - name: Running Race Detector (agent control-plane token)
         run: go test -race -count=1 ./pkg/agent/token/...
 

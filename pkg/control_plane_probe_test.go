@@ -44,11 +44,11 @@ func recordLaunch(t *testing.T, agentURI string) {
 	t.Cleanup(func() { token.ForgetLaunch(agentURI, launch) })
 }
 
-// TestVerifyControlPlaneGuarded is what makes a broken token handoff loud.
-// Every step between minting the token and the agent enforcing it fails OPEN —
-// the agent serves everything and this process's requests all succeed — so
-// without this check the whole feature can regress to a no-op with every test
-// and every CI lane still green.
+// TestVerifyControlPlaneGuarded is what makes a broken token handoff loud. An
+// agent of this release with no token refuses to start, but an older agent
+// image (or a regression) serves everything while this process's requests all
+// succeed — so without this check the whole feature can regress to a no-op
+// with every test and every CI lane still green.
 func TestVerifyControlPlaneGuarded(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -147,7 +147,8 @@ func TestVerifyControlPlaneGuarded_DoesNotReportAProbeThatCouldNotComplete(t *te
 // else started — a sidecar k8s-proxy injected, a pinned agent image that
 // predates the token — made no token handoff of its own, and the check
 // reported a broken handoff at ERROR, which keploy's CI lanes treat as fatal.
-// A sidecar with no token says for itself that it runs unauthenticated.
+// An agent of this release with no token refuses to start, and says so for
+// itself.
 func TestVerifyControlPlaneGuarded_LeavesAgentsItNeverStartedAlone(t *testing.T) {
 	resetProbeOnce(t)
 

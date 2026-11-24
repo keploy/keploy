@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // guardedAgent stands in for a real agent: it enforces the same middleware the
@@ -161,11 +162,20 @@ func TestBearerTransport_DoesNotMutateTheCallersRequest(t *testing.T) {
 		"RoundTrip mutated the request it was given")
 }
 
+// mustNativeAgentArgs is a.nativeAgentArgs(opts), failing the test on an error.
+func mustNativeAgentArgs(t *testing.T, a *AgentClient, opts models.SetupOptions) []string {
+	t.Helper()
+	args, err := a.nativeAgentArgs(opts)
+	require.NoError(t, err)
+	return args
+}
+
 func TestAppendTokenFileArg_PassesThePathAndNeverTheToken(t *testing.T) {
 	t.Cleanup(func() { _ = token.Cleanup() })
-	args := appendTokenFileArg(zap.NewNop(), []string{"--port", "16789"})
+	args, err := appendTokenFileArg([]string{"--port", "16789"})
+	require.NoError(t, err)
 
-	require.Len(t, args, 4, "the agent was spawned without --token-file and will serve unauthenticated")
+	require.Len(t, args, 4, "the agent was spawned without --token-file, and would refuse to start")
 	require.Equal(t, "--token-file", args[2])
 
 	path := args[3]
@@ -189,7 +199,7 @@ func TestNativeAgentArgs_HandTheAgentItsToken(t *testing.T) {
 	const agentURI = "http://localhost:26789/agent"
 	a := New(zap.NewNop(), nil, &config.Config{})
 
-	args := a.nativeAgentArgs(models.SetupOptions{AgentPort: 26789, ProxyPort: 26790, DnsPort: 26791, AgentURI: agentURI, Mode: models.MODE_RECORD})
+	args := mustNativeAgentArgs(t, a, models.SetupOptions{AgentPort: 26789, ProxyPort: 26790, DnsPort: 26791, AgentURI: agentURI, Mode: models.MODE_RECORD})
 
 	i := slices.Index(args, "--token-file")
 	require.GreaterOrEqual(t, i, 0, "the native agent is started without --token-file: %v", args)
@@ -204,13 +214,11 @@ func TestNativeAgentArgs_HandTheAgentItsToken(t *testing.T) {
 	require.True(t, launched, "the client does not know it launched this agent, so it will never check the agent enforces the token")
 }
 
-// TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked: a token file that
-// cannot be written leaves the native agent without a token, serving open. The
-// client's readiness check is what reports that, and it only checks agents
-// this process launched — so the launch has to be on record whether or not the
-// handoff went through, or the one agent that needs checking is the one that
-// is skipped.
-func TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked(t *testing.T) {
+// TestNativeAgentArgs_ATokenFileThatCannotBeWrittenFailsTheStart: a token
+// file that cannot be written leaves no token to hand the native agent, and
+// the start fails with an error that says so, rather than start an agent
+// without one. Nothing is on record as launched: no agent was.
+func TestNativeAgentArgs_ATokenFileThatCannotBeWrittenFailsTheStart(t *testing.T) {
 	require.NoError(t, token.Cleanup()) // so the next WriteFile needs a new private directory
 	t.Cleanup(func() { _ = token.Cleanup() })
 	unwritable := filepath.Join(t.TempDir(), "does-not-exist")
@@ -220,11 +228,45 @@ func TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked(t *testing.T) {
 	const agentURI = "http://localhost:26792/agent"
 	a := New(zap.NewNop(), nil, &config.Config{})
 
-	args := a.nativeAgentArgs(models.SetupOptions{AgentPort: 26792, ProxyPort: 26793, DnsPort: 26794, AgentURI: agentURI, Mode: models.MODE_RECORD})
-
-	require.NotContains(t, args, "--token-file", "a token file was written to a temp directory that does not exist")
+	args, err := a.nativeAgentArgs(models.SetupOptions{AgentPort: 26792, ProxyPort: 26793, DnsPort: 26794, AgentURI: agentURI, Mode: models.MODE_RECORD})
+	require.Error(t, err, "the native agent was started with no token file")
+	require.Contains(t, err.Error(), "could not hand the keploy agent its control-plane token, so it is not started")
+	require.Nil(t, args)
 	_, launched := token.Launched(agentURI)
-	require.True(t, launched, "an agent that got no token is not on record as launched, so nothing checks it and it serves open unreported")
+	require.False(t, launched, "an agent that was never started is on record as launched")
+
+	_, _, _, err = a.nativeAgentLaunch(models.SetupOptions{AgentPort: 26792, ProxyPort: 26793, DnsPort: 26794, AgentURI: agentURI, Mode: models.MODE_RECORD})
+	require.Error(t, err, "the native launch went ahead with no token file")
+}
+
+// TestStartNativeAgent_ATokenFileThatCannotBeWrittenStartsNothing: the start
+// itself fails with the handoff's error, and no agent process is spawned. The
+// binary it would start is one that does not exist, without sudo, so that a
+// regression fails here rather than running anything.
+func TestStartNativeAgent_ATokenFileThatCannotBeWrittenStartsNothing(t *testing.T) {
+	require.NoError(t, token.Cleanup())
+	t.Cleanup(func() { _ = token.Cleanup() })
+	origBin, origElev := nativeAgentBinary, nativeAgentElevates
+	t.Cleanup(func() { nativeAgentBinary, nativeAgentElevates = origBin, origElev })
+	nativeAgentBinary = func() (string, error) { return filepath.Join(t.TempDir(), "no-such-keploy"), nil }
+	nativeAgentElevates = func(string) bool { return false }
+	unwritable := filepath.Join(t.TempDir(), "does-not-exist")
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, unwritable)
+	}
+	a := New(zap.NewNop(), nil, &config.Config{})
+	grp, gctx := errgroup.WithContext(context.Background())
+	ctx := context.WithValue(gctx, models.ErrGroupKey, grp)
+	exited := make(chan error, 1)
+	err := a.startNativeAgent(ctx, models.SetupOptions{AgentPort: 26801, ProxyPort: 26802, DnsPort: 26803,
+		AgentURI: "http://localhost:26801/agent", Mode: models.MODE_RECORD}, exited, nil)
+	require.ErrorContains(t, err, "could not hand the keploy agent its control-plane token, so it is not started")
+	require.NoError(t, grp.Wait(), "something was started for an agent with no token")
+	select {
+	case e := <-exited:
+		t.Fatalf("an agent process ran and exited: %v", e)
+	default:
+	}
 }
 
 // TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken: every native
@@ -233,8 +275,7 @@ func TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked(t *testing.T) {
 // second agent of the same run (one that replaces the first). The client
 // presents that one token on every request it sends any agent of the run, so
 // an agent handed another would refuse them all, and one handed none would
-// serve its control-plane API to any caller that reaches its port
-// (routes.ConsumeSessionToken).
+// refuse to start (routes.Guard).
 func TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken(t *testing.T) {
 	t.Cleanup(func() { _ = token.Cleanup() })
 	require.NotEmpty(t, token.Session(), "this process has no run token to hand its agents")
@@ -253,7 +294,7 @@ func TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken(t *testing.T) {
 				opts := tc.opts
 				opts.AgentPort, opts.ProxyPort, opts.DnsPort = 26789, 26790, 26791
 				opts.AgentURI = "http://localhost:26789/agent"
-				args := a.nativeAgentArgs(opts)
+				args := mustNativeAgentArgs(t, a, opts)
 				i := slices.Index(args, "--token-file")
 				require.GreaterOrEqual(t, i, 0, "agent %d of a %s run is started without --token-file: %v", agent, tc.name, args)
 				require.Less(t, i+1, len(args))
@@ -268,7 +309,7 @@ func TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken(t *testing.T) {
 // TestNew_BuildsClientsThatCarryTheSessionToken pins what New wires up. The
 // transport has its own tests, but New handing it an empty token left them all
 // green while every request the CLI made was a 401 — or, against an agent that
-// was handed nothing either, unauthenticated.
+// was handed nothing either, not checked at all.
 func TestNew_BuildsClientsThatCarryTheSessionToken(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]string{}
@@ -381,8 +422,9 @@ func TestRedactToken_KeepsTheTokenOutOfLogs(t *testing.T) {
 func TestNativeAgentLaunch_TellsTheAgentWhereToReportItsTeardown(t *testing.T) {
 	t.Cleanup(func() { _ = token.Cleanup() })
 	a := New(zap.NewNop(), nil, &config.Config{})
-	args, progress, remove := a.nativeAgentLaunch(models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797,
+	args, progress, remove, err := a.nativeAgentLaunch(models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797,
 		AgentURI: "http://localhost:26795/agent", Mode: models.MODE_RECORD})
+	require.NoError(t, err)
 	i := slices.Index(args, "--teardown-progress-file")
 	require.GreaterOrEqual(t, i, 0, "the native agent is not told where to report its teardown: %v", args)
 	require.Less(t, i+1, len(args))

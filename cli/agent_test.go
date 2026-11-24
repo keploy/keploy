@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -78,10 +79,16 @@ func (noFlags) AddFlags(*cobra.Command) error                       { return nil
 func (noFlags) ValidateFlags(context.Context, *cobra.Command) error { return nil }
 func (noFlags) Validate(context.Context, *cobra.Command) error      { return nil }
 
+// testAgentToken is the control-plane token the agents these tests start are
+// handed, as every launcher hands its agent one: an agent with none refuses to
+// start (TestAgent_WithoutATokenRefusesToStart), before what a test is about.
+const testAgentToken = "5e55105e55105e55105e55105e55105e55105e55105e55105e55105e55105e55"
+
 // runAgent runs the agent command's RunE against factory and returns the exit
 // code the process would end with.
 func runAgent(t *testing.T, ctx context.Context, factory ServiceFactory) int {
 	t.Helper()
+	t.Setenv(token.Env, testAgentToken)
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	cmd := Agent(ctx, zap.NewNop(), &config.Config{}, factory, noFlags{})
@@ -206,7 +213,7 @@ func startHangupAgent(t *testing.T, hold bool, env ...string) (dir string, agent
 
 	dir = t.TempDir()
 	agent = exec.Command(os.Args[0], "-test.run=^TestAgentDiesOfAHangUp$")
-	agent.Env = append(os.Environ(), agentHangupHelperEnv+"="+dir)
+	agent.Env = append(os.Environ(), agentHangupHelperEnv+"="+dir, token.Env+"="+testAgentToken)
 	if hold {
 		agent.Env = append(agent.Env, agentHangupHoldEnv+"=1")
 	}

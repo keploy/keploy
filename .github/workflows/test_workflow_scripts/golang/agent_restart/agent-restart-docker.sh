@@ -112,6 +112,12 @@ docker build -q -t "$PROBE_IMAGE" "$WORK" >/dev/null
 
 state() { docker inspect -f '{{.State.Status}}' "$1" 2>&1; }
 
+# The agent's control-plane token, as keploy hands every agent it starts one:
+# an agent started without one refuses to start. Passed to docker by name
+# (-e KEPLOY_AGENT_TOKEN), never as a value in argv; the recorder presents it.
+KEPLOY_AGENT_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+export KEPLOY_AGENT_TOKEN
+
 docker run -d --name "$DEP" "$PROBE_IMAGE" -serve 8000 >/dev/null
 dep_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$DEP")
 await "the dependency to accept connections" "state $DEP" \
@@ -125,6 +131,7 @@ docker run -d --name "$POD" --ipc=shareable -p "127.0.0.1:$AGENT_PORT:$AGENT_POR
 docker run -d --name "$AGENT" --privileged \
   --pid="container:$POD" --network="container:$POD" --ipc="container:$POD" \
   -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
+  -e KEPLOY_AGENT_TOKEN \
   "$IMAGE" --port "$AGENT_PORT" --proxy-port 16789 --dns-port 26789 --mode record >/dev/null
 
 # healthy waits for the agent to answer its health check, which it serves
@@ -394,6 +401,7 @@ instances() {
   docker run -d --name "$AGENT" --privileged \
     --pid="container:$POD" --network="container:$POD" --ipc="container:$POD" \
     -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
+    -e KEPLOY_AGENT_TOKEN \
     "$IMAGE" --port "$AGENT_PORT" --proxy-port 16789 --dns-port 26789 --mode record --proven >/dev/null
   if ! healthy; then
     fail "with the proven switch on the agent did not answer its health check"

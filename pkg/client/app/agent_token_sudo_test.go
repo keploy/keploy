@@ -142,7 +142,7 @@ func TestRun_AsRootComposeDoesNotGoThroughItsSudo(t *testing.T) {
 			}
 			require.Len(t, ups, 1, "compose was never brought up; %s was run as %v", tc.prefix, wrapped)
 			require.Equal(t, token.Session(), ups[0].token,
-				"compose started the agent without the token its compose file names, so the agent serves its control plane to anyone")
+				"compose started the agent without the token its compose file names, so the agent refuses to start")
 			require.Empty(t, wrapped, "keploy is root, and still ran compose through %s", tc.prefix)
 		})
 	}
@@ -152,8 +152,8 @@ func TestRun_AsRootComposeDoesNotGoThroughItsSudo(t *testing.T) {
 // the sudo in front of compose is needed, and it is told
 // --preserve-env=KEPLOY_AGENT_TOKEN. sudo-rs before 0.2.7 does not implement
 // that: it warns, runs compose anyway, and compose starts an agent with no
-// token, which serves its control plane to anyone who can reach it. keploy has
-// to refuse before anything starts, and say why.
+// token, which then refuses to start. keploy has to refuse before anything
+// starts, and say why.
 func TestSetup_RefusesASudoThatWouldDropTheAgentToken(t *testing.T) {
 	setEffectiveUID(t, 1000)
 	for _, version := range []string{"0.2.5", "0.2.6"} {

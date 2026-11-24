@@ -36,7 +36,7 @@ func TestNativeAgentArgs_CarryTheCLIsRootSettings(t *testing.T) {
 	for _, on := range settings {
 		conf := &config.Config{}
 		on.set(conf)
-		args := New(zap.NewNop(), nil, conf).nativeAgentArgs(opts)
+		args := mustNativeAgentArgs(t, New(zap.NewNop(), nil, conf), opts)
 		for _, s := range settings[1:] {
 			var got []string
 			for _, arg := range args {

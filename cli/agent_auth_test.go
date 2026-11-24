@@ -83,6 +83,11 @@ func startAgent(t *testing.T, logger *zap.Logger, args ...string) *runningAgent 
 		orig := containerTeardownProgressFile
 		containerTeardownProgressFile = progress
 		t.Cleanup(func() { containerTeardownProgressFile = orig })
+		// Its start's progress too, so that no row writes the host's own
+		// file (kdocker.AgentBootProgressFile).
+		origBoot := containerBootProgressFile
+		containerBootProgressFile = filepath.Join(dir, "boot-progress.json")
+		t.Cleanup(func() { containerBootProgressFile = origBoot })
 	} else {
 		args = append([]string{"--teardown-progress-file", progress}, args...)
 	}
@@ -212,8 +217,9 @@ func TestAgent_RefusesToStartWithATokenFileItCannotRead(t *testing.T) {
 }
 
 // TestAgent_DaemonSetSaysNothingAboutAServerItNeverStarts: a DaemonSet agent
-// never binds the control-plane server, so the startup warning that its
-// control plane is unauthenticated was a false alarm in every node's log.
+// never binds the control-plane server, so it needs no token: without the
+// gate, every node's agent would refuse to start for want of one. It starts,
+// and says nothing about a token.
 func TestAgent_DaemonSetSaysNothingAboutAServerItNeverStarts(t *testing.T) {
 	t.Setenv(token.Env, "")
 	t.Setenv("KEPLOY_DAEMONSET_ENABLED", "true")
@@ -227,41 +233,140 @@ func TestAgent_DaemonSetSaysNothingAboutAServerItNeverStarts(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if n := logs.FilterMessageSnippet("authentication").Len(); n != 0 {
-		t.Errorf("the DaemonSet agent reported on the authentication of a server it never starts: %v",
-			logs.FilterMessageSnippet("authentication").All()[0].Message)
+	for _, said := range []string{"authentication", "control-plane token", token.InsecureNoAuthEnv} {
+		if n := logs.FilterMessageSnippet(said).Len(); n != 0 {
+			t.Errorf("the DaemonSet agent reported on the token of a server it never starts: %v",
+				logs.FilterMessageSnippet(said).All()[0].Message)
+		}
 	}
 	if got := a.get(t, "/health", ""); got != -1 {
 		t.Errorf("the DaemonSet agent is serving its control plane (%d)", got)
 	}
 }
 
-// TestAgent_InClusterAgentSaysPlainlyWhyItIsUnauthenticated starts the agent
-// the way Kubernetes runs a pod agent that k8s-proxy handed no token: a
-// container (--is-docker) in a pod, with no KEPLOY_AGENT_TOKEN and no
-// KEPLOY_DAEMONSET_ENABLED, as one injected before k8s-proxy's per-sidecar
-// token release, a replay or sandbox pod in a DaemonSet install, or one
-// injected with proxy.keployAgentControlPlaneAuth=false is. It still serves,
-// and says so once, plainly, naming those three causes — not with the
-// local-handoff warning, whose remedies do not exist in a pod.
-func TestAgent_InClusterAgentSaysPlainlyWhyItIsUnauthenticated(t *testing.T) {
-	t.Setenv(token.Env, "")
-	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
-	core, logs := observer.New(zapcore.InfoLevel)
-	a := startAgent(t, zap.New(core), "--is-docker")
-	a.waitServing(t)
-
-	said := logs.FilterMessageSnippet("authentication").All()
-	if len(said) != 1 {
-		t.Fatalf("the in-cluster agent said %d things about its authentication, want exactly one", len(said))
+// refusedToStart waits for a started agent to exit and checks it refused to
+// start: a non-zero exit, no hooking of the application, nothing serving its
+// port, and an error that says why, containing each of want.
+func refusedToStart(t *testing.T, a *runningAgent, logs *observer.ObservedLogs, want ...string) {
+	t.Helper()
+	select {
+	case <-a.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the agent did not exit")
 	}
-	if said[0].Level != zapcore.InfoLevel ||
-		!strings.Contains(said[0].Message, "this in-cluster agent was started without a control-plane token") ||
-		!strings.Contains(said[0].Message, "pods injected before that release") ||
-		!strings.Contains(said[0].Message, "pods in a DaemonSet install") ||
-		!strings.Contains(said[0].Message, "proxy.keployAgentControlPlaneAuth=false") ||
-		strings.Contains(said[0].Message, "trusted") {
-		t.Errorf("the in-cluster agent said, at %s: %s", said[0].Level, said[0].Message)
+	if utils.ErrCode == 0 {
+		t.Error("the agent exited 0; the CLI, docker or the kubelet that started it would read that as a clean finish")
+	}
+	select {
+	case <-a.setupCalled:
+		t.Error("the agent went on to hook the application without a token to enforce")
+	default:
+	}
+	if got := a.get(t, "/health", ""); got != -1 {
+		t.Errorf("something is serving the agent port (%d)", got)
+	}
+	var reasons []string
+	for _, e := range logs.All() {
+		if reason, _ := e.ContextMap()["error"].(string); reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	for _, w := range want {
+		if !slices.ContainsFunc(reasons, func(r string) bool { return strings.Contains(r, w) }) {
+			t.Errorf("the agent's refusal does not say %q; it said: %q", w, reasons)
+		}
+	}
+}
+
+// TestAgent_WithoutATokenRefusesToStart: an agent started with no token file
+// and no KEPLOY_AGENT_TOKEN, as `keploy agent` run by hand is, exits non-zero
+// and says how to start it with one.
+func TestAgent_WithoutATokenRefusesToStart(t *testing.T) {
+	t.Setenv(token.Env, "")
+	t.Setenv(token.InsecureNoAuthEnv, "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	core, logs := observer.New(zapcore.ErrorLevel)
+	a := startAgent(t, zap.New(core))
+	refusedToStart(t, a, logs, "no control-plane token: start the agent through keploy, or set KEPLOY_AGENT_TOKEN",
+		token.InsecureNoAuthEnv+"=true")
+}
+
+// TestAgent_InClusterAgentWithoutATokenRefusesToStart starts the agent the way
+// Kubernetes runs a pod agent that k8s-proxy handed no token: a container
+// (--is-docker) in a pod, with no KEPLOY_AGENT_TOKEN and no
+// KEPLOY_DAEMONSET_ENABLED. It refuses to start, naming k8s-proxy, so a replay
+// under a k8s-proxy release before the one that gives every agent it starts a
+// token fails at its agent's start rather than with a guard nothing passes.
+func TestAgent_InClusterAgentWithoutATokenRefusesToStart(t *testing.T) {
+	t.Setenv(token.Env, "")
+	t.Setenv(token.InsecureNoAuthEnv, "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	core, logs := observer.New(zapcore.ErrorLevel)
+	a := startAgent(t, zap.New(core), "--is-docker")
+	refusedToStart(t, a, logs, "this in-cluster agent was started without KEPLOY_AGENT_TOKEN", "upgrade k8s-proxy")
+}
+
+// TestAgent_InsecureOptOutServesWithoutAToken: with the explicit opt-out, an
+// agent with no token serves every route to any caller, and says so once, at
+// WARN, naming the variable.
+func TestAgent_InsecureOptOutServesWithoutAToken(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		k8s  string
+	}{
+		{"native", nil, ""},
+		{"in-cluster", []string{"--is-docker"}, "10.96.0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(token.Env, "")
+			t.Setenv(token.InsecureNoAuthEnv, "true")
+			t.Setenv("KUBERNETES_SERVICE_HOST", tc.k8s)
+			core, logs := observer.New(zapcore.InfoLevel)
+			a := startAgent(t, zap.New(core), tc.args...)
+			a.waitServing(t)
+
+			// The probe path has no handler: the router's 404 means the guard
+			// let a request with no token through.
+			if got := a.get(t, token.ProbePath, ""); got != http.StatusNotFound {
+				t.Errorf("no token got %d past the opt-out's guard, want the router's 404", got)
+			}
+			said := logs.FilterMessageSnippet(token.InsecureNoAuthEnv).All()
+			if len(said) != 1 || said[0].Level != zapcore.WarnLevel {
+				t.Fatalf("the opt-out was announced %d times (want once, at WARN): %v", len(said), said)
+			}
+		})
+	}
+}
+
+// TestAgent_InsecureOptOutOnlyTakesTrue: any other value of the opt-out is not
+// read as a yes, and the agent says what it was set to.
+func TestAgent_InsecureOptOutOnlyTakesTrue(t *testing.T) {
+	for _, v := range []string{"1", "TRUE", "yes", " true"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv(token.Env, "")
+			t.Setenv(token.InsecureNoAuthEnv, v)
+			core, logs := observer.New(zapcore.ErrorLevel)
+			a := startAgent(t, zap.New(core))
+			refusedToStart(t, a, logs, token.InsecureNoAuthEnv+" is set to")
+		})
+	}
+}
+
+// TestAgent_InsecureOptOutLeavesAHandedTokenEnforced: the opt-out is for an
+// agent with no token; one that was handed a token enforces it whatever the
+// opt-out says.
+func TestAgent_InsecureOptOutLeavesAHandedTokenEnforced(t *testing.T) {
+	const tok = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	t.Setenv(token.Env, tok)
+	t.Setenv(token.InsecureNoAuthEnv, "true")
+	a := startAgent(t, zap.NewNop(), "--is-docker")
+	a.waitServing(t)
+	if got := a.get(t, token.ProbePath, ""); got != http.StatusUnauthorized {
+		t.Errorf("no token got %d, want 401: the opt-out switched off a token the agent was handed", got)
+	}
+	if got := a.get(t, token.ProbePath, tok); got != http.StatusNotFound {
+		t.Errorf("the handed-over token got %d, want the router's 404", got)
 	}
 }
 
@@ -286,8 +391,10 @@ func TestAgent_InClusterAgentEnforcesTheTokenK8sProxyHandedIt(t *testing.T) {
 	if got := a.get(t, token.ProbePath, tok); got != http.StatusNotFound {
 		t.Errorf("the token k8s-proxy handed over got %d, want the router's 404", got)
 	}
-	if said := logs.FilterMessageSnippet("authentication").All(); len(said) != 0 {
-		t.Errorf("the in-cluster agent enforcing its token said, at %s: %s", said[0].Level, said[0].Message)
+	for _, snippet := range []string{"authentication", "control-plane token", token.InsecureNoAuthEnv} {
+		if said := logs.FilterMessageSnippet(snippet).All(); len(said) != 0 {
+			t.Errorf("the in-cluster agent enforcing its token said, at %s: %s", said[0].Level, said[0].Message)
+		}
 	}
 }
 

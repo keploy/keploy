@@ -77,7 +77,15 @@ type mock struct {
 }
 
 func record(agent string) {
-	res, err := http.Post(agent+"/outgoing", "application/json", strings.NewReader(`{"outgoingOptions":{}}`))
+	req, err := http.NewRequest(http.MethodPost, agent+"/outgoing", strings.NewReader(`{"outgoingOptions":{}}`))
+	if err != nil {
+		fmt.Println("record:", err)
+		os.Exit(1)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// The agent's control-plane token, as keploy presents it.
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("KEPLOY_AGENT_TOKEN"))
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Println("record:", err)
 		os.Exit(1)

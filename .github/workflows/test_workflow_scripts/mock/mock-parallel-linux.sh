@@ -92,9 +92,11 @@ PY
 
 # The control plane's guard, checked by every driver before its first call.
 # Without it the whole feature can regress to a no-op with a green pipeline:
-# an agent that was handed no token serves everything, and every other
-# assertion here still passes. Unconditional: record and replay both run the
-# PR build here, so a missing token is the regression, not an older binary.
+# an agent of this release that was handed no token refuses to start, but a
+# regression (or an older agent image) would serve everything while every
+# other assertion here still passed. Unconditional: record and replay both
+# run the PR build here, so a missing token is the regression, not an older
+# binary.
 cat > guard.py <<'PY'
 import json, os, urllib.request
 import keploy_v1 as k

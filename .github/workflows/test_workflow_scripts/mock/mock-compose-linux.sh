@@ -92,11 +92,12 @@ def get(path):
 
 # The agent must refuse a control-plane caller with no credential. Its token
 # reaches it through compose: the generated agent service names it without a
-# value and compose copies it from the environment keploy runs compose in. That
-# handoff fails OPEN — an agent that got no token serves everything and every
-# assertion below still passes — so it is checked here directly, from inside
-# the agent's network namespace, at the address keploy exports for exactly
-# this kind of caller.
+# value and compose copies it from the environment keploy runs compose in. An
+# agent of this release that got no token refuses to start; an older agent
+# image, or a regression, would serve everything while every assertion below
+# still passed — so it is checked here directly, from inside the agent's
+# network namespace, at the address keploy exports for exactly this kind of
+# caller.
 import urllib.error
 # Under `keploy record` (RECORD_APP=1) the runner is just the recorded app:
 # keploy exports no mock agent address for it, so it skips the mock
@@ -236,8 +237,8 @@ YML
 assert_agent_guarded() {
   local log=$1
   grep -q "AGENT REFUSED AN UNAUTHENTICATED CALLER" "$log" || { echo "FAIL: $log: the runner never saw the agent refuse an unauthenticated call"; FAIL=1; }
-  if grep -qE "running WITHOUT authentication|NOT enforcing control-plane authentication" "$log"; then
-    echo "FAIL: $log: the agent came up without its control-plane token — the compose handoff is broken"; FAIL=1
+  if grep -qE "running WITHOUT authentication|NOT enforcing control-plane authentication|no control-plane token" "$log"; then
+    echo "FAIL: $log: the agent had no control-plane token (it came up without one, or refused to start) — the compose handoff is broken"; FAIL=1
   fi
 }
 

@@ -1,11 +1,11 @@
 package http
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 
 	"go.keploy.io/server/v3/pkg/agent/token"
-	"go.uber.org/zap"
 )
 
 // bearerTransport attaches the session's control-plane token to every request
@@ -180,15 +180,13 @@ func redactToken(cmd string) string {
 // and `ps` would show it to every user on the box. So the token sits in a 0600
 // file in a directory only this user can enter, and only its path is passed.
 //
-// A failure is not fatal: the agent then starts unauthenticated and says so,
-// which is how it behaved before this existed, rather than leaving the user
-// unable to record at all.
-func appendTokenFileArg(logger *zap.Logger, args []string) []string {
+// A failure fails the agent's start: an agent started without a token
+// refuses to start anyway, and the error here says why it has none.
+func appendTokenFileArg(args []string) ([]string, error) {
 	tokenFile, err := token.WriteFile()
 	if err != nil {
-		logger.Warn("could not hand a control-plane token to the agent; it will start without authentication",
-			zap.Error(err))
-		return args
+		return nil, fmt.Errorf("could not hand the keploy agent its control-plane token, so it is not started: %w "+
+			"(if keploy could not create its private directory or file, check the temp directory, TMPDIR)", err)
 	}
-	return append(args, "--token-file", tokenFile)
+	return append(args, "--token-file", tokenFile), nil
 }

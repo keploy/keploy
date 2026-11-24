@@ -5747,9 +5747,10 @@ var controlPlaneProbed sync.Map
 // verifyControlPlaneGuarded checks that an agent this process launched is
 // really enforcing the control-plane token it was handed.
 //
-// A token that never reaches the agent fails OPEN rather than closed: an agent
-// started with no --token-file natively, or whose docker or compose client did
-// not pass the variable through to the container, has no token, and serves its
+// An agent of this release that gets no token refuses to start. An older agent
+// image (a user can pin one) does not: one before v3.6.72 checks no token at
+// all, and one from v3.6.72 up to this release enforces a token it is handed
+// but serves open when the token did not reach it. Either way it serves its
 // whole control plane — live TLS session keys included — to anything that can
 // reach the port, while this process keeps sending a header nothing checks.
 // Every request still succeeds, so nothing downstream notices and no test of a
@@ -5765,12 +5766,13 @@ var controlPlaneProbed sync.Map
 // drives an agent something else started — a sidecar k8s-proxy injected, whose
 // token (if it has one) k8s-proxy put in its pod spec, or a pinned agent image
 // that predates the token — made no handoff of its own, and blaming one that
-// never happened is a false alarm at error level. A sidecar without a token
-// says for itself that it is running unauthenticated; an image that predates
-// the token says nothing, as it checks nothing.
+// never happened is a false alarm at error level. An agent of this release
+// with no token refuses to start, so one this process launched that does not
+// refuse the probe is an older agent image whose token did not reach it (or
+// that predates v3.6.72 and checks none), or a regression.
 //
-// Reported rather than fatal: an agent that could not be given a token still
-// records and replays, and refusing to run would be the worse outcome. It is
+// Reported rather than fatal: an older agent image still records and
+// replays, and refusing to run would break every user who pins one. It is
 // logged at error level so that it reaches the operator and fails keploy's own
 // CI, which treats any ERROR in a run as fatal.
 func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI string) {
@@ -5817,7 +5819,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	utils.LogError(logger, nil, "the agent is NOT enforcing control-plane authentication: it accepted a request carrying an invalid token",
 		zap.Int("probe_status", resp.StatusCode),
 		zap.String("impact", "/agent/pcap/keylog streams live TLS session keys and /agent/stop and /agent/storemocks alter this session; any local user or neighbouring container that can reach the agent port can use them"),
-		zap.String("next_step", "the token this keploy process handed to the agent did not reach it — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker; a doas in front of docker compose resets that environment unless its doas.conf rule has keepenv or setenv { "+token.Env+" }), and report this if you did not change how keploy starts its agent"))
+		zap.String("next_step", "the token this keploy process handed to the agent did not reach it, or the agent image predates v3.6.72 and checks none (this release's agent image refuses to start without its token and says why) — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker; a doas in front of docker compose resets that environment unless its doas.conf rule has keepenv or setenv { "+token.Env+" }), and report this if you did not change how keploy starts its agent"))
 }
 
 // controlPlaneProbeTimeout bounds the check above. Generous: the agent answered
