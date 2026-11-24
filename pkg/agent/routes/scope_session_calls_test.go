@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -69,4 +70,72 @@ func TestTheScopeTableHandsTheAgentTheDeclaredSessionCalls(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	require.Equal(t, http.StatusOK, post(table(nil)).Code)
 	require.True(t, models.SessionCallsDeclared(), "off the switch the table's declaration was installed")
+}
+
+// orderSvc is poolSvc that notes, as each setter of the table is called,
+// whether the declared session call rates.example.com GET /rates is
+// installed then: each of them may stage the set (SetScopePool serves the
+// pool, which stages the set once the run is claimed: servePoolExactly), and
+// a staging marks the set's plain startup: recordings by the declaration in
+// force (agent.backgroundRecordingsOf).
+type orderSvc struct {
+	*poolSvc
+	declaredAt map[string]bool
+}
+
+func declaresRates() bool {
+	covered, named := models.SessionCallDeclared("GET", "rates.example.com", "/rates")
+	return covered && named
+}
+
+func (s *orderSvc) SetScopeTable(ctx context.Context, t map[string][]string) error {
+	s.declaredAt["table"] = declaresRates()
+	return s.poolSvc.SetScopeTable(ctx, t)
+}
+
+func (s *orderSvc) SetScopeWorker(_ context.Context, w map[string][]string) error {
+	s.declaredAt["worker"] = declaresRates()
+	s.worker = w
+	return nil
+}
+
+func (s *orderSvc) SetScopeBackground(_ context.Context, _ []string) error {
+	s.declaredAt["background"] = declaresRates()
+	return nil
+}
+
+func (s *orderSvc) SetScopePool(ctx context.Context, p map[string][]string) error {
+	s.declaredAt["pool"] = declaresRates()
+	return s.poolSvc.SetScopePool(ctx, p)
+}
+
+// keploy mock replay's scope table installs the session calls the client
+// declares before it hands the agent anything that stages the set (its
+// table, worker scope, background names and pool, whose serving stages it),
+// so the staging marks the set's plain startup: recordings by that
+// declaration, not the previous one: a declared call's recording is never
+// marked, and an undeclared one always is.
+// Mutation: install the declaration after the pool, or after any setter
+// that stages the set.
+func TestTheScopeTableInstallsTheDeclaredSessionCallsBeforeItStagesTheSet(t *testing.T) {
+	t.Cleanup(func() { models.SetSessionCalls(nil) })
+	t.Setenv(provenswitch.Env, "1")
+	models.SetSessionCalls(nil)
+	svc := &orderSvc{poolSvc: &poolSvc{}, declaredAt: map[string]bool{}}
+	b, err := json.Marshal(models.ScopeTableReq{
+		Mappings:     map[string][]string{"o::TestA": {"mock-1"}},
+		Pool:         map[string][]string{"o": {"mock-0"}},
+		Worker:       map[string][]string{"o": {}},
+		Background:   []string{"mock-0"},
+		SessionCalls: &models.DeclaredSessionCalls{Rules: []models.SessionCallRule{{Host: "rates.example.com", Method: "GET", PathPrefix: "/rates"}}},
+	})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(string(b))))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, step := range []string{"table", "worker", "background", "pool"} {
+		declared, called := svc.declaredAt[step]
+		require.True(t, called, "the table never handed the agent its %s", step)
+		require.True(t, declared, "the table handed the agent its %s before it installed the declared session calls: a staging then marks by the previous declaration", step)
+	}
 }
