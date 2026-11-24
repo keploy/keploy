@@ -458,6 +458,61 @@ func TestANewInstanceIsServedTheSetsStartUnderTheBackgroundRules(t *testing.T) {
 	}
 }
 
+// With the switch off, a set served under the background rules spends a
+// pool recording the application consumes as it starts
+// (consumeUnsetBackground), so a call of it that races into the first test
+// is not answered twice. The new instance's start is the set's start afresh:
+// a recording the earlier instance spent as it started, which the new one
+// first calls once the first test opened (an index build racing into it), is
+// served to it there, as it is after the set's own staging.
+func TestANewInstanceIsServedTheSetsBackgroundUnspentWithTheSwitchOff(t *testing.T) {
+	for _, rearmed := range []bool{false, true} {
+		name := "the set's staging"
+		if rearmed {
+			name = "re-armed after the earlier instance spent it"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "")
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.ResetForReplaySession()
+			mm.ArmSetFence()
+			mm.SeedStartupCutoff(winStart(1))
+			mm.StageExactBackground(models.RecordedWithS12Routing)
+			mm.SetMocksWithWindow([]*models.Mock{
+				inFlightMock("boot-1", 300, 310),
+				inFlightMock("own-1", 1010, 1020),
+			}, nil, models.BaseTime, time.Now())
+			mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"boot-1"}, nil)
+			if mm.ExactServing() {
+				t.Fatal("precondition: with the switch off no exact view serves the set")
+			}
+			if rearmed {
+				if !serveStart(mm, "boot-1") {
+					t.Fatal("precondition: the earlier instance was not served boot-1 as it started")
+				}
+				if !mm.exact.bg.Load().isSpent("boot-1") {
+					t.Fatal("precondition: the earlier instance's start did not spend boot-1 for the background")
+				}
+				if err := mm.RearmAppStart(); err != nil {
+					t.Fatal(err)
+				}
+				if mm.exact.bg.Load().isSpent("boot-1") {
+					t.Fatal("the re-armed start kept the earlier instance's spend of boot-1")
+				}
+			}
+			// The first test opens before the instance calls boot-1.
+			mm.SetScopeMocks([]*models.Mock{inFlightMock("boot-1", 300, 310), inFlightMock("own-1", 1010, 1020)}, nil, true)
+			if !serveStart(mm, "boot-1") {
+				t.Fatal("boot-1, called once the first test opened, was refused")
+			}
+			if serveStart(mm, "boot-1") {
+				t.Fatal("boot-1 was answered twice")
+			}
+		})
+	}
+}
+
 // No test opens between a re-arm's check and its staging: whichever way a
 // test opens (a test's window staged, or opened with its variables, in three
 // tiers, a keploy mock replay scope, an exact test served, opened, or
