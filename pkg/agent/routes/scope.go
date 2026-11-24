@@ -331,6 +331,23 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			// The worker scope's series and those that answer once in a
+			// run, before the pool, whose serving hands them to the proxy
+			// with it: the background answers a once series' recording one
+			// call in the run wherever the application makes it, at its
+			// boot too, as under the switch.
+			if ss, ok := a.svc.(scopeSeriesSetter); ok {
+				if err := ss.SetScopeSeries(r.Context(), req.Series); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if ons, ok := a.svc.(scopeOnceSetter); ok {
+				if err := ons.SetScopeOnce(r.Context(), req.Once); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
 			if bs, ok := a.svc.(scopeBackgroundSetter); ok {
 				if err := bs.SetScopeBackground(r.Context(), req.Background); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
