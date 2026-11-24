@@ -28,6 +28,9 @@ func inRun(t *testing.T) (tmp, project string) {
 		}
 	}
 	t.Setenv("TMPDIR", tmp)
+	// The user keploy runs for is the test's own, whatever runs it (a sudo
+	// that set SUDO_UID); a test of sudo sets it after.
+	t.Setenv("SUDO_UID", "")
 	t.Chdir(project)
 	return tmp, project
 }
@@ -738,6 +741,29 @@ func TestNew_UnderSudoTheAgentAppendsToTheSudoUsersLog(t *testing.T) {
 	}
 }
 
+// Under a relative TMPDIR the log's name is absolute: the "logs:" line names,
+// and a failed run keeps, the file itself, wherever the name is read from.
+func TestCreateLogFile_NamesTheLogAbsolutelyUnderARelativeTMPDIR(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.Mkdir("tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", "tmp")
+	t.Setenv("SUDO_UID", "")
+	f, _, err := createLogFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = CloseLogFile(f) })
+	if !filepath.IsAbs(f.Name()) || filepath.Dir(f.Name()) != filepath.Join(dir, "tmp") {
+		t.Fatalf("the log under TMPDIR=tmp is named %q, want a name in %s", f.Name(), filepath.Join(dir, "tmp"))
+	}
+	if _, err := os.Lstat(f.Name()); err != nil {
+		t.Errorf("no log at its name: %v", err)
+	}
+}
+
 // createLogFile opens each name it tries with O_EXCL: a file, a symlink or a
 // named pipe already at a name, which any user of a shared /tmp can put there,
 // is left as it is, and the next name is used.
@@ -914,5 +940,260 @@ func TestReadLogFileTail(t *testing.T) {
 	}
 	if _, err := ReadLogFileTail(nil, 500); err == nil {
 		t.Error("ReadLogFileTail(nil) read a log")
+	}
+}
+
+// A run's start prunes the logs failed runs kept beside its own
+// (pruneLogFiles): a week-old one is gone once New has made the run's log.
+func TestNew_PrunesTheLogsFailedRunsKept(t *testing.T) {
+	tmp, _ := inRun(t)
+	old := deadLog(t, tmp, 0, keptLogsFor+time.Hour)
+	_, f := newLog(t)
+	if exists(old) {
+		t.Errorf("a run's start left the week-old log %s", old)
+	}
+	if !exists(f.Name()) {
+		t.Errorf("a run's start pruned its own log %s", f.Name())
+	}
+}
+
+// A run marks its log live for as long as it holds it open, and the mark goes
+// with the descriptor: the log of a run killed outright, which closed nothing,
+// is pruned like any kept one. Pruning touches only the regular files, not
+// links, of the user keploy runs for: a link at a log's name, and every log
+// when keploy runs for another user (SUDO_UID), are left as they are.
+func TestPruneLogFiles_TakesOnlyTheRunUsersDeadLogs(t *testing.T) {
+	t.Run("a killed run's log", func(t *testing.T) {
+		dir := inTempDir(t)
+		f, _, err := createLogFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// What a SIGKILL does to it: the descriptor closes, nothing else.
+		_ = f.Close()
+		at := time.Now().Add(-2 * keptLogsFor)
+		if err := os.Chtimes(f.Name(), at, at); err != nil {
+			t.Fatal(err)
+		}
+		if n := pruneLogFiles(dir, time.Now()); n != 1 || exists(f.Name()) {
+			t.Errorf("pruned %d; a killed run's week-old log exists=%v, want it gone", n, exists(f.Name()))
+		}
+	})
+	t.Run("a link at a log's name", func(t *testing.T) {
+		dir := inTempDir(t)
+		target := deadLog(t, t.TempDir(), 0, 2*keptLogsFor)
+		link := filepath.Join(dir, "keploy-logs-7.txt")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if n := pruneLogFiles(dir, time.Now()); n != 0 || !exists(link) || !exists(target) {
+			t.Errorf("pruned %d; the link exists=%v, its target exists=%v; want both left", n, exists(link), exists(target))
+		}
+	})
+	t.Run("links at logs' names spend none of a start's tries", func(t *testing.T) {
+		dir := inTempDir(t)
+		dead := deadLog(t, dir, 0, 2*keptLogsFor)
+		target := deadLog(t, t.TempDir(), 1, 2*keptLogsFor)
+		var links []string
+		for i := 0; i < pruneMax+keptLogsMax; i++ {
+			link := filepath.Join(dir, "keploy-logs-"+strconv.Itoa(5000+i)+".txt")
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			links = append(links, link)
+		}
+		// As of a time the links were quiet by (their own times are now's):
+		// listed, they would be the newest, and spend every try before the
+		// dead log, the oldest.
+		if n := pruneLogFiles(dir, time.Now().Add(pruneQuiet+time.Minute)); n != 1 || exists(dead) {
+			t.Errorf("pruned %d; the dead log behind %d links exists=%v, want it gone", n, len(links), exists(dead))
+		}
+		for _, l := range links {
+			if !exists(l) {
+				t.Fatalf("pruned the link %s", l)
+			}
+		}
+	})
+	t.Run("another user's logs", func(t *testing.T) {
+		dir := inTempDir(t)
+		old := deadLog(t, dir, 0, 2*keptLogsFor)
+		t.Setenv("SUDO_UID", strconv.Itoa(os.Getuid()+1))
+		if n := pruneLogFiles(dir, time.Now()); n != 0 || !exists(old) {
+			t.Errorf("pruned %d logs of a user keploy does not run for", n)
+		}
+	})
+}
+
+// A failed run names its log only while the name is still that file: a name
+// removed before a re-exec, or a file another put at it, is nothing to name.
+// (Unix only: on Windows a name the run holds open cannot be removed.)
+func TestKeepLogFile_NamesNothingElse(t *testing.T) {
+	t.Run("a name removed before a re-exec", func(t *testing.T) {
+		inTempDir(t)
+		f, _, err := createLogFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveLogFile(f); err != nil {
+			t.Fatal(err)
+		}
+		if path, err := KeepLogFile(f); path != "" || err != nil {
+			t.Errorf("KeepLogFile of a log whose name went = %q, %v; want nothing to name", path, err)
+		}
+	})
+	t.Run("a file that replaced it", func(t *testing.T) {
+		inTempDir(t)
+		f, _, err := createLogFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Replaced while the run holds it open, as CloseLogFile's row does:
+		// a file freed first could hand its inode to the one put there.
+		t.Cleanup(func() { _ = f.Close() })
+		name := f.Name()
+		if err := os.Remove(name); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte("another's\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if path, _ := KeepLogFile(f); path != "" {
+			t.Errorf("KeepLogFile named %q, a file another put at the log's name", path)
+		}
+		if b, err := os.ReadFile(name); err != nil || string(b) != "another's\n" {
+			t.Errorf("keeping the log changed the file at its name: %q, %v", b, err)
+		}
+	})
+}
+
+// A native agent's log is its CLI's (ClientLogFileFlag): an agent that failed
+// only closes it, as CloseLogFile does. It names nothing to keep, leaves the
+// file where it is, with every line, and does not stamp it: whether the log is
+// kept, and when, is the CLI's to say at its own end.
+func TestKeepLogFile_InAnAgentOnlyClosesTheCLIsLog(t *testing.T) {
+	inRun(t)
+	cli, _, err := createLogFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = CloseLogFile(cli) })
+	mustWrite(t, cli, "cli line\n")
+	asAgentOf(t, cli.Name())
+	_, agent, err := New()
+	if err != nil || agent == nil || agent.Name() != cli.Name() {
+		t.Fatalf("New = %v, %v; want the CLI's log %s", agent, err, cli.Name())
+	}
+	mustWrite(t, agent, "agent line\n")
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(cli.Name(), at, at); err != nil {
+		t.Fatal(err)
+	}
+
+	if path, err := KeepLogFile(agent); path != "" || err != nil {
+		t.Errorf("an agent's KeepLogFile = %q, %v; want nothing named: the log is its CLI's", path, err)
+	}
+	if _, err := agent.WriteString("after its end\n"); err == nil {
+		t.Error("the agent's log is still open after KeepLogFile")
+	}
+	fi, err := os.Lstat(cli.Name())
+	if err != nil {
+		t.Fatalf("an agent's KeepLogFile removed the CLI's log: %v", err)
+	}
+	if !fi.ModTime().Equal(at) {
+		t.Errorf("an agent's KeepLogFile stamped the CLI's log: its time is %v, want %v", fi.ModTime(), at)
+	}
+	got := mustRead(t, cli.Name())
+	if i := strings.Index(got, "cli line\n"); i < 0 || !strings.Contains(got[i:], "agent line\n") {
+		t.Errorf("the CLI's log holds %q after its agent's end, want the CLI's line and then the agent's", got)
+	}
+	if strings.Contains(got, "after its end") {
+		t.Errorf("the agent wrote the CLI's log after its end: %q", got)
+	}
+}
+
+// The agent holds the CLI's log open for reading too, though it only appends:
+// on a network file system that emulates flock with fcntl's locks, the shared
+// lock that marks the log live (markLiveLog) needs read access, and an agent
+// that outlives a CLI killed outright is then the log's only mark.
+func TestNew_TheAgentHoldsTheCLIsLogReadWrite(t *testing.T) {
+	inRun(t)
+	cli, _, err := createLogFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = CloseLogFile(cli) })
+	mustWrite(t, cli, "cli line\n")
+	asAgentOf(t, cli.Name())
+	_, agent, err := New()
+	if err != nil || agent == nil || agent.Name() != cli.Name() {
+		t.Fatalf("New = %v, %v; want the CLI's log %s", agent, err, cli.Name())
+	}
+	t.Cleanup(func() { _ = CloseLogFile(agent) })
+	buf := make([]byte, len("cli line"))
+	if _, err := agent.ReadAt(buf, 0); err != nil || string(buf) != "cli line" {
+		t.Errorf("the agent's descriptor of the CLI's log cannot be read (%q, %v): it holds it write-only", buf, err)
+	}
+}
+
+// The native agent marks the CLI's log live too: an agent that outlives a CLI
+// killed outright (its descriptor, and so its mark, gone) still writes the
+// log, and no run's start prunes it while the agent has it open.
+func TestPruneLogFiles_LeavesTheLogAnAgentWrites(t *testing.T) {
+	tmp, _ := inRun(t)
+	cli, _, err := createLogFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	asAgentOf(t, cli.Name())
+	_, agent, err := New()
+	if err != nil || agent == nil || agent.Name() != cli.Name() {
+		t.Fatalf("New = %v, %v; want the CLI's log %s", agent, err, cli.Name())
+	}
+	_ = cli.Close() // the CLI is killed: its mark goes
+	at := time.Now().Add(-2 * keptLogsFor)
+	if err := os.Chtimes(cli.Name(), at, at); err != nil {
+		t.Fatal(err)
+	}
+	if n := pruneLogFiles(tmp, time.Now()); n != 0 || !exists(cli.Name()) {
+		t.Fatalf("pruned %d; the log an agent still writes exists=%v", n, exists(cli.Name()))
+	}
+	if err := CloseLogFile(agent); err != nil {
+		t.Fatal(err)
+	}
+	if n := pruneLogFiles(tmp, time.Now()); n != 1 || exists(cli.Name()) {
+		t.Errorf("pruned %d once the agent ended too; the log exists=%v, want it gone", n, exists(cli.Name()))
+	}
+}
+
+// A run whose re-exec failed after its log's name went (RemoveLogFile) goes on
+// and fails in this process: ReviveLogFile gives the log a name again, a fresh
+// log holding every line it had, which the run then writes and a failed run
+// keeps. A log whose name is still there is left as it is.
+func TestReviveLogFile(t *testing.T) {
+	inRun(t)
+	logger, f := newLog(t)
+	logger.Info("before the re-exec")
+	if got, err := ReviveLogFile(f); got != f || err != nil {
+		t.Fatalf("ReviveLogFile of a log with its name = %v, %v; want it as it is", got, err)
+	}
+	if err := RemoveLogFile(f); err != nil {
+		t.Fatal(err)
+	}
+	revived, err := ReviveLogFile(f)
+	if err != nil || revived == f || revived == nil {
+		t.Fatalf("ReviveLogFile = %v, %v; want a new log", revived, err)
+	}
+	t.Cleanup(func() { _ = CloseLogFile(revived) })
+	logger.Info("after the failed re-exec")
+	if _, err := f.WriteString("x"); err == nil {
+		t.Error("the nameless log was left open")
+	}
+	path, err := KeepLogFile(revived)
+	if err != nil || path == "" {
+		t.Fatalf("KeepLogFile(the revived log) = %q, %v", path, err)
+	}
+	got := mustRead(t, path)
+	if !strings.Contains(got, "before the re-exec") || !strings.Contains(got, "after the failed re-exec") {
+		t.Errorf("the revived log does not hold the run's lines before and after:\n%s", got)
 	}
 }

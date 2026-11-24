@@ -2906,7 +2906,8 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 		args = append(args, "--client-pid-ns", ns)
 	}
 	// This run's log, for the agent to append its lines to: one run, one file,
-	// which this process removes at its end (keployLog.ClientLogFileFlag).
+	// which this process ends at its end, removed or kept by its exit code
+	// (keployLog.ClientLogFileFlag).
 	// Absolute, as a relative TMPDIR would make it.
 	if utils.LogFile != nil {
 		if p, err := filepath.Abs(utils.LogFile.Name()); err == nil {

@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -1140,5 +1141,44 @@ func TestAReportsCommandUsedHasItsSecretsRedacted(t *testing.T) {
 		if got, want := GetFullCommandUsed(), `keploy test -c "`+c+`"`; got != want {
 			t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, want)
 		}
+	}
+}
+
+// A panic on a goroutine that defers Recover with no logger is recovered as
+// any other: the run is marked as one that crashed, so it exits non-zero and
+// keeps its log (RunExitCode, EndRunLog), and is stopped; the panic is said
+// on stderr, never on stdout, which may be a document (--json). Recover used
+// to return at once there, without recovering it.
+func TestRecoverWithNoLoggerRecoversAndStopsTheRun(t *testing.T) {
+	if recoverOut != os.Stderr {
+		t.Fatalf("Recover with no logger reports on %v, not stderr", recoverOut)
+	}
+	wasCrashed := crashed.Load()
+	crashed.Store(false)
+	t.Cleanup(func() { crashed.Store(wasCrashed) })
+	var out bytes.Buffer
+	recoverOut = &out
+	t.Cleanup(func() { recoverOut = os.Stderr })
+	t.Cleanup(ClearInterrupted)
+	ctx := NewCtx()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer Recover(nil)
+		panic("a crash with no logger")
+	}()
+	<-done
+	if !Crashed() {
+		t.Error("the run is not marked as one that crashed")
+	}
+	if got := RunExitCode(0); got != ExitKeployError {
+		t.Errorf("RunExitCode(0) = %d after the crash, want %d", got, ExitKeployError)
+	}
+	if ctx.Err() == nil {
+		t.Error("the run was not stopped")
+	}
+	if !strings.Contains(out.String(), "Recovered from panic: a crash with no logger") {
+		t.Errorf("the panic is not said on stderr:\n%s", out.String())
 	}
 }

@@ -297,6 +297,9 @@ func TestReexecWithSudo_AFailureReturnsToItsCaller(t *testing.T) {
 		prevLog := LogFile
 		LogFile = f
 		t.Cleanup(func() { LogFile = prevLog })
+		if _, err := f.WriteString("a line of the run\n"); err != nil {
+			t.Fatal(err)
+		}
 		prev := execProcess
 		execProcess = func(string, []string, []string) error { return syscall.EACCES }
 		t.Cleanup(func() { execProcess = prev })
@@ -307,8 +310,20 @@ func TestReexecWithSudo_AFailureReturnsToItsCaller(t *testing.T) {
 		if _, err := os.Lstat(f.Name()); !os.IsNotExist(err) {
 			t.Errorf("this process's log %s is still there after a failed exec (lstat: %v)", f.Name(), err)
 		}
-		if err := keployLog.CloseLogFile(f); err != nil {
+		// The run fails here: its log has a name again, holding the lines
+		// it had, for the failed run to keep (log.ReviveLogFile).
+		if LogFile == f || LogFile == nil {
+			t.Fatal("the run's log got no name again after its failed exec")
+		}
+		revived := LogFile
+		if b, err := os.ReadFile(revived.Name()); err != nil || !strings.Contains(string(b), "a line of the run") {
+			t.Errorf("the revived log does not hold the run's lines (%v): %q", err, b)
+		}
+		if err := keployLog.CloseLogFile(revived); err != nil {
 			t.Errorf("CloseLogFile after a failed exec = %v, want nil", err)
+		}
+		if err := keployLog.CloseLogFile(f); err != nil {
+			t.Errorf("CloseLogFile of the nameless log after a failed exec = %v, want nil", err)
 		}
 	})
 }

@@ -12,11 +12,13 @@
 # (await_agent_ready), and starts the app's wait, with its full budget, from
 # there.
 #
-# keploy removes its log (keploy-logs-*.txt) and the agent's start report
-# (boot.json, in a keploy-agent-stop-* directory) when it exits, and both are
-# root's. So a lane that gives up on the agent or the app copies them into its
-# working directory (save_keploy_start_evidence) before it stops keploy, and
-# its workflow uploads that directory.
+# keploy removes the agent's start report (boot.json, in a
+# keploy-agent-stop-* directory) when it exits, and its log
+# (keploy-logs-*.txt) when the run worked; both are root's. So a lane that
+# gives up on the agent or the app copies them into its working directory
+# (save_keploy_start_evidence) before it stops keploy, and its workflow
+# uploads that directory. On a runner that ran keploy before, the logs that
+# earlier failed runs kept come too, each under its own name.
 
 # The line keploy record prints once its agent is ready, just before it starts
 # the app (pkg/service/record/record.go). Every release since v3.0.3 prints it.

@@ -666,26 +666,39 @@ func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
 	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
 }
 
-// Recover recovers from a panic and logs the stack trace to Sentry.
-// It also stops the global context.
+// Recover, deferred, recovers a panic of its goroutine: it reports it, with
+// its stack trace, to the log and Sentry, marks the run as one that crashed
+// (Crashed, RunExitCode), and stops the global context. With no logger it
+// reports it on stderr, as stdout may be a document (--json).
 func Recover(logger *zap.Logger) {
-	if logger == nil {
-		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
-		return
-	}
 	// No flush on a clean return: Recover is deferred on hot goroutines, and a
 	// flush waits on the process's one Sentry transport worker. Only a
 	// recovered panic has an event to flush (below).
 	if r := recover(); r != nil {
-		HandleRecovery(logger, r, "Recovered from panic")
-		// Before Stop: the process may exit as soon as the global context ends.
-		sentry.Flush(2 * time.Second)
-		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
-		if err != nil {
-			LogError(logger, err, "failed to stop the global context")
-		}
+		recovered(logger, r)
 	}
 }
+
+// recovered is Recover's handling of r, the panic it recovered.
+func recovered(logger *zap.Logger, r interface{}) {
+	crashed.Store(true)
+	if logger == nil {
+		_, _ = fmt.Fprintf(recoverOut, "%sRecovered from panic: %v\n%s", Emoji, r, debug.Stack())
+		_ = Stop(zap.NewNop(), fmt.Sprintf("Recovered from: %s", r))
+		return
+	}
+	HandleRecovery(logger, r, "Recovered from panic")
+	// Before Stop: the process may exit as soon as the global context ends.
+	sentry.Flush(2 * time.Second)
+	err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
+	if err != nil {
+		LogError(logger, err, "failed to stop the global context")
+	}
+}
+
+// recoverOut is where Recover with no logger reports a panic: stderr (a
+// variable for tests).
+var recoverOut io.Writer = os.Stderr
 
 // GenerateGithubActions generates a GitHub Actions workflow file for Keploy
 func GenerateGithubActions(logger *zap.Logger, appCmd string) {

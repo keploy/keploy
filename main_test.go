@@ -158,3 +158,55 @@ func TestMainReportsItsTeardownSteps(t *testing.T) {
 		})
 	}
 }
+
+// A panic anywhere in start() after its log exists is recovered before the
+// log's end (utils.Recover, the deferred call right after the one that ends
+// the log, so the first to run of the two), so the run fails and keeps its log
+// (utils.Crashed, utils.SetExitCodeOnce). Deferred further down, a panic in the statements between the two
+// unwound through the log's end with the code still 0, and the log was
+// removed. CLI rows crash the command and a worker goroutine
+// (TestCLICrashExitsNonZeroAndKeepsItsLog, TestCLIWorkerCrashExitsNonZeroAndKeepsItsLog).
+func TestStartRecoversRightAfterDeferringTheLogsEnd(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body []ast.Stmt
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "start" {
+			body = fn.Body.List
+		}
+	}
+	calls := func(n ast.Node, pkg, name string) bool {
+		found := false
+		ast.Inspect(n, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
+					if x, ok := sel.X.(*ast.Ident); ok && x.Name == pkg {
+						found = true
+					}
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	end := -1
+	for i, st := range body {
+		if d, ok := st.(*ast.DeferStmt); ok && calls(d, "utils", "EndRunLog") {
+			end = i
+			break
+		}
+	}
+	if end < 0 || end+1 >= len(body) {
+		t.Fatalf("start defers no end of its log (utils.EndRunLog) with a statement after it (at %d)", end)
+	}
+	next, ok := body[end+1].(*ast.DeferStmt)
+	if !ok || !calls(next, "utils", "Recover") {
+		t.Errorf("the statement after start defers its log's end is not `defer utils.Recover(...)`: a panic between them would remove the log of a crashed run")
+	}
+	if !calls(body[end], "utils", "Crashed") || !calls(body[end], "utils", "SetExitCodeOnce") {
+		t.Errorf("start's end of its log does not fail a run that crashed (utils.Crashed, utils.SetExitCodeOnce): such a run would pass")
+	}
+}

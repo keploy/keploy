@@ -67,7 +67,8 @@ func ReexecWithSudo(logger *zap.Logger) error {
 	// The run goes on in the process the exec starts, which creates a log of
 	// its own; this one's, a temp file, would be left with no run to remove
 	// it. Its name goes now; the file itself, open close-on-exec as Go opens
-	// every file, goes at the exec, or with this process if the exec fails.
+	// every file, goes at the exec. If the exec fails, the log gets a name
+	// again below, and this run, which then fails, keeps it.
 	if err := keployLog.RemoveLogFile(LogFile); err != nil {
 		logger.Debug("failed to remove this process's log before re-executing", zap.Error(err))
 	}
@@ -75,6 +76,14 @@ func ReexecWithSudo(logger *zap.Logger) error {
 	// This means no parent process remains - clean handoff
 	err = execProcess(sudoPath, args, os.Environ())
 	if err != nil {
+		// The run goes on here, and fails: its log, whose name went for the
+		// process it was to become, gets a name again, so the failed run
+		// keeps it (EndRunLog).
+		if revived, rerr := keployLog.ReviveLogFile(LogFile); rerr != nil {
+			logger.Debug("failed to give this run's log a name again after the failed re-exec", zap.Error(rerr))
+		} else {
+			LogFile = revived
+		}
 		// syscall.Exec only returns on error
 		logger.Error("failed to re-execute with sudo", zap.Error(err))
 		fmt.Printf("Error: failed to re-execute with sudo: %v\n", err)

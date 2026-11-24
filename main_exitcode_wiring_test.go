@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +13,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+	"go.keploy.io/server/v3/cli"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -43,11 +48,61 @@ func TestMain(m *testing.M) {
 		if hold := os.Getenv(holdAfterLoggerEnv); hold != "" {
 			holdAfterLogger(hold)
 		}
+		if os.Getenv(panicCommandEnv) == "1" {
+			registerPanicCommand()
+		}
 		setVersion()
 		start(utils.NewCtx())
 		os.Exit(utils.ErrCode)
 	}
 	os.Exit(m.Run())
+}
+
+// panicCommandEnv gives a re-executed CLI the command panicCommand, which
+// panics as it runs: a crash of the command's own goroutine.
+const panicCommandEnv = "KEPLOY_TEST_PANIC_COMMAND"
+
+// panicCommand is the name of the command registerPanicCommand adds.
+const panicCommand = "zz-test-panic"
+
+// workerPanicCommand is the name of the command registerPanicCommand adds
+// whose worker goroutine panics, under utils.Recover as keploy's workers run.
+const workerPanicCommand = "zz-test-worker-panic"
+
+// wrappedExitEightCommand is the name of the command registerPanicCommand
+// adds that ends with the exit code 8 a command it wraps left, as `keploy mock
+// replay -c ctest` does when ctest's tests fail.
+const wrappedExitEightCommand = "zz-test-wrapped-exit-8"
+
+// registerPanicCommand adds panicCommand, which logs a line and panics, and
+// workerPanicCommand, which logs a line, starts a worker that panics under
+// utils.Recover (which stops the run's context), and returns nil once the
+// context ends: a command that takes its context's end for a normal stop.
+func registerPanicCommand() {
+	cli.Register(panicCommand, func(_ context.Context, logger *zap.Logger, _ *config.Config, _ cli.ServiceFactory, _ cli.CmdConfigurator) *cobra.Command {
+		return &cobra.Command{Use: panicCommand, RunE: func(*cobra.Command, []string) error {
+			logger.Info("the line before the crash")
+			panic("a crash of the command")
+		}}
+	})
+	cli.Register(workerPanicCommand, func(ctx context.Context, logger *zap.Logger, _ *config.Config, _ cli.ServiceFactory, _ cli.CmdConfigurator) *cobra.Command {
+		return &cobra.Command{Use: workerPanicCommand, RunE: func(*cobra.Command, []string) error {
+			logger.Info("the line before the crash")
+			go func() {
+				defer utils.Recover(logger)
+				panic("a crash of a worker")
+			}()
+			<-ctx.Done()
+			return nil
+		}}
+	})
+	cli.Register(wrappedExitEightCommand, func(_ context.Context, logger *zap.Logger, _ *config.Config, _ cli.ServiceFactory, _ cli.CmdConfigurator) *cobra.Command {
+		return &cobra.Command{Use: wrappedExitEightCommand, RunE: func(*cobra.Command, []string) error {
+			logger.Info("the line before the wrapped command's exit")
+			utils.SetExitCodeOnce(utils.ExitUsageError)
+			return nil
+		}}
+	})
 }
 
 // reexecWithNoSudoEnv lets a re-executed CLI that would re-execute itself
@@ -92,7 +147,9 @@ func runCLIOutput(t *testing.T, args ...string) (int, string) {
 
 	cmd := exec.Command(os.Args[0])
 	cmd.Args = append([]string{"keploy"}, args...)
-	cmd.Env = append(os.Environ(), subprocessEnv+"=1")
+	// A TMPDIR of its own: the run's start prunes the logs kept there, and a
+	// run that fails keeps one.
+	cmd.Env = append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+t.TempDir())
 	cmd.Dir = t.TempDir()
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -211,9 +268,9 @@ func TestCLIChildThatWouldReexecThroughSudoIsRefused(t *testing.T) {
 
 // TestCLICleansUpLogFileOnUnknownCommand pins the other half of routing errors
 // through utils.ErrCode rather than os.Exit(1): the deferred cleanup in start()
-// now actually runs, so a failed invocation leaves no log behind -- not in the
-// temp directory, where the log is, and nothing in the working directory,
-// where keploy-logs.txt used to be.
+// now actually runs, so a usage error, which keploy refused before running
+// anything, leaves no log behind -- not in the temp directory, where the log
+// is, and nothing in the working directory, where keploy-logs.txt used to be.
 func TestCLICleansUpLogFileOnUnknownCommand(t *testing.T) {
 	if code := runCLI(t, "--help"); code != 0 {
 		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
@@ -237,14 +294,44 @@ func TestCLICleansUpLogFileOnUnknownCommand(t *testing.T) {
 	}
 }
 
+// requireOnlyItsKeptLog checks a run that failed, given everything it wrote
+// (said): it left nothing in its working directory dir, and only its log in
+// its temp directory tmp, kept there for the bug report, and said so once
+// (utils.EndRunLog). A failed run used to remove its log, so the runs that
+// needed one to report left none; the next run's start prunes the kept ones.
+func requireOnlyItsKeptLog(t *testing.T, said, dir, tmp, what string) (logPath string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("%s left %s behind in its working directory %s", what, e.Name(), dir)
+	}
+	entries, err = os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("%s left %d files in its temp directory %s, want its one kept log: %v", what, len(entries), tmp, entries)
+	}
+	logPath = filepath.Join(tmp, entries[0].Name())
+	if ok, _ := filepath.Match(log.LogFilePattern, entries[0].Name()); !ok || !entries[0].Type().IsRegular() {
+		t.Errorf("%s left %s in its temp directory, which is not its log", what, entries[0].Name())
+	}
+	if want := utils.KeptRunLogLine(logPath); strings.Count(said, want) != 1 {
+		t.Errorf("%s did not say once that its log is kept, %q:\n%s", what, want, said)
+	}
+	return logPath
+}
+
 // `keploy test` with no keploy folder, a new user's first mistake, fails with
-// exit code 1 and names its log, and the log is gone at the end, from the
-// temp directory as from the working directory. ValidateFlags used to
-// os.Exit(1) there, past start()'s deferred calls: each such run left one
-// more keploy-logs-*.txt in the temp directory. It now returns
+// exit code 1, names its log, and keeps it in the temp directory, saying so,
+// and leaves nothing in the working directory. ValidateFlags used to
+// os.Exit(1) there, past start()'s deferred calls. It now returns
 // provider.ErrNoTestSets, which main exits 1 for, and which nothing says a
 // second time as "failed to validate flags".
-func TestCLITestWithNoKeployFolderExitsOneAndLeavesNoLog(t *testing.T) {
+func TestCLITestWithNoKeployFolderExitsOneAndKeepsItsLog(t *testing.T) {
 	if code := runCLI(t, "--help"); code != 0 {
 		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
 	}
@@ -254,8 +341,8 @@ func TestCLITestWithNoKeployFolderExitsOneAndLeavesNoLog(t *testing.T) {
 	cmd.Args = []string{"keploy", "test", "-c", "true"}
 	cmd.Env = append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+tmp)
 	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	code := 0
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -268,7 +355,7 @@ func TestCLITestWithNoKeployFolderExitsOneAndLeavesNoLog(t *testing.T) {
 	if code != utils.ExitKeployError {
 		t.Errorf("exit code = %d, want %d", code, utils.ExitKeployError)
 	}
-	said := out.String()
+	said := stdout.String() + stderr.String()
 	if !strings.Contains(said, "No test-sets found") {
 		t.Errorf("the run did not say it found no test-sets:\n%s", said)
 	}
@@ -278,22 +365,24 @@ func TestCLITestWithNoKeployFolderExitsOneAndLeavesNoLog(t *testing.T) {
 	if strings.Contains(said, "failed to validate flags") {
 		t.Errorf("the refusal was said a second time, as a validation failure:\n%s", said)
 	}
-	for _, d := range []string{dir, tmp} {
-		entries, err := os.ReadDir(d)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, e := range entries {
-			t.Errorf("keploy test with no keploy folder left %s behind in %s", e.Name(), d)
-		}
+	logPath := requireOnlyItsKeptLog(t, said, dir, tmp, "keploy test with no keploy folder")
+	if !strings.Contains(said, "logs: "+logPath+"\n") {
+		t.Errorf("the run did not name the log it kept, %s, beside its version:\n%s", logPath, said)
+	}
+	if !strings.Contains(stderr.String(), utils.KeptRunLogLine(logPath)) {
+		t.Errorf("the kept log's line is not on stderr:\n%s", stderr.String())
+	}
+	if b, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(b), "No test-sets found") {
+		t.Errorf("the kept log does not hold why the run failed (%v):\n%s", err, b)
 	}
 }
 
 // A docker run that keploy cannot re-execute through sudo, for there is no
-// sudo, fails with exit code 1 and leaves no log: ReexecWithSudo returns its
-// error to start(), whose deferred calls remove the log. It used to os.Exit(1)
-// inside ReexecWithSudo, before the log's name went at the exec.
-func TestCLIReexecWithNoSudoExitsOneAndLeavesNoLog(t *testing.T) {
+// sudo, fails with exit code 1 and keeps its log, saying so: ReexecWithSudo
+// returns its error to start(), whose deferred calls end the log. It used to
+// os.Exit(1) inside ReexecWithSudo, before the log's name went at the exec,
+// and left the log behind with nothing said.
+func TestCLIReexecWithNoSudoExitsOneAndKeepsItsLog(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
 		t.Skip("start() re-executes through sudo only on Linux, for a user who is not root")
 	}
@@ -312,8 +401,8 @@ func TestCLIReexecWithNoSudoExitsOneAndLeavesNoLog(t *testing.T) {
 	}
 	cmd.Env = env
 	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	code := 0
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -322,20 +411,160 @@ func TestCLIReexecWithNoSudoExitsOneAndLeavesNoLog(t *testing.T) {
 		}
 		code = exitErr.ExitCode()
 	}
+	out := stdout.String() + stderr.String()
 
 	if code != utils.ExitKeployError {
-		t.Errorf("exit code = %d, want %d:\n%s", code, utils.ExitKeployError, out.String())
+		t.Errorf("exit code = %d, want %d:\n%s", code, utils.ExitKeployError, out)
 	}
-	if !strings.Contains(out.String(), "sudo is required") {
-		t.Errorf("the run did not say it needs sudo:\n%s", out.String())
+	if !strings.Contains(out, "sudo is required") {
+		t.Errorf("the run did not say it needs sudo:\n%s", out)
 	}
-	for _, d := range []string{dir, tmp} {
-		entries, err := os.ReadDir(d)
-		if err != nil {
-			t.Fatal(err)
+	logPath := requireOnlyItsKeptLog(t, out, dir, tmp, "a re-exec with no sudo")
+	if !strings.Contains(stderr.String(), utils.KeptRunLogLine(logPath)) {
+		t.Errorf("the kept log's line is not on stderr:\n%s", stderr.String())
+	}
+	if b, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(b), "sudo not found in PATH") {
+		t.Errorf("the kept log does not hold why the run failed (%v):\n%s", err, b)
+	}
+}
+
+// A crash of the command's own goroutine is a failed run: it exits non-zero,
+// not 0, and keeps its log, holding the line logged before the crash, with
+// the line that says so on stderr. utils.Recover recovered such a panic and
+// left the code at 0, so the run passed and removed its log.
+func TestCLICrashExitsNonZeroAndKeepsItsLog(t *testing.T) {
+	if code := runCLI(t, "--help"); code != 0 {
+		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	}
+	dir, tmp := t.TempDir(), t.TempDir()
+	cmd := exec.Command(os.Args[0])
+	cmd.Args = []string{"keploy", panicCommand}
+	cmd.Env = append(os.Environ(), subprocessEnv+"=1", panicCommandEnv+"=1", "TMPDIR="+tmp, "SUDO_UID=")
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running keploy %s: %v", panicCommand, err)
 		}
-		for _, e := range entries {
-			t.Errorf("a re-exec with no sudo left %s behind in %s", e.Name(), d)
+		code = exitErr.ExitCode()
+	}
+	if code != utils.ExitKeployError {
+		t.Errorf("a crash exited %d, want %d:\n%s%s", code, utils.ExitKeployError, stdout.String(), stderr.String())
+	}
+	logPath := requireOnlyItsKeptLog(t, stdout.String()+stderr.String(), dir, tmp, "a crash")
+	if !strings.Contains(stderr.String(), utils.KeptRunLogLine(logPath)) {
+		t.Errorf("the kept log's line is not on stderr:\n%s", stderr.String())
+	}
+	if b, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(b), "the line before the crash") || !strings.Contains(string(b), "a crash of the command") {
+		t.Errorf("the kept log does not hold the line logged before the crash and the crash (%v):\n%s", err, b)
+	}
+}
+
+// A run that exits 8 because the command it wraps did -- ctest exits 8 when its
+// tests fail, and keploy mock replay exits with its test command's code -- is
+// a failed run, not a command line keploy refused: it keeps its log and says
+// so. Only main's mapping of a usage error refuses one (utils.RefuseCommandLine);
+// the run removed its log for any 8.
+func TestCLIAWrappedCommandsExitEightKeepsItsLog(t *testing.T) {
+	if code := runCLI(t, "--help"); code != 0 {
+		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	}
+	dir, tmp := t.TempDir(), t.TempDir()
+	cmd := exec.Command(os.Args[0])
+	cmd.Args = []string{"keploy", wrappedExitEightCommand}
+	cmd.Env = append(os.Environ(), subprocessEnv+"=1", panicCommandEnv+"=1", "TMPDIR="+tmp, "SUDO_UID=")
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running keploy %s: %v", wrappedExitEightCommand, err)
 		}
+		code = exitErr.ExitCode()
+	}
+	if code != utils.ExitUsageError {
+		t.Errorf("the run exited %d, want its wrapped command's %d:\n%s%s", code, utils.ExitUsageError, stdout.String(), stderr.String())
+	}
+	logPath := requireOnlyItsKeptLog(t, stdout.String()+stderr.String(), dir, tmp, "a run whose wrapped command exited 8")
+	if !strings.Contains(stderr.String(), utils.KeptRunLogLine(logPath)) {
+		t.Errorf("the kept log's line is not on stderr:\n%s", stderr.String())
+	}
+	if b, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(b), "the line before the wrapped command's exit") {
+		t.Errorf("the kept log does not hold the run's line (%v):\n%s", err, b)
+	}
+}
+
+// A crash of a run that tees its debug log into KEPLOY_DEBUG_FILE (--debug)
+// leaves its report there too: the debug file is ended after the crash is
+// recovered and reported (utils.Recover), as after every other deferred call.
+func TestCLICrashSaysItsReportInTheDebugFile(t *testing.T) {
+	if code := runCLI(t, "--help"); code != 0 {
+		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	}
+	dir, tmp, debugDir := t.TempDir(), t.TempDir(), t.TempDir()
+	debugPath := filepath.Join(debugDir, "debug.log")
+	cmd := exec.Command(os.Args[0])
+	cmd.Args = []string{"keploy", panicCommand, "--debug"}
+	cmd.Env = append(os.Environ(), subprocessEnv+"=1", panicCommandEnv+"=1", "TMPDIR="+tmp, "SUDO_UID=", "KEPLOY_DEBUG_FILE="+debugPath)
+	cmd.Dir = dir
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running keploy %s --debug: %v", panicCommand, err)
+		}
+		code = exitErr.ExitCode()
+	}
+	if code != utils.ExitKeployError {
+		t.Errorf("a crash exited %d, want %d:\n%s", code, utils.ExitKeployError, out.String())
+	}
+	b, err := os.ReadFile(debugPath)
+	if err != nil {
+		t.Fatalf("the run wrote no debug file: %v\n%s", err, out.String())
+	}
+	for _, want := range []string{"the line before the crash", "Recovered from panic", "a crash of the command"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("the debug file does not hold %q:\n%s", want, b)
+		}
+	}
+}
+
+// A crash on one of keploy's worker goroutines, recovered there
+// (utils.Recover), stops the run; the command takes that stop for a normal
+// end and returns. The run still failed: it exits non-zero and keeps its log,
+// which holds the crash. utils.Recover used to leave the code at 0, so such a
+// run passed and removed its log.
+func TestCLIWorkerCrashExitsNonZeroAndKeepsItsLog(t *testing.T) {
+	if code := runCLI(t, "--help"); code != 0 {
+		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	}
+	dir, tmp := t.TempDir(), t.TempDir()
+	cmd := exec.Command(os.Args[0])
+	cmd.Args = []string{"keploy", workerPanicCommand}
+	cmd.Env = append(os.Environ(), subprocessEnv+"=1", panicCommandEnv+"=1", "TMPDIR="+tmp, "SUDO_UID=")
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running keploy %s: %v", workerPanicCommand, err)
+		}
+		code = exitErr.ExitCode()
+	}
+	if code != utils.ExitKeployError {
+		t.Errorf("a run whose worker crashed exited %d, want %d:\n%s%s", code, utils.ExitKeployError, stdout.String(), stderr.String())
+	}
+	logPath := requireOnlyItsKeptLog(t, stdout.String()+stderr.String(), dir, tmp, "a run whose worker crashed")
+	if b, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(b), "a crash of a worker") {
+		t.Errorf("the kept log does not hold the crash (%v):\n%s", err, b)
 	}
 }

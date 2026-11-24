@@ -101,29 +101,25 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+	// KEPLOY_DEBUG_FILE's file, when this run tees its debug log into one
+	// (below): ended in the first deferred call too.
+	var debugFile *os.File
+	var debugSink *log.DebugFileSink
 	// The first deferred call, so the last to run: every return of start()
 	// from here on, the early ones included (a failed sudo re-exec), ends the
 	// log, and what the other deferred calls log reaches it first.
 	defer func() {
-		if os.Getenv("KEPLOY_INDOCKER") != "true" {
-			// This run's own temp log (log.LogFilePattern), closed and
-			// removed; whatever else is at its name is not this run's. A
-			// native agent's log is its CLI's (log.ClientLogFileFlag), which
-			// it only closes: the CLI removes it.
-			if err := log.CloseLogFile(utils.LogFile); err != nil {
-				utils.LogError(logger, err, "Failed to close and remove Keploy Logs")
-			}
-			utils.LogFile = nil
+		// A run during which keploy crashed -- a panic recovered on any
+		// goroutine (utils.Recover) -- failed, whatever code the command it
+		// stopped left (utils.RunExitCode): it exits non-zero, and keeps its
+		// log. Set under the exit code's lock, and only then: a goroutine
+		// still in its teardown may set the code at the same time.
+		if utils.Crashed() {
+			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
-	}()
-
-	// If KEPLOY_DEBUG_FILE is set and this run asked for its debug log
-	// (--debug, or --debug-file), tee debug-level log records into that
-	// file in addition to whatever sinks log.New configured
-	// (maybeAttachDebugFileSink says when, and where it lands).
-	debugFile, debugSink := maybeAttachDebugFileSink(logger, os.Args[1:])
-	if debugFile != nil {
-		defer func() {
+		// The debug file is ended after every other deferred call, Recover's
+		// report of a crash included, so it holds what they log.
+		if debugFile != nil {
 			if debugSink != nil {
 				if ferr := debugSink.Flush(); ferr != nil {
 					logger.Warn("KEPLOY_DEBUG_FILE: flush failed", zap.Error(ferr))
@@ -132,8 +128,31 @@ func start(ctx context.Context) {
 			if cerr := debugFile.Close(); cerr != nil {
 				logger.Warn("KEPLOY_DEBUG_FILE: close failed", zap.Error(cerr))
 			}
-		}()
-	}
+		}
+		if os.Getenv("KEPLOY_INDOCKER") != "true" {
+			// This run's own temp log (log.LogFilePattern): removed after a
+			// run that worked, and kept where it is after one that failed,
+			// for the bug report, with a line naming it (utils.EndRunLog);
+			// whatever else is at its name is not this run's. The exit code
+			// is the run's by now: this is start()'s last deferred call. A
+			// native agent's log is its CLI's (log.ClientLogFileFlag), which
+			// it only closes: the CLI ends it.
+			utils.EndRunLog(logger, utils.ErrCode, os.Stderr)
+		}
+	}()
+	// A panic of this goroutine anywhere below is recovered here, the second
+	// deferred call: after every deferred call below it, and before the
+	// first's, which then ends the debug file with the crash's report in it
+	// and keeps the log of the run that crashed (utils.RunExitCode). A panic
+	// unwinding through the log's end unrecovered would leave the run's code
+	// as the command left it, and the log removed.
+	defer utils.Recover(logger)
+
+	// If KEPLOY_DEBUG_FILE is set and this run asked for its debug log
+	// (--debug, or --debug-file), tee debug-level log records into that
+	// file in addition to whatever sinks log.New configured
+	// (maybeAttachDebugFileSink says when, and where it lands).
+	debugFile, debugSink = maybeAttachDebugFileSink(logger, os.Args[1:])
 
 	// Start pprof HTTP server for live profiling if PPROF_PORT is set
 	if pprofPort := os.Getenv("PPROF_PORT"); pprofPort != "" {
@@ -193,9 +212,15 @@ func start(ctx context.Context) {
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
 	if utils.ShouldReexecWithSudo() {
-		// ReexecWithSudo calls syscall.Exec which replaces the process, so this
-		// line is only reached if there's an error, which it has said. The run
-		// ends here, through start()'s deferred calls, which remove its log.
+		// ReexecWithSudo calls syscall.Exec, which replaces the process, so
+		// this line is reached only when the re-exec failed, which it has
+		// said. The run then ends here, failed, through start()'s deferred
+		// calls, which keep its log. Where sudo was not found, that is the
+		// log the run has had all along. Where the exec itself failed, the
+		// log's name had already been removed for the process it was to
+		// become, and ReexecWithSudo gave the same lines a new name
+		// (log.ReviveLogFile); if it could not, the run keeps no log, and its
+		// lines are on the console only.
 		if err := utils.ReexecWithSudo(logger); err != nil {
 			utils.ErrCode = utils.ExitKeployError
 		}
@@ -255,7 +280,6 @@ func start(ctx context.Context) {
 			}
 		}
 	}()
-	defer utils.Recover(logger)
 
 	// The 'umask' command is commonly used in various operating systems to regulate the permissions of newly created files.
 	// These 'umask' values subtract from the permissions assigned by the process, effectively lowering the permissions.
@@ -283,7 +307,7 @@ func start(ctx context.Context) {
 		errMsg := "failed to get installation id"
 		utils.LogError(logger, err, errMsg)
 		// Returned, not os.Exit(1): the run ends through its deferred calls,
-		// which remove its temp log.
+		// which end its temp log (kept and named: the run failed).
 		utils.ErrCode = utils.ExitKeployError
 		return
 	}
@@ -579,6 +603,9 @@ func exitCodeForCmdErr(err error, cmdPath string, w io.Writer) int {
 			fmt.Fprintln(w, "Error:", err.Error())
 		}
 		fmt.Fprintf(w, "Run '%s --help' for usage.\n", cmdPath)
+		// Said here, where it is known: a wrapped command's own 8 is no
+		// refusal (utils.KeepsRunLog).
+		utils.RefuseCommandLine()
 		return utils.ExitUsageError
 	}
 	return utils.ExitKeployError

@@ -82,6 +82,9 @@ func TestExitCodeForCmdErr(t *testing.T) {
 		},
 	}
 
+	// A usage error refuses the command line for the whole process
+	// (utils.RefuseCommandLine); the other tests here start with none.
+	t.Cleanup(utils.TestOnlyResetCommandLineRefusal)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := tt.path
