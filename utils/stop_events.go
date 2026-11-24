@@ -1,6 +1,27 @@
 package utils
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+type testsDoneCtxKey struct{}
+
+// WithTestsDone marks ctx as belonging to a teardown after all tests of the
+// run or test set have already finished, so compose app kill logs downgrade
+// from WARN to INFO.
+func WithTestsDone(ctx context.Context) context.Context {
+	return context.WithValue(ctx, testsDoneCtxKey{}, true)
+}
+
+// TestsDone reports whether ctx was marked with WithTestsDone.
+func TestsDone(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(testsDoneCtxKey{}).(bool)
+	return v
+}
 
 // StopEnd is how a stop's wait for an app's exit ended (WaitExitByEvents).
 type StopEnd int

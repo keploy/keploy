@@ -165,6 +165,12 @@ type MockManager struct {
 
 	logger *zap.Logger
 
+	// carryRunLeftOut accumulates mocks left out by the carry-over tier byte
+	// cap across the entire agent run (outside carry.reset() and
+	// ResetForReplaySession) so one end-of-run Warn reports the run-wide total.
+	carryRunLeftOut  atomic.Int64
+	carryWarnEmitted sync.Once
+
 	// consumedMu guards consumedList and consumedIndex.
 	// consumedList records MockState entries in the order they were first
 	// intercepted from the network (first call to flagMockAsUsed wins the
@@ -782,6 +788,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 // are still live, they just don't accept new mutations.
 func (m *MockManager) Close() {
 	m.closeOnce.Do(func() {
+		m.LogCarryOverOverflowSummary()
 		m.closed.Store(true)
 		close(m.sweeperStop)
 		// A learn step waiting for this manager's round to move
@@ -5959,24 +5966,51 @@ func (m *MockManager) fileCarryOver(oldPerTest *TreeDb, carryIn, newPerTest []*m
 	for k := range res.kinds {
 		changed[k] = struct{}{}
 	}
-	if res.leftOut > 0 && m.logger != nil {
-		fields := []zap.Field{
-			zap.Int("leftOut", res.leftOut),
-			zap.Int("leftOutThisSet", res.leftOutTotal),
-			zap.Int("held", res.heldCount),
-			zap.Int("heldBytes", res.heldBytes),
-			zap.Int("capBytes", carryOverCapBytes),
-			zap.Time("windowStart", start),
-		}
-		if res.firstCapHit {
-			m.logger.Warn("carry-over tier is full: mocks the application may publish outside their own test window "+
-				"are no longer kept past that window, in recorded order from here on; a test that consumes one of "+
-				"them late will miss it. The held mocks are ones earlier tests left unconsumed", fields...)
-		} else {
-			m.logger.Debug("carry-over tier still full; more mocks left out", fields...)
+	if res.leftOut > 0 {
+		runTotal := m.carryRunLeftOut.Add(int64(res.leftOut))
+		if m.logger != nil {
+			m.logger.Debug("carry-over tier is full; mocks left out",
+				zap.Int("leftOut", res.leftOut),
+				zap.Int("leftOutThisSet", res.leftOutTotal),
+				zap.Int64("leftOutRunTotal", runTotal),
+				zap.Int("held", res.heldCount),
+				zap.Int("heldBytes", res.heldBytes),
+				zap.Int("capBytes", effectiveCarryOverCapBytes()),
+				zap.Time("windowStart", start),
+			)
 		}
 	}
 	return changed
+}
+
+// LogCarryOverOverflowSummary emits at most one Warn per agent run when the
+// carry-over tier byte cap left mocks out during the run, reporting the
+// run-wide total and the env var that raises the cap.
+func (m *MockManager) LogCarryOverOverflowSummary() {
+	if m == nil || m.logger == nil {
+		return
+	}
+	total := m.carryRunLeftOut.Load()
+	if total <= 0 {
+		return
+	}
+	m.carryWarnEmitted.Do(func() {
+		m.logger.Warn("carry-over tier is full: mocks the application may publish outside their own test window "+
+			"were left out in recorded order during this run; a test that consumes one late may miss it. "+
+			"The held mocks are ones earlier tests left unconsumed",
+			zap.Int64("leftOut", total),
+			zap.Int("capBytes", effectiveCarryOverCapBytes()),
+			zap.String("next_step", "check why earlier tests left carry-over mocks unconsumed, or set "+carryOverCapEnv+" (default 16) to raise the carry-over tier cap"))
+	})
+}
+
+// findEvictedCarryOver returns the exact evicted mock ID from the carry-over
+// tier when r.ClosestMock matches an entry in the eviction record.
+func (m *MockManager) findEvictedCarryOver(r *models.MockMismatchReport) string {
+	if m == nil || m.carry == nil {
+		return ""
+	}
+	return m.carry.matchEvicted(r)
 }
 
 // ArmSetFence tells the manager that the session ResetForReplaySession just

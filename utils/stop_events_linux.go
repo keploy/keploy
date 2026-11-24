@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
@@ -43,6 +44,11 @@ import (
 // before keploy kills it: the watchdog's stall bound (stall.HangBudget). A
 // test sets it shorter.
 var StopStallBudget = stall.HangBudget
+
+// ComposeStopGrace is the default stop grace for docker compose teardown when
+// the container declares no larger StopTimeout: StopStallBudget on Linux (60s
+// by default, or whatever a test lowered StopStallBudget to).
+func ComposeStopGrace() time.Duration { return StopStallBudget }
 
 // StopStallSaid is how a kill names the bound it killed on where the app's
 // processes could not be read: keploy's runnable time.
@@ -652,7 +658,16 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 // and a press before that ended nothing: the stop waited on, for a second
 // offer and press or its stall bound.
 func WaitExitOffered(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope, notice *StopNowNotice, offer string) (end StopEnd, bound string) {
-	clock, meter, stop := NewExitMeter(procs, StopStallBudget)
+	return WaitExitOfferedWithBudget(logger, exited, procs, moved, notice, offer, StopStallBudget)
+}
+
+// WaitExitOfferedWithBudget is WaitExitOffered with an explicit stall budget
+// (for example a container's declared StopTimeout / terminationGracePeriod).
+func WaitExitOfferedWithBudget(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope, notice *StopNowNotice, offer string, budget time.Duration) (end StopEnd, bound string) {
+	if budget <= 0 {
+		budget = StopStallBudget
+	}
+	clock, meter, stop := NewExitMeter(procs, budget)
 	defer stop()
 	offering := false
 	var uncompared FilesUncomparedNote
@@ -662,9 +677,9 @@ func WaitExitOffered(logger *zap.Logger, exited <-chan struct{}, procs []Reached
 	for {
 		select {
 		case <-exited:
-			return StopExited, clock.Said(StopStallBudget)
+			return StopExited, clock.Said(budget)
 		case <-notice.Interrupt():
-			return StopPressed, clock.Said(StopStallBudget)
+			return StopPressed, clock.Said(budget)
 		case <-meter.Wait():
 		}
 		if looked := exitLooked.Load(); looked != nil {
@@ -676,7 +691,7 @@ func WaitExitOffered(logger *zap.Logger, exited <-chan struct{}, procs []Reached
 		}
 		m := MarkExit(procs)
 		if len(procs) > 0 && m.Running == 0 {
-			return StopExited, clock.Said(StopStallBudget)
+			return StopExited, clock.Said(budget)
 		}
 		uncompared.Say(logger, m)
 		if meter.Advance(m) {
@@ -684,7 +699,7 @@ func WaitExitOffered(logger *zap.Logger, exited <-chan struct{}, procs []Reached
 			continue
 		}
 		if meter.Expired() {
-			return StopStalled, clock.Said(StopStallBudget)
+			return StopStalled, clock.Said(budget)
 		}
 	}
 }

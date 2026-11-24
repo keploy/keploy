@@ -1,11 +1,22 @@
 package proxy
 
 import (
+	"net/url"
+	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+)
+
+const (
+	defaultCarryOverCapBytes = 16 << 20
+	// carryOverCapEnv optionally raises the carry-over tier cap (in MiB) when
+	// a recording holds more than 16 MiB of unconsumed carry-over mocks.
+	carryOverCapEnv = "KEPLOY_CARRY_OVER_CAP_MIB"
 )
 
 // carryOverCapBytes bounds what the carry-over tier holds: 16 MiB, 1.6% of the
@@ -13,7 +24,19 @@ import (
 // unconsumed on a production recording) is 13.15 MiB. Above it, carry-over stops
 // in recorded order: the earliest-recorded mocks are kept. A var so tests can
 // lower it.
-var carryOverCapBytes = 16 << 20
+var carryOverCapBytes = defaultCarryOverCapBytes
+
+func effectiveCarryOverCapBytes() int {
+	if carryOverCapBytes != defaultCarryOverCapBytes {
+		return carryOverCapBytes
+	}
+	if raw := strings.TrimSpace(os.Getenv(carryOverCapEnv)); raw != "" {
+		if mib, err := strconv.Atoi(raw); err == nil && mib > 0 {
+			return mib << 20
+		}
+	}
+	return carryOverCapBytes
+}
 
 // carryKey identifies one mock in the carry-over tier. Names are unique inside
 // a test set, but the recorded request time is part of the key for the same
@@ -42,10 +65,91 @@ type carryOverPool struct {
 	// insert and removal (binary search + shift), so a read is a copy.
 	ordered []*models.Mock
 	bytes   int
-	// capWarned latches the one cap Warn per staging epoch; leftOut counts
-	// the mocks the cap kept out since then.
-	capWarned bool
-	leftOut   int
+	// leftOut counts the mocks the cap kept out in the current staging epoch
+	// (logged at Debug; the run-wide total and single Warn live on MockManager).
+	leftOut int
+	// evicted records the names of carry-over mocks kept out by the byte cap
+	// so later miss reports can attribute an exact evicted mock ID.
+	evicted map[carryKey]string
+}
+
+const maxEvictedCarryMeta = 16384
+
+// carryOverMockSig computes the canonical call signature for an evicted mock,
+// preferring explicit operation/commandType metadata (and topic when present,
+// so broker kinds such as Pulsar never collapse distinct topics onto the bare
+// op token) so it matches runtime ActualSummary values.
+func carryOverMockSig(mk *models.Mock) string {
+	if mk == nil {
+		return ""
+	}
+	if mk.Spec.HTTPReq != nil {
+		return normalizeCarryOverSig(string(mk.Kind), string(mk.Spec.HTTPReq.Method)+" "+mk.Spec.HTTPReq.URL)
+	}
+	topic := strings.TrimSpace(mk.Spec.Metadata["topic"])
+	if cmd := strings.TrimSpace(mk.Spec.Metadata["commandType"]); cmd != "" {
+		if topic != "" {
+			return normalizeCarryOverSig(string(mk.Kind), cmd+" "+topic)
+		}
+		return normalizeCarryOverSig(string(mk.Kind), cmd)
+	}
+	if op := strings.TrimSpace(mk.Spec.Metadata["operation"]); op != "" {
+		if topic != "" {
+			return normalizeCarryOverSig(string(mk.Kind), op+" "+topic)
+		}
+		return normalizeCarryOverSig(string(mk.Kind), op)
+	}
+	return normalizeCarryOverSig(string(mk.Kind), models.MockSummaryFromSpec(mk))
+}
+
+// normalizeCarryOverSig produces the same canonical call signature for both
+// recorded mock summaries (MockSummaryFromSpec, which uses full URLs for HTTP
+// and "<Kind> <op>" for broker/DB kinds) and runtime mismatch summaries
+// (ActualSummary, which uses "METHOD /path" for HTTP and "<op> <topic/target>"
+// for broker/DB kinds). For Pulsar, the op alone (e.g. "send") is never
+// sufficient: the topic token must be present too.
+func normalizeCarryOverSig(kind, summary string) string {
+	s := strings.TrimSpace(summary)
+	if s == "" {
+		return ""
+	}
+	if strings.EqualFold(kind, string(models.HTTP)) || strings.EqualFold(kind, "HTTP") {
+		parts := strings.Fields(s)
+		if len(parts) < 2 {
+			return ""
+		}
+		method := strings.ToUpper(parts[0])
+		rawTarget := parts[1]
+		if strings.Contains(rawTarget, "://") {
+			if u, err := url.Parse(rawTarget); err == nil {
+				rawTarget = u.Path
+			}
+		}
+		if i := strings.IndexByte(rawTarget, '?'); i >= 0 {
+			rawTarget = rawTarget[:i]
+		}
+		if rawTarget == "" {
+			rawTarget = "/"
+		}
+		return method + " " + rawTarget
+	}
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	if kind != "" && len(fields) > 1 && strings.EqualFold(fields[0], strings.TrimSpace(kind)) {
+		fields = fields[1:]
+	}
+	if strings.Contains(strings.ToLower(kind), "pulsar") {
+		if len(fields) < 2 {
+			return ""
+		}
+		return strings.ToLower(fields[0]) + " " + fields[1]
+	}
+	if len(fields) >= 2 {
+		return strings.ToLower(fields[0]) + " " + fields[1]
+	}
+	return strings.ToLower(fields[0])
 }
 
 // carryEntry keeps the size charged at insert, so the release credits exactly
@@ -73,23 +177,23 @@ func recordedBefore(a, b *models.Mock) bool {
 	return a.Name < b.Name
 }
 
-// reset empties the pool and re-arms the cap Warn (a new staging epoch, or a
-// replay pass that went back to an earlier window).
+// reset empties the pool for a new staging epoch or a replay pass that went
+// back to an earlier window. The run-wide overflow counter and once-per-run
+// Warn live on MockManager and are NOT reset here.
 func (p *carryOverPool) reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.byKey = make(map[carryKey]carryEntry)
 	p.ordered = nil
 	p.bytes = 0
-	p.capWarned = false
 	p.leftOut = 0
+	p.evicted = nil
 }
 
 // fileResult is what one filing did, for the revision bump and the cap log.
 type fileResult struct {
 	kinds         map[models.Kind]struct{}
 	leftOut       int // kept out by the cap in this filing
-	firstCapHit   bool
 	heldCount     int
 	heldBytes     int
 	leftOutTotal  int
@@ -108,6 +212,7 @@ func (p *carryOverPool) file(candidates []*models.Mock, inTree map[carryKey]stru
 	for k, e := range p.byKey {
 		if _, now := inTree[k]; now {
 			p.removeLocked(k, e)
+			delete(p.evicted, k)
 			res.kinds[e.mk.Kind] = struct{}{}
 			res.removedByTree++
 		}
@@ -115,16 +220,26 @@ func (p *carryOverPool) file(candidates []*models.Mock, inTree map[carryKey]stru
 	for _, mk := range candidates {
 		k := carryKeyOf(mk)
 		if _, held := p.byKey[k]; held {
+			delete(p.evicted, k)
 			continue
 		}
 		if _, now := inTree[k]; now {
+			delete(p.evicted, k)
 			continue
 		}
+		capBytes := effectiveCarryOverCapBytes()
 		size := approxMockBytes(mk)
-		if p.bytes+size > carryOverCapBytes {
+		if p.bytes+size > capBytes {
 			res.leftOut++
+			if p.evicted == nil {
+				p.evicted = make(map[carryKey]string)
+			}
+			if len(p.evicted) < maxEvictedCarryMeta {
+				p.evicted[k] = mk.Name
+			}
 			continue
 		}
+		delete(p.evicted, k)
 		// Matchers can reach it from here on (see models.Mock.pooled). Every
 		// candidate today comes from a staging's own slices, which marked it
 		// already; this keeps a future caller's mock from being stamped.
@@ -139,10 +254,6 @@ func (p *carryOverPool) file(candidates []*models.Mock, inTree map[carryKey]stru
 	}
 	if res.leftOut > 0 {
 		p.leftOut += res.leftOut
-		if !p.capWarned {
-			p.capWarned = true
-			res.firstCapHit = true
-		}
 	}
 	res.heldCount, res.heldBytes, res.leftOutTotal = len(p.byKey), p.bytes, p.leftOut
 	return res
@@ -195,6 +306,39 @@ func (p *carryOverPool) size() (count, bytes int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.byKey), p.bytes
+}
+
+// matchEvicted returns the exact evicted mock ID from the carry-over tier when
+// r.ClosestMock is present in the eviction record and r is not a payload diff.
+//
+// Eviction is NEVER claimed without an exact evicted mock ID (no signature
+// fallback), and a payload/body/variable diff against a test's own candidate
+// mock is never attributed to carry-over eviction.
+func (p *carryOverPool) matchEvicted(r *models.MockMismatchReport) string {
+	if r == nil || r.ClosestMock == "" {
+		return ""
+	}
+	// A payload/body/variable diff against a compared candidate mock is never
+	// blamed on carry-over eviction, even if a mock with the same name was
+	// evicted earlier.
+	if len(r.FieldDiffs) > 0 || len(r.Differs) > 0 {
+		return ""
+	}
+	switch r.MatchPhase {
+	case models.MatchPhaseBody, models.MatchPhaseStrict, models.MatchPhaseVariable:
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.evicted) == 0 {
+		return ""
+	}
+	for _, name := range p.evicted {
+		if name == r.ClosestMock {
+			return name
+		}
+	}
+	return ""
 }
 
 // approxMockBytes estimates the heap a held mock pins, for the carry-over cap.

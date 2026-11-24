@@ -41,7 +41,7 @@ func keptLines(t *testing.T, logs *observer.ObservedLogs) (header map[string]any
 // misses carried (a DNS name fully qualified, as the DNS proxy's lines name
 // it), and no line or field names one whole.
 func TestTheRunNamesEachDestinationKeptInsideOnce(t *testing.T) {
-	core, logs := observer.New(zapcore.InfoLevel)
+	core, logs := observer.New(zapcore.DebugLevel)
 	r := &Replayer{logger: zap.New(core)}
 
 	r.keptInside.add([]models.UnmatchedCall{
@@ -91,7 +91,7 @@ func TestTheRunNamesEachDestinationKeptInsideOnce(t *testing.T) {
 // whose misses carried no tag (an agent that tags none) is named by its
 // shape alone, and one whose misses carried several by the first.
 func TestKeptInsideNamesAnAddressWholeAndAnUntaggedHostByItsShape(t *testing.T) {
-	core, logs := observer.New(zapcore.InfoLevel)
+	core, logs := observer.New(zapcore.DebugLevel)
 	r := &Replayer{logger: zap.New(core)}
 
 	r.keptInside.add([]models.UnmatchedCall{

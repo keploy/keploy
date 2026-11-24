@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -945,8 +946,9 @@ func TestCarryOverRestartsWhenAPassGoesBack(t *testing.T) {
 	r.wantCarry("pass 2, W1", "s1", "s2")
 }
 
-// Above the cap, carry-over stops in recorded order with one Warn naming the
-// count left out; later overflows of the same set are Debug.
+// Above the cap, carry-over stops in recorded order, logs each overflow at
+// Debug with the running count, and emits ONE Warn at the end of the run with
+// the run-wide total across all test sets.
 func TestCarryOverCapWarnsOnceWithTheCount(t *testing.T) {
 	registerSends(t)
 	prev := carryOverCapBytes
@@ -976,23 +978,19 @@ func TestCarryOverCapWarnsOnceWithTheCount(t *testing.T) {
 	if !eqNames(pacedNames(got), []string{"a", "b"}) {
 		t.Fatalf("held %v; the cap must keep the earliest-recorded", pacedNames(got))
 	}
-	warns := logs.FilterLevelExact(zap.WarnLevel).All()
-	if len(warns) != 1 {
-		t.Fatalf("%d Warns, want exactly one", len(warns))
+	if n := len(logs.FilterLevelExact(zap.WarnLevel).All()); n != 0 {
+		t.Fatalf("%d mid-run Warns on W1 overflow, want 0 (warn prints once at run end)", n)
 	}
-	if n := warns[0].ContextMap()["leftOut"]; n != int64(3) {
-		t.Fatalf("the Warn names leftOut=%v, want 3", n)
-	}
-	// W2: one more overflow in the same set is not another Warn.
+	// W2: one more overflow in the same set logs at Debug with the running count (still 0 mid-run Warns).
 	offer(2, brokerMockAt("f", pulsarKind, "SEND", 2500))
-	if n := len(logs.FilterLevelExact(zap.WarnLevel).All()); n != 1 {
-		t.Fatalf("%d Warns after a second overflow, want still 1", n)
+	if n := len(logs.FilterLevelExact(zap.WarnLevel).All()); n != 0 {
+		t.Fatalf("%d mid-run Warns after W2 overflow, want 0", n)
 	}
-	dbg := logs.FilterMessageSnippet("carry-over tier still full").All()
-	if len(dbg) != 1 || dbg[0].ContextMap()["leftOutThisSet"] != int64(4) {
-		t.Fatalf("second overflow not reported at Debug with the running count: %+v", dbg)
+	dbg := logs.FilterMessageSnippet("carry-over tier is full; mocks left out").FilterLevelExact(zap.DebugLevel).All()
+	if len(dbg) != 2 || dbg[1].ContextMap()["leftOutThisSet"] != int64(4) || dbg[1].ContextMap()["leftOutRunTotal"] != int64(4) {
+		t.Fatalf("overflows not reported at Debug with running counts: %+v", dbg)
 	}
-	// Consuming frees room; a new staging call re-arms the Warn.
+	// Consuming frees room; a new staging call empties the tier without resetting the run-wide total.
 	if !mm.DeleteFilteredMock(*brokerMockAt("a", pulsarKind, "SEND", 1200)) {
 		t.Fatal("could not consume a")
 	}
@@ -1002,6 +1000,23 @@ func TestCarryOverCapWarnsOnceWithTheCount(t *testing.T) {
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	if n, b := mm.carry.size(); n != 0 || b != 0 {
 		t.Fatalf("staging did not empty the tier: %d mocks, %d bytes", n, b)
+	}
+	// Second test set overflows 1 more mock: run-end Close emits ONE Warn with total 5.
+	offer(1,
+		brokerMockAt("s2-a", pulsarKind, "SEND", 1200),
+		brokerMockAt("s2-b", pulsarKind, "SEND", 1300),
+		brokerMockAt("s2-c", pulsarKind, "SEND", 1500),
+	)
+	mm.Close()
+	warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zap.WarnLevel).All()
+	if len(warns) != 1 {
+		t.Fatalf("%d run-end Warn lines, want exactly one: %+v", len(warns), logs.All())
+	}
+	if n := warns[0].ContextMap()["leftOut"]; n != int64(5) {
+		t.Fatalf("the run-end Warn line names leftOut=%v, want 5", n)
+	}
+	if ns, _ := warns[0].ContextMap()["next_step"].(string); !strings.Contains(ns, carryOverCapEnv) {
+		t.Fatalf("the run-end Warn line next_step=%q does not name %s", ns, carryOverCapEnv)
 	}
 }
 
