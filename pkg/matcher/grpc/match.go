@@ -506,7 +506,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		// A reorder alone keeps its own grading and reason below: decoded,
 		// it would read as a value change.
 		assessExp, assessAct := expectedDecodedData, actualDecodedData
-		if mo.decode != nil && !reorderedOnly && !(json.Valid([]byte(assessExp)) && json.Valid([]byte(assessAct))) {
+		if mo.decode != nil && !reorderedOnly && (!json.Valid([]byte(assessExp)) || !json.Valid([]byte(assessAct))) {
 			if e, a, ok := mo.decode(assessExp, assessAct); ok {
 				assessExp, assessAct = e, a
 			}
