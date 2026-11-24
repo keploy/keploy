@@ -204,7 +204,7 @@ type Relay struct {
 	// upstream socket out of order.
 	holdMu sync.Mutex
 
-	// preDispatchActive is true between [Relay.Run]'s pre-spawn
+	// preDispatchActive is true between [New]'s
 	// [installPreDispatchPause] call (gated on
 	// [Config.PreDispatchPause]) and the
 	// [directive.KindResumePreDispatch] handler. While set, the
@@ -223,6 +223,10 @@ type Relay struct {
 	// stash via takeStashedPrefix; it then clears the flag on its own
 	// endPause path).
 	preDispatchActive atomic.Bool
+
+	// heldAtParserEnd: PauseTees found the relay holding bytes for the
+	// parser (HeldAtParserEnd).
+	heldAtParserEnd atomic.Bool
 }
 
 // ErrRelayAlreadyRun is returned from a second [Relay.Run] call.
@@ -287,6 +291,15 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	// hold it can actually release. See the note in run().
 	if cfg.HoldClientWrites {
 		r.holdClient.Store(true)
+	}
+	// The pre-dispatch window is armed here too, for the same reason: a
+	// parser gone before Run's goroutine ran found no window, so PauseTees
+	// queued no release, and Run then installed one nothing would end.
+	// Installing it touches no socket (installPreDispatchPause), and a
+	// release queued before Run starts waits on the directive channel.
+	if cfg.PreDispatchPause {
+		r.installPreDispatchPause()
+		r.preDispatchActive.Store(true)
 	}
 
 	r.teeC2D = newTee(
@@ -418,13 +431,41 @@ func (r *Relay) DropCounts() (c2d, d2c uint64) {
 // for it" cannot both be true, so the release belongs here rather than
 // at the call site, where forgetting it is a silent user-traffic
 // outage rather than a compile error.
+//
+// For the same reason it ENDS the pre-dispatch window (Config.
+// PreDispatchPause), which only the parser's ResumePreDispatch or
+// UpgradeTLS ends: a parser that retired before sending either -- the
+// Postgres parser, hung on a client's startup choreography -- left both
+// directions stashed and parked for the rest of the connection. The
+// client's StartupMessage never reached the server (Postgres 10 logged
+// "incomplete startup packet" when the client gave up) and the
+// application saw its connection time out, while the retire line said its
+// traffic was unaffected. The release is queued as a ResumePreDispatch on
+// the directive channel, so the directive processor runs it after
+// anything the parser sent before it died (an UpgradeTLS it had asked for
+// runs first, and the resume then finds no window and does nothing).
 func (r *Relay) PauseTees() {
+	if r.preDispatchActive.Load() || r.holdClient.Load() || r.currentPauseCh() != nil {
+		r.heldAtParserEnd.Store(true)
+	}
 	r.teeC2D.setPaused(true)
 	r.teeD2C.setPaused(true)
 	if err := r.releaseClientHold(); err != nil && r.cfg.Logger != nil {
 		r.cfg.Logger.Debug("relay: flushing the client hold while pausing tees failed",
 			zap.Error(err),
 		)
+	}
+	if r.preDispatchActive.Load() {
+		select {
+		case r.directives <- directive.Directive{Kind: directive.KindResumePreDispatch}:
+		default:
+			// Eight directives the processor has not taken: it is stuck in
+			// one (a TLS upgrade's handshake), which this resume would wait
+			// behind anyway.
+			if r.cfg.Logger != nil {
+				r.cfg.Logger.Debug("relay: could not queue the pre-dispatch release for a parser that is gone; the directive channel is full")
+			}
+		}
 	}
 }
 
@@ -503,10 +544,10 @@ func (r *Relay) run(ctx context.Context) error {
 		r.processDirectives(ctx, stopping)
 	}()
 
-	// Pre-dispatch pause: install the pause barrier BEFORE spawning
-	// forwarder goroutines so the very first byte each direction
+	// Pre-dispatch pause: New() installed the pause barrier, so it is
+	// up BEFORE the forwarder goroutines below start, and the very first byte each direction
 	// produces lands in the post-Read pause path (where the
-	// preDispatchActive flag below makes the forwarder tee AND stash
+	// preDispatchActive flag New() set makes the forwarder tee AND stash
 	// instead of writing). This closes the postgres SSL preamble
 	// race (keploy/enterprise#2012) — without it, by the time the
 	// parser sees SSLRequest on its FakeConn the server may already
@@ -519,11 +560,8 @@ func (r *Relay) run(ctx context.Context) error {
 	// blocked Read would just leave the read deadlines stuck in the
 	// past — making the forwarder Read return EAGAIN forever in a
 	// tight loop until endPause clears it. The pause channel and the
-	// parker tracking are set up identically.
-	if r.cfg.PreDispatchPause {
-		r.installPreDispatchPause()
-		r.preDispatchActive.Store(true)
-	}
+	// parker tracking are set up identically. It is armed in New(), before
+	// the caller registers its abort hook (see the client write hold below).
 
 	// Client write hold: armed before the forwarders start so it covers
 	// the connection from its first byte. Unlike the pre-dispatch pause
@@ -544,8 +582,8 @@ func (r *Relay) run(ctx context.Context) error {
 	// user-traffic outage PauseTees exists to prevent.
 	//
 	// withDefaults has already refused any HoldClientWrites +
-	// PreDispatchPause combination, so the block above cannot have
-	// installed a pause barrier that this hold would strand.
+	// PreDispatchPause combination, so New() cannot have installed a
+	// pre-dispatch barrier that this hold would strand.
 
 	// When one forwarder exits, signal the other to exit too via the
 	// existing stopping/nudgeDeadline machinery. Without this signalling,
@@ -838,8 +876,8 @@ func (r *Relay) forward(
 		// resumed.
 		//
 		// Pre-dispatch pause is the exception: the pause channel is
-		// already open at first entry (installed by run() before
-		// spawning forwarders), but we must NOT park here — the
+		// already open at first entry (installed by New(), before the
+		// forwarders start), but we must NOT park here — the
 		// parser needs the first Read on each direction to produce a
 		// chunk it can inspect via its FakeConn. The forwarder reads,
 		// hits the post-Read recheck below, and parks there with the
@@ -1498,6 +1536,14 @@ func (r *Relay) readNow() time.Time {
 	}
 	return time.Now()
 }
+
+// HeldAtParserEnd reports whether the relay was holding the connection's
+// bytes for its parser when PauseTees was told the parser is gone: the
+// pre-dispatch window, a pause a directive installed, or a client write
+// hold. The application waited on that hold for as long as the parser took
+// to stop (a hung parser: its hang budget), so its traffic was affected,
+// though PauseTees releases the hold.
+func (r *Relay) HeldAtParserEnd() bool { return r.heldAtParserEnd.Load() }
 
 // currentPauseCh snapshots the current pause channel under the mutex.
 // Returns nil if no pause is active. The forwarder uses the result to
