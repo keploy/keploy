@@ -960,6 +960,10 @@ type PreparedMock struct {
 // Mock is the mock prepared.
 func (p *PreparedMock) Mock() *models.Mock { return p.mock }
 
+// Dir is the test-set directory the mock will be written to
+// (filepath.Join(MockYaml.MockPath, testSetID)).
+func (p *PreparedMock) Dir() string { return p.mockPath }
+
 // PrepareMock names mock and chooses where it is written, as InsertMock does
 // first. It names mocks in the order it is called. An error is the insert's:
 // WritePrepared returns it.
