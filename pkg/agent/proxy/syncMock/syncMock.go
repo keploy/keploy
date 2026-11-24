@@ -600,6 +600,10 @@ type SyncMockManager struct {
 	// notRecorded counts the requests an ingress did not record because the
 	// memory guard had paused recording (NoteNotRecordedUnderPressure).
 	notRecorded notRecordedUnderPressure
+	// overSize counts the requests an ingress served and did not record as
+	// test cases because each was over keploy's size limit for a test case
+	// (NoteOverSizeLimit).
+	overSize overSizeLimit
 
 	// leftOut counts the mocks a session routed here left out
 	// because a parser could not record them (NoteMockLeftOut): their capture

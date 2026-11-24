@@ -66,7 +66,9 @@ var CaptureHook CaptureFunc = Capture
 // nil means no dedup.
 var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) (isDuplicate bool, schemaKey string)
 
-// MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
+// MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and
+// response (5 MiB). An exchange over it is not recorded as a test case, and is
+// counted for the recording's summary (NoteOverSizeLimit, TestCaseLimit).
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 
 // LargeBodyThreshold is the size threshold (1MB) above which response bodies
@@ -216,9 +218,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 				if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 					// Oversized, not corrupt: same condition as the post-
 					// decompression MaxTestCaseSize check further down, hit
-					// earlier — log it the same way, not as a decode failure.
+					// earlier — log it the same way, not as a decode failure,
+					// and count it the same way.
 					logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
 						zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+					NoteOverSizeLimit(ctx, logger, req, opts, TestCaseLimit)
 					return
 				}
 				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
@@ -275,6 +279,9 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
 					zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+				// The filters were read above, before a multipart body's
+				// Content-Type was cut to its media type: not again.
+				noteOverSizeLimit(ctx, logger, req, TestCaseLimit)
 				return
 			}
 			utils.LogError(logger, err, "failed to decompress the response body")
@@ -290,6 +297,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Int("reqBodySize", len(reqBody)),
 			zap.Int("respBodySize", len(respBody)),
 			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+		// Counted for the recording's summary, and told on its console:
+		// the app served it, and the recording lacks it. The filters were
+		// read above, before a multipart body's Content-Type was cut to its
+		// media type: not again.
+		noteOverSizeLimit(ctx, logger, req, TestCaseLimit)
 		return
 	}
 
@@ -730,7 +742,8 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 //   - a duplicate ends its window BEFORE its prune (a keep=false resolve,
 //     with --sync), so the window does not hold its own debris, and is not
 //     handed on;
-//   - a call over the 5 MB cap is not recorded, and nothing is resolved to it;
+//   - a call over the 5 MB cap is not recorded, and nothing is resolved to it:
+//     it is counted for the recording's summary (NoteGRPCOverSizeLimit);
 //   - with --sync a window given up while the call was in flight (the hold's
 //     bound, memory pressure, its recording's stop) leaves it out; else its
 //     test case is handed on with the window still unclaimed, then claimed
@@ -794,6 +807,8 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 			zap.Int("totalSize", totalSize),
 			zap.String("path", utils.URLPathShape(u)),
 			utils.PathTagField(models.URLPathTag(ctx, http.MethodPost, u)))
+		// Counted and told as an HTTP call over the limit is (Capture).
+		NoteGRPCOverSizeLimit(ctx, logger, u.Path, TestCaseLimit)
 		return
 	}
 
