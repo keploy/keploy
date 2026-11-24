@@ -3,9 +3,12 @@ package models
 import (
 	"encoding/json"
 	"net"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // PassThroughMode selects how keploy treats egress to a matched telemetry /
@@ -196,10 +199,17 @@ func passThroughScore(r PassThroughRule, host string, port uint32, method, reqPa
 // ties keep the first in slice order. The returned rule's Mode is normalized.
 // This does not do user-vs-builtin tiering — use ResolvePassThrough for that.
 func MatchPassThrough(rules []PassThroughRule, host string, port uint32, method, reqPath string) (PassThroughRule, bool) {
+	return matchPassThrough(rules, host, port, method, reqPath, nil)
+}
+
+func matchPassThrough(rules []PassThroughRule, host string, port uint32, method, reqPath string, skip func(PassThroughRule) bool) (PassThroughRule, bool) {
 	host = normalizeHost(host)
 	best := PassThroughRule{}
 	bestScore := 0
 	for _, r := range rules {
+		if skip != nil && skip(r) {
+			continue
+		}
 		score, ok := passThroughScore(r, host, port, method, reqPath)
 		if ok && score > bestScore {
 			bestScore = score
@@ -214,15 +224,30 @@ func MatchPassThrough(rules []PassThroughRule, host string, port uint32, method,
 }
 
 // ResolvePassThrough is THE single entry point for the egress passthrough
-// decision. It is two-tier: any matching USER rule (userPorts+userHosts) wins
-// over every built-in default, and specificity only orders WITHIN a tier — so a
-// user rule for a target can never be silently outranked by a more-specific
-// built-in. It returns (rule, passthrough): passthrough is false when nothing
-// matched OR the winning rule is mode:"off" (record the endpoint normally), and
-// true with rule.Mode ∈ {skip, recordOne} otherwise. Callers must branch on the
-// bool, not re-derive "does matched mean passthrough" themselves.
+// decision when request headers are unavailable. It is two-tier: any matching
+// USER rule (userPorts+userHosts) wins over every built-in default, and
+// specificity only orders WITHIN a tier — so a user rule for a target can never
+// be silently outranked by a more-specific built-in. It returns (rule,
+// passthrough): passthrough is false when nothing matched OR the winning rule
+// is mode:"off" (record the endpoint normally), and true with rule.Mode ∈
+// {skip, recordOne} otherwise. Callers must branch on the bool, not re-derive
+// "does matched mean passthrough" themselves. Built-ins whose fingerprint is
+// marked alwaysRequire (such as elastic-apm-v2-events) still require their port
+// or header fingerprint here; pass headers via ResolvePassThroughWithHeader
+// when available.
 func ResolvePassThrough(userPorts, userHosts []PassThroughRule, host string, port uint32, method, reqPath string) (PassThroughRule, bool) {
-	return resolvePassThrough(userPorts, userHosts, BuiltinTelemetryDefaults(), host, port, method, reqPath)
+	return ResolvePassThroughWithHeader(userPorts, userHosts, host, port, method, reqPath, nil)
+}
+
+// ResolvePassThroughWithHeader is ResolvePassThrough with the outgoing request
+// headers, so built-in path rows marked alwaysRequire in telemetryFingerprints
+// (such as elastic-apm-v2-events) enforce the same tight port-or-header
+// fingerprint in default mode as under KEPLOY_PROVEN=1.
+func ResolvePassThroughWithHeader(userPorts, userHosts []PassThroughRule, host string, port uint32, method, reqPath string, header map[string][]string) (PassThroughRule, bool) {
+	return resolvePassThrough(userPorts, userHosts, BuiltinTelemetryDefaults(), host, port, method, reqPath, func(r PassThroughRule) bool {
+		fp, ok := telemetryFingerprints[r.ID]
+		return ok && fp.alwaysRequire && !fp.matches(port, header)
+	})
 }
 
 // ResolveProven is the egress passthrough decision under the proven switch
@@ -233,49 +258,62 @@ func ResolvePassThrough(userPorts, userHosts []PassThroughRule, host string, por
 // clears them under the switch (mock.real replaces them, U18), and keploy
 // record and keploy test keep theirs until they read mock.real.
 func ResolveProven(userPorts, userHosts []PassThroughRule, host string, port uint32, method, reqPath string, header map[string][]string) (PassThroughRule, bool) {
-	var builtins []PassThroughRule
-	for _, r := range BuiltinTelemetryDefaults() {
-		if fp, ok := telemetryFingerprints[r.ID]; ok && !fp.matches(port, header) {
-			continue
-		}
-		builtins = append(builtins, r)
+	return resolvePassThrough(userPorts, userHosts, BuiltinTelemetryDefaults(), host, port, method, reqPath, func(r PassThroughRule) bool {
+		fp, ok := telemetryFingerprints[r.ID]
+		return ok && !fp.matches(port, header)
+	})
+}
+
+// ResolvePassThroughEgress is the shared egress passthrough decision for live
+// HTTP proxy calls and loaded HTTP mock assertion checks. Under the proven
+// switch it delegates to ResolveProven; with the switch off it delegates to
+// ResolvePassThroughWithHeader.
+func ResolvePassThroughEgress(userPorts, userHosts []PassThroughRule, host string, port uint32, method, reqPath string, header map[string][]string) (PassThroughRule, bool) {
+	if provenswitch.On() {
+		return ResolveProven(userPorts, userHosts, host, port, method, reqPath, header)
 	}
-	return resolvePassThrough(userPorts, userHosts, builtins, host, port, method, reqPath)
+	return ResolvePassThroughWithHeader(userPorts, userHosts, host, port, method, reqPath, header)
 }
 
 // resolvePassThrough is ResolvePassThrough over the built-in rows given.
-func resolvePassThrough(userPorts, userHosts, builtins []PassThroughRule, host string, port uint32, method, reqPath string) (PassThroughRule, bool) {
+func resolvePassThrough(userPorts, userHosts, builtins []PassThroughRule, host string, port uint32, method, reqPath string, skipBuiltin func(PassThroughRule) bool) (PassThroughRule, bool) {
 	// An {id, mode:"off"} override disables the built-in with that ID by identity
 	// (robust to un-mirrored fields like PathPrefix). Collect those first; the
 	// markers themselves are not matchable rules.
 	var disabled map[string]bool
-	user := make([]PassThroughRule, 0, len(userPorts)+len(userHosts))
-	for _, r := range append(append([]PassThroughRule{}, userPorts...), userHosts...) {
-		if r.ID != "" && r.Host == "" && r.Port == 0 && r.Path == "" && r.NormalizeMode() == PassThroughOff {
-			if disabled == nil {
-				disabled = make(map[string]bool)
+	var user []PassThroughRule
+	if total := len(userPorts) + len(userHosts); total > 0 {
+		user = make([]PassThroughRule, 0, total)
+		for _, r := range userPorts {
+			if r.ID != "" && r.Host == "" && r.Port == 0 && r.Path == "" && r.NormalizeMode() == PassThroughOff {
+				if disabled == nil {
+					disabled = make(map[string]bool)
+				}
+				disabled[r.ID] = true
+				continue
 			}
-			disabled[r.ID] = true
-			continue
+			user = append(user, r)
 		}
-		user = append(user, r)
+		for _, r := range userHosts {
+			if r.ID != "" && r.Host == "" && r.Port == 0 && r.Path == "" && r.NormalizeMode() == PassThroughOff {
+				if disabled == nil {
+					disabled = make(map[string]bool)
+				}
+				disabled[r.ID] = true
+				continue
+			}
+			user = append(user, r)
+		}
 	}
 
 	// Tier 1: user rules compete by specificity. Tier 2 (built-ins, minus any
-	// disabled-by-ID) is consulted only when no user rule matched — so a user
-	// rule always wins.
-	rule, ok := MatchPassThrough(user, host, port, method, reqPath)
+	// disabled-by-ID or fingerprint-filtered rows) is consulted only when no
+	// user rule matched — so a user rule always wins.
+	rule, ok := matchPassThrough(user, host, port, method, reqPath, nil)
 	if !ok {
-		if len(disabled) > 0 {
-			filtered := make([]PassThroughRule, 0, len(builtins))
-			for _, r := range builtins {
-				if !disabled[r.ID] {
-					filtered = append(filtered, r)
-				}
-			}
-			builtins = filtered
-		}
-		rule, ok = MatchPassThrough(builtins, host, port, method, reqPath)
+		rule, ok = matchPassThrough(builtins, host, port, method, reqPath, func(r PassThroughRule) bool {
+			return disabled[r.ID] || (skipBuiltin != nil && skipBuiltin(r))
+		})
 	}
 	if !ok || rule.NormalizeMode() == PassThroughOff {
 		return PassThroughRule{}, false
@@ -327,20 +365,19 @@ func matchHost(pattern, host string) bool {
 	return false
 }
 
-// BuiltinTelemetryDefaults returns the built-in "skip" rules for well-known
-// telemetry / observability endpoints, matched deterministically by request
-// path-prefix (HTTP OTLP + Pyroscope + OTLP/gRPC method) or host (SaaS
-// backends). They generalize the old hardcoded {/v1/traces,/ingest} bypass into
-// the configurable rule set. Merged UNDER user rules so a user rule for the same
-// target wins (see MergePassThroughDefaults). Users disable a default by
-// declaring a recordOne rule for the same target.
+// BuiltinTelemetryDefaults returns the built-in telemetry / observability
+// passthrough rules (derived from TelemetryDefaults), matched deterministically
+// by request path (HTTP OTLP, Pyroscope, Datadog, Prometheus, Elastic APM,
+// OTLP/gRPC) or host (New Relic and SaaS backends). Merged UNDER user rules so
+// a user rule for the same target wins (see ResolvePassThrough); users disable
+// a default with {id, mode:"off"} or a matching mode:"off" rule.
 func BuiltinTelemetryDefaults() []PassThroughRule {
 	return builtinTelemetryDefaultsCache
 }
 
 // builtinTelemetryDefaultsCache is the built-in rule slice materialised ONCE at
 // init, not rebuilt per request. ResolvePassThrough runs on every egress call
-// (matched or not), so rebuilding the 12-element literal each time was pure
+// (matched or not), so rebuilding the default rule slice each time was pure
 // per-request garbage. Read-only; callers must not mutate it.
 var builtinTelemetryDefaultsCache = func() []PassThroughRule {
 	defs := TelemetryDefaults()
@@ -357,7 +394,7 @@ var builtinTelemetryDefaultsCache = func() []PassThroughRule {
 // a UI can prove it is showing the set the running agent actually applies, rather
 // than a drifting hardcoded copy. It is NOT the mock-format version (see
 // models.GetVersion) and does not affect on-disk compatibility.
-const TelemetryDefaultsVersion = 3
+const TelemetryDefaultsVersion = 4
 
 // TelemetryDefault is a built-in passthrough rule plus display metadata, so a UI
 // can present each default with a human-readable provider/label and let the user
@@ -371,10 +408,11 @@ type TelemetryDefault struct {
 
 // TelemetryDefaults returns the built-in "skip"/"recordOne" rules for well-known
 // telemetry / observability endpoints, with display metadata. Matched
-// deterministically by request path-prefix (HTTP OTLP + Pyroscope + OTLP/gRPC
-// method) or host (SaaS backends). Merged UNDER user rules so a user rule for the
-// same target wins (see MergePassThroughDefaults); a user rule with mode:"off"
-// disables the default entirely (records the endpoint normally).
+// deterministically by request path (HTTP OTLP, Pyroscope, Datadog, Prometheus,
+// Elastic APM, OTLP/gRPC) or host (New Relic and SaaS backends). Merged UNDER
+// user rules so a user rule for the same target wins (see ResolvePassThrough);
+// a user rule with mode:"off" (or {id, mode:"off"}) disables the default
+// entirely (records the endpoint normally).
 func TelemetryDefaults() []TelemetryDefault {
 	// Every path-based built-in is POST-only and matches on segment boundaries
 	// (Method:"POST", PathPrefix left false) so a GET or a same-prefixed app route
@@ -396,6 +434,10 @@ func TelemetryDefaults() []TelemetryDefault {
 		// safe (the sender ignores the body). Pull-scrape /metrics is ingress and
 		// intentionally not here.
 		{"Prometheus", "remote_write", PassThroughRule{ID: "prometheus-remote-write", Path: "/api/v1/write", Method: "POST", Mode: PassThroughSkip}},
+		// Elastic APM intake v2: agents stream NDJSON events (transactions, spans,
+		// metricsets, errors) to POST /intake/v2/events; stateless 2xx empty body
+		// → skip is safe.
+		{"Elastic APM", "APM intake v2", PassThroughRule{ID: "elastic-apm-v2-events", Path: "/intake/v2/events", Method: "POST", Mode: PassThroughSkip}},
 		// OTLP/gRPC exporters — the gRPC :path is the OTLP collector service, so
 		// this one is a genuine PREFIX (PathPrefix:true) over the h2 POST :path.
 		{"OpenTelemetry", "OTLP/gRPC", PassThroughRule{ID: "otlp-grpc", Path: "/opentelemetry.proto.collector.", Method: "POST", PathPrefix: true, Mode: PassThroughSkip}},
@@ -432,10 +474,12 @@ func MergePassThroughDefaults(userPorts, userHosts []PassThroughRule) []PassThro
 // telemetryFingerprint is a built-in path row's protocol fingerprint (design
 // v14 §4): the default port of the protocol, or a header only its clients
 // send (with a value prefix, or any value when value is ""). A path alone is
-// an app's route as often as a collector's.
+// an app's route as often as a collector's. When alwaysRequire is true, the
+// fingerprint is enforced in default mode as well as under KEPLOY_PROVEN=1.
 type telemetryFingerprint struct {
 	port          uint32
 	header, value string
+	alwaysRequire bool
 }
 
 // telemetryFingerprints are the fingerprints of the built-in path rows. A row
@@ -449,6 +493,7 @@ var telemetryFingerprints = map[string]telemetryFingerprint{
 	"datadog-v04-traces":      {port: 8126, header: "Datadog-Meta-Lang"},
 	"datadog-v07-traces":      {port: 8126, header: "Datadog-Meta-Lang"},
 	"prometheus-remote-write": {header: "X-Prometheus-Remote-Write-Version"},
+	"elastic-apm-v2-events":   {port: 8200, header: "Content-Type", value: "application/x-ndjson", alwaysRequire: true},
 }
 
 // matches reports whether a call to port, with header, carries the
@@ -471,4 +516,111 @@ func (f telemetryFingerprint) matches(port uint32, header map[string][]string) b
 		}
 	}
 	return false
+}
+
+// httpPassThroughMeta holds the minimal request fields of a recorded HTTP mock
+// needed to evaluate ResolvePassThroughEgress after LeavePayloadOnDisk has
+// dropped Spec.HTTPReq from memory.
+type httpPassThroughMeta struct {
+	host   string
+	port   uint32
+	method string
+	path   string
+	header map[string][]string
+}
+
+func isFingerprintHeader(k string) bool {
+	for _, fp := range telemetryFingerprints {
+		if fp.header != "" && strings.EqualFold(k, fp.header) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractHTTPPassThrough(m *Mock) *httpPassThroughMeta {
+	if m == nil || m.Kind != HTTP || m.Spec.HTTPReq == nil {
+		return nil
+	}
+	req := m.Spec.HTTPReq
+	u, err := url.Parse(req.URL)
+	if err != nil {
+		if before, _, ok := strings.Cut(req.URL, "?"); ok {
+			u, err = url.Parse(before)
+		}
+		if err != nil {
+			return nil
+		}
+	}
+	var hostHeader string
+	var hdr map[string][]string
+	for k, v := range req.Header {
+		if strings.EqualFold(k, "Host") {
+			hostHeader = v
+		}
+		if isFingerprintHeader(k) {
+			if hdr == nil {
+				hdr = make(map[string][]string, 2)
+			}
+			ck := strings.Clone(k)
+			hdr[ck] = append(hdr[ck], strings.Clone(v))
+		}
+	}
+	host := hostHeader
+	if host == "" {
+		host = u.Host
+	}
+	var port uint32
+	if ps := u.Port(); ps != "" {
+		if n, perr := strconv.ParseUint(ps, 10, 32); perr == nil {
+			port = uint32(n)
+		}
+	}
+	if port == 0 && host != "" {
+		if _, ps, herr := net.SplitHostPort(host); herr == nil {
+			if n, perr := strconv.ParseUint(ps, 10, 32); perr == nil {
+				port = uint32(n)
+			}
+		}
+	}
+	if port == 0 {
+		switch {
+		case strings.EqualFold(u.Scheme, "https"):
+			port = 443
+		case strings.EqualFold(u.Scheme, "http"):
+			port = 80
+		}
+	}
+	return &httpPassThroughMeta{
+		host:   strings.Clone(host),
+		port:   port,
+		method: strings.Clone(string(req.Method)),
+		path:   strings.Clone(u.Path),
+		header: hdr,
+	}
+}
+
+func (m *Mock) httpPassThrough() *httpPassThroughMeta {
+	if m == nil || m.Kind != HTTP {
+		return nil
+	}
+	if m.PayloadOnDisk() {
+		return m.onDisk.httpPassThrough
+	}
+	return extractHTTPPassThrough(m)
+}
+
+// AnsweredByPassThrough reports whether m is a recorded HTTP mock whose
+// request ResolvePassThroughEgress now answers via a passthrough rule under
+// userPorts and userHosts. During replay, decodeHTTP short-circuits matching
+// egress without consuming the recorded mock, so per-test and worker-scope
+// unconsumed-mock assertions exclude it on both sides while respecting any
+// user {id, mode:"off"} override.
+func (m *Mock) AnsweredByPassThrough(userPorts, userHosts []PassThroughRule) bool {
+	meta := m.httpPassThrough()
+	if meta == nil {
+		return false
+	}
+	_, matched := ResolvePassThroughEgress(userPorts, userHosts, meta.host, meta.port, meta.method, meta.path, meta.header)
+	return matched
 }
