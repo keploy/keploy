@@ -76,6 +76,27 @@ const massSuppressionPercent = 25
 // requests a pause of the memory guard cost names, those with the most first.
 const maxNamedPressureConns = 8
 
+// maxNamedOverSizeCalls is how many calls the summary's warning of the
+// requests over keploy's size limit for a test case names, those with the
+// most first; the rest are counted in one more entry.
+const maxNamedOverSizeCalls = 10
+
+// overSizeSkipSummary is what the summary and the end marker say of the
+// requests a session did not record as test cases because each was over
+// keploy's size limit for one (syncMock NoteOverSizeLimit): how many, the
+// calls with the most, and the agent's limits. Zero when there were none.
+func overSizeSkipSummary(s syncmgr.OverSizeSkips) models.OverSizeSkipSummary {
+	if s.Total == 0 {
+		return models.OverSizeSkipSummary{}
+	}
+	return models.OverSizeSkipSummary{
+		Requests:       s.Total,
+		Calls:          s.Most(maxNamedOverSizeCalls),
+		LimitBytes:     conn.MaxTestCaseSize,
+		BodyLimitBytes: conn.MaxTestCaseBodySize,
+	}
+}
+
 // notHandedOnSaid is the summary's warning of a session's test cases that
 // never reached its stream because the ingress that served their requests
 // stopped first (syncMock NoteNotHandedOn).
@@ -711,6 +732,24 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// still open starts them again, so one may be said at WARN twice, never
 	// at Debug alone).
 	tlsRelayedBefore := syncmgr.Get().StartTLSRelayedSession()
+	// The requests the ingress served and did not record as test cases
+	// because each was over keploy's size limit for one
+	// (NoteOverSizeLimit), on a tally of this session's own, opened before
+	// the headers go out as the tallies above: its calls are named apart
+	// from every other session's. Read once (sessionOverSize): the end
+	// marker, the summary and its warning say the same count, whichever of
+	// them reads first.
+	overSizeTally := syncmgr.Get().OpenOverSizeTally()
+	defer overSizeTally.Close()
+	var overSizeRead bool
+	var overSizeLost models.OverSizeSkipSummary
+	sessionOverSize := func() models.OverSizeSkipSummary {
+		if !overSizeRead {
+			overSizeRead = true
+			overSizeLost = overSizeSkipSummary(overSizeTally.Read())
+		}
+		return overSizeLost
+	}
 	// The requests the ingress serves and does not record as test cases
 	// (syncMock NoteNotRecorded), each told to this stream's client as it
 	// comes (tellNotRecorded), from here: the agent's line names each by
@@ -1107,6 +1146,20 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			a.logger.Warn(notHandedOnSaid,
 				zap.Uint64("test_cases", notHandedOn))
 		}
+		overSize := sessionOverSize()
+		if overSize.Requests > 0 {
+			// The app served each, and none is a test case: each was over
+			// a size limit for one. The ingress warned of the agent's first
+			// as it came, and told the client's console each (which names
+			// up to 50 calls and counts the rest); this is the session's
+			// count, and the calls with the most.
+			a.logger.Warn(models.OverSizeLimitSaid,
+				zap.Uint64("requests", overSize.Requests),
+				zap.Int("limit_bytes", overSize.LimitBytes),
+				zap.Int("body_limit_bytes", overSize.BodyLimitBytes),
+				zap.Strings("calls_most", overSize.Calls),
+				zap.String("next_step", models.OverSizeLimitNextStep))
+		}
 		if unnamedConns > 0 {
 			// Each was passed to the app's listener and none of its calls
 			// recorded: the proxy warned of the agent's first as it came;
@@ -1154,6 +1207,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// had paused recording when they came (the WARN above names
 			// their connections).
 			zap.Uint64("tcs_not_recorded_under_pressure", notRecorded.Total),
+			// Requests the ingress served and did not record because each
+			// was over keploy's size limit for a test case (the WARN above
+			// names the calls with the most; the client's console named
+			// each as it came).
+			zap.Uint64("tcs_not_recorded_over_size_limit", overSize.Requests),
 			// The HTTP/1 ingress requests that came while recording was
 			// paused (memoryguard.PauseTally), whatever their capture
 			// did: a pause costs these and those in flight at its edges,
@@ -1294,6 +1352,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					Capacity:   drops.Capacity,
 					Named:      drops.Named,
 				},
+				NotRecordedOverSizeLimit: sessionOverSize(),
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
