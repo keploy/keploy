@@ -118,6 +118,36 @@ func TestGenerateKeployAgentService_CarriesTheProvenSwitch(t *testing.T) {
 	t.Fatalf("KEPLOY_PROVEN=1, yet the compose agent command lacks %s", flag)
 }
 
+// The agent container mounts no project, so the session calls keploy.yaml
+// declares reach it as an argument, under the proven switch: through the
+// alias (provenSuffix, which every platform arm takes) and the compose
+// service alike.
+// Mutation: leave them out of either launcher.
+func TestTheAgentContainerIsHandedTheDeclaredSessionCalls(t *testing.T) {
+	t.Cleanup(func() { models.SetSessionCalls(nil) })
+	models.SetSessionCalls([]models.SessionCallRule{{Host: "rates.example.com", Method: "GET", PathPrefix: "/rates"}})
+	t.Setenv(provenswitch.Env, "1")
+	want := models.SessionCallsAgentArgs()
+	if len(want) != 1 {
+		t.Fatalf("no session-calls argument to hand: %v", want)
+	}
+	if !strings.Contains(provenSuffix(), " "+want[0]) {
+		t.Fatalf("the agent alias's suffix %q lacks %s", provenSuffix(), want[0])
+	}
+	svc, err := (&Impl{logger: zap.NewNop(), conf: &config.Config{}}).GenerateKeployAgentService(models.SetupOptions{
+		AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, Mode: models.MODE_TEST,
+	})
+	if err != nil {
+		t.Fatalf("GenerateKeployAgentService: %v", err)
+	}
+	for _, arg := range composeCommand(t, svc) {
+		if arg == want[0] {
+			return
+		}
+	}
+	t.Fatalf("the compose agent command lacks %s", want[0])
+}
+
 // composeCommand reads the `command:` sequence of a generated service node.
 func composeCommand(t *testing.T, svc *yaml.Node) []string {
 	t.Helper()

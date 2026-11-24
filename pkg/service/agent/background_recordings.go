@@ -47,11 +47,12 @@ type bgCallTime struct {
 // it was sent, the rule learn.PreviousCall reads a call's previous call by.
 // Under the proven switch each one startup names is a plain startup:
 // recording (models.BackgroundRecording.Startup) when a user can declare a
-// call of its kind (models.StartupDeclarable: HTTP and HTTP/2, and the
-// kinds a rule system registered) and no keploy.yaml sessionCalls entry
+// call identical to it (models.StartupDeclarable: an HTTP or HTTP/2
+// recording that states its lifetime, and any of a kind a rule system
+// registered) and no keploy.yaml sessionCalls entry
 // names it exactly (models.Mock.DeclaredSessionCall): a declared session
-// call stays the background's, and so does a recording of a kind no one can
-// declare, as in v3.7.18. With the switch off none is, whatever the CLI
+// call stays the background's, and so does a recording no one can declare,
+// as in v3.7.18. With the switch off none is, whatever the CLI
 // sent. Each recording on disk is decoded once, and only
 // the named ones are kept. nil for no names; err when disk cannot be read.
 func backgroundRecordingsOf(names, startup []string, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
@@ -83,7 +84,7 @@ func backgroundRecordingsOf(names, startup []string, resident [][]*models.Mock, 
 		seen[id] = true
 		if want[mk.Name] && !got[mk.Name] {
 			got[mk.Name] = true
-			recs = append(recs, models.BackgroundRecording{Mock: mk, Startup: plain[mk.Name] && models.StartupDeclarable(mk.Kind) && !mk.DeclaredSessionCall()})
+			recs = append(recs, models.BackgroundRecording{Mock: mk, Startup: plain[mk.Name] && models.StartupDeclarable(mk) && !mk.DeclaredSessionCall()})
 		}
 		if !mk.IsProtocolPhase() && !mk.Spec.ReqTimestampMock.IsZero() {
 			calls = append(calls, bgCallTime{req: mk.Spec.ReqTimestampMock, res: mk.Spec.ResTimestampMock})

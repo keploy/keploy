@@ -67,8 +67,8 @@ func TestAPlainStartupRecordingIsATestsOwnCallInItsWindow(t *testing.T) {
 
 	// A test's repeat of it after it answered is the test's own call.
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
-	if a, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/pool"}, func(*models.Mock) bool { return true }); !ok || a.Background != "" || a.Mock.Name != "pool" {
-		t.Fatalf("a test's repeat of the plain startup recording reads %+v (%v); want it with no background scope", a, ok)
+	if a, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/pool"}, func(*models.Mock) bool { return true }); !ok || a.Background != "" || !a.OutsideTests || a.Mock.Name != "pool" {
+		t.Fatalf("a test's repeat of the plain startup recording reads %+v (%v); want it with no background scope, made outside every test", a, ok)
 	}
 
 	// With the switch off nothing of this applies.
@@ -231,11 +231,11 @@ func TestAHeldCallIsShownThePlainStartupRecordingsByTheWindowItWasReadIn(t *test
 	heldBetween, _ := mm.HoldToRound(mm.MarkCallRound())
 	mm.ServeExactTest("T2", []*models.Mock{ms["other"]})
 	heldInTest, _ := mm.HoldToRound(mm.MarkCallRound())
-	if a, ok := heldBetween.(integrations.AnsweredFinder).FindAnsweredEarlier(models.HTTP, []string{"url:/pool"}, all); !ok || a.Background != models.RepeatBackgroundPool {
+	if a, ok := heldBetween.(integrations.AnsweredFinder).FindAnsweredEarlier(models.HTTP, []string{"url:/pool"}, all); !ok || a.Background != models.RepeatBackgroundPool || a.OutsideTests {
 		t.Fatalf("a call read between tests, decided in a test, reads its repeat %+v (%v); want the pool's", a, ok)
 	}
 	mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
-	if a, ok := heldInTest.(integrations.AnsweredFinder).FindAnsweredEarlier(models.HTTP, []string{"url:/pool"}, all); !ok || a.Background != "" {
+	if a, ok := heldInTest.(integrations.AnsweredFinder).FindAnsweredEarlier(models.HTTP, []string{"url:/pool"}, all); !ok || a.Background != "" || !a.OutsideTests {
 		t.Fatalf("a call read in a test, decided between tests, reads its repeat %+v (%v); want no background scope", a, ok)
 	}
 }
@@ -266,6 +266,15 @@ func TestThePlainStartupMarksAreReadInTheEpochOfTheCallAndTheView(t *testing.T) 
 	}
 	if !v1.startupOwned("pool") {
 		t.Fatal("a view of the earlier set reads the next set's marks")
+	}
+	if !mm.OwnsStartup(call, "pool") {
+		t.Fatal("a call marked in the earlier set's test does not own its plain startup recording after the next set's install")
+	}
+	if mm.OwnsStartup(integrations.NewCallRound(mm.StagingEpoch(), nil).InView(true, true), "pool") {
+		t.Fatal("a call marked in the next set's test owns the earlier set's plain startup recording")
+	}
+	if mm.OwnsStartup(integrations.NewCallRound(call.Epoch(), nil), "pool") {
+		t.Fatal("a call read between tests owns a plain startup recording")
 	}
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
 	mm.ServeExactWorker([]string{"w-boot"})

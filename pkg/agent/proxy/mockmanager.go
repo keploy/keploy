@@ -4937,6 +4937,15 @@ func (m *MockManager) testOwnsStartupAt(epoch uint64, name string) bool {
 	return in != nil && in.startup[name]
 }
 
+// OwnsStartup implements integrations.StartupOwner: name is one of the plain
+// startup: recordings of the set call was marked in (testOwnsStartupAt), and
+// call was read in a test's window.
+func (m *MockManager) OwnsStartup(call integrations.CallRound, name string) bool {
+	return call.Read() && call.InTest() && m.testOwnsStartupAt(call.Epoch(), name)
+}
+
+var _ integrations.StartupOwner = (*MockManager)(nil)
+
 func (in *backgroundInstall) of(kind models.Kind) []models.BackgroundRecording {
 	if in == nil {
 		return nil

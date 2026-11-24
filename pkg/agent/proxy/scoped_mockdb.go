@@ -534,6 +534,13 @@ func (s *scopedMockDb) InBackground(name string) bool {
 
 var _ integrations.BackgroundMember = (*scopedMockDb)(nil)
 
+// OwnsStartup forwards the store's integrations.StartupOwner answer.
+func (s *scopedMockDb) OwnsStartup(call integrations.CallRound, name string) bool {
+	return integrations.OwnsStartup(s.MockMemDb, call, name)
+}
+
+var _ integrations.StartupOwner = (*scopedMockDb)(nil)
+
 // Unheld implements integrations.UnheldTeller: the store's, so a view over
 // the fail-closed store HoldToRound made says why its call read nothing.
 func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMemDb) }

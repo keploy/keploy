@@ -783,8 +783,11 @@ func clientPIDNSSuffix() string {
 // provenSuffix carries the proven model's staging switch into the agent
 // container, which is not given KEPLOY_PROVEN: " --proven" when the switch is
 // on, "" otherwise, so the alias is byte-identical to before with it off.
+// Under the switch it carries the session calls keploy.yaml declares too,
+// which the agent reads under it and the container, mounting no project,
+// cannot (models.SessionCallsAgentArgs: one base64url word).
 func provenSuffix() string {
-	args := provenswitch.AgentArgs()
+	args := append(provenswitch.AgentArgs(), models.SessionCallsAgentArgs()...)
 	if len(args) == 0 {
 		return ""
 	}

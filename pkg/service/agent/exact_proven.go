@@ -433,6 +433,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	a.provenMu.Lock()
 	a.proven.stagedPool = staged
 	a.proven.stagedBackground = background
+	a.proven.stagedStartup = startup
 	a.provenMu.Unlock()
 	// The learn step reads the set's recordings now, in the background, not
 	// on its first drifted call's answer path: keploy mock's replay of

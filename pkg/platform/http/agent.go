@@ -2962,6 +2962,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// The proven model's staging switch: sudo drops KEPLOY_PROVEN on the way to
 	// the agent, so it travels as a flag.
 	args = append(args, provenswitch.AgentArgs()...)
+	// The session calls keploy.yaml declares, which an agent started with
+	// another config path, or none, would not read (models.SessionCallsAgentArgs).
+	args = append(args, models.SessionCallsAgentArgs()...)
 	// And the Docker endpoint the tests' containers run on, which sudo drops
 	// too, so the agent can name container destinations (containerkey).
 	args = append(args, containerkey.AgentArgs()...)

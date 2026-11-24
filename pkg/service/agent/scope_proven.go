@@ -170,6 +170,11 @@ type provenWire struct {
 	// the table had none.
 	background       []string
 	stagedBackground []string
+	// stagedStartup is the plain startup: names the last staging handed the
+	// proxy (plainStartupNames: the background less the worker scope then,
+	// models.MockFilterParams.StartupMocks): a worker scope that changes
+	// them stages the set again (SetScopeWorker).
+	stagedStartup []string
 	// startupRules is true when the replay's set carries at least one worker:
 	// entry placed by a declared kind: background rule with startup: true
 	// (models.ScopeTableReq.StartupRules). Plain recorded startup: entries do
@@ -971,6 +976,12 @@ func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) 
 	}
 	a.provenMu.Lock()
 	a.proven.worker = cp
+	// The staging marked the set's plain startup: recordings by the worker
+	// scope it read: one that moves a recording into or out of it stages the
+	// set again before it is served, so no mark outlives its scope.
+	if a.proven.staged && !slices.Equal(a.proven.stagedStartup, plainStartupNames(a.proven.background, cp)) {
+		a.proven.staged = false
+	}
 	a.provenMu.Unlock()
 	return nil
 }
@@ -2497,7 +2508,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 	}
 	ev := &models.ScopeEvidence{}
 	all, err := a.missesOf(ctx, a.scopeInstance(id))
-	var misses, outside []models.UnmatchedCall
+	var misses, outside, repeats []models.UnmatchedCall
 	for _, m := range all {
 		if m.EarlierSetTest != "" || m.EarlierSet > 0 {
 			// An earlier set's call, which keploy decided only after this
@@ -2528,11 +2539,22 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 		if backgroundRepeat(m) {
 			m.WindowOf = missWindow(m, id, began)
 			outside = append(outside, m)
+			if m.WindowOf == id && m.Background && m.Answer == "" {
+				// Made in this test's window, with no recording left to
+				// answer it: listed as the test's background miss
+				// (ScopeEvidence.Background), as one the proxy did not
+				// name a repeat is, so a test that failed on the answer it
+				// did not get is shown the call.
+				repeats = append(repeats, m)
+			}
 			continue
 		}
 		misses = append(misses, m)
 	}
 	a.charge(outside, "")
+	for _, m := range repeats {
+		ev.Background = append(ev.Background, sanitizedMiss(a.asRecorded(m)))
+	}
 	// Misses a read returned with its error are this test's all the same.
 	a.charge(misses, id)
 	for _, m := range misses {

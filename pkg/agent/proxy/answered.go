@@ -749,12 +749,16 @@ func (m *MockManager) findAnsweredEarlierIn(read *exactView, kind models.Kind, k
 		return integrations.AnsweredCall{}, false
 	}
 	a := integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at, Background: best.background, SkippedRead: best.skippedRead}
-	if a.Background == models.RepeatBackgroundPool && read != nil && read.test != "" && read.startupOwned(best.mock.Name) {
+	if read != nil && read.test != "" && m.testOwnsStartupAt(read.installed.Epoch, best.mock.Name) {
 		// A plain startup: recording that answered outside every test,
 		// found again by a call read in a test's window: the test's own
 		// call, and its miss the test's, saying the recording was made
 		// outside every test (models.RepeatNote.OutsideTests), not one more
-		// run of the set's background (testOwnsStartupAt). The store says
+		// run of the set's background (testOwnsStartupAt), whatever rules
+		// serve the set and whatever scope its answer was logged with: a
+		// set served by today's rules shows the pool in no test, and its
+		// marks are the set's all the same. A plain startup: recording is
+		// never the worker scope's nor a skipped test's read. The store says
 		// so itself: keploy test's staging installs no scope table
 		// (integrations.InPool) to tell it by.
 		a.Background, a.OutsideTests = "", true

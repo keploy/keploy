@@ -231,6 +231,27 @@ func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 	report.NextSteps = notOwnedNextSteps(m.Name)
 }
 
+// markOutsideTests makes report the miss of a call, made in a test's
+// window, that is m, one of the set's plain startup: recordings
+// (integrations.OwnsStartup): made outside every test (in TestMain or at
+// start-up) and declared by no rule, so the test is not served it. m is its
+// closest, and its next steps say why it was not served and keep what the
+// report already advises (sessionCallHint: the keploy.yaml entry that
+// declares the call). It is no recording made elsewhere (NotOwned): judging
+// moves nothing for it.
+func markOutsideTests(report *models.MockMismatchReport, m *models.Mock) {
+	report.ClosestMock, report.NotOwned, report.Diff = m.Name, false, ""
+	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
+	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
+	report.NextSteps = strings.TrimSpace(outsideTestsNextSteps(m.Name) + " " + report.NextSteps)
+}
+
+// outsideTestsNextSteps says why a test's call was not served m, a plain
+// startup: recording (markOutsideTests).
+func outsideTestsNextSteps(name string) string {
+	return fmt.Sprintf("This request is %s, a recording made outside every test (in TestMain or at start-up), which keploy does not answer a test's call with: a test is served a recording made outside every test only for a call a keploy.yaml sessionCalls entry names exactly, by its method and whole path, and an answer given otherwise could hide a bug.", name)
+}
+
 // notOwnedNextSteps says what a miss on a call that is a recording the open
 // view does not show (notOwnedRecording) likely means, and what to do.
 func notOwnedNextSteps(name string) string {

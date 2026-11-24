@@ -43,6 +43,23 @@ func TestNativeAgentArgs_CarryTheProvenSwitch(t *testing.T) {
 	}
 }
 
+// A native agent started with another config path, or on another machine,
+// reads another keploy.yaml, or none: under the switch it is handed the
+// session calls its client declares.
+// Mutation: leave them out of the native agent's argv.
+func TestNativeAgentArgs_CarryTheDeclaredSessionCallsUnderTheSwitch(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup(); models.SetSessionCalls(nil) })
+	models.SetSessionCalls([]models.SessionCallRule{{Host: "rates.example.com", Method: "GET", PathPrefix: "/rates"}})
+	a := New(zap.NewNop(), nil, &config.Config{})
+	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_TEST}
+	t.Setenv("DOCKER_HOST", "unix:///run/test-docker.sock")
+	t.Setenv(provenswitch.Env, "1")
+	want := models.SessionCallsAgentArgs()
+	if len(want) != 1 || !slices.Contains(a.nativeAgentArgs(opts), want[0]) {
+		t.Fatalf("KEPLOY_PROVEN=1, yet the native agent argv lacks the session calls %v: %v", want, a.nativeAgentArgs(opts))
+	}
+}
+
 // sudo drops DOCKER_HOST too, so under the switch the native agent is told
 // the client's Docker endpoint, where it resolves container keys; with the
 // switch off its argv does not change.

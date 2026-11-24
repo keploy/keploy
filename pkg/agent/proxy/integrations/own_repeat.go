@@ -96,6 +96,24 @@ func InBackground(db MockMemDb, name string) bool {
 	return ok && b.InBackground(name)
 }
 
+// StartupOwner is an optional MockMemDb capability under the proven switch:
+// whether a recording, by name, is one of the set's plain startup:
+// recordings (models.BackgroundRecording.Startup) that call, read in a
+// test's window, is that test's own call of: made outside every test, so a
+// miss of the call names it as such and says how to declare the call, not
+// as a recording made elsewhere (MockMismatchReport.NotOwned). The agent's
+// MockManager implements it, and every MockMemDb wrapper must forward it.
+type StartupOwner interface {
+	OwnsStartup(call CallRound, name string) bool
+}
+
+// OwnsStartup is db's StartupOwner answer: false from a store that has none
+// (it marks no plain startup: recording).
+func OwnsStartup(db MockMemDb, call CallRound, name string) bool {
+	o, ok := db.(StartupOwner)
+	return ok && o.OwnsStartup(call, name)
+}
+
 // OwnRepeatRead is db, the store HoldToRound returned for call, as the call
 // reads it: with the decision whether the call is one of the open test's own
 // calls kept for the door where a background recording is about to answer it

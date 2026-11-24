@@ -14,20 +14,28 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
+// statedRates is GET /rates recorded once by a recorder that states its
+// HTTP calls' lifetimes (spec.metadata.lifetime: per-test), at t0: a call a
+// keploy.yaml sessionCalls entry can declare (models.StartupDeclarable).
+func statedRates(name string) *models.Mock {
+	m := pingMock(name, "/rates", "rates", t0)
+	m.Spec.Metadata = map[string]string{"type": string(models.HTTPClient), models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	return m
+}
+
 // startupOwnAgent is a replaying agent, under the proven switch, whose set
 // recorded GET /rates once outside every test (mock-0, its startup: entry,
-// in the pool) and TestReload's own GET /b. o.worker places mock-0 in the
-// worker scope: a startup: true rule's recording, or one learned between
-// tests. o.declared names GET /rates exactly in keploy.yaml sessionCalls,
-// mock-0 recorded with a stated per-test lifetime. o.noBoot leaves out the
+// in the pool, its lifetime stated: statedRates) and TestReload's own
+// GET /b. o.worker places mock-0 in the worker scope: a startup: true
+// rule's recording, or one learned between tests. o.declared names
+// GET /rates exactly in keploy.yaml sessionCalls. o.noBoot leaves out the
 // app's start-up call (GET /rates, before any test), which else is made,
 // and answered, before TestReload begins.
 func startupOwnAgent(t *testing.T, o startupOwn) (*Agent, *servingProxy) {
 	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
-	rates := pingMock("mock-0", "/rates", "rates", t0)
+	rates := statedRates("mock-0")
 	if o.declared {
-		rates.Spec.Metadata = map[string]string{"type": string(models.HTTPClient), models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
 		t.Cleanup(func() { models.SetSessionCalls(nil) })
 		models.SetSessionCalls([]models.SessionCallRule{{Host: "127.0.0.1:18093", Method: "GET", PathPrefix: "/rates"}})
 	}
@@ -95,7 +103,8 @@ func TestMockReplayPlainStartupIsTheTestsOwnCallUnderTheSwitch(t *testing.T) {
 	require.Empty(t, m.Repeat.Background, "the miss is told it repeats the set's background")
 	require.True(t, m.Repeat.OutsideTests, "the miss is not told mock-0 was made outside every test")
 	require.Equal(t, "mock-0", m.ClosestMock, "the miss does not name the recording")
-	require.Contains(t, m.Repeat.Explain("keploy mock record"), "keploy.yaml sessionCalls", "the miss's note does not say how to declare the call")
+	require.Contains(t, m.NextSteps, "made outside every test", "the miss's next step does not say mock-0 was made outside every test: %s", m.NextSteps)
+	require.Contains(t, m.NextSteps, "keploy.yaml sessionCalls", "the miss's next step does not say how to declare the call: %s", m.NextSteps)
 	require.Empty(t, ev.Background)
 }
 
@@ -129,7 +138,9 @@ func TestPlainStartupNamesAreTheBackgroundLessTheWorkerScope(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	got := plainStartupNames([]string{"w1", "s1", "", "s2"}, map[string][]string{"o": {"w1"}, models.PoolKeyNone: {"s2"}})
 	require.Equal(t, []string{"s1"}, got)
-	mocks := [][]*models.Mock{{pingMock("s1", "/s1", "s", t0), pingMock("w1", "/w1", "w", t0.Add(1))}}
+	s1 := pingMock("s1", "/s1", "s", t0)
+	s1.Spec.Metadata = map[string]string{"type": string(models.HTTPClient), models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	mocks := [][]*models.Mock{{s1, pingMock("w1", "/w1", "w", t0.Add(1))}}
 	flags := func() map[string]bool {
 		recs, err := backgroundRecordingsOf([]string{"s1", "w1"}, []string{"s1"}, mocks, nil)
 		require.NoError(t, err)
@@ -140,6 +151,13 @@ func TestPlainStartupNamesAreTheBackgroundLessTheWorkerScope(t *testing.T) {
 		return out
 	}
 	require.Equal(t, map[string]bool{"s1": true, "w1": false}, flags())
+
+	// An HTTP recording whose recorder stated no lifetime is never marked:
+	// no sessionCalls entry can declare it.
+	recs, err := backgroundRecordingsOf([]string{"u1"}, []string{"u1"}, [][]*models.Mock{{pingMock("u1", "/u1", "u", t0)}}, nil)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	require.False(t, recs[0].Startup, "an HTTP recording with no stated lifetime was marked plain startup")
 
 	// A recording of a kind no one can declare (Mongo, until a rule system
 	// registers it) is never marked.
@@ -243,9 +261,10 @@ func TestAPlainStartupRecordingIsATestsOwnCallOnlyWhereItsCallCanBeDeclared(t *t
 // test), identical to a plain startup: recording, is the test's own call
 // too: TestReload is not served the unspent recording, and its miss counts
 // against it and fails it. It is no background miss, and it repeats no
-// earlier answer.
+// earlier answer: its next step names mock-0 as made outside every test and
+// says how to declare the call, never as a recording made elsewhere.
 // Mutation: show the unspent plain startup recording in the test's window,
-// or read the call as background.
+// read the call as background, or name it a recording made elsewhere.
 func TestMockReplayPlainStartupCallMadeOnlyInATestIsItsOwnCall(t *testing.T) {
 	a, p := startupOwnAgent(t, startupOwn{noBoot: true})
 	got, e := runTest(t, a, p, "TestReload", "/b", "/rates")
@@ -261,6 +280,10 @@ func TestMockReplayPlainStartupCallMadeOnlyInATestIsItsOwnCall(t *testing.T) {
 	require.True(t, m.CountsAgainstTest())
 	require.Equal(t, models.MissInTest, m.Kind)
 	require.Equal(t, "mock-0", m.ClosestMock, "the miss does not name the recording")
+	require.False(t, m.NotOwned, "the miss names the plain startup recording as one made elsewhere")
+	require.Contains(t, m.NextSteps, "made outside every test", "the miss's next step does not say mock-0 was made outside every test: %s", m.NextSteps)
+	require.Contains(t, m.NextSteps, "sessionCalls", "the miss's next step does not say how to declare the call: %s", m.NextSteps)
+	require.NotContains(t, m.NextSteps, "worker scope", "the miss's next step gives a recording made elsewhere's advice: %s", m.NextSteps)
 	require.Empty(t, ev.Background)
 }
 
@@ -291,22 +314,43 @@ func TestMockReplayDeclaredStartupCallIsServedToTheTestUnderTheSwitch(t *testing
 // tests, is still the test's own miss, and its note says the recording was
 // made outside every test, whose next step declares the call in keploy.yaml
 // sessionCalls (the finder says so: integrations.AnsweredCall.OutsideTests).
+// So too in a set served by today's rules, which shows the pool in no test.
 // A recording keploy test names in no StartupMocks (covered: a declared or
-// worker: one) stays the background's: its repeat is a background miss.
-// Mutation: drop the finder's outside-tests flag, or the note's read of it.
+// worker: one) stays the background's: its repeat is a background miss; so
+// does one whose lifetime its recorder did not state, which no sessionCalls
+// entry can declare (models.StartupDeclarable), as in v3.7.18.
+// Mutation: drop the finder's outside-tests flag or the note's read of it,
+// ask the set's background rules for the mark, or mark an undeclarable
+// recording.
 func TestKeployTestPlainStartupRepeatIsTheTestsOwnMissNamingSessionCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		startup []string
-	}{{"plain", []string{"mock-0"}}, {"covered", nil}} {
+		// rules is the set's background rules: s12-routing, or today's
+		// (""), which shows the pool in no test.
+		rules string
+		// unstated leaves mock-0's lifetime unstated, as a recorder before
+		// lifetimes did: no sessionCalls entry can declare it.
+		unstated bool
+		own      bool
+	}{
+		{name: "plain", startup: []string{"mock-0"}, rules: models.RecordedWithS12Routing, own: true},
+		{name: "plain, today's rules", startup: []string{"mock-0"}, own: true},
+		{name: "covered", rules: models.RecordedWithS12Routing},
+		{name: "plain, lifetime unstated", startup: []string{"mock-0"}, rules: models.RecordedWithS12Routing, unstated: true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			a, _ := wireAgent(t, models.MODE_TEST)
 			t.Setenv(provenswitch.Env, "1")
 			p := newServingProxy()
 			a.Proxy = p
+			rates := statedRates("mock-0")
+			if tc.unstated {
+				rates = pingMock("mock-0", "/rates", "rates", t0)
+			}
 			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
-				pingMock("mock-0", "/rates", "rates", t0),
+				rates,
 				pingMock("mock-1", "/b", "b", t0.Add(2*time.Second)),
 			}))
 			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
@@ -314,7 +358,7 @@ func TestKeployTestPlainStartupRepeatIsTheTestsOwnMissNamingSessionCalls(t *test
 				FirstRecordedTestStart: t0.Add(time.Second),
 				BackgroundMocks:        []string{"mock-0"},
 				StartupMocks:           tc.startup,
-				Exact:                  &models.ExactServing{Stage: true, Background: models.RecordedWithS12Routing, Pool: []string{"mock-0"}, Order: []string{"test-1"}},
+				Exact:                  &models.ExactServing{Stage: true, Background: tc.rules, Pool: []string{"mock-0"}, Order: []string{"test-1"}},
 			}))
 			code, body := p.call(t, "/rates")
 			require.Equal(t, 200, code, "the start-up call was not answered between tests: %s", body)
@@ -334,18 +378,59 @@ func TestKeployTestPlainStartupRepeatIsTheTestsOwnMissNamingSessionCalls(t *test
 			require.NotNil(t, m, "no miss of GET /rates in %+v", misses)
 			require.NotNil(t, m.Repeat, "the miss names no earlier answer")
 			require.Equal(t, "mock-0", m.Repeat.Mock)
-			if tc.startup == nil {
-				require.Equal(t, models.RepeatBackgroundPool, m.Repeat.Background, "a covered recording's repeat is not the background's")
+			if !tc.own {
+				require.Equal(t, models.RepeatBackgroundPool, m.Repeat.Background, "a covered or undeclarable recording's repeat is not the background's")
 				require.False(t, m.Repeat.OutsideTests)
-				require.True(t, m.Background, "a covered recording's repeat is not a background miss")
+				require.True(t, m.Background, "a covered or undeclarable recording's repeat is not a background miss")
 				require.False(t, m.CountsAgainstTest())
 				return
 			}
 			require.Empty(t, m.Repeat.Background, "the plain startup recording's repeat is told it is the set's background")
 			require.True(t, m.Repeat.OutsideTests, "keploy test's miss is not told mock-0 was made outside every test")
-			require.Contains(t, m.Repeat.ExplainMiss(m.NotOwned, m.ClosestMock, m.RecordedIn, "keploy record"), "keploy.yaml sessionCalls", "keploy test's next step does not say how to declare the call")
+			require.Contains(t, m.NextSteps, "made outside every test", "keploy test's next step does not say mock-0 was made outside every test: %s", m.NextSteps)
+			require.Contains(t, m.NextSteps, "keploy.yaml sessionCalls", "keploy test's next step does not say how to declare the call: %s", m.NextSteps)
+			require.NotEmpty(t, m.Repeat.Hint, "keploy test's note keeps no sessionCalls entry to declare")
 			require.False(t, m.Background, "the call is a background miss")
 			require.True(t, m.CountsAgainstTest(), "the call does not count against test-1")
 		})
 	}
+}
+
+// The staging marks the set's plain startup: recordings by the worker scope
+// it read. A scope table that then places mock-0 in worker: (a startup: true
+// rule's recording) stages the set again before it is served, so mock-0 is
+// no longer marked, and TestReload's call of it fails nothing.
+// Mutation: keep the staging when the worker scope changes the marks.
+func TestAWorkerScopeThatChangesThePlainStartupNamesStagesTheSetAgain(t *testing.T) {
+	a, p := startupOwnAgent(t, startupOwn{})
+	recs := p.mm.BackgroundRecordings(models.HTTP)
+	require.Len(t, recs, 1)
+	require.True(t, recs[0].Startup, "the staging did not mark mock-0 plain startup")
+	require.NoError(t, a.SetScopeWorker(context.Background(), map[string][]string{"o": {"mock-0"}}))
+	got, e := runTest(t, a, p, "TestReload", "/b", "/rates")
+	require.Equal(t, "200 b", got[0])
+	recs = p.mm.BackgroundRecordings(models.HTTP)
+	require.Len(t, recs, 1)
+	require.False(t, recs[0].Startup, "mock-0 is still marked plain startup once the worker scope places it")
+	require.NotEqual(t, models.ScopeActionFail, e.Action, "a worker: recording's call failed TestReload: %s (%v)", e.Reason, got)
+}
+
+// A call that repeats a spent background recording in a test's window (a
+// worker: recording's second call there, its one answer in the windows
+// given) is charged to no test and fails none, and is listed in the test's
+// evidence as its background miss (ScopeEvidence.Background), naming the
+// recording, as a background miss the proxy names no repeat of is.
+// Mutation: leave a background repeat out of the test's evidence.
+func TestABackgroundRepeatInATestsWindowIsListedAsItsBackgroundMiss(t *testing.T) {
+	a, p := startupOwnAgent(t, startupOwn{worker: true})
+	got, e := runTest(t, a, p, "TestReload", "/b", "/rates", "/rates")
+	require.Equal(t, []string{"200 b", "200 rates"}, got[:2])
+	require.True(t, strings.HasPrefix(got[2], "502"), "the worker: recording answered twice in the windows: %s", got[2])
+	require.NotEqual(t, models.ScopeActionFail, e.Action, "a background repeat failed TestReload: %s", e.Reason)
+	ev := evidenceOf(t, a, "o::TestReload")
+	require.Empty(t, ev.Misses, "a background repeat is TestReload's miss")
+	require.Len(t, ev.Background, 1, "the background repeat is not listed in TestReload's evidence")
+	require.Equal(t, "GET /rates", ev.Background[0].ActualSummary)
+	require.NotNil(t, ev.Background[0].Repeat)
+	require.Equal(t, models.RepeatBackgroundWorker, ev.Background[0].Repeat.Background)
 }

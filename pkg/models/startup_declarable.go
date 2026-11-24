@@ -2,28 +2,38 @@ package models
 
 import "sync"
 
-// StartupDeclarable reports whether a call of kind made in a test's window
-// can be declared a call every test may make, so that a plain startup:
-// recording of kind (BackgroundRecording.Startup: made before the first
-// test, covered by no declared rule) is that test's own call under the
-// proven switch, its miss saying how to declare it. HTTP and HTTP/2 always
-// are: a keploy.yaml sessionCalls entry declares them
-// (Mock.DeclaredSessionCall). Any other kind is only once a rule system that
-// declares it registered it (RegisterStartupDeclarableKinds); until then a
-// plain startup: recording of it is the set's background in a test's window
-// too, as in v3.7.18, since its user has no way to declare the call.
-func StartupDeclarable(kind Kind) bool {
-	if kind == HTTP || kind == HTTP2 {
-		return true
+// StartupDeclarable reports whether a call identical to m, made in a test's
+// window, can be declared a call every test may make, so that m, a plain
+// startup: recording (BackgroundRecording.Startup: made before the first
+// test, covered by no declared rule), is that test's own call under the
+// proven switch, its miss saying how to declare it. A recording of a kind a
+// rule system registered (RegisterStartupDeclarableKinds) is. An HTTP or
+// HTTP/2 recording is when its recorder stated its lifetime: a keploy.yaml
+// sessionCalls entry then declares it (Mock.DeclaredSessionCall), and one
+// that states none no entry can. Any other is not: a plain startup:
+// recording of it is the set's background in a test's window too, as in
+// v3.7.18, since its user has no way to declare the call.
+func StartupDeclarable(m *Mock) bool {
+	if m == nil {
+		return false
 	}
 	startupDeclarable.mu.RLock()
-	defer startupDeclarable.mu.RUnlock()
-	return startupDeclarable.kinds[kind] > 0
+	registered := startupDeclarable.kinds[m.Kind] > 0
+	startupDeclarable.mu.RUnlock()
+	if registered {
+		return true
+	}
+	if m.Kind != HTTP && m.Kind != HTTP2 {
+		return false
+	}
+	_, stated := statedLifetime(m)
+	return stated
 }
 
-// RegisterStartupDeclarableKinds adds kinds to StartupDeclarable's: a rule
-// system that lets a user declare a call of each of them (enterprise's
-// startup: true rules) calls it once, at init, in every process that marks
+// RegisterStartupDeclarableKinds makes every recording of kinds
+// StartupDeclarable: a rule system that lets a user declare a call of each
+// of them (enterprise's startup: true rules) calls it once, at init, in
+// every process that marks
 // a set's background recordings: the agent marks them
 // (agent.backgroundRecordingsOf). keploy's enterprise binary is its own
 // agent (the agent it starts, natively or in its container, is the same
