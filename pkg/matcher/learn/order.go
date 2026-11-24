@@ -774,16 +774,7 @@ func (dc *decider) textsOf(i int, p evPlace) *placeTexts {
 	l, _ := a.WordOf(p.live)
 	t := &placeTexts{rec: open(r), live: open(l)}
 	if t.rec.dot || t.live.dot {
-		if dc.clients == nil {
-			dc.clientMaps++
-			dc.clients = map[string]bool{}
-			for _, e := range dc.in.Earlier {
-				if _, ok := dc.clients[e.Mock]; !ok {
-					dc.clients[e.Mock] = e.incoming
-				}
-			}
-		}
-		t.client = dc.clients[p.mock]
+		t.client = dc.isClient(p.mock)
 	}
 	if dc.texts == nil {
 		dc.texts = map[int]*placeTexts{}
@@ -791,6 +782,21 @@ func (dc *decider) textsOf(i int, p evPlace) *placeTexts {
 	dc.texts[i] = t
 	dc.opened++
 	return t
+}
+
+// isClient reports whether mock is a client test's request (Earlier.incoming),
+// building dc.clients once for the call.
+func (dc *decider) isClient(mock string) bool {
+	if dc.clients == nil {
+		dc.clientMaps++
+		dc.clients = map[string]bool{}
+		for _, e := range dc.in.Earlier {
+			if _, ok := dc.clients[e.Mock]; !ok {
+				dc.clients[e.Mock] = e.incoming
+			}
+		}
+	}
+	return dc.clients[mock]
 }
 
 // longestWord is s's longest word (variables.Words), the first of that
@@ -3190,10 +3196,19 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 // it as a plain read of the clock (valueByForm reads it).
 func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
+	fromAt := dc.fromAt(first, c.r, c.l)
+	if !dc.isClient(first.mock) && first.leaf.Path != "" && unbindableJWTClaim(fromAt, first, c.r, c.l) {
+		// A non-client call recorded earlier may carry the value only inside a
+		// signed JWT claim (which fromAt leaves unbindable when !client); pick
+		// the earliest bindable place across all of src (non-client or client).
+		if p, pa, ok := dc.earliestBindable(src, c.r, c.l); ok {
+			first, fromAt = p, pa
+		}
+	}
 	if first.trailed {
 		rule += ", sent in " + dc.in.Trails.Test + ", which this call trails"
 	}
-	fromAt, name, places := dc.fromAt(first, c.r, c.l), first.name, names(src)
+	name, places := first.name, names(src)
 	if claim := ClaimName(fromAt); claim != "" {
 		// Bound inside a token, the line names the claim that holds it,
 		// and so does its place in the line's places.
@@ -3206,10 +3221,55 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	}
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
-		Given: first.given, Client: dc.clientCase(first.mock), Clock: first.clock, Offset: first.offset}
+		Given: first.given, Client: dc.isClient(first.mock), Clock: first.clock, Offset: first.offset}
 	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d
+}
+
+// unbindableJWTClaim reports whether fromAt left p unbindable (not directly
+// reading v) specifically because p holds (v, f) only inside a JWT claim
+// (a Bearer/bare JWT or a Cookie header's JWT), which fromAt skips for
+// non-client calls. Other unbindable places (e.g. a URL-split token) return
+// false so oneToken rejects the whole-token bind and falls back to words.
+func unbindableJWTClaim(a variables.Address, p evPlace, v, f string) bool {
+	rec, ok := a.WordOf(p.leaf.Value)
+	if !ok || rec == v {
+		return false
+	}
+	live, _ := a.WordOf(p.live)
+	if _, _, ok := claimWord(rec, live, v, f); ok {
+		return true
+	}
+	_, _, ok = cookieToken(a, rec, live, v, f, true)
+	return ok
+}
+
+// earliestBindable returns the earliest bindable place across all of src
+// (non-client and client alike, including raw recording places and leaves
+// whose resolved address directly holds v), preserving src's tie-breaking
+// order for equal timestamps.
+func (dc *decider) earliestBindable(src []evPlace, v, f string) (evPlace, variables.Address, bool) {
+	var best evPlace
+	var bestAt variables.Address
+	found := false
+	for _, p := range src {
+		if found && !p.at.Before(best.at) {
+			continue
+		}
+		if p.raw > 0 {
+			best, bestAt, found = p, variables.Address{Word: -1}, true
+			continue
+		}
+		if p.leaf.Path == "" {
+			continue
+		}
+		pa := dc.fromAt(p, v, f)
+		if held, ok := pa.WordOf(p.leaf.Value); ok && held == v {
+			best, bestAt, found = p, pa, true
+		}
+	}
+	return best, bestAt, found
 }
 
 // earliest is the first of src to happen, src's first of those at one time.
@@ -3813,7 +3873,7 @@ func (dc *decider) fromAt(p evPlace, v, f string) variables.Address {
 		a.Steps, a.Word = append(slices.Clip(a.Steps), steps...), -1
 		return a
 	}
-	if !dc.clientCase(p.mock) {
+	if !dc.isClient(p.mock) {
 		return a
 	}
 	if st, n, ok := claimWord(rec, live, v, f); ok {
