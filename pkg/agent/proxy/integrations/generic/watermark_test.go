@@ -58,6 +58,7 @@ func TestEncodeGenericV2_HoldsTestCaseUntilMockIsHandedOn(t *testing.T) {
 	go func() { capDone <- encodeGenericV2(sess, zap.NewNop()) }()
 
 	released := false
+	capWaited := false
 	t.Cleanup(func() {
 		if !released {
 			close(release)
@@ -74,9 +75,11 @@ func TestEncodeGenericV2_HoldsTestCaseUntilMockIsHandedOn(t *testing.T) {
 		_ = r.DestStream().Close()
 		_ = srcProxy.Close()
 		_ = dstProxy.Close()
-		select {
-		case <-capDone:
-		case <-time.After(5 * time.Second):
+		if !capWaited {
+			select {
+			case <-capDone:
+			case <-time.After(5 * time.Second):
+			}
 		}
 	})
 
@@ -138,6 +141,7 @@ func TestEncodeGenericV2_HoldsTestCaseUntilMockIsHandedOn(t *testing.T) {
 	_ = destSvc.Close()
 	select {
 	case err := <-capDone:
+		capWaited = true
 		if err != nil {
 			t.Fatalf("encodeGenericV2: %v", err)
 		}

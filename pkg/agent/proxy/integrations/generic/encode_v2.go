@@ -488,6 +488,258 @@ func pairChunkEventsWithPeeked(events <-chan chunkEvent, sess *supervisor.Sessio
 	// Drain every event the two reader goroutines produce. The closer
 	// goroutine above closes `events` once both readers return, which
 	// is the only termination signal this loop observes.
+	handleEvent := func(ev chunkEvent) {
+		if ev.err != nil {
+			// End-of-stream for this side. Classify benign terminations
+			// (EOF / ErrClosed / deadline) distinctly from unexpected
+			// errors so operator-facing logs stay quiet on clean exits
+			// but still surface real problems.
+			if logger != nil && !isBenignReadErr(ev.err) {
+				logger.Debug("generic v2: stream read ended",
+					zap.String("dir", ev.dir.String()),
+					zap.Error(ev.err))
+			}
+			return
+		}
+
+		// Ignore spurious empty chunks — they carry no payload, and
+		// a response with none would pair with a request.
+		if len(ev.bytes) == 0 {
+			return
+		}
+		if ev.dir == fakeconn.FromDest {
+			destRead = ev.through
+		}
+		// The connection's life, by its chunks' recorded times: a held
+		// first exchange is the preamble once a chunk comes after the
+		// answer of the test that owns it. A chunk's time here is when the
+		// relay read it, in either direction, never when its write
+		// returned: the relay stamps a read before it writes the bytes on,
+		// so the other side cannot have had them earlier, while a write's
+		// return is stamped as late as the relay's goroutine runs. Under
+		// load a destination's answer was stamped written after the client
+		// had read it, ended its test and the next test had begun, so a
+		// connection wholly inside its test read as outliving it, its only
+		// exchange went to the session pool, and the test passed at replay
+		// with its call skipped. A chunk with no read time (none the relay
+		// stamped) does not count: no time it has shows the connection
+		// outlived its test.
+		at := ev.readAt
+		if at.After(lastAt) {
+			lastAt = at
+		}
+		if hold != nil {
+			hold.saw(lastAt)
+			if hold.outlived() {
+				release(false)
+			}
+		}
+
+		switch ev.dir {
+		case fakeconn.FromClient:
+			// The rest of an answer the stop cut short, if any, came
+			// before this request (stopDecided).
+			stopDecided, cutTailCounted = false, false
+			// The next request ends the answer held (holdAnswer): the
+			// exchange is handed on whole before a new one starts, as
+			// the legacy encoder does.
+			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
+				flushMock()
+			}
+			// Starting a brand-new exchange: leave out any orphaned
+			// response chunks, held with no exchange (reported, with
+			// their span: leaveOutTail), and anchor the request
+			// timestamp to THIS chunk's ReadAt so we record when
+			// bytes actually hit the relay rather than when the
+			// parser got around to pairing them.
+			//
+			// Orphaned is decided by capture order, not on arrival. A
+			// single held response captured AFTER this request is not
+			// the leftover of an earlier reply — on the wire it comes
+			// second — so the two are one exchange, teed out of order
+			// (the relay forwards bytes before it tees them, so either
+			// direction can overtake the other). Dropping it here would
+			// leave this request to pair with the NEXT response instead.
+			reqFirst, _ := order(stamp{ev.connSeq, ev.readAt}, stamp{resHeadSeq, resHeadWrittenAt})
+			answersThis := len(genericRequests) == 0 &&
+				len(genericResponses) > 0 &&
+				reqFirst
+			if len(genericRequests) == 0 {
+				if !answersThis {
+					leaveOutTail(len(genericResponses), resHeadAt, resTimestampMock)
+					genericResponses = nil
+					resHeadSeq = 0
+					resHeadWrittenAt = time.Time{}
+					resHeadAt = time.Time{}
+				}
+				reqTimestampMock = ev.readAt
+				carriedBySplit = false
+			}
+			genericRequests = append(genericRequests, encodePayload(ev.bytes, models.FromClient))
+			reqSeq = append(reqSeq, ev.connSeq)
+			reqReadAt = append(reqReadAt, ev.readAt)
+			prevChunkWasReq = true
+			if answersThis {
+				// The answer is this request's, every chunk of it held:
+				// each was captured after the head, which was captured
+				// after the request. So the exchange is the one wire
+				// order makes, the request and its answer so far, held
+				// as any answered exchange is until its answer ends
+				// (holdAnswer): the bytes a test replays do not depend
+				// on which way the relay's two goroutines were
+				// scheduled.
+				if logger != nil {
+					logger.Debug("generic v2: paired a request with the response that arrived ahead of it",
+						zap.Uint32("requestConnSeq", ev.connSeq),
+						zap.Uint32("responseConnSeq", resHeadSeq),
+						zap.Time("requestReadAt", ev.readAt),
+						zap.Time("responseWrittenAt", resHeadWrittenAt),
+						zap.Int("responseChunksHeld", len(genericResponses)))
+				}
+				holdAnswer()
+				prevChunkWasReq = false
+			}
+
+		case fakeconn.FromDest:
+			// The half a split carried forward is an exchange this
+			// parser created, so it owes the same precondition the
+			// split itself is held to: a response captured before the
+			// request cannot be its answer. In wire order that chunk
+			// is the tail of the PREVIOUS reply and is left out (with
+			// its span: leaveOutTail); pairing it here instead
+			// records an answer this request never got — and generic
+			// mocks are session-scoped (Metadata type "config"), so
+			// replay's window filter short-circuits them into the
+			// unfiltered pool BEFORE its response-precedes-request
+			// check. Nothing downstream catches this; it replays.
+			if carriedBySplit && len(reqSeq) > 0 {
+				if resFirst, _ := order(stamp{ev.connSeq, ev.writtenAt}, stamp{reqSeq[0], reqReadAt[0]}); resFirst {
+					if logger != nil {
+						logger.Debug("generic v2: left out a response older than the request a split carried forward",
+							zap.Uint32("responseConnSeq", ev.connSeq),
+							zap.Uint32("requestConnSeq", reqSeq[0]),
+							zap.Time("responseWrittenAt", ev.writtenAt),
+							zap.Time("requestReadAt", reqReadAt[0]))
+					}
+					leaveOutTail(1, readOrWritten(ev), ev.writtenAt)
+					return
+				}
+			}
+			// A request captured after this response is not what it
+			// answers: the destination sent the response before it
+			// could have had the request (connseq.Upstream numbers a
+			// client chunk after every byte the destination had sent
+			// when it was read, before the relay writes it on). So on
+			// the wire the two are in different exchanges however they
+			// reached us. Cut there: keep the requests that precede the
+			// response, carry the rest forward. Without this, a reply
+			// teed after the request it unblocked merges two commands
+			// into one mock and drops the second reply — and replay,
+			// which matches on the NUMBER of request buffers, then
+			// finds nothing for either command, which is how a
+			// recorded app dies at startup.
+			//
+			// This restores wire order; it does not make an opaque
+			// stream understood. The parser still pairs by direction
+			// transitions, so bytes the server sent unbidden — a push,
+			// the tail of a multi-chunk reply — are attributed to
+			// whatever request precedes them, wrongly, exactly as they
+			// were before any of this (TestV2_ServerPushIsPairedThe
+			// SameEitherWay walks one such stream both ways). Fixing
+			// THAT needs a parser that frames the protocol, not a
+			// capture order.
+			//
+			// A connection that lost a chunk drops its whole in-flight
+			// exchange (flushMock below). Splitting first would keep
+			// the tail half of a capture already known to be holed.
+			if len(genericRequests) > 1 {
+				if i := exchangeSplit(reqSeq, reqReadAt, stamp{ev.connSeq, ev.writtenAt}); i > 0 {
+					heldReqs := append([]models.Payload(nil), genericRequests[i:]...)
+					heldSeq := append([]uint32(nil), reqSeq[i:]...)
+					heldAt := append([]time.Time(nil), reqReadAt[i:]...)
+					genericRequests = genericRequests[:i]
+					reqSeq = reqSeq[:i]
+					reqReadAt = reqReadAt[:i]
+					genericResponses = append(genericResponses, encodePayload(ev.bytes, models.FromServer))
+					resTimestampMock = ev.writtenAt
+					if reason, leftOut := flushMock(); leftOut {
+						// The relay holed this capture — possibly
+						// between our check and this flush, so the
+						// answer has to come from the flush itself.
+						// Let the carried half go with it rather
+						// than record the surviving half of a
+						// recording known to be missing bytes, and
+						// report it for the same reason, as the
+						// flush reported the first half: an
+						// exchange the connection could not record,
+						// counted. Its answer is yet to come, so it
+						// spans its requests' reads, first to last,
+						// which every test case that made one spans.
+						carried := &models.Mock{Name: "mocks", Kind: models.GENERIC}
+						carried.Spec.ReqTimestampMock = heldAt[0]
+						carried.Spec.ResTimestampMock = heldAt[len(heldAt)-1]
+						sess.ReportLeftOut(carried, reason)
+						if logger != nil {
+							logger.Debug("generic v2: dropped the half a split carried out of a holed exchange",
+								zap.Int("requestsDropped", len(heldReqs)),
+								zap.Time("firstRequestReadAt", heldAt[0]),
+								zap.Time("lastRequestReadAt", heldAt[len(heldAt)-1]))
+						}
+						prevChunkWasReq = false
+						return
+					}
+					genericRequests = heldReqs
+					reqSeq = heldSeq
+					reqReadAt = heldAt
+					reqTimestampMock = heldAt[0]
+					carriedBySplit = true
+					if logger != nil {
+						logger.Debug("generic v2: split an exchange the response arrived behind",
+							zap.Int("splitAfterRequests", i),
+							zap.Int("requestsCarriedForward", len(heldReqs)),
+							zap.Uint32("responseConnSeq", ev.connSeq),
+							zap.Uint32("nextRequestConnSeq", heldSeq[0]),
+							zap.Time("responseWrittenAt", ev.writtenAt),
+							zap.Time("nextRequestReadAt", heldAt[0]))
+					}
+					return
+				}
+			}
+			if stopDecided && syncMock.FromContextOrGlobal(ctx).HoldsSession() == decidedBy {
+				// The rest of an answer the stop cut short (or an
+				// answer with no request, after the stop): left out
+				// with its span as the parser takes it, not held to
+				// the next request or the streams' end, which may come
+				// after the verdict of the test case over it. The
+				// decision took every request the parser had, and the
+				// next request clears the flag, so none is held here.
+				leaveOutCutTail(ev)
+				return
+			}
+			if len(genericResponses) == 0 {
+				resHeadSeq = ev.connSeq
+				resHeadWrittenAt = ev.writtenAt
+				resHeadAt = readOrWritten(ev)
+			}
+			genericResponses = append(genericResponses, encodePayload(ev.bytes, models.FromServer))
+			// Per the migration spec, ResTimestampMock is WrittenAt of
+			// the last dest chunk for the matching response — always
+			// overwrite so that if the response were to accumulate
+			// multiple chunks before flush, the last wins.
+			resTimestampMock = ev.writtenAt
+
+			// An answered exchange is held until its answer ends
+			// (holdAnswer), each chunk of it appended here: at the
+			// next request, the streams' end, or as the recording's
+			// stop decides it. Chunks with no request before them
+			// are held with no exchange, and left out at the next
+			// request or the streams' end (leaveOutTail).
+			if len(genericRequests) > 0 {
+				holdAnswer()
+			}
+			prevChunkWasReq = false
+		}
+	}
 drain:
 	for {
 		// While the recorder holds the connection's first exchange, the
@@ -548,258 +800,6 @@ drain:
 		}
 		if !open {
 			break drain
-		}
-		handleEvent := func(ev chunkEvent) {
-			if ev.err != nil {
-				// End-of-stream for this side. Classify benign terminations
-				// (EOF / ErrClosed / deadline) distinctly from unexpected
-				// errors so operator-facing logs stay quiet on clean exits
-				// but still surface real problems.
-				if logger != nil && !isBenignReadErr(ev.err) {
-					logger.Debug("generic v2: stream read ended",
-						zap.String("dir", ev.dir.String()),
-						zap.Error(ev.err))
-				}
-				return
-			}
-
-			// Ignore spurious empty chunks — they carry no payload, and
-			// a response with none would pair with a request.
-			if len(ev.bytes) == 0 {
-				return
-			}
-			if ev.dir == fakeconn.FromDest {
-				destRead = ev.through
-			}
-			// The connection's life, by its chunks' recorded times: a held
-			// first exchange is the preamble once a chunk comes after the
-			// answer of the test that owns it. A chunk's time here is when the
-			// relay read it, in either direction, never when its write
-			// returned: the relay stamps a read before it writes the bytes on,
-			// so the other side cannot have had them earlier, while a write's
-			// return is stamped as late as the relay's goroutine runs. Under
-			// load a destination's answer was stamped written after the client
-			// had read it, ended its test and the next test had begun, so a
-			// connection wholly inside its test read as outliving it, its only
-			// exchange went to the session pool, and the test passed at replay
-			// with its call skipped. A chunk with no read time (none the relay
-			// stamped) does not count: no time it has shows the connection
-			// outlived its test.
-			at := ev.readAt
-			if at.After(lastAt) {
-				lastAt = at
-			}
-			if hold != nil {
-				hold.saw(lastAt)
-				if hold.outlived() {
-					release(false)
-				}
-			}
-
-			switch ev.dir {
-			case fakeconn.FromClient:
-				// The rest of an answer the stop cut short, if any, came
-				// before this request (stopDecided).
-				stopDecided, cutTailCounted = false, false
-				// The next request ends the answer held (holdAnswer): the
-				// exchange is handed on whole before a new one starts, as
-				// the legacy encoder does.
-				if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-					flushMock()
-				}
-				// Starting a brand-new exchange: leave out any orphaned
-				// response chunks, held with no exchange (reported, with
-				// their span: leaveOutTail), and anchor the request
-				// timestamp to THIS chunk's ReadAt so we record when
-				// bytes actually hit the relay rather than when the
-				// parser got around to pairing them.
-				//
-				// Orphaned is decided by capture order, not on arrival. A
-				// single held response captured AFTER this request is not
-				// the leftover of an earlier reply — on the wire it comes
-				// second — so the two are one exchange, teed out of order
-				// (the relay forwards bytes before it tees them, so either
-				// direction can overtake the other). Dropping it here would
-				// leave this request to pair with the NEXT response instead.
-				reqFirst, _ := order(stamp{ev.connSeq, ev.readAt}, stamp{resHeadSeq, resHeadWrittenAt})
-				answersThis := len(genericRequests) == 0 &&
-					len(genericResponses) > 0 &&
-					reqFirst
-				if len(genericRequests) == 0 {
-					if !answersThis {
-						leaveOutTail(len(genericResponses), resHeadAt, resTimestampMock)
-						genericResponses = nil
-						resHeadSeq = 0
-						resHeadWrittenAt = time.Time{}
-						resHeadAt = time.Time{}
-					}
-					reqTimestampMock = ev.readAt
-					carriedBySplit = false
-				}
-				genericRequests = append(genericRequests, encodePayload(ev.bytes, models.FromClient))
-				reqSeq = append(reqSeq, ev.connSeq)
-				reqReadAt = append(reqReadAt, ev.readAt)
-				prevChunkWasReq = true
-				if answersThis {
-					// The answer is this request's, every chunk of it held:
-					// each was captured after the head, which was captured
-					// after the request. So the exchange is the one wire
-					// order makes, the request and its answer so far, held
-					// as any answered exchange is until its answer ends
-					// (holdAnswer): the bytes a test replays do not depend
-					// on which way the relay's two goroutines were
-					// scheduled.
-					if logger != nil {
-						logger.Debug("generic v2: paired a request with the response that arrived ahead of it",
-							zap.Uint32("requestConnSeq", ev.connSeq),
-							zap.Uint32("responseConnSeq", resHeadSeq),
-							zap.Time("requestReadAt", ev.readAt),
-							zap.Time("responseWrittenAt", resHeadWrittenAt),
-							zap.Int("responseChunksHeld", len(genericResponses)))
-					}
-					holdAnswer()
-					prevChunkWasReq = false
-				}
-
-			case fakeconn.FromDest:
-				// The half a split carried forward is an exchange this
-				// parser created, so it owes the same precondition the
-				// split itself is held to: a response captured before the
-				// request cannot be its answer. In wire order that chunk
-				// is the tail of the PREVIOUS reply and is left out (with
-				// its span: leaveOutTail); pairing it here instead
-				// records an answer this request never got — and generic
-				// mocks are session-scoped (Metadata type "config"), so
-				// replay's window filter short-circuits them into the
-				// unfiltered pool BEFORE its response-precedes-request
-				// check. Nothing downstream catches this; it replays.
-				if carriedBySplit && len(reqSeq) > 0 {
-					if resFirst, _ := order(stamp{ev.connSeq, ev.writtenAt}, stamp{reqSeq[0], reqReadAt[0]}); resFirst {
-						if logger != nil {
-							logger.Debug("generic v2: left out a response older than the request a split carried forward",
-								zap.Uint32("responseConnSeq", ev.connSeq),
-								zap.Uint32("requestConnSeq", reqSeq[0]),
-								zap.Time("responseWrittenAt", ev.writtenAt),
-								zap.Time("requestReadAt", reqReadAt[0]))
-						}
-						leaveOutTail(1, readOrWritten(ev), ev.writtenAt)
-						return
-					}
-				}
-				// A request captured after this response is not what it
-				// answers: the destination sent the response before it
-				// could have had the request (connseq.Upstream numbers a
-				// client chunk after every byte the destination had sent
-				// when it was read, before the relay writes it on). So on
-				// the wire the two are in different exchanges however they
-				// reached us. Cut there: keep the requests that precede the
-				// response, carry the rest forward. Without this, a reply
-				// teed after the request it unblocked merges two commands
-				// into one mock and drops the second reply — and replay,
-				// which matches on the NUMBER of request buffers, then
-				// finds nothing for either command, which is how a
-				// recorded app dies at startup.
-				//
-				// This restores wire order; it does not make an opaque
-				// stream understood. The parser still pairs by direction
-				// transitions, so bytes the server sent unbidden — a push,
-				// the tail of a multi-chunk reply — are attributed to
-				// whatever request precedes them, wrongly, exactly as they
-				// were before any of this (TestV2_ServerPushIsPairedThe
-				// SameEitherWay walks one such stream both ways). Fixing
-				// THAT needs a parser that frames the protocol, not a
-				// capture order.
-				//
-				// A connection that lost a chunk drops its whole in-flight
-				// exchange (flushMock below). Splitting first would keep
-				// the tail half of a capture already known to be holed.
-				if len(genericRequests) > 1 {
-					if i := exchangeSplit(reqSeq, reqReadAt, stamp{ev.connSeq, ev.writtenAt}); i > 0 {
-						heldReqs := append([]models.Payload(nil), genericRequests[i:]...)
-						heldSeq := append([]uint32(nil), reqSeq[i:]...)
-						heldAt := append([]time.Time(nil), reqReadAt[i:]...)
-						genericRequests = genericRequests[:i]
-						reqSeq = reqSeq[:i]
-						reqReadAt = reqReadAt[:i]
-						genericResponses = append(genericResponses, encodePayload(ev.bytes, models.FromServer))
-						resTimestampMock = ev.writtenAt
-						if reason, leftOut := flushMock(); leftOut {
-							// The relay holed this capture — possibly
-							// between our check and this flush, so the
-							// answer has to come from the flush itself.
-							// Let the carried half go with it rather
-							// than record the surviving half of a
-							// recording known to be missing bytes, and
-							// report it for the same reason, as the
-							// flush reported the first half: an
-							// exchange the connection could not record,
-							// counted. Its answer is yet to come, so it
-							// spans its requests' reads, first to last,
-							// which every test case that made one spans.
-							carried := &models.Mock{Name: "mocks", Kind: models.GENERIC}
-							carried.Spec.ReqTimestampMock = heldAt[0]
-							carried.Spec.ResTimestampMock = heldAt[len(heldAt)-1]
-							sess.ReportLeftOut(carried, reason)
-							if logger != nil {
-								logger.Debug("generic v2: dropped the half a split carried out of a holed exchange",
-									zap.Int("requestsDropped", len(heldReqs)),
-									zap.Time("firstRequestReadAt", heldAt[0]),
-									zap.Time("lastRequestReadAt", heldAt[len(heldAt)-1]))
-							}
-							prevChunkWasReq = false
-							return
-						}
-						genericRequests = heldReqs
-						reqSeq = heldSeq
-						reqReadAt = heldAt
-						reqTimestampMock = heldAt[0]
-						carriedBySplit = true
-						if logger != nil {
-							logger.Debug("generic v2: split an exchange the response arrived behind",
-								zap.Int("splitAfterRequests", i),
-								zap.Int("requestsCarriedForward", len(heldReqs)),
-								zap.Uint32("responseConnSeq", ev.connSeq),
-								zap.Uint32("nextRequestConnSeq", heldSeq[0]),
-								zap.Time("responseWrittenAt", ev.writtenAt),
-								zap.Time("nextRequestReadAt", heldAt[0]))
-						}
-						return
-					}
-				}
-				if stopDecided && syncMock.FromContextOrGlobal(ctx).HoldsSession() == decidedBy {
-					// The rest of an answer the stop cut short (or an
-					// answer with no request, after the stop): left out
-					// with its span as the parser takes it, not held to
-					// the next request or the streams' end, which may come
-					// after the verdict of the test case over it. The
-					// decision took every request the parser had, and the
-					// next request clears the flag, so none is held here.
-					leaveOutCutTail(ev)
-					return
-				}
-				if len(genericResponses) == 0 {
-					resHeadSeq = ev.connSeq
-					resHeadWrittenAt = ev.writtenAt
-					resHeadAt = readOrWritten(ev)
-				}
-				genericResponses = append(genericResponses, encodePayload(ev.bytes, models.FromServer))
-				// Per the migration spec, ResTimestampMock is WrittenAt of
-				// the last dest chunk for the matching response — always
-				// overwrite so that if the response were to accumulate
-				// multiple chunks before flush, the last wins.
-				resTimestampMock = ev.writtenAt
-
-				// An answered exchange is held until its answer ends
-				// (holdAnswer), each chunk of it appended here: at the
-				// next request, the streams' end, or as the recording's
-				// stop decides it. Chunks with no request before them
-				// are held with no exchange, and left out at the next
-				// request or the streams' end (leaveOutTail).
-				if len(genericRequests) > 0 {
-					holdAnswer()
-				}
-				prevChunkWasReq = false
-			}
 		}
 		handleEvent(ev)
 		// Done with the chunk, any mock it flushed handed on (or left out):
