@@ -111,6 +111,29 @@ type TestDB interface {
 	DeleteTestSet(ctx context.Context, testSetID string) error
 }
 
+// TestCasePresenceReader is an optional TestDB capability: it reports whether
+// a test set has at least one test case to run without decoding every test
+// case or logging an error on a set that RunTestSet is about to read and
+// report itself.
+//
+// lastSetThatRuns pre-scans trailing sets before the first set starts so
+// KEPLOY-LAST-TESTCASE and kept-app stops land on the last set that runs.
+// Calling GetTestCases there decoded the last set twice and logged an
+// unreadable test case at ERROR twice. When a TestDB opts in for itself
+// (PresenceAppliesTo(r.testDB) == true), lastSetThatRuns asks HasTestCases
+// instead. Any other store — including a wrapper that embeds *testdb.TestYaml
+// and overrides GetTestCases — falls back to GetTestCases and reuses the
+// settled set's decoded cases once in RunTestSet.
+type TestCasePresenceReader interface {
+	HasTestCases(ctx context.Context, testSetID string) (bool, error)
+	// PresenceAppliesTo reports whether HasTestCases matches the GetTestCases
+	// behavior of db itself (typically `return db == self`). Because Go
+	// promotes embedded methods onto outer wrapper structs, checking receiver
+	// identity prevents a filtering wrapper around *testdb.TestYaml from
+	// silently inheriting HasTestCases.
+	PresenceAppliesTo(db any) bool
+}
+
 // RecordedStartReader is an optional TestDB capability: the request time of the
 // earliest test case a test set ever recorded, which can predate every test case
 // the set holds now. A zero time means the TestDB does not know it.

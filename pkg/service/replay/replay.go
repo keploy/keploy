@@ -684,6 +684,13 @@ type Replayer struct {
 	// the application --keep-app-alive keeps across sets (P101-c), or, with
 	// the proven switch off, a docker compose stack reused across them.
 	noLaterSetRuns bool
+	// prescanned holds at most the one settled test set decoded by
+	// lastSetThatRuns on the fallback path (stores that do not opt into
+	// TestCasePresenceReader); prescannedEmpty notes trailing empty set IDs
+	// skipped on that same path (no test cases held). Consumed once by
+	// RunTestSet's loadTestCases and cleared when Start returns.
+	prescanned      *prescannedSet
+	prescannedEmpty map[string]struct{}
 	// noSetFollows: the set running is the run's last by its place: every
 	// other set of the run has returned, its report written, before it
 	// begins. Under docker compose it, not the last set that runs
@@ -1441,6 +1448,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// not among them: it reads every set's report, so it waits for the last
 	// set by its place (noSetFollows).
 	lastRuns := r.lastSetThatRuns(ctx, testSets)
+	defer r.clearPrescanned()
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -2519,7 +2527,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}()
 
-	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
+	testCases, err := r.loadTestCases(runTestSetCtx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
