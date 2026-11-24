@@ -103,13 +103,14 @@ func mongoIndexMock(name, cmd, coll, reply string, at time.Time) *models.Mock {
 //   - never required of Test 1 when startup finished before Test 1,
 //   - never re-served in Test 2 once consumed.
 //
-// Under KEPLOY_PROVEN=1 that holds here of a recording a declared rule
-// covers (a startup: true rule places it in worker:, mapdb's MoveToWorker):
-// mock replay's scope table places it in worker:, and keploy test's staging
-// call names it in no StartupMocks. A plain startup: recording
-// (StartupMocks: in no worker scope) of a kind its user can declare is, on
-// both paths, no background of a test's window: a test's identical call is
-// its own call (TestMockReplayPlainStartupIsTheTestsOwnCallUnderTheSwitch,
+// Under KEPLOY_PROVEN=1 it holds of a plain startup: recording of a kind no
+// sessionCalls entry declares (Mongo, models.StartupDeclarable), served as in
+// v3.7.18, on both paths, and of one a declared rule covers (the _worker
+// subtest: a startup: true rule places it in worker:, mapdb's MoveToWorker;
+// keploy test's staging then names it in no StartupMocks). A plain startup:
+// recording of a kind its user can declare is, on both paths, no background
+// of a test's window: a test's identical call is its own call
+// (TestMockReplayPlainStartupIsTheTestsOwnCallUnderTheSwitch,
 // TestAPlainStartupRecordingIsATestsOwnCallOnlyWhereItsCallCanBeDeclared).
 func TestMockReplayServesStartupBackgroundInTestWindowParityWithKeployTest(t *testing.T) {
 	base := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
@@ -117,9 +118,16 @@ func TestMockReplayServesStartupBackgroundInTestWindowParityWithKeployTest(t *te
 	for _, mode := range []struct {
 		name   string
 		proven string
+		// worker places the startup recording in worker:, as a startup:
+		// true rule does (mapdb's MoveToWorker); else it is a plain startup:
+		// one no sessionCalls entry can declare (a Mongo recording, an HTTP
+		// one with no stated lifetime: models.StartupDeclarable), which a
+		// test's window is served as in v3.7.18.
+		worker bool
 	}{
-		{"KEPLOY_PROVEN=1", "1"},
-		{"KEPLOY_PROVEN_unset", ""},
+		{"KEPLOY_PROVEN=1", "1", false},
+		{"KEPLOY_PROVEN=1_worker", "1", true},
+		{"KEPLOY_PROVEN_unset", "", false},
 	} {
 		t.Run(mode.name+"_mock_replay_and_keploy_test_parity", func(t *testing.T) {
 			ctx := context.Background()
@@ -150,11 +158,9 @@ func TestMockReplayServesStartupBackgroundInTestWindowParityWithKeployTest(t *te
 				models.PoolKeyNone: {"mock-startup-idx"},
 				".":                {},
 			}))
-			if mode.proven == "1" {
-				// Under the switch a test's window is served a recording made
-				// before the first test only when a declared rule covers it: a
-				// startup: true rule places it in worker: (mapdb's
-				// MoveToWorker).
+			if mode.worker {
+				// A startup: true rule places the recording in worker:
+				// (mapdb's MoveToWorker).
 				require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{models.PoolKeyNone: {"mock-startup-idx"}}))
 			}
 
@@ -214,8 +220,6 @@ func TestMockReplayServesStartupBackgroundInTestWindowParityWithKeployTest(t *te
 			}
 
 			// 2) keploy test parity path (same ServeExactBackground engine).
-			// Its staging call names the recording in no StartupMocks: under
-			// the switch, a declared or learned one (worker:).
 			keployTest := func(startup []string) (*Agent, *servingProxy) {
 				t.Helper()
 				ktAgent, _ := wireAgent(t, models.MODE_TEST)
@@ -241,7 +245,14 @@ func TestMockReplayServesStartupBackgroundInTestWindowParityWithKeployTest(t *te
 				}))
 				return ktAgent, ktProxy
 			}
-			ktAgent, ktProxy := keployTest(nil)
+			// keploy test's half names the recording as mock replay's half
+			// places it: a plain startup: one (StartupMocks), or a covered
+			// one (none).
+			var startup []string
+			if !mode.worker {
+				startup = []string{"mock-startup-idx"}
+			}
+			ktAgent, ktProxy := keployTest(startup)
 			ktBG := ktProxy.mm.Background(models.Mongo)
 			require.Len(t, ktBG, 1, "keploy test parity: @startup recording exposed via ServeExactBackground")
 			require.Equal(t, bg[0].Name, ktBG[0].Name)
@@ -398,9 +409,16 @@ func TestMockReplayRepeatsOwnNeverBorrowsStartup(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
 		proven string
+		// worker places the startup recording in worker:, as a startup:
+		// true rule does (mapdb's MoveToWorker); else it is a plain startup:
+		// one no sessionCalls entry can declare (a Mongo recording, an HTTP
+		// one with no stated lifetime: models.StartupDeclarable), which a
+		// test's window is served as in v3.7.18.
+		worker bool
 	}{
-		{"KEPLOY_PROVEN=1", "1"},
-		{"KEPLOY_PROVEN_unset", ""},
+		{"KEPLOY_PROVEN=1", "1", false},
+		{"KEPLOY_PROVEN=1_worker", "1", true},
+		{"KEPLOY_PROVEN_unset", "", false},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -420,10 +438,9 @@ func TestMockReplayRepeatsOwnNeverBorrowsStartup(t *testing.T) {
 				{TestCase: ".::TestCfg", Start: base.Add(time.Second), End: base.Add(3 * time.Second)},
 			}))
 			require.NoError(t, a.SetScopeBackground(ctx, []string{"mock-startup-cfg"}))
-			if mode.proven == "1" {
-				// A declared startup: true rule places the recording in worker:
-				// (mapdb's MoveToWorker): under the switch only a declared or
-				// learned recording is a test window's background.
+			if mode.worker {
+				// A startup: true rule places the recording in worker:
+				// (mapdb's MoveToWorker).
 				require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{models.PoolKeyNone: {"mock-startup-cfg"}}))
 			}
 			require.NoError(t, a.SetScopePool(ctx, map[string][]string{
@@ -481,9 +498,16 @@ func TestMockReplayStartupAnswerDataflowRunsSequentially(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
 		proven string
+		// worker places the startup recording in worker:, as a startup:
+		// true rule does (mapdb's MoveToWorker); else it is a plain startup:
+		// one no sessionCalls entry can declare (a Mongo recording, an HTTP
+		// one with no stated lifetime: models.StartupDeclarable), which a
+		// test's window is served as in v3.7.18.
+		worker bool
 	}{
-		{"KEPLOY_PROVEN=1", "1"},
-		{"KEPLOY_PROVEN_unset", ""},
+		{"KEPLOY_PROVEN=1", "1", false},
+		{"KEPLOY_PROVEN=1_worker", "1", true},
+		{"KEPLOY_PROVEN_unset", "", false},
 	} {
 		t.Run(mode.name+"_served_startup_answer_tracked_and_spent_sequentially", func(t *testing.T) {
 			ctx := context.Background()
@@ -510,10 +534,9 @@ func TestMockReplayStartupAnswerDataflowRunsSequentially(t *testing.T) {
 				{TestCase: ".::TestAfter", Start: base.Add(3 * time.Second), End: base.Add(5 * time.Second)},
 			}))
 			require.NoError(t, a.SetScopeBackground(ctx, []string{"mock-startup-seed"}))
-			if mode.proven == "1" {
-				// A declared startup: true rule places the recording in worker:
-				// (mapdb's MoveToWorker): under the switch only a declared or
-				// learned recording is a test window's background.
+			if mode.worker {
+				// A startup: true rule places the recording in worker:
+				// (mapdb's MoveToWorker).
 				require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{models.PoolKeyNone: {"mock-startup-seed"}}))
 			}
 			require.NoError(t, a.SetScopePool(ctx, map[string][]string{
@@ -665,9 +688,16 @@ func TestMockReplayUnsetOwnKeepsLegacyMatchingWhileBackgroundStaysExact(t *testi
 	for _, mode := range []struct {
 		name   string
 		proven string
+		// worker places the startup recording in worker:, as a startup:
+		// true rule does (mapdb's MoveToWorker); else it is a plain startup:
+		// one no sessionCalls entry can declare (a Mongo recording, an HTTP
+		// one with no stated lifetime: models.StartupDeclarable), which a
+		// test's window is served as in v3.7.18.
+		worker bool
 	}{
-		{"KEPLOY_PROVEN_unset", ""},
-		{"KEPLOY_PROVEN=1", "1"},
+		{"KEPLOY_PROVEN_unset", "", false},
+		{"KEPLOY_PROVEN=1", "1", false},
+		{"KEPLOY_PROVEN=1_worker", "1", true},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -686,10 +716,9 @@ func TestMockReplayUnsetOwnKeepsLegacyMatchingWhileBackgroundStaysExact(t *testi
 				{TestCase: ".::TestOwnDrift", Start: base.Add(time.Second), End: base.Add(3 * time.Second)},
 			}))
 			require.NoError(t, a.SetScopeBackground(ctx, []string{"mock-startup-seed"}))
-			if mode.proven == "1" {
-				// A declared startup: true rule places the recording in worker:
-				// (mapdb's MoveToWorker): under the switch only a declared or
-				// learned recording is a test window's background.
+			if mode.worker {
+				// A startup: true rule places the recording in worker:
+				// (mapdb's MoveToWorker).
 				require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{models.PoolKeyNone: {"mock-startup-seed"}}))
 			}
 			require.NoError(t, a.SetScopePool(ctx, map[string][]string{

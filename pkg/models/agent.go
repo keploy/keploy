@@ -485,6 +485,10 @@ const ScopeTableServedSeries = "series"
 // ScopeTableReq.Sources.
 const ScopeTableServedSources = "sources"
 
+// ScopeTableServedSessionCalls is ScopeTableResp.Served's name for
+// ScopeTableReq.SessionCalls.
+const ScopeTableServedSessionCalls = "sessionCalls"
+
 // ScopeTableServedOnce is ScopeTableResp.Served's name for
 // ScopeTableReq.Once.
 const ScopeTableServedOnce = "once"
@@ -494,8 +498,13 @@ const ScopeTableServedOnce = "once"
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
-	Root     string              `json:"root,omitempty"`
-	Sets     map[string]SetTable `json:"sets,omitempty"`
+	// SessionCalls hands the agent, under the proven switch, the session
+	// calls the client declares (DeclaredSessionCalls): it installs them
+	// before it stages the set (ScopeTableServedSessionCalls). nil leaves
+	// the agent's as they are.
+	SessionCalls *DeclaredSessionCalls `json:"sessionCalls,omitempty"`
+	Root         string                `json:"root,omitempty"`
+	Sets         map[string]SetTable   `json:"sets,omitempty"`
 	// Pool is, under the proven switch, each key's pool slice: the names of
 	// the mocks recorded while no test was open, by the key of the claim
 	// then (PoolKeyNone for none, and for a mock recorded without a key).
@@ -824,6 +833,11 @@ type MockFilterParams struct {
 	// entry names exactly. Empty: every background recording is the
 	// background's in a test's window too, as before.
 	StartupMocks []string `json:"startupMocks,omitempty"`
+	// SessionCalls hands the agent, on the staging call under the proven
+	// switch, the session calls the client declares (DeclaredSessionCalls):
+	// it installs them before it marks or stages the set's recordings. nil
+	// leaves the agent's as they are.
+	SessionCalls *DeclaredSessionCalls `json:"sessionCalls,omitempty"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase

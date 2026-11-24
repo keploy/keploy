@@ -1,6 +1,8 @@
 package models
 
 import (
+	"encoding/json"
+	"net/url"
 	"strings"
 	"sync"
 )
@@ -16,12 +18,12 @@ import (
 // that states none no entry can. Any other is not: a plain startup:
 // recording of it is the set's background in a test's window too, as in
 // v3.7.18, since its user has no way to declare the call. Nor is an HTTP or
-// HTTP/2 recording whose request names an AWS JSON API's action (an
-// X-Amz-Target header: DynamoDB, SQS, Kinesis), whatever rule system is
-// registered: such calls share one method and path, so a sessionCalls entry
-// cannot name one of them apart from the others.
+// HTTP/2 recording of an API whose calls share one method and path, telling
+// one from another by a header or the body alone (namesCallInRequest),
+// whatever rule system is registered: a sessionCalls entry names a call by
+// its method and path, so it cannot name one of them apart from the others.
 func StartupDeclarable(m *Mock) bool {
-	if m == nil || namesAWSTarget(m) {
+	if m == nil || namesCallInRequest(m) {
 		return false
 	}
 	startupDeclarable.mu.RLock()
@@ -74,21 +76,55 @@ var startupDeclarable struct {
 	kinds map[Kind]int
 }
 
-// namesAWSTarget reports whether m is an HTTP or HTTP/2 recording whose
-// request carries an X-Amz-Target header (an AWS JSON API's action), its
-// name read case-insensitively.
-func namesAWSTarget(m *Mock) bool {
+// namesCallInRequest reports whether m is an HTTP or HTTP/2 recording of an
+// API whose calls share one method and path and name the call in a header or
+// the body, each told by a precise marker:
+//   - AWS JSON (DynamoDB, SQS, Kinesis): an X-Amz-Target header;
+//   - AWS Query (SQS, SNS, STS on older SDKs): a form-encoded body
+//     (Content-Type application/x-www-form-urlencoded) with both Action and
+//     Version parameters;
+//   - GraphQL: a JSON body whose top-level object has a string query field;
+//   - JSON-RPC: a JSON body whose top-level object has a jsonrpc field.
+//
+// Header names are read in any case. A recording it misreads as one keeps
+// v3.7.18's behaviour (StartupDeclarable), the safe direction.
+func namesCallInRequest(m *Mock) bool {
 	var header map[string]string
+	var body string
 	switch {
 	case m.Kind == HTTP && m.Spec.HTTPReq != nil:
-		header = m.Spec.HTTPReq.Header
+		header, body = m.Spec.HTTPReq.Header, m.Spec.HTTPReq.Body
 	case m.Kind == HTTP2 && m.Spec.HTTP2Req != nil:
-		header = m.Spec.HTTP2Req.Headers
+		header, body = m.Spec.HTTP2Req.Headers, m.Spec.HTTP2Req.Body
+	default:
+		return false
 	}
-	for k := range header {
-		if strings.EqualFold(k, "X-Amz-Target") {
+	if _, ok := headerValue(header, "X-Amz-Target"); ok {
+		return true
+	}
+	if ct, _ := headerValue(header, "Content-Type"); strings.Contains(strings.ToLower(ct), "application/x-www-form-urlencoded") {
+		if q, err := url.ParseQuery(body); err == nil && q.Has("Action") && q.Has("Version") {
 			return true
 		}
 	}
-	return false
+	var top map[string]json.RawMessage
+	if b := strings.TrimSpace(body); !strings.HasPrefix(b, "{") || json.Unmarshal([]byte(b), &top) != nil {
+		return false
+	}
+	if q, ok := top["query"]; ok && len(q) > 0 && q[0] == '"' {
+		return true
+	}
+	_, rpc := top["jsonrpc"]
+	return rpc
+}
+
+// headerValue is the value of the header name in h, its name read in any
+// case.
+func headerValue(h map[string]string, name string) (string, bool) {
+	for k, v := range h {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return "", false
 }

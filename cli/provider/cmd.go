@@ -519,12 +519,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// switch; without it the agent asks the environment's endpoint.
 		cmd.Flags().String(containerkey.AgentFlag, "", "Internal: the Docker endpoint of the keploy client that starts this agent, for naming container destinations. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(containerkey.AgentFlag)
-		// Internal orchestrator→agent flag: the session calls the client's
-		// keploy.yaml declares (models.SessionCallsAgentArgs), which an agent
-		// container, mounting no project, cannot read. Passed only under the
-		// proven switch, where the agent reads them.
-		cmd.Flags().String(models.SessionCallsAgentFlag, "", "Internal: the session calls the keploy client that starts this agent declares (keploy.yaml sessionCalls). Not intended to be set by users directly.")
-		_ = cmd.Flags().MarkHidden(models.SessionCallsAgentFlag)
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -2533,18 +2527,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		if host, err := cmd.Flags().GetString(containerkey.AgentFlag); err == nil && host != "" {
 			setDockerHost(host)
-		}
-		// The session calls the client declares, from the flag when it is
-		// given: the client's keploy.yaml, which an agent container, or one
-		// started with another config path, does not read.
-		if v, err := cmd.Flags().GetString(models.SessionCallsAgentFlag); err == nil && v != "" {
-			rules, err := models.ParseSessionCallsAgentArg(v)
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to read the declared-session-calls flag")
-				return errors.New("failed to read the declared-session-calls flag")
-			}
-			c.cfg.SessionCalls = rules
-			models.SetSessionCalls(rules)
 		}
 		if verify, err := cmd.Flags().GetBool(provenswitch.VerifyFlag); err == nil && verify {
 			setExactViewVerify(true)

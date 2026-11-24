@@ -11,7 +11,6 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/log"
 )
@@ -71,22 +70,6 @@ func TestAgentIgnoresAnUnreadableProvenValue(t *testing.T) {
 	t.Setenv(provenswitch.Env, "yes")
 	if on, called := runAgentFlags(t, "--"+provenswitch.AgentFlag); !called || !on {
 		t.Fatalf("pinned=%v on=%v; the agent's switch comes from its flag", called, on)
-	}
-}
-
-// An agent started with the session calls its client declares (as an agent
-// container, which reads no keploy.yaml, is) declares them itself.
-// Mutation: ignore the flag.
-func TestAgentDeclaresTheSessionCallsItIsHanded(t *testing.T) {
-	t.Cleanup(func() { models.SetSessionCalls(nil) })
-	t.Setenv(provenswitch.Env, "1")
-	rule := models.SessionCallRule{Host: "rates.example.com", Method: "GET", PathPrefix: "/rates"}
-	models.SetSessionCalls([]models.SessionCallRule{rule})
-	args := models.SessionCallsAgentArgs()
-	models.SetSessionCalls(nil)
-	runAgentFlags(t, append([]string{"--" + provenswitch.AgentFlag}, args...)...)
-	if covered, named := models.SessionCallDeclared("GET", "rates.example.com", "/rates"); !covered || !named {
-		t.Fatalf("the agent declares GET rates.example.com/rates covered=%v named=%v; want the call it was handed declared", covered, named)
 	}
 }
 

@@ -8505,11 +8505,15 @@ func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
 //   - startup names, of background, the set's plain startup: mocks under
 //     the proven switch (models.MockFilterParams.StartupMocks,
 //     backgroundMocksOf): a test's call identical to one is the test's own.
+//   - sessionCalls hands the agent, under the proven switch, the session
+//     calls keploy.yaml declares (models.MockFilterParams.SessionCalls): an
+//     agent container reads no keploy.yaml.
 type recordedSetShape struct {
 	firstTestStart time.Time
 	windows        []models.TestWindow
 	background     []string
 	startup        []string
+	sessionCalls   *models.DeclaredSessionCalls
 }
 
 func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
@@ -8528,6 +8532,7 @@ func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
 func (r *Replayer) recordedSetShape(ctx context.Context, testSetID string, testCases []*models.TestCase) recordedSetShape {
 	shape := recordedSetShapeOf(testCases)
 	shape.background, shape.startup = r.backgroundMocksOf(ctx, testSetID)
+	shape.sessionCalls = models.DeclaredSessionCallsToHand()
 	reader, ok := r.testDB.(RecordedStartReader)
 	if !ok {
 		return shape
@@ -8707,6 +8712,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		RecordedWindows:        shape.windows,
 		BackgroundMocks:        shape.background,
 		StartupMocks:           shape.startup,
+		SessionCalls:           shape.sessionCalls,
 		MockMapping:            expectedMockMapping,
 		UseMappingBased:        useMappingBased,
 		AgentOwnsConsumed:      agentOwnsConsumed,

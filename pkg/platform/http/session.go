@@ -818,6 +818,7 @@ func copyMockParams(params models.MockFilterParams) (_ models.MockFilterParams, 
 	params.RecordedWindows = slices.Clone(params.RecordedWindows)
 	params.BackgroundMocks = slices.Clone(params.BackgroundMocks)
 	params.StartupMocks = slices.Clone(params.StartupMocks)
+	params.SessionCalls = params.SessionCalls.Clone()
 	params.MockMapping = slices.Clone(params.MockMapping)
 	params.Variables = slices.Clone(params.Variables)
 	if params.Exact != nil {

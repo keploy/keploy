@@ -990,9 +990,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// The proven model's staging switch: the agent container is not given
 	// KEPLOY_PROVEN, so it travels as a flag.
 	command = append(command, provenswitch.AgentArgs()...)
-	// And the session calls keploy.yaml declares, which the agent container,
-	// mounting no project, cannot read (models.SessionCallsAgentArgs).
-	command = append(command, models.SessionCallsAgentArgs()...)
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}

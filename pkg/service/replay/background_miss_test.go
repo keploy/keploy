@@ -72,6 +72,10 @@ func TestTheMismatchStoreKeepsTheBackgroundMark(t *testing.T) {
 // is not one: keploy test serves it to every test as a session mock
 // (models.ServeAsSession), not as a background recording.
 func TestTheStagingCallNamesTheSetsBackgroundRecordings(t *testing.T) {
+	// With the switch off: under it the staging call also names the plain
+	// startup mocks and the declared session calls
+	// (TestTheStagingCallNamesThePlainStartupMocksUnderTheSwitch).
+	t.Setenv(provenswitch.Env, "")
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{
 		Worker:  []models.MockEntry{{Name: "poll-1"}, {Name: "jwks-1", Reason: models.WorkerRuleReason("jwks")}, {Name: "poll-2"}},
@@ -97,6 +101,9 @@ func TestTheStagingCallNamesTheSetsBackgroundRecordings(t *testing.T) {
 		}
 		if len(p.StartupMocks) != 0 {
 			t.Fatalf("with the switch off the staging call named plain startup mocks %v", p.StartupMocks)
+		}
+		if p.SessionCalls != nil {
+			t.Fatalf("with the switch off the staging call handed the agent session calls %+v", p.SessionCalls)
 		}
 	}
 	if staged != 1 {
@@ -230,6 +237,28 @@ func TestTheStagingCallNamesThePlainStartupMocksUnderTheSwitch(t *testing.T) {
 	f.mu.Unlock()
 	if want := []string{"boot-1", "boot-2"}; !reflect.DeepEqual(p.StartupMocks, want) {
 		t.Fatalf("the staging call sent plain startup mocks %v, want %v", p.StartupMocks, want)
+	}
+	// And the session calls keploy.yaml declares, none an empty declaration:
+	// an agent container reads no keploy.yaml.
+	if p.SessionCalls == nil || len(p.SessionCalls.Rules) != 0 {
+		t.Fatalf("none declared: the staging call sent %+v; want an empty declaration", p.SessionCalls)
+	}
+	t.Cleanup(func() { models.SetSessionCalls(nil) })
+	rule := models.SessionCallRule{Host: "rates.example.com", Method: "GET", PathPrefix: "/rates"}
+	models.SetSessionCalls([]models.SessionCallRule{rule})
+	shape = r.recordedSetShape(ctx, "s", nil)
+	if err := sender.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), nil, nil, false, shape, nil); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+	f.mu.Lock()
+	p = f.lastParams
+	f.mu.Unlock()
+	if p.SessionCalls == nil || !reflect.DeepEqual(p.SessionCalls.Rules, []models.SessionCallRule{rule}) {
+		t.Fatalf("the staging call sent %+v; want the declared session call", p.SessionCalls)
+	}
+	t.Setenv(provenswitch.Env, "")
+	if got := r.recordedSetShape(ctx, "s", nil).sessionCalls; got != nil {
+		t.Fatalf("switch off: the staging call's shape hands %+v", got)
 	}
 }
 

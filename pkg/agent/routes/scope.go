@@ -264,6 +264,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if provenswitch.On() && req.Sets == nil && req.SessionCalls != nil {
+		// The session calls the client declares, before anything of the
+		// set is staged: an agent container reads no keploy.yaml.
+		req.SessionCalls.Install()
+		served = append(served, models.ScopeTableServedSessionCalls)
+	}
 	if provenswitch.On() && req.Sets == nil {
 		// The values each test gave when it was recorded: a replay's given
 		// is bound with its recorded value. An agent that cannot take them

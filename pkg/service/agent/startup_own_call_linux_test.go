@@ -4,6 +4,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -488,4 +490,67 @@ func TestABackgroundRepeatMadeOutsideATestsWindowIsNotItsBackgroundMiss(t *testi
 			require.Empty(t, w.Evidence.Misses)
 		}
 	}
+}
+
+// keploy test's staging call hands the agent, under the proven switch, the
+// session calls the client declares (models.MockFilterParams.SessionCalls),
+// before the set's recordings are marked: an agent container reads no
+// keploy.yaml. A declaration over 128 KiB arrives whole through the control
+// plane's JSON; the next run's staging replaces it, and one of none clears
+// it; a per-test call, which carries none, leaves it as it is. A recording
+// the declaration names is never marked plain startup.
+// Mutation: ignore the declaration, install it after the marks, or let a
+// per-test call clear it.
+func TestKeployTestsStagingHandsTheAgentTheDeclaredSessionCalls(t *testing.T) {
+	t.Cleanup(func() { models.SetSessionCalls(nil) })
+	t.Setenv(provenswitch.Env, "1")
+	ctx := context.Background()
+	stage := func(a *Agent, d *models.DeclaredSessionCalls) {
+		t.Helper()
+		b, err := json.Marshal(models.MockFilterParams{
+			AfterTime: models.BaseTime, BeforeTime: time.Now(), StrictMockWindow: true,
+			FirstRecordedTestStart: t0.Add(time.Second),
+			BackgroundMocks:        []string{"mock-0"},
+			StartupMocks:           []string{"mock-0"},
+			SessionCalls:           d,
+			Exact:                  &models.ExactServing{Stage: true, Background: models.RecordedWithS12Routing, Pool: []string{"mock-0"}, Order: []string{"test-1"}},
+		})
+		require.NoError(t, err)
+		var params models.MockFilterParams
+		require.NoError(t, json.Unmarshal(b, &params))
+		require.NoError(t, a.UpdateMockParams(ctx, params))
+	}
+	declared := func(host, path string) bool {
+		covered, named := models.SessionCallDeclared("GET", host, path)
+		return covered && named
+	}
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{statedRates("mock-0"), pingMock("mock-1", "/b", "b", t0.Add(2*time.Second))}))
+
+	big := make([]models.SessionCallRule, 2500)
+	for i := range big {
+		big[i] = models.SessionCallRule{Host: fmt.Sprintf("svc-%05d.internal.example.com", i), Method: "GET", PathPrefix: fmt.Sprintf("/v1/config/%05d/settings", i)}
+	}
+	big = append(big, models.SessionCallRule{Host: "127.0.0.1:18093", Method: "GET", PathPrefix: "/rates"})
+	stage(a, &models.DeclaredSessionCalls{Rules: big})
+	require.True(t, declared(big[0].Host, big[0].PathPrefix), "the agent does not declare the session calls the staging call handed it")
+	recs := p.mm.BackgroundRecordings(models.HTTP)
+	require.Len(t, recs, 1)
+	require.False(t, recs[0].Startup, "a recording the declaration names was marked plain startup")
+
+	// A per-test call carries none: the declaration stays.
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}))
+	require.True(t, declared(big[0].Host, big[0].PathPrefix), "a per-test call cleared the declaration")
+
+	// The next run's staging replaces it; one of none clears it.
+	stage(a, &models.DeclaredSessionCalls{Rules: []models.SessionCallRule{{Host: "other.example.com", Method: "GET", PathPrefix: "/x"}}})
+	require.True(t, declared("other.example.com", "/x"))
+	require.False(t, declared(big[0].Host, big[0].PathPrefix), "the earlier run's declaration outlived it")
+	recs = p.mm.BackgroundRecordings(models.HTTP)
+	require.Len(t, recs, 1)
+	require.True(t, recs[0].Startup, "a recording the run's declaration does not name was not marked plain startup")
+	stage(a, &models.DeclaredSessionCalls{})
+	require.False(t, models.SessionCallsDeclared(), "a declaration of none left the earlier one in force")
 }
