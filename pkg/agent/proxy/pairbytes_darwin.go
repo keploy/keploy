@@ -187,6 +187,13 @@ func heldSettled(t *pairTarget, ps proxySide) (bool, error) {
 type pairedConnOS struct {
 	wroteCount
 	appHolder
+	// seenInTable and seenInHolder record whether THIS connection's
+	// application socket has been explicitly sighted in the XNU TCP table or
+	// a readable process's descriptor table. On darwin, an unlisted socket
+	// ends a held fault only when THIS socket was sighted before, never
+	// merely because some other application socket was visible.
+	seenInTable  atomic.Bool
+	seenInHolder atomic.Bool
 }
 
 // pairedConnsOS is what proves, on darwin, an application socket not found

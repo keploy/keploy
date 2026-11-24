@@ -87,13 +87,6 @@ type pairedConn struct {
 	// connection no add made.
 	appClosed     chan struct{}
 	appClosedOnce sync.Once
-	// seenInTable and seenInHolder record whether THIS connection's
-	// application socket has been explicitly sighted in the OS TCP table or a
-	// readable process's descriptor table. On darwin, an unlisted socket ends
-	// a held fault only when THIS socket was sighted before, never merely
-	// because some other application socket was visible.
-	seenInTable  atomic.Bool
-	seenInHolder atomic.Bool
 	// cuts are the ends cut short on the connection, oldest first: each a
 	// test whose bytes wait ended before the proxy's side had received what
 	// the application had written when the wait began (cutShort). Bytes up
