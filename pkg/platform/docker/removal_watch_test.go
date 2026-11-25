@@ -295,3 +295,19 @@ func (a *endingAsk) end() int {
 	}
 	return len(fns)
 }
+
+// Watch reports true when the engine took the wait before ask ended, and false
+// when ask ended first and withdrew the wait.
+func TestRemovalWatchReportsTaken(t *testing.T) {
+	f := newFakeRemovals(goneByInspect)
+	w := NewRemovalWatch(f, "keploy-v3-0a1b2c3d4e5f6071")
+	if !w.Watch(context.Background()) {
+		t.Fatal("Watch reported not taken when engine answered under a live ask")
+	}
+	ask, cancel := context.WithCancel(context.Background())
+	cancel()
+	w2 := NewRemovalWatch(f, "keploy-v3-0a1b2c3d4e5f6072")
+	if w2.Watch(ask) {
+		t.Fatal("Watch reported taken when ask was already ended")
+	}
+}

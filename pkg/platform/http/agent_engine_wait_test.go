@@ -157,3 +157,18 @@ func TestWithinEngineWaitEndsWithTheWaitAndWithItsOwnEnd(t *testing.T) {
 		t.Fatalf("ended with its wait with %v, want %v", cause, errDaemonSilent)
 	}
 }
+
+// An already-ended wait cancels the returned context synchronously with the
+// wait's cause, without relying on context.AfterFunc's asynchronous goroutine.
+func TestWithinEngineWaitAlreadyEndedCancelsSynchronously(t *testing.T) {
+	wait, stop := context.WithCancelCause(context.Background())
+	stop(errDaemonSilent)
+	ctx, end := withinEngineWait(context.Background(), wait)
+	defer end()
+	if ctx.Err() == nil {
+		t.Fatal("withinEngineWait returned a live context for an already-ended wait")
+	}
+	if cause := context.Cause(ctx); !errors.Is(cause, errDaemonSilent) {
+		t.Fatalf("already-ended wait cause = %v, want %v", cause, errDaemonSilent)
+	}
+}
