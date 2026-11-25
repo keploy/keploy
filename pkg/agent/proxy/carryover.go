@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -74,83 +73,6 @@ type carryOverPool struct {
 }
 
 const maxEvictedCarryMeta = 16384
-
-// carryOverMockSig computes the canonical call signature for an evicted mock,
-// preferring explicit operation/commandType metadata (and topic when present,
-// so broker kinds such as Pulsar never collapse distinct topics onto the bare
-// op token) so it matches runtime ActualSummary values.
-func carryOverMockSig(mk *models.Mock) string {
-	if mk == nil {
-		return ""
-	}
-	if mk.Spec.HTTPReq != nil {
-		return normalizeCarryOverSig(string(mk.Kind), string(mk.Spec.HTTPReq.Method)+" "+mk.Spec.HTTPReq.URL)
-	}
-	topic := strings.TrimSpace(mk.Spec.Metadata["topic"])
-	if cmd := strings.TrimSpace(mk.Spec.Metadata["commandType"]); cmd != "" {
-		if topic != "" {
-			return normalizeCarryOverSig(string(mk.Kind), cmd+" "+topic)
-		}
-		return normalizeCarryOverSig(string(mk.Kind), cmd)
-	}
-	if op := strings.TrimSpace(mk.Spec.Metadata["operation"]); op != "" {
-		if topic != "" {
-			return normalizeCarryOverSig(string(mk.Kind), op+" "+topic)
-		}
-		return normalizeCarryOverSig(string(mk.Kind), op)
-	}
-	return normalizeCarryOverSig(string(mk.Kind), models.MockSummaryFromSpec(mk))
-}
-
-// normalizeCarryOverSig produces the same canonical call signature for both
-// recorded mock summaries (MockSummaryFromSpec, which uses full URLs for HTTP
-// and "<Kind> <op>" for broker/DB kinds) and runtime mismatch summaries
-// (ActualSummary, which uses "METHOD /path" for HTTP and "<op> <topic/target>"
-// for broker/DB kinds). For Pulsar, the op alone (e.g. "send") is never
-// sufficient: the topic token must be present too.
-func normalizeCarryOverSig(kind, summary string) string {
-	s := strings.TrimSpace(summary)
-	if s == "" {
-		return ""
-	}
-	if strings.EqualFold(kind, string(models.HTTP)) || strings.EqualFold(kind, "HTTP") {
-		parts := strings.Fields(s)
-		if len(parts) < 2 {
-			return ""
-		}
-		method := strings.ToUpper(parts[0])
-		rawTarget := parts[1]
-		if strings.Contains(rawTarget, "://") {
-			if u, err := url.Parse(rawTarget); err == nil {
-				rawTarget = u.Path
-			}
-		}
-		if i := strings.IndexByte(rawTarget, '?'); i >= 0 {
-			rawTarget = rawTarget[:i]
-		}
-		if rawTarget == "" {
-			rawTarget = "/"
-		}
-		return method + " " + rawTarget
-	}
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		return ""
-	}
-	if kind != "" && len(fields) > 1 && strings.EqualFold(fields[0], strings.TrimSpace(kind)) {
-		fields = fields[1:]
-	}
-	if strings.Contains(strings.ToLower(kind), "pulsar") {
-		if len(fields) < 2 {
-			return ""
-		}
-		return strings.ToLower(fields[0]) + " " + fields[1]
-	}
-	if len(fields) >= 2 {
-		return strings.ToLower(fields[0]) + " " + fields[1]
-	}
-	return strings.ToLower(fields[0])
-}
 
 // carryEntry keeps the size charged at insert, so the release credits exactly
 // what was charged.
