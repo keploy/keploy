@@ -775,6 +775,7 @@ func sayNotRecorded(w io.Writer, c models.NotRecordedCall, more int) {
 func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase, ended *atomic.Bool, said *notRecordedSaid) (done bool) {
 	mr := multipart.NewReader(res.Body, boundary)
 	var pendingTestCase *models.TestCase
+	linkedFiles := make(map[[2]int]bool)
 
 	for {
 		part, err := mr.NextPart()
@@ -828,6 +829,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			}
 			if tc.HasBinaryFile {
 				pendingTestCase = &tc
+				clear(linkedFiles)
 			} else {
 				select {
 				case <-ctx.Done():
@@ -870,17 +872,32 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			for i := range pendingTestCase.HTTPReq.Form {
 				form := &pendingTestCase.HTTPReq.Form[i]
 				for j, fname := range form.FileNames {
-					if (fname == fileName || fname == sanitizedFileName || filepath.Base(fname) == sanitizedFileName) && j < len(form.Paths) {
+					slot := [2]int{i, j}
+					if (fname == fileName || fname == sanitizedFileName || filepath.Base(fname) == sanitizedFileName) &&
+						j < len(form.Paths) && form.Paths[j] != "" && !linkedFiles[slot] {
 						form.Paths[j] = savePath
+						linkedFiles[slot] = true
 						updated = true
+						break
 					}
+				}
+				if updated {
+					break
 				}
 			}
 			if !updated {
 				for i := range pendingTestCase.HTTPReq.Form {
 					form := &pendingTestCase.HTTPReq.Form[i]
-					if len(form.Paths) > 0 {
-						form.Paths[0] = savePath
+					for j, path := range form.Paths {
+						slot := [2]int{i, j}
+						if path != "" && !linkedFiles[slot] {
+							form.Paths[j] = savePath
+							linkedFiles[slot] = true
+							updated = true
+							break
+						}
+					}
+					if updated {
 						break
 					}
 				}

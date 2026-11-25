@@ -1330,6 +1330,9 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 		return nil
 	}
 
+	usedDestinationPaths := make(map[string]bool)
+	nextCollisionIndex := make(map[string]int)
+
 	for i, form := range tc.HTTPReq.Form {
 		// 3a. Offload large form field values (>1MB) to assets (that are not actual files)
 		if len(form.FileNames) == 0 && len(form.Paths) == 0 {
@@ -1403,7 +1406,26 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				if safeFileName == "." || safeFileName == string(filepath.Separator) || safeFileName == "" {
 					safeFileName = "asset_file"
 				}
-				destPath := filepath.Join(assetDir, safeFileName)
+				baseDestPath := filepath.Join(assetDir, safeFileName)
+				destPath := baseDestPath
+				if len(form.FileNames) > 1 {
+					destPath = filepath.Join(assetDir, strconv.Itoa(j), safeFileName)
+				}
+				if usedDestinationPaths[destPath] {
+					baseKey := baseDestPath
+					for {
+						index := nextCollisionIndex[baseKey]
+						nextCollisionIndex[baseKey] = index + 1
+						destPath = filepath.Join(assetDir, strconv.Itoa(index), safeFileName)
+						if !usedDestinationPaths[destPath] {
+							break
+						}
+					}
+				}
+				if err := yaml.MkdirAllInRecording(ts.TcsPath, filepath.Dir(destPath), 0o755); err != nil {
+					utils.LogError(ts.logger, err, "failed to create asset file directory", zap.String("path", filepath.Dir(destPath)))
+					return err
+				}
 				wroteFile := false
 
 				// Case 1: the file the capture left the part in (Captured),
@@ -1486,6 +1508,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				}
 
 				if wroteFile {
+					usedDestinationPaths[destPath] = true
 					// Store path relative to keploy directory so it stays portable
 					relPath, relErr := filepath.Rel(ts.TcsPath, destPath)
 					if relErr != nil {
