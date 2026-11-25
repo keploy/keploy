@@ -316,9 +316,11 @@ func TestDockerAgentCancel(t *testing.T) {
 }
 
 // A daemon that does not take the removal's question does not hold the
-// stop: once keploy has had daemonAnswerStall of its own runnable time, the
-// question is withdrawn and the container is sent SIGTERM and waited for,
-// and the client is killed.
+// stop past keploy's one bound on its answers: once keploy has had
+// daemonAnswerStall of its own runnable time, the question is withdrawn, the
+// run's wait on the engine has ended with it (engineWait), so nothing more is
+// asked of the daemon, and the client is killed. keploy says at WARN that the
+// container may still run, and the command that removes it.
 func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
 	clk := &stall.ManualClock{}
 	boundClock = clk
@@ -331,13 +333,14 @@ func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
 	if err := client.Start(); err != nil {
 		t.Fatal(err)
 	}
+	core, logs := observer.New(zapcore.WarnLevel)
 	run := newAgentRun()
 	t.Cleanup(run.engine.end) // the run's end, which asks for its volumes, is not run here
 	run.ready.Store(true)
 	silent := &removalSilent{asked: make(chan struct{})}
 	cancelled := make(chan error, 1)
 	go func() {
-		cancelled <- dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(silent, stopTestContainer))()
+		cancelled <- dockerAgentCancel(zap.New(core), client, run, stopTestContainer, kdocker.NewRemovalWatch(silent, stopTestContainer))()
 	}()
 	within(t, "the removal's question", func() { <-silent.asked })
 	// The bound's look at the clock is armed before the clock moves: a move
@@ -352,7 +355,12 @@ func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
 	if err := client.Wait(); err == nil {
 		t.Fatal("the docker client was not killed")
 	}
-	requireSignalledAndWaited(t, engineLines(t, log))
+	if lines := engineLines(t, log); len(lines) != 0 {
+		t.Fatalf("the stop asked %v of a daemon silent for keploy's whole bound", lines)
+	}
+	if warned := logs.FilterMessageSnippet("rm -f " + stopTestContainer).Len(); warned != 1 {
+		t.Fatalf("said at WARN %v, want once that the container may still run, with the command that removes it", logs.All())
+	}
 }
 
 // removalSilent is an engine whose daemon does not take the removal's
