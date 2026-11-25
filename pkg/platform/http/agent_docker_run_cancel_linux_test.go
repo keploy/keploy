@@ -49,6 +49,8 @@ import (
 func TestADockerRunsStopKillsWhatItsClientLeftHoldingItsOutput(t *testing.T) {
 	s := stopADockerRun(t, `trap '' TERM
 "$dir/holder" "$dir" &
+until [ -s "$dir/holder.pid" ]; do sleep 0.01; done
+: > "$dir/running"
 wait`)
 	s.requireEnded(t)
 	pid := s.holder(t)
@@ -68,6 +70,8 @@ wait`)
 func TestADockerRunsStopIsNotHeldByAClientKeployCannotSignal(t *testing.T) {
 	s := stopADockerRun(t, `trap '' TERM
 setsid "$dir/holder" "$dir" &
+until [ -s "$dir/holder.pid" ]; do sleep 0.01; done
+: > "$dir/running"
 wait`)
 	s.requireEnded(t)
 	if pid := s.holder(t); !processRuns(pid) {
@@ -79,7 +83,8 @@ wait`)
 // that ends once its container has stopped is as it was: the container is
 // signalled and waited for by name, the client ends, and the run ends.
 func TestADockerRunsStopOfAClientThatEndsWithItsContainer(t *testing.T) {
-	s := stopADockerRun(t, `while held && ! grep -q '^kill --signal SIGTERM ' "$dir/calls" 2>/dev/null; do sleep 0.01; done
+	s := stopADockerRun(t, `: > "$dir/running"
+while held && ! grep -q '^kill --signal SIGTERM ' "$dir/calls" 2>/dev/null; do sleep 0.01; done
 exit 0`)
 	s.requireEnded(t)
 }
@@ -150,14 +155,15 @@ type dockerRunStop struct {
 
 // stopADockerRun starts a docker-run run whose `docker container run` runs
 // client, a shell fragment run with $dir the fakes' directory and held true
-// while the test holds the engine, and stops it once client runs. The
+// while the test holds the engine, and stops it once client has marked
+// itself ready ($dir/running): a client that starts a holder marks itself
+// only once the holder runs, so the stop never ends the client first. The
 // holder in $dir ignores SIGTERM and holds the output it was given until
 // the test is done with it; it writes its pid to $dir/holder.pid.
 func stopADockerRun(t *testing.T, client string) *dockerRunStop {
 	t.Helper()
 	dir := t.TempDir()
-	writeDockerRunFakes(t, dir, `: > "$dir/running"
-`+client)
+	writeDockerRunFakes(t, dir, client)
 	a, daemon, logged := dockerRunAgentClient()
 	grp, gctx := errgroup.WithContext(context.Background())
 	ctx, stop := context.WithCancel(context.WithValue(gctx, models.ErrGroupKey, grp))
