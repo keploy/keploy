@@ -15,7 +15,8 @@ import (
 )
 
 // Outside-test misses emit ONE Info summary line per set (never a per-call
-// Warn loop) with an actionable generic next_step, and per-call detail at Debug.
+// Warn loop) whose next_step points to the misses file and whose next_steps
+// say each kind's own next step, and per-call detail at Debug.
 func TestOutsideTestMissesSingleInfoSummary(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	r := &Replayer{logger: zap.New(core)}
@@ -42,8 +43,23 @@ func TestOutsideTestMissesSingleInfoSummary(t *testing.T) {
 		t.Errorf("summary Info line = %q, want call count + misses file", msg)
 	}
 	ns := fmt.Sprint(infos[0].ContextMap()["next_step"])
-	if !strings.Contains(ns, "sessionCalls") || !strings.Contains(ns, "allowEgress") || !strings.Contains(ns, file) {
-		t.Errorf("outside-test Info next_step = %q, want sessionCalls + allowEgress + misses file", ns)
+	if !strings.Contains(ns, file) {
+		t.Errorf("outside-test Info next_step = %q, want the misses file", ns)
+	}
+	// What to do is each kind's own next step, once: no recording answers
+	// these calls, so the first is to record the set again (sessionCalls only
+	// shares a call a recording holds); then the HTTP calls' bypassRules and
+	// the lookup's allowEgress opt-ins.
+	steps, _ := infos[0].ContextMap()["next_steps"].([]any)
+	if len(steps) != 2 {
+		t.Fatalf("outside-test Info next_steps = %v, want the HTTP calls' and the lookup's", infos[0].ContextMap()["next_steps"])
+	}
+	call, lookup := fmt.Sprint(steps[0]), fmt.Sprint(steps[1])
+	if call != misses[0].NextStep || !strings.Contains(call, "record the test set again") || !strings.Contains(call, "bypassRules") {
+		t.Errorf("next_steps[0] = %q, want the HTTP calls' next step (record again, bypassRules)", call)
+	}
+	if lookup != misses[len(misses)-1].NextStep || !strings.Contains(lookup, "record the test set again") || !strings.Contains(lookup, "allowEgress") {
+		t.Errorf("next_steps[1] = %q, want the lookup's next step (record again, allowEgress)", lookup)
 	}
 	dbgs := logs.FilterLevelExact(zapcore.DebugLevel).All()
 	if len(dbgs) != len(misses) {
@@ -129,9 +145,9 @@ func TestWarnUnexercisedDependenciesPassedOnlyAndSilentAtZero(t *testing.T) {
 	})
 }
 
-// sayKeptInside folds per-destination lines into ONE Info line with the
-// destination count, call count, and a capped sample of destinations, logging
-// per-destination detail at Debug.
+// sayKeptInside says the run's kept-inside destinations in ONE Info line with
+// the destination count, the call count, and every destination (kept), none
+// left out however many there are, and no per-destination line at any level.
 func TestKeptInsideSingleInfoLine(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	r := &Replayer{logger: zap.New(core)}
@@ -142,6 +158,9 @@ func TestKeptInsideSingleInfoLine(t *testing.T) {
 	}
 	r.sayKeptInside()
 
+	if n := logs.Len(); n != 1 {
+		t.Fatalf("expected 1 line from sayKeptInside, got %d: %v", n, logs.All())
+	}
 	infos := logs.FilterLevelExact(zapcore.InfoLevel).All()
 	if len(infos) != 1 {
 		t.Fatalf("expected 1 Info line from sayKeptInside, got %d: %v", len(infos), infos)
@@ -150,16 +169,14 @@ func TestKeptInsideSingleInfoLine(t *testing.T) {
 	if fields["destinations"] != int64(7) {
 		t.Errorf("destinations = %v, want 7", fields["destinations"])
 	}
-	sample, ok := fields["sample"].([]any)
-	if !ok || len(sample) != 5 {
-		t.Fatalf("sample = %#v (%T), want capped slice of 5 destinations", fields["sample"], fields["sample"])
+	kept, ok := fields["kept"].([]any)
+	if !ok || len(kept) != 7 {
+		t.Fatalf("kept = %#v (%T), want all 7 destinations", fields["kept"], fields["kept"])
 	}
-	if !strings.Contains(fmt.Sprint(sample[0]), "198.18.0.1:80") {
-		t.Errorf("sample[0] = %v, want destination address", sample[0])
-	}
-	dbgs := logs.FilterLevelExact(zapcore.DebugLevel).All()
-	if len(dbgs) != 7 {
-		t.Errorf("expected 7 Debug per-destination lines, got %d: %v", len(dbgs), dbgs)
+	for i, k := range kept {
+		if want := fmt.Sprintf("HTTP 198.18.0.%d:80 (1)", i+1); fmt.Sprint(k) != want {
+			t.Errorf("kept[%d] = %v, want %s", i, k, want)
+		}
 	}
 }
 

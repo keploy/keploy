@@ -15,13 +15,13 @@ import (
 // closed connection, a synthetic DNS answer). keptInside collects, for the
 // whole run, each destination the app called that way, so the run's output
 // names each one once, with how many calls it took and how real egress would
-// be opened for it. The misses themselves are still reported per test. A
-// line names a host as the agent's own lines do, by its shape beside its
-// host tag ({}.{}.{}. #3fa2c1d0e9b8): the app chose the name (a tenant's, a
-// customer's), and the line reaches log stores. The console and the report
+// be opened for it, in one line. The misses themselves are still reported per
+// test. Each entry of that line names a host as the agent's own lines do, by
+// its shape beside its host tag ({}.{}.{}. #3fa2c1d0e9b8): the app chose the
+// name (a tenant's, a customer's), and the line reaches log stores. The console and the report
 // name each miss's host whole beside the same tag.
 
-// KeptInsidePrefix starts each line of that report.
+// KeptInsidePrefix starts that report's line.
 const KeptInsidePrefix = "kept inside the replay: "
 
 // keptInsideOptIn is how a replay is let out to the real network: only by a
@@ -128,8 +128,10 @@ func (k *keptInside) snapshot() []keptDest {
 	return out
 }
 
-// sayKeptInside logs, once for the run, each destination the replay kept
-// inside, with how many calls it took, and how real egress is opened.
+// sayKeptInside logs, once for the run, in one line, each destination the
+// replay kept inside, with how many calls it took, and how real egress is
+// opened. The line names every one (kept): a destination left out of it is a
+// call the user is never told did not reach its destination.
 func (r *Replayer) sayKeptInside() {
 	dests := r.keptInside.snapshot()
 	if len(dests) == 0 {
@@ -157,21 +159,15 @@ func (r *Replayer) sayKeptInside() {
 		}
 		return dests[i].protocol < dests[j].protocol
 	})
-	const maxKeptInsideSample = 5
 	totalCalls := 0
-	sample := make([]string, 0, min(len(dests), maxKeptInsideSample))
-	for i, d := range dests {
+	kept := make([]string, 0, len(dests))
+	for _, d := range dests {
 		totalCalls += d.calls
-		if i < maxKeptInsideSample {
-			sample = append(sample, fmt.Sprintf("%s %s (%d)", d.protocol, d.logName(), d.calls))
-		}
+		kept = append(kept, fmt.Sprintf("%s %s (%d)", d.protocol, d.logName(), d.calls))
 	}
 	r.logger.Info(KeptInsidePrefix+"no recorded mock answered the app's calls to these destinations, so keploy answered each call itself and relayed none of them to its destination",
 		zap.Int("destinations", len(dests)),
 		zap.Int("calls", totalCalls),
-		zap.Strings("sample", sample),
+		zap.Strings("kept", kept),
 		zap.String("opt_in", keptInsideOptIn))
-	for _, d := range dests {
-		r.logger.Debug(KeptInsidePrefix+d.protocol+" "+d.logName(), zap.Int("calls", d.calls))
-	}
 }
