@@ -255,9 +255,12 @@ type Session struct {
 
 	// exchanges is NextRequest's state.
 	exchanges exchanges
-	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
-	// hole, and why (MarkEndedAtHole). nil while it has not.
-	endedAtHole [2]atomic.Pointer[string]
+	// stops is how the connection stopped being recorded before its end:
+	// when (StoppedAt), and at which capture holes its streams ended
+	// (MarkEndedAtHole). nil until the first of those. Out of line, since only
+	// a connection whose recording stops early (a hole, the parser's stop, its
+	// death or its retirement) has any, so a Session stays in its size class.
+	stops atomic.Pointer[sessionStops]
 	// emitMu guards OnMockRecorded's chain (AddMockHook, EmitMock) and
 	// order (enforceReqMonotonic, countClampedOut), each taken alone, never
 	// one inside the other. One mutex for both keeps a Session in its size
@@ -279,11 +282,6 @@ type Session struct {
 	// leaves it set, and nothing clears it.
 	incomplete atomic.Pointer[incompleteMark]
 
-	// stoppedAt is the instant the connection stopped being recorded
-	// (StoppedAt), in Unix nanoseconds: 0 until StoppedAt first reads the
-	// clock. The call that stores it tells OnStop.
-	stoppedAt atomic.Int64
-
 	// progressed notes that the parser made progress on what it has read
 	// since the supervisor's last look (handedOver, taken by takeHandedOver).
 	// Its own atomic, never a bit in peerEnds, so peer-end marks and
@@ -293,6 +291,28 @@ type Session struct {
 	// retired is the supervisor's, closed as it retires the parser (Retired);
 	// Supervisor.Run sets it before the parser runs.
 	retired <-chan struct{}
+}
+
+// sessionStops is what a Session keeps, out of line, of how the connection
+// stopped being recorded before its end (Session.stops).
+type sessionStops struct {
+	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
+	// hole, and why (MarkEndedAtHole). nil while it has not.
+	endedAtHole [2]atomic.Pointer[string]
+	// at is the instant the connection stopped being recorded (StoppedAt), in
+	// Unix nanoseconds: 0 until StoppedAt first reads the clock. The call
+	// that stores it tells OnStop.
+	at atomic.Int64
+}
+
+// madeStops is the session's sessionStops, made by the first call that needs
+// it; every call gets the same one.
+func (s *Session) madeStops() *sessionStops {
+	if p := s.stops.Load(); p != nil {
+		return p
+	}
+	s.stops.CompareAndSwap(nil, new(sessionStops))
+	return s.stops.Load()
 }
 
 // Retired is closed once the supervisor running this session's parser retires
@@ -674,21 +694,25 @@ func (s *Session) FirstPeerEnded() (dir fakeconn.Direction, ok bool) {
 // for a parser that asks for it (relay.Config.EndAtHole,
 // integrations.EndAtHoleCapable), and marks no mock incomplete for the hole.
 func (s *Session) MarkEndedAtHole(dir fakeconn.Direction, reason string) {
-	if s == nil || int(dir) >= len(s.endedAtHole) {
+	if s == nil || int(dir) >= len(sessionStops{}.endedAtHole) {
 		return
 	}
 	r := reason
-	s.endedAtHole[dir].CompareAndSwap(nil, &r)
+	s.madeStops().endedAtHole[dir].CompareAndSwap(nil, &r)
 }
 
 // EndedAtHole reports whether dir's stream ended at a capture hole, and why
 // (MarkEndedAtHole). A parser asks it once the stream has ended: an end with no
 // hole is the connection's, or the capture's. Nil-safe.
 func (s *Session) EndedAtHole(dir fakeconn.Direction) (reason string, ok bool) {
-	if s == nil || int(dir) >= len(s.endedAtHole) {
+	if s == nil || int(dir) >= len(sessionStops{}.endedAtHole) {
 		return "", false
 	}
-	r := s.endedAtHole[dir].Load()
+	p := s.stops.Load()
+	if p == nil {
+		return "", false
+	}
+	r := p.endedAtHole[dir].Load()
 	if r == nil {
 		return "", false
 	}
@@ -1594,12 +1618,15 @@ func (s *Session) StoppedAt() time.Time {
 	if s == nil {
 		return time.Time{}
 	}
-	if n := s.stoppedAt.Load(); n != 0 {
-		return time.Unix(0, n)
+	if p := s.stops.Load(); p != nil {
+		if n := p.at.Load(); n != 0 {
+			return time.Unix(0, n)
+		}
 	}
+	p := s.madeStops()
 	now := time.Now().UnixNano()
-	if !s.stoppedAt.CompareAndSwap(0, now) {
-		return time.Unix(0, s.stoppedAt.Load())
+	if !p.at.CompareAndSwap(0, now) {
+		return time.Unix(0, p.at.Load())
 	}
 	at := time.Unix(0, now)
 	if s.OnStop != nil {
