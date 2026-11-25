@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -169,7 +170,7 @@ func isDir(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error {
+func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) (retErr error) {
 	// The set's recordings are rewritten where they lie, outside testdb:
 	// each is re-keyed once, after (testdb.SetRewrite).
 	rw, err := testdb.BeginSetRewrite(t.logger, filepath.Dir(testSetDir), filepath.Base(testSetDir))
@@ -180,7 +181,7 @@ func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error
 	return t.sanitizeTestSetDir(ctx, testSetDir)
 }
 
-func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error {
+func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) (retErr error) {
 	set, err := openTestSet(testSetDir)
 	if err != nil {
 		return err
@@ -189,6 +190,18 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 
 	// Aggregate secrets across ALL files in this test set
 	aggSecrets := map[string]string{}
+	secretPath := filepath.Join(testSetDir, secretsFile)
+
+	defer func() {
+		if len(aggSecrets) == 0 {
+			return
+		}
+		if err := WriteSecretsYAML(secretPath, aggSecrets); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("write secret.yaml: %w", err))
+			return
+		}
+		t.logger.Info("Wrote secret.yaml", zap.String("path", secretPath))
+	}()
 
 	// keploy/<set>/tests/*.yaml, every one checked before any is rewritten.
 	var unsanitized []string
@@ -227,13 +240,6 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 		}
 	}
 
-	// Write keploy/<set>/secret.yaml -- even when a file failed: the files
-	// already sanitized need it to be restored.
-	secretPath := filepath.Join(testSetDir, secretsFile)
-	if err := writeSecretsIn(set, secretsFile, aggSecrets); err != nil {
-		return fmt.Errorf("write secret.yaml: %w", err)
-	}
-	t.logger.Info("Wrote secret.yaml", zap.String("path", secretPath))
 	if len(unsanitized) > 0 {
 		// A rerun skips a test set that has a secret.yaml, so say how to finish.
 		return fmt.Errorf("%d test file(s) could not be sanitized and may still hold secrets: %s; to finish, run `keploy normalize` to restore the test set, fix those files, then sanitize it again", len(unsanitized), strings.Join(unsanitized, ", "))
@@ -1247,6 +1253,97 @@ func DesanitizeFileInPlace(path string, secrets map[string]string) error {
 	})
 }
 
+var secretPlaceholderPattern = regexp.MustCompile(`\{\{\s*string\s+\.secret\.([^\s}]+)\s*\}\}`)
+
+func hasSecretPlaceholder(s string) bool {
+	return strings.Contains(s, ".secret.") && strings.Contains(s, "{{") && strings.Contains(s, "}}")
+}
+
+func replacePlaceholders(s string, secrets map[string]string) string {
+	if len(secrets) == 0 || !hasSecretPlaceholder(s) {
+		return s
+	}
+	return secretPlaceholderPattern.ReplaceAllStringFunc(s, func(match string) string {
+		sub := secretPlaceholderPattern.FindStringSubmatch(match)
+		if len(sub) > 1 {
+			if val, ok := secrets[sub[1]]; ok {
+				return val
+			}
+		}
+		return match
+	})
+}
+
+func replaceInJSON(val interface{}, secrets map[string]string) interface{} {
+	switch v := val.(type) {
+	case map[string]interface{}:
+		newMap := make(map[string]interface{}, len(v))
+		for k, child := range v {
+			newKey := replacePlaceholders(k, secrets)
+			newMap[newKey] = replaceInJSON(child, secrets)
+		}
+		return newMap
+	case []interface{}:
+		newSlice := make([]interface{}, len(v))
+		for i, child := range v {
+			newSlice[i] = replaceInJSON(child, secrets)
+		}
+		return newSlice
+	case string:
+		return replacePlaceholders(v, secrets)
+	default:
+		return val
+	}
+}
+
+func desanitizeNode(n *yaml.Node, secrets map[string]string) error {
+	if n == nil {
+		return nil
+	}
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!str" {
+		return desanitizeScalarNode(n, secrets)
+	}
+	for _, child := range n.Content {
+		if err := desanitizeNode(child, secrets); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func desanitizeScalarNode(node *yaml.Node, secrets map[string]string) error {
+	if !hasSecretPlaceholder(node.Value) {
+		return nil
+	}
+	if json.Valid([]byte(node.Value)) {
+		dec := json.NewDecoder(strings.NewReader(node.Value))
+		dec.UseNumber()
+		var jsonObj interface{}
+		if err := dec.Decode(&jsonObj); err == nil {
+			jsonObj = replaceInJSON(jsonObj, secrets)
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(jsonObj); err == nil {
+				node.Value = strings.TrimSuffix(buf.String(), "\n")
+				node.Tag = "!!str"
+				if node.Style == 0 {
+					node.Style = yaml.DoubleQuotedStyle
+				}
+				return nil
+			}
+		}
+	}
+	node.Value = replacePlaceholders(node.Value, secrets)
+	node.Tag = "!!str"
+	if node.Style == yaml.SingleQuotedStyle && strings.ContainsAny(node.Value, "\n\r") {
+		node.Style = yaml.DoubleQuotedStyle
+	} else if node.Style == 0 {
+		node.Style = yaml.DoubleQuotedStyle
+	}
+	return nil
+}
+
 // desanitizeFileIn is DesanitizeFileInPlace of the file name in the folder dir.
 func desanitizeFileIn(dir *os.Root, name string, secrets map[string]string) error {
 	path := filepath.Join(dir.Name(), name)
@@ -1255,30 +1352,37 @@ func desanitizeFileIn(dir *os.Root, name string, secrets map[string]string) erro
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 
-	// Replace all placeholders with actual values
-	content := string(raw)
-	for key, value := range secrets {
-		// sanitize only follows this pattern as of now
-		placeholder := fmt.Sprintf("{{string .secret.%s }}", key)
-		content = strings.ReplaceAll(content, placeholder, value)
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	var docs []*yaml.Node
+	for {
+		var doc yaml.Node
+		if err := dec.Decode(&doc); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("parse desanitized yaml %s: %w", path, err)
+		}
+		docs = append(docs, &doc)
 	}
 
-	// Normalize YAML formatting
-	var root yaml.Node
-	err = yaml.Unmarshal([]byte(content), &root)
-	if err != nil {
-		return fmt.Errorf("parse desanitized yaml %s: %w", path, err)
+	if len(docs) == 0 {
+		return nil
+	}
+
+	for _, doc := range docs {
+		if err := desanitizeNode(doc, secrets); err != nil {
+			return fmt.Errorf("desanitize yaml %s: %w", path, err)
+		}
 	}
 
 	var out bytes.Buffer
 	enc := yaml.NewEncoder(&out)
 	enc.SetIndent(2)
-
-	// to ensure the same formatting as the original file
-	err = enc.Encode(&root)
-	if err != nil {
-		_ = enc.Close()
-		return fmt.Errorf("encode desanitized yaml %s: %w", path, err)
+	for _, doc := range docs {
+		if err := enc.Encode(doc); err != nil {
+			_ = enc.Close()
+			return fmt.Errorf("encode desanitized yaml %s: %w", path, err)
+		}
 	}
 	_ = enc.Close()
 

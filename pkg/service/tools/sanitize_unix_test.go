@@ -358,7 +358,7 @@ func TestSanitizeUnderSudo_OnlyNewFilesGoToTheInvokingUser(t *testing.T) {
 // is still written: the files already sanitized need it to be restored.
 func TestSanitizeTestSetDir_NamesATestItCouldNotSanitize(t *testing.T) {
 	_, set := testSet(t, map[string]string{
-		"test-1.yaml": "kind: Http\nspec:\n  req:\n    header:\n      Authorization: Bearer abc.def.ghi\n",
+		"test-1.yaml": "kind: Http\nspec:\n  req:\n    header:\n      Authorization: Bearer abc.def.ghi.jkl.mno.pqr\n",
 		"test-2.yaml": "kind: [unclosed\n",
 	}, nil)
 	err := (&Tools{logger: zap.NewNop()}).SanitizeTestSetDir(context.Background(), set)
