@@ -285,6 +285,7 @@ func TestDockerAgentCancel(t *testing.T) {
 			t.Fatal(err)
 		}
 		run := newAgentRun()
+		t.Cleanup(run.engine.end) // the run's end, which asks for its volumes, is not run here
 		run.ready.Store(ready)
 		watch := &removalAsked{t: t, log: log, before: -1, asks: recordStopAsks(t)}
 		if err := dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(watch, stopTestContainer))(); err != nil {
@@ -331,6 +332,7 @@ func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := newAgentRun()
+	t.Cleanup(run.engine.end) // the run's end, which asks for its volumes, is not run here
 	run.ready.Store(true)
 	silent := &removalSilent{asked: make(chan struct{})}
 	cancelled := make(chan error, 1)
