@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -129,6 +130,26 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 				return
 			}
 			Utils.CaptureHook(syncMock.WithWindow(windowCtx, win), logger, t, stream.HTTPReq, stream.HTTPResp, stream.ReqTime, stream.RespTime, opts, synchronous, mapping, appPort)
+			return
+		}
+		if stream.MessageErr != nil {
+			// A compressed message keploy cannot inflate: recorded, it
+			// would be bytes no app reads as its message, and replay would
+			// send them uncompressed. Skipped, as the egress recorder skips
+			// such a call; one that inflates past the test-case size limit
+			// is skipped as one past it on the wire. Told unless the
+			// recording's filters leave the call out anyway.
+			if Utils.IsGrpcFiltered(logger, stream.GRPCReq, opts) {
+				return
+			}
+			method := zap.String("method", stream.GRPCReq.Headers.PseudoHeaders[":path"])
+			if errors.Is(stream.MessageErr, pkg.ErrDecompressedTooLarge) {
+				logger.Error("gRPC test case data exceeds the test-case size limit once inflated, skipping capture",
+					method, zap.Error(stream.MessageErr))
+				return
+			}
+			logger.Warn("Not recording a gRPC call whose compressed message keploy cannot inflate",
+				method, zap.Error(stream.MessageErr))
 			return
 		}
 		Utils.CaptureGRPC(syncMock.WithWindow(windowCtx, win), logger, t, stream, appPort, synchronous, mapping, opts)

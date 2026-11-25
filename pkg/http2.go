@@ -3,6 +3,9 @@ package pkg
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -210,6 +213,10 @@ type HTTP2Stream struct {
 	HTTPReq           *http.Request
 	HTTPResp          *http.Response
 	ReqTime, RespTime time.Time
+	// MessageErr, when set, says a gRPC call's compressed message cannot be
+	// inflated (ErrUndecodableGrpcMessage), or inflates past the test-case
+	// size limit (ErrDecompressedTooLarge): the call is no test case.
+	MessageErr error
 }
 
 // DefaultStreamManager implements stream management
@@ -563,13 +570,22 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 			if isGRPCCall(stream.grpcReq, stream.grpcResp) {
 				stream.grpcReq.Timestamp = stream.startTime
 				stream.grpcResp.Timestamp = stream.endTime
-				// Its messages, from each side's bytes; a side with none
-				// (an error answer's) keeps no body.
+				// Its messages, from each side's bytes, inflated with the
+				// side's grpc-encoding when compressed; a side with none (an
+				// error answer's) keeps no body.
 				if len(stream.reqRaw) > 0 {
-					stream.grpcReq.Body = CreateLengthPrefixedMessageFromPayload(stream.reqRaw)
+					msg, err := ingressMessage(stream.reqRaw, stream.grpcReq.Headers.OrdinaryHeaders["grpc-encoding"])
+					stream.grpcReq.Body = msg
+					if err != nil {
+						http2Stream.MessageErr = fmt.Errorf("request: %w", err)
+					}
 				}
 				if len(stream.respRaw) > 0 {
-					stream.grpcResp.Body = CreateLengthPrefixedMessageFromPayload(stream.respRaw)
+					msg, err := ingressMessage(stream.respRaw, stream.grpcResp.Headers.OrdinaryHeaders["grpc-encoding"])
+					stream.grpcResp.Body = msg
+					if err != nil && http2Stream.MessageErr == nil {
+						http2Stream.MessageErr = fmt.Errorf("response: %w", err)
+					}
 				}
 				stream.reqRaw, stream.respRaw = nil, nil
 				http2Stream.GRPCReq, http2Stream.GRPCResp = stream.grpcReq, stream.grpcResp
@@ -1051,6 +1067,14 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		if strings.HasPrefix(k, ":") {
 			continue
 		}
+		// The codecs the recording's client could read are not the replay
+		// client's: forwarded, they had the app compress its answer with
+		// one the replay cannot read (deflate), and the test failed on
+		// "Decompressor is not installed". The replay client names its own,
+		// as gRPC negotiates them.
+		if strings.EqualFold(k, "grpc-accept-encoding") {
+			continue
+		}
 		md[k] = []string{v}
 	}
 
@@ -1485,6 +1509,140 @@ func CreateLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefix
 	}
 
 	return msg
+}
+
+// ingressMessage is the message a call's side carries, from its bytes
+// (CreateLengthPrefixedMessageFromPayload), inflated with the side's
+// grpc-encoding when compressed (inflatedGrpcMessage). A compressed message cut
+// short, or one that does not inflate, is ErrUndecodableGrpcMessage; one that
+// inflates past MaxGrpcInflateBytes is ErrDecompressedTooLarge.
+func ingressMessage(raw []byte, encoding string) (models.GrpcLengthPrefixedMessage, error) {
+	// Only its first message is recorded: it is bounded alone.
+	if len(raw) < 5 || raw[0] == 0 {
+		return CreateLengthPrefixedMessageFromPayload(raw), nil
+	}
+	end := 5 + int(binary.BigEndian.Uint32(raw[1:5]))
+	if end < 5 || end > len(raw) {
+		return models.GrpcLengthPrefixedMessage{}, fmt.Errorf("%w: cut short", ErrUndecodableGrpcMessage)
+	}
+	return inflatedGrpcMessage(raw[0], raw[5:end], encoding, MaxGrpcInflateBytes)
+}
+
+// MaxGrpcInflateBytes bounds what one side of a gRPC call inflates to, all
+// its messages together (SplitGrpcMessages, ingressMessage): the test-case
+// size limit (hooks/conn MaxTestCaseSize, which imports this package), as
+// the HTTP capture bounds a body it decompresses. A call whose messages
+// inflate past it is no test case, as one past it on the wire is not; the
+// bound stops a small compressed message (a zip bomb) from costing more.
+const MaxGrpcInflateBytes = 5 * 1024 * 1024
+
+// ErrUndecodableGrpcMessage reports a compressed gRPC message (compression
+// flag set) that cannot be inflated: its codec is one keploy does not know
+// (snappy, zstd, or identity with the flag set), or it does not inflate (one
+// that inflates past the limit is ErrDecompressedTooLarge, a size skip).
+// Recorded, it would be bytes no app reads as its
+// message: no field view, no decode with a .proto, and a replay that sends it
+// as an uncompressed message. The egress recorder skips such a call
+// (integrations grpcV2 HasUndecodableBody); the ingress does too.
+var ErrUndecodableGrpcMessage = errors.New("grpc: a compressed message cannot be inflated")
+
+// InflateGrpcMessage returns a gRPC message's payload as the app's code sends
+// and reads it: as it is when its compression flag is 0, else inflated with
+// its direction's grpc-encoding: gzip (also when the header is missing:
+// gzip is the codec gRPC mandates, as the egress recorder reads it) or
+// deflate (zlib, or a raw deflate stream). It reads at most limit bytes of
+// the inflated message: one past it is ErrDecompressedTooLarge. Anything
+// else it cannot read is ErrUndecodableGrpcMessage.
+//
+// gRPC compresses each message on its own, with the codec the call names in
+// grpc-encoding (grpc.UseCompressor): it is not the app's data, which a
+// message carries as it is, but how gRPC sends it. Read as protobuf, the
+// compressed bytes were recorded as a protoscope dump of gzip.
+func InflateGrpcMessage(flag byte, payload []byte, encoding string, limit int64) ([]byte, error) {
+	if flag == 0 {
+		return payload, nil
+	}
+	var r io.Reader
+	switch enc := strings.ToLower(strings.TrimSpace(encoding)); enc {
+	case "", "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(payload))
+		if err != nil {
+			return nil, fmt.Errorf("%w: gzip: %v", ErrUndecodableGrpcMessage, err)
+		}
+		defer zr.Close()
+		r = zr
+	case "deflate":
+		// HTTP's deflate (RFC 9110) is a zlib stream; some peers send a raw
+		// deflate stream under the name.
+		if zr, err := zlib.NewReader(bytes.NewReader(payload)); err == nil {
+			defer zr.Close()
+			r = zr
+		} else {
+			fr := flate.NewReader(bytes.NewReader(payload))
+			defer fr.Close()
+			r = fr
+		}
+	default:
+		return nil, fmt.Errorf("%w: grpc-encoding %q is not one keploy inflates", ErrUndecodableGrpcMessage, enc)
+	}
+	out, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrUndecodableGrpcMessage, encoding, err)
+	}
+	if int64(len(out)) > limit {
+		return nil, fmt.Errorf("gRPC message inflates past %d bytes: %w", limit, ErrDecompressedTooLarge)
+	}
+	return out, nil
+}
+
+// inflatedGrpcMessage is a gRPC message as recorded: its payload inflated
+// (InflateGrpcMessage), so it is kept as the app's message, uncompressed
+// (CompressionFlag 0, its own length), as the egress recorder keeps one and
+// as replay's gRPC client reads the app's answer.
+func inflatedGrpcMessage(flag byte, payload []byte, encoding string, limit int64) (models.GrpcLengthPrefixedMessage, error) {
+	plain, err := InflateGrpcMessage(flag, payload, encoding, limit)
+	if err != nil {
+		return models.GrpcLengthPrefixedMessage{}, err
+	}
+	if int64(len(plain)) > limit {
+		return models.GrpcLengthPrefixedMessage{}, fmt.Errorf("gRPC message of %d bytes past %d: %w", len(plain), limit, ErrDecompressedTooLarge)
+	}
+	msg := models.GrpcLengthPrefixedMessage{MessageLength: uint32(len(plain))} // #nosec G115 -- bounded by limit
+	if len(plain) > 0 {
+		msg.DecodedData = protoscope.Write(plain, protoscope.WriterOptions{})
+	}
+	return msg, nil
+}
+
+// SplitGrpcMessages is SplitLengthPrefixedMessages for a direction whose
+// grpc-encoding is encoding: each compressed message is inflated, and kept
+// uncompressed (inflatedGrpcMessage). A message that cannot be is
+// ErrUndecodableGrpcMessage, with the messages before it. The direction's
+// messages together, as the app sent them, are at most limit bytes
+// (MaxGrpcInflateBytes): past it is ErrDecompressedTooLarge.
+func SplitGrpcMessages(data []byte, encoding string, limit int64) ([]models.GrpcLengthPrefixedMessage, error) {
+	var msgs []models.GrpcLengthPrefixedMessage
+	left := limit
+	for off := 0; off < len(data); {
+		if len(data)-off < 5 {
+			return msgs, fmt.Errorf("%w: %d trailing byte(s) after %d message(s), too few for a 5-byte prefix",
+				ErrTrailingGrpcBytes, len(data)-off, len(msgs))
+		}
+		length := binary.BigEndian.Uint32(data[off+1 : off+5])
+		end := off + 5 + int(length)
+		if end < off+5 || end > len(data) {
+			return msgs, fmt.Errorf("%w: message %d declares %d bytes but only %d remain",
+				ErrTrailingGrpcBytes, len(msgs), length, len(data)-off-5)
+		}
+		msg, err := inflatedGrpcMessage(data[off], data[off+5:end], encoding, left)
+		if err != nil {
+			return msgs, fmt.Errorf("message %d: %w", len(msgs), err)
+		}
+		left -= int64(msg.MessageLength)
+		msgs = append(msgs, msg)
+		off = end
+	}
+	return msgs, nil
 }
 
 // ErrTrailingGrpcBytes reports that a length-prefixed chain did not consume

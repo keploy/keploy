@@ -857,3 +857,12 @@ func TestCaptureGRPC_IngressFilters(t *testing.T) {
 		})
 	}
 }
+
+// The gRPC recorders inflate a side's messages up to the test-case size
+// limit (pkg.MaxGrpcInflateBytes, which this package cannot be imported by):
+// the two are one limit.
+func TestTheGRPCInflateBoundIsTheTestCaseSizeLimit(t *testing.T) {
+	if pkg.MaxGrpcInflateBytes != MaxTestCaseSize {
+		t.Fatalf("pkg.MaxGrpcInflateBytes %d, MaxTestCaseSize %d: want one limit", pkg.MaxGrpcInflateBytes, MaxTestCaseSize)
+	}
+}

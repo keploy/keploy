@@ -404,6 +404,12 @@ func startGRPCIngressOn(t *testing.T, wrap func(net.Conn) net.Conn) *grpcIngress
 // options (its filters) from loadOpts, when it is not nil, at each capture.
 func startGRPCIngressWith(t *testing.T, wrap func(net.Conn) net.Conn, loadOpts func() models.IncomingOptions) *grpcIngress {
 	t.Helper()
+	return startGRPCIngressLogged(t, zap.NewNop(), wrap, loadOpts)
+}
+
+// startGRPCIngressLogged is startGRPCIngressWith whose recorder logs to logger.
+func startGRPCIngressLogged(t *testing.T, logger *zap.Logger, wrap func(net.Conn) net.Conn, loadOpts func() models.IncomingOptions) *grpcIngress {
+	t.Helper()
 	g := &grpcIngress{m: syncMock.New(nil), tcCh: make(chan *models.TestCase), recorded: make(chan struct{}),
 		stop: asTheAgentGetsIt(time.Now().Add(time.Hour))}
 	remove := g.m.AddWatermark(caughtUp{})
@@ -417,7 +423,7 @@ func startGRPCIngressWith(t *testing.T, wrap func(net.Conn) net.Conn, loadOpts f
 	}
 	go func() {
 		defer close(g.recorded)
-		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, g.tcCh, 50051, "", false, false, loadOpts)
+		_ = RecordIncoming(ctx, logger, cliProxy, appProxy, g.tcCh, 50051, "", false, false, loadOpts)
 	}()
 	t.Cleanup(func() {
 		cancel()
