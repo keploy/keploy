@@ -63,8 +63,10 @@ type GrpcSchemaSource interface {
 	// no release), shown to the user as given.
 	RecordedSchema(ctx context.Context, testSetID string) (schema *protoschema.Schema, label, note string)
 	// TargetSchema is the schema uploaded for the release being replayed,
-	// used for the new side when the run has no local protos. Nil when none.
-	TargetSchema(ctx context.Context) (schema *protoschema.Schema, label string)
+	// used for the new side when the run has no local protos. A nil schema
+	// may come with a note saying why (none uploaded for that release),
+	// shown to the user as given; "" when the run names no such release.
+	TargetSchema(ctx context.Context) (schema *protoschema.Schema, label, note string)
 }
 
 // SetGrpcSchemaSource gives the replay the schemas uploaded per release.
@@ -112,8 +114,10 @@ type grpcProtoView struct {
 	expectedLabel string
 	actual        *protoschema.Schema
 	actualLabel   string
-	// note says why a side has no schema, for the report.
-	note string
+	// note says why the recorded side has no schema, for the report;
+	// actualNote why the new side has none.
+	note       string
+	actualNote string
 	// noiseSchemas are what the run's noise names, map fields and grading are
 	// read with, in order, for the first that defines the method: the
 	// recorded release's schema, then the run's own protos, the ones its
@@ -152,6 +156,8 @@ func (r *Replayer) grpcProtoViewFor(tc *models.TestCase, testSetID string) *grpc
 			v.actual, v.actualLabel = local, "local"
 		} else if t := r.targetSchema(ctx); t.schema != nil {
 			v.actual, v.actualLabel = t.schema, t.label
+		} else {
+			v.actualNote = t.note
 		}
 		// A run with its own protos and no upload for the recorded release
 		// (or one that does not define this method) keeps the noise it had
@@ -242,8 +248,8 @@ func (r *Replayer) targetSchema(ctx context.Context) recordedSchema {
 		return *t
 	}
 	r.grpcSchemas.mu.Unlock()
-	s, label := r.grpcSchemas.source.TargetSchema(ctx)
-	t := &recordedSchema{schema: s, label: label}
+	s, label, note := r.grpcSchemas.source.TargetSchema(ctx)
+	t := &recordedSchema{schema: s, label: label, note: note}
 	if s != nil { // as recordedSchemaFor: only a schema is kept
 		r.grpcSchemas.mu.Lock()
 		r.grpcSchemas.target = t
@@ -707,8 +713,12 @@ func (r *Replayer) showGrpcBodiesDecoded(res *models.Result, view *grpcProtoView
 	info := &models.GrpcDecodeInfo{Note: view.note, MessageIndex: row}
 	res.GrpcDecode = info
 	if view.expected == nil || view.actual == nil {
-		if info.Note == "" {
-			info.Note = "no schema for the new response: give the run its protos (--proto-dir) or upload them for the release being replayed"
+		// Each side that has no schema says why: both reasons when neither
+		// has one, as either upload alone decodes nothing.
+		// The same reason once: a release under test that is the recorded
+		// release says the same of both sides.
+		if view.actual == nil && (info.Note == "" || view.actualNote != "" && view.actualNote != view.note) {
+			info.Note = joinNotes(info.Note, newResponseNote(view.actualNote))
 		}
 		return
 	}
@@ -735,6 +745,16 @@ func (r *Replayer) showGrpcBodiesDecoded(res *models.Result, view *grpcProtoView
 	if sameJSON(exp.JSON, act.JSON) {
 		info.Note = encodingOnlyNote
 	}
+}
+
+// newResponseNote says why the new side was read with no schema: the
+// source's reason (the release being replayed has no upload, and the command
+// that gives it one), else how to give it one.
+func newResponseNote(reason string) string {
+	if reason = strings.TrimSpace(reason); reason != "" {
+		return "no schema for the new response: " + reason
+	}
+	return "no schema for the new response: give the run its protos (--proto-dir) or upload them for the release being replayed"
 }
 
 func decodeResponse(s *protoschema.Schema, method, body string) (*protoschema.Decoded, error) {

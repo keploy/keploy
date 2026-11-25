@@ -168,6 +168,7 @@ type fakeSchemas struct {
 	recorded      map[string]*protoschema.Schema
 	recordedLabel string
 	target        *protoschema.Schema
+	targetNote    string
 	recordedAsked int
 }
 
@@ -179,11 +180,11 @@ func (f *fakeSchemas) RecordedSchema(_ context.Context, testSetID string) (*prot
 	return nil, "", "schema not uploaded for release app:v1: run keploy proto upload --release-tag app:v1"
 }
 
-func (f *fakeSchemas) TargetSchema(context.Context) (*protoschema.Schema, string) {
+func (f *fakeSchemas) TargetSchema(context.Context) (*protoschema.Schema, string, string) {
 	if f.target == nil {
-		return nil, ""
+		return nil, "", f.targetNote
 	}
-	return f.target, "release:app:v2"
+	return f.target, "release:app:v2", ""
 }
 
 func ordersSchema(t *testing.T, proto string) *protoschema.Schema {
@@ -240,6 +241,75 @@ func TestARecordedReleaseWithNoSchemaIsShownAsRecordedAndSaysSo(t *testing.T) {
 	}
 }
 
+// The recorded release has its upload and the release under test has none:
+// both sides stay as recorded, and the report says why in the source's words
+// (the release to upload, and how), not a generic "upload it" -- the end of
+// the run names the same release.
+func TestTheReleaseUnderTestWithNoUploadIsNamed(t *testing.T) {
+	r := &Replayer{config: &config.Config{}, logger: zap.NewNop()}
+	const why = "schema not uploaded for release app:v2: run keploy proto upload --release-tag app:v2"
+	r.SetGrpcSchemaSource(&fakeSchemas{
+		recorded:      map[string]*protoschema.Schema{"set-1": ordersSchema(t, ordersProto)},
+		recordedLabel: "release:app:v1",
+		targetNote:    why,
+	})
+	_, res := compareWithProtos(r, ordersCase("3: {\"Pending\"}", nil), ordersResp("3: {\"Shipped\"}"))
+	d := res.GrpcDecode
+	if d == nil || d.ExpectedJSON != "" || d.ActualJSON != "" {
+		t.Fatalf("both sides must stay as recorded: %+v", d)
+	}
+	if d.Note != "no schema for the new response: "+why {
+		t.Fatalf("note = %q", d.Note)
+	}
+}
+
+// Neither release has an upload: the note gives both reasons, as uploading
+// either alone still decodes nothing.
+func TestBothReleasesWithNoUploadAreNamed(t *testing.T) {
+	r := &Replayer{config: &config.Config{}, logger: zap.NewNop()}
+	const why = "schema not uploaded for release app:v2: run keploy proto upload --release-tag app:v2"
+	r.SetGrpcSchemaSource(&fakeSchemas{targetNote: why})
+	_, res := compareWithProtos(r, ordersCase("3: {\"Pending\"}", nil), ordersResp("3: {\"Shipped\"}"))
+	want := "schema not uploaded for release app:v1: run keploy proto upload --release-tag app:v1; no schema for the new response: " + why
+	if d := res.GrpcDecode; d == nil || d.Note != want {
+		t.Fatalf("note = %+v, want %q", d, want)
+	}
+}
+
+// The release under test is the recorded release, with no upload: its
+// reason is given once, not once per side.
+func TestTheSameReleaseWithNoUploadIsNamedOnce(t *testing.T) {
+	r := &Replayer{config: &config.Config{}, logger: zap.NewNop()}
+	const why = "schema not uploaded for release app:v1: run keploy proto upload --release-tag app:v1"
+	r.SetGrpcSchemaSource(&fakeSchemas{targetNote: why})
+	_, res := compareWithProtos(r, ordersCase("3: {\"Pending\"}", nil), ordersResp("3: {\"Shipped\"}"))
+	if d := res.GrpcDecode; d == nil || d.Note != why {
+		t.Fatalf("note = %+v, want %q", d, why)
+	}
+}
+
+// The release under test answered with no schema and a reason (nothing was
+// uploaded yet): it is asked again for the next test, and its schema used
+// once the source has one.
+func TestATargetWithNoSchemaIsAskedAgain(t *testing.T) {
+	r := &Replayer{config: &config.Config{}, logger: zap.NewNop()}
+	src := &fakeSchemas{
+		recorded:      map[string]*protoschema.Schema{"set-1": ordersSchema(t, ordersProto)},
+		recordedLabel: "release:app:v1",
+		targetNote:    "schema not uploaded for release app:v2",
+	}
+	r.SetGrpcSchemaSource(src)
+	_, first := compareWithProtos(r, ordersCase("3: {\"Pending\"}", nil), ordersResp("3: {\"Shipped\"}"))
+	if first.GrpcDecode == nil || first.GrpcDecode.ActualJSON != "" {
+		t.Fatalf("first test: %+v", first.GrpcDecode)
+	}
+	src.target = ordersSchema(t, ordersProto)
+	_, second := compareWithProtos(r, ordersCase("3: {\"Pending\"}", nil), ordersResp("3: {\"Shipped\"}"))
+	if d := second.GrpcDecode; d == nil || d.Actual != "release:app:v2" || !strings.Contains(d.ActualJSON, "Shipped") {
+		t.Fatalf("second test: %+v", d)
+	}
+}
+
 // A test set's schema is asked for once per run, not once per test case.
 func TestTheRecordedSchemaIsResolvedOncePerTestSet(t *testing.T) {
 	r := &Replayer{config: &config.Config{}, logger: zap.NewNop()}
@@ -283,12 +353,12 @@ func (f *flakySchemas) RecordedSchema(context.Context, string) (*protoschema.Sch
 	return f.schema, "release:app:v1", ""
 }
 
-func (f *flakySchemas) TargetSchema(context.Context) (*protoschema.Schema, string) {
+func (f *flakySchemas) TargetSchema(context.Context) (*protoschema.Schema, string, string) {
 	f.targetAsked++
 	if f.targetAsked == 1 {
-		return nil, ""
+		return nil, "", ""
 	}
-	return f.schema, "release:app:v2"
+	return f.schema, "release:app:v2", ""
 }
 
 // A stream shows the message that differs, not the first one.
