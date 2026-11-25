@@ -10,7 +10,22 @@
 #   3. a service with no container_name: <project>-<service>-1, the project
 #      from a name: with capitals, lowercased as compose lowercases it;
 #   4. the same under --compatibility: <project>_<service>_1;
-#   5. the same with COMPOSE_COMPATIBILITY=true in the project's .env.
+#   5. the same with COMPOSE_COMPATIBILITY=true in the project's .env;
+#   6. the same with inline COMPOSE_COMPATIBILITY=true in the -c command;
+#   7. inline APP_CONTAINER=<name> in the -c command;
+#   8. inline COMPOSE_FILE=noname.yml in the -c command while docker-compose.yml
+#      is also present in the working directory;
+#   9. a compose file in a subdirectory (-f sub$ID/compose.yml and inline
+#      COMPOSE_FILE=sub$ID/compose.yml) with no container_name and no name:,
+#      verifying keploy preserves the subdirectory as project directory (for
+#      both the derived project name sub$ID-app-1 and relative volumes / .env);
+#  10. a multi-file inline CECN_REQ=1 COMPOSE_FILE=base.yml:override.yml in -c
+#      where base.yml defines app and db (requiring ${CECN_REQ:?set CECN_REQ})
+#      and override.yml adds container_name, ports, extra_hosts, override-only
+#      networks (overnet), and sidecar, run twice consecutively without script
+#      cleanup between runs to verify keploy's own teardown (with inline env
+#      and all rewritten -f files) removes every container/network and run 2
+#      gets a fresh db ID.
 # Each leg records one call and must write its test case; a keploy that
 # matches container_name as written ends at once with "container ... not
 # found in any of the provided docker-compose files".
@@ -39,14 +54,17 @@ ID=$$
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
 PORT=$(free_port) || exit 1
 # The variables the files name start unset, as a user's shell has them.
-unset APP_PROJECT APP_CONTAINER APP_PORT APP_NETWORK COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_COMPATIBILITY
+unset APP_PROJECT APP_CONTAINER APP_PORT APP_NETWORK CECN_REQ COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_COMPATIBILITY
 
 # Tear down only this run's projects, by their files. Never a blanket prune.
 cleanup() {
   local f
-  for f in docker-compose.yml noname.yml; do
+  for f in docker-compose.yml noname.yml "sub${ID}/compose.yml"; do
     [ -f "$f" ] && sudo docker compose -f "$f" down --remove-orphans >/dev/null 2>&1
   done
+  if [ -f base.yml ] && [ -f override.yml ]; then
+    sudo CECN_REQ=1 docker compose -f base.yml -f override.yml down --remove-orphans >/dev/null 2>&1
+  fi
   return 0
 }
 finish() {
@@ -141,7 +159,7 @@ record() {
   local name=$1 cmd=$2 ctr=$3 not=${4:-} log="$1.log" pid rc before=$FAIL n
   sudo rm -rf keploy
   : > "$log"
-  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" ${KEPLOY_PROVEN:+"KEPLOY_PROVEN=$KEPLOY_PROVEN"} "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
@@ -169,7 +187,7 @@ record() {
     echo "FAIL: $name: keploy did not find the container compose named $ctr"
     FAIL=1
   fi
-  verify_ran "" "$log" || FAIL=$((FAIL + 1))
+  verify_ran "${KEPLOY_PROVEN:-}" "$log" || FAIL=$((FAIL + 1))
   [ "$FAIL" -eq "$before" ] || tail -60 "$log"
 }
 
@@ -194,6 +212,126 @@ printf 'COMPOSE_COMPATIBILITY=true\n' > .env
 record compatenv "docker compose -f noname.yml up" "cecn-proj-${ID}_app_1" "cecn-proj-$ID-app-1"
 cleanup
 rm -f .env
+echo "== 6. inline COMPOSE_COMPATIBILITY=true in the -c command: <project>_<service>_1 =="
+record compatinline "COMPOSE_COMPATIBILITY=true docker compose -f noname.yml up" "cecn-proj-${ID}_app_1" "cecn-proj-$ID-app-1"
+cleanup
+echo "== 7. inline APP_CONTAINER in the -c command =="
+record containerinline "APP_CONTAINER=cecn-inline-$ID docker compose up" "cecn-inline-$ID" "cecn-app-$ID"
+cleanup
+echo "== 8. inline COMPOSE_FILE=noname.yml in the -c command =="
+record composefileinline "COMPOSE_FILE=noname.yml docker compose up" "cecn-proj-$ID-app-1" "cecn-app-$ID"
+cleanup
+echo "== 9. compose file in a subdirectory (-f sub${ID}/compose.yml and inline COMPOSE_FILE=sub${ID}/compose.yml) =="
+SUBDIR="sub${ID}"
+mkdir -p "$SUBDIR"
+cp app.py "$SUBDIR/app.py"
+printf 'SUB_PORT=%s\n' "$PORT" > "$SUBDIR/.env"
+cat > "$SUBDIR/compose.yml" <<YML
+services:
+  app:
+    image: $IMAGE
+    working_dir: /w
+    volumes: [".:/w:z"]
+    command: python app.py
+    ports: ["\${SUB_PORT}:8080"]
+YML
+WORK_PROJ=$(basename "$WORK" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+record subdir "docker compose -f ${SUBDIR}/compose.yml up" "${SUBDIR}-app-1" "${WORK_PROJ}-app-1"
+cleanup
+record subdirinline "COMPOSE_FILE=${SUBDIR}/compose.yml docker compose up" "${SUBDIR}-app-1" "${WORK_PROJ}-app-1"
+cleanup
+
+echo "== 10. multi-file inline CECN_REQ=1 COMPOSE_FILE=base.yml:override.yml (override adds container_name, ports, extra_hosts, networks, sidecar; teardown with inline env across 2 runs) =="
+cat > base.yml <<YML
+name: cecn-multi-proj-$ID
+services:
+  app:
+    image: $IMAGE
+    working_dir: /w
+    volumes: [".:/w:z"]
+    command: python app.py
+  db:
+    image: $IMAGE
+    environment:
+      - REQ=\${CECN_REQ:?set CECN_REQ}
+    command: ["python", "-c", "import time; time.sleep(300)"]
+YML
+cat > override.yml <<YML
+services:
+  app:
+    container_name: cecn-multi-$ID
+    ports: ["$PORT:8080"]
+    extra_hosts: ["override.local:127.0.0.1"]
+    networks: [overnet]
+  sidecar:
+    image: $IMAGE
+    command: ["python", "-c", "import time; time.sleep(300)"]
+networks:
+  overnet: {}
+YML
+MULTI_PROJ="cecn-multi-proj-$ID"
+record_multi_and_check_teardown() {
+  local name=$1 outvar=$2 log="$1.log" pid rc before=$FAIL n dbid="" leftover netleft
+  sudo rm -rf keploy
+  : > "$log"
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" ${KEPLOY_PROVEN:+"KEPLOY_PROVEN=$KEPLOY_PROVEN"} "$RECORD_BIN" record \
+    -c "CECN_REQ=1 COMPOSE_FILE=base.yml:override.yml docker compose up" --container-name "cecn-multi-$ID" \
+    --disable-tele --debug > "$log" 2>&1 &
+  pid=$!
+  if await "$log" "$pid" "APP LISTENING" 1; then
+    dbid=$(sudo docker ps -q --filter "label=com.docker.compose.project=$MULTI_PROJ" --filter "label=com.docker.compose.service=db" | head -n 1)
+    if [ -z "$dbid" ]; then
+      echo "FAIL: $name: db dependency container not running"; FAIL=1
+    fi
+    if [ -z "$(sudo docker ps -q --filter "label=com.docker.compose.project=$MULTI_PROJ" --filter "label=com.docker.compose.service=sidecar")" ]; then
+      echo "FAIL: $name: override-only sidecar container not running"; FAIL=1
+    fi
+    if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/hello/$name"; then
+      await "$log" "$pid" "Keploy has captured test cases" 1 ||
+        { echo "FAIL: $name: keploy did not write the call's test case"; FAIL=1; }
+      names | grep -qxF "cecn-multi-$ID" || { echo "FAIL: $name: compose named no container cecn-multi-$ID"; names; FAIL=1; }
+      if names | grep -qxF "${MULTI_PROJ}-app-1"; then
+        echo "FAIL: $name: compose also named ${MULTI_PROJ}-app-1"; FAIL=1
+      fi
+    else
+      echo "FAIL: $name: GET /hello/$name through the app failed"; FAIL=1
+    fi
+    sudo kill -INT "$pid" 2>/dev/null
+  else
+    echo "FAIL: $name: keploy exited before the app listened"
+    FAIL=1
+  fi
+  wait "$pid"
+  rc=$?
+  [ "$rc" -eq 0 ] || { echo "FAIL: $name: keploy record exited $rc"; FAIL=1; }
+  n=$(sudo sh -c 'ls keploy/test-set-*/tests/*.yaml 2>/dev/null' | grep -c .)
+  [ "$n" -ge 1 ] || { echo "FAIL: $name: no test case on disk"; FAIL=1; }
+  # Check BEFORE script cleanup(): keploy's own teardown must have removed
+  # every container (app, keploy-agent, db, override-only sidecar) and network
+  # (override-only overnet) for this project.
+  leftover=$(sudo docker ps -aq --filter "label=com.docker.compose.project=$MULTI_PROJ")
+  if [ -n "$leftover" ]; then
+    echo "FAIL: $name: keploy teardown left project containers behind: $leftover"; FAIL=1
+  fi
+  netleft=$(sudo docker network ls -q --filter "label=com.docker.compose.project=$MULTI_PROJ")
+  if [ -n "$netleft" ]; then
+    echo "FAIL: $name: keploy teardown left project networks behind: $netleft"; FAIL=1
+  fi
+  verify_ran "${KEPLOY_PROVEN:-}" "$log" || FAIL=$((FAIL + 1))
+  [ "$FAIL" -eq "$before" ] || tail -60 "$log"
+  printf -v "$outvar" '%s' "$dbid"
+}
+DB_ID_1=""
+DB_ID_2=""
+record_multi_and_check_teardown composefilemulti1 DB_ID_1
+# Deliberately do NOT run script cleanup() between runs: keploy's own teardown
+# must leave a clean slate so run 2 creates a brand-new db container.
+record_multi_and_check_teardown composefilemulti2 DB_ID_2
+if [ -n "$DB_ID_1" ] && [ -n "$DB_ID_2" ] && [ "$DB_ID_1" = "$DB_ID_2" ]; then
+  echo "FAIL: composefilemulti: db container was reused across runs ($DB_ID_1)"
+  FAIL=1
+fi
+cleanup
 
 # A race build reports a data race and carries on: fail on one in any leg.
 if grep -l "WARNING: DATA RACE" ./*.log; then

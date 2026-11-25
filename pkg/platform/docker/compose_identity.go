@@ -20,22 +20,33 @@ import (
 
 // ComposeScope is what docker compose resolves its files in, beyond the files
 // themselves: the compose command's own -p/--project-name (or the
-// COMPOSE_PROJECT_NAME it assigns), --project-directory, --env-file and
-// --compatibility values, and whether keploy's in-process compose library
-// runs the files in the CLI's place. The zero value is a docker compose
-// command that sets none of them, which is the usual case: compose then takes
-// the project directory from the first file (the current directory for a
-// document on its standard input), reads that directory's .env, and names the
-// project from the environment, the files' name: or the directory.
+// COMPOSE_PROJECT_NAME it assigns), --project-directory, --env-file,
+// --compatibility, leading inline shell assignments (`NAME=value`), and
+// whether keploy's in-process compose library runs the files in the CLI's
+// place. The zero value is a docker compose command that sets none of them,
+// which is the usual case: compose then takes the project directory from the
+// first file (the current directory for a document on its standard input),
+// reads that directory's .env, and names the project from the environment,
+// the files' name: or the directory.
 type ComposeScope struct {
 	ProjectName string
 	ProjectDir  string
 	EnvFiles    []string
 	// Compatibility is the command's --compatibility: compose then names a
 	// service's containers <project>_<service>_<number>, as it does when its
-	// environment (keploy's, else the env files') sets COMPOSE_COMPATIBILITY
-	// true.
+	// environment (inline command assignments, else keploy's, else the env
+	// files') sets COMPOSE_COMPATIBILITY true.
 	Compatibility bool
+	// Env holds leading shell variable assignments from the compose command
+	// (`COMPOSE_COMPATIBILITY=true APP_CONTAINER=x docker compose up`). Ignored
+	// when InProcess is true (the in-process library does not run in a shell);
+	// otherwise they overlay keploy's environment with higher precedence, as
+	// `sh -c` passes them to docker compose.
+	Env map[string]string
+	// EnvErr records an inline shell expansion that keploy cannot evaluate
+	// statically (command substitution or unsupported parameter expansion);
+	// resolveComposeIdentity returns it fail-closed unless InProcess is true.
+	EnvErr error
 	// InProcess is set when the compose library keploy runs in-process
 	// (RegisterComposeStack) runs the document, not the docker compose CLI.
 	// Compatibility mode is the CLI's: the library names every container
@@ -47,6 +58,10 @@ type ComposeScope struct {
 // composeCompatibilityEnv is the variable that runs the docker compose CLI in
 // compatibility mode, read from the environment the files resolve against.
 const composeCompatibilityEnv = "COMPOSE_COMPATIBILITY"
+
+// composeDisableEnvFileEnv is the variable that stops compose from loading the
+// default .env file when no explicit env file is given.
+const composeDisableEnvFileEnv = "COMPOSE_DISABLE_ENV_FILE"
 
 // composeCompatibilitySeparator is what compose puts between a container
 // name's parts in compatibility mode, in composeContainerSeparator's place.
@@ -86,10 +101,12 @@ func loadComposeContentIdentity(ctx context.Context, content []byte, scope Compo
 // resolveComposeIdentity resolves the files at paths, or content as the one
 // document `-f -` reads when content is set, as docker compose resolves them
 // in scope, with compose's own library: ${VAR}, ${VAR:-d}, ${VAR-d}, ${VAR:?e}
-// and $$ against keploy's environment (it wins, as the shell's does for
-// compose), then the env files (scope's, else COMPOSE_ENV_FILES, else the
-// project directory's .env), and each later file merged over the earlier
-// ones, extends and include followed.
+// and $$ against leading inline assignments from the command overlaid on
+// keploy's environment (inline wins over keploy's env, which wins over the env
+// files, as the shell's does for compose), then the env files (scope's, else
+// COMPOSE_ENV_FILES, else the project directory's .env unless
+// COMPOSE_DISABLE_ENV_FILE is true), and each later file merged over the
+// earlier ones, extends and include followed.
 //
 // It reads what names a container and nothing more. A document that does not
 // load (a required variable unset, a malformed template, an env file that
@@ -97,15 +114,23 @@ func loadComposeContentIdentity(ctx context.Context, content []byte, scope Compo
 // to matching the text as written, which is the guess that missed every
 // container_name set from a variable.
 func resolveComposeIdentity(ctx context.Context, paths []string, content []byte, scope ComposeScope) (*composeIdentity, error) {
+	if !scope.InProcess && scope.EnvErr != nil {
+		return nil, scope.EnvErr
+	}
 	env := composetypes.Mapping{}
 	for _, kv := range os.Environ() {
 		if k, v, ok := strings.Cut(kv, "="); ok {
 			env[k] = v
 		}
 	}
+	if !scope.InProcess {
+		for k, v := range scope.Env {
+			env[k] = v
+		}
+	}
 	envFiles := scope.EnvFiles
 	if len(envFiles) == 0 {
-		envFiles = strings.FieldsFunc(os.Getenv(composeEnvFilesEnv), func(c rune) bool { return c == ',' })
+		envFiles = strings.FieldsFunc(env[composeEnvFilesEnv], func(c rune) bool { return c == ',' })
 	}
 	files := make([]string, 0, len(envFiles))
 	for _, f := range envFiles {
@@ -136,7 +161,7 @@ func resolveComposeIdentity(ctx context.Context, paths []string, content []byte,
 	o, err := cli.NewProjectOptions(paths,
 		cli.WithWorkingDirectory(scope.ProjectDir),
 		func(o *cli.ProjectOptions) error { o.Environment = env; return nil },
-		cli.WithEnvFiles(files...),
+		composeEnvFilesOption(files, env),
 		cli.WithDotEnv,
 		cli.WithName(scope.ProjectName),
 		cli.WithLoadOptions(loadOptions...),
@@ -171,24 +196,69 @@ func resolveComposeIdentity(ctx context.Context, paths []string, content []byte,
 	return ident, nil
 }
 
+// composeEnvFilesOption is cli.WithEnvFiles using env (which overlays inline
+// command assignments on keploy's process environment) rather than
+// os.LookupEnv for COMPOSE_DISABLE_ENV_FILE. Explicit files (--env-file or
+// COMPOSE_ENV_FILES) are always used; only the implicit default .env is
+// skipped when COMPOSE_DISABLE_ENV_FILE parses true.
+func composeEnvFilesOption(files []string, env composetypes.Mapping) cli.ProjectOptionsFn {
+	if len(files) > 0 {
+		return cli.WithEnvFiles(files...)
+	}
+	return func(o *cli.ProjectOptions) error {
+		if v, ok := env[composeDisableEnvFileEnv]; ok {
+			disabled, err := strconv.ParseBool(v)
+			if err != nil {
+				return err
+			}
+			if disabled {
+				return nil
+			}
+		}
+		wd, err := o.GetWorkingDir()
+		if err != nil {
+			return err
+		}
+		defaultDotEnv := filepath.Join(wd, ".env")
+		s, err := os.Stat(defaultDotEnv)
+		if os.IsNotExist(err) || os.IsPermission(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !s.IsDir() {
+			o.EnvFiles = []string{defaultDotEnv}
+		}
+		return nil
+	}
+}
+
 // loadSchemaUnchecked is load(), which loads with compose's schema unchecked
 // (resolveComposeIdentity's SkipValidation). compose-go's normalizer asserts the
 // types the schema guarantees, so a document the schema refuses (a service's
 // `volumes:` or `networks:` left empty, a service with no body) panics there,
 // where compose, which checks the schema first, says why. Such a document is
 // loaded once more with the schema checked, and that load's error is the one
-// compose gives.
+// compose gives. Panics on the second load are recovered too so a document
+// compose itself panics on returns compose's loader message rather than
+// crashing keploy.
 func loadSchemaUnchecked(load func(extra ...func(*loader.Options)) (*composetypes.Project, error)) (*composetypes.Project, error) {
-	project, failure, err := func() (p *composetypes.Project, failure any, err error) {
+	run := func(extra ...func(*loader.Options)) (p *composetypes.Project, failure any, err error) {
 		defer func() { failure = recover() }()
-		p, err = load()
+		p, err = load(extra...)
 		return p, nil, err
-	}()
+	}
+	project, failure, err := run()
 	if failure == nil {
 		return project, err
 	}
-	if _, err := load(func(lo *loader.Options) { lo.SkipValidation = false }); err != nil {
-		return nil, err
+	_, failure2, err2 := run(func(lo *loader.Options) { lo.SkipValidation = false })
+	if err2 != nil {
+		return nil, err2
+	}
+	if failure2 != nil {
+		return nil, fmt.Errorf("compose's loader failed on the document: %v", failure2)
 	}
 	return nil, fmt.Errorf("compose's loader failed on the document: %v", failure)
 }

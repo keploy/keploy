@@ -20,10 +20,11 @@ import (
 // on its stdout for the container's stdout and on its stderr for the
 // container's stderr, where name is the container as compose names it in its
 // output (its container_name, else <service>-<number>, <service>_<number> in
-// compatibility mode) and the padding lines the names up. Its own lines (progress, "Attaching to", "exited with code")
-// carry no such prefix and are not kept. It is the line format of compose's
-// log formatter, the one the compose library's consumer reproduces
-// (composeLogConsumer), with its colour codes when compose colours it.
+// compatibility mode) and the padding lines the names up. Its own lines
+// (progress, "Attaching to", "exited with code") carry no such prefix and are
+// not kept. It is the line format of compose's log formatter, the one the
+// compose library's consumer reproduces (composeLogConsumer), with its colour
+// codes when compose colours it.
 //
 // Each StartComposeChildOutput is one Up: it starts a new run of the
 // project's tails, as ComposeRunner.Up does, so the tails hold that Up's
@@ -34,11 +35,12 @@ type ComposeChildOutput struct {
 }
 
 // StartComposeChildOutput resolves content as `docker compose -f -` will in
-// scope (the command's -p, --project-directory, --env-file and
-// --compatibility), with compose's own library (loadComposeContentIdentity),
-// to know the project's name and its services' container names, and starts a
-// new run of that project's tails. It reads no daemon. Call it before the
-// child starts, and hand each of the child's output streams its own Stream.
+// scope (the command's -p, --project-directory, --env-file, --compatibility,
+// and leading inline NAME=value assignments), with compose's own library
+// (loadComposeContentIdentity), to know the project's name and its services'
+// container names, and starts a new run of that project's tails. It reads no
+// daemon. Call it before the child starts, and hand each of the child's output
+// streams its own Stream.
 func StartComposeChildOutput(ctx context.Context, content []byte, scope ComposeScope) (*ComposeChildOutput, error) {
 	project, err := loadComposeContentIdentity(ctx, content, scope)
 	if err != nil {
