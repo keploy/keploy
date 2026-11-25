@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,6 +45,11 @@ import (
 // being replayed. A recorded release with no upload shows both sides as
 // recorded and says so, never a guess from another release. Without a source
 // (a plain keploy test) the run's local protos read both, as before.
+//
+// NOISE, MAP FIELDS AND GRADING READ ONE SCHEMA: the recorded release's, or,
+// when nothing was uploaded for it (or it does not define the method), the
+// run's own protos, which the run's noise was written against -- what such a
+// run read before uploads existed. Never the release under test's.
 
 // GrpcSchemaSource supplies schemas uploaded per release. Cloud replay sets
 // one (SetGrpcSchemaSource); a plain keploy test has none.
@@ -72,6 +78,8 @@ type grpcSchemas struct {
 	target   *recordedSchema
 	// warned holds the refused noise entries already said (firstRefusal).
 	warned sync.Map
+	// walks holds each schema and method's walkSchema (walk).
+	walks sync.Map
 }
 
 // firstRefusal reports whether these refused noise entries were not yet
@@ -103,6 +111,14 @@ type grpcProtoView struct {
 	actualLabel   string
 	// note says why a side has no schema, for the report.
 	note string
+	// noiseSchemas are what the run's noise names, map fields and grading are
+	// read with, in order, for the first that defines the method: the
+	// recorded release's schema, then the run's own protos, the ones its
+	// noise was written against (as a run read them before uploads existed).
+	// Never the release under test's. They never decide how a body is shown:
+	// a recorded release with no schema is shown as recorded, never with
+	// another release's names.
+	noiseSchemas []*protoschema.Schema
 }
 
 func (r *Replayer) protosConfigured() bool {
@@ -134,14 +150,29 @@ func (r *Replayer) grpcProtoViewFor(tc *models.TestCase, testSetID string) *grpc
 		} else if t := r.targetSchema(ctx); t.schema != nil {
 			v.actual, v.actualLabel = t.schema, t.label
 		}
+		// A run with its own protos and no upload for the recorded release
+		// (or one that does not define this method) keeps the noise it had
+		// before uploads existed.
+		v.noiseSchemas = nonNilSchemas(rec.schema, local)
 	} else if local != nil {
 		v.expected, v.expectedLabel = local, "local"
 		v.actual, v.actualLabel = local, "local"
+		v.noiseSchemas = nonNilSchemas(local)
 	}
 	if v.expected == nil && v.actual == nil && v.note == "" {
 		return nil
 	}
 	return v
+}
+
+func nonNilSchemas(schemas ...*protoschema.Schema) []*protoschema.Schema {
+	var out []*protoschema.Schema
+	for _, s := range schemas {
+		if s != nil {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (r *Replayer) localSchema(method string) *protoschema.Schema {
@@ -211,19 +242,23 @@ func (r *Replayer) targetSchema(ctx context.Context) recordedSchema {
 	return *t
 }
 
-// noiseMessage is the response descriptor noise names are read against: the
-// schema the test case's fields were written in. With a schema source that is
-// the recorded release's, and nothing else -- never a guess from another
-// release; without one, the run's local protos.
+// noiseMessage is the response descriptor noise names are read against, and
+// the schema it is from: the first of noiseSchemas that defines the method.
 func (v *grpcProtoView) noiseMessage() protoreflect.MessageDescriptor {
-	s := v.expected
-	if s == nil {
-		return nil
+	_, md := v.noiseSchema()
+	return md
+}
+
+func (v *grpcProtoView) noiseSchema() (*protoschema.Schema, protoreflect.MessageDescriptor) {
+	if v == nil {
+		return nil, nil
 	}
-	if _, resp, err := s.MessageTypes(v.method); err == nil {
-		return resp
+	for _, s := range v.noiseSchemas {
+		if _, resp, err := s.MessageTypes(v.method); err == nil {
+			return s, resp
+		}
 	}
-	return nil
+	return nil, nil
 }
 
 // withNameNoiseAsFieldNumbers returns a copy of tc whose noise also names, by
@@ -339,11 +374,21 @@ func fieldNumberPathOf(md protoreflect.MessageDescriptor, key string) (string, p
 	var nums []string
 	var last protoreflect.FieldDescriptor
 	cur := md
+	// opaque: the last step named a field whose JSON keys are not field names
+	// -- a map (its keys are entry keys) or a well-known type such as Struct.
+	// A step past it names one entry, which a field-number path cannot: it
+	// is refused rather than widened to the whole field.
+	opaque := false
+	// repeated: the last step named a list, whose next segment may be an index.
+	repeated := false
 	for _, seg := range strings.Split(key, ".") {
-		if _, err := strconv.Atoi(seg); err == nil {
-			continue // an index (or an already-numeric key): every element
+		if _, err := strconv.Atoi(seg); err == nil && repeated {
+			repeated = false
+			continue // an index into a list: every element
 		}
-		if cur == nil {
+		// A number anywhere else names no field here (inner.3, 6.name): it
+		// is refused, never skipped onto another field or the whole one.
+		if opaque || cur == nil {
 			return "", nil, false
 		}
 		fd := fieldByLowerName(cur, seg)
@@ -352,9 +397,10 @@ func fieldNumberPathOf(md protoreflect.MessageDescriptor, key string) (string, p
 		}
 		last = fd
 		nums = append(nums, strconv.Itoa(int(fd.Number())))
+		repeated = fd.IsList()
 		switch {
-		case fd.IsMap():
-			cur = nil // a map's entries are not named by key in a field-number path
+		case fd.IsMap(), fd.Message() != nil && jsonIsNotItsFields[fd.Message().FullName()]:
+			cur, opaque = nil, true
 		case fd.Message() != nil:
 			cur = fd.Message()
 		default:
@@ -392,15 +438,14 @@ func (r *Replayer) compareGRPCWithSchemas(tc *models.TestCase, actual *models.Gr
 	view := r.grpcProtoViewFor(tc, testSetID)
 	compared := r.withNameNoiseAsFieldNumbers(tc, view, testSetID)
 	extra := []grpcMatcher.MatchOption{grpcMatcher.WithWarnOnce(r.grpcSchemas.firstWarning)}
-	if view != nil && view.expected != nil {
-		if md := view.noiseMessage(); md != nil {
-			extra = append(extra, grpcMatcher.WithUnorderedFields(mapFieldPaths(md)))
-		}
-		// Grading reads both sides with ONE schema, the recorded one, as
-		// the verdict compares them by field number: read with two, a
-		// renamed field would look removed on one side and added on the
-		// other. The per-side schemas are for the display only.
-		grade := view.expected
+	if grade, md := view.noiseSchema(); grade != nil {
+		extra = append(extra, grpcMatcher.WithUnorderedFieldSet(r.grpcSchemas.walk(grade, view.method, md).mapSet))
+		// Grading reads both sides with ONE schema, the one the noise is
+		// read with, as the verdict compares them by field number: read with
+		// two, a renamed field would look removed on one side and added on
+		// the other. With no upload for the recorded release that is the
+		// run's own protos, as a run graded before uploads existed. The
+		// per-side schemas are for the display only.
 		extra = append(extra, grpcMatcher.WithAssessmentDecoder(func(e, a string) (string, string, bool) {
 			exp, err1 := decodeResponse(grade, view.method, e)
 			act, err2 := decodeResponse(grade, view.method, a)
@@ -415,46 +460,27 @@ func (r *Replayer) compareGRPCWithSchemas(tc *models.TestCase, actual *models.Gr
 	return pass, res
 }
 
-// mapFieldPaths lists, by field-number path, every map field reachable from
-// md (a map's entries have no order in protobuf), maps inside a map's value
-// message included. A recursive message (a tree: Node{map attrs; repeated
-// Node children}) is followed maxTypeRepeats levels deep, so its nested
-// maps are listed too; the walk stops at maxMapFieldDepth and after
-// maxMapFieldPaths paths, so a schema with several recursive fields cannot
-// make it explode.
-func mapFieldPaths(md protoreflect.MessageDescriptor) []string {
-	var out []string
-	var walk func(m protoreflect.MessageDescriptor, prefix string, seen map[protoreflect.FullName]int, depth int)
-	walk = func(m protoreflect.MessageDescriptor, prefix string, seen map[protoreflect.FullName]int, depth int) {
-		if m == nil || seen[m.FullName()] >= maxTypeRepeats || depth > maxMapFieldDepth || len(out) >= maxMapFieldPaths {
-			return
-		}
-		seen[m.FullName()]++
-		defer func() { seen[m.FullName()]-- }()
-		fields := m.Fields()
-		for i := 0; i < fields.Len(); i++ {
-			fd := fields.Get(i)
-			p := strconv.Itoa(int(fd.Number()))
-			if prefix != "" {
-				p = prefix + "." + p
-			}
-			if fd.IsMap() {
-				out = append(out, p)
-				// A map's value may be a message holding maps of its own:
-				// entries are field 1 (key) and 2 (value).
-				if v := fd.MapValue(); v.Message() != nil {
-					walk(v.Message(), p+".2", seen, depth+1)
-				}
-				continue
-			}
-			if fd.Message() != nil {
-				walk(fd.Message(), p, seen, depth+1)
-			}
-		}
-	}
-	walk(md, "", map[protoreflect.FullName]int{}, 0)
-	sort.Strings(out)
-	return out
+// schemaWalk is what one walk of a method's response type finds.
+type schemaWalk struct {
+	// maps are the field-number paths of every map field (entries have no
+	// order in protobuf), maps inside a map's value message included.
+	maps []string
+	// opaque are the field-name paths, as decoded JSON spells them (proto
+	// names, no list indices), of every field a noise path may name whole but
+	// not step past (fieldNumberPathOf refuses the step): a map, whose JSON
+	// keys are entry keys, and the well-known types whose JSON is not their
+	// fields.
+	opaque []string
+	// visited counts the fields walked and well-known map paths generated (at
+	// most maxWalkFields).
+	visited int
+	// mapSet is maps as the set the comparison reads, built once per walk.
+	mapSet map[string]bool
+	// complete says every field a name path can reach was visited. A
+	// recursive type is followed maxTypeRepeats levels deep and the walk
+	// stops after maxWalkFields fields, so a deeper map keeps its order (as
+	// without a schema), and a deeper opaque field is not listed.
+	complete bool
 }
 
 const (
@@ -463,10 +489,183 @@ const (
 	// path: a tree's maps a few levels down are listed; deeper ones keep
 	// their order, as without a schema.
 	maxTypeRepeats = 8
-	// maxMapFieldPaths bounds the list a schema with several recursive
-	// fields could otherwise grow without end.
-	maxMapFieldPaths = 4096
+	// maxWalkFields bounds the work of one walk: a schema whose recursive
+	// types reach many fields at every level would otherwise be walked
+	// exhaustively (k^maxTypeRepeats fields for k self-referencing fields).
+	maxWalkFields = 20000
 )
+
+// walkSchema walks the fields reachable from md, bounded in depth, type
+// repeats and fields visited. Every field a name path can reach is walked
+// first; the messages inside map values, where only nested maps matter, after,
+// so the budget running out there cannot hide them.
+func walkSchema(md protoreflect.MessageDescriptor) schemaWalk {
+	w := schemaWalk{complete: true}
+	seen := map[protoreflect.FullName]int{}
+	type deferred struct {
+		m      protoreflect.MessageDescriptor
+		prefix string
+		depth  int
+	}
+	var later []deferred
+	// mapsOnly: inside a map's value, where only nested maps matter (a name
+	// path cannot reach there).
+	var walk func(m protoreflect.MessageDescriptor, numPrefix, namePrefix string, depth int, mapsOnly bool)
+	walk = func(m protoreflect.MessageDescriptor, numPrefix, namePrefix string, depth int, mapsOnly bool) {
+		if m == nil {
+			return
+		}
+		if seen[m.FullName()] >= maxTypeRepeats || depth > maxMapFieldDepth {
+			// Inside a map's value no name path reaches: a cut there only
+			// leaves deeper maps in their order.
+			if !mapsOnly {
+				w.complete = false
+			}
+			return
+		}
+		seen[m.FullName()]++
+		defer func() { seen[m.FullName()]-- }()
+		fields := m.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			if w.visited >= maxWalkFields {
+				if !mapsOnly {
+					w.complete = false
+				}
+				return
+			}
+			w.visited++
+			fd := fields.Get(i)
+			np, nm := strconv.Itoa(int(fd.Number())), fd.TextName()
+			if numPrefix != "" {
+				np = numPrefix + "." + np
+			}
+			if namePrefix != "" {
+				nm = namePrefix + "." + nm
+			}
+			switch {
+			case fd.IsMap():
+				w.maps = append(w.maps, np)
+				if !mapsOnly {
+					w.opaque = append(w.opaque, nm)
+				}
+				// A map's value may be a message holding maps of its own:
+				// entries are field 1 (key) and 2 (value).
+				if v := fd.MapValue(); v.Message() != nil {
+					if mapsOnly {
+						walk(v.Message(), np+".2", "", depth+1, true)
+					} else {
+						later = append(later, deferred{v.Message(), np + ".2", depth + 1})
+					}
+				}
+			case fd.Message() != nil && jsonIsNotItsFields[fd.Message().FullName()]:
+				if !mapsOnly {
+					w.opaque = append(w.opaque, nm)
+				}
+				// Their own maps are fixed: not walked, as Struct recurses
+				// through Value without end. Each path counts against the
+				// budget, as a walked field does.
+				paths := wellKnownMapPaths(fd.Message().FullName(), np)
+				if w.visited+len(paths) > maxWalkFields {
+					w.visited = maxWalkFields
+					if !mapsOnly {
+						w.complete = false
+					}
+					return
+				}
+				w.visited += len(paths)
+				w.maps = append(w.maps, paths...)
+			case fd.Message() != nil:
+				walk(fd.Message(), np, nm, depth+1, mapsOnly)
+			}
+		}
+	}
+	walk(md, "", "", 0, false)
+	for _, d := range later {
+		walk(d.m, d.prefix, "", d.depth, true)
+	}
+	sort.Strings(w.maps)
+	sort.Strings(w.opaque)
+	w.mapSet = make(map[string]bool, len(w.maps))
+	for _, p := range w.maps {
+		w.mapSet[p] = true
+	}
+	return w
+}
+
+// wellKnownMapPaths are the map fields of a well-known type whose JSON is not
+// its fields, at prefix, nested up to maxWellKnownNesting objects and lists
+// deep: a Struct's entries (fields, 1) and, inside each entry's Value (1.2), a
+// nested object (struct_value 5) or list (list_value 6, whose values are 1);
+// a Value's object or list; a ListValue's elements. The paths are fixed, so
+// they are generated, not walked: a Struct recurses through Value without end.
+func wellKnownMapPaths(name protoreflect.FullName, prefix string) []string {
+	var out []string
+	var structAt, valueAt, listAt func(p string, level int)
+	structAt = func(p string, level int) {
+		out = append(out, p+".1")
+		valueAt(p+".1.2", level+1)
+	}
+	valueAt = func(p string, level int) {
+		if level > maxWellKnownNesting {
+			return
+		}
+		structAt(p+".5", level)
+		listAt(p+".6", level)
+	}
+	listAt = func(p string, level int) {
+		valueAt(p+".1", level+1)
+	}
+	switch name {
+	case "google.protobuf.Struct":
+		structAt(prefix, 0)
+	case "google.protobuf.Value":
+		valueAt(prefix, 0)
+	case "google.protobuf.ListValue":
+		listAt(prefix, 0)
+	}
+	return out
+}
+
+// maxWellKnownNesting is how many objects and lists deep inside a Struct,
+// Value or ListValue its maps are listed (compared in any order). Deeper ones
+// keep their order, as without a schema. The paths double per level.
+const maxWellKnownNesting = 6
+
+// mapFieldPaths lists, by field-number path, every map field reachable from
+// md (walkSchema).
+func mapFieldPaths(md protoreflect.MessageDescriptor) []string { return walkSchema(md).maps }
+
+// opaqueFieldNames lists, by field-name path, every field reachable from md a
+// noise path can name whole but not step past (walkSchema).
+func opaqueFieldNames(md protoreflect.MessageDescriptor) []string { return walkSchema(md).opaque }
+
+// jsonIsNotItsFields are the well-known types whose JSON form is not their
+// fields: a Struct is an object of its keys, a Value any JSON value, a
+// ListValue an array, an Any its packed message plus "@type".
+var jsonIsNotItsFields = map[protoreflect.FullName]bool{
+	"google.protobuf.Struct":    true,
+	"google.protobuf.Value":     true,
+	"google.protobuf.ListValue": true,
+	"google.protobuf.Any":       true,
+}
+
+// walkKey names one walk: a schema and a method of it.
+type walkKey struct {
+	schema *protoschema.Schema
+	method string
+}
+
+// walk is walkSchema of the method's response type, once per schema and
+// method for the run: it runs for every gRPC comparison.
+func (g *grpcSchemas) walk(s *protoschema.Schema, method string, md protoreflect.MessageDescriptor) schemaWalk {
+	key := walkKey{schema: s, method: method}
+	if w, ok := g.walks.Load(key); ok {
+		return w.(schemaWalk)
+	}
+	w := walkSchema(md)
+	g.walks.Store(key, w)
+	return w
+}
 
 // showGrpcBodiesDecoded says, in Result.GrpcDecode, which schema reads each
 // side of a failed gRPC test, and shows the first differing message of each
@@ -515,6 +714,13 @@ func (r *Replayer) showGrpcBodiesDecoded(res *models.Result, view *grpcProtoView
 	}
 	info.ExpectedJSON, info.ActualJSON = string(exp.JSON), string(act.JSON)
 	info.Expected, info.Actual = view.expectedLabel, view.actualLabel
+	// Tied to what the noise is translated with, which is the recorded
+	// schema whenever the bodies are shown decoded.
+	if ns, md := view.noiseSchema(); ns == view.expected && md != nil {
+		walked := r.grpcSchemas.walk(ns, view.method, md)
+		// A copy: the walk is shared by every result of the run.
+		info.OpaqueFields, info.OpaqueFieldsComplete = slices.Clone(walked.opaque), walked.complete
+	}
 	info.ExpectedUnknownFields, info.ActualUnknownFields = exp.UnknownFields, act.UnknownFields
 	if sameJSON(exp.JSON, act.JSON) {
 		info.Note = encodingOnlyNote

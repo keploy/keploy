@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
@@ -323,15 +325,40 @@ message O { map<string,Inner> by = 5; }`)
 	}
 }
 
-// With a schema source and no schema uploaded for the recorded release, a
-// noise key written by name is not translated with another release's schema.
-func TestNameNoiseIsNotTranslatedWithoutTheRecordedSchema(t *testing.T) {
-	r := protoReplayer(t) // local protos would translate it
+// Noise is the run's own configuration, written against the run's own
+// protos. With an upload source but no upload for the recorded release, those
+// protos still translate it, as before uploads existed: a run that never
+// uploads keeps its verdicts. The bodies are still shown as recorded
+// (TestARecordedReleaseWithNoSchemaIsShownAsRecordedAndSaysSo).
+func TestNameNoiseFallsBackToTheRunsProtosWithoutAnUpload(t *testing.T) {
+	recorded := "1: {\"o-1\"}\n3: {\"Pending\"}\n8: {\n  1: 1795582799\n  2: 5\n}"
+	actual := strings.Replace(recorded, "1795582799", "1795590000", 1)
+	r := protoReplayer(t)
 	r.SetGrpcSchemaSource(&fakeSchemas{})
+	pass, _ := compareWithProtos(r, ordersCase(recorded, map[string][]string{"body": {"created_at.seconds"}}), ordersResp(actual))
+	if !pass {
+		t.Fatal("created_at.seconds is noise in the run's protos and only it differs; the test failed")
+	}
+	changed := strings.Replace(actual, "Pending", "Shipped", 1)
+	pass, res := compareWithProtos(r, ordersCase(recorded, map[string][]string{"body": {"created_at.seconds"}}), ordersResp(changed))
+	if pass {
+		t.Fatal("status changed and is not noise; the test passed")
+	}
+	if res.GrpcDecode == nil || res.GrpcDecode.ExpectedJSON != "" || !strings.Contains(res.GrpcDecode.Note, "not uploaded") {
+		t.Fatalf("the run's protos must not stand in for the recorded release in the display: %+v", res.GrpcDecode)
+	}
+}
+
+// Without the run's protos or an upload for the recorded release, a name is
+// never translated: the release under test is another release, and its schema
+// never reads the recorded side.
+func TestNameNoiseIsNeverReadWithTheTargetRelease(t *testing.T) {
+	r := &Replayer{config: &config.Config{}, logger: zap.NewNop()}
+	r.SetGrpcSchemaSource(&fakeSchemas{target: ordersSchema(t, ordersProto)})
 	tc := ordersCase("", map[string][]string{"body": {"status"}})
 	view := r.grpcProtoViewFor(tc, "set-1")
 	if _, ok := r.withNameNoiseAsFieldNumbers(tc, view, "set-1").Noise["body.3"]; ok {
-		t.Fatal("status was translated without the recorded release's schema")
+		t.Fatal("status was translated with the target release's schema")
 	}
 }
 
@@ -379,8 +406,29 @@ message Node { map<string,string> attrs = 1; repeated Node children = 2; repeate
 	if !strings.Contains(","+got+",", ",1,") || !strings.Contains(","+got+",", ",2.1,") || !strings.Contains(","+got+",", ",2.2.1,") {
 		t.Fatalf("a child's attrs are not listed: %v", paths[:min(len(paths), 10)])
 	}
-	if len(paths) > maxMapFieldPaths {
-		t.Fatalf("%d paths, above the cap %d", len(paths), maxMapFieldPaths)
+}
+
+// A schema whose recursive types reach many fields at every level is not
+// walked exhaustively: the walk stops after maxWalkFields fields and says it
+// is incomplete.
+func TestTheSchemaWalkIsBounded(t *testing.T) {
+	s := ordersSchema(t, `syntax = "proto3"; package demo;
+service Orders { rpc Read(R) returns (Expr); }
+message R {}
+message Expr { Expr a = 1; Expr b = 2; Expr c = 3; Expr d = 4; Expr e = 5; Expr f = 6; Expr g = 7; Expr h = 8; Expr i = 9; Expr j = 10; Expr k = 11; string name = 12; }`)
+	_, resp, _ := s.MessageTypes("/demo.Orders/Read")
+	start := time.Now()
+	w := walkSchema(resp)
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the walk took %v", took)
+	}
+	if w.complete || w.visited != maxWalkFields {
+		t.Fatalf("the budget must cut the walk: complete %v, %d fields visited", w.complete, w.visited)
+	}
+	flat := ordersSchema(t, ordersProto)
+	_, flatResp, _ := flat.MessageTypes("/demo.Orders/Read")
+	if !walkSchema(flatResp).complete {
+		t.Fatal("a small schema's walk says it is incomplete")
 	}
 }
 
@@ -396,5 +444,169 @@ func TestAnInvalidNoisePatternIsSaidOncePerRun(t *testing.T) {
 		if n := logs.FilterMessageSnippet("does not compile").Len(); n != 1 {
 			t.Fatalf("run %d said it %d times, want once", run, n)
 		}
+	}
+}
+
+// A noise learner reading the decoded diff may name these fields whole but
+// never reach into them: the replay translates the field and refuses a step
+// past it (a map's key, a Struct's key, an Any's packed field). A failed
+// test's GrpcDecode carries them.
+func TestOpaqueFieldsAreWhereNoiseTranslationStops(t *testing.T) {
+	s := ordersSchema(t, `syntax = "proto3"; package demo;
+import "google/protobuf/struct.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+service Orders { rpc Read(R) returns (O); }
+message R {}
+message Inner { map<string,int32> tags = 2; google.protobuf.Any extra = 3; string name = 4; }
+message O { map<string,Inner> labels = 5; Inner inner = 6; repeated Inner many = 7; google.protobuf.Struct meta = 8; google.protobuf.Timestamp at = 9; }`)
+	_, resp, _ := s.MessageTypes("/demo.Orders/Read")
+	got := opaqueFieldNames(resp)
+	if strings.Join(got, ",") != "inner.extra,inner.tags,labels,many.extra,many.tags,meta" {
+		t.Fatalf("opaque fields = %v", got)
+	}
+	for _, p := range got {
+		if _, ok := fieldNumberPath(resp, p); !ok {
+			t.Errorf("%s must translate whole", p)
+		}
+		if path, ok := fieldNumberPath(resp, p+".k"); ok {
+			t.Errorf("%s.k translated to %s; the learner was told it does not", p, path)
+		}
+	}
+	// A step past one names an entry or a key, even when it is spelled like
+	// one of the type's own fields or a list index: never widened to the whole
+	// field.
+	for _, key := range []string{"meta.fields", "inner.extra.value", "inner.extra.type_url", "labels.0", "labels.k.name", "meta.123"} {
+		if path, ok := fieldNumberPath(resp, key); ok {
+			t.Errorf("%s translated to %s", key, path)
+		}
+	}
+	if path, ok := fieldNumberPath(resp, "many.0.name"); !ok || path != "7.4" {
+		t.Errorf("a list index still reads every element: many.0.name = %q %v", path, ok)
+	}
+
+	r := &Replayer{config: &config.Config{}, logger: zap.NewNop()}
+	r.SetGrpcSchemaSource(&fakeSchemas{recorded: map[string]*protoschema.Schema{"set-1": s}, recordedLabel: "release:app:v1", target: s})
+	_, res := compareWithProtos(r, ordersCase("6: {\n  4: {\"a\"}\n}", nil), ordersResp("6: {\n  4: {\"b\"}\n}"))
+	if res.GrpcDecode == nil || strings.Join(res.GrpcDecode.OpaqueFields, ",") != strings.Join(got, ",") || !res.GrpcDecode.OpaqueFieldsComplete {
+		t.Fatalf("a failed test's decode must name its opaque fields: %+v", res.GrpcDecode)
+	}
+}
+
+// Struct, Value and ListValue fields are not walked (a Struct recurses through
+// Value without end): many of them spend no budget, a map declared after them
+// is still listed, and the walk is complete.
+func TestWellKnownTypesDoNotSpendTheWalk(t *testing.T) {
+	s := ordersSchema(t, `syntax = "proto3"; package demo;
+import "google/protobuf/struct.proto";
+service Orders { rpc Read(R) returns (Page); }
+message R {}
+message Item { google.protobuf.Struct a = 1; google.protobuf.Struct b = 2; google.protobuf.Value v = 3; google.protobuf.ListValue l = 4; }
+message Page { Item items = 1; Item featured = 2; Item prev = 3; Item next = 4; Item related = 5; Item more = 6; map<string,string> tags = 9; }`)
+	_, resp, _ := s.MessageTypes("/demo.Orders/Read")
+	w := walkSchema(resp)
+	if !w.complete || w.visited >= maxWalkFields {
+		t.Fatalf("complete %v after %d fields", w.complete, w.visited)
+	}
+	got := "," + strings.Join(w.maps, ",") + ","
+	// A Struct's entries, a nested object in an entry, an object in a list in
+	// an entry, a Value's object and its list's objects, a ListValue's.
+	for _, want := range []string{",9,", ",1.1.1,", ",1.1.1.2.5.1,", ",1.1.1.2.6.1.5.1,", ",1.3.5.1,", ",1.3.6.1.5.1,", ",1.4.1.5.1,"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("maps %v lack %s", w.maps, strings.Trim(want, ","))
+		}
+	}
+}
+
+// The well-known types' generated map paths count against the walk budget: a
+// recursive type full of Struct fields cannot list millions of them.
+func TestWellKnownPathsSpendTheBudget(t *testing.T) {
+	s := ordersSchema(t, `syntax = "proto3"; package demo;
+import "google/protobuf/struct.proto";
+service Orders { rpc Read(R) returns (Expr); }
+message R {}
+message Expr { Expr a = 1; Expr b = 2; Expr c = 3; Expr d = 4; Expr e = 5;
+  google.protobuf.Struct s1 = 11; google.protobuf.Struct s2 = 12; google.protobuf.Struct s3 = 13; google.protobuf.Struct s4 = 14; google.protobuf.Struct s5 = 15; }`)
+	_, resp, _ := s.MessageTypes("/demo.Orders/Read")
+	w := walkSchema(resp)
+	if len(w.maps) > maxWalkFields || w.visited > maxWalkFields {
+		t.Fatalf("%d map paths after %d counted, budget %d", len(w.maps), w.visited, maxWalkFields)
+	}
+	if w.complete {
+		t.Fatal("a walk the budget cut says it is complete")
+	}
+	if len(w.mapSet) != len(w.maps) {
+		t.Fatalf("the set holds %d of %d paths", len(w.mapSet), len(w.maps))
+	}
+}
+
+// The messages inside map values are walked after every field a name path can
+// reach: a recursive map value spending the whole budget hides no later map or
+// opaque field, and leaves the walk complete.
+func TestMapValuesAreWalkedLast(t *testing.T) {
+	s := ordersSchema(t, `syntax = "proto3"; package demo;
+import "google/protobuf/struct.proto";
+service Orders { rpc Read(R) returns (O); }
+message R {}
+message Expr { Expr a = 1; Expr b = 2; Expr c = 3; Expr d = 4; Expr e = 5; Expr f = 6; Expr g = 7; Expr h = 8; Expr i = 9; Expr j = 10; Expr k = 11; }
+message O { map<string,Expr> exprs = 1; map<string,string> tags = 2; google.protobuf.Struct meta = 3; }`)
+	_, resp, _ := s.MessageTypes("/demo.Orders/Read")
+	w := walkSchema(resp)
+	if !w.complete || w.visited != maxWalkFields {
+		t.Fatalf("complete %v after %d fields: a cut inside a map value leaves every name-reachable field walked", w.complete, w.visited)
+	}
+	if !slices.Contains(w.maps, "2") || !slices.Contains(w.opaque, "tags") || !slices.Contains(w.opaque, "meta") {
+		t.Fatalf("a field after the map was not walked: maps %v, opaque %v", w.maps, w.opaque)
+	}
+}
+
+// A number names a list element only right after a list: anywhere else it is
+// refused, never skipped onto another field or widened to the whole one.
+func TestANumberInANamePathIsAListIndexOnly(t *testing.T) {
+	s := ordersSchema(t, `syntax = "proto3"; package demo;
+import "google/protobuf/struct.proto";
+service Orders { rpc Read(R) returns (O); }
+message R {}
+message Inner { string name = 4; }
+message O { Inner inner = 6; repeated Inner many = 7; string name = 4; repeated google.protobuf.Struct docs = 8; }`)
+	_, resp, _ := s.MessageTypes("/demo.Orders/Read")
+	for key, want := range map[string]string{"many.0.name": "7.4", "many.name": "7.4", "docs.0": "8", "docs": "8"} {
+		if got, ok := fieldNumberPath(resp, key); !ok || got != want {
+			t.Errorf("%s = %q %v, want %s", key, got, ok, want)
+		}
+	}
+	for _, key := range []string{"inner.3", "6.name", "inner.0.name", "many.0.0", "docs.0.k"} {
+		if got, ok := fieldNumberPath(resp, key); ok {
+			t.Errorf("%s translated to %s", key, got)
+		}
+	}
+}
+
+// Noise reads the recorded release's schema first: where it and the run's own
+// protos name field 3 differently, the recorded name translates.
+func TestNameNoisePrefersTheRecordedSchema(t *testing.T) {
+	r := protoReplayer(t) // local: field 3 is `status`
+	recorded := ordersSchema(t, strings.Replace(ordersProto, "string status = 3;", "string state = 3;", 1))
+	r.SetGrpcSchemaSource(&fakeSchemas{recorded: map[string]*protoschema.Schema{"set-1": recorded}, recordedLabel: "release:app:v1"})
+	tc := ordersCase("", map[string][]string{"body": {"state", "status"}})
+	got := r.withNameNoiseAsFieldNumbers(tc, r.grpcProtoViewFor(tc, "set-1"), "set-1").Noise
+	if _, ok := got["body.3"]; !ok {
+		t.Fatalf("state is field 3 in the recorded release; not translated: %v", got)
+	}
+	tc = ordersCase("", map[string][]string{"body": {"status"}})
+	if _, ok := r.withNameNoiseAsFieldNumbers(tc, r.grpcProtoViewFor(tc, "set-1"), "set-1").Noise["body.3"]; ok {
+		t.Fatal("status, the run's own name, was translated though the recorded release names field 3 state")
+	}
+}
+
+// An upload that does not define the method (another service's protos) leaves
+// the method's noise to the run's own protos.
+func TestNameNoiseFallsBackPerMethod(t *testing.T) {
+	r := protoReplayer(t)
+	other := ordersSchema(t, `syntax = "proto3"; package other; service Billing { rpc Pay(P) returns (P); } message P { string id = 1; }`)
+	r.SetGrpcSchemaSource(&fakeSchemas{recorded: map[string]*protoschema.Schema{"set-1": other}, recordedLabel: "release:app:v1"})
+	tc := ordersCase("", map[string][]string{"body": {"status"}})
+	if _, ok := r.withNameNoiseAsFieldNumbers(tc, r.grpcProtoViewFor(tc, "set-1"), "set-1").Noise["body.3"]; !ok {
+		t.Fatal("the recorded upload does not define /demo.Orders/Read; the run's protos must translate its noise")
 	}
 }

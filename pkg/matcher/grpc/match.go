@@ -69,6 +69,16 @@ func WithUnorderedFields(paths []string) MatchOption {
 	}
 }
 
+// WithUnorderedFieldSet is WithUnorderedFields for a set built once (a caller
+// comparing many bodies of one schema). The set is read, never written.
+func WithUnorderedFieldSet(set map[string]bool) MatchOption {
+	return func(o *matchOptions) {
+		if len(set) > 0 {
+			o.unordered = set
+		}
+	}
+}
+
 // WithAssessmentDecoder gives the comparison a way to read both bodies with
 // field names, so a body difference is graded as the JSON comparison grades
 // one (a value change is not a broken schema). It never decides the verdict,

@@ -1647,4 +1647,14 @@ type GrpcDecodeInfo struct {
 	// not uploaded for the recorded release, a method no schema defines, or
 	// a difference only in encoding.
 	Note string `json:"note,omitempty" bson:"note,omitempty" yaml:"note,omitempty"`
+	// OpaqueFields are the field-name paths (ExpectedJSON's keys, with no list
+	// indices) of fields a noise path can name whole but not step past: maps,
+	// whose JSON keys are entry keys, and google.protobuf.Struct, Value,
+	// ListValue and Any, whose JSON is not their fields. OpaqueFieldsComplete
+	// says the list covers every field of the message; a recursive or very
+	// large schema's may not, and a learner then cannot tell a path it may
+	// learn. In-process only, for a noise learner reading the decoded diff;
+	// never stored or sent.
+	OpaqueFields         []string `json:"-" bson:"-" yaml:"-"`
+	OpaqueFieldsComplete bool     `json:"-" bson:"-" yaml:"-"`
 }

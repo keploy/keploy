@@ -157,6 +157,18 @@ func TestMatch_ProtoscopeMapEntriesHaveNoOrder(t *testing.T) {
 	}
 }
 
+// A set built once reads the same as the list it was built from.
+func TestMatch_ProtoscopeUnorderedFieldSet(t *testing.T) {
+	rec := "5: {\n  1: {\"k1\"}\n  2: 1\n}\n5: {\n  1: {\"k2\"}\n  2: 2\n}"
+	act := "5: {\n  1: {\"k2\"}\n  2: 2\n}\n5: {\n  1: {\"k1\"}\n  2: 1\n}"
+	if _, res := Match(grpcTestCase(rec, nil), grpcActual(act), map[string]map[string][]string{}, false, zap.NewNop(), false, WithUnorderedFieldSet(map[string]bool{"5": true})); !decodedDataNormal(res) {
+		t.Fatal("map field 5's entries came back in another order; it failed")
+	}
+	if _, res := Match(grpcTestCase(rec, nil), grpcActual(act), map[string]map[string][]string{}, false, zap.NewNop(), false, WithUnorderedFieldSet(map[string]bool{"6": true})); decodedDataNormal(res) {
+		t.Fatal("field 5 is not in the set; its reorder must fail with order kept")
+	}
+}
+
 // A body difference read through a schema is graded as a JSON one: a changed
 // value is not a broken schema.
 func TestMatch_ProtoscopeDifferenceGradedThroughTheDecoder(t *testing.T) {
