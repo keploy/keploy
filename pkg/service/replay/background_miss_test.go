@@ -206,15 +206,18 @@ func TestTheStagingCallNamesThePlainStartupMocksUnderTheSwitch(t *testing.T) {
 	}
 	r := newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}, mapping: mapping})
 	t.Setenv(provenswitch.Env, "")
-	if _, got := r.backgroundMocksOf(ctx, "s"); got != nil {
-		t.Fatalf("switch off: named plain startup mocks %v", got)
+	if _, got, derive := r.backgroundMocksOf(ctx, "s"); got != nil || derive {
+		t.Fatalf("switch off with explicit mappings.yaml: startup=%v derive=%v; want nil, false", got, derive)
 	}
 	if got := r.recordedSetShape(ctx, "s", nil).startup; got != nil {
 		t.Fatalf("switch off: the staging call's shape names plain startup mocks %v", got)
 	}
 	t.Setenv(provenswitch.Env, "1")
 	r.exact = &exactPlan{worker: []models.MockEntry{{Name: "poll-1"}, {Name: "served-1"}}}
-	all, got := r.backgroundMocksOf(ctx, "s")
+	all, got, derive := r.backgroundMocksOf(ctx, "s")
+	if derive {
+		t.Fatalf("switch on with exact plan: derive=true; want false")
+	}
 	if want := []string{"boot-1", "boot-2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch on: plain startup mocks %v, want %v", got, want)
 	}
@@ -225,6 +228,28 @@ func TestTheStagingCallNamesThePlainStartupMocksUnderTheSwitch(t *testing.T) {
 	if got, want := shape.startup, []string{"boot-1", "boot-2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch on: the staging call's shape names %v, want %v", got, want)
 	}
+
+	// DeriveBackgroundFromWindows is set ONLY when GetMapping finds no
+	// mappings.yaml (nil, nil) and no exact plan exists; an explicit empty
+	// mappings.yaml or an exact plan keeps derive=false.
+	t.Run("deriveBackgroundFromWindows gate", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		rNoFile := newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}, mapping: nil})
+		if all, _, derive := rNoFile.backgroundMocksOf(ctx, "s"); len(all) != 0 || !derive {
+			t.Fatalf("no mappings.yaml, no exact plan: all=%v derive=%v; want nil, true", all, derive)
+		}
+		if !rNoFile.recordedSetShape(ctx, "s", nil).deriveBackground {
+			t.Fatalf("no mappings.yaml: recordedSetShape.deriveBackground=false; want true")
+		}
+		rEmptyFile := newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{}})
+		if _, _, derive := rEmptyFile.backgroundMocksOf(ctx, "s"); derive {
+			t.Fatalf("explicit empty mappings.yaml: derive=true; want false")
+		}
+		rNoFile.exact = &exactPlan{}
+		if _, _, derive := rNoFile.backgroundMocksOf(ctx, "s"); derive {
+			t.Fatalf("exact plan present with no mappings.yaml: derive=true; want false")
+		}
+	})
 
 	// The staging call carries them to the agent.
 	f := &rearmInstr{}
@@ -267,4 +292,84 @@ type unreadableMappingDB struct{ *prMappingDB }
 
 func (unreadableMappingDB) GetMapping(context.Context, string) (*models.Mapping, error) {
 	return nil, errors.New("unreadable")
+}
+
+// End-to-end replay -> real agent (DiskMocks) -> real MockManager test: when
+// mappings.yaml is absent and no exact plan is active, the replayer sets
+// DeriveBackgroundFromWindows on the staging call, the agent derives outside-
+// window recordings in two passes without retaining non-derived mocks, and the
+// proxy's MockManager installs only those derived background recordings with
+// their recorded spans. An explicit empty mappings.yaml seeds none.
+func TestReplayWithoutMappingsYamlDerivesBackgroundRecordingsEndToEnd(t *testing.T) {
+	mkAt := func(name string, ms int) *models.Mock {
+		return &models.Mock{
+			Version: "api.keploy.io/v1beta1",
+			Name:    name,
+			Kind:    models.HTTP2,
+			Spec: models.MockSpec{
+				Metadata: map[string]string{
+					"type":                     "mocks",
+					models.MetadataLifetimeKey: models.MetadataLifetimePerTest,
+				},
+				ReqTimestampMock: attrAt(ms),
+				ResTimestampMock: attrAt(ms + 1),
+			},
+		}
+	}
+	recording := []*models.Mock{
+		mkAt("in-test-1", 1050),
+		mkAt("poll-between", 1500),
+		mkAt("in-test-2", 2050),
+	}
+
+	t.Run("no mappings.yaml derives outside-window background recordings", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		h := newPartialRunHarness(t, 2, 0)
+		pinWindows(h)
+		h.replayer.config.Test.StrictMockWindow = true
+		h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: nil}
+		h.replayer.mockDB = &allMocksDB{recording: recording}
+		agent := newManagedAgent(t, h.instr)
+		h.replayer.instrumentation = agent
+		if status := h.run(t); status != models.TestSetStatusPassed {
+			t.Fatalf("status %q, want PASSED", status)
+		}
+		got := agent.mm.BackgroundRecordings(models.HTTP2)
+		if len(got) != 1 || got[0].Mock.Name != "poll-between" {
+			t.Fatalf("MockManager.BackgroundRecordings(HTTP2) = %+v; want only poll-between", got)
+		}
+		if !got[0].From.Equal(attrAt(1050)) {
+			t.Fatalf("derived poll-between From = %v; want %v (in-test-1)", got[0].From, attrAt(1050))
+		}
+	})
+
+	t.Run("explicit empty mappings.yaml does not derive", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		h := newPartialRunHarness(t, 2, 0)
+		pinWindows(h)
+		h.replayer.config.Test.StrictMockWindow = true
+		h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{}}
+		h.replayer.mockDB = &allMocksDB{recording: recording}
+		agent := newManagedAgent(t, h.instr)
+		h.replayer.instrumentation = agent
+		if status := h.run(t); status != models.TestSetStatusPassed {
+			t.Fatalf("status %q, want PASSED", status)
+		}
+		if got := agent.mm.BackgroundRecordings(models.HTTP2); len(got) != 0 {
+			t.Fatalf("explicit empty mappings.yaml seeded %+v; want none", got)
+		}
+	})
+}
+
+type allMocksDB struct {
+	prMockDB
+	recording []*models.Mock
+}
+
+func (m *allMocksDB) GetFilteredMocks(_ context.Context, _ string, _, _ time.Time, _, _ map[string]bool) ([]*models.Mock, error) {
+	out := make([]*models.Mock, 0, len(m.recording))
+	for _, mk := range m.recording {
+		out = append(out, mk.DeepCopy())
+	}
+	return out, nil
 }

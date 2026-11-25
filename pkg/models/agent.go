@@ -821,6 +821,16 @@ type MockFilterParams struct {
 	// is served differently for it. Empty: the set has none, and every miss
 	// stays its test's.
 	BackgroundMocks []string `json:"backgroundMocks,omitempty"`
+	// DeriveBackgroundFromWindows, when true alongside empty BackgroundMocks
+	// and non-empty RecordedWindows (outside ExactStaging), tells the agent to
+	// derive outside-window recordings from RecordedWindows via
+	// DeriveWindowMappings as the set's background recordings. Set explicitly
+	// by the replayer only when mappings.yaml does not exist (GetMapping
+	// returned nil, nil) and no CLI exact plan was built — for example round-1
+	// DaemonSet auto-replay before mappings.yaml is written. False when an
+	// explicit mappings.yaml exists (even with empty worker:/startup:) or
+	// under an exact plan, so explicit files are never overridden.
+	DeriveBackgroundFromWindows bool `json:"deriveBackgroundFromWindows,omitempty"`
 	// StartupMocks names, of BackgroundMocks, the set's plain startup:
 	// mocks (BackgroundRecording.Startup): made before the first test and
 	// covered by no declared rule. Under the proven switch alone: keploy
