@@ -426,12 +426,15 @@ rows_recorded_nx() {
 }
 # row_nolog NAME FILE REGEX: FILE has no line matching REGEX.
 row_nolog() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null || echo 1)" "no /$3/ in $(basename "$(dirname "$2")")"; }
-# A kept-inside line names a DNS name as keploy's lines name a host: by its
-# labels' shape beside its host tag ("DNS {}.{}.{}. #3fa2c1d0e9b8"), never
-# whole. The run's report names each DNS question a test made that no mock
-# answered whole, beside that tag; keploy test's misses file names each one
+# The run's kept-inside report is one line, whose kept list names each
+# destination the replay kept inside, with its calls ("HTTP 198.18.0.11
+# (1)", an address with its port where the call's parser named one). It names
+# a DNS name as keploy's lines name a host: by its labels' shape beside its
+# host tag ("DNS {}.{}.{}. #3fa2c1d0e9b8 (2)"), never whole. The run's
+# report names each DNS question a test made that no mock answered whole,
+# beside that tag; keploy test's misses file names each one
 # made outside every test whole, beside the same tag (the report names those
-# by their shape). The rows read which name a line names from the two.
+# by their shape). The rows read which name an entry names from the two.
 # whole_dns PHASE: "TAG NAME" for each DNS question PHASE's report or misses
 # file names whole.
 whole_dns() {
@@ -450,14 +453,41 @@ whole_dns() {
 		}'
 	} | sort -u
 }
+# KEPT starts the kept-inside line.
+KEPT='kept inside the replay: '
+# kept_entries PHASE: each entry of the kept list of PHASE's kept-inside line,
+# one a line, as "<protocol> <destination> (<calls>)": the list's JSON strings
+# read one by one, so a destination with a bracket in it (an IPv6 address)
+# or a comma is read whole.
+kept_entries() {
+	sed 's/\x1b\[[0-9;]*m//g' "$W/out/$1/keploy.log" 2>/dev/null | grep -F "$KEPT" | awk '
+		{
+			i = index($0, "\"kept\": ["); if (!i) next
+			s = substr($0, i + 9)
+			while (1) {
+				sub(/^[ ,]+/, "", s)
+				if (substr(s, 1, 1) != "\"") break
+				s = substr(s, 2); v = ""
+				while (s != "") {
+					c = substr(s, 1, 1)
+					if (c == "\\") { v = v substr(s, 2, 1); s = substr(s, 3); continue }
+					s = substr(s, 2)
+					if (c == "\"") break
+					v = v c
+				}
+				print v
+			}
+		}'
+}
 # kept_dns_tags PHASE: the tag of each DNS name PHASE's kept-inside report
-# names, and "untagged" for a line that names one by its shape alone (keploy
+# names, and "untagged" for an entry that names one by its shape alone (keploy
 # writes that when no miss carried a tag): no report name is told from it, so
 # row_not_kept_dns counts it as one it cannot clear.
 kept_dns_tags() {
-	grep -oE "${KEPT}DNS [^[:space:]]+( #[0-9a-f]+)?" "$W/out/$1/keploy.log" 2>/dev/null |
-		awk '{ print ($NF ~ /^#[0-9a-f]+$/) ? $NF : "untagged" }' | sort -u
+	kept_entries "$1" | awk '$1 == "DNS" { print ($(NF-1) ~ /^#[0-9a-f]+$/) ? $(NF-1) : "untagged" }' | sort -u
 }
+# row_kept NAME PHASE ERE: an entry of PHASE's kept-inside report matches ERE.
+row_kept() { row "$1" "$(kept_entries "$2" | grep -qE -- "$3" && echo 1)" "/$3/ in $2's kept list: $(kept_entries "$2" | paste -sd'|' | cut -c1-200)"; }
 # row_kept_dns NAME PHASE QNAME: PHASE's kept-inside report names the DNS
 # question QNAME (fully qualified), by the tag PHASE's report names it by.
 row_kept_dns() {
@@ -465,7 +495,7 @@ row_kept_dns() {
 	tag=$(whole_dns "$2" | awk -v n="$3" '$2 == n { print $1; exit }')
 	row "$1" "$([ -n "$tag" ] && kept_dns_tags "$2" | grep -qxF -- "$tag" && echo 1)" "$3 is ${tag:-not in the report} in $2"
 }
-# row_not_kept_dns NAME PHASE QNAME: no kept-inside DNS line of PHASE names
+# row_not_kept_dns NAME PHASE QNAME: no kept-inside DNS entry of PHASE names
 # QNAME: each names the tag of another name PHASE's report or misses file
 # holds whole (a tag neither holds could be QNAME's, so it fails the row).
 row_not_kept_dns() {
@@ -482,7 +512,8 @@ row_not_kept_dns() {
 # test and in no recording. keploy test answers it itself and fails nothing
 # for it; the run's report names it among the set's outside-test misses by
 # its shape beside its host tag, never whole (a report may be uploaded), and
-# the log says its next step; keploy test's own misses file
+# the log's one line for the calls outside every test says its next step;
+# keploy test's own misses file
 # (keploy/<set>/last-test-misses.yaml, by: keploy test) names it whole beside
 # the same tag, and git ignores that file. keploy mock replay's misses file
 # (last-replay-misses.yaml) is left as it was.
@@ -521,7 +552,9 @@ git_ignores() {
 	return $rc
 }
 # rows_startup PHASE: PHASE's report, log and misses files name the start-up
-# lookup as above.
+# lookup as above. The log says the calls outside every test in one line,
+# which points to the misses file by its path and gives the lookup's next
+# step, to record the test set again; the file says it beside the lookup.
 rows_startup() {
 	local p=$1 whole tag shaped
 	whole=$(yaml_list misses "$W/out/$p/last-test-misses.yaml" | grep -E "[|]call=(A|AAAA) ${STARTUP//./[.]}[|]")
@@ -530,8 +563,9 @@ rows_startup() {
 	shaped=$(yaml_list outside_test_misses "$W/out/$p"/report/*.yaml | grep -F '|protocol=DNS|' | grep -F '|when=before_first_test|' | grep -F " $tag|")
 	row "$p's report names the start-up lookup by its shape, before the first test" "$([ -n "$tag" ] && [ -n "$shaped" ] && ! printf '%s' "$shaped" | grep -qF startup-probe && echo 1)" "$(printf '%s' "${shaped:-no outside-test miss with tag ${tag:-unknown}}" | cut -c1-160)"
 	row "$p's report names the start-up lookup nowhere whole" "$(cat "$W/out/$p"/report/*.yaml 2>/dev/null | grep -qF startup-probe || echo 1)" "startup-probe in $p's report"
-	row_log "$p says the start-up lookup's next step" "$W/out/$p/keploy.log" 'made a call outside every test that no mock answered.*record the test set again'
-	row_log "$p points to its misses file" "$W/out/$p/keploy.log" 'misses file names each call the application made outside every test whole.*last-test-misses[.]yaml'
+	row_log "$p says the start-up lookup's next step" "$W/out/$p/keploy.log" 'outside every test got no recorded answer .*"next_steps": \[.*"the application looked this name up outside every test[^"]*record the test set again'
+	row "$p's misses file says the start-up lookup's next step" "$(printf '%s\n' "$whole" | grep -qE '[|]next_step=[^|]*record the test set again' && echo 1)" "$(printf '%s' "${whole:-none in last-test-misses.yaml}" | cut -c1-160)"
+	row_log "$p points to its misses file" "$W/out/$p/keploy.log" 'calls? outside every test got no recorded answer \(fail nothing\): .*DNS x[0-9]+.*; each is named in the misses file \([^)]*/last-test-misses[.]yaml\).*"next_step": "inspect [^"]*/last-test-misses[.]yaml'
 	row "git ignores $p's misses file" "$(git_ignores "$W/out/$p/keploy.gitignore" && echo 1)" "keploy/.gitignore $p left"
 	row "$p leaves mock replay's misses file as it was" "$([ -f "$W/out/$p/mock-misses-kept" ] && echo 1)" "last-replay-misses.yaml"
 }
@@ -956,12 +990,11 @@ done
 log "kept inside (each replay's report)"
 for p in $phases; do
 	[ -f "$W/out/$p/keploy.log" ] || continue
-	echo "-- $p"; grep -o 'kept inside the replay: .*' "$W/out/$p/keploy.log" | cut -c1-200
+	echo "-- $p"; grep -o 'kept inside the replay: .*' "$W/out/$p/keploy.log" | cut -c1-200; kept_entries "$p" | sed 's/^/   /'
 done
 
 log "rows"
 EGRESS_DNS='real egress opened by test.allowEgress \(dns\)'
-KEPT='kept inside the replay: '
 for mode in "${MODES[@]}"; do
 	case $mode in
 	native)
@@ -978,7 +1011,7 @@ for mode in "${MODES[@]}"; do
 		row_log "replay-native names the resolvers it does not ask" "$W/out/replay-native/keploy.log" 'forwarded only to a resolver inside the replay.s own network.*not_asked.*198\.18\.0\.10'
 		row_nolog "replay-native opens no DNS egress" "$W/out/replay-native/keploy.log" "$EGRESS_DNS"
 		row_log "replay-native names the port-only bypass rule" "$W/out/replay-native/keploy.log" 'real egress opened by bypassRules.*7002'
-		row_log "replay-native reports the IMDS call it kept inside" "$W/out/replay-native/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
+		row_kept "replay-native reports the IMDS call it kept inside" replay-native '^HTTP 198\.18\.0\.11(:[0-9]+)? \([0-9]+\)$'
 		row_kept_dns "replay-native reports the DNS name it answered itself" replay-native leak-probe.invalid-replay-isolation.test.
 		# The opt-in: the same misses now reach the host's resolver.
 		row "replay-native-dns passes" "$([ "$(cat "$W/out/replay-native-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-native-dns/exit" 2>/dev/null)"
@@ -1015,7 +1048,7 @@ for mode in "${MODES[@]}"; do
 		row_kept_dns "replay-docker reports the DNS name it answered itself" replay-docker leak-probe.invalid-replay-isolation.test.
 		row_nolog "replay-docker opens no DNS egress" "$W/out/replay-docker/keploy.log" "$EGRESS_DNS"
 		row_log "replay-docker names the port-only bypass rule" "$W/out/replay-docker/keploy.log" 'real egress opened by bypassRules.*7002'
-		row_log "replay-docker reports the IMDS call it kept inside" "$W/out/replay-docker/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
+		row_kept "replay-docker reports the IMDS call it kept inside" replay-docker '^HTTP 198\.18\.0\.11(:[0-9]+)? \([0-9]+\)$'
 		row "replay-docker-dns passes" "$([ "$(cat "$W/out/replay-docker-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker-dns/exit" 2>/dev/null)"
 		row_log "replay-docker-dns: the agent gets the opt-in" "$W/out/replay-docker-dns/keploy.log" "$EGRESS_DNS"
 		# The opt-in sends the miss on, through 127.0.0.11 to its upstream,
@@ -1062,7 +1095,7 @@ for mode in "${MODES[@]}"; do
 		row_kept_dns "replay-compose reports the DNS name it answered itself" replay-compose leak-probe.invalid-replay-isolation.test.
 		row_nolog "replay-compose opens no DNS egress" "$W/out/replay-compose/keploy.log" "$EGRESS_DNS"
 		row_log "replay-compose names the port-only bypass rule" "$W/out/replay-compose/keploy.log" 'real egress opened by bypassRules.*7002'
-		row_log "replay-compose reports the IMDS call it kept inside" "$W/out/replay-compose/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
+		row_kept "replay-compose reports the IMDS call it kept inside" replay-compose '^HTTP 198\.18\.0\.11(:[0-9]+)? \([0-9]+\)$'
 		row "replay-compose-dns passes" "$([ "$(cat "$W/out/replay-compose-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-dns/exit" 2>/dev/null)"
 		row_log "replay-compose-dns: the agent gets the opt-in" "$W/out/replay-compose-dns/keploy.log" "$EGRESS_DNS"
 		rows_reach replay-compose-dns dns-udp

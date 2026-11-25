@@ -59,8 +59,9 @@ func TestTheSetsOutsideTestMissesFailNothingInEitherMode(t *testing.T) {
 	}
 }
 
-// Outside-test misses emit ONE Info summary line naming the call count and
-// misses file (when written), while per-call detail is logged at Debug.
+// Outside-test misses emit ONE Info summary line naming the call count, the
+// misses file (when written) and each distinct next step the misses carry
+// (next_steps), while per-call detail is logged at Debug.
 func TestEachOutsideTestMissIsSaidWithItsNextStep(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
 	r := &Replayer{logger: zap.New(core)}
@@ -81,6 +82,12 @@ func TestEachOutsideTestMissIsSaidWithItsNextStep(t *testing.T) {
 	if f["call"] != "A {}.{}." || f["destination"] != "{}.{}. #ab12" || f["when"] != models.OutsideBeforeFirstTest || f["next_step"] != misses[0].NextStep || f["test-set"] != "test-set-0" {
 		t.Errorf("the debug line reads %+v", f)
 	}
+	if got := fmt.Sprint(infos[0].ContextMap()["next_steps"]); got != fmt.Sprint([]any{misses[0].NextStep}) {
+		t.Errorf("the summary's next_steps = %s, want the lookup's next step %q", got, misses[0].NextStep)
+	}
+	if !strings.Contains(misses[0].NextStep, "record the test set again") {
+		t.Errorf("a DNS lookup's next step does not say to record the test set again: %q", misses[0].NextStep)
+	}
 
 	logs.TakeAll()
 	var many []models.UnmatchedCall
@@ -98,6 +105,27 @@ func TestEachOutsideTestMissIsSaidWithItsNextStep(t *testing.T) {
 	}
 	if dbgs := logs.FilterLevelExact(zap.DebugLevel).All(); len(dbgs) != 23 {
 		t.Fatalf("got %d Debug detail lines, want 23", len(dbgs))
+	}
+	one := models.OutsideTestMissesOf(many[:1])[0].NextStep
+	if got := fmt.Sprint(infos[0].ContextMap()["next_steps"]); got != fmt.Sprint([]any{one}) {
+		t.Errorf("23 calls of one kind: next_steps = %s, want their one next step %q", got, one)
+	}
+
+	// A lookup and another call: each kind's next step, once, in the order
+	// first carried.
+	logs.TakeAll()
+	mixed := models.OutsideTestMissesOf([]models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "GET /a", Destination: "10.0.0.1:80", BeforeSet: true},
+		{Protocol: "DNS", ActualSummary: "A db.example.", HostTag: "#ab12", BeforeSet: true},
+		{Protocol: "HTTP", ActualSummary: "GET /b", Destination: "10.0.0.2:80", BeforeSet: true},
+	})
+	r.logOutsideTestMisses("test-set-0", mixed, file)
+	infos = logs.FilterLevelExact(zap.InfoLevel).All()
+	if len(infos) != 1 {
+		t.Fatalf("got %d Info lines for a mixed set, want 1: %+v", len(infos), infos)
+	}
+	if got, want := fmt.Sprint(infos[0].ContextMap()["next_steps"]), fmt.Sprint([]any{mixed[0].NextStep, mixed[1].NextStep}); got != want || mixed[0].NextStep == mixed[1].NextStep {
+		t.Errorf("mixed: next_steps = %s, want %s", got, want)
 	}
 }
 

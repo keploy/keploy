@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -129,8 +130,9 @@ var outsideWriter = localfile.Writer{
 // (TestReport.OutsideTestMisses), as its report names them, by their shape.
 // It writes them whole, each with the same next step, in the set's misses
 // file (localfile.WriteMisses: in place of the last run's, and only where it
-// is git-ignored; a set with none removes the last run's), and says each in
-// the log (logOutsideTestMisses), with the file's path.
+// is git-ignored; a set with none removes the last run's), and says them in
+// one log line (logOutsideTestMisses), with the file's path and their next
+// steps.
 func (r *Replayer) outsideTestMisses(testSetID string) []models.OutsideTestMiss {
 	calls := r.setCalls.outside(provenswitch.On())
 	whole := make([]models.UnmatchedCall, 0, len(calls))
@@ -150,9 +152,12 @@ func (r *Replayer) outsideTestMisses(testSetID string) []models.OutsideTestMiss 
 }
 
 // logOutsideTestMisses emits ONE Info summary line for the set's outside-test
-// misses (with total call count, per-protocol breakdown, and the misses file
-// path when written) and logs each per-call entry at Debug. The report and
-// misses file keep every miss whole.
+// misses (with total call count, per-protocol breakdown, the misses file path
+// when written, and each distinct next step its misses carry: next_steps, one
+// for DNS lookups and one for other calls, each of which first says to record
+// the test set again) and logs each per-call entry at Debug. The misses file
+// keeps every miss whole and the report by its shape, each beside its own
+// next step.
 func (r *Replayer) logOutsideTestMisses(testSetID string, misses []models.OutsideTestMiss, file string) {
 	if len(misses) == 0 {
 		return
@@ -172,14 +177,15 @@ func (r *Replayer) logOutsideTestMisses(testSetID string, misses []models.Outsid
 		msg = fmt.Sprintf("%d %s outside every test got no recorded answer (fail nothing): %s; each is named in the misses file (%s)", totalCalls, callWord, breakdown, file)
 		fields = append(fields,
 			zap.String("misses_file", file),
-			zap.String("next_step", fmt.Sprintf("inspect %s; declare shared calls under sessionCalls or allow live egress via bypassRules/allowEgress in keploy.yaml", file)),
+			zap.String("next_step", fmt.Sprintf("inspect %s, which names each call whole beside its next step; next_steps says what to do for each kind of call", file)),
 		)
 	} else {
 		msg = fmt.Sprintf("%d %s outside every test got no recorded answer (fail nothing): %s; each is named in the test-set report (outsideTestMisses)", totalCalls, callWord, breakdown)
 		fields = append(fields,
-			zap.String("next_step", "inspect outsideTestMisses in the test-set report; declare shared calls under sessionCalls or allow live egress via bypassRules/allowEgress in keploy.yaml"),
+			zap.String("next_step", "inspect outsideTestMisses in the test-set report, which names each call by its shape beside its next step; next_steps says what to do for each kind of call"),
 		)
 	}
+	fields = append(fields, zap.Strings("next_steps", outsideNextSteps(misses)))
 	r.logger.Info(msg, fields...)
 
 	for _, m := range misses {
@@ -193,6 +199,19 @@ func (r *Replayer) logOutsideTestMisses(testSetID string, misses []models.Outsid
 			zap.Int("count", m.Count),
 			zap.String("next_step", m.NextStep))
 	}
+}
+
+// outsideNextSteps is each distinct next step of misses, in the order first
+// carried: what the summary line says to do (models.OutsideTestNextStep gives
+// a DNS lookup one and any other call another).
+func outsideNextSteps(misses []models.OutsideTestMiss) []string {
+	var steps []string
+	for _, m := range misses {
+		if m.NextStep != "" && !slices.Contains(steps, m.NextStep) {
+			steps = append(steps, m.NextStep)
+		}
+	}
+	return steps
 }
 
 func formatOutsideTestSummary(misses []models.OutsideTestMiss) (int, string) {

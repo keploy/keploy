@@ -12,34 +12,47 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// keptLines returns the report's lines: the header's destination count and
-// opt-in, and "<protocol> <destination> <calls>" for each destination, in the
-// order they were logged.
+// keptLines returns the report, which is one INFO line: its fields (the
+// destination count, the calls, the opt-in), and "<protocol> <destination>
+// <calls>" for each destination its kept list names, in the list's order. A
+// second line with the report's prefix, at any level, or one not at INFO,
+// fails the test.
 func keptLines(t *testing.T, logs *observer.ObservedLogs) (header map[string]any, dests []string) {
 	t.Helper()
 	for _, e := range logs.All() {
 		if !strings.HasPrefix(e.Message, KeptInsidePrefix) {
 			continue
 		}
-		fields := e.ContextMap()
-		if _, ok := fields["destinations"]; ok {
-			if header != nil {
-				t.Fatalf("the report's header was logged twice")
-			}
-			header = fields
-			continue
+		if header != nil {
+			t.Fatalf("the report took more than one line: %v", logs.All())
 		}
-		dests = append(dests, fmt.Sprintf("%s %v", strings.TrimPrefix(e.Message, KeptInsidePrefix), fields["calls"]))
+		if e.Level != zapcore.InfoLevel {
+			t.Fatalf("the report's line is at %v, want INFO: %v", e.Level, e)
+		}
+		header = e.ContextMap()
+		kept, ok := header["kept"].([]any)
+		if !ok {
+			t.Fatalf("the report's line has no kept list: %v", header)
+		}
+		for _, k := range kept {
+			s := fmt.Sprint(k)
+			i := strings.LastIndex(s, " (")
+			if i < 0 || !strings.HasSuffix(s, ")") {
+				t.Fatalf("kept entry %q is not \"<protocol> <destination> (<calls>)\"", s)
+			}
+			dests = append(dests, s[:i]+" "+s[i+2:len(s)-1])
+		}
 	}
 	return header, dests
 }
 
 // Each destination the app called that no mock answered is named once for the
 // run, with its count over every read, whatever test or set read it; an
-// answered call and a connection that sent nothing are not in it. Each line
-// names a host as the agent's lines do, by its shape beside the host tag its
-// misses carried (a DNS name fully qualified, as the DNS proxy's lines name
-// it), and no line or field names one whole.
+// answered call and a connection that sent nothing are not in it, all in the
+// report's one line. Each entry of its kept list names a host as the agent's
+// lines do, by its shape beside the host tag its misses carried (a DNS name
+// fully qualified, as the DNS proxy's lines name it), and no line or field
+// names one whole.
 func TestTheRunNamesEachDestinationKeptInsideOnce(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	r := &Replayer{logger: zap.New(core)}
@@ -75,7 +88,7 @@ func TestTheRunNamesEachDestinationKeptInsideOnce(t *testing.T) {
 		"unknown (the unknown parser did not name the destination) 1",
 	}
 	if !slices.Equal(dests, want) {
-		t.Fatalf("report lines\n got %q\nwant %q", dests, want)
+		t.Fatalf("kept entries\n got %q\nwant %q", dests, want)
 	}
 	for _, e := range logs.All() {
 		line := e.Message + fmt.Sprint(e.ContextMap())
@@ -111,7 +124,7 @@ func TestKeptInsideNamesAnAddressWholeAndAnUntaggedHostByItsShape(t *testing.T) 
 		"Redis {}.{}:6379 #5a5a5a5a5a5a 4",
 	}
 	if !slices.Equal(dests, want) {
-		t.Fatalf("report lines\n got %q\nwant %q", dests, want)
+		t.Fatalf("kept entries\n got %q\nwant %q", dests, want)
 	}
 }
 
