@@ -119,7 +119,8 @@ func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]str
 // mapping the file writes as {...}, below the key) stays on the key; so does
 // keploy's line below the key, which YAML hangs on the next key in one file
 // and below the first in the file a rewrite writes of it. Above the key,
-// keploy's line is taken whatever the head holds: what stays above the key
+// keploy's lines (keploysLine: its version line, and what the proven flow
+// says the file is) are taken whatever the head holds: what stays above the key
 // is the head of the file a rewrite writes, where a writer puts keploy's
 // line where it always did (header). So no line is written by both the head
 // and the first key, and a rewrite of a file a rewrite wrote changes
@@ -151,7 +152,7 @@ func takeFileHead(doc, root *yamlLib.Node, old []byte) string {
 			switch n := headLine(l); {
 			case held[n] > 0:
 				held[n]--
-			case n == versionLine && above:
+			case keploysLine(n) && above:
 			default:
 				left = append(left, l)
 				continue

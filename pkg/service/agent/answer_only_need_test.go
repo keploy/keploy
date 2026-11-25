@@ -75,7 +75,7 @@ func TestAnAnswerOnlyNeedRunsTheTestAndAnswersAsRecorded(t *testing.T) {
 		core, logs := observer.New(zap.InfoLevel)
 		a.logger = zap.New(core)
 		claimSelf(t, a)
-		require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestGated": "listed"}, needs, nil, false))
+		require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestGated": "listed"}, needs, nil, false, ""))
 		return a, ap, logs
 	}
 	run := func(t *testing.T, a *Agent, name string) models.ScopeBeginResp {

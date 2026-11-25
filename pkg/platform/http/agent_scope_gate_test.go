@@ -84,14 +84,14 @@ func TestAgentClient_PushScopeSkips(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
 
-	if err := a.PushScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil, nil, false); err != nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil, nil, false, ""); err != nil {
 		t.Fatalf("skips: %v", err)
 	}
 	answer = `{"v":1,"status":"ok","skips":0}`
-	if err := a.PushScopeSkips(ctx, map[string]string{}, nil, nil, false); err != nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{}, nil, nil, false, ""); err != nil {
 		t.Fatalf("no skips: %v", err)
 	}
-	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false); err == nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false, ""); err == nil {
 		t.Fatal("an agent that applies fewer entries than were sent did not acknowledge the list")
 	}
 	bodies = bodies[:2]
@@ -99,28 +99,36 @@ func TestAgentClient_PushScopeSkips(t *testing.T) {
 	if len(bodies) != 2 || bodies[0] != want[0] || bodies[1] != want[1] {
 		t.Fatalf("posted %v, want %v", bodies, want)
 	}
+	// The file the replay writes its report to goes with the list.
+	bodies, answer = nil, `{"v":1,"status":"ok","skips":0}`
+	if err := a.PushScopeSkips(ctx, map[string]string{}, nil, nil, false, "keploy/reports/r1/replay.yaml"); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if want := `{"run":null,"report":"keploy/reports/r1/replay.yaml"}`; len(bodies) != 1 || bodies[0] != want {
+		t.Fatalf("posted %v, want %v", bodies, want)
+	}
 	// The needs ride the same push; an agent that applies fewer than were
 	// sent (one that predates them) did not acknowledge them.
 	bodies = nil
 	needs := map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: "r"}}}
-	if err := a.PushScopeSkips(ctx, nil, needs, nil, false); err == nil {
+	if err := a.PushScopeSkips(ctx, nil, needs, nil, false, ""); err == nil {
 		t.Fatal("an agent that applies none of the needs sent did not acknowledge them")
 	}
 	answer = `{"v":1,"status":"ok","skips":0,"needs":1}`
-	if err := a.PushScopeSkips(ctx, nil, needs, nil, false); err != nil {
+	if err := a.PushScopeSkips(ctx, nil, needs, nil, false, ""); err != nil {
 		t.Fatalf("needs: %v", err)
 	}
 	if w := `{"run":null,"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"}]}}`; len(bodies) != 2 || bodies[1] != w {
 		t.Fatalf("posted %v, want %s", bodies, w)
 	}
 	answer = `{"status":"ok"}`
-	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false); err == nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false, ""); err == nil {
 		t.Fatal("an agent that answers without the wire's version did not acknowledge the list")
 	}
 	answer = `{"v":1,"status":"ok","skips":1}`
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusUnprocessableEntity, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false); err == nil {
+		if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, nil, nil, false, ""); err == nil {
 			t.Fatalf("status %d: a refused list must be an error", s)
 		}
 	}
@@ -143,7 +151,7 @@ func TestAgentClient_PushScopeSkipsAgainToARestartedAgent(t *testing.T) {
 	s := storeSession(t, srv.URL, true)
 	needs := map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: "r"}}}
 	flags := []string{"--local", "--name", "checkout"}
-	if err := a.PushScopeSkips(context.Background(), map[string]string{"o::TestGated": "listed"}, needs, flags, true); err != nil {
+	if err := a.PushScopeSkips(context.Background(), map[string]string{"o::TestGated": "listed"}, needs, flags, true, ""); err != nil {
 		t.Fatal(err)
 	}
 	flags[2] = "other"

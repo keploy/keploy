@@ -121,6 +121,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			MocksDigest:    MocksDigest(m.config.Path, name),
 			MinCoverage:    m.config.Mock.MinCoverage,
 			Version:        utils.Version,
+			Report:         replayReport,
 		})
 		// No test ran, or keploy could not read what they did: an earlier
 		// run's per-test results must not stand next to this receipt as
@@ -447,7 +448,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
-		opts := models.RunOptions{AppCommand: m.config.Command}
+		opts := models.RunOptions{AppCommand: m.config.Command, TestCommand: true}
 		if provenswitch.On() && len(m.series) > 0 {
 			// The series a declared rule requires, which what the test
 			// command leaves running may still make once it exited.
@@ -1024,10 +1025,12 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 13. Say what the run proved, in the terminal as well as in the receipt.
 	//     The verdict used to exist only in the receipt, and only a run that
 	//     wrote a coverage report said anything about isolation at all.
+	//     A judged replay's VERDICT says it, from keploy's evidence on each
+	//     test: this line would only repeat it, vaguer.
 	if isolated {
 		m.logger.Info("this replay ran with every dependency answered from the recording",
 			zap.String("mock-set", name), zap.Int("served", counts.consumed))
-	} else {
+	} else if !provenswitch.On() || !replaysJudged.Load() {
 		// The note as a log line carries it: a loss's hosts by their shape,
 		// a call answered with another call's recording by its shape and
 		// path tag (the receipt keeps them whole).
@@ -1073,6 +1076,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Refusals:        m.refusals,
 		CannotCapture:   lostNotJudged,
 		UnchargedMisses: counts.uncharged,
+		Report:          replayReport,
 		RequiredNotMade: counts.requiredNotMade,
 		RequiredNotDue:  counts.requiredNotDue,
 
@@ -2458,11 +2462,25 @@ func RegisterScopeSetFlagsSource(fn ScopeSetFlagsSource) {
 }
 
 // ScopeSkipPusher is an optional Instrumentation extension: under the proven
-// switch, Replay hands the agent the tests to skip with it, and the flags
-// that name the replayed set in the commands a failed test's reason names,
-// with whether that set is Keploy Cloud's recordings.
+// switch, Replay hands the agent the tests to skip with it, the flags that
+// name the replayed set in the commands a failed test's reason names, with
+// whether that set is Keploy Cloud's recordings, and the file the replay
+// writes its report to (ReportReplayTo).
 type ScopeSkipPusher interface {
-	PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool) error
+	PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool, report string) error
+}
+
+// replayReport is the file the replay writes its report to, as the project
+// names it; "" when none was named (ReportReplayTo).
+var replayReport string
+
+// ReportReplayTo names the file this process's replay writes its report to,
+// as the project names it (.keploy-run/runs/<run>/replay.yaml): under the proven
+// switch the agent ends a failed test's reason with it. A wrapping build
+// (enterprise) that writes the report calls it before the replay runs; ""
+// names none.
+func ReportReplayTo(path string) {
+	replayReport = path
 }
 
 // scopeSkips is the proven gate a replay read from its skip source
@@ -2541,7 +2559,7 @@ func (m *mockService) pushSkips(ctx context.Context, name string, g scopeSkips) 
 	if skip == nil {
 		skip = map[string]string{}
 	}
-	if err := pusher.PushScopeSkips(ctx, skip, needs, setFlags, cloudSet); err != nil {
+	if err := pusher.PushScopeSkips(ctx, skip, needs, setFlags, cloudSet, replayReport); err != nil {
 		return fmt.Errorf("could not tell the agent which tests to skip: %w", err)
 	}
 	if len(skip) > 0 {
@@ -3207,7 +3225,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 // drift the fields), and, where it gave none, to record the call. A
 // connection whose client sent nothing made no call: it is said as such, and
 // as what it was if its client waited for its server to speak first (a TCP
-// health check closes the same way).
+// health check closes the same way). Under the proven switch the call is told
+// as keploy saw it, by its shape (models.CallShape), and with no next step:
+// the matcher's advice (re-record the set, mark a field as noise) is not a
+// fact about this call, and the end of the replay's output says what to run.
 func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	msg := "no recorded mock matched an outgoing call"
 	if miss.MatchPhase == models.MatchPhaseNoRequest {
@@ -3230,6 +3251,11 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		// test ended or began, or that another view was served between
 		// tests.
 		fields = append(fields, zap.String("reason", models.UnmatchedCallLogText(miss, miss.Reason)))
+	}
+	if provenswitch.On() {
+		// No next step: the matcher's advice is not a fact about the call.
+		logger.Warn(msg, fields...)
+		return
 	}
 	logger.Warn(msg, append(fields, zap.String("next_step", models.UnmatchedCallLogText(miss, missNextStep(miss))))...)
 }

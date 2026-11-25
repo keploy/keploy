@@ -172,7 +172,7 @@ func TestARewriteThatKeepsNoEditWritesKeploysEncoding(t *testing.T) {
 		must(t, err)
 		data, err := yaml.MarshalGeneric(yaml.FormatYAML, mapping)
 		must(t, err)
-		if want := utils.GetVersionAsComment() + string(data); string(got) != want || unkept.Comments != 1 {
+		if want := utils.FileHead(utils.MappingsAbout) + string(data); string(got) != want || unkept.Comments != 1 {
 			t.Fatalf("a rewrite that kept no edit wrote (%d comment line(s) dropped, want 1):\n%s\nwant keploy's encoding:\n%s", unkept.Comments, got, want)
 		}
 	})
@@ -304,7 +304,7 @@ func TestEncodeOverFWritesAndSaysAsKeploysWriters(t *testing.T) {
 		core, logs := observer.New(zapcore.WarnLevel)
 		got, err = EncodeOverF(zap.New(core), &mapping, yaml.FormatYAML, []byte("# a person's note\n"+edited), "s")
 		must(t, err)
-		if !strings.HasPrefix(string(got), "# a person's note\n"+utils.GetVersionAsComment()+"version: ") || !strings.Contains(string(got), "    # the login test\n    - id: o::TestA\n      owner_team: payments\n") || strings.Contains(string(got), "- id: o::TestB") {
+		if !strings.HasPrefix(string(got), "# a person's note\n"+utils.FileHead(utils.MappingsAbout)+"version: ") || !strings.Contains(string(got), "    # the login test\n    - id: o::TestA\n      owner_team: payments\n") || strings.Contains(string(got), "- id: o::TestB") {
 			t.Fatalf("EncodeOverF did not keep the hand edits of the test it keeps:\n%s", got)
 		}
 		if n := droppedSaid(t, logs); n != 1 {
@@ -587,10 +587,10 @@ func TestACommentAroundTheFirstKeyIsKept(t *testing.T) {
 			"around a directive":            {"# one\n%YAML 1.1\n---\n# two\n" + body, "# one\n# two\nversion: "},
 			"a blank line past a directive": {"# one\n%YAML 1.1\n---\n\n# two\n" + body, "# one\n\n# two\nversion: "},
 			"marker and a comment beyond":   {"# one\n---\n# two\n" + strings.Replace(body, "kind: TestMocksMapping\n", "kind: TestMocksMapping # k\n", 1), "# one\n# two\nversion: "},
-			"on the marker line":            {"--- # a note\n" + body, utils.GetVersionAsComment() + "# a note\nversion: "},
-			"a {...} file":                  {flow, utils.GetVersionAsComment() + "# a note\nversion: "},
+			"on the marker line":            {"--- # a note\n" + body, utils.FileHead(utils.MappingsAbout) + "# a note\nversion: "},
+			"a {...} file":                  {flow, utils.FileHead(utils.MappingsAbout) + "# a note\nversion: "},
 			"a {...} file under a head":     {"# one\n" + flow, "# one\n# a note\nversion: "},
-			"keploy's line in a {...} file": {strings.Replace(flow, "  # a note\n", "  "+utils.GetVersionAsComment()+"  # a note\n", 1), utils.GetVersionAsComment() + "# a note\nversion: "},
+			"keploy's line in a {...} file": {strings.Replace(flow, "  # a note\n", "  "+utils.GetVersionAsComment()+"  # a note\n", 1), utils.FileHead(utils.MappingsAbout) + "# a note\nversion: "},
 			"a {...} file under its note":   {"# a note\n" + flow, "# a note\n# a note\nversion: "},
 			"a {...} file a line under it":  {"# a note\n\n" + flow, "# a note\n# a note\nversion: "},
 			"the head's note below the key": {"# note\n" + strings.Replace(body, "kind:", "# note\n\nkind:", 1), "# note\nversion: api.keploy.io/v1beta1\n# note\n\nkind: "},
@@ -710,8 +710,10 @@ func TestEveryWriterWritesAPersonsHeadOnce(t *testing.T) {
 					must(t, write(db))
 					files = append(files, readSet(t, dir))
 				}
-				if !strings.HasPrefix(files[0], head.want+"version: ") {
-					t.Errorf("%s, %s: want the file to start %q:\n%s", name, shape, head.want, files[0])
+				// keploy's line is its head under the switch (utils.FileHead).
+				want := strings.Replace(head.want, utils.GetVersionAsComment(), utils.FileHead(utils.MappingsAbout), 1)
+				if !strings.HasPrefix(files[0], want+"version: ") {
+					t.Errorf("%s, %s: want the file to start %q:\n%s", name, shape, want, files[0])
 				}
 				if files[1] != files[0] || files[2] != files[0] {
 					t.Errorf("%s, %s: a rewrite of a file a rewrite wrote changed it:\n%s\nthen:\n%s\nthen:\n%s", name, shape, files[0], files[1], files[2])

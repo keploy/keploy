@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
@@ -300,6 +301,9 @@ func TestMachineFormatsKeepStdoutParseable(t *testing.T) {
 // it for everyone would be a regression in the opposite direction.
 func TestTextFormatStillPrintsTheLogo(t *testing.T) {
 	t.Cleanup(log.TestOnlyResetSink)
+	// The art is the switch-off console's: under the proven switch it is left
+	// out (TestPrintLogoUnderTheSwitchKeepsTheVersionAndTheLog).
+	t.Setenv(provenswitch.Env, "")
 
 	cfg := config.New()
 	c := NewCmdConfigurator(zap.New(nil), cfg)
@@ -329,6 +333,8 @@ func TestTextFormatStillPrintsTheLogo(t *testing.T) {
 // extend. With the logger redirected, nothing may reach stdout.
 func TestPrintLogoFollowsTheLoggerSink(t *testing.T) {
 	t.Cleanup(log.TestOnlyResetSink)
+	// The art is the switch-off console's (see TestTextFormatStillPrintsTheLogo).
+	t.Setenv(provenswitch.Env, "")
 
 	// Default: the sink is stdout, so the logo lands there.
 	onStdout := captureStdout(t, func() { PrintLogo(log.PrimarySink(), true) })
@@ -549,5 +555,20 @@ func TestPrintLogoToAConsoleThatFailsReturns(t *testing.T) {
 		if w.writes == 0 {
 			t.Errorf("PrintLogo(disableANSI=%v) wrote nothing: the row did not reach a failing write", disableANSI)
 		}
+	}
+}
+
+// Under the proven switch the console keeps the version and the log's path,
+// and leaves out the logo's art, which an agent reading the run line by
+// line gains nothing from. Mutation: print the art under the switch.
+func TestPrintLogoUnderTheSwitchKeepsTheVersionAndTheLog(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	var b strings.Builder
+	PrintLogo(&b, true)
+	if strings.Contains(b.String(), "OPEN SOURCE") || strings.Contains(b.String(), "▓") {
+		t.Fatalf("the art was printed under the switch:\n%s", b.String())
+	}
+	if !strings.Contains(b.String(), utils.VersionIdentifier+": ") {
+		t.Fatalf("the version line is gone:\n%s", b.String())
 	}
 }

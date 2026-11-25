@@ -3,6 +3,8 @@ package mockdb
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -343,5 +346,26 @@ func TestAMappedKindsClockReadsSurviveItsDecode(t *testing.T) {
 	}
 	if !reflect.DeepEqual(back[0].Spec.Clocks, clocks) {
 		t.Fatalf("the mapped mock read back with clock reads %+v, want %+v", back[0].Spec.Clocks, clocks)
+	}
+}
+
+func TestAMocksFileSaysWhatItIs(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	ys := clockStore(dir, string(yaml.FormatYAML))
+	m := noiseTestMock(`{"a":"b"}`)
+	m.Name = "mock-0"
+	if err := ys.InsertMock(context.Background(), m, "test-set-0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "test-set-0", "mocks.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(raw), utils.FileHead(utils.MocksAbout)) {
+		t.Fatalf("mocks.yaml does not start with keploy's line and what the file is:\n%s", raw)
 	}
 }
