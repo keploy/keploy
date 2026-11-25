@@ -106,6 +106,9 @@ type Hooks struct {
 	// SetInstance (instance.go); instanceMu guards it.
 	instanceMu   sync.Mutex
 	instanceFork link.Link
+	// instanceLock holds this agent's cross-PID-namespace flock ownership
+	// claim for the lifetime of loaded eBPF hooks.
+	instanceLock *instanceLock
 
 	connect4    link.Link
 	udp4Sendmsg link.Link
@@ -180,11 +183,19 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	})
 	err := h.load(ctx, opts, setupOpts)
 	if err != nil {
+		if h.instanceLock != nil {
+			_ = h.instanceLock.Release()
+			h.instanceLock = nil
+		}
 		return privilegeFailure(err)
 	}
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
+		if h.instanceLock != nil {
+			_ = h.instanceLock.Release()
+			h.instanceLock = nil
+		}
 		return errors.New("failed to get the error group from the context")
 	}
 
@@ -560,15 +571,27 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
-	// Detect and clean orphaned BPF programs from crashed previous
-	// runs. This must happen BEFORE attaching our new programs to
-	// avoid "program already attached" failures. Safety is enforced
-	// inside the helper: it name-matches keployBPFProgNames and
-	// gates on HasOtherKeployProcesses(os.Getpid()) so it cannot
-	// detach programs belonging to a live keploy sibling. The helper
-	// also emits its own Info log when it cleans anything, so no
-	// log is needed here.
-	DetectAndCleanOrphanedCgroupPrograms(h.logger, cGroupPath)
+	// Claim a kernel-enforced flock(2) instance lock on host-shared bpffs so
+	// sibling agents in other container PID namespaces recognize this live
+	// instance without relying on /proc visibility. Released on unLoad (or
+	// automatically by the kernel on crash/SIGKILL).
+	lockDir := defaultInstanceLockDir()
+	var selfInstanceID string
+	if lockDir != "" {
+		if il, lockErr := acquireInstanceLock(lockDir, ""); lockErr != nil {
+			h.logger.Warn("Could not acquire per-instance flock; falling back to bpf_link and /proc checks",
+				zap.String("lockDir", lockDir), zap.Error(lockErr))
+		} else {
+			h.instanceLock = il
+			selfInstanceID = il.ID()
+		}
+	}
+
+	// Detect and clean legacy raw-attached orphaned BPF programs from crashed
+	// previous runs before attaching our new programs. Skips when any live
+	// sibling holds an instance lock (even across PID namespaces), and never
+	// attempts RawDetachProgram on bpf_link-owned programs.
+	detectAndCleanOrphanedCgroupProgramsForInstance(h.logger, cGroupPath, lockDir, selfInstanceID)
 
 	h.logger.Debug("Attaching SockOps...")
 	sockops, err := link.AttachCgroup(link.CgroupOptions{
@@ -1008,6 +1031,14 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 			}
 		}
 
+	}
+	// Release the per-instance flock only after every cgroup link and eBPF
+	// object owned by Hooks (including cgBind*/cgPostBind*) is closed.
+	if h.instanceLock != nil {
+		if err := h.instanceLock.Release(); err != nil {
+			h.logger.Debug("failed to release per-instance flock", zap.Error(err))
+		}
+		h.instanceLock = nil
 	}
 	h.unseenEnd()
 	h.logger.Debug("eBPF resources released successfully...")
