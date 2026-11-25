@@ -131,7 +131,11 @@ type Hooks struct {
 	postBindRefused *postBindRefusal
 
 	BindEvents *ebpf.Map
-	sockops    link.Link
+	// cgroupOwner holds this instance's unpinned keploy_cg_owner BPF map for
+	// the lifetime of its cgroup attachments, signaling cross-PID-namespace
+	// ownership to other keploy instances on the same cgroup (cleanup.go).
+	cgroupOwner *cgroupOwnerToken
+	sockops     link.Link
 	// sockCreate is k_sock_create's link: sys_enter_socket's backstop,
 	// attached where it is.
 	sockCreate link.Link
@@ -560,15 +564,33 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
-	// Detect and clean orphaned BPF programs from crashed previous
-	// runs. This must happen BEFORE attaching our new programs to
-	// avoid "program already attached" failures. Safety is enforced
-	// inside the helper: it name-matches keployBPFProgNames and
-	// gates on HasOtherKeployProcesses(os.Getpid()) so it cannot
-	// detach programs belonging to a live keploy sibling. The helper
-	// also emits its own Info log when it cleans anything, so no
-	// log is needed here.
-	DetectAndCleanOrphanedCgroupPrograms(h.logger, cGroupPath)
+	// Claim kernel-enforced ownership on this cgroup BEFORE orphan cleanup and
+	// before attaching any cgroup program. Keeping the unpinned BPF map open
+	// signals live ownership across PID and mount namespaces (hostPID: false
+	// sidecar/replay pods included), and the kernel automatically releases it
+	// on process exit or SIGKILL.
+	loadOK := false
+	if ownerTok, ownerErr := acquireCgroupOwnerToken(cGroupPath); ownerErr != nil {
+		h.logger.Warn("Could not acquire kernel cgroup ownership token",
+			zap.String("path", cGroupPath), zap.Error(ownerErr))
+	} else {
+		h.cgroupOwner = ownerTok
+		defer func() {
+			if !loadOK && h.cgroupOwner != nil {
+				h.cgroupOwner.Close()
+				h.cgroupOwner = nil
+			}
+		}()
+	}
+
+	// Detect and clean orphaned legacy (non-bpf_link) BPF programs from
+	// crashed previous runs. This must happen BEFORE attaching our new
+	// programs to avoid "program already attached" failures on kernels that
+	// fall back to legacy BPF_PROG_ATTACH. Ownership safety is enforced inside
+	// the helper via bpf_link inspection and kernel-global keploy_cg_owner
+	// tokens (not /proc alone), so a non-hostPID pod cannot detach programs
+	// belonging to a live host or sibling agent.
+	detectAndCleanOrphanedCgroupPrograms(h.logger, cGroupPath, h.cgroupOwner.mapID())
 
 	h.logger.Debug("Attaching SockOps...")
 	sockops, err := link.AttachCgroup(link.CgroupOptions{
@@ -835,6 +857,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 	}
 
+	loadOK = true
 	return nil
 }
 
@@ -1010,6 +1033,10 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 	}
 	h.unseenEnd()
+	if h.cgroupOwner != nil {
+		h.cgroupOwner.Close()
+		h.cgroupOwner = nil
+	}
 	h.logger.Debug("eBPF resources released successfully...")
 
 }
