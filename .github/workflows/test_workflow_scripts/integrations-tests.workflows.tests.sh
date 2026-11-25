@@ -506,8 +506,16 @@ only_keys() {
 }
 # A key the steps below do not expect could skip, soften or redirect them:
 # continue-on-error, if:, shell:, working-directory:, or an env such as
-# GOFLAGS that changes what go test runs.
-only_keys "$job" "" name on permissions concurrency jobs
+# GOFLAGS that changes what go test runs. The one top-level env is
+# KEPLOY_INTERNAL: "1", which every workflow sets (sudo_env.tests.sh) so that
+# the keploy its jobs run marks its telemetry as keploy's own; any other key
+# there, or another value, fails.
+only_keys "$job" "" name on permissions concurrency env jobs
+if has "$job" env; then
+  only_keys "$job" env KEPLOY_INTERNAL
+  v="$(get "$job" env.KEPLOY_INTERNAL)" || v="(none)"
+  [ "$v" = '"1"' ] || problem "integrations-tests.yml's top-level env sets KEPLOY_INTERNAL to $v, want \"1\""
+fi
 only_keys "$job" jobs.integrations-tests name timeout-minutes runs-on env steps
 only_keys "$job" jobs.integrations-tests.env CGO_ENABLED
 # integrations-tests.sh runs go with no GOFLAGS whatever the env holds; a step
