@@ -1573,7 +1573,13 @@ func TestPauseTeesEndsThePreDispatchWindowOfAParserThatIsGone(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, Config{PreDispatchPause: true})
 	payload := []byte("startup-message")
-	go h.writeClient(payload)
+	// The write blocks until the relay reads it; its error is checked here,
+	// on the test's goroutine, once the destination has the bytes.
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := h.clientApp.Write(payload) // a short write returns an error
+		wrote <- err
+	}()
 	// Held while the parser could still decide.
 	_ = h.destSvc.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
 	if n, err := h.destSvc.Read(make([]byte, 64)); err == nil {
@@ -1593,6 +1599,9 @@ func TestPauseTeesEndsThePreDispatchWindowOfAParserThatIsGone(t *testing.T) {
 	got := make([]byte, len(payload))
 	if _, err := io.ReadFull(h.destSvc, got); err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("the destination did not get the client's bytes after the parser was gone: %q, %v", got, err)
+	}
+	if err := <-wrote; err != nil {
+		t.Fatalf("clientApp.Write: %v", err)
 	}
 	reply := []byte("N")
 	go func() { _, _ = h.destSvc.Write(reply) }()
