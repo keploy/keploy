@@ -163,7 +163,10 @@ func TestRemovalWatchEndsWithItsContext(t *testing.T) {
 // silentDaemon is an engine whose daemon does not take a wait's question:
 // ContainerWait returns only once its context ends, as the engine's client
 // does, with that end on its error channel.
-type silentDaemon struct{ asked chan struct{} }
+type silentDaemon struct {
+	asked        chan struct{}
+	inspectCalls int
+}
 
 func (d *silentDaemon) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
 	close(d.asked)
@@ -173,13 +176,15 @@ func (d *silentDaemon) ContainerWait(ctx context.Context, _ string, _ container.
 	return make(chan container.WaitResponse), failed
 }
 
-func (d *silentDaemon) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
-	return container.InspectResponse{}, nil
+func (d *silentDaemon) ContainerInspect(ctx context.Context, _ string) (container.InspectResponse, error) {
+	d.inspectCalls++
+	<-ctx.Done()
+	return container.InspectResponse{}, ctx.Err()
 }
 
 // A daemon that does not take the question holds Watch only until its ask
 // ends: the question is withdrawn, so the stop goes on, and Wait finds the
-// engine's wait ended and returns at once.
+// engine's wait ended and returns at once without calling ContainerInspect.
 func TestRemovalWatchWithdrawsAnUntakenQuestionWhenItsAskEnds(t *testing.T) {
 	d := &silentDaemon{asked: make(chan struct{})}
 	w := NewRemovalWatch(d, "keploy-v3-0a1b2c3d4e5f6071")
@@ -190,6 +195,9 @@ func TestRemovalWatchWithdrawsAnUntakenQuestionWhenItsAskEnds(t *testing.T) {
 	end()
 	within(t, "Watch, once its ask ended", returned)
 	within(t, "Wait, after a withdrawn question", waitInBackground(context.Background(), w))
+	if d.inspectCalls != 0 {
+		t.Fatalf("Wait called ContainerInspect %d times after withdrawn Watch, want 0", d.inspectCalls)
+	}
 }
 
 // A question the engine has taken outlives Watch's ask: the ask bounds only

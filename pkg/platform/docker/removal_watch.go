@@ -59,7 +59,9 @@ func NewRemovalWatch(api ContainerWaiter, name string) *RemovalWatch {
 func (w *RemovalWatch) Watch(ask context.Context) {
 	withdraw := context.AfterFunc(ask, w.cancel)
 	said, failed := w.api.ContainerWait(w.ctx, w.name, container.WaitConditionRemoved)
-	withdraw()
+	if !withdraw() {
+		w.cancel()
+	}
 	w.mu.Lock()
 	w.said, w.failed = said, failed
 	w.mu.Unlock()
@@ -68,14 +70,15 @@ func (w *RemovalWatch) Watch(ask context.Context) {
 // Wait returns once the engine has said the container is removed, or that
 // it is gone or could not be removed, or once ctx ends. It returns at once
 // when Watch never asked -- the container ended on its own, and its `docker
-// run` client, which waits for the removal, was not killed -- and when the
-// container still runs: the stop did not reach it, and nothing removes it.
+// run` client, which waits for the removal, was not killed -- when Watch
+// withdrew the wait because ask expired, and when the container still runs:
+// the stop did not reach it, and nothing removes it.
 func (w *RemovalWatch) Wait(ctx context.Context, logger *zap.Logger) {
 	defer w.cancel()
 	w.mu.Lock()
 	said, failed := w.said, w.failed
 	w.mu.Unlock()
-	if said == nil {
+	if said == nil || w.ctx.Err() != nil {
 		return
 	}
 	if info, err := w.api.ContainerInspect(ctx, w.name); err == nil && info.ContainerJSONBase != nil && info.State != nil && info.State.Running {
