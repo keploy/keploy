@@ -142,6 +142,31 @@ func (w *missWindow) startOfLocked(epoch uint64) int {
 	return k
 }
 
+// markedBeforeFirstTest reports whether err, a miss filed in w while a test
+// capture window is open (or carried into a later window), is a call whose
+// parser marked its round during the running test set's startup — in the
+// current set's staging (MarkEpoch >= setStaged), outside any test view
+// (!MarkedInTest && MarkedTest == ""), and before the set's first test fired
+// under exact serving (MarkedBeforeFirstTest). Once the first test's view is
+// installed, later pool views (even before Test #1's GetMockErrors read runs)
+// leave MarkedBeforeFirstTest false so post-Test-#1 pool misses stay Between,
+// never BeforeSet.
+func (w *missWindow) markedBeforeFirstTest(err error) bool {
+	staged := w.setStaged.Load()
+	if staged == 0 {
+		return false
+	}
+	var pe models.ParserError
+	if !errors.As(err, &pe) || pe.MismatchReport == nil {
+		return false
+	}
+	r := pe.MismatchReport
+	if r.Mark == models.RoundUnmarked || !r.MarkedBeforeFirstTest || r.MarkedInTest || r.MarkedTest != "" {
+		return false
+	}
+	return r.MarkEpoch >= staged
+}
+
 // missInstance is the test worker whose process made the miss err (0: none).
 // errors.As reaches a miss carried as the set's through beforeSetMiss.Unwrap.
 func missInstance(err error) uint32 {
@@ -277,7 +302,7 @@ func (p *Proxy) missManager(inst uint32) *MockManager {
 // the proxy's own does the run's (Proxy.ContinueTestErrorCapture).
 func (s instanceExact) ContinueTestErrorCapture() {
 	if w := s.p.missWindowOf(s.inst); w != nil {
-		s.p.openCaptureOn(w, true, false)
+		s.p.openCaptureOn(context.Background(), w, true, false)
 	}
 }
 

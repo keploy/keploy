@@ -132,9 +132,9 @@ func eitherSwitch(t *testing.T, f func(t *testing.T)) {
 func TestGetMockErrors_ReportsAnIncompleteRead(t *testing.T) {
 	eitherSwitch(t, func(t *testing.T) {
 		p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 2)}
-		p.errDrainActive.Store(true) // a drain that stalled: active, never taking
 		p.errDrainDone = make(chan struct{})
 		p.BeginTestErrorCapture()
+		p.errDrainActive.Store(true) // a drain that stalled: active, never taking
 		p.errChannel <- mockMiss("GET /a")
 
 		ctx, cancel := context.WithCancel(context.Background())

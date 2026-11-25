@@ -722,6 +722,19 @@ type MockStats struct {
 	Loaded   int `json:"loaded"`
 	Consumed int `json:"consumed"`
 	Missed   int `json:"missed"`
+	// InFlight is the number of outbound dependency calls currently in flight
+	// in the proxy when this snapshot was read. Only populated when
+	// InFlightCounted is true; zero when InFlightCounted is false means
+	// in-flight calls are not tracked, not that none are in flight.
+	InFlight int `json:"inFlight,omitempty"`
+	// ActivityCounted says this agent populates Consumed and Missed on
+	// /agent/mock/stats. False from an older agent that reports Loaded only.
+	ActivityCounted bool `json:"activityCounted,omitempty"`
+	// InFlightCounted says this agent tracks in-flight outbound calls and
+	// populates InFlight on /agent/mock/stats. False when the proxy does not
+	// retain accepted connections for in-flight tracking (for example, default
+	// replay with KEPLOY_PROVEN unset and settle-reads off).
+	InFlightCounted bool `json:"inFlightCounted,omitempty"`
 	// SeriesCounted says the agent counts the calls in tests each series of
 	// a declared rule (ScopeTableReq.Series) answered past its recorded
 	// count, in SeriesRepeats. False from an agent that does not: its

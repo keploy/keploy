@@ -120,13 +120,14 @@ var notInTheReport = map[string]string{
 // notFromTheMiss names each field of the report that no field of the miss
 // feeds, with why.
 var notFromTheMiss = map[string]string{
-	"Mark":         "the parser's mark of the call's round, read by the agent's routing, never on the wire (json:\"-\")",
-	"MarkedInTest": "part of the parser's round mark (Mark), never on the wire",
-	"MarkEpoch":    "part of the parser's round mark (Mark), never on the wire",
-	"MarkBounds":   "part of the parser's round mark (Mark), never on the wire",
-	"MarkRound":    "part of the parser's round mark (Mark), never on the wire",
-	"MarkReads":    "part of the parser's round mark (Mark), never on the wire",
-	"MarkedTest":   "part of the parser's round mark (Mark), never on the wire",
+	"Mark":                  "the parser's mark of the call's round, read by the agent's routing, never on the wire (json:\"-\")",
+	"MarkedInTest":          "part of the parser's round mark (Mark), never on the wire",
+	"MarkEpoch":             "part of the parser's round mark (Mark), never on the wire",
+	"MarkBounds":            "part of the parser's round mark (Mark), never on the wire",
+	"MarkRound":             "part of the parser's round mark (Mark), never on the wire",
+	"MarkReads":             "part of the parser's round mark (Mark), never on the wire",
+	"MarkedTest":            "part of the parser's round mark (Mark), never on the wire",
+	"MarkedBeforeFirstTest": "part of the parser's round mark (Mark), never on the wire",
 }
 
 // A call a parser held past its window for a later test's recording, which

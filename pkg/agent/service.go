@@ -1361,6 +1361,14 @@ type SeriesRepeatReader interface {
 	SeriesRepeats() (map[string]int64, error)
 }
 
+// MockActivityReader is implemented by a proxy that reports a non-draining
+// live snapshot of outbound mock activity for /agent/mock/stats: total mocks
+// served (consumed), total mock misses observed (missed), and outbound calls
+// currently in flight (inFlight) when inFlightCounted is true.
+type MockActivityReader interface {
+	MockActivity() (consumed, missed, inFlight int, inFlightCounted bool)
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),

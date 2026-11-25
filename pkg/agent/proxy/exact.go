@@ -1141,6 +1141,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	r := &m.exact.round
 	r.mu.Lock()
 	v := m.exact.view.Load()
+	fired := m.exact.fired.Load()
 	at := integrations.RoundAt{Epoch: m.stagingEpoch.Load(), Gen: r.gen, Bounds: r.bounds}
 	reads := m.windowReads.Load()
 	var ended *exactView
@@ -1181,7 +1182,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// charges its miss by the view it was read in (fails closed).
 		return c.HoldingEvery().WithTrackerAhead(true)
 	}
-	return c.OfTest(v.test).WithTrackerAhead(false)
+	return c.OfTest(v.test).WithTrackerAhead(false).WithBeforeFirstTest(!fired && v.test == "")
 }
 
 // inVariableScope is c, a mark made in v, in the variable scope v was

@@ -60,6 +60,10 @@ type instanceServing struct {
 	mgrs map[uint32]*MockManager
 	// misses is each served worker's misses window (missWindowOf).
 	misses map[uint32]*missWindow
+	// retiredServed preserves the TotalServed counts of test workers stopped
+	// within the current replay session so MockActivity().Consumed stays
+	// monotonic across worker exits until the session resets.
+	retiredServed int
 }
 
 // stage applies a staging of kind key to the run's manager m and every
@@ -107,7 +111,7 @@ func (p *Proxy) endInstances() {
 	s.staged = nil
 	s.mu.Lock()
 	mgrs := s.mgrs
-	s.mgrs, s.misses, s.on = nil, nil, false
+	s.mgrs, s.misses, s.on, s.retiredServed = nil, nil, false, 0
 	s.mu.Unlock()
 	s.stageMu.Unlock()
 	for _, wm := range mgrs {
@@ -202,6 +206,9 @@ func (p *Proxy) StopServingInstance(inst uint32) error {
 	s.stageMu.Lock()
 	s.mu.Lock()
 	wm := s.mgrs[inst]
+	if wm != nil {
+		s.retiredServed += wm.TotalServed()
+	}
 	delete(s.mgrs, inst)
 	delete(s.misses, inst)
 	s.mu.Unlock()
@@ -211,6 +218,23 @@ func (p *Proxy) StopServingInstance(inst uint32) error {
 	}
 	wm.Close()
 	return nil
+}
+
+// totalConsumed returns the total mocks served across the run's mock manager
+// and every live or retired test worker manager in the current replay session.
+func (p *Proxy) totalConsumed() int {
+	var consumed int
+	if m := p.getMockManager(); m != nil {
+		consumed = m.TotalServed()
+	}
+	s := &p.instances
+	s.mu.RLock()
+	consumed += s.retiredServed
+	for _, wm := range s.mgrs {
+		consumed += wm.TotalServed()
+	}
+	s.mu.RUnlock()
+	return consumed
 }
 
 var _ agent.InstanceServer = (*Proxy)(nil)

@@ -606,16 +606,29 @@ func (a *Agent) DrainCapturedMocks(_ context.Context) ([]*models.Mock, error) {
 	return httpparser.DrainCaptured(), nil
 }
 
-// MockStats returns a non-draining snapshot for /agent/mock/stats. Consumed and
-// missed totals are surfaced in the CLI's end-of-run summary (they drain their
-// capture windows), so this live endpoint reports the loaded count only, and,
-// from a proxy that serves declared rules' series, how many calls each
-// answered past its recorded count (withSeriesRepeats).
+// MockStats returns a non-draining snapshot for /agent/mock/stats: loaded
+// count, live outbound activity (consumed, missed, in-flight when the proxy
+// reports it via withMockActivity), and declared-rule series repeats
+// (withSeriesRepeats).
 func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 	a.scopeMu.Lock()
 	loaded := a.loadedMocks
 	a.scopeMu.Unlock()
-	return a.withSeriesRepeats(models.MockStats{Loaded: loaded})
+	stats := a.withMockActivity(models.MockStats{Loaded: loaded})
+	return a.withSeriesRepeats(stats)
+}
+
+// withMockActivity populates stats.Consumed, stats.Missed, stats.InFlight,
+// stats.ActivityCounted, and stats.InFlightCounted from a proxy implementing
+// coreAgent.MockActivityReader.
+func (a *Agent) withMockActivity(stats models.MockStats) models.MockStats {
+	r, ok := a.Proxy.(coreAgent.MockActivityReader)
+	if !ok {
+		return stats
+	}
+	stats.Consumed, stats.Missed, stats.InFlight, stats.InFlightCounted = r.MockActivity()
+	stats.ActivityCounted = true
+	return stats
 }
 
 type scopeMeta struct {

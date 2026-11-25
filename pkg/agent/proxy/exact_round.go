@@ -790,6 +790,9 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 			return integrations.RoundSnapshot{}, false
 		}
 		epoch := m.stagingEpoch.Load()
+		// Phase stays zero (not RoundStartUp) because no exact view is
+		// installed here (unset background serving, e.g. inside an open
+		// keploy-mock scope), so CallRound().BeforeFirstTest() stays false.
 		s := integrations.RoundSnapshot{
 			At:               integrations.RoundAt{Epoch: epoch, Gen: r.gen, Bounds: r.bounds},
 			Reads:            m.windowReads.Load(),

@@ -217,6 +217,9 @@ type MockManager struct {
 	// first-use timestamp and its usage in consumedPersistent, so only a count
 	// tells that it answered again.
 	servedCount map[string]uint64
+	// totalServed is the monotonic count of served calls across this replay
+	// session, read lock-free by MockActivity for /agent/mock/stats.
+	totalServed atomic.Int64
 	// setServed is servedCount for the per-test mocks of the test set being
 	// replayed, as the set's ownership summary says it (sayOwnership, which
 	// empties it); a set boundary and a re-arm of the set's start
@@ -458,6 +461,16 @@ type MockManager struct {
 	// scope tests is not the app's startup (TreeDb.bootBuilt). Written under
 	// swapMu.
 	scopeFiredThisSet bool
+
+	// testStagedThisSet records whether any non-initial per-test staging has
+	// run in the current test set (SetMocksWithWindow / OpenTestWithWindow
+	// with start != models.BaseTime), including zero-start windows for
+	// timestamp-less test cases (e.g. Postman imports, hand-written cases, or
+	// non-HTTP/gRPC cases). Unlike testFiredThisSet, it does not alter
+	// WindowSnapshot().FirstTestFired or timestamp-based tier routing, and it
+	// stays sticky until the next test-set boundary clears it. Written under
+	// swapMu.
+	testStagedThisSet bool
 
 	// appStart is the set's start as its staging staged it, while no test of
 	// the set has run (noteAppStartLocked): what RearmAppStart stages again
@@ -996,6 +1009,7 @@ func (m *MockManager) ResetForReplaySession() {
 	if m.servedCount != nil {
 		m.servedCount = make(map[string]uint64)
 	}
+	m.totalServed.Store(0)
 	m.takenThisSession = nil
 	if m.scopeConsumed != nil {
 		m.scopeConsumed = make(map[string]struct{})
@@ -1958,6 +1972,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	}
 	if scope {
 		m.scopeFiredThisSet = true
+	} else if !isInitialStaging {
+		m.testStagedThisSet = true
 	}
 	// The set's start, as this staging stages it, while no test of the set
 	// has run: what a new instance of the application is staged again
@@ -2013,6 +2029,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		if m.boundaryPending {
 			m.boundaryPending = false
 			m.testFiredThisSet = false
+			m.testStagedThisSet = false
 			m.scopeFiredThisSet = false
 			// Install this set's seeded cutoff. Zero when nothing was seeded,
 			// which is exactly the historical clear.
@@ -3451,6 +3468,23 @@ func (m *MockManager) HasFirstTestFired() bool {
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
 	return m.testFiredThisSet || m.scopeOpen
+}
+
+// HasAnyTestOrScopeFired reports whether any test or keploy-mock scope has
+// fired in the current set. Unlike WindowSnapshot().FirstTestFired and
+// HasFirstTestFired, this stays true after SetScopeMocks(..., open=false)
+// closes a scope test, and it also reflects non-initial per-test stagings with
+// a zero-start window (such as Postman imports, hand-written cases, or
+// non-HTTP/gRPC cases), so misses inside or after the first test are not
+// attributed to BeforeSet.
+func (m *MockManager) HasAnyTestOrScopeFired() bool {
+	if m.exact.fired.Load() {
+		return true
+	}
+	m.swapMu.RLock()
+	fired := m.testFiredThisSet || m.testStagedThisSet || m.scopeFiredThisSet
+	m.swapMu.RUnlock()
+	return fired
 }
 
 // FirstTestWindowStart returns this set's startup-init cutoff: the earliest
@@ -6030,6 +6064,9 @@ func (m *MockManager) recordConsumeLocked(mock models.MockState, staged uint64, 
 	if served && m.servedCount != nil {
 		m.servedCount[mock.Name]++
 	}
+	if served {
+		m.totalServed.Add(1)
+	}
 	if served && mock.Lifetime == models.LifetimePerTest {
 		if m.setServed == nil {
 			m.setServed = make(map[string]uint64)
@@ -6040,6 +6077,12 @@ func (m *MockManager) recordConsumeLocked(mock models.MockState, staged uint64, 
 		m.noteAnsweredInLocked(mock.Name, time.Now().UnixNano())
 	}
 	return nil
+}
+
+// TotalServed returns the non-draining count of calls answered by mocks in
+// this replay session (never drained, lock-free).
+func (m *MockManager) TotalServed() int {
+	return int(m.totalServed.Load())
 }
 
 // ServedCounts returns a copy of how many calls each mock is credited with

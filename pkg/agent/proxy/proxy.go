@@ -267,6 +267,9 @@ type Proxy struct {
 	// their kind that were dropped for room (noteAnswerDropped): no read is
 	// incomplete for them, and each hundredth is said.
 	answersDropped atomic.Int64
+	// totalMissed is the non-draining count of mock mismatches observed in the
+	// current mock session, exposed via MockActivity for /agent/mock/stats.
+	totalMissed atomic.Int64
 	// missCutPending is set by a test set's Mock, with the proven switch on
 	// or off, and taken by its first staging (SetMocksWithWindow from
 	// models.BaseTime), which cuts what was missed until then
@@ -4717,6 +4720,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
 	p.stopBegun.Store(false)
+	p.totalMissed.Store(0)
 	// Forget the previous recording's MySQL ports before this test set derives
 	// its own. The agent is a single long-lived process and this registry is
 	// allocated once, so without the reset the derived port set — and the
@@ -4809,6 +4813,9 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(p.shareWindows(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger)))
 	} else {
+		p.instances.mu.Lock()
+		p.instances.retiredServed = 0
+		p.instances.mu.Unlock()
 		// Every test worker's manager starts the session as the run's does.
 		p.stage(mm, "session", func(m *MockManager) {
 			m.ResetForReplaySession()
@@ -5403,11 +5410,23 @@ func (p *Proxy) TakeTestRequest(req *models.TestRequest) {
 // (agent.TestRequestTaker): under the proven switch the learn step's test
 // begins awaiting its test case's request, which its opening filter brings
 // (TakeTestRequest), in the same step (learn.Tracker.BeginAwaiting).
-func (p *Proxy) BeginTestCaseCapture() { p.openTestErrorCapture(false, true) }
+func (p *Proxy) BeginTestCaseCapture() { p.openTestErrorCapture(context.Background(), false, true) }
+
+// BeginTestCaseCaptureCtx is BeginTestCaseCapture with ctx bounding the
+// error-drain flush that precedes opening the test's capture window.
+func (p *Proxy) BeginTestCaseCaptureCtx(ctx context.Context) {
+	p.openTestErrorCapture(ctx, false, true)
+}
 
 // ContinueTestCaseCapture is ContinueTestErrorCapture of a test keploy test
 // opens, as BeginTestCaseCapture is BeginTestErrorCapture's.
-func (p *Proxy) ContinueTestCaseCapture() { p.openTestErrorCapture(true, true) }
+func (p *Proxy) ContinueTestCaseCapture() { p.openTestErrorCapture(context.Background(), true, true) }
+
+// ContinueTestCaseCaptureCtx is ContinueTestCaseCapture with ctx bounding the
+// error-drain flush that precedes opening the test's capture window.
+func (p *Proxy) ContinueTestCaseCaptureCtx(ctx context.Context) {
+	p.openTestErrorCapture(ctx, true, true)
+}
 
 var _ agent.TestRequestTaker = (*Proxy)(nil)
 
@@ -6452,7 +6471,13 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // zero latency (cutMissesAtSetStart).
 // GetMockErrors retrieves and the next Begin/ContinueTestErrorCapture resets
 // the window.
-func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false, false) }
+func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(context.Background(), false, false) }
+
+// BeginTestErrorCaptureCtx is BeginTestErrorCapture with ctx bounding the
+// error-drain flush that precedes opening Test #1's capture window.
+func (p *Proxy) BeginTestErrorCaptureCtx(ctx context.Context) {
+	p.openTestErrorCapture(ctx, false, false)
+}
 
 // ContinueTestErrorCapture opens the next test's window, as
 // BeginTestErrorCapture does, but carries into it the misses made since the
@@ -6465,22 +6490,41 @@ func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false, false) }
 // no test at all. Under the proven switch the read marks such a miss, one
 // made while no test's view served, as the set's (betweenTestsMiss): the
 // replay fails the set with it and charges the next test nothing.
-func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true, false) }
+func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(context.Background(), true, false) }
+
+// ContinueTestErrorCaptureCtx is ContinueTestErrorCapture with ctx bounding
+// the error-drain flush that precedes opening the next test's capture window.
+func (p *Proxy) ContinueTestErrorCaptureCtx(ctx context.Context) {
+	p.openTestErrorCapture(ctx, true, false)
+}
 
 // openTestErrorCapture opens the next test's capture window (carry: as
 // ContinueTestErrorCapture). Under the proven switch the learn step's test
 // begins with it, awaiting its test case's request where keploy test opened
 // it (awaits: learn.Tracker.BeginAwaiting), in one step: no call reads the
 // test's places between its begin and the wait.
-func (p *Proxy) openTestErrorCapture(carry, awaits bool) {
-	p.openCaptureOn(&p.missWindow, carry, awaits)
+func (p *Proxy) openTestErrorCapture(ctx context.Context, carry, awaits bool) {
+	p.openCaptureOn(ctx, &p.missWindow, carry, awaits)
 }
 
 // openCaptureOn is openTestErrorCapture on the misses window w: the run's,
 // or a test worker's (instanceExact), whose tests the learn step does not
 // follow.
-func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
+func (p *Proxy) openCaptureOn(ctx context.Context, w *missWindow, carry, awaits bool) {
 	p.hasTestCaptureReader.Store(true)
+	// Flush every miss already queued in errChannel into the pre-window queue
+	// BEFORE installing the new test's accumulator, so a boot miss (or a gap
+	// miss between two tests) already sent before this window opened is never
+	// routed into this test unwrapped.
+	if p.errDrainActive.Load() && p.errChannel != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if flushed, reason := p.flushOnEvents(ctx, &flushMarker{done: make(chan struct{})}); !flushed && p.logger != nil {
+			p.logger.Debug("error drain flush before opening test capture window did not complete",
+				zap.String("reason", reason))
+		}
+	}
 	if provenswitch.On() && w == &p.missWindow {
 		// The learn step's earlier places are the running test's.
 		p.learnBoundary(func(t *learn.Tracker) {
@@ -6524,17 +6568,19 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 			// one made in the test whose read came before, which keploy
 			// decided after that read (lateInTestMiss): the test this window
 			// opens for begins only after it, and made neither. An earlier
-			// set's test's call (earlierSetMiss) is no call of this set's,
-			// and keeps its wrap: a read unwraps one alone.
-			if provenswitch.On() {
-				_, isEarlier := err.(earlierSetMiss)
-				switch {
-				case isEarlier:
-				case madeOutsideEveryTest(err):
-					err = betweenTestsMiss{err}
-				case madeInATestView(err):
-					err = lateInTestMiss{err}
-				}
+			// set's test's call (earlierSetMiss) or a late startup call
+			// (beforeSetMiss / markedBeforeFirstTest) keeps its own wrap: a
+			// read unwraps one alone.
+			_, isBefore := err.(beforeSetMiss)
+			_, isEarlier := err.(earlierSetMiss)
+			switch {
+			case isBefore, isEarlier:
+			case w.markedBeforeFirstTest(err):
+				err = asBeforeSet(err)
+			case provenswitch.On() && madeOutsideEveryTest(err):
+				err = betweenTestsMiss{err}
+			case provenswitch.On() && madeInATestView(err):
+				err = lateInTestMiss{err}
 			}
 			if !acc.addBounded(err, maxPendingMockErrors) {
 				p.missDroppedForRoom(err)
@@ -6849,6 +6895,9 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 		late, isLate := err.(lateInTestMiss)
 		if isLate {
 			err = late.error
+		}
+		if !isBefore && !isEarlier && !isBetween && !isLate && w.markedBeforeFirstTest(err) {
+			isBefore = true
 		}
 		first := len(errs)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
@@ -7237,7 +7286,8 @@ func (p *Proxy) sendMockNotFoundErrorFrom(ctx context.Context, err error, pid, i
 	if r := proxyErr.MismatchReport; r != nil {
 		proxyErr.Recorded = r.Recorded
 	}
-	if m := p.missManager(inst); m != nil {
+	m := p.missManager(inst)
+	if m != nil {
 		if proxyErr.MissKind = m.exactMissKind(proxyErr.MismatchReport); proxyErr.MissKind != "" {
 			// Only a miss made in the open test is an extra call, and only
 			// an extra call says how often the call was recorded. The
@@ -7336,8 +7386,34 @@ func (p *Proxy) sendMockNotFoundErrorFrom(ctx context.Context, err error, pid, i
 		p.mismatchLog(p.missInOpenTestWindow(inst, nil))("mock mismatch: no matching mock for outgoing call (no structured report)",
 			zap.String("error_type", fmt.Sprintf("%T", err)), zap.Int("error_bytes", len(err.Error())), zap.Bool("no_mock_matched", errors.Is(err, models.ErrNoMockMatched)))
 	}
-	p.SendError(proxyErr)
+	if r := proxyErr.MismatchReport; (r != nil && r.Answer == "") || (r == nil && errors.Is(err, models.ErrNoMockMatched)) {
+		p.totalMissed.Add(1)
+	}
+	var toSend error = proxyErr
+	if m != nil {
+		if w := p.missWindowOf(inst); w != nil && w.setStaged.Load() > 0 && !m.HasAnyTestOrScopeFired() {
+			toSend = asBeforeSet(proxyErr)
+		}
+	}
+	p.SendError(toSend)
 }
+
+// MockActivity implements agent.MockActivityReader: a non-draining snapshot
+// of mocks served (across the run and test workers), mock misses observed, and
+// in-flight outbound calls for /agent/mock/stats. inFlightCounted is true only
+// when the proxy retains accepted connections for in-flight tracking
+// (keepsConnections).
+func (p *Proxy) MockActivity() (consumed, missed, inFlight int, inFlightCounted bool) {
+	consumed = p.totalConsumed()
+	missed = int(p.totalMissed.Load())
+	if p.keepsConnections() {
+		inFlight, _ = p.InFlightState(true)
+		inFlightCounted = true
+	}
+	return consumed, missed, inFlight, inFlightCounted
+}
+
+var _ agent.MockActivityReader = (*Proxy)(nil)
 
 // CloseErrorChannel closes the error channel
 func (p *Proxy) CloseErrorChannel() {

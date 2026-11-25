@@ -491,6 +491,12 @@ type MockMismatchReport struct {
 	// read found (integrations.CallRound.Test): "" for a pool view, and where
 	// the store did not name it. Never written to a report.
 	MarkedTest string `json:"-" yaml:"-"`
+	// MarkedBeforeFirstTest is, with Mark set, that the call's first read
+	// found a non-test view before the set's first test fired under exact
+	// serving (integrations.CallRound.BeforeFirstTest): once the first test's
+	// view is installed, later pool views between tests leave it false even
+	// before that test's GetMockErrors read runs. Never written to a report.
+	MarkedBeforeFirstTest bool `json:"-" yaml:"-"`
 	// Repeat says the call is identical to a recording an earlier test of
 	// the set made, which already answered that test's call at this replay
 	// (RepeatNote); nil otherwise. ClosestMock is then that recording, but

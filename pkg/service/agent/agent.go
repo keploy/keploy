@@ -1210,15 +1210,25 @@ func (a *Agent) PIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, erro
 // replayer's subsequent GetMockErrors returns only this test's misses instead
 // of draining a process-global queue. The replayer calls it before each test
 // (in-process here, over HTTP via the agent client). Safe no-op return.
-func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
+func (a *Agent) BeginTestErrorCapture(ctx context.Context) error {
 	// a.Proxy is the agent.Proxy interface; reach the concrete capability via a
 	// type-assertion so the interface stays unchanged. Older proxies without it
 	// simply fall back to the legacy global queue. Under the proven switch a
 	// proxy whose learn step reads the test case's request opens the window
 	// with the learn step's test awaiting it, in one step
 	// (coreAgent.TestRequestTaker).
-	if taker, ok := a.Proxy.(coreAgent.TestRequestTaker); ok && provenswitch.On() {
-		taker.BeginTestCaseCapture()
+	if provenswitch.On() {
+		if takerCtx, ok := a.Proxy.(interface{ BeginTestCaseCaptureCtx(context.Context) }); ok {
+			takerCtx.BeginTestCaseCaptureCtx(ctx)
+		} else if taker, ok := a.Proxy.(coreAgent.TestRequestTaker); ok {
+			taker.BeginTestCaseCapture()
+		} else if bCtx, ok := a.Proxy.(interface{ BeginTestErrorCaptureCtx(context.Context) }); ok {
+			bCtx.BeginTestErrorCaptureCtx(ctx)
+		} else if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
+			b.BeginTestErrorCapture()
+		}
+	} else if bCtx, ok := a.Proxy.(interface{ BeginTestErrorCaptureCtx(context.Context) }); ok {
+		bCtx.BeginTestErrorCaptureCtx(ctx)
 	} else if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
 		b.BeginTestErrorCapture()
 	}
@@ -1237,15 +1247,23 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 // test awaiting its request, ContinueTestCaseCapture). A proxy without it
 // opens a window as Begin does.
 func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
+	takerCtx, takesCtx := a.Proxy.(interface{ ContinueTestCaseCaptureCtx(context.Context) })
 	taker, takes := a.Proxy.(coreAgent.TestRequestTaker)
+	takesCtx = takesCtx && provenswitch.On()
 	takes = takes && provenswitch.On()
+	cCtx, carriesCtx := a.Proxy.(interface{ ContinueTestErrorCaptureCtx(context.Context) })
 	c, carries := a.Proxy.(interface{ ContinueTestErrorCapture() })
-	if !takes && !carries {
+	if !takesCtx && !takes && !carriesCtx && !carries {
 		return a.BeginTestErrorCapture(ctx)
 	}
-	if takes {
+	switch {
+	case takesCtx:
+		takerCtx.ContinueTestCaseCaptureCtx(ctx)
+	case takes:
 		taker.ContinueTestCaseCapture()
-	} else {
+	case carriesCtx:
+		cCtx.ContinueTestErrorCaptureCtx(ctx)
+	default:
 		c.ContinueTestErrorCapture()
 	}
 	if t := a.realTracker(); t != nil && provenswitch.On() {

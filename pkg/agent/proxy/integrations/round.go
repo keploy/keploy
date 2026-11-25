@@ -237,6 +237,7 @@ type roundHeader struct {
 	at         RoundAt
 	reads      uint64
 	test       string
+	fired      bool
 	phase      RoundPhase
 	ended      string
 	background bool
@@ -301,7 +302,7 @@ func (h roundHeader) callRound(holds func(string) bool) CallRound {
 		// tracker's test's, never the test whose view is in force.
 		return NewCallRound(h.at.Epoch, nil).HoldingEvery().ReadAt(h.at).InStaging(h.staging).InView(h.test != "", h.background).InWorkerView(worker).InStoreView(h.scope.view).AfterReads(h.reads)
 	}
-	return NewCallRound(h.at.Epoch, holds).ReadAt(h.at).InStaging(h.staging).InView(h.test != "", h.background).InWorkerView(worker).OfTest(h.test).InStoreView(h.scope.view).AfterReads(h.reads)
+	return NewCallRound(h.at.Epoch, holds).ReadAt(h.at).InStaging(h.staging).InView(h.test != "", h.background).InWorkerView(worker).OfTest(h.test).InStoreView(h.scope.view).AfterReads(h.reads).WithBeforeFirstTest(h.phase == RoundStartUp && !h.fired && h.test == "")
 }
 
 func (h roundHeader) inBackground(name string, owned bool) bool {
@@ -540,7 +541,7 @@ type RoundSnapshot struct {
 
 func (s RoundSnapshot) header() roundHeader {
 	return roundHeader{
-		at: s.At, reads: s.Reads, test: s.Test, phase: s.Phase,
+		at: s.At, reads: s.Reads, test: s.Test, fired: s.Fired, phase: s.Phase,
 		ended: s.Ended, background: s.Background, staging: s.Staging,
 		learn: s.Learn, scope: s.roundScopeParts,
 	}
@@ -1139,7 +1140,7 @@ type RoundMeta struct {
 
 func (m RoundMeta) header() roundHeader {
 	return roundHeader{
-		at: m.At, reads: m.Reads, test: m.Test, phase: m.Phase,
+		at: m.At, reads: m.Reads, test: m.Test, fired: m.Fired, phase: m.Phase,
 		ended: m.Ended, background: m.Background, staging: m.Staging,
 		learn: m.Learn, scope: m.roundScopeParts,
 	}

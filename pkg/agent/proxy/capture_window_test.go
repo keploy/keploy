@@ -195,12 +195,12 @@ func TestCaptureWindow_ContinueCarriesWhatAReadWindowGotLater(t *testing.T) {
 			}
 			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
 			p.errDrainDone = make(chan struct{}) // a drain that runs and never reaches the marker
-			p.errDrainActive.Store(true)
 
 			// The caller gives the read up: the event that ends it.
 			ctx, giveUp := context.WithCancel(context.Background())
 			giveUp()
 			p.BeginTestErrorCapture()
+			p.errDrainActive.Store(true)
 			p.activeTestErrors.Load().addBounded(mockMiss("POST /t1"), maxPendingMockErrors)
 			got, err := p.GetMockErrors(ctx)
 			if len(got) != 1 || got[0].ActualSummary != "POST /t1" {
@@ -215,8 +215,8 @@ func TestCaptureWindow_ContinueCarriesWhatAReadWindowGotLater(t *testing.T) {
 			}
 			acc.addBounded(mockMiss("SEND after test1 was read"), maxPendingMockErrors)
 
+			p.errDrainActive.Store(false) // the next open and read close the window normally
 			p.ContinueTestErrorCapture()
-			p.errDrainActive.Store(false) // the next read closes the window normally
 			if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || got[0].ActualSummary != "SEND after test1 was read" {
 				t.Fatalf("test2 expected [SEND after test1 was read], got %+v", got)
 			}

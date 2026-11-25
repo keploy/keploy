@@ -806,6 +806,9 @@ type CallRound struct {
 	// reads is how many reads of its misses window had begun when the read
 	// was made (AfterReads).
 	reads uint64
+	// beforeFirstTest is whether the read found a non-test view before the
+	// set's first test fired under exact serving (WithBeforeFirstTest).
+	beforeFirstTest bool
 	// scope is the number of the variable scope in force in the view the
 	// read was made in (InVariableScope), scoped whether the store keeps one.
 	scope  uint64
@@ -843,6 +846,19 @@ func (c CallRound) AfterReads(n uint64) CallRound {
 // Reads is how many reads of its misses window had begun when c's read was
 // made (AfterReads): 0 from a store that counts none.
 func (c CallRound) Reads() uint64 { return c.reads }
+
+// WithBeforeFirstTest records whether c's read found a non-test view before
+// the set's first test fired under exact serving. Once the first test's view
+// is installed, later pool views leave it false even before that test's
+// GetMockErrors read increments windowReads.
+func (c CallRound) WithBeforeFirstTest(before bool) CallRound {
+	c.beforeFirstTest = before
+	return c
+}
+
+// BeforeFirstTest reports whether c was marked before the set's first test
+// fired under exact serving (WithBeforeFirstTest).
+func (c CallRound) BeforeFirstTest() bool { return c.beforeFirstTest }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
 // name, the recordings its view held as its own (nil: none).
@@ -1099,6 +1115,7 @@ func StampMark(r *models.MockMismatchReport, call CallRound) {
 	}
 	r.MarkedTest = call.Test()
 	r.MarkReads = call.Reads()
+	r.MarkedBeforeFirstTest = call.BeforeFirstTest()
 }
 
 // MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the
