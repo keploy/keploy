@@ -603,9 +603,12 @@ type UnmatchedCall struct {
 	// cascade stopped. Omitted when empty — the protocol supplied no
 	// destination evidence, and an absent field is the only honest rendering
 	// of "we did not check".
-	DestinationScope string          `json:"destination_scope,omitempty" yaml:"destination_scope,omitempty"`
-	CandidateCount   int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
-	FieldDiffs       []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
+	DestinationScope string `json:"destination_scope,omitempty" yaml:"destination_scope,omitempty"`
+	// ClosestOnAnotherRoute mirrors MockMismatchReport.ClosestOnAnotherRoute:
+	// the closest mock named is a recording of another route than the call's.
+	ClosestOnAnotherRoute bool            `json:"closest_on_another_route,omitempty" yaml:"closest_on_another_route,omitempty"`
+	CandidateCount        int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
+	FieldDiffs            []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
 	// ClosestMockReq / ReceivedReq carry the FULL rendered requests for the CLI
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`

@@ -470,6 +470,72 @@ func TestWholeSetLookupSkipsOwnPayloadDiffAndNeverMislabelsOwnMockOutsideWindow(
 		}
 	})
 
+	// A call whose closest mock is on another route (ClosestOnAnotherRoute)
+	// is no payload diff of its own, whoever owns that mock (the nearest
+	// other route is often one of the test's own): it is looked up across the
+	// set, and its next step names where it was recorded.
+	for _, closest := range []string{"mock-own", "mock-other-orders"} {
+		t.Run("call whose closest mock is on another route is looked up across the set, closest "+closest, func(t *testing.T) {
+			calls := []models.UnmatchedCall{{
+				Protocol:      "HTTP",
+				ActualSummary: "GET /v1/config",
+				Destination:   "cfg.internal:8080",
+				ClosestMock:   closest,
+				MatchPhase:    models.MatchPhaseSchema,
+				FieldDiffs: []models.MockFieldDiff{
+					{Path: "method", Kind: models.DiffKindValueChanged, Expected: "POST", Actual: "GET"},
+					{Path: "path", Kind: models.DiffKindValueChanged, Expected: "/v1/orders", Actual: "/v1/config"},
+				},
+				ClosestOnAnotherRoute: true,
+				NextSteps:             "If another test recorded this call and every test may make it, declare sessionCalls.",
+			}}
+			idx.enrichCalls(calls, "tc-1")
+			if !strings.Contains(calls[0].NextSteps, "A call to the same endpoint was recorded in mock-boot (outside any test window)") {
+				t.Errorf("NextSteps = %q, want the whole-set lookup's endpoint match", calls[0].NextSteps)
+			}
+			if calls[0].ClosestMock != closest || calls[0].RecordedIn != "" {
+				t.Errorf("heuristic match must not mutate ClosestMock/RecordedIn: got ClosestMock=%q RecordedIn=%q", calls[0].ClosestMock, calls[0].RecordedIn)
+			}
+		})
+	}
+
+	// A call whose destination is what differs (out of scope, or a host diff
+	// under the proven switch) is not looked up, though its closest mock is
+	// on another route: the lookup's fallback would name mock-other-orders,
+	// tc-2's recording of its path on another upstream.
+	for _, c := range []struct {
+		name  string
+		scope string
+		diffs []models.MockFieldDiff
+	}{
+		{"out of scope", models.DestinationScopeNotInComparedSet, []models.MockFieldDiff{
+			{Path: "method", Kind: models.DiffKindValueChanged, Expected: "GET", Actual: "POST"},
+			{Path: "path", Kind: models.DiffKindValueChanged, Expected: "/v1/config", Actual: "/v1/orders"},
+		}},
+		{"host diff", models.DestinationScopeInComparedSet, []models.MockFieldDiff{
+			{Path: "host", Kind: models.DiffKindValueChanged, Expected: "orders.internal:8080", Actual: "orders-b.internal:8080"},
+		}},
+	} {
+		t.Run("call whose destination differs is not looked up, "+c.name, func(t *testing.T) {
+			origNext := "original hint"
+			calls := []models.UnmatchedCall{{
+				Protocol:              "HTTP",
+				ActualSummary:         "POST /v1/orders",
+				Destination:           "orders-b.internal:8080",
+				ClosestMock:           "mock-boot",
+				MatchPhase:            models.MatchPhaseSchema,
+				DestinationScope:      c.scope,
+				FieldDiffs:            c.diffs,
+				ClosestOnAnotherRoute: true,
+				NextSteps:             origNext,
+			}}
+			idx.enrichCalls(calls, "tc-1")
+			if calls[0].NextSteps != origNext || calls[0].RecordedIn != "" {
+				t.Errorf("a call whose destination differs was looked up: NextSteps=%q RecordedIn=%q", calls[0].NextSteps, calls[0].RecordedIn)
+			}
+		})
+	}
+
 	t.Run("AppTimeoutError implements Timeout() bool", func(t *testing.T) {
 		var err error = &pkg.AppTimeoutError{TestCase: "tc-1", Duration: time.Second}
 		te, ok := err.(interface{ Timeout() bool })

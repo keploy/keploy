@@ -2012,35 +2012,36 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			// Carried across so the CLI rendering can tell an out-of-scope
 			// destination from a drifted request; the two need different
 			// artifacts, not just different hints.
-			DestinationScope: call.DestinationScope,
-			CandidateCount:   call.CandidateCount,
-			FieldDiffs:       call.FieldDiffs,
-			ClosestMockReq:   call.ClosestMockReq,
-			ReceivedReq:      call.ReceivedReq,
-			MissKind:         call.Kind,
-			Recorded:         call.Recorded,
-			SkippedReads:     call.SkippedReads,
-			Differs:          call.Differs,
-			FieldReasons:     call.FieldReasons,
-			VariablePlaces:   call.VariablePlaces,
-			BoundIn:          slices.Clone(call.BoundIn),
-			Given:            call.Given,
-			VariableWhy:      call.VariableWhy,
-			NotOwned:         call.NotOwned,
-			HeldPastWindow:   call.Held, // the proxy's copy of the parser's HeldPastWindow
-			Background:       call.Background,
-			BackgroundBound:  slices.Clone(call.BackgroundBound), // a copy, as the proxy's: the report shares no slice with the miss
-			Reason:           call.Reason,
-			Concurrent:       call.Concurrent,
-			Answer:           call.Answer,
-			Drift:            call.Drift,
-			Reused:           call.Reused,
-			WriteKind:        call.WriteKind,
-			Source:           call.Source,
-			RecordedIn:       call.RecordedIn,
-			Earlier:          call.Earlier,
-			TrailsOf:         call.TrailsOf,
-			Repeat:           call.Repeat.Clone(),
+			DestinationScope:      call.DestinationScope,
+			ClosestOnAnotherRoute: call.ClosestOnAnotherRoute,
+			CandidateCount:        call.CandidateCount,
+			FieldDiffs:            call.FieldDiffs,
+			ClosestMockReq:        call.ClosestMockReq,
+			ReceivedReq:           call.ReceivedReq,
+			MissKind:              call.Kind,
+			Recorded:              call.Recorded,
+			SkippedReads:          call.SkippedReads,
+			Differs:               call.Differs,
+			FieldReasons:          call.FieldReasons,
+			VariablePlaces:        call.VariablePlaces,
+			BoundIn:               slices.Clone(call.BoundIn),
+			Given:                 call.Given,
+			VariableWhy:           call.VariableWhy,
+			NotOwned:              call.NotOwned,
+			HeldPastWindow:        call.Held, // the proxy's copy of the parser's HeldPastWindow
+			Background:            call.Background,
+			BackgroundBound:       slices.Clone(call.BackgroundBound), // a copy, as the proxy's: the report shares no slice with the miss
+			Reason:                call.Reason,
+			Concurrent:            call.Concurrent,
+			Answer:                call.Answer,
+			Drift:                 call.Drift,
+			Reused:                call.Reused,
+			WriteKind:             call.WriteKind,
+			Source:                call.Source,
+			RecordedIn:            call.RecordedIn,
+			Earlier:               call.Earlier,
+			TrailsOf:              call.TrailsOf,
+			Repeat:                call.Repeat.Clone(),
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)
@@ -2138,15 +2139,38 @@ func partitionPassingMismatches(rows []TestFailure) (unmatched, mapping []TestFa
 	return unmatched, mapping
 }
 
+// diffsNameADestination reports whether diffs hold a destination field (host,
+// container): the recording compared went elsewhere.
+func diffsNameADestination(diffs []models.MockFieldDiff) bool {
+	for _, d := range diffs {
+		if d.Path == "host" || d.Path == "container" {
+			return true
+		}
+	}
+	return false
+}
+
 // isPayloadDiffRow reports whether f is an outgoing-call payload/body diff
 // against a compared candidate mock (as opposed to a no-candidate upstream
 // miss or a mapping-only row). In default mode, payload diffs do not fail a
-// test and stay in the deduplicated OUTGOING CALL DIFFS table.
+// test and stay in the deduplicated OUTGOING CALL DIFFS table. A miss whose
+// closest mock is on another route (ClosestOnAnotherRoute, the parser's
+// verdict) is none, whatever field diffs it carries: they say which
+// recording was nearest (a GET /config/boot for a POST /oauth/token only
+// another test recorded), not what drifted. It is the test's own miss,
+// printed in the failed test's MOCK MISMATCH block with its heading and Hint
+// (for a call another test recorded, the sessionCalls advice), which the
+// table's one row does not carry. An out-of-scope miss with diffs stays a
+// table row, merged with its repeats across tests: a sidecar's egress makes
+// many.
 func isPayloadDiffRow(f TestFailure) bool {
 	if f.FailureReason != models.ErrMockNotFound || f.MismatchReport == nil {
 		return false
 	}
 	r := f.MismatchReport
+	if r.ClosestOnAnotherRoute && r.DestinationScope != models.DestinationScopeNotInComparedSet {
+		return false
+	}
 	if len(r.FieldDiffs) > 0 || len(r.Differs) > 0 {
 		return true
 	}

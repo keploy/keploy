@@ -331,8 +331,17 @@ func (idx *wholeSetMockIndex) lookupCall(call models.UnmatchedCall, currentTest 
 }
 
 // isOwnPayloadDiff reports whether call is a payload/header diff against a
-// candidate mock rather than a cross-test missing-candidate call.
+// candidate mock rather than a cross-test missing-candidate call. A call
+// whose closest mock is on another route (ClosestOnAnotherRoute) is none,
+// whoever owns that mock: the nearest other route is often one of the
+// test's own, and the lookup never names the test's own mocks. A call whose
+// destination is what differs (a host or container diff, or out of scope) is
+// left as it was: the lookup's fallback can name a recording of its path on
+// another upstream, which says nothing of a call whose host changed.
 func (idx *wholeSetMockIndex) isOwnPayloadDiff(c models.UnmatchedCall, currentTest string) bool {
+	if c.ClosestOnAnotherRoute && !diffsNameADestination(c.FieldDiffs) && c.DestinationScope != models.DestinationScopeNotInComparedSet {
+		return false
+	}
 	if len(c.FieldDiffs) > 0 || len(c.Differs) > 0 || c.MatchPhase == models.MatchPhaseBody {
 		return true
 	}
@@ -474,10 +483,14 @@ func failedMismatchNextStep(failures []TestFailure) string {
 		if r.RecordedIn != "" || r.NotOwned {
 			hasRecordedElsewhere = true
 		}
-		if len(r.FieldDiffs) > 0 || len(r.Differs) > 0 ||
-			r.MatchPhase == models.MatchPhaseBody ||
-			strings.Contains(r.MatchPhase, "body") ||
-			strings.Contains(r.MatchPhase, "header") {
+		// Field diffs against another route's recording
+		// (ClosestOnAnotherRoute) or another upstream's (out of scope) are
+		// no drift of the call's own: the call got no recorded answer.
+		if !r.ClosestOnAnotherRoute && r.DestinationScope != models.DestinationScopeNotInComparedSet &&
+			(len(r.FieldDiffs) > 0 || len(r.Differs) > 0 ||
+				r.MatchPhase == models.MatchPhaseBody ||
+				strings.Contains(r.MatchPhase, "body") ||
+				strings.Contains(r.MatchPhase, "header")) {
 			hasPayloadDrift = true
 		} else if r.MatchPhase == models.MatchPhaseSchema ||
 			r.MatchPhase == models.MatchPhaseNoMocks ||

@@ -1145,3 +1145,44 @@ func TestQueryParamsMatch_ValueSensitive(t *testing.T) {
 		})
 	}
 }
+
+// A report says its closest mock is on another route (ClosestOnAnotherRoute)
+// by the rule the lax matcher reads a route by: another method, or a path
+// that is not the call's own with url noise and id segments relaxed as the
+// match relaxed them. A token call whose nearest recording is GET
+// /config/boot is on another route; a call on its own route whose id segment
+// and query value changed is not, nor one whose path differs only in a
+// segment url noise covers.
+func TestBuildHTTPMismatchReport_ClosestOnAnotherRoute(t *testing.T) {
+	h := newHTTP()
+	req := func(method, path, query string) *http.Request {
+		return &http.Request{Method: method, URL: &url.URL{Path: path, RawQuery: query}, Header: http.Header{}}
+	}
+	for _, c := range []struct {
+		name     string
+		mock     *models.Mock
+		request  *http.Request
+		urlNoise []string
+		auto     bool
+		want     bool
+	}{
+		{"another method and path", httpMock("mock-0", "GET", "http://auth:9096/config/boot"), req("POST", "/oauth/token", ""), nil, true, true},
+		{"same path, another method", httpMock("mock-0", "GET", "http://auth:9096/oauth/token"), req("POST", "/oauth/token", ""), nil, true, true},
+		{"own route, a query value changed", httpMock("mock-1", "GET", "http://api:80/v1/orders?date=2026-11-24"), req("GET", "/v1/orders", "date=2026-11-25"), nil, true, false},
+		{"own route, an id segment and a query value changed", httpMock("mock-1", "GET", "http://api:80/v1/orders/3f2b8c1e-9d4a-4e7b-8a6f-1c2d3e4f5a6b?date=2026-11-24"), req("GET", "/v1/orders/7a9e0d2c-1b3f-4c5d-9e8f-2a3b4c5d6e7f", "date=2026-11-25"), nil, true, false},
+		{"an id segment changed, id segments not relaxed", httpMock("mock-1", "GET", "http://api:80/v1/orders/3f2b8c1e-9d4a-4e7b-8a6f-1c2d3e4f5a6b"), req("GET", "/v1/orders/7a9e0d2c-1b3f-4c5d-9e8f-2a3b4c5d6e7f", ""), nil, false, true},
+		{"a segment url noise covers", httpMock("mock-2", "GET", "http://files:80/v1/files/report-a"), req("GET", "/v1/files/report-b", ""), []string{"/v1/files/report-[a-z]+"}, true, false},
+		{"the same segment, no url noise", httpMock("mock-2", "GET", "http://files:80/v1/files/report-a"), req("GET", "/v1/files/report-b", ""), nil, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db := &mockMemDb{mocks: []*models.Mock{c.mock}}
+			r := h.buildHTTPMismatchReportRouted(context.Background(), c.request, nil, db, []*models.Mock{c.mock}, nil, nil, c.urlNoise, c.auto, nil)
+			if r == nil || r.ClosestMock != c.mock.Name {
+				t.Fatalf("report %+v, want one naming %s as its closest mock", r, c.mock.Name)
+			}
+			if r.ClosestOnAnotherRoute != c.want {
+				t.Errorf("ClosestOnAnotherRoute = %v, want %v (field diffs %+v)", r.ClosestOnAnotherRoute, c.want, r.FieldDiffs)
+			}
+		})
+	}
+}
