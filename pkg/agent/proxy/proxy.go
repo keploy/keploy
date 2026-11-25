@@ -4640,6 +4640,14 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	// forgotten here: its calls from then on are recorded as startup calls
 	// (sent on at once, not windowed), and the next request signals again.
 	syncMock.Get().StartRecordSession()
+	// Rewire the process-wide mock manager to this recording's output channel
+	// now, after StartRecordSession has ended any previous stop on the old
+	// channel. Long-lived keep-alive connections that stayed open across a
+	// recorder reconnect (e.g. k8s-proxy restarting against a sidecar agent)
+	// do not re-enter handleConnection, so their parsers keep emitting through
+	// syncMock.Get(); without this, their post-reconnect mocks go to the
+	// previous session's dead channel.
+	syncMock.Get().SetOutputChannel(mocks)
 	// Lift the per-session opportunistic-TLS toggle onto the proxy
 	// for handleConnection to read. Independent of GlobalPassthrough.
 	p.OpportunisticTLSIntercept = opts.OpportunisticTLSIntercept
