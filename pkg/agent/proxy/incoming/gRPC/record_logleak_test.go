@@ -41,7 +41,7 @@ func TestRecordIncoming_LogsGRPCMethodAsShapeAndSessionTag(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RecordIncoming(ctx, logger, cliProxy, appProxy, tcCh, 50051, "", false, false)
+		_ = RecordIncoming(ctx, logger, cliProxy, appProxy, tcCh, 50051, "", false, false, nil)
 	}()
 
 	reqBytes := append([]byte(http2.ClientPreface),

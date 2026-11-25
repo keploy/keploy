@@ -470,6 +470,38 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	// here, before the ingress ends it (syncMock.TestSpanAt).
 	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 }
+
+// GrpcFilterRequest is a gRPC call as the ingress filters read an HTTP
+// request (IsFiltered): it is one, a POST over HTTP/2 to the method's path,
+// with its metadata as headers (User-Agent among them, which the built-in
+// probe exclusions match) and :authority as its Host.
+func GrpcFilterRequest(req *models.GrpcReq) *http.Request {
+	h := http.Header{}
+	for k, v := range req.Headers.OrdinaryHeaders {
+		h.Set(k, v)
+	}
+	authority := req.Headers.PseudoHeaders[":authority"]
+	if authority != "" {
+		h.Set("Host", authority)
+	}
+	return &http.Request{
+		Method: http.MethodPost,
+		URL:    &url.URL{Path: req.Headers.PseudoHeaders[":path"]},
+		Header: h,
+		Host:   authority,
+	}
+}
+
+// IsGrpcFiltered reports whether the recording's ingress filters leave a gRPC
+// call out, as IsFiltered does an HTTP request: a call they exclude is no test
+// case, and is not counted by the static deduper either.
+func IsGrpcFiltered(logger *zap.Logger, req *models.GrpcReq, opts models.IncomingOptions) bool {
+	if req == nil {
+		return false
+	}
+	return IsFiltered(logger, GrpcFilterRequest(req), opts)
+}
+
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	filtered, _ := evalFilters(logger, req, opts)
 	return filtered
@@ -736,6 +768,9 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 // returned, on every path:
 //   - a call a pause of the memory guard costs (SkipGRPCUnderPressure) is left
 //     out and counted before any of the rest;
+//   - a call the recording's ingress filters exclude (IsGrpcFiltered: a
+//     health probe, a user's exclude rule) is left out before the static
+//     deduper sees it, as an HTTP request is;
 //   - GRPCCaptureHook is invoked before any resolve. With --sync every call,
 //     duplicate or not, takes a name of the manager's (test-N): concurrent
 //     duplicates would otherwise share one in the manager's window map;
@@ -751,7 +786,7 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 //     takes what was held and ends the window;
 //   - without --sync a call in flight across its recording's stop is left
 //     out, and a test case handed on notes its span (Window.Tested).
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool, opts models.IncomingOptions) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -763,6 +798,11 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	}
 
 	if SkipEndedRecording(ctx, nil, nil) || SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
+		return
+	}
+
+	if IsGrpcFiltered(logger, http2Stream.GRPCReq, opts) {
+		logger.Debug("The gRPC call is a filtered request")
 		return
 	}
 

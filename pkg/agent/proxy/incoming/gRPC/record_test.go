@@ -329,18 +329,29 @@ func pingCall(t *testing.T) (req, resp []byte) {
 // when it is the connection's first call.
 func pingCallOn(t *testing.T, id uint32, first bool) (req, resp []byte) {
 	t.Helper()
+	return pingCallAs(t, id, first, "/svc.Echo/Ping", "")
+}
+
+// pingCallAs is pingCallOn to path, with userAgent as the call's user-agent
+// when it is not "".
+func pingCallAs(t *testing.T, id uint32, first bool, path, userAgent string) (req, resp []byte) {
+	t.Helper()
+	fields := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "http"},
+		{Name: ":path", Value: path},
+		{Name: ":authority", Value: "localhost:50051"},
+		{Name: "content-type", Value: "application/grpc"},
+	}
+	if userAgent != "" {
+		fields = append(fields, hpack.HeaderField{Name: "user-agent", Value: userAgent})
+	}
 	if first {
 		req = []byte(http2.ClientPreface)
 	}
 	req = append(req,
 		append(
-			headersFrameBytes(t, id, []hpack.HeaderField{
-				{Name: ":method", Value: "POST"},
-				{Name: ":scheme", Value: "http"},
-				{Name: ":path", Value: "/svc.Echo/Ping"},
-				{Name: ":authority", Value: "localhost:50051"},
-				{Name: "content-type", Value: "application/grpc"},
-			}, false),
+			headersFrameBytes(t, id, fields, false),
 			dataFrameBytes(t, id, true, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'i', 'n', 'g'}))...,
 		)...,
 	)
@@ -386,6 +397,13 @@ func startGRPCIngress(t *testing.T) *grpcIngress {
 // connection wrapped by wrap, when it is not nil.
 func startGRPCIngressOn(t *testing.T, wrap func(net.Conn) net.Conn) *grpcIngress {
 	t.Helper()
+	return startGRPCIngressWith(t, wrap, nil)
+}
+
+// startGRPCIngressWith is startGRPCIngressOn reading the recording's ingress
+// options (its filters) from loadOpts, when it is not nil, at each capture.
+func startGRPCIngressWith(t *testing.T, wrap func(net.Conn) net.Conn, loadOpts func() models.IncomingOptions) *grpcIngress {
+	t.Helper()
 	g := &grpcIngress{m: syncMock.New(nil), tcCh: make(chan *models.TestCase), recorded: make(chan struct{}),
 		stop: asTheAgentGetsIt(time.Now().Add(time.Hour))}
 	remove := g.m.AddWatermark(caughtUp{})
@@ -399,7 +417,7 @@ func startGRPCIngressOn(t *testing.T, wrap func(net.Conn) net.Conn) *grpcIngress
 	}
 	go func() {
 		defer close(g.recorded)
-		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, g.tcCh, 50051, "", false, false)
+		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, g.tcCh, 50051, "", false, false, loadOpts)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -460,6 +478,58 @@ func (g *grpcIngress) call(t *testing.T) {
 	go func() { _, _ = g.appApp.Write(resp) }()
 	_, err = io.ReadFull(g.cliApp, make([]byte, len(resp)))
 	require.NoError(t, err)
+}
+
+// The recording's ingress filters reach the gRPC capture as they are when
+// each call is captured, as an HTTP request's are: a gRPC connection lasts
+// hours, across a recorder reconnecting with other filters. A probe on a
+// connection opened before the filters were set is recorded; once they are
+// set, the next probe on the same connection is not; the app's own call
+// still is. An include-only set leaves out every call it does not include.
+func TestRecordIncoming_AFilteredCallIsNoTestCase(t *testing.T) {
+	var current atomic.Pointer[models.IncomingOptions]
+	current.Store(&models.IncomingOptions{})
+	g := startGRPCIngressWith(t, nil, func() models.IncomingOptions { return *current.Load() })
+	exchange := func(req, resp []byte) {
+		go func() { _, _ = g.cliApp.Write(req) }()
+		_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+		require.NoError(t, err)
+		go func() { _, _ = g.appApp.Write(resp) }()
+		_, err = io.ReadFull(g.cliApp, make([]byte, len(resp)))
+		require.NoError(t, err)
+	}
+	next := func(what string) *models.TestCase {
+		select {
+		case tc := <-g.tcCh:
+			return tc
+		case <-time.After(500 * time.Millisecond):
+			return nil
+		}
+	}
+	const probe = "kube-probe/1.31 grpc-go/1.65.0"
+
+	exchange(pingCallAs(t, 1, true, "/grpc.health.v1.Health/Check", probe))
+	tc := next("the probe before the filters")
+	require.NotNil(t, tc, "with no filters yet the probe is recorded")
+
+	current.Store(&models.IncomingOptions{Filters: []models.Filter{
+		{Headers: map[string]string{"User-Agent": `^kube-probe/`}, FilterPolicy: "exclude"},
+	}})
+	exchange(pingCallAs(t, 3, false, "/grpc.health.v1.Health/Check", probe))
+	require.Nil(t, next("the probe after the filters"), "the filters set on an open connection did not apply to its next call")
+	exchange(pingCallAs(t, 5, false, "/svc.Echo/Ping", "grpc-go/1.72.0"))
+	tc = next("the app's call")
+	require.NotNil(t, tc, "the app's own call was not captured")
+	require.Equal(t, "/svc.Echo/Ping", tc.GrpcReq.Headers.PseudoHeaders[":path"])
+
+	current.Store(&models.IncomingOptions{Filters: []models.Filter{
+		{BypassRule: models.BypassRule{Path: "^/svc\\.Keep/"}, FilterPolicy: "include"},
+	}})
+	exchange(pingCallAs(t, 7, false, "/svc.Echo/Ping", "grpc-go/1.72.0"))
+	require.Nil(t, next("a call an include-only set does not include"), "an include-only set kept a call it does not include")
+	exchange(pingCallAs(t, 9, false, "/svc.Keep/Get", "grpc-go/1.72.0"))
+	tc = next("an included call")
+	require.NotNil(t, tc, "an included call was not captured")
 }
 
 // A gRPC call that ended before a recording's stop is the agent's until the
