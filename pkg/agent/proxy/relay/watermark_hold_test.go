@@ -17,8 +17,13 @@ func heldCallAcrossAWindow(t *testing.T, h *relayHarness) (first, next fakeconn.
 	h.writeClient([]byte("req"))
 	h.readDest(3)
 	first = readChunk(t, h.r.ClientStream())
+	// On a clock that moves on only at its tick (Windows') the request's
+	// stamp, a mid read within that tick and the reply's stamp are one
+	// instant: mid is read once the clock has passed the request, and the
+	// reply sent once it has passed mid.
+	waitClockPast(t, first.ReadAt)
 	mid = time.Now()
-	time.Sleep(2 * time.Millisecond) // the reply is stamped after mid
+	waitClockPast(t, mid) // the reply is stamped after mid
 	h.writeDest([]byte("ans"))
 	h.readClient(3)
 	next = readChunk(t, h.r.DestStream())
@@ -124,8 +129,9 @@ func TestWatermark_AHoldSetAsALookReadsItIsSeenWithTheReadPastIt(t *testing.T) {
 	h.writeClient([]byte("req"))
 	h.readDest(3)
 	first := readChunk(t, client)
+	waitClockPast(t, first.ReadAt) // as heldCallAcrossAWindow does
 	mid := time.Now()
-	time.Sleep(2 * time.Millisecond) // the reply is stamped after mid
+	waitClockPast(t, mid) // the reply is stamped after mid
 	h.writeDest([]byte("ans"))
 	h.readClient(3)
 	awaitState(t, "the reply to reach the parser's stream", func() bool {
@@ -169,8 +175,9 @@ func TestWatermark_AHoldSetBetweenLookAndCaughtUpIsStillSeen(t *testing.T) {
 	h.writeClient([]byte("req"))
 	h.readDest(3)
 	first := readChunk(t, client)
+	waitClockPast(t, first.ReadAt) // as heldCallAcrossAWindow does
 	mid := time.Now()
-	time.Sleep(2 * time.Millisecond)
+	waitClockPast(t, mid) // the reply is stamped after mid
 	h.writeDest([]byte("ans"))
 	h.readClient(3)
 	awaitState(t, "the reply to reach the parser's stream", func() bool {
