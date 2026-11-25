@@ -194,6 +194,30 @@ exit 0
 	}
 }
 
+// silentWaitDaemon takes the removal watch at once so the stop reaches
+// `docker kill` and `docker wait`, then never answers the container's removal
+// or volume removals until its context ends.
+type silentWaitDaemon struct{ kdocker.Client }
+
+func (silentWaitDaemon) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	failed := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		failed <- ctx.Err()
+	}()
+	return make(chan container.WaitResponse), failed
+}
+
+func (silentWaitDaemon) ContainerInspect(ctx context.Context, _ string) (container.InspectResponse, error) {
+	<-ctx.Done()
+	return container.InspectResponse{}, ctx.Err()
+}
+
+func (silentWaitDaemon) VolumeRemove(ctx context.Context, _ string, _ bool) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 // The stop of a docker-mode agent on a daemon that never answers it: one
 // that answers nothing, and one that takes the stop's signal but never says
 // the container exited (`docker wait`). The run ends at keploy's bound on the
@@ -201,12 +225,18 @@ exit 0
 // one bound a question later; the drain waits for it; and it says at WARN
 // each of its volumes it could not remove, with the command that removes it.
 func TestDockerAgentStopOnASilentDaemonEndsAtTheBound(t *testing.T) {
-	for _, tc := range []struct{ name, kill string }{
-		{name: "the daemon answers nothing", kill: `while [ -d "$D" ]; do sleep 0.05; done; exit 1`},
-		{name: "the daemon takes the signal but never says the container exited", kill: `exit 0`},
+	for _, tc := range []struct {
+		name      string
+		kill      string
+		api       kdocker.Client
+		awaitWait bool
+	}{
+		{name: "the daemon answers nothing", kill: `while [ -d "$D" ]; do sleep 0.05; done; exit 1`, api: silentDaemon{}},
+		{name: "the daemon takes the signal but never says the container exited", kill: `exit 0`, api: silentWaitDaemon{}, awaitWait: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			waited := filepath.Join(dir, "waited")
 			core, logs := observer.New(zapcore.InfoLevel)
 			clk, exited, drained := engineWaitRun(t, dir, `#!/bin/sh
 D="`+dir+`"
@@ -219,10 +249,15 @@ esac
 case "$1" in
 kill) `+tc.kill+` ;;
 cp) while [ -d "$D" ]; do sleep 0.05; done; exit 1 ;;
-wait) while [ -d "$D" ]; do sleep 0.05; done; exit 1 ;;
+wait)
+  : > "`+waited+`"
+  while [ -d "$D" ]; do sleep 0.05; done; exit 1 ;;
 esac
 exit 0
-`, silentDaemon{}, zap.New(core))
+`, tc.api, zap.New(core))
+			if tc.awaitWait {
+				awaitFile(t, "the stop's docker wait", waited)
+			}
 			pass(clk, daemonAnswerStall-time.Second)
 			// Wall time passes, keploy's runnable time does not.
 			for i := 0; i < 25; i++ {
