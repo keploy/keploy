@@ -2507,6 +2507,27 @@ func JSONValueEqual(actual, expected interface{}) bool {
 	return jsonValueEqual(actual, expected)
 }
 
+// JSONBodiesEqual reports whether expected and actual are valid, non-empty JSON
+// documents with semantically equal contents. Key ordering and insignificant
+// whitespace are ignored, and numbers preserve precision via json.Decoder.UseNumber.
+func JSONBodiesEqual(expected, actual string) bool {
+	if !json.Valid([]byte(expected)) || !json.Valid([]byte(actual)) {
+		return false
+	}
+	if expected == actual {
+		return true
+	}
+	expVal, err := UnmarshallJSON(expected, nil)
+	if err != nil {
+		return false
+	}
+	actVal, err := UnmarshallJSON(actual, nil)
+	if err != nil {
+		return false
+	}
+	return JSONValueEqual(actVal, expVal)
+}
+
 // jsonValueEqual compares two decoded JSON values with mathematical equality
 // for numbers regardless of whether they are json.Number, float64, or Go ints.
 func jsonValueEqual(actual, expected interface{}) bool {

@@ -1121,3 +1121,152 @@ func TestLearnedIDKeyEntryIsExactUnderTheSwitch(t *testing.T) {
 		t.Fatalf("a sibling whose name it prefixes is excused under the switch")
 	}
 }
+
+func TestJSONBodiesEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected string
+		actual   string
+		want     bool
+	}{
+		// Valid JSON equality
+		{
+			name:     "identical JSON objects",
+			expected: `{"a":1,"b":"hello"}`,
+			actual:   `{"a":1,"b":"hello"}`,
+			want:     true,
+		},
+		{
+			name:     "objects with different key ordering",
+			expected: `{"a":1,"b":2,"c":3}`,
+			actual:   `{"c":3,"a":1,"b":2}`,
+			want:     true,
+		},
+		{
+			name:     "objects with different whitespace",
+			expected: `{"a":1,"b":"two"}`,
+			actual:   "{\n  \"a\": 1,\n  \"b\": \"two\"\n}",
+			want:     true,
+		},
+		{
+			name:     "nested JSON objects with reordered keys",
+			expected: `{"user":{"id":1,"roles":["admin","user"]},"meta":{"ok":true,"count":2}}`,
+			actual:   `{"meta":{"count":2,"ok":true},"user":{"roles":["admin","user"],"id":1}}`,
+			want:     true,
+		},
+		{
+			name:     "nested JSON object mismatch",
+			expected: `{"user":{"id":1,"name":"alice"}}`,
+			actual:   `{"user":{"id":1,"name":"bob"}}`,
+			want:     false,
+		},
+		{
+			name:     "identical arrays with different whitespace",
+			expected: `[1,2,{"a":3}]`,
+			actual:   `[ 1 , 2 , { "a" : 3 } ]`,
+			want:     true,
+		},
+		{
+			name:     "arrays with different element order do not match",
+			expected: `[1,2]`,
+			actual:   `[2,1]`,
+			want:     false,
+		},
+
+		// Numeric precision
+		{
+			name:     "1 equals 1.0 per JSONValueEqual contract",
+			expected: `{"n":1}`,
+			actual:   `{"n":1.0}`,
+			want:     true,
+		},
+		{
+			name:     "100 equals 1e2",
+			expected: `{"n":100}`,
+			actual:   `{"n":1e2}`,
+			want:     true,
+		},
+		{
+			name:     "0 equals -0.0",
+			expected: `{"n":0}`,
+			actual:   `{"n":-0.0}`,
+			want:     true,
+		},
+		{
+			name:     "distinguishes >2^53 integers (9007199254740993 vs 9007199254740992)",
+			expected: `{"id":9007199254740993}`,
+			actual:   `{"id":9007199254740992}`,
+			want:     false,
+		},
+		{
+			name:     "negative numbers equal across formatting",
+			expected: `{"temp":-42}`,
+			actual:   `{"temp":-42.0}`,
+			want:     true,
+		},
+		{
+			name:     "negative numbers distinguish distinct values",
+			expected: `{"temp":-1}`,
+			actual:   `{"temp":1}`,
+			want:     false,
+		},
+		{
+			name:     "large integer values equal when exact",
+			expected: `{"id":9223372036854775807}`,
+			actual:   `{"id":9223372036854775807}`,
+			want:     true,
+		},
+		{
+			name:     "large integer values distinguish off-by-one",
+			expected: `{"id":9223372036854775807}`,
+			actual:   `{"id":9223372036854775806}`,
+			want:     false,
+		},
+
+		// Invalid JSON
+		{
+			name:     "identical plain-text strings rejected",
+			expected: "ok",
+			actual:   "ok",
+			want:     false,
+		},
+		{
+			name:     "empty strings rejected",
+			expected: "",
+			actual:   "",
+			want:     false,
+		},
+		{
+			name:     "whitespace-only strings rejected",
+			expected: "   ",
+			actual:   "   ",
+			want:     false,
+		},
+		{
+			name:     "malformed JSON rejected even when identical",
+			expected: `{"a":`,
+			actual:   `{"a":`,
+			want:     false,
+		},
+		{
+			name:     "valid JSON followed by trailing garbage rejected",
+			expected: `{"a":1}`,
+			actual:   `{"a":1} trailing`,
+			want:     false,
+		},
+		{
+			name:     "identical valid JSON with trailing garbage rejected",
+			expected: `{"a":1} trailing`,
+			actual:   `{"a":1} trailing`,
+			want:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := JSONBodiesEqual(tc.expected, tc.actual); got != tc.want {
+				t.Errorf("JSONBodiesEqual(%q, %q) = %v, want %v", tc.expected, tc.actual, got, tc.want)
+			}
+		})
+	}
+}

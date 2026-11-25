@@ -957,7 +957,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 			expJSON := tc.HTTPResp.Body
 			actJSON := actualResponse.Body
-			if expJSON != actJSON {
+			if !matcherUtils.JSONBodiesEqual(expJSON, actJSON) {
 				pass = false
 				logger.Error("json_equal assertion failed", zap.Int("expected_bytes", len(expJSON)), zap.Int("actual_bytes", len(actJSON)))
 			}
