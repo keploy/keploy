@@ -298,8 +298,8 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			fmt.Sprintf("the client answered the greeting with a %s, not a HandshakeResponse41, so none of the %d recorded handshakes can be compared with it", packetType(pkt), handshakes),
 			models.MatchPhaseExhausted, handshakes)
 	}
-	// Live client caps. Its MariaDB extended capabilities were set as it
-	// was decoded (wire.DecodePayload), as on record.
+	// Live client caps. Its MariaDB extended capabilities and initial database
+	// were set as it was decoded (wire.DecodePayload), as on record.
 	decodeCtx.ClientCaps = hr41.CapabilityFlags
 
 	// NEW: Build a single candidate list:

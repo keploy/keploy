@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -968,7 +969,12 @@ func (p *PreparedMock) Dir() string { return p.mockPath }
 // first. It names mocks in the order it is called. An error is the insert's:
 // WritePrepared returns it.
 func (ys *MockYaml) PrepareMock(ctx context.Context, mock *models.Mock, testSetID string) *PreparedMock {
-	mock.Name = fmt.Sprint("mock-", ys.getNextID())
+	// Preserve deterministic mock-rt-<hash> names on deduplicated session
+	// read-through mocks so they stay stable across rollovers and never
+	// collide with the recorder's sequential mock-<N> namespace.
+	if !mock.IsReadThrough() || !strings.HasPrefix(mock.Name, "mock-rt-") {
+		mock.Name = fmt.Sprint("mock-", ys.getNextID())
+	}
 	p := &PreparedMock{mock: mock, mockPath: filepath.Join(ys.MockPath, testSetID), mockFileName: ys.MockName, logger: ys.Logger}
 	if p.mockFileName == "" {
 		p.mockFileName = "mocks"

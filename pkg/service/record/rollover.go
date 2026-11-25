@@ -76,6 +76,14 @@ func mockMappingEntryBytes(m *models.Mock) int64 {
 // stay bounded in memory and per-set size.
 const maxCarryState = 512
 
+// maxCarryReadThrough caps distinct base session read-through mocks carried
+// across test-set rollovers independently of maxCarryState so read-through
+// mocks never evict genuine session/connection state mocks. Each carried base
+// mock may also carry at most one paired conflict sentinel without consuming
+// another base slot, bounding total carried read-through entries at
+// 2*maxCarryReadThrough (1024).
+const maxCarryReadThrough = 512
+
 // rollSet is one test set of a recording. The captures stamped after after
 // (and not after the next set's after) are its: a test by its request's
 // time, a mock by its request's. The first set's after is the zero time.
@@ -127,13 +135,14 @@ type straddle struct {
 // the recording's first test (its startup). Replayed on its own, a set's
 // application starts from nothing, and makes these calls again.
 type carried struct {
-	name     string
-	at       time.Time
-	doc      []byte
-	mapBytes int64
-	startup  bool
-	window   *models.WindowedMock
-	mark     *markedCall
+	name        string
+	at          time.Time
+	doc         []byte
+	mapBytes    int64
+	startup     bool
+	readThrough bool
+	window      *models.WindowedMock
+	mark        *markedCall
 }
 
 // setRoll is the recording's test sets once it may roll over (Roller): which
@@ -179,8 +188,9 @@ type setRoll struct {
 	// carryState is where in carry the state mock of each content is
 	// (stateKey): the same exchange recorded again (a connection's ping, a
 	// session's setting read again) is carried once, its latest recording.
-	carryState map[[sha256.Size]byte]int
-	format     string
+	carryState       map[[sha256.Size]byte]int
+	carryReadThrough int
+	format           string
 	// startup is the mocks made before the recording's first test (without
 	// their documents), until the first cut (startupOpen) reads them back and
 	// carries them.
@@ -579,6 +589,34 @@ func (sr *setRoll) wrote(ctx context.Context, s *rollSet, m *models.Mock, doc []
 		}
 		return
 	}
+	if m.IsReadThrough() {
+		if _, dup := sr.carryNames[m.Name]; dup {
+			return
+		}
+		// Always carry a -conflict sentinel whose base mock was already
+		// carried so the read-through carry cap never splits a conflict pair
+		// across a rollover boundary and re-enables serving a conflicted key.
+		isConflictPair := false
+		if base, ok := models.ReadThroughConflictBaseName(m.Name); ok {
+			_, isConflictPair = sr.carryNames[base]
+		}
+		if !isConflictPair && sr.carryReadThrough >= maxCarryReadThrough {
+			return
+		}
+		sr.carryNames[m.Name] = struct{}{}
+		sr.carry = append(sr.carry, carried{
+			name:        m.Name,
+			at:          at,
+			doc:         doc,
+			mapBytes:    mapBytes,
+			readThrough: true,
+			window:      window,
+		})
+		if !isConflictPair {
+			sr.carryReadThrough++
+		}
+		return
+	}
 	// The application's startup: what it did before its first test, which
 	// every set's replay starts with. Named until the first cut, as long as
 	// no test seen yet came before it; the cut reads the documents back.
@@ -591,14 +629,14 @@ func (sr *setRoll) wrote(ctx context.Context, s *rollSet, m *models.Mock, doc []
 // from sr.carry to bound carry size under long-running connection churn.
 func (sr *setRoll) evictOldestStateLocked() {
 	for i, c := range sr.carry {
-		if c.mark != nil || c.startup {
+		if c.mark != nil || c.startup || c.readThrough {
 			continue
 		}
 		delete(sr.carryNames, c.name)
 		sr.carry = append(sr.carry[:i], sr.carry[i+1:]...)
 		clear(sr.carryState)
 		for j, item := range sr.carry {
-			if item.mark == nil && !item.startup {
+			if item.mark == nil && !item.startup && !item.readThrough {
 				sr.carryState[stateKey(item.doc)] = j
 			}
 		}

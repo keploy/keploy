@@ -119,6 +119,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 			StmtIDToQuery:      make(map[uint32]string),
 			NextStmtID:         1,
 		}
+		decodeCtx.SetDestPortFromCfg(dstCfg)
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
 		// Simulate the initial client-server handshake (connection phase)

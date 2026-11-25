@@ -124,6 +124,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		}
 	}()
 
+	clientIsTLS := pUtil.IsTLSConn(clientConn)
+
 	// enqueueMock sends a paired request/response for async mock creation.
 	// Non-blocking: if the recorder can't keep up, the mock is dropped
 	// (same pattern as postgres/mongo).
@@ -133,6 +135,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			Resp:             resp,
 			ReqTimestampMock: reqTs,
 			ResTimestampMock: resTs,
+			TLS:              clientIsTLS,
 		}
 		select {
 		case mockDataCh <- m:

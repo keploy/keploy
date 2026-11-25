@@ -425,6 +425,13 @@ type TestModeInfo struct {
 	// for RepeatRead: a Mock stays in its size class.
 	Concurrent bool `json:"-" bson:"-"`
 
+	// readThroughState caches the result of ReadThroughKey validation for
+	// readThrough-tagged mocks at ingest (DeriveLifetime / MarkReadThrough)
+	// so repeated IsReadThrough calls avoid re-parsing JSON payloads.
+	// Unexported so json/bson/yaml/gob ignore it; sits in Concurrent's padding
+	// so Mock stays in the 640 B size class.
+	readThroughState uint8
+
 	// ServedIn is, on a copy exact serving serves an open test
 	// (KEPLOY_PROVEN), the number of that test's view; zero on every other mock. A
 	// consume of a copy an earlier view served (a previous attempt of the
@@ -1243,6 +1250,12 @@ type MockState struct {
 	// none, and a newer replay then finds such a test mock unconsumed: the
 	// agent and the CLI are one keploy.
 	DataPlane bool `json:"dataPlane,omitempty"`
+	// ReadThrough marks a mock served from the deduplicated session
+	// read-through tier (Spec.Metadata["readThrough"]=="true"). Read-through
+	// serves are reusable fallback cache-warming reads, never owned by a single
+	// test in mappings.yaml and never treated as an extra per-test dependency
+	// mismatch in streaming/obsolete checks.
+	ReadThrough bool `json:"readThrough,omitempty"`
 	// Variables carries the mock's variables (MockSpec.Variables) back from
 	// the agent under the proven switch, as ReqBodyNoise carries its learned
 	// noise: those the learn step of record's full round learned on it are

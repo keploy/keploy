@@ -4139,6 +4139,19 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 			return exactServed, nil, func() { m.noteExactServed(owned, mk) }
 		}
 	}
+	// Deduplicated session read-through mocks are strictly read-only and
+	// reusable across tests on a cold replay pod: allow serving them without
+	// spending them in v.spent or outsideAnswers, while recording usage.
+	// observe=false because exactConsumeAt already invokes observe().
+	if m.isReadThroughMock(mk) {
+		if _, replaced := v.sourcesReplaced[mk.Name]; replaced {
+			return exactRefused, nil, nil
+		}
+		if !evicts {
+			return exactPass, nil, nil
+		}
+		return exactServed, nil, func() { m.recordReadThroughHit(mk, false) }
+	}
 	windowed := g.windowed(v)
 	if !v.showsTo(mk, windowed) {
 		return exactRefused, nil, nil

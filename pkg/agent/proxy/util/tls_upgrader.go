@@ -162,3 +162,26 @@ func ClientServerName(conn net.Conn) string {
 		}
 	}
 }
+
+// IsTLSConn reports whether conn is a *tls.Conn, unwrapping the proxy's own
+// connection wrappers (*SafeConn, *Conn) the same way ClientServerName does.
+func IsTLSConn(conn net.Conn) bool {
+	for {
+		switch c := conn.(type) {
+		case *tls.Conn:
+			return c != nil
+		case *SafeConn:
+			if c == nil {
+				return false
+			}
+			conn = c.Unwrap()
+		case *Conn:
+			if c == nil {
+				return false
+			}
+			conn = c.Conn
+		default:
+			return false
+		}
+	}
+}

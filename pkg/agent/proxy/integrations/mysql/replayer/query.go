@@ -22,6 +22,7 @@ import (
 // client leaves, or a command misses. dst is the upstream the client dialled,
 // named in a miss's report ("" when unknown).
 func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+	decodeCtx.SetDestPortFromAddr(dst)
 
 	// Log initial mock state at the start of command phase
 	total, cfg, data := mockDb.GetMySQLCounts()

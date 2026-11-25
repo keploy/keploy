@@ -305,6 +305,20 @@ func IsResultSetTerminator(data []byte, deprecateEOF bool) bool {
 	return false
 }
 
+// TerminatorStatus returns the 16-bit server status flags from a result set's
+// recorded terminator packet (4-byte header + payload): either a protocol-4.1
+// EOF (0xfe, 5-byte payload: 2B warnings, 2B status) or an OK-replacing-EOF
+// under CLIENT_DEPRECATE_EOF (0xfe, 0x00, 0x00, 2B status, 2B warnings, ...).
+// Both place status flags at data[7:9] little-endian. Returns (0, false) for
+// any other packet (including pre-4.1 EOF without status flags).
+func TerminatorStatus(data []byte) (uint16, bool) {
+	eof41 := IsEOFPacket(data) && len(data) >= 9 && (uint32(data[0])|uint32(data[1])<<8|uint32(data[2])<<16) == 5
+	if !eof41 && !IsOKReplacingEOF(data) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint16(data[7:9]), true
+}
+
 func IsGenericResponse(data []byte) (string, bool) {
 	if IsOKPacket(data) {
 		return "OK", true

@@ -359,6 +359,12 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 	// call: theirs, not the running test's consumption.
 	othersFlagged := 0
 	for _, st := range consumed {
+		if st.ReadThrough {
+			// Read-through mocks are reusable session-scoped cache warmers,
+			// never owned by a single test in mappings.yaml.
+			startup = append(startup, st)
+			continue
+		}
 		if creditedElsewhere(st, running) {
 			credits = append(credits, st)
 			othersFlagged++
