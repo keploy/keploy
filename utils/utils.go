@@ -2430,6 +2430,44 @@ func EnsureRmBeforeName(cmd string) string {
 	return cmd
 }
 
+// DockerRunHasRm reports whether cmd is a `docker run` (or `docker container
+// run`) command whose run options enable auto-removal (--rm, --rm=true,
+// --rm=1). Options after the image name or `--` belong to the container
+// command and are ignored; when `--rm` appears more than once, the last value
+// wins, matching Docker CLI's flag parser.
+func DockerRunHasRm(cmd string) bool {
+	words, ok := scanShellWords(cmd)
+	if !ok {
+		return false
+	}
+	optStart := dockerRunOptionsStart(words)
+	if optStart < 0 {
+		return false
+	}
+	rm := false
+	for i := optStart; i < len(words); i++ {
+		w := words[i].value
+		if w == "--" || w == "-" || !strings.HasPrefix(w, "-") {
+			break
+		}
+		if w == "--rm" {
+			rm = true
+			continue
+		}
+		if val, ok := strings.CutPrefix(w, "--rm="); ok {
+			b, err := strconv.ParseBool(val)
+			if err == nil {
+				rm = b
+			}
+			continue
+		}
+		if dockerRunFlagTakesNext(w) {
+			i++
+		}
+	}
+	return rm
+}
+
 // dockerLongFlagValue returns the value of the first occurrence of any of
 // names in cmd, accepting both "--flag value" and "--flag=value". Docker
 // accepts either spelling for every long flag, so a parser that understands

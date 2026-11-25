@@ -1536,6 +1536,13 @@ const (
 	composePsStateBudget = 5 * time.Second
 )
 
+var (
+	// appRemovalAskBudget and appRemovalWaitBudget bound the RemovalWatch for
+	// a --rm `docker run` application container on teardown. Variables for tests.
+	appRemovalAskBudget  = reapBarrierBudget
+	appRemovalWaitBudget = waitTillExitBudget
+)
+
 // waitContainersRemoved polls until the named containers no longer exist (or the
 // budget elapses), converting the daemon's async reap into a bounded synchronous
 // barrier so the next compose up cannot race a still-removing same-named
@@ -2411,6 +2418,12 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// dockerRunName is the resolved user-app container name; reused by the
 	// post-run container-name-conflict retry below.
 	var dockerRunName string
+	// appRemoval watches the engine's removal of a --rm docker-run application
+	// container so that when teardown kills its `docker run` client, App.run
+	// waits for the engine to finish removing the container and releasing its
+	// per-run volumes (keploy-sockets-vol-<id>, keploy-tls-certs-<id>) before
+	// agent teardown calls RemoveRunVolumes.
+	var appRemoval *docker.RemovalWatch
 	if a.kind == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 		// Clear any container left over from a prior run with the same --name
@@ -2429,6 +2442,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 			dockerRunName = utils.ContainerNameFromDockerRun(userCmd)
 		}
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
+		if a.docker != nil && dockerRunName != "" && utils.DockerRunHasRm(userCmd) {
+			appRemoval = docker.NewRemovalWatch(a.docker, dockerRunName)
+		}
 	}
 
 	// Compose mode: before `docker compose up`, make sure the keploy agent
@@ -2487,6 +2503,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 				return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 			}
 			if utils.IsDockerCmd(a.kind) {
+				if appRemoval != nil {
+					askCtx, askCancel := context.WithTimeout(context.Background(), appRemovalAskBudget)
+					appRemoval.Watch(askCtx)
+					askCancel()
+				}
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 				if err != nil {
@@ -2720,6 +2741,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// to the teardown and risk overrunning the drain budget.
 	if utils.IsDockerCmd(a.kind) && a.kind != utils.DockerCompose {
 		a.waitTillExit()
+		if appRemoval != nil {
+			rmCtx, rmCancel := context.WithTimeout(context.Background(), appRemovalWaitBudget)
+			appRemoval.Wait(rmCtx, a.logger)
+			rmCancel()
+		}
 	}
 
 	select {
