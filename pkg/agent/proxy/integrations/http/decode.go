@@ -646,7 +646,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
-				report, hint := h.buildHTTPMismatchReportHinted(ctx, request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				report, hint := h.buildHTTPMismatchReportHinted(ctx, request, input.body, db, nil, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, diag)
 				if hint != "" {
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + hint)
 				}

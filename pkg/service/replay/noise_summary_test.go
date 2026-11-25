@@ -493,6 +493,101 @@ func TestMixedRunResponseFailureAndPassingOutgoingDiffs(t *testing.T) {
 		}
 	})
 
+	// A failed test's call that no recorded call of its shape answered (a
+	// token call only another test recorded) carries field diffs against the
+	// least distant mock of another call. It is no payload diff: it stays in
+	// the test's MOCK MISMATCH block, with its heading (the call whole beside
+	// its path tag) and its Hint (the sessionCalls advice), and not in the
+	// OUTGOING CALL DIFFS table, whose one row carries neither; the line above
+	// the block gives the same advice, not noise for a drift.
+	t.Run("failed test's call that matched no recorded call's shape keeps its block and hint", func(t *testing.T) {
+		provenOn(t, false)
+		h := newPartialRunHarness(t, 2, 0)
+		h.cases[0].Name = "tc-fail-token"
+		h.cases[1].Name = "tc-pass-diff"
+		h.cases[0].HTTPResp.StatusCode = 200
+		h.cases[0].HTTPResp.Body = `{"user":"ada"}`
+		h.cases[1].HTTPResp.StatusCode = 200
+		h.cases[1].HTTPResp.Body = `{"ok":true}`
+		h.replayer.hookImpl = statusHooks{
+			respByTest: map[string]*models.HTTPResp{
+				"tc-fail-token": {StatusCode: 502, Body: `{"error":"fetch the token: 502"}`},
+				"tc-pass-diff":  {StatusCode: 200, Body: `{"ok":true}`},
+			},
+		}
+		h.replayer.config.Command = "./app"
+		h.replayer.config.CommandType = string(utils.Native)
+		h.replayer.config.Test.MaxFlakyChecks = 1
+
+		var consoleBuf bytes.Buffer
+		h.replayer.console = &consoleBuf
+
+		const hint = `declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: "127.0.0.1:9096", method: "POST", pathPrefix: "/oauth/token"}])`
+		tokenMiss := models.UnmatchedCall{
+			Protocol:         "HTTP",
+			ActualSummary:    "POST /oauth/token",
+			PathTag:          "#0123456789ab",
+			Destination:      "127.0.0.1:9096",
+			ClosestMock:      "mock-0",
+			MatchPhase:       models.MatchPhaseSchema,
+			DestinationScope: models.DestinationScopeInComparedSet,
+			// The parser's verdict: mock-0 (GET /config/boot) is another route.
+			ClosestOnAnotherRoute: true,
+			CandidateCount:        2,
+			FieldDiffs: []models.MockFieldDiff{
+				{Path: "method", Kind: models.DiffKindValueChanged, Expected: "GET", Actual: "POST"},
+				{Path: "path", Kind: models.DiffKindValueChanged, Expected: "/config/boot", Actual: "/oauth/token"},
+			},
+			NextSteps: "Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it, " + hint + ".",
+		}
+		passDiff := models.UnmatchedCall{
+			Protocol:      "Pulsar",
+			ActualSummary: "SEND persistent://tenant/ns/orders",
+			Destination:   "broker:6650",
+			MatchPhase:    models.MatchPhaseBody,
+			FieldDiffs:    []models.MockFieldDiff{{Path: "body.id", Expected: "1", Actual: "2"}},
+		}
+		h.instr.mockErrorsFor = misses(reads(tokenMiss), reads(passDiff))
+
+		core, logs := observer.New(zapcore.InfoLevel)
+		h.replayer.logger = zap.New(core)
+		saved := utils.ErrCode
+		utils.ErrCode = 0
+		t.Cleanup(func() { utils.ErrCode = saved })
+
+		ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+		defer cancel()
+		_ = h.replayer.Start(ctx)
+
+		header := logs.FilterMessageSnippet("see each test's response diff for why it failed").All()
+		if len(header) != 1 {
+			t.Fatalf("expected 1 line above the failed test's MOCK MISMATCH block, got %d: %v", len(header), logs.All())
+		}
+		next, _ := header[0].ContextMap()["next_step"].(string)
+		if !strings.Contains(next, "sessionCalls") || strings.Contains(next, "as noise") {
+			t.Errorf("the line above the block advises %q, want the sessionCalls advice for a call that got no recorded answer, not noise", next)
+		}
+
+		out := consoleBuf.String()
+		mockIdx := strings.Index(out, "=========================== MOCK MISMATCH ===========================")
+		tableIdx := strings.Index(out, "=========================== OUTGOING CALL DIFFS ===========================")
+		if mockIdx < 0 || tableIdx < 0 || mockIdx > tableIdx {
+			t.Fatalf("expected the failed test's MOCK MISMATCH block, then the passing test's OUTGOING CALL DIFFS table:\n%s", out)
+		}
+		failedSection, tableSection := out[mockIdx:tableIdx], out[tableIdx:]
+		for _, want := range []string{"tc-fail-token", "  Mock mismatch: [HTTP] POST /oauth/token [path tag #0123456789ab]", "  Hint: ", hint} {
+			if !strings.Contains(failedSection, want) {
+				t.Errorf("the failed test's MOCK MISMATCH block lacks %q:\n%s", want, failedSection)
+			}
+		}
+		if strings.Contains(tableSection, "tc-fail-token") || strings.Contains(tableSection, "/oauth/token") {
+			t.Errorf("the call that matched no recorded call's shape is a row of the OUTGOING CALL DIFFS table:\n%s", tableSection)
+		}
+		if !strings.Contains(tableSection, "tc-pass-diff") {
+			t.Errorf("the passing test's payload diff is not in the OUTGOING CALL DIFFS table:\n%s", tableSection)
+		}
+	})
+
 	t.Run("default-mode response failure with payload diff names response diff and keeps payload diff as table row", func(t *testing.T) {
 		provenOn(t, false)
 		h := newPartialRunHarness(t, 2, 0)
@@ -744,5 +839,72 @@ func TestPassingRunWithMappingMismatchOnlyPrintsMappingDiffs(t *testing.T) {
 	}
 	if strings.Contains(out, "startup-noise.internal") || strings.Contains(out, "MOCK MISMATCH") {
 		t.Errorf("mapping-only branch leaked non-counting DNS miss or MOCK MISMATCH block:\n%s", out)
+	}
+}
+
+// A miss is a drift of its own recording, a payload diff, only when its
+// closest mock is on its own route: one the parser says is on another route
+// (ClosestOnAnotherRoute) is not, whatever field diffs it carries; a schema
+// miss on its own route (a query value changed) is, as a body-phase one is.
+// An out-of-scope miss with diffs stays a table row.
+func TestIsPayloadDiffRowByWhatTheDiffsAreAgainst(t *testing.T) {
+	row := func(r models.MockMismatchReport) TestFailure {
+		return TestFailure{FailureReason: models.ErrMockNotFound, MismatchReport: &r}
+	}
+	methodPath := []models.MockFieldDiff{
+		{Path: "method", Kind: models.DiffKindValueChanged, Expected: "GET", Actual: "POST"},
+		{Path: "path", Kind: models.DiffKindValueChanged, Expected: "/config/boot", Actual: "/oauth/token"},
+	}
+	queryValue := []models.MockFieldDiff{{Path: "query.date", Kind: models.DiffKindValueChanged, Expected: "2026-11-24", Actual: "2026-11-25"}}
+	body := []models.MockFieldDiff{{Path: "body.id", Kind: models.DiffKindValueChanged, Expected: "1", Actual: "2"}}
+	for _, c := range []struct {
+		name string
+		r    models.MockMismatchReport
+		want bool
+	}{
+		{"schema miss whose closest mock is on another route", models.MockMismatchReport{MatchPhase: models.MatchPhaseSchema, ClosestMock: "mock-0", FieldDiffs: methodPath, ClosestOnAnotherRoute: true}, false},
+		{"schema miss on its own route", models.MockMismatchReport{MatchPhase: models.MatchPhaseSchema, ClosestMock: "mock-3", FieldDiffs: queryValue}, true},
+		{"body drift", models.MockMismatchReport{MatchPhase: models.MatchPhaseBody, ClosestMock: "mock-3", FieldDiffs: body}, true},
+		{"body drift against another upstream's mocks only", models.MockMismatchReport{MatchPhase: models.MatchPhaseBody, ClosestMock: "mock-3", FieldDiffs: body, DestinationScope: models.DestinationScopeNotInComparedSet}, true},
+		{"out-of-scope miss whose closest mock is on another route", models.MockMismatchReport{MatchPhase: models.MatchPhaseSchema, ClosestMock: "mock-0", FieldDiffs: methodPath, ClosestOnAnotherRoute: true, DestinationScope: models.DestinationScopeNotInComparedSet}, true},
+		{"full cascade with field diffs", models.MockMismatchReport{MatchPhase: models.MatchPhaseExhausted, ClosestMock: "mock-3", FieldDiffs: body}, true},
+		{"full cascade with no diffs", models.MockMismatchReport{MatchPhase: models.MatchPhaseExhausted, ClosestMock: "mock-3"}, false},
+	} {
+		if got := isPayloadDiffRow(row(c.r)); got != c.want {
+			t.Errorf("%s: isPayloadDiffRow = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The line above a failed run's MOCK MISMATCH blocks advises by what the
+// misses are: a call whose closest mock is on another route, or whose
+// destination no compared mock targets, got no recorded answer (sessionCalls
+// or re-record); a drift of the call's own recording is noise to declare.
+func TestFailedMismatchNextStepByWhatTheDiffsAreAgainst(t *testing.T) {
+	row := func(r models.MockMismatchReport) []TestFailure {
+		return []TestFailure{{FailureReason: models.ErrMockNotFound, MismatchReport: &r}}
+	}
+	methodPath := []models.MockFieldDiff{
+		{Path: "method", Kind: models.DiffKindValueChanged, Expected: "GET", Actual: "POST"},
+		{Path: "path", Kind: models.DiffKindValueChanged, Expected: "/config/boot", Actual: "/oauth/token"},
+	}
+	queryValue := []models.MockFieldDiff{{Path: "query.date", Kind: models.DiffKindValueChanged, Expected: "2026-11-24", Actual: "2026-11-25"}}
+	hostOnly := []models.MockFieldDiff{{Path: "host", Kind: models.DiffKindValueChanged, Expected: "auth-a:9096", Actual: "auth-b:9096"}}
+	body := []models.MockFieldDiff{{Path: "body.id", Kind: models.DiffKindValueChanged, Expected: "1", Actual: "2"}}
+	const noAnswer, noise = "got no recorded answer", "Add drifting dynamic fields as noise"
+	for _, c := range []struct {
+		name string
+		r    models.MockMismatchReport
+		want string
+	}{
+		{"schema miss whose closest mock is on another route", models.MockMismatchReport{MatchPhase: models.MatchPhaseSchema, ClosestMock: "mock-0", FieldDiffs: methodPath, ClosestOnAnotherRoute: true}, noAnswer},
+		{"schema miss on its own route", models.MockMismatchReport{MatchPhase: models.MatchPhaseSchema, ClosestMock: "mock-3", FieldDiffs: queryValue}, noise},
+		{"schema miss against its path on another host (proven)", models.MockMismatchReport{MatchPhase: models.MatchPhaseSchema, ClosestMock: "mock-4", FieldDiffs: hostOnly, ClosestOnAnotherRoute: true}, noAnswer},
+		{"body drift", models.MockMismatchReport{MatchPhase: models.MatchPhaseBody, ClosestMock: "mock-3", FieldDiffs: body}, noise},
+		{"body drift against another upstream's mocks only", models.MockMismatchReport{MatchPhase: models.MatchPhaseBody, ClosestMock: "mock-3", FieldDiffs: body, DestinationScope: models.DestinationScopeNotInComparedSet}, noAnswer},
+	} {
+		if got := failedMismatchNextStep(row(c.r)); !strings.Contains(got, c.want) {
+			t.Errorf("%s: failedMismatchNextStep = %q, want it to say %q", c.name, got, c.want)
+		}
 	}
 }

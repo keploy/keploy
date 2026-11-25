@@ -282,8 +282,17 @@ type MockMismatchReport struct {
 	// absent from the compared set still has a real cascade stop, and
 	// overwriting the phase with the verdict destroys that triage fact.
 	DestinationScope string
-	CandidateCount   int             // protocol mocks considered before giving up
-	FieldDiffs       []MockFieldDiff // field-level diffs vs the closest mock, noise-vocabulary paths
+	// ClosestOnAnotherRoute says the closest mock named (ClosestMock) is a
+	// recording of another route than the call's, by the matcher's own rule
+	// for a route: its method and path, with url noise and id segments
+	// relaxed as the matcher relaxes them, and under the proven switch its
+	// destination too. Its field diffs then say which recording was nearest,
+	// not what drifted, and no recording of the call's route answered it: the
+	// miss is the call's own, never a drift for noise. The HTTP parser sets
+	// it; false where a protocol does not tell.
+	ClosestOnAnotherRoute bool
+	CandidateCount        int             // protocol mocks considered before giving up
+	FieldDiffs            []MockFieldDiff // field-level diffs vs the closest mock, noise-vocabulary paths
 	// ClosestMockReq / ReceivedReq are the FULL rendered requests for the CLI
 	// side-by-side diff (left = recorded mock, right = live request). They are
 	// the human-facing complement to FieldDiffs (machine-readable): the

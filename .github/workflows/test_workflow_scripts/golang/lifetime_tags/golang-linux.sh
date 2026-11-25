@@ -338,12 +338,14 @@ between_read() {
 # recorded, its first replay (no mappings.yaml); mapped keeps the mappings an
 # earlier replay wrote. only runs one test; declare declares the token call in
 # keploy.yaml; NOISE_KEY, when set, marks that request-body field as
-# configured noise there (test.globalNoise.global.requestBody). RC is its
-# exit code.
+# configured noise there (test.globalNoise.global.requestBody); DEBUG_REPLAY,
+# when set, runs it with --debug, which prints the agent's DEBUG lines, the
+# miss lines among them (expect_miss). RC is its exit code.
 replay() {
     local name="$1" mapping="$2" only="${3:-}" declare="${4:-}" before
-    local switch=()
+    local switch=() debug=()
     [ -n "${PROVEN_REPLAY:-}" ] && switch=(KEPLOY_PROVEN=1)
+    [ -n "${DEBUG_REPLAY:-}" ] && debug=(--debug)
     [ "$mapping" = fresh ] && rm -f keploy/test-set-0/mappings.yaml
     rm -f keploy.yml
     {
@@ -363,7 +365,7 @@ replay() {
     before="$(newest_run)"
     named_env
     sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "${NAMED_ENV[@]}" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
-        --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
+        --generateGithubActions=false --disable-tele "${debug[@]}" >"$name.log" 2>&1 </dev/null
     RC=$?
     own
     rm -f keploy.yml
@@ -412,11 +414,14 @@ unmatched() { T="$1" yq -o=json -I=0 '[.tests[] | select(.test_case_id == strenv
 # HTTP call, beside a path tag; keploy's miss line names it by its protocol,
 # destination, shape and that tag, and no part of a miss line (its message,
 # its next step, its closest mock, any field) names its path (a statement's
-# text), nor any literal the statement quotes, alone. An HTTP call's
-# console heading names it whole beside the same tag. When hint is set, the
-# miss line's advice names keploy.yaml's sessionCalls and points to the
-# console's Hint for the path by the tag, and that Hint, under the call's
-# heading, quotes the path whole, as the log no longer does.
+# text), nor any literal the statement quotes, alone. keploy test prints a
+# miss once, in the failed test's end-of-run MOCK MISMATCH block: the miss
+# line is logged at DEBUG, which a run without --debug does not print, so the
+# replay runs with --debug (DEBUG_REPLAY) and each miss line must be DEBUG.
+# An HTTP call's console heading names it whole beside the same tag. When
+# hint is set, the miss line's advice names keploy.yaml's sessionCalls and
+# points to the console's Hint for the path by the tag, and that Hint, under
+# the call's heading, quotes the path whole, as the log no longer does.
 expect_miss() {
     if [ "$(test_status "$2")" != "$3" ]; then
         fail "$1: $2 must be $3 (exit $RC, status $(test_status "$2"))"
@@ -442,6 +447,10 @@ expect_miss() {
     path=${8#* }
     path=${path%%\?*}
     [ -n "$(miss_raw "$4")" ] || fail "$1: the log has no miss line"
+    # The level is the field after the line's time.
+    local loud
+    loud=$(miss_raw "$4" | awk -F'\t' '$2 != "DEBUG"')
+    [ -z "$loud" ] || fail "$1: a miss line is logged above DEBUG, so keploy test without --debug prints the miss beside its MOCK MISMATCH block: $(printf '%s' "$loud" | cut -c1-600)"
     if miss_raw "$4" | grep -F "$path" >/dev/null; then
         fail "$1: a miss line names the call's path $path: $(miss_raw "$4" | grep -F "$path" | cut -c1-600)"
     fi
@@ -536,7 +545,7 @@ replay all fresh && expect_pass "the whole set" all.log
 #    are shared.
 replay only-count fresh get-orders-count-1 && expect_pass "get-orders-count-1 alone" only-count.log
 # 3. get-profile-1 alone: the token call only post-orders-1 recorded.
-if replay only-profile fresh get-profile-1; then
+if DEBUG_REPLAY=1 replay only-profile fresh get-profile-1; then
     if [ "$judged" = false ]; then
         echo "get-profile-1 alone, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
@@ -546,7 +555,7 @@ if replay only-profile fresh get-profile-1; then
     fi
 fi
 # 4. get-quote-1 alone: the rate only post-orders-1 read.
-if replay only-quote fresh get-quote-1; then
+if DEBUG_REPLAY=1 replay only-quote fresh get-quote-1; then
     if [ "$judged" = false ]; then
         echo "get-quote-1 alone, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
@@ -563,7 +572,7 @@ fi
 # 6. With the mappings a replay of the whole set writes.
 replay all-mapping fresh && expect_pass "the whole set, writing its mappings" all-mapping.log
 [ -s keploy/test-set-0/mappings.yaml ] || fail "the replay of the whole set wrote no mappings.yaml"
-if replay mapped-profile mapped get-profile-1; then
+if DEBUG_REPLAY=1 replay mapped-profile mapped get-profile-1; then
     if [ "$judged" = false ]; then
         echo "get-profile-1 alone by its mapping, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
