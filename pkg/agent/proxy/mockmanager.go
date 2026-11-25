@@ -165,11 +165,15 @@ type MockManager struct {
 
 	logger *zap.Logger
 
-	// carryRunLeftOut accumulates mocks left out by the carry-over tier byte
-	// cap across the entire agent run (outside carry.reset() and
-	// ResetForReplaySession) so one end-of-run Warn reports the run-wide total.
-	carryRunLeftOut  atomic.Int64
-	carryWarnEmitted sync.Once
+	// carryRunLeftOutOwn accumulates mocks left out by the carry-over tier
+	// byte cap across the entire agent run (outside carry.reset() and
+	// ResetForReplaySession) so one end-of-run Warn reports the run-wide
+	// total. Worker managers point carryRunLeftOutShared at the run
+	// manager's counter via shareCarryOverOverflow so worker overflows fold
+	// into the run total and only the run manager emits the Warn.
+	carryRunLeftOutOwn    atomic.Int64
+	carryRunLeftOutShared *atomic.Int64
+	carryWarnEmitted      sync.Once
 
 	// consumedMu guards consumedList and consumedIndex.
 	// consumedList records MockState entries in the order they were first
@@ -6039,7 +6043,7 @@ func (m *MockManager) fileCarryOver(oldPerTest *TreeDb, carryIn, newPerTest []*m
 		changed[k] = struct{}{}
 	}
 	if res.leftOut > 0 {
-		runTotal := m.carryRunLeftOut.Add(int64(res.leftOut))
+		runTotal := m.carryRunCounter().Add(int64(res.leftOut))
 		if m.logger != nil {
 			m.logger.Debug("carry-over tier is full; mocks left out",
 				zap.Int("leftOut", res.leftOut),
@@ -6055,22 +6059,42 @@ func (m *MockManager) fileCarryOver(oldPerTest *TreeDb, carryIn, newPerTest []*m
 	return changed
 }
 
-// LogCarryOverOverflowSummary emits at most one Warn per agent run when the
-// carry-over tier byte cap left mocks out during the run, reporting the
-// run-wide total and the env var that raises the cap.
-func (m *MockManager) LogCarryOverOverflowSummary() {
-	if m == nil || m.logger == nil {
+func (m *MockManager) carryRunCounter() *atomic.Int64 {
+	if m.carryRunLeftOutShared != nil {
+		return m.carryRunLeftOutShared
+	}
+	return &m.carryRunLeftOutOwn
+}
+
+// shareCarryOverOverflow points a worker manager at parent's run-wide
+// carry-over overflow counter so worker overflows accumulate into parent and
+// only parent emits the single end-of-run Warn. Must be called before staging
+// or publishing the worker manager.
+func (m *MockManager) shareCarryOverOverflow(parent *MockManager) {
+	if m == nil || parent == nil || m == parent {
 		return
 	}
-	total := m.carryRunLeftOut.Load()
-	if total <= 0 {
+	m.carryRunLeftOutShared = parent.carryRunCounter()
+}
+
+// LogCarryOverOverflowSummary emits at most one Warn per agent run when the
+// carry-over tier byte cap left mocks out during the run, reporting the
+// run-wide total and the env var that raises the cap. Worker managers that
+// share the run manager's counter (shareCarryOverOverflow) suppress their own
+// Warn so closing workers never splits or duplicates the run-end summary.
+func (m *MockManager) LogCarryOverOverflowSummary() {
+	if m == nil || m.logger == nil || m.carryRunLeftOutShared != nil {
+		return
+	}
+	counter := m.carryRunCounter()
+	if counter.Load() <= 0 {
 		return
 	}
 	m.carryWarnEmitted.Do(func() {
 		m.logger.Warn("carry-over tier is full: mocks the application may publish outside their own test window "+
 			"were left out in recorded order during this run; a test that consumes one late may miss it. "+
 			"The held mocks are ones earlier tests left unconsumed",
-			zap.Int64("leftOut", total),
+			zap.Int64("leftOut", counter.Load()),
 			zap.Int("capBytes", effectiveCarryOverCapBytes()),
 			zap.String("next_step", "check why earlier tests left carry-over mocks unconsumed, or set "+carryOverCapEnv+" (default 16) to raise the carry-over tier cap"))
 	})
