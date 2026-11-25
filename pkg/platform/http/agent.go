@@ -4691,10 +4691,15 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 // not one bound a question.
 func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string, removal *kdocker.RemovalWatch) func() error {
 	return func() error {
-		run.engine.begin(logger, name, run.scope)
+		wait := run.engine.begin(logger, name, run.scope)
 		ask, release := daemonAsk()
-		removal.Watch(ask)
+		ctx, unhook := withinEngineWait(ask, wait)
+		taken := removal.Watch(ctx)
+		unhook()
 		release()
+		if !taken {
+			run.engine.expireIfStalled(logger, name)
+		}
 		stopAgentContainerFor(logger, run, name)
 		if cmd.Process == nil {
 			return nil

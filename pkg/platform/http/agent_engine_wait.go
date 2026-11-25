@@ -45,14 +45,23 @@ var engineWaitSay = 5 * time.Second
 // The zero value is ready to use; its methods may be called from any
 // goroutine.
 type engineWait struct {
-	init  sync.Once
-	began sync.Once
+	init       sync.Once
+	began      sync.Once
+	silentOnce sync.Once
 	// on is set once it has begun.
 	on   atomic.Bool
 	ctx  context.Context
 	stop context.CancelCauseFunc
 	// ended is closed once its hold on the drains is released.
 	ended chan struct{}
+
+	// mu guards meter state shared between begin's goroutine and
+	// expireIfStalled. Never held while calling w.stop or logger.
+	mu      sync.Mutex
+	m       *stall.Meter
+	moved   *utils.TeardownScope
+	last    uint64
+	stopped bool
 }
 
 func (w *engineWait) context() context.Context {
@@ -74,41 +83,89 @@ func (w *engineWait) begin(logger *zap.Logger, name string, moved *utils.Teardow
 	w.began.Do(func() {
 		w.on.Store(true)
 		release := utils.BeginAgentStop()
-		m := stall.NewMeter(boundClock, daemonAnswerStall)
+		w.mu.Lock()
+		w.m = stall.NewMeter(boundClock, daemonAnswerStall)
+		w.moved = moved
+		w.last = moved.Moves()
+		w.mu.Unlock()
 		go func() {
 			defer close(w.ended)
 			defer release()
-			defer m.Stop()
+			defer func() {
+				w.mu.Lock()
+				w.stopped = true
+				w.m.Stop()
+				w.mu.Unlock()
+			}()
 			said := false
-			last := moved.Moves()
 			for {
-				if now := moved.Moves(); now != last {
-					last = now
-					m.Reset()
-				}
 				if ctx.Err() != nil {
 					return
 				}
-				if m.Expired() {
-					logger.Warn("The container engine's daemon has not answered keploy's stop of its agent container within keploy's bound: keploy stops waiting for it, and the container may still run. Remove it yourself once the daemon answers: "+engine.Active().CLI+" rm -f "+name,
-						zap.String("container", name), zap.Duration("bound", daemonAnswerStall))
-					w.stop(errDaemonSilent)
+				expired, stalled := w.checkMeter()
+				if expired {
+					w.expireSilent(logger, name)
 					return
 				}
-				if !said && m.Stalled() >= engineWaitSay {
+				if !said && stalled >= engineWaitSay {
 					said = true
 					logger.Info("Waiting for "+engine.Active().CLI+" to stop keploy's agent container and remove the run's volumes (up to "+daemonAnswerStall.String()+" without an answer from its daemon)",
 						zap.String("container", name))
 				}
+				waitCh, expired := w.waitMeter()
+				if expired {
+					w.expireSilent(logger, name)
+					return
+				}
+				if waitCh == nil {
+					return
+				}
 				select {
 				case <-ctx.Done():
 					return
-				case <-m.Wait():
+				case <-waitCh:
 				}
 			}
 		}()
 	})
 	return ctx
+}
+
+// checkMeter updates movement on w.m under w.mu and reports whether the meter
+// is expired and its current stall duration without arming the next wait timer.
+func (w *engineWait) checkMeter() (expired bool, stalled time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.m == nil || w.stopped {
+		return false, 0
+	}
+	if now := w.moved.Moves(); now != w.last {
+		w.last = now
+		w.m.Reset()
+	}
+	if w.m.Expired() {
+		return true, 0
+	}
+	return false, w.m.Stalled()
+}
+
+// waitMeter re-checks movement and expiration under w.mu and arms the meter's
+// next timer. Calling it after logging keeps the clock's pending timer as the
+// barrier after any INFO log for that check.
+func (w *engineWait) waitMeter() (waitCh <-chan time.Time, expired bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.m == nil || w.stopped {
+		return nil, false
+	}
+	if now := w.moved.Moves(); now != w.last {
+		w.last = now
+		w.m.Reset()
+	}
+	if w.m.Expired() {
+		return nil, true
+	}
+	return w.m.Wait(), false
 }
 
 // begun is the wait's context once it has begun (begin), and nil before.
@@ -117,6 +174,41 @@ func (w *engineWait) begun() context.Context {
 		return nil
 	}
 	return w.context()
+}
+
+// expireIfStalled ends the wait synchronously with errDaemonSilent when its
+// own movement-aware stall meter has already reached daemonAnswerStall. If
+// teardown movement reset the meter or the bound has not yet elapsed, this is
+// a no-op so an independent per-question timeout cannot cut short a moving
+// teardown.
+func (w *engineWait) expireIfStalled(logger *zap.Logger, name string) {
+	w.mu.Lock()
+	expired := false
+	if w.m != nil && !w.stopped {
+		if now := w.moved.Moves(); now != w.last {
+			w.last = now
+			w.m.Reset()
+		}
+		expired = w.m.Expired()
+	}
+	w.mu.Unlock()
+	if expired {
+		w.expireSilent(logger, name)
+	}
+}
+
+// expireSilent ends the wait with errDaemonSilent and logs the WARN once,
+// unless the wait has already ended.
+func (w *engineWait) expireSilent(logger *zap.Logger, name string) {
+	ctx := w.context()
+	w.silentOnce.Do(func() {
+		if ctx.Err() != nil {
+			return
+		}
+		logger.Warn("The container engine's daemon has not answered keploy's stop of its agent container within keploy's bound: keploy stops waiting for it, and the container may still run. Remove it yourself once the daemon answers: "+engine.Active().CLI+" rm -f "+name,
+			zap.String("container", name), zap.Duration("bound", daemonAnswerStall))
+		w.stop(errDaemonSilent)
+	})
 }
 
 // end ends the wait: its context ends, and its hold on the drains is
@@ -136,7 +228,11 @@ func withinEngineWait(ctx, wait context.Context) (context.Context, func()) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	unhook := func() bool { return false }
 	if wait != nil {
-		unhook = context.AfterFunc(wait, func() { cancel(context.Cause(wait)) })
+		if wait.Err() != nil {
+			cancel(context.Cause(wait))
+		} else {
+			unhook = context.AfterFunc(wait, func() { cancel(context.Cause(wait)) })
+		}
 	}
 	return ctx, func() {
 		unhook()
