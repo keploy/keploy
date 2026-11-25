@@ -264,6 +264,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if provenswitch.On() && req.Sets == nil && req.SessionCalls != nil {
+		// The session calls the client declares, before anything of the
+		// set is staged: an agent container reads no keploy.yaml.
+		req.SessionCalls.Install()
+		served = append(served, models.ScopeTableServedSessionCalls)
+	}
 	if provenswitch.On() && req.Sets == nil {
 		// The values each test gave when it was recorded: a replay's given
 		// is bound with its recorded value. An agent that cannot take them
@@ -306,6 +312,53 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			if err := s.SetRunPlaceWindows(r.Context(), req.Windows); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
+			}
+		}
+		if srs, ok := a.svc.(scopeStartupRulesSetter); ok {
+			if err := srs.SetScopeStartupRules(r.Context(), req.StartupRules); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		// With the proven switch off, when the mock set carries @startup or
+		// worker: background recordings, wire ONLY the shared background
+		// serving engine (ServeExactBackground) without changing main's
+		// run-place windows or test-own scope serving.
+		if !provenswitch.On() && len(req.Background) > 0 {
+			if ws, ok := a.svc.(scopeWorkerSetter); ok {
+				if err := ws.SetScopeWorker(r.Context(), req.Worker); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			// The worker scope's series and those that answer once in a
+			// run, before the pool, whose serving hands them to the proxy
+			// with it: the background answers a once series' recording one
+			// call in the run wherever the application makes it, at its
+			// boot too, as under the switch.
+			if ss, ok := a.svc.(scopeSeriesSetter); ok {
+				if err := ss.SetScopeSeries(r.Context(), req.Series); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if ons, ok := a.svc.(scopeOnceSetter); ok {
+				if err := ons.SetScopeOnce(r.Context(), req.Once); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if bs, ok := a.svc.(scopeBackgroundSetter); ok {
+				if err := bs.SetScopeBackground(r.Context(), req.Background); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if ps, ok := a.svc.(scopePoolSetter); ok && req.Pool != nil {
+				if err := ps.SetScopePool(r.Context(), req.Pool); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 	}
@@ -480,6 +533,12 @@ type scopeBackgroundSetter interface {
 	SetScopeBackground(ctx context.Context, names []string) error
 }
 
+// scopeStartupRulesSetter records whether a replay's set carries a declared
+// startup-capable background rule (models.ScopeTableReq.StartupRules).
+type scopeStartupRulesSetter interface {
+	SetScopeStartupRules(ctx context.Context, on bool) error
+}
+
 // scopeSkippedReadsSetter installs which of a replay's worker scope are the
 // reads of tests its gate skips, each with the skipped test that lists it
 // (models.ScopeTableReq.SkippedReads, proven wire).
@@ -574,7 +633,7 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case proven:
-		if err := p.SetScopeSkips(r.Context(), req.Skip, req.Needs); err != nil {
+		if err := p.SetScopeSkips(r.Context(), req.Skip, req.Needs, req.SetFlags, req.CloudSet); err != nil {
 			writeScopeError(w, r, &models.ScopeError{Status: http.StatusInternalServerError, Code: models.ScopeErrInternal, Message: err.Error()})
 			return
 		}

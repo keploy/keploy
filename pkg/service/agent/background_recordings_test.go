@@ -119,14 +119,14 @@ func TestABackgroundRecordingsSpanStartsAtTheCallBeforeIt(t *testing.T) {
 	poll := bgMock("poll", models.Mongo, 4, 4)
 	same := bgMock("same-instant", models.Mongo, 4, 4)
 	before := bgMock("before", models.Mongo, 1, 1)
-	recs, err := backgroundRecordingsOf([]string{"poll", "none-at"}, [][]*models.Mock{{before, same, poll}, {{Name: "none-at", Kind: models.Mongo}}}, nil)
+	recs, err := backgroundRecordingsOf([]string{"poll", "none-at"}, nil, [][]*models.Mock{{before, same, poll}, {{Name: "none-at", Kind: models.Mongo}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := bgFroms(recs), map[string]int{"poll": 1, "none-at": -1}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("spans' starts %v; want %v", got, want)
 	}
-	if recs, _ := backgroundRecordingsOf(nil, [][]*models.Mock{{poll}}, nil); recs != nil {
+	if recs, _ := backgroundRecordingsOf(nil, nil, [][]*models.Mock{{poll}}, nil); recs != nil {
 		t.Fatalf("no names resolved %v", bgFroms(recs))
 	}
 	disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
@@ -134,7 +134,7 @@ func TestABackgroundRecordingsSpanStartsAtTheCallBeforeIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = disk.Close()
-	if recs, err := backgroundRecordingsOf([]string{"poll"}, [][]*models.Mock{{poll}}, disk); err == nil || recs != nil {
+	if recs, err := backgroundRecordingsOf([]string{"poll"}, nil, [][]*models.Mock{{poll}}, disk); err == nil || recs != nil {
 		t.Fatalf("a store that cannot be read resolved %v, err %v; want none and its error", bgFroms(recs), err)
 	}
 }
@@ -144,7 +144,7 @@ func TestABackgroundRecordingsSpanStartsAtTheCallBeforeIt(t *testing.T) {
 // call is the latest sent before it in any list.
 func TestABackgroundRecordingsPreviousCallIsReadAcrossTheLists(t *testing.T) {
 	poll := bgMock("poll", models.Mongo, 6, 6)
-	recs, err := backgroundRecordingsOf([]string{"poll"}, [][]*models.Mock{{bgMock("c3", models.Mongo, 3, 3), poll}, {bgMock("c1", models.Mongo, 1, 1), bgMock("c2", models.Mongo, 2, 2)}}, nil)
+	recs, err := backgroundRecordingsOf([]string{"poll"}, nil, [][]*models.Mock{{bgMock("c3", models.Mongo, 3, 3), poll}, {bgMock("c1", models.Mongo, 1, 1), bgMock("c2", models.Mongo, 2, 2)}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

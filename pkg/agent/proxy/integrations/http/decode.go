@@ -741,7 +741,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if earlierRec != nil {
 					report.Earlier = earlierRec.Name
 				}
-				if elsewhere != nil {
+				if elsewhere != nil && integrations.OwnsStartup(db, call, elsewhere.Name) {
+					// One of the set's plain startup: recordings, which a
+					// call in a test's window is that test's own call of:
+					// made outside every test, not elsewhere.
+					markOutsideTests(report, elsewhere, hint)
+				} else if elsewhere != nil {
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
 					lmiss.explain(report, gone != "")
@@ -814,8 +819,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 				}
 
-				// No mock matched — send a 502 so the application gets a
-				// proper HTTP error instead of a silent connection close.
+				// No mock matched — mark whether the miss is one more run
+				// of the application's background work (a worker: or
+				// startup: recording of the set the call was marked in,
+				// apart from noise, bound values, and reads of the clock),
+				// after any on-miss passthrough above so live-served calls
+				// pay nothing (background_mark.go).
+				h.markBackground(reqCtx, report, input, db, mockDb, call, staged, headerNoise, bodyNoise, urlNoise)
+
+				// Send a 502 so the application gets a proper HTTP error
+				// instead of a silent connection close.
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)

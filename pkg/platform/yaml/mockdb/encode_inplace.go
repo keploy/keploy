@@ -45,6 +45,7 @@ type inPlaceDoc struct {
 
 	Variables models.MockVariables          `yaml:"variables,omitempty"`
 	Clocks    map[string]models.ClockOffset `yaml:"clocks,omitempty"`
+	Authored  *models.Authored              `yaml:"authored,omitempty"`
 	Origin    *models.Origin                `yaml:"origin,omitempty"`
 }
 
@@ -83,6 +84,7 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 		Noise:        yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 		Variables:    mock.Spec.Variables.Clone(),
 		Clocks:       maps.Clone(mock.Spec.Clocks),
+		Authored:     mock.Spec.Authored.Clone(),
 		Origin:       mock.Origin.Persisted(),
 	}
 	switch mock.Kind {

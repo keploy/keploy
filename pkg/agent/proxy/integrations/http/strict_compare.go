@@ -249,6 +249,10 @@ type strictKnown struct {
 	// mock is the recording's name, for lazy clock-rule lookup on refusal
 	// (clockBarredWhy).
 	mock string
+	// but holds exact leaf places excused for one background-miss check
+	// (background_mark.go), read as learned noise is (never bypassing
+	// type/shape, pattern guards, or declared clock rules); nil otherwise.
+	but map[string]bool
 }
 
 // clocksOf is what the learn step learned of m as reads of the
@@ -353,8 +357,12 @@ func (k strictKnown) learnedAt(exact, legacy string) bool {
 }
 
 // learnedNoiseAt is learnedAt of the learned noise alone, not the learned
-// reads of the clock.
+// reads of the clock, including any exact leaf places temporarily excused
+// via k.but for a background-miss check (background_mark.go).
 func (k strictKnown) learnedNoiseAt(exact, legacy string) bool {
+	if k.but[exact] {
+		return true
+	}
 	if len(k.learned) == 0 {
 		return false
 	}
@@ -510,17 +518,40 @@ func fieldDiffs(fields []strictField) []models.MockFieldDiff {
 	return out
 }
 
+// newStrictKnown constructs the strictKnown comparison state for m under n,
+// with optional exact leaf places in but excused as learned noise.
+func newStrictKnown(m *models.Mock, n strictNoise, but map[string]bool) strictKnown {
+	return strictKnown{
+		n:        n,
+		learned:  m.Spec.ReqBodyNoise,
+		values:   util.NewNoiseChecker(m.Noise),
+		clocks:   clocksWith(m, n.declaredRules),
+		declared: declaredClockFields(m, n.declaredRules),
+		mock:     m.Name,
+		but:      but,
+	}
+}
+
 // strictDiff returns the compared fields in which the live request differs
 // from m's recording outside known noise, nil when m's recording is this
 // call. live is where the live request went; ctx is its connection's, whose
 // learn tracker tells the call's window on the application's clock.
 func strictDiff(ctx context.Context, input *req, live destination, m *models.Mock, n strictNoise) []strictField {
+	return strictDiffWith(ctx, input, live, m, n, nil, nil)
+}
+
+// strictDiffWith is strictDiff with exact leaf places in but excused (as
+// learned noise is, never bypassing type, presence, pattern guards, or
+// declared clock rules) and, when bgSpans is non-nil, learned clock reads
+// checked against bgSpans (learn.CallSpansOf, bounded by the set's begin,
+// never by a serve) instead of learn.ClockSpanOf.
+func strictDiffWith(ctx context.Context, input *req, live destination, m *models.Mock, n strictNoise, but map[string]bool, bgSpans []learn.Span) []strictField {
 	r := m.Spec.HTTPReq
 	if r == nil {
 		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}
 	}
 	strictDiffs.Add(1)
-	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declaredClockFields(m, n.declaredRules), mock: m.Name}
+	k := newStrictKnown(m, n, but)
 	var out []strictField
 	if string(r.Method) != input.method {
 		out = append(out, field(valueDiff("method", string(r.Method), input.method)))
@@ -538,6 +569,9 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 	out = append(out, k.queryDiffs(recQuery, liveQuery)...)
 	out = append(out, k.headerDiffs(r.Header, input.header, input.sentBody())...)
 	out = append(out, k.bodyDiffs(r, input)...)
+	if bgSpans != nil {
+		return append(out, k.clockDiffsIn(ctx, input, m, bgSpans)...)
+	}
 	return append(out, k.clockDiffs(ctx, input, m)...)
 }
 
@@ -608,6 +642,40 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 	if len(k.clocks) == 0 {
 		return nil
 	}
+	span, known := learn.ClockSpanOf(ctx, input.arrived, m)
+	return k.clockDiffsBy(ctx, input, m, func(shape string, o models.ClockOffset, live learn.Leaf) (bool, string) {
+		return learn.CheckClockReadForm(shape, o, live, span, known, k.n.timeForm)
+	})
+}
+
+// clockDiffsIn is clockDiffs checked against spans (learn.CallSpansOf, the
+// background call's spans bounded by the set's begin, never by a serve): a
+// clock read holds if it holds in any span of spans; when spans is empty,
+// check is called with known=false (which fails closed for range-checked
+// reads and still honours form-only reads under the time default).
+func (k strictKnown) clockDiffsIn(ctx context.Context, input *req, m *models.Mock, spans []learn.Span) []strictField {
+	if len(k.clocks) == 0 {
+		return nil
+	}
+	return k.clockDiffsBy(ctx, input, m, func(shape string, o models.ClockOffset, live learn.Leaf) (bool, string) {
+		if len(spans) == 0 {
+			return learn.CheckClockReadForm(shape, o, live, learn.Span{}, false, k.n.timeForm)
+		}
+		var lastWhy string
+		for _, s := range spans {
+			ok, why := learn.CheckClockReadForm(shape, o, live, s, true, k.n.timeForm)
+			if ok {
+				return true, ""
+			}
+			lastWhy = why
+		}
+		return false, lastWhy
+	})
+}
+
+// clockDiffsBy checks every non-claim learned/declared clock place in
+// k.clocks by calling check on each carried, unexcused read of the place.
+func (k strictKnown) clockDiffsBy(ctx context.Context, input *req, m *models.Mock, check func(shape string, o models.ClockOffset, live learn.Leaf) (bool, string)) []strictField {
 	var leaves map[string]learn.Leaf
 	var livePath urlPath
 	if input.url != nil {
@@ -618,7 +686,6 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 	recPath, _ := recordedStrictURL(m)
 	rec := k.urlPathOf(recPath)
 	read := k.pathReadings(rec)
-	span, known := learn.ClockSpanOf(ctx, input.arrived, m)
 	places := make([]string, 0, len(k.clocks))
 	for p, o := range k.clocks {
 		if _, claim := learn.ClaimClockField(p, o); claim {
@@ -643,7 +710,7 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 				f.why, f.clock = learn.ClockReadAbsent(f.shape, k.clocks[p]), true
 				break
 			}
-			if ok, why := learn.CheckClockReadForm(f.shape, k.clocks[p], r.live, span, known, k.n.timeForm); !ok {
+			if ok, why := check(f.shape, k.clocks[p], r.live); !ok {
 				f.why, f.clock = why, true
 				break
 			}

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,9 @@ type provenWire struct {
 	skip  map[string]string
 	needs map[string][]models.ScopeNeed
 	began map[string]bool
+	// set names the replayed set in the commands a failed test's reason
+	// names (models.ScopeGateReq.SetFlags and CloudSet); set with skip.
+	set scopeSet
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -166,6 +170,16 @@ type provenWire struct {
 	// the table had none.
 	background       []string
 	stagedBackground []string
+	// stagedStartup is the plain startup: names the last staging handed the
+	// proxy (plainStartupNames: the background less the worker scope then,
+	// models.MockFilterParams.StartupMocks): a worker scope that changes
+	// them stages the set again (SetScopeWorker).
+	stagedStartup []string
+	// startupRules is true when the replay's set carries at least one worker:
+	// entry placed by a declared kind: background rule with startup: true
+	// (models.ScopeTableReq.StartupRules). Plain recorded startup: entries do
+	// not set this flag.
+	startupRules bool
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
 	// sends a pool slice naming a recording the staging did not read.
@@ -416,6 +430,13 @@ func (a *Agent) hooksHoldInRun(pid int, start uint64) bool {
 	return ok && h.HoldsInRun(pid, start)
 }
 
+// inRun reports whether process pid is one of the run's processes: it
+// descends from root, keploy's client (clientRoot), by pid, or the hooks
+// hold it, created at start, in the run (hooksHoldInRun).
+func (a *Agent) inRun(pid int, start uint64, root int) bool {
+	return procDescends(pid, root) || a.hooksHoldInRun(pid, start)
+}
+
 // CallerSocketWhy is "" when process pid, which the kernel's tables name as
 // the owner of the client socket at client connected to the agent at server,
 // is the process that sends on it, as hooks that see sockets handed between
@@ -513,12 +534,17 @@ func (a *Agent) resetSession(ctx context.Context) error {
 }
 
 // ClaimInstance claims the run for caller (a process ID in the agent's PID
-// namespace, read from the connection). A caller outside the run's own
-// processes is refused: keploy does not intercept it, so its tests' calls
-// would reach real infrastructure. A run another live process claimed is
-// refused (the first release runs one test process at a time), and so is a
-// second claim of the claimer while its test is open. A claim whose process
-// exited is ended first: its open test, if any, fails.
+// namespace, read from the connection), or for the child it names
+// (req.Child): a running process the caller started, its parent read from
+// the kernel with both creation times (directChild). A caller outside the
+// run's own processes is refused: keploy does not intercept it, so its
+// tests' calls would reach real infrastructure. So is a child that is not
+// the caller's running child, and one that is but is not itself one of the
+// run's processes (inRun): the child is checked as the caller is, never
+// taken as the run's because its parent is. A run another live process
+// claimed is refused (the first release runs one test process at a time),
+// and so is a second claim of the claimer while its test is open. A claim
+// whose process exited is ended first: its open test, if any, fails.
 //
 // In a replay, the misses made before a new process claims the run are the
 // run's, not a test's: they were made by the run's earlier processes (the
@@ -538,6 +564,11 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	if key == "" || strings.ContainsRune(key, 0) || !models.IDPart(key) || len(key) > 4096 || !filepath.IsLocal(key) || filepath.ToSlash(filepath.Clean(key)) != key {
 		return models.InstanceResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
 			"the instance key is not a clean path inside the project", `send the package directory relative to the project directory, with slashes and nothing to clean up ("." for the project's own), without "::" and neither beginning nor ending with ":"`)
+	}
+	if req.Dir == "" {
+		// The claim of an integration written by hand names its folder by
+		// its key alone (models.ScopeUpgradeRemedy): its tests run there.
+		req.Dir = a.keyFolder(key)
 	}
 	if a.wireClosed() {
 		return models.InstanceResp{}, errClosed()
@@ -562,10 +593,37 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrNoCaller,
 			"keploy's agent could not tell which process called it", "run the test command natively, on the machine the agent runs on")
 	}
-	if !procDescends(caller, root) && !a.hooksHoldInRun(caller, start) {
+	if !a.inRun(caller, start, root) {
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			fmt.Sprintf("process %d is not part of this keploy run, so keploy cannot capture or mock its calls", caller),
 			`run the test command through keploy, to record: keploy mock record -c "<command>"; to replay: keploy mock replay -c "<command>"`)
+	}
+	if req.Child != 0 {
+		// A launcher that runs the test process as its child (Windows has
+		// no exec that keeps the launcher's pid) claims for it before it
+		// runs: from here the claim is the child's, as if it had made it.
+		childStart, ok := procChildStart(req.Child, caller)
+		// The child is checked as the caller was, never taken as the run's
+		// because its parent is. A child the run does not hold that has
+		// exited by then is answered as one that does not run: its exit, not
+		// the run, is why it was not found. One that exits once it was found
+		// is claimed as an exited process (directChild), which every begin
+		// refuses.
+		member := ok && a.inRun(req.Child, childStart, root)
+		if ok && !member {
+			ok = procAlive(req.Child, childStart)
+		}
+		if !ok {
+			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
+				fmt.Sprintf("process %d claimed this keploy run for process %d, which is not a running process it started", caller, req.Child),
+				"claim for the test process while it runs, from the process that started it, or let the test process claim for itself")
+		}
+		if !member {
+			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
+				fmt.Sprintf("process %d claimed this keploy run for process %d, which the system names as its child but which is not part of this keploy run, so keploy cannot capture or mock its calls", caller, req.Child),
+				"start the test process inside the keploy run (on Windows, inside the run's job object)")
+		}
+		caller, start = req.Child, childStart
 	}
 	declared, serr := declaredWorkers(req.Workers, caller)
 	if serr != nil {
@@ -923,6 +981,12 @@ func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) 
 	}
 	a.provenMu.Lock()
 	a.proven.worker = cp
+	// The staging marked the set's plain startup: recordings by the worker
+	// scope it read: one that moves a recording into or out of it stages the
+	// set again before it is served, so no mark outlives its scope.
+	if a.proven.staged && !slices.Equal(a.proven.stagedStartup, plainStartupNames(a.proven.background, cp)) {
+		a.proven.staged = false
+	}
 	a.provenMu.Unlock()
 	return nil
 }
@@ -972,14 +1036,29 @@ func (a *Agent) SetScopeBackground(ctx context.Context, names []string) error {
 	return nil
 }
 
+// SetScopeStartupRules records whether the staged replay set carries a
+// declared startup-capable background rule (models.ScopeTableReq.StartupRules).
+// Every scope table sets it (false clears any prior set's value).
+func (a *Agent) SetScopeStartupRules(ctx context.Context, on bool) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.startupRules = on
+	a.provenMu.Unlock()
+	return nil
+}
+
 // evidenceText is evidenceReason with what the agent holds for it: in a
-// replay, the recordings of the calls the test never made and the skipped
-// test of each read the replay's gate skips; in a record, neither.
+// replay, the recordings of the calls the test never made, the skipped
+// test of each read the replay's gate skips, and the set's flags; in a
+// record, none.
 func (a *Agent) evidenceText(id string, ev *models.ScopeEvidence, beganAt time.Time) string {
 	if !a.replaying() {
-		return evidenceReason(id, ev, nil, beganAt, nil)
+		return evidenceReason(id, ev, nil, beganAt, nil, scopeSet{})
 	}
-	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests())
+	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests(), a.scopeSetFlags())
 }
 
 // skippedReadTests is a copy of the skipped test of each read the replay's
@@ -1242,6 +1321,9 @@ func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start tim
 // unless a test is open: its end serves it. In a run of test workers, each
 // served worker none of whose tests is open is served its own key's slice.
 func (a *Agent) applyPool(ctx context.Context) error {
+	if !provenswitch.On() {
+		return a.serveUnsetBackground(ctx)
+	}
 	a.provenMu.Lock()
 	var serve []uint32
 	if ids := a.workerIDs(); len(ids) == 0 {
@@ -1300,12 +1382,33 @@ func (a *Agent) NoteRefusal(r models.RunRefusal) {
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
 // with their reasons, and the tests that must begin before each test that
-// needs them. nil skips nothing.
-func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
+// needs them. nil skips nothing. setFlags name the replayed set in the
+// commands a failed test's reason names (evidenceReason), and cloudSet says
+// that set is Keploy Cloud's recordings.
+func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool) error {
 	a.provenMu.Lock()
 	a.proven.skip, a.proven.needs = maps.Clone(skip), maps.Clone(needs)
+	a.proven.set = scopeSet{flags: slices.Clone(setFlags), cloud: cloudSet}
 	a.provenMu.Unlock()
 	return nil
+}
+
+// scopeSet is how the commands a failed test's reason names name the
+// replayed set: flags are the flags that make them act on it, and cloud
+// says it is Keploy Cloud's recordings, which keploy mock derive does not
+// change (models.ScopeGateReq.CloudSet). The zero value names no set: the
+// commands carry no flags, as in a record.
+type scopeSet struct {
+	flags []string
+	cloud bool
+}
+
+// scopeSetFlags is how the replay's gate named its set (SetScopeSkips);
+// the zero scopeSet in a record, and in a replay that named none.
+func (a *Agent) scopeSetFlags() scopeSet {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return a.proven.set
 }
 
 func (a *Agent) replaying() bool {
@@ -1966,7 +2069,8 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
 		// kept for judging, as R0's capture_incomplete (design v14 §7.4),
-		// and the test's outcome is its own against real infra.
+		// and the test's outcome is its own against real infra. Only a
+		// replay's gate names set flags.
 		ev.Reason = a.evidenceText(id, ev, beganAt)
 	}
 	if len(uses) > 0 {
@@ -2034,7 +2138,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		ev.FailedOnItsOwn = !ev.Unanswered()
 	}
 	a.NoteScopeOutcome(id, 0, outcome)
-	if ev != nil && (ev.Reason != "" || !ev.Empty()) {
+	if ev.Kept() {
 		a.noteScopeEvidence(id, ev)
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
@@ -2366,6 +2470,8 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // a connection that sent nothing made no call), and the test mocks it did not
 // consume while it was open (exact serving tells which). A failed read is an
 // error. Every miss is still charged to the run, so its next step is said.
+// Its background misses (models.UnmatchedCall.Background) fail nothing: they
+// are listed apart (models.ScopeEvidence.Background), never in Misses.
 //
 // began is where exact serving began serving the test (its time zero, and
 // its round not known, when it is not known). A miss made outside every test
@@ -2407,7 +2513,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 	}
 	ev := &models.ScopeEvidence{}
 	all, err := a.missesOf(ctx, a.scopeInstance(id))
-	var misses, outside []models.UnmatchedCall
+	var misses, outside, repeats []models.UnmatchedCall
 	for _, m := range all {
 		if m.EarlierSetTest != "" || m.EarlierSet > 0 {
 			// An earlier set's call, which keploy decided only after this
@@ -2438,15 +2544,33 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, began 
 		if backgroundRepeat(m) {
 			m.WindowOf = missWindow(m, id, began)
 			outside = append(outside, m)
+			if m.WindowOf == id && m.Background && m.Answer == "" {
+				// Made in this test's window, with no recording left to
+				// answer it: listed as the test's background miss
+				// (ScopeEvidence.Background), as one the proxy did not
+				// name a repeat is, so a test that failed on the answer it
+				// did not get is shown the call.
+				repeats = append(repeats, m)
+			}
 			continue
 		}
 		misses = append(misses, m)
 	}
 	a.charge(outside, "")
+	for _, m := range repeats {
+		ev.Background = append(ev.Background, sanitizedMiss(a.asRecorded(m)))
+	}
 	// Misses a read returned with its error are this test's all the same.
 	a.charge(misses, id)
 	for _, m := range misses {
 		if !m.CountsAgainstTest() {
+			// A background miss of the test's window fails nothing, and is
+			// listed with its recording and next step (ScopeEvidence.
+			// Background); a DNS lookup's, or a connection's that sent
+			// nothing, is no call of the test's.
+			if m.Background && m.Answer == "" {
+				ev.Background = append(ev.Background, sanitizedMiss(a.asRecorded(m)))
+			}
 			continue
 		}
 		ev.Misses = append(ev.Misses, sanitizedMiss(a.asRecorded(m)))
@@ -2878,8 +3002,12 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // before it, before the test began, an extra call of another test's
 // included. skippedOf is, in a replay, the skipped test that lists each read
 // the replay's gate skips (SetScopeSkippedReads): an extra call's line names
-// the test of each that answered the call (extraCallText).
-func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string) string {
+// the test of each that answered the call (extraCallText). set's flags name
+// the replayed set in each command it names (keploy mock quarantine, keploy
+// mock derive --remove), so the command acts on the set that failed
+// (SetScopeSkips); none, and they carry no flags. A set of Keploy Cloud's
+// recordings is told no remove command (authoredFix).
+func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string, set scopeSet) string {
 	var what []string
 	for _, c := range ev.Incomplete {
 		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
@@ -2934,8 +3062,23 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
 	sort.Strings(unmade)
+	// An authored mock (keploy mock derive or generate) is no recording: a
+	// record keeps it, so a re-record never clears it. It is named as
+	// authored, with its author's reason, and its remedy is the command
+	// that takes it out (authoredFix).
+	var authored []string
 	for _, n := range unmade {
-		what = append(what, "recorded call "+mockText(n, mocks[n])+" was never made")
+		m := mocks[n]
+		if !m.IsAuthored() {
+			what = append(what, "recorded call "+mockText(n, m)+" was never made")
+			continue
+		}
+		authored = append(authored, n)
+		line := "authored call " + mockText(n, m) + " was never made"
+		if a := m.Spec.Authored; a != nil && a.Reason != "" {
+			line += " (" + strconv.Quote(strings.Join(strings.Fields(a.Reason), " ")) + ")"
+		}
+		what = append(what, line)
 	}
 	if t := ev.CaptureIncomplete.Text(); t != "" {
 		if len(what) == 0 {
@@ -2965,8 +3108,36 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	} else {
 		head += " "
 	}
-	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id)))
+	flags := quoteFlags(set.flags)
+	quarantine := fmt.Sprintf("If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\"%s.", shellQuote(id), flags)
+	if len(ev.Misses) == 0 && len(authored) == len(ev.Unconsumed) {
+		// Only authored mocks were left unmade: a re-record keeps them.
+		return RunnableText(head + authoredFix(id, authored, flags, set.cloud) + "\n" + quarantine)
+	}
+	fix := ""
+	if len(authored) > 0 {
+		fix = authoredFix(id, authored, flags, set.cloud) + "\n"
+	}
+	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n%s%s",
+		head, id, fix, quarantine))
+}
+
+// authoredFix is what a test (id) that never called its authored mocks
+// (names) is told: a re-record keeps them, the command that takes each out,
+// with the set's flags (quoteFlags), and that a call the test now makes
+// differently is authored again. A set of Keploy Cloud's recordings (cloud)
+// is told no command: keploy mock derive refuses them, so it is told why,
+// and its quarantine line is what it can run.
+func authoredFix(id string, names []string, flags string, cloud bool) string {
+	if cloud {
+		return "A re-record keeps an authored mock, and keploy mock derive takes one out only of a set on disk, not of Keploy Cloud's recordings."
+	}
+	cmds := make([]string, 0, len(names))
+	for _, n := range names {
+		cmds = append(cmds, "keploy mock derive --remove "+shellQuote(id+"/"+n)+flags)
+	}
+	return "A re-record keeps an authored mock. If the test no longer makes its call, remove it: " + strings.Join(cmds, "; ") +
+		". If the call changed, derive or generate it again into this test."
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the
@@ -3004,6 +3175,16 @@ func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) b
 		out = append(out, fmt.Sprintf("and %d more call(s) missed for a reason keploy record's full round gave", more))
 	}
 	return out
+}
+
+// quoteFlags is flags as a command's trailing words, each quoted for a
+// shell and led by a space; "" for none.
+func quoteFlags(flags []string) string {
+	var b strings.Builder
+	for _, f := range flags {
+		b.WriteString(" " + shellQuote(f))
+	}
+	return b.String()
 }
 
 // shellQuote quotes s for a POSIX shell unless it is made of characters a
@@ -3144,7 +3325,7 @@ func mockText(name string, m *models.Mock) string {
 	if m == nil {
 		return name
 	}
-	if m.Kind == models.HTTP && m.Spec.HTTPReq != nil {
+	if (m.Kind == models.HTTP || m.Kind == models.HTTPFault) && m.Spec.HTTPReq != nil {
 		return fmt.Sprintf("%s %s (%s)", m.Spec.HTTPReq.Method, models.MockURLShape(m), name)
 	}
 	return fmt.Sprintf("%s mock %s", m.Kind, name)

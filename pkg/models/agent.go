@@ -336,6 +336,16 @@ type ScopeGateReq struct {
 	// their calls send in the same run (a run's variable), so it cannot run
 	// without them.
 	Needs map[string][]ScopeNeed `json:"needs,omitempty"`
+	// SetFlags, read with Skip, are the flags that make a command a failed
+	// test's reason names (keploy mock quarantine, keploy mock derive
+	// --remove) act on the set this replay serves, as the replay CLI names
+	// it ("--local", "--name", "<set>"). None: the commands carry no flags.
+	SetFlags []string `json:"set_flags,omitempty"`
+	// CloudSet, read with SetFlags, says the replayed set is Keploy Cloud's
+	// recordings, which keploy mock derive does not change: a failed test's
+	// reason names no command that takes an authored mock out of it, and its
+	// quarantine command carries SetFlags as for any set.
+	CloudSet bool `json:"cloud_set,omitempty"`
 }
 
 // ScopeNeed is one test a replayed test needs to have begun before it
@@ -475,6 +485,10 @@ const ScopeTableServedSeries = "series"
 // ScopeTableReq.Sources.
 const ScopeTableServedSources = "sources"
 
+// ScopeTableServedSessionCalls is ScopeTableResp.Served's name for
+// ScopeTableReq.SessionCalls.
+const ScopeTableServedSessionCalls = "sessionCalls"
+
 // ScopeTableServedOnce is ScopeTableResp.Served's name for
 // ScopeTableReq.Once.
 const ScopeTableServedOnce = "once"
@@ -484,8 +498,13 @@ const ScopeTableServedOnce = "once"
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
-	Root     string              `json:"root,omitempty"`
-	Sets     map[string]SetTable `json:"sets,omitempty"`
+	// SessionCalls hands the agent, under the proven switch, the session
+	// calls the client declares (DeclaredSessionCalls): it installs them
+	// before it stages the set (ScopeTableServedSessionCalls). nil leaves
+	// the agent's as they are.
+	SessionCalls *DeclaredSessionCalls `json:"sessionCalls,omitempty"`
+	Root         string                `json:"root,omitempty"`
+	Sets         map[string]SetTable   `json:"sets,omitempty"`
 	// Pool is, under the proven switch, each key's pool slice: the names of
 	// the mocks recorded while no test was open, by the key of the claim
 	// then (PoolKeyNone for none, and for a mock recorded without a key).
@@ -605,6 +624,11 @@ type ScopeTableReq struct {
 	// of them: they are tests' calls. Absent from an older CLI and from a
 	// set with none: every miss stays its test's.
 	Background []string `json:"background,omitempty"`
+	// StartupRules is true when the set's mappings.yaml carries at least one
+	// worker: entry placed by a declared kind: background rule with
+	// startup: true (MockEntry.Rule != "" && MockEntry.Startup). Plain
+	// recorded startup: entries do not set this flag.
+	StartupRules bool `json:"startupRules,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its
@@ -797,6 +821,23 @@ type MockFilterParams struct {
 	// is served differently for it. Empty: the set has none, and every miss
 	// stays its test's.
 	BackgroundMocks []string `json:"backgroundMocks,omitempty"`
+	// StartupMocks names, of BackgroundMocks, the set's plain startup:
+	// mocks (BackgroundRecording.Startup): made before the first test and
+	// covered by no declared rule. Under the proven switch alone: keploy
+	// mock replay's agent sets it from the set's scope table, and keploy
+	// test's staging call from its mappings.yaml, each as the set's
+	// startup: mocks less its worker scope (a startup: true rule's
+	// recording is placed in worker:, as is one learned between tests).
+	// The agent marks only those of a kind a user can declare a call of
+	// (StartupDeclarable), and leaves out one a keploy.yaml sessionCalls
+	// entry names exactly. Empty: every background recording is the
+	// background's in a test's window too, as before.
+	StartupMocks []string `json:"startupMocks,omitempty"`
+	// SessionCalls hands the agent, on the staging call under the proven
+	// switch, the session calls the client declares (DeclaredSessionCalls):
+	// it installs them before it marks or stages the set's recordings. nil
+	// leaves the agent's as they are.
+	SessionCalls *DeclaredSessionCalls `json:"sessionCalls,omitempty"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase

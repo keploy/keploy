@@ -153,3 +153,60 @@ func TestAWorkersBeginAsksWhetherItsOwnProcessCarriesTheShim(t *testing.T) {
 	require.Contains(t, serr.Message, strconv.Itoa(unshimmed))
 	require.Equal(t, []int{os.Getpid(), unshimmed}, h.asked)
 }
+
+// A launcher that carries the shim and claims the run for the test process
+// it started as its child (keploy's Go launcher on Windows, where no exec
+// keeps the launcher's pid) does not lend the child its shim: the hooks are
+// told the child claimed the run, never the launcher, and each begin asks
+// about the child alone. A child without the shim is refused, naming it, as
+// clock_not_frozen when keploy froze the run's clock, and opens nothing;
+// once the child carries the shim, its begin opens the test, though the
+// launcher no longer carries it.
+func TestABeginOfAChildItsLauncherClaimedForAsksAboutTheChild(t *testing.T) {
+	for _, tc := range []struct {
+		name, timeFile string
+		code           string
+	}{
+		{"on the real clock", "", models.ScopeErrNotInRun},
+		{"on a frozen clock", "/run/kclk/t", models.ScopeErrClockNotFrozen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.timeFile != "" {
+				useHooks(t, &clockHooks{file: tc.timeFile})
+			}
+			a, _ := wireAgent(t, models.MODE_RECORD)
+			launcher := os.Getpid()
+			c := child(t).Process.Pid
+			h := &shimHooks{armed: map[int]bool{launcher: true}}
+			a.Hooks = h
+			_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "o", Child: c}, launcher)
+			require.Nil(t, serr)
+			require.NotEmpty(t, h.told)
+			require.Equal(t, "claimed by "+strconv.Itoa(c), h.told[0], "the hooks are told the child claimed the run")
+			require.NotContains(t, h.told, "claimed by "+strconv.Itoa(launcher), "the launcher claimed nothing for itself")
+
+			_, serr = a.ProvenBegin(as(c), begin("TestUnshimmedChild"))
+			require.NotNil(t, serr, "the launcher carries the shim, the child it claimed for does not")
+			require.Equal(t, tc.code, serr.Code)
+			require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
+			require.Contains(t, serr.Message, "o::TestUnshimmedChild")
+			require.Regexp(t, `test process `+strconv.Itoa(c)+`\b`, serr.Message, "the refusal names the child")
+			require.NotRegexp(t, `\b`+strconv.Itoa(launcher)+`\b`, serr.Message, "and not its launcher")
+			require.Contains(t, serr.Message, "it never said HELLO")
+			require.Equal(t, []string{strconv.Itoa(c) + " " + tc.timeFile}, h.asked, "the begin asks about the child, not its launcher")
+			a.provenMu.Lock()
+			open := a.proven.open
+			a.provenMu.Unlock()
+			require.Empty(t, open, "the refused begin opened no test")
+
+			h.armed, h.asked = map[int]bool{c: true}, nil
+			_, serr = a.ProvenBegin(as(c), begin("TestShimmedChild"))
+			require.Nil(t, serr, "the child carries the shim")
+			require.Equal(t, []string{strconv.Itoa(c) + " " + tc.timeFile}, h.asked)
+			a.provenMu.Lock()
+			open = a.proven.open
+			a.provenMu.Unlock()
+			require.Equal(t, "o::TestShimmedChild", open[0].id)
+		})
+	}
+}

@@ -371,6 +371,24 @@ type SequenceView struct {
 	// cursor), so a window's answers never depend on how many calls landed
 	// between tests.
 	Between MockCursor
+	// Declared reports whether a data-plane recording is one a keploy.yaml
+	// sessionCalls entry serves to every test: a recording of the view's pool
+	// slice (a pool view's own; in a test, the one served before it opened),
+	// made outside every test, of a call an entry names exactly
+	// (models.Mock.DeclaredSessionCall). nil with no session call declared,
+	// and in a view whose pool slice is empty or none. A recording the view
+	// never offers (another test's; another pool slice's, but in a test
+	// under the background rules, which offers it the whole pool) is never
+	// served for such a call, so a walk of it holds only what the view
+	// offers (Offers).
+	Declared func(*models.Mock) bool
+	// Offers reports, with Declared, whether the view offers a recording,
+	// spent or not: one it holds (in a test, the test's own, in flight into
+	// it, shared with it; on a pool view, the next test's in flight), or one
+	// it shows (exactView.showsStatic: the protocol phase, the reached worker
+	// scope, between tests the pool slice, in a test the declared session
+	// calls and under the background rules the pool's but an async lane's).
+	Offers func(*models.Mock) bool
 }
 
 // Span returns the recordings, of n of one reusable request in record order
@@ -686,12 +704,19 @@ func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
 // the recording is of (models.RepeatNote.Background), empty for a test's own.
 // SkippedRead says it is the read of a test the replay's gate skips, moved
 // to the worker scope for the replay (models.RepeatNote.SkippedRead): no
-// recording of the background, so Background is empty.
+// recording of the background, so Background is empty. OutsideTests says
+// the store knows the recording was made outside every test and is no
+// background of the call: one of the set's plain startup: recordings
+// (models.BackgroundRecording.Startup) found again by a call read in a
+// test's window, whose Background is empty
+// (models.RepeatNote.OutsideTests). Whatever else the store knows of the
+// set's scope table, the call's note then says so.
 type AnsweredCall struct {
-	Mock        *models.Mock
-	AnsweredAt  time.Time
-	Background  string
-	SkippedRead bool
+	Mock         *models.Mock
+	AnsweredAt   time.Time
+	Background   string
+	SkippedRead  bool
+	OutsideTests bool
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the
@@ -1509,8 +1534,10 @@ type ExactBackground interface {
 type ByKindBackground interface {
 	// KindBackground is kind's background recordings (data-plane, no async
 	// lane's), the worker scope at every place and the pool: those unused,
-	// and those this staging spent, each in recorded order. nil, nil for a
-	// set served by today's rules.
+	// and those this staging spent, each in recorded order. To a call read
+	// in a test's window, none of the set's plain startup: recordings
+	// (models.BackgroundRecording.Startup): such a call is the test's own.
+	// nil, nil for a set served by today's rules.
 	KindBackground(kind models.Kind) (unused, spent []*models.Mock)
 	// SpendByKind spends m, one of KindBackground's unused, for the staging:
 	// a by-kind answer's consumption, whatever m's place. False when m is

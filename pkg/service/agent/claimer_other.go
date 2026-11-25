@@ -8,6 +8,8 @@ func procAlive(int, uint64) bool   { return false }
 func procStart(int) (uint64, bool) { return 0, false }
 func procDescends(int, int) bool   { return false }
 
+func procChildStart(int, int) (uint64, bool) { return 0, false }
+
 // zombieExited is true: procStatStart reads a /proc, which this system has
 // not, so it never asks.
 var zombieExited = func(int) bool { return true }

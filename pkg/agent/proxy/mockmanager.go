@@ -221,6 +221,17 @@ type MockManager struct {
 	// staging that ends such a test leaves them out, so a test's recording
 	// answers no call after its test ended. Reset with consumedPersistent.
 	scopeConsumed map[string]struct{}
+	// scopeOwned holds the open test's per-test recordings staged by
+	// SetScopeMocks (KEPLOY_PROVEN unset) so repeatsOwn / OwnedRecordings can
+	// keep background passes from borrowing a repeat of a test's own recording
+	// without enabling exactView.
+	scopeOwnedMu  sync.Mutex
+	scopeOwned    []*models.Mock
+	scopeOwnedGen uint64
+	// scopeReplaced names recordings replaced by the open test's derived mocks
+	// under SetScopeMocks (KEPLOY_PROVEN unset), so unset-mode background
+	// serving omits them while the test is open.
+	scopeReplaced map[string]struct{}
 	// answered keeps, of the per-test recordings that answered a call in this
 	// test set, the request side, by request key and bounded by bytes, for a
 	// miss's diagnosis (FindAnsweredEarlier).
@@ -941,6 +952,10 @@ func (m *MockManager) ResetForReplaySession() {
 		m.scopeConsumed = make(map[string]struct{})
 	}
 	m.consumedMu.Unlock()
+	m.scopeOwnedMu.Lock()
+	m.scopeOwned = nil
+	m.scopeReplaced = nil
+	m.scopeOwnedMu.Unlock()
 
 	m.swapMu.Lock()
 	m.boundaryPending = true
@@ -1599,6 +1614,18 @@ func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, st
 // trees and the window of one staging; the others see each change as it
 // lands, the trees before the window, as with any staging.
 func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bool) {
+	var replaced map[string]struct{}
+	if open {
+		replaced = models.ReplacedBy(filtered)
+	}
+	m.SetScopeMocksWithReplaced(filtered, unfiltered, open, replaced)
+}
+
+// SetScopeMocksWithReplaced stages the scope mocks like SetScopeMocks, using
+// replaced as the exact set of sources the open test's own derived mocks
+// replace (so carry-over mocks belonging to other tests never leak replacements
+// into the open test's background serving).
+func (m *MockManager) SetScopeMocksWithReplaced(filtered, unfiltered []*models.Mock, open bool, replaced map[string]struct{}) {
 	defer m.signalWindowChange()
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
@@ -1607,9 +1634,26 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 		filtered, unfiltered = withoutScopeServed(filtered, served), withoutScopeServed(unfiltered, served)
 		ownForStaging(&filtered, &unfiltered)
 		m.setMocksWithWindowLocked(filtered, unfiltered, nil, models.BaseTime, time.Now(), false)
+		m.scopeOwnedMu.Lock()
+		m.scopeOwned = nil
+		m.scopeReplaced = nil
+		m.scopeOwnedMu.Unlock()
 		return
 	}
 	ownForStaging(&filtered, &unfiltered)
+	m.scopeOwnedMu.Lock()
+	m.scopeOwned = slices.Clone(filtered)
+	if len(replaced) > 0 {
+		cp := make(map[string]struct{}, len(replaced))
+		for k := range replaced {
+			cp[k] = struct{}{}
+		}
+		m.scopeReplaced = cp
+	} else {
+		m.scopeReplaced = nil
+	}
+	m.scopeOwnedGen++
+	m.scopeOwnedMu.Unlock()
 	// The epoch and carry-over bookkeeping a BaseTime staging resets, which
 	// the zero-window staging below leaves alone.
 	m.bumpStagingEpoch()
@@ -4783,6 +4827,9 @@ type backgroundInstall struct {
 	from   uint64
 	byKind map[models.Kind][]models.BackgroundRecording
 	prev   *backgroundInstall
+	// startup names the install's plain startup: recordings
+	// (models.BackgroundRecording.Startup).
+	startup map[string]bool
 }
 
 // installBackgroundLocked installs byKind as the background recordings in
@@ -4792,9 +4839,19 @@ type backgroundInstall struct {
 // reads the latest, as it did before). Holding swapMu.
 func (m *MockManager) installBackgroundLocked(byKind map[models.Kind][]models.BackgroundRecording, from uint64) {
 	in := &backgroundInstall{from: from, byKind: byKind}
+	for _, list := range byKind {
+		for _, r := range list {
+			if r.Startup && r.Mock != nil {
+				if in.startup == nil {
+					in.startup = map[string]bool{}
+				}
+				in.startup[r.Mock.Name] = true
+			}
+		}
+	}
 	if cur := m.background.Load(); cur != nil {
 		if cur.from < from {
-			in.prev = &backgroundInstall{from: cur.from, byKind: cur.byKind}
+			in.prev = &backgroundInstall{from: cur.from, byKind: cur.byKind, startup: cur.startup}
 		} else if cur.prev != nil {
 			in.prev = cur.prev
 		}
@@ -4817,18 +4874,77 @@ func (m *MockManager) BackgroundRecordings(kind models.Kind) []models.Background
 // replay can stage before keploy decides the call. nil for a call marked
 // before both (it is read as no background call, and counts), and the
 // current set's for the zero CallRound.
+//
+// Under the proven switch, for a call read in a test's view
+// (CallRound.InTest), it leaves out the set's plain startup: recordings
+// (models.BackgroundRecording.Startup): such a call is the test's own, and
+// its miss counts against the test (testOwnsStartupAt).
 func (m *MockManager) BackgroundRecordingsIn(call integrations.CallRound, kind models.Kind) []models.BackgroundRecording {
 	in := m.background.Load()
 	if !call.Read() {
 		return in.of(kind)
 	}
+	in = in.at(call.Epoch())
+	if call.InTest() && provenswitch.On() && in != nil && len(in.startup) > 0 {
+		return in.ofLeavingOut(kind, in.startup)
+	}
+	return in.of(kind)
+}
+
+// at is the install in force in the staging epoch epoch: in, or the first of
+// the installs it replaced that took effect at or before epoch. nil for an
+// epoch before them all.
+func (in *backgroundInstall) at(epoch uint64) *backgroundInstall {
 	for ; in != nil; in = in.prev {
-		if in.from <= call.Epoch() {
-			return in.of(kind)
+		if in.from <= epoch {
+			return in
 		}
 	}
 	return nil
 }
+
+// ofLeavingOut is of(kind) without the recordings out names.
+func (in *backgroundInstall) ofLeavingOut(kind models.Kind, out map[string]bool) []models.BackgroundRecording {
+	var keep []models.BackgroundRecording
+	for _, r := range in.of(kind) {
+		if r.Mock != nil && out[r.Mock.Name] {
+			continue
+		}
+		keep = append(keep, r)
+	}
+	return keep
+}
+
+// testOwnsStartupAt reports whether name, a recording of the background in
+// force in the staging epoch epoch (backgroundInstall.at), is one a test's
+// call identical to it is the test's own call in: one of a keploy mock
+// replay's or keploy test's set's plain startup: recordings
+// (models.BackgroundRecording.Startup), made before the first test and
+// covered by no declared rule (keploy.yaml sessionCalls, a startup: true
+// rule). The agent marks them under the proven switch alone
+// (models.MockFilterParams.StartupMocks). Recordings' names restart in each
+// set, so it reads the install of the epoch the asking view was installed
+// in (exactView.startupOwned), never the latest: a call of one set is never
+// judged by the next set's marks. Such a recording is not shown to a call
+// read in a test's window (exactView.sharesRestTo), is no background of
+// one (BackgroundRecordingsIn, exactView.isBackgroundRecordingTo), and such
+// a call identical to it after it answered outside every test is the
+// test's miss, saying how to declare it (findAnsweredEarlierIn:
+// models.RepeatNote.OutsideTests). A learned background recording (worker:)
+// or a declared one stays the background's in a test's window too.
+func (m *MockManager) testOwnsStartupAt(epoch uint64, name string) bool {
+	in := m.background.Load().at(epoch)
+	return in != nil && in.startup[name]
+}
+
+// OwnsStartup implements integrations.StartupOwner: name is one of the plain
+// startup: recordings of the set call was marked in (testOwnsStartupAt), and
+// call was read in a test's window.
+func (m *MockManager) OwnsStartup(call integrations.CallRound, name string) bool {
+	return call.Read() && call.InTest() && m.testOwnsStartupAt(call.Epoch(), name)
+}
+
+var _ integrations.StartupOwner = (*MockManager)(nil)
 
 func (in *backgroundInstall) of(kind models.Kind) []models.BackgroundRecording {
 	if in == nil {

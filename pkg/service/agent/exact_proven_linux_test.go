@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	nethttp "net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +39,9 @@ type servingProxy struct {
 	mm     *proxyPkg.MockManager
 	mu     sync.Mutex
 	misses []models.UnmatchedCall
+	// background, when set, marks a filed miss as its parser's background
+	// mark does (the proxy's miss read keeps MismatchReport.Background).
+	background func(*models.UnmatchedCall)
 }
 
 func newServingProxy() *servingProxy {
@@ -46,6 +50,10 @@ func newServingProxy() *servingProxy {
 
 func (p *servingProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock, s, e time.Time) error {
 	p.mm.SetMocksWithWindow(f, u, s, e)
+	return nil
+}
+func (p *servingProxy) SetScopeMocks(_ context.Context, f, u []*models.Mock, open bool) error {
+	p.mm.SetScopeMocks(f, u, open)
 	return nil
 }
 func (p *servingProxy) SetMocks(_ context.Context, f, u []*models.Mock) error {
@@ -72,6 +80,17 @@ func (p *servingProxy) ServeExactWorker(names []string) error {
 func (p *servingProxy) ServeExactWorkerSkipped(names, skipped []string) error {
 	p.mm.ServeExactWorkerSkipped(names, skipped)
 	return nil
+}
+func (p *servingProxy) StageExactBackground(rules string) error {
+	p.mm.StageExactBackground(rules)
+	return nil
+}
+func (p *servingProxy) ServeExactBackground(rules string, pool, worker []string) error {
+	p.mm.ServeExactBackground(rules, pool, worker)
+	return nil
+}
+func (p *servingProxy) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
+	p.mm.SeedBackgroundRecordings(recs)
 }
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)
@@ -102,7 +121,7 @@ func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 // test or outside every test, and the round, models.MissMark), an extra call
 // as its matcher found it, with the fields its report
 // says differ, whether it is a recording made elsewhere, its repeat note,
-// and stamped with when its report was built.
+// its next steps, and stamped with when its report was built.
 func (p *servingProxy) noteMiss(err error) {
 	uc := models.UnmatchedCall{Protocol: "HTTP", Kind: models.MissOutsideTest, At: time.Now()}
 	if p.mm.WindowSnapshot().Active {
@@ -115,6 +134,9 @@ func (p *servingProxy) noteMiss(err error) {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
 		uc.ClosestMock, uc.NotOwned, uc.Repeat = rep.ClosestMock, rep.NotOwned, rep.Repeat.Clone()
+		uc.NextSteps = rep.NextSteps
+		// The proxy's read keeps the parser's background mark (proxy.go).
+		uc.Background, uc.BackgroundBound = rep.Background, slices.Clone(rep.BackgroundBound)
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
@@ -132,6 +154,9 @@ func (p *servingProxy) noteMiss(err error) {
 		}
 	}
 	p.mu.Lock()
+	if p.background != nil {
+		p.background(&uc)
+	}
 	p.misses = append(p.misses, uc)
 	p.mu.Unlock()
 }
@@ -139,6 +164,12 @@ func (p *servingProxy) noteMiss(err error) {
 // call sends GET path, through the real HTTP matcher, and returns the status
 // and body the app got.
 func (p *servingProxy) call(t *testing.T, path string) (int, string) {
+	t.Helper()
+	return p.callWith(t, path, "")
+}
+
+// callWith is call with headers (each "Name: value\r\n") sent after Host.
+func (p *servingProxy) callWith(t *testing.T, path, headers string) (int, string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -154,7 +185,7 @@ func (p *servingProxy) call(t *testing.T, path string) (int, string) {
 	go func() {
 		_ = httpparser.New(zap.NewNop()).MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Port: 18093}, p.mm, models.OutgoingOptions{})
 	}()
-	_, err = io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:18093\r\n\r\n")
+	_, err = io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:18093\r\n"+headers+"\r\n")
 	require.NoError(t, err)
 	resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil)
 	require.NoError(t, err)
@@ -671,7 +702,7 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
 		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
-	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
+	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil, nil, false))
 	b, serr := a.ProvenBegin(context.Background(), begin("TestSkipped"))
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionSkip, b.Action)
@@ -694,7 +725,7 @@ func TestASkippedTestsRecordingStillBoundsAHeldCall(t *testing.T) {
 		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
 		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
 	ctx := context.Background()
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil, nil, false))
 	b, serr := a.ProvenBegin(ctx, begin("TestSkipped"))
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionSkip, b.Action)

@@ -147,13 +147,20 @@ type shownExtra struct {
 // pooled (models.Mock.MarkPooled): a change stores a new value, and moves the
 // tree's generation.
 func (v *exactView) showsStatic(mk *models.Mock) bool {
+	return v.showsStaticTo(mk, v.test != "")
+}
+
+// showsStaticTo is showsStatic to a call read in a test's window (windowed)
+// or between tests, whatever view is in force as it settles (showsTo,
+// sharesRestTo).
+func (v *exactView) showsStaticTo(mk *models.Mock, windowed bool) bool {
 	if mk == nil {
 		return false
 	}
 	if mk.IsProtocolPhase() {
 		return true
 	}
-	return v.showsStaticRest(mk)
+	return !v.holds(mk.Name) && v.sharesRestTo(mk, windowed)
 }
 
 // showsStaticRest is showsStatic of a mock that is not protocol-phase.
@@ -170,12 +177,30 @@ func (v *exactView) showsStaticRest(mk *models.Mock) bool {
 }
 
 // sharesRest is what the view shows of a mock that is not protocol-phase, its
-// own apart: one of the reached worker scope; in a test, one of the pool
-// under the background rules, or one a declared session call names
-// (declaredInPool); between tests, one of the pool slice served.
+// own apart, to a call read in it (sharesRestTo).
 func (v *exactView) sharesRest(mk *models.Mock) bool {
+	return v.sharesRestTo(mk, v.test != "")
+}
+
+// sharesRestTo is sharesRest to a call read in a test's window (windowed) or
+// between tests, whatever view is in force as it settles
+// (roundGuard.windowed): one of the reached worker scope; in a test, one of
+// the pool under the background rules, or one a declared session call names
+// (declaredInPool); between tests, one of the pool slice served. To a call
+// read in a test's window it never shows one of the set's plain startup:
+// recordings (startupOwned), which such a call is the test's own call in,
+// and to one read between tests it shows them as the pool's, though the
+// next test opened before it settled. It never shows a recording the open
+// test's derived mocks replace (exactView.sourcesReplaced).
+func (v *exactView) sharesRestTo(mk *models.Mock, windowed bool) bool {
+	if _, gone := v.sourcesReplaced[mk.Name]; gone {
+		return false
+	}
 	if v.isWorker(mk.Name) {
 		return true
+	}
+	if windowed && v.startupOwned(mk.Name) {
+		return false
 	}
 	if v.test != "" {
 		// Under the background rules the pool answers in a test too,
@@ -183,8 +208,10 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 		// lane's recording keeps today's rules.
 		return v.declaredInPool(mk) || v.bg.inPool(mk.Name) && !mk.IsAsync()
 	}
-	_, ok := v.pool[mk.Name]
-	return ok
+	if _, ok := v.pool[mk.Name]; ok {
+		return true
+	}
+	return v.bg.inPool(mk.Name) && !mk.IsAsync()
 }
 
 // declaredInPool reports whether mk, in a test's view, is a recording made
@@ -194,7 +221,9 @@ func (v *exactView) sharesRest(mk *models.Mock) bool {
 // (models.Mock.DeclaredSessionCall). Every test of the run is served it,
 // whatever test opened: a call the app makes once at start-up and caches
 // (a token, a configuration read) that a test makes again. Another test's
-// recording of it is that test's alone.
+// recording of it is that test's alone. On a pool view it reports the same
+// of the view's own slice, for a stateful walk (sequenceViewOf), never for
+// what the view shows.
 func (v *exactView) declaredInPool(mk *models.Mock) bool {
 	return v.declared.has(mk.Name) && mk.DeclaredSessionCall()
 }
@@ -228,7 +257,7 @@ func (v *exactView) extraLocked(db *TreeDb, ix *integrations.MockIndex, key stri
 		return s.extra
 	}
 	shownBuilds.Add(1)
-	var pool, declared map[string]struct{}
+	var pool, bgPool, declared map[string]struct{}
 	if v.test != "" {
 		if v.bg != nil {
 			pool = v.bg.pool
@@ -238,15 +267,21 @@ func (v *exactView) extraLocked(db *TreeDb, ix *integrations.MockIndex, key stri
 		}
 	} else {
 		pool = v.pool
+		if v.bg != nil {
+			bgPool = v.bg.pool
+		}
 	}
 	var extra []keyedEntry
-	if looks := len(v.worker) + len(pool) + len(declared); looks < len(p.rest) {
+	if looks := len(v.worker) + len(pool) + len(bgPool) + len(declared); looks < len(p.rest) {
 		keyedExamined.Add(uint64(looks))
 		var pos []int
 		for name := range v.worker {
 			pos = append(pos, p.byName[name]...)
 		}
 		for name := range pool {
+			pos = append(pos, p.byName[name]...)
+		}
+		for name := range bgPool {
 			pos = append(pos, p.byName[name]...)
 		}
 		for name := range declared {

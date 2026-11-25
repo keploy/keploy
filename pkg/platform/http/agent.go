@@ -5864,6 +5864,13 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // times by the clock checks alone, which refuses more and never passes
 // more, so it is not refused.
 func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) (retErr error) {
+	return a.PushProvenTableWithStartupRules(ctx, table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background, series, sources, once, timeForm, false)
+}
+
+// PushProvenTableWithStartupRules is PushProvenTable with startupRules
+// (models.ScopeTableReq.StartupRules) set when the set carries a declared
+// startup-capable background rule.
+func (a *AgentClient) PushProvenTableWithStartupRules(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm, startupRules bool) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
@@ -5871,11 +5878,14 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 		if retErr == nil && a.session().recording() {
 			t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background), maps.Clone(series), maps.Clone(sources), slices.Clone(once)
 			a.session().record(stepScopeTable, func(c context.Context) error {
-				return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, timeForm)
+				return a.PushProvenTableWithStartupRules(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, timeForm, startupRules)
 			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, TimeForm: timeForm})
+	// The session calls keploy.yaml declares go with the set: an agent
+	// container reads no keploy.yaml (models.DeclaredSessionCalls).
+	sessionCalls := models.DeclaredSessionCallsToHand()
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, TimeForm: timeForm, StartupRules: startupRules, SessionCalls: sessionCalls})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -5896,19 +5906,22 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("the agent refused the per-test table and pool slices (status %d): %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
-	if len(series) == 0 && len(sources) == 0 && len(once) == 0 {
+	declares := sessionCalls != nil && len(sessionCalls.Rules) > 0
+	if len(series) == 0 && len(sources) == 0 && len(once) == 0 && !declares {
 		return nil
 	}
 	// An older agent answers with no field named: it would serve a series'
 	// recordings once each, so a slower replay's repeat would miss, it
-	// would learn a declared field as if no rule declared it, and it would
-	// answer a once series' request again and again.
+	// would learn a declared field as if no rule declared it, it would
+	// answer a once series' request again and again, and it would neither
+	// serve a declared session call nor tell it from a plain startup: one.
 	var ack models.ScopeTableResp
 	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&ack); err != nil {
 		return ErrAgentIgnoresRules
 	}
 	if len(series) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedSeries) || len(sources) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedSources) ||
-		len(once) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedOnce) {
+		len(once) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedOnce) ||
+		declares && !slices.Contains(ack.Served, models.ScopeTableServedSessionCalls) {
 		return ErrAgentIgnoresRules
 	}
 	return nil
@@ -5917,7 +5930,7 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 // ErrAgentIgnoresRules is PushProvenTable's refusal of an agent that does
 // not acknowledge a scope table's series or declared sources
 // (models.ScopeTableResp.Served).
-var ErrAgentIgnoresRules = errors.New("this keploy agent does not acknowledge the scope table's series, once series or declared sources (an older agent ignores them): keploy mock does not run a set with declared rules on it; update the agent")
+var ErrAgentIgnoresRules = errors.New("this keploy agent does not acknowledge the scope table's series, once series, declared sources or declared session calls (an older agent ignores them): keploy mock does not run a set with declared rules on it; update the agent")
 
 // PushTestBegins hands the agent when each test of the replayed recording
 // began, so it moves the run's clock per test, and the seed each test's
@@ -5965,14 +5978,49 @@ func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time
 // served pool per test, with the recorded window of every test of the set
 // (models.ScopeTableReq.Windows). A missing endpoint (older agent) is a no-op.
 func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string, windows []models.TestWindow) (retErr error) {
+	return a.PushScopeTableWithBackground(ctx, table, windows, nil, nil, nil, nil, nil, false)
+}
+
+// PushScopeTableWithBackground hands the agent the replay-time per-test
+// name→mock-names table along with pool slices, worker-scope, @startup
+// background mock names, series, once series, and declared-startup-rule flag
+// (proven switch off) so both KEPLOY_PROVEN modes share the exact same
+// ServeExactBackground engine.
+func (a *AgentClient) PushScopeTableWithBackground(ctx context.Context, table map[string][]string, windows []models.TestWindow, pool, worker map[string][]string, background []string, series map[string][]string, once []string, startupRules bool) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded, recordedWindows := maps.Clone(table), slices.Clone(windows)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushScopeTable(c, recorded, recordedWindows) })
+			cloneMap := func(m map[string][]string) map[string][]string {
+				if m == nil {
+					return nil
+				}
+				cp := make(map[string][]string, len(m))
+				for k, v := range m {
+					cp[k] = slices.Clone(v)
+				}
+				return cp
+			}
+			recordedPool := cloneMap(pool)
+			recordedWorker := cloneMap(worker)
+			recordedBG := slices.Clone(background)
+			recordedSeries := cloneMap(series)
+			recordedOnce := slices.Clone(once)
+			a.session().record(stepScopeTable, func(c context.Context) error {
+				return a.PushScopeTableWithBackground(c, recorded, recordedWindows, recordedPool, recordedWorker, recordedBG, recordedSeries, recordedOnce, startupRules)
+			})
 		}
 	}()
 	url := fmt.Sprintf("%s/scope/table", a.conf.AgentURI())
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Windows: windows})
+	body, err := json.Marshal(models.ScopeTableReq{
+		Mappings:     table,
+		Windows:      windows,
+		Pool:         pool,
+		Worker:       worker,
+		Background:   background,
+		Series:       series,
+		Once:         once,
+		StartupRules: startupRules,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -6039,17 +6087,22 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 
 // PushScopeSkips hands the agent the proven model's gate: the tests to skip,
 // by ID, each with its reason, and the tests each test needs to have begun
-// before it (models.ScopeGateReq.Needs); an empty map skips nothing. Made
-// again on a restarted agent, like the scope gate. Any answer but 200 is a
-// failure: a replay that cannot skip what CI skips refuses.
-func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) (retErr error) {
+// before it (models.ScopeGateReq.Needs); an empty map skips nothing. With
+// them go the flags that name the replayed set in the commands a failed
+// test's reason names (models.ScopeGateReq.SetFlags), and whether that set
+// is Keploy Cloud's recordings (models.ScopeGateReq.CloudSet). Made again on a
+// restarted agent, like the scope gate. Any answer but 200 is a failure: a
+// replay that cannot skip what CI skips refuses.
+func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded, recordedNeeds := maps.Clone(skip), maps.Clone(needs)
-			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded, recordedNeeds) })
+			recorded, recordedNeeds, recordedFlags := maps.Clone(skip), maps.Clone(needs), slices.Clone(setFlags)
+			a.session().record(stepScopeGate, func(c context.Context) error {
+				return a.PushScopeSkips(c, recorded, recordedNeeds, recordedFlags, cloudSet)
+			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Needs: needs})
+	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Needs: needs, SetFlags: setFlags, CloudSet: cloudSet})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
 	}

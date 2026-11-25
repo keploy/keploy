@@ -163,8 +163,13 @@ type exactView struct {
 	// declared session call names (models.Mock.DeclaredSessionCall),
 	// recorded outside every test, are shown too (sharesRest). A pool view
 	// shows none of them so, and carries it for its ident (sharedIdent).
-	// nil otherwise.
+	// Either view tells the declared ones to a stateful walk
+	// (sequenceViewOf: integrations.SequenceView.Declared). nil otherwise.
 	declared *poolSlice
+	// sourcesReplaced names, on a test view, the recordings the open test's
+	// derived mocks replace in it (models.ReplacedBy): the view never shows
+	// them, wherever they are staged, and every other view does.
+	sourcesReplaced map[string]struct{}
 	// worker is the set's worker-scope mocks the run has reached the place
 	// of, by name, as ServeExactWorker last said when the view was
 	// installed: shown whether a test is open or not.
@@ -1090,7 +1095,7 @@ func (v *exactView) spendsBetween(mk *models.Mock, windowed bool) bool {
 func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 
 // ExactServing reports whether the manager serves each test exactly its own
-// mocks (KEPLOY_PROVEN): every read shows one view, which changes as a
+// mocks (exact view armed): every read shows one view, which changes as a
 // test begins and ends, and a consume the view refuses returns false. A
 // parser that keeps an index across reads (Postgres v3's tier engines) reads
 // it at each dispatch: exact serving can begin after a connection opened.
@@ -1765,7 +1770,12 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	if m.exact.beforeInstall != nil {
 		m.exact.beforeInstall()
 	}
-	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned)+len(cands))}
+	// A derived mock of test's own replaces in it the recording it was
+	// derived from: test is served the derived answer, never the source,
+	// whether the source is staged for every test or shared with test.
+	replaced := models.ReplacedBy(owned)
+	owned, cands = models.WithoutReplaced(owned, replaced), models.WithoutReplaced(cands, replaced)
+	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned)+len(cands)), sourcesReplaced: replaced}
 	if w, ok := m.testWindows.Load().Of(test); ok {
 		v.winStart, v.winEnd = w.Start, w.End
 	}
@@ -2492,7 +2502,8 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	v.staging = v.test == "" && m.exact.staging.Load()
 	// Under the background rules the view orders its worker scope as the
 	// agent placed it, and shows the pool in a test (exact_background.go).
-	if bg := m.exact.bg.Load(); bg != nil {
+	// servedBackground decides whether the view serves them.
+	if bg, _ := m.servedBackground(v); bg != nil {
 		v.bg = bg
 		if w != nil {
 			v.workerOrder = w.order
@@ -2506,7 +2517,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	r.boundary("a view was installed")
 	v.round = r.gen
 	v.installed = integrations.RoundAt{Epoch: m.stagingEpoch.Load(), Gen: r.gen, Bounds: r.bounds}
-	m.exact.shared.of(v, w)
+	m.exact.shared.of(v, w, m.background.Load().at(v.installed.Epoch))
 	if v.test != "" {
 		r.bindLocked(v)
 	}
@@ -3192,7 +3203,7 @@ func (v *exactView) showsTo(mk *models.Mock, windowed bool) bool {
 	if mk == nil {
 		return false
 	}
-	return !v.spentIn(mk.Name) && !v.spentOutsideIn(mk.Name, windowed) && v.showsStatic(mk)
+	return !v.spentIn(mk.Name) && !v.spentOutsideIn(mk.Name, windowed) && v.showsStaticTo(mk, windowed)
 }
 
 // inBackgroundPool reports whether mk, consumed in an open test, is one of
@@ -3953,6 +3964,9 @@ func (m *MockManager) consumeAt(mk *models.Mock, evicts bool, g *roundGuard, tie
 	if m.exactView() != nil {
 		return m.exactConsumeAt(mk, evicts, g, tier, observe) != exactRefused
 	}
+	if handled, ok := m.consumeUnsetBackground(mk, evicts, g, tier, observe); handled {
+		return ok
+	}
 	if g.checks() {
 		g.refuse("exact serving is off")
 		return false
@@ -4289,6 +4303,13 @@ func (m *MockManager) consumeValueAt(mock models.Mock, evicts bool, g *roundGuar
 		}
 		return m.exactConsumeAt(&mk, evicts, g, func() bool { return tier(mk) }, tell) != exactRefused
 	}
+	var tell func()
+	if observe {
+		tell = func() { m.observeServedCopy(mock, g.flight()) }
+	}
+	if handled, ok := m.consumeUnsetBackground(&mock, evicts, g, func() bool { return tier(mock) }, tell); handled {
+		return ok
+	}
 	if g.checks() {
 		g.refuse("exact serving is off")
 		return false
@@ -4456,12 +4477,22 @@ func (m *MockManager) SequenceView() (integrations.SequenceView, bool) {
 // the test windows wherever its calls land in them: the worker scope belongs
 // to no test. The calls between tests walk their own cursor (the pool
 // view's), so a window's answers never depend on how many calls landed
-// between tests.
+// between tests. In a view that may serve declared session calls it tells
+// them too (Declared: declaredInPool), with every recording the view offers
+// (Offers: those it holds, and those it shows), so a declared call's
+// sequence is walked over what the view offers alone: a recording it never
+// offers (another test's; another pool slice's, but in a test under the
+// background rules, which offers it the whole pool) never fixes what the
+// declaration serves.
 func (m *MockManager) sequenceViewOf(v *exactView) integrations.SequenceView {
 	sv := integrations.SequenceView{Cursor: viewCursor{m: m, v: v}, Test: v.test, Start: v.winStart, End: v.winEnd}
 	if v.test != "" && len(v.worker) > 0 {
 		sv.Worker = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.isWorker(mk.Name) }
 		sv.Between = windowsCursor{m: m}
+	}
+	if v.declared != nil && len(v.declared.names) > 0 {
+		sv.Declared = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.declaredInPool(mk) }
+		sv.Offers = func(mk *models.Mock) bool { return mk != nil && (v.holds(mk.Name) || v.showsStatic(mk)) }
 	}
 	return sv
 }

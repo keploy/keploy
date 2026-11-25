@@ -20,25 +20,52 @@ import (
 // stored generation of every kind it touches (setMocksWithWindowLocked), the
 // SharedGen's other half: the ident leaves the epoch out.
 //
+// startup is the background install in force in the view's staging epoch
+// (backgroundInstall.at): its plain startup: recordings are no part of a
+// test's view (exactView.startupOwned).
+//
 // own is what the view leaves out of its shared part for being its own
 // (ownShared): two views that own different recordings of the pool or the
-// worker scope show different shared parts.
+// worker scope show different shared parts. replaced is what the view leaves
+// out because its own derived mocks replace those sources (replacedShared).
 type sharedIdent struct {
 	worker   *reachedWorker
 	bg       *backgroundState
+	startup  *backgroundInstall
 	declared *poolSlice
 	kept     *keptLoad
 	own      string
+	replaced string
 }
 
 // sharedIdentOf is v's ident now; w is the reached worker scope it was
-// installed with.
-func sharedIdentOf(v *exactView, w *reachedWorker) sharedIdent {
-	id := sharedIdent{worker: w, bg: v.bg, declared: v.declared, own: v.ownShared()}
+// installed with, bgIn the background install in force in its staging epoch.
+func sharedIdentOf(v *exactView, w *reachedWorker, bgIn *backgroundInstall) sharedIdent {
+	id := sharedIdent{worker: w, bg: v.bg, startup: bgIn, declared: v.declared, own: v.ownShared(), replaced: v.replacedShared()}
 	if v.kept != nil {
 		id.kept = v.kept.cur.Load()
 	}
 	return id
+}
+
+// replacedShared is, sorted and each ended by a NUL, the names of recordings
+// the open test's derived mocks replace in its view (exactView.sourcesReplaced).
+// "" when there are none.
+func (v *exactView) replacedShared() string {
+	if len(v.sourcesReplaced) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(v.sourcesReplaced))
+	for n := range v.sourcesReplaced {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, n := range names {
+		b.WriteString(n)
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 // ownShared is, sorted and each ended by a NUL, the names of v's own
@@ -77,9 +104,10 @@ type sharedViews struct {
 }
 
 // of sets v's shared number and ident (exactView.shared), w being the reached
-// worker scope v is installed with.
-func (s *sharedViews) of(v *exactView, w *reachedWorker) {
-	id := sharedIdentOf(v, w)
+// worker scope v is installed with, bgIn the background install in force in
+// its staging epoch.
+func (s *sharedViews) of(v *exactView, w *reachedWorker, bgIn *backgroundInstall) {
+	id := sharedIdentOf(v, w, bgIn)
 	if s.lastID == 0 || s.last != id {
 		s.seq++
 		s.last, s.lastID = id, s.seq
@@ -159,10 +187,22 @@ func (m *MockManager) OwnedUnanswered() ([]*models.Mock, bool) {
 // caller reads it and never changes it. False while no test is open.
 func (m *MockManager) OwnedRecordings() (uint64, []*models.Mock, bool) {
 	v := m.exactView()
-	if v == nil || v.test == "" {
+	if v != nil {
+		if v.test == "" {
+			return 0, nil, false
+		}
+		return v.gen, v.owned, true
+	}
+	if _, exact := m.servedBackground(nil); !exact {
 		return 0, nil, false
 	}
-	return v.gen, v.owned, true
+	m.scopeOwnedMu.Lock()
+	gen, owned := m.scopeOwnedGen, m.scopeOwned
+	m.scopeOwnedMu.Unlock()
+	if len(owned) == 0 {
+		return 0, nil, false
+	}
+	return gen, owned, true
 }
 
 // OwnedUnansweredAt is the positions of at, in OwnedRecordings of the view
