@@ -206,15 +206,18 @@ func TestTheStagingCallNamesThePlainStartupMocksUnderTheSwitch(t *testing.T) {
 	}
 	r := newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}, mapping: mapping})
 	t.Setenv(provenswitch.Env, "")
-	if _, got := r.backgroundMocksOf(ctx, "s"); got != nil {
-		t.Fatalf("switch off: named plain startup mocks %v", got)
+	if _, got, derive := r.backgroundMocksOf(ctx, "s"); got != nil || derive {
+		t.Fatalf("switch off with explicit mappings.yaml: startup=%v derive=%v; want nil, false", got, derive)
 	}
 	if got := r.recordedSetShape(ctx, "s", nil).startup; got != nil {
 		t.Fatalf("switch off: the staging call's shape names plain startup mocks %v", got)
 	}
 	t.Setenv(provenswitch.Env, "1")
 	r.exact = &exactPlan{worker: []models.MockEntry{{Name: "poll-1"}, {Name: "served-1"}}}
-	all, got := r.backgroundMocksOf(ctx, "s")
+	all, got, derive := r.backgroundMocksOf(ctx, "s")
+	if derive {
+		t.Fatalf("switch on with exact plan: derive=true; want false")
+	}
 	if want := []string{"boot-1", "boot-2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch on: plain startup mocks %v, want %v", got, want)
 	}
@@ -225,6 +228,28 @@ func TestTheStagingCallNamesThePlainStartupMocksUnderTheSwitch(t *testing.T) {
 	if got, want := shape.startup, []string{"boot-1", "boot-2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch on: the staging call's shape names %v, want %v", got, want)
 	}
+
+	// DeriveBackgroundFromWindows is set ONLY when GetMapping finds no
+	// mappings.yaml (nil, nil) and no exact plan exists; an explicit empty
+	// mappings.yaml or an exact plan keeps derive=false.
+	t.Run("deriveBackgroundFromWindows gate", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		rNoFile := newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}, mapping: nil})
+		if all, _, derive := rNoFile.backgroundMocksOf(ctx, "s"); len(all) != 0 || !derive {
+			t.Fatalf("no mappings.yaml, no exact plan: all=%v derive=%v; want nil, true", all, derive)
+		}
+		if !rNoFile.recordedSetShape(ctx, "s", nil).deriveBackground {
+			t.Fatalf("no mappings.yaml: recordedSetShape.deriveBackground=false; want true")
+		}
+		rEmptyFile := newReplayerWithMappingDB(&shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{}})
+		if _, _, derive := rEmptyFile.backgroundMocksOf(ctx, "s"); derive {
+			t.Fatalf("explicit empty mappings.yaml: derive=true; want false")
+		}
+		rNoFile.exact = &exactPlan{}
+		if _, _, derive := rNoFile.backgroundMocksOf(ctx, "s"); derive {
+			t.Fatalf("exact plan present with no mappings.yaml: derive=true; want false")
+		}
+	})
 
 	// The staging call carries them to the agent.
 	f := &rearmInstr{}

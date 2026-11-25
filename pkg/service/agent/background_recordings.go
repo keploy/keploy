@@ -25,13 +25,94 @@ func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, residen
 	if !ok {
 		return
 	}
-	recs, err := backgroundRecordingsOf(params.BackgroundMocks, params.StartupMocks, resident, disk)
+	var recs []models.BackgroundRecording
+	var err error
+	if len(params.BackgroundMocks) > 0 {
+		recs, err = backgroundRecordingsOf(params.BackgroundMocks, params.StartupMocks, resident, disk)
+	} else if params.DeriveBackgroundFromWindows && len(params.RecordedWindows) > 0 && !params.ExactStaging {
+		recs, err = derivedBackgroundRecordingsOf(params.RecordedWindows, resident, disk)
+	}
 	if err != nil {
-		a.logger.Warn("could not read the test set's background recordings (mappings.yaml worker: and startup:); every call that misses stays its test's miss",
-			zap.Int("background", len(params.BackgroundMocks)), zap.Error(err))
+		a.logger.Warn("could not read the test set's background recordings; every call that misses stays its test's miss",
+			zap.Int("background", len(params.BackgroundMocks)), zap.Int("windows", len(params.RecordedWindows)), zap.Error(err))
 		recs = nil
 	}
 	seeder.SeedBackgroundRecordings(recs)
+}
+
+// derivedBackgroundRecordingsOf derives outside-window background recordings
+// from windows via models.DeriveWindowMappings in a single pass over resident
+// and disk mocks, resolving each derived Worker recording's recorded span
+// (From) from the same pass. Used only when the caller explicitly opted in via
+// MockFilterParams.DeriveBackgroundFromWindows (no mappings.yaml exists and no
+// exact plan was built). Derived recordings are returned with Startup=false
+// because DeriveWindowMappings places all outside-window recordings in Worker.
+func derivedBackgroundRecordingsOf(windows []models.TestWindow, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
+	if len(windows) == 0 {
+		return nil, nil
+	}
+	var wm []models.WindowedMock
+	var calls []bgCallTime
+	byName := map[string]*models.Mock{}
+	seenID := map[string]bool{}
+	see := func(mk *models.Mock) bool {
+		if mk == nil {
+			return true
+		}
+		id := learn.MockID(mk)
+		if seenID[id] {
+			return true
+		}
+		seenID[id] = true
+		if mk.Name != "" {
+			if _, dup := byName[mk.Name]; !dup {
+				byName[mk.Name] = mk
+				wm = append(wm, models.NewWindowedMock(mk))
+			}
+		}
+		if !mk.IsProtocolPhase() && !mk.Spec.ReqTimestampMock.IsZero() {
+			calls = append(calls, bgCallTime{req: mk.Spec.ReqTimestampMock, res: mk.Spec.ResTimestampMock})
+		}
+		return true
+	}
+	for _, list := range resident {
+		for _, mk := range list {
+			see(mk)
+		}
+	}
+	if disk != nil {
+		if err := disk.RangeRecordedBefore(time.Unix(0, math.MaxInt64), see); err != nil {
+			return nil, err
+		}
+	}
+	if len(wm) == 0 {
+		return nil, nil
+	}
+	derived := models.DeriveWindowMappings(windows, wm)
+	if len(derived.Worker) == 0 {
+		return nil, nil
+	}
+	recs := make([]models.BackgroundRecording, 0, len(derived.Worker))
+	added := make(map[string]bool, len(derived.Worker))
+	for _, e := range derived.Worker {
+		if e.Name == "" || added[e.Name] {
+			continue
+		}
+		mk, ok := byName[e.Name]
+		if !ok {
+			continue
+		}
+		added[e.Name] = true
+		recs = append(recs, models.BackgroundRecording{Mock: mk})
+	}
+	if len(recs) == 0 {
+		return nil, nil
+	}
+	slices.SortFunc(calls, func(a, b bgCallTime) int { return a.req.Compare(b.req) })
+	for i := range recs {
+		recs[i].From = previousCallAt(calls, recs[i].Mock)
+	}
+	return recs, nil
 }
 
 // bgCallTime is what bounds a background recording's recorded span, of one

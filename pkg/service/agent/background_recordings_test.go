@@ -152,3 +152,99 @@ func TestABackgroundRecordingsPreviousCallIsReadAcrossTheLists(t *testing.T) {
 		t.Fatalf("spans' starts %v; want %v", got, want)
 	}
 }
+
+// When a non-exact staging explicitly opts in via DeriveBackgroundFromWindows
+// alongside RecordedWindows and empty BackgroundMocks (such as round-1
+// DaemonSet auto-replay before mappings.yaml exists), mocks recorded outside
+// every test window are derived as background recordings in a single pass,
+// while mocks inside a test window stay that test's own. Without the opt-in
+// flag, with explicit BackgroundMocks, or under ExactStaging, no derivation
+// overrides the caller's list; disk errors fall back to seeding none.
+func TestStagingWithoutBackgroundMocksDerivesOutsideWindowBackgroundRecordings(t *testing.T) {
+	pollBetween := bgMock("poll-between", models.HTTP2, 6, 6)
+	pollBetween.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+	explicitBg := bgMock("explicit-bg", models.HTTP2, 8, 8)
+	explicitBg.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+	inTest1 := bgMock("in-test-1", models.HTTP2, 2, 2)
+	inTest1.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+	inTest2 := bgMock("in-test-2", models.HTTP2, 11, 11)
+	inTest2.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+
+	p := &backgroundProxy{}
+	a := &Agent{logger: zap.NewNop(), Proxy: p}
+	a.clientMocks.Store(uint64(0), &ClientMockStorage{
+		filtered: []*models.Mock{inTest1, pollBetween, explicitBg, inTest2},
+	})
+
+	baseStaging := models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             time.Now(),
+		FirstRecordedTestStart: bgT0.Add(1 * time.Second),
+		RecordedWindows: []models.TestWindow{
+			{TestCase: "tc-1", Start: bgT0.Add(1 * time.Second), End: bgT0.Add(4 * time.Second)},
+			{TestCase: "tc-2", Start: bgT0.Add(10 * time.Second), End: bgT0.Add(13 * time.Second)},
+		},
+	}
+
+	// 1. Without DeriveBackgroundFromWindows (e.g. explicit mappings.yaml with
+	// empty worker:/startup:), empty BackgroundMocks must seed NONE.
+	if err := a.UpdateMockParams(context.Background(), baseStaging); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.bgSeen) != 1 || len(p.bgSeen[0]) != 0 {
+		t.Fatalf("without DeriveBackgroundFromWindows must seed none; got %+v", p.bgSeen)
+	}
+
+	// 2. With DeriveBackgroundFromWindows=true, outside-window recordings are
+	// derived as background recordings while in-window mocks stay per-test.
+	derivedStaging := baseStaging
+	derivedStaging.DeriveBackgroundFromWindows = true
+	if err := a.UpdateMockParams(context.Background(), derivedStaging); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.bgSeen) != 2 {
+		t.Fatalf("seeded %d times, want 2", len(p.bgSeen))
+	}
+	if got, want := bgFroms(p.bgSeen[1]), map[string]int{"poll-between": 2, "explicit-bg": 6}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("derived background recordings %v; want %v", got, want)
+	}
+
+	// 3. Explicit BackgroundMocks together with RecordedWindows + flag: explicit
+	// list wins and must not be replaced by derivation.
+	explicitStaging := derivedStaging
+	explicitStaging.BackgroundMocks = []string{"explicit-bg"}
+	if err := a.UpdateMockParams(context.Background(), explicitStaging); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.bgSeen) != 3 {
+		t.Fatalf("seeded %d times, want 3", len(p.bgSeen))
+	}
+	if got, want := bgFroms(p.bgSeen[2]), map[string]int{"explicit-bg": 6}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit BackgroundMocks with windows seeded %v; want %v", got, want)
+	}
+
+	// 4. Under ExactStaging, mappings.yaml is authoritative; empty BackgroundMocks
+	// must NOT derive even if DeriveBackgroundFromWindows is set.
+	exactStaging := derivedStaging
+	exactStaging.ExactStaging = true
+	if err := a.UpdateMockParams(context.Background(), exactStaging); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.bgSeen) != 4 || len(p.bgSeen[3]) != 0 {
+		t.Fatalf("ExactStaging with empty BackgroundMocks must seed none; got %+v", p.bgSeen)
+	}
+
+	// 5. Disk read error during derivation logs and falls back to seeding none.
+	closedDisk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closedDisk.Close()
+	if recs, err := derivedBackgroundRecordingsOf(derivedStaging.RecordedWindows, [][]*models.Mock{{inTest1, pollBetween}}, closedDisk); err == nil || recs != nil {
+		t.Fatalf("derivedBackgroundRecordingsOf on closed disk = (%v, %v); want (nil, error)", recs, err)
+	}
+	a.seedBackgroundRecordings(derivedStaging, [][]*models.Mock{{inTest1, pollBetween}}, closedDisk)
+	if len(p.bgSeen) != 5 || p.bgSeen[4] != nil {
+		t.Fatalf("disk error during derivation must fall back to nil; got %+v", p.bgSeen[4])
+	}
+}
