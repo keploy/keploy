@@ -28,7 +28,7 @@ func TestNativeAgentArgs_NameTheCLIsLog(t *testing.T) {
 	flag := "--" + keployLog.ClientLogFileFlag
 
 	utils.LogFile = nil
-	if args := a.nativeAgentArgs(opts); slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, flag) }) {
+	if args := mustNativeAgentArgs(t, a, opts); slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, flag) }) {
 		t.Errorf("a run that keeps no log names one to its agent: %v", args)
 	}
 
@@ -43,7 +43,7 @@ func TestNativeAgentArgs_NameTheCLIsLog(t *testing.T) {
 	t.Cleanup(func() { _ = f.Close() })
 	utils.LogFile = f
 	want := flag + "=" + filepath.Join(dir, "keploy-logs-1.txt")
-	if args := a.nativeAgentArgs(opts); !slices.Contains(args, want) {
+	if args := mustNativeAgentArgs(t, a, opts); !slices.Contains(args, want) {
 		t.Errorf("the native agent argv does not name this run's log as %q: %v", want, args)
 	}
 }

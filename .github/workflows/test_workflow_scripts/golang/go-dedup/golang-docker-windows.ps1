@@ -661,21 +661,24 @@ if ($REC_PID -and $REC_PID -ne 0) {
 # Stop-Job $recJob
 # Remove-Job $recJob
 
-# The agent's control plane must be guarded by the token keploy hands it. That
-# handoff fails OPEN — an agent that got no token serves everything, and the
-# recording and both replays below still pass — so a green run proves nothing
-# about it unless this is checked. Both sides say so when it breaks: the agent
-# ("running WITHOUT authentication", streamed through compose into keploy's
-# output) and keploy's own probe ("NOT enforcing control-plane authentication").
+# The agent's control plane must be guarded by the token keploy hands it. An
+# agent of this release that got no token refuses to start; an older agent
+# image, or a regression, would serve everything while the recording and both
+# replays below still passed — so a green run proves nothing about it unless
+# this is checked. Both sides say so when it breaks: the agent ("running
+# WITHOUT authentication" from an agent of a release before agents refused to
+# start without a token, "no control-plane token" from one since, streamed
+# through compose into keploy's output) and keploy's own probe ("NOT
+# enforcing control-plane authentication").
 # A targeted match rather than a blanket ERROR grep, which would trip on the
 # benign lifecycle lines docker writes to stderr; case-sensitive, like the bash
 # lanes' grep, so it matches exactly those two lines.
 function Assert-AgentGuarded {
     param([string[]]$Paths)
-    $hits = Select-String -Path $Paths -CaseSensitive -Pattern 'running WITHOUT authentication','NOT enforcing control-plane authentication' -ErrorAction SilentlyContinue
+    $hits = Select-String -Path $Paths -CaseSensitive -Pattern 'running WITHOUT authentication','NOT enforcing control-plane authentication','no control-plane token' -ErrorAction SilentlyContinue
     if ($hits) {
         $hits | ForEach-Object { Write-Host $_.Line }
-        Write-Error "The keploy agent ran without its control-plane token; the docker compose token handoff is broken on windows."
+        Write-Error "The keploy agent had no control-plane token (it came up without one, or refused to start); the docker compose token handoff is broken on windows."
         exit 1
     }
 }

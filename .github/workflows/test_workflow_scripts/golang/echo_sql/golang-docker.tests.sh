@@ -141,7 +141,15 @@ run_case record-noauth-line FAKE_RECORD_RC_2=2 \
     FAKE_RECORD_SAYS_2="agent running WITHOUT authentication"
 expect record-noauth-line 1 \
     "keploy record (iteration 2) exited 2" \
-    "The agent came up with no control-plane token; the compose token handoff is broken." \
+    "The agent had no control-plane token (it came up without one, or refused to start); the compose token handoff is broken." \
+    "fake keploy record 2 log" \
+    -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
+
+run_case record-notoken-line FAKE_RECORD_RC_2=2 \
+    FAKE_RECORD_SAYS_2="refusing to start the agent: no control-plane token: start the agent through keploy, or set KEPLOY_AGENT_TOKEN"
+expect record-notoken-line 1 \
+    "keploy record (iteration 2) exited 2" \
+    "The agent had no control-plane token (it came up without one, or refused to start); the compose token handoff is broken." \
     "fake keploy record 2 log" \
     -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
 

@@ -62,10 +62,25 @@ const ProbePath = "/__keploy_auth_probe"
 // environment would adopt it as its own rather than present it.
 const MockAgentTokenEnv = "KEPLOY_MOCK_AGENT_TOKEN"
 
+// InsecureNoAuthEnv is the explicit opt-out for an agent started with no
+// control-plane token at all: set to exactly "true", that agent serves its API
+// to any caller instead of refusing to start, and says so at WARN.
+//
+// No keploy launcher sets it. The CLI hands every agent it starts a token, and
+// k8s-proxy gives every agent it starts its own; this is for an agent started
+// by hand, or by something older that hands it none, whose operator has
+// decided that whatever can reach its port may use it. A token, when there is
+// one, is enforced whatever this says.
+const InsecureNoAuthEnv = "KEPLOY_AGENT_INSECURE_NO_AUTH"
+
+// randRead fills a new token's bytes: crypto/rand.Read, a variable so that a
+// test can make it fail.
+var randRead = rand.Read
+
 // New returns a fresh 256-bit control-plane token.
 func New() (string, error) {
 	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := randRead(b); err != nil {
 		return "", fmt.Errorf("generating agent control-plane token: %w", err)
 	}
 	return hex.EncodeToString(b), nil
@@ -74,7 +89,9 @@ func New() (string, error) {
 var (
 	sessionMu sync.Mutex
 	session   string
-	resolved  bool
+	// sessionErr is why session is empty when it could not be minted.
+	sessionErr error
+	resolved   bool
 )
 
 // Session is the token this process presents to an agent and passes down to
@@ -88,15 +105,15 @@ var (
 // depended on that ordering would surface as an auth failure at runtime in
 // whichever mode happened to read it first.
 //
-// A generation failure is not fatal. The agent then starts without a token and
-// behaves exactly as it did before authentication existed, saying so loudly at
-// startup, rather than leaving the user unable to record at all.
+// A generation failure leaves it empty, and Require then says why: every
+// launcher asks Require for the token it hands its agent, and refuses to start
+// an agent without one.
 func Session() string {
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
 
 	if !resolved {
-		session = resolveSession(os.Getenv)
+		session, sessionErr = resolveSession(os.Getenv)
 		resolved = true
 	}
 	return session
@@ -104,8 +121,9 @@ func Session() string {
 
 // Adopt fixes the session token to the one this process was given rather than
 // one it minted. The agent calls it once it knows which token it is enforcing —
-// the value from its token file, or the empty string when it was started
-// without one — so that a later Session() in the agent returns that, instead of
+// the value from its token file or its environment, or the empty string when
+// it has none (it then refuses to start, unless its operator set the explicit
+// opt-out) — so that a later Session() in the agent returns that, instead of
 // a freshly minted 256-bit string that would look entirely valid and match
 // nothing a client sends.
 func Adopt(tok string) {
@@ -122,26 +140,44 @@ func Adopt(tok string) {
 	resolved = true
 }
 
-// resolveSession holds the logic Session memoises, with the environment
-// injected so it can be exercised without touching the process-wide memo.
-func resolveSession(getenv func(string) string) string {
-	if inherited := getenv(Env); inherited != "" {
-		return inherited
+// Require returns the session token for an agent this process starts, or an
+// error when there is none: a launcher hands its agent this token, and an
+// agent started without one refuses to start (or, with the explicit opt-out,
+// serves its API to any caller), so a launcher with no token fails its start
+// rather than start such an agent.
+func Require() (string, error) {
+	tok := Session()
+	if tok != "" {
+		return tok, nil
 	}
-	tok, err := New()
+	sessionMu.Lock()
+	err := sessionErr
+	sessionMu.Unlock()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("no control-plane token to hand the keploy agent: %w", err)
 	}
-	return tok
+	return "", errors.New("no control-plane token to hand the keploy agent")
+}
+
+// resolveSession holds the logic Session memoises, with the environment
+// injected so it can be exercised without touching the process-wide memo. A
+// token that cannot be minted is an error, never a quiet "".
+func resolveSession(getenv func(string) string) (string, error) {
+	if inherited := strings.TrimSpace(getenv(Env)); inherited != "" {
+		return inherited, nil
+	}
+	return New()
 }
 
 // FromEnv returns the token the process that started this agent passed down,
-// or "" when there wasn't one.
+// or "" when there wasn't one. Surrounding whitespace is not part of it (a
+// Secret's value or an env file can carry a trailing newline, which no HTTP
+// client can present), and a value that is only whitespace is no token.
 //
 // The agent must not fall back to minting its own: a token no client knows
 // would reject every request rather than protect anything. An agent started
-// without a token serves its control plane unauthenticated, and says so.
-func FromEnv() string { return os.Getenv(Env) }
+// without a token refuses to start (routes.Guard).
+func FromEnv() string { return strings.TrimSpace(os.Getenv(Env)) }
 
 // fileMu guards the session's token file and the private directory it lives
 // in.
@@ -162,10 +198,9 @@ const fileName = "agent-token"
 // The file, not the environment, is what carries the token to a natively
 // spawned agent. On Linux the CLI usually starts the agent as `sudo keploy
 // agent`, and sudo's default env_reset drops unknown variables, so an
-// environment-only handoff arrives empty on the single most common path — the
-// agent would fall back to serving unauthenticated while the client dutifully
-// sent a token nothing checked. The file survives sudo because only its path
-// travels, in argv, and a path is not a secret.
+// environment-only handoff arrives empty on the single most common path, and
+// the agent would refuse to start for want of a token. The file survives sudo
+// because only its path travels, in argv, and a path is not a secret.
 //
 // It is also why the file never sits directly in the temp directory. The path
 // is in the agent's argv for every local user to read, and the agent unlinks
@@ -187,9 +222,9 @@ func WriteFile() (string, error) {
 	fileMu.Lock()
 	defer fileMu.Unlock()
 
-	tok := Session()
-	if tok == "" {
-		return "", fmt.Errorf("no agent control-plane token to write")
+	tok, err := Require()
+	if err != nil {
+		return "", err
 	}
 	if !ownDir() {
 		d, err := os.MkdirTemp("", "keploy-agent-*")
@@ -288,10 +323,11 @@ var (
 // or through a docker or compose client given the token by name.
 //
 // It is what the client's check that its agent enforces the token keys on
-// (pkg.verifyControlPlaneGuarded). Recorded for the launch, not for a handoff
-// that went through: a token file that could not be written, or a launcher
-// that stopped passing one, leaves an agent this process started serving open,
-// and that is exactly what the check exists to catch. What it must not check
+// (pkg.verifyControlPlaneGuarded). Recorded once the launch has a token to hand
+// over (a launcher with none starts no agent), and kept for whatever happens
+// to the handoff after: an agent that came up not enforcing the token this
+// process holds (an older agent image, a launcher that stopped passing it) is
+// exactly what the check exists to catch. What it must not check
 // is an agent this process never launched — a Kubernetes sidecar that
 // k8s-proxy injected (with a token of k8s-proxy's own, or none), an agent
 // image that predates the token. This process handed that agent nothing, and

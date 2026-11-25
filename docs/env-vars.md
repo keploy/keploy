@@ -118,6 +118,34 @@ Three things worth knowing about those values:
 Nothing else reads these variables, and `keploy record` behaves exactly as
 before when none is set.
 
+## The agent
+
+### `KEPLOY_AGENT_TOKEN` — the agent's control-plane token
+
+The token the keploy agent requires on every call to its control-plane API
+but `/agent/health`, and the one a keploy process presents to the agent it
+drives. Keploy mints one per run and hands it to every agent it starts
+(natively through a private token file, to the `docker run` alias and the
+compose agent service through this variable); k8s-proxy gives each agent it
+starts its own, from a Secret. Set it yourself only to run `keploy agent`
+(or the agent image) by hand: set it to a random value, for example
+`openssl rand -hex 32`, and give the keploy that drives the agent the same
+value.
+
+An agent started without a token refuses to start, exits non-zero, and says
+what to do, unless `KEPLOY_AGENT_INSECURE_NO_AUTH` is set to `true` (DaemonSet
+node agents started with `KEPLOY_DAEMONSET_ENABLED=true` bind no control-plane
+API and start without one).
+
+### `KEPLOY_AGENT_INSECURE_NO_AUTH` — `true`
+
+The explicit opt-out: an agent started with no token at all serves its
+control-plane API to any caller that can reach its port, and says so at WARN.
+Only the exact value `true` counts; any other value is refused, naming it. It
+never overrides a token the agent was handed (the agent says it is ignored),
+and it does not cover a token file the agent cannot read. No keploy launcher
+sets it. Default: unset.
+
 ## Profiling / diagnostics
 
 ### `PPROF_PORT` — positive integer (keploy OSS)

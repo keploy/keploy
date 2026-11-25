@@ -2890,7 +2890,7 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 // nativeAgentArgs builds the `keploy agent` argv for a natively spawned agent,
 // the control-plane token file included, and records the launch
 // (token.RecordLaunch) so the client holds that agent to the token.
-func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
+func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) ([]string, error) {
 	// Build args (binary is passed separately to utils)
 	args := []string{
 		"agent",
@@ -3014,11 +3014,22 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
-	// Recorded apart from the handoff, so an agent that did not get its token
-	// is still one this process launched, and still checked for it.
+	args, err := appendTokenFileArg(args)
+	if err != nil {
+		return nil, err
+	}
 	token.RecordLaunch(opts.AgentURI)
-	return appendTokenFileArg(a.logger, args)
+	return args, nil
 }
+
+// nativeAgentBinary and nativeAgentElevates are what startNativeAgent starts
+// the agent as: this keploy binary, through sudo where the platform needs
+// it. Variables so that a test of a start that must fail before either is
+// used can make a regression harmless.
+var (
+	nativeAgentBinary   = utils.GetCurrentBinaryPath
+	nativeAgentElevates = agentUtils.AgentNeedsElevation
+)
 
 // startNativeAgent starts the keploy agent as a native process. The process's
 // exit is sent on exited.
@@ -3030,13 +3041,17 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		return fmt.Errorf("failed to get errorgroup from the context")
 	}
 
-	keployBin, err := utils.GetCurrentBinaryPath()
+	keployBin, err := nativeAgentBinary()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get current keploy binary path")
 		return err
 	}
 
-	args, progress, removeProgress := a.nativeAgentLaunch(opts)
+	args, progress, removeProgress, err := a.nativeAgentLaunch(opts)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to start the keploy agent")
+		return err
+	}
 
 	// The PTY and the cached-credentials probe both exist for one reason: sudo
 	// may prompt for a password. On a platform where the agent is never
@@ -3044,7 +3059,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// pure cost — startNativeAgentWithPTY puts the user's real terminal into
 	// raw mode for the whole run and swallows their keystrokes into a pty
 	// nothing reads.
-	elevates := agentUtils.AgentNeedsElevation(runtime.GOOS)
+	elevates := nativeAgentElevates(runtime.GOOS)
 
 	sudoCached := false
 	if elevates {
@@ -3138,13 +3153,16 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 // (nativeAgentArgs), telling it where to report its teardown's progress once
 // it is stopped, which its stop reads (endAgent); and that path, with how to
 // remove it once the agent has exited.
-func (a *AgentClient) nativeAgentLaunch(opts models.SetupOptions) (args []string, progress string, removeProgress func()) {
-	args = a.nativeAgentArgs(opts)
+func (a *AgentClient) nativeAgentLaunch(opts models.SetupOptions) (args []string, progress string, removeProgress func(), err error) {
+	args, err = a.nativeAgentArgs(opts)
+	if err != nil {
+		return nil, "", func() {}, err
+	}
 	progress, removeProgress = teardownProgressPath(a.logger)
 	if progress != "" {
 		args = append(args, "--teardown-progress-file", progress)
 	}
-	return args, progress, removeProgress
+	return args, progress, removeProgress, nil
 }
 
 // teardownProgressPath returns where a native agent this client starts

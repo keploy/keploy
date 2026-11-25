@@ -30,7 +30,7 @@ func TestNativeAgentArgs_CarryTheProvenSwitch(t *testing.T) {
 	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_TEST}
 
 	t.Setenv(provenswitch.Env, "")
-	if args := a.nativeAgentArgs(opts); slices.Contains(args, flag) {
+	if args := mustNativeAgentArgs(t, a, opts); slices.Contains(args, flag) {
 		t.Fatalf("switch off, yet the native agent argv carries %s: %v", flag, args)
 	}
 
@@ -38,7 +38,7 @@ func TestNativeAgentArgs_CarryTheProvenSwitch(t *testing.T) {
 	// for its context (containerkey.AgentArgs).
 	t.Setenv("DOCKER_HOST", "unix:///run/test-docker.sock")
 	t.Setenv(provenswitch.Env, "1")
-	if args := a.nativeAgentArgs(opts); !slices.Contains(args, flag) {
+	if args := mustNativeAgentArgs(t, a, opts); !slices.Contains(args, flag) {
 		t.Fatalf("KEPLOY_PROVEN=1, yet the native agent argv lacks %s, so the agent's parsers run the old paths: %v", flag, args)
 	}
 }
@@ -54,11 +54,11 @@ func TestNativeAgentArgs_CarryTheDockerEndpointUnderTheSwitch(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///run/user/1000/docker.sock")
 
 	t.Setenv(provenswitch.Env, "")
-	if args := a.nativeAgentArgs(opts); slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, "--"+containerkey.AgentFlag) }) {
+	if args := mustNativeAgentArgs(t, a, opts); slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, "--"+containerkey.AgentFlag) }) {
 		t.Fatalf("switch off, yet the native agent argv carries the Docker endpoint: %v", args)
 	}
 	t.Setenv(provenswitch.Env, "1")
-	if args := a.nativeAgentArgs(opts); !slices.Contains(args, flag) {
+	if args := mustNativeAgentArgs(t, a, opts); !slices.Contains(args, flag) {
 		t.Fatalf("KEPLOY_PROVEN=1 and DOCKER_HOST set, yet the native agent argv lacks %s: %v", flag, args)
 	}
 }
@@ -434,11 +434,11 @@ func TestNativeAgentArgs_CarrySettleReads(t *testing.T) {
 	t.Cleanup(func() { _ = token.Cleanup() })
 	a := New(zap.NewNop(), nil, &config.Config{})
 	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_TEST}
-	if args := a.nativeAgentArgs(opts); slices.Contains(args, "--settle-reads") {
+	if args := mustNativeAgentArgs(t, a, opts); slices.Contains(args, "--settle-reads") {
 		t.Fatalf("a run that learns no noise, yet the native agent argv carries --settle-reads: %v", args)
 	}
 	opts.SettleReads = true
-	if args := a.nativeAgentArgs(opts); !slices.Contains(args, "--settle-reads") {
+	if args := mustNativeAgentArgs(t, a, opts); !slices.Contains(args, "--settle-reads") {
 		t.Fatalf("a run that learns noise, yet the native agent argv lacks --settle-reads: %v", args)
 	}
 }

@@ -31,7 +31,7 @@ func TestNativeAgentArgs_SayTheCLIsPidNamespace(t *testing.T) {
 	a := New(zap.NewNop(), nil, &config.Config{})
 	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
 		opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: mode}
-		args := a.nativeAgentArgs(opts)
+		args := mustNativeAgentArgs(t, a, opts)
 		i := slices.Index(args, "--client-pid")
 		if i < 0 || i+1 >= len(args) || args[i+1] != strconv.Itoa(os.Getpid()) {
 			t.Fatalf("%s: the native agent argv does not say this CLI's pid: %v", mode, args)

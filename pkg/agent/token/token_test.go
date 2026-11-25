@@ -2,6 +2,7 @@ package token
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,18 +30,69 @@ func TestNew_IsAFreshHexEncoded256BitSecret(t *testing.T) {
 func TestResolveSession_PrefersAnInheritedToken(t *testing.T) {
 	// The agent side of a spawn must adopt the launcher's token rather than
 	// mint its own: a token no client knows rejects every request.
-	got := resolveSession(func(k string) string {
+	got, err := resolveSession(func(k string) string {
 		require.Equal(t, Env, k)
 		return "inherited-token"
 	})
+	require.NoError(t, err)
 	require.Equal(t, "inherited-token", got)
 }
 
 func TestResolveSession_MintsWhenNothingWasInherited(t *testing.T) {
-	got := resolveSession(func(string) string { return "" })
+	got, err := resolveSession(func(string) string { return "" })
+	require.NoError(t, err)
 	raw, err := hex.DecodeString(got)
 	require.NoError(t, err)
 	require.Len(t, raw, 32)
+}
+
+// failRandRead makes minting a token fail for the rest of the test.
+func failRandRead(t *testing.T) {
+	t.Helper()
+	prev := randRead
+	randRead = func([]byte) (int, error) { return 0, errors.New("entropy source unavailable") }
+	t.Cleanup(func() { randRead = prev })
+}
+
+// A token that cannot be minted is an error, never an empty token that a
+// launcher would hand on as "no token".
+func TestResolveSession_AMintFailureIsAnError(t *testing.T) {
+	failRandRead(t)
+	got, err := resolveSession(func(string) string { return "" })
+	require.Error(t, err)
+	require.Empty(t, got)
+}
+
+func TestRequire_ReturnsTheSessionToken(t *testing.T) {
+	restoreSession(t)
+	resetSession(t)
+	t.Setenv(Env, "inherited-token")
+	got, err := Require()
+	require.NoError(t, err)
+	require.Equal(t, "inherited-token", got)
+	require.Equal(t, Session(), got)
+}
+
+// Every launcher asks Require for the token it hands its agent: when none can
+// be minted it gets an error naming why, and so does WriteFile, so no agent is
+// started without one.
+func TestRequire_FailsWhenNoTokenCanBeMinted(t *testing.T) {
+	restoreSession(t)
+	resetSession(t)
+	freshTokenDir(t)
+	t.Setenv(Env, "")
+	failRandRead(t)
+
+	got, err := Require()
+	require.Error(t, err)
+	require.Empty(t, got)
+	require.Contains(t, err.Error(), "no control-plane token to hand the keploy agent")
+	require.Contains(t, err.Error(), "entropy source unavailable")
+	require.Empty(t, Session())
+
+	path, err := WriteFile()
+	require.Error(t, err, "a token file was written with no token in it")
+	require.Empty(t, path)
 }
 
 func TestWriteFileReadFile_RoundTripsThroughAPrivateFile(t *testing.T) {
@@ -79,8 +131,8 @@ func TestWriteFile_IsNotReadableByOtherUsers(t *testing.T) {
 // read, and the agent unlinks the file once it has read it. When the file sat
 // directly in /tmp — sticky, but writable by everyone — anyone could create a
 // file at that name the moment it was gone, and the next agent this process
-// started was handed it: garbage, which left it serving unauthenticated, or a
-// token of the planter's choosing, which it then enforced.
+// started was handed it: garbage, which it could not use, or a token of the
+// planter's choosing, which it then enforced.
 func TestWriteFile_KeepsTheFileWhereOtherUsersCannotPlantOne(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permission bits are not the access control that applies on windows")
@@ -235,9 +287,9 @@ func TestReadFile_RejectsContentItCannotTrust(t *testing.T) {
 			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0600))
 
 			_, err := ReadFile(path)
-			// Returning "" with a nil error would start the agent
-			// unauthenticated while the client kept sending a token, so the
-			// mismatch has to surface as an error.
+			// Returning "" with a nil error would have the agent adopt
+			// no token and refuse every call (its own client's included)
+			// or fail to start, so the bad file must surface as an error.
 			require.Error(t, err)
 		})
 	}
@@ -312,10 +364,11 @@ func TestAdopt_StopsTheAgentFromMintingAPhantomToken(t *testing.T) {
 }
 
 func TestAdopt_EmptyTokenMeansNoTokenRatherThanMintOne(t *testing.T) {
-	// The agent started without a token serves unauthenticated and says so.
-	// If Adopt("") left the memo unresolved, the next Session() in that process
-	// would mint a token nothing knows — which reads as a working credential
-	// and matches no request.
+	// An agent with no token (one its operator started with the explicit
+	// opt-out) must report that it has none. If Adopt("") left the memo
+	// unresolved, the next Session() in that process would mint a token
+	// nothing knows — which reads as a working credential and matches no
+	// request.
 	restoreSession(t)
 	resetSession(t)
 
@@ -413,11 +466,11 @@ func sharedTempDir(t *testing.T) string {
 func restoreSession(t *testing.T) {
 	t.Helper()
 	sessionMu.Lock()
-	prev, prevResolved := session, resolved
+	prev, prevErr, prevResolved := session, sessionErr, resolved
 	sessionMu.Unlock()
 	t.Cleanup(func() {
 		sessionMu.Lock()
-		session, resolved = prev, prevResolved
+		session, sessionErr, resolved = prev, prevErr, prevResolved
 		sessionMu.Unlock()
 	})
 }
@@ -426,6 +479,25 @@ func restoreSession(t *testing.T) {
 func resetSession(t *testing.T) {
 	t.Helper()
 	sessionMu.Lock()
-	session, resolved = "", false
+	session, sessionErr, resolved = "", nil, false
 	sessionMu.Unlock()
+}
+
+// A token from the environment is taken without the whitespace around it (a
+// Secret's value or an env file can end in a newline, which no HTTP client can
+// present), and one that is only whitespace is no token at all.
+func TestFromEnv_TakesTheTokenWithoutSurroundingWhitespace(t *testing.T) {
+	t.Setenv(Env, "  the-token\n")
+	require.Equal(t, "the-token", FromEnv())
+	t.Setenv(Env, " \t\n")
+	require.Empty(t, FromEnv())
+
+	got, err := resolveSession(func(string) string { return " \n" })
+	require.NoError(t, err)
+	raw, err := hex.DecodeString(got)
+	require.NoError(t, err, "a whitespace-only inherited token must not be taken as one")
+	require.Len(t, raw, 32)
+	got, err = resolveSession(func(string) string { return "inherited\n" })
+	require.NoError(t, err)
+	require.Equal(t, "inherited", got)
 }

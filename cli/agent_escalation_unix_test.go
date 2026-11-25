@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -123,6 +124,7 @@ func TestTheAgentCommandReportsItsTeardown(t *testing.T) {
 			}}}
 			utils.ErrCode = 0
 			t.Cleanup(func() { utils.ErrCode = 0 })
+			t.Setenv(token.Env, testAgentToken)
 			cmd := Agent(ctx, zap.NewNop(), &config.Config{}, factory, flags)
 			if err := cmd.RunE(cmd, nil); err != nil {
 				t.Fatalf("RunE: %v", err)

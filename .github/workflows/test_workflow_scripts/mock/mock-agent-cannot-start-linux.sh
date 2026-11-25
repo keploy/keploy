@@ -31,6 +31,15 @@
 #                  mounted, no network                                 -> 6
 #                  The agent runs alone, with no test command; docker-6
 #                  checks how the CLI passes an agent container's 6 on.
+#                  It is handed a control-plane token, as every launcher
+#                  hands its agent one, so that it gets as far as this.
+# An agent with no control-plane token refuses to start, before it checks
+# or changes anything:
+#   agent-no-token `keploy agent` run alone with no token, natively and as
+#                  a pod's agent (--is-docker, KUBERNETES_SERVICE_HOST),
+#                  each saying how to start it with one              -> 1
+#                  (and again with the switch on, as agent-no-token-proven:
+#                  an agent takes it only from its --proven flag)
 # The docker-* cases run keploy's docker mode with a stand-in `docker` whose
 # agent container exits with AGENT_EXIT, as `docker run` does with its
 # container's status. Docker mode lowers kernel.perf_event_paranoid, which is
@@ -113,7 +122,8 @@ cat > "$WORK/inside.sh" <<'SH'
 CASE=$1
 D=/work/$CASE
 # <case>-proven is the case under the proven switch (KEPLOY_PROVEN, given to
-# the container).
+# the container; agent-no-token-proven, whose agent runs alone, passes the
+# agent's own --proven flag instead, as keploy does).
 BASE=${CASE%-proven}
 mkdir -p "$D/home" "$D/app" "$D/bin"
 trap 'chown -R "$HOSTUID" "$D"' EXIT
@@ -125,10 +135,27 @@ case "$BASE" in
   agent-no-ipv4)
     mount -t tracefs nodev /sys/kernel/tracing || exit 1
     for mode in record test; do
-      bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy agent --is-docker --mode "$mode" --client-pid 1 > "$D/agent-$mode.log" 2>&1
+      KEPLOY_AGENT_TOKEN=$AGENT_TOKEN bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy agent --is-docker --mode "$mode" --client-pid 1 > "$D/agent-$mode.log" 2>&1
       echo $? > "$D/agent-$mode.exit"
       echo "agent-$mode" >> "$D/runs"
     done
+    exit 0
+    ;;
+  agent-no-token)
+    # Everything the agent would need to start but its token: it must
+    # refuse before it gets that far.
+    mount -t tracefs nodev /sys/kernel/tracing || exit 1
+    unset KEPLOY_AGENT_TOKEN KEPLOY_AGENT_INSECURE_NO_AUTH
+    PROVEN=""
+    [ "$CASE" != "$BASE" ] && PROVEN="--proven"
+    # shellcheck disable=SC2086 # $PROVEN is a flag or nothing
+    bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy agent --mode record $PROVEN > "$D/agent-native.log" 2>&1
+    echo $? > "$D/agent-native.exit"
+    echo "agent-native" >> "$D/runs"
+    # shellcheck disable=SC2086 # $PROVEN is a flag or nothing
+    KUBERNETES_SERVICE_HOST=10.96.0.1 bash /work/hang_guard.sh -s INT -k 30 120 /work/keploy agent --is-docker --mode record $PROVEN > "$D/agent-in-cluster.log" 2>&1
+    echo $? > "$D/agent-in-cluster.exit"
+    echo "agent-in-cluster" >> "$D/runs"
     exit 0
     ;;
   bad-btf)
@@ -213,8 +240,9 @@ check() {
   local name=$1 want=$2 says=$3 runs expect="mock-record mock-replay test record"
   shift 3
   [ "$name" = agent-no-ipv4 ] && expect="agent-record agent-test"
+  [ "${name%-proven}" = agent-no-token ] && expect="agent-native agent-in-cluster"
   echo "--- $name: expecting exit $want from each of its runs ---"
-  docker run --rm --network none "$@" -e HOSTUID="$(id -u):$(id -g)" \
+  docker run --rm --network none "$@" -e HOSTUID="$(id -u):$(id -g)" -e AGENT_TOKEN="$AGENT_TOKEN" \
     -v "$WORK:/work" "$IMAGE" /work/inside.sh "$name" || fail "$name: the container itself failed"
   runs="$(tr '\n' ' ' < "$WORK/$name/runs" 2>/dev/null)"
   [ "${runs% }" = "$expect" ] || fail "$name: ran \"${runs% }\", want \"$expect\""
@@ -236,7 +264,30 @@ check() {
   [ -e "$WORK/$name/ran" ] && fail "$name: the test command ran, with no agent to record or replay it"
 }
 
+# The token agent-no-ipv4's agent is handed: any 64 hex characters do.
+AGENT_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+# What an agent with no token says, natively and in a pod: each its own
+# remedy; only the native one names the explicit opt-out, which in a cluster
+# would leave the agent open to every pod (no_token_remedies).
+NO_TOKEN="no control-plane token"
+no_token_remedies() {
+  local d="$WORK/$1"
+  grep -aqF "no control-plane token: start the agent through keploy, or set KEPLOY_AGENT_TOKEN" "$d/agent-native.log" 2>/dev/null ||
+    fail "$1: the native agent with no token does not say to start it through keploy or set KEPLOY_AGENT_TOKEN"
+  grep -aqF "KEPLOY_AGENT_INSECURE_NO_AUTH=true" "$d/agent-native.log" 2>/dev/null ||
+    fail "$1: the native agent with no token does not name the opt-out"
+  if ! grep -aqF "this in-cluster agent was started without KEPLOY_AGENT_TOKEN" "$d/agent-in-cluster.log" 2>/dev/null ||
+    ! grep -aqF "upgrade k8s-proxy" "$d/agent-in-cluster.log" 2>/dev/null; then
+    fail "$1: the in-cluster agent with no token does not say to upgrade k8s-proxy"
+  fi
+  if grep -aqF "KEPLOY_AGENT_INSECURE_NO_AUTH" "$d/agent-in-cluster.log" 2>/dev/null; then
+    fail "$1: the in-cluster agent with no token offers the opt-out instead of the k8s-proxy upgrade"
+  fi
+}
+
 if half off; then
+check agent-no-token 1 "$NO_TOKEN" --privileged
+no_token_remedies agent-no-token
 check unprivileged 3 "keploy does not have the kernel privileges it needs"
 check no-tracefs 6 "neither debugfs nor tracefs are mounted" --privileged
 # The agent has to have failed on the BTF, not on anything else that exits 1.
@@ -290,6 +341,8 @@ check_proven() {
 }
 
 if half on; then
+check agent-no-token-proven 1 "$NO_TOKEN" --privileged
+no_token_remedies agent-no-token-proven
 JUDGES="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
 check_proven unprivileged 3 "keploy does not have the kernel privileges it needs" 1 "$JUDGES"
 check_proven no-tracefs 6 "neither debugfs nor tracefs are mounted" 1 "$JUDGES" --privileged

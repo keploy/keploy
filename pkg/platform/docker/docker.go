@@ -878,13 +878,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// the agent's own network namespace.
 	//
 	// The launch is recorded by the app, which starts this service every time
-	// it runs compose, whether or not there is a token to hand over (see
-	// App.withAgentToken in pkg/client/app).
-	if token.Session() == "" {
-		idc.logger.Warn("no control-plane token to hand to the agent container; it will start without authentication")
-	} else {
-		envVars = append(envVars, token.Env)
+	// it runs compose (see App.withAgentToken in pkg/client/app). With no
+	// token to hand over there is no service: an agent started without one
+	// refuses to start anyway, and this error says why it has none.
+	if _, err := requireAgentToken(); err != nil {
+		return nil, fmt.Errorf("the keploy agent service is not generated: %w", err)
 	}
+	envVars = append(envVars, token.Env)
 
 	// When the operator's keploy folder is resolved, bind-mount it into
 	// the agent container at /keploy-host and point KEPLOY_DEBUG_FILE at

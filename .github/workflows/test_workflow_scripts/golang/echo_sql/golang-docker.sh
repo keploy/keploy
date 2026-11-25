@@ -93,9 +93,13 @@ do_record_iteration() {
         cat "docker-compose-tmp.yaml"
         exit 1
     fi
-    # The agent says this when it was handed no control-plane token: it then
-    # serves /agent/pcap/keylog, /agent/stop and /agent/storemocks to anything
-    # that can reach the port, and the run still passes.
+    # The agent says one of these when it was handed no control-plane token:
+    # an agent from a release before agents refused to start without one
+    # ("running WITHOUT authentication", the cross-version cells' released
+    # binary) then served /agent/pcap/keylog, /agent/stop and
+    # /agent/storemocks to anything that could reach the port, and the run
+    # still passed; one from then on refuses to start ("no control-plane
+    # token").
     #
     # keploy probes for this itself at the readiness gate and logs an ERROR,
     # which the check above already catches. This is the second line of
@@ -103,8 +107,8 @@ do_record_iteration() {
     # compose file heavily, and losing the agent service's KEPLOY_AGENT_TOKEN
     # environment entry in one of those rewrites — or compose not being given
     # the value to fill it from — is exactly the silent regression this guards.
-    if grep -q "running WITHOUT authentication" "$log"; then
-        echo "The agent came up with no control-plane token; the compose token handoff is broken."
+    if grep -qE "running WITHOUT authentication|no control-plane token" "$log"; then
+        echo "The agent had no control-plane token (it came up without one, or refused to start); the compose token handoff is broken."
         cat "$log"
         cat "docker-compose-tmp.yaml"
         exit 1

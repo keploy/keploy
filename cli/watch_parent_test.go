@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -80,7 +81,7 @@ func startWatchHelper(t *testing.T, env ...string) (*exec.Cmd, <-chan error) {
 		t.Fatalf("finding this test binary: %v", err)
 	}
 	cmd := exec.Command(self, "-test.run=^TestAnAgentEndsWhenTheClientThatStartedItIsKilled$")
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(append(os.Environ(), token.Env+"="+testAgentToken), env...)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting a helper: %v", err)
 	}

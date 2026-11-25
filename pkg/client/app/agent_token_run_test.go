@@ -129,7 +129,7 @@ exec env -i PATH="$PATH" "$@"`,
 				for _, got := range starts {
 					if tc.agent {
 						require.Equal(t, token.Session(), got,
-							"run %d: compose started the agent without the token its compose file names, so the agent serves its control plane to anyone", run)
+							"run %d: compose started the agent without the token its compose file names, so the agent refuses to start", run)
 					} else {
 						require.Equal(t, "<unset>", got, "run %d: the application under test was handed the agent's token", run)
 					}

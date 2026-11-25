@@ -70,7 +70,7 @@ func TestSudoCannotKeepAgentToken(t *testing.T) {
 // TestPrepareDockerCommand_RefusesASudoThatWouldDropTheToken: a keploy that is
 // not root starts the agent container through `sudo --preserve-env=…
 // docker`. sudo-rs before 0.2.7 ignores the flag, so docker would start the
-// agent without a token, which then serves its control plane to anyone.
+// agent without a token, which then refuses to start.
 // PrepareDockerCommand refuses that sudo before anything runs, and asks no
 // sudo anything when the alias does not go through one.
 func TestPrepareDockerCommand_RefusesASudoThatWouldDropTheToken(t *testing.T) {
@@ -86,7 +86,9 @@ func TestPrepareDockerCommand_RefusesASudoThatWouldDropTheToken(t *testing.T) {
 		{name: "sudo-rs 0.2.7", sudoVersion: "sudo-rs 0.2.7"},
 		{name: "sudo 1.9.16p2", sudoVersion: "Sudo version 1.9.16p2"},
 		{name: "root, sudo-rs 0.2.5", sudoVersion: "sudo-rs 0.2.5", root: true},
-		// Nothing to keep, so nothing to refuse: sudo docker, as before.
+		// Nothing to keep, so nothing to refuse. Not a command keploy
+		// builds any more (it always hands the agent a token); the row
+		// pins that the check refuses only a sudo that would drop one.
 		{name: "no token, sudo-rs 0.2.5", sudoVersion: "sudo-rs 0.2.5", noToken: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,7 +103,7 @@ exec env -i PATH="$PATH" "$keep=$(printenv "$keep")" "$@"`)
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 			cmd, err := PrepareDockerCommand(context.Background(),
-				linuxDockerClient(tc.root, !tc.noToken)+" container run --rm -e "+token.Env+" keploy-image")
+				dockerClientFor(tc.root, !tc.noToken)+" container run --rm -e "+token.Env+" keploy-image")
 			sudoLog, _ := os.ReadFile(filepath.Join(bin, "sudo.log"))
 			if tc.root || tc.noToken {
 				require.NoError(t, err)
