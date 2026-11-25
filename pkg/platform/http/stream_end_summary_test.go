@@ -156,6 +156,16 @@ func TestTheClientSaysASessionThatDroppedMocks(t *testing.T) {
 	if n := logs.FilterMessage(models.MocksDroppedSaid).Len(); n != 0 {
 		t.Fatalf("a session that dropped nothing was said %d times", n)
 	}
+	core, logs = observer.New(zapcore.InfoLevel)
+	a = &AgentClient{logger: zap.New(core)}
+	a.sayAgentSummary(models.StreamEndSummary{InvertedResponseBeforeRequest: 3})
+	saidInv := logs.FilterMessage(models.InvertedLeftOutSaid).All()
+	if len(saidInv) != 1 || saidInv[0].Level != zapcore.WarnLevel || saidInv[0].ContextMap()["test_cases"] != uint64(3) {
+		t.Fatalf("inverted left-out summary was said %v, want once at WARN with 3 test_cases", saidInv)
+	}
+	if got, _ := saidInv[0].ContextMap()["next_step"].(string); got != models.InvertedLeftOutNextStep {
+		t.Fatalf("inverted left-out summary next_step = %q, want %q", got, models.InvertedLeftOutNextStep)
+	}
 }
 
 // A summary is the last incoming stream's only once its agent ends it with

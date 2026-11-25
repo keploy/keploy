@@ -750,6 +750,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 		return overSizeLost
 	}
+	// Tally of test cases left out fail-closed at capture time because their
+	// response timestamp preceded their request timestamp
+	// (NoteInvertedTestCase). Opened before headers go out so drops noted
+	// while this stream is open are counted (matching LossTally and
+	// OverSizeTally); read once (sessionInverted) together with
+	// tcsInvertedLeftOut (stream-level drops) so the end marker, summary,
+	// and WARN always agree.
+	invertedTally := syncmgr.Get().OpenInvertedTally()
+	defer invertedTally.Close()
 	// The requests the ingress serves and does not record as test cases
 	// (syncMock NoteNotRecorded), each told to this stream's client as it
 	// comes (tellNotRecorded), from here: the agent's line names each by
@@ -805,9 +814,56 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Use select (not for-range) so context cancellation is checked
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
-	var tcsSentSoFar int       // TCs sent to CLI this session
-	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
-	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	var tcsSentSoFar int          // TCs sent to CLI this session
+	var tcsSuppressedSoFar int    // TCs suppressed on the stream: pressure/orphan overlap, capacity-dropped mock, or response timestamp before request timestamp
+	var tcsInvertedLeftOut uint64 // TCs left out fail-closed on the stream because response timestamp preceded request timestamp
+	var tcsUnsettled int          // TCs the hold's bound released before their verdict was final
+	var invertedRead bool
+	var invertedTotal, invertedCapture uint64
+	sessionInverted := func() (total, capture uint64) {
+		if !invertedRead {
+			invertedRead = true
+			invertedCapture = invertedTally.Read()
+			invertedTotal = invertedCapture + tcsInvertedLeftOut
+		}
+		return invertedTotal, invertedCapture
+	}
+	// recordInvertedDrop accounts for one stream-level inverted-window drop
+	// and logs per-test diagnostics (protocol, ingress, clock origin) at Debug.
+	recordInvertedDrop := func(t *models.TestCase, tcReqTime, tcRespTime time.Time) {
+		tcsSuppressedSoFar++
+		tcsInvertedLeftOut++
+		protocol := "http"
+		if t.Kind == models.GRPC_EXPORT {
+			protocol = "grpc"
+		}
+		clock := ""
+		if t.Origin != nil {
+			clock = t.Origin.Clock
+		}
+		a.logger.Debug("agent: TC left out fail-closed — response timestamp precedes request timestamp; not sent to CLI",
+			zap.String("tc_name", t.Name),
+			zap.Time("tc_req", tcReqTime),
+			zap.Time("tc_resp", tcRespTime),
+			zap.String("protocol", protocol),
+			zap.String("ingress", "routes.HandleIncoming"),
+			zap.String("clock", clock),
+			zap.String("kind", string(t.Kind)),
+			zap.Uint64("tcs_inverted_left_out", tcsInvertedLeftOut),
+		)
+	}
+	// dropIfInverted fails closed before a test case enters the test-case hold
+	// or send(), discarding any uploaded form files immediately so inverted
+	// test cases never occupy hold capacity or wait on the watermark.
+	dropIfInverted := func(t *models.TestCase) bool {
+		tcReqTime, tcRespTime := testCaseWindow(t)
+		if !models.IsInvertedWindow(tcReqTime, tcRespTime) {
+			return false
+		}
+		discardUpload(a.logger, t)
+		recordInvertedDrop(t, tcReqTime, tcRespTime)
+		return true
+	}
 	// The TCs left out over the requests a parser never read because the
 	// recording's stop cut it short: named at WARN once, as the session
 	// ends (summarize).
@@ -827,6 +883,13 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// on which the span checks below make no claim, so a gRPC test case a
 		// pause or a hole overlapped was streamed without the mocks it lost.
 		tcReqTime, tcRespTime := testCaseWindow(t)
+		// Fail closed on any test case whose captured response timestamp
+		// precedes its request timestamp: keeping a test case without
+		// guaranteed mocks breaks replay.
+		if models.IsInvertedWindow(tcReqTime, tcRespTime) {
+			recordInvertedDrop(t, tcReqTime, tcRespTime)
+			return true
+		}
 		if _, left := leftovers[tcReqTime.UnixNano()]; left && !tcReqTime.IsZero() {
 			a.logger.Debug("Test case left out: its request was in flight across the stop of a recording that has ended",
 				zap.Time("request_time", tcReqTime))
@@ -1098,8 +1161,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// that is the intended trade; at a third of the session the
 		// operator has a materially thinner recording than they
 		// think, and must be told at a level they actually see.
+		inverted, invertedCap := sessionInverted()
+		totalSuppressed := tcsSuppressedSoFar + int(invertedCap)
 		logRecordingComplete := a.logger.Info
-		if massSuppressed(tcsSentSoFar, tcsSuppressedSoFar) {
+		if massSuppressed(tcsSentSoFar, totalSuppressed) {
 			logRecordingComplete = a.logger.Warn
 		}
 		// Read once: the warning and the summary say the same.
@@ -1160,6 +1225,13 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Strings("calls_most", overSize.Calls),
 				zap.String("next_step", models.OverSizeLimitNextStep))
 		}
+		if inverted > 0 {
+			// Left out fail-closed because response timestamp preceded request
+			// timestamp (capture-level drops plus stream-level drops).
+			a.logger.Warn(models.InvertedLeftOutSaid,
+				zap.Uint64("test_cases", inverted),
+				zap.String("next_step", models.InvertedLeftOutNextStep))
+		}
 		if unnamedConns > 0 {
 			// Each was passed to the app's listener and none of its calls
 			// recorded: the proxy warned of the agent's first as it came;
@@ -1193,7 +1265,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// "client" (the stream ended under it).
 			zap.String("ended_by", endedBy),
 			zap.Int("tcs_sent_to_cli", tcsSentSoFar),
-			zap.Int("tcs_suppressed_total", tcsSuppressedSoFar),
+			zap.Int("tcs_suppressed_total", totalSuppressed),
 			// _total is how often each suppressor fired; the spans
 			// are what they were kept as, after overlapping and (past
 			// the cap) joining (syncMock.Spans).
@@ -1260,6 +1332,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// Served by the app and never handed to this stream: the
 			// ingress that served them stopped first (the WARN above).
 			zap.Uint64("tcs_not_handed_on", notHandedOn),
+			// Left out fail-closed because response timestamp preceded request
+			// timestamp (the WARN above).
+			zap.Uint64("tcs_response_dated_before_request", inverted),
 			// Calls to the app none of which was recorded: the agent could
 			// not name their callers (the WARN above).
 			zap.Uint64("connections_from_unnamed_callers", unnamedConns),
@@ -1279,6 +1354,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// take hands a test case the ingress built to the hold, or, without one,
 	// to the stream. It reports false once the stream is broken.
 	take := func(t *models.TestCase) bool {
+		if dropIfInverted(t) {
+			return true
+		}
 		if hold == nil {
 			return send(t)
 		}
@@ -1334,9 +1412,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			notHandedOn, unnamedConns, tlsRelayedConns, drops := sessionLost()
+			inverted, invertedCap := sessionInverted()
+			totalSuppressed := tcsSuppressedSoFar + int(invertedCap)
 			if err := json.NewEncoder(part).Encode(models.StreamEndSummary{
 				TestCasesSent:       tcsSentSoFar,
-				TestCasesSuppressed: tcsSuppressedSoFar,
+				TestCasesSuppressed: totalSuppressed,
 				LeftOutInFlight:     leftOut.LeftOut(),
 				NotRecordedUnderPressure: func() models.PressureSkipSummary {
 					n := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
@@ -1346,13 +1426,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				UnnamedCallerConns: unnamedConns,
 				TLSRelayedConns:    tlsRelayedConns,
 				Unsettled:          tcsUnsettled,
-				MassSuppressed:     massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				MassSuppressed:     massSuppressed(tcsSentSoFar, totalSuppressed),
 				MocksDropped: models.MockDropSummary{
 					ByPressure: drops.Pressure,
 					Capacity:   drops.Capacity,
 					Named:      drops.Named,
 				},
-				NotRecordedOverSizeLimit: sessionOverSize(),
+				NotRecordedOverSizeLimit:      sessionOverSize(),
+				InvertedResponseBeforeRequest: inverted,
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
@@ -1394,6 +1475,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			if dropIfInverted(t) {
+				continue
+			}
 			if hold == nil {
 				if !send(t) {
 					return

@@ -144,10 +144,24 @@ func IsCaptureID(name string) bool {
 // times are its GrpcReq's and GrpcResp's, any other's its HTTPReq's and
 // HTTPResp's.
 func TestCaseWindow(tc *TestCase) (time.Time, time.Time) {
+	if tc == nil {
+		return time.Time{}, time.Time{}
+	}
 	if tc.Kind == GRPC_EXPORT {
 		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
 	}
 	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+}
+
+// IsInvertedWindow reports whether both start and end are non-zero and end's
+// wall-clock reading precedes start's (stripping any monotonic clock reading
+// via Round(0)). Wall-clock comparison is used intentionally because
+// timestamps serialized over the agent stream or persisted to YAML carry only
+// wall-clock readings; in-memory syncMock range helpers (heldRangeLocked,
+// sentClaimRangeLocked, revokeReaching) use Before/After directly and also
+// clamp lo/hi independently for defense in depth.
+func IsInvertedWindow(start, end time.Time) bool {
+	return !start.IsZero() && !end.IsZero() && end.Round(0).Before(start.Round(0))
 }
 
 // MockName constants for the PostgresV3 parser. The integrations-side

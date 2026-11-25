@@ -447,6 +447,81 @@ func TestHandleIncoming_ATestCaseWithNoRequestTimeIsCheckedOverItsRecording(t *t
 	}
 }
 
+// HandleIncoming fails closed on any test case whose captured response
+// timestamp precedes its request timestamp even when no pressure or orphan
+// span overlaps it, while streaming in-order test cases normally.
+func TestHandleIncoming_FailsClosedOnInvertedTestCaseWithoutSpans(t *testing.T) {
+	mgr := syncmgr.Get()
+	mgr.SetWatermark(nil)
+	mgr.StartRecordSession()
+	mgr.TakeLeftovers()
+	tcs := make(chan *models.TestCase, 4)
+	resp := openStream(t, tcs)
+	now := time.Now()
+	tcs <- &models.TestCase{
+		Name:     "http-in-order",
+		Kind:     models.HTTP,
+		HTTPReq:  models.HTTPReq{Timestamp: now},
+		HTTPResp: models.HTTPResp{Timestamp: now.Add(time.Millisecond)},
+	}
+	tcs <- &models.TestCase{
+		Name:     "http-inverted",
+		Kind:     models.HTTP,
+		HTTPReq:  models.HTTPReq{Timestamp: now.Add(time.Second)},
+		HTTPResp: models.HTTPResp{Timestamp: now},
+	}
+	tcs <- &models.TestCase{
+		Name:     "grpc-inverted",
+		Kind:     models.GRPC_EXPORT,
+		GrpcReq:  models.GrpcReq{Timestamp: now.Add(time.Second)},
+		GrpcResp: models.GrpcResp{Timestamp: now},
+	}
+	tcs <- &models.TestCase{
+		Name:     "http-equal-ts",
+		Kind:     models.HTTP,
+		HTTPReq:  models.HTTPReq{Timestamp: now},
+		HTTPResp: models.HTTPResp{Timestamp: now},
+	}
+	close(tcs)
+	got := streamedNames(t, resp)
+	if strings.Join(got, ",") != "http-in-order,http-equal-ts" {
+		t.Fatalf("streamed %v, want [http-in-order http-equal-ts] (inverted HTTP/gRPC TCs left out fail-closed)", got)
+	}
+}
+
+// When ResolveRange refuses mocks for an inverted kept window, it revokes the
+// test case by name so HandleIncoming still leaves it out even if the test
+// case handed to the stream carries different (in-order) timestamps.
+func TestHandleIncoming_RevokesTestCaseFromInvertedResolveEvenWhenOwnTimesInOrder(t *testing.T) {
+	mgr := syncmgr.Get()
+	mgr.SetWatermark(nil)
+	mgr.StartRecordSession()
+	mgr.TakeLeftovers()
+
+	now := time.Now()
+	mgr.ResolveRange(now.Add(time.Second), now, "test-revoked-by-inverted-resolve", true, true)
+
+	tcs := make(chan *models.TestCase, 2)
+	resp := openStream(t, tcs)
+	tcs <- &models.TestCase{
+		Name:     "test-revoked-by-inverted-resolve",
+		Kind:     models.HTTP,
+		HTTPReq:  models.HTTPReq{Timestamp: now},
+		HTTPResp: models.HTTPResp{Timestamp: now.Add(10 * time.Millisecond)},
+	}
+	tcs <- &models.TestCase{
+		Name:     "test-healthy",
+		Kind:     models.HTTP,
+		HTTPReq:  models.HTTPReq{Timestamp: now},
+		HTTPResp: models.HTTPResp{Timestamp: now.Add(10 * time.Millisecond)},
+	}
+	close(tcs)
+	got := streamedNames(t, resp)
+	if strings.Join(got, ",") != "test-healthy" {
+		t.Fatalf("streamed %v, want [test-healthy] (revoked test case must be left out by name)", got)
+	}
+}
+
 // A test case that comes with a capture id and no name (a request captured
 // without --sync, for a client that reads capture ids) is known to the stream
 // by its capture id: one sent before a mock any test may need is lost, whose

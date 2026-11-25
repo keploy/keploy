@@ -619,9 +619,12 @@ type SyncMockManager struct {
 	// stopped first (NoteNotHandedOn).
 	notHandedOn atomic.Uint64
 
-	// invertedTestCases counts the kept test cases whose response is dated
-	// before their request (noteInverted).
+	// invertedTestCases counts test cases left out fail-closed because their
+	// response timestamp preceded their request timestamp (noteInverted).
 	invertedTestCases atomic.Uint64
+	// invertedMu guards invertedTallies for per-session counting.
+	invertedMu      sync.Mutex
+	invertedTallies []*InvertedTally
 	// unnamedCallerConns counts the connections to a listener of the run's
 	// own process tree whose caller the agent could not name in its PID
 	// namespace, so that none of the calls they carried was recorded as a
@@ -2944,30 +2947,117 @@ func (m *SyncMockManager) PendingIn(start, end time.Time) bool {
 	return false
 }
 
-// invertedWarning is logged for a kept test case whose response is dated
-// before its request (noteInverted).
-const invertedWarning = "syncMock: a test case's response is dated before its request, so its window holds none of the mocks requested between the two"
+// invertedWarning is logged when a test case whose response timestamp precedes
+// its request timestamp is left out fail-closed (noteInverted).
+const invertedWarning = "syncMock: a test case's response is dated before its request, so it was left out fail-closed without claiming mocks"
 
-// noteInverted counts a kept test case whose response is dated before its
-// request, and logs the first and every sendDropSampleRate-th with its name
-// and both times. Its window [request, response] holds no time
-// (heldRangeLocked, sentClaimRangeLocked), so none of the mocks requested
-// between the two are mapped to it: the capture that dated it is to be found
-// from these lines.
-func (m *SyncMockManager) noteInverted(testName string, request, response time.Time) {
+// InvertedMeta carries diagnostic context logged when an inverted test case is
+// left out fail-closed (NoteInvertedTestCaseWithMeta).
+type InvertedMeta struct {
+	Protocol string
+	Ingress  string
+	Clock    string
+}
+
+// InvertedTally counts test cases left out fail-closed because their response
+// timestamp preceded their request timestamp (noteInverted) while the tally is
+// open. Like LossTally and OverSizeTally, every open tally on the manager
+// observes drops noted during its open interval; drops before OpenInvertedTally
+// or after Close are excluded.
+type InvertedTally struct {
+	m     *SyncMockManager
+	count uint64 // guarded by m.invertedMu
+}
+
+// OpenInvertedTally opens a tally of inverted test cases noted from now on
+// while the tally stays open. Close it when the session ends. Nil for a nil
+// manager.
+func (m *SyncMockManager) OpenInvertedTally() *InvertedTally {
+	if m == nil {
+		return nil
+	}
+	m.invertedMu.Lock()
+	defer m.invertedMu.Unlock()
+	t := &InvertedTally{m: m}
+	m.invertedTallies = append(m.invertedTallies, t)
+	return t
+}
+
+// Read returns how many inverted test cases were noted while t was open.
+// Zero for a nil tally.
+func (t *InvertedTally) Read() uint64 {
+	if t == nil {
+		return 0
+	}
+	t.m.invertedMu.Lock()
+	defer t.m.invertedMu.Unlock()
+	return t.count
+}
+
+// Close ends t so it stops counting new drops while keeping its recorded total
+// readable via Read. Idempotent and nil-safe.
+func (t *InvertedTally) Close() {
+	if t == nil {
+		return
+	}
+	t.m.invertedMu.Lock()
+	defer t.m.invertedMu.Unlock()
+	if i := slices.Index(t.m.invertedTallies, t); i >= 0 {
+		t.m.invertedTallies = slices.Delete(t.m.invertedTallies, i, i+1)
+	}
+}
+
+// noteInverted counts a test case left out fail-closed because its response
+// timestamp precedes its request timestamp, updates every open InvertedTally,
+// and logs the first and every sendDropSampleRate-th with capture diagnostics
+// and an actionable next_step.
+func (m *SyncMockManager) noteInverted(testName string, request, response time.Time, meta InvertedMeta) {
 	if m == nil {
 		return
 	}
 	n := m.invertedTestCases.Add(1)
+	m.invertedMu.Lock()
+	for _, t := range m.invertedTallies {
+		t.count++
+	}
+	m.invertedMu.Unlock()
 	if n == 1 || n%sendDropSampleRate == 0 {
-		m.dropLogger().Warn(invertedWarning,
-			zap.String("test", testName), zap.Time("request", request), zap.Time("response", response),
-			zap.Duration("by", request.Sub(response)), zap.Uint64("inverted_so_far", n))
+		fields := []zap.Field{
+			zap.String("test", testName),
+			zap.Time("request", request),
+			zap.Time("response", response),
+			zap.Duration("by", request.Sub(response)),
+			zap.Uint64("inverted_so_far", n),
+			zap.String("next_step", models.InvertedLeftOutNextStep),
+		}
+		if meta.Protocol != "" {
+			fields = append(fields, zap.String("protocol", meta.Protocol))
+		}
+		if meta.Ingress != "" {
+			fields = append(fields, zap.String("ingress", meta.Ingress))
+		}
+		if meta.Clock != "" {
+			fields = append(fields, zap.String("clock", meta.Clock))
+		}
+		m.dropLogger().Warn(invertedWarning, fields...)
 	}
 }
 
-// InvertedTestCases is how many kept test cases had a response dated before
-// their request (noteInverted), since the manager was made.
+// NoteInvertedTestCase counts a test case left out fail-closed because its
+// response timestamp precedes its request timestamp. Nil-safe.
+func (m *SyncMockManager) NoteInvertedTestCase(testName string, request, response time.Time) {
+	m.noteInverted(testName, request, response, InvertedMeta{})
+}
+
+// NoteInvertedTestCaseWithMeta is NoteInvertedTestCase with capture
+// diagnostics (protocol, ingress path, clock origin).
+func (m *SyncMockManager) NoteInvertedTestCaseWithMeta(testName string, request, response time.Time, meta InvertedMeta) {
+	m.noteInverted(testName, request, response, meta)
+}
+
+// InvertedTestCases is how many test cases were left out fail-closed because
+// their response timestamp preceded their request timestamp (noteInverted)
+// since the manager was created.
 func (m *SyncMockManager) InvertedTestCases() uint64 {
 	if m == nil {
 		return 0
@@ -5985,10 +6075,41 @@ func (m *SyncMockManager) ResolveKept(w *Window, start, end time.Time, testName 
 	m.resolveRange(start, end, testName, true, mapping, w)
 }
 
-func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, keep bool, mapping bool, w *Window) {
-	if keep && !end.IsZero() && end.Before(start) {
-		m.noteInverted(testName, start, end)
+// SweepStaleMocks sweeps stale out-of-window mocks and flushes reusable
+// session/connection mocks from the buffer over an empty window without
+// claiming mocks for a test case, emitting mappings, recording a resolved
+// window, or advancing the startup-window counter. Nil-safe.
+func (m *SyncMockManager) SweepStaleMocks() {
+	if m == nil {
+		return
 	}
+	m.resolveRangeInternal(time.Time{}, time.Time{}, "", false, false, nil, true)
+}
+
+func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, keep bool, mapping bool, w *Window) {
+	if keep && models.IsInvertedWindow(start, end) {
+		// Refuse mocks for an inverted kept window without incrementing the
+		// inverted-drop tally: resolveRange does not drop the test case itself,
+		// so counting here would double-count when the caller hands it on to
+		// the stream backstop (routes/record.go). Revoke by name so the test
+		// case is left out even if its own times differ from [start, end], and
+		// sweep stale mocks over an empty window so buffer growth stays bounded.
+		m.dropLogger().Debug("syncMock: refusing mocks for inverted test window",
+			zap.String("test", testName),
+			zap.Time("request", start),
+			zap.Time("response", end),
+			zap.Duration("by", start.Sub(end)))
+		w.Close()
+		if testName != "" {
+			m.RevokeTestCase(testName)
+		}
+		m.SweepStaleMocks()
+		return
+	}
+	m.resolveRangeInternal(start, end, testName, keep, mapping, w, false)
+}
+
+func (m *SyncMockManager) resolveRangeInternal(start, end time.Time, testName string, keep bool, mapping bool, w *Window, sweepOnly bool) {
 	// Collect mocks and mapping data under the lock, then send to the
 	// outgoing channels AFTER releasing it. Holding m.mu across a
 	// channel send can deadlock on ordering: a buffer-full outChan
@@ -6137,7 +6258,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
 		if i < settled {
-			if t := at[i]; (t.Before(start) || t.After(end)) && !t.Before(cutoffTime) {
+			if t := at[i]; (sweepOnly || t.Before(start) || t.After(end)) && !t.Before(cutoffTime) {
 				m.buffer[keepIdx] = mock
 				at[keepIdx] = t
 				keepIdx++
@@ -6184,7 +6305,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		// so a long-running test's per-test mocks aren't pre-empted by
 		// the stale-buffer cutoff. A mock another request claims after this
 		// one yielded is not in this window (see sharedFrom).
-		inWindow := !mockTime.Before(start) && !mockTime.After(end)
+		inWindow := !sweepOnly && !mockTime.Before(start) && !mockTime.After(end)
 		claimedAway := false // left to a request that claims it (see sharedFrom)
 		if inWindow && len(others) > 0 && mockTime.After(sharedFrom) && others.covers(mockTime) {
 			inWindow, claimedAway = false, true
@@ -6471,15 +6592,17 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// the direct [start,end] path above, never the ring. Skipped for the
 	// no-keep / unbound cases is unnecessary — an empty-but-recorded
 	// window is harmless and aged out by the count cap (addRecentWindowLocked).
-	m.addRecentWindowLocked(resolvedWindow{
-		start:      start,
-		end:        end,
-		testName:   testName,
-		mapping:    mapping,
-		keep:       keep,
-		sharedFrom: unixNanoOrZero(sharedFrom),
-		recording:  m.recording,
-	})
+	if !sweepOnly {
+		m.addRecentWindowLocked(resolvedWindow{
+			start:      start,
+			end:        end,
+			testName:   testName,
+			mapping:    mapping,
+			keep:       keep,
+			sharedFrom: unixNanoOrZero(sharedFrom),
+			recording:  m.recording,
+		})
+	}
 	// With the output bound, every mock the walk left in the buffer it kept
 	// at the retention (or stepped over as settled): settled, whatever this
 	// window held. Unbound, it kept some for the output, which the next pass
