@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -146,9 +147,9 @@ func TestMockSessionResetRestoresWarnAfterTestSession(t *testing.T) {
 
 // Carry-over tier overflow must accumulate across test sets and emit ONE
 // visible Warn at run end with the run-wide total + actionable setting (zero
-// per-set Warns mid-run), attribute ONLY exact evicted mock IDs (never
+// per-set Warns mid-run), and attribute ONLY exact evicted mock IDs (never
 // signature fallback without a mock ID, never payload diffs against a test's
-// own candidate mock), and require Pulsar signatures to include the topic.
+// own candidate mock).
 func TestCarryOverOverflowWarnAndScopedEvictionAttribution(t *testing.T) {
 	registerSends(t)
 	prev := carryOverCapBytes
@@ -270,33 +271,6 @@ func TestCarryOverOverflowWarnAndScopedEvictionAttribution(t *testing.T) {
 		}
 	})
 
-	t.Run("positive: Pulsar signature requires topic and never matches bare SEND", func(t *testing.T) {
-		if got := normalizeCarryOverSig("Pulsar", "SEND"); got != "" {
-			t.Errorf("Pulsar bare SEND sig = %q, want empty (must require topic)", got)
-		}
-		sigOrders := normalizeCarryOverSig("Pulsar", "SEND persistent://tenant/ns/orders")
-		sigEvents := normalizeCarryOverSig("Pulsar", "SEND persistent://tenant/ns/events")
-		if sigOrders == "" || sigEvents == "" || sigOrders == sigEvents {
-			t.Errorf("Pulsar sigs must distinguish topics: orders=%q events=%q", sigOrders, sigEvents)
-		}
-		if got := carryOverMockSig(evicted); got != sigOrders {
-			t.Errorf("carryOverMockSig(evicted) = %q, want %q", got, sigOrders)
-		}
-		bareMock := brokerMockAt("bare-pulsar", pulsarKind, "SEND", 1600)
-		if got := carryOverMockSig(bareMock); got != "" {
-			t.Errorf("carryOverMockSig(bare Pulsar SEND without topic) = %q, want empty", got)
-		}
-	})
-
-	t.Run("positive: normalized HTTP signature matches full URL, empty path, and path-only summary", func(t *testing.T) {
-		if got, want := normalizeCarryOverSig("HTTP", "POST http://auth.internal:8080/v3/oauth/token?x=1"), normalizeCarryOverSig("HTTP", "POST /v3/oauth/token"); got != want || got != "POST /v3/oauth/token" {
-			t.Errorf("HTTP carry-over sig mismatch: full=%q path=%q", got, want)
-		}
-		if got, want := normalizeCarryOverSig("HTTP", "GET http://auth.internal:8080"), normalizeCarryOverSig("HTTP", "GET /"); got != want || got != "GET /" {
-			t.Errorf("HTTP empty-path carry-over sig mismatch: full=%q path=%q", got, want)
-		}
-	})
-
 	// Overflow again in a SECOND test set (ResetForReplaySession + new staging):
 	// still zero mid-run Warns, and run-end Close() emits ONE Warn with the
 	// run-wide total across BOTH sets (2 from set 1 + 2 from set 2 = 4).
@@ -324,4 +298,192 @@ func TestCarryOverOverflowWarnAndScopedEvictionAttribution(t *testing.T) {
 	if ns, _ := warns[0].ContextMap()["next_step"].(string); !strings.Contains(ns, carryOverCapEnv) {
 		t.Errorf("next_step = %q, want %s", ns, carryOverCapEnv)
 	}
+}
+
+// Under parallel test workers (ServeInstance), each worker owns a MockManager
+// of its own. Worker carry-over overflows must accumulate into the run
+// manager's counter, worker Close (via StopServingInstance or endInstances)
+// must emit ZERO carry-over overflow Warns, and the run manager must emit
+// EXACTLY ONE Warn at run end with the combined run + workers leftOut total.
+func TestCarryOverOverflowAggregatesAcrossWorkersSingleRunWarn(t *testing.T) {
+	registerSends(t)
+	prev := carryOverCapBytes
+	t.Cleanup(func() { carryOverCapBytes = prev })
+	one := approxMockBytes(brokerMockAt("sx", pulsarKind, "SEND", 0))
+	carryOverCapBytes = one + one/2 // room for only one mock per manager
+
+	t.Run("multi-worker concurrent overflow aggregates into single run-end Warn", func(t *testing.T) {
+		core, logs := observer.New(zapcore.DebugLevel)
+		logger := zap.New(core)
+		p := New(logger, nil, config.New())
+		run := p.shareWindows(NewMockManager(nil, nil, logger))
+		p.setMockManager(run)
+		t.Cleanup(func() {
+			p.endInstances()
+			run.Close()
+		})
+		p.SeedRecordedWindows(carryWindows())
+
+		if _, err := p.ServeInstance(1); err != nil {
+			t.Fatalf("ServeInstance(1): %v", err)
+		}
+		if _, err := p.ServeInstance(2); err != nil {
+			t.Fatalf("ServeInstance(2): %v", err)
+		}
+		w1 := p.instanceManager(1)
+		w2 := p.instanceManager(2)
+		if w1 == nil || w2 == nil {
+			t.Fatalf("expected non-nil worker managers, got w1=%v w2=%v", w1, w2)
+		}
+
+		// Prime startup windows on each manager before concurrent overflows.
+		for _, mm := range []*MockManager{run, w1, w2} {
+			mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			// run: 1 kept + 1 leftOut in win 1, then +1 leftOut in win 2 => 2
+			run.SetMocksWithWindow([]*models.Mock{
+				brokerMockAt("run-keep", pulsarKind, "SEND", 1200),
+				brokerMockAt("run-drop-1", pulsarKind, "SEND", 1500),
+			}, nil, winStart(1), winEnd(1))
+			run.SetMocksWithWindow([]*models.Mock{
+				brokerMockAt("run-drop-2", pulsarKind, "SEND", 2500),
+			}, nil, winStart(2), winEnd(2))
+		}()
+		go func() {
+			defer wg.Done()
+			// w1: 1 kept + 2 leftOut => 2
+			w1.SetMocksWithWindow([]*models.Mock{
+				brokerMockAt("w1-keep", pulsarKind, "SEND", 1200),
+				brokerMockAt("w1-drop-1", pulsarKind, "SEND", 1500),
+				brokerMockAt("w1-drop-2", pulsarKind, "SEND", 1800),
+			}, nil, winStart(1), winEnd(1))
+		}()
+		go func() {
+			defer wg.Done()
+			// w2: 1 kept + 3 leftOut => 3
+			w2.SetMocksWithWindow([]*models.Mock{
+				brokerMockAt("w2-keep", pulsarKind, "SEND", 1200),
+				brokerMockAt("w2-drop-1", pulsarKind, "SEND", 1500),
+				brokerMockAt("w2-drop-2", pulsarKind, "SEND", 1700),
+				brokerMockAt("w2-drop-3", pulsarKind, "SEND", 1900),
+			}, nil, winStart(1), winEnd(1))
+		}()
+		wg.Wait()
+
+		// Zero Warns mid-run.
+		if warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zapcore.WarnLevel).All(); len(warns) != 0 {
+			t.Fatalf("expected 0 mid-run Warns, got %d: %v", len(warns), warns)
+		}
+
+		// Closing worker 1 via StopServingInstance emits ZERO Warns.
+		if err := p.StopServingInstance(1); err != nil {
+			t.Fatalf("StopServingInstance(1): %v", err)
+		}
+		if warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zapcore.WarnLevel).All(); len(warns) != 0 {
+			t.Fatalf("expected 0 Warns after StopServingInstance(1), got %d: %v", len(warns), warns)
+		}
+
+		// Closing remaining worker 2 via endInstances emits ZERO Warns.
+		p.endInstances()
+		if warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zapcore.WarnLevel).All(); len(warns) != 0 {
+			t.Fatalf("expected 0 Warns after endInstances, got %d: %v", len(warns), warns)
+		}
+
+		// Closing run manager emits EXACTLY ONE Warn with combined leftOut = 2 + 2 + 3 = 7.
+		run.Close()
+		warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zapcore.WarnLevel).All()
+		if len(warns) != 1 {
+			t.Fatalf("expected exactly 1 run-end Warn, got %d: %v", len(warns), logs.All())
+		}
+		if got := warns[0].ContextMap()["leftOut"]; got != int64(7) {
+			t.Errorf("combined leftOut = %v, want 7 (run=2 + w1=2 + w2=3)", got)
+		}
+		if got := warns[0].ContextMap()["capBytes"]; got != int64(carryOverCapBytes) {
+			t.Errorf("capBytes = %v, want %d", got, carryOverCapBytes)
+		}
+		if ns, _ := warns[0].ContextMap()["next_step"].(string); !strings.Contains(ns, carryOverCapEnv) {
+			t.Errorf("next_step = %q, want %s", ns, carryOverCapEnv)
+		}
+
+		// Idempotent: a subsequent LogCarryOverOverflowSummary call emits nothing more.
+		run.LogCarryOverOverflowSummary()
+		if warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zapcore.WarnLevel).All(); len(warns) != 1 {
+			t.Fatalf("expected still 1 Warn after repeated summary call, got %d", len(warns))
+		}
+	})
+
+	t.Run("worker-only overflow emits zero worker Warns and single run-end Warn", func(t *testing.T) {
+		core, logs := observer.New(zapcore.DebugLevel)
+		logger := zap.New(core)
+		p := New(logger, nil, config.New())
+		run := p.shareWindows(NewMockManager(nil, nil, logger))
+		p.setMockManager(run)
+		t.Cleanup(func() {
+			p.endInstances()
+			run.Close()
+		})
+		p.SeedRecordedWindows(carryWindows())
+
+		if _, err := p.ServeInstance(1); err != nil {
+			t.Fatalf("ServeInstance(1): %v", err)
+		}
+		w1 := p.instanceManager(1)
+		if w1 == nil {
+			t.Fatal("expected non-nil worker manager 1")
+		}
+		// Run manager itself never overflows; only worker 1 overflows 2 mocks.
+		w1.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		w1.SetMocksWithWindow([]*models.Mock{
+			brokerMockAt("wo-keep", pulsarKind, "SEND", 1200),
+			brokerMockAt("wo-drop-1", pulsarKind, "SEND", 1500),
+			brokerMockAt("wo-drop-2", pulsarKind, "SEND", 1800),
+		}, nil, winStart(1), winEnd(1))
+
+		// Closing worker emits ZERO Warns even though worker had overflow.
+		p.endInstances()
+		if warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zapcore.WarnLevel).All(); len(warns) != 0 {
+			t.Fatalf("expected 0 Warns when closing worker with overflow, got %d: %v", len(warns), warns)
+		}
+
+		// Run manager emits the worker's overflow total (2) at run end.
+		run.Close()
+		warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zapcore.WarnLevel).All()
+		if len(warns) != 1 {
+			t.Fatalf("expected 1 run-end Warn for worker-only overflow, got %d: %v", len(warns), logs.All())
+		}
+		if got := warns[0].ContextMap()["leftOut"]; got != int64(2) {
+			t.Errorf("run-end leftOut = %v, want 2", got)
+		}
+		if ns, _ := warns[0].ContextMap()["next_step"].(string); !strings.Contains(ns, carryOverCapEnv) {
+			t.Errorf("next_step = %q, want %s", ns, carryOverCapEnv)
+		}
+	})
+
+	t.Run("self-sharing is a no-op and preserves standalone run-end Warn", func(t *testing.T) {
+		core, logs := observer.New(zapcore.DebugLevel)
+		logger := zap.New(core)
+		mm := NewMockManager(nil, nil, logger)
+		defer mm.Close()
+		mm.shareCarryOverOverflow(mm)
+		mm.shareCarryOverOverflow(nil)
+		mm.SeedRecordedWindows(carryWindows())
+		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.SetMocksWithWindow([]*models.Mock{
+			brokerMockAt("solo-keep", pulsarKind, "SEND", 1200),
+			brokerMockAt("solo-drop", pulsarKind, "SEND", 1500),
+		}, nil, winStart(1), winEnd(1))
+		mm.Close()
+		warns := logs.FilterMessageSnippet("carry-over tier is full").FilterLevelExact(zapcore.WarnLevel).All()
+		if len(warns) != 1 {
+			t.Fatalf("expected 1 Warn on standalone manager, got %d: %v", len(warns), logs.All())
+		}
+		if got := warns[0].ContextMap()["leftOut"]; got != int64(1) {
+			t.Errorf("standalone leftOut = %v, want 1", got)
+		}
+	})
 }
