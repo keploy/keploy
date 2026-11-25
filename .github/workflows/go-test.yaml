@@ -14,17 +14,53 @@ permissions:
 # keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
 env:
   KEPLOY_INTERNAL: "1"
+  CGO_ENABLED: "1" # Enable CGO for all jobs
+  # Same shape, different resource: tests that need IPv6 on the runner
+  # (an IPv6 TCP socket, and ::1 on lo): the proxy's loopback
+  # address-family fallback tests, the tcp6 cases of
+  # TestASocketBoundToADeviceIsFound, and the IPv6 row of
+  # TestSocketsSharingTheirEndsOnTwoDevicesAreNoAnswer. Without this they
+  # SKIP and the package still reports ok — a suite that tests nothing
+  # while looking healthy, which is the exact failure the fallback itself
+  # exists to prevent.
+  # Unlike MySQL this is not a service the lane provides, it is a property
+  # of the runner; every GitHub-hosted ubuntu image has ::1 on lo, so this
+  # only fires if that stops being true, and it stays unset elsewhere so a
+  # v6-less environment skips rather than fails.
+  KEPLOY_TEST_IPV6_REQUIRED: "1"
+  # And for user namespaces, which this lane lets unprivileged users
+  # create (in go-test-setup before tests run). utils' test of the process
+  # tree InterruptProcessTree signals starts a process in a nested pid
+  # namespace under `unshare --user`, the one real check that it never
+  # signals pid 1; without user namespaces it skips, and the package
+  # still reports ok. With this set it fails instead.
+  KEPLOY_TEST_USERNS_REQUIRED: "1"
+  # The tests that hold processes off the CPU (internal/starvetest: 32
+  # hogs pinned to one CPU) or spin one run where this says the host is
+  # one for them, and skip elsewhere, so that a routine `go test` of
+  # utils or pkg/platform/http on a developer's machine pins no CPU.
+  # This lane is where they run.
+  KEPLOY_TEST_CPU_HOLD: "1"
+  # utils' tests of a stop's storage I/O read a file from storage, out of
+  # the page cache; where no read reaches storage (both test dirs in
+  # memory) they skip. This runner's disks take them: with this set they
+  # fail instead.
+  KEPLOY_TEST_STORAGE_IO_REQUIRED: "1"
 
 jobs:
-  test:
-    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
-    # The longest healthy job in this repo runs ~32 min, so this is ~2x
-    # headroom and cannot trip a job that is merely slow.
-    timeout-minutes: 60
-    name: go-test
+  # Unit tests split across 3 parallel shards, keeping every package via
+  # deterministic partitioning of `go list ./...` so newly added packages are
+  # automatically covered without editing this file.
+  unit:
+    timeout-minutes: 30
+    name: go-test-unit (${{ matrix.shard }}/${{ matrix.total }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+        total: [3]
     env:
-      CGO_ENABLED: "1" # Enable CGO for this job
       # This lane PROVIDES the MySQL below, so it is the one lane entitled to
       # fail when the server is missing. The real-server tests key their hard
       # failure on this var rather than on the generic CI var: CI is set by
@@ -32,52 +68,19 @@ jobs:
       # database, so keying on it would turn an unrelated contributor's PR red
       # over a service they were never offered. Unset, the tests skip.
       KEPLOY_TEST_MYSQL_REQUIRED: "1"
-      # Same shape, different resource: tests that need IPv6 on the runner
-      # (an IPv6 TCP socket, and ::1 on lo): the proxy's loopback
-      # address-family fallback tests, the tcp6 cases of
-      # TestASocketBoundToADeviceIsFound, and the IPv6 row of
-      # TestSocketsSharingTheirEndsOnTwoDevicesAreNoAnswer. Without this they
-      # SKIP and the package still reports ok — a suite that tests nothing
-      # while looking healthy, which is the exact failure the fallback itself
-      # exists to prevent.
-      # Unlike MySQL this is not a service the lane provides, it is a property
-      # of the runner; every GitHub-hosted ubuntu image has ::1 on lo, so this
-      # only fires if that stops being true, and it stays unset elsewhere so a
-      # v6-less environment skips rather than fails.
-      KEPLOY_TEST_IPV6_REQUIRED: "1"
-      # And for user namespaces, which this lane lets unprivileged users
-      # create (the step before the unit tests). utils' test of the process
-      # tree InterruptProcessTree signals starts a process in a nested pid
-      # namespace under `unshare --user`, the one real check that it never
-      # signals pid 1; without user namespaces it skips, and the package
-      # still reports ok. With this set it fails instead.
-      KEPLOY_TEST_USERNS_REQUIRED: "1"
-      # The tests that hold processes off the CPU (internal/starvetest: 32
-      # hogs pinned to one CPU) or spin one run where this says the host is
-      # one for them, and skip elsewhere, so that a routine `go test` of
-      # utils or pkg/platform/http on a developer's machine pins no CPU.
-      # This lane is where they run.
-      KEPLOY_TEST_CPU_HOLD: "1"
-      # utils' tests of a stop's storage I/O read a file from storage, out of
-      # the page cache; where no read reaches storage (both test dirs in
-      # memory) they skip. This runner's disks take them: with this set they
-      # fail instead.
-      KEPLOY_TEST_STORAGE_IO_REQUIRED: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass
       KEPLOY_TEST_MYSQL_DB: sampledb
     permissions:
       contents: read
-      packages: write
-      id-token: write
 
-    # The MySQL V2 record path is the one place keploy terminates TLS on
-    # BOTH sides of a connection it is also parsing, and its client-write
-    # hold is only observable against a server that actually speaks the
-    # protocol: a scripted peer accepts a leaked ClientHello that a real
-    # mysqld rejects. mysql:8.0 generates its own certs at init, so
-    # have_ssl is YES with no extra configuration.
+    # The MySQL V2 record path is the one place keploy terminates TLS on BOTH
+    # sides of a connection it is also parsing, and its client-write hold is
+    # only observable against a server that actually speaks the protocol: a
+    # scripted peer accepts a leaked ClientHello that a real mysqld rejects.
+    # mysql:8.0 generates its own certs at init, so have_ssl is YES with no
+    # extra configuration.
     services:
       mysql:
         image: mysql:8.0
@@ -95,49 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: false     
-      
-      - name: Installing build Essentials and gcc
-        run: |
-          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential gcc libc-dev \
-            pkg-config \
-            libgl1-mesa-dev          \
-            libxi-dev libxcursor-dev \
-            libxrandr-dev libxinerama-dev \
-            libxxf86vm-dev libx11-dev libx11-xcb-dev  
-
-      - name: Install dependencies
-        run: |
-          # `cache: false` above means this lane re-downloads keploy's whole
-          # module graph on every run, before every test in this job.
-          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
-          go_retry get .
-          # `go get .` resolves the main module's NON-test import graph. The two
-          # test steps additionally load github.com/go-sql-driver/mysql and its
-          # dependency filippo.io/edwards25519, and neither step can be wrapped
-          # (go-retry.sh forbids wrapping `go test`), so a transient proxy error
-          # while those resolve kills the job unretried. Measured by evicting
-          # both from GOMODCACHE: `go get .` leaves them absent, and
-          # `go list -deps -test ./...` extracts exactly those two.
-          # `go list -deps -test` rather than `go mod download` is a preference,
-          # not a correctness point — both warm what the test steps need, and
-          # both leave go.sum byte-identical (measured +0 lines, 3/3 trials; the
-          # command that does rewrite go.sum is `go mod download all`, which is
-          # not this). `go list` warms only what these steps load and picks up
-          # new test-only deps by itself.
-          go_retry list -deps -test ./... > /dev/null
-
-      # ubuntu-24.04 restricts unprivileged user namespaces through AppArmor
-      # by default (kernel.apparmor_restrict_unprivileged_userns=1), so
-      # `unshare --user` fails there (actions/runner-images#10443). Lift that
-      # for this job, which promises user namespaces to the tests
-      # (KEPLOY_TEST_USERNS_REQUIRED above). A runner without the setting
-      # fails this step, and the lane's promise has to be looked at again.
-      - name: Allow unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - uses: ./.github/actions/go-test-setup
 
       # KEPLOY_TEST_REAL_DOCKER lets the rows that start containers on the
       # runner's daemon run (a real `docker compose` child's output kept in
@@ -150,14 +111,37 @@ jobs:
       # a DOCKER_HOST, in its t.TempDir() fails here, as it fails on a
       # machine whose temporary directory is long, instead of passing under
       # /tmp. Such a row takes its socket's directory from internal/testnet's
-      # SocketDir, made under TMPDIR. The steps after this one keep /tmp.
-      - name: Running Unit Tests
+      # SocketDir, made under TMPDIR.
+      - name: Running Unit Tests (shard ${{ matrix.shard }}/${{ matrix.total }})
         env:
           KEPLOY_TEST_REAL_DOCKER: "1"
           GOTMPDIR: /tmp/keploy-go-test-a-GOTMPDIR-as-long-as-a-developer-machine-may-have
         run: |
+          set -o pipefail
           mkdir -p "$GOTMPDIR"
-          go test ./...
+          pkg_list=$(bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-test-shard.sh" "${{ matrix.shard }}" "${{ matrix.total }}")
+          mapfile -t pkgs <<< "$pkg_list"
+          if [ "${#pkgs[@]}" -eq 0 ] || [ -z "${pkgs[0]}" ]; then
+            echo "shard ${{ matrix.shard }}/${{ matrix.total }} resolved zero packages" >&2
+            exit 1
+          fi
+          printf 'Shard %s/%s (%d packages):\n' "${{ matrix.shard }}" "${{ matrix.total }}" "${#pkgs[@]}"
+          printf '  %s\n' "${pkgs[@]}"
+          go test "${pkgs[@]}"
+
+  # Learn proven-mode cache/lazy sweeps, learn-tracker -race rows, and the
+  # large-stream HTTP learn memory-bound legs.
+  learn-modes:
+    timeout-minutes: 35
+    name: go-test-learn-modes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/go-test-setup
 
       # Most of the learn package's rows read a cache no tracker made, and
       # payloads read whole, while keploy reads a set's caches (setDerived)
@@ -166,9 +150,8 @@ jobs:
       # set cache of its own, KEPLOY_LEARN_LAZY_EVERY_RAW makes every RawOf a
       # lazy Raw read again at each use. A part of a recording the set keeps
       # under another part's key, or a rule reading a payload past its
-      # accessor, passes the plain run above and fails one of these. Under
-      # the proven switch, as keploy's learn step runs (the plain run above
-      # has it off).
+      # accessor, passes the plain run and fails one of these. Under the proven
+      # switch, as keploy's learn step runs (the plain run has it off).
       - name: Running Unit Tests (learn, every cache a set's, every payload lazy)
         run: |
           KEPLOY_PROVEN=1 KEPLOY_LEARN_SET_EVERY_CACHE=1 go test -count=1 ./pkg/matcher/learn/
@@ -190,8 +173,8 @@ jobs:
 
       # The HTTP learn step's bound row holds its peak heap to the set's
       # budget, a quarter of the agent's memory limit, at three limits. The
-      # plain run above takes the 256 MiB limit alone, which streams 128 MiB,
-      # twice its budget; the 512 MiB and 1 GiB limits' legs run only with
+      # plain run takes the 256 MiB limit alone, which streams 128 MiB, twice
+      # its budget; the 512 MiB and 1 GiB limits' legs run only with
       # KEPLOY_LARGE_STREAM_MIB set, here, at a 256 MiB stream, so the
       # package's own run (and the Windows lane's) stays short. Each leg's
       # PASS line is grepped, so a leg that skips or is renamed away fails
@@ -208,28 +191,42 @@ jobs:
               { echo "the bound row's $leg leg did not pass"; exit 1; }
           done
 
+  # Privileged root rows: kcmp(2) open-file checks, starvetest scheduling-policy
+  # restore, and Linux eBPF/tracefs hooks.
+  root-rows:
+    timeout-minutes: 25
+    name: go-test-root-rows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: setup
+        uses: ./.github/actions/go-test-setup
+
       # utils' TestMarkExitCountsOpenFilesNotDescriptors compares a child's
       # descriptors with kcmp(2), which the kernel may refuse the runner user
       # (another process's files need PTRACE_MODE_READ_REALCREDS). Where it
       # refuses, the row holds keploy to counting each descriptor and saying
       # why, and logs why the kernel refused: run here with -v so that reason
-      # is in the log, even where the unit run above failed. Run again as
-      # root with KEPLOY_TEST_KCMP_REQUIRED=1, which fails it where the kernel
-      # refuses, so the comparison itself runs on every PR. Beside it, the
-      # rows of a child reaped before its files are compared (required to
-      # compare as root too) and of a process read through threads that exit
-      # (it builds a C program; a runner with no cc fails the step). Each leg runs
-      # whether or not the one before it passed or built (a leg's failure is
-      # in its output, not the shell's -e and pipefail), so one run says both
-      # answers; each PASS line is grepped at the end, so a row that fails,
-      # does not build or vanishes fails the step. Each run passes
+      # is in the log. Run again as root with KEPLOY_TEST_KCMP_REQUIRED=1,
+      # which fails it where the kernel refuses, so the comparison itself runs
+      # on every PR. Beside it, the rows of a child reaped before its files are
+      # compared (required to compare as root too) and of a process read through
+      # threads that exit (it builds a C program; a runner with no cc fails the
+      # step). Each leg runs whether or not the one before it passed or built (a
+      # leg's failure is in its output, not the shell's -e and pipefail), so one
+      # run says both answers; each PASS line is grepped at the end, so a row
+      # that fails, does not build or vanishes fails the step. Each run passes
       # -test.timeout, as go test does: a test binary run with none has no
       # deadline. The http row bounds its waits by the test's deadline, so a
       # hang there fails naming what it waited on instead of running to the
       # job's end; the utils rows bound none of their waits so (awaitFile), and
       # the timeout alone bounds their run.
       - name: Open-file rows as the runner user and as root
-        if: success() || failure()
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         shell: bash
         run: |
           rm -f /tmp/utils.test /tmp/http.test
@@ -258,7 +255,7 @@ jobs:
       # KEPLOY_TEST_POLICY_RESTORE_REQUIRED=1, which fails it where the
       # kernel would not, so the policy given back is checked on every PR.
       - name: Hold row as root
-        if: success() || failure()
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
@@ -268,7 +265,7 @@ jobs:
           sudo env KEPLOY_TEST_CPU_HOLD=1 KEPLOY_TEST_POLICY_RESTORE_REQUIRED=1 /tmp/starvetest.test -test.count=1 -test.v -test.run '^TestAHoldLetsItsProcessesRunAsBefore$' | tee /tmp/starvetest-root.out
           grep -q -- '^--- PASS: TestAHoldLetsItsProcessesRunAsBefore ' /tmp/starvetest-root.out
 
-      # The hooks package's root tests skip in the run above, which is the
+      # The hooks package's root tests skip in the unit run, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
       # objects against this kernel's BTF, as the agent does, and
       # TestTracefsMountedAgreesWithCiliumInEveryLayout holds tracefsMounted to
@@ -282,6 +279,7 @@ jobs:
       # each PASS line grepped, so a test or layout that skips or vanishes
       # fails the step.
       - name: Hooks tests as root
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         shell: bash
         run: |
           go test -c -o /tmp/hooks-linux.test ./pkg/agent/hooks/linux/
@@ -292,6 +290,46 @@ jobs:
             TestTracefsMountedAgreesWithCiliumInEveryLayout/{none,canonical,elsewhere,subdir,debugfs}; do
             grep -q -- "--- PASS: $t " /tmp/hooks-linux.out || { echo "$t did not pass as root"; exit 1; }
           done
+
+  # Race detector for agent proxy, netnames, routes, and control-plane token
+  # (requires MySQL for proxy's real-server MySQL TLS rows).
+  race-proxy:
+    timeout-minutes: 35
+    name: go-test-race-proxy
+    runs-on: ubuntu-latest
+    env:
+      # This lane PROVIDES the MySQL below, so it is entitled to fail when the
+      # server is missing. The real-server tests key their hard failure on this
+      # var rather than on the generic CI var: CI is set by every GitHub Actions
+      # run, including forks and lanes that promise no database, so keying on it
+      # would turn an unrelated contributor's PR red over a service they were
+      # never offered. Unset, the tests skip.
+      KEPLOY_TEST_MYSQL_REQUIRED: "1"
+      KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
+      KEPLOY_TEST_MYSQL_USER: root
+      KEPLOY_TEST_MYSQL_PASS: rootpass
+      KEPLOY_TEST_MYSQL_DB: sampledb
+    permissions:
+      contents: read
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpass
+          MYSQL_DATABASE: sampledb
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -prootpass"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/go-test-setup
 
       # The mock-manager's concurrency guards — the match-count race and the
       # hitMu/treesMu lock order — are only meaningful under -race: without
@@ -309,8 +347,11 @@ jobs:
       # on each change closing a channel under the store's lock, and a close
       # moved outside the lock passes a plain run while it can panic the agent
       # with "close of closed channel". Only -race sees it, so race both too.
+      #
+      # -timeout 15m gives pkg/agent/proxy (542s) and integrations/http (537s)
+      # headroom beyond go test's 10m default under -race (run 45588244174).
       - name: Running Race Detector (agent proxy)
-        run: go test -race -count=1 ./pkg/agent/proxy/... ./pkg/agent/netnames/... ./pkg/agent/routes/...
+        run: go test -race -count=1 -timeout 15m ./pkg/agent/proxy/... ./pkg/agent/netnames/... ./pkg/agent/routes/...
 
       # Same argument, different subtree: pkg/agent/token holds the
       # control-plane token behind a mutex that Session and Adopt share, and a
@@ -321,13 +362,42 @@ jobs:
       - name: Running Race Detector (agent control-plane token)
         run: go test -race -count=1 ./pkg/agent/token/...
 
+  # Race detector for mapping file writes (includes the 40k-mock heap-bound
+  # passes under -race instrumentation).
+  race-mapdb:
+    timeout-minutes: 30
+    name: go-test-race-mapdb
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/go-test-setup
+
       # Same argument for a set's mapping file: every write of it holds the
       # set's write lock, which lives in a table every MappingDb of the process
       # shares (k8s-proxy's recorder and auto-replay round each build their
       # own over one directory). The lock rows prove no write is lost;
       # a table read outside its mutex passes them by, and only -race sees it.
+      # -timeout 15m gives the 40k-mock heap-bound passes headroom beyond go
+      # test's 10m default under -race instrumentation.
       - name: Running Race Detector (mapping file writes)
-        run: go test -race -count=1 ./pkg/platform/yaml/mapdb/
+        run: go test -race -count=1 -timeout 15m ./pkg/platform/yaml/mapdb/
+
+  # Race detector for replay.
+  race-replay:
+    timeout-minutes: 35
+    name: go-test-race-replay
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/go-test-setup
 
       # Same argument for replay: its test-set loop runs the application, its
       # watcher and the tests on goroutines of their own, and one defect its
@@ -336,9 +406,54 @@ jobs:
       # passes a race by, so TestRunTestSetDrainThatGivesUpLeavesTheWatcherAlone
       # proves something only here. The whole package, not the tests named
       # for that loop, so the rest of its concurrency is raced too. Measured
-      # under -race: 4m09s on 14 cores and 6m22s with the test binary pinned to
-      # 4 CPUs (the size of ubuntu-latest), with no race. -timeout 20m gives
-      # that run about three times its 4-CPU time before go test calls it
-      # hung; the default 10m gives it less than twice.
+      # under -race: 4m09s on 14 cores, 6m22s pinned to 4 CPUs, and 705s on
+      # ubuntu-latest (run 45588244174), with no race. -timeout 20m keeps ~1.7x
+      # headroom over that ubuntu-latest run where the default 10m would fail.
       - name: Running Race Detector (replay)
         run: go test -race -count=1 -timeout 20m ./pkg/service/replay/
+
+  # Stable gate check preserving the `go-test` check name for branch protection
+  # and PR reviewers. Fails closed if any shard or race job fails, cancels, or
+  # is skipped.
+  test:
+    timeout-minutes: 5
+    name: go-test
+    runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      contents: read
+    needs:
+      - unit
+      - learn-modes
+      - root-rows
+      - race-proxy
+      - race-mapdb
+      - race-replay
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - name: Verify all go-test jobs succeeded
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(jq -er 'if type == "object" then length else error("expected object") end' <<< "$NEEDS_JSON")
+          if [ "$count" -eq 0 ]; then
+            echo "FAIL: needs context is empty" >&2
+            exit 1
+          fi
+          rows=$(jq -er 'to_entries[] | if (.value | type) != "object" then error("non-object job entry") else [.key, (.value.result // "")] | @tsv end' <<< "$NEEDS_JSON")
+          failed=0
+          seen=0
+          while IFS=$'\t' read -r job res; do
+            seen=$((seen + 1))
+            echo "  ${job}: ${res}"
+            if [ "$res" != "success" ]; then
+              echo "FAIL: ${job} ended with '${res}', want 'success'" >&2
+              failed=1
+            fi
+          done <<< "$rows"
+          if [ "$seen" -ne "$count" ]; then
+            echo "FAIL: read ${seen} job rows, expected ${count}" >&2
+            exit 1
+          fi
+          exit "$failed"

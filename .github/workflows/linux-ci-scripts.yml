@@ -72,6 +72,12 @@ name: Linux CI scripts
 # it; only Apple's Accepted for the zip that was sent writes the binary. And
 # build-darwin's steps: the state is kept before the wait, and a rerun skips
 # the build, signing and submission.
+#
+# And go-test-shard.tests.sh: go-test-shard.sh, which deterministically
+# partitions `go list ./...` across go-test.yaml's parallel unit shards (exact
+# union, zero overlaps, serpentine spreading of heavy packages, fail-closed on
+# bad args or empty lists), plus structural checks on go-test.yaml and its
+# composite setup action (all suites present, fail-closed `go-test` aggregator).
 
 on:
   push:
@@ -106,6 +112,10 @@ on:
       - '.github/scripts/macos/notarize-darwin.sh'
       - '.github/scripts/macos/notarize-darwin.tests.sh'
       - '.github/workflows/release.yml'
+      - '.github/workflows/test_workflow_scripts/go-test-shard.sh'
+      - '.github/workflows/test_workflow_scripts/go-test-shard.tests.sh'
+      - '.github/workflows/go-test.yaml'
+      - '.github/actions/go-test-setup/action.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -137,6 +147,10 @@ on:
       - '.github/scripts/macos/notarize-darwin.sh'
       - '.github/scripts/macos/notarize-darwin.tests.sh'
       - '.github/workflows/release.yml'
+      - '.github/workflows/test_workflow_scripts/go-test-shard.sh'
+      - '.github/workflows/test_workflow_scripts/go-test-shard.tests.sh'
+      - '.github/workflows/go-test.yaml'
+      - '.github/actions/go-test-setup/action.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -332,3 +346,14 @@ jobs:
 
       - name: Test notarize-darwin.sh (Apple's transient failures are tried again on the same submission; a rerun resumes it; only Accepted for the zip sent writes the binary)
         run: bash .github/scripts/macos/notarize-darwin.tests.sh
+
+  go-test-shard:
+    # Partition, heavy-package spread, fail-closed arg/empty checks, and
+    # go-test.yaml structural invariants; about a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test go-test-shard.sh and go-test.yaml invariants
+        run: bash .github/workflows/test_workflow_scripts/go-test-shard.tests.sh
