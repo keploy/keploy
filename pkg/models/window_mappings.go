@@ -92,7 +92,7 @@ func NewWindowedMock(m *Mock) WindowedMock {
 		At:       m.Spec.ReqTimestampMock,
 		Res:      m.Spec.ResTimestampMock,
 		Place:    PlaceOf(m),
-		TestMock: !m.OutsideTestScopes() && !m.IsAsync(),
+		TestMock: !m.OutsideTestScopes() && !m.IsAsync() && !m.IsReadThrough(),
 		InFlight: InFlightEligible(m),
 		Idle:     IsIdleAnswer(m),
 		Clock:    m.Origin.clock(),

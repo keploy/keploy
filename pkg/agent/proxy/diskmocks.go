@@ -191,7 +191,7 @@ func newDiskMocks(logger *zap.Logger, budget int64) (*DiskMocks, error) {
 // valid timestamps. Reusable/config and missing-timestamp mocks stay resident
 // (the filter routes them without a window check). Call DeriveLifetime first.
 func EligibleForDisk(m *models.Mock) bool {
-	if m == nil || m.TestModeInfo.Lifetime != models.LifetimePerTest {
+	if m == nil || m.TestModeInfo.Lifetime != models.LifetimePerTest || m.IsReadThrough() {
 		return false
 	}
 	req := m.Spec.ReqTimestampMock

@@ -555,6 +555,12 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		miss.places = miss.places.or(everyPlace)
 		miss.fieldDiffs = miss.places.fieldDiffs(miss.fieldDiffs, "")
 	}
+	if !ok && err == nil && !hidden && !restaged() && unheld == "" &&
+		(miss == nil || (miss.matchPhase != models.MatchPhaseStrict && miss.strictRejected == 0)) {
+		if rtResp, hit := tryReadThrough(logger, req, decodeCtx, held); hit {
+			return rtResp, true, nil, nil
+		}
+	}
 	if miss != nil {
 		miss.call = call
 		// One command more than the open test recorded: its own recordings
@@ -565,6 +571,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 	// Only a command matchCommandWith answered with a recording wrote served.
 	bindAfter(decodeCtx, req, served)
+	if ok && resp != nil {
+		decodeCtx.UpdateDatabaseFromCommand(&req.PacketBundle, &resp.PacketBundle)
+	}
 	return resp, ok, miss, err
 }
 

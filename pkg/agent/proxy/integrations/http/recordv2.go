@@ -1392,6 +1392,9 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 		"operation": req.Method,
 		"connID":    connID,
 	}
+	if isHTTPExchangeTLS(opts.DstCfg, nil, opts.TLS || m.TLS, req.URL) {
+		meta["tls"] = "true"
+	}
 	skip, rule, matched := h.passThrough(ctx, req, destPort, opts)
 	if skip {
 		return nil, nil
@@ -1527,6 +1530,7 @@ func (h *HTTP) buildFaultAfterHead(ctx context.Context, m *FinalHTTP, req *http.
 		ResTimestampMock: m.ResTimestampMock,
 		ReqClock:         m.ReqClock,
 		Fault:            &models.Fault{Kind: models.FaultEOF},
+		TLS:              m.TLS,
 	}
 	mock, err := h.buildHTTPMock(ctx, noAnswer, destPort, connID, opts)
 	m.recordOne = noAnswer.recordOne

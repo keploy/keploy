@@ -111,9 +111,19 @@ type OutgoingOptions struct {
 	Synchronous bool
 	Mocking     bool // used to enable/disable mocking
 	SwapIDs     bool
+	// TLS reports that this connection carried TLS traffic even when
+	// SkipTLSMITM is set (observe-only / proxyless capture where DstCfg.TLSCfg
+	// is nil and the client connection is a SimulatedConn). No production code
+	// in this repository sets it; a capture layer that decrypts TLS outside the
+	// proxy must set it per connection. Alongside this flag, the HTTP
+	// integration also detects TLS from DstCfg.TLSCfg, *tls.Conn, and the https
+	// URL scheme on both record and replay. json:"-" like SrcInstance; sits in
+	// the final byte of the 4-byte word alongside Synchronous/Mocking/SwapIDs
+	// before SrcInstance so supervisor.Session stays in the 640 B size class.
+	TLS bool `json:"-"`
 	// SrcInstance is the test worker instance the kernel stamped THIS
 	// connection with (0: none). Runtime, per-connection: json:"-" like
-	// SrcPid. It sits in the word the three bools above leave four bytes
+	// SrcPid. It sits in the word the four bools above leave four bytes
 	// of: supervisor.Session holds these options by value, once per
 	// connection, and stays in the 640 B size class only so
 	// (TestASessionStaysInThe640ByteSizeClass).

@@ -83,9 +83,12 @@ func (m *SyncMockManager) refuseEnded() bool {
 // agent owed it from before its stop and asked for its streams' end markers
 // (routes' endRecordingStreams), or its streams have all closed after its
 // stop asked (StopWasAsked). From here the agent captures nothing until a
-// recording starts: no test case, mock or mapping (Recording). What it still
-// holds for the ended recording is let go, and nothing of it is said per
-// item:
+// recording starts: no test case, mock or mapping (Recording). Before letting
+// go of the remaining buffer, it delivers late owned / startup / reusable
+// mocks to their owners (FlushOwnedWindows) and rescues genuinely unowned
+// read-only mocks preceding any still-open window's openFrom into the bounded
+// session read-through tier (flushUnownedReadThrough). What it still holds
+// for the ended recording is then let go, and nothing of it is said per item:
 //   - every request still in flight is given up (NoteStop at now, then
 //     EndStoppedRecording): none is the ended recording's any more, and none
 //     is a later one's;
@@ -107,6 +110,13 @@ func (m *SyncMockManager) EndRecording() {
 	m.ended.requests.Store(0)
 	m.ended.calls.Store(0)
 	m.ended.said.Store(false)
+	// Deliver any late owned / startup / reusable mocks to their owners first
+	// (matching CloseOutChan), then rescue any genuinely unowned read-only
+	// mocks still sitting in m.buffer (e.g. from sampled-out or filtered-out
+	// cache-warming calls captured within StaleHorizon of stop) before clearing
+	// m.buffer and before the caller closes the mock stream with its end marker.
+	m.FlushOwnedWindows()
+	m.flushUnownedReadThrough()
 	m.NoteStop(time.Now())
 	m.EndStoppedRecording()
 

@@ -10983,6 +10983,9 @@ func (r *Replayer) determineMockingStrategyWith(ctx context.Context, testSetID s
 // compared. Tier is read from TestModeInfo.Lifetime (derived at ingest) with
 // Spec.Metadata["type"] as a fallback for mocks whose lifetime wasn't derived.
 func isReusableTierMock(m *models.Mock) bool {
+	if m != nil && m.IsReadThrough() {
+		return true
+	}
 	switch m.TestModeInfo.Lifetime {
 	case models.LifetimeSession, models.LifetimeConnection:
 		return true
@@ -10998,9 +11001,13 @@ func isReusableTierMock(m *models.Mock) bool {
 
 // isReusableTierState is the MockState (consumed-mock) equivalent of
 // isReusableTierMock. GetConsumedMocks carries the recorder-derived Lifetime
-// and metadata type, so session/connection/config mocks are carved out of the
-// consumed side of the assertion the same way they are on the expected side.
+// and metadata type, so session/connection/config/read-through mocks are carved
+// out of the consumed side of the assertion and startup partitioning the same
+// way they are on the expected side.
 func isReusableTierState(s models.MockState) bool {
+	if s.ReadThrough {
+		return true
+	}
 	switch s.Lifetime {
 	case models.LifetimeSession, models.LifetimeConnection:
 		return true

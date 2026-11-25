@@ -198,6 +198,9 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 		}
 		return ruleWindowBoundDropped
 	}
+	if p.IsReadThrough() {
+		return ruleStartup
+	}
 	if untimedMock(p) {
 		return ruleUntimed
 	}

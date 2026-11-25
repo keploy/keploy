@@ -176,6 +176,12 @@ func (m *Mock) DeriveLifetime() {
 	// StoreMocks → syncMock). The bool also guards
 	// legacyKindFallbackFires from double-counting when a mock passes
 	// through multiple ingest paths.
+	// Cache read-through validation before the LifetimeDerived short-circuit:
+	// mocks gob-streamed from CLI to agent arrive with LifetimeDerived=true
+	// while the unexported readThroughState starts at readThroughUnknown.
+	if m.TestModeInfo.readThroughState == readThroughUnknown {
+		m.cacheReadThroughState()
+	}
 	if m.TestModeInfo.LifetimeDerived {
 		return
 	}

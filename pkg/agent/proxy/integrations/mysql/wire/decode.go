@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase"
@@ -165,9 +166,12 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		var pktType string
 		switch pkt := pkt.(type) {
 		case *mysql.HandshakeResponse41Packet:
-			// Store the client capabilities to use it later
+			// Store the client capabilities and initial database to use later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
 			decodeCtx.ClientMariaDBCaps = pkt.MariaDBCapabilities()
+			if db := strings.TrimSpace(pkt.Database); db != "" {
+				decodeCtx.Database = db
+			}
 
 			// Its auth response is the client's credential, or derived
 			// from it: the password in clear under mysql_clear_password
