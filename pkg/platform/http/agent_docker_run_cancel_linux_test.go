@@ -129,6 +129,7 @@ func TestDockerAgentCancelOfAClientAlreadyWaitedFor(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := newAgentRun()
+	t.Cleanup(run.engine.end) // the run's end, which asks for its volumes, is not run here
 	run.ready.Store(true)
 	if err := dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(&removesAtOnce{}, stopTestContainer))(); err != nil {
 		t.Fatalf("the stop of a client already waited for: %v", err)
