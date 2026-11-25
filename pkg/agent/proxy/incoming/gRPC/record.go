@@ -116,6 +116,21 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		if loadOpts != nil {
 			opts = loadOpts()
 		}
+		if stream.HTTPReq != nil {
+			// An HTTP request sent over cleartext HTTP/2 (h2c), not a gRPC
+			// call: recorded as the HTTP request it is, by the HTTP
+			// capture, with its filters, deduper and body handling, as an
+			// HTTP/1.x request is (incoming/http.go). A pause of the memory
+			// guard as its request was read costs it, as it costs an
+			// HTTP/1.x request read then (pausedAtRequest): its mocks went.
+			if Utils.SkipGRPCUnderPressure(ctx, stream.RequestPaused) {
+				_ = stream.HTTPReq.Body.Close()
+				_ = stream.HTTPResp.Body.Close()
+				return
+			}
+			Utils.CaptureHook(syncMock.WithWindow(windowCtx, win), logger, t, stream.HTTPReq, stream.HTTPResp, stream.ReqTime, stream.RespTime, opts, synchronous, mapping, appPort)
+			return
+		}
 		Utils.CaptureGRPC(syncMock.WithWindow(windowCtx, win), logger, t, stream, appPort, synchronous, mapping, opts)
 	}
 
@@ -130,6 +145,7 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		done := parsedChunks
 		parsedChunks = nil
 		emitMu.Unlock()
+		leaveOutAnswers(logger, sm, calls, loadOpts)
 		emitCompleteStreams(ctx, logger, sm, captureStream)
 		for _, d := range done {
 			d()
@@ -540,6 +556,48 @@ func drainFrameChunks(ch <-chan frameChunk) {
 	}
 }
 
+// leaveOutAnswers decides, at its answer's headers, each HTTP request over
+// HTTP/2 whose answer is not recorded, as the HTTP/1.x ingress decides one
+// (notRecordedStream, notRecordedStaticAsset): a stream (SSE, NDJSON,
+// multipart: keploy records no streaming test case) or a static asset the
+// recording leaves out. Its window ends then, so no mock is held for it
+// however long it lasts, and the stream manager keeps none of its bytes.
+func leaveOutAnswers(logger *zap.Logger, sm *pkg.DefaultStreamManager, calls *callWindows, loadOpts func() models.IncomingOptions) {
+	answered := sm.TakeAnswered()
+	if len(answered) == 0 {
+		return
+	}
+	var opts models.IncomingOptions
+	if loadOpts != nil {
+		opts = loadOpts()
+	}
+	for _, a := range answered {
+		switch {
+		case models.IsHTTPStreamResponse(a.HTTPResp):
+			if !Utils.IsFiltered(logger, a.HTTPReq, opts) {
+				logger.Info("Not recording a streaming response as a test case: keploy does not support streaming test cases",
+					zap.String("method", a.HTTPReq.Method),
+					zap.String("path", utils.URLPathShape(a.HTTPReq.URL)),
+					zap.String("content_type", mediaTypeOf(a.HTTPResp)))
+			}
+		case Utils.ShouldSkipStaticAsset(logger, a.HTTPReq, a.HTTPResp, opts):
+			logger.Debug("Skipping static asset response as a test case (--ignore-static-assets)",
+				zap.String("content_type", mediaTypeOf(a.HTTPResp)))
+		default:
+			continue
+		}
+		sm.Drop(a.ID)
+		calls.take(a.ID).Close()
+	}
+}
+
+// mediaTypeOf is an answer's Content-Type as a log line names it: its media
+// type, lower case, never its parameters, which the app writes.
+func mediaTypeOf(resp *http.Response) string {
+	ct, _, _ := strings.Cut(resp.Header.Get("Content-Type"), ";")
+	return strings.ToLower(strings.TrimSpace(ct))
+}
+
 // emitCompleteStreams checks the stream manager for complete request/response
 // pairs and dispatches each via capture. Only called from the single emitter
 // goroutine to prevent duplicate emissions. ctx, t, appPort, synchronous, and
@@ -556,6 +614,15 @@ func emitCompleteStreams(ctx context.Context, logger *zap.Logger, sm *pkg.Defaul
 
 	streams := sm.GetCompleteStreams()
 	for _, stream := range streams {
+		if stream.HTTPReq != nil {
+			logger.Debug("captured an HTTP request over HTTP/2 (passthrough)",
+				zap.String("method", stream.HTTPReq.Method),
+				zap.String("path", utils.URLPathShape(stream.HTTPReq.URL)),
+				utils.PathTagField(models.URLPathTag(ctx, stream.HTTPReq.Method, stream.HTTPReq.URL)))
+			capture(stream)
+			sm.CleanupStream(stream.ID)
+			continue
+		}
 		if stream.GRPCReq == nil || stream.GRPCResp == nil {
 			continue
 		}
