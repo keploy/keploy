@@ -253,6 +253,44 @@ func TestTheRecordedSchemaIsResolvedOncePerTestSet(t *testing.T) {
 	}
 }
 
+// A set whose schema was not given on the first ask (a passing read failure)
+// is asked again for its next test, and decoded once the source answers.
+func TestARecordedSchemaNotGivenIsAskedAgain(t *testing.T) {
+	r := &Replayer{config: &config.Config{}, logger: zap.NewNop()}
+	src := &flakySchemas{schema: ordersSchema(t, ordersProto)}
+	r.SetGrpcSchemaSource(src)
+	_, first := compareWithProtos(r, ordersCase("3: {\"Pending\"}", nil), ordersResp("3: {\"Shipped\"}"))
+	_, second := compareWithProtos(r, ordersCase("3: {\"Pending\"}", nil), ordersResp("3: {\"Shipped\"}"))
+	if first.GrpcDecode == nil || first.GrpcDecode.ExpectedJSON != "" {
+		t.Fatalf("first test: %+v", first.GrpcDecode)
+	}
+	if second.GrpcDecode == nil || second.GrpcDecode.ExpectedJSON == "" || src.recordedAsked != 2 || src.targetAsked != 2 {
+		t.Fatalf("second test: %+v (recorded asked %d, target %d)", second.GrpcDecode, src.recordedAsked, src.targetAsked)
+	}
+}
+
+// flakySchemas answers nothing on the first ask, then its schema.
+type flakySchemas struct {
+	schema                     *protoschema.Schema
+	recordedAsked, targetAsked int
+}
+
+func (f *flakySchemas) RecordedSchema(context.Context, string) (*protoschema.Schema, string, string) {
+	f.recordedAsked++
+	if f.recordedAsked == 1 {
+		return nil, "", "could not be read (timeout)"
+	}
+	return f.schema, "release:app:v1", ""
+}
+
+func (f *flakySchemas) TargetSchema(context.Context) (*protoschema.Schema, string) {
+	f.targetAsked++
+	if f.targetAsked == 1 {
+		return nil, ""
+	}
+	return f.schema, "release:app:v2"
+}
+
 // A stream shows the message that differs, not the first one.
 func TestAStreamShowsTheMessageThatDiffers(t *testing.T) {
 	r := protoReplayer(t)

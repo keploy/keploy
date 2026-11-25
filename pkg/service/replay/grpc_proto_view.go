@@ -52,7 +52,10 @@ import (
 // run read before uploads existed. Never the release under test's.
 
 // GrpcSchemaSource supplies schemas uploaded per release. Cloud replay sets
-// one (SetGrpcSchemaSource); a plain keploy test has none.
+// one (SetGrpcSchemaSource); a plain keploy test has none. The replay keeps a
+// schema it is given for the run, and asks again where it was given none, so
+// a source should answer repeated asks from what it knows (reading again
+// only what may have failed for a passing reason).
 type GrpcSchemaSource interface {
 	// RecordedSchema is the schema uploaded for the release testSetID was
 	// recorded on, with its label ("release:<image ref>"). A nil schema comes
@@ -218,12 +221,17 @@ func (r *Replayer) recordedSchemaFor(ctx context.Context, testSetID string) reco
 	r.grpcSchemas.mu.Unlock()
 	s, label, note := r.grpcSchemas.source.RecordedSchema(ctx, testSetID)
 	rs := recordedSchema{schema: s, label: label, note: note}
-	r.grpcSchemas.mu.Lock()
-	if r.grpcSchemas.recorded == nil {
-		r.grpcSchemas.recorded = map[string]recordedSchema{}
+	// Only a schema is kept: with none, the source is asked again for the
+	// next test, and it decides whether to read again (a transient failure)
+	// or answer from what it already knows.
+	if s != nil {
+		r.grpcSchemas.mu.Lock()
+		if r.grpcSchemas.recorded == nil {
+			r.grpcSchemas.recorded = map[string]recordedSchema{}
+		}
+		r.grpcSchemas.recorded[testSetID] = rs
+		r.grpcSchemas.mu.Unlock()
 	}
-	r.grpcSchemas.recorded[testSetID] = rs
-	r.grpcSchemas.mu.Unlock()
 	return rs
 }
 
@@ -236,9 +244,11 @@ func (r *Replayer) targetSchema(ctx context.Context) recordedSchema {
 	r.grpcSchemas.mu.Unlock()
 	s, label := r.grpcSchemas.source.TargetSchema(ctx)
 	t := &recordedSchema{schema: s, label: label}
-	r.grpcSchemas.mu.Lock()
-	r.grpcSchemas.target = t
-	r.grpcSchemas.mu.Unlock()
+	if s != nil { // as recordedSchemaFor: only a schema is kept
+		r.grpcSchemas.mu.Lock()
+		r.grpcSchemas.target = t
+		r.grpcSchemas.mu.Unlock()
+	}
 	return *t
 }
 
