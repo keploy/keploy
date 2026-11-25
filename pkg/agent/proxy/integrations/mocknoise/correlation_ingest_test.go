@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // correlationsByFullParse is CorrelationsFromMock as it was before the
@@ -162,7 +163,7 @@ func TestAGatedDetectorFindsWhatAFullParseFinds(t *testing.T) {
 				t.Fatalf("fixture: a full parse finds %d correlations, the row expects %d: %+v", len(want), tc.want, want)
 			}
 			for i := 0; i < 64; i++ {
-				if got := CorrelationsFromMock(m); !reflect.DeepEqual(got, want) {
+				if got := CorrelationsFromMock(zap.NewNop(), m); !reflect.DeepEqual(got, want) {
 					t.Fatalf("run %d: correlations differ from a full parse:\n got  %+v\n want %+v", i, got, want)
 				}
 			}
@@ -281,7 +282,7 @@ func TestAGatedDetectorMatchesAFullParseOnRandomMocks(t *testing.T) {
 
 		m := mockWithBodies(req.String(), body)
 		want := correlationsByFullParse(m)
-		if got := CorrelationsFromMock(m); !reflect.DeepEqual(got, want) {
+		if got := CorrelationsFromMock(zap.NewNop(), m); !reflect.DeepEqual(got, want) {
 			t.Fatalf("mock %d differs from a full parse:\n request %s\n answer  %s\n got  %+v\n want %+v", it, req.String(), body, got, want)
 		}
 		found += len(want)
@@ -458,7 +459,7 @@ func TestAValueOnlyInTheAnswerFindsNoCorrelation(t *testing.T) {
 		`{"key":"6ba7b810-9dad-11d1-80b4-00c04fd430c8"}`,
 	} {
 		m := mockWithBodies(req, `{"id":"`+minted+`","status":"created"}`)
-		if got := CorrelationsFromMock(m); len(got) != 0 {
+		if got := CorrelationsFromMock(zap.NewNop(), m); len(got) != 0 {
 			t.Fatalf("request %s: a value only the answer carries was correlated: %+v", req, got)
 		}
 	}
@@ -488,7 +489,7 @@ func TestALargeAnswerIsNotParsedAtIngest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := mockWithBodies(tc.req, tc.resp)
 			allocs, bytes := allocatedPerRun(3, func() {
-				if got := CorrelationsFromMock(m); len(got) != 0 {
+				if got := CorrelationsFromMock(zap.NewNop(), m); len(got) != 0 {
 					t.Fatalf("want no correlation, got %+v", got)
 				}
 			})
@@ -523,7 +524,7 @@ func TestARequestIsNotParsedForAnEmptyAnswer(t *testing.T) {
 	for _, resp := range []string{"", " \r\n\t "} {
 		m := mockWithBodies(req, resp)
 		allocs := testing.AllocsPerRun(3, func() {
-			if got := CorrelationsFromMock(m); len(got) != 0 {
+			if got := CorrelationsFromMock(zap.NewNop(), m); len(got) != 0 {
 				t.Fatalf("want no correlation, got %+v", got)
 			}
 		})
@@ -542,7 +543,7 @@ func TestAParsedAnswerKeepsOnlyWrittenValues(t *testing.T) {
 	m := mockWithBodies(`{"idempotencyKey":"`+key+`"}`, resp)
 	parse := testing.AllocsPerRun(3, func() { _ = flattenJSONBody(resp) })
 	allocs := testing.AllocsPerRun(3, func() {
-		if got := CorrelationsFromMock(m); len(got) != 1 {
+		if got := CorrelationsFromMock(zap.NewNop(), m); len(got) != 1 {
 			t.Fatalf("want the echo's correlation, got %+v", got)
 		}
 	})
@@ -571,7 +572,7 @@ func TestAnEchoInTheTailOfALargeAnswerIsFound(t *testing.T) {
 			if len(want) != 1 {
 				t.Fatalf("fixture: a full parse finds %d correlations, want the echo's: %+v", len(want), want)
 			}
-			if got := CorrelationsFromMock(m); !reflect.DeepEqual(got, want) {
+			if got := CorrelationsFromMock(zap.NewNop(), m); !reflect.DeepEqual(got, want) {
 				t.Fatalf("correlations differ from a full parse:\n got  %+v\n want %+v", got, want)
 			}
 		})

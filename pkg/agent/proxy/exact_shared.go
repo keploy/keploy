@@ -12,31 +12,60 @@ import (
 // sharedIdent is what a test's view shows of the trees beyond the
 // protocol-phase recordings, and how it hands each out: the reached worker
 // scope (its names and order), the background rules (the pool it shows in a
-// test), and the kept learning each recording is handed out with
+// test), the pool slice whose declared session calls it shows in a test
+// (exactView.declared), and the kept learning each recording is handed out with
 // (exactView.learned). Two test views with the same ident show the same of
 // the same trees (exactView.showsStatic). A staging changes the trees, and
 // the copies learned hands out are per staging epoch, but a staging moves the
 // stored generation of every kind it touches (setMocksWithWindowLocked), the
 // SharedGen's other half: the ident leaves the epoch out.
 //
+// startup is the background install in force in the view's staging epoch
+// (backgroundInstall.at): its plain startup: recordings are no part of a
+// test's view (exactView.startupOwned).
+//
 // own is what the view leaves out of its shared part for being its own
 // (ownShared): two views that own different recordings of the pool or the
-// worker scope show different shared parts.
+// worker scope show different shared parts. replaced is what the view leaves
+// out because its own derived mocks replace those sources (replacedShared).
 type sharedIdent struct {
-	worker *reachedWorker
-	bg     *backgroundState
-	kept   *keptLoad
-	own    string
+	worker   *reachedWorker
+	bg       *backgroundState
+	startup  *backgroundInstall
+	declared *poolSlice
+	kept     *keptLoad
+	own      string
+	replaced string
 }
 
 // sharedIdentOf is v's ident now; w is the reached worker scope it was
-// installed with.
-func sharedIdentOf(v *exactView, w *reachedWorker) sharedIdent {
-	id := sharedIdent{worker: w, bg: v.bg, own: v.ownShared()}
+// installed with, bgIn the background install in force in its staging epoch.
+func sharedIdentOf(v *exactView, w *reachedWorker, bgIn *backgroundInstall) sharedIdent {
+	id := sharedIdent{worker: w, bg: v.bg, startup: bgIn, declared: v.declared, own: v.ownShared(), replaced: v.replacedShared()}
 	if v.kept != nil {
 		id.kept = v.kept.cur.Load()
 	}
 	return id
+}
+
+// replacedShared is, sorted and each ended by a NUL, the names of recordings
+// the open test's derived mocks replace in its view (exactView.sourcesReplaced).
+// "" when there are none.
+func (v *exactView) replacedShared() string {
+	if len(v.sourcesReplaced) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(v.sourcesReplaced))
+	for n := range v.sourcesReplaced {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, n := range names {
+		b.WriteString(n)
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 // ownShared is, sorted and each ended by a NUL, the names of v's own
@@ -75,9 +104,10 @@ type sharedViews struct {
 }
 
 // of sets v's shared number and ident (exactView.shared), w being the reached
-// worker scope v is installed with.
-func (s *sharedViews) of(v *exactView, w *reachedWorker) {
-	id := sharedIdentOf(v, w)
+// worker scope v is installed with, bgIn the background install in force in
+// its staging epoch.
+func (s *sharedViews) of(v *exactView, w *reachedWorker, bgIn *backgroundInstall) {
+	id := sharedIdentOf(v, w, bgIn)
 	if s.lastID == 0 || s.last != id {
 		s.seq++
 		s.last, s.lastID = id, s.seq
@@ -157,10 +187,22 @@ func (m *MockManager) OwnedUnanswered() ([]*models.Mock, bool) {
 // caller reads it and never changes it. False while no test is open.
 func (m *MockManager) OwnedRecordings() (uint64, []*models.Mock, bool) {
 	v := m.exactView()
-	if v == nil || v.test == "" {
+	if v != nil {
+		if v.test == "" {
+			return 0, nil, false
+		}
+		return v.gen, v.owned, true
+	}
+	if _, exact := m.servedBackground(nil); !exact {
 		return 0, nil, false
 	}
-	return v.gen, v.owned, true
+	m.scopeOwnedMu.Lock()
+	gen, owned := m.scopeOwnedGen, m.scopeOwned
+	m.scopeOwnedMu.Unlock()
+	if len(owned) == 0 {
+		return 0, nil, false
+	}
+	return gen, owned, true
 }
 
 // OwnedUnansweredAt is the positions of at, in OwnedRecordings of the view
@@ -177,12 +219,11 @@ func (m *MockManager) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
 
 var _ integrations.SharedReads = (*MockManager)(nil)
 
-// SharedGeneration, SharedMocks and the owned reads are the manager's while
-// the staging is still h's call's after they were read and h reads in the
-// view in force; they report false once the staging moved, when h reads
-// nothing (heldScope.held), and while h reads in another view
-// (heldScope.elsewhere): they are the view in force's open test's, which h's
-// reads are not.
+// SharedGeneration and SharedMocks are the manager's while the staging is
+// still h's call's after they were read and h reads in the view in force;
+// they report false once the staging moved, when h reads nothing
+// (heldScope.held), and while h reads in another view (heldScope.elsewhere):
+// they are the view in force's open test's, which h's reads are not.
 func (h *heldScope) SharedGeneration(kind models.Kind) (integrations.SharedGen, bool) {
 	g, ok := h.MockManager.SharedGeneration(kind)
 	if !ok || h.moved() || h.elsewhere() {
@@ -199,28 +240,69 @@ func (h *heldScope) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	return perTest, session, true
 }
 
+// The owned reads are those of the view h's call was read in (ownedView), as
+// h's other reads are: keploy can decide a test's call after the replay
+// began the next test, and the call is still its own test's, one more than
+// that test recorded when it is one of that test's recordings (the own-call
+// check, integrations.OwnRepeatRead), as when keploy decides it at once. The
+// next test's recordings are never the call's own. Each reports false once
+// the staging moved (heldScope.held), while the view h reads in is no test's
+// (a pool view owns none), and once the view a round snapshot's call is
+// diagnosed in was replaced (heldScope.viewGone), checked after the read.
 func (h *heldScope) OwnedUnanswered() ([]*models.Mock, bool) {
-	owned, ok := h.MockManager.OwnedUnanswered()
-	if !ok || h.moved() || h.elsewhere() {
+	v := h.ownedView()
+	if v == nil {
+		return nil, false
+	}
+	owned := v.unanswered("")
+	if !h.ownedHeld() {
 		return nil, false
 	}
 	return owned, true
 }
 
 func (h *heldScope) OwnedRecordings() (uint64, []*models.Mock, bool) {
-	view, owned, ok := h.MockManager.OwnedRecordings()
-	if !ok || h.moved() || h.elsewhere() {
+	v := h.ownedView()
+	if v == nil || !h.ownedHeld() {
 		return 0, nil, false
 	}
-	return view, owned, true
+	return v.gen, v.owned, true
 }
 
 func (h *heldScope) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
-	live, ok := h.MockManager.OwnedUnansweredAt(view, at)
-	if !ok || h.moved() || h.elsewhere() {
+	v := h.ownedView()
+	if v == nil || v.gen != view {
+		return nil, false
+	}
+	live := v.unansweredAt(at)
+	if !h.ownedHeld() {
 		return nil, false
 	}
 	return live, true
+}
+
+// ownedView is the view h's owned reads are made in, while it is a test's
+// (nil otherwise): the view h's reads are made in (readView: its mark's, or
+// the view in force for a call decided in the test the store opens next and
+// for one whose consume the view in force refused), or, for a call marked
+// from a round snapshot, whose other reads are made in the view in force,
+// the view that snapshot read (heldIn).
+func (h *heldScope) ownedView() *exactView {
+	v := h.readView()
+	if h.snapped {
+		v = h.heldIn
+	}
+	if v != nil && v.test != "" {
+		return v
+	}
+	return nil
+}
+
+// ownedHeld reports whether an owned read made in ownedView is h's call's:
+// the staging is still the call's, and the view a round snapshot's call is
+// diagnosed in was not replaced.
+func (h *heldScope) ownedHeld() bool {
+	return !h.moved() && !h.viewGone()
 }
 
 var _ integrations.SharedReads = (*heldScope)(nil)

@@ -59,9 +59,14 @@ func clockMissWhere(t *testing.T, appClock bool, in *req, body map[string][]stri
 	if err != nil || ok || diag == nil {
 		t.Fatalf("match ok=%v diag=%v err=%v; want a miss", ok, diag, err)
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: in.method, URL: in.url, Host: "api.example", Header: in.header}, in.body, db, nil, nil, body, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: in.method, URL: in.url, Host: "api.example", Header: in.header}, in.body, db, nil, nil, body, diag)
 	if r == nil {
 		t.Fatal("no miss report")
+	}
+	// No caller declares patterns: a clock read the call does not hold is
+	// warned as one alone, never as a pattern's refusal too.
+	if n := logs.FilterMessage("a keploy.yml noise pattern does not excuse a field").Len(); n != 0 {
+		t.Errorf("a clock read's miss warned %d times of a pattern; want none", n)
 	}
 	return r, logs.FilterMessage("a learned read of the application's clock does not hold").All()
 }
@@ -283,7 +288,7 @@ func TestAnAnsweredRecordingOfAnotherRouteGivesNoClockReason(t *testing.T) {
 			t.Fatalf("%s gives the reason %q; want none: the closest recording is of another route", f.shape, f.why)
 		}
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: in.method, URL: in.url, Host: "api.example", Header: in.header}, in.body, db, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: in.method, URL: in.url, Host: "api.example", Header: in.header}, in.body, db, nil, nil, nil, diag)
 	if r == nil || r.ClosestMock != "mock-6" || len(r.FieldReasons) != 0 || !hasField(r.Differs, "path") || !hasField(r.Differs, "body.content") {
 		t.Fatalf("report %+v; want mock-6 closest, path and body.content named, no field reasons", r)
 	}
@@ -308,7 +313,7 @@ func TestARecordingOfAnotherRouteGivesNoNoisePatternReason(t *testing.T) {
 	if err != nil || ok || diag == nil {
 		t.Fatalf("match ok=%v diag=%v err=%v; want a miss", ok, diag, err)
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: in.method, URL: in.url, Host: "api.example", Header: in.header}, in.body, db, nil, nil, body, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: in.method, URL: in.url, Host: "api.example", Header: in.header}, in.body, db, nil, nil, body, diag)
 	if r == nil || r.ClosestMock != "mock-x" || !hasField(r.Differs, "path") || !hasField(r.Differs, "body.id") || len(r.FieldReasons) != 0 {
 		t.Fatalf("report %+v; want mock-x closest, path and body.id named, no field reasons", r)
 	}

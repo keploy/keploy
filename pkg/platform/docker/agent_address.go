@@ -35,7 +35,7 @@ func PresetAgentIP(conf *config.Config) string {
 	if conf == nil {
 		return ""
 	}
-	raw := strings.TrimSpace(conf.Agent.AgentURI)
+	raw := strings.TrimSpace(conf.AgentURI())
 	if raw == "" {
 		return ""
 	}

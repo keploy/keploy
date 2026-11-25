@@ -49,6 +49,15 @@ const (
 	// have taken the connection. Unset, they note nothing, and the lookup
 	// holds nothing.
 	FlagIngressHold uint32 = 1 << 5
+	// FlagIngressSteer (bit 6; KEPLOY_FLAG_INGRESS_STEER in
+	// headers/k_ingress_hold.h), set with FlagIngressHold: the bind hooks
+	// move no bind. The application keeps the port it asks for, its bind is
+	// noted, and the lookup steers the connections that socket would take to
+	// the agent's park, which forwards each to the application at the
+	// address it was sent to (ingressport.go). Nothing but the agent's own
+	// sockets stands between the application and its callers, so the
+	// agent's death leaves the application's port to the application.
+	FlagIngressSteer uint32 = 1 << 6
 )
 
 type BpfSpinLock struct{ Val uint32 }

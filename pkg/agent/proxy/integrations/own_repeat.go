@@ -23,6 +23,17 @@ import (
 // duplicate of a recorded call (a write made twice, a retried request) would
 // pass.
 //
+// One exception, in the judging, not in the answer: a parser that finds such
+// a call the same request as one of the set's background recordings (its
+// worker: or startup: mocks), apart from noise and reads of the clock, marks
+// its miss Background (models.MockMismatchReport.Background). That miss is
+// listed, and counts against no test and no set: it is one more run of the
+// application's own background work, a poll on a timer, and not the test's.
+// So the background still never answers one call more than the open test
+// recorded, but such a call fails the test only when it is not identical to
+// a background recording. A parser that marks nothing leaves every such miss
+// the test's, as before.
+//
 // The parser decides whether a call is one of the open test's own calls: one
 // its matcher, as it reads "the same call", matches with a recording the
 // test owns, answered or not (OwnRepeatRead). The decision is asked where a
@@ -85,6 +96,24 @@ func InBackground(db MockMemDb, name string) bool {
 	return ok && b.InBackground(name)
 }
 
+// StartupOwner is an optional MockMemDb capability under the proven switch:
+// whether a recording, by name, is one of the set's plain startup:
+// recordings (models.BackgroundRecording.Startup) that call, read in a
+// test's window, is that test's own call of: made outside every test, so a
+// miss of the call names it as such and says how to declare the call, not
+// as a recording made elsewhere (MockMismatchReport.NotOwned). The agent's
+// MockManager implements it, and every MockMemDb wrapper must forward it.
+type StartupOwner interface {
+	OwnsStartup(call CallRound, name string) bool
+}
+
+// OwnsStartup is db's StartupOwner answer: false from a store that has none
+// (it marks no plain startup: recording).
+func OwnsStartup(db MockMemDb, call CallRound, name string) bool {
+	o, ok := db.(StartupOwner)
+	return ok && o.OwnsStartup(call, name)
+}
+
 // OwnRepeatRead is db, the store HoldToRound returned for call, as the call
 // reads it: with the decision whether the call is one of the open test's own
 // calls kept for the door where a background recording is about to answer it
@@ -126,7 +155,7 @@ func InBackground(db MockMemDb, name string) bool {
 // test's own, so they are never in the owned list and stay readable to the
 // call either way.
 func OwnRepeatRead(db MockMemDb, call CallRound, owns func() bool) MockMemDb {
-	if !provenswitch.On() || !ShowsBackgroundIn(call, db) {
+	if (!provenswitch.On() && !S12Background(db)) || !ShowsBackgroundIn(call, db) {
 		return db
 	}
 	h, ok := db.(BackgroundHider)

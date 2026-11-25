@@ -109,9 +109,9 @@ func TestATreeTheStopCannotReadIsStillStopped(t *testing.T) {
 // WaitDelay) is no exit of its own.
 func TestAGroupTheStopCannotSignalIsSaid(t *testing.T) {
 	orig := signalGroup
-	signalGroup = func(logger *zap.Logger, pid int, sig syscall.Signal) error {
+	signalGroup = func(logger *zap.Logger, pid int, sig syscall.Signal) (map[int]bool, error) {
 		if sig == syscall.SIGINT {
-			return syscall.EPERM
+			return nil, syscall.EPERM
 		}
 		return orig(logger, pid, sig)
 	}

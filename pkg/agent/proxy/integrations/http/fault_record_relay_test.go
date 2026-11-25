@@ -1,19 +1,19 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
 import (
-	"errors"
+	"context"
 	"io"
 	"net"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -62,9 +62,19 @@ func appRead(t *testing.T, app net.Conn) (string, error) {
 }
 
 // awaitPeerEnd waits until the relay has read dir's end of the connection
-// (Session.PeerEnded), so a close of the other side that follows is the
-// second end, as an application's reaction to an end the relay forwarded it
-// is: the relay marks an end before it forwards it.
+// (Session.PeerEnded) and handed it on, so a close of the other side that
+// follows is the second end, as an application's reaction to an end the
+// relay forwarded it is.
+//
+// The destination's end is marked before the relay looks at the client's
+// socket (Relay.destEndRead) and forwards it, so a client close that comes
+// between the mark and that look is a close before the destination's end
+// reached the client, which the client's own end judges
+// (clientEndJudges;
+// TestRecordV2_ThroughTheRelayAnAppThatClosedBeforeTheUpstreamsEndReachedItJudgesTheCall).
+// An application can react only to an end it has read, so for the
+// destination's end the wait ends once the application has read it: the
+// relay's FIN (io.EOF) or its reset.
 func awaitPeerEnd(t *testing.T, c *relayedConn, dir fakeconn.Direction) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -73,6 +83,12 @@ func awaitPeerEnd(t *testing.T, c *relayedConn, dir fakeconn.Direction) {
 			t.Fatalf("the relay did not read the end of side %d within 10s", dir)
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if dir != fakeconn.FromDest {
+		return
+	}
+	if _, err := appRead(t, c.app); err != io.EOF && !neterr.IsConnReset(err) {
+		t.Fatalf("the application's read ended with %v, want the end the relay forwarded (EOF or a reset)", err)
 	}
 }
 
@@ -92,6 +108,11 @@ func oneMock(t *testing.T, mocks []*models.Mock, err error) *models.Mock {
 	if len(mocks) != 1 {
 		t.Fatalf("recorded %d mocks, want 1: the faulted call is recorded", len(mocks))
 	}
+	// A test's mock with no request time is read as needed by every test
+	// case of its recording (syncMock's warnNoRequestTime).
+	if mocks[0].Spec.ReqTimestampMock.IsZero() {
+		t.Fatalf("the faulted call's mock has no request time; want its request's first byte's")
+	}
 	return mocks[0]
 }
 
@@ -110,7 +131,7 @@ func TestRecordV2_FaultUpstreamResetBeforeAnswer(t *testing.T) {
 	}
 	_ = c.src.Close()
 	got, rerr := appRead(t, c.app)
-	if got != "" || !errors.Is(rerr, syscall.ECONNRESET) {
+	if got != "" || !neterr.IsConnReset(rerr) {
 		t.Errorf("the application read %q, %v; want nothing, then a reset, as the upstream gave", got, rerr)
 	}
 	mocks, err := c.finish(t)
@@ -145,7 +166,7 @@ func TestRecordV2_FaultUpstreamNeverAnswersAndTheAppGivesUp(t *testing.T) {
 		t.Fatalf("the upstream read %v; want the application's close forwarded (EOF)", err)
 	}
 	mocks, err := c.finish(t)
-	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 }
 
 func TestRecordV2_FaultUpstreamTruncatesItsBody(t *testing.T) {
@@ -239,7 +260,7 @@ func TestRecordV2_FaultUpstreamResetsAfterTheHead(t *testing.T) {
 	<-c.relayDone
 	_ = c.src.Close()
 	got, rerr := appRead(t, c.app)
-	if got != "" || !errors.Is(rerr, syscall.ECONNRESET) {
+	if got != "" || !neterr.IsConnReset(rerr) {
 		t.Errorf("the application read %q, %v after the head and 5 bytes; want a reset, as the upstream gave", got, rerr)
 	}
 	mocks, err := c.finish(t)
@@ -296,7 +317,9 @@ func TestRecordV2_FaultUpstreamGoesSilentAfterTheHeadAndTheAppGivesUp(t *testing
 		t.Fatalf("the upstream read %v; want the application's close forwarded (EOF)", err)
 	}
 	mocks, err := c.finish(t)
-	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5})
+	m := oneMock(t, mocks, err)
+	wantFault(t, m, models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 20, AppEndedFirst: true})
+	wantStoppedReading(t, m, "01234", sentAs{length: 20})
 }
 
 func TestRecordV2_FaultChunkedBodyTruncatedKeepsItsFraming(t *testing.T) {
@@ -342,7 +365,7 @@ func TestRecordV2_FaultBeforeAnswerOnAReusedConnectionIsNotRecorded(t *testing.T
 		}
 		// The upstream's end reaches the application before it closes.
 		got, rerr := appRead(t, c.app)
-		if want := error(io.EOF); reset && !errors.Is(rerr, syscall.ECONNRESET) || !reset && rerr != want || got != "" {
+		if want := error(io.EOF); reset && !neterr.IsConnReset(rerr) || !reset && rerr != want || got != "" {
 			t.Errorf("reset %v: the application read %q, %v; want nothing, then the upstream's end", reset, got, rerr)
 		}
 		mocks, err := c.finish(t)
@@ -373,7 +396,7 @@ func TestRecordV2_FaultTimeoutOnAReusedConnectionIsRecorded(t *testing.T) {
 	if mocks[0].Spec.Fault != nil {
 		t.Errorf("the first call recorded with fault %v, want the answer it got", mocks[0].Spec.Fault)
 	}
-	wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 }
 
 // Server bytes no request asked for before a request (its 408 on a keep-alive
@@ -415,7 +438,7 @@ func TestRecordV2_FaultNotRecordedAfterServerBytesNoRequestAskedFor(t *testing.T
 		if err != nil || len(mocks) != 2 {
 			t.Fatalf("recorded %d mocks, %v; want 2: the answered call, then the one the application gave up on", len(mocks), err)
 		}
-		wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout})
+		wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 	})
 }
 
@@ -434,7 +457,7 @@ func TestRecordV2_FaultTimeoutAfterTheAnswerInFlightWhenTheCaptureJoined(t *test
 	relayed(t, c.dest, faultReq)
 	closeUnread(t, c)
 	mocks, err := c.finish(t)
-	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 	if n := c.mgr.MocksLeftOut(); n != 1 {
 		t.Errorf("%d mocks left out, want 1: the answer in flight when the capture joined", n)
 	}
@@ -646,21 +669,24 @@ func TestRecordV2_FaultOnARequestThatDoesNotDecodeIsAnError(t *testing.T) {
 func TestBuildHTTPMock_FaultOnlyOnAnUnfinishedAnswer(t *testing.T) {
 	h := &HTTP{Logger: zap.NewNop()}
 	whole := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
-	m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(whole),
+	m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(faultReq), Resp: []byte(whole),
 		Fault: &models.Fault{Kind: models.FaultReset, AfterHead: true}}, 80, "c", models.OutgoingOptions{})
 	if err != nil || m == nil || m.Spec.Fault != nil || m.Spec.HTTPResp.Body != "ok" {
 		t.Errorf("a whole answer with a reset after it: %v, %v; want the answer, no fault", m, err)
 	}
 	empty := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-	m, err = h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(empty),
+	m, err = h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(faultReq), Resp: []byte(empty),
 		Fault: &models.Fault{Kind: models.FaultReset, AfterHead: true}}, 80, "c", models.OutgoingOptions{})
 	if err != nil || m == nil || m.Spec.Fault != nil || m.Spec.HTTPResp.StatusCode != 200 {
 		t.Errorf("a whole answer with no body (Content-Length: 0) and a reset after it: %v, %v; want the answer, no fault", m, err)
 	}
+	// A head whose lines end at a bare LF ends where net/http's reader ends
+	// it (messageHead), so the body's bytes are known as a CRLF head's are.
 	bareLF := "HTTP/1.1 200 OK\nContent-Length: 20\n\n0123456789"
-	if m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(bareLF),
-		Fault: &models.Fault{Kind: models.FaultTruncate}}, 80, "c", models.OutgoingOptions{}); err == nil {
-		t.Errorf("a cut-short answer whose head has bare LFs recorded as %+v; want an error: its body's bytes are not known", m.Spec)
+	m, err = h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(faultReq), Resp: []byte(bareLF),
+		Fault: &models.Fault{Kind: models.FaultTruncate}}, 80, "c", models.OutgoingOptions{})
+	if err != nil || m == nil || m.Spec.Fault == nil || m.Spec.HTTPResp.StatusCode != 200 || m.Spec.HTTPResp.Body != "0123456789" {
+		t.Errorf("a cut-short answer whose head has bare LFs: %v, %v; want its 10 body bytes and the fault", m, err)
 	}
 }
 
@@ -875,11 +901,11 @@ func TestRecordV2_FaultTimeoutRecordedWhenTheAppGaveUpBeforeTheStop(t *testing.T
 		c.start(t)
 		write(t, c.app, c.src, faultReq)
 		relayed(t, c.dest, faultReq)
-		want := models.Fault{Kind: models.FaultTimeout}
+		want := models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true}
 		if afterHead {
 			write(t, c.dest, c.dst, head+"01234")
 			relayed(t, c.app, head+"01234")
-			want = models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5}
+			want = models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 20, AppEndedFirst: true}
 		}
 		appClosed(t, c)
 		awaitPeerEnd(t, c, fakeconn.FromClient)

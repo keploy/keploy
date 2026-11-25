@@ -128,12 +128,14 @@ func TestCopyMockParamsSharesNothing(t *testing.T) {
 		TotalConsumedMocks: map[string]models.MockState{"a": {}},
 		MockMapping:        []string{"m1"},
 		RecordedWindows:    []models.TestWindow{{}},
+		BackgroundMocks:    []string{"worker-1"},
 	}
 	c, _ := copyMockParams(params)
 	params.TotalConsumedMocks["b"] = models.MockState{}
 	params.MockMapping[0] = "changed"
 	params.RecordedWindows[0].Start = time.Now()
-	if len(c.TotalConsumedMocks) != 1 || c.MockMapping[0] != "m1" || !c.RecordedWindows[0].Start.IsZero() {
+	params.BackgroundMocks[0] = "changed"
+	if len(c.TotalConsumedMocks) != 1 || c.MockMapping[0] != "m1" || !c.RecordedWindows[0].Start.IsZero() || c.BackgroundMocks[0] != "worker-1" {
 		t.Fatalf("the copy changed with the original: %+v", c)
 	}
 }
@@ -563,7 +565,7 @@ func TestStreamsEndOutsideCompose(t *testing.T) {
 // The packet capture goes on after a restart: the traffic in a capture file of
 // its own (each a valid capture), the key log in the same file.
 func TestPcapStreamsReconnectToARestartedAgent(t *testing.T) {
-	client, _ := newRestartingClient(t, true)
+	client, agent := newRestartingClient(t, true)
 	s := client.session()
 	dir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -600,6 +602,15 @@ func TestPcapStreamsReconnectToARestartedAgent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the pcap streams did not end with the run")
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	calls := map[string]int{}
+	for _, call := range agent.order {
+		calls[call]++
+	}
+	if calls["GET /agent/pcap/traffic"] != 2 || calls["GET /agent/pcap/keylog"] != 2 {
+		t.Fatalf("the pcap streams were not each opened by GET, then reopened by GET: %q", agent.order)
 	}
 }
 
@@ -766,5 +777,46 @@ func TestSessionKeepsTheExactStagingBeforeWhatIsServed(t *testing.T) {
 	poolCall.Exact.Ahead[0] = "changed"
 	if pc.Exact.Ahead[0] != "mock-3" {
 		t.Fatalf("the copy's calls in flight changed with the original: %+v", pc.Exact)
+	}
+}
+
+// A test set's capture files are made only inside the recording: a keploy
+// folder the repository carries as a link out of the project, or a capture
+// file that is a link out of its set, is refused, and nothing is made or
+// written where it leads.
+func TestPcapStreamsWriteOnlyInsideTheRecording(t *testing.T) {
+	client, _ := newRestartingClient(t, true)
+	project := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(project, "keploy")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := client.StreamPcapArtifacts(ctx, filepath.Join(project, "keploy", "test-set-1"))
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a keploy folder that links out: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the link leads", len(entries))
+	}
+
+	set := filepath.Join(t.TempDir(), "keploy", "test-set-1")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("KEEP ME"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(set, "traffic.pcap")); err != nil {
+		t.Fatal(err)
+	}
+	err = client.StreamPcapArtifacts(ctx, set)
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a capture file that links out: %v, want it refused", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "KEEP ME" {
+		t.Fatalf("the file the link leads to holds %q", got)
 	}
 }

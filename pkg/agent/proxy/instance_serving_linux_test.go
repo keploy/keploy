@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -13,7 +15,10 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -27,6 +32,7 @@ func (storeParser) MatchType(context.Context, []byte) bool { return true }
 func (storeParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
 	return nil
 }
+func (storeParser) MockNoise() mocknoise.Adapter { return nil }
 func (s storeParser) MockOutgoing(_ context.Context, _ net.Conn, _ *models.ConditionalDstCfg, db integrations.MockMemDb, _ models.OutgoingOptions) error {
 	s.saw <- db
 	return nil
@@ -104,6 +110,19 @@ func TestEachTestWorkerIsServedFromAManagerOfItsOwn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Each worker's test view was installed on its own manager's round,
+	// which that worker's test end reads (ExactTestInstalled).
+	for inst, w := range map[uint32]agent.ExactServer{1: w1, 2: w2} {
+		r, ok := w.(agent.ExactTestInstallReader)
+		if !ok {
+			t.Fatalf("worker %d's server cannot say where its test's view was installed", inst)
+		}
+		epoch, bounds, ok := r.ExactTestInstalled("T")
+		wantEpoch, wantBounds, wantOK := instanceMgrOf(t, p, inst).ExactTestInstalled("T")
+		if !ok || !wantOK || epoch != wantEpoch || bounds != wantBounds {
+			t.Fatalf("worker %d's test was installed at %d/%d (%v), want its own manager's %d/%d (%v)", inst, epoch, bounds, ok, wantEpoch, wantBounds, wantOK)
+		}
+	}
 	pt, _ := m1.GetPerTestMocksInWindow()
 	if len(pt) != 1 || !m1.DeleteFilteredMock(*pt[0]) {
 		t.Fatalf("worker 1 could not answer its test's call from its own mock: %v", exactNames(pt))
@@ -139,6 +158,9 @@ func TestEachTestWorkerIsServedFromAManagerOfItsOwn(t *testing.T) {
 	}
 	if _, _, _, on := w1.ExactTestOutcome(); on {
 		t.Fatal("worker 1's test outlived the session that served it")
+	}
+	if _, _, on := w1.(agent.ExactTestInstallReader).ExactTestInstalled("T"); on {
+		t.Fatal("worker 1's test's install outlived the session that served it")
 	}
 }
 
@@ -520,7 +542,7 @@ func TestEachTestWorkersMissesAreReadByItsOwnTestsAlone(t *testing.T) {
 	w1, w2 := s1.(workerMisses), s2.(workerMisses)
 	miss := func(call string, inst uint32) {
 		report := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: call}
-		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
+		p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
 	}
 	read := func(name string, r workerMisses) []string {
 		t.Helper()
@@ -625,5 +647,157 @@ func TestAWorkersMissAtAnUnlistedEndpointIsReadByItsOwnTest(t *testing.T) {
 	}
 	if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
 		t.Fatalf("the run's window read %+v (err %v); want nothing, the miss is worker 7's", got, err)
+	}
+}
+
+// TestServeInstancePlainStartupServesOwnCallsIdenticallyToMain proves W1 and
+// B3's serving contract on a real Proxy with ServeInstance, a plain recorded
+// startup: set, and 2 parallel workers in BOTH KEPLOY_PROVEN unset and
+// KEPLOY_PROVEN=1 modes:
+//   - Staging ServeExactBackground on the run's proxy and claiming 2 workers
+//     via ServeInstance(1) / ServeInstance(2) never leaves a worker's manager
+//     in a mixed state in unset mode (ExactServing==true, ConsumeRefused(own)==true,
+//     S12Background==false, scopedMockDb.passThrough()==true — identical to main).
+//   - Serving real HTTP requests through handleConnection -> connManager(inst)
+//     for worker 1 and worker 2 answers each worker's own call with its own
+//     mock once, rejects a repeat and a drifted path, and keeps worker 2
+//     completely isolated from worker 1.
+func TestServeInstancePlainStartupServesOwnCallsIdenticallyToMain(t *testing.T) {
+	httpMock := func(name, path, body string, at time.Time) *models.Mock {
+		return &models.Mock{
+			Version: "api.keploy.io/v1beta1",
+			Kind:    models.HTTP,
+			Name:    name,
+			TestModeInfo: models.TestModeInfo{
+				Lifetime: models.LifetimePerTest,
+			},
+			Spec: models.MockSpec{
+				Metadata: map[string]string{"name": "Http"},
+				HTTPReq: &models.HTTPReq{
+					Method: "GET",
+					URL:    "http://127.0.0.1:50061" + path,
+					Header: map[string]string{"Host": "127.0.0.1:50061", "Connection": "close"},
+				},
+				HTTPResp: &models.HTTPResp{
+					StatusCode: 200,
+					Header:     map[string]string{"Content-Type": "text/plain", "Content-Length": fmt.Sprint(len(body))},
+					Body:       body,
+				},
+				ReqTimestampMock: at,
+				ResTimestampMock: at.Add(5 * time.Millisecond),
+			},
+		}
+	}
+
+	callWorker := func(t *testing.T, p *Proxy, dest *agent.NetworkAddress, inst uint32, path string) (int, string) {
+		t.Helper()
+		dest.Instance = inst
+		app, src := acceptedConn(t)
+		done := make(chan error, 1)
+		go func() { done <- p.handleConnection(context.Background(), p.inflight.track(src)) }()
+		_, err := io.WriteString(app, fmt.Sprintf("GET %s HTTP/1.1\r\nHost: 127.0.0.1:50061\r\nConnection: close\r\n\r\n", path))
+		if err != nil {
+			t.Fatalf("write request %s: %v", path, err)
+		}
+		_ = app.SetReadDeadline(time.Now().Add(3 * time.Second))
+		resp, readErr := http.ReadResponse(bufio.NewReader(app), nil)
+		status, body := 502, ""
+		if readErr == nil && resp != nil {
+			status = resp.StatusCode
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			body = string(b)
+		}
+		_ = app.Close()
+		<-done
+		return status, body
+	}
+
+	base := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	for _, mode := range []struct {
+		name   string
+		proven string
+	}{
+		{"KEPLOY_PROVEN_unset", ""},
+		{"KEPLOY_PROVEN_1", "1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, mode.proven)
+			dest := ipv4Dest(t, "127.0.0.1:50061")
+			dest.KernelPid = uint32(os.Getpid())
+			p, _ := instanceProxy(t, dest, nil)
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
+				integrations.HTTP: httpint.New(zap.NewNop()),
+			}
+			t.Cleanup(p.endInstances)
+
+			seed := httpMock("mock-startup-seed", "/seed/1001", "boot-seed", base)
+			own1 := httpMock("mock-own-1", "/items/1001", "own-1", base.Add(time.Second))
+			own2 := httpMock("mock-own-2", "/other/2002", "own-2", base.Add(2*time.Second))
+
+			if err := p.StageExactBackground(models.RecordedWithS12Routing); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.SetMocksWithWindow(context.Background(), nil, []*models.Mock{seed, own1, own2}, models.BaseTime, time.Now().Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-startup-seed"}, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			w1, err := p.ServeInstance(1)
+			if err != nil {
+				t.Fatalf("ServeInstance(1): %v", err)
+			}
+			w2, err := p.ServeInstance(2)
+			if err != nil {
+				t.Fatalf("ServeInstance(2): %v", err)
+			}
+			// Mirror ClaimInstance -> servePoolExactly on each worker.
+			for _, w := range []agent.ExactServer{w1, w2} {
+				if eb, ok := w.(agent.ExactBackgroundServer); ok {
+					if err := eb.StageExactBackground(models.RecordedWithS12Routing); err != nil {
+						t.Fatal(err)
+					}
+					if err := eb.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-startup-seed"}, nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := w.ServeExactPool(models.PoolKeyNone, []string{"mock-startup-seed"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			m1 := instanceMgrOf(t, p, 1)
+			wantS12 := mode.proven == "1"
+			if m1.exactView() == nil || !m1.ExactServing() || !integrations.ConsumeRefused(m1, "mock-own-1") || integrations.S12Background(m1) != wantS12 {
+				t.Fatalf("worker 1 state (%s): exactView=%v ExactServing=%v ConsumeRefused(own)=%v S12Background=%v (wantS12=%v)",
+					mode.name, m1.exactView() != nil, m1.ExactServing(), integrations.ConsumeRefused(m1, "mock-own-1"), integrations.S12Background(m1), wantS12)
+			}
+			if !(&scopedMockDb{MockMemDb: m1}).passThrough() {
+				t.Fatalf("worker 1 scopedMockDb.passThrough() must be true (%s)", mode.name)
+			}
+
+			// Open each worker's test and serve real HTTP calls via handleConnection.
+			if err := w1.ServeExactTest("T1", []*models.Mock{own1}); err != nil {
+				t.Fatal(err)
+			}
+			if err := w2.ServeExactTest("T2", []*models.Mock{own2}); err != nil {
+				t.Fatal(err)
+			}
+
+			if st, body := callWorker(t, p, dest, 1, "/items/1001"); st != 200 || body != "own-1" {
+				t.Fatalf("worker 1 own exact call (%s): got %d:%q; want 200:own-1", mode.name, st, body)
+			}
+			if st, body := callWorker(t, p, dest, 1, "/items/1001"); st == 200 {
+				t.Fatalf("worker 1 own repeat call (%s): must miss under exact serving, got 200:%q", mode.name, body)
+			}
+			if st, body := callWorker(t, p, dest, 1, "/items/9999"); st == 200 {
+				t.Fatalf("worker 1 own drifted call (%s): must miss under exact serving, got 200:%q", mode.name, body)
+			}
+			if st, body := callWorker(t, p, dest, 2, "/other/2002"); st != 200 || body != "own-2" {
+				t.Fatalf("worker 2 own exact call (%s): got %d:%q; want 200:own-2", mode.name, st, body)
+			}
+		})
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // Under the proven switch a correlation is never found by a value's shape:
@@ -13,7 +14,7 @@ func TestMaterializeCorrelationsFindsNoneUnderTheSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const id = "550e8400-e29b-41d4-a716-446655440000"
 	echo := mockWithBodies(`{"idempotencyKey":"`+id+`"}`, `{"idempotencyKey":"`+id+`"}`)
-	MaterializeCorrelations(echo)
+	MaterializeCorrelations(zap.NewNop(), echo)
 	if len(echo.Spec.Correlations) != 0 {
 		t.Fatalf("a UUID's shape found a correlation under the switch: %+v", echo.Spec.Correlations)
 	}

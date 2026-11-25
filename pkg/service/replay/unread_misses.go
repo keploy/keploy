@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -25,18 +26,20 @@ func markUnmatchedCallsUnread(result *models.TestResult) {
 }
 
 // testsWithUnreadMisses names the tests of a set whose unmatched calls could
-// not all be read (FailureInfo.UnmatchedCallsUnread), in result order. Under
-// the proven switch a miss fails its test, so such a test has no verdict and
-// neither has its set: RunTestSet reports the set INTERNAL_ERR, which is
-// neither PASSED nor FAILED, and nothing reading the report can take it for
-// either. With the switch off it is always nil.
+// not all be read (FailureInfo.UnmatchedCallsUnread) and whose read returned
+// none, in result order. Under the proven switch a miss fails its test, so
+// such a test has no verdict and neither has its set: RunTestSet reports the
+// set INTERNAL_ERR, which is neither PASSED nor FAILED, and nothing reading
+// the report can take it for either. A read that returned a miss before it
+// failed saw that miss: the test fails on it whatever the rest of the read
+// could not tell, and is not named. With the switch off it is always nil.
 func testsWithUnreadMisses(results []models.TestResult) []string {
 	if !provenswitch.On() {
 		return nil
 	}
 	var out []string
 	for _, r := range results {
-		if r.FailureInfo.UnmatchedCallsUnread {
+		if r.FailureInfo.UnmatchedCallsUnread && len(r.FailureInfo.UnmatchedCalls) == 0 {
 			out = append(out, r.TestCaseID)
 		}
 	}
@@ -256,15 +259,20 @@ func markAnswerStalled(result *models.TestResult, err error) {
 // sayNoAnswer is the console's line for a test with no answer: for one the
 // stall rule or the app's keepalives ended, that it is not judged and what
 // was waited for, not an ordinary failure; else what as says, with the
-// error.
-func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
+// error. Each names the test, which the report names the request under.
+func sayNoAnswer(ctx context.Context, logger *zap.Logger, test string, err error, as string) {
+	// The line names the request by its shape (pkg.LoggableAnswerError);
+	// the test report keeps it whole.
 	if errors.Is(err, pkg.ErrAnswerStalled) {
-		logger.Error("not judged: "+err.Error(),
+		logger.Error("not judged: "+pkg.LoggableAnswerError(err),
 			zap.String("testcase", test),
 			zap.String("next_step", stalledAnswerRemedy(err)))
 		return
 	}
-	utils.LogError(logger, err, as)
+	// A host the error names outside a quoted URL (a dial's lookup of the
+	// app's name: "lookup <host>: no such host") by its labels' shape beside
+	// its tag in ctx's session (models.HostsInError): a host name is traffic.
+	utils.LogError(logger, models.HostsInError(ctx, pkg.LoggableAnswerErr(err), models.HostsNamedIn(err)...), as, zap.String("testcase", test))
 }
 
 // sayStartJudged is the console's line for a test whose answer began and then
@@ -272,7 +280,7 @@ func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
 // failed on its start, and that its body never came. The start's diff is
 // printed with it.
 func sayStartJudged(logger *zap.Logger, test string, err error) {
-	logger.Error("failed on its answer's start, which differs from the recording; nothing whole of its body came: "+err.Error(),
+	logger.Error("failed on its answer's start, which differs from the recording; nothing whole of its body came: "+pkg.LoggableAnswerError(err),
 		zap.String("testcase", test))
 }
 

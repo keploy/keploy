@@ -76,6 +76,27 @@ func instancesAt(host string) *agentInstances {
 	return v.(*agentInstances)
 }
 
+// stageMoveInstances stores the agentInstances entry at fromHost under toHost
+// before the agent's address switches, so any WatchAgentInstance opened before
+// compose up continues observing answers at the moved host.
+func stageMoveInstances(fromHost, toHost string) (any, bool) {
+	if fromHost == "" || toHost == "" || fromHost == toHost {
+		return nil, false
+	}
+	v, ok := instances.Load(fromHost)
+	if !ok {
+		return nil, false
+	}
+	instances.Store(toHost, v)
+	return v, true
+}
+
+func finishMoveInstances(fromHost string, moved any) {
+	if fromHost != "" && moved != nil {
+		instances.CompareAndDelete(fromHost, moved)
+	}
+}
+
 // answered notes an answer from the process instance.
 func (s *agentInstances) answered(instance string) {
 	s.mu.Lock()
@@ -166,7 +187,7 @@ func (w *instanceWatch) Stop() {
 // WatchAgentInstance begins a watch of which agent process answers at this
 // client's agent address (models.AgentInstanceWatch).
 func (a *AgentClient) WatchAgentInstance() models.AgentInstanceWatch {
-	return instancesAt(agentHost(a.conf.Agent.AgentURI)).watch()
+	return instancesAt(agentHost(a.conf.AgentURI())).watch()
 }
 
 // AgentStartedBeforeApp reports whether the agent process instance
@@ -179,7 +200,7 @@ func (a *AgentClient) WatchAgentInstance() models.AgentInstanceWatch {
 // kubelet started again under a running application included, and for ""
 // (an answer that names none).
 func (a *AgentClient) AgentStartedBeforeApp(instance string) bool {
-	return instancesAt(agentHost(a.conf.Agent.AgentURI)).wasStartedBeforeApp(instance)
+	return instancesAt(agentHost(a.conf.AgentURI())).wasStartedBeforeApp(instance)
 }
 
 // agentHost is the host:port of the agent URI uri, as its requests carry it.

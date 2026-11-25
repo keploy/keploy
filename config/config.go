@@ -49,6 +49,9 @@ type Config struct {
 	// several tests need though only one recorded it misses in the others;
 	// declaring it here serves it to every test, without recording again.
 	// Each rule names a host, and optionally a method and a path prefix.
+	// Under the proven switch (KEPLOY_PROVEN) a rule serves every test only
+	// a recording made outside every test (in TestMain or at start-up), of
+	// a call it names exactly: its method, and the whole path as pathPrefix.
 	SessionCalls []models.SessionCallRule `json:"sessionCalls,omitempty" yaml:"sessionCalls,omitempty" mapstructure:"sessionCalls"`
 	// MysqlPorts pins destination ports to the MySQL parser, skipping
 	// auto-detection for them; a non-empty list replaces the built-in
@@ -162,6 +165,9 @@ type Record struct {
 	BasePath    string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata    string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// IgnoreStaticAssets skips recording successful GET/HEAD responses for web
+	// static assets (CSS, JavaScript, fonts, images, audio, video) as test cases.
+	IgnoreStaticAssets bool `json:"ignoreStaticAssets" yaml:"ignoreStaticAssets" mapstructure:"ignoreStaticAssets"`
 	// TestCaseNaming controls how default test case filenames are generated.
 	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
 	// "sequential" preserves the legacy `test-N.yaml` numbering.
@@ -247,6 +253,14 @@ type Record struct {
 	// Azure App Insights host) are merged in unless overridden. See models.PassThroughRule.
 	PassThroughPorts []models.PassThroughRule `json:"passThroughPorts,omitempty" yaml:"passThroughPorts,omitempty" mapstructure:"passThroughPorts"`
 	PassThroughHosts []models.PassThroughRule `json:"passThroughHosts,omitempty" yaml:"passThroughHosts,omitempty" mapstructure:"passThroughHosts"`
+	// WorkerMocks are the user's worker-mock rules (models.WorkerMockRule):
+	// calls the application makes on its own rather than for one test,
+	// typically once in each of its worker processes (a JWKS fetch, an ORM's
+	// schema read). keploy record adds each mock a rule matches to the set's
+	// worker scope, and keploy test serves those to every test, so a test
+	// that reaches a cold worker process is answered whichever test recorded
+	// the call. Validated when the config is read.
+	WorkerMocks []models.WorkerMockRule `json:"workerMocks,omitempty" yaml:"workerMocks,omitempty" mapstructure:"workerMocks"`
 }
 
 // UpstreamTLS configures the upstream (destination-side) leg of keploy's TLS
@@ -419,6 +433,13 @@ type MockCmd struct {
 	// entries (container:redis). Read only under the proven switch
 	// (KEPLOY_PROVEN=1); without it the key is ignored.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty" mapstructure:"real"`
+	// TimeForm turns on the learn step's time default under the proven
+	// switch (models.ScopeTableReq.TimeForm, learn.Input.TimeForm): a
+	// changed time passes at replay with any value of the type and form it
+	// was recorded in. keploy.yml does not set it: the command that runs
+	// the replay does (keploy's T2 commands, unless keploy.yml asks for
+	// strict times). Off, times are decided by the clock checks alone.
+	TimeForm bool `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Contract struct {
@@ -619,6 +640,15 @@ type Test struct {
 	// no mapping entry), never read from keploy.yml. The replayer writes it
 	// into the IGNORED result's SkipReason, with the proven switch on or off.
 	SkipReasons map[string]map[string]string `json:"-" yaml:"-" mapstructure:"-"`
+	// SkipKinds names the kind of each skip SkipReasons gives a reason for, by
+	// the same test set -> test case, so the run does not call a skip that is
+	// no quarantine quarantined: models.SkipThisRunOnly for a test skipped for
+	// this run only, models.SkipUntilRerecorded for one skipped until it is
+	// recorded again. A skip it names no kind for is a quarantine
+	// (models.SkipQuarantined). Set at run time, never read from keploy.yml,
+	// and afresh each round by a caller that runs rounds, as SkipReasons is;
+	// a kind for a test SkipReasons gives no reason for says nothing.
+	SkipKinds map[string]map[string]models.SkipKind `json:"-" yaml:"-" mapstructure:"-"`
 	// AllowEgress names what a replay may reach on the real network, by the
 	// entries models.NormalizeAllowEgress accepts (models.AllowEgressDNS). What a
 	// replay does not answer from its mocks otherwise stays inside the replay;

@@ -226,16 +226,20 @@ func (c *endsAsHandedOver) Err() error {
 
 // An exchange the session leaves out as the parser hands it on at the stop
 // (the channel full, or the mock refused as the context ends) is counted once,
-// over its own span: the answer chunks after it are the rest of it. Before,
-// its tail was counted as a second mock left out.
+// over its own span: the answer chunks after it, which come after it was
+// handed on (a split: the request after it flushes it), are the rest of it.
+// Before, its tail was counted as a second mock left out. The exchange after
+// it is handed on at the stop and left out for the full channel. Through the
+// sync-mock manager neither is refused at the stop
+// (TestV2_AnExchangeHandedOnAsTheStopComesIsRecordedWithItsTail).
 func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T) {
 	for _, c := range []struct {
-		name                 string
-		refused, viaSyncMock bool
+		name    string
+		refused bool
+		leftOut int64
 	}{
-		{name: "channel full at the stop"},
-		{name: "refused at the stop", refused: true},
-		{name: "refused at the stop/viaSyncMock", refused: true, viaSyncMock: true},
+		{name: "channel full at the stop", leftOut: 2},
+		{name: "refused at the stop", refused: true, leftOut: 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ended, cancel := context.WithCancel(context.Background())
@@ -246,7 +250,7 @@ func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T
 			// No room and no reader: a mock the session hands on would be
 			// counted as left out at the stop, and wait on nothing before it.
 			sess := &supervisor.Session{Mocks: make(chan *models.Mock), Logger: logger, Ctx: ended,
-				ClientConnID: "test-client-conn", Mgr: mgr, Orphans: spans, RouteMocksViaSyncMock: c.viaSyncMock}
+				ClientConnID: "test-client-conn", Mgr: mgr, Orphans: spans}
 			if c.refused {
 				live := &endsAsHandedOver{Context: ended}
 				sess.Ctx = live
@@ -254,9 +258,11 @@ func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T
 			}
 			asked := time.Unix(1000, 0)
 			evs := []chunkEvent{
-				clientChunk("q0", 1, asked),
-				destChunk("r0", 2, time.Unix(1001, 0)),
-				destChunk("r0-tail", 3, time.Unix(1002, 0)),
+				clientChunk("HELLO", 1, asked),
+				clientChunk("PING", 4, asked.Add(4*time.Second)),
+				destChunk("hello-reply", 2, asked.Add(2*time.Second)),
+				destChunk("hello-tail", 3, asked.Add(3*time.Second)),
+				destChunk("pong", 5, asked.Add(5*time.Second)),
 			}
 			events := make(chan chunkEvent, len(evs))
 			for _, ev := range evs {
@@ -266,13 +272,130 @@ func TestV2_AnExchangeLeftOutAsItIsHandedOnIsCountedOnceWithItsTail(t *testing.T
 			if err := pairChunkEvents(events, sess, logger); err != nil {
 				t.Fatalf("pairChunkEvents returned error: %v", err)
 			}
-			if n := mgr.MocksLeftOut(); n != 1 {
-				t.Fatalf("the manager counts %d mock(s) left out, want the exchange once, its tail with it", n)
+			if n := mgr.MocksLeftOut(); n != c.leftOut {
+				t.Fatalf("the manager counts %d mock(s) left out, want %d: the exchange once, its tail with it", n, c.leftOut)
 			}
 			if over, _ := spans.Overlaps(asked, asked); !over {
 				t.Fatal("a test case over the exchange is not left out")
 			}
 		})
+	}
+}
+
+// An exchange the session's manager drops as the parser hands it on (the
+// output closed) is counted once, by the manager: the answer chunks after it
+// are the rest of it, not a mock left out. Before, the parser could not tell
+// the drop, and counted its tail as a second mock lost. The same chunks of an
+// exchange the manager takes report that tail, so the count tells the two
+// apart. Memory pressure keeps every Generic mock (each derives as the
+// session's), so its exchange is one taken.
+func TestV2_AnExchangeTheManagerDropsIsCountedOnceWithItsTail(t *testing.T) {
+	for _, c := range []struct {
+		name               string
+		set                func(*syncMock.SyncMockManager)
+		leftOut            int64
+		pressure, capacity int
+		spanAt             time.Duration
+	}{
+		{"output closed", func(m *syncMock.SyncMockManager) { m.CloseOutChan() }, 0, 0, 2, 0},
+		{"taken", func(*syncMock.SyncMockManager) {}, 1, 0, 0, 3 * time.Second},
+		{"memory pressure keeps a Generic mock", func(m *syncMock.SyncMockManager) { m.SetMemoryPressure(true) }, 1, 0, 0, 3 * time.Second},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ended, cancel := context.WithCancel(context.Background())
+			cancel()
+			mgr := syncMock.New(nil)
+			mgr.SetOutputChannel(make(chan *models.Mock, 4))
+			c.set(mgr)
+			logger := zaptest.NewLogger(t)
+			spans := &syncMock.Spans{}
+			sess := &supervisor.Session{Logger: logger, Ctx: ended, ClientConnID: "test-client-conn",
+				Mgr: mgr, Orphans: spans, RouteMocksViaSyncMock: true}
+			asked := time.Now()
+			// A split: the request after it flushes the first exchange, so
+			// the tail of its answer comes after it was handed on.
+			evs := []chunkEvent{
+				clientChunk("HELLO", 1, asked),
+				clientChunk("PING", 4, asked.Add(4*time.Second)),
+				destChunk("hello-reply", 2, asked.Add(2*time.Second)),
+				destChunk("hello-tail", 3, asked.Add(3*time.Second)),
+				destChunk("pong", 5, asked.Add(5*time.Second)),
+			}
+			events := make(chan chunkEvent, len(evs))
+			for _, ev := range evs {
+				events <- ev
+			}
+			close(events)
+			if err := pairChunkEvents(events, sess, logger); err != nil {
+				t.Fatalf("pairChunkEvents returned error: %v", err)
+			}
+			if n := mgr.MocksLeftOut(); n != c.leftOut {
+				t.Fatalf("%d mock(s) left out, want %d", n, c.leftOut)
+			}
+			// Not counted is not forgotten. An exchange dropped is spanned
+			// over its own times, as one left out is, its tail with it; of one
+			// taken, only the tail is missing, so only the tail is spanned.
+			at := asked.Add(c.spanAt)
+			if over, _ := spans.Overlaps(at, at); !over {
+				t.Fatalf("a test case at %v into the exchange is not left out", c.spanAt)
+			}
+			_, pressure, _, _ := mgr.GetDropStats()
+			if pressure != int64(c.pressure) || mgr.DropCount() != uint64(c.capacity) {
+				t.Fatalf("pressure drops %d, capacity drops %d; want %d, %d", pressure, mgr.DropCount(), c.pressure, c.capacity)
+			}
+		})
+	}
+}
+
+// Through the sync-mock manager, as the agent records, an exchange handed on
+// as the stop comes (the context ending in its post-record hook, after
+// emitV2's look at it and before EmitMock's own) is recorded whole, its
+// answer's tail with it, and nothing is left out: it was captured before the
+// stop. Before, EmitMock refused it, and it was left out with its tail.
+func TestV2_AnExchangeHandedOnAsTheStopComesIsRecordedWithItsTail(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	live := &endsAsHandedOver{Context: ended}
+	mgr := syncMock.New(nil)
+	out := make(chan *models.Mock, 4)
+	mgr.SetOutputChannel(out)
+	spans := &syncMock.Spans{}
+	logger := zaptest.NewLogger(t)
+	// No room and no reader: a mock handed on here instead of through the
+	// manager would be left out.
+	sess := &supervisor.Session{Mocks: make(chan *models.Mock), Logger: logger, Ctx: live,
+		ClientConnID: "test-client-conn", Mgr: mgr, Orphans: spans, RouteMocksViaSyncMock: true,
+		OnMockRecorded: func(*models.Mock) { live.ended.Store(true) }}
+	asked := time.Unix(1000, 0)
+	evs := []chunkEvent{
+		clientChunk("q0", 1, asked),
+		destChunk("r0", 2, time.Unix(1001, 0)),
+		destChunk("r0-tail", 3, time.Unix(1002, 0)),
+	}
+	events := make(chan chunkEvent, len(evs))
+	for _, ev := range evs {
+		events <- ev
+	}
+	close(events)
+	if err := pairChunkEvents(events, sess, logger); err != nil {
+		t.Fatalf("pairChunkEvents returned error: %v", err)
+	}
+	if n := mgr.MocksLeftOut(); n != 0 {
+		t.Fatalf("the manager counts %d mock(s) left out, want none", n)
+	}
+	if over, _ := spans.Overlaps(asked, asked); over {
+		t.Fatal("a test case over the exchange is left out")
+	}
+	select {
+	case m := <-out:
+		assertExchange(t, m, []string{"q0"}, []string{"r0", "r0-tail"})
+	case <-time.After(10 * time.Second):
+		t.Fatal("the exchange handed on as the stop came was not recorded")
+	}
+	select {
+	case m := <-out:
+		t.Fatalf("recorded a second mock %q, want the one exchange", m.Name)
+	default:
 	}
 }
 

@@ -116,7 +116,7 @@ func connectFrom(peer string, lo, hi int) (*net.TCPConn, error) {
 		if err == nil {
 			return c.(*net.TCPConn), nil
 		}
-		if !errors.Is(err, errAddrInUse) {
+		if !errors.Is(err, ErrAddrInUse) {
 			return nil, err
 		}
 	}

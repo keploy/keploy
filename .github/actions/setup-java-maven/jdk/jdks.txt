@@ -1,0 +1,26 @@
+# The JDKs this repository's jobs build and run Java with: one line per major
+# version a workflow asks setup-java-maven (or its jdk action) for, pinning it
+# to one Temurin build for Linux x64. jdk.sh reads it.
+#
+#   MAJOR  BUILD  SHA256  URL
+#
+# BUILD is the build as actions/setup-java names it (the release's semver);
+# URL is the build's .tar.gz on Adoptium's GitHub release, and SHA256 the
+# digest Adoptium publishes beside it (the archive's .sha256.txt asset, which
+# GitHub's release API also gives as the asset's digest). A job uses the
+# runner image's own copy when the image holds exactly BUILD (ubuntu-26.04
+# holds 17.0.21+9, and no JDK 8), else the archive, checked against SHA256.
+#
+# To move a JDK, take all three from the new release and change its line in a
+# pull request of its own. The release tag, BUILD and the archive's name go
+# together; for 17 and later, e.g. 17.0.22+7:
+#   tag jdk-17.0.22+7, BUILD 17.0.22+7,
+#   .../temurin17-binaries/releases/download/jdk-17.0.22%2B7/OpenJDK17U-jdk_x64_linux_hotspot_17.0.22_7.tar.gz
+# and for 8, e.g. 8u522-b03:
+#   tag jdk8u522-b03, BUILD 8.0.522+3,
+#   .../temurin8-binaries/releases/download/jdk8u522-b03/OpenJDK8U-jdk_x64_linux_hotspot_8u522b03.tar.gz
+# jdk.tests.sh checks that each line follows this. When the runner image moves
+# its 17 to a newer build, jobs take the pinned build's archive (downloaded
+# when the cache has none) until the line is moved to the image's build.
+8   8.0.514+1  27eda854481d20806d918b30cdd417c6bed4fd15882e24f3595dc8ae7fb5d095  https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u514-b01/OpenJDK8U-jdk_x64_linux_hotspot_8u514b01.tar.gz
+17  17.0.21+9  8b9b611d917e3dfd8419d3566b5949226f69b052fed7e109c1368add1dfe8711  https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21%2B9/OpenJDK17U-jdk_x64_linux_hotspot_17.0.21_9.tar.gz

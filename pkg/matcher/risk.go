@@ -2,20 +2,36 @@ package matcher
 
 import (
 	"encoding/json"
-	"fmt"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/textcut"
 )
+
+// pathReport holds extra metadata collected during JSONFieldDiffsWithTypeStrict
+// and left nil on matching/count paths so hot-path allocations and struct size
+// stay identical to main.
+type pathReport struct {
+	// strictValues holds the scalar stringified value for type-strict
+	// (learned-dynamic) primitives so missing and type-changed diffs keep
+	// their recorded/live values without affecting diffMaps value suppression.
+	strictValues map[string]string
+	// containers holds the JSON container kind ("object" or "array") for
+	// container paths (both empty and non-empty) so scalar<->container and
+	// object<->array shape changes are reported as one type_changed diff
+	// rather than removed + added leaves.
+	containers map[string]string
+}
 
 type pathMaps struct {
 	types  map[string]string // path -> type ("string","number","boolean","null")
-	values map[string]string // path -> scalar stringified value (only for primitives)
+	values map[string]string // path -> scalar stringified value (only for non-typeStrict primitives)
+	// report is non-nil only when collecting for JSONFieldDiffsWithTypeStrict.
+	report *pathReport
 	// coveredTypes and coveredValues hold, as types and values do, the
 	// scalars a pattern-guarded noise entry matched. They are set aside, not
 	// dropped: a pattern excuses a field only when the recorded and the live
@@ -42,11 +58,56 @@ func (m *pathMaps) coveredOnly(path string) bool {
 // collectBoth collects the recorded (exp) and the live (act) document under
 // one noise index and applies bothSides to them.
 func collectBoth(exp, act interface{}, ni noiseIndex) (expMaps, actMaps pathMaps) {
+	return collectBothWithDetails(exp, act, ni, false)
+}
+
+func collectBothWithDetails(exp, act interface{}, ni noiseIndex, reportDetails bool) (expMaps, actMaps pathMaps) {
 	expMaps, actMaps = newPathMaps(), newPathMaps()
-	collectJSON(exp, "", ni, &expMaps)
-	collectJSON(act, "", ni, &actMaps)
+	if reportDetails {
+		expMaps.report, actMaps.report = &pathReport{}, &pathReport{}
+	}
+	collectJSON(exp, "", ni, &expMaps, nil)
+	collectJSON(act, "", ni, &actMaps, ni.recordedPaths(exp))
 	bothSides(&expMaps, &actMaps)
 	return expMaps, actMaps
+}
+
+// recordedPaths is the path of every node of the recorded document exp, as
+// collectJSON names paths, which collectJSON needs to read the live document
+// as the matcher does: an entry naming id keys excuses a node only where the
+// recording has it (noiseIndex.matchAdded). nil when ni holds no such entry.
+func (ni noiseIndex) recordedPaths(exp interface{}) map[string]bool {
+	if !ni.idKeys {
+		return nil
+	}
+	out := map[string]bool{}
+	eachNodePath(exp, "", func(p string) { out[p] = true })
+	return out
+}
+
+// eachNodePath calls fn with the path of every node of v below its root, as
+// collectJSON names it: an object's member by key, an array's elements under
+// "[]".
+func eachNodePath(v interface{}, path string, fn func(path string)) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, child := range t {
+			p := k
+			if path != "" {
+				p = path + "." + k
+			}
+			fn(p)
+			eachNodePath(child, p, fn)
+		}
+	case []interface{}:
+		p := path + "[]"
+		if len(t) > 0 {
+			fn(p)
+		}
+		for _, e := range t {
+			eachNodePath(e, p, fn)
+		}
+	}
 }
 
 // bothSides decides the scalars a pattern-guarded noise entry matched on
@@ -82,11 +143,12 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		return nil, nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil, err
 	}
 
@@ -95,8 +157,8 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	// collectBoth, reading first where the live side holds only values a
 	// pattern matched: the reasons below name the other side there.
 	expMaps, actMaps := newPathMaps(), newPathMaps()
-	collectJSON(exp, "", idx, &expMaps)
-	collectJSON(act, "", idx, &actMaps)
+	collectJSON(exp, "", idx, &expMaps, nil)
+	collectJSON(act, "", idx, &actMaps, idx.recordedPaths(exp))
 	liveIn := map[string]bool{}
 	for p := range actMaps.coveredTypes {
 		liveIn[p] = actMaps.coveredOnly(p)
@@ -236,11 +298,12 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, t
 		return nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil
 	}
 	return ChangedDecodedJSONFieldPaths(exp, act, known, typeStrict, valueChangesOnly, excludeRecordedValue)
@@ -266,7 +329,7 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 	// its patterns, which bothSides no longer tells. Read on first need.
 	live := sync.OnceValue(func() pathMaps {
 		m := newPathMaps()
-		collectJSON(act, "", idx, &m)
+		collectJSON(act, "", idx, &m, idx.recordedPaths(exp))
 		return m
 	})
 	// heldRecorded is the paths where the recorded document, read alone,
@@ -325,6 +388,8 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 	return out
 }
 
+const redactedDiffValue = "(redacted)"
+
 // JSONFieldDiffs returns field-level diffs between two JSON documents with
 // recorded/live values attached, for mock-mismatch reporting. It walks both
 // documents with the same traversal as ComputeFailureAssessmentJSON (arrays
@@ -335,44 +400,76 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 // rune boundary) to keep reports and yaml output bounded. Returns nil when
 // either side isn't valid JSON.
 func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPrefix string, maxVal int) []models.MockFieldDiff {
+	return jsonFieldDiffs(expJSON, actJSON, known, nil, pathPrefix, maxVal, false, nil)
+}
+
+// JSONFieldDiffsWithTypeStrict is JSONFieldDiffs where paths in `typeStrict`
+// (learned-dynamic paths, also carried in `known`) ignore same-type value
+// drift while still reporting missing fields and JSON type changes, including
+// scalar-to-container, container-to-scalar, and object-to-array/array-to-object
+// shape changes.
+func JSONFieldDiffsWithTypeStrict(expJSON, actJSON string, known map[string][]string, typeStrict map[string]struct{}, pathPrefix string, maxVal int) []models.MockFieldDiff {
+	return jsonFieldDiffs(expJSON, actJSON, known, typeStrict, pathPrefix, maxVal, true, nil)
+}
+
+// JSONFieldDiffsWithTypeStrictRedacted is JSONFieldDiffsWithTypeStrict where
+// `redactValue`, when non-nil, is consulted with each uncut scalar value BEFORE
+// maxVal truncation. Returning true replaces that scalar with "(redacted)" (or
+// "<type>: (redacted)" on type_changed diffs), so maxVal truncation only ever
+// applies to values already judged printable.
+func JSONFieldDiffsWithTypeStrictRedacted(expJSON, actJSON string, known map[string][]string, typeStrict map[string]struct{}, pathPrefix string, maxVal int, redactValue func(string) bool) []models.MockFieldDiff {
+	return jsonFieldDiffs(expJSON, actJSON, known, typeStrict, pathPrefix, maxVal, true, redactValue)
+}
+
+func jsonFieldDiffs(expJSON, actJSON string, known map[string][]string, typeStrict map[string]struct{}, pathPrefix string, maxVal int, reportDetails bool, redactValue func(string) bool) []models.MockFieldDiff {
 	if !json.Valid([]byte(expJSON)) || !json.Valid([]byte(actJSON)) {
 		return nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil
 	}
 
 	idx := buildNoiseIndex(known, nil)
+	idx.markTypeStrict(typeStrict)
 
-	expMaps, actMaps := collectBoth(exp, act, idx)
+	expMaps, actMaps := collectBothWithDetails(exp, act, idx, reportDetails)
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
-
-	// diffMaps iterates Go maps, so bucket order is randomized per run; sort
-	// each bucket so reports, yaml output and the capped diff subset are
-	// stable across runs.
-	sort.Strings(added)
-	sort.Strings(removed)
-	sort.Strings(typeChanges)
-	sort.Strings(valueChanges)
 
 	trunc := func(s string) string {
 		if maxVal <= 0 || len(s) <= maxVal {
 			return s
 		}
-		// Back the cut off to a rune boundary so a multi-byte UTF-8
-		// character is never split — invalid UTF-8 here would garble the
-		// report yaml/json encoders downstream.
-		cut := maxVal
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
+		// Never split a multi-byte UTF-8 character: invalid UTF-8 here
+		// would garble the report yaml/json encoders downstream.
+		return textcut.Prefix(s, maxVal) + "…"
+	}
+	formatScalar := func(raw string) string {
+		if redactValue != nil && redactValue(raw) {
+			return redactedDiffValue
 		}
-		return s[:cut] + "…"
+		return trunc(raw)
+	}
+	formatTyped := func(typ, raw string) string {
+		if redactValue != nil && redactValue(raw) {
+			return typ + ": " + redactedDiffValue
+		}
+		return trunc(typ + ": " + raw)
+	}
+	valueOf := func(m pathMaps, p string) string {
+		if v, ok := m.values[p]; ok {
+			return v
+		}
+		if m.report == nil {
+			return ""
+		}
+		return m.report.strictValues[p]
 	}
 
 	var out []models.MockFieldDiff
@@ -380,45 +477,142 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 		out = append(out, models.MockFieldDiff{
 			Path:     pathPrefix + p,
 			Kind:     models.DiffKindValueChanged,
-			Expected: trunc(expMaps.values[p]),
-			Actual:   trunc(actMaps.values[p]),
+			Expected: formatScalar(expMaps.values[p]),
+			Actual:   formatScalar(actMaps.values[p]),
 		})
 	}
+
+	typeDiffs := make([]models.MockFieldDiff, 0, len(typeChanges))
 	for _, p := range typeChanges {
-		out = append(out, models.MockFieldDiff{
+		typeDiffs = append(typeDiffs, models.MockFieldDiff{
 			Path:     pathPrefix + p,
 			Kind:     models.DiffKindTypeChanged,
-			Expected: trunc(expMaps.types[p] + ": " + expMaps.values[p]),
-			Actual:   trunc(actMaps.types[p] + ": " + actMaps.values[p]),
+			Expected: formatTyped(expMaps.types[p], valueOf(expMaps, p)),
+			Actual:   formatTyped(actMaps.types[p], valueOf(actMaps, p)),
 		})
 	}
+
+	if reportDetails {
+		var retypedContainers, retypedToContainer, retypedFromContainer []string
+		for p, expKind := range expMaps.report.containers {
+			if actKind, ok := actMaps.report.containers[p]; ok && expKind != actKind {
+				retypedContainers = append(retypedContainers, p)
+			}
+		}
+		if len(retypedContainers) > 0 {
+			sort.Strings(retypedContainers)
+			for _, p := range retypedContainers {
+				typeDiffs = append(typeDiffs, models.MockFieldDiff{
+					Path:     pathPrefix + p,
+					Kind:     models.DiffKindTypeChanged,
+					Expected: expMaps.report.containers[p],
+					Actual:   actMaps.report.containers[p],
+				})
+			}
+		}
+		var keptRemoved, keptAdded []string
+		for _, p := range removed {
+			if HasAncestorPath(p, retypedContainers) {
+				continue
+			}
+			if actKind, ok := actMaps.report.containers[p]; ok {
+				if expKind, both := expMaps.report.containers[p]; both && expKind != actKind {
+					continue
+				}
+				retypedToContainer = append(retypedToContainer, p)
+				typeDiffs = append(typeDiffs, models.MockFieldDiff{
+					Path:     pathPrefix + p,
+					Kind:     models.DiffKindTypeChanged,
+					Expected: formatTyped(expMaps.types[p], valueOf(expMaps, p)),
+					Actual:   actKind,
+				})
+				continue
+			}
+			keptRemoved = append(keptRemoved, p)
+		}
+		for _, p := range added {
+			if HasAncestorPath(p, retypedToContainer) || HasAncestorPath(p, retypedContainers) {
+				continue
+			}
+			if expKind, ok := expMaps.report.containers[p]; ok {
+				if actKind, both := actMaps.report.containers[p]; both && expKind != actKind {
+					continue
+				}
+				retypedFromContainer = append(retypedFromContainer, p)
+				typeDiffs = append(typeDiffs, models.MockFieldDiff{
+					Path:     pathPrefix + p,
+					Kind:     models.DiffKindTypeChanged,
+					Expected: expKind,
+					Actual:   formatTyped(actMaps.types[p], valueOf(actMaps, p)),
+				})
+				continue
+			}
+			keptAdded = append(keptAdded, p)
+		}
+		if len(retypedFromContainer) > 0 {
+			filtered := keptRemoved[:0]
+			for _, p := range keptRemoved {
+				if !HasAncestorPath(p, retypedFromContainer) {
+					filtered = append(filtered, p)
+				}
+			}
+			keptRemoved = filtered
+		}
+		removed, added = keptRemoved, keptAdded
+		if len(retypedToContainer) > 0 || len(retypedFromContainer) > 0 || len(retypedContainers) > 0 {
+			sort.Slice(typeDiffs, func(i, j int) bool { return typeDiffs[i].Path < typeDiffs[j].Path })
+		}
+	}
+
+	out = append(out, typeDiffs...)
 	for _, p := range removed {
 		out = append(out, models.MockFieldDiff{
 			Path:     pathPrefix + p,
 			Kind:     models.DiffKindMissingInLive,
-			Expected: trunc(expMaps.values[p]),
+			Expected: formatScalar(valueOf(expMaps, p)),
 		})
 	}
 	for _, p := range added {
 		out = append(out, models.MockFieldDiff{
 			Path:   pathPrefix + p,
 			Kind:   models.DiffKindMissingInMock,
-			Actual: trunc(actMaps.values[p]),
+			Actual: formatScalar(valueOf(actMaps, p)),
 		})
 	}
 	return out
 }
 
-func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
+// HasAncestorPath reports whether path is a strict descendant of any path in
+// ancestors under collectJSON's "." / "[]" path segment boundaries. A sibling
+// sharing only a string prefix (e.g. "meta.ts2" vs "meta.ts") returns false.
+func HasAncestorPath(path string, ancestors []string) bool {
+	for _, parent := range ancestors {
+		if len(path) <= len(parent) || !strings.HasPrefix(path, parent) {
+			continue
+		}
+		rest := path[len(parent):]
+		if rest[0] == '.' || strings.HasPrefix(rest, "[]") {
+			return true
+		}
+	}
+	return false
+}
+
+// collectJSON collects v's leaves at path into out, as the matcher reads them
+// under ni. recorded is nil for the recorded document; for the live one it is
+// the recorded document's node paths (recordedPaths): a node the recording
+// lacks was added, and an entry naming id keys does not excuse it
+// (noiseIndex.matchAdded), so the added field is reported.
+func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps, recorded map[string]bool) {
 	keyLower := strings.ToLower(path)
-	// matchKind resolves the winning (most-specific-first) entry. A type-strict
+	// lookup resolves the winning (most-specific-first) entry. A type-strict
 	// entry records the field's TYPE but not its VALUE — so a type change is
 	// reported while a value change is tolerated — but ONLY when it is itself the
 	// most specific match; a more-specific user/regex entry still wins and keeps
 	// its full-ignore / value-regex semantics. (The learned path is also carried in
 	// the known-noise set, so non-JSON parsers, which don't consult the flag, keep
 	// fully excluding it.)
-	regs, noisy, typeStrict := ni.matchKind(keyLower)
+	regs, noisy, typeStrict := ni.lookup(keyLower, recorded == nil || path == "" || recorded[path])
 	if noisy && !typeStrict {
 		// An entry with no patterns ignores the whole subtree. A pattern-guarded
 		// entry ignores only the values it describes, so it must be evaluated
@@ -445,14 +639,26 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 
 	switch t := v.(type) {
 	case map[string]interface{}:
+		if out.report != nil && path != "" {
+			if out.report.containers == nil {
+				out.report.containers = map[string]string{}
+			}
+			out.report.containers[path] = "object"
+		}
 		for k, child := range t {
 			p := k
 			if path != "" {
 				p = path + "." + k
 			}
-			collectJSON(child, p, ni, out)
+			collectJSON(child, p, ni, out, recorded)
 		}
 	case []interface{}:
+		if out.report != nil && path != "" {
+			if out.report.containers == nil {
+				out.report.containers = map[string]string{}
+			}
+			out.report.containers[path] = "array"
+		}
 		// normalize array paths using [] suffix so we don't depend on indices
 		p := path
 		if p != "" {
@@ -461,13 +667,18 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 			p = "[]"
 		}
 		for _, e := range t {
-			collectJSON(e, p, ni, out)
+			collectJSON(e, p, ni, out, recorded)
 		}
-	case string, float64, bool, nil:
+	case string, float64, json.Number, bool, nil:
 		typ, val := scalarTypeValue(t)
 		out.types[path] = typ
 		if !typeStrict {
 			out.values[path] = val
+		} else if out.report != nil {
+			if out.report.strictValues == nil {
+				out.report.strictValues = map[string]string{}
+			}
+			out.report.strictValues[path] = val
 		}
 	default:
 		// other JSON forms won't appear here
@@ -490,25 +701,34 @@ func eachJSONScalar(v interface{}, path string, fn func(path string, v interface
 		for _, e := range t {
 			eachJSONScalar(e, path+"[]", fn)
 		}
-	case string, float64, bool, nil:
+	case string, float64, json.Number, bool, nil:
 		fn(path, t)
 	}
 }
 
-// scalarTypeValue is a JSON scalar's type and value as the path maps hold
-// them.
+// scalarTypeValue is a JSON scalar's type and human-readable value as the path
+// maps hold them (preserving exact JSON decimal text for reports, shape
+// diagnostics, and recorded-value exclusion).
 func scalarTypeValue(v interface{}) (typ, val string) {
 	switch t := v.(type) {
 	case string:
 		return "string", t
+	case json.Number:
+		return "number", t.String()
 	case float64:
-		return "number", fmt.Sprintf("%v", t)
+		return "number", formatJSONNumber(t)
 	case bool:
 		return "boolean", strconv.FormatBool(t)
 	}
 	return "null", "null"
 }
 
+// diffMaps returns the paths added, removed, retyped and changed in value
+// between two path maps, each list sorted. It walks Go maps, whose order is
+// random on every run, so it sorts what it found: the same two documents give
+// the same lists, and the failure assessment's reasons, the reports, the yaml
+// output and the capped diff subset built from them read the same on every
+// run.
 func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []string) {
 	seen := map[string]struct{}{}
 
@@ -529,6 +749,9 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 		av, aok := act.values[k]
 		// If both present and differ -> value change
 		if eok && aok && ev != av {
+			if expType == "number" && equalJSONNumbers(json.Number(ev), json.Number(av)) {
+				continue
+			}
 			valueChanges = append(valueChanges, k)
 		}
 	}
@@ -539,6 +762,10 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 			added = append(added, k)
 		}
 	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(typeChanges)
+	sort.Strings(valueChanges)
 	return
 }
 

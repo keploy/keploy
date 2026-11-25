@@ -25,6 +25,7 @@ const (
 	unixconnMapAppPortInfo                 = "app_port_info"
 	unixconnMapBindEvents                  = "bind_events"
 	unixconnMapExcludedPids                = "excluded_pids"
+	unixconnMapKeployAgentExeMap           = "keploy_agent_exe_map"
 	unixconnMapKeployAgentKernelPidMap     = "keploy_agent_kernel_pid_map"
 	unixconnMapKeployAgentRegistrationMap  = "keploy_agent_registration_map"
 	unixconnMapKeployClientKernelPidMap    = "keploy_client_kernel_pid_map"
@@ -120,6 +121,7 @@ type unixconnMapSpecs struct {
 	AppPortInfo                 *ebpf.MapSpec `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.MapSpec `ebpf:"excluded_pids"`
+	KeployAgentExeMap           *ebpf.MapSpec `ebpf:"keploy_agent_exe_map"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
@@ -175,6 +177,7 @@ type unixconnMaps struct {
 	AppPortInfo                 *ebpf.Map `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.Map `ebpf:"excluded_pids"`
+	KeployAgentExeMap           *ebpf.Map `ebpf:"keploy_agent_exe_map"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
@@ -206,6 +209,7 @@ func (m *unixconnMaps) Close() error {
 		m.AppPortInfo,
 		m.BindEvents,
 		m.ExcludedPids,
+		m.KeployAgentExeMap,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,

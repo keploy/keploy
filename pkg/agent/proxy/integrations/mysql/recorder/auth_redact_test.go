@@ -513,6 +513,10 @@ func TestAChangeOfUserKeepsNoCredential(t *testing.T) {
 	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), at(13))
 	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), at(20))
 	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), at(21))
+	// The query after it confirms the one taken up after the change left out
+	// (takenUp): the end of the connection would not.
+	h.pushClient(cannedCOMQuery(t, 0, "SELECT 2"), at(30))
+	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), at(31))
 	h.closeStreams()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -529,8 +533,8 @@ func TestAChangeOfUserKeepsNoCredential(t *testing.T) {
 			}
 		}
 	}
-	if fmt.Sprint(recorded) != "[HandshakeResponse41 COM_QUERY]" {
-		t.Errorf("recorded %q; want the handshake and the query after the change of user, and nothing of the change", recorded)
+	if fmt.Sprint(recorded) != "[HandshakeResponse41 COM_QUERY COM_QUERY]" {
+		t.Errorf("recorded %q; want the handshake and the queries after the change of user, and nothing of the change", recorded)
 	}
 	if secret := heldSecret(logs.Bytes()); secret != "" {
 		t.Errorf("the log holds the client's credential (%s):\n%s", secret, logs.Bytes())

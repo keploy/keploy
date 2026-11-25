@@ -2,7 +2,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
@@ -154,7 +159,11 @@ func sayUsageError(cmd *cobra.Command, err error) error {
 	return err
 }
 
-// rejectUnknownSubcommand installs the reject-on-unknown-verb RunE on one group.
+// rejectUnknownSubcommand installs the reject-on-unknown-verb RunE on one group,
+// and the same refusal for an unknown verb followed by flags: cobra parses the
+// group's own flags first, so `keploy cloud request-changes --branch x` failed
+// on --branch ("unknown flag: --branch"), which sent a coding agent looking for
+// a flag when what it had wrong was the command.
 func rejectUnknownSubcommand(c *cobra.Command) {
 	c.SilenceUsage = true
 	c.SilenceErrors = true
@@ -162,6 +171,105 @@ func rejectUnknownSubcommand(c *cobra.Command) {
 		if len(args) == 0 {
 			return cmd.Help()
 		}
-		return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+		return UnknownSubcommand(cmd, args[0])
 	}
+	// The func c answered flag errors with before: its own, or the one it
+	// inherits. It still says every flag error that is not an unknown verb.
+	prev := c.FlagErrorFunc()
+	c.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		// pflag keeps the arguments it read before the flag it failed on.
+		if args := cmd.Flags().Args(); cmd == c && len(args) > 0 {
+			return UnknownSubcommand(cmd, args[0])
+		}
+		// An error raised on a command under c, which reaches this func by
+		// inheritance, is not an unknown verb of c's.
+		return prev(cmd, err)
+	})
+}
+
+// maxSubcommandHints bounds the commands an unknown verb's error names.
+const maxSubcommandHints = 5
+
+// suggestionDistance is the edit distance cobra suggests within when a
+// command sets none (cobra's findSuggestions uses the same 2).
+const suggestionDistance = 2
+
+// UnknownSubcommand is group's refusal of verb, naming the commands under
+// group at any depth whose name is verb or close to it (cobra's own
+// suggestions, made at each level), exact names first: `keploy cloud
+// request-changes` points at `keploy cloud review request-changes`, which
+// cobra's suggestions, one level deep and made only for the root, never
+// reached. None when suggestions are disabled. Its message starts as cobra's
+// own does (`unknown command "verb" for "path"`), which utils.IsUsageError
+// reads as a usage error.
+func UnknownSubcommand(group *cobra.Command, verb string) error {
+	type hint struct {
+		path  string
+		exact bool
+	}
+	var hints []hint
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.DisableSuggestions {
+			return
+		}
+		// SuggestionsFor reads the distance from the command; at 0 it matches
+		// only an exact name, a prefix or an explicit SuggestFor. Set as cobra
+		// would, then put back: the commands are shared.
+		if d := c.SuggestionsMinimumDistance; d <= 0 {
+			c.SuggestionsMinimumDistance = suggestionDistance
+			defer func() { c.SuggestionsMinimumDistance = d }()
+		}
+		for _, s := range c.SuggestionsFor(verb) {
+			hints = append(hints, hint{c.CommandPath() + " " + s, s == verb})
+		}
+		for _, sub := range c.Commands() {
+			if sub.IsAvailableCommand() {
+				walk(sub)
+			}
+		}
+	}
+	if !group.Root().DisableSuggestions {
+		walk(group)
+	}
+	sort.SliceStable(hints, func(i, j int) bool { return hints[i].exact && !hints[j].exact })
+	if len(hints) > maxSubcommandHints {
+		hints = hints[:maxSubcommandHints]
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", verb, group.CommandPath())
+	if len(hints) > 0 {
+		paths := make([]string, len(hints))
+		for i, h := range hints {
+			paths[i] = h.path
+		}
+		msg += "\n\nDid you mean this?\n\t" + strings.Join(paths, "\n\t")
+	}
+	return errors.New(msg)
+}
+
+// unknownRootCommand is cobra's refusal of an unknown top-level command:
+// `unknown command "verb" for "keploy"`, then its own one-level suggestions.
+var unknownRootCommand = regexp.MustCompile(`^unknown command ("(?:[^"\\]|\\.)*") for ("(?:[^"\\]|\\.)*")`)
+
+// HintUnknownCommand is err, or, when err is cobra's refusal of an unknown
+// top-level command of root, the same refusal naming where a command of that
+// name, or a near one, lives at any depth (UnknownSubcommand): `keploy
+// generate` points at `keploy contract generate`. cobra raises it while it
+// finds the command, before any of root's funcs run, so a binary's main calls
+// this on the error ExecuteC returns.
+func HintUnknownCommand(root *cobra.Command, err error) error {
+	if err == nil {
+		return nil
+	}
+	m := unknownRootCommand.FindStringSubmatch(err.Error())
+	if m == nil {
+		return err
+	}
+	// cobra quoted both with %q.
+	verb, verr := strconv.Unquote(m[1])
+	path, perr := strconv.Unquote(m[2])
+	if verr != nil || perr != nil || path != root.CommandPath() {
+		return err
+	}
+	return UnknownSubcommand(root, verb)
 }

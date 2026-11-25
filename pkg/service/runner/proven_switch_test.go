@@ -64,6 +64,27 @@ func (s *startWatchInstr) WatchAgentStart(context.Context) <-chan error {
 	return out
 }
 
+// The runner's error for an agent that did not come up shows the agent's URI
+// with its password masked: it is the error k8s-proxy's sealed URI goes
+// through, its token in the URI's password.
+func TestSetupTestSetNeverSaysTheAgentURIsPassword(t *testing.T) {
+	addr := testnet.RefusedAddr(t, "tcp")
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: &startWatchInstr{},
+		config:          &config.Config{Agent: config.Agent{AgentURI: "keploy-agent://:s3aled-t0ken@" + addr + "/agent"}},
+		mappingDB:       &stubMappingDB{mappings: map[string][]models.MockEntry{}},
+		mockDB:          &skippingMockDB{},
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err == nil {
+		setup.cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "keploy-agent at keploy-agent://xxxxx@"+addr+"/agent did not come up") || strings.Contains(err.Error(), "s3aled") {
+		t.Fatalf("setupTestSet = %v; want the agent that did not come up, its URI masked", err)
+	}
+}
+
 // The runner's gate on its agent follows the agent's start, through the
 // instrumentation's own watch (a wrapper passes it on: the interface has it):
 // a start that stopped ends it with that, where the health check never
@@ -84,5 +105,28 @@ func TestSetupTestSetEndsOnTheAgentsStalledStart(t *testing.T) {
 	}
 	if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "did not come up") || instr.watched != 1 {
 		t.Fatalf("setupTestSet = %v after %d watch(es); want the agent's stalled start, watched once", err, instr.watched)
+	}
+}
+
+// When Setup or a compose move sets the agent's address through SetAgentURI,
+// setupTestSet gates on and reports that address rather than the stale field.
+func TestSetupTestSetFollowsAMovedAgentURI(t *testing.T) {
+	moved := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
+	cfg := &config.Config{}
+	cfg.SetAgentURI(moved)
+	instr := &startWatchInstr{}
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: instr,
+		config:          cfg,
+		mappingDB:       &stubMappingDB{mappings: map[string][]models.MockEntry{}},
+		mockDB:          &skippingMockDB{},
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err == nil {
+		setup.cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), moved) || instr.watched != 1 {
+		t.Fatalf("setupTestSet = %v after %d watch(es); want error naming moved URI %q, watched once", err, instr.watched, moved)
 	}
 }

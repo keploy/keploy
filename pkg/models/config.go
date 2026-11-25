@@ -14,6 +14,13 @@ type TestSet struct {
 	// that makes such a call cannot judge it (P101-b-k). Empty when the
 	// stop did not kill, and always with the switch off.
 	RecordStopKilled string `json:"record_stop_killed,omitempty" bson:"record_stop_killed,omitempty" yaml:"recordStopKilled,omitempty"`
+	// RecordMocksDropped says the recording's agent dropped mocks after it
+	// had captured them (memory pressure, its mock output): what the agent's
+	// summary of the session said of them (StreamEndSummary.MocksDropped).
+	// The recording does not hold them, so a replay may find no mock for a
+	// call that needs one. Nil when the agent dropped none, or sent no
+	// summary (an agent older than it).
+	RecordMocksDropped *MockDropSummary `json:"record_mocks_dropped,omitempty" bson:"record_mocks_dropped,omitempty" yaml:"recordMocksDropped,omitempty"`
 }
 
 // Secret interface for types that support secret configuration.

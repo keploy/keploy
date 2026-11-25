@@ -36,8 +36,8 @@ func verifyOff(t *testing.T) {
 // 100 recordings and at 2000 alike, one strictDiff, a recording of the same
 // path with another method passed over too (it compared every
 // recording of the pool on every call, looking for the closest one even when
-// a recording was the call). A miss still compares every recording, and
-// names the closest.
+// a recording was the call). A miss on a recorded route compares only that
+// route's recordings for the closest, never the rest of the pool.
 func TestAStrictCallComparesOnlyTheRecordingsThatMayBeIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
@@ -79,13 +79,93 @@ func TestAStrictCallComparesOnlyTheRecordingsThatMayBeIt(t *testing.T) {
 			if err != nil || ok {
 				t.Fatalf("miss: ok %v, err %v; want a miss", ok, err)
 			}
-			if got < int64(n) {
-				t.Fatalf("a miss compared %d of %d; want every recording, for the closest", got, n)
+			if got > 2 {
+				t.Fatalf("a same-route miss compared %d of %d; want only its route's recording", got, n)
 			}
 			if diag == nil || diag.closest == nil || diag.closest.Name != fmt.Sprintf("mock-%d", n/2) {
 				t.Fatalf("miss diagnosis %+v; want mock-%d the closest", diag, n/2)
 			}
 		})
+	}
+}
+
+// strictClosest picks the exact same closest recording, route flag, and field
+// diffs as strictCompare across randomized miss corpora: same-route misses,
+// off-route misses, tie-breaking by pool order, differing hosts, queries,
+// headers, JSON bodies, url noise, learned URL places, and nil HTTPReq.
+func TestStrictClosestIsWhatEveryRecordingComparedFinds(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	ctx := context.Background()
+	h := newHTTP()
+	rng := rand.New(rand.NewSource(19))
+	hosts := []string{"localhost:50001", "localhost:50002"}
+	methods := []string{"GET", "POST"}
+	recorded := []string{"/a/1", "/a/2", "/b/1", "/a/1?x=1", "/a/22", "/"}
+	livePaths := []string{"/a/1", "/a/3", "/c/9", "/a/22", "/"}
+	bodies := []string{"", `{"k":1}`, `{"k":2,"m":"x"}`, `{"a":1,"b":2,"c":3}`}
+	learned := [][]string{nil, {"url.path.1"}, {"body.k"}}
+	noises := [][]string{nil, {`[0-9]+`}}
+	routeMisses, offRouteMisses := 0, 0
+	for round := 0; round < 400; round++ {
+		urlNoise := noises[rng.Intn(len(noises))]
+		var bodyNoise map[string][]string
+		if round%2 == 0 {
+			bodyNoise = map[string][]string{"k": {"^only-digits-[0-9]+$"}}
+		}
+		n := h.newStrictNoise(nil, bodyNoise, urlNoise)
+		pool := make([]*models.Mock, 1+rng.Intn(14))
+		for i := range pool {
+			m := onHost(fmt.Sprintf("mock-%d", i), recorded[rng.Intn(len(recorded))], hosts[rng.Intn(len(hosts))])
+			m.Spec.HTTPReq.Method = models.Method(methods[rng.Intn(len(methods))])
+			if b := bodies[rng.Intn(len(bodies))]; b != "" {
+				m.Spec.HTTPReq.Body = b
+				m.Spec.HTTPReq.Header["Content-Type"] = "application/json"
+			}
+			if keys := learned[rng.Intn(len(learned))]; keys != nil {
+				m.Spec.ReqBodyNoise = map[string][]string{}
+				for _, k := range keys {
+					m.Spec.ReqBodyNoise[k] = []string{}
+				}
+			}
+			if rng.Intn(12) == 0 {
+				m.Spec.HTTPReq = nil
+			}
+			pool[i] = m
+		}
+		call := getTo(livePaths[rng.Intn(len(livePaths))], hosts[rng.Intn(len(hosts))])
+		call.method = methods[rng.Intn(len(methods))]
+		if rng.Intn(3) == 0 {
+			call.url.RawQuery = "x=2"
+		}
+		if b := bodies[rng.Intn(len(bodies))]; b != "" {
+			call.body = []byte(b)
+			call.header.Set("Content-Type", "application/json")
+		}
+		dest := liveDestination(ctx, call)
+		fits, want, err := strictCompare(ctx, call, dest, pool, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fits) > 0 {
+			continue
+		}
+		got, err := strictClosest(ctx, call, dest, pool, n, integrations.ExactViewVerify.Load())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.mock != want.mock || got.route != want.route || !sameStrictFields(got.diffs, want.diffs) {
+			t.Fatalf("round %d: got (%v, route=%v, diffs=%v), want (%v, route=%v, diffs=%v)",
+				round, got.mock, got.route, got.diffs, want.mock, want.route, want.diffs)
+		}
+		if got.route {
+			routeMisses++
+		} else {
+			offRouteMisses++
+		}
+	}
+	if routeMisses < 20 || offRouteMisses < 50 {
+		t.Fatalf("expected many same-route (%d) and off-route (%d) misses", routeMisses, offRouteMisses)
 	}
 }
 

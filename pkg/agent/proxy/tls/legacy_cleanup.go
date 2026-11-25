@@ -2,16 +2,19 @@ package tls
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -41,8 +44,9 @@ func legacyCAFingerprint() (fp [32]byte, ok bool) {
 
 // SweepLegacyCA removes the traces of the retired static MITM CA this host may
 // carry from past keploy runs or from the documented "bake it into the image"
-// recipe that need no JVM: the anchor files in the system store and the
-// world-writable temp files the old client left behind. The agent's start
+// recipe that need no JVM: the anchor files in the system store, the
+// world-writable temp files the old client left behind and, on Windows, the
+// certificate in the ROOT stores (sweepLegacyWindowsRoots). The agent's start
 // runs it; the fixed JDK keystore alias goes in SweepLegacyJavaAlias, which
 // the agent runs once its proxy listens, as keytool may be needed and a JVM
 // takes seconds on a starved host. It is best-effort and idempotent — a host
@@ -89,12 +93,101 @@ func sweepLegacyCA(ctx context.Context, logger *zap.Logger, fresh, includeTrusts
 	if removed > 0 {
 		logger.Info("removed retired static MITM CA anchors from the system trust store",
 			zap.Int("count", removed))
-		if err := refreshCaStore(ctx, fresh); err != nil {
+		if err := refreshCaStore(ctx, logger, fresh); err != nil {
 			logger.Debug("could not refresh the system CA store after removing legacy anchors", zap.Error(err))
 		}
 	}
 
 	removeLegacyTempFiles(logger, fp, includeTruststores)
+	sweepLegacyWindowsRoots(logger, fp)
+}
+
+// legacyCASubject is the retired CA's whole subject, as crypto/x509 spells it.
+const legacyCASubject = "CN=My Custom CA"
+
+// isLegacyWindowsRoot says whether der, a certificate of a Windows ROOT
+// store, is the retired CA: its SHA-256 is fp and its subject is exactly
+// legacyCASubject. Both, so that no other certificate is ever removed, a
+// user's own "My Custom CA" among them.
+func isLegacyWindowsRoot(der []byte, fp [32]byte) bool {
+	if sha256.Sum256(der) != fp {
+		return false
+	}
+	cert, err := x509.ParseCertificate(der)
+	return err == nil && cert.Subject.String() == legacyCASubject
+}
+
+// sweepLegacyWindowsRoots removes the retired CA from the Windows ROOT stores
+// an older keploy put it in with certutil: the current user's, and the
+// machine's (LocalMachine\Root, where an elevated run put it) when this run
+// is elevated. A run that is not elevated removes nothing from the machine's
+// store: it says the CA is there, and how an administrator removes it.
+// Removing a root from the user's store asks the user, in a dialog, as adding
+// one does; a No, or a session with no desktop to ask in, leaves it there,
+// said with the step that removes it. Each removal is said at INFO. Off
+// Windows there is no such store, and it does nothing.
+func sweepLegacyWindowsRoots(logger *zap.Logger, fp [32]byte) {
+	for _, s := range []winRootStore{userRootStore, machineRootStore} {
+		ders, err := rootStoreCertsFn(s)
+		if errors.Is(err, errNoWindowsStore) {
+			return
+		}
+		if err != nil {
+			logger.Debug("could not read "+s.String()+" to look for keploy's retired CA", zap.Error(err))
+			continue
+		}
+		for _, der := range ders {
+			if isLegacyWindowsRoot(der, fp) {
+				removeLegacyWindowsRoot(logger, s, der)
+			}
+		}
+	}
+}
+
+// removeLegacyWindowsRoot removes the retired CA der from the Windows ROOT
+// store s, or says why it cannot and what removes it.
+func removeLegacyWindowsRoot(logger *zap.Logger, s winRootStore, der []byte) {
+	const what = "keploy's retired CA (CN=My Custom CA), whose private key was published, so anyone can make a certificate it vouches for"
+	step := legacyWindowsRootStep(s, der)
+	if s == machineRootStore && !tokenElevatedFn() {
+		logger.Warn(s.String()+" trusts "+what+"; this run is not elevated, so it cannot remove it", zap.String("next_step", step))
+		return
+	}
+	end := func() {}
+	if s == userRootStore {
+		// Windows asks the user, in a dialog, whether to remove a root from
+		// their store, and waits for the answer: said first, so the dialog
+		// does not come unexplained.
+		logger.Info("keploy is removing its retired CA (CN=My Custom CA), whose private key was published, from "+s.String()+": answer Yes if Windows asks whether to remove it",
+			zap.String("sha256", legacyCASHA256Hex))
+		end = utils.BeginBootPrompt("Windows' prompt to remove keploy's retired CA")
+	}
+	removed, err := rootStoreDeleteFn(s, der)
+	end()
+	switch {
+	case err == nil && removed:
+		logger.Info("removed keploy's retired CA (CN=My Custom CA), whose private key was published, from "+s.String(),
+			zap.String("subject", legacyCASubject), zap.String("sha256", legacyCASHA256Hex))
+	case err == nil:
+		logger.Debug("keploy's retired CA left " + s.String() + " before this run removed it")
+	case errors.Is(err, errRemovalDeclined):
+		logger.Warn("you answered No to Windows' prompt to remove "+what+", so "+s.String()+" still trusts it", zap.String("next_step", step))
+	case errors.Is(err, errRemovalNoPrompt):
+		logger.Warn(s.String()+" trusts "+what+"; this session has no desktop for Windows' prompt to remove it", zap.String("next_step", step))
+	default:
+		logger.Warn("could not remove "+what+" from "+s.String(), zap.Error(err), zap.String("next_step", step))
+	}
+}
+
+// legacyWindowsRootStep is the step that removes the retired CA der from the
+// Windows ROOT store s by hand: certutil, naming it by its SHA-1 thumbprint,
+// which only it has.
+func legacyWindowsRootStep(s winRootStore, der []byte) string {
+	thumb := sha1.Sum(der)
+	if s == machineRootStore {
+		return "from an administrator's prompt, run 'certutil -delstore ROOT " + hex.EncodeToString(thumb[:]) + "', or run keploy elevated once"
+	}
+	return "from a session signed in to the desktop, run 'certutil -user -delstore ROOT " + hex.EncodeToString(thumb[:]) + "' and answer Yes to Windows' prompt, or run keploy there and answer Yes"
 }
 
 // removeLegacyAnchors deletes, from each system CA directory, any file that is
@@ -183,8 +276,11 @@ func removeLegacyJavaAlias(ctx context.Context, logger *zap.Logger, fp [32]byte)
 		logger.Debug("a 'keployCA' JDK alias exists but is not the retired CA; leaving it", zap.String("cacerts", cacerts))
 		return
 	}
-	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	err := withStoreLock(ctx, logger, func() (err error) {
+		out, err = exec.CommandContext(ctx, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+		return err
+	})
 	if err != nil {
 		logger.Debug("could not delete the legacy JDK alias", zap.String("cacerts", cacerts), zap.ByteString("output", out), zap.Error(err))
 		return
@@ -211,7 +307,9 @@ func exportJavaAliasCert(ctx context.Context, keytool, cacerts, alias string) []
 }
 
 // resolveKeytoolAndCacerts finds a keytool and the cacerts it manages, from
-// JAVA_HOME first then PATH. ok=false when no JDK is reachable.
+// JAVA_HOME first then PATH. A keytool on PATH is often a link into its JDK
+// (/usr/bin/keytool through the alternatives), so its JDK is the one above
+// the file the link names. ok=false when no JDK is reachable.
 func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	exe := "keytool"
 	if runtime.GOOS == "windows" {
@@ -219,8 +317,7 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	}
 	if jh := os.Getenv("JAVA_HOME"); jh != "" {
 		kt := filepath.Join(jh, "bin", exe)
-		cc := filepath.Join(jh, "lib", "security", "cacerts")
-		if fileExists(kt) && fileExists(cc) {
+		if cc, found := jdkCacerts(jh); found && fileExists(kt) {
 			return kt, cc, true
 		}
 	}
@@ -228,10 +325,13 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	// Derive JAVA_HOME from <home>/bin/keytool -> <home>/lib/security/cacerts.
-	home := filepath.Dir(filepath.Dir(kt))
-	cc := filepath.Join(home, "lib", "security", "cacerts")
-	if !fileExists(cc) {
+	if resolved, err := filepath.EvalSymlinks(kt); err == nil {
+		kt = resolved
+	}
+	// Derive JAVA_HOME from <home>/bin/keytool, then its cacerts (jdkCacerts:
+	// JDK 8 keeps it under jre/).
+	cc, found := jdkCacerts(filepath.Dir(filepath.Dir(kt)))
+	if !found {
 		return "", "", false
 	}
 	return kt, cc, true
@@ -273,16 +373,20 @@ func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, includeTruststores b
 // On Debian/Ubuntu update-ca-certificates --fresh also prunes stale hash-links
 // to a deleted anchor (a plain run leaves dangling /etc/ssl/certs symlinks that
 // Go ignores but that are confusing); other distros' tools regenerate wholesale.
-func refreshCaStore(ctx context.Context, fresh bool) error {
-	if commandExists("update-ca-certificates") {
-		args := []string{}
-		if fresh {
-			args = append(args, "--fresh")
+//
+// It holds the store lock, as updateCaStore does.
+func refreshCaStore(ctx context.Context, logger *zap.Logger, fresh bool) error {
+	return withStoreLock(ctx, logger, func() error {
+		if commandExists("update-ca-certificates") {
+			args := []string{}
+			if fresh {
+				args = append(args, "--fresh")
+			}
+			return exec.CommandContext(ctx, "update-ca-certificates", args...).Run()
 		}
-		return exec.CommandContext(ctx, "update-ca-certificates", args...).Run()
-	}
-	// update-ca-trust / the rest take no --fresh; a bare extract regenerates.
-	return updateCaStore(ctx)
+		// update-ca-trust / the rest take no --fresh; a bare extract regenerates.
+		return runCaStoreUpdate(ctx)
+	})
 }
 
 func fileExists(path string) bool {

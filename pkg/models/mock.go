@@ -3,8 +3,8 @@ package models
 import (
 	"encoding/gob"
 	"maps"
-	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,6 +100,56 @@ const (
 	RevokedTests Kind = "keploy-revoked-tests"
 )
 
+// RevokeByRequestPrefix starts the name a RevokedTests frame gives a test
+// case the agent's stream sent with no name of its own (the async capture
+// leaves naming to the client, which names it as it saves it): the rest is
+// the request time its window starts at (TestCaseWindow), in Unix
+// nanoseconds, by which the client finds the name it gave it
+// (RequestOfRevokeName). The agent names one so only to a client that says it
+// reads such a name (OutgoingOptions.SupportsRevokeByRequest).
+const RevokeByRequestPrefix = "keploy-request-at:"
+
+// RevokeNameByRequest is the name a RevokedTests frame gives a test case sent
+// with no name whose window starts at req (RevokeByRequestPrefix).
+func RevokeNameByRequest(req time.Time) string {
+	return RevokeByRequestPrefix + strconv.FormatInt(req.UnixNano(), 10)
+}
+
+// RequestOfRevokeName reports the request time, in Unix nanoseconds, a
+// revoked name gives (RevokeNameByRequest), and false for any other name.
+func RequestOfRevokeName(name string) (int64, bool) {
+	rest, ok := strings.CutPrefix(name, RevokeByRequestPrefix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(rest, 10, 64)
+	return n, err == nil
+}
+
+// CaptureIDPrefix starts every capture id (TestCase.CaptureID): the name the
+// agent gives a request it captured without --sync and without a
+// Keploy-Test-Name, for a client that reads such names
+// (OutgoingOptions.SupportsCaptureIDs). The recorder files whatever names a
+// capture id under the name it saves that request's test case with. A
+// Keploy-Test-Name that starts with it is read as a capture id: the prefix is
+// reserved.
+const CaptureIDPrefix = "keploy-capture:"
+
+// IsCaptureID reports whether name is a capture id (CaptureIDPrefix).
+func IsCaptureID(name string) bool {
+	return strings.HasPrefix(name, CaptureIDPrefix)
+}
+
+// TestCaseWindow is a test case's window, by its kind: a gRPC test case's
+// times are its GrpcReq's and GrpcResp's, any other's its HTTPReq's and
+// HTTPResp's.
+func TestCaseWindow(tc *TestCase) (time.Time, time.Time) {
+	if tc.Kind == GRPC_EXPORT {
+		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+}
+
 // MockName constants for the PostgresV3 parser. The integrations-side
 // recorder currently hardcodes these values as string literals when
 // stamping Mock.Name; exposing them on the keploy side lets a future
@@ -166,6 +216,14 @@ type Mock struct {
 	// that worker's test only (ScopeWindow.Instance). 0 for none. Like
 	// SourcePID it only travels, to keploy record, and is never stored.
 	Instance uint32 `json:"-" yaml:"-" bson:"-"`
+	// OutsideRequests says the agent knows no incoming request was open while
+	// this call ran, so no request made it: it is the app's own background
+	// work, such as a poll on a timer. Only an agent that can tell sets it;
+	// false means "not known", never "a request's", so a mock from an agent
+	// that does not set it is taken for a request's. Like SourcePID it only
+	// travels, to the recorder, and is never stored; it sits in that field's
+	// padding, so a Mock is no bigger for it.
+	OutsideRequests bool `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -275,9 +333,24 @@ func (m *Mock) HydrateResponse() error {
 // whole while other connections count matches against them, so the replay
 // mock manager keeps the counts itself.
 type TestModeInfo struct {
-	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
-	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
-	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	ID         int  `json:"Id,omitempty" bson:"Id,omitempty"`
+	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
+
+	// LoadSeq is the mock's place, counted from 1, in the set the agent's
+	// mock stream handed it (Agent.StoreMocksStream): the order the client
+	// sent the set in, the order its mocks were recorded in. The agent keeps
+	// each per-test mock in memory or on disk, and a read lists those kept in
+	// memory ahead of those loaded from disk, so where one time ties mocks
+	// (the frames of one pipelined write) the order a read holds them in is
+	// not the order recorded; this is, whichever tier holds the mock. Zero on
+	// a mock no stream handed. A uint32 in IsFiltered's word's padding, so a
+	// Mock stays in its size class; the stream refuses a set with more mocks
+	// than it counts. Runtime-only, like Lifetime and the fields below it:
+	// gob carries it into the agent's on-disk store and back, and no file
+	// keeps it.
+	LoadSeq uint32 `json:"-" bson:"-"`
+
+	SortOrder int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
 
 	// Lifetime classifies the mock (per-test / session / connection)
 	// once at ingest via (*Mock).DeriveLifetime. Matchers read this
@@ -410,7 +483,7 @@ func (m *Mock) RecordedDestination() (string, bool) {
 			return v, true
 		}
 	}
-	if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
+	if u, err := ParseRequestURL(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
 		return u.Host, true
 	}
 	return "", false
@@ -497,16 +570,23 @@ type MockSpec struct {
 	// recording without it loads as before, and an older keploy ignores it.
 	Clocks map[string]ClockOffset `json:"Clocks,omitempty" yaml:"clocks,omitempty" bson:"clocks,omitempty"`
 
-	// learned and learnedBinds are, on a mock the learn step of record's
-	// full round just paired (agent side, in memory), the variables it
-	// learned on the mock and those it learned that are bound at an earlier
-	// mock of the same test (by that mock's name). They ride out on the
-	// consumed mock's state (MockState.Variables, MockState.Binds), and are
-	// never encoded (unexported: no gob, JSON or YAML of a mock carries
-	// them) nor served: a reused mock the learn step paired is the same
-	// recording to the next call.
-	learned      MockVariables
-	learnedBinds map[string]MockVariables
+	// Authored says the mock was written, derived from a recorded mock or
+	// generated, rather than recorded, and why (see Authored). Kind-agnostic,
+	// carried on the doc envelope as a top-level `authored:` block like
+	// clocks; nil for a recorded mock. Additive / omitempty: an older keploy
+	// ignores it.
+	Authored *Authored `json:"Authored,omitempty" yaml:"authored,omitempty" bson:"authored,omitempty"`
+
+	// learned holds, on a mock the learn step of record's full round just
+	// paired (agent side, in memory), the variables it learned on the mock
+	// and those it learned that are bound at an earlier mock of the same
+	// test (by that mock's name). They ride out on the consumed mock's state
+	// (MockState.Variables, MockState.Binds), and are never encoded
+	// (unexported: no gob, JSON or YAML of a mock carries them) nor served:
+	// a reused mock the learn step paired is the same recording to the next
+	// call. Kept behind one pointer (nil on every other mock) so adding
+	// Authored keeps Mock in the 640 B size class.
+	learned *mockLearned
 
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
@@ -519,11 +599,17 @@ type MockSpec struct {
 // echoed in that mock's RESPONSE, so replay can reproduce an app-minted value
 // (UUID / nonce / idempotency key) the dependency reflects back. On replay the
 // matcher matches the request field by presence + ValueClass (not value),
-// binds the live value, and renders it into each ResponsePath of the served
-// response. Paths use the kind-agnostic dotted vocabulary of ReqBodyNoise
-// (body.<path>, header.<name>, url.query.<name>). RecordedValue is the value as
-// recorded (never a live/secret value) and ValueClass names its shape
-// (e.g. "uuid", "hex", "nonce") for the presence/type match.
+// binds the live value, and replaces RecordedValue with it in the served
+// response. RecordedValue is the value as recorded (never a live/secret value)
+// and ValueClass names its shape (e.g. "uuid", "hex", "nonce") for the
+// presence/type match.
+//
+// An HTTP mock's paths use the dotted vocabulary of ReqBodyNoise (body.<path>,
+// header.<name>, url.query.<name>). A Mongo mock's are section.<i>.<path>,
+// where i is the OP_MSG section's index. ResponsePaths says where the recording
+// answered the value, for a reader: the render goes by RecordedValue, and no
+// replay reads it. A Mongo list holds at most a few places of a value, on the
+// value's first correlation, and is empty on the value's others.
 type FieldCorrelation struct {
 	RequestPath   string   `json:"requestPath" yaml:"request_path" bson:"request_path"`
 	ResponsePaths []string `json:"responsePaths" yaml:"response_paths" bson:"response_paths"`
@@ -1182,6 +1268,32 @@ type MockState struct {
 	// learned past a point it could not read) reads such learning as that
 	// window's, not the recording owner's. Empty on every other state.
 	TaughtIn []TeachingWindow `json:"taughtIn,omitempty"`
+	// AnsweredIn is, in a replay, every test window (ScopeWindow.Seq) that
+	// was open at any of the mock's serves since the last consumed read,
+	// ascending by Seq, each once with when the mock first answered in it:
+	// a recording that answers call after call (a session or connection
+	// one, one a mapping edit moved to a shared scope) answered every test
+	// it served, not only the one its first serve fell in. Under windows
+	// open at once (parallel tests), a serve is every open window's.
+	// AnsweredOutsideAt is when it first answered while no test window was
+	// open (the application's start, between tests, after the last), 0 when
+	// it did not. The agent keeps a bounded number of window ids between
+	// reads: AnsweredInLost counts those it could not keep for this mock,
+	// and a reader then cannot say every test it answered. An agent that
+	// predates them reports none of the three.
+	AnsweredIn        []WindowAnswer `json:"answeredIn,omitempty"`
+	AnsweredOutsideAt int64          `json:"answeredOutsideAt,omitempty"`
+	AnsweredInLost    int            `json:"answeredInLost,omitempty"`
+}
+
+// WindowAnswer is one test window a mock answered in (MockState.AnsweredIn):
+// the window's id (ScopeWindow.Seq) and when the mock first answered while
+// it was open, in Unix nanoseconds on the agent's clock. Its later answers
+// there are not kept: an answer can shape only what comes after it, so the
+// first is the one a reader compares with when a test ended.
+type WindowAnswer struct {
+	Seq   uint64 `json:"seq"`
+	First int64  `json:"first"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
@@ -1229,7 +1341,7 @@ func (m *Mock) DeepCopy() *Mock {
 		Start:        m.Start,
 		StartRef:     m.StartRef,
 	}
-	c.Spec.learned, c.Spec.learnedBinds = m.Spec.learned.Clone(), cloneBinds(m.Spec.learnedBinds)
+	c.Spec.learned = m.Spec.learned.clone()
 
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
@@ -1247,6 +1359,7 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 	// And the test worker it came from, which record charges it by.
 	c.Instance, c.EndedInstance = m.Instance, m.EndedInstance
+	c.OutsideRequests = m.OutsideRequests
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {
@@ -1291,6 +1404,7 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.Variables = m.Spec.Variables.Clone()
 	c.Spec.Clocks = maps.Clone(m.Spec.Clocks)
+	c.Spec.Authored = m.Spec.Authored.Clone()
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.
@@ -1410,16 +1524,47 @@ func (m *Mock) DeepCopy() *Mock {
 	return &c
 }
 
+// mockLearned is the in-memory learning held behind MockSpec.learned so
+// adding MockSpec.Authored keeps Mock in the 640 B size class.
+type mockLearned struct {
+	vars  MockVariables
+	binds map[string]MockVariables
+}
+
+func (l *mockLearned) clone() *mockLearned {
+	if l == nil {
+		return nil
+	}
+	return &mockLearned{
+		vars:  l.vars.Clone(),
+		binds: cloneBinds(l.binds),
+	}
+}
+
 // SetLearned records on s, in memory only, the variables the learn step
 // learned on its mock (vars) and those bound at earlier mocks (binds): see
 // MockSpec.learned.
 func (s *MockSpec) SetLearned(vars MockVariables, binds map[string]MockVariables) {
-	s.learned, s.learnedBinds = vars, binds
+	if vars == nil && binds == nil {
+		s.learned = nil
+		return
+	}
+	s.learned = &mockLearned{vars: vars, binds: binds}
 }
 
 // Learned is the variables the learn step learned on s's mock (SetLearned).
-func (s *MockSpec) Learned() MockVariables { return s.learned }
+func (s *MockSpec) Learned() MockVariables {
+	if s.learned == nil {
+		return nil
+	}
+	return s.learned.vars
+}
 
 // LearnedBinds is the variables the learn step learned while answering s's
 // mock that are bound at an earlier mock, by its name (SetLearned).
-func (s *MockSpec) LearnedBinds() map[string]MockVariables { return s.learnedBinds }
+func (s *MockSpec) LearnedBinds() map[string]MockVariables {
+	if s.learned == nil {
+		return nil
+	}
+	return s.learned.binds
+}

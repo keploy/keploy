@@ -321,11 +321,25 @@ func TestAMemoryGuardPauseKeepsTheCapturedStreamWhole(t *testing.T) {
 func TestTeeDropOnPerConnCap(t *testing.T) {
 	t.Parallel()
 	drops := newDropSink()
+	// The forwarder tees a chunk after its Write to the destination has
+	// returned, so the test can have read every byte before the tee has seen
+	// any; how much later it does is up to the scheduler. OnCarried runs
+	// right after each push, so a client chunk the tee refused is the event
+	// the drop is reported by: the row waits for it, not for a time.
+	refused := make(chan struct{}, 64)
 
 	h := newHarness(t, Config{
 		PerConnCap:           4,
 		TeeChanBuf:           64,
 		OnMarkMockIncomplete: drops.record,
+		OnCarried: func(dir fakeconn.Direction, _ time.Time, teed bool, _ int64) {
+			if dir == fakeconn.FromClient && !teed {
+				select {
+				case refused <- struct{}{}:
+				default:
+				}
+			}
+		},
 	})
 
 	// Don't drain the FakeConn so bytes accumulate in staging and hit
@@ -342,8 +356,14 @@ func TestTeeDropOnPerConnCap(t *testing.T) {
 		t.Fatalf("writeClient error: %v", err)
 	}
 
-	// Give the tee a moment to process.
-	time.Sleep(50 * time.Millisecond)
+	// A hang guard, not a wait: a tee that never refuses a chunk over its
+	// cap never gets here, on any host.
+	select {
+	case <-refused:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the tee refused none of the client's chunks over its cap of 4 bytes: got reasons %v (c2d drops=%d)",
+			drops.snapshot(), h.r.teeC2D.dropCount())
+	}
 
 	if drops.count(DropPerConnCap) == 0 {
 		t.Fatalf("expected per_conn_cap drop, got reasons %v (c2d drops=%d)",
@@ -872,10 +892,20 @@ func TestSecondRunReturnsError(t *testing.T) {
 	r := New(Config{}, srcProxy, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go func() { _ = r.Run(ctx) }()
-	time.Sleep(20 * time.Millisecond)
+	// The second call is made once the first has returned, not after a
+	// time: a first Run the scheduler starts late would otherwise be the
+	// second one, and the call below the first, which runs on with no end.
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		_ = r.Run(ctx)
+	}()
 	cancel()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-first:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the first Run did not return after its context was cancelled")
+	}
 
 	// Second call should refuse.
 	if err := r.Run(context.Background()); !errors.Is(err, ErrRelayAlreadyRun) {
@@ -886,15 +916,32 @@ func TestSecondRunReturnsError(t *testing.T) {
 func TestBumpActivityInvoked(t *testing.T) {
 	t.Parallel()
 	var count atomic.Int64
-	h := newHarness(t, Config{BumpActivity: func() { count.Add(1) }})
+	// A forwarder bumps activity after its Write has returned and its chunk
+	// is teed, so the peer can have read the bytes well before: the row
+	// waits for the two bumps themselves, not for a time.
+	bumped := make(chan struct{}, 16)
+	h := newHarness(t, Config{BumpActivity: func() {
+		count.Add(1)
+		select {
+		case bumped <- struct{}{}:
+		default:
+		}
+	}})
 
 	go h.writeClient([]byte("tick"))
 	_ = h.readDest(4)
 	go h.writeDest([]byte("tock"))
 	_ = h.readClient(4)
 
-	// Give the forwarders a moment to run the BumpActivity callback.
-	time.Sleep(20 * time.Millisecond)
+	// A hang guard, not a wait: forwarders that never bump never get past
+	// it, on any host.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-bumped:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("BumpActivity count=%d, want >=2", count.Load())
+		}
+	}
 	if got := count.Load(); got < 2 {
 		t.Fatalf("BumpActivity count=%d, want >=2", got)
 	}
@@ -1382,7 +1429,7 @@ func TestAFailedTLSUpgradeIsACaptureLoss(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	var kinds []models.CaptureLossKind
-	h := newHarness(t, Config{OnCaptureLoss: func(k models.CaptureLossKind, _ string) {
+	h := newHarness(t, Config{OnCaptureLoss: func(k models.CaptureLossKind, _ string, _ ...models.LossHost) {
 		mu.Lock()
 		kinds = append(kinds, k)
 		mu.Unlock()

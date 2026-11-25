@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
@@ -32,6 +33,7 @@ func (instanceParser) MatchType(context.Context, []byte) bool { return true }
 func (instanceParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
 	return nil
 }
+func (instanceParser) MockNoise() mocknoise.Adapter { return nil }
 func (w instanceParser) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
 	id, _ := ctx.Value(models.ClientConnectionIDKey).(string)
 	m := &models.Mock{ConnectionID: id}

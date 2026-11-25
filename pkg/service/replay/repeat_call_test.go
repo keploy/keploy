@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"go/ast"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -28,10 +29,10 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 	results := []models.TestResult{
 		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7")},
-			{ActualSummary: "GET /alone", ClosestMock: "mock-8", Repeat: note("mock-8")},
-			{ActualSummary: "GET /other", NextSteps: "as it was"},
-			{ActualSummary: "GET /named", ClosestMock: "mock-6", Repeat: named("mock-6", "test-4")},
+			{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7")},
+			{Protocol: "HTTP", ActualSummary: "GET /alone", ClosestMock: "mock-8", Repeat: note("mock-8")},
+			{Protocol: "HTTP", ActualSummary: "GET /other", NextSteps: "as it was"},
+			{Protocol: "HTTP", ActualSummary: "GET /named", ClosestMock: "mock-6", Repeat: named("mock-6", "test-4")},
 		}}},
 	}
 	consumers := map[string][]string{"mock-7": {"test-9", "test-3", "test-5"}, "mock-8": {"test-9"}, "mock-6": {"test-2", "test-4"}}
@@ -67,7 +68,7 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	if calls[3].Repeat.Test != "test-4" || !strings.Contains(calls[3].NextSteps, "test test-4's call") {
 		t.Fatalf("a note that named test-4 now names %q: %s", calls[3].Repeat.Test, calls[3].NextSteps)
 	}
-	if len(lines) != 3 || !strings.Contains(lines[0], "test-9: GET /count repeats mock-7, answered for test-3 6.00s before this test began at replay, 2.00s after mock-7 at record") {
+	if len(lines) != 3 || !strings.Contains(lines[0], "test-9: GET /{} repeats mock-7, answered for test-3 6.00s before this test began at replay, 2.00s after mock-7 at record") {
 		t.Fatalf("the set log lines are %q", lines)
 	}
 
@@ -109,7 +110,7 @@ func TestMarkRepeatOfNamesTheRepeatAPairingAnswered(t *testing.T) {
 	// after mock-1 answered.
 	agent := models.NewRepeatNote("mock-1", replay, rec, replay.Add(9100*time.Millisecond))
 	results := []models.TestResult{{TestCaseID: "get-cachedrate-7", Status: models.TestStatusPassed, Answers: []models.UnmatchedCall{
-		{ActualSummary: "GET /rates", ClosestMock: "mock-3", NotOwned: true, Answer: models.AnswerProvisional, Repeat: agent},
+		{Protocol: "HTTP", ActualSummary: "GET /rates", ClosestMock: "mock-3", NotOwned: true, Answer: models.AnswerProvisional, Repeat: agent},
 		{ActualSummary: "GET /tick", ClosestMock: "mock-6", NotOwned: true, Answer: models.AnswerProvisional, NextSteps: "as it was"},
 	}}}
 	tcs := []*models.TestCase{{Name: "get-cachedrate-7", HTTPReq: models.HTTPReq{Timestamp: rec.Add(20020 * time.Millisecond)}}}
@@ -125,7 +126,7 @@ func TestMarkRepeatOfNamesTheRepeatAPairingAnswered(t *testing.T) {
 	if a[0].NextSteps != "" || a[1].NextSteps != "as it was" || a[1].Repeat != nil {
 		t.Fatalf("the answers' next steps are %q and %q (note %+v); want both as they were", a[0].NextSteps, a[1].NextSteps, a[1].Repeat)
 	}
-	if len(named) != 1 || answered != 1 || likely != 1 || !strings.Contains(named[0], "get-cachedrate-7: GET /rates repeats mock-1, answered for get-cachedrate-2") || !strings.Contains(named[0], "answered with mock-3, another test's recording (a pairing)") {
+	if len(named) != 1 || answered != 1 || likely != 1 || !strings.Contains(named[0], "get-cachedrate-7: GET /{} repeats mock-1, answered for get-cachedrate-2") || !strings.Contains(named[0], "answered with mock-3, another test's recording (a pairing)") {
 		t.Fatalf("the set log lines are %q (%d answered, %d likely)", named, answered, likely)
 	}
 }
@@ -590,6 +591,56 @@ func TestMockLookupKeepsTheRequestOfAMockOnDisk(t *testing.T) {
 	if !lookup["disk"].recordedAtOf().Equal(at) || !lookup["held"].recordedAtOf().Equal(at) {
 		t.Fatal("the lookup lost when a request was recorded")
 	}
+}
+
+// A replay's lookup of a set's mocks (newMockLookup) keeps a view of each
+// mock its read left on disk, not the mock: the read's mocks, about a
+// kilobyte each with their metadata, go once they are on the agent, rather
+// than staying for the set's run, which on a long recording's live set held
+// hundreds of MB beside every other round's load.
+func TestTheMockLookupHoldsNoMockOfTheSetsRead(t *testing.T) {
+	const n = 20000
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	before := heapNow()
+	freed := make(chan struct{}, 1)
+	var read uint64
+	// The set's read, dropped once the lookup is made: only the lookup
+	// holds anything of it then.
+	lookup := func() map[string]mockDisplayInfo {
+		mocks := make([]*models.Mock, n)
+		for i := range mocks {
+			m := &models.Mock{Name: fmt.Sprintf("mock-%d", i), Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at,
+				Metadata: map[string]string{"type": "mocks", "connID": fmt.Sprintf("conn-%d", i), "name": "redis"},
+				HTTPReq:  &models.HTTPReq{Method: "GET", URL: fmt.Sprintf("http://sap/rates/%d", i)}}}
+			m.LeavePayloadOnDisk(noPayloads{}, models.PayloadAt{Name: m.Name, Offset: int64(i) * 4096, Length: 4096})
+			mocks[i] = m
+		}
+		runtime.SetFinalizer(mocks[n/2], func(*models.Mock) { freed <- struct{}{} })
+		read = heapNow()
+		return newMockLookup(mocks, nil)
+	}()
+	runtime.GC()
+	lookupOnly := heapNow()
+	select {
+	case <-freed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lookup holds the mocks of the set's read: one of them is still live once the set's pools are dropped")
+	}
+	if got := lookup["mock-7"]; got.onDisk == nil || got.recordedAtOf() != at || got.requestOf() == "" ||
+		got.summaryOf() != "GET http://sap/rates/7" || got.targetOf() != "GET sap/rates/7" {
+		t.Fatalf("the lookup lost what it names a mock on disk by: summary %q, target %q, request %q, recorded %v",
+			got.summaryOf(), got.targetOf(), got.requestOf(), got.recordedAtOf())
+	}
+	t.Logf("%d mocks on disk: the read holds %d bytes a mock, the lookup alone %d", n, (int64(read)-int64(before))/n, (int64(lookupOnly)-int64(before))/n)
+	runtime.KeepAlive(lookup)
+}
+
+// heapNow is the heap live now: right after a collection.
+func heapNow() uint64 {
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
 }
 
 // noPayloads is a mock file no test reads back.

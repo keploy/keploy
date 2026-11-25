@@ -616,7 +616,7 @@ func TestMockOfAResponseAfterAnInterimResponse(t *testing.T) {
 	} {
 		resp := []byte(interim + "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
 		h := &HTTP{Logger: zaptest.NewLogger(t)}
-		v2, err := h.buildHTTPMock(&FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+		v2, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 			443, "test-conn", models.OutgoingOptions{})
 		if err != nil || v2 == nil {
 			t.Fatalf("%q: buildHTTPMock = (%v, %v)", interim, v2, err)
@@ -636,8 +636,8 @@ func TestMockOfAResponseAfterAnInterimResponse(t *testing.T) {
 func TestTransferEncodingOverridesContentLength(t *testing.T) {
 	const both = "POST /v1/echo HTTP/1.1\r\nHost: tlsup\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n"
 	body := []string{"5\r\nhel", "lo\r\n0\r\n\r\n"}
-	if cl, te := parseHeaders([]byte(both)); cl != "" || te != "chunked" {
-		t.Errorf("parseHeaders = (%q, %q), want (\"\", \"chunked\")", cl, te)
+	if cl, chunked, err := parseHeaders([]byte(both), false); err != nil || cl != -1 || !chunked {
+		t.Errorf("parseHeaders = (%d, %v, %v), want (-1, true, nil)", cl, chunked, err)
 	}
 
 	t.Run("replay request", func(t *testing.T) {
@@ -687,31 +687,37 @@ func TestTransferEncodingOverridesContentLength(t *testing.T) {
 }
 
 // A 101 Switching Protocols (WebSocket) ends the HTTP exchange but not the
-// connection: what follows is the other protocol. The V2 record path reads it
-// to the close as one response, as before, instead of taking the upgraded
-// stream for the next HTTP request.
-func TestReadResponseV2ReadsAnUpgradedConnectionToItsClose(t *testing.T) {
+// connection: what follows is the other protocol. net/http frames the 101 as
+// its head alone, and so does the V2 record path: it returns at the head's
+// end, the switched-to protocol's bytes in the head's read cut off, and its
+// writes end there. It read them as the 101's body, to the connection's close.
+func TestReadResponseV2FramesA101AsItsHeadAlone(t *testing.T) {
+	const head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
-	stream, send, closeStream := makeStream(t, fakeconn.FromDest, 8)
-	now := time.Now()
-	head := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
-	send([]byte("\x81\x05hello"), now, now)
-	finalResp := []byte(head) // the first chunk, already read by recordV2
+	stream, send, _ := makeStream(t, fakeconn.FromDest, 8)
+	first, second := time.Now(), time.Now().Add(time.Millisecond)
+	send([]byte(head[20:]+"\x81\x05hello"), second, second) // the head's end, and a frame
+	finalResp := []byte(head[:20])                          // the first chunk, already read by recordV2
+	writes := []respWrite{{end: 20, at: first}}
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(stream, &finalResp, "GET"); done <- err }()
+	go func() { _, err := h.readResponseWrites(stream, &finalResp, "GET", &writes); done <- err }()
 	select {
 	case err := <-done:
-		t.Fatalf("readResponseV2 returned (%v) at the 101's head, with the connection still open", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	closeStream()
-	select {
-	case <-done:
+		if err != nil {
+			t.Fatalf("readResponseWrites = %v at the 101's head", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("readResponseV2 did not return at the close")
+		t.Fatal("readResponseWrites did not return at the 101's head: it waits on the switched-to protocol's bytes")
 	}
-	if string(finalResp) != head+"\x81\x05hello" {
-		t.Fatalf("finalResp = %q", finalResp)
+	if string(finalResp) != head {
+		t.Fatalf("finalResp = %q, want the 101's head alone", finalResp)
+	}
+	if len(writes) != 2 || writes[0].end != 20 || writes[1].end != len(head) {
+		t.Fatalf("writes = %+v, want the second to end at the head's end, %d", writes, len(head))
+	}
+	marks := answerMarks(finalResp, writes, "", 0)
+	if marks == nil || !marks.Head.Equal(second) || len(marks.Writes) != 1 || marks.Writes[0].Offset != 0 {
+		t.Fatalf("answerMarks = %+v, want the head at the second write, and no body", marks)
 	}
 }
 
@@ -755,60 +761,114 @@ func TestExpectsContinueIgnoresCase(t *testing.T) {
 	}
 }
 
-// chunkedEndRefused: what a client that closed the connection refused, after a
-// chunked response its stream ended in the middle of, ends that response with
-// framing alone (the rest of a chunk's CRLF, the last chunk, the empty line),
-// so the client had every byte of content and the response is whole; or it
-// holds content the client never had (chunk data, a trailer field), or does
-// not end the body, and the exchange stays left out.
-func TestChunkedEndRefused(t *testing.T) {
+// lastChunkRead: a chunked response its stream ended in the middle of holds
+// every byte of content but trailer fields once its last chunk is in, and
+// before that it does not; a response not chunked, or not framed by the RFC,
+// holds no last chunk.
+func TestLastChunkRead(t *testing.T) {
 	const head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
 	const chunk = "5\r\nhello\r\n"
 	for _, row := range []struct {
-		name, resp, refused string
-		// whole is the response recorded; "" when it is left out.
-		whole string
+		name, resp string
+		want       bool
 	}{
-		{name: "the last chunk and the empty line", resp: head + chunk, refused: "0\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "bytes after the end are not the response's", resp: head + chunk, refused: "0\r\n\r\nHTTP/1.1 200 OK\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "a last chunk with an extension", resp: head + chunk, refused: "0;done=1\r\n\r\n", whole: head + chunk + "0;done=1\r\n\r\n"},
-		{name: "the CRLF after the data the client had", resp: head + "5\r\nhello", refused: "\r\n0\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "the rest of the last chunk's line", resp: head + chunk + "0", refused: "\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "the empty line alone", resp: head + chunk + "0\r\n", refused: "\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "after a trailer field the client had", resp: head + chunk + "0\r\nX-A: 1\r\n", refused: "\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
-		{name: "after a trailer field the client had all but the CRLF of", resp: head + chunk + "0\r\nX-A: 1", refused: "\r\n\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
-		{name: "an empty body", resp: head, refused: "0\r\n\r\n", whole: head + "0\r\n\r\n"},
-		{name: "chunked among other codings, in any case", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk, refused: "0\r\n\r\n",
-			whole: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk + "0\r\n\r\n"},
-		{name: "after an interim response", resp: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk, refused: "0\r\n\r\n", whole: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk + "0\r\n\r\n"},
-		{name: "a data chunk", resp: head + chunk, refused: "3\r\nabc\r\n0\r\n\r\n"},
-		{name: "the rest of a chunk's data", resp: head + "5\r\nhel", refused: "lo\r\n0\r\n\r\n"},
-		{name: "the data of a chunk whose size line the client had", resp: head + "5\r\n", refused: "hello\r\n0\r\n\r\n"},
-		{name: "a trailer field", resp: head + chunk, refused: "0\r\nX-A: 1\r\n\r\n"},
-		{name: "the rest of a trailer field", resp: head + chunk + "0\r\nX-A", refused: ": 1\r\n\r\n"},
-		{name: "no empty line", resp: head + chunk, refused: "0\r\n"},
-		{name: "nothing refused", resp: head + chunk, refused: ""},
-		{name: "cut short, as the relay keeps only the start", resp: head + chunk, refused: "0;" + strings.Repeat("x", 100)},
-		{name: "a bare LF", resp: head + chunk, refused: "0\n\n"},
-		{name: "a head the client did not have whole", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n", refused: "\r\n0\r\n\r\n"},
-		{name: "a Content-Length body", resp: "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n", refused: "0\r\n\r\n"},
-		{name: "a body read to the connection's end", resp: "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", refused: "0\r\n\r\n"},
+		{name: "the last chunk, without the empty line", resp: head + chunk + "0\r\n", want: true},
+		{name: "the last chunk with an extension", resp: head + chunk + "0;done=1\r\n", want: true},
+		{name: "a trailer field after the last chunk", resp: head + chunk + "0\r\nX-A: 1\r\n", want: true},
+		{name: "part of a trailer field", resp: head + chunk + "0\r\nX-A", want: true},
+		{name: "the last chunk of an empty body", resp: head + "0\r\n", want: true},
+		{name: "after an interim response", resp: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk + "0\r\n", want: true},
+		{name: "the last chunk's line cut short", resp: head + chunk + "0"},
+		{name: "a whole chunk", resp: head + chunk},
+		{name: "a chunk cut short", resp: head + "5\r\nhel"},
+		{name: "a head alone", resp: head},
+		{name: "a head cut short", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"},
+		{name: "a bare LF", resp: head + chunk + "0\n"},
+		// Past the last chunk, a trailer section not framed by the RFC: the
+		// body is not read whole as far as it came.
+		{name: "a bare LF in the trailer section", resp: head + chunk + "0\r\nX-A: 1\n"},
+		{name: "a trailer line too long with no line ending", resp: head + chunk + "0\r\n" + strings.Repeat("a", maxChunkedLineLen+1)},
+		{name: "a size line that is not hex", resp: head + "zz\r\nhello\r\n0\r\n"},
+		{name: "a Content-Length body that reads as a last chunk", resp: "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0\r\n"},
+		{name: "a body the connection's close ends that reads as a last chunk", resp: "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n0\r\n"},
+		{name: "chunked in any case", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n" + chunk + "0\r\n", want: true},
+		// net/http refuses a coding other than chunked alone: its framing is
+		// not read (parseHeaders), so it holds no last chunk.
+		{name: "chunked among other codings", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n" + chunk + "0\r\n"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			resp := []byte(row.resp)
-			got, ok := chunkedEndRefused(resp, []byte(row.refused))
-			if row.whole == "" {
-				if ok {
-					t.Fatalf("whole %q, want it left out: the client did not have it all", got)
+			if got := lastChunkRead([]byte(row.resp)); got != row.want {
+				t.Fatalf("lastChunkRead = %v, want %v", got, row.want)
+			}
+		})
+	}
+}
+
+// A body cut after its last chunk (in its trailer section, which net/http
+// reads to its own error, not io.ErrUnexpectedEOF) is recorded as far as the
+// app read it only when the app stopped reading it. One the observe-only
+// capture read in part (the stream carries only what the client read) is not
+// recorded, as before: its client may have had the trailer's end.
+func TestABodyCutInItsTrailerIsRecordedOnlyWhenTheAppStoppedReading(t *testing.T) {
+	req := []byte("GET /events HTTP/1.1\r\nHost: api\r\n\r\n")
+	resp := []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-A")
+	for _, row := range []struct {
+		name                       string
+		readInPart, stoppedReading bool
+		recorded                   bool
+	}{
+		{name: "the app stopped reading", stoppedReading: true, recorded: true},
+		{name: "the observe-only capture read it in part", readInPart: true},
+		{name: "a whole response"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			h := &HTTP{Logger: zaptest.NewLogger(t)}
+			var fault *models.Fault
+			if row.stoppedReading {
+				fault = &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true}
+			}
+			m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: req, Resp: resp, RespReadInPart: row.readInPart, Fault: fault,
+				ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()}, 80, "test-conn", models.OutgoingOptions{})
+			if !row.recorded {
+				if err == nil {
+					t.Fatalf("recorded %+v, want the body's read error", m)
 				}
 				return
 			}
-			if !ok || string(got) != row.whole {
-				t.Fatalf("got %q, %v; want %q, whole", got, ok, row.whole)
-			}
-			if string(resp) != row.resp {
-				t.Fatalf("resp changed to %q", resp)
+			if err != nil || m == nil || m.Spec.HTTPResp.Body != "hello" || m.Spec.Fault == nil ||
+				m.Spec.Fault.Kind != models.FaultStoppedReading || m.Spec.Fault.BodyBytes != 5 {
+				t.Fatalf("buildHTTPMock = (%+v, %v), want the body %q, with a stopped_reading fault after 5 bytes", m, err, "hello")
 			}
 		})
+	}
+}
+
+// parseHeaders compares a field's name in place, without regard to ASCII case
+// (asciiEqualFold), as net/http's reader canonicalizes it: a name in capitals
+// or in any mix of cases is the field, and a name that only starts like a
+// framing field, or runs past one, is not.
+func TestParseHeadersNamesTheFramingFieldsInAnyCase(t *testing.T) {
+	for _, c := range []struct {
+		name, fields string
+		length       int
+		chunked      bool
+	}{
+		{"Content-Length in capitals", "CONTENT-LENGTH: 5\r\n", 5, false},
+		{"Content-Length in mixed case", "content-LENGTH: 5\r\n", 5, false},
+		{"Transfer-Encoding in capitals", "TRANSFER-ENCODING: chunked\r\n", -1, true},
+		{"a name that only starts like Content-Length", "Content: 3\r\n", -1, false},
+		{"a name that runs past Transfer-Encoding", "Transfer-Encoding-X: chunked\r\nContent-Length: 5\r\n", 5, false},
+		{"other names of the same lengths", "Accept-Charset: utf-8\r\nIf-Modified-Since: Tue, 03 Nov 2026 10:00:00 GMT\r\n", -1, false},
+	} {
+		head := []byte("POST / HTTP/1.1\r\nHost: a\r\n" + c.fields + "\r\n")
+		length, chunked, err := parseHeaders(head, false)
+		if err != nil || length != c.length || chunked != c.chunked {
+			t.Errorf("%s: parseHeaders = (%d, %v, %v), want (%d, %v, nil)", c.name, length, chunked, err, c.length, c.chunked)
+		}
+	}
+	for _, field := range []string{"Content-Length : 5\r\n", "TRANSFER-ENCODING : chunked\r\n"} {
+		if _, _, err := parseHeaders([]byte("POST / HTTP/1.1\r\nHost: a\r\n"+field+"\r\n"), false); !errors.Is(err, errFramingRefused) {
+			t.Errorf("%q: parseHeaders error = %v, want errFramingRefused (a space before a framing field's colon)", field, err)
+		}
 	}
 }

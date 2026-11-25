@@ -5,79 +5,78 @@ package routes
 import (
 	"bufio"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // procRoot is where the kernel's process and socket tables are read; a var so
 // a test can point it at a fixture tree.
 var procRoot = "/proc"
 
-// callerPID is the process (thread-group ID in the agent's PID namespace) that
-// owns the client end of the request's TCP connection: the socket whose local
-// address is the request's remote address and whose remote address is the
-// server's own. It is read from the kernel's socket tables, never from what
-// the caller says.
-func callerPID(r *http.Request) (int, error) {
-	remote, err := netip.ParseAddrPort(r.RemoteAddr)
-	if err != nil {
-		return 0, fmt.Errorf("the connection's remote address %q: %w", r.RemoteAddr, err)
-	}
-	la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
-	if !ok || la == nil {
-		return 0, errors.New("the connection's local address is unknown")
-	}
-	local, err := netip.ParseAddrPort(la.String())
-	if err != nil {
-		return 0, fmt.Errorf("the connection's local address %q: %w", la.String(), err)
-	}
-	return tcpOwner(remote, local)
-}
-
-// tcpOwner finds the process owning the TCP socket bound to self and
-// connected to peer.
+// tcpOwner finds the process (thread-group ID in the agent's PID namespace)
+// owning the TCP socket bound to self and connected to peer.
 func tcpOwner(self, peer netip.AddrPort) (int, error) {
 	inode, err := tcpInode(self, peer)
 	if err != nil {
 		return 0, err
 	}
-	fds, err := filepath.Glob(filepath.Join(procRoot, "[0-9]*", "fd", "*"))
-	if err != nil {
-		return 0, err
-	}
 	want := "socket:[" + inode + "]"
 	holders := map[int]bool{}
-	for _, fd := range fds {
-		link, err := os.Readlink(fd)
-		if err != nil || link != want {
+	// Every fd of every process whose name starts with a digit, as
+	// filepath.Glob(procRoot/[0-9]*/fd/*) listed them, read directly: the
+	// table's names, then each process's fd directory. Glob also read each
+	// process's own directory to find "fd" in it, one more directory per
+	// process on the machine for each call.
+	for _, name := range dirNames(procRoot) {
+		if name == "" || name[0] < '0' || name[0] > '9' {
 			continue
 		}
-		rel, err := filepath.Rel(procRoot, fd)
-		if err != nil {
-			continue
+		dir := filepath.Join(procRoot, name, "fd")
+		for _, fd := range dirNames(dir) {
+			link, err := os.Readlink(filepath.Join(dir, fd))
+			if err != nil || link != want {
+				continue
+			}
+			pid, err := pidOf(name)
+			if err != nil {
+				// A holder whose name is no process ID could be the caller
+				// itself: taking another holder for it would hand the run to
+				// the wrong process, and reading no holder would hide why the
+				// caller is unknown.
+				return 0, fmt.Errorf("the socket %s -> %s (inode %s) is held by %s, which is not a process ID: %w", self, peer, inode, filepath.Join(procRoot, name), err)
+			}
+			holders[pid] = true
 		}
-		name := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
-		pid, err := pidOf(name)
-		if err != nil {
-			// A holder whose name is no process ID could be the caller
-			// itself: taking another holder for it would hand the run to
-			// the wrong process, and reading no holder would hide why the
-			// caller is unknown.
-			return 0, fmt.Errorf("the socket %s -> %s (inode %s) is held by %s, which is not a process ID: %w", self, peer, inode, filepath.Join(procRoot, name), err)
-		}
-		holders[pid] = true
 	}
 	if len(holders) == 0 {
 		return 0, fmt.Errorf("no process holds the socket %s -> %s (inode %s)", self, peer, inode)
 	}
 	return soleHolder(self, peer, holders, procParent)
+}
+
+// dirReads counts the directories dirNames read, for the rows that pin how
+// many one call reads. Nothing in keploy reads it.
+var dirReads atomic.Int64
+
+// dirNames is dir's entries sorted by name, none when it cannot be read.
+// What it read before an error counts, as filepath.Glob takes it: a process
+// that exits mid-read ends its own table, not the walk.
+func dirNames(dir string) []string {
+	dirReads.Add(1)
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	names, _ := f.Readdirnames(-1)
+	sort.Strings(names)
+	return names
 }
 
 // pidOf reads a /proc directory's name as the process ID it is: a pid_t,
@@ -134,6 +133,21 @@ func tcpInode(self, peer netip.AddrPort) (string, error) {
 	return "", fmt.Errorf("no TCP socket %s -> %s in the kernel's tables", self, peer)
 }
 
+// heldState is the TCP states, as /proc/net/tcp{,6} writes them (the kernel's
+// tcp_states.h, %02X), in which a process can still hold a connected socket:
+// ESTABLISHED, FIN_WAIT1, FIN_WAIT2, CLOSE_WAIT, LAST_ACK and CLOSING.
+// SYN_SENT has sent no request yet, TIME_WAIT is no process's, CLOSE is a
+// connection reset or never made, and LISTEN and the SYN_RECV states are a
+// server's.
+var heldState = map[string]bool{
+	"01": true, // ESTABLISHED
+	"04": true, // FIN_WAIT1
+	"05": true, // FIN_WAIT2
+	"08": true, // CLOSE_WAIT
+	"09": true, // LAST_ACK
+	"0B": true, // CLOSING
+}
+
 func scanTCPTable(f *os.File, self, peer netip.AddrPort) (string, bool) {
 	sc := bufio.NewScanner(f)
 	sc.Scan() // header
@@ -142,9 +156,12 @@ func scanTCPTable(f *os.File, self, peer netip.AddrPort) (string, bool) {
 		if len(fields) < 10 {
 			continue
 		}
-		// Only an established connection with a socket (inode 0 is one in
-		// TIME_WAIT, owned by no process) is a caller.
-		if fields[3] != "01" || fields[9] == "0" {
+		// A caller's socket is one a process can still hold: established, or
+		// closed by one side or both while the caller keeps it (a caller that
+		// called CloseWrite after its request, as macOS's read names it too).
+		// Inode 0 is a socket no process holds any more (TIME_WAIT, or one
+		// its process closed).
+		if !heldState[fields[3]] || fields[9] == "0" {
 			continue
 		}
 		l, okL := procAddrPort(fields[1])

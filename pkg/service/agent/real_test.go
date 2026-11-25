@@ -118,7 +118,7 @@ func TestAReplayedTestCarriesItsRealRowsAndACaptureLoss(t *testing.T) {
 	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full"}}
+	lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full", Err: -7}}
 	// The loss first, then the connection, in one sentence; nothing to
 	// re-record or quarantine: both are keploy's own.
 	require.Equal(t, "keploy: "+lost.Text()+"; keploy could not capture a connection to 10.0.0.7:443 (keploy could not read which name it was opened for).", e.Reason)

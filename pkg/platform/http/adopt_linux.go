@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -339,17 +340,28 @@ func procChildrenIn(root string, parent int) ([]child, error) {
 		if gone || st.PPID != parent {
 			continue
 		}
-		c := child{pid: pid, start: st.StartTime}
-		if st.State == 'Z' {
-			tid, runs, err := utils.RunningThread(root, pid)
-			if err != nil {
-				return nil, fmt.Errorf("read the threads of process %d, whose main thread exited: %w", pid, err)
-			}
-			c.zombie, c.thread = !runs, tid
+		c, err := childOf(root, pid, st)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// childOf is process pid of the /proc at root, whose stat is st, as a child
+// of this process: whether it is a zombie, and, where its main thread exited
+// while another thread runs on, that thread.
+func childOf(root string, pid int, st utils.ProcStat) (child, error) {
+	c := child{pid: pid, start: st.StartTime}
+	if st.State == 'Z' {
+		tid, runs, err := utils.RunningThread(root, pid)
+		if err != nil {
+			return child{}, fmt.Errorf("read the threads of process %d, whose main thread exited: %w", pid, err)
+		}
+		c.zombie, c.thread = !runs, tid
+	}
+	return c, nil
 }
 
 // procStat reads process pid's stat from the /proc at root
@@ -470,45 +482,28 @@ func fdinfoPath() string {
 	return "/proc/self/fdinfo"
 }
 
-// ownFds is the pidfds the adopter itself holds (a reap's zombies, a stop's
-// daemons): no sign that a child is one os/exec waits for. An adopted
-// zombie a stop held a pidfd on was taken for keploy's own, and not reaped
-// until a later child's exit. Changed, and read by heldPidfds, under its
-// lock: an fd leaves it before it is closed, so its number, given again to
-// a pidfd of os/exec's, is never skipped.
-var ownFds = struct {
-	sync.Mutex
-	m map[int]bool
-}{m: map[int]bool{}}
-
-// openPidfd opens a pidfd on pid for the adopter (ownFds).
-func openPidfd(pid int) (int, error) {
-	ownFds.Lock()
-	defer ownFds.Unlock()
-	fd, err := unix.PidfdOpen(pid, 0)
-	if err == nil {
-		ownFds.m[fd] = true
-	}
-	return fd, err
-}
+// openPidfd opens a pidfd on pid for the adopter (a reap's zombies, a stop's
+// daemons), one keploy's own (utils.OpenOwnPidfd): no sign that a child is
+// one os/exec waits for. An adopted zombie a stop held a pidfd on was taken
+// for keploy's own, and not reaped until a later child's exit.
+func openPidfd(pid int) (int, error) { return utils.OpenOwnPidfd(pid) }
 
 // closePidfd closes a pidfd openPidfd opened.
-func closePidfd(fd int) {
-	ownFds.Lock()
-	defer ownFds.Unlock()
-	delete(ownFds.m, fd)
-	_ = unix.Close(fd)
+func closePidfd(fd int) { utils.CloseOwnPidfd(fd) }
+
+// heldPidfds is the set of pids this process holds a pidfd for, but those it
+// opened to watch a process (utils.WithOwnPidfds: the adopter's, and the
+// interrupt's): a pidfd's fdinfo names its process ("Pid:"), and no other
+// kind of fd has that line. A read that fails is an error, never a smaller
+// set (a zombie of this process's own taken for adopted would be reaped from
+// under its Wait); an fd closed meanwhile is no pidfd held.
+func heldPidfds() (held map[int]bool, err error) {
+	utils.WithOwnPidfds(func(skip map[int]bool) { held, err = heldPidfdsBut(skip) })
+	return held, err
 }
 
-// heldPidfds is the set of pids this process holds a pidfd for, but the
-// adopter's own (ownFds): a pidfd's fdinfo names its process ("Pid:"), and no
-// other kind of fd has that line. A read that fails is an error, never a
-// smaller set (a zombie of this process's own taken for adopted would be
-// reaped from under its Wait); an fd closed meanwhile is no pidfd held.
-func heldPidfds() (map[int]bool, error) {
-	ownFds.Lock()
-	defer ownFds.Unlock()
-	skip := ownFds.m
+// heldPidfdsBut is heldPidfds with skip the fds it does not read.
+func heldPidfdsBut(skip map[int]bool) (map[int]bool, error) {
 	held := map[int]bool{}
 	dir := fdinfoPath()
 	fds, err := os.ReadDir(dir)
@@ -638,6 +633,13 @@ type member struct {
 // their way out is a movement of moved, the teardown scope of the run whose
 // app left them (nil: none).
 func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.TeardownScope) (why, left string) {
+	// What keploy's interrupt left to its caller ends with it, whether
+	// keploy adopted it or not (stopHanded).
+	defer func() {
+		if handed := stopHanded(logger, reached, moved); handed != "" && why == "" {
+			why = handed
+		}
+	}()
 	if !adopting.Load() {
 		if no := cannotAdopt.Load(); no != nil {
 			return "", "whatever the application left running: keploy cannot tell whether its processes ended (it could not adopt them: " + *no + ")"
@@ -663,6 +665,22 @@ func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.Teard
 		after = read.pids
 	}
 	return why, leftRunning(read, after)
+}
+
+// appRunsOn says whether a daemon the application left runs, one this
+// process adopted and may stop (adoptedRunning), or whether its children keep
+// changing so that it cannot tell, once the application's command has exited:
+// keploy's stop of them (stopAdopted) has not begun. False where it adopts
+// nothing, or cannot read its children: it then does not wait on them.
+func appRunsOn(logger *zap.Logger, _ *app.App) bool {
+	if !adopting.Load() {
+		return false
+	}
+	read, err := adoptedRunning(logger)
+	if err != nil {
+		return false
+	}
+	return len(read.pids) > 0 || !read.settled
 }
 
 // stopAll stops daemons as stopAdopted does, and says why it had to kill
@@ -749,27 +767,88 @@ func adoptedRunning(logger *zap.Logger) (adoptedRead, error) {
 	self, selfErr := os.Stat("/proc/self/exe")
 	read := adoptedRead{settled: settled}
 	for _, c := range children {
-		if c.zombie || held[c.pid] {
-			continue
-		}
-		if _, gone := leftToKernel.Load([2]uint64{uint64(c.pid), c.start}); gone {
+		switch kind, err := daemonOf(c, held, self, selfErr); kind {
+		case daemonHeld:
 			read.held = append(read.held, c.pid)
-			continue
-		}
-		exe, err := os.Stat(exePath(c))
-		if err != nil {
+		case daemonUnseen:
 			logger.Info("keploy cannot see what a daemon the application left running is (it is not dumpable, or another user's), and leaves it running",
 				zap.Int("pid", c.pid), zap.Error(err))
 			read.unseen = append(read.unseen, c.pid)
-			continue
+		case daemonStopped:
+			read.pids = append(read.pids, c.pid)
 		}
-		if selfErr == nil && os.SameFile(exe, self) {
-			continue // keploy's own
-		}
-		read.pids = append(read.pids, c.pid)
 	}
 	return read, nil
 }
+
+// daemonKind is what adoptedRunning makes of a child of this process.
+type daemonKind int
+
+const (
+	// notDaemon is a zombie, or keploy's own: one it holds a pidfd on (a
+	// child it started), or one that runs keploy's executable.
+	notDaemon daemonKind = iota
+	// daemonHeld is one a stop killed that the kernel holds (leftToKernel):
+	// said, not waited for again.
+	daemonHeld
+	// daemonUnseen is one whose executable keploy cannot read (it is not
+	// dumpable, or another user's): said, and left running.
+	daemonUnseen
+	// daemonStopped is a daemon keploy stops (stopAdopted).
+	daemonStopped
+)
+
+// daemonOf is what adoptedRunning makes of child c: held is the pidfds this
+// process holds (heldPidfds), self and selfErr its executable's stat. For a
+// daemon it cannot see, it says why.
+func daemonOf(c child, held map[int]bool, self os.FileInfo, selfErr error) (daemonKind, error) {
+	if c.zombie || held[c.pid] {
+		return notDaemon, nil
+	}
+	if _, gone := leftToKernel.Load([2]uint64{uint64(c.pid), c.start}); gone {
+		return daemonHeld, nil
+	}
+	exe, err := os.Stat(exePath(c))
+	if err != nil {
+		return daemonUnseen, err
+	}
+	if selfErr == nil && os.SameFile(exe, self) {
+		return notDaemon, nil
+	}
+	return daemonStopped, nil
+}
+
+// endsWithTheDaemons is keploy's answer to its interrupt of the application
+// (utils.LeaveToDaemonStop): whether process pid, started at start, is a
+// daemon this process adopted whose stop (stopAdopted, which follows the
+// interrupt in every run, agent.go) ends it, or one the kernel holds after a
+// stop's kill, which no wait ends. It reads the process as adoptedRunning
+// reads each child (daemonOf), so the interrupt leaves to that stop only
+// what it ends. Where keploy adopts nothing, or the process, its threads or
+// this process's pidfds cannot be read, it is not one: the interrupt waits
+// for it.
+func endsWithTheDaemons(pid int, start uint64) bool {
+	if !adopting.Load() {
+		return false
+	}
+	st, gone, err := procStat("/proc", pid)
+	if err != nil || gone || st.StartTime != start || st.PPID != os.Getpid() {
+		return false
+	}
+	c, err := childOf("/proc", pid, st)
+	if err != nil {
+		return false
+	}
+	held, err := heldPidfds()
+	if err != nil {
+		return false
+	}
+	self, selfErr := os.Stat("/proc/self/exe")
+	kind, _ := daemonOf(c, held, self, selfErr)
+	return kind == daemonStopped || kind == daemonHeld
+}
+
+func init() { utils.LeaveToDaemonStop(endsWithTheDaemons) }
 
 // exePath is where what child c runs is read: its /proc/<pid>/exe, or, where
 // its main thread exited while another runs on (whose exe reads as none, its
@@ -786,36 +865,90 @@ func exePath(c child) string {
 // utils.Exited), or whose pid names another process by the time its pidfd is
 // opened, is left out.
 func members(pids []int) []member {
+	self := os.Getpid()
+	return membersOf(pids, func(_ int, st utils.ProcStat) bool { return st.PPID == self })
+}
+
+// membersOf is each process of tops that is, as is reads it, and every
+// process it runs, now, each named by a pidfd, as members reads them.
+func membersOf(tops []int, is func(pid int, st utils.ProcStat) bool) []member {
 	var ms []member
 	seen := map[int]bool{}
-	var add func(pid, parent int, top bool)
-	add = func(pid, parent int, top bool) {
+	var add func(pid int, is func(utils.ProcStat) bool, top bool)
+	add = func(pid int, is func(utils.ProcStat) bool, top bool) {
 		if seen[pid] {
 			return
 		}
 		seen[pid] = true
 		before, ok := utils.ReadProcStat(pid)
-		if !ok || before.PPID != parent || utils.Exited(pid, before) {
+		if !ok || !is(before) || utils.Exited(pid, before) {
 			return
 		}
 		fd, err := openPidfd(pid)
 		if err != nil {
 			return
 		}
-		if after, ok := utils.ReadProcStat(pid); !ok || after.StartTime != before.StartTime || after.PPID != parent {
+		if after, ok := utils.ReadProcStat(pid); !ok || after.StartTime != before.StartTime || !is(after) {
 			closePidfd(fd)
 			return
 		}
 		ms = append(ms, member{pid: pid, fd: fd, start: before.StartTime, pgrp: before.PGRP, leads: top && before.PGRP == pid})
 		for _, child := range processChildren(pid) {
-			add(child, pid, false)
+			add(child, func(st utils.ProcStat) bool { return st.PPID == pid }, false)
 		}
 	}
-	self := os.Getpid()
-	for _, pid := range pids {
-		add(pid, self, true)
+	for _, pid := range tops {
+		add(pid, func(st utils.ProcStat) bool { return is(pid, st) }, true)
 	}
 	return ms
+}
+
+// stopHanded ends what keploy's interrupt of the application left to its
+// caller (utils.InterruptProcessTreeReached, utils.InterruptProcessTreeStop):
+// each process of reached that ignored the interrupt. Each that runs on,
+// still the process the interrupt reached (its start time), and what it runs, is
+// asked to stop with SIGTERM, killed once it makes no progress on its way
+// out, and waited for (stopMembers), as a daemon keploy adopted is. So no
+// process the interrupt reached runs once the stop of the application is
+// over, where keploy adopts its daemons and where it does not (it could not:
+// cannotAdopt), or could not read them. Where the stop of the daemons ended
+// them already, none runs on, and it does nothing. One a stop killed and the
+// kernel holds without progress (leftToKernel) is not waited for again. It
+// says why it killed one for want of progress, as stopMembers does; "" when
+// it did not.
+func stopHanded(logger *zap.Logger, reached []utils.Reached, moved *utils.TeardownScope) string {
+	ms := handedMembers(reached)
+	if len(ms) == 0 {
+		return ""
+	}
+	defer func() {
+		for _, m := range ms {
+			closePidfd(m.fd)
+		}
+	}()
+	end := utils.BeginDaemonStop()
+	defer end()
+	return stopMembers(logger, ms, func(member) bool { return false }, moved)
+}
+
+// handedMembers is stopHanded's read of what of reached its interrupt left
+// to it: each that ignored the interrupt, is still the process it reached
+// (its start time), and is not held by the kernel after a stop's kill, and
+// what it runs (membersOf).
+func handedMembers(reached []utils.Reached) []member {
+	start := make(map[int]uint64, len(reached))
+	var pids []int
+	for _, r := range reached {
+		if !r.Ignores {
+			continue
+		}
+		if _, held := leftToKernel.Load([2]uint64{uint64(r.PID), r.Start}); held {
+			continue
+		}
+		start[r.PID] = r.Start
+		pids = append(pids, r.PID)
+	}
+	return membersOf(pids, func(pid int, st utils.ProcStat) bool { return st.StartTime == start[pid] })
 }
 
 // stopMembers asks ms to stop, but those acting on keploy's interrupt
@@ -825,6 +958,20 @@ func members(pids []int) []member {
 // held by the kernel without progress for as long (leftToKernel, which the
 // next read of the daemons says, adoptedRunning). stallKill says why it
 // killed for want of progress; "" when it did not.
+//
+// Their progress is that of those on a way out of their own (hasWayOut).
+// One that ignores the SIGTERM it is asked to stop with is on none: what it
+// does as it runs on (storage it reads and writes, files it opens and
+// closes, threads it ends) is no progress on a way out, so however busily
+// it runs, it holds the stop for no more than the others' way out and the
+// stall after it. From the kill on, each is on the kill's way out, and the
+// progress of each is read.
+//
+// One on a way out of its own that makes progress for as long as it runs (it
+// handles SIGTERM, and then writes to storage for good) holds the stop with
+// no fixed bound, as the application's own exit holds keploy's stop of it,
+// but never silently: past the stall window the stop says, once and then
+// every stopSayEvery, which it waits for and how to end the wait (waitNote).
 func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, moved *utils.TeardownScope) (stallKill string) {
 	pids := make([]int, 0, len(ms))
 	var stopping []int
@@ -842,6 +989,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	ignored := ignoresSigtermNow(ms)
 	signalAll(ms, syscall.SIGTERM, false, acting)
 	signalAll(ms, syscall.SIGCONT, false, nil) // a stopped one handles it now
+	waits := newWaitNote(time.Now())
 	notice := utils.NewStopNowNotice(stopOffer)
 	defer notice.Withdraw()
 	t := time.NewTicker(stopCheck)
@@ -853,18 +1001,21 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	clock, meter, stopMeter := utils.NewExitMeter(procs, stopStall())
 	defer stopMeter()
 	var uncompared utils.FilesUncomparedNote
+	killed, offering := false, false
 	look := func() utils.ExitMark {
-		m := markExit(ms)
+		m := markExit(ms, func(mb member) bool { return killed || hasWayOut(mb, acting, ignored) })
 		uncompared.Say(logger, m)
 		return m
 	}
 	meter.Advance(look())
-	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
 		killMembers(ms)
 		killed = true
 		meter.Reset()
+		// The mark is of each of them from now on (look), set afresh: a
+		// reading of more processes than the one before is no step back.
+		meter.Rebase(look())
 		// What is left the kill ends, or the kernel holds: no press
 		// does more, and a closed channel read again would spin.
 		notice.Withdraw()
@@ -890,6 +1041,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
 				zap.Ints("pids", left))
 		}
+		waits.check(logger, ms, time.Now(), killed, offering)
 		if meter.Advance(look()) {
 			moved.Note()
 			continue
@@ -954,16 +1106,21 @@ func signalAll(ms []member, sig syscall.Signal, every bool, skip func(member) bo
 	}
 }
 
+// hasWayOut reports whether member m of a stop is on a way out of its own,
+// which a kill would cut: it acts on keploy's interrupt, or it did not
+// ignore SIGTERM when the stop asked it to stop with it (ignored).
+func hasWayOut(m member, acting func(member) bool, ignored map[[2]uint64]bool) bool {
+	return acting(m) || !ignored[[2]uint64{uint64(m.pid), m.start}]
+}
+
 // cutBy splits the members of ms still running by whether a kill now cuts
-// their way out: cut, those acting on keploy's interrupt and those that did
-// not ignore SIGTERM when the stop asked them to stop with it (ignored);
-// uncut, the rest.
+// their way out (hasWayOut): cut, those on one; uncut, the rest.
 func cutBy(ms []member, acting func(member) bool, ignored map[[2]uint64]bool) (cut, uncut []member) {
 	for _, m := range ms {
 		if m.exited() {
 			continue
 		}
-		if acting(m) || !ignored[[2]uint64{uint64(m.pid), m.start}] {
+		if hasWayOut(m, acting, ignored) {
 			cut = append(cut, m)
 		} else {
 			uncut = append(uncut, m)
@@ -1026,6 +1183,137 @@ func describe(ms []member) string {
 	return strings.Join(names, ", ")
 }
 
+// stopSayEvery is how often a stop of the daemons that waits on past its
+// stall window says again what it waits for (waitNote). A variable for the
+// tests.
+var stopSayEvery = 30 * time.Second
+
+// waitNote is a stop of the daemons' word on what it waits for, once it has
+// waited for the stall window (stopStall) since it asked them to stop: as the
+// window passes it reads each member that runs (readExitMark, one at a
+// time), and at the next check, then every stopSayEvery, it says each it
+// waits for (its pid and command), what that one did since the reading
+// before (doneSince), and how to end the wait (endWaitBy). Owned by the
+// stop's own loop.
+type waitNote struct {
+	due   time.Time
+	read  time.Time
+	marks map[[2]uint64]utils.ExitMark // each member's at the last reading; nil before the first
+}
+
+// newWaitNote is the waitNote of a stop that asked its members to stop at
+// asked.
+func newWaitNote(asked time.Time) *waitNote {
+	return &waitNote{due: asked.Add(stopStall())}
+}
+
+// check is called at each check of the stop, now: killed is whether the
+// stop killed its members, offering whether a press of Ctrl+C kills them
+// now (utils.StopNowNotice).
+func (n *waitNote) check(logger *zap.Logger, ms []member, now time.Time, killed, offering bool) {
+	if now.Before(n.due) {
+		return
+	}
+	marks := map[[2]uint64]utils.ExitMark{}
+	var waiting []string
+	for _, m := range ms {
+		if m.exited() {
+			continue
+		}
+		key := [2]uint64{uint64(m.pid), m.start}
+		mark := readExitMark([]utils.Reached{{PID: m.pid, Start: m.start}})
+		marks[key] = mark
+		if before, ok := n.marks[key]; ok {
+			waiting = append(waiting, commandOf(m.pid)+": "+doneSince(before, mark))
+		}
+	}
+	first, since := n.marks == nil, now.Sub(n.read)
+	n.marks, n.read = marks, now
+	if first {
+		// What each does is said from the next check on, against this.
+		n.due = now
+		return
+	}
+	n.due = now.Add(stopSayEvery)
+	if len(waiting) == 0 {
+		return
+	}
+	logger.Warn("keploy is still waiting for the daemons the application left running to exit after it asked them to stop: it waits for as long as they make progress on their way out",
+		zap.Strings("waiting_for", waiting), zap.String("seen_over", saidSince(since)), zap.String("next_step", endWaitBy(killed, offering)))
+}
+
+// endWaitBy is how the user ends a stop's wait for its members (waitNote):
+// killed is whether the stop killed them, offering whether a press of
+// Ctrl+C kills them now.
+func endWaitBy(killed, offering bool) string {
+	switch {
+	case killed:
+		return "keploy killed them and waits for the kernel to let them go; it goes on without one that makes no progress on its way out"
+	case offering:
+		return "press Ctrl+C again to kill them now"
+	default:
+		return "press Ctrl+C (it stops keploy's run), then again once keploy says another press kills them"
+	}
+}
+
+// doneSince says what a process did on its way out between its readings
+// before and now (utils.ExitMark): the storage its threads read or wrote,
+// the threads it ended, the files it closed (where both readings of its
+// files settled).
+func doneSince(before, now utils.ExitMark) string {
+	var done []string
+	var io uint64
+	for tid, n := range now.IO {
+		if n > before.IO[tid] {
+			io += n - before.IO[tid]
+		}
+	}
+	if io > 0 {
+		done = append(done, fmt.Sprintf("still reading or writing storage (%d bytes)", io))
+	}
+	if now.Threads < before.Threads {
+		done = append(done, fmt.Sprintf("ended %d of its threads", before.Threads-now.Threads))
+	}
+	if !now.FilesUnsettled && !before.FilesUnsettled && now.Fds < before.Fds {
+		done = append(done, fmt.Sprintf("closed %d of its files", before.Fds-now.Fds))
+	}
+	if len(done) == 0 {
+		return "no progress on its way out"
+	}
+	return strings.Join(done, ", ")
+}
+
+// saidSince is how long a waitNote's readings spanned, as it says it.
+func saidSince(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
+}
+
+// commandOf names process pid by its pid and command line (its comm where
+// that cannot be read, as of a kernel thread), cut to a line's length.
+func commandOf(pid int) string {
+	name := "process " + strconv.Itoa(pid)
+	cmd := ""
+	if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline"); err == nil {
+		cmd = strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " "))
+	}
+	if cmd == "" {
+		if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm"); err == nil {
+			cmd = strings.TrimSpace(string(b))
+		}
+	}
+	const most = 160
+	if len(cmd) > most {
+		cmd = strings.ToValidUTF8(cmd[:most], "") + "..."
+	}
+	if cmd == "" {
+		return name
+	}
+	return name + " (" + cmd + ")"
+}
+
 // exited reports whether m has exited: its pidfd is readable then.
 func (m member) exited() bool {
 	fds := []unix.PollFd{{Fd: int32(m.fd), Events: unix.POLLIN}}
@@ -1044,17 +1332,22 @@ func running(ms []member) []int {
 	return pids
 }
 
-// markExit reads how far a stop's members are on their way out
-// (utils.ExitMark): those whose pidfd shows them exited are not read.
-func markExit(ms []member) utils.ExitMark {
+// markExit reads how far the members of a stop's ms that read holds for
+// are on their way out (utils.ExitMark): those whose pidfd shows them
+// exited are not read.
+func markExit(ms []member, read func(member) bool) utils.ExitMark {
 	procs := make([]utils.Reached, 0, len(ms))
 	for _, mb := range ms {
-		if !mb.exited() {
+		if read(mb) && !mb.exited() {
 			procs = append(procs, utils.Reached{PID: mb.pid, Start: mb.start})
 		}
 	}
-	return utils.MarkExit(procs)
+	return readExitMark(procs)
 }
+
+// readExitMark is markExit's read of processes (utils.MarkExit): a test
+// reads marks of its own.
+var readExitMark = utils.MarkExit
 
 // processChildren is the processes pid runs: its threads' children lists, or,
 // where the kernel keeps none, every process whose parent it is.

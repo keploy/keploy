@@ -218,11 +218,15 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// Chunks after an exchange left out are the rest of it, counted and
 	// spanned with it already: reported again, they would count a mock
 	// twice, and span time its test cases need not span. That holds for an
-	// exchange flushMock leaves out (the capture's incomplete flag) and for
+	// exchange flushMock leaves out (the capture's incomplete flag), for
 	// one the session leaves out as flushMock hands it on (emitV2: refused,
-	// or the channel full, at the stop). A held exchange (preambleHold) the
-	// session leaves out as the hold hands it on is counted apart from its
-	// tail: counted once more, its span only wider (fail-closed).
+	// or the channel full, at the stop), and for one the session's manager
+	// drops as it is handed on (the output closed, or at its byte bound),
+	// which it counted and the session spanned. Memory pressure is not among
+	// them: every Generic mock derives as the session's, which it keeps. A
+	// held exchange (preambleHold) the session leaves out, or its manager
+	// drops, as the hold hands it on is counted apart from its tail: counted
+	// once more, its span only wider (fail-closed).
 	var flushedLeftOut bool
 	leaveOutTail := func(n int, from, to time.Time) {
 		if n == 0 || flushedLeftOut {
@@ -890,30 +894,36 @@ func readOrWritten(ev chunkEvent) time.Time {
 	return ev.readAt
 }
 
-// leftOutRefusedAtStop is the reason emitV2 leaves out a mock the session
-// refused as its context ended.
-const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
+// leftOutRefusedAtStop is the reason the session leaves out a mock it refused
+// as its context ended (supervisor.LeftOutRefusedAtStop).
+const leftOutRefusedAtStop = supervisor.LeftOutRefusedAtStop
 
 // emitV2 hands the session m, the mock of an exchange read whole, whether or
-// not the session's context (Session.Ctx) has ended: EmitMock refuses every
-// mock once it has, so a mock handed over after the recording's stop, by a
-// parser behind its capture, goes through EmitMockOnShutdown, which records
-// it. Before, every exchange recorded after the stop was refused, with a
-// Debug line only. A mock refused all the same (the context ended between
-// this check and EmitMock's own) is left out with its reason, counted and
-// spanned, never dropped with nothing said. It returns whether m was left
-// out, by the session (EmitMockOutcome) or here.
-func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (leftOut bool) {
-	atStop := sess.Ctx != nil && sess.Ctx.Err() != nil
-	leftOut, err := sess.EmitMockOutcome(m, atStop)
+// not the session's context (Session.Ctx) has ended. Through the sync-mock
+// manager, as the agent records (RouteMocksViaSyncMock), it is always
+// EmitMockOnShutdown: there it differs from EmitMock only in skipping
+// EmitMock's look at the context, which comes after the post-record hooks, so
+// a recording's stop that came while the hooks ran would refuse a mock
+// captured before the stop, which the supervisor's stop waits for the parser
+// to record. Straight to the session's channel: EmitMock while the context
+// lasts, EmitMockOnShutdown once it has ended, as at the recording's stop,
+// where EmitMock refuses every mock, so a mock handed over after the stop, by
+// a parser behind its capture, is recorded. A mock refused all the same (the
+// context ended between this check and EmitMock's own) is left out with its
+// reason, counted and spanned by EmitMockOutcome itself, never dropped with
+// nothing said. It returns whether m was lost: left out by the session, or
+// dropped by the session's manager as it was handed over (EmitMockOutcome),
+// which counted it.
+func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (lost bool) {
+	shutdown := sess.RouteMocksViaSyncMock || (sess.Ctx != nil && sess.Ctx.Err() != nil)
+	lost, err := sess.EmitMockOutcome(m, shutdown)
 	if err != nil {
 		if logger != nil {
 			logger.Debug("generic v2: the session refused a mock as its context ended", zap.Error(err))
 		}
-		sess.ReportLeftOut(m, leftOutRefusedAtStop)
 		return true
 	}
-	return leftOut
+	return lost
 }
 
 // readStream pumps Chunks from one FakeConn onto its direction's events, out,

@@ -110,6 +110,10 @@ type Flight struct {
 	// while aloft): a read of the order (Placed) reads it only if it landed
 	// before the read, so later requests change no read's verdict.
 	landed uint64
+	// landedAt is the real instant it landed (zero while aloft): a serve
+	// made in it gave the application nothing before then (Order.ArrivedAt
+	// reads it).
+	landedAt time.Time
 	// untold is the tracker's count of landings once this one ended untold
 	// (EndUntold; 0 while it has not): a read made since reads none of its
 	// serves, and a read made before keeps the verdict it gave.
@@ -239,7 +243,7 @@ func (f *Flight) Land() {
 	}
 	delete(t.aloft, f)
 	t.landings++
-	f.landed = t.landings
+	f.landed, f.landedAt = t.landings, time.Now()
 }
 
 // EndUntold is the end of f whose answer the application is not given: no

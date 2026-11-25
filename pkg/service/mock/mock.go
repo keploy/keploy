@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -22,6 +23,11 @@ import (
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
 	ids *ids.Map
+	// console is where the replay names each call no mock answered whole,
+	// for the user's eyes only and never for its log (sayMisses): keploy's
+	// console, which keploy's CLI sets (SetConsole). nil, as New leaves it,
+	// says nothing; MissesFile names every call either way.
+	console io.Writer
 	// drainClock is the clock the run's end measures its drain's stall on
 	// (teardownDrain): nil, keploy's own runnable time; a test drives its
 	// own.
@@ -46,7 +52,8 @@ type mockService struct {
 	// KEPLOY_SHIM_CTRL=… <command>` -- and that launch line is not the user's
 	// command: recorded in the replay receipt it leaked a temp path, and
 	// `keploy mock status` handed it back to agents as the command to run.
-	userCommand string
+	// Held as utils.AppCommand: a log line names it by its program.
+	userCommand utils.AppCommand
 	// claims are, under the proven switch, the run's claims (windows with
 	// Claim set), which readWindows takes out of the windows it returns: a
 	// record tags each pool mock with the key of the claim it was made
@@ -78,6 +85,23 @@ type mockService struct {
 	// past such a read (models.RepeatNote.SkippedRead), its test
 	// (withSkippedTest).
 	skippedReadOf map[string]string
+	// series is, under the proven switch, each series a declared rule
+	// placed in the worker scope (models.MockEntry.Series), as
+	// pushProvenTable read the set's mappings: each is required once per run
+	// when it is due (requiredNotMade).
+	series map[string]seriesDue
+	// placed is, as series is, every series a declared rule (or keploy
+	// record's own trail move) placed in the worker scope, the ones served,
+	// not required, among them (placedSeries): what the run's RULE USED
+	// lines count.
+	placed map[string]seriesDue
+	// repeats is what the run's end read of how many calls in tests each
+	// series answered past its recorded count (readSeriesRepeats).
+	repeats seriesRepeats
+	// consumed is what the agent consumed, as every read of the run read it
+	// (the wait for the series the run owes, awaitRequiredSeries, then the
+	// run's end, reportOutcome), each recording once.
+	consumed consumedReads
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
@@ -106,7 +130,7 @@ func New(
 		store:           store,
 		hooks:           hooks,
 		config:          cfg,
-		userCommand:     cfg.Command,
+		userCommand:     utils.NewAppCommand(cfg.Command),
 	}
 }
 
@@ -130,6 +154,14 @@ func (m *mockService) SetStore(store Store) {
 // SetTestDB gives Record a store for the app's incoming requests (--record-requests).
 func (m *mockService) SetTestDB(db TestDB) {
 	m.testDB = db
+}
+
+// SetConsole makes w the service's console (mockService.console): keploy's
+// CLI sets os.Stdout. A program that embeds the service sets it only to a
+// place that is for the user's eyes alone, never to a stream its log is
+// written from. nil says nothing.
+func (m *mockService) SetConsole(w io.Writer) {
+	m.console = w
 }
 
 // SetRecordHooks replaces the record hooks (e.g. enterprise secret obfuscation).
@@ -250,7 +282,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	})
 
 	m.logger.Info("waiting for the keploy-agent compose service to come up",
-		zap.String("agent-uri", m.config.Agent.AgentURI))
+		zap.String("agent-uri", pkg.ShownAgentURI(m.config.AgentURI())))
 
 	// The wait follows the agent container's BOOT, which is exactly what this
 	// waits on, as keploy record's same wait does: it lasts while the start
@@ -262,7 +294,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	agentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	agentReadyCh := make(chan bool, 1)
-	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh, time.Second)
+	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.AgentURI, agentReadyCh)
 	agentStart := pkg.WatchAgentStart(agentCtx, m.instrumentation)
 
 	select {
@@ -319,6 +351,16 @@ func (m *mockService) composeAgentFailure() error {
 		return nil
 	}
 	return reader.ComposeAgentFailure()
+}
+
+// composeEnd is what ended a compose recording when the test command's own
+// end, appExit, does not stand, or nil. See ComposeEndReader.
+func (m *mockService) composeEnd(appExit int) error {
+	reader, ok := m.instrumentation.(ComposeEndReader)
+	if !ok || !m.isDockerCompose() {
+		return nil
+	}
+	return reader.ComposeEndAfterReady(appExit)
 }
 
 // releaseComposeApp releases the app service, which has been parked at its

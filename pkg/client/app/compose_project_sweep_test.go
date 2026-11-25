@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -69,6 +70,12 @@ done
 for a in "$@"; do
   if [ "$a" = "ps" ]; then
     if [ "` + hang + `" = "1" ]; then while : ; do sleep 1; done; fi
+    # KEPLOY_STUB_PS_CODE: ps fails with this code, as it does on a file that
+    # needs a variable only the up's own command gave.
+    if [ -n "${KEPLOY_STUB_PS_CODE:-}" ]; then
+      echo 'required variable TAG is missing a value' >&2
+      exit "$KEPLOY_STUB_PS_CODE"
+    fi
     cat "` + errFile + `" >&2
     cat "` + psFile + `"
     exit 0
@@ -81,9 +88,15 @@ for a in "$@"; do
     # KEPLOY_STUB_UP_CODE: the first up exits with this code, and every up
     # after it exits 0 at once, as a retried up whose dependency is healthy
     # now (the first up may also be killed: it is the first all the same).
+    # KEPLOY_STUB_UP_RETRY_WAIT_FILE: a retried up runs until that file
+    # exists instead, as an up whose stack keploy then stops.
     if [ -n "${KEPLOY_STUB_UP_CODE:-}" ]; then
       if [ -e "$KEPLOY_STUB_UP_WAIT_FILE.first" ]; then
         printf 'UP-RETRIED\n' >> "` + argvLog + `"
+        if [ -n "${KEPLOY_STUB_UP_RETRY_WAIT_FILE:-}" ]; then
+          while [ ! -e "$KEPLOY_STUB_UP_RETRY_WAIT_FILE" ] && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05 </dev/null >/dev/null 2>&1; done
+          printf 'UP-RETRY-DONE\n' >> "` + argvLog + `"
+        fi
         exit 0
       fi
       : > "$KEPLOY_STUB_UP_WAIT_FILE.first"
@@ -328,7 +341,7 @@ func keployStack(t *testing.T, psJSON string, downCode int) (*App, *inspectRecor
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose -p orderflow up",
+		cmd:             utils.NewAppCommand("docker compose -p orderflow up"),
 		keployContainer: "keploy-v3",
 		container:       "user-app",
 		composeServices: []string{"app", "db", "keploy-agent"},
@@ -433,7 +446,7 @@ func TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
-		cmd:             "docker compose -f - up",
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
 		composeServices: []string{"app"},
 	}
 
@@ -456,7 +469,7 @@ func TestSweepWithNoKnownServicesDoesNothing(t *testing.T) {
 	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
 	stubDockerCLI(t, ps, 1)
 	rec := &inspectRecorder{}
-	a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: "docker compose up"}
+	a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: utils.NewAppCommand("docker compose up")}
 
 	if ids := a.sweepStragglingProjectContainers(); len(ids) != 0 {
 		t.Fatalf("swept %v with no known service list", ids)
@@ -556,7 +569,7 @@ func TestSweepSurvivesComposeWarningsOnStderr(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 
@@ -590,7 +603,7 @@ func TestSweepLeavesComposeRunOneOffsAlone(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 
@@ -621,7 +634,7 @@ func TestSweepIsBoundedWhenComposeHangs(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 

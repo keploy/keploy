@@ -18,3 +18,84 @@ const (
 	// One filed as a test ended, made after it began, is that test's.
 	MissOutsideTest = "outside_test"
 )
+
+// KindOutsideEveryTest names a call no recording answered that is charged to
+// no test because the application made it outside every test (between two
+// tests; UnmatchedCall.Between): it fails the run, and no test. It is the
+// kind field of the line keploy prints for such a call, in the form keploy's
+// docs document ("outside every test").
+const KindOutsideEveryTest = "outside_every_test"
+
+// MissMark is where a miss's call was when its parser marked it, its first
+// read of the round under the proven switch (MockMismatchReport.Mark): the
+// staging (Epoch) and the round's boundary count (Bounds) the read was made
+// at, and the test whose view it found (Test, "" for a pool view or where the
+// store did not name it). Every view's install moves the boundary count, so
+// a mark tells whether the call was made before or after a test's view was
+// installed, however late keploy decided it and its miss reached the agent.
+// Known is false for a parser that marks no round, and for a store that
+// keeps no boundary count: such a miss is placed by when it was filed.
+type MissMark struct {
+	Epoch, Bounds uint64
+	Test          string
+	Known         bool
+}
+
+// Before reports whether the mark was made before the round at epoch and
+// bounds (a test view's install, read with the same lock): in an earlier
+// staging, or earlier in the same one. False for a mark not known.
+func (k MissMark) Before(epoch, bounds uint64) bool {
+	if !k.Known {
+		return false
+	}
+	return k.Epoch < epoch || (k.Epoch == epoch && k.Bounds < bounds)
+}
+
+// OutsideEveryTest reports whether keploy's replay fails the set with c as a
+// call outside every test (KindOutsideEveryTest), under the proven switch:
+// made between two tests (Between), or made in a test and decided only after
+// that test ended (Late), unless a parser held it for a later test's
+// recording (Held), which the replay says as held.
+func (c UnmatchedCall) OutsideEveryTest() bool { return c.Between || c.Late && !c.Held }
+
+// What a miss's match phase, or a read of its whole set, says of its set's
+// recordings of the call's shape (UnmatchedCall.ShapeRecordings), as the line
+// of a call outside every test says it.
+const (
+	// RecordedShape: the matcher compared recordings of the call's shape and
+	// refused each: by its body (MatchPhaseBody), by strict noise
+	// (MatchPhaseStrict), or by a test variable (MatchPhaseVariable); or the
+	// set has a recording of its shape (SetShapeRecordings).
+	RecordedShape = "shape"
+	// RecordedNone: keploy read every recording of the call's set and none
+	// has its shape (SetShapeRecordings).
+	RecordedNone = "none"
+)
+
+// ShapeRecordings says what keploy knows of c's set's recordings of c's
+// shape: RecordedShape when c's match phase compared some, else what a read
+// of the whole set found (SetRecorded): RecordedShape, RecordedNone, or ""
+// when no such read said (none was made, or it could not tell). A phase that
+// found no recording to compare (MatchPhaseNoMocks, MatchPhaseSchema) speaks
+// only of the pool its matcher read, one test's window and the session's less
+// what was spent: alone, it never says the set has none.
+func (c UnmatchedCall) ShapeRecordings() string {
+	switch c.MatchPhase {
+	case MatchPhaseBody, MatchPhaseStrict, MatchPhaseVariable:
+		return RecordedShape
+	}
+	switch c.SetRecorded {
+	case RecordedShape, RecordedNone:
+		return c.SetRecorded
+	}
+	return ""
+}
+
+// NeedsSetRecorded reports whether only a read of c's whole set
+// (SetShapeRecordings, into SetRecorded) can say what the set recorded of c's
+// shape: c names no closest recording and does not already know the set has
+// one of its shape (ShapeRecordings). Every path that reports a call outside
+// every test reads the set for such a call, and only for one.
+func (c UnmatchedCall) NeedsSetRecorded() bool {
+	return c.ClosestMock == "" && c.ShapeRecordings() != RecordedShape
+}

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
@@ -386,6 +387,7 @@ func TestSessionEmitMockHonorsCtxCancel(t *testing.T) {
 	ch := make(chan *models.Mock)
 	ctx, cancel := context.WithCancel(context.Background())
 	sess := &Session{
+		Mgr:    syncMock.New(nil),
 		Mocks:  ch,
 		Ctx:    ctx,
 		Logger: zaptest.NewLogger(t),
@@ -486,6 +488,7 @@ func TestSessionEmitMockRouteViaSyncMock_HonorsCtx(t *testing.T) {
 	cancel() // cancel before EmitMock is called
 
 	sess := &Session{
+		Mgr:                   syncMock.New(nil),
 		Mocks:                 directCh,
 		Logger:                zaptest.NewLogger(t),
 		Ctx:                   ctx,

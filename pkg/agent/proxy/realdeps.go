@@ -266,7 +266,7 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 		dec = d.ByName(name, dst.Port())
 		if dec.Verdict == realdeps.Dependency {
 			p.logger.Debug("a connection to a mock.real name's address is for another name: a dependency",
-				zap.String("destination", dstAddr), zap.String("name", name.Host), zap.String("via", name.Via))
+				zap.String("destination", dstAddr), zap.String("name", models.HostLogName(ctx, name.Host)), zap.String("via", name.Via))
 			p.dropRealPredial(predialed)
 			return false, wrapped, nil
 		}
@@ -385,9 +385,13 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 		Sent:     func(int) { p.realTracker.Sent(realUseOrigin(from), connID, dec.Label) },
 		Answered: func() { p.realTracker.Answered(dec.Label) },
 		H2:       func() { p.realTracker.H2(realUseOrigin(from), dec.Label) },
-		Refused: func(why string) {
-			p.realTracker.Incomplete(realUseOrigin(from), dstAddr, why)
-			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", why))
+		Refused: func(why string, hosts models.LossHosts) {
+			// The report's text names the client's other name whole
+			// (the test's REAL row), beside the tag this line names it
+			// by, its shape, where why holds it: the name goes with the
+			// evidence, so keploy's CLI logs it by the same shape and tag.
+			p.realTracker.Incomplete(realUseOrigin(from), dstAddr, why, hosts...)
+			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", hosts.LogText(why)))
 		},
 		// The app's side over, the connection waits on the real server's
 		// answer: no work of keploy's, which a test's end, and a set's
@@ -409,11 +413,22 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 // answer cache (design v14 §4). An upstream that cannot be asked is answered
 // SERVFAIL, so the app's resolver sees the failure as it is and is never
 // steered to keploy's own address.
+//
+// The failure's level says whose it is. keploy asked and no upstream
+// answered: the SERVFAIL is the one the app's own resolver gives, so it is
+// logUnansweredForward's WARN. keploy asked none (no upstream to ask, or a
+// type it does not forward): the SERVFAIL is keploy's own and the app did not
+// get the live answer it was promised, so it stays an ERROR.
 func (p *Proxy) realDNS(question dns.Question) dnsCacheEntry {
 	fwd, err := p.forwardDNSUpstream(question)
 	if err != nil || fwd == nil {
-		utils.LogError(p.logger, err, "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL",
-			append(dnsQuestionFields(question), zap.String("next_step", "check the upstream DNS resolver keploy's agent forwards to"))...)
+		const msg = "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL"
+		fields := append(p.dnsQuestionFields(question), zap.String("next_step", "check the upstream DNS resolver keploy's agent forwards to"))
+		if errors.Is(err, errNoUpstreamAnswered) {
+			p.logUnansweredForward(question, msg, append(fields, zap.Error(err))...)
+		} else {
+			utils.LogError(p.logger, err, msg, fields...)
+		}
 		return dnsCacheEntry{Msg: &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure, RecursionAvailable: true}}}
 	}
 	return dnsCacheEntry{Msg: fwd, FromUpstream: true}

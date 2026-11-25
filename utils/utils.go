@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -38,6 +40,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/linkout"
 	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
@@ -67,6 +70,25 @@ func IsShutdownError(err error) bool {
 		strings.Contains(errStr, "use of closed network connection")
 }
 
+// UnbracketHost is host without the one pair of brackets an IPv6 literal
+// comes in when it is written next to a port ("[fd00::1]"). "fd00::1" and
+// "[fd00::1]" are one host, and the helpers here bracket an IPv6 host
+// themselves wherever the form they build needs it (net.JoinHostPort, a URL's
+// host), so one passed in bracketed would come out bracketed twice.
+func UnbracketHost(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
+// ReplaceHost replaces currentURL's host with ipAddress, keeping its port.
+//
+// ipAddress may be IPv6, bare ("fd00::1", as a Kubernetes Pod IP is) or
+// bracketed. An IPv6 host has to be bracketed in a URL: "http://fd00::1:8080/"
+// is no URL, and url.Parse refuses it (invalid port "::1:8080" after host).
+// A zone ("fe80::1%eth0") is kept and written as a URL writes it (%25).
+// Any other host (a name, an IPv4 address) is put in as given.
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
@@ -80,26 +102,69 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
 	}
 
-	// Replace hostname with the IP address
-	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-	// Return the modified URL
+	host := ipAddress
+	if bare := UnbracketHost(ipAddress); isIPv6Literal(bare) {
+		host = "[" + bare + "]"
+	}
+	if port := parsedURL.Port(); port != "" {
+		host += ":" + port
+	}
+	parsedURL.Host = host
 	return parsedURL.String(), nil
 }
 
+// isIPv6Literal says host is an IPv6 address, with or without a zone, an
+// IPv4-mapped one ("::ffff:127.0.0.1") included: every one has colons, so
+// each needs the brackets.
+func isIPv6Literal(host string) bool {
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Is6()
+}
+
+// ReplaceGrpcHost replaces authority's host with ipAddress, keeping its port.
+//
+// An authority may have no port ("my-svc", "10.0.0.5", "[fd00::1]"): then
+// ipAddress alone comes back, an IPv6 one bracketed as an authority writes
+// it, and ResolveTestTarget gives it its port (app_port, grpcPort or 443).
+// ipAddress may be IPv6, bare or bracketed. One with a zone ("fe80::1%eth0")
+// is put in too, but grpc-go refuses a target with a zone.
 func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
 	// Check if ipAddress is empty
 	if ipAddress == "" {
 		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
 	}
 
-	// Use net.SplitHostPort to properly handle IPv6 addresses
-	_, port, err := net.SplitHostPort(authority)
+	port, hasPort, err := authorityPort(authority)
 	if err != nil {
 		return authority, fmt.Errorf("invalid authority format: %v", err)
 	}
+	host := UnbracketHost(ipAddress)
+	if !hasPort {
+		if isIPv6Literal(host) {
+			return "[" + host + "]", nil
+		}
+		return host, nil
+	}
+	// Replace the host part with ipAddress, keeping the port. JoinHostPort
+	// brackets an IPv6 host, so a bracketed one is given to it bare.
+	return net.JoinHostPort(host, port), nil
+}
 
-	// Replace the host part with ipAddress, keeping the port
-	return net.JoinHostPort(ipAddress, port), nil
+// authorityPort is the port of a host:port authority, and hasPort false for
+// one with no port: one with no colon (a name, an IPv4 address), one in
+// brackets ("[fd00::1]"), or a bare IPv6 address, whose colons are the
+// address's. The host itself is not checked, as ReplaceGrpcHost replaces it
+// whole. Anything else net.SplitHostPort cannot split ("a:b:c", "[fd00::1")
+// is an error.
+func authorityPort(authority string) (port string, hasPort bool, err error) {
+	_, port, err = net.SplitHostPort(authority)
+	if err == nil {
+		return port, true, nil
+	}
+	if !strings.Contains(authority, ":") || UnbracketHost(authority) != authority || isIPv6Literal(authority) {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
 func ReplaceGrpcPort(authority string, port string) (string, error) {
@@ -111,8 +176,9 @@ func ReplaceGrpcPort(authority string, port string) (string, error) {
 	// Use net.SplitHostPort to properly handle IPv6 addresses
 	host, _, err := net.SplitHostPort(authority)
 	if err != nil {
-		// If splitting fails, assume it's just a host without port
-		return net.JoinHostPort(authority, port), nil
+		// If splitting fails, assume it's just a host without port: "[fd00::1]"
+		// or "fd00::1" as much as "localhost", which JoinHostPort brackets.
+		return net.JoinHostPort(UnbracketHost(authority), port), nil
 	}
 
 	// Replace the port part, keeping the host
@@ -158,29 +224,61 @@ func ReplacePort(currentURL string, port string) (string, error) {
 		return currentURL, err
 	}
 
-	if parsedURL.Port() == "" {
-		parsedURL.Host = parsedURL.Host + ":" + port
-	} else {
-		parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Port(), port, 1)
-	}
-
+	// Rebuilt from the hostname, never edited as text: replacing the port's
+	// digits in Host replaced their first occurrence, which can be in the host
+	// ("10.0.0.80:80" became "10.0.0.9000:80", "[fd00::8080]:8080" a
+	// different host). JoinHostPort brackets an IPv6 hostname.
+	parsedURL.Host = net.JoinHostPort(parsedURL.Hostname(), port)
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta is what a log says about req: its method, its host, its path's
-// shape (URLPathShape) and the names of its query parameters. Never a path
-// segment, a query value, a header or the body: those are the application's
-// content (a segment may be a token the recording redacted), and
-// logs get pasted into issues. A query part with no "=" is not named either,
-// since it may be a bare token; a bare token that holds "=" (padded base64,
-// ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
-func GetReqMeta(req *http.Request) map[string]string {
+// GetReqMeta is what a log line logged under ctx says about req: its
+// method, its host (a name by its shape and tag, models.HostLogName), its
+// path's shape (URLPathShape), its path tag (path_tag,
+// models.URLPathTag under the session ctx carries: what the console and the
+// report print beside the request where they name it whole; none for a
+// request that names no method) and the names of its query parameters
+// (GetReqShape). For the agent's lines about a call, which the console and
+// the report name by that tag. ctx is the context of the work the line is
+// logged in (a connection's, a request's): a line under a context with no
+// session tags under the process's key (models.LogKeySession).
+func GetReqMeta(ctx context.Context, req *http.Request) map[string]string {
+	reqMeta := GetReqShape(req)
+	if req != nil && req.Host != "" {
+		// The host's name by its shape beside its tag under the session
+		// (models.HostLogName), so the session's lines about one host match
+		// up; an IP address whole.
+		reqMeta["host"] = models.HostLogName(ctx, req.Host)
+	}
+	if req != nil && req.URL != nil {
+		if tag := models.URLPathTag(ctx, req.Method, req.URL); tag != "" {
+			reqMeta["path_tag"] = tag
+		}
+	}
+	return reqMeta
+}
+
+// GetReqShape is what a log says about req with no path tag: its method, its
+// host (a name by its labels' shape, models.HostShape, with no tag), its
+// path's shape (URLPathShape) and the names of its query
+// parameters. For a line of keploy's CLI about a test case's request (one it
+// sends, stores or compares): no console or report line prints such a tag,
+// so the line names the request by its shape, and the test case where it has
+// one. Never a path segment, a query value, a header or the body: those are
+// the application's content (a segment may be a token the recording
+// redacted), and logs get pasted into issues. A query part with no "=" is not
+// named either, since it may be a bare token; a bare token that holds "="
+// (padded base64, ?dG9rZW4=) is named by what comes before its first "="
+// (dG9rZW4).
+func GetReqShape(req *http.Request) map[string]string {
 	reqMeta := map[string]string{}
 	if req == nil {
 		return reqMeta
 	}
 	reqMeta["method"] = req.Method
-	reqMeta["host"] = req.Host
+	// The host by its labels' shape (models.HostShape): a name is the
+	// app's, as a path is; an IP address whole.
+	reqMeta["host"] = models.HostShape(req.Host)
 	if req.URL != nil {
 		reqMeta["path"] = URLPathShape(req.URL)
 		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
@@ -226,12 +324,18 @@ func queryKeys(rawQuery string) []string {
 		if u, err := url.QueryUnescape(k); err == nil {
 			k = u
 		}
-		keys = append(keys, k)
+		// A name that does not read as one may be a value the app sent (a
+		// token passed as a parameter's name): {} (models.KeyShape).
+		keys = append(keys, models.KeyShape(k))
 	}
 	slices.Sort(keys)
 	return slices.Compact(keys)
 }
 
+// IsPassThrough reports whether one of opts' bypass rules names req, to
+// destPort. A rule whose regex does not compile is said, with req by its
+// shape alone (GetReqShape): the line is about keploy.yml's rule, and no
+// console or report line names the call a rule was tried on beside a tag.
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
 	passThrough := false
 
@@ -239,7 +343,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Host != "" {
 			regex, err := regexp.Compile(bypass.Host)
 			if err != nil {
-				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqShape(req)))
 				continue
 			}
 			passThrough = regex.MatchString(req.Host)
@@ -250,7 +354,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Path != "" {
 			regex, err := regexp.Compile(bypass.Path)
 			if err != nil {
-				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqShape(req)))
 				// The rule's host may have matched; a path that does not
 				// compile matches no call.
 				passThrough = false
@@ -422,7 +526,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
-# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
+# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configuration file.
 `
 
 // ErrNoAnswer is returned when there was nobody to answer the question: stdin
@@ -758,30 +862,152 @@ func extractFlagFromArgs(args []string, names ...string) string {
 	return found
 }
 
-// ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
-// Returns empty string if not found.
+// keployValueLongFlags lists known value-taking keploy CLI long flags
+// (normalized by removing hyphens and lowercasing so both kebab-case and
+// camelCase spellings match). Used by ExtractCommandFromArgs so an argument
+// value starting with "-c" (e.g. `--app-name -ci`) is consumed by its owning
+// flag rather than mistaken for the `-c` shorthand. Flags with NoOptDefVal
+// (such as boolean flags and `--enable-sampling`) must NOT be listed here
+// because pflag never consumes the following argv token for them. Unknown
+// flags are left unskipped so newly added boolean flags before `-c` still work.
+var keployValueLongFlags = map[string]bool{
+	"allowegress":            true,
+	"apitimeout":             true,
+	"appid":                  true,
+	"appname":                true,
+	"basepath":               true,
+	"builddelay":             true,
+	"cajavahome":             true,
+	"clientlogfile":          true,
+	"clientpid":              true,
+	"clientpidns":            true,
+	"cmdtype":                true,
+	"configpath":             true,
+	"consumerstallgrace":     true,
+	"containername":          true,
+	"coveragereport":         true,
+	"coveragereportpath":     true,
+	"delay":                  true,
+	"dnsport":                true,
+	"dockerhost":             true,
+	"driven":                 true,
+	"flakycheckretry":        true,
+	"format":                 true,
+	"fromcontainer":          true,
+	"grpcport":               true,
+	"halfclosegrace":         true,
+	"healthpath":             true,
+	"healthpolltimeout":      true,
+	"healthscheme":           true,
+	"healthurl":              true,
+	"host":                   true,
+	"incomingproxyport":      true,
+	"jacocoagentpath":        true,
+	"keploycontainer":        true,
+	"keploynetwork":          true,
+	"language":               true,
+	"maxfailattempts":        true,
+	"maxmemoryperconn":       true,
+	"maxmemoryperconnection": true,
+	"memorylimit":            true,
+	"metadata":               true,
+	"mincoverage":            true,
+	"mode":                   true,
+	"mongopassword":          true,
+	"name":                   true,
+	"networkname":            true,
+	"onmiss":                 true,
+	"output":                 true,
+	"passthroughports":       true,
+	"path":                   true,
+	"port":                   true,
+	"protodir":               true,
+	"protofile":              true,
+	"protoinclude":           true,
+	"proxyport":              true,
+	"queuesize":              true,
+	"recordtimer":            true,
+	"reportpath":             true,
+	"run1":                   true,
+	"run2":                   true,
+	"runonly":                true,
+	"selectedtests":          true,
+	"serverport":             true,
+	"services":               true,
+	"sseport":                true,
+	"storageformat":          true,
+	"tc":                     true,
+	"teardownprogressfile":   true,
+	"testcase":               true,
+	"testrun":                true,
+	"tests":                  true,
+	"testsets":               true,
+	"tlsprivatekeypath":      true,
+	"tokenfile":              true,
+	"upstreamtlscacert":      true,
+	"upstreamtls.cacert":     true,
+	"urlmethods":             true,
+}
+
+var keployValueShortFlags = map[string]bool{
+	"-b": true, "-d": true, "-l": true, "-n": true,
+	"-o": true, "-p": true, "-r": true, "-s": true, "-t": true,
+}
+
+func isKnownKeployValueFlag(arg string) bool {
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	if strings.HasPrefix(arg, "--") {
+		key := strings.ToLower(strings.ReplaceAll(arg[2:], "-", ""))
+		return keployValueLongFlags[key]
+	}
+	return keployValueShortFlags[arg]
+}
+
+// ExtractCommandFromArgs returns the value of -c/--command in raw argv, read
+// the way cobra reads it: the last occurrence wins, the shorthand takes its
+// value as the next argument or joined to it (-cVALUE, -c=VALUE), and nothing
+// after the "--" terminator is a flag. Returns "" when absent.
+//
+// Known value-taking keploy flags skip their following argument so values
+// beginning with "-c" (e.g. `--app-name -ci`) are not misread as the `-c`
+// shorthand.
+//
+// ShouldReexecWithSudo decides from this value whether keploy needs root,
+// before cobra parses anything. Reading another value than the one cobra runs
+// (the first of two -c, or none for -cVALUE) re-executes a native command
+// under sudo, or starts a docker command unprivileged, which then fails
+// writing /proc/sys/kernel/perf_event_paranoid.
 func ExtractCommandFromArgs(args []string) string {
+	found := ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// Check for -c or --command
-		if arg == "-c" || arg == "--command" {
-			// Next argument is the command value
+		switch {
+		case arg == "--":
+			return found
+		case arg == "-c" || arg == "--command":
+			found = ""
 			if i+1 < len(args) {
-				return args[i+1]
+				i++
+				found = args[i]
 			}
-			return ""
-		}
-
-		// Check for -c=value or --command=value format
-		if len(arg) > 3 && arg[:3] == "-c=" {
-			return arg[3:]
-		}
-		if len(arg) > 10 && arg[:10] == "--command=" {
-			return arg[10:]
+		case strings.HasPrefix(arg, "--command="):
+			found = arg[len("--command="):]
+		case strings.HasPrefix(arg, "-c"):
+			// pflag drops the "=" of -c=VALUE only when a value follows it:
+			// a bare -c= is the shorthand with the value "=".
+			found = arg[len("-c"):]
+			if len(found) > 1 && found[0] == '=' {
+				found = found[1:]
+			}
+		case isKnownKeployValueFlag(arg):
+			if i+1 < len(args) {
+				i++
+			}
 		}
 	}
-	return ""
+	return found
 }
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file.
@@ -953,13 +1179,121 @@ func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	return path
 }
 
-// makeDirectory creates a directory if not exists with all user access
-func makeDirectory(path string) error {
-	err := os.MkdirAll(path, 0777)
+// MkdirAllForUser creates path and any missing parent directories with perm
+// using os.OpenRoot (refusing symlinks escaping the anchor directory). When
+// running under sudo, it restores ownership of only the directories newly
+// created by this call to the invoking user via open file descriptors in
+// bottom-up order, avoiding symlink-following chown races as root.
+func MkdirAllForUser(logger *zap.Logger, path string, perm os.FileMode) error {
+	if path == "" {
+		return os.MkdirAll(path, perm)
+	}
+	clean := filepath.Clean(path)
+	perm = perm.Perm()
+
+	var base string
+	var relParts []string
+	if !filepath.IsAbs(clean) {
+		parts := strings.Split(filepath.ToSlash(clean), "/")
+		i := 0
+		for i < len(parts) && (parts[i] == "." || parts[i] == "..") {
+			i++
+		}
+		if i == 0 {
+			base = "."
+		} else {
+			base = filepath.FromSlash(strings.Join(parts[:i], "/"))
+		}
+		relParts = parts[i:]
+	} else {
+		parent := filepath.Dir(clean)
+		if parent == clean {
+			// Filesystem root already exists.
+			return nil
+		}
+		relParts = append(relParts, filepath.Base(clean))
+		base = parent
+		for {
+			if _, err := os.Lstat(base); err == nil {
+				break
+			}
+			nextParent := filepath.Dir(base)
+			if nextParent == base {
+				break
+			}
+			relParts = append(relParts, filepath.Base(base))
+			base = nextParent
+		}
+		for i, j := 0, len(relParts)-1; i < j; i, j = i+1, j-1 {
+			relParts[i], relParts[j] = relParts[j], relParts[i]
+		}
+	}
+
+	r, err := os.OpenRoot(base)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = r.Close() }()
+
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	type createdDir struct {
+		f    *os.File
+		path string
+	}
+	var created []createdDir
+	defer func() {
+		for i := len(created) - 1; i >= 0; i-- {
+			RestoreFileOwnershipOf(logger, created[i].f, created[i].path)
+			_ = created[i].f.Close()
+		}
+	}()
+
+	cur := r
+	defer func() {
+		if cur != nil && cur != r {
+			_ = cur.Close()
+		}
+	}()
+	at := base
+	for _, seg := range relParts {
+		if seg == "" || seg == "." {
+			continue
+		}
+		mkErr := cur.Mkdir(seg, perm)
+		didCreate := mkErr == nil
+		next, err := cur.OpenRoot(seg)
+		if err != nil {
+			if mkErr != nil && !errors.Is(mkErr, fs.ErrExist) {
+				return mkErr
+			}
+			return err
+		}
+		nextPath := filepath.Join(at, seg)
+		if didCreate {
+			if linfo, lerr := cur.Lstat(seg); lerr == nil && linfo.IsDir() && linfo.Mode()&os.ModeSymlink == 0 {
+				if f, ferr := cur.Open(seg); ferr == nil {
+					if finfo, serr := f.Stat(); serr == nil && os.SameFile(linfo, finfo) {
+						created = append(created, createdDir{f: f, path: nextPath})
+					} else {
+						_ = f.Close()
+					}
+				}
+			}
+		}
+		if cur != r {
+			_ = cur.Close()
+		}
+		cur, at = next, nextPath
+	}
 	return nil
+}
+
+// makeDirectory creates a directory if not exists with standard permissions (0o755)
+func makeDirectory(path string) error {
+	return MkdirAllForUser(nil, path, 0o755)
 }
 
 // SetCoveragePath takes a goCovPath and sets the coverage path accordingly.
@@ -973,7 +1307,7 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 			return "", err
 		}
 		goCovPath = currentPath + "/coverage-reports"
-		if err := makeDirectory(goCovPath); err != nil {
+		if err := MkdirAllForUser(logger, goCovPath, 0o755); err != nil {
 			LogError(logger, err, "failed to create coverage-reports directory", zap.String("CoverageReportPath", goCovPath))
 			return "", err
 		}
@@ -1031,8 +1365,9 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 // CTRL_BREAK, and was force-killed (taskkill /F). A stop that could not tell
 // that the tree had exited without a kill says so too: one whose signal could
 // not be sent, whose force-kill failed, or whose state it could not read. As
-// InterruptProcessTree, it waits for each group's leader, not for the rest of
-// the group.
+// InterruptProcessTree, it waits for each group until no process of it runs
+// (groupRunning): a leader that has exited can leave processes in its group
+// that run on, and a group of zombies only has exited.
 func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
 	killed, _, err = interruptProcessTree(logger, ppid, sig, nil, false, nil)
 	return killed, err
@@ -1059,8 +1394,9 @@ func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signa
 
 // InterruptProcessTreeStop is InterruptProcessTreeReached for a stop that
 // waits on the app's exit, not for a number of seconds (a test set's end, a
-// recording's end, under the proven switch): it waits for each group's
-// leader to exit, on its exit event (Linux, stop_events_linux.go), and kills
+// recording's end, under the proven switch): it waits for each process its
+// signal reached in each group to exit, on its exit event (Linux,
+// stop_events_linux.go), and kills
 // a group only when it made no progress on its way out for StopStallBudget
 // of the time both it and keploy could run (ExitClock). A starved group,
 // whether the host is or only the group is, takes as long as it takes.
@@ -1073,14 +1409,15 @@ func InterruptProcessTreeStop(logger *zap.Logger, ppid int, sig syscall.Signal, 
 }
 
 // groupStopByEvents, where it is set (Linux), is how InterruptProcessTreeStop
-// waits for a group it signalled: until its leader exits, while its members
+// waits for a group it signalled: until each of its members exits, while they
 // (as the signal reached them) make progress. It kills the group on a stall,
 // or at the user's Ctrl+C, and says why ("" when it did not kill).
 // Each step the group takes on its way out is a movement of moved.
 var groupStopByEvents func(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string)
 
 // TreeInterruptGrace is how long InterruptProcessTree waits for each process
-// group of the tree to exit after its signal before it sends SIGKILL.
+// group of the tree to exit (no process of it runs) after its signal before
+// it sends SIGKILL.
 const TreeInterruptGrace = 3 * time.Second
 
 // windowsInterruptGrace is how long InterruptProcessTree waits on Windows for
@@ -1107,7 +1444,9 @@ function Get-ChildProcesses($parentId) {
         Get-ChildProcesses $child.ProcessId
     }
 }
-Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List`, ppid))
+Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Format-List`, ppid))
+		// Ids and names only, as the listing after the kill: a process's
+		// command line can carry a credential (an inline -e TOKEN=...).
 		if output, err := listAllCmd.CombinedOutput(); err == nil {
 			logger.Debug("ALL descendant processes before kill", zap.Int("parent_pid", ppid), zap.String("output", string(output)))
 		} else {
@@ -1219,7 +1558,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if snapshot != nil {
 			members = snapshot(pid, sig)
 		}
-		err := signalGroup(logger, -pid, sig)
+		sent, err := signalGroup(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
 			// The group was not asked to stop: what ends it now (the
@@ -1238,26 +1577,34 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			}
 			continue
 		}
-		// Wait for this particular process to exit with a timeout of 3 seconds
-		err = waitForProcessExit(pid, TreeInterruptGrace, logger)
-		if err != nil {
-			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
+		// Wait, up to the grace, until no process of the group runs: its
+		// leader, or one it left in its group, such as the server of
+		// `sh -c 'server &'` whose sh no one reaps (a zombie leader). One
+		// the caller was handed, as it ignored the signal, is the caller's.
+		// Where the signal went to each process by its pid (macOS), one
+		// that joined the group after it is sent it at the wait's next
+		// read of the group, once (signalJoined).
+		handed := handedOver(pid, members)
+		var joined func()
+		if signalJoined != nil {
+			joined = func() { signalJoined(logger, pid, sig, sent) }
 		}
+		waitForGroupExit(pid, handed, TreeInterruptGrace, logger, joined)
 		// If it ignored the graceful signal (or was too contention-slow to exit
 		// within the wait), escalate to SIGKILL so it cannot keep holding resources
 		// (e.g. a listening port) and race the next app start with
 		// "address already in use" (the go-docker-timefreeze flake).
-		if running, rerr := isProcessRunning(pid); rerr != nil {
+		if running, rerr := groupRunning(pid, handed); rerr != nil {
 			logger.Debug("could not verify process state after graceful signal", zap.Int("pid", pid), zap.Error(rerr))
 		} else if running {
 			logger.Debug("process still alive after graceful signal; escalating to SIGKILL", zap.Int("pgid", pid))
 			if killed == "" {
 				killed = fmt.Sprintf("a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", TreeInterruptGrace)
 			}
-			if killErr := SendSignal(logger, -pid, syscall.SIGKILL); killErr != nil {
+			if _, killErr := signalGroup(logger, -pid, syscall.SIGKILL); killErr != nil {
 				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
 			} else {
-				_ = waitForProcessExit(pid, 3*time.Second, logger)
+				waitForGroupExit(pid, handed, 3*time.Second, logger, nil)
 			}
 		}
 	}
@@ -1265,11 +1612,88 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 }
 
 // processTree and signalGroup are the tree interrupt's reads of the process
-// tree and its signals to a process group; a test fails them.
+// tree and its signals to a process group (on macOS, signalGroupByMembers);
+// a test fails them. signalGroup says which processes its signal reached by
+// their pids (sent) where it signals each process by its pid (macOS), and
+// nil where its one signal went to the group, as Linux's does.
+//
+// signalJoined, where it is set (macOS, signalJoinedMembers), is the group
+// wait's signal, at each of its reads, to each process of group pgid that
+// joined it after signalGroup's signal sig reached the others: sig once to
+// each that sent does not name, which it then names.
 var (
-	processTree = findChildPIDs
-	signalGroup = SendSignal
+	processTree  = findChildPIDs
+	signalGroup  = signalGroupAsOne
+	signalJoined func(logger *zap.Logger, pgid int, sig syscall.Signal, sent map[int]bool)
 )
+
+// signalGroupAsOne is SendSignal of a process group (pid < 0): one signal,
+// which reaches each process of it.
+func signalGroupAsOne(logger *zap.Logger, pid int, sig syscall.Signal) (map[int]bool, error) {
+	return nil, SendSignal(logger, pid, sig)
+}
+
+// groupExitPoll is how often waitForGroupExit reads whether a group runs.
+const groupExitPoll = 100 * time.Millisecond
+
+// waitForGroupExit waits until no process of process group pgid runs but
+// those in except (groupRunning), or timeout has passed. A group whose state
+// cannot be read is waited for no more: the caller reads it again, and says
+// why. joined, if set, is called at each read, before it: it signals what
+// joined the group since the last (signalJoined).
+func waitForGroupExit(pgid int, except []Reached, timeout time.Duration, logger *zap.Logger, joined func()) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if joined != nil {
+			joined()
+		}
+		if running, err := groupRunning(pgid, except); err != nil || !running {
+			logger.Debug("Process group exited", zap.Int("pgid", pgid), zap.Error(err))
+			return
+		}
+		if time.Now().After(deadline) {
+			logger.Debug("Timed out waiting for process group to exit", zap.Int("pgid", pgid))
+			return
+		}
+		time.Sleep(groupExitPoll)
+	}
+}
+
+// groupRunning reports whether a process of process group pgid has not
+// exited: its leader, pid pgid, runs (isProcessRunning; a zombie has
+// exited), or another process of its group does (groupRuns). A group counts
+// as exited only when no process of it runs: a leader that has exited,
+// reaped or a zombie, can leave processes in its group that run on, as
+// `sh -c 'server &'` leaves its server, and those can still hold the app's
+// port. A group of zombies only has exited, and costs no wait. A process of
+// except (handedOver), named by its pid and start time, is not counted, nor
+// is one, but the leader, that keploy's stop of the daemons ends
+// (LeaveToDaemonStop), nor what either runs (Linux).
+func groupRunning(pgid int, except []Reached) (bool, error) {
+	if running, err := isProcessRunning(pgid); err != nil || running {
+		return running, err
+	}
+	return groupRunsExcept(pgid, except)
+}
+
+// handedOver is what of members, the processes of group leader's that its
+// signal reached (InterruptProcessTreeReached and InterruptProcessTreeStop
+// return them), the stop leaves to its caller: each that ignored the
+// signal, but the leader. Its interrupt neither waits for them nor kills
+// them: the caller ends each that runs on (adopt_linux.go, stopAdopted and
+// stopHanded: SIGTERM, then a kill once it makes no progress on its way
+// out, waited for), whether keploy adopted it or not. The leader, and every process the signal
+// reached that acts on it, the interrupt waits for. Where no snapshot is
+// read (InterruptProcessTreeKilled; macOS) nothing is handed over.
+func handedOver(leader int, members []Reached) []Reached {
+	var handed []Reached
+	for _, m := range members {
+		if m.Ignores && m.PID != leader {
+			handed = append(handed, m)
+		}
+	}
+	return handed
+}
 
 // waitForProcessExit waits for the process to exit or times out after the specified duration
 func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) error {
@@ -1337,6 +1761,10 @@ func isProcessRunning(pid int) (bool, error) {
 			return false, nil
 		}
 		return true, nil
+	}
+	// A zombie has exited: it only waits for its parent to reap it.
+	if exitedUnreaped(pid) {
+		return false, nil
 	}
 
 	// No error means the process is running
@@ -1438,7 +1866,24 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
 // one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, 0)
+	return GetAvailablePortExcept()
+}
+
+// GetAvailablePortExcept is GetAvailablePort never returning one of exclude,
+// ports handed out already that nothing binds yet: its search skips them. A
+// caller that drew GetAvailablePort again while it returned one of them could
+// fail with a port free, in a band whose free ports were an excluded one and
+// one other: most draws returned the excluded one.
+func GetAvailablePortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, 0, false, exclude...)
+}
+
+// GetAvailableDNSPortExcept is GetAvailablePortExcept for a DNS server's
+// port, which the server binds over UDP and over TCP: a port either socket
+// holds is passed over. A port free over TCP alone failed the server's UDP
+// bind.
+func GetAvailableDNSPortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, 0, true, exclude...)
 }
 
 // hostEphemeralRange reads the host's ephemeral port range for
@@ -1462,13 +1907,21 @@ const containerEphemeralHi = defaultEphemeralHi
 // 60999, or reaches 65535, or is unknown (macOS, Windows), would otherwise
 // hand out ports inside it.
 func GetAvailableContainerPort() (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, containerEphemeralHi)
+	return GetAvailableContainerPortExcept()
+}
+
+// GetAvailableContainerPortExcept is GetAvailableContainerPort never
+// returning one of exclude, as GetAvailablePortExcept.
+func GetAvailableContainerPortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi, false, exclude...)
 }
 
 // availablePortAbove is GetAvailablePort with the host's ephemeral range read
 // by ephemeral (ephemeralPortRange's signature), whose candidates are above
-// floor too.
-func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32) (uint32, error) {
+// floor too, and never one of exclude: the search skips those, it does not
+// draw again after it returns one. With udp, a candidate is free only where a
+// UDP socket binds it too (GetAvailableDNSPortExcept).
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32, udp bool, exclude ...uint32) (uint32, error) {
 	top := floor
 	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
 		top = ephemeralHi
@@ -1476,27 +1929,47 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	if top > 0 {
 		lo := top + 1
 		span := 65536 - lo // inclusive of 65535
-		// A random start, not a scan from the bottom. Scanning upward returns
-		// the LOWEST free port every time, so two keploy processes started
-		// moments apart — the ordinary CI pattern — are handed an identical
-		// number, each having verified it free; whichever binds second loses.
+		// Candidates drawn at random, each on its own (randomProbes of them),
+		// then every port from a random start. Not a scan from the bottom:
+		// it returns the LOWEST free port every time, so two keploy processes
+		// started moments apart — the ordinary CI pattern — are handed an
+		// identical number, each having verified it free; whichever binds
+		// second loses. Nor a scan from a random start alone: every start
+		// inside a run of held ports leads it to the first free port after
+		// the run, so beside such a run (a process holding a block of ports
+		// above the range) the draws of processes started together met there.
+		for i := 0; i < randomProbes; i++ {
+			off, ok := portOffset(span)
+			if !ok {
+				break
+			}
+			if slices.Contains(exclude, lo+off) {
+				continue
+			}
+			free, err := portProbe(lo+off, udp)
+			if err != nil {
+				return 0, err
+			}
+			if free {
+				return lo + off, nil
+			}
+		}
 		start := lo
-		if n, err := rand.Int(rand.Reader, big.NewInt(int64(span))); err == nil {
-			start = lo + uint32(n.Int64())
+		if off, ok := portOffset(span); ok {
+			start = lo + off
 		}
 		for i := uint32(0); i < span; i++ {
 			port := lo + ((start - lo + i) % span)
-			ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
-			if err != nil {
+			if slices.Contains(exclude, port) {
 				continue
 			}
-			// A failed Close leaves this process holding the port for its
-			// lifetime, so the candidate is unusable AND leaked — return the
-			// error rather than continuing and leaking one fd per candidate.
-			if err := ln.Close(); err != nil {
-				return 0, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+			free, err := portProbe(port, udp)
+			if err != nil {
+				return 0, err
 			}
-			return port, nil
+			if free {
+				return port, nil
+			}
 		}
 	}
 
@@ -1506,14 +1979,119 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	// is strictly better than no port at all, and this is the historical
 	// behaviour. A container's port that then meets one of the resolver's
 	// fails the agent's start at its bind, as no port at all would.
-	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
-	if err != nil {
-		return 0, fmt.Errorf("failed to find available port: %w", err)
-	}
-	defer listener.Close()
+	return osAssignedPort(exclude, udp)
+}
 
-	addr := listener.Addr().(*net.TCPAddr)
-	return uint32(addr.Port), nil
+// osAssignedPort is a port the OS assigns (a listener on ":0", let go before
+// it returns) other than exclude, and, with udp, one a UDP socket binds too.
+// A pick in exclude, or one a UDP socket holds, stays held while the OS is
+// asked again, so the OS cannot hand it back: len(exclude)+1 asks always reach
+// a port outside exclude, and udpHeldPicks more pass over as many picks held
+// over UDP, the OS's picks being its own ephemeral ports, which a UDP socket
+// seldom holds.
+func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
+	var held []net.Listener
+	defer func() {
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+	}()
+	asks := len(exclude) + 1
+	if udp {
+		asks += udpHeldPicks
+	}
+	for i := 0; i < asks; i++ {
+		ln, err := portListen(context.Background(), "tcp", ":0")
+		if err != nil {
+			return 0, fmt.Errorf("failed to find available port: %w", err)
+		}
+		held = append(held, ln)
+		port := uint32(ln.Addr().(*net.TCPAddr).Port)
+		if slices.Contains(exclude, port) {
+			continue
+		}
+		if !udp {
+			return port, nil
+		}
+		free, err := udpFree(port)
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return port, nil
+		}
+	}
+	if udp {
+		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, in %d of the OS's picks", exclude, asks)
+	}
+	return 0, fmt.Errorf("failed to find a port other than %v", exclude)
+}
+
+// udpHeldPicks is how many of the OS's picks held over UDP osAssignedPort
+// passes over for a DNS server's port before it fails.
+const udpHeldPicks = 8
+
+// randomProbes is how many candidates availablePortAbove draws at random
+// before it scans: with half the ports held, all 32 miss about once in four
+// billion tries.
+const randomProbes = 32
+
+// portOffset draws availablePortAbove's candidates (randomOffset) and
+// portProbe checks each (probePort).
+var portOffset, portProbe = randomOffset, probePort
+
+// portListen opens probePort's and osAssignedPort's listeners: plain TCP,
+// never Go's default MPTCP, which for as long as it is open listens on every
+// interface.
+var portListen = plaintcp.Listen
+
+// udpListen opens udpFree's UDP sockets.
+var udpListen = net.ListenPacket
+
+// randomOffset is a random offset in [0, span), and false where no random
+// number could be read.
+func randomOffset(span uint32) (uint32, bool) {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(span)))
+	if err != nil {
+		return 0, false
+	}
+	return uint32(n.Int64()), true
+}
+
+// probePort says whether port is free: whether a plain TCP listener binds it,
+// and, with udp, a UDP socket too while the listener holds it (udpFree); it
+// then lets them go. A failed Close leaves this process holding the port for
+// its lifetime, so the candidate is unusable AND leaked: that is an error,
+// not a candidate passed over, which would leak one fd per candidate.
+func probePort(port uint32, udp bool) (bool, error) {
+	ln, err := portListen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	free := true
+	if udp {
+		if free, err = udpFree(port); err != nil {
+			_ = ln.Close()
+			return false, err
+		}
+	}
+	if err := ln.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+	}
+	return free, nil
+}
+
+// udpFree says whether a UDP socket binds port, which it then lets go; a
+// failed Close is an error, as probePort's.
+func udpFree(port uint32) (bool, error) {
+	pc, err := udpListen("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	if err := pc.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe socket on UDP port %d: %w", port, err)
+	}
+	return true, nil
 }
 
 // isPortAvailable checks if a specific port is available on the system, with
@@ -1538,51 +2116,343 @@ func isPortAvailable(port uint32) bool {
 // it. Narrowing allocation to above the ephemeral range makes the pool smaller
 // and that coincidence correspondingly more likely, so the exclusion is not
 // optional bookkeeping.
+//
+// The search for another port skips them (GetAvailablePortExcept). It used to
+// draw GetAvailablePort's port again while that was an excluded one, 16 times
+// at most: in a band whose free ports were an excluded one and one other, the
+// draws kept returning the excluded port and the search failed with a port
+// free.
 func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
-	taken := make(map[uint32]struct{}, len(exclude))
-	for _, p := range exclude {
-		taken[p] = struct{}{}
-	}
-	if _, clash := taken[port]; !clash && isPortAvailable(port) {
+	return EnsureFreePort(isPortAvailable, port, exclude...)
+}
+
+// EnsureAvailableDNSPort is EnsureAvailablePorts for a DNS server's port,
+// which the server binds over UDP and over TCP: port is kept only where both
+// bind it, and the port drawn in its place is free over both
+// (GetAvailableDNSPortExcept). A check over TCP alone kept a port a UDP
+// socket held, and the DNS server's start failed on it, as each start again
+// did, handed the same port.
+func EnsureAvailableDNSPort(port uint32, exclude ...uint32) (uint32, error) {
+	return EnsureFreeDNSPort(isDNSPortAvailable, port, exclude...)
+}
+
+// isDNSPortAvailable says whether a DNS server binds port: a plain TCP
+// listener and a UDP socket both (probePort).
+func isDNSPortAvailable(port uint32) bool {
+	free, _ := probePort(port, true) // false on any error
+	return free
+}
+
+// EnsureFreePort is EnsureAvailablePorts with free saying whether port is
+// free, in place of a probe listener on it. A test that calls a port free
+// holds it with a listener of its own, so that no other process can take it,
+// and hands in a probe that says it is free: a port it let go of for the
+// probe could be taken by another process before the probe bound it, and the
+// port would then move with the test's answer wrong.
+func EnsureFreePort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	return ensureFree(free, GetAvailablePortExcept, port, exclude...)
+}
+
+// EnsureFreeDNSPort is EnsureAvailableDNSPort with free in place of its
+// probe, as EnsureFreePort.
+func EnsureFreeDNSPort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	return ensureFree(free, GetAvailableDNSPortExcept, port, exclude...)
+}
+
+// ensureFree is port where free says so and it is not one of exclude, and
+// otherwise draw's port.
+func ensureFree(free func(port uint32) bool, draw func(exclude ...uint32) (uint32, error), port uint32, exclude ...uint32) (uint32, error) {
+	if !slices.Contains(exclude, port) && free(port) {
 		return port, nil
 	}
-	var newPort uint32
-	var err error
-	// Bounded: a handful of draws is plenty to miss a set this small, and a
-	// bound means an exhausted pool surfaces as an error rather than a hang.
-	for i := 0; i < 16; i++ {
-		newPort, err = GetAvailablePort()
-		if err != nil {
+	newPort, err := draw(exclude...)
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate new port: %w", err)
+	}
+	return newPort, nil
+}
+
+type shellWord struct {
+	start int
+	value string
+}
+
+func isShellSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// scanShellWords tokenizes a POSIX-like shell command into words with their
+// starting byte offsets in cmd, respecting single quotes, double quotes, and
+// backslash escapes. Returns ok=false on an unterminated quote or trailing
+// backslash.
+func scanShellWords(cmd string) ([]shellWord, bool) {
+	var words []shellWord
+	n := len(cmd)
+	i := 0
+	for i < n {
+		for i < n {
+			if isShellSpace(cmd[i]) {
+				i++
+				continue
+			}
+			if cmd[i] == '\\' && i+1 < n && cmd[i+1] == '\n' {
+				i += 2
+				continue
+			}
 			break
 		}
-		if _, clash := taken[newPort]; !clash {
-			return newPort, nil
+		if i >= n {
+			break
+		}
+
+		start := i
+		var b strings.Builder
+
+		for i < n {
+			c := cmd[i]
+			if isShellSpace(c) {
+				break
+			}
+			switch c {
+			case '\'':
+				i++
+				closeIdx := strings.IndexByte(cmd[i:], '\'')
+				if closeIdx < 0 {
+					return nil, false
+				}
+				b.WriteString(cmd[i : i+closeIdx])
+				i += closeIdx + 1
+			case '"':
+				i++
+				closed := false
+				for i < n {
+					dc := cmd[i]
+					if dc == '"' {
+						i++
+						closed = true
+						break
+					}
+					if dc == '\\' && i+1 < n {
+						next := cmd[i+1]
+						switch next {
+						case '"', '\\', '$', '`':
+							b.WriteByte(next)
+							i += 2
+							continue
+						case '\n':
+							i += 2
+							continue
+						}
+					}
+					b.WriteByte(dc)
+					i++
+				}
+				if !closed {
+					return nil, false
+				}
+			case '\\':
+				if i+1 >= n {
+					return nil, false
+				}
+				if cmd[i+1] == '\n' {
+					i += 2
+					continue
+				}
+				b.WriteByte(cmd[i+1])
+				i += 2
+			default:
+				b.WriteByte(c)
+				i++
+			}
+		}
+
+		words = append(words, shellWord{start: start, value: b.String()})
+	}
+	return words, true
+}
+
+func shellBaseName(word string) string {
+	if idx := strings.LastIndexAny(word, "/\\"); idx >= 0 {
+		return word[idx+1:]
+	}
+	return word
+}
+
+func isEnvAssignment(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	return eq > 0 && !strings.HasPrefix(word, "-")
+}
+
+var sudoValueLongFlags = map[string]bool{
+	"--user": true, "--group": true, "--host": true, "--prompt": true,
+	"--close-from": true, "--chdir": true, "--chroot": true, "--role": true,
+	"--type": true, "--other-user": true, "--command-timeout": true,
+}
+
+const sudoValueShortFlags = "CDRTUghprtu"
+
+var dockerGlobalBoolFlags = map[string]bool{
+	"-D": true, "--debug": true, "--tls": true, "--tlsverify": true,
+	"-v": true, "--version": true, "-h": true, "--help": true,
+	"-r": true, "--remote": true, "--rootless-cni": true,
+	"--syslog": true, "--transient-store": true,
+}
+
+var dockerRunBoolFlags = map[string]bool{
+	"--detach": true, "--rm": true, "--interactive": true, "--tty": true,
+	"--privileged": true, "--init": true, "--read-only": true,
+	"--publish-all": true, "--no-healthcheck": true, "--oom-kill-disable": true,
+	"--disable-content-trust": true, "--quiet": true, "--help": true,
+	"--replace": true, "--rmi": true, "--no-hosts": true, "--env-host": true,
+	"--read-only-tmpfs": true, "--http-proxy": true, "--sig-proxy": true,
+	"--use-api-socket": true, "--tls-verify": true, "--no-hostname": true,
+	"--passwd": true, "--rootfs": true, "--unsetenv-all": true,
+}
+
+const dockerRunValueShortFlags = "acehlmpuvw"
+
+func sudoFlagTakesNext(opt string) bool {
+	if strings.Contains(opt, "=") {
+		return false
+	}
+	if strings.HasPrefix(opt, "--") {
+		return sudoValueLongFlags[opt]
+	}
+	letters := opt[1:]
+	at := strings.IndexAny(letters, sudoValueShortFlags)
+	return at >= 0 && at == len(letters)-1
+}
+
+func dockerRunOptionsStart(words []shellWord) int {
+	i := 0
+	for i < len(words) && isEnvAssignment(words[i].value) {
+		i++
+	}
+	if i < len(words) && strings.EqualFold(shellBaseName(words[i].value), "sudo") {
+		i++
+		for i < len(words) && strings.HasPrefix(words[i].value, "-") && words[i].value != "-" {
+			opt := words[i].value
+			i++
+			if opt == "--" {
+				break
+			}
+			if sudoFlagTakesNext(opt) {
+				i++
+			}
+		}
+		for i < len(words) && isEnvAssignment(words[i].value) {
+			i++
 		}
 	}
-	if err == nil {
-		return 0, fmt.Errorf("failed to allocate a port distinct from %v", exclude)
+	if i >= len(words) {
+		return -1
 	}
-	return 0, fmt.Errorf("failed to allocate new port: %w", err)
+	prog := strings.TrimSuffix(strings.ToLower(shellBaseName(words[i].value)), ".exe")
+	if prog != "docker" && prog != "podman" {
+		return -1
+	}
+	i++
+
+	for i < len(words) && strings.HasPrefix(words[i].value, "-") && words[i].value != "-" {
+		opt := words[i].value
+		i++
+		if opt == "--" {
+			break
+		}
+		if strings.Contains(opt, "=") || dockerGlobalBoolFlags[opt] {
+			continue
+		}
+		if strings.HasPrefix(opt, "--") {
+			i++
+		} else {
+			letters := opt[1:]
+			if at := strings.IndexAny(letters, "Hcl"); at >= 0 && at == len(letters)-1 {
+				i++
+			}
+		}
+	}
+	if i >= len(words) {
+		return -1
+	}
+	sub := strings.ToLower(words[i].value)
+	if sub == "container" {
+		i++
+		if i >= len(words) || !strings.EqualFold(words[i].value, "run") {
+			return -1
+		}
+		return i + 1
+	}
+	if sub == "run" {
+		return i + 1
+	}
+	return -1
+}
+
+func dockerRunFlagTakesNext(w string) bool {
+	if strings.Contains(w, "=") {
+		return false
+	}
+	if strings.HasPrefix(w, "--") {
+		return !dockerRunBoolFlags[w]
+	}
+	letters := w[1:]
+	at := strings.IndexAny(letters, dockerRunValueShortFlags)
+	return at >= 0 && at == len(letters)-1
 }
 
 func EnsureRmBeforeName(cmd string) string {
-	parts := strings.Split(cmd, " ")
-	rmIndex := -1
-	nameIndex := -1
+	words, ok := scanShellWords(cmd)
+	if !ok {
+		return cmd
+	}
+	optStart := dockerRunOptionsStart(words)
+	if optStart < 0 {
+		return cmd
+	}
 
-	for i, part := range parts {
-		if part == "--rm" {
-			rmIndex = i
-		} else if part == "--name" {
-			nameIndex = i
-			break // Assuming --name will always have an argument, we can break here
+	hasRm := false
+	nameStart := -1
+
+	for i := optStart; i < len(words); i++ {
+		w := words[i].value
+		if w == "--" || w == "-" || !strings.HasPrefix(w, "-") {
+			// Stop at the image name (or end-of-options marker): everything
+			// after this belongs to the container command, not docker run.
+			break
+		}
+
+		if w == "--rm" || strings.HasPrefix(w, "--rm=") {
+			hasRm = true
+			continue
+		}
+
+		if w == "--name" {
+			if i+1 < len(words) {
+				if nameStart == -1 && words[i+1].value != "" {
+					nameStart = words[i].start
+				}
+				i++ // consume --name's value
+			}
+			continue
+		}
+		if val, ok := strings.CutPrefix(w, "--name="); ok {
+			// Docker accepts both "--name app" and "--name=app"
+			// (see dockerLongFlagValue).
+			if nameStart == -1 && val != "" {
+				nameStart = words[i].start
+			}
+			continue
+		}
+
+		if dockerRunFlagTakesNext(w) {
+			i++
 		}
 	}
-	if rmIndex == -1 && nameIndex != -1 {
-		parts = append(parts[:nameIndex], append([]string{"--rm"}, parts[nameIndex:]...)...)
-	}
 
-	return strings.Join(parts, " ")
+	if !hasRm && nameStart != -1 {
+		return cmd[:nameStart] + "--rm " + cmd[nameStart:]
+	}
+	return cmd
 }
 
 // dockerLongFlagValue returns the value of the first occurrence of any of
@@ -1751,13 +2621,26 @@ type PermissionError struct {
 	IsRead   bool // true if it's a read permission issue, false if write
 }
 
-// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
+// AddToGitIgnore adds ignoreString to path's .gitignore, if it is not there
+// yet. The file is opened inside path, and path from the project
+// (OpenRecordingDir): keploy/.gitignore comes with a cloned repository, so
+// one that links out of path, or a path that links out of the project, is
+// refused, with why, and what it leads to is not written. A link that stays
+// inside is followed.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
-	gitignorePath := path + "/.gitignore"
-
-	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
+	root, err := OpenRecordingDir(path)
 	if err != nil {
-		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
+		return fmt.Errorf("error opening the folder of the .gitignore file: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	file, err := root.OpenFile(".gitignore", os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		refused := fmt.Sprintf("the .gitignore file is written only inside %q", path)
+		if out := linkout.Explain(root, path, ".gitignore", refused, err); out != nil {
+			return out
+		}
+		return fmt.Errorf("%s: %w", refused, err)
 	}
 
 	defer func() {
@@ -1784,22 +2667,97 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 	return nil
 }
 
+// GitIgnores reports whether git ignores path, a path inside dir (relative
+// to dir, or absolute), as `git add` would read it: by every .gitignore that
+// applies, a later entry that un-ignores it (a "!*.yaml") included, the
+// repository's info/exclude, and the global excludes of the HOME keploy runs
+// with. known is false when git cannot say (it is not installed, dir is in no
+// git work tree, or git refused or took too long), and then ignored says
+// nothing. A path git tracks already is not ignored. Under sudo git runs as
+// the user sudo ran keploy for (asInvokingUser): git refuses, as root, a work
+// tree another user owns. sudo usually keeps root's HOME, so that user's own
+// global excludes are then not read: they can only ignore more, never
+// un-ignore a path, so the answer errs only toward not ignored.
+func GitIgnores(dir, path string) (ignored, known bool) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, git, "-C", dir, "check-ignore", "-q", "--", path)
+	cmd.SysProcAttr = asInvokingUser()
+	err = cmd.Run()
+	if err == nil {
+		return true, true
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, true
+	}
+	return false, false
+}
+
 func Hash(data []byte) string {
 	hasher := sha256.New()
 	hasher.Write(data)
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+// cdIntoOneThatExists is what a user does about a working directory that is
+// gone.
+const cdIntoOneThatExists = "cd into a directory that exists and run keploy again"
+
+// GetLastDirectory is the name of the directory keploy runs in. It fails once
+// that directory is gone, on every platform, in the same words.
 func GetLastDirectory() (string, error) {
-	// Get the current working directory
-	dir, err := os.Getwd()
+	return lastDirectory(os.Getwd)
+}
+
+func lastDirectory(getwd func() (string, error)) (string, error) {
+	dir, err := workingDirectory(getwd)
 	if err != nil {
 		return "", err
 	}
+	return filepath.Base(dir), nil
+}
 
-	// Extract the base (last directory)
-	lastDir := filepath.Base(dir)
-	return lastDir, nil
+// workingDirectory is getwd's answer, once confirmWorkingDirectory says it
+// still leads to the directory the process is in.
+func workingDirectory(getwd func() (string, error)) (string, error) {
+	dir, err := getwd()
+	if err == nil {
+		err = confirmWorkingDirectory(dir)
+	}
+	// Linux's Getwd fails here, and on macOS the stat of its answer does.
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("the working directory is gone: %w; %s", err, cdIntoOneThatExists)
+	}
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// confirmWorkingDirectory fails unless dir, os.Getwd's answer, still leads to
+// the directory the process is in. Getwd does not say so itself: on Linux it
+// fails once the directory is removed, but macOS's getcwd goes on answering the
+// path the directory last had, which by then leads nowhere or to a newer
+// directory of that name. A path this user may not walk, as under `sudo -u`
+// below a private directory, says nothing of the kind, and is let through.
+func confirmWorkingDirectory(dir string) error {
+	here, err := os.Stat(".")
+	if err == nil {
+		var there os.FileInfo
+		there, err = os.Stat(dir)
+		if err == nil && !os.SameFile(here, there) {
+			return fmt.Errorf("the working directory is gone: %s is another directory now; %s", dir, cdIntoOneThatExists)
+		}
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return nil
+	}
+	return err
 }
 
 func IsFileEmpty(filePath string) (bool, error) {
@@ -1989,58 +2947,16 @@ func isValidGRPCIdentifier(name string) bool {
 	return true
 }
 
-func GetContainerIPv4() (string, error) {
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	// Iterate over the interfaces
-	for _, i := range interfaces {
-		// Skip down or loopback interfaces
-		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		// Get the addresses for the current interface
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue
-		}
-
-		// Iterate over the addresses
-		for _, addr := range addrs {
-			var ip net.IP
-			// The address can be of type *net.IPNet or *net.IPAddr
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				// Check if it's an IPv4 address
-				if ipnet.IP.To4() != nil {
-					ip = ipnet.IP
-				}
-			}
-
-			if ip != nil {
-				// Found a valid IPv4 address, return it
-				return ip.String(), nil
-			}
-		}
-	}
-
-	// Tagged, so the agent that cannot start without it says so in its exit
-	// status: a container with no IPv4 address but loopback's (docker
-	// --network none, an IPv6-only network) is the environment to change, not
-	// a privilege to grant. Only an agent started with --is-docker asks (its
-	// hooks, as they load): they send the connections of the applications it
-	// serves to this address. A native one is reached over loopback and needs
-	// no address of its own.
-	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
-}
-
-// GetFullCommandUsed returns the full command-line used to run the current process.
-// It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
+// GetFullCommandUsed is the command line keploy was run with, as a test
+// report records it (cmdUsed): os.Args, its secrets redacted by RedactArgv,
+// the redactor of every line that names a command whole (the command given
+// with -c is read as the command line it is, so its password, token or
+// logon is <redacted> and its hosts and paths are kept), and an argument
+// that holds a space or a quote Go-quoted. Reports are committed, kept as CI
+// artifacts and uploaded: a secret RedactArgv reads in the command reaches
+// none.
 func GetFullCommandUsed() string {
-	args := os.Args
+	args := RedactArgv(os.Args)
 
 	// Build the command string with proper quoting for arguments containing spaces
 	var parts []string

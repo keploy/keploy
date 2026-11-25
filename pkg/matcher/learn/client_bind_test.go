@@ -88,7 +88,7 @@ func TestAClientTestsGivenValueIsBindableWhereItIsFirstSent(t *testing.T) {
 // round gave the application in another form the value took none of), or
 // where the search for its source went past an earlier place (follows.
 // refuted: the recorded name stands whole in mock-s's answer, which record's
-// full round gave the application byte for byte while the name changed),
+// full round gave the application as recorded while the name changed),
 // it is refused as before and never bindable: binding it would hold every
 // replay to the value sent here, whatever that earlier place gives.
 func TestAClientTestsValueBesideAnEarlierWordIsNeverBindable(t *testing.T) {

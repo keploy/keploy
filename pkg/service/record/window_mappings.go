@@ -55,32 +55,47 @@ func (w *windowMappings) noteStop(at time.Time) {
 	w.mu.Unlock()
 }
 
-// markAtStop marks, of the worker scope, each mock placed once keploy record
-// had begun stopping the application (stopAt): its shutdown's calls, which a
-// replay requires only once it has stopped the application. A mock's place is
-// placed's (models.PlaceOf, as the window mappings read it: its answer's time
-// for a mock placed at its answer), else its request time.
-func markAtStop(worker []models.MockEntry, placed map[string]time.Time, stopAt time.Time) {
-	if stopAt.IsZero() {
+// clear drops the buffered test and mock windows once an aged rolled set no
+// longer needs window-derived mappings (the agent streamed mappings itself).
+func (w *windowMappings) clear() {
+	if w == nil {
 		return
 	}
-	for i := range worker {
-		at, ok := placed[worker[i].Name]
-		if !ok {
-			var err error
-			if at, err = models.ParseMockTimestamp(worker[i].ReqTimestampMock); err != nil {
-				continue
-			}
-		}
-		if !at.IsZero() && !at.Before(stopAt) {
-			worker[i].AtStop = true
-		}
-	}
+	w.mu.Lock()
+	w.tests = nil
+	w.mocks = nil
+	w.mu.Unlock()
 }
 
 // lostTestPrefix starts the window name of a test case the recording failed
 // to persist. No test case is named so: a test case's name is a file name.
 const lostTestPrefix = "\x00lost-"
+
+// deletedTestPrefix starts the window name of a test case the recording
+// deleted (lose); the name it was saved under follows, after a NUL, so a line
+// that speaks of the window names it (windowTestName). A later test case
+// saved under that name keeps a window of its own.
+const deletedTestPrefix = "\x00deleted-"
+
+// keptWindow reports whether the window named id is a test case's the set
+// keeps: neither lost nor deleted.
+func keptWindow(id string) bool {
+	return !strings.HasPrefix(id, lostTestPrefix) && !strings.HasPrefix(id, deletedTestPrefix)
+}
+
+// windowTestName is what a line calls the test case of the window named id:
+// a deleted one's own name, and what a lost one is.
+func windowTestName(id string) string {
+	if rest, ok := strings.CutPrefix(id, deletedTestPrefix); ok {
+		if _, name, ok := strings.Cut(rest, "\x00"); ok {
+			return name
+		}
+	}
+	if strings.HasPrefix(id, lostTestPrefix) {
+		return "a test the recording failed to persist"
+	}
+	return id
+}
 
 // newWindowMappings is the collector of a recording that derives its
 // mappings.yaml from its test windows: one made without --sync under the
@@ -107,21 +122,40 @@ func (r *Recorder) newWindowMappings() *windowMappings {
 }
 
 // addTest records the window of a test case once it is persisted (under the
-// name its insert gave it). One that came back without a name keeps its window
-// and gets no entry, as a test case the recording failed to persist does: an
-// entry needs the test's name.
-func (w *windowMappings) addTest(tc *models.TestCase) {
+// name its insert gave it), and returns it, for lose: -1 for none. One that
+// came back without a name keeps its window and gets no entry, as a test case
+// the recording failed to persist does: an entry needs the test's name.
+func (w *windowMappings) addTest(tc *models.TestCase) int {
 	if w == nil {
-		return
+		return -1
 	}
 	if tc == nil || tc.Name == "" {
 		w.addLostTest(tc)
-		return
+		return -1
 	}
 	win := models.RecordedWindow(tc)
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.tests = append(w.tests, win)
-	w.mu.Unlock()
+	return len(w.tests) - 1
+}
+
+// lose makes the window addTest returned as i a test case's the recording
+// deleted: it keeps its window, so what was recorded inside it is no other
+// test's, and gets no entry, as a lost one does (addLostTest); a line that
+// speaks of it names it. A later test case saved under its name keeps its
+// own. Nil-safe; i < 0 is none.
+func (w *windowMappings) lose(i int) {
+	if w == nil || i < 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if i >= len(w.tests) || !keptWindow(w.tests[i].TestCase) {
+		return
+	}
+	w.lost++
+	w.tests[i].TestCase = fmt.Sprintf("%s%d\x00%s", deletedTestPrefix, w.lost, w.tests[i].TestCase)
 }
 
 // addLostTest records the window of a test case the recording failed to
@@ -146,8 +180,13 @@ func (w *windowMappings) addMock(m *models.Mock) {
 	if w == nil {
 		return
 	}
-	wm := models.NewWindowedMock(m)
-	if !wm.TestMock || wm.At.IsZero() {
+	w.addWindowed(models.NewWindowedMock(m))
+}
+
+// addWindowed is addMock of a mock already windowed (models.NewWindowedMock):
+// a mock a test set a recording rolls over to starts with (setRoll's carry).
+func (w *windowMappings) addWindowed(wm models.WindowedMock) {
+	if w == nil || !wm.TestMock || wm.At.IsZero() {
 		return
 	}
 	w.mu.Lock()
@@ -157,9 +196,9 @@ func (w *windowMappings) addMock(m *models.Mock) {
 
 // write derives the set's mappings from its test windows and writes them to
 // mappings.yaml: an entry for every test case the recording kept, with the
-// test mocks of its window. A test case the finalize deleted (in deleted)
-// keeps its window, so the mocks recorded inside it stay its own and are not
-// handed to a test that ran beside it; its entry is left out.
+// test mocks of its window. A test case the recording deleted (lose) keeps its
+// window, so the mocks recorded inside it stay its own and are not handed to
+// a test that ran beside it; its entry is left out.
 //
 // streamed is how many mappings the agent handed over. An agent that maps a
 // recording made without --sync itself (enterprise's static dedup resolves its
@@ -171,15 +210,15 @@ func (w *windowMappings) addMock(m *models.Mock) {
 // derived now could leave a test without a mock it recorded: none is written.
 // A mapping that is not written, or whose write fails, fails the recording, as
 // a failed mappings write refuses under the proven model (design v14 §5.2).
-func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db MappingDb, testSetID string, deleted map[string]struct{}, drained bool, streamed uint64) {
-	w.writeFor(ctx, logger, db, testSetID, deleted, drained, streamed, nil)
+func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db MappingDb, testSetID string, drained bool, streamed uint64) {
+	w.writeFor(ctx, logger, db, testSetID, drained, streamed, nil)
 }
 
 // writeFor is write, telling mapped, when set, each kept test case's mocks as
 // its window derives them, as consumeMappingsFor tells a streamed mapping's:
 // the capture watch charges a test case with a mock of its whose container
 // the Docker daemon did not answer the read of (captureWatch.mapped).
-func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db MappingDb, testSetID string, deleted map[string]struct{}, drained bool, streamed uint64, mapped func(test string, entries []models.MockEntry)) {
+func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db MappingDb, testSetID string, drained bool, streamed uint64, mapped func(test string, entries []models.MockEntry)) {
 	if w == nil {
 		return
 	}
@@ -225,10 +264,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		}
 	}
 	w.mu.Unlock()
-	kept := func(id string) bool {
-		_, gone := deleted[id]
-		return !gone && !strings.HasPrefix(id, lostTestPrefix)
-	}
+	kept := keptWindow
 	conc := keptConcurrencyOf(derived, kept)
 	byTest := make(map[string][]models.MockEntry, len(derived.Tests))
 	mappedMocks := 0
@@ -264,7 +300,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 	// latest kept test case before it (the set's start before every one), so
 	// a replay of the kept test cases reaches it.
 	worker := keptPlaces(derived, kept)
-	markAtStop(worker, placed, stopAt)
+	models.MarkAtStop(worker, placed, stopAt)
 	routedReasons(logger, testSetID, worker, derived.Routed, kept)
 	if err := db.UpsertWorker(ctx, testSetID, worker); err != nil {
 		logger.Error("failed to save the test set's worker scope, the calls no test made, derived from the test windows",
@@ -463,10 +499,7 @@ func routedReasons(logger *zap.Logger, testSetID string, worker []models.MockEnt
 		if !ok {
 			continue
 		}
-		test, isKept := r.Test, kept(r.Test)
-		if strings.HasPrefix(test, lostTestPrefix) {
-			test = "a test the recording failed to persist"
-		}
+		test, isKept := windowTestName(r.Test), kept(r.Test)
 		worker[i].Reason = routedReason(r.Mock, test, isKept, worker[i])
 		logger.Info("routed a write to the test set's worker scope: it was sent before the test it was in flight into began, so that test did not make it ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),

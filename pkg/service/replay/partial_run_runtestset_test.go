@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -251,6 +253,7 @@ func (f *prInstr) RunsAppProcess() bool { return true }
 type prInstr struct {
 	mu                sync.Mutex
 	updateCalls       int
+	runs              int // how many times the application was started
 	failUpdateFromNth int // 0 = never fail
 	recentAppLogs     string
 	// stopAppAfterNUpdates makes the stand-in application exit part-way through
@@ -301,6 +304,16 @@ type prInstr struct {
 	// read of the calls no mock answered during the test that just ran. The
 	// replayer reads them once per test, in test order.
 	mockErrorsFor func() ([]models.UnmatchedCall, error)
+	// readCtx is the context of the latest GetMockErrors call: the run's,
+	// whose session (models.LogKeys) its tags are made under.
+	readCtx context.Context
+}
+
+// readContext is the context of the latest GetMockErrors call.
+func (f *prInstr) readContext() context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readCtx
 }
 
 func (f *prInstr) AgentServesBackground() string {
@@ -324,6 +337,9 @@ func (f *prInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) 
 // report the app as having exited, and the set lands on APP_HALTED no matter
 // what the tests did — which would mask the very status this file asserts on.
 func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	f.mu.Lock()
+	f.runs++
+	f.mu.Unlock()
 	if f.stopped != nil {
 		defer close(f.stopped)
 	}
@@ -347,12 +363,27 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		return models.AppError{
 			AppErrorType: errType,
 			ExitCode:     1,
-			AppLogs:      "panic: runtime error: out of memory\n",
+			AppLogs:      prExitLogs,
 		}
 	}
 }
-func (f *prInstr) GetErrorChannel() <-chan error                                 { return make(chan error) }
-func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return f.errs() }
+
+// prExitLogs is the last lines the stand-in application logged as it exited.
+const prExitLogs = "panic: runtime error: out of memory\n"
+
+// runCalls is how many times the application was started.
+func (f *prInstr) runCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runs
+}
+func (f *prInstr) GetErrorChannel() <-chan error { return make(chan error) }
+func (f *prInstr) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	f.mu.Lock()
+	f.readCtx = ctx
+	f.mu.Unlock()
+	return f.errs()
+}
 
 // TestVariables answers as an agent that bound no test variable does: the
 // stand-in agent serves no mock with variables.
@@ -615,6 +646,12 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 	}
 	cfg := &config.Config{}
 	cfg.Path = t.TempDir()
+	// --must-pass backs a test set up before it deletes from it, and deletes
+	// nothing when the backup fails, so the set has a directory on disk as a
+	// recorded set does.
+	if err := os.MkdirAll(filepath.Join(cfg.Path, "test-set-0"), 0755); err != nil {
+		t.Fatalf("create the test set's directory: %v", err)
+	}
 	// The readiness gate polls for HealthPollTimeout, which defaults to THREE
 	// minutes. With it left at the default, a host where the probe cannot reach
 	// the stand-in listener burns the whole prTimeout per test and then fails
@@ -650,6 +687,9 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 		failedTCsBySetID:     make(map[string][]string),
 		mockMismatchFailures: NewTestFailureStore(),
 		consumedMockNames:    make(map[string]struct{}),
+		// The console keploy's CLI gives a run (cli/provider: os.Stdout),
+		// so the tests that read what a run prints read it at stdout.
+		console: stdoutConsole{},
 	}
 	return &prRun{replayer: r, report: reportDB, instr: instr, mocks: mocks, mappings: mappings, cases: cases}
 }
@@ -1581,6 +1621,34 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	}
 	if len(h.instr.lastParams.TotalConsumedMocks) == 0 {
 		t.Fatal("the fallback did not carry the CLI's consumed map")
+	}
+}
+
+// Every filter carries the rewinds of the history it is built from, sent or
+// not: a set's own history none, a retry cycle's its count, so the agent
+// starts a pass at the cycle's first window whatever its start.
+func TestSendMockFilterParamsCarriesTheHistorysRewinds(t *testing.T) {
+	for _, owns := range []string{"", "1"} {
+		t.Run("agent owns consumed="+owns, func(t *testing.T) {
+			t.Setenv("KEPLOY_AGENT_OWNS_CONSUMED", owns)
+			h := newPartialRunHarness(t, 1, 0)
+			r := h.replayer
+			own := models.ConsumedHistoryOf(map[string]models.MockState{"mock-1": {Name: "mock-1", Usage: models.Deleted}})
+			at := models.BaseTime.Add(time.Hour)
+			if err := r.SendMockFilterParamsToAgent(context.Background(), nil, at, at.Add(time.Second), own, nil, false, recordedSetShape{}, nil); err != nil {
+				t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+			}
+			if got := h.instr.lastParams.ConsumedRewinds; got != 0 {
+				t.Fatalf("the set's own history sent %d rewinds, want 0", got)
+			}
+			retry := r.rewindConsumedForRetryCycle(own, map[string]models.MockState{}, map[string]models.MockState{})
+			if err := r.SendMockFilterParamsToAgent(context.Background(), nil, at, at.Add(time.Second), retry, nil, false, recordedSetShape{}, nil); err != nil {
+				t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+			}
+			if got := h.instr.lastParams.ConsumedRewinds; got != 1 {
+				t.Fatalf("the retry cycle's history sent %d rewinds, want 1", got)
+			}
+		})
 	}
 }
 

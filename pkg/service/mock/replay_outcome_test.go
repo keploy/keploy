@@ -555,13 +555,16 @@ func TestAProvenMissIsToldWithoutAdvice(t *testing.T) {
 		t.Fatalf("a proven miss was told with advice: %v", f["next_step"])
 	}
 
-	// A protocol with no call shape (Redis, Kafka, generic) is told
-	// without a call, never an empty one.
+	// A protocol with no call shape (Redis, Kafka, generic) is told by
+	// its protocol (models.UnmatchedCallLogShape), never an empty call.
 	logs.TakeAll()
 	logMiss(zap.New(core), models.UnmatchedCall{Protocol: "Generic", Destination: "10.0.0.5:6000"})
 	f = logs.All()[0].ContextMap()
-	if _, ok := f["call"]; ok {
-		t.Fatalf("a miss with no call shape was told with a call: %v", f)
+	if f["call"] != "a Generic call" {
+		t.Fatalf("a miss with no call shape was told with call %q: %v", f["call"], f)
+	}
+	if _, ok := f["next_step"]; ok {
+		t.Fatalf("a proven miss was told with advice: %v", f["next_step"])
 	}
 	if f["destination"] != "10.0.0.5:6000" {
 		t.Fatalf("the miss was told as %v", f)

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -30,10 +31,10 @@ func TestATeeDropThatLosesBytesIsACaptureLoss(t *testing.T) {
 	want := models.CaptureLosses{
 		// A memory-guard pause no longer drops a chunk (relay.DropMemoryPressure
 		// is not produced), and what a pause costs is the mock manager's count.
-		{Kind: models.CaptureLossDropped, Count: 1, What: relay.DropPerConnCap + " on a connection to 10.0.0.5:5432"},
-		{Kind: models.CaptureLossParserStall, Count: 1, What: relay.DropConsumerGone + " on a connection to 10.0.0.5:5432"},
+		{Kind: models.CaptureLossDropped, Count: 1, What: relay.DropPerConnCap + " on a connection to 10.0.0.5:5432", HostsListed: true},
+		{Kind: models.CaptureLossParserStall, Count: 1, What: relay.DropConsumerGone + " on a connection to 10.0.0.5:5432", HostsListed: true},
 	}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("capture losses %+v, want %+v", got, want)
 	}
 }

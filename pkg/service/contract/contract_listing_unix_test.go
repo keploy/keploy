@@ -60,20 +60,22 @@ func cprService(t *testing.T, dir, self string, sets ...string) {
 
 // keploy contract download reads the other services' checkouts in
 // VirtualCPR. A service folder, or a test set in one, that is a symbolic link
-// to a folder is read through the link, like the folders beside it; it used
-// to be passed over without a word, so validate then checked nothing against
-// it. A link not named like a test set, in a service's keploy folder, is
-// still no test set.
+// to a folder is read through the link, like the folders beside it, when it
+// stays inside VirtualCPR or the service's checkout (one that leads out is
+// refused: TestDownloadTestsCopiesNothingFromOutsideTheCheckout); it used to
+// be passed over without a word, so validate then checked nothing against it.
+// A link not named like a test set, in a service's keploy folder, is still no
+// test set.
 func TestDownload_ASymlinkedServiceOrTestSetIsRead(t *testing.T) {
 	t.Run("mocks", func(t *testing.T) {
 		root := virtualCPR(t)
 		cpr := filepath.Join(root, "VirtualCPR")
 		cprService(t, filepath.Join(cpr, "svc"), "svc", "test-set-0")
-		mkdir(t, filepath.Join(root, "shared", "mset"))
-		symlink(t, filepath.Join(root, "shared", "mset"), filepath.Join(cpr, "svc", "keploy", "test-set-1"))
+		mkdir(t, filepath.Join(cpr, "svc", "vendored", "mset"))
+		symlink(t, filepath.Join("..", "vendored", "mset"), filepath.Join(cpr, "svc", "keploy", "test-set-1"))
 		symlink(t, filepath.Join(root, "gone"), filepath.Join(cpr, "svc", "keploy", "notes"))
-		cprService(t, filepath.Join(root, "shared", "other"), "other", "test-set-0")
-		symlink(t, filepath.Join(root, "shared", "other"), filepath.Join(cpr, "other"))
+		cprService(t, filepath.Join(cpr, "svc", "vendored", "other"), "other", "test-set-0")
+		symlink(t, filepath.Join("svc", "vendored", "other"), filepath.Join(cpr, "other"))
 		db := &recordingMockDB{}
 		s := &contract{logger: zap.NewNop(), mockDB: db, config: &config.Config{Contract: config.Contract{Mappings: config.Mappings{Self: "me"}}}}
 		if err := s.DownloadMocks(context.Background(), ""); err != nil {
@@ -87,8 +89,8 @@ func TestDownload_ASymlinkedServiceOrTestSetIsRead(t *testing.T) {
 		root := virtualCPR(t)
 		cpr := filepath.Join(root, "VirtualCPR")
 		cprService(t, filepath.Join(cpr, "svc"), "svc", "test-set-0")
-		cprService(t, filepath.Join(root, "shared"), "unused", "test-set-1")
-		symlink(t, filepath.Join(root, "shared", "keploy", "test-set-1"), filepath.Join(cpr, "svc", "keploy", "test-set-1"))
+		cprService(t, filepath.Join(cpr, "svc", "vendored"), "unused", "test-set-1")
+		symlink(t, filepath.Join("..", "vendored", "keploy", "test-set-1"), filepath.Join(cpr, "svc", "keploy", "test-set-1"))
 		symlink(t, filepath.Join(root, "gone"), filepath.Join(cpr, "svc", "keploy", "notes"))
 		s := &contract{logger: zap.NewNop(), config: &config.Config{Contract: config.Contract{Mappings: config.Mappings{ServicesMapping: map[string][]string{"svc": {"http://svc/x"}}}}}}
 		if err := s.DownloadTests(""); err != nil {

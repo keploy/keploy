@@ -10,11 +10,13 @@ import (
 	"math/big"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/logleak"
 	"go.uber.org/zap"
 )
 
@@ -107,8 +109,7 @@ func TestPublishRealCertFromUpgraded_FiresWithExpectedArgs(t *testing.T) {
 			},
 		},
 	}
-	src := net.Conn(fakeSrcWithPort{port: wantSourcePort})
-	r.src.Store(&src)
+	r.src.Store(wrapPeerConn(fakeSrcWithPort{port: wantSourcePort}, &r.srcWrites))
 
 	publishRealCertFromUpgraded(r, clientConn, zap.NewNop())
 
@@ -129,6 +130,46 @@ func TestPublishRealCertFromUpgraded_FiresWithExpectedArgs(t *testing.T) {
 	}
 }
 
+// The upstream's certificate names the host the application called (its
+// subject's CN) and the organisation behind it: the hook's Debug line names
+// the leaf by its size and signature algorithm, never its subject. It
+// logged the subject whole.
+func TestTheRealCertHooksLineNamesNoHost(t *testing.T) {
+	host := strings.ToLower(logleak.Canary) + ".tenant.example"
+	serverCert, serverKey, rootPool := mkSelfSigned(t, host)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{serverCert.Raw}, PrivateKey: serverKey, Leaf: serverCert}},
+	})
+	if err != nil {
+		t.Fatalf("tls.Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_ = c.(*tls.Conn).Handshake()
+		_, _ = c.Read(make([]byte, 1))
+	}()
+	clientConn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{RootCAs: rootPool, ServerName: host})
+	if err != nil {
+		t.Fatalf("tls.Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close(); <-serverDone })
+	r := &Relay{cfg: Config{RealCertHook: func(string, []byte, x509.SignatureAlgorithm) {}}}
+	r.src.Store(wrapPeerConn(fakeSrcWithPort{port: 54322}, &r.srcWrites))
+	logger, logs := logleak.Observe()
+	publishRealCertFromUpgraded(r, clientConn, logger)
+	if logs.FilterMessage("relay: RealCertHook fired").Len() != 1 {
+		t.Fatalf("the hook's line was not said: %+v", logs.All())
+	}
+	logleak.Check(t, logs, logleak.Canary, "the real cert hook's line")
+}
+
 // TestPublishRealCertFromUpgraded_NoCallWhenHookNil verifies the
 // nil-safe early-return when no hook is installed. Pinned coverage
 // for the "operator never enables the shim" path — the existing
@@ -136,8 +177,7 @@ func TestPublishRealCertFromUpgraded_FiresWithExpectedArgs(t *testing.T) {
 // dereferenced a nil RealCertHook would surface here first.
 func TestPublishRealCertFromUpgraded_NoCallWhenHookNil(t *testing.T) {
 	r := &Relay{cfg: Config{}} // RealCertHook left nil
-	src := net.Conn(fakeSrcWithPort{port: 1234})
-	r.src.Store(&src)
+	r.src.Store(wrapPeerConn(fakeSrcWithPort{port: 1234}, &r.srcWrites))
 	// Even with no TLS conn, the function must early-return cleanly.
 	publishRealCertFromUpgraded(r, nil, zap.NewNop())
 	publishRealCertFromUpgraded(r, &net.IPConn{}, zap.NewNop()) // non-TLS conn

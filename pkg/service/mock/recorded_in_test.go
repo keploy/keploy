@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
@@ -40,8 +41,9 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-1\n"), 0o644))
 			instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 			instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+			at := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
 			misses := []models.UnmatchedCall{
-				{Protocol: "HTTP", ActualSummary: "GET /a", Destination: "api:80", NotOwned: true, ClosestMock: "mock-0"},
+				{Protocol: "HTTP", ActualSummary: "GET /a", Destination: "api:80", NotOwned: true, ClosestMock: "mock-0", At: at},
 				{Protocol: "HTTP", ActualSummary: "GET /pool", Destination: "api:80", NotOwned: true, ClosestMock: "mock-2"},
 				{Protocol: "HTTP", ActualSummary: "GET /own", Destination: "api:80", NotOwned: true, ClosestMock: "mock-1"},
 				{Protocol: "HTTP", ActualSummary: "GET /changed", Destination: "api:80", ClosestMock: "mock-0"},
@@ -51,6 +53,12 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 				{Name: "o::TestA", Outcome: models.ScopeOutcomePassed},
 				{Name: "o::TestB", Outcome: models.ScopeOutcomeFailed, Evidence: &models.ScopeEvidence{Misses: misses}},
 			}
+			// The agent's read of the misses carries each call's path tag,
+			// which its evidence copy does not (models.UnmatchedCall
+			// .Sanitized): the line names the call by it.
+			read := misses[0]
+			read.PathTag = "#0a0a0a0a0a0a"
+			instr.mockErrors = []models.UnmatchedCall{read}
 			cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
 			cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 			utils.ErrCode = 0
@@ -92,7 +100,7 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 			}, got, "only the miss that is another test's recording names that test")
 			require.Equal(t, []string{"o::TestB PUT /secret after mock-0 in o::TestA"}, earlier, "a changed call names the test whose window holds the earlier recording of its method and path")
 			require.Equal(t, 1, said.Len(), "the replay says once which calls another test recorded")
-			require.Equal(t, []any{"o::TestB: GET /a (mock-0, recorded in o::TestA)"}, said.All()[0].ContextMap()["calls"])
+			require.Equal(t, []any{"o::TestB: GET /a [path tag #0a0a0a0a0a0a] (mock-0, recorded in o::TestA)"}, said.All()[0].ContextMap()["calls"])
 			// The agent's windows are read, never written: the name is on the
 			// receipt's own copy.
 			require.Empty(t, instr.windows[1].Evidence.Misses[0].RecordedIn)

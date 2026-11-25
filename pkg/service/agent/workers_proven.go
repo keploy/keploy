@@ -81,6 +81,9 @@ func (a *Agent) workerHooks(ctx context.Context, declared int) (coreAgent.Instan
 	if serr := a.clockWorkersRefusal(declared); serr != nil {
 		return nil, serr
 	}
+	if serr := a.startupBackgroundWorkersRefusal(declared); serr != nil {
+		return nil, serr
+	}
 	if serr := a.lossWorkersRefusal(ctx, declared); serr != nil {
 		return nil, serr
 	}
@@ -130,6 +133,20 @@ func (a *Agent) clockWorkersRefusal(declared int) *models.ScopeError {
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
 		fmt.Sprintf("a test process declared %d test workers, but this replay moves the run's clock to each test's recorded begin, and a run has one clock, so two workers' tests open at once cannot each run at their own", declared),
+		"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
+}
+
+// startupBackgroundWorkersRefusal refuses a claim as one of declared test
+// workers in a replay where a declared startup-capable background rule applies
+// (hasDeclaredStartupRule): plain recorded startup: entries do not trigger
+// this refusal, so parallel-worker replay of sets without declared startup
+// rules behaves identically to main.
+func (a *Agent) startupBackgroundWorkersRefusal(declared int) *models.ScopeError {
+	if !a.replaying() || !a.hasDeclaredStartupRule() {
+		return nil
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
+		fmt.Sprintf("a test process declared %d test workers, but this replay enforces a declared startup background rule across test windows and must run one test worker at a time sequentially", declared),
 		"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
 }
 
@@ -217,6 +234,15 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 		taken[coreAgent.InstanceIDOf(v)] = true
 	}
 	a.provenMu.Unlock()
+	// A run of workers holds the session from here, also after a run of one
+	// test process that claimed it before (its process gone): a close of a
+	// connection no worker made (instance 0) is the run's count again, which
+	// charges the test open now (coreAgent.PairedBytesBeginner), never worker
+	// 0's, whose tests no claim of a worker begins. Told before the stale
+	// test's end reads its counts.
+	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+		pb.PairedBytesOneProcess(false)
+	}
 	if stale != "" {
 		a.failOpen(ctx, stale, "the test process exited while the test was open")
 	}

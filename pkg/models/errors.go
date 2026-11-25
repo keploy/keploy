@@ -122,19 +122,22 @@ const (
 
 // CountsAgainstTest reports whether a miss is evidence against the test it was
 // made in: every miss but a DNS lookup's (the proxy answers an unrecorded name
-// itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
-// call was made, and a dependency's TCP health check closes the same way). An
-// answered call (Answer, under the proven switch) is no miss, and counts
-// against nothing. Every verdict, count and evidence line that judges misses
-// reads this.
+// itself), a connection whose client sent nothing (MatchPhaseNoRequest: no
+// call was made, and a dependency's TCP health check closes the same way), and
+// a background miss (Background: the same request as one of the set's
+// background recordings, which the application's background work makes, not
+// a test). An answered call (Answer, under the proven switch) is no miss, and
+// counts against nothing. Every verdict, count and evidence line that judges
+// misses reads this, under either switch, and so does the set's: a background
+// miss made before the set's first test fails no set either.
 func (c UnmatchedCall) CountsAgainstTest() bool {
-	return c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+	return c.Answer == "" && !c.Background && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
 }
 
 // CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
 // is made from, for the places that hold the report and not the call.
 func (r *MockMismatchReport) CountsAgainstTest() bool {
-	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase, Answer: r.Answer}.CountsAgainstTest()
+	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase, Answer: r.Answer, Background: r.Background}.CountsAgainstTest()
 }
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.
@@ -249,10 +252,29 @@ type MockMismatchReport struct {
 	Diff          string    // Human-readable diff (protocol-specific)
 	NextSteps     string    // Actionable suggestion for the user
 	MatchPhase    string    // how far the match cascade got (MatchPhase* constants)
+	// PathTag is an HTTP call's path tag (models.PathTag), made in the
+	// session that logs the miss, the agent's (CallPathTag of its context),
+	// and carried here so the console and the report print beside the call
+	// the tag the agent's log line names it by. "" for a call of another
+	// protocol.
+	PathTag string `json:"path_tag,omitempty" yaml:"path_tag,omitempty"`
+	// HostTag is the tag of Destination's host name (models.HostTag), made
+	// in the session that logs the miss, the agent's, and carried here so
+	// the console, the report and keploy mock replay's misses file print it
+	// beside the destination whole: the agent's line names the destination
+	// by its shape beside this tag ({}.{}.{}:443 #3fa2c1d0e9b8). "" for an
+	// IP address, or no destination.
+	HostTag string `json:"host_tag,omitempty" yaml:"host_tag,omitempty"`
 	// Operation is the label of the operation an HTTP call carries, as the
 	// registered reader names it (HTTPOperationLabel): "query GetAppLabels".
 	// "" when it carries none. ActualSummary never holds it.
 	Operation string
+	// Command is the name of the call, as its parser reads it from the
+	// request, for a protocol keploy has no shape of (CallShape ""): a cache
+	// command ("GET"), a broker API ("Produce"), a queue operation
+	// ("SendMessage"), a DNS query type ("A"). Never a value the call sent,
+	// and "" when the parser names none. A miss's shape is it (MissShape).
+	Command string
 	// DestinationScope is the verdict on whether any mock the matcher
 	// compared against targeted this call's upstream (DestinationScope*
 	// constants; empty means the question was never answered). It is a
@@ -308,6 +330,24 @@ type MockMismatchReport struct {
 	// which the miss's shape writes {} (MissShape); the summary then names
 	// the path escaped, as a place counts segments.
 	VariablePlaces []string
+	// BoundIn is, under the proven switch, of a miss whose closest
+	// recording the variable pass refused (a variable miss,
+	// MatchPhaseVariable, or a MongoDB call whose recorded answer gives a
+	// variable another value than this run bound), where this run bound
+	// each test variable the pass read to refuse the call, once, in the
+	// order the pass read them: the variable the closest recording's place
+	// (or answer) holds another value than, or the other variable whose
+	// value the call (or answer) carries where it was recorded with
+	// another. Each is the name the binding carries
+	// (VariableBinding.Mock): the recording whose answer or request bound
+	// it, or "test case <name>" where the test's own request did. A name,
+	// never a value. A refusal that read no bound variable (a given, a
+	// variable not bound yet) gives none, as does a parser that does not
+	// name its bindings: a reader of a variable miss without it cannot tell
+	// which recordings shaped the refusal beside the closest one. Set by
+	// each matcher's variable check that names them (the HTTP and MongoDB
+	// matchers').
+	BoundIn []string
 	// Given is, under the proven switch, the given (GivenVariable) a
 	// variable miss is about: the call carried another value than the one the
 	// test gave, or a value of another JSON type, or this run's test did not
@@ -315,6 +355,15 @@ type MockMismatchReport struct {
 	// it chose, never a value, and the miss's evidence names it
 	// (UnmatchedCall.Sanitized). Set by the HTTP matcher's variable check.
 	Given string
+	// VariableWhy is, under the proven switch, why the variable pass refused
+	// the call as ClosestMock's own call (MatchPhaseVariable): which of that
+	// recording's variables does not hold in this run, at which place, and
+	// which recording or test bound it, by their names, never a value. A
+	// parser that cannot say why without a value leaves it empty. The miss's
+	// evidence keeps it, each field path it names in its shape
+	// (UnmatchedCall.Sanitized), so the next step a reader of the run gets
+	// says what to fix.
+	VariableWhy string
 	// NotOwned says, under the proven switch, the call is ClosestMock, a
 	// recording the open test does not own (byte for byte, or at the per-test
 	// similarity): likely one another test recorded, which the replay names
@@ -326,6 +375,29 @@ type MockMismatchReport struct {
 	// (integrations.SetEndFiler). Such a call may have been made in a test
 	// or between two (UnmatchedCall.Held).
 	HeldPastWindow bool
+	// Background says, under either switch, the parser found the call the
+	// same request as one of the set's background recordings (the set's
+	// worker: or startup: mocks in mappings.yaml), apart from the places its
+	// matcher reads as noise or as a read of the application's clock: one
+	// more run of the application's own background work, a poll on a timer,
+	// that no recording was left to answer. Its miss is listed, and counts
+	// against no test (UnmatchedCall.Background).
+	Background bool
+	// BackgroundBound, of a Background miss, names each place at which the
+	// call differs from its background recording only by a value the call's
+	// own test bound before it (BackgroundBinding). Empty when the call is
+	// that recording's request apart from noise and clock reads alone.
+	BackgroundBound []BackgroundBinding
+	// TrailsOf names, under the proven switch, the test whose kept value the
+	// missed call carries: the call is of a worker: recording's command and
+	// collection that trails that test (mappings.yaml trails:), and at each
+	// use place of every variable of that test the recording holds, the call
+	// holds the value that test bound in this run. Such a call is that
+	// test's clean-up, whichever window it lands in: its miss is charged to
+	// no test's window and still counts (CountsAgainstTest), and judging
+	// fails the trailed test on it. A test ID, never a value; "" for every
+	// other miss (UnmatchedCall.TrailsOf).
+	TrailsOf string
 	// Reason is why the call missed, when the learn step decided it, or
 	// MissViewReplaced when a test's begin or end, or another view served
 	// between tests, replaced its view before its miss was diagnosed
@@ -391,6 +463,25 @@ type MockMismatchReport struct {
 	// report reaches the proxy (the proxy's set-start cut). Never written
 	// to a report.
 	MarkEpoch uint64 `json:"-" yaml:"-"`
+	// MarkBounds is, with Mark set and MarkRound, the round's boundary count
+	// the call's first read was made at (integrations.CallRound.Round,
+	// RoundAt.Bounds): with MarkEpoch, it tells whether the call was marked
+	// before or after a test's view was installed, however late its report
+	// reaches the proxy (UnmatchedCall.Marked). MarkRound is false for a mark of
+	// a store that keeps no boundary count. Never written to a report.
+	MarkBounds uint64 `json:"-" yaml:"-"`
+	MarkRound  bool   `json:"-" yaml:"-"`
+	// MarkReads is, with Mark set, how many reads of the misses window the
+	// call's store files its misses in had begun when the call's first read
+	// was made (integrations.CallRound.Reads): with MarkEpoch, it tells
+	// whether the call was marked before or after its test set's last read
+	// of that window, however late its report reaches the proxy (the
+	// proxy's set-start cut). Never written to a report.
+	MarkReads uint64 `json:"-" yaml:"-"`
+	// MarkedTest is, with Mark set, the test whose view the call's first
+	// read found (integrations.CallRound.Test): "" for a pool view, and where
+	// the store did not name it. Never written to a report.
+	MarkedTest string `json:"-" yaml:"-"`
 	// Repeat says the call is identical to a recording an earlier test of
 	// the set made, which already answered that test's call at this replay
 	// (RepeatNote); nil otherwise. ClosestMock is then that recording, but
@@ -517,6 +608,13 @@ func NewMockMismatchError(err error, report *MockMismatchReport) error {
 // 46-hour production recording that way. Errors wrapped with this sentinel are
 // skipped and counted; everything else stays fatal.
 var ErrMockEncode = errors.New("mock encode failure")
+
+// ErrTestCaseEncode marks a test case the store refuses for THIS test case's
+// own payload, a body its storage format cannot hold, rather than for the
+// storage environment. As with ErrMockEncode, the failure says nothing about
+// the next test case, so a recording skips and counts this one and goes on;
+// every other insert error stays what it was.
+var ErrTestCaseEncode = errors.New("test case encode failure")
 
 // AgentRunUnfinishedError says keploy's agent did not finish its end of a run
 // (its after-test-run hook failed, or the agent was gone) under the proven

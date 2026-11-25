@@ -234,6 +234,9 @@ func BuildDelayExample(command string) string {
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
 var IsConfigFileFound = true
 
+// ConfigFile is the keploy.yml PreProcessFlags read, "" when it found none.
+var ConfigFile string
+
 type CmdConfigurator struct {
 	logger *zap.Logger
 	cfg    *config.Config
@@ -379,7 +382,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return err
 		}
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
-		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
+		_ = cmd.Flags().MarkDeprecated("app-id", "DEPRECATED: was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
@@ -425,6 +428,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "agent":
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
+		if cmd.Flags().Lookup("debug-file") == nil {
+			cmd.Flags().Bool("debug-file", false, "Write this run's DEBUG log to the file KEPLOY_DEBUG_FILE names (--debug does it too)")
+			if err := cmd.Flags().MarkHidden("debug-file"); err != nil {
+				c.logger.Debug("failed to hide the debug-file flag", zap.Error(err))
+			}
+		}
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
 		cmd.Flags().String("client-pid-ns", "", "The pid namespace the keploy client runs in, beside --client-pid (set by keploy itself)")
@@ -548,6 +557,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	case "record":
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
+		cmd.Flags().Bool("ignore-static-assets", c.cfg.Record.IgnoreStaticAssets, "Skip recording successful GET/HEAD web static asset responses (CSS, JS, fonts, images, audio, video) as test cases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
@@ -668,6 +678,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"goCoverage":                "go-coverage",
 		"fallBackOnMiss":            "fallBack-on-miss",
 		"basePath":                  "base-path",
+		"ignoreStaticAssets":        "ignore-static-assets",
 		"updateTemplate":            "update-template",
 		"mocking":                   "mocking",
 		"configPath":                "config-path",
@@ -792,19 +803,15 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 		return err
 	}
 
-	appName, err := utils.GetLastDirectory()
+	// Only a run that records or tests keploy.yml's app writes the name into
+	// it; every other command, the agent and mock record among them, reads it.
+	appName, err := AppName(c.logger, c.cfg.AppName, ConfigFile, RecordsOrTests(cmd))
 	if err != nil {
 		// Said here, as every other refusal is: nothing else says it.
 		utils.LogError(c.logger, err, "failed to get the last directory for appName")
 		return fmt.Errorf("failed to get the last directory for appName: %v", err)
 	}
-
-	if c.cfg.AppName == "" {
-		c.logger.Debug("Using the last directory name as appName : " + appName)
-		c.cfg.AppName = appName
-	} else if c.cfg.AppName != appName {
-		c.logger.Info("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
-	}
+	c.cfg.AppName = appName
 
 	// The "create config file if missing" behavior is meaningful
 	// only for user-facing commands (record/test/etc.) that are
@@ -832,7 +839,92 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 	return nil
 }
 
+// AppName is the name a run records and reports under. configured, the
+// name the run was given (--app-name, KEPLOY_APPNAME, or appName in
+// keploy.yml or its override), is kept unless it is blank: a name of spaces
+// alone, like the "" a YAML null (appName:, ~, null, Null) reads as, names no
+// app, as enterprise reads keploy.yml. PreProcessFlags drops a blank
+// --app-name or KEPLOY_APPNAME before it reads keploy.yml (dropBlankAppName),
+// and a blank appName in the override file as it merges that file, so
+// keploy.yml's appName is not hidden by one. A run given none is named:
+//   - with no keploy.yml (configFile ""), after its git repository and its
+//     folder's path inside it, or after its folder outside one
+//     (utils.DefaultAppName); the keploy.yml the run writes keeps the name;
+//   - with a keploy.yml that names no app, an existing project's, after its
+//     folder, as every run named it before keploy read repositories, so the
+//     project keeps its name. With write, a run from the keploy.yml's own
+//     folder writes the name into it once (tools.AddAppName), for later runs
+//     to read, its line ending with config.KeptAppNameNote, which says
+//     keploy, not the user, chose it; a file it cannot write is said in a
+//     warning, and the run goes on under that name.
+//
+// It fails, as utils.WorkingDirectory does, once the working directory is
+// gone, whatever the run was given.
+func AppName(logger *zap.Logger, configured, configFile string, write bool) (string, error) {
+	dir, err := utils.WorkingDirectory()
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(configured) != "" {
+		return configured, nil
+	}
+	if configFile == "" {
+		name, from := utils.AppNameFor(dir)
+		logger.Info(fmt.Sprintf("Naming the app %q after %s; set appName in keploy.yml or pass --app-name to name it otherwise", name, from))
+		return name, nil
+	}
+	old := filepath.Base(dir)
+	// A keploy.yml in another folder (--config-path) may be shared by the
+	// services of a monorepo, each run named after its own folder: a name
+	// written into it would rename the others, so only a run from the
+	// file's own folder writes one.
+	if !write || !sameFolder(filepath.Dir(configFile), dir) {
+		return old, nil
+	}
+	if err := tools.AddAppName(configFile, old); err != nil {
+		logger.Warn(fmt.Sprintf("%s names no app, so this run uses %q, the name runs from this folder have had; keploy could not write it into the file (%v): set appName there to keep it", configFile, old, err))
+		return old, nil
+	}
+	logger.Info(fmt.Sprintf("%s named no app, so keploy wrote appName %q into it: the name runs from this folder have had, which the project keeps", configFile, old))
+	return old, nil
+}
+
+// RecordsOrTests says whether cmd records or tests the app keploy.yml names:
+// keploy record and keploy test, and enterprise's record sandbox and test
+// sandbox, which record and test through them. Only these write the app's
+// name into a keploy.yml that names none. Every other command reads the name
+// and leaves the file as it is: the agent, report, an enterprise app, branch,
+// mock registry or cloud command, and keploy mock record and mock replay,
+// whose app is not keploy.yml's appName but --app's, or the one enterprise
+// looks up for the folder (so a name they wrote would be another app's than
+// the one they use). cmd is named by its path below the root command, so
+// contract test is not test; a command with no parent is taken by its own
+// name.
+func RecordsOrTests(cmd *cobra.Command) bool {
+	path := cmd.Name()
+	for c := cmd.Parent(); c != nil && c.HasParent(); c = c.Parent() {
+		path = c.Name() + " " + path
+	}
+	switch path {
+	case "record", "test", "record sandbox", "test sandbox":
+		return true
+	}
+	return false
+}
+
+// sameFolder says whether a and b are one folder, by whatever paths.
+func sameFolder(a, b string) bool {
+	// A folder Stat fails for is nil, which is the same file as none.
+	fa, _ := os.Stat(a)
+	fb, _ := os.Stat(b)
+	return os.SameFile(fa, fb)
+}
+
 func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
+	// 0) A blank --app-name or KEPLOY_APPNAME names no app, so it is no
+	// choice: dropped before viper reads the layers below.
+	dropBlankAppName(c.logger, cmd.Flags())
+
 	// 1) Bind flags (highest precedence in Viper)
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	if err := viper.BindPFlags(cmd.Flags()); err != nil {
@@ -850,6 +942,12 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		errMsg := "failed to bind cmd specific flags to viper"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
+	}
+
+	if f := cmd.Flags().Lookup("test-run"); cmd.Name() == "normalize" && f != nil {
+		if err := viper.BindPFlag("normalize.testReport", f); err != nil {
+			return err
+		}
 	}
 
 	// 4) Use provided configPath and convert to absolute path
@@ -881,16 +979,21 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	// --path, <path>/keploy is also where keploy keeps its tests, which
 	// utils.EnsureKeployPathIsFolder explains.
 	configFile := loader.Find(configPath)
+	ConfigFile = configFile
 	viper.SetConfigType("yml")
+	// files keeps test.globalNoise as keploy.yml and the override write it,
+	// for the Unmarshal below: viper lowercases its keys and splits them on
+	// ".", and they are url regexes and field paths (loader.Files).
+	files := loader.New(viper.GetViper())
 	if configFile == "" {
 		IsConfigFileFound = false
 		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
 		// keploy.yml is a file of the repository keploy runs in, which a cloned
-		// repo decides: loader.Read is viper's read of it, bounded -- a FIFO,
+		// repo decides: files.Read is viper's read of it, bounded -- a FIFO,
 		// a link to /dev/zero or a file past keploy's limits is refused, where
 		// viper.ReadInConfig blocked for good or ran out of memory.
-		if err := loader.Read(viper.GetViper(), configFile); err != nil {
+		if err := files.Read(configFile); err != nil {
 			errMsg := "failed to read config file"
 			utils.LogError(c.logger, err, errMsg, zap.String("file", configFile))
 			return errors.New(errMsg)
@@ -915,10 +1018,21 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		overridePath := filepath.Join(appDir, fmt.Sprintf("%s.keploy.yml", lastDir))
 
 		if _, statErr := os.Stat(overridePath); statErr == nil {
-			if err := loader.Merge(viper.GetViper(), overridePath); err != nil {
+			// The name the run has before the override: keploy.yml's
+			// appName, or a given --app-name or KEPLOY_APPNAME, which no
+			// file overrides.
+			named := viper.GetString("appName")
+			if err := files.Merge(overridePath); err != nil {
 				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
+			}
+			// A blank or null appName in the override names no app, so it
+			// is no choice, as a blank --app-name is none: keploy.yml's
+			// appName names the run, not the folder with a warning that
+			// keploy.yml names no app.
+			if strings.TrimSpace(viper.GetString("appName")) == "" {
+				viper.Set("appName", named)
 			}
 			c.logger.Info("merged override config file", zap.String("file", overridePath))
 		} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -929,8 +1043,8 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		IsConfigFileFound = true
 	}
 
-	// 7) Unmarshal
-	if err := viper.Unmarshal(c.cfg); err != nil {
+	// 7) Unmarshal, with test.globalNoise as the files write it
+	if err := files.Unmarshal(c.cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
@@ -940,6 +1054,30 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	c.cfg.ConfigPath = configPath
 	c.configRead = true
 	return nil
+}
+
+// dropBlankAppName drops an --app-name or a KEPLOY_APPNAME that is empty or
+// blank, so that the run is named as if it were given no name: by
+// keploy.yml's appName, else by its git repository, else by its folder
+// (AppName). viper takes a given flag, then the env, over keploy.yml, so a
+// blank one hid keploy.yml's appName, and the run was named after its folder
+// with a warning that keploy.yml named no app. A blank name names no app, as
+// a blank or null appName in keploy.yml does. The flag is set back to its
+// default and marked not given, so viper, and any later read of the flag,
+// sees none; the variable is unset for this process and the ones it starts.
+// Each one dropped is said in a warning, but for an empty KEPLOY_APPNAME,
+// which viper never read.
+func dropBlankAppName(logger *zap.Logger, flags *pflag.FlagSet) {
+	if f := flags.Lookup("app-name"); f != nil && f.Changed && strings.TrimSpace(f.Value.String()) == "" {
+		logger.Warn(fmt.Sprintf("ignoring --app-name %q: a blank name is no name, so this run takes keploy.yml's appName, else its git repository's or its folder's name", f.Value.String()))
+		// A string flag's Set takes any value.
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	}
+	if v := os.Getenv("KEPLOY_APPNAME"); v != "" && strings.TrimSpace(v) == "" {
+		logger.Warn(fmt.Sprintf("ignoring KEPLOY_APPNAME %q: a blank name is no name, so this run takes keploy.yml's appName, else its git repository's or its folder's name", v))
+		_ = os.Unsetenv("KEPLOY_APPNAME")
+	}
 }
 
 // mockViperPrefix keeps `keploy mock record` flags out of the record.* config section, whose passThroughPorts holds rules, not ports.
@@ -1119,12 +1257,14 @@ func resolveCommandKind(logger *zap.Logger, cmd *cobra.Command, command, configu
 			// so a wrapper is supported there (see App.SetupCompose).
 			if (kind == utils.DockerRun || kind == utils.DockerStart) && command != "" &&
 				!mentionsDockerBinary(command) {
+				// The command by its program alone (AppCommand): validate logs
+				// this error at ERROR, and its arguments carry the app's secrets.
 				return "", fmt.Errorf(
 					"--cmd-type %s has to rewrite the command to attach keploy's namespaces, "+
-						"which is only possible on a literal docker command, and %q is not one. "+
+						"which is only possible on a literal docker command, and the %q command is not one. "+
 						"Pass the underlying docker command with -c, or use --cmd-type %s if the "+
 						"wrapper brings up a compose project",
-					explicit, command, utils.DockerCompose)
+					explicit, utils.NewAppCommand(command).Program(), utils.DockerCompose)
 			}
 			return explicit, nil
 		case utils.Empty:
@@ -1317,6 +1457,31 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				zap.String("next_step", "name the call's host as its request does, for example host: auth.example.com or host: auth.example.com:8443, and narrow it with method and pathPrefix"))
 		}
 	}
+	// A worker-mock rule that does not validate matches nothing. keploy
+	// record, the one command that applies the rules, refuses it, so a typo
+	// is told now, not found when a cold worker misses its call; every other
+	// command says so and goes on.
+	if problems := models.ValidateWorkerMockRules(c.cfg.Record.WorkerMocks); len(problems) > 0 {
+		const fix = "fix the rules (each needs a kind keploy records and at least one match key that kind reads) or remove them"
+		// Each problem by the rule's number and what is wrong, its quoted
+		// parts by their size: an id or a pattern can hold a path or a
+		// value, and both the refusal and the warning are logged.
+		for i, p := range problems {
+			problems[i] = utils.WithholdQuoted(p)
+		}
+		if isKeployRecord(cmd) {
+			return fmt.Errorf("record.workerMocks in keploy.yaml: %s; %s", strings.Join(problems, "; "), fix)
+		}
+		c.logger.Warn("record.workerMocks in keploy.yaml has rules keploy record will refuse",
+			zap.Strings("problems", problems), zap.String("next_step", fix))
+	}
+
+	// keploy mock record does not apply worker-mock rules: said, so a user
+	// who wrote them does not take their absence for a miss of theirs.
+	if len(c.cfg.Record.WorkerMocks) > 0 && cmd.Name() == "record" && !isKeployRecord(cmd) {
+		c.logger.Warn("record.workerMocks in keploy.yaml is applied by keploy record only; this recording marks no worker mocks",
+			zap.Int("rules", len(c.cfg.Record.WorkerMocks)))
+	}
 
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
@@ -1486,19 +1651,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 
-	// Redact the DB password before dumping the whole config at Debug — it would
-	// otherwise leak test.mongoPassword into any -debug capture.
+	// The config as a -debug capture needs it, with what can carry a
+	// credential redacted: the app's command line (an inline -e TOKEN=...),
+	// test.mongoPassword, the health URL (a token in its query), and
+	// record.workerMocks' rules (their patterns name paths, statements and
+	// keys, which can hold a value), counted. An in-memory compose file is
+	// never dumped (json:"-"; its size here). redactedCfg is a shallow copy:
+	// the live config is untouched.
 	redactedCfg := *c.cfg
+	redactedCfg.Command = utils.RedactCommandLine(redactedCfg.Command)
 	if redactedCfg.Test.MongoPassword != "" {
 		redactedCfg.Test.MongoPassword = "****"
 	}
-	// InMemoryCompose can carry docker-compose YAML with embedded secrets/tokens;
-	// never dump its contents. redactedCfg is a shallow copy, so reassigning the
-	// slice header here leaves the live config untouched.
-	if len(redactedCfg.InMemoryCompose) > 0 {
-		redactedCfg.InMemoryCompose = []byte(fmt.Sprintf("**** (%d bytes redacted)", len(redactedCfg.InMemoryCompose)))
+	if redactedCfg.Test.HealthURL != "" {
+		redactedCfg.Test.HealthURL = utils.RedactCommandLine(redactedCfg.Test.HealthURL)
 	}
-	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", redactedCfg))
+	workerMockRules := len(redactedCfg.Record.WorkerMocks)
+	redactedCfg.Record.WorkerMocks = nil
+	c.logger.Debug("config has been initialised", zap.String("for cmd", cmd.Name()), zap.Any("config", redactedCfg), zap.Int("in-memory compose bytes", len(redactedCfg.InMemoryCompose)), zap.Int("worker-mock rules", workerMockRules))
 
 	// `keploy mock record` / `keploy mock replay` validation runs on its own
 	// path (see addMockFlags) — the subcommands are named "record"/"replay".
@@ -2762,6 +2932,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	case "record":
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
 		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
+		cmd.Flags().Bool("ignore-static-assets", c.cfg.Record.IgnoreStaticAssets, "Skip recording successful GET/HEAD web static asset responses (CSS, JS, fonts, images, audio, video) as test cases when --record-requests is enabled")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if a call missed its recorded mock (dependency contract drift); a DNS lookup or a connection that sent nothing does not count")
@@ -3046,6 +3217,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		if err := c.readMockBool(cmd, "record-requests", "mock.recordRequests", &c.cfg.Mock.RecordRequests); err != nil {
 			return err
 		}
+		if err := c.readMockBool(cmd, "ignore-static-assets", "record.ignoreStaticAssets", &c.cfg.Record.IgnoreStaticAssets); err != nil {
+			return err
+		}
 	case "replay":
 		// The miss policy as resolved above, from --on-miss or mock.onMiss.
 		onMiss := strings.ToLower(strings.TrimSpace(c.cfg.Mock.OnMiss))
@@ -3152,4 +3326,14 @@ func startsWithGeneratedHeader(file string) bool {
 	// An editor may have put a byte-order mark before it.
 	line = strings.TrimPrefix(line, "\xef\xbb\xbf")
 	return strings.HasPrefix(line, "# Generated by Keploy")
+}
+
+// isKeployRecord reports whether cmd is keploy record, not another command's
+// record subcommand (keploy mock record).
+func isKeployRecord(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Name() != "record" {
+		return false
+	}
+	p := cmd.Parent()
+	return p == nil || p.Parent() == nil
 }

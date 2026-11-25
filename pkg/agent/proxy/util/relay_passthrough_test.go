@@ -5,17 +5,17 @@ import (
 	"io"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/memconn"
 	"go.uber.org/zap"
 )
 
-// testDrainIdle keeps the timing tests quick. The drain's logic does not
-// depend on the size of the window — only on whether the survivor moved
-// bytes during one — so exercising it at 400ms proves the same mechanism
-// the production window runs. What the short window cannot check is that
-// the production value is big enough to be useful; that is pinned
-// separately by TestRelayDrainIdleLeavesRoomForARealUpstream.
+// testDrainIdle keeps the real-TCP liveness/FIN tests quick. The multi-window
+// survivor drain and prompt-return tests below run inside testing/synctest on
+// RelayDrainIdle directly over in-memory half-closable conns, so none of them
+// race wall-clock sleeps against this value.
 const testDrainIdle = 400 * time.Millisecond
 
 func tcpPair(t *testing.T, ln net.Listener) (dialed, accepted net.Conn) {
@@ -44,8 +44,7 @@ func tcpPair(t *testing.T, ln net.Listener) (dialed, accepted net.Conn) {
 // but it is exactly what Go's tls.Conn does, keeping c.in.err and
 // c.out.err separate. Production reaches these functions with SafeConns
 // over *tls.Conn on every TLS-intercepted path, so this is the real case,
-// not a contrivance. Writes still go to the real socket, so the assertions
-// below are about bytes that genuinely crossed the wire.
+// not a contrivance.
 type splitHalfConn struct {
 	net.Conn
 	readErr error
@@ -64,8 +63,9 @@ func (c *splitHalfConn) Read(p []byte) (int, error) {
 // swallows CloseWrite is a trap for the next person to reuse it.
 func (c *splitHalfConn) CloseWrite() error { return CloseWriteIfPossible(c.Conn) }
 
-// relayFixture wires up two real TCP pairs with one side's READ half
-// broken, and runs the relay over them.
+// memRelayFixture wires up two in-memory half-closable conn pairs inside a
+// testing/synctest bubble with one side's READ half broken, and runs the
+// production RelayRawPassthrough entry point over them.
 //
 // breakDest selects WHICH direction fails, and running every drain test
 // both ways is the point. The drain has to watch the byte counter of the
@@ -73,42 +73,23 @@ func (c *splitHalfConn) CloseWrite() error { return CloseWriteIfPossible(c.Conn)
 // came from the first goroutine is right in one orientation and silently
 // wrong in the other — it watches the dead direction's counter, which
 // never moves again, so the very first tick reads "stalled" and the drain
-// collapses back into a single fixed wait. Tests that only ever break the
-// app side certify half a function.
-type relayFixture struct {
-	appSide, appPeer   net.Conn
-	destSide, destPeer net.Conn
-	// sender writes into the relay; receiver reads what the surviving
-	// direction delivered.
-	sender, receiver net.Conn
-	relayDone        chan struct{}
+// collapses back into a single fixed wait.
+type memRelayFixture struct {
+	appSide, appPeer   *memconn.Conn
+	destSide, destPeer *memconn.Conn
+	sender, receiver   *memconn.Conn
+	relayDone          chan struct{}
 }
 
-func newRelayFixture(t *testing.T, breakDest bool, idle time.Duration) *relayFixture {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-
-	f := &relayFixture{relayDone: make(chan struct{})}
-	f.appSide, f.appPeer = tcpPair(t, ln)
-	f.destSide, f.destPeer = tcpPair(t, ln)
-	t.Cleanup(func() {
-		_ = f.appSide.Close()
-		_ = f.appPeer.Close()
-		_ = f.destSide.Close()
-		_ = f.destPeer.Close()
-	})
+func newMemRelayFixture(breakDest bool) *memRelayFixture {
+	f := &memRelayFixture{relayDone: make(chan struct{})}
+	f.appSide, f.appPeer = memconn.Pair()
+	f.destSide, f.destPeer = memconn.Pair()
 
 	clientConn, destConn := net.Conn(f.appSide), net.Conn(f.destSide)
 	if breakDest {
 		// The upstream read fails: the surviving direction is the REQUEST
-		// still being uploaded to that upstream. This is the orientation
-		// that shows up first in production — a reset or a TLS alert from
-		// the server surfaces on the dest read while the client is still
-		// mid-body.
+		// still being uploaded to that upstream.
 		destConn = &splitHalfConn{Conn: f.destSide, readErr: io.ErrUnexpectedEOF}
 		f.sender, f.receiver = f.appPeer, f.destPeer
 	} else {
@@ -119,47 +100,27 @@ func newRelayFixture(t *testing.T, breakDest bool, idle time.Duration) *relayFix
 	}
 
 	go func() {
-		relayRawPassthrough(NewSafeConn(clientConn, zap.NewNop()), NewSafeConn(destConn, zap.NewNop()), idle)
+		RelayRawPassthrough(NewSafeConn(clientConn, zap.NewNop()), NewSafeConn(destConn, zap.NewNop()))
 		close(f.relayDone)
 	}()
 	return f
 }
 
-// awaitReturnAndClose waits for the relay to return, then models
-// handleConnection: it closes the REAL sockets the moment the relay hands
-// control back. Without that close these tests prove nothing — returning
-// early is harmless on its own, since the copier goroutines keep
-// delivering; it is the caller's close that truncates them.
-func (f *relayFixture) awaitReturnAndClose(t *testing.T) {
-	t.Helper()
-	select {
-	case <-f.relayDone:
-	case <-time.After(30 * time.Second):
-		t.Fatal("relayRawPassthrough never returned; a reintroduced unconditional wait shows " +
-			"up here rather than as an opaque package timeout")
-	}
+func (f *memRelayFixture) closeAll() {
 	_ = f.appSide.Close()
+	_ = f.appPeer.Close()
 	_ = f.destSide.Close()
+	_ = f.destPeer.Close()
 }
 
-// pacedSend writes payload in chunks with a gap between them, so the
-// transfer is still ARRIVING when the other direction breaks. Blasting it
-// in one write finishes over loopback before the break lands, leaving
-// nothing in flight to truncate — which is how the first version of these
-// tests passed against a build that truncated.
-func pacedSend(c net.Conn, payload []byte, chunkSize int, gap time.Duration) {
-	go func() {
-		for off := 0; off < len(payload); off += chunkSize {
-			end := off + chunkSize
-			if end > len(payload) {
-				end = len(payload)
-			}
-			if _, err := c.Write(payload[off:end]); err != nil {
-				return
-			}
-			time.Sleep(gap)
-		}
-	}()
+// closeProxySides models handleConnection: it closes the real proxy-side
+// sockets the moment RelayRawPassthrough hands control back. Without that
+// close these tests prove nothing — returning early is harmless on its own,
+// since the copier goroutines keep delivering; it is the caller's close that
+// truncates them.
+func (f *memRelayFixture) closeProxySides() {
+	_ = f.appSide.Close()
+	_ = f.destSide.Close()
 }
 
 func readAllInto(c net.Conn, n int) <-chan int {
@@ -191,26 +152,65 @@ func TestRelayRawPassthrough_LetsTheSurvivorFinishAfterABreak(t *testing.T) {
 		{"upstream read half fails, request survives", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			const chunks, chunkSize = 20, 32 * 1024
-			payload := bytes.Repeat([]byte("R"), chunks*chunkSize)
+			synctest.Test(t, func(t *testing.T) {
+				const chunks, chunkSize = 20, 32 * 1024
+				payload := bytes.Repeat([]byte("R"), chunks*chunkSize)
+				got := make([]byte, len(payload))
 
-			f := newRelayFixture(t, tc.breakDest, testDrainIdle)
-			pacedSend(f.sender, payload, chunkSize, 5*time.Millisecond)
-			got := readAllInto(f.receiver, len(payload))
+				f := newMemRelayFixture(tc.breakDest)
+				defer f.closeAll()
 
-			f.awaitReturnAndClose(t)
-
-			select {
-			case n := <-got:
-				if n < len(payload) {
-					t.Fatalf("the surviving direction delivered %d of %d bytes. Returning the "+
-						"moment either direction errors lets the caller's deferred close "+
-						"truncate a healthy direction — the two halves of a tls.Conn fail "+
-						"independently.", n, len(payload))
+				// Wait for the broken direction to fail and WaitForSurvivor to
+				// arm its real RelayDrainIdle timer before the survivor starts.
+				synctest.Wait()
+				select {
+				case <-f.relayDone:
+					f.closeProxySides()
+					t.Fatal("RelayRawPassthrough returned immediately on the first copy error without draining the survivor")
+				default:
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("reader never completed")
-			}
+
+				gap := RelayDrainIdle / 4
+				for i := 0; i < chunks; i++ {
+					time.Sleep(gap)
+					synctest.Wait()
+					select {
+					case <-f.relayDone:
+						f.closeProxySides()
+						t.Fatalf("the surviving direction delivered %d of %d bytes. Returning the "+
+							"moment either direction errors lets the caller's deferred close "+
+							"truncate a healthy direction — the two halves of a tls.Conn fail "+
+							"independently.", i*chunkSize, len(payload))
+					default:
+					}
+					off := i * chunkSize
+					if _, err := f.sender.Write(payload[off : off+chunkSize]); err != nil {
+						t.Fatalf("chunk %d write: %v", i+1, err)
+					}
+					if _, err := io.ReadFull(f.receiver, got[off:off+chunkSize]); err != nil {
+						t.Fatalf("chunk %d read: %v", i+1, err)
+					}
+					synctest.Wait()
+				}
+				if !bytes.Equal(got, payload) {
+					t.Fatal("surviving direction delivered corrupted bytes")
+				}
+
+				// Go silent without closing: RelayRawPassthrough must stop
+				// after two idle windows (one to observe the final chunk's
+				// byte count, one with no further progress).
+				silenceStart := time.Now()
+				select {
+				case <-f.relayDone:
+				case <-time.After(3 * RelayDrainIdle):
+					t.Fatal("RelayRawPassthrough never returned after the survivor stalled")
+				}
+				if wait := time.Since(silenceStart); wait != 2*RelayDrainIdle {
+					t.Fatalf("RelayRawPassthrough stalled after %v of silence, want %v", wait, 2*RelayDrainIdle)
+				}
+				f.closeProxySides()
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -225,8 +225,8 @@ func TestRelayRawPassthrough_LetsTheSurvivorFinishAfterABreak(t *testing.T) {
 // ordinary. Measured on the wall-clock version: 33% of a 960 KiB response
 // delivered before the cut.
 //
-// Here the survivor keeps delivering, slowly, for well beyond one idle
-// window — every byte must still arrive, in BOTH orientations. Watching
+// Here the survivor keeps delivering, slowly, across six full RelayDrainIdle
+// windows — every byte must still arrive, in BOTH orientations. Watching
 // the wrong direction's counter reproduces the wall clock exactly, and
 // only in one of them.
 func TestRelayRawPassthrough_DrainIsIdleNotAWallClock(t *testing.T) {
@@ -238,29 +238,83 @@ func TestRelayRawPassthrough_DrainIsIdleNotAWallClock(t *testing.T) {
 		{"upstream read half fails, request survives", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Total transfer time well over one window, but never idle for a
-			// whole window: a wall clock truncates this, an idle timer does not.
-			const chunks, chunkSize = 12, 16 * 1024
-			gap := testDrainIdle / 3
-			payload := bytes.Repeat([]byte("S"), chunks*chunkSize)
+			synctest.Test(t, func(t *testing.T) {
+				const windows, chunksPerWindow, chunkSize = 6, 2, 16 * 1024
+				payload := bytes.Repeat([]byte("S"), windows*chunksPerWindow*chunkSize)
+				got := make([]byte, len(payload))
 
-			f := newRelayFixture(t, tc.breakDest, testDrainIdle)
-			pacedSend(f.sender, payload, chunkSize, gap)
-			got := readAllInto(f.receiver, len(payload))
+				f := newMemRelayFixture(tc.breakDest)
+				defer f.closeAll()
 
-			f.awaitReturnAndClose(t)
-
-			select {
-			case n := <-got:
-				if n < len(payload) {
-					t.Fatalf("the surviving direction delivered %d of %d bytes over %v. A fixed "+
-						"grace is a deadline on the whole transfer, not a flush — it truncates "+
-						"any response slower than the grace, which for a real upstream is normal.",
-						n, len(payload), time.Duration(chunks)*gap)
+				// Wait until the broken direction has failed and WaitForSurvivor
+				// has armed the real RelayDrainIdle timer.
+				synctest.Wait()
+				select {
+				case <-f.relayDone:
+					f.closeProxySides()
+					t.Fatal("RelayRawPassthrough returned without arming the survivor drain")
+				default:
 				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("reader never completed")
-			}
+
+				step := RelayDrainIdle * 2 / 3
+				rem := RelayDrainIdle - step
+				for w := 0; w < windows; w++ {
+					// Stay silent for 2/3 of the production idle window before
+					// sending: this catches both a shortened initial window and
+					// a shortened Reset duration (e.g. idle/2).
+					time.Sleep(step)
+					synctest.Wait()
+					select {
+					case <-f.relayDone:
+						f.closeProxySides()
+						t.Fatalf("window %d of %d: surviving direction was abandoned after %d of %d bytes "+
+							"before its idle window expired", w+1, windows, w*chunksPerWindow*chunkSize, len(payload))
+					default:
+					}
+
+					for c := 0; c < chunksPerWindow; c++ {
+						off := (w*chunksPerWindow + c) * chunkSize
+						if _, err := f.sender.Write(payload[off : off+chunkSize]); err != nil {
+							t.Fatalf("window %d chunk %d write: %v", w+1, c+1, err)
+						}
+						if _, err := io.ReadFull(f.receiver, got[off:off+chunkSize]); err != nil {
+							t.Fatalf("window %d chunk %d read: %v", w+1, c+1, err)
+						}
+					}
+					synctest.Wait()
+
+					// Advance across the idle timer tick; WaitForSurvivor must
+					// observe the delivered bytes and reset for another window.
+					time.Sleep(rem)
+					synctest.Wait()
+					select {
+					case <-f.relayDone:
+						f.closeProxySides()
+						t.Fatalf("window %d of %d: surviving direction was abandoned after %d of %d bytes. "+
+							"A fixed grace or watching the dead direction's counter truncates an active survivor.",
+							w+1, windows, (w+1)*chunksPerWindow*chunkSize, len(payload))
+					default:
+					}
+				}
+
+				if !bytes.Equal(got, payload) {
+					t.Fatal("surviving direction delivered corrupted bytes")
+				}
+
+				// Go silent without closing: the drain must stall after one
+				// full RelayDrainIdle window with no new bytes.
+				silenceStart := time.Now()
+				select {
+				case <-f.relayDone:
+				case <-time.After(2 * RelayDrainIdle):
+					t.Fatal("drain kept resetting after the survivor went silent")
+				}
+				if wait := time.Since(silenceStart); wait != RelayDrainIdle {
+					t.Fatalf("drain stalled after %v of silence, want %v", wait, RelayDrainIdle)
+				}
+				f.closeProxySides()
+				synctest.Wait()
+			})
 		})
 	}
 }
@@ -283,43 +337,82 @@ func TestRelayRawPassthrough_WaitsThroughUpstreamThinkTime(t *testing.T) {
 		{"upstream read half fails, request survives", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			payload := []byte("the answer, eventually")
-			think := testDrainIdle * 3 / 4 // silent for most of a window, then answers
+			synctest.Test(t, func(t *testing.T) {
+				part1 := []byte("the answer, ")
+				part2 := []byte("eventually")
+				want := append(append([]byte(nil), part1...), part2...)
+				got := make([]byte, len(want))
 
-			f := newRelayFixture(t, tc.breakDest, testDrainIdle)
-			go func() {
+				f := newMemRelayFixture(tc.breakDest)
+				defer f.closeAll()
+
+				// Wait until the break has armed the first RelayDrainIdle
+				// window, then keep the survivor silent for 2/3 of the window.
+				synctest.Wait()
+				think := RelayDrainIdle * 2 / 3
 				time.Sleep(think)
-				_, _ = f.sender.Write(payload)
-			}()
-			got := readAllInto(f.receiver, len(payload))
-
-			f.awaitReturnAndClose(t)
-
-			select {
-			case n := <-got:
-				if n < len(payload) {
-					t.Fatalf("delivered %d of %d bytes after a %v think time. The drain treats "+
-						"'has not started yet' as 'stalled', so a window shorter than the "+
-						"upstream's first-byte latency drops the whole response.",
-						n, len(payload), think)
+				synctest.Wait()
+				select {
+				case <-f.relayDone:
+					f.closeProxySides()
+					t.Fatalf("RelayRawPassthrough abandoned the survivor during %v of think time (< %v)",
+						think, RelayDrainIdle)
+				default:
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("reader never completed")
-			}
+
+				if _, err := f.sender.Write(part1); err != nil {
+					t.Fatalf("write part1: %v", err)
+				}
+				if _, err := io.ReadFull(f.receiver, got[:len(part1)]); err != nil {
+					t.Fatalf("read part1: %v", err)
+				}
+				if _, err := f.sender.Write(part2); err != nil {
+					t.Fatalf("write part2: %v", err)
+				}
+				if _, err := io.ReadFull(f.receiver, got[len(part1):]); err != nil {
+					t.Fatalf("read part2: %v", err)
+				}
+				synctest.Wait()
+
+				// Cross the first tick: the answer arrived within the window,
+				// so the drain must reset rather than stop.
+				time.Sleep(RelayDrainIdle - think)
+				synctest.Wait()
+				select {
+				case <-f.relayDone:
+					f.closeProxySides()
+					t.Fatal("drain abandoned the survivor on the first tick even though it answered within the window")
+				default:
+				}
+
+				if !bytes.Equal(got, want) {
+					t.Fatalf("got %q, want %q", got, want)
+				}
+
+				silenceStart := time.Now()
+				select {
+				case <-f.relayDone:
+				case <-time.After(2 * RelayDrainIdle):
+					t.Fatal("drain kept resetting after survivor went silent")
+				}
+				if wait := time.Since(silenceStart); wait != RelayDrainIdle {
+					t.Fatalf("drain stalled after %v of silence, want %v", wait, RelayDrainIdle)
+				}
+				f.closeProxySides()
+				synctest.Wait()
+			})
 		})
 	}
 }
 
-// TestRelayDrainIdleLeavesRoomForARealUpstream is the one assertion the
-// short-window tests cannot make.
+// TestRelayDrainIdleLeavesRoomForARealUpstream pins the floor on the
+// production constant itself.
 //
-// Everything above runs the drain at testDrainIdle, which proves the
-// mechanism but says nothing about whether the production window is long
-// enough to be worth having. It is not an arbitrary number: the window is
-// the maximum time a survivor may be SILENT before keploy decides it is
-// dead, and ordinary upstreams are silent for hundreds of milliseconds
-// before their first byte and between streamed chunks. A previous 500ms
-// window lost entire responses to an upstream that thought for 800ms.
+// The window is the maximum time a survivor may be SILENT before keploy
+// decides it is dead, and ordinary upstreams are silent for hundreds of
+// milliseconds before their first byte and between streamed chunks. A
+// previous 500ms window lost entire responses to an upstream that thought
+// for 800ms.
 func TestRelayDrainIdleLeavesRoomForARealUpstream(t *testing.T) {
 	if RelayDrainIdle < 5*time.Second {
 		t.Fatalf("RelayDrainIdle is %v. This is how long a survivor may go quiet before its "+
@@ -375,12 +468,12 @@ func TestRelayRawPassthrough_ReturnsWhenOneDirectionBreaks(t *testing.T) {
 }
 
 // TestRelayRawPassthrough_ForwardsFINOnCleanEOF: a clean end of stream must
-// still propagate, or an EOF-delimited peer waits forever for a reply that
-// was already complete.
+// still propagate over real TCP, or an EOF-delimited peer waits forever for a
+// reply that was already complete.
 //
-// This one calls the exported entry point, so the wiring from
-// RelayRawPassthrough down to the copy loop is covered by a test too, not
-// only the parameterised form the timing tests use.
+// This calls the exported RelayRawPassthrough entry point directly on real TCP
+// sockets, complementing the in-memory synctest drain tests and the
+// parameterised liveness/write-error tests.
 func TestRelayRawPassthrough_ForwardsFINOnCleanEOF(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -546,76 +639,74 @@ func TestDeadWriteConnActuallyForwardsCloseWrite(t *testing.T) {
 	}
 }
 
-// TestRelayRawPassthrough_ProductionEntryPointDrainsTheSurvivor closes the
-// gap the parameterised window opens.
+// TestRelayRawPassthrough_ProductionEntryPointDrainsTheSurvivor drives the
+// exported RelayRawPassthrough entry point over multi-second chunk gaps
+// followed by a clean survivor FIN.
 //
-// Every other drain test calls relayRawPassthrough with testDrainIdle, so
-// the line that actually wires the production constant into the mechanism
-// is executed but never CHECKED. Severing it — passing 0, or any value too
-// small to cover a real transfer — abandons the survivor immediately,
-// which is this function's original data-loss bug, and the rest of the
-// suite stays green because none of it goes through this door.
-//
-// So drive the exported entry point, on the production constant, through
-// the survivor path. It does not cost 30s: a survivor is only ever waited
-// ON the window when its source goes silent while still open. Here the
-// source closes when it is done, io.Copy returns, and the relay returns
-// with it.
+// Each gap is RelayDrainIdle/2 (15s), which catches a call site that wires a
+// sub-second window instead of RelayDrainIdle, and the ending CloseWrite
+// verifies that a survivor finishing cleanly returns immediately without
+// sitting out a trailing idle window.
 func TestRelayRawPassthrough_ProductionEntryPointDrainsTheSurvivor(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer func() { _ = ln.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		f := newMemRelayFixture(false)
+		defer f.closeAll()
 
-	appSide, appPeer := tcpPair(t, ln)
-	destSide, destPeer := tcpPair(t, ln)
-	defer func() { _ = appSide.Close(); _ = appPeer.Close(); _ = destSide.Close(); _ = destPeer.Close() }()
+		synctest.Wait()
+		select {
+		case <-f.relayDone:
+			f.closeProxySides()
+			t.Fatal("RelayRawPassthrough returned immediately without draining the survivor")
+		default:
+		}
 
-	const chunks, chunkSize = 10, 16 * 1024
-	payload := bytes.Repeat([]byte("P"), chunks*chunkSize)
-	go func() {
+		const chunks, chunkSize = 10, 16 * 1024
+		gap := RelayDrainIdle / 2
+		payload := bytes.Repeat([]byte("P"), chunks*chunkSize)
+		got := make([]byte, len(payload))
+		start := time.Now()
 		for i := 0; i < chunks; i++ {
-			if _, err := destPeer.Write(payload[i*chunkSize : (i+1)*chunkSize]); err != nil {
-				return
+			time.Sleep(gap)
+			synctest.Wait()
+			select {
+			case <-f.relayDone:
+				f.closeProxySides()
+				t.Fatalf("the surviving direction delivered %d of %d bytes through the EXPORTED "+
+					"entry point after %v. The drain is only as good as the window wired into it here; "+
+					"a window shorter than RelayDrainIdle (%v) abandons the survivor and the caller's "+
+					"close truncates it.", i*chunkSize, len(payload), time.Since(start), RelayDrainIdle)
+			default:
 			}
-			time.Sleep(20 * time.Millisecond)
+			off := i * chunkSize
+			if _, err := f.sender.Write(payload[off : off+chunkSize]); err != nil {
+				t.Fatalf("chunk %d write: %v", i+1, err)
+			}
+			if _, err := io.ReadFull(f.receiver, got[off:off+chunkSize]); err != nil {
+				t.Fatalf("chunk %d read: %v", i+1, err)
+			}
+			synctest.Wait()
 		}
-		// Closing ends the survivor's copy, so the relay returns on its own
-		// rather than sitting out the production idle window.
-		if tc, ok := destPeer.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if !bytes.Equal(got, payload) {
+			t.Fatal("surviving direction delivered corrupted bytes")
 		}
-	}()
 
-	got := readAllInto(appPeer, len(payload))
-
-	broken := &splitHalfConn{Conn: appSide, readErr: io.ErrUnexpectedEOF}
-	relayDone := make(chan struct{})
-	go func() {
-		// The EXPORTED function, on RelayDrainIdle. That is the whole point.
-		RelayRawPassthrough(NewSafeConn(broken, zap.NewNop()), NewSafeConn(destSide, zap.NewNop()))
-		close(relayDone)
-	}()
-	select {
-	case <-relayDone:
-	case <-time.After(60 * time.Second):
-		t.Fatal("RelayRawPassthrough never returned")
-	}
-	_ = appSide.Close()
-	_ = destSide.Close()
-
-	select {
-	case n := <-got:
-		if n < len(payload) {
-			t.Fatalf("the surviving direction delivered %d of %d bytes through the EXPORTED "+
-				"entry point. The drain is only as good as the window wired into it here; a "+
-				"window too small to cover a real transfer abandons the survivor and the "+
-				"caller's close truncates it.", n, len(payload))
+		// Closing ends the survivor's copy, so the relay must return
+		// immediately rather than sitting out the production idle window.
+		finAt := time.Now()
+		if err := f.sender.CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite: %v", err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("reader never completed")
-	}
+		select {
+		case <-f.relayDone:
+		case <-time.After(2 * RelayDrainIdle):
+			t.Fatal("RelayRawPassthrough never returned after survivor half-closed")
+		}
+		if waitAfterFIN := time.Since(finAt); waitAfterFIN != 0 {
+			t.Fatalf("RelayRawPassthrough waited %v after survivor FIN, want 0", waitAfterFIN)
+		}
+		f.closeProxySides()
+		synctest.Wait()
+	})
 }
 
 // TestRelayRawPassthrough_ReplySurvivesTheClientFIN is the shape an
@@ -701,55 +792,60 @@ func TestRelayRawPassthrough_ReplySurvivesTheClientFIN(t *testing.T) {
 // cleanly, the other resets.
 //
 // Both results are already in hand there, so there is nothing left to
-// drain and no reason to wait. Dropping that check costs a full idle
-// window of dead time per connection — 30s in production — and no other
-// test notices, because they all run on a short window where the
-// difference is invisible.
+// drain and no reason to wait. Running inside testing/synctest ensures the
+// first clean outcome is consumed before the peer resets and asserts exact
+// zero fake elapsed time on return, catching both a missing early return
+// and any fixed grace/sleep on that branch without wall-clock flakiness.
 func TestRelayRawPassthrough_CleanThenResetReturnsPromptly(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer func() { _ = ln.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		appSide, appPeer := memconn.Pair()
+		destSide, destPeer := memconn.Pair()
+		defer func() {
+			_ = appSide.Close()
+			_ = appPeer.Close()
+			_ = destSide.Close()
+			_ = destPeer.Close()
+		}()
 
-	appSide, appPeer := tcpPair(t, ln)
-	destSide, destPeer := tcpPair(t, ln)
-	defer func() { _ = appSide.Close(); _ = appPeer.Close(); _ = destSide.Close() }()
+		returned := make(chan struct{})
+		go func() {
+			RelayRawPassthrough(NewSafeConn(appSide, zap.NewNop()), NewSafeConn(destSide, zap.NewNop()))
+			close(returned)
+		}()
 
-	// app->dest ends cleanly; dest->app resets. Both land quickly, so the
-	// loop reaches its second iteration with both results in hand.
-	go func() {
-		_, _ = appPeer.Write([]byte("hello"))
-		if tc, ok := appPeer.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if _, err := appPeer.Write([]byte("hello")); err != nil {
+			t.Fatalf("write: %v", err)
 		}
-	}()
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		if tc, ok := destPeer.(*net.TCPConn); ok {
-			_ = tc.SetLinger(0)
+		if err := appPeer.CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite: %v", err)
 		}
-		_ = destPeer.Close()
-	}()
+		got, err := io.ReadAll(destPeer)
+		if err != nil {
+			t.Fatalf("ReadAll: %v", err)
+		}
+		if string(got) != "hello" {
+			t.Fatalf("dest got %q, want %q", got, "hello")
+		}
 
-	start := time.Now()
-	returned := make(chan struct{})
-	go func() {
-		relayRawPassthrough(NewSafeConn(appSide, zap.NewNop()), NewSafeConn(destSide, zap.NewNop()), testDrainIdle)
-		close(returned)
-	}()
+		// Ensure the clean app->dest outcome has already been consumed by the
+		// relay loop (i == 0) before the destination resets, so the reset is
+		// guaranteed to land on i == 1.
+		synctest.Wait()
 
-	select {
-	case <-returned:
-	case <-time.After(10 * time.Second):
-		t.Fatal("relayRawPassthrough never returned")
-	}
-	// Comfortably under a window, but not so tight that a loaded runner
-	// trips it: the bug this catches costs a WHOLE window, not a slice.
-	if elapsed := time.Since(start); elapsed > testDrainIdle*3/4 {
-		t.Fatalf("returned after %v, which is most of one %v idle window. Both copy results "+
-			"were already available, so there was nothing to drain — waiting anyway burns a "+
-			"full window of dead time on every clean-then-reset connection, and in production "+
-			"that window is %v.", elapsed, testDrainIdle, RelayDrainIdle)
-	}
+		start := time.Now()
+		destPeer.Reset()
+
+		select {
+		case <-returned:
+		case <-time.After(2 * RelayDrainIdle):
+			t.Fatalf("RelayRawPassthrough did not return after clean EOF followed by reset")
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("RelayRawPassthrough waited %v after both copy results were in hand, want 0", elapsed)
+		}
+
+		_ = appSide.Close()
+		_ = destSide.Close()
+		synctest.Wait()
+	})
 }

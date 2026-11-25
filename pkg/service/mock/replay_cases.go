@@ -3,7 +3,6 @@ package mock
 import (
 	"context"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -47,9 +47,17 @@ type CaseReader interface {
 
 // replayDetail is everything the outcome needs to say what each test did this run.
 type replayDetail struct {
-	set      string // the set replayed
-	windows  []models.ScopeWindow
-	starts   []models.ScopeWindow
+	set     string // the set replayed
+	windows []models.ScopeWindow
+	starts  []models.ScopeWindow
+	// run is when keploy started the test command and when what it started
+	// was down: no application it started lived past its end, and none
+	// began before the first call keploy saw of it (lifeOf). A series whose
+	// rule's timer bound that life did not reach is not due (markEarly).
+	// Zero when not measured (a compose run, whose application keploy
+	// started apart from the command): every series is due as with no
+	// bound.
+	run      commandRun
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase
@@ -75,7 +83,10 @@ func (m *mockService) watchIncoming(ctx context.Context, on bool) *actualCapture
 	if !on {
 		return nil
 	}
-	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(ctx, models.IncomingOptions{Filters: m.config.Record.Filters})
+	incoming, err := m.instrumentation.(IncomingReader).GetIncoming(ctx, models.IncomingOptions{
+		Filters:            m.config.Record.Filters,
+		IgnoreStaticAssets: m.config.Record.IgnoreStaticAssets,
+	})
 	if err != nil {
 		m.logger.Warn("the app's responses will not be compared with the recording: could not read its incoming requests", zap.Error(err))
 		return nil
@@ -103,26 +114,11 @@ func (c *actualCapture) list() []*models.TestCase {
 	return append([]*models.TestCase(nil), c.cases...)
 }
 
-var idSegment = regexp.MustCompile(`^([0-9]+|[0-9a-fA-F]{12,}|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27})$`)
-
-// normalisePath keeps the path of a URL with ids blanked, so the same call made twice looks the same.
-func normalisePath(rawURL string) string {
-	path := rawURL
-	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
-		path = u.Path
-	}
-	parts := strings.Split(path, "/")
-	for i, p := range parts {
-		if idSegment.MatchString(p) {
-			parts[i] = "{id}"
-		}
-	}
-	return strings.Join(parts, "/")
-}
-
-// requestKey is what makes two requests the same call: the method and the path with ids blanked.
+// requestKey is what makes two requests the same call: the method and the
+// path with each segment that names a record blanked (learn.CaseKey, the
+// rule the learn step pairs a client test's requests by).
 func requestKey(method, rawURL string) string {
-	return strings.ToUpper(method) + " " + normalisePath(rawURL)
+	return learn.CaseKey(models.Method(method), rawURL)
 }
 
 func exactKey(method, rawURL string) string {
@@ -207,7 +203,10 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 	return out
 }
 
-// attributeMocks puts each served mock and each miss under the test that was running when it happened.
+// attributeMocks puts each served mock and each miss under the test that was
+// running when it happened. A mock the agent says every test window of is
+// put under each test it answered in (answeredInKnown); an older agent's,
+// by when it first answered, under one test.
 func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.MockEntry, consumed []models.MockState, misses []models.UnmatchedCall) []FlowMocks {
 	byFlow := make(map[string]*FlowMocks)
 	get := func(flow string) *FlowMocks {
@@ -221,7 +220,30 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 	for flow, entries := range expected {
 		get(flow).Expected = entries
 	}
+	bySeq := make(map[uint64]string)
+	for _, w := range windows {
+		bySeq[w.Seq] = w.Name // no answer names 0: the agent's ids start at 1
+	}
+	// consumed holds each recording once, with where it answered over every
+	// read of the run (consumedReads).
 	for _, c := range consumed {
+		if answeredInKnown(c) {
+			// Under every test whose window was open at one of its serves,
+			// once each: two of its windows can be one test's runs.
+			var under map[string]bool
+			for _, a := range c.AnsweredIn {
+				flow, ok := bySeq[a.Seq]
+				if !ok || under[flow] {
+					continue
+				}
+				if under == nil {
+					under = make(map[string]bool)
+				}
+				under[flow] = true
+				get(flow).Consumed = append(get(flow).Consumed, c)
+			}
+			continue
+		}
 		if c.Timestamp == 0 {
 			continue // an older agent does not say when it served a mock
 		}
@@ -234,6 +256,11 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 			continue
 		}
 		if flow, ok := flowAt(windows, miss.At, expected); ok {
+			// A test's misses go to the receipt's lines and the replay's
+			// hooks, never to the console: none keeps the whole call a
+			// charged miss carries for the console alone
+			// (models.UnmatchedCall.Whole).
+			miss.Whole = nil
 			get(flow).Missed = append(get(flow).Missed, miss)
 		}
 	}

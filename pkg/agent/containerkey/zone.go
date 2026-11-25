@@ -36,17 +36,21 @@ type zoneAPI interface {
 type Zone struct {
 	Name string `json:"name,omitempty"`
 	Data []byte `json:"data,omitempty"`
-	Err  string `json:"err,omitempty"`
+	// Source is the extract of the container's own zone source
+	// (tzdata.zi) that gives Data its offsets, where no release of IANA's
+	// zone data keploy knows does (learn.ZoneFile).
+	Source []byte `json:"source,omitempty"`
+	Err    string `json:"err,omitempty"`
 }
 
 // readZone is the Zone of container id, whose configuration Docker's
 // inspect gave as cfg (containerZone).
 func readZone(ctx context.Context, api zoneAPI, id string, cfg *container.Config) Zone {
-	z, data, err := containerZone(ctx, api, id, cfg)
+	z, file, err := containerZone(ctx, api, id, cfg)
 	if err != nil {
 		return Zone{Err: err.Error()}
 	}
-	return Zone{Name: z.Loc.String(), Data: data}
+	return Zone{Name: z.Loc.String(), Data: file.Data, Source: file.Source}
 }
 
 // containerZone is the zone the processes of container id, of
@@ -67,22 +71,22 @@ func readZone(ctx context.Context, api zoneAPI, id string, cfg *container.Config
 // JVM. An error too where keploy cannot read the zone (a TZ of a POSIX
 // rule, a TZ naming no zone file in the container, a link to nothing, a
 // container gone).
-func containerZone(ctx context.Context, api zoneAPI, id string, cfg *container.Config) (learn.ProcZone, []byte, error) {
+func containerZone(ctx context.Context, api zoneAPI, id string, cfg *container.Config) (learn.ProcZone, learn.ZoneFile, error) {
 	if cfg == nil {
-		return learn.ProcZone{}, nil, errors.New("docker reported no configuration of the container")
+		return learn.ProcZone{}, learn.ZoneFile{}, errors.New("docker reported no configuration of the container")
 	}
 	tz, set := envValue(cfg.Env, "TZ")
 	if src, ok := javaZoneOption(cfg); ok {
-		return learn.ProcZone{}, nil, fmt.Errorf("%s holds -Duser.timezone=, which sets the zone of a JVM given it, over TZ and /etc/localtime; keploy reads a JVM's zone only from its process, and cannot tell from the container's configuration whether its process is a JVM given it", src)
+		return learn.ProcZone{}, learn.ZoneFile{}, fmt.Errorf("%s holds -Duser.timezone=, which sets the zone of a JVM given it, over TZ and /etc/localtime; keploy reads a JVM's zone only from its process, and cannot tell from the container's configuration whether its process is a JVM given it", src)
 	}
 	f := containerFiles{ctx: ctx, api: api, id: id}
-	z, data, err := learn.ReadZoneOf(f, tz, set)
+	z, file, err := learn.ReadZoneOf(f, tz, set)
 	if err != nil {
-		return learn.ProcZone{}, nil, err
+		return learn.ProcZone{}, learn.ZoneFile{}, err
 	}
 	if set && strings.TrimPrefix(tz, ":") != "" {
 		// A JVM reads a TZ that names a zone as the C library does.
-		return z, data, nil
+		return z, file, nil
 	}
 	if set {
 		// An empty TZ: the C library reads UTC, a JVM the zone of its
@@ -92,23 +96,23 @@ func containerZone(ctx context.Context, api zoneAPI, id string, cfg *container.C
 		fz, _, ferr := learn.ReadZoneOf(f, "", false)
 		if ferr != nil {
 			// A failed read is no zone, never UTC (a nil Loc prints UTC).
-			return learn.ProcZone{}, nil, fmt.Errorf("%s, whose read failed (%w)%s", empty, ferr, which)
+			return learn.ProcZone{}, learn.ZoneFile{}, fmt.Errorf("%s, whose read failed (%w)%s", empty, ferr, which)
 		}
 		if !sameZoneName(fz.Loc.String(), "UTC") && !utcRules(fz.Loc) {
-			return learn.ProcZone{}, nil, errors.New(empty + ", which is not UTC" + which)
+			return learn.ProcZone{}, learn.ZoneFile{}, errors.New(empty + ", which is not UTC" + which)
 		}
 	}
 	tzfile, ok, err := learn.TimezoneFileOf(f)
 	if err != nil {
-		return learn.ProcZone{}, nil, err
+		return learn.ProcZone{}, learn.ZoneFile{}, err
 	}
 	if !ok {
-		return z, data, nil
+		return z, file, nil
 	}
 	if !sameZoneName(tzfile, z.Loc.String()) {
-		return learn.ProcZone{}, nil, fmt.Errorf("the container's /etc/timezone names %q, which JDKs before JDK-8345213 read as a JVM's zone, and its /etc/localtime %q, which the C library reads; keploy cannot tell from the container's configuration which its process reads", tzfile, z.Loc.String())
+		return learn.ProcZone{}, learn.ZoneFile{}, fmt.Errorf("the container's /etc/timezone names %q, which JDKs before JDK-8345213 read as a JVM's zone, and its /etc/localtime %q, which the C library reads; keploy cannot tell from the container's configuration which its process reads", tzfile, z.Loc.String())
 	}
-	return z, data, nil
+	return z, file, nil
 }
 
 // utcNames are the names of UTC's zone files and of Go's UTC.
@@ -300,10 +304,14 @@ func (c containerFiles) Readable() error {
 // reads the container's files through its mounts, so a host's
 // /etc/localtime bind-mounted over an image's link to its zone
 // (-v /etc/localtime:/etc/localtime:ro lands on the file the link names)
-// reads as the mounted file's bytes there, which learn checks against the
-// rules the keploy CLI's own zone data gives the zone the path names
-// (learn's loadZone, and utcZone for an empty TZ or TZ=UTC): the CLI shares
-// no root with the container, so its zone data is never that file.
+// reads as the mounted file's bytes there, whose offsets learn reads
+// against the ones the keploy CLI's own zone data, every release of IANA's
+// zone data keploy knows, and the container's own zone source (its
+// tzdata.zi), give the zone the path names (learn's loadZone: another
+// zone's file is unknown, however it got there; and utcZone for an empty
+// TZ or TZ=UTC): the CLI shares no root with the container, so its zone
+// data is never that file. Docker's inspect lists a
+// mount's host path, which the agent's log would show: keploy reads none.
 func (c containerFiles) ZoneMount(p, zn string) (*models.ZoneMount, error) {
 	return nil, nil
 }

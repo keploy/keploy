@@ -163,6 +163,7 @@ func TestTierKeyKeepsEveryFieldButTheID(t *testing.T) {
 			StagedSet:       5,
 			Concurrent:      true,
 			RepeatRead:      &models.RepeatReadMark{Name: "r", At: 1},
+			LoadSeq:         9,
 		},
 	}
 	v := reflect.ValueOf(src.TestModeInfo)

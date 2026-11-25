@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -163,7 +164,7 @@ func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 	if dup {
 		return nil, fmt.Errorf("test worker instance %s is served already", agent.InstanceLabel(inst))
 	}
-	wm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger.With(zap.Uint32("workerInstance", inst)))
+	wm := p.shareWindows(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger.With(zap.Uint32("workerInstance", inst))))
 	// No set's end read asks a worker's manager (Proxy.FileAtSetEnd).
 	wm.notAtSetEnd.Store(true)
 	for _, st := range s.staged {
@@ -180,7 +181,14 @@ func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 	if s.misses == nil {
 		s.misses = make(map[uint32]*missWindow)
 	}
-	s.misses[inst] = &missWindow{}
+	w := &missWindow{}
+	if set := p.setStarts.Load(); set > 0 {
+		// Served in a running test set, under the proven switch: the
+		// worker's calls are that set's from its manager's staging here,
+		// before any read of its window (missWindow.keptAsEarlierSet).
+		w.noteSetStart(setStart{epoch: wm.StagingEpoch(), set: set})
+	}
+	s.misses[inst] = w
 	s.on = true
 	s.mu.Unlock()
 	return instanceExact{p: p, inst: inst}, nil
@@ -244,6 +252,15 @@ func (s instanceExact) OpenExactTestConcurrent(test string, owned, cands []*mode
 	return s.open(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, cands, given) })
 }
 
+func (s instanceExact) AnswerAsRecordedAtOpen(test string, names []string) error {
+	m, err := s.mgr()
+	if err != nil {
+		return err
+	}
+	m.AnswerAsRecordedAtOpen(test, names)
+	return nil
+}
+
 func (s instanceExact) GiveExactTest(test string, b models.VariableBinding) error {
 	m, err := s.mgr()
 	if err != nil {
@@ -279,6 +296,24 @@ func (s instanceExact) ServeExactWorker(names []string) error {
 	return nil
 }
 
+func (s instanceExact) StageExactBackground(rules string) error {
+	m, err := s.mgr()
+	if err != nil {
+		return err
+	}
+	m.StageExactBackground(rules)
+	return nil
+}
+
+func (s instanceExact) ServeExactBackground(rules string, pool, worker []string) error {
+	m, err := s.mgr()
+	if err != nil {
+		return err
+	}
+	m.ServeExactBackground(rules, pool, worker)
+	return nil
+}
+
 func (s instanceExact) RestartExactKey(key string, names []string) error {
 	m, err := s.mgr()
 	if err != nil {
@@ -286,6 +321,14 @@ func (s instanceExact) RestartExactKey(key string, names []string) error {
 	}
 	m.RestartExactKey(key, names)
 	return nil
+}
+
+func (s instanceExact) ExactTestInstalled(test string) (epoch, bounds uint64, ok bool) {
+	m, err := s.mgr()
+	if err != nil {
+		return 0, 0, false
+	}
+	return m.ExactTestInstalled(test)
 }
 
 func (s instanceExact) ExactTestOutcome() (string, []string, []string, bool) {
@@ -305,6 +348,7 @@ func (s instanceExact) ExactTestSkippedReads() (string, []string) {
 }
 
 var _ agent.ExactSkippedReadsReader = instanceExact{}
+var _ agent.ExactTestAnswerer = instanceExact{}
 
 var (
 	_ agent.ExactServer           = instanceExact{}
@@ -313,7 +357,10 @@ var (
 	_ agent.ExactConcurrentServer = instanceExact{}
 	_ agent.ExactAheadServer      = instanceExact{}
 	_ agent.ExactWorkerServer     = instanceExact{}
+	_ agent.ExactBackgroundServer = instanceExact{}
 	_ agent.ExactKeyRestarter     = instanceExact{}
+
+	_ agent.ExactTestInstallReader = instanceExact{}
 )
 
 // refuseUnserved is the error that ends a connection no test worker's
@@ -321,12 +368,16 @@ var (
 // which process made it, and where it went. The refusal is counted as a
 // call keploy cannot attribute (models.CaptureLossUnattributed), which
 // leaves each test open as it was made without a verdict: the call went
-// unanswered, and any of them may have made it, or waited on it.
-func (p *Proxy) refuseUnserved(dest *agent.NetworkAddress, dst string, why error) error {
-	what := fmt.Sprintf("the latest: a connection to %s, from process %d, in no test worker's keploy instance", dst, dest.KernelPid)
+// unanswered, and any of them may have made it, or waited on it. The loss
+// lists dst's host (a CONNECT target's name) with its tag in ctx's session,
+// the connection's, as its lines name it.
+func (p *Proxy) refuseUnserved(ctx context.Context, dest *agent.NetworkAddress, dst string, why error) error {
+	what := models.NewLossText(ctx).Say("the latest: a connection to ").Host(dst)
 	if dest.Instance != 0 {
-		what = fmt.Sprintf("the latest: a connection to %s, from process %d of test worker instance %s, which keploy does not serve (the worker ended, or keploy never began serving it)", dst, dest.KernelPid, agent.InstanceLabel(dest.Instance))
+		what.Sayf(", from process %d of test worker instance %s, which keploy does not serve (the worker ended, or keploy never began serving it)", dest.KernelPid, agent.InstanceLabel(dest.Instance))
+	} else {
+		what.Sayf(", from process %d, in no test worker's keploy instance", dest.KernelPid)
 	}
-	p.losses.Add(models.CaptureLossUnattributed, what)
+	p.losses.Add(models.CaptureLossUnattributed, what.String(), what.Hosts()...)
 	return fmt.Errorf("keploy refused a call of process %d (test worker instance %s) to %s: %w", dest.KernelPid, agent.InstanceLabel(dest.Instance), dst, why)
 }

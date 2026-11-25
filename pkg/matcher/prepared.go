@@ -2,9 +2,9 @@ package matcher
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"hash/fnv"
 	"math"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,7 +27,7 @@ func NewValidatedJSON(expected, actual interface{}) ValidatedJSON {
 	return ValidatedJSON{
 		expected:    expected,
 		actual:      actual,
-		isIdentical: reflect.TypeOf(expected) == reflect.TypeOf(actual),
+		isIdentical: areJSONTypesEqual(expected, actual),
 	}
 }
 
@@ -44,6 +44,11 @@ func NewValidatedJSON(expected, actual interface{}) ValidatedJSON {
 // members by name in any order, array elements in order, numbers by value).
 // So a document whose key differs from the live one's need not be compared.
 // Equal keys prove nothing: compare those.
+//
+// A path entry naming id keys (NoiseIDKey) names a member at any id, as the
+// matcher reads it (NoiseKeyCovers), whichever document holds it. The matcher
+// excuses less than that, a member the live document added not at all
+// (noiseIndex.matchAdded); leaving out more only makes more pairs compared.
 func JSONMatchKey(doc interface{}, noise map[string][]string) uint64 {
 	k := matchKeyer{h: fnv.New64a()}
 	for key := range noise {
@@ -55,6 +60,10 @@ func JSONMatchKey(doc interface{}, noise map[string][]string) uint64 {
 			k.global[lk] = struct{}{}
 			continue
 		}
+		if ek, idKeys := NoiseEntryKey(lk); idKeys {
+			k.idPaths = append(k.idPaths, ek)
+			continue
+		}
 		k.paths = append(k.paths, lk)
 	}
 	k.walk(doc, "")
@@ -64,7 +73,10 @@ func JSONMatchKey(doc interface{}, noise map[string][]string) uint64 {
 type matchKeyer struct {
 	global map[string]struct{}
 	paths  []string
-	h      interface {
+	// idPaths are the path entries naming id keys, as NoiseEntryKey spells
+	// them: each is tested against the path with its id keys collapsed.
+	idPaths []string
+	h       interface {
 		Write([]byte) (int, error)
 		Sum64() uint64
 	}
@@ -79,6 +91,14 @@ func (k *matchKeyer) named(member, p string) bool {
 	for _, e := range k.paths {
 		if strings.Contains(p, e) {
 			return true
+		}
+	}
+	if len(k.idPaths) > 0 {
+		c := CollapseIDKeys(p)
+		for _, e := range k.idPaths {
+			if strings.Contains(c, e) {
+				return true
+			}
 		}
 	}
 	return false
@@ -108,12 +128,26 @@ func (k *matchKeyer) walk(v interface{}, p string) {
 		} else {
 			k.tag('f', 0)
 		}
+	case json.Number:
+		if c, ok := canonicalJSONNumber(t); ok {
+			k.tag('d', len(c))
+			_, _ = k.h.Write([]byte(c))
+			return
+		}
+		s := t.String()
+		k.tag('d', len(s))
+		_, _ = k.h.Write([]byte(s))
 	case float64:
 		if t == 0 {
 			t = 0 // -0 == 0 to the matcher
 		}
 		if math.IsNaN(t) {
 			k.tag('N', 0)
+			return
+		}
+		if c, ok := canonicalJSONNumber(t); ok {
+			k.tag('d', len(c))
+			_, _ = k.h.Write([]byte(c))
 			return
 		}
 		f := strconv.FormatFloat(t, 'g', -1, 64)
@@ -161,13 +195,53 @@ type JSONFields struct {
 	// path, sorted by path hash. Whether the pattern excuses them depends on
 	// the other side (bothSides), so they are counted only against it.
 	covered []fieldHash
+	// together holds a document collected under noise naming id keys
+	// (NoiseIDKey), and fields and covered are then empty: such an entry
+	// excuses a node of the live document only where the recorded one has
+	// it (noiseIndex.matchAdded), so the two are read together.
+	together *jsonFieldsDoc
+}
+
+// jsonFieldsDoc is a document kept for CountJSONFieldDiffs, the index it was
+// collected under, and the memory it takes, as Bytes counts it.
+type jsonFieldsDoc struct {
+	doc   interface{}
+	ni    noiseIndex
+	bytes int
 }
 
 type fieldHash struct{ path, value uint64 }
 
-// Bytes is the memory f's fields take: 16 bytes each. A caller that keeps many
-// counts them against its budget.
-func (f JSONFields) Bytes() int { return (cap(f.fields) + cap(f.covered)) * 16 }
+// Bytes is the memory f's fields take: 16 bytes each, or what its document
+// takes when it keeps one. A caller that keeps many counts them against its
+// budget.
+func (f JSONFields) Bytes() int {
+	n := (cap(f.fields) + cap(f.covered)) * 16
+	if f.together != nil {
+		n += f.together.bytes
+	}
+	return n
+}
+
+// jsonDocBytes estimates what a parsed document takes: 16 bytes for each
+// value (an interface) and each object member or array slot, and every
+// string's and member name's bytes.
+func jsonDocBytes(v interface{}) int {
+	n := 16
+	switch t := v.(type) {
+	case string:
+		n += len(t)
+	case map[string]interface{}:
+		for k, e := range t {
+			n += 16 + len(k) + jsonDocBytes(e)
+		}
+	case []interface{}:
+		for _, e := range t {
+			n += 16 + jsonDocBytes(e)
+		}
+	}
+	return n
+}
 
 func fnv64a(parts ...string) uint64 {
 	h := uint64(14695981039346656037)
@@ -182,18 +256,41 @@ func fnv64a(parts ...string) uint64 {
 	return h
 }
 
+// canonicalFieldValue normalizes numeric field values so CollectJSONFields and
+// CountJSONFieldDiffs agree with diffMaps on mathematically equal number
+// spellings (e.g., 1 vs 1.0, float64(0.1) vs json.Number("0.1")).
+func canonicalFieldValue(typ, val string) string {
+	if typ == "number" {
+		if c, ok := normalizeDecimalNumber(val); ok {
+			return c
+		}
+	}
+	return val
+}
+
 // CollectJSONFields collects doc under known as JSONFieldDiffs collects each
-// side it compares.
+// side it compares. Under noise naming id keys (NoiseIDKey) it keeps doc
+// itself, which the caller must not change: what such an entry excuses in the
+// live document depends on the recorded one (noiseIndex.matchAdded).
 func CollectJSONFields(doc interface{}, known map[string][]string) JSONFields {
+	ni := buildNoiseIndex(known, nil)
+	if ni.idKeys {
+		return JSONFields{together: &jsonFieldsDoc{doc: doc, ni: ni, bytes: jsonDocBytes(doc)}}
+	}
 	pm := newPathMaps()
-	collectJSON(doc, "", buildNoiseIndex(known, nil), &pm)
+	collectJSON(doc, "", ni, &pm, nil)
+	return hashFields(pm)
+}
+
+// hashFields is pm's fields as JSONFields holds them.
+func hashFields(pm pathMaps) JSONFields {
 	out := JSONFields{fields: make([]fieldHash, 0, len(pm.types))}
 	for p, typ := range pm.types {
-		out.fields = append(out.fields, fieldHash{path: fnv64a(p), value: fnv64a(typ, pm.values[p])})
+		out.fields = append(out.fields, fieldHash{path: fnv64a(p), value: fnv64a(typ, canonicalFieldValue(typ, pm.values[p]))})
 	}
 	sortFieldHashes(out.fields)
 	for p, typ := range pm.coveredTypes {
-		out.covered = append(out.covered, fieldHash{path: fnv64a(p), value: fnv64a(typ, pm.coveredValues[p])})
+		out.covered = append(out.covered, fieldHash{path: fnv64a(p), value: fnv64a(typ, canonicalFieldValue(typ, pm.coveredValues[p]))})
 	}
 	sortFieldHashes(out.covered)
 	return out
@@ -206,6 +303,18 @@ func sortFieldHashes(f []fieldHash) {
 		}
 		return f[i].value < f[j].value
 	})
+}
+
+// alone is f's fields collected without the other document: what a kept
+// document's are when only one side kept it, which happens only for two
+// documents collected under different noise.
+func (f JSONFields) alone() JSONFields {
+	if f.together == nil {
+		return f
+	}
+	pm := newPathMaps()
+	collectJSON(f.together.doc, "", f.together.ni, &pm, nil)
+	return hashFields(pm)
 }
 
 // compared is f's fields counted against other as bothSides leaves them:
@@ -238,8 +347,16 @@ func (f JSONFields) compared(other JSONFields) []fieldHash {
 
 // CountJSONFieldDiffs is len(JSONFieldDiffs(exp, act, known, ...)) for two
 // documents collected under the same known noise, without building the diffs:
-// the fields only one side has, plus those whose type or value differs.
+// the fields only one side has, plus those whose type or value differs. exp
+// is the recorded document and act the live one.
 func CountJSONFieldDiffs(exp, act JSONFields) int {
+	if exp.together != nil && act.together != nil {
+		// Under noise naming id keys: read together, as JSONFieldDiffs does.
+		e, a := collectBoth(exp.together.doc, act.together.doc, exp.together.ni)
+		added, removed, typeChanges, valueChanges := diffMaps(e, a)
+		return len(added) + len(removed) + len(typeChanges) + len(valueChanges)
+	}
+	exp, act = exp.alone(), act.alone()
 	e, a := exp.compared(act), act.compared(exp)
 	n, i, j := 0, 0, 0
 	for i < len(e) && j < len(a) {

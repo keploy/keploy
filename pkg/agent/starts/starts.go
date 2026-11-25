@@ -85,6 +85,12 @@ type Registry struct {
 	instances liveInstances
 }
 
+// ParentOf is the parent of process pid in this host's process table, read
+// as Default reads it: /proc/<pid>/stat on Linux, the kernel's process table
+// (sysctl kern.proc.pid) on macOS, which has no /proc, and nothing elsewhere.
+// It is false when pid names no process it can read.
+func ParentOf(pid uint32) (uint32, bool) { return sysProc{}.Parent(pid) }
+
 func New(p Proc, slack time.Duration) *Registry {
 	return &Registry{proc: p, slack: slack}
 }

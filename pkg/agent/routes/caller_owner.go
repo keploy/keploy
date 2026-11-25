@@ -50,8 +50,3 @@ func descendsFrom(pid, ancestor int, parent func(pid int) (int, bool)) bool {
 	}
 	return false
 }
-
-// sameEndpoint compares two endpoints with IPv4-mapped IPv6 read as IPv4.
-func sameEndpoint(a, b netip.AddrPort) bool {
-	return a.Port() == b.Port() && a.Addr().Unmap() == b.Addr().Unmap()
-}

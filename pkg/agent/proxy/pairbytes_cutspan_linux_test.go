@@ -120,10 +120,14 @@ func TestAnUnreadableCloseChargesTheOpenTestPastACutEnd(t *testing.T) {
 	// unread can be read.
 	_ = proxySide.Close()
 	_ = reader.Close()
-	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
-		t.Fatalf("app_bytes_lost charged to the open test = %d, want 1", l)
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+		t.Fatalf("app_bytes_untold charged to the open test = %d, want 1", l)
 	}
-	if got := ownersOf(p); !slices.Equal(got, []string{"test-1"}) {
-		t.Fatalf("the loss is owned by %q, want test-1's", got)
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("app_bytes_lost charged = %d, want 0: keploy cannot tell a byte was lost", l)
+	}
+	owned := p.TakeOwnedLosses()
+	if len(owned) != 1 || owned[0].Test != "test-1" || owned[0].Loss.Kind != models.CaptureLossAppBytesUntold {
+		t.Fatalf("owned %+v, want one untold close of test-1's", owned)
 	}
 }

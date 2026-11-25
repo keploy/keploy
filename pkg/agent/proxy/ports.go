@@ -1,10 +1,9 @@
 package proxy
 
 import (
-	"errors"
 	"fmt"
-	"syscall"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -13,15 +12,17 @@ import (
 // ports the proxy and its DNS server then listen on, at each move, before
 // StartProxy returns: the agent tells its hooks there
 // (agent.ProxyPortsSetter). Unset, a taken port fails the start, naming what
-// holds it.
+// holds it, as one the CLI starts again on ports it picks again
+// (utils.ErrPortTaken).
 //
-// The CLI that starts an agent checks that the ports it hands it are free
-// (utils.EnsureAvailablePorts), but cannot keep them free until the agent
-// binds them: two runs started together both found the default ports free,
-// and the second agent failed to bind them. In Docker it checks them in its
-// own network namespace, not the agent container's, where Docker's embedded
-// DNS resolver already holds a TCP and a UDP port of the ephemeral range. The
-// bind is the only check that cannot be overtaken.
+// The CLI that starts a Linux agent hands it the configured ports unchecked
+// (AgentClient.proxyPorts): a check there could not keep them free until the
+// agent binds them, nor see a Docker agent's network namespace, where
+// Docker's embedded DNS resolver already holds a TCP and a UDP port of the
+// ephemeral range. Two runs started together both found the default ports
+// free, and the second agent failed to bind them; or one found the other's
+// check holding one for a moment, and moved it with no line said. The bind is
+// the only check that cannot be overtaken.
 func (p *Proxy) SetPortMover(move func(proxyPort, dnsPort uint32) error) {
 	p.portMover = move
 }
@@ -43,12 +44,15 @@ func (p *Proxy) bindOrMove(server string, port *uint32, bind func(port uint32) e
 	if err == nil {
 		return nil
 	}
-	if !errors.Is(err, syscall.EADDRINUSE) {
+	if !neterr.IsAddrInUse(err) {
 		return err
 	}
 	taken := fmt.Sprintf("the %s's %s", server, utils.PortTaken(*port))
 	if p.portMover == nil {
-		return fmt.Errorf("%s: %w", taken, err)
+		// The CLI found it free and handed it over (a native agent off
+		// Linux), or it is the configured one: either way the CLI starts the
+		// agent again, at once, on ports it checks again (utils.ErrPortTaken).
+		return utils.PortTakenError(fmt.Errorf("%s: %w", taken, err))
 	}
 	moved, err := utils.BindFreePort(bind, p.agentPort, p.Port, p.DNSPort)
 	if err != nil {

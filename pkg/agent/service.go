@@ -83,9 +83,30 @@ type CaptureLossReporter interface {
 // it (Test): bytes that test wrote to a connection, which its end could not
 // wait for, and which were lost later, under another test. It is no capture
 // loss of that other test's, and is in no count CaptureLosses reports.
+//
+// One with no Test and Open is a close of a connection of the test worker
+// whose keploy instance is Worker (the kernel's stamp of the process that
+// made the connection; 0, the one test process of a run of one, while it
+// holds its claim: PairedBytesBeginner.PairedBytesOneProcess), which no
+// other worker's test used. Epoch is that worker's test epoch as the proxy
+// counted it (PairedBytesBeginner): the agent charges it to the test of that
+// worker it began at that epoch alone, while that test is open. One counted
+// in the worker's gap between tests, or under no open test, is the run's,
+// charged to no test: never to the worker's next test, which did not exist
+// when it was counted, and never to another worker's.
+//
+// Session is the agent's session the loss was made in (PairedBytesSessioner):
+// a cut-short end's, the session that end was in; an Open one's, the session
+// the proxy last moved bytes on its connection in (or accepted it in, with
+// none moved). The agent charges a loss of an earlier session than the one
+// open as it takes it to no run or test: it logs it, once, and drops it.
 type OwnedLoss struct {
-	Test string
-	Loss models.CaptureLoss
+	Test    string
+	Worker  uint32
+	Epoch   uint64
+	Open    bool
+	Session uint64
+	Loss    models.CaptureLoss
 }
 
 // OwnedLossTaker is the optional extension implemented by a proxy that tells
@@ -372,6 +393,65 @@ type ShimReporter interface {
 	ShimClaimedBy(pid int)
 }
 
+// RunMemberReporter is the optional extension implemented by hooks that hold
+// the run's processes themselves: Windows's, whose job object every process
+// the run's command starts joins, with no breakaway. A claim is the run's when
+// its process descends from keploy's client. On Linux the client, as the
+// run's child subreaper, adopts a process whose parent exited, so its chain
+// stays whole; on Windows that process keeps its exited parent's number,
+// which names no process or a later one, and descends from no one. The agent
+// then asks these hooks: a process they hold is the run's, wherever its chain
+// was cut. With hooks that do not implement it, nothing is asked.
+type RunMemberReporter interface {
+	// HoldsInRun reports whether process pid, created at start (its
+	// creation time as the agent read it for the claim: on Windows, FILETIME
+	// ticks), is one of the run's processes now. It never waits. It is also
+	// asked about the child a claim names (models.InstanceReq.Child), which
+	// may have been created a moment ago, suspended, and run nothing yet: it
+	// answers from the run's membership itself, not from what the process
+	// has said or anything the hooks have been told of it so far.
+	HoldsInRun(pid int, start uint64) bool
+}
+
+// CallerSocketReporter is the optional extension implemented by hooks that
+// see, from inside each process, which process connected a socket and which
+// sockets a process hands to another: Windows's shim. Windows's TCP tables
+// name the process that created a socket, whichever process it was later
+// given to (a child that inherited it, one it was duplicated into), so the
+// process they name for a call to the agent is its sender only when these
+// hooks say so. With hooks that do not implement it, nothing is asked.
+type CallerSocketReporter interface {
+	// CallerSocketWhy is "" when process pid, which the kernel's tables name
+	// as the owner of the client socket at client connected to the agent at
+	// server, is the process that sends on it; otherwise why keploy cannot
+	// tell which process called. It may wait, bounded by the
+	// implementation (Windows's: a process of the run that started just
+	// now has a short grace to say what it holds, and the shim's report of
+	// the socket a short time to arrive), and never longer.
+	CallerSocketWhy(pid int, client, server netip.AddrPort) string
+}
+
+// AppSendCounter is the optional extension implemented by hooks that count,
+// from inside the application's process, what it hands to each connection it
+// made to the proxy: Windows's shim, where no table the agent may read as a
+// standard user says how much an application socket has written. The proxy
+// asks it for the bytes a test's end waits for (PairedBytesWaiter); with
+// hooks that do not implement it, a proxy that needs it cannot count them.
+type AppSendCounter interface {
+	// AppSent is what the application had handed to its connection from
+	// app to the proxy when it is read: done, every byte a send call
+	// completed with (in the kernel's hands, on its way to the proxy);
+	// started, every byte handed to a send call, never below what the
+	// proxy's side can have received; pending, the send calls whose
+	// outcome is not known yet (done counts none of them). It fails when
+	// the counts cannot be told: no count is kept for the connection, its
+	// process cannot be read, or another process may send on it. It may
+	// wait, bounded as CallerSocketWhy is: the proxy asks it as it closes a
+	// paired connection too, which holds that close, and no other, by as
+	// much.
+	AppSent(app netip.AddrPort) (done, started uint64, pending uint32, err error)
+}
+
 // ListenerCountTaker is the optional extension implemented by proxies that can
 // have their listener counted by the hooks. The agent hands it the hooks
 // (ListenerCounter) whenever they can count, switch or not, before
@@ -537,6 +617,63 @@ type PairedBytesWaiter interface {
 	// connection received more, saw its orphan change state, or was
 	// resolved), for a watchdog: it only ever grows.
 	PairedBytesProgress() uint64
+}
+
+// PairedBytesSettler is the optional extension of a PairedBytesWaiter that
+// is told when a settle that waited for the bytes on the paired connections
+// is done (PairedBytesSettled), for the test worker whose keploy instance
+// is worker (0: a run of one test process, every connection): by then the
+// settle has had its connections' handlers take, and in a replay answer,
+// the calls it waited for, and every byte the proxy moved on them since the
+// wait began is the ending test's, never the next one's.
+type PairedBytesSettler interface {
+	PairedBytesSettled(worker uint32)
+}
+
+// PairedBytesBeginner is the optional extension of a PairedBytesSettler
+// that keeps, for each test worker (its keploy instance), a test epoch: it
+// moves at each begin of one of that worker's tests the agent tells it
+// (PairedBytesBegun, which returns the epoch the test begins at) and at
+// each end's mark, once the end's settle is done (PairedBytesSettled). A
+// close of that worker's connection is stamped with the epoch as it is
+// counted (OwnedLoss.Epoch): the begun test's while it is open and its end
+// is settling, a newer one in the gap after it, which no test began at.
+//
+// PairedBytesOneProcess is told, on, as a run of one test process claims the
+// session, before the claim reads the counts its first test counts from, and
+// off as the session is reset: while on, a close of a connection of no
+// worker's (keploy instance 0: that process's) is stamped with worker 0's
+// test epoch as a worker's is (OwnedLoss.Open), and is in no count, so one
+// counted in the gap between that process's tests is the run's, never its
+// next test's. Turned on, it moves worker 0's epoch past every test's: a
+// close counted between the claim and the first begin is the run's too.
+// While off (keploy test's test cases, which the agent begins no test of,
+// and a run of workers, whose instance 0 is no worker's) such a close is
+// in the counts (CaptureLossReporter).
+type PairedBytesBeginner interface {
+	PairedBytesBegun(worker uint32) uint64
+	PairedBytesOneProcess(on bool)
+}
+
+// PairedBytesSessioner is the optional extension of an OwnedLossTaker that is
+// told, as the agent resets a session, the new session's number, and stamps
+// each owned loss with the session it was made in (OwnedLoss.Session).
+type PairedBytesSessioner interface {
+	PairedBytesSession(session uint64)
+}
+
+// PairedBytesDrainer is the optional extension of an OwnedLossTaker that
+// waits, as a session's last read of its losses asks once the application
+// has stopped, until it has counted the close of every connection whose
+// application end has ended or whose close it has begun: a loss of such a
+// close is then in that read (counted, or owned), never in a later session's
+// or set's. A connection the application holds open is not waited for. A
+// close whose handler makes no progress for the proxy's bound is owned as the
+// session's, not judged, naming where the connection went and the session,
+// and the drain answers: the read then has it. It ends with ctx, with an
+// error: the read is then not made.
+type PairedBytesDrainer interface {
+	PairedBytesDrain(ctx context.Context) error
 }
 
 // PairedBytesChecker is the proxy's account of whether it can count the bytes
@@ -748,6 +885,54 @@ type RecordedWindowsSeeder interface {
 	SeedRecordedWindows(ws []models.TestWindow)
 }
 
+// ConsumedRewindsSeeder is the optional extension implemented by proxies whose
+// mock manager counts the passes a replay starts over its set
+// (integrations.WindowRewindCounter): SeedConsumedRewinds hands it, before the
+// call's window is set, how many times keploy test rewound the set's consumed
+// history for a retry cycle (models.MockFilterParams.ConsumedRewinds), so a
+// retry cycle that starts at the window the last one ended in starts a pass
+// too, and starts a new pass of the manager's once-claims
+// (integrations.MockMemDb.ClaimOnce), under exact serving as well. An agent
+// whose proxy lacks it counts a pass only where a window start went back, as
+// before, and its once-claims last the whole staging.
+type ConsumedRewindsSeeder interface {
+	SeedConsumedRewinds(n uint64)
+}
+
+// RunPlaceSeeder is the optional extension implemented by proxies that hold
+// an answer's write until the replay's run reaches its recorded place
+// (integrations.RunPlacer), for a replay that seeds no recorded windows
+// (keploy mock replay with the proven switch off): SeedRunPlaceWindows gives
+// the run's place the set's recorded test windows, and ReachRunTest moves it
+// at each test's begin (open) and end. An agent whose proxy lacks it writes
+// every answer at once, as before.
+type RunPlaceSeeder interface {
+	SeedRunPlaceWindows(ws []models.TestWindow)
+	ReachRunTest(test string, open bool)
+}
+
+// RunSetEnder is the optional extension implemented by proxies that hold an
+// answer's write until the replay's run reaches its recorded place
+// (integrations.RunPlacer): EndRunSet moves the run's place to the set's
+// end, at keploy test's read of a set's end (models.SetEndRead), before that
+// read settles the application's calls, so the read settles and takes the
+// calls the answers written then make. An agent whose proxy lacks it ends
+// those holds at the next set's staging or at the store's close.
+type RunSetEnder interface {
+	EndRunSet()
+}
+
+// BackgroundRecordingsSeeder is the optional extension implemented by proxies
+// whose mock manager can be handed the set's background recordings as it is
+// staged (models.MockFilterParams.BackgroundMocks), read-only, each with its
+// recorded span, for a parser to tell a miss is one more run of one of them
+// (integrations.BackgroundRecordingReader). An agent whose proxy lacks it
+// seeds nothing, and every miss stays its test's, as before. nil clears the
+// previous set's.
+type BackgroundRecordingsSeeder interface {
+	SeedBackgroundRecordings(recs []models.BackgroundRecording)
+}
+
 // StatefulCursorResetter is the optional extension implemented by proxies whose
 // mock manager keeps per-request cursors for stateful dependency replay (serving
 // successive recorded responses in record order). The agent calls it once per
@@ -808,6 +993,21 @@ type ClientTestsReader interface {
 // proxy that lacks it bounds no call so.
 type RecordedBeginTaker interface {
 	TakeRecordedBegin(at time.Time)
+}
+
+// ClientCasesTaker is the optional extension implemented by proxies whose
+// learn step reads a client test's requests as places of its calls: the
+// agent gives it, as a keploy mock test begins in the run's own window and
+// after the proxy opened the test, the requests the test sent the
+// application in its recording (models.ClientCase), which the requests of
+// the test that reach the application this run pair with
+// (learn.Tracker.SetCases, Incoming), and from which each request of the
+// test that pairs with one binds the test's variables bound at it
+// (models.ClientCase.Binds) before the application is given it. nil gives
+// none: the requests that reach it from then give no place and bind
+// nothing. A proxy that lacks it reads no client test's request.
+type ClientCasesTaker interface {
+	TakeClientCases(test string, cases []models.ClientCase)
 }
 
 // VariableBinder is the optional extension implemented by proxies that keep
@@ -929,6 +1129,16 @@ type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
 }
 
+// RecordingKeeper is implemented by a proxy whose learn step keeps the
+// staged set's recordings it reads from the agent's on-disk store decoded,
+// within the set's learn budget (learn.Tracker.KeepRecording): the agent
+// hands KeepRecording to the store (proxy.DiskMocks.SetRecordingKeeper), so
+// its calls, each of which reads every recording of the set made before it,
+// decode one once for the set, not once per call. Nothing it keeps is served.
+type RecordingKeeper interface {
+	KeepRecording(key string, size int64, decode func() (*models.Mock, error)) (*models.Mock, error)
+}
+
 // LearnSetWarmer is implemented by a proxy whose learn step reads the staged
 // set's recordings before its tests' calls do: WarmLearnSet, called once the
 // set is staged and its on-disk recordings are set (RecordedBeforeSetter),
@@ -998,6 +1208,16 @@ type ExactTestServedReader interface {
 	ExactTestServed() string
 }
 
+// ExactTestInstallReader is an optional ExactServer capability of a proxy
+// whose parsers mark each call's round (models.MissMark): ExactTestInstalled
+// is the staging and the round's boundary count the view in force was
+// installed at, when it is test's view (ok false otherwise). A test's end
+// tells by them whether a miss was marked before that test's view was
+// installed, however late its call was decided.
+type ExactTestInstallReader interface {
+	ExactTestInstalled(test string) (epoch, bounds uint64, ok bool)
+}
+
 // ExactTestOpener is an optional ExactServer capability of a proxy that keeps
 // the test variables a replay binds (VariableBinder): OpenExactTest opens test
 // as ServeExactTest does, and begins its variables with given bound in the
@@ -1018,6 +1238,20 @@ type ExactTestGiver interface {
 	GiveExactTest(test string, b models.VariableBinding) error
 }
 
+// ExactTestAnswerer is an optional ExactServer capability of a proxy that
+// keeps the test variables a replay binds: AnswerAsRecordedAtOpen names, for
+// the scope of test's variables to begin with as test opens next, the run's
+// variables test receives from earlier tests only in answers
+// (models.ScopeNeed.Answers), which this replay did not run before it. While
+// one is not bound in that scope, its answer places are answered with its
+// recorded value; a call that sends it at a request place misses as when
+// nothing names it. The next call replaces them, and an open of another test
+// drops them. A proxy that lacks it cannot answer them so: the agent sets the
+// test aside instead.
+type ExactTestAnswerer interface {
+	AnswerAsRecordedAtOpen(test string, names []string) error
+}
+
 // AppClockSetter is an optional proxy capability: SetAppClock hands the
 // proxy how to read the app's clock at a real instant, as the agent's hooks
 // move it (a time-freeze; false where they cannot tell), so that the
@@ -1027,12 +1261,30 @@ type AppClockSetter interface {
 	SetAppClock(f func(real time.Time) (time.Time, bool))
 }
 
+// BackgroundClockSetter is an optional proxy capability: with the proven
+// switch off, SetBackgroundClock hands the proxy how to read the app's clock
+// at a real instant (false where the hooks cannot tell; nil for none), for
+// the check that a call no recording answered is one more run of the set's
+// background work alone (learn.CallSpanOf, learn.ServeClock). The learn
+// step reads no clock with the switch off, and is handed none here.
+type BackgroundClockSetter interface {
+	SetBackgroundClock(f func(real time.Time) (time.Time, bool))
+}
+
 // AppClockRunSetter is an optional proxy capability, beside AppClockSetter:
 // SetAppClockRun makes the learn step read, through f, the real instant
 // from which the app's clock has run as one to a real instant, as the
 // agent's hooks moved it (learn.Tracker.SetAppClockRun); nil for none.
 type AppClockRunSetter interface {
 	SetAppClockRun(f func(real time.Time) (time.Time, bool))
+}
+
+// AppClockShownSetter is an optional proxy capability, beside
+// AppClockRunSetter: SetAppClockShown makes the background check read,
+// through f, what the app's clock showed between two real instants, as the
+// agent's hooks moved it (learn.Tracker.SetAppClockShown); nil for none.
+type AppClockShownSetter interface {
+	SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool))
 }
 
 // PoolNamesSetter is an optional ExactServer capability: SetPoolNames hands the
@@ -1047,6 +1299,58 @@ type AppClockRunSetter interface {
 // bounds the teardown of.
 type PoolNamesSetter interface {
 	SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error
+}
+
+// PoolTrailsSetter is implemented by a proxy whose learn step reads a
+// worker-scope call that trails an earlier test in that test's scope
+// (integrations.TrailedTests): SetPoolTrails installs, of keploy mock
+// replay's scope table under the proven switch, the test each worker-scope
+// recording trails (models.ScopeTableReq.Trails), with the table's tests
+// (PoolNamesSetter).
+type PoolTrailsSetter interface {
+	SetPoolTrails(trails map[string]string) error
+}
+
+// PoolSeriesSetter is implemented by a proxy that serves a series of
+// worker-scope recordings a declared rule placed: SetPoolSeries installs, of
+// keploy mock replay's scope table under the proven switch, each series'
+// recordings in placement order (models.ScopeTableReq.Series).
+type PoolSeriesSetter interface {
+	SetPoolSeries(series map[string][]string) error
+}
+
+// PoolOnceSetter is implemented by a proxy that serves a series of
+// worker-scope recordings once in a run: SetPoolOnce installs, of keploy
+// mock replay's scope table under the proven switch, the series whose
+// recordings each answer once, in a window or between tests, and never
+// again (models.ScopeTableReq.Once).
+type PoolOnceSetter interface {
+	SetPoolOnce(once []string) error
+}
+
+// PoolSourcesSetter is implemented by a proxy whose learn step decides a
+// field by the source a rule declared in keploy.yml gives it
+// (integrations.DeclaredSourcesOf): SetPoolSources installs, of keploy mock
+// replay's scope table under the proven switch, by recording name, the
+// sources of its request's fields (models.ScopeTableReq.Sources).
+type PoolSourcesSetter interface {
+	SetPoolSources(sources map[string][]models.DeclaredSource) error
+}
+
+// PoolTimeFormSetter is implemented by a proxy whose learn step can check a
+// changed time by its form alone (the time default, learn.Input.TimeForm):
+// SetPoolTimeForm installs, of keploy mock replay's scope table under the
+// proven switch, whether it does (models.ScopeTableReq.TimeForm).
+type PoolTimeFormSetter interface {
+	SetPoolTimeForm(on bool) error
+}
+
+// SeriesRepeatReader is implemented by a proxy that serves the series
+// SetPoolSeries installs: SeriesRepeats is, by series, how many calls in the
+// current staging's tests its last-placed recording answered past the
+// series' recorded count (models.MockStats.SeriesRepeats).
+type SeriesRepeatReader interface {
+	SeriesRepeats() (map[string]int64, error)
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
@@ -1096,6 +1400,16 @@ type InstanceServer interface {
 	StopServingInstance(inst uint32) error
 }
 
+// TestWindowNoter is an optional Proxy capability: the agent tells it each
+// test window it opens and closes (models.ScopeWindow.Seq), so its consumed
+// read says, of each mock, every test window it answered in
+// (models.MockState.AnsweredIn). A proxy without it reports none, and the
+// agent gives its windows no Seq.
+type TestWindowNoter interface {
+	OpenTestWindow(seq uint64)
+	CloseTestWindow(seq uint64)
+}
+
 // ScopeStager is an optional Proxy capability: it stages the pool of a test
 // of keploy mock replay that its harness began (open) or ended (!open) without
 // a worker pid, with the proven switch off. Such a test is served the mocks
@@ -1108,6 +1422,13 @@ type InstanceServer interface {
 // test's mocks and the reusable tier.
 type ScopeStager interface {
 	SetScopeMocks(ctx context.Context, filtered, unFiltered []*models.Mock, open bool) error
+}
+
+// ScopeReplacedStager is an optional ScopeStager extension that receives the
+// exact set of sources replaced by the open test's own derived mocks (computed
+// before any other test's carry-over mocks are appended to filtered).
+type ScopeReplacedStager interface {
+	SetScopeMocksWithReplaced(ctx context.Context, filtered, unFiltered []*models.Mock, open bool, replaced map[string]struct{}) error
 }
 
 type WindowedProxy interface {
@@ -1167,6 +1488,14 @@ type LearnedElsewhereReader interface {
 
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
+}
+
+// IncomingOptionsReader is the optional extension of an IncomingProxy that
+// says what options the recorder last started ingress with (zero before
+// Start), so a capture path other than the proxy's own can filter the same
+// way.
+type IncomingOptionsReader interface {
+	IncomingOptions() models.IncomingOptions
 }
 
 // AppListenPorter is the optional extension of an IncomingProxy that knows
@@ -1304,5 +1633,10 @@ type Session struct {
 	Mode models.Mode
 	TC   chan<- *models.TestCase
 	MC   chan<- *models.Mock
+	// LogKeys is the session's key for the path tags the lines about its
+	// connections name their calls by (models.LogKeySession): the one the
+	// context Record or Mock was given carries, drawn as the session began.
+	// nil: the process's key.
+	LogKeys *models.LogKeySession
 	models.OutgoingOptions
 }

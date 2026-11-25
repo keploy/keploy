@@ -1,12 +1,14 @@
 package record
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/internal/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -89,7 +91,7 @@ func TestARecordingNamesOnlyTheTestCasesATLSRejectionHappenedIn(t *testing.T) {
 // recording is incomplete when test-3 is named for a PID-map refusal.
 func TestARecordingsReasonNamesEveryLossNotOnlyTheLast(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}
+	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443", HostsListed: true}
 	both := models.CaptureLosses{pid(1)[0], tls}
 	instr := &countingInstr{answers: []models.CaptureLosses{nil, {tls}, {tls}, both}}
 	w, failed, logs := record3(t, instr)
@@ -755,5 +757,50 @@ func TestARecordJudgedLaterHandsOverAKernelSkipAsEvidence(t *testing.T) {
 	}
 	if txt := l.Text(); !strings.Contains(txt, "during its recording the kernel skipped 3 capture run(s)") || strings.Contains(txt, "not judged") {
 		t.Fatalf("Text() = %q, want the skip said, as no verdict", txt)
+	}
+}
+
+// A capture loss's What names a destination whole, for the user's own view
+// (a connection's host and port, a DNS question's name, a mock.real
+// connection's other name): the recording's lines, which reach keploy's log,
+// name each host the agent listed by its labels' shape beside the agent's
+// tag, an address whole. Their reason quoted the What whole, at ERROR and
+// WARN. The loss's text names it whole beside the same tag.
+func TestARecordingsLossLinesNameNoHost(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	host := strings.ToLower(logleak.Canary) + ".tenant.example"
+	agent := models.NewLogKeySession()
+	jw := agent.LossText().Say("to ").Host(host + ":443").Say(": the client does not trust keploy's CA")
+	uw := agent.LossText().Say("the latest: a DNS question for ").Host(host + ".").Say(" (A) that no DNS mock answers, asked while test workers are served")
+	judged := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 1, What: jw.String(), Hosts: jw.Hosts(), HostsListed: true}
+	unattributed := models.CaptureLoss{Kind: models.CaptureLossUnattributed, Count: 1, What: uw.String(), Hosts: uw.Hosts(), HostsListed: true}
+	core, logs := observer.New(zapcore.DebugLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, {judged}, {judged, unattributed}}})
+	var console bytes.Buffer
+	w.setConsole(&console)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	if !w.finish("test-set-0", false) {
+		t.Fatal("precondition: the recording that lost a call passed")
+	}
+	shaped := false
+	for _, e := range logs.All() {
+		if strings.Contains(fmt.Sprint(e.ContextMap()["reason"]), "to {}.{}.{}:443 "+agent.HostTag(host)+":") {
+			shaped = true
+		}
+	}
+	if !shaped {
+		t.Fatalf("no line names the loss's destination by its shape and the agent's tag: %+v", logs.All())
+	}
+	logleak.Check(t, logs, logleak.Canary, "the recording's capture-loss lines")
+	if want := host + ":443 " + models.HostTagLabel(agent.HostTag(host)); !strings.Contains(w.lost.Text(), want) {
+		t.Fatalf("the loss's text, for the user's own view, lost its destination beside its tag (%q): %q", want, w.lost.Text())
+	}
+	// The console names each whole beside the tag the lines name it by.
+	for _, want := range []string{host + ":443 " + models.HostTagLabel(agent.HostTag(host)) + ": the client", host + ". " + models.HostTagLabel(agent.HostTag(host)) + " (A)"} {
+		if !strings.Contains(console.String(), want) {
+			t.Errorf("the console does not name %q: %q", want, console.String())
+		}
 	}
 }

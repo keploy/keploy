@@ -846,17 +846,52 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // so that serve bounds no read of this call. s is checked first, so a read
 // plus an offset checkable in s alone is checked there as before; a value
 // outside both is refused with s's reason.
+//
+// CheckClockRead checks with the time default off (keploy.yml's
+// mock.times: strict, or a replay outside keploy mock), as
+// CheckClockReadForm does with timeForm false: it fails closed for a
+// caller that does not say the replay turned the default on.
 func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known bool) (bool, string) {
+	return CheckClockReadForm(path, o, live, s, known, false)
+}
+
+// CheckClockReadForm is CheckClockRead for a replay that says whether it
+// turned the time default on (timeForm: integrations.TimeFormOf of its
+// store). On, an o learned with a form (models.ClockOffset.Form) passes any
+// value of that form. Off (keploy.yml's mock.times: strict), the form is
+// set aside and o is checked by its range, cut, zone and provenance, as
+// before the default was; an o learned with a form alone, whose range the
+// learn step never learned (no cut: the default settled a refusal there),
+// is refused, saying to record it again under strict.
+func CheckClockReadForm(path string, o models.ClockOffset, live Leaf, s Span, known, timeForm bool) (bool, string) {
 	if o.Empty() {
 		return false, path + " was learned at more than one call as " + o.String() + ": no one read of the application's clock explains them all, so keploy refuses the value whatever it is. Record the test again; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
+	if o.Form != "" && !timeForm {
+		if o.Res <= 0 {
+			return false, path + " was learned as a time written as " + o.Forms() + ", checked by its form alone: learned under the time default; re-record with mock.times: strict to check its range"
+		}
+		o.Form, o.FormF = "", ""
+	}
 	learned := learnedAs(path, o)
+	if o.Form != "" {
+		learned = path + " was learned as a time written as " + o.Forms()
+	}
 	if !o.Word.IsZero() {
 		word, why := wordIn(o.Word, live)
 		if why != "" {
 			return false, learned + why
 		}
 		o.Word, live = models.ClockWord{}, word
+	}
+	if o.Form != "" {
+		// The time default: any instant of the form passes (TimeForm), of
+		// either form where the two record runs wrote two (FormF); a word
+		// keeps its leaf's type (wordIn).
+		if f := TimeForm(live); !o.WrittenAs(f) {
+			return false, learned + ", and the value this call carries is " + formWhy(f) + ": it changed"
+		}
+		return true, ""
 	}
 	ok, why := checkClockRead(o, live, s, known, learned)
 	if ok || s.TestFrom.IsZero() || !s.TestFrom.Before(s.From) {
@@ -915,6 +950,9 @@ func ReadsAsClockRead(o models.ClockOffset, live Leaf) bool {
 			return false
 		}
 		live = word
+	}
+	if o.Form != "" {
+		return o.WrittenAs(TimeForm(live))
 	}
 	if models.LayoutTimeOfDay(o.Layout) {
 		_, _, lay, ok := timeOfDayOf(live)
@@ -1120,7 +1158,7 @@ const ZoneUnreadLog = "keploy cannot read the zone of the process that made the 
 // made the call says to do: where keploy reads that zone, and, in keploy's
 // own docker and compose modes, where its CLI reads an app container's
 // (containerkey.ConnZone) and where it reads none.
-const zoneUnread = " Run keploy where it reads the application's zone: in the host PID namespace (--pid=host or hostPID), the application's process and its files readable, or in keploy's own docker and compose modes, whose CLI reads the zone of the app container that made the call through Docker. The agent's debug line \"" + ZoneUnreadLog + "\" (run keploy with --debug) says why it could not. In docker and compose modes keploy reads no zone of a container whose configuration sets a JVM's user.timezone (keploy reads a JVM's zone only from its process: drop -Duser.timezone= from the container's configuration and set the zone with TZ), of one whose TZ names no zone while its /etc/timezone names a zone other than its /etc/localtime, or whose TZ is empty and its files hold no UTC (set TZ to the zone), of one whose TZ or zone files keploy cannot resolve (a TZ of a POSIX rule or of a zone with no file in the container, an /etc/localtime linking to nothing), of one whose read failed or stalled, or of any on a host of cgroup v1 alone (and it may not on a host of both versions), where the agent cannot tell which container made the call."
+const zoneUnread = " Run keploy where it reads the application's zone: in the host PID namespace (--pid=host or hostPID), the application's process and its files readable, or in keploy's own docker and compose modes, whose CLI reads the zone of the app container that made the call through Docker. The agent's debug line \"" + ZoneUnreadLog + "\" (run keploy with --debug) says why it could not. In docker and compose modes keploy reads no zone of a container whose configuration sets a JVM's user.timezone (keploy reads a JVM's zone only from its process: drop -Duser.timezone= from the container's configuration and set the zone with TZ), of one whose TZ names no zone while its /etc/timezone names a zone other than its /etc/localtime, or whose TZ is empty and its files hold no UTC (set TZ to the zone), of one whose TZ or zone files keploy cannot resolve (a TZ of a POSIX rule or of a zone with no file in the container, an /etc/localtime linking to nothing), of one whose zone file is another zone's (another zone's file copied through its /etc/localtime link, or a host's /etc/localtime mounted over it: set TZ to the zone, or link /etc/localtime to it), of one whose read failed or stalled, or of any on a host of cgroup v1 alone (and it may not on a host of both versions), where the agent cannot tell which container made the call."
 
 // hourFarWhy is what a refusal of a wall clock of no zone (models.ZoneApp)
 // checked at an hour in name, the zone the learn step stored, adds where
@@ -1379,22 +1417,28 @@ func fallBackNamed(turn time.Time, back time.Duration, loc *time.Location) strin
 // appZoneHint is what a refusal of a value at a place learned with the
 // application's zone named as name (models.ClockOffset.AppZone), learned,
 // adds where this replay's own zone (s.Zone, as its tracker knows it) is
-// another, by its rules (its offset at the span's end and its next change,
-// never its name): the application may now write its clock there, and how
-// to replay it in the zone it was recorded in. "" where the two agree, or
-// either is not known.
+// another, by its rules (its offset at the span's end and at each change of
+// it in the year after: models.SameZoneAt; never its name): the
+// application may now write its clock there, and how to replay it in the
+// zone it was recorded in. Where the two are of one name, their zone files
+// are of two releases of IANA's data (learn's loadZone names such a file
+// by its zone), and it says so, with the first instant they part at. ""
+// where the two agree, or either is not known.
 func appZoneHint(name string, learned *time.Location, s Span) string {
-	if s.Zone == nil || learned == nil {
+	if s.Zone == nil || learned == nil || models.SameZoneAt(s.Zone, learned, s.To) {
 		return ""
 	}
-	a, b := s.To.In(s.Zone), s.To.In(learned)
-	_, oa := a.Zone()
-	_, ob := b.Zone()
-	_, ea := a.ZoneBounds()
-	_, eb := b.ZoneBounds()
-	if oa == ob && ea.Equal(eb) {
-		return ""
+	if s.Zone.String() == name {
+		whose := "this machine's"
+		if s.Own {
+			whose = "the application's"
+		}
+		at, _ := models.ZoneRulesDiffer(s.Zone, learned, s.To, s.To.AddDate(1, 0, 0))
+		_, off := at.In(s.Zone).Zone()
+		_, ownOff := at.In(learned).Zone()
+		return ". The zone file of " + name + " the value was checked in, " + whose + ", is of another release of IANA's zone data (tzdata) than keploy's: on " + at.UTC().Format(time.RFC3339) + " it reads UTC" + utcOffset(off) + ", keploy's UTC" + utcOffset(ownOff) + ", where the test was recorded in keploy's reading of the zone. Update the zone data that is out of date, the application's or keploy's"
 	}
+	a := s.To.In(s.Zone)
 	own := s.Zone.String()
 	if own == "" || own == "Local" || own[0] == '+' || own[0] == '-' {
 		own = "a zone at UTC" + a.Format("-07:00")

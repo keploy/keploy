@@ -10,9 +10,9 @@ import (
 
 // peerEndMarker marks, for a recorded connection, how each side ended its side
 // (Session.MarkPeerEndedBy), and whether the connection's first end records no
-// fault, and which such end it is (Session.EndFollowedStop,
-// Session.FirstEndNoFault), rather than being the application's giving up or
-// the upstream's fault:
+// fault (Session.EndFollowedStop), and the client's end, first or not, which
+// such end it is (Session.ClientEndNoFault), rather than being the
+// application's giving up or the upstream's fault:
 //   - any end read once the recording's stop began (Proxy.StopBegun): keploy
 //     record and keploy mock record say so before they stop the application
 //     (supervisor.EndAtStop);

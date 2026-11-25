@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -40,8 +41,9 @@ import (
 //
 // A replay may run only some tests (see SetScopeGate). The begin of a test it
 // gated out is answered {"status":"ok","action":"skip","reason":"..."}; the
-// harness then skips the test and sends no end for it. Only a harness that
-// says it can skip is told to:
+// harness then skips the test and sends no end for it, or an end whose
+// outcome is skipped, which is answered ok. Only a harness that says it can
+// skip is told to:
 //
 //	POST {url}/agent/scope/begin  {"name":"<test>","canSkip":true}
 //
@@ -75,7 +77,12 @@ type scopeKey struct {
 // single global scope, which narrows every connection (sequential runs, a
 // shared app, and the suite-level default).
 func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
-	return a.beginScopeAt(ctx, name, pid, at, nil)
+	if err := a.beginScopeAt(ctx, name, pid, at, nil); err != nil {
+		return err
+	}
+	// The run's place reaches the test's window once its pool is in.
+	a.reachRunTest(name, true)
+	return nil
 }
 
 // beginScopeAt is BeginScopeAt, calling onClock (when not nil) once the
@@ -129,16 +136,12 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 			}
 		}
 		if pid >= 0 && provenswitch.On() {
-			// The proven wire serves a test exactly its own mocks
-			// (exact_proven.go): one with no mapping, or none in it, owns
-			// none, so any data-plane call of its own is a miss. Its
-			// variables begin as it opens, in the same step, so no call its
-			// mocks answer binds before them (serveTestExactly). A worker
-			// pid (an in-process caller's: the wire refuses one) names the
-			// clock's holder only: exact serving decides what every
-			// connection reads, whenever it opened, and no per-worker view
-			// narrows it (proxy scopedFor), so its test is served exactly
-			// as one without a pid is.
+			// Under the proven switch, serve the test through exact serving
+			// (exact_proven.go): one with no mapping, or none in it, owns none,
+			// so any data-plane call it makes is a miss unless served by exact
+			// background. With KEPLOY_PROVEN unset, test-own serving always
+			// stays on the legacy stageScope path below while background passes
+			// alone use ServeExactBackground.
 			if err := a.serveTestExactly(ctx, name); err != nil {
 				return a.refuseBegin(ctx, name, pid, at, took, err)
 			}
@@ -278,6 +281,7 @@ func (a *Agent) openWindow(name string, pid int, at time.Time) {
 		a.workerOpen = make(map[scopeKey]time.Time)
 	}
 	a.workerOpen[k] = start
+	a.openSeqLocked(k)
 	a.recordScopeLocked(k, start)
 	if proc != "" {
 		if a.openProc == nil {
@@ -336,8 +340,42 @@ func (a *Agent) withdrawWindow(name string, pid int) {
 	delete(a.workerOpen, k)
 	delete(a.openProc, k)
 	delete(a.scopeMeta, k)
+	a.closeSeqLocked(k)
 	a.abandonScopeLocked(k)
 	a.scopeMu.Unlock()
+}
+
+// openSeqLocked gives the window k opens now an id and tells the proxy it is
+// open, when the proxy can say what answered in it
+// (coreAgent.TestWindowNoter): every mock it serves until the window closes
+// answered in it. A window k still held is closed first: its begin was
+// replaced. Caller holds scopeMu.
+func (a *Agent) openSeqLocked(k scopeKey) {
+	a.closeSeqLocked(k)
+	n, ok := a.Proxy.(coreAgent.TestWindowNoter)
+	if !ok {
+		return
+	}
+	a.lastSeq++
+	if a.openSeq == nil {
+		a.openSeq = make(map[scopeKey]uint64)
+	}
+	a.openSeq[k] = a.lastSeq
+	n.OpenTestWindow(a.lastSeq)
+}
+
+// closeSeqLocked tells the proxy k's window is closed and returns its id, 0
+// when it had none. Caller holds scopeMu.
+func (a *Agent) closeSeqLocked(k scopeKey) uint64 {
+	seq, ok := a.openSeq[k]
+	if !ok {
+		return 0
+	}
+	delete(a.openSeq, k)
+	if n, ok := a.Proxy.(coreAgent.TestWindowNoter); ok {
+		n.CloseTestWindow(seq)
+	}
+	return seq
 }
 
 // recordScopeLocked opens, in a recording under the proven switch, the test
@@ -387,6 +425,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		end := boundaryTime(at)
 		delete(a.workerOpen, k)
 		delete(a.openProc, k)
+		seq := a.closeSeqLocked(k)
 		// Its span is the window's.
 		a.openScopes[k].End(end)
 		delete(a.openScopes, k)
@@ -400,7 +439,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, SkippedReads: meta.skippedReads, Instance: meta.instance})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Seq: seq, Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, SkippedReads: meta.skippedReads, Instance: meta.instance})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -422,7 +461,7 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
-		a.noteEndOfGated(name, pid)
+		a.noteEndOfGated(name, pid, a.takeGatedOutcome(name, pid))
 		// The test worker whose pool the end serves again, read before
 		// the window that names it closes.
 		worker := a.scopeInstance(name)
@@ -438,6 +477,9 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		if closed || !provenswitch.On() {
 			err = a.restorePool(ctx, name, pid, worker)
 		}
+		// The test has ended: the run's place reaches its end, the pool
+		// restored or not.
+		a.reachRunTest(name, false)
 		if cerr := a.endTestClock(ctx, name, pid); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("keploy could not move the clock back after %s: %w", name, cerr))
 		}
@@ -458,8 +500,8 @@ func (a *Agent) restorePool(ctx context.Context, name string, pid int, worker ui
 	a.scopeMu.Lock()
 	_, scoped := a.scopeTable[name]
 	a.scopeMu.Unlock()
-	// The proven wire narrowed even a test without a mapping entry, with a
-	// worker pid or without one (beginScopeAt).
+	// Exact serving narrowed even a test without a mapping entry, with a
+	// worker pid or without one (beginScopeAt), under KEPLOY_PROVEN=1 only.
 	exact := pid >= 0 && provenswitch.On()
 	if !scoped && !exact {
 		return nil
@@ -566,12 +608,14 @@ func (a *Agent) DrainCapturedMocks(_ context.Context) ([]*models.Mock, error) {
 
 // MockStats returns a non-draining snapshot for /agent/mock/stats. Consumed and
 // missed totals are surfaced in the CLI's end-of-run summary (they drain their
-// capture windows), so this live endpoint reports the loaded count only.
+// capture windows), so this live endpoint reports the loaded count only, and,
+// from a proxy that serves declared rules' series, how many calls each
+// answered past its recorded count (withSeriesRepeats).
 func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 	a.scopeMu.Lock()
 	loaded := a.loadedMocks
 	a.scopeMu.Unlock()
-	return models.MockStats{Loaded: loaded}, nil
+	return a.withSeriesRepeats(models.MockStats{Loaded: loaded})
 }
 
 type scopeMeta struct {
@@ -696,6 +740,11 @@ func (a *Agent) NoteScopeOutcome(name string, pid int, outcome string) {
 	defer a.scopeMu.Unlock()
 	k := scopeKey{pid: uint32(pid), name: name}
 	if _, open := a.workerOpen[k]; !open {
+		// The end of a scope its harness was told to skip says what the
+		// harness did with it (takeGatedOutcome).
+		if _, gated := a.gatedScopes[k]; gated {
+			a.gatedScopes[k] = outcome
+		}
 		return
 	}
 	if a.scopeMeta == nil {
@@ -723,9 +772,9 @@ func (a *Agent) noteScopeNotRun(name string, pid int, at time.Time, outcome stri
 	a.scopeMu.Lock()
 	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: outcome})
 	if a.gatedScopes == nil {
-		a.gatedScopes = make(map[scopeKey]struct{})
+		a.gatedScopes = make(map[scopeKey]string)
 	}
-	a.gatedScopes[scopeKey{pid: uint32(pid), name: name}] = struct{}{}
+	a.gatedScopes[scopeKey{pid: uint32(pid), name: name}] = ""
 	a.scopeMu.Unlock()
 }
 
@@ -746,24 +795,48 @@ func (a *Agent) noteScopeFailed(name string, pid int, at time.Time, refused erro
 	a.scopeMu.Unlock()
 }
 
-// noteEndOfGated warns, once per session, when a harness ends a scope it was
-// told to skip and never began: the harness said it can skip, then ran the
-// test anyway. The test is recorded as gated; what it did is not counted.
-func (a *Agent) noteEndOfGated(name string, pid int) {
+// noteEndOfGated reads an end of a scope its harness was told to skip and
+// never began, with outcome, the verdict the end sends (normalized). An end
+// that says skipped confirms the skip: it reports true, at Debug, however
+// often it is sent, so a harness that ends every test it meets runs on. Any
+// other end of it is warned, once per session: the harness said it can skip,
+// then ran the test anyway. Either way the test is recorded as gated; what it
+// did is not counted.
+func (a *Agent) noteEndOfGated(name string, pid int, outcome string) (confirmed bool) {
 	k := scopeKey{pid: uint32(pid), name: name}
 	a.scopeMu.Lock()
 	_, gated := a.gatedScopes[k]
 	_, open := a.workerOpen[k]
-	warn := gated && !open && !a.gatedEndWarned
+	gated = gated && !open
+	confirmed = gated && outcome == models.ScopeOutcomeSkipped
+	warn := gated && !confirmed && !a.gatedEndWarned
 	if warn {
 		a.gatedEndWarned = true
 	}
 	a.scopeMu.Unlock()
+	if confirmed {
+		a.logger.Debug("the test runner's harness confirmed a skip keploy asked for", zap.String("test", name))
+	}
 	if warn {
 		a.logger.Warn("the test runner's harness ended a test it was told to skip; it is recorded as not run, and what it did is not counted",
 			zap.String("test", name),
 			zap.String("next_step", `make the harness skip a test whose /agent/scope/begin answer says "action":"skip"`))
 	}
+	return confirmed
+}
+
+// takeGatedOutcome is the outcome the scope end route noted
+// (NoteScopeOutcome) for this end of a scope its harness was told to skip,
+// "" for none. Each end notes its own, so it is cleared as it is read.
+func (a *Agent) takeGatedOutcome(name string, pid int) string {
+	k := scopeKey{pid: uint32(pid), name: name}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	outcome, gated := a.gatedScopes[k]
+	if gated {
+		a.gatedScopes[k] = ""
+	}
+	return outcome
 }
 
 // NoteUngatable warns, once per session, that the replay gates which tests

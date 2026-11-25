@@ -422,7 +422,7 @@ func TestAMissNamesAFieldKeployYmlPatternsRefuseOverLearnedNoise(t *testing.T) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	pool := []*models.Mock{m}
-	r := newHTTP().buildHTTPMismatchReport(request, input.body, &mockMemDb{mocks: pool}, pool, nil, requestBodyNoise(map[string][]string{"id": {`^r-\d$`}}).Body,
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, input.body, &mockMemDb{mocks: pool}, pool, nil, requestBodyNoise(map[string][]string{"id": {`^r-\d$`}}).Body,
 		&matchDiag{phase: models.MatchPhaseSchema, candidates: 1, schemaMatched: pool})
 	var paths []string
 	for _, d := range r.FieldDiffs {

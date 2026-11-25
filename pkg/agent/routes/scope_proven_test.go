@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,8 @@ type wireSvc struct {
 	ended     []models.ScopeReq
 	skips     map[string]string
 	needs     map[string][]models.ScopeNeed
+	setFlags  []string
+	cloudSet  bool
 	report    string
 	beginResp models.ScopeBeginResp
 	beginErr  *models.ScopeError
@@ -64,8 +67,8 @@ func (s *wireSvc) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Sc
 	return s.endResp, s.endErr
 }
 
-func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, report string) error {
-	s.skips, s.needs, s.report = skip, needs, report
+func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool, report string) error {
+	s.skips, s.needs, s.setFlags, s.cloudSet, s.report = skip, needs, setFlags, cloudSet, report
 	return nil
 }
 
@@ -180,15 +183,27 @@ func TestTheGateTakesTheSkipMapAndAcknowledgesIt(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil || ack.V != 1 || ack.Skips != 1 {
 		t.Fatalf("ack %s (%v)", rec.Body.String(), err)
 	}
-	// The needs ride the same push, and are acknowledged by count.
-	rec = call(t, a.HandleScopeGate, `{"run":null,"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"}]}}`)
+	// The needs ride the same push, each with the values its test only
+	// receives, and are acknowledged by count.
+	rec = call(t, a.HandleScopeGate, `{"run":null,"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"},{"test":"o::TestList","reason":"l","answers":["run-a"]}]}}`)
 	if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil || rec.Code != http.StatusOK || ack.Needs != 1 || ack.Skips != 0 ||
-		len(svc.needs["o::TestUse"]) != 1 || svc.needs["o::TestUse"][0] != (models.ScopeNeed{Test: "o::TestMake", Reason: "r"}) {
+		!reflect.DeepEqual(svc.needs["o::TestUse"], []models.ScopeNeed{{Test: "o::TestMake", Reason: "r"}, {Test: "o::TestList", Reason: "l", Answers: []string{"run-a"}}}) {
 		t.Fatalf("needs: %d %s, needs %v (%v)", rec.Code, rec.Body.String(), svc.needs, err)
+	}
+	// The set's flags ride the same push, for the commands a failed
+	// test's reason names.
+	rec = call(t, a.HandleScopeGate, `{"run":null,"set_flags":["--local","--name","checkout"]}`)
+	if rec.Code != http.StatusOK || !reflect.DeepEqual(svc.setFlags, []string{"--local", "--name", "checkout"}) || svc.cloudSet {
+		t.Fatalf("set flags: %d %s, flags %q, cloud %v", rec.Code, rec.Body.String(), svc.setFlags, svc.cloudSet)
+	}
+	// So does whether the set is Keploy Cloud's recordings.
+	rec = call(t, a.HandleScopeGate, `{"run":null,"set_flags":["--name","checkout","--branch","b"],"cloud_set":true}`)
+	if rec.Code != http.StatusOK || !reflect.DeepEqual(svc.setFlags, []string{"--name", "checkout", "--branch", "b"}) || !svc.cloudSet {
+		t.Fatalf("cloud set: %d %s, flags %q, cloud %v", rec.Code, rec.Body.String(), svc.setFlags, svc.cloudSet)
 	}
 	// A push without a map (an empty one is left out of the JSON) skips nothing.
 	rec = call(t, a.HandleScopeGate, `{"run":null}`)
-	if rec.Code != http.StatusOK || svc.skips != nil || svc.needs != nil {
+	if rec.Code != http.StatusOK || svc.skips != nil || svc.needs != nil || svc.setFlags != nil || svc.cloudSet {
 		t.Fatalf("empty gate: %d %s, skips %v", rec.Code, rec.Body.String(), svc.skips)
 	}
 	// The file the replay writes its report to reaches the agent with it.

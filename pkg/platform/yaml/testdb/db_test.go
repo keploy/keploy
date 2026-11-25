@@ -3,8 +3,10 @@ package testdb
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -476,5 +478,67 @@ func TestATestCaseFileSaysWhatItIs(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(raw), utils.FileHead(utils.TestCaseAbout)) {
 		t.Fatalf("the test case file does not start with keploy's line and what the file is:\n%s", raw)
+	}
+}
+
+// TestAStoredCaseWithNoNoiseMapIsWrittenThroughEveryWriter: the writers a
+// test case from a store goes through (InsertTestCase, UpdateTestCase, which
+// k8s-proxy lays a replay's cases out with, and TestCaseFile) take the case as
+// the store decoded it, and a case created from the dashboard has no noise map.
+// With the proven switch off each writes the time-shaped Date header as noise
+// and gives the caller's case the map it wrote, as it does for a case that came
+// with one; none panics.
+func TestAStoredCaseWithNoNoiseMapIsWrittenThroughEveryWriter(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	writers := map[string]func(db *TestYaml, tc *models.TestCase) error{
+		"insert": func(db *TestYaml, tc *models.TestCase) error {
+			return db.InsertTestCase(context.Background(), tc, "test-set-0", false)
+		},
+		"update": func(db *TestYaml, tc *models.TestCase) error {
+			return db.UpdateTestCase(context.Background(), tc, "test-set-0", false)
+		},
+		"file": func(db *TestYaml, tc *models.TestCase) error {
+			f, err := db.TestCaseFile(context.Background(), tc, "test-set-0")
+			if err != nil {
+				return err
+			}
+			// ReplaceFiles replaces files of a set that is on disk.
+			if err := os.MkdirAll(filepath.Join(db.TcsPath, "test-set-0", "tests"), 0o755); err != nil {
+				return err
+			}
+			return db.ReplaceFiles(context.Background(), []yaml.File{f})
+		},
+	}
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		for name, write := range writers {
+			t.Run(string(format)+", "+name, func(t *testing.T) {
+				db := NewWithFormat(zap.NewNop(), t.TempDir(), format)
+				tc := &models.TestCase{
+					Version:  models.GetVersion(),
+					Kind:     models.HTTP,
+					Name:     "get-health-1",
+					HTTPReq:  models.HTTPReq{Method: "GET", URL: "http://localhost:8081/health"},
+					HTTPResp: models.HTTPResp{StatusCode: 200, Header: map[string]string{"Date": time.Now().UTC().Format(http.TimeFormat)}, Body: "ok"},
+				}
+				var err error
+				if p := panicOf(func() { err = write(db, tc) }); p != nil {
+					t.Fatalf("writing a test case that has no noise map panicked: %v", p)
+				}
+				if err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				want := map[string][]string{"header.Date": {}}
+				if !reflect.DeepEqual(tc.Noise, want) {
+					t.Fatalf("the caller's test case has noise %v after the write, want %v", tc.Noise, want)
+				}
+				stored, err := db.GetTestCases(context.Background(), "test-set-0")
+				if err != nil || len(stored) != 1 {
+					t.Fatalf("stored test cases = %d (err %v), want 1", len(stored), err)
+				}
+				if !reflect.DeepEqual(stored[0].Noise, want) {
+					t.Fatalf("the stored test case has noise %v, want %v", stored[0].Noise, want)
+				}
+			})
+		}
 	}
 }

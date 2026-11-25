@@ -189,8 +189,8 @@ func (l answerLists) holdsWhole(t string) bool {
 // notFromWhy is the reason of a drifted value v whose recorded value the
 // search found at from (appearedIn), a recording's payload of the call's own
 // test, where F served from as the rule a copy follows its source sets
-// aside (follows.refute: as recorded, byte for byte, or by a view the value
-// did not move with): nothing F gave the application there holds the value
+// aside (follows.refute: as recorded, or by a view the value did not move
+// with): nothing F gave the application there holds the value
 // the call carries now. Where the value is an id (lateID) that serves of
 // older tests gave the application whole, and nothing else F gave it before
 // the call may hold (lateServes), it names those serves (lateOf), and late

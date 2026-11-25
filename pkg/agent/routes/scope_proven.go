@@ -24,7 +24,7 @@ type provenScope interface {
 	ClaimInstance(ctx context.Context, req models.InstanceReq, caller int) (models.InstanceResp, *models.ScopeError)
 	ProvenBegin(ctx context.Context, req models.ScopeReq) (models.ScopeBeginResp, *models.ScopeError)
 	ProvenEnd(ctx context.Context, req models.ScopeReq) (models.ScopeEndResp, *models.ScopeError)
-	SetScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, report string) error
+	SetScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool, report string) error
 }
 
 // refusalNoter records what the wire refused (agent.Agent.NoteRefusal).
@@ -108,8 +108,8 @@ func scopeBodyErr(what string, err error) *models.ScopeError {
 }
 
 // HandleInstance claims the run for the calling test process
-// (models.InstanceReq). The caller is read from the connection, never from
-// the body.
+// (models.InstanceReq), or for the running child the caller names that it
+// started. The caller is read from the connection, never from the body.
 func (a *Agent) HandleInstance(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.proven()
 	if !ok {
@@ -132,7 +132,7 @@ func (a *Agent) HandleInstance(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	caller, err := callerPID(r)
+	caller, err := a.caller(r)
 	if err != nil {
 		a.refuse(w, r, &models.ScopeError{
 			Status:  http.StatusInternalServerError,
@@ -153,12 +153,12 @@ func (a *Agent) HandleInstance(w http.ResponseWriter, r *http.Request) {
 
 // withCaller gives the service the begin's or end's caller, read from the
 // connection only if the service asks (coreAgent.WithCaller).
-func withCaller(r *http.Request) context.Context {
-	return coreAgent.WithCaller(r.Context(), func() (int, error) { return callerPID(r) })
+func (a *Agent) withCaller(r *http.Request) context.Context {
+	return coreAgent.WithCaller(r.Context(), func() (int, error) { return a.caller(r) })
 }
 
 func (a *Agent) provenBegin(w http.ResponseWriter, r *http.Request, p provenScope, req models.ScopeReq) {
-	resp, serr := p.ProvenBegin(withCaller(r), req)
+	resp, serr := p.ProvenBegin(a.withCaller(r), req)
 	if serr != nil {
 		a.refuse(w, r, serr)
 		return
@@ -168,7 +168,7 @@ func (a *Agent) provenBegin(w http.ResponseWriter, r *http.Request, p provenScop
 }
 
 func (a *Agent) provenEnd(w http.ResponseWriter, r *http.Request, p provenScope, req models.ScopeReq) {
-	resp, serr := p.ProvenEnd(withCaller(r), req)
+	resp, serr := p.ProvenEnd(a.withCaller(r), req)
 	if serr != nil {
 		// An end the wire refuses because of its harness (an old one, or a
 		// body that is not the protocol's) is the run's to name, as at a

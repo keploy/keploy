@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 	"unsafe"
 )
 
@@ -66,6 +67,22 @@ var ErrPayloadFileReplaced = errors.New("the mock file was rewritten after its m
 // before it is sent any mock.
 var ErrPayloadMutatorChangedMock = errors.New("a mock payload hook changed what decides the mock's pool")
 
+// MockPayloadRefusal is the error of a PayloadMutator that failed on a mock:
+// the replay's hooks refused to hand the mock to the agent (Keploy Enterprise
+// refuses a sealed value its key service did not open). Err is the hook's
+// reason. The replay fails the mock's test set, unrun, with it, and goes on
+// to the next set.
+type MockPayloadRefusal struct {
+	Mock string
+	Err  error
+}
+
+func (e *MockPayloadRefusal) Error() string {
+	return fmt.Sprintf("the mock payload hook failed on mock %q: %v", e.Mock, e.Err)
+}
+
+func (e *MockPayloadRefusal) Unwrap() error { return e.Err }
+
 // payloadOnDisk is where a mock's payload was left, and what the replay asks
 // of the payload, answered before it was.
 type payloadOnDisk struct {
@@ -87,6 +104,11 @@ type payloadOnDisk struct {
 	// IsMySQLStatementLifecycle's and mysqlIsSessionReusableCommand's.
 	mysqlStatementLifecycle bool
 	mysqlSessionReusable    bool
+	// authored is IsAuthored's: whether the mock's Spec.Authored was set.
+	authored bool
+	// replaces is Replaces': the recording a derived mock replaces in its
+	// own test.
+	replaces string
 	// fault is a copy of the mock's Spec.Fault (FaultOf), nil for none: what
 	// a replay's summary names when the mock was served (FaultServed).
 	fault *Fault
@@ -121,6 +143,8 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.fingerprint = requestFingerprint(m)
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
+	d.authored = m.Spec.Authored != nil
+	d.replaces = m.Spec.Authored.replaces()
 	if f := m.Spec.Fault; f != nil {
 		kept := *f
 		kept.Observed = strings.Clone(f.Observed)
@@ -173,6 +197,68 @@ func (d *payloadOnDisk) display(m *Mock, of func(*Mock) string, unknown string) 
 	c.Spec = read.Spec
 	return of(&c)
 }
+
+// OnDiskView is what a report reads of a mock whose payload a replay's read
+// left on disk (LeavePayloadOnDisk), kept without the mock: its name and kind,
+// when its request was recorded, its lifetime, and what the read kept to name
+// it (its summary, target and request fingerprint), the payload read back
+// for what it did not keep. A replay's lookup of a set's mocks holds a view
+// of each, not the mock: the mock (the Mock, its metadata) is the set's read,
+// about a kilobyte a mock, and goes once the mocks are on the agent, rather
+// than for the rest of the set's run.
+type OnDiskView struct {
+	name       string
+	kind       Kind
+	recordedAt time.Time
+	lifetime   Lifetime
+	d          *payloadOnDisk
+}
+
+// OnDiskView is m's view (above); nil when m's payload is in memory.
+func (m *Mock) OnDiskView() *OnDiskView {
+	if !m.PayloadOnDisk() {
+		return nil
+	}
+	return &OnDiskView{name: m.Name, kind: m.Kind, recordedAt: m.Spec.ReqTimestampMock, lifetime: m.TestModeInfo.Lifetime, d: m.onDisk}
+}
+
+// skeleton is the mock the view is of, as display reads it: its name and
+// kind, its payload on disk.
+func (v *OnDiskView) skeleton() *Mock {
+	return &Mock{Name: v.name, Kind: v.kind}
+}
+
+// Summary is MockSummaryFromSpec of the mock.
+func (v *OnDiskView) Summary() string {
+	if v.d.longSummary {
+		return v.d.display(v.skeleton(), MockSummaryFromSpec, string(v.kind))
+	}
+	return v.d.summary
+}
+
+// Target is MockTargetFromSpec of the mock.
+func (v *OnDiskView) Target() string {
+	if v.d.longTarget {
+		return v.d.display(v.skeleton(), MockTargetFromSpec, "")
+	}
+	return v.d.target
+}
+
+// Operation is MockOperation of the mock as recorded, its payload read back:
+// a read keeps none of it.
+func (v *OnDiskView) Operation() string {
+	return v.d.display(v.skeleton(), MockOperation, "")
+}
+
+// RequestFingerprint is the mock's Mock.RequestFingerprint.
+func (v *OnDiskView) RequestFingerprint() string { return v.d.fingerprint }
+
+// RecordedAt is when the mock's request was recorded (its
+// Spec.ReqTimestampMock).
+func (v *OnDiskView) RecordedAt() time.Time { return v.recordedAt }
+
+// Lifetime is the mock's TestModeInfo.Lifetime.
+func (v *OnDiskView) Lifetime() Lifetime { return v.lifetime }
 
 // IndexEntryFrom is a copy of m, a mock whose payload is on disk
 // (LeavePayloadOnDisk), whose payload src reads back from the same place in
@@ -272,16 +358,16 @@ func (m *Mock) WithPayload(ctx context.Context) (*Mock, error) {
 	return c, nil
 }
 
-// MutatePayload has mutate change m's payload, and fails when it changed
-// anything else that decides m's pool or its place in it
-// (ErrPayloadMutatorChangedMock). A nil mutate changes nothing.
+// MutatePayload has mutate change m's payload, and fails when mutate fails
+// (MockPayloadRefusal) or changed anything else that decides m's pool or its
+// place in it (ErrPayloadMutatorChangedMock). A nil mutate changes nothing.
 func MutatePayload(ctx context.Context, m *Mock, mutate PayloadMutator) error {
 	if mutate == nil {
 		return nil
 	}
 	before := poolKeyOf(m)
 	if err := mutate(ctx, m); err != nil {
-		return fmt.Errorf("the mock payload hook failed on mock %q: %w", before.name, err)
+		return &MockPayloadRefusal{Mock: before.name, Err: err}
 	}
 	if after := poolKeyOf(m); after != before {
 		return fmt.Errorf("%w: mock %q, before %+v, after %+v", ErrPayloadMutatorChangedMock, before.name, before, after)

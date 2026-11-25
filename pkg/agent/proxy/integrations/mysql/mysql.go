@@ -10,10 +10,12 @@ import (
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/recorder"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -24,6 +26,9 @@ func init() {
 		Initializer: New,
 		Priority:    100,
 	})
+	// A recording that loses a handshake or a COM_QUIT on its way out keeps
+	// the test cases its replay serves from another copy, or from none.
+	syncMock.RegisterServedByCopy(models.MySQL, replayer.ServedByCopy)
 }
 
 type MySQL struct {
@@ -38,6 +43,11 @@ func New(logger *zap.Logger) integrations.Integrations {
 		logger: logger,
 	}
 }
+
+// MockNoise returns MySQL's field-level request-body mock-noise adapter
+// (mysqlNoiseAdapter, exposed via replayer.NoiseAdapter), wiring the parser into
+// the shared mocknoise engine. Satisfies integrations.Integrations.
+func (m *MySQL) MockNoise() mocknoise.Adapter { return replayer.NoiseAdapter() }
 
 func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 	// The default proxy path routes MySQL by destination port (3306), so

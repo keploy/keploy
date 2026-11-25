@@ -383,6 +383,11 @@ func TestAPairedHTTPCallIsAnsweredAndReported(t *testing.T) {
 	if r.Answer != models.AnswerProvisional || !r.NotOwned || r.ClosestMock != "other-test-delete" || r.Drift {
 		t.Fatalf("the answer's report is %+v; want provisional, not owned, naming other-test-delete, exact", r)
 	}
+	// The call's path tag, of the path it sent, as the parser's lines about
+	// the request tag it: the console and the report print this one.
+	if r.PathTag != models.PathTag(context.Background(), "GET", "/delete") {
+		t.Fatalf("the answer's report carries path tag %q, want GET /delete's, %s", r.PathTag, models.PathTag(context.Background(), "GET", "/delete"))
+	}
 	if !db.claimed["other-test-delete"] || db.deletedFiltered != nil || db.updateUnFilteredMockOld != nil {
 		t.Fatalf("the recording was not claimed, or was consumed: claims %v", db.claimed)
 	}
@@ -650,7 +655,7 @@ func TestHTTPSaysWhoseRequestItServes(t *testing.T) {
 			}
 		},
 		"a pairing": func(ctx context.Context, _ *learn.Tracker) {
-			reportPairing(ctx, &req{method: "GET", header: http.Header{"Host": {"api.test"}}}, m, integrations.AnsweredCall{}, false)
+			reportPairing(ctx, &req{method: "GET", header: http.Header{"Host": {"api.test"}}}, m, integrations.AnsweredCall{}, false, integrations.CallRound{})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -51,8 +53,9 @@ type ClientMockStorage struct {
 	// (variables this keploy cannot follow, followable): each was logged as
 	// it was refused. A mapping that lists one owns nothing for it, and the
 	// call it recorded misses (mocksByName). The value says whether the mock
-	// is a test mock (data-plane): one is a recorded call its test is judged
-	// for (refusedOf).
+	// is a test mock (data-plane, and no answer the client never read:
+	// models.Mock.OutsideTestScopes): one is a recorded call its test is
+	// judged for (refusedOf).
 	refused map[string]bool
 	// statements is the set's statement catalog, read from diskMocks once
 	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
@@ -197,6 +200,7 @@ type Agent struct {
 	testBegins   map[string]time.Time           // replay: test name -> when it began in its recording (SetTestBegins)
 	testReal     map[string][]string            // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
 	testSeeds    map[string]string              // replay: test name -> the seed its recording kept for its browser (SetTestSeeds)
+	testCases    map[string][]models.ClientCase // replay: test name -> the requests its client test sent in its recording (SetTestCases)
 	testGiven    map[string][]models.GivenValue // replay, proven switch: test ID -> the values it gave when recorded; replaced with the scope table (SetScopeGiven)
 	testRepeats  map[string][]models.RepeatRead // replay, proven switch: test ID -> its repeated reads; replaced with the scope table (SetScopeRepeatReads)
 	testPool     []string                       // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
@@ -213,16 +217,45 @@ type Agent struct {
 	gateRun    map[string]struct{}
 	gateReason string
 	gateWarned bool // NoteUngatable said so this session
-	// replay: the scopes the gate told a harness to skip, and whether
-	// noteEndOfGated said so this session.
-	gatedScopes    map[scopeKey]struct{}
+	// replay: the scopes the gate told a harness to skip, each with the
+	// outcome the route noted for an end of it not yet read
+	// (takeGatedOutcome), and whether noteEndOfGated warned this session.
+	gatedScopes    map[scopeKey]string
 	gatedEndWarned bool
+	// openSeq is each open window's id (models.ScopeWindow.Seq) as the proxy
+	// was told it (coreAgent.TestWindowNoter); lastSeq the latest given.
+	// Guarded by scopeMu.
+	openSeq map[scopeKey]uint64
+	lastSeq uint64
 
 	// provenMu guards proven, the single-worker integration wire's state
 	// (scope_proven.go), served under the proven switch. Never held while
 	// taking scopeMu.
 	provenMu sync.Mutex
 	proven   provenWire
+	// runsOwn is every loss of a session's own the wire made the run's
+	// (provenWire.ownedRun: a cut-short end's, or a close counted in a
+	// worker's gap between tests), for the agent's life, under provenMu. No
+	// count of the proxy's holds one, so CaptureLosses adds them: the run's
+	// own verdict (mock replay's and mock record's count of what the agent
+	// could not capture while the test command ran) has every loss of the
+	// run, those charged to no test among them. A session's reset keeps it,
+	// as every count is kept.
+	runsOwn models.CaptureLosses
+	// session numbers the agent's sessions, each reset moving it on (0
+	// before the first), with the wire held: the log of a loss a session
+	// left unread names the session it was counted in (resetSession).
+	session uint64
+	// setRun is the keploy test run whose sessions sessionSets names
+	// (models.TestSetSession.Run), "" for none, and setRunFrom its first
+	// session: sessionSets has, for each of its latest sessions
+	// (models.MaxSessionSets), the test set it served. earlierSets are the
+	// losses of that run's earlier sessions that keploy test's next take
+	// returns, each naming its set (keepEarlierSetLocked). Under provenMu.
+	setRun      string
+	setRunFrom  uint64
+	sessionSets map[uint64]string
+	earlierSets []models.OwnedCaptureLoss
 	// instanceGen is, for each keploy instance id, the generation its next
 	// claim gets (coreAgent.InstanceValue), for the agent's life: a session's
 	// reset keeps it, so no claim of an id is stamped with the value of an
@@ -682,7 +715,12 @@ const (
 func (a *Agent) resetScopeState() {
 	a.scopeMu.Lock()
 	a.workerOpen, a.openProc = nil, nil
-	// A test a previous session left open is no test case of this one.
+	// A test a previous session left open is no test case of this one, and
+	// the proxy must not keep tagging serves with its window id.
+	for k := range a.openSeq {
+		a.closeSeqLocked(k)
+	}
+	a.openSeq = nil
 	for _, s := range a.openScopes {
 		s.Abandon()
 	}
@@ -699,11 +737,34 @@ func (a *Agent) resetScopeState() {
 	a.testBegins = nil
 	a.testReal = nil
 	a.testSeeds = nil
+	a.testCases = nil
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
 	a.testWorker, a.testBg = nil, nil
 	a.forgetReached()
 	a.scopeMu.Unlock()
+}
+
+// beginLogKeySession begins a session's key for the path tags the agent's
+// lines name its calls by (models.LogKeySession), as a recording or a
+// replay's session begins: the ingress takes each connection from now under
+// it (SetLogKeySession), the registry logs the processes the session's calls
+// come from under it (starts.Registry.SetLogKeySession), and the returned
+// ctx, which the proxy's Record or Mock is given, carries it to the proxy's
+// session, whose connections are tagged under it. A session another
+// program serves through this agent's proxy at the same time keeps the key
+// of its own.
+func (a *Agent) beginLogKeySession(ctx context.Context) context.Context {
+	keys := models.NewLogKeySession()
+	if s, ok := a.IncomingProxy.(interface {
+		SetLogKeySession(*models.LogKeySession)
+	}); ok {
+		s.SetLogKeySession(keys)
+	}
+	// The record log names each process a call came from once, its command
+	// line's words tagged under the session (starts.Registry).
+	starts.Default.SetLogKeySession(keys)
+	return models.WithLogKeySession(ctx, keys)
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
@@ -714,6 +775,10 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	}
 	m := make(chan *models.Mock, outgoingMockChanCap)
 
+	// A recording is a session of its own: its log names each path by a tag
+	// under a key drawn now (beginLogKeySession), which no other session's
+	// tag agrees with.
+	ctx = a.beginLogKeySession(ctx)
 	starts.Default.Reset()
 	ids.Default.Reset()
 	if err := a.resetSession(ctx); err != nil {
@@ -731,6 +796,12 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	// (SupportsDroppedRevoke=false, the default) never receives a RevokedTests
 	// control frame it can't divert.
 	syncMock.Get().SetRevokeCapable(opts.SupportsDroppedRevoke)
+	// And whether it finds a revoked test case sent with no name (the async
+	// capture names none) by its request time.
+	syncMock.Get().SetRevokeByRequest(opts.SupportsRevokeByRequest)
+	// And whether it reads capture ids: only then is a request captured
+	// without --sync given one, which its mappings and test case carry.
+	syncMock.Get().SetCaptureIDs(opts.SupportsCaptureIDs)
 
 	return m, nil
 }
@@ -765,6 +836,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	// standalone) never drains one replay's captured-on-miss mocks into a later,
 	// unrelated set. Harmless when --on-miss is not "record" (buffer stays empty).
 	httpparser.ResetCaptured()
+	// So is a replay's session: its log names each path by a tag under a
+	// key drawn now (beginLogKeySession). A miss of the session before that
+	// the client reads after this keeps the tag its line named
+	// (models.UnmatchedCall.PathTag).
+	ctx = a.beginLogKeySession(ctx)
 	starts.Default.Reset()
 	ids.Default.Reset()
 	if err := a.resetSession(ctx); err != nil {
@@ -975,13 +1051,13 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 // joins, is not empty when the agent starts: on a user-defined network, as
 // every compose stack's is, Docker's embedded DNS resolver listens in it on
 // 127.0.0.11, on a TCP and a UDP port the kernel drew from the namespace's
-// ephemeral range (32768-60999) before the agent ran. The CLI checks its
-// ports in its own namespace and cannot see them, and their holder, dockerd,
-// is in another PID namespace, so the agent cannot name it. A --proxy-port or
-// --dns-port in that range met one of them now and then, and the agent failed
-// its start. The app reaches the proxy and the DNS server through the hooks'
-// redirect, never through the port the CLI publishes for the proxy, so a
-// moved port serves it as the one the CLI chose would have.
+// ephemeral range (32768-60999) before the agent ran. The CLI cannot see
+// them from its own namespace, and their holder, dockerd, is in another PID
+// namespace, so the agent cannot name it. A --proxy-port or --dns-port in
+// that range met one of them now and then, and the agent failed its start.
+// The app reaches the proxy and the DNS server through the hooks' redirect,
+// and the CLI publishes neither on the host, so a moved port serves it as the
+// configured one would have.
 func (a *Agent) letProxyPortsMove() {
 	setter, ok := a.Hooks.(coreAgent.ProxyPortsSetter)
 	if !ok || coreAgent.EbpfProxyPortOverride != 0 {
@@ -1004,10 +1080,37 @@ func (a *Agent) letProxyPortsMove() {
 }
 
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	// keploy test's read of what was consumed after a set's last test, with
+	// the proven switch off, which reads the set's misses only after it, for
+	// the set's report: every answer held for a later place of the set is
+	// due (coreAgent.RunSetEnder). It files nothing: no parser holds a call
+	// for a set whose client does not say it reads each set's end
+	// (models.OutgoingOptions.ReadsSetEnds).
+	if models.SetEndRead(ctx) {
+		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
+			e.EndRunSet()
+		}
+	}
 	return a.Proxy.GetConsumedMocks(ctx)
 }
 
 func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	// keploy test's read of a set's end: every answer held for a later
+	// place of the set is due (coreAgent.RunSetEnder), before the settle
+	// below, so the read settles the calls those answers make and takes
+	// their misses: it is the set's last.
+	if models.SetEndRead(ctx) {
+		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
+			e.EndRunSet()
+		}
+	}
+	// keploy test's read of a test's end: every answer held for the gap
+	// after that test is due (reachRunTest), before the settle below, as at
+	// the set's end, and as under exact serving the pool's view moves the
+	// place before this read.
+	if test, ok := models.TestEndRead(ctx); ok {
+		a.reachRunTest(test, false)
+	}
 	// Under the proven switch a replay's read of its misses waits, as a
 	// test's end does, until every call the application made is in the
 	// proxy's hands and answered (settle_proven.go): the run's last read
@@ -1247,13 +1350,13 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	for _, m := range storage.filtered {
 		if m != nil {
 			m.DeriveLifetime()
-			mocknoise.MaterializeCorrelations(m)
+			mocknoise.MaterializeCorrelations(a.logger, m)
 		}
 	}
 	for _, m := range storage.unfiltered {
 		if m != nil {
 			m.DeriveLifetime()
-			mocknoise.MaterializeCorrelations(m)
+			mocknoise.MaterializeCorrelations(a.logger, m)
 		}
 	}
 
@@ -1326,6 +1429,20 @@ func (a *Agent) wireAppClock() {
 	r, reads := ActiveHooks.(AppClockReader)
 	_, own := ActiveHooks.(*AgentHook)
 	realClock := !reads && own && provenswitch.On()
+	// With the switch off the learn step reads no clock, and is handed none
+	// below, as before. The background check alone reads a call's span
+	// then (coreAgent.BackgroundClockSetter): on the real clock where the
+	// hooks say no clock is moved (BackgroundClockReader), or are this
+	// build's own, which move none; hooks that say neither hand it none.
+	if bs, ok := a.Proxy.(coreAgent.BackgroundClockSetter); ok && !provenswitch.On() {
+		var f func(time.Time) (time.Time, bool)
+		if br, tells := ActiveHooks.(BackgroundClockReader); tells {
+			f = br.BackgroundAppClock
+		} else if own {
+			f = realAppClock
+		}
+		bs.SetBackgroundClock(f)
+	}
 	if rs, ok := a.Proxy.(coreAgent.AppClockRunSetter); ok {
 		var run func(time.Time) (time.Time, bool)
 		if rr, tells := ActiveHooks.(AppClockRunReader); tells && reads {
@@ -1334,6 +1451,13 @@ func (a *Agent) wireAppClock() {
 			run = realAppClockRun
 		}
 		rs.SetAppClockRun(run)
+	}
+	if ss, ok := a.Proxy.(coreAgent.AppClockShownSetter); ok {
+		var shown func(from, to time.Time) ([]learn.Span, bool)
+		if sr, tells := ActiveHooks.(AppClockShownReader); tells && reads {
+			shown = sr.AppClockShown
+		}
+		ss.SetAppClockShown(shown)
 	}
 	if reads {
 		s.SetAppClock(r.AppClock)
@@ -1361,6 +1485,12 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	total := header.FilteredCount + header.UnfilteredCount
 	if header.FilteredCount < 0 || header.UnfilteredCount < 0 || total < 0 {
 		return fmt.Errorf("storemocks stream: invalid counts (filtered=%d unfiltered=%d)", header.FilteredCount, header.UnfilteredCount)
+	}
+	// Each mock is numbered by its place in the set (a uint32,
+	// models.TestModeInfo.LoadSeq), so a set too large to number is refused
+	// before any mock is read: no two of its mocks share a place.
+	if uint64(total) > math.MaxUint32 {
+		return fmt.Errorf("storemocks stream: a set of %d mocks: a mock's place in the set counts at most %d", total, uint64(math.MaxUint32))
 	}
 	// Pre-size from the header counts, but cap the capacity: the counts are
 	// client-provided, so an inflated header must not force a huge upfront
@@ -1427,8 +1557,11 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			return failStream(fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err))
 		}
 		mock := &m
+		// Its place in the set as sent, kept whichever tier holds it below
+		// (models.TestModeInfo.LoadSeq).
+		mock.TestModeInfo.LoadSeq = uint32(i + 1)
 		mock.DeriveLifetime()
-		mocknoise.MaterializeCorrelations(mock)
+		mocknoise.MaterializeCorrelations(a.logger, mock)
 		if proven {
 			tally.Add(mock)
 			storage.dests.add(mock)
@@ -1548,7 +1681,7 @@ func (s *ClientMockStorage) noteRefused(mock *models.Mock) {
 	if s.refused == nil {
 		s.refused = map[string]bool{}
 	}
-	s.refused[mock.Name] = !mock.IsProtocolPhase()
+	s.refused[mock.Name] = !mock.OutsideTestScopes()
 }
 
 // maxStreamPresize bounds the slice capacity pre-allocated from a /storemocks
@@ -2126,6 +2259,9 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	if err != nil {
 		return err
 	}
+	// Handed before the staging, which installs it with the trees it builds,
+	// so a read of the set as recorded (integrations.RecordedSetRanger)
+	// ranges one staging's trees and source, the last set's until then.
 	a.readKindFromDisk()
 
 	// Atomically update mocks AND the active test window when the proxy
@@ -2179,6 +2315,18 @@ func (a *Agent) opensWithoutVariables(given []models.VariableBinding) error {
 	return nil
 }
 
+// seedConsumedRewinds hands the proxy the retry cycles the history params is
+// built from was rewound for (models.MockFilterParams.ConsumedRewinds), before
+// anything params asks is staged or served: a higher count starts a new pass
+// over the set (MockManager.SeedConsumedRewinds). Every keploy test filter
+// does it, exact serving's (serveKeployTestExactly) and the windows'
+// (mocksForParams) alike; the same count handed again changes nothing.
+func (a *Agent) seedConsumedRewinds(params models.MockFilterParams) {
+	if seeder, ok := a.Proxy.(coreAgent.ConsumedRewindsSeeder); ok {
+		seeder.SeedConsumedRewinds(params.ConsumedRewinds)
+	}
+}
+
 // mocksForParams is the pool UpdateMockParams stages for params: the per-test
 // and the session tier, filtered as params ask. It also applies what the
 // staging call carries beside the pool (the startup cutoff, the recorded
@@ -2206,6 +2354,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 			seeder.SeedRecordedWindows(params.RecordedWindows)
 		}
 	}
+	// And at every call, the retry cycles the history the filter is built
+	// from was rewound for: the staging below counts a change of it with the
+	// window it sets, as a new pass over the set
+	// (integrations.WindowRewindCounter).
+	a.seedConsumedRewinds(params)
 	// A staging call (recordedSetShape populated: FirstRecordedTestStart and/or
 	// RecordedWindows) marks a new test-set. Reset the stateful-dependency
 	// cursors so each test-set replays its sequences (1,2,3…) from the start
@@ -2284,6 +2437,20 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	disk := storage.diskMocks
 	storage.mu.RUnlock()
 
+	// The staging call (recordedSetShape populated, as for the cursors'
+	// reset above), and keploy mock replay's own staging of a set
+	// (ExactStaging) whatever windows its table sent, hands the proxy the
+	// set's background recordings, read from every mock held for the set,
+	// served or not: a set that names none clears the previous set's.
+	if params.ExactStaging || !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
+		// The session calls the client declares, before the set's
+		// recordings are marked: an agent container reads no keploy.yaml
+		// (models.DeclaredSessionCalls). A call that carries none leaves
+		// the agent's as they are.
+		params.SessionCalls.Install()
+		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
+	}
+
 	// On WindowedProxy the agent filter runs non-strict (SetMocksWithWindow does
 	// the authoritative strict enforcement); env override still applies inside.
 	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
@@ -2350,7 +2517,8 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// MockManager.SetMocksWithWindow enforce strict semantics.
 
 	// Apply filtering based on parameters
-	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
+	mapped := params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping)
+	if mapped {
 		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, originalFiltered, params.MockMapping, params.AfterTime, params.BeforeTime)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
@@ -2406,6 +2574,34 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		zap.Int("unfilteredMocks", len(unfilteredMocks)),
 		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
 		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
+
+	// A derived mock of the test this call stages replaces, in that test,
+	// the recording it was derived from (models.Mock.Replaces): the test is
+	// served the derived answer and never its source, from either pool,
+	// while every other test, and the time between tests, is served the
+	// source as before. The test's own are, staged by its mapping, the
+	// mocks it names, and staged by its window, those placed in the window
+	// (pkg.RecordedInWindow), not the start-up band or the calls in flight
+	// staged beside them. A call that stages no test (no mapping and no
+	// window: a set's staging, the pool staged between tests) replaces
+	// nothing. The carry-over below is other tests' mocks, so it is added
+	// after.
+	windowed := !params.AfterTime.IsZero() && !params.AfterTime.Equal(models.BaseTime)
+	if mapped || windowed {
+		own := filteredMocks
+		if !mapped {
+			own = nil
+			w := pkg.ServeWindow{Start: params.AfterTime, End: params.BeforeTime}
+			for _, m := range filteredMocks {
+				if pkg.RecordedInWindow(m, w) {
+					own = append(own, m)
+				}
+			}
+		}
+		replaced := models.ReplacedBy(own)
+		filteredMocks = models.WithoutReplaced(filteredMocks, replaced)
+		unfilteredMocks = models.WithoutReplaced(unfilteredMocks, replaced)
+	}
 
 	// The carry-over lookahead bypasses the filter on purpose: on a windowed
 	// proxy the filter runs lax and would make these session mocks, reachable in

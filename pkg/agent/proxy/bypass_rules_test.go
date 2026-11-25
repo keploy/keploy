@@ -105,7 +105,7 @@ func TestABypassRuleAConnectionCannotDecidePassesItThroughWithOneWarning(t *test
 	core, logs := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
 	for i := 0; i < 3; i++ {
-		warnBypassRulesUndecided(logger, rules[1:3], "10.0.0.5:5432", "")
+		warnBypassRulesUndecided(context.Background(), logger, rules[1:3], "10.0.0.5:5432", "")
 	}
 	entries := logs.All()
 	if len(entries) != 2 {
@@ -122,17 +122,24 @@ func TestABypassRuleAConnectionCannotDecidePassesItThroughWithOneWarning(t *test
 }
 
 // A connection that shows its host (a TLS server name) and no path: the
-// warning names that host, not every host on the port.
+// warning names that host, not every host on the port. The host is the
+// app's (its SNI): named by its labels' shape beside its tag in the
+// connection's session, never whole; the rule's own pattern is the user's,
+// and kept.
 func TestABypassRuleWithAPathOnATLSServerWarnsOfThatServer(t *testing.T) {
 	resetBypassRulesWarned(t)
 	core, logs := observer.New(zap.WarnLevel)
-	warnBypassRulesUndecided(zap.New(core), []models.BypassRule{{Host: `^api\.example$`, Path: "/v1", Port: 443}}, "10.0.0.5:443", "api.example")
+	keys := models.NewLogKeySession()
+	warnBypassRulesUndecided(models.WithLogKeySession(context.Background(), keys), zap.New(core), []models.BypassRule{{Host: `^api\.example$`, Path: "/v1", Port: 443}}, "10.0.0.5:443", "api.example")
 	entries := logs.All()
 	if len(entries) != 1 {
 		t.Fatalf("warnings = %d, want 1: %v", len(entries), entries)
 	}
 	msg := entries[0].Message
-	for _, part := range []string{`{host: "^api\\.example$", path: "/v1", port: 443}`, "passes every such connection to api.example through whole", "{port: 443}"} {
+	if strings.Contains(msg, "api.example") {
+		t.Errorf("warning = %q, names the connection's host whole", msg)
+	}
+	for _, part := range []string{`{host: "^api\\.example$", path: "/v1", port: 443}`, "passes every such connection to {}.{} " + keys.HostTag("api.example") + " through whole", "{port: 443}"} {
 		if !strings.Contains(msg, part) {
 			t.Errorf("warning = %q, want it to say %q", msg, part)
 		}
@@ -1078,18 +1085,23 @@ func TestAPassedThroughConnectTunnelKeepsWhatTheServerSentPastThe200(t *testing.
 func TestAPathOnlyBypassRuleWarnsOfEveryHostOnItsPort(t *testing.T) {
 	resetBypassRulesWarned(t)
 	core, logs := observer.New(zap.WarnLevel)
-	warnBypassRulesUndecided(zap.New(core), []models.BypassRule{{Path: "/v1", Port: 8443}}, "10.0.0.5:8443", "a.internal")
+	keys := models.NewLogKeySession()
+	warnBypassRulesUndecided(models.WithLogKeySession(context.Background(), keys), zap.New(core), []models.BypassRule{{Path: "/v1", Port: 8443}}, "10.0.0.5:8443", "a.internal")
 	entries := logs.All()
 	if len(entries) != 1 {
 		t.Fatalf("warnings = %d, want 1: %v", len(entries), entries)
 	}
 	msg := entries[0].Message
-	for _, part := range []string{`{host: "", path: "/v1", port: 8443}`, "to port 8443 through whole", "whichever host", "a.internal", "{port: 8443}"} {
+	host := keys.HostLogName("a.internal")
+	for _, part := range []string{`{host: "", path: "/v1", port: 8443}`, "to port 8443 through whole", "whichever host", host, "{port: 8443}"} {
 		if !strings.Contains(msg, part) {
 			t.Errorf("warning = %q, want it to say %q", msg, part)
 		}
 	}
-	if strings.Contains(msg, "connection to a.internal through") {
+	if strings.Contains(msg, "a.internal") {
+		t.Errorf("warning = %q, names the connection's host whole", msg)
+	}
+	if strings.Contains(msg, "connection to "+host+" through") {
 		t.Errorf("warning = %q, names one host, but the rule passes every host on its port", msg)
 	}
 }

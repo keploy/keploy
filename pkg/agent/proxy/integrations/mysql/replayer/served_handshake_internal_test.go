@@ -80,11 +80,18 @@ func TestAHandshakesViewIsWhatTheApplicationSentAndFWrote(t *testing.T) {
 		_, k, _ := s.view()
 		return k
 	}
-	if again := keyOf(served([]mysql.PacketBundle{hr("4242")}, greeting(8), ok)); again != key {
-		t.Error("two handshakes that gave the same view have different keys")
+	// The key names the packets F wrote, never those the client sent: a
+	// client that names its own process in its connection attributes (a pid
+	// at every run) was given the same greeting and OK, one view.
+	for name, s := range map[string]*servedHandshake{
+		"the same packets":                  served([]mysql.PacketBundle{hr("4242")}, greeting(8), ok),
+		"another pid sent, the same answer": served([]mysql.PacketBundle{hr("4243")}, greeting(8), ok),
+	} {
+		if k := keyOf(s); k != key {
+			t.Errorf("%s: key %q; want the view's, %q: F wrote the same packets", name, k, key)
+		}
 	}
 	for name, s := range map[string]*servedHandshake{
-		"another pid sent":               served([]mysql.PacketBundle{hr("4243")}, greeting(8), ok),
 		"another greeting written":       served([]mysql.PacketBundle{hr("4242")}, greeting(9), ok),
 		"the greeting sent, not written": served([]mysql.PacketBundle{hr("4242"), greeting(8)}, ok),
 		"an auth switch written as well": served([]mysql.PacketBundle{hr("4242")}, greeting(8), switchReq, ok),

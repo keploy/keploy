@@ -593,7 +593,7 @@ func TestARepeatNamesTheTwinWithNoOtherRecordingsDiffs(t *testing.T) {
 	// Nor why a field of the other recording was refused.
 	other := &models.MockMismatchReport{ClosestMock: "mock-near", Differs: []string{"body.since"},
 		FieldReasons: []models.FieldReason{{Field: "body.since", Why: "body.since was learned as a read of the application's clock"}}}
-	markRepeat(other, twin.answered[0])
+	markRepeat(other, twin.answered[0], false, "")
 	if other.ClosestMock != "mock-7" || other.FieldReasons != nil || other.Differs != nil {
 		t.Fatalf("the repeat's miss is closest %q, differs %v, reasons %+v; want mock-7 with no reason of another recording's", other.ClosestMock, other.Differs, other.FieldReasons)
 	}

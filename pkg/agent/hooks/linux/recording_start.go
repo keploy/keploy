@@ -239,37 +239,11 @@ const maxRecordingStartSize = 128
 // Anything else is an error, which makes it a damaged record.
 func readRecordingStartFile(path string) (recordingStartRecord, error) {
 	var r recordingStartRecord
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	raw, err := readOwnShmFile(path, maxRecordingStartSize)
 	if err != nil {
 		return r, err
 	}
-	defer unix.Close(fd)
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return r, err
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		return r, fmt.Errorf("%s is not a regular file (mode %#o)", path, st.Mode)
-	}
-	if euid := os.Geteuid(); st.Uid != uint32(euid) {
-		return r, fmt.Errorf("%s is owned by uid %d, not %d", path, st.Uid, euid)
-	}
-	buf := make([]byte, maxRecordingStartSize+1)
-	n := 0
-	for n < len(buf) {
-		m, err := unix.Read(fd, buf[n:])
-		if err != nil {
-			return r, err
-		}
-		if m == 0 {
-			break
-		}
-		n += m
-	}
-	if n > maxRecordingStartSize {
-		return r, fmt.Errorf("%s is larger than a record", path)
-	}
-	b := string(buf[:n])
+	b := string(raw)
 	if _, err := fmt.Sscanf(b, "keploy-recording-start v1 pidns=%d init=%d start=%d\n", &r.pidNS, &r.init, &r.start); err != nil {
 		return r, err
 	}
@@ -277,6 +251,45 @@ func readRecordingStartFile(path string) (recordingStartRecord, error) {
 		return r, fmt.Errorf("%s is not a record: %q", path, b)
 	}
 	return r, nil
+}
+
+// readOwnShmFile reads a file an earlier agent of the pod kept in /dev/shm.
+// /dev/shm is shared with every container of the pod, so what is there is
+// only read if it is a regular file this agent's user owns, never through a
+// symbolic link, never by waiting on a FIFO's writer, and never beyond max
+// bytes. Anything else is an error.
+func readOwnShmFile(path string, max int) ([]byte, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, fmt.Errorf("%s is not a regular file (mode %#o)", path, st.Mode)
+	}
+	if euid := os.Geteuid(); st.Uid != uint32(euid) {
+		return nil, fmt.Errorf("%s is owned by uid %d, not %d", path, st.Uid, euid)
+	}
+	buf := make([]byte, max+1)
+	n := 0
+	for n < len(buf) {
+		m, err := unix.Read(fd, buf[n:])
+		if err != nil {
+			return nil, err
+		}
+		if m == 0 {
+			break
+		}
+		n += m
+	}
+	if n > max {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, max)
+	}
+	return buf[:n], nil
 }
 
 // nsInode is the inode of this process's namespace of the given kind.

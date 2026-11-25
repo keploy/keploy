@@ -21,8 +21,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -50,7 +50,8 @@ import (
 //   - a set whose first test says nowhere it dials: the same.
 //
 // No ceiling: what ends a wait that never sees its event is the watchdog. It
-// wakes once a second and counts the wake-ups in a row at which the
+// wakes soon after the wait begins, then once every readyWakeEvery
+// (readyWake), and counts the wake-ups in a row at which the
 // application made no progress: no listen, connect, process fork or exec by
 // its processes (in a container, its main process and what that starts; a
 // docker exec or a healthcheck is not the application), and, until it
@@ -63,20 +64,59 @@ import (
 // (JDWP's 5005) and then only computes for longer than the count; one its
 // launcher daemonizes before it listens (no longer seen as the
 // application). It counts its own wake-ups, not seconds: a starved keploy
-// wakes as seldom as it runs, so load alone cannot trip it. --delay is added
-// after the event.
+// wakes as seldom as it runs, so load alone cannot trip it. The count is
+// readyStallFor's worth of wake-ups at readyWakeEvery, each at least that long
+// after the last: the limit falls at about its time on an idle host (the
+// first wake-up comes readyWakeFirst in), later on a starved one. --delay is
+// added after the event.
+
+// readyWakeFirst is how soon after the wait begins the watchdog first wakes,
+// and readyWakeEvery how long it sleeps between two wake-ups after that. Each
+// wake-up reads the agent and probes again: an application that listens a few
+// milliseconds after keploy started it is found then, and one slow to start
+// within about readyWakeEvery of its listen. No busy loop: each read has the
+// agent look through /proc for the application's CPU time, and each probe
+// asks the application, ten of each a second at most.
+const (
+	readyWakeFirst = 10 * time.Millisecond
+	readyWakeEvery = 100 * time.Millisecond
+)
+
+// readyStallFor is how long the watchdog waits on an application that makes no
+// progress (design v14's lead decision: 600 wake-ups once a second, ten
+// minutes), and readyStatusFor how often a wait that goes on says what it
+// waits on: each a time, counted in the watchdog's wake-ups (readyStallLimit,
+// readyStatusEvery).
+const (
+	readyStallFor  = 10 * time.Minute
+	readyStatusFor = time.Minute
+)
+
+// wakeUpsIn is how many of the watchdog's wake-ups, readyWakeEvery apart, d
+// spans.
+func wakeUpsIn(d time.Duration) int { return int(d / readyWakeEvery) }
 
 // readyStallLimit is the watchdog's count of wake-ups in a row with no
-// progress (design v14's lead decision: 600).
-var readyStallLimit = 600
+// progress: readyStallFor's worth. A test sets its own.
+var readyStallLimit = wakeUpsIn(readyStallFor)
 
-// readyWake is how the watchdog wakes; a test replaces it.
+// watchdogSpan says n of the watchdog's wake-ups, and about the time they
+// span: n of readyWakeEvery, less when the first of them is the one
+// readyWakeFirst after the wait began, more when keploy is starved.
+func watchdogSpan(n int) string {
+	return fmt.Sprintf("%d wake-ups of keploy's watchdog (about %v, one each %v)", n, time.Duration(n)*readyWakeEvery, readyWakeEvery)
+}
+
+// readyWake is how the watchdog wakes: readyWakeFirst after the wait begins,
+// then readyWakeEvery after the wait took the last wake-up. A test replaces
+// it.
 var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
-	t := time.NewTicker(time.Second)
 	ch := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(ch)
+		t := time.NewTimer(readyWakeFirst)
+		defer t.Stop()
 		for {
 			select {
 			case <-t.C:
@@ -87,6 +127,7 @@ var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
 				case <-done:
 					return
 				}
+				t.Reset(readyWakeEvery)
 			case <-ctx.Done():
 				return
 			case <-done:
@@ -94,7 +135,7 @@ var readyWake = func(ctx context.Context) (<-chan struct{}, func()) {
 			}
 		}
 	}()
-	return ch, func() { t.Stop(); close(done) }
+	return ch, func() { close(done) }
 }
 
 // readinessReader is what the wait asks keploy's agent
@@ -123,7 +164,12 @@ type publishedPortReader interface {
 // provenReadiness is one set's wait for its application.
 type provenReadiness struct {
 	logger *zap.Logger
-	cfg    *config.Config
+	// keys is the session the run's lines are logged in (models.LogKeys of
+	// its ctx): the lines that name the replay target's host name it by its
+	// labels' shape beside its tag under it (HostLogName), as every other
+	// line of the run does.
+	keys *models.LogKeySession
+	cfg  *config.Config
 	// agent is asked for the application's listens and progress; nil when
 	// keploy did not start the application (none of its processes are
 	// keploy's to watch).
@@ -199,7 +245,8 @@ func (m progressMark) moved(was progressMark) bool {
 // readyStatusEvery is how many wake-ups of a wait that goes on apart keploy
 // says what it waits on, and what moved: an endless wait (a start that
 // loops, re-exec'ing before it ever listens) is said, not silent.
-var readyStatusEvery = 60
+// readyStatusFor's worth; a test sets its own.
+var readyStatusEvery = wakeUpsIn(readyStatusFor)
 
 // wait blocks until the application is ready (true), ctx ends (false, ""),
 // or the application stalls (false and why, for the set's not-judged
@@ -239,11 +286,16 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 	probes := make(chan probeResult, 1)
 	probing := false
 	lastProbe := ""
+	// wakes counts the watchdog's wake-ups, and probeFrom and readFrom
+	// their count when the probe and the read in flight began: 0 for the
+	// first look, begun at the wait's start, however many wake-ups came
+	// while it was in flight.
+	wakes, probeFrom, readFrom := 0, 0, 0
 	startProbe := func() {
 		if probing || (health == "" && !p.dial) {
 			return
 		}
-		probing = true
+		probing, probeFrom = true, wakes
 		go func() {
 			if health != "" {
 				ok, what := answers(pctx, health, healthAny)
@@ -264,7 +316,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		if p.agent == nil || reading {
 			return
 		}
-		reading, readWakes = true, 0
+		reading, readWakes, readFrom = true, 0, wakes
 		if p.tally != nil {
 			p.tally.started.Add(1)
 		}
@@ -280,10 +332,23 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 
 	var last, mark, said progressMark
 	var st models.AppReadiness
+	// firstSt is the first look's answer, the read begun at the wait's
+	// start, once in. atFirstLook says it found the application listening
+	// where the first test dials: a kept-alive one is ready at the first
+	// look (afterEvent's atOnce), whatever wake-ups and reads came before
+	// docker said which port that is (resolve).
+	var firstSt *models.AppReadiness
+	atFirstLook := func() bool {
+		if firstSt == nil {
+			return false
+		}
+		_, ok := p.listened(*firstSt)
+		return ok
+	}
 	read, first := false, true
 	restarts0 := p.since.restarts
 	lastErr := ""
-	stalls, wakes := 0, 0
+	stalls := 0
 	// pending: the last wake-up waits on its read's answer to be weighed.
 	pending := false
 	// weigh counts a wake-up as progress or not, by the latest read's
@@ -309,7 +374,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		}
 		why := lastErr
 		if reading {
-			why = fmt.Sprintf("keploy's agent has not answered its last read, in flight across %d wake-ups", readWakes)
+			why = fmt.Sprintf("keploy's agent has not answered its last read, in flight across %s", watchdogSpan(readWakes))
 		}
 		if !resolved {
 			why = strings.TrimPrefix(why+"; docker has not answered keploy's look at the ports the agent container publishes", "; ")
@@ -335,10 +400,10 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 			p.agent = nil
 			if health == "" {
 				p.dial = true
-				p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", zap.Error(r.err), zap.String("address", net.JoinHostPort(p.host, p.port)))
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", zap.Error(r.err), zap.String("address", p.keys.HostLogName(net.JoinHostPort(p.host, p.port))))
 				startProbe()
 			} else {
-				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", sanitizeHealthURL(health)))
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(health))))
 			}
 		case r.err != nil:
 			// No progress seen (a transient failure, the agent
@@ -347,9 +412,12 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 			lastErr = r.err.Error()
 		default:
 			st, lastErr, read = r.st, "", true
+			if readFrom == 0 {
+				firstSt = &r.st
+			}
 			if health == "" && resolved {
 				if port, ok := p.listened(st); ok {
-					ready, why := p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), first && wakes == 0)
+					ready, why := p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), atFirstLook())
 					return ready, why, true
 				}
 			}
@@ -389,7 +457,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		}
 		if health == "" && !p.dial && read {
 			if port, ok := p.listened(st); ok {
-				ready, why = p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), wakes == 0)
+				ready, why = p.afterEvent(ctx, fmt.Sprintf("the application listens on :%d", port), atFirstLook())
 				return ready, why, true
 			}
 		}
@@ -420,7 +488,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		case r := <-probes:
 			probing = false
 			if r.ok {
-				return p.afterEvent(ctx, r.what, wakes == 0)
+				return p.afterEvent(ctx, r.what, probeFrom == 0)
 			}
 			lastProbe = r.what // the next probe at the next wake-up
 		case r := <-reads:
@@ -514,17 +582,23 @@ func (p provenReadiness) progressOf(st models.AppReadiness, restarts0 uint64) pr
 
 // sayStillWaiting says, every readyStatusEvery wake-ups of a wait, what it
 // waits on and what moved since it last said: an endless wait is told.
+// It names the host the set's first test dials, and the health URL's, by
+// their labels' shape beside their tags in the run's session (HostLogName;
+// an IP address whole), in what it waits for and in its last probe's text (a
+// dial's error names the host): a host name is traffic. The not-judged reason
+// (stalled) names them whole, for the report and the console.
 func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st models.AppReadiness, was, now progressMark, stalls int, restarts uint64) {
-	waits := fmt.Sprintf("a listen on :%d, where the set's first test dials %s", p.listen, net.JoinHostPort(p.host, p.port))
+	waits := fmt.Sprintf("a listen on :%d, where the set's first test dials %s", p.listen, p.keys.HostLogName(net.JoinHostPort(p.host, p.port)))
 	switch {
 	case p.resolve != nil && p.listen == 0 && health == "" && !p.dial:
-		waits = fmt.Sprintf("a listen where the set's first test dials %s (docker has not said which container port that is)", net.JoinHostPort(p.host, p.port))
+		waits = fmt.Sprintf("a listen where the set's first test dials %s (docker has not said which container port that is)", p.keys.HostLogName(net.JoinHostPort(p.host, p.port)))
 	case health != "":
-		waits = sanitizeHealthURL(health) + "'s answer"
+		waits = targetLogNameIn(p.keys, sanitizeHealthURL(health)) + "'s answer"
 	case p.dial:
-		waits = net.JoinHostPort(p.host, p.port) + " taking a connect (keploy's agent cannot tell when the application listens)"
+		waits = p.keys.HostLogName(net.JoinHostPort(p.host, p.port)) + " taking a connect (keploy's agent cannot tell when the application listens)"
 	}
-	fields := []zap.Field{zap.String("waitingFor", waits), zap.Int("wakeUpsWithNoProgress", stalls), zap.Int("notJudgedAt", readyStallLimit)}
+	fields := []zap.Field{zap.String("waitingFor", waits), zap.Int("wakeUpsWithNoProgress", stalls), zap.Int("notJudgedAt", readyStallLimit),
+		zap.Duration("noProgressFor", time.Duration(stalls)*readyWakeEvery), zap.Duration("notJudgedAfter", time.Duration(readyStallLimit)*readyWakeEvery)}
 	if p.agent != nil {
 		fields = append(fields, zap.String("listening", p.listeningOn(st)),
 			zap.Uint64("newListens", now.p.Listens-min(now.p.Listens, was.p.Listens)),
@@ -538,7 +612,11 @@ func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st m
 		}
 	}
 	if lastProbe != "" {
-		fields = append(fields, zap.String("lastProbe", lastProbe))
+		hosts := []string{p.host}
+		if h, _, ok := healthURLAddress(health); ok {
+			hosts = append(hosts, h)
+		}
+		fields = append(fields, zap.String("lastProbe", p.keys.HostsInText(lastProbe, hosts...)))
 	}
 	if lastErr != "" {
 		fields = append(fields, zap.String("lastReadError", lastErr))
@@ -668,12 +746,12 @@ func (p provenReadiness) healthTarget() (string, bool) {
 // stalled is the not-judged reason of a wait that saw no progress across the
 // watchdog's count.
 func (p provenReadiness) stalled(health, lastProbe, lastErr string, st models.AppReadiness, restarts uint64) string {
-	idle := fmt.Sprintf("it made no progress (no new listen, and before it listened no new connect, process fork or exec, or CPU time used) across %d wake-ups of keploy's watchdog", readyStallLimit)
+	idle := fmt.Sprintf("it made no progress (no new listen, and before it listened no new connect, process fork or exec, or CPU time used) across %s", watchdogSpan(readyStallLimit))
 	if !p.listenedAnywhere(st) && !st.CPUKnown {
-		idle = fmt.Sprintf("it made no progress (no new listen, connect, process fork or exec; its CPU time keploy could not read) across %d wake-ups of keploy's watchdog", readyStallLimit)
+		idle = fmt.Sprintf("it made no progress (no new listen, connect, process fork or exec; its CPU time keploy could not read) across %s", watchdogSpan(readyStallLimit))
 	}
 	if p.agent == nil {
-		idle = fmt.Sprintf("across %d wake-ups of keploy's watchdog (keploy's agent cannot tell when the application listens)", readyStallLimit)
+		idle = fmt.Sprintf("across %s; keploy's agent cannot tell when the application listens", watchdogSpan(readyStallLimit))
 	}
 	var what string
 	switch {
@@ -816,30 +894,8 @@ func firstDialTarget(ctx context.Context, testCfg config.Test, testCases []*mode
 				return sc, h, p, true
 			}
 		case models.GRPC_EXPORT:
-			// Where the test is sent (pkg.SimulateGRPC, as the replay hooks
-			// configure it): test.host for the authority's host, its app
-			// port, test.grpcPort, replaceWith, and the one host port its
-			// app port is published on.
-			authority := tc.GrpcReq.Headers.PseudoHeaders[":authority"]
-			if authority == "" {
-				continue
-			}
-			h := testCfg.Host
-			if h == "" {
-				h = "localhost"
-			}
-			port := testCfg.GRPCPort
-			if ps, ok := testCfg.Protocol["grpc"]; ok && ps.Port > 0 {
-				port = ps.Port
-			}
-			urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
-			target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, h, tc.AppPort, port, false, logger)
-			if err != nil {
-				continue
-			}
-			target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{ConfigPort: port, URLReplacements: urlReplacements, PortMappings: portMappings, PublishedPort: published}, authority, target, tc.AppPort, false)
-			if th, tp, err := net.SplitHostPort(target); err == nil && tp != "" {
-				return "", th, tp, true
+			if h, p, ok := resolveGRPCProbeTarget(ctx, testCfg, tc, testSetID, logger, published); ok {
+				return "", h, p, true
 			}
 		}
 	}
@@ -873,20 +929,12 @@ func listenPortFor(ctx context.Context, pub publishedPortReader, cmd, containerN
 	return hostPort
 }
 
-// dockerRunMappings reads every -p/--publish of a docker run command.
+// dockerRunMappings reads every -p/--publish of a docker run command, from
+// its own options before the image (engine.Publishes), never a native app's
+// -p or a container's own argument.
 func dockerRunMappings(cmd string) []portMapping {
-	fields := strings.Fields(cmd)
 	var out []portMapping
-	for i := 0; i+1 < len(fields); i++ {
-		spec := ""
-		switch {
-		case fields[i] == "-p" || fields[i] == "--publish":
-			spec = fields[i+1]
-		case strings.HasPrefix(fields[i], "--publish="):
-			spec = strings.TrimPrefix(fields[i], "--publish=")
-		default:
-			continue
-		}
+	for _, spec := range engine.Publishes(cmd) {
 		if m, ok := parsePortMapping(spec, os.LookupEnv); ok {
 			out = append(out, m)
 		}
@@ -1110,18 +1158,25 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 		if !started {
 			return true, ""
 		}
-		return waitForAppReady(ctx, r.logger, r.config, resolveTestSetProbeTarget(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), publishedPortsOf(r.logger, r.instrumentation).of(testSetID))), ""
+		return waitForAppReady(ctx, r.logger, r.config, probeTargetForSet(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), publishedPortsOf(r.logger, r.instrumentation).of(testSetID))), ""
 	}
-	p := provenReadiness{logger: r.logger, cfg: r.config, docker: utils.IsDockerCmd(utils.CmdType(r.config.CommandType))}
+	p := provenReadiness{logger: r.logger, cfg: r.config, docker: utils.IsDockerCmd(utils.CmdType(r.config.CommandType)), keys: models.LogKeys(ctx)}
 	scheme, host, port, ok := firstDialTarget(ctx, r.config.Test, testCases, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID))
 	if ok {
 		p.scheme, p.host, p.port = scheme, host, port
 	}
+	// The hosts the set's not-ready reason may name whole (the report's and
+	// the console's), which its log line names by their shape and tag.
+	readyHosts := []string{p.host}
+	if h, _, ok := healthURLAddress(r.config.Test.HealthURL); ok {
+		readyHosts = append(readyHosts, h)
+	}
+	r.readyHosts.Store(testSetID, readyHosts)
 	if u := strings.TrimSpace(r.config.Test.HealthURL); u != "" {
 		if reason, valid := validateHealthURL(u); !valid {
 			r.badHealthURLSaid.Do(func() {
 				r.logger.Error("invalid --health-url; the application's listen is the event instead",
-					zap.String("healthUrl", sanitizeHealthURL(u)), zap.String("reason", reason),
+					zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(u))), zap.String("reason", reason),
 					zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host"))
 			})
 		}
@@ -1146,7 +1201,7 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 			r.logger.Warn("this keploy cannot ask its agent when the application listens; the health URL alone decides")
 			return p.wait(ctx)
 		}
-		r.logger.Warn("this keploy cannot ask its agent when the application listens; the first test's address taking a connect decides", zap.String("address", net.JoinHostPort(p.host, p.port)))
+		r.logger.Warn("this keploy cannot ask its agent when the application listens; the first test's address taking a connect decides", zap.String("address", p.keys.HostLogName(net.JoinHostPort(p.host, p.port))))
 		p.dial = true
 		return p.wait(ctx)
 	}

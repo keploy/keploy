@@ -35,7 +35,7 @@ func childComposeApp() *App {
 	return &App{
 		logger:         zap.NewNop(),
 		kind:           utils.DockerCompose,
-		cmd:            "docker compose -p childapp -f - up",
+		cmd:            utils.NewAppCommand("docker compose -p childapp -f - up"),
 		composeContent: []byte("services: {app: {image: app}, db: {image: db, container_name: my-db}}"),
 		composeService: "app",
 		container:      "app",
@@ -95,7 +95,7 @@ func TestRecentAppLogsReadsTheComposeChildsTail(t *testing.T) {
 func TestComposeChildTeeTakesTheCommandsProjectAssignment(t *testing.T) {
 	shellOutPath(t)
 	a := childComposeApp()
-	a.cmd = "COMPOSE_PROJECT_NAME=Assigned docker compose -f - up"
+	a.cmd = utils.NewAppCommand("COMPOSE_PROJECT_NAME=Assigned docker compose -f - up")
 	if opts := a.composeChildTee(context.Background()); len(opts) != 1 {
 		t.Fatalf("composeChildTee gave %d options, want the tee", len(opts))
 	}
@@ -133,7 +133,7 @@ func TestComposeChildTeeTakesTheProjectComposeTakes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := childComposeApp()
-			a.cmd = tc.cmd
+			a.cmd = utils.NewAppCommand(tc.cmd)
 			if tc.doc != nil {
 				a.composeContent = tc.doc
 			}
@@ -179,7 +179,7 @@ func TestComposeChildTeeIsOnlyForKeploysOwnDocument(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
 	for _, kind := range []utils.CmdType{utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer} {
 		d := &logsDaemon{}
-		a := &App{logger: zap.New(core), kind: kind, cmd: "docker compose up", container: "app", docker: d}
+		a := &App{logger: zap.New(core), kind: kind, cmd: utils.NewAppCommand("docker compose up"), container: "app", docker: d}
 		if opts := a.composeChildTee(ctx); opts != nil || a.composeChildOut.Load() != nil || logs.Len() != 0 {
 			t.Fatalf("%s: a user's own command got a tee, or a warning: %v", kind, logs.All())
 		}

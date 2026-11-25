@@ -11,6 +11,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// childConsolePipe returns a pipe whose read end supports read deadlines so
+// ChildOutputCopy.Drain can wake a blocked read when the child exits.
+func childConsolePipe() (r, w *os.File, err error) {
+	return os.Pipe()
+}
+
 // drainNow writes to dst what src holds when it is called, and no more: a
 // process the child left running may write on without end. src is in the
 // poller (Drain set a deadline on it), so its descriptor does not block: a

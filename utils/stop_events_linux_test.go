@@ -2514,17 +2514,20 @@ func TestAGroupsLeaderIsWaitedForAsTheSignalReachedIt(t *testing.T) {
 		members []Reached
 		exited  bool
 	}{
-		{"not among those reached", []Reached{{PID: pid + 1, Start: st.StartTime}}, true},
+		// nil (not pid+1): groupGone watches every reached member, and on a
+		// busy host pid+1 can be an unrelated process forked in the same 10ms
+		// clock tick with StartTime == st.StartTime.
+		{"not among those reached", nil, true},
 		{"its pid naming another process", []Reached{{PID: pid, Start: st.StartTime + 1}}, true},
 		{"the one reached, running", []Reached{{PID: pid, Start: st.StartTime}}, false},
 	} {
-		exited, release := leaderExited(pid, tc.members)
+		exited, release := groupGone(pid, tc.members)
 		if got := isClosed(exited); got != tc.exited {
 			t.Fatalf("%s: exited %v, want %v", tc.name, got, tc.exited)
 		}
 		release()
 	}
-	exited, release := leaderExited(pid, []Reached{{PID: pid, Start: st.StartTime}})
+	exited, release := groupGone(pid, []Reached{{PID: pid, Start: st.StartTime}})
 	defer release()
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	select {
@@ -2533,6 +2536,117 @@ func TestAGroupsLeaderIsWaitedForAsTheSignalReachedIt(t *testing.T) {
 		t.Fatal("the leader's exit was not seen")
 	}
 	awaitReaped(t, "the leader", reaped)
+}
+
+// The group wait leaves to keploy's stop of the daemons each process that
+// stop ends (LeaveToDaemonStop), but never the group's leader: the app
+// keploy started, which that stop does not end. Where keploy holds no pidfd
+// on what it started (a kernel or sandbox without them), the adopter cannot
+// tell that app from a daemon it adopted, so the leader must be waited for
+// whatever the adopter answers. Here it answers yes for every process.
+func TestAGroupsLeaderIsNeverLeftToTheDaemonStop(t *testing.T) {
+	prev := daemonStopEnds.Load()
+	t.Cleanup(func() { daemonStopEnds.Store(prev) })
+	LeaveToDaemonStop(func(int, uint64) bool { return true })
+	cmd, reaped := startGroupLeader(t, "sleep", "600")
+	pid := cmd.Process.Pid
+	st, ok := ReadProcStat(pid)
+	if !ok {
+		t.Fatal("cannot read the leader")
+	}
+	reached := []Reached{{PID: pid, Start: st.StartTime}}
+	isClosed := func(c <-chan struct{}) bool {
+		select {
+		case <-c:
+			return true
+		case <-time.After(300 * time.Millisecond):
+			return false
+		}
+	}
+	// The same process, not the leader, is left to that stop: the answer
+	// is in force.
+	left, release := groupGone(0, reached)
+	if !isClosed(left) {
+		release()
+		t.Fatal("a running process the adopter says its stop ends, not the leader, was waited for")
+	}
+	release()
+	exited, release := groupGone(pid, reached)
+	defer release()
+	if isClosed(exited) {
+		t.Fatal("the group's leader, running, was left to the stop of the daemons")
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	select {
+	case <-exited:
+	case <-time.After(time.Minute):
+		t.Fatal("the leader's exit was not seen")
+	}
+	awaitReaped(t, "the leader", reaped)
+}
+
+// A process is adopted only as the parent it runs under exits, so the group
+// wait reads again, at that exit, whether keploy's stop of the daemons ends
+// it (leftOnParentExit): a shell's background command that ignores the
+// interrupt is left to that stop once the shell is gone, though it runs on.
+// Here the stop of the daemons ends a process once its parent is not the
+// shell that started it.
+func TestAProcessIsLeftToTheDaemonStopOnceItsParentExits(t *testing.T) {
+	shell := exec.Command("sh", "-c", "sleep 600 & echo $!; wait")
+	shell.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	out, err := shell.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shell.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-shell.Process.Pid, syscall.SIGKILL)
+		_ = shell.Wait()
+	})
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading the background command's pid: %v", err)
+	}
+	child, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("the background command's pid %q: %v", line, err)
+	}
+	m, ok := ProcOf(child)
+	if !ok {
+		t.Fatal("cannot read the background command")
+	}
+	prev := daemonStopEnds.Load()
+	t.Cleanup(func() { daemonStopEnds.Store(prev) })
+	LeaveToDaemonStop(func(pid int, start uint64) bool {
+		st, ok := ReadProcStat(pid)
+		return ok && pid == m.PID && start == m.Start && st.StartTime == m.Start && st.PPID != shell.Process.Pid
+	})
+	exit, releaseExit := ExitOf(m)
+	defer releaseExit()
+	done := make(chan struct{})
+	defer close(done)
+	left := make(chan bool, 1)
+	go func() { left <- leftOnParentExit(m, exit, done) }()
+	select {
+	case <-left:
+		t.Fatal("the wait ended while the background command ran under its shell")
+	case <-time.After(300 * time.Millisecond):
+	}
+	_ = shell.Process.Signal(syscall.SIGKILL)
+	_ = shell.Wait()
+	select {
+	case got := <-left:
+		if !got {
+			t.Fatal("the wait ended as if stopped")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the background command, adopted as its shell exited, was still waited for")
+	}
+	if running, err := isProcessRunning(m.PID); err != nil || !running {
+		t.Fatalf("the background command no longer runs (%v, %v): the row proves nothing", running, err)
+	}
 }
 
 // The processes a stop watches all gone is the app's exit, though its event

@@ -11,8 +11,12 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // An observe-only capture (a DaemonSet's, Opts.SkipTLSMITM) carries only the
@@ -303,16 +307,20 @@ func TestRecordV2_ResponseCutShortOtherwiseIsNotRecorded(t *testing.T) {
 	}
 }
 
-// Whole responses record the same mock whether or not the stream ended with
-// the client closing: the flag changes only what does not parse whole.
+// Whole responses framed by their head record the same mock whether or not the
+// stream ended with the client closing: the flag changes only what does not
+// parse whole, and the marks of an answer it reads as read in part
+// (TestRecordMarksAWholeAnswerOnlyAsTheClientReadItAll). A body framed by the
+// connection's close is whole only where the stream ended with the connection
+// (TestRecordV2_ObserveOnly_ACloseDelimitedBodyIsWholeOnlyAtTheConnectionsEnd).
 func TestRecordV2_WholeResponsesAreRecordedAlike(t *testing.T) {
 	t.Parallel()
 	for name, resp := range map[string]string{
-		"close-delimited":      "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello until close",
-		"bare-LF header lines": "HTTP/1.1 200 OK\r\nContent-Type: text/plain\n\nline1\r\nline2",
-		"content-length":       "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
-		"chunked":              "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
-		"no content":           "HTTP/1.1 204 No Content\r\n\r\n",
+		"content-length":                       "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+		"content-length, bare-LF header lines": "HTTP/1.1 200 OK\r\nContent-Length: 5\nContent-Type: text/plain\n\nhello",
+		"chunked":                              "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+		"chunked, capitalised":                 "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+		"no content":                           "HTTP/1.1 204 No Content\r\n\r\n",
 	} {
 		read, err := recordOne(t, clientClosed, []byte(resp))
 		if err != nil || read == nil {
@@ -322,6 +330,7 @@ func TestRecordV2_WholeResponsesAreRecordedAlike(t *testing.T) {
 		if err != nil || plain == nil {
 			t.Fatalf("%s: mock %v, err %v", name, plain, err)
 		}
+		read.Spec.HTTPResp.Marks, plain.Spec.HTTPResp.Marks = nil, nil
 		if !reflect.DeepEqual(read.Spec.HTTPResp, plain.Spec.HTTPResp) {
 			t.Errorf("%s: recorded %+v with the client's close, %+v without", name, read.Spec.HTTPResp, plain.Spec.HTTPResp)
 		}
@@ -397,11 +406,15 @@ func TestRecordV2_ObserveOnly_CloseDelimitedGzipBodyReadInPart(t *testing.T) {
 
 // Only a stream that ran out ended where its capture did. One whose reader was
 // closed under it (fakeconn.ErrClosed: an abort, with chunks possibly still on
-// their way) is not read in part, even where the capture had marked the end.
+// their way) is not read in part, even where the capture had marked the end:
+// the close cut the read, and the exchange is left out for it
+// (LeftOutReadAborted), as no decode error.
 func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 	t.Parallel()
-	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	core, logs := observer.New(zapcore.DebugLevel)
+	h := &HTTP{Logger: zap.New(core)}
 	sess, sendReq, closeReq, sendResp, _, mocks := newTestSession(t)
+	sess.Logger = zap.New(core)
 	sess.Opts.SkipTLSMITM = true
 	sess.MarkEndedWithConnection(fakeconn.FromDest)
 	at := time.Unix(1_700_005_000, 0)
@@ -421,8 +434,8 @@ func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 	_ = sess.DestStream.Close() // its reader is closed; its chunk channel is not
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Error("recordV2 returned nil for a response whose reader was closed under it; want the parse error")
+		if err != nil {
+			t.Errorf("recordV2 = %v for a response whose reader was closed under it; want nil: the close cut the read, which is no decode error", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("recordV2 did not exit within 2s")
@@ -432,20 +445,38 @@ func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 		t.Errorf("mock emitted for a response whose reader was closed under it: %+v", m.Spec.HTTPResp)
 	default:
 	}
+	var reasons []any // at WARN, or at DEBUG past its cause's WARN limit
+	for _, e := range logs.All() {
+		if e.Message == supervisor.LeftOutWarnMsg || e.Message == supervisor.LeftOutDebugMsg {
+			reasons = append(reasons, e.ContextMap()["reason"])
+		}
+	}
+	if len(reasons) != 1 || reasons[0] != supervisor.LeftOutReadAborted {
+		t.Errorf("left out for %v; want once for %q", reasons, supervisor.LeftOutReadAborted)
+	}
+	if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+		t.Errorf("logged %d lines at ERROR; want none", n)
+	}
 }
 
 // An interim net/http will not read (a malformed header line in a 103) does not
 // cost the final response behind it: it is framed by its blank lines, as it
-// was before the interims were read one by one.
+// was before the interims were read one by one. A line that starts with a CR
+// is no blank line (net/textproto drops only the CR right before an LF).
 func TestRecordV2_FinalResponseBehindAMalformedInterim(t *testing.T) {
 	t.Parallel()
-	for _, end := range []streamEnd{relayedClosed, captureCut, clientClosed} {
-		m, err := recordOne(t, end, []byte("HTTP/1.1 103 Early Hints\r\nBad Header Line\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
-		if err != nil || m == nil {
-			t.Fatalf("%+v: mock %v, err %v; want the 200", end, m, err)
-		}
-		if r := m.Spec.HTTPResp; r.StatusCode != 200 || r.Body != "ok" {
-			t.Errorf("%+v: recorded %d %q, want 200 \"ok\"", end, r.StatusCode, r.Body)
+	for _, interim := range []string{
+		"HTTP/1.1 103 Early Hints\r\nBad Header Line\r\n\r\n",
+		"HTTP/1.1 103 Early Hints\r\n\rLink: </a>\r\n\r\n",
+	} {
+		for _, end := range []streamEnd{relayedClosed, captureCut, clientClosed} {
+			m, err := recordOne(t, end, []byte(interim+"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+			if err != nil || m == nil {
+				t.Fatalf("%q, %+v: mock %v, err %v; want the 200", interim, end, m, err)
+			}
+			if r := m.Spec.HTTPResp; r.StatusCode != 200 || r.Body != "ok" {
+				t.Errorf("%q, %+v: recorded %d %q, want 200 \"ok\"", interim, end, r.StatusCode, r.Body)
+			}
 		}
 	}
 }

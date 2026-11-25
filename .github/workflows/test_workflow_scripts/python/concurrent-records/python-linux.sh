@@ -1,9 +1,12 @@
 #!/bin/bash
 # Two `keploy record` runs started together on one host, on the default
-# ports. Each CLI checks its ports free before its agent binds them, and both
-# could find them free; the second agent then failed to bind. Now the agent's
-# bind is the check: an agent whose port is taken when it binds it binds
-# another, says so naming the holder, and tells its hooks before it is ready.
+# ports. Each CLI used to check its ports free before its agent bound them:
+# both could find them free and the second agent failed to bind, or one found
+# the other's check holding a port for a moment and handed its agent another
+# with no line said. Now each CLI hands its agent the configured ports, and
+# the agent's bind is the check: an agent whose port is taken when it binds
+# it binds another, says so naming the holder, and tells its hooks before it
+# is ready.
 #
 # On every request each app resolves a DNS name of its own run's and calls an
 # upstream on a path of its own run's (app.py). In every round each run must
@@ -11,15 +14,23 @@
 # its mocks must hold its own run's DNS names and upstream paths and none of
 # the other run's: hooks still sending an app to a port its agent left, or to
 # the other run's, would lose its names or put them in the other run's mocks.
+# And each agent's proxy and DNS server must listen on the configured ports
+# (16789, 26789), or on ports its agent says it moved to off them, naming the
+# holder: a port moved by anything else, as the CLI's check used to, is moved
+# with no line said.
 #
 # Rounds:
-# - "together": the runs as reported. Whether the CLI's check or the agent's
-#   bind finds the other run's port taken depends on how their starts
-#   interleave; either way both runs must record. The moves are printed.
-# - "dns-held": the same, with a process holding UDP 26789 only. The CLI
-#   checks the port over TCP and finds it free, so each agent finds it taken
-#   at its bind, every time: both must move their DNS servers, naming that
-#   process, and their apps' DNS must still reach their own moved servers.
+# - "together": the runs as reported. Which agent finds the other's port
+#   taken at its bind depends on how their starts interleave; either way both
+#   runs must record. The moves are printed.
+# - "staggered": run B starts once run A's agent listens, so B's agent finds
+#   both ports taken by A's at its bind: it must move both, naming A's agent.
+#   It makes certain the interleaving in which the CLI's check, run before
+#   its agent starts, found A's ports taken and moved B's with no line said.
+# - "dns-held": as together, with a process holding UDP 26789 only. Each
+#   CLI hands its agent 26789, so each agent finds it taken at its bind:
+#   both must move their DNS servers, naming that process, and their apps'
+#   DNS must still reach their own moved servers.
 
 # keploy runs under sudo, which hands it only the variables its command line
 # names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
@@ -34,6 +45,10 @@ set +e
 
 TOGETHER_ROUNDS=${TOGETHER_ROUNDS:-2}
 UPSTREAM_PORT=9092
+# The ports keploy's proxy and DNS server are configured on: the defaults,
+# which neither run changes.
+PROXY_PORT=16789
+DNS_PORT=26789
 dir="$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/concurrent-records"
 cd "$dir" || exit 1
 
@@ -71,12 +86,50 @@ count() {
     echo "${n:-0}"
 }
 
+# agent_lines LOG: the lines of a record log its agent wrote, colours off.
+agent_lines() {
+    sed 's/\x1b\[[0-9;]*m//g' "$1" 2>/dev/null | grep -a -F 'Keploy(agent):'
+}
+
+# moved_off LOG SERVER PORT: what the agent said of moving SERVER ("proxy" or
+# "DNS server") off the configured PORT: its lines "the SERVER's port PORT is
+# taken ...; the SERVER listens on port N instead".
+moved_off() {
+    agent_lines "$1" | grep -a -o -E "the $2's port $3 is taken[^;]*; the $2 listens on port [0-9]+ instead"
+}
+
+# own_ports NAME RUN: checks that RUN's agent in round NAME listens on the
+# configured ports, or on ports it said it moved to off them.
+own_ports() {
+    local name=$1 run=$2 log="record_logs_$2_$1.txt" proxy dns p
+    proxy=$(agent_lines "$log" | grep -a -o -E 'Proxy started at port:[0-9]+' | sed 's/.*://' | sort -u)
+    dns=$(agent_lines "$log" | grep -a -o -E 'starting (UDP|TCP) DNS server at addr :[0-9]+' | sed 's/.*://' | sort -u)
+    echo "round $name run $run: proxy on ${proxy:-none}, DNS server on ${dns:-none}"
+    if [ -z "$proxy" ] || [ -z "$dns" ]; then
+        echo "::error::round $name run $run: its agent did not say on which ports its proxy and DNS server listen"
+        fail=1
+        return
+    fi
+    for p in $proxy; do
+        if [ "$p" != "$PROXY_PORT" ] && ! moved_off "$log" proxy "$PROXY_PORT" | grep -a -q -E " on port $p instead\$"; then
+            echo "::error::round $name run $run: the proxy listens on port $p, not on the configured $PROXY_PORT, and its agent did not say it moved there"
+            fail=1
+        fi
+    done
+    for p in $dns; do
+        if [ "$p" != "$DNS_PORT" ] && ! moved_off "$log" "DNS server" "$DNS_PORT" | grep -a -q -E " on port $p instead\$"; then
+            echo "::error::round $name run $run: the DNS server listens on port $p, not on the configured $DNS_PORT, and its agent did not say it moved there"
+            fail=1
+        fi
+    done
+}
+
 fail=0
-# round NAME: starts runs A and B together, drives each app, and checks what
-# each recorded.
+# round NAME [staggered]: starts runs A and B together, or B once A's agent
+# listens, drives each app, and checks what each recorded.
 round() {
-    local name=$1 run tag app_port ready got k p
-    echo "=== round $name: two records started together ==="
+    local name=$1 mode=${2:-together} run tag app_port ready got k p
+    echo "=== round $name: two records started $mode ==="
     sudo rm -rf A B # the last round's, which root-run keploy wrote
     mkdir -p A B
     record_pids=()
@@ -89,6 +142,20 @@ round() {
             > "$dir/record_logs_${run}_$name.txt" 2>&1
         record_pids+=("$HANG_PID")
         cd - >/dev/null || exit 1
+        if [ "$run" = A ] && [ "$mode" = staggered ]; then
+            ready=0
+            for _ in $(seq 1 120); do
+                if agent_lines "record_logs_A_$name.txt" | grep -a -q 'Proxy started at port:'; then
+                    ready=1
+                    break
+                fi
+                sleep 0.5
+            done
+            if [ "$ready" != 1 ]; then
+                echo "::error::round $name: run A's agent did not start its proxy within 60s"
+                fail=1
+            fi
+        fi
     done
 
     ready=0
@@ -143,11 +210,21 @@ round() {
             grep -a -i -E 'error|taken|listens on port' "record_logs_${run}_$name.txt" | tail -20
             fail=1
         fi
+        own_ports "$name" "$run"
     done
 }
 
 for r in $(seq 1 "$TOGETHER_ROUNDS"); do
     round "together-$r"
+done
+
+round staggered staggered
+for server in proxy "DNS server"; do
+    if [ "$server" = proxy ]; then p=$PROXY_PORT; else p=$DNS_PORT; fi
+    if ! moved_off record_logs_B_staggered.txt "$server" "$p" | grep -a -q -E "taken by pid [0-9]+ "; then
+        echo "::error::round staggered: run B started once run A's agent listened, want its agent to move its $server off $p naming the holder; it did not"
+        fail=1
+    fi
 done
 
 python3 -c '
@@ -172,7 +249,12 @@ if [ "$held" != 1 ]; then
     exit 1
 fi
 round dns-held
-moves=$(count "the DNS server's port 26789 is taken by pid $holder_pid \\([^)]*\\); the DNS server listens on port [0-9]+ instead" record_logs_A_dns-held.txt record_logs_B_dns-held.txt)
+moves=0
+for run in A B; do
+    if moved_off "record_logs_${run}_dns-held.txt" "DNS server" "$DNS_PORT" | grep -a -q -E "taken by pid $holder_pid "; then
+        moves=$((moves + 1))
+    fi
+done
 if [ "$moves" != 2 ]; then
     echo "::error::with UDP 26789 held by pid $holder_pid, want both agents to move their DNS servers naming it; $moves did"
     fail=1

@@ -26,6 +26,13 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 		if errno, ok := err.(syscall.Errno); ok && errno == syscall.ESRCH {
 			return nil
 		}
+		// A process group of zombies only has exited too: macOS answers
+		// its signal EPERM, which is no refusal when no process of the
+		// group runs.
+		if errno, ok := err.(syscall.Errno); ok && errno == syscall.EPERM && pid < -1 && groupExited(-pid) {
+			logger.Debug("the process group has exited; its zombies wait to be reaped", zap.Int("pgid", -pid), zap.String("signal", sig.String()))
+			return nil
+		}
 		logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
 		return err
 	}
@@ -91,7 +98,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 			Setsid: true,
 		}
 		logger.Debug("Output is a TTY (Docker Compose -> PTY)")
-		return executeWithPTY(ctx, logger, cmd, o.outputTee)
+		return executeWithPTY(ctx, logger, cmd, NewAppCommand(userCmd), o.outputTee)
 	}
 
 	// For non-PTY execution, use Setpgid for process group management
@@ -109,7 +116,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 		return CmdError{Type: Init, Err: err}
 	}
 
-	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
+	logAppStart(logger, StartingApplication, NewAppCommand(userCmd), "executing_cmd", cmd.Args)
 	err = cmd.Start()
 	console.Started()
 	if err != nil {
@@ -133,8 +140,9 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 // executeWithPTY runs the command inside a dedicated PTY (Pseudo-Terminal).
 // This is necessary for Docker Compose when Setpgid is true, as Docker Compose
 // tries to read terminal size for rendering progress bars. Without a PTY,
-// the OS would pause the background process with SIGTTOU/SIGTTIN.
-func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, tee func() io.Writer) CmdError {
+// the OS would pause the background process with SIGTTOU/SIGTTIN. userCmd is
+// the user's command cmd runs, which its log line names (logAppStart).
+func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, userCmd AppCommand, tee func() io.Writer) CmdError {
 	// Start the command with a PTY
 	// pty.Start creates a PTY pair, assigns the slave PTY to cmd's stdin/stdout/stderr,
 	// and starts the command
@@ -144,7 +152,7 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, tee fu
 		return CmdError{Type: Init, Err: err}
 	}
 
-	logger.Info("Starting Application:", zap.String("executing_cmd", cmd.String()))
+	logAppStart(logger, startingApplicationPTY, userCmd, "executing_cmd", cmd.Args)
 
 	// Handle terminal resize - propagate size changes from real terminal to PTY
 	resizeCh := make(chan os.Signal, 1)

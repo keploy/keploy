@@ -172,37 +172,31 @@ func TestV2_TimestampsComeFromChunks(t *testing.T) {
 func TestV2_MultipleExchanges(t *testing.T) {
 	t.Parallel()
 
-	clientCh := make(chan fakeconn.Chunk, 4)
-	destCh := make(chan fakeconn.Chunk, 4)
-
 	req1At := time.Unix(2000, 0)
 	resp1WrittenAt := time.Unix(2001, 0)
 	req2At := time.Unix(3000, 0)
 	resp2WrittenAt := time.Unix(3001, 0)
 
-	// Push first exchange, then second. Closing the dest channel after
-	// the second response signals EOF so the loop drains and exits.
-	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("req1"), ReadAt: req1At}
-	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("resp1"), WrittenAt: resp1WrittenAt}
-
-	// Small pause to let the parser observe the first response before
-	// the second request arrives. Using a tiny sleep here is OK because
-	// we're driving synthetic chunks, not measuring real time.
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("req2"), ReadAt: req2At}
-		time.Sleep(10 * time.Millisecond)
-		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("resp2"), WrittenAt: resp2WrittenAt}
-		close(clientCh)
-		close(destCh)
-	}()
-
-	sess, mocks := newV2Session(t, clientCh, destCh)
-	if err := dispatch(t, sess); err != nil {
-		t.Fatalf("RecordOutgoing: %v", err)
+	// The chunks have no capture number and the session no capture order,
+	// so the merge hands them on in the order it takes them: each goes on
+	// its stream once the parser has done all it can with the one before
+	// it (putAtRest), or req2 can reach the merge ahead of resp1. Ending
+	// the streams after the second response has the loop hand it on and
+	// return.
+	r := startRecordingUnder(t, nil, false, false)
+	for _, c := range []fakeconn.Chunk{
+		{Dir: fakeconn.FromClient, Bytes: []byte("req1"), ReadAt: req1At},
+		{Dir: fakeconn.FromDest, Bytes: []byte("resp1"), WrittenAt: resp1WrittenAt},
+		{Dir: fakeconn.FromClient, Bytes: []byte("req2"), ReadAt: req2At},
+		{Dir: fakeconn.FromDest, Bytes: []byte("resp2"), WrittenAt: resp2WrittenAt},
+	} {
+		r.putAtRest(c)
 	}
-	close(mocks)
-	got := drainMocks(mocks)
+	run := r.end()
+	if !run.returned {
+		t.Fatal("the parser did not return once both streams ended")
+	}
+	got := run.recorded
 	if len(got) != 2 {
 		t.Fatalf("expected 2 mocks, got %d", len(got))
 	}

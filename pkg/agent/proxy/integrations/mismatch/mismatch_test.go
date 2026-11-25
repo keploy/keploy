@@ -64,11 +64,35 @@ func TestBuilder_StructuralChangeNextSteps(t *testing.T) {
 func TestBuilder_FieldDiffCap(t *testing.T) {
 	diffs := make([]models.MockFieldDiff, maxFieldDiffs+10)
 	for i := range diffs {
-		diffs[i] = models.MockFieldDiff{Path: "body.x", Kind: models.DiffKindValueChanged}
+		diffs[i] = models.MockFieldDiff{Path: fmt.Sprintf("body.x%d", i), Kind: models.DiffKindValueChanged}
 	}
 	report := NewReport(ProtocolHTTP, "GET /a").WithClosest("m", diffs).Build()
 	if len(report.FieldDiffs) != maxFieldDiffs {
 		t.Errorf("expected diff cap %d, got %d", maxFieldDiffs, len(report.FieldDiffs))
+	}
+}
+
+// A report carries a field's diff once however many of its places differ
+// alike (diffs of one path and kind, an array's elements by the array's
+// shape), at its first place, in the diffs' order: they count once against
+// the cut (TestTheHintStaysSmallHoweverManyValuesMiss: the hint still
+// offers the widen). Diffs of one path and two kinds are two.
+func TestBuilderFoldsTheDiffsOfOneName(t *testing.T) {
+	drift := func(path, expected string) models.MockFieldDiff {
+		return models.MockFieldDiff{Path: path, Kind: models.DiffKindValueChanged, Expected: expected, Actual: "x"}
+	}
+	gone := models.MockFieldDiff{Path: "body.ids[]", Kind: models.DiffKindMissingInLive, Expected: "9"}
+	var diffs []models.MockFieldDiff
+	for i := 0; i < 3000; i++ {
+		diffs = append(diffs, drift("body.ids[]", fmt.Sprint(i)))
+	}
+	diffs = append(diffs, drift("body.a", "a"), gone, drift("body.ids[]", "late"), gone)
+	r := NewReport(ProtocolHTTP, "POST /x").WithClosest("m", diffs).Build()
+	if want := []models.MockFieldDiff{drift("body.ids[]", "0"), drift("body.a", "a"), gone}; !slices.Equal(r.FieldDiffs, want) {
+		t.Errorf("field diffs %+v; want %+v", r.FieldDiffs, want)
+	}
+	if few := []models.MockFieldDiff{drift("body.a", "a"), drift("body.b", "b")}; !slices.Equal(foldDiffs(few), few) || foldDiffs(nil) != nil {
+		t.Errorf("foldDiffs changed diffs that do not repeat")
 	}
 }
 
@@ -174,6 +198,50 @@ func TestJSONBodyDiffs_RespectsIgnoreAndReportsValues(t *testing.T) {
 	d := diffs[0]
 	if d.Path != "body.nested.v" || d.Kind != models.DiffKindValueChanged || d.Expected != "1" || d.Actual != "2" {
 		t.Errorf("unexpected diff: %+v", d)
+	}
+}
+
+func TestJSONBodyDiffsWithTypeStrict_ReportsMissingAndTypeChange(t *testing.T) {
+	ignore := map[string][]string{"ts": {}, "skip": {}}
+	ts := map[string]struct{}{"ts": {}}
+
+	// Missing learned field names the field, kind, and recorded value.
+	diffs := JSONBodyDiffsWithTypeStrict(`{"q":"ada","ts":1}`, `{"q":"ada"}`, ignore, ts)
+	if len(diffs) != 1 || diffs[0].Path != "body.ts" || diffs[0].Kind != models.DiffKindMissingInLive || diffs[0].Expected != "1" {
+		t.Fatalf("missing learned field: got %+v", diffs)
+	}
+	if got := RenderFieldDiffs(diffs); got != `body.ts: recorded "1", absent in live call` {
+		t.Fatalf("rendered diff = %q", got)
+	}
+
+	// Type-changed learned field names the field, kind, and both typed values.
+	diffs = JSONBodyDiffsWithTypeStrict(`{"q":"ada","ts":1}`, `{"q":"ada","ts":"1"}`, ignore, ts)
+	if len(diffs) != 1 || diffs[0].Path != "body.ts" || diffs[0].Kind != models.DiffKindTypeChanged || diffs[0].Expected != "number: 1" || diffs[0].Actual != "string: 1" {
+		t.Fatalf("type-changed learned field: got %+v", diffs)
+	}
+
+	// Same-type value drift on learned field produces no diff.
+	if diffs = JSONBodyDiffsWithTypeStrict(`{"q":"ada","ts":1}`, `{"q":"ada","ts":2}`, ignore, ts); len(diffs) != 0 {
+		t.Fatalf("same-type learned drift must produce no diff: %+v", diffs)
+	}
+
+	// User-ignored field (not in typeStrict) stays ignored even when absent.
+	if diffs = JSONBodyDiffsWithTypeStrict(`{"q":"ada","skip":1}`, `{"q":"ada"}`, ignore, ts); len(diffs) != 0 {
+		t.Fatalf("user-ignored missing field must produce no diff: %+v", diffs)
+	}
+
+	// Pre-cut redaction redacts placeholders exceeding maxFieldDiffValueLen (256B) before truncation.
+	longPH := "OBFPH77" + strings.Repeat("q", 293) // 300 bytes
+	diffs = JSONBodyDiffsWithTypeStrictRedacted(
+		`{"meta":{"s":"`+longPH+`"}}`,
+		`{"meta":"`+longPH+`","extra":"`+longPH+`"}`,
+		nil, nil,
+		func(raw string) bool { return raw == longPH },
+	)
+	if len(diffs) != 2 ||
+		diffs[0].Path != "body.meta" || diffs[0].Kind != models.DiffKindTypeChanged || diffs[0].Expected != "object" || diffs[0].Actual != "string: (redacted)" ||
+		diffs[1].Path != "body.extra" || diffs[1].Kind != models.DiffKindMissingInMock || diffs[1].Actual != "(redacted)" {
+		t.Fatalf("pre-cut redaction failed for 300B placeholder: got %+v", diffs)
 	}
 }
 
@@ -286,8 +354,23 @@ func TestRenderFieldDiffs_NoValuesNamesTheFieldAlone(t *testing.T) {
 	got := RenderFieldDiffs([]models.MockFieldDiff{
 		{Path: "body.x", Kind: models.DiffKindValueChanged},
 		{Path: "body.y", Kind: models.DiffKindValueChanged, Expected: "", Actual: "b"},
+		{Path: "body.m", Kind: models.DiffKindMissingInLive},
+		{Path: "body.a", Kind: models.DiffKindMissingInMock},
 	})
-	if want := `body.x: differs (values not shown); body.y: recorded "", live "b"`; got != want {
+	if want := `body.x: differs (values not shown); body.y: recorded "", live "b"; body.m: absent in live call; body.a: absent in recording`; got != want {
 		t.Fatalf("RenderFieldDiffs = %q, want %q", got, want)
+	}
+}
+
+// A parser of a protocol keploy has no shape of names its call by its
+// command (WithCommand), and the report carries it beside the summary, so a
+// sanitized miss of it is named by the command and by no word of the summary.
+func TestBuilder_WithCommandNamesTheCall(t *testing.T) {
+	report := NewReport(ProtocolRedis, "GET").WithCommand("GET").Build()
+	if report.Command != "GET" {
+		t.Fatalf("report Command = %q, want GET", report.Command)
+	}
+	if got := NewReport(ProtocolRedis, "GET").Build().Command; got != "" {
+		t.Fatalf("a report no parser named a command for has Command %q, want none", got)
 	}
 }

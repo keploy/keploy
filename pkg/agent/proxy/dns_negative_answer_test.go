@@ -101,6 +101,11 @@ func assertReportedOnce(t *testing.T, p *Proxy, q dns.Question, why string) {
 	if qt := dns.TypeToString[q.Qtype]; !strings.HasPrefix(reports[0].ActualSummary, qt+" ") {
 		t.Errorf("report ActualSummary = %q; want it to start with the qtype %q", reports[0].ActualSummary, qt)
 	}
+	// The query's type names the call, so a sanitized miss of it keeps that
+	// and not the name it asked for (models.MissShape).
+	if qt := dns.TypeToString[q.Qtype]; reports[0].Command != qt {
+		t.Errorf("report Command = %q, want the qtype %q", reports[0].Command, qt)
+	}
 }
 
 // assertNotReported pins that nothing was reported, and prints what WAS

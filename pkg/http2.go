@@ -508,6 +508,24 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 	return completed
 }
 
+// ResetStream forgets a stream that either side reset (RST_STREAM) before it
+// was complete: no call is built of it, and what it held goes. It reports
+// whether the stream ended so, which a stream it holds nothing of did too. A
+// complete stream is its capture's (GetCompleteStreams, CleanupStream): it
+// stays, and ResetStream reports false. A frame of the stream handled after
+// the reset is the other side's (one side sends nothing after its own reset,
+// and what it sent before is handled before it): it starts the stream again
+// with that side's frames only, so it never completes.
+func (sm *DefaultStreamManager) ResetStream(streamID uint32) bool {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	if s := sm.streams[streamID]; s != nil && s.isComplete {
+		return false
+	}
+	delete(sm.streams, streamID)
+	return true
+}
+
 // CleanupStream removes a stream from the manager
 func (sm *DefaultStreamManager) CleanupStream(streamID uint32) {
 	sm.mutex.Lock()
@@ -716,7 +734,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Determine which port to use for test execution.
 	var err error
 	recorded := authority
-	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
+	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger.With(zap.String("testcase", tc.Name)))
 	if err != nil {
 		return nil, err
 	}
@@ -754,7 +772,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// the exchange (pingWatch tells it which: never a keepalive) cuts it.
 	var dialed net.Conn = conn
 	var pings *pingWatch
-	answer := newAnswerWatch(cfg)
+	answer := newAnswerWatch(ctx, cfg)
 	defer answer.stop()
 	defer answer.waiting()()
 	answer.closeOnCut(conn)
@@ -919,8 +937,10 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			// mock. Stop draining and record it below, rather than discarding
 			// a partial stream and the reason it ended.
 			drainErr = err
+			// Its code, never its message: the app's server writes that
+			// (an echo of what it refused); the mock records it.
 			logger.Debug("gRPC response stream ended with an error; recording what arrived",
-				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.Error(err))
+				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.String("code", status.Code(err).String()))
 			break
 		}
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))

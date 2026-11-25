@@ -26,12 +26,14 @@ func (r *Replayer) assertTestMocks() bool {
 
 // excludedFromTestMockAssertion reports whether a loaded mock is left out of
 // the per-test consumed-vs-expected assertion by name: a reusable-tier mock
-// today, and only a protocol-phase mock under the proven switch.
+// today, and only a protocol-phase mock under the proven switch. An answer
+// the client never read (models.Mock.IsUndelivered) is left out under both:
+// no replay serves it, so no test makes the call it recorded.
 func excludedFromTestMockAssertion(m *models.Mock) bool {
 	if provenswitch.On() {
-		return m.IsProtocolPhase()
+		return m.OutsideTestScopes()
 	}
-	return isReusableTierMock(m)
+	return m.IsUndelivered() || isReusableTierMock(m)
 }
 
 // unconsumedTestMocks is, under the proven switch, how many test mocks a test
@@ -626,7 +628,7 @@ func markRecordedIn(results []models.TestResult, owners map[string][]string) []s
 		for j := range r.FailureInfo.UnmatchedCalls {
 			c := &r.FailureInfo.UnmatchedCalls[j]
 			if c.NameRecordedIn(r.TestCaseID, owners) {
-				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.Named(), c.ClosestMock, c.RecordedIn))
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, models.UnmatchedCallLogName(*c), c.ClosestMock, c.RecordedIn))
 			}
 			// As keploy mock replay's receipt does (withRecordedIn).
 			c.NameEarlierIn(r.TestCaseID, owners)

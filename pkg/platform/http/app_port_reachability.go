@@ -373,7 +373,7 @@ func (l appListening) listens() bool {
 // appListening asks the agent, which shares the app's network namespace, where
 // the app listens on port.
 func (a *AgentClient) appListening(ctx context.Context, port uint16) appListening {
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return appListening{}
 	}
 	if config.KeployPorts(a.conf)[port] != "" {
@@ -383,12 +383,12 @@ func (a *AgentClient) appListening(ctx context.Context, port uint16) appListenin
 		// (AppListenAddrs) counted keploy's socket as the app's.
 		return appListening{}
 	}
-	url := fmt.Sprintf("%s/app/listen-addrs?port=%d", a.conf.Agent.AgentURI, port)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	url := fmt.Sprintf("%s/app/listen-addrs?port=%d", a.conf.AgentURI(), port)
+	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return appListening{}
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		a.logger.Debug("could not ask the agent where the app listens", zap.Uint16("port", port), zap.Error(err))
 		return appListening{}

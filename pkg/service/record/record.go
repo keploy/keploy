@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -94,6 +96,9 @@ type drainOpts[T any] struct {
 	// recording's stream end, for its end by the agent's marker (streamsEnd).
 	stream models.FrameStream
 	ends   *streamsEnd
+	// cut is the stop's cut-off, which the recording's other drains judge
+	// their frames by too (stopCut); nil: when this drain sees the stop.
+	cut *stopCut
 }
 
 // beforeHand runs o.handing for a frame about to be handed over, and returns
@@ -176,7 +181,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	var quietUntil time.Time
 	// stopCame starts the drain: the stop has come, now.
 	stopCame := func() {
-		stoppedAt = time.Now()
+		stoppedAt = o.cut.at()
 		quietUntil = stoppedAt.Add(quiet)
 		resetTimer(idle, quiet)
 	}
@@ -219,7 +224,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	}
 	// mayBeHeld reports whether a frame handed on after the stop may be what
 	// the agent said it held from before it: one captured before the stop, or
-	// undated. Counted in r.heldFrames (agentEndedDrain).
+	// undated. Counted in r.heldFrames (agentEndedDrain). It reads the frame,
+	// so it is asked before the hand-over: a handed frame is the consumer's,
+	// which may change it (handing).
 	mayBeHeld := func(item T) bool {
 		at := o.capturedAt(item)
 		return at.IsZero() || !at.After(stoppedAt)
@@ -235,13 +242,14 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			again = utils.StopNow()
 		}
 		onHanded := o.beforeHand(item)
+		held := mayBeHeld(item) // before the hand-over (mayBeHeld)
 		handed := false
 		select {
 		case out <- item:
 			r.frameProgress.Add(1)
 			if draining {
 				sinceStop++
-				if mayBeHeld(item) {
+				if held {
 					r.heldFrames.Add(1)
 				}
 			}
@@ -329,10 +337,11 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 				stopTimer(idle)
 				if forward, _ := keep(item); forward {
 					onHanded := o.beforeHand(item)
+					held := mayBeHeld(item) // before the hand-over (mayBeHeld)
 					select {
 					case out <- item:
 						r.frameProgress.Add(1)
-						if mayBeHeld(item) {
+						if held {
 							r.heldFrames.Add(1)
 						}
 						onHanded()
@@ -375,6 +384,15 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 					// stop, and said as one, whichever this select saw first.
 					giveUp()
 				default:
+					if o.stream == models.MockStream && (canEnd || stoppedAt.IsZero() && r.recordingGoesOn()) {
+						// The mocks the agent still had are lost: it ends its
+						// streams with a marker and this end had none, or it
+						// ended the stream while the recording was still going.
+						// An agent that cannot mark its end ends the stream
+						// after the stop as a matter of course, which says
+						// nothing about a mock it named and never sent.
+						r.mockStreamLost.Store(true)
+					}
 					r.agentEndedDrain(o.kind, &looks)
 				}
 				return
@@ -448,8 +466,8 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 //
 // This form has no mock stream beside it: every mock's outcome is already
 // published, so an entry whose mock is unknown counts as uncorrelated at once.
-func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map) error {
-	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil)
+func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(test string, lostAt []time.Time), shortPoolByTest *sync.Map) error {
+	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil, nil, nil)
 }
 
 // consumeMappingsFor is consumeMappings beside a live mock stream, and telling
@@ -464,31 +482,98 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 // Nothing here is bounded by a clock: on a loaded host a mock is saved long
 // after the mapping that names it, and giving up on a clock is what left such
 // a mock out of its test's mapping while it sat in the mocks file.
-func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry)) error {
+//
+// names binds the capture ids the recording's test cases came with to the
+// names they were saved under (captureNames): an entry naming a capture id is
+// filed under its test case's saved name, held until that test case is saved,
+// and dropped once it is known not to be (its mocks stay saved, in no test's
+// mapping, as a --sync recording leaves those of a request it did not
+// record); the function returns only once none is held. nil files every name
+// as it comes.
+func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(test string, lostAt []time.Time), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry), marks *workerMarks, names *captureNames) error {
+	return r.consumeMappingsIn(ctx, newSetRoll(r.logger, nil, nil, testSetID, nil, marks), mappings, correlationMap, asyncMockIDs, droppedMockIDs, waits, revokeTest, shortPoolByTest, mapped, names)
+}
+
+// consumeMappingsIn is consumeMappingsFor for a recording's sets (setRoll): a
+// test's mapping is written to the set its test case went to, after the
+// mocks it names that the set does not hold are copied into it (setRoll.place).
+// A mapping of a test not routed yet after a cut waits for its test case.
+func (r *Recorder) consumeMappingsIn(ctx context.Context, roll *setRoll, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(test string, lostAt []time.Time), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry), names *captureNames) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	// pending batches mappings so the file is rewritten once per batch instead of
-	// once per test. flushMu guards it because the ticker below flushes too.
-	pending := make(map[string][]models.MockEntry, mappingFlushBatch)
+	// once per test, per set. flushMu guards it because the ticker below
+	// flushes too. parked holds the mappings of tests whose test case has not
+	// been routed to a set yet (setRoll.setOfTest).
+	pending := map[*rollSet]map[string][]models.MockEntry{}
+	pendingTests := 0
+	parked := map[string][]models.MockEntry{}
+	// parkedAt is the rollover count when each parked mapping was parked.
+	parkedAt := map[string]int{}
 	var flushMu sync.Mutex
-
-	// Both are touched only by this loop (the ticker goroutine below flushes
-	// `pending` under flushMu and never reads these), so plain maps are safe.
-	revokedHere := map[string]struct{}{}
-
-	flush := func() {
-		flushMu.Lock()
-		defer flushMu.Unlock()
-		if len(pending) == 0 {
-			return
+	addPending := func(s *rollSet, testName string, entries []models.MockEntry) {
+		byTest := pending[s]
+		if byTest == nil {
+			byTest = make(map[string][]models.MockEntry, mappingFlushBatch)
+			pending[s] = byTest
 		}
-		if err := r.mappingDb.UpsertBatch(persistCtx, testSetID, pending); err != nil {
+		if _, had := byTest[testName]; !had {
+			pendingTests++
+		}
+		byTest[testName] = mergeMockEntries(byTest[testName], entries)
+	}
+	// reroute moves the parked mappings whose test is now routed to their
+	// set's batch. Caller holds flushMu.
+	// byTime adds entries to the batch of the set each entry's own time
+	// names: for the entry of the calls the agent placed in no test (name
+	// ""), which a recording files by their time, and for a mapping whose
+	// test case never came.
+	byTime := func(testName string, entries []models.MockEntry) {
+		order, groups := roll.groupEntriesByTime(entries)
+		for _, s := range order {
+			addPending(s, testName, groups[s])
+		}
+	}
+	// reroute moves the parked mappings whose test is now routed to their
+	// set's batch, and those whose test case has not come within two
+	// rollovers -- it would have come by then -- to the sets their entries'
+	// times name. Caller holds flushMu.
+	reroute := func() {
+		cuts := roll.cutCount()
+		for name, entries := range parked {
+			if s, ok := roll.setOfTest(name); ok {
+				addPending(s, name, entries)
+			} else if cuts-parkedAt[name] >= 2 {
+				byTime(name, entries)
+			} else {
+				continue
+			}
+			delete(parked, name)
+			delete(parkedAt, name)
+		}
+	}
+
+	flushSet := func(s *rollSet, byTest map[string][]models.MockEntry) {
+		var entries []models.MockEntry
+		if roll.rolls() {
+			for _, es := range byTest {
+				entries = append(entries, es...)
+			}
+			// Every mock a mapping names is in its set before the mapping
+			// is: a replay of the set never meets a name it does not hold.
+			if missing := roll.place(persistCtx, s, entries); len(missing) > 0 {
+				r.logger.Warn("tests of this test set name mocks keploy could not find in any test set of the recording; their replay reports those calls as missing",
+					zap.String("testSetID", s.id), zap.Strings("mocks", missing),
+					zap.String("next_step", "re-record the tests that name them"))
+			}
+		}
+		if err := r.mappingDb.UpsertBatch(persistCtx, s.id, byTest); err != nil {
 			// Deliberately not utils.LogError: it suppresses context.Canceled,
 			// which is exactly the class this write used to fail with, so a lost
 			// batch left no trace at all. A mapping that goes missing here is a
 			// no_mocks failure at replay — it must never be silent again.
-			names := make([]string, 0, len(pending))
-			for tn := range pending {
+			names := make([]string, 0, len(byTest))
+			for tn := range byTest {
 				names = append(names, tn)
 			}
 			sort.Strings(names)
@@ -496,8 +581,30 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 				zap.Strings("tests", names),
 				zap.Error(err),
 				zap.String("next_step", "these tests' mocks will be missing from mappings.yaml and replay will report no_mocks for them; re-record the test set"))
+		} else {
+			roll.mapped(s, entries)
+			// The marks of the worker-mock rules go in right after a write of
+			// the file, never beside one: each rewrites it whole.
+			s.marks.flush(persistCtx, r.mappingDb, s.id, false)
+		}
+	}
+	flush := func() {
+		flushMu.Lock()
+		defer flushMu.Unlock()
+		reroute()
+		if len(pending) == 0 {
+			return
+		}
+		sets := make([]*rollSet, 0, len(pending))
+		for s := range pending {
+			sets = append(sets, s)
+		}
+		sort.Slice(sets, func(i, j int) bool { return sets[i].idx < sets[j].idx })
+		for _, s := range sets {
+			flushSet(s, pending[s])
 		}
 		clear(pending)
+		pendingTests = 0
 	}
 
 	// A partial batch must not sit in memory until the stream closes: recording
@@ -532,14 +639,13 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		// Counted per DISTINCT TEST, not per mapping: the agent emits a test's
 		// mocks as several delta mappings (see the merge note below), so a
 		// per-mapping counter would report more "tests" than the set contains.
-		// A revoked test is excluded — it is deleted at finalize, so it never
+		// A name the set keeps no test under at the end is left out there
+		// (liveRevokes.shortTotals): a revoked test is deleted, so it never
 		// reaches replay with a short pool at all.
 		if uncorrelated > 0 && !lostMock {
-			if _, revoked := revokedHere[testName]; !revoked {
-				prev, _ := shortPoolByTest.Load(testName)
-				n, _ := prev.(int64)
-				shortPoolByTest.Store(testName, n+int64(uncorrelated))
-			}
+			prev, _ := shortPoolByTest.Load(testName)
+			n, _ := prev.(int64)
+			shortPoolByTest.Store(testName, n+int64(uncorrelated))
 		}
 
 		// This test owned at least one mock we could not persist. Replaying it
@@ -547,17 +653,18 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		// product regression, so revoke it the same way the agent's own
 		// capacity-drop path does (RevokedTests) and let finalize delete it.
 		if lostMock {
-			revokedHere[testName] = struct{}{}
-			// Drop whatever an EARLIER delta recorded for this test. The revoke
-			// can arrive after a delta whose mock never came, and a
+			// Drop whatever an EARLIER delta recorded for this capture. The
+			// revoke can arrive after a delta whose mock never came, and a
 			// deleted test never reaches replay with a short pool at all —
 			// leaving the entry in place inflates the very metric whose
 			// credibility is the reason the never-arrived path is not revoked.
 			// (Teardown applies the same exclusion for the agent's own revokes,
-			// keyed on tests it actually managed to DELETE.)
+			// keyed on the tests it actually managed to DELETE.)
 			shortPoolByTest.Delete(testName)
 			if revokeTest != nil {
-				revokeTest(testName)
+				// With the request times of the mocks lost, which tell the
+				// capture the revoke is about (liveRevokes.revokeLost).
+				revokeTest(testName, res.lostAt)
 			}
 		}
 
@@ -573,8 +680,27 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		// resolves and emits more later for mocks retroactively binned into that
 		// window. Those later emissions are a DELTA — overwriting would delete the
 		// mocks already recorded for the test and replay it with a short pool.
-		pending[testName] = mergeMockEntries(pending[testName], realMockEntries)
-		full := len(pending) >= mappingFlushBatch
+		s, routed := roll.setOfTest(testName)
+		switch {
+		case !routed && testName == "":
+			// No test owns these: each goes where its time says.
+			byTime(testName, realMockEntries)
+			full := pendingTests >= mappingFlushBatch
+			flushMu.Unlock()
+			if full {
+				flush()
+			}
+			return
+		case !routed:
+			if _, held := parked[testName]; !held {
+				parkedAt[testName] = roll.cutCount()
+			}
+			parked[testName] = mergeMockEntries(parked[testName], realMockEntries)
+			flushMu.Unlock()
+			return
+		}
+		addPending(s, testName, realMockEntries)
+		full := pendingTests >= mappingFlushBatch
 		flushMu.Unlock()
 
 		// Flush on size only. Draining the channel is the priority: every
@@ -583,6 +709,56 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		// over. The ticker flushes whatever a partial batch leaves behind.
 		if full {
 			flush()
+		}
+	}
+
+	// byCapture holds what settled for a capture id whose test case is not
+	// saved yet (names), one resolution per id, its parts merged.
+	byCapture := map[string]*mappingResolution{}
+	unsaved := 0 // capture ids whose entries were dropped: no saved test case
+	// file applies what settled for the test the agent named key under the
+	// name it was saved with: key itself, or its capture id's test case's
+	// name, once that is decided (names.nameOf).
+	file := func(key string, res mappingResolution) {
+		if names == nil || !models.IsCaptureID(key) {
+			apply(key, res)
+			return
+		}
+		if res.lost {
+			// Revoked under its saved name below; nothing of the id may
+			// wait for the lost mock either.
+			waits.revoke([]string{key})
+		}
+		name, decided := names.nameOf(key)
+		switch {
+		case !decided:
+			held := byCapture[key]
+			if held == nil {
+				byCapture[key] = &res
+				return
+			}
+			held.entries = mergeMockEntries(held.entries, res.entries)
+			held.lost = held.lost || res.lost
+			held.lostAt = append(held.lostAt, res.lostAt...)
+			held.uncorrelated += res.uncorrelated
+		case name == "":
+			unsaved++
+		default:
+			apply(name, res)
+		}
+	}
+	// fileNamed files what byCapture holds for the ids decided since the
+	// last look.
+	fileNamed := func() {
+		for id, res := range byCapture {
+			if name, decided := names.nameOf(id); decided {
+				delete(byCapture, id)
+				if name == "" {
+					unsaved++
+					continue
+				}
+				apply(name, *res)
+			}
 		}
 	}
 
@@ -606,14 +782,15 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 			r.addSettled(res, e.test, e.tempID, entry, fate, e.why, asyncMockIDs)
 		}
 		for _, tn := range order {
-			apply(tn, *byTest[tn])
+			file(tn, *byTest[tn])
 		}
 	}
 
 	// Drain the mapping stream, and the held entries as their mocks arrive,
-	// until the stream is closed and nothing waits.
+	// until the stream is closed and nothing waits: no mock, and no test case
+	// to be saved.
 	in := mappings
-	for in != nil || !waits.settled() {
+	for in != nil || !waits.settled() || len(byCapture) > 0 {
 		select {
 		case mapping, ok := <-in:
 			if !ok {
@@ -622,14 +799,33 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 			}
 			r.frameProgress.Add(1)
 			r.mappingsStreamed.Add(1)
-			entries, lost, uncorrelated := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs, droppedMockIDs, waits)
-			apply(mapping.TestName, mappingResolution{entries: entries, lost: lost, uncorrelated: uncorrelated})
+			file(mapping.TestName, r.resolveMapping(mapping, correlationMap, asyncMockIDs, droppedMockIDs, waits))
 		case <-waits.wakeCh():
 			applyReady()
+		case <-names.wakeCh():
+			fileNamed()
+		case <-roll.wake:
+			flushMu.Lock()
+			reroute()
+			flushMu.Unlock()
 		}
+	}
+	if unsaved > 0 {
+		r.logger.Debug("mapping entries of requests whose test case was not saved are left out: their mocks are saved, in no test's mapping",
+			zap.Int("entries", unsaved), zap.String("testSetID", roll.first().id))
 	}
 
 	// The stream is closed: persist whatever the last partial batch holds.
+	// A test whose test case never came has its mapping go to the set its
+	// mocks' time says, as a recording that does not roll over writes it to
+	// its one set.
+	flushMu.Lock()
+	reroute()
+	for name, entries := range parked {
+		byTime(name, entries)
+		delete(parked, name)
+	}
+	flushMu.Unlock()
 	flush()
 	return nil
 }
@@ -644,6 +840,16 @@ type Recorder struct {
 	testSetConf     TestSetConfig
 	config          *config.Config
 	hooks           RecordHooks
+	// roller, when set (SetRoller), rolls a recording over to new test sets
+	// past a size (Roller).
+	roller Roller
+
+	// console is where the recording names whole what its log names by a
+	// host's shape and tag (a capture loss's destination, a mock.real
+	// connection's other name), beside that tag: keploy's CLI sets its
+	// stdout (SetConsole). nil, as New leaves it, prints nothing: a program
+	// that embeds the recorder, whose stdout may be a log, sets its own.
+	console io.Writer
 
 	// cleanups is run in LIFO order from Start's defer. Downstream
 	// builds and internal subsystems register shutdown work here
@@ -682,6 +888,14 @@ type Recorder struct {
 	// mappingWaitsMade, when set (a test), is handed each recording's mapping
 	// waits as Start makes them, before anything uses them.
 	mappingWaitsMade func(*mappingWaits)
+	// mockStreamLost is set when the agent ended the mock stream without its
+	// end marker (agentEndedDrain), from an agent that marks its end, or while
+	// the recording was still going: a mapping entry whose mock never came is
+	// then a loss, and its test is revoked (mappingWaits.endLost).
+	mockStreamLost atomic.Bool
+	// recording is the context of the recording Start runs: done once its
+	// stop has come, which a frame drain hears of only later (reqCtx).
+	recording atomic.Pointer[recordingCtx]
 	// captureLost is set when a frame drain stopped waiting for what the
 	// agent still held from before the stop, or the mock store could not
 	// write mocks the recording captured (mocksNotWritten): the recording is
@@ -713,6 +927,9 @@ type Recorder struct {
 	// cover, are not counted. Whether one came since the look that said the
 	// agent held something decides if a loss is certain (agentEndedDrain).
 	heldFrames atomic.Uint64
+	// unmapped counts the mapping entries this recording settled with no
+	// mock, by why: its stop says them once (sayUnmapped).
+	unmapped unmappedMocks
 	// mappingsStreamed counts the test-mock mappings the agent handed over
 	// this recording. A recording made without --sync that the agent mapped
 	// itself (enterprise's static dedup resolves its windows in the agent)
@@ -721,6 +938,16 @@ type Recorder struct {
 	// unsupportedBacklogOnce says once that the agent cannot tell what it
 	// still holds.
 	unsupportedBacklogOnce sync.Once
+}
+
+// recordingCtx holds the context of the recording Start runs.
+type recordingCtx struct{ ctx context.Context }
+
+// recordingGoesOn reports whether the recording Start runs has not been
+// stopped: its context is live. False outside Start.
+func (r *Recorder) recordingGoesOn() bool {
+	rc := r.recording.Load()
+	return rc != nil && rc.ctx.Err() == nil
 }
 
 // backlogReader is an agent client that can ask the agent whether it may still
@@ -1095,6 +1322,51 @@ func (r *Recorder) RegisterCleanup(fn func() error) {
 	r.cleanupMu.Unlock()
 }
 
+// testCaseDeleter is what deletes a saved test case of a set: the store's
+// DeleteTests, which the record TestDB interface leaves out (enterprise
+// implements that interface).
+type testCaseDeleter interface {
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+}
+
+// deleteRevoked deletes the revoked test cases names from the test set
+// setID in td, and returns those it deleted. It asks for them all in one
+// call, as a shared loss can revoke thousands and a store may make each call
+// a round trip; when that call fails, it deletes them one by one, so one
+// that cannot be deleted leaves the others deleted. A store's batch may stop
+// part way, so a name it reports gone (fs.ErrNotExist) on the retry counts
+// as deleted: it is not in the set. One that fails is left in the set, said
+// at WARN, and not returned.
+func deleteRevoked(ctx context.Context, logger *zap.Logger, td testCaseDeleter, setID string, names []string) map[string]struct{} {
+	deleted := make(map[string]struct{}, len(names))
+	err := td.DeleteTests(ctx, setID, names)
+	if err == nil {
+		for _, n := range names {
+			deleted[n] = struct{}{}
+		}
+		return deleted
+	}
+	logger.Debug("deferred-orphan revoke: deleting the revoked test cases at once failed; deleting them one by one",
+		zap.String("testSetID", setID), zap.Int("count", len(names)), zap.Error(err))
+	for _, n := range names {
+		if err := td.DeleteTests(ctx, setID, []string{n}); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
+				zap.String("testSetID", setID), zap.String("testCase", n), zap.Error(err))
+			continue
+		}
+		deleted[n] = struct{}{}
+	}
+	return deleted
+}
+
+// savedTestCaseDeleter is the recording's store as a testCaseDeleter, reached
+// by assertion; ok is false for a store that cannot delete a test case it
+// saved, so a revoke from the agent cannot be applied to it.
+func (r *Recorder) savedTestCaseDeleter() (testCaseDeleter, bool) {
+	td, ok := r.testDB.(testCaseDeleter)
+	return td, ok
+}
+
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, hooks RecordHooks, config *config.Config) Service {
 	if hooks == nil {
 		hooks = BaseRecordHooks{}
@@ -1111,6 +1383,10 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 		hooks:           hooks,
 	}
 }
+
+// SetConsole makes w the recording's console (Recorder.console): keploy's
+// CLI sets its stdout. nil prints nothing.
+func (r *Recorder) SetConsole(w io.Writer) { r.console = w }
 
 // afterRecordingComplete invokes the end-of-recording hook (issue #1867). It is
 // best-effort: the recording is already saved, so neither an error NOR a panic
@@ -1164,6 +1440,18 @@ func (r *Recorder) SetRecordHooks(hooks RecordHooks) {
 // reassigned in production code.
 var maxLiveDroppedMockIDs = 10000
 
+// maxLeftOutAtStopMarks bounds how many mocks left out after the stop are
+// marked at once for the mapping entries that name them (leftOutMarker):
+// about 100 bytes each, so under 10 MB. A mark is freed when an entry consumes
+// it, and the mapping drain leaves out the mappings it can tell are of
+// requests after the stop (a dated one, or one of a test case it left out), so
+// most marks of an agent that dates its mappings are never consumed; and the
+// drain of what the agent held before the stop has no time bound.
+//
+// A package-level var, not a const, only so a test can shrink it. Never
+// reassigned in production code.
+var maxLeftOutAtStopMarks = 100000
+
 // droppedMockSet is the set of mock tempIDs the recorder FAILED to persist, so
 // the mapping consumer revokes the test that owns one instead of replaying it
 // with a short mock pool.
@@ -1175,7 +1463,7 @@ var maxLiveDroppedMockIDs = 10000
 // take() removes the ID as it reports it: entries are consumed exactly once,
 // which is what keeps the set from growing across a multi-day recording.
 type droppedMockSet struct {
-	ids  sync.Map // map[string]struct{}
+	ids  sync.Map // map[string]time.Time: each mock's request time
 	live atomic.Int64
 }
 
@@ -1183,10 +1471,16 @@ type droppedMockSet struct {
 // was tracked; false means the set is at capacity and the owning test will NOT
 // be revoked.
 func (d *droppedMockSet) add(tempID string) bool {
+	return d.addAt(tempID, time.Time{})
+}
+
+// addAt is add, with the mock's request time (zero when not known): it tells
+// the capture whose mock it was (liveRevokes.revokeLost).
+func (d *droppedMockSet) addAt(tempID string, at time.Time) bool {
 	if d.live.Load() >= int64(maxLiveDroppedMockIDs) {
 		return false
 	}
-	if _, loaded := d.ids.LoadOrStore(tempID, struct{}{}); !loaded {
+	if _, loaded := d.ids.LoadOrStore(tempID, at); !loaded {
 		d.live.Add(1)
 	}
 	return true
@@ -1194,11 +1488,19 @@ func (d *droppedMockSet) add(tempID string) bool {
 
 // take reports whether tempID is in the set, and removes it.
 func (d *droppedMockSet) take(tempID string) bool {
-	if _, ok := d.ids.LoadAndDelete(tempID); !ok {
-		return false
+	_, ok := d.takeAt(tempID)
+	return ok
+}
+
+// takeAt is take, with the mock's request time addAt was given.
+func (d *droppedMockSet) takeAt(tempID string) (time.Time, bool) {
+	v, ok := d.ids.LoadAndDelete(tempID)
+	if !ok {
+		return time.Time{}, false
 	}
 	d.live.Add(-1)
-	return true
+	at, _ := v.(time.Time)
+	return at, true
 }
 
 // skippedMockMarker tags an asyncMockIDs entry that exists ONLY because a
@@ -1217,7 +1519,8 @@ func (d *droppedMockSet) take(tempID string) bool {
 // the tempID, so a run with mappings disabled (--disable-mapping), or a skipped
 // mock no mapping ever references, retains its entry for the whole session.
 // Those runs are back to the pre-marker growth; the marker helps the common
-// case, it does not cap the worst one.
+// case, it does not cap the worst one. The marks of mocks left out after the
+// stop are leftOutMock instead, and capped (leftOutMarker).
 type skippedMock struct{}
 
 var skippedMockMarker = skippedMock{}
@@ -1236,6 +1539,16 @@ func markSkippedMock(asyncMockIDs *sync.Map, tempID string) {
 	asyncMockIDs.Store(tempID, skippedMockMarker)
 }
 
+// isSkipMarker reports whether v, an asyncMockIDs entry, marks a mock the
+// recording decided not to persist (skippedMock or leftOutMock).
+func isSkipMarker(v any) bool {
+	switch v.(type) {
+	case skippedMock, leftOutMock:
+		return true
+	}
+	return false
+}
+
 // releaseSkippedMock frees a SKIP-marked asyncMockIDs entry once a mapping has
 // consumed it. Ordinary async entries are deliberately left in place.
 //
@@ -1245,8 +1558,14 @@ func markSkippedMock(asyncMockIDs *sync.Map, tempID string) {
 // persisted, so a later mapping referencing a pruned entry simply never
 // correlates: no revoke, no leak, at worst one counter tick at the end.
 func releaseSkippedMock(asyncMockIDs *sync.Map, tempID string, v any) {
-	if _, skipped := v.(skippedMock); skipped {
+	switch m := v.(type) {
+	case skippedMock:
 		asyncMockIDs.Delete(tempID)
+	case leftOutMock:
+		// Counted once, by whichever consumer takes the entry.
+		if _, had := asyncMockIDs.LoadAndDelete(tempID); had {
+			m.live.Add(-1)
+		}
 	}
 }
 
@@ -1268,21 +1587,24 @@ func settleMock(tempID string, correlationMap, asyncMockIDs *sync.Map, droppedMo
 		}
 		return val.(models.MockEntry), fateMapped
 	}
-	if droppedMockIDs.take(tempID) {
+	if at, dropped := droppedMockIDs.takeAt(tempID); dropped {
 		// A dropped ASYNC mock is no short pool for anybody: revoking on it
 		// would delete the healthy test that merely overlapped it in time.
 		if v, isAsync := asyncMockIDs.Load(tempID); isAsync {
 			releaseSkippedMock(asyncMockIDs, tempID, v)
 			return models.MockEntry{}, fateExcluded
 		}
-		return models.MockEntry{}, fateLost
+		// Its request time tells the capture it was lost from.
+		var lost models.MockEntry
+		if !at.IsZero() {
+			lost.ReqTimestampMock = models.FormatMockTimestamp(at)
+		}
+		return lost, fateLost
 	}
 	// A skip is an outcome of its own: the mock is never saved.
-	if v, ok := asyncMockIDs.Load(tempID); ok {
-		if _, skipped := v.(skippedMock); skipped {
-			asyncMockIDs.Delete(tempID)
-			return models.MockEntry{}, fateExcluded
-		}
+	if v, ok := asyncMockIDs.Load(tempID); ok && isSkipMarker(v) {
+		releaseSkippedMock(asyncMockIDs, tempID, v)
+		return models.MockEntry{}, fateExcluded
 	}
 	return models.MockEntry{}, fateUnknown
 }
@@ -1292,6 +1614,9 @@ type mappingResolution struct {
 	entries []models.MockEntry
 	// lost: the test owned a mock we could not persist; it is revoked.
 	lost bool
+	// lostAt are the request times of the mocks lost, a zero one for a mock
+	// that never came: what tells the capture the revoke is about.
+	lostAt []time.Time
 	// uncorrelated counts the mocks of the test that never arrived.
 	uncorrelated int
 }
@@ -1313,29 +1638,49 @@ func (r *Recorder) addSettled(res *mappingResolution, test, tempID string, entry
 		res.entries = append(res.entries, entry)
 	case fateLost:
 		res.lost = true
+		at, _ := models.ParseMockTimestamp(entry.ReqTimestampMock)
+		res.lostAt = append(res.lostAt, at)
 	case fateUnknown:
 		// Deliberately NOT treated as a drop. A drop is a fact — we know the
 		// mock was abandoned. A mock the stream never delivered is not known
 		// to be lost by this recorder, so the test is still persisted, with a
 		// short pool, and counted: the count is reported at teardown and in
 		// telemetry.
+		if why == reasonStreamLost {
+			// The agent ended the mock stream without saying it had sent all
+			// it had: this mock is lost, and a test saved without it fails at
+			// replay as if the app had changed. Revoked, as a mock the
+			// recorder could not save is (the stream's end is said once, at
+			// WARN or ERROR: agentEndedDrain). It never came, so its time is
+			// not known.
+			res.lost = true
+			res.lostAt = append(res.lostAt, time.Time{})
+			r.logger.Debug("revoking a test whose mock the agent never sent before it ended the mock stream",
+				zap.String("test", test),
+				zap.String("tempMockID", tempID))
+			return
+		}
 		res.uncorrelated++
 		if why == reasonRevoked {
 			// The test is deleted at the recording's end (and counted short
 			// there only if its delete fails): no loss to report per mock.
 			r.logger.Debug("not waiting for a revoked test's mock",
-				zap.String("test", test),
 				zap.String("tempMockID", tempID))
 			return
 		}
-		r.logger.Error("Failed to correlate mock mapping",
-			zap.String("test", test),
+		// Said once, counted by why, at the recording's stop (sayUnmapped):
+		// a mapping names about a hundred mocks, and a line for each (an
+		// ERROR, with a stack) pushed everything else out of the log. No
+		// test name: the agent's can be a request's own header.
+		r.unmapped.add(why)
+		r.logger.Debug(unmappedEntryLog,
 			zap.String("tempMockID", tempID),
+			zap.String("why", lossReasonName(why)),
 			zap.String("next_step", lossNextStep(why)))
 	}
 }
 
-// lossNextStep is what a "Failed to correlate" line says of why.
+// lossNextStep is what an entry's debug line says of why it has no mock.
 func lossNextStep(why lossReason) string {
 	switch why {
 	case reasonTaken:
@@ -1359,6 +1704,13 @@ func lossNextStep(why lossReason) string {
 // such an entry is in none of the results. With nil waits the mock stream is
 // taken as over: an entry with no outcome counts as uncorrelated at once.
 func (r *Recorder) resolveMappingEntries(mapping models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits) ([]models.MockEntry, bool, int) {
+	res := r.resolveMapping(mapping, correlationMap, asyncMockIDs, droppedMockIDs, waits)
+	return res.entries, res.lost, res.uncorrelated
+}
+
+// resolveMapping is resolveMappingEntries, whole: with the request times of
+// the mocks lost.
+func (r *Recorder) resolveMapping(mapping models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits) mappingResolution {
 	var res mappingResolution
 	for _, tempID := range mapping.MockIDs {
 		c := waits.claim(mapping.TestName, tempID, func() (models.MockEntry, mockFate) {
@@ -1370,12 +1722,11 @@ func (r *Recorder) resolveMappingEntries(mapping models.TestMockMapping, correla
 		if c.capFirst {
 			r.logger.Warn("too many mapping entries are waiting for their mocks: entries past the cap are not held, and each test that names one is recorded without that mock",
 				zap.Int("maxHeldMappingEntries", maxHeldMappingEntries),
-				zap.String("test", mapping.TestName),
 				zap.String("next_step", "the agent is naming mocks it does not send; re-record the test set and report it"))
 		}
 		r.addSettled(&res, mapping.TestName, tempID, c.entry, c.fate, c.why, asyncMockIDs)
 	}
-	return res.entries, res.lost, res.uncorrelated
+	return res
 }
 
 // GetRecordHooks returns the current hooks.
@@ -1456,6 +1807,10 @@ func recordExitCode(err error) int {
 func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+	// A recording is a session of its own: what its log names by a path tag
+	// it names under a key drawn now, carried in ctx (models.LogKeySession),
+	// unless ctx carries one its embedder began for it.
+	ctx = models.EnsureLogKeySession(ctx)
 	// The recording's own teardown scope (Recorder.teardown).
 	ctx, teardown := utils.NewTeardownScope(ctx)
 	r.teardown.Store(teardown)
@@ -1471,6 +1826,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// A recorder can be started again: this recording has not lost anything
 	// yet.
 	r.captureLost.Store(false)
+	r.mockStreamLost.Store(false)
+	r.recording.Store(&recordingCtx{ctx: ctx})
 	r.mocksLossSaid.Store(false)
 	r.mockWriteStopped.Store(false)
 	r.heldFrames.Store(0)
@@ -1615,6 +1972,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	var newTestSetID string
 	var err error
 	var testCount = 0
+	// refusedTestCount counts the test cases the store refused for their own
+	// payload (models.ErrTestCaseEncode), said when the recording ends. Under
+	// insertedMu, as testCount is.
+	var refusedTestCount = 0
 	var mockCountMap = make(map[string]int)
 	// droppedMockCount / droppedMockKinds are the missing half of mockCountMap,
 	// which only ever counts successes. A mock whose own payload cannot be
@@ -1624,12 +1985,13 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	var droppedMockCount = 0
 	// shortPoolByTest maps a test name to how many of its mocks never
 	// correlated, i.e. tests persisted with an INCOMPLETE mock set (see the
-	// fateUnknown branch in addSettled). Unlike a dropped mock this does
-	// not revoke the test, so without a total the loss shows up only as
-	// scattered per-occurrence log lines. Kept per-test rather than
-	// pre-aggregated so the teardown block can subtract EVERY revoke path — the
-	// agent's RevokedTests control frame revokes tests consumeMappings never
-	// sees, and a revoked test is deleted rather than shipped short.
+	// fateUnknown branch in addSettled). Unlike a dropped mock this does not
+	// revoke the test, so without a total the loss shows up only as scattered
+	// per-occurrence log lines. Kept per-test rather than pre-aggregated so the
+	// teardown block can subtract EVERY revoke path — the agent's RevokedTests
+	// control frame revokes tests consumeMappings never sees, and a revoked
+	// test is deleted rather than shipped short — counting a name only while
+	// the set keeps a test under it (liveRevokes.shortTotals).
 	var shortPoolByTest sync.Map
 	// correlationMap, asyncMockIDs, droppedMockIDs and mappingHolds are what
 	// the mock loop publishes of each mock for the mapping consumer; declared
@@ -1686,21 +2048,34 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	 */
 	var captureStart time.Time
 
-	// Deferred-orphan revoke bookkeeping. revokedNames collects TC names the
-	// agent signalled via Kind=RevokedTests control frames (their owned mock
-	// was capacity-dropped AFTER the TC streamed); insertedNames records which
-	// TCs actually persisted. At finalize we delete the intersection so a
-	// revoke that raced ahead of its TC's persistence is still caught. Both are
-	// written only by the mock/TC consumer goroutines and read at teardown
-	// AFTER those goroutines drain, but the mutexes are cheap insurance against
-	// a force-shutdown teardown racing an in-flight consumer.
-	revokedNames := map[string]struct{}{}
-	var revokedMu sync.Mutex
-	insertedNames := map[string]struct{}{}
+	// insertedMu guards the test-case loop's counts (testCount,
+	// refusedTestCount), which teardown reads and the revokes adjust.
 	var insertedMu sync.Mutex
+	// The names the test cases that came with a capture id were saved under
+	// (captureNames): their mappings and revokes name the capture id.
+	names := newCaptureNames()
+	// live applies each revoke as it comes, to the one capture it is about
+	// (liveRevokes): the agent's RevokedTests frames (a mock it dropped after
+	// it sent the test case), the mapping consumer's own revokes, and a mock
+	// stream the agent ended without its end marker. Started with the
+	// test-case loop, ended at teardown before the revokes left are applied.
+	var live *liveRevokes
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
+	// The marks of the user's worker-mock rules (config record.workerMocks),
+	// written to the set's worker scope as the recording goes; nil without
+	// rules.
+	var workerRules []models.WorkerMockRule
+	if r.config != nil {
+		workerRules = r.config.Record.WorkerMocks
+	}
+	marks := newWorkerMarks(workerRules, r.mappingDb, r.logger)
+	// roll is the recording's test sets: one, unless an embedder's Roller
+	// rolls it over (rollover.go). Its first set is named once there is one
+	// (begin, below).
+	roll := newSetRoll(r.logger, r.roller, r.mockDB, "", windowMaps, marks)
+	roll.streamed = func() bool { return r.mappingsStreamed.Load() > 0 }
 	// The moment the recording is stopped (a stop signal, the record timer,
 	// a caller's cancel each end ctx first) is when the application's
 	// shutdown begins: what it records from then on is the shutdown's
@@ -1708,7 +2083,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	if windowMaps != nil {
 		go func() {
 			<-ctx.Done()
-			windowMaps.noteStop(time.Now())
+			roll.noteStop(time.Now())
 		}()
 	}
 
@@ -1737,9 +2112,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// (keploy injects it), so taking the stack down takes the agent, and
 	// everything it has not handed over yet, with it: at 110 req/s for 30 s
 	// that was the mocks of 1,655 of 3,300 tests. So the agent is drained
-	// first, once (composeDrain): by the stop, before it takes the stack down
-	// (the app keeps running meanwhile, but what it serves after the stop is
-	// not recorded: forwardUntilDrained), or earlier, when the agent says
+	// first, once (composeDrain): by the stop, once keploy has stopped the
+	// app's container and before it takes the stack down (what the app does
+	// as it stops is recorded; one whose stop failed keeps running, but what
+	// it serves after the stop is not recorded: forwardUntilDrained), or
+	// earlier, when the agent says
 	// compose is stopping it (agentGoing: the app exited on its own, or a
 	// container of its project did, and compose stops the project). The agent
 	// then waits for the drain, and goes once its streams close: what it
@@ -1830,11 +2207,16 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// before the stack it is a service of is taken down.
 		composeAgent := r.config.CommandType == string(utils.DockerCompose)
 		if composeAgent {
-			// Under the switch the app's stop is keploy's own and leaves the
-			// agent up (P101-c): the app is stopped first, so what it does as
-			// it stops is recorded with the rest, and the drain then takes
-			// it. Its stop says, in the app's run, whether it had to kill.
-			if s, ok := r.instrumentation.(composeAppStopper); ok && provenswitch.On() {
+			// The app's stop is keploy's own and leaves the agent up, in
+			// every mode: the app is stopped first, so what it does as it
+			// stops is recorded with the rest, and the drain then takes it.
+			// keploy test reads the calls an app makes as it stops, in
+			// every mode, so a stop-time call the recording left out would
+			// be named a miss after the last test at every replay. A native
+			// or docker run app is stopped before its drain as well (the
+			// app's run below). Under the switch its stop says, in the
+			// app's run, whether it had to kill.
+			if s, ok := r.instrumentation.(composeAppStopper); ok {
 				// An app that exited on its own needs no stop.
 				if _, err := s.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
 					r.logger.Warn("keploy could not stop the application's container before saving what the agent captured", zap.Error(err))
@@ -1842,7 +2224,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 			drainComposeAgent(false)
 		}
-		windowMaps.noteStop(time.Now())
+		roll.noteStop(time.Now())
 		runAppCtxCancel()
 		// Waited for while the stop moves (drainProgress): the app's way
 		// out, what the agent captures of it, not a fixed time.
@@ -1868,7 +2250,17 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			why = r.endCut.Load()
 		}
 		if why != nil && recordingStarted && newTestSetID != "" {
-			r.markStopKilled(context.WithoutCancel(ctx), newTestSetID, *why)
+			// The stop cut the recording's end, which is in its newest set.
+			r.markStopKilled(context.WithoutCancel(ctx), roll.last().id, *why)
+		}
+		// The streams have drained: the incoming one's end marker, if the
+		// agent sent it, has been read.
+		if recordingStarted && newTestSetID != "" {
+			// Which set a dropped mock would have gone to is not known: each
+			// set of the recording is marked.
+			for _, s := range roll.all() {
+				r.markMocksDropped(context.WithoutCancel(ctx), s.id)
+			}
 		}
 
 		setupCtxCancel()
@@ -1906,10 +2298,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 			var res mappingResolution
 			r.addSettled(&res, e.test, e.tempID, entry, fate, why, &asyncMockIDs)
-			if res.uncorrelated > 0 {
-				prev, _ := shortPoolByTest.Load(e.test)
+			// Under the name its test case was saved with, when it came
+			// with a capture id; none when that test case was not saved.
+			if test, _ := names.nameOf(e.test); res.uncorrelated > 0 && (test != "" || e.test == "") {
+				prev, _ := shortPoolByTest.Load(test)
 				n, _ := prev.(int64)
-				shortPoolByTest.Store(e.test, n+int64(res.uncorrelated))
+				shortPoolByTest.Store(test, n+int64(res.uncorrelated))
 			}
 		}
 		// A handed-back entry with no mock keeps why it was handed back (the
@@ -1947,6 +2341,25 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 		}
 
+		// The worker-mock rules' marks not written yet (a mock recorded after
+		// the last batch of mappings), once the mapping stream's consumer has
+		// joined (its writes and this one each rewrite the whole mapping
+		// file) and only when the mock store wrote every mock (a worker entry
+		// must name a mock that is on disk). Before the end-of-recording hook,
+		// so a pass it runs over the mappings reads them.
+		if recordingStarted && newTestSetID != "" {
+			for _, s := range roll.all() {
+				switch {
+				case !recordDrainedCleanly:
+					s.marks.lost(s.id, "the record drain timed out, so the mapping file may still be being written")
+				case !storeWrote:
+					s.marks.lost(s.id, "the mock store could not write every mock")
+				default:
+					s.marks.flush(persistCtx, r.mappingDb, s.id, true)
+				}
+			}
+		}
+
 		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
 		// and mock is now drained to disk, so a cross-artifact pass can correlate
 		// them. Best-effort — a failure never invalidates the recording.
@@ -1968,62 +2381,54 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				r.logger.Warn("skipping the end-of-recording hook: the mock store could not write every mock, so the mock file is unfinished",
 					zap.String("testSetID", newTestSetID))
 			default:
-				r.afterRecordingComplete(ctx, newTestSetID)
+				for _, s := range roll.all() {
+					r.afterRecordingComplete(ctx, s.id)
+				}
 			}
 		}
 
-		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
-		// AFTER the TC streamed (the agent signalled them live via RevokedTests
-		// control frames). Applied here — after all inserts drained — so a revoke
-		// that raced ahead of its TC's persistence is still caught by the intersect.
-		// Snapshot both sets under their OWN locks before intersecting. On the
-		// DrainErrGroup TIMEOUT path a wedged consumer goroutine can still be
-		// writing these maps (DrainErrGroup returns after its timeout WITHOUT
-		// joining a goroutine that ignores cancellation — see utils/drain.go),
-		// so an unguarded read here could hit a fatal "concurrent map read and
-		// map write". The two maps are never locked together elsewhere, so
-		// snapshot each independently (lock, copy, unlock) — no nesting, no
-		// ordering hazard.
-		revokedMu.Lock()
-		revokedSnap := make([]string, 0, len(revokedNames))
-		for n := range revokedNames {
-			revokedSnap = append(revokedSnap, n)
+		// Deferred-orphan revoke: a test case whose owned mock was lost after it
+		// was saved is deleted. Most revokes were applied as they came
+		// (liveRevokes), each to the one capture it is about: what is left is
+		// a delete that failed, tried once more here, or a revoke that came as
+		// the recording ended. On the DrainErrGroup TIMEOUT path a wedged
+		// consumer goroutine can still be running (DrainErrGroup returns after
+		// its timeout WITHOUT joining a goroutine that ignores cancellation —
+		// see utils/drain.go); liveRevokes keeps its own lock, so this reads it
+		// safely.
+		_, notRecordedRevoked, toDelete := live.end()
+		if notRecordedRevoked > 0 {
+			r.logger.Info("did not save test cases revoked before they arrived: one of their mocks was lost",
+				zap.Int("testCases", notRecordedRevoked), zap.String("testSetID", newTestSetID))
 		}
-		revokedMu.Unlock()
 
-		// Names whose delete actually SUCCEEDED. A revoke is not always applied:
-		// DeleteTests is reached by runtime assertion because it is deliberately
-		// not on the record TestDB interface, and an individual delete can fail and
-		// warn. A test that stays in the set IS shipped with a short mock pool, so
-		// only a genuinely deleted one may be excluded from the totals below.
-		deletedSet := map[string]struct{}{}
-
-		var toDelete []string
-		insertedMu.Lock()
-		for _, n := range revokedSnap {
-			if _, ok := insertedNames[n]; ok {
-				toDelete = append(toDelete, n)
-			}
-		}
-		insertedMu.Unlock()
+		// A revoke is not always applied: DeleteTests is reached by runtime
+		// assertion because it is deliberately not on the record TestDB
+		// interface, and an individual delete can fail and warn. A test that
+		// stays in the set IS shipped with a short mock pool, so only a capture
+		// genuinely deleted is left out of the totals and the mappings below
+		// (liveRevokes keeps which). Those deleted as their revokes came are
+		// out of testCount already.
 		if len(toDelete) > 0 {
 			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
 			// TestDB interface (enterprise implements that interface; don't break it).
-			// Reach it by runtime assertion; degrade to a warning if unavailable.
-			if td, ok := r.testDB.(interface {
-				DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
-			}); ok {
-				deleted := 0
-				for _, n := range toDelete {
-					if err := td.DeleteTests(ctx, newTestSetID, []string{n}); err != nil {
-						r.logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
-							zap.String("testSetID", newTestSetID), zap.String("testCase", n), zap.Error(err))
+			// Reach it by runtime assertion (savedTestCaseDeleter); degrade to a
+			// warning if unavailable.
+			if td, ok := r.savedTestCaseDeleter(); ok {
+				// Each from the set its capture was saved in.
+				var deletedNow map[string]struct{}
+				for _, in := range live.leftBySet(newTestSetID) {
+					d := deleteRevoked(ctx, r.logger, td, in.set, in.names)
+					live.endDeleted(d)
+					if deletedNow == nil {
+						deletedNow = d
 						continue
 					}
-					deletedSet[n] = struct{}{}
-					deleted++
+					for n := range d {
+						deletedNow[n] = struct{}{}
+					}
 				}
-				if deleted > 0 {
+				if deleted := len(deletedNow); deleted > 0 {
 					// Guard under insertedMu so this decrement can't race the
 					// (possibly still-live, on the drain-timeout path) testCount++
 					// in the TC-insert loop, which now runs under the same lock.
@@ -2042,7 +2447,27 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// The test cases the set keeps are final: map them (a no-op unless
 		// this recording derives its mappings from its test windows).
 		if recordingStarted && newTestSetID != "" {
-			windowMaps.writeFor(persistCtx, r.logger, r.mappingDb, newTestSetID, deletedSet, recordDrainedCleanly, r.mappingsStreamed.Load(), capWatch.mapped)
+			sets := roll.all()
+			if len(sets) > 1 && r.mappingsStreamed.Load() == 0 {
+				// Each set's windows own the mocks inside its tests'
+				// windows (setRoll.rebalanceWindows), and a derived mapping
+				// names only mocks of its set (place, before it is written).
+				roll.rebalanceWindows()
+			}
+			for _, s := range sets {
+				s := s
+				mapped := capWatch.mapped
+				if len(sets) > 1 {
+					mapped = func(test string, entries []models.MockEntry) {
+						capWatch.mapped(test, entries)
+						if missing := roll.place(persistCtx, s, entries); len(missing) > 0 {
+							r.logger.Warn("a test of this test set names mocks keploy could not find in any test set of the recording; its replay reports those calls as missing",
+								zap.String("testSetID", s.id), zap.String("test", test), zap.Strings("mocks", missing))
+						}
+					}
+				}
+				s.windows.writeFor(persistCtx, r.logger, r.mappingDb, s.id, recordDrainedCleanly, r.mappingsStreamed.Load(), mapped)
+			}
 		}
 
 		/*
@@ -2054,9 +2479,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		 * DRAIN-TIMEOUT path DrainErrGroup returns without joining a
 		 * wedged consumer, so the `testCount++` in the TC-insert loop can
 		 * still be live while this defer runs: exactly the hazard the
-		 * revokedNames/insertedNames note above documents, on a plain int
-		 * instead of a map, where the race detector has nothing to trip
-		 * on until it does.
+		 * deferred-orphan revoke note above documents, on a plain int,
+		 * where the race detector has nothing to trip on until it does.
 		 *
 		 * Reading once also makes the three consumers agree. Three
 		 * separate reads of a value another goroutine may still be
@@ -2088,6 +2512,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		 */
 		insertedMu.Lock()
 		testCountSnapshot := testCount
+		refusedSnapshot := refusedTestCount
 		insertedMu.Unlock()
 
 		totalMocks := 0
@@ -2107,34 +2532,32 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// Say it on the way out too, so an operator sees the holes even with
 			// telemetry disabled.
 			// Totalled here, not accumulated as we went, so every revoke path is
-			// accounted for: revokedNames holds both consumeMappings' own revokes
-			// and the agent's RevokedTests frames. Subtract on DELETED, not
+			// accounted for: the counts are kept by capture, and liveRevokes
+			// knows which captures both consumeMappings' own revokes and the
+			// agent's RevokedTests frames deleted. Subtract on DELETED, not
 			// merely revoked — a revoke that could not be applied leaves the test
 			// in the set, still short, so it must stay in the count.
-			shortPoolTests, shortPoolMocks := 0, 0
-			shortPoolByTest.Range(func(k, v any) bool {
-				name, _ := k.(string)
-				if _, gone := deletedSet[name]; gone {
-					return true
-				}
-				shortPoolTests++
-				n, _ := v.(int64)
-				shortPoolMocks += int(n)
-				return true
-			})
+			shortPoolTests, shortPoolMocks := live.shortTotals(&shortPoolByTest)
 			if shortPoolTests > 0 {
 				r.logger.Warn("recording finished with test cases whose mock set is INCOMPLETE: some mocks never correlated to their mapping, and unlike a dropped mock this does not revoke the test — these will fail at replay",
 					zap.Int("testsWithShortMockPool", shortPoolTests),
 					zap.Int("mocksUncorrelated", shortPoolMocks),
 					zap.String("testSetID", newTestSetID),
-					zap.String("next_step", "ensure the mapping store is enabled; each test's \"Failed to correlate mock mapping\" line says why its mock is missing; re-record the test set if this count is non-trivial"))
+					zap.String("next_step", "ensure the mapping store is enabled; the line on mappings that named mocks the recording does not hold says why they are missing; re-record the test set if this count is non-trivial"))
 			}
+			r.sayUnmapped(newTestSetID)
 			if droppedSnapshot > 0 {
 				r.logger.Warn("recording finished with mocks dropped; the tests that owned them were revoked rather than recorded with a short mock pool",
 					zap.Int("mocksDropped", droppedSnapshot),
 					zap.Any("byKind", droppedKindSnapshot),
 					zap.String("testSetID", newTestSetID),
 					zap.String("next_step", "check byKind: an unencodable payload is a parser/encoder bug worth reporting; drops during shutdown are usually I/O and re-recording recovers them"))
+			}
+			if refusedSnapshot > 0 {
+				r.logger.Warn("recording finished without the test cases the store refused: their bodies cannot be stored in this format, and each is said above",
+					zap.Int("testCasesRefused", refusedSnapshot),
+					zap.String("testSetID", newTestSetID),
+					zap.String("next_step", "set storageFormat to yaml and record them again; the yaml encoder stores binary bodies as !!binary without loss"))
 			}
 			suiteMeta := map[string]interface{}{
 				"host-domains": domainSet.ToSlice(),
@@ -2176,6 +2599,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, a second interrupt stopped the saving, or the mock store could not write every mock); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
+		// Test cases stored without a form part's file: every insert is
+		// over (the drains above), so the list is whole.
+		r.sayFormPartsLeftOut(newTestSetID)
 		// Under the proven switch: test cases recorded while the agent could
 		// not capture every call, or that could not be checked, and
 		// connections to a mock.real destination neither captured nor
@@ -2333,7 +2759,19 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Create config.yaml if metadata is provided
 	if r.config.Record.Metadata != "" && r.testSetConf != nil {
 		r.createConfigWithMetadata(ctx, newTestSetID)
+		roll.configure = r.createRolledSetConfig
 	}
+	roll.begin(newTestSetID, func() *windowMappings {
+		if windowMaps == nil {
+			return nil
+		}
+		return r.newWindowMappings()
+	}, func() *workerMarks {
+		if marks == nil {
+			return nil
+		}
+		return newWorkerMarks(workerRules, r.mappingDb, r.logger)
+	})
 
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
 	select {
@@ -2383,7 +2821,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	if r.config.CommandType == string(utils.DockerCompose) {
 
-		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", r.config.Agent.AgentURI))
+		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", pkg.ShownAgentURI(r.config.AgentURI())))
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
@@ -2405,7 +2843,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.AgentURI, agentReadyCh)
 		agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
 		select {
@@ -2470,6 +2908,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		streamCtx = models.WithAgentStopNotice(reqCtx)
 		agentStopping = w.WatchAgentStop(reqCtx)
 	}
+	// A mock the stop's drain leaves out as traffic the app served after the
+	// stop is settled for the mapping entries that name it as one a hook
+	// skipped (leftOutMarker).
+	leftOut := &leftOutMarker{asyncMockIDs: &asyncMockIDs, waits: mappingHolds, logger: r.logger, off: r.config.DisableMapping}
+	streamCtx = withMockLeftOutAtStop(streamCtx, leftOut.mark)
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(streamCtx)
 	if err != nil {
@@ -2487,6 +2930,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// What the agent could not capture is counted from here: the agent is
 	// capturing, and a native app has not started.
 	capWatch = watchCaptureLosses(ctx, r.logger, r.instrumentation)
+	capWatch.setConsole(r.console)
 	if agentStopping != nil {
 		// Compose is stopping the agent (the app exited on its own, or a
 		// container of its project did), and the agent waits for this drain
@@ -2573,8 +3017,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// (recording stop) or when the agent's HTTP server closes the
 	// response. Any error is logged but never fails the recording.
 	if r.config.Record.CapturePackets {
-		destDir := filepath.Join(r.config.Path, newTestSetID)
-		if err := os.MkdirAll(destDir, 0o755); err != nil {
+		destDir, err := pcapDir(r.config.Path, newTestSetID)
+		if err != nil {
 			r.logger.Warn("failed to create test-set dir for pcap stream; continuing without pcap",
 				zap.String("destDir", destDir), zap.Error(err))
 		} else {
@@ -2614,20 +3058,43 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	}
 
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
+	{
+		td, _ := r.savedTestCaseDeleter()
+		live = startLiveRevokes(ctx, r.logger, td, newTestSetID, &insertedMu, &testCount)
+		// A capture deleted gives its test window up (proven, no --sync), and
+		// a mapping entry is held, or not, by the capture its name designates.
+		live.giveWindows(windowMaps)
+		mappingHolds.revokes = live
+	}
 	errGrp.Go(func() error {
+		// Once no test case comes any more, a capture id with no saved test
+		// case has none, and what names it is left out.
+		defer names.end()
 		for testCase := range frames.Incoming {
 			r.frameProgress.Add(1)
+			// The set the test goes to, by its request's time (setRoll).
+			set := roll.test(testCase)
+			capture := live.arrive(testCase)
+			if capture == nil {
+				// One of its mocks is already known lost: saved, it would
+				// fail at replay as if the app had changed. What names its
+				// capture id is left out with it.
+				set.windows.addLostTest(testCase)
+				names.inserted(testCase.CaptureID, "", nil)
+				continue
+			}
+			live.inSet(capture, set.id, set.windows)
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
 			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromTestCase(testCase))
 			if hookErr := r.hooks.BeforeTestCaseInsert(ctx, &TestCaseContext{
-				TestCase: testCase, TestSetID: newTestSetID,
+				TestCase: testCase, TestSetID: set.id,
 			}); hookErr != nil {
 				r.logger.Error("BeforeTestCaseInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
 					zap.Error(hookErr),
-					zap.String("testSetID", newTestSetID),
+					zap.String("testSetID", set.id),
 					zap.String("testCaseName", testCase.Name))
 			}
 			/*
@@ -2665,11 +3132,35 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			 * it fail, so the `continue` really is taken.
 			 */
 			uiJoinObserved.observe(testCase.AppPort)
-			err := r.testDB.InsertTestCase(persistCtx, testCase, newTestSetID, true)
-			// After the insert, which is what names an auto-named test case.
+			// A save and a revoke's delete under one name never overlap
+			// (liveRevokes.saving).
+			heldName := testCase.Name
+			live.saving(capture, heldName)
+			err := r.testDB.InsertTestCase(persistCtx, testCase, set.id, true)
+			// After the insert, which is what names an auto-named test case:
+			// a revoke from now on names it by that name too, and one that came
+			// while it was saved deletes it (liveRevokes); then what names its
+			// capture id is filed under that name (captureNames). liveRevokes is
+			// told first, so it knows the capture under its saved name before
+			// the mapping consumer can name it; a revoke under that name that
+			// comes first anyway is applied as the save is told (saved).
+			live.saved(capture, heldName, testCase, err)
+			if err == nil {
+				roll.saved(testCase, set)
+			}
+			names.inserted(testCase.CaptureID, testCase.Name, err)
 			unreachablePorts.check(ctx, testCase)
 			if err != nil {
-				windowMaps.addLostTest(testCase)
+				set.windows.addLostTest(testCase)
+				if errors.Is(err, models.ErrTestCaseEncode) {
+					// THIS test case's body, not the storage: the store said so
+					// at ERROR, and the next test case may be fine. As for an
+					// unencodable mock, one such body must not end the recording.
+					insertedMu.Lock()
+					refusedTestCount++
+					insertedMu.Unlock()
+					continue
+				}
 				if ctx.Err() != nil {
 					// Once shutdown has begun nothing reads insertTestErrChan:
 					// Start's select has already returned, and this loop keeps
@@ -2679,7 +3170,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					// error here is real and the operator needs it.
 					utils.LogError(r.logger, err, "failed to record test case during shutdown",
 						zap.String("testCaseName", testCase.Name),
-						zap.String("testSetID", newTestSetID))
+						zap.String("testSetID", set.id))
 					continue
 				}
 				// Non-blocking for the same reason as the mock loop's sibling
@@ -2695,24 +3186,25 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				default:
 				}
 			} else {
-				// testCount and insertedNames are both TC-insert state; write
-				// them under one insertedMu section so the finalize revoke block
-				// (which reads insertedNames and adjusts testCount, possibly
-				// while this goroutine is still live on the drain-timeout path)
-				// can't race them.
+				// Under insertedMu: the revokes' deletes and the finalize
+				// block (possibly while this goroutine is still live on the
+				// drain-timeout path) adjust and read it.
 				insertedMu.Lock()
 				testCount++
-				insertedNames[testCase.Name] = struct{}{}
 				insertedMu.Unlock()
-				windowMaps.addTest(testCase)
+				live.placed(capture, set.windows.addTest(testCase))
+				// Its mapping goes to its set by the name it was saved
+				// under, and the calls it made after a cut it was in flight
+				// at are its set's too (setRoll).
+				roll.straddled(persistCtx, testCase, set)
 				capWatch.afterTestCase(ctx, testCase.Name)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
-					TestCase: testCase, TestSetID: newTestSetID,
+					TestCase: testCase, TestSetID: set.id,
 				}); hookErr != nil {
 					r.logger.Error("AfterTestCaseInsert hook failed; test case was recorded successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
 						zap.Error(hookErr),
-						zap.String("testSetID", newTestSetID),
+						zap.String("testSetID", set.id),
 						zap.String("testCaseName", testCase.Name))
 				}
 			}
@@ -2722,16 +3214,25 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	errGrp.Go(func() error {
 		// The document the MockDB writes for each mock, for AfterMockInsert.
-		insertedDoc := NewInsertedMockDoc(persistCtx, r.hooks)
+		// A recording that may roll over is handed every document, to count
+		// its sets' bytes and carry what the next set needs (setRoll.wrote).
+		insertedDoc := insertedDocFor(persistCtx, r.hooks, roll.rolls())
 		// No mock comes after this loop: a mapping entry still waiting for
-		// one is settled as never arrived.
-		defer mappingHolds.end()
+		// one is settled as never arrived, and as lost (its test revoked)
+		// when the agent ended the stream without its end marker.
+		defer func() {
+			if r.mockStreamLost.Load() {
+				mappingHolds.endLost()
+				return
+			}
+			mappingHolds.end()
+		}()
 		// dropMock publishes that the recorder failed to save tempID's mock,
 		// then tells the waits. It reports whether the drop is tracked (its
 		// test revocable): past maxLiveDroppedMockIDs it is not, and an entry
 		// held for it is settled as lost for that reason.
-		dropMock := func(tempID string) bool {
-			if droppedMockIDs.add(tempID) {
+		dropMock := func(tempID string, at time.Time) bool {
+			if droppedMockIDs.addAt(tempID, at) {
 				mappingHolds.arrived(tempID)
 				return true
 			}
@@ -2749,26 +3250,27 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				if mock.Spec.Metadata != nil {
 					for _, n := range strings.Split(mock.Spec.Metadata["revoked_tests"], ",") {
 						if n = strings.TrimSpace(n); n != "" {
-							revokedMu.Lock()
-							revokedNames[n] = struct{}{}
-							revokedMu.Unlock()
 							revoked = append(revoked, n)
 						}
 					}
 				}
-				// A revoked test is deleted at the end: its mapping still names
-				// the mock the agent dropped and never sends, so nothing of it
-				// may wait for that mock (and count toward the waits' cap).
-				mappingHolds.revoke(revoked)
+				// Deleted now when saved, and not saved when it comes later. Its
+				// mapping still names the mock the agent dropped and never
+				// sends, so nothing of it may wait for that mock (and count
+				// toward the waits' cap): its held entries are let go, and a
+				// later entry under its name is not held (heldOut).
+				mappingHolds.revoke(live.revokeByAgent(revoked...))
 				continue
 			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
-			mockCtx := &MockContext{Mock: mock, TestSetID: newTestSetID}
+			// The set the mock goes to, by its request's time (setRoll).
+			set := roll.mock(mock)
+			mockCtx := &MockContext{Mock: mock, TestSetID: set.id}
 			if hookErr := r.hooks.BeforeMockInsert(ctx, mockCtx); hookErr != nil {
 				r.logger.Error("BeforeMockInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
 					zap.Error(hookErr),
-					zap.String("testSetID", newTestSetID),
+					zap.String("testSetID", set.id),
 					zap.String("mockName", mock.Name),
 					zap.String("mockKind", mock.GetKind()))
 			}
@@ -2794,7 +3296,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			if mock.IsAsync() {
 				asyncMockIDs.Store(tempID, struct{}{})
 			}
-			encoded, encodedFormat, err := insertedDoc.Insert(r.mockDB, mock, newTestSetID)
+			encoded, encodedFormat, err := insertedDoc.Insert(r.mockDB, mock, set.id)
 			if err != nil {
 				if ctx.Err() != nil {
 					// See the sibling note on the test-case insert: insertMockErrChan
@@ -2812,11 +3314,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					droppedMockCount++
 					droppedMockKinds[mock.GetKind()]++
 					mockCountMapMu.Unlock()
-					dropMock(tempID)
+					dropMock(tempID, mock.Spec.ReqTimestampMock)
 					utils.LogError(r.logger, err, "failed to record mock during shutdown",
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()),
-						zap.String("testSetID", newTestSetID))
+						zap.String("testSetID", set.id))
 					continue
 				}
 				if errors.Is(err, models.ErrMockEncode) {
@@ -2834,7 +3336,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					mockCountMapMu.Unlock()
 					// Tell the mapping consumer so it revokes the owning test
 					// instead of recording it short.
-					tracked := dropMock(tempID)
+					tracked := dropMock(tempID, mock.Spec.ReqTimestampMock)
 					// Loud on the first, then sampled: a recording that quietly
 					// grows holes is worse than one that dies, so this must stay
 					// visible without drowning the log on a systematic failure.
@@ -2842,7 +3344,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 						utils.LogError(r.logger, err, "dropping ONE unencodable mock and CONTINUING to record; the test that owns it is revoked, not recorded short",
 							zap.String("mockName", mock.Name),
 							zap.String("mockKind", mock.GetKind()),
-							zap.String("testSetID", newTestSetID),
+							zap.String("testSetID", set.id),
 							zap.Int("mocksDroppedSoFar", dropped),
 							zap.Bool("ownerRevocable", tracked))
 					}
@@ -2862,12 +3364,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				droppedMockKinds[mock.GetKind()]++
 				dropped := droppedMockCount
 				mockCountMapMu.Unlock()
-				dropMock(tempID)
+				dropMock(tempID, mock.Spec.ReqTimestampMock)
 				if dropped == 1 || dropped%100 == 0 {
 					utils.LogError(r.logger, err, "failed to record mock (environmental); stopping the session",
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()),
-						zap.String("testSetID", newTestSetID),
+						zap.String("testSetID", set.id),
 						zap.Int("mocksDroppedSoFar", dropped))
 				}
 				// The send must not block: once the buffer filled, a blocking
@@ -2883,12 +3385,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				}
 			} else {
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
-					Mock: mock, TestSetID: newTestSetID,
+					Mock: mock, TestSetID: set.id,
 					Encoded: encoded, EncodedFormat: encodedFormat,
 				}); hookErr != nil {
 					r.logger.Error("AfterMockInsert hook failed; mock was inserted successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
 						zap.Error(hookErr),
-						zap.String("testSetID", newTestSetID),
+						zap.String("testSetID", set.id),
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()))
 				}
@@ -2907,27 +3409,38 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					// settles on what it now finds.
 					mappingHolds.arrived(tempID)
 				}
-				windowMaps.addMock(mock)
+				var windowed *models.WindowedMock
+				if set.windows != nil {
+					wm := models.NewWindowedMock(mock)
+					set.windows.addWindowed(wm)
+					windowed = &wm
+				}
+				mark := set.marks.add(mock)
+				roll.wrote(persistCtx, set, mock, encoded, encodedFormat, mark, windowed)
 				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
 				mockCountMapMu.Unlock()
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+				// The set is full: what is captured from now on goes to
+				// the next. Not once the recording is stopping, which only
+				// drains what was captured before the stop.
+				if ctx.Err() == nil && roll.due() {
+					roll.cut(persistCtx)
+				}
 			}
 		}
 		return nil
 	})
 
 	errGrp.Go(func() error {
-		return r.consumeMappingsFor(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs, &droppedMockIDs, mappingHolds,
-			func(testName string) {
-				// Reuse the deferred-orphan revoke path the agent's own
-				// capacity-drop uses: finalize deletes these test cases instead
-				// of letting them reach replay without their mocks.
-				revokedMu.Lock()
-				revokedNames[testName] = struct{}{}
-				revokedMu.Unlock()
-				mappingHolds.revoke([]string{testName})
-			}, &shortPoolByTest, capWatch.mapped)
+		return r.consumeMappingsIn(ctx, roll, frames.Mappings, &correlationMap, &asyncMockIDs, &droppedMockIDs, mappingHolds,
+			func(testName string, lostAt []time.Time) {
+				// The test case the lost mocks were of is deleted as soon as
+				// it is saved (liveRevokes.revokeLost), told by the mocks'
+				// request times, instead of reaching replay without them. A
+				// name the revoke kills has its held entries let go.
+				mappingHolds.revoke(live.revokeLost(testName, lostAt))
+			}, &shortPoolByTest, capWatch.mapped, names)
 	})
 
 	// Every frame channel now has a reader, so the shutdown hand-over can no
@@ -3021,6 +3534,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	return fmt.Errorf("%s: %w", stopReason, err)
 }
 
+// hasMappingTestName reports whether name carries a non-blank test identity
+// that can key postStopTests or recordedTests across a stop drain. Empty and
+// whitespace-only names represent unnamed captures and must never key either
+// map.
+func hasMappingTestName(name string) bool {
+	return strings.TrimSpace(name) != ""
+}
+
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// This recording's streams end by the agent's markers when it can
 	// (stream_end.go): its token names them to the agent.
@@ -3032,7 +3553,8 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	ctx = models.WithStreamEndToken(ctx, ends.token)
 
 	incomingOpts := models.IncomingOptions{
-		Filters: r.config.Record.Filters,
+		Filters:            r.config.Record.Filters,
+		IgnoreStaticAssets: r.config.Record.IgnoreStaticAssets,
 	}
 
 	// Create channels to receive incoming and outgoing data.
@@ -3074,6 +3596,13 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// that only their forwarders end. framesDrained closes when both have
 	// ended: the mapping drain waits for it (see MAPPINGS).
 	framesDrained := make(chan struct{})
+	// The stop's cut-off, one for the three drains (stopCut), fixed as the
+	// stop comes: a drain that is handing a frame to a consumer still
+	// persisting the last one sees the stop only once the consumer takes
+	// it, and fixed by the first drain to look, the cut came after every
+	// request made meanwhile, and those were recorded.
+	cut := &stopCut{}
+	context.AfterFunc(ctx, func() { cut.at() })
 	// Under docker compose the app runs on while the agent drains (Start's
 	// stop): what it serves after the stop is not recorded. postStopTests
 	// names the test cases left out for it, and recordedTests those handed to
@@ -3147,22 +3676,36 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			kind:        "test cases",
 			stream:      models.TestCaseStream,
 			ends:        ends,
+			cut:         cut,
 		}
 		if appRunsOn {
 			// A test case the app served after the stop is not part of the
 			// recording: its mocks may come after the drain has ended, and
 			// saved without them it would fail replay. An undated one
 			// (testCaseCapturedAt) cannot be told from one, and is left out
-			// too. Neither is its mapping (MAPPINGS).
+			// too. Neither is its mapping (MAPPINGS). Unnamed (empty or
+			// whitespace-only) test cases carry no identity to key
+			// postStopTests by: storing "" or whitespace would drop in-flight
+			// pre-stop unnamed mappings before framesDrained closes.
 			opts.afterStop = func(tc *models.TestCase) {
-				postStopTests.Store(tc.Name, struct{}{})
+				if name := tc.AgentName(); hasMappingTestName(name) {
+					postStopTests.Store(name, struct{}{})
+				}
 				r.logger.Debug("not recording a test case served after the stop", zap.String("testCaseName", tc.Name))
 			}
 			// Keyed by the name the test case is handed over with: the
-			// agent's, which its mappings carry. Read before the hand-off,
-			// since the consumer's insert names an unnamed test case in place.
+			// agent's, which its mappings carry (its capture id when it came
+			// with one). Read before the hand-off, since the consumer's insert
+			// names an unnamed test case in place. Unnamed (empty or
+			// whitespace-only) test cases carry no identity to key
+			// recordedTests by: storing blank names makes later unnamed
+			// post-stop mappings look recorded after framesDrained and reset
+			// mappingIdleGrace indefinitely.
 			opts.handing = func(tc *models.TestCase) func() {
-				name := tc.Name
+				name := tc.AgentName()
+				if !hasMappingTestName(name) {
+					return func() {}
+				}
 				return func() { recordedTests.Store(name, struct{}{}) }
 			}
 		}
@@ -3222,6 +3765,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		return FrameChan{}, fmt.Errorf("failed to hand keploy's agent mock.real: %w", err)
 	}
 
+	_, canDelete := r.savedTestCaseDeleter()
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:                     r.config.BypassRules,
 		MongoPassword:             r.config.Test.MongoPassword,
@@ -3243,7 +3787,21 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// control frame: it diverts such a frame into a revoke set and deletes
 		// those deferred-orphan test cases at finalize instead of persisting it
 		// as a mock. The agent emits revoke frames ONLY when this is true.
-		SupportsDroppedRevoke: true,
+		// Only a store that can delete a test case it saved can apply one
+		// (savedTestCaseDeleter): with any other, a revoked test case stays
+		// in the set, so the agent is told the client cannot delete, and
+		// says that the test cases it sent stay instead of that they were
+		// revoked.
+		SupportsDroppedRevoke: canDelete,
+		// And that it finds a revoked test case the agent sent with no name
+		// (the async capture names none; this client names it as it saves
+		// it) by its request time (liveRevokes).
+		SupportsRevokeByRequest: canDelete,
+		// And that it reads capture ids: it files what the agent names by a
+		// test case's capture id under the name it saves that test case with
+		// (captureNames), so a request captured without --sync is mapped to
+		// its own test case.
+		SupportsCaptureIDs: true,
 	})
 	if err != nil {
 
@@ -3284,13 +3842,27 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			kind:        "mocks",
 			stream:      models.MockStream,
 			ends:        ends,
+			cut:         cut,
 		}
 		if appRunsOn {
 			// Traffic the app serves after the stop is not recorded: a mock
 			// requested after it belongs to a test case that is not (a recorded
 			// one ended before the stop, and so did its mocks). An undated
 			// mock is kept: at worst it is a mock no test case uses.
+			//
+			// The recording is told of each one it leaves out
+			// (withMockLeftOutAtStop): the agent still names it in the mapping
+			// of its request. An agent that does not date its mappings
+			// (models.TestMockMapping.RequestedAt) sends that mapping undated,
+			// and the mapping drain hands it on when it cannot tell it is of a
+			// request after the stop: an unnamed one (an async capture) until
+			// the frame drains end, a named one that comes before its test case
+			// is judged. Without this, each of its entries was settled as a
+			// mock the recording lost.
 			opts.afterStop = func(*models.Mock) {}
+			if leftOut := mockLeftOutAtStop(ctx); leftOut != nil {
+				opts.afterStop = leftOut
+			}
 			opts.keepUndated = true
 		}
 		forwardUntilDrained(ctx, r, outgoingStream, outgoingChan, abandoned, opts)
@@ -3335,6 +3907,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// is through.
 		mapCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
+		// leftOut counts the mappings of requests made after the stop that
+		// were left out (below): said once, at debug, with no test name.
+		leftOut := 0
+		defer func() {
+			if leftOut > 0 {
+				r.logger.Debug("left out the mappings of requests the app served after the stop", zap.Int("mappings", leftOut))
+			}
+		}()
 
 		// lastMapping is when the stream last delivered a mapping, or a
 		// hand-over to the consumer ended (UnixNano); handing is set while one
@@ -3514,13 +4094,20 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					return nil
 				}
 				if appRunsOn && ctx.Err() != nil {
-					// A mapping of a test case served after the stop is not
-					// recorded. Once the test-case drain is over, every test
-					// case recorded has been handed on, so a mapping of any
-					// other one is left out.
+					// A mapping of a request made after the stop is not
+					// recorded: one the agent dated after the stop's cut-off
+					// (the one the test-case drain judges by), or one of a
+					// test case served after it. Once the test-case drain is
+					// over, every test case recorded has been handed on, so a
+					// mapping of any other one is left out too, and so is one
+					// that names no test (an unnamed test case is named only
+					// as it is saved: no mapping can name it). None of these
+					// is waited for or moves the quiet bound: an app that goes
+					// on serving after the stop does not hold its save open.
 					_, after := postStopTests.Load(m.TestName)
 					_, recorded := recordedTests.Load(m.TestName)
-					if after || (framesDone && !recorded) {
+					if mappingAfterStop(m, cut.at()) || after || (framesDone && (!recorded || m.TestName == "")) {
+						leftOut++
 						continue
 					}
 				}
@@ -3682,4 +4269,57 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+// pcapDir makes the folder a record's packet capture is streamed to, the test
+// set's, <keploy folder>/<set>, and returns it. The keploy folder is made and
+// opened from the project (utils.MkdirOpenRecordingDir), and the set's folder
+// only inside it: a keploy folder or set that is a link out is refused with
+// why, and no folder is made where it leads. The keploy folder is the root,
+// not the set's folder, so a set's name, even keploy, never decides where the
+// project is.
+func pcapDir(keployDir, set string) (string, error) {
+	destDir := filepath.Join(keployDir, set)
+	r, err := utils.MkdirOpenRecordingDir(keployDir, 0o755)
+	if err != nil {
+		return destDir, err
+	}
+	defer func() { _ = r.Close() }()
+	if err := r.MkdirAll(set, 0o755); err != nil {
+		refused := fmt.Sprintf("the test set's folder %q is made only inside %q", set, keployDir)
+		if out := linkout.Explain(r, keployDir, set, refused, err); out != nil {
+			return destDir, out
+		}
+		return destDir, fmt.Errorf("%s: %w", refused, err)
+	}
+	return destDir, nil
+}
+
+// sayFormPartsLeftOut says once, where the recording ends, each form file
+// part a test case of this recording was stored without, by test case, part
+// and the path the part named: such a test case replays without that file.
+// The test store keeps the list (testdb.TestYaml); one that keeps none has
+// nothing to say here.
+func (r *Recorder) sayFormPartsLeftOut(testSetID string) {
+	td, ok := r.testDB.(interface {
+		TakeFormPartsLeftOut() ([]models.FormPartLeftOut, int)
+	})
+	if !ok {
+		return
+	}
+	parts, more := td.TakeFormPartsLeftOut()
+	if len(parts) == 0 && more == 0 {
+		return
+	}
+	said := make([]string, 0, len(parts))
+	for _, p := range parts {
+		said = append(said, p.String())
+	}
+	r.logger.Error("recording summary: test cases were stored without a form part's file, and replay without it",
+		zap.String("testSetID", testSetID),
+		zap.Int("parts", len(parts)+more),
+		zap.Strings("stored_without", said),
+		zap.Int("not_listed", more),
+		zap.String("why", "each part named no file a capture of this run left, carried no contents, and its path names no file in the recording"),
+		zap.String("next_step", "re-record these test cases with the parts' files sent"))
 }

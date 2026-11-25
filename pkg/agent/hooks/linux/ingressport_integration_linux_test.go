@@ -132,6 +132,15 @@ func holdCgroup(t *testing.T) string {
 	return cg
 }
 
+// armPark puts h's park in the lookup (ArmIngressPark), as the ingress
+// manager does as its accept loop on it starts.
+func armPark(t *testing.T, h *Hooks) {
+	t.Helper()
+	if err := h.ArmIngressPark(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // refusedPort dials port and fails the test unless it is refused.
 func refusedPort(t *testing.T, port uint16, what string) {
 	t.Helper()
@@ -169,6 +178,7 @@ func TestAMovedPortIsHeldByTheParkUntilItsForwarderListens(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h.startIngressHold(ctx, holdCgroup(t))
+	armPark(t, h) // as the ingress manager does as its accept loop starts
 	if !h.IngressHeld() {
 		t.Fatal("the hold did not start on this kernel")
 	}
@@ -311,6 +321,7 @@ func TestAPortWhoseSocketWentIsNotHeld(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h.startIngressHold(ctx, cg)
+	armPark(t, h) // as the ingress manager does as its accept loop starts
 	if !h.IngressHeld() {
 		t.Fatal("the hold did not start on this kernel")
 	}
@@ -329,7 +340,7 @@ func TestAPortWhoseSocketWentIsNotHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = cgf.Close() }()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd := exec.Command(appExe(), "-test.run=^$")
 	cmd.Env = append(os.Environ(), ingressSockHelperEnv+"=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd()), Pdeathsig: syscall.SIGKILL}
 	stdin, _ := cmd.StdinPipe()
@@ -422,6 +433,7 @@ func TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h.startIngressHold(ctx, holdCgroup(t))
+	armPark(t, h) // as the ingress manager does as its accept loop starts
 	if !h.IngressHeld() {
 		t.Fatal("the hold did not start on this kernel")
 	}
@@ -473,6 +485,7 @@ func TestTheHoldClosesOnlyBetweenItsCalls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h.startIngressHold(ctx, holdCgroup(t))
+	armPark(t, h) // as the ingress manager does as its accept loop starts
 	if !h.IngressHeld() {
 		t.Fatal("the hold did not start")
 	}
@@ -545,6 +558,7 @@ func TestTheHoldReadsTheIPv6AddressesTheAppsBindsTake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h.startIngressHold(ctx, holdCgroup(t))
+	armPark(t, h) // as the ingress manager does as its accept loop starts
 	if !h.IngressHeld() {
 		t.Fatal("the hold did not start")
 	}
@@ -615,6 +629,7 @@ func TestTheLookupParksWhereTheGoNotesSayTheAppsSocketsTakeCalls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h.startIngressHold(ctx, holdCgroup(t))
+	armPark(t, h) // as the ingress manager does as its accept loop starts
 	if !h.IngressHeld() {
 		t.Fatal("the hold did not start")
 	}

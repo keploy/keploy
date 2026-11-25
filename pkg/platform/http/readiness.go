@@ -17,14 +17,14 @@ import (
 // from since on and of its start's progress (GET /app/readiness?since=N,
 // under the proven switch). An error is "unknown", never "not ready".
 func (a *AgentClient) AppReadiness(ctx context.Context, since uint64) (models.AppReadiness, error) {
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return models.AppReadiness{}, errors.New("no keploy agent to ask")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/app/readiness?since="+strconv.FormatUint(since, 10), nil)
+	req, err := newAgentRequest(ctx, http.MethodGet, a.conf.AgentURI()+"/app/readiness?since="+strconv.FormatUint(since, 10), nil)
 	if err != nil {
 		return models.AppReadiness{}, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.AppReadiness{}, fmt.Errorf("ask the agent whether the application listens: %w", err)
 	}
@@ -53,14 +53,14 @@ func (a *AgentClient) AppReadiness(ctx context.Context, since uint64) (models.Ap
 // processes did, and answers the counts its listens begin after. 404/501 is
 // an agent that cannot (models.ErrReadinessUnsupported).
 func (a *AgentClient) MarkReadiness(ctx context.Context) (models.AppReadiness, error) {
-	if a.conf.Agent.AgentURI == "" {
+	if a.conf.AgentURI() == "" {
 		return models.AppReadiness{}, errors.New("no keploy agent to ask")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/app/readiness/mark", nil)
+	req, err := newAgentRequest(ctx, http.MethodPost, a.conf.AgentURI()+"/app/readiness/mark", nil)
 	if err != nil {
 		return models.AppReadiness{}, err
 	}
-	res, err := a.client.Do(req)
+	res, err := doAgent(&a.client, req)
 	if err != nil {
 		return models.AppReadiness{}, fmt.Errorf("mark the set's start on the agent: %w", err)
 	}

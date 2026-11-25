@@ -306,6 +306,9 @@ func mocksOf(mocks []*models.Mock, op string) []*models.Mock {
 func TestRecordV2_UndecodableResponseIsLeftOut(t *testing.T) {
 	t.Parallel()
 	next := cannedCOMQuery(t, 0, "SELECT 1")
+	// The query after it confirms the one taken up after the exchange left
+	// out (takenUp): the end of the connection would not.
+	confirming := cannedCOMQuery(t, 0, "SELECT 2")
 	for _, c := range undecodableCases() {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -319,11 +322,13 @@ func TestRecordV2_UndecodableResponseIsLeftOut(t *testing.T) {
 				}
 				h.pushClient(next, at())
 				h.pushDest(wrapPacket([]byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 1), at())
+				h.pushClient(confirming, at())
+				h.pushDest(wrapPacket([]byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 1), at())
 			})
-			// The query after the exchange is told from it by its text.
+			// The queries after the exchange are told from it by their text.
 			var recorded, after []*models.Mock
 			for _, m := range mocksOf(got, c.op) {
-				if qp, ok := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket); ok && qp.Query == "SELECT 1" {
+				if qp, ok := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket); ok && (qp.Query == "SELECT 1" || qp.Query == "SELECT 2") {
 					continue
 				}
 				recorded = append(recorded, m)

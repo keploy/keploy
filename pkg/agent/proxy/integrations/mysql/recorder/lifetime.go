@@ -232,11 +232,25 @@ var sessionStateFuncs = map[string]bool{
 	"connection_id": true,
 }
 
+// serverSetupFuncs are the functions whose IS test over arguments that are
+// themselves session state (literals, system variables) reads only how the
+// server is set up: CONVERT_TZ(...) IS NOT NULL of literal times and zone
+// names answers by whether the server's time-zone tables are loaded. Django's
+// MySQL backend asks it on every new connection, beside VERSION() and the
+// connection's system variables (DatabaseWrapper.mysql_server_data). Only
+// under IS: the converted value itself is an app's data (a booking's time in
+// the guest's zone), and served to another test it would answer with the
+// wrong time.
+var serverSetupFuncs = map[string]bool{
+	"convert_tz": true,
+}
+
 // sessionStateSelect reports whether s reads nothing but system variables
-// (@@...), literals (a pool's SELECT 1) and the connection's identity
-// (sessionStateFuncs), from no table (or DUAL). Anything else, a table, a
-// user variable, NOW(), UUID(), LAST_INSERT_ID() or an expression, may carry
-// one test's data, and is not.
+// (@@...), literals (a pool's SELECT 1), the connection's identity
+// (sessionStateFuncs), and IS tests of these and of a server-setup probe
+// (serverSetupProbe), from no table (or DUAL). Anything else, a table, a user variable,
+// NOW(), UUID(), LAST_INSERT_ID() or any other expression, may carry one
+// test's data, and is not.
 func sessionStateSelect(s *sqlparser.Select) bool {
 	if s.With != nil || s.Into != nil || s.Where != nil || s.GroupBy != nil || s.Having != nil || s.SelectExprs == nil {
 		return false
@@ -269,8 +283,32 @@ func sessionStateExpr(e sqlparser.Expr) bool {
 		return x.Scope != sqlparser.VariableScope && !valueVariables[x.Name.Lowered()]
 	case *sqlparser.Literal, *sqlparser.NullVal, sqlparser.BoolVal:
 		return true
+	case *sqlparser.IsExpr:
+		// IS [NOT] NULL / TRUE / FALSE of session state is session state, and
+		// so is an IS test of a server-setup probe (serverSetupFuncs).
+		if f, ok := x.Left.(*sqlparser.FuncExpr); ok && serverSetupProbe(f) {
+			return true
+		}
+		return sessionStateExpr(x.Left)
 	case *sqlparser.FuncExpr:
-		return x.Qualifier.IsEmpty() && len(x.Exprs) == 0 && sessionStateFuncs[x.Name.Lowered()]
+		if !x.Qualifier.IsEmpty() {
+			return false
+		}
+		return len(x.Exprs) == 0 && sessionStateFuncs[x.Name.Lowered()]
 	}
 	return false
+}
+
+// serverSetupProbe reports whether f is a server-setup function
+// (serverSetupFuncs) over arguments that are all session state.
+func serverSetupProbe(f *sqlparser.FuncExpr) bool {
+	if !f.Qualifier.IsEmpty() || len(f.Exprs) == 0 || !serverSetupFuncs[f.Name.Lowered()] {
+		return false
+	}
+	for _, arg := range f.Exprs {
+		if !sessionStateExpr(arg) {
+			return false
+		}
+	}
+	return true
 }

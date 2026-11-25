@@ -70,7 +70,7 @@ sudo_env_is other-keploy-name "KEPLOY_PROVEN=1|KEPLOY_EXACT_VIEW_VERIFY=1" "KEPL
 # KEPLOY_TEST_ switches, which go-test.yaml names on its sudo lines. A new
 # switch fails here until it is in one of them, so no sudo'd keploy run drops
 # it unseen.
-NOT_READ=" KEPLOY_BIN KEPLOY_FLAGS KEPLOY_E2E_MYSQL_RUN KEPLOY_START_STEP_OUTCOME "
+NOT_READ=" KEPLOY_BIN KEPLOY_FLAGS KEPLOY_E2E_MYSQL_RUN KEPLOY_START_STEP_OUTCOME KEPLOY_ROW_TOKEN_ELEVATED "
 switches=" $(load "" 'echo "${SUDO_SWITCHES[*]}"') "
 # unnamed_switches DIR: each KEPLOY_ name a workflow in DIR sets in an env:
 # block that is neither a switch nor in NOT_READ, as "FILE sets NAME".

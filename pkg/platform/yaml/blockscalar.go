@@ -36,6 +36,10 @@ import (
 // choose its style, or what a MarshalYAML or MarshalText of v's returns. A
 // value yaml.v3 cannot marshal (its MarshalYAML fails or panics) is reported
 // false: marshaling it reports the failure.
+//
+// keploy/yaml, the fork go.mod replaces gopkg.in/yaml.v3 with, writes these
+// block scalars readably. This is kept: mock files keep the format they have
+// been written in, and a module built without the fork stays safe.
 func NeedsQuoting(v any) (needs bool) {
 	defer func() {
 		if recover() != nil {

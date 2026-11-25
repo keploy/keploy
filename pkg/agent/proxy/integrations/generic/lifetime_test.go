@@ -57,16 +57,15 @@ func TestTheRecordersStateAConnectionsPreambleSessionAndTheRestPerTest(t *testin
 		mgr := syncMock.New(zap.NewNop())
 		mgr.SetOutputChannel(out)
 		ctx := syncMock.NewContext(context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1"), mgr)
-		clientCh, destCh := make(chan []byte), make(chan []byte)
+		chunks := make(chan capturedChunk)
 		go func() {
 			for _, x := range []string{"hello", "get a", "get b"} {
-				clientCh <- []byte(x)
-				destCh <- []byte("ok " + x)
+				chunks <- capturedChunk{fromClient: true, buf: []byte(x)}
+				chunks <- capturedChunk{buf: []byte("ok " + x)}
 			}
-			close(clientCh)
-			close(destCh)
+			close(chunks)
 		}()
-		createGenericMocksAsync(ctx, zap.NewNop(), clientCh, destCh)
+		createGenericMocksAsync(ctx, zap.NewNop(), chunks)
 		var got []*models.Mock
 		for len(got) < 3 {
 			got = append(got, <-out)
@@ -76,25 +75,21 @@ func TestTheRecordersStateAConnectionsPreambleSessionAndTheRestPerTest(t *testin
 		}
 	})
 	t.Run("v2", func(t *testing.T) {
-		clientCh := make(chan fakeconn.Chunk, 3)
-		destCh := make(chan fakeconn.Chunk, 3)
-		go func() {
-			for i, x := range []string{"hello", "get a", "get b"} {
-				at := time.Unix(int64(1000+10*i), 0)
-				clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ReadAt: at}
-				time.Sleep(10 * time.Millisecond)
-				destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok " + x), WrittenAt: at.Add(time.Second)}
-				time.Sleep(10 * time.Millisecond)
-			}
-			close(clientCh)
-			close(destCh)
-		}()
-		sess, mocks := newV2Session(t, clientCh, destCh)
-		if err := dispatch(t, sess); err != nil {
-			t.Fatal(err)
+		// Unnumbered chunks on a session with no capture order: the merge
+		// hands them on in the order it takes them, so each goes on its
+		// stream once the parser has done all it can with the one before
+		// it (putAtRest).
+		r := startRecordingUnder(t, nil, false, false)
+		for i, x := range []string{"hello", "get a", "get b"} {
+			at := time.Unix(int64(1000+10*i), 0)
+			r.putAtRest(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ReadAt: at})
+			r.putAtRest(fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok " + x), WrittenAt: at.Add(time.Second)})
 		}
-		close(mocks)
-		if s := statedOf(drainMocks(mocks)); !equal(s, want) {
+		run := r.end()
+		if !run.returned {
+			t.Fatal("the parser did not return once both streams ended")
+		}
+		if s := statedOf(run.recorded); !equal(s, want) {
 			t.Fatalf("stated %v, want %v", s, want)
 		}
 	})
@@ -852,18 +847,17 @@ func TestLegacyAConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 		ctx = context.WithValue(ctx, models.CapturedReqTimeKey, func() time.Time { return start.Add(time.Millisecond) })
 		ctx = context.WithValue(ctx, models.CapturedRespTimeKey, func() time.Time { return start.Add(2 * time.Millisecond) })
 		ctx = syncMock.NewContext(ctx, mgr)
-		clientCh, destCh := make(chan []byte), make(chan []byte)
+		chunks := make(chan capturedChunk)
 		go func() {
 			for _, x := range []string{"publish 1", "publish 2"} {
-				clientCh <- []byte(x)
-				destCh <- []byte("ok")
+				chunks <- capturedChunk{fromClient: true, buf: []byte(x)}
+				chunks <- capturedChunk{buf: []byte("ok")}
 			}
-			close(clientCh)
-			close(destCh)
+			close(chunks)
 		}()
 		done := make(chan struct{})
 		go func() {
-			createGenericMocksAsync(ctx, zap.NewNop(), clientCh, destCh)
+			createGenericMocksAsync(ctx, zap.NewNop(), chunks)
 			close(done)
 		}()
 		if inWindow {

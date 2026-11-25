@@ -183,6 +183,14 @@ func (a *Agent) settle(ctx context.Context, answers bool) (models.ListenDrops, e
 // answered later is never the next test's.
 func (a *Agent) settleKeeping(ctx context.Context, answers bool, worker uint32, keep func(coreAgent.InFlightScope)) (models.ListenDrops, error) {
 	none := models.ListenDrops{}
+	// Once the settle is done, whatever its outcome, the bytes the proxy
+	// moved on worker's connections since its bytes wait began are the
+	// ending test's: its calls, which the settle had the handlers take and
+	// answer. The next test of worker begins after the end, so none of them
+	// is that test's (coreAgent.PairedBytesSettler).
+	if ps, ok := a.Proxy.(coreAgent.PairedBytesSettler); ok {
+		defer ps.PairedBytesSettled(worker)
+	}
 	cut := false
 	if keep != nil && provenswitch.On() {
 		defer func() {

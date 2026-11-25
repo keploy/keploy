@@ -10,9 +10,10 @@
 #
 # KEEP_TMP=1 keeps each case's directories, output and stub log.
 #
-# No network and no root. Each case gets its own HOME and TMPDIR, the TMPDIR
-# already holding files of someone else's named like the ones in a release
-# tarball, and a PATH that starts with stubs:
+# No network, and no root needed (run as root, it also checks that root's
+# extraction leaves keploy root's own). Each case gets its own HOME and
+# TMPDIR, the TMPDIR already holding files of someone else's named like the
+# ones in a release tarball, and a PATH that starts with stubs:
 #   - curl: a download of ent/install.sh writes a stand-in installer (it logs
 #     that it ran, from where and with what arguments, and returns
 #     FAKE_ENT_STATUS) wherever curl was told to write it, `-o FILE` or, like
@@ -20,18 +21,42 @@
 #     writes a stand-in release (a keploy that logs its runs, LICENSE,
 #     README.md, READMEes-Es.md). FAKE_HTTP_404 makes the installer URL answer
 #     with an error page: written, exit 0, unless curl is told to --fail.
-#   - rm, mv, tar and mkdir run the real command only when every absolute path
-#     they are given is inside this test's own directory, and curl writes only
-#     there; anything else is logged as "fenced:" and fails. sudo fails and is
-#     logged, except in the root cases (FAKE_SUDO_ROOT), where `sudo mkdir` and
-#     `sudo mv` run as the caller, through those fenced commands, with
-#     /usr/local/bin mapped into the case's directory. So a keploy.sh that
-#     reaches for fixed /tmp paths, as the --oss route once did, fails here
-#     without touching the host's /tmp.
-#   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set.
+#   - rm, mv, tar, mkdir and chown run the real command only when every
+#     absolute path they are given is inside this test's own directory, and
+#     curl writes only there; anything else is logged as "fenced:" and fails.
+#     So a keploy.sh that reaches for fixed /tmp paths, as the --oss route
+#     once did, fails here without touching the host's /tmp.
+#   - mktemp makes its directory only inside this test's own directory; any
+#     other absolute template is logged as "fenced:" and fails. In the cases
+#     of a shell with no TMPDIR, /tmp is mapped to the case's temp directory,
+#     as sudo's /usr/local/bin is mapped: a template under /tmp is made there,
+#     and so is a directory asked for with no template, which Linux's mktemp
+#     makes in /tmp.
+#   - sudo fails and is logged as "sudo:", except in the cases of a user with
+#     sudo (FAKE_SUDO_ROOT), where `sudo mkdir` and `sudo mv` run as the
+#     caller, through those fenced commands, with /usr/local/bin mapped into
+#     the case's directory, `sudo mount` is logged, and so is
+#     `sudo chown 0:0 /usr/local/bin/keploy`, the one chown sudo may run.
+#   - in the root cases (FAKE_UID=0) root's own mkdir and mv are mapped the
+#     same way, its mount is logged, and so is a tar extraction that would
+#     keep the archive's owner; anyone else's mount is fenced. Root's chown is
+#     logged, not done, only when every absolute path it is given is in
+#     /usr/local/bin; any other goes through the fence. The cases that check
+#     the chown to root fail on any logged chown but the installed keploy's.
+#   - FAKE_CHOWN_FAIL makes that one logged chown, through sudo or root's
+#     own, fail.
+#   - sysctl -n hw.optional.arm64 says FAKE_ARM64 when it is set, and fails
+#     (the key is absent, as on an Intel Mac) when it is not.
+#   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set, and
+#     Linux / x86_64 when they are not, whatever machine runs the suite (a Mac
+#     too); id -u says 1000, or 0 in the root cases, whoever runs the suite;
+#     mountpoint says debugfs is mounted unless FAKE_NO_DEBUGFS is set.
+#   - the cases of a machine with no sudo (a debian or ubuntu container's
+#     root) run with no sudo on PATH at all.
 # keploy.sh itself runs unmodified, SOURCED the way users run it, under bash
 # and under zsh when it is installed; one case sources it from an interactive
-# shell on a terminal (util-linux script(1)). After the source, the shell logs
+# shell on a terminal (script(1): util-linux's, or the BSD one a Mac has).
+# After the source, the shell logs
 # that it lived on, job control before and after, and the status variables
 # keploy.sh left set.
 #
@@ -44,6 +69,8 @@
 #     the other installer over it.
 #   - the other installer is downloaded into a private temp directory under
 #     $TMPDIR that is removed afterwards, and gets the caller's arguments.
+#   - with no TMPDIR set, as in most Linux shells, both routes download into
+#     a private temp directory under /tmp, removed afterwards.
 #   - a failed download fails the install, and never sources an install.sh
 #     that happens to be in the caller's directory instead.
 #   - the other installer's status is keploy.sh's status.
@@ -54,10 +81,21 @@
 #   - with --oss, a failed, corrupt or cut-off download, or a release with no
 #     keploy in it, fails the install and installs nothing, not even the part
 #     of keploy that was extracted.
-#   - --oss as root puts the release's keploy in /usr/local/bin with sudo,
-#     from its private temp directory; when sudo refuses, the install fails.
+#   - --oss by a user with sudo puts the release's keploy in /usr/local/bin
+#     with sudo, from its private temp directory, then makes it root's with
+#     sudo (chown 0:0), mounts debugfs with sudo outside CI, and gives v2 its
+#     alias that runs keploy with sudo, in the rc file or, with none, in the
+#     shell it was sourced into, where typing keploy runs it; when sudo
+#     refuses, or the chown fails, the install fails.
 #   - the same holds for the Linux arm64 and the macOS (Apple Silicon)
-#     release, which the uname stub drives on any Linux.
+#     release, which the uname stub drives on any machine.
+#   - --oss as root does on Linux what a user with sudo does, but itself,
+#     with no sudo, whether the machine has sudo or not, and gives v2 no
+#     alias that runs keploy with sudo; the keploy it extracts and chowns is
+#     root's own, never left owned by the uid the release's archive names.
+#   - --oss by a user with no sudo is refused before anything is mounted or
+#     downloaded, with a hint to use -noRoot; with -noRoot it installs in
+#     ~/.keploy/bin.
 #   - an error page from the installer URL is never sourced.
 #   - an unsupported architecture or OS, and Windows, fail the --oss install,
 #     with -isCI too, before anything is downloaded.
@@ -69,13 +107,17 @@
 #   - job control is as it was: on in an interactive shell, off in a CI step.
 #   - keploy.sh leaves no status variable set in the caller's shell.
 #   - no case touches a path outside its own directories, or runs sudo for
-#     anything but the root cases' mkdir and mv.
+#     anything but the mkdir, mv and mount of a user with sudo, the chown of
+#     the keploy it installed, and v2's alias.
 
 set -u
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 installer="$repo/keploy.sh"
-tmp=$(mktemp -d)
+# Its real path: a case's shell starts with no PWD (env -i), so it names its
+# directory as the system resolves it, and on macOS the temp directory is
+# under /var, a link to /private/var.
+tmp=$(mktemp -d) && tmp=$(cd "$tmp" && pwd -P) || exit 1
 trap '[ -n "${KEEP_TMP:-}" ] || rm -rf "$tmp"' EXIT
 
 failures=0
@@ -152,6 +194,37 @@ EOF
 cat > "$stubs/fence" << 'EOF'
 #!/bin/sh
 name=$(basename "$0")
+# Root (FAKE_UID=0) runs its install steps itself, with no sudo: its
+# /usr/local/bin is mapped into the case's directory, as the sudo stub maps it.
+if [ "${FAKE_UID:-}" = 0 ] && [ -n "${FAKE_ROOT_DIR:-}" ]; then
+  mapped=""
+  unmapped=""
+  for a in "$@"; do
+    case "$a" in
+      /usr/local/bin | /usr/local/bin/*) a="$FAKE_ROOT_DIR$a" mapped=1 ;;
+      /*) unmapped=1 ;;
+    esac
+    set -- "$@" "$a"
+    shift
+  done
+  [ -z "$mapped" ] || echo "root-mapped: $name $*" >> "$STUB_LOG"
+  # Root's chown in /usr/local/bin is logged, not done: this suite's runner
+  # is seldom root. made_roots_after_move fails on any but the installed
+  # keploy's. A chown of any other absolute path goes through the fence below.
+  if [ "$name" = chown ] && [ -n "$mapped" ] && [ -z "$unmapped" ]; then
+    [ -z "${FAKE_CHOWN_FAIL:-}" ]
+    exit
+  fi
+  # Root's tar keeps the owner the archive names (a release's is uid 1001)
+  # unless told --no-same-owner; this suite's runner is seldom root, so the
+  # stub says when root's extraction would have kept it.
+  if [ "$name" = tar ]; then
+    case " $* " in
+      *" --no-same-owner "*) ;;
+      *) echo "root-tar: keeps the archive's owner: tar $*" >> "$STUB_LOG" ;;
+    esac
+  fi
+fi
 for a in "$@"; do
   case "$a" in
     "$FENCE"/*) ;;
@@ -165,7 +238,38 @@ PATH=/usr/bin:/bin
 export PATH
 exec "$name" "$@"
 EOF
-for cmd in rm mv tar mkdir; do ln -s fence "$stubs/$cmd"; done
+for cmd in rm mv tar mkdir chown; do ln -s fence "$stubs/$cmd"; done
+
+# mktemp: a template under /tmp is mapped to FAKE_SYS_TMP, the case's temp
+# directory, when the case has no TMPDIR (case_no_tmpdir), and so is a
+# directory asked for with no template; then any absolute path outside this
+# test's own directory is fenced.
+cat > "$stubs/mktemp" << 'EOF'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    /tmp/*) [ -z "${FAKE_SYS_TMP:-}" ] || a="$FAKE_SYS_TMP/${a#/tmp/}" ;;
+  esac
+  set -- "$@" "$a"
+  shift
+done
+for a in "$@"; do
+  case "$a" in
+    "$FENCE"/*) ;;
+    /*)
+      echo "fenced: mktemp $*" >> "$STUB_LOG"
+      exit 1
+      ;;
+  esac
+done
+if [ -n "${FAKE_SYS_TMP:-}" ]; then
+  TMPDIR=$FAKE_SYS_TMP
+  export TMPDIR
+fi
+PATH=/usr/bin:/bin
+export PATH
+exec mktemp "$@"
+EOF
 
 cat > "$stubs/sudo" << 'EOF'
 #!/bin/sh
@@ -182,23 +286,100 @@ if [ -n "${FAKE_SUDO_ROOT:-}" ]; then
       done
       exec "$cmd" "$@"
       ;;
+    mount)
+      echo "sudo-mapped: $*" >> "$STUB_LOG"
+      exit 0
+      ;;
+    chown)
+      # Only the installed keploy's chown to root, and it is logged, not done:
+      # the runner seldom is root. Any other chown is refused below.
+      if [ "$*" = "chown 0:0 /usr/local/bin/keploy" ]; then
+        echo "sudo-mapped: $*" >> "$STUB_LOG"
+        [ -z "${FAKE_CHOWN_FAIL:-}" ]
+        exit
+      fi
+      ;;
+    -E)
+      # v2's alias: sudo -E env PATH="$PATH" keploy ...
+      echo "sudo-mapped: $*" >> "$STUB_LOG"
+      shift
+      exec "$@"
+      ;;
   esac
 fi
 echo "sudo: $*" >> "$STUB_LOG"
 exit 1
 EOF
 
+# Only `id -u` is asked: a user's uid, unless the case is root (FAKE_UID=0),
+# whoever runs this suite.
+cat > "$stubs/id" << 'EOF'
+#!/bin/sh
+if [ "$*" = -u ]; then
+  echo "${FAKE_UID:-1000}"
+  exit 0
+fi
+PATH=/usr/bin:/bin
+export PATH
+exec id "$@"
+EOF
+
+# Only `mountpoint -q /sys/kernel/debug` is asked: mounted, unless the case
+# says it is not (FAKE_NO_DEBUGFS).
+cat > "$stubs/mountpoint" << 'EOF'
+#!/bin/sh
+[ -z "${FAKE_NO_DEBUGFS:-}" ]
+EOF
+
+# mount runs for root only (FAKE_UID=0), logged and not done; anyone else's
+# mount is fenced.
+cat > "$stubs/mount" << 'EOF'
+#!/bin/sh
+if [ "${FAKE_UID:-}" = 0 ]; then
+  echo "root-mount: $*" >> "$STUB_LOG"
+  exit 0
+fi
+echo "fenced: mount $*" >> "$STUB_LOG"
+exit 1
+EOF
+
+# A case runs on Linux amd64 unless it names another OS or machine: the
+# cases that name neither are the Linux ones, and one that names only the
+# machine (aarch64, riscv64) is a Linux one too, so on a Mac the suite still
+# drives keploy.sh's Linux route there, and not the Mac's own.
 cat > "$stubs/uname" << 'EOF'
 #!/bin/sh
 case "$*" in
-  -s | "") [ -z "${FAKE_UNAME_S:-}" ] || { echo "$FAKE_UNAME_S"; exit 0; } ;;
-  -m) [ -z "${FAKE_UNAME_M:-}" ] || { echo "$FAKE_UNAME_M"; exit 0; } ;;
+  -s | "") echo "${FAKE_UNAME_S:-Linux}"; exit 0 ;;
+  -m) echo "${FAKE_UNAME_M:-x86_64}"; exit 0 ;;
 esac
 PATH=/usr/bin:/bin
 export PATH
 exec uname "$@"
 EOF
-chmod +x "$stubs/curl" "$stubs/fence" "$stubs/sudo" "$stubs/uname"
+
+# keploy.sh asks only `sysctl -n hw.optional.arm64`, on macOS: it says 1 on
+# Apple silicon (FAKE_ARM64=1) and is absent on an Intel Mac, so the cases
+# hold whatever machine runs the suite.
+cat > "$stubs/sysctl" << 'EOF'
+#!/bin/sh
+[ -n "${FAKE_ARM64:-}" ] || exit 1
+echo "$FAKE_ARM64"
+EOF
+chmod +x "$stubs/curl" "$stubs/fence" "$stubs/mktemp" "$stubs/sudo" "$stubs/uname" "$stubs/sysctl" "$stubs/id" "$stubs/mountpoint" "$stubs/mount"
+
+# A PATH with no sudo on it, for the cases of a machine that has none (a
+# debian or ubuntu container's root, a CI runner's user): the stubs and the
+# system's own tools, each but sudo, linked into two directories of their own.
+nosudo_stubs="$tmp/nosudo-stubs"
+nosudo_sys="$tmp/nosudo-sys"
+mkdir -p "$nosudo_stubs" "$nosudo_sys"
+for f in "$stubs"/*; do
+  [ "${f##*/}" = sudo ] || ln -s "$f" "$nosudo_stubs/${f##*/}"
+done
+for f in /usr/bin/* /bin/*; do
+  [ "${f##*/}" = sudo ] || [ -e "$nosudo_sys/${f##*/}" ] || ln -s "$f" "$nosudo_sys/${f##*/}"
+done
 
 # The stand-in release, laid out like goreleaser's tarball.
 release="$tmp/release"
@@ -209,7 +390,12 @@ echo "the release's keploy ran: $*" >> "$STUB_LOG"
 EOF
 chmod +x "$release/keploy"
 for f in LICENSE README.md READMEes-Es.md; do echo "the release's $f" > "$release/$f"; done
-tar czf "$tmp/release.tar.gz" -C "$release" keploy LICENSE README.md READMEes-Es.md
+# Its files belong to another uid, as a release's belong to the uid that
+# built it, where tar can say so (GNU tar): a suite run by root then sees
+# whether root's extraction kept that owner.
+foreign_owner=()
+if tar --version 2> /dev/null | grep -q 'GNU tar'; then foreign_owner=(--owner=4242 --group=4242); fi
+tar czf "$tmp/release.tar.gz" ${foreign_owner[@]+"${foreign_owner[@]}"} -C "$release" keploy LICENSE README.md READMEes-Es.md
 echo "not a tarball" > "$tmp/corrupt.tar.gz"
 tar czf "$tmp/no-keploy.tar.gz" -C "$release" LICENSE README.md READMEes-Es.md
 
@@ -246,12 +432,18 @@ CALLERS_ENT="the caller's own keploy-enterprise.sh"
 # keploy-enterprise.sh of the caller's. With case_in_repo set it is a repo root
 # instead: it holds the caller's own install.sh and keploy-enterprise.sh, and
 # keploy.sh is sourced from another directory. Extra environment goes in the
-# case_env array. case_sudo_root lets sudo mkdir and mv run, mapped into
-# $root_dir; case_home_blocked makes ~/.keploy a file, so nothing can be put
-# in ~/.keploy/bin; case_pty sources keploy.sh from an interactive shell on a
-# terminal; case_errexit sources it under `set -eo pipefail`, the shell of a
-# GitHub Actions `shell: bash` step. Leaves $work, $out, $log, $scratch,
-# $root_dir and $rc.
+# case_env array. case_sudo_root lets sudo mkdir, mv and mount run (a user
+# with sudo), mkdir and mv mapped into $root_dir; case_root runs it as root
+# (id -u says 0), whose own mkdir and mv are mapped into $root_dir and whose
+# mount is logged; case_no_sudo leaves sudo off its PATH altogether;
+# case_bashrc gives it a ~/.bashrc; case_home_blocked makes ~/.keploy a file,
+# so nothing can be put in ~/.keploy/bin; case_pty sources keploy.sh from an
+# interactive shell on a terminal; case_errexit sources it under
+# `set -eo pipefail`, the shell of a GitHub Actions `shell: bash` step;
+# case_no_tmpdir gives it no TMPDIR, as most Linux shells have none, its
+# temp directory standing in for /tmp (FAKE_SYS_TMP, the mktemp stub);
+# case_after is run in the shell keploy.sh was sourced into, after it. Leaves
+# $work, $out, $log, $scratch, $dir_home, $root_dir and $rc.
 install() {
   local dir="$tmp/$run_shell-$1"
   shift
@@ -264,7 +456,13 @@ install() {
   mkdir -p "$dir/home" "$work" "$scratch" "$dir/dl" "$root_dir"
   : > "$log"
   [ -z "$case_home_blocked" ] || echo "a file, not a directory" > "$dir/home/.keploy"
+  [ -z "$case_bashrc" ] || echo "# the caller's own .bashrc" > "$dir/home/.bashrc"
   [ -z "$case_sudo_root" ] || case_env+=(FAKE_SUDO_ROOT="$root_dir")
+  [ -z "$case_root" ] || case_env+=(FAKE_UID=0 FAKE_ROOT_DIR="$root_dir")
+  # PATH ends with the case's mapped /usr/local/bin, as a system's PATH holds
+  # /usr/local/bin: keploy.sh runs the keploy it installed there.
+  local path="$stubs:/usr/bin:/bin:$root_dir/usr/local/bin"
+  [ -z "$case_no_sudo" ] || path="$nosudo_stubs:$nosudo_sys:$root_dir/usr/local/bin"
   local f
   for f in $THEIRS; do echo "someone else's $f" > "$scratch/$f"; done
   local src=./install.sh
@@ -276,19 +474,30 @@ install() {
   else
     cp "$installer" "$work/install.sh"
   fi
-  local runner body=$BODY
+  local runner body=$BODY tmp_var=TMPDIR
+  [ -z "$case_no_tmpdir" ] || tmp_var=FAKE_SYS_TMP
   [ -z "$case_errexit" ] || body="set -eo pipefail; $BODY"
+  # The body's last command, `exit $st`, as text: case_after goes before it.
+  # shellcheck disable=SC2016
+  [ -z "$case_after" ] || body="${body%'exit $st'}$case_after; exit \$st"
   if [ -n "$case_pty" ]; then
     local cmd flags=(-f)
     [ "$run_shell" = bash ] && flags=(--norc --noprofile)
-    printf -v cmd '%q ' "$run_shell" "${flags[@]}" -i -c "$body" install "$src" "$@"
-    runner=(bash "$repo/.github/workflows/test_workflow_scripts/hang_guard.sh" 120 script -qec "$cmd" /dev/null)
+    if [ "$have_pty" = util-linux ]; then
+      printf -v cmd '%q ' "$run_shell" "${flags[@]}" -i -c "$body" install "$src" "$@"
+      runner=(bash "$repo/.github/workflows/test_workflow_scripts/hang_guard.sh" 120 script -qec "$cmd" /dev/null)
+    else
+      # The BSD script(1) takes the command as its arguments. hang_guard.sh
+      # reads /proc, which a Mac does not have, so the same 120 s bound is
+      # kept by mac_bounded instead.
+      runner=(/bin/bash -c "$MAC_BOUNDED" mac_bounded 120 script -q /dev/null "$run_shell" "${flags[@]}" -i -c "$body" install "$src" "$@")
+    fi
   else
     runner=("$run_shell" -c "$body" install "$src" "$@")
   fi
   (
     cd "$work" || exit 1
-    env -i HOME="$dir/home" PATH="$stubs:/usr/bin:/bin" TMPDIR="$scratch" TERM=dumb \
+    env -i HOME="$dir/home" PATH="$path" "$tmp_var=$scratch" TERM=dumb \
       STUB_LOG="$log" FENCE="$tmp" FAKE_ENT_INSTALLER="$tmp/fake-ent-install.sh" \
       FAKE_RELEASE_TARBALL="$tmp/release.tar.gz" ${case_env[@]+"${case_env[@]}"} \
       "${runner[@]}" < /dev/null
@@ -297,9 +506,14 @@ install() {
   case_env=()
   case_in_repo=""
   case_sudo_root=""
+  case_root=""
+  case_no_sudo=""
+  case_bashrc=""
   case_home_blocked=""
   case_pty=""
   case_errexit=""
+  case_no_tmpdir=""
+  case_after=""
 }
 # What the inner shell runs: it sources keploy.sh the way users do, then logs
 # that it lived on (an `exit` in keploy.sh would have closed it) with the
@@ -311,9 +525,14 @@ BODY='src=$1; shift; jc_before=$-; source "$src" "$@"; st=$?; jc_after=$-; echo 
 case_env=()
 case_in_repo=""
 case_sudo_root=""
+case_root=""
+case_no_sudo=""
+case_bashrc=""
 case_home_blocked=""
 case_pty=""
 case_errexit=""
+case_no_tmpdir=""
+case_after=""
 # Files of someone else's in each case's TMPDIR, named like the ones the --oss
 # route downloads and extracts.
 THEIRS="keploy keploy.tar.gz LICENSE README.md READMEes-Es.md"
@@ -350,11 +569,17 @@ used_private_dir_and_cleaned_up() { # <stub log key> <file>
   case "${to#"$scratch"/}" in */*/*) return 1 ;; esac
   tmp_left_as_it_was
 }
-# Nothing outside the case's directories was touched, and sudo never ran
-# (but for the root cases' mapped mkdir and mv).
+# Nothing outside the case's directories was touched, and sudo ran nothing
+# but what its stub maps for a user with sudo.
 stayed_inside() { ! grep -qE '^(fenced|sudo):' "$log"; }
 installed() { cmp -s "$release/keploy" "$dir_home/.keploy/bin/keploy"; }
-installed_as_root() { cmp -s "$release/keploy" "$root_dir/usr/local/bin/keploy"; }
+# The release's keploy is in the case's /usr/local/bin; when this suite runs
+# as root, which then extracts for real, it is root's, not the archive's
+# owner's.
+installed_as_root() {
+  cmp -s "$release/keploy" "$root_dir/usr/local/bin/keploy" &&
+    { [ "$(id -u)" != 0 ] || [ "$(stat -c %u "$root_dir/usr/local/bin/keploy")" = 0 ]; }
+}
 nothing_installed() { [ ! -e "$dir_home/.keploy/bin/keploy" ] && [ ! -e "$root_dir/usr/local/bin/keploy" ]; }
 nothing_downloaded() { ! grep -q '^release-download-to ' "$log"; }
 error_page_not_sourced() { ! grep -qF "the error page was sourced" "$log"; }
@@ -383,11 +608,59 @@ ent_ran_with() { grep -qF "ent-installer ran from $work with: $1" "$log"; }
 ent_did_not_run() { ! grep -q '^ent-installer ' "$log"; }
 callers_install_not_run() { ! grep -qF "the caller's own install.sh ran" "$log"; }
 said() { grep -qF -- "$1" "$out"; }
+# Root put keploy in /usr/local/bin itself: its own mkdir and mv ran there,
+# and extracted the release as its own, not keeping the archive's owner.
+root_moved_it() {
+  grep -q '^root-mapped: mkdir ' "$log" && grep -q '^root-mapped: mv ' "$log" &&
+    ! grep -q '^root-tar: ' "$log"
+}
+# keploy, once moved into /usr/local/bin, was made root's (chown 0:0, which is
+# root:root) after the move, through sudo (sudo) or by root itself (root),
+# and no other chown was mapped: root's chown of anything else in
+# /usr/local/bin fails here, even with its failure ignored.
+made_roots_after_move() {
+  local key path mv_at chown_at
+  case $1 in
+    sudo) key=sudo-mapped path=/usr/local/bin/keploy ;;
+    root) key=root-mapped path=$root_dir/usr/local/bin/keploy ;;
+  esac
+  mv_at=$(grep -nE "^$key: mv .* $path\$" "$log" | tail -n 1 | cut -d: -f1)
+  chown_at=$(grep -nxF "$key: chown 0:0 $path" "$log" | tail -n 1 | cut -d: -f1)
+  [ -n "$mv_at" ] && [ -n "$chown_at" ] && [ "$chown_at" -gt "$mv_at" ] &&
+    ! grep -E '^(sudo|root)-mapped: chown ' "$log" | grep -qvxF "$key: chown 0:0 $path"
+}
+# What the shell keploy.sh was sourced into does afterwards: puts one more
+# directory on PATH, then types keploy, with aliases on, as they are in an
+# interactive shell.
+# shellcheck disable=SC2016
+TYPE_KEPLOY='[ -z "${BASH_VERSION-}" ] || shopt -s expand_aliases; PATH="$PATH:/later-on-path"; eval "keploy typed"'
+# That keploy ran the installed keploy, through v2's alias: with sudo, and the
+# shell's PATH as it is when keploy runs, not as it was when the alias was set.
+typed_keploy_ran_with_sudo() {
+  grep -qE '^sudo-mapped: -E env PATH=.*:/later-on-path keploy typed$' "$log" &&
+    grep -qxF "the release's keploy ran: typed" "$log"
+}
+no_rc_file() { [ ! -e "$dir_home/.bashrc" ] && [ ! -e "$dir_home/.zshrc" ] && [ ! -e "$dir_home/.profile" ]; }
+# debugfs was mounted by root itself (root) or through sudo (sudo); none: no
+# mount was tried at all.
+debugfs_mounted_by() {
+  case $1 in
+    root) grep -qxF 'root-mount: -t debugfs debugfs /sys/kernel/debug' "$log" ;;
+    sudo) grep -qxF 'sudo-mapped: mount -t debugfs debugfs /sys/kernel/debug' "$log" ;;
+    none) ! grep -q 'mount' "$log" ;;
+  esac
+}
+# No command was missing: nothing reached for a sudo that is not there.
+no_command_missing() { ! grep -qi 'not found' "$out"; }
+SUDO_ALIAS="alias keploy='sudo -E env PATH=\"\$PATH\" keploy'"
+has_sudo_alias() { grep -qxF "$SUDO_ALIAS" "$dir_home/.bashrc"; }
+no_alias() { ! grep -q 'alias keploy' "$dir_home/.bashrc"; }
 show_output() { sed 's/^/     | /' "$out" | tail -n 15; }
 
 # ---------------------------------------------------------------- cases
 
 suite() {
+  local row name what env args said_what argv
   echo "==== sourced under $run_shell"
 
   echo "== from a repo root that has its own install.sh and keploy-enterprise.sh"
@@ -409,6 +682,15 @@ suite() {
   check "the other installer runs, with the caller's arguments" ent_run_with_args
   check "the install.sh the caller downloaded is left as it was, next to their keploy-enterprise.sh" callers_dir_untouched downloaded
   check "the download used a private temp directory, removed afterwards" used_private_dir_and_cleaned_up download-to install.sh
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  echo "== no TMPDIR set, as in most Linux shells"
+  case_no_tmpdir=1
+  install no-tmpdir -noRoot
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the other installer runs, with the caller's arguments" ent_run_with_args
+  check "the download used a private temp directory under /tmp, removed afterwards" used_private_dir_and_cleaned_up download-to install.sh
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
 
   echo "== the download fails, from a repo root"
@@ -463,23 +745,156 @@ suite() {
     check "the release's keploy is installed in ~/.keploy/bin" installed
     check "job control is still on afterwards" job_control on
   else
-    echo "     skipped: no util-linux script(1) here to give the shell a terminal"
+    echo "     skipped: no script(1) here to give the shell a terminal"
   fi
 
-  echo "== --oss as root (-isCI), from a repo root"
+  echo "== --oss by a user with sudo (-isCI), from a repo root"
   case_in_repo=1
   case_sudo_root=1
-  install oss-root --oss -isCI
+  install oss-sudo --oss -isCI
   [ "$rc" -eq 0 ] || show_output
   check "the install succeeds" test "$rc" -eq 0
   check "the release's keploy is put in /usr/local/bin with sudo" installed_as_root
+  check "and then made root's with sudo, so its user cannot replace what root runs" made_roots_after_move sudo
   check "the download and extraction used a private temp directory, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
-  check "nothing outside its own directories is touched, and sudo runs only mkdir and mv" stayed_inside
+  check "nothing outside its own directories is touched, and sudo runs only mkdir, mv and chown" stayed_inside
   check "the repo's install.sh and keploy-enterprise.sh are kept unchanged, and nothing is added" callers_dir_untouched callers
 
-  echo "== --oss as root (-isCI), from a repo root, and sudo refuses"
+  echo "== --oss v2 by a user with sudo, outside CI, debugfs not mounted"
+  case_sudo_root=1
+  case_bashrc=1
+  case_env=(FAKE_NO_DEBUGFS=1)
+  install oss-sudo-dev --oss -v v2.1.0 -platform bash
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is put in /usr/local/bin with sudo, and then made root's with sudo" eval 'installed_as_root && made_roots_after_move sudo'
+  check "debugfs is mounted with sudo" debugfs_mounted_by sudo
+  check "the user's .bashrc gets v2's alias, which runs keploy with sudo" has_sudo_alias
+  check "keploy example runs the installed keploy" release_keploy_ran
+  check "nothing outside its own directories is touched, and sudo runs only mkdir, mv, chown and mount" stayed_inside
+
+  # With no rc file, v2's alias goes in the shell keploy.sh was sourced into,
+  # for each of the three rc files it would otherwise have gone in.
+  local platform
+  for platform in bash zsh sh; do
+    echo "== --oss v2 by a user with sudo, -platform $platform, no rc file"
+    case_sudo_root=1
+    case_after=$TYPE_KEPLOY
+    install "oss-sudo-norc-$platform" --oss -v v2.1.0 -platform "$platform"
+    [ "$rc" -eq 0 ] || show_output
+    check "the install succeeds" test "$rc" -eq 0
+    check "keploy, typed in the shell it was sourced into, runs the installed keploy with sudo" typed_keploy_ran_with_sudo
+    check "no rc file is written" no_rc_file
+    check "nothing outside its own directories is touched" stayed_inside
+  done
+
+  echo "== --oss by a user with sudo (-isCI), and the chown to root fails"
+  case_sudo_root=1
+  case_env=(FAKE_CHOWN_FAIL=1)
+  install oss-sudo-chown-fails --oss -isCI
+  check "the install fails" test "$rc" -ne 0
+  check "it says so" said "Failed to make /usr/local/bin/keploy owned by root"
+  check "it tried to make it root's with sudo, after the move, and chowned nothing else" made_roots_after_move sudo
+  check "no keploy runs" release_keploy_did_not_run
+  check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
+  check "nothing outside its own directories is touched, and sudo runs only mkdir, mv and chown" stayed_inside
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+
+  # A debian or ubuntu container's root has no sudo, and Keploy's own CI
+  # install line runs there.
+  echo "== --oss as root with no sudo (-isCI), from a repo root"
   case_in_repo=1
-  install oss-root-refused --oss -isCI
+  case_root=1
+  case_no_sudo=1
+  install oss-root-nosudo --oss -isCI
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is put in /usr/local/bin" installed_as_root
+  check "root puts it there itself, as its own file, and reaches for no sudo" eval 'root_moved_it && made_roots_after_move root && no_command_missing'
+  check "keploy example runs the installed keploy" release_keploy_ran
+  check "the download and extraction used a private temp directory, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
+  check "nothing outside its own directories is touched" stayed_inside
+  check "the repo's install.sh and keploy-enterprise.sh are kept unchanged, and nothing is added" callers_dir_untouched callers
+
+  echo "== --oss as root with no sudo (-isCI), and its own chown to root fails"
+  case_root=1
+  case_no_sudo=1
+  case_env=(FAKE_CHOWN_FAIL=1)
+  install oss-root-chown-fails --oss -isCI
+  check "the install fails" test "$rc" -ne 0
+  check "it says so" said "Failed to make /usr/local/bin/keploy owned by root"
+  check "root tried to make it its own, after the move, and chowned nothing else" made_roots_after_move root
+  check "no keploy runs" release_keploy_did_not_run
+  check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
+  check "nothing outside its own directories is touched" stayed_inside
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+
+  echo "== --oss v2 as root with no sudo, outside CI, debugfs not mounted"
+  case_root=1
+  case_no_sudo=1
+  case_bashrc=1
+  case_env=(FAKE_NO_DEBUGFS=1)
+  install oss-root-nosudo-dev --oss -v v2.1.0 -platform bash
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is put in /usr/local/bin by root itself, as its own file" eval 'installed_as_root && root_moved_it && made_roots_after_move root'
+  check "root mounts debugfs itself" debugfs_mounted_by root
+  check "it reaches for no sudo" no_command_missing
+  check "root gets no alias that runs keploy with sudo, and keploy example runs the installed keploy" eval 'no_alias && release_keploy_ran'
+  check "nothing outside its own directories is touched" stayed_inside
+
+  echo "== --oss v2 as root with sudo installed, outside CI, debugfs not mounted"
+  case_root=1
+  case_bashrc=1
+  case_env=(FAKE_NO_DEBUGFS=1)
+  install oss-root-dev --oss -v v2.1.0 -platform bash
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is put in /usr/local/bin by root itself, as its own file" eval 'installed_as_root && root_moved_it && made_roots_after_move root'
+  check "root mounts debugfs itself" debugfs_mounted_by root
+  check "root gets no alias that runs keploy with sudo, and keploy example runs the installed keploy" eval 'no_alias && release_keploy_ran'
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  for row in \
+    "oss-nosudo|-isCI|" \
+    "oss-nosudo-dev|outside CI, debugfs not mounted|FAKE_NO_DEBUGFS=1"; do
+    IFS='|' read -r name what env <<< "$row"
+    argv=()
+    [ "$what" = -isCI ] && argv=(-isCI)
+    echo "== --oss by a user with no sudo ($what)"
+    case_no_sudo=1
+    [ -z "$env" ] || case_env=("$env")
+    install "$name" --oss ${argv[@]+"${argv[@]}"}
+    check "the install fails" test "$rc" -ne 0
+    check "it says why, and names -noRoot" eval 'said "this user is not root and has no sudo" && said "add -noRoot"'
+    check "it reaches for no sudo" no_command_missing
+    check "nothing is mounted, downloaded or installed, and no keploy runs" eval 'debugfs_mounted_by none && nothing_downloaded && nothing_installed && release_keploy_did_not_run'
+    check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
+    check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+    check "nothing outside its own directories is touched" stayed_inside
+  done
+
+  echo "== --oss -noRoot by a user with no sudo (-isCI)"
+  case_no_sudo=1
+  install oss-nosudo-noroot --oss -isCI -noRoot
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is installed in ~/.keploy/bin, and keploy example runs it" eval 'installed && release_keploy_ran'
+  check "it reaches for no sudo" no_command_missing
+  check "nothing outside its own directories is touched" stayed_inside
+
+  echo "== --oss -noRoot, no TMPDIR set, as in most Linux shells"
+  case_no_tmpdir=1
+  install oss-no-tmpdir --oss -isCI -noRoot
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is installed in ~/.keploy/bin, and keploy example runs it" eval 'installed && release_keploy_ran'
+  check "the download and extraction used a private temp directory under /tmp, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
+  check "nothing outside its own directories is touched" stayed_inside
+
+  echo "== --oss by a user (-isCI), from a repo root, and sudo refuses"
+  case_in_repo=1
+  install oss-sudo-refused --oss -isCI
   check "the install fails" test "$rc" -ne 0
   check "it says so" said "Failed to move the keploy binary"
   check "nothing is installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
@@ -579,7 +994,23 @@ suite() {
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
 
-  local row name what env args said_what argv
+  echo "== --oss on an Apple silicon Mac in a Rosetta (x86_64) shell"
+  case_env=(FAKE_UNAME_S=Darwin FAKE_UNAME_M=x86_64 FAKE_ARM64=1)
+  install oss-macos-rosetta --oss
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds: the hardware is Apple silicon" test "$rc" -eq 0
+  check "it downloads the macOS arm64 release" fetched keploy_darwin_arm64.tar.gz
+
+  echo "== --oss on an Intel Mac"
+  case_env=(FAKE_UNAME_S=Darwin FAKE_UNAME_M=x86_64)
+  install oss-macos-intel --oss
+  check "the install fails" test "$rc" -ne 0
+  check "it says keploy does not support Intel Macs, in one line with the docs page" said "Keploy does not support Intel Macs; it runs on Apple silicon Macs only. See https://keploy.io/docs/installation/macos-installation/"
+  check "it offers no route: neither Lima nor Docker" eval '! said Lima && ! said Docker'
+  check "nothing is downloaded or installed, and no keploy runs" eval 'nothing_downloaded && nothing_installed && release_keploy_did_not_run'
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
   for row in \
     "oss-riscv64|an unsupported architecture|FAKE_UNAME_M=riscv64|-noRoot|Unsupported architecture: riscv64" \
     "oss-riscv64-ci|an unsupported architecture, with -isCI|FAKE_UNAME_M=riscv64|-isCI|Unsupported architecture: riscv64" \
@@ -645,12 +1076,38 @@ suite() {
 }
 ent_run_with_args() { ent_ran_with "-noRoot"; }
 
+# mac_bounded SECONDS CMD...: runs CMD and returns its status; if it still
+# runs after SECONDS, says so on stderr, as hang_guard.sh does, and sends it
+# TERM (the BSD script(1) then hangs up its terminal, which ends the shell
+# on it). Plain bash 3.2, the one a Mac has, with no /proc.
+# shellcheck disable=SC2016
+MAC_BOUNDED='secs=$1; shift
+"$@" &
+pid=$!
+( n=0
+  while kill -0 "$pid" 2> /dev/null; do
+    if [ "$n" -ge "$secs" ]; then
+      echo "hang guard: still running after ${secs}s: $*" >&2
+      kill -TERM "$pid" 2> /dev/null
+      exit 0
+    fi
+    sleep 1
+    n=$((n + 1))
+  done ) &
+wd=$!
+wait "$pid"
+st=$?
+wait "$wd"
+exit "$st"'
+
 have_pty=""
 if script -qec true /dev/null < /dev/null > /dev/null 2>&1; then
-  have_pty=1
+  have_pty=util-linux
+elif [ "$(uname -s)" = Darwin ] && script -q /dev/null true < /dev/null > /dev/null 2>&1; then
+  have_pty=bsd
 elif [ -n "${REQUIRE_PTY:-}" ]; then
   # CI sets this: the interactive case is the only one that sees job control on.
-  fail "util-linux script(1) is required (REQUIRE_PTY is set) but is missing or does not work"
+  fail "script(1) is required (REQUIRE_PTY is set) but is missing or does not work"
 fi
 
 run_shell=bash

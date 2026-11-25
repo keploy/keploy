@@ -4,6 +4,7 @@ package grpc
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,25 @@ type MatchOption func(*matchOptions)
 
 type matchOptions struct {
 	noPassLine bool
+	// console is where the comparison's lines go (WithConsole); nil, the
+	// default, prints nothing.
+	console io.Writer
+}
+
+// out is o's console, io.Discard for none.
+func (o matchOptions) out() io.Writer {
+	if o.console == nil {
+		return io.Discard
+	}
+	return o.console
+}
+
+// WithConsole makes w the console the comparison writes its lines to: the
+// "Testrun passed" and "Testrun failed" lines and a failure's diff, which
+// names the expected and actual messages whole. With none, or a nil w, it
+// prints nothing, as the HTTP matcher's WithConsole.
+func WithConsole(w io.Writer) MatchOption {
+	return func(o *matchOptions) { o.console = w }
 }
 
 // WithoutPassLine says the caller has already failed the test case on its
@@ -37,6 +57,30 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	for _, opt := range opts {
 		opt(&mo)
 	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	// When the test case carries assertions (anything beyond the noise entry),
+	// evaluate them in place of the ordinary comparison before running or
+	// printing any comparison output. This mirrors pkg/matcher/http/match.go:
+	// no contradictory pass/fail banners, no spurious comparison warnings, and
+	// honours emitFailureLogs, WithConsole, and WithoutPassLine.
+	if AssertionsReplaceComparison(tc) {
+		pass, res := AssertionMatch(tc, actualResp, zap.NewNop())
+		if emitFailureLogs {
+			if pass {
+				if !mo.noPassLine {
+					printPassLine(tc, logger, mo.out())
+				}
+			} else {
+				printFailLine(tc, logger, mo.out())
+				AssertionMatch(tc, actualResp, logger)
+			}
+		}
+		return pass, res
+	}
+
 	// Under the proven switch response arrays are compared in order.
 	ignoreOrdering = matcher.ResponseIgnoreOrdering(ignoreOrdering)
 	expectedResp := tc.GrpcResp
@@ -333,8 +377,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 
 	if !matched {
 		// Display differences to the user, similar to HTTP matcher
-		logDiffs := matcher.NewDiffsPrinter(tc.Name)
+		logDiffs := matcher.NewDiffsPrinterOut(mo.console, tc.Name)
 		newLogger := pp.New()
+		newLogger.SetOutput(mo.out())
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetFailingColorScheme())
 		var logs = ""
@@ -401,6 +446,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	} else if !mo.noPassLine {
 		// Display success message
 		newLogger := pp.New()
+		newLogger.SetOutput(mo.out())
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
 		var log2 = ""
@@ -484,6 +530,26 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 
 	return matched, result
+}
+
+func printPassLine(tc *models.TestCase, logger *zap.Logger, out io.Writer) {
+	newLogger := pp.New()
+	newLogger.SetOutput(out)
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetPassingColorScheme())
+	if _, err := newLogger.Printf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name); err != nil {
+		utils.LogError(logger, err, "failed to print the logs")
+	}
+}
+
+func printFailLine(tc *models.TestCase, logger *zap.Logger, out io.Writer) {
+	newLogger := pp.New()
+	newLogger.SetOutput(out)
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetFailingColorScheme())
+	if _, err := newLogger.Printf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name); err != nil {
+		utils.LogError(logger, err, "failed to print the logs")
+	}
 }
 
 // parseGrpcStatus parses a grpc-status trailer value to int.
@@ -731,10 +797,12 @@ func compareGrpcMessage(
 	var jsonComparisonResult matcher.JSONComparisonResult
 
 	if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
+		// Their sizes, never the messages: they are the recorded and the
+		// app's answers.
 		logger.Debug("Both gRPC decoded data are valid JSON, using JSON comparison",
 			zap.Int("message_index", msgIdx),
-			zap.String("expectedDecodedData", expectedDecodedData),
-			zap.String("actualDecodedData", actualDecodedData))
+			zap.Int("expected_bytes", len(expectedDecodedData)),
+			zap.Int("actual_bytes", len(actualDecodedData)))
 
 		expectedDecodedData = matcher.NormalizeNestedJSONForNoise(expectedDecodedData, bodyNoise, logger)
 		actualDecodedData = matcher.NormalizeNestedJSONForNoise(actualDecodedData, bodyNoise, logger)

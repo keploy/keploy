@@ -11,12 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/plaintcp"
@@ -52,9 +54,11 @@ func (p *Proxy) newDNSServer(network string) *dnsServer {
 		Addr:    fmt.Sprintf(":%v", p.DNSPort),
 		Net:     network,
 		Handler: p,
-		// miekg/dns calls it just before it serves on the socket, on the
-		// goroutine that called ActivateAndServe. A serve call that fails
-		// before it serves never calls it.
+		// miekg/dns calls it just before it enters its accept/read loop, on
+		// the goroutine that called ActivateAndServe — before Accept on TCP
+		// (every OS) and before touching the UDP socket on Windows. serve's
+		// preBoundReady check stops a closed or unverifiable pre-bound socket
+		// from reaching ActivateAndServe and being notified as started.
 		NotifyStartedFunc: func() { s.settleAs(true, nil) },
 	}
 	return s
@@ -85,7 +89,9 @@ func (s *dnsServer) serve() (err error) {
 		defer func() { _ = sock.Close() }()
 	}
 	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
-	err = s.srv.ActivateAndServe()
+	if err = preBoundReady(s.srv); err == nil {
+		err = s.srv.ActivateAndServe()
+	}
 	if err != nil {
 		utils.LogError(s.logger, err, fmt.Sprintf("the %s DNS server failed to serve or stopped serving", s.name()), zap.String("addr", s.srv.Addr))
 	}
@@ -246,8 +252,8 @@ const (
 )
 
 // newDNSCache creates a new thread-safe, size-bounded, TTL-expiring DNS cache.
-func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
-	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
+func newDNSCache() *lru.Expirable[string, dnsCacheEntry] {
+	return lru.NewExpirable[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
 }
 
 // shouldCacheDNSResponse reports whether a DNS resolution result is
@@ -282,16 +288,16 @@ func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
 // exist (search-list expansions) never evict a resolved answer, which would be
 // recorded again each time its question leaves the dnsCache.
 type dnsRecordDedupe struct {
-	resolved *expirable.LRU[string, bool]
-	negative *expirable.LRU[string, bool]
+	resolved *lru.Expirable[string, bool]
+	negative *lru.Expirable[string, bool]
 }
 
 // newRecordedDNSMocksCache creates the bounded, TTL-expiring trackers for DNS
 // mock deduplication.
 func newRecordedDNSMocksCache() *dnsRecordDedupe {
 	return &dnsRecordDedupe{
-		resolved: expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL),
-		negative: expirable.NewLRU[string, bool](recordedDNSNegativesMaxSize, nil, recordedDNSMocksTTL),
+		resolved: lru.NewExpirable[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL),
+		negative: lru.NewExpirable[string, bool](recordedDNSNegativesMaxSize, nil, recordedDNSMocksTTL),
 	}
 }
 
@@ -299,15 +305,32 @@ func newRecordedDNSMocksCache() *dnsRecordDedupe {
 // holding it when so, with the key it is held under. Non-atomic Get-then-Add:
 // two concurrent first answers can both record, as before.
 func (d *dnsRecordDedupe) firstAnswer(question dns.Question, rank int) (string, bool) {
-	tracker, key := d.resolved, generateDNSDedupeKey(question)
-	if rank != dnsRankResolved {
-		tracker, key = d.negative, key+dnsDedupeSuffix[rank]
-	}
+	tracker, key := d.trackerFor(question, rank)
 	if _, held := tracker.Get(key); held {
 		return key, false
 	}
 	tracker.Add(key, true)
 	return key, true
+}
+
+// giveBack lets go of question's answer of kind rank, held by firstAnswer for
+// a mock the recording lost as it was handed over (the manager dropped it):
+// held, it would skip the question's next answer of that kind as a duplicate
+// of an answer no recording holds, for recordedDNSMocksTTL. Its next answer
+// is recorded in its place.
+func (d *dnsRecordDedupe) giveBack(question dns.Question, rank int) {
+	tracker, key := d.trackerFor(question, rank)
+	tracker.Remove(key)
+}
+
+// trackerFor is the tracker and key question's answer of kind rank is held
+// under.
+func (d *dnsRecordDedupe) trackerFor(question dns.Question, rank int) (*lru.Expirable[string, bool], string) {
+	key := generateDNSDedupeKey(question)
+	if rank != dnsRankResolved {
+		return d.negative, key + dnsDedupeSuffix[rank]
+	}
+	return d.resolved, key
 }
 
 // Purge empties both trackers in place (see ResetRecordedDNSMocks).
@@ -317,9 +340,11 @@ func (d *dnsRecordDedupe) Purge() {
 }
 
 // newNodataRelayLogCache creates the bounded, TTL-expiring tracker that dedupes
-// the "relayed NODATA" Info log to once per (name, qtype).
-func newNodataRelayLogCache() *expirable.LRU[string, bool] {
-	return expirable.NewLRU[string, bool](nodataRelayLogMaxSize, nil, nodataRelayLogTTL)
+// the "relayed NODATA" Info log to once per (name, qtype). The unanswered
+// forward WARN (logUnansweredForward) is deduped by another of the same shape:
+// its key space is the same app-controlled (name, qtype).
+func newNodataRelayLogCache() *lru.Expirable[string, bool] {
+	return lru.NewExpirable[string, bool](nodataRelayLogMaxSize, nil, nodataRelayLogTTL)
 }
 
 // shouldLogNodataRelay reports whether the "relayed NODATA" Info line has not
@@ -335,14 +360,41 @@ func newNodataRelayLogCache() *expirable.LRU[string, bool] {
 // DNS server down mid-resolution. (It also keeps the bare &Proxy{} literals in
 // this package's tests exercising the surrounding DNS logic.)
 func (p *Proxy) shouldLogNodataRelay(key string) bool {
-	if p.nodataRelayLogged == nil {
+	return firstNotice(p.nodataRelayLogged, key)
+}
+
+// firstNotice reports whether key has not been seen by tracker yet, recording
+// it as seen when it returns true: the once-per-key gate of a log line. A nil
+// tracker sees nothing, so every sighting is a first one.
+func firstNotice(tracker *lru.Expirable[string, bool], key string) bool {
+	if tracker == nil {
 		return true
 	}
-	if _, dup := p.nodataRelayLogged.Get(key); dup {
+	if _, dup := tracker.Get(key); dup {
 		return false
 	}
-	p.nodataRelayLogged.Add(key, true)
+	tracker.Add(key, true)
 	return true
+}
+
+// dnsName is name, a DNS question's, as the agent's lines and errors name
+// it: its labels' shape beside its tag (models.HostLogName) under the
+// session the proxy serves now (its LogKeys; the process's key when it
+// serves none). A name is the app's: a tenant's, a customer's. The mocks
+// and the report keep it whole.
+func (p *Proxy) dnsName(name string) string {
+	return p.dnsKeys().HostLogName(name)
+}
+
+// dnsKeys is the key of the session the proxy serves now (its LogKeys), nil,
+// the process's key, when it serves none: what the DNS proxy's lines name a
+// question's name under (dnsName), and its miss's report carries the tag of
+// (MockMismatchReport.HostTag).
+func (p *Proxy) dnsKeys() *models.LogKeySession {
+	if s := p.getSession(); s != nil {
+		return s.LogKeys
+	}
+	return nil
 }
 
 func generateCacheKey(name string, qtype uint16) string {
@@ -356,9 +408,12 @@ func dnsTypeString(qtype uint16) string {
 	return strconv.Itoa(int(qtype))
 }
 
-func dnsQuestionFields(question dns.Question) []zap.Field {
+// dnsQuestionFields are the fields a line names question by: its name by its
+// labels' shape beside its tag under the session the proxy serves
+// (dnsName), its type and its class.
+func (p *Proxy) dnsQuestionFields(question dns.Question) []zap.Field {
 	return []zap.Field{
-		zap.String("query", question.Name),
+		zap.String("query", p.dnsName(question.Name)),
 		zap.String("qtype", dnsTypeString(question.Qtype)),
 		zap.Uint16("qclass", question.Qclass),
 	}
@@ -410,7 +465,12 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 		var resp dnsCacheEntry
 		found := false
-		if _, listed := rd.listedNameOf(question.Name); listed {
+		if isLocalhostName(question.Name) {
+			// Before the mock.real list, the cache, a mock or an upstream:
+			// keploy's DNS answers a localhost name itself, the same in a
+			// recording and a replay (localhostDNSResponse).
+			resp, found = localhostDNSResponse(question), true
+		} else if _, listed := rd.listedNameOf(question.Name); listed {
 			resp, found = p.realDNS(question), true
 		} else {
 			resp, found = p.dnsCache.Get(key)
@@ -522,6 +582,11 @@ func (p *Proxy) isRedundantSearchExpansion(name string) bool {
 func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) dnsCacheEntry {
 	switch mode {
 	case models.MODE_TEST:
+		// The question's round as it reaches keploy, which its miss carries
+		// (StampMark): forwarding it below can take long enough for the
+		// replay to begin the next test before the miss is filed, and the
+		// miss is listed where its question was asked.
+		mark := p.dnsCallRound()
 		// Use recorded DNS mocks only.
 		if mockingEnabled {
 			if resp, mocked := p.getMockedDNSResponse(question); mocked {
@@ -584,7 +649,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					// mock was asked, and keploy does not report the queries
 					// reportable leaves out, so neither line calls it a miss.
 					fields := []zap.Field{
-						zap.String("query", question.Name),
+						zap.String("query", p.dnsName(question.Name)),
 						zap.String("qtype", dns.TypeToString[question.Qtype]),
 						zap.Int("rcode", fwdResp.Rcode),
 						zap.Int("answers", len(fwdResp.Answer)),
@@ -634,20 +699,20 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				case reportable:
 					if p.shouldLogNodataRelay(generateCacheKey(question.Name, question.Qtype)) {
 						p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
-							zap.String("query", question.Name),
+							zap.String("query", p.dnsName(question.Name)),
 							zap.String("qtype", dns.TypeToString[question.Qtype]))
 					} else {
 						p.logger.Debug("DNS mock miss: upstream NODATA, relaying (already logged for this name/qtype)",
-							zap.String("query", question.Name),
+							zap.String("query", p.dnsName(question.Name)),
 							zap.String("qtype", dns.TypeToString[question.Qtype]))
 					}
 				case mockingEnabled:
 					p.logger.Debug("DNS NODATA (empty NOERROR) for a query keploy does not report as a miss; relaying upstream answer",
-						zap.String("query", question.Name),
+						zap.String("query", p.dnsName(question.Name)),
 						zap.String("qtype", dns.TypeToString[question.Qtype]))
 				default:
 					p.logger.Debug("DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer",
-						zap.String("query", question.Name),
+						zap.String("query", p.dnsName(question.Name)),
 						zap.String("qtype", dns.TypeToString[question.Qtype]))
 				}
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
@@ -665,7 +730,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// like "localstack" or "postgres" — issue #2006).
 			if !mockingEnabled {
 				p.logger.Debug("DNS upstream returned negative answer; mocking disabled, returning upstream response",
-					zap.String("query", question.Name),
+					zap.String("query", p.dnsName(question.Name)),
 					zap.String("qtype", dns.TypeToString[question.Qtype]),
 					zap.Int("rcode", fwdResp.Rcode))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
@@ -675,7 +740,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// not answer -- they say nothing about whether the name exists,
 			// so they stay reportable like an unreachable upstream.
 			fields := []zap.Field{
-				zap.String("query", question.Name),
+				zap.String("query", p.dnsName(question.Name)),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Int("rcode", fwdResp.Rcode),
 			}
@@ -691,7 +756,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			}
 		} else if fwdErr != nil {
 			fields := []zap.Field{
-				zap.String("query", question.Name),
+				zap.String("query", p.dnsName(question.Name)),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Error(fwdErr),
 			}
@@ -723,7 +788,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		if isGrpcServiceConfigProbe(question) {
 			p.logger.Debug("no mock for the gRPC service-config TXT probe; "+
 				"an empty TXT answer is the correct, complete response",
-				zap.String("query", question.Name))
+				zap.String("query", p.dnsName(question.Name)))
 			return p.defaultDNSResponse(question)
 		}
 		// Skipped when upstream said NXDOMAIN: there is no mock to be missing.
@@ -752,7 +817,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// Without it a suppressed report and a report that never reached
 			// the gate look identical in the agent log.
 			p.logger.Debug("DNS query not reported as a miss: redundant search-list expansion, a name that cannot resolve",
-				zap.String("query", question.Name),
+				zap.String("query", p.dnsName(question.Name)),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Strings("search", p.dnsSearch))
 		}
@@ -761,21 +826,30 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// mock and upstream forwarding also failed.
 			p.logger.Debug("mock miss",
 				zap.String("protocol", "DNS"),
-				zap.String("query", question.Name),
+				zap.String("query", p.dnsName(question.Name)),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.String("hint", "DNS mocks may be missing. Re-record to capture DNS queries."),
 			)
 			missed := time.Now()
+			report := &models.MockMismatchReport{
+				At:            missed,
+				Protocol:      "DNS",
+				ActualSummary: fmt.Sprintf("%s %s", dns.TypeToString[question.Qtype], question.Name),
+				// The query's type names the call; its name is the
+				// value it asked for.
+				Command:   dns.TypeToString[question.Qtype],
+				NextSteps: "DNS mocks may be missing. Re-record to capture DNS queries.",
+				// The tag the lines above name the question's name by,
+				// for the console and the report to print beside the
+				// question whole.
+				HostTag: p.dnsKeys().HostTag(question.Name),
+			}
+			integrations.StampMark(report, mark)
 			proxyErr := models.ParserError{
 				ParserErrorType: models.ErrMockNotFound,
-				Err:             fmt.Errorf("DNS mock not found for query: %s (%s)", question.Name, dns.TypeToString[question.Qtype]),
+				Err:             fmt.Errorf("DNS mock not found for query: %s (%s)", p.dnsName(question.Name), dns.TypeToString[question.Qtype]),
 				At:              missed,
-				MismatchReport: &models.MockMismatchReport{
-					At:            missed,
-					Protocol:      "DNS",
-					ActualSummary: fmt.Sprintf("%s %s", dns.TypeToString[question.Qtype], question.Name),
-					NextSteps:     "DNS mocks may be missing. Re-record to capture DNS queries.",
-				},
+				MismatchReport:  report,
 			}
 			p.sendDNSMiss(proxyErr, question)
 		}
@@ -784,9 +858,24 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 	case models.MODE_RECORD:
 		resp, err := p.recordDNSMock(question, reqTime, session)
 		if err != nil {
-			utils.LogError(p.logger, err, "DNS resolution failed in record mode",
-				dnsQuestionFields(question)...,
-			)
+			// The failure's level says whose it is, as realDNS's does.
+			// recordDNSMock marks its error errNoUpstreamAnswered when it
+			// asked the app's own upstream resolvers and none answered: the
+			// SERVFAIL is the one the app's resolver gives, so it is
+			// logUnansweredForward's WARN. Any other failure is keploy's own
+			// and stays an ERROR, such as public resolvers keploy picked
+			// (recordDNSFallback) not answering when it captured none of the
+			// app's.
+			if errors.Is(err, errNoUpstreamAnswered) {
+				p.logUnansweredForward(question, "DNS resolution failed in record mode",
+					append(p.dnsQuestionFields(question), zap.Error(err),
+						zap.String("app_answer", "SERVFAIL, as a recursive resolver answers when the servers it asks do not; nothing is recorded for the name"))...,
+				)
+			} else {
+				utils.LogError(p.logger, err, "DNS resolution failed in record mode",
+					p.dnsQuestionFields(question)...,
+				)
+			}
 			return dnsCacheEntry{
 				Msg: &dns.Msg{
 					MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure},
@@ -799,6 +888,68 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// any other mode -> best-effort defaults
 		return p.defaultDNSResponse(question)
 	}
+}
+
+// isLocalhostName reports whether name is a localhost name (RFC 6761 6.3):
+// localhost. itself or any name under it, in any letter case.
+func isLocalhostName(name string) bool {
+	n := strings.ToLower(dns.Fqdn(name))
+	return n == "localhost." || strings.HasSuffix(n, ".localhost.")
+}
+
+// localhostDNSResponse is keploy's own answer to a localhost name, the one RFC
+// 6761 6.3 asks of a resolver: the loopback address for an address query
+// (127.0.0.1 for A, ::1 for AAAA) and, for any other type, NOERROR with no
+// record (NODATA: the name exists, it has addresses, but no record of that
+// type). It never asks another server, so it is the same in a recording and in
+// a replay, needs no mock and is never recorded.
+//
+// The names never leave the machine they are asked on, so no upstream can
+// answer them better, and asking one only costs: grpc-go asks TXT
+// _grpc_config.<host> before a client's first connection, and for a localhost
+// target that went upstream, where a resolver that did not answer held the
+// client back for its timeout. The addresses are the ones an app's own
+// resolver gives (a hosts file's localhost entries; systemd-resolved for every
+// name under localhost.); ::1 is the loopback address whether or not keploy
+// redirects IPv6, as it is in a hosts file.
+func localhostDNSResponse(question dns.Question) dnsCacheEntry {
+	resp := dnsCacheEntry{Msg: &dns.Msg{MsgHdr: dns.MsgHdr{
+		Rcode:              dns.RcodeSuccess,
+		Authoritative:      true,
+		RecursionAvailable: true,
+	}}}
+	hdr := dns.RR_Header{Name: question.Name, Rrtype: question.Qtype, Class: dns.ClassINET, Ttl: 3600}
+	switch question.Qtype {
+	case dns.TypeA:
+		resp.Answer = []dns.RR{&dns.A{Hdr: hdr, A: net.IPv4(127, 0, 0, 1)}}
+	case dns.TypeAAAA:
+		resp.Answer = []dns.RR{&dns.AAAA{Hdr: hdr, AAAA: net.IPv6loopback}}
+	}
+	return resp
+}
+
+// logUnansweredForward logs msg for a query keploy forwarded for the app that
+// no upstream resolver answered (a timeout, a refused or a failed exchange),
+// and that keploy then answered SERVFAIL.
+//
+// At WARN, not ERROR, because keploy did not fail: it answered as a recursive
+// resolver answers when the servers it asks do not (SERVFAIL), so the app got
+// the failure its own resolver would have given it, and nothing keploy keeps
+// is lost: a failed answer is never a mock (recordDNSMock records NOERROR
+// answers only), and a mock.real name is never recorded. The app did see a
+// DNS failure, which can shape what it did while it was recorded, so the line
+// is said at the level an operator reads. It is a WARN once per (name, qtype)
+// every 30 minutes and Debug in between: a failed answer is not cached, so
+// every retry of an app comes back here, and an upstream that stays down would
+// otherwise repeat the line for as long. The tracker (unansweredForwardLogged)
+// holds the last 1024 questions for 30 minutes each, and a new recording
+// session clears it (ResetRecordedDNSMocks).
+func (p *Proxy) logUnansweredForward(question dns.Question, msg string, fields ...zap.Field) {
+	if firstNotice(p.unansweredForwardLogged, generateCacheKey(question.Name, question.Qtype)) {
+		p.logger.Warn(msg, fields...)
+		return
+	}
+	p.logger.Debug(msg, fields...)
 }
 
 // isGrpcServiceConfigProbe reports whether q is grpc-go's service-config
@@ -826,7 +977,7 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 	switch question.Qtype {
 	case dns.TypeA:
 		p.logger.Debug("using synthesized A fallback for DNS query",
-			append(dnsQuestionFields(question), zap.String("proxy_ip4", p.IP4))...,
+			append(p.dnsQuestionFields(question), zap.String("proxy_ip4", p.IP4))...,
 		)
 		resp.Answer = []dns.RR{&dns.A{
 			Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
@@ -909,6 +1060,16 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 	}
 }
 
+// dnsCallRound is the run's store's round now (integrations.MarkCallRound),
+// as a DNS question reaches keploy; the zero CallRound with no store.
+func (p *Proxy) dnsCallRound() integrations.CallRound {
+	mgr := p.getMockManager()
+	if mgr == nil {
+		return integrations.CallRound{}
+	}
+	return integrations.MarkCallRound(mgr)
+}
+
 func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool) {
 	mgr := p.getMockManager()
 	if mgr == nil {
@@ -964,7 +1125,7 @@ func (p *Proxy) replayDNSAnswer(question dns.Question, recorded dnsCacheEntry) d
 		return recorded
 	}
 	p.logger.Debug("DNS answer recorded as negative; the replay's own network answers the name better, serving its answer",
-		zap.String("query", question.Name),
+		zap.String("query", p.dnsName(question.Name)),
 		zap.String("qtype", dns.TypeToString[question.Qtype]),
 		zap.String("recorded_rcode", dns.RcodeToString[recorded.Rcode]),
 		zap.Int("answers", len(live.Answer)))
@@ -1035,7 +1196,10 @@ func decodeDNSRR(logger *zap.Logger, raw string) (rr dns.RR, ok bool) {
 	rr, err := dns.NewRR(raw)
 	if err != nil || rr == nil {
 		if logger != nil {
-			logger.Debug("failed to parse dns rr", zap.String("rr", raw), zap.Error(err))
+			// Its size, never its text: a recorded answer names the host
+			// it answered, and the parser's error quotes the token it
+			// refused (withheld).
+			logger.Debug("failed to parse dns rr", zap.Int("rr_bytes", len(raw)), zap.Error(utils.WithholdInput(err)))
 		}
 		return nil, false
 	}
@@ -1143,6 +1307,16 @@ func generateDNSDedupeKey(question dns.Question) string {
 	)
 }
 
+// recordDNSFallback is what a recording's lookup asks when keploy captured
+// no upstream resolver of the app's at startup (captureDNSUpstream): public
+// resolvers keploy picked, as host:port. recordDNSTimeout caps each exchange
+// of the lookup. Both are vars only so a test can point the fallback at a
+// resolver that does not answer, and need not wait 5 s for one.
+var (
+	recordDNSFallback = []string{"8.8.8.8:53", "1.1.1.1:53"}
+	recordDNSTimeout  = 5 * time.Second
+)
+
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
 	// Prefer the upstream resolver list captured once at proxy
 	// startup (see captureDNSUpstream). This is critical in sidecar
@@ -1155,24 +1329,39 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// (b) discover nothing at all. Capturing once at startup pins
 	// the REAL cluster resolvers.
 	//
-	// The public-DNS fallback (8.8.8.8 / 1.1.1.1) is retained for the
-	// rare local-dev case where the proxy runs outside a cluster AND
-	// resolv.conf is entirely missing — the forwarder treats this as
-	// "no upstream" and we would otherwise be stuck.
-	var servers []string
-	port := "53"
-	if p.hasDNSUpstream() {
-		servers = p.dnsUpstreamServers
-		port = p.dnsUpstreamPort
+	// The public-DNS fallback (recordDNSFallback: 8.8.8.8 / 1.1.1.1) is
+	// asked when keploy captured no upstream of the app's: resolv.conf
+	// is missing or unreadable, or names no resolver keploy can use (no
+	// nameserver given as a plain IP, or only keploy's own listener),
+	// or on Windows when no adapter that is up has a DNS server. The
+	// forwarder treats this as "no upstream" and we would otherwise be
+	// stuck. Those servers are keploy's pick, not the app's, so a
+	// failure to reach them is not marked errNoUpstreamAnswered, and it
+	// stays an ERROR.
+	type upstreamTarget struct {
+		server string
+		addr   string
+	}
+	var targets []upstreamTarget
+	appUpstream := p.hasDNSUpstream()
+	if appUpstream {
+		for _, server := range p.dnsUpstreamServers {
+			targets = append(targets, upstreamTarget{
+				server: server,
+				addr:   net.JoinHostPort(server, p.dnsUpstreamPort),
+			})
+		}
 	} else {
 		// captureDNSUpstream already logs once at startup if it cannot
 		// snapshot a real resolver, so we don't re-log per-query here
 		// (that path runs on every cache miss and would burst the log).
-		servers = []string{"8.8.8.8", "1.1.1.1"}
+		for _, addr := range recordDNSFallback {
+			targets = append(targets, upstreamTarget{server: addr, addr: addr})
+		}
 	}
 
 	c := new(dns.Client)
-	c.Timeout = 5 * time.Second
+	c.Timeout = recordDNSTimeout
 
 	m := new(dns.Msg)
 	m.SetQuestion(question.Name, question.Qtype)
@@ -1183,18 +1372,25 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		resolveErr error
 	)
 
-	for _, server := range servers {
-		addr := net.JoinHostPort(server, port)
-
+	// The servers are asked as the application's resolver asks them
+	// (upstreamSearch): past a server's failure or refusal on every OS, and
+	// on Windows adapter by adapter, so a recording holds the answer the
+	// application gets.
+	search := newUpstreamSearch(p.dnsUpstreamAdapter)
+	for _, target := range targets {
+		server, addr := target.server, target.addr
+		if search.passes(server) {
+			continue
+		}
 		// Per-server-attempt logs fire on every cache miss (worst case, multiple
 		// servers per miss) so we keep only the diagnostic ones — silent success
 		// path, log the rare failure / truncation / TCP-retry transitions.
 		c.Net = "udp"
-		resp, _, err := c.Exchange(m, addr)
+		resp, _, err := p.exchange(c, m, addr)
 		if err != nil {
 			resolveErr = err
 			p.logger.Debug("upstream DNS exchange failed",
-				append(dnsQuestionFields(question),
+				append(p.dnsQuestionFields(question),
 					zap.String("upstream_addr", addr),
 					zap.String("transport", c.Net),
 					zap.Error(err),
@@ -1205,14 +1401,14 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 		if resp != nil && resp.Truncated {
 			p.logger.Debug("upstream DNS response truncated; retrying over TCP",
-				append(dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
+				append(p.dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
 			)
 			c.Net = "tcp"
-			resp, _, err = c.Exchange(m, addr)
+			resp, _, err = p.exchange(c, m, addr)
 			if err != nil {
 				resolveErr = err
 				p.logger.Debug("upstream DNS TCP retry failed",
-					append(dnsQuestionFields(question),
+					append(p.dnsQuestionFields(question),
 						zap.String("upstream_addr", addr),
 						zap.String("transport", c.Net),
 						zap.Error(err),
@@ -1223,17 +1419,40 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		}
 
 		if resp != nil {
+			if !search.ends(server, resp) {
+				p.logger.Debug("upstream DNS server did not answer the name (a failure, a refusal, or its adapter denies it); asking the next server",
+					append(p.dnsQuestionFields(question),
+						zap.String("upstream_addr", addr),
+						zap.String("rcode", dns.RcodeToString[resp.Rcode]),
+					)...,
+				)
+				continue
+			}
 			in = resp
 			resolveErr = nil
 			break
 		}
 	}
+	// No server's answer was the answer: every adapter that answered said
+	// the name does not exist (the preferred adapter's NXDOMAIN is the
+	// answer), or every server that answered failed or refused (the first
+	// failure is), whatever a later server's transport error was.
+	if in == nil {
+		if answer := search.answer(); answer != nil {
+			in, resolveErr = answer, nil
+		}
+	}
 
 	if resolveErr != nil {
-		return dnsCacheEntry{}, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, resolveErr)
+		err := fmt.Errorf("failed to resolve DNS query for %s: %w", p.dnsName(question.Name), resolveErr)
+		if appUpstream {
+			// It asked the app's own upstream resolvers and none answered.
+			err = fmt.Errorf("%w: %w", errNoUpstreamAnswered, err)
+		}
+		return dnsCacheEntry{}, err
 	}
 	if in == nil {
-		return dnsCacheEntry{}, fmt.Errorf("nil DNS response for %s", question.Name)
+		return dnsCacheEntry{}, fmt.Errorf("nil DNS response for %s", p.dnsName(question.Name))
 	}
 
 	resp := dnsCacheEntry{
@@ -1267,7 +1486,8 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// not resolve at first (a service not up yet) and did later keeps its
 	// later answer, which a replay serves before the earlier one
 	// (getMockedDNSResponse).
-	dedupeKey, first := p.recordedDNSMocks.firstAnswer(question, dnsAnswerRank(in))
+	rank := dnsAnswerRank(in)
+	_, first := p.recordedDNSMocks.firstAnswer(question, rank)
 	if !first {
 		return resp, nil
 	}
@@ -1306,9 +1526,10 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// One log per UNIQUE (name, qtype, kind) — bounded by the dedupe
 	// trackers' sizes so this is naturally rate-limited. Keep counts only; full
 	// answer/ns/extra string dumps would balloon log size for chatty clients.
+	// Its dedupe key is not named: it is the question's name whole, which
+	// the query field names by its shape and tag (dnsQuestionFields).
 	p.logger.Debug("Recording new DNS mock",
-		append(dnsQuestionFields(question),
-			zap.String("dedupe_key", dedupeKey),
+		append(p.dnsQuestionFields(question),
 			zap.Int("rcode", in.Rcode),
 			zap.Int("answer_count", len(in.Answer)),
 			zap.Int("ns_count", len(in.Ns)),
@@ -1337,12 +1558,19 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// needs to be able to bind the channel the first time a query
 	// arrives, which may precede the first TCP connection that
 	// otherwise triggers proxy.buildRecordSession's SetOutputChannel.
+	//
+	// A mock the manager drops (counted and said there) gives its question
+	// back (giveBack), so its next answer is recorded.
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.SetOutputChannel(session.MC)
+		var drop syncMock.MockDrop
 		if session.Synchronous {
-			mgr.AddMock(mock)
+			drop = mgr.AddMock(mock)
 		} else {
-			mgr.SendConfigMock(mock)
+			drop = mgr.SendConfigMock(mock)
+		}
+		if drop.Dropped() {
+			p.recordedDNSMocks.giveBack(question, rank)
 		}
 	}
 	return resp, nil
@@ -1419,4 +1647,28 @@ func preBound(srv *dns.Server) io.Closer {
 		return srv.PacketConn
 	}
 	return nil
+}
+
+// preBoundReady verifies that a pre-bound socket handed to srv is still open
+// before miekg/dns enters ActivateAndServe. miekg/dns invokes NotifyStartedFunc
+// before Accept on TCP (every OS) and before ReadFrom on UDP on Windows (where
+// miekg/dns's setUDPSocketOptions is a no-op). Without this check, a socket
+// closed between bindDNS and ActivateAndServe settles the server as serving and
+// lets startDNSServers return nil while serve fails immediately on the closed
+// socket. A non-nil socket that does not implement syscall.Conn fails closed so
+// an unverifiable wrapper can never bypass the check silently.
+func preBoundReady(srv *dns.Server) error {
+	sock := preBound(srv)
+	if sock == nil {
+		return nil
+	}
+	sc, ok := sock.(syscall.Conn)
+	if !ok {
+		return fmt.Errorf("cannot verify the DNS socket is serving: %T does not expose its OS handle", sock)
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	return raw.Control(func(uintptr) {})
 }

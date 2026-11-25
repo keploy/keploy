@@ -64,6 +64,21 @@ jobs:
       #                       and the macOS one can run it; upstream_test.go
       #                       checks the numbering by what was read. Neither
       #                       had run on Windows before this job.
+      #   .../proxy/supervisor  the session's record of how each end of a
+      #                       connection ended: a client socket's Winsock
+      #                       reset or broken pipe kept as syscall.ECONNRESET
+      #                       or syscall.EPIPE for the parsers
+      #                       (client_end_windows.go). Its Windows rows keep
+      #                       the errors real loopback sockets gave and run
+      #                       only here.
+      #   .../proxy/relay     which chunks of an answer the client took before
+      #                       it closed or reset, judged from the client
+      #                       socket's TCP_INFO_v0 (SIO_TCP_INFO,
+      #                       client_socket_windows.go). Its real-socket rows
+      #                       drive loopback clients that half-close, reset,
+      #                       or stop reading until their receive window
+      #                       closes, so they prove the Windows reading only
+      #                       when they run here.
       #   ./internal/testnet  the ports ./pkg, ./pkg/neterr and
       #                       ./pkg/agent/proxy/incoming take for their
       #                       refused dials and their listeners. Their
@@ -100,16 +115,67 @@ jobs:
       # &&: under `shell: cmd` a multi-line block is a batch file that does not
       # stop on failure and reports only the last exit code.
       - name: Test amd64
-        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./internal/testnet/
+        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./pkg/agent/proxy/supervisor/ ./pkg/agent/proxy/relay/ ./internal/testnet/
+        shell: cmd
+
+      # The count of writes the proxy puts over every accepted client socket
+      # (relay.CountClientWrites, under the tracking), which the relay's
+      # closed-window rows above read on Windows: every site that keys or
+      # reads the accepted socket finds it under the count, whether the proxy
+      # keeps the connection, pairs it, both or neither. Only these two rows
+      # of ./pkg/agent/proxy/ run here: the package as a whole is not listed
+      # above (see its line).
+      - name: Test the proxy's count of accepted sockets (amd64)
+        run: go test -count=1 -run "^(TestTheAcceptedSocketIsFoundUnderTheCountOfWrites|TestEveryAcceptedSocketIsCountedWhetherKeptOrPaired)$" ./pkg/agent/proxy/
+        shell: cmd
+
+      # The DNS servers' startup readiness and start-failure contract on Windows
+      # (dns.go + dns_startup_ready_test.go): miekg/dns's setUDPSocketOptions is
+      # a no-op on Windows and NotifyStartedFunc runs before Accept on TCP, so
+      # dnsServer.serve verifies the pre-bound socket is still open before
+      # ActivateAndServe. Running these rows here keeps that contract covered on
+      # Windows alongside Linux.
+      - name: Test the proxy's DNS server startup readiness (amd64)
+        run: go test -count=1 -run "^(TestStartedDNSServersServeOnTheirBoundPort|TestTheTCPDNSServerListensPlainTCP|TestADNSServerThatCannotServeSettlesWithItsError|TestADNSServerThatCannotServeFailsTheDNSServersStart|TestATCPDNSServerThatCannotServeFailsTheDNSServersStart|TestADNSServerWithAnUnverifiableSocketFailsClosed|TestADNSServerThatReturnsWithoutServingLetsItsSocketGo|TestADNSServerCancelledBeforeItServesIsStoppedOnceItServes)$" ./pkg/agent/proxy/
+        shell: cmd
+
+      # The look at a socket's TCP state (util.PeerGone, util.AwaitPeerReset:
+      # SIO_TCP_INFO here) that the http package's held answers above ask on
+      # Windows: a peer's FIN and its reset are seen, and a wait past the FIN
+      # ends at the reset. Only these rows of ./pkg/agent/proxy/util/ run
+      # here: the package as a whole has not been shown to pass on Windows.
+      - name: Test the look at a socket's peer (amd64)
+        run: go test -count=1 -run "^(TestPeerGone|TestPeerGoneByTheSocketsState|TestAwaitPeerReset|TestTCPStateOnWindows)$" ./pkg/agent/proxy/util/
+        shell: cmd
+
+      # A taken port on Windows: the proxy's bind and the DNS servers' tell
+      # Winsock's WSAEADDRINUSE as a taken port (neterr.IsAddrInUse), and a
+      # port the proxy may not move off fails the start as one to start again
+      # on new ports (utils.ErrPortTaken). Only these rows of
+      # ./pkg/agent/proxy/ run here (see the package's line above).
+      - name: Test the proxy's taken port on Windows (amd64)
+        run: go test -count=1 -run "^(TestATakenPortThatMayNotMoveFailsAsOneToStartAgain|TestTheDNSServersBindIsAStageOfTheAgentsStart)$" ./pkg/agent/proxy/
         shell: cmd
 
       # The Windows stop of a native app (utils.interruptProcessTree): one that
       # had to force-kill the app says so, so a test set's end it cut is not
-      # judged (P101-b-o). Only this test of ./utils/ runs here: the package
-      # as a whole has not been shown to pass on Windows. It takes ~30 s, most
-      # of it the stop's own 10 s grace and its PowerShell process checks.
-      - name: Test the Windows stop (amd64)
-        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled" ./utils/
+      # judged (P101-b-o). It takes ~30 s, most of it the stop's own 10 s
+      # grace and its PowerShell process checks. The stop reaches a Go app's
+      # os.Interrupt, with no kill, from a keploy on a console and from one on
+      # none (started detached or as a service), two sends at once included.
+      # And the check every command makes that its working directory is
+      # still there (GetLastDirectory), which must answer the directory a
+      # Windows run is in. Only these tests of ./utils/ run here: the package
+      # as a whole has not been shown to pass on Windows.
+      - name: Test the Windows stop, working directory, and child console pipe (amd64)
+        run: go test -count=1 -v -run "TestTheWindowsStopSaysItKilled|TestOnWindowsKeploysStopReaches|TestGetLastDirectory|TestChildConsoleWindowsDrainsWithoutWaitingForAGrandchildHoldingThePipe|TestChildConsoleWindowsPipeHasOwnerOnlyDACLAndReadAttributes" ./utils/
+        shell: cmd
+
+      # The agent's start on Windows, which has no PTY: what the command
+      # prints reaches the tee the CLI reads a failed start's reason from, and
+      # with no tee the command prints to keploy's own console.
+      - name: Test the agent command's output on Windows (amd64)
+        run: go test -count=1 -run "TestAWindowsCommandsOutputReachesItsTee" ./pkg/platform/http/utils/
         shell: cmd
 
       # The run's log on Windows: a full log is sealed with the read-only
@@ -123,3 +189,125 @@ jobs:
       - name: Test the run's log (amd64)
         run: go test -count=1 -run "TestTheRunsLog|TestCloseLogFileOfAClosedLogIsANoOp|TestCloseLogFileLeavesAFileThatIsNotALog" ./utils/log/
         shell: cmd
+
+      # The CA run and store locks on Windows (pkg/agent/proxy/tls/runlock_windows.go:
+      # LockFileEx on a file in %ProgramData%\Keploy\ca-runs, under a test
+      # directory here): the rows of runlock_test.go (runlock_unix_test.go's
+      # are not built here). A held lock makes its run live, a released one
+      # does not and its file is gone; an upper-case id is its lower-case
+      # form's run, and an id with a dot or a separator takes no lock; with no
+      # lock directory no run is live; a run that can take no lock says why,
+      # once; a run whose own file another handle keeps locked takes it when
+      # that handle lets go, gives up after its bound and says so, and does
+      # not wait once its context has ended; a lock error (a closed handle)
+      # ends the wait at once; every install but macOS's takes the lock. And
+      # the rows of storelock_test.go: a change holds the store lock while it
+      # runs and gives it up after; it waits while another handle holds it,
+      # says so once per interval, each line and step naming the file, and
+      # runs once that handle lets go; a holder that never lets go ends it at
+      # its bound with an error that names the file; it does not run once its
+      # context has ended; a lock error ends the wait at once; with no
+      # directory, no file, or a failing try it runs without the lock and
+      # warns once; the store lock is no run's; its interval is under the
+      # CLI's bound for a start that takes no step; a wait is a step in the
+      # start's progress report (utils.ReportBootProgress: the boot reporter's
+      # first run here); once one CA install's wait ends at the bound, its
+      # changes after that try once, until one gets the lock; waits that get
+      # the lock spend none of the install's bound. (The held lock's next
+      # step, a text these rows check too, is logged only on Linux.) Only
+      # these rows of ./pkg/agent/proxy/tls/ run here: the package's other
+      # tests are Unix-only or have not been shown to pass on Windows. They
+      # were added with the code, which no Windows host was at hand to run, so
+      # this job is their first Windows run.
+      - name: Test the CA run and store locks (amd64)
+        run: go test -count=1 -run "^(TestCARunLock|TestStoreLock)" ./pkg/agent/proxy/tls/
+        shell: cmd
+
+      # The claim's reads of the calling process on Windows, all without
+      # elevation: the owner of a connection's client end, from the system's
+      # TCP tables (GetExtendedTcpTable); a process's creation time, and that
+      # one that has exited is gone while a handle still keeps it
+      # (procStart); and its parent chain (procDescends). The table layout and
+      # the chain rule are also tested on every system (caller_tcptable_test,
+      # claimer_chain_test); only here do the system's own tables and
+      # processes feed them. The claim row has a child claim over HTTP and
+      # checks that the agent names the child; the exported-reads row reads
+      # a claiming child as a conformance check of an integration does
+      # (CallerPID, ProcStart, ProcAlive), while it runs and once it exited.
+      - name: Test the claim's process reads (amd64)
+        run: go test -count=1 -run "TestTheClaimReadsTheCallerFromTheConnection|TestTheExportedReads|TestCallerPID|TestSameEndpoint|TestTCPOwnerOnWindows|TestTheWindowsTCP|TestWindowsProc|TestDescendsByCreation" ./pkg/agent/routes/ ./pkg/service/agent/
+        shell: cmd
+
+      # The proxy's count of its accepts on Windows. listenerDrops is 0 here:
+      # a full backlog can drop a connection the client saw complete, and the
+      # application's side of each connection is what charges it. The backlog
+      # row floods a listener of backlog 1 that accepts nothing and checks
+      # that every connect the client completed is accepted or reset at the
+      # client, never left open with no one to accept it. The canary rows
+      # check that the count is proved before the proxy says it is ready, or
+      # unknown from the start. Only these rows of ./pkg/agent/proxy run here
+      # (see the first test step for why).
+      - name: Test the proxy's accept count (amd64)
+        run: go test -count=1 -run "TestOnWindowsAFullBacklogResetsAConnectionItDropsAfterTheClientCompletedIt|TestWithAShimsCount" ./pkg/agent/proxy/
+        shell: cmd
+
+      # The bytes wait on paired connections on Windows: the proxy's side as
+      # SIO_TCP_INFO reads it (BytesIn, and its State by TCPSTATE's values),
+      # and the wait on the shim's send counts (done, started, pending), with
+      # a stand-in for the counts; a settle's cut at the socket's BytesIn, and
+      # the close's charge for bytes a reset dropped unread. Loopback only; no
+      # administrator.
+      - name: Test the proxy's bytes wait (amd64)
+        run: go test -count=1 -v -run "^TestOnWindows(TheProxysSideCountsWhatArrivedAndNoFIN|ASide|AWait|ACancelledSend|AConnection|ASettleWaitsForBytes|AResetThatDropsBytes|AClose)|^TestSent" ./pkg/agent/proxy/
+        shell: cmd
+
+      # The resolvers a recording asks on Windows: the DNS servers of the
+      # adapters that are up, read with GetAdaptersAddresses and checked
+      # against PowerShell's list, and a name only they answer (a private
+      # address's PTR) recorded with their answer rather than a public
+      # resolver's. A name one adapter's server denies is asked on the next
+      # adapter, as Windows asks it, and a server's failure (SERVFAIL) on the
+      # next server: the row adds an adapter of its own (an internal Hyper-V
+      # switch's; it skips and says why where Hyper-V is not running), gives
+      # only it two DNS servers, compares the recording with Resolve-DnsName
+      # and removes the adapter. The machine's own adapters are not changed.
+      - name: Test the machine's DNS resolvers (amd64)
+        run: go test -count=1 -v -run "TestOnWindowsARecordingAsksEachAdapterAsWindowsDoes|TestOnWindowsTheRecordingAsksTheMachinesResolvers|TestOnWindowsTheAdaptersAreReadWhateverTheFirstBufferSize|TestOnWindowsAFailedAdapterReadIsAnError|TestOnWindowsEachAdapterAndServerOfTheListIsRead" ./pkg/agent/proxy/
+        shell: cmd
+
+      # The native agent's watch of the keploy client that started it
+      # (cli/watch_parent_windows.go): the agent command runs with
+      # --client-pid naming a stand-in client and must end once that client
+      # is killed, and not before; a reused pid, a pid no process has, a
+      # client it may not open and a failed wait are each handled as the
+      # rows say. Only these rows of ./cli run here: on Windows the package's
+      # config tests fail on a file mode and one waits on a prompt.
+      - name: Test the agent's watch of its client (amd64)
+        run: go test -count=1 -v -run "TestAnAgentEndsWhenTheClientThatStartedItIsKilled|TestOnWindows" ./cli/
+        shell: cmd
+
+      # keploy's CA trust on Windows, the rows that need no standard user:
+      # the reads of the user's and the machine's ROOT stores (each store's
+      # first and last certificate is found, a fresh one is not), certutil's
+      # exit for a session that cannot show the trust prompt, and the check
+      # that alone lets a run change the machine's trust. This runner's user
+      # is an administrator (KEPLOY_ROW_TOKEN_ELEVATED=1): that check must
+      # say so, and must say no on a thread impersonating the same token
+      # restricted to Administrators deny-only, which still reports
+      # TokenElevation. certutil's ERROR_CANCELLED exit code, as cmd passes
+      # one on, is read as a No (a real click on No is not driven here; the
+      # rows that a No adds keploy's CA to no store run on Linux, through the
+      # store seam); the removal failures Windows' prompt names; and the sweep of the retired "My Custom CA": the user's own
+      # ROOT store is listed apart from the machine's roots its view takes
+      # in, and an elevated sweep removes that CA from the machine's store and
+      # leaves another certificate of its subject. The
+      # rows that run as a standard user with no desktop need a second
+      # account: they run where one exists, with
+      # KEPLOY_ROW_NO_DESKTOP_STANDARD_USER=1.
+      # Only these rows of ./pkg/agent/proxy/tls/ run here (see the first test
+      # step for why).
+      - name: Test keploy's CA trust (amd64)
+        run: go test -count=1 -v -run "TestOnWindowsTheRootStoresAreReadForTheCAsTheyHold|TestOnWindowsCertutilsNotSupportedExitIsANoTrustPrompt|TestOnWindowsTokenElevatedReadsTheRunsToken|TestOnWindowsATokenWithAdministratorsDenyOnlyIsNotElevated|TestOnWindowsCertutilsCancelledExitIsAUserNo|TestOnWindowsRemovalErrorsNameWhatThePromptRefused|TestOnWindowsTheRootStoresAreListedForTheSweep|TestOnWindowsAnElevatedSweepRemovesOnlyTheRetiredCAFromTheMachineStore" ./pkg/agent/proxy/tls/
+        shell: cmd
+        env:
+          KEPLOY_ROW_TOKEN_ELEVATED: "1"

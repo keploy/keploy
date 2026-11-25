@@ -3,7 +3,10 @@ package http
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"reflect"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -271,7 +274,9 @@ func TestAGuardedFormKeyKeepsItsValuesHoweverTheyAreEscapedOrOrdered(t *testing.
 // and by mock serving's body check, and with it on. Where it is refused and
 // named, the switch-off miss names the field: the reason by the key's shape,
 // as the switch's does (a key like these may carry a value), the live value
-// outside the pattern a string of 4 bytes, and the diff by its name.
+// outside the pattern, a string of 4 bytes among them, and the recorded
+// ones beside them where rec's values of the key are outside it too, each
+// side's shapes once, and the diff by its name.
 func holdsGuardedFormKey(t *testing.T, entry, pat, rec, live string, served, named bool) {
 	t.Helper()
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
@@ -295,12 +300,44 @@ func holdsGuardedFormKey(t *testing.T, entry, pat, rec, live string, served, nam
 		}
 		request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(live))
 		request.Header.Set("Content-Type", form["Content-Type"])
-		r := newHTTP().buildHTTPMismatchReport(request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, user, diag)
+		r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, user, diag)
 		if r == nil {
 			t.Fatal("no miss report")
 		}
 		field := "body." + models.KeyShape(entry)
-		want := []models.FieldReason{{Field: field, Why: matcher.PatternWhy(field, []string{pat}, "live", matcher.StringShape(4))}}
+		// Each side's values outside the pattern, by their lengths, each
+		// length once: "the live value (...)", "the recorded values (...)".
+		outside := func(side, body string) (string, int) {
+			values, _ := url.ParseQuery(body)
+			var shapes []string
+			n := 0
+			for _, v := range values[entry] {
+				if shape := matcher.StringShape(len(v)); !regexp.MustCompile(pat).MatchString(v) {
+					n++
+					if !slices.Contains(shapes, shape) {
+						shapes = append(shapes, shape)
+					}
+				}
+			}
+			switch n {
+			case 0:
+				return "", 0
+			case 1:
+				return "the " + side + " value (" + shapes[0] + ")", 1
+			}
+			return "the " + side + " values (" + strings.Join(shapes, ", ") + ")", n
+		}
+		liveValues, nLive := outside("live", live)
+		recValues, nRec := outside("recorded", rec)
+		if nLive == 0 || !strings.Contains(liveValues, matcher.StringShape(4)) {
+			t.Fatalf("live %q holds %q outside %q; want a string of 4 bytes among them", live, liveValues, pat)
+		}
+		values := liveValues
+		if nRec > 0 {
+			values += " and " + recValues
+		}
+		why := matcher.PatternValuesWhy(field, []string{pat}, values, nLive+nRec > 1)
+		want := []models.FieldReason{{Field: field, Why: why}}
 		if !reflect.DeepEqual(r.FieldReasons, want) || !strings.Contains(r.Diff, "body."+entry+":") {
 			t.Errorf("reasons %v, diff %q; want %v and body.%s named", r.FieldReasons, r.Diff, want, entry)
 		}
@@ -392,7 +429,7 @@ func TestWithTheSwitchOffARedactedFieldInsideItsPatternIsNotNamed(t *testing.T) 
 	}
 	request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(live))
 	request.Header.Set("Content-Type", hdr["Content-Type"])
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, user, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, user, diag)
 	if r == nil {
 		t.Fatal("no miss report")
 	}
@@ -421,7 +458,7 @@ func TestWithTheSwitchOffLearnedNoiseDoesNotHideAPatternRefusal(t *testing.T) {
 	}
 	request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(live))
 	request.Header.Set("Content-Type", hdr["Content-Type"])
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, user, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, user, diag)
 	if r == nil {
 		t.Fatal("no miss report")
 	}
@@ -508,7 +545,7 @@ func TestWithTheSwitchOffAPatternRefusalNamesTheField(t *testing.T) {
 			}
 			request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(c.live))
 			request.Header.Set("Content-Type", c.ctype)
-			r := newHTTP().buildHTTPMismatchReport(request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, tok, diag)
+			r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, tok, diag)
 			if r == nil {
 				t.Fatal("no miss report")
 			}
@@ -546,7 +583,7 @@ func TestWithTheSwitchOffAMissOfAnotherPhaseNamesNoPattern(t *testing.T) {
 	}
 	request, _ := http.NewRequest("POST", "http://api.example/y", strings.NewReader(live))
 	request.Header.Set("Content-Type", form["Content-Type"])
-	if r := newHTTP().buildHTTPMismatchReport(request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, tok, diag); r == nil || len(r.FieldReasons) > 0 {
+	if r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, tok, diag); r == nil || len(r.FieldReasons) > 0 {
 		t.Fatalf("report %+v; want no field reasons", r)
 	}
 }

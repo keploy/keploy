@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -462,6 +463,69 @@ func TestAnEndJudgesAgainstTheCountsAtItsBegin(t *testing.T) {
 	require.Contains(t, e.Reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
+// A replayed test keploy fails for a recorded call it never made says, on its
+// evidence, whether its own harness had failed it already: such a call may be
+// one it never reached. A failure keploy imposes (a test the run cut) is not
+// the test's own.
+func TestAnEndSaysWhetherTheTestFailedOnItsOwn(t *testing.T) {
+	for _, c := range []struct {
+		outcome string
+		own     bool
+	}{{"failed", true}, {"passed", false}} {
+		t.Run(c.outcome, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			ctx := context.Background()
+			storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+			a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+			claimSelf(t, a)
+			_, serr := a.ProvenBegin(ctx, begin("TestA"))
+			require.Nil(t, serr)
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: c.outcome})
+			require.Nil(t, serr)
+			require.Equal(t, models.ScopeActionFail, e.Action)
+			w := windowOf(t, a, "o::TestA")
+			require.NotNil(t, w.Evidence)
+			require.Equal(t, []string{"mock-1"}, w.Evidence.Unconsumed)
+			require.Equal(t, c.own, w.Evidence.FailedOnItsOwn)
+		})
+	}
+	// A test that met keploy's error answer to a call (a miss) may have failed
+	// on that answer, so its harness's failure is not its own, and the
+	// recorded call it did not make stays its evidence.
+	t.Run("failed beside a miss", func(t *testing.T) {
+		a, p := wireAgent(t, models.MODE_TEST)
+		ctx := context.Background()
+		storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+		a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+		claimSelf(t, a)
+		_, serr := a.ProvenBegin(ctx, begin("TestA"))
+		require.Nil(t, serr)
+		p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit", Destination: "127.0.0.1:18282"}}
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "failed"})
+		require.Nil(t, serr)
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		w := windowOf(t, a, "o::TestA")
+		require.NotNil(t, w.Evidence)
+		require.Len(t, w.Evidence.Misses, 1)
+		require.Equal(t, []string{"mock-1"}, w.Evidence.Unconsumed)
+		require.False(t, w.Evidence.FailedOnItsOwn, "a test keploy failed a call of did not fail on its own")
+	})
+	// keploy's own failure of a test it closes (why) is not the test's.
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	ev, outcome, err := a.closeOpen(ctx, "o::TestA", models.ScopeOutcomeFailed, time.Now(), "the test process exited")
+	require.NoError(t, err)
+	require.Equal(t, models.ScopeOutcomeFailed, outcome)
+	require.NotNil(t, ev)
+	require.Equal(t, []string{"mock-1"}, ev.Unconsumed)
+	require.False(t, ev.FailedOnItsOwn)
+}
+
 // A recording keploy's judging marked served, not required is not charged when
 // the test that lists it did not make its call; a mark another test's table
 // carries charges this one as before, and so does a mark on another name.
@@ -650,7 +714,7 @@ func TestAReplayedListedTestIsSkippedWithItsReason(t *testing.T) {
 	ctx := context.Background()
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
 	require.Nil(t, serr)
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil, ""))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil, nil, false, ""))
 
 	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
 	require.Nil(t, serr)
@@ -662,6 +726,86 @@ func TestAReplayedListedTestIsSkippedWithItsReason(t *testing.T) {
 	require.Nil(t, serr)
 	require.Empty(t, b.Action)
 	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "orders::TestToken").Outcome)
+}
+
+// A harness that ends a test it was told to skip with the outcome skipped
+// confirms the skip: the end is answered ok, as often as it is sent, at
+// Debug, and nothing else changes. A harness that crashes on an error answer
+// (urllib raises on 409) would otherwise exit before its next test. Ending it
+// with any other outcome is still refused: the harness ran a test keploy
+// told it to skip.
+func TestASkippedEndOfAGatedTestIsAccepted(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	core, logs := observer.New(zapcore.DebugLevel)
+	a.logger = zap.New(core)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{
+		"orders::TestToken": "flaky: replay_only",
+		"orders::TestRan":   "flaky: replay_only",
+	}, nil, nil, false, ""))
+	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+
+	for i := 0; i < 2; i++ {
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skipped"})
+		require.Nil(t, serr, "end %d of a skipped test, said skipped", i+1)
+		require.Equal(t, models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, e)
+	}
+	// A runner's own spelling of skipped is skipped.
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skip"})
+	require.Nil(t, serr)
+	require.Zero(t, logs.FilterLevelExact(zapcore.WarnLevel).Len(), "the harness did as it was told")
+	require.Equal(t, 3, logs.FilterMessageSnippet("confirmed a skip").FilterLevelExact(zapcore.DebugLevel).Len())
+	require.Empty(t, refusalCodes(a))
+
+	// Every test that comes after runs as before.
+	b, serr = a.ProvenBegin(ctx, begin("TestOther"))
+	require.Nil(t, serr)
+	require.Empty(t, b.Action)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestOther", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	// Ran anyway: refused and warned, as before.
+	b, serr = a.ProvenBegin(ctx, begin("TestRan"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	for _, outcome := range []string{"passed", "failed", ""} {
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestRan", Outcome: outcome})
+		require.NotNil(t, serr, "outcome %q", outcome)
+		require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	}
+	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").FilterLevelExact(zapcore.WarnLevel).Len())
+
+	// Said skipped, for a test keploy never told to skip: refused, as before.
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestNever", Outcome: "skipped"})
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "orders::TestToken").Outcome, "still recorded not run")
+}
+
+// A skipped end of a gated test is the skip's confirmation while another
+// test of the same worker is open: that test stays open, and its end judges
+// it as usual.
+func TestASkippedEndOfAGatedTestLeavesTheOpenTestOpen(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil, nil, false, ""))
+	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	_, serr = a.ProvenBegin(ctx, begin("TestOther"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skipped"})
+	require.Nil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestOther", Outcome: "passed"})
+	require.Nil(t, serr, "TestOther was still open")
+	require.Equal(t, models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, e)
+	require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "orders::TestOther").Outcome)
 }
 
 // A test whose call holds a value an earlier test's call sends runs only
@@ -679,7 +823,7 @@ func TestATestThatNeedsAnotherRunsOnlyAfterItBegan(t *testing.T) {
 		"o::TestUse":     {{Test: "o::TestMake", Reason: why}},
 		"o::TestGated":   {{Test: "o::TestNever", Reason: "never"}},
 		"o::TestOfGated": {{Test: "o::TestMake", Reason: "make"}, {Test: "o::TestGated", Reason: "gated"}, {Test: "o::TestNever", Reason: "never"}},
-	}, ""))
+	}, nil, false, ""))
 	run := func(name string) models.ScopeBeginResp {
 		t.Helper()
 		b, serr := a.ProvenBegin(ctx, begin(name))
@@ -706,7 +850,7 @@ func TestATestThatNeedsAnotherRunsOnlyAfterItBegan(t *testing.T) {
 
 	r, _ := wireAgent(t, models.MODE_RECORD)
 	claimSelf(t, r)
-	require.NoError(t, r.SetScopeSkips(ctx, nil, map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: why}}}, ""))
+	require.NoError(t, r.SetScopeSkips(ctx, nil, map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: why}}}, nil, false, ""))
 	b, serr = r.ProvenBegin(ctx, begin("TestUse"))
 	require.Nil(t, serr)
 	require.Empty(t, b.Action, "a record never skips")
@@ -721,7 +865,7 @@ func TestANewSessionForgetsWhichTestsBegan(t *testing.T) {
 	session := func() {
 		t.Helper()
 		claimSelf(t, a)
-		require.NoError(t, a.SetScopeSkips(ctx, nil, map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: why}}}, ""))
+		require.NoError(t, a.SetScopeSkips(ctx, nil, map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: why}}}, nil, false, ""))
 	}
 	session()
 	b, serr := a.ProvenBegin(ctx, begin("TestMake"))
@@ -741,7 +885,7 @@ func TestARecordNeverSkips(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	claimSelf(t, a)
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestToken": "listed"}, nil, ""))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestToken": "listed"}, nil, nil, false, ""))
 	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
 	require.Nil(t, serr)
 	require.Empty(t, b.Action)
@@ -917,7 +1061,7 @@ func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {
 func TestAMissFailsTheReplayedTestAndStaysInTheRunsMisses(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
-	require.NoError(t, a.SetScopeSkips(ctx, nil, nil, "keploy/reports/r1/replay.yaml"))
+	require.NoError(t, a.SetScopeSkips(ctx, nil, nil, nil, false, "keploy/reports/r1/replay.yaml"))
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
 	require.Nil(t, serr)
 	_, serr = a.ProvenBegin(ctx, begin("TestPlaceOrder"))
@@ -1473,7 +1617,7 @@ func TestASelfSkippedTestIsNotFailedForCallsItNeverMade(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "POST", "http://h/audit"))
 	a.scopeTable = map[string][]string{"t": {"mock-1"}}
-	ev, err := a.testEvidence(context.Background(), "t", false, time.Time{})
+	ev, err := a.testEvidence(context.Background(), "t", false, testBegin{})
 	require.NoError(t, err)
 	require.True(t, ev.Empty())
 }
@@ -1595,11 +1739,11 @@ func TestAnUnmadeRecordedCallIsEvidence(t *testing.T) {
 	require.NoError(t, a.serveTestExactly(context.Background(), "orders::TestPlaceOrder"))
 	p.served["mock-2"]++
 
-	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true, time.Time{})
+	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true, testBegin{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"mock-1"}, ev.Unconsumed, "the audit call was not made; DNS is protocol-phase")
 
-	reason := evidenceReason("orders::TestPlaceOrder", ev, a.mocksFound(ev.Unconsumed), time.Time{}, nil, "")
+	reason := evidenceReason("orders::TestPlaceOrder", ev, a.mocksFound(ev.Unconsumed), time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
@@ -1621,7 +1765,7 @@ func TestAMappedMockThatIsNotLoadedIsAnError(t *testing.T) {
 func TestTheWireResetsWithTheSession(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestA": "listed"}, nil, ""))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestA": "listed"}, nil, nil, false, ""))
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestB"))
 	require.Nil(t, serr)
@@ -1726,17 +1870,17 @@ func TestAMissKeepsTheLearnStepsReason(t *testing.T) {
 func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
 	learned := sanitizedMiss(models.UnmatchedCall{Protocol: "Mongo", Destination: "mongo:27017", Reason: models.MissRequestChanged, Differs: []string{"body.docs.msgs.0.appId"},
 		NextSteps: "The record round's replay saw body.docs.msgs.0.appId differ: it carries a value keploy cannot follow yet.", FieldDiffs: []models.MockFieldDiff{{Path: "body.docs.msgs.0.appId"}}})
-	r := evidenceReason("api::TestSlowStep", &models.ScopeEvidence{Misses: []models.UnmatchedCall{learned, learned}}, nil, time.Time{}, nil, "")
+	r := evidenceReason("api::TestSlowStep", &models.ScopeEvidence{Misses: []models.UnmatchedCall{learned, learned}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Equal(t, "keploy: a Mongo call to mongo:27017 had no recorded answer (body.docs.msgs.{}.appId differs); a Mongo call to mongo:27017 had no recorded answer (body.docs.msgs.{}.appId differs).\n"+
 		"a Mongo call to mongo:27017 missed (request_changed): The record round's replay saw body.docs.msgs.{}.appId differ: it carries a value keploy cannot follow yet.", r, "one line per reason, said once")
 
-	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", NextSteps: "Re-record."}}}, nil, time.Time{}, nil, "")
+	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", NextSteps: "Re-record."}}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Equal(t, "keploy: GET /x had no recorded answer.", plain, "a miss without the learn step's reason reads as it did")
 
 	began := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	early := learned
 	early.At = began.Add(-time.Second)
-	r = evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{early}}, nil, began, nil, "")
+	r = evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{early}}, nil, began, nil, scopeSet{}, "")
 	require.NotContains(t, r, "missed (request_changed)", "a call made before the test began is not explained as the test's")
 
 	var many []models.UnmatchedCall
@@ -1745,7 +1889,7 @@ func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
 		c.Destination = fmt.Sprintf("mongo-%d:27017", i)
 		many = append(many, c)
 	}
-	r = evidenceReason("t", &models.ScopeEvidence{Misses: many}, nil, time.Time{}, nil, "")
+	r = evidenceReason("t", &models.ScopeEvidence{Misses: many}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Equal(t, 5, strings.Count(r, "missed (request_changed)"))
 	require.Contains(t, r, "and 2 more call(s) missed for a reason keploy record's full round gave")
 }
@@ -1758,7 +1902,7 @@ func TestAFailedTestsReasonSaysWhyAMissWhoseViewWentMissed(t *testing.T) {
 	const gone = "keploy record's full round decided this request in test-2, and the replay ended test-2 before keploy diagnosed its miss, so no recording is named for it: keploy reads nothing of a view a test's begin or end replaced."
 	ev := &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Reason: models.MissViewReplaced, NextSteps: gone}}}
 	require.Equal(t, "keploy: POST /orders had no recorded answer.\n"+
-		"POST /orders missed (view_replaced): "+gone, evidenceReason("test-2", ev, nil, time.Time{}, nil, ""))
+		"POST /orders missed (view_replaced): "+gone, evidenceReason("test-2", ev, nil, time.Time{}, nil, scopeSet{}, ""))
 }
 
 // End to end on the agent: the test's end answers fail with the learn
@@ -1836,7 +1980,7 @@ func TestEvidenceKeepsAnHTTPCallsShape(t *testing.T) {
 	declared := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://store/orders/kqzxwv"},
 		Variables: models.MockVariables{"orderId": {Recorded: "kqzxwv", Bind: "url.path[1]"}}}}
 	require.Equal(t, "GET store/orders/{} (mock-1)", mockText("mock-1", declared), "a mock's declared variable place holds a recorded value")
-	r := evidenceReason("orders::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{sanitizedMiss(miss)}, Unconsumed: []string{"mock-3"}}, map[string]*models.Mock{"mock-3": mock}, time.Time{}, nil, "")
+	r := evidenceReason("orders::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{sanitizedMiss(miss)}, Unconsumed: []string{"mock-3"}}, map[string]*models.Mock{"mock-3": mock}, time.Time{}, nil, scopeSet{}, "")
 	for _, v := range []string{"alice@example.com", "ord_9f8e7d", "s3cret", "507f1f77bcf86cd799439011", "true"} {
 		require.NotContains(t, r, v)
 	}
@@ -1849,13 +1993,13 @@ func TestEvidenceKeepsAnHTTPCallsShape(t *testing.T) {
 func TestTheReasonNamesTheReportAndNoRemedy(t *testing.T) {
 	ev := &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Destination: "h:80", Differs: []string{"header.accept"}}},
 		Unconsumed: []string{"m"}}
-	r := evidenceReason("tests/a.py::test_x[1-2] y", ev, nil, time.Time{}, nil, "keploy/reports/20261027T112439Z-1-abcdef/replay.yaml")
+	r := evidenceReason("tests/a.py::test_x[1-2] y", ev, nil, time.Time{}, nil, scopeSet{}, "keploy/reports/20261027T112439Z-1-abcdef/replay.yaml")
 	require.Equal(t, "keploy: GET /x to h:80 had no recorded answer (header.accept differs); recorded call m was never made. Details: keploy/reports/20261027T112439Z-1-abcdef/replay.yaml", r)
 	for _, advice := range []string{"intended", "re-record", "keploy mock record", "flaky", "quarantine"} {
 		require.NotContains(t, r, advice)
 	}
 	// With no report named (a CLI that writes none), the facts alone.
-	require.Equal(t, "keploy: recorded call m was never made.", evidenceReason("t", &models.ScopeEvidence{Unconsumed: []string{"m"}}, nil, time.Time{}, nil, ""))
+	require.Equal(t, "keploy: recorded call m was never made.", evidenceReason("t", &models.ScopeEvidence{Unconsumed: []string{"m"}}, nil, time.Time{}, nil, scopeSet{}, ""))
 }
 
 // The reason a failed test is given names the report the CLI pushed with the
@@ -1863,9 +2007,9 @@ func TestTheReasonNamesTheReportAndNoRemedy(t *testing.T) {
 func TestTheGatePushNamesTheReport(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	require.Equal(t, "", a.reportFile())
-	require.NoError(t, a.SetScopeSkips(context.Background(), nil, nil, "keploy/reports/r1/replay.yaml"))
+	require.NoError(t, a.SetScopeSkips(context.Background(), nil, nil, nil, false, "keploy/reports/r1/replay.yaml"))
 	require.Equal(t, "keploy/reports/r1/replay.yaml", a.reportFile())
-	require.NoError(t, a.SetScopeSkips(context.Background(), nil, nil, ""))
+	require.NoError(t, a.SetScopeSkips(context.Background(), nil, nil, nil, false, ""))
 	require.Equal(t, "", a.reportFile())
 }
 
@@ -1958,7 +2102,7 @@ func TestAFailedConsumptionReadKeepsTheTestsMisses(t *testing.T) {
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
-	ev, err := a.testEvidence(context.Background(), "o::TestA", true, time.Time{})
+	ev, err := a.testEvidence(context.Background(), "o::TestA", true, testBegin{})
 	require.ErrorContains(t, err, "was not serving o::TestA exactly")
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)
@@ -1990,7 +2134,7 @@ func TestAMissOutsideEveryTestIsChargedToNoTest(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			a, p := wireAgent(t, models.MODE_TEST)
 			p.misses = append([]models.UnmatchedCall(nil), misses...)
-			ev, err := a.testEvidence(context.Background(), "o::TestA", false, c.beganAt)
+			ev, err := a.testEvidence(context.Background(), "o::TestA", false, testBegin{at: c.beganAt})
 			require.NoError(t, err)
 			var listed, uncharged []string
 			for _, m := range ev.Misses {
@@ -2007,6 +2151,99 @@ func TestAMissOutsideEveryTestIsChargedToNoTest(t *testing.T) {
 			var want []string
 			for _, m := range misses {
 				if !slices.Contains(c.uncharged, m.Destination) {
+					want = append(want, m.Destination)
+				}
+			}
+			require.Equal(t, want, listed, "the misses the ending test's evidence lists")
+		})
+	}
+}
+
+// A miss is placed by the round its call was marked in (models.MissMark),
+// never by when keploy decided it: under load keploy answers a call after
+// the replay began the next test, and that test, which never made the call,
+// must not fail for it. The rows are the shapes of a loaded replay: a
+// delete the application made between two tests, decided 3 ms after the next
+// test's view was installed, is charged to no test; a call of the previous
+// test's, read after that test's end was read and decided after the next
+// one's install, is charged to no test and names the test it was made in. A
+// call marked in the ending test's own view, one marked in the pool view
+// after it (made as it ended), one of an earlier opening of the same test,
+// one marked in a later staging, and an in-test one whose mark names no test
+// stay its own. A call the last test of the set before made, which keploy
+// decided only after this set's mocks were staged (the proxy keeps it for
+// this set's first read naming that test as an earlier set's,
+// EarlierSetTest), is charged to no test and names the test it was made in,
+// also when that test has the ending test's name, with or without its round,
+// and whether or not the install or the begin is known; one of that set made
+// while no test's view named one (EarlierSet, no test) is charged to no test
+// and names none, the same way. A call made before
+// the set's first test whose mark names a test is listed under it where the
+// install is known. A miss with no mark, and every other miss read when the
+// install's round is not known, keep the time rule.
+func TestAMissIsChargedByTheRoundItsCallWasMarkedIn(t *testing.T) {
+	const ending, previous, lastOfSetBefore = "o::TestUnauthenticated", "o::TestDashboardAppOperations", "o::TestAppSearchFilter"
+	began := time.Now()
+	installed := testBegin{at: began, epoch: 3, bounds: 10, round: true}
+	late := began.Add(3200 * time.Microsecond)
+	pool := func(bounds uint64) models.MissMark { return models.MissMark{Epoch: 3, Bounds: bounds, Known: true} }
+	of := func(test string, epoch, bounds uint64) models.MissMark {
+		return models.MissMark{Epoch: epoch, Bounds: bounds, Test: test, Known: true}
+	}
+	misses := []models.UnmatchedCall{
+		{Protocol: "Mongo", ActualSummary: "delete on api-server.{}", Destination: "between:27017", Kind: models.MissOutsideTest, At: late, Marked: pool(9)},
+		{Protocol: "Mongo", ActualSummary: "delete on {}", Destination: "earlier-set:27017", Kind: models.MissOutsideTest, At: late, Marked: models.MissMark{Epoch: 2, Bounds: 40, Known: true}},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "set-before-last:27017", Kind: models.MissOutsideTest, EarlierSetTest: lastOfSetBefore, At: late, Marked: of(lastOfSetBefore, 2, 40)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "set-before-same-name:27017", Kind: models.MissOutsideTest, EarlierSetTest: ending, At: late, Marked: of(ending, 2, 40)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "set-before-unrounded:27017", Kind: models.MissOutsideTest, EarlierSetTest: lastOfSetBefore, At: late},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "set-before-no-test:27017", Kind: models.MissOutsideTest, EarlierSet: 1, At: late},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "before-set-named:27017", Kind: models.MissOutsideTest, BeforeSet: true, At: late, Marked: of(previous, 3, 8)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "previous:27017", Kind: models.MissInTest, At: late, Marked: of(previous, 3, 8)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "previous-extra:27017", Kind: models.MissExtraCall, At: late, Marked: of(previous, 3, 8)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "own:27017", Kind: models.MissInTest, At: late, Marked: of(ending, 3, 10)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "own-earlier-opening:27017", Kind: models.MissInTest, At: late, Marked: of(ending, 3, 6)},
+		{Protocol: "Mongo", ActualSummary: "delete on api-server.{}", Destination: "as-it-ended:27017", Kind: models.MissOutsideTest, At: late, Marked: pool(11)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "another-after:27017", Kind: models.MissInTest, At: late, Marked: of(previous, 3, 10)},
+		{Protocol: "Mongo", ActualSummary: "find on api-server.{}", Destination: "unnamed:27017", Kind: models.MissInTest, At: late, Marked: of("", 3, 8)},
+		{Protocol: "Mongo", ActualSummary: "delete on api-server.{}", Destination: "next-staging:27017", Kind: models.MissOutsideTest, At: late, Marked: models.MissMark{Epoch: 4, Bounds: 5, Known: true}},
+		{Protocol: "Mongo", ActualSummary: "delete on api-server.{}", Destination: "filed-early:27017", Kind: models.MissOutsideTest, At: began.Add(-time.Millisecond), Marked: pool(9)},
+		{Protocol: "HTTP", ActualSummary: "GET /tick", Destination: "unmarked-before:80", Kind: models.MissOutsideTest, At: began.Add(-time.Millisecond)},
+		{Protocol: "HTTP", ActualSummary: "GET /tick", Destination: "unmarked-late:80", Kind: models.MissOutsideTest, At: late},
+	}
+	for _, c := range []struct {
+		name  string
+		began testBegin
+		// uncharged is, by destination, each miss charged to no test, with
+		// the window it names.
+		uncharged map[string]string
+	}{
+		{"install known", installed, map[string]string{
+			"between:27017": "", "earlier-set:27017": "", "set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore, "set-before-no-test:27017": "", "before-set-named:27017": previous, "previous:27017": previous, "previous-extra:27017": previous, "filed-early:27017": "", "unmarked-before:80": "",
+		}},
+		{"install not known", testBegin{at: began}, map[string]string{"set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore, "set-before-no-test:27017": "", "filed-early:27017": "", "unmarked-before:80": ""}},
+		{"begin not known", testBegin{}, map[string]string{"set-before-last:27017": lastOfSetBefore, "set-before-same-name:27017": ending, "set-before-unrounded:27017": lastOfSetBefore, "set-before-no-test:27017": ""}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			p.misses = append([]models.UnmatchedCall(nil), misses...)
+			ev, err := a.testEvidence(context.Background(), ending, false, c.began)
+			require.NoError(t, err)
+			var listed []string
+			for _, m := range ev.Misses {
+				listed = append(listed, m.Destination)
+			}
+			uncharged := map[string]string{}
+			for _, m := range a.takeChargedMisses() {
+				if m.ChargedTo == "" {
+					uncharged[m.Destination] = m.WindowOf
+				} else {
+					require.Equal(t, ending, m.ChargedTo)
+				}
+			}
+			require.Equal(t, c.uncharged, uncharged, "the misses charged to no test, and the window each names")
+			var want []string
+			for _, m := range misses {
+				if _, ok := c.uncharged[m.Destination]; !ok {
 					want = append(want, m.Destination)
 				}
 			}
@@ -2100,7 +2337,8 @@ func TestTheAgentRefusesItsOwnClaim(t *testing.T) {
 }
 
 // A read that returns misses together with an error keeps them: they fail
-// the test, and stay in the run's misses.
+// the test, whose end answers it failed and names the read's error, and
+// they stay in the run's misses.
 func TestMissesReadWithAnErrorAreKept(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	p := &partialProxy{wireProxy: &wireProxy{served: map[string]uint64{}}}
@@ -2111,10 +2349,14 @@ func TestMissesReadWithAnErrorAreKept(t *testing.T) {
 	require.Nil(t, serr)
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
 	p.err = errors.New("some misses were not read")
-	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
-	require.NotNil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr, "a miss keploy saw is judged: the end answers, not keploy's error")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "keploy could not read all of what o::TestA did: ")
+	require.Contains(t, e.Reason, "some misses were not read")
 	w := windowOf(t, a, "o::TestA")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.False(t, w.Evidence.Unread)
 	require.Len(t, w.Evidence.Misses, 1)
 	_, err := a.GetMockErrors(ctx)
 	require.Error(t, err, "the read still fails")
@@ -2439,7 +2681,7 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 		Differs: []string{"body.amount", "body.users.alice@example.role", "body.orders.123456.total", "header.authorization", "body.items[].sku9X0001234[]", "header.x-b3-traceid"}})
 	// A header's name is the protocol's: never written {}.
 	require.Equal(t, []string{"body.amount", "body.users.{}.role", "body.orders.{}.total", "header.authorization", "body.items[].{}[]", "header.x-b3-traceid"}, miss.Differs)
-	reason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{miss}}, nil, time.Time{}, nil, "")
+	reason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{miss}}, nil, time.Time{}, nil, scopeSet{}, "")
 	// Every field is named: when two changes are in one call, the one left
 	// out could be the one that matters.
 	require.Contains(t, reason, "POST /charge to pay.internal had no recorded answer (body.amount, body.users.{}.role, body.orders.{}.total, header.authorization, body.items[].{}[] and header.x-b3-traceid differ)")
@@ -2449,7 +2691,7 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 	// ID, token or random key the app sent reaches the reason.
 	shaped := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /charge/a1b2", Destination: "pay.internal",
 		Differs: []string{"body.users.kqzx9w.role", "body.keys.NffrFeUfNVaHib", "query.ord_9f8e"}})
-	shapedReason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{shaped}}, nil, time.Time{}, nil, "")
+	shapedReason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{shaped}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, shapedReason, "POST /charge/{} to pay.internal had no recorded answer (body.users.{}.role, body.keys.{} and query.{} differ)")
 	for _, v := range []string{"a1b2", "kqzx9w", "NffrFeUfNVaHib", "ord_9f8e"} {
 		require.NotContains(t, shapedReason, v)
@@ -2457,7 +2699,7 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 	// The reason shapes what differs itself, part by part, for a miss not
 	// shaped before (a backstop: the strict comparison shapes each key).
 	raw := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge",
-		Differs: []string{"body.users.kqzx9w.role"}}}}, nil, time.Time{}, nil, "")
+		Differs: []string{"body.users.kqzx9w.role"}}}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, raw, "POST /charge had no recorded answer (body.users.{}.role differs)")
 
 	// A call that differs in more than maxDiffersInline fields names that
@@ -2472,16 +2714,16 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 		many = append(many, "body."+name)
 	}
 	wide := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: many}
-	bounded := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{wide}}, nil, time.Time{}, nil, "keploy/reports/r/replay.yaml")
+	bounded := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{wide}}, nil, time.Time{}, nil, scopeSet{}, "keploy/reports/r/replay.yaml")
 	require.Contains(t, bounded, "body.y and 3 more differ; all in Details). Details: keploy/reports/r/replay.yaml")
 	require.NotContains(t, bounded, "body.z")
-	require.Contains(t, evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{wide}}, nil, time.Time{}, nil, ""), "body.aa and body.bb differ)")
+	require.Contains(t, evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{wide}}, nil, time.Time{}, nil, scopeSet{}, ""), "body.aa and body.bb differ)")
 
-	one := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: []string{"body.amount"}}}}, nil, time.Time{}, nil, "")
+	one := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: []string{"body.amount"}}}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, one, "POST /charge had no recorded answer (body.amount differs)")
-	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"host", "header.accept"}}}}, nil, time.Time{}, nil, "")
+	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"host", "header.accept"}}}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, two, "GET /x had no recorded answer (host and header.accept differ)")
-	none := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}}}, nil, time.Time{}, nil, "")
+	none := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, none, "GET /x had no recorded answer.")
 }
 
@@ -2514,7 +2756,7 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := miss
 			m.Kind, m.At = c.kind, c.at
-			reason := evidenceReason("usage::TestUsage", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, c.beganAt, nil, "")
+			reason := evidenceReason("usage::TestUsage", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, c.beganAt, nil, scopeSet{}, "")
 			require.Contains(t, reason, "GET /v1/usage to api.internal"+c.where+" (body.since and body.users.{}.since differ: "+since+")")
 			require.NotContains(t, reason, "kqzx9w")
 		})
@@ -2523,10 +2765,10 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 	// a value in; with no field named as differing it gives the why alone,
 	// and two are joined.
 	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x",
-		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "kqzx9w"}, {Field: "body.expires", Why: ttl}}}}}, nil, time.Time{}, nil, "")
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "kqzx9w"}, {Field: "body.expires", Why: ttl}}}}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, two, "GET /x had no recorded answer ("+since+"; "+ttl+")")
 	require.NotContains(t, two, "kqzx9w")
-	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"body.q"}}}}, nil, time.Time{}, nil, "")
+	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"body.q"}}}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, plain, "GET /x had no recorded answer (body.q differs).")
 
 	// The run's summary shows a miss's next step as evidence keeps it
@@ -2548,6 +2790,22 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 	bare := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}}})
 	require.Equal(t, since, bare.NextSteps)
 
+	// However many fields a replay refused, the test's reason and the
+	// next step name the first three reasons and count the rest, so each
+	// stays small.
+	var many []models.FieldReason
+	for i := 0; i < 60; i++ {
+		f := "header.x-f" + strconv.Itoa(i)
+		many = append(many, models.FieldReason{Field: f, Why: "keploy.yml's noise lets " + f + " vary only within \"^x$\"; the live value (a string of 2 bytes) is outside it, so it is compared"})
+	}
+	whys := many[0].Why + "; " + many[1].Why + "; " + many[2].Why + "; and 57 more reasons"
+	sixty := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", FieldReasons: many}}}, nil, time.Time{}, nil, scopeSet{}, "")
+	require.Contains(t, sixty, "GET /x had no recorded answer ("+whys+")")
+	require.NotContains(t, sixty, many[3].Why)
+	capped := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "re-record the test", FieldReasons: many})
+	require.Equal(t, "re-record the test ("+whys+")", capped.NextSteps)
+	require.Len(t, capped.FieldReasons, 60, "the evidence keeps every reason; the text names a few")
+
 	// A Postgres miss's place names (bind.$N, literal.N) are positions, not
 	// values: its why reaches the test's reason, with the place it names.
 	bound := "bind.$1 was learned as clock, a read of the application's clock, and the call sends no value there: it changed"
@@ -2555,7 +2813,7 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 		Differs: []string{"bind.$1"}, FieldReasons: []models.FieldReason{{Field: "bind.$1", Why: bound}}})
 	require.Equal(t, []models.FieldReason{{Field: "bind.$1", Why: bound}}, pg.FieldReasons)
 	require.Equal(t, []string{"bind.$1"}, pg.Differs)
-	pgReason := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{pg}}, nil, time.Time{}, nil, "")
+	pgReason := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{pg}}, nil, time.Time{}, nil, scopeSet{}, "")
 	require.Contains(t, pgReason, " (bind.$1 differs: "+bound+")")
 }
 
@@ -2733,6 +2991,77 @@ func TestStoredMocksHandTheProxyWhereTheAppsClocksRunBegan(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
 	require.Nil(t, p.run, "the switch off: no run")
+}
+
+// shownClockHook is runClockHook that also tells what the app's clock
+// showed between two real instants (AppClockShownReader).
+type shownClockHook struct {
+	runClockHook
+}
+
+func (h *shownClockHook) AppClockShown(from, to time.Time) ([]learn.Span, bool) {
+	return []learn.Span{{From: from.Add(h.offset), To: to.Add(h.offset)}}, true
+}
+
+// shownOnlyHooks tell what the app's clock showed but report no app clock
+// (no AppClockReader).
+type shownOnlyHooks struct{ otherHooks }
+
+func (h *shownOnlyHooks) AppClockShown(from, to time.Time) ([]learn.Span, bool) {
+	return []learn.Span{{From: from, To: to}}, true
+}
+
+// shownProxy is a wireProxy that takes what the app's clock showed
+// (coreAgent.AppClockShownSetter).
+type shownProxy struct {
+	*wireProxy
+	set   bool
+	shown func(from, to time.Time) ([]learn.Span, bool)
+}
+
+func (p *shownProxy) SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool)) {
+	p.set, p.shown = true, f
+}
+
+// Once the mocks are stored, the proxy is handed what the app's clock
+// showed, from hooks that report the app's clock and tell it; hooks that do
+// not tell it, or report no app clock, hand it none, replacing any handed
+// before, and so do this build's own hooks, whose real clock never moved.
+func TestStoredMocksHandTheProxyWhatTheAppsClockShowed(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+
+	ActiveHooks = &shownClockHook{runClockHook{clockHook: clockHook{offset: time.Second}, began: at}}
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &shownProxy{wireProxy: wp}
+	a.Proxy = p
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, p.shown, "the hooks' shown clock")
+	got, ok := p.shown(at, at.Add(time.Minute))
+	require.True(t, ok)
+	require.Equal(t, []learn.Span{{From: at.Add(time.Second), To: at.Add(time.Minute + time.Second)}}, got)
+
+	ActiveHooks = &runClockHook{clockHook: clockHook{offset: time.Second}, began: at}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.True(t, p.set)
+	require.Nil(t, p.shown, "hooks that tell no shown clock: none, replacing the earlier")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &otherHooks{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "hooks that report no app clock: none")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &shownOnlyHooks{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "hooks that tell what the clock showed but report no app clock: none")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &AgentHook{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "the real clock never moved: none")
 }
 
 // recBeginProxy is a wireProxy that takes a test's recorded begin
@@ -2990,10 +3319,10 @@ func TestAnExtraCallLineCountsTheSkippedReadsThatAnsweredIt(t *testing.T) {
 	first.SkippedReads = []string{"mock-1", "mock-9"}
 	second.SkippedReads = []string{"mock-1", "mock-9", "mock-6"}
 	skippedOf := map[string]string{"mock-1": "o::TestCRUD", "mock-6": "o::TestCRUD"}
-	r := evidenceReason("o::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{first, second}}, nil, time.Time{}, skippedOf, "")
+	r := evidenceReason("o::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{first, second}}, nil, time.Time{}, skippedOf, scopeSet{}, "")
 	require.Contains(t, r, "GET /x to h:80 was called 6 times: 1 recorded, 2 answered by o::TestCRUD's reads mock-1, mock-6 (that test is skipped), 1 answered by a skipped test's read mock-9, 2 extra.")
 
-	r = evidenceReason("o::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{x, x}}, nil, time.Time{}, skippedOf, "")
+	r = evidenceReason("o::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{x, x}}, nil, time.Time{}, skippedOf, scopeSet{}, "")
 	require.Contains(t, r, "GET /x to h:80 was called 3 times, recorded 1.", "no skipped read answered it: the line reads as before")
 }
 
@@ -3063,3 +3392,154 @@ func TestAReplayedTestsWindowNamesTheSkippedReadsThatAnsweredIt(t *testing.T) {
 		}
 	}
 }
+
+// An authored mock (keploy mock derive or generate) the test never called
+// is no recording a re-record replaces: a record keeps a test's authored
+// mocks. Its reason says it is authored, with its author's reason, and
+// gives the exact command that takes it out. No re-record or quarantine is
+// offered, for an authored mock or a recorded one: what to do is the end of
+// the replay's output.
+func TestANeverMadeAuthoredMockIsGivenItsRemoveCommand(t *testing.T) {
+	derived := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredDerived, Reason: "card\ndeclined", Source: "checkout::TestCheckout/mock-1"}}}
+	generated := &models.Mock{Kind: models.HTTPFault, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredGenerated, Reason: "payments hangs"}}}
+	recorded := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://pay.internal/rates"}}}
+	mocks := map[string]*models.Mock{"mock-12": derived, "mock-13": generated, "mock-2": recorded}
+
+	only := evidenceReason("checkout::TestCheckoutDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-13", "mock-12"}}, mocks, time.Time{}, nil, scopeSet{}, "")
+	require.Contains(t, only, `authored call POST pay.internal/charge (mock-12) was never made ("card declined")`)
+	require.Contains(t, only, `authored call POST pay.internal/charge (mock-13) was never made ("payments hangs")`, "a fault mock is named by its request too")
+	require.NotContains(t, only, "recorded call")
+	require.Contains(t, only, "A re-record keeps an authored mock. If the test no longer makes its call, remove it: "+
+		"keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12; keploy mock derive --remove checkout::TestCheckoutDeclined/mock-13. "+
+		"If the call changed, derive or generate it again into this test.")
+	require.NotContains(t, only, "re-record it", "a re-record keeps the authored mocks, so it cannot clear this test")
+	require.NotContains(t, only, "quarantine")
+
+	mixed := evidenceReason("checkout::TestCheckoutDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12", "mock-2"}}, mocks, time.Time{}, nil, scopeSet{}, "")
+	require.Contains(t, mixed, "recorded call GET pay.internal/rates (mock-2) was never made")
+	require.NotContains(t, mixed, "re-record it", "a failed test's reason states what keploy saw")
+	require.Contains(t, mixed, "keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12. If the call changed")
+	require.NotContains(t, mixed, "mock-2. If the call changed", "a recorded mock is not authored")
+
+	missed := evidenceReason("checkout::TestCheckoutDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12"},
+		Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Destination: "pay.internal"}}}, mocks, time.Time{}, nil, scopeSet{}, "")
+	require.NotContains(t, missed, "re-record it", "a failed test's reason states what keploy saw")
+	require.Contains(t, missed, "keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12")
+
+	plain := evidenceReason("t", &models.ScopeEvidence{Unconsumed: []string{"mock-2"}}, mocks, time.Time{}, nil, scopeSet{}, "")
+	require.NotContains(t, plain, "authored")
+	require.NotContains(t, plain, "derive")
+
+	// A mock with no reason gets no empty quotes.
+	unexplained := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredGenerated}}}
+	bare := evidenceReason("t", &models.ScopeEvidence{Unconsumed: []string{"mock-14"}}, map[string]*models.Mock{"mock-14": unexplained}, time.Time{}, nil, scopeSet{}, "")
+	require.Contains(t, bare, "authored call POST pay.internal/charge (mock-14) was never made.")
+	require.NotContains(t, bare, `("")`)
+
+	// A replay that left an authored mock's payload on disk holds no
+	// authored block in memory: the mock is still named as authored and
+	// given its remove command, and the line names no reason, as none was
+	// read.
+	lazy := &models.Mock{Name: "mock-15", Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredDerived, Reason: "card declined"}}}
+	lazy.LeavePayloadOnDisk(noPayloadSource{}, models.PayloadAt{Name: "mock-15"})
+	require.Nil(t, lazy.Spec.Authored, "the row needs a mock whose authored block is on disk")
+	onDisk := evidenceReason("t", &models.ScopeEvidence{Unconsumed: []string{"mock-15"}}, map[string]*models.Mock{"mock-15": lazy}, time.Time{}, nil, scopeSet{}, "")
+	require.Contains(t, onDisk, "authored call ")
+	require.Contains(t, onDisk, "keploy mock derive --remove t/mock-15")
+	require.NotContains(t, onDisk, "re-record it")
+	require.NotContains(t, onDisk, `was never made (`, "a block left on disk is not read, so no reason is named")
+}
+
+// The commands a failed test's reason names act on the set the replay
+// serves: each remove line of an authored mock the test never called ends
+// in the flags the replay's gate named the set with, each quoted for a
+// shell. None, and they carry no flags.
+func TestAFailedTestsCommandsCarryTheSetsFlags(t *testing.T) {
+	authored := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredDerived, Reason: "card declined", Source: "checkout::TestCheckout/mock-1"}}}
+	recorded := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://pay.internal/rates"}}}
+	mocks := map[string]*models.Mock{"mock-12": authored, "mock-2": recorded}
+	flags := []string{"--local", "--name", "checkout", "--path", "/srv/my app"}
+	const named = ` --local --name checkout --path '/srv/my app'`
+
+	only := evidenceReason("checkout::TestDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12"}}, mocks, time.Time{}, nil, scopeSet{flags: flags}, "")
+	require.Contains(t, only, "remove it: keploy mock derive --remove checkout::TestDeclined/mock-12"+named+". If the call changed")
+
+	mixed := evidenceReason("checkout::TestDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12", "mock-2"}}, mocks, time.Time{}, nil, scopeSet{flags: flags}, "")
+	require.Contains(t, mixed, "keploy mock derive --remove checkout::TestDeclined/mock-12"+named+". If the call changed")
+
+	none := evidenceReason("checkout::TestDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12"}}, mocks, time.Time{}, nil, scopeSet{}, "")
+	require.Contains(t, none, "keploy mock derive --remove checkout::TestDeclined/mock-12. If the call changed")
+
+	// An ID a shell would split is quoted in the command.
+	split := evidenceReason("tests/a.py::test_x[1-2] y", &models.ScopeEvidence{Unconsumed: []string{"mock-12"}}, mocks, time.Time{}, nil, scopeSet{}, "")
+	require.Contains(t, split, "keploy mock derive --remove 'tests/a.py::test_x[1-2] y/mock-12'")
+	require.Equal(t, "orders::TestA", shellQuote("orders::TestA"))
+
+	// A set of Keploy Cloud's recordings: keploy mock derive refuses it, so
+	// no remove (or derive-again) command is named, and the reason says why.
+	cloud := scopeSet{flags: []string{"--name", "checkout", "--branch", "feat x"}, cloud: true}
+	for _, unmade := range [][]string{{"mock-12"}, {"mock-12", "mock-2"}} {
+		r := evidenceReason("checkout::TestDeclined", &models.ScopeEvidence{Unconsumed: unmade}, mocks, time.Time{}, nil, cloud, "")
+		require.NotContains(t, r, "derive --remove", unmade)
+		require.NotContains(t, r, "derive or generate it again", unmade)
+		require.Contains(t, r, "authored call POST pay.internal/charge (mock-12) was never made", unmade)
+		require.Contains(t, r, "A re-record keeps an authored mock, and keploy mock derive takes one out only of a set on disk, not of Keploy Cloud's recordings.", unmade)
+		require.NotContains(t, r, "quarantine", unmade)
+	}
+}
+
+// The flags the replay's gate names its set with (SetScopeSkips) are the
+// agent's own copy, and the report it names goes into the reason of each
+// test the replay fails: one failed for a call with no answer, and one whose
+// reason is written again with what keploy could not capture. A new session
+// forgets both.
+func TestTheReplaysSetFlagsReachEachFailedTestsReason(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	flags := []string{"--local", "--name", "checkout"}
+	const report = ".keploy-run/runs/r1/replay.yaml"
+	require.NoError(t, a.SetScopeSkips(ctx, nil, nil, flags, false, report))
+	flags[2] = "other"
+	require.Equal(t, scopeSet{flags: []string{"--local", "--name", "checkout"}}, a.scopeSetFlags(), "the agent keeps its own copy of the flags")
+	claimSelf(t, a)
+	fail := func(name string) string {
+		t.Helper()
+		_, serr := a.ProvenBegin(ctx, begin(name))
+		require.Nil(t, serr)
+		p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Destination: "pay.internal"}}
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+		require.Nil(t, serr)
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		return e.Reason
+	}
+	require.True(t, strings.HasSuffix(fail("TestA"), " Details: "+report), "the reason ends by naming the report")
+
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Excluded: 1}}
+	lost := fail("TestB")
+	require.Contains(t, lost, "excluded_pids", "the reason is written again with the loss")
+	require.Contains(t, lost, "Details: "+report)
+
+	require.NoError(t, a.resetSession(ctx))
+	require.Equal(t, scopeSet{}, a.scopeSetFlags(), "the flags belong to the session whose gate named them")
+	claimSelf(t, a)
+	require.NotContains(t, fail("TestC"), "Details:", "the report belongs to the session whose gate named it")
+}
+
+// noPayloadSource is a PayloadSource that reads nothing back.
+type noPayloadSource struct{}
+
+func (noPayloadSource) LoadPayload(context.Context, models.PayloadAt) (*models.Mock, error) {
+	return nil, errors.New("no payload")
+}
+func (noPayloadSource) SetPayloadMutator(models.PayloadMutator) {}
+func (noPayloadSource) PayloadMutator() models.PayloadMutator   { return nil }

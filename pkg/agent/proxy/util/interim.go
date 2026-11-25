@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 )
 
 // IsInterimStatus reports whether code is an interim response's
@@ -34,8 +35,13 @@ func ReadFinalResponse(r *bufio.Reader, req *http.Request, onInterim func(*http.
 	interimBytes := 0
 	for {
 		resp, err := http.ReadResponse(r, req)
-		if err != nil || !IsInterimStatus(resp.StatusCode) {
-			return resp, err
+		if err != nil {
+			// The parser's error quotes the status line it refused: on a
+			// connection read mid-stream, a body's line (a token in it).
+			return resp, utils.WithholdInput(err)
+		}
+		if !IsInterimStatus(resp.StatusCode) {
+			return resp, nil
 		}
 		if interimBytes += headerSize(resp); interimBytes > maxInterimHeaderBytes {
 			return nil, errTooManyInterimResponses

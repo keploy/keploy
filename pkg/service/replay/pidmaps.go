@@ -218,6 +218,32 @@ type OwnedLossTaker interface {
 	TakeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error)
 }
 
+// CaptureLossDrainer is an optional Instrumentation extension: the agent's
+// wait until its proxy has counted the close of every connection whose
+// application end has ended (POST /agent/capturelosses/drain).
+type CaptureLossDrainer interface {
+	DrainCaptureLosses(ctx context.Context) error
+}
+
+// drainCaptureLosses asks, under the proven switch, at a set's end whose
+// application stopped, the agent to count the close of every connection the
+// stop ended, before the set's end reads its losses (endCaptureLosses,
+// takeOwnedLosses): a loss of such a close is the set's, never a later
+// set's. An agent that does not drain answers nothing (the set's reads are
+// as they were); a drain that failed is returned: what the stop's closes
+// lost cannot be told, and the set is not judged on it.
+func (r *Replayer) drainCaptureLosses(ctx context.Context) error {
+	d, ok := r.instrumentation.(CaptureLossDrainer)
+	if !ok || r.noAgent || !provenswitch.On() {
+		return nil
+	}
+	err := d.DrainCaptureLosses(ctx)
+	if errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		return nil
+	}
+	return err
+}
+
 // takeOwnedLosses takes, under the proven switch, the losses a cut-short end
 // owned that the agent counted, and keeps them for the set's end
 // (applyOwnedLosses). Made at each test case's end and at the set's end, so
@@ -233,6 +259,9 @@ func (r *Replayer) takeOwnedLosses(ctx context.Context) {
 	if errors.Is(err, models.ErrCaptureLossesUnsupported) {
 		return
 	}
+	// A loss of an earlier set's, found after its end, is that set's: the
+	// run keeps it, and no test of this set is charged with it.
+	owned = r.takeEarlierSetLosses(owned, r.earlierSetCalls.reading())
 	r.ownedMu.Lock()
 	defer r.ownedMu.Unlock()
 	r.owned = append(r.owned, owned...)
@@ -269,18 +298,45 @@ func (r *Replayer) applyOwnedLosses(results []models.TestResult) (set models.Cap
 	return set, err
 }
 
-// unnameUnappliedOwnedLosses gives the run the losses keploy took that no
-// set's end applied, as a session's reset does on the agent: a set that
-// returned before its end's applyOwnedLosses (a failed post-script) left
-// losses naming its test cases, whose names the next set's repeat (test-1,
-// test-2), so a later set's end must not match them by name. They stay,
-// and that end fails its set on them, their words still naming the test
-// case.
-func (r *Replayer) unnameUnappliedOwnedLosses() {
+// reportUnappliedOwnedLosses reports, for a set that returns before its end
+// applies them (applyOwnedLosses: a failed post-script, an error), the losses
+// cut-short ends owned that keploy took in it, and, when the set began its
+// own session on the agent (sessionBegun), takes once more: the set has its
+// result already, and a later set's tests caused none of them, so each is
+// said in this set's log, naming its test case, and none reaches a later
+// set's end, whose test cases repeat this set's names (test-1, test-2). A set
+// that returns before its session began (wholly ignored, no test case, a
+// failure before its staging) does not take: the session open on the agent
+// is an earlier set's. The next session's start keeps that set's losses as
+// its own (models.OwnedCaptureLoss.EarlierSession) for the next take, which
+// leaves the run not judged for it (passesEarlierSetLosses); with no later
+// session, the last set that runs stopped the application before its own
+// take (lastSetThatRuns).
+func (r *Replayer) reportUnappliedOwnedLosses(ctx context.Context, testSetID string, sessionBegun bool) {
+	if sessionBegun {
+		r.takeOwnedLosses(ctx)
+	}
 	r.ownedMu.Lock()
-	defer r.ownedMu.Unlock()
-	for i := range r.owned {
-		r.owned[i].Test = ""
+	owned, err := r.owned, r.ownedErr
+	r.owned, r.ownedErr = nil, nil
+	r.ownedMu.Unlock()
+	for _, o := range owned {
+		msg := "keploy could not capture a call of this test-set's, on a connection a test case's end could not wait for; the test-set ended before its end could judge it, and no later test-set is charged with it"
+		if o.Loss.Kind.NotJudged() {
+			msg = "keploy could not tell whether a connection of this test-set's, which a test case's end could not wait for, carried a call it did not capture; the test-set ended before its end could judge it, and no later test-set is charged with it"
+		}
+		r.logger.Error(msg,
+			zap.String("test-set", testSetID),
+			zap.String("test-case", o.Test),
+			zap.String("kind", string(o.Loss.Kind)),
+			zap.Uint64("count", o.Loss.Count),
+			zap.String("what", o.Loss.LogWhat()),
+			zap.String("next_step", "fix what ended the test-set early (the error above says), then run it again: its test cases are not verified"))
+	}
+	if err != nil {
+		r.logger.Error("keploy could not take from the agent the capture losses of this test-set's test cases whose ends were cut short; the test-set ended before its end could judge them",
+			zap.String("test-set", testSetID), zap.Error(err),
+			zap.String("next_step", "fix what ended the test-set early (the error above says), then run it again"))
 	}
 }
 
@@ -429,11 +485,12 @@ func (r *Replayer) markCaptureLosses(ctx context.Context) {
 // so): the bases are then the latest read's process's from its start, all it
 // counted (more, never less), not left with a process gone, which would
 // leave every later test unjudged until the application starts anew again.
-func (r *Replayer) appStartsAnew() {
+// It reports whether the application starts anew: false where it runs on.
+func (r *Replayer) appStartsAnew() bool {
 	if r.lossAppRunsOn {
 		r.lossAppRunsOn = false
 		r.lossAppKept = r.lossAppRunsOnWhy
-		return
+		return false
 	}
 	r.lossAppBase, r.lossAppKept = nil, ""
 	if r.lossMark.known {
@@ -444,6 +501,7 @@ func (r *Replayer) appStartsAnew() {
 		r.lossRunBase = r.lossAppBase
 		r.lossBasesAgent = r.lossAgent
 	}
+	return true
 }
 
 // agentsStartedBeforeApp is an optional Instrumentation extension: whether an
@@ -657,7 +715,8 @@ func (r *Replayer) appLossesCarriedIn() models.CaptureLosses {
 	var out models.CaptureLosses
 	for _, c := range r.lossLast.Since(r.lossAppBase) {
 		if c.Kind.AppLife() && c.Count > sinceSet[c.Kind] {
-			out = append(out, models.CaptureLoss{Kind: c.Kind, Count: c.Count - sinceSet[c.Kind], What: c.What})
+			c.Count -= sinceSet[c.Kind]
+			out = append(out, c)
 		}
 	}
 	return out

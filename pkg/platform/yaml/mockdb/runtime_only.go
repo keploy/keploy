@@ -56,9 +56,9 @@ func runtimeOnlyPaths(t reflect.Type) [][]int {
 //   - SourcePID and StartRef: the process that made the call and the
 //     in-process reference of the start it came from, hints the agent hands
 //     the recorder. Start, the start's recorded key, is kept.
-//   - IsStartup, ServedIn, StagedSet and Concurrent: the recorder's buffer
-//     and the replay's staging and serving set them on live mocks; a file
-//     would carry a past run's values.
+//   - IsStartup, ServedIn, StagedSet, Concurrent and LoadSeq: the
+//     recorder's buffer and the replay's load, staging and serving set them
+//     on live mocks; a file would carry a past run's values.
 //   - RepeatRead: the agent marks it on its copies of a test's recordings
 //     when the test opens, from the reads this replay's namer named
 //     (models.MarkRepeatReads). A file that kept a past run's mark would

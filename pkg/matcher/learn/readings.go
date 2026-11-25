@@ -1699,6 +1699,35 @@ func (d decoded) formsOf(text string) []string {
 	return out
 }
 
+// formKinds is how many kinds of declared form a text has besides itself
+// (decoded.kinds).
+const formKinds = 7
+
+// kinds are formsOf(text)'s forms past text itself, each at the place of
+// its kind, "" where text has none: text case-folded where its escapes
+// change nothing; else its escapes read, and that case-folded; its
+// quoted-printable form, and that case-folded; its encoded runs' text, and
+// that case-folded. A text whose escapes change it and one they do not
+// share no kind but the last four.
+func (d decoded) kinds(text string) (k [formKinds]string) {
+	low := func(s string) string {
+		if l := strings.ToLower(s); l != s {
+			return l
+		}
+		return ""
+	}
+	if d.hasDec {
+		k[1], k[2] = d.dec, low(d.dec)
+	} else {
+		k[0] = low(text)
+	}
+	if d.hasQ {
+		k[3], k[4] = d.q, low(d.q)
+	}
+	k[5], k[6] = d.b, low(d.b)
+	return k
+}
+
 // extraOf is extraOf of the text d decodes.
 func (d decoded) extraOf(text string) string { return strings.Join(d.formsOf(text)[1:], "\n") }
 

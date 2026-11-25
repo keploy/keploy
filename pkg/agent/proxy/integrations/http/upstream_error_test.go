@@ -296,3 +296,20 @@ func TestParseFinalHTTPAcceptsSynthesizedEOFResponse(t *testing.T) {
 		t.Fatalf("parseFinalHTTP returned error on synthesized eof response: %v", err)
 	}
 }
+
+// The record-mode line about an upstream that errored names the call by its
+// URL's shape and its path tag, as the agent's other lines about a call do
+// (models.PathTag of its method and path, never its query): never a path
+// segment or a query value. A buffer that is no request is named by the
+// socket's address, with no tag.
+func TestUpstreamRequestURLNamesTheShapeAndTheTag(t *testing.T) {
+	const s = "kpLogCanary7Qx3vZ9mW2"
+	raw := []byte("POST /v1/reset/" + s + "?token=" + s + " HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n")
+	shape, tag, host := upstreamRequestURL(context.Background(), raw, nil)
+	if shape != "http://{}.{}/{}/{}/{}?{token}" || tag != models.PathTag(context.Background(), "POST", "/v1/reset/"+s) || host != "{}.{} "+models.HostTag(context.Background(), "api.example") {
+		t.Fatalf("upstreamRequestURL = %q, %q, %q; want the shape and the tag of POST /v1/reset/<token>, and the host by its shape and tag", shape, tag, host)
+	}
+	if shape, tag, _ := upstreamRequestURL(context.Background(), []byte("not a request"), nil); shape != "unknown" || tag != "" {
+		t.Fatalf("upstreamRequestURL of no request = %q, %q; want unknown and no tag", shape, tag)
+	}
+}

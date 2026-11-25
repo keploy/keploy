@@ -25,13 +25,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cloudflare/cfssl/csr"
-	cfsslLog "github.com/cloudflare/cfssl/log"
-	"github.com/cloudflare/cfssl/signer"
-	"github.com/cloudflare/cfssl/signer/local"
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/lru"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
@@ -269,6 +266,11 @@ func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPI
 	if err != nil {
 		return err
 	}
+
+	// The install's changes of the trust stores, the legacy sweep's among them,
+	// share one bound for the store lock: once a wait ends at it, the changes
+	// after it try the lock once, until one gets it (withStoreLockBudget).
+	ctx = withStoreLockBudget(ctx)
 
 	// Best-effort: remove the retired static CA this host may still trust from
 	// older runs or the "bake it into the image" recipe. Runs before this run's
@@ -1130,11 +1132,87 @@ func noteJavaImport(j javaInstall) {
 	}
 }
 
+// installJavaCAForHomeFn is installJavaCAForHome, as setupNativeWindows
+// reaches it; rows swap it.
+var installJavaCAForHomeFn = installJavaCAForHome
+
+// setupNativeWindows is setupNativeForApp's Windows install: keploy's CA in
+// the user's Windows trust store (trustOnWindows), in the JDK's keystore, and
+// in the agent's runtime trust env vars. A user who answered No to Windows'
+// prompt to trust it gets it in no trust store: not the Windows ones, not the
+// JDK's; the run goes on with the env vars only, Java through the merged
+// truststore the client points JAVA_TOOL_OPTIONS at (SetupCaCertEnv).
+func setupNativeWindows(ctx context.Context, logger *zap.Logger, ca *caState, store caStore, resolvedJavaHome, alias string) error {
+	caDER := ca.cert.Raw
+	// Extract certificate to a temporary file
+	tempCertPath, err := extractCertToTemp(ca.certPEM)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to extract certificate to temp folder")
+		return err
+	}
+	defer func() {
+		if err := os.Remove(tempCertPath); err != nil {
+			logger.Debug("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
+		}
+	}()
+
+	// Recorded before the install, as on Linux: whatever it leaves in the
+	// ROOT store is removed by this run's teardown however the install ends
+	// (removeWindowsCAByName finds nothing to remove when it added nothing). A
+	// persisted per-user CA is kept across runs (so once the user answers
+	// Yes, later runs reuse it with no prompt); an ephemeral one is removed
+	// at teardown.
+	recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey(), caDER: caDER})
+
+	// Install certificate using certutil. A session that cannot show
+	// Windows' trust prompt, or a user who answers No to it, leaves it out of
+	// the store, and the app is given keploy's CA where its runtime reads one
+	// instead.
+	keptAt := ""
+	if fs, ok := store.(*fileStore); ok {
+		keptAt = filepath.Join(fs.dir, caCertFileName)
+	}
+	declined, err := trustOnWindows(ctx, logger, tempCertPath, caDER, keptAt)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to install CA certificate on Windows")
+		return err
+	}
+
+	// install CA in the java keystore if java is installed. Non-fatal: Java
+	// also trusts the keploy CA via the JAVA_TOOL_OPTIONS merged truststore
+	// the client sets (SetupCaCertEnv), so a missing/failing keytool must not
+	// fail CA setup for a run that may not even use Java. Not for a user who
+	// answered No: the JDK's keystore is a trust store too, read by every
+	// program of that JDK.
+	if !declined {
+		jdk, err := installJavaCAForHomeFn(ctx, logger, tempCertPath, resolvedJavaHome, alias)
+		noteJavaImport(jdk)
+		if err != nil {
+			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
+		}
+	}
+
+	// Set environment variables for Node.js and Python to use the custom CA
+	if err := SetEnvForPath(logger, tempCertPath); err != nil {
+		return err
+	}
+	// Mirror the shared-volume path: only signal readiness when the
+	// full install chain (cert import + java keystore + env vars)
+	// has succeeded.
+	markCAReady()
+	return nil
+}
+
 // setupNativeForApp is the PID-aware native-install path. It installs this run's
 // generated CA public certificate into the OS trust store under a unique
 // filename for the duration of the run (removed at teardown; crashed-run copies
 // are inert because the key died with the process and are swept at next start).
 func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, store caStore, appPID int, javaHomeOverride string) error {
+	// Its changes of the trust stores go under one budget for the store lock:
+	// once a wait ends at storeLockWait, the changes after it try once, until
+	// one gets it (withStoreLockBudget; SetupCAForApp's, when it has given
+	// one).
+	ctx = withStoreLockBudget(ctx)
 	// Resolve the target JDK's java.home once, up front. Order:
 	//   1. --ca-java-home CLI override wins (opts.Agent.CAJavaHome).
 	//   2. /proc/<appPID>/environ JAVA_HOME, then /proc/<appPID>/exe.
@@ -1146,53 +1224,15 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	// certificate (caDER), whatever alias holds it.
 	alias, caDER := runAlias(ca), ca.cert.Raw
 
+	// This run's lock, before any entry is written: other keploy runs' sweeps
+	// leave a live run's entries (runlock.go).
+	if writesSweptEntries(runtime.GOOS) {
+		holdCARunLock(ctx, logger, ca.runID)
+	}
+
 	// Windows Specific Logic
 	if runtime.GOOS == "windows" {
-		// Extract certificate to a temporary file
-		tempCertPath, err := extractCertToTemp(ca.certPEM)
-		if err != nil {
-			utils.LogError(logger, err, "Failed to extract certificate to temp folder")
-			return err
-		}
-		defer func() {
-			if err := os.Remove(tempCertPath); err != nil {
-				logger.Debug("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
-			}
-		}()
-
-		// Recorded before the install, as on Linux below: whatever it leaves
-		// in the ROOT store is removed by this run's teardown however the
-		// install ends (removeWindowsCAByName finds nothing to remove when it
-		// added nothing). A persisted per-user CA is kept across runs (so the
-		// ROOT-store prompt fires at most once); an ephemeral one is removed
-		// at teardown.
-		recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey(), caDER: caDER})
-
-		// Install certificate using certutil
-		if err = installWindowsCA(ctx, logger, tempCertPath); err != nil {
-			utils.LogError(logger, err, "Failed to install CA certificate on Windows")
-			return err
-		}
-
-		// install CA in the java keystore if java is installed. Non-fatal: Java
-		// also trusts the keploy CA via the JAVA_TOOL_OPTIONS merged truststore
-		// the client sets (SetupCaCertEnv), so a missing/failing keytool must not
-		// fail CA setup for a run that may not even use Java.
-		jdk, err := installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome, alias)
-		noteJavaImport(jdk)
-		if err != nil {
-			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
-		}
-
-		// Set environment variables for Node.js and Python to use the custom CA
-		if err := SetEnvForPath(logger, tempCertPath); err != nil {
-			return err
-		}
-		// Mirror the shared-volume path: only signal readiness when the
-		// full install chain (cert import + java keystore + env vars)
-		// has succeeded.
-		markCAReady()
-		return nil
+		return setupNativeWindows(ctx, logger, ca, store, resolvedJavaHome, alias)
 	}
 
 	// macOS Specific Logic
@@ -1255,7 +1295,7 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	}
 
 	// Update the system store
-	if err := updateCaStore(ctx); err != nil {
+	if err := updateCaStore(ctx, logger); err != nil {
 		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
 	}
@@ -1300,8 +1340,12 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 // path, where the run's context is already cancelled — so it runs the trust-store
 // and keytool commands under its own short-lived context rather than the dead
 // one. Safe to call when nothing was installed (docker/k8s modes, or a persisted
-// per-user CA): it is then a no-op.
+// per-user CA): it then removes nothing, and only gives up the run's lock if it
+// holds one.
 func TeardownNativeCA(logger *zap.Logger) {
+	// The run's lock goes last, once its entries are gone: until then other
+	// runs' sweeps leave them.
+	defer releaseCARunLock()
 	installedNativeMu.Lock()
 	n := installedNative
 	installedNative = nil
@@ -1328,7 +1372,7 @@ func TeardownNativeCA(logger *zap.Logger) {
 		// keploy-mitm-<id>.crt, removed directly here, so a full bundle rebuild is
 		// unnecessary. --fresh is reserved for `keploy ca clean`, where pruning
 		// stale hash-links of a generically-named legacy anchor matters.
-		if err := refreshCaStore(ctx, false); err != nil {
+		if err := refreshCaStore(ctx, logger, false); err != nil {
 			logger.Debug("could not refresh the CA store after removing this run's anchor", zap.Error(err))
 		}
 	}
@@ -1362,8 +1406,10 @@ func removeWindowsCAByName(ctx context.Context, logger *zap.Logger, cn string) {
 	}
 }
 
-// sweepRunLeftovers removes keploy-mitm-*.crt anchors from a previous crashed
-// run (any run id other than the current one). They are inert — their signing
+// sweepRunLeftovers removes the keploy-mitm-*.crt anchors of other runs (any
+// run id other than the current one) that are no longer alive: a run that
+// holds its lock (caRunLive) keeps its anchor, so two keploy runs on one host
+// do not remove each other's. A crashed run's anchor is inert — its signing
 // key is gone — so this is housekeeping, not a security fix.
 func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
 	current := "keploy-mitm-" + currentRunID + ".crt"
@@ -1375,6 +1421,10 @@ func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
 		for _, e := range entries {
 			name := e.Name()
 			if name == current || !strings.HasPrefix(name, "keploy-mitm-") || !strings.HasSuffix(name, ".crt") {
+				continue
+			}
+			if liveRunEntry(name) {
+				logger.Debug("left the CA anchor of a keploy run that is still alive", zap.String("path", filepath.Join(dir, name)))
 				continue
 			}
 			if err := os.Remove(filepath.Join(dir, name)); err == nil {
@@ -1438,11 +1488,15 @@ func removeRunCAFromJDKKeystores(ctx context.Context, logger *zap.Logger, n *nat
 	}
 }
 
-// removeJavaAlias deletes alias from the JDK keystore cacerts, best-effort.
-// The caller holds jdkKeystoreMu.
+// removeJavaAlias deletes alias from the JDK keystore cacerts, best-effort,
+// holding the store lock (withStoreLock). The caller holds jdkKeystoreMu.
 func removeJavaAlias(ctx context.Context, logger *zap.Logger, keytool, cacerts, alias string) {
-	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", alias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	var out []byte
+	err := withStoreLock(ctx, logger, func() (err error) {
+		out, err = exec.CommandContext(ctx, keytool, "-delete", "-alias", alias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+		return err
+	})
+	if err != nil {
 		logger.Debug("could not delete this run's CA from a JDK keystore", zap.String("alias", alias), zap.String("cacerts", cacerts), zap.ByteString("output", out), zap.Error(err))
 		return
 	}
@@ -1648,7 +1702,16 @@ func commandExists(cmd string) bool {
 	return err == nil
 }
 
-func updateCaStore(ctx context.Context) error {
+// updateCaStore rebuilds the system trust bundle from the anchors' directory,
+// holding the store lock (withStoreLock): a rebuild that ran beside another
+// run's wrote out a bundle without the anchor that run had just added.
+func updateCaStore(ctx context.Context, logger *zap.Logger) error {
+	return withStoreLock(ctx, logger, func() error { return runCaStoreUpdate(ctx) })
+}
+
+// runCaStoreUpdate runs the first of caStoreUpdateCmd this host has. Its
+// callers hold the store lock.
+func runCaStoreUpdate(ctx context.Context) error {
 	commandRun := false
 	for _, cmd := range caStoreUpdateCmd {
 		if commandExists(cmd) {
@@ -1732,8 +1795,8 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 //     agent has no better signal (pre-registration boot, or the
 //     auto-detector returned empty).
 //   - non-empty: use $javaHome/bin/keytool as the executable and
-//     $javaHome/lib/security/cacerts as the target keystore, bypassing
-//     PATH. This is the path that fixes the SDKMAN/Maven-wrapper
+//     $javaHome's cacerts (jdkCacerts: lib/security, or jre/lib/security
+//     on JDK 8) as the target keystore, bypassing PATH. This is the path that fixes the SDKMAN/Maven-wrapper
 //     divergence described at the top of java_detect.go.
 //
 // The split matters because keytool reads and writes cacerts using its
@@ -1786,9 +1849,12 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 		keytoolBin = "keytool"
 	}
 
-	// Assuming modern Java structure (without /jre/).
-	// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes).
-	cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
+	// JDK 8 keeps its keystore under jre/: with no keystore, no keytool
+	// runs, since keytool -import would fail on the missing directory.
+	cacertsPath, found := jdkCacerts(javaHome)
+	if !found {
+		return javaInstall{}, fmt.Errorf("no cacerts keystore under %s (looked in lib/security and jre/lib/security)", javaHome)
+	}
 	// You can modify these as per your requirements
 	storePass := "changeit"
 
@@ -1803,13 +1869,25 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 	}
 
 	jdk.imported = true
-	if isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath) {
+	// One keytool -list of the whole keystore says whether alias is there and
+	// which other keploy CAs' aliases are; only a keystore that cannot be
+	// listed so is asked for alias alone.
+	present, listed := sweepJavaLeftovers(ctx, logger, keytoolBin, cacertsPath, alias)
+	if !listed {
+		present = isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath)
+	}
+	if present {
 		logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
 		return jdk, nil
 	}
 
-	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
-	cmdOutput, err := cmd.CombinedOutput()
+	// The store lock: an import beside another run's rewrite of the keystore
+	// was lost, or lost that run's change (storelock.go).
+	var cmdOutput []byte
+	err = withStoreLock(ctx, logger, func() (err error) {
+		cmdOutput, err = exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath).CombinedOutput()
+		return err
+	})
 	utils.BootStep("keytool -import is over")
 	if err != nil {
 		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
@@ -1818,6 +1896,99 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 	logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
 	logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	return jdk, nil
+}
+
+// javaSweepMax is the most aliases of other keploy CAs one install removes.
+// Each removal is a keytool -delete: a JVM start and a rewrite of the whole
+// keystore, about 0.3 s. A keystore can hold hundreds of them (every crashed
+// run's, and every run's whose teardown deleted from another JDK's keystore),
+// so a backlog is worked off a few per start instead of holding one start up
+// for minutes.
+const javaSweepMax = 3
+
+// sweepJavaLeftovers lists the keystore cacerts with keytool and removes from
+// it up to javaSweepMax aliases named keploy-mitm-* other than alias, this
+// run's, whose runs are no longer alive (liveRunEntry), and nothing else. Such
+// an alias is an earlier run's whose teardown never deleted it: the run
+// crashed (its CA's key died with it), or its teardown deleted from another
+// JDK's keystore. The start-up sweep (sweepRunLeftovers) removes only such
+// runs' anchors. It stops at the first delete that fails: the keystore is
+// most likely not writable, and the next would fail too. It reports whether
+// the listing holds alias, and whether cacerts could be listed at all (when
+// not, present says nothing). Best-effort, like the anchors' sweep. The
+// caller holds jdkKeystoreMu.
+func sweepJavaLeftovers(ctx context.Context, logger *zap.Logger, keytool, cacerts, alias string) (present, listed bool) {
+	out, err := exec.CommandContext(ctx, keytool, "-list", "-keystore", cacerts, "-storepass", "changeit").Output()
+	utils.BootStep("keytool -list is over")
+	if err != nil {
+		logger.Debug("could not list the JDK keystore to remove other keploy CAs' aliases", zap.String("cacerts", cacerts), zap.Error(err))
+		return false, false
+	}
+	present, others := javaLeftovers(out, alias)
+	var leftovers []string
+	for _, a := range others {
+		if !liveRunEntry(a) {
+			leftovers = append(leftovers, a)
+		}
+	}
+	removed := 0
+	var failed error // the delete the sweep stopped at, with keytool's output
+	for _, a := range leftovers[:min(len(leftovers), javaSweepMax)] {
+		var delOut []byte
+		delErr := withStoreLock(ctx, logger, func() (err error) {
+			delOut, err = exec.CommandContext(ctx, keytool, "-delete", "-alias", a, "-keystore", cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+			return err
+		})
+		utils.BootStep("keytool -delete is over")
+		if delErr != nil {
+			logger.Debug("could not remove another keploy CA's alias from the JDK keystore", zap.String("alias", a), zap.String("cacerts", cacerts), zap.ByteString("output", delOut), zap.Error(delErr))
+			failed = fmt.Errorf("keytool -delete -alias %s: %w: %s", a, delErr, bytes.TrimSpace(delOut))
+			break
+		}
+		removed++
+		logger.Debug("removed another keploy CA's alias from the JDK keystore", zap.String("alias", a), zap.String("cacerts", cacerts))
+	}
+	if remaining := len(leftovers) - removed; remaining > 0 {
+		logger.Info("the JDK keystore holds CA aliases that other keploy runs left there",
+			zap.String("cacerts", cacerts), zap.Int("removed", removed), zap.Int("remaining", remaining), zap.Int("removedPerStart", javaSweepMax),
+			zap.NamedError("deleteFailed", failed))
+	}
+	return present, true
+}
+
+// javaLeftovers reads `keytool -list` output: whether it lists alias (this
+// run's), and every alias in it that another keploy CA left there, named
+// keploy-mitm-<run id> (runAlias) and not alias. keytool prints each entry as
+// a line that starts with its alias and a comma ("<alias>, <date>,
+// trustedCertEntry,"), in each of its languages. A JKS or PKCS12 keystore
+// keeps its aliases in lower case, so alias is compared without case.
+func javaLeftovers(list []byte, alias string) (present bool, leftovers []string) {
+	for _, line := range strings.Split(string(list), "\n") {
+		a, _, _ := strings.Cut(line, ",")
+		if strings.EqualFold(a, alias) {
+			present = true
+			continue
+		}
+		if strings.HasPrefix(a, "keploy-mitm-") {
+			leftovers = append(leftovers, a)
+		}
+	}
+	return present, leftovers
+}
+
+// jdkCacerts returns the cacerts keystore of the JDK or JRE at home: JDK 9+
+// and a JRE keep it in <home>/lib/security, JDK 8 in <home>/jre/lib/security
+// (a JDK 8 root has no lib/security). found=false when neither file exists.
+func jdkCacerts(home string) (path string, found bool) {
+	for _, p := range []string{
+		filepath.Join(home, "lib", "security", "cacerts"),
+		filepath.Join(home, "jre", "lib", "security", "cacerts"),
+	} {
+		if fileExists(p) {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // installWindowsCA installs the CA certificate into a Windows trust store.
@@ -1836,37 +2007,101 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 // only trust store that has to contain the CA — and installing there does not
 // alter machine-wide trust for every other user and service on the host.
 //
-// The machine store is kept as a fallback for setups where the per-user store
-// is unavailable (a service account with no loaded profile, say), which is also
-// what preserves the previous behaviour for an elevated run.
-func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) error {
-	userCmd := exec.CommandContext(ctx, "certutil", "-user", "-addstore", "-f", "ROOT", certPath)
+// A CA the user's store or the machine's already holds (keploy keeps its
+// Windows CA across runs, castore.go) is not added again, and nothing is said
+// about it beyond a debug line: once the user answers Yes, Windows asks no more, a later
+// run in a session with no desktop reuses what the user trusted, and a CA an
+// administrator or a company's group policy put in LocalMachine\Root for
+// every user is trust as well (trustedWindowsStore).
+//
+// The machine store is kept as a fallback only for an elevated run (an
+// administrator past UAC, or a service account: LocalSystem's user-store add
+// fails with that code too, measured on Windows 11 26200) whose user store
+// could not ask, in a session with no desktop (errNoTrustPrompt's
+// ERROR_NOT_SUPPORTED),
+// which is what preserves the previous behaviour there; a CA it puts there is
+// said in one INFO line, since every user of the machine then trusts it. Any
+// other failure of the user store's add is the setup's, elevated or not: one
+// keploy cannot name could be a No in a form it does not know. A standard
+// user never asks the machine store: it can only refuse them, and keploy
+// needs no administrator.
+//
+// A session that has no desktop to show Windows' trust prompt in (a CI
+// runner's service, an OpenSSH session, a scheduled task) makes certutil fail
+// the user-store add with ERROR_NOT_SUPPORTED: that is errNoTrustPrompt.
+//
+// A user who answers No to Windows' prompt makes certutil fail the add with
+// ERROR_CANCELLED: that is errUserDeclined, and it ends the install with no
+// store changed, elevated or not. The machine store is never the fallback for
+// a No: it asks nobody, so an elevated run would put the CA the user refused
+// in every user's trust. The No is recorded beside the kept CA
+// (declinedRecord), so a later run whose add fails without asking ends the
+// same way (errDeclinedEarlier); a Yes, or the CA found in a store, clears
+// it.
+func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string, der []byte, keptAt string) error {
+	if store := trustedWindowsStore(logger, der); store != "" {
+		logger.Debug("keploy's CA is already in "+store+"; not adding it again", zap.String("store", store))
+		// The user trusts it now, by hand or through an administrator: a No
+		// an earlier run recorded no longer holds.
+		clearDeclined(logger, keptAt)
+		return nil
+	}
 	// Windows asks the user, in a dialog, whether to trust a certificate added
 	// to their ROOT store, and certutil waits for the answer: the agent's
 	// start waits for the user (utils.BeginBootPrompt), however long they take.
 	answered := utils.BeginBootPrompt("Windows' prompt to trust keploy's CA")
-	userOut, userErr := userCmd.CombinedOutput()
+	userOut, userErr := certutilAddFn(ctx, true, certPath)
 	answered()
 	if userErr == nil {
 		logger.Debug("installed the keploy CA in the current user's Windows ROOT store",
 			zap.String("output", string(userOut)))
+		clearDeclined(logger, keptAt)
 		return nil
 	}
-	logger.Debug("could not install the keploy CA in the per-user Windows ROOT store; trying the machine store",
+	// The user's answer, before the token is read: a No holds for an elevated
+	// run as for any, and for later runs that cannot ask (declinedRecord).
+	if userDeclined(userOut, userErr) {
+		logger.Debug("Windows' prompt to trust keploy's CA was answered No; adding it to no store", zap.String("output", string(userOut)))
+		noteDeclined(logger, keptAt)
+		return errUserDeclined
+	}
+	cannotAsk := noTrustPrompt(userOut, userErr)
+	// An add that could not ask (no desktop), after a No an earlier run
+	// recorded: that No stands, for a standard user's run as for an elevated
+	// one, and no store, a JDK's included, gets the CA. Any other failure is
+	// the setup's, said as it is (below).
+	if cannotAsk && declinedBefore(keptAt) {
+		logger.Debug("this session cannot show Windows' prompt to trust keploy's CA, and an earlier run recorded the user's No to it; adding it to no store",
+			zap.String("output", string(userOut)), zap.String("record", declinedRecord(keptAt)))
+		return errDeclinedEarlier
+	}
+	// The machine store is the fallback only for an elevated run whose user
+	// store could not ask (no desktop): never for a failure keploy cannot
+	// name, which could be a No in a form it does not know.
+	if !tokenElevatedFn() || !cannotAsk {
+		if cannotAsk {
+			logger.Debug("this session cannot show Windows' prompt to trust keploy's CA", zap.String("output", string(userOut)))
+			return errNoTrustPrompt
+		}
+		utils.LogError(logger, userErr, "Failed to install keploy's CA in the current user's Windows ROOT store",
+			zap.String("output", string(userOut)),
+			zap.String("next_step", trustStep(keptAt)+". Without it the application's HTTPS calls fail certificate verification."))
+		return userErr
+	}
+	logger.Debug("could not install the keploy CA in the per-user Windows ROOT store; this run is elevated, so trying the machine store",
 		zap.Error(userErr), zap.String("output", string(userOut)))
 
-	machineCmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
-	machineOut, machineErr := machineCmd.CombinedOutput()
+	machineOut, machineErr := certutilAddFn(ctx, false, certPath)
 	utils.BootStep("certutil -addstore is over")
 	if machineErr != nil {
 		utils.LogError(logger, machineErr, "Failed to install CA certificate using certutil",
 			zap.String("user_store_output", string(userOut)),
 			zap.String("machine_store_output", string(machineOut)),
-			zap.String("next_step", "the machine-wide certificate store needs Administrator; re-run in an elevated terminal, or import "+certPath+" into your user's Trusted Root store manually. Without the CA installed, the application's HTTPS calls will fail certificate verification."))
+			zap.String("next_step", trustStep(keptAt)+". Without the CA installed, the application's HTTPS calls fail certificate verification."))
 		return machineErr
 	}
-	logger.Debug("installed the keploy CA in the machine-wide Windows ROOT store",
-		zap.String("output", string(machineOut)))
+	logger.Info("keploy's CA is in the machine's Windows ROOT store (LocalMachine\\Root), which every user of this machine trusts: this run is elevated and the current user's store did not take it",
+		zap.String("user_store_output", string(userOut)), zap.String("output", string(machineOut)))
 	return nil
 }
 
@@ -1916,14 +2151,12 @@ func ReleaseSrcPortIfOwner(port int, token int64) bool {
 	return false
 }
 
-var setLogLevelOnce sync.Once
-
 // certCache caches generated TLS certificates by hostname to avoid regenerating
 // a certificate for every connection to the same host. Without this cache,
 // N concurrent CONNECT tunnels to the same host cause N parallel cert generations,
 // saturating CPU in resource-constrained environments (e.g., K8s pods).
 var (
-	certCache     *expirable.LRU[string, *tls.Certificate]
+	certCache     *lru.Expirable[string, *tls.Certificate]
 	certCacheOnce sync.Once
 )
 
@@ -1964,15 +2197,19 @@ const (
 	certCacheTTL     = 24 * time.Hour
 )
 
-func getCertCache() *expirable.LRU[string, *tls.Certificate] {
+func getCertCache() *lru.Expirable[string, *tls.Certificate] {
 	certCacheOnce.Do(func() {
-		certCache = expirable.NewLRU[string, *tls.Certificate](certCacheMaxSize, nil, certCacheTTL)
+		certCache = lru.NewExpirable[string, *tls.Certificate](certCacheMaxSize, nil, certCacheTTL)
 	})
 	return certCache
 }
 
+// CertForClient is the leaf for clientHello's server name, minted by the CA
+// (caPrivKey, caCertParsed) or reused from the cache. Its lines name the
+// server's name under the session clientHello's context carries (the
+// handshake's, HandshakeContext), the process's key when it carries none.
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
-	return certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, "", nil)
+	return certForClient(clientHello.Context(), logger, clientHello, caPrivKey, caCertParsed, backdate, "", nil)
 }
 
 // certForClient is CertForClient with what the connection itself says of its
@@ -1985,25 +2222,14 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 // the client's source port (SrcPortToDstURL), and a port is not a connection:
 // another client on the same port (a pod of the same node, or a connection
 // whose port was reused) had its host put on this client's leaf.
-func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, connectTarget string, dstIP net.IP) (*tls.Certificate, error) {
-	// Ensure log level is set only once
-
-	/*
-	* Since multiple goroutines can call this function concurrently, we need to ensure that the log level is set only once.
-	 */
-	setLogLevelOnce.Do(func() {
-		// * Set the log level to error to avoid unnecessary logs. like below...
-
-		// 2025/03/18 20:54:25 [INFO] received CSR
-		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
-		// 2025/03/18 20:54:25 [INFO] received CSR
-		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
-		// 2025/03/18 20:54:25 [INFO] encoded CSR
-		// 2025/03/18 20:54:25 [INFO] encoded CSR
-		// 2025/03/18 20:54:25 [INFO] signed certificate with serial number 435398774381835435678674951099961010543769077102
-		cfsslLog.Level = cfsslLog.LevelError
-	})
-
+//
+// Its lines name the server's name by its labels' shape beside its tag under
+// the session ctx carries (models.HostLogName): the connection's, which
+// HandleTLSConnection is given. clientHello.Context() is the handshake's,
+// context.Background() for a Handshake made with none, so its tags were the
+// process's, one host's the same across every recording and replay of a
+// long-lived agent.
+func certForClient(ctx context.Context, logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, connectTarget string, dstIP net.IP) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname.
 	// When the client omits SNI (common after CONNECT tunnel setup where the
 	// client already knows the target from the CONNECT request), fall back to
@@ -2028,7 +2254,7 @@ func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 
 	// The name the leaf is minted for. With no SNI and no CONNECT target the
 	// client dialled an IP literal, and it verifies the leaf against an IP SAN,
-	// which cfssl makes of an IP host.
+	// which mintLeaf makes of an IP host.
 	certHost := dstURL
 	if certHost == "" && dstIP != nil {
 		certHost = dstIP.String()
@@ -2046,37 +2272,21 @@ func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Check the cert cache before generating a new certificate.
 	if certHost != "" {
 		if cached, ok := getCertCache().Get(cacheKey); ok {
-			probeCert(logger, "cache-hit", dstURL, 0)
-			logger.Debug("reusing cached certificate", zap.String("hostname", certHost))
+			probeCert(logger, "cache-hit", models.HostLogName(ctx, dstURL), 0)
+			logger.Debug("reusing cached certificate", zap.String("hostname", models.HostLogName(ctx, certHost)))
 			publishMITM(sourcePort, cached)
 			return cached, nil
 		}
 	}
-	probeCert(logger, "mint-start", dstURL, 0)
+	probeCert(logger, "mint-start", models.HostLogName(ctx, dstURL), 0)
 	mintStart := time.Now()
 	defer func() {
-		probeCert(logger, "mint-done", dstURL, time.Since(mintStart).Nanoseconds())
+		probeCert(logger, "mint-done", models.HostLogName(ctx, dstURL), time.Since(mintStart).Nanoseconds())
 	}()
 
-	serverReq := &csr.CertificateRequest{
-		CN: certHost,
-		Hosts: []string{
-			certHost,
-		},
-		KeyRequest: csr.NewKeyRequest(),
-	}
-
-	serverCsr, serverKey, err := csr.ParseRequest(serverReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create server CSR: %v", err)
-	}
 	cryptoSigner, ok := caPrivKey.(crypto.Signer)
 	if !ok {
 		return nil, fmt.Errorf("failed to typecast the caPrivKey")
-	}
-	signerd, err := local.NewSigner(cryptoSigner, caCertParsed, signer.DefaultSigAlgo(cryptoSigner), nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create signer: %v", err)
 	}
 
 	if backdate.IsZero() {
@@ -2092,49 +2302,25 @@ func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	//
 	// Note: If you have recorded test cases before April 20, 2024 (http://www.sslchecker.com/certdecoder?su=269725513dfeb137f6f29b8488f17ca9)
 	// and are using time freezing, please reach out to us if you get tls handshake error.
-	signReq := signer.SignRequest{
-		Hosts:     serverReq.Hosts,
-		Request:   string(serverCsr),
-		Profile:   "web",
-		NotBefore: backdate.AddDate(-1, 0, 0),
-		NotAfter:  time.Now().AddDate(1, 0, 0),
-	}
+	notBefore := backdate.AddDate(-1, 0, 0)
+	notAfter := time.Now().AddDate(1, 0, 0)
 
-	serverCert, err := signerd.Sign(signReq)
+	serverTLSCert, err := mintLeaf(certHost, cryptoSigner, caCertParsed, notBefore, notAfter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign server certificate: %v", err)
+		return nil, err
 	}
 
-	logger.Debug("signed the certificate for a duration of 2 years", zap.String("notBefore", signReq.NotBefore.String()), zap.String("notAfter", signReq.NotAfter.String()))
-
-	// Load the server certificate and private key
-	serverTLSCert, err := tls.X509KeyPair(serverCert, serverKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
-	}
-
-	// Pre-populate Leaf to avoid a data race: crypto/tls lazily parses
-	// Certificate.Leaf on first use, which is not goroutine-safe. Parsing
-	// it here, before caching, ensures all concurrent consumers see a
-	// fully-initialized certificate.
-	if serverTLSCert.Leaf == nil {
-		leaf, parseErr := x509.ParseCertificate(serverTLSCert.Certificate[0])
-		if parseErr != nil {
-			logger.Debug("failed to pre-parse certificate leaf, skipping cache", zap.Error(parseErr))
-			return &serverTLSCert, nil
-		}
-		serverTLSCert.Leaf = leaf
-	}
+	logger.Debug("signed the certificate for a duration of 2 years", zap.String("notBefore", notBefore.String()), zap.String("notAfter", notAfter.String()))
 
 	// Cache the generated certificate for reuse by subsequent connections to the
 	// same host, under the composite key (host + backdate bucket + CA identity)
 	// computed above — so a frozen-time replay and a live run never share a leaf.
 	if certHost != "" {
-		getCertCache().Add(cacheKey, &serverTLSCert)
+		getCertCache().Add(cacheKey, serverTLSCert)
 	}
 
-	publishMITM(sourcePort, &serverTLSCert)
-	return &serverTLSCert, nil
+	publishMITM(sourcePort, serverTLSCert)
+	return serverTLSCert, nil
 }
 
 // certCacheKey composes the cert-cache key from the target host, the backdate

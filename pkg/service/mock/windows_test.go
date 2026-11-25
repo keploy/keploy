@@ -1,11 +1,13 @@
 package mock
 
 import (
-	"slices"
+	"context"
+	"reflect"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 func windowMock(name string, t0 time.Time, req, res int) *models.Mock {
@@ -79,19 +81,25 @@ func TestRecordedTestWindowsAreTheMappingsTests(t *testing.T) {
 			name:  "windows that touch at one instant are one, named by no test",
 			mp:    &models.Mapping{TestCases: []models.MappedTestCase{{ID: "o::TestA", At: at(10)}, {ID: "o::TestB", At: at(14)}}},
 			table: map[string][]string{"o::TestA": {"a-1", "a-2"}, "o::TestB": {"b-1"}},
-			want:  []models.TestWindow{{Start: at(10), End: at(22)}},
+			want:  []models.TestWindow{{Start: at(10), End: at(22), Tests: []string{"o::TestA", "o::TestB"}}},
+		},
+		{
+			name:  "three overlapping windows are one, listing each test",
+			mp:    &models.Mapping{TestCases: []models.MappedTestCase{{ID: "o::TestA", At: at(10)}, {ID: "o::TestB", At: at(13)}, {ID: "o::TestC", At: at(20)}}},
+			table: map[string][]string{"o::TestA": {"a-1", "a-2"}, "o::TestB": {"b-1"}, "o::TestC": {}},
+			want:  []models.TestWindow{{Start: at(10), End: at(22), Tests: []string{"o::TestA", "o::TestB", "o::TestC"}}},
 		},
 		{
 			name:  "overlapping windows are one, named by no test",
 			mp:    &models.Mapping{TestCases: []models.MappedTestCase{{ID: "o::TestA", At: at(10)}, {ID: "o::TestB", At: at(13)}, {ID: "o::TestC", At: at(30)}}},
 			table: map[string][]string{"o::TestA": {"a-1", "a-2"}, "o::TestB": {"b-1"}, "o::TestC": {}},
 			want: []models.TestWindow{
-				{Start: at(10), End: at(22)},
+				{Start: at(10), End: at(22), Tests: []string{"o::TestA", "o::TestB"}},
 				{TestCase: "o::TestC", Start: at(30), End: at(30)},
 			},
 		},
 	} {
-		if got := recordedTestWindows(c.mp, c.table, decoded); !slices.Equal(got, c.want) {
+		if got := recordedTestWindows(c.mp, c.table, decoded); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: windows\n %v\nwant\n %v", c.name, got, c.want)
 		}
 	}
@@ -175,7 +183,7 @@ func TestAPoolRecordingInTheInFlightGapIsOutsideEveryWindow(t *testing.T) {
 	mp := &models.Mapping{TestCases: []models.MappedTestCase{{ID: "o::TestA", At: at(10)}, {ID: "o::TestB", At: at(20)}}}
 	table := map[string][]string{"o::TestA": {"a-1"}, "o::TestB": {"b-inflight", "b-1"}}
 	ws := recordedTestWindows(mp, table, decoded)
-	if want := []models.TestWindow{{TestCase: "o::TestA", Start: at(10), End: at(11)}, {TestCase: "o::TestB", Start: at(20), End: at(22)}}; !slices.Equal(ws, want) {
+	if want := []models.TestWindow{{TestCase: "o::TestA", Start: at(10), End: at(11)}, {TestCase: "o::TestB", Start: at(20), End: at(22)}}; !reflect.DeepEqual(ws, want) {
 		t.Fatalf("windows\n %v\nwant\n %v", ws, want)
 	}
 	s := models.NewWindowSchedule(ws)
@@ -228,7 +236,7 @@ func TestAnAnswerStampedAfterTheNextCallDoesNotStretchItsTestsWindow(t *testing.
 	mp := &models.Mapping{TestCases: []models.MappedTestCase{{ID: "items::TestCrossTestFind", At: begin}}}
 	table := map[string][]string{"items::TestCrossTestFind": {"last-find", "last-delete"}}
 	ws := recordedTestWindows(mp, table, decoded)
-	if want := []models.TestWindow{{TestCase: "items::TestCrossTestFind", Start: begin, End: at("2026-11-02T21:56:15.613347922Z")}}; !slices.Equal(ws, want) {
+	if want := []models.TestWindow{{TestCase: "items::TestCrossTestFind", Start: begin, End: at("2026-11-02T21:56:15.613347922Z")}}; !reflect.DeepEqual(ws, want) {
 		t.Errorf("windows\n %v\nwant\n %v", ws, want)
 	}
 	if s := models.NewWindowSchedule(ws); s.Contains(decoded[2].Spec.ReqTimestampMock) {
@@ -268,7 +276,7 @@ func TestAWindowEndsAtARecordingPlacedAtItsAnswer(t *testing.T) {
 		},
 	} {
 		table := map[string][]string{"o::TestA": {"a-1"}, "o::TestB": {"b-poll", "b-1"}}
-		if got := recordedTestWindows(c.mp, table, decoded); !slices.Equal(got, c.want) {
+		if got := recordedTestWindows(c.mp, table, decoded); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: windows\n %v\nwant\n %v", c.name, got, c.want)
 		}
 	}
@@ -292,8 +300,109 @@ func TestARecordingWithNoPlaceMovesNoWindow(t *testing.T) {
 		{"a-1", "a-2", "a-unstamped"},
 	} {
 		table := map[string][]string{"o::TestA": list}
-		if got := recordedTestWindows(nil, table, decoded); !slices.Equal(got, want) {
+		if got := recordedTestWindows(nil, table, decoded); !reflect.DeepEqual(got, want) {
 			t.Errorf("%v: windows\n %v\nwant\n %v", list, got, want)
 		}
+	}
+}
+
+// scopeTableDB is a set's mappings, read both ways.
+type scopeTableDB struct {
+	MappingDB
+	mapping *models.Mapping
+}
+
+func (d scopeTableDB) Get(context.Context, string) (map[string][]models.MockEntry, bool, error) {
+	out := map[string][]models.MockEntry{}
+	for _, tc := range d.mapping.TestCases {
+		out[tc.ID] = tc.Mocks
+	}
+	return out, true, nil
+}
+
+func (d scopeTableDB) GetMapping(context.Context, string) (*models.Mapping, error) {
+	return d.mapping, nil
+}
+
+// scopeTablePusher keeps what the replay pushed (ScopePusher).
+type scopeTablePusher struct {
+	Instrumentation
+	table   map[string][]string
+	windows []models.TestWindow
+}
+
+func (p *scopeTablePusher) PushScopeTable(_ context.Context, table map[string][]string, windows []models.TestWindow) error {
+	p.table, p.windows = table, windows
+	return nil
+}
+
+// With the proven switch off, keploy mock replay sends the agent every test's
+// recorded window with the per-test table, derived from the set's mappings
+// as under the switch (recordedTestWindows): the run's place an answer
+// recorded in a later window than its call is written at. A recording the
+// agent never holds still places its test's window. A test's recorded begin
+// is read only under the switch, so each window starts at its test's first
+// recording.
+func TestScopeTableCarriesTheRecordedWindowsWithTheSwitchOff(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	t0 := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	decoded := []*models.Mock{windowMock("a-1", t0, 1, 2), windowMock("b-1", t0, 21, 22), windowMock("b-2", t0, 25, 26)}
+	p := &scopeTablePusher{}
+	m := &mockService{logger: zap.NewNop(), instrumentation: p, mappingDB: scopeTableDB{mapping: &models.Mapping{TestCases: []models.MappedTestCase{
+		{ID: "o::TestA", At: at(0), Mocks: []models.MockEntry{{Name: "a-1"}}},
+		{ID: "o::TestB", At: at(20), Mocks: []models.MockEntry{{Name: "b-1"}, {Name: "b-2"}}},
+	}}}}
+	if err := m.pushScopeTable(context.Background(), "rec", decoded[:2], nil, decoded, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []models.TestWindow{{TestCase: "o::TestA", Start: at(1), End: at(1)}, {TestCase: "o::TestB", Start: at(21), End: at(25)}}
+	if !reflect.DeepEqual(p.windows, want) {
+		t.Fatalf("windows\n %v\nwant\n %v", p.windows, want)
+	}
+	if len(p.table) != 2 {
+		t.Fatalf("table %v", p.table)
+	}
+}
+
+// The run's place reads a set's windows so that a test's own answers lie in
+// its own window, the last test's too: built from what recordedTestWindows
+// gives, under the switch (each test's recorded begin) and with it off (its
+// first recording). An answer recorded in a later test lies in that test's.
+func TestRunWindowsHoldEachAnswerInTheTestOfItsMoment(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	decoded := []*models.Mock{
+		windowMock("a-1", t0, 11, 12),
+		windowMock("a-2", t0, 14, 15),
+		windowMock("a-late", t0, 13, 24),
+		windowMock("b-1", t0, 22, 23),
+		windowMock("c-1", t0, 32, 33),
+		windowMock("c-2", t0, 34, 36),
+	}
+	table := map[string][]string{"o::TestA": {"a-1", "a-2", "a-late"}, "o::TestB": {"b-1"}, "o::TestC": {"c-1", "c-2"}}
+	begun := &models.Mapping{TestCases: []models.MappedTestCase{
+		{ID: "o::TestA", At: t0.Add(10 * time.Second)}, {ID: "o::TestB", At: t0.Add(20 * time.Second)}, {ID: "o::TestC", At: t0.Add(30 * time.Second)},
+	}}
+	for name, mp := range map[string]*models.Mapping{"switch on": begun, "switch off": nil} {
+		t.Run(name, func(t *testing.T) {
+			s := models.NewWindowSchedule(models.RunWindows(recordedTestWindows(mp, table, decoded)))
+			for _, c := range []struct {
+				mock string
+				test string
+			}{
+				{"a-1", "o::TestA"}, {"a-2", "o::TestA"}, {"a-late", "o::TestB"}, {"b-1", "o::TestB"}, {"c-1", "o::TestC"}, {"c-2", "o::TestC"},
+			} {
+				var res time.Time
+				for _, m := range decoded {
+					if m.Name == c.mock {
+						res = m.Spec.ResTimestampMock
+					}
+				}
+				want, ok := s.IndexOfTest(c.test)
+				if got := s.IndexOf(res); !ok || got != want {
+					t.Errorf("the answer of %s lies in window %d, want %s's, %d", c.mock, got, c.test, want)
+				}
+			}
+		})
 	}
 }

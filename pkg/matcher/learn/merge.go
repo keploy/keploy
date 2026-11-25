@@ -59,7 +59,15 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // dropping either check lets a wrong value pass. The Mongo replay checks
 // both; the HTTP replay refuses such a place (it cannot hold one value to
 // both yet), which fails closed.
+//
+// A mock that carries an authored block (models.Authored, written by keploy
+// mock derive or generate) takes none of it: the noise and variables its
+// answer is matched by are the ones its author declared, so what it matches
+// stays readable in its block and is never guessed.
 func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
+	if mock.Spec.Authored != nil {
+		return nil
+	}
 	var added []string
 	if !provenswitch.On() {
 		// Without the switch nothing learns variables, and noise merges as
@@ -169,7 +177,10 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 // bind place from either, every use and answer place of both, and an echo
 // only when both say so (a call another uses the value of is not its echo).
 // A clock read goes with its bind, and holds for one both bind only when
-// both say so (models.MergeVariables).
+// both say so (models.MergeVariables). The why stays: a's, else b's, so a
+// variable bound at another recording keeps the line saying why it is one.
+// A use's check by form holds only where no learning checks it exactly
+// (models.MergeByForm).
 func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	if a.Recorded == "" {
 		a.Recorded, a.Echo = b.Recorded, b.Echo
@@ -181,8 +192,12 @@ func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	} else if b.Bind != "" && len(b.Clock) == 0 {
 		a.Clock = nil
 	}
+	a.ByForm = models.MergeByForm(a.Use, a.ByForm, b.Use, b.ByForm)
 	a.Use = unionSorted(a.Use, b.Use)
 	a.Answer = unionSorted(a.Answer, b.Answer)
+	if a.Why == "" {
+		a.Why = b.Why
+	}
 	return a
 }
 

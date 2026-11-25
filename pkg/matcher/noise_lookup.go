@@ -35,11 +35,15 @@ func NewNoiseLookup(noise map[string][]string) NoiseLookup {
 	return NoiseLookup{idx: buildNoiseIndex(noise, nil)}
 }
 
+// Empty reports whether the lookup holds no entry: it then covers no leaf
+// (Covers, CoversAdded) and names none (Patterns).
+func (l NoiseLookup) Empty() bool { return len(l.idx.entries) == 0 }
+
 // Covers reports whether the leaf at path is noise. value is its text when it
 // is a scalar (scalar true); a container is excused only by an entry with no
 // patterns.
 func (l NoiseLookup) Covers(path, value string, scalar bool) bool {
-	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path))
+	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path), true)
 	if !noisy {
 		return false
 	}
@@ -49,27 +53,104 @@ func (l NoiseLookup) Covers(path, value string, scalar bool) bool {
 	return scalar && anyRegexpMatchStr(value, regs)
 }
 
+// CoversAdded reports whether the leaf at path, which the live request carries
+// and the recorded one lacks, is noise: an entry with no patterns names it, and
+// that entry does not name id keys. An entry naming id keys speaks for the ids
+// the recording has; a new id, or a field an id did not carry, is a change (as
+// the response matcher reads it, noiseIndex.matchAdded).
+func (l NoiseLookup) CoversAdded(path string) bool {
+	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path), false)
+	return noisy && len(regs) == 0
+}
+
 // Patterns are the patterns of the entry that names the leaf at path, as
 // Covers reads it, and whether an entry does: none for an entry that excuses
 // every value. A reason names them; Covers decides.
 func (l NoiseLookup) Patterns(path string) ([]string, bool) {
-	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path))
-	out := make([]string, len(regs))
-	for i, re := range regs {
-		out[i] = re.String()
+	_, pats, ok := l.Entry(path)
+	return pats, ok
+}
+
+// Entry is Patterns with the entry that names the leaf at path, named by
+// the run of whole fields of path it matches (wholeFieldsRun), so in path's
+// own case: the noise configuration's keys are read without case, and
+// keploy.yml's arrive lowercased (viper lowercases map keys), so the key an
+// entry is held by would name, for "requestId", a key keploy.yml does not
+// spell so. A hint names the entry to edit, which may name the leaf by its
+// last field alone ("qty" for "order.qty") or name the array it is an
+// element of ("ids" for "ids[]"). An entry naming id keys (NoiseIDKey)
+// with no id written as a literal beside them is named by the run of path
+// with its id keys collapsed, as it matched it ("options.{id}.traceId"),
+// never by an id the path holds. One that also writes an id as a literal
+// ("hotels.<id>.rooms.{id}.rate") is named "", by the field's whole path:
+// its collapsed run would name an entry keploy.yml does not have, and one
+// declared so would tie with the user's on its key and lose the tie, so
+// widening it would never serve the call.
+func (l NoiseLookup) Entry(path string) (key string, patterns []string, ok bool) {
+	e, noisy := l.idx.entryWholeFields(strings.ToLower(path), true)
+	if !noisy {
+		return "", []string{}, false
 	}
-	return out, noisy
+	if e.idKeys {
+		if strings.ToLower(e.key) != e.keyLower {
+			// The collapse (NoiseEntryKey) changed the key: it writes
+			// an id as a literal.
+			return "", regexpTexts(e.regexps), true
+		}
+		// IsIDKey ignores case, so this collapses the segments the
+		// lowercased path's collapse (entryWholeFields) did.
+		path = CollapseIDKeys(path)
+	}
+	return wholeFieldsRun(path, e.keyLower), regexpTexts(e.regexps), true
+}
+
+// wholeFieldsRun is the first run of whole fields of path that entry,
+// lowercase, names (namesWholeFields), as path writes it. Lowercasing maps
+// each rune alone, and no rune to or from ".", "[" or "]", so a run
+// namesWholeFields finds in the lowercased path is one here; were there
+// none, "" would name the entry by the path (mismatch.PatternMiss.Entry).
+func wholeFieldsRun(path, entry string) string {
+	for i := 0; i < len(path); i++ {
+		if i > 0 && path[i-1] != '.' {
+			continue
+		}
+		for end := i + 1; end <= len(path); end++ {
+			if (end == len(path) || path[end] == '.' || strings.HasPrefix(path[end:], "[]")) && strings.ToLower(path[i:end]) == entry {
+				return path[i:end]
+			}
+		}
+	}
+	return ""
 }
 
 // matchWholeFields is match with entries naming whole fields (namesWholeFields):
-// the first, most specific, entry that does wins.
-func (ni noiseIndex) matchWholeFields(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
+// the first, most specific, entry that does wins. An entry naming id keys
+// (NoiseIDKey) is tested against the path with its id keys collapsed, as
+// matchKind tests it, and only when idKeys is set (CoversAdded).
+func (ni noiseIndex) matchWholeFields(keyLower string, idKeys bool) (regs []*regexp.Regexp, isNoisy bool) {
+	e, ok := ni.entryWholeFields(keyLower, idKeys)
+	return e.regexps, ok
+}
+
+// entryWholeFields is the entry matchWholeFields reads.
+func (ni noiseIndex) entryWholeFields(keyLower string, idKeys bool) (noiseEntry, bool) {
+	collapsed := keyLower
+	if idKeys && ni.idKeys {
+		collapsed = CollapseIDKeys(keyLower)
+	}
 	for _, e := range ni.entries {
-		if namesWholeFields(keyLower, e.keyLower) {
-			return e.regexps, true
+		path := keyLower
+		if e.idKeys {
+			if !idKeys {
+				continue
+			}
+			path = collapsed
+		}
+		if namesWholeFields(path, e.keyLower) {
+			return e, true
 		}
 	}
-	return nil, false
+	return noiseEntry{}, false
 }
 
 // namesWholeFields reports whether entry occurs in path as a run of whole

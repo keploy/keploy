@@ -3,6 +3,9 @@ package models
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -78,6 +81,23 @@ type HTTPSchema struct {
 	Fault *Fault `json:"fault,omitempty" yaml:"fault,omitempty"`
 }
 
+// MarshalYAML writes s as its fields are tagged, with one rule over them: a
+// fault that sends the head (Fault.SendsHead) has replay send BodyBytes of the
+// body as the upstream sent them, so that body is written as those bytes and
+// never as a stream's frames. A stream's frames do not keep its bytes: an SSE
+// field's space after its ':' and its line ends are not kept, so the first
+// BodyBytes of the body they read back as are not the bytes the client read
+// at record. A body already held as frames (read back from them: StreamBody)
+// stays frames, never rewritten as the bytes they read back as, and replay
+// refuses its fault (faultHead).
+func (s HTTPSchema) MarshalYAML() (interface{}, error) {
+	type plain HTTPSchema // no MarshalYAML of its own: s's fields as tagged
+	if s.Fault != nil && s.Fault.SendsHead() {
+		s.Response.bodyOnWire = true // s is a copy: the caller's is untouched
+	}
+	return plain(s), nil
+}
+
 type FormData struct {
 	Key       string   `json:"key" bson:"key" yaml:"key"`
 	Values    []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
@@ -92,7 +112,107 @@ type FormData struct {
 	// JSON upload: the persister writes it to the test case's assets and
 	// clears it, and yaml/bson "-" keep it out of stored test cases.
 	FileContents [][]byte `json:"file_contents,omitempty" bson:"-" yaml:"-"`
+	// Captured names, index-aligned with FileNames, the file a part's bytes
+	// are in as this process received the test case from its agent (the
+	// agent client, platform/http): the test store copies a part into the
+	// test case's assets, and removes the file, only from here. It is never
+	// encoded, so a test case read back (a set's file, the cloud, the wire)
+	// never names a file for the store to read or remove: its Paths name
+	// files already kept beside it, opened only inside the recording.
+	Captured []string `json:"-" bson:"-" yaml:"-"`
 }
+
+// FormPartLeftOut names a form file part a test case was stored without:
+// the test store had nothing to keep the part's file from (no file a capture
+// left, no contents, and no file in the recording at the path it names).
+// Path is the path the part named, empty when it named none.
+type FormPartLeftOut struct {
+	TestSet  string
+	TestCase string
+	Key      string
+	FileName string
+	Path     string
+}
+
+// String says the part as a recording's summary lists it, a log line: its
+// file name by its size and its path by FormFilePathLogText.
+func (p FormPartLeftOut) String() string {
+	path := "no path"
+	if p.Path != "" {
+		path = fmt.Sprintf("path %q", FormFilePathLogText(p.Path))
+	}
+	return fmt.Sprintf("%s/%s: form part %q (file %s, %s)", p.TestSet, p.TestCase, p.Key, FormFileNameLogText(p.FileName), path)
+}
+
+// FormFileNameLogText is a form part's file name as a log line or an error
+// names it: by its size. The name is the app's (multipart's filename=), and
+// keploy's log lines never carry the app's traffic.
+func FormFileNameLogText(name string) string {
+	return "(file name withheld, " + strconv.Itoa(len(name)) + " bytes)"
+}
+
+// FormFilePathLogText is a path that ends in a form part's file as a log line
+// or an error names it: its folder (the recording's assets folder, or the
+// capture's), and its file name, which the app's request named, by
+// FormFileNameLogText. "" for "".
+func FormFilePathLogText(path string) string {
+	if path == "" {
+		return ""
+	}
+	dir, base := filepath.Split(path)
+	return dir + FormFileNameLogText(base)
+}
+
+// FormFilePathsInError is err, an error about a file that ends in a form
+// part's file name, with each of paths written in its text as
+// FormFilePathLogText writes it: the os package names the whole path in its
+// errors, and keploy's recording-file helpers the path within the recording,
+// plain or quoted. errors.Is and errors.As still see err. err itself when its
+// text names none of paths; nil for nil.
+func FormFilePathsInError(err error, paths ...string) error {
+	if err == nil {
+		return nil
+	}
+	text := err.Error()
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		shaped := FormFilePathLogText(p)
+		text = strings.ReplaceAll(text, strconv.Quote(p), strconv.Quote(shaped))
+		text = strings.ReplaceAll(text, p, shaped)
+	}
+	if text == err.Error() {
+		return err
+	}
+	return formFileErr{err: err, text: text}
+}
+
+// FormFileError is Err, an error about a file that ends in a form part's file
+// name (each of Paths), as a caller hands it on: its text whole, for the
+// user's own view (a test's report names the file the test case names), and
+// LogText for a log line. A caller that logs an error it is handed finds it
+// with errors.As (pkg.LoggableAnswerError).
+type FormFileError struct {
+	Err   error
+	Paths []string
+}
+
+func (e FormFileError) Error() string { return e.Err.Error() }
+func (e FormFileError) Unwrap() error { return e.Err }
+
+// LogText is e's text as a log line carries it: each of e.Paths by
+// FormFilePathLogText (FormFilePathsInError).
+func (e FormFileError) LogText() string { return FormFilePathsInError(e.Err, e.Paths...).Error() }
+
+// formFileErr is an error whose text FormFilePathsInError shaped.
+type formFileErr struct {
+	err  error
+	text string
+}
+
+func (e formFileErr) Error() string { return e.text }
+func (e formFileErr) Unwrap() error { return e.err }
 
 // HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a
 // recording keeps them in YAML (MarshalYAML). JSON carries the body alone, one
@@ -117,6 +237,16 @@ type HTTPResp struct {
 	// HeaderLineLengths: as on HTTPReq. Recorded for a mock's response, the
 	// one recorded response keploy sends back out at replay.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
+
+	// bodyOnWire: Body is the bytes the upstream sent before a fault
+	// (HTTPSchema.MarshalYAML sets it on the copy it writes), so YAML keeps
+	// it as they came, never split into frames (streamChunksForYAML).
+	bodyOnWire bool
+
+	// Marks: when each part of a mock's answer reached the application
+	// (HTTPAnswerMarks). Replay writes each part at its recorded place. Nil
+	// in a recording older than the marks, whose answer is written at once.
+	Marks *HTTPAnswerMarks `json:"marks,omitempty" yaml:"marks,omitempty"`
 }
 
 // HTTPResponseHasNoBody reports whether a response carries no body whatever
@@ -209,8 +339,14 @@ func (h HTTPReq) MarshalBSON() ([]byte, error) {
 
 // UnmarshalBSON reads HTTPReq, accepting either the new RFC3339Nano string
 // timestamp or the legacy BSON DateTime (millisecond) shape for backward
-// compatibility with records written before MarshalBSON landed.
+// compatibility with records written before MarshalBSON landed. A null
+// request reads as the zero HTTPReq, as the driver's default does: the driver
+// passes a null or undefined value here as no bytes.
 func (h *HTTPReq) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*h = HTTPReq{}
+		return nil
+	}
 	var raw httpReqBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
@@ -252,7 +388,8 @@ type httpRespBSON struct {
 	Binary        string            `bson:"binary"`
 	Timestamp     string            `bson:"timestamp"`
 
-	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
+	HeaderLineLengths HeaderLineLengths    `bson:"headerlinelengths,omitempty"`
+	Marks             *httpAnswerMarksBSON `bson:"marks,omitempty"`
 }
 
 type httpRespBSONReader struct {
@@ -268,7 +405,8 @@ type httpRespBSONReader struct {
 	Binary        string            `bson:"binary"`
 	Timestamp     bson.RawValue     `bson:"timestamp"`
 
-	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
+	HeaderLineLengths HeaderLineLengths    `bson:"headerlinelengths,omitempty"`
+	Marks             *httpAnswerMarksBSON `bson:"marks,omitempty"`
 }
 
 // MarshalBSON — see the HTTPReq version above. Same rationale.
@@ -287,10 +425,17 @@ func (h HTTPResp) MarshalBSON() ([]byte, error) {
 		Timestamp:     FormatMockTimestamp(h.Timestamp),
 
 		HeaderLineLengths: h.HeaderLineLengths,
+		Marks:             h.Marks.toBSON(),
 	})
 }
 
+// UnmarshalBSON — see the HTTPReq version above. A null response reads as
+// the zero HTTPResp.
 func (h *HTTPResp) UnmarshalBSON(data []byte) error {
+	if len(data) == 0 {
+		*h = HTTPResp{}
+		return nil
+	}
 	var raw httpRespBSONReader
 	if err := bson.Unmarshal(data, &raw); err != nil {
 		return err
@@ -316,12 +461,16 @@ func (h *HTTPResp) UnmarshalBSON(data []byte) error {
 
 		HeaderLineLengths: raw.HeaderLineLengths,
 	}
+	if h.Marks, err = raw.Marks.marks(); err != nil {
+		return fmt.Errorf("HTTPResp.UnmarshalBSON marks: %w", err)
+	}
 	return nil
 }
 
-// decodeBSONTimestamp handles the two on-disk shapes for HTTP timestamps:
-// the new RFC3339Nano string (preserves nanoseconds) and the legacy BSON
-// DateTime (millisecond int64). An absent/null value decodes to the zero time.
+// decodeBSONTimestamp handles the two on-disk shapes for HTTP and gRPC
+// timestamps: the new RFC3339Nano string (preserves nanoseconds) and the
+// legacy BSON DateTime (millisecond int64), read in UTC as the driver reads a
+// date. An absent/null value decodes to the zero time.
 func decodeBSONTimestamp(v bson.RawValue) (time.Time, error) {
 	switch v.Type {
 	case 0, bson.TypeNull, bson.TypeUndefined:
@@ -337,7 +486,7 @@ func decodeBSONTimestamp(v bson.RawValue) (time.Time, error) {
 		if !ok {
 			return time.Time{}, fmt.Errorf("expected DateTime, got malformed value")
 		}
-		return bson.DateTime(dt).Time(), nil
+		return bson.DateTime(dt).Time().UTC(), nil
 	default:
 		return time.Time{}, fmt.Errorf("unsupported BSON type %v for timestamp", v.Type)
 	}

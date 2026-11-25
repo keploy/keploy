@@ -177,7 +177,9 @@ func TestAPausedContainerIsNotRunning(t *testing.T) {
 // created it, and once it is removed; else its status), with what docker says
 // of a container it does not know, on stderr, and notes the state each inspect
 // found. Nothing else it is asked answers. An inspect the test holds
-// (holdNextLook) is answered only once a child it starts has ended.
+// (holdNextLook) is answered only once a child it starts has ended. A sudo
+// beside it (putSudoOnPath) refuses, unless the row lets it run the engine;
+// either way, a row fails at its end if sudo ran at all.
 type standInEngine struct {
 	state, looks string
 	// hold, while there, has the next inspect held; held is the FIFO its
@@ -213,6 +215,16 @@ esac
 	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	sudoCalls := filepath.Join(dir, "sudo-calls")
+	putSudoOnPath(t, dir, sudoCalls)
+	// The engine here answers only as its daemon does (a container's state,
+	// or that it has no such container), and never refuses keploy's user, so
+	// no command a row has it run is one for sudo to run again.
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(sudoCalls); err == nil && len(b) > 0 {
+			t.Errorf("sudo ran after the engine's daemon had answered: %q", b)
+		}
+	})
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return e
 }
@@ -554,8 +566,13 @@ func TestACancelledEngineCommandIsWaitedForUnlessItsKillIsRefused(t *testing.T) 
 // Once keploy has known the agent's container to be there, the engine not
 // knowing it is its end: the release ends, saying it is gone, whether keploy
 // knew it from a look at it (the engine said it runs) or from the agent's
-// answer alone (its container removed before any look got to it).
+// answer alone (its container removed before any look got to it). So under
+// either sudo: the engine's answer is not one sudo is asked to replace.
 func TestTheReleaseEndsOnTheRemovalOfAContainerKeployKnew(t *testing.T) {
+	underEitherSudo(t, theReleaseEndsOnTheRemovalOfAContainerKeployKnew)
+}
+
+func theReleaseEndsOnTheRemovalOfAContainerKeployKnew(t *testing.T) {
 	for _, knownBy := range []string{"a look", "the agent's answer"} {
 		t.Run(knownBy, func(t *testing.T) {
 			fastLooks(t)
@@ -698,8 +715,13 @@ func TestNamingTheAgentsContainerForgetsWhatWasKnownOfTheName(t *testing.T) {
 // container, while it is there, does not make the later client's known, so
 // that the later one, not created yet, is waited for, not taken for gone
 // once the earlier one is removed. The release goes through Run and
-// MakeAgentReadyForDockerCompose, as enterprise's callers drive it.
+// MakeAgentReadyForDockerCompose, as enterprise's callers drive it. So under
+// either sudo: the engine's answer is not one sudo is asked to replace.
 func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
+	underEitherSudo(t, anotherClientsContainerOfTheSameNameIsNotThisClients)
+}
+
+func anotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 	failingApp := func() *app.App {
 		return app.NewApp(zap.NewNop(), "exit 3", nil, models.SetupOptions{CommandType: string(utils.Native)})
 	}
@@ -810,8 +832,13 @@ func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 // two), and whether the run's app ran or the run ended before it could (no
 // app to run); at the watch's first look after the run's end. The project's
 // run here is an `up` that fails before compose creates the agent's
-// container: the stand-in engine never has it.
+// container: the stand-in engine never has it. So under either sudo: the
+// engine's answer is not one sudo is asked to replace.
 func TestTheReleaseEndsOnceTheRunEndedWithoutTheAgentsContainer(t *testing.T) {
+	underEitherSudo(t, theReleaseEndsOnceTheRunEndedWithoutTheAgentsContainer)
+}
+
+func theReleaseEndsOnceTheRunEndedWithoutTheAgentsContainer(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		releaseFirst  bool

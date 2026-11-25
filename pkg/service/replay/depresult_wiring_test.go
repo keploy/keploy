@@ -732,13 +732,13 @@ func TestMockLookupCarriesATarget(t *testing.T) {
 		})
 	}
 
-	// Two literals: a mock whose payload is on disk keeps itself, and its
-	// target is worked out from it when asked (mockDisplayInfo.targetOf,
-	// which reads mockTargetFromSpec); a whole mock's is worked out here.
+	// Two literals: a mock whose payload is on disk keeps its view
+	// (models.OnDiskView), and its target is worked out from it when asked
+	// (mockDisplayInfo.targetOf); a whole mock's is worked out here.
 	if len(found) != 2 {
 		t.Fatalf("expected exactly two mockDisplayInfo literals in replay.go, found %d: %v", len(found), found)
 	}
-	if want := "addMockDisplayInfo: mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}"; found[0] != want {
+	if want := "addMockDisplayInfo: mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock.OnDiskView()}"; found[0] != want {
 		t.Fatalf("the mock display lookup of a mock whose payload is on disk is now %s, want %s", found[0], want)
 	}
 	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), request: mock.RequestFingerprint(), recordedAt: mock.Spec.ReqTimestampMock, lifetime: mock.TestModeInfo.Lifetime, }"
@@ -1035,5 +1035,50 @@ func TestRunTestSetDerivesItsExpectationListFromTheSharedFilter(t *testing.T) {
 				"reusableMockNames stops session/connection-tier ones being excluded, so healthy tests are "+
 				"reported with MISSING dependencies and --assert-dependencies fails them.", w, calls[0])
 		}
+	}
+}
+
+// RunTestSet reports a test with no dependency as having used none: its row
+// carries mock_mismatches, empty, since what it consumed was read. Left out,
+// the row looked the same as one whose consumed mocks could not be read.
+func TestRunTestSetReportsATestThatUsedNoMockAsSuch(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	h.run(t)
+	var found bool
+	for _, r := range h.report.results {
+		if r.TestCaseID != "test-1" {
+			continue
+		}
+		found = true
+		if r.MockMismatches == nil {
+			t.Fatal("a test whose consumed mocks were read, and were none, has no mock_mismatches")
+		}
+		if len(r.MockMismatches.ExpectedMocks)+len(r.MockMismatches.ActualMocks) != 0 {
+			t.Fatalf("precondition: the test has no mock, yet its row lists %+v", r.MockMismatches)
+		}
+	}
+	if !found {
+		t.Fatal("no row for test-1")
+	}
+}
+
+// A test whose consumed mocks could not be read reports no mock_mismatches:
+// an empty one would say it used none.
+func TestRunTestSetLeavesOutTheMocksOfATestWhoseConsumptionWasUnread(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	h.replayer.hookImpl = consumedReadFails{}
+	h.run(t)
+	var found bool
+	for _, r := range h.report.results {
+		if r.TestCaseID != "test-1" {
+			continue
+		}
+		found = true
+		if r.MockMismatches != nil {
+			t.Fatalf("consumed mocks unread, yet the row reports %+v: read as used none", r.MockMismatches)
+		}
+	}
+	if !found {
+		t.Fatal("no row for test-1")
 	}
 }

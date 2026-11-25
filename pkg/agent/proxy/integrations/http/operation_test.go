@@ -150,7 +150,7 @@ func TestAMissIsDiffedAgainstItsOwnOperation(t *testing.T) {
 		t.Run("the report, "+tc.name, func(t *testing.T) {
 			h := newHTTP()
 			pool := []*models.Mock{sub, labels}
-			r := h.buildHTTPMismatchReport(request, body, &mockMemDb{mocks: pool}, pool, nil, nil, tc.diag)
+			r := h.buildHTTPMismatchReport(context.Background(), request, body, &mockMemDb{mocks: pool}, pool, nil, nil, tc.diag)
 			if r.ActualSummary != "POST /query" || r.Operation != "query GetAppLabels" || r.ClosestMock != "labels" {
 				t.Fatalf("summary %q operation %q closest %q", r.ActualSummary, r.Operation, r.ClosestMock)
 			}
@@ -204,6 +204,34 @@ func readEveryForm(t *testing.T) {
 		}
 		return models.HTTPOperation{}, false
 	}))
+}
+
+// A miss is compared with each recording of its pool by the path of the
+// recorded URL, not by the URL whole (routeKeyOf): of a recording of the
+// call's own route on a long host name and one of another path on a short
+// host, the first is the closest, and a recording whose URL does not parse
+// is compared by the URL as recorded.
+func TestAMissIsComparedWithTheRecordedPathNotTheURL(t *testing.T) {
+	recorded := func(name, rawURL string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: rawURL}}}
+	}
+	own := recorded("own", "http://orders.internal.payments.example.com:8443/v1/orders/7")
+	other := recorded("other", "http://h/v1/users")
+	call := &http.Request{Method: "GET", URL: &url.URL{Path: "/v1/orders/8"}}
+	if got := pickClosestCandidate(call, "", nil, []*models.Mock{other, own}); got != own {
+		name := "none"
+		if got != nil {
+			name = got.Name
+		}
+		t.Fatalf("the closest recording to GET /v1/orders/8 is %s; want own, of /v1/orders/7", name)
+	}
+	if got, want := recordedRoutes.of(own.Spec.HTTPReq), "GET /v1/orders/7"; got != want {
+		t.Fatalf("the route a miss compares %s by is %q; want %q", own.Spec.HTTPReq.URL, got, want)
+	}
+	odd := recorded("odd", "http://h:port/x")
+	if got, want := recordedRoutes.of(odd.Spec.HTTPReq), "GET http://h:port/x"; got != want {
+		t.Fatalf("the route a miss compares an unparsed URL by is %q; want %q", got, want)
+	}
 }
 
 // A live call is read from what its recording holds: its URL with its
@@ -273,7 +301,7 @@ func TestAPairingNamesItsOperation(t *testing.T) {
 		}
 	})
 	in := &req{method: "POST", url: &url.URL{Path: "/query"}, header: http.Header{"Host": {"localhost:8083"}, "Content-Type": {"application/json"}}, body: []byte(gqlBody("GetAppLabels"))}
-	reportPairing(ctx, in, gqlMock("labels", "GetAppLabels"), integrations.AnsweredCall{}, false)
+	reportPairing(ctx, in, gqlMock("labels", "GetAppLabels"), integrations.AnsweredCall{}, false, integrations.CallRound{})
 	if len(got) != 1 || got[0].ActualSummary != "POST /query" || got[0].Operation != "query GetAppLabels" {
 		t.Fatalf("reports %+v", got)
 	}

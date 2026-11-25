@@ -74,21 +74,47 @@ func TestCaptureWindow_RendezvousNoLoss(t *testing.T) {
 	}
 }
 
-// TestCaptureWindow_BeginClearsStale proves BeginTestErrorCapture discards
-// misses retained before the window (startup / background traffic) so they
-// don't attach to the first test.
-func TestCaptureWindow_BeginClearsStale(t *testing.T) {
-	// With the proven switch off; on, the first test reads them as the set's
-	// (TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets).
-	t.Setenv(provenswitch.Env, "")
-	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+// A set's first test reads what was missed before it with no window open (its
+// application's startup) as the set's (models.UnmatchedCall.BeforeSet,
+// models.MissOutsideTest), a DNS lookup's too, with the proven switch on or
+// off: with it off they were dropped, and nothing the run wrote named them.
+func TestCaptureWindow_BeginHandsTheStartupsMissesOverAsTheSets(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			core, logs := observer.New(zap.DebugLevel)
+			p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16)}
 
-	p.pendingMockErrors.addBounded(mockMiss("GET /background"), maxPendingMockErrors)
-	p.BeginTestErrorCapture()
+			dns := mockMiss("A db.internal.example.")
+			dns.MismatchReport.Protocol = "DNS"
+			p.pendingMockErrors.addBounded(dns, maxPendingMockErrors)
+			p.pendingMockErrors.addBounded(mockMiss("GET /config"), maxPendingMockErrors)
+			p.BeginTestErrorCapture()
+			p.errChannel <- mockMiss("POST /t1")
 
-	got, _ := p.GetMockErrors(context.Background())
-	if len(got) != 0 {
-		t.Fatalf("stale pre-window miss should be cleared on Begin, got %+v", got)
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatalf("GetMockErrors: %v", err)
+			}
+			read := map[string]models.UnmatchedCall{}
+			for _, c := range got {
+				read[c.ActualSummary] = c
+			}
+			if len(got) != 3 || len(read) != 3 {
+				t.Fatalf("the set's first test read %+v; want the startup's two misses and its own", got)
+			}
+			for _, name := range []string{"A db.internal.example.", "GET /config"} {
+				if c := read[name]; !c.BeforeSet || c.Kind != models.MissOutsideTest {
+					t.Errorf("the startup's miss %q reads %+v; want it marked BeforeSet, %s", name, c, models.MissOutsideTest)
+				}
+			}
+			if c := read["POST /t1"]; c.BeforeSet {
+				t.Errorf("the test's own miss reads %+v; want it unmarked", c)
+			}
+			if n := logs.FilterMessageSnippet("not attributed to a test").Len(); n != 0 {
+				t.Errorf("the startup's misses were said to be dropped (%d)", n)
+			}
+		})
 	}
 }
 
@@ -131,7 +157,8 @@ func TestCaptureWindow_ContinueCarriesTheGapsMisses(t *testing.T) {
 		t.Fatalf("test2 expected [SEND between tests, POST /t2], got %+v", got)
 	}
 
-	// And a test that begins instead (a set's first) does not inherit it.
+	// And a test that begins instead (a set's first) reads it as the set's,
+	// not its own.
 	p.errChannel <- mockMiss("SEND between tests")
 	deadline = time.Now().Add(5 * time.Second)
 	for p.pendingLen() == 0 {
@@ -141,56 +168,8 @@ func TestCaptureWindow_ContinueCarriesTheGapsMisses(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	p.BeginTestErrorCapture()
-	if got, _ := p.GetMockErrors(context.Background()); len(got) != 0 {
-		t.Fatalf("a set's first test must not inherit what was missed before it, got %+v", got)
-	}
-}
-
-// What a set's first test discards — misses made before it, with no window
-// open — is logged, with the calls, so no miss is dropped without a word.
-func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
-	// With the proven switch off; on, the first test reads them as the set's
-	// (TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets).
-	t.Setenv(provenswitch.Env, "")
-	core, logs := observer.New(zap.WarnLevel)
-	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16)}
-
-	p.pendingMockErrors.addBounded(mockMiss("GET /background"), maxPendingMockErrors)
-	p.BeginTestErrorCapture()
-
-	e := logs.FilterMessageSnippet("not attributed to a test").All()
-	if len(e) != 1 || e[0].ContextMap()["count"] != int64(1) {
-		t.Fatalf("want one Warn naming the discarded miss, got %+v", logs.All())
-	}
-	if calls, _ := e[0].ContextMap()["calls"].([]interface{}); len(calls) != 1 || calls[0] != "GET /background" {
-		t.Fatalf("the Warn does not name the call: %+v", e[0].ContextMap())
-	}
-
-	// Nothing discarded, nothing said.
-	logs.TakeAll()
-	p.BeginTestErrorCapture()
-	if n := logs.Len(); n != 0 {
-		t.Fatalf("a Begin that discards nothing logged %d line(s)", n)
-	}
-
-	// DNS misses alone (an offline runner's upstream at the app's startup)
-	// are not warned about: the end-of-run summary leaves them out too.
-	dns := mockMiss("A example.com")
-	dns.MismatchReport.Protocol = "DNS"
-	p.pendingMockErrors.addBounded(dns, maxPendingMockErrors)
-	p.BeginTestErrorCapture()
-	if n := logs.Len(); n != 0 {
-		t.Fatalf("a DNS-only discard logged %d Warn line(s): %+v", n, logs.All())
-	}
-
-	// Nor are connections that sent nothing (models.MatchPhaseNoRequest):
-	// the end-of-run summary leaves them out of a green run too.
-	silent := mockMiss("connection phase: server greeting")
-	silent.MismatchReport.MatchPhase = models.MatchPhaseNoRequest
-	p.pendingMockErrors.addBounded(silent, maxPendingMockErrors)
-	p.BeginTestErrorCapture()
-	if n := logs.Len(); n != 0 {
-		t.Fatalf("a discard of connections that sent nothing logged %d Warn line(s): %+v", n, logs.All())
+	if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || !got[0].BeforeSet {
+		t.Fatalf("a set's first test must read what was missed before it as the set's, got %+v", got)
 	}
 }
 
@@ -294,8 +273,17 @@ func TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets(t *testing.T) {
 // it as made before that set. A staging that is not a set's first since its
 // Mock (a test's window, a re-stage within the set) cuts nothing: what was
 // missed between two tests is the next test's.
-func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
+func TestAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) { missBeforeASetsMocksAreStagedIsNotTheSets(t, proven) })
+	}
+}
+
+// missBeforeASetsMocksAreStagedIsNotTheSets is
+// TestAMissBeforeASetsMocksAreStagedIsNotTheSets with the proven switch set
+// to proven.
+func missBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T, proven string) {
+	t.Setenv(provenswitch.Env, proven)
 	core, logs := observer.New(zap.WarnLevel)
 	p := New(zap.New(core), fakeDestInfo{}, config.New())
 	p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
@@ -340,7 +328,7 @@ func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) 
 		t.Fatalf("the cut was said %d times; want once: %+v", len(e), logs.All())
 	}
 	calls, _ := e[0].ContextMap()["calls"].([]interface{})
-	if len(calls) != 2 || calls[0] != "POST /stopped" || calls[1] != "GET /health" {
+	if len(calls) != 2 || calls[0] != "HTTP POST /{}" || calls[1] != "HTTP GET /{}" {
 		t.Fatalf("the warning names %v; want the call after the last read and the one before the staging", calls)
 	}
 
@@ -438,5 +426,191 @@ func TestAWithdrawnWindowEndsTheTrackersTestInTheManagersRound(t *testing.T) {
 	}
 	if snap.Phase != integrations.RoundInTest || snap.Test != "T2" {
 		t.Fatalf("the round reads phase %v, test %q (%s); want T2's test, the one the tracker began over the view", snap.Phase, snap.Test, snap.Boundary)
+	}
+}
+
+// What a set's staging cuts (cutMissesAtSetStart) is said, with the calls by
+// their shape (models.MissLogShape), so no miss is dropped without a word: at
+// Warn, but DNS misses alone and connections that sent nothing alone at
+// Debug, which the end-of-run summary leaves out of a green run too.
+func TestDroppedMissesAreSaidAtWarnButDNSOrSilentAloneAtDebug(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	p := &Proxy{logger: zap.New(core)}
+
+	p.logDroppedMisses(missesCutAtSetStart, []error{mockMiss("GET /background")})
+	e := logs.FilterMessageSnippet("not attributed to a test").All()
+	if len(e) != 1 || e[0].ContextMap()["count"] != int64(1) {
+		t.Fatalf("want one Warn naming the dropped miss, got %+v", logs.All())
+	}
+	if calls, _ := e[0].ContextMap()["calls"].([]interface{}); len(calls) != 1 || calls[0] != "HTTP GET /{}" {
+		t.Fatalf("the Warn does not name the call: %+v", e[0].ContextMap())
+	}
+
+	logs.TakeAll()
+	p.logDroppedMisses(missesCutAtSetStart, nil)
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("nothing dropped logged %d line(s)", n)
+	}
+	dns := mockMiss("A example.com")
+	dns.MismatchReport.Protocol = "DNS"
+	silent := mockMiss("connection phase: server greeting")
+	silent.MismatchReport.MatchPhase = models.MatchPhaseNoRequest
+	p.logDroppedMisses(missesCutAtSetStart, []error{dns, silent})
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("DNS misses and connections that sent nothing alone logged %d Warn line(s): %+v", n, logs.All())
+	}
+	p.logDroppedMisses(missesCutAtSetStart, []error{dns, mockMiss("GET /background")})
+	if n := logs.Len(); n != 1 {
+		t.Fatalf("a DNS miss beside a call that counts logged %d Warn line(s); want one", n)
+	}
+}
+
+// kindedMiss is a miss its proxy placed (models.ParserError.MissKind).
+func kindedMiss(summary, kind string) models.ParserError {
+	m := mockMiss(summary)
+	m.MissKind = kind
+	return m
+}
+
+// Under the proven switch a miss made between two tests, filed while no
+// test's window was open and made while no test's view served
+// (models.MissOutsideTest), is the set's: the next test's read carries it
+// marked Between, for the replay to fail the set with, charging that test
+// nothing. A miss made in the previous test and filed after its read
+// (models.MissInTest, models.MissExtraCall) is the set's too: it is carried
+// marked Late, named under the test its mark names (MadeIn). With the switch
+// off every miss is carried unmarked.
+func TestUnderTheSwitchAMissBetweenTwoTestsIsTheSets(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("switch=%v", on), func(t *testing.T) {
+			if on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+
+			p.BeginTestErrorCapture()
+			if got, _ := p.GetMockErrors(context.Background()); len(got) != 0 {
+				t.Fatalf("the first test read %+v; want nothing", got)
+			}
+			p.pendingMockErrors.addBounded(kindedMiss("delete on sessions", models.MissOutsideTest), maxPendingMockErrors)
+			p.pendingMockErrors.addBounded(kindedMiss("find on carts", models.MissInTest), maxPendingMockErrors)
+			p.pendingMockErrors.addBounded(markedMiss("count on carts", models.MissExtraCall, "t1"), maxPendingMockErrors)
+			p.ContinueTestErrorCapture()
+			p.errChannel <- kindedMiss("POST /t2", models.MissInTest)
+
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatalf("GetMockErrors: %v", err)
+			}
+			read := map[string]models.UnmatchedCall{}
+			for _, c := range got {
+				read[c.ActualSummary] = c
+			}
+			if len(got) != 4 || len(read) != 4 {
+				t.Fatalf("the second test read %+v; want the three carried misses and its own", got)
+			}
+			if c := read["delete on sessions"]; c.Between != on || c.Kind != models.MissOutsideTest || c.BeforeSet {
+				t.Errorf("the miss made between the tests reads %+v; want Between=%v, %s, not BeforeSet", c, on, models.MissOutsideTest)
+			}
+			if c := read["delete on sessions"]; c.Late {
+				t.Errorf("the miss made between the tests reads %+v; want it not Late", c)
+			}
+			if c := read["find on carts"]; c.Between || c.Late != on || c.MadeIn != "" {
+				t.Errorf("the previous test's late miss reads %+v; want Late=%v, no mark to name its test, not Between", c, on)
+			}
+			if c := read["count on carts"]; c.Between || c.Late != on || (on && c.MadeIn != "t1") {
+				t.Errorf("the previous test's late extra call reads %+v; want Late=%v, made in t1, not Between", c, on)
+			}
+			if c := read["POST /t2"]; c.Between || c.Late {
+				t.Errorf("the test's own miss reads %+v; want it unmarked", c)
+			}
+		})
+	}
+}
+
+// markedMiss is a miss its parser marked in test (models.MockMismatchReport
+// MarkedTest, with a known round), of kind.
+func markedMiss(summary, kind, test string) models.ParserError {
+	m := kindedMiss(summary, kind)
+	m.MismatchReport.Mark = models.RoundMarkedSettled
+	m.MismatchReport.MarkedInTest = test != ""
+	m.MismatchReport.MarkRound = true
+	m.MismatchReport.MarkedTest = test
+	return m
+}
+
+// Under the proven switch keploy test's read of a test's end
+// (models.WithTestEndRead) returns a miss whose mark names another test as
+// made in that test (Late, MadeIn): keploy decided it after that test's end
+// was read, and it reached the window of the test being read. A miss marked
+// in the test read, or with no test in its mark, is that test's. A read that
+// names no test (the scope agent's, the set's end) leaves every miss as it
+// is, and so does a read with the switch off.
+func TestATestsEndReadNamesAMissMarkedInAnEarlierTest(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		on     bool
+		ctx    context.Context
+		isLate bool
+	}{
+		{"switch on, keploy test's end read", true, models.WithTestEndRead(context.Background(), "t2"), true},
+		{"switch on, a read naming no test", true, context.Background(), false},
+		{"switch off", false, models.WithTestEndRead(context.Background(), "t2"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+			p.BeginTestErrorCapture()
+			if got, _ := p.GetMockErrors(models.WithTestEndRead(context.Background(), "t1")); len(got) != 0 {
+				t.Fatalf("the first test read %+v; want nothing", got)
+			}
+			p.ContinueTestErrorCapture()
+			p.errChannel <- markedMiss("GET /t1-late", models.MissInTest, "t1")
+			p.errChannel <- markedMiss("GET /t2-own", models.MissInTest, "t2")
+			p.errChannel <- kindedMiss("GET /t2-unmarked", models.MissInTest)
+
+			got, err := p.GetMockErrors(tc.ctx)
+			if err != nil {
+				t.Fatalf("GetMockErrors: %v", err)
+			}
+			read := map[string]models.UnmatchedCall{}
+			for _, c := range got {
+				read[c.ActualSummary] = c
+			}
+			if len(got) != 3 || len(read) != 3 {
+				t.Fatalf("the second test read %+v; want its three misses", got)
+			}
+			if c := read["GET /t1-late"]; c.Late != tc.isLate || (tc.isLate && c.MadeIn != "t1") || c.Between || c.BeforeSet {
+				t.Errorf("the miss marked in t1 reads %+v; want Late=%v, made in t1", c, tc.isLate)
+			}
+			for _, own := range []string{"GET /t2-own", "GET /t2-unmarked"} {
+				if c := read[own]; c.Late || c.MadeIn != "" {
+					t.Errorf("t2's own miss %s reads %+v; want it unmarked", own, c)
+				}
+			}
+		})
+	}
+}
+
+// A miss marked in a test that a set's first window carries is made before
+// the set (BeforeSet), never Late, even when the read names another test:
+// the set's start keeps it as the set's.
+func TestASetsFirstReadKeepsAMarkedMissBeforeTheSetNotLate(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+	p.pendingMockErrors.addBounded(markedMiss("GET /last-sets-test", models.MissInTest, "t9"), maxPendingMockErrors)
+	p.BeginTestErrorCapture()
+	got, err := p.GetMockErrors(models.WithTestEndRead(context.Background(), "t1"))
+	if err != nil {
+		t.Fatalf("GetMockErrors: %v", err)
+	}
+	if len(got) != 1 || !got[0].BeforeSet || got[0].Late || got[0].MadeIn != "" {
+		t.Fatalf("the set's first read %+v; want the marked miss BeforeSet, not Late", got)
 	}
 }

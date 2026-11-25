@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -222,8 +224,10 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		return nil, nil, false, err
 	}
 	if len(fits) == 0 {
-		// A miss: every recording is compared, for the closest.
-		_, near, err := strictCompare(ctx, input, live, pool, n)
+		// A miss: find the closest recording in pool, matching strictCompare's
+		// order and tie-breaking without comparing recordings that cannot beat
+		// the closest already found.
+		near, err := strictClosest(ctx, input, live, pool, n, h.verifying())
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -232,17 +236,20 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		if !routeMatched {
 			phase = models.MatchPhaseSchema
 		}
-		for _, f := range closestDiffs {
-			switch {
-			case f.clock:
+		// Each field refused for a reason of its own, once, with the
+		// reason the miss's report gives it (fieldReasons): a field the
+		// patterns refused at many places (an array's elements) is one line,
+		// so the log stays small however many values miss.
+		for _, r := range fieldReasons(closestDiffs) {
+			if r.clock {
 				// A read of the application's clock the closest recording
 				// learned that this call does not hold: why, legibly.
-				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
-			case f.why != "":
-				// A field keploy.yml's noise lets vary only within
-				// patterns, one side's value outside them.
-				h.Logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", r.Field), zap.String("reason", r.Why))
+				continue
 			}
+			// A field keploy.yml's noise lets vary only within patterns, a
+			// side's values outside them.
+			h.Logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("mock", closest.Name), zap.String("field", r.Field), zap.String("reason", r.Why))
 		}
 		diag = &matchDiag{phase: phase, candidates: len(comparedPool), pool: comparedPool, live: &live, closest: closest, differs: closestDiffs}
 		if closest != nil && routeMatched {
@@ -437,6 +444,113 @@ func strictCompare(ctx context.Context, input *req, live destination, pool []*mo
 	return fits, near, nil
 }
 
+// strictClosest returns the closest recording of pool to a call no recording
+// of pool fits (len(fits) == 0): strictCompare's near, without comparing
+// recordings that cannot beat it.
+//
+// Because closerThan prefers any recording of the call's route over any of
+// another, pass 1 compares only recordings strictSieve.mayBe passes (the only
+// ones whose route can match): if any of those has route true, it wins over
+// every recording of another route and pass 2 never runs; a route match with
+// one difference cannot be beaten (every recording differs in at least one
+// field) and stops pass 1 at once.
+//
+// Otherwise no recording is of the call's route, so pass 2 walks pool in its
+// order comparing each recording only up to the closest's difference count
+// (strictDiffOffRoute), stopping at once on a single-difference recording,
+// which no later one can beat.
+//
+// In verify mode (verify) every recording is also compared by strictCompare
+// and a difference panics.
+func strictClosest(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise, verify bool) (nearest, error) {
+	sieve := newStrictSieve(input, n)
+	var near nearest
+	// Pass 1: recordings that may be of the call's route. Only route-matching
+	// recordings are kept here so off-route tie-breaking stays in pool order
+	// in pass 2.
+	for _, m := range pool {
+		if ctx.Err() != nil {
+			return nearest{}, ctx.Err()
+		}
+		if !sieve.mayBe(m) {
+			continue
+		}
+		d := strictDiff(ctx, input, live, m, n)
+		if len(d) == 0 || !routeMatches(d) {
+			continue
+		}
+		c := nearest{mock: m, diffs: d, route: true}
+		if c.closerThan(near) {
+			near = c
+			if len(near.diffs) == 1 {
+				break
+			}
+		}
+	}
+	if !near.route {
+		// Pass 2: no recording is of the call's route. Walk pool in order so
+		// ties keep the earliest recording; a single difference cannot be
+		// beaten because no recording in pool fits.
+		livePath := ""
+		var liveQuery url.Values
+		if input.url != nil {
+			livePath, liveQuery = input.url.Path, input.url.Query()
+		}
+		for _, m := range pool {
+			if ctx.Err() != nil {
+				return nearest{}, ctx.Err()
+			}
+			limit := len(near.diffs)
+			if near.mock != nil && limit == 1 {
+				break
+			}
+			diffs, closer := strictDiffOffRoute(input, live, livePath, liveQuery, m, n, limit)
+			if !closer || len(diffs) == 0 {
+				continue
+			}
+			near = nearest{mock: m, diffs: diffs, route: false}
+		}
+	}
+	if verify {
+		_, want, err := strictCompare(ctx, input, live, pool, n)
+		if err != nil {
+			return nearest{}, err
+		}
+		if near.mock != want.mock || near.route != want.route || !sameStrictFields(near.diffs, want.diffs) {
+			var gotName, wantName string
+			if near.mock != nil {
+				gotName = near.mock.Name
+			}
+			if want.mock != nil {
+				wantName = want.mock.Name
+			}
+			panic(fmt.Sprintf("exact view verify: strict closest of %s %s: pruned (%s, route=%v, %d diffs), compared (%s, route=%v, %d diffs)",
+				input.method, sieve.path, gotName, near.route, len(near.diffs), wantName, want.route, len(want.diffs)))
+		}
+	}
+	return near, nil
+}
+
+// sameStrictFields compares two strictField slices by value (including the
+// optional PatternMiss pointer added on pattern/id-key refusals).
+func sameStrictFields(a, b []strictField) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].diff != b[i].diff || a[i].shape != b[i].shape || a[i].why != b[i].why || a[i].clock != b[i].clock {
+			return false
+		}
+		if (a[i].pattern == nil) != (b[i].pattern == nil) {
+			return false
+		}
+		if a[i].pattern != nil && !reflect.DeepEqual(a[i].pattern, b[i].pattern) {
+			return false
+		}
+	}
+	return true
+}
+
 // walkOnly are the fields of fields the walk found differing, not the
 // refused reads of the clock (strictField.clock), each with only its name
 // and how it differs (diff, shape): no reason of any kind a field may carry,
@@ -548,11 +662,32 @@ func bandPick(group []*models.Mock, cs integrations.MockCursor, bg bool, mockDb 
 // whichever test's window it lands, and how many calls landed between tests
 // before it moves nothing a window is answered. A test's own recordings are
 // never walked here (a test view serves them ConsumeReuse, each once), so
-// under today's rules a band in a test is the worker scope's; one that holds
-// any other recording keeps the test's window. Each worker-scope recording
-// is spent in the windows as it answers, so today the cursor's served marks
-// only restate the spends: what the band changes is the window.
+// under today's rules a band in a test is the worker scope's or a declared
+// session call's; one that is not all the worker scope's keeps the test's
+// window, a declared session call's too (below). Each worker-scope
+// recording is spent in the windows as it answers, so in a band of the
+// worker scope alone the cursor's served marks only restate the spends: what
+// the band changes is the window. A declared recording is never spent, so
+// its served mark is what moves a walk on from it.
+//
+// A band that holds a recording a keploy.yaml sessionCalls entry serves every
+// test (sv.Declared: made outside every test, of the view's pool slice) is
+// fixed by the recordings the view offers alone (sv.Offers: those it holds,
+// the protocol phase, the reached worker scope, the pool slice or the
+// declared calls, under the background rules the pool; declaredMember),
+// spent or not, on the cursor and window it is walked with otherwise (the
+// test's, the pool view's, or the background's). A recording the view never
+// offers (another test's; another pool slice's, but in a test under the
+// background rules, which offers it the whole pool) is never served by it:
+// held in the walk, one could fix where the sequence stands (one in the
+// test's window, or the last before it, or the last of all where no window
+// applies), and the call the declaration serves would miss. Every recording
+// the view offers stays in it, spent or not. A walk with no declared
+// recording live is left as it is (declaredMember).
 func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv integrations.SequenceView, mockDb integrations.MockMemDb, member func(*models.Mock) bool) (int, func(), *answeredSequence) {
+	if member != nil {
+		member = declaredMember(group, sv, member)
+	}
 	switch {
 	case bg:
 		sv = integrations.SequenceView{Cursor: cs}
@@ -565,6 +700,29 @@ func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv inte
 		}
 	}
 	return servedWalk(group, stagedGroup(mockDb, group, member), sv)
+}
+
+// declaredMember is member (non-nil) narrowed, for a band (group) that holds
+// a declared session call's recording (sv.Declared), to the recordings the
+// view offers (sv.Offers); member as given for any other band (bandWalk).
+// The trigger scopes the narrowing to declared calls' walks; the worker
+// scope's band is narrowed to the worker scope already (bandWalk).
+func declaredMember(group []*models.Mock, sv integrations.SequenceView, member func(*models.Mock) bool) func(*models.Mock) bool {
+	declared, offers := sv.Declared, sv.Offers
+	if declared == nil || offers == nil || !anyOf(group, declared) {
+		return member
+	}
+	return func(m *models.Mock) bool { return member(m) && offers(m) }
+}
+
+// anyOf reports whether is holds for a recording of group.
+func anyOf(group []*models.Mock, is func(*models.Mock) bool) bool {
+	for _, m := range group {
+		if is(m) {
+			return true
+		}
+	}
+	return false
 }
 
 // allOf reports whether is holds for every recording of group, and group has
@@ -628,7 +786,7 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest string, d
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closest.Name, diffs).
-		WithGuarded(guardedPaths(diag.differs)...).
+		WithPatternMisses(patternMisses(diag.differs)...).
 		WithoutNoise(payloadHashPaths()...).
 		WithRenderedRequests(
 			renderMockRequest(closest.Spec.HTTPReq, closest.Noise),
@@ -641,14 +799,14 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest string, d
 	return r
 }
 
-// guardedPaths are the report paths of fields keploy.yml's noise guards with
-// patterns that a side's value is outside of: those with a reason that is no
-// refused read of the application's clock (strictField.why).
-func guardedPaths(fields []strictField) []string {
-	var out []string
+// patternMisses are, of fields, those keploy.yml's noise guards with
+// patterns that a side's value is outside of, each with those patterns and
+// that side (strictField.pattern), for the miss's hint to name.
+func patternMisses(fields []strictField) []mismatch.PatternMiss {
+	var out []mismatch.PatternMiss
 	for _, f := range fields {
-		if f.why != "" && !f.clock {
-			out = append(out, f.diff.Path)
+		if f.pattern != nil {
+			out = append(out, *f.pattern)
 		}
 	}
 	return out
@@ -670,12 +828,58 @@ func payloadHashPaths() []string {
 
 // reasonsOf are, of fields, those refused for a reason of their own (a
 // learned read of the application's clock the call does not carry:
-// clockDiffs), each named by its shape, with that reason, once.
+// clockDiffs; a value outside the patterns keploy.yml's noise guards a
+// field with: strictField.pattern), each named by its shape, with that
+// reason, once (fieldReasons).
 func reasonsOf(fields []strictField) []models.FieldReason {
 	var out []models.FieldReason
+	for _, r := range fieldReasons(fields) {
+		out = append(out, r.FieldReason)
+	}
+	return out
+}
+
+// fieldReason is a field's reason, and whether it is of a learned read of
+// the application's clock (strictField.clock).
+type fieldReason struct {
+	models.FieldReason
+	clock bool
+}
+
+// fieldReasons are, of fields, those refused for a reason of their own,
+// each named by its shape, with that reason, once. A field the patterns
+// refused at many places (an array's elements share its shape) has one
+// reason, of the values of every one of them (mismatch.PatternMiss.Fold),
+// which names a few shapes a side and counts the rest: a field's reason
+// stays small however many values miss.
+func fieldReasons(fields []strictField) []fieldReason {
+	var out []fieldReason
+	// facts[i] is the refusal by patterns out[i] says, folded over each
+	// place of its field; nil for a reason of another kind.
+	var facts []*mismatch.PatternMiss
+	at := map[string]int{} // a field's shape and patterns: its index in out
 	for _, f := range fields {
-		if r := (models.FieldReason{Field: f.shape, Why: f.why}); f.shape != "" && f.why != "" && !slices.Contains(out, r) {
-			out = append(out, r)
+		switch {
+		case f.shape == "" || f.why == "":
+		case f.pattern == nil:
+			r := fieldReason{FieldReason: models.FieldReason{Field: f.shape, Why: f.why}, clock: f.clock}
+			if !slices.Contains(out, r) {
+				out, facts = append(out, r), append(facts, nil)
+			}
+		default:
+			key := strings.Join(append([]string{f.shape}, f.pattern.Patterns...), "\x00")
+			if i, seen := at[key]; seen {
+				facts[i].Fold(*f.pattern)
+				continue
+			}
+			p := *f.pattern
+			at[key] = len(out)
+			out, facts = append(out, fieldReason{FieldReason: models.FieldReason{Field: f.shape}}), append(facts, &p)
+		}
+	}
+	for i, p := range facts {
+		if p != nil {
+			out[i].Why = p.Why(out[i].Field)
 		}
 	}
 	return out

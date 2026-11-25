@@ -217,3 +217,157 @@ func TestDecodePayload_AnOlderKeploysReadingIsKeptAtReplayOnly(t *testing.T) {
 		_ = peer.Close()
 	}
 }
+
+func longDataPacket(stmtID uint32, paramID uint16, chunk []byte) []byte {
+	p := []byte{mysql.COM_STMT_SEND_LONG_DATA}
+	p = binary.LittleEndian.AppendUint32(p, stmtID)
+	p = binary.LittleEndian.AppendUint16(p, paramID)
+	p = append(p, chunk...)
+	return append([]byte{byte(len(p)), byte(len(p) >> 8), byte(len(p) >> 16), 0}, p...)
+}
+
+// executeBlobAndString frames a COM_STMT_EXECUTE for a 2-parameter (BLOB,
+// VAR_STRING) statement. When blobInline is false, param 0 is omitted from the
+// wire payload because it was streamed ahead of time via COM_STMT_SEND_LONG_DATA.
+func executeBlobAndString(stmtID uint32, bound, blobInline bool, blob, s string) []byte {
+	p := []byte{mysql.COM_STMT_EXECUTE}
+	p = binary.LittleEndian.AppendUint32(p, stmtID)
+	p = append(p, 0x00)
+	p = binary.LittleEndian.AppendUint32(p, 1)
+	p = append(p, 0x00) // null bitmap: neither param is NULL
+	if bound {
+		p = append(p, 0x01, byte(mysql.FieldTypeBLOB), 0x00, byte(mysql.FieldTypeVarString), 0x00)
+	} else {
+		p = append(p, 0x00)
+	}
+	if blobInline {
+		p = append(append(p, byte(len(blob))), blob...)
+	}
+	p = append(append(p, byte(len(s))), s...)
+	return append([]byte{byte(len(p)), byte(len(p) >> 8), byte(len(p) >> 16), 0}, p...)
+}
+
+// MySQL discards buffered COM_STMT_SEND_LONG_DATA parameters once the statement
+// executes or closes. If the decoder keeps stale LongDataParams entries across
+// executions or after COM_STMT_CLOSE (when a statement ID is reused), the next
+// inline EXECUTE skips the parameter bytes and mis-parses the remaining fields.
+func TestDecodePayload_LongDataParamsClearedOnExecuteAndClose(t *testing.T) {
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+		t.Run(string(mode), func(t *testing.T) {
+			client, peer := net.Pipe()
+			t.Cleanup(func() { _ = client.Close(); _ = peer.Close() })
+			decodeCtx := &DecodeContext{
+				Mode: mode, LastOp: NewLastOpMap(), ServerGreetings: NewGreetings(),
+				PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{
+					7: {StatementID: 7, NumParams: 2},
+					8: {StatementID: 8, NumParams: 2},
+				},
+			}
+			decodeCtx.ServerGreetings.Store(client, &mysql.HandshakeV10Packet{CapabilityFlags: mysql.CLIENT_PROTOCOL_41})
+			decode := func(packet []byte) (*mysql.PacketBundle, error) {
+				decodeCtx.LastOp.Store(client, RESET)
+				return DecodePayload(context.Background(), zap.NewNop(), packet, client, decodeCtx)
+			}
+
+			// Stream long data on both statements 7 and 8.
+			if _, err := decode(longDataPacket(7, 0, []byte("streamed-7"))); err != nil {
+				t.Fatalf("send long data stmt 7: %v", err)
+			}
+			if _, err := decode(longDataPacket(8, 0, []byte("streamed-8"))); err != nil {
+				t.Fatalf("send long data stmt 8: %v", err)
+			}
+
+			// First execute on stmt 7 consumes its buffered long data and must
+			// leave stmt 8's buffered long data intact.
+			b1, err := decode(executeBlobAndString(7, true, false, "", "run-1"))
+			if err != nil {
+				t.Fatalf("first execute stmt 7: %v", err)
+			}
+			if p := b1.Message.(*mysql.StmtExecutePacket).Parameters; p[0].Value != nil || p[1].Value != "run-1" {
+				t.Fatalf("first execute stmt 7 decoded %+v, want [nil, run-1]", p)
+			}
+			if _, ok := decodeCtx.LongDataParams[7]; ok {
+				t.Fatalf("stmt 7 LongDataParams remained after COM_STMT_EXECUTE: %+v", decodeCtx.LongDataParams[7])
+			}
+			if !decodeCtx.LongDataParams[8][0] {
+				t.Fatalf("stmt 8 LongDataParams was cleared by stmt 7 execute")
+			}
+
+			// Second execute on stmt 7 sends both parameters inline without
+			// rebinding types; both must decode accurately.
+			b2, err := decode(executeBlobAndString(7, false, true, "inline-blob", "run-2"))
+			if err != nil {
+				t.Fatalf("second execute stmt 7: %v", err)
+			}
+			if p := b2.Message.(*mysql.StmtExecutePacket).Parameters; p[0].Value != "inline-blob" || p[1].Value != "run-2" {
+				t.Fatalf("second execute stmt 7 decoded %+v, want [inline-blob, run-2]", p)
+			}
+
+			// Stream long data for stmt 7 again, then close stmt 7 without
+			// executing. Closing must clear stmt 7's LongDataParams without
+			// touching stmt 8, so a subsequent execute reusing ID 7 reads
+			// inline parameters properly.
+			if _, err := decode(longDataPacket(7, 0, []byte("abandoned"))); err != nil {
+				t.Fatalf("send long data before close: %v", err)
+			}
+			if _, err := decode(closePacket(7)); err != nil {
+				t.Fatalf("close stmt 7: %v", err)
+			}
+			if _, ok := decodeCtx.LongDataParams[7]; ok {
+				t.Fatalf("stmt 7 LongDataParams remained after COM_STMT_CLOSE: %+v", decodeCtx.LongDataParams[7])
+			}
+			if !decodeCtx.LongDataParams[8][0] {
+				t.Fatalf("stmt 8 LongDataParams was cleared by stmt 7 close")
+			}
+
+			b3, err := decode(executeBlobAndString(7, true, true, "reused-blob", "run-3"))
+			if err != nil {
+				t.Fatalf("execute on reused stmt 7: %v", err)
+			}
+			if p := b3.Message.(*mysql.StmtExecutePacket).Parameters; p[0].Value != "reused-blob" || p[1].Value != "run-3" {
+				t.Fatalf("reused stmt 7 decoded %+v, want [reused-blob, run-3]", p)
+			}
+
+			// A COM_STMT_EXECUTE that fails to decode (e.g. an unsupported
+			// parameter type on param 1) must still clear stmt 7's buffered
+			// long data so the next decodable inline EXECUTE on the same
+			// connection is not poisoned.
+			if _, err := decode(longDataPacket(7, 0, []byte("streamed-before-err"))); err != nil {
+				t.Fatalf("send long data before failing execute: %v", err)
+			}
+			badExec := []byte{mysql.COM_STMT_EXECUTE}
+			badExec = binary.LittleEndian.AppendUint32(badExec, 7)
+			badExec = append(badExec, 0x00)
+			badExec = binary.LittleEndian.AppendUint32(badExec, 1)
+			badExec = append(badExec, 0x00) // null bitmap
+			badExec = append(badExec, 0x01, byte(mysql.FieldTypeBLOB), 0x00, byte(mysql.FieldTypeNewDecimal), 0x00)
+			badExec = append(badExec, 0x01, '1')
+			badExec = append([]byte{byte(len(badExec)), byte(len(badExec) >> 8), byte(len(badExec) >> 16), 0}, badExec...)
+			if _, err := decode(badExec); err == nil {
+				t.Fatalf("expected unsupported parameter type execute to fail decode")
+			}
+			if _, ok := decodeCtx.LongDataParams[7]; ok {
+				t.Fatalf("stmt 7 LongDataParams remained after failing COM_STMT_EXECUTE: %+v", decodeCtx.LongDataParams[7])
+			}
+			b4, err := decode(executeBlobAndString(7, true, true, "after-err-blob", "run-4"))
+			if err != nil {
+				t.Fatalf("inline execute after failing execute: %v", err)
+			}
+			if p := b4.Message.(*mysql.StmtExecutePacket).Parameters; p[0].Value != "after-err-blob" || p[1].Value != "run-4" {
+				t.Fatalf("after-err stmt 7 decoded %+v, want [after-err-blob, run-4]", p)
+			}
+
+			// Confirm stmt 8's buffered long data remained usable end-to-end.
+			b8, err := decode(executeBlobAndString(8, true, false, "", "stmt8-run"))
+			if err != nil {
+				t.Fatalf("execute stmt 8: %v", err)
+			}
+			if p := b8.Message.(*mysql.StmtExecutePacket).Parameters; p[0].Value != nil || p[1].Value != "stmt8-run" {
+				t.Fatalf("stmt 8 decoded %+v, want [nil, stmt8-run]", p)
+			}
+			if _, ok := decodeCtx.LongDataParams[8]; ok {
+				t.Fatalf("stmt 8 LongDataParams remained after COM_STMT_EXECUTE: %+v", decodeCtx.LongDataParams[8])
+			}
+		})
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // fakeAdapter is a minimal Adapter for exercising the engine independently of
@@ -207,6 +208,51 @@ func TestEngineDetectDisabled(t *testing.T) {
 	}
 }
 
+// TestEngineWithoutDetection covers the per-call "don't learn on this match"
+// opt-out: a connection-level engine built with detection ON yields a copy that
+// learns nothing (the proven-switch fallback and dry own/extra-call matches rely
+// on this so "no other replay learns noise" holds), while the original engine is
+// left untouched and strict enforcement is preserved on the copy.
+func TestEngineWithoutDetection(t *testing.T) {
+	a := &fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}
+	on := New(a, true, true)
+
+	off := on.WithoutDetection()
+	if off.DetectionEnabled() {
+		t.Fatal("WithoutDetection copy must have detection off")
+	}
+	if !off.StrictEnabled() {
+		t.Fatal("WithoutDetection must leave strict enforcement unchanged")
+	}
+	if drift, comparable := off.Detect(&models.Mock{}, []byte(`{"a":2}`), nil); drift != nil || comparable {
+		t.Fatalf("detection-off copy must not learn, got drift=%v comparable=%v", drift, comparable)
+	}
+	// The original engine is unaffected — the detection-on path still learns.
+	if drift, _ := on.Detect(&models.Mock{}, []byte(`{"a":2}`), nil); len(drift) == 0 {
+		t.Fatal("WithoutDetection must not mutate the original engine")
+	}
+
+	// Already detection-off (and nil) are returned as-is, no allocation.
+	alreadyOff := New(a, false, true)
+	if alreadyOff.WithoutDetection() != alreadyOff {
+		t.Fatal("a detection-off engine must be returned unchanged")
+	}
+	var nilEngine *Engine
+	if nilEngine.WithoutDetection() != nil {
+		t.Fatal("nil engine WithoutDetection must stay nil")
+	}
+}
+
+// The default config attaches no engine, so EngineFrom returns nil and the
+// match path (http/match.go) calls PatternDrift on it directly. It must report
+// no drift rather than dereference a nil adapter and panic.
+func TestEngineNilPatternDriftIsNoop(t *testing.T) {
+	var nilEngine *Engine
+	if drift := nilEngine.WithoutDetection().PatternDrift(&models.Mock{}, []byte(`{"a":2}`), nil); drift != nil {
+		t.Fatalf("nil engine PatternDrift must be a no-op, got %v", drift)
+	}
+}
+
 func TestEngineLearnMonotonicAndDeepCopied(t *testing.T) {
 	stored := map[string][]string{"body.a": {}}
 	a := &fakeAdapter{stored: stored}
@@ -251,6 +297,66 @@ func TestEngineKnownNoiseMergesStoredAndUser(t *testing.T) {
 	}
 	if _, ok := known["sessionId"]; !ok {
 		t.Fatalf("user noise must be present: %v", known)
+	}
+}
+
+func TestStrictNoiseSetsAndNilSafety(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		env  string
+	}{
+		{name: "proven_unset", env: ""},
+		{name: "proven_1", env: "1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, mode.env)
+
+			user := map[string][]string{
+				"userid": {},
+				"id":     {`^\d+$`},
+			}
+			stored := map[string][]string{
+				"body.ts":        {},
+				"body.userId":    {}, // case twin of user full-ignore
+				"body.user.id":   {}, // covered by user pattern on id
+				"header.x-trace": {}, // non-body learned entry (dropped under KEPLOY_PROVEN=1)
+			}
+
+			a := &fakeAdapter{stored: stored}
+			e := New(a, false, true)
+			known, ts := e.StrictNoise(&models.Mock{}, user)
+
+			if _, ok := known["ts"]; !ok {
+				t.Fatalf("expected learned ts in known: %v", known)
+			}
+			if _, ok := ts["ts"]; !ok {
+				t.Fatalf("expected learned ts in typeStrict: %v", ts)
+			}
+			if _, ok := ts["userId"]; ok {
+				t.Fatalf("user full-ignore case twin must not be typeStrict: %v", ts)
+			}
+			if _, ok := ts["user.id"]; ok {
+				t.Fatalf("user pattern-guarded path must not be typeStrict: %v", ts)
+			}
+			if _, ok := known["user.id"]; ok {
+				t.Fatalf("user pattern-guarded learned path must not override user pattern in known: %v", known)
+			}
+			if mode.env == "1" {
+				if _, ok := known["header.x-trace"]; ok {
+					t.Fatalf("under proven switch non-body learned entry must not enter known: %v", known)
+				}
+				if _, ok := ts["header.x-trace"]; ok {
+					t.Fatalf("under proven switch non-body learned entry must not enter typeStrict: %v", ts)
+				}
+			}
+
+			// Nil engine stays safe and returns userNoise with no typeStrict.
+			var nilEngine *Engine
+			nk, nts := nilEngine.StrictNoise(&models.Mock{}, user)
+			if !reflect.DeepEqual(nk, user) || nts != nil {
+				t.Fatalf("nil engine StrictNoise: got (%v, %v), want (%v, nil)", nk, nts, user)
+			}
+		})
 	}
 }
 

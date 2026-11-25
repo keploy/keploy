@@ -24,30 +24,6 @@ import (
 // after it in tens of rounds out of a few hundred; numbered by what the
 // destination had sent when the request was read (connseq.Upstream), never.
 
-// loopbackPair returns the two ends of a loopback TCP connection.
-func loopbackPair(t *testing.T) (dialed, accepted net.Conn) {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l.Close() }()
-	got := make(chan net.Conn, 1)
-	go func() {
-		c, _ := l.Accept()
-		got <- c
-	}()
-	dialed, err = net.Dial("tcp", l.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if accepted = <-got; accepted == nil {
-		t.Fatal("accept failed")
-	}
-	t.Cleanup(func() { _ = dialed.Close(); _ = accepted.Close() })
-	return dialed, accepted
-}
-
 // received is the socket c's count of the bytes it has received.
 func received(t *testing.T, c net.Conn) uint64 {
 	t.Helper()

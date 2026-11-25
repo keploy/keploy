@@ -26,12 +26,16 @@ const TestPIDEnv = "KEPLOY_TEST_PID"
 // pool slice the instance consumes outside tests, and the path its tests' IDs
 // carry: for Go, the test binary's package directory relative to the project
 // directory. The caller's process is read from the connection, never from
-// the body.
+// the body; Child names, at most, a running process the caller started.
 type InstanceReq struct {
 	Key string `json:"key"`
 	// Dir is the test process's working directory, absolute: where its tests
 	// run (a Go package's directory). Kept on each test's window, so the
-	// recording's mapping names the folder each test runs in.
+	// recording's mapping names the folder each test runs in. A claim without
+	// one runs its tests in the folder Key names below the project (the
+	// folder keploy.yml is read from), as an integration written by hand
+	// claims; an integration whose Key is not a folder (@keploy/jest's, its
+	// project's displayName) sends Dir.
 	Dir string `json:"dir,omitempty"`
 	// Workers is how many test workers of the run its framework runs at
 	// once (Playwright's workers, go test's -p), each claiming for itself.
@@ -42,6 +46,18 @@ type InstanceReq struct {
 	// a live worker's (ScopeErrWorkersMismatch), so whether a run is taken
 	// never depends on how its workers happen to overlap.
 	Workers int `json:"workers,omitempty"`
+	// Child, when set, claims for a test process the caller started and
+	// runs as its child, before it runs (keploy's Go launcher on Windows,
+	// which has no exec that keeps the launcher's pid). The agent takes the
+	// claim as the child's only when the kernel names the caller as the
+	// child's parent, the child runs, the caller was created no later than
+	// it, and the child is itself one of the run's processes, as the caller
+	// must be; otherwise it refuses it (ScopeErrNotInRun). The creation times
+	// keep a process created after the child, on its exited parent's pid,
+	// from counting as that parent; one created in the same clock tick as
+	// the child is taken, since the system stamps creation at its clock's
+	// tick. 0 claims for the caller.
+	Child int `json:"child,omitempty"`
 }
 
 // InstanceResp answers POST /agent/instance. With one test process per run
@@ -187,6 +203,27 @@ type ScopeEvidence struct {
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
 	Unread bool `json:"unread,omitempty" yaml:"unread,omitempty"`
+	// FailedOnItsOwn: in a replay, the test's harness ended it failed on
+	// its own (its own assertion, or an end with no verdict, which keploy
+	// counts failed) before this evidence failed it, and keploy answered
+	// every call it made (not Unanswered: the evidence is only the
+	// recordings it never made). Those may then be calls it never reached,
+	// so they say nothing of where the app makes them. A test that met
+	// keploy's error answer to a call (a miss) may have failed on that
+	// answer: it never has it. It is no evidence: Empty ignores it.
+	FailedOnItsOwn bool `json:"failedOnItsOwn,omitempty" yaml:"failedOnItsOwn,omitempty"`
+	// Background is, in a replay, the test's background misses: the calls
+	// made in its window that keploy found the same request as one of the
+	// set's background recordings (worker: or startup:), apart from noise
+	// and reads of the application's clock, with none left to answer them
+	// (UnmatchedCall.Background, no Answer). Each names its closest
+	// recording (UnmatchedCall.ClosestMock) and its next step. They count
+	// against no test (UnmatchedCall.CountsAgainstTest) and fail none, so
+	// they are never in Misses, and they are no evidence against the test:
+	// Empty and Unanswered ignore them. They are listed (Kept) so a test
+	// that failed on the answer it did not get is shown the call and how
+	// to serve it.
+	Background []UnmatchedCall `json:"background,omitempty" yaml:"background,omitempty"`
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID
@@ -213,9 +250,34 @@ func IDPart(s string) bool {
 	return !strings.Contains(s, "::") && !strings.HasPrefix(s, ":") && !strings.HasSuffix(s, ":")
 }
 
-// Empty reports whether there is no evidence.
+// Empty reports whether there is no evidence against the test. Its
+// background misses (Background) are none.
 func (e *ScopeEvidence) Empty() bool {
 	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0 && len(e.CannotCapture) == 0)
+}
+
+// Kept reports whether there is anything to keep of the test's end: evidence
+// against it (not Empty), a reason it was failed or not judged with, or a
+// background miss of its window (Background), which is listed though it
+// fails nothing.
+func (e *ScopeEvidence) Kept() bool {
+	return e != nil && (!e.Empty() || e.Reason != "" || len(e.Background) > 0)
+}
+
+// Unanswered reports whether the evidence holds a call of the test keploy
+// did not answer from a recording, or could not tell it answered: any
+// evidence but the recordings the test did not make (a miss, a call keploy
+// could not capture), or keploy could not read all the test did (Unread).
+// A background miss (Background) is none: keploy left it unanswered as the
+// set's background, not as the test's call, and it says nothing of where
+// the application makes the test's calls (FailedOnItsOwn).
+func (e *ScopeEvidence) Unanswered() bool {
+	if e == nil {
+		return false
+	}
+	rest := *e
+	rest.Unconsumed = nil
+	return e.Unread || !rest.Empty()
 }
 
 // ChargeNotJudged charges the test with losses that leave it without a
@@ -235,12 +297,14 @@ func (e *ScopeEvidence) ChargeNotJudged(l CaptureLosses) {
 				continue
 			}
 			// Plus keeps the What charged last: each What charged is named,
-			// once.
+			// once, with the hosts it names. A What c's already holds is
+			// named there, and c's own list (each host where c's What
+			// holds it) names its hosts.
+			joined := c
 			if !strings.Contains(c.What, sum[i].What) {
-				sum[i].What = c.What + "; " + sum[i].What
-			} else {
-				sum[i].What = c.What
+				joined.JoinWhat(sum[i])
 			}
+			sum[i].SetWhatOf(joined)
 		}
 	}
 	e.CannotCapture = sum

@@ -1,11 +1,14 @@
 package http
 
 import (
+	"context"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -107,15 +110,19 @@ func ownedLive(sr integrations.SharedReads, key learnIndexKey, view uint64, at [
 // filed under their method and masked path (strictKey), those that learned a
 // place of their URL under their method alone (learnsURL: a call of another
 // path of the method may be them), and the positions of those that declare
-// variables (vars), which the variable pass reads for every call.
+// variables (vars), which the variable pass reads for every call. bodies are
+// buckets of byKey filed by their recordings' bodies (plainPrint), each on
+// the first call that reads it so: a test that owns many recordings of one
+// path costs a call what one that owns few does too.
 type strictOwned struct {
-	byKey map[string][]int
-	byURL map[string][]int
-	vars  []int
+	byKey  map[string][]int
+	byURL  map[string][]int
+	vars   []int
+	bodies *bodyFilings
 }
 
 func buildStrictOwned(owned []*models.Mock, n strictNoise) *strictOwned {
-	ix := &strictOwned{byKey: map[string][]int{}, byURL: map[string][]int{}}
+	ix := &strictOwned{byKey: map[string][]int{}, byURL: map[string][]int{}, bodies: newBodyFilings(&strictBodyFilings)}
 	for p, m := range owned {
 		if m == nil || m.Kind != models.HTTP {
 			continue
@@ -141,7 +148,29 @@ func buildStrictOwned(owned []*models.Mock, n strictNoise) *strictOwned {
 // at is the positions a strict call of the sieve's method and masked path
 // may be, in the list's order, then those that declare variables.
 func (ix *strictOwned) at(s strictSieve) []int {
-	exact, wide := ix.byKey[s.method+" "+s.masked], ix.byURL[s.method]
+	return ix.join(ix.byKey[s.method+" "+s.masked], ix.byURL[s.method])
+}
+
+// atBody is at for a call whose body has the print body where printed
+// (livePrint): of its method and masked path, only the recordings of that
+// print and those whose body does not compare plainly (plainPrint), of the
+// view's list owned, which the index is of.
+func (ix *strictOwned) atBody(ctx context.Context, s strictSieve, owned []*models.Mock, body uint64, printed bool) ([]int, error) {
+	key := s.method + " " + s.masked
+	exact := ix.byKey[key]
+	if printed && len(exact) > 0 {
+		b, err := ix.bodies.file(ctx, key, exact, func(p int) (uint64, bool) { return plainPrint(owned[p]) })
+		if err != nil {
+			return nil, err
+		}
+		exact = b.of(body)
+	}
+	return ix.join(exact, ix.byURL[s.method]), nil
+}
+
+// join is exact and wide, in the list's order, then those that declare
+// variables.
+func (ix *strictOwned) join(exact, wide []int) []int {
 	out := make([]int, 0, len(exact)+len(wide)+len(ix.vars))
 	out = append(append(out, exact...), wide...)
 	if len(wide) > 0 && len(exact) > 0 {
@@ -158,14 +187,20 @@ func (ix *strictOwned) at(s strictSieve) []int {
 // excused (learnsWide) under their method and segment count too, as
 // buildLearnIndex files them.
 type learnOwned struct {
-	pos    []int
-	masked []string
-	byPath map[string][]int
-	wild   map[string][]int
+	pos     []int
+	masked  []string
+	url     []*regexp.Regexp
+	byPath  map[string][]int
+	wild    map[string][]int
+	allCur  map[string]*atomic.Int64
+	wildCur map[string]*atomic.Int64
+	// bodies are buckets of byPath filed by their recordings' requests
+	// (learnPlainPrint), each on the first call that reads it so.
+	bodies *bodyFilings
 }
 
 func buildLearnOwned(owned []*models.Mock, n learnNoise) *learnOwned {
-	ix := &learnOwned{byPath: map[string][]int{}, wild: map[string][]int{}}
+	ix := &learnOwned{url: n.url, byPath: map[string][]int{}, wild: map[string][]int{}, bodies: newBodyFilings(&learnBodyFilings)}
 	for p, m := range owned {
 		if m != nil && m.Kind == models.HTTP && m.Spec.HTTPReq != nil && !hasVariables(m) {
 			ix.pos = append(ix.pos, p)
@@ -180,25 +215,57 @@ func buildLearnOwned(owned []*models.Mock, n learnNoise) *learnOwned {
 		// which the index would otherwise keep.
 		masked := strings.Clone(n.maskedPath(rp.path))
 		ix.masked = append(ix.masked, masked)
-		ix.byPath[rp.method+" "+masked] = append(ix.byPath[rp.method+" "+masked], r)
+		pk := rp.method + " " + masked
+		ps := append(ix.byPath[pk], r)
+		ix.byPath[pk] = ps
+		if len(ps) == 2 {
+			if ix.allCur == nil {
+				ix.allCur = map[string]*atomic.Int64{}
+			}
+			ix.allCur[pk] = &atomic.Int64{}
+		}
 		if learnsWide(m) {
 			w := rp.method + " " + strconv.Itoa(segmentCount(masked))
-			ix.wild[w] = append(ix.wild[w], r)
+			ws := append(ix.wild[w], r)
+			ix.wild[w] = ws
+			if len(ws) == 2 {
+				if ix.wildCur == nil {
+					ix.wildCur = map[string]*atomic.Int64{}
+				}
+				ix.wildCur[w] = &atomic.Int64{}
+			}
 		}
 	}
 	return ix
 }
 
-// ranks are the entries a call of method whose masked path is masked may be,
-// in recorded order: those of its method and masked path, and those of its
-// method and segment count a segment of whose path may be excused
-// (learnIndex.positions' rule).
-func (ix *learnOwned) ranks(method, masked string) []int {
-	exact, wild := ix.byPath[method+" "+masked], ix.wild[method+" "+strconv.Itoa(segmentCount(masked))]
-	if len(wild) == 0 {
-		return exact
+// filePath lazily files byPath[key] by learnPlainPrint, sharing the filed
+// bodyBucket between replay's ranksBody and record's full-round fast path.
+func (ix *learnOwned) filePath(ctx context.Context, key string, exact []int, owned []*models.Mock) (*bodyBucket, error) {
+	ln := learnNoise{url: ix.url}
+	return ix.bodies.file(ctx, key, exact, func(r int) (uint64, bool) {
+		m := owned[ix.pos[r]]
+		return learnPlainPrint(m, recordedParts(m), ln)
+	})
+}
+
+// ranksBody are the entries a call of method whose masked path is masked may
+// be, in recorded order: those of its method and masked path, and those of
+// its method and segment count a segment of whose path may be excused
+// (learnIndex.positions' rule). Where the call's request has the print body
+// (printed: learnLivePrint), of those of its method and masked path only the
+// recordings of that print and those whose request the learn step does not
+// compare plainly (learnPlainPrint), of the view's list owned, which the
+// index is of.
+func (ix *learnOwned) ranksBody(ctx context.Context, method, masked string, owned []*models.Mock, body uint64, printed bool) ([]int, error) {
+	key := method + " " + masked
+	exact := ix.byPath[key]
+	if printed && len(exact) > 1 {
+		b, err := ix.filePath(ctx, key, exact, owned)
+		if err != nil {
+			return nil, err
+		}
+		exact = b.of(body)
 	}
-	out := append(append(make([]int, 0, len(exact)+len(wild)), exact...), wild...)
-	slices.Sort(out)
-	return slices.Compact(out)
+	return joinWild(exact, ix.wild[method+" "+strconv.Itoa(segmentCount(masked))]), nil
 }

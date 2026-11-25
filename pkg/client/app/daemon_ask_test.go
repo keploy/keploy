@@ -15,7 +15,6 @@ import (
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 // slowDaemon is a loaded docker daemon in front of another (Client): its
@@ -134,85 +133,6 @@ func TestAReadOfTheDaemonEndsOnItsAnswer(t *testing.T) {
 // exitedApp is a daemon whose container "app" has exited.
 func exitedApp() *inspectRecorder {
 	return &inspectRecorder{inspects: map[string]container.InspectResponse{"app": {ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited"}}}}}
-}
-
-// The grace keploy gives a compose app it interrupted ends once the daemon
-// says the app's container exited, however slow its answer (here 2.2 s, well
-// inside the 5 s grace): the reads had 2 s budgets, every slow answer was cut,
-// and the app that had exited at once was given the whole grace.
-//
-// Driven through composeAppGrace itself. It used to be driven through
-// composeGraceThenDown, the in-process compose library's wrapper, which also
-// counted the down that followed; the library is gone and the shell-out calls
-// composeAppGrace directly (app.go, cmdCancel's compose branch), so the down
-// is no longer this grace's to make.
-func TestTheComposeGraceEndsOnTheDaemonsSlowAnswer(t *testing.T) {
-	core, logs := observer.New(zap.DebugLevel)
-	d := &slowDaemon{Client: exitedApp(), latency: 2200 * time.Millisecond}
-	a := &App{logger: zap.New(core), docker: d, container: "app"}
-	a.composeAppGrace(nil)
-	if logs.FilterMessage("app container stopped gracefully; tearing down the rest of the compose stack").Len() != 1 {
-		t.Fatalf("%d answers read; want the grace ended on the daemon's answer that the app exited", d.answers())
-	}
-}
-
-// The grace keploy gives a compose app it interrupted ends at compose's up
-// returning (here at 0.6 s), while the daemon fails every read of the app's
-// container: the up's return was looked at only between reads, and a read
-// asked again until the grace's end held the grace to its 5 s.
-func TestTheComposeGraceEndsAtTheUpsReturnWhileTheDaemonFailsItsReads(t *testing.T) {
-	stallBudget(t, time.Hour)
-	core, logs := observer.New(zap.DebugLevel)
-	d := &slowDaemon{Client: exitedApp(), failInspects: 1 << 30}
-	a := &App{logger: zap.New(core), docker: d, container: "app"}
-	began := time.Now()
-	returnedAt := began.Add(600 * time.Millisecond)
-	a.composeAppGrace(func() bool { return time.Now().After(returnedAt) })
-	if took := time.Since(began); took >= graceBudget {
-		t.Fatalf("the grace took %v, its whole %v, after the up returned at 0.6 s; want it ended at the up's return", took, graceBudget)
-	}
-	if logs.FilterMessage("docker compose process exited").Len() != 1 {
-		t.Fatal("the grace did not say it ended at the up's return")
-	}
-}
-
-// The grace keploy gives a compose app it interrupted ends on the app's exit
-// while compose's up still runs, as it does when the app exits at once and
-// keploy's agent is still stopping: the up returns only once every service
-// has stopped, which the down after the grace hastens. The grace's watcher of
-// the up ends with the grace; one that ended only at the up's return held the
-// grace's end, and the teardown after it, on the slowest service.
-//
-// The row counts, and does not time, that the grace is through on the app's
-// exit: the watcher looks at the up once a tick, and a grace that cancels its
-// watcher as it ends lets at most 2 looks follow its log of the exit (one in
-// flight, and one on a tick already pending when the watcher sees the end).
-// A grace that joined its watcher before cancelling it was held to its whole
-// budget after the app's exit, a look every tick until then.
-func TestTheComposeGraceEndsOnTheAppsExitWhileTheUpStillRuns(t *testing.T) {
-	const exited = "app container stopped gracefully; tearing down the rest of the compose stack"
-	core, logs := observer.New(zap.DebugLevel)
-	a := &App{logger: zap.New(core), docker: &slowDaemon{Client: exitedApp()}, container: "app"}
-	var looksAfterExit atomic.Int32
-	upReturned := func() bool {
-		if logs.FilterMessage(exited).Len() > 0 {
-			looksAfterExit.Add(1)
-		}
-		return false
-	}
-	done := make(chan struct{})
-	go func() { a.composeAppGrace(upReturned); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(time.Minute):
-		t.Fatal("the grace did not return after the app had exited: its watcher of compose's up held it")
-	}
-	if logs.FilterMessage(exited).Len() != 1 {
-		t.Fatal("the grace did not end on the app's exit")
-	}
-	if n := looksAfterExit.Load(); n > 2 {
-		t.Fatalf("the grace's watcher looked at compose's up %d times after the app had exited, want at most 2: the grace was held past the app's exit", n)
-	}
 }
 
 // The wait for a docker run app's container to exit after keploy's interrupt

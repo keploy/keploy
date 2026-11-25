@@ -23,6 +23,28 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// stopCutWarnMsg is the WARN warnStopCut logs.
+const stopCutWarnMsg = "the recording's stop cut short a parser that made no progress on what its connection carried before the stop: the test cases over the requests it had not read are left out"
+
+// warnStopCut says that the recording's stop cut short a connection's parser
+// the hang watchdog found making no progress on bytes captured for it before
+// the stop, and names the test cases that cost: those over the requests the
+// cut left out (leftOut), by when their requests or answers came.
+func warnStopCut(logger *zap.Logger, parserType integrations.IntegrationType, clientConnID string, leftOut leftOutRequests) {
+	fields := []zap.Field{
+		zap.String("parser", string(parserType)),
+		zap.String("clientConnID", clientConnID),
+		zap.Int("unread_request_chunks", leftOut.chunks),
+	}
+	next := "the parser had read every request this connection carried before the stop: only the exchange it was in may lack its mock"
+	if leftOut.chunks > 0 {
+		fields = append(fields, zap.Time("test_cases_from", leftOut.from), zap.Time("test_cases_to", leftOut.to))
+		next = "every test case whose request or answer came between test_cases_from and test_cases_to is left out of the recording, rather than saved without its mocks: the agent names them by test case as the recording ends"
+	}
+	fields = append(fields, zap.String("next_step", next+". The parser made no progress for its hang budget of the time the agent could run, so it was cut: re-run with --debug for why"))
+	logger.Warn(stopCutWarnMsg, fields...)
+}
+
 // recordViaSupervisor runs a V2-capable parser's RecordOutgoing inside
 // the new supervisor + relay architecture.
 //
@@ -61,11 +83,17 @@ func (p *Proxy) recordViaSupervisor(
 ) error {
 	sv := supervisor.New(supervisor.Config{
 		Logger: logger,
-		// Leave HangBudget / MemCap / PanicReporter defaulted by the
-		// supervisor package. Tune via config once we have production
-		// telemetry on the fallback rate.
+		// Leave HangBudget / MemCap / PanicReporter, and the clock (unless
+		// a test sets one), defaulted by the supervisor package. Tune via
+		// config once we have production telemetry on the fallback rate.
+		Clock: p.supervisorClock,
 	})
 	defer sv.Close()
+	// No StopDeadline: at the recording's stop the supervisor waits on the
+	// parser for as long as it makes progress on what its connection
+	// carried before the stop, on no clock but the time the process could
+	// run (Supervisor.Run). A parser that makes none for its hang budget is
+	// cut, and the record path says what that left out (stopCutWarnMsg).
 
 	// Parser-facing session is constructed before the relay so its
 	// MarkMockIncomplete / ClearPendingWork hooks can be wired into
@@ -275,11 +303,18 @@ func (p *Proxy) recordViaSupervisor(
 		// The destination's stream ends where the client stopped taking it
 		// (it closed its socket, and refused what came after): a parser
 		// that reaches that end mid-message knows the client's close cut
-		// the message there, not the destination (the HTTP recorder leaves
-		// that exchange out, and says why, unless what the client refused,
-		// of what reached the proxy before the client's FIN, only finished
-		// the message's framing).
+		// the message there, not the destination (the HTTP recorder records
+		// that response as far as the client took it, with a stopped_reading
+		// fault, and leaves out, saying why, one whose head the client did
+		// not have whole, and one whose client's end came first and records
+		// no fault: the recording's stop, its process's own exit, or an end
+		// the hooks cannot judge).
 		ClientStopped: svSess.MarkEndedWhereClientStopped,
+		// The client had ended its side before the destination's end
+		// reached it, whichever end the relay read first: the HTTP recorder
+		// judges a call the client closed partway by the client's own end
+		// then, as when the client's end is read first.
+		ClientEndedBeforeDest: svSess.MarkClientEndedBeforeDest,
 		// How each side ended its side of the connection, and which ended
 		// first: a call the destination never answered is recorded with
 		// the fault it gave (its reset or its close), or as the client's
@@ -431,9 +466,12 @@ func (p *Proxy) recordViaSupervisor(
 	switch {
 	case result.FallthroughToPassthrough:
 		// A parser retired as the recording stops (RecordingStopping), however
-		// it ends: aborted once it has read its streams to their end, or once
-		// the stop's deadline passed (canceled), or dead of a panic as the
-		// recording stops (panicked).
+		// it ends: aborted once it has read its streams to their end and then
+		// made no progress on what it read for its fold window (canceled),
+		// or cut while it had captured bytes unread and made no progress on
+		// them for its hang budget (hung: said below the switch, as it costs
+		// the test cases over them), or dead of a panic as the recording
+		// stops (panicked).
 		// There is no "rest of the connection" left to lose, so the warning
 		// does not apply, any more than the span does (openSpan): emitting it
 		// would tell the user their recording is broken at the exact moment
@@ -561,7 +599,26 @@ func (p *Proxy) recordViaSupervisor(
 	// answer reads it, and they open no span then. Called before the tees are
 	// paused below: a chunk a paused tee refuses is told of as after the
 	// return.
-	reads.parserReturned()
+	//
+	// A hang as the recording stops is the one way the stop cuts a parser
+	// that still had captured bytes to read: it made no progress on them for
+	// its hang budget, on the time the process could run. What it had not
+	// read of the requests captured before the stop is left out as the stop
+	// cut's (Session.RecordStopCutWindow), and the test cases over them with
+	// it: routes/record.go names them at WARN, once per stop.
+	var cutAtStop func(start, end time.Time)
+	stopCut := result.Status == supervisor.StatusHung && svSess.RecordingStopping()
+	if stopCut {
+		cutAtStop = svSess.RecordStopCutWindow
+	}
+	leftOut := reads.parserReturned(cutAtStop)
+	if stopCut {
+		// The "parser retired" WARN above is not logged for a stopping
+		// recording, and the supervisor logs the hang at Debug: said here,
+		// with the connection and the window of what it cost, so no stop
+		// drops a test case silently.
+		warnStopCut(logger, parserType, svSess.ClientConnID, leftOut)
+	}
 	// Only now does the watermark stop following the connection: a test case
 	// held for what its parser never read is let go once that is left out
 	// (above), not before, when it would be checked against no span and
@@ -728,7 +785,10 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 			}
 			tlsConn := tls.Client(conn, dialCfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				return nil, fmt.Errorf("dest TLS handshake failed: %w", err)
+				// The handshake's error names the server name it checked
+				// and the certificate's names whole: written by their
+				// shape and tag, as the relay logs it.
+				return nil, models.HostsInError(ctx, fmt.Errorf("dest TLS handshake failed: %w", err), dialCfg.ServerName)
 			}
 			return tlsConn, nil
 		}

@@ -13,7 +13,6 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
-	"go.keploy.io/server/v3/utils"
 )
 
 // Per-PID (worker-keyed) mock scoping — "Design A".
@@ -35,7 +34,7 @@ import (
 // A worker self-reports its PID in the scope call (ScopeReq.Pid — e.g. Node
 // process.pid), which registers an allowlist of that test's mock names on the
 // proxy (SetWorkerScope). A connection's origin PID (OutgoingOptions.SrcPid,
-// from the eBPF redirect map) is resolved up the /proc process tree once, when
+// from the eBPF redirect map) is resolved up its process tree once, when
 // it opens; each read on it is then filtered by the allowlist of the nearest
 // worker on that chain registered at that moment, so the connection follows
 // its worker from test to test. Connections from unregistered process trees
@@ -373,6 +372,12 @@ func (s *scopedMockDb) RoundSnapshot(q integrations.RoundQuery) (integrations.Ro
 	return integrations.SnapshotRound(s.MockMemDb, q)
 }
 
+// RoundMeta forwards the store's O(1) round metadata read
+// (integrations.ExactRoundReader).
+func (s *scopedMockDb) RoundMeta(tracker *learn.Tracker) (integrations.RoundMeta, bool) {
+	return integrations.ReadRoundMeta(s.MockMemDb, tracker)
+}
+
 // AwaitRoundMove forwards the store's wait for its round to move
 // (integrations.RoundWaiter); false, at once, from a store that has none.
 func (s *scopedMockDb) AwaitRoundMove(ctx context.Context, at integrations.RoundAt) (bool, error) {
@@ -399,8 +404,9 @@ func (s *scopedMockDb) TakenLog(epoch uint64, from, to int) []integrations.Take 
 }
 
 var (
-	_ integrations.RoundReader = (*scopedMockDb)(nil)
-	_ integrations.RoundWaiter = (*scopedMockDb)(nil)
+	_ integrations.RoundReader      = (*scopedMockDb)(nil)
+	_ integrations.RoundWaiter      = (*scopedMockDb)(nil)
+	_ integrations.ExactRoundReader = (*scopedMockDb)(nil)
 )
 
 // MarkCallRound forwards the store's (integrations.StagedFinder): the zero
@@ -527,6 +533,13 @@ func (s *scopedMockDb) InBackground(name string) bool {
 }
 
 var _ integrations.BackgroundMember = (*scopedMockDb)(nil)
+
+// OwnsStartup forwards the store's integrations.StartupOwner answer.
+func (s *scopedMockDb) OwnsStartup(call integrations.CallRound, name string) bool {
+	return integrations.OwnsStartup(s.MockMemDb, call, name)
+}
+
+var _ integrations.StartupOwner = (*scopedMockDb)(nil)
 
 // Unheld implements integrations.UnheldTeller: the store's, so a view over
 // the fail-closed store HoldToRound made says why its call read nothing.
@@ -1033,6 +1046,40 @@ func (s *scopedMockDb) InPool(m *models.Mock) (bool, bool) {
 	return integrations.InPool(s.MockMemDb, m)
 }
 
+// TrailOf forwards integrations.TrailedTests: the test a recording trails
+// by the replay's scope table is the store's, whatever view a worker reads.
+func (s *scopedMockDb) TrailOf(mock string) learn.Trail {
+	return integrations.TrailOf(s.MockMemDb, mock)
+}
+
+var _ integrations.TrailedTests = (*scopedMockDb)(nil)
+
+// SourcesOf forwards integrations.DeclaredSourcesOf: the sources rules
+// declared give a recording's fields by the replay's scope table are the
+// store's, whatever view a worker reads.
+func (s *scopedMockDb) SourcesOf(mock string) []models.DeclaredSource {
+	return integrations.SourcesOf(s.MockMemDb, mock)
+}
+
+var _ integrations.DeclaredSourcesOf = (*scopedMockDb)(nil)
+
+// DeclaresSources forwards integrations.SourcesDeclarer: whether the
+// replay's scope table declares sources is the store's, whatever view a
+// worker reads; a store that cannot tell declares them.
+func (s *scopedMockDb) DeclaresSources() bool {
+	return integrations.DeclaresSources(s.MockMemDb)
+}
+
+var _ integrations.SourcesDeclarer = (*scopedMockDb)(nil)
+
+// TimeForm forwards integrations.TimeFormReader: whether the replay turned
+// the time default on is the store's, whatever view a worker reads.
+func (s *scopedMockDb) TimeForm() bool {
+	return integrations.TimeFormOf(s.MockMemDb)
+}
+
+var _ integrations.TimeFormReader = (*scopedMockDb)(nil)
+
 // RecordedWindowIndex forwards integrations.RecordedWindowIndex.
 func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {
@@ -1079,6 +1126,30 @@ func (s *scopedMockDb) cursorKey(key string) string {
 	return s.lastScope + "\x00" + key
 }
 
+// BackgroundRecordings is the set's background recordings whatever this
+// view's allowlist (integrations.BackgroundRecordingReader): they are read,
+// never served.
+func (s *scopedMockDb) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
+	return integrations.BackgroundRecordingsOf(s.MockMemDb, kind)
+}
+
+// BackgroundRecordingsIn is the background recordings of the set call was
+// marked in (integrations.RoundBackgroundReader), whatever this view's
+// allowlist.
+func (s *scopedMockDb) BackgroundRecordingsIn(call integrations.CallRound, kind models.Kind) []models.BackgroundRecording {
+	return integrations.BackgroundRecordingsAt(s.MockMemDb, call, kind)
+}
+
+var _ integrations.RoundBackgroundReader = (*scopedMockDb)(nil)
+
+// BoundValuesIn is the bound values of the set call was marked in
+// (integrations.RoundBoundReader): the store's, as Variables and TrailOf.
+func (s *scopedMockDb) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {
+	return integrations.BoundValuesAt(s.MockMemDb, call)
+}
+
+var _ integrations.RoundBoundReader = (*scopedMockDb)(nil)
+
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
@@ -1095,6 +1166,50 @@ func (s *scopedMockDb) WindowChanged() <-chan struct{} {
 		return p.WindowChanged()
 	}
 	return nil
+}
+
+// RunPlace and RunPlaceChanged carry no mock data either. A wrapped store
+// without the facet reports the set's end and a channel that never fires: a
+// parser holds nothing over it, as over a store with no facet at all.
+func (s *scopedMockDb) RunPlace() models.RunPlace {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlace()
+	}
+	return models.RunPlace{SetEnd: true}
+}
+
+func (s *scopedMockDb) RunPlaceChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlaceChanged()
+	}
+	return nil
+}
+
+// IdleUntilRunPlaceChanges over a wrapped store without the facet marks
+// nothing: its place is the set's end, so no parser waits on it.
+func (s *scopedMockDb) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (func(), bool) {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.IdleUntilRunPlaceChanges(changed, mark)
+	}
+	return func() {}, false
+}
+
+// OpenTestRecordings is the wrapped store's: a parser reads it for the
+// recordings a call could have been answered with in its test, so more of
+// them only makes it hold less. ClaimHold of a wrapped store without the
+// facet claims nothing: no parser holds over it.
+func (s *scopedMockDb) OpenTestRecordings() []*models.Mock {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.OpenTestRecordings()
+	}
+	return nil
+}
+
+func (s *scopedMockDb) ClaimHold(name string) bool {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.ClaimHold(name)
+	}
+	return false
 }
 
 // The carry-over tier is a read tier like the others, so it goes through keep().
@@ -1129,6 +1244,38 @@ func (s *scopedMockDb) StagingEpoch() uint64 {
 	}
 	return 0
 }
+
+// WindowRewinds carries no mock data either. A wrapped store without the facet
+// counts none, with its window start.
+func (s *scopedMockDb) WindowRewinds() (uint64, time.Time) {
+	if r, ok := s.MockMemDb.(integrations.WindowRewindCounter); ok {
+		return r.WindowRewinds()
+	}
+	start, _ := s.CurrentTestWindow()
+	return 0, start
+}
+
+// GetPerTestMocksWithRewinds is the wrapped store's, through the same name
+// filter as GetPerTestMocksInWindow. A wrapped store without the facet counts
+// none, and its start and tier are read apart.
+func (s *scopedMockDb) GetPerTestMocksWithRewinds() ([]*models.Mock, uint64, time.Time, error) {
+	if r, ok := s.MockMemDb.(integrations.WindowRewindCounter); ok {
+		mocks, rewinds, start, err := r.GetPerTestMocksWithRewinds()
+		mocks, err = s.keep(mocks, err)
+		return mocks, rewinds, start, err
+	}
+	_, start := s.WindowRewinds()
+	mocks, err := s.GetPerTestMocksInWindow()
+	return mocks, 0, start, err
+}
+
+// ClaimOnce delegates to the underlying store so distinct per-connection
+// wrappers over one MockManager share its once-per-staging claim set.
+func (s *scopedMockDb) ClaimOnce(key string) bool {
+	return s.MockMemDb.ClaimOnce(key)
+}
+
+var _ integrations.MockMemDb = (*scopedMockDb)(nil)
 
 func (s *scopedMockDb) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
 	if bk, ok := s.MockMemDb.(interface {
@@ -1465,7 +1612,7 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	nobody := len(p.workerScope) == 0
 	p.workerScopeMu.RUnlock()
 	if nobody {
-		return mgr // fast path: no worker scoped — no /proc walk, exact old behavior
+		return mgr // fast path: no worker scoped — no process-tree walk, exact old behavior
 	}
 	chain := ancestorChain(kpid)
 	if v := p.workerViewFor(chain); v.allow == nil && v.refused == "" {
@@ -1485,14 +1632,15 @@ func (p *Proxy) WorkerViewForTest(pid uint32, mgr integrations.MockMemDb) integr
 	return p.scopedFor(pid, mgr)
 }
 
-// ancestorChain is pid and its ancestors, nearest first, read from /proc once
-// per connection, outside any lock. Bounded so a reparent race or an
-// unexpected /proc shape can never spin.
+// ancestorChain is pid and its ancestors, nearest first, read from the host's
+// process table (starts.ParentOf: /proc on Linux, sysctl on macOS) once per
+// connection, outside any lock. Bounded so a reparent race or an unexpected
+// process table can never spin.
 func ancestorChain(pid uint32) []uint32 {
 	chain := make([]uint32, 0, 8)
 	for i := 0; i < 32 && pid > 1; i++ {
 		chain = append(chain, pid)
-		ppid, ok := ppidFromStat(pid)
+		ppid, ok := starts.ParentOf(pid)
 		if !ok {
 			break
 		}
@@ -1517,16 +1665,6 @@ func (p *Proxy) workerViewFor(chain []uint32) workerView {
 		}
 	}
 	return v
-}
-
-// ppidFromStat reads the parent PID of pid from /proc/<pid>/stat
-// (utils.ReadProcStat).
-func ppidFromStat(pid uint32) (uint32, bool) {
-	st, ok := utils.ReadProcStat(int(pid))
-	if !ok {
-		return 0, false
-	}
-	return uint32(st.PPID), true
 }
 
 // byStart is mocks as a live view for pid shows them (starts View): those it

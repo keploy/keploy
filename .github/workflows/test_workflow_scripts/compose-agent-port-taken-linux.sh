@@ -4,13 +4,12 @@
 # network, as every compose project's is, the resolver listens in the agent
 # container's namespace, which the app joins, on 127.0.0.11, on a TCP and a
 # UDP port the kernel drew from the namespace's ephemeral range (32768-60999)
-# before the agent ran. The CLI checks the ports it hands the agent in its own
-# namespace, where they are free, and the agent cannot name their holder,
-# dockerd, which is in another PID namespace. An agent handed one of them must
-# move that server to a free port and tell its hooks, which redirect the
-# app's calls and DNS queries there, as it does natively; failing its start
-# fails the run (a compose lane met it by chance, on ports CI hands out from
-# 30000 up).
+# before the agent ran. The CLI hands the agent the configured ports as they
+# are, and the agent cannot name their holder, dockerd, which is in another
+# PID namespace. An agent handed one of them must move that server to a free
+# port and tell its hooks, which redirect the app's calls and DNS queries
+# there, as it does natively; failing its start fails the run (a compose lane
+# met it by chance, on ports CI hands out from 30000 up).
 #
 # The collision is made, not waited for: the agent image runs behind a
 # wrapper entrypoint (port-taken-entry.sh) that reads the resolver's
@@ -50,8 +49,8 @@ ID=$$
 APP="ptk-app-$ID"
 ORIG="keploy-port-taken-orig:$ID"
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
-# The app's port on this host, and the marker ports the CLI hands the agent:
-# free here, below every ephemeral range, so the CLI keeps them.
+# The app's port on this host, and the marker ports the CLI hands the agent
+# as they are: free here, below every ephemeral range.
 PORT=$(free_port) || exit 1
 M_PROXY_TCP=$(free_port "$PORT") || exit 1
 M_DNS_TCP=$(free_port "$PORT" "$M_PROXY_TCP") || exit 1

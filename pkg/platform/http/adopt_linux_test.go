@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -855,6 +856,106 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 		// The kill names what it killed, and what to do about it.
 		if tc.killed && (!strings.Contains(appErr.StopKilled, "(sh, state ") || !strings.Contains(appErr.StopKilled, "make it exit once it is asked to stop")) {
 			t.Fatalf("%s: the kill is said as %q; want the process named, with its state, and the next step", tc.name, appErr.StopKilled)
+		}
+	}
+}
+
+// What the application left runs on only where keploy adopts it: a child
+// keploy holds no pidfd on (one a library forked) is not the application's
+// when keploy adopts nothing; a read of its children that fails says nothing
+// runs on, and one whose children keep changing that something may.
+func TestAppRunsOnOnlyWhatKeployAdopted(t *testing.T) {
+	pid, err := syscall.ForkExec("/bin/sh", []string{"sh", "-c", "sleep 30"}, &syscall.ProcAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		var ws syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &ws, 0, nil)
+	})
+	await(t, "the child running", func() bool { return parentIs(pid, os.Getpid()) })
+	was := adopting.Load()
+	t.Cleanup(func() { adopting.Store(was) })
+	adopting.Store(false)
+	if appRunsOn(zap.NewNop(), nil) {
+		t.Fatal("a child keploy did not adopt reads as the application running on")
+	}
+	adopting.Store(true)
+	scan := scanChildren
+	t.Cleanup(func() { scanChildren = scan })
+	scanChildren = func() ([]child, error) { return nil, errors.New("proc is gone") }
+	if appRunsOn(zap.NewNop(), nil) {
+		t.Fatal("a read of the children that failed says the application runs on")
+	}
+	n := 0
+	scanChildren = func() ([]child, error) { n++; return []child{{pid: 1<<22 + n}}, nil }
+	if !appRunsOn(zap.NewNop(), nil) {
+		t.Fatal("children that kept changing over every read say nothing runs on")
+	}
+}
+
+// An application whose command exits on its own, leaving a daemon that
+// runs on, is waited on before keploy stops that daemon: the run's
+// BeforeStop is called while the daemon runs, says so, and says so no more
+// once the daemon ended on its own; the daemon finished what it does after
+// the command's exit (its last write), not stopped. A run keploy stopped at
+// a set's end calls no BeforeStop.
+func TestARunWaitsOnWhatTheCommandLeftBeforeItStopsIt(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	for _, ownExit := range []bool{true, false} {
+		dir := t.TempDir()
+		ready, goOn, done := filepath.Join(dir, "ready"), filepath.Join(dir, "go"), filepath.Join(dir, "done")
+		daemon := `: > ` + ready + `; until [ -e ` + goOn + ` ]; do sleep 0.02; done; : > ` + done
+		then := "exec " + testproc.UntilTheTestEnds
+		if ownExit {
+			then = "until [ -e " + ready + " ]; do sleep 0.02; done; exit 0"
+		}
+		cfg := &config.Config{}
+		cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
+		client := New(zap.NewNop(), nil, cfg)
+		client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
+			`sh -c 'setsid sh -c "`+daemon+`" >/dev/null 2>&1 </dev/null &'; `+then, nil,
+			models.SetupOptions{CommandType: string(utils.Native)}))
+		var ranAtStart, ranAtEnd, called bool
+		opts := models.RunOptions{BeforeStop: func(_ context.Context, running func() bool) {
+			called = true
+			ranAtStart = running()
+			if err := os.WriteFile(goOn, nil, 0o644); err != nil {
+				t.Error(err)
+				return
+			}
+			await(t, "the daemon ends on its own", func() bool { return !running() })
+			_, err := os.Stat(done)
+			ranAtEnd = err == nil
+		}}
+		ctx, cancel := context.WithCancelCause(context.Background())
+		result := make(chan models.AppError, 1)
+		go func() { result <- client.Run(ctx, opts) }()
+		await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+		if !ownExit {
+			cancel(models.ErrAppStoppedForSetEnd)
+		}
+		<-result
+		cancel(nil)
+		if !ownExit {
+			if called {
+				t.Fatal("a run keploy stopped at the set's end called BeforeStop")
+			}
+			continue
+		}
+		if !called || !ranAtStart {
+			t.Fatalf("BeforeStop called %v, running at its start %v; want it called while the daemon ran", called, ranAtStart)
+		}
+		if !ranAtEnd {
+			t.Fatal("the daemon was stopped before it made its last write")
 		}
 	}
 }
@@ -1859,9 +1960,11 @@ func TestTheReaperReapsUnderTheLockAReadOfTheChildrenHolds(t *testing.T) {
 }
 
 // zombieLeaderEnv makes this test binary, started with it set to a file's
-// path, a process whose main thread exits while another runs on, writing a
-// count to that file as it runs: its stat says Z, as ps says Zl, and it
-// runs.
+// path (memBeat), a process whose main thread exits while another runs on,
+// writing a count to that file as it runs: its stat says Z, as ps says Zl,
+// and it runs. It runs until it is killed or that path is gone, which ends
+// it with the test's process: ownerEnv cannot, as its own init sets that to
+// its own pid.
 const zombieLeaderEnv = "KEPLOY_TEST_MAIN_THREAD_EXITS"
 
 func init() {
@@ -1873,18 +1976,50 @@ func init() {
 	runtime.LockOSThread()
 	go func() {
 		for n := 1; ; n++ {
-			_ = os.WriteFile(beat, []byte(strconv.Itoa(n)), 0o644)
+			// Only a path that is gone ends it. Left to run, it would write
+			// into the file of whichever process next takes the test's pid
+			// and holds that descriptor. Any other error passes: one that
+			// ended it would pass for the stop having stopped it.
+			if err := os.WriteFile(beat, []byte(strconv.Itoa(n)), 0o644); errors.Is(err, fs.ErrNotExist) {
+				os.Exit(0)
+			}
 			time.Sleep(20 * time.Millisecond)
 		}
 	}()
+	// Until the other thread wrote its first count: it runs.
 	for {
-		if _, err := os.Stat(beat); err == nil {
+		if fi, err := os.Stat(beat); err == nil && fi.Size() > 0 {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
 	// The main thread alone exits (exit, not exit_group).
 	_, _, _ = syscall.RawSyscall(syscall.SYS_EXIT, 0, 0, 0)
+}
+
+// memBeat returns the path of an empty file in memory (a memfd) that only the
+// test holds, for a daemon zombieLeaderEnv starts to write its count to while
+// the test runs. It is opened through /proc, as heldPipe's pipe is, so its
+// path goes with the test's process, however that ends, and the daemon then
+// ends too (zombieLeaderEnv). A file on disk would not do: a write to it, on
+// a disk that others keep busy, can hold the daemon's one running thread in
+// the kernel (D, its writeback throttled in rq_qos_wait) for longer than the
+// stop's bound in these tests. A virtual disk beside two fsync writers
+// completed none of the 98 requests it had in flight for half a second. The
+// stop takes a disk that stands still for its bound for dead (utils.ExitClock)
+// and kills the daemon at twice the bound; where the disk stands still for a
+// bound more, it finds the kernel still holding the daemon, and says so,
+// rightly. A disk's stall is not what these tests are about.
+func memBeat(t *testing.T) string {
+	t.Helper()
+	fd, err := unix.MemfdCreate("beat", unix.MFD_CLOEXEC)
+	if err != nil {
+		t.Fatalf("memfd_create: %v", err)
+	}
+	f := os.NewFile(uintptr(fd), "beat")
+	// Open, so its path names it, until the test ends.
+	t.Cleanup(func() { _ = f.Close() })
+	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), fd)
 }
 
 // beatOf is the count a process zombieLeaderEnv started wrote last; -1 where
@@ -1928,7 +2063,7 @@ func TestAStopStopsADaemonWhoseMainThreadExited(t *testing.T) {
 	if err := os.WriteFile(bin, self, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	beat := filepath.Join(dir, "beat")
+	beat := memBeat(t)
 	// No collection (a stop of the world would wait for ever on the main
 	// thread, which holds a P it never gives back), and Ps to spare.
 	pid := daemonize(t, `exec env `+zombieLeaderEnv+`="$1" GOGC=off GOMAXPROCS=4 "$2" -test.run=^$`, beat, bin)

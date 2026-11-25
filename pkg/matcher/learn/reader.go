@@ -2,6 +2,7 @@ package learn
 
 import (
 	"math"
+	"slices"
 	"unicode"
 	"unicode/utf8"
 
@@ -67,13 +68,18 @@ const (
 	stretchShapeChanged
 )
 
-// wordStretch is the moved words between two kept words: the word index
-// range [from, to) of each run (empty in a run that has none there), and
-// the whole tokens that hold every moved word of it in both runs.
+// wordStretch is the moved words between two kept words (or the bounds of
+// an aligned instant, alignedCuts): the word index range [from, to) of each
+// run (empty in a run that has none there), the whole tokens that hold
+// every moved word of it in both runs, and whether it holds an instant the
+// alignment aligned with none of the other run (Loose): that instant stands
+// in one run alone, so the text changed shape, and the stretch's words pair
+// with none.
 type wordStretch struct {
 	Shape     stretchShape
 	Rec, Live [2]int
 	Tokens    []wholeToken
+	Loose     bool
 }
 
 // readWord is one changed word: its address (At, readLeaf's; the zero
@@ -181,6 +187,75 @@ func keptWords(rec, live []string) [][2]int {
 	return kept
 }
 
+// textCut is one cut of a text's word diff (alignedCuts): R's word r and
+// F's word l stay (kept), or, not kept, a bound before R's word r and F's
+// word l, the edge of an aligned instant, where a stretch ends. loose: the
+// stretch the cut ends holds an instant aligned with none (wordStretch).
+type textCut struct {
+	r, l        int
+	kept, loose bool
+}
+
+// alignedCuts are the cuts of the word diff of rw and lw, R's and F's
+// words (at rWords and lWords), the last one bounding the text's end, and
+// tied, the pairs of R's instant and F's (of rSpans and lSpans) read as one
+// instant across the runs (innerTied). Where both runs hold an instant, the
+// text is diffed first as units (textUnits, keptWords): each word no
+// instant holds, and each instant whole, every instant the same unit
+// whatever its text, so that an instant stays with the other run's at its
+// place. Each pair of instants aligned so is diffed word by word inside its
+// bounds alone: the diff never pairs a word of one instant with a word of
+// another, or with a word no instant holds ("07:06:07" to "07:07:09" keeps
+// its "07" inside the one instant; "08:06 08:08" to "08:08 08:09" pairs each
+// time with its own). Where only one run holds an instant there is none to
+// align it with, and the text is diffed word by word, as where neither does.
+func alignedCuts(rw, lw []string, rWords, lWords [][2]int, rSpans, lSpans []instant) (cuts []textCut, tied [][2]int) {
+	if len(rSpans) == 0 || len(lSpans) == 0 {
+		for _, k := range keptWords(rw, lw) {
+			cuts = append(cuts, textCut{r: k[0], l: k[1], kept: true})
+		}
+		return append(cuts, textCut{r: len(rw), l: len(lw)}), nil
+	}
+	ru, lu := textUnits(rWords, rSpans), textUnits(lWords, lSpans)
+	keys := func(words []string, us []textUnit) []string {
+		out := make([]string, len(us))
+		for i, u := range us {
+			// No word holds a NUL byte: every instant is this one unit.
+			if out[i] = words[u.from]; u.span >= 0 {
+				out[i] = "\x00"
+			}
+		}
+		return out
+	}
+	instantIn := func(us []textUnit, from, to int) bool {
+		return slices.ContainsFunc(us[from:to], func(u textUnit) bool { return u.span >= 0 })
+	}
+	pr, pl := 0, 0
+	for _, k := range append(keptWords(keys(rw, ru), keys(lw, lu)), [2]int{len(ru), len(lu)}) {
+		loose := instantIn(ru, pr, k[0]) || instantIn(lu, pl, k[1])
+		pr, pl = k[0]+1, k[1]+1
+		if k[0] == len(ru) {
+			cuts = append(cuts, textCut{r: len(rw), l: len(lw), loose: loose})
+			break
+		}
+		r, l := ru[k[0]], lu[k[1]]
+		if r.span < 0 {
+			cuts = append(cuts, textCut{r: r.from, l: l.from, kept: true, loose: loose})
+			continue
+		}
+		cuts = append(cuts, textCut{r: r.from, l: l.from, loose: loose})
+		inner := keptWords(rw[r.from:r.to], lw[l.from:l.to])
+		for _, p := range inner {
+			cuts = append(cuts, textCut{r: r.from + p[0], l: l.from + p[1], kept: true})
+		}
+		cuts = append(cuts, textCut{r: r.to, l: l.to})
+		if innerTied(rw[r.from:r.to], lw[l.from:l.to], inner) {
+			tied = append(tied, [2]int{r.span, l.span})
+		}
+	}
+	return cuts, tied
+}
+
 // readText reads a drifted text (rec, live) word by word (the reader's
 // rules above), with no cache.
 func readText(rec, live string) textReading { return readTextIn(nil, rec, live) }
@@ -196,24 +271,28 @@ func readTextIn(dc *DriftCache, rec, live string) textReading {
 	rSpans, lSpans := dc.spansOf(rec), dc.spansOf(live)
 	rTok := tokenSpans(rec, rSpans)
 	lTok := tokenSpans(live, lSpans)
-	kept := keptWords(rw, lw)
+	cuts, tied := alignedCuts(rw, lw, rd.RecWords, rd.LiveWords, rSpans, lSpans)
 	paired := make([]int, len(rw))
 	for i := range paired {
 		paired[i] = -1
 	}
-	for _, k := range kept {
-		paired[k[0]] = k[1]
+	for _, c := range cuts {
+		if c.kept {
+			paired[c.r] = c.l
+		}
 	}
-	prev := [2]int{-1, -1}
-	for _, k := range append(kept[:len(kept):len(kept)], [2]int{len(rw), len(lw)}) {
-		st := wordStretch{Rec: [2]int{prev[0] + 1, k[0]}, Live: [2]int{prev[1] + 1, k[1]}}
-		prev = k
+	pr, pl := 0, 0
+	for _, c := range cuts {
+		st := wordStretch{Rec: [2]int{pr, c.r}, Live: [2]int{pl, c.l}, Loose: c.loose}
+		if pr, pl = c.r, c.l; c.kept {
+			pr, pl = c.r+1, c.l+1
+		}
 		nr, nl := st.Rec[1]-st.Rec[0], st.Live[1]-st.Live[0]
 		if nr == 0 && nl == 0 {
 			continue
 		}
 		switch {
-		case nr == nl:
+		case nr == nl && !st.Loose:
 			st.Shape = stretchPaired
 		case nr == 0 || nl == 0:
 			st.Shape = stretchShapeChanged
@@ -246,21 +325,25 @@ func readTextIn(dc *DriftCache, rec, live string) textReading {
 		}
 	}
 	rd.readSeparators(paired, rTok, lTok)
-	rd.readInstants(rSpans, lSpans)
+	rd.readInstants(rSpans, lSpans, tied)
 	rd.readShape()
 	rd.readEncoded(dc, rTok, lTok)
 	return rd
 }
 
-// readShape marks the text changed in shape where a stretch only one run
-// has holds a word that no instant paired across the runs holds. A word
-// such an instant holds is one of the instant's, which is read whole and
-// judged by its moment (a minute crossed, 08:59:00 to 09:00:01, leaves the
-// "00" of R's seconds kept with F's minutes; a fraction dropped), not a
-// word the text gained or lost.
+// readShape marks the text changed in shape where a stretch holds an
+// instant the alignment aligned with none (Loose), or where a stretch only
+// one run has holds a word that no instant paired across the runs holds. A
+// word such an instant holds is one of the instant's, which is read whole
+// and judged by its moment (a minute crossed, 08:59:00 to 09:00:01, leaves
+// the "00" of R's seconds kept with F's minutes inside the instant; a
+// fraction dropped), not a word the text gained or lost.
 func (rd *textReading) readShape() {
 	for _, w := range rd.Words {
-		if rd.Stretches[w.Stretch].Shape != stretchShapeChanged {
+		if st := rd.Stretches[w.Stretch]; st.Loose {
+			rd.ChangedShape = true
+			return
+		} else if st.Shape != stretchShapeChanged {
 			continue
 		}
 		if iw := w.Instant; iw == nil || iw.RecAt[0] < 0 || iw.LiveAt[0] < 0 {

@@ -106,10 +106,11 @@ type offsetView struct {
 // as one of its readings hands it: a payload (x: one F served before the call
 // or recorded before it, or an exchange's served leaf by leaf) or one F gave
 // earlier in the set (g); key names its recording (its mock and when its
-// request was recorded), as the readings of one recording are one. places
-// and kept are what offsetIndex.take read of it.
+// request was recorded: offsetKeyOf's bytes, in the call's block of keys,
+// appendOffsetKey), as the readings of one recording are one. places and
+// kept are what offsetIndex.take read of it.
 type offsetSource struct {
-	key         string
+	key         []byte
 	x           *Raw
 	g           *GivenPlaces
 	given       bool
@@ -118,7 +119,39 @@ type offsetSource struct {
 	kept, read  bool
 }
 
-func offsetKeyOf(mock string, at time.Time) string { return mock + "\x00" + at.String() }
+func offsetKeyOf(mock string, at time.Time) string { return string(appendOffsetKey(nil, mock, at)) }
+
+// appendOffsetKey appends offsetKeyOf(mock, at) to b: the mock, a zero byte
+// and at as at.String() writes it, which is at in String's layout, then its
+// monotonic reading where it has one. A call names each of its recordings
+// so, into one block (offsetKeys), where a string per recording per call was
+// an allocation for each recording of the set: the index reads a key's
+// bytes, and copies one only where it adds the recording (take).
+func appendOffsetKey(b []byte, mock string, at time.Time) []byte {
+	b = append(append(b, mock...), 0)
+	if at != at.Round(0) { // a monotonic reading, which String adds and the layout does not
+		return append(b, at.String()...)
+	}
+	return at.AppendFormat(b, "2006-01-02 15:04:05.999999999 -0700 MST")
+}
+
+// offsetKeys is a call's block of its recordings' keys (appendOffsetKey),
+// with room for n of them: each key is the block's part it wrote, which no
+// later key writes over (a grown block is a new one).
+type offsetKeys struct{ b []byte }
+
+func newOffsetKeys(n int) *offsetKeys { return &offsetKeys{b: make([]byte, 0, n*offsetKeyRoom)} }
+
+// offsetKeyRoom is the room a key takes in its call's block, a mock's name
+// of a dozen letters and an instant in String's layout.
+const offsetKeyRoom = 64
+
+// of is mock and at's key, written into the block.
+func (k *offsetKeys) of(mock string, at time.Time) []byte {
+	n := len(k.b)
+	k.b = appendOffsetKey(k.b, mock, at)
+	return k.b[n:len(k.b):len(k.b)]
+}
 
 // readPlaces reads s's places, and whether the set keeps them (setPlaces,
 // Order.GivenPlaces), once.
@@ -172,7 +205,7 @@ func (ix *offsetIndex) take(dc *DriftCache, srcs []offsetSource) (offsetSnap, []
 	ix.mu.Lock()
 	var missing []int
 	for i := range srcs {
-		if r, ok := ix.of[srcs[i].key]; ok {
+		if r, ok := ix.of[string(srcs[i].key)]; ok {
 			recs[i] = r
 			continue
 		}
@@ -190,7 +223,7 @@ func (ix *offsetIndex) take(dc *DriftCache, srcs []offsetSource) (offsetSnap, []
 	added := map[offsetKey][]offsetRef{}
 	for _, i := range missing {
 		s := &srcs[i]
-		if r, found := ix.of[s.key]; found {
+		if r, found := ix.of[string(s.key)]; found {
 			recs[i] = r
 			continue
 		}
@@ -210,7 +243,7 @@ func (ix *offsetIndex) take(dc *DriftCache, srcs []offsetSource) (offsetSnap, []
 			rec.mock, rec.call, rec.at = s.x.mock, s.x.call, s.x.at
 		}
 		ix.recs = append(ix.recs, rec)
-		ix.of[s.key] = r
+		ix.of[string(s.key)] = r
 		ix.bytes += size
 		ix.reads++
 		recs[i] = r

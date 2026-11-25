@@ -6,79 +6,50 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
 // valueRedacted replaces sensitive/obfuscated values in the rendered requests.
-const valueRedacted = "(redacted)"
-
-// sensitiveKeyTokens marks header / query / body key names whose values must
-// never be printed into a report (they commonly carry credentials).
-var sensitiveKeyTokens = []string{"auth", "key", "token", "secret", "cookie", "signature", "credential", "password", "passwd", "pwd"}
+const valueRedacted = mismatch.ValueRedacted
 
 // isSensitiveHeader reports whether a header, query-param, or JSON body key
 // looks like it carries a credential and should be redacted.
 func isSensitiveHeader(name string) bool {
-	ln := strings.ToLower(name)
-	for _, t := range sensitiveKeyTokens {
-		if strings.Contains(ln, t) {
-			return true
-		}
-	}
-	return false
-}
-
-// secretValuePatterns matches credential-SHAPED values, independent of the key
-// name or the mock's noise config — the value-shape backstop behind the
-// key-name denylist and the noise regexes. They are deliberately
-// prefix/scheme-based (not raw Shannon entropy): a generic "high-entropy"
-// rule would also redact UUIDs, content hashes and idempotency keys, which are
-// frequently the exact field that drifted and caused the mismatch — redacting
-// those would gut the diagnostic value of the diff. Each pattern matches a
-// credential FORM with effectively no legitimate non-secret collision.
-var secretValuePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),              // Authorization schemes
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}`), // JWT (header.payload.sig)
-	regexp.MustCompile(`-----BEGIN[A-Z ]*PRIVATE KEY-----`),                            // PEM private key
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`),                                // AWS access key id
-	regexp.MustCompile(`\bgh[posru]_[A-Za-z0-9]{20,}\b`),                               // GitHub token
-	regexp.MustCompile(`\bkep_[A-Za-z0-9_-]{20,}\b`),                                   // keploy PAT
-	regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b`),                        // Stripe secret key
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`),                             // Slack token
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),                                 // GitLab PAT
-	regexp.MustCompile(`\bAIza[A-Za-z0-9_-]{35}\b`),                                    // Google API key
+	return mismatch.IsSensitiveKey(name)
 }
 
 // looksLikeSecretValue reports whether a single header / query-param /
 // JSON-scalar value is credential-shaped and must be redacted even when its key
 // isn't on the denylist and the mock's noise config didn't cover it.
 func looksLikeSecretValue(v string) bool {
-	s := strings.TrimSpace(v)
-	if len(s) < 8 {
-		return false
-	}
-	for _, re := range secretValuePatterns {
-		if re.MatchString(s) {
-			return true
-		}
-	}
-	return false
+	return mismatch.LooksLikeSecretValue(v)
 }
 
 // scrubSecretsInText replaces credential-shaped tokens embedded in free-form
 // (opaque, non-JSON / non-form) body text with the redaction marker, leaving
 // the surrounding structure intact so the diff stays useful.
 func scrubSecretsInText(s string) string {
-	for _, re := range secretValuePatterns {
-		s = re.ReplaceAllString(s, valueRedacted)
-	}
-	return s
+	return mismatch.ScrubSecretsInText(s)
+}
+
+// shouldRedactValue reports whether a bare scalar value matches one of the
+// mock's noise patterns or is credential-shaped.
+func (p redactedPlaces) shouldRedactValue(raw string) bool {
+	return p.noisy(raw) || mismatch.LooksLikeSecretValue(raw)
+}
+
+// redactDiffValue redacts a single Expected or Actual field-diff side. For
+// type_changed diffs rendered as "<type>: <value>", it inspects the bare value
+// so obfuscator patterns anchored on the bare value (^...$) and secret-value
+// backstops match cleanly without touching the type prefix.
+func redactDiffValue(v string, isTypeChanged, sensitive bool, places redactedPlaces) string {
+	return mismatch.RedactDiffValue(v, isTypeChanged, sensitive, places.shouldRedactValue)
 }
 
 // redactFieldDiffs redacts the Expected/Actual values of structured field diffs
@@ -95,12 +66,9 @@ func redactFieldDiffs(diffs []models.MockFieldDiff, places redactedPlaces, liveP
 	for i := range diffs {
 		places.redactDiff(&diffs[i], livePath)
 		sensitive := isSensitiveHeader(diffs[i].Path)
-		if sensitive || places.noisy(diffs[i].Expected) || looksLikeSecretValue(diffs[i].Expected) {
-			diffs[i].Expected = valueRedacted
-		}
-		if sensitive || places.noisy(diffs[i].Actual) || looksLikeSecretValue(diffs[i].Actual) {
-			diffs[i].Actual = valueRedacted
-		}
+		isTypeChanged := diffs[i].Kind == models.DiffKindTypeChanged
+		diffs[i].Expected = redactDiffValue(diffs[i].Expected, isTypeChanged, sensitive, places)
+		diffs[i].Actual = redactDiffValue(diffs[i].Actual, isTypeChanged, sensitive, places)
 	}
 }
 
@@ -134,7 +102,7 @@ func mockQueryString(mockReq *models.HTTPReq) string {
 	if len(mockReq.URLParams) > 0 {
 		return urlParamsQuery(mockReq.URLParams)
 	}
-	if parsed, err := url.Parse(mockReq.URL); err == nil {
+	if parsed, err := parseRecordedURL(mockReq.URL); err == nil {
 		return parsed.RawQuery
 	}
 	return ""
@@ -157,7 +125,7 @@ func renderLiveRequest(request *http.Request, body []byte, places redactedPlaces
 // mockURLPath extracts just the path from a mock's URL (mocks store full URL
 // strings); falls back to the raw string when it doesn't parse.
 func mockURLPath(mockURL string) string {
-	if parsed, err := url.Parse(mockURL); err == nil {
+	if parsed, err := parseRecordedURL(mockURL); err == nil {
 		return parsed.Path
 	}
 	return mockURL

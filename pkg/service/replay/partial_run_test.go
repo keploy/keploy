@@ -111,6 +111,14 @@ func TestRewindConsumedForRetryCycleMarksAgentHistoryStale(t *testing.T) {
 		t.Fatal("the finished cycle's consumption was not folded into the across-cycles record; the " +
 			"post-loop telemetry and PersistMockNoise readers would be incomplete")
 	}
+	// Each rewind is counted on the history it hands back, which every
+	// filter of the cycle carries to the agent (MockFilterParams.ConsumedRewinds).
+	if got := next.Rewinds(); got != 1 {
+		t.Fatalf("the rewound history counts %d rewinds, want 1", got)
+	}
+	if got := r.rewindConsumedForRetryCycle(next, baseline, across).Rewinds(); got != 2 {
+		t.Fatalf("a second cycle's history counts %d rewinds, want 2", got)
+	}
 }
 
 // A run that stopped early for a reason that ALREADY has an honest diagnosis
@@ -195,7 +203,7 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 			t.Fatal("the rewind did not disqualify the agent's history; cycle 2 would be filtered " +
 				"against cycle 1 and fail with match_phase=no_mocks")
 		}
-		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
+		if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}); err != nil {
 			t.Fatalf("MockOutgoing: %v", err)
 		}
 		if r.agentConsumedHistoryUnusable() {
@@ -208,7 +216,7 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{}}
 		r.agentHistoryIncompleteForRun.Store(true)
 
-		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
+		if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}); err != nil {
 			t.Fatalf("MockOutgoing: %v", err)
 		}
 		if !r.agentConsumedHistoryUnusable() {
@@ -221,7 +229,7 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{err: errors.New("agent refused")}}
 		r.agentHistoryStaleForSet.Store(true)
 
-		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err == nil {
+		if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}); err == nil {
 			t.Fatal("expected the error through")
 		}
 		if !r.agentConsumedHistoryUnusable() {
@@ -251,7 +259,7 @@ func (f *latchInstr) MockOutgoing(_ context.Context, opts models.OutgoingOptions
 func TestMockOutgoingForTestSetSaysItStartsATestSet(t *testing.T) {
 	f := &latchInstr{}
 	r := &Replayer{logger: zap.NewNop(), instrumentation: f}
-	if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{SQLDelay: time.Second}); err != nil {
+	if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{SQLDelay: time.Second}); err != nil {
 		t.Fatalf("MockOutgoing: %v", err)
 	}
 	if !f.opts.StartsTestSet || f.opts.SQLDelay != time.Second {

@@ -438,3 +438,34 @@ func TestTheTextThatPlacesAWord(t *testing.T) {
 		}
 	}
 }
+
+// TestPctOffsetsAreSizedUpFront: each byte text percent-decodes to has the
+// offset it starts at, then len(text), in a slice sized to len(text)+1 up
+// front (its most), so no append grows it; a '%' without two hex digits
+// after it gives nil.
+func TestPctOffsetsAreSizedUpFront(t *testing.T) {
+	for _, c := range []struct {
+		text string
+		want []int
+	}{
+		{"", []int{0}},
+		{"a", []int{0, 1}},
+		{"abcd", []int{0, 1, 2, 3, 4}},
+		{"%41", []int{0, 3}},
+		{"a%41b", []int{0, 1, 4, 5}},
+		{"%2f%2F", []int{0, 3, 6}},
+		{"%", nil},
+		{"a%4", nil},
+		{"%4g", nil},
+		{"%41%", nil},
+	} {
+		got := pctOffsets(c.text)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("pctOffsets(%q) = %v; want %v", c.text, got, c.want)
+			continue
+		}
+		if got != nil && cap(got) != len(c.text)+1 {
+			t.Errorf("pctOffsets(%q): the slice holds %d; want %d, sized up front", c.text, cap(got), len(c.text)+1)
+		}
+	}
+}

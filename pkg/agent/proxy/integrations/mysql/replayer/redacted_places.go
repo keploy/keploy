@@ -12,12 +12,11 @@ import (
 	"time"
 	"unsafe"
 
-	lru "github.com/hashicorp/golang-lru/v2"
-
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	// vitesslog must load before any vitess code logs: see that package.
 	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"vitess.io/vitess/go/vt/sqlparser"
@@ -518,7 +517,7 @@ func (l sqlLiterals) bytes() int {
 // pool's places are read for every command a debug line or a miss shows,
 // and each redacted recording the cache keeps is read once, not once per
 // command. Its values are shared: read them, never change them.
-var sqlLiteralsCache = func() *lru.TwoQueueCache[string, sqlLiteralsRead] {
+var sqlLiteralsCache = func() *lru.TwoQueue[string, sqlLiteralsRead] {
 	c, err := lru.New2Q[string, sqlLiteralsRead](queryShapeCacheSize)
 	if err != nil {
 		// Unreachable: New2Q only errors on a non-positive size.
@@ -884,22 +883,16 @@ func (w *windowPlaces) released(db integrations.MockMemDb, gen uint64, start tim
 }
 
 // everyPlace redacts a live command whole: its statement, every bound
-// value and every streamed chunk. A log line and a miss report read it when
-// the pool's places cannot be read.
+// value and every streamed chunk. A miss report reads it when the pool's
+// places cannot be read.
 var everyPlace = redactedPlaces{statement: true, whole: true, everyParam: true, data: true}
 
-// logPlaces reads the places a log line shows the live statement by
-// (poolPlaces), once per command, and shows each text of the statement by
-// them once too. A command's lines show its statement for each candidate
-// they compare it with, as written or as its identity (sqlStatementIdentity),
-// and a statement the caches do not keep (memoKeeps) would be read again for
-// each line. The texts a command's lines show are its own: a few at most.
+// logPlaces reads the places a miss's report shows the live command by
+// (poolPlaces), once per command.
 type logPlaces struct {
 	read func() redactedPlaces
 	// held are the places read, once read.
 	held *redactedPlaces
-	// shown is each text live showed, by the text.
-	shown map[string]string
 }
 
 // places are the places r reads, read once; every place when there is no
@@ -913,24 +906,4 @@ func (r *logPlaces) places() redactedPlaces {
 		r.held = &p
 	}
 	return *r.held
-}
-
-// live is the live statement sql as a log line shows it: by the places r
-// reads, or whole redacted when there is no r. No statement reads none.
-func (r *logPlaces) live(sql string) string {
-	if sql == "" {
-		return sql
-	}
-	if r == nil {
-		return everyPlace.liveStatement(sql)
-	}
-	shown, ok := r.shown[sql]
-	if !ok {
-		shown = r.places().liveStatement(sql)
-		if r.shown == nil {
-			r.shown = map[string]string{}
-		}
-		r.shown[sql] = shown
-	}
-	return shown
 }

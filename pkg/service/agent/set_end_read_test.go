@@ -98,6 +98,8 @@ func (p settlingSetEndProxy) InFlightState(answers bool) (int, []string) {
 	return p.settleProxy.InFlightState(answers)
 }
 
+func (p settlingSetEndProxy) EndRunSet() { *p.did = append(*p.did, "set end") }
+
 func (p settlingSetEndProxy) FileAtSetEnd(context.Context) error {
 	*p.did = append(*p.did, "file")
 	return nil
@@ -110,7 +112,9 @@ func (p settlingSetEndProxy) GetMockErrors(context.Context) ([]models.UnmatchedC
 
 // Under the switch a replay's set end read settles the application's calls
 // before the parsers file what they hold: a call held while the read settles
-// is filed with the rest, so the read takes it.
+// is filed with the rest, so the read takes it. Before it settles, it ends
+// the run's set: an answer held for a later place is written, and the
+// settle waits for the calls it makes.
 func TestGetMockErrors_ASetEndReadFilesAfterTheSettle(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	a, h, p := settleAgent()
@@ -123,7 +127,26 @@ func TestGetMockErrors_ASetEndReadFilesAfterTheSettle(t *testing.T) {
 	if _, err := a.GetMockErrors(models.WithSetEndRead(context.Background())); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"settle", "file", "read"}; !slices.Equal(did, want) {
+	if want := []string{"set end", "settle", "file", "read"}; !slices.Equal(did, want) {
+		t.Fatalf("did %v, want %v", did, want)
+	}
+}
+
+// A test's read under the switch settles and reads, and does not end the
+// set: an answer held for a later test of the set still waits.
+func TestGetMockErrors_ATestsReadDoesNotEndTheSet(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a, h, p := settleAgent()
+	a.config = config.New()
+	a.config.Agent.Mode = models.MODE_TEST
+	h.established = 1
+	p.set(1, 0)
+	var did []string
+	a.Proxy = settlingSetEndProxy{settleProxy: p, once: &sync.Once{}, did: &did}
+	if _, err := a.GetMockErrors(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"settle", "read"}; !slices.Equal(did, want) {
 		t.Fatalf("did %v, want %v", did, want)
 	}
 }
