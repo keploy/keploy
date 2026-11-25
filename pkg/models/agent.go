@@ -1541,7 +1541,13 @@ type NotRecordedCall struct {
 // compose, which can drop its last lines as the stack stops: the client tears
 // the stack down once its drains end at the markers.
 type StreamEndSummary struct {
-	TestCasesSent       int `json:"tcs_sent_to_cli"`
+	TestCasesSent int `json:"tcs_sent_to_cli"`
+	// TestCasesSuppressed counts test cases suppressed on the stream
+	// (pressure/orphan overlap, capacity-dropped mock, or inverted
+	// response-before-request timestamps) plus capture-level inverted-window
+	// drops (InvertedResponseBeforeRequest). Other capture-level skips
+	// (such as over-size-limit, pressure-paused, and left-out-in-flight) are
+	// reported in their own fields rather than here.
 	TestCasesSuppressed int `json:"tcs_suppressed_total"`
 	// LeftOutInFlight: test cases left out because each stayed in flight
 	// while mocks it may have made had to be let go.
@@ -1576,7 +1582,18 @@ type StreamEndSummary struct {
 	// recorded as test cases because each was over keploy's size limit for
 	// a test case.
 	NotRecordedOverSizeLimit OverSizeSkipSummary `json:"not_recorded_over_size_limit,omitzero"`
+	// InvertedResponseBeforeRequest: test cases whose response timestamp
+	// preceded their request timestamp and were left out fail-closed.
+	InvertedResponseBeforeRequest uint64 `json:"tcs_response_dated_before_request,omitempty"`
 }
+
+// InvertedLeftOutSaid is what the agent's summary and its client say of test
+// cases left out fail-closed because their response timestamp preceded their
+// request timestamp.
+const InvertedLeftOutSaid = "the keploy agent left some test cases out fail-closed: their response timestamp preceded their request timestamp"
+
+// InvertedLeftOutNextStep is what the user can do when InvertedLeftOutSaid fires.
+const InvertedLeftOutNextStep = "affected test cases were left out rather than saved without guaranteed mocks; re-run with --debug to inspect per-test timestamps, protocol, and ingress clock origin, and check agent logs for capture ring-buffer drops or stream desyncs"
 
 // OverSizeLimitSaid is what the agent's summary and its client say of the
 // requests a session did not record as test cases because each was over

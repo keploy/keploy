@@ -669,6 +669,11 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 			zap.Strings("calls_most", o.Calls),
 			zap.String("next_step", models.OverSizeLimitNextStep))
 	}
+	if s.InvertedResponseBeforeRequest > 0 {
+		a.logger.Warn(models.InvertedLeftOutSaid,
+			zap.Uint64("test_cases", s.InvertedResponseBeforeRequest),
+			zap.String("next_step", models.InvertedLeftOutNextStep))
+	}
 	if s.MassSuppressed {
 		a.logger.Warn("the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
 			zap.Int("suppressed", s.TestCasesSuppressed), zap.Int("recorded", s.TestCasesSent))

@@ -375,6 +375,36 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	// case waits to be handed on.
 	decodes.giveBack()
 
+	// Fail closed when the captured response timestamp precedes the request
+	// timestamp: keeping a test case without guaranteed mocks breaks replay.
+	if models.IsInvertedWindow(reqTimeTest, resTimeTest) {
+		mgr := syncMock.FromContextOrGlobal(ctx)
+		syncMock.WindowFromContext(ctx).Close()
+		// Name the dropped request by its method and normalized path shape
+		// (never the client-supplied Keploy-Test-Name header) to avoid
+		// logging raw HTTP-sourced input (see the CodeQL note below).
+		invName := req.Method + " " + utils.URLPathShape(req.URL)
+		clock := WindowClockFromContext(ctx)
+		mgr.NoteInvertedTestCaseWithMeta(invName, reqTimeTest, resTimeTest, syncMock.InvertedMeta{
+			Protocol: "http",
+			Ingress:  "hooks.Capture",
+			Clock:    clock,
+		})
+		// Still sweep stale mocks and flush reusable session/connection mocks
+		// over an empty window so inverted bursts cannot grow m.buffer without
+		// bound.
+		mgr.SweepStaleMocks()
+		logger.Debug("Test case left out fail-closed: response timestamp precedes request timestamp",
+			zap.String("test", invName),
+			zap.String("method", req.Method),
+			zap.String("protocol", "http"),
+			zap.String("ingress", "hooks.Capture"),
+			zap.String("clock", clock),
+			zap.Time("req_ts", reqTimeTest),
+			zap.Time("resp_ts", resTimeTest))
+		return
+	}
+
 	if synchronous {
 		// The request's open window (the ingress opened it at the request's
 		// first byte: syncMock.OpenWindow) kept every mock it may own from the
@@ -767,6 +797,38 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	}
 
 	reqTime, resTime := http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp
+	// The call's manager: the one its context carries, as Capture's, so an
+	// HTTP request's and a gRPC call's names never share one, and the call's
+	// mocks resolve on the manager its window is on.
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	win := syncMock.WindowFromContext(ctx)
+
+	// Fail closed BEFORE GRPCCaptureHook (static dedup) and NextTestID so an
+	// inverted first call never marks a schema as seen or burns a test ID.
+	if models.IsInvertedWindow(reqTime, resTime) {
+		win.Close()
+		u := &url.URL{Path: http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]}
+		invName := utils.URLPathShape(u)
+		if invName == "" {
+			invName = "grpc"
+		}
+		clock := WindowClockFromContext(ctx)
+		mgr.NoteInvertedTestCaseWithMeta(invName, reqTime, resTime, syncMock.InvertedMeta{
+			Protocol: "grpc",
+			Ingress:  "hooks.CaptureGRPC",
+			Clock:    clock,
+		})
+		mgr.SweepStaleMocks()
+		logger.Debug("gRPC test case left out fail-closed: response timestamp precedes request timestamp",
+			zap.String("test", invName),
+			zap.String("protocol", "grpc"),
+			zap.String("ingress", "hooks.CaptureGRPC"),
+			zap.String("clock", clock),
+			zap.Time("req_ts", reqTime),
+			zap.Time("resp_ts", resTime))
+		return
+	}
+
 	// Read whatever its case: a real call sends it lowercase, as HTTP/2 does
 	// every header name (GrpcHeaders.Ordinary).
 	testName := http2Stream.GRPCReq.Headers.Ordinary("Keploy-Test-Name")
@@ -776,11 +838,6 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
 	}
 
-	// The call's manager: the one its context carries, as Capture's, so an
-	// HTTP request's and a gRPC call's names never share one, and the call's
-	// mocks resolve on the manager its window is on.
-	mgr := syncMock.FromContextOrGlobal(ctx)
-	win := syncMock.WindowFromContext(ctx)
 	if synchronous {
 		// The name its mocks are mapped to and its test case's (below), as an
 		// HTTP request's is (Capture): the recording joins a mapping to its
