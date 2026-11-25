@@ -1187,6 +1187,10 @@ func refuseEngineCommand(cmd *cobra.Command, command string) error {
 		}
 		return nil
 	}
+	if _, rest, err := utils.LeadingEnvAssignments(command); errors.Is(err, utils.ErrUnsupportedInlineEnvExpansion) && utils.FindDockerCmd(rest) == utils.DockerCompose {
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return err
+	}
 	name, ok := engine.Invocation(command)
 	if !ok {
 		return nil

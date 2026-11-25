@@ -161,9 +161,10 @@ jobs:
   # A compose project whose names are variables, as the parse-server sample
   # writes them (name:, container_name, ports and the network's name each
   # ${VAR:-default}): `keploy record --container-name` finds the app by the
-  # name compose gives its container after its own interpolation, from the
-  # defaults, from the project's .env, and from the project's name for a
-  # service with no container_name.
+  # name compose gives its container after its own interpolation, across all 10
+  # legs (defaults, .env, lowercased project name, --compatibility, .env and
+  # inline COMPOSE_COMPATIBILITY, inline APP_CONTAINER, single- and multi-file
+  # inline COMPOSE_FILE, and a compose file in a subdirectory).
   compose_env_container_name_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}

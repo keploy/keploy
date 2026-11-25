@@ -111,6 +111,9 @@ func TestComposeChildOutputProjectIsTheOneComposeMakes(t *testing.T) {
 		{name: "no name: the directory's, normalized", doc: "services:\n  app:\n    image: x\n", want: "mychild"},
 		{name: "--project-directory names the directory", doc: "services:\n  app:\n    image: x\n",
 			files: map[string]string{"Sub_Dir/keep": ""}, scope: ComposeScope{ProjectDir: "Sub_Dir"}, want: "sub_dir"},
+		{name: "inline PARSE_PROJECT beats exported env", doc: parseShape,
+			env:   map[string]string{"PARSE_PROJECT": "fromenv"},
+			scope: ComposeScope{Env: map[string]string{"PARSE_PROJECT": "Inline.Proj"}}, want: "inlineproj"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o, err := childProject(t, tc.doc, tc.files, tc.env, tc.scope)
@@ -148,6 +151,13 @@ func TestComposeChildOutputKeepsALineAgainstTheResolvedService(t *testing.T) {
 			printed: "worker_1", service: "worker"},
 		{name: "COMPOSE_COMPATIBILITY false", env: map[string]string{composeCompatibilityEnv: "false"},
 			printed: "worker-1", service: "worker"},
+		{name: "a replica under inline COMPOSE_COMPATIBILITY=true",
+			scope:   ComposeScope{Env: map[string]string{composeCompatibilityEnv: "true"}},
+			printed: "worker_1", service: "worker"},
+		{name: "a container_name from inline APP_CONTAINER beating exported env",
+			env:     map[string]string{"APP_CONTAINER": "from-env"},
+			scope:   ComposeScope{Env: map[string]string{"APP_CONTAINER": "from-inline"}},
+			printed: "from-inline", service: "parse-server"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o, err := childProject(t, doc, tc.files, tc.env, tc.scope)

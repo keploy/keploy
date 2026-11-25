@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/loader"
+	composetypes "github.com/compose-spec/compose-go/v2/types"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -242,6 +245,85 @@ func TestComposeIdentity_ContainerNameFromAVariable(t *testing.T) {
 			files: map[string]string{"compose.yml": parseServerShape, "home.env": "APP_CONTAINER=from-home\n"},
 			env:   map[string]string{"HOME": "<dir>"}, scope: ComposeScope{EnvFiles: []string{"~/home.env"}},
 			container: "from-home", wantService: "parse-server"},
+		// Inline shell assignments from the compose command (scope.Env).
+		{name: "inline COMPOSE_COMPATIBILITY=true: <project>_<service>_<number>",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			scope:     ComposeScope{Env: map[string]string{composeCompatibilityEnv: "true"}},
+			container: "proj_app_1", wantService: "app"},
+		{name: "inline COMPOSE_COMPATIBILITY=true: refuses <project>-<service>-<number>",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			scope:     ComposeScope{Env: map[string]string{composeCompatibilityEnv: "true"}},
+			container: "proj-app-1", wantErr: `app: "proj_app_1"`},
+		{name: "inline COMPOSE_COMPATIBILITY=false beats exported true",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			env:       map[string]string{composeCompatibilityEnv: "true"},
+			scope:     ComposeScope{Env: map[string]string{composeCompatibilityEnv: "false"}},
+			container: "proj-app-1", wantService: "app"},
+		{name: "inline APP_CONTAINER set: matches the inline value",
+			files:     map[string]string{"compose.yml": parseServerShape},
+			scope:     ComposeScope{Env: map[string]string{"APP_CONTAINER": "from-inline"}},
+			container: "from-inline", wantService: "parse-server"},
+		{name: "inline APP_CONTAINER set: default no longer names it",
+			files:     map[string]string{"compose.yml": parseServerShape},
+			scope:     ComposeScope{Env: map[string]string{"APP_CONTAINER": "from-inline"}},
+			container: "parse-server-mongo-app", wantErr: `parse-server: "from-inline"`},
+		{name: "inline unrelated var: APP_CONTAINER keeps its default",
+			files:     map[string]string{"compose.yml": parseServerShape},
+			scope:     ComposeScope{Env: map[string]string{"OTHER": "1"}},
+			container: "parse-server-mongo-app", wantService: "parse-server"},
+		{name: "inline APP_CONTAINER beats exported env and .env",
+			files:     map[string]string{"compose.yml": parseServerShape, ".env": "APP_CONTAINER=from-dotenv\n"},
+			env:       map[string]string{"APP_CONTAINER": "from-env"},
+			scope:     ComposeScope{Env: map[string]string{"APP_CONTAINER": "from-inline"}},
+			container: "from-inline", wantService: "parse-server"},
+		{name: "inline empty APP_CONTAINER beats exported env for ${VAR-default}",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n    container_name: ${APP_CONTAINER-dflt}\n"},
+			env:       map[string]string{"APP_CONTAINER": "from-env"},
+			scope:     ComposeScope{Env: map[string]string{"APP_CONTAINER": ""}},
+			container: "proj-app-1", wantService: "app"},
+		{name: "inline COMPOSE_PROJECT_NAME beats exported env",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			env:       map[string]string{composeProjectNameEnv: "from-env"},
+			scope:     ComposeScope{Env: map[string]string{composeProjectNameEnv: "from-inline"}},
+			container: "from-inline-app-1", wantService: "app"},
+		{name: "inline COMPOSE_ENV_FILES replaces .env",
+			files:     map[string]string{"compose.yml": parseServerShape, ".env": "APP_CONTAINER=from-dotenv\n", "ci.env": "APP_CONTAINER=from-inline-env-file\n"},
+			scope:     ComposeScope{Env: map[string]string{composeEnvFilesEnv: "ci.env"}},
+			container: "from-inline-env-file", wantService: "parse-server"},
+		{name: "inline COMPOSE_ENV_FILES beats exported COMPOSE_ENV_FILES",
+			files:     map[string]string{"compose.yml": parseServerShape, "other.env": "APP_CONTAINER=from-other\n", "ci.env": "APP_CONTAINER=from-inline-env-file\n"},
+			env:       map[string]string{composeEnvFilesEnv: "other.env"},
+			scope:     ComposeScope{Env: map[string]string{composeEnvFilesEnv: "ci.env"}},
+			container: "from-inline-env-file", wantService: "parse-server"},
+		{name: "inline COMPOSE_DISABLE_ENV_FILE=1 skips .env",
+			files:     map[string]string{"compose.yml": parseServerShape, ".env": "APP_CONTAINER=from-dotenv\n"},
+			scope:     ComposeScope{Env: map[string]string{composeDisableEnvFileEnv: "1"}},
+			container: "parse-server-mongo-app", wantService: "parse-server"},
+		{name: "inline COMPOSE_DISABLE_ENV_FILE=1 refuses .env name",
+			files:     map[string]string{"compose.yml": parseServerShape, ".env": "APP_CONTAINER=from-dotenv\n"},
+			scope:     ComposeScope{Env: map[string]string{composeDisableEnvFileEnv: "1"}},
+			container: "from-dotenv", wantErr: "not found"},
+		{name: "inline COMPOSE_DISABLE_ENV_FILE=0 beats exported 1 and reads .env",
+			files:     map[string]string{"compose.yml": parseServerShape, ".env": "APP_CONTAINER=from-dotenv\n"},
+			env:       map[string]string{composeDisableEnvFileEnv: "1"},
+			scope:     ComposeScope{Env: map[string]string{composeDisableEnvFileEnv: "0"}},
+			container: "from-dotenv", wantService: "parse-server"},
+		{name: "inline COMPOSE_DISABLE_ENV_FILE=1 still honours explicit --env-file",
+			files:     map[string]string{"compose.yml": parseServerShape, ".env": "APP_CONTAINER=from-dotenv\n", "ci.env": "APP_CONTAINER=from-ci\n"},
+			scope:     ComposeScope{EnvFiles: []string{"ci.env"}, Env: map[string]string{composeDisableEnvFileEnv: "1"}},
+			container: "from-ci", wantService: "parse-server"},
+		{name: "inline COMPOSE_DISABLE_ENV_FILE=1 still honours COMPOSE_ENV_FILES",
+			files:     map[string]string{"compose.yml": parseServerShape, ".env": "APP_CONTAINER=from-dotenv\n", "ci.env": "APP_CONTAINER=from-ci\n"},
+			scope:     ComposeScope{Env: map[string]string{composeDisableEnvFileEnv: "1", composeEnvFilesEnv: "ci.env"}},
+			container: "from-ci", wantService: "parse-server"},
+		{name: "inline COMPOSE_DISABLE_ENV_FILE invalid bool is refused",
+			files:     map[string]string{"compose.yml": parseServerShape},
+			scope:     ComposeScope{Env: map[string]string{composeDisableEnvFileEnv: "notabool"}},
+			container: "parse-server-mongo-app", wantErr: "invalid syntax"},
+		{name: "in-process library ignores inline scope.Env",
+			files:     map[string]string{"compose.yml": parseServerShape},
+			scope:     ComposeScope{InProcess: true, Env: map[string]string{"APP_CONTAINER": "from-inline", composeCompatibilityEnv: "true"}},
+			container: "parse-server-mongo-app", wantService: "parse-server"},
 	}
 	// Each row runs on the file (-f compose.yml) and on its content as the
 	// one in-memory document (-f -) from the same directory: compose names
@@ -531,4 +613,239 @@ func TestComposeIdentity_SchemaRefusalIsComposesError(t *testing.T) {
 			})
 		}
 	}
+}
+
+// loadSchemaUnchecked recovers panics on both the unchecked load and the
+// schema-checked retry, returning compose's loader message rather than crashing
+// keploy.
+func TestLoadSchemaUnchecked_RecoversSecondPanic(t *testing.T) {
+	runNoPanic := func(load func(extra ...func(*loader.Options)) (*composetypes.Project, error)) (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("loadSchemaUnchecked panicked: %v", r)
+			}
+		}()
+		_, err = loadSchemaUnchecked(load)
+		return err
+	}
+
+	calls := 0
+	err := runNoPanic(func(extra ...func(*loader.Options)) (*composetypes.Project, error) {
+		calls++
+		if calls == 1 {
+			panic("first boom")
+		}
+		panic("second boom")
+	})
+	if calls != 2 {
+		t.Fatalf("load called %d times, want 2", calls)
+	}
+	if err == nil || !strings.Contains(err.Error(), "compose's loader failed on the document: second boom") {
+		t.Fatalf("got %v, want second loader panic message", err)
+	}
+
+	calls = 0
+	err = runNoPanic(func(extra ...func(*loader.Options)) (*composetypes.Project, error) {
+		calls++
+		if calls == 1 {
+			panic("first boom")
+		}
+		return &composetypes.Project{Name: "p"}, nil
+	})
+	if calls != 2 {
+		t.Fatalf("load called %d times, want 2", calls)
+	}
+	if err == nil || !strings.Contains(err.Error(), "compose's loader failed on the document: first boom") {
+		t.Fatalf("got %v, want first loader panic message", err)
+	}
+}
+
+// TestComposeIdentity_MultiFileOverrideMovesConflictsAndPassesComposeValidation
+// verifies that when a companion compose file sets ports, networks, dns, and
+// extra_hosts on the app service, FindContainerInComposeFiles collects them
+// and ModifyComposeForAgent moves them to keploy-agent and strips them from the
+// companion file so compose-go's own full validation accepts the rewritten pair.
+func TestComposeIdentity_MultiFileOverrideMovesConflictsAndPassesComposeValidation(t *testing.T) {
+	dir := composeProjectDir(t, map[string]string{
+		"base.yml": `services:
+  app:
+    image: alpine:3.21
+    networks: []
+    ports:
+      - "8080:8080"
+  db:
+    image: alpine:3.21
+`,
+		"override.yml": `x-override-dns: &override_dns
+  - "1.1.1.1"
+services:
+  app:
+    container_name: override-app
+    network_mode: bridge
+    pid: host
+    hostname: myhost
+    domainname: example.local
+    mac_address: "02:42:ac:11:00:02"
+    links:
+      - db
+    expose:
+      - "9090"
+    ports:
+      - "8883:80"
+    networks:
+      - overnet
+    dns: *override_dns
+    extra_hosts:
+      - "api.local:127.0.0.1"
+      - "host.docker.internal:10.0.0.9"
+  sidecar:
+    image: alpine:3.21
+networks:
+  overnet: {}
+`,
+	})
+	basePath := filepath.Join(dir, "base.yml")
+	overridePath := filepath.Join(dir, "override.yml")
+
+	idc, err := New(zap.NewNop(), &config.Config{})
+	if err != nil {
+		t.Fatalf("docker.New: %v", err)
+	}
+	// Duplicate path must never put primaryPath into ExtraFiles.
+	dupInfo, err := idc.FindContainerInComposeFiles(context.Background(), []string{basePath, basePath}, ComposeScope{}, "proj-app-1")
+	if err != nil {
+		t.Fatalf("FindContainerInComposeFiles(dup): %v", err)
+	}
+	if len(dupInfo.ExtraFiles) != 0 {
+		t.Fatalf("duplicate path produced ExtraFiles = %v, want empty", dupInfo.ExtraFiles)
+	}
+
+	info, err := idc.FindContainerInComposeFiles(context.Background(), []string{basePath, overridePath}, ComposeScope{}, "override-app")
+	if err != nil {
+		t.Fatalf("FindContainerInComposeFiles: %v", err)
+	}
+	if len(info.ExtraFiles) != 1 || info.ExtraFiles[0].Path != overridePath {
+		t.Fatalf("ExtraFiles = %v, want single companion %q", info.ExtraFiles, overridePath)
+	}
+	if len(info.Networks) != 1 || info.Networks[0] != "overnet" {
+		t.Fatalf("Networks = %v, want [overnet] (empty base networks: [] must not add default)", info.Networks)
+	}
+	gotServices := info.Compose.ResolvedServiceNames()
+	if strings.Join(gotServices, ",") != "app,db,sidecar" {
+		t.Fatalf("ResolvedServiceNames() = %v, want [app db sidecar]", gotServices)
+	}
+	opts := buildAgentOpts()
+	opts.Container = "override-app"
+	opts.AppPorts = info.Ports
+	opts.AppNetworks = info.Networks
+	opts.HostGateway = true
+	if err := idc.ModifyComposeForAgent(info.Compose, opts, info.AppServiceName); err != nil {
+		t.Fatalf("ModifyComposeForAgent: %v", err)
+	}
+	outPrimary := filepath.Join(dir, "docker-compose-tmp.yaml")
+	outOverride := filepath.Join(dir, "docker-compose-tmp-1.yaml")
+	if err := idc.WriteComposeFile(info.Compose, outPrimary); err != nil {
+		t.Fatalf("WriteComposeFile(primary): %v", err)
+	}
+	if err := idc.WriteComposeFile(info.ExtraFiles[0].Compose, outOverride); err != nil {
+		t.Fatalf("WriteComposeFile(override): %v", err)
+	}
+
+	// Load the generated pair with compose-go's full validation enabled.
+	po, err := cli.NewProjectOptions(
+		[]string{outPrimary, outOverride},
+		cli.WithWorkingDirectory(dir),
+		cli.WithName("proj"),
+	)
+	if err != nil {
+		t.Fatalf("cli.NewProjectOptions: %v", err)
+	}
+	proj, err := po.LoadProject(context.Background())
+	if err != nil {
+		t.Fatalf("compose-go rejected rewritten multi-file pair: %v", err)
+	}
+
+	appSvc := proj.Services["app"]
+	if appSvc.NetworkMode != "service:keploy-agent" {
+		t.Fatalf("app.NetworkMode = %q, want service:keploy-agent", appSvc.NetworkMode)
+	}
+	if appSvc.Pid != "service:keploy-agent" {
+		t.Fatalf("app.Pid = %q, want service:keploy-agent", appSvc.Pid)
+	}
+	if appSvc.Hostname != "" || appSvc.DomainName != "" || appSvc.MacAddress != "" || len(appSvc.Links) != 0 || len(appSvc.Expose) != 0 {
+		t.Fatalf("app still carries stripped host/link/expose fields: hostname=%q domainname=%q mac=%q links=%v expose=%v",
+			appSvc.Hostname, appSvc.DomainName, appSvc.MacAddress, appSvc.Links, appSvc.Expose)
+	}
+	if appSvc.ContainerName != "override-app" {
+		t.Fatalf("app.ContainerName = %q, want override-app", appSvc.ContainerName)
+	}
+	if len(appSvc.Ports) != 0 || len(appSvc.Networks) != 0 || len(appSvc.DNS) != 0 || len(appSvc.ExtraHosts) != 0 {
+		t.Fatalf("app still carries conflicting keys: ports=%v networks=%v dns=%v extra_hosts=%v",
+			appSvc.Ports, appSvc.Networks, appSvc.DNS, appSvc.ExtraHosts)
+	}
+
+	agentSvc := proj.Services["keploy-agent"]
+	if _, ok := agentSvc.Networks["overnet"]; !ok || len(agentSvc.Networks) != 1 {
+		t.Fatalf("keploy-agent.Networks = %v, want only overnet", agentSvc.Networks)
+	}
+	var gotPublished []string
+	for _, p := range agentSvc.Ports {
+		gotPublished = append(gotPublished, p.Published)
+	}
+	if !strings.Contains(strings.Join(gotPublished, ","), "8080") || !strings.Contains(strings.Join(gotPublished, ","), "8883") {
+		t.Fatalf("keploy-agent published ports = %v, want both 8080 and 8883", gotPublished)
+	}
+	if len(agentSvc.DNS) != 1 || agentSvc.DNS[0] != "1.1.1.1" {
+		t.Fatalf("keploy-agent.DNS = %v, want [1.1.1.1]", agentSvc.DNS)
+	}
+	if got := agentSvc.ExtraHosts["api.local"]; len(got) != 1 || got[0] != "127.0.0.1" {
+		t.Fatalf("keploy-agent.ExtraHosts[api.local] = %v, want [127.0.0.1]", got)
+	}
+	// User's override mapping for host.docker.internal must beat host-gateway.
+	if got := agentSvc.ExtraHosts["host.docker.internal"]; len(got) != 1 || got[0] != "10.0.0.9" {
+		t.Fatalf("keploy-agent.ExtraHosts[host.docker.internal] = %v, want [10.0.0.9]", got)
+	}
+
+	// Companion setting ONLY network_mode: host (no ports/networks/dns/extra_hosts)
+	// must still be detected as conflicting and stripped so it cannot overwrite
+	// keploy's network_mode: service:keploy-agent on merge.
+	t.Run("solo network_mode override is detected and stripped", func(t *testing.T) {
+		soloDir := composeProjectDir(t, map[string]string{
+			"base.yml":     "services:\n  app:\n    image: alpine:3.21\n",
+			"override.yml": "services:\n  app:\n    network_mode: host\n",
+		})
+		bp := filepath.Join(soloDir, "base.yml")
+		op := filepath.Join(soloDir, "override.yml")
+		soloInfo, err := idc.FindContainerInComposeFiles(context.Background(), []string{bp, op}, ComposeScope{}, "proj-app-1")
+		if err != nil {
+			t.Fatalf("FindContainerInComposeFiles(solo): %v", err)
+		}
+		if len(soloInfo.ExtraFiles) != 1 || soloInfo.ExtraFiles[0].Path != op {
+			t.Fatalf("solo network_mode override ExtraFiles = %v, want [%q]", soloInfo.ExtraFiles, op)
+		}
+		soloOpts := buildAgentOpts()
+		soloOpts.Container = "proj-app-1"
+		if err := idc.ModifyComposeForAgent(soloInfo.Compose, soloOpts, soloInfo.AppServiceName); err != nil {
+			t.Fatalf("ModifyComposeForAgent(solo): %v", err)
+		}
+		p1 := filepath.Join(soloDir, "docker-compose-tmp.yaml")
+		p2 := filepath.Join(soloDir, "docker-compose-tmp-1.yaml")
+		if err := idc.WriteComposeFile(soloInfo.Compose, p1); err != nil {
+			t.Fatal(err)
+		}
+		if err := idc.WriteComposeFile(soloInfo.ExtraFiles[0].Compose, p2); err != nil {
+			t.Fatal(err)
+		}
+		po2, err := cli.NewProjectOptions([]string{p1, p2}, cli.WithWorkingDirectory(soloDir), cli.WithName("proj"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		proj2, err := po2.LoadProject(context.Background())
+		if err != nil {
+			t.Fatalf("compose-go rejected solo network_mode rewrite: %v", err)
+		}
+		if got := proj2.Services["app"].NetworkMode; got != "service:keploy-agent" {
+			t.Fatalf("solo override app.NetworkMode = %q, want service:keploy-agent", got)
+		}
+	})
 }

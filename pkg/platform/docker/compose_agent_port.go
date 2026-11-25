@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -108,8 +109,9 @@ func movedScalar(slot **yaml.Node, value string) {
 // FindComposeFiles returns the compose file paths for cmd in Docker Compose
 // precedence order:
 //  1. Explicit -f / --file flags on cmd.
-//  2. The COMPOSE_FILE environment variable, split by COMPOSE_PATH_SEPARATOR
-//     (or filepath.ListSeparator when unset).
+//  2. Leading inline COMPOSE_FILE (or COMPOSE_FILE in keploy's environment),
+//     split by leading inline COMPOSE_PATH_SEPARATOR (or COMPOSE_PATH_SEPARATOR
+//     in keploy's environment, else filepath.ListSeparator).
 //  3. Default discovery in the working directory: the first existing base file
 //     (docker-compose.yml, docker-compose.yaml, compose.yml, compose.yaml),
 //     followed by the first existing override file
@@ -136,17 +138,35 @@ func FindComposeFiles(cmd string) []string {
 	if len(paths) > 0 {
 		return paths
 	}
-	if env := os.Getenv("COMPOSE_FILE"); env != "" {
-		sep := os.Getenv("COMPOSE_PATH_SEPARATOR")
+	inlineEnv, rest, _ := utils.LeadingEnvAssignments(cmd)
+	if w := strings.Fields(rest); len(w) > 0 && (filepath.Base(w[0]) == "sudo" || filepath.Base(w[0]) == "doas") {
+		inlineEnv = nil
+	}
+	composeFile, hasInlineFile := inlineEnv["COMPOSE_FILE"]
+	if hasInlineFile {
+		// Compose refuses an explicitly empty (or separator/whitespace-only)
+		// COMPOSE_FILE; do not fall back to default discovery and record a
+		// different stack.
+		if composeFile == "" {
+			return nil
+		}
+	} else {
+		composeFile = os.Getenv("COMPOSE_FILE")
+	}
+	if composeFile != "" {
+		sep, ok := inlineEnv["COMPOSE_PATH_SEPARATOR"]
+		if !ok {
+			sep = os.Getenv("COMPOSE_PATH_SEPARATOR")
+		}
 		if sep == "" {
 			sep = string(filepath.ListSeparator)
 		}
-		for _, raw := range strings.Split(env, sep) {
+		for _, raw := range strings.Split(composeFile, sep) {
 			if p := strings.TrimSpace(raw); p != "" {
 				paths = append(paths, p)
 			}
 		}
-		if len(paths) > 0 {
+		if len(paths) > 0 || hasInlineFile {
 			return paths
 		}
 	}
