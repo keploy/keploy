@@ -752,10 +752,15 @@ func (r *Replayer) showGrpcBodiesDecoded(res *models.Result, view *grpcProtoView
 // that gives it one), else how to give it one.
 func newResponseNote(reason string) string {
 	if reason = strings.TrimSpace(reason); reason != "" {
-		return "no schema for the new response: " + reason
+		return GrpcNewResponseNote + reason
 	}
-	return "no schema for the new response: give the run its protos (--proto-dir) or upload them for the release being replayed"
+	return GrpcNewResponseNote + "give the run its protos (--proto-dir) or upload them for the release being replayed"
 }
+
+// GrpcNewResponseNote starts the part of Result.GrpcDecode's note that says
+// why the new response was not decoded. When the recorded side has no schema
+// either, it follows that side's reason after "; ".
+const GrpcNewResponseNote = "no schema for the new response: "
 
 func decodeResponse(s *protoschema.Schema, method, body string) (*protoschema.Decoded, error) {
 	_, resp, err := s.MessageTypes(method)
