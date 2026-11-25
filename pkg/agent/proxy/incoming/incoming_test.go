@@ -719,13 +719,13 @@ func TestTheIngressFiltersAGRPCCall(t *testing.T) {
 		if err != nil {
 			t.Fatalf("listen: %v", err)
 		}
-		defer ln.Close()
+		defer func() { _ = ln.Close() }()
 		go func() { // the app: takes the call, answers it
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			if _, err := io.ReadFull(c, make([]byte, len(req))); err == nil {
 				_, _ = c.Write(resp)
 			}

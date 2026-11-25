@@ -3027,8 +3027,9 @@ func TestAnHTTP2RecordedRequestOverTLSIsReplayedOverHTTP2(t *testing.T) {
 		require.NoError(t, err)
 		resp, err := prepared.Client.Do(prepared.Request)
 		require.NoError(t, err)
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
 		return string(b)
 	}
 	assert.Equal(t, "HTTP/2.0", send(2))

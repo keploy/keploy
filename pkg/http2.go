@@ -1569,17 +1569,17 @@ func InflateGrpcMessage(flag byte, payload []byte, encoding string, limit int64)
 		if err != nil {
 			return nil, fmt.Errorf("%w: gzip: %v", ErrUndecodableGrpcMessage, err)
 		}
-		defer zr.Close()
+		defer func() { _ = zr.Close() }() // Close only repeats an error the read already returned
 		r = zr
 	case "deflate":
 		// HTTP's deflate (RFC 9110) is a zlib stream; some peers send a raw
 		// deflate stream under the name.
 		if zr, err := zlib.NewReader(bytes.NewReader(payload)); err == nil {
-			defer zr.Close()
+			defer func() { _ = zr.Close() }()
 			r = zr
 		} else {
 			fr := flate.NewReader(bytes.NewReader(payload))
-			defer fr.Close()
+			defer func() { _ = fr.Close() }()
 			r = fr
 		}
 	default:
