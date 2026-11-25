@@ -1931,14 +1931,12 @@ func hasDeclaredStartupRule(mp *models.Mapping) bool {
 }
 
 // uncoveredBackgroundRules selects only declared background rules that have
-// zero covering worker: or startup: entries in mp (and decoded). When filter
-// is provided (e.g. enterprise CLI with mockrules), it evaluates full
-// per-(rule, collection) and per-HTTP-rule coverage against mp and decoded
-// (including fail-closed checks on missing or unreadable mocks) and its result
-// is returned directly so a recording on one collection does not drop
-// uncovered sibling collections of the same rule. When filter is nil, any rule
-// whose ID already appears on a worker: or startup: entry's Rule mark
-// ("<id>@<hash>" or "<id>") is dropped before pushing to the agent.
+// zero covering worker: or startup: entries in mp and decoded. Coverage is
+// evaluated exclusively by filter (e.g. enterprise CLI's
+// umjudge.UncoveredBackgroundRules), which checks per-(rule, collection) and
+// per-HTTP-rule coverage and fails closed on missing or unreadable mocks.
+// When mp or filter is nil, this fails closed and returns nil for both
+// protocols so uncovered rules are never pushed without full coverage checks.
 func uncoveredBackgroundRules(
 	mp *models.Mapping,
 	decoded []*models.Mock,
@@ -1946,49 +1944,10 @@ func uncoveredBackgroundRules(
 	httpRules []models.BackgroundHTTPRule,
 	filter func(*models.Mapping, []*models.Mock) ([]models.BackgroundMongoRule, []models.BackgroundHTTPRule),
 ) ([]models.BackgroundMongoRule, []models.BackgroundHTTPRule) {
-	// Fail closed when no mapping is available: without mappings.yaml we cannot
-	// tell which rules already have worker:/startup: recordings in the set.
-	if mp == nil {
+	if mp == nil || filter == nil {
 		return nil, nil
 	}
-	if filter != nil {
-		return filter(mp, decoded)
-	}
-	if len(mongoRules) == 0 && len(httpRules) == 0 {
-		return mongoRules, httpRules
-	}
-	covered := map[string]bool{}
-	mark := func(entries []models.MockEntry) {
-		for _, e := range entries {
-			if e.Rule == "" {
-				continue
-			}
-			id, _, _ := strings.Cut(e.Rule, "@")
-			if id != "" {
-				covered[id] = true
-			}
-		}
-	}
-	mark(mp.Worker)
-	mark(mp.Startup)
-	if len(covered) == 0 {
-		return mongoRules, httpRules
-	}
-	var outMongo []models.BackgroundMongoRule
-	for _, r := range mongoRules {
-		if r.ID != "" && covered[r.ID] {
-			continue
-		}
-		outMongo = append(outMongo, r)
-	}
-	var outHTTP []models.BackgroundHTTPRule
-	for _, r := range httpRules {
-		if r.ID != "" && covered[r.ID] {
-			continue
-		}
-		outHTTP = append(outHTTP, r)
-	}
-	return outMongo, outHTTP
+	return filter(mp, decoded)
 }
 
 // withoutSourceBoundWorkerSeries returns a shallow copy of mp omitting from

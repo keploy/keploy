@@ -56,6 +56,9 @@ func TestKeployMockReplayForwardsBackgroundMongoRules(t *testing.T) {
 	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
 	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 	cfg.Mock.BackgroundMongo = want
+	cfg.Mock.BackgroundRulesFilter = func(*models.Mapping, []*models.Mock) ([]models.BackgroundMongoRule, []models.BackgroundHTTPRule) {
+		return want, nil
+	}
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 
@@ -64,7 +67,7 @@ func TestKeployMockReplayForwardsBackgroundMongoRules(t *testing.T) {
 	require.Equal(t, want, instr.gotRules)
 }
 
-func TestUncoveredBackgroundRulesDropsRulesWithWorkerOrStartupEntries(t *testing.T) {
+func TestUncoveredBackgroundRulesFailsClosedWithoutFilterOrMapping(t *testing.T) {
 	mp := &models.Mapping{
 		Worker: []models.MockEntry{
 			{Name: "mock-1", Rule: "covered-mongo@12345678"},
@@ -83,12 +86,18 @@ func TestUncoveredBackgroundRulesDropsRulesWithWorkerOrStartupEntries(t *testing
 		{ID: "covered-http", Method: "GET", Host: "localhost:8200", Path: "/v1/sys/health"},
 		{ID: "uncovered-http", Method: "GET", Host: "localhost:8200", Path: "/v1/sys/ready"},
 	}
+
+	// Nil filter fails closed (returns nil for both protocols) so rules are
+	// never forwarded without full coverage evaluation against mp and decoded.
 	gotM, gotH := uncoveredBackgroundRules(mp, nil, mongoIn, httpIn, nil)
-	require.Equal(t, []models.BackgroundMongoRule{mongoIn[2]}, gotM)
-	require.Equal(t, []models.BackgroundHTTPRule{httpIn[1]}, gotH)
+	require.Nil(t, gotM)
+	require.Nil(t, gotH)
 
 	// Nil mapping fails closed (returns nil for both protocols).
-	nilM, nilH := uncoveredBackgroundRules(nil, nil, mongoIn, httpIn, nil)
+	nilM, nilH := uncoveredBackgroundRules(nil, nil, mongoIn, httpIn, func(*models.Mapping, []*models.Mock) ([]models.BackgroundMongoRule, []models.BackgroundHTTPRule) {
+		t.Fatal("filter must not run when mapping is nil")
+		return mongoIn, httpIn
+	})
 	require.Nil(t, nilM)
 	require.Nil(t, nilH)
 

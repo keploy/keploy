@@ -91,6 +91,18 @@ func TestAClientIDTheClientTestSentWholeIsBoundAtItsRequest(t *testing.T) {
 			}
 		})
 	}
+	t.Run("stress 200 consecutive sealed client_id pairs bind whole without flakes", func(t *testing.T) {
+		const base int64 = 1794446576090003375
+		for i := int64(0); i < 200; i++ {
+			rec := sealedClientID("E2E Blocked Agent "+strconv.FormatInt(base+i*104729, 10), "e2e-secret")
+			live := sealedClientID("E2E Blocked Agent "+strconv.FormatInt(base+int64(67*time.Second)+i*130003, 10), "e2e-secret")
+			d := oWord(t, Decide(staffBlockCall(t, rec, live, rec, live)), rec, live)
+			if d.Outcome != OutcomeValue || !d.From.Client || d.From.Path != "url.query.client_id" || d.At.Word >= 0 {
+				t.Fatalf("pair %d (%s -> %s): outcome %v word %d (%s); want whole-value client bind",
+					i, rec, live, d.Outcome, d.At.Word, d.Line)
+			}
+		}
+	})
 }
 
 // TestAClientIDNoEarlierLeafHoldsWholeInBothRunsStaysRefused: where no leaf

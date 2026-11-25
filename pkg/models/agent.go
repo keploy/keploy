@@ -706,7 +706,11 @@ type BackgroundMongoWhere struct {
 // BackgroundMongoRule is one non-once, non-chained, non-due declared
 // kind: background Mongo rule forwarded under the proven switch so replay miss
 // classification can recognize a rare periodic sweeper that had zero
-// recordings in the set.
+// recordings in the set. Must name an explicit DB and Collections list, and
+// carry non-empty Where unless Command is listIndexes; because listIndexes
+// carries no wire filter document, any caller of listIndexes on a declared
+// collection in DB is excused when no covering recording exists for that
+// collection.
 type BackgroundMongoRule struct {
 	ID          string                 `json:"id,omitempty"`
 	DB          string                 `json:"db"`
@@ -719,7 +723,8 @@ type BackgroundMongoRule struct {
 // BackgroundHTTPRule is one non-once, non-chained, non-due read-only declared
 // kind: background HTTP rule forwarded under the proven switch so replay miss
 // classification can recognize a rare periodic HTTP background poll that had
-// zero recordings in the set.
+// zero recordings in the set. Path must contain at least one literal
+// (non-placeholder) segment; catch-alls such as "/{}" or "/{}/{}" are refused.
 type BackgroundHTTPRule struct {
 	ID     string `json:"id,omitempty"`
 	Method string `json:"method"`

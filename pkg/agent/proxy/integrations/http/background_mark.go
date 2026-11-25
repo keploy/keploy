@@ -706,17 +706,35 @@ func isReadOnlyHTTPMethod(method string) bool {
 	return method == "GET" || method == "HEAD" || method == "OPTIONS"
 }
 
+// httpPathHasLiteralSegment reports whether path is a '/'-rooted path
+// containing at least one non-empty literal (non-placeholder, non-wildcard)
+// segment. Root "/" and all-placeholder catch-alls (such as "/{}", "/{}/{}",
+// "/{a}/{b}", or "/{*}") return false so catch-all rules cannot excuse
+// arbitrary unrecorded HTTP calls.
+func httpPathHasLiteralSegment(path string) bool {
+	if !strings.HasPrefix(path, "/") || path == "/" {
+		return false
+	}
+	for _, seg := range strings.Split(path[1:], "/") {
+		if seg == "" || seg == "{}" || seg == "*" || (strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}")) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // matchesDeclaredBackgroundHTTP reports whether a missed HTTP call matches one
-// of the staged set's read-only declared kind: background HTTP rules AND zero
-// HTTP recordings in recs already cover that rule. Unreadable recordings in
-// recs fail closed (blocking the fallback). Serving remains strictly
-// fail-closed either way.
+// of the staged set's read-only declared kind: background HTTP rules (carrying
+// at least one literal path segment) AND zero HTTP recordings in recs already
+// cover that rule. Unreadable recordings in recs fail closed (blocking the
+// fallback). Serving remains strictly fail-closed either way.
 func matchesDeclaredBackgroundHTTP(input *req, live destination, recs []models.BackgroundRecording, rules []models.BackgroundHTTPRule) (string, bool) {
 	if len(rules) == 0 || input == nil || input.url == nil || live.host == "" {
 		return "", false
 	}
 	for _, r := range rules {
-		if !isReadOnlyHTTPMethod(r.Method) || r.Host == "" || r.Path == "" {
+		if !isReadOnlyHTTPMethod(r.Method) || r.Host == "" || !httpPathHasLiteralSegment(r.Path) {
 			continue
 		}
 		if !httpRuleCovers(r, input.method, live.host, input.url.Path) {
@@ -755,8 +773,9 @@ func anyRecMatchesHTTPBgRule(recs []models.BackgroundRecording, r models.Backgro
 }
 
 // httpRuleCovers reports whether r matches an HTTP call of method to host at
-// path (segment-by-segment, with "{}" matching exactly one non-empty segment),
-// matching mockrules.HTTPTarget.Covers.
+// path (segment-by-segment, with "{}" matching exactly one non-empty segment).
+// Host comparison uses strings.EqualFold because live Host headers are
+// case-insensitive (unlike mockrules.HTTPTarget.Covers' exact string compare).
 func httpRuleCovers(r models.BackgroundHTTPRule, method, host, path string) bool {
 	if r.Method != method || !strings.EqualFold(r.Host, host) {
 		return false

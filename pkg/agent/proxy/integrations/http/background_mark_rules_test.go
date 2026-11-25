@@ -123,6 +123,52 @@ func TestDeclaredBackgroundHTTPRules(t *testing.T) {
 		}
 	})
 
+	t.Run("all-placeholder catch-all HTTP paths are refused and never excuse misses", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			rulePath string
+			reqURL   string
+		}{
+			{"single placeholder", "/{}", "http://localhost:8200/anything"},
+			{"two placeholders", "/{}/{}", "http://localhost:8200/a/b"},
+			{"named placeholders", "/{a}/{b}", "http://localhost:8200/{a}/{b}"},
+			{"glob placeholder", "/{*}", "http://localhost:8200/{*}"},
+			{"root only", "/", "http://localhost:8200/"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				db := &httpBgRulesStore{
+					rules: []models.BackgroundHTTPRule{{
+						ID:     "catch-all-http",
+						Method: "GET",
+						Host:   "localhost:8200",
+						Path:   tc.rulePath,
+					}},
+				}
+				rep := &models.MockMismatchReport{}
+				h.markBackground(ctx, rep, bgHTTPInput("GET", "localhost:8200", tc.reqURL), db, db, mark, false, nil, nil, nil)
+				if rep.Background {
+					t.Fatalf("catch-all HTTP rule %q must NOT excuse miss for %s", tc.rulePath, tc.reqURL)
+				}
+			})
+		}
+	})
+
+	t.Run("leading placeholder with literal segment still excuses", func(t *testing.T) {
+		db := &httpBgRulesStore{
+			rules: []models.BackgroundHTTPRule{{
+				ID:     "tenant-health",
+				Method: "GET",
+				Host:   "localhost:8200",
+				Path:   "/{}/health",
+			}},
+		}
+		rep := &models.MockMismatchReport{}
+		h.markBackground(ctx, rep, bgHTTPInput("GET", "localhost:8200", "http://localhost:8200/t1/health"), db, db, mark, false, nil, nil, nil)
+		if !rep.Background {
+			t.Fatal("expected rule with at least one literal segment (/{}/health) to excuse miss")
+		}
+	})
+
 	t.Run("covering HTTP background recording blocks fallback", func(t *testing.T) {
 		// Recorded GET /v1/sys/health has query ?standbyok=true; live call
 		// has ?standbyok=false so strictDiff fails, and the covering recording
