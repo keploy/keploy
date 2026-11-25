@@ -2842,6 +2842,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// startupMockNames: the test-set's boot traffic. Merged into every test's
 	// expected-name list because the mapping-based loader takes names only.
 	var startupMockNames []string
+	// backgroundExcluded: the test-set's startup, background, and worker-scoped
+	// mock names excluded from per-test unconsumed-mock assertions on both the
+	// expected and consumed sides.
+	var backgroundExcluded []string
 	var isMappingEnabled bool
 	isMappingEnabled = !r.config.DisableMapping
 	if r.exactServing() {
@@ -2855,18 +2859,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	// Map mock name to Kind for DNS filtering (mappings may have empty Kind)
 	mockKindByName := make(map[string]models.Kind)
-	// reusableMockNames marks mocks whose recorder-derived tier is reusable
-	// across tests (session / connection / config) or app-startup traffic —
-	// i.e. NOT per-test. They belong in the mapping (so the pool is complete)
-	// but are excluded from the per-test consumed-vs-expected assertion: only
-	// per-test mocks are deterministically attributed to a single test, so
-	// comparing reusable/startup mocks would falsely demote tests to OBSOLETE
-	// (the same reason DNS mocks are excluded). MockEntry carries no tier, so
-	// we derive it from the loaded mocks (which do, via TestModeInfo.Lifetime).
+	// reusableMockNames marks mocks excluded from the per-test
+	// consumed-vs-expected assertion: with KEPLOY_PROVEN unset, mocks whose
+	// recorder-derived tier is reusable across tests (session / connection /
+	// config), undelivered or passthrough mocks, plus backgroundExcluded (the
+	// set's startup, worker-rule, and worker-scoped mocks). They stay in the
+	// mapping so the pool is complete, while only per-test mocks are compared
+	// so unconsumed reusable/background mocks never falsely demote tests to
+	// OBSOLETE (the same reason DNS mocks are excluded). MockEntry carries no
+	// tier, so we derive it from the loaded mocks (via TestModeInfo.Lifetime).
 	//
-	// Under the proven switch it marks the protocol-phase mocks instead
-	// (excludedFromTestMockAssertion): a test owns every data-plane mock its
-	// mapping lists, whatever tier DeriveLifetime gives it.
+	// Under exact serving (KEPLOY_PROVEN=1) it marks protocol-phase and
+	// passthrough mocks (excludedFromTestMockAssertion) plus post-plan
+	// backgroundExcluded (r.exact.worker and, when !fromWindows, trusted
+	// startup: mocks in r.exact.pool): strictly disjoint from r.exact.owned,
+	// so a test still asserts every data-plane mock its mapping owns, whatever
+	// tier DeriveLifetime gives it.
 	reusableMockNames := make(map[string]bool)
 	// passThroughMockNames marks recorded HTTP mocks that an active egress
 	// passthrough rule now answers without consuming (models.Mock.AnsweredByPassThrough):
@@ -3069,6 +3077,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// set, or one keploy does not start, booted before this set.
 			r.exact.bootSeen = r.instrument && !serveTest && (strings.TrimSpace(conf.AppCommand) != "" || strings.TrimSpace(r.config.Command) != "")
 			r.noteOwnsNothing(testSetID)
+		}
+		// Exclude the set's startup, background, and worker-scoped mocks from
+		// per-test unconsumed-mock assertions (eligibleExpectedEntries,
+		// buildDepResults, unconsumedTestMocks, filteredMockNames): leaving a
+		// background or worker-scoped mock unconsumed during a test window must
+		// not mark the test OBSOLETE or fail it as a missing per-test dependency.
+		// Computed after r.exact is built so exact serving derives exclusions
+		// from post-plan ownership (r.exact.worker and trusted r.exact.pool
+		// startup mocks), never excusing a test-owned mock in r.exact.owned.
+		backgroundExcluded = r.backgroundExcludedMockNames(ctx, testSetID, isMappingEnabled, fromWindows, startupMockNames)
+		for _, n := range backgroundExcluded {
+			reusableMockNames[n] = true
 		}
 		return filtered, unfiltered, nil
 	}
@@ -4687,10 +4707,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			// consumedOutsideAssertion is the consumed-side twin of
 			// eligibleExpectedEntries (and the filter buildDepResults uses), so
-			// the two sides exclude the same kinds.
+			// the two sides exclude the same kinds and excluded mock names.
 			filteredMockNames := make([]string, 0, len(consumedMocks))
 			for _, m := range consumedMocks {
-				if consumedOutsideAssertion(m) || passThroughMockNames[m.Name] {
+				if consumedOutsideAssertion(m) || reusableMockNames[m.Name] {
 					continue
 				}
 				filteredMockNames = append(filteredMockNames, m.Name)
@@ -5289,17 +5309,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
 					// semantics. Both extracted as helpers for unit testability.
-					// Startup names are dropped from BOTH sides, matching the
-					// runner path (checkMockMismatches) and the existing DNS
+					// Startup, background, and worker-scoped mock names
+					// (backgroundExcluded) are dropped from BOTH sides, matching
+					// the runner path (checkMockMismatches) and the existing DNS
 					// carve-out. They belong to the test SET, so neither their
 					// presence nor their absence in one test is a mismatch: a step
-					// that re-handshakes would otherwise report an unexpected
-					// consumption, and one that did not would report a phantom
-					// missing expectation for any name that appears in both
-					// sections. Report-only — MockMismatches does not drive the
-					// pass/fail or obsolescence verdict.
-					expectedMockInfos := dropStartupMockInfos(buildExpectedMockInfos(expectedMocks, mockKindByName, undeliveredMockNames), startupMockNames)
-					actualMockInfos := dropStartupMockInfos(buildActualMockInfos(perTestConsumed, perTestConsumedKnown), startupMockNames)
+					// that re-handshakes or hits a background worker mock would
+					// otherwise report an unexpected consumption, and one that did
+					// not would report a phantom missing expectation for any name
+					// that appears in both sections. Report-only — MockMismatches
+					// does not drive the pass/fail or obsolescence verdict.
+					expectedMockInfos := dropStartupMockInfos(buildExpectedMockInfos(expectedMocks, mockKindByName, undeliveredMockNames), backgroundExcluded)
+					actualMockInfos := dropStartupMockInfos(buildActualMockInfos(perTestConsumed, perTestConsumedKnown), backgroundExcluded)
 
 					// FIRST WRITER of models.Result.DepResult
 					// (keploy-consumer-design-v2.md §2, §7 slice 4). Written
@@ -5802,7 +5823,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			mockSetMismatch := false
 			hasExpectedMocks := len(expectedMocks) > 0
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(carryAttr.withoutStartupTraffic(consumedMocks, startupMockNames, tc.Name), reusableMockNames), expectedMocks)
+				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(carryAttr.withoutStartupTraffic(consumedMocks, backgroundExcluded, tc.Name), reusableMockNames), expectedMocks)
 			}
 			// NOTE: with the proven switch off models.Result.DepResult is
 			// deliberately NOT populated on the deferred streaming path, for
@@ -6028,7 +6049,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// already forced emitFailureLogs=false on a streaming body
 			// mismatch, it stays suppressed: that mismatch was logged.
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(carryAttr.withoutStartupTraffic(consumedMocks, startupMockNames, tc.Name), reusableMockNames), expectedMocks)
+				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(carryAttr.withoutStartupTraffic(consumedMocks, backgroundExcluded, tc.Name), reusableMockNames), expectedMocks)
 			}
 
 			// Each use place is asserted on its own: the headers', and each
@@ -8649,6 +8670,62 @@ func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
 func (r *Replayer) backgroundMockNames(ctx context.Context, testSetID string) []string {
 	all, _ := r.backgroundMocksOf(ctx, testSetID)
 	return all
+}
+
+// backgroundExcludedMockNames returns the mock names scoped to testSetID's
+// startup, background, or worker traffic rather than to a single test case, so
+// leaving one unconsumed during a test never triggers a per-test
+// mockSetMismatch, OBSOLETE demotion, or missing-dependency failure:
+//   - Under exact serving (KEPLOY_PROVEN=1): post-plan r.exact.worker (which
+//     already excludes worker-rule entries, returned drift moves, and any
+//     mock owned by a test in r.exact.owned) plus, when !fromWindows (i.e.
+//     mappings.yaml was not rejected as source: keploy-test), startupMockNames
+//     that landed in r.exact.pool (so dual-listed tests: + startup: mocks
+//     owned by r.exact.owned stay enforced, and rejected mappings cannot
+//     excuse window-owned mocks).
+//   - Without exact serving: startupMockNames (mappings.yaml startup: plus
+//     worker-rule entries from defaultWorkerScope) plus the set's remaining
+//     mappings.yaml worker: entries (r.backgroundMockNames) when mapping is
+//     enabled.
+func (r *Replayer) backgroundExcludedMockNames(ctx context.Context, testSetID string, isMappingEnabled, fromWindows bool, startupMockNames []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(startupMockNames))
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if r.exactServing() {
+		if r.exact == nil {
+			return nil
+		}
+		for _, e := range r.exact.worker {
+			add(e.Name)
+		}
+		if !fromWindows && len(startupMockNames) > 0 {
+			inPool := make(map[string]bool, len(r.exact.pool))
+			for _, n := range r.exact.pool {
+				inPool[n] = true
+			}
+			for _, n := range startupMockNames {
+				if inPool[n] {
+					add(n)
+				}
+			}
+		}
+		return out
+	}
+	for _, n := range startupMockNames {
+		add(n)
+	}
+	if isMappingEnabled {
+		for _, n := range r.backgroundMockNames(ctx, testSetID) {
+			add(n)
+		}
+	}
+	return out
 }
 
 // backgroundMocksOf is backgroundMockNames (all), with, under the proven
