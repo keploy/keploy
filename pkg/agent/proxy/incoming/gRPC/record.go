@@ -30,7 +30,7 @@ import (
 // This passthrough approach is compatible with cmux and any other listener wrapper
 // because it forwards the client's original HTTP/2 handshake directly to the app
 // without creating a separate gRPC session.
-func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string, synchronous, mapping bool) error {
+func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string, synchronous, mapping bool, loadOpts func() models.IncomingOptions) error {
 	// Each call's window, on the manager its capture resolves on, from
 	// before the app can read its request until its capture decides it
 	// (callWindows). Whatever is left open when the connection's calls are
@@ -97,7 +97,7 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true, building, stopAsked, nil)
 	}()
 
-	// captureStream closes over ctx, t, appPort, synchronous, and mapping so
+	// captureStream closes over ctx, t, appPort, synchronous, mapping and loadOpts so
 	// emitCompleteStreams does not need to carry those as parameters.
 	// The forwarder stamps each client chunk with the proxy's time.Now
 	// before it writes it on (forwardAndTee), so a call's request stamp,
@@ -109,7 +109,14 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	captureStream := func(stream *pkg.HTTP2Stream) {
 		win := calls.take(stream.ID)
 		defer win.Close()
-		Utils.CaptureGRPC(syncMock.WithWindow(windowCtx, win), logger, t, stream, appPort, synchronous, mapping)
+		// The recording's ingress options as they are when the call is
+		// captured, as an HTTP request reads them: a gRPC connection lasts
+		// hours, across a recorder reconnecting with other filters.
+		var opts models.IncomingOptions
+		if loadOpts != nil {
+			opts = loadOpts()
+		}
+		Utils.CaptureGRPC(syncMock.WithWindow(windowCtx, win), logger, t, stream, appPort, synchronous, mapping, opts)
 	}
 
 	// Single emitter goroutine to avoid duplicate test case emission. Each

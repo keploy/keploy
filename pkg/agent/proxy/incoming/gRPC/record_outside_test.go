@@ -42,7 +42,7 @@ func TestRecordIncomingKeepsACallsMocksFromBeingMarkedOutsideRequests(t *testing
 	tcCh := make(chan *models.TestCase, 8)
 	go func() {
 		defer close(done)
-		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", false, false)
+		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", false, false, nil)
 	}()
 	req, _ := pingCall(t)
 	go func() { _, _ = cliApp.Write(req) }()

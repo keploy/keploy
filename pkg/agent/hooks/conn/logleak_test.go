@@ -81,7 +81,7 @@ func TestCaptureGRPCOverTheLimitNamesTheMethodByItsShape(t *testing.T) {
 	}
 	keys := models.NewLogKeySession()
 	ctx := models.WithLogKeySession(context.Background(), keys)
-	CaptureGRPC(ctx, logger, make(chan *models.TestCase, 1), stream, 8080, false, false)
+	CaptureGRPC(ctx, logger, make(chan *models.TestCase, 1), stream, 8080, false, false, models.IncomingOptions{})
 	said := logs.FilterMessageSnippet("gRPC test case data exceeds 5MB limit").All()
 	if len(said) != 1 || said[0].ContextMap()["path"] != "/{}/{}" {
 		t.Fatalf("want one over-the-limit line naming the method by its shape, /{}/{}, got %+v", logs.All())
