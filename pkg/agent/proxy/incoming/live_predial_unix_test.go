@@ -129,3 +129,68 @@ func TestDialAppTakesTheHoldsDialOnlyAtItsAddress(t *testing.T) {
 		t.Fatalf("dialApp(%s) = %v, %v; want the hold's dial of that address, still there for it", held.Addr(), got, err)
 	}
 }
+
+// When the app already closed the connection the handshake hold dialed for a
+// live call, dialApp hands that closed connection over (passing the close
+// through to the caller) rather than opening a second connection the caller
+// never made.
+func TestDialAppHandsOverAHoldDialTheAppAlreadyClosedWithoutRedialing(t *testing.T) {
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	up, err := net.Dial("tcp4", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = up.Close() }()
+	app, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = app.Close()
+	// Wait until the app's FIN has arrived on up so closedByPeer sees it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if gone, known := util.PeerGone(up); gone && known {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("app's FIN never arrived on the hold's dial")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	extraAccepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := l.Accept(); err == nil {
+			extraAccepted <- c
+		}
+	}()
+
+	pre := util.NewPredialed(l.Addr().String(), connseq.NewUpstream(up))
+	ctx := util.WithPredialed(context.Background(), pre)
+	pm := New(zap.NewNop(), nil, &config.Config{})
+	client, proxied := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	got, err := pm.dialApp(ctx, l.Addr().String(), proxied)
+	if err != nil {
+		t.Fatalf("dialApp = %v, want the closed hold dial handed over", err)
+	}
+	defer func() { _ = got.Close() }()
+	if !pre.Is(got) {
+		t.Fatalf("dialApp opened a second connection instead of handing over the hold's dial")
+	}
+	_ = got.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, rerr := got.Read(make([]byte, 1)); n != 0 || rerr != io.EOF {
+		t.Fatalf("reading the handed hold dial = %d, %v; want EOF (the app's close)", n, rerr)
+	}
+	select {
+	case c := <-extraAccepted:
+		_ = c.Close()
+		t.Fatal("the app's listener accepted a second connection that the caller never made")
+	default:
+	}
+}

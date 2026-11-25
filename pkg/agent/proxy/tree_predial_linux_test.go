@@ -300,3 +300,152 @@ func TestATreeCallReachingTheProxyIsServedWithTheListenerItsHoldFound(t *testing
 		t.Fatalf("handleConnection = %v, want the call served over the hold's dial", err)
 	}
 }
+
+// When no listener exists at the hold's look (treeListenerAt), found stays
+// false so a listener that starts before serveTreeListener runs is asked
+// again instead of being treated as owner 0 (not in the tree) and sent to
+// the mock path.
+func TestTheHandshakeHoldKeepsFoundFalseWhenNoListenerExistsAtItsLook(t *testing.T) {
+	recorded.forget()
+	t.Cleanup(recorded.forget)
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	port := uint32(l.Addr().(*net.TCPAddr).Port)
+	_ = l.Close()
+
+	p := selfCallProxy()
+	held := p.treeListenerAt(ipv4Dest(t, addr))
+	if held.found || held.owner != 0 {
+		t.Fatalf("treeListenerAt(%s) with no listener = %+v, want {owner:0 found:false}", addr, held)
+	}
+	// Re-listen on the same port and verify serveTreeListener re-asks when
+	// given held from treeListenerAt above.
+	again, err := net.Listen("tcp4", addr)
+	if err != nil {
+		t.Skipf("port %d could not be re-bound: %v", port, err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	up, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = up.Close() })
+	srv, err := again.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	pre := util.NewPredialed(addr, connseq.NewUpstream(up))
+	cli, done := treeCall(t, p, addr, port, pre, held)
+	if msg := exchange(cli, srv); msg != "" {
+		t.Fatal(msg)
+	}
+	_ = cli.Close()
+	_ = srv.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("serveTreeListener with held={found:false} from treeListenerAt: %v", err)
+	}
+}
+
+// A tree call addressed to the unspecified address (0.0.0.0:p or [::]:p)
+// maps to the loopback of its family in both treeListenerAt (the hold's look)
+// and serveTreeListener, so a listener bound to 127.0.0.1:p or [::1]:p is
+// found and served.
+func TestUnspecifiedDestinationResolvesTreeListenerOnLoopback(t *testing.T) {
+	recorded.forget()
+	t.Cleanup(recorded.forget)
+	p := selfCallProxy()
+
+	t.Run("ipv4 0.0.0.0", func(t *testing.T) {
+		l, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		port := uint32(l.Addr().(*net.TCPAddr).Port)
+		dest := &agent.NetworkAddress{
+			Version:    4,
+			IPv4Addr:   0,
+			Port:       port,
+			KernelPid:  uint32(os.Getpid()),
+			AgentNsPid: uint32(os.Getpid()),
+		}
+		if got := p.treeListenerAt(dest); got != (treeListener{owner: os.Getpid(), found: true}) {
+			t.Fatalf("treeListenerAt(0.0.0.0:%d) = %+v, want this process's listener on 127.0.0.1:%d", port, got, port)
+		}
+		srvCh := make(chan net.Conn, 1)
+		go func() {
+			if c, err := l.Accept(); err == nil {
+				srvCh <- c
+			}
+		}()
+		cli, srv := net.Pipe()
+		t.Cleanup(func() { _ = cli.Close() })
+		done := make(chan error, 1)
+		go func() {
+			served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("0.0.0.0:%d", port), "1", nil, treeListener{})
+			if err == nil && !served {
+				err = errors.New("not served")
+			}
+			done <- err
+		}()
+		appConn := <-srvCh
+		t.Cleanup(func() { _ = appConn.Close() })
+		if msg := exchange(cli, appConn); msg != "" {
+			t.Fatal(msg)
+		}
+		_ = cli.Close()
+		_ = appConn.Close()
+		if err := <-done; err != nil {
+			t.Fatalf("serveTreeListener(0.0.0.0:%d): %v", port, err)
+		}
+	})
+
+	t.Run("ipv6 ::", func(t *testing.T) {
+		l, err := net.Listen("tcp6", "[::1]:0")
+		if err != nil {
+			t.Skipf("cannot listen on [::1]: %v", err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		port := uint32(l.Addr().(*net.TCPAddr).Port)
+		dest := &agent.NetworkAddress{
+			Version:    6,
+			IPv6Addr:   [4]uint32{0, 0, 0, 0},
+			Port:       port,
+			KernelPid:  uint32(os.Getpid()),
+			AgentNsPid: uint32(os.Getpid()),
+		}
+		if got := p.treeListenerAt(dest); got != (treeListener{owner: os.Getpid(), found: true}) {
+			t.Fatalf("treeListenerAt([::]:%d) = %+v, want this process's listener on [::1]:%d", port, got, port)
+		}
+		srvCh := make(chan net.Conn, 1)
+		go func() {
+			if c, err := l.Accept(); err == nil {
+				srvCh <- c
+			}
+		}()
+		cli, srv := net.Pipe()
+		t.Cleanup(func() { _ = cli.Close() })
+		done := make(chan error, 1)
+		go func() {
+			served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("[::]:%d", port), "1", nil, treeListener{})
+			if err == nil && !served {
+				err = errors.New("not served")
+			}
+			done <- err
+		}()
+		appConn := <-srvCh
+		t.Cleanup(func() { _ = appConn.Close() })
+		if msg := exchange(cli, appConn); msg != "" {
+			t.Fatal(msg)
+		}
+		_ = cli.Close()
+		_ = appConn.Close()
+		if err := <-done; err != nil {
+			t.Fatalf("serveTreeListener([::]:%d): %v", port, err)
+		}
+	})
+}
