@@ -345,8 +345,8 @@ func (p *managerProxy) SeedRecordedWindows(ws []models.TestWindow) { p.mm.SeedRe
 func (p *managerProxy) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
 	p.mm.SeedBackgroundRecordings(recs)
 }
-func (p *managerProxy) EdgeWindows() *models.WindowSchedule        { return p.mm.EdgeWindows() }
-func (p *managerProxy) FirstTestWindowStart() time.Time            { return p.mm.FirstTestWindowStart() }
+func (p *managerProxy) EdgeWindows() *models.WindowSchedule { return p.mm.EdgeWindows() }
+func (p *managerProxy) FirstTestWindowStart() time.Time     { return p.mm.FirstTestWindowStart() }
 func (p *managerProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
 }
