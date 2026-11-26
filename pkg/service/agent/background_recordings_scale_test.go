@@ -614,3 +614,180 @@ func TestPrevCallTracker_MatchesBatchReference(t *testing.T) {
 		t.Fatalf("once slow(1,10) answered at 10: got %v; want %v", got, at(1))
 	}
 }
+
+// TestDerivedBackgroundRecordings_MultiDiskStreamsUnfilteredDiskBounded verifies
+// that P0-1 streaming derivation and P0-3 unfilteredDisk compose cleanly:
+// derivedBackgroundRecordingsOf and backgroundRecordingsOf stream BOTH disk
+// and unfilteredDisk via StreamRecorded in a single pass, preserve exact
+// interleaved timestamp ordering and From spans across resident + disk +
+// unfilteredDisk, deduplicate identical mocks, bound retained recordings
+// without loading all unfiltered mocks into RAM, and propagate errors when any
+// disk store is closed.
+func TestDerivedBackgroundRecordings_MultiDiskStreamsUnfilteredDiskBounded(t *testing.T) {
+	const (
+		filteredCount   = 1200
+		unfilteredCount = 4000
+	)
+	base := time.Date(2026, 11, 26, 6, 0, 0, 0, time.UTC)
+	mkHTTP := func(name, path string, at time.Time, lifetime string, mockType string) *models.Mock {
+		md := map[string]string{
+			"destAddr": "127.0.0.1:8200",
+		}
+		if lifetime != "" {
+			md[models.MetadataLifetimeKey] = lifetime
+		}
+		if mockType != "" {
+			md["type"] = mockType
+		}
+		return &models.Mock{
+			Version: "api.keploy.io/v1beta1",
+			Name:    name,
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata: md,
+				HTTPReq: &models.HTTPReq{
+					Method: models.Method("GET"),
+					URL:    "http://svc.internal:8200" + path,
+					Header: map[string]string{"Host": "svc.internal:8200"},
+				},
+				HTTPResp: &models.HTTPResp{
+					StatusCode: 200,
+					Body:       strings.Repeat("x", 2*1024),
+				},
+				ReqTimestampMock: at,
+				ResTimestampMock: at.Add(time.Millisecond),
+			},
+		}
+	}
+
+	disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+
+	unfDisk, err := proxyPkg.NewDiskMocksWithBudget(zap.NewNop(), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unfDisk.Close() })
+
+	// Interleave timestamps across resident, disk (filtered), and unfilteredDisk.
+	resBoot := mkHTTP("res-boot", "/boot/res", base.Add(1*time.Second), "", "mocks")
+	unfBoot := mkHTTP("unf-boot", "/boot/unf", base.Add(2*time.Second), "", "mocks")
+	// Protocol-phase config mock in unfilteredDisk must be excluded from derived
+	// worker recordings and must not advance From.
+	unfCfg := mkHTTP("unf-cfg", "/boot/cfg", base.Add(3*time.Second), "", "config")
+	// Duplicate name across resident and unfilteredDisk must be deduped.
+	dupUnf := mkHTTP("res-boot", "/boot/res", base.Add(1*time.Second), "", "mocks")
+
+	for _, m := range []*models.Mock{unfBoot, unfCfg, dupUnf} {
+		if err := unfDisk.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < unfilteredCount-3; i++ {
+		ts := base.Add(time.Duration(10+i*2) * time.Second)
+		if err := unfDisk.Add(mkHTTP(fmt.Sprintf("unf-poll-%d", i), fmt.Sprintf("/unf/poll/%d", i%300), ts, "", "mocks")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unfDisk.Finalize()
+
+	for i := 0; i < filteredCount; i++ {
+		ts := base.Add(time.Duration(11+i*2) * time.Second)
+		if err := disk.Add(mkHTTP(fmt.Sprintf("flt-bg-%d", i), fmt.Sprintf("/flt/bg/%d", i%200), ts, models.MetadataLifetimePerTest, "mocks")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Late in-window mock at the end so all earlier mocks are outside-window.
+	winStart := base.Add(time.Duration(10+unfilteredCount*2+100) * time.Second)
+	winEnd := winStart.Add(5 * time.Second)
+	inWin := mkHTTP("in-win-1", "/api/order", winStart.Add(time.Second), models.MetadataLifetimePerTest, "mocks")
+	if err := disk.Add(inWin); err != nil {
+		t.Fatal(err)
+	}
+	disk.Finalize()
+
+	windows := []models.TestWindow{{TestCase: "test-late", Start: winStart, End: winEnd}}
+
+	recs, err := derivedBackgroundRecordingsOf(windows, [][]*models.Mock{{resBoot}}, disk, unfDisk)
+	if err != nil {
+		t.Fatalf("derivedBackgroundRecordingsOf(disk, unfDisk): %v", err)
+	}
+
+	// Single streaming pass over EACH disk store (never double-scanned).
+	wantDiskReads := int64(filteredCount + 1)
+	if got := disk.RecordedReads(); got != wantDiskReads {
+		t.Fatalf("disk.RecordedReads() = %d; want %d (single pass)", got, wantDiskReads)
+	}
+	wantUnfReads := int64(unfilteredCount)
+	if got := unfDisk.RecordedReads(); got != wantUnfReads {
+		t.Fatalf("unfDisk.RecordedReads() = %d; want %d (single pass)", got, wantUnfReads)
+	}
+
+	// Strictly bounded retention despite > 5,000 total outside-window mocks.
+	if len(recs) == 0 || len(recs) > derivedBgMaxEntries {
+		t.Fatalf("len(recs) = %d; want in [1, %d]", len(recs), derivedBgMaxEntries)
+	}
+
+	// Verify exact timestamp ordering, dedup, and From span across resident -> unfDisk.
+	seen := make(map[string]models.BackgroundRecording, len(recs))
+	var prevTS time.Time
+	for _, r := range recs {
+		if _, dup := seen[r.Mock.Name]; dup {
+			t.Fatalf("duplicate mock %q in derived recordings", r.Mock.Name)
+		}
+		seen[r.Mock.Name] = r
+		if !prevTS.IsZero() && r.Mock.Spec.ReqTimestampMock.Before(prevTS) {
+			t.Fatalf("out-of-order derived recording %q (%v < %v)", r.Mock.Name, r.Mock.Spec.ReqTimestampMock, prevTS)
+		}
+		prevTS = r.Mock.Spec.ReqTimestampMock
+	}
+	if _, ok := seen["in-win-1"]; ok {
+		t.Fatalf("in-window mock in-win-1 leaked into derived background recordings")
+	}
+	if _, ok := seen["unf-cfg"]; ok {
+		t.Fatalf("protocol-phase config mock unf-cfg leaked into derived background recordings")
+	}
+	unfRec, ok := seen["unf-boot"]
+	if !ok {
+		t.Fatalf("expected leading unf-boot from unfilteredDisk in derived recordings")
+	}
+	if !unfRec.From.Equal(resBoot.Spec.ReqTimestampMock) {
+		t.Fatalf("unf-boot.From = %v; want %v (preceding resident res-boot)", unfRec.From, resBoot.Spec.ReqTimestampMock)
+	}
+	if unfRec.Mock.Spec.HTTPResp != nil {
+		t.Fatalf("derived unf-boot retained response payload; want stripped")
+	}
+	if resBoot.Spec.HTTPResp == nil {
+		t.Fatalf("resident res-boot response payload was mutated")
+	}
+
+	// Explicit backgroundRecordingsOf across disk + unfilteredDisk also preserves
+	// interleaved From spans (flt-bg-0 at +11s follows unf-poll-0 at +10s).
+	expRecs, err := backgroundRecordingsOf([]string{"unf-boot", "flt-bg-0"}, nil, [][]*models.Mock{{resBoot}}, disk, unfDisk)
+	if err != nil {
+		t.Fatalf("backgroundRecordingsOf(disk, unfDisk): %v", err)
+	}
+	if len(expRecs) != 2 {
+		t.Fatalf("len(expRecs) = %d; want 2", len(expRecs))
+	}
+	byName := map[string]models.BackgroundRecording{}
+	for _, r := range expRecs {
+		byName[r.Mock.Name] = r
+	}
+	if got := byName["flt-bg-0"].From; !got.Equal(base.Add(10 * time.Second)) {
+		t.Fatalf("flt-bg-0.From = %v; want %v (preceding unf-poll-0 in unfilteredDisk)", got, base.Add(10*time.Second))
+	}
+
+	// Closed second disk store propagates error cleanly without leaking iterators.
+	closedDisk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closedDisk.Close()
+	if gotRecs, err := derivedBackgroundRecordingsOf(windows, [][]*models.Mock{{resBoot}}, disk, closedDisk); err == nil || gotRecs != nil {
+		t.Fatalf("derivedBackgroundRecordingsOf with closed unfilteredDisk = (%v, %v); want (nil, error)", gotRecs, err)
+	}
+}

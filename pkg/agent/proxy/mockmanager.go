@@ -689,6 +689,19 @@ type MockManager struct {
 	// hitIndexBuilt, when set, runs between building a new hit index and
 	// swapping it in. Tests only: it lets one land a seed in that gap.
 	hitIndexBuilt func()
+	// prevPerTestHitNames tracks per-test/startup-only mock names added to
+	// hitIdx on top of a retained unfiltered tier so subsequent per-test
+	// stagings update hitIdx in O(window) instead of rebuilding the whole
+	// unfiltered hit index. Guarded by swapMu.
+	prevPerTestHitNames map[string]struct{}
+
+	// unfilteredStaged is set once the unfiltered tier has been published for
+	// the current set (cleared on ResetForReplaySession and scope staging);
+	// unfilteredDeleted is set if DeleteUnFilteredMock removes an entry or
+	// UpdateUnFilteredMock moves an entry across kinds, forcing the next
+	// staging to reload the unfiltered pool rather than retaining the tree.
+	unfilteredStaged  atomic.Bool
+	unfilteredDeleted atomic.Bool
 
 	// reclaim tracks unconsumed equivalent alternatives recorded inside active
 	// overlapping windows so a later overlapping window can reclaim a consumed
@@ -882,6 +895,8 @@ func (m *MockManager) IsClosed() bool {
 // references to the cleared trees still observe valid (empty) trees
 // rather than panicking.
 func (m *MockManager) ResetForReplaySession() {
+	m.unfilteredStaged.Store(false)
+	m.unfilteredDeleted.Store(false)
 	m.spentMu.Lock()
 	m.spent = nil
 	m.spentMu.Unlock()
@@ -1085,18 +1100,39 @@ func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered,
 func (m *MockManager) statelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
 	if kind == models.DNS {
 		key = strings.ToLower(dns.Fqdn(key))
+		m.treesMu.RLock()
+		defer m.treesMu.RUnlock()
+		if km, ok := m.statelessFiltered[kind]; ok {
+			if list := km[key]; len(list) > 0 {
+				filtered = append([]*models.Mock(nil), list...)
+			}
+		}
+		if km, ok := m.statelessUnfiltered[kind]; ok {
+			if list := km[key]; len(list) > 0 {
+				unfiltered = append([]*models.Mock(nil), list...)
+			}
+		}
+		return
 	}
 	m.treesMu.RLock()
-	defer m.treesMu.RUnlock()
-	if km, ok := m.statelessFiltered[kind]; ok {
-		if list := km[key]; len(list) > 0 {
-			filtered = append([]*models.Mock(nil), list...)
-		}
+	flt := m.filteredByKind[kind]
+	unf := m.unfilteredByKind[kind]
+	m.treesMu.RUnlock()
+	if flt != nil {
+		flt.rangeValues(func(v interface{}) bool {
+			if mk, ok := v.(*models.Mock); ok && mk != nil && mk.Name == key {
+				filtered = append(filtered, mk)
+			}
+			return true
+		})
 	}
-	if km, ok := m.statelessUnfiltered[kind]; ok {
-		if list := km[key]; len(list) > 0 {
-			unfiltered = append([]*models.Mock(nil), list...)
-		}
+	if unf != nil {
+		unf.rangeValues(func(v interface{}) bool {
+			if mk, ok := v.(*models.Mock); ok && mk != nil && mk.Name == key {
+				unfiltered = append(unfiltered, mk)
+			}
+			return true
+		})
 	}
 	return
 }
@@ -1660,15 +1696,91 @@ func (m *MockManager) keepRunOnlyForAnExactStartUp(start time.Time) {
 	m.vars.AllowRun()
 }
 
+// CanRetainUnfiltered reports whether this manager already holds an intact
+// unfiltered tier for the current set that can be retained across per-test
+// window updates without reloading or rebuilding the unfiltered trees.
+// Note: retaining the live unfiltered trees preserves per-mock SortOrder LRU
+// adjustments made by UpdateUnFilteredMock across tests within the same set
+// (matching exact-serving's single-stage session tree behavior).
+func (m *MockManager) CanRetainUnfiltered() bool {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	return !m.boundaryPending && m.unfilteredStaged.Load() && !m.unfilteredDeleted.Load()
+}
+
+// SetFilteredMocksWithWindow atomically updates the per-test and startup tiers
+// and the active test window while retaining the already-staged unfiltered
+// (session/connection) tier in place. Returns false without mutating trees or
+// window state if retention can no longer be honored under swapMu (e.g. a
+// concurrent DeleteUnFilteredMock, ResetForReplaySession, or lax session
+// promotion raced after CanRetainUnfiltered).
+func (m *MockManager) SetFilteredMocksWithWindow(filtered []*models.Mock, start, end time.Time) bool {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
+	if !m.setMocksWithWindowRetaining(filtered, nil, start, end, true) {
+		return false
+	}
+	m.placeWindowAt(start)
+	return true
+}
+
 // setMocksWithWindow is SetMocksWithWindow but for the run's (KeepNoRun).
 func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	_ = m.setMocksWithWindowRetaining(filtered, unfiltered, start, end, false)
+}
+
+func (m *MockManager) setMocksWithWindowRetaining(filtered, unfiltered []*models.Mock, start, end time.Time, retainUnfiltered bool) bool {
 	// Signal once the new trees and window are visible: the deferred calls
 	// run last in, first out, so swapMu is released first.
-	defer m.signalWindowChange()
+	applied := false
+	defer func() {
+		if applied {
+			m.signalWindowChange()
+		}
+	}()
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
-	ownForStaging(&filtered, &unfiltered)
-	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end, false)
+	if retainUnfiltered {
+		if !m.canRetainUnfilteredLocked(filtered, start, end, false) {
+			return false
+		}
+		ownForStaging(&filtered)
+	} else {
+		ownForStaging(&filtered, &unfiltered)
+	}
+	applied = m.setMocksWithWindowLockedRetaining(filtered, unfiltered, nil, start, end, false, retainUnfiltered)
+	return applied
+}
+
+// canRetainUnfilteredLocked checks under swapMu whether a retained-unfiltered
+// staging can proceed without mutating any manager state, including verifying
+// that no mock in filtered would be lax-promoted into sessionIn.
+func (m *MockManager) canRetainUnfilteredLocked(filtered []*models.Mock, start, end time.Time, scope bool) bool {
+	if start.Equal(models.BaseTime) || scope || m.boundaryPending || !m.unfilteredStaged.Load() || m.unfilteredDeleted.Load() {
+		return false
+	}
+	if !start.IsZero() && !end.IsZero() {
+		firstStart := m.firstWindowStart
+		if firstStart.IsZero() || start.Before(firstStart) {
+			firstStart = start
+		}
+		sw := pkg.ServeWindow{Start: start, End: end, FirstStart: firstStart, StrictPerCall: true, StrictWindow: true}
+		if m.exactView() == nil {
+			sw.Windows = m.testWindows.Load()
+		}
+		if gapFrom, hasGap := m.testWindows.Load().GapBefore(start); hasGap {
+			sw.InFlightFrom = gapFrom
+		}
+		for _, mock := range filtered {
+			if mock == nil || m.isReclaimConsumed(mock.Name) {
+				continue
+			}
+			if serve, _ := pkg.StageInWindow(nil, mock, sw); serve == pkg.ServedSession {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // SetScopeMocks stages the pool of keploy mock replay, with the proven switch
@@ -1896,6 +2008,13 @@ func bootPlaced(mk *models.Mock, cutoff time.Time) bool {
 // scope opens a test with no time bounds (SetScopeMocks); it is published
 // with the window, and every other staging closes one.
 func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope bool) {
+	_ = m.setMocksWithWindowLockedRetaining(filtered, unfiltered, explicitStartup, start, end, scope, false)
+}
+
+func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope, retainUnfiltered bool) bool {
+	if retainUnfiltered && !m.canRetainUnfilteredLocked(filtered, start, end, scope) {
+		return false
+	}
 	// Every staging starts the per-test stateful cursors over: a test's own
 	// recordings of a request advance their cursor within that test alone.
 	m.resetPerTestCursors()
@@ -2298,12 +2417,30 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// tier is published.
 	m.stageRunTest(filteredForTree)
 
-	// Build both remaining tiers before publishing anything: building stamps
+	// Drop our local reference to oldStartup before building replacements, and
+	// on initial/boundary staging (before any test runs) release the previous
+	// set's startup and unfiltered trees before allocating replacements so old
+	// and new large trees never coexist simultaneously in RAM.
+	oldStartup = nil
+	if !retainUnfiltered && (isInitialStaging || setBoundary) {
+		m.treesMu.Lock()
+		m.startup = NewTreeDb(customComparator)
+		m.startupKeys = nil
+		m.unfiltered = NewTreeDb(customComparator)
+		m.unfilteredByKind = make(map[models.Kind]*TreeDb)
+		m.statelessUnfiltered = make(map[models.Kind]map[string][]*models.Mock)
+		m.treesMu.Unlock()
+	}
+
+	// Build remaining tiers before publishing anything: building stamps
 	// tree IDs and sort orders, and one staged mock can sit in more than one
 	// tier (startup and session during BaseTime staging), so stamping after
 	// a tier went live would write into a mock its readers may be copying.
 	filteredBuild := m.buildTier(filteredForTree, true)
-	unfilteredBuild := m.buildTier(unfilteredForTree, false)
+	var unfilteredBuild tierBuild
+	if !retainUnfiltered {
+		unfilteredBuild = m.buildTier(unfilteredForTree, false)
+	}
 	// The explicit startup slice of a three-tier staging joins the startup
 	// tier, stamped after every other tier, as the three-tier call has always
 	// stamped it.
@@ -2385,7 +2522,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// where all three tiers agree. Suppression is per-call, not a flag on the
 	// manager, so it cannot swallow a concurrent consumer's own bump.
 	m.publishFiltered(filteredBuild, false)
-	m.publishUnfiltered(unfilteredBuild, false)
+	if !retainUnfiltered {
+		m.publishUnfiltered(unfilteredBuild, false)
+		if scope {
+			m.unfilteredStaged.Store(false)
+		}
+	}
 
 	touchedAll := map[models.Kind]struct{}{}
 	if carryOn {
@@ -2437,13 +2579,50 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// mock whose count never moves. Session and connection mocks copied into
 	// startup during BaseTime staging are already covered via unfilteredForTree;
 	// the ones that miss are those the startup tier alone holds.
-	m.rebuildHitIndex(setBoundary, startupInit, filteredForTree, unfilteredForTree, explicitStartup)
-
-	// Seed per-connID trees for connection-scoped mocks so
-	// GetConnectionMocks takes the O(1) path from the first lookup.
-	for _, mk := range unfilteredForTree {
-		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimeConnection {
-			m.AddConnectionMock(mk)
+	if retainUnfiltered {
+		m.updatePerTestHitIndex(startupInit, filteredForTree, explicitStartup)
+	} else {
+		m.rebuildHitIndex(setBoundary, startupInit, filteredForTree, unfilteredForTree, explicitStartup)
+		// Seed prevPerTestHitNames with per-test/startup-only names (excluding
+		// unfilteredForTree) so the next retained staging evicts stale per-test
+		// entries from hitIdx without allocating an O(U) unfiltered name map.
+		perTestCandidates := make(map[string]struct{}, len(filteredForTree)+len(explicitStartup))
+		for _, s := range [][]*models.Mock{filteredForTree, explicitStartup} {
+			for _, mk := range s {
+				if mk != nil && mk.Name != "" {
+					perTestCandidates[mk.Name] = struct{}{}
+				}
+			}
+		}
+		if isInitialStaging {
+			// On initial staging, startupInit = filtered + unfiltered; only
+			// filtered mocks are per-test/startup-only candidates.
+			for _, mk := range filtered {
+				if mk != nil && mk.Name != "" {
+					perTestCandidates[mk.Name] = struct{}{}
+				}
+			}
+		} else {
+			for _, mk := range startupInit {
+				if mk != nil && mk.Name != "" {
+					perTestCandidates[mk.Name] = struct{}{}
+				}
+			}
+		}
+		if len(perTestCandidates) > 0 {
+			for _, mk := range unfilteredForTree {
+				if mk != nil && mk.Name != "" {
+					delete(perTestCandidates, mk.Name)
+				}
+			}
+		}
+		m.prevPerTestHitNames = perTestCandidates
+		// Seed per-connID trees for connection-scoped mocks so
+		// GetConnectionMocks takes the O(1) path from the first lookup.
+		for _, mk := range unfilteredForTree {
+			if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimeConnection {
+				m.AddConnectionMock(mk)
+			}
 		}
 	}
 
@@ -2496,6 +2675,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			zap.Time("windowStart", start),
 			zap.Time("windowEnd", end))
 	}
+	return true
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
@@ -3150,6 +3330,24 @@ func (m *MockManager) OpenTestWithWindow(filtered, unfiltered []*models.Mock, st
 	carry := m.carriedInto(m.exactView())
 	m.vars.StartOpening(func() { m.setMocksWithWindow(filtered, unfiltered, start, end) }, given, carry)
 	m.aheadVars.Reset()
+}
+
+// OpenTestFilteredWithWindow stages a test's per-test window while retaining
+// the already-staged unfiltered tier and begins its variables in the same step.
+// Returns false without mutating trees, window, or variables if retention can
+// no longer be honored under swapMu.
+func (m *MockManager) OpenTestFilteredWithWindow(filtered []*models.Mock, start, end time.Time, given []models.VariableBinding) bool {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
+	carry := m.carriedInto(m.exactView())
+	opened := m.vars.TryStartOpening(func() bool {
+		return m.setMocksWithWindowRetaining(filtered, nil, start, end, true)
+	}, given, carry)
+	if !opened {
+		return false
+	}
+	m.aheadVars.Reset()
+	return true
 }
 
 // BoundVariables is the test variables the current test (or the one that just
@@ -4125,14 +4323,19 @@ func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		b.touched[k] = struct{}{}
-		if b.stateless[k] == nil {
-			b.stateless[k] = make(map[string][]*models.Mock)
+		// Only DNS uses the stateless fast-path map in production; non-DNS
+		// GetStatelessMocks lookups fall back to scanning the per-kind tree,
+		// avoiding an extra O(U) map+slice index per staging.
+		if k == models.DNS {
+			if b.stateless[k] == nil {
+				b.stateless[k] = make(map[string][]*models.Mock)
+			}
+			key := mock.Name
+			if mock.Spec.DNSReq != nil {
+				key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
+			}
+			b.stateless[k][key] = append(b.stateless[k][key], mock)
 		}
-		key := mock.Name
-		if mock.Kind == models.DNS && mock.Spec.DNSReq != nil {
-			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
-		}
-		b.stateless[k][key] = append(b.stateless[k][key], mock)
 		if b.v3Trace && mock.Kind == models.PostgresV3 {
 			b.v3Names = append(b.v3Names, mock.Name)
 		}
@@ -4199,6 +4402,8 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 	}
 	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = b.tree, b.byKind, b.stateless
 	m.treesMu.Unlock()
+	m.unfilteredStaged.Store(true)
+	m.unfilteredDeleted.Store(false)
 	if bump {
 		for k := range b.touched {
 			m.bumpRevisionKind(k)
@@ -4355,6 +4560,7 @@ func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) b
 				zap.String("toKind", string(newK)),
 			)
 		}
+		m.unfilteredDeleted.Store(true)
 	}
 
 	// Mark usage if global changed (legacy behavior)
@@ -4602,6 +4808,7 @@ func (m *MockManager) deleteUnFilteredTier(mock models.Mock) bool {
 	m.treesMu.Unlock()
 
 	if deletedGlobal {
+		m.unfilteredDeleted.Store(true)
 		if err := m.flagMockAsUsed(models.MockState{
 			Name:             mock.Name,
 			Kind:             mock.Kind,
@@ -5605,6 +5812,41 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 		keep()
 	}
 	m.hitIdx = idx
+}
+
+// updatePerTestHitIndex updates hitIdx in place for the newly staged per-test
+// and startup slices while keeping every counter belonging to the retained
+// unfiltered tier untouched, avoiding an O(U) map rebuild on every test.
+// Caller holds swapMu; hitMu is taken as a leaf lock.
+func (m *MockManager) updatePerTestHitIndex(slices ...[]*models.Mock) {
+	want := make(map[string]struct{})
+	for _, s := range slices {
+		for _, mk := range s {
+			if mk != nil && mk.Name != "" {
+				want[mk.Name] = struct{}{}
+			}
+		}
+	}
+	nextPerTest := make(map[string]struct{}, len(want))
+	m.hitMu.Lock()
+	defer m.hitMu.Unlock()
+	if m.hitIdx == nil {
+		m.hitIdx = make(map[string]*atomic.Uint64, len(want))
+	}
+	for name := range m.prevPerTestHitNames {
+		if _, keep := want[name]; !keep {
+			delete(m.hitIdx, name)
+		} else {
+			nextPerTest[name] = struct{}{}
+		}
+	}
+	for name := range want {
+		if _, ok := m.hitIdx[name]; !ok {
+			m.hitIdx[name] = new(atomic.Uint64)
+			nextPerTest[name] = struct{}{}
+		}
+	}
+	m.prevPerTestHitNames = nextPerTest
 }
 
 // ---------- bookkeeping ----------

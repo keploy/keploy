@@ -159,6 +159,12 @@ func NewDiskMocks(logger *zap.Logger) (*DiskMocks, error) {
 	return newDiskMocks(logger, residentBudgetBytes)
 }
 
+// NewDiskMocksWithBudget creates a DiskMocks store keeping up to budget bytes
+// of encoded records in memory and spilling the rest to its unlinked temp file.
+func NewDiskMocksWithBudget(logger *zap.Logger, budget int64) (*DiskMocks, error) {
+	return newDiskMocks(logger, budget)
+}
+
 // newDiskMocks is NewDiskMocks keeping up to budget bytes of records in
 // memory.
 func newDiskMocks(logger *zap.Logger, budget int64) (*DiskMocks, error) {
@@ -219,7 +225,10 @@ func EligibleForResponseSpill(m *models.Mock) bool {
 // written as a separate blob and the record encoded with it elided. Called
 // from the single-threaded ingest loop.
 func (d *DiskMocks) Add(m *models.Mock) error {
-	spill := EligibleForResponseSpill(m)
+	// Per-test HTTP/Mongo mocks spill large answers via EligibleForResponseSpill;
+	// HTTP session/config mocks stored in an unfiltered DiskMocks also spill
+	// large response bodies because the HTTP matcher hydrates on serve.
+	spill := EligibleForResponseSpill(m) || (m != nil && m.Kind == models.HTTP && m.Spec.HTTPResp != nil && len(m.Spec.HTTPResp.Body) >= responseSpillMinBytes)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -263,7 +272,7 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	if err != nil {
 		return fmt.Errorf("disk mocks: write %q: %w", m.Name, err)
 	}
-	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), resTsNano: m.Spec.ResTimestampMock.UnixNano(),
+	e := diskEntry{reqTsNano: placeNano(m.Spec.ReqTimestampMock), resTsNano: placeNano(m.Spec.ResTimestampMock),
 		placeTsNano: placeNano(models.PlaceOf(m)), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
@@ -1047,21 +1056,28 @@ func (d *DiskMocks) decodeAll(sel []diskEntry) ([]*models.Mock, error) {
 	return out, nil
 }
 
-// EarliestReqTs returns the earliest on-disk request timestamp (zero if empty);
-// folded into the replay freeze anchor since boot mocks often live on disk.
+// EarliestReqTs returns the earliest non-zero on-disk request timestamp (zero
+// if empty or if every entry is untimed); folded into the replay freeze anchor
+// since boot mocks often live on disk.
 func (d *DiskMocks) EarliestReqTs() time.Time {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if len(d.entries) == 0 {
-		return time.Time{}
-	}
 	// entries are sorted by place once finalized, and a mock placed at its
-	// answer may be the earliest asked: the minimum is read either way.
-	min := d.entries[0].reqTsNano
-	for _, e := range d.entries[1:] {
-		if e.reqTsNano < min {
-			min = e.reqTsNano
+	// answer may be the earliest asked: the minimum is read either way,
+	// skipping untimed entries (reqTsNano == 0).
+	var min int64
+	found := false
+	for _, e := range d.entries {
+		if e.reqTsNano == 0 {
+			continue
 		}
+		if !found || e.reqTsNano < min {
+			min = e.reqTsNano
+			found = true
+		}
+	}
+	if !found {
+		return time.Time{}
 	}
 	return time.Unix(0, min)
 }

@@ -18,6 +18,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -2743,23 +2744,37 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 		}
 	}
 	disk := s.diskMocks
+	unfDisk := s.unfilteredDisk
 	s.mu.RUnlock()
-	var rest []string
-	for n := range want {
-		if out[n] == nil {
-			rest = append(rest, n)
+	loadFrom := func(d *proxyPkg.DiskMocks) error {
+		if d == nil {
+			return nil
 		}
-	}
-	if len(rest) > 0 && disk != nil {
-		found, err := disk.LoadByNames(rest)
+		var rest []string
+		for n := range want {
+			if out[n] == nil {
+				rest = append(rest, n)
+			}
+		}
+		if len(rest) == 0 {
+			return nil
+		}
+		found, err := d.LoadByNames(rest)
 		if err != nil {
-			return nil, fmt.Errorf("reading mocks %s: %w", strings.Join(rest, ", "), err)
+			return fmt.Errorf("reading mocks %s: %w", strings.Join(rest, ", "), err)
 		}
 		for _, m := range found {
 			if m != nil {
 				out[m.Name] = m
 			}
 		}
+		return nil
+	}
+	if err := loadFrom(disk); err != nil {
+		return nil, err
+	}
+	if err := loadFrom(unfDisk); err != nil {
+		return nil, err
 	}
 	var missing []string
 	for n := range want {

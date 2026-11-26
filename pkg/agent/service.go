@@ -1454,6 +1454,25 @@ type WindowedTestOpener interface {
 	OpenTestWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time, given []models.VariableBinding) error
 }
 
+// ErrUnfilteredNotRetained is returned by UnfilteredRetainingWindowedProxy
+// methods when the proxy cannot safely retain its already-staged unfiltered
+// tier under its staging lock (for example, a concurrent DeleteUnFilteredMock,
+// ResetForReplaySession, worker manager invalidation, or lax session promotion
+// raced after CanRetainUnfiltered). The proxy leaves its trees, window, and
+// variable state untouched so the caller can fall back to full staging.
+var ErrUnfilteredNotRetained = errors.New("unfiltered tier cannot be retained")
+
+// UnfilteredRetainingWindowedProxy is an optional WindowedProxy extension that
+// replaces the per-test and startup tiers for a new test window while keeping
+// the already-staged unfiltered (session/connection) tier in place, avoiding
+// reloading, copying, and rebuilding the unfiltered trees on every test when
+// the unfiltered pool has not changed across windows.
+type UnfilteredRetainingWindowedProxy interface {
+	SetFilteredMocksWithWindow(ctx context.Context, filtered []*models.Mock, start, end time.Time) error
+	OpenTestFilteredWithWindow(ctx context.Context, filtered []*models.Mock, start, end time.Time, given []models.VariableBinding) error
+	CanRetainUnfiltered() bool
+}
+
 // AsyncMockLoader is an optional Proxy capability. The agent hands the proxy
 // the COMPLETE async-mock corpus exactly once (at mock-store time) so the
 // async engine can build its per-lane ordered streams. Proxies without async
