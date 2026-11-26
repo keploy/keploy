@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -69,13 +70,16 @@ const composeCompatibilitySeparator = "_"
 
 // composeIdentity is what the compose files make of each service's container
 // name, resolved as docker compose resolves them: the project's name, the
-// separator compose joins a default container name with, and each service's
+// separator compose joins a default container name with, each service's
 // container_name after interpolation and the merge of every file ("" when the
-// service sets none, or sets it to a variable that is empty).
+// service sets none, or sets it to a variable that is empty), and any
+// identity/runtime fields set on a resolved `keploy-agent` service that make
+// it conflict with keploy's generated agent service.
 type composeIdentity struct {
-	project        string
-	separator      string
-	containerNames map[string]string
+	project             string
+	separator           string
+	containerNames      map[string]string
+	agentConflictFields []string
 }
 
 // loadComposeIdentity resolves paths, in order, as `docker compose -f p1 -f p2
@@ -108,11 +112,12 @@ func loadComposeContentIdentity(ctx context.Context, content []byte, scope Compo
 // COMPOSE_DISABLE_ENV_FILE is true), and each later file merged over the
 // earlier ones, extends and include followed.
 //
-// It reads what names a container and nothing more. A document that does not
-// load (a required variable unset, a malformed template, an env file that
-// cannot be read) is an error, as it is to compose: keploy does not fall back
-// to matching the text as written, which is the guess that missed every
-// container_name set from a variable.
+// It reads what names a container (plus any `keploy-agent` conflict checks on
+// projects that mention `keploy-agent` or merge multiple `-f` files). A
+// document that does not load (a required variable unset, a malformed template,
+// an env file that cannot be read) is an error, as it is to compose: keploy
+// does not fall back to matching the text as written, which is the guess that
+// missed every container_name set from a variable.
 func resolveComposeIdentity(ctx context.Context, paths []string, content []byte, scope ComposeScope) (*composeIdentity, error) {
 	if !scope.InProcess && scope.EnvErr != nil {
 		return nil, scope.EnvErr
@@ -193,7 +198,130 @@ func resolveComposeIdentity(ctx context.Context, paths []string, content []byte,
 	for name, svc := range project.AllServices() {
 		ident.containerNames[name] = svc.ContainerName
 	}
+	_, hasAgent := ident.containerNames["keploy-agent"]
+	switch {
+	case hasAgent && len(project.ComposeFiles) <= 1:
+		// A single compose file (or in-memory document) has no secondary -f
+		// override file: if `keploy-agent` is keyed directly in the document,
+		// AddKeployAgentToCompose refuses it first; otherwise it was imported
+		// via `include:`, which must be refused rather than merged.
+		ident.agentConflictFields = []string{"include"}
+	case len(project.ComposeFiles) > 1:
+		conflicts, err := detectAgentOverrideConflicts(ctx, o, project, hasAgent, loadOptions)
+		if err != nil {
+			return nil, err
+		}
+		ident.agentConflictFields = conflicts
+	}
 	return ident, nil
+}
+
+const (
+	agentSentinelImage         = "__keploy_sentinel_image__"
+	agentSentinelContainerName = "__keploy_sentinel_container__"
+	agentSentinelEntrypoint    = "__keploy_sentinel_entrypoint__"
+	agentSentinelCommand       = "__keploy_sentinel_command__"
+)
+
+var agentSentinelCompose = []byte(
+	"services:\n" +
+		"  keploy-agent:\n" +
+		"    image: " + agentSentinelImage + "\n" +
+		"    container_name: " + agentSentinelContainerName + "\n" +
+		"    entrypoint: [" + agentSentinelEntrypoint + "]\n" +
+		"    command: [" + agentSentinelCommand + "]\n",
+)
+
+// detectAgentOverrideConflicts checks a multi-file compose project for a
+// `keploy-agent` service that cannot safely be merged with keploy's generated
+// agent service. It refuses a `keploy-agent` imported only through `include:`,
+// then prepends an in-memory sentinel `keploy-agent` service ahead of the `-f`
+// files and merges them with compose-go. Comparing the merged service against
+// the sentinel catches every form of identity/exec override or removal —
+// literal values, empty strings/lists, `null`, env interpolation, `extends`,
+// `!override`, and `!reset` (including resetting the whole `keploy-agent`
+// service) — while leaving pure tuning overrides (such as `cpus: 0.02` in
+// agent-cpu.yml) intact.
+func detectAgentOverrideConflicts(
+	ctx context.Context,
+	o *cli.ProjectOptions,
+	project *composetypes.Project,
+	hasAgent bool,
+	loadOptions []func(*loader.Options),
+) ([]string, error) {
+	opts := append(loadOptions[:len(loadOptions):len(loadOptions)], func(lo *loader.Options) {
+		lo.SetProjectName(project.Name, true)
+	})
+	if hasAgent {
+		directFiles := make([]composetypes.ConfigFile, 0, len(project.ComposeFiles))
+		for _, f := range project.ComposeFiles {
+			directFiles = append(directFiles, composetypes.ConfigFile{Filename: f})
+		}
+		noIncludeOpts := append(opts[:len(opts):len(opts)], func(lo *loader.Options) {
+			lo.SkipInclude = true
+			lo.SkipExtends = true
+		})
+		direct, err := loadSchemaUnchecked(func(extra ...func(*loader.Options)) (*composetypes.Project, error) {
+			return loader.LoadWithContext(ctx, composetypes.ConfigDetails{
+				ConfigFiles: directFiles,
+				WorkingDir:  project.WorkingDir,
+				Environment: o.Environment,
+			}, append(noIncludeOpts[:len(noIncludeOpts):len(noIncludeOpts)], extra...)...)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := direct.AllServices()["keploy-agent"]; !ok {
+			return []string{"include"}, nil
+		}
+	}
+	configFiles := make([]composetypes.ConfigFile, 0, len(project.ComposeFiles)+1)
+	configFiles = append(configFiles, composetypes.ConfigFile{
+		Filename: "<keploy-agent-sentinel>",
+		Content:  agentSentinelCompose,
+	})
+	for _, f := range project.ComposeFiles {
+		configFiles = append(configFiles, composetypes.ConfigFile{
+			Filename: f,
+		})
+	}
+	merged, err := loadSchemaUnchecked(func(extra ...func(*loader.Options)) (*composetypes.Project, error) {
+		return loader.LoadWithContext(ctx, composetypes.ConfigDetails{
+			ConfigFiles: configFiles,
+			WorkingDir:  project.WorkingDir,
+			Environment: o.Environment,
+		}, append(opts[:len(opts):len(opts)], extra...)...)
+	})
+	if err != nil {
+		return nil, err
+	}
+	svc, ok := merged.AllServices()["keploy-agent"]
+	if !ok {
+		return []string{"service"}, nil
+	}
+	return agentServiceConflictFields(svc), nil
+}
+
+// agentServiceConflictFields returns the identity/runtime fields altered or
+// cleared relative to the sentinel `keploy-agent` service, plus `build` if set.
+func agentServiceConflictFields(svc composetypes.ServiceConfig) []string {
+	var fields []string
+	if svc.Image != agentSentinelImage {
+		fields = append(fields, "image")
+	}
+	if svc.Build != nil {
+		fields = append(fields, "build")
+	}
+	if svc.ContainerName != agentSentinelContainerName {
+		fields = append(fields, "container_name")
+	}
+	if !slices.Equal(svc.Entrypoint, composetypes.ShellCommand{agentSentinelEntrypoint}) {
+		fields = append(fields, "entrypoint")
+	}
+	if !slices.Equal(svc.Command, composetypes.ShellCommand{agentSentinelCommand}) {
+		fields = append(fields, "command")
+	}
+	return fields
 }
 
 // composeEnvFilesOption is cli.WithEnvFiles using env (which overlays inline
