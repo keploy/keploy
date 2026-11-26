@@ -61,7 +61,7 @@ echo "Using containers - MONGO: $MONGO_CONTAINER, APP_IMAGE: $APP_IMAGE, KEPLOY:
 # ---------------------------------------------------------------------------
 cleanup() {
     echo "Cleaning up containers and network for job ${JOB_ID}..."
-    for c in "${MONGO_CONTAINER}" "ginApp_${JOB_ID}_1" "ginApp_${JOB_ID}_2" "ginApp_${JOB_ID}_test" "${KEPLOY_CONTAINER}"; do
+    for c in "${MONGO_CONTAINER}" "ginApp_${JOB_ID}_1" "ginApp_${JOB_ID}_2" "ginApp_${JOB_ID}_1_json" "ginApp_${JOB_ID}_2_json" "ginApp_${JOB_ID}_test" "ginApp_${JOB_ID}_test_json" "${KEPLOY_CONTAINER}"; do
         docker rm -f "$c" >/dev/null 2>&1 || true
     done
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true

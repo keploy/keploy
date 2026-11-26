@@ -44,7 +44,10 @@ cleanup() {
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_1" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_2" >/dev/null 2>&1 || true
+    docker rm -f "${APP_CONTAINER}_1_json" >/dev/null 2>&1 || true
+    docker rm -f "${APP_CONTAINER}_2_json" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_test_1" >/dev/null 2>&1 || true
+    docker rm -f "${APP_CONTAINER}_test_json" >/dev/null 2>&1 || true
     docker rm -f "$KEPLOY_CONTAINER" >/dev/null 2>&1 || true
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
     echo "Cleanup completed for job ${JOB_ID}"

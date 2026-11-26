@@ -98,6 +98,12 @@ type AgentClient struct {
 	// Setup's initial draw and composeAgentPortRefused's move draw so keploy's
 	// agent never takes a port another service in the same compose up publishes.
 	composeStaticPorts []uint32
+	// refusedAgentPorts holds agent ports that the container engine refused to
+	// publish during this Setup sequence (under mu). Excluded on subsequent
+	// RetryAgentSetup draws so a retry cannot re-pick a port held inside a
+	// VM (e.g. Docker Desktop on macOS) or by a concurrent process; cleared
+	// once agentReady succeeds or fails with a non-retryable error.
+	refusedAgentPorts []uint32
 
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
@@ -2881,6 +2887,15 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 			// the reason an agent that could not start gave for it.
 			exited <- err
 			if err != nil && !errors.Is(agentCtx.Err(), context.Canceled) {
+				if !run.ready.Load() && errors.Is(err, utils.ErrPortTaken) {
+					// Taken-port startup failure: already delivered via exited to
+					// waitForAgent -> RetryAgentSetup for an immediate fresh pick.
+					// Returning it to grp would poison teardown's setupErrGrp.Wait()
+					// after a successful retry and cancel errgroup.WithContext
+					// callers before RetryAgentSetup can run the next attempt.
+					a.logger.Debug("docker agent port was taken before bind; deferring to retry", zap.Error(err))
+					return nil
+				}
 				a.logger.Error("failed to start Docker agent", zap.Error(err))
 				return err
 			}
@@ -3130,6 +3145,19 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		}
 		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
+			if !run.ready.Load() && run.portTaken.Load() != nil {
+				// Native agent failed startup on a taken port; waitForAgent
+				// surfaces utils.ErrPortTaken to RetryAgentSetup. Keep grp clean
+				// so the retry is not cancelled and teardown does not report
+				// the recovered attempt's error.
+				a.mu.Lock()
+				if a.agentCmd == cmd { // not a later start's
+					a.agentCmd = nil
+				}
+				a.mu.Unlock()
+				a.logger.Debug("agent process exited on a taken port; deferring to retry", zap.Error(err))
+				return nil
+			}
 			a.logger.Error("agent process exited with error", zap.Error(err))
 			return err
 		}
@@ -3145,7 +3173,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-		if a.conf.AgentURI() == "" {
+		if run.isGone() || a.conf.AgentURI() == "" {
 			return nil
 		}
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
@@ -3264,6 +3292,16 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 		}
 		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
+			if !run.ready.Load() && run.portTaken.Load() != nil {
+				a.mu.Lock()
+				if a.agentPTY == ptyHandle { // not a later start's
+					a.agentCmd = nil
+					a.agentPTY = nil
+				}
+				a.mu.Unlock()
+				a.logger.Debug("agent process exited on a taken port; deferring to retry", zap.Error(err))
+				return nil
+			}
 			a.logger.Error("agent process exited with error", zap.Error(err))
 			return err
 		}
@@ -3280,7 +3318,7 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-		if a.conf.AgentURI() == "" {
+		if run.isGone() || a.conf.AgentURI() == "" {
 			return nil
 		}
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
@@ -3826,8 +3864,12 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 // its clock. Under docker compose, BeforeTestSetCompose hands it.
 func (a *AgentClient) agentReady(ctx context.Context, exited <-chan error, isDockerCmd bool, opts models.SetupOptions) error {
 	if err := a.waitForAgent(ctx, exited, isDockerCmd, opts); err != nil {
+		if !errors.Is(err, utils.ErrPortTaken) && !errors.Is(err, pkg.ErrAgentNotReady) {
+			a.clearRefusedAgentPorts()
+		}
 		return err
 	}
+	a.clearRefusedAgentPorts()
 	a.handClockRun(ctx)
 	return nil
 }
@@ -4024,14 +4066,43 @@ func agentPortFor(docker bool, keep ...uint32) (uint32, error) {
 	return hostPort(keep...)
 }
 
+func (a *AgentClient) noteRefusedAgentPort(port uint32) {
+	if port == 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !slices.Contains(a.refusedAgentPorts, port) {
+		a.refusedAgentPorts = append(a.refusedAgentPorts, port)
+	}
+}
+
+func (a *AgentClient) refusedAgentPortsSnapshot() []uint32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.refusedAgentPorts) == 0 {
+		return nil
+	}
+	return append([]uint32(nil), a.refusedAgentPorts...)
+}
+
+func (a *AgentClient) clearRefusedAgentPorts() {
+	a.mu.Lock()
+	a.refusedAgentPorts = nil
+	a.mu.Unlock()
+}
+
 // agentPorts picks the ports a new agent's server (agentPortFor), proxy and
 // DNS server (proxyPorts) listen on. extraKeep holds any additional ports the
 // agent's own port must stay off (such as host ports statically published by
-// other services in a compose document).
+// other services in a compose document). Ports the engine previously refused
+// to publish during this Setup sequence are excluded too.
 func (a *AgentClient) agentPorts(docker bool, extraKeep ...uint32) (agentPort, proxyPort, dnsPort uint32, err error) {
-	keep := make([]uint32, 0, 2+len(extraKeep))
+	refused := a.refusedAgentPortsSnapshot()
+	keep := make([]uint32, 0, 2+len(extraKeep)+len(refused))
 	keep = append(keep, a.conf.ProxyPort, a.conf.DNSPort)
 	keep = append(keep, extraKeep...)
+	keep = append(keep, refused...)
 	if agentPort, err = agentPortFor(docker, keep...); err != nil {
 		return 0, 0, 0, fmt.Errorf("failed to find available port for agent: %w", err)
 	}
@@ -4658,7 +4729,12 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 			return nil
 		}
 		err = publishRefusedBy(err, said.String(), opts.AgentPort)
-		utils.LogError(logger, err, "failed to run keploy agent in docker")
+		if errors.Is(err, utils.ErrPortTaken) {
+			a.noteRefusedAgentPort(opts.AgentPort)
+			logger.Debug("keploy agent docker run could not publish taken port", zap.Error(err))
+		} else {
+			utils.LogError(logger, err, "failed to run keploy agent in docker")
+		}
 		return err
 	}
 
@@ -5131,7 +5207,12 @@ func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logg
 			return nil
 		}
 		err = publishRefusedBy(err, said.String(), agentPort)
-		utils.LogError(logger, err, "failed to run keploy agent in docker with PTY")
+		if errors.Is(err, utils.ErrPortTaken) {
+			a.noteRefusedAgentPort(agentPort)
+			logger.Debug("keploy agent docker run with PTY could not publish taken port", zap.Error(err))
+		} else {
+			utils.LogError(logger, err, "failed to run keploy agent in docker with PTY")
+		}
 		return err
 	}
 

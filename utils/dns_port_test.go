@@ -72,7 +72,8 @@ func TestADNSPortsProbeBindsUDPBesideTCP(t *testing.T) {
 			}
 			asked := udpPicks(t, c.closeFails, taken...)
 			wasTCP := portListen
-			t.Cleanup(func() { portListen = wasTCP })
+			wasLoopback := loopbackListen
+			t.Cleanup(func() { portListen = wasTCP; loopbackListen = wasLoopback })
 			var opened []*pickListener
 			portListen = func(_ context.Context, network, address string) (net.Listener, error) {
 				if network != "tcp" || address != fmt.Sprintf(":%d", port) {
@@ -81,6 +82,12 @@ func TestADNSPortsProbeBindsUDPBesideTCP(t *testing.T) {
 				l := &pickListener{port: port}
 				opened = append(opened, l)
 				return l, nil
+			}
+			loopbackListen = func(_ context.Context, network, address string) (net.Listener, error) {
+				if network != "tcp4" || address != fmt.Sprintf("127.0.0.1:%d", port) {
+					return nil, fmt.Errorf("unexpected loopback listen on %s %s", network, address)
+				}
+				return &pickListener{port: port}, nil
 			}
 			wasUDP := udpListen
 			udpListen = func(network, address string) (net.PacketConn, error) {

@@ -285,9 +285,9 @@ func TestTheOSsPickIsNeverAnExcludedPort(t *testing.T) {
 // The probes and the OS's pick are plain TCP listeners, never Go's default
 // MPTCP: for as long as one is open it listens on every interface.
 func TestPortProbesArePlainTCP(t *testing.T) {
-	was := portListen
-	t.Cleanup(func() { portListen = was })
-	opened := 0
+	was, wasLoopback := portListen, loopbackListen
+	t.Cleanup(func() { portListen, loopbackListen = was, wasLoopback })
+	opened, loopbackOpened := 0, 0
 	portListen = func(ctx context.Context, network, address string) (net.Listener, error) {
 		ln, err := was(ctx, network, address)
 		if err == nil {
@@ -296,16 +296,102 @@ func TestPortProbesArePlainTCP(t *testing.T) {
 		}
 		return ln, err
 	}
+	loopbackListen = func(ctx context.Context, network, address string) (net.Listener, error) {
+		ln, err := wasLoopback(ctx, network, address)
+		if err == nil {
+			loopbackOpened++
+			plaintcptest.RequirePlainTCP(t, ln)
+		}
+		return ln, err
+	}
 	for _, c := range []struct {
 		name  string
 		known bool
 	}{{"a probe above the range", true}, {"the OS's pick", false}} {
-		opened = 0
+		opened, loopbackOpened = 0, 0
 		if _, err := availablePortAbove(func() (uint32, uint32, bool) { return 32768, 60999, c.known }, 0, false); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if opened == 0 {
 			t.Fatalf("%s: no listener through portListen", c.name)
 		}
+		if c.known && loopbackOpened == 0 {
+			t.Fatalf("%s: no listener through loopbackListen", c.name)
+		}
 	}
 }
+
+// A port held on 127.0.0.1 alone (as a Docker container's -p 127.0.0.1:P:P
+// publish holds it on macOS Docker Desktop) must never be reported free. Go
+// sets SO_REUSEADDR on Unix TCP listeners, and BSD/macOS bind() rules allow a
+// wildcard probe on ":P" to succeed beside a 127.0.0.1:P listener; probing
+// loopback directly rejects it.
+func TestProbePortRejectsLoopbackHeldPort(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	held := uint32(ln.Addr().(*net.TCPAddr).Port)
+
+	free, err := probePort(held, false)
+	if err != nil {
+		t.Fatalf("probePort(%d, false) returned unexpected error: %v", held, err)
+	}
+	if free {
+		t.Fatalf("probePort(%d, false) = true while 127.0.0.1:%d is held; want false", held, held)
+	}
+	if isPortAvailable(held) {
+		t.Fatalf("isPortAvailable(%d) = true while 127.0.0.1:%d is held; want false", held, held)
+	}
+	if got, err := EnsureAvailablePorts(held); err != nil || got == held {
+		t.Fatalf("EnsureAvailablePorts(%d) = %d, %v while 127.0.0.1:%d is held; want another port", held, got, err, held)
+	}
+}
+
+// Even where the wildcard probe succeeds (as BSD/macOS SO_REUSEADDR allows
+// beside a 127.0.0.1 listener), a loopback bind refusal marks the port taken,
+// and a failed loopback Close propagates as an error rather than leaking an fd.
+func TestLoopbackProbeRejectsPortAndPropagatesCloseError(t *testing.T) {
+	const port = 61645
+	wasTCP, wasLoopback := portListen, loopbackListen
+	t.Cleanup(func() { portListen, loopbackListen = wasTCP, wasLoopback })
+
+	portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+		if network != "tcp" || address != fmt.Sprintf(":%d", port) {
+			return nil, fmt.Errorf("unexpected wildcard listen on %s %s", network, address)
+		}
+		return &pickListener{port: port}, nil
+	}
+
+	// Case 1: wildcard succeeds, loopback refuses -> port is NOT free, no error.
+	loopbackListen = func(_ context.Context, network, address string) (net.Listener, error) {
+		if network != "tcp4" || address != fmt.Sprintf("127.0.0.1:%d", port) {
+			return nil, fmt.Errorf("unexpected loopback listen on %s %s", network, address)
+		}
+		return nil, errors.New("bind: address already in use")
+	}
+	free, err := probePort(port, false)
+	if free || err != nil {
+		t.Fatalf("probePort(%d) with loopback refused = (%v, %v); want (false, nil)", port, free, err)
+	}
+
+	// Case 2: loopback Close fails -> propagated error naming the port.
+	closeErr := errors.New("close failed")
+	loopbackListen = func(_ context.Context, _ string, _ string) (net.Listener, error) {
+		return &failingCloseListener{port: port, err: closeErr}, nil
+	}
+	free, err = probePort(port, false)
+	if free || !errors.Is(err, closeErr) || !strings.Contains(err.Error(), strconv.Itoa(port)) {
+		t.Fatalf("probePort(%d) with loopback close error = (%v, %v); want (false, error wrapping closeErr naming %d)", port, free, err, port)
+	}
+}
+
+type failingCloseListener struct {
+	port int
+	err  error
+}
+
+func (l *failingCloseListener) Accept() (net.Conn, error) { return nil, errors.New("not accepting") }
+func (l *failingCloseListener) Close() error              { return l.err }
+func (l *failingCloseListener) Addr() net.Addr            { return &net.TCPAddr{Port: l.port} }

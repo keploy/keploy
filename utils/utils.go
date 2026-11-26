@@ -2020,6 +2020,10 @@ var portOffset, portProbe = randomOffset, probePort
 // interface.
 var portListen = plaintcp.Listen
 
+// loopbackListen opens loopbackFree's TCP4 loopback probe listeners, plain TCP
+// as portListen is.
+var loopbackListen = plaintcp.Listen
+
 // udpListen opens udpFree's UDP sockets.
 var udpListen = net.ListenPacket
 
@@ -2033,11 +2037,12 @@ func randomOffset(span uint32) (uint32, bool) {
 	return uint32(n.Int64()), true
 }
 
-// probePort says whether port is free: whether a plain TCP listener binds it,
-// and, with udp, a UDP socket too while the listener holds it (udpFree); it
-// then lets them go. A failed Close leaves this process holding the port for
-// its lifetime, so the candidate is unusable AND leaked: that is an error,
-// not a candidate passed over, which would leak one fd per candidate.
+// probePort says whether port is free: whether a plain TCP listener binds it
+// on wildcard and on 127.0.0.1 (loopbackFree), and, with udp, a UDP socket too
+// while the wildcard TCP listener holds it (udpFree); it then lets them go. A
+// failed Close leaves this process holding the port for its lifetime, so the
+// candidate is unusable AND leaked: that is an error, not a candidate passed
+// over, which would leak one fd per candidate.
 func probePort(port uint32, udp bool) (bool, error) {
 	ln, err := portListen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -2053,7 +2058,27 @@ func probePort(port uint32, udp bool) (bool, error) {
 	if err := ln.Close(); err != nil {
 		return false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
 	}
-	return free, nil
+	if !free {
+		return false, nil
+	}
+	return loopbackFree(port)
+}
+
+// loopbackFree says whether a plain TCP4 listener binds 127.0.0.1:port, which
+// it then lets go; a failed Close is an error, as probePort's. Go sets
+// SO_REUSEADDR on Unix TCP listeners, and under BSD/macOS bind() rules a
+// wildcard probe on ":port" can succeed while another socket (such as a Docker
+// container publishing -p 127.0.0.1:port:port) already holds 127.0.0.1:port;
+// probing loopback directly catches that conflict.
+func loopbackFree(port uint32) (bool, error) {
+	ln, err := loopbackListen(context.Background(), "tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false, nil
+	}
+	if err := ln.Close(); err != nil {
+		return false, fmt.Errorf("failed to release loopback probe listener on port %d: %w", port, err)
+	}
+	return true, nil
 }
 
 // udpFree says whether a UDP socket binds port, which it then lets go; a
@@ -2070,14 +2095,10 @@ func udpFree(port uint32) (bool, error) {
 }
 
 // isPortAvailable checks if a specific port is available on the system, with
-// a plain TCP probe listener (as GetAvailablePort's).
+// plain TCP probes on wildcard and loopback (as GetAvailablePort's).
 func isPortAvailable(port uint32) bool {
-	listener, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return false
-	}
-	defer listener.Close()
-	return true
+	free, _ := probePort(port, false) // false on any error
+	return free
 }
 
 // EnsureAvailablePorts checks if the proxy and DNS ports are available.
