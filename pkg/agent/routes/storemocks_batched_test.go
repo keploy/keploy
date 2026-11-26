@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 )
@@ -47,12 +48,17 @@ func TestStoreMocksBatchedRoutes_LifecycleAndStatusCodes(t *testing.T) {
 	r := chi.NewRouter()
 	DefaultRoutes{}.New(r, ag, zap.NewNop())
 
-	// /agent/health advertises batched-v1 protocol + agent instance.
+	// /agent/health advertises batched-v1 protocol; X-Keploy-Agent-Instance
+	// is emitted only when the proven switch is on.
 	hRec := httptest.NewRecorder()
 	r.ServeHTTP(hRec, httptest.NewRequest(http.MethodGet, "/agent/health", nil))
 	require.Equal(t, http.StatusOK, hRec.Code)
 	require.Equal(t, models.StoreMocksProtocolBatchedV1, hRec.Header().Get(models.StoreMocksProtocolHeader))
-	require.Equal(t, processInstance, hRec.Header().Get(models.AgentInstanceHeader))
+	if provenswitch.On() {
+		require.Equal(t, processInstance, hRec.Header().Get(models.AgentInstanceHeader))
+	} else {
+		require.Empty(t, hRec.Header().Get(models.AgentInstanceHeader))
+	}
 
 	// Begin staging session for 3 mocks.
 	beginBody, _ := json.Marshal(models.StoreMocksBeginReq{FilteredCount: 2, UnfilteredCount: 1})
@@ -133,4 +139,54 @@ func TestStoreMocksBatchedRoutes_LifecycleAndStatusCodes(t *testing.T) {
 	legacyReq.Header.Set("Content-Encoding", models.MockStreamEncodingZstd)
 	r.ServeHTTP(legacyRec, legacyReq)
 	require.Equal(t, http.StatusOK, legacyRec.Code)
+}
+
+// TestStoreMocksBatchedRoutes_AgentInstanceFollowsProvenSwitch guards the
+// provenswitch contract enforced by agent-restart-docker.sh: /agent/health and
+// all /agent/storemocks/{begin,batch,commit,abort} responses must omit
+// X-Keploy-Agent-Instance when the proven switch is off and emit
+// processInstance (via answersAs middleware) when it is on.
+func TestStoreMocksBatchedRoutes_AgentInstanceFollowsProvenSwitch(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run(provenswitch.Env+"="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			want := ""
+			if proven == "1" {
+				want = processInstance
+			}
+
+			ag := agent.New(zap.NewNop(), nil, nil, nil, nil, config.New())
+			r := chi.NewRouter()
+			DefaultRoutes{}.New(r, ag, zap.NewNop())
+
+			hRec := httptest.NewRecorder()
+			r.ServeHTTP(hRec, httptest.NewRequest(http.MethodGet, "/agent/health", nil))
+			require.Equal(t, http.StatusOK, hRec.Code)
+			require.Equal(t, models.StoreMocksProtocolBatchedV1, hRec.Header().Get(models.StoreMocksProtocolHeader))
+			require.Equal(t, want, hRec.Header().Get(models.AgentInstanceHeader), "health")
+
+			beginBody, _ := json.Marshal(models.StoreMocksBeginReq{FilteredCount: 1})
+			bRec := httptest.NewRecorder()
+			r.ServeHTTP(bRec, httptest.NewRequest(http.MethodPost, "/agent/storemocks/begin", bytes.NewReader(beginBody)))
+			require.Equal(t, http.StatusOK, bRec.Code)
+			require.Equal(t, want, bRec.Header().Get(models.AgentInstanceHeader), "begin")
+			var bResp models.StoreMocksBeginResp
+			require.NoError(t, json.Unmarshal(bRec.Body.Bytes(), &bResp))
+
+			batchRec := httptest.NewRecorder()
+			r.ServeHTTP(batchRec, httptest.NewRequest(http.MethodPost, "/agent/storemocks/batch?id="+bResp.StagingID+"&seq=0", encodeBatchBody(t, 0, []string{"m1"}, false)))
+			require.Equal(t, http.StatusOK, batchRec.Code)
+			require.Equal(t, want, batchRec.Header().Get(models.AgentInstanceHeader), "batch")
+
+			comRec := httptest.NewRecorder()
+			r.ServeHTTP(comRec, httptest.NewRequest(http.MethodPost, "/agent/storemocks/commit?id="+bResp.StagingID, nil))
+			require.Equal(t, http.StatusOK, comRec.Code)
+			require.Equal(t, want, comRec.Header().Get(models.AgentInstanceHeader), "commit")
+
+			abRec := httptest.NewRecorder()
+			r.ServeHTTP(abRec, httptest.NewRequest(http.MethodPost, "/agent/storemocks/abort?id="+bResp.StagingID, nil))
+			require.Equal(t, http.StatusOK, abRec.Code)
+			require.Equal(t, want, abRec.Header().Get(models.AgentInstanceHeader), "abort")
+		})
+	}
 }
