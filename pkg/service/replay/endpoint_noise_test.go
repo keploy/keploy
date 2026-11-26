@@ -1,11 +1,14 @@
 package replay
 
 import (
+	"context"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestReplayAppliesEndpointNoiseOnlyToItsEndpoint(t *testing.T) {
@@ -37,5 +40,18 @@ func TestReplayAppliesEndpointNoiseOnlyToItsEndpoint(t *testing.T) {
 	}
 	if got := r.httpNoiseConfig("set", nil); len(got["body"]) != 1 {
 		t.Fatalf("noise without a test case holds endpoint fields: %v", got)
+	}
+}
+
+func TestStartSaysAnEndpointRuleThatIgnoresNothing(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	cfg := &config.Config{}
+	cfg.Test.GlobalNoise.Endpoints = []config.EndpointNoise{{Path: "/version?x=1", Body: config.Noise{"version": {}}}}
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	r := NewReplayer(zap.New(core), startTestDB{list: func(context.Context) ([]string, error) { return nil, nil }}, nil, nil, nil, nil, startTelemetry{}, startInstrumentation{}, nil, cfg)
+	_ = r.Start(context.Background())
+	if logs.FilterMessage("an endpoint noise rule ignores nothing").Len() != 1 {
+		t.Fatal("keploy test did not say the rule with a query in its path ignores nothing")
 	}
 }

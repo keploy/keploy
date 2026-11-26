@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type ruleInstr struct{ stepInstr }
@@ -68,5 +69,15 @@ func TestTheRunnerAppliesAnEndpointRuleOnlyToItsEndpoint(t *testing.T) {
 				t.Fatalf("GET %s failed on something other than its body: %s", c.path, res.Diff)
 			}
 		})
+	}
+}
+
+func TestTheRunnerSaysAnEndpointRuleThatIgnoresNothing(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	cfg := &config.Config{}
+	cfg.Test.GlobalNoise.Endpoints = []config.EndpointNoise{{Path: "/version"}}
+	New(zap.New(core), storedCaseDB{}, &ruleInstr{}, &skippingMockDB{}, &stubMappingDB{}, cfg, nil)
+	if logs.FilterMessage("an endpoint noise rule ignores nothing").Len() != 1 {
+		t.Fatal("the runner did not say the rule with no fields ignores nothing")
 	}
 }

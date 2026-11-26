@@ -1,15 +1,61 @@
 package http
 
 import (
+	"fmt"
 	"maps"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 
 	"go.keploy.io/server/v3/config"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
+
+var (
+	arrayPosition = regexp.MustCompile(`\[\d+\]`)
+	leadingWord   = regexp.MustCompile(`^[A-Za-z][A-Za-z-]*\s+\S`)
+)
+
+func WarnEndpointNoiseProblems(logger *zap.Logger, rules []config.EndpointNoise) {
+	if logger == nil {
+		return
+	}
+	for i, r := range rules {
+		rule := fmt.Sprintf("test.globalNoise.endpoints[%d]: %s", i, strings.TrimSpace(r.Method+" "+r.Path))
+		warn := func(reason, next string) {
+			logger.Warn("an endpoint noise rule ignores nothing", zap.String("rule", rule), zap.String("reason", reason), zap.String("next_step", next))
+		}
+		path := strings.TrimSpace(r.Path)
+		switch {
+		case path == "":
+			warn("it has no path, so it matches no request", "add the endpoint's path, for example path: /version")
+		case notAPath(path):
+			warn("its path holds a host, a query, a fragment or a method, and keploy compares the request's path alone, so it matches no request", "write the path alone, for example /version")
+		}
+		for _, f := range slices.Sorted(maps.Keys(r.Body)) {
+			if arrayPosition.MatchString(f) {
+				warn("body field "+f+" names one element of an array, and a rule's field names every element, so it matches no field", "write the field without the position: "+arrayPosition.ReplaceAllString(f, ""))
+			}
+		}
+		if len(r.Body) == 0 && len(r.Header) == 0 {
+			warn("it names no body field or header", "add a body field or header name to the rule")
+		}
+	}
+}
+
+func notAPath(path string) bool {
+	if strings.Contains(path, "://") || strings.ContainsAny(path, "?#") {
+		return true
+	}
+	if strings.HasPrefix(path, "/") {
+		return false
+	}
+	first, _, _ := strings.Cut(path, "/")
+	return strings.ContainsAny(first, ".:") || leadingWord.MatchString(path)
+}
 
 func AddEndpointNoise(noise map[string]map[string][]string, rules []config.EndpointNoise, tc *models.TestCase) map[string]map[string][]string {
 	if len(rules) == 0 || tc == nil {

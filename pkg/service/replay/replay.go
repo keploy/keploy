@@ -1160,6 +1160,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		}
 	}()
 
+	httpMatcher.WarnEndpointNoiseProblems(r.logger, r.config.Test.GlobalNoise.Endpoints)
+
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)

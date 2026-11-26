@@ -333,3 +333,37 @@ func TestBodyNoiseCoveringNamesOtherNoiseBeforeAnEndpointRule(t *testing.T) {
 		t.Fatalf("covering %q, want %q", got, want)
 	}
 }
+
+func TestARuleThatIgnoresNothingIsSaid(t *testing.T) {
+	version := config.Noise{"version": {}}
+	cases := []struct {
+		rule   config.EndpointNoise
+		reason string
+	}{
+		{config.EndpointNoise{Method: "GET", Body: version}, "it has no path"},
+		{config.EndpointNoise{Path: "/version?x=1", Body: version}, "its path holds"},
+		{config.EndpointNoise{Path: "/version#top", Body: version}, "its path holds"},
+		{config.EndpointNoise{Path: "https://api.example.com/version", Body: version}, "its path holds"},
+		{config.EndpointNoise{Path: "api.example.com/version", Body: version}, "its path holds"},
+		{config.EndpointNoise{Path: "GET /version", Body: version}, "its path holds"},
+		{config.EndpointNoise{Path: "/version", Body: config.Noise{"items[0].id": {}}}, "body field items[0].id names one element"},
+		{config.EndpointNoise{Path: "/version"}, "it names no body field or header"},
+	}
+	for _, c := range cases {
+		core, logs := observer.New(zap.WarnLevel)
+		WarnEndpointNoiseProblems(zap.New(core), []config.EndpointNoise{c.rule})
+		said := logs.FilterMessage("an endpoint noise rule ignores nothing").All()
+		if len(said) != 1 || !strings.HasPrefix(said[0].ContextMap()["reason"].(string), c.reason) {
+			t.Errorf("rule %+v: said %v, want one warning whose reason starts %q", c.rule, said, c.reason)
+		}
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	WarnEndpointNoiseProblems(zap.New(core), []config.EndpointNoise{
+		{Method: "GET", Path: "/version", Body: version},
+		{Path: "version", Header: config.Noise{"X-Build": {}}},
+		{Path: "/apps/{id}/files/a.json", Body: config.Noise{"items[].at": {}}},
+	})
+	if logs.Len() != 0 {
+		t.Fatalf("rules that match were warned about: %v", logs.All())
+	}
+}

@@ -116,6 +116,9 @@ func New(
 	cfg *config.Config,
 	globalNoise models.GlobalNoise,
 ) Service {
+	if cfg != nil {
+		httpMatcher.WarnEndpointNoiseProblems(logger, cfg.Test.GlobalNoise.Endpoints)
+	}
 	return &Runner{
 		logger:          logger,
 		testCaseDB:      testCaseDB,
