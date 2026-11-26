@@ -248,6 +248,55 @@ func TestRangeRecordedBefore_TellsAFailedRead(t *testing.T) {
 	}
 }
 
+func TestStreamRecorded_OrderBypassKeeperAndErrors(t *testing.T) {
+	s := newDiskWith(t, perTestMockAt("m30", 30), perTestMockAt("m10-a", 10), perTestMockAt("m10-b", 10), perTestMockAt("m20", 20))
+	t.Cleanup(func() { _ = s.Close() })
+
+	keeperCalls := 0
+	s.SetRecordingKeeper(func(_ string, _ int64, decode func() (*models.Mock, error)) (*models.Mock, error) {
+		keeperCalls++
+		return decode()
+	})
+
+	var order []string
+	if err := s.StreamRecorded(func(m *models.Mock) bool {
+		order = append(order, m.Name)
+		return true
+	}); err != nil {
+		t.Fatalf("StreamRecorded: %v", err)
+	}
+	if got, want := strings.Join(order, ","), "m10-a,m10-b,m20,m30"; got != want {
+		t.Fatalf("StreamRecorded order = %q; want %q", got, want)
+	}
+	if keeperCalls != 0 {
+		t.Fatalf("StreamRecorded invoked RecordingKeeper %d times; want 0", keeperCalls)
+	}
+	if got := s.RecordedReads(); got != 4 {
+		t.Fatalf("RecordedReads = %d; want 4", got)
+	}
+
+	// Early stop terminates immediately without decoding remaining entries.
+	order = nil
+	if err := s.StreamRecorded(func(m *models.Mock) bool {
+		order = append(order, m.Name)
+		return len(order) < 2
+	}); err != nil {
+		t.Fatalf("StreamRecorded early stop: %v", err)
+	}
+	if got, want := strings.Join(order, ","), "m10-a,m10-b"; got != want {
+		t.Fatalf("StreamRecorded early stop = %q; want %q", got, want)
+	}
+	if got := s.RecordedReads(); got != 6 {
+		t.Fatalf("RecordedReads after early stop = %d; want 6", got)
+	}
+
+	// Closed store returns error.
+	_ = s.Close()
+	if err := s.StreamRecorded(func(*models.Mock) bool { return true }); err == nil {
+		t.Fatal("StreamRecorded on closed store returned nil error")
+	}
+}
+
 func TestLoadByNames_And_All(t *testing.T) {
 	s := newDiskWith(t,
 		perTestMockAt("m10", 10), perTestMockAt("m20", 20), perTestMockAt("m30", 30),
@@ -672,5 +721,72 @@ func TestRangeKeysVisitsTheKeysAskedInRecordedOrder(t *testing.T) {
 	}
 	if got, _ := visit(models.Mongo, []string{"dele"}, "", ""); len(got) != 0 {
 		t.Fatalf("a kind with no declared keys visited %v", got)
+	}
+}
+
+// EarliestReqTs skips untimed mocks (zero ReqTimestampMock, stored as 0 rather
+// than time.Time{}.UnixNano() which overflows to year 1754), returning zero
+// when every entry is untimed and the earliest timed mock otherwise.
+func TestDiskMocks_EarliestReqTsIgnoresUntimedMocks(t *testing.T) {
+	untimedOnly, err := NewDiskMocksWithBudget(zap.NewNop(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = untimedOnly.Close() }()
+	untimed := &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Name:    "cfg-untimed",
+		Kind:    models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"type": "config"},
+			HTTPReq:  &models.HTTPReq{Method: models.Method("GET"), URL: "http://svc/cfg"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: "ok"},
+		},
+	}
+	if err := untimedOnly.Add(untimed); err != nil {
+		t.Fatal(err)
+	}
+	untimedOnly.Finalize()
+	if got := untimedOnly.EarliestReqTs(); !got.IsZero() {
+		t.Fatalf("all-untimed EarliestReqTs() = %v, want zero", got)
+	}
+
+	mixed, err := NewDiskMocksWithBudget(zap.NewNop(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mixed.Close() }()
+	wantTS := time.Date(2026, 11, 26, 6, 0, 0, 0, time.UTC)
+	laterTS := wantTS.Add(30 * time.Second)
+	for _, m := range []*models.Mock{
+		untimed,
+		{
+			Version: "api.keploy.io/v1beta1",
+			Name:    "cfg-later",
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "config"},
+				ReqTimestampMock: laterTS,
+				ResTimestampMock: laterTS.Add(time.Millisecond),
+			},
+		},
+		{
+			Version: "api.keploy.io/v1beta1",
+			Name:    "cfg-earliest",
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "config"},
+				ReqTimestampMock: wantTS,
+				ResTimestampMock: wantTS.Add(time.Millisecond),
+			},
+		},
+	} {
+		if err := mixed.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mixed.Finalize()
+	if got := mixed.EarliestReqTs(); !got.Equal(wantTS) {
+		t.Fatalf("mixed EarliestReqTs() = %v, want %v", got, wantTS)
 	}
 }

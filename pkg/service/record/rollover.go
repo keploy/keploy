@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
+	"os"
 	"regexp"
 	"sort"
 	"sync"
@@ -76,6 +78,14 @@ func mockMappingEntryBytes(m *models.Mock) int64 {
 // stay bounded in memory and per-set size.
 const maxCarryState = 512
 
+// maxCarryReadThrough caps distinct base session read-through mocks carried
+// across test-set rollovers independently of maxCarryState so read-through
+// mocks never evict genuine session/connection state mocks. Each carried base
+// mock may also carry at most one paired conflict sentinel without consuming
+// another base slot, bounding total carried read-through entries at
+// 2*maxCarryReadThrough (1024).
+const maxCarryReadThrough = 512
+
 // rollSet is one test set of a recording. The captures stamped after after
 // (and not after the next set's after) are its: a test by its request's
 // time, a mock by its request's. The first set's after is the zero time.
@@ -99,9 +109,13 @@ type rollSet struct {
 	// Roller.Next()) is promoted into sr.straddles under sr.mu.
 	maxResp time.Time
 	// copyMu serializes cross-set mock appends into this set so concurrent
-	// wrote(), straddled(), and place() calls never write a mock twice.
-	// Lock order is always copyMu -> sr.mu.
+	// wrote(), straddled(), place(), and backfillStartup() calls never write
+	// a mock twice. Lock order is always copyMu -> sr.mu.
 	copyMu sync.Mutex
+	// hasStartup reports whether this rolled set (idx >= 1) holds every
+	// startup mock carried so far (either at creation or via backfill).
+	// Protected by sr.mu.
+	hasStartup bool
 	// windows and marks are the set's own test windows and worker marks
 	// (the recorder's, per set).
 	windows *windowMappings
@@ -127,13 +141,16 @@ type straddle struct {
 // the recording's first test (its startup). Replayed on its own, a set's
 // application starts from nothing, and makes these calls again.
 type carried struct {
-	name     string
-	at       time.Time
-	doc      []byte
-	mapBytes int64
-	startup  bool
-	window   *models.WindowedMock
-	mark     *markedCall
+	name        string
+	at          time.Time
+	doc         []byte
+	docBytes    int64
+	mapBytes    int64
+	startup     bool
+	readThrough bool
+	from        *rollSet
+	window      *models.WindowedMock
+	mark        *markedCall
 }
 
 // setRoll is the recording's test sets once it may roll over (Roller): which
@@ -179,15 +196,21 @@ type setRoll struct {
 	// carryState is where in carry the state mock of each content is
 	// (stateKey): the same exchange recorded again (a connection's ping, a
 	// session's setting read again) is carried once, its latest recording.
-	carryState map[[sha256.Size]byte]int
-	format     string
+	carryState       map[[sha256.Size]byte]int
+	carryReadThrough int
+	format           string
 	// startup is the mocks made before the recording's first test (without
-	// their documents), until the first cut (startupOpen) reads them back and
-	// carries them.
-	startup     []carried
-	startupOpen bool
-	firstTest   time.Time
-	latest      time.Time
+	// their documents), until the first cut after firstTest is known (or
+	// finalize) reads them back and carries them. Total carried and queued
+	// startup bytes are capped at sr.limit.
+	startup                []carried
+	startupOpen            bool
+	startupBytes           int64
+	startupQueuedBytes     int64
+	startupSkippedEarliest time.Time
+	startupCapWarned       bool
+	firstTest              time.Time
+	latest                 time.Time
 	// straddles are the tests in flight at a cut whose later calls are
 	// copied into their set as they are written (straddled).
 	straddles []straddle
@@ -278,11 +301,19 @@ func (sr *setRoll) seeLocked(t time.Time) {
 
 // test routes a test case, by its request's time, and remembers its set for
 // its mapping. It is called for every test case that arrives, kept or not.
-func (sr *setRoll) test(tc *models.TestCase) *rollSet {
+// When the first test arrives after one or more rollovers already happened,
+// it resolves and backfills the startup mocks recorded so far into sets from
+// its set onward while leaving startupOpen true until the next cut or finalize
+// so late startup mocks are still captured. When a later-arriving test has an
+// earlier request time routed to a rolled set that was previously skipped
+// because no test had landed in it yet, it backfills the already-carried
+// startup mocks into that set on demand.
+func (sr *setRoll) test(ctx context.Context, tc *models.TestCase) *rollSet {
 	req, resp := models.TestCaseWindow(tc)
 	sr.mu.Lock()
 	sr.seeLocked(req)
-	if !req.IsZero() && (sr.firstTest.IsZero() || req.Before(sr.firstTest)) {
+	wasZero := sr.firstTest.IsZero()
+	if !req.IsZero() && (wasZero || req.Before(sr.firstTest)) {
 		sr.firstTest = req
 	}
 	s := sr.setForLocked(req)
@@ -290,9 +321,41 @@ func (sr *setRoll) test(tc *models.TestCase) *rollSet {
 		s.maxResp = resp
 	}
 	sr.registerLocked(tc.Name, s)
+	needStartup := sr.rolls() && wasZero && !sr.firstTest.IsZero() && sr.startupOpen && len(sr.sets) > 1
+	var backCarry []carried
+	var backFormat string
+	if sr.rolls() && !needStartup && s.idx >= 1 && !s.hasStartup {
+		for _, c := range sr.carry {
+			if c.startup && (req.IsZero() || c.at.Before(req)) {
+				backCarry = append(backCarry, c)
+			}
+		}
+		backFormat = sr.format
+	}
 	sr.mu.Unlock()
 	sr.signal()
+	if needStartup {
+		sr.resolveStartup(ctx, false, false, nil)
+	} else if len(backCarry) > 0 {
+		sr.backfillStartup(ctx, []*rollSet{s}, backCarry, backFormat, nil)
+	}
 	return s
+}
+
+// finalize resolves and backfills any remaining startup mocks (late-arriving
+// startup calls recorded after the first test when no subsequent rollover
+// occurred, or a retry after a transient read error on the first test) before
+// the recording closes its mock store.
+func (sr *setRoll) finalize(ctx context.Context) {
+	if !sr.rolls() {
+		return
+	}
+	sr.mu.Lock()
+	need := sr.startupOpen && !sr.firstTest.IsZero() && len(sr.sets) > 1
+	sr.mu.Unlock()
+	if need {
+		sr.resolveStartup(ctx, true, true, nil)
+	}
 }
 
 func (sr *setRoll) addStraddleLocked(s *rollSet, from, to time.Time) {
@@ -411,7 +474,7 @@ func (sr *setRoll) copyIn(ctx context.Context, s *rollSet, format string, docs m
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	_, err := sr.copyInOrdered(ctx, s, format, names, docs)
+	_, _, err := sr.copyInOrdered(ctx, s, format, names, docs, false)
 	if err != nil {
 		utils.LogError(sr.logger, err, "keploy could not copy into a test set the calls a test of it in flight at the cut made after it",
 			zap.String("testSetID", s.id), zap.Int("mocks", len(names)))
@@ -419,10 +482,14 @@ func (sr *setRoll) copyIn(ctx context.Context, s *rollSet, format string, docs m
 }
 
 // copyInOrdered appends docs for orderedNames into s under s.copyMu, filtering
-// out any mock already present in s.names (or on disk when s has aged out).
-// Returns the names that were newly appended (or already present) and any
-// append error.
-func (sr *setRoll) copyInOrdered(ctx context.Context, s *rollSet, format string, orderedNames []string, docs map[string][]byte) ([]string, error) {
+// out any mock already present in s.names (or on disk when s has aged out,
+// failing closed on non-os.ErrNotExist read errors across all aged-set callers
+// such as place, straddled, and backfillStartup to avoid writing duplicates).
+// When asCarry is true, bytes added to the newest set also advance carryAt so
+// carried startup backfills do not trigger an immediate premature rollover.
+// Returns the names that were newly appended, the appended byte count, and any
+// error.
+func (sr *setRoll) copyInOrdered(ctx context.Context, s *rollSet, format string, orderedNames []string, docs map[string][]byte, asCarry bool) ([]string, int64, error) {
 	s.copyMu.Lock()
 	defer s.copyMu.Unlock()
 
@@ -442,7 +509,7 @@ func (sr *setRoll) copyInOrdered(ctx context.Context, s *rollSet, format string,
 	}
 	sr.mu.Unlock()
 	if len(want) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if !open {
 		need := make(map[string]struct{}, len(want))
@@ -450,7 +517,10 @@ func (sr *setRoll) copyInOrdered(ctx context.Context, s *rollSet, format string,
 			need[nm] = struct{}{}
 		}
 		have, _, err := sr.store.ReadMockDocs(ctx, s.id, need)
-		if err == nil && len(have) > 0 {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, 0, err
+		}
+		if len(have) > 0 {
 			filtered := want[:0]
 			for _, nm := range want {
 				if _, exists := have[nm]; !exists {
@@ -460,7 +530,7 @@ func (sr *setRoll) copyInOrdered(ctx context.Context, s *rollSet, format string,
 			want = filtered
 		}
 		if len(want) == 0 {
-			return nil, nil
+			return nil, 0, nil
 		}
 	}
 	list := make([][]byte, 0, len(want))
@@ -469,7 +539,7 @@ func (sr *setRoll) copyInOrdered(ctx context.Context, s *rollSet, format string,
 	}
 	n, err := sr.store.AppendMockDocs(ctx, s.id, format, list)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	sr.mu.Lock()
 	if s.names != nil {
@@ -479,12 +549,18 @@ func (sr *setRoll) copyInOrdered(ctx context.Context, s *rollSet, format string,
 	}
 	if s == sr.sets[len(sr.sets)-1] {
 		sr.bytes += n
+		var mapAdded int64
 		for _, nm := range want {
-			sr.wroteMapBytes += int64(len(nm)) + 194
+			mapAdded += int64(len(nm)) + 194
+		}
+		sr.wroteMapBytes += mapAdded
+		if asCarry {
+			sr.carryAt += n
+			sr.carryWroteMapAt += mapAdded
 		}
 	}
 	sr.mu.Unlock()
-	return want, nil
+	return want, n, nil
 }
 
 // setOfTest is the set a test's mapping goes to: the set its test case went
@@ -579,11 +655,49 @@ func (sr *setRoll) wrote(ctx context.Context, s *rollSet, m *models.Mock, doc []
 		}
 		return
 	}
+	if m.IsReadThrough() {
+		if _, dup := sr.carryNames[m.Name]; dup {
+			return
+		}
+		// Always carry a -conflict sentinel whose base mock was already
+		// carried so the read-through carry cap never splits a conflict pair
+		// across a rollover boundary and re-enables serving a conflicted key.
+		isConflictPair := false
+		if base, ok := models.ReadThroughConflictBaseName(m.Name); ok {
+			_, isConflictPair = sr.carryNames[base]
+		}
+		if !isConflictPair && sr.carryReadThrough >= maxCarryReadThrough {
+			return
+		}
+		sr.carryNames[m.Name] = struct{}{}
+		sr.carry = append(sr.carry, carried{
+			name:        m.Name,
+			at:          at,
+			doc:         doc,
+			mapBytes:    mapBytes,
+			readThrough: true,
+			window:      window,
+		})
+		if !isConflictPair {
+			sr.carryReadThrough++
+		}
+		return
+	}
 	// The application's startup: what it did before its first test, which
-	// every set's replay starts with. Named until the first cut, as long as
-	// no test seen yet came before it; the cut reads the documents back.
+	// every set's replay starts with. Named until the first cut after the
+	// first test is known (or finalize), bounded to sr.limit bytes so startup
+	// spanning multiple early cuts cannot grow carry without bound.
 	if sr.startupOpen && !at.IsZero() && (sr.firstTest.IsZero() || at.Before(sr.firstTest)) {
-		sr.startup = append(sr.startup, carried{name: m.Name, at: at, mapBytes: mapBytes, startup: true, window: window})
+		docBytes := int64(len(doc))
+		if sr.startupBytes+sr.startupQueuedBytes+docBytes <= sr.limit {
+			sr.startup = append(sr.startup, carried{
+				name: m.Name, at: at, docBytes: docBytes,
+				mapBytes: mapBytes, startup: true, from: s, window: window,
+			})
+			sr.startupQueuedBytes += docBytes
+		} else if sr.startupSkippedEarliest.IsZero() || at.Before(sr.startupSkippedEarliest) {
+			sr.startupSkippedEarliest = at
+		}
 	}
 }
 
@@ -591,14 +705,14 @@ func (sr *setRoll) wrote(ctx context.Context, s *rollSet, m *models.Mock, doc []
 // from sr.carry to bound carry size under long-running connection churn.
 func (sr *setRoll) evictOldestStateLocked() {
 	for i, c := range sr.carry {
-		if c.mark != nil || c.startup {
+		if c.mark != nil || c.startup || c.readThrough {
 			continue
 		}
 		delete(sr.carryNames, c.name)
 		sr.carry = append(sr.carry[:i], sr.carry[i+1:]...)
 		clear(sr.carryState)
 		for j, item := range sr.carry {
-			if item.mark == nil && !item.startup {
+			if item.mark == nil && !item.startup && !item.readThrough {
 				sr.carryState[stateKey(item.doc)] = j
 			}
 		}
@@ -640,6 +754,277 @@ func (sr *setRoll) due() bool {
 	return byBytes || byMap
 }
 
+// pruneStartupLocked drops handled (snapshotted) and post-firstTest entries
+// from sr.startup while keeping any entries appended concurrently while
+// ReadMockDocs ran unlocked, and recalculates sr.startupQueuedBytes.
+func (sr *setRoll) pruneStartupLocked(snapshotted map[string]struct{}) {
+	kept := sr.startup[:0]
+	var queued int64
+	for _, c := range sr.startup {
+		if _, handled := snapshotted[c.name]; handled {
+			continue
+		}
+		if !sr.firstTest.IsZero() && !c.at.Before(sr.firstTest) {
+			continue
+		}
+		kept = append(kept, c)
+		queued += c.docBytes
+	}
+	sr.startup = kept
+	sr.startupQueuedBytes = queued
+}
+
+func (sr *setRoll) warnStartupCap(limit int64) {
+	sr.logger.Warn("startup calls before the first test exceeded the rollover carry budget; later test sets carry only startup calls fitting within the limit",
+		zap.Int64("startupCarryLimitBytes", limit),
+		zap.String("next_step", "increase the test-set rollover size limit or reduce outgoing calls made before the first incoming request"))
+}
+
+// resolveStartup reads startup mocks (those recorded before sr.firstTest) back
+// from their originating sets, adds them to sr.carry up to sr.limit bytes
+// (arrival-ordered within the queue cap and timestamp-ordered on resolve), and
+// backfills them into already-rolled sets from setForLocked(firstTest) onward
+// (sets before firstTest that have not received any test yet are skipped here
+// and backfilled on demand in test() if a slower earlier test lands in them).
+// When closeAfter is true (called from cut or finalize), startupOpen is closed;
+// when false (called from test), startupOpen stays open and only snapshotted
+// and post-firstTest entries are pruned so late startup mocks arriving before
+// the next cut or finalize are still captured. A transient ReadMockDocs error
+// leaves startupOpen and startup intact for a later cut or finalize to retry;
+// when onFinalize is true, no retry follows and a Warn names the affected sets.
+// When reportFor is non-nil, returns the count and bytes newly appended to it.
+func (sr *setRoll) resolveStartup(ctx context.Context, closeAfter, onFinalize bool, reportFor *rollSet) (int, int64) {
+	if !sr.rolls() {
+		return 0, 0
+	}
+	sr.mu.Lock()
+	if !sr.startupOpen || sr.firstTest.IsZero() {
+		sr.mu.Unlock()
+		return 0, 0
+	}
+	var startup []carried
+	for _, c := range sr.startup {
+		if _, dup := sr.carryNames[c.name]; !dup && c.at.Before(sr.firstTest) {
+			startup = append(startup, c)
+		}
+	}
+	sort.SliceStable(startup, func(i, j int) bool { return startup[i].at.Before(startup[j].at) })
+	if len(startup) == 0 {
+		warnCap := !sr.startupSkippedEarliest.IsZero() && sr.startupSkippedEarliest.Before(sr.firstTest) && !sr.startupCapWarned
+		if warnCap {
+			sr.startupCapWarned = true
+		}
+		if closeAfter {
+			sr.startupOpen = false
+			sr.startup = nil
+			sr.startupQueuedBytes = 0
+		} else {
+			sr.pruneStartupLocked(nil)
+		}
+		limit := sr.limit
+		sr.mu.Unlock()
+		if warnCap {
+			sr.warnStartupCap(limit)
+		}
+		return 0, 0
+	}
+	firstSet := sr.sets[0]
+	format := sr.format
+	sr.mu.Unlock()
+
+	bySrc := map[*rollSet]map[string]struct{}{}
+	var srcs []*rollSet
+	for _, c := range startup {
+		src := c.from
+		if src == nil {
+			src = firstSet
+		}
+		if bySrc[src] == nil {
+			bySrc[src] = map[string]struct{}{}
+			srcs = append(srcs, src)
+		}
+		bySrc[src][c.name] = struct{}{}
+	}
+	sort.Slice(srcs, func(i, j int) bool { return srcs[i].idx < srcs[j].idx })
+	got := make(map[string][]byte, len(startup))
+	for _, src := range srcs {
+		want := bySrc[src]
+		docs, gotFormat, err := sr.store.ReadMockDocs(context.WithoutCancel(ctx), src.id, want)
+		if err != nil {
+			if onFinalize {
+				sr.mu.Lock()
+				var affected []string
+				if len(sr.sets) > 1 {
+					start := max(1, sr.setForLocked(sr.firstTest).idx)
+					for _, t := range sr.sets[start:] {
+						affected = append(affected, t.id)
+					}
+				}
+				sr.mu.Unlock()
+				sr.logger.Warn("keploy could not read back startup calls at finalize; affected rolled test sets may replay without these startup calls",
+					zap.Error(err),
+					zap.String("testSetID", src.id),
+					zap.Int("mocks", len(want)),
+					zap.Strings("affectedTestSets", affected),
+					zap.String("next_step", "check storage health and re-record if replays of the affected test sets fail during application startup"))
+			} else {
+				utils.LogError(sr.logger, err, "keploy could not read back the calls the application made before the recording's first test; will retry on the next rollover or at finalize",
+					zap.String("testSetID", src.id),
+					zap.Int("mocks", len(want)),
+					zap.String("next_step", "check storage health if this error repeats; later test sets need these startup mocks to replay on their own"))
+			}
+			return 0, 0
+		}
+		if gotFormat != "" {
+			format = gotFormat
+		}
+		for k, v := range docs {
+			got[k] = v
+		}
+	}
+
+	snapshotted := make(map[string]struct{}, len(startup))
+	for _, c := range startup {
+		snapshotted[c.name] = struct{}{}
+	}
+	var added []carried
+	var haveTargets, fullTargets []*rollSet
+	var allStartup []carried
+	var warnCap bool
+	sr.mu.Lock()
+	if sr.format == "" && format != "" {
+		sr.format = format
+	}
+	limit := sr.limit
+	hitCap := !sr.startupSkippedEarliest.IsZero() && sr.startupSkippedEarliest.Before(sr.firstTest)
+	for _, c := range startup {
+		if !c.at.Before(sr.firstTest) {
+			continue
+		}
+		doc, ok := got[c.name]
+		if !ok {
+			continue
+		}
+		if _, dup := sr.carryNames[c.name]; dup {
+			continue
+		}
+		docBytes := int64(len(doc))
+		if sr.startupBytes+docBytes > sr.limit {
+			hitCap = true
+			continue
+		}
+		c.doc = doc
+		c.docBytes = docBytes
+		c.startup = true
+		sr.carryNames[c.name] = struct{}{}
+		sr.carry = append(sr.carry, c)
+		sr.startupBytes += docBytes
+		added = append(added, c)
+	}
+	if hitCap && !sr.startupCapWarned {
+		sr.startupCapWarned = true
+		warnCap = true
+	}
+	if closeAfter {
+		sr.startupOpen = false
+		sr.startup = nil
+		sr.startupQueuedBytes = 0
+	} else {
+		sr.pruneStartupLocked(snapshotted)
+	}
+	if len(added) > 0 && len(sr.sets) > 1 {
+		start := max(1, sr.setForLocked(sr.firstTest).idx)
+		for _, t := range sr.sets[start:] {
+			if t.hasStartup {
+				haveTargets = append(haveTargets, t)
+			} else {
+				fullTargets = append(fullTargets, t)
+			}
+		}
+		if len(fullTargets) > 0 {
+			for _, c := range sr.carry {
+				if c.startup && c.at.Before(sr.firstTest) {
+					allStartup = append(allStartup, c)
+				}
+			}
+		}
+	}
+	sr.mu.Unlock()
+
+	if warnCap {
+		sr.warnStartupCap(limit)
+	}
+	var repMocks int
+	var repBytes int64
+	if len(haveTargets) > 0 {
+		am, ab := sr.backfillStartup(ctx, haveTargets, added, format, reportFor)
+		repMocks += am
+		repBytes += ab
+	}
+	if len(fullTargets) > 0 {
+		am, ab := sr.backfillStartup(ctx, fullTargets, allStartup, format, reportFor)
+		repMocks += am
+		repBytes += ab
+	}
+	return repMocks, repBytes
+}
+
+// backfillStartup appends startup mocks into each target set (skipping any mock
+// the set already holds, serialized by copyMu) and records their windows when
+// mappings are derived from windows. When reportFor is non-nil, returns the
+// count and bytes newly appended to reportFor.
+func (sr *setRoll) backfillStartup(ctx context.Context, targets []*rollSet, items []carried, format string, reportFor *rollSet) (int, int64) {
+	if len(targets) == 0 || len(items) == 0 {
+		return 0, 0
+	}
+	ordered := make([]string, 0, len(items))
+	docs := make(map[string][]byte, len(items))
+	byName := make(map[string]carried, len(items))
+	for _, c := range items {
+		if c.doc == nil {
+			continue
+		}
+		ordered = append(ordered, c.name)
+		docs[c.name] = c.doc
+		byName[c.name] = c
+	}
+	if len(ordered) == 0 {
+		return 0, 0
+	}
+	skipWindows := sr.streamed != nil && sr.streamed()
+	noCancel := context.WithoutCancel(ctx)
+	var repMocks int
+	var repBytes int64
+	for _, t := range targets {
+		copied, addedBytes, err := sr.copyInOrdered(noCancel, t, format, ordered, docs, true)
+		if err != nil {
+			sr.mu.Lock()
+			t.hasStartup = false
+			sr.mu.Unlock()
+			utils.LogError(sr.logger, err, "keploy could not backfill startup mocks into a rolled test set; this set will replay without those startup calls",
+				zap.String("testSetID", t.id),
+				zap.Int("mocks", len(ordered)),
+				zap.String("next_step", "check storage health and re-record if replays of this test set fail during application startup"))
+			continue
+		}
+		sr.mu.Lock()
+		t.hasStartup = true
+		sr.mu.Unlock()
+		if t == reportFor {
+			repMocks += len(copied)
+			repBytes += addedBytes
+		}
+		if !skipWindows {
+			for _, nm := range copied {
+				if c := byName[nm]; c.window != nil {
+					t.windows.addWindowed(*c.window)
+				}
+			}
+		}
+	}
+	return repMocks, repBytes
+}
+
 // cut begins the next set: it names it (Roller.Next), copies the carried mocks
 // into it, and from then on routes what is captured after the cut to it. A
 // failure leaves the recording in the set it is in, to try again once the set
@@ -651,52 +1036,18 @@ func (sr *setRoll) cut(ctx context.Context) {
 	if at.IsZero() || !at.After(cur.after) {
 		at = time.Now()
 	}
-	var startup []carried
 	startupHadFirstTest := !sr.firstTest.IsZero()
-	if sr.startupOpen && startupHadFirstTest {
-		for _, c := range sr.startup {
-			if _, dup := sr.carryNames[c.name]; !dup && c.at.Before(sr.firstTest) {
-				startup = append(startup, c)
-			}
-		}
-		if len(startup) == 0 {
-			sr.startupOpen = false
-			sr.startup = nil
-		}
-	}
 	format := sr.format
 	limit := sr.limit
 	sr.mu.Unlock()
 
-	// The startup's documents, read back from the first set, where they are
-	// near the front. Keep sr.startupOpen / sr.startup intact on a transient
-	// read error so a later cut can retry.
-	if len(startup) > 0 {
-		want := make(map[string]struct{}, len(startup))
-		for _, c := range startup {
-			want[c.name] = struct{}{}
-		}
-		got, _, err := sr.store.ReadMockDocs(context.WithoutCancel(ctx), sr.first().id, want)
-		if err != nil {
-			utils.LogError(sr.logger, err, "keploy could not read back the calls the application made before the recording's first test; will retry on the next rollover",
-				zap.String("testSetID", sr.first().id), zap.Int("mocks", len(want)))
-		} else {
-			sr.mu.Lock()
-			for _, c := range startup {
-				if doc, ok := got[c.name]; ok {
-					if _, dup := sr.carryNames[c.name]; !dup {
-						c.doc = doc
-						sr.carryNames[c.name] = struct{}{}
-						sr.carry = append(sr.carry, c)
-					}
-				}
-			}
-			sr.startupOpen = false
-			sr.startup = nil
-			sr.mu.Unlock()
-		}
+	if startupHadFirstTest {
+		sr.resolveStartup(ctx, true, false, nil)
 	}
 	sr.mu.Lock()
+	if sr.format != "" {
+		format = sr.format
+	}
 	carry := append([]carried(nil), sr.carry...)
 	sr.mu.Unlock()
 
@@ -728,7 +1079,14 @@ func (sr *setRoll) cut(ctx context.Context) {
 		sr.giveUp(cur.id, "the mocks the next test set starts with could not be written to it", err)
 		return
 	}
-	s := &rollSet{id: next, after: at, names: names}
+	var hasStartup bool
+	for _, c := range carry {
+		if c.startup {
+			hasStartup = true
+			break
+		}
+	}
+	s := &rollSet{id: next, after: at, names: names, hasStartup: hasStartup}
 	if sr.newWindows != nil {
 		s.windows = sr.newWindows()
 	}
@@ -756,6 +1114,21 @@ func (sr *setRoll) cut(ctx context.Context) {
 	sr.bytes, sr.carryAt = n, n
 	sr.wroteMapBytes, sr.carryWroteMapAt = carryMap, carryMap
 	sr.mappedMapBytes, sr.carryMappedMapAt = 0, 0
+	// If startup mocks were resolved into sr.carry by a concurrent test()
+	// while cut() was unlocked in Roller.Next()/AppendMockDocs(), s missed
+	// them in its initial carry snapshot and must be backfilled now.
+	var lateStartup []carried
+	for _, c := range sr.carry {
+		if c.startup {
+			if _, have := s.names[c.name]; !have {
+				lateStartup = append(lateStartup, c)
+			}
+		}
+	}
+	// If the first test arrived while cut() was unlocked (so sr.test saw
+	// len(sr.sets)==1 and did not resolve startup), resolve and backfill now.
+	resolveAfterCut := !startupHadFirstTest && sr.startupOpen && !sr.firstTest.IsZero()
+	lateFormat := sr.format
 	// The set before the previous one is no longer written to by the
 	// captures: what is asked of it from now on is read from its file.
 	var agedWindows *windowMappings
@@ -784,12 +1157,24 @@ func (sr *setRoll) cut(ctx context.Context) {
 	if agedWindows != nil {
 		agedWindows.clear()
 	}
+	carriedMocks := len(carry)
+	carriedBytes := n
+	if len(lateStartup) > 0 {
+		am, ab := sr.backfillStartup(ctx, []*rollSet{s}, lateStartup, lateFormat, s)
+		carriedMocks += am
+		carriedBytes += ab
+	}
+	if resolveAfterCut {
+		am, ab := sr.resolveStartup(ctx, true, false, s)
+		carriedMocks += am
+		carriedBytes += ab
+	}
 
 	sr.roller.Rolled(cur.id, next, at)
 	sr.logger.Info("the recording continues in a new test set: the one it was in reached its size limit",
 		zap.String("testSetID", cur.id), zap.String("nextTestSetID", next),
 		zap.Int64("setLimitBytes", limit), zap.Time("cutAt", at),
-		zap.Int("carriedMocks", len(carry)), zap.Int64("carriedBytes", n))
+		zap.Int("carriedMocks", carriedMocks), zap.Int64("carriedBytes", carriedBytes))
 }
 
 var errSameSet = errorString("the embedder named the same test set to continue in")
@@ -942,7 +1327,7 @@ func (sr *setRoll) place(ctx context.Context, s *rollSet, entries []models.MockE
 		if len(ordered) == 0 {
 			continue
 		}
-		copied, err := sr.copyInOrdered(ctx, s, format, ordered, got)
+		copied, _, err := sr.copyInOrdered(ctx, s, format, ordered, got, false)
 		if err != nil {
 			utils.LogError(sr.logger, err, "keploy could not copy the mocks a test names into its test set",
 				zap.String("testSetID", s.id), zap.String("fromTestSetID", h.id), zap.Int("mocks", len(ordered)))

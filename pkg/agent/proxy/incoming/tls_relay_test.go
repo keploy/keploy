@@ -170,7 +170,7 @@ func TestATLSConnectionTheStoppedAppRefusesIsClosed(t *testing.T) {
 	if n, err := app.Read(make([]byte, 1)); n != 0 || err == nil || (errors.As(err, &ne) && ne.Timeout()) {
 		t.Fatalf("the client's connection read %d bytes (%v) after the failed dial, want it closed", n, err)
 	}
-	failed := logs.FilterMessage("Failed to connect to the application to relay a TLS connection to it. Verify that the application is listening on the resolved address and port.").All()
+	failed := logs.FilterMessage("Failed to connect to the application. Verify that the application is listening on the resolved address and port.").All()
 	if len(failed) != 1 || failed[0].Level != zapcore.DebugLevel || failed[0].ContextMap()["final_app_addr"] != refused {
 		t.Fatalf("the refused dial was said %v, want once at DEBUG naming %s", failed, refused)
 	}

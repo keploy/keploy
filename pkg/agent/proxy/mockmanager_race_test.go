@@ -151,6 +151,13 @@ func TestTierKeyKeepsEveryFieldButTheID(t *testing.T) {
 	src := &models.Mock{
 		Name: "m",
 		Kind: models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{
+				models.MetadataReadThroughKey: models.MetadataReadThroughValue,
+			},
+			HTTPReq:  &models.HTTPReq{Method: models.Method("GET"), URL: "http://example.internal/k"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200},
+		},
 		TestModeInfo: models.TestModeInfo{
 			ID:              7,
 			IsFiltered:      true,
@@ -166,6 +173,9 @@ func TestTierKeyKeepsEveryFieldButTheID(t *testing.T) {
 			LoadSeq:         9,
 		},
 	}
+	// Populate the unexported readThroughState cache on TestModeInfo without
+	// altering the already-derived Lifetime fields.
+	src.DeriveLifetime()
 	v := reflect.ValueOf(src.TestModeInfo)
 	for i := 0; i < v.NumField(); i++ {
 		if v.Field(i).IsZero() {

@@ -835,7 +835,7 @@ func (r *Relay) handleAbortMock(d directive.Directive) directive.Ack {
 }
 
 // handleResumePreDispatch ends the pre-dispatch pause window installed
-// by run() under Config.PreDispatchPause. It:
+// by New() under Config.PreDispatchPause. It:
 //
 //  1. Nudges both real sockets' read deadlines into the past and waits
 //     for both forwarders to mark themselves parked on the pause
@@ -1005,7 +1005,7 @@ func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan str
 	// A client write hold means "resume" cannot be honoured by lifting
 	// the pause alone: the forward loop would come back up and keep
 	// swallowing client bytes, and this handler would have acked OK
-	// while doing it. Run() refuses to arm both brakes at once, so this
+	// while doing it. Config.withDefaults (in New) refuses to arm both brakes at once, so this
 	// is unreachable today and stays as a guard: if a hold is up, a
 	// resume ends it. The stash claimed above is drained below, so
 	// clear the flag and the counter rather than calling

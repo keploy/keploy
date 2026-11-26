@@ -821,6 +821,16 @@ type MockFilterParams struct {
 	// is served differently for it. Empty: the set has none, and every miss
 	// stays its test's.
 	BackgroundMocks []string `json:"backgroundMocks,omitempty"`
+	// DeriveBackgroundFromWindows, when true alongside empty BackgroundMocks
+	// and non-empty RecordedWindows (outside ExactStaging), tells the agent to
+	// derive outside-window recordings from RecordedWindows via
+	// DeriveWindowMappings as the set's background recordings. Set explicitly
+	// by the replayer only when mappings.yaml does not exist (GetMapping
+	// returned nil, nil) and no CLI exact plan was built — for example round-1
+	// DaemonSet auto-replay before mappings.yaml is written. False when an
+	// explicit mappings.yaml exists (even with empty worker:/startup:) or
+	// under an exact plan, so explicit files are never overridden.
+	DeriveBackgroundFromWindows bool `json:"deriveBackgroundFromWindows,omitempty"`
 	// StartupMocks names, of BackgroundMocks, the set's plain startup:
 	// mocks (BackgroundRecording.Startup): made before the first test and
 	// covered by no declared rule. Under the proven switch alone: keploy
@@ -1531,7 +1541,13 @@ type NotRecordedCall struct {
 // compose, which can drop its last lines as the stack stops: the client tears
 // the stack down once its drains end at the markers.
 type StreamEndSummary struct {
-	TestCasesSent       int `json:"tcs_sent_to_cli"`
+	TestCasesSent int `json:"tcs_sent_to_cli"`
+	// TestCasesSuppressed counts test cases suppressed on the stream
+	// (pressure/orphan overlap, capacity-dropped mock, or inverted
+	// response-before-request timestamps) plus capture-level inverted-window
+	// drops (InvertedResponseBeforeRequest). Other capture-level skips
+	// (such as over-size-limit, pressure-paused, and left-out-in-flight) are
+	// reported in their own fields rather than here.
 	TestCasesSuppressed int `json:"tcs_suppressed_total"`
 	// LeftOutInFlight: test cases left out because each stayed in flight
 	// while mocks it may have made had to be let go.
@@ -1562,6 +1578,45 @@ type StreamEndSummary struct {
 	// MocksDropped: mocks the agent dropped as their parsers handed them over
 	// or after, which the recording does not hold.
 	MocksDropped MockDropSummary `json:"mocks_dropped,omitzero"`
+	// NotRecordedOverSizeLimit: requests the app served that were not
+	// recorded as test cases because each was over keploy's size limit for
+	// a test case.
+	NotRecordedOverSizeLimit OverSizeSkipSummary `json:"not_recorded_over_size_limit,omitzero"`
+	// InvertedResponseBeforeRequest: test cases whose response timestamp
+	// preceded their request timestamp and were left out fail-closed.
+	InvertedResponseBeforeRequest uint64 `json:"tcs_response_dated_before_request,omitempty"`
+}
+
+// InvertedLeftOutSaid is what the agent's summary and its client say of test
+// cases left out fail-closed because their response timestamp preceded their
+// request timestamp.
+const InvertedLeftOutSaid = "the keploy agent left some test cases out fail-closed: their response timestamp preceded their request timestamp"
+
+// InvertedLeftOutNextStep is what the user can do when InvertedLeftOutSaid fires.
+const InvertedLeftOutNextStep = "affected test cases were left out rather than saved without guaranteed mocks; re-run with --debug to inspect per-test timestamps, protocol, and ingress clock origin, and check agent logs for capture ring-buffer drops or stream desyncs"
+
+// OverSizeLimitSaid is what the agent's summary and its client say of the
+// requests a session did not record as test cases because each was over
+// keploy's size limit for one (OverSizeSkipSummary).
+const OverSizeLimitSaid = "the keploy agent did not record some requests the app served as test cases: each was over keploy's size limit for a test case (limit_bytes, body_limit_bytes); the console named up to 50 not-recorded calls per recording as they came, then counted the rest"
+
+// OverSizeLimitNextStep is what the user can do about the requests
+// OverSizeLimitSaid counts.
+const OverSizeLimitNextStep = "these limits are fixed: no flag or setting raises them. While recording, call these endpoints with payloads under the limits, so that their test cases are recorded"
+
+// OverSizeSkipSummary is how many requests a recording did not record as test
+// cases because each was over keploy's size limit for one, the calls with the
+// most of them, each named by its method, its path's shape and its path tag
+// (the console printed its path beside the same tag), and the agent's limits
+// (StreamEndSummary).
+type OverSizeSkipSummary struct {
+	Requests uint64   `json:"requests"`
+	Calls    []string `json:"calls_most,omitempty"`
+	// LimitBytes is the most a request and its response together may hold
+	// to be recorded as a test case; BodyLimitBytes the most either body
+	// may, as the agent reads it.
+	LimitBytes     int `json:"limit_bytes,omitempty"`
+	BodyLimitBytes int `json:"body_limit_bytes,omitempty"`
 }
 
 // MocksDroppedSaid is what the agent's summary and its client say of the mocks

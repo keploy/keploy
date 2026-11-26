@@ -183,6 +183,7 @@ func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall, 
 	if !report.NotOwned {
 		report.ClosestMock = m.Name
 		report.FieldDiffs, report.Differs, report.FieldReasons, report.Diff = nil, nil, nil, ""
+		report.ClosestOnAnotherRoute = false // m is this call, answered earlier
 		report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	}
 	report.Repeat = models.NewRepeatNote(m.Name, a.AnsweredAt, m.Spec.ReqTimestampMock, report.At)

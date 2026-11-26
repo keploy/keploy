@@ -50,10 +50,12 @@ type execFallbacks struct {
 	gate              *strictGate
 	sameStatementOnly bool
 	testsOwn          func(*models.Mock) bool
+	ownerRank         func(*models.Mock) int
 	eager             bool
 	list              []execFallback
 
 	window, anyTier, scored *models.Mock
+	windowRank              int
 	maxScore                int
 	windowRead, anyTierRead bool
 	scoredRead              bool
@@ -62,7 +64,7 @@ type execFallbacks struct {
 // reset starts a pass over: the walk's full scan after its first pass.
 func (f *execFallbacks) reset() {
 	f.list = f.list[:0]
-	f.window, f.anyTier, f.scored, f.maxScore = nil, nil, nil, 0
+	f.window, f.anyTier, f.scored, f.windowRank, f.maxScore = nil, nil, nil, 0, 0
 	f.windowRead, f.anyTierRead, f.scoredRead = false, false, false
 }
 
@@ -84,8 +86,9 @@ func (f *execFallbacks) add(mock *models.Mock, score int, queryExact bool) {
 	}
 	if queryExact {
 		if f.testsOwn(mock) {
-			if f.window == nil {
-				f.window = mock
+			rank := f.rankOf(mock)
+			if f.window == nil || rank < f.windowRank {
+				f.window, f.windowRank = mock, rank
 			}
 		} else if f.anyTier == nil {
 			f.anyTier = mock
@@ -136,19 +139,42 @@ func (f *execFallbacks) owned(e *execFallback) bool {
 	return e.own > 0
 }
 
+func (f *execFallbacks) rankOf(mock *models.Mock) int {
+	if f.ownerRank == nil {
+		return 0
+	}
+	return f.ownerRank(mock)
+}
+
 // fifo is the first query-exact fallback in walk order, of the open test's
-// own (own) or of the rest, the gate admits; nil when it admits none.
+// own (own, preferring lower ownerRank first) or of the rest, the gate admits;
+// nil when it admits none.
 func (f *execFallbacks) fifo(own bool) *models.Mock {
+	var best *models.Mock
+	bestRank := 0
 	for i := range f.list {
 		e := &f.list[i]
 		if e.definitive || !e.queryExact || f.owned(e) != own {
 			continue
 		}
+		if !own {
+			if f.admit(e) {
+				return e.mock
+			}
+			continue
+		}
+		rank := f.rankOf(e.mock)
+		if best != nil && rank >= bestRank {
+			continue
+		}
 		if f.admit(e) {
-			return e.mock
+			best, bestRank = e.mock, rank
+			if rank == 0 {
+				return best
+			}
 		}
 	}
-	return nil
+	return best
 }
 
 // windowPick is the open test's FIFO candidate (fifoExecMockWindow).

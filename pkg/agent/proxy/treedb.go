@@ -187,6 +187,31 @@ func (db *TreeDb) deleteMockReturning(key interface{}, want models.Mock) (bool, 
 	return true, removed
 }
 
+// deleteByName removes the first entry whose mock Name equals name. Used when
+// consuming a mock captured from an earlier staging whose tier-local ID may
+// differ in the current staging's tree.
+func (db *TreeDb) deleteByName(name string) bool {
+	if db == nil || name == "" {
+		return false
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	it := db.rbt.Iterator()
+	for it.Next() {
+		mk, ok := it.Value().(*models.Mock)
+		if !ok || mk == nil || mk.Name != name {
+			continue
+		}
+		key := it.Key()
+		db.rbt.Remove(key)
+		if info, ok := key.(models.TestModeInfo); ok {
+			delete(db.idIndex, info.ID)
+		}
+		return true
+	}
+	return false
+}
+
 // swapValue stores newObj under key in place of old, when the tree holds old
 // itself there (by pointer). The key does not change, so the window index stays
 // right whenever newObj keeps old's request time, and each key index swaps the

@@ -693,7 +693,9 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// seq==0: existing connection, already authenticated. No HandshakeResponse41
 		// and no auth exchange to consume. Emit the config mock from the stored
 		// greeting + SSLRequest, and hand the command back to handleCommandsV2 as
-		// its first packet.
+		// its first packet. Mark the active database unknown fail-closed until
+		// an explicit COM_INIT_DB or USE establishes it.
+		decodeCtx.DatabaseUnknown = true
 		logger.Debug("post-TLS V2: existing connection detected (seq=0), skipping auth; entering command phase",
 			zap.Uint16("dstPort", dstPort))
 		if caps, mariaDBCaps, ok := ownClientCaps(source, sslReqPkt); ok {
@@ -1831,6 +1833,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		}
 		carry = nil
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
+		decodeCtx.MarkDatabaseUnknown()
 		leaveOut(sess, reqTs, later(reqTs, sess.DestStream.LastReadTime()), leftOutAlone(err))
 		reportFault(logger, sess, err, true)
 		lastEnd = later(lastEnd, reqTs)
@@ -2281,6 +2284,9 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					}
 					continue
 				}
+				if op == mysql.COM_QUERY {
+					decodeCtx.MarkDatabaseUnknown()
+				}
 				leaveOut(sess, reqTs, resTs, fmt.Errorf("a %s that does not decode: %w", mysql.CommandStatusToString(op), err))
 				lastEnd = later(reqTs, resTs)
 				continue
@@ -2304,9 +2310,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				leaveOut(sess, reqTs, reqTs, oversizedNotRecorded(cmdPkt.Header.Type, "command"))
 				continue
 			}
+			currentDB := decodeCtx.Database
+			currentDBUnknown := decodeCtx.DatabaseUnknown
 			emit := func() {
-				emitMockV2(ctx, sess, []mysql.Request{{PacketBundle: *cmdPkt}}, nil, "mocks",
-					cmdPkt.Header.Type, "NO Response Packet", reqTs, reqTs)
+				emitMockV2WithDB(ctx, sess, []mysql.Request{{PacketBundle: *cmdPkt}}, nil, "mocks",
+					cmdPkt.Header.Type, "NO Response Packet", reqTs, reqTs, currentDB, currentDBUnknown)
 			}
 			if held != nil {
 				// Recorded behind the PREPARE, in the order sent.
@@ -2391,6 +2399,9 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				sp, _ := respBundle.Message.(*mysql.StmtPrepareOkPacket)
 				forgetPrepared(decodeCtx, sp)
 			}
+			if decodeCtx.MayChangeDatabase(cmdPkt) {
+				decodeCtx.MarkDatabaseUnknown()
+			}
 			decodeCtx.LastOp.Store(clientKey, wire.RESET)
 			leaveOut(sess, reqTs, resTs, err)
 			lastEnd = later(reqTs, resTs)
@@ -2404,6 +2415,9 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		}
 		lastEnd = later(reqTs, resTs)
 		rememberPrepared(decodeCtx, cmdPkt, respBundle)
+		currentDB := decodeCtx.Database
+		currentDBUnknown := decodeCtx.DatabaseUnknown
+		decodeCtx.UpdateDatabaseFromCommand(cmdPkt, respBundle)
 
 		mockType := "mocks"
 		if cmdPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_PREPARE) {
@@ -2411,13 +2425,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		}
 
 		record := func(resTs time.Time) {
-			emitMockV2(ctx, sess,
+			emitMockV2WithDB(ctx, sess,
 				[]mysql.Request{{PacketBundle: *cmdPkt}},
 				[]mysql.Response{{PacketBundle: *respBundle}},
 				mockType,
 				cmdPkt.Header.Type,
 				respBundle.Header.Type,
-				reqTs, resTs)
+				reqTs, resTs, currentDB, currentDBUnknown)
 		}
 		if sp, ok := respBundle.Message.(*mysql.StmtPrepareOkPacket); ok && leavesFramingOpen(decodeCtx, sp) {
 			// Its response is read whole: holding it is no pending work. The
@@ -2900,6 +2914,47 @@ func answeredWhenRead(reqTs, resTs time.Time) time.Time {
 // stamps, never from time.Now(). They follow the order the exchange's bytes
 // were read in (answeredWhenRead).
 func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.Request, responses []mysql.Response, mockType, reqOp, respOp string, reqTs, resTs time.Time) {
+	emitMockV2WithDB(ctx, sess, requests, responses, mockType, reqOp, respOp, reqTs, resTs, "", false)
+}
+
+const serverStatusInTrans uint16 = 0x0001
+
+// mysqlResponsesInTx reports whether any response packet in responses carries
+// SERVER_STATUS_IN_TRANS (0x0001) on its status flags (OK, EOF, or a result
+// set's EOF / OK-replacing-EOF terminator).
+func mysqlResponsesInTx(responses []mysql.Response) bool {
+	for _, r := range responses {
+		switch msg := r.Message.(type) {
+		case *mysql.OKPacket:
+			if msg != nil && msg.StatusFlags&serverStatusInTrans != 0 {
+				return true
+			}
+		case *mysql.EOFPacket:
+			if msg != nil && msg.StatusFlags&serverStatusInTrans != 0 {
+				return true
+			}
+		case *mysql.TextResultSet:
+			if msg != nil && terminatorStatusInTx(msg.FinalResponse) {
+				return true
+			}
+		case *mysql.BinaryProtocolResultSet:
+			if msg != nil && terminatorStatusInTx(msg.FinalResponse) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func terminatorStatusInTx(t *mysql.GenericResponse) bool {
+	if t == nil {
+		return false
+	}
+	status, ok := mysqlUtils.TerminatorStatus(t.Data)
+	return ok && status&serverStatusInTrans != 0
+}
+
+func emitMockV2WithDB(ctx context.Context, sess *supervisor.Session, requests []mysql.Request, responses []mysql.Response, mockType, reqOp, respOp string, reqTs, resTs time.Time, database string, databaseUnknown bool) {
 	if at := answeredWhenRead(reqTs, resTs); !at.Equal(resTs) {
 		// Said, so a stamping bug that inverts a mock stays findable: the
 		// session's warning of a mock answered before it was asked no longer
@@ -2917,8 +2972,21 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 		"responseOperation": respOp,
 		"connID":            sess.ClientConnID,
 	}
-	if sess.Opts.DstCfg != nil && sess.Opts.DstCfg.Addr != "" {
-		meta["destAddr"] = sess.Opts.DstCfg.Addr
+	if sess.Opts.DstCfg != nil {
+		if sess.Opts.DstCfg.Addr != "" {
+			meta["destAddr"] = sess.Opts.DstCfg.Addr
+		}
+		if port := wire.DestPortFromCfg(sess.Opts.DstCfg); port != "" {
+			meta["destPort"] = port
+		}
+	}
+	if databaseUnknown {
+		meta["databaseUnknown"] = "true"
+	} else if db := strings.TrimSpace(database); db != "" {
+		meta["database"] = db
+	}
+	if mysqlResponsesInTx(responses) {
+		meta["inTx"] = "true"
 	}
 
 	// The lifetime the mock is stated (statedLifetime), beside the type tag,

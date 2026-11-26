@@ -42,13 +42,28 @@ import (
 type ClientMockStorage struct {
 	// filtered = resident per-test mocks (only the disk-ineligible ones when
 	// diskMocks is set; the full slice on the legacy blob path). unfiltered =
-	// resident config/session pool.
+	// resident config/session pool (empty on the streaming path once
+	// unfilteredDisk is engaged, except on write-error fallback).
 	filtered   []*models.Mock
 	unfiltered []*models.Mock
 	// diskMocks (non-nil on the streaming path) holds window-eligible per-test
 	// mocks on disk; UpdateMockParams loads only the current window from it.
 	diskMocks *proxyPkg.DiskMocks
-	mu        sync.RWMutex
+	// unfilteredDisk (non-nil on the streaming path under strict residency or
+	// when UnfilteredCount exceeds unfilteredResidentLimit) holds the unfiltered
+	// (config/session/connection) pool in a DiskMocks store with bounded
+	// resident memory and lazy HTTP response spilling.
+	unfilteredDisk *proxyPkg.DiskMocks
+	// id uniquely identifies this published storage generation; keptGen bumps
+	// whenever loadKeptLearning updates stored mocks or disk onLoad hooks.
+	id      uint64
+	keptGen uint64
+	// unfilteredWindowSensitive is true if any unfiltered mock can change
+	// FilterConfigMocksTierAware routing across windows (WindowBound, untimed,
+	// or LifetimePerTest). When false, the unfiltered tier is window-invariant
+	// and can be retained across per-test UpdateMockParams calls.
+	unfilteredWindowSensitive bool
+	mu                        sync.RWMutex
 	// refused names the mocks this store refused under the proven switch
 	// (variables this keploy cannot follow, followable): each was logged as
 	// it was refused. A mapping that lists one owns nothing for it, and the
@@ -88,7 +103,13 @@ type Agent struct {
 	// activeClients sync.Map
 	// New field for storing client-specific mocks
 	clientMocks sync.Map // map[uint64]*ClientMockStorage
-	Ip          string
+	// nextStorageID assigns a monotonic generation to each published
+	// ClientMockStorage; stagedUnf tracks the unfiltered snapshot currently
+	// staged on Proxy so per-test UpdateMockParams calls can retain it in place.
+	nextStorageID atomic.Uint64
+	stagedUnfMu   sync.Mutex
+	stagedUnf     stagedUnfilteredState
+	Ip            string
 
 	// strictLogOnce de-dupes the "strict mock window enabled" Info log
 	// so it fires at most once per agent process instead of once per
@@ -1357,6 +1378,9 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 		if m != nil {
 			m.DeriveLifetime()
 			mocknoise.MaterializeCorrelations(a.logger, m)
+			if isUnfilteredWindowSensitive(m) {
+				storage.unfilteredWindowSensitive = true
+			}
 		}
 	}
 
@@ -1375,10 +1399,17 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 // half-built pool) and seeds the freeze anchor. Shared by StoreMocks and
 // StoreMocksStream.
 func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStorage) {
-	// Close the superseded generation's on-disk store file (temp-file leak otherwise).
+	storage.id = a.nextStorageID.Add(1)
+	a.invalidateStagedUnfiltered()
+	// Close the superseded generation's on-disk store files (temp-file leak otherwise).
 	if prev, ok := a.clientMocks.Load(uint64(0)); ok {
-		if ps, _ := prev.(*ClientMockStorage); ps != nil && ps.diskMocks != nil && ps.diskMocks != storage.diskMocks {
-			_ = ps.diskMocks.Close()
+		if ps, _ := prev.(*ClientMockStorage); ps != nil {
+			if ps.diskMocks != nil && ps.diskMocks != storage.diskMocks {
+				_ = ps.diskMocks.Close()
+			}
+			if ps.unfilteredDisk != nil && ps.unfilteredDisk != storage.unfilteredDisk {
+				_ = ps.unfilteredDisk.Close()
+			}
 		}
 	}
 	a.clientMocks.Store(uint64(0), storage)
@@ -1391,14 +1422,19 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 	if storage.diskMocks != nil {
 		a.loadedMocks += storage.diskMocks.Len()
 	}
+	if storage.unfilteredDisk != nil {
+		a.loadedMocks += storage.unfilteredDisk.Len()
+	}
 	a.scopeMu.Unlock()
 
 	// Seed the freeze anchor from the earliest request timestamp across the WHOLE
 	// pool, including on-disk mocks (they often carry the earliest, boot, times).
 	anchor := earliestReqTimestamp(storage.filtered, storage.unfiltered)
-	if storage.diskMocks != nil {
-		if se := storage.diskMocks.EarliestReqTs(); !se.IsZero() && (anchor.IsZero() || se.Before(anchor)) {
-			anchor = se
+	for _, d := range []*proxyPkg.DiskMocks{storage.diskMocks, storage.unfilteredDisk} {
+		if d != nil {
+			if se := d.EarliestReqTs(); !se.IsZero() && (anchor.IsZero() || se.Before(anchor)) {
+				anchor = se
+			}
 		}
 	}
 	if !anchor.IsZero() {
@@ -1492,27 +1528,6 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	if uint64(total) > math.MaxUint32 {
 		return fmt.Errorf("storemocks stream: a set of %d mocks: a mock's place in the set counts at most %d", total, uint64(math.MaxUint32))
 	}
-	// Pre-size from the header counts, but cap the capacity: the counts are
-	// client-provided, so an inflated header must not force a huge upfront
-	// allocation. A larger real count just grows via append; a lying count
-	// still fails fast at the first Decode past the actual data.
-	storage := &ClientMockStorage{
-		filtered:   make([]*models.Mock, 0, presizeCap(header.FilteredCount)),
-		unfiltered: make([]*models.Mock, 0, presizeCap(header.UnfilteredCount)),
-	}
-
-	// Engage the on-disk store when strict mock-window is in effect — the OSS
-	// config flag config.Test.StrictMockWindow, on by default (seeded by
-	// config.New(); KEPLOY_STRICT_MOCK_WINDOW=0 opts out). Under lax the filter
-	// promotes out-of-window mocks, needing the whole per-test set every test, so
-	// windowing to disk would only add reload cost. Best-effort — fall back to
-	// full-resident if the store can't be created.
-	//
-	// keploy mock replay under the proven switch keeps the on-disk store
-	// whatever the window mode (stagesMockReplay): its staging reads, of the
-	// store, only what no test owns, and each test reads its own as it opens.
-	// That bounds the agent's memory, which the opt-out of the strict window,
-	// a matching choice, must not undo.
 	var disk *proxyPkg.DiskMocks
 	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) || a.stagesMockReplay() {
 		d, diskErr := proxyPkg.NewDiskMocks(a.logger)
@@ -1522,10 +1537,38 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			disk = d
 		}
 	}
-	storage.diskMocks = disk
+	// Also spill unfiltered (config/session/connection) mocks into a bounded
+	// DiskMocks store whenever disk residency is active OR the unfiltered pool
+	// exceeds unfilteredResidentLimit, so large unfiltered corpora never stay
+	// decoded in storage.unfiltered forever.
+	var unfilteredDisk *proxyPkg.DiskMocks
+	if header.UnfilteredCount > 0 && (disk != nil || header.UnfilteredCount > unfilteredResidentLimit) {
+		ud, udErr := proxyPkg.NewDiskMocksWithBudget(a.logger, unfilteredDiskBudgetBytes)
+		if udErr != nil {
+			a.logger.Warn("on-disk unfiltered mock store unavailable; keeping unfiltered mocks resident", zap.Error(udErr))
+		} else {
+			unfilteredDisk = ud
+		}
+	}
+	// Pre-size resident slices only when mocks actually stay resident in them;
+	// when parked on disk, leave them empty so a large header does not allocate
+	// an unused backing array.
+	storage := &ClientMockStorage{
+		diskMocks:      disk,
+		unfilteredDisk: unfilteredDisk,
+	}
+	if disk == nil {
+		storage.filtered = make([]*models.Mock, 0, presizeCap(header.FilteredCount))
+	}
+	if unfilteredDisk == nil {
+		storage.unfiltered = make([]*models.Mock, 0, presizeCap(header.UnfilteredCount))
+	}
 	failStream := func(err error) error {
 		if disk != nil {
 			_ = disk.Close()
+		}
+		if unfilteredDisk != nil {
+			_ = unfilteredDisk.Close()
 		}
 		return err
 	}
@@ -1587,11 +1630,25 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 				storage.filtered = append(storage.filtered, mock)
 			}
 		} else {
-			storage.unfiltered = append(storage.unfiltered, mock)
+			if isUnfilteredWindowSensitive(mock) {
+				storage.unfilteredWindowSensitive = true
+			}
+			if unfilteredDisk != nil {
+				if err := unfilteredDisk.Add(mock); err != nil {
+					a.logger.Warn("on-disk unfiltered mock write failed; keeping mock resident",
+						zap.String("mock", mock.Name), zap.Error(err))
+					storage.unfiltered = append(storage.unfiltered, mock)
+				}
+			} else {
+				storage.unfiltered = append(storage.unfiltered, mock)
+			}
 		}
 	}
 	if proven {
 		containerkey.Default.SetRecorded(&tally)
+	}
+	if unfilteredDisk != nil {
+		unfilteredDisk.Finalize()
 	}
 	if disk != nil {
 		disk.Finalize()
@@ -1600,16 +1657,45 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			return failStream(fmt.Errorf("storemocks stream: read the statement catalog from the on-disk store: %w", err))
 		}
 		storage.statements = statements
+	}
+	if unfilteredDisk != nil {
+		unfStatements, err := unfilteredDisk.LoadStatements()
+		if err != nil {
+			return failStream(fmt.Errorf("storemocks stream: read the statement catalog from the unfiltered on-disk store: %w", err))
+		}
+		if len(unfStatements) > 0 {
+			storage.statements = dedupByName(storage.statements, unfStatements)
+		}
+	}
+	if disk != nil || unfilteredDisk != nil {
 		// diskBytes are the store's records in its file, residentBytes those
 		// it keeps in memory (up to its resident budget): together, every
-		// per-test mock the store holds, as encoded.
+		// mock the store holds, as encoded.
+		ptOnDisk, ptSpilled, ptDiskBytes, ptResBytes := 0, 0, int64(0), int64(0)
+		if disk != nil {
+			ptOnDisk = disk.Len()
+			ptSpilled = disk.SpilledResponses()
+			ptDiskBytes = disk.DiskBytes()
+			ptResBytes = disk.ResidentBytes()
+		}
+		unfOnDisk, unfSpilled, unfDiskBytes, unfResBytes := 0, 0, int64(0), int64(0)
+		if unfilteredDisk != nil {
+			unfOnDisk = unfilteredDisk.Len()
+			unfSpilled = unfilteredDisk.SpilledResponses()
+			unfDiskBytes = unfilteredDisk.DiskBytes()
+			unfResBytes = unfilteredDisk.ResidentBytes()
+		}
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
-			zap.Int("onDisk", disk.Len()),
-			zap.Int("spilledResponses", disk.SpilledResponses()),
-			zap.Int64("diskBytes", disk.DiskBytes()),
-			zap.Int64("residentBytes", disk.ResidentBytes()),
+			zap.Int("onDisk", ptOnDisk),
+			zap.Int("spilledResponses", ptSpilled),
+			zap.Int64("diskBytes", ptDiskBytes),
+			zap.Int64("residentBytes", ptResBytes),
 			zap.Int("residentPerTest", len(storage.filtered)),
-			zap.Int("residentConfig", len(storage.unfiltered)))
+			zap.Int("residentConfig", len(storage.unfiltered)),
+			zap.Int("unfilteredOnDisk", unfOnDisk),
+			zap.Int("unfilteredSpilledResponses", unfSpilled),
+			zap.Int64("unfilteredDiskBytes", unfDiskBytes),
+			zap.Int64("unfilteredResidentBytes", unfResBytes))
 	}
 
 	a.finalizeClientMocks(ctx, storage)
@@ -1689,6 +1775,57 @@ func (s *ClientMockStorage) noteRefused(mock *models.Mock) {
 // upfront allocation (CodeQL: untrusted allocation size). Real pools are far
 // smaller; a larger real count grows via append.
 const maxStreamPresize = 1 << 20
+
+// unfilteredResidentLimit caps how many unfiltered mocks stay decoded in
+// storage.unfiltered on the streaming path even when strict mock-window disk
+// residency is disabled (lax mode); larger pools spill to unfilteredDisk.
+const unfilteredResidentLimit = 1024
+
+// unfilteredDiskBudgetBytes caps the in-memory encoded gob buffer of
+// unfilteredDisk so large unfiltered corpora spill promptly to the temp file.
+const unfilteredDiskBudgetBytes = 8 << 20
+
+type stagedUnfilteredState struct {
+	valid     bool
+	storageID uint64
+	keptGen   uint64
+}
+
+func (a *Agent) invalidateStagedUnfiltered() {
+	a.stagedUnfMu.Lock()
+	a.stagedUnf = stagedUnfilteredState{}
+	a.stagedUnfMu.Unlock()
+}
+
+func (a *Agent) setStagedUnfiltered(s stagedUnfilteredState) {
+	a.stagedUnfMu.Lock()
+	a.stagedUnf = s
+	a.stagedUnfMu.Unlock()
+}
+
+func (a *Agent) matchesStagedUnfiltered(storageID, keptGen uint64) bool {
+	a.stagedUnfMu.Lock()
+	defer a.stagedUnfMu.Unlock()
+	return a.stagedUnf.valid && a.stagedUnf.storageID == storageID && a.stagedUnf.keptGen == keptGen
+}
+
+// isUnfilteredWindowSensitive reports whether m's FilterConfigMocksTierAware
+// routing can vary across test windows. Timed non-WindowBound mocks with
+// LifetimeSession or LifetimeConnection always route to ruleSessionLifetime
+// with IsFiltered=false regardless of window bounds.
+func isUnfilteredWindowSensitive(m *models.Mock) bool {
+	if m == nil {
+		return false
+	}
+	if models.WindowBound(m.Kind) {
+		return true
+	}
+	if m.Spec.ReqTimestampMock.IsZero() || m.Spec.ResTimestampMock.IsZero() {
+		return true
+	}
+	lt := m.TestModeInfo.Lifetime
+	return lt != models.LifetimeSession && lt != models.LifetimeConnection
+}
 
 func presizeCap(n int) int {
 	if n < 0 {
@@ -1867,7 +2004,30 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 				zap.String("firstRecordedTest", cutoff.UTC().Format(time.RFC3339Nano)))
 			break
 		}
-		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
+		// Widen the on-disk window read by MockWindowEdgeSkew so a plain
+		// per-test mock the edge rule gives this window
+		// (models.WindowSchedule.EdgeOwnedBy), placed just outside it,
+		// reaches the window filter instead of being left unread on disk. Of
+		// the margins only such mocks are kept (edgeMargin): every other
+		// margin mock, one the edge rule gives the other window or leaves to
+		// the in-flight rule among them, is left unread as on main. Not
+		// widened when the proxy applies no edge rule (no recorded windows,
+		// or exact serving), nor for an inverted window (its response before
+		// its request), which LoadWindow clamps to its start.
+		loadStart, loadEnd := params.AfterTime, params.BeforeTime
+		var edgeWindows *models.WindowSchedule
+		if r, ok := a.Proxy.(interface{ EdgeWindows() *models.WindowSchedule }); ok {
+			edgeWindows = r.EdgeWindows()
+		}
+		widen := edgeWindows.Len() > 0 && !loadStart.Equal(models.BaseTime) && !loadEnd.Before(loadStart)
+		if widen {
+			loadStart = loadStart.Add(-models.MockWindowEdgeSkew)
+			loadEnd = loadEnd.Add(models.MockWindowEdgeSkew)
+		}
+		loaded, err = disk.LoadWindow(loadStart, loadEnd)
+		if err == nil && widen {
+			loaded = edgeMargin(loaded, edgeWindows, params.AfterTime, params.BeforeTime)
+		}
 		if err == nil && !firstWindowStart.IsZero() {
 			var startup []*models.Mock
 			startup, err = disk.LoadBefore(firstWindowStart)
@@ -1906,6 +2066,24 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	return dedupByName(resident, loaded), nil
 }
 
+// edgeMargin is loaded, a read of the window [start, end] widened by
+// models.MockWindowEdgeSkew on both sides, less the margin mocks the edge rule
+// does not give this window (models.WindowSchedule.EdgeOwnedBy over windows):
+// what the window's own read holds (placed in it, models.PlaceOf), and of the
+// margins only the mocks the edge rule gives it. The filter is in place.
+func edgeMargin(loaded []*models.Mock, windows *models.WindowSchedule, start, end time.Time) []*models.Mock {
+	out := loaded[:0]
+	for _, m := range loaded {
+		if m == nil {
+			continue
+		}
+		if place := models.PlaceOf(m); (!place.Before(start) && !place.After(end)) || windows.EdgeOwnedBy(m, start, end) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // seedStatementCatalog hands the proxy the stored set's statement catalog
 // (storage.statements): the first recorded mock of each statement its on-disk
 // store holds. An app may prepare at start the statements it runs only inside
@@ -1922,10 +2100,18 @@ func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
 		return
 	}
 	seeder.SeedStatementCatalog(storage.statements)
-	if storage.diskMocks != nil {
+	if storage.diskMocks != nil || storage.unfilteredDisk != nil {
+		onDisk, unfOnDisk := 0, 0
+		if storage.diskMocks != nil {
+			onDisk = storage.diskMocks.Len()
+		}
+		if storage.unfilteredDisk != nil {
+			unfOnDisk = storage.unfilteredDisk.Len()
+		}
 		a.logger.Info("seeded the set's statement catalog from the on-disk store: the first recording of each statement, to describe a statement the app prepares before the test that runs it, never served",
 			zap.Int("statements", len(storage.statements)),
-			zap.Int("onDisk", storage.diskMocks.Len()))
+			zap.Int("onDisk", onDisk),
+			zap.Int("unfilteredOnDisk", unfOnDisk))
 	}
 }
 
@@ -1952,17 +2138,30 @@ func (a *Agent) seedRecordedDestinations(storage *ClientMockStorage) {
 		return
 	}
 	var mocks []*models.Mock
-	if storage.diskMocks != nil {
-		var err error
-		if mocks, err = storage.diskMocks.LoadDestinations(); err != nil {
+	for _, d := range []*proxyPkg.DiskMocks{storage.diskMocks, storage.unfilteredDisk} {
+		if d == nil {
+			continue
+		}
+		loaded, err := d.LoadDestinations()
+		if err != nil {
 			utils.LogError(a.logger, err, "failed to read the set's recorded destinations from the on-disk store; the proxy reads them from what is staged")
-			mocks = nil
+			continue
+		}
+		if len(loaded) > 0 {
+			mocks = dedupByName(mocks, loaded)
 		}
 	}
 	seeder.SeedRecordedDestinations(mocks)
-	if storage.diskMocks != nil {
+	if storage.diskMocks != nil || storage.unfilteredDisk != nil {
+		onDisk := 0
+		if storage.diskMocks != nil {
+			onDisk += storage.diskMocks.Len()
+		}
+		if storage.unfilteredDisk != nil {
+			onDisk += storage.unfilteredDisk.Len()
+		}
 		a.logger.Debug("seeded the set's recorded destinations from the on-disk store",
-			zap.Int("destinations", len(mocks)), zap.Int("onDisk", storage.diskMocks.Len()))
+			zap.Int("destinations", len(mocks)), zap.Int("onDisk", onDisk))
 	}
 }
 
@@ -2247,7 +2446,7 @@ func (a *Agent) OpenTestCase(ctx context.Context, params models.MockFilterParams
 func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, alsoLoad []string, open *opening) error {
 	// The window is opened in one step only through WindowedProxy's staging;
 	// a proxy staged by SetMocks never is.
-	_, windowed := a.Proxy.(coreAgent.WindowedProxy)
+	wp, windowed := a.Proxy.(coreAgent.WindowedProxy)
 	opener, opensInOneStep := a.Proxy.(coreAgent.WindowedTestOpener)
 	opensInOneStep = opensInOneStep && windowed
 	if open != nil && !opensInOneStep {
@@ -2255,7 +2454,11 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 			return err
 		}
 	}
-	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params, alsoLoad...)
+	retainer, canRetainProxy := a.Proxy.(coreAgent.UnfilteredRetainingWindowedProxy)
+	allowRetain := windowed && canRetainProxy && retainer.CanRetainUnfiltered() &&
+		!params.AfterTime.Equal(models.BaseTime) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero()
+
+	filteredMocks, unfilteredMocks, retained, stagedSnap, err := a.mocksForParamsWithRetain(ctx, params, allowRetain, alsoLoad...)
 	if err != nil {
 		return err
 	}
@@ -2268,19 +2471,51 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	// supports the WindowedProxy extension. Otherwise fall back to the
 	// stable SetMocks contract — third-party proxies without window
 	// support keep working in legacy lax mode.
-	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
+	if windowed {
+		if retained {
+			var retainErr error
+			if open != nil && opensInOneStep {
+				retainErr = retainer.OpenTestFilteredWithWindow(ctx, filteredMocks, params.AfterTime, params.BeforeTime, open.given)
+			} else {
+				retainErr = retainer.SetFilteredMocksWithWindow(ctx, filteredMocks, params.AfterTime, params.BeforeTime)
+			}
+			if retainErr == nil {
+				return nil
+			}
+			if !errors.Is(retainErr, coreAgent.ErrUnfilteredNotRetained) {
+				if open != nil && opensInOneStep {
+					utils.LogError(a.logger, retainErr, "failed to stage the test case's window on the proxy and begin its variables")
+				} else {
+					utils.LogError(a.logger, retainErr, "failed to set filtered mocks and test window on proxy")
+				}
+				return retainErr
+			}
+			// Retention was invalidated concurrently (e.g. DeleteUnFilteredMock,
+			// ResetForReplaySession, or worker manager invalidation raced after
+			// CanRetainUnfiltered). The proxy left its trees untouched; fall back
+			// cleanly to loading the unfiltered pool and performing a full stage.
+			a.invalidateStagedUnfiltered()
+			filteredMocks, unfilteredMocks, _, stagedSnap, err = a.mocksForParamsWithRetain(ctx, params, false, alsoLoad...)
+			if err != nil {
+				return err
+			}
+			a.readKindFromDisk()
+		}
 		if open != nil && opensInOneStep {
 			if err := opener.OpenTestWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime, open.given); err != nil {
 				utils.LogError(a.logger, err, "failed to stage the test case's window on the proxy and begin its variables")
 				return err
 			}
+			a.setStagedUnfiltered(stagedSnap)
 			return nil
 		}
 		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
 			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
 			return err
 		}
+		a.setStagedUnfiltered(stagedSnap)
 	} else {
+		a.invalidateStagedUnfiltered()
 		if err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 			utils.LogError(a.logger, err, "failed to set mocks on proxy")
 			return err
@@ -2334,6 +2569,11 @@ func (a *Agent) seedConsumedRewinds(params models.MockFilterParams) {
 // alsoLoad names per-test mocks the on-disk store holds to read as well,
 // beside what params' own load reads.
 func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterParams, alsoLoad ...string) ([]*models.Mock, []*models.Mock, error) {
+	filtered, unfiltered, _, _, err := a.mocksForParamsWithRetain(ctx, params, false, alsoLoad...)
+	return filtered, unfiltered, err
+}
+
+func (a *Agent) mocksForParamsWithRetain(ctx context.Context, params models.MockFilterParams, allowRetain bool, alsoLoad ...string) ([]*models.Mock, []*models.Mock, bool, stagedUnfilteredState, error) {
 	// Seed the startup-init cutoff from the set's earliest RECORDED test before
 	// anything else touches the window. Without it the cutoff follows whichever
 	// test fires FIRST, so a --test-sets selection, an ignored test or the
@@ -2425,16 +2665,20 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// Get stored mocks for the client
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
 	if !exists {
-		return nil, nil, fmt.Errorf("no mocks stored for client ID")
+		return nil, nil, false, stagedUnfilteredState{}, fmt.Errorf("no mocks stored for client ID")
 	}
 	storage := storageInterface.(*ClientMockStorage)
 
 	storage.mu.RLock()
 	residentFiltered := make([]*models.Mock, len(storage.filtered))
-	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
 	copy(residentFiltered, storage.filtered)
-	copy(originalUnfiltered, storage.unfiltered)
+	residentUnfiltered := make([]*models.Mock, len(storage.unfiltered))
+	copy(residentUnfiltered, storage.unfiltered)
 	disk := storage.diskMocks
+	unfDisk := storage.unfilteredDisk
+	storageID := storage.id
+	keptGen := storage.keptGen
+	unfSensitive := storage.unfilteredWindowSensitive
 	storage.mu.RUnlock()
 
 	// The staging call (recordedSetShape populated, as for the cursors'
@@ -2448,7 +2692,10 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		// (models.DeclaredSessionCalls). A call that carries none leaves
 		// the agent's as they are.
 		params.SessionCalls.Install()
-		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
+		if params.SessionCalls != nil {
+			a.invalidateStagedUnfiltered()
+		}
+		a.seedBackgroundRecordings(params, [][]*models.Mock{residentFiltered, residentUnfiltered}, disk, unfDisk)
 	}
 
 	// On WindowedProxy the agent filter runs non-strict (SetMocksWithWindow does
@@ -2456,136 +2703,43 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
 	agentStrict := params.StrictMockWindow && !isWindowedProxy
 
-	// firstWindowStart: earliest observed window start, so startup-init mocks
-	// (req < it) are kept, not dropped as stale.
-	//
-	// On the FIRST window the proxy has not learned it yet: SetMocksWithWindow
-	// records it (mockmanager.go:676-679) LATER in this same call, so the read
-	// here returns the zero time and every startup-band guard downstream is
-	// switched off for test #1 — loadPerTestMocks' disk.LoadBefore(...) never
-	// fires, and the startup tier stays EMPTY for the one test where a slow
-	// application bootstrap actually lands. That is why a bootstrap query issued
-	// under load misses with candidates:0 while the mock sits unread on disk.
-	//
-	// Derive it from this call's own window start instead, applying exactly the
-	// predicate mockmanager uses so the two cannot disagree: a zero or BaseTime
-	// AfterTime is "no window", anything else is a real start.
 	var firstWindowStart time.Time
 	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
 		firstWindowStart = reader.FirstTestWindowStart()
 	}
-	//
-	// Guarded on isWindowedProxy on purpose. This derivation is only valid where
-	// SetMocksWithWindow adopts this very same start as firstWindowStart later in
-	// this call (see MockManager.SetMocksWithWindow). A proxy implementing only
-	// the base agent.Proxy interface has neither the reader nor that adoption, so
-	// its reader value is permanently zero — without the guard the fallback would
-	// fire on EVERY window with the CURRENT window's start, collapsing
-	// "req < firstWindowStart" into "req < afterTime" and preserving every stale
-	// previous-test mock. That is exactly the cross-test bleed strict mode exists
-	// to prevent, and agentStrict is true on that path.
 	firstWindowStart = effectiveFirstWindowStart(isWindowedProxy, firstWindowStart, params.AfterTime)
 
 	// Load only what the filter will keep for this call (see loadPerTestMocks).
 	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart, alsoLoad...)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
-		return nil, nil, err
+		return nil, nil, false, stagedUnfilteredState{}, err
 	}
 	carryOver, err := a.loadCarryOverLookahead(disk, params)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load the carry-over mocks for this test from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
-		return nil, nil, err
+		return nil, nil, false, stagedUnfilteredState{}, err
 	}
 
-	a.logger.Debug("Original mocks before filtering",
-		zap.Int("originalFiltered", len(originalFiltered)),
-		zap.Int("originalUnfiltered", len(originalUnfiltered)))
-
-	var filteredMocks, unfilteredMocks []*models.Mock
-
-	// When the proxy supports the windowed extension, MockManager's
-	// SetMocksWithWindow applies the authoritative per-test-window
-	// filter (including startup-init promotion for req < firstWindowStart
-	// — bootstrap traffic like HikariCP pool warm-up that fires before
-	// any test request). Pre-dropping out-of-window per-test mocks at
-	// the agent under strict mode would hide those startup-init mocks
-	// from MockManager and break replay of app-bootstrap DB calls under
-	// strict. So: agent-level strict pre-filtering runs only on the
-	// legacy SetMocks fallback path. For WindowedProxy callers we
-	// pass strict=false to FilterPerTestAndLaxPromoted and let
-	// MockManager.SetMocksWithWindow enforce strict semantics.
-
-	// Apply filtering based on parameters
+	filteredOwned := len(residentFiltered) == 0 && disk != nil
 	mapped := params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping)
+
+	var filteredMocks, promotedToSession []*models.Mock
 	if mapped {
-		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, originalFiltered, params.MockMapping, params.AfterTime, params.BeforeTime)
-		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
+		filteredMocks = pkg.FilterTcsMocksMappingInWindowNoDeepCopy(ctx, a.logger, originalFiltered, params.MockMapping, params.AfterTime, params.BeforeTime, filteredOwned)
 	} else {
-		// Lax-mode promotion restoration: filterByTimeStamp moves
-		// out-of-window non-config per-test mocks into its "unfiltered"
-		// return slice so they remain reusable across tests (the
-		// pre-Phase-2 kind-fallback used to do this implicitly by
-		// over-promoting anything MySQL/Postgres/... to LifetimeSession
-		// at DeriveLifetime). Round-5 correctly narrowed DeriveLifetime
-		// but FilterTcsMocks was still discarding the promoted slice —
-		// so shared-fixture mocks (SELECT * FROM pet used by every
-		// test in spring-petclinic) were lost at the agent. We now
-		// drain those promoted-to-session mocks out of the per-test
-		// filter and merge them into the session pool passed to the
-		// proxy. Under strict mode this branch doesn't fire because
-		// filterByTimeStamp drops rather than promotes.
-		// The calls in flight when the window's test began are its own
-		// per-test mocks in the user's window mode (params.StrictMockWindow),
-		// not agentStrict's: on a windowed proxy the agent's filter is never
-		// strict, and the mock manager filters what it is handed.
 		inFlightFrom, _ := a.inFlightFrom(params)
-		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedInFlightAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart, inFlightFrom, params.StrictMockWindow)
-		filteredMocks = perTestIn
-		unfilteredMocks = pkg.FilterConfigMocksTierAware(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
-		if len(promotedToSession) > 0 {
-			unfilteredMocks = append(unfilteredMocks, promotedToSession...)
-			// Ordering: both FilterConfigMocks and FilterPerTestAndLaxPromoted
-			// already sort their outputs by ReqTimestampMock deterministically,
-			// so the concatenated slice is stable across runs. We deliberately
-			// DO NOT re-sort the merged pool here — the Mongo v2 matcher
-			// relies on config-tagged session mocks preceding lax-promoted
-			// per-test mocks in the unfiltered iteration order (config tier
-			// wins handshake/ping ties before data-plane mocks get a chance
-			// to steal the match and drop the driver connection mid-handshake).
-			// Re-sorting by timestamp interleaves them and causes the
-			// Mongo fuzzer cross-version replay to hang.
-			a.logger.Debug("lax-promoted per-test mocks into session pool for cross-test reuse",
-				zap.Int("count", len(promotedToSession)))
+		var edgeWindows *models.WindowSchedule
+		if r, ok := a.Proxy.(interface{ EdgeWindows() *models.WindowSchedule }); ok {
+			edgeWindows = r.EdgeWindows()
 		}
+		filteredMocks, promotedToSession = pkg.FilterPerTestAndLaxPromotedWithWindowsNoDeepCopy(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart, inFlightFrom, params.StrictMockWindow, edgeWindows, filteredOwned)
 	}
 
-	// Count IsFiltered distribution for debugging
-	var filteredCount, unfilteredCount int
-	for _, m := range unfilteredMocks {
-		if m.TestModeInfo.IsFiltered {
-			filteredCount++
-		} else {
-			unfilteredCount++
-		}
-	}
-	a.logger.Debug("After filtering",
-		zap.Int("filteredMocks", len(filteredMocks)),
-		zap.Int("unfilteredMocks", len(unfilteredMocks)),
-		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
-		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
-
-	// A derived mock of the test this call stages replaces, in that test,
-	// the recording it was derived from (models.Mock.Replaces): the test is
-	// served the derived answer and never its source, from either pool,
-	// while every other test, and the time between tests, is served the
-	// source as before. The test's own are, staged by its mapping, the
-	// mocks it names, and staged by its window, those placed in the window
-	// (pkg.RecordedInWindow), not the start-up band or the calls in flight
-	// staged beside them. A call that stages no test (no mapping and no
-	// window: a set's staging, the pool staged between tests) replaces
-	// nothing. The carry-over below is other tests' mocks, so it is added
-	// after.
+	// Compute derived-mock replacements BEFORE loading unfiltered so we know
+	// whether any source mock must be omitted from the unfiltered pool for this
+	// test.
+	var replaced map[string]struct{}
 	windowed := !params.AfterTime.IsZero() && !params.AfterTime.Equal(models.BaseTime)
 	if mapped || windowed {
 		own := filteredMocks
@@ -2598,9 +2752,77 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 				}
 			}
 		}
-		replaced := models.ReplacedBy(own)
+		replaced = models.ReplacedBy(own)
 		filteredMocks = models.WithoutReplaced(filteredMocks, replaced)
-		unfilteredMocks = models.WithoutReplaced(unfilteredMocks, replaced)
+	}
+
+	// Retain the already-staged unfiltered tier in place whenever the unfiltered
+	// pool is window-invariant and unchanged for this test — zero disk decode,
+	// zero copy, and zero unfiltered tree rebuild.
+	retainUnfiltered := allowRetain && !mapped && !unfSensitive &&
+		len(promotedToSession) == 0 && len(replaced) == 0 &&
+		a.matchesStagedUnfiltered(storageID, keptGen)
+
+	var unfilteredMocks []*models.Mock
+	var stagedSnap stagedUnfilteredState
+	if !retainUnfiltered {
+		originalUnfiltered := residentUnfiltered
+		unfOwned := false
+		if unfDisk != nil {
+			loadedUnf, loadErr := unfDisk.LoadAll()
+			if loadErr != nil {
+				utils.LogError(a.logger, loadErr, "failed to load unfiltered mocks from the agent's on-disk store")
+				return nil, nil, false, stagedUnfilteredState{}, loadErr
+			}
+			if len(residentUnfiltered) == 0 {
+				originalUnfiltered = loadedUnf
+				unfOwned = true
+			} else {
+				originalUnfiltered = dedupByName(residentUnfiltered, loadedUnf)
+			}
+		}
+
+		a.logger.Debug("Original mocks before filtering",
+			zap.Int("originalFiltered", len(originalFiltered)),
+			zap.Int("originalUnfiltered", len(originalUnfiltered)))
+
+		if mapped {
+			unfilteredMocks = pkg.FilterConfigMocksMappingNoDeepCopy(ctx, a.logger, originalUnfiltered, params.MockMapping, unfOwned)
+		} else {
+			unfilteredMocks = pkg.FilterConfigMocksTierAwareNoDeepCopy(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart, unfOwned)
+			if len(promotedToSession) > 0 {
+				unfilteredMocks = append(unfilteredMocks, promotedToSession...)
+				a.logger.Debug("lax-promoted per-test mocks into session pool for cross-test reuse",
+					zap.Int("count", len(promotedToSession)))
+			}
+		}
+
+		// Count IsFiltered distribution for debugging
+		var filteredCount, unfilteredCount int
+		for _, m := range unfilteredMocks {
+			if m.TestModeInfo.IsFiltered {
+				filteredCount++
+			} else {
+				unfilteredCount++
+			}
+		}
+		a.logger.Debug("After filtering",
+			zap.Int("filteredMocks", len(filteredMocks)),
+			zap.Int("unfilteredMocks", len(unfilteredMocks)),
+			zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
+			zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
+
+		if len(replaced) > 0 {
+			unfilteredMocks = models.WithoutReplaced(unfilteredMocks, replaced)
+		}
+		if !mapped && !unfSensitive && len(promotedToSession) == 0 && len(replaced) == 0 &&
+			!params.AfterTime.IsZero() && !params.BeforeTime.IsZero() {
+			stagedSnap = stagedUnfilteredState{
+				valid:     true,
+				storageID: storageID,
+				keptGen:   keptGen,
+			}
+		}
 	}
 
 	// The carry-over lookahead bypasses the filter on purpose: on a windowed
@@ -2613,15 +2835,9 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.AgentOwnsConsumed {
-		// Agent applies filterOutDeleted from its OWN persistent consumption
-		// history — the client no longer re-sends the growing TotalConsumedMocks
-		// map. Equivalent by construction: that persistent map is the exact
-		// accumulation of the flagMockAsUsed states the client used to relay.
 		if reader, ok := a.Proxy.(coreAgent.ConsumedStateReader); ok {
 			filteredMocks = a.filterOutDeleted(filteredMocks, reader.GetPersistentConsumed())
 		} else if params.TotalConsumedMocks != nil {
-			// Proxy can't expose its persistent map — never silently skip the
-			// filter; fall back to any client-sent map.
 			a.logger.Warn("AgentOwnsConsumed set but proxy has no ConsumedStateReader; falling back to client-sent TotalConsumedMocks")
 			filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
 		}
@@ -2629,7 +2845,7 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
 	}
 
-	return filteredMocks, unfilteredMocks, nil
+	return filteredMocks, unfilteredMocks, retainUnfiltered, stagedSnap, nil
 }
 
 // ServedMocks reports the mocks served so far this session, keyed by mock name.

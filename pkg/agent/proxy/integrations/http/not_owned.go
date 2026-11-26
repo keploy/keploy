@@ -227,6 +227,7 @@ func init() {
 func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 	report.ClosestMock, report.NotOwned, report.Diff = m.Name, true, ""
 	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
+	report.ClosestOnAnotherRoute = false // m is this call
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)
 }
@@ -244,6 +245,7 @@ func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 func markOutsideTests(report *models.MockMismatchReport, m *models.Mock, hint string) {
 	report.ClosestMock, report.NotOwned, report.Diff = m.Name, false, ""
 	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
+	report.ClosestOnAnotherRoute = false // m is this call
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = strings.TrimSpace(outsideTestsNextSteps(m.Name) + " " + hint)
 }

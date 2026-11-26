@@ -27,6 +27,10 @@ on:
         default: 'all' # Default to running all jobs
 
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   mysql_fuzzer:
     if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'mysql_fuzzer') }}
@@ -372,5 +376,8 @@ jobs:
         run: |
           cd go-fuzzers/mongo
           echo "::group::Keploy Report"
-          sudo "$REPLAY_KEPLOY_BIN" report || echo "Failed to generate report"
+          # sudo hands keploy only what its command line names: SUDO_ENV names
+          # the workflow's switches, KEPLOY_INTERNAL among them.
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/sudo_env.sh"
+          sudo env "${SUDO_ENV[@]}" "$REPLAY_KEPLOY_BIN" report || echo "Failed to generate report"
           echo "::endgroup::"

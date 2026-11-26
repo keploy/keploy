@@ -719,6 +719,33 @@ func (s *scopedMockDb) RangeRecordedBefore(t time.Time, visit func(*models.Mock)
 	return errNoRecordedBefore
 }
 
+// RecordingsReadable forwards the store's readable epoch (integrations.SetFollower);
+// 0, no epoch, over a store that keeps none.
+func (s *scopedMockDb) RecordingsReadable() uint64 {
+	if f, ok := s.MockMemDb.(integrations.SetFollower); ok {
+		return f.RecordingsReadable()
+	}
+	return 0
+}
+
+// TestCycle forwards the store's count of tests opened again
+// (integrations.SetFollower).
+func (s *scopedMockDb) TestCycle() uint64 {
+	if f, ok := s.MockMemDb.(integrations.SetFollower); ok {
+		return f.TestCycle()
+	}
+	return 0
+}
+
+// ExcuseRecording forwards to the store (integrations.SetFollower).
+func (s *scopedMockDb) ExcuseRecording(name string) {
+	if f, ok := s.MockMemDb.(integrations.SetFollower); ok {
+		f.ExcuseRecording(name)
+	}
+}
+
+var _ integrations.SetFollower = (*scopedMockDb)(nil)
+
 // errNoRecordedBefore is a scoped view's answer over a store that cannot read
 // every recording made before an instant.
 var errNoRecordedBefore = errors.New("the mock store cannot read every recording made before an instant")
@@ -1088,9 +1115,68 @@ func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	return -1, false
 }
 
+// OwnerTestWindow forwards integrations.WindowOwnership.
+func (s *scopedMockDb) OwnerTestWindow(t time.Time) (models.TestWindow, bool, bool) {
+	if w, ok := s.MockMemDb.(integrations.WindowOwnership); ok {
+		return w.OwnerTestWindow(t)
+	}
+	return models.TestWindow{}, false, false
+}
+
+// OwnerTestWindowSpan forwards integrations.WindowOwnership.
+func (s *scopedMockDb) OwnerTestWindowSpan(start, end time.Time) (models.TestWindow, bool) {
+	if w, ok := s.MockMemDb.(integrations.WindowOwnership); ok {
+		return w.OwnerTestWindowSpan(start, end)
+	}
+	return models.TestWindow{}, false
+}
+
+// EdgeOwnerWindow forwards integrations.WindowOwnership.
+func (s *scopedMockDb) EdgeOwnerWindow(m *models.Mock) (models.TestWindow, bool) {
+	if w, ok := s.MockMemDb.(integrations.WindowOwnership); ok {
+		return w.EdgeOwnerWindow(m)
+	}
+	return models.TestWindow{}, false
+}
+
+// TallyOwnership forwards integrations.OwnershipTally.
+func (s *scopedMockDb) TallyOwnership(e integrations.OwnershipEvent) {
+	if w, ok := s.MockMemDb.(integrations.OwnershipTally); ok {
+		w.TallyOwnership(e)
+	}
+}
+
+// RecordWindowAlternatives forwards integrations.WindowReclaim.
+func (s *scopedMockDb) RecordWindowAlternatives(consumed *models.Mock, winStart, winEnd time.Time, alts []*models.Mock) {
+	if w, ok := s.MockMemDb.(integrations.WindowReclaim); ok {
+		w.RecordWindowAlternatives(consumed, winStart, winEnd, alts)
+	}
+}
+
+// ReclaimableInWindow forwards integrations.WindowReclaim.
+func (s *scopedMockDb) ReclaimableInWindow(winStart, winEnd time.Time) []*models.Mock {
+	if w, ok := s.MockMemDb.(integrations.WindowReclaim); ok {
+		return w.ReclaimableInWindow(winStart, winEnd)
+	}
+	return nil
+}
+
+// CommitWindowReclaim forwards integrations.WindowReclaim.
+func (s *scopedMockDb) CommitWindowReclaim(reclaimed *models.Mock, winStart, winEnd time.Time) (*models.Mock, bool) {
+	if w, ok := s.MockMemDb.(integrations.WindowReclaim); ok {
+		return w.CommitWindowReclaim(reclaimed, winStart, winEnd)
+	}
+	return nil, false
+}
+
 var (
 	_ integrations.RecordedWindowIndex = (*MockManager)(nil)
 	_ integrations.RecordedWindowIndex = (*scopedMockDb)(nil)
+	_ integrations.WindowOwnership     = (*MockManager)(nil)
+	_ integrations.WindowOwnership     = (*scopedMockDb)(nil)
+	_ integrations.WindowReclaim       = (*MockManager)(nil)
+	_ integrations.WindowReclaim       = (*scopedMockDb)(nil)
+	_ integrations.OwnershipTally      = (*scopedMockDb)(nil)
 )
 
 // SameRecordedTestWindow forwards integrations.TestWindows.
@@ -1307,6 +1393,18 @@ func (s *scopedMockDb) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, 
 		return s.keep(bk.GetStartupMocksByKind(kind))
 	}
 	return s.keep(s.MockMemDb.GetStartupMocks())
+}
+
+func (s *scopedMockDb) MatchReadThrough(live *models.Mock) (*models.Mock, bool) {
+	if s == nil || s.MockMemDb == nil {
+		return nil, false
+	}
+	if !s.passThrough() && !s.live {
+		if v := s.current(); v.refused != "" {
+			return nil, false
+		}
+	}
+	return integrations.MatchReadThrough(s.MockMemDb, live)
 }
 
 // SetWorkerScope registers (or replaces) the per-test mock allowlist for a

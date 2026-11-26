@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -456,6 +457,7 @@ func TestRefuseEngineCommand(t *testing.T) {
 		{"engine flags before the subcommand", "docker --context prod run --name app img", ""},
 		{"a wrapper", "timeout 600 docker compose up", ""},
 		{"env in front of docker-compose", "env FOO=bar docker-compose up", ""},
+		{"inline env before sudo docker compose", "COMPOSE_PROJECT_NAME=p sudo docker compose up", ""},
 		{"explicitly empty --cmd-type", "sudo -E docker run --name app img", "="},
 		{"a build before it", "docker build -t app . && docker run --name app app", ""},
 		{"a trailer after it", "sudo -E docker compose up || true", ""},
@@ -484,6 +486,7 @@ func TestRefuseEngineCommand(t *testing.T) {
 		{"docker container run", "docker container run --name app img", ""},
 		{"docker start", "docker start -a app", ""},
 		{"docker compose", "docker compose -f c.yml up", ""},
+		{"inline env before docker compose", "COMPOSE_COMPATIBILITY=true docker compose -f c.yml up", ""},
 		{"docker-compose", "docker-compose up", ""},
 		{"an explicit container kind takes it as written", "sudo -E docker run --name app img", "docker-run"},
 		{"explicit native", "/usr/bin/docker run --name app img", "native"},
@@ -503,6 +506,24 @@ func TestRefuseEngineCommand(t *testing.T) {
 			}
 		})
 	}
+	t.Run("refused: unsupported inline expansion reports ErrUnsupportedInlineEnvExpansion", func(t *testing.T) {
+		for _, c := range []string{
+			"APP_CONTAINER=$(whoami) docker compose up",
+			"APP_CONTAINER=$(echo a b) docker compose up",
+			"APP_CONTAINER=`whoami` docker compose up",
+			"APP_CONTAINER=$[2+3] docker compose up",
+			"APP_CONTAINER=$'ab' docker compose up",
+		} {
+			err := refuseEngineCommand(cmdWithCmdTypeFlag("", false), c)
+			if !errors.Is(err, utils.ErrUnsupportedInlineEnvExpansion) {
+				t.Fatalf("refuseEngineCommand(%q) = %v, want ErrUnsupportedInlineEnvExpansion", c, err)
+			}
+		}
+		// Genuine native command with command substitution stays allowed.
+		if err := refuseEngineCommand(cmdWithCmdTypeFlag("", false), "FOO=$(date) python app.py"); err != nil {
+			t.Fatalf("refuseEngineCommand(native with $()) = %v, want nil", err)
+		}
+	})
 }
 
 // Substring matching let "./run-docker.sh" past the docker-run guard — a

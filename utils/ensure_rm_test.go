@@ -234,3 +234,40 @@ func TestEnsureRmBeforeName(t *testing.T) {
 		})
 	}
 }
+
+func TestDockerRunHasRm(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"bare --rm", "docker run --rm --name app img", true},
+		{"--rm=true", "docker run --rm=true --name app img", true},
+		{"--rm=1", "docker run --rm=1 img", true},
+		{"--rm=false", "docker run --rm=false --name app img", false},
+		{"--rm=0", "docker run --rm=0 --name app img", false},
+		{"last --rm wins false", "docker run --rm --rm=false img", false},
+		{"last --rm wins true", "docker run --rm=false --rm img", true},
+		{"no --rm", "docker run --name app img", false},
+		{"--rm after image ignored", "docker run img --rm", false},
+		{"--rm after double dash ignored", "docker run -- --rm img", false},
+		{"docker container run --rm", "docker container run --rm img", true},
+		{"sudo docker run --rm", "sudo docker run --rm img", true},
+		{"podman run --rm", "podman run --rm img", true},
+		{"--rm after modifyDockerRun flags", "docker run -v keploy-tls-certs-1:/etc/keploy/certs:ro -e JAVA_TOOL_OPTIONS='-Da -Db' --name app --rm img", true},
+		{"--rm after attached and combined short flags", "docker run -p8080:80 -itp 9090:90 --rm img", true},
+		{"--rm as -e value ignored", "docker run -e --rm img", false},
+		{"--rm as --name value ignored", "docker run --name --rm img", false},
+		{"quoted --rm=false", `docker run --rm="false" img`, false},
+		{"--rm before image with --rm=false after image", "docker run --rm img --rm=false", true},
+		{"non-docker command", "echo --rm", false},
+		{"unclosed quote", "docker run --rm 'img", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DockerRunHasRm(tt.cmd); got != tt.want {
+				t.Errorf("DockerRunHasRm(%q) = %v, want %v", tt.cmd, got, tt.want)
+			}
+		})
+	}
+}

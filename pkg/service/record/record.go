@@ -1956,7 +1956,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	reqErrGrp, _ := errgroup.WithContext(ctx)
 	reqCtx := context.WithoutCancel(ctx)
-	reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+	// Cancelled with the instant of its cancel (utils.WithStop): what the
+	// frame drains date the recording's stop by (stopCut), not the moment a
+	// goroutine that saw the cancel first ran.
+	reqCtx, reqCtxCancel := utils.WithStop(reqCtx)
 	reqCtx = context.WithValue(reqCtx, models.ErrGroupKey, reqErrGrp)
 
 	var stopReason string
@@ -2335,6 +2338,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		agentLost := r.captureLost.Load()
 		storeWrote := true // false once the mock store said it could not write every mock
 		if recordDrainedCleanly {
+			roll.finalize(persistCtx)
 			if err := r.closeMockStore(r.mockDB, drainProgressEvery); err != nil {
 				r.mocksNotWritten(err)
 				storeWrote = false
@@ -3073,7 +3077,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		for testCase := range frames.Incoming {
 			r.frameProgress.Add(1)
 			// The set the test goes to, by its request's time (setRoll).
-			set := roll.test(testCase)
+			set := roll.test(persistCtx, testCase)
 			capture := live.arrive(testCase)
 			if capture == nil {
 				// One of its mocks is already known lost: saved, it would
@@ -3239,64 +3243,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			mappingHolds.droppedUntracked(tempID)
 			return false
 		}
-		for mock := range frames.Outgoing {
-			r.frameProgress.Add(1)
-			// Deferred-orphan revoke: a reserved-Kind control frame, NOT a mock.
-			// Divert it into the revoke set (applied at finalize) BEFORE any
-			// domain-extraction / hook / InsertMock / correlation work — it
-			// carries no traffic and must never be persisted.
-			if mock.GetKind() == string(models.RevokedTests) {
-				var revoked []string
-				if mock.Spec.Metadata != nil {
-					for _, n := range strings.Split(mock.Spec.Metadata["revoked_tests"], ",") {
-						if n = strings.TrimSpace(n); n != "" {
-							revoked = append(revoked, n)
-						}
-					}
-				}
-				// Deleted now when saved, and not saved when it comes later. Its
-				// mapping still names the mock the agent dropped and never
-				// sends, so nothing of it may wait for that mock (and count
-				// toward the waits' cap): its held entries are let go, and a
-				// later entry under its name is not held (heldOut).
-				mappingHolds.revoke(live.revokeByAgent(revoked...))
-				continue
-			}
-			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
-			tempID := mock.Name
-			// The set the mock goes to, by its request's time (setRoll).
-			set := roll.mock(mock)
-			mockCtx := &MockContext{Mock: mock, TestSetID: set.id}
-			if hookErr := r.hooks.BeforeMockInsert(ctx, mockCtx); hookErr != nil {
-				r.logger.Error("BeforeMockInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
-					zap.Error(hookErr),
-					zap.String("testSetID", set.id),
-					zap.String("mockName", mock.Name),
-					zap.String("mockKind", mock.GetKind()))
-			}
-			if mockCtx.Skip {
-				// A hook asked to drop this mock (collapsed async poll no-change
-				// cycle). Do not persist, map, or correlate it.
-				//
-				// The agent does not know we skipped it, so its tempID is still
-				// in the mapping it streams. Skip means "never persisted", so
-				// this tempID must never appear in a per-test mapping and must
-				// never be read as loss: the skip marker says so, and is the
-				// outcome a mapping entry waiting for this mock is settled on.
-				// It cannot be gated on mock.IsAsync(): AsyncRecorder sets
-				// info.Skip and returns BEFORE it assigns Spec.Async, so a
-				// collapsed cycle reports IsAsync()==false. Gating on it would
-				// make this whole guard a no-op.
-				markSkippedMock(&asyncMockIDs, tempID)
-				mappingHolds.arrived(tempID)
-				continue
-			}
-			// The AsyncRecorder hook sets Spec.Async in BeforeMockInsert above;
-			// remember it so the mapping goroutine below never per-test maps it.
-			if mock.IsAsync() {
-				asyncMockIDs.Store(tempID, struct{}{})
-			}
-			encoded, encodedFormat, err := insertedDoc.Insert(r.mockDB, mock, set.id)
+		// finish does what follows a mock's write: its loss, or its hooks,
+		// mappings and counts. On this goroutine, in the order the mocks came.
+		finish := func(mock *models.Mock, tempID string, set *rollSet, encoded []byte, encodedFormat string, err error) {
 			if err != nil {
 				if ctx.Err() != nil {
 					// See the sibling note on the test-case insert: insertMockErrChan
@@ -3319,7 +3268,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()),
 						zap.String("testSetID", set.id))
-					continue
+					return
 				}
 				if errors.Is(err, models.ErrMockEncode) {
 					// THIS mock's payload cannot be encoded — an unsupported
@@ -3348,7 +3297,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 							zap.Int("mocksDroppedSoFar", dropped),
 							zap.Bool("ownerRevocable", tracked))
 					}
-					continue
+					return
 				}
 				// Environmental (I/O, storage gone): every later mock fails too,
 				// so stopping is still correct — but stopping is not instant.
@@ -3429,6 +3378,81 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				}
 			}
 		}
+		// The mocks in hand are encoded on several CPUs ahead of their write
+		// (mockLookahead); nil when this recording cannot (lookaheadFor).
+		ahead := lookaheadFor(r.logger, r.mockDB, roll.rolls(), insertedDoc, finish)
+		defer ahead.stop()
+		for {
+			mock, ok := ahead.next(frames.Outgoing)
+			if !ok {
+				break
+			}
+			r.frameProgress.Add(1)
+			// Deferred-orphan revoke: a reserved-Kind control frame, NOT a mock.
+			// Divert it into the revoke set (applied at finalize) BEFORE any
+			// domain-extraction / hook / InsertMock / correlation work — it
+			// carries no traffic and must never be persisted.
+			if mock.GetKind() == string(models.RevokedTests) {
+				// After every mock before it, as when the mocks were written
+				// one by one.
+				ahead.flush()
+				var revoked []string
+				if mock.Spec.Metadata != nil {
+					for _, n := range strings.Split(mock.Spec.Metadata["revoked_tests"], ",") {
+						if n = strings.TrimSpace(n); n != "" {
+							revoked = append(revoked, n)
+						}
+					}
+				}
+				// Deleted now when saved, and not saved when it comes later. Its
+				// mapping still names the mock the agent dropped and never
+				// sends, so nothing of it may wait for that mock (and count
+				// toward the waits' cap): its held entries are let go, and a
+				// later entry under its name is not held (heldOut).
+				mappingHolds.revoke(live.revokeByAgent(revoked...))
+				continue
+			}
+			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
+			tempID := mock.Name
+			// The set the mock goes to, by its request's time (setRoll).
+			set := roll.mock(mock)
+			mockCtx := &MockContext{Mock: mock, TestSetID: set.id}
+			if hookErr := r.hooks.BeforeMockInsert(ctx, mockCtx); hookErr != nil {
+				r.logger.Error("BeforeMockInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
+					zap.Error(hookErr),
+					zap.String("testSetID", set.id),
+					zap.String("mockName", mock.Name),
+					zap.String("mockKind", mock.GetKind()))
+			}
+			if mockCtx.Skip {
+				// A hook asked to drop this mock (collapsed async poll no-change
+				// cycle). Do not persist, map, or correlate it.
+				//
+				// The agent does not know we skipped it, so its tempID is still
+				// in the mapping it streams. Skip means "never persisted", so
+				// this tempID must never appear in a per-test mapping and must
+				// never be read as loss: the skip marker says so, and is the
+				// outcome a mapping entry waiting for this mock is settled on.
+				// It cannot be gated on mock.IsAsync(): AsyncRecorder sets
+				// info.Skip and returns BEFORE it assigns Spec.Async, so a
+				// collapsed cycle reports IsAsync()==false. Gating on it would
+				// make this whole guard a no-op.
+				markSkippedMock(&asyncMockIDs, tempID)
+				mappingHolds.arrived(tempID)
+				continue
+			}
+			// The AsyncRecorder hook sets Spec.Async in BeforeMockInsert above;
+			// remember it so the mapping goroutine below never per-test maps it.
+			if mock.IsAsync() {
+				asyncMockIDs.Store(tempID, struct{}{})
+			}
+			if ahead.take(mock, tempID, set) {
+				continue
+			}
+			encoded, encodedFormat, err := insertedDoc.Insert(r.mockDB, mock, set.id)
+			finish(mock, tempID, set, encoded, encodedFormat, err)
+		}
+		ahead.flush()
 		return nil
 	})
 
@@ -3542,6 +3566,11 @@ func hasMappingTestName(name string) bool {
 	return strings.TrimSpace(name) != ""
 }
 
+// GetTestAndMockChans returns the recording's frame streams. Its ctx should
+// be one a stop cancels with the instant of the stop (utils.WithStop), as
+// Start's is: the mappings of requests made after that instant are left out
+// (stopCut); with a plain cancel the cut is when the drains first see the
+// stop.
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// This recording's streams end by the agent's markers when it can
 	// (stream_end.go): its token names them to the agent.
@@ -3601,7 +3630,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// persisting the last one sees the stop only once the consumer takes
 	// it, and fixed by the first drain to look, the cut came after every
 	// request made meanwhile, and those were recorded.
-	cut := &stopCut{}
+	cut := &stopCut{ctx: ctx}
 	context.AfterFunc(ctx, func() { cut.at() })
 	// Under docker compose the app runs on while the agent drains (Start's
 	// stop): what it serves after the stop is not recorded. postStopTests

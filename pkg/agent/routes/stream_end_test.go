@@ -129,6 +129,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 				syncmgr.Get().NoteNotHandedOn()
 				syncmgr.Get().NoteUnnamedCallerConn()
 				syncmgr.Get().NoteTLSRelayedConn(8443)
+				syncmgr.Get().NoteInvertedTestCase("after-marker", time.Now(), time.Now().Add(-time.Millisecond))
 				loseMockForOutput("after-marker")
 			}
 			return nil
@@ -143,6 +144,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// name.
 		syncmgr.Get().NoteNotHandedOn()
 		syncmgr.Get().NoteUnnamedCallerConn()
+		// A test case of an earlier session whose response was dated before
+		// its request (must not be counted in this session's tally).
+		syncmgr.Get().NoteInvertedTestCase("pre-session", time.Now(), time.Now().Add(-time.Millisecond))
 		// And a TLS connection of an earlier session the ingress relayed to
 		// the app unread.
 		syncmgr.Get().NoteTLSRelayedConn(8443)
@@ -153,6 +157,16 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		defer done()
 		for _, n := range []string{"test-1", "test-2"} {
 			svc.tc <- windowedNow(n)
+		}
+		// One real inverted test case sent through send() on this stream
+		// (must be left out fail-closed and added to the 2 capture-level drops
+		// below for a total of 3, not max(2, 1)).
+		invNow := time.Now()
+		svc.tc <- &models.TestCase{
+			Name:     "stream-inverted",
+			Kind:     models.HTTP,
+			HTTPReq:  models.HTTPReq{Timestamp: invNow.Add(time.Second)},
+			HTTPResp: models.HTTPResp{Timestamp: invNow},
 		}
 		// Requests a pause of the memory guard cost this session, three on
 		// two connections, noted once its stream is open: what the session
@@ -168,6 +182,10 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// could not name in its PID namespace.
 		syncmgr.Get().NoteUnnamedCallerConn()
 		syncmgr.Get().NoteUnnamedCallerConn()
+		// Two test cases this session left out fail-closed at capture time
+		// because their response preceded their request.
+		syncmgr.Get().NoteInvertedTestCase("cap-inv-1", time.Now(), time.Now().Add(-time.Millisecond))
+		syncmgr.Get().NoteInvertedTestCase("cap-inv-2", time.Now(), time.Now().Add(-time.Millisecond))
 		// Two TLS connections to the app this session, relayed to the app's
 		// TLS unread.
 		syncmgr.Get().NoteTLSRelayedConn(8443)
@@ -212,10 +230,10 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 			}
 		}
 		if len(got) != 2 {
-			t.Fatalf("before its marker the stream carried %v, want the two test cases queued", got)
+			t.Fatalf("before its marker the stream carried %v, want the two in-order test cases queued", got)
 		}
-		if sum.TestCasesSent != 2 || sum.TestCasesSuppressed != 0 || sum.MassSuppressed {
-			t.Fatalf("the marker's summary says %+v, want the two test cases sent and none suppressed", sum)
+		if sum.TestCasesSent != 2 || sum.TestCasesSuppressed != 3 || !sum.MassSuppressed {
+			t.Fatalf("the marker's summary says %+v, want 2 sent, 3 suppressed (2 capture + 1 stream inverted), MassSuppressed=true", sum)
 		}
 		if want := (models.PressureSkipSummary{Requests: 3, Connections: 2}); sum.NotRecordedUnderPressure != want {
 			t.Fatalf("the marker says a pause cost %+v, want %+v", sum.NotRecordedUnderPressure, want)
@@ -234,6 +252,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		if sum.TLSRelayedConns != 2 {
 			t.Fatalf("the marker says %d TLS connections were relayed unread, want this session's 2", sum.TLSRelayedConns)
+		}
+		if sum.InvertedResponseBeforeRequest != 3 {
+			t.Fatalf("the marker says %d inverted test cases were left out, want this session's 3 (2 capture + 1 stream)", sum.InvertedResponseBeforeRequest)
 		}
 		if _, err := mr.NextPart(); err != io.EOF {
 			t.Fatalf("the stream did not end after its marker: %v", err)
@@ -255,17 +276,21 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		sumLine := fields("agent: recording complete")
 		for name, want := range map[string]uint64{
-			"tcs_not_recorded_under_pressure":  3,
-			"requests_during_pauses":           2,
-			"requests_before_first_pause":      1,
-			"tcs_not_handed_on":                2,
-			"connections_from_unnamed_callers": 2,
-			"connections_relayed_tls":          2,
-			"mocks_dropped_capacity":           1,
+			"tcs_not_recorded_under_pressure":   3,
+			"requests_during_pauses":            2,
+			"requests_before_first_pause":       1,
+			"tcs_not_handed_on":                 2,
+			"tcs_response_dated_before_request": 3,
+			"connections_from_unnamed_callers":  2,
+			"connections_relayed_tls":           2,
+			"mocks_dropped_capacity":            1,
 		} {
 			if got := sumLine[name]; got != want {
 				t.Errorf("the summary says %s=%v, want %d", name, got, want)
 			}
+		}
+		if got := sumLine["tcs_suppressed_total"]; got != int64(3) {
+			t.Errorf("the summary says tcs_suppressed_total=%v, want 3", got)
 		}
 		if named := fmt.Sprint(sumLine["mocks_dropped_named"]); strings.Contains(named, "after-marker") || !strings.Contains(named, "marker-output") {
 			t.Errorf("the summary names %s, want the mocks the marker named and not one dropped after it", named)
@@ -279,6 +304,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		if got := fields(notHandedOnSaid)["test_cases"]; got != uint64(2) {
 			t.Errorf("the warning of test cases not handed on says %v, want 2", got)
+		}
+		if f := fields(models.InvertedLeftOutSaid); f["test_cases"] != uint64(3) || f["next_step"] != models.InvertedLeftOutNextStep {
+			t.Errorf("the warning of inverted test cases says %v, want 3 and next_step=%q", f, models.InvertedLeftOutNextStep)
 		}
 		if got := fields(unnamedCallerConnsSaid)["connections"]; got != uint64(2) {
 			t.Errorf("the warning of connections from unnamed callers says %v, want 2", got)
@@ -477,4 +505,185 @@ func windowedNow(name string) *models.TestCase {
 	now := time.Now()
 	return &models.TestCase{Name: name, Kind: models.HTTP,
 		HTTPReq: models.HTTPReq{Timestamp: now}, HTTPResp: models.HTTPResp{Timestamp: now}}
+}
+
+// neverSettledWatermark keeps every test case added to TestCaseHold held until
+// the hold bound or stream end, proving inverted test cases are dropped before
+// entering the hold.
+type neverSettledWatermark struct{}
+
+func (neverSettledWatermark) Settled(_, _ string, _, _ time.Time) bool { return false }
+
+// Sending ONE inverted test case through ResolveRange(..., keep=true) and then
+// handing that same test case to HandleIncoming must count it EXACTLY ONCE in
+// InvertedResponseBeforeRequest, TestCasesSuppressed, the summary log, and the
+// WARN (no double-counting across resolveRange and HandleIncoming).
+func TestInvertedResolveRangeThenHandleIncomingCountsExactlyOnce(t *testing.T) {
+	mgr := syncmgr.Get()
+	mgr.SetWatermark(nil)
+	mgr.StartRecordSession()
+	mgr.TakeLeftovers()
+
+	svc := streamsSvc{
+		tc:    make(chan *models.TestCase, 4),
+		mocks: make(chan *models.Mock),
+		maps:  make(chan models.TestMockMapping),
+	}
+	core, logs := observer.New(zapcore.DebugLevel)
+	a := &Agent{logger: zap.New(core), svc: svc}
+	tok := rand.Text()
+	resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
+
+	now := time.Now()
+	reqInv := now.Add(time.Second)
+	respInv := now
+
+	// 1. Caller resolves the inverted window with keep=true (as external
+	// static-dedup captures do before HandOn).
+	mgr.ResolveRange(reqInv, respInv, "test-both-paths", true, true)
+	if !mgr.WasMockDroppedForTC("test-both-paths") {
+		t.Fatal("ResolveRange on inverted kept window did not revoke test-both-paths")
+	}
+
+	// 2. Caller then hands the SAME inverted test case to HandleIncoming,
+	// alongside one healthy in-order test case.
+	svc.tc <- &models.TestCase{
+		Name:     "test-both-paths",
+		Kind:     models.HTTP,
+		Origin:   &models.Origin{Clock: "bpf-ktime"},
+		HTTPReq:  models.HTTPReq{Timestamp: reqInv},
+		HTTPResp: models.HTTPResp{Timestamp: respInv},
+	}
+	svc.tc <- windowedNow("test-healthy")
+
+	endRecordingStreams(tok)
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("parse multipart content-type: %v", err)
+	}
+	mr := multipart.NewReader(resp.Body, params["boundary"])
+	var streamed []string
+	var sum models.StreamEndSummary
+	var gotEnd bool
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextPart: %v", err)
+		}
+		switch p.FormName() {
+		case "metadata":
+			var tc models.TestCase
+			if err := json.NewDecoder(p).Decode(&tc); err != nil {
+				t.Fatalf("decode tc: %v", err)
+			}
+			streamed = append(streamed, tc.Name)
+		case models.StreamEndPart:
+			if err := json.NewDecoder(p).Decode(&sum); err != nil {
+				t.Fatalf("decode StreamEndSummary: %v", err)
+			}
+			gotEnd = true
+		}
+	}
+	done()
+
+	if !gotEnd {
+		t.Fatal("missing StreamEndPart")
+	}
+	if strings.Join(streamed, ",") != "test-healthy" {
+		t.Fatalf("streamed = %v, want [test-healthy]", streamed)
+	}
+	if sum.TestCasesSent != 1 || sum.InvertedResponseBeforeRequest != 1 || sum.TestCasesSuppressed != 1 {
+		t.Fatalf("StreamEndSummary = %+v, want Sent=1 Inverted=1 Suppressed=1 (no double-count)", sum)
+	}
+	sumLogs := logs.FilterMessage("agent: recording complete").All()
+	if len(sumLogs) != 1 {
+		t.Fatalf("recording complete logged %d times, want 1", len(sumLogs))
+	}
+	sf := sumLogs[0].ContextMap()
+	if sf["tcs_response_dated_before_request"] != uint64(1) || sf["tcs_suppressed_total"] != int64(1) {
+		t.Fatalf("summary log fields = %v, want inverted=1 suppressed=1", sf)
+	}
+	warns := logs.FilterMessage(models.InvertedLeftOutSaid).All()
+	if len(warns) != 1 || warns[0].ContextMap()["test_cases"] != uint64(1) {
+		t.Fatalf("inverted WARN = %v, want once with test_cases=1", warns)
+	}
+	dbgs := logs.FilterMessage("agent: TC left out fail-closed — response timestamp precedes request timestamp; not sent to CLI").All()
+	if len(dbgs) != 1 {
+		t.Fatalf("inverted Debug entries = %d, want 1", len(dbgs))
+	}
+	df := dbgs[0].ContextMap()
+	if df["protocol"] != "http" || df["ingress"] != "routes.HandleIncoming" || df["clock"] != "bpf-ktime" {
+		t.Fatalf("inverted Debug fields = %v, want protocol=http ingress=routes.HandleIncoming clock=bpf-ktime", df)
+	}
+}
+
+// When a test-case hold is active (Watermark != nil), an inverted test case is
+// dropped before entering the hold so it consumes no hold capacity, never
+// becomes unsettled, and is counted even if the watermark never settles.
+func TestHandleIncoming_DropsInvertedBeforeTestCaseHold(t *testing.T) {
+	mgr := syncmgr.Get()
+	mgr.SetWatermark(neverSettledWatermark{})
+	t.Cleanup(func() { mgr.SetWatermark(nil) })
+	mgr.StartRecordSession()
+	mgr.TakeLeftovers()
+
+	svc := streamsSvc{
+		tc:    make(chan *models.TestCase, 2),
+		mocks: make(chan *models.Mock),
+		maps:  make(chan models.TestMockMapping),
+	}
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := &Agent{logger: zap.New(core), svc: svc}
+	tok := rand.Text()
+	resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
+
+	now := time.Now()
+	svc.tc <- &models.TestCase{
+		Name:     "held-inverted",
+		Kind:     models.HTTP,
+		HTTPReq:  models.HTTPReq{Timestamp: now.Add(time.Second)},
+		HTTPResp: models.HTTPResp{Timestamp: now},
+	}
+
+	endRecordingStreams(tok)
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("parse multipart content-type: %v", err)
+	}
+	mr := multipart.NewReader(resp.Body, params["boundary"])
+	var sum models.StreamEndSummary
+	var gotEnd bool
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextPart: %v", err)
+		}
+		if p.FormName() == models.StreamEndPart {
+			if err := json.NewDecoder(p).Decode(&sum); err != nil {
+				t.Fatalf("decode StreamEndSummary: %v", err)
+			}
+			gotEnd = true
+		}
+	}
+	done()
+
+	if !gotEnd {
+		t.Fatal("missing StreamEndPart")
+	}
+	if sum.InvertedResponseBeforeRequest != 1 || sum.TestCasesSuppressed != 1 || sum.Unsettled != 0 {
+		t.Fatalf("StreamEndSummary = %+v, want Inverted=1 Suppressed=1 Unsettled=0", sum)
+	}
+	sumLogs := logs.FilterMessage("agent: recording complete").All()
+	if len(sumLogs) != 1 {
+		t.Fatalf("recording complete logged %d times, want 1", len(sumLogs))
+	}
+	if held := sumLogs[0].ContextMap()["tcs_held_at_end"]; held != int64(0) {
+		t.Fatalf("tcs_held_at_end = %v, want 0 (inverted TC must not enter hold)", held)
+	}
 }

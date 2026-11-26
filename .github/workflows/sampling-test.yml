@@ -23,6 +23,11 @@ concurrency:
   group: sampling-test-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+  KEPLOY_EXACT_VIEW_VERIFY: "1"
+
 jobs:
   sampling-test:
     runs-on: ubuntu-latest
@@ -67,6 +72,13 @@ jobs:
         run: |
           chmod +x keploy/.github/workflows/test_workflow_scripts/sampling/run-sampling-test.sh
           keploy/.github/workflows/test_workflow_scripts/sampling/run-sampling-test.sh
+
+      - name: Run sampled cache-warming read-through end-to-end test
+        env:
+          KEPLOY_BIN: ${{ github.workspace }}/keploy/keploy
+        run: |
+          chmod +x keploy/.github/workflows/test_workflow_scripts/sampling/run-readthrough-sampling-test.sh
+          keploy/.github/workflows/test_workflow_scripts/sampling/run-readthrough-sampling-test.sh
 
       - name: Upload artifacts on failure
         if: failure()

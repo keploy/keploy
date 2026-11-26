@@ -66,7 +66,9 @@ var CaptureHook CaptureFunc = Capture
 // nil means no dedup.
 var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) (isDuplicate bool, schemaKey string)
 
-// MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
+// MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and
+// response (5 MiB). An exchange over it is not recorded as a test case, and is
+// counted for the recording's summary (NoteOverSizeLimit, TestCaseLimit).
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 
 // LargeBodyThreshold is the size threshold (1MB) above which response bodies
@@ -216,9 +218,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 				if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 					// Oversized, not corrupt: same condition as the post-
 					// decompression MaxTestCaseSize check further down, hit
-					// earlier — log it the same way, not as a decode failure.
+					// earlier — log it the same way, not as a decode failure,
+					// and count it the same way.
 					logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
 						zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+					NoteOverSizeLimit(ctx, logger, req, opts, TestCaseLimit)
 					return
 				}
 				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
@@ -275,6 +279,9 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
 					zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+				// The filters were read above, before a multipart body's
+				// Content-Type was cut to its media type: not again.
+				noteOverSizeLimit(ctx, logger, req, TestCaseLimit)
 				return
 			}
 			utils.LogError(logger, err, "failed to decompress the response body")
@@ -290,6 +297,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Int("reqBodySize", len(reqBody)),
 			zap.Int("respBodySize", len(respBody)),
 			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+		// Counted for the recording's summary, and told on its console:
+		// the app served it, and the recording lacks it. The filters were
+		// read above, before a multipart body's Content-Type was cut to its
+		// media type: not again.
+		noteOverSizeLimit(ctx, logger, req, TestCaseLimit)
 		return
 	}
 
@@ -362,6 +374,36 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	// are the capture's no longer, and their room goes back before the test
 	// case waits to be handed on.
 	decodes.giveBack()
+
+	// Fail closed when the captured response timestamp precedes the request
+	// timestamp: keeping a test case without guaranteed mocks breaks replay.
+	if models.IsInvertedWindow(reqTimeTest, resTimeTest) {
+		mgr := syncMock.FromContextOrGlobal(ctx)
+		syncMock.WindowFromContext(ctx).Close()
+		// Name the dropped request by its method and normalized path shape
+		// (never the client-supplied Keploy-Test-Name header) to avoid
+		// logging raw HTTP-sourced input (see the CodeQL note below).
+		invName := req.Method + " " + utils.URLPathShape(req.URL)
+		clock := WindowClockFromContext(ctx)
+		mgr.NoteInvertedTestCaseWithMeta(invName, reqTimeTest, resTimeTest, syncMock.InvertedMeta{
+			Protocol: "http",
+			Ingress:  "hooks.Capture",
+			Clock:    clock,
+		})
+		// Still sweep stale mocks and flush reusable session/connection mocks
+		// over an empty window so inverted bursts cannot grow m.buffer without
+		// bound.
+		mgr.SweepStaleMocks()
+		logger.Debug("Test case left out fail-closed: response timestamp precedes request timestamp",
+			zap.String("test", invName),
+			zap.String("method", req.Method),
+			zap.String("protocol", "http"),
+			zap.String("ingress", "hooks.Capture"),
+			zap.String("clock", clock),
+			zap.Time("req_ts", reqTimeTest),
+			zap.Time("resp_ts", resTimeTest))
+		return
+	}
 
 	if synchronous {
 		// The request's open window (the ingress opened it at the request's
@@ -458,6 +500,38 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	// here, before the ingress ends it (syncMock.TestSpanAt).
 	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 }
+
+// GrpcFilterRequest is a gRPC call as the ingress filters read an HTTP
+// request (IsFiltered): it is one, a POST over HTTP/2 to the method's path,
+// with its metadata as headers (User-Agent among them, which the built-in
+// probe exclusions match) and :authority as its Host.
+func GrpcFilterRequest(req *models.GrpcReq) *http.Request {
+	h := http.Header{}
+	for k, v := range req.Headers.OrdinaryHeaders {
+		h.Set(k, v)
+	}
+	authority := req.Headers.PseudoHeaders[":authority"]
+	if authority != "" {
+		h.Set("Host", authority)
+	}
+	return &http.Request{
+		Method: http.MethodPost,
+		URL:    &url.URL{Path: req.Headers.PseudoHeaders[":path"]},
+		Header: h,
+		Host:   authority,
+	}
+}
+
+// IsGrpcFiltered reports whether the recording's ingress filters leave a gRPC
+// call out, as IsFiltered does an HTTP request: a call they exclude is no test
+// case, and is not counted by the static deduper either.
+func IsGrpcFiltered(logger *zap.Logger, req *models.GrpcReq, opts models.IncomingOptions) bool {
+	if req == nil {
+		return false
+	}
+	return IsFiltered(logger, GrpcFilterRequest(req), opts)
+}
+
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	filtered, _ := evalFilters(logger, req, opts)
 	return filtered
@@ -724,13 +798,17 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 // returned, on every path:
 //   - a call a pause of the memory guard costs (SkipGRPCUnderPressure) is left
 //     out and counted before any of the rest;
+//   - a call the recording's ingress filters exclude (IsGrpcFiltered: a
+//     health probe, a user's exclude rule) is left out before the static
+//     deduper sees it, as an HTTP request is;
 //   - GRPCCaptureHook is invoked before any resolve. With --sync every call,
 //     duplicate or not, takes a name of the manager's (test-N): concurrent
 //     duplicates would otherwise share one in the manager's window map;
 //   - a duplicate ends its window BEFORE its prune (a keep=false resolve,
 //     with --sync), so the window does not hold its own debris, and is not
 //     handed on;
-//   - a call over the 5 MB cap is not recorded, and nothing is resolved to it;
+//   - a call over the 5 MB cap is not recorded, and nothing is resolved to it:
+//     it is counted for the recording's summary (NoteGRPCOverSizeLimit);
 //   - with --sync a window given up while the call was in flight (the hold's
 //     bound, memory pressure, its recording's stop) leaves it out; else its
 //     test case is handed on with the window still unclaimed, then claimed
@@ -738,7 +816,7 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 //     takes what was held and ends the window;
 //   - without --sync a call in flight across its recording's stop is left
 //     out, and a test case handed on notes its span (Window.Tested).
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool, opts models.IncomingOptions) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -753,7 +831,44 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	}
 
+	if IsGrpcFiltered(logger, http2Stream.GRPCReq, opts) {
+		logger.Debug("The gRPC call is a filtered request")
+		return
+	}
+
 	reqTime, resTime := http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp
+	// The call's manager: the one its context carries, as Capture's, so an
+	// HTTP request's and a gRPC call's names never share one, and the call's
+	// mocks resolve on the manager its window is on.
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	win := syncMock.WindowFromContext(ctx)
+
+	// Fail closed BEFORE GRPCCaptureHook (static dedup) and NextTestID so an
+	// inverted first call never marks a schema as seen or burns a test ID.
+	if models.IsInvertedWindow(reqTime, resTime) {
+		win.Close()
+		u := &url.URL{Path: http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]}
+		invName := utils.URLPathShape(u)
+		if invName == "" {
+			invName = "grpc"
+		}
+		clock := WindowClockFromContext(ctx)
+		mgr.NoteInvertedTestCaseWithMeta(invName, reqTime, resTime, syncMock.InvertedMeta{
+			Protocol: "grpc",
+			Ingress:  "hooks.CaptureGRPC",
+			Clock:    clock,
+		})
+		mgr.SweepStaleMocks()
+		logger.Debug("gRPC test case left out fail-closed: response timestamp precedes request timestamp",
+			zap.String("test", invName),
+			zap.String("protocol", "grpc"),
+			zap.String("ingress", "hooks.CaptureGRPC"),
+			zap.String("clock", clock),
+			zap.Time("req_ts", reqTime),
+			zap.Time("resp_ts", resTime))
+		return
+	}
+
 	// Read whatever its case: a real call sends it lowercase, as HTTP/2 does
 	// every header name (GrpcHeaders.Ordinary).
 	testName := http2Stream.GRPCReq.Headers.Ordinary("Keploy-Test-Name")
@@ -763,11 +878,6 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
 	}
 
-	// The call's manager: the one its context carries, as Capture's, so an
-	// HTTP request's and a gRPC call's names never share one, and the call's
-	// mocks resolve on the manager its window is on.
-	mgr := syncMock.FromContextOrGlobal(ctx)
-	win := syncMock.WindowFromContext(ctx)
 	if synchronous {
 		// The name its mocks are mapped to and its test case's (below), as an
 		// HTTP request's is (Capture): the recording joins a mapping to its
@@ -794,6 +904,8 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 			zap.Int("totalSize", totalSize),
 			zap.String("path", utils.URLPathShape(u)),
 			utils.PathTagField(models.URLPathTag(ctx, http.MethodPost, u)))
+		// Counted and told as an HTTP call over the limit is (Capture).
+		NoteGRPCOverSizeLimit(ctx, logger, u.Path, TestCaseLimit)
 		return
 	}
 

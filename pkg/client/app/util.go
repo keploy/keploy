@@ -2,9 +2,11 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
@@ -16,11 +18,12 @@ import (
 // composeSubcommands lists the docker compose subcommands that mark the end of
 // global options. "-f -" must be injected before the first subcommand token.
 var composeSubcommands = map[string]bool{
-	"up": true, "down": true, "run": true, "exec": true, "ps": true,
-	"logs": true, "build": true, "config": true, "create": true,
-	"events": true, "images": true, "kill": true, "pause": true,
-	"port": true, "pull": true, "push": true, "restart": true,
-	"rm": true, "start": true, "stop": true, "top": true, "unpause": true,
+	"attach": true, "build": true, "config": true, "cp": true, "create": true,
+	"down": true, "events": true, "exec": true, "images": true, "kill": true,
+	"logs": true, "pause": true, "port": true, "ps": true, "pull": true,
+	"push": true, "restart": true, "rm": true, "run": true, "scale": true,
+	"start": true, "stop": true, "top": true, "unpause": true, "up": true,
+	"wait": true, "watch": true,
 }
 
 // ensureInMemoryComposeFlags rewrites the docker compose command to use stdin
@@ -98,66 +101,218 @@ func isRewritableComposeCommand(appCmd string) bool {
 // it, so `make -C deploy up` would otherwise look for
 // deploy/docker-compose-tmp.yaml and find nothing.
 func composeLaunchPlan(appCmd, newComposeFile, appComposePath string) (newCmd, composeFileEnv string) {
+	return composeLaunchPlanWithReplacements(appCmd, newComposeFile, appComposePath, nil, nil)
+}
+
+// composeLaunchPlanWithReplacements decides how keploy hands its generated
+// compose file(s) to the user's command: rewriting literal compose commands in
+// place (replacing appComposePath and any rewritten companion paths in
+// extraReplacements) or returning a COMPOSE_FILE value of absolute paths for
+// wrapper commands such as `make up`.
+func composeLaunchPlanWithReplacements(appCmd, newComposeFile, appComposePath string, allPaths []string, extraReplacements map[string]string) (newCmd, composeFileEnv string) {
 	if isRewritableComposeCommand(appCmd) {
-		return modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath), ""
+		return modifyDockerComposeCommandWithReplacements(appCmd, newComposeFile, appComposePath, allPaths, extraReplacements), ""
 	}
-	abs, err := filepath.Abs(newComposeFile)
-	if err != nil {
-		abs = newComposeFile
+	absOf := func(p string) string {
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs
+		}
+		return p
 	}
-	return "", abs
+	if len(allPaths) <= 1 {
+		return "", absOf(newComposeFile)
+	}
+	sep := os.Getenv("COMPOSE_PATH_SEPARATOR")
+	if sep == "" {
+		sep = string(filepath.ListSeparator)
+	}
+	cleanApp := filepath.Clean(appComposePath)
+	cleanExtras := make(map[string]string, len(extraReplacements))
+	for orig, repl := range extraReplacements {
+		cleanExtras[filepath.Clean(orig)] = repl
+	}
+	hasPrimary := false
+	absPaths := make([]string, 0, len(allPaths))
+	for _, p := range allPaths {
+		cleanP := filepath.Clean(p)
+		switch {
+		case p == appComposePath || cleanP == cleanApp:
+			absPaths = append(absPaths, absOf(newComposeFile))
+			hasPrimary = true
+		case extraReplacements[p] != "":
+			absPaths = append(absPaths, absOf(extraReplacements[p]))
+		case cleanExtras[cleanP] != "":
+			absPaths = append(absPaths, absOf(cleanExtras[cleanP]))
+		default:
+			absPaths = append(absPaths, absOf(p))
+		}
+	}
+	if !hasPrimary {
+		absPaths = append(absPaths, absOf(newComposeFile))
+	}
+	return "", strings.Join(absPaths, sep)
 }
 
 func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath string) string {
-	// Ensure newComposeFile starts with ./
-	if !strings.HasPrefix(newComposeFile, "./") {
-		newComposeFile = "./" + newComposeFile
+	return modifyDockerComposeCommandWithReplacements(appCmd, newComposeFile, appComposePath, nil, nil)
+}
+
+// modifyDockerComposeCommandWithReplacements splices newComposeFile (and any
+// companion temp files in extraReplacements) into a literal compose command,
+// replacing matching -f/--file flags or inserting -f flags for allPaths in
+// order when none were passed.
+func modifyDockerComposeCommandWithReplacements(appCmd, newComposeFile, appComposePath string, allPaths []string, extraReplacements map[string]string) string {
+	ensureDotSlash := func(p string) string {
+		if !strings.HasPrefix(p, "./") {
+			return "./" + p
+		}
+		return p
+	}
+	newComposeFile = ensureDotSlash(newComposeFile)
+	replacements := make(map[string]string, len(extraReplacements)+1)
+	for orig, repl := range extraReplacements {
+		replacements[orig] = ensureDotSlash(repl)
+		replacements[filepath.Clean(orig)] = ensureDotSlash(repl)
+	}
+	// Primary appComposePath always wins over any companion mapping.
+	replacements[appComposePath] = newComposeFile
+	replacements[filepath.Clean(appComposePath)] = newComposeFile
+
+	lookupReplacement := func(p string) (string, bool) {
+		if repl, ok := replacements[p]; ok {
+			return repl, true
+		}
+		if repl, ok := replacements[filepath.Clean(p)]; ok {
+			return repl, true
+		}
+		return "", false
 	}
 
 	var modifiedCmd string
-	// Define a regular expression pattern to match "-f <file>"
-	pattern := `(-f\s+("[^"]+"|'[^']+'|\S+))`
+	// Match explicit -f / --file flags (both space- and =-separated).
+	pattern := `((?:-f|--file)(?:\s+|=)("[^"]+"|'[^']+'|\S+))`
 	re := regexp.MustCompile(pattern)
 
-	// Find all matches and replace only the one that matches appComposePath
-	matches := re.FindAllStringSubmatch(appCmd, -1)
-	if len(matches) > 0 {
-		for _, match := range matches {
-			fullMatch := match[0]
-			filePart := match[1]
-
-			// Extract the actual file path from the match (remove -f and whitespace)
-			filePattern := `-f\s+("[^"]+"|'[^']+'|\S+)`
-			fileRe := regexp.MustCompile(filePattern)
-			fileMatch := fileRe.FindStringSubmatch(filePart)
-
-			if len(fileMatch) > 1 {
-				quotedFile := fileMatch[1]
-				// Remove quotes if present
-				actualFile := strings.Trim(quotedFile, `"'`)
-
-				// Check if this file matches the appComposePath
-				if actualFile == appComposePath {
-					modifiedCmd = strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
-					return withoutComposeAbortFlags(modifiedCmd)
-				}
+	// Replace every explicit -f/--file flag whose path keploy rewrote (primary
+	// app file and any stripped companion file). Replacing every occurrence
+	// keeps chained commands (`-f a.yml build && -f a.yml up`) and repeated
+	// flags consistent.
+	if re.MatchString(appCmd) {
+		modifiedCmd = re.ReplaceAllStringFunc(appCmd, func(fullMatch string) string {
+			sub := re.FindStringSubmatch(fullMatch)
+			if len(sub) < 3 {
+				return fullMatch
 			}
+			actualFile := strings.Trim(sub[2], `"'`)
+			if repl, ok := lookupReplacement(actualFile); ok {
+				return fmt.Sprintf("-f %s", repl)
+			}
+			return fullMatch
+		})
+		return withoutComposeAbortFlags(modifiedCmd)
+	}
+
+	// No explicit -f/--file flag was given (the files came from COMPOSE_FILE or
+	// default discovery). Passing -f makes compose ignore COMPOSE_FILE and skip
+	// docker-compose.override.yml, so emit -f for every discovered file in
+	// order with keploy's temp file(s) taking the rewritten files' slots.
+	var fFlags []string
+	hasPrimary := false
+	for _, p := range allPaths {
+		if repl, ok := lookupReplacement(p); ok {
+			fFlags = append(fFlags, "-f "+repl)
+			if repl == newComposeFile {
+				hasPrimary = true
+			}
+		} else {
+			fFlags = append(fFlags, "-f "+shellQuoteComposeArg(p))
 		}
-		// If no matching compose path found, return original command
-		modifiedCmd = appCmd
-		return withoutComposeAbortFlags(modifiedCmd)
 	}
+	if !hasPrimary {
+		fFlags = append(fFlags, "-f "+newComposeFile)
+	}
+	fileFlags := strings.Join(fFlags, " ")
 
-	// If the pattern doesn't exist, inject the new Compose file right before
-	// the `up` subcommand: after compose's global flags, whose values (a -p
-	// project named "upload", say) are not the subcommand.
+	// Prefer the `up` subcommand so chained commands like
+	// `docker compose build && docker compose up` splice before `up` rather
+	// than `build`; fall back to the first compose subcommand for non-`up`
+	// commands (`run`, `watch`, `start`, ...).
 	if upAt, ok := composeUpOffset(appCmd, true); ok {
-		modifiedCmd = fmt.Sprintf("%s-f %s %s", appCmd[:upAt], newComposeFile, appCmd[upAt:])
+		modifiedCmd = fmt.Sprintf("%s%s %s", appCmd[:upAt], fileFlags, appCmd[upAt:])
+		return withoutComposeAbortFlags(modifiedCmd)
+	}
+	if subAt, ok := composeSubcommandOffset(appCmd, true); ok {
+		modifiedCmd = fmt.Sprintf("%s%s %s", appCmd[:subAt], fileFlags, appCmd[subAt:])
 		return withoutComposeAbortFlags(modifiedCmd)
 	}
 
-	modifiedCmd = fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
+	modifiedCmd = fmt.Sprintf("%s %s", appCmd, fileFlags)
 	return withoutComposeAbortFlags(modifiedCmd)
+}
+
+// composeProjectDirToPreserve returns the project directory keploy must pass
+// via --project-directory when rewriting a compose command whose first file
+// lives outside the current working directory. Without it, replacing
+// `-f deploy/app.yml` with `-f ./docker-compose-tmp.yaml` shifts compose's
+// project directory from `deploy` to the current working directory, changing
+// the derived project name, `.env` location, and relative build/volume paths.
+// Returns "" when the user already passed --project-directory or when the
+// first file is already in the current directory.
+func composeProjectDirToPreserve(paths []string, explicitProjectDir string) string {
+	if explicitProjectDir != "" || len(paths) == 0 {
+		return ""
+	}
+	dir := filepath.Dir(paths[0])
+	if dir == "" || dir == "." {
+		return ""
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if absDir, err := filepath.Abs(dir); err == nil && filepath.Clean(absDir) == filepath.Clean(cwd) {
+			return ""
+		}
+	}
+	return dir
+}
+
+// withComposeProjectDirectory splices `--project-directory <projectDir>` into
+// a literal compose command right next to every rewritten `-f <newComposeFile>`
+// flag (so chained commands such as `-f sub/compose.yml build && -f
+// sub/compose.yml up` both keep the original project directory), falling back
+// to before the first known compose subcommand.
+func withComposeProjectDirectory(cmd, newComposeFile, projectDir string) string {
+	if projectDir == "" {
+		return cmd
+	}
+	if newComposeFile != "" && !strings.HasPrefix(newComposeFile, "./") {
+		newComposeFile = "./" + newComposeFile
+	}
+	flag := "--project-directory " + shellQuoteComposeArg(projectDir)
+	if newComposeFile != "" {
+		needle := "-f " + newComposeFile
+		if strings.Contains(cmd, needle) {
+			return strings.ReplaceAll(cmd, needle, needle+" "+flag)
+		}
+	}
+	if subAt, ok := composeSubcommandOffset(cmd, true); ok {
+		return fmt.Sprintf("%s%s %s", cmd[:subAt], flag, cmd[subAt:])
+	}
+	return fmt.Sprintf("%s %s", cmd, flag)
+}
+
+func shellQuoteComposeArg(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := s[0] != '~'
+	for i := 0; safe && i < len(s); i++ {
+		c := s[i]
+		safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '.' || c == '/' || c == ':' || c == '@' || c == '+' || c == '-'
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
@@ -219,6 +374,33 @@ func composeUpField(parts []string) int {
 // `bash -c "docker compose up"` does: with intoQuoted, the `up` is then
 // found inside that word, so a splice lands in the script the wrapper runs.
 func composeUpOffset(cmd string, intoQuoted bool) (int, bool) {
+	return composeTokenOffset(cmd, intoQuoted, composeUpField)
+}
+
+// composeSubcommandField is the index in parts of the first compose subcommand
+// (composeSubcommands) that is not the value of a global flag.
+func composeSubcommandField(parts []string) int {
+	value := false
+	for i, p := range parts {
+		switch {
+		case value:
+			value = false
+		case composeGlobalValueFlags[p]:
+			value = true
+		case composeSubcommands[p]:
+			return i
+		}
+	}
+	return -1
+}
+
+// composeSubcommandOffset is the byte offset in cmd of its first compose
+// subcommand (composeSubcommandField).
+func composeSubcommandOffset(cmd string, intoQuoted bool) (int, bool) {
+	return composeTokenOffset(cmd, intoQuoted, composeSubcommandField)
+}
+
+func composeTokenOffset(cmd string, intoQuoted bool, find func([]string) int) (int, bool) {
 	var starts []int
 	var words []string
 	for i := 0; i < len(cmd); {
@@ -242,7 +424,7 @@ func composeUpOffset(cmd string, intoQuoted bool) (int, bool) {
 		starts = append(starts, start)
 		words = append(words, cmd[start:i])
 	}
-	if i := composeUpField(words); i >= 0 {
+	if i := find(words); i >= 0 {
 		return starts[i], true
 	}
 	for i, w := range words {
@@ -250,7 +432,7 @@ func composeUpOffset(cmd string, intoQuoted bool) (int, bool) {
 			break
 		}
 		if len(w) >= 2 && (w[0] == '"' || w[0] == '\'') && w[len(w)-1] == w[0] {
-			if at, ok := composeUpOffset(w[1:len(w)-1], true); ok {
+			if at, ok := composeTokenOffset(w[1:len(w)-1], true, find); ok {
 				return starts[i] + 1 + at, true
 			}
 		}
@@ -355,6 +537,25 @@ func composeEnvFiles(cmd string) []string {
 		}
 	}
 	return files
+}
+
+// composeCompatibility reports whether the compose command's own options
+// (engine.ComposeOptions: before its subcommand, where compose takes them)
+// run it in compatibility mode: --compatibility, or --compatibility=V with V
+// true as compose's flag parser reads a bool (strconv.ParseBool), the last
+// one given winning. A --compatibility of another program, or after compose's
+// subcommand, is not compose's.
+func composeCompatibility(cmd string) bool {
+	on := false
+	for _, part := range engine.ComposeOptions(cmd) {
+		switch {
+		case part == "--compatibility":
+			on = true
+		case strings.HasPrefix(part, "--compatibility="):
+			on, _ = strconv.ParseBool(strings.TrimPrefix(part, "--compatibility="))
+		}
+	}
+	return on
 }
 
 // composeAbortFlag matches, with the space before it, a compose up flag that

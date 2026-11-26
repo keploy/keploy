@@ -1491,6 +1491,67 @@ type RecordedWindowIndex interface {
 	RecordedWindowIndex(t time.Time) (index int, known bool)
 }
 
+// WindowOwnership is an optional TestWindows capability: which recorded test
+// window of the staged set owns a mock's recorded timestamp
+// (models.WindowSchedule.OwnerOf). Smallest containing window owns nested
+// pairs; partly overlapping (non-nested) windows rank by closest request start
+// then stable ID; a mock just outside every window goes to the window whose
+// nearer edge is closest within models.MockWindowEdgeSkew.
+type WindowOwnership interface {
+	// OwnerTestWindow returns the recorded test window owning t, whether t
+	// lies inside that window (false when attributed by bounded edge skew),
+	// and whether the store has seeded recorded windows and found an owner.
+	OwnerTestWindow(t time.Time) (owner models.TestWindow, inside, owned bool)
+	// OwnerTestWindowSpan returns the smallest recorded test window containing
+	// the entire interval [start, end] (models.WindowSchedule.OwnerOfSpan).
+	OwnerTestWindowSpan(start, end time.Time) (owner models.TestWindow, owned bool)
+	// EdgeOwnerWindow returns the recorded test window the edge rule gives m
+	// to (models.WindowSchedule.EdgeOwner): only a plain per-test timed mock
+	// placed just outside every window, which no other rule places.
+	EdgeOwnerWindow(m *models.Mock) (owner models.TestWindow, owned bool)
+}
+
+// OwnershipTally is an optional MockMemDb capability: a matcher reports what
+// the window ownership rules decided for a call, which the store counts for
+// the test set being replayed and says at its end.
+type OwnershipTally interface {
+	TallyOwnership(e OwnershipEvent)
+}
+
+// OwnershipEvent is one decision OwnershipTally counts.
+type OwnershipEvent uint8
+
+const (
+	// OwnershipEdgeAnswered: a call was answered by a recording the edge rule
+	// gives the open window (models.WindowSchedule.EdgeOwner).
+	OwnershipEdgeAnswered OwnershipEvent = iota + 1
+	// OwnershipDeferred: the first exact match of a call in the open window
+	// did not answer at once, because another recorded window owns it, it is
+	// the open window's by the edge rule alone, or its recorded transaction
+	// status disagrees with the live connection's.
+	OwnershipDeferred
+	// OwnershipPassedOver: of those, the call was answered by another
+	// recording.
+	OwnershipPassedOver
+	// OwnershipDriftRanked: a drifted query's score fallback answered with a
+	// recording ranked by ownership, the bound connection or the transaction
+	// status above a higher-scoring one.
+	OwnershipDriftRanked
+)
+
+// WindowReclaim is an optional MockMemDb capability used in windowed replay
+// (without exact serving) to reclaim a previously consumed mock inside the
+// open test window by atomically consuming a still-unconsumed identical
+// alternative recorded inside the earlier overlapping window.
+type WindowReclaim interface {
+	RecordWindowAlternatives(consumed *models.Mock, winStart, winEnd time.Time, alts []*models.Mock)
+	ReclaimableInWindow(winStart, winEnd time.Time) []*models.Mock
+	// CommitWindowReclaim takes reclaimed back for the window [winStart,
+	// winEnd] the call was matched in, and credits the earlier holders on
+	// the path the next copy (MockState.CreditTo).
+	CommitWindowReclaim(reclaimed *models.Mock, winStart, winEnd time.Time) (replacement *models.Mock, ok bool)
+}
+
 // VariableScopes is an optional MockMemDb capability, beside VariableStore:
 // the scope a call binds test variables in, by the mock that answers it. Under
 // exact serving, between tests, the next test's calls in flight the pool view
@@ -2174,12 +2235,12 @@ type WindowRewindCounter interface {
 //     returned through, and in the read's error when file panics.
 //   - ok is true only where a read of the set's end will run file: the run's
 //     store, in a replay session whose client reads each set's end
-//     (models.OutgoingOptions.ReadsSetEnds: keploy test under the proven
-//     switch, which the agent passes on only to a Proxy that files at that
-//     read, agent.SetEndFilingProxy). It is false, and nothing is
+//     (models.OutgoingOptions.ReadsSetEnds: keploy test and keploy mock under
+//     the proven switch, which the agent passes on only to a Proxy that files
+//     at that read, agent.SetEndFilingProxy). It is false, and nothing is
 //     registered, on a test worker's store, which no such read asks; in a
-//     session whose client does not set ReadsSetEnds (keploy mock, keploy
-//     test without the switch or from before the read); on a closed store; and for a nil
+//     session whose client does not set ReadsSetEnds (without the switch, or
+//     from before the read); on a closed store; and for a nil
 //     file or an empty kind. It is the word of the session handed to the
 //     store last when AtSetEnd is called, and a registration outlives that
 //     session: so the parser registers at each call it would hold past its
@@ -2260,6 +2321,28 @@ type RunPlacer interface {
 	IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (release func(), ok bool)
 	OpenTestRecordings() []*models.Mock
 	ClaimHold(name string) bool
+}
+
+// SetFollower is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that keeps what the application wrote
+// across a test set's tests and reads the whole set's recordings to do it.
+//
+//   - RecordingsReadable is the staging epoch (WindowPacer.StagingEpoch) whose
+//     recordings RecordedBeforeReader reads whole. Between a staging and the
+//     wiring of the agent's on-disk store that reader answers from the trees
+//     alone, with no error, so a parser reads it only once this equals the
+//     staging epoch. The gap is a staging's own few steps.
+//   - TestCycle counts the times a test of the staging opened again
+//     (--retry-passing-test): a parser that keeps state across tests rewinds it
+//     as the replay rewinds consumed mocks. A new staging counts from zero.
+//   - ExcuseRecording takes the recording name out of its test's outcome, so
+//     the test is not told a call was left unmade: the parser's own ledger
+//     answered that call in another test or between tests, and holds the set
+//     to it. It lasts for the staging.
+type SetFollower interface {
+	RecordingsReadable() uint64
+	TestCycle() uint64
+	ExcuseRecording(name string)
 }
 
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the

@@ -111,9 +111,19 @@ type OutgoingOptions struct {
 	Synchronous bool
 	Mocking     bool // used to enable/disable mocking
 	SwapIDs     bool
+	// TLS reports that this connection carried TLS traffic even when
+	// SkipTLSMITM is set (observe-only / proxyless capture where DstCfg.TLSCfg
+	// is nil and the client connection is a SimulatedConn). No production code
+	// in this repository sets it; a capture layer that decrypts TLS outside the
+	// proxy must set it per connection. Alongside this flag, the HTTP
+	// integration also detects TLS from DstCfg.TLSCfg, *tls.Conn, and the https
+	// URL scheme on both record and replay. json:"-" like SrcInstance; sits in
+	// the final byte of the 4-byte word alongside Synchronous/Mocking/SwapIDs
+	// before SrcInstance so supervisor.Session stays in the 640 B size class.
+	TLS bool `json:"-"`
 	// SrcInstance is the test worker instance the kernel stamped THIS
 	// connection with (0: none). Runtime, per-connection: json:"-" like
-	// SrcPid. It sits in the word the three bools above leave four bytes
+	// SrcPid. It sits in the word the four bools above leave four bytes
 	// of: supervisor.Session holds these options by value, once per
 	// connection, and stays in the 640 B size class only so
 	// (TestASessionStaysInThe640ByteSizeClass).
@@ -172,6 +182,16 @@ type OutgoingOptions struct {
 	// NoiseDetection() / NoiseStrict(), never directly.
 	SchemaNoiseDetection bool
 	SchemaNoiseStrict    bool
+	// RedisDrawn lists the Redis key shapes keploy.yaml declares as holding a
+	// word the app drew in this run (redis.drawn), handed on for the enterprise
+	// Redis parser; nothing in OSS judges or acts on them (enterprise-only).
+	// It sits after the bools above, which with the two DisableAuto ones fill
+	// one word: placed between them it left two words part empty.
+	// supervisor.Session holds these options by value, once per connection;
+	// with this slice's three words it fits its 640 B size class
+	// (TestASessionStaysInThe640ByteSizeClass) only because it keeps what it
+	// has of a stop out of line (Session.stops), with no room left.
+	RedisDrawn []string
 	// ConnKey names THIS connection's socket, as an opaque token on which the
 	// connection's two capture legs agree: the raw leg that carries its
 	// cleartext prelude (a MySQL greeting and SSLRequest) and the decrypted leg
@@ -239,6 +259,11 @@ type OutgoingOptions struct {
 	// (MockManager.ArmSetFence). Like Learn it sits in the padding after the
 	// TLS switches.
 	StartsTestSet bool `json:"StartsTestSet,omitempty"`
+	// KeepAppAlive reports that the replay keeps the application running across
+	// test-set boundaries (--keep-app-alive), so stateful parsers carry live
+	// overlay state and run-born bindings across staging epochs. Like
+	// StartsTestSet it sits in the padding after the TLS switches.
+	KeepAppAlive bool
 	// LearnTests, when not nil, are the tests whose recordings the round
 	// learns onto (config.Test.LearnTests: the tests a record has just
 	// recorded anew). A test outside it keeps an earlier record's recording
@@ -327,14 +352,13 @@ type OutgoingOptions struct {
 	// ReadsSetEnds is a capability flag set by the CLI on the replay
 	// session's /mock request: when true, the CLI reads each of its test
 	// sets' end with a set's end read (WithSetEndRead) and fails the set
-	// with a call it files there, as keploy test does under the proven
-	// switch. The run's mock manager takes a parser's
+	// with a call it files there, as keploy test and keploy mock do under the
+	// proven switch. The run's mock manager takes a parser's
 	// set's end registration (integrations.SetEndFiler), which the parser
 	// makes at each call it would hold for a later test, ONLY in a session
-	// that sets it, so under a client that does not (keploy mock; keploy
-	// test without the switch, whose read of a set's end fails nothing; one
-	// from before the read) a parser holds no call for a later test: it
-	// misses it at once instead.
+	// that sets it, so under a client that does not (without the switch,
+	// whose read of a set's end fails nothing; one from before the read) a
+	// parser holds no call for a later test: it misses it at once instead.
 	// The agent passes it on only to a Proxy that files those calls at the
 	// read (agent.SetEndFilingProxy), and false to any other. Replay path
 	// only.

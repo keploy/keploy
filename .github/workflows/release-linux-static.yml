@@ -39,6 +39,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  KEPLOY_INTERNAL: "1"
   # The integrations ref the release builds with (release.yml).
   INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
 

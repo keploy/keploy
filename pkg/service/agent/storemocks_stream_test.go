@@ -207,19 +207,38 @@ func TestStoreMocksStream_PerTestMocksGoToDisk(t *testing.T) {
 				if len(got) != 2 {
 					t.Fatalf("LoadWindow should reconstruct 2 eligible mocks, got %d", len(got))
 				}
+				// Strict: unfiltered/config mocks also spill into unfilteredDisk
+				// rather than remaining decoded in storage.unfiltered.
+				if st.unfilteredDisk == nil {
+					t.Fatal("strict mode: expected an on-disk unfiltered store")
+				}
+				if got := st.unfilteredDisk.Len(); got != 1 {
+					t.Fatalf("expected 1 on-disk unfiltered mock, got %d", got)
+				}
+				if len(st.unfiltered) != 0 {
+					t.Fatalf("strict mode: unfiltered mocks should spill to disk, got resident %v", sigs(st.unfiltered))
+				}
+				unfGot, err := st.unfilteredDisk.LoadAll()
+				if err != nil {
+					t.Fatalf("unfilteredDisk.LoadAll: %v", err)
+				}
+				if len(unfGot) != 1 || unfGot[0].Name != "cfg-1" {
+					t.Fatalf("unfilteredDisk should reconstruct cfg-1, got %v", sigs(unfGot))
+				}
 			} else {
-				// Lax: no on-disk store — all 3 per-test mocks stay resident.
+				// Lax (below unfilteredResidentLimit): no on-disk store — all mocks stay resident.
 				if st.diskMocks != nil {
 					t.Fatal("lax mode: on-disk store must NOT engage (no RAM bound to gain)")
+				}
+				if st.unfilteredDisk != nil {
+					t.Fatal("lax mode (small pool): on-disk unfiltered store must NOT engage")
 				}
 				if len(st.filtered) != 3 {
 					t.Fatalf("lax mode: all 3 per-test mocks should be resident, got %d", len(st.filtered))
 				}
-			}
-
-			// config stays resident in unfiltered in BOTH modes.
-			if len(st.unfiltered) != 1 || st.unfiltered[0].Name != "cfg-1" {
-				t.Fatalf("config should be resident in unfiltered, got %v", sigs(st.unfiltered))
+				if len(st.unfiltered) != 1 || st.unfiltered[0].Name != "cfg-1" {
+					t.Fatalf("lax mode (small pool): config should be resident in unfiltered, got %v", sigs(st.unfiltered))
+				}
 			}
 			// freeze anchor = earliest request timestamp (pt-1 @ base+1s) in both
 			// modes: folded from the on-disk store under strict, from the resident

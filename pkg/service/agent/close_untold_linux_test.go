@@ -69,6 +69,12 @@ func TestAnUntoldCloseBesideASeenMiss(t *testing.T) {
 			if during {
 				require.Contains(t, stock.Evidence.Reason, "keploy also cannot tell whether bytes the application wrote to 1 connection(s) this test used")
 				require.True(t, strings.HasSuffix(stock.Evidence.Reason, "the call keploy saw miss fails the test whatever they held."), "nothing is left to say after the untold close: %q", stock.Evidence.Reason)
+				// Said on a line of its own: the quarantine command before it
+				// keeps its words.
+				require.Equal(t, [][]string{
+					{"keploy", "mock", "record", "-c", "<your command, selecting o::TestStock>"},
+					{"keploy", "mock", "quarantine", "o::TestStock", "--reason", "<why>"},
+				}, commandsIn(t, stock.Evidence.Reason), stock.Evidence.Reason)
 			} else {
 				require.NotContains(t, stock.Evidence.Reason, "keploy also cannot tell")
 			}

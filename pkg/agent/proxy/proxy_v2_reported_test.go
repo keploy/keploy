@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,5 +126,24 @@ func TestRecordViaSupervisorDoesNotWarnAgainAboutAStopTheParserReported(t *testi
 				t.Fatalf("the span left out was closed by %v after the connection started, with both peers open and the connection idle for less than %v: the test cases recorded over it after its parser retired are saved without their mocks", idleFor, syncMock.UnrecordedIdleGrace)
 			}
 		})
+	}
+}
+
+// The "parser retired" warning says user traffic is unaffected only when the
+// relay was not holding the connection's bytes for the parser as it retired;
+// a held connection forwarded nothing while the parser was stuck, and the
+// warning says so.
+func TestRetiredNextStepSaysUnaffectedOnlyWhenTheRelayIsNotHeld(t *testing.T) {
+	free, held := retiredNextStep(false), retiredNextStep(true)
+	if !strings.HasPrefix(free, "user traffic is unaffected") {
+		t.Fatalf("not held: %q", free)
+	}
+	if strings.Contains(held, "unaffected") || !strings.Contains(held, "WAS AFFECTED") {
+		t.Fatalf("held: %q", held)
+	}
+	for _, s := range []string{free, held} {
+		if !strings.Contains(s, "KEPLOY_DISABLE_PARSING=1") {
+			t.Fatalf("the remedy is gone: %q", s)
+		}
 	}
 }

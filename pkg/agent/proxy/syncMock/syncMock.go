@@ -462,6 +462,11 @@ type SyncMockManager struct {
 	lossTallies []*LossTally
 	lossEpoch   uint64
 
+	// readThrough retains deduplicated, bounded read-only mocks rescued from
+	// sampled-out, static-deduped, or out-of-window requests (read_through.go).
+	// Guarded by mu.
+	readThrough readThroughCache
+
 	// outChanMu guards outChan and outChanClosed together. Senders
 	// RLock across the whole read+send; the closer Locks across the
 	// close. This is the only lock protecting outChan — see commit
@@ -600,6 +605,10 @@ type SyncMockManager struct {
 	// notRecorded counts the requests an ingress did not record because the
 	// memory guard had paused recording (NoteNotRecordedUnderPressure).
 	notRecorded notRecordedUnderPressure
+	// overSize counts the requests an ingress served and did not record as
+	// test cases because each was over keploy's size limit for a test case
+	// (NoteOverSizeLimit).
+	overSize overSizeLimit
 
 	// leftOut counts the mocks a session routed here left out
 	// because a parser could not record them (NoteMockLeftOut): their capture
@@ -614,6 +623,13 @@ type SyncMockManager struct {
 	// whose test case never reached the recording's queue: the ingress
 	// stopped first (NoteNotHandedOn).
 	notHandedOn atomic.Uint64
+
+	// invertedTestCases counts test cases left out fail-closed because their
+	// response timestamp preceded their request timestamp (noteInverted).
+	invertedTestCases atomic.Uint64
+	// invertedMu guards invertedTallies for per-session counting.
+	invertedMu      sync.Mutex
+	invertedTallies []*InvertedTally
 	// unnamedCallerConns counts the connections to a listener of the run's
 	// own process tree whose caller the agent could not name in its PID
 	// namespace, so that none of the calls they carried was recorded as a
@@ -2904,10 +2920,8 @@ func (m *SyncMockManager) PendingIn(start, end time.Time) bool {
 	in := func(t time.Time) bool { return !t.IsZero() && !t.Before(start) && !t.After(end) }
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, mk := range m.buffer {
-		if mk != nil && in(mk.Spec.ReqTimestampMock) {
-			return true
-		}
+	if m.bufferPendingInLocked(start, end) {
+		return true
 	}
 	if m.heldShared > 0 {
 		lo, hi := m.heldRangeLocked(start, end)
@@ -2936,6 +2950,124 @@ func (m *SyncMockManager) PendingIn(start, end time.Time) bool {
 		}
 	}
 	return false
+}
+
+// invertedWarning is logged when a test case whose response timestamp precedes
+// its request timestamp is left out fail-closed (noteInverted).
+const invertedWarning = "syncMock: a test case's response is dated before its request, so it was left out fail-closed without claiming mocks"
+
+// InvertedMeta carries diagnostic context logged when an inverted test case is
+// left out fail-closed (NoteInvertedTestCaseWithMeta).
+type InvertedMeta struct {
+	Protocol string
+	Ingress  string
+	Clock    string
+}
+
+// InvertedTally counts test cases left out fail-closed because their response
+// timestamp preceded their request timestamp (noteInverted) while the tally is
+// open. Like LossTally and OverSizeTally, every open tally on the manager
+// observes drops noted during its open interval; drops before OpenInvertedTally
+// or after Close are excluded.
+type InvertedTally struct {
+	m     *SyncMockManager
+	count uint64 // guarded by m.invertedMu
+}
+
+// OpenInvertedTally opens a tally of inverted test cases noted from now on
+// while the tally stays open. Close it when the session ends. Nil for a nil
+// manager.
+func (m *SyncMockManager) OpenInvertedTally() *InvertedTally {
+	if m == nil {
+		return nil
+	}
+	m.invertedMu.Lock()
+	defer m.invertedMu.Unlock()
+	t := &InvertedTally{m: m}
+	m.invertedTallies = append(m.invertedTallies, t)
+	return t
+}
+
+// Read returns how many inverted test cases were noted while t was open.
+// Zero for a nil tally.
+func (t *InvertedTally) Read() uint64 {
+	if t == nil {
+		return 0
+	}
+	t.m.invertedMu.Lock()
+	defer t.m.invertedMu.Unlock()
+	return t.count
+}
+
+// Close ends t so it stops counting new drops while keeping its recorded total
+// readable via Read. Idempotent and nil-safe.
+func (t *InvertedTally) Close() {
+	if t == nil {
+		return
+	}
+	t.m.invertedMu.Lock()
+	defer t.m.invertedMu.Unlock()
+	if i := slices.Index(t.m.invertedTallies, t); i >= 0 {
+		t.m.invertedTallies = slices.Delete(t.m.invertedTallies, i, i+1)
+	}
+}
+
+// noteInverted counts a test case left out fail-closed because its response
+// timestamp precedes its request timestamp, updates every open InvertedTally,
+// and logs the first and every sendDropSampleRate-th with capture diagnostics
+// and an actionable next_step.
+func (m *SyncMockManager) noteInverted(testName string, request, response time.Time, meta InvertedMeta) {
+	if m == nil {
+		return
+	}
+	n := m.invertedTestCases.Add(1)
+	m.invertedMu.Lock()
+	for _, t := range m.invertedTallies {
+		t.count++
+	}
+	m.invertedMu.Unlock()
+	if n == 1 || n%sendDropSampleRate == 0 {
+		fields := []zap.Field{
+			zap.String("test", testName),
+			zap.Time("request", request),
+			zap.Time("response", response),
+			zap.Duration("by", request.Sub(response)),
+			zap.Uint64("inverted_so_far", n),
+			zap.String("next_step", models.InvertedLeftOutNextStep),
+		}
+		if meta.Protocol != "" {
+			fields = append(fields, zap.String("protocol", meta.Protocol))
+		}
+		if meta.Ingress != "" {
+			fields = append(fields, zap.String("ingress", meta.Ingress))
+		}
+		if meta.Clock != "" {
+			fields = append(fields, zap.String("clock", meta.Clock))
+		}
+		m.dropLogger().Warn(invertedWarning, fields...)
+	}
+}
+
+// NoteInvertedTestCase counts a test case left out fail-closed because its
+// response timestamp precedes its request timestamp. Nil-safe.
+func (m *SyncMockManager) NoteInvertedTestCase(testName string, request, response time.Time) {
+	m.noteInverted(testName, request, response, InvertedMeta{})
+}
+
+// NoteInvertedTestCaseWithMeta is NoteInvertedTestCase with capture
+// diagnostics (protocol, ingress path, clock origin).
+func (m *SyncMockManager) NoteInvertedTestCaseWithMeta(testName string, request, response time.Time, meta InvertedMeta) {
+	m.noteInverted(testName, request, response, meta)
+}
+
+// InvertedTestCases is how many test cases were left out fail-closed because
+// their response timestamp preceded their request timestamp (noteInverted)
+// since the manager was created.
+func (m *SyncMockManager) InvertedTestCases() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.invertedTestCases.Load()
 }
 
 // drainPendingRevokes emits a revoke control frame for every test case queued
@@ -3551,6 +3683,10 @@ func (m *SyncMockManager) CloseOutChan() {
 	// earlier in shutdown, so a late-decoded teardown mock would otherwise be
 	// discarded here and orphan its test case.
 	m.FlushOwnedWindows()
+	// Rescue any remaining unowned read-only mocks (e.g. from sampled-out
+	// requests within StaleHorizon of shutdown) into the deduplicated session
+	// read-through tier before sealing outChan.
+	m.flushUnownedReadThrough()
 
 	// Closed to senders first: what comes after is dropped as closed. What
 	// is queued already goes on to a consumer that still reads (an older
@@ -3810,7 +3946,9 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 				noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 			} else {
-				m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, tally, refs.of(shared, behind))
+				if !m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, tally, refs.of(shared, behind)) {
+					m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
+				}
 			}
 			continue
 		case flushOwned:
@@ -3855,6 +3993,7 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 	m.pruneSentClaimedLocked(&lateMappings)
 	gaveUp = m.fitHoldLocked(tally)
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
+	m.drainReadThroughPendingLocked(outChanBound, &mocksToSend)
 	return mocksToSend, lateMappings, gaveUp
 }
 
@@ -4422,6 +4561,9 @@ func (m *SyncMockManager) dropHeldLocked(n int, t *dropTally, givenUp bool) (dro
 			m.owed = append(m.owed, owedMock{mock: h.mock, to: h.owner})
 			continue
 		}
+		if !givenUp {
+			m.queueReadThroughLocked(h.mock)
+		}
 		if h.why == droppedOutsideAnyWindow {
 			m.heldCut = append(m.heldCut, cutHeld{mock: h.mock, epoch: epoch})
 			m.letGo.Store(true)
@@ -4722,11 +4864,13 @@ func (m *SyncMockManager) unholdLocked(lo, hi int) {
 }
 
 // heldRangeLocked returns the bounds [lo, hi) of the held mocks requested
-// within [start, end]. Caller holds mu.
+// within [start, end]: an empty range, lo == hi, for a window that ends
+// before it starts (a test case whose response is dated before its request),
+// which holds no time. Caller holds mu.
 func (m *SyncMockManager) heldRangeLocked(start, end time.Time) (lo, hi int) {
 	lo = sort.Search(len(m.held), func(i int) bool { return !m.held[i].mock.Spec.ReqTimestampMock.Before(start) })
 	hi = sort.Search(len(m.held), func(i int) bool { return m.held[i].mock.Spec.ReqTimestampMock.After(end) })
-	return lo, hi
+	return lo, max(lo, hi)
 }
 
 // takeHeldLocked removes and returns the held mocks requested within
@@ -5004,6 +5148,7 @@ func (m *SyncMockManager) StartRecordSession() {
 	m.firstReqSeen = false
 	m.resolvedTestCount = 0
 	m.destTCs = nil
+	m.readThrough.reset()
 	m.recordingFrom.Store(time.Now().UnixNano())
 	m.mu.Unlock()
 	m.EndStoppedRecording()
@@ -5780,11 +5925,12 @@ func (m *SyncMockManager) settleLetGo() {
 }
 
 // sentClaimRangeLocked returns the notes requested within [start, end]:
-// sentClaimed[lo:hi]. Caller holds m.mu.
+// sentClaimed[lo:hi], empty (lo == hi) for a window that ends before it
+// starts, as heldRangeLocked's. Caller holds m.mu.
 func (m *SyncMockManager) sentClaimRangeLocked(start, end time.Time) (lo, hi int) {
 	lo = sort.Search(len(m.sentClaimed), func(i int) bool { return !m.sentClaimed[i].at.Before(start) })
 	hi = sort.Search(len(m.sentClaimed), func(i int) bool { return m.sentClaimed[i].at.After(end) })
-	return lo, hi
+	return lo, max(lo, hi)
 }
 
 // takeSentClaimedLocked is a kept resolve of [start, end], for testName,
@@ -5945,7 +6091,41 @@ func (m *SyncMockManager) ResolveKept(w *Window, start, end time.Time, testName 
 	m.resolveRange(start, end, testName, true, mapping, w)
 }
 
+// SweepStaleMocks sweeps stale out-of-window mocks and flushes reusable
+// session/connection mocks from the buffer over an empty window without
+// claiming mocks for a test case, emitting mappings, recording a resolved
+// window, or advancing the startup-window counter. Nil-safe.
+func (m *SyncMockManager) SweepStaleMocks() {
+	if m == nil {
+		return
+	}
+	m.resolveRangeInternal(time.Time{}, time.Time{}, "", false, false, nil, true)
+}
+
 func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, keep bool, mapping bool, w *Window) {
+	if keep && models.IsInvertedWindow(start, end) {
+		// Refuse mocks for an inverted kept window without incrementing the
+		// inverted-drop tally: resolveRange does not drop the test case itself,
+		// so counting here would double-count when the caller hands it on to
+		// the stream backstop (routes/record.go). Revoke by name so the test
+		// case is left out even if its own times differ from [start, end], and
+		// sweep stale mocks over an empty window so buffer growth stays bounded.
+		m.dropLogger().Debug("syncMock: refusing mocks for inverted test window",
+			zap.String("test", testName),
+			zap.Time("request", start),
+			zap.Time("response", end),
+			zap.Duration("by", start.Sub(end)))
+		w.Close()
+		if testName != "" {
+			m.RevokeTestCase(testName)
+		}
+		m.SweepStaleMocks()
+		return
+	}
+	m.resolveRangeInternal(start, end, testName, keep, mapping, w, false)
+}
+
+func (m *SyncMockManager) resolveRangeInternal(start, end time.Time, testName string, keep bool, mapping bool, w *Window, sweepOnly bool) {
 	// Collect mocks and mapping data under the lock, then send to the
 	// outgoing channels AFTER releasing it. Holding m.mu across a
 	// channel send can deadlock on ordering: a buffer-full outChan
@@ -6094,7 +6274,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
 		if i < settled {
-			if t := at[i]; (t.Before(start) || t.After(end)) && !t.Before(cutoffTime) {
+			if t := at[i]; (sweepOnly || t.Before(start) || t.After(end)) && !t.Before(cutoffTime) {
 				m.buffer[keepIdx] = mock
 				at[keepIdx] = t
 				keepIdx++
@@ -6141,7 +6321,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		// so a long-running test's per-test mocks aren't pre-empted by
 		// the stale-buffer cutoff. A mock another request claims after this
 		// one yielded is not in this window (see sharedFrom).
-		inWindow := !mockTime.Before(start) && !mockTime.After(end)
+		inWindow := !sweepOnly && !mockTime.Before(start) && !mockTime.After(end)
 		claimedAway := false // left to a request that claims it (see sharedFrom)
 		if inWindow && len(others) > 0 && mockTime.After(sharedFrom) && others.covers(mockTime) {
 			inWindow, claimedAway = false, true
@@ -6212,8 +6392,11 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			} else {
 				// A duplicate's debris — unless a concurrent request still in
 				// flight may own it (a duplicate's window says nothing about
-				// whose it is): then it is held for that request.
-				m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
+				// whose it is): then it is held for that request. Otherwise
+				// offer read-only calls to the deduplicated read-through tier.
+				if !m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind)) {
+					m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
+				}
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
@@ -6273,7 +6456,9 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 					noted := m.noteSentClaimedLocked(mock, w, refs.of(shared, behind))
 					mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 				} else {
-					m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
+					if !m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind)) {
+						m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
+					}
 				}
 				continue
 			}
@@ -6343,6 +6528,10 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			if m.holdOrDropLocked(mock, droppedOutsideAnyWindow, openFrom, open, &tally, nil) {
 				continue
 			}
+			// Sampled-out / out-of-window read-only calls (e.g. cold cache
+			// warmers) are copied once per canonical key into the session
+			// read-through tier while preserving original cut/loss accounting.
+			m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
 			// Collected, and said, told and left out for after mu
 			// (cutDropped): a request in flight with no window open
 			// for it may still be decided with this mock inside its
@@ -6406,6 +6595,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	}
 	gaveUp := m.fitHoldLocked(&tally)
 	lateBinned += m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
+	m.drainReadThroughPendingLocked(outChanBound, &mocksToSend)
 	hold := m.holdStateLocked()
 
 	// The startup mocks sent while this request was in flight, which it
@@ -6428,15 +6618,17 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// the direct [start,end] path above, never the ring. Skipped for the
 	// no-keep / unbound cases is unnecessary — an empty-but-recorded
 	// window is harmless and aged out by the count cap (addRecentWindowLocked).
-	m.addRecentWindowLocked(resolvedWindow{
-		start:      start,
-		end:        end,
-		testName:   testName,
-		mapping:    mapping,
-		keep:       keep,
-		sharedFrom: unixNanoOrZero(sharedFrom),
-		recording:  m.recording,
-	})
+	if !sweepOnly {
+		m.addRecentWindowLocked(resolvedWindow{
+			start:      start,
+			end:        end,
+			testName:   testName,
+			mapping:    mapping,
+			keep:       keep,
+			sharedFrom: unixNanoOrZero(sharedFrom),
+			recording:  m.recording,
+		})
+	}
 	// With the output bound, every mock the walk left in the buffer it kept
 	// at the retention (or stepped over as settled): settled, whatever this
 	// window held. Unbound, it kept some for the output, which the next pass
@@ -6662,8 +6854,10 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 		// Owns no kept window and is before the horizon → the skipped
 		// duplicate's own debris, unless a request still in flight started
 		// before it: then it may be that request's, and is held for it.
-		// Drop it (fall through without keeping), or hold it.
-		m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
+		// Otherwise offer read-only calls to the deduplicated read-through tier.
+		if !m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind)) {
+			m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
+		}
 	}
 
 	// Memory Cleanup: Nil out the deleted entries to allow GC to reclaim the memory
@@ -6675,6 +6869,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	m.keepSettledLocked(stillSettled, at)
 	gaveUp := m.fitHoldLocked(&tally)
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
+	m.drainReadThroughPendingLocked(outChanBound, &mocksToSend)
 	bufferLenAfter, hold := len(m.buffer), m.holdStateLocked()
 	m.noteTaken(mocksToSend)
 	// Owed before the mocks go (mappings_owed.go).

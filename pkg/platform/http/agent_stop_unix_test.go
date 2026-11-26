@@ -285,6 +285,7 @@ func TestDockerAgentCancel(t *testing.T) {
 			t.Fatal(err)
 		}
 		run := newAgentRun()
+		t.Cleanup(run.engine.end) // the run's end, which asks for its volumes, is not run here
 		run.ready.Store(ready)
 		watch := &removalAsked{t: t, log: log, before: -1, asks: recordStopAsks(t)}
 		if err := dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(watch, stopTestContainer))(); err != nil {
@@ -315,9 +316,11 @@ func TestDockerAgentCancel(t *testing.T) {
 }
 
 // A daemon that does not take the removal's question does not hold the
-// stop: once keploy has had daemonAnswerStall of its own runnable time, the
-// question is withdrawn and the container is sent SIGTERM and waited for,
-// and the client is killed.
+// stop past keploy's one bound on its answers: once keploy has had
+// daemonAnswerStall of its own runnable time, the question is withdrawn, the
+// run's wait on the engine has ended with it (engineWait), so nothing more is
+// asked of the daemon, and the client is killed. keploy says at WARN that the
+// container may still run, and the command that removes it.
 func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
 	clk := &stall.ManualClock{}
 	boundClock = clk
@@ -330,12 +333,14 @@ func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
 	if err := client.Start(); err != nil {
 		t.Fatal(err)
 	}
+	core, logs := observer.New(zapcore.WarnLevel)
 	run := newAgentRun()
+	t.Cleanup(run.engine.end) // the run's end, which asks for its volumes, is not run here
 	run.ready.Store(true)
 	silent := &removalSilent{asked: make(chan struct{})}
 	cancelled := make(chan error, 1)
 	go func() {
-		cancelled <- dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(silent, stopTestContainer))()
+		cancelled <- dockerAgentCancel(zap.New(core), client, run, stopTestContainer, kdocker.NewRemovalWatch(silent, stopTestContainer))()
 	}()
 	within(t, "the removal's question", func() { <-silent.asked })
 	// The bound's look at the clock is armed before the clock moves: a move
@@ -350,7 +355,211 @@ func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
 	if err := client.Wait(); err == nil {
 		t.Fatal("the docker client was not killed")
 	}
+	if lines := engineLines(t, log); len(lines) != 0 {
+		t.Fatalf("the stop asked %v of a daemon silent for keploy's whole bound", lines)
+	}
+	if warned := logs.FilterMessageSnippet("rm -f " + stopTestContainer).Len(); warned != 1 {
+		t.Fatalf("said at WARN %v, want once that the container may still run, with the command that removes it", logs.All())
+	}
+}
+
+// parkedClock is a deterministic stall.Clock whose Runnable() time can be
+// advanced without ever waking After() timers, so tests can deterministically
+// exercise dockerAgentCancel's expireIfStalled path while engineWait.begin's
+// background goroutine remains parked. armed is signalled when After() is
+// called so tests can wait until engineWait's goroutine has entered select.
+type parkedClock struct {
+	ran   atomic.Int64
+	armed chan struct{}
+}
+
+func newParkedClock() *parkedClock {
+	return &parkedClock{armed: make(chan struct{}, 8)}
+}
+
+func (c *parkedClock) Runnable() time.Duration { return time.Duration(c.ran.Load()) }
+func (c *parkedClock) Advance(d time.Duration) { c.ran.Add(int64(d)) }
+func (c *parkedClock) After(time.Duration) (<-chan time.Time, func() bool) {
+	select {
+	case c.armed <- struct{}{}:
+	default:
+	}
+	return make(chan time.Time), func() bool { return true }
+}
+
+// Deterministic positive test for expireIfStalled: when daemonAsk expires
+// after daemonAnswerStall with zero teardown movement while engineWait.begin's
+// goroutine has not yet woken up (parkedClock), dockerAgentCancel must still
+// end engineWait synchronously with errDaemonSilent so stopAgentContainerFor
+// sends zero commands to the silent daemon and logs the rm -f WARN once.
+func TestDockerAgentCancelExpiresStalledWaitWhenWatchTimesOutFirst(t *testing.T) {
+	clk := newParkedClock()
+	boundClock = clk
+	t.Cleanup(func() { boundClock = nil })
+	prevAsk := daemonAsk
+	askCtx, askCancel := context.WithCancelCause(context.Background())
+	var calls atomic.Int32
+	daemonAsk = func() (context.Context, func()) {
+		if calls.Add(1) == 1 {
+			return askCtx, func() { askCancel(context.Canceled) }
+		}
+		return prevAsk()
+	}
+	t.Cleanup(func() { daemonAsk = prevAsk })
+
+	log, release := fakeEngine(t)
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := exec.Command("sleep", "300")
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zapcore.WarnLevel)
+	run := newAgentRun()
+	t.Cleanup(run.engine.end)
+	run.ready.Store(true)
+	silent := &removalSilent{asked: make(chan struct{})}
+	cancelled := make(chan error, 1)
+	go func() {
+		cancelled <- dockerAgentCancel(zap.New(core), client, run, stopTestContainer, kdocker.NewRemovalWatch(silent, stopTestContainer))()
+	}()
+	within(t, "the removal's question", func() { <-silent.asked })
+	within(t, "engineWait parked in select", func() { <-clk.armed })
+	clk.Advance(daemonAnswerStall)
+	askCancel(errDaemonSilent)
+	within(t, "dockerAgentCancel", func() {
+		if err := <-cancelled; err != nil {
+			t.Errorf("cancel: %v", err)
+		}
+	})
+	if err := client.Wait(); err == nil {
+		t.Fatal("the docker client was not killed")
+	}
+	if lines := engineLines(t, log); len(lines) != 0 {
+		t.Fatalf("the stop asked %v of a daemon silent for keploy's whole bound", lines)
+	}
+	if warned := logs.FilterMessageSnippet("rm -f " + stopTestContainer).Len(); warned != 1 {
+		t.Fatalf("said at WARN %v, want once that the container may still run", logs.All())
+	}
+}
+
+// A per-question removal timeout (daemonAsk) that fires at total runnable time
+// >= daemonAnswerStall while teardown movement occurred does NOT expire
+// engineWait: expireIfStalled checks moved.Moves() and resets the meter, so
+// stopAgentContainerFor must still send SIGTERM.
+func TestDockerAgentCancelDoesNotExpireEngineWaitWhenMovementOccurred(t *testing.T) {
+	clk := newParkedClock()
+	boundClock = clk
+	t.Cleanup(func() { boundClock = nil })
+	prevAsk := daemonAsk
+	askCtx, askCancel := context.WithCancelCause(context.Background())
+	var calls atomic.Int32
+	daemonAsk = func() (context.Context, func()) {
+		if calls.Add(1) == 1 {
+			return askCtx, func() { askCancel(context.Canceled) }
+		}
+		return prevAsk()
+	}
+	t.Cleanup(func() { daemonAsk = prevAsk })
+
+	log, release := fakeEngine(t)
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := exec.Command("sleep", "300")
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zapcore.WarnLevel)
+	_, scope := utils.NewTeardownScope(context.Background())
+	run := newAgentRun()
+	run.scope = scope
+	t.Cleanup(run.engine.end)
+	run.ready.Store(true)
+	silent := &removalSilent{asked: make(chan struct{})}
+	cancelled := make(chan error, 1)
+	go func() {
+		cancelled <- dockerAgentCancel(zap.New(core), client, run, stopTestContainer, kdocker.NewRemovalWatch(silent, stopTestContainer))()
+	}()
+	within(t, "the removal's question", func() { <-silent.asked })
+	within(t, "engineWait parked in select", func() { <-clk.armed })
+	// Advance half the bound, note teardown movement, then advance the rest so
+	// total runnable time == daemonAnswerStall. Without the movement check in
+	// expireIfStalled, engineWait would expire and skip SIGTERM.
+	clk.Advance(daemonAnswerStall / 2)
+	scope.Note()
+	clk.Advance(daemonAnswerStall - daemonAnswerStall/2)
+	askCancel(errDaemonSilent)
+	within(t, "dockerAgentCancel", func() {
+		if err := <-cancelled; err != nil {
+			t.Errorf("cancel: %v", err)
+		}
+	})
+	if err := client.Wait(); err == nil {
+		t.Fatal("the docker client was not killed")
+	}
 	requireSignalledAndWaited(t, engineLines(t, log))
+	if warned := logs.FilterMessageSnippet("rm -f " + stopTestContainer).Len(); warned != 0 {
+		t.Fatalf("unexpected silent-daemon WARN when teardown moved: %v", logs.All())
+	}
+}
+
+// If the daemon answered removal.Watch before ask expired (taken == true),
+// dockerAgentCancel must not call expireIfStalled even if runnable time hits
+// daemonAnswerStall and ask cancels immediately after Watch returns.
+func TestDockerAgentCancelDoesNotMisclassifyAnsweredWatchAsSilent(t *testing.T) {
+	clk := newParkedClock()
+	boundClock = clk
+	t.Cleanup(func() { boundClock = nil })
+	prevAsk := daemonAsk
+	askCtx, askCancel := context.WithCancelCause(context.Background())
+	var calls atomic.Int32
+	daemonAsk = func() (context.Context, func()) {
+		if calls.Add(1) == 1 {
+			return askCtx, func() {
+				within(t, "engineWait parked in select", func() { <-clk.armed })
+				clk.Advance(daemonAnswerStall)
+				askCancel(errDaemonSilent)
+			}
+		}
+		return prevAsk()
+	}
+	t.Cleanup(func() { daemonAsk = prevAsk })
+
+	log, release := fakeEngine(t)
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := exec.Command("sleep", "300")
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zapcore.WarnLevel)
+	run := newAgentRun()
+	t.Cleanup(run.engine.end)
+	run.ready.Store(true)
+	immediate := &removalImmediate{}
+	if err := dockerAgentCancel(zap.New(core), client, run, stopTestContainer, kdocker.NewRemovalWatch(immediate, stopTestContainer))(); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if err := client.Wait(); err == nil {
+		t.Fatal("the docker client was not killed")
+	}
+	requireSignalledAndWaited(t, engineLines(t, log))
+	if warned := logs.FilterMessageSnippet("rm -f " + stopTestContainer).Len(); warned != 0 {
+		t.Fatalf("unexpected silent-daemon WARN when daemon answered watch: %v", logs.All())
+	}
+}
+
+type removalImmediate struct{}
+
+func (*removalImmediate) ContainerWait(context.Context, string, container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	return make(chan container.WaitResponse), make(chan error)
+}
+
+func (*removalImmediate) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+	return container.InspectResponse{}, nil
 }
 
 // removalSilent is an engine whose daemon does not take the removal's

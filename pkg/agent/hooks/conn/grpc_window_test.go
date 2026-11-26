@@ -76,7 +76,7 @@ func TestCaptureGRPCSynchronousRecordsAKeptCallAndEndsItsWindow(t *testing.T) {
 	mgr, w, out, maps, start, mock := heldGRPCManager(t)
 	tcChan := make(chan *models.TestCase, 1)
 	ctx := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w)
-	CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(start, time.Now()), 50051, true, true)
+	CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(start, time.Now()), 50051, true, true, models.IncomingOptions{})
 	var tc *models.TestCase
 	select {
 	case tc = <-tcChan:
@@ -108,7 +108,7 @@ func TestCaptureGRPCWithoutSyncNamesACallByItsLowercaseKeployTestName(t *testing
 	call := grpcCall(start, time.Now())
 	call.GRPCReq.Headers.OrdinaryHeaders = map[string]string{"content-type": "application/grpc", "keploy-test-name": "named-call"}
 	ctx := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w)
-	CaptureGRPC(ctx, zap.NewNop(), tcChan, call, 50051, false, true)
+	CaptureGRPC(ctx, zap.NewNop(), tcChan, call, 50051, false, true, models.IncomingOptions{})
 	var tc *models.TestCase
 	select {
 	case tc = <-tcChan:
@@ -127,7 +127,7 @@ func TestCaptureGRPCSynchronousLeavesOutAGivenUpCall(t *testing.T) {
 	defer w.Close()
 	tcChan := make(chan *models.TestCase, 1)
 	ctx := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w)
-	CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(w.Start(), time.Now()), 50051, true, false)
+	CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(w.Start(), time.Now()), 50051, true, false, models.IncomingOptions{})
 	select {
 	case tc := <-tcChan:
 		t.Fatalf("%s was recorded though its call's window was given up", tc.Name)
@@ -164,7 +164,7 @@ func TestCaptureGRPCSynchronousRevokesATestCaseWhoseWindowWasGivenUpWhileItWaite
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(start, time.Now()), 50051, true, false)
+		CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(start, time.Now()), 50051, true, false, models.IncomingOptions{})
 	}()
 	<-ctx.seen
 	n := time.Now()
@@ -193,7 +193,7 @@ func TestCaptureGRPCSynchronousResolvesNothingToATestCaseItCouldNotHandOn(t *tes
 	mgr, w, out, maps, start, mock := heldGRPCManager(t)
 	ingress, stop := context.WithCancel(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w))
 	stop()
-	CaptureGRPC(ingress, zap.NewNop(), make(chan *models.TestCase), grpcCall(start, time.Now()), 50051, true, true)
+	CaptureGRPC(ingress, zap.NewNop(), make(chan *models.TestCase), grpcCall(start, time.Now()), 50051, true, true, models.IncomingOptions{})
 	if ids, emitted := mappedTo(maps, out, "test-1", mock); emitted || len(ids) > 0 {
 		t.Fatalf("a call never handed on had its mock emitted (%v) or mapped (%v)", emitted, ids)
 	}
@@ -207,7 +207,7 @@ func TestCaptureGRPCSynchronousDuplicateEndsItsWindowBeforeItsPrune(t *testing.T
 	defer func() { GRPCCaptureHook = prev }()
 	tcChan := make(chan *models.TestCase, 1)
 	ctx := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w)
-	CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(start, time.Now()), 50051, true, true)
+	CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(start, time.Now()), 50051, true, true, models.IncomingOptions{})
 	if len(tcChan) > 0 {
 		t.Fatal("a duplicate was handed on")
 	}
@@ -227,7 +227,7 @@ func TestCaptureGRPCWithoutSyncDuplicatePrunesNothing(t *testing.T) {
 	GRPCCaptureHook = func(*models.GrpcReq, *models.GrpcResp) (bool, string) { return true, "" }
 	defer func() { GRPCCaptureHook = prev }()
 	end := time.Now()
-	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), zap.NewNop(), make(chan *models.TestCase, 1), grpcCall(start, end), 50051, false, true)
+	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), zap.NewNop(), make(chan *models.TestCase, 1), grpcCall(start, end), 50051, false, true, models.IncomingOptions{})
 	mgr.ResolveRange(start, end, "test-next", true, true)
 	if ids, emitted := mappedTo(maps, out, "test-next", mock); !emitted || len(ids) != 1 {
 		t.Fatalf("after a duplicate without --sync, the mock in its span: emitted %v, mapped %v; want it left for the next resolve", emitted, ids)
@@ -240,7 +240,7 @@ func TestCaptureGRPCSynchronousResolvesNothingToACallOverTheSizeCap(t *testing.T
 	call := grpcCall(start, time.Now())
 	call.GRPCReq.Body.DecodedData = strings.Repeat("x", MaxTestCaseSize+1)
 	tcChan := make(chan *models.TestCase, 1)
-	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), zap.NewNop(), tcChan, call, 50051, true, true)
+	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), zap.NewNop(), tcChan, call, 50051, true, true, models.IncomingOptions{})
 	if len(tcChan) > 0 {
 		t.Fatal("a call over the size cap was handed on")
 	}
@@ -263,14 +263,14 @@ func TestCaptureGRPCWithoutSyncDecidesItsWindow(t *testing.T) {
 	mgr.NoteStop(time.Now())
 	mgr.EndStoppedRecording()
 	tcChan := make(chan *models.TestCase, 1)
-	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), zap.NewNop(), tcChan, grpcCall(reqAt, time.Now()), 50051, false, false)
+	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), zap.NewNop(), tcChan, grpcCall(reqAt, time.Now()), 50051, false, false, models.IncomingOptions{})
 	if len(tcChan) > 0 {
 		t.Fatal("a call in flight across its recording's stop was recorded")
 	}
 
 	_, budget := givenUpWindow(t)
 	defer budget.Close()
-	CaptureGRPC(syncMock.WithWindow(context.Background(), budget), zap.NewNop(), tcChan, grpcCall(reqAt, time.Now()), 50051, false, false)
+	CaptureGRPC(syncMock.WithWindow(context.Background(), budget), zap.NewNop(), tcChan, grpcCall(reqAt, time.Now()), 50051, false, false, models.IncomingOptions{})
 	if len(tcChan) != 1 {
 		t.Fatal("without --sync a call the hold's budget gave up is no longer recorded")
 	}
@@ -284,15 +284,51 @@ func TestCaptureGRPCWithoutSyncDecidesItsWindow(t *testing.T) {
 	notOn := fresh.OpenWindow(start, nil)
 	ingress, stop := context.WithCancel(syncMock.WithWindow(syncMock.NewContext(context.Background(), fresh), notOn))
 	stop()
-	CaptureGRPC(ingress, zap.NewNop(), make(chan *models.TestCase), grpcCall(start, end), 50051, false, false)
+	CaptureGRPC(ingress, zap.NewNop(), make(chan *models.TestCase), grpcCall(start, end), 50051, false, false, models.IncomingOptions{})
 	notOn.Close()
 	if span, ok := fresh.TestSpanAt(start.Add(time.Millisecond)); ok {
 		t.Fatalf("a call never handed on noted a test span %v", span)
 	}
 	on := fresh.OpenWindow(start, nil)
-	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), fresh), on), zap.NewNop(), tcChan, grpcCall(start, end), 50051, false, false)
+	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), fresh), on), zap.NewNop(), tcChan, grpcCall(start, end), 50051, false, false, models.IncomingOptions{})
 	on.Close()
 	if span, ok := fresh.TestSpanAt(start.Add(time.Millisecond)); !ok || !span.End.Equal(end) {
 		t.Fatalf("a handed-on call's span: %v %v, want it noted to %v", span, ok, end)
+	}
+}
+
+// With --sync a call the recording's ingress filters exclude takes no name of
+// the manager's (test-N), as a filtered HTTP request takes none: the next
+// kept call is named as it would be with no filtered call before it.
+func TestCaptureGRPCSynchronousFilteredCallTakesNoName(t *testing.T) {
+	opts := models.IncomingOptions{Filters: []models.Filter{
+		{Headers: map[string]string{"User-Agent": `^kube-probe/`}, FilterPolicy: "exclude"},
+	}}
+	keptName := func(filteredFirst bool) string {
+		t.Helper()
+		mgr, w, _, _, start, _ := heldGRPCManager(t)
+		ctx := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w)
+		if filteredFirst {
+			probe := grpcCall(start, time.Now())
+			probe.GRPCReq.Headers.PseudoHeaders[":path"] = "/grpc.health.v1.Health/Check"
+			probe.GRPCReq.Headers.OrdinaryHeaders = map[string]string{"user-agent": "kube-probe/1.31 grpc-go/1.65.0"}
+			none := make(chan *models.TestCase, 1)
+			CaptureGRPC(ctx, zap.NewNop(), none, probe, 50051, true, true, opts)
+			if len(none) != 0 {
+				t.Fatal("the filtered probe was handed on")
+			}
+		}
+		tcChan := make(chan *models.TestCase, 1)
+		CaptureGRPC(ctx, zap.NewNop(), tcChan, grpcCall(start, time.Now()), 50051, true, true, opts)
+		select {
+		case tc := <-tcChan:
+			return tc.Name
+		default:
+			t.Fatal("the kept call was not handed on")
+			return ""
+		}
+	}
+	if alone, after := keptName(false), keptName(true); alone != after {
+		t.Fatalf("the kept call is named %q after a filtered call, %q without one: the filtered call took a name", after, alone)
 	}
 }

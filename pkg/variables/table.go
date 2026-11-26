@@ -920,6 +920,21 @@ func (t *Table) StartOpening(open func(), given, carried []Binding) {
 	t.StartOpeningTest("", open, given, carried, nil)
 }
 
+// TryStartOpening is StartOpening when open may decline to open the scope
+// (returning false): when open returns false, the table's scope and bindings
+// are left untouched.
+func (t *Table) TryStartOpening(open func() bool, given, carried []Binding) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !open() {
+		return false
+	}
+	t.start("", given, carried)
+	t.notes = nil
+	t.asRecorded = make(map[string]bool)
+	return true
+}
+
 // StartOpeningTest is StartOpening for the scope of the test named test
 // ("" for none named): once the next scope begins, what this one bound
 // itself is that test's (EndedOf), on a table that keeps it (KeepEnded). The

@@ -673,3 +673,92 @@ func TestAGRPCCallAPauseCostsIsCountedOnItsConnection(t *testing.T) {
 	<-done
 	_ = client.Close()
 }
+
+// The ingress hands a gRPC call the recording's filters as it hands an HTTP
+// request them: a kubelet gRPC probe the filters exclude is no test case,
+// and an app's own call through the same ingress is one.
+func TestTheIngressFiltersAGRPCCall(t *testing.T) {
+	call := func(path, userAgent string) (req, resp []byte) {
+		var out, block bytes.Buffer
+		fr, enc := http2.NewFramer(&out, nil), hpack.NewEncoder(&block)
+		headers := func(end bool, fields ...string) {
+			block.Reset()
+			for i := 0; i < len(fields); i += 2 {
+				if err := enc.WriteField(hpack.HeaderField{Name: fields[i], Value: fields[i+1]}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fr.WriteHeaders(http2.HeadersFrameParam{StreamID: 1, BlockFragment: block.Bytes(), EndStream: end, EndHeaders: true}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		msg := []byte{0, 0, 0, 0, 0}
+		headers(false, ":method", "POST", ":scheme", "http", ":path", path, ":authority", "localhost",
+			"content-type", "application/grpc", "user-agent", userAgent)
+		if err := fr.WriteData(1, true, msg); err != nil {
+			t.Fatal(err)
+		}
+		req = append([]byte(clientPreface), out.Bytes()...)
+		out.Reset()
+		headers(false, ":status", "200", "content-type", "application/grpc")
+		if err := fr.WriteData(1, false, msg); err != nil {
+			t.Fatal(err)
+		}
+		headers(true, "grpc-status", "0")
+		return req, append([]byte(nil), out.Bytes()...)
+	}
+
+	pm := &IngressProxyManager{logger: zap.NewNop()}
+	pm.incomingOpts.Store(&models.IncomingOptions{Filters: []models.Filter{
+		{Headers: map[string]string{"User-Agent": `^kube-probe/`}, FilterPolicy: "exclude"},
+	}})
+	record := func(path, userAgent string) *models.TestCase {
+		t.Helper()
+		req, resp := call(path, userAgent)
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		defer func() { _ = ln.Close() }()
+		go func() { // the app: takes the call, answers it
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer func() { _ = c.Close() }()
+			if _, err := io.ReadFull(c, make([]byte, len(req))); err == nil {
+				_, _ = c.Write(resp)
+			}
+			_, _ = io.Copy(io.Discard, c)
+		}()
+		ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
+		defer cancel()
+		tcs := make(chan *models.TestCase, 1)
+		client, server := net.Pipe()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			pm.handleConnection(ctx, server, ln.Addr().String(), pm.logger, tcs, make(chan struct{}, 1), 8080)
+		}()
+		go func() { _, _ = client.Write(req) }()
+		if _, err := io.ReadFull(client, make([]byte, len(resp))); err != nil {
+			t.Fatalf("the call's response: %v", err)
+		}
+		var tc *models.TestCase
+		select {
+		case tc = <-tcs:
+		case <-time.After(2 * time.Second):
+		}
+		cancel()
+		<-done
+		_ = client.Close()
+		return tc
+	}
+
+	if tc := record("/grpc.health.v1.Health/Check", "kube-probe/1.31 grpc-go/1.65.0"); tc != nil {
+		t.Fatalf("the probe the filters exclude was recorded: %s", tc.GrpcReq.Headers.PseudoHeaders[":path"])
+	}
+	if tc := record("/svc.Echo/Ping", "grpc-go/1.72.0"); tc == nil {
+		t.Fatal("the app's own call was not recorded")
+	}
+}

@@ -59,39 +59,73 @@ func TestTheSetsOutsideTestMissesFailNothingInEitherMode(t *testing.T) {
 	}
 }
 
-// Each outside-test miss is said at WARN, by its shape and tags, with its
-// next step; past outsideLogMax, one line says how many more the report
-// names; and a last line points to the set's misses file, by path, when one
-// was written.
+// Outside-test misses emit ONE Info summary line naming the call count, the
+// misses file (when written) and each distinct next step the misses carry
+// (next_steps), while per-call detail is logged at Debug.
 func TestEachOutsideTestMissIsSaidWithItsNextStep(t *testing.T) {
-	core, logs := observer.New(zap.InfoLevel)
+	core, logs := observer.New(zap.DebugLevel)
 	r := &Replayer{logger: zap.New(core)}
 	misses := models.OutsideTestMissesOf([]models.UnmatchedCall{{Protocol: "DNS", ActualSummary: "A db.example.", HostTag: "#ab12", BeforeSet: true}})
 	r.logOutsideTestMisses("test-set-0", misses, "")
-	e := logs.FilterMessageSnippet("outside every test").All()
-	if len(e) != 1 || logs.Len() != 1 {
-		t.Fatalf("got %d lines, want 1 and no misses file's: %+v", len(e), logs.All())
+	infos := logs.FilterLevelExact(zap.InfoLevel).All()
+	if len(infos) != 1 {
+		t.Fatalf("got %d Info lines, want 1: %+v", len(infos), logs.All())
 	}
-	f := e[0].ContextMap()
+	if warns := logs.FilterLevelExact(zap.WarnLevel).All(); len(warns) != 0 {
+		t.Fatalf("got %d Warn lines, want 0: %+v", len(warns), warns)
+	}
+	dbgs := logs.FilterLevelExact(zap.DebugLevel).All()
+	if len(dbgs) != 1 {
+		t.Fatalf("got %d Debug lines, want 1: %+v", len(dbgs), dbgs)
+	}
+	f := dbgs[0].ContextMap()
 	if f["call"] != "A {}.{}." || f["destination"] != "{}.{}. #ab12" || f["when"] != models.OutsideBeforeFirstTest || f["next_step"] != misses[0].NextStep || f["test-set"] != "test-set-0" {
-		t.Errorf("the line reads %+v", f)
+		t.Errorf("the debug line reads %+v", f)
+	}
+	if got := fmt.Sprint(infos[0].ContextMap()["next_steps"]); got != fmt.Sprint([]any{misses[0].NextStep}) {
+		t.Errorf("the summary's next_steps = %s, want the lookup's next step %q", got, misses[0].NextStep)
+	}
+	if !strings.Contains(misses[0].NextStep, "record the test set again") {
+		t.Errorf("a DNS lookup's next step does not say to record the test set again: %q", misses[0].NextStep)
 	}
 
 	logs.TakeAll()
 	var many []models.UnmatchedCall
-	for i := 0; i < outsideLogMax+3; i++ {
+	for i := 0; i < 23; i++ {
 		many = append(many, models.UnmatchedCall{Protocol: "HTTP", ActualSummary: fmt.Sprintf("GET /c%d", i), Destination: fmt.Sprintf("10.0.0.%d:80", i), BeforeSet: true})
 	}
 	const file = "keploy/test-set-0/last-test-misses.yaml"
 	r.logOutsideTestMisses("test-set-0", models.OutsideTestMissesOf(many), file)
-	if n := logs.Len(); n != outsideLogMax+2 {
-		t.Fatalf("got %d lines for %d misses, want %d", n, len(many), outsideLogMax+2)
+	infos = logs.FilterLevelExact(zap.InfoLevel).All()
+	if len(infos) != 1 {
+		t.Fatalf("got %d Info lines for %d misses, want 1 summary line: %+v", len(infos), len(many), infos)
 	}
-	if more := logs.FilterMessageSnippet("more calls").All(); len(more) != 1 || more[0].ContextMap()["more"] != int64(3) {
-		t.Fatalf("no line says 3 more: %+v", more)
+	if infos[0].ContextMap()["misses_file"] != file || infos[0].ContextMap()["calls"] != int64(23) {
+		t.Fatalf("summary line missing misses_file or calls count: %+v", infos[0].ContextMap())
 	}
-	if last := logs.All()[outsideLogMax+1]; last.ContextMap()["misses_file"] != file {
-		t.Fatalf("the last line does not point to the misses file: %+v", last)
+	if dbgs := logs.FilterLevelExact(zap.DebugLevel).All(); len(dbgs) != 23 {
+		t.Fatalf("got %d Debug detail lines, want 23", len(dbgs))
+	}
+	one := models.OutsideTestMissesOf(many[:1])[0].NextStep
+	if got := fmt.Sprint(infos[0].ContextMap()["next_steps"]); got != fmt.Sprint([]any{one}) {
+		t.Errorf("23 calls of one kind: next_steps = %s, want their one next step %q", got, one)
+	}
+
+	// A lookup and another call: each kind's next step, once, in the order
+	// first carried.
+	logs.TakeAll()
+	mixed := models.OutsideTestMissesOf([]models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "GET /a", Destination: "10.0.0.1:80", BeforeSet: true},
+		{Protocol: "DNS", ActualSummary: "A db.example.", HostTag: "#ab12", BeforeSet: true},
+		{Protocol: "HTTP", ActualSummary: "GET /b", Destination: "10.0.0.2:80", BeforeSet: true},
+	})
+	r.logOutsideTestMisses("test-set-0", mixed, file)
+	infos = logs.FilterLevelExact(zap.InfoLevel).All()
+	if len(infos) != 1 {
+		t.Fatalf("got %d Info lines for a mixed set, want 1: %+v", len(infos), infos)
+	}
+	if got, want := fmt.Sprint(infos[0].ContextMap()["next_steps"]), fmt.Sprint([]any{mixed[0].NextStep, mixed[1].NextStep}); got != want || mixed[0].NextStep == mixed[1].NextStep {
+		t.Errorf("mixed: next_steps = %s, want %s", got, want)
 	}
 }
 

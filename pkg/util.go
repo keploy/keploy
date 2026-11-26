@@ -42,6 +42,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -901,11 +902,37 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		}
 	}
 
+	// A request recorded over HTTP/2 is sent over HTTP/2: a cleartext one
+	// with prior knowledge (h2c), as a mesh sidecar on an "http2" port or an
+	// h2c client sends it, since an app that serves only HTTP/2 refuses
+	// HTTP/1.1; a TLS one negotiating it.
+	if tc.HTTPReq.ProtoMajor == 2 {
+		useHTTP2(client, req.URL.Scheme, disableCompression)
+	}
+
 	return &preparedHTTPRequest{
 		Request: req,
 		Client:  client,
 		AppPort: appPort,
 	}, nil
+}
+
+// useHTTP2 makes client send over HTTP/2: over cleartext with prior
+// knowledge (h2c) for an http URL, negotiating it over TLS for an https one.
+func useHTTP2(client *http.Client, scheme string, disableCompression bool) {
+	if scheme == "http" {
+		client.Transport = &http2.Transport{
+			AllowHTTP:          true,
+			DisableCompression: disableCompression,
+			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+		}
+		return
+	}
+	if t, ok := client.Transport.(*http.Transport); ok {
+		t.ForceAttemptHTTP2 = true
+	}
 }
 
 // endAtHeaders gives an answer that switches its connection to another
@@ -1372,6 +1399,73 @@ func isClosedOnTheDrop(err error) bool {
 	return errors.Is(err, net.ErrClosed)
 }
 
+// AppTimeoutError marks a test request whose app response exceeded
+// test.apiTimeout, carrying the configured timeout duration so replay can
+// emit one clear timeout line naming test.apiTimeout and classify the result
+// as APP_TIMEOUT.
+type AppTimeoutError struct {
+	TestCase string
+	Duration time.Duration
+	Err      error
+}
+
+func (e *AppTimeoutError) Error() string {
+	if e.Duration > 0 {
+		return fmt.Sprintf("the app did not answer %s within test.apiTimeout (%s): %v", e.TestCase, e.Duration, e.Err)
+	}
+	return fmt.Sprintf("the app did not answer %s within test.apiTimeout: %v", e.TestCase, e.Err)
+}
+
+func (e *AppTimeoutError) Unwrap() error { return e.Err }
+
+// Timeout implements the standard net.Error / timeout interface so callers
+// checking interface{ Timeout() bool } recognize AppTimeoutError directly.
+func (e *AppTimeoutError) Timeout() bool { return true }
+
+// IsAppTimeout reports whether err is an AppTimeoutError produced when
+// keploy's configured test.apiTimeout deadline fired while waiting for the
+// app's answer, excluding ErrAnswerStalled, DNS timeouts, TCP dial timeouts,
+// unbounded mode, and gRPC's fallback default timeout when apiTimeout == 0.
+func IsAppTimeout(err error) bool {
+	if err == nil || errors.Is(err, ErrAnswerStalled) {
+		return false
+	}
+	var te *AppTimeoutError
+	return errors.As(err, &te)
+}
+
+// isNonAPITimeoutTransportErr reports whether err is a DNS resolver timeout or
+// TCP dial error (such as ETIMEDOUT) rather than the app failing to answer a
+// connected request within test.apiTimeout.
+func isNonAPITimeoutTransportErr(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	return false
+}
+
+// isClientAPITimeout reports whether err was caused by the HTTP client's
+// configured RequestTimeout (test.apiTimeout) expiring while awaiting the
+// app's response, and not by parent context cancellation, a DNS timeout, or a
+// TCP dial timeout.
+func isClientAPITimeout(parentCtx context.Context, err error, timeout time.Duration) bool {
+	if err == nil || timeout <= 0 || errors.Is(err, ErrAnswerStalled) {
+		return false
+	}
+	if parentCtx != nil && parentCtx.Err() != nil {
+		return false
+	}
+	if isNonAPITimeoutTransportErr(err) {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
 // IsAppConnectionError reports whether err says a test request failed because
 // the connection to the app failed: it was refused (isPreResponseConnRefused,
 // which the refusal re-send and the gRPC dial ask), the app's host was not
@@ -1608,6 +1702,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
 		}
+		if isClientAPITimeout(ctx, errHTTPReq, cfg.RequestTimeout) {
+			return nil, &AppTimeoutError{TestCase: tc.Name, Duration: cfg.RequestTimeout, Err: errHTTPReq}
+		}
 		// The line withholds what the client's error quotes (the request's
 		// URL, query and all), and names a host the error names outside its
 		// quotes (a lookup's: "lookup <host>: no such host") by its labels'
@@ -1646,6 +1743,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 				Header:        ToYamlHTTPHeader(httpResp.Header),
 				Body:          decodedPart(httpResp.Header.Get("Content-Encoding"), respBody),
 			}, cfg.answer.err()
+		}
+		if isClientAPITimeout(ctx, errReadRespBody, cfg.RequestTimeout) {
+			return nil, &AppTimeoutError{TestCase: tc.Name, Duration: cfg.RequestTimeout, Err: errReadRespBody}
 		}
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
@@ -1724,6 +1824,9 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		prepared.Client.CloseIdleConnections()
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
+		}
+		if isClientAPITimeout(ctx, errHTTPReq, cfg.RequestTimeout) {
+			return nil, &AppTimeoutError{TestCase: tc.Name, Duration: cfg.RequestTimeout, Err: errHTTPReq}
 		}
 		// The line withholds what the client's error quotes (the request's
 		// URL, query and all), and names a host the error names outside its
@@ -4173,7 +4276,53 @@ func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logge
 // strictWindow is the user's window mode (MockFilterParams.StrictMockWindow),
 // which decides that, whatever strict says. A zero inFlightFrom keeps none.
 func FilterPerTestAndLaxPromotedInFlightAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
-	perTestInWindow, promotedToSession := filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow)
+	return FilterPerTestAndLaxPromotedWithWindows(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, nil)
+}
+
+// FilterPerTestAndLaxPromotedWithWindows is
+// FilterPerTestAndLaxPromotedInFlightAware that also keeps in the per-test
+// slice, under the strict window, a plain per-test mock the edge rule gives
+// the window (ServeWindow.Windows, models.WindowSchedule.EdgeOwner), as the
+// mock manager's staging then stages it: the set's recorded windows. Nil
+// windows keep none, as FilterPerTestAndLaxPromotedInFlightAware.
+type mockCopyMode uint8
+
+const (
+	mockCopyDeep mockCopyMode = iota
+	mockCopyShallow
+	mockCopyInPlace
+)
+
+func copyMockForFilter(m *models.Mock, mode mockCopyMode) *models.Mock {
+	switch mode {
+	case mockCopyInPlace:
+		return m
+	case mockCopyShallow:
+		return m.ShallowCopy()
+	default:
+		return m.DeepCopy()
+	}
+}
+
+func FilterPerTestAndLaxPromotedWithWindows(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule) ([]*models.Mock, []*models.Mock) {
+	return filterPerTestAndLaxPromotedWithWindowsMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, windows, mockCopyDeep)
+}
+
+// FilterPerTestAndLaxPromotedWithWindowsNoDeepCopy is
+// FilterPerTestAndLaxPromotedWithWindows without whole-mock DeepCopy: when
+// owned is true (mocks freshly decoded from DiskMocks), TestModeInfo fields
+// are updated in place; otherwise ShallowCopy isolates TestModeInfo while
+// sharing immutable Spec payloads.
+func FilterPerTestAndLaxPromotedWithWindowsNoDeepCopy(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule, owned bool) ([]*models.Mock, []*models.Mock) {
+	mode := mockCopyShallow
+	if owned {
+		mode = mockCopyInPlace
+	}
+	return filterPerTestAndLaxPromotedWithWindowsMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, windows, mode)
+}
+
+func filterPerTestAndLaxPromotedWithWindowsMode(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule, mode mockCopyMode) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStampInFlightAwareMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, windows, mode)
 
 	sort.SliceStable(perTestInWindow, func(i, j int) bool {
 		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
@@ -4202,7 +4351,21 @@ func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock
 // tier-aware strict branch) and reach MockManager.SetMocksWithWindow
 // where the startup-tier partition sorts them correctly.
 func FilterConfigMocksTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
+	return filterConfigMocksTierAwareMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, mockCopyDeep)
+}
+
+// FilterConfigMocksTierAwareNoDeepCopy is FilterConfigMocksTierAware without
+// whole-pool DeepCopy (in-place when owned, ShallowCopy otherwise).
+func FilterConfigMocksTierAwareNoDeepCopy(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time, owned bool) []*models.Mock {
+	mode := mockCopyShallow
+	if owned {
+		mode = mockCopyInPlace
+	}
+	return filterConfigMocksTierAwareMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, mode)
+}
+
+func filterConfigMocksTierAwareMode(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time, mode mockCopyMode) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByTimeStampInFlightAwareMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, time.Time{}, false, nil, mode)
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -4245,19 +4408,37 @@ func IsTestWindow(afterTime, beforeTime time.Time) bool {
 // names the test's whole recording, ExactMapping), or no kind placed at its
 // answer, it is FilterTcsMocksMapping.
 func FilterTcsMocksMappingInWindow(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time) []*models.Mock {
-	if !models.AnswerPlacedRegistered() || !IsTestWindow(afterTime, beforeTime) {
-		return FilterTcsMocksMapping(ctx, logger, m, mocksPresentInMapping)
+	return filterTcsMocksMappingInWindowMode(ctx, logger, m, mocksPresentInMapping, afterTime, beforeTime, mockCopyDeep)
+}
+
+// FilterTcsMocksMappingInWindowNoDeepCopy is FilterTcsMocksMappingInWindow
+// without whole-mock DeepCopy (in-place when owned, ShallowCopy otherwise).
+func FilterTcsMocksMappingInWindowNoDeepCopy(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time, owned bool) []*models.Mock {
+	mode := mockCopyShallow
+	if owned {
+		mode = mockCopyInPlace
 	}
-	names := append([]string(nil), mocksPresentInMapping...)
-	for _, mk := range m {
-		if mk == nil || !models.IsAnswerPlaced(mk) {
-			continue
-		}
-		if place := models.PlaceOf(mk); !place.Before(afterTime) && !place.After(beforeTime) {
-			names = append(names, mk.Name)
+	return filterTcsMocksMappingInWindowMode(ctx, logger, m, mocksPresentInMapping, afterTime, beforeTime, mode)
+}
+
+func filterTcsMocksMappingInWindowMode(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time, mode mockCopyMode) []*models.Mock {
+	names := mocksPresentInMapping
+	if models.AnswerPlacedRegistered() && IsTestWindow(afterTime, beforeTime) {
+		names = append([]string(nil), mocksPresentInMapping...)
+		for _, mk := range m {
+			if mk == nil || !models.IsAnswerPlaced(mk) {
+				continue
+			}
+			if place := models.PlaceOf(mk); !place.Before(afterTime) && !place.After(beforeTime) {
+				names = append(names, mk.Name)
+			}
 		}
 	}
-	return FilterTcsMocksMapping(ctx, logger, m, names)
+	filteredMocks, _ := filterByMappingMode(ctx, logger, m, names, mode)
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+	return filteredMocks
 }
 
 // FilterConfigMocksMapping tags the reusable (config/session/connection) pool
@@ -4296,7 +4477,21 @@ func FilterTcsMocksMappingInWindow(ctx context.Context, logger *zap.Logger, m []
 // on a pool where neither rule fires. The property claimed here is narrower and
 // is the one that matters: mapping membership is not a chronological signal, so
 // it must not reorder this pool.
-func FilterConfigMocksMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	return filterConfigMocksMappingMode(ctx, logger, m, mocksPresentInMapping, mockCopyDeep)
+}
+
+// FilterConfigMocksMappingNoDeepCopy is FilterConfigMocksMapping without
+// whole-pool DeepCopy (in-place when owned, ShallowCopy otherwise).
+func FilterConfigMocksMappingNoDeepCopy(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, owned bool) []*models.Mock {
+	mode := mockCopyShallow
+	if owned {
+		mode = mockCopyInPlace
+	}
+	return filterConfigMocksMappingMode(ctx, logger, m, mocksPresentInMapping, mode)
+}
+
+func filterConfigMocksMappingMode(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, mode mockCopyMode) []*models.Mock {
 	mapping := make(map[string]bool, len(mocksPresentInMapping))
 	for _, name := range mocksPresentInMapping {
 		mapping[name] = true
@@ -4308,7 +4503,7 @@ func FilterConfigMocksMapping(_ context.Context, logger *zap.Logger, m []*models
 		if mock == nil {
 			continue
 		}
-		p := mock.DeepCopy()
+		p := copyMockForFilter(mock, mode)
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
@@ -4473,7 +4668,7 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 // the reader fall through to the zero-time behaviour and remain
 // functionally identical to the pre-fix blanket-drop contract.
 func filterByTimeStampTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
-	return filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, time.Time{}, false)
+	return filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, time.Time{}, false, nil)
 }
 
 // filterByTimeStampInFlightAware is filterByTimeStampTierAware that also keeps
@@ -4493,8 +4688,15 @@ func filterByTimeStampTierAware(ctx context.Context, logger *zap.Logger, m []*mo
 // stated its lifetime is kept, since lax mode drops a stated mock out of its
 // window, and an unstated one is promoted to the session pool as every
 // unstated per-test mock out of the window is, as before. A zero inFlightFrom
-// keeps none.
-func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
+// keeps none. Given windows, the recorded windows, it keeps in the per-test
+// slice too, under the strict window, a plain per-test mock the edge rule
+// gives the window (models.WindowSchedule.EdgeOwnedBy), stated lifetime or
+// not; nil: no edge rule.
+func filterByTimeStampInFlightAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule) ([]*models.Mock, []*models.Mock) {
+	return filterByTimeStampInFlightAwareMode(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, inFlightFrom, strictWindow, windows, mockCopyDeep)
+}
+
+func filterByTimeStampInFlightAwareMode(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule, mode mockCopyMode) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -4508,7 +4710,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 	}
 
 	strict := strictWindowEnabled(strictPerCall)
-	w := ServeWindow{Start: afterTime, End: beforeTime, FirstStart: firstWindowStart, InFlightFrom: inFlightFrom, StrictPerCall: strictPerCall, StrictWindow: strictWindow}
+	w := ServeWindow{Start: afterTime, End: beforeTime, FirstStart: firstWindowStart, InFlightFrom: inFlightFrom, StrictPerCall: strictPerCall, StrictWindow: strictWindow, Windows: windows}
 	isNonKeploy := false
 	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 
@@ -4516,9 +4718,11 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		if mock == nil {
 			continue
 		}
-		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
-		// field in this for loop, and write in mockmanager functions.
-		p := mock.DeepCopy()
+		// Copy according to mode: external Filter* callers deep-copy to keep
+		// caller slices isolated; agent staging uses in-place (freshly decoded
+		// from DiskMocks) or ShallowCopy (isolating TestModeInfo while sharing
+		// immutable Spec payloads).
+		p := copyMockForFilter(mock, mode)
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
@@ -4602,7 +4806,11 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		case ruleSessionLifetime, ruleLaxPromoted:
 			p.TestModeInfo.IsFiltered = false
 			unfilteredMocks = append(unfilteredMocks, p)
-		case ruleInWindow, ruleInFlight:
+		case ruleInWindow, ruleInFlight, ruleEdge:
+			// ruleEdge: under the strict window, given w.Windows, a plain
+			// per-test mock the edge rule gives this window (EdgeOwnedBy),
+			// stated lifetime or not, which the mock manager then stages by
+			// the same rule.
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 		case ruleStartup:
@@ -4943,7 +5151,11 @@ func effectiveLifetimeForRouting(m *models.Mock) models.Lifetime {
 	return models.LifetimePerTest
 }
 
-func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
+func filterByMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
+	return filterByMappingMode(ctx, logger, m, mocksPresentInMapping, mockCopyDeep)
+}
+
+func filterByMappingMode(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, mode mockCopyMode) ([]*models.Mock, []*models.Mock) {
 	mapping := make(map[string]bool, len(mocksPresentInMapping))
 	for _, name := range mocksPresentInMapping {
 		mapping[name] = true
@@ -4954,12 +5166,18 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 		if mock == nil {
 			continue
 		}
-		p := mock.DeepCopy()
+		p := copyMockForFilter(mock, mode)
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
 		if mapping[p.Name] {
 			p.TestModeInfo.IsFiltered = true
+			filtered = append(filtered, p)
+		} else if p.IsReadThrough() {
+			// Session read-through mocks are unmapped by construction; keep
+			// them in the filtered slice passed to MockManager so
+			// SetMocksWithWindow routes them into the read-through tier.
+			p.TestModeInfo.IsFiltered = false
 			filtered = append(filtered, p)
 		} else {
 			p.TestModeInfo.IsFiltered = false

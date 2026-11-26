@@ -56,6 +56,13 @@ CI_MAX_HTTP_FAILURE_RATE="${CI_MAX_HTTP_FAILURE_RATE:-0.40}"
 # and check_capture_accounted can hold the recording to what a pause may cost.
 # Empty: no forced pause (real memory pressure can still pause the guard).
 FORCE_PAUSE="${FORCE_PAUSE-1500:1530}"
+# The size-limit probe (probe_size_limit): its payload, in MiB, over the
+# 2.5 MiB keploy records of one body in a test case and under the app's own
+# 8 MiB; 0 sends no probe.
+SIZE_PROBE_MB="${SIZE_PROBE_MB:-3}"
+SIZE_PROBE_REQS=0
+SIZE_PROBE_ID=""
+APP_BASE_URL="${APP_BASE_URL:-${APP_HEALTH_URL%/healthz}}"
 MEMORY_VIOLATION_FILE="${PWD}/keploy-memory-violation.txt"
 MEMORY_USAGE_LOG="${PWD}/keploy-memory-usage.log"
 MEMORY_MONITOR_PID=""
@@ -234,11 +241,15 @@ recording_counter() {
 }
 
 # check_capture_accounted fails when the recording loses requests without
-# saying so, or when a pause did not end for the app's ingress. Each k6
-# request must be a recorded test or a loss the agent's summary counts:
-# suppressed, not recorded under memory pressure, left out in flight, dropped
-# at capacity, or held at the end. Requests k6 saw fail may have reached no
-# one, so they are allowed for, with 1% of the requests (at least 10) on top.
+# saying so, or when a pause did not end for the app's ingress. Each request
+# k6 and the size-limit probe sent must be a recorded test or a loss the
+# agent's summary counts: suppressed, not recorded under memory pressure, not
+# recorded for being over keploy's size limit for a test case, left out in
+# flight, dropped at capacity, or held at the end. Requests k6 saw fail may
+# have reached no one, so they are allowed for, with 1% of the requests (at
+# least 10) on top. A call over the size limit used to be counted nowhere: at
+# LARGE_PAYLOAD_SIZES_MB=4 each large upload and download is, and a recording
+# of 7,388 requests lost 151 of them without a word.
 #
 # Every pause must also be temporary, the forced one (FORCE_PAUSE) and each one
 # real memory pressure made. The agent counts the ingress requests that came
@@ -251,9 +262,11 @@ recording_counter() {
 #   requests_during_pauses + N * 2 * VUs: more says a pause stayed on for a
 #   connection after it ended, and the agent counted its later requests;
 # - the recording holds at least
-#   reqs - failed - requests_during_pauses - N * 2 * VUs - slack tests (a
-#   suppressed test does not count towards that): fewer says that, after a
-#   pause, the app's requests did not become tests again.
+#   reqs - failed - requests_during_pauses - N * 2 * VUs - slack - (requests
+#   over the size limit) tests (a suppressed test does not count towards
+#   that): fewer says that, after a pause, the app's requests did not become
+#   tests again. A request over the size limit is never a test, and is
+#   counted exactly (check_size_limit_told holds the count).
 # The second check can judge only when a recording that captured nothing after
 # its first pause would fall below that floor: when the floor is above the
 # requests that came before the first pause (requests_before_first_pause).
@@ -289,6 +302,7 @@ check_capture_accounted() {
         echo "k6's http_reqs is not in k6-output.log: cannot account for the recording."
         return 1
     fi
+    reqs=$((reqs + SIZE_PROBE_REQS))
     fail_pct="$(grep -oP 'http_req_failed[.]*:\s+\K[0-9]+(\.[0-9]+)?' "${PWD}/k6-output.log" | head -1 || true)"
     failed="$(awk -v p="${fail_pct:-0}" -v n="$reqs" 'BEGIN { printf "%d", p * n / 100 + 0.999 }')"
     tests="$(find ./keploy -path '*/tests/*.yaml' 2>/dev/null | wc -l)"
@@ -301,8 +315,8 @@ check_capture_accounted() {
     local rc=0
     local -A n=()
     for name in tcs_sent_to_cli tcs_suppressed_total tcs_not_recorded_under_pressure \
-        tcs_left_out_in_flight tcs_dropped_capacity tcs_held_at_end pressure_ranges_total \
-        requests_during_pauses requests_before_first_pause; do
+        tcs_not_recorded_over_size_limit tcs_left_out_in_flight tcs_dropped_capacity tcs_held_at_end \
+        pressure_ranges_total requests_during_pauses requests_before_first_pause; do
         value="$(recording_counter "$line" "$name")"
         if [ -z "$value" ]; then
             echo "FAIL: the agent's summary does not say ${name}; counted as 0 below."
@@ -311,11 +325,11 @@ check_capture_accounted() {
         n[$name]="${value:-0}"
     done
 
-    local reported=$((n[tcs_suppressed_total] + n[tcs_not_recorded_under_pressure] + n[tcs_left_out_in_flight] + n[tcs_dropped_capacity] + n[tcs_held_at_end]))
+    local reported=$((n[tcs_suppressed_total] + n[tcs_not_recorded_under_pressure] + n[tcs_not_recorded_over_size_limit] + n[tcs_left_out_in_flight] + n[tcs_dropped_capacity] + n[tcs_held_at_end]))
     local unaccounted=$((reqs - tests - reported))
     local slack=$((reqs / 100 > 10 ? reqs / 100 : 10))
-    echo "k6: ${reqs} requests, ${failed} failed (${fail_pct:-?}%). Recorded tests: ${tests} (the agent sent ${n[tcs_sent_to_cli]})."
-    echo "The agent counts as lost: suppressed ${n[tcs_suppressed_total]}, not recorded under pressure ${n[tcs_not_recorded_under_pressure]}, left out in flight ${n[tcs_left_out_in_flight]}, dropped at capacity ${n[tcs_dropped_capacity]}, held at the end ${n[tcs_held_at_end]}; memory-guard pauses: ${n[pressure_ranges_total]}."
+    echo "k6 and the size-limit probe: ${reqs} requests (${SIZE_PROBE_REQS} of the probe), ${failed} failed (${fail_pct:-?}%). Recorded tests: ${tests} (the agent sent ${n[tcs_sent_to_cli]})."
+    echo "The agent counts as lost: suppressed ${n[tcs_suppressed_total]}, not recorded under pressure ${n[tcs_not_recorded_under_pressure]}, not recorded over the size limit ${n[tcs_not_recorded_over_size_limit]}, left out in flight ${n[tcs_left_out_in_flight]}, dropped at capacity ${n[tcs_dropped_capacity]}, held at the end ${n[tcs_held_at_end]}; memory-guard pauses: ${n[pressure_ranges_total]}."
     echo "Requests neither recorded nor counted as lost: ${unaccounted} (allowed: ${failed} failed + ${slack})."
     if [ "$unaccounted" -gt $((failed + slack)) ]; then
         echo "FAIL: the recording lost ${unaccounted} requests without saying so."
@@ -345,7 +359,10 @@ check_capture_accounted() {
         echo "FAIL: the agent did not record ${not_recorded} requests under pressure, more than the ${during} that came during its pauses and the ${edges} in flight at their edges: a pause stayed on for some connection after it ended."
         rc=1
     fi
-    local floor=$((reqs - failed - during - edges - slack))
+    # A request over keploy's size limit for a test case can never be a test,
+    # and no pause cost it: the floor does not count on it.
+    local over_size="${n[tcs_not_recorded_over_size_limit]}"
+    local floor=$((reqs - failed - during - edges - slack - over_size))
     local judged=0
     if [ "$pauses" -eq 0 ]; then
         echo "No memory-guard pause in this recording: there is no resumption to judge."
@@ -354,9 +371,9 @@ check_capture_accounted() {
         rc=1
     else
         judged=1
-        echo "The recording must hold at least ${floor} tests (more than the ${before} before the first pause)."
+        echo "The recording must hold at least ${floor} tests (more than the ${before} before the first pause; ${over_size} requests over the size limit are not expected to be tests)."
         if [ "$tests" -lt "$floor" ]; then
-            echo "FAIL: the recording holds ${tests} tests of ${reqs} requests: the pauses cost more than the requests during them and at their edges, so after a pause the app's requests did not become tests again."
+            echo "FAIL: the recording holds ${tests} tests of ${reqs} requests (${over_size} of them over the size limit): the pauses cost more than the requests during them and at their edges, so after a pause the app's requests did not become tests again."
             rc=1
         fi
     fi
@@ -367,6 +384,117 @@ check_capture_accounted() {
             echo "The recording accounts for every request."
         fi
     fi
+    return "$rc"
+}
+
+# probe_size_limit sends the app, recorded and before the load, a call over
+# keploy's size limit for a test case each way: a POST whose request body is
+# SIZE_PROBE_MB MiB, and the GET of what it stored, whose response body is.
+# Neither can be recorded as a test case, and the recording must say so
+# (check_size_limit_told). Sent before k6, while the agent is idle, so that a
+# pause of the memory guard is unlikely to take either from the count (one
+# that does is counted as a pause's loss instead, and the check says so).
+probe_size_limit() {
+    if ! [[ $SIZE_PROBE_MB =~ ^[0-9]+$ ]]; then
+        echo "SIZE_PROBE_MB=${SIZE_PROBE_MB}: a whole number of MiB, or 0 for no probe."
+        return 1
+    fi
+    [ "$SIZE_PROBE_MB" -gt 0 ] || return 0
+    section "Calling the app over keploy's size limit for a test case (${SIZE_PROBE_MB} MiB)"
+    local body="${PWD}/size-probe.json" resp id code
+    {
+        printf '{"name":"size limit probe","content_type":"text/plain","payload":"'
+        head -c "$((SIZE_PROBE_MB * 1024 * 1024))" /dev/zero | tr '\0' 'a'
+        printf '"}'
+    } > "$body"
+    resp="$(curl -sS --max-time 120 -X POST -H 'Content-Type: application/json' --data-binary "@${body}" "${APP_BASE_URL}/large-payloads")" || {
+        rm -f "$body"
+        echo "The size-limit probe's POST failed."
+        return 1
+    }
+    rm -f "$body"
+    id="$(printf '%s' "$resp" | grep -oP '"id":\s*"?\K[^",}]+' | head -1 || true)"
+    if [ -z "$id" ]; then
+        echo "The size-limit probe's POST stored nothing: ${resp:0:300}"
+        return 1
+    fi
+    code="$(curl -sS --max-time 120 -o /dev/null -w '%{http_code}' "${APP_BASE_URL}/large-payloads/${id}")" || code=failed
+    if [ "$code" != 200 ]; then
+        echo "The size-limit probe's GET of ${id} answered ${code}, want 200."
+        return 1
+    fi
+    SIZE_PROBE_REQS=2
+    SIZE_PROBE_ID="$id"
+    echo "Sent POST /large-payloads and GET /large-payloads/${id}, each with a ${SIZE_PROBE_MB} MiB body."
+}
+
+# check_size_limit_told fails when the recording does not say what keploy's
+# size limit for a test case cost it. The probe's two calls
+# (probe_size_limit) must be counted in the agent's summary
+# (tcs_not_recorded_over_size_limit), warned of with the calls and the
+# limits named, and each named on keploy's console by its method and path
+# with why. k6's own calls are under the limit when every
+# LARGE_PAYLOAD_SIZES_MB is 2 MiB or less (the sample sends and answers the
+# payload as a JSON string of ASCII letters: 2 MiB and some 300 bytes of JSON
+# around it, under 2.5 MiB), and the count is then exactly the probe's; with a
+# larger one it is at least the probe's. k6 reads each size as an integer
+# (parseInt), and so does this. A recorder that is not this build predates
+# the count: not checked.
+check_size_limit_told() {
+    section "Checking that the recording says what keploy's size limit cost it"
+    if [ "${RECORD_SRC:-build}" != build ]; then
+        echo "The recorder is ${RECORD_SRC}, not this build: not checked."
+        return 0
+    fi
+    if [ "$SIZE_PROBE_REQS" -eq 0 ]; then
+        echo "No size-limit probe was sent (SIZE_PROBE_MB=${SIZE_PROBE_MB}): not checked."
+        return 0
+    fi
+    local rc=0 line n size over=0 call
+    line="$(grep 'agent: recording complete' record.txt | tail -1 || true)"
+    n="$(recording_counter "$line" tcs_not_recorded_over_size_limit)"
+    # pause_note says, beside a count short of the probe's, where the memory
+    # guard's first pause came: a probe call a pause took is counted as the
+    # pause's loss, not here.
+    pause_note() {
+        local pauses before
+        pauses="$(recording_counter "$line" pressure_ranges_total)"
+        before="$(recording_counter "$line" requests_before_first_pause)"
+        if [ "${pauses:-0}" -gt 0 ]; then
+            echo "(The memory guard's first pause came after ${before:-?} ingress requests: if the probe's calls came after them, a pause may have taken some of those calls; any it took is counted as its loss.)"
+        fi
+    }
+    for size in ${LARGE_PAYLOAD_SIZES_MB//,/ }; do
+        size="${size%%.*}"
+        [ "${size:-0}" -gt 2 ] && over=1
+    done
+    if [ -z "$n" ]; then
+        echo "FAIL: the agent's summary does not say tcs_not_recorded_over_size_limit: the ${SIZE_PROBE_REQS} calls over the size limit are counted nowhere."
+        rc=1
+    elif [ "$over" -eq 0 ] && [ "$n" -ne "$SIZE_PROBE_REQS" ]; then
+        echo "FAIL: the agent's summary counts ${n} requests over the size limit, want the probe's ${SIZE_PROBE_REQS}: k6's calls are all under it (LARGE_PAYLOAD_SIZES_MB=${LARGE_PAYLOAD_SIZES_MB})."
+        if [ "$n" -lt "$SIZE_PROBE_REQS" ]; then
+            pause_note
+        fi
+        rc=1
+    elif [ "$n" -lt "$SIZE_PROBE_REQS" ]; then
+        echo "FAIL: the agent's summary counts ${n} requests over the size limit, fewer than the probe's ${SIZE_PROBE_REQS}."
+        pause_note
+        rc=1
+    else
+        echo "The agent's summary counts ${n} requests over the size limit (the probe sent ${SIZE_PROBE_REQS})."
+    fi
+    for call in "POST /large-payloads" "GET /large-payloads/${SIZE_PROBE_ID}"; do
+        if ! grep -F "not recorded as a test case: ${call} [path tag #" record.txt | grep -qF "body is over 2.5 MiB"; then
+            echo "FAIL: keploy's console does not name ${call} as not recorded for its body over the 2.5 MiB limit."
+            rc=1
+        fi
+    done
+    if ! grep -F "the keploy agent did not record some requests the app served as test cases" record.txt | grep -F '"calls_most"' | grep -qF '"body_limit_bytes": 2621440'; then
+        echo "FAIL: the agent's summary does not warn of the requests over the size limit, naming the calls and the limits."
+        rc=1
+    fi
+    [ "$rc" -eq 0 ] && echo "The recording says what keploy's size limit for a test case cost it, and names each call."
     return "$rc"
 }
 
@@ -751,6 +879,7 @@ echo "Detected Keploy container: $keploy_container"
 start_memory_monitor "$keploy_container" "$record_pid" "record"
 
 wait_for_http "$APP_HEALTH_URL" 180
+probe_size_limit
 run_loadtest
 
 sleep 10
@@ -762,6 +891,7 @@ check_memory_violation
 check_for_errors record.txt
 check_recorded_tests
 check_capture_accounted
+check_size_limit_told
 
 section "Preparing Replay"
 cleanup_compose

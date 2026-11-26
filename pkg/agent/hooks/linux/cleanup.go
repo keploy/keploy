@@ -19,7 +19,8 @@ import (
 var ExtraBPFPinPatterns []string
 
 // keployBPFProgNames lists the BPF program names that keploy attaches to cgroups.
-// Used to identify orphaned programs from crashed/killed previous runs.
+// Used to identify orphaned legacy raw-attached programs from crashed/killed
+// previous runs.
 var keployBPFProgNames = map[string]ebpf.AttachType{
 	"k_connect4":     ebpf.AttachCGroupInet4Connect,
 	"k_connect6":     ebpf.AttachCGroupInet6Connect,
@@ -61,35 +62,83 @@ func kernelProgName(name string) string {
 	return name
 }
 
-// DetectAndCleanOrphanedCgroupPrograms finds BPF programs attached to the
-// root cgroup that match keploy's known program names and detaches them.
+// attachedCgroupProg pairs a cgroup-attached BPF program ID with whether
+// BPF_PROG_QUERY reported an owning bpf_link for it.
+type attachedCgroupProg struct {
+	ID      uint32
+	HasLink bool
+}
+
+// cleanupOps isolates kernel/OS probes so unit tests can exercise
+// cross-PID-namespace flock gating and bpf_link filtering deterministically
+// without requiring CAP_BPF or root.
+type cleanupOps struct {
+	hasOtherProc      func(selfPID int) bool
+	queryPrograms     func(cgroupFD uintptr, attachType ebpf.AttachType) ([]attachedCgroupProg, bool, error)
+	liveCgroupLinkIDs func() (map[uint32]struct{}, error)
+	lookupProgName    func(progID uint32) (string, error)
+	detachRawProgram  func(cgroupFD uintptr, progID uint32, attachType ebpf.AttachType) error
+}
+
+func defaultCleanupOps() cleanupOps {
+	return cleanupOps{
+		hasOtherProc:      HasOtherKeployProcesses,
+		queryPrograms:     queryAttachedPrograms,
+		liveCgroupLinkIDs: queryLiveCgroupLinkProgIDs,
+		lookupProgName:    lookupBPFProgramName,
+		detachRawProgram:  detachProgramFromCgroup,
+	}
+}
+
+func hasOtherKeployInstances(lockDir, selfID string, hasOtherProc func(int) bool) bool {
+	if hasOtherLiveInstanceLocks(lockDir, selfID) {
+		return true
+	}
+	if hasOtherProc != nil && hasOtherProc(os.Getpid()) {
+		return true
+	}
+	return false
+}
+
+// DetectAndCleanOrphanedCgroupPrograms detaches legacy raw-attached
+// (non-bpf_link) orphaned Keploy cgroup BPF programs left behind by a crashed
+// prior run.
 //
-// IMPORTANT: the kernel does not expose the creator PID of an attached
-// cgroup program in a queryable field, so we cannot verify per-program
-// that the owning process is dead. Instead we gate the whole cleanup on
-// the absence of any other live keploy process in /proc — if any live
-// sibling exists, the programs might belong to it and we must not touch
-// them. The function is therefore a no-op when a second keploy instance
-// is running concurrently (intentional: correctness over aggression).
+// Two invariants prevent cross-container interference:
+//  1. Cross-PID-namespace liveness is checked via kernel flock(2) instance
+//     locks on host-shared bpffs (in addition to /proc for legacy binaries), so
+//     a sibling running in an isolated container PID namespace is never
+//     misclassified as dead.
+//  2. Programs attached via a kernel bpf_link are NEVER passed to
+//     RawDetachProgram: unpinned bpf_links are auto-destroyed by the kernel
+//     when their owning process exits (so an active unpinned bpf_link cannot be
+//     an orphan), and RawDetachProgram always returns ENOENT on bpf_link
+//     attachments. Because the Linux kernel does not report link IDs in
+//     cgroup BPF_PROG_QUERY (HaveLinkInfo() is false for cgroups), live cgroup
+//     bpf_links are enumerated via link.Iterator.
 //
-// The primary use case is recovery from a crashed / hard-killed prior
-// run, where the orphaned cgroup programs would otherwise prevent the
-// next keploy startup from attaching its own programs with the same
-// names (EEXIST).
+// Callers that already hold an instanceLock should call
+// detectAndCleanOrphanedCgroupProgramsForInstance with their own lock ID so
+// they do not observe their own lock as a live sibling.
 func DetectAndCleanOrphanedCgroupPrograms(logger *zap.Logger, cgroupPath string) int {
-	// Safety gate: only run when no other keploy process is alive.
-	// Without this a second keploy instance would detach a live
-	// sibling's cgroup programs, silently breaking its capture.
-	if HasOtherKeployProcesses(os.Getpid()) {
-		logger.Debug("Skipping orphaned cgroup program cleanup — another keploy process is alive",
-			zap.Int("selfPID", os.Getpid()))
+	return detectAndCleanOrphanedCgroupProgramsForInstance(logger, cgroupPath, defaultInstanceLockDir(), "")
+}
+
+func detectAndCleanOrphanedCgroupProgramsForInstance(logger *zap.Logger, cgroupPath, lockDir, selfID string) int {
+	return detectAndCleanOrphanedCgroupProgramsWithOps(logger, cgroupPath, lockDir, selfID, defaultCleanupOps())
+}
+
+func detectAndCleanOrphanedCgroupProgramsWithOps(logger *zap.Logger, cgroupPath, lockDir, selfID string, ops cleanupOps) int {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if hasOtherKeployInstances(lockDir, selfID, ops.hasOtherProc) {
+		logger.Debug("Skipping orphaned cgroup program cleanup — another keploy instance is alive",
+			zap.Int("selfPID", os.Getpid()),
+			zap.String("selfInstanceID", selfID))
 		return 0
 	}
 
-	// Open the cgroup directory once for all per-name detaches. The
-	// inner loop used to open/close the cgroup per program name,
-	// which meant 2 extra syscalls × len(keployBPFProgNames) on every
-	// startup. Reuse the FD for every query/detach in this run.
 	cgroupFD, err := os.Open(cgroupPath)
 	if err != nil {
 		logger.Debug("Cannot open cgroup for orphan detection",
@@ -98,9 +147,30 @@ func DetectAndCleanOrphanedCgroupPrograms(logger *zap.Logger, cgroupPath string)
 	}
 	defer cgroupFD.Close()
 
+	var (
+		linkIDsLoaded bool
+		liveLinkProgs map[uint32]struct{}
+	)
+	loadLiveLinks := func() map[uint32]struct{} {
+		if linkIDsLoaded {
+			return liveLinkProgs
+		}
+		linkIDsLoaded = true
+		if ops.liveCgroupLinkIDs != nil {
+			m, lerr := ops.liveCgroupLinkIDs()
+			if len(m) > 0 {
+				liveLinkProgs = m
+			}
+			if lerr != nil {
+				logger.Debug("Cannot enumerate live cgroup bpf_links during orphan cleanup", zap.Error(lerr))
+			}
+		}
+		return liveLinkProgs
+	}
+
 	cleaned := 0
 	for progName, attachType := range keployBPFProgNames {
-		n := detachOrphanedByName(logger, cgroupFD, cgroupPath, progName, attachType)
+		n := detachOrphanedByNameWithOps(logger, cgroupFD.Fd(), cgroupPath, progName, attachType, ops, loadLiveLinks)
 		cleaned += n
 	}
 
@@ -118,34 +188,17 @@ func orphanNamed(name, progName string) bool {
 	return name == kernelProgName(progName)
 }
 
-// detachOrphanedByName iterates all BPF programs of the given attach type on
-// the cgroup, finds ones matching the expected name, and detaches them.
-// It does not (and cannot, via BPF_PROG_GET_INFO_BY_FD) verify per-program
-// creator PID or liveness; the safety guarantee comes from the caller
-// invoking it only after DetectAndCleanOrphanedCgroupPrograms has confirmed
-// no other keploy process is alive — a name match at that point is
-// definitionally an orphan from a crashed prior run.
-//
-// Caller owns the cgroup FD (opened once in
-// DetectAndCleanOrphanedCgroupPrograms and reused across every program-name
-// iteration); cgroupPath is kept around only for log context.
-func detachOrphanedByName(logger *zap.Logger, cgroupFD *os.File, cgroupPath string, progName string, attachType ebpf.AttachType) int {
-
-	// Query all programs attached to this cgroup for this attach type.
-	// queryAttachedPrograms calls link.QueryPrograms (cilium/ebpf's
-	// typed wrapper around the BPF_PROG_QUERY syscall), so unsupported
-	// attach types or insufficient privileges are reported as errors
-	// from that helper.
-	progIDs, err := queryAttachedPrograms(cgroupFD.Fd(), attachType)
+func detachOrphanedByNameWithOps(
+	logger *zap.Logger,
+	cgroupFD uintptr,
+	cgroupPath string,
+	progName string,
+	attachType ebpf.AttachType,
+	ops cleanupOps,
+	loadLiveLinks func() map[uint32]struct{},
+) int {
+	progs, haveLinkInfo, err := ops.queryPrograms(cgroupFD, attachType)
 	if err != nil {
-		// Surface the query failure at Debug. Not all attach types are
-		// queryable on every kernel (EINVAL on older kernels, EPERM
-		// when the process lacks CAP_SYS_ADMIN/CAP_BPF, etc.), and the
-		// silent-skip path pre-this-PR made "orphan cleanup became a
-		// no-op" invisible — operators would then hit the downstream
-		// attach with "program already attached" and have no starting
-		// point for diagnosis. Debug keeps it out of normal logs while
-		// --debug runs get a trail.
 		logger.Debug("cannot query cgroup-attached BPF programs for orphan cleanup; the helper will become a no-op for this attach type — verify kernel support for BPF_PROG_QUERY on this attach type, ensure CAP_SYS_ADMIN/CAP_BPF are granted, check the cgroup v2 mount, and use bpftool to clear stale attachments manually if the subsequent attach fails with 'program already attached'",
 			zap.String("cgroupPath", cgroupPath),
 			zap.String("attachType", attachType.String()),
@@ -154,42 +207,50 @@ func detachOrphanedByName(logger *zap.Logger, cgroupFD *os.File, cgroupPath stri
 	}
 
 	cleaned := 0
-	for _, progID := range progIDs {
-		prog, err := ebpf.NewProgramFromID(ebpf.ProgramID(progID))
-		if err != nil {
+	for _, ap := range progs {
+		// Programs attached via a kernel bpf_link cannot be detached with
+		// RawDetachProgram (kernel returns ENOENT) and unpinned bpf_links are
+		// auto-destroyed on process exit.
+		if ap.HasLink {
+			logger.Debug("Skipping cgroup BPF program owned by active bpf_link",
+				zap.Uint32("progID", ap.ID),
+				zap.String("attachType", attachType.String()))
 			continue
 		}
 
-		info, err := prog.Info()
+		name, err := ops.lookupProgName(ap.ID)
 		if err != nil {
-			prog.Close()
 			continue
 		}
-
-		name := info.Name
-		prog.Close()
-
 		if !orphanNamed(name, progName) {
 			continue
 		}
 
-		// Name-match is the only check we can do — the BPF program info
-		// exposed via BPF_PROG_GET_INFO_BY_FD does not include a creator
-		// PID. The global no-other-keploy-process gate enforced by the
-		// caller (DetectAndCleanOrphanedCgroupPrograms) is what makes
-		// this safe: if we are the only live keploy and we find a
-		// program with a keploy-reserved name attached to the cgroup,
-		// it is by definition an orphan from a crashed prior run.
+		// Cgroup BPF_PROG_QUERY does not populate link IDs (HaveLinkInfo() is
+		// false for cgroups; link info is populated for tcx-style attachments),
+		// so enumerate live cgroup bpf_links via link.Iterator before calling
+		// RawDetachProgram.
+		if !haveLinkInfo && loadLiveLinks != nil {
+			if live := loadLiveLinks(); live != nil {
+				if _, ownedByLink := live[ap.ID]; ownedByLink {
+					logger.Debug("Skipping cgroup BPF program owned by active bpf_link",
+						zap.String("program", name),
+						zap.Uint32("progID", ap.ID),
+						zap.String("attachType", attachType.String()))
+					continue
+				}
+			}
+		}
 
 		logger.Info("Detaching orphaned BPF program from cgroup",
 			zap.String("program", name),
-			zap.Uint32("progID", progID),
+			zap.Uint32("progID", ap.ID),
 			zap.String("attachType", attachType.String()))
 
-		if err := detachProgramFromCgroup(cgroupFD.Fd(), progID, attachType); err != nil {
+		if err := ops.detachRawProgram(cgroupFD, ap.ID, attachType); err != nil {
 			logger.Debug("Failed to detach orphaned BPF program; re-run with elevated privileges or check cgroup permissions and retry, otherwise remove the stale attachment manually with bpftool",
 				zap.String("program", name),
-				zap.Uint32("progID", progID),
+				zap.Uint32("progID", ap.ID),
 				zap.String("cgroupPath", cgroupPath),
 				zap.String("attachType", attachType.String()),
 				zap.Error(err))
@@ -201,26 +262,69 @@ func detachOrphanedByName(logger *zap.Logger, cgroupFD *os.File, cgroupPath stri
 	return cleaned
 }
 
+func lookupBPFProgramName(progID uint32) (string, error) {
+	prog, err := ebpf.NewProgramFromID(ebpf.ProgramID(progID))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = prog.Close() }()
+
+	info, err := prog.Info()
+	if err != nil {
+		return "", err
+	}
+	return info.Name, nil
+}
+
 // queryAttachedPrograms queries the cgroup for attached BPF programs of the
-// given attach type. Returns a list of program IDs.
-func queryAttachedPrograms(cgroupFD uintptr, attachType ebpf.AttachType) ([]uint32, error) {
+// given attach type, preserving per-program bpf_link ownership information
+// whenever the kernel supplies it.
+func queryAttachedPrograms(cgroupFD uintptr, attachType ebpf.AttachType) ([]attachedCgroupProg, bool, error) {
 	qr, err := link.QueryPrograms(link.QueryOptions{
 		Target: int(cgroupFD),
 		Attach: attachType,
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	result := make([]uint32, 0, len(qr.Programs))
-	for _, p := range qr.Programs {
-		result = append(result, uint32(p.ID))
+	haveLinks := qr.HaveLinkInfo()
+	result := make([]attachedCgroupProg, 0, len(qr.Programs))
+	for i := range qr.Programs {
+		p := &qr.Programs[i]
+		_, hasLink := p.LinkID()
+		result = append(result, attachedCgroupProg{
+			ID:      uint32(p.ID),
+			HasLink: hasLink,
+		})
 	}
-	return result, nil
+	return result, haveLinks, nil
 }
 
-// detachProgramFromCgroup detaches a specific program from a cgroup using
-// BPF_PROG_DETACH. This is the legacy API that works for all program types.
+// queryLiveCgroupLinkProgIDs enumerates all active kernel cgroup bpf_links via
+// cilium/ebpf's link.Iterator and returns the set of program IDs attached
+// through them.
+func queryLiveCgroupLinkProgIDs() (map[uint32]struct{}, error) {
+	progIDs := make(map[uint32]struct{})
+	var it link.Iterator
+	defer it.Close()
+	for it.Next() {
+		info, err := it.Link.Info()
+		if err != nil || info == nil {
+			continue
+		}
+		if info.Cgroup() != nil {
+			progIDs[uint32(info.Program)] = struct{}{}
+		}
+	}
+	if err := it.Err(); err != nil {
+		return progIDs, err
+	}
+	return progIDs, nil
+}
+
+// detachProgramFromCgroup detaches a specific legacy raw-attached program from
+// a cgroup using BPF_PROG_DETACH.
 func detachProgramFromCgroup(cgroupFD uintptr, progID uint32, attachType ebpf.AttachType) error {
 	prog, err := ebpf.NewProgramFromID(ebpf.ProgramID(progID))
 	if err != nil {
@@ -235,15 +339,20 @@ func detachProgramFromCgroup(cgroupFD uintptr, progID uint32, attachType ebpf.At
 	})
 }
 
-// CleanOrphanedBPFPins removes stale pinned BPF objects from /sys/fs/bpf/.
-// Only removes keploy-specific pins. Gated internally on
-// HasOtherKeployProcesses so a live keploy sibling cannot have its pins
-// yanked out from under it — earlier revisions delegated this check to
-// the caller, which was fragile because every new call site had to
-// remember to re-enforce it.
+// CleanOrphanedBPFPins removes stale legacy top-level pinned BPF objects from
+// /sys/fs/bpf/ only when no other live Keploy instance exists (checked via
+// flock on shared bpffs across PID namespaces as well as /proc). Call before
+// acquiring an instance lock.
 func CleanOrphanedBPFPins(logger *zap.Logger) {
-	if HasOtherKeployProcesses(os.Getpid()) {
-		logger.Debug("Skipping BPF pin cleanup because another keploy process is still running")
+	cleanOrphanedBPFPins(logger, defaultInstanceLockDir(), "", HasOtherKeployProcesses)
+}
+
+func cleanOrphanedBPFPins(logger *zap.Logger, lockDir, selfID string, hasOtherProc func(int) bool) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if hasOtherKeployInstances(lockDir, selfID, hasOtherProc) {
+		logger.Debug("Skipping legacy BPF pin cleanup because another keploy instance is still running")
 		return
 	}
 	patterns := []string{
@@ -278,8 +387,8 @@ func CleanOrphanedBPFPins(logger *zap.Logger) {
 				// error that will otherwise hit on the next attach.
 				// Common root causes: bpffs mounted read-only, wrong
 				// keploy user, another live keploy still holding the
-				// pin (the HasOtherKeployProcesses guard above should
-				// prevent that but belt-and-suspenders).
+				// pin (the liveness guard above should prevent that,
+				// but belt-and-suspenders).
 				logger.Error("failed to remove stale BPF pin during orphan cleanup; verify /sys/fs/bpf is writable, this process has CAP_SYS_ADMIN/CAP_BPF, and no other keploy instance has the pin in use, then retry startup",
 					zap.String("path", m),
 					zap.Error(removeErr))

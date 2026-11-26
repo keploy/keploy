@@ -1014,6 +1014,19 @@ func FindDockerCmd(cmd string) CmdType {
 			return DockerCompose
 		}
 	}
+	// Leading shell NAME=value assignments directly before a compose command
+	// (`COMPOSE_COMPATIBILITY=true docker compose up`, `APP_CONTAINER=x docker
+	// compose up`) are applied by `sh -c` to compose and read into keploy's
+	// compose scope. Assignments before `sudo` are deliberately excluded
+	// because `sudo`'s default env_reset strips them before compose starts.
+	if _, rest, err := LeadingEnvAssignments(cmd); err == nil && rest != cmd {
+		restLower := strings.Join(strings.Fields(strings.ToLower(rest)), " ")
+		for _, pattern := range []string{"docker-compose", "docker compose", "podman-compose", "podman compose"} {
+			if strings.HasPrefix(restLower, pattern) {
+				return DockerCompose
+			}
+		}
+	}
 	// Check for Docker start command patterns
 	for _, pattern := range dockerStartPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
@@ -1027,6 +1040,318 @@ func FindDockerCmd(cmd string) CmdType {
 		}
 	}
 	return Native
+}
+
+// ErrUnsupportedInlineEnvExpansion is returned by LeadingEnvAssignments when
+// an inline assignment value contains command substitution (`$(...)`,
+// backticks) or shell parameter expansion keploy cannot evaluate statically.
+var ErrUnsupportedInlineEnvExpansion = errors.New("inline environment assignment in the compose command uses command substitution or shell parameter expansion that keploy cannot evaluate; export the variable or put it in an env file")
+
+// LeadingEnvAssignments reads every leading shell NAME=value assignment from
+// cmd before the first non-assignment word (the program), handling single
+// quotes, double quotes (with sh's \" \\ \$ \` escapes), unquoted backslash
+// escapes, unquoted tilde expansion (~ at start of value or after :), and
+// $VAR / ${VAR} / ${VAR:-default} / ${VAR-default} expansion against earlier
+// inline assignments overlaid on keploy's environment. It returns the parsed
+// assignments (nil when there are none), the remainder of cmd starting at the
+// first non-assignment word (or cmd unchanged when no leading assignments
+// apply), and ErrUnsupportedInlineEnvExpansion when an assignment uses command
+// substitution, unquoted ANSI-C/locale quoting ($'...'/$"..."), ~user tilde
+// expansion, quotes/backslashes/unquoted tildes inside a ${...} default, or any
+// other shell parameter expansion keploy cannot evaluate statically. If the leading assignments end
+// at a command separator (;, &, |, \n) with no program word, they belong to a
+// separate shell command and are not passed to the following command's
+// environment, so (nil, cmd, nil) is returned.
+func LeadingEnvAssignments(cmd string) (map[string]string, string, error) {
+	var env map[string]string
+	var expandErr error
+	i, n := 0, len(cmd)
+	for i < n {
+		for i < n && (cmd[i] == ' ' || cmd[i] == '\t' || cmd[i] == '\r') {
+			i++
+		}
+		if i >= n {
+			break
+		}
+		if cmd[i] == ';' || cmd[i] == '&' || cmd[i] == '|' || cmd[i] == '\n' {
+			return nil, cmd, nil
+		}
+		start := i
+		for i < n && isShellVarNameByte(cmd[i], i == start) {
+			i++
+		}
+		if i == start || i >= n || cmd[i] != '=' {
+			if expandErr != nil {
+				return nil, cmd[start:], expandErr
+			}
+			if env == nil {
+				return nil, cmd, nil
+			}
+			return env, cmd[start:], nil
+		}
+		name := cmd[start:i]
+		i++ // skip '='
+		var val strings.Builder
+		var quote byte
+		canExpandTilde := true
+		for i < n {
+			c := cmd[i]
+			switch quote {
+			case 0:
+				if c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+					c == ';' || c == '&' || c == '|' || c == '(' || c == ')' || c == '<' || c == '>' {
+					goto endWord
+				}
+				if c == '\'' || c == '"' {
+					quote = c
+					canExpandTilde = false
+					i++
+					continue
+				}
+				if c == '\\' && i+1 < n {
+					if cmd[i+1] == '\n' {
+						i += 2
+						continue
+					}
+					val.WriteByte(cmd[i+1])
+					canExpandTilde = false
+					i += 2
+					continue
+				}
+				if c == '~' && canExpandTilde {
+					canExpandTilde = false
+					if i+1 >= n || isTildeBoundary(cmd[i+1]) {
+						if home, ok := lookupInlineEnv("HOME", env); ok {
+							val.WriteString(home)
+						} else {
+							val.WriteByte('~')
+						}
+						i++
+						continue
+					}
+					expandErr = ErrUnsupportedInlineEnvExpansion
+					i++
+					continue
+				}
+				if c == '`' {
+					expandErr = ErrUnsupportedInlineEnvExpansion
+					i = skipBacktick(cmd, i)
+					canExpandTilde = false
+					continue
+				}
+				if c == '$' {
+					expanded, nextIdx, err := expandShellVar(cmd, i, env, false)
+					if err != nil {
+						expandErr = err
+					} else {
+						val.WriteString(expanded)
+					}
+					canExpandTilde = false
+					i = nextIdx
+					continue
+				}
+				val.WriteByte(c)
+				canExpandTilde = (c == ':')
+				i++
+			case '\'':
+				if c == '\'' {
+					quote = 0
+				} else {
+					val.WriteByte(c)
+				}
+				i++
+			case '"':
+				if c == '"' {
+					quote = 0
+					i++
+					continue
+				}
+				if c == '\\' && i+1 < n {
+					next := cmd[i+1]
+					if next == '\n' {
+						i += 2
+						continue
+					}
+					if next == '"' || next == '\\' || next == '$' || next == '`' {
+						val.WriteByte(next)
+						i += 2
+						continue
+					}
+				}
+				if c == '`' {
+					expandErr = ErrUnsupportedInlineEnvExpansion
+					i = skipBacktick(cmd, i)
+					continue
+				}
+				if c == '$' {
+					expanded, nextIdx, err := expandShellVar(cmd, i, env, true)
+					if err != nil {
+						expandErr = err
+					} else {
+						val.WriteString(expanded)
+					}
+					i = nextIdx
+					continue
+				}
+				val.WriteByte(c)
+				i++
+			}
+		}
+	endWord:
+		if quote != 0 {
+			if expandErr != nil {
+				return nil, cmd, expandErr
+			}
+			return nil, cmd, nil
+		}
+		if env == nil {
+			env = make(map[string]string)
+		}
+		env[name] = val.String()
+	}
+	if expandErr != nil {
+		return nil, "", expandErr
+	}
+	if env == nil {
+		return nil, cmd, nil
+	}
+	return env, "", nil
+}
+
+func skipBacktick(cmd string, i int) int {
+	for j := i + 1; j < len(cmd); j++ {
+		if cmd[j] == '\\' && j+1 < len(cmd) {
+			j++
+			continue
+		}
+		if cmd[j] == '`' {
+			return j + 1
+		}
+	}
+	return len(cmd)
+}
+
+func skipBalancedGroup(cmd string, i int, open, close byte) int {
+	depth := 0
+	for j := i; j < len(cmd); j++ {
+		if cmd[j] == '\\' && j+1 < len(cmd) {
+			j++
+			continue
+		}
+		switch cmd[j] {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return j + 1
+			}
+		}
+	}
+	return len(cmd)
+}
+
+func isTildeBoundary(c byte) bool {
+	return c == '/' || c == ':' || c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+		c == ';' || c == '&' || c == '|' || c == '(' || c == ')' || c == '<' || c == '>'
+}
+
+func lookupInlineEnv(name string, inline map[string]string) (string, bool) {
+	if inline != nil {
+		if v, ok := inline[name]; ok {
+			return v, true
+		}
+	}
+	return os.LookupEnv(name)
+}
+
+// expandShellVar expands a `$` expression starting at cmd[i] against inline
+// assignments parsed so far overlaid on keploy's process environment: $VAR,
+// ${VAR}, ${VAR:-default}, and ${VAR-default}. Command substitution ($(...)),
+// deprecated bash arithmetic ($[...]), unquoted ANSI-C/locale quoting
+// ($'...'/$"..."), defaults containing quotes, backslashes, nested expansions,
+// or unquoted tildes, and other parameter expansions return
+// ErrUnsupportedInlineEnvExpansion.
+func expandShellVar(cmd string, i int, inline map[string]string, inDoubleQuote bool) (string, int, error) {
+	n := len(cmd)
+	if i+1 >= n {
+		return "$", i + 1, nil
+	}
+	next := cmd[i+1]
+	if next == '(' {
+		return "", skipBalancedGroup(cmd, i+1, '(', ')'), ErrUnsupportedInlineEnvExpansion
+	}
+	if next == '[' {
+		return "", skipBalancedGroup(cmd, i+1, '[', ']'), ErrUnsupportedInlineEnvExpansion
+	}
+	if !inDoubleQuote && (next == '\'' || next == '"') {
+		return "", i + 1, ErrUnsupportedInlineEnvExpansion
+	}
+	if next == '{' {
+		closeIdx := strings.IndexByte(cmd[i+2:], '}')
+		if closeIdx < 0 {
+			return "", n, ErrUnsupportedInlineEnvExpansion
+		}
+		expr := cmd[i+2 : i+2+closeIdx]
+		j := 0
+		for j < len(expr) && isShellVarNameByte(expr[j], j == 0) {
+			j++
+		}
+		if j == 0 {
+			return "", i + 2 + closeIdx + 1, ErrUnsupportedInlineEnvExpansion
+		}
+		varName := expr[:j]
+		tail := expr[j:]
+		end := i + 2 + closeIdx + 1
+		badDefaultChars := "$`\"'\\"
+		if !inDoubleQuote {
+			badDefaultChars = "$`\"'\\~"
+		}
+		switch {
+		case tail == "":
+			v, _ := lookupInlineEnv(varName, inline)
+			return v, end, nil
+		case strings.HasPrefix(tail, ":-"):
+			dflt := tail[2:]
+			if strings.ContainsAny(dflt, badDefaultChars) {
+				return "", end, ErrUnsupportedInlineEnvExpansion
+			}
+			if v, ok := lookupInlineEnv(varName, inline); ok && v != "" {
+				return v, end, nil
+			}
+			return dflt, end, nil
+		case strings.HasPrefix(tail, "-"):
+			dflt := tail[1:]
+			if strings.ContainsAny(dflt, badDefaultChars) {
+				return "", end, ErrUnsupportedInlineEnvExpansion
+			}
+			if v, ok := lookupInlineEnv(varName, inline); ok {
+				return v, end, nil
+			}
+			return dflt, end, nil
+		default:
+			return "", end, ErrUnsupportedInlineEnvExpansion
+		}
+	}
+	if isShellVarNameByte(next, true) {
+		j := i + 1
+		for j < n && isShellVarNameByte(cmd[j], j == i+1) {
+			j++
+		}
+		v, _ := lookupInlineEnv(cmd[i+1:j], inline)
+		return v, j, nil
+	}
+	if strings.ContainsRune("?$!@*#-0123456789", rune(next)) {
+		return "", i + 2, ErrUnsupportedInlineEnvExpansion
+	}
+	return "$", i + 1, nil
+}
+
+func isShellVarNameByte(c byte, first bool) bool {
+	if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' {
+		return true
+	}
+	return !first && c >= '0' && c <= '9'
 }
 
 // RunSubcommandEnd is the offset in cmd just past the run subcommand of a
@@ -2428,6 +2753,44 @@ func EnsureRmBeforeName(cmd string) string {
 		return cmd[:nameStart] + "--rm " + cmd[nameStart:]
 	}
 	return cmd
+}
+
+// DockerRunHasRm reports whether cmd is a `docker run` (or `docker container
+// run`) command whose run options enable auto-removal (--rm, --rm=true,
+// --rm=1). Options after the image name or `--` belong to the container
+// command and are ignored; when `--rm` appears more than once, the last value
+// wins, matching Docker CLI's flag parser.
+func DockerRunHasRm(cmd string) bool {
+	words, ok := scanShellWords(cmd)
+	if !ok {
+		return false
+	}
+	optStart := dockerRunOptionsStart(words)
+	if optStart < 0 {
+		return false
+	}
+	rm := false
+	for i := optStart; i < len(words); i++ {
+		w := words[i].value
+		if w == "--" || w == "-" || !strings.HasPrefix(w, "-") {
+			break
+		}
+		if w == "--rm" {
+			rm = true
+			continue
+		}
+		if val, ok := strings.CutPrefix(w, "--rm="); ok {
+			b, err := strconv.ParseBool(val)
+			if err == nil {
+				rm = b
+			}
+			continue
+		}
+		if dockerRunFlagTakesNext(w) {
+			i++
+		}
+	}
+	return rm
 }
 
 // dockerLongFlagValue returns the value of the first occurrence of any of

@@ -23,6 +23,10 @@ type TCP struct {
 	// SndCC is what its send buffer holds: written by the process and not
 	// yet acknowledged by its peer, sent or not. It does not count a FIN.
 	SndCC uint32
+	// DualStack is an IPv6 socket that takes IPv4 too (no IPV6_V6ONLY):
+	// both of its family flags are set, and Local and Remote are read as
+	// IPv4, so an unspecified [::] shows as 0.0.0.0.
+	DualStack bool
 }
 
 // The proc_info system call and the layouts it fills, from <sys/proc_info.h>
@@ -126,10 +130,11 @@ func parseTCP(b []byte) (TCP, bool) {
 		return TCP{}, false
 	}
 	return TCP{
-		Local:  netip.AddrPortFrom(la, binary.BigEndian.Uint16(b[offInsiLport:])),
-		Remote: netip.AddrPortFrom(ra, binary.BigEndian.Uint16(b[offInsiFport:])),
-		State:  uint8(binary.LittleEndian.Uint32(b[offTCPState:])),
-		SndCC:  binary.LittleEndian.Uint32(b[offSndCC:]),
+		Local:     netip.AddrPortFrom(la, binary.BigEndian.Uint16(b[offInsiLport:])),
+		Remote:    netip.AddrPortFrom(ra, binary.BigEndian.Uint16(b[offInsiFport:])),
+		State:     uint8(binary.LittleEndian.Uint32(b[offTCPState:])),
+		SndCC:     binary.LittleEndian.Uint32(b[offSndCC:]),
+		DualStack: b[offInsiVflag]&(iniIPv4|iniIPv6) == iniIPv4|iniIPv6,
 	}, true
 }
 

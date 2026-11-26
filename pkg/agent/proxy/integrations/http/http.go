@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,6 +148,9 @@ type FinalHTTP struct {
 	// is in fact unfinished: its body cut short of its framing, or a
 	// close-delimited body the upstream reset or the client gave up on.
 	Fault *models.Fault
+	// TLS records that the client connection unwrapped to a *tls.Conn even when
+	// OutgoingOptions.DstCfg was omitted.
+	TLS bool
 	// recordOne is the recordOne mark buildHTTPMock took for the mock it
 	// built (ptRecorder.take), or nil: given back if the recording loses the
 	// mock as it is handed over (emitV2).
@@ -264,6 +269,24 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 	return nil
 }
 
+// isHTTPExchangeTLS reports whether an HTTP/1.1 exchange ran over TLS. Shared
+// by recording (buildHTTPMock, parseFinalHTTP) and replay (decodeHTTP,
+// tryReadThrough) so origin-form recorded HTTPS/1.1 mocks and live HTTPS replay
+// requests never drift on meta["tls"] = "true". Supports MITM (DstCfg.TLSCfg,
+// *tls.Conn) and observe-only / proxyless capture (OutgoingOptions.TLS).
+func isHTTPExchangeTLS(dstCfg *models.ConditionalDstCfg, clientConn net.Conn, explicitTLS bool, reqURL *url.URL) bool {
+	if explicitTLS {
+		return true
+	}
+	if dstCfg != nil && dstCfg.TLSCfg != nil {
+		return true
+	}
+	if util.IsTLSConn(clientConn) {
+		return true
+	}
+	return reqURL != nil && strings.EqualFold(reqURL.Scheme, "https")
+}
+
 // ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
 func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions, onMockRecorded integrations.PostRecordHook) error {
 	var req *http.Request
@@ -354,6 +377,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		"type":      models.HTTPClient,
 		"operation": req.Method,
 		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
+	}
+	if isHTTPExchangeTLS(opts.DstCfg, nil, opts.TLS || mock.TLS, req.URL) {
+		meta["tls"] = "true"
 	}
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {

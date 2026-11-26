@@ -515,9 +515,9 @@ func TestDecodeHTTPServesARequestReadWithItsEOF(t *testing.T) {
 		{keepAlivePath: matched("a call read with a connection reset"), answers: 2,
 			steps: []readStep{{data: []byte(eofPost), err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}}}},
 		// A request cut by the EOF is no request: the one before it is
-		// answered, and the cut one is logged, without another read.
-		{keepAlivePath: matched("part of a call read with the EOF"), steps: eof(eofPost + eofPost[:10]), answers: 2,
-			errLog: "failed to read the request message from the client: EOF"},
+		// answered, and the client EOF is logged at Debug (not Error),
+		// without another read.
+		{keepAlivePath: matched("part of a call read with the EOF"), steps: eof(eofPost + eofPost[:10]), answers: 2},
 	}
 	for _, p := range keepAlivePaths(depAddr, depPort) {
 		rows = append(rows, row{keepAlivePath: p, steps: eof(p.call), answers: 2})

@@ -115,7 +115,7 @@ func callTreeAs(t *testing.T, p *Proxy, dest *agent.NetworkAddress) (bool, strin
 	}
 	done := make(chan result, 1)
 	go func() {
-		served, outside, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		served, outside, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1", nil, treeListener{})
 		_ = srv.Close()
 		done <- result{served, outside, err}
 	}()
@@ -269,7 +269,7 @@ func sendTreeAs(ctx context.Context, t *testing.T, p *Proxy, dest *agent.Network
 	}
 	done := make(chan result, 1)
 	go func() {
-		served, _, err := p.serveTreeListener(ctx, srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "7")
+		served, _, err := p.serveTreeListener(ctx, srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "7", nil, treeListener{})
 		_ = srv.Close()
 		done <- result{served, err}
 	}()
@@ -688,13 +688,13 @@ func TestUnderTheSwitchACallNothingAnswersAndNoRecordingHasIsNotListed(t *testin
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, outside, err := p.serveTreeListener(context.Background(), srv, dest, net.JoinHostPort(own.String(), fmt.Sprint(port)), "1")
+	served, outside, err := p.serveTreeListener(context.Background(), srv, dest, net.JoinHostPort(own.String(), fmt.Sprint(port)), "1", nil, treeListener{})
 	if served || err != nil || outside != nil {
 		t.Fatalf("want the mock path and no row, got served=%v outside=%+v err=%v", served, outside, err)
 	}
 	// The same call, recorded: mocked, so listed.
 	recorded.add([]*models.Mock{recordedPlainDep(port)})
-	served, outside, err = p.serveTreeListener(context.Background(), srv, dest, net.JoinHostPort(own.String(), fmt.Sprint(port)), "1")
+	served, outside, err = p.serveTreeListener(context.Background(), srv, dest, net.JoinHostPort(own.String(), fmt.Sprint(port)), "1", nil, treeListener{})
 	if served || err != nil || outside == nil || outside.Addr != net.JoinHostPort(own.String(), fmt.Sprint(port)) {
 		t.Fatalf("want the mock path and the row, got served=%v outside=%+v err=%v", served, outside, err)
 	}

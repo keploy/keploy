@@ -96,3 +96,23 @@ func TestTheStagingCutoffIsTheEarliestTestOfAnyKind(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordedFirstTestStartHelper(t *testing.T) {
+	for name, tc := range map[string]struct {
+		db   TestDB
+		want time.Time
+	}{
+		"nil testDB":             {nil, time.Time{}},
+		"no RecordedStartReader": {&prTestDB{}, time.Time{}},
+		"zero recorded start":    {&recordedStartDB{}, time.Time{}},
+		"recorded start error":   {&recordedStartDB{at: recordedT0, err: errors.New("boom")}, time.Time{}},
+		"valid recorded start":   {&recordedStartDB{at: recordedT0}, recordedT0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &Replayer{logger: zap.NewNop(), testDB: tc.db}
+			if got := r.recordedFirstTestStart(context.Background(), "test-set-0"); !got.Equal(tc.want) {
+				t.Fatalf("recordedFirstTestStart = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

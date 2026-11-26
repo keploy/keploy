@@ -203,7 +203,7 @@ func passedWithAVerdict(r models.TestResult) bool {
 func leftRecordedMockUnconsumed(expected []models.MockEntry, consumed []models.MockState, kinds map[string]models.Kind, excluded map[string]bool) bool {
 	got := make(map[string]bool, len(consumed))
 	for _, m := range consumed {
-		if !consumedOutsideAssertion(m) {
+		if !excluded[m.Name] && !consumedOutsideAssertion(m) {
 			got[m.Name] = true
 		}
 	}

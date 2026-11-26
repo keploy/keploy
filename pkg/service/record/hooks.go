@@ -5,6 +5,7 @@ import (
 	"context"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 )
 
 // TestCaseContext is passed to test-case hooks.
@@ -54,6 +55,15 @@ type RecordingCompleteContext struct {
 
 // RecordHooks allows enterprise (or any consumer) to inject behaviour into the
 // OSS recording pipeline — the same pattern as TestHooks for the replay service.
+//
+// The mock hooks run on the recorder's mock loop, one at a time, each mock's
+// in the order the mocks came: BeforeMockInsert before the mock is named and
+// written, AfterMockInsert once it is written. Across mocks the two may
+// interleave: the loop takes the mocks waiting for it ahead of their writes
+// (mock_lookahead.go), so a mock's BeforeMockInsert may run before the
+// AfterMockInsert of up to twice as many mocks before it as the loop has
+// encoders. A BeforeMockInsert changes only the mock it is given, and decides
+// from nothing an AfterMockInsert of an earlier mock sets.
 type RecordHooks interface {
 	BeforeTestCaseInsert(ctx context.Context, info *TestCaseContext) error
 	AfterTestCaseInsert(ctx context.Context, info *TestCaseContext) error
@@ -113,6 +123,19 @@ func (d *InsertedMockDoc) Insert(db interface {
 }, mock *models.Mock, testSetID string) (doc []byte, format string, err error) {
 	d.mock = mock
 	err = db.InsertMock(d.ctx, mock, testSetID)
+	doc, format, handed := d.doc, d.format, d.handed
+	d.mock, d.doc, d.format, d.handed = nil, nil, "", 0
+	if err != nil || handed != 1 {
+		return nil, "", err
+	}
+	return doc, format, nil
+}
+
+// Write is Insert for a mock db prepared (mockPreparer.PrepareMock): it writes
+// it, and returns what Insert returns.
+func (d *InsertedMockDoc) Write(db mockPreparer, p *mockdb.PreparedMock) (doc []byte, format string, err error) {
+	d.mock = p.Mock()
+	err = db.WritePrepared(d.ctx, p)
 	doc, format, handed := d.doc, d.format, d.handed
 	d.mock, d.doc, d.format, d.handed = nil, nil, "", 0
 	if err != nil || handed != 1 {

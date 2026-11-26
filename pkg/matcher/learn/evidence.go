@@ -90,7 +90,10 @@ type evPlace struct {
 	outsideTest, lateCall string
 	scope                 string
 	// leaf: an earlier exchange's leaf, which names its place (FromAt).
-	leaf  Leaf
+	leaf Leaf
+	// at: the place's recorded instant; for a client test's incoming request
+	// (Earlier.incoming), its recorded arrival time (arrivedRec) rather than
+	// the zero time.
 	at    time.Time
 	state placeState
 	why   string
@@ -280,13 +283,22 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 		// payload: the zero time).
 		sentBefore := e.alwaysEarlier() || !e.noTime && e.At.Before(in.At)
 		answeredBefore := e.alwaysEarlier() || sentBefore && answeredBy(e.At, e.Payload.answered, in.At)
+		// A client test's incoming HTTP request (e.incoming) leaves e.At zero
+		// (GivenRequest) and records its arrival in e.arrivedRec. Place its
+		// leaves at e.arrivedRec so earliest(src) orders it after any app call
+		// recorded earlier (e.g. a write that minted an id the client later
+		// echoes), while still ordering it before calls made after it arrived.
+		at := e.At
+		if e.incoming {
+			at = e.arrivedRec
+		}
 		for _, s := range e.Seen {
 			path := cmp.Or(s.Leaf.Path, s.Place)
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
 				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, offset: s.Offset, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
-				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
+				at: at, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
 				rBefore:  s.Side != Response && sentBefore || s.Side == Response && answeredBefore,
 			})

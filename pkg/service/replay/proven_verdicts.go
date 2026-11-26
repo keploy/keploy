@@ -24,12 +24,26 @@ func (r *Replayer) assertTestMocks() bool {
 	return r.config.Test.AssertDependencies || provenswitch.On()
 }
 
+// mocksCanFailTests reports whether mock/dependency differences themselves can
+// fail a test in this run (strict / proven / assert-dependencies /
+// schema-noise-strict mode). In default mode the verdict is the app's response
+// diff, never an outgoing payload diff.
+func (r *Replayer) mocksCanFailTests() bool {
+	return provenswitch.On() || r.config.Test.AssertDependencies || r.config.Test.NoiseStrict()
+}
+
 // excludedFromTestMockAssertion reports whether a loaded mock is left out of
 // the per-test consumed-vs-expected assertion by name: a reusable-tier mock
 // today, and only a protocol-phase mock under the proven switch. An answer
 // the client never read (models.Mock.IsUndelivered) is left out under both:
-// no replay serves it, so no test makes the call it recorded.
-func excludedFromTestMockAssertion(m *models.Mock) bool {
+// no replay serves it, so no test makes the call it recorded. A recorded HTTP
+// mock now answered by an egress passthrough rule (models.Mock.AnsweredByPassThrough)
+// is left out under both too: decodeHTTP short-circuits matching calls without
+// consuming the mock, while respecting any user {id, mode:"off"} override.
+func excludedFromTestMockAssertion(m *models.Mock, passThroughPorts, passThroughHosts []models.PassThroughRule) bool {
+	if m.AnsweredByPassThrough(passThroughPorts, passThroughHosts) {
+		return true
+	}
 	if provenswitch.On() {
 		return m.OutsideTestScopes()
 	}
@@ -49,7 +63,7 @@ func unconsumedTestMocks(armed bool, expected []models.MockEntry, consumed []mod
 	eligible := eligibleExpectedEntries(expected, kinds, excluded)
 	got := make(map[string]bool, len(consumed))
 	for _, m := range consumed {
-		if !consumedOutsideAssertion(m) {
+		if !excluded[m.Name] && !consumedOutsideAssertion(m) {
 			got[m.Name] = true
 		}
 	}
@@ -600,11 +614,16 @@ func attachStreamDepResults(result *models.TestResult, status models.TestStatus,
 	attachDepResults(result, status, buildDepResults(expected, consumed, valid, excluded, kinds, lookup), true)
 }
 
-// noteConsumers records that test consumed each of consumed.
+// noteConsumers records that test consumed each of consumed: each mock its
+// drain credits to another test's call (MockState.CreditTo) that test.
 func noteConsumers(consumers map[string][]string, test string, consumed []models.MockState) {
 	for _, m := range consumed {
-		if !slices.Contains(consumers[m.Name], test) {
-			consumers[m.Name] = append(consumers[m.Name], test)
+		by := test
+		if m.CreditTo != "" {
+			by = m.CreditTo
+		}
+		if !slices.Contains(consumers[m.Name], by) {
+			consumers[m.Name] = append(consumers[m.Name], by)
 		}
 	}
 }

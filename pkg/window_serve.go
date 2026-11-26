@@ -15,13 +15,15 @@ const (
 	// NotServed: the window leaves the mock out. It is another window's, or
 	// one no window serves (its response stamped before its request, a
 	// window-bound mock outside its own window, a stated per-test mock
-	// outside its window in either mode).
+	// outside its window in either mode, unless the edge rule gives it the
+	// window).
 	NotServed WindowServe = iota
 	// ServedPerTest: the window's per-test pool, its own test's mocks. Placed
 	// in the window (models.PlaceOf, ends included), in flight when it began
 	// (models.InFlightEligible, models.SentInGapAnsweredBy), with no recorded
-	// time (which every window's pool gets), or a window-bound mock recorded
-	// in it.
+	// time (which every window's pool gets), a window-bound mock recorded in
+	// it, or, under the strict window, one the edge rule gives it
+	// (ServeWindow.Windows, models.WindowSchedule.EdgeOwnedBy).
 	ServedPerTest
 	// ServedReleased: the window is the first that reaches the mock by a
 	// release rule of the recorded windows (ServeWindow.Recorded). A
@@ -65,6 +67,14 @@ type ServeWindow struct {
 	// as in the window filter's own call; the carry-over tier and the push
 	// hub serve those mocks apart from it.
 	Recorded *models.WindowSchedule
+	// Windows is the set's recorded test windows, by which the edge rule
+	// (models.WindowSchedule.EdgeOwner) serves a plain per-test mock placed
+	// just outside every window, nearest this window's edge, as this
+	// window's own, under the strict window. The agent's window filter, the
+	// mock manager's staging and the replay's no-answer hold set it alike.
+	// Nil: the rule is not asked, as under exact serving, where the test's
+	// mapping says what it owns.
+	Windows *models.WindowSchedule
 	// Lookahead says the agent's per-test load runs the carry-over
 	// lookahead for the window (the agent's perTestLoadMode: the strict
 	// window mode, or a load by the test's mapping): it hands the mock
@@ -107,7 +117,7 @@ func ServeInWindow(m *models.Mock, session bool, w ServeWindow) WindowServe {
 		// The agent filters its session pool with no call in flight, in the
 		// strict-window off mode, and hands both slices to the session pool
 		// (FilterConfigMocksTierAware).
-		w.InFlightFrom, w.StrictWindow, w.Recorded = time.Time{}, false, nil
+		w.InFlightFrom, w.StrictWindow, w.Recorded, w.Windows = time.Time{}, false, nil, nil
 		if serveRuleOf(nil, m, w).serve() == NotServed {
 			return NotServed
 		}
@@ -154,6 +164,7 @@ const (
 	ruleStartup
 	ruleInFlight
 	ruleReleased
+	ruleEdge
 	ruleOutOfWindow
 	ruleLaxPromoted
 )
@@ -161,7 +172,7 @@ const (
 // serve is the pool a rule hands its mock to.
 func (r serveRule) serve() WindowServe {
 	switch r {
-	case ruleWindowBoundInWindow, ruleUntimed, ruleInWindow, ruleInFlight:
+	case ruleWindowBoundInWindow, ruleUntimed, ruleInWindow, ruleInFlight, ruleEdge:
 		return ServedPerTest
 	case ruleWindowBoundStartup, ruleStartup:
 		return ServedStartup
@@ -186,6 +197,9 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 			return ruleWindowBoundStartup
 		}
 		return ruleWindowBoundDropped
+	}
+	if p.IsReadThrough() {
+		return ruleStartup
 	}
 	if untimedMock(p) {
 		return ruleUntimed
@@ -235,10 +249,24 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 	if w.Recorded != nil && (carry || w.Lookahead) && models.IsCarryOver(p) && w.Recorded.CarryOverReachedFirstAt(req, w.Start) {
 		return ruleReleased
 	}
+	// The edge rule, after every rule that places a mock: under the strict
+	// window, as the in-flight rule is, a plain per-test timed mock placed just
+	// outside every window and nearest this window's edge, which no other rule
+	// places, stated lifetime or not: one unstated is the window's, never
+	// promoted to the session pool.
+	if w.enabled(w.StrictWindow) && edgeOwnedBy(p, w) {
+		return ruleEdge
+	}
 	if carry {
 		return ruleOutOfWindow
 	}
 	return ruleLaxPromoted
+}
+
+// edgeOwnedBy reports whether the edge rule gives p to w
+// (models.WindowSchedule.EdgeOwnedBy over w.Windows; false when nil).
+func edgeOwnedBy(p *models.Mock, w ServeWindow) bool {
+	return w.Windows.EdgeOwnedBy(p, w.Start, w.End)
 }
 
 // enabled is strict, one of w's strict flags, as the agent applies it: as it

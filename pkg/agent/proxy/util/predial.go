@@ -87,6 +87,37 @@ func (p *Predialed) Look(addr string) net.Conn {
 	return p.takeConn("tcp", addr, false)
 }
 
+// Take is take for a dial made outside this package that dials addr itself
+// when it returns nil: the live handler's dial of the app (PredialedFrom).
+// Unlike take, it hands over the pre-dialled connection even if the app has
+// already closed it: that connection is the one the app accepted for the
+// caller while the handshake was held, so handing it over passes the app's
+// close through instead of opening a second connection the caller never made.
+func (p *Predialed) Take(addr string) net.Conn {
+	return p.takeConn("tcp", addr, false)
+}
+
+// predialedKey is the context key PredialedFrom reads.
+type predialedKey struct{}
+
+// WithPredialed is ctx carrying p, the connection the handshake hold dialed
+// for the connection ctx is handed with: the live handler, which dials the
+// app for itself, takes it (PredialedFrom) rather than open a second
+// connection the application never made.
+func WithPredialed(ctx context.Context, p *Predialed) context.Context {
+	if p == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, predialedKey{}, p)
+}
+
+// PredialedFrom is the pre-dialled connection ctx carries (WithPredialed);
+// nil, which takes nothing, when it carries none.
+func PredialedFrom(ctx context.Context) *Predialed {
+	p, _ := ctx.Value(predialedKey{}).(*Predialed)
+	return p
+}
+
 // take hands the connection to the first dial of its address, once.
 func (p *Predialed) take(network, addr string) net.Conn {
 	return p.takeConn(network, addr, true)

@@ -74,10 +74,13 @@ func TestMatch_JSONComparison(t *testing.T) {
   1: {"type"}}
   1: {      2: {2: 0.0}   # 0x0i64
   1: {"candidateCnt"}}}}`,
-			noiseConfig:    map[string]map[string][]string{},
-			ignoreOrdering: false,
+			noiseConfig: map[string]map[string][]string{},
+			// The swap is of repeated field 9.3.1's two elements, so it matches
+			// only because order is ignored (the default). With ignoreOrdering
+			// off it is a difference: TestMatch_ProtoscopeHonoursIgnoreOrdering.
+			ignoreOrdering: true,
 			expectedMatch:  true,
-			description:    "Should match protoscope text where field order (and thus indentation) differs but content is identical",
+			description:    "Should match protoscope text whose repeated elements (and thus indentation) differ in order when ordering is ignored",
 		},
 	}
 

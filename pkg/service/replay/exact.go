@@ -683,7 +683,7 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 	seen := map[string]bool{}
 	for _, list := range stored {
 		for _, mk := range list {
-			if mk == nil || mk.Name == "" || seen[mk.Name] {
+			if mk == nil || mk.Name == "" || seen[mk.Name] || mk.IsReadThrough() {
 				continue
 			}
 			seen[mk.Name] = true
@@ -753,16 +753,21 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 // stored data-plane mocks it lists that no test case's mapping lists, in its
 // order; it is not the pool's.
 func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEntry, stored ...[]*models.Mock) *exactPlan {
+	return newExactPlanWithExcluded(mappings, worker, nil, stored...)
+}
+
+func newExactPlanWithExcluded(mappings map[string][]models.MockEntry, worker []models.MockEntry, excluded map[string]bool, stored ...[]*models.Mock) *exactPlan {
 	p := &exactPlan{owned: make(map[string][]string, len(mappings))}
 	// held: the stored mocks by name, true for a test mock
 	// (models.Mock.OutsideTestScopes: data-plane, and no answer the client
-	// never read, so whatever mapping lists one, neither its test nor the
-	// worker scope requires it).
+	// never read, nor a recorded HTTP mock answered by egress passthrough,
+	// so whatever mapping lists one, neither its test nor the worker scope
+	// requires it).
 	held := map[string]bool{}
 	for _, list := range stored {
 		for _, mk := range list {
 			if mk != nil && mk.Name != "" {
-				held[mk.Name] = !mk.OutsideTestScopes()
+				held[mk.Name] = !mk.OutsideTestScopes() && !excluded[mk.Name]
 				if models.IsAnswerPlaced(mk) {
 					if p.answerPlaced == nil {
 						p.answerPlaced = map[string]bool{}

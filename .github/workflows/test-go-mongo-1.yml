@@ -2,6 +2,10 @@ name: Test GinApp 1
 on:
   workflow_call:
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   test-go-mongo:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.

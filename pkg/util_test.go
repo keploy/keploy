@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"mime"
@@ -26,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/net/http2"
 )
 
 func TestNextIDIgnoresOtherPrefixes(t *testing.T) {
@@ -2956,4 +2958,80 @@ func TestAReplacementWithItsSchemeKeepsItsPort(t *testing.T) {
 	got, err := ResolveTestTarget("http://localhost:8080/x", map[string]string{"http://localhost:8080": "http://127.0.0.1:9090"}, nil, "", 8080, 0, true, zap.NewNop())
 	require.NoError(t, err)
 	require.Equal(t, "http://127.0.0.1:9090/x", got)
+}
+
+// A request recorded over HTTP/2 is replayed over HTTP/2: an app that serves
+// only HTTP/2 (prior knowledge, h2c: a mesh sidecar on an "http2" port, a
+// Node http2 server) refuses the HTTP/1.1 it was sent before. A request
+// recorded over HTTP/1.1 is still sent over HTTP/1.1.
+func TestAnHTTP2RecordedRequestIsReplayedOverHTTP2(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	h2 := &http2.Server{}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"proto":"` + r.Proto + `"}`))
+	})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go h2.ServeConn(c, &http2.ServeConnOpts{Handler: handler})
+		}
+	}()
+	send := func(protoMajor int) (*http.Response, error) {
+		test := &models.TestCase{
+			Name: "lookup-self",
+			HTTPReq: models.HTTPReq{
+				Method:     "GET",
+				URL:        "http://" + ln.Addr().String() + "/v1/auth/token/lookup-self",
+				ProtoMajor: protoMajor,
+				Header:     map[string]string{},
+			},
+		}
+		prepared, err := prepareHTTPRequest(context.Background(), test, "test-set", zap.NewNop(), SimulationConfig{TargetFromURL: true, RequestTimeout: 5 * time.Second})
+		require.NoError(t, err)
+		return prepared.Client.Do(prepared.Request)
+	}
+
+	resp, err := send(2)
+	require.NoError(t, err, "a request recorded over HTTP/2 was not answered by an HTTP/2-only app")
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	assert.Equal(t, `{"proto":"HTTP/2.0"}`, string(body))
+
+	if resp, err := send(1); err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("an HTTP/1.1 request was answered by an HTTP/2-only app: status %d", resp.StatusCode)
+	}
+}
+
+// Over TLS, a request recorded over HTTP/2 negotiates HTTP/2 (ALPN h2).
+func TestAnHTTP2RecordedRequestOverTLSIsReplayedOverHTTP2(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.Proto))
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	send := func(protoMajor int) string {
+		test := &models.TestCase{
+			Name:    "tls",
+			HTTPReq: models.HTTPReq{Method: "GET", URL: srv.URL + "/v1/sys/health", ProtoMajor: protoMajor, Header: map[string]string{}},
+		}
+		prepared, err := prepareHTTPRequest(context.Background(), test, "test-set", zap.NewNop(),
+			SimulationConfig{TargetFromURL: true, RequestTimeout: 5 * time.Second, TLSConfig: &tls.Config{InsecureSkipVerify: true}}) // #nosec G402 -- test server's own certificate
+		require.NoError(t, err)
+		resp, err := prepared.Client.Do(prepared.Request)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return string(b)
+	}
+	assert.Equal(t, "HTTP/2.0", send(2))
+	assert.Equal(t, "HTTP/1.1", send(1))
 }

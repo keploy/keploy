@@ -94,5 +94,6 @@ func (a *Agent) stageScope(ctx context.Context, names []string, open bool) error
 		utils.LogError(a.logger, stageErr, "failed to stage the mocks of a test on the proxy")
 		return stageErr
 	}
+	a.invalidateStagedUnfiltered()
 	return nil
 }

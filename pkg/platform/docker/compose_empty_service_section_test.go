@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func runModifyForAgent(t *testing.T, in string) map[string]interface{} {
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	_, ports, _, _ := idc.findContainerInServices(&compose, "app")
+	_, ports, _ := idc.serviceByKey(&compose, "app")
 	opts := buildAgentOpts()
 	opts.AppPorts = ports
 	if err := idc.ModifyComposeForAgent(&compose, opts, "app"); err != nil {
@@ -750,7 +751,7 @@ func TestGate_PortsAndNetworksReadThroughEmptyAndAliasedNodes(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		nets, ports, _, found := idc.findContainerInServices(&compose, "app")
+		nets, ports, found := idc.serviceByKey(&compose, "app")
 		if !found {
 			t.Fatalf("gate did not find the app service")
 		}
@@ -1052,7 +1053,7 @@ func TestGate_AliasElementsInsideAListAreRead(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		nets, ports, _, found := idc.findContainerInServices(&compose, "app")
+		nets, ports, found := idc.serviceByKey(&compose, "app")
 		if !found {
 			t.Fatalf("gate did not find the app service")
 		}
@@ -1125,7 +1126,7 @@ services:
       - target: 80
         published: *pub
 `)
-		if len(ports) != 1 || ports[0] != "8080:80" {
+		if len(ports) != 1 || ports[0] != "{target: 80, published: 8080}" {
 			t.Errorf("published read through an alias came back %#v; the host port "+
 				"is dropped and only the container port is published", ports)
 		}
@@ -1278,16 +1279,17 @@ services:
 		// docker compose accepts.
 		idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
 		var compose Compose
-		if err := yaml.Unmarshal([]byte(`x-name: &appname myapp
+		const in = `x-name: &appname myapp
 services:
   svc:
     image: alpine:3.21
     container_name: *appname
-`), &compose); err != nil {
+`
+		if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if _, _, name, found := idc.findContainerInServices(&compose, "myapp"); !found {
-			t.Errorf("the gate did not find the service (name=%q)", name)
+		if info, err := idc.FindContainerInCompose(context.Background(), []byte(in), ComposeScope{}, "myapp"); err != nil || info.AppServiceName != "svc" {
+			t.Errorf("the gate did not find the service: %v, %v", info, err)
 		}
 		if _, _, err := idc.findServiceNodeAndName(&compose, "myapp"); err != nil {
 			t.Errorf("findServiceNodeAndName: %v", err)

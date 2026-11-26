@@ -52,6 +52,9 @@ type req struct {
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
+	// tls is true when the live outgoing HTTP request arrived over a TLS
+	// connection (dstCfg.TLSCfg != nil, *tls.Conn, or explicit https scheme).
+	tls bool
 	// written is, for a call of another parser that the learn step decides
 	// (LearnMatch), the answer that parser writes for a recording the learn
 	// step serves it: it may write another one than the learn step gives it
@@ -2599,7 +2602,14 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // just the lowest-Levenshtein path. If httpMocks is nil, it fetches from
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(ctx context.Context, request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
-	r, hint := h.buildHTTPMismatchReportHinted(ctx, request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	return h.buildHTTPMismatchReportRouted(ctx, request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, nil, true, diag)
+}
+
+// buildHTTPMismatchReportRouted is buildHTTPMismatchReport with the url noise
+// and the auto-dynamic switch the call was matched under, by which the report
+// says whether its closest mock is on another route (ClosestOnAnotherRoute).
+func (h *HTTP) buildHTTPMismatchReportRouted(ctx context.Context, request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, diag *matchDiag) *models.MockMismatchReport {
+	r, hint := h.buildHTTPMismatchReportHinted(ctx, request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, diag)
 	if hint != "" {
 		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + hint)
 	}
@@ -2611,8 +2621,8 @@ func (h *HTTP) buildHTTPMismatchReport(ctx context.Context, request *http.Reques
 // steps: "" when the recording does not state its HTTP mocks' lifetimes. A
 // repeat note keeps it (markRepeat), so the hint outlives the note's own
 // next step.
-func (h *HTTP) buildHTTPMismatchReportHinted(ctx context.Context, request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (*models.MockMismatchReport, string) {
-	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+func (h *HTTP) buildHTTPMismatchReportHinted(ctx context.Context, request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, diag *matchDiag) (*models.MockMismatchReport, string) {
+	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, diag)
 	if r != nil && request != nil {
 		// The call's path tag, of its method and the path it sent, in the
 		// session of ctx, the connection's: the summary may write a segment
@@ -2643,6 +2653,7 @@ func viewless(r *models.MockMismatchReport) {
 	r.ClosestMock, r.ClosestMockReq, r.Diff = "", "", ""
 	r.FieldDiffs, r.Differs, r.FieldReasons = nil, nil, nil
 	r.DestinationScope, r.NextSteps = plain.DestinationScope, ""
+	r.ClosestOnAnotherRoute = false
 }
 
 // sessionCallHint tells how to serve a call to every test, for a recording
@@ -2721,7 +2732,7 @@ func statesHTTPLifetimes(mockDb integrations.MockMemDb, compared []*models.Mock)
 // buildHTTPMismatchReport adds. When the pool cannot be read, the summary
 // names the call's path by its shape only (shapeSummary): keploy cannot tell
 // there which segment holds a secret.
-func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (r *models.MockMismatchReport, places redactedPlaces) {
+func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, diag *matchDiag) (r *models.MockMismatchReport, places redactedPlaces) {
 	// Defensive: this diagnostic builder and its callees (pickClosestCandidate,
 	// renderLiveRequest) — plus decode.go's 502 error line — dereference
 	// request.URL throughout. http.ReadRequest always sets a non-nil URL on the
@@ -2835,8 +2846,14 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// Under the proven switch: the strict comparison's closest recording,
 		// and the fields it found differ.
 		places := heldPlaces(mockDb, diag.closest, comparedPool, request.URL.EscapedPath())
-		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, diag, comparedDests, phase, candidateCount, places),
-			request, diag.closest, comparedPool, variableTable(mockDb), places), places
+		sr := strictMismatchReport(request, liveBody, dest, diag, comparedDests, phase, candidateCount, places)
+		if sr != nil {
+			// The strict comparison names a recording of another route
+			// (method, destination, path) only as a schema miss
+			// (strict.go, answeredDiag).
+			sr.ClosestOnAnotherRoute = phase == models.MatchPhaseSchema
+		}
+		return withRoutePlaces(sr, request, diag.closest, comparedPool, variableTable(mockDb), places), places
 	}
 	closestPool := httpMocks
 	if diag != nil && diag.live != nil {
@@ -3027,6 +3044,12 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		b = b.WithDiff(fmt.Sprintf("closest mock %q has no field-level differences; match stopped at phase %q", closestMock.Name, phase))
 	}
 	r = b.Build()
+	// The closest mock is on another route by the rule the lax matcher reads
+	// a route by (SchemaMatch): another method, or a path MatchURLPath does
+	// not take for the call's, url noise and id segments relaxed as the
+	// match relaxed them (the proven switch relaxes no id segment).
+	r.ClosestOnAnotherRoute = string(mockReq.Method) != request.Method ||
+		!h.MatchURLPath(mockReq.URL, request.URL.Path, urlNoise, autoURLDynamic && !provenswitch.On())
 	if r != nil {
 		r.FieldReasons = reasonsOf(guarded)
 	}

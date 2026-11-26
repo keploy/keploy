@@ -427,6 +427,8 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		Backdate: backdate,
 	}
 	if r.config != nil {
+		outOpts.RedisDrawn = r.config.Redis.DrawnKeys()
+		outOpts.KeepAppAlive = r.config.Test.KeepAppAlive
 		outOpts.Rules = r.config.BypassRules
 		outOpts.MongoPassword = r.config.Test.MongoPassword
 		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second

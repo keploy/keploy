@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -345,6 +346,106 @@ func TestFindDockerCmdReadsWordsNotSpacing(t *testing.T) {
 	} {
 		if got := FindDockerCmd(cmd); got != want {
 			t.Errorf("FindDockerCmd(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+}
+
+func TestFindDockerCmdSkipsLeadingEnvAssignments(t *testing.T) {
+	t.Setenv("C", "true")
+	for cmd, want := range map[string]CmdType{
+		"COMPOSE_COMPATIBILITY=true docker compose up":            DockerCompose,
+		"COMPOSE_COMPATIBILITY=$C docker compose up":              DockerCompose,
+		`APP_CONTAINER="my app" docker compose -f compose.yml up`: DockerCompose,
+		"A=1 B='two words' docker-compose up":                     DockerCompose,
+		"COMPOSE_FILE=prod.yml docker compose up":                 DockerCompose,
+		`DB_PASS="secret$" docker compose up`:                     DockerCompose,
+		"COMPOSE_PROJECT_NAME=p sudo docker compose up":           Native,
+		"env FOO=bar docker compose up":                           Native,
+		"FOO=bar; docker compose up":                              Native,
+		"FOO=bar && docker compose up":                            Native,
+		"FOO=bar\ndocker compose up":                              Native,
+		`'FOO=bar' docker compose up`:                             Native,
+		"1FOO=bar docker compose up":                              Native,
+		`FOO="unclosed docker compose up`:                         Native,
+		"FOO=bar":                                                 Native,
+		"FOO=bar docker run --name app img":                       Native,
+		"APP_CONTAINER=$(whoami) docker compose up":               Native,
+		"APP_CONTAINER=`whoami` docker compose up":                Native,
+	} {
+		if got := FindDockerCmd(cmd); got != want {
+			t.Errorf("FindDockerCmd(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+}
+
+func TestLeadingEnvAssignmentsExpansionAndRefusal(t *testing.T) {
+	t.Setenv("C", "true")
+	t.Setenv("PREFIX", "stage")
+	t.Setenv("EMPTY_VAR", "")
+	t.Setenv("HOME", "/home/tester")
+
+	for _, tc := range []struct {
+		cmd      string
+		wantKey  string
+		wantVal  string
+		wantErr  bool
+		wantRest string
+	}{
+		{"COMPOSE_COMPATIBILITY=$C docker compose up", "COMPOSE_COMPATIBILITY", "true", false, "docker compose up"},
+		{`COMPOSE_COMPATIBILITY="$C" docker compose up`, "COMPOSE_COMPATIBILITY", "true", false, "docker compose up"},
+		{"A=1 B=$A docker compose up", "B", "1", false, "docker compose up"},
+		{"C=false COMPOSE_COMPATIBILITY=$C docker compose up", "COMPOSE_COMPATIBILITY", "false", false, "docker compose up"},
+		{"A=1 B=${A:-fallback} docker compose up", "B", "1", false, "docker compose up"},
+		{`APP_CONTAINER="${PREFIX}-app" docker compose up`, "APP_CONTAINER", "stage-app", false, "docker compose up"},
+		{`APP_CONTAINER="${UNSET_VAR:-fallback}-app" docker compose up`, "APP_CONTAINER", "fallback-app", false, "docker compose up"},
+		{`APP_CONTAINER="${EMPTY_VAR:-fallback}-app" docker compose up`, "APP_CONTAINER", "fallback-app", false, "docker compose up"},
+		{`APP_CONTAINER="${EMPTY_VAR-fallback}-app" docker compose up`, "APP_CONTAINER", "-app", false, "docker compose up"},
+		{`APP_CONTAINER="${UNSET_VAR-fallback}-app" docker compose up`, "APP_CONTAINER", "fallback-app", false, "docker compose up"},
+		{`APP_CONTAINER='$C' docker compose up`, "APP_CONTAINER", "$C", false, "docker compose up"},
+		{`APP_CONTAINER="\$C" docker compose up`, "APP_CONTAINER", "$C", false, "docker compose up"},
+		{`APP_CONTAINER='` + "`cmd`" + `' docker compose up`, "APP_CONTAINER", "`cmd`", false, "docker compose up"},
+		{"X=~/f docker compose up", "X", "/home/tester/f", false, "docker compose up"},
+		{"X=~/a:~/b docker compose up", "X", "/home/tester/a:/home/tester/b", false, "docker compose up"},
+		{"X=~ docker compose up", "X", "/home/tester", false, "docker compose up"},
+		{`X="~/f" docker compose up`, "X", "~/f", false, "docker compose up"},
+		{`X="foo$" docker compose up`, "X", "foo$", false, "docker compose up"},
+		{`X="foo$'bar" docker compose up`, "X", "foo$'bar", false, "docker compose up"},
+		{`X="${UNSET_VAR:-~/f}" docker compose up`, "X", "~/f", false, "docker compose up"},
+		{`APP_CONTAINER=$(whoami) docker compose up`, "", "", true, "docker compose up"},
+		{`APP_CONTAINER="$(whoami)" docker compose up`, "", "", true, "docker compose up"},
+		{"APP_CONTAINER=`whoami` docker compose up", "", "", true, "docker compose up"},
+		{"APP_CONTAINER=\"`whoami`\" docker compose up", "", "", true, "docker compose up"},
+		{`APP_CONTAINER=${PREFIX:+alt} docker compose up`, "", "", true, "docker compose up"},
+		{`APP_CONTAINER=${UNCLOSED docker compose up`, "", "", true, ""},
+		{`X=${UNSET_VAR:-"a b"} docker compose up`, "", "", true, "docker compose up"},
+		{`X=${UNSET_VAR:-'q'} docker compose up`, "", "", true, "docker compose up"},
+		{`X=${UNSET_VAR:-a\}b} docker compose up`, "", "", true, "docker compose up"},
+		{`X=${UNSET_VAR:-~/f} docker compose up`, "", "", true, "docker compose up"},
+		{`X=${UNSET_VAR-~} docker compose up`, "", "", true, "docker compose up"},
+		{`X=${UNSET_VAR:-~root/f} docker compose up`, "", "", true, "docker compose up"},
+		{`X=${UNSET_VAR:-a:~/f} docker compose up`, "", "", true, "docker compose up"},
+		{`X=$'ab' docker compose up`, "", "", true, "docker compose up"},
+		{`X=$"ab" docker compose up`, "", "", true, "docker compose up"},
+		{`X=$[2+3] docker compose up`, "", "", true, "docker compose up"},
+		{`X="$[2+3]" docker compose up`, "", "", true, "docker compose up"},
+		{"X=~alice/f docker compose up", "", "", true, "docker compose up"},
+	} {
+		env, rest, err := LeadingEnvAssignments(tc.cmd)
+		if rest != tc.wantRest {
+			t.Errorf("LeadingEnvAssignments(%q) rest = %q, want %q", tc.cmd, rest, tc.wantRest)
+		}
+		if tc.wantErr {
+			if !errors.Is(err, ErrUnsupportedInlineEnvExpansion) {
+				t.Errorf("LeadingEnvAssignments(%q) = %v, %v; want ErrUnsupportedInlineEnvExpansion", tc.cmd, env, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("LeadingEnvAssignments(%q) unexpected error: %v", tc.cmd, err)
+			continue
+		}
+		if got := env[tc.wantKey]; got != tc.wantVal {
+			t.Errorf("LeadingEnvAssignments(%q)[%q] = %q, want %q", tc.cmd, tc.wantKey, got, tc.wantVal)
 		}
 	}
 }

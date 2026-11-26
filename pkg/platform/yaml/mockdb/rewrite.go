@@ -91,7 +91,7 @@ type fileDoc struct {
 // the error decoding a parsed one. Either fails the whole test set, except for
 // the file's last document when the file ends part-way through a line
 // (yaml.MockReader.Unterminated): a write that was interrupted (the recorder
-// killed, the disk full; appendMock writes a large document in pieces) leaves
+// killed, the disk full; writeMockDoc writes a large document in pieces) leaves
 // exactly that, and losing that one mock must not fail every test in the set.
 //
 // Such a YAML document is never served. That it parses, or even decodes,
@@ -263,6 +263,13 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 		// variables bound at this mock by others were written by
 		// PersistLearned, before any prune.
 		mergeLearned(mock, st, nil)
+		return true
+	}
+	// Session read-through mocks (deduplicated read-only cache-warming calls)
+	// may not be consumed in every batch or subset replay, so RemoveUnusedMocks
+	// must retain them for future cold-cache replays. Checked AFTER mergeLearned
+	// so noise learned on a consumed read-through mock is still persisted.
+	if mock.IsReadThrough() {
 		return true
 	}
 	// Preserve mocks written after replay start.

@@ -9,14 +9,14 @@ import (
 )
 
 // Every connection has two FakeConns. The tap took the place of a field a
-// FakeConn already had (a copy of consumed), so it is no larger for it: 304
-// bytes on a 64-bit platform, as before.
+// FakeConn already had (a copy of consumed), and HoldFrom added one atomic
+// timestamp: 312 bytes on a 64-bit platform, still in the 320 byte size class.
 func TestFakeConnSize(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) != 8 {
 		t.Skip("sized for a 64-bit platform")
 	}
-	if got := unsafe.Sizeof(FakeConn{}); got > 304 {
-		t.Fatalf("a FakeConn is %d bytes, more than the 304 it was", got)
+	if got := unsafe.Sizeof(FakeConn{}); got > 312 {
+		t.Fatalf("a FakeConn is %d bytes, more than the 312 it was", got)
 	}
 }
 
