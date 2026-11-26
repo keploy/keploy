@@ -64,3 +64,43 @@ func TestTheAgentContainerGetsKeploysOwnMark(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateKeployAgentService_ForwardsInstallationID(t *testing.T) {
+	const hostID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cases := []struct {
+		name      string
+		confID    string
+		envID     string
+		wantEntry string
+		wantSet   bool
+	}{
+		{name: "from config when env unset", confID: hostID, wantEntry: "INSTALLATION_ID=" + hostID, wantSet: true},
+		{name: "config wins over host env", confID: hostID, envID: "github-app-12345", wantEntry: "INSTALLATION_ID=" + hostID, wantSet: true},
+		{name: "trims config installation id", confID: "  " + hostID + "\n", wantEntry: "INSTALLATION_ID=" + hostID, wantSet: true},
+		{name: "does not leak raw host INSTALLATION_ID env when config empty", confID: "", envID: "unsafe$var", wantSet: false},
+		{name: "omitted when config whitespace only", confID: "  \t ", envID: "", wantSet: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("INSTALLATION_ID", tc.envID)
+			svc, err := (&Impl{
+				logger: zap.NewNop(),
+				conf:   &config.Config{InstallationID: tc.confID},
+			}).GenerateKeployAgentService(models.SetupOptions{
+				AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, Mode: models.MODE_RECORD,
+			})
+			if err != nil {
+				t.Fatalf("GenerateKeployAgentService: %v", err)
+			}
+			env := mappingValue(svc, "environment")
+			hasAny := env != nil && sequenceContainsPrefix(env, "INSTALLATION_ID=")
+			if hasAny != tc.wantSet {
+				t.Fatalf("compose agent env %s: has INSTALLATION_ID=%v, want %v", formatSequence(env), hasAny, tc.wantSet)
+			}
+			if tc.wantSet && !sequenceContainsPrefix(env, tc.wantEntry) {
+				t.Fatalf("compose agent env %s missing %q", formatSequence(env), tc.wantEntry)
+			}
+		})
+	}
+}

@@ -129,6 +129,24 @@ func PassesInternal() bool {
 // starts in turn, carry the mark.
 const AgentFlag = "keploy-internal"
 
+// AgentInstallationIDFlag is the hidden `keploy agent` flag by which the CLI
+// forwards its resolved installation ID to a native agent: sudo resets the
+// environment (dropping KEPLOY_INSTALLATION_ID and CI vars) and may reset HOME
+// to /root, which would otherwise cause the agent to mint a second installation
+// ID for the same machine or CI run. Only a native launcher passes it (Docker
+// agents receive INSTALLATION_ID via container environment variables).
+const AgentInstallationIDFlag = "installation-id"
+
+// AgentInstallationIDArgs returns the native-agent argv fragment carrying id,
+// or nil when id is empty.
+func AgentInstallationIDArgs(id string) []string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	return []string{"--" + AgentInstallationIDFlag + "=" + id}
+}
+
 // AgentArgs is what a native agent's launcher appends to its argv: AgentFlag
 // when this run is keploy's own (PassesInternal), nothing otherwise, so a
 // user's agent's argv is what it was before the flag existed. Only a native

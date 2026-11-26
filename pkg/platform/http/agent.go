@@ -2971,6 +2971,13 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// repository), which sudo drops too, so the agent's telemetry is not
 	// counted as a user's.
 	args = append(args, telemetry.AgentArgs()...)
+	// Forward the CLI's resolved installation ID to the native agent: sudo
+	// resets the environment (dropping KEPLOY_INSTALLATION_ID and CI vars) and
+	// may reset HOME to /root, which would otherwise cause the agent to mint a
+	// second installation ID for the same machine or CI run.
+	if a.conf != nil {
+		args = append(args, telemetry.AgentInstallationIDArgs(a.conf.InstallationID)...)
+	}
 	// And the Docker endpoint the tests' containers run on, which sudo drops
 	// too, so the agent can name container destinations (containerkey).
 	args = append(args, containerkey.AgentArgs()...)

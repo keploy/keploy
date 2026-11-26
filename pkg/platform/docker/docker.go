@@ -985,8 +985,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 	envVars = append(envVars, fmt.Sprintf("CERT_EXPORT_PATH=%s", KeployTLSMountPath))
 
-	// Add installation ID if available
-	if installationID := os.Getenv("INSTALLATION_ID"); installationID != "" {
+	// Forward the host's installation ID to the agent container so its
+	// telemetry correlates with the host CLI instead of minting a separate ID.
+	// Only read idc.conf.InstallationID (validated by GetInstallationID), never
+	// raw os.Getenv("INSTALLATION_ID"), so unrelated host variables (e.g. GitHub
+	// App installation IDs or values containing "$") cannot leak into compose YAML.
+	if installationID := strings.TrimSpace(idc.conf.InstallationID); installationID != "" {
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
 	}
 	// A run that is keploy's own (KEPLOY_INTERNAL, a CI run of a keploy/
