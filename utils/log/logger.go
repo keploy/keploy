@@ -215,6 +215,17 @@ func (logFileWriter) Sync() error {
 
 var LogCfg zap.Config
 
+// IsQuietMode reports whether the global log level has been raised above
+// Info (e.g. to Warn or Error by the enterprise CLI's cloud replay).
+// Safe to call before New(): an uninitialised LogCfg, whose zero AtomicLevel
+// would panic on Level(), returns false.
+func IsQuietMode() bool {
+	if LogCfg.Level == (zap.AtomicLevel{}) {
+		return false
+	}
+	return LogCfg.Level.Level() > zap.InfoLevel
+}
+
 // Redactor rewrites log entries/fields in place to strip secrets before the
 // underlying zap core writes them out. Implementations live outside this
 // package (enterprise plugs in one that uses its secret detector) so OSS
