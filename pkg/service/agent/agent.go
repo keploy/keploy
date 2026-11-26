@@ -1655,6 +1655,9 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		containerkey.Default.SetRecorded(&tally)
 	}
 	if unfilteredDisk != nil {
+		if err := unfilteredDisk.Flush(); err != nil {
+			return failStream(fmt.Errorf("storemocks stream: flush the unfiltered on-disk store: %w", err))
+		}
 		unfilteredDisk.Finalize()
 	}
 	if disk != nil {

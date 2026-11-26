@@ -8457,10 +8457,41 @@ func (r *Replayer) payloadMutator() models.PayloadMutator {
 // file's, or a store's that indexes no file) now, once.
 func (r *Replayer) mutatePayloads(ctx context.Context, payloads models.PayloadSource, pools ...[]*models.Mock) error {
 	mutate := r.payloadMutator()
+	prefetcher, _ := r.hookImpl.(MockPayloadBatchPrefetcher)
 	if payloads != nil {
 		payloads.SetPayloadMutator(mutate)
+		if bmSrc, ok := payloads.(models.BatchPayloadMutatorSource); ok {
+			if prefetcher != nil && mutate != nil {
+				bmSrc.SetBatchPayloadMutator(func(ctx context.Context, batch []*models.Mock) error {
+					if err := prefetcher.PrefetchMocks(ctx, batch); err != nil {
+						return err
+					}
+					for _, m := range batch {
+						if err := models.MutatePayload(ctx, m, mutate); err != nil {
+							return err
+						}
+					}
+					return nil
+				})
+			} else {
+				bmSrc.SetBatchPayloadMutator(nil)
+			}
+		}
 	}
 	for _, pool := range pools {
+		if prefetcher != nil && mutate != nil {
+			var inMem []*models.Mock
+			for _, m := range pool {
+				if m != nil && !m.PayloadOnDisk() {
+					inMem = append(inMem, m)
+				}
+			}
+			if len(inMem) > 0 {
+				if err := prefetcher.PrefetchMocks(ctx, inMem); err != nil {
+					return err
+				}
+			}
+		}
 		for _, m := range pool {
 			if m == nil || m.PayloadOnDisk() {
 				continue

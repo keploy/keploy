@@ -46,15 +46,16 @@ func (e *StoreMocksSeqConflictError) Error() string {
 }
 
 type storeMocksStage struct {
-	id         string
-	header     models.MockStreamHeader
-	total      int
-	storage    *ClientMockStorage
-	disk       *proxyPkg.DiskMocks
-	asyncMocks []*models.Mock
-	wantAsync  bool
-	proven     bool
-	tally      containerkey.RecordedTally
+	id             string
+	header         models.MockStreamHeader
+	total          int
+	storage        *ClientMockStorage
+	disk           *proxyPkg.DiskMocks
+	unfilteredDisk *proxyPkg.DiskMocks
+	asyncMocks     []*models.Mock
+	wantAsync      bool
+	proven         bool
+	tally          containerkey.RecordedTally
 
 	mu         sync.Mutex
 	nextSeq    int
@@ -66,9 +67,10 @@ type storeMocksStage struct {
 	timer      *time.Timer
 }
 
-// closeLocked tears down the stage's on-disk store and expiry timer. Caller
-// holds s.mu. While a commit is in flight, ownership of s.disk belongs to
-// CommitStoreMocks so closeLocked leaves it to finish cleanly.
+// closeLocked tears down the stage's on-disk stores and expiry timer. Caller
+// holds s.mu. While a commit is in flight, ownership of s.disk and
+// s.unfilteredDisk belongs to CommitStoreMocks so closeLocked leaves them to
+// finish cleanly.
 func (s *storeMocksStage) closeLocked() {
 	if s.closed {
 		return
@@ -78,9 +80,15 @@ func (s *storeMocksStage) closeLocked() {
 		s.timer.Stop()
 		s.timer = nil
 	}
-	if !s.committing && s.disk != nil {
-		_ = s.disk.Close()
-		s.disk = nil
+	if !s.committing {
+		if s.disk != nil {
+			_ = s.disk.Close()
+			s.disk = nil
+		}
+		if s.unfilteredDisk != nil {
+			_ = s.unfilteredDisk.Close()
+			s.unfilteredDisk = nil
+		}
 	}
 }
 
@@ -103,10 +111,6 @@ func (a *Agent) BeginStoreMocks(_ context.Context, req models.StoreMocksBeginReq
 		return "", fmt.Errorf("storemocks begin: a set of %d mocks: a mock's place in the set counts at most %d", total, uint64(math.MaxUint32))
 	}
 
-	storage := &ClientMockStorage{
-		filtered:   make([]*models.Mock, 0, presizeCap(req.FilteredCount)),
-		unfiltered: make([]*models.Mock, 0, presizeCap(req.UnfilteredCount)),
-	}
 	var disk *proxyPkg.DiskMocks
 	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) || a.stagesMockReplay() {
 		d, diskErr := proxyPkg.NewDiskMocks(a.logger)
@@ -116,7 +120,25 @@ func (a *Agent) BeginStoreMocks(_ context.Context, req models.StoreMocksBeginReq
 			disk = d
 		}
 	}
-	storage.diskMocks = disk
+	var unfilteredDisk *proxyPkg.DiskMocks
+	if req.UnfilteredCount > 0 && (disk != nil || req.UnfilteredCount > unfilteredResidentLimit) {
+		ud, udErr := proxyPkg.NewDiskMocksWithBudget(a.logger, unfilteredDiskBudgetBytes)
+		if udErr != nil {
+			a.logger.Warn("on-disk unfiltered mock store unavailable; keeping unfiltered mocks resident", zap.Error(udErr))
+		} else {
+			unfilteredDisk = ud
+		}
+	}
+	storage := &ClientMockStorage{
+		diskMocks:      disk,
+		unfilteredDisk: unfilteredDisk,
+	}
+	if disk == nil {
+		storage.filtered = make([]*models.Mock, 0, presizeCap(req.FilteredCount))
+	}
+	if unfilteredDisk == nil {
+		storage.unfiltered = make([]*models.Mock, 0, presizeCap(req.UnfilteredCount))
+	}
 	proven := provenswitch.On()
 	if proven {
 		storage.dests = recordedDests{}
@@ -124,13 +146,14 @@ func (a *Agent) BeginStoreMocks(_ context.Context, req models.StoreMocksBeginReq
 
 	id := rand.Text()
 	st := &storeMocksStage{
-		id:        id,
-		header:    models.MockStreamHeader{FilteredCount: req.FilteredCount, UnfilteredCount: req.UnfilteredCount},
-		total:     total,
-		storage:   storage,
-		disk:      disk,
-		wantAsync: a.wantsAsyncMocks(),
-		proven:    proven,
+		id:             id,
+		header:         models.MockStreamHeader{FilteredCount: req.FilteredCount, UnfilteredCount: req.UnfilteredCount},
+		total:          total,
+		storage:        storage,
+		disk:           disk,
+		unfilteredDisk: unfilteredDisk,
+		wantAsync:      a.wantsAsyncMocks(),
+		proven:         proven,
 	}
 
 	ttl := a.stageTTL()
@@ -210,7 +233,18 @@ func (a *Agent) ingestStagedMockLocked(st *storeMocksStage, mock *models.Mock, i
 			st.storage.filtered = append(st.storage.filtered, mock)
 		}
 	} else {
-		st.storage.unfiltered = append(st.storage.unfiltered, mock)
+		if isUnfilteredWindowSensitive(mock) {
+			st.storage.unfilteredWindowSensitive = true
+		}
+		if st.unfilteredDisk != nil {
+			if err := st.unfilteredDisk.Add(mock); err != nil {
+				a.logger.Warn("on-disk unfiltered mock write failed; keeping mock resident",
+					zap.String("mock", mock.Name), zap.Error(err))
+				st.storage.unfiltered = append(st.storage.unfiltered, mock)
+			}
+		} else {
+			st.storage.unfiltered = append(st.storage.unfiltered, mock)
+		}
 	}
 }
 
@@ -379,6 +413,7 @@ func (a *Agent) CommitStoreMocks(ctx context.Context, stagingID string) error {
 		st.timer = nil
 	}
 	disk := st.disk
+	unfilteredDisk := st.unfilteredDisk
 	storage := st.storage
 	asyncMocks := st.asyncMocks
 	proven := st.proven
@@ -387,8 +422,13 @@ func (a *Agent) CommitStoreMocks(ctx context.Context, stagingID string) error {
 
 	var commitErr error
 	defer func() {
-		if commitErr != nil && disk != nil {
-			_ = disk.Close()
+		if commitErr != nil {
+			if disk != nil {
+				_ = disk.Close()
+			}
+			if unfilteredDisk != nil {
+				_ = unfilteredDisk.Close()
+			}
 		}
 		st.commitErr = commitErr
 
@@ -404,6 +444,7 @@ func (a *Agent) CommitStoreMocks(ctx context.Context, stagingID string) error {
 		st.mu.Lock()
 		st.closed = true
 		st.disk = nil
+		st.unfilteredDisk = nil
 		st.mu.Unlock()
 
 		close(commitDone)
@@ -411,6 +452,13 @@ func (a *Agent) CommitStoreMocks(ctx context.Context, stagingID string) error {
 
 	if proven {
 		containerkey.Default.SetRecorded(&tally)
+	}
+	if unfilteredDisk != nil {
+		if err := unfilteredDisk.Flush(); err != nil {
+			commitErr = fmt.Errorf("storemocks commit: flush the unfiltered on-disk store: %w", err)
+			return commitErr
+		}
+		unfilteredDisk.Finalize()
 	}
 	if disk != nil {
 		if err := disk.Flush(); err != nil {
@@ -424,13 +472,43 @@ func (a *Agent) CommitStoreMocks(ctx context.Context, stagingID string) error {
 			return commitErr
 		}
 		storage.statements = statements
+	}
+	if unfilteredDisk != nil {
+		unfStatements, err := unfilteredDisk.LoadStatements()
+		if err != nil {
+			commitErr = fmt.Errorf("storemocks commit: read the statement catalog from the unfiltered on-disk store: %w", err)
+			return commitErr
+		}
+		if len(unfStatements) > 0 {
+			storage.statements = dedupByName(storage.statements, unfStatements)
+		}
+	}
+	if disk != nil || unfilteredDisk != nil {
+		ptOnDisk, ptSpilled, ptDiskBytes, ptResBytes := 0, 0, int64(0), int64(0)
+		if disk != nil {
+			ptOnDisk = disk.Len()
+			ptSpilled = disk.SpilledResponses()
+			ptDiskBytes = disk.DiskBytes()
+			ptResBytes = disk.ResidentBytes()
+		}
+		unfOnDisk, unfSpilled, unfDiskBytes, unfResBytes := 0, 0, int64(0), int64(0)
+		if unfilteredDisk != nil {
+			unfOnDisk = unfilteredDisk.Len()
+			unfSpilled = unfilteredDisk.SpilledResponses()
+			unfDiskBytes = unfilteredDisk.DiskBytes()
+			unfResBytes = unfilteredDisk.ResidentBytes()
+		}
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
-			zap.Int("onDisk", disk.Len()),
-			zap.Int("spilledResponses", disk.SpilledResponses()),
-			zap.Int64("diskBytes", disk.DiskBytes()),
-			zap.Int64("residentBytes", disk.ResidentBytes()),
+			zap.Int("onDisk", ptOnDisk),
+			zap.Int("spilledResponses", ptSpilled),
+			zap.Int64("diskBytes", ptDiskBytes),
+			zap.Int64("residentBytes", ptResBytes),
 			zap.Int("residentPerTest", len(storage.filtered)),
-			zap.Int("residentConfig", len(storage.unfiltered)))
+			zap.Int("residentConfig", len(storage.unfiltered)),
+			zap.Int("unfilteredOnDisk", unfOnDisk),
+			zap.Int("unfilteredSpilledResponses", unfSpilled),
+			zap.Int64("unfilteredDiskBytes", unfDiskBytes),
+			zap.Int64("unfilteredResidentBytes", unfResBytes))
 	}
 
 	a.finalizeClientMocks(ctx, storage)

@@ -244,6 +244,15 @@ type MockPayloadMutator interface {
 	MutateMockPayload(ctx context.Context, m *models.Mock) error
 }
 
+// MockPayloadBatchPrefetcher is an optional extension to TestHooks: when a
+// replay loads mock payloads in batches (models.BatchPayloadMutatorSource) or
+// holds mocks in memory, PrefetchMocks is called once per batch before
+// MutateMockPayload runs on each mock in that batch (for example, to batch
+// decryption round trips across mocks).
+type MockPayloadBatchPrefetcher interface {
+	PrefetchMocks(ctx context.Context, mocks []*models.Mock) error
+}
+
 // wholeSetMockMutator is the hook a replay called with a test set's mocks
 // loaded whole, which it no longer loads (MockPayloadMutator). Hooks that
 // still implement it are refused, loudly, rather than left uncalled: a
