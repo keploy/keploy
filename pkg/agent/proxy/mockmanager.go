@@ -131,9 +131,11 @@ type MockManager struct {
 	// lock). A name DeleteStartupMock removed stays until the next staging:
 	// that recording is never served again.
 	startupNames atomic.Pointer[map[string]struct{}]
-	// startupShared is set while the startup tier may hold the session tier's
-	// own mocks — after a staging that filed them in both (see mirrorStartup)
-	// — and clear otherwise, so session updates pay for mirroring only then.
+	// startupShared is set while the startup tier may hold some of the session
+	// tier's own mocks — after a staging that filed them in both (see
+	// mirrorStartup): an initial staging files there the session mocks
+	// recorded before the set's first test (sessionMockForBoot) — and clear
+	// otherwise, so session updates pay for mirroring only then.
 	startupShared atomic.Bool
 	// mirrorMu makes a session-tier update or delete and its mirror into the
 	// startup tier one step, while startupShared. Without it two matchers
@@ -2011,6 +2013,20 @@ func bootPlaced(mk *models.Mock, cutoff time.Time) bool {
 	return models.PlaceOf(mk).Before(cutoff)
 }
 
+// sessionMockForBoot reports whether an initial staging copies the session
+// or connection mock mk into the start-up tier as well as the session tier:
+// when it was placed before the set's first recorded test (cutoff), the app's
+// own start-up, and whenever nothing tells, with no cutoff known or no time
+// recorded on mk. One placed at or after the cutoff was made while the tests
+// ran (a connection opened then) and is served from the session tier.
+func sessionMockForBoot(mk *models.Mock, cutoff time.Time) bool {
+	if cutoff.IsZero() {
+		return true
+	}
+	place := models.PlaceOf(mk)
+	return place.IsZero() || place.Before(cutoff)
+}
+
 // setMocksWithWindowLocked is SetMocksWithWindow without the window-change
 // signal. The caller holds swapMu and owns the mocks (mockOwner).
 //
@@ -2071,6 +2087,10 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 	// startupHeld is what the startup tier this staging builds stores but
 	// does not serve without exact serving (TreeDb.held).
 	startupHeld := map[*models.Mock]struct{}{}
+	// sessionOnly counts the session and connection mocks an initial staging
+	// leaves to the session tier alone: recorded at or after the set's first
+	// recorded test (sessionMockForBoot).
+	sessionOnly := 0
 
 	// Runner/Replayer's initial SetMocksWithWindow call fires with
 	// start=models.BaseTime before any test runs — to stage mocks for
@@ -2204,16 +2224,38 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 		// until a window holds the answer. Exact serving shows it where its
 		// view places it, and every reader of the staged set (the teardown
 		// bound, the views, HasUnservedRecording) still finds it.
+		//
+		// Of the session and connection mocks, only those recorded before the
+		// set's first recorded test are copied (sessionMockForBoot): the app's
+		// own start-up. The rest stay in the session tier alone, where every
+		// parser that reads the start-up tier before the first test also looks
+		// (the session tier, or the whole pool for a Mongo handshake). Copied
+		// whatever their time, a recording's later connection handshakes made
+		// the start-up tier grow with the recording: each new Mongo
+		// connection added two mocks to every following round's start-up
+		// tier, and a matcher that scores the start-up tier on each boot call
+		// got slower each round (k8s-proxy#989).
 		cutoff := m.firstRecordedStartLocked()
-		for _, list := range [][]*models.Mock{filtered, unfiltered} {
-			for _, mk := range list {
-				if mk == nil {
-					continue
-				}
-				startupInit = append(startupInit, mk)
-				if !bootPlaced(mk, cutoff) {
-					startupHeld[mk] = struct{}{}
-				}
+		for _, mk := range filtered {
+			if mk == nil {
+				continue
+			}
+			startupInit = append(startupInit, mk)
+			if !bootPlaced(mk, cutoff) {
+				startupHeld[mk] = struct{}{}
+			}
+		}
+		for _, mk := range unfiltered {
+			if mk == nil {
+				continue
+			}
+			if !sessionMockForBoot(mk, cutoff) {
+				sessionOnly++
+				continue
+			}
+			startupInit = append(startupInit, mk)
+			if !bootPlaced(mk, cutoff) {
+				startupHeld[mk] = struct{}{}
 			}
 		}
 	}
@@ -2368,7 +2410,8 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
 	// *models.Mock pointer can appear in BOTH startupInit and
 	// unfilteredForTree during initial staging (see the BaseTime branch
-	// above that copies unfiltered→startupInit); the session tier's build
+	// above, which copies the session mocks recorded before the set's first
+	// test, sessionMockForBoot, from unfiltered to startupInit); the session tier's build
 	// below stamps mk.TestModeInfo.ID with its index in the unfiltered
 	// slice, which would invalidate any startup-tier
 	// reference that relied on the original stamp. A mock pointer's
@@ -2504,13 +2547,16 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 	m.startup = newStartup
 	m.startupKeys = newStartupKeys
 	m.startupNames.Store(&startupNames)
-	// Initial staging files the session pool in the startup tier too; an
-	// explicit startup slice may share mocks with it as well.
+	// Initial staging files in the startup tier too the session mocks recorded
+	// before the set's first test (all of them when no first test is known,
+	// sessionMockForBoot); an explicit startup slice may share mocks with the
+	// session tier as well.
 	m.startupShared.Store(isInitialStaging || len(explicitStartup) > 0)
 	m.treesMu.Unlock()
 	if m.logger != nil && len(startupInit) > 0 {
 		m.logger.Debug("routed startup-init mocks into startup tree",
 			zap.Int("count", len(startupInit)),
+			zap.Int("sessionOnly", sessionOnly),
 			zap.Time("firstTestWindow", firstStart),
 			zap.Bool("initialStaging", isInitialStaging))
 	}
@@ -4482,8 +4528,11 @@ func (m *MockManager) restoreRetainedUnfilteredLocked() (map[models.Kind]struct{
 // ---------- point updates / deletes (keep per-kind in sync) ----------
 
 // mirrorStartup keeps the startup tier's copy of a recording in step with the
-// session tier's. Staging at BaseTime files the session pool in BOTH tiers as
-// one shared pointer (see SetMocksWithWindow's isInitialStaging branch), and
+// session tier's. Staging at BaseTime files the session mocks recorded before
+// the set's first test (all of them when no first test is known,
+// sessionMockForBoot) in BOTH tiers as one shared pointer (see
+// SetMocksWithWindow's isInitialStaging branch); a mock the startup tier does
+// not hold is not mirrored. And
 // GetSessionMocks — every parser's view of the reusable pool — lists the two
 // tiers as one, telling them apart by pointer. When a match replaced the
 // session tier's entry with an updated copy (a fresh sort order, learned
