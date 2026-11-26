@@ -158,7 +158,10 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 // We avoid building a separate registry; instead we search the linked files directly.
 func compileAndFindResponseDescriptor(compileNames []string, roots []string, serviceFull, method string) (protoreflect.MessageDescriptor, []protoreflect.FileDescriptor, error) {
 	c := &protocompile.Compiler{
-		Resolver: &protocompile.SourceResolver{ImportPaths: roots},
+		// The well-known types (google/protobuf/*.proto) come with the
+		// compiler, as with protoc: a --proto-dir holds only the user's own
+		// files. A file of the same path under the roots still wins.
+		Resolver: protocompile.WithStandardImports(&protocompile.SourceResolver{ImportPaths: roots}),
 		Reporter: reporter.NewReporter(
 			func(e reporter.ErrorWithPos) error { return e }, // errors
 			func(w reporter.ErrorWithPos) { /* optionally log warnings */ },
