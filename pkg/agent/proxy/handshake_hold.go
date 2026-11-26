@@ -38,8 +38,17 @@ import (
 const predialTTL = 5 * time.Second
 
 type predialEntry struct {
-	p  *util.Predialed
-	at time.Time
+	p        *util.Predialed
+	at       time.Time
+	listener treeListener
+}
+
+// treeListener is the listener the handshake hold found at a mock run's local
+// destination as it dialed it (treeListenerAt): the process holding the
+// socket (listenerOwner), when a socket listened there (found).
+type treeListener struct {
+	owner int
+	found bool
 }
 
 // predials holds each pre-dialled upstream from the moment its handshake is
@@ -50,6 +59,12 @@ type predials struct {
 }
 
 func (t *predials) put(client netip.AddrPort, p *util.Predialed) {
+	t.putWith(client, p, treeListener{})
+}
+
+// putWith is put with the listener the hold found at the destination as it
+// dialed it (takeWith gives it back).
+func (t *predials) putWith(client netip.AddrPort, p *util.Predialed, l treeListener) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.m == nil {
@@ -58,7 +73,7 @@ func (t *predials) put(client netip.AddrPort, p *util.Predialed) {
 	if old, ok := t.m[client]; ok {
 		old.p.CloseIfUnused() // a new handshake from the same end: the old one was abandoned
 	}
-	t.m[client] = predialEntry{p: p, at: time.Now()}
+	t.m[client] = predialEntry{p: p, at: time.Now(), listener: l}
 }
 
 // drop closes and forgets the pre-dial kept for client, if any: a new
@@ -70,14 +85,20 @@ func (t *predials) drop(client netip.AddrPort) {
 }
 
 func (t *predials) take(client netip.AddrPort) *util.Predialed {
+	p, _ := t.takeWith(client)
+	return p
+}
+
+// takeWith is take with the listener putWith kept beside the connection.
+func (t *predials) takeWith(client netip.AddrPort) (*util.Predialed, treeListener) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	e, ok := t.m[client]
 	if !ok {
-		return nil
+		return nil, treeListener{}
 	}
 	delete(t.m, client)
-	return e.p
+	return e.p, e.listener
 }
 
 // reap closes the upstreams whose application never completed its handshake.
@@ -151,6 +172,27 @@ func (p *Proxy) dialsUpstream(rule *agent.Session) bool {
 		return true
 	}
 	return p.GlobalPassthrough || rule.OpportunisticTLSIntercept || !rule.Mocking
+}
+
+// treeListenerAt is the listener at dest, a held connection's destination, as
+// serveTreeListener asks for it (a mock run's local destination; none for
+// any other): the hold looks before its dial, which is the connection the
+// listener accepts for the application. serveTreeListener, which comes
+// after, takes it: a listener that takes one connection and closes (a Gradle
+// daemon's for the test worker it forks) is gone by then, and the call was
+// closed as one the connect of which nothing accepted, while its listener
+// had accepted the hold's dial for it (the daemon then failed writing to
+// that dial, "Broken pipe", and the build hung).
+func (p *Proxy) treeListenerAt(dest *agent.NetworkAddress) treeListener {
+	if !p.refusesLocal() {
+		return treeListener{}
+	}
+	ip, ok := treeListenerIP(destAddr(dest))
+	if !ok {
+		return treeListener{}
+	}
+	owner, found := listenerOwner(ip, dest.Port)
+	return treeListener{owner: owner, found: found}
 }
 
 func (p *Proxy) refusesLocal() bool {
@@ -230,6 +272,10 @@ func (p *Proxy) decideHandshake(lookup agent.HandshakeDestInfo) synhold.Decide {
 // connection of the open test's REAL row, as the app sees it fail.
 func (p *Proxy) dialHeld(ctx context.Context, lookup agent.HandshakeDestInfo, client, proxy netip.AddrPort, dest *agent.NetworkAddress, label string) synhold.Decision {
 	addr := destAddr(dest)
+	// Looked at before the dial, while the SYN is held: the dial below is
+	// what the listener accepts for the application, and one that takes a
+	// single connection and closes is gone once it has.
+	listener := p.treeListenerAt(dest)
 	conn, err := p.dialWhileHeld(ctx, lookup, client, proxy, addr)
 	if errors.Is(err, errHandshakeAbandoned) {
 		// The app's connect to its real destination failed.
@@ -274,7 +320,7 @@ func (p *Proxy) dialHeld(ctx context.Context, lookup agent.HandshakeDestInfo, cl
 		Outcome: synhold.Accept,
 		// Published before the SYN is let through, so handleConnection
 		// finds it when the connection arrives.
-		Keep:    func() { p.predials.put(client, pre) },
+		Keep:    func() { p.predials.putWith(client, pre, listener) },
 		Discard: pre.CloseIfUnused,
 	}
 }

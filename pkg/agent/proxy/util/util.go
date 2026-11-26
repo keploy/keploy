@@ -666,6 +666,17 @@ func AppendRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Read
 	return dst, nil
 }
 
+// AppendAvailableBytes is one read of reader into dst's free capacity: the
+// bytes that have come, appended to dst, and the read's error. dst must
+// have free capacity.
+func AppendAvailableBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, dst []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return dst, err
+	}
+	n, err := readContained(logger, reader, dst[len(dst):cap(dst)])
+	return dst[:len(dst)+n], err
+}
+
 // readContained is reader.Read with a panic turned into an error, reported
 // like any recovered parser panic (RecoverWithoutClose).
 func readContained(logger *zap.Logger, reader io.Reader, p []byte) (n int, err error) {

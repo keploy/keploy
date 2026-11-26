@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ func runWithGate(t *testing.T, in string) (map[string]interface{}, []string) {
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	_, ports, _, found := idc.findContainerInServices(&compose, "app")
+	_, ports, found := idc.serviceByKey(&compose, "app")
 	if !found {
 		t.Fatalf("gate did not find the app service")
 	}
@@ -264,7 +265,7 @@ services:
 `), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Deliberately no findContainerInServices call.
+	// Deliberately no gate (serviceByKey) call.
 	if err := idc.ModifyComposeForAgent(&compose, buildAgentOpts(), "app"); err != nil {
 		t.Fatalf("ModifyComposeForAgent: %v", err)
 	}
@@ -407,7 +408,7 @@ services:
 `), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Deliberately no findContainerInServices call — one flatten only.
+	// Deliberately no gate (serviceByKey) call — one flatten only.
 	if err := idc.ModifyComposeForAgent(&compose, buildAgentOpts(), "app"); err != nil {
 		t.Fatalf("ModifyComposeForAgent: %v", err)
 	}
@@ -512,8 +513,8 @@ services:
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if _, _, _, found := idc.findContainerInServices(&compose, "myapp"); !found {
-		t.Errorf("the gate did not find the service by its inherited container_name")
+	if info, err := idc.FindContainerInCompose(context.Background(), []byte(in), ComposeScope{}, "myapp"); err != nil || info.AppServiceName != "svc" {
+		t.Errorf("the gate did not find the service by its inherited container_name: %v, %v", info, err)
 	}
 	var second Compose
 	if err := yaml.Unmarshal([]byte(in), &second); err != nil {

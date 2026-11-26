@@ -1,14 +1,15 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
+	"golang.org/x/net/http/httpguts"
 )
 
 type proxyStop func() error
@@ -727,39 +729,389 @@ func (h *goTCPIngressHook) bindIngress(ctx context.Context, network, addr string
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
+// prefaceKind is what a connection's first bytes say it carries.
+type prefaceKind int
+
+const (
+	prefaceUndecided prefaceKind = iota // the bytes so far begin more than one of the kinds below
+	prefaceTLS                          // a TLS handshake record: relayed to the app's TLS (relayTLS)
+	prefaceH2                           // HTTP/2's client preface: gRPC (grpc.RecordIncoming)
+	prefaceHTTP1                        // an HTTP/1 request line's method and its space
+	prefaceOther                        // none of them: relayed to the app unread (relayUnread)
+)
+
+// undecidedPrefaceWait is how long readPreface waits for more client bytes
+// once at least one client byte has arrived that is still undecided (such as
+// JDWP's 14-byte "JDWP-Handshake", all HTTP token characters with no space)
+// before relaying the connection unread. While no client byte has arrived, no
+// timer runs (both sides silent waits without timing out).
+var undecidedPrefaceWait = 250 * time.Millisecond
+
+// serverClosedGrace is how long a server's 0-byte close waits before waking
+// an idle client read, so already-buffered client bytes (such as a port probe
+// followed by EOF) finish reading without racing the server's close.
+var serverClosedGrace = 50 * time.Millisecond
+
+const h2FrameHeaderLen = 9
+
+// isH2SettingsFrame reports whether b begins with a valid 9-byte HTTP/2
+// server SETTINGS frame header (RFC 9113 §4.1, §6.5): type 0x04, flags 0x00
+// (not ACK), stream ID 0, and payload length a multiple of 6 within the
+// default max frame size (16384).
+func isH2SettingsFrame(b []byte) bool {
+	if len(b) < h2FrameHeaderLen {
+		return false
+	}
+	length := int(b[0])<<16 | int(b[1])<<8 | int(b[2])
+	return length <= 16384 && length%6 == 0 &&
+		b[3] == 0x04 && b[4] == 0x00 &&
+		b[5]&0x7f == 0 && b[6] == 0 && b[7] == 0 && b[8] == 0
+}
+
+// isH2SettingsPrefix reports whether b (fewer than 9 bytes) could be the
+// start of an HTTP/2 server SETTINGS frame header.
+func isH2SettingsPrefix(b []byte) bool {
+	if len(b) == 0 || len(b) >= h2FrameHeaderLen {
+		return false
+	}
+	if b[0] != 0x00 {
+		return false
+	}
+	if len(b) >= 2 && b[1] > 0x40 {
+		return false
+	}
+	if len(b) >= 3 {
+		length := int(b[1])<<8 | int(b[2])
+		if length > 16384 || length%6 != 0 {
+			return false
+		}
+	}
+	if len(b) >= 4 && b[3] != 0x04 {
+		return false
+	}
+	if len(b) >= 5 && b[4] != 0x00 {
+		return false
+	}
+	if len(b) >= 6 && b[5]&0x7f != 0 {
+		return false
+	}
+	if len(b) >= 7 && b[6] != 0 {
+		return false
+	}
+	if len(b) >= 8 && b[7] != 0 {
+		return false
+	}
+	return true
+}
+
+type serverFirstOutcome int
+
+const (
+	serverNone serverFirstOutcome = iota
+	serverSpoke
+	serverH2Settings
+	serverClosed
+)
+
+// prefaceWatch coordinates deadlines between the client preface reader
+// (readPreface) and the concurrent app-first peek (peekServerFirst) so
+// neither can race with the other or touch deadlines after sniffing ends.
+type prefaceWatch struct {
+	mu           sync.Mutex
+	sniffing     bool
+	stopClient   bool
+	clientDoneCh chan struct{}
+}
+
+func newPrefaceWatch() *prefaceWatch {
+	return &prefaceWatch{
+		sniffing:     true,
+		clientDoneCh: make(chan struct{}),
+	}
+}
+
+func (w *prefaceWatch) setClientDeadline(conn net.Conn, d time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.sniffing || w.stopClient {
+		return false
+	}
+	_ = conn.SetReadDeadline(d)
+	return true
+}
+
+func (w *prefaceWatch) wakeClient(conn net.Conn) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.sniffing {
+		return
+	}
+	w.stopClient = true
+	_ = conn.SetReadDeadline(time.Unix(1, 0))
+}
+
+func (w *prefaceWatch) finishClient(upConn net.Conn) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	select {
+	case <-w.clientDoneCh:
+	default:
+		close(w.clientDoneCh)
+	}
+	if w.sniffing {
+		_ = upConn.SetReadDeadline(time.Unix(1, 0))
+	}
+}
+
+func (w *prefaceWatch) cancelAll(clientConn, upConn net.Conn) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.sniffing {
+		return
+	}
+	w.stopClient = true
+	_ = clientConn.SetReadDeadline(time.Unix(1, 0))
+	_ = upConn.SetReadDeadline(time.Unix(1, 0))
+}
+
+func (w *prefaceWatch) endSniff() {
+	w.mu.Lock()
+	w.sniffing = false
+	w.mu.Unlock()
+}
+
+// peekServerFirst reads the app's first bytes on upConn concurrently with
+// readPreface. Non-HTTP/2 server-first greetings (MySQL, SMTP, SSH) wake the
+// client reader at once so the connection is relayed unread; an HTTP/2
+// SETTINGS frame lets the client reader wait for HTTP/2's client preface so
+// gRPC recording is preserved.
+func peekServerFirst(ctx context.Context, clientConn, upConn net.Conn, w *prefaceWatch) ([]byte, serverFirstOutcome) {
+	buf := make([]byte, 0, 64)
+	for {
+		n, err := upConn.Read(buf[len(buf):cap(buf)])
+		if n > 0 {
+			buf = buf[:len(buf)+n]
+			if isH2SettingsFrame(buf) {
+				return buf, serverH2Settings
+			}
+			if isH2SettingsPrefix(buf) && err == nil {
+				continue
+			}
+			w.wakeClient(clientConn)
+			return buf, serverSpoke
+		}
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				return buf, serverNone
+			}
+			if len(buf) > 0 {
+				w.wakeClient(clientConn)
+				return buf, serverSpoke
+			}
+			t := time.NewTimer(serverClosedGrace)
+			select {
+			case <-w.clientDoneCh:
+			case <-ctx.Done():
+			case <-t.C:
+				w.wakeClient(clientConn)
+			}
+			t.Stop()
+			return nil, serverClosed
+		}
+	}
+}
+
+// readPreface reads a connection's first bytes as they come, until they say
+// what it carries (kindOf), and at most len(clientPreface). It used to wait
+// for all of those 24 bytes, whatever they were. So a client whose first
+// message is shorter and that waits for the answer before sending more
+// waited for ever: an HTTP/1.0 request with no header (18 bytes), or a
+// binary protocol's hello (PostgreSQL's 8-byte SSLRequest, to a database
+// the tests started). Every kind is told well within the bytes such a
+// client sends first: a TLS record by its 5-byte header, an HTTP/1 request
+// by its method, a binary protocol by its first byte that no method has.
+// A connection that ends first is what it read (kindOf of the end).
+//
+// While no client byte has arrived yet, no timer runs (both sides silent
+// waits without timing out). Once at least one byte has arrived and kindOf
+// is still prefaceUndecided (e.g. JDWP's "JDWP-Handshake"), undecidedPrefaceWait
+// bounds the wait so the connection is relayed unread instead of deadlocking.
+func readPreface(ctx context.Context, logger *zap.Logger, conn net.Conn, w *prefaceWatch) ([]byte, prefaceKind, error) {
+	// Invariant: buf's capacity MUST be exactly len(clientPreface) (24 bytes).
+	// A larger capacity lets a single write containing HTTP/2's 24-byte
+	// preface and its first SETTINGS frame read past byte 24, so kindOf would
+	// not match strings.HasPrefix(clientPreface, ...) and would misclassify
+	// HTTP/2 as HTTP/1 ("PRI ").
+	buf := make([]byte, 0, len(clientPreface))
+	var deadline time.Time
+	for {
+		if len(buf) > 0 && deadline.IsZero() {
+			deadline = time.Now().Add(undecidedPrefaceWait)
+		}
+		if !deadline.IsZero() {
+			if w != nil {
+				if !w.setClientDeadline(conn, deadline) {
+					return buf, prefaceOther, nil
+				}
+			} else {
+				_ = conn.SetReadDeadline(deadline)
+			}
+		}
+		got, err := util.AppendAvailableBytes(ctx, logger, conn, buf)
+		buf = got
+		if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+			if w == nil {
+				_ = conn.SetReadDeadline(time.Time{})
+			}
+			if ctx.Err() != nil {
+				return buf, prefaceOther, ctx.Err()
+			}
+			// Either the server spoke first (or closed), or the client's
+			// bytes stayed undecided past undecidedPrefaceWait (JDWP):
+			// relay unread without error.
+			return buf, prefaceOther, nil
+		}
+		full := len(buf) == cap(buf)
+		// At the end kindOf is never prefaceUndecided.
+		if k := kindOf(buf, full || err != nil); k != prefaceUndecided {
+			if !deadline.IsZero() && w == nil {
+				_ = conn.SetReadDeadline(time.Time{})
+			}
+			return buf, k, err
+		}
+	}
+}
+
+// kindOf is what b, a connection's first bytes, says it carries; at the end
+// (the connection's end, or all len(clientPreface) bytes read) never
+// prefaceUndecided. HTTP/2's preface ("PRI * HTTP/2.0...") also begins an
+// HTTP/1 request line, whose method is PRI, so it is told only by all of
+// it, as before. An HTTP/1 request line begins with its method, a token
+// (RFC 9110 5.6.2), and a space: a byte that is neither, or a token that
+// does not end in a space within the bytes read, is not one. Such a
+// connection, and one that ends before it says what it is, is relayed to
+// the app unread, as without keploy (prefaceOther): read as an HTTP/1
+// request, its bytes were lost, the ingress closed it, and its client
+// failed (Gradle's, to the daemon it forks: "The first result from the
+// daemon was empty").
+func kindOf(b []byte, end bool) prefaceKind {
+	if len(b) == 0 {
+		if end {
+			return prefaceOther
+		}
+		return prefaceUndecided
+	}
+	if b[0] == tlsHandshakeRecord {
+		switch {
+		case pTls.IsTLSHandshake(b):
+			return prefaceTLS
+		case !end && tlsRecordPrefix(b):
+			return prefaceUndecided
+		}
+		return prefaceOther
+	}
+	if strings.HasPrefix(clientPreface, string(b)) {
+		switch {
+		case len(b) == len(clientPreface):
+			return prefaceH2
+		case !end:
+			return prefaceUndecided
+		}
+	}
+	method := 0
+	for method < len(b) && httpguts.IsTokenRune(rune(b[method])) {
+		method++
+	}
+	switch {
+	case method == len(b) && !end:
+		return prefaceUndecided
+	case method > 0 && method < len(b) && b[method] == ' ':
+		return prefaceHTTP1
+	}
+	return prefaceOther
+}
+
+// tlsHandshakeRecord is the first byte of a TLS handshake record, and so of
+// every ClientHello.
+const tlsHandshakeRecord = 0x16
+
+// tlsRecordPrefix is whether b, shorter than a TLS record header, begins one
+// that pTls.IsTLSHandshake takes: 0x16, then major version 3, then a minor
+// version up to 3.
+func tlsRecordPrefix(b []byte) bool {
+	return len(b) < 5 && b[0] == tlsHandshakeRecord && (len(b) < 2 || b[1] == 0x03) && (len(b) < 3 || b[2] <= 0x03)
+}
+
 func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
 	// The connection's calls are the session's the ingress serves as it is
 	// taken: its lines tag their paths under that session's key.
 	ctx = pm.withLogKeys(ctx)
 
-	preface, err := util.ReadRequiredBytes(ctx, logger, clientConn, len(clientPreface))
-	if err == io.EOF && len(preface) == 0 {
+	// Dial the application eagerly as soon as the connection is accepted so
+	// server-first protocols (MySQL, SMTP, SSH) can speak without deadlocking
+	// behind a client-first preface read, and empty connections connect and
+	// close at the app just as without keploy.
+	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+	upConn, err := pm.dialApp(ctx, finalAppAddr, clientConn)
+	if err != nil {
+		pm.logAppDialFailure(logger, "Failed to connect to the application. Verify that the application is listening on the resolved address and port.",
+			err, zap.String("final_app_addr", finalAppAddr))
+		return
+	}
+	defer func() {
+		_ = upConn.Close()
+	}()
+
+	w := newPrefaceWatch()
+	stopCancel := context.AfterFunc(ctx, func() {
+		w.cancelAll(clientConn, upConn)
+	})
+	type serverRes struct {
+		bytes   []byte
+		outcome serverFirstOutcome
+	}
+	serverCh := make(chan serverRes, 1)
+	go func() {
+		b, out := peekServerFirst(ctx, clientConn, upConn, w)
+		serverCh <- serverRes{bytes: b, outcome: out}
+	}()
+
+	preface, kind, err := readPreface(ctx, logger, clientConn, w)
+	w.finishClient(upConn)
+	srv := <-serverCh
+	w.endSniff()
+	stopCancel()
+	_ = clientConn.SetReadDeadline(time.Time{})
+	_ = upConn.SetReadDeadline(time.Time{})
+
+	if len(srv.bytes) > 0 {
+		upConn = newReplayConn(srv.bytes, upConn)
+	}
+	if srv.outcome == serverSpoke {
+		pm.relayUnreadConn(clientConn, preface, upConn, finalAppAddr, logger)
+		return
+	}
+	if err == io.EOF && len(preface) == 0 && len(srv.bytes) == 0 {
 		return
 	}
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
-	if pTls.IsTLSHandshake(preface) {
-		pm.relayTLS(ctx, clientConn, preface, newAppAddr, logger, appPort)
+	switch kind {
+	case prefaceTLS:
+		pm.relayTLSConn(ctx, clientConn, preface, upConn, logger, appPort)
+		return
+	case prefaceOther:
+		pm.relayUnreadConn(clientConn, preface, upConn, finalAppAddr, logger)
 		return
 	}
-	if bytes.HasPrefix(preface, []byte(clientPreface)) {
-		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
-
+	if kind == prefaceH2 {
 		// newAppAddr holds the port Keploy moved the application to, not the port
 		// it advertises, so the test case records the caller-supplied appPort
 		// (the original) instead.
 		actualPort := appPort
-
-		upConn, err := pm.dialApp(ctx, finalAppAddr, clientConn)
-		if err != nil {
-			pm.logAppDialFailure(logger, "Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
-				err, zap.String("final_app_addr", finalAppAddr))
-			clientConn.Close() // Close the client connection as we can't proceed
-			return
-		}
 
 		// Pass replayConn so RecordIncoming sees the full byte stream including
 		// the preface. RecordIncoming's forwardAndTee will forward everything
@@ -768,46 +1120,42 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// for the count of the calls a pause of the memory guard costs
 		// (hooksUtils.SkipGRPCUnderPressure).
 		grpcCtx := syncMock.WithIngressConn(ctx, ingressConnName(clientConn, finalAppAddr))
-		grpc.RecordIncoming(grpcCtx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping)
+		if err := grpc.RecordIncoming(grpcCtx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping, pm.loadIncomingOpts); err != nil {
+			utils.LogError(logger, err, "failed to record the gRPC connection")
+		}
 	} else {
-		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
+		pm.handleHttp1WithConn(ctx, newReplayConn(preface, clientConn), upConn, finalAppAddr, logger, t, sem, appPort)
 	}
 }
 
 // tlsRelayedWarning is what the ingress says of a TLS connection it relayed
-// to the app unread (relayTLS): at WARN for a recording session's first to
+// to the app unread (relayTLSConn): at WARN for a recording session's first to
 // each app port, at Debug for the rest.
 const tlsRelayedWarning = "a TLS connection to the app was relayed to it unread, so the app's own certificate answers its client: keploy records the app's plain HTTP and gRPC calls as test cases, and NONE of the calls on a TLS connection was recorded"
 
-// relayTLS relays a connection whose client opened with a TLS ClientHello
-// (preface, read from clientConn) to the app, both ways, unread: the app's
-// TLS answers it, with the app's own certificate, as it would without
-// keploy. Read as an HTTP/1 request, the ClientHello was answered with a
-// plain-text 400, and the client failed ("http: server gave HTTP response to
-// HTTPS client"). Nothing on the connection is recorded: its calls are
-// encrypted. So each is counted on the recording's manager, whose session
-// summary and stream end marker say the session's count at WARN, as for a
-// connection whose caller the proxy could not name; and the session's first
-// to each app port is said at WARN as it comes, the rest at Debug. It is
-// counted as the relay starts: a connection kept open past its recording's
-// end is that recording's.
-func (pm *IngressProxyManager) relayTLS(ctx context.Context, clientConn net.Conn, preface []byte, newAppAddr string, logger *zap.Logger, appPort uint16) {
-	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
-	upConn, err := pm.dialApp(ctx, finalAppAddr, clientConn)
-	if err != nil {
-		pm.logAppDialFailure(logger, "Failed to connect to the application to relay a TLS connection to it. Verify that the application is listening on the resolved address and port.",
-			err, zap.String("final_app_addr", finalAppAddr))
-		return
-	}
-	defer func() {
-		_ = upConn.Close()
-	}()
+// relayTLSConn relays a connection whose client opened with a TLS ClientHello
+// (preface, read from clientConn) over upConn to the app, both ways, unread:
+// the app's TLS answers it, with the app's own certificate, as it would
+// without keploy. Nothing on the connection is recorded: its calls are
+// encrypted, so each is counted on the recording's manager, and the session's
+// first to each app port is said at WARN, the rest at Debug.
+func (pm *IngressProxyManager) relayTLSConn(ctx context.Context, clientConn net.Conn, preface []byte, upConn net.Conn, logger *zap.Logger, appPort uint16) {
 	if syncMock.FromContextOrGlobal(ctx).NoteTLSRelayedConn(appPort) {
 		logger.Warn(tlsRelayedWarning, zap.Uint16("port", appPort),
 			zap.String("note", "this recording's further TLS connections to this port are logged at debug, and its summary counts them all"))
 	} else {
 		logger.Debug(tlsRelayedWarning, zap.Uint16("port", appPort))
 	}
+	util.RelayRawPassthrough(newReplayConn(preface, clientConn), upConn)
+}
+
+// relayUnreadConn relays a connection that is not HTTP, HTTP/2 or TLS
+// (prefaceOther, or server-first) over upConn to the app, both ways, unread,
+// as it would reach the app without keploy: nothing keploy records as a test
+// case is on it.
+func (pm *IngressProxyManager) relayUnreadConn(clientConn net.Conn, preface []byte, upConn net.Conn, finalAppAddr string, logger *zap.Logger) {
+	logger.Debug("a connection to the app that is not HTTP, HTTP/2 or TLS was relayed to it unread: keploy records HTTP and gRPC calls as test cases, and none is on it",
+		zap.String("final_app_addr", finalAppAddr))
 	util.RelayRawPassthrough(newReplayConn(preface, clientConn), upConn)
 }
 

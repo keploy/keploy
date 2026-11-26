@@ -29,7 +29,7 @@ func TestRecordIncomingLeavesNothingBehindAnEndedConversation(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", false, false)
+			_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", false, false, nil)
 		}()
 		_ = cliApp.Close()
 		_ = appApp.Close()
@@ -60,7 +60,7 @@ func TestRecordIncomingOfAnIdleConversationReturnsWhenTheIngressStops(t *testing
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", false, false)
+		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", false, false, nil)
 	}()
 	// The preface's first byte, then the conversation stays idle.
 	if _, err := cliApp.Write([]byte("P")); err != nil {
@@ -102,7 +102,7 @@ func TestRecordIncomingEndsAnUnansweredCallsWindowAtTheConnectionsEnd(t *testing
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", synchronous, false)
+				_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", synchronous, false, nil)
 			}()
 			req, _ := pingCall(t)
 			go func() { _, _ = cliApp.Write(req) }()

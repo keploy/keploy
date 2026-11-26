@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -82,6 +83,26 @@ func TestTheSessionSaysItReadsSetEndsOnlyUnderTheSwitch(t *testing.T) {
 		rf.mu.Unlock()
 		if reads != on {
 			t.Fatalf("switch %v: the repair's re-registration said ReadsSetEnds=%v", on, reads)
+		}
+	}
+}
+
+// keploy test passes KeepAppAlive in OutgoingOptions when --keep-app-alive is
+// configured, so stateful parsers know the application survives across test-set
+// boundaries.
+func TestTheSessionPassesKeepAppAliveInOutgoingOptions(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		f := &latchInstr{}
+		r := &Replayer{
+			logger:          zap.NewNop(),
+			instrumentation: f,
+			config:          &config.Config{Test: config.Test{KeepAppAlive: keep}},
+		}
+		if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if f.opts.KeepAppAlive != keep {
+			t.Fatalf("KeepAppAlive=%v: the set's session got %v", keep, f.opts.KeepAppAlive)
 		}
 	}
 }

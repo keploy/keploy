@@ -41,6 +41,10 @@ on:
         required: false
         default: 'all'
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   startup_mock_capture_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}

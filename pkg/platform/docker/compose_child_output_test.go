@@ -26,7 +26,7 @@ services:
 func startChild(t *testing.T, project string) *ComposeChildOutput {
 	t.Helper()
 	unsetEnv(t, composeEnvFilesEnv, "COMPOSE_DISABLE_ENV_FILE")
-	o, err := StartComposeChildOutput(context.Background(), []byte(childDoc), project, t.TempDir(), nil)
+	o, err := StartComposeChildOutput(context.Background(), []byte(childDoc), ComposeScope{ProjectName: project, ProjectDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("StartComposeChildOutput: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestComposeChildOutputProjectFollowsComposePrecedence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(composeProjectNameEnv, tc.env)
-			o, err := StartComposeChildOutput(context.Background(), tc.doc, tc.given, dir, nil)
+			o, err := StartComposeChildOutput(context.Background(), tc.doc, ComposeScope{ProjectName: tc.given, ProjectDir: dir})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestComposeChildOutputProjectFollowsComposePrecedence(t *testing.T) {
 			}
 		})
 	}
-	if _, err := StartComposeChildOutput(context.Background(), nil, "x", dir, nil); err == nil {
+	if _, err := StartComposeChildOutput(context.Background(), nil, ComposeScope{ProjectName: "x", ProjectDir: dir}); err == nil {
 		t.Fatal("no document: want an error")
 	}
 	var none *ComposeChildOutput

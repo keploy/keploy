@@ -318,6 +318,83 @@ func TestFindComposeFilesPrecedenceOverrideAndEnv(t *testing.T) {
 			t.Fatalf("FindComposeFiles = %v; want empty", got)
 		}
 	})
+
+	t.Run("inline COMPOSE_FILE beats exported COMPOSE_FILE and default files", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "docker-compose.yml")
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "exported.yml")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		got := FindComposeFiles("COMPOSE_FILE=prod.yml docker compose up")
+		want := []string{"prod.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("inline COMPOSE_FILE with inline COMPOSE_PATH_SEPARATOR", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", ":")
+
+		got := FindComposeFiles("COMPOSE_FILE=base.yml,extra.yml COMPOSE_PATH_SEPARATOR=, docker compose up")
+		want := []string{"base.yml", "extra.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("inline empty or separator-only COMPOSE_FILE returns no files instead of falling back", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "docker-compose.yml")
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "exported.yml")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		for _, cmd := range []string{
+			"COMPOSE_FILE= docker compose up",
+			`COMPOSE_FILE=" " docker compose up`,
+			"COMPOSE_FILE=: docker compose up",
+		} {
+			if got := FindComposeFiles(cmd); len(got) != 0 {
+				t.Fatalf("FindComposeFiles(%q) = %v; want empty (compose refuses empty COMPOSE_FILE)", cmd, got)
+			}
+		}
+	})
+
+	t.Run("inline COMPOSE_FILE before sudo or /usr/bin/sudo is ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "docker-compose.yml")
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		for _, cmd := range []string{
+			"COMPOSE_FILE=prod.yml sudo docker compose up",
+			"COMPOSE_FILE=prod.yml /usr/bin/sudo docker compose up",
+		} {
+			got := FindComposeFiles(cmd)
+			want := []string{"docker-compose.yml"}
+			if !slices.Equal(got, want) {
+				t.Fatalf("FindComposeFiles(%q) = %v; want %v", cmd, got, want)
+			}
+		}
+	})
+
+	t.Run("explicit -f still beats inline COMPOSE_FILE", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		t.Setenv("COMPOSE_FILE", "")
+		t.Setenv("COMPOSE_PATH_SEPARATOR", "")
+
+		got := FindComposeFiles("COMPOSE_FILE=prod.yml docker compose -f explicit.yml up")
+		want := []string{"explicit.yml"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("FindComposeFiles = %v; want %v", got, want)
+		}
+	})
 }
 
 // ComposePublishedHostPortsFromFiles skips unreadable or unparseable compose

@@ -1230,21 +1230,21 @@ func TestUnexercisedSummary(t *testing.T) {
 		wantPassed int
 	}{
 		{
-			name: "mixed population: only the PASSED ones are counted as still-matching",
+			name: "mixed population: only the PASSED ones are counted",
 			in: map[string]models.TestStatus{
 				"tc-b": models.TestStatusPassed,
 				"tc-a": models.TestStatusObsolete,
 				"tc-c": models.TestStatusPassed,
 			},
-			wantNames:  []string{"tc-a", "tc-b", "tc-c"},
-			wantSample: []string{"tc-a", "tc-b", "tc-c"},
+			wantNames:  []string{"tc-b", "tc-c"},
+			wantSample: []string{"tc-b", "tc-c"},
 			wantPassed: 2,
 		},
 		{
-			name:       "all demoted: zero still matched",
+			name:       "all demoted: zero counted",
 			in:         map[string]models.TestStatus{"tc-a": models.TestStatusObsolete},
-			wantNames:  []string{"tc-a"},
-			wantSample: []string{"tc-a"},
+			wantNames:  []string{},
+			wantSample: []string{},
 			wantPassed: 0,
 		},
 	}
@@ -1830,11 +1830,9 @@ func TestWarnUnexercisedDependencies_ClaimsOnlyWhatTheDataSupports(t *testing.T)
 	}
 
 	fields := entries[0].ContextMap()
-	if fields["tests"] != int64(2) {
-		t.Errorf("tests = %v, want 2", fields["tests"])
+	if fields["tests"] != int64(1) {
+		t.Errorf("tests = %v, want 1 (only PASSED tests are counted)", fields["tests"])
 	}
-	// The PASSED subset is reported separately instead of the message
-	// asserting it over everything.
 	if fields["responseStillMatched"] != int64(1) {
 		t.Errorf("responseStillMatched = %v, want 1 (tc-obsolete's response did NOT match)", fields["responseStillMatched"])
 	}

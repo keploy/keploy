@@ -75,22 +75,21 @@ const (
 	// fillNeither: nothing more, so both readers wait on a read, or come to
 	// one, once the main loop panics, and the abort's Close ends them.
 	fillNeither readersFill = iota
-	// fillClient: more requests, sent once the dest's reader waits on a read,
-	// done with the reply, so the merge parks on its send to the full events
-	// channel, and the client's reader on its send to its own full channel,
-	// before the main loop panics: it panics once the client's reader has
-	// taken fillClientTaken chunks, so every queue is full. The dest's reader
-	// reads the abort's ErrClosed.
+	// fillClient: more requests, sent while the dest's reader is parked
+	// waiting on taken for the reply: the client's reader peeks one chunk,
+	// hands it on, and parks waiting on taken without consuming it or any
+	// further chunk.
 	fillClient
-	// fillBoth: more requests and more replies, so the merge and both readers
-	// park on their sends to full channels before the main loop panics: it
-	// panics once the readers have taken fillBothTaken chunks between them.
+	// fillBoth: more requests and more replies, sent while the dest's reader
+	// waits on taken for the reply and the client's reader peeks one chunk and
+	// waits on taken: both readers park outside FakeConn reads without
+	// consuming any of the fill.
 	fillBoth
 	// fillAfterTheLoop: nothing more until the main loop is gone, and the
-	// client's reader waits on a read when it panics. Then requests reach
-	// the client's stream before the abort's Close, with room in the events
-	// channel: the reader's read in progress hands it one, and it must take
-	// no other. The dest's reader reads the abort's ErrClosed.
+	// client's reader waits on a peek when it panics. Then requests reach
+	// the client's stream before the abort's Close: the reader's peek in
+	// progress may see one chunk, and must consume none. The dest's reader
+	// returns on stop without consuming the reply.
 	fillAfterTheLoop
 )
 
@@ -101,18 +100,10 @@ const (
 	readersAfterChunks = 8
 )
 
-// fillClientTaken is how many chunks the client's reader has taken off its
-// stream in fillClient once every queue on its way is full: the events
-// channel (mergedQueueLen), the head the merge is sending, the client's
-// queue (streamQueueLen) and the chunk the reader is sending. Nothing takes
-// another until the main loop takes an event, which it does not.
-// fillBothTaken is the same, between both readers, in fillBoth: the merge
-// holds one head only, the one it sends, since it hands an unnumbered chunk
-// on at once and takes no other event while it sends.
-const (
-	fillClientTaken = mergedQueueLen + 1 + streamQueueLen + 1
-	fillBothTaken   = mergedQueueLen + 1 + 2*(streamQueueLen+1)
-)
+// fillClientPeeked is how many chunks the client's reader has peeked off
+// clientCh in fillClient: one, after which it waits on taken and takes no
+// other until the main loop processes it.
+const fillClientPeeked = 1
 
 // checkReadersEndAfterAPanicOfTheMainLoop runs encodeGenericV2 under a
 // supervisor over a session whose streams hold one exchange, and whose
@@ -168,18 +159,17 @@ func checkReadersEndAfterAPanicOfTheMainLoop(t *testing.T, fill readersFill) {
 		// with every goroutine's stack.
 		switch fill {
 		case fillClient:
-			awaitWaiting(destConn)
 			for i := 0; i < readersFillChunks; i++ {
 				clientCh <- chunk(fakeconn.FromClient, "REQX")
 			}
-			awaitTaken(func() int { return readersFillChunks - len(clientCh) }, fillClientTaken)
-			awaitReaderSends(created, 1)
+			awaitTaken(func() int { return readersFillChunks - len(clientCh) }, fillClientPeeked)
+			awaitReaderSends(created, 2)
 		case fillBoth:
 			for i := 0; i < readersFillChunks; i++ {
 				clientCh <- chunk(fakeconn.FromClient, "REQX")
 				destCh <- chunk(fakeconn.FromDest, "REPX")
 			}
-			awaitTaken(func() int { return 2*readersFillChunks - len(clientCh) - len(destCh) }, fillBothTaken)
+			awaitTaken(func() int { return readersFillChunks - len(clientCh) }, fillClientPeeked)
 			awaitReaderSends(created, 2)
 		case fillAfterTheLoop:
 			awaitWaiting(clientConn)
@@ -205,17 +195,27 @@ func checkReadersEndAfterAPanicOfTheMainLoop(t *testing.T, fill readersFill) {
 		t.Fatalf("setup: the main loop did not panic with %q: status %v, err %v", readersPanicMsg, res.Status, res.Err)
 	}
 	awaitReadersEnd(t, created)
-	// A reader parked on its send holds the chunk it read; one waiting on a
-	// read is handed one chunk at most, by that read.
-	reached, wantTaken := clientLeft, 0
+	// Neither reader may consume any chunk the main loop did not finish
+	// handling: clientConn consumed only "REQ" (3 bytes), destConn consumed 0
+	// (the loop panicked while handling "REP").
+	if got := clientConn.Consumed(); got != int64(len("REQ")) {
+		t.Fatalf("clientConn consumed %d bytes after panic, want %d", got, len("REQ"))
+	}
+	if got := destConn.Consumed(); got != 0 {
+		t.Fatalf("destConn consumed %d bytes after panic, want 0", got)
+	}
+	// A reader parked on taken takes no more chunks from clientCh/destCh;
+	// fillAfterTheLoop's client reader waiting in Peek may pull at most 1
+	// chunk into pending (unconsumed) before exiting on stop.
+	reached, maxPulled := clientLeft, 0
 	if fill == fillAfterTheLoop {
-		reached, wantTaken = clientLeft+readersAfterChunks, 1
+		reached, maxPulled = clientLeft+readersAfterChunks, 1
 	}
-	if taken := reached - len(clientCh); taken != wantTaken {
-		t.Fatalf("the client's reader took %d chunks off its stream after its main loop was gone, not %d", taken, wantTaken)
+	if pulled := reached - len(clientCh); pulled > maxPulled {
+		t.Fatalf("the client's reader pulled %d chunks off its channel after its main loop was gone, more than %d", pulled, maxPulled)
 	}
-	if taken := destLeft - len(destCh); taken != 0 {
-		t.Fatalf("the dest's reader took %d chunks off its stream after its main loop was gone, not 0", taken)
+	if pulled := destLeft - len(destCh); pulled != 0 {
+		t.Fatalf("the dest's reader pulled %d chunks off its channel after its main loop was gone, not 0", pulled)
 	}
 }
 

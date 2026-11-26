@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -174,10 +175,11 @@ networks:
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	nets, ports, name, found := idc.findContainerInServices(&compose, "app")
-	if !found {
-		t.Fatalf("the app service was not found behind its alias")
+	info, err := idc.FindContainerInCompose(context.Background(), []byte(in), ComposeScope{}, "app")
+	if err != nil {
+		t.Fatalf("the app service was not found behind its alias: %v", err)
 	}
+	nets, ports, name := info.Networks, info.Ports, info.AppServiceName
 	if name != "app" {
 		t.Errorf("name = %q, want app", name)
 	}
@@ -266,7 +268,7 @@ func TestAddKeployAgent_RefusesADuplicate(t *testing.T) {
 }
 
 // TestServiceAlias_PortsReadThroughAnAliasedSection pins the section-level
-// resolution in findContainerInServices specifically.
+// resolution in serviceByKey specifically.
 //
 // The per-service resolution inside the loop covers `services: {app: *app}`,
 // where the section itself is a real mapping. It cannot help when the whole
@@ -286,11 +288,12 @@ services: *svcs
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	_, ports, name, found := idc.findContainerInServices(&compose, "app")
-	if !found {
-		t.Fatalf("the app was not found behind a wholly-aliased `services:` section; " +
-			"the caller reports \"container not found\" on a file that declares it")
+	info, err := idc.FindContainerInCompose(context.Background(), []byte(in), ComposeScope{}, "app")
+	if err != nil {
+		t.Fatalf("the app was not found behind a wholly-aliased `services:` section; "+
+			"the caller reports \"container not found\" on a file that declares it: %v", err)
 	}
+	ports, name := info.Ports, info.AppServiceName
 	if name != "app" {
 		t.Errorf("name = %q, want app", name)
 	}
@@ -326,7 +329,7 @@ services:
 	}
 
 	// The gate the caller runs first; its ports feed opts.AppPorts.
-	_, ports, _, found := idc.findContainerInServices(&compose, "app")
+	_, ports, found := idc.serviceByKey(&compose, "app")
 	if !found || len(ports) == 0 {
 		t.Fatalf("gate did not resolve the aliased service: found=%v ports=%v", found, ports)
 	}
@@ -401,7 +404,7 @@ services:
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if err := idc.modifyAppServiceForKeploy(&compose, "app", false); err != nil {
+	if err := idc.modifyAppServiceForKeploy(&compose, "app", "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy: %v", err)
 	}
 	data, err := idc.MarshalCompose(&compose)
@@ -691,13 +694,14 @@ services:
 			if err := yaml.Unmarshal([]byte(tc.in), &compose); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			_, ports, _, found := idc.findContainerInServices(&compose, "myapp")
-			if !found {
-				t.Fatalf("the gate did not find the service")
+			info, err := idc.FindContainerInCompose(context.Background(), []byte(tc.in), ComposeScope{}, "myapp")
+			if err != nil || info.AppServiceName != "svc" {
+				t.Fatalf("the gate did not find the service: %v, %v", info, err)
 			}
+			compose = *info.Compose
 			opts := buildAgentOpts()
-			opts.AppPorts = ports
-			if err := idc.ModifyComposeForAgent(&compose, opts, "myapp"); err != nil {
+			opts.AppPorts = info.Ports
+			if err := idc.ModifyComposeForAgent(&compose, opts, info.AppServiceName); err != nil {
 				t.Fatalf("ModifyComposeForAgent: %v", err)
 			}
 			data, err := idc.MarshalCompose(&compose)
@@ -852,11 +856,12 @@ services:
 // a user service named keploy-agent produces NO container-name clash and docker
 // accepts the generated file without complaint.
 //
-// The damage is in keploy's own lookup. findServiceNodeAndName("keploy-agent")
-// matches on container_name too and reaches the user's service first, so the
-// app's `dns` is MOVED onto an unrelated service — overwriting the dns that
-// service declared for itself — while the agent that owns the network namespace
-// gets none. A recording made this way is quietly wrong rather than absent.
+// The damage is in a lookup of the agent that takes a service by key or
+// container_name, service by service, as the enterprise compose hook's does on
+// the document next: it reaches the user's service first and makes the agent's
+// edits there. (findServiceNodeAndName takes every key first, so keploy's own
+// dns move reaches the agent.) A recording made this way is quietly wrong
+// rather than absent.
 //
 // Driven through the full pipeline, which is also the only place the ordering
 // matters: the lookups that resolve service aliases in place stop as soon as
@@ -887,7 +892,7 @@ services:
 
 	// The gate runs first in production and resolves aliases as it goes — but it
 	// stops at the app, so `x` is untouched when the guard runs.
-	_, ports, _, _ := idc.findContainerInServices(&compose, "app")
+	_, ports, _ := idc.serviceByKey(&compose, "app")
 	opts.AppPorts = ports
 
 	err := idc.ModifyComposeForAgent(&compose, opts, "app")

@@ -99,3 +99,79 @@ func TestARequestInFlightAcrossAStopIsGivenUpAsTheNextRecordingStarts(t *testing
 		t.Fatal("the next recording kept a request in flight across the last recording's stop")
 	}
 }
+
+// When a recording client reconnects to a still-running agent (for example,
+// k8s-proxy restarting mid-recording on a sidecar pod), Proxy.Record starts a
+// new recording session with a fresh mock output channel. An application
+// connection that stayed open across the reconnect never re-enters
+// handleConnection, so its parser keeps emitting through syncMock.Get();
+// Proxy.Record must rewire syncMock.Get()'s output channel to the new stream
+// so post-reconnect mocks reach the new recording instead of leaking onto the
+// previous session's dead channel.
+func TestARecordingAfterReconnectDeliversMocksFromAnExistingConnection(t *testing.T) {
+	mgr := syncMock.Get()
+	t.Cleanup(func() { mgr.SetOutputChannel(nil) })
+
+	upstream := keepAliveHTTPUpstream(t)
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+	if err := p.InitIntegrations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	mocks1 := make(chan *models.Mock, 16)
+	if err := p.Record(context.Background(), mocks1, models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// One persistent keep-alive connection stays open across the reconnect.
+	app, src := acceptedConn(t)
+	br := bufio.NewReader(app)
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), src) }()
+
+	if body := awaitEvent(t, get(app, br, "/before-reconnect", false), "before-reconnect call"); body != "/before-reconnect" {
+		t.Fatalf("before-reconnect call got %q", body)
+	}
+	select {
+	case m := <-mocks1:
+		if m.Spec.HTTPReq == nil || !strings.HasSuffix(m.Spec.HTTPReq.URL, "/before-reconnect") {
+			t.Fatalf("first recording got unexpected mock %+v", m.Spec.HTTPReq)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for /before-reconnect mock on first recording")
+	}
+
+	// Simulate the recording client stopping and a replacement opening a new
+	// /agent/outgoing stream with a fresh channel while the app's connection
+	// stays open.
+	if err := p.SetGracefulShutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mocks2 := make(chan *models.Mock, 16)
+	if err := p.Record(context.Background(), mocks2, models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if body := awaitEvent(t, get(app, br, "/after-reconnect", true), "after-reconnect call"); body != "/after-reconnect" {
+		t.Fatalf("after-reconnect call got %q", body)
+	}
+	_ = app.Close()
+	_ = awaitEvent(t, done, "handleConnection returning")
+
+	select {
+	case m := <-mocks2:
+		if m.Spec.HTTPReq == nil || !strings.HasSuffix(m.Spec.HTTPReq.URL, "/after-reconnect") {
+			t.Fatalf("reconnected recording got unexpected mock %+v", m.Spec.HTTPReq)
+		}
+	case leaked := <-mocks1:
+		url := "<non-http>"
+		if leaked != nil && leaked.Spec.HTTPReq != nil {
+			url = leaked.Spec.HTTPReq.URL
+		}
+		t.Fatalf("post-reconnect mock %q leaked onto the previous recording's output channel instead of the reconnected stream", url)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for /after-reconnect mock on reconnected recording")
+	}
+}

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -1559,5 +1560,110 @@ func TestAParserBehindTheRelayReadsTheEndOfAStreamAsEOF(t *testing.T) {
 	}
 	for _, e := range early {
 		t.Error(e)
+	}
+}
+
+// A parser that is gone while the pre-dispatch window is still up (the
+// Postgres parser retired before its ResumePreDispatch or UpgradeTLS) must
+// not leave the connection held: PauseTees, which the proxy calls once the
+// parser is dead, ends the window, so the client's first bytes reach the
+// destination and its answer reaches the client. Before, both stayed
+// stashed until the client timed out.
+func TestPauseTeesEndsThePreDispatchWindowOfAParserThatIsGone(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{PreDispatchPause: true})
+	payload := []byte("startup-message")
+	// The write blocks until the relay reads it; its error is checked here,
+	// on the test's goroutine, once the destination has the bytes.
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := h.clientApp.Write(payload) // a short write returns an error
+		wrote <- err
+	}()
+	// Held while the parser could still decide.
+	_ = h.destSvc.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if n, err := h.destSvc.Read(make([]byte, 64)); err == nil {
+		t.Fatalf("the destination got %d bytes during the pre-dispatch window", n)
+	}
+	if h.r.HeldAtParserEnd() {
+		t.Fatal("HeldAtParserEnd before the parser ended")
+	}
+	// The parser is gone.
+	h.r.PauseTees()
+	if !h.r.HeldAtParserEnd() {
+		t.Fatal("the pre-dispatch window the parser left up is not reported as a hold")
+	}
+	_ = h.r.ClientStream().Close()
+	_ = h.r.DestStream().Close()
+	_ = h.destSvc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(h.destSvc, got); err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("the destination did not get the client's bytes after the parser was gone: %q, %v", got, err)
+	}
+	if err := <-wrote; err != nil {
+		t.Fatalf("clientApp.Write: %v", err)
+	}
+	reply := []byte("N")
+	go func() { _, _ = h.destSvc.Write(reply) }()
+	_ = h.clientApp.SetReadDeadline(time.Now().Add(5 * time.Second))
+	back := make([]byte, 1)
+	if _, err := io.ReadFull(h.clientApp, back); err != nil || !bytes.Equal(back, reply) {
+		t.Fatalf("the client did not get the destination's answer: %q, %v", back, err)
+	}
+	if h.r.currentPauseCh() != nil || h.r.preDispatchActive.Load() {
+		t.Fatal("the relay is still held after the parser was gone")
+	}
+}
+
+// A relay that held nothing for its parser (no pre-dispatch window, no
+// pause, no client hold) is not reported as held when the parser goes.
+func TestHeldAtParserEndIsFalseForAFreeRelay(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{})
+	h.r.PauseTees()
+	if h.r.HeldAtParserEnd() {
+		t.Fatal("a relay that held nothing is reported as held")
+	}
+}
+
+// The same, for a parser gone before Run's goroutine ran: the proxy registers
+// its abort hook between New and `go r.Run`, so PauseTees can come first. The
+// window is armed in New, so PauseTees finds it, and the release it queues
+// runs once Run starts. Armed in Run, the window went up after PauseTees had
+// found nothing, and nothing ended it.
+func TestPauseTeesBeforeRunEndsThePreDispatchWindow(t *testing.T) {
+	t.Parallel()
+	clientApp, srcProxy := net.Pipe()
+	dstProxy, destSvc := net.Pipe()
+	r := New(Config{Logger: zap.NewNop(), PreDispatchPause: true}, srcProxy, connseq.NewUpstream(dstProxy))
+	r.PauseTees()
+	if !r.HeldAtParserEnd() {
+		t.Fatal("the window armed by New is not reported as a hold")
+	}
+	_ = r.ClientStream().Close()
+	_ = r.DestStream().Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = r.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = clientApp.Close()
+		_ = destSvc.Close()
+		<-done
+		_ = srcProxy.Close()
+		_ = dstProxy.Close()
+	})
+	payload := []byte("startup-message")
+	go func() { _, _ = clientApp.Write(payload) }()
+	_ = destSvc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(destSvc, got); err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("the destination did not get the client's bytes: %q, %v", got, err)
+	}
+	go func() { _, _ = destSvc.Write([]byte("N")) }()
+	_ = clientApp.SetReadDeadline(time.Now().Add(5 * time.Second))
+	back := make([]byte, 1)
+	if _, err := io.ReadFull(clientApp, back); err != nil || back[0] != 'N' {
+		t.Fatalf("the client did not get the destination's answer: %q, %v", back, err)
 	}
 }

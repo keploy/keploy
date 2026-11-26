@@ -46,36 +46,41 @@ func NewRemovalWatch(api ContainerWaiter, name string) *RemovalWatch {
 }
 
 // Watch asks the engine to say when the container is removed. It returns
-// once the engine has taken the question -- the engine answers a wait's
-// request only after it has registered it -- or once ask ends (keploy's
-// bound on an answer from the engine's daemon). A daemon that has not taken
-// the question by then is not waited for: the question is withdrawn, and the
-// stop goes on. Wait then finds the engine's wait ended and returns at once.
-// A question the engine has taken is kept past ask, for Wait -- unless ask
-// ends in the moment between the engine's taking it and Watch's return. It
-// is withdrawn then too, and Wait returns at once: the run's volumes may
-// still be held when RemoveRunVolumes asks, which leaves them for a later
-// run's SweepRunVolumes.
-func (w *RemovalWatch) Watch(ask context.Context) {
+// true once the engine has taken the question -- the engine answers a wait's
+// request only after it has registered it -- or false when ask ends first
+// (keploy's bound on an answer from the engine's daemon). A daemon that has
+// not taken the question by then is not waited for: the question is
+// withdrawn, and the stop goes on. Wait then finds the engine's wait ended
+// and returns at once. A question the engine has taken is kept past ask, for
+// Wait -- unless ask ends in the moment between the engine's taking it and
+// Watch's return. It is withdrawn then too (returning false), and Wait
+// returns at once: the run's volumes may still be held when RemoveRunVolumes
+// asks, which leaves them for a later run's SweepRunVolumes.
+func (w *RemovalWatch) Watch(ask context.Context) bool {
 	withdraw := context.AfterFunc(ask, w.cancel)
 	said, failed := w.api.ContainerWait(w.ctx, w.name, container.WaitConditionRemoved)
-	withdraw()
+	taken := withdraw()
+	if !taken {
+		w.cancel()
+	}
 	w.mu.Lock()
 	w.said, w.failed = said, failed
 	w.mu.Unlock()
+	return taken
 }
 
 // Wait returns once the engine has said the container is removed, or that
 // it is gone or could not be removed, or once ctx ends. It returns at once
 // when Watch never asked -- the container ended on its own, and its `docker
-// run` client, which waits for the removal, was not killed -- and when the
-// container still runs: the stop did not reach it, and nothing removes it.
+// run` client, which waits for the removal, was not killed -- when Watch
+// withdrew the wait because ask expired, and when the container still runs:
+// the stop did not reach it, and nothing removes it.
 func (w *RemovalWatch) Wait(ctx context.Context, logger *zap.Logger) {
 	defer w.cancel()
 	w.mu.Lock()
 	said, failed := w.said, w.failed
 	w.mu.Unlock()
-	if said == nil {
+	if said == nil || w.ctx.Err() != nil {
 		return
 	}
 	if info, err := w.api.ContainerInspect(ctx, w.name); err == nil && info.ContainerJSONBase != nil && info.State != nil && info.State.Running {

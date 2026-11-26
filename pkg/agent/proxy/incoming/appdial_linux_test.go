@@ -90,6 +90,9 @@ func callThroughHandler(t *testing.T, pm *IngressProxyManager, addr string) (cli
 // says where the app listens, and the call is forwarded there and answered,
 // with nothing said above DEBUG. Without it the call was refused (main: an
 // ERROR after 3 s), and with only a wait it would have waited for ever.
+// The address dialed is also written as keploy's proxy writes a dual-stack
+// socket's IPv4 destination, [127.0.0.1]:p (a Java client's): the socket
+// table is read for it as for 127.0.0.1:p.
 func TestACallToAnAppThatListensAtAnotherAddressOfItsNamespaceIsAnswered(t *testing.T) {
 	for _, tc := range []struct {
 		name, network string
@@ -100,33 +103,43 @@ func TestACallToAnAppThatListensAtAnotherAddressOfItsNamespaceIsAnswered(t *test
 		{"an interface's address", "tcp4", nonLoopbackIPv4},
 		{"an interface's IPv6 link-local address, on its device", "tcp6", linkLocalIPv6},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			host := tc.host(t)
-			port := testnet.SharedPort(t)
-			ln, err := testnet.OpenShared(tc.network, net.JoinHostPort(host, strconv.Itoa(port)))
-			if err != nil {
-				t.Skipf("cannot listen at %s here: %v", host, err)
-			}
-			t.Cleanup(func() { _ = ln.Close() })
-			serveApp(t, ln, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "AT "+host) })
-			core, logs := observer.New(zapcore.DebugLevel)
-			pm := New(zap.New(core), nil, &config.Config{})
+		for _, dialed := range []string{"127.0.0.1:", "[127.0.0.1]:"} {
+			t.Run(tc.name+"/"+dialed+"p", func(t *testing.T) {
+				testACallToAnotherAddressIsAnswered(t, tc.network, tc.host(t), dialed)
+			})
+		}
+	}
+}
 
-			client, done := callThroughHandler(t, pm, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-			if err != nil {
-				t.Fatalf("the call to an app at %s was not answered: %v; logged: %v", host, err, atOrAbove(logs, zapcore.DebugLevel))
-			}
-			body, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if string(body) != "AT "+host {
-				t.Fatalf("answer %s %q, want the app's", resp.Status, body)
-			}
-			<-done
-			if e := atOrAbove(logs, zapcore.InfoLevel); len(e) != 0 {
-				t.Errorf("logged at INFO or above: %v", e)
-			}
-		})
+// testACallToAnotherAddressIsAnswered is one call of
+// TestACallToAnAppThatListensAtAnotherAddressOfItsNamespaceIsAnswered: the
+// app listens at host on network, and the ingress dials dialed (an address
+// up to its port) and the port.
+func testACallToAnotherAddressIsAnswered(t *testing.T, network, host, dialed string) {
+	port := testnet.SharedPort(t)
+	ln, err := testnet.OpenShared(network, net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		t.Skipf("cannot listen at %s here: %v", host, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	serveApp(t, ln, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "AT "+host) })
+	core, logs := observer.New(zapcore.DebugLevel)
+	pm := New(zap.New(core), nil, &config.Config{})
+
+	client, done := callThroughHandler(t, pm, dialed+strconv.Itoa(port))
+	_ = client.SetDeadline(time.Now().Add(20 * time.Second)) // a call that hangs fails, not the run
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("the call to an app at %s was not answered: %v; logged: %v", host, err, atOrAbove(logs, zapcore.DebugLevel))
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != "AT "+host {
+		t.Fatalf("answer %s %q, want the app's", resp.Status, body)
+	}
+	<-done
+	if e := atOrAbove(logs, zapcore.InfoLevel); len(e) != 0 {
+		t.Errorf("logged at INFO or above: %v", e)
 	}
 }
 

@@ -311,22 +311,29 @@ func TestSetupComposeWrapperDoesNotLeakComposeFileEnvAcrossTestSets(t *testing.T
 			t.Fatalf("SetupCompose leaked COMPOSE_FILE=%q into keploy's own process env", got)
 		}
 
-		// The wrapper child's env carries COMPOSE_FILE pointing at the generated file.
+		// The wrapper child's env carries COMPOSE_FILE pointing at the generated
+		// file alongside docker-compose.override.yml so sidecar/override
+		// definitions are not dropped when compose runs with COMPOSE_FILE set.
 		wantGenerated, err := filepath.Abs("docker-compose-tmp.yaml")
 		if err != nil {
 			t.Fatal(err)
 		}
+		wantOverride, err := filepath.Abs("docker-compose.override.yml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantComposeFile := wantGenerated + string(filepath.ListSeparator) + wantOverride
 		setEffectiveUID(t, 1000)
 		_, env1 := a1.withAgentToken(a1.cmd.WholeUnredacted())
-		if !slices.Contains(env1, "COMPOSE_FILE="+wantGenerated) {
-			t.Fatalf("wrapper runEnv = %v, want COMPOSE_FILE=%s", env1, wantGenerated)
+		if !slices.Contains(env1, "COMPOSE_FILE="+wantComposeFile) {
+			t.Fatalf("wrapper runEnv = %v, want COMPOSE_FILE=%s", env1, wantComposeFile)
 		}
 		gotSudoCmd, envSudo := a1.withAgentToken("sudo make up")
 		if wantSudo := "sudo --preserve-env=" + token.Env + ",COMPOSE_FILE make up"; gotSudoCmd != wantSudo {
 			t.Fatalf("sudo wrapper cmd = %q, want %q", gotSudoCmd, wantSudo)
 		}
-		if !slices.Contains(envSudo, "COMPOSE_FILE="+wantGenerated) {
-			t.Fatalf("sudo wrapper runEnv = %v, want COMPOSE_FILE=%s", envSudo, wantGenerated)
+		if !slices.Contains(envSudo, "COMPOSE_FILE="+wantComposeFile) {
+			t.Fatalf("sudo wrapper runEnv = %v, want COMPOSE_FILE=%s", envSudo, wantComposeFile)
 		}
 
 		// Next test set's FindComposeFiles and port exclusion still see the user's

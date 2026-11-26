@@ -376,7 +376,7 @@ func TestALastDocumentWithoutAFinalNewline(t *testing.T) {
 }
 
 // A mock file can end part-way through its last line: the recorder was killed
-// or the disk filled while appendMock wrote the last mock, which it writes in
+// or the disk filled while writeMockDoc wrote the last mock, which it writes in
 // pieces when it is large. That never fails the set, and the cut mock is never
 // served: it is skipped with one WARN naming the file, listed in Skipped when
 // its name was written, and the prune and the noise write-back move it aside,

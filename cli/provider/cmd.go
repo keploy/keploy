@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
@@ -513,6 +514,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// proven switch), which the agent does not inherit either.
 		cmd.Flags().Bool(provenswitch.VerifyFlag, false, "Internal: recompute each read of the exact view and fail on any difference (KEPLOY_EXACT_VIEW_VERIFY=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(provenswitch.VerifyFlag)
+		// Internal orchestrator→agent flag: the run is keploy's own
+		// (KEPLOY_INTERNAL=1, or a CI run of a keploy/ repository), which a
+		// native agent cannot read for itself: sudo drops the environment
+		// (telemetry.AgentArgs). The agent marks its own run from it, so its
+		// telemetry is not counted as a user's.
+		cmd.Flags().Bool(telemetry.AgentFlag, false, "Internal: this run is keploy's own (KEPLOY_INTERNAL), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden(telemetry.AgentFlag)
 		// Internal orchestrator→agent flag: the Docker endpoint the client
 		// uses (its DOCKER_HOST), which sudo drops, for naming container
 		// destinations (containerkey.AgentArgs). Passed only under the proven
@@ -1178,6 +1186,10 @@ func refuseEngineCommand(cmd *cobra.Command, command string) error {
 			return engine.Unsupported(name)
 		}
 		return nil
+	}
+	if _, rest, err := utils.LeadingEnvAssignments(command); errors.Is(err, utils.ErrUnsupportedInlineEnvExpansion) && utils.FindDockerCmd(rest) == utils.DockerCompose {
+		utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+		return err
 	}
 	name, ok := engine.Invocation(command)
 	if !ok {
@@ -2524,6 +2536,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if v, ignored := provenswitch.IgnoredEnv(); ignored {
 			c.logger.Warn("KEPLOY_PROVEN in the agent's own environment is ignored: an agent takes the proven switch only from the --proven flag of the keploy that starts it",
 				zap.String("value", v), zap.Bool("proven", provenswitch.On()))
+		}
+		if internal, err := cmd.Flags().GetBool(telemetry.AgentFlag); err == nil && internal {
+			telemetry.MarkInternal()
 		}
 		if host, err := cmd.Flags().GetString(containerkey.AgentFlag); err == nil && host != "" {
 			setDockerHost(host)

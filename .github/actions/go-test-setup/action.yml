@@ -1,0 +1,53 @@
+name: Go Test Setup
+description: Install Go, build dependencies, warm module cache, and allow unprivileged user namespaces
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+        cache: false
+
+    - name: Installing build Essentials and gcc
+      shell: bash
+      run: |
+        bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential gcc libc-dev \
+          pkg-config \
+          libgl1-mesa-dev \
+          libxi-dev libxcursor-dev \
+          libxrandr-dev libxinerama-dev \
+          libxxf86vm-dev libx11-dev libx11-xcb-dev
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        # `cache: false` above means this lane re-downloads keploy's whole
+        # module graph on every run, before every test in this job.
+        source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+        go_retry get .
+        # `go get .` resolves the main module's NON-test import graph. The two
+        # test steps additionally load github.com/go-sql-driver/mysql and its
+        # dependency filippo.io/edwards25519, and neither step can be wrapped
+        # (go-retry.sh forbids wrapping `go test`), so a transient proxy error
+        # while those resolve kills the job unretried. Measured by evicting
+        # both from GOMODCACHE: `go get .` leaves them absent, and
+        # `go list -deps -test ./...` extracts exactly those two.
+        # `go list -deps -test` rather than `go mod download` is a preference,
+        # not a correctness point — both warm what the test steps need, and
+        # both leave go.sum byte-identical (measured +0 lines, 3/3 trials; the
+        # command that does rewrite go.sum is `go mod download all`, which is
+        # not this). `go list` warms only what these steps load and picks up
+        # new test-only deps by itself.
+        go_retry list -deps -test ./... > /dev/null
+
+    # ubuntu-24.04 restricts unprivileged user namespaces through AppArmor
+    # by default (kernel.apparmor_restrict_unprivileged_userns=1), so
+    # `unshare --user` fails there (actions/runner-images#10443). Lift that
+    # for every job, which promises user namespaces to the tests
+    # (KEPLOY_TEST_USERNS_REQUIRED in go-test.yaml). A runner without the
+    # setting fails this step, and the lane's promise has to be looked at again.
+    - name: Allow unprivileged user namespaces
+      shell: bash
+      run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

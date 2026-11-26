@@ -90,7 +90,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("handling the chunked requests to read the complete request")
 			err := h.HandleChunkedRequests(ctx, &reqBuf, client, nil)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to handle chunked requests")
+				if !errors.Is(err, io.EOF) {
+					utils.LogError(h.Logger, err, "failed to handle chunked requests")
+				}
 				errCh <- err
 				return
 			}
@@ -241,7 +243,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			// Telemetry / noisy-egress passthrough. Configurable via
 			// record.passThroughPorts / passThroughHosts (see models.PassThroughRule),
-			// with built-in defaults (POST /v1/traces, /ingest) as a "skip" fallback.
+			// with built-in defaults (models.TelemetryDefaults) as a fallback.
 			// These are live, fire-and-forget telemetry the app emits every run, not
 			// recorded dependencies — matching them falls through to the HTTP
 			// fuzzy-matcher, which reads the large (~150–200 KB) bodies against
@@ -644,7 +646,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
-				report, hint := h.buildHTTPMismatchReportHinted(ctx, request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				report, hint := h.buildHTTPMismatchReportHinted(ctx, request, input.body, db, nil, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, diag)
 				if hint != "" {
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + hint)
 				}

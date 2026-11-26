@@ -276,10 +276,12 @@ fi
 # window UpdateMocks always keeps (the readiness GET / is recorded too). There is
 # no mappings.yaml, as in a DaemonSet recording.
 #   D1: the doc-7 test is pointed at a listener that accepts and never answers,
-#       so it hits the client timeout while every other test passes. Tests
-#       passed, none was refused and nothing else failed: the shape the prune
-#       used to accept, deleting the unanswered test's mock. The run must delete
-#       nothing, and must not create mappings.yaml, which would lack doc-7 for good.
+#       so it hits the client timeout (--api-timeout), which keploy's console
+#       says on one line naming the test and test.apiTimeout, while every other
+#       test passes. Tests passed, none was refused and nothing else failed:
+#       the shape the prune used to accept, deleting the unanswered test's
+#       mock. The run must delete nothing, and must not create mappings.yaml,
+#       which would lack doc-7 for good.
 #   D2 (control): doc-7 points at the app again and a mock no test sends is
 #       planted beside its mock. A clean run must delete exactly that one and
 #       create mappings.yaml with doc-7. Without D2, a prune that never runs
@@ -304,7 +306,8 @@ else
     fail "precondition: the no-answer listener did not start on an ephemeral 127.0.0.1 port"
   else
     point_test_at "$tc7" "$hang_port"
-    replay "$APP_DIR/test_noanswer.log" --remove-unused-mocks --api-timeout 3
+    noanswer_timeout=3 # seconds
+    replay "$APP_DIR/test_noanswer.log" --remove-unused-mocks --api-timeout "$noanswer_timeout"
     mocks_after=$(mock_count)
     # Grep a stripped copy, not `strip_ansi <log | grep -q`: under pipefail that
     # pipeline fails whenever grep -q exits on its first match and sed then takes
@@ -313,8 +316,10 @@ else
     strip_ansi <"$APP_DIR/test_noanswer.log" >"$noanswer_log"
     passed_tests=$(awk '/Total test passed:/ { print $NF; exit }' "$noanswer_log")
     failed_tests=$(awk '/Total test failed:/ { print $NF; exit }' "$noanswer_log")
-    if ! grep -q 'Client.Timeout exceeded' "$noanswer_log"; then
-      fail "precondition: the doc-7 test did not hit the client timeout"
+    # The test is its file's name, as mappings.yaml names it (Phase D2).
+    noanswer_line="the app did not answer $(basename "$tc7" .yaml) within test.apiTimeout (${noanswer_timeout}s)"
+    if ! grep -qF "$noanswer_line" "$noanswer_log"; then
+      fail "precondition: the doc-7 test did not hit the client timeout: no line '$noanswer_line'"
       tail -20 "$noanswer_log" | sed 's/^/    /'
     elif [ "${passed_tests:-0}" -lt 1 ] || [ "${failed_tests:-0}" -ne 1 ]; then
       fail "precondition: want doc-7 as the only failure, got ${passed_tests:-?} passed and ${failed_tests:-?} failed; any other failure lets the prune decide on it instead"

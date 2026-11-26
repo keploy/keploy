@@ -454,6 +454,24 @@ func TestConsumedOutsideAssertionFollowsTheSwitch(t *testing.T) {
 	}
 }
 
+// A mock the drain credits to another test's call (MockState.CreditTo: the
+// agent's window reclaim) is that test's consumption: the running test's
+// expected-against-consumed comparison leaves it out, under either switch.
+func TestConsumedOutsideAssertionLeavesOutACredit(t *testing.T) {
+	credit := models.MockState{Name: "m-out", Kind: models.MySQL, Type: "mocks", Lifetime: models.LifetimePerTest, CreditTo: "outer", CreditReplaces: "m-in"}
+	own := credit
+	own.CreditTo, own.CreditReplaces = "", ""
+	for _, on := range []bool{false, true} {
+		setSwitch(t, on)
+		if !consumedOutsideAssertion(credit) {
+			t.Errorf("switch %v: a mock credited to another test is inside the running test's assertion", on)
+		}
+		if consumedOutsideAssertion(own) {
+			t.Errorf("switch %v: the running test's own per-test consume is outside its assertion", on)
+		}
+	}
+}
+
 func TestUnconsumedTestMocks(t *testing.T) {
 	expected := []models.MockEntry{{Name: "m1", Kind: "Http"}, {Name: "m2", Kind: "Http"}, {Name: "dns", Kind: "DNS"}, {Name: "hs", Kind: "Postgres"}}
 	kinds := map[string]models.Kind{"m1": models.HTTP, "m2": models.HTTP, "dns": models.DNS, "hs": models.Postgres}
@@ -553,9 +571,9 @@ func TestRunTestSet_AStreamedTestWithAnUnconsumedTestMockIsNeverObsolete(t *test
 				if want := []models.UnconsumedMock{{Name: "mock-1", Kind: string(models.HTTP)}}; !reflect.DeepEqual(h.result(t, "test-1").FailureInfo.UnconsumedMocks, want) {
 					t.Errorf("unconsumed mocks %+v, want %+v: the evidence names the mock", h.result(t, "test-1").FailureInfo.UnconsumedMocks, want)
 				}
-				said := logs.FilterMessageSnippet("mock mapping mismatch detected for streaming testcase; marking it as FAILED").All()
-				if len(said) != 1 || said[0].ContextMap()["reason"] != vetoUnconsumedTestMock {
-					t.Errorf("the mismatch was said %+v; want once, as FAILED, for the unconsumed test mock", said)
+				said := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()
+				if len(said) != 1 || said[0].ContextMap()["kept_failed_by"] != vetoUnconsumedTestMock {
+					t.Errorf("the mismatch was said %+v; want once, kept FAILED, for the unconsumed test mock", said)
 				}
 				if n := len(logs.FilterMessageSnippet("marking as obsolete").All()) + len(logs.FilterMessageSnippet("mismatch ignored because streaming testcase passed").All()); n != 0 {
 					t.Errorf("the mismatch was also said as obsolete or ignored (%d)", n)
@@ -778,6 +796,19 @@ func TestMarkConsumedByNamesTheSibling(t *testing.T) {
 	}
 }
 
+// A mock a drain credits to another test's call (MockState.CreditTo) is
+// noted as that test's consumption, not the draining test's.
+func TestNoteConsumersNotesACreditUnderItsTest(t *testing.T) {
+	consumers := map[string][]string{}
+	noteConsumers(consumers, "inner", []models.MockState{{Name: "m-in"}, {Name: "m-out", CreditTo: "outer", CreditReplaces: "m-in"}})
+	if got := consumers["m-out"]; !reflect.DeepEqual(got, []string{"outer"}) {
+		t.Errorf("m-out consumed by %v; want [outer], whose call it is credited with", got)
+	}
+	if got := consumers["m-in"]; !reflect.DeepEqual(got, []string{"inner"}) {
+		t.Errorf("m-in consumed by %v; want [inner]", got)
+	}
+}
+
 // Under the switch a streamed test's mock-set comparison leaves out of what it
 // consumed the mocks its assertion does not own, as it leaves them out of
 // what it expects; with the switch off it reads all of it, as before.
@@ -919,9 +950,9 @@ func TestRunTestSet_AStreamedWrongAnswerIsNeverObsoleteUnderTheSwitch(t *testing
 			if !on {
 				return
 			}
-			said := logs.FilterMessageSnippet("mock mapping mismatch detected for streaming testcase").All()
-			if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || said[0].ContextMap()["reason"] != provenswitch.Env+"=1" {
-				t.Fatalf("the mismatch was said %+v; want once, as FAILED, naming the switch", said)
+			said := logs.FilterMessageSnippet("mock mapping diverged (kept FAILED)").All()
+			if len(said) != 1 || said[0].ContextMap()["kept_failed_by"] != provenswitch.Env+"=1" {
+				t.Fatalf("the mismatch was said %+v; want once, kept FAILED, naming the switch", said)
 			}
 		})
 	}

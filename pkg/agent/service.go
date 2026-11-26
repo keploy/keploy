@@ -1139,6 +1139,14 @@ type RecordingKeeper interface {
 	KeepRecording(key string, size int64, decode func() (*models.Mock, error)) (*models.Mock, error)
 }
 
+// RecordingsReadableMarker is implemented by a proxy whose parsers read the
+// whole staged set (integrations.SetFollower): MarkRecordingsReadable, called
+// once the agent has set where the set's on-disk recordings are read, says they
+// can all be read now.
+type RecordingsReadableMarker interface {
+	MarkRecordingsReadable() error
+}
+
 // LearnSetWarmer is implemented by a proxy whose learn step reads the staged
 // set's recordings before its tests' calls do: WarmLearnSet, called once the
 // set is staged and its on-disk recordings are set (RecordedBeforeSetter),
@@ -1444,6 +1452,25 @@ type WindowedProxy interface {
 // ExactTestOpener opens a test under exact serving.
 type WindowedTestOpener interface {
 	OpenTestWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time, given []models.VariableBinding) error
+}
+
+// ErrUnfilteredNotRetained is returned by UnfilteredRetainingWindowedProxy
+// methods when the proxy cannot safely retain its already-staged unfiltered
+// tier under its staging lock (for example, a concurrent DeleteUnFilteredMock,
+// ResetForReplaySession, worker manager invalidation, or lax session promotion
+// raced after CanRetainUnfiltered). The proxy leaves its trees, window, and
+// variable state untouched so the caller can fall back to full staging.
+var ErrUnfilteredNotRetained = errors.New("unfiltered tier cannot be retained")
+
+// UnfilteredRetainingWindowedProxy is an optional WindowedProxy extension that
+// replaces the per-test and startup tiers for a new test window while keeping
+// the already-staged unfiltered (session/connection) tier in place, avoiding
+// reloading, copying, and rebuilding the unfiltered trees on every test when
+// the unfiltered pool has not changed across windows.
+type UnfilteredRetainingWindowedProxy interface {
+	SetFilteredMocksWithWindow(ctx context.Context, filtered []*models.Mock, start, end time.Time) error
+	OpenTestFilteredWithWindow(ctx context.Context, filtered []*models.Mock, start, end time.Time, given []models.VariableBinding) error
+	CanRetainUnfiltered() bool
 }
 
 // AsyncMockLoader is an optional Proxy capability. The agent hands the proxy

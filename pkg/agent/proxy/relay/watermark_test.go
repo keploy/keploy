@@ -106,7 +106,7 @@ func TestWatermark_AParserPastATimeIsDoneWithIt(t *testing.T) {
 	h.writeClient([]byte("one"))
 	h.readDest(3)
 	mid := time.Now()
-	time.Sleep(2 * time.Millisecond) // the next chunk is stamped after mid
+	waitClockPast(t, mid) // the next chunk is stamped after mid
 	h.writeClient([]byte("two"))
 	h.readDest(3)
 	h.writeClient([]byte("three"))
@@ -616,7 +616,7 @@ func TestWatermark_ADeliveredChunkOnTheOtherDirectionHoldsIt(t *testing.T) {
 	h.writeDest([]byte("resp"))
 	h.readClient(4)
 	mid := time.Now()
-	time.Sleep(2 * time.Millisecond) // the next chunk is stamped after mid
+	waitClockPast(t, mid) // the next chunk is stamped after mid
 	h.writeClient([]byte("next"))
 	h.readDest(4)
 	// The drain hands the response to the parser's stream at once (it is
@@ -685,7 +685,7 @@ func TestWatermark_AParserWaitingWithTheOtherDirectionUnreadIsNotDone(t *testing
 	h.readDest(3)
 	readChunk(t, h.r.ClientStream())
 	mid := time.Now()
-	time.Sleep(2 * time.Millisecond) // the response is stamped after mid
+	waitClockPast(t, mid) // the response is stamped after mid
 	h.writeDest([]byte("resp"))
 	h.readClient(4)
 	awaitState(t, "the response to reach the parser's stream", func() bool {

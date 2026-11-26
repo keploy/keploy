@@ -165,6 +165,16 @@ type MockManager struct {
 
 	logger *zap.Logger
 
+	// carryRunLeftOutOwn accumulates mocks left out by the carry-over tier
+	// byte cap across the entire agent run (outside carry.reset() and
+	// ResetForReplaySession) so one end-of-run Warn reports the run-wide
+	// total. Worker managers point carryRunLeftOutShared at the run
+	// manager's counter via shareCarryOverOverflow so worker overflows fold
+	// into the run total and only the run manager emits the Warn.
+	carryRunLeftOutOwn    atomic.Int64
+	carryRunLeftOutShared *atomic.Int64
+	carryWarnEmitted      sync.Once
+
 	// consumedMu guards consumedList and consumedIndex.
 	// consumedList records MockState entries in the order they were first
 	// intercepted from the network (first call to flagMockAsUsed wins the
@@ -200,11 +210,18 @@ type MockManager struct {
 	// learnedElsewhere.
 	elsewhereCounts                 map[elsewhereOp]map[string]int
 	elsewhereCounted, elsewhereSaid int
-	// servedCount counts, per mock name, every time the mock answered a
-	// request this session, reset with consumedPersistent. A mock that may
-	// answer more than once keeps its first-use timestamp and its usage in
-	// consumedPersistent, so only a count tells that it answered again.
+	// servedCount counts, per mock name, every call the mock is credited with
+	// this session (ServedCounts), reset with consumedPersistent by a reset of
+	// the replay session, and on its own as the set's start is served again
+	// (RearmAppStart). A mock that may answer more than once keeps its
+	// first-use timestamp and its usage in consumedPersistent, so only a count
+	// tells that it answered again.
 	servedCount map[string]uint64
+	// setServed is servedCount for the per-test mocks of the test set being
+	// replayed, as the set's ownership summary says it (sayOwnership, which
+	// empties it); a set boundary and a re-arm of the set's start
+	// (RearmAppStart) empty it too.
+	setServed map[string]uint64
 	// takenThisSession names each mock a take settled holding the round
 	// lock answered this session (takeLocked: one of a view's own consumed,
 	// a staged recording spent), less a pool view's ahead answer voided
@@ -442,6 +459,21 @@ type MockManager struct {
 	// swapMu.
 	scopeFiredThisSet bool
 
+	// appStart is the set's start as its staging staged it, while no test of
+	// the set has run (noteAppStartLocked): what RearmAppStart stages again
+	// for a new instance of the application. Written under swapMu.
+	appStart *appStartStaging
+	// rearmMu orders a re-arm of the set's start (RearmAppStart) and what
+	// runs a test: a staging (SetMocksWithWindow, SetMocksWithWindowThreeTier,
+	// OpenTestWithWindow, SetScopeMocksWithReplaced) and an exact test's opening
+	// (serveExactTest). Each takes it first, before any other lock of the
+	// manager, so no test opens between a re-arm's check and its staging.
+	rearmMu sync.Mutex
+	// testHookRearm, set only by a test before the manager is shared, runs
+	// in a re-arm (rearmAppStart) once it checked and began the new variable
+	// set, before it stages.
+	testHookRearm func()
+
 	// cutoffSeeded parks the startup-init cutoff the replayer supplies for the
 	// NEXT set, until that set's staging call installs it.
 	//
@@ -657,6 +689,44 @@ type MockManager struct {
 	// hitIndexBuilt, when set, runs between building a new hit index and
 	// swapping it in. Tests only: it lets one land a seed in that gap.
 	hitIndexBuilt func()
+	// prevPerTestHitNames tracks per-test/startup-only mock names added to
+	// hitIdx on top of a retained unfiltered tier so subsequent per-test
+	// stagings update hitIdx in O(window) instead of rebuilding the whole
+	// unfiltered hit index. Guarded by swapMu.
+	prevPerTestHitNames map[string]struct{}
+
+	// unfilteredStaged is set once the unfiltered tier has been published for
+	// the current set (cleared on ResetForReplaySession and scope staging);
+	// unfilteredDeleted is set if DeleteUnFilteredMock removes an entry or
+	// UpdateUnFilteredMock performs a non-restorable mutation (cross-kind move,
+	// rename, DNS update, in-place same-pointer update, or filtered->unfiltered
+	// promotion), forcing the next staging to reload the unfiltered pool.
+	unfilteredStaged  atomic.Bool
+	unfilteredDeleted atomic.Bool
+
+	// retainedDirty maps the latest *models.Mock pointer currently filed in
+	// m.unfiltered and m.unfilteredByKind via UpdateUnFilteredMock back to the
+	// original *models.Mock pointer that full staging placed there. Before
+	// publishing a retained per-test window (SetFilteredMocksWithWindow /
+	// OpenTestFilteredWithWindow), restoring just these O(touched) entries
+	// returns the unfiltered trees to their exact freshly-staged SortOrder and
+	// contents without reloading the full pool. Guarded by treesMu.
+	retainedDirty map[*models.Mock]*models.Mock
+
+	// reclaim tracks unconsumed equivalent alternatives recorded inside active
+	// overlapping windows so a later overlapping window can reclaim a consumed
+	// mock by consuming a still-unconsumed alternative instead (WindowReclaim).
+	reclaim windowReclaimState
+	// edgeStaged names the mocks the last staging took by the edge rule
+	// (recordConsume marks a consume of one MockState.EdgeOwned); ownership
+	// counts what the window ownership rules did in the set being replayed,
+	// said at its end (logSetOwnership).
+	edgeStaged atomic.Pointer[map[string]struct{}]
+	ownership  ownershipTally
+	// consumeRecorded, a test's hook, runs after each section of the drain's
+	// lock that recorded consumes (recordConsumes) is left: where a drain
+	// can come between two. Nil outside tests.
+	consumeRecorded func()
 }
 
 // defaultConnectionIdleRetention is the baseline for how long a
@@ -766,6 +836,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 // are still live, they just don't accept new mutations.
 func (m *MockManager) Close() {
 	m.closeOnce.Do(func() {
+		m.LogCarryOverOverflowSummary()
 		m.closed.Store(true)
 		close(m.sweeperStop)
 		// A learn step waiting for this manager's round to move
@@ -834,9 +905,15 @@ func (m *MockManager) IsClosed() bool {
 // references to the cleared trees still observe valid (empty) trees
 // rather than panicking.
 func (m *MockManager) ResetForReplaySession() {
+	m.unfilteredStaged.Store(false)
+	m.unfilteredDeleted.Store(false)
+	m.treesMu.Lock()
+	m.retainedDirty = nil
+	m.treesMu.Unlock()
 	m.spentMu.Lock()
 	m.spent = nil
 	m.spentMu.Unlock()
+	m.clearWindowReclaim()
 	m.connMu.Lock()
 	m.connectionTrees = make(map[string]*TreeDb)
 	m.connectionLastTs = make(map[string]time.Time)
@@ -1036,18 +1113,39 @@ func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered,
 func (m *MockManager) statelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
 	if kind == models.DNS {
 		key = strings.ToLower(dns.Fqdn(key))
+		m.treesMu.RLock()
+		defer m.treesMu.RUnlock()
+		if km, ok := m.statelessFiltered[kind]; ok {
+			if list := km[key]; len(list) > 0 {
+				filtered = append([]*models.Mock(nil), list...)
+			}
+		}
+		if km, ok := m.statelessUnfiltered[kind]; ok {
+			if list := km[key]; len(list) > 0 {
+				unfiltered = append([]*models.Mock(nil), list...)
+			}
+		}
+		return
 	}
 	m.treesMu.RLock()
-	defer m.treesMu.RUnlock()
-	if km, ok := m.statelessFiltered[kind]; ok {
-		if list := km[key]; len(list) > 0 {
-			filtered = append([]*models.Mock(nil), list...)
-		}
+	flt := m.filteredByKind[kind]
+	unf := m.unfilteredByKind[kind]
+	m.treesMu.RUnlock()
+	if flt != nil {
+		flt.rangeValues(func(v interface{}) bool {
+			if mk, ok := v.(*models.Mock); ok && mk != nil && mk.Name == key {
+				filtered = append(filtered, mk)
+			}
+			return true
+		})
 	}
-	if km, ok := m.statelessUnfiltered[kind]; ok {
-		if list := km[key]; len(list) > 0 {
-			unfiltered = append([]*models.Mock(nil), list...)
-		}
+	if unf != nil {
+		unf.rangeValues(func(v interface{}) bool {
+			if mk, ok := v.(*models.Mock); ok && mk != nil && mk.Name == key {
+				unfiltered = append(unfiltered, mk)
+			}
+			return true
+		})
 	}
 	return
 }
@@ -1312,6 +1410,37 @@ func (m *MockManager) RecordedWindowIndex(t time.Time) (index int, known bool) {
 	return s.CurrentIndex(t), true
 }
 
+// OwnerTestWindow returns the recorded test window that owns t
+// (models.WindowSchedule.OwnerOf with models.MockWindowEdgeSkew), whether t
+// lies inside that window, and whether an owner exists
+// (integrations.WindowOwnership).
+func (m *MockManager) OwnerTestWindow(t time.Time) (owner models.TestWindow, inside, owned bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 || t.IsZero() {
+		return models.TestWindow{}, false, false
+	}
+	idx, in, ok := s.OwnerOf(t, models.MockWindowEdgeSkew)
+	if !ok {
+		return models.TestWindow{}, false, false
+	}
+	return s.Window(idx), in, true
+}
+
+// OwnerTestWindowSpan returns the smallest recorded test window containing the
+// interval [start, end] (models.WindowSchedule.OwnerOfSpan;
+// integrations.WindowOwnership).
+func (m *MockManager) OwnerTestWindowSpan(start, end time.Time) (owner models.TestWindow, owned bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 || start.IsZero() {
+		return models.TestWindow{}, false
+	}
+	idx, ok := s.OwnerOfSpan(start, end)
+	if !ok {
+		return models.TestWindow{}, false
+	}
+	return s.Window(idx), true
+}
+
 // SameRecordedTestWindow reports whether a and b were recorded inside one
 // recorded test's window; known is false when the replay seeded none.
 func (m *MockManager) SameRecordedTestWindow(a, b time.Time) (same, known bool) {
@@ -1488,6 +1617,9 @@ func (m *MockManager) getFilteredMocksInWindowAt(v *exactView) ([]*models.Mock, 
 		case inFlightAtStart(mock, req, res, gapFrom, start, hasGap):
 			// In flight when the window's test began: its own.
 			out = append(out, mock)
+		case m.isEdgeOwnedByWindow(mock, start, end):
+			// Bounded edge skew outside every recorded window, nearest to this window.
+			out = append(out, mock)
 		default:
 			droppedOutOfWindow++
 		}
@@ -1544,6 +1676,8 @@ func (m *MockManager) DroppedOutOfWindow() uint64 {
 // Also resets the per-test droppedOutOfWindow counter, and closes the channel
 // WindowChanged handed out once the new trees and window are visible.
 func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	m.keepRunOnlyForAnExactStartUp(start)
 	m.setMocksWithWindow(filtered, unfiltered, start, end)
 	m.placeWindowAt(start)
@@ -1575,15 +1709,91 @@ func (m *MockManager) keepRunOnlyForAnExactStartUp(start time.Time) {
 	m.vars.AllowRun()
 }
 
+// CanRetainUnfiltered reports whether this manager already holds an intact
+// unfiltered tier for the current set that can be retained across per-test
+// window updates without reloading or rebuilding the unfiltered trees.
+// Entries mutated by UpdateUnFilteredMock during a test are restored in place
+// in O(touched) before publishing the next window so every test observes the
+// exact freshly-staged unfiltered order and contents.
+func (m *MockManager) CanRetainUnfiltered() bool {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	return !m.boundaryPending && m.unfilteredStaged.Load() && !m.unfilteredDeleted.Load()
+}
+
+// SetFilteredMocksWithWindow atomically updates the per-test and startup tiers
+// and the active test window while retaining the already-staged unfiltered
+// (session/connection) tier in place. Returns false without mutating trees or
+// window state if retention can no longer be honored under swapMu (e.g. a
+// concurrent DeleteUnFilteredMock, ResetForReplaySession, or lax session
+// promotion raced after CanRetainUnfiltered).
+func (m *MockManager) SetFilteredMocksWithWindow(filtered []*models.Mock, start, end time.Time) bool {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
+	if !m.setMocksWithWindowRetaining(filtered, nil, start, end, true) {
+		return false
+	}
+	m.placeWindowAt(start)
+	return true
+}
+
 // setMocksWithWindow is SetMocksWithWindow but for the run's (KeepNoRun).
 func (m *MockManager) setMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	_ = m.setMocksWithWindowRetaining(filtered, unfiltered, start, end, false)
+}
+
+func (m *MockManager) setMocksWithWindowRetaining(filtered, unfiltered []*models.Mock, start, end time.Time, retainUnfiltered bool) bool {
 	// Signal once the new trees and window are visible: the deferred calls
 	// run last in, first out, so swapMu is released first.
-	defer m.signalWindowChange()
+	applied := false
+	defer func() {
+		if applied {
+			m.signalWindowChange()
+		}
+	}()
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
-	ownForStaging(&filtered, &unfiltered)
-	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end, false)
+	if retainUnfiltered {
+		if !m.canRetainUnfilteredLocked(filtered, start, end, false) {
+			return false
+		}
+		ownForStaging(&filtered)
+	} else {
+		ownForStaging(&filtered, &unfiltered)
+	}
+	applied = m.setMocksWithWindowLockedRetaining(filtered, unfiltered, nil, start, end, false, retainUnfiltered)
+	return applied
+}
+
+// canRetainUnfilteredLocked checks under swapMu whether a retained-unfiltered
+// staging can proceed without mutating any manager state, including verifying
+// that no mock in filtered would be lax-promoted into sessionIn.
+func (m *MockManager) canRetainUnfilteredLocked(filtered []*models.Mock, start, end time.Time, scope bool) bool {
+	if start.Equal(models.BaseTime) || scope || m.boundaryPending || !m.unfilteredStaged.Load() || m.unfilteredDeleted.Load() {
+		return false
+	}
+	if !start.IsZero() && !end.IsZero() {
+		firstStart := m.firstWindowStart
+		if firstStart.IsZero() || start.Before(firstStart) {
+			firstStart = start
+		}
+		sw := pkg.ServeWindow{Start: start, End: end, FirstStart: firstStart, StrictPerCall: true, StrictWindow: true}
+		if m.exactView() == nil {
+			sw.Windows = m.testWindows.Load()
+		}
+		if gapFrom, hasGap := m.testWindows.Load().GapBefore(start); hasGap {
+			sw.InFlightFrom = gapFrom
+		}
+		for _, mock := range filtered {
+			if mock == nil || m.isReclaimConsumed(mock.Name) {
+				continue
+			}
+			if serve, _ := pkg.StageInWindow(nil, mock, sw); serve == pkg.ServedSession {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // SetScopeMocks stages the pool of keploy mock replay, with the proven switch
@@ -1626,6 +1836,8 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 // replace (so carry-over mocks belonging to other tests never leak replacements
 // into the open test's background serving).
 func (m *MockManager) SetScopeMocksWithReplaced(filtered, unfiltered []*models.Mock, open bool, replaced map[string]struct{}) {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	defer m.signalWindowChange()
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
@@ -1809,6 +2021,21 @@ func bootPlaced(mk *models.Mock, cutoff time.Time) bool {
 // scope opens a test with no time bounds (SetScopeMocks); it is published
 // with the window, and every other staging closes one.
 func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope bool) {
+	_ = m.setMocksWithWindowLockedRetaining(filtered, unfiltered, explicitStartup, start, end, scope, false)
+}
+
+func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope, retainUnfiltered bool) bool {
+	if retainUnfiltered && !m.canRetainUnfilteredLocked(filtered, start, end, scope) {
+		return false
+	}
+	var restoredKinds map[models.Kind]struct{}
+	if retainUnfiltered {
+		var ok bool
+		restoredKinds, ok = m.restoreRetainedUnfilteredLocked()
+		if !ok {
+			return false
+		}
+	}
 	// Every staging starts the per-test stateful cursors over: a test's own
 	// recordings of a request advance their cursor within that test alone.
 	m.resetPerTestCursors()
@@ -1872,6 +2099,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	if scope {
 		m.scopeFiredThisSet = true
 	}
+	// The set's start, as this staging stages it, while no test of the set
+	// has run: what a new instance of the application is staged again
+	// (RearmAppStart). Noted before a carry-over mock the app consumed is
+	// left out, as that re-arm forgets those consumes.
+	m.noteAppStartLocked(filtered, unfiltered, explicitStartup, end,
+		isInitialStaging && !scope && (m.boundaryPending || (!m.testFiredThisSet && !m.scopeFiredThisSet)))
 	if !fenced {
 		// A carry-over mock the app consumed as it started is not staged
 		// again, whatever this staging was handed (bootTaken). The previous
@@ -1908,6 +2141,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// snapshot too.
 		m.carry.reset()
 		m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
+		m.clearWindowReclaim()
 		// Staging is the set boundary as far as routing is concerned: this is
 		// where the previous set's window bits and startup-init cutoff go, so
 		// they are replaced in the same call that replaces the trees rather
@@ -2011,7 +2245,15 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// the session pool (KEPLOY_STRICT_MOCK_WINDOW=0: an unstated per-test mock
 	// out of the window), as the agent's window filter promotes it.
 	var sessionIn []*models.Mock
+	// edgeNames names the mocks this staging took by the edge rule: a consume
+	// of one of them is the open test's though its recorded window leaves it
+	// out (MockState.EdgeOwned). Replaced at every staging.
+	var edgeNames map[string]struct{}
+	// Under exact serving the test's mapping says which recordings it owns:
+	// the edge rule, a rule of recorded times, is off there.
+	edgeOn := m.exactView() == nil
 	if !isInitialStaging && !start.IsZero() && !end.IsZero() {
+		m.pruneWindowReclaim(start)
 		out := make([]*models.Mock, 0, len(filtered))
 		// Every mock is staged by the agent's one serve decision
 		// (pkg.StageInWindow, the window filter's own rule, which the
@@ -2040,13 +2282,22 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		//     ReceiveMessage, a BLPOP) the app keeps outstanding between
 		//     tests, whose answer the test waits for (models.InFlightEligible);
 		//   - a window-bound mock (a connection failure): its own window or
-		//     the startup band, nowhere else.
+		//     the startup band, nowhere else;
+		//   - after every other rule, a plain per-test timed mock placed just
+		//     outside every window, within models.MockWindowEdgeSkew of this
+		//     window's edge and nearer it than any other's (the edge rule,
+		//     models.WindowSchedule.EdgeOwner, through sw.Windows): its own.
+		//     Off under exact serving.
 		//
 		// A carry-over mock no rule serves here (loaded ahead of its window,
 		// or mapped to this test from a gap) is offered to the carry-over
 		// tier below, which serves it from its release window on
 		// (models.WindowSchedule.CarryOverReachable).
 		sw := pkg.ServeWindow{Start: start, End: end, FirstStart: firstStart, StrictPerCall: true, StrictWindow: true}
+		if edgeOn {
+			// The edge rule (pkg.StageInWindow's, as every site asks it).
+			sw.Windows = m.testWindows.Load()
+		}
 		if gapFrom, hasGap := m.testWindows.Load().GapBefore(start); hasGap {
 			sw.InFlightFrom = gapFrom
 		}
@@ -2054,10 +2305,22 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			if mock == nil {
 				continue
 			}
+			if m.isReclaimConsumed(mock.Name) {
+				continue
+			}
 			serve, answeredBeforeAsked := pkg.StageInWindow(m.logger, mock, sw)
 			switch {
 			case serve == pkg.ServedPerTest:
 				out = append(out, mock)
+				// Taken by the edge rule: a mock it gives this window lies
+				// outside every window, so no other rule served it here.
+				if edgeOn && m.isEdgeOwnedByWindow(mock, start, end) {
+					if edgeNames == nil {
+						edgeNames = make(map[string]struct{})
+					}
+					edgeNames[mock.Name] = struct{}{}
+					m.ownership.edgeStaged.Add(1)
+				}
 			case serve == pkg.ServedStartup:
 				startupInit = append(startupInit, mock)
 			case serve == pkg.ServedSession:
@@ -2068,10 +2331,14 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 				carryIn = append(carryIn, mock)
 			default:
 				droppedOutOfWindow++
+				if edgeOn && m.edgeLeftInFlight(mock, start, end) {
+					m.ownership.edgeLeftInFlight.Add(1)
+				}
 			}
 		}
 		filteredForTree = out
 	}
+	m.edgeStaged.Store(&edgeNames)
 
 	// Wave 2/3: rebuild the dedicated startup tree from the startupInit
 	// slice extracted above. The legacy GetSessionMocks shim will
@@ -2171,12 +2438,30 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// tier is published.
 	m.stageRunTest(filteredForTree)
 
-	// Build both remaining tiers before publishing anything: building stamps
+	// Drop our local reference to oldStartup before building replacements, and
+	// on initial/boundary staging (before any test runs) release the previous
+	// set's startup and unfiltered trees before allocating replacements so old
+	// and new large trees never coexist simultaneously in RAM.
+	oldStartup = nil
+	if !retainUnfiltered && (isInitialStaging || setBoundary) {
+		m.treesMu.Lock()
+		m.startup = NewTreeDb(customComparator)
+		m.startupKeys = nil
+		m.unfiltered = NewTreeDb(customComparator)
+		m.unfilteredByKind = make(map[models.Kind]*TreeDb)
+		m.statelessUnfiltered = make(map[models.Kind]map[string][]*models.Mock)
+		m.treesMu.Unlock()
+	}
+
+	// Build remaining tiers before publishing anything: building stamps
 	// tree IDs and sort orders, and one staged mock can sit in more than one
 	// tier (startup and session during BaseTime staging), so stamping after
 	// a tier went live would write into a mock its readers may be copying.
 	filteredBuild := m.buildTier(filteredForTree, true)
-	unfilteredBuild := m.buildTier(unfilteredForTree, false)
+	var unfilteredBuild tierBuild
+	if !retainUnfiltered {
+		unfilteredBuild = m.buildTier(unfilteredForTree, false)
+	}
 	// The explicit startup slice of a three-tier staging joins the startup
 	// tier, stamped after every other tier, as the three-tier call has always
 	// stamped it.
@@ -2258,7 +2543,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// where all three tiers agree. Suppression is per-call, not a flag on the
 	// manager, so it cannot swallow a concurrent consumer's own bump.
 	m.publishFiltered(filteredBuild, false)
-	m.publishUnfiltered(unfilteredBuild, false)
+	if !retainUnfiltered {
+		m.publishUnfiltered(unfilteredBuild, false)
+		if scope {
+			m.unfilteredStaged.Store(false)
+		}
+	}
 
 	touchedAll := map[models.Kind]struct{}{}
 	if carryOn {
@@ -2291,6 +2581,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	for k := range outgoingKinds {
 		touchedAll[k] = struct{}{}
 	}
+	for k := range restoredKinds {
+		touchedAll[k] = struct{}{}
+	}
 	for k := range touchedAll {
 		m.bumpRevisionKind(k)
 	}
@@ -2310,13 +2603,50 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// mock whose count never moves. Session and connection mocks copied into
 	// startup during BaseTime staging are already covered via unfilteredForTree;
 	// the ones that miss are those the startup tier alone holds.
-	m.rebuildHitIndex(setBoundary, startupInit, filteredForTree, unfilteredForTree, explicitStartup)
-
-	// Seed per-connID trees for connection-scoped mocks so
-	// GetConnectionMocks takes the O(1) path from the first lookup.
-	for _, mk := range unfilteredForTree {
-		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimeConnection {
-			m.AddConnectionMock(mk)
+	if retainUnfiltered {
+		m.updatePerTestHitIndex(startupInit, filteredForTree, explicitStartup)
+	} else {
+		m.rebuildHitIndex(setBoundary, startupInit, filteredForTree, unfilteredForTree, explicitStartup)
+		// Seed prevPerTestHitNames with per-test/startup-only names (excluding
+		// unfilteredForTree) so the next retained staging evicts stale per-test
+		// entries from hitIdx without allocating an O(U) unfiltered name map.
+		perTestCandidates := make(map[string]struct{}, len(filteredForTree)+len(explicitStartup))
+		for _, s := range [][]*models.Mock{filteredForTree, explicitStartup} {
+			for _, mk := range s {
+				if mk != nil && mk.Name != "" {
+					perTestCandidates[mk.Name] = struct{}{}
+				}
+			}
+		}
+		if isInitialStaging {
+			// On initial staging, startupInit = filtered + unfiltered; only
+			// filtered mocks are per-test/startup-only candidates.
+			for _, mk := range filtered {
+				if mk != nil && mk.Name != "" {
+					perTestCandidates[mk.Name] = struct{}{}
+				}
+			}
+		} else {
+			for _, mk := range startupInit {
+				if mk != nil && mk.Name != "" {
+					perTestCandidates[mk.Name] = struct{}{}
+				}
+			}
+		}
+		if len(perTestCandidates) > 0 {
+			for _, mk := range unfilteredForTree {
+				if mk != nil && mk.Name != "" {
+					delete(perTestCandidates, mk.Name)
+				}
+			}
+		}
+		m.prevPerTestHitNames = perTestCandidates
+		// Seed per-connID trees for connection-scoped mocks so
+		// GetConnectionMocks takes the O(1) path from the first lookup.
+		for _, mk := range unfilteredForTree {
+			if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimeConnection {
+				m.AddConnectionMock(mk)
+			}
 		}
 	}
 
@@ -2369,6 +2699,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			zap.Time("windowStart", start),
 			zap.Time("windowEnd", end))
 	}
+	return true
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
@@ -2420,6 +2751,8 @@ func (m *MockManager) getUnFilteredMocksIn(v *exactView) ([]*models.Mock, error)
 // gRPC, Kafka, etc.) can pass nil for `startup` and get behaviour
 // identical to SetMocksWithWindow.
 func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	m.keepRunOnlyForAnExactStartUp(start)
 	// The run's place moves once the window is visible.
 	defer m.placeWindowAt(start)
@@ -2791,7 +3124,8 @@ func (m *MockManager) unkeep(name string, gen uint64) {
 // the per-test pool served for it: under exact serving, the test's mapping
 // (ServeExactTest); else the per-test tier, by the test's recorded window when
 // it has one, as GetPerTestMocksInWindow serves it: a call of the window, or
-// one in flight when the test began (inFlightAtStart). With no test open (the
+// one in flight when the test began (inFlightAtStart), or one the edge rule
+// gives the window. With no test open (the
 // staging before the first test, between tests, or a replay that opens none)
 // no mock is.
 func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
@@ -2830,8 +3164,9 @@ func (m *MockManager) ownedByOpenTest(mk *models.Mock, read func()) bool {
 	if start.IsZero() || end.IsZero() {
 		return true
 	}
-	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
-	return inRecordedWindow(mk, start, end, gapFrom, hasGap)
+	windows := m.testWindows.Load()
+	gapFrom, hasGap := windows.GapBefore(start)
+	return inRecordedWindow(mk, start, end, gapFrom, hasGap, windows)
 }
 
 // InFlightIntoOpenTest reports whether mk was in flight when the open test
@@ -2868,11 +3203,12 @@ func (m *MockManager) InFlightIntoOpenTest(mk *models.Mock) bool {
 // test's recorded window [start, end]: placed inside it (models.PlaceOf: its
 // request, or its answer for a mock placed at its answer), in flight when
 // the test began (inFlightAtStart, with gapFrom and hasGap the window's
-// models.WindowSchedule.GapBefore), or no recorded times. A mock whose
-// response is stamped before its request is in no window, as that read leaves
-// it out, but under the proven switch, where the read keeps it
-// (pkg.LeaveOutAnsweredBeforeAsked).
-func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap bool) bool {
+// models.WindowSchedule.GapBefore), given to it by the edge rule
+// (models.WindowSchedule.EdgeOwnedBy over windows, the recorded windows;
+// nil: none), or no recorded times. A mock whose response is stamped before
+// its request is in no window, as that read leaves it out, but under the
+// proven switch, where the read keeps it (pkg.LeaveOutAnsweredBeforeAsked).
+func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap bool, windows *models.WindowSchedule) bool {
 	req, res := mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock
 	if req.IsZero() || res.IsZero() {
 		return true
@@ -2883,7 +3219,7 @@ func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap boo
 	if place := models.PlaceOf(mk); !place.Before(start) && !place.After(end) {
 		return true
 	}
-	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap)
+	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap) || windows.EdgeOwnedBy(mk, start, end)
 }
 
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].
@@ -3012,10 +3348,30 @@ func (m *MockManager) carriedInto(v *exactView) []models.VariableBinding {
 // answered between them bound in the run's, which every later test of the
 // set reads (NewVariableSet).
 func (m *MockManager) OpenTestWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time, given []models.VariableBinding) {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
 	m.keepRunOnlyForAnExactStartUp(start)
 	carry := m.carriedInto(m.exactView())
 	m.vars.StartOpening(func() { m.setMocksWithWindow(filtered, unfiltered, start, end) }, given, carry)
 	m.aheadVars.Reset()
+}
+
+// OpenTestFilteredWithWindow stages a test's per-test window while retaining
+// the already-staged unfiltered tier and begins its variables in the same step.
+// Returns false without mutating trees, window, or variables if retention can
+// no longer be honored under swapMu.
+func (m *MockManager) OpenTestFilteredWithWindow(filtered []*models.Mock, start, end time.Time, given []models.VariableBinding) bool {
+	m.rearmMu.Lock()
+	defer m.rearmMu.Unlock()
+	carry := m.carriedInto(m.exactView())
+	opened := m.vars.TryStartOpening(func() bool {
+		return m.setMocksWithWindowRetaining(filtered, nil, start, end, true)
+	}, given, carry)
+	if !opened {
+		return false
+	}
+	m.aheadVars.Reset()
+	return true
 }
 
 // BoundVariables is the test variables the current test (or the one that just
@@ -3991,14 +4347,19 @@ func (m *MockManager) buildTier(mocks []*models.Mock, filtered bool) tierBuild {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		b.touched[k] = struct{}{}
-		if b.stateless[k] == nil {
-			b.stateless[k] = make(map[string][]*models.Mock)
+		// Only DNS uses the stateless fast-path map in production; non-DNS
+		// GetStatelessMocks lookups fall back to scanning the per-kind tree,
+		// avoiding an extra O(U) map+slice index per staging.
+		if k == models.DNS {
+			if b.stateless[k] == nil {
+				b.stateless[k] = make(map[string][]*models.Mock)
+			}
+			key := mock.Name
+			if mock.Spec.DNSReq != nil {
+				key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
+			}
+			b.stateless[k][key] = append(b.stateless[k][key], mock)
 		}
-		key := mock.Name
-		if mock.Kind == models.DNS && mock.Spec.DNSReq != nil {
-			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
-		}
-		b.stateless[k][key] = append(b.stateless[k][key], mock)
 		if b.v3Trace && mock.Kind == models.PostgresV3 {
 			b.v3Names = append(b.v3Names, mock.Name)
 		}
@@ -4064,13 +4425,58 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 		b.touched[k] = struct{}{}
 	}
 	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = b.tree, b.byKind, b.stateless
+	m.retainedDirty = nil
 	m.treesMu.Unlock()
+	m.unfilteredStaged.Store(true)
+	m.unfilteredDeleted.Store(false)
 	if bump {
 		for k := range b.touched {
 			m.bumpRevisionKind(k)
 		}
 		m.bumpRevisionAll()
 	}
+}
+
+// restoreRetainedUnfilteredLocked restores every unfiltered mock modified via
+// UpdateUnFilteredMock since the last full unfiltered staging back to its
+// original freshly-staged pointer and SortOrder in both m.unfiltered and
+// m.unfilteredByKind. Returns false (marking unfilteredDeleted so the caller
+// falls back to full staging) if a concurrent update/delete raced with any
+// tracked entry. Caller holds swapMu.
+func (m *MockManager) restoreRetainedUnfilteredLocked() (map[models.Kind]struct{}, bool) {
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	if m.unfilteredDeleted.Load() || !m.unfilteredStaged.Load() {
+		return nil, false
+	}
+	if len(m.retainedDirty) == 0 {
+		return nil, true
+	}
+	var restoredKinds map[models.Kind]struct{}
+	for cur, orig := range m.retainedDirty {
+		if cur == nil || orig == nil {
+			continue
+		}
+		okGlobal, gotReplaced := m.unfiltered.updateReplacing(cur.TestModeInfo, orig.TestModeInfo, orig, *cur)
+		if !okGlobal || gotReplaced != cur {
+			m.unfilteredDeleted.Store(true)
+			m.retainedDirty = nil
+			return nil, false
+		}
+		if unf := m.unfilteredByKind[orig.Kind]; unf != nil {
+			if !unf.update(cur.TestModeInfo, orig.TestModeInfo, orig, *cur) {
+				m.unfilteredDeleted.Store(true)
+				m.retainedDirty = nil
+				return nil, false
+			}
+		}
+		if restoredKinds == nil {
+			restoredKinds = make(map[models.Kind]struct{}, 2)
+		}
+		restoredKinds[orig.Kind] = struct{}{}
+	}
+	m.retainedDirty = nil
+	return restoredKinds, true
 }
 
 // ---------- point updates / deletes (keep per-kind in sync) ----------
@@ -4200,6 +4606,30 @@ func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) b
 			}
 			unf.insert(new.TestModeInfo, new)
 			updatedNewKind = true
+			// Filtered->unfiltered promotion added an entry not present at
+			// initial staging; force full reload on next staging.
+			m.unfilteredDeleted.Store(true)
+			m.retainedDirty = nil
+		} else if updatedGlobal {
+			// Track O(touched) rollback back to the original staged entry so
+			// SetFilteredMocksWithWindow restores exact staged order between
+			// tests. Non-restorable mutations (same-pointer in-place edits,
+			// renames, or DNS entries indexed in statelessUnfiltered) force a
+			// full reload.
+			if replaced == nil || replaced == new || replaced.Name != new.Name || oldK == models.DNS {
+				m.unfilteredDeleted.Store(true)
+				m.retainedDirty = nil
+			} else if m.unfilteredStaged.Load() {
+				if m.retainedDirty == nil {
+					m.retainedDirty = make(map[*models.Mock]*models.Mock)
+				}
+				if orig, ok := m.retainedDirty[replaced]; ok {
+					delete(m.retainedDirty, replaced)
+					m.retainedDirty[new] = orig
+				} else {
+					m.retainedDirty[new] = replaced
+				}
+			}
 		}
 		m.treesMu.Unlock()
 	} else {
@@ -4213,6 +4643,7 @@ func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) b
 			newUnf.insert(new.TestModeInfo, new)
 			updatedNewKind = true
 		}
+		m.retainedDirty = nil
 		m.treesMu.Unlock()
 		if m.logger != nil {
 			m.logger.Info("moved mock across kinds",
@@ -4221,6 +4652,7 @@ func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) b
 				zap.String("toKind", string(newK)),
 			)
 		}
+		m.unfilteredDeleted.Store(true)
 	}
 
 	// Mark usage if global changed (legacy behavior)
@@ -4465,9 +4897,13 @@ func (m *MockManager) deleteUnFilteredTier(mock models.Mock) bool {
 	_, unf := m.ensureKindTrees(k)
 	m.treesMu.Lock()
 	deletedKind := unf.deleteMock(mock.TestModeInfo, mock)
+	if deletedGlobal {
+		m.retainedDirty = nil
+	}
 	m.treesMu.Unlock()
 
 	if deletedGlobal {
+		m.unfilteredDeleted.Store(true)
 		if err := m.flagMockAsUsed(models.MockState{
 			Name:             mock.Name,
 			Kind:             mock.Kind,
@@ -5044,8 +5480,12 @@ func (m *MockManager) WindowRewinds() (uint64, time.Time) {
 // inside the other.
 func (m *MockManager) SeedConsumedRewinds(n uint64) {
 	m.windowMu.Lock()
+	changed := n != m.consumedRewinds
 	m.consumedRewinds = n
 	m.windowMu.Unlock()
+	if changed {
+		m.clearWindowReclaim()
+	}
 	m.lockRound()
 	defer m.exact.round.mu.Unlock()
 	r := &m.exact.round
@@ -5469,6 +5909,41 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 	m.hitIdx = idx
 }
 
+// updatePerTestHitIndex updates hitIdx in place for the newly staged per-test
+// and startup slices while keeping every counter belonging to the retained
+// unfiltered tier untouched, avoiding an O(U) map rebuild on every test.
+// Caller holds swapMu; hitMu is taken as a leaf lock.
+func (m *MockManager) updatePerTestHitIndex(slices ...[]*models.Mock) {
+	want := make(map[string]struct{})
+	for _, s := range slices {
+		for _, mk := range s {
+			if mk != nil && mk.Name != "" {
+				want[mk.Name] = struct{}{}
+			}
+		}
+	}
+	nextPerTest := make(map[string]struct{}, len(want))
+	m.hitMu.Lock()
+	defer m.hitMu.Unlock()
+	if m.hitIdx == nil {
+		m.hitIdx = make(map[string]*atomic.Uint64, len(want))
+	}
+	for name := range m.prevPerTestHitNames {
+		if _, keep := want[name]; !keep {
+			delete(m.hitIdx, name)
+		} else {
+			nextPerTest[name] = struct{}{}
+		}
+	}
+	for name := range want {
+		if _, ok := m.hitIdx[name]; !ok {
+			m.hitIdx[name] = new(atomic.Uint64)
+			nextPerTest[name] = struct{}{}
+		}
+	}
+	m.prevPerTestHitNames = nextPerTest
+}
+
 // ---------- bookkeeping ----------
 
 // SetServedObserver makes f told of every mock a parser is served, from now
@@ -5747,16 +6222,75 @@ var errPreviousSet = errors.New("the mock was pooled for an earlier test set")
 // the record, as the fence moves the generation with its drop (zero: not
 // checked).
 func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error {
-	if mock.Name == "" {
-		return fmt.Errorf("mock is empty")
+	return m.recordConsume(mock, staged, true)
+}
+
+// recordConsume is flagMockAsUsed, which counts the consume as a serve of
+// mock (servedCount) when served is set. A window reclaim's re-credit
+// (CommitWindowReclaim) records a recording that served a call before under
+// another test, or one that takes over a call served before, and counts only
+// the latter: each call is one serve. A state credited to another test
+// (MockState.CreditTo) answered no call of the open test, so no window is
+// noted for it (noteAnsweredInLocked). A per-test mock the open window's
+// staging took by the edge rule (models.WindowSchedule.EdgeOwner) is said to
+// be (MockState.EdgeOwned), so the replay lists it under the open test.
+func (m *MockManager) recordConsume(mock models.MockState, staged uint64, served bool) error {
+	return m.recordConsumes([]consumeRecord{{state: mock, staged: staged, served: served}})
+}
+
+// consumeRecord is one state recordConsumes records: recordConsume's
+// arguments.
+type consumeRecord struct {
+	state  models.MockState
+	staged uint64
+	served bool
+}
+
+// recordConsumes is recordConsume for each of recs, in order, in one section
+// of the drain's lock (consumedMu), so a drain (GetConsumedMocks) takes all
+// of them or none: a window reclaim's states (CommitWindowReclaim) are one
+// move of credits, which a drain between two of them would split. It returns
+// the first error; a state that errs is not recorded, the others are.
+func (m *MockManager) recordConsumes(recs []consumeRecord) error {
+	var first error
+	keep := make([]consumeRecord, 0, len(recs))
+	inScope := make([]bool, 0, len(recs))
+	for _, r := range recs {
+		mock := r.state
+		if mock.Name == "" {
+			if first == nil {
+				first = fmt.Errorf("mock is empty")
+			}
+			continue
+		}
+		if mock.CreditTo == "" && !mock.EdgeOwned && m.edgeStagedNow(mock.Name) {
+			mock.EdgeOwned = true
+		}
+		if mock.Timestamp == 0 {
+			mock.Timestamp = time.Now().UnixNano() // when it was first served, so a client can tell which test used it
+		}
+		r.state = mock
+		keep = append(keep, r)
+		inScope = append(inScope, mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen())
 	}
-	if mock.Timestamp == 0 {
-		mock.Timestamp = time.Now().UnixNano() // when it was first served, so a client can tell which test used it
-	}
-	inScope := mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen()
 	m.consumedMu.Lock()
+	for i, r := range keep {
+		if err := m.recordConsumeLocked(r.state, r.staged, r.served, inScope[i]); err != nil && first == nil {
+			first = err
+		}
+	}
+	m.consumedMu.Unlock()
+	if hook := m.consumeRecorded; hook != nil {
+		hook()
+	}
+	return first
+}
+
+// recordConsumeLocked is recordConsume's record of mock, with consumedMu
+// held; inScope is whether it is a per-test mock consumed while a scope is
+// open (scopeIsOpen, read before the lock).
+func (m *MockManager) recordConsumeLocked(mock models.MockState, staged uint64, served, inScope bool) error {
 	if staged != 0 && staged != m.setGen.Load() {
-		m.consumedMu.Unlock()
 		return errPreviousSet
 	}
 	// What a reusable mock learns is cumulative across its states, because the
@@ -5790,6 +6324,21 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 	if inScope && m.scopeConsumed != nil {
 		m.scopeConsumed[mock.Name] = struct{}{}
 	}
+	// A credit off a recording this drain already credits to the same test
+	// (an earlier reclaim of the open test moved that test's call onto it,
+	// in place of the recording its entry lists): the drain keeps one state
+	// per name, so that credit is overwritten in this reclaim (the recording
+	// it moved off is the open test's or the next holder's now), and this
+	// credit takes the place of what that one replaced. A reclaim's states
+	// are recorded in one section of the drain's lock (recordConsumes), so no
+	// drain splits this credit from the state that overwrites that one.
+	if mock.CreditTo != "" && mock.CreditReplaces != "" {
+		if idx, exists := m.consumedIndex[mock.CreditReplaces]; exists {
+			if via := m.consumedList[idx]; via.CreditTo == mock.CreditTo && via.CreditReplaces != "" {
+				mock.CreditReplaces = via.CreditReplaces
+			}
+		}
+	}
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
 		mock.Timestamp = m.consumedList[idx].Timestamp
 		// A consume in this drain that learned after the learn step ended
@@ -5797,6 +6346,13 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 		// were served through it. Only the drain's: another drain's
 		// consumers were not.
 		mock.LearnedAfterEnd = mock.LearnedAfterEnd || m.consumedList[idx].LearnedAfterEnd
+		// A consume of the open test's that the edge rule gave it stays said
+		// so (MockState.EdgeOwned) when a later state for it, recorded after
+		// a staging that no longer holds it, does not say it; a credit to
+		// another test replaces it whole.
+		if mock.CreditTo == "" && m.consumedList[idx].CreditTo == "" {
+			mock.EdgeOwned = mock.EdgeOwned || m.consumedList[idx].EdgeOwned
+		}
 		m.consumedList[idx] = mock // update state, preserve position and first use
 	} else {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
@@ -5808,16 +6364,26 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 	if m.consumedPersistent != nil {
 		m.consumedPersistent[mock.Name] = mock
 	}
-	if m.servedCount != nil {
+	if served && m.servedCount != nil {
 		m.servedCount[mock.Name]++
 	}
-	m.noteAnsweredInLocked(mock.Name, time.Now().UnixNano())
-	m.consumedMu.Unlock()
+	if served && mock.Lifetime == models.LifetimePerTest {
+		if m.setServed == nil {
+			m.setServed = make(map[string]uint64)
+		}
+		m.setServed[mock.Name]++
+	}
+	if mock.CreditTo == "" {
+		m.noteAnsweredInLocked(mock.Name, time.Now().UnixNano())
+	}
 	return nil
 }
 
-// ServedCounts returns a copy of how many times each mock answered a request
-// this session. Never drained.
+// ServedCounts returns a copy of how many calls each mock is credited with
+// this session: each time it answered a request, except that after a window
+// reclaim (CommitWindowReclaim) the copy an earlier call is credited with
+// counts that call, and the recording reclaimed for the open test does not
+// count it again. Never drained.
 func (m *MockManager) ServedCounts() map[string]uint64 {
 	m.consumedMu.Lock()
 	defer m.consumedMu.Unlock()
@@ -6001,24 +6567,71 @@ func (m *MockManager) fileCarryOver(oldPerTest *TreeDb, carryIn, newPerTest []*m
 	for k := range res.kinds {
 		changed[k] = struct{}{}
 	}
-	if res.leftOut > 0 && m.logger != nil {
-		fields := []zap.Field{
-			zap.Int("leftOut", res.leftOut),
-			zap.Int("leftOutThisSet", res.leftOutTotal),
-			zap.Int("held", res.heldCount),
-			zap.Int("heldBytes", res.heldBytes),
-			zap.Int("capBytes", carryOverCapBytes),
-			zap.Time("windowStart", start),
-		}
-		if res.firstCapHit {
-			m.logger.Warn("carry-over tier is full: mocks the application may publish outside their own test window "+
-				"are no longer kept past that window, in recorded order from here on; a test that consumes one of "+
-				"them late will miss it. The held mocks are ones earlier tests left unconsumed", fields...)
-		} else {
-			m.logger.Debug("carry-over tier still full; more mocks left out", fields...)
+	if res.leftOut > 0 {
+		runTotal := m.carryRunCounter().Add(int64(res.leftOut))
+		if m.logger != nil {
+			m.logger.Debug("carry-over tier is full; mocks left out",
+				zap.Int("leftOut", res.leftOut),
+				zap.Int("leftOutThisSet", res.leftOutTotal),
+				zap.Int64("leftOutRunTotal", runTotal),
+				zap.Int("held", res.heldCount),
+				zap.Int("heldBytes", res.heldBytes),
+				zap.Int("capBytes", effectiveCarryOverCapBytes()),
+				zap.Time("windowStart", start),
+			)
 		}
 	}
 	return changed
+}
+
+func (m *MockManager) carryRunCounter() *atomic.Int64 {
+	if m.carryRunLeftOutShared != nil {
+		return m.carryRunLeftOutShared
+	}
+	return &m.carryRunLeftOutOwn
+}
+
+// shareCarryOverOverflow points a worker manager at parent's run-wide
+// carry-over overflow counter so worker overflows accumulate into parent and
+// only parent emits the single end-of-run Warn. Must be called before staging
+// or publishing the worker manager.
+func (m *MockManager) shareCarryOverOverflow(parent *MockManager) {
+	if m == nil || parent == nil || m == parent {
+		return
+	}
+	m.carryRunLeftOutShared = parent.carryRunCounter()
+}
+
+// LogCarryOverOverflowSummary emits at most one Warn per agent run when the
+// carry-over tier byte cap left mocks out during the run, reporting the
+// run-wide total and the env var that raises the cap. Worker managers that
+// share the run manager's counter (shareCarryOverOverflow) suppress their own
+// Warn so closing workers never splits or duplicates the run-end summary.
+func (m *MockManager) LogCarryOverOverflowSummary() {
+	if m == nil || m.logger == nil || m.carryRunLeftOutShared != nil {
+		return
+	}
+	counter := m.carryRunCounter()
+	if counter.Load() <= 0 {
+		return
+	}
+	m.carryWarnEmitted.Do(func() {
+		m.logger.Warn("carry-over tier is full: mocks the application may publish outside their own test window "+
+			"were left out in recorded order during this run; a test that consumes one late may miss it. "+
+			"The held mocks are ones earlier tests left unconsumed",
+			zap.Int64("leftOut", counter.Load()),
+			zap.Int("capBytes", effectiveCarryOverCapBytes()),
+			zap.String("next_step", "check why earlier tests left carry-over mocks unconsumed, or set "+carryOverCapEnv+" (default 16) to raise the carry-over tier cap"))
+	})
+}
+
+// findEvictedCarryOver returns the exact evicted mock ID from the carry-over
+// tier when r.ClosestMock matches an entry in the eviction record.
+func (m *MockManager) findEvictedCarryOver(r *models.MockMismatchReport) string {
+	if m == nil || m.carry == nil {
+		return ""
+	}
+	return m.carry.matchEvicted(r)
 }
 
 // ArmSetFence tells the manager that the session ResetForReplaySession just
@@ -6047,6 +6660,9 @@ func (m *MockManager) ArmSetFence() {
 // flags before both or is refused after (flagMockAsUsed). Caller holds
 // swapMu; consumedMu and bootTakenMu are leaves.
 func (m *MockManager) dropPreviousSetConsumes() {
+	// The previous set's ownership summary, if its end read never said it,
+	// and the next set's counts from nothing.
+	m.sayOwnership(true)
 	m.consumedMu.Lock()
 	// The answered log follows the generation (answeredLog.fence); its
 	// lock is a leaf.

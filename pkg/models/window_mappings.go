@@ -238,6 +238,45 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 	return DeriveWindowMappingsWith(windows, mocks, DeriveOptions{})
 }
 
+// WindowClassifier classifies individual mocks as worker-scope (outside every
+// recorded test window, or idle answers) using the exact same rules as
+// DeriveWindowMappings, in O(log W) time and O(W) memory where W is the number
+// of valid test windows, without buffering mocks in RAM.
+type WindowClassifier struct {
+	ws    []TestWindow
+	sched *WindowSchedule
+}
+
+// NewWindowClassifier prepares a streaming worker-scope classifier for windows.
+func NewWindowClassifier(windows []TestWindow) *WindowClassifier {
+	sched := NewWindowSchedule(windows)
+	return &WindowClassifier{ws: sched.windows, sched: sched}
+}
+
+// IsWorker reports whether DeriveWindowMappings(windows, ...) would place m in
+// WindowMappings.Worker.
+func (c *WindowClassifier) IsWorker(m *Mock) bool {
+	if c == nil || m == nil {
+		return false
+	}
+	w := NewWindowedMock(m)
+	if !w.TestMock || w.At.IsZero() {
+		return false
+	}
+	if w.Idle {
+		return true
+	}
+	at := w.placed()
+	next := sort.Search(len(c.ws), func(i int) bool { return c.ws[i].Start.After(at) })
+	if next > 0 && !c.sched.maxEnd[next-1].Before(at) {
+		return false
+	}
+	if w.InFlight && next < len(c.ws) && c.sched.InFlightInto(w.At, w.Res, c.ws[next].Start) {
+		return false
+	}
+	return true
+}
+
 // DeriveWindowMappingsWith is DeriveWindowMappings with opts.
 func DeriveWindowMappingsWith(windows []TestWindow, mocks []WindowedMock, opts DeriveOptions) WindowMappings {
 	ws := make([]TestWindow, 0, len(windows))

@@ -12,8 +12,10 @@ import (
 const maxHTTPCombinedCaptureBytes = hooksUtils.MaxTestCaseSize
 
 // Per-body capture limit is half the combined 5MB testcase budget so that
-// request + response together stay within the budget enforced downstream.
-const maxHTTPBodyCaptureBytes = maxHTTPCombinedCaptureBytes / 2
+// request + response together stay within the budget enforced downstream
+// (hooksUtils.MaxTestCaseBodySize). An exchange whose body passes it is
+// counted and told as over it (hooksUtils.NoteOverSizeLimit, BodyLimit).
+const maxHTTPBodyCaptureBytes = hooksUtils.MaxTestCaseBodySize
 
 type captureBuffer struct {
 	buf       bytes.Buffer
@@ -81,7 +83,12 @@ func (b *captureBuffer) Bytes() []byte {
 	return b.buf.Bytes()
 }
 
+// Total is how many bytes of the body went through the buffer, captured or
+// not. A nil buffer (no body, or one buffered whole instead) saw none.
 func (b *captureBuffer) Total() int64 {
+	if b == nil {
+		return 0
+	}
 	return b.total
 }
 

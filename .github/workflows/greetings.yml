@@ -2,6 +2,10 @@ name: Greetings
 
 on: [pull_request_target, issues]
 
+# keploy's own CI: the keploy it runs marks its telemetry internal, out of the customer metrics.
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   greeting:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.

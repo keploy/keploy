@@ -3,6 +3,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -30,8 +31,12 @@ func (h *HTTP) readRequestHead(ctx context.Context, finalReq *[]byte, clientConn
 		h.Logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
 		reqHeader, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
 		if err != nil {
-			// With its error: the context's end (context.Canceled) is not logged.
-			utils.LogError(h.Logger, err, "failed to read the request message from the client")
+			if errors.Is(err, io.EOF) {
+				h.Logger.Debug("client closed connection before completing request headers", zap.Error(err))
+			} else {
+				// With its error: the context's end (context.Canceled) is not logged.
+				utils.LogError(h.Logger, err, "failed to read the request message from the client")
+			}
 			return nil, 0, err
 		}
 		// destConn is nil in case of test mode
@@ -141,9 +146,9 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 		}
 
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				// Client closed connection cleanly
-				utils.LogError(h.Logger, nil, "conn closed by the user client")
+				h.Logger.Debug("conn closed by the user client", zap.Error(err))
 				return err
 			}
 
@@ -239,7 +244,11 @@ func (h *HTTP) chunkedRequest(ctx context.Context, finalReq *[]byte, clientConn,
 			if done, ferr := complete(); ferr == nil && done {
 				return nil // the last bytes arrived together with the client closing
 			}
-			utils.LogError(h.Logger, err, "failed to read the request message from the client")
+			if errors.Is(err, io.EOF) {
+				h.Logger.Debug("client closed connection before completing chunked request", zap.Error(err))
+			} else {
+				utils.LogError(h.Logger, err, "failed to read the request message from the client")
+			}
 			return err
 		}
 	}

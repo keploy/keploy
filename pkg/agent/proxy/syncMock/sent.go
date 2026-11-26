@@ -150,7 +150,10 @@ func (l *sentList) from(t time.Time) int {
 func (l *sentList) revokeReaching(from, to time.Time, applied bool, revoke func(name string)) int {
 	lo, hi := l.from(from), len(l.tcs)
 	if !to.IsZero() {
-		hi = sort.Search(len(l.tcs), func(k int) bool { return l.tcs[k].start.After(to) })
+		// The test cases from lo that start after to are kept; with to far
+		// enough before from that none from lo starts by it, that is all of
+		// them, and the range is empty rather than inverted.
+		hi = max(lo, sort.Search(len(l.tcs), func(k int) bool { return l.tcs[k].start.After(to) }))
 	}
 	k := lo
 	for _, tc := range l.tcs[lo:hi] {

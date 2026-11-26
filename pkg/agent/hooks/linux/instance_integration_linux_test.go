@@ -354,11 +354,27 @@ func TestUnloadingTheHooksDetachesTheInstanceFork(t *testing.T) {
 	if _, err := l.Info(); err != nil {
 		t.Fatalf("k_instance_fork's link before the unload: %v", err)
 	}
+	lockDir := t.TempDir()
+	il, err := acquireInstanceLock(lockDir, "")
+	if err != nil {
+		t.Fatalf("acquireInstanceLock: %v", err)
+	}
+	t.Cleanup(func() { _ = il.Release() })
+	h.instanceLock = il
+	if !hasOtherLiveInstanceLocks(lockDir, "sibling") {
+		t.Fatal("instanceLock not visible before unload")
+	}
 	h.unLoad(context.Background(), agent.HookCfg{})
 	if h.instanceFork != nil {
 		t.Error("the hooks unloaded and still hold k_instance_fork's link")
 	}
 	if _, err := l.Info(); err == nil {
 		t.Error("the hooks unloaded and k_instance_fork's link is still open")
+	}
+	if h.instanceLock != nil {
+		t.Error("the hooks unloaded and still hold instanceLock")
+	}
+	if hasOtherLiveInstanceLocks(lockDir, "sibling") {
+		t.Error("the hooks unloaded and instanceLock flock is still held")
 	}
 }

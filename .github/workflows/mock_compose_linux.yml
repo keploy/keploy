@@ -24,6 +24,7 @@ on:
         default: 'all'
 
 env:
+  KEPLOY_INTERNAL: "1"
   # Every run under the proven switch (KEPLOY_PROVEN=1) runs the agent's exact
   # view in verify mode: each read the view keeps materialised is recomputed,
   # and any difference fails that read (pkg/agent/proxy exact_view_verify.go).
@@ -156,6 +157,40 @@ jobs:
           CLOCK_ZONE_LEGS: docker compose
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/clock-zone/proven-clock-zone-linux.sh"
+
+  # A compose project whose names are variables, as the parse-server sample
+  # writes them (name:, container_name, ports and the network's name each
+  # ${VAR:-default}): `keploy record --container-name` finds the app by the
+  # name compose gives its container after its own interpolation, across all 10
+  # legs (defaults, .env, lowercased project name, --compatibility, .env and
+  # inline COMPOSE_COMPATIBILITY, inline APP_CONTAINER, single- and multi-file
+  # inline COMPOSE_FILE, and a compose file in a subdirectory).
+  compose_env_container_name_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: container name from a variable (docker_compose)
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run compose env container-name e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-env-container-name-linux.sh"
 
   # A compose app that exits on its own during `keploy record`: compose stops
   # the project, keploy's agent with it (--abort-on-container-exit). The agent

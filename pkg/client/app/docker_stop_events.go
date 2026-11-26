@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
@@ -154,9 +155,12 @@ type containerWatch struct {
 	// stopSignal is the stop signal the container declares (its compose
 	// stop_signal, or its image's STOPSIGNAL), "" when it declares none.
 	stopSignal string
-	procs      []utils.Reached
-	mainGone   <-chan struct{}
-	release    func()
+	// stopTimeout is the container's declared stop grace period (compose
+	// stop_grace_period / pod terminationGracePeriodSeconds), 0 when unset.
+	stopTimeout time.Duration
+	procs       []utils.Reached
+	mainGone    <-chan struct{}
+	release     func()
 }
 
 // watchContainer reads container id for its stop. The daemon's word is
@@ -172,6 +176,9 @@ func (a *App) watchContainer(ctx context.Context, id string) containerWatch {
 		w.seen, w.running = true, info.State.Running
 		if info.Config != nil {
 			w.stopSignal = info.Config.StopSignal
+			if info.Config.StopTimeout != nil && *info.Config.StopTimeout > 0 {
+				w.stopTimeout = time.Duration(*info.Config.StopTimeout) * time.Second
+			}
 		}
 		if !w.running || info.State.Restarting {
 			// A restarting container has no process to read (its pid is 0).

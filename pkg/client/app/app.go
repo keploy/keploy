@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -34,7 +35,6 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
 )
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -126,11 +126,13 @@ type App struct {
 	composeService string
 	// composeAbort is what the user's compose up abort flags say, which
 	// keploy does on its watch (compose_userabort.go).
-	composeAbort    composeAbortRule
-	keployContainer string
-	composeFile     string // path to the temp compose file (set during SetupCompose)
-	composeFileEnv  string // COMPOSE_FILE handed only to a wrapper command's child env (never exported to keploy's own process env)
-	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
+	composeAbort     composeAbortRule
+	keployContainer  string
+	composeFile      string            // path to the primary temp compose file (set during SetupCompose)
+	composeFiles     []string          // full ordered list of compose files passed to compose (down/ps/sweep)
+	composeInlineEnv map[string]string // leading inline NAME=value assignments from -c (set during SetupCompose)
+	composeFileEnv   string            // COMPOSE_FILE handed only to a wrapper command's child env (never exported to keploy's own process env)
+	composeContent   []byte            // in-memory compose YAML; set when InMemoryCompose is used
 	// composeServices are the service keys of the compose source keploy actually
 	// runs — the user's services plus the injected agent. It is the set
 	// `docker compose down` targets, and the ONLY set the teardown sweep is
@@ -405,7 +407,8 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 
 	newPath := "docker-compose-tmp.yaml"
 
-	serviceInfo, err := a.docker.FindContainerInComposeFiles(paths, a.container)
+	scope := composeScope(a.cmd.WholeUnredacted())
+	serviceInfo, err := a.docker.FindContainerInComposeFiles(ctx, paths, scope, a.container)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find container in compose files")
 		return err
@@ -422,13 +425,16 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	a.composeService = serviceInfo.AppServiceName
 	compose := serviceInfo.Compose
 
-	err = a.docker.ModifyComposeForAgent(compose, a.opts, a.container)
+	// The service is named by its KEY from here on, not by a.container: the
+	// file may write the app's container_name as a variable
+	// (`${APP_CONTAINER:-app}`), which only the resolved model matches.
+	err = a.docker.ModifyComposeForAgent(compose, a.opts, serviceInfo.AppServiceName)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to modify compose for keploy integration")
 		return err
 	}
 	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, compose, a.container)
+		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, compose, serviceInfo.AppServiceName)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during docker compose setup")
 			return err
@@ -441,11 +447,55 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 	}
-	a.setComposeSource(newPath, nil, compose)
+	var extraReplacements map[string]string
+	if len(serviceInfo.ExtraFiles) > 0 {
+		extraReplacements = make(map[string]string, len(serviceInfo.ExtraFiles))
+		for idx, extra := range serviceInfo.ExtraFiles {
+			extraPath := fmt.Sprintf("docker-compose-tmp-%d.yaml", idx+1)
+			if err := a.docker.WriteComposeFile(extra.Compose, extraPath); err != nil {
+				utils.LogError(a.logger, err, "failed to write stripped companion compose file", zap.String("path", extraPath))
+				return err
+			}
+			extraReplacements[extra.Path] = extraPath
+		}
+	}
+	cleanApp := filepath.Clean(serviceInfo.ComposePath)
+	cleanExtra := make(map[string]string, len(extraReplacements))
+	for orig, repl := range extraReplacements {
+		cleanExtra[filepath.Clean(orig)] = repl
+	}
+	rewrittenFiles := make([]string, 0, len(paths))
+	seenRewritten := map[string]bool{}
+	for _, p := range paths {
+		cp := filepath.Clean(p)
+		var mapped string
+		switch {
+		case p == serviceInfo.ComposePath || cp == cleanApp:
+			mapped = newPath
+		case extraReplacements[p] != "":
+			mapped = extraReplacements[p]
+		case cleanExtra[cp] != "":
+			mapped = cleanExtra[cp]
+		default:
+			mapped = p
+		}
+		if !seenRewritten[mapped] {
+			seenRewritten[mapped] = true
+			rewrittenFiles = append(rewrittenFiles, mapped)
+		}
+	}
+	if !seenRewritten[newPath] {
+		rewrittenFiles = append(rewrittenFiles, newPath)
+	}
+	a.setComposeSource(newPath, nil, compose, rewrittenFiles...)
+	a.composeInlineEnv = scope.Env
 	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
-	newCmd, composeFileEnv := composeLaunchPlan(a.cmd.WholeUnredacted(), newPath, serviceInfo.ComposePath)
+	newCmd, composeFileEnv := composeLaunchPlanWithReplacements(a.cmd.WholeUnredacted(), newPath, serviceInfo.ComposePath, paths, extraReplacements)
 	if newCmd != "" {
+		if pd := composeProjectDirToPreserve(paths, scope.ProjectDir); pd != "" {
+			newCmd = withComposeProjectDirectory(newCmd, newPath, pd)
+		}
 		a.setComposeUserAbort(a.cmd.WholeUnredacted(), compose)
 	}
 
@@ -470,8 +520,7 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	// keploy's own generated file — which already defines keploy-agent — and
 	// fail in AddKeployAgentToCompose.
 	if previous, had := os.LookupEnv("COMPOSE_FILE"); had && previous != composeFileEnv {
-		a.logger.Warn("overriding an existing COMPOSE_FILE for this run; any files it named "+
-			"beyond the one keploy copied are not part of the application's configuration",
+		a.logger.Warn("overriding an existing COMPOSE_FILE for this run with keploy's generated compose file(s)",
 			zap.String("previous", previous), zap.String("now", composeFileEnv))
 	}
 	a.composeFileEnv = composeFileEnv
@@ -499,29 +548,37 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 // injects the keploy-agent service, serialises the result back to bytes, and
 // configures the command to pipe the content via stdin ("-f -").
 func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) error {
-	var compose docker.Compose
-	if err := yaml.Unmarshal(a.opts.InMemoryCompose, &compose); err != nil {
-		return fmt.Errorf("failed to parse in-memory compose YAML: %w", err)
+	// Resolved as the command will run the document: `docker compose -f -`
+	// in its scope, or the in-process library when this build has one.
+	scope := composeScope(a.cmd.WholeUnredacted())
+	scope.InProcess = composeLibrarySupported()
+	if scope.InProcess {
+		// The library never runs the command in a shell: leading shell
+		// assignments do not reach it.
+		scope.ProjectName, _ = composeProjectScope(a.cmd.WholeUnredacted())
+		scope.Env = nil
+		scope.EnvErr = nil
 	}
-
-	serviceInfo, err := a.docker.FindContainerInCompose(&compose, a.container)
+	serviceInfo, err := a.docker.FindContainerInCompose(ctx, a.opts.InMemoryCompose, scope, a.container)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find container in in-memory compose")
 		return err
 	}
+	compose := serviceInfo.Compose
 
 	a.opts.AppPorts = serviceInfo.Ports
 	a.opts.AppNetworks = serviceInfo.Networks
 	a.opts.ExtraArgs = extraArgs
 	a.composeService = serviceInfo.AppServiceName
 
-	if err := a.docker.ModifyComposeForAgent(&compose, a.opts, a.container); err != nil {
+	// By its key, as the files path names it (SetupCompose).
+	if err := a.docker.ModifyComposeForAgent(compose, a.opts, serviceInfo.AppServiceName); err != nil {
 		utils.LogError(a.logger, err, "failed to modify in-memory compose for keploy integration")
 		return err
 	}
 
 	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, &compose, a.container)
+		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, compose, serviceInfo.AppServiceName)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during in-memory docker compose setup")
 			return err
@@ -531,16 +588,17 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 		}
 	}
 
-	content, err := a.docker.MarshalCompose(&compose)
+	content, err := a.docker.MarshalCompose(compose)
 	if err != nil {
 		return fmt.Errorf("failed to serialise modified compose to YAML: %w", err)
 	}
 	a.composeFileEnv = ""
-	a.setComposeSource("", content, &compose)
+	a.setComposeSource("", content, compose)
+	a.composeInlineEnv = scope.Env
 
 	// Ensure the command uses stdin ("-f -"), its abort flags left out,
 	// and keploy does what they say (setComposeUserAbort).
-	a.setComposeUserAbort(a.cmd.WholeUnredacted(), &compose)
+	a.setComposeUserAbort(a.cmd.WholeUnredacted(), compose)
 	a.cmd = utils.NewAppCommand(ensureInMemoryComposeFlags(a.cmd.WholeUnredacted()))
 
 	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
@@ -739,23 +797,19 @@ func (a *App) executeCommand(ctx context.Context, runCmd string, runEnv []string
 // for any other command, which keeps `docker logs`; and none when keploy's
 // loader cannot load the document (the library path refuses it alike), when
 // the app's recent output is then empty, said once per document. The loader
-// sees keploy's environment and the env files compose reads, not what only
-// the shell gives the child: an assignment in the command (`DB_PASS=x docker
-// compose up`) or a flag value the shell expands (`--env-file $HOME/x.env`).
+// sees keploy's environment, leading assignments in the command, and the env
+// files compose reads, not a flag value the shell expands
+// (`--env-file $HOME/x.env`).
 func (a *App) composeChildTee(ctx context.Context) []utils.ExecOption {
 	if len(a.composeContent) == 0 || a.useComposeLibrary() {
 		return nil
 	}
-	whole := a.cmd.WholeUnredacted()
-	projectName, projectDir := composeProjectScope(whole)
-	if projectName == "" {
-		projectName = normalizeComposeProjectName(composeProjectEnvAssignment(whole))
-	}
-	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, projectName, projectDir, composeEnvFiles(whole))
+	scope := composeScope(a.cmd.WholeUnredacted())
+	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, scope)
 	a.composeChildOut.Store(out)
 	if err != nil {
 		if a.composeChildWarned.CompareAndSwap(false, true) {
-			a.logger.Warn("keploy could not load the compose document it runs, so it keeps none of its containers' output, and an app crash will show no recent output. Keploy reads its own environment and the env files compose reads (--env-file, COMPOSE_ENV_FILES, the project's .env), not an assignment in the command (DB_PASS=x docker compose up) or a flag value the shell expands: export such a variable or put it in an env file, and write an --env-file path out in full",
+			a.logger.Warn("keploy could not load the compose document it runs, so it keeps none of its containers' output, and an app crash will show no recent output. Keploy reads its own environment, leading assignments in the command, and the env files compose reads (--env-file, COMPOSE_ENV_FILES, the project's .env), not a flag value the shell expands: export such a variable or put it in an env file, and write an --env-file path out in full",
 				zap.Error(err))
 		}
 		return nil
@@ -884,7 +938,7 @@ func (a *App) ComposeDown() {
 	// The teardown's drains (utils.DrainErrGroupProgress) wait for it: the down stops
 	// keploy's agent with the stack, an agent's stop in progress
 	// (utils.BeginAgentStop), which ends on its own.
-	if !a.useComposeLibrary() && len(a.composeContent) == 0 && a.composeFile == "" {
+	if !a.useComposeLibrary() && len(a.composeContent) == 0 && len(a.composeFiles) == 0 && a.composeFile == "" {
 		return
 	}
 	defer utils.BeginAgentStop()()
@@ -931,27 +985,22 @@ func (a *App) ComposeDown() {
 		}
 	// Reached whenever no in-process runner is registered (every keploy build;
 	// enterprise's on darwin, on windows and without composelib on linux):
-	// same teardown, through `docker compose -f -` with the generated document
-	// on stdin.
-	case len(a.composeContent) > 0:
-		a.logger.Debug("Running docker compose down using in-memory compose content")
-		args := []string{"-f", "-"}
-		args = append(args, a.composeProjectArgs(project)...)
-		args = append(args, "down", "--timeout", "1")
-		downCmd = composeCommand(downCtx, args...)
-		downCmd.Stdin = bytes.NewReader(a.composeContent)
-	case a.composeFile != "":
-		a.logger.Debug("Running docker compose down to clean up containers and networks",
-			zap.String("composeFile", a.composeFile))
-		// The SAME project the `up` created (composeProjectArgs): a down that
-		// resolved another, cwd-derived, left this stack running, and took
-		// down a stack of that name the user runs.
-		args := []string{"-f", a.composeFile}
-		args = append(args, a.composeProjectArgs(project)...)
-		args = append(args, "down", "--timeout", "1")
-		downCmd = composeCommand(downCtx, args...)
+	// same teardown, through `docker compose` with the generated files or `-f -`
+	// on stdin and this run's project flags and inline env.
 	default:
-		return
+		downCmd = a.composeCLICommand(downCtx, project, "down", "--timeout", "1")
+		if downCmd == nil {
+			return
+		}
+		if len(a.composeContent) > 0 {
+			a.logger.Debug("Running docker compose down using in-memory compose content")
+		} else {
+			// The SAME project the `up` created (composeProjectArgs): a down that
+			// resolved another, cwd-derived, left this stack running, and took
+			// down a stack of that name the user runs.
+			a.logger.Debug("Running docker compose down to clean up containers and networks",
+				zap.Strings("composeFiles", a.composeFiles), zap.String("composeFile", a.composeFile))
+		}
 	}
 
 	if downCmd != nil {
@@ -1088,20 +1137,48 @@ func normalizeComposeProjectName(s string) string {
 	return strings.TrimLeft(b.String(), "_-")
 }
 
+// composeScope is what the compose command cmd resolves its files in beyond
+// the files themselves (docker.ComposeScope): its -p, else the
+// COMPOSE_PROJECT_NAME its leading assignments set; its --project-directory;
+// its --env-file values; its --compatibility; and every leading NAME=value
+// assignment before the program name.
+func composeScope(cmd string) docker.ComposeScope {
+	projectName, projectDir := composeProjectScope(cmd)
+	env, rest, envErr := utils.LeadingEnvAssignments(cmd)
+	if first, _ := cutWord(strings.TrimLeft(rest, " \t")); filepath.Base(first) == "sudo" || filepath.Base(first) == "doas" {
+		// sudo/doas resets the environment before compose starts, so leading
+		// assignments placed before it never reach compose.
+		env, envErr = nil, nil
+	}
+	if projectName == "" {
+		projectName = normalizeComposeProjectName(env["COMPOSE_PROJECT_NAME"])
+	}
+	return docker.ComposeScope{
+		ProjectName:   projectName,
+		ProjectDir:    projectDir,
+		EnvFiles:      composeEnvFiles(cmd),
+		Compatibility: composeCompatibility(cmd),
+		Env:           env,
+		EnvErr:        envErr,
+	}
+}
+
 // composeProjectEnvAssignment is COMPOSE_PROJECT_NAME as cmd's leading
 // assignments set it (`COMPOSE_PROJECT_NAME=x docker compose up`), "" when
 // they do not.
 func composeProjectEnvAssignment(cmd string) string {
-	for _, f := range strings.Fields(cmd) {
-		name, value, ok := strings.Cut(f, "=")
-		if !ok || name == "" || strings.HasPrefix(name, "-") {
-			return ""
-		}
-		if name == "COMPOSE_PROJECT_NAME" {
-			return strings.Trim(value, `"'`)
-		}
+	return composeEnvAssignments(cmd)["COMPOSE_PROJECT_NAME"]
+}
+
+// composeEnvAssignments reads every leading shell NAME=value assignment from
+// cmd before the first non-assignment word (utils.LeadingEnvAssignments),
+// ignoring assignments placed before sudo/doas whose env_reset drops them.
+func composeEnvAssignments(cmd string) map[string]string {
+	env, rest, _ := utils.LeadingEnvAssignments(cmd)
+	if first, _ := cutWord(strings.TrimLeft(rest, " \t")); filepath.Base(first) == "sudo" || filepath.Base(first) == "doas" {
+		return nil
 	}
-	return ""
+	return env
 }
 
 // composeProjectLabelAnswered is the compose project label on container
@@ -1315,8 +1392,9 @@ func (a *App) sweepProjectNetworks(project string) {
 //
 // It must be called AFTER ModifyComposeForAgent so the injected agent service
 // is in the set; the sweep is allowed to remove that one.
-func (a *App) setComposeSource(file string, content []byte, compose *docker.Compose) {
+func (a *App) setComposeSource(file string, content []byte, compose *docker.Compose, allFiles ...string) {
 	a.composeFile = file
+	a.composeFiles = allFiles
 	a.composeContent = content
 	a.composeDoc = compose
 	a.composeServices = composeServiceNames(compose)
@@ -1330,17 +1408,101 @@ func (a *App) setComposeSource(file string, content []byte, compose *docker.Comp
 	a.composeChildWarned.Store(false)
 }
 
-// composeServiceNames returns the service keys of a parsed compose document.
-// Services is a YAML mapping node, so its Content alternates key, value.
-func composeServiceNames(compose *docker.Compose) []string {
-	if compose == nil || compose.Services.Content == nil {
+// composeFileArgs returns the `-f <file>` flags for keploy's own compose calls
+// (`down`, `ps`, teardown sweep): every rewritten file in order when
+// SetupCompose recorded a multi-file set, else the single composeFile.
+func (a *App) composeFileArgs() []string {
+	if len(a.composeFiles) > 0 {
+		args := make([]string, 0, len(a.composeFiles)*2)
+		for _, f := range a.composeFiles {
+			args = append(args, "-f", f)
+		}
+		return args
+	}
+	if a.composeFile != "" {
+		return []string{"-f", a.composeFile}
+	}
+	return nil
+}
+
+// composeCommandEnv returns keploy's environment overlaid with any leading
+// inline NAME=value assignments from the user's `-c` compose command (or nil
+// when there are none), so keploy's own `down` and `ps` calls see the same
+// variables (`${VAR:?err}`, `COMPOSE_ENV_FILES`, `COMPOSE_DISABLE_ENV_FILE`,
+// custom network/image vars) that `sh -c` gave `up`.
+func (a *App) composeCommandEnv() []string {
+	inline := a.composeInlineEnv
+	if len(inline) == 0 {
 		return nil
 	}
-	names := make([]string, 0, len(compose.Services.Content)/2)
-	for i := 0; i+1 < len(compose.Services.Content); i += 2 {
-		if name := compose.Services.Content[i].Value; name != "" {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+len(inline))
+	for _, kv := range env {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			if _, overridden := inline[k]; overridden {
+				continue
+			}
+		}
+		out = append(out, kv)
+	}
+	keys := make([]string, 0, len(inline))
+	for k := range inline {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, k+"="+inline[k])
+	}
+	return out
+}
+
+// composeCLICommand builds a compose CLI command (`down`, `ps`) targeting this
+// run's compose source (in-memory `-f -` with stdin, or every rewritten `-f`
+// file in order), project flags, and overlaid inline environment. Returns nil
+// when the app has no compose source configured.
+func (a *App) composeCLICommand(ctx context.Context, project string, subArgs ...string) *exec.Cmd {
+	var args []string
+	switch {
+	case len(a.composeContent) > 0:
+		args = []string{"-f", "-"}
+	case len(a.composeFiles) > 0 || a.composeFile != "":
+		args = a.composeFileArgs()
+	default:
+		return nil
+	}
+	args = append(args, a.composeProjectArgs(project)...)
+	args = append(args, subArgs...)
+	cmd := composeCommand(ctx, args...)
+	if env := a.composeCommandEnv(); len(env) > 0 {
+		cmd.Env = env
+	}
+	if len(a.composeContent) > 0 {
+		cmd.Stdin = bytes.NewReader(a.composeContent)
+	}
+	return cmd
+}
+
+// composeServiceNames returns every service key across the compose source:
+// every service from the merged compose project (when resolved) plus every
+// service in compose.Services (so keploy-agent, added after resolution, is
+// always included).
+func composeServiceNames(compose *docker.Compose) []string {
+	if compose == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var names []string
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
 			names = append(names, name)
 		}
+	}
+	for _, svc := range compose.ResolvedServiceNames() {
+		add(svc)
+	}
+	for i := 0; i+1 < len(compose.Services.Content); i += 2 {
+		add(compose.Services.Content[i].Value)
 	}
 	return names
 }
@@ -1374,15 +1536,11 @@ func composeServiceNames(compose *docker.Compose) []string {
 // and environment. Best-effort and bounded throughout; on any failure the
 // teardown behaves exactly as it did before this sweep existed.
 //
-// Not covered, and a real gap: a multi-file command
-// (`docker compose -f app.yml -f deps.yml up`). SetupCompose tmp-copies only
-// the file that contains the app, so composeServices holds only that file's
-// services — and `down` on the generated file treats deps.yml's containers as
-// orphans and leaves them too. The sweep is still exactly `down`'s set, so it
-// is not WRONG, but that user's dependency containers survive every teardown
-// and the next `up` reuses them with the same rows, which is the defect this
-// function exists to fix. Closing it means making the teardown aware of every
-// -f the user passed, not widening this filter.
+// Multi-file stacks (`-f app.yml -f deps.yml`, multi-file COMPOSE_FILE, or
+// default docker-compose.yml + docker-compose.override.yml) are covered:
+// SetupCompose records every rewritten file in a.composeFiles (passed to both
+// `down` and `ps`) and composeServices collects every service key from the
+// merged compose project plus keploy-agent.
 func (a *App) sweepStragglingProjectContainers() []string {
 	return a.sweepStragglingProjectContainersOf("")
 }
@@ -1536,6 +1694,13 @@ const (
 	composePsStateBudget = 5 * time.Second
 )
 
+var (
+	// appRemovalAskBudget and appRemovalWaitBudget bound the RemovalWatch for
+	// a --rm `docker run` application container on teardown. Variables for tests.
+	appRemovalAskBudget  = reapBarrierBudget
+	appRemovalWaitBudget = waitTillExitBudget
+)
+
 // waitContainersRemoved polls until the named containers no longer exist (or the
 // budget elapses), converting the daemon's async reap into a bounded synchronous
 // barrier so the next compose up cannot race a still-removing same-named
@@ -1678,26 +1843,11 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 		return ids
 	}
 
-	var args []string
-	switch {
 	// Reached whenever no in-process runner is registered (every keploy build;
-	// enterprise's on darwin, on windows and without composelib on linux): the
-	// generated document goes to `docker compose -f -` on stdin.
-	case len(a.composeContent) > 0:
-		args = []string{"-f", "-"}
-		args = append(args, a.composeProjectArgs(a.composeDownProject(ctx))...)
-		args = append(args, "ps", "-aq", keployAgentComposeService)
-	case a.composeFile != "":
-		args = []string{"-f", a.composeFile}
-		args = append(args, a.composeProjectArgs(a.composeDownProject(ctx))...)
-		args = append(args, "ps", "-aq", keployAgentComposeService)
-	default:
+	// enterprise's on darwin, on windows and without composelib on linux).
+	cmd := a.composeCLICommand(ctx, a.composeDownProject(ctx), "ps", "-aq", keployAgentComposeService)
+	if cmd == nil {
 		return nil
-	}
-
-	cmd := composeCommand(ctx, args...)
-	if len(a.composeContent) > 0 {
-		cmd.Stdin = bytes.NewReader(a.composeContent)
 	}
 	// Output(), NOT CombinedOutput(): compose writes warnings to stderr, and
 	// this output is parsed as a list of container ids. An obsolete `version:`
@@ -1843,29 +1993,14 @@ func (a *App) composeServiceStatesOf(ctx context.Context, project string) []comp
 		return states
 	}
 
-	var args []string
-	switch {
 	// Reached whenever no in-process runner is registered (every keploy build;
 	// enterprise's on darwin, on windows and without composelib on linux).
-	case len(a.composeContent) > 0:
-		args = []string{"-f", "-"}
-		args = append(args, a.composeProjectArgs(project)...)
-		args = append(args, "ps", "-a", "--format", "json")
-	case a.composeFile != "":
-		args = []string{"-f", a.composeFile}
-		// The SAME project the `up` created (composeProjectArgs). Without it,
-		// the probe queried another (cwd-derived) project, saw nothing, and the
-		// failure was (mis)classified as non-transient — silently disabling
-		// the retry.
-		args = append(args, a.composeProjectArgs(project)...)
-		args = append(args, "ps", "-a", "--format", "json")
-	default:
+	// Pass the SAME project the `up` created (composeProjectArgs). Without it,
+	// the probe queried another (cwd-derived) project, saw nothing, and the
+	// failure was (mis)classified as non-transient — silently disabling the retry.
+	cmd := a.composeCLICommand(ctx, project, "ps", "-a", "--format", "json")
+	if cmd == nil {
 		return nil
-	}
-
-	cmd := composeCommand(ctx, args...)
-	if len(a.composeContent) > 0 {
-		cmd.Stdin = bytes.NewReader(a.composeContent)
 	}
 	// Output(), NOT CombinedOutput(). Compose writes its warnings to stderr —
 	//
@@ -2411,6 +2546,12 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// dockerRunName is the resolved user-app container name; reused by the
 	// post-run container-name-conflict retry below.
 	var dockerRunName string
+	// appRemoval watches the engine's removal of a --rm docker-run application
+	// container so that when teardown kills its `docker run` client, App.run
+	// waits for the engine to finish removing the container and releasing its
+	// per-run volumes (keploy-sockets-vol-<id>, keploy-tls-certs-<id>) before
+	// agent teardown calls RemoveRunVolumes.
+	var appRemoval *docker.RemovalWatch
 	if a.kind == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 		// Clear any container left over from a prior run with the same --name
@@ -2429,6 +2570,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 			dockerRunName = utils.ContainerNameFromDockerRun(userCmd)
 		}
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
+		if a.docker != nil && dockerRunName != "" && utils.DockerRunHasRm(userCmd) {
+			appRemoval = docker.NewRemovalWatch(a.docker, dockerRunName)
+		}
 	}
 
 	// Compose mode: before `docker compose up`, make sure the keploy agent
@@ -2487,6 +2631,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 				return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 			}
 			if utils.IsDockerCmd(a.kind) {
+				if appRemoval != nil {
+					askCtx, askCancel := context.WithTimeout(context.Background(), appRemovalAskBudget)
+					appRemoval.Watch(askCtx)
+					askCancel()
+				}
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 				if err != nil {
@@ -2720,6 +2869,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// to the teardown and risk overrunning the drain budget.
 	if utils.IsDockerCmd(a.kind) && a.kind != utils.DockerCompose {
 		a.waitTillExit()
+		if appRemoval != nil {
+			rmCtx, rmCancel := context.WithTimeout(context.Background(), appRemovalWaitBudget)
+			appRemoval.Wait(rmCtx, a.logger)
+			rmCancel()
+		}
 	}
 
 	select {

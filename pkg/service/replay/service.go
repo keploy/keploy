@@ -121,7 +121,8 @@ type TestDB interface {
 // k8s-proxy's auto-replay deletes a round's test cases from the recording's set
 // once they are written back, and keeps adding to the same mock file. The next
 // round's first test is then a late one, everything recorded before it counts
-// as startup traffic, and the agent stages most of the recording.
+// as startup traffic, the agent stages most of the recording, and mock pruning
+// exempts every historical mock from deletion.
 type RecordedStartReader interface {
 	RecordedFirstTestStart(ctx context.Context, testSetID string) (time.Time, error)
 }

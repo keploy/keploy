@@ -49,12 +49,12 @@ type composeOnly struct {
 	docker.Client
 }
 
-func (composeOnly) FindContainerInComposeFiles(paths []string, _ string) (*docker.ComposeServiceInfo, error) {
+func (composeOnly) FindContainerInComposeFiles(_ context.Context, paths []string, _ docker.ComposeScope, _ string) (*docker.ComposeServiceInfo, error) {
 	return &docker.ComposeServiceInfo{AppServiceName: "app", ComposePath: paths[0], Compose: &docker.Compose{}}, nil
 }
 
-func (composeOnly) FindContainerInCompose(c *docker.Compose, _ string) (*docker.ComposeServiceInfo, error) {
-	return &docker.ComposeServiceInfo{AppServiceName: "app", Compose: c}, nil
+func (composeOnly) FindContainerInCompose(_ context.Context, content []byte, _ docker.ComposeScope, _ string) (*docker.ComposeServiceInfo, error) {
+	return &docker.ComposeServiceInfo{AppServiceName: "app", Compose: parsedCompose(content)}, nil
 }
 
 func (composeOnly) ModifyComposeForAgent(*docker.Compose, models.SetupOptions, string) error {

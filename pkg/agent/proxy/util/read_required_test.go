@@ -230,6 +230,25 @@ func TestAppendRequiredBytesGrowsAcrossManyReads(t *testing.T) {
 	}
 }
 
+// AppendAvailableBytes is one read: it appends what that read brings, after
+// dst's bytes and within its free capacity, and once its context has ended
+// it reads nothing and returns the context's error.
+func TestAppendAvailableBytesIsOneReadAndNoneOnceTheContextEnds(t *testing.T) {
+	dst := make([]byte, 2, 8)
+	copy(dst, "ab")
+	r := &stepReader{data: []byte("cdefghij"), step: 3}
+	got, err := AppendAvailableBytes(context.Background(), zap.NewNop(), r, dst)
+	if err != nil || string(got) != "abcde" {
+		t.Fatalf("got (%q, %v), want dst's bytes and the one read's 3: \"abcde\"", got, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err = AppendAvailableBytes(ctx, zap.NewNop(), r, got)
+	if !errors.Is(err, context.Canceled) || string(got) != "abcde" || len(r.data) != 5 {
+		t.Fatalf("once the context ended got (%q, %v) and %d bytes left unread, want nothing read and the context's error", got, err, len(r.data))
+	}
+}
+
 // RCA #2's stall: one Sentry event that cannot be delivered (egress blocked,
 // the event from a recovered parser panic) made every packet read wait for a
 // Flush(2s) on v3.6.78, about 6s for three reads, with no CPU burnt. The

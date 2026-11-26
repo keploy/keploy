@@ -250,8 +250,11 @@ func start(ctx context.Context) {
 
 	defer func() {
 		if os.Getenv("KEPLOY_INDOCKER") != "true" {
-			if err := utils.DeleteFileIfExists(logger, "docker-compose-tmp.yaml"); err != nil {
-				return
+			_ = utils.DeleteFileIfExists(logger, "docker-compose-tmp.yaml")
+			if extras, err := filepath.Glob("docker-compose-tmp-[0-9]*.yaml"); err == nil {
+				for _, f := range extras {
+					_ = utils.DeleteFileIfExists(logger, f)
+				}
 			}
 		}
 	}()

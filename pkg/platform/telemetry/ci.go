@@ -118,10 +118,8 @@ var gitRepoOnce struct {
 // nothing names one. It never panics or blocks for more than 2 seconds.
 func detectGitRepo() string {
 	// 1. CI variables first (fast, always available in CI)
-	for _, name := range ciRepoVars {
-		if s := normalizeRepo(os.Getenv(name), ciRepoURLVars[name]); s != "" {
-			return s
-		}
+	if s := ciRepo(); s != "" {
+		return s
 	}
 
 	// 2. Fall back to local .git (cached; runs git only once per process)
@@ -136,6 +134,33 @@ func detectGitRepo() string {
 		}
 	})
 	return gitRepoOnce.repo
+}
+
+// ciRepo is the slug of the repository a CI run builds: the first of
+// ciRepoVars whose value names one, "" when none does (outside CI, or a
+// provider that names none). It reads the CI provider's variables alone,
+// never the checkout's remote.
+func ciRepo() string {
+	for _, name := range ciRepoVars {
+		if s := normalizeRepo(os.Getenv(name), ciRepoURLVars[name]); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// detectCIOrInvoker is detectCI, and CI too where InvokerEnv says a CI job
+// started this CLI: a job's container, or a step that cleared its runner's
+// variables, carries no variable detectCI reads, and its events said
+// invoker=ci with is_ci false. Such a run names no provider ("unknown").
+func detectCIOrInvoker() (bool, string) {
+	if ci, provider := detectCI(); ci {
+		return ci, provider
+	}
+	if invokedByCI() {
+		return true, "unknown"
+	}
+	return false, ""
 }
 
 // remoteRepo is the slug a checkout's remote.origin.url names. Only a URL

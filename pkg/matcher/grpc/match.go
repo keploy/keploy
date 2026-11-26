@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -22,6 +23,15 @@ type MatchOption func(*matchOptions)
 
 type matchOptions struct {
 	noPassLine bool
+	// unordered names, by field-number path, the repeated fields whose
+	// elements compare in any order even when order is kept (WithUnorderedFields).
+	unordered map[string]bool
+	// decode shows a recorded body with field names, for grading a body
+	// difference as a JSON one (WithAssessmentDecoder); nil: none.
+	decode func(expected, actual string) (expJSON, actJSON string, ok bool)
+	// warnOnce says whether a warning keyed so is new (WithWarnOnce); nil:
+	// once per process.
+	warnOnce func(key string) bool
 	// console is where the comparison's lines go (WithConsole); nil, the
 	// default, prints nothing.
 	console io.Writer
@@ -41,6 +51,48 @@ func (o matchOptions) out() io.Writer {
 // prints nothing, as the HTTP matcher's WithConsole.
 func WithConsole(w io.Writer) MatchOption {
 	return func(o *matchOptions) { o.console = w }
+}
+
+// WithUnorderedFields names, by field-number path ("5", "2.4"), repeated
+// fields whose elements compare in any order even when order is kept: a map's
+// entries, which protobuf gives no order (Go marshals them in random order).
+// A schema knows which fields are maps; protoscope text does not.
+func WithUnorderedFields(paths []string) MatchOption {
+	return func(o *matchOptions) {
+		if len(paths) == 0 {
+			return
+		}
+		o.unordered = make(map[string]bool, len(paths))
+		for _, p := range paths {
+			o.unordered[p] = true
+		}
+	}
+}
+
+// WithUnorderedFieldSet is WithUnorderedFields for a set built once (a caller
+// comparing many bodies of one schema). The set is read, never written.
+func WithUnorderedFieldSet(set map[string]bool) MatchOption {
+	return func(o *matchOptions) {
+		if len(set) > 0 {
+			o.unordered = set
+		}
+	}
+}
+
+// WithAssessmentDecoder gives the comparison a way to read both bodies with
+// field names, so a body difference is graded as the JSON comparison grades
+// one (a value change is not a broken schema). It never decides the verdict,
+// which stays the field-number comparison's.
+func WithAssessmentDecoder(decode func(expected, actual string) (expJSON, actJSON string, ok bool)) MatchOption {
+	return func(o *matchOptions) { o.decode = decode }
+}
+
+// WithWarnOnce lets the caller scope a warning the comparison says once (an
+// invalid noise pattern): first(key) reports whether key is new. A replay
+// passes its own, so each run says it once; without one it is said once per
+// process.
+func WithWarnOnce(first func(key string) bool) MatchOption {
+	return func(o *matchOptions) { o.warnOnce = first }
 }
 
 // WithoutPassLine says the caller has already failed the test case on its
@@ -271,7 +323,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 
 	for msgIdx := 0; msgIdx < compareCount; msgIdx++ {
 		cmp := compareGrpcMessage(msgIdx, indexed, expMsgs[msgIdx], actMsgs[msgIdx],
-			differences, result, bodyNoise, ignoreOrdering, logger)
+			differences, result, bodyNoise, ignoreOrdering, mo.unordered, mo.warnOnce, logger)
 		if !cmp.decodedNormal && !cmp.reorderedOnly {
 			reorderedOnly = false
 		}
@@ -459,8 +511,18 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 
 	var bodyAssessment *models.FailureAssessment
 	if !decodedDataNormal {
-		if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
-			if assess, err := matcher.ComputeFailureAssessmentJSON(expectedDecodedData, actualDecodedData, bodyNoise, ignoreOrdering); err == nil && assess != nil {
+		// A schema reads protoscope bodies with field names, so their
+		// difference is graded as a JSON one is (WithAssessmentDecoder).
+		// A reorder alone keeps its own grading and reason below: decoded,
+		// it would read as a value change.
+		assessExp, assessAct := expectedDecodedData, actualDecodedData
+		if mo.decode != nil && !reorderedOnly && (!json.Valid([]byte(assessExp)) || !json.Valid([]byte(assessAct))) {
+			if e, a, ok := mo.decode(assessExp, assessAct); ok {
+				assessExp, assessAct = e, a
+			}
+		}
+		if json.Valid([]byte(assessExp)) && json.Valid([]byte(assessAct)) {
+			if assess, err := matcher.ComputeFailureAssessmentJSON(assessExp, assessAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
 				currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
 				currentCategories = append(currentCategories, assess.Category...)
 				bodyAssessment = assess
@@ -469,11 +531,12 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				currentCategories = append(currentCategories, models.InternalFailure)
 			}
 		} else if reorderedOnly {
-			// Only a repeated field's order differs (protoscope, under the
-			// proven switch): the schema and the values are the recorded
-			// ones, as a reordered JSON array is graded. The reason, with
-			// the proto-files way out for a map, is persisted with the
-			// result, so the report and JUnit say it, not only the console.
+			// Only a repeated field's order differs (protoscope, with order
+			// kept: test.ignoreOrdering off or the proven switch): the
+			// schema and the values are the recorded ones, as a reordered
+			// JSON array is graded. The reason, with how a map is compared
+			// as a map (the service's protos), is persisted with the result,
+			// so the report and JUnit say it, not only the console.
 			currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
 			currentCategories = append(currentCategories, models.SchemaUnchanged)
 			bodyAssessment = &models.FailureAssessment{
@@ -704,7 +767,7 @@ type msgComparison struct {
 	actual        string
 	json          matcher.JSONComparisonResult
 	// reorderedOnly: the decoded data differs only in the order of a
-	// repeated field's elements (protoscope, under the proven switch).
+	// repeated field's elements (protoscope, with order kept).
 	reorderedOnly bool
 }
 
@@ -744,6 +807,8 @@ func compareGrpcMessage(
 	result *models.Result,
 	bodyNoise map[string][]string,
 	ignoreOrdering bool,
+	unordered map[string]bool,
+	warnOnce func(key string) bool,
 	logger *zap.Logger,
 ) msgComparison {
 	key := func(field string) string {
@@ -831,17 +896,30 @@ func compareGrpcMessage(
 		// Per-message only. Canonicalizing a whole stream would sort across
 		// message boundaries and let a reordered stream match.
 		//
-		// Under the proven switch a repeated field's elements are compared
-		// in order (CanonicalizeKeepingRepeatedOrder); a reorder alone is
-		// then said as one.
-		canonicalize := CanonicalizeTopLevelBlocks
-		if provenswitch.On() {
-			canonicalize = CanonicalizeKeepingRepeatedOrder
+		// Noise first: a field named by its field-number path (body:
+		// ["8.2.1"]) is taken out of both sides, so a timestamp or a
+		// generated id can be denoised without proto files -- the only way an
+		// in-cluster replay, which has none, ever can.
+		//
+		// Then order, as the user configured it (ignoreOrdering, already
+		// resolved: the proven switch always keeps it): different fields
+		// compare in any order, a repeated field's elements in order unless
+		// order is ignored. A reorder alone is then said as one.
+		keepOrder := !ignoreOrdering
+		var invalid []string
+		expectedDecodedData, invalid = stripProtoscopeNoise(expectedDecodedData, bodyNoise)
+		actualDecodedData, _ = stripProtoscopeNoise(actualDecodedData, bodyNoise)
+		if warnOnce == nil {
+			warnOnce = firstInvalidNoiseWarning
 		}
-		expCanon := canonicalize(expectedDecodedData)
-		actCanon := canonicalize(actualDecodedData)
+		if len(invalid) > 0 && msgIdx == 0 && warnOnce("invalid-noise\x00"+strings.Join(invalid, "\x00")) {
+			logger.Warn("these gRPC body noise entries have a pattern that does not compile, so they ignore nothing; fix the pattern",
+				zap.Strings("noise", invalid))
+		}
+		expCanon := canonicalizeWith(expectedDecodedData, keepOrder, unordered)
+		actCanon := canonicalizeWith(actualDecodedData, keepOrder, unordered)
 		decodedDataNormal = expCanon == actCanon
-		if !decodedDataNormal && provenswitch.On() && CanonicalizeTopLevelBlocks(expectedDecodedData) == CanonicalizeTopLevelBlocks(actualDecodedData) {
+		if !decodedDataNormal && keepOrder && CanonicalizeTopLevelBlocks(expectedDecodedData) == CanonicalizeTopLevelBlocks(actualDecodedData) {
 			decodedMessage = reorderedRepeatedMessage
 		}
 		expectedDecodedData = expCanon
@@ -899,8 +977,18 @@ func useIndexedKeys(expMsgs, actMsgs []models.GrpcLengthPrefixedMessage) bool {
 }
 
 // reorderedRepeatedMessage says a gRPC message's decoded data differs only in
-// the order of a repeated field's elements, which the proven switch compares
-// in order. Protoscope text carries no schema, so a map field's entries are
-// compared in order too: with proto files configured the message is compared
-// as JSON, where a map is an object.
-const reorderedRepeatedMessage = "decoded data mismatch: a repeated field's elements came back in another order (KEPLOY_PROVEN=1 compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"
+// the order of a repeated field's elements, which are compared in order when
+// order is kept (test.ignoreOrdering off, or the proven switch). Protoscope
+// text carries no schema, so a map field's entries are compared in order too,
+// unless the run's protos (local or uploaded for the release) name the field
+// a map (WithUnorderedFields).
+const reorderedRepeatedMessage = "decoded data mismatch: a repeated field's elements came back in another order (test.ignoreOrdering is off, or KEPLOY_PROVEN=1, so they are compared in order); a map field is compared in any order when the run has the service's protos (--proto-file or --proto-dir, or uploaded for the release), which say which fields are maps"
+
+// invalidNoiseWarned remembers which invalid gRPC noise entries were already
+// reported, so a global entry is said once, not on every test case.
+var invalidNoiseWarned sync.Map
+
+func firstInvalidNoiseWarning(key string) bool {
+	_, seen := invalidNoiseWarned.LoadOrStore(key, true)
+	return !seen
+}

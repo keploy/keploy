@@ -2,6 +2,10 @@ package replay
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -114,10 +118,6 @@ func (r *Replayer) stopBeforeSetEndRead(stop func()) {
 	stop()
 }
 
-// outsideLogMax is how many outside-test misses a set's log names, one line
-// each; the report names every one.
-const outsideLogMax = 20
-
 // outsideWriter is keploy test, as a set's misses file names it.
 var outsideWriter = localfile.Writer{
 	File:      localfile.TestMissesFile,
@@ -130,8 +130,9 @@ var outsideWriter = localfile.Writer{
 // (TestReport.OutsideTestMisses), as its report names them, by their shape.
 // It writes them whole, each with the same next step, in the set's misses
 // file (localfile.WriteMisses: in place of the last run's, and only where it
-// is git-ignored; a set with none removes the last run's), and says each in
-// the log (logOutsideTestMisses), with the file's path.
+// is git-ignored; a set with none removes the last run's), and says them in
+// one log line (logOutsideTestMisses), with the file's path and their next
+// steps.
 func (r *Replayer) outsideTestMisses(testSetID string) []models.OutsideTestMiss {
 	calls := r.setCalls.outside(provenswitch.On())
 	whole := make([]models.UnmatchedCall, 0, len(calls))
@@ -150,20 +151,45 @@ func (r *Replayer) outsideTestMisses(testSetID string) []models.OutsideTestMiss 
 	return misses
 }
 
-// logOutsideTestMisses says, at WARN, each call of misses, the set's
-// outside-test misses (TestReport.OutsideTestMisses), by its shape beside its
-// tags, as the report names it, with how many times it was made and its next
-// step: up to outsideLogMax lines, then how many more the report names. file
-// is the set's misses file, which names each whole: a last line points to
-// it ("" when none was written).
+// logOutsideTestMisses emits ONE Info summary line for the set's outside-test
+// misses (with total call count, per-protocol breakdown, the misses file path
+// when written, and each distinct next step its misses carry: next_steps, one
+// for DNS lookups and one for other calls, each of which first says to record
+// the test set again) and logs each per-call entry at Debug. The misses file
+// keeps every miss whole and the report by its shape, each beside its own
+// next step.
 func (r *Replayer) logOutsideTestMisses(testSetID string, misses []models.OutsideTestMiss, file string) {
-	for i, m := range misses {
-		if i == outsideLogMax {
-			r.logger.Warn("the application made more calls outside every test that no mock answered; the test-set's report names each (outsideTestMisses)",
-				zap.String("test-set", testSetID), zap.Int("more", len(misses)-outsideLogMax))
-			break
-		}
-		r.logger.Warn("the application made a call outside every test that no mock answered; it fails nothing (a call outside every test is served, not required), and the test-set's report names it (outsideTestMisses)",
+	if len(misses) == 0 {
+		return
+	}
+	totalCalls, breakdown := formatOutsideTestSummary(misses)
+	callWord := "calls"
+	if totalCalls == 1 {
+		callWord = "call"
+	}
+	fields := []zap.Field{
+		zap.String("test-set", testSetID),
+		zap.Int("calls", totalCalls),
+		zap.Int("unique", len(misses)),
+	}
+	var msg string
+	if file != "" {
+		msg = fmt.Sprintf("%d %s outside every test got no recorded answer (fail nothing): %s; each is named in the misses file (%s)", totalCalls, callWord, breakdown, file)
+		fields = append(fields,
+			zap.String("misses_file", file),
+			zap.String("next_step", fmt.Sprintf("inspect %s, which names each call whole beside its next step; next_steps says what to do for each kind of call", file)),
+		)
+	} else {
+		msg = fmt.Sprintf("%d %s outside every test got no recorded answer (fail nothing): %s; each is named in the test-set report (outsideTestMisses)", totalCalls, callWord, breakdown)
+		fields = append(fields,
+			zap.String("next_step", "inspect outsideTestMisses in the test-set report, which names each call by its shape beside its next step; next_steps says what to do for each kind of call"),
+		)
+	}
+	fields = append(fields, zap.Strings("next_steps", outsideNextSteps(misses)))
+	r.logger.Info(msg, fields...)
+
+	for _, m := range misses {
+		r.logger.Debug("the application made a call outside every test that no mock answered; it fails nothing (a call outside every test is served, not required), and the test-set's report names it (outsideTestMisses)",
 			zap.String("test-set", testSetID),
 			zap.String("protocol", m.Protocol),
 			zap.String("call", m.Call),
@@ -173,8 +199,70 @@ func (r *Replayer) logOutsideTestMisses(testSetID string, misses []models.Outsid
 			zap.Int("count", m.Count),
 			zap.String("next_step", m.NextStep))
 	}
-	if file != "" {
-		r.logger.Info("the test-set's misses file names each call the application made outside every test whole, beside its path tag; it is local and git-ignored",
-			zap.String("test-set", testSetID), zap.String("misses_file", file))
+}
+
+// outsideNextSteps is each distinct next step of misses, in the order first
+// carried: what the summary line says to do (models.OutsideTestNextStep gives
+// a DNS lookup one and any other call another).
+func outsideNextSteps(misses []models.OutsideTestMiss) []string {
+	var steps []string
+	for _, m := range misses {
+		if m.NextStep != "" && !slices.Contains(steps, m.NextStep) {
+			steps = append(steps, m.NextStep)
+		}
 	}
+	return steps
+}
+
+func formatOutsideTestSummary(misses []models.OutsideTestMiss) (int, string) {
+	type protoStats struct {
+		calls int
+		dests map[string]struct{}
+	}
+	byProto := map[string]*protoStats{}
+	total := 0
+	for _, m := range misses {
+		n := m.Count
+		if n <= 0 {
+			n = 1
+		}
+		total += n
+		proto := strings.TrimSpace(m.Protocol)
+		if proto == "" {
+			proto = "unknown"
+		}
+		st := byProto[proto]
+		if st == nil {
+			st = &protoStats{dests: map[string]struct{}{}}
+			byProto[proto] = st
+		}
+		st.calls += n
+		if d := strings.TrimSpace(m.Destination); d != "" {
+			st.dests[d] = struct{}{}
+		}
+	}
+	protos := make([]string, 0, len(byProto))
+	for p := range byProto {
+		protos = append(protos, p)
+	}
+	sort.Slice(protos, func(i, j int) bool {
+		if byProto[protos[i]].calls != byProto[protos[j]].calls {
+			return byProto[protos[i]].calls > byProto[protos[j]].calls
+		}
+		return protos[i] < protos[j]
+	})
+	parts := make([]string, 0, len(protos))
+	for _, p := range protos {
+		st := byProto[p]
+		if !strings.EqualFold(p, "DNS") && len(st.dests) > 0 {
+			hostWord := "hosts"
+			if len(st.dests) == 1 {
+				hostWord = "host"
+			}
+			parts = append(parts, fmt.Sprintf("%s x%d to %d %s", p, st.calls, len(st.dests), hostWord))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s x%d", p, st.calls))
+		}
+	}
+	return total, strings.Join(parts, ", ")
 }
