@@ -54,7 +54,8 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
-		Variables: mock.Spec.Variables.Clone(),
+		// Declared-only variables (keploy.yml transforms) are never persisted.
+		Variables: mock.Spec.Variables.Persisted(),
 		// The places the learn step learned as a read of the application's
 		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
 		Clocks: maps.Clone(mock.Spec.Clocks),
@@ -337,7 +338,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
-		Variables: mock.Spec.Variables.Clone(),
+		// Declared-only variables (keploy.yml transforms) are never persisted.
+		Variables: mock.Spec.Variables.Persisted(),
 		// The places the learn step learned as a read of the application's
 		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
 		Clocks: maps.Clone(mock.Spec.Clocks),

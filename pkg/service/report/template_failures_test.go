@@ -350,3 +350,45 @@ func TestBuildFailure_NamesARefusedSetsReason(t *testing.T) {
 		t.Errorf("keploy report files a refused test set under template placeholders: %q", sb.String())
 	}
 }
+
+// A per-test-case BeforeTestCaseRun refusal (TEST_CASE_REFUSED) is NOT a
+// whole-set load refusal: wholeSetRefusal returns false, JUnit says it was
+// refused before send without prefixing "template variable", and text report
+// renders it under its own TEST CASE REFUSED BEFORE SEND heading.
+func TestBuildFailure_TestCaseRefusedNotWholeSetRefusal(t *testing.T) {
+	tf := models.TemplateFailure{
+		Where:   "test case test-1",
+		Why:     `the BeforeTestCaseRun hook refused test case "test-1": REFUSE_FROZEN_TIME_SHIFT`,
+		Refused: true,
+	}
+	if wholeSetRefusal(tf) {
+		t.Fatalf("wholeSetRefusal(%+v) = true, want false for TEST_CASE_REFUSED", tf)
+	}
+	refused := refusedCase()
+	refused.FailureInfo.Category = []models.FailureCategory{models.TestCaseRefused}
+	refused.TemplateFailures = []models.TemplateFailure{tf}
+
+	f := buildFailure(refused)
+	if want := "test case test-1: " + tf.Why; !strings.Contains(f.Text, want) {
+		t.Errorf("JUnit failure text missing reason %q: %q", want, f.Text)
+	}
+	if strings.Contains(f.Text, "template variable") {
+		t.Errorf("JUnit failure mislabelled TEST_CASE_REFUSED as template variable: %q", f.Text)
+	}
+	if f.Message != "test case refused before send, not sent [HIGH-RISK]" {
+		t.Errorf("JUnit message = %q, want %q", f.Message, "test case refused before send, not sent [HIGH-RISK]")
+	}
+
+	var sb strings.Builder
+	renderTemplateFailures(&sb, refused.TemplateFailures)
+	out := sb.String()
+	if !strings.Contains(out, "=== TEST CASE REFUSED BEFORE SEND (NOT SENT) ===") {
+		t.Errorf("report missing TEST CASE REFUSED heading: %q", out)
+	}
+	if strings.Contains(out, "=== TEST SET REFUSED WHEN IT LOADED") || strings.Contains(out, "TEMPLATE PLACEHOLDERS") {
+		t.Errorf("report misfiled TEST_CASE_REFUSED under set or template heading: %q", out)
+	}
+	if !strings.Contains(out, "  test case test-1: "+tf.Why+"\n") {
+		t.Errorf("report missing refusal line: %q", out)
+	}
+}

@@ -232,6 +232,32 @@ type TestResult struct {
 	// (TestCase.ExpectedRewrite), each with its recorded value and why: the
 	// comparison read the rewritten value there. Absent when there is none.
 	Rewritten []RewrittenPlace `json:"rewritten,omitempty" yaml:"rewritten,omitempty"`
+	// AppliedTransforms records the declarative transforms applied for this
+	// test case (on its request or matched mock answers). Absent when none ran.
+	AppliedTransforms []AppliedTransform `json:"applied_transforms,omitempty" yaml:"applied_transforms,omitempty"`
+	// ClockFreeze reports whether clock freeze was active for this test case
+	// and, when active, the instant the application's clock was frozen to.
+	// Absent when not recorded.
+	ClockFreeze *ClockFreezeInfo `json:"clock_freeze,omitempty" yaml:"clock_freeze,omitempty"`
+}
+
+// AppliedTransform records one declarative replay transform applied during a
+// test case, carrying metadata only (never raw recorded or live values).
+type AppliedTransform struct {
+	Name        string `json:"name" yaml:"name"`
+	At          string `json:"at" yaml:"at"`
+	Place       string `json:"place" yaml:"place"`
+	Function    string `json:"function" yaml:"function"`
+	SigningMode string `json:"signing_mode,omitempty" yaml:"signing_mode,omitempty"`
+	SecretRef   string `json:"secret_ref,omitempty" yaml:"secret_ref,omitempty"`
+	Summary     string `json:"summary,omitempty" yaml:"summary,omitempty"`
+}
+
+// ClockFreezeInfo reports whether clock freeze was active for a test case and
+// the instant it was frozen to.
+type ClockFreezeInfo struct {
+	Active  bool       `json:"active" yaml:"active"`
+	Instant *time.Time `json:"instant,omitempty" yaml:"instant,omitempty"`
 }
 
 // TemplateFailure is one template variable place a test case failed on, or
@@ -1392,6 +1418,11 @@ const (
 	// failure reason, and the test case's refusal in
 	// TestResult.TemplateFailures, say which files or which mock, and why.
 	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
+	// TestCaseRefused means a replay hook (BeforeTestCaseRun) refused this
+	// single test case before sending it (models.TestCaseRefusal), leaving
+	// the rest of the test set to run. TestResult.TemplateFailures names the
+	// test case and why.
+	TestCaseRefused FailureCategory = "TEST_CASE_REFUSED"
 	// TestCaseNotFound means the run selected the test case by name and its
 	// test set holds none of that name: it failed unsent, and
 	// FailureInfo.NotFound says which.

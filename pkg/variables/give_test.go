@@ -84,3 +84,24 @@ func TestANoteSaysWhyAVariableOfTheScopeIsNotBound(t *testing.T) {
 		}
 	}
 }
+
+func TestTable_SensitiveBindingPreservedInMemoryAndSnapshot(t *testing.T) {
+	var tb Table
+	given := Binding{
+		Name:      "declared:fresh-jwt",
+		Value:     "Bearer live.jwt.token",
+		Recorded:  "Bearer rec.jwt.token",
+		Mock:      "test case test-1",
+		Place:     "header.Authorization",
+		Given:     true,
+		Sensitive: true,
+	}
+	tb.Start([]Binding{given})
+
+	got, ok := tb.Lookup(given.Name)
+	require.True(t, ok)
+	require.Equal(t, given, got, "Table keeps live/recorded values and Sensitive flag intact for mock matching")
+
+	snap := tb.Snapshot()
+	require.Equal(t, []Binding{given}, snap, "Snapshot preserves Sensitive flag so replayer redacts reports")
+}

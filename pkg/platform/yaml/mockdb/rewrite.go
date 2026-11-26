@@ -650,7 +650,7 @@ func newGobFileRewriter(root, gobPath string) (*gobFileRewriter, error) {
 }
 
 func (rw *gobFileRewriter) write(mock *models.Mock) error {
-	if err := rw.enc.Encode(gobKinded(mock)); err != nil {
+	if err := rw.enc.Encode(gobKinded(persisted(mock))); err != nil {
 		return fmt.Errorf("encode mock during gob rewrite: %w", err)
 	}
 	return nil

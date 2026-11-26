@@ -16,7 +16,7 @@ func TestIsAutoReplayHighRisk(t *testing.T) {
 		"", SchemaUnchanged, SchemaAdded, SchemaBroken, StatusCodeChanged,
 		HeaderChanged, InternalFailure, AppConnectionError, DependencyMissing,
 		CallUnmatched, CaptureIncompleteCategory, TemplateVariable,
-		TestSetRefused, TestCaseNotFound, "UNKNOWN",
+		TestSetRefused, TestCaseRefused, TestCaseNotFound, "UNKNOWN",
 	}
 	for _, risk := range risks {
 		for _, category := range categories {

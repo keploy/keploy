@@ -459,7 +459,7 @@ func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 		}
 		for _, c := range r.FailureInfo.Category {
 			if c == models.CallUnmatched || c == models.DependencyMissing || c == models.CaptureIncompleteCategory ||
-				(len(templates) > 0 && (c == models.TemplateVariable || c == models.TestSetRefused)) {
+				(len(templates) > 0 && (c == models.TemplateVariable || c == models.TestSetRefused || c == models.TestCaseRefused)) {
 				e.categories = appendCategoryUnique(e.categories, c)
 			}
 		}
