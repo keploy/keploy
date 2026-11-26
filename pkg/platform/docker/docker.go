@@ -1577,15 +1577,23 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 	// every keploy run has (the lookup that found the app resolved it): every
 	// file's services, each container_name interpolated. So
 	// `container_name: ${AGENT:-keploy-agent}` is refused as the literal is,
-	// and so is a keploy-agent service another -f file keys, which compose
-	// would merge into keploy's agent. A document its caller parsed itself
-	// has no resolution, and only the names it writes, checked above.
+	// a `keploy-agent` imported only via `include:` is refused, and so is a
+	// `keploy-agent` service in another -f file that defines, overrides, or
+	// resets (`!reset` / `!override`) container/image/runtime identity (image,
+	// build, container_name, entrypoint, command, or the `keploy-agent` service
+	// itself). A pure tuning override for `keploy-agent` in a secondary -f file
+	// (such as `cpus: 0.02` in agent-cpu.yml) is allowed so compose merges it
+	// onto keploy's generated service; a `keploy-agent` key in the rewritten
+	// compose file itself is always refused above. A document its caller parsed
+	// itself has no resolution, and only the names it writes, checked above.
 	if ident := compose.resolved; ident != nil {
+		if len(ident.agentConflictFields) > 0 {
+			return fmt.Errorf("the compose project already defines or resets a "+
+				"service named \"keploy-agent\" (%s); rename it or remove "+
+				"those overrides so keploy can add its own",
+				strings.Join(ident.agentConflictFields, ", "))
+		}
 		for _, svc := range ident.services() {
-			if svc == "keploy-agent" {
-				return fmt.Errorf("the compose project already defines a service " +
-					"named \"keploy-agent\"; rename it so keploy can add its own")
-			}
 			if ident.containerNames[svc] == "keploy-agent" {
 				return fmt.Errorf("service %q already uses container_name "+
 					"\"keploy-agent\"; rename it so keploy can add its own", svc)

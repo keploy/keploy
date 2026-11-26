@@ -530,11 +530,16 @@ func TestModifyComposeForAgent_HookGetsTheContainerName(t *testing.T) {
 // keploy's agent service is keploy-agent, so a service compose names
 // keploy-agent is refused however the files name it: through a variable, from
 // the project's .env, or in another -f file. Each lookup hands its resolution
-// on with the document ModifyComposeForAgent rewrites.
+// on with the document ModifyComposeForAgent rewrites. A pure tuning override
+// for keploy-agent in a secondary -f file (such as `cpus: 0.02` in
+// agent-cpu.yml) is allowed so compose merges it onto keploy's generated
+// service, while any primary-file `keploy-agent` key or secondary entry that
+// sets image, build, container_name, entrypoint, or command is refused.
 func TestModifyComposeForAgent_AgentNameAsComposeResolvesIt(t *testing.T) {
 	const web = "services:\n  web:\n    image: x\n"
 	const side = web + "  side:\n    image: x\n    container_name: ${AGENT_NAME:-keploy-agent}\n"
 	const named = `service "side" already uses container_name "keploy-agent"`
+	const projectDefined = `the compose project already defines or resets a service named "keploy-agent"`
 	for _, tc := range []struct {
 		name     string
 		files    map[string]string
@@ -550,9 +555,101 @@ func TestModifyComposeForAgent_AgentNameAsComposeResolvesIt(t *testing.T) {
 			"compose.yml": web + "  side:\n    image: x\n    container_name: ${AGENT_NAME}\n",
 			".env":        "AGENT_NAME=keploy-agent\n",
 		}, []string{"compose.yml"}, false, named},
-		{"another file keys it", map[string]string{
+		{"another file tunes keploy-agent with cpus", map[string]string{
+			"compose.yml": web, "agent-cpu.yml": "services:\n  keploy-agent:\n    cpus: 0.02\n",
+		}, []string{"compose.yml", "agent-cpu.yml"}, false, ""},
+		{"earlier override file tunes keploy-agent with cpus", map[string]string{
+			"compose.yml": web, "agent-cpu.yml": "services:\n  keploy-agent:\n    cpus: 0.02\n",
+		}, []string{"agent-cpu.yml", "compose.yml"}, false, ""},
+		{"another file tunes keploy-agent with labels and env", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    labels:\n      keploy.test: \"1\"\n    environment:\n      - FOO=bar\n",
+		}, []string{"compose.yml", "override.yml"}, false, ""},
+		{"another file tunes keploy-agent; the app extends an included service", map[string]string{
+			"compose.yml":   "include:\n  - common.yml\nservices:\n  web:\n    extends:\n      service: base\n",
+			"common.yml":    "services:\n  base:\n    image: x\n",
+			"agent-cpu.yml": "services:\n  keploy-agent:\n    cpus: 0.02\n",
+		}, []string{"compose.yml", "agent-cpu.yml"}, false, ""},
+		{"another file clears command with null", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    command: null\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (command)"},
+		{"another file clears entrypoint with null", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    entrypoint: null\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (entrypoint)"},
+		{"another file keys it with image", map[string]string{
 			"compose.yml": web, "agent.yml": "services:\n  keploy-agent:\n    image: mine\n",
-		}, []string{"compose.yml", "agent.yml"}, false, `the compose project already defines a service named "keploy-agent"`},
+		}, []string{"compose.yml", "agent.yml"}, false, projectDefined + " (image)"},
+		{"another file keys it with empty image", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    image: \"\"\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (image)"},
+		{"another file resets image with !reset", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    image: !reset \"\"\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (image)"},
+		{"another file keys it with build", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    build: .\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (build)"},
+		{"another file keys it with container_name", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    container_name: other\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (container_name)"},
+		{"another file keys it with empty container_name", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    container_name: \"\"\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (container_name)"},
+		{"another file resets container_name with !reset", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    container_name: !reset null\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (container_name)"},
+		{"another file keys it with container_name keploy-agent", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    container_name: keploy-agent\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (container_name)"},
+		{"another file keys it with container_name from env", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    container_name: ${AGENT_NAME:-other}\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (container_name)"},
+		{"another file keys it with entrypoint", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    entrypoint: [\"/bin/sh\"]\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (entrypoint)"},
+		{"another file keys it with empty entrypoint", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    entrypoint: []\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (entrypoint)"},
+		{"another file resets entrypoint with !reset", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    entrypoint: !reset []\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (entrypoint)"},
+		{"another file keys it with command", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    command: [\"sleep\", \"99\"]\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (command)"},
+		{"another file keys it with empty command", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    command: []\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (command)"},
+		{"another file resets command with !reset", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    command: !reset []\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (command)"},
+		{"another file overrides command with !override", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent:\n    command: !override [\"sleep\", \"99\"]\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (command)"},
+		{"another file resets whole keploy-agent service with !reset", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent: !reset {}\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (service)"},
+		{"another file overrides whole keploy-agent service with !override", map[string]string{
+			"compose.yml": web, "override.yml": "services:\n  keploy-agent: !override\n    cpus: 0.02\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (image, container_name, entrypoint, command)"},
+		{"another file extends a service with image onto keploy-agent", map[string]string{
+			"compose.yml":  web,
+			"base.yml":     "services:\n  base:\n    image: mine\n",
+			"override.yml": "services:\n  keploy-agent:\n    extends:\n      file: base.yml\n      service: base\n",
+		}, []string{"compose.yml", "override.yml"}, false, projectDefined + " (image)"},
+		{"included file defines keploy-agent with only cpus", map[string]string{
+			"compose.yml": "include:\n  - agent.yml\n" + web,
+			"agent.yml":   "services:\n  keploy-agent:\n    cpus: 0.02\n",
+		}, []string{"compose.yml"}, false, projectDefined + " (include)"},
+		{"included file defines keploy-agent with only cpus, in memory", map[string]string{
+			"compose.yml": "include:\n  - agent.yml\n" + web,
+			"agent.yml":   "services:\n  keploy-agent:\n    cpus: 0.02\n",
+		}, nil, true, projectDefined + " (include)"},
+		{"multi-file project with included keploy-agent", map[string]string{
+			"compose.yml": "include:\n  - agent.yml\n" + web,
+			"agent.yml":   "services:\n  keploy-agent:\n    cpus: 0.02\n",
+			"side.yml":    "services:\n  side:\n    image: y\n",
+		}, []string{"compose.yml", "side.yml"}, false, projectDefined + " (include)"},
+		{"same file keys keploy-agent even with only cpus", map[string]string{
+			"compose.yml": web + "  keploy-agent:\n    cpus: 0.02\n",
+		}, []string{"compose.yml"}, false, `the compose file already defines a service named "keploy-agent"`},
 		{"another file names it", map[string]string{
 			"compose.yml": web, "side.yml": "services:\n  side:\n    image: x\n    container_name: keploy-agent\n",
 		}, []string{"compose.yml", "side.yml"}, false, named},
@@ -579,6 +676,60 @@ func TestModifyComposeForAgent_AgentNameAsComposeResolvesIt(t *testing.T) {
 				t.Fatalf("got %v, want the refusal %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestModifyComposeForAgent_SecondaryAgentOverrideMergesInComposeGo verifies
+// that a secondary override file tuning keploy-agent (as compose-agent-boot
+// passes `-f docker-compose.yml -f agent-cpu.yml`) is accepted and merges its
+// resource limit onto keploy's generated keploy-agent service under compose-go
+// full validation.
+func TestModifyComposeForAgent_SecondaryAgentOverrideMergesInComposeGo(t *testing.T) {
+	dir := composeProjectDir(t, map[string]string{
+		"docker-compose.yml": "services:\n  app:\n    image: alpine:3.21\n    container_name: cab-app\n",
+		"agent-cpu.yml":      "services:\n  keploy-agent:\n    cpus: 0.02\n",
+	})
+	basePath := filepath.Join(dir, "docker-compose.yml")
+	overridePath := filepath.Join(dir, "agent-cpu.yml")
+
+	idc, err := New(zap.NewNop(), &config.Config{})
+	if err != nil {
+		t.Fatalf("docker.New: %v", err)
+	}
+	info, err := idc.FindContainerInComposeFiles(context.Background(), []string{basePath, overridePath}, ComposeScope{}, "cab-app")
+	if err != nil {
+		t.Fatalf("FindContainerInComposeFiles: %v", err)
+	}
+	opts := buildAgentOpts()
+	opts.Container = "cab-app"
+	if err := idc.ModifyComposeForAgent(info.Compose, opts, info.AppServiceName); err != nil {
+		t.Fatalf("ModifyComposeForAgent: %v", err)
+	}
+	outPrimary := filepath.Join(dir, "docker-compose-tmp.yaml")
+	if err := idc.WriteComposeFile(info.Compose, outPrimary); err != nil {
+		t.Fatalf("WriteComposeFile: %v", err)
+	}
+	po, err := cli.NewProjectOptions(
+		[]string{outPrimary, overridePath},
+		cli.WithWorkingDirectory(dir),
+		cli.WithName("proj"),
+	)
+	if err != nil {
+		t.Fatalf("cli.NewProjectOptions: %v", err)
+	}
+	proj, err := po.LoadProject(context.Background())
+	if err != nil {
+		t.Fatalf("compose-go rejected rewritten compose + agent-cpu.yml: %v", err)
+	}
+	agentSvc := proj.Services["keploy-agent"]
+	if agentSvc.CPUS != 0.02 {
+		t.Fatalf("keploy-agent.CPUS = %v, want 0.02", agentSvc.CPUS)
+	}
+	if agentSvc.ContainerName != opts.KeployContainer {
+		t.Fatalf("keploy-agent.ContainerName = %q, want %q", agentSvc.ContainerName, opts.KeployContainer)
+	}
+	if agentSvc.Image == "" {
+		t.Fatalf("keploy-agent.Image is empty")
 	}
 }
 
