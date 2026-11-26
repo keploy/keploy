@@ -939,7 +939,7 @@ func forEachPEMCertificate(data []byte, fn func(der []byte)) {
 	}
 }
 
-func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string, ca *caState) error {
+func setupSharedVolume(ctx context.Context, logger *zap.Logger, exportPath string, ca *caState) error {
 	if err := os.MkdirAll(exportPath, 0755); err != nil {
 		return fmt.Errorf("failed to create export dir: %w", err)
 	}
@@ -999,6 +999,14 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string,
 
 	if err := setEnvForSharedVolume(logger, crtPath, keployOnlyPath); err != nil {
 		logger.Debug("Failed to set internal env vars for Agent", zap.Error(err))
+	}
+
+	// The app's in-cluster Kubernetes client reads none of the files above,
+	// only its service-account ca.crt: add keploy's CA to a copy of that
+	// directory when the pod builder asked for one (kube_serviceaccount.go).
+	if err := exportKubeServiceAccount(ctx, logger, ca.certPEM); err != nil {
+		logger.Error("Failed to export the app's Kubernetes service-account directory", zap.Error(err))
+		return err
 	}
 
 	// Generate Java Truststore from the MERGED bundle (system roots +
