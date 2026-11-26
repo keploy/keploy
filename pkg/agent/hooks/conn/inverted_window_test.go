@@ -182,7 +182,7 @@ func TestCaptureGRPCSynchronousFailsClosedOnInvertedCall(t *testing.T) {
 	}
 	queue := make(chan *models.TestCase, 1)
 	ctx := WithWindowClock(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), "grpc-clock")
-	CaptureGRPC(ctx, zap.NewNop(), queue, stream, 9090, true, true)
+	CaptureGRPC(ctx, zap.NewNop(), queue, stream, 9090, true, true, models.IncomingOptions{})
 	select {
 	case tc := <-queue:
 		t.Fatalf("inverted gRPC test case %q was emitted instead of failing closed", tc.Name)
@@ -225,7 +225,7 @@ func TestCaptureGRPCWithoutSyncFailsClosedOnInvertedCall(t *testing.T) {
 	}
 	queue := make(chan *models.TestCase, 1)
 	ctx := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w)
-	CaptureGRPC(ctx, zap.NewNop(), queue, stream, 9090, false, false)
+	CaptureGRPC(ctx, zap.NewNop(), queue, stream, 9090, false, false, models.IncomingOptions{})
 	select {
 	case tc := <-queue:
 		t.Fatalf("inverted gRPC test case %q was emitted without --sync", tc.Name)
@@ -277,7 +277,7 @@ func TestCaptureGRPC_InvertedCallSkipsHookAndNextTestID(t *testing.T) {
 		GRPCResp: &models.GrpcResp{Timestamp: req.Add(-50 * time.Millisecond)},
 	}
 	ctxInv := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), winInv)
-	CaptureGRPC(ctxInv, zap.NewNop(), queue, invStream, 9090, true, true)
+	CaptureGRPC(ctxInv, zap.NewNop(), queue, invStream, 9090, true, true, models.IncomingOptions{})
 
 	if hookCalls != 0 {
 		t.Fatalf("GRPCCaptureHook called %d times on inverted call, want 0", hookCalls)
@@ -298,7 +298,7 @@ func TestCaptureGRPC_InvertedCallSkipsHookAndNextTestID(t *testing.T) {
 		GRPCResp: &models.GrpcResp{Timestamp: reqOK.Add(10 * time.Millisecond)},
 	}
 	ctxOK := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), winOK)
-	CaptureGRPC(ctxOK, zap.NewNop(), queue, okStream, 9090, true, true)
+	CaptureGRPC(ctxOK, zap.NewNop(), queue, okStream, 9090, true, true, models.IncomingOptions{})
 
 	if hookCalls != 1 {
 		t.Fatalf("GRPCCaptureHook called %d times after healthy call, want 1", hookCalls)
@@ -368,7 +368,7 @@ func TestCaptureAndCaptureGRPC_InvertedStillSweepStaleMocks(t *testing.T) {
 		},
 		GRPCResp: &models.GrpcResp{Timestamp: reqGRPC.Add(-10 * time.Millisecond)},
 	}
-	CaptureGRPC(ctxGRPC, zap.NewNop(), make(chan *models.TestCase, 1), stream, 9090, true, false)
+	CaptureGRPC(ctxGRPC, zap.NewNop(), make(chan *models.TestCase, 1), stream, 9090, true, false, models.IncomingOptions{})
 	if _, _, _, buf := mgrGRPC.GetDropStats(); buf != 0 {
 		t.Fatalf("gRPC buffer size after inverted CaptureGRPC = %d, want 0 (stale mock must be swept)", buf)
 	}
