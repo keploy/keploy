@@ -261,3 +261,121 @@ func TestProxy_RetainingDeclinesAtomicallyWithWorkerManagers(t *testing.T) {
 		t.Fatalf("mm variables mutated on declined OpenTestFilteredWithWindow: got %v, want empty", bound)
 	}
 }
+
+// TestMockManager_SetFilteredMocksWithWindowRestoresUpdatedUnfilteredOrder
+// proves that retaining the unfiltered tier across per-test windows restores
+// any O(touched) UpdateUnFilteredMock SortOrder mutations back to their
+// freshly-staged order (preventing cross-test LRU drift such as MySQL
+// COM_STMT_PREPARE cycling across later tests), while still retaining the
+// same unfiltered tree pointer without rebuilding the full pool.
+func TestMockManager_SetFilteredMocksWithWindowRestoresUpdatedUnfilteredOrder(t *testing.T) {
+	logger := zap.NewNop()
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), logger)
+	base := time.Date(2024, 1, 2, 10, 0, 0, 0, time.UTC)
+
+	makePrep := func(name string, offset time.Duration) *models.Mock {
+		return &models.Mock{
+			Version: models.GetVersion(),
+			Kind:    models.MySQL,
+			Name:    name,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "connection"},
+				ReqTimestampMock: base.Add(offset),
+				ResTimestampMock: base.Add(offset + time.Millisecond),
+			},
+			TestModeInfo: models.TestModeInfo{
+				IsFiltered: false,
+				Lifetime:   models.LifetimeConnection,
+			},
+		}
+	}
+	makePT := func(name string, offset time.Duration) *models.Mock {
+		return &models.Mock{
+			Version: models.GetVersion(),
+			Kind:    models.MySQL,
+			Name:    name,
+			Spec: models.MockSpec{
+				ReqTimestampMock: base.Add(offset),
+				ResTimestampMock: base.Add(offset + time.Millisecond),
+			},
+			TestModeInfo: models.TestModeInfo{
+				IsFiltered: true,
+				Lifetime:   models.LifetimePerTest,
+			},
+		}
+	}
+
+	preps := []*models.Mock{
+		makePrep("prep-1", 1*time.Second),
+		makePrep("prep-2", 2*time.Second),
+		makePrep("prep-3", 3*time.Second),
+	}
+	pt1 := makePT("exec-1", 10*time.Second)
+	pt2 := makePT("exec-2", 20*time.Second)
+	pt3 := makePT("exec-3", 30*time.Second)
+
+	mm.SetMocksWithWindow([]*models.Mock{pt1}, preps, base.Add(9*time.Second), base.Add(15*time.Second))
+	origTree := mm.unfiltered
+
+	namesOf := func(ms []*models.Mock) []string {
+		out := make([]string, len(ms))
+		for i, m := range ms {
+			out[i] = m.Name
+		}
+		return out
+	}
+
+	// Test 1: MySQL replayer bumps prep-1's SortOrder to the back of the tree.
+	unf1, _ := mm.GetUnFilteredMocks()
+	if got := namesOf(unf1); len(got) != 3 || got[0] != "prep-1" || got[1] != "prep-2" || got[2] != "prep-3" {
+		t.Fatalf("initial unfiltered order = %v, want [prep-1 prep-2 prep-3]", got)
+	}
+	bumped1 := unf1[0].ShallowCopy()
+	bumped1.TestModeInfo.SortOrder = 100
+	if !mm.UpdateUnFilteredMock(unf1[0], bumped1) {
+		t.Fatal("UpdateUnFilteredMock(prep-1 -> 100) returned false")
+	}
+	// Chained second update within the same test (100 -> 200).
+	bumped2 := bumped1.ShallowCopy()
+	bumped2.TestModeInfo.SortOrder = 200
+	if !mm.UpdateUnFilteredMock(bumped1, bumped2) {
+		t.Fatal("UpdateUnFilteredMock(prep-1 -> 200) returned false")
+	}
+	midUnf, _ := mm.GetUnFilteredMocks()
+	if got := namesOf(midUnf); len(got) != 3 || got[0] != "prep-2" || got[2] != "prep-1" {
+		t.Fatalf("mid-test unfiltered order = %v, want [prep-2 prep-3 prep-1]", got)
+	}
+
+	// Test 2: SetFilteredMocksWithWindow retains the tree pointer AND restores
+	// prep-1 back to the front with its original SortOrder in both global and
+	// per-kind trees.
+	if !mm.SetFilteredMocksWithWindow([]*models.Mock{pt2}, base.Add(19*time.Second), base.Add(25*time.Second)) {
+		t.Fatal("SetFilteredMocksWithWindow(test 2) returned false, want true")
+	}
+	if mm.unfiltered != origTree {
+		t.Fatal("SetFilteredMocksWithWindow rebuilt unfiltered tree instead of restoring in place")
+	}
+	unf2, _ := mm.GetUnFilteredMocks()
+	if got := namesOf(unf2); len(got) != 3 || got[0] != "prep-1" || got[1] != "prep-2" || got[2] != "prep-3" {
+		t.Fatalf("post-stage global unfiltered order = %v, want [prep-1 prep-2 prep-3]", got)
+	}
+	if unf2[0].TestModeInfo.SortOrder != 1 {
+		t.Fatalf("restored prep-1 SortOrder = %d, want 1", unf2[0].TestModeInfo.SortOrder)
+	}
+	byKind, err := mm.GetUnFilteredMocksByKind(models.MySQL)
+	if err != nil {
+		t.Fatalf("GetUnFilteredMocksByKind(MySQL): %v", err)
+	}
+	if got := namesOf(byKind); len(got) != 3 || got[0] != "prep-1" || got[1] != "prep-2" || got[2] != "prep-3" {
+		t.Fatalf("post-stage per-kind unfiltered order = %v, want [prep-1 prep-2 prep-3]", got)
+	}
+
+	// Same-pointer in-place UpdateUnFilteredMock cannot be safely restored:
+	// must invalidate retention so the caller falls back to full staging.
+	if !mm.UpdateUnFilteredMock(unf2[0], unf2[0]) {
+		t.Fatal("in-place UpdateUnFilteredMock returned false")
+	}
+	if mm.SetFilteredMocksWithWindow([]*models.Mock{pt3}, base.Add(29*time.Second), base.Add(35*time.Second)) {
+		t.Fatal("SetFilteredMocksWithWindow succeeded after same-pointer UpdateUnFilteredMock, want false")
+	}
+}

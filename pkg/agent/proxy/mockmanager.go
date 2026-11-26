@@ -698,10 +698,20 @@ type MockManager struct {
 	// unfilteredStaged is set once the unfiltered tier has been published for
 	// the current set (cleared on ResetForReplaySession and scope staging);
 	// unfilteredDeleted is set if DeleteUnFilteredMock removes an entry or
-	// UpdateUnFilteredMock moves an entry across kinds, forcing the next
-	// staging to reload the unfiltered pool rather than retaining the tree.
+	// UpdateUnFilteredMock performs a non-restorable mutation (cross-kind move,
+	// rename, DNS update, in-place same-pointer update, or filtered->unfiltered
+	// promotion), forcing the next staging to reload the unfiltered pool.
 	unfilteredStaged  atomic.Bool
 	unfilteredDeleted atomic.Bool
+
+	// retainedDirty maps the latest *models.Mock pointer currently filed in
+	// m.unfiltered and m.unfilteredByKind via UpdateUnFilteredMock back to the
+	// original *models.Mock pointer that full staging placed there. Before
+	// publishing a retained per-test window (SetFilteredMocksWithWindow /
+	// OpenTestFilteredWithWindow), restoring just these O(touched) entries
+	// returns the unfiltered trees to their exact freshly-staged SortOrder and
+	// contents without reloading the full pool. Guarded by treesMu.
+	retainedDirty map[*models.Mock]*models.Mock
 
 	// reclaim tracks unconsumed equivalent alternatives recorded inside active
 	// overlapping windows so a later overlapping window can reclaim a consumed
@@ -897,6 +907,9 @@ func (m *MockManager) IsClosed() bool {
 func (m *MockManager) ResetForReplaySession() {
 	m.unfilteredStaged.Store(false)
 	m.unfilteredDeleted.Store(false)
+	m.treesMu.Lock()
+	m.retainedDirty = nil
+	m.treesMu.Unlock()
 	m.spentMu.Lock()
 	m.spent = nil
 	m.spentMu.Unlock()
@@ -1699,9 +1712,9 @@ func (m *MockManager) keepRunOnlyForAnExactStartUp(start time.Time) {
 // CanRetainUnfiltered reports whether this manager already holds an intact
 // unfiltered tier for the current set that can be retained across per-test
 // window updates without reloading or rebuilding the unfiltered trees.
-// Note: retaining the live unfiltered trees preserves per-mock SortOrder LRU
-// adjustments made by UpdateUnFilteredMock across tests within the same set
-// (matching exact-serving's single-stage session tree behavior).
+// Entries mutated by UpdateUnFilteredMock during a test are restored in place
+// in O(touched) before publishing the next window so every test observes the
+// exact freshly-staged unfiltered order and contents.
 func (m *MockManager) CanRetainUnfiltered() bool {
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
@@ -2014,6 +2027,14 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope, retainUnfiltered bool) bool {
 	if retainUnfiltered && !m.canRetainUnfilteredLocked(filtered, start, end, scope) {
 		return false
+	}
+	var restoredKinds map[models.Kind]struct{}
+	if retainUnfiltered {
+		var ok bool
+		restoredKinds, ok = m.restoreRetainedUnfilteredLocked()
+		if !ok {
+			return false
+		}
 	}
 	// Every staging starts the per-test stateful cursors over: a test's own
 	// recordings of a request advance their cursor within that test alone.
@@ -2558,6 +2579,9 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 	// Kinds that were present before this call but are absent from every input
 	// slice above. Collected pre-swap; see outgoingKinds.
 	for k := range outgoingKinds {
+		touchedAll[k] = struct{}{}
+	}
+	for k := range restoredKinds {
 		touchedAll[k] = struct{}{}
 	}
 	for k := range touchedAll {
@@ -4401,6 +4425,7 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 		b.touched[k] = struct{}{}
 	}
 	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = b.tree, b.byKind, b.stateless
+	m.retainedDirty = nil
 	m.treesMu.Unlock()
 	m.unfilteredStaged.Store(true)
 	m.unfilteredDeleted.Store(false)
@@ -4410,6 +4435,48 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 		}
 		m.bumpRevisionAll()
 	}
+}
+
+// restoreRetainedUnfilteredLocked restores every unfiltered mock modified via
+// UpdateUnFilteredMock since the last full unfiltered staging back to its
+// original freshly-staged pointer and SortOrder in both m.unfiltered and
+// m.unfilteredByKind. Returns false (marking unfilteredDeleted so the caller
+// falls back to full staging) if a concurrent update/delete raced with any
+// tracked entry. Caller holds swapMu.
+func (m *MockManager) restoreRetainedUnfilteredLocked() (map[models.Kind]struct{}, bool) {
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	if m.unfilteredDeleted.Load() || !m.unfilteredStaged.Load() {
+		return nil, false
+	}
+	if len(m.retainedDirty) == 0 {
+		return nil, true
+	}
+	var restoredKinds map[models.Kind]struct{}
+	for cur, orig := range m.retainedDirty {
+		if cur == nil || orig == nil {
+			continue
+		}
+		okGlobal, gotReplaced := m.unfiltered.updateReplacing(cur.TestModeInfo, orig.TestModeInfo, orig, *cur)
+		if !okGlobal || gotReplaced != cur {
+			m.unfilteredDeleted.Store(true)
+			m.retainedDirty = nil
+			return nil, false
+		}
+		if unf := m.unfilteredByKind[orig.Kind]; unf != nil {
+			if !unf.update(cur.TestModeInfo, orig.TestModeInfo, orig, *cur) {
+				m.unfilteredDeleted.Store(true)
+				m.retainedDirty = nil
+				return nil, false
+			}
+		}
+		if restoredKinds == nil {
+			restoredKinds = make(map[models.Kind]struct{}, 2)
+		}
+		restoredKinds[orig.Kind] = struct{}{}
+	}
+	m.retainedDirty = nil
+	return restoredKinds, true
 }
 
 // ---------- point updates / deletes (keep per-kind in sync) ----------
@@ -4539,6 +4606,30 @@ func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) b
 			}
 			unf.insert(new.TestModeInfo, new)
 			updatedNewKind = true
+			// Filtered->unfiltered promotion added an entry not present at
+			// initial staging; force full reload on next staging.
+			m.unfilteredDeleted.Store(true)
+			m.retainedDirty = nil
+		} else if updatedGlobal {
+			// Track O(touched) rollback back to the original staged entry so
+			// SetFilteredMocksWithWindow restores exact staged order between
+			// tests. Non-restorable mutations (same-pointer in-place edits,
+			// renames, or DNS entries indexed in statelessUnfiltered) force a
+			// full reload.
+			if replaced == nil || replaced == new || replaced.Name != new.Name || oldK == models.DNS {
+				m.unfilteredDeleted.Store(true)
+				m.retainedDirty = nil
+			} else if m.unfilteredStaged.Load() {
+				if m.retainedDirty == nil {
+					m.retainedDirty = make(map[*models.Mock]*models.Mock)
+				}
+				if orig, ok := m.retainedDirty[replaced]; ok {
+					delete(m.retainedDirty, replaced)
+					m.retainedDirty[new] = orig
+				} else {
+					m.retainedDirty[new] = replaced
+				}
+			}
 		}
 		m.treesMu.Unlock()
 	} else {
@@ -4552,6 +4643,7 @@ func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) b
 			newUnf.insert(new.TestModeInfo, new)
 			updatedNewKind = true
 		}
+		m.retainedDirty = nil
 		m.treesMu.Unlock()
 		if m.logger != nil {
 			m.logger.Info("moved mock across kinds",
@@ -4805,6 +4897,9 @@ func (m *MockManager) deleteUnFilteredTier(mock models.Mock) bool {
 	_, unf := m.ensureKindTrees(k)
 	m.treesMu.Lock()
 	deletedKind := unf.deleteMock(mock.TestModeInfo, mock)
+	if deletedGlobal {
+		m.retainedDirty = nil
+	}
 	m.treesMu.Unlock()
 
 	if deletedGlobal {
