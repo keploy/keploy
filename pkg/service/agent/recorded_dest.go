@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -67,16 +68,35 @@ func loopback(host string) bool {
 // from its resident mocks.
 func (s *ClientMockStorage) recordedDests() recordedDests {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.dests == nil {
-		s.dests = recordedDests{}
-		for _, pool := range [][]*models.Mock{s.filtered, s.unfiltered} {
-			for _, m := range pool {
-				s.dests.add(m)
-			}
+	if s.dests != nil {
+		d := s.dests
+		s.mu.Unlock()
+		return d
+	}
+	d := recordedDests{}
+	for _, pool := range [][]*models.Mock{s.filtered, s.unfiltered} {
+		for _, m := range pool {
+			d.add(m)
 		}
 	}
-	return s.dests
+	disks := []*proxyPkg.DiskMocks{s.diskMocks, s.unfilteredDisk}
+	s.mu.Unlock()
+	for _, disk := range disks {
+		if disk == nil {
+			continue
+		}
+		_ = disk.StreamRecorded(func(m *models.Mock) bool {
+			d.add(m)
+			return true
+		})
+	}
+	s.mu.Lock()
+	if s.dests == nil {
+		s.dests = d
+	}
+	res := s.dests
+	s.mu.Unlock()
+	return res
 }
 
 // asRecorded is m with its destination named as the loaded recording names

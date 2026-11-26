@@ -4285,8 +4285,44 @@ func FilterPerTestAndLaxPromotedInFlightAware(ctx context.Context, logger *zap.L
 // the window (ServeWindow.Windows, models.WindowSchedule.EdgeOwner), as the
 // mock manager's staging then stages it: the set's recorded windows. Nil
 // windows keep none, as FilterPerTestAndLaxPromotedInFlightAware.
+type mockCopyMode uint8
+
+const (
+	mockCopyDeep mockCopyMode = iota
+	mockCopyShallow
+	mockCopyInPlace
+)
+
+func copyMockForFilter(m *models.Mock, mode mockCopyMode) *models.Mock {
+	switch mode {
+	case mockCopyInPlace:
+		return m
+	case mockCopyShallow:
+		return m.ShallowCopy()
+	default:
+		return m.DeepCopy()
+	}
+}
+
 func FilterPerTestAndLaxPromotedWithWindows(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule) ([]*models.Mock, []*models.Mock) {
-	perTestInWindow, promotedToSession := filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, windows)
+	return filterPerTestAndLaxPromotedWithWindowsMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, windows, mockCopyDeep)
+}
+
+// FilterPerTestAndLaxPromotedWithWindowsNoDeepCopy is
+// FilterPerTestAndLaxPromotedWithWindows without whole-mock DeepCopy: when
+// owned is true (mocks freshly decoded from DiskMocks), TestModeInfo fields
+// are updated in place; otherwise ShallowCopy isolates TestModeInfo while
+// sharing immutable Spec payloads.
+func FilterPerTestAndLaxPromotedWithWindowsNoDeepCopy(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule, owned bool) ([]*models.Mock, []*models.Mock) {
+	mode := mockCopyShallow
+	if owned {
+		mode = mockCopyInPlace
+	}
+	return filterPerTestAndLaxPromotedWithWindowsMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, windows, mode)
+}
+
+func filterPerTestAndLaxPromotedWithWindowsMode(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule, mode mockCopyMode) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStampInFlightAwareMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow, windows, mode)
 
 	sort.SliceStable(perTestInWindow, func(i, j int) bool {
 		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
@@ -4315,7 +4351,21 @@ func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock
 // tier-aware strict branch) and reach MockManager.SetMocksWithWindow
 // where the startup-tier partition sorts them correctly.
 func FilterConfigMocksTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
+	return filterConfigMocksTierAwareMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, mockCopyDeep)
+}
+
+// FilterConfigMocksTierAwareNoDeepCopy is FilterConfigMocksTierAware without
+// whole-pool DeepCopy (in-place when owned, ShallowCopy otherwise).
+func FilterConfigMocksTierAwareNoDeepCopy(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time, owned bool) []*models.Mock {
+	mode := mockCopyShallow
+	if owned {
+		mode = mockCopyInPlace
+	}
+	return filterConfigMocksTierAwareMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, mode)
+}
+
+func filterConfigMocksTierAwareMode(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time, mode mockCopyMode) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByTimeStampInFlightAwareMode(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, time.Time{}, false, nil, mode)
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -4358,19 +4408,37 @@ func IsTestWindow(afterTime, beforeTime time.Time) bool {
 // names the test's whole recording, ExactMapping), or no kind placed at its
 // answer, it is FilterTcsMocksMapping.
 func FilterTcsMocksMappingInWindow(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time) []*models.Mock {
-	if !models.AnswerPlacedRegistered() || !IsTestWindow(afterTime, beforeTime) {
-		return FilterTcsMocksMapping(ctx, logger, m, mocksPresentInMapping)
+	return filterTcsMocksMappingInWindowMode(ctx, logger, m, mocksPresentInMapping, afterTime, beforeTime, mockCopyDeep)
+}
+
+// FilterTcsMocksMappingInWindowNoDeepCopy is FilterTcsMocksMappingInWindow
+// without whole-mock DeepCopy (in-place when owned, ShallowCopy otherwise).
+func FilterTcsMocksMappingInWindowNoDeepCopy(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time, owned bool) []*models.Mock {
+	mode := mockCopyShallow
+	if owned {
+		mode = mockCopyInPlace
 	}
-	names := append([]string(nil), mocksPresentInMapping...)
-	for _, mk := range m {
-		if mk == nil || !models.IsAnswerPlaced(mk) {
-			continue
-		}
-		if place := models.PlaceOf(mk); !place.Before(afterTime) && !place.After(beforeTime) {
-			names = append(names, mk.Name)
+	return filterTcsMocksMappingInWindowMode(ctx, logger, m, mocksPresentInMapping, afterTime, beforeTime, mode)
+}
+
+func filterTcsMocksMappingInWindowMode(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time, mode mockCopyMode) []*models.Mock {
+	names := mocksPresentInMapping
+	if models.AnswerPlacedRegistered() && IsTestWindow(afterTime, beforeTime) {
+		names = append([]string(nil), mocksPresentInMapping...)
+		for _, mk := range m {
+			if mk == nil || !models.IsAnswerPlaced(mk) {
+				continue
+			}
+			if place := models.PlaceOf(mk); !place.Before(afterTime) && !place.After(beforeTime) {
+				names = append(names, mk.Name)
+			}
 		}
 	}
-	return FilterTcsMocksMapping(ctx, logger, m, names)
+	filteredMocks, _ := filterByMappingMode(ctx, logger, m, names, mode)
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+	return filteredMocks
 }
 
 // FilterConfigMocksMapping tags the reusable (config/session/connection) pool
@@ -4409,7 +4477,21 @@ func FilterTcsMocksMappingInWindow(ctx context.Context, logger *zap.Logger, m []
 // on a pool where neither rule fires. The property claimed here is narrower and
 // is the one that matters: mapping membership is not a chronological signal, so
 // it must not reorder this pool.
-func FilterConfigMocksMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	return filterConfigMocksMappingMode(ctx, logger, m, mocksPresentInMapping, mockCopyDeep)
+}
+
+// FilterConfigMocksMappingNoDeepCopy is FilterConfigMocksMapping without
+// whole-pool DeepCopy (in-place when owned, ShallowCopy otherwise).
+func FilterConfigMocksMappingNoDeepCopy(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, owned bool) []*models.Mock {
+	mode := mockCopyShallow
+	if owned {
+		mode = mockCopyInPlace
+	}
+	return filterConfigMocksMappingMode(ctx, logger, m, mocksPresentInMapping, mode)
+}
+
+func filterConfigMocksMappingMode(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, mode mockCopyMode) []*models.Mock {
 	mapping := make(map[string]bool, len(mocksPresentInMapping))
 	for _, name := range mocksPresentInMapping {
 		mapping[name] = true
@@ -4421,7 +4503,7 @@ func FilterConfigMocksMapping(_ context.Context, logger *zap.Logger, m []*models
 		if mock == nil {
 			continue
 		}
-		p := mock.DeepCopy()
+		p := copyMockForFilter(mock, mode)
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
@@ -4610,7 +4692,11 @@ func filterByTimeStampTierAware(ctx context.Context, logger *zap.Logger, m []*mo
 // slice too, under the strict window, a plain per-test mock the edge rule
 // gives the window (models.WindowSchedule.EdgeOwnedBy), stated lifetime or
 // not; nil: no edge rule.
-func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule) ([]*models.Mock, []*models.Mock) {
+func filterByTimeStampInFlightAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule) ([]*models.Mock, []*models.Mock) {
+	return filterByTimeStampInFlightAwareMode(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, inFlightFrom, strictWindow, windows, mockCopyDeep)
+}
+
+func filterByTimeStampInFlightAwareMode(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool, windows *models.WindowSchedule, mode mockCopyMode) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -4632,9 +4718,11 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		if mock == nil {
 			continue
 		}
-		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
-		// field in this for loop, and write in mockmanager functions.
-		p := mock.DeepCopy()
+		// Copy according to mode: external Filter* callers deep-copy to keep
+		// caller slices isolated; agent staging uses in-place (freshly decoded
+		// from DiskMocks) or ShallowCopy (isolating TestModeInfo while sharing
+		// immutable Spec payloads).
+		p := copyMockForFilter(mock, mode)
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
@@ -5063,7 +5151,11 @@ func effectiveLifetimeForRouting(m *models.Mock) models.Lifetime {
 	return models.LifetimePerTest
 }
 
-func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
+func filterByMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
+	return filterByMappingMode(ctx, logger, m, mocksPresentInMapping, mockCopyDeep)
+}
+
+func filterByMappingMode(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, mode mockCopyMode) ([]*models.Mock, []*models.Mock) {
 	mapping := make(map[string]bool, len(mocksPresentInMapping))
 	for _, name := range mocksPresentInMapping {
 		mapping[name] = true
@@ -5074,7 +5166,7 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 		if mock == nil {
 			continue
 		}
-		p := mock.DeepCopy()
+		p := copyMockForFilter(mock, mode)
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}

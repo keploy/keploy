@@ -723,3 +723,70 @@ func TestRangeKeysVisitsTheKeysAskedInRecordedOrder(t *testing.T) {
 		t.Fatalf("a kind with no declared keys visited %v", got)
 	}
 }
+
+// EarliestReqTs skips untimed mocks (zero ReqTimestampMock, stored as 0 rather
+// than time.Time{}.UnixNano() which overflows to year 1754), returning zero
+// when every entry is untimed and the earliest timed mock otherwise.
+func TestDiskMocks_EarliestReqTsIgnoresUntimedMocks(t *testing.T) {
+	untimedOnly, err := NewDiskMocksWithBudget(zap.NewNop(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = untimedOnly.Close() }()
+	untimed := &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Name:    "cfg-untimed",
+		Kind:    models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"type": "config"},
+			HTTPReq:  &models.HTTPReq{Method: models.Method("GET"), URL: "http://svc/cfg"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: "ok"},
+		},
+	}
+	if err := untimedOnly.Add(untimed); err != nil {
+		t.Fatal(err)
+	}
+	untimedOnly.Finalize()
+	if got := untimedOnly.EarliestReqTs(); !got.IsZero() {
+		t.Fatalf("all-untimed EarliestReqTs() = %v, want zero", got)
+	}
+
+	mixed, err := NewDiskMocksWithBudget(zap.NewNop(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mixed.Close() }()
+	wantTS := time.Date(2026, 11, 26, 6, 0, 0, 0, time.UTC)
+	laterTS := wantTS.Add(30 * time.Second)
+	for _, m := range []*models.Mock{
+		untimed,
+		{
+			Version: "api.keploy.io/v1beta1",
+			Name:    "cfg-later",
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "config"},
+				ReqTimestampMock: laterTS,
+				ResTimestampMock: laterTS.Add(time.Millisecond),
+			},
+		},
+		{
+			Version: "api.keploy.io/v1beta1",
+			Name:    "cfg-earliest",
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "config"},
+				ReqTimestampMock: wantTS,
+				ResTimestampMock: wantTS.Add(time.Millisecond),
+			},
+		},
+	} {
+		if err := mixed.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mixed.Finalize()
+	if got := mixed.EarliestReqTs(); !got.Equal(wantTS) {
+		t.Fatalf("mixed EarliestReqTs() = %v, want %v", got, wantTS)
+	}
+}

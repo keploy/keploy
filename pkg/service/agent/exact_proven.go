@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"math"
 	"slices"
@@ -202,8 +203,9 @@ func (a *Agent) serveUnsetBackground(_ context.Context) error {
 		copy(residentFiltered, storage.filtered)
 		copy(originalUnfiltered, storage.unfiltered)
 		disk := storage.diskMocks
+		unfDisk := storage.unfilteredDisk
 		storage.mu.RUnlock()
-		a.seedBackgroundRecordings(models.MockFilterParams{BackgroundMocks: bgNames}, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk)
+		a.seedBackgroundRecordings(models.MockFilterParams{BackgroundMocks: bgNames}, [][]*models.Mock{residentFiltered, originalUnfiltered}, disk, unfDisk)
 	}
 	return nil
 }
@@ -493,7 +495,7 @@ func (a *Agent) readUnstagedFromDisk() error {
 	}
 	if rb, ok := a.Proxy.(coreAgent.RecordedBeforeSetter); ok {
 		if rk, ok := a.Proxy.(coreAgent.RecordingKeeper); ok {
-			if disk := a.stagedDisk(); disk != nil {
+			for _, disk := range a.stagedDisks() {
 				disk.SetRecordingKeeper(rk.KeepRecording)
 			}
 		}
@@ -524,11 +526,37 @@ func (a *Agent) readUnstagedFromDisk() error {
 // when the set's mocks are all resident, and so all staged in the proxy's
 // trees.
 func (a *Agent) diskRecordingTimes() func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error {
-	disk := a.stagedDisk()
-	if disk == nil {
+	disks := a.stagedDisks()
+	if len(disks) == 0 {
 		return nil
 	}
-	return disk.RangeTimes
+	if len(disks) == 1 {
+		return disks[0].RangeTimes
+	}
+	return func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error {
+		seen := make(map[string]struct{})
+		stopped := false
+		for _, d := range disks {
+			if stopped {
+				break
+			}
+			err := d.RangeTimes(func(name string, place time.Time, protocolPhase bool, clock string) bool {
+				if _, dup := seen[name]; dup {
+					return true
+				}
+				seen[name] = struct{}{}
+				if !visit(name, place, protocolPhase, clock) {
+					stopped = true
+					return false
+				}
+				return true
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // restartKey starts key's calls outside every test afresh on the proxy
@@ -927,10 +955,16 @@ func (a *Agent) loadKeptLearning(states []models.MockState) error {
 		}
 	}
 	disk := s.diskMocks
+	unfDisk := s.unfilteredDisk
+	s.keptGen++
 	s.mu.Unlock()
 	if disk != nil {
 		disk.SetOnLoad(kept.Into)
 	}
+	if unfDisk != nil {
+		unfDisk.SetOnLoad(kept.Into)
+	}
+	a.invalidateStagedUnfiltered()
 	return nil
 }
 
@@ -992,16 +1026,42 @@ func (a *Agent) servePoolAhead(es coreAgent.ExactServer, pool, ahead []string) e
 // under request keys (DiskMocks.RangeKeys); nil when the set's mocks are all
 // resident, and so all staged in the proxy's trees.
 func (a *Agent) diskRecordingSource() func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
-	disk := a.stagedDisk()
-	if disk == nil {
+	disks := a.stagedDisks()
+	if len(disks) == 0 {
 		return nil
 	}
-	return disk.RangeKeys
+	if len(disks) == 1 {
+		return disks[0].RangeKeys
+	}
+	return func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
+		seen := make(map[string]struct{})
+		stopped := false
+		for _, d := range disks {
+			if stopped {
+				break
+			}
+			err := d.RangeKeys(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
+				if _, dup := seen[name]; dup {
+					return true
+				}
+				seen[name] = struct{}{}
+				if !visit(name, load) {
+					stopped = true
+					return false
+				}
+				return true
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
-// stagedDisk is the on-disk store of the staged set's per-test mocks, nil
-// when it keeps none on disk.
-func (a *Agent) stagedDisk() *proxyPkg.DiskMocks {
+// stagedDisks returns every non-nil on-disk store of the staged set (per-test
+// diskMocks and/or unfilteredDisk), empty when all mocks are resident.
+func (a *Agent) stagedDisks() []*proxyPkg.DiskMocks {
 	v, ok := a.clientMocks.Load(uint64(0))
 	s, _ := v.(*ClientMockStorage)
 	if !ok || s == nil {
@@ -1009,18 +1069,104 @@ func (a *Agent) stagedDisk() *proxyPkg.DiskMocks {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.diskMocks
+	var out []*proxyPkg.DiskMocks
+	if s.diskMocks != nil {
+		out = append(out, s.diskMocks)
+	}
+	if s.unfilteredDisk != nil {
+		out = append(out, s.unfilteredDisk)
+	}
+	return out
 }
 
-// diskRecordedBefore is the on-disk store's reader of the staged set's
+// diskRecordedBefore is the on-disk stores' reader of the staged set's
 // recordings made before an instant (DiskMocks.RangeRecordedBefore), nil
-// when the set keeps none on disk.
+// when the set keeps none on disk. When multiple stores are active (e.g.
+// filtered diskMocks and unfilteredDisk), it merges them in ascending
+// ReqTimestampMock order with cross-disk name deduplication while preserving
+// RangeRecordedBefore's RecordingKeeper population.
 func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) bool) error {
-	disk := a.stagedDisk()
-	if disk == nil {
+	disks := a.stagedDisks()
+	if len(disks) == 0 {
 		return nil
 	}
-	return disk.RangeRecordedBefore
+	if len(disks) == 1 {
+		return disks[0].RangeRecordedBefore
+	}
+	return func(t time.Time, visit func(*models.Mock) bool) error {
+		type diskPullStream struct {
+			next func() (*models.Mock, bool)
+			stop func()
+			err  *error
+			cur  *models.Mock
+			ok   bool
+		}
+		streams := make([]diskPullStream, 0, len(disks))
+		defer func() {
+			for i := range streams {
+				streams[i].stop()
+			}
+		}()
+		for _, d := range disks {
+			var streamErr error
+			diskRef := d
+			next, stop := iter.Pull(func(yield func(*models.Mock) bool) {
+				streamErr = diskRef.RangeRecordedBefore(t, func(dm *models.Mock) bool {
+					if dm == nil {
+						return true
+					}
+					return yield(dm)
+				})
+			})
+			cur, ok := next()
+			if !ok && streamErr != nil {
+				stop()
+				return streamErr
+			}
+			streams = append(streams, diskPullStream{
+				next: next,
+				stop: stop,
+				err:  &streamErr,
+				cur:  cur,
+				ok:   ok,
+			})
+		}
+
+		seen := make(map[string]struct{})
+		for {
+			bestIdx := -1
+			for i := range streams {
+				if !streams[i].ok {
+					continue
+				}
+				if bestIdx < 0 || streams[i].cur.Spec.ReqTimestampMock.Before(streams[bestIdx].cur.Spec.ReqTimestampMock) {
+					bestIdx = i
+				}
+			}
+			if bestIdx < 0 {
+				return nil
+			}
+			mk := streams[bestIdx].cur
+			skip := false
+			if mk.Name != "" {
+				if _, dup := seen[mk.Name]; dup {
+					skip = true
+				} else {
+					seen[mk.Name] = struct{}{}
+				}
+			}
+			if !skip && !visit(mk) {
+				return nil
+			}
+			streams[bestIdx].cur = nil
+			cur, ok := streams[bestIdx].next()
+			if !ok && *streams[bestIdx].err != nil {
+				return *streams[bestIdx].err
+			}
+			streams[bestIdx].cur = cur
+			streams[bestIdx].ok = ok
+		}
+	}
 }
 
 // serveWorkerExactly tells the proxy which of the set's worker-scope mocks
@@ -1407,9 +1553,35 @@ func (a *Agent) serveBackgroundExactly(es coreAgent.ExactServer, rules string, p
 // recordings of a kind (DiskMocks.RangeKind), nil when the set keeps none on
 // disk.
 func (a *Agent) diskRecordedOfKind() func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
-	disk := a.stagedDisk()
-	if disk == nil {
+	disks := a.stagedDisks()
+	if len(disks) == 0 {
 		return nil
 	}
-	return disk.RangeKind
+	if len(disks) == 1 {
+		return disks[0].RangeKind
+	}
+	return func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error {
+		seen := make(map[string]struct{})
+		stopped := false
+		for _, d := range disks {
+			if stopped {
+				break
+			}
+			err := d.RangeKind(kind, func(name string, load func() (*models.Mock, error)) bool {
+				if _, dup := seen[name]; dup {
+					return true
+				}
+				seen[name] = struct{}{}
+				if !visit(name, load) {
+					stopped = true
+					return false
+				}
+				return true
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }

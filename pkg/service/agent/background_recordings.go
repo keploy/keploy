@@ -2,6 +2,7 @@ package agent
 
 import (
 	"container/heap"
+	"iter"
 	"net/url"
 	"slices"
 	"sort"
@@ -47,7 +48,7 @@ var (
 // or not. A staging call that names none clears the previous set's. A set
 // whose recordings cannot be read is handed none: every miss stays its
 // test's, as before.
-func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) {
+func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, resident [][]*models.Mock, disks ...*proxyPkg.DiskMocks) {
 	seeder, ok := a.Proxy.(coreAgent.BackgroundRecordingsSeeder)
 	if !ok {
 		return
@@ -55,9 +56,9 @@ func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, residen
 	var recs []models.BackgroundRecording
 	var err error
 	if len(params.BackgroundMocks) > 0 {
-		recs, err = backgroundRecordingsOf(params.BackgroundMocks, params.StartupMocks, resident, disk)
+		recs, err = backgroundRecordingsOf(params.BackgroundMocks, params.StartupMocks, resident, disks...)
 	} else if params.DeriveBackgroundFromWindows && len(params.RecordedWindows) > 0 && !params.ExactStaging {
-		recs, err = derivedBackgroundRecordingsOf(params.RecordedWindows, resident, disk)
+		recs, err = derivedBackgroundRecordingsOf(params.RecordedWindows, resident, disks...)
 	}
 	if err != nil {
 		a.logger.Warn("could not read the test set's background recordings; every call that misses stays its test's miss",
@@ -73,15 +74,15 @@ func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, residen
 // (models.WindowClassifier) and the same recorded-span start rule as
 // backgroundRecordingsOf (prevCallTracker).
 //
-// Each on-disk mock is decoded at most once and dropped immediately unless
-// admitted into a bounded collector capped by canonical request shape
-// (derivedBgMaxPerShape), total entry count (derivedBgMaxEntries), and
-// estimated decoded bytes (derivedBgMaxBytes), while preserving both the
-// leading boot/startup prefix and the most recent outside-window recordings
-// closest to the test windows. Derived recordings are returned with
-// Startup=false because DeriveWindowMappings places all outside-window
-// recordings in Worker.
-func derivedBackgroundRecordingsOf(windows []models.TestWindow, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
+// Each on-disk mock across all disk stores (filtered and unfilteredDisk) is
+// decoded at most once and dropped immediately unless admitted into a bounded
+// collector capped by canonical request shape (derivedBgMaxPerShape), total
+// entry count (derivedBgMaxEntries), and estimated decoded bytes
+// (derivedBgMaxBytes), while preserving both the leading boot/startup prefix
+// and the most recent outside-window recordings closest to the test windows.
+// Derived recordings are returned with Startup=false because
+// DeriveWindowMappings places all outside-window recordings in Worker.
+func derivedBackgroundRecordingsOf(windows []models.TestWindow, resident [][]*models.Mock, disks ...*proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
 	if len(windows) == 0 {
 		return nil, nil
 	}
@@ -96,7 +97,7 @@ func derivedBackgroundRecordingsOf(windows []models.TestWindow, resident [][]*mo
 		derivedBgHeadReserveBytes,
 	)
 
-	err := streamRecordedMerged(resident, disk, func(mk *models.Mock) bool {
+	err := streamRecordedMerged(resident, disks, func(mk *models.Mock) bool {
 		if mk == nil {
 			return true
 		}
@@ -132,7 +133,7 @@ type bgCallTime struct {
 }
 
 // backgroundRecordingsOf is, of the set's recordings (resident, and those
-// disk keeps), the ones names names, each with its recorded span's start
+// disks keep), the ones names names, each with its recorded span's start
 // (models.BackgroundRecording.From): the request time of the latest
 // data-plane recording sent before it, not itself, and not answered after
 // it was sent, the rule learn.PreviousCall reads a call's previous call by.
@@ -145,8 +146,8 @@ type bgCallTime struct {
 // call stays the background's, and so does a recording no one can declare,
 // as in v3.7.18. With the switch off none is, whatever the CLI
 // sent. Each recording on disk is decoded once, and only
-// the named ones are kept. nil for no names; err when disk cannot be read.
-func backgroundRecordingsOf(names, startup []string, resident [][]*models.Mock, disk *proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
+// the named ones are kept. nil for no names; err when any disk cannot be read.
+func backgroundRecordingsOf(names, startup []string, resident [][]*models.Mock, disks ...*proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
@@ -163,7 +164,7 @@ func backgroundRecordingsOf(names, startup []string, resident [][]*models.Mock, 
 	var recs []models.BackgroundRecording
 	got := make(map[string]bool, len(names))
 	tracker := newPrevCallTracker()
-	err := streamRecordedMerged(resident, disk, func(mk *models.Mock) bool {
+	err := streamRecordedMerged(resident, disks, func(mk *models.Mock) bool {
 		if mk == nil {
 			return true
 		}
@@ -188,10 +189,12 @@ func backgroundRecordingsOf(names, startup []string, resident [][]*models.Mock, 
 	return recs, nil
 }
 
-// streamRecordedMerged visits every non-nil mock across resident lists and
-// disk in ascending ReqTimestampMock order, decoding at most one on-disk mock
-// at a time. When timestamps tie, resident mocks precede disk mocks.
-func streamRecordedMerged(resident [][]*models.Mock, disk *proxyPkg.DiskMocks, visit func(*models.Mock) bool) error {
+// streamRecordedMerged visits every non-nil mock across resident lists and all
+// non-nil DiskMocks stores in ascending ReqTimestampMock order, decoding at
+// most one on-disk mock per store at a time via StreamRecorded. When timestamps
+// tie, resident mocks precede disk mocks, and earlier disk stores precede later
+// ones.
+func streamRecordedMerged(resident [][]*models.Mock, disks []*proxyPkg.DiskMocks, visit func(*models.Mock) bool) error {
 	var res []*models.Mock
 	for _, list := range resident {
 		for _, mk := range list {
@@ -204,10 +207,26 @@ func streamRecordedMerged(resident [][]*models.Mock, disk *proxyPkg.DiskMocks, v
 		return a.Spec.ReqTimestampMock.Compare(b.Spec.ReqTimestampMock)
 	})
 
-	ri := 0
-	stopped := false
-	if disk != nil {
-		err := disk.StreamRecorded(func(dm *models.Mock) bool {
+	var active []*proxyPkg.DiskMocks
+	for _, d := range disks {
+		if d != nil {
+			active = append(active, d)
+		}
+	}
+
+	if len(active) == 0 {
+		for _, mk := range res {
+			if !visit(mk) {
+				return nil
+			}
+		}
+		return nil
+	}
+
+	if len(active) == 1 {
+		ri := 0
+		stopped := false
+		err := active[0].StreamRecorded(func(dm *models.Mock) bool {
 			if dm == nil {
 				return true
 			}
@@ -230,6 +249,83 @@ func streamRecordedMerged(resident [][]*models.Mock, disk *proxyPkg.DiskMocks, v
 		if stopped {
 			return nil
 		}
+		for ; ri < len(res); ri++ {
+			if !visit(res[ri]) {
+				return nil
+			}
+		}
+		return nil
+	}
+
+	type diskPullStream struct {
+		next func() (*models.Mock, bool)
+		stop func()
+		err  *error
+		cur  *models.Mock
+		ok   bool
+	}
+	streams := make([]diskPullStream, 0, len(active))
+	defer func() {
+		for i := range streams {
+			streams[i].stop()
+		}
+	}()
+	for _, d := range active {
+		var streamErr error
+		diskRef := d
+		next, stop := iter.Pull(func(yield func(*models.Mock) bool) {
+			streamErr = diskRef.StreamRecorded(func(dm *models.Mock) bool {
+				if dm == nil {
+					return true
+				}
+				return yield(dm)
+			})
+		})
+		cur, ok := next()
+		if !ok && streamErr != nil {
+			stop()
+			return streamErr
+		}
+		streams = append(streams, diskPullStream{
+			next: next,
+			stop: stop,
+			err:  &streamErr,
+			cur:  cur,
+			ok:   ok,
+		})
+	}
+
+	ri := 0
+	for {
+		bestIdx := -1
+		for i := range streams {
+			if !streams[i].ok {
+				continue
+			}
+			if bestIdx < 0 || streams[i].cur.Spec.ReqTimestampMock.Before(streams[bestIdx].cur.Spec.ReqTimestampMock) {
+				bestIdx = i
+			}
+		}
+		if bestIdx < 0 {
+			break
+		}
+		nextDisk := streams[bestIdx].cur
+		for ri < len(res) && !res[ri].Spec.ReqTimestampMock.After(nextDisk.Spec.ReqTimestampMock) {
+			if !visit(res[ri]) {
+				return nil
+			}
+			ri++
+		}
+		if !visit(nextDisk) {
+			return nil
+		}
+		streams[bestIdx].cur = nil
+		cur, ok := streams[bestIdx].next()
+		if !ok && *streams[bestIdx].err != nil {
+			return *streams[bestIdx].err
+		}
+		streams[bestIdx].cur = cur
+		streams[bestIdx].ok = ok
 	}
 	for ; ri < len(res); ri++ {
 		if !visit(res[ri]) {

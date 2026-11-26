@@ -69,6 +69,20 @@ func (p *Proxy) stage(m *MockManager, key string, apply func(*MockManager)) {
 	s := &p.instances
 	s.stageMu.Lock()
 	defer s.stageMu.Unlock()
+	// Release any prior closure for key (and any retained-unfiltered overlay
+	// when a full mocksWindow staging supersedes it) BEFORE apply runs, so
+	// previous-set slices referenced by the old closure are eligible for GC
+	// before replacement trees are built.
+	dst := s.staged[:0]
+	for _, st := range s.staged {
+		if st.key == key || (key == "mocksWindow" && st.key == "mocksWindowFiltered") {
+			continue
+		}
+		dst = append(dst, st)
+	}
+	clear(s.staged[len(dst):])
+	s.staged = dst
+
 	apply(m)
 	s.mu.RLock()
 	mgrs := make([]*MockManager, 0, len(s.mgrs))
@@ -79,13 +93,40 @@ func (p *Proxy) stage(m *MockManager, key string, apply func(*MockManager)) {
 	for _, wm := range mgrs {
 		apply(wm)
 	}
-	for i, st := range s.staged {
-		if st.key == key {
-			s.staged = append(s.staged[:i], s.staged[i+1:]...)
-			break
-		}
-	}
 	s.staged = append(s.staged, staging{key: key, apply: apply})
+}
+
+// stageRetaining applies a retained-unfiltered staging to m when no
+// multi-worker instance managers are active and m can still retain its
+// unfiltered tier. When multi-worker managers exist (len(s.mgrs) > 0), or
+// when m declines retention (returning false), it mutates nothing, records
+// nothing in s.staged, and returns false so the caller falls back cleanly to
+// a full staging.
+func (p *Proxy) stageRetaining(m *MockManager, key string, apply func(*MockManager) bool) bool {
+	s := &p.instances
+	s.stageMu.Lock()
+	defer s.stageMu.Unlock()
+	s.mu.RLock()
+	hasWorkers := len(s.mgrs) > 0
+	s.mu.RUnlock()
+	if hasWorkers || !m.CanRetainUnfiltered() {
+		return false
+	}
+	if !apply(m) {
+		return false
+	}
+	if key != "" {
+		dst := s.staged[:0]
+		for _, st := range s.staged {
+			if st.key == key {
+				continue
+			}
+			dst = append(dst, st)
+		}
+		clear(s.staged[len(dst):])
+		s.staged = append(dst, staging{key: key, apply: func(mm *MockManager) { _ = apply(mm) }})
+	}
+	return true
 }
 
 // stageOn is stage on the run's current manager; errNoMockManager when

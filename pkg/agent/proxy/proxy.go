@@ -5000,6 +5000,77 @@ func (p *Proxy) OpenTestWithWindow(ctx context.Context, filtered, unFiltered []*
 	return nil
 }
 
+// CanRetainUnfiltered reports whether the proxy's mock manager holds an intact
+// unfiltered tier that can be retained across per-test window updates without
+// multi-worker instance managers active.
+func (p *Proxy) CanRetainUnfiltered() bool {
+	m := p.getMockManager()
+	if m == nil || !m.CanRetainUnfiltered() {
+		return false
+	}
+	s := &p.instances
+	s.mu.RLock()
+	hasWorkers := len(s.mgrs) > 0
+	s.mu.RUnlock()
+	return !hasWorkers
+}
+
+// SetFilteredMocksWithWindow stages a new per-test window while retaining the
+// already-staged unfiltered tier in place. Returns agent.ErrUnfilteredNotRetained
+// without mutating trees or window state if retention can no longer be honored.
+// Satisfies agent.UnfilteredRetainingWindowedProxy.
+func (p *Proxy) SetFilteredMocksWithWindow(ctx context.Context, filtered []*models.Mock, start, end time.Time) error {
+	m := p.getMockManager()
+	if m == nil {
+		return agent.ErrUnfilteredNotRetained
+	}
+	if !p.stageRetaining(m, "mocksWindowFiltered", func(mm *MockManager) bool {
+		return mm.SetFilteredMocksWithWindow(filtered, start, end)
+	}) {
+		return agent.ErrUnfilteredNotRetained
+	}
+	p.deriveMysqlPorts(filtered, nil, p.seededDestinations())
+	recorded.add(filtered, nil)
+	p.dnsCache.Purge()
+	if start.Equal(models.BaseTime) && p.missCutPending.CompareAndSwap(true, false) {
+		p.cutMissesAtSetStart(ctx)
+	}
+	if p.asyncEngine != nil && opensTestWindow(start) {
+		p.asyncEngine.AdvanceWindow()
+	}
+	return nil
+}
+
+// OpenTestFilteredWithWindow stages a test's per-test window while retaining
+// the already-staged unfiltered tier and begins its variables in one step.
+// Returns agent.ErrUnfilteredNotRetained without mutating trees, window, or
+// variable state if retention can no longer be honored.
+// Satisfies agent.UnfilteredRetainingWindowedProxy.
+func (p *Proxy) OpenTestFilteredWithWindow(ctx context.Context, filtered []*models.Mock, start, end time.Time, given []models.VariableBinding) error {
+	m := p.getMockManager()
+	if m == nil {
+		if len(given) > 0 {
+			return errNoMockManager
+		}
+		return agent.ErrUnfilteredNotRetained
+	}
+	if !p.stageRetaining(m, "", func(mm *MockManager) bool {
+		return mm.OpenTestFilteredWithWindow(filtered, start, end, given)
+	}) {
+		return agent.ErrUnfilteredNotRetained
+	}
+	p.deriveMysqlPorts(filtered, nil, p.seededDestinations())
+	recorded.add(filtered, nil)
+	p.dnsCache.Purge()
+	if start.Equal(models.BaseTime) && p.missCutPending.CompareAndSwap(true, false) {
+		p.cutMissesAtSetStart(ctx)
+	}
+	if p.asyncEngine != nil && opensTestWindow(start) {
+		p.asyncEngine.AdvanceWindow()
+	}
+	return nil
+}
+
 // stageWithWindow is SetMocksWithWindow, the mock manager's part staged by
 // stage.
 func (p *Proxy) stageWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time, key string, stage func(*MockManager)) {
@@ -5071,8 +5142,9 @@ func (p *Proxy) SetScopeMocksWithReplaced(_ context.Context, filtered, unFiltere
 }
 
 var (
-	_ agent.ScopeStager         = (*Proxy)(nil)
-	_ agent.ScopeReplacedStager = (*Proxy)(nil)
+	_ agent.ScopeStager                      = (*Proxy)(nil)
+	_ agent.ScopeReplacedStager              = (*Proxy)(nil)
+	_ agent.UnfilteredRetainingWindowedProxy = (*Proxy)(nil)
 )
 
 // FirstTestWindowStart returns the earliest test window start observed
