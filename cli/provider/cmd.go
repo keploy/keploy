@@ -521,6 +521,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// telemetry is not counted as a user's.
 		cmd.Flags().Bool(telemetry.AgentFlag, false, "Internal: this run is keploy's own (KEPLOY_INTERNAL), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(telemetry.AgentFlag)
+		// Internal orchestrator→agent flag: the CLI's resolved installation ID,
+		// which sudo drops from the environment and may hide behind /root's HOME.
+		// Read pre-cobra by userDb.GetInstallationID so no stray fallback file
+		// is created before flags are parsed, and registered here so cobra
+		// accepts it on `keploy agent`.
+		cmd.Flags().String(telemetry.AgentInstallationIDFlag, "", "Internal: the installation ID of the keploy client that starts this agent. Not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden(telemetry.AgentInstallationIDFlag)
 		// Internal orchestrator→agent flag: the Docker endpoint the client
 		// uses (its DOCKER_HOST), which sudo drops, for naming container
 		// destinations (containerkey.AgentArgs). Passed only under the proven

@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/utils"
 	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
@@ -45,5 +46,27 @@ func TestNativeAgentArgs_NameTheCLIsLog(t *testing.T) {
 	want := flag + "=" + filepath.Join(dir, "keploy-logs-1.txt")
 	if args := a.nativeAgentArgs(opts); !slices.Contains(args, want) {
 		t.Errorf("the native agent argv does not name this run's log as %q: %v", want, args)
+	}
+}
+
+// A natively started agent receives the CLI's resolved installation ID via
+// --installation-id so sudo's environment/HOME reset never causes the agent to
+// mint a second installation ID for the same machine or CI run.
+func TestNativeAgentArgs_CarryTheInstallationID(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	t.Setenv("DOCKER_HOST", "unix:///run/test-docker.sock")
+	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_RECORD}
+	flag := "--" + telemetry.AgentInstallationIDFlag
+
+	empty := New(zap.NewNop(), nil, &config.Config{InstallationID: "  "})
+	if args := empty.nativeAgentArgs(opts); slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, flag) }) {
+		t.Errorf("empty InstallationID should not pass %s: %v", flag, args)
+	}
+
+	const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	withID := New(zap.NewNop(), nil, &config.Config{InstallationID: id})
+	want := flag + "=" + id
+	if args := withID.nativeAgentArgs(opts); !slices.Contains(args, want) {
+		t.Errorf("nativeAgentArgs missing %q: %v", want, args)
 	}
 }
