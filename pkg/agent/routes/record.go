@@ -467,7 +467,6 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(provenswitch.HealthHeader, provenswitch.State())
 	if _, ok := a.svc.(stagedStoreMocksService); ok {
 		w.Header().Set(models.StoreMocksProtocolHeader, models.StoreMocksProtocolBatchedV1)
-		w.Header().Set(models.AgentInstanceHeader, processInstance)
 	}
 	a.setCapabilities(w)
 	w.WriteHeader(http.StatusOK)

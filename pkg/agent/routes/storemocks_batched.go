@@ -30,7 +30,6 @@ func writeBatchedJSON(w http.ResponseWriter, r *http.Request, status int, payloa
 	if utils.Version != "" {
 		w.Header().Set(models.AgentVersionHeader, utils.Version)
 	}
-	w.Header().Set(models.AgentInstanceHeader, processInstance)
 	w.Header().Set("Content-Type", "application/json")
 	render.Status(r, status)
 	render.JSON(w, r, payload)
@@ -148,7 +147,6 @@ func (a *Agent) StoreMocksBatch(w http.ResponseWriter, r *http.Request) {
 
 // StoreMocksCommit finalizes and atomically publishes the staged mock corpus.
 func (a *Agent) StoreMocksCommit(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set(models.AgentInstanceHeader, processInstance)
 	w.Header().Set("Content-Type", "application/json")
 
 	svc, ok := a.svc.(stagedStoreMocksService)
@@ -183,7 +181,6 @@ func (a *Agent) StoreMocksCommit(w http.ResponseWriter, r *http.Request) {
 
 // StoreMocksAbort cleans up an active staging session (best-effort, idempotent).
 func (a *Agent) StoreMocksAbort(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set(models.AgentInstanceHeader, processInstance)
 	w.Header().Set("Content-Type", "application/json")
 
 	svc, ok := a.svc.(stagedStoreMocksService)
