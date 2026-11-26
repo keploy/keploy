@@ -1243,3 +1243,44 @@ func TestAReportsCommandUsedHasItsSecretsRedacted(t *testing.T) {
 		}
 	}
 }
+
+func TestUnbracketHost(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+		want string
+	}{
+		{"empty", "", ""},
+		{"bracketed IPv6", "[fd00::1]", "fd00::1"},
+		{"bracketed IPv6 with zone", "[fe80::1%eth0]", "fe80::1%eth0"},
+		{"square brackets only", "[]", ""},
+		{"single bracket", "[", "["},
+		{"unbracketed", "localhost", "localhost"},
+		{"IPv4", "192.168.1.1", "192.168.1.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := UnbracketHost(tc.host); got != tc.want {
+				t.Errorf("UnbracketHost(%q) = %q, want %q", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNetworkToHostShort(t *testing.T) {
+	cases := []struct {
+		net  uint16
+		want uint16
+	}{
+		{0x0000, 0x0000},
+		{0x0102, 0x0201},
+		{0x0304, 0x0403},
+		{0x1234, 0x3412},
+		{0xffff, 0xffff},
+	}
+	for _, tc := range cases {
+		if got := NetworkToHostShort(tc.net); got != tc.want {
+			t.Errorf("NetworkToHostShort(0x%04x) = 0x%04x, want 0x%04x", tc.net, got, tc.want)
+		}
+	}
+}
