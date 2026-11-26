@@ -47,6 +47,25 @@ type PayloadSource interface {
 // change its payload only (MutatePayload).
 type PayloadMutator func(ctx context.Context, m *Mock) error
 
+// BatchPayloadSource is an optional PayloadSource capability that reads a
+// batch of on-disk mock payloads with a single file open, stat, and SameFile
+// check instead of opening and closing the file once per mock.
+type BatchPayloadSource interface {
+	LoadPayloadBatch(ctx context.Context, ats []PayloadAt) ([]*Mock, error)
+}
+
+// BatchPayloadMutator changes a batch of mocks' payloads before they are sent
+// to the agent (for example, batching KMS decryption across a 500-mock batch).
+// Like PayloadMutator, it may change each mock's payload only.
+type BatchPayloadMutator func(ctx context.Context, mocks []*Mock) error
+
+// BatchPayloadMutatorSource is an optional PayloadSource capability for
+// registering a BatchPayloadMutator.
+type BatchPayloadMutatorSource interface {
+	SetBatchPayloadMutator(mutate BatchPayloadMutator)
+	BatchPayloadMutator() BatchPayloadMutator
+}
+
 // PayloadAt is where a mock's document is in its file: the Length bytes from
 // Offset, which decode to the mock named Name.
 type PayloadAt struct {
@@ -352,6 +371,15 @@ func (m *Mock) IndexEntryBytes() int64 {
 // it back.
 func (m *Mock) PayloadOnDisk() bool { return m != nil && m.onDisk != nil }
 
+// PayloadDiskBytes returns the on-disk document length in bytes when m's
+// payload was left on disk, or 0 if m is already in memory.
+func (m *Mock) PayloadDiskBytes() int {
+	if !m.PayloadOnDisk() {
+		return 0
+	}
+	return m.onDisk.at.Length
+}
+
 // WithPayload is the mock to send: m itself when its payload is in memory,
 // else a copy of m with its payload read back from its file and changed by the
 // source's mutator. The copy is to be sent and dropped: m keeps its payload on
@@ -373,6 +401,119 @@ func (m *Mock) WithPayload(ctx context.Context) (*Mock, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// WithPayloads resolves a batch of mocks for sending, preserving order without
+// mutating caller slices. Mocks whose payloads were left on disk are grouped by
+// their PayloadSource: sources implementing BatchPayloadSource read all mocks
+// for that source in a single LoadPayloadBatch call, and sources with a
+// BatchPayloadMutator mutate them in a single call (falling back to single-mock
+// LoadPayload / PayloadMutator otherwise). Returns the resolved mocks and how
+// many were read back from disk.
+func WithPayloads(ctx context.Context, mocks []*Mock) ([]*Mock, int64, error) {
+	out := make([]*Mock, len(mocks))
+	if len(mocks) == 0 {
+		return out, 0, nil
+	}
+
+	type srcGroup struct {
+		src     PayloadSource
+		indices []int
+		ats     []PayloadAt
+	}
+	var groups []srcGroup
+	var readBack int64
+
+	for i, m := range mocks {
+		if !m.PayloadOnDisk() {
+			out[i] = m
+			continue
+		}
+		readBack++
+		d := m.onDisk
+		gi := -1
+		for k := range groups {
+			if groups[k].src == d.src {
+				gi = k
+				break
+			}
+		}
+		if gi < 0 {
+			groups = append(groups, srcGroup{src: d.src})
+			gi = len(groups) - 1
+		}
+		groups[gi].indices = append(groups[gi].indices, i)
+		groups[gi].ats = append(groups[gi].ats, d.at)
+	}
+
+	for _, g := range groups {
+		var loaded []*Mock
+		if batcher, ok := g.src.(BatchPayloadSource); ok {
+			var err error
+			loaded, err = batcher.LoadPayloadBatch(ctx, g.ats)
+			if err != nil {
+				return nil, readBack, err
+			}
+			if len(loaded) != len(g.ats) {
+				return nil, readBack, fmt.Errorf("batch payload load returned %d mocks, want %d", len(loaded), len(g.ats))
+			}
+		} else {
+			loaded = make([]*Mock, len(g.ats))
+			for j, at := range g.ats {
+				read, err := g.src.LoadPayload(ctx, at)
+				if err != nil {
+					return nil, readBack, err
+				}
+				loaded[j] = read
+			}
+		}
+
+		groupCopies := make([]*Mock, len(g.indices))
+		for j, idx := range g.indices {
+			c := mocks[idx].ShallowCopy()
+			c.onDisk = nil
+			c.Spec = loaded[j].Spec
+			c.Noise = loaded[j].Noise
+			groupCopies[j] = c
+			out[idx] = c
+		}
+
+		if bmSrc, ok := g.src.(BatchPayloadMutatorSource); ok {
+			if bm := bmSrc.BatchPayloadMutator(); bm != nil {
+				before := make([]poolKey, len(groupCopies))
+				for j, c := range groupCopies {
+					before[j] = poolKeyOf(c)
+				}
+				if err := bm(ctx, groupCopies); err != nil {
+					var refusal *MockPayloadRefusal
+					if errors.As(err, &refusal) {
+						return nil, readBack, err
+					}
+					name := ""
+					if len(before) > 0 {
+						name = before[0].name
+					}
+					return nil, readBack, &MockPayloadRefusal{Mock: name, Err: err}
+				}
+				for j, c := range groupCopies {
+					if after := poolKeyOf(c); after != before[j] {
+						return nil, readBack, fmt.Errorf("%w: mock %q, before %+v, after %+v", ErrPayloadMutatorChangedMock, before[j].name, before[j], after)
+					}
+				}
+				continue
+			}
+		}
+
+		if mut := g.src.PayloadMutator(); mut != nil {
+			for _, c := range groupCopies {
+				if err := MutatePayload(ctx, c, mut); err != nil {
+					return nil, readBack, err
+				}
+			}
+		}
+	}
+
+	return out, readBack, nil
 }
 
 // MutatePayload has mutate change m's payload, and fails when mutate fails
