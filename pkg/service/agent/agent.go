@@ -111,6 +111,12 @@ type Agent struct {
 	stagedUnf     stagedUnfilteredState
 	Ip            string
 
+	// stagingMu guards active staged batched storemocks uploads (storemocks_staged.go).
+	stagingMu              sync.Mutex
+	staging                map[string]*storeMocksStage
+	lastCommittedStagingID string
+	stagingTTL             time.Duration // 0 uses defaultStoreMocksStageTTL
+
 	// strictLogOnce de-dupes the "strict mock window enabled" Info log
 	// so it fires at most once per agent process instead of once per
 	// test. Operators searching agent logs for strict-mode activity
@@ -377,6 +383,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 	tearDown := func() error {
 		stop()
+		a.closeAllStaging()
 		a.logger.Debug("waiting for the agent's teardown before Setup returns")
 		return errGrp.Wait()
 	}
@@ -1651,6 +1658,9 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		unfilteredDisk.Finalize()
 	}
 	if disk != nil {
+		if err := disk.Flush(); err != nil {
+			return failStream(fmt.Errorf("storemocks stream: flush the on-disk store: %w", err))
+		}
 		disk.Finalize()
 		statements, err := disk.LoadStatements()
 		if err != nil {

@@ -1738,6 +1738,11 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	a.consumedPerTest.Store(false)
 	a.concurrentServing.Store(false)
 	a.mockWindows.reset()
+	caps := a.probeStoreMocksCaps(ctx)
+	if caps.batched {
+		return a.storeMocksBatched(ctx, filtered, unFiltered, caps)
+	}
+
 	// A dedicated cancelable context for the stream request: cancelling it tears
 	// down the transport's read of the io.Pipe body, which unblocks the encoder
 	// goroutine's pw.Write if the agent responded before consuming the whole
@@ -1745,7 +1750,7 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 
-	encoding := a.storeMocksEncoding(ctx)
+	encoding := caps.encoding
 	start := time.Now()
 	res, sent, err := a.storeMocksStream(streamCtx, filtered, unFiltered, encoding)
 	if err != nil {
@@ -1778,36 +1783,12 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 }
 
 // storeMocksEncodingProbeTimeout bounds the /health request that asks the agent
-// whether its /storemocks takes a compressed stream. Running out of it is not an
-// error: the mocks then go uncompressed, as to an agent that cannot decompress.
-// It is long because the agent can be a port-forward away over a slow link,
-// where a new connection alone costs several round trips.
+// which /storemocks protocol and encoding it supports. Running out of it is not
+// an error: the mocks then go uncompressed over the legacy stream, as to an
+// agent that cannot decompress. It is long because the agent can be a
+// port-forward away over a slow link, where a new connection alone costs
+// several round trips.
 const storeMocksEncodingProbeTimeout = 30 * time.Second
-
-// storeMocksEncoding returns the Content-Encoding to send the mock stream with:
-// zstd when the agent's /health advertises it (Accept-Encoding, RFC 7694), and
-// "" (uncompressed) otherwise, including when the agent cannot be asked. An
-// agent that predates compression has no such header, so it keeps getting the
-// stream it can read.
-func (a *AgentClient) storeMocksEncoding(ctx context.Context) string {
-	ctx, cancel := context.WithTimeout(ctx, storeMocksEncodingProbeTimeout)
-	defer cancel()
-	req, err := newAgentRequest(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.AgentURI()), nil)
-	if err != nil {
-		return ""
-	}
-	res, err := doAgent(&a.client, req)
-	if err != nil {
-		a.logger.Debug("could not ask the agent whether it takes compressed mocks; sending them uncompressed", zap.Error(err))
-		return ""
-	}
-	defer res.Body.Close()
-	_, _ = io.Copy(io.Discard, res.Body)
-	if res.StatusCode == http.StatusOK && acceptsEncoding(res.Header.Values("Accept-Encoding"), models.MockStreamEncodingZstd) {
-		return models.MockStreamEncodingZstd
-	}
-	return ""
-}
 
 // acceptsEncoding reports whether Accept-Encoding header values list coding,
 // ignoring case, spaces and parameters. A coding listed with q=0 is refused
@@ -1920,19 +1901,16 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 			fail(err)
 			return
 		}
-		i := 0
 		encodeAll := func(mocks []*models.Mock) error {
-			for _, m := range mocks {
-				if i%1024 == 0 {
-					if err := ctx.Err(); err != nil {
-						return err
-					}
+			for pos := 0; pos < len(mocks); {
+				if err := ctx.Err(); err != nil {
+					return err
 				}
-				i++
-				if m.PayloadOnDisk() {
-					sent.readBack.Add(1)
+				chunk := nextStoreMocksBatch(mocks[pos:])
+				hydrated, rb, err := models.WithPayloads(ctx, chunk)
+				if rb > 0 {
+					sent.readBack.Add(rb)
 				}
-				whole, err := m.WithPayload(ctx)
 				if err != nil {
 					// Kept for the caller: the agent sees only a stream that
 					// ended early.
@@ -1940,9 +1918,12 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 					sent.err.Store(&err)
 					return err
 				}
-				if err := enc.Encode(whole); err != nil {
-					return err
+				for _, whole := range hydrated {
+					if err := enc.Encode(whole); err != nil {
+						return err
+					}
 				}
+				pos += len(chunk)
 			}
 			return nil
 		}

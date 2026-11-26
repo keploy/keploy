@@ -169,6 +169,10 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/mappings", a.HandleMappings)
 		r.Post("/mock", a.MockOutgoing)
 		r.Post("/storemocks", a.StoreMocks)
+		r.Post("/storemocks/begin", a.StoreMocksBegin)
+		r.Post("/storemocks/batch", a.StoreMocksBatch)
+		r.Post("/storemocks/commit", a.StoreMocksCommit)
+		r.Post("/storemocks/abort", a.StoreMocksAbort)
 		r.Post("/updatemockparams", a.UpdateMockParams)
 		r.Post("/stop", a.Stop)
 		r.Get("/record/pending", a.HandlePending)
@@ -461,6 +465,10 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	// --proven flag; the CLI refuses an agent whose switch is not its own
 	// (provenswitch.CheckAgent).
 	w.Header().Set(provenswitch.HealthHeader, provenswitch.State())
+	if _, ok := a.svc.(stagedStoreMocksService); ok {
+		w.Header().Set(models.StoreMocksProtocolHeader, models.StoreMocksProtocolBatchedV1)
+		w.Header().Set(models.AgentInstanceHeader, processInstance)
+	}
 	a.setCapabilities(w)
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
