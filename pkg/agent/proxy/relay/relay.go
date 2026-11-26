@@ -837,9 +837,11 @@ func (r *Relay) forward(
 	buf := make([]byte, bufSize)
 	log := r.cfg.Logger
 	// The chunk a Read returned is in this forwarder's hand until it is
-	// queued, refused or stashed (progress.go): released at the top of each
-	// iteration, before any park, and on the way out. On the way out nothing
-	// the TLS layer it read through still holds will reach the parser either.
+	// queued and told of (noteCarried), set aside (await), refused, or
+	// stashed (progress.go): released immediately after noteCarried / await,
+	// before any pause park, at the top of each iteration, and on the way
+	// out. On the way out nothing the TLS layer it read through still holds
+	// will reach the parser either.
 	defer t.noteReleased()
 	defer t.noteLayerGone()
 	// If any write to this side observed a peer reset (consuming sk_err) and
@@ -994,6 +996,7 @@ func (r *Relay) forward(
 					chunk.SeqNo = seq.Add(1)
 					teed := t.push(chunk)
 					r.noteCarried(t, chunk, teed)
+					t.noteReleased()
 					if teed && r.cfg.OnClientChunkTeed != nil {
 						r.cfg.OnClientChunkTeed()
 					}
@@ -1072,6 +1075,7 @@ func (r *Relay) forward(
 				chunk.SeqNo = seq.Add(1)
 				teed := t.push(chunk)
 				r.noteCarried(t, chunk, teed)
+				t.noteReleased()
 				if teed && r.cfg.OnClientChunkTeed != nil {
 					r.cfg.OnClientChunkTeed()
 				}
@@ -1170,6 +1174,7 @@ func (r *Relay) forward(
 				}
 				teed := t.push(chunk)
 				r.noteCarried(t, chunk, teed)
+				t.noteReleased()
 				// On a successful client→dest tee, signal the supervisor
 				// that a request chunk is in flight and awaiting a mock
 				// emission. This is the "pending work" signal the hang

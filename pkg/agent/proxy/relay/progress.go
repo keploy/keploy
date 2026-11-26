@@ -23,8 +23,8 @@ import (
 //     the read that brought them in (readTrackingConn) until it hands the
 //     record to the forwarder, and can hold more records than it hands on in
 //     one Read;
-//   - in the forwarder's hand, from the read until the forwarder's next
-//     iteration, past the push (held);
+//   - in the forwarder's hand, from the read until it is queued and told of
+//     (noteCarried), set aside (await), refused, or stashed (held);
 //   - set aside: a destination chunk written to a client after its FIN, which
 //     waits for the client's answer before it is pushed or refused
 //     (tee.awaiting, client_took.go);
@@ -55,10 +55,11 @@ const heldUnstamped int64 = -1
 // the forwarder's; delivered and deliveredBytes are guarded by tee.mu.
 type teeProgress struct {
 	// held is the stamp (UnixNano) of the chunk the forwarder has read and not
-	// let go of yet: set from its Read, and cleared at the top of the
-	// forwarder's next iteration, once it has queued, refused, stashed or set
-	// aside the chunk and told of it. 0 when it holds none, heldUnstamped
-	// while it is stamping one.
+	// let go of yet: set from its Read, and cleared right after it has queued
+	// and told of (noteCarried) or set aside (await) the chunk, as well as
+	// before any pause park, at the top of the next iteration, and on exit
+	// (noteReleased). 0 when it holds none, heldUnstamped while it is stamping
+	// one.
 	held atomic.Int64
 	// layer is the stamp (UnixNano) of the read under the layer the forwarder
 	// reads through (a TLS layer over a readTrackingConn), when that layer
@@ -100,8 +101,8 @@ type deliveredChunk struct {
 }
 
 // noteCarried says the forwarder stamped the chunk it read at at, and holds it
-// until it is queued, refused or stashed (noteReleased). noteReading came
-// before the stamp was taken.
+// until it is queued and told of, set aside, refused, or stashed
+// (noteReleased). noteReading came before the stamp was taken.
 func (t *tee) noteCarried(at time.Time) {
 	ns := at.UnixNano()
 	t.progress.held.Store(ns)
@@ -129,13 +130,16 @@ func (t *tee) noteNumbered(seq uint32) {
 	t.progress.changed.wake()
 }
 
-// noteReleased says the forwarder holds no chunk: it queued, refused,
-// stashed or set aside (tee.await) the one it read. One it refused or stashed
-// never comes on the stream, so a reader waiting on it is told (changed).
+// noteReleased says the forwarder holds no chunk: it queued and told of,
+// refused, stashed or set aside (tee.await) the one it read. One it refused or
+// stashed never comes on the stream, so a reader waiting on it is told
+// (changed) when the forwarder still held a chunk.
 func (t *tee) noteReleased() {
-	t.progress.held.Store(0)
-	t.progress.heldSeq.Store(0)
-	t.progress.changed.wake()
+	held := t.progress.held.Swap(0)
+	seq := t.progress.heldSeq.Swap(0)
+	if held != 0 || seq != 0 {
+		t.progress.changed.wake()
+	}
 }
 
 // numbering is heldSeq while the forwarder holds a chunk it has not numbered:
@@ -292,12 +296,12 @@ func (t *tee) trimDeliveredLocked() {
 // it reads again, by when the forwarder has queued every chunk from the reads
 // before (a chunk it hands on over that read takes that read's stamp, or,
 // when the read brought nothing, the forwarder's). The forwarder sets held
-// before it stamps a chunk and clears it once it has queued, refused,
-// stashed or set aside (to wait) it. So when this look read a mark clear,
-// every chunk that was in that hand has left it (onto the queue, or set
-// aside, which the look reads under the lock, or refused or stashed), and one
-// that comes into it later is stamped no earlier than the look
-// (heldUnstamped). A chunk set aside moves to the queue (a push) before it
+// before it stamps a chunk and clears it right after it has queued and told of
+// (noteCarried), set aside (await), refused, or stashed it. So when this look
+// read a mark clear, every chunk that was in that hand has left it (onto the
+// queue, or set aside, which the look reads under the lock, or refused or
+// stashed), and one that comes into it later is stamped no earlier than the
+// look (heldUnstamped). A chunk set aside moves to the queue (a push) before it
 // leaves awaiting (doneAwaiting), so a look under the lock finds it in one of
 // the two. A chunk further on is older than one behind it, so the first place
 // that holds one gives the oldest.

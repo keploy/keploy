@@ -389,6 +389,7 @@ func (r *Relay) destWritten(ctx context.Context, t *tee, seq *atomic.Uint64, c f
 		go r.resolve(ctx, t, seq, r.resolverDone)
 	}
 	t.await(c)
+	t.noteReleased()
 	r.awaitingFrom = append(r.awaitingFrom, from)
 	if mark != "" {
 		// Only the last chunk can carry one: the forwarder returns after a

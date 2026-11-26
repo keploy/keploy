@@ -2,6 +2,7 @@ package relay
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,9 @@ func heldCallAcrossAWindow(t *testing.T, h *relayHarness) (first, next fakeconn.
 	h.writeDest([]byte("ans"))
 	h.readClient(3)
 	next = readChunk(t, h.r.DestStream())
+	awaitState(t, "the forwarders to release their chunks after OnCarried", func() bool {
+		return h.r.teeC2D.progress.held.Load() == 0 && h.r.teeD2C.progress.held.Load() == 0
+	})
 	if !first.ReadAt.Before(mid) || !next.ReadAt.After(mid) {
 		t.Fatalf("setup: chunks stamped %v and %v, not either side of %v", first.ReadAt, next.ReadAt, mid)
 	}
@@ -103,6 +107,9 @@ func TestWatermark_AParserWaitingWithACallHeldIsNotDone(t *testing.T) {
 	h.writeClient([]byte("req"))
 	h.readDest(3)
 	first := readChunk(t, client)
+	awaitState(t, "the client forwarder to release its chunk after OnCarried", func() bool {
+		return h.r.teeC2D.progress.held.Load() == 0
+	})
 	client.HoldFrom(first.ReadAt)
 	blockInRead(t, client)
 	after := time.Now()
@@ -134,8 +141,10 @@ func TestWatermark_AHoldSetAsALookReadsItIsSeenWithTheReadPastIt(t *testing.T) {
 	waitClockPast(t, mid) // the reply is stamped after mid
 	h.writeDest([]byte("ans"))
 	h.readClient(3)
-	awaitState(t, "the reply to reach the parser's stream", func() bool {
-		return h.r.teeD2C.acceptedBytes() == 3
+	awaitState(t, "the reply to reach the parser's stream and the forwarders to finish OnCarried", func() bool {
+		return h.r.teeD2C.acceptedBytes() == 3 &&
+			h.r.teeC2D.progress.held.Load() == 0 &&
+			h.r.teeD2C.progress.held.Load() == 0
 	})
 
 	fired := false
@@ -180,8 +189,10 @@ func TestWatermark_AHoldSetBetweenLookAndCaughtUpIsStillSeen(t *testing.T) {
 	waitClockPast(t, mid) // the reply is stamped after mid
 	h.writeDest([]byte("ans"))
 	h.readClient(3)
-	awaitState(t, "the reply to reach the parser's stream", func() bool {
-		return h.r.teeD2C.acceptedBytes() == 3
+	awaitState(t, "the reply to reach the parser's stream and the forwarders to finish OnCarried", func() bool {
+		return h.r.teeD2C.acceptedBytes() == 3 &&
+			h.r.teeC2D.progress.held.Load() == 0 &&
+			h.r.teeD2C.progress.held.Load() == 0
 	})
 
 	fired := false
@@ -207,4 +218,137 @@ func TestWatermark_AHoldSetBetweenLookAndCaughtUpIsStillSeen(t *testing.T) {
 	if w.PendingBefore(mid) {
 		t.Errorf("PendingBefore(mid): true after clearing the hold: %v", w.PendingOn(mid))
 	}
+}
+
+// The forwarder keeps teeProgress.held set across Config.OnCarried (so
+// UnrecordedConn.Note runs before a window can settle) and releases its hand
+// immediately after OnCarried returns, before post-carry hooks such as
+// OnClientChunkTeed, BumpActivity, or the next forward loop iteration.
+func TestWatermark_ForwarderReleasesHandAfterOnCarriedBeforePostHooks(t *testing.T) {
+	t.Run("held_during_OnCarried", func(t *testing.T) {
+		paused := make(chan struct{})
+		release := make(chan struct{})
+		var pauseOnce, releaseOnce sync.Once
+		unlock := func() { releaseOnce.Do(func() { close(release) }) }
+
+		h := newHarness(t, Config{
+			OnCarried: func(dir fakeconn.Direction, _ time.Time, _ bool, _ int64) {
+				if dir == fakeconn.FromClient {
+					pauseOnce.Do(func() { close(paused) })
+					<-release
+				}
+			},
+		})
+		defer unlock()
+
+		w := NewWatermark()
+		defer w.Track(h.r, "conn-1")()
+
+		h.writeClient([]byte("req"))
+		h.readDest(3)
+		select {
+		case <-paused:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for client forwarder to enter OnCarried")
+		}
+		first := readChunk(t, h.r.ClientStream())
+		waitClockPast(t, first.ReadAt)
+		mid := time.Now()
+		waitClockPast(t, mid)
+		h.writeDest([]byte("ans"))
+		h.readClient(3)
+		next := readChunk(t, h.r.DestStream())
+		awaitState(t, "the dest forwarder to release its chunk", func() bool {
+			return h.r.teeD2C.progress.held.Load() == 0
+		})
+		if !first.ReadAt.Before(mid) || !next.ReadAt.After(mid) {
+			t.Fatalf("setup: chunks stamped %v and %v, not either side of %v", first.ReadAt, next.ReadAt, mid)
+		}
+
+		// Even though the parser has consumed both chunks and read past mid,
+		// the client forwarder is still inside OnCarried, so the window must
+		// remain held (fail-safe for UnrecordedConn.Note).
+		start := first.ReadAt.Add(-time.Second)
+		if !w.PendingBefore(mid) {
+			t.Error("PendingBefore(mid): false while client forwarder was still inside OnCarried")
+		}
+		if w.Settled("", "", start, mid) {
+			t.Error("Settled: true while client forwarder was still inside OnCarried")
+		}
+
+		unlock()
+		awaitState(t, "the client forwarder to release its chunk after OnCarried", func() bool {
+			return h.r.teeC2D.progress.held.Load() == 0
+		})
+		if w.PendingBefore(mid) || !w.Settled("", "", start, mid) {
+			t.Errorf("window still held once OnCarried returned: %v", w.PendingOn(mid))
+		}
+	})
+
+	t.Run("released_before_OnClientChunkTeed", func(t *testing.T) {
+		paused := make(chan struct{})
+		release := make(chan struct{})
+		var pauseOnce, releaseOnce sync.Once
+		unlock := func() { releaseOnce.Do(func() { close(release) }) }
+
+		h := newHarness(t, Config{
+			OnClientChunkTeed: func() {
+				pauseOnce.Do(func() { close(paused) })
+				<-release
+			},
+		})
+		defer unlock()
+
+		w := NewWatermark()
+		defer w.Track(h.r, "conn-1")()
+		client, dest := h.r.ClientStream(), h.r.DestStream()
+
+		h.writeClient([]byte("req"))
+		h.readDest(3)
+		select {
+		case <-paused:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for client forwarder to reach OnClientChunkTeed")
+		}
+		first := readChunk(t, client)
+		waitClockPast(t, first.ReadAt)
+		mid := time.Now()
+		waitClockPast(t, mid)
+		h.writeDest([]byte("ans"))
+		h.readClient(3)
+		awaitState(t, "the reply to reach the parser's stream and dest forwarder to release", func() bool {
+			return h.r.teeD2C.acceptedBytes() == 3 && h.r.teeD2C.progress.held.Load() == 0
+		})
+
+		fired := false
+		var next fakeconn.Chunk
+		hook := func() {
+			if fired {
+				return
+			}
+			fired = true
+			client.HoldFrom(first.ReadAt)
+			next = readChunk(t, dest)
+		}
+		afterHoldLook.Store(&hook)
+		t.Cleanup(func() { afterHoldLook.Store(nil) })
+
+		// The client forwarder is paused inside OnClientChunkTeed (after
+		// OnCarried and noteReleased, before BumpActivity / next loop):
+		// passedThrough must reach heldFrom instead of short-circuiting on a
+		// stale teeC2D.progress.held stamp.
+		if !w.PendingBefore(mid) {
+			t.Error("PendingBefore(mid): false for a look that read the parser past mid but not the hold it set before that read")
+		}
+		if !fired || !next.ReadAt.After(mid) {
+			t.Fatalf("setup: the hook ran %v and the parser took a chunk stamped %v, want one after %v (pending=%v)",
+				fired, next.ReadAt, mid, w.PendingOn(mid))
+		}
+		client.HoldFrom(time.Time{})
+		start := first.ReadAt.Add(-time.Second)
+		if w.PendingBefore(mid) || !w.Settled("", "", start, mid) {
+			t.Errorf("window still held after clearing hold while client forwarder paused in OnClientChunkTeed: %v",
+				w.PendingOn(mid))
+		}
+	})
 }
