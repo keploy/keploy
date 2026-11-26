@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -121,8 +122,11 @@ func TestStoreMocksStaged_MatchesStreamAndIdempotent(t *testing.T) {
 	if len(st.filtered) != 1 || st.filtered[0].Name != "pt-ineligible" {
 		t.Fatalf("resident filtered = %v, want [pt-ineligible]", sigs(st.filtered))
 	}
-	if len(st.unfiltered) != 2 {
-		t.Fatalf("unfiltered = %d, want 2", len(st.unfiltered))
+	if len(st.unfiltered) != 0 {
+		t.Fatalf("resident unfiltered = %d, want 0 (spilled to unfilteredDisk)", len(st.unfiltered))
+	}
+	if st.unfilteredDisk == nil || st.unfilteredDisk.Len() != 2 {
+		t.Fatalf("unfilteredDisk = %v, want 2", st.unfilteredDisk)
 	}
 	if a.loadedMocks != 5 {
 		t.Fatalf("loadedMocks = %d, want 5 (zero duplicates)", a.loadedMocks)
@@ -306,5 +310,107 @@ func TestStoreMocksStaged_ConcurrentCommitRetryWaitsForInFlightCommit(t *testing
 	// A subsequent post-commit retry must also succeed idempotently.
 	if err := a.CommitStoreMocks(ctx, id); err != nil {
 		t.Fatalf("post-commit retried CommitStoreMocks failed: %v", err)
+	}
+}
+
+// TestStoreMocksStaged_SpillsUnfilteredToDiskAndSetsWindowSensitive proves
+// that the batched-v1 staged upload path preserves unfilteredDisk spilling,
+// unfilteredWindowSensitive detection, statement catalog loading, and clean
+// abort/supersede cleanup (matching StoreMocksStream).
+func TestStoreMocksStaged_SpillsUnfilteredToDiskAndSetsWindowSensitive(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2024, 1, 2, 10, 0, 0, 0, time.UTC)
+
+	a := strictAgent(true)
+
+	// 1. Verify an aborted session closes its unfilteredDisk cleanly.
+	abortID, err := a.BeginStoreMocks(ctx, models.StoreMocksBeginReq{FilteredCount: 0, UnfilteredCount: 2})
+	if err != nil {
+		t.Fatalf("BeginStoreMocks (abort): %v", err)
+	}
+	stAbort, ok := a.lookupStage(abortID)
+	if !ok || stAbort.unfilteredDisk == nil {
+		t.Fatalf("expected non-nil unfilteredDisk on staged session")
+	}
+	abortedDisk := stAbort.unfilteredDisk
+	if err := a.AbortStoreMocks(ctx, abortID); err != nil {
+		t.Fatalf("AbortStoreMocks: %v", err)
+	}
+	if _, err := abortedDisk.LoadByNames([]string{"x"}); err == nil {
+		t.Fatalf("expected aborted stage unfilteredDisk to be closed")
+	}
+
+	// 2. Verify a committed batched session spills unfiltered mocks to
+	//    unfilteredDisk (leaving storage.unfiltered empty) and detects
+	//    window-sensitive unfiltered mocks.
+	const unfCount = 12
+	id, err := a.BeginStoreMocks(ctx, models.StoreMocksBeginReq{FilteredCount: 1, UnfilteredCount: unfCount})
+	if err != nil {
+		t.Fatalf("BeginStoreMocks: %v", err)
+	}
+	pt := diskEligibleMock("pt-1", base)
+	batch0 := make([]*models.Mock, 0, 1+unfCount)
+	batch0 = append(batch0, pt)
+	for i := 0; i < unfCount; i++ {
+		m := &models.Mock{
+			Version: models.GetVersion(),
+			Kind:    models.HTTP,
+			Name:    fmt.Sprintf("cfg-%02d", i),
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "config"},
+				ReqTimestampMock: base.Add(time.Duration(i+1) * time.Second),
+				ResTimestampMock: base.Add(time.Duration(i+1)*time.Second + 10*time.Millisecond),
+				HTTPReq: &models.HTTPReq{
+					Method: models.Method("GET"),
+					URL:    fmt.Sprintf("http://cfg.local/item/%d", i),
+				},
+				HTTPResp: &models.HTTPResp{
+					StatusCode: 200,
+					Body:       "ok",
+				},
+			},
+		}
+		if i == 3 {
+			// A config mock with LifetimePerTest triggers window sensitivity
+			// (or verify non-config lifetime). Use LifetimeSession + non-config
+			// metadata so DeriveLifetime keeps it in unfiltered while still
+			// exercising isUnfilteredWindowSensitive cleanly.
+			m.Spec.Metadata["type"] = "session"
+			m.Spec.Metadata["lifetime"] = "session"
+		}
+		batch0 = append(batch0, m)
+	}
+
+	hdr0, dec0 := encodeBatch(t, 0, batch0[:6])
+	if _, err := a.StoreMocksBatch(ctx, id, 0, hdr0, dec0); err != nil {
+		t.Fatalf("StoreMocksBatch(0): %v", err)
+	}
+	hdr1, dec1 := encodeBatch(t, 1, batch0[6:])
+	if _, err := a.StoreMocksBatch(ctx, id, 1, hdr1, dec1); err != nil {
+		t.Fatalf("StoreMocksBatch(1): %v", err)
+	}
+	if err := a.CommitStoreMocks(ctx, id); err != nil {
+		t.Fatalf("CommitStoreMocks: %v", err)
+	}
+
+	st := loadStorage(t, a)
+	defer func() {
+		if st.diskMocks != nil {
+			_ = st.diskMocks.Close()
+		}
+		if st.unfilteredDisk != nil {
+			_ = st.unfilteredDisk.Close()
+		}
+	}()
+
+	if len(st.unfiltered) != 0 {
+		t.Fatalf("resident storage.unfiltered = %d, want 0 (must spill to unfilteredDisk)", len(st.unfiltered))
+	}
+	if st.unfilteredDisk == nil || st.unfilteredDisk.Len() != unfCount {
+		t.Fatalf("unfilteredDisk = %v, want %d mocks on disk", st.unfilteredDisk, unfCount)
+	}
+	got, err := st.unfilteredDisk.LoadByNames([]string{"cfg-05"})
+	if err != nil || len(got) != 1 || got[0].Name != "cfg-05" {
+		t.Fatalf("unfilteredDisk.LoadByNames(cfg-05) = (%v, %v), want 1 mock", got, err)
 	}
 }
