@@ -1,6 +1,9 @@
 package matcher
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 const ExactKeyPrefix = "\x00."
 
@@ -56,4 +59,46 @@ func headerKeyCovers(nameLower, key string) bool {
 		return nameLower == strings.ToLower(p)
 	}
 	return strings.Contains(nameLower, strings.ToLower(key))
+}
+
+func HeaderNoiseEntry(name string, noise map[string][]string) (key string, patterns []string, ok bool) {
+	nameLower := strings.ToLower(name)
+	var keys [2]string
+	var found [2]bool
+	for k := range noise {
+		if !headerKeyCovers(nameLower, k) {
+			continue
+		}
+		i := 0
+		if strings.HasPrefix(k, ExactKeyPrefix) {
+			i = 1
+		}
+		if !found[i] || len(k) > len(keys[i]) || (len(k) == len(keys[i]) && k < keys[i]) {
+			keys[i], found[i] = k, true
+		}
+	}
+	other, rule := noise[keys[0]], noise[keys[1]]
+	switch {
+	case !found[1]:
+		return keys[0], other, found[0]
+	case !found[0], len(rule) == 0 && len(other) > 0:
+		return keys[1], rule, true
+	case len(other) == 0:
+		return keys[0], other, true
+	}
+	return keys[0], append(slices.Clip(other), rule...), true
+}
+
+func eitherEntry(rule *noiseEntry, other noiseEntry) noiseEntry {
+	if rule == nil || len(other.regexps) == 0 && !other.typeStrict {
+		return other
+	}
+	if len(rule.regexps) == 0 && (!rule.typeStrict || len(other.regexps) > 0) {
+		return *rule
+	}
+	if len(other.regexps) == 0 {
+		return other
+	}
+	other.regexps = append(slices.Clip(other.regexps), rule.regexps...)
+	return other
 }

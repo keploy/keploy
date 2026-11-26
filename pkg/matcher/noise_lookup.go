@@ -138,7 +138,8 @@ func (ni noiseIndex) entryWholeFields(keyLower string, idKeys bool) (noiseEntry,
 	if idKeys && ni.idKeys {
 		collapsed = CollapseIDKeys(keyLower)
 	}
-	for _, e := range ni.entries {
+	var rule *noiseEntry
+	for i, e := range ni.entries {
 		path := keyLower
 		if e.idKeys {
 			if !idKeys {
@@ -147,14 +148,17 @@ func (ni noiseIndex) entryWholeFields(keyLower string, idKeys bool) (noiseEntry,
 			path = collapsed
 		}
 		if e.exact {
-			if exactCovers(path, e.keyLower) {
-				return e, true
+			if rule == nil && exactCovers(path, e.keyLower) {
+				rule = &ni.entries[i]
 			}
 			continue
 		}
 		if namesWholeFields(path, e.keyLower) {
-			return e, true
+			return eitherEntry(rule, e), true
 		}
+	}
+	if rule != nil {
+		return *rule, true
 	}
 	return noiseEntry{}, false
 }

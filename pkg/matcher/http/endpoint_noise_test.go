@@ -253,3 +253,83 @@ func TestTheFirstRuleThatNamesAFieldDecides(t *testing.T) {
 		}
 	}
 }
+
+func TestAnEndpointRuleNeverNarrowsOtherNoise(t *testing.T) {
+	headerRule := []config.EndpointNoise{{Path: "/version", Header: config.Noise{"X-Build": {"^b-"}}}}
+	for _, key := range []string{"x-build", "X-Build", "build"} {
+		tc := endpointCase("GET", "http://api/version", `{}`)
+		tc.HTTPResp.Header = map[string]string{"X-Build": "b-1"}
+		live := &models.HTTPResp{StatusCode: 200, Body: `{}`, Header: map[string]string{"X-Build": "c-2"}}
+		global := map[string]map[string][]string{"header": {key: {}}}
+		if pass, _ := Match(tc, live, AddEndpointNoise(global, headerRule, tc), false, false, zap.NewNop(), false); !pass {
+			t.Errorf("the rule's pattern narrowed the header entry %q, which ignores any value", key)
+		}
+	}
+	bodyRule := []config.EndpointNoise{{Path: "/version", Body: config.Noise{"data.info.version": {`^v1\.`}}}}
+	for _, key := range []string{"version", "data.info.version", "Data.Info.Version", "info.version"} {
+		tc := endpointCase("GET", "http://api/version", `{"data":{"info":{"version":"v1.0"}}}`)
+		global := map[string]map[string][]string{"body": {key: {}}}
+		if !matchWith(t, tc, `{"data":{"info":{"version":"v2.0"}}}`, global, bodyRule) {
+			t.Errorf("the rule's pattern narrowed the body entry %q, which ignores any value", key)
+		}
+	}
+}
+
+func TestAnEndpointRuleAddsToOtherNoisesPatterns(t *testing.T) {
+	global := map[string]map[string][]string{"body": {"data.version": {`^v2\.`}}, "header": {"x-build": {"^c-"}}}
+	cases := []struct {
+		name                       string
+		rec, live, recHdr, liveHdr string
+		rules                      []config.EndpointNoise
+		want                       bool
+	}{
+		{"values the rule lets vary", "v1.0", "v1.1", "b-1", "b-2", nil, true},
+		{"values the other noise lets vary", "v2.0", "v2.1", "c-1", "c-2", nil, true},
+		{"a value either lets vary into one the other does", "v1.0", "v2.0", "b-1", "c-2", nil, true},
+		{"a body value outside both", "v1.0", "x", "b-1", "b-2", nil, false},
+		{"a header value outside both", "v1.0", "v1.1", "b-1", "x", nil, false},
+		{"a rule with no patterns", "v1.0", "x", "b-1", "x", []config.EndpointNoise{{Path: "/version", Body: config.Noise{"data.version": {}}, Header: config.Noise{"X-Build": {}}}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rules := c.rules
+			if rules == nil {
+				rules = []config.EndpointNoise{{Path: "/version", Body: config.Noise{"data.version": {`^v1\.`}}, Header: config.Noise{"X-Build": {"^b-"}}}}
+			}
+			tc := endpointCase("GET", "http://api/version", `{"data":{"version":"`+c.rec+`"}}`)
+			tc.HTTPResp.Header = map[string]string{"X-Build": c.recHdr}
+			live := &models.HTTPResp{StatusCode: 200, Body: `{"data":{"version":"` + c.live + `"}}`, Header: map[string]string{"X-Build": c.liveHdr}}
+			if pass, _ := Match(tc, live, AddEndpointNoise(global, rules, tc), false, false, zap.NewNop(), false); pass != c.want {
+				t.Fatalf("pass=%v, want %v", pass, c.want)
+			}
+		})
+	}
+}
+
+func TestATestCaseKeyTheComparisonNeverAppliesOnAnArrayLeavesTheRuleOn(t *testing.T) {
+	rules := []config.EndpointNoise{{Path: "/version", Body: config.Noise{"items.v": {}}}}
+	tc := endpointCase("GET", "http://api/version", `{"items":[{"v":"a1"}]}`)
+	tc.Noise = map[string][]string{"body.items[].v": {"^a"}}
+	if matchWith(t, tc, `{"items":[{"v":"a2"}]}`, nil, nil) {
+		t.Fatal("the test case's key items[].v now applies to items.v; the comparison walks an array's elements under the array's own key")
+	}
+	if !matchWith(t, tc, `{"items":[{"v":"b2"}]}`, nil, rules) {
+		t.Fatal("the test case's key items[].v, which ignores nothing, turned the rule on items.v off")
+	}
+	tc.Noise = map[string][]string{"body.items.v": {"^a"}}
+	if matchWith(t, tc, `{"items":[{"v":"b2"}]}`, nil, rules) {
+		t.Fatal("the rule widened the test case's own items.v")
+	}
+}
+
+func TestBodyNoiseCoveringNamesOtherNoiseBeforeAnEndpointRule(t *testing.T) {
+	keys := []string{"data", "version"}
+	global := map[string]map[string][]string{"body": {"data.version": {}, matcherUtils.ExactKey("data.version"): {`^v1\.`}}}
+	if got, want := matcherUtils.BodyNoiseCovering(keys, nil, global, zap.NewNop()), "body.data.version (globalNoise)"; got != want {
+		t.Fatalf("covering %q, want %q", got, want)
+	}
+	delete(global["body"], "data.version")
+	if got, want := matcherUtils.BodyNoiseCovering(keys, nil, global, zap.NewNop()), "body.data.version (globalNoise.endpoints)"; got != want {
+		t.Fatalf("covering %q, want %q", got, want)
+	}
+}

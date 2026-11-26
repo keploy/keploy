@@ -1,6 +1,9 @@
 package matcher
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestJSONMatchKeyLeavesOutAnExactEntry(t *testing.T) {
 	noise := map[string][]string{ExactKey("version"): {}, ExactKey("data[].at"): {}}
@@ -62,6 +65,30 @@ func TestExactKeyCovers(t *testing.T) {
 		rank, covers, exact := ExactKeyCovers(c.path, c.key)
 		if rank != c.rank || covers != c.covers || exact != c.exact {
 			t.Errorf("ExactKeyCovers(%q, %q) = %q, %v, %v; want %q, %v, %v", c.path, c.key, rank, covers, exact, c.rank, c.covers, c.exact)
+		}
+	}
+}
+
+func TestHeaderNoiseEntry(t *testing.T) {
+	rule := ExactKey("X-Build")
+	for _, c := range []struct {
+		noise    map[string][]string
+		key      string
+		patterns []string
+		ok       bool
+	}{
+		{map[string][]string{"x-build": {}, rule: {"^b-"}}, "x-build", nil, true},
+		{map[string][]string{"build": {"^c-"}, "x-build": {"^d-"}, rule: {"^b-"}}, "x-build", []string{"^d-", "^b-"}, true},
+		{map[string][]string{"build": {"^c-"}, rule: {}}, rule, nil, true},
+		{map[string][]string{rule: {"^b-"}}, rule, []string{"^b-"}, true},
+		{map[string][]string{"x-build-id": {}, ExactKey("x-build-id"): {}}, "", nil, false},
+	} {
+		key, patterns, ok := HeaderNoiseEntry("X-Build", c.noise)
+		if key != c.key || ok != c.ok || len(patterns) != len(c.patterns) || (len(patterns) > 0 && !slices.Equal(patterns, c.patterns)) {
+			t.Errorf("HeaderNoiseEntry over %v = %q %q %v, want %q %q %v", c.noise, key, patterns, ok, c.key, c.patterns, c.ok)
+		}
+		if got, noisy := SubstringKeyMatch("X-Build", c.noise); noisy != c.ok || len(got) != len(c.patterns) {
+			t.Errorf("SubstringKeyMatch over %v = %q %v, want HeaderNoiseEntry's patterns", c.noise, got, noisy)
 		}
 	}
 }

@@ -319,12 +319,13 @@ func (r *Replayer) refuseUntiedArrayUses(testSetID string, check *templates.Chec
 			byName[tc.Name] = tc
 		}
 	}
+	noiseOf := r.caseNoise(testSetID)
 	for _, p := range check.Places {
 		tc := byName[p.TestCase]
 		if tc == nil || p.Placeholder.Capture || p.Stream || !inArray(p.Path) {
 			continue
 		}
-		global := r.httpNoiseConfig(testSetID, tc)
+		global := noiseOf(tc)
 		untied := "nothing ties it to its element: any element holding " + p.Placeholder.Key + "'s value would satisfy it, whatever the element's other fields say"
 		literal := "write " + p.Placeholder.Key + "'s recorded value in place of the placeholder (as the test case was recorded)"
 		var why string
@@ -421,12 +422,13 @@ func (r *Replayer) warnNoiseOverVariables(testSetID string, places []templates.P
 		}
 	}
 	warned := map[string]bool{}
+	noiseOf := r.caseNoise(testSetID)
 	for _, p := range places {
 		tc := byName[p.TestCase]
 		if tc == nil || len(refused[p.TestCase]) > 0 {
 			continue
 		}
-		entry := r.noiseCovering(p, tc, r.httpNoiseConfig(testSetID, tc))
+		entry := r.noiseCovering(p, tc, noiseOf(tc))
 		if entry == "" || warned[p.TestCase+"\x00"+p.Where+"\x00"+entry] {
 			continue
 		}
@@ -439,6 +441,18 @@ func (r *Replayer) warnNoiseOverVariables(testSetID string, places []templates.P
 			zap.String("testset", testSetID), zap.String("testcase", p.TestCase), zap.String("noise", entry),
 			zap.String("variable", p.Placeholder.Text), zap.String("where", templateWhereShape(p.Where)),
 			zap.String("next_step", next))
+	}
+}
+
+func (r *Replayer) caseNoise(testSetID string) func(*models.TestCase) map[string]map[string][]string {
+	byCase := map[*models.TestCase]map[string]map[string][]string{}
+	return func(tc *models.TestCase) map[string]map[string][]string {
+		if noise, ok := byCase[tc]; ok {
+			return noise
+		}
+		noise := r.httpNoiseConfig(testSetID, tc)
+		byCase[tc] = noise
+		return noise
 	}
 }
 
@@ -533,19 +547,8 @@ func streamNoiseCovering(p templates.Place, tcNoise map[string][]string, global 
 // bestKey is the most specific noise key whose name the header holds, as
 // matcherUtils.SubstringKeyMatch picks it.
 func bestKey(header string, noise map[string][]string) string {
-	if len(noise) == 0 {
-		return ""
-	}
-	if _, ok := matcherUtils.SubstringKeyMatch(header, noise); !ok {
-		return ""
-	}
-	best := ""
-	for k := range noise {
-		if matcherUtils.HeaderKeyCovers(header, k) && (len(k) > len(best) || (len(k) == len(best) && k < best)) {
-			best = k
-		}
-	}
-	return best
+	k, _, _ := matcherUtils.HeaderNoiseEntry(header, noise)
+	return k
 }
 
 // nextStepRefused is the next step of a test case refused when its set

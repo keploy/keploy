@@ -245,7 +245,8 @@ func (ni noiseIndex) lookup(keyLower string, idKeys bool) (regs []*regexp.Regexp
 	if idKeys && ni.idKeys {
 		collapsed = CollapseIDKeys(keyLower)
 	}
-	for _, e := range ni.entries {
+	var rule *noiseEntry
+	for i, e := range ni.entries {
 		key := keyLower
 		if e.idKeys {
 			if !idKeys {
@@ -254,8 +255,8 @@ func (ni noiseIndex) lookup(keyLower string, idKeys bool) (regs []*regexp.Regexp
 			key = collapsed
 		}
 		if e.exact {
-			if exactCovers(key, e.keyLower) {
-				return e.regexps, true, e.typeStrict
+			if rule == nil && exactCovers(key, e.keyLower) {
+				rule = &ni.entries[i]
 			}
 			continue
 		}
@@ -266,13 +267,18 @@ func (ni noiseIndex) lookup(keyLower string, idKeys bool) (regs []*regexp.Regexp
 			// field whose name it happens to contain: "items[].id" in
 			// "items[].identifier".
 			if key == e.keyLower || strings.HasPrefix(key, e.keyLower+".") || strings.HasPrefix(key, e.keyLower+"[]") {
-				return e.regexps, true, true
+				e = eitherEntry(rule, e)
+				return e.regexps, true, e.typeStrict
 			}
 			continue
 		}
 		if strings.Contains(key, e.keyLower) {
+			e = eitherEntry(rule, e)
 			return e.regexps, true, e.typeStrict
 		}
+	}
+	if rule != nil {
+		return rule.regexps, true, rule.typeStrict
 	}
 	return nil, false, false
 }
@@ -2377,24 +2383,11 @@ func lowerHeaderNoise(noise map[string][]string) map[string][]string {
 // the keys as an ordered slice via a different helper — SubstringKeyMatch
 // does not accept one today.
 func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
-	sLower := strings.ToLower(s)
-	// Ranging a map picks an arbitrary winner when several keys match, so two
-	// runs of the same suite could disagree on whether a header is noisy.
-	// Resolve most-specific first — longest key, ties lexicographic — the same
-	// precedence buildNoiseIndex uses.
-	best, found := "", false
-	for key := range mp {
-		if !headerKeyCovers(sLower, key) {
-			continue
-		}
-		if !found || len(key) > len(best) || (len(key) == len(best) && key < best) {
-			best, found = key, true
-		}
-	}
-	if !found {
+	_, patterns, ok := HeaderNoiseEntry(s, mp)
+	if !ok {
 		return []string{}, false
 	}
-	return mp[best], true
+	return patterns, true
 }
 
 // func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
